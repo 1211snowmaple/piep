@@ -1,0 +1,73 @@
+/* CSSカスタムプロパティ（変数）を定義 */
+:root {
+    --tag-color: #0073bb;
+    --date-color: #888;
+}
+
+/* 全体の基本設定 */
+body {
+    line-height: 1.7;
+    padding: 1em;
+}
+
+.main-content {
+    max-width: 100%;
+}
+
+/* 作品タイトル */
+h3 {
+    text-align: left;
+    margin-top: 0;
+    font-weight: bold;
+}
+
+/* 著者名 */
+.author {
+    text-align: left;
+}
+
+/* カバー画像コンテナ */
+.cover-container {
+    text-align: center;
+    margin: 1.5em 0;
+}
+
+.cover-container img {
+    max-width: 50%;
+    height: auto;
+    border-radius: 10px;
+}
+
+/* 作品説明 */
+.description {
+    text-align: left;
+    margin-bottom: 1.5em;
+}
+
+/* タグ */
+.tags {
+    color: var(--tag-color);
+    line-height: 1.8;
+}
+
+/* 日付 */
+.date {
+    color: var(--date-color);
+    text-align: left;
+}
+
+/* ソースURL */
+.source-link {
+    word-wrap: break-word;
+}
+
+/* 挿絵 */
+.illustration {
+    text-align: center;
+    margin: 1.5em 0;
+}
+
+.illustration img {
+    max-width: 100%;
+    height: auto;
+}

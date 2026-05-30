@@ -1,0 +1,60 @@
+{% include "_base_style.css.j2" %}
+
+/* --- Pixiv固有の変数の定義 --- */
+:root {
+    --series-title-color: #777;
+    --char-count-bg: rgba(0, 0, 0, 0.3);
+    --char-count-text: white;
+}
+
+/* --- Pixiv固有のスタイル定義 --- */
+
+h3 {
+    line-height: 1.2;
+}
+
+.series-title-inline {
+    color: var(--series-title-color);
+    font-size: 0.8em;
+    font-weight: normal;
+}
+
+.cover-meta-table {
+    width: 100%;
+    border-spacing: 0;
+    margin-bottom: 1.5em;
+    border-collapse: collapse;
+}
+
+.cover-cell {
+    width: 33.3%;
+    padding: 0;
+}
+
+.cover-cell img {
+    width: 100%;
+    height: auto;
+    display: block;
+    border-radius: 10px;
+}
+
+.char-count-cell {
+    width: 33.35%;
+    vertical-align: top;
+    text-align: right;
+    padding: 0;
+}
+
+.spacer-cell {
+    width: 33.35%;
+    padding: 0;
+}
+
+.char-count {
+    display: inline-block;
+    background-color: var(--char-count-bg);
+    color: var(--char-count-text);
+    font-size: 0.8em;
+    padding: 2px 10px;
+    border-radius: 20px;
+}

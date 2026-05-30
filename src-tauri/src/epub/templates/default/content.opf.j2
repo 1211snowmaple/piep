@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="bookid" xml:lang="ja">
+    <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+        <dc:title>{{ manifest.core.name }}</dc:title>
+        <dc:language>ja</dc:language>
+        <dc:identifier id="bookid">{{ manifest.core.id_ }}</dc:identifier>
+        <dc:creator id="author">{{ manifest.core.author.name }}</dc:creator>
+        <meta refines="#author" property="role" scheme="marc:relators">aut</meta>
+        <dc:date>{{ manifest.core.datePublished }}</dc:date>
+        {% if manifest.core.dateModified -%}
+        <meta property="dcterms:modified">{{ manifest.core.dateModified }}</meta>
+        {% else -%}
+        <meta property="dcterms:modified">{{ manifest.core.datePublished }}</meta>
+        {% endif -%}
+
+        {% if provider_ids.novel_id -%}
+        <dc:identifier id="pixiv-id">urn:pixiv:novel:{{ provider_ids.novel_id }}</dc:identifier>
+        {% endif -%}
+
+        {% if provider_ids.post_id -%}
+        <dc:identifier id="fanbox-id">urn:fanbox:post:{{ provider_ids.post_id }}</dc:identifier>
+        {% endif -%}
+
+        {% if manifest.core.isPartOf -%}
+        <meta property="belongs-to-collection" id="series-title">{{ manifest.core.isPartOf.name }}</meta>
+        <meta refines="#series-title" property="collection-type">series</meta>
+        {% if manifest.core.isPartOf.order -%}
+        <meta refines="#series-title" property="group-position">{{ manifest.core.isPartOf.order }}</meta>
+        {% endif -%}
+
+        {% if provider_ids.series_id -%}
+        <meta property="meta" scheme="urn:{{ provider_ids.novel_id and 'pixiv' or 'fanbox' }}:series:id">{{ provider_ids.series_id }}</meta>
+        {%- endif %}
+        {% endif -%}
+
+        {% if plain_description -%}
+        <dc:description>{{ plain_description }}</dc:description>
+        {% endif -%}
+        {% for tag in manifest.core.keywords -%}
+        <dc:subject>{{ tag }}</dc:subject>
+        {% endfor -%}
+
+        {% if cover_image_id -%}
+        <meta name="cover" content="{{ cover_image_id }}" />
+        {% endif -%}
+    </metadata>
+    <manifest>
+        {% for item in manifest_items -%}
+        <item id="{{ item.id }}" href="{{ item.href }}" media-type="{{ item.media_type }}" {% if item.properties %}properties="{{ item.properties }}" {% endif %}/>
+        {% endfor -%}
+    </manifest>
+    <spine>
+        {% for item in spine_itemrefs -%}
+        <itemref idref="{{ item.idref }}" {% if not item.linear %}linear="no" {% endif %}/>
+        {% endfor -%}
+    </spine>
+</package>

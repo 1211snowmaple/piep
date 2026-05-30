@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" xml:lang="ja">
+
+<head>
+    <title>{{ strings.TOC_TITLE }}</title>
+</head>
+
+<body>
+    <nav epub:type="toc">
+        <h1>{{ strings.TOC_TITLE }}</h1>
+        <ol>
+            {% if toc.has_info_page %}
+            <li>
+                <a href="{{ toc.info_page.href }}">{{ toc.info_page.title }}</a>
+            </li>
+            {% endif %}
+            {% for page in toc.pages %}
+            <li><a href="{{ page.href }}">{{ page.title }}</a></li>
+            {% endfor %}
+        </ol>
+    </nav>
+    <nav epub:type="landmarks" hidden="">
+        <h2>{{ strings.LANDMARKS_TITLE }}</h2>
+        <ol>
+            {% if landmarks.has_cover %}
+            <li>
+                <a epub:type="cover" href="text/cover.xhtml">{{ strings.COVER_TITLE }}</a>
+            </li>
+            {% endif %}
+            {% if landmarks.info_page %}
+            <li>
+                <a href="{{ landmarks.info_page.href }}">{{ landmarks.info_page.title }}</a>
+            </li>
+            {% endif %}
+            {% if landmarks.start_page_href %}
+            <li>
+                <a epub:type="bodymatter" href="{{ landmarks.start_page_href }}">{{ strings.BODY_MATTER_TITLE }}</a>
+            </li>
+            {% endif %}
+        </ol>
+    </nav>
+</body>
+
+</html>
