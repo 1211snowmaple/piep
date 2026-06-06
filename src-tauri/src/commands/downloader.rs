@@ -194,7 +194,7 @@ pub async fn fetch_pixiv_novel_by_url(
 }
 
 /// 本文テキストのハッシュ値、文字数、更新時間を算出する（Pixivはメタデータを含む統合ハッシュ）
-fn compute_content_details(
+pub(crate) fn compute_content_details(
     data: &serde_json::Value,
     source: &str,
 ) -> (String, i64, Option<String>) {
@@ -361,7 +361,7 @@ fn fanbox_has_material_content(data: &serde_json::Value) -> bool {
         })
 }
 
-fn json_string_at<'a>(value: &'a serde_json::Value, keys: &[&str]) -> Option<&'a str> {
+pub(crate) fn json_string_at<'a>(value: &'a serde_json::Value, keys: &[&str]) -> Option<&'a str> {
     for key in keys {
         if let Some(s) = value.get(*key).and_then(|v| v.as_str()) {
             if !s.trim().is_empty() {
@@ -381,7 +381,7 @@ fn json_string_at<'a>(value: &'a serde_json::Value, keys: &[&str]) -> Option<&'a
     None
 }
 
-fn json_id_at(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
+pub(crate) fn json_id_at(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
     for key in keys {
         let direct = value.get(*key);
         let nested = value.get("detail").and_then(|d| d.get(*key));
@@ -399,7 +399,7 @@ fn json_id_at(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
     None
 }
 
-fn extract_series_relation(data: &serde_json::Value) -> Option<(String, String)> {
+pub(crate) fn extract_series_relation(data: &serde_json::Value) -> Option<(String, String)> {
     let series_id = json_id_at(data, &["seriesId", "series_id"])?;
     let series_title = json_string_at(data, &["seriesTitle", "series_title"])
         .or_else(|| {
@@ -417,7 +417,7 @@ fn extract_series_relation(data: &serde_json::Value) -> Option<(String, String)>
     Some((series_id, series_title.to_string()))
 }
 
-fn extract_series_content_order(data: &serde_json::Value) -> Option<i64> {
+pub(crate) fn extract_series_content_order(data: &serde_json::Value) -> Option<i64> {
     json_id_at(data, &["contentOrder", "content_order", "order"])
         .and_then(|s| s.parse::<i64>().ok())
         .or_else(|| {
@@ -580,6 +580,7 @@ async fn save_series_snapshot_from_download(
     state: &Arc<AppState>,
     data: &serde_json::Value,
     source: &str,
+    local_cover_path: Option<&str>,
 ) -> Result<(), String> {
     let Some((series_id, series_title)) = extract_series_relation(data) else {
         return Ok(());
@@ -635,7 +636,7 @@ async fn save_series_snapshot_from_download(
         &series_id,
         &series_title,
         None,
-        None,
+        local_cover_path,
         &hash,
         &json_path,
         0,
@@ -652,6 +653,7 @@ async fn sync_download_entities(
     source: &str,
     author_id: &str,
     author_name: &str,
+    cover_path: Option<&str>,
 ) {
     if let Err(e) =
         state
@@ -699,7 +701,7 @@ async fn sync_download_entities(
                 log::warn!("Failed to register normalized series relation: {}", e);
             }
         }
-        if let Err(e) = save_series_snapshot_from_download(state, data, source).await {
+        if let Err(e) = save_series_snapshot_from_download(state, data, source, cover_path).await {
             log::warn!("Failed to save series snapshot: {}", e);
         }
     }
@@ -763,6 +765,7 @@ pub async fn download_and_save(
                 &source,
                 &dl.author_id,
                 &dl.author_name,
+                dl.cover_path.as_deref(),
             )
             .await;
             if let Err(e) = state.db.reindex_download(dl.id) {
@@ -793,6 +796,7 @@ pub async fn download_and_save(
                 &source,
                 &dl.author_id,
                 &dl.author_name,
+                dl.cover_path.as_deref(),
             )
             .await;
             if let Err(e) = state.db.reindex_download(dl.id) {
@@ -919,8 +923,6 @@ pub async fn download_and_save(
     let json_path = original_json_path.clone();
 
     // 5. DB登録
-    let tags_json = tags.map(|t| serde_json::to_string(&t).unwrap_or_default());
-
     let new_dl = NewDownload {
         source: source.clone(),
         source_id: source_id.clone(),
@@ -928,7 +930,7 @@ pub async fn download_and_save(
         author_name,
         author_id,
         content_type,
-        tags: tags_json,
+        tags: tags.unwrap_or_default(),
         excerpt,
         cover_path: cover_path_str,
         json_path: json_path.to_string_lossy().to_string(),
@@ -957,6 +959,7 @@ pub async fn download_and_save(
         &source,
         &new_dl.author_id,
         &new_dl.author_name,
+        new_dl.cover_path.as_deref(),
     )
     .await;
 
@@ -999,7 +1002,7 @@ pub async fn download_and_save(
     state.db.get_download(dl_id)
 }
 
-fn collect_assets_recursive(
+pub(crate) fn collect_assets_recursive(
     dir: &std::path::Path,
     assets: &mut Vec<NewAsset>,
     total_size: &mut i64,

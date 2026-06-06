@@ -1,12 +1,37 @@
 import { CSSProperties, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
-import { ask, save } from "@tauri-apps/plugin-dialog";
 import { store } from "../../store";
+import {
+  deleteDownload,
+  getAssetUrl,
+  getDownloadBySource,
+  getLatestEntityProfileJson,
+  getPerson,
+  getSeries,
+  listEntityVersions,
+  refreshEntityProfile,
+  searchDownloadsV2,
+} from "@/services/dbApi";
+import { exportEntityZip } from "@/services/archiveApi";
+import { askDialog, saveDialog } from "@/services/dialogApi";
+import {
+  downloadAndSave,
+  fetchFanboxCreatorPosts,
+  fetchFanboxPost,
+  fetchPixivNovel,
+  fetchPixivSeriesNovels,
+  fetchPixivUserNovels,
+} from "@/services/downloadApi";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
+import { cn } from "@/lib/utils";
 import {
   BookIcon,
   CloseIcon,
+  CompactIcon,
   ExportIcon,
   FanboxIcon,
+  GalleryIcon,
   ImageIcon,
   LinkIcon,
   PixivIcon,
@@ -15,6 +40,7 @@ import {
   TrashIcon,
   XIcon,
 } from "../icons/Icons";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
 interface DownloadEntry {
   id: number;
@@ -33,7 +59,7 @@ interface DownloadEntry {
   assetCount: number;
   fileSizeBytes: number;
   contentType?: string;
-  tags?: string | string[] | null;
+  tags?: string[];
   excerpt?: string | null;
   seriesId?: string | null;
   seriesTitle?: string | null;
@@ -81,13 +107,15 @@ interface Props {
   epubSidebarOpen?: boolean;
 }
 
-const ENTITY_CARD_WIDTH = 338;
-const ENTITY_CARD_GAP = 16;
-const ENTITY_MAX_COLUMNS = 4;
+const ENTITY_WORK_PAGE_SIZE = 72;
 
-function useEntityLayoutStyle() {
+function useEntityLayoutStyle(viewMode: "gallery" | "compact") {
   const ref = useRef<HTMLDivElement | null>(null);
   const [columns, setColumns] = useState(2);
+
+  const cardWidth = viewMode === "gallery" ? 220 : 338;
+  const cardGap = 16;
+  const maxColumns = viewMode === "gallery" ? 6 : 4;
 
   useEffect(() => {
     const element = ref.current;
@@ -99,8 +127,8 @@ function useEntityLayoutStyle() {
       const nextColumns = Math.max(
         1,
         Math.min(
-          ENTITY_MAX_COLUMNS,
-          Math.floor((available + ENTITY_CARD_GAP) / (ENTITY_CARD_WIDTH + ENTITY_CARD_GAP)),
+          maxColumns,
+          Math.floor((available + cardGap) / (cardWidth + cardGap)),
         ),
       );
       setColumns(nextColumns);
@@ -110,13 +138,14 @@ function useEntityLayoutStyle() {
     const observer = new ResizeObserver(update);
     observer.observe(parent);
     return () => observer.disconnect();
-  }, []);
+  }, [viewMode, cardWidth, maxColumns]);
 
-  const width = columns * ENTITY_CARD_WIDTH + (columns - 1) * ENTITY_CARD_GAP;
+  const width = columns * cardWidth + (columns - 1) * cardGap;
   return {
     ref,
     style: {
       "--entity-columns": String(columns),
+      "--entity-card-width": `${cardWidth}px`,
       "--entity-content-width": `${width}px`,
     } as CSSProperties,
   };
@@ -205,21 +234,11 @@ function profileStat(profileJson: any, key: string): number | null {
 function useImage(path: string | null | undefined) {
   const [src, setSrc] = useState<string | null>(null);
   useEffect(() => {
-    let cancelled = false;
     if (!path) {
       setSrc(null);
       return;
     }
-    invoke<string>("read_image_base64", { path })
-      .then((value) => {
-        if (!cancelled) setSrc(value);
-      })
-      .catch(() => {
-        if (!cancelled) setSrc(null);
-      });
-    return () => {
-      cancelled = true;
-    };
+    setSrc(getAssetUrl(path));
   }, [path]);
   return src;
 }
@@ -228,15 +247,17 @@ function EntityLinkIconButton({ link, onOpenSourceUrl }: { link: string; onOpenS
   const kind = linkKind(link);
   const icon = kind === "pixiv" ? <PixivIcon /> : kind === "x" ? <XIcon /> : kind === "skeb" ? <SkebIcon /> : kind === "fanbox" ? <FanboxIcon /> : <LinkIcon />;
   return (
-    <button
+    <Button
       type="button"
-      className={`entity-link-icon ${kind}`}
+      variant="outline"
+      size="icon"
+      className={cn("entity-link-icon", kind)}
       onClick={() => onOpenSourceUrl(link)}
       title={displayLink(link)}
       aria-label={displayLink(link)}
     >
       {icon}
-    </button>
+    </Button>
   );
 }
 
@@ -286,85 +307,95 @@ function EntityActionBar({
               <span className={`epub-selection-badge entity-selection-badge ${selectedCount === 0 ? "empty" : ""}`}>
                 {selectionLabel}: {selectedCount} 件選択
               </span>
-              <button
+              <Button
                 type="button"
-                className={`toolbar-btn entity-select-toggle ${allSelected ? "active" : ""}`}
+                variant={allSelected ? "secondary" : "outline"}
+                size="sm"
+                className={cn("entity-select-toggle", allSelected && "border-primary/30 bg-primary/10 text-primary")}
                 onClick={allSelected ? onSelectNone : onSelectAll}
                 disabled={busy || works.length === 0}
                 title={allSelected ? "すべての選択を解除" : "このページの作品をすべて選択"}
               >
                 {allSelected ? "全解除" : "全選択"}
-              </button>
+              </Button>
             </div>
             {deleteMode && (
-              <button
+              <Button
                 type="button"
-                className="icon-btn entity-delete-confirm-btn"
+                variant="destructive"
+                size="icon"
+                className="entity-delete-confirm-btn"
                 onClick={onConfirmDelete}
                 disabled={busy || selectedCount === 0}
                 title="選択した作品を削除します"
                 aria-label="削除確定"
               >
                 <TrashIcon />
-              </button>
+              </Button>
             )}
-            <button
+            <Button
               type="button"
-              className="icon-btn"
+              variant="outline"
+              size="icon"
               onClick={onCancelDelete}
               disabled={busy}
               title={deleteMode ? "削除選択をキャンセルします" : "EPUB選択を終了します"}
               aria-label={deleteMode ? "削除キャンセル" : "EPUB選択終了"}
             >
               <CloseIcon />
-            </button>
+            </Button>
           </>
         ) : (
           <>
-            <button
+            <Button
               type="button"
-              className="icon-btn"
+              variant="outline"
+              size="icon"
               onClick={onRefresh}
               disabled={busy || refreshing}
               title="プロフィールと新作を確認します"
               aria-label="更新チェック"
             >
-              {refreshing ? <span className="spinner-mini" style={{ display: "inline-block" }} /> : <RefreshIcon />}
-            </button>
-            <button
+              {refreshing ? <span className="spinner-mini inline-block" /> : <RefreshIcon />}
+            </Button>
+            <Button
               type="button"
-              className="icon-btn"
+              variant="outline"
+              size="icon"
               onClick={onEnterDelete}
               disabled={busy || works.length === 0}
               title="作品を選択して削除します"
               aria-label="削除"
             >
               <TrashIcon />
-            </button>
+            </Button>
           </>
         )}
-          <button
+          <Button
             type="button"
-            className="icon-btn"
+            variant="outline"
+            size="icon"
             onClick={onBackup}
             disabled={busy}
             title="このページの作品だけをZIPバックアップとして作成します"
             aria-label="バックアップ作成"
           >
             <ExportIcon />
-          </button>
+          </Button>
       </div>
       <div className="viewer-action-group epub-action-group">
-        <button
+        <Button
           type="button"
-          className={`icon-btn sidebar-toggle-btn ${epubSidebarOpen || epubMode ? "primary" : ""}`}
+          variant={epubSidebarOpen || epubMode ? "default" : "outline"}
+          size="icon"
+          className={cn((epubSidebarOpen || epubMode) && "shadow-md")}
           onClick={onOpenEpub}
           disabled={busy || works.length === 0}
           title={epubSidebarOpen || epubMode ? "EPUB選択を終了します" : "EPUBにする作品を選択します"}
           aria-label="EPUB"
         >
           <BookIcon />
-        </button>
+        </Button>
       </div>
     </div>
   );
@@ -375,6 +406,7 @@ function EntityWorkGrid({
   selectedIds,
   deleteMode,
   epubMode,
+  viewMode,
   onToggleSelect,
   onViewDetail,
   onViewSeries,
@@ -383,6 +415,7 @@ function EntityWorkGrid({
   selectedIds: Set<number>;
   deleteMode: boolean;
   epubMode: boolean;
+  viewMode: "gallery" | "compact";
   onToggleSelect: (id: number) => void;
   onViewDetail: (id: number) => void;
   onViewSeries: (source: string, sourceKey: string) => void;
@@ -393,11 +426,25 @@ function EntityWorkGrid({
         const selected = selectedIds.has(work.id);
         const selectionMode = deleteMode || epubMode;
         return (
-          <button
+          <Card
             key={work.id}
-            type="button"
-            className={`entity-work-card ${deleteMode ? "delete-mode" : ""} ${epubMode ? "epub-mode" : ""} ${selected ? "checked" : ""} ${epubMode && selected ? "epub-checked" : ""}`}
+            role="button"
+            tabIndex={0}
+            className={cn(
+              "entity-work-card",
+              `view-${viewMode}`,
+              deleteMode && "delete-mode",
+              epubMode && "epub-mode",
+              selected && "checked",
+              epubMode && selected && "epub-checked",
+            )}
             onClick={() => selectionMode ? onToggleSelect(work.id) : onViewDetail(work.id)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault();
+                selectionMode ? onToggleSelect(work.id) : onViewDetail(work.id);
+              }
+            }}
           >
             {deleteMode && (
               <span className="entity-card-delete-overlay">
@@ -433,7 +480,7 @@ function EntityWorkGrid({
               <span>{work.authorName}</span>
               <small>{formatDate(work.sourceCreatedAt || work.downloadedAt)} · {work.textLength.toLocaleString()}字 · {work.assetCount} assets · {formatBytes(work.fileSizeBytes)}</small>
             </div>
-          </button>
+          </Card>
         );
       })}
     </div>
@@ -513,14 +560,14 @@ function useEntityTools({
   const confirmDelete = useCallback(async () => {
     const ids = Array.from(selectedIds);
     if (ids.length === 0) return;
-    const confirmed = await ask(
+    const confirmed = await askDialog(
       `選択された ${ids.length} 件の作品を完全に削除してもよろしいですか？\nアセットファイルや関連データも完全に消去されます。`,
       { title: "削除の確認", kind: "warning", okLabel: "削除する", cancelLabel: "キャンセル" },
     );
     if (!confirmed) return;
     setBusy(true);
     try {
-      await Promise.all(ids.map(id => invoke("db_delete_download", { id })));
+      await Promise.all(ids.map(id => deleteDownload(id)));
       showToast(`${ids.length} 件の作品を完全に削除しました`, "success");
       cancelSelection();
       onLibraryChanged();
@@ -535,11 +582,11 @@ function useEntityTools({
   const createBackup = useCallback(async () => {
     try {
       const safeName = displayName.replace(/[<>:"/\\|?*\u0000-\u001F]/g, "_").trim() || sourceKey;
-      const path = await save({ filters: [{ name: "ZIP", extensions: ["zip"] }], defaultPath: `piep_${entityType}_${safeName}.zip` });
+      const path = await saveDialog({ filters: [{ name: "ZIP", extensions: ["zip"] }], defaultPath: `piep_${entityType}_${safeName}.zip` });
       if (!path) return;
       setBusy(true);
       showToast("このページのバックアップを作成中...", "info");
-      await invoke("export_entity_zip", { entityType, source, sourceKey, zipPath: path });
+      await exportEntityZip(entityType, source, sourceKey, path);
       showToast("このページのバックアップ作成が完了しました", "success");
     } catch (e) {
       showToast(`バックアップ作成エラー: ${e}`, "error");
@@ -595,14 +642,12 @@ async function refreshRelatedEntities(entry: DownloadEntry, refreshToken: string
 
   for (const target of targets) {
     try {
-      await invoke("refresh_entity_profile", {
-        params: {
-          ...target,
-          force: false,
-          refreshToken,
-          cookie,
-          userAgent,
-        },
+      await refreshEntityProfile({
+        ...target,
+        force: false,
+        refreshToken,
+        cookie,
+        userAgent,
       });
     } catch {
       // Profile refresh is best effort after saving a work.
@@ -612,9 +657,9 @@ async function refreshRelatedEntities(entry: DownloadEntry, refreshToken: string
 
 async function savePixivNovel(item: any, refreshToken: string, fallbackAuthorName: string, fallbackAuthorId: string): Promise<{ saved: DownloadEntry; wasExisting: DownloadEntry | null }> {
   const sourceId = normalizePixivNovelId(item);
-  const wasExisting = await invoke<DownloadEntry | null>("db_get_download_by_source", { source: "pixiv", sourceId });
-  const data: any = await invoke("fetch_pixiv_novel", { novelId: sourceId, refreshToken });
-  const saved = await invoke<DownloadEntry>("download_and_save", {
+  const wasExisting = await getDownloadBySource<DownloadEntry>("pixiv", sourceId);
+  const data: any = await fetchPixivNovel(sourceId, refreshToken);
+  const saved = await downloadAndSave<DownloadEntry>({
     data,
     source: "pixiv",
     sourceId,
@@ -633,9 +678,9 @@ async function savePixivNovel(item: any, refreshToken: string, fallbackAuthorNam
 
 async function saveFanboxPost(item: any, cookie: string, userAgent: string, fallbackAuthorName: string, fallbackAuthorId: string): Promise<{ saved: DownloadEntry; wasExisting: DownloadEntry | null }> {
   const sourceId = String(item.id ?? "");
-  const wasExisting = await invoke<DownloadEntry | null>("db_get_download_by_source", { source: "fanbox", sourceId });
-  const data: any = await invoke("fetch_fanbox_post", { postId: sourceId, cookie, userAgent });
-  const saved = await invoke<DownloadEntry>("download_and_save", {
+  const wasExisting = await getDownloadBySource<DownloadEntry>("fanbox", sourceId);
+  const data: any = await fetchFanboxPost(sourceId, cookie, userAgent);
+  const saved = await downloadAndSave<DownloadEntry>({
     data,
     source: "fanbox",
     sourceId,
@@ -664,10 +709,25 @@ export function PersonView({ source, sourceKey, showToast, onViewDetail, onViewS
   const [versions, setVersions] = useState<EntityVersion[]>([]);
   const [profileJson, setProfileJson] = useState<any>(null);
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  const [viewMode, setViewMode] = useState<"gallery" | "compact">("compact");
   const icon = useImage(person?.iconPath);
   const cover = useImage(person?.coverPath);
-  const layout = useEntityLayoutStyle();
+
+  useEffect(() => {
+    store.get<"gallery" | "compact">("entity.viewMode").then((val) => {
+      if (val === "gallery" || val === "compact") setViewMode(val);
+    }).catch(() => undefined);
+  }, []);
+
+  const handleToggleViewMode = (mode: "gallery" | "compact") => {
+    setViewMode(mode);
+    store.set("entity.viewMode", mode).catch(() => undefined);
+  };
+
+  const layout = useEntityLayoutStyle(viewMode);
   const links = useMemo(() => {
     const parsed = parseLinks(person?.linksJson || null);
     const fallback = defaultSourceLink(source, sourceKey, "person");
@@ -677,16 +737,24 @@ export function PersonView({ source, sourceKey, showToast, onViewDetail, onViewS
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [personData, workData, versionData, latestJson] = await Promise.all([
-        invoke<PersonEntry>("db_get_person", { source, sourceKey }),
-        invoke<DownloadEntry[]>("db_search_downloads", {
-          params: { limit: 500, offset: 0, sortBy: "published", sortOrder: "desc", personSource: source, personKey: sourceKey },
+      const [personData, workResult, versionData, latestJson] = await Promise.all([
+        getPerson<PersonEntry>(source, sourceKey),
+        searchDownloadsV2({
+          limit: ENTITY_WORK_PAGE_SIZE,
+          cursor: null,
+          sortBy: "published",
+          sortOrder: "desc",
+          personSource: source,
+          personKey: sourceKey,
+          viewMode,
+          projection: viewMode === "compact" ? "libraryCompact" : "libraryGallery",
         }),
-        invoke<EntityVersion[]>("db_list_entity_versions", { entityType: "person", source, sourceKey }),
-        invoke<any | null>("db_get_latest_entity_profile_json", { entityType: "person", source, sourceKey }).catch(() => null),
+        listEntityVersions<EntityVersion[]>("person", source, sourceKey),
+        getLatestEntityProfileJson<any>("person", source, sourceKey).catch(() => null),
       ]);
       setPerson(personData);
-      setWorks(workData);
+      setWorks(workResult.items as DownloadEntry[]);
+      setNextCursor(workResult.nextCursor);
       setVersions(versionData);
       setProfileJson(latestJson);
     } catch (e) {
@@ -694,7 +762,30 @@ export function PersonView({ source, sourceKey, showToast, onViewDetail, onViewS
     } finally {
       setLoading(false);
     }
-  }, [source, sourceKey, showToast]);
+  }, [source, sourceKey, showToast, viewMode]);
+
+  const loadMoreWorks = useCallback(async () => {
+    if (!nextCursor || loadingMore) return;
+    setLoadingMore(true);
+    try {
+      const result = await searchDownloadsV2({
+        limit: ENTITY_WORK_PAGE_SIZE,
+        cursor: nextCursor,
+        sortBy: "published",
+        sortOrder: "desc",
+        personSource: source,
+        personKey: sourceKey,
+        viewMode,
+        projection: viewMode === "compact" ? "libraryCompact" : "libraryGallery",
+      });
+      setWorks(prev => [...prev, ...(result.items as DownloadEntry[])]);
+      setNextCursor(result.nextCursor);
+    } catch (e) {
+      showToast(`作品の追加読み込みに失敗しました: ${e}`, "error");
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [loadingMore, nextCursor, source, sourceKey, showToast, viewMode]);
 
   useEffect(() => {
     document.querySelector(".library-main-content")?.scrollTo({ top: 0 });
@@ -720,17 +811,15 @@ export function PersonView({ source, sourceKey, showToast, onViewDetail, onViewS
       const refreshToken = await store.get<string>("pixiv_refresh_token") || "";
       const cookie = await store.get<string>("fanbox_session_id") || "";
       const userAgent = await store.get<string>("fanbox_user_agent") || "Mozilla/5.0";
-      await invoke("refresh_entity_profile", {
-        params: { entityType: "person", source, sourceKey, force: true, refreshToken, cookie, userAgent },
-      });
+      await refreshEntityProfile({ entityType: "person", source, sourceKey, force: true, refreshToken, cookie, userAgent });
 
       let items: any[] = [];
       if (source === "pixiv") {
         if (!refreshToken) throw new Error("Pixivの認証情報がありません");
-        items = await invoke<any[]>("fetch_pixiv_user_novels", { userId: sourceKey, refreshToken });
+        items = await fetchPixivUserNovels<any[]>(sourceKey, refreshToken);
       } else if (source === "fanbox") {
         if (!cookie) throw new Error("FANBOXの認証情報がありません");
-        items = await invoke<any[]>("fetch_fanbox_creator_posts", { creatorId: sourceKey, cookie, userAgent });
+        items = await fetchFanboxCreatorPosts<any[]>(sourceKey, cookie, userAgent);
       }
 
       let newCount = 0;
@@ -792,7 +881,7 @@ export function PersonView({ source, sourceKey, showToast, onViewDetail, onViewS
           <span className="entity-avatar">{icon ? <img src={icon} alt="" /> : <ImageIcon />}</span>
           <div className="entity-heading">
             <div className="entity-title-row">
-              <span className={`source-tag ${source}`}>{source === "pixiv" ? "Pixiv" : "FANBOX"}</span>
+              <Badge className={cn("source-tag", source)}>{source === "pixiv" ? "Pixiv" : "FANBOX"}</Badge>
               <h2>{person?.displayName || sourceKey}</h2>
             </div>
             <p>{person?.description || (loading ? "読み込み中..." : "保存済み作品から作成された人物ページです。")}</p>
@@ -814,11 +903,42 @@ export function PersonView({ source, sourceKey, showToast, onViewDetail, onViewS
           </div>
         )}
       </section>
-      <div className="entity-section-title">
-        <h3>保存済み作品</h3>
-        <span>{works.length} 件</span>
+      <div className="entity-section-title flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <h3>保存済み作品</h3>
+          <span className="text-muted-foreground text-xs font-normal">{works.length} 件</span>
+        </div>
+        <div className="flex items-center gap-1.5">
+          <Tabs value={viewMode} onValueChange={value => handleToggleViewMode(value as "gallery" | "compact")}>
+          <TabsList className="h-8 bg-muted/50 p-0.5">
+            <TabsTrigger
+              value="gallery"
+              className="h-7 w-8 p-0"
+              title="ギャラリー"
+              aria-label="ギャラリー"
+            >
+              <GalleryIcon className="h-4 w-4" />
+            </TabsTrigger>
+            <TabsTrigger
+              value="compact"
+              className="h-7 w-8 p-0"
+              title="コンパクト"
+              aria-label="コンパクト"
+            >
+              <CompactIcon className="h-4 w-4" />
+            </TabsTrigger>
+          </TabsList>
+          </Tabs>
+        </div>
       </div>
-      <EntityWorkGrid works={works} selectedIds={tools.selectedIds} deleteMode={tools.deleteMode} epubMode={tools.epubMode} onToggleSelect={tools.toggleSelect} onViewDetail={onViewDetail} onViewSeries={onViewSeries} />
+      <EntityWorkGrid works={works} selectedIds={tools.selectedIds} deleteMode={tools.deleteMode} epubMode={tools.epubMode} viewMode={viewMode} onToggleSelect={tools.toggleSelect} onViewDetail={onViewDetail} onViewSeries={onViewSeries} />
+      {nextCursor && (
+        <div className="entity-load-more">
+          <Button type="button" variant="outline" onClick={loadMoreWorks} disabled={loadingMore}>
+            {loadingMore ? "読み込み中..." : "さらに読み込む"}
+          </Button>
+        </div>
+      )}
       {!loading && works.length === 0 && (
         <div className="entity-empty">この人物に紐づく保存済み作品はまだありません。</div>
       )}
@@ -832,25 +952,48 @@ export function SeriesView({ source, sourceKey, showToast, onViewDetail, onViewS
   const [versions, setVersions] = useState<EntityVersion[]>([]);
   const [profileJson, setProfileJson] = useState<any>(null);
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [lastCheckSummary, setLastCheckSummary] = useState<string | null>(null);
+  const [viewMode, setViewMode] = useState<"gallery" | "compact">("compact");
   const cover = useImage(series?.coverPath);
-  const layout = useEntityLayoutStyle();
+
+  useEffect(() => {
+    store.get<"gallery" | "compact">("entity.viewMode").then((val) => {
+      if (val === "gallery" || val === "compact") setViewMode(val);
+    }).catch(() => undefined);
+  }, []);
+
+  const handleToggleViewMode = (mode: "gallery" | "compact") => {
+    setViewMode(mode);
+    store.set("entity.viewMode", mode).catch(() => undefined);
+  };
+
+  const layout = useEntityLayoutStyle(viewMode);
   const sourceLink = defaultSourceLink(source, sourceKey, "series");
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [seriesData, workData, versionData, latestJson] = await Promise.all([
-        invoke<SeriesEntry>("db_get_series", { source, sourceKey }),
-        invoke<DownloadEntry[]>("db_search_downloads", {
-          params: { limit: 500, offset: 0, sortBy: "series_order", sortOrder: "asc", seriesSource: source, seriesKey: sourceKey },
+      const [seriesData, workResult, versionData, latestJson] = await Promise.all([
+        getSeries<SeriesEntry>(source, sourceKey),
+        searchDownloadsV2({
+          limit: ENTITY_WORK_PAGE_SIZE,
+          cursor: null,
+          sortBy: "series_order",
+          sortOrder: "asc",
+          seriesSource: source,
+          seriesKey: sourceKey,
+          viewMode,
+          projection: viewMode === "compact" ? "libraryCompact" : "libraryGallery",
         }),
-        invoke<EntityVersion[]>("db_list_entity_versions", { entityType: "series", source, sourceKey }),
-        invoke<any | null>("db_get_latest_entity_profile_json", { entityType: "series", source, sourceKey }).catch(() => null),
+        listEntityVersions<EntityVersion[]>("series", source, sourceKey),
+        getLatestEntityProfileJson<any>("series", source, sourceKey).catch(() => null),
       ]);
       setSeries(seriesData);
-      setWorks(workData);
+      setWorks(workResult.items as DownloadEntry[]);
+      setNextCursor(workResult.nextCursor);
       setVersions(versionData);
       setProfileJson(latestJson);
     } catch (e) {
@@ -858,7 +1001,30 @@ export function SeriesView({ source, sourceKey, showToast, onViewDetail, onViewS
     } finally {
       setLoading(false);
     }
-  }, [source, sourceKey, showToast]);
+  }, [source, sourceKey, showToast, viewMode]);
+
+  const loadMoreWorks = useCallback(async () => {
+    if (!nextCursor || loadingMore) return;
+    setLoadingMore(true);
+    try {
+      const result = await searchDownloadsV2({
+        limit: ENTITY_WORK_PAGE_SIZE,
+        cursor: nextCursor,
+        sortBy: "series_order",
+        sortOrder: "asc",
+        seriesSource: source,
+        seriesKey: sourceKey,
+        viewMode,
+        projection: viewMode === "compact" ? "libraryCompact" : "libraryGallery",
+      });
+      setWorks(prev => [...prev, ...(result.items as DownloadEntry[])]);
+      setNextCursor(result.nextCursor);
+    } catch (e) {
+      showToast(`作品の追加読み込みに失敗しました: ${e}`, "error");
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [loadingMore, nextCursor, source, sourceKey, showToast, viewMode]);
 
   useEffect(() => {
     document.querySelector(".library-main-content")?.scrollTo({ top: 0 });
@@ -884,9 +1050,7 @@ export function SeriesView({ source, sourceKey, showToast, onViewDetail, onViewS
       const refreshToken = await store.get<string>("pixiv_refresh_token") || "";
       const cookie = await store.get<string>("fanbox_session_id") || "";
       const userAgent = await store.get<string>("fanbox_user_agent") || "Mozilla/5.0";
-      await invoke("refresh_entity_profile", {
-        params: { entityType: "series", source, sourceKey, force: true, refreshToken, cookie, userAgent },
-      });
+      await refreshEntityProfile({ entityType: "series", source, sourceKey, force: true, refreshToken, cookie, userAgent });
 
       let newCount = 0;
       let updatedCount = 0;
@@ -894,7 +1058,7 @@ export function SeriesView({ source, sourceKey, showToast, onViewDetail, onViewS
       let failedCount = 0;
       if (source === "pixiv") {
         if (!refreshToken) throw new Error("Pixivの認証情報がありません");
-        const items = await invoke<any[]>("fetch_pixiv_series_novels", { seriesId: sourceKey, refreshToken });
+        const items = await fetchPixivSeriesNovels<any[]>(sourceKey, refreshToken);
         for (const item of items) {
           try {
             const result = await savePixivNovel(item, refreshToken, "", "");
@@ -950,7 +1114,7 @@ export function SeriesView({ source, sourceKey, showToast, onViewDetail, onViewS
         <div className="entity-hero-content">
           <div className="entity-heading">
             <div className="entity-title-row">
-              <span className={`source-tag ${source}`}>{source === "pixiv" ? "Pixiv" : "FANBOX"}</span>
+              <Badge className={cn("source-tag", source)}>{source === "pixiv" ? "Pixiv" : "FANBOX"}</Badge>
               <h2>{series?.title || profileJson?.title || (loading ? "読み込み中..." : sourceKey)}</h2>
             </div>
             <p>{series?.description || profileJson?.description || "保存済み作品から作成されたシリーズページです。"}</p>
@@ -969,11 +1133,42 @@ export function SeriesView({ source, sourceKey, showToast, onViewDetail, onViewS
           </div>
         )}
       </section>
-      <div className="entity-section-title">
-        <h3>シリーズ内の保存済み作品</h3>
-        <span>{works.length} 件</span>
+      <div className="entity-section-title flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <h3>シリーズ内の保存済み作品</h3>
+          <span className="text-muted-foreground text-xs font-normal">{works.length} 件</span>
+        </div>
+        <div className="flex items-center gap-1.5">
+          <Tabs value={viewMode} onValueChange={value => handleToggleViewMode(value as "gallery" | "compact")}>
+          <TabsList className="h-8 bg-muted/50 p-0.5">
+            <TabsTrigger
+              value="gallery"
+              className="h-7 w-8 p-0"
+              title="ギャラリー"
+              aria-label="ギャラリー"
+            >
+              <GalleryIcon className="h-4 w-4" />
+            </TabsTrigger>
+            <TabsTrigger
+              value="compact"
+              className="h-7 w-8 p-0"
+              title="コンパクト"
+              aria-label="コンパクト"
+            >
+              <CompactIcon className="h-4 w-4" />
+            </TabsTrigger>
+          </TabsList>
+          </Tabs>
+        </div>
       </div>
-      <EntityWorkGrid works={works} selectedIds={tools.selectedIds} deleteMode={tools.deleteMode} epubMode={tools.epubMode} onToggleSelect={tools.toggleSelect} onViewDetail={onViewDetail} onViewSeries={onViewSeries} />
+      <EntityWorkGrid works={works} selectedIds={tools.selectedIds} deleteMode={tools.deleteMode} epubMode={tools.epubMode} viewMode={viewMode} onToggleSelect={tools.toggleSelect} onViewDetail={onViewDetail} onViewSeries={onViewSeries} />
+      {nextCursor && (
+        <div className="entity-load-more">
+          <Button type="button" variant="outline" onClick={loadMoreWorks} disabled={loadingMore}>
+            {loadingMore ? "読み込み中..." : "さらに読み込む"}
+          </Button>
+        </div>
+      )}
       {!loading && works.length === 0 && (
         <div className="entity-empty">このシリーズに紐づく保存済み作品はまだありません。</div>
       )}

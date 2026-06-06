@@ -1,32 +1,63 @@
-import { useState, useEffect, useRef, useCallback } from "react";
-import { AuthSettings } from "./components/AuthSettings";
-import { LibraryUiState, LibraryView } from "./components/library/LibraryView";
-import { PersonView, SeriesView } from "./components/library/EntityViews";
-import { ContentViewer } from "./components/viewer/ContentViewer";
-import { EpubSidebar } from "./components/epub/EpubSidebar";
-import { UpdateSidebar } from "./components/update/UpdateSidebar";
-import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { lazy, useState, useEffect, useRef, useCallback } from "react";
+import type { LibraryUiState } from "./components/library/LibraryView";
+import { RouteRenderer } from "./components/app/RouteRenderer";
+import { BrowserToolbar } from "./components/browser/BrowserToolbar";
+import { BrowserWorkspace } from "./components/browser/BrowserWorkspace";
 import { store } from "./store";
-import "./App.css";
-import logo from "./assets/piep.svg";
+import type { LibraryEntityView, ViewMode, WorkScreenMode } from "./types/navigation";
+import { getDownloadBySource, getStats, refreshEntityProfile } from "./services/dbApi";
+import { onTauriEvent } from "./services/eventBus";
 import {
-  HomeIcon, PaletteIcon, HeartIcon, SettingsIcon, LibraryIcon, BookIcon,
-  ChevronLeftIcon, ChevronRightIcon, RefreshIcon, DownloadIcon,
-  AlertIcon, TerminalAlertIcon,
-} from "./components/icons/Icons";
+  destroyEmbeddedBrowser,
+  getEmbeddedBrowserUrl,
+  navigateEmbeddedBrowser,
+  openEmbeddedBrowser,
+} from "./services/browserApi";
+import {
+  downloadAndSave,
+  fetchFanboxCreatorPosts,
+  fetchFanboxPost,
+  fetchPixivNovelByUrl,
+  fetchPixivSeriesNovels,
+  fetchPixivUserNovels,
+} from "./services/downloadApi";
+import {
+  detectDownloadTarget,
+  extractSavedSourceTarget,
+  getFanboxCreatorId,
+  isSameSidebarUrl,
+  normalizeContentLinkUrl,
+  normalizeUrlForSidebar,
+  stripSidebarItemStatus,
+  type FanboxPost,
+  type PixivNovel,
+  type PixivTag,
+  type SidebarAnalysisState,
+  type SidebarDownloadType,
+  type SidebarItem,
+  type SidebarMode,
+} from "./features/browser/downloadCandidates";
+
+const AuthSettingsLazy = lazy(() => import("./components/AuthSettings").then(module => ({ default: module.AuthSettings })));
+const LibraryView = lazy(() => import("./components/library/LibraryView").then(module => ({ default: module.LibraryView })));
+const PersonView = lazy(() => import("./components/library/EntityViews").then(module => ({ default: module.PersonView })));
+const SeriesView = lazy(() => import("./components/library/EntityViews").then(module => ({ default: module.SeriesView })));
+const ContentViewer = lazy(() => import("./components/viewer/ContentViewer").then(module => ({ default: module.ContentViewer })));
+const ReaderView = lazy(() => import("./components/viewer/ReaderView").then(module => ({ default: module.ReaderView })));
+const WorkEditor = lazy(() => import("./components/viewer/WorkEditor").then(module => ({ default: module.WorkEditor })));
+const EpubSidebar = lazy(() => import("./components/epub/EpubSidebar").then(module => ({ default: module.EpubSidebar })));
+const UpdateSidebar = lazy(() => import("./components/update/UpdateSidebar").then(module => ({ default: module.UpdateSidebar })));
+const HomeDashboard = lazy(() => import("./features/home/HomeDashboard").then(module => ({ default: module.HomeDashboard })));
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
-type ViewMode = "home" | "pixiv" | "fanbox" | "library" | "epub" | "update" | "settings";
-type LibraryEntityView = { type: "person" | "series"; source: string; sourceKey: string } | null;
-
 interface AppHistoryState {
   piep: true;
   viewMode: ViewMode;
   viewingDownloadId: number | null;
+  workScreenMode: WorkScreenMode;
   libraryEntityView: LibraryEntityView;
   libraryFilter: string;
   libraryUiState: LibraryUiState;
@@ -65,88 +96,12 @@ interface DownloadEntry {
   seriesId?: string | null;
 }
 
-interface SavedSourceTarget {
-  source: "pixiv" | "fanbox";
-  sourceId: string;
-}
-
-interface PixivUser {
-  id: string;
-  name: string;
-}
-
-interface PixivSeriesNavigation {
-  seriesId: string;
-  seriesTitle: string;
-}
-
-interface PixivTag {
-  name: string;
-}
-
-interface PixivNovel {
-  id: string;
-  title: string;
-  characterCount: number;
-  createDate: string;
-  user: PixivUser;
-  seriesNavigation?: PixivSeriesNavigation;
-  body?: string;
-  cover_url?: string;
-  tags?: (PixivTag | string)[];
-  detail?: {
-    id: string;
-    title: string;
-    user: PixivUser;
-    cover_url?: string;
-    seriesNavigation?: PixivSeriesNavigation;
-    tags?: { tags: PixivTag[] } | PixivTag[] | string[];
-  };
-}
-
-interface FanboxUser {
-  userId: string;
-  name: string;
-}
-
-interface FanboxPost {
-  id: string;
-  title: string;
-  type: string;
-  publishedDatetime: string;
-  user: FanboxUser;
-  body?: any;
-  coverImageUrl?: string;
-  tags?: string[];
-  creatorId?: string;
-}
-
-interface SidebarItem {
-  id: string;
-  title: string;
-  subtitle?: string;
-  selected: boolean;
-  originalData: PixivNovel | FanboxPost;
-  status?: "pending" | "downloading" | "success" | "skipped" | "failed";
-}
-
-type SidebarDownloadType = "pixiv_single" | "pixiv_series" | "pixiv_user" | "fanbox_single" | "fanbox_creator";
-type SidebarMode = "empty" | "loading" | "analysis" | "downloadProgress" | "downloadDone";
-type DownloadTargetKind = SidebarDownloadType | "unsupported";
-
-interface SidebarAnalysisState {
-  sourceUrl: string;
-  title: string;
-  items: SidebarItem[];
-  downloadType: SidebarDownloadType;
-  analyzedAt: number;
-}
-
 const EPUB_SIDEBAR_TRANSITION_MS = 220;
 
 const defaultLibraryUiState: LibraryUiState = {
   searchVal: "",
   sourceFilter: "",
+  viewMode: "gallery",
   sortBy: "published",
   sortOrder: "desc",
   tagFilters: {},
@@ -160,40 +115,23 @@ const defaultLibraryUiState: LibraryUiState = {
   scrollTop: 0,
 };
 
-
-function formatBytes(bytes: number): string {
-  if (bytes === 0) return "0 B";
-  const k = 1024;
-  const sizes = ["B", "KB", "MB", "GB"];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + " " + sizes[i];
+function libraryUiStateForMode(_mode: ViewMode, currentViewMode: string = "gallery", overrides: Partial<LibraryUiState> = {}): LibraryUiState {
+  let normalizedMode = currentViewMode;
+  if (normalizedMode === "epubSelection" || normalizedMode === "updateReview") {
+    normalizedMode = "compact";
+  }
+  if (normalizedMode !== "gallery" && normalizedMode !== "compact") {
+    normalizedMode = "gallery";
+  }
+  return {
+    ...defaultLibraryUiState,
+    viewMode: normalizedMode,
+    ...overrides,
+  };
 }
 
 function isTauriRuntime(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
-}
-
-function normalizeContentLinkUrl(url: string): string {
-  return url
-    .replace(/pixiv:\/\/illusts?\/(\d+)/g, "https://www.pixiv.net/artworks/$1")
-    .replace(/pixiv:\/\/novels?\/(\d+)/g, "https://www.pixiv.net/novel/show.php?id=$1")
-    .replace(/pixiv:\/\/users?\/(\d+)/g, "https://www.pixiv.net/users/$1");
-}
-
-function extractSavedSourceTarget(url: string): SavedSourceTarget | null {
-  const normalized = normalizeContentLinkUrl(url);
-  const pixivNovelMatch = normalized.match(/pixiv\.net\/(?:[a-z]{2}\/)?novels\/(\d+)/)
-    || normalized.match(/pixiv\.net\/(?:[a-z]{2}\/)?novel\/show\.php\?id=(\d+)/);
-  if (pixivNovelMatch?.[1]) {
-    return { source: "pixiv", sourceId: pixivNovelMatch[1] };
-  }
-
-  const fanboxPostMatch = normalized.match(/fanbox\.cc\/(?:@[^/]+\/)?posts\/(\d+)/);
-  if (fanboxPostMatch?.[1]) {
-    return { source: "fanbox", sourceId: fanboxPostMatch[1] };
-  }
-
-  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -209,6 +147,7 @@ function App() {
   const [isPixivAuthed, setIsPixivAuthed] = useState(false);
   const [isFanboxAuthed, setIsFanboxAuthed] = useState(false);
   const [viewingDownloadId, setViewingDownloadId] = useState<number | null>(null);
+  const [workScreenMode, setWorkScreenMode] = useState<WorkScreenMode>("detail");
   const [libraryEntityView, setLibraryEntityView] = useState<LibraryEntityView>(null);
   const [logs, setLogs] = useState<{ time: string; type: "info" | "success" | "warn" | "error"; text: string }[]>([]);
   const [showConsole, setShowConsole] = useState(false);
@@ -299,6 +238,7 @@ function App() {
   const navStateRef = useRef({
     viewMode: "home" as ViewMode,
     viewingDownloadId: null as number | null,
+    workScreenMode: "detail" as WorkScreenMode,
     libraryEntityView: null as LibraryEntityView,
     libraryFilter: "all",
     libraryUiState: defaultLibraryUiState,
@@ -316,6 +256,7 @@ function App() {
       piep: true,
       viewMode: s.viewMode,
       viewingDownloadId: s.viewingDownloadId,
+      workScreenMode: s.workScreenMode,
       libraryEntityView: s.libraryEntityView,
       libraryFilter: s.libraryFilter,
       libraryUiState: { ...s.libraryUiState, scrollTop },
@@ -327,12 +268,14 @@ function App() {
     navStateRef.current = {
       viewMode: state.viewMode,
       viewingDownloadId: state.viewingDownloadId,
+      workScreenMode: state.workScreenMode ?? "detail",
       libraryEntityView: state.libraryEntityView ?? null,
       libraryFilter: state.libraryFilter ?? "all",
       libraryUiState: { ...defaultLibraryUiState, ...state.libraryUiState },
     };
     setViewMode(state.viewMode);
     setViewingDownloadId(state.viewingDownloadId);
+    setWorkScreenMode(state.workScreenMode ?? "detail");
     setLibraryEntityView(state.libraryEntityView ?? null);
     setLibraryFilter(state.libraryFilter ?? "all");
     setLibraryUiState({ ...defaultLibraryUiState, ...state.libraryUiState });
@@ -351,6 +294,7 @@ function App() {
       piep: true,
       viewMode: updates.hasOwnProperty("viewMode") ? updates.viewMode! : current.viewMode,
       viewingDownloadId: updates.hasOwnProperty("viewingDownloadId") ? updates.viewingDownloadId! : current.viewingDownloadId,
+      workScreenMode: updates.hasOwnProperty("workScreenMode") ? updates.workScreenMode! : current.workScreenMode,
       libraryEntityView: updates.hasOwnProperty("libraryEntityView") ? updates.libraryEntityView! : current.libraryEntityView,
       libraryFilter: updates.hasOwnProperty("libraryFilter") ? updates.libraryFilter! : current.libraryFilter,
       libraryUiState: updates.hasOwnProperty("libraryUiState") ? updates.libraryUiState! : current.libraryUiState,
@@ -422,13 +366,69 @@ function App() {
   const handleViewDetail = useCallback((id: number) => {
     navigateTo({
       viewingDownloadId: id,
+      workScreenMode: "detail",
       libraryEntityView: null,
+    });
+  }, [navigateTo]);
+
+  const handleSelectTagFilter = useCallback((tag: string) => {
+    setInitialTagFilters({ [tag]: "include" });
+    setInitialAuthorFilters({});
+    navigateTo({
+      viewMode: "library",
+      viewingDownloadId: null,
+      workScreenMode: "detail",
+      libraryEntityView: null,
+      libraryFilter: "all",
+      libraryUiState: {
+        ...defaultLibraryUiState,
+        tagFilters: { [tag]: "include" },
+        authorFilters: {},
+        scrollTop: 0,
+        showFilters: false,
+      },
+    });
+  }, [navigateTo]);
+
+  const handleSelectAuthorFilter = useCallback((author: string) => {
+    setInitialTagFilters({});
+    setInitialAuthorFilters({ [author]: "include" });
+    navigateTo({
+      viewMode: "library",
+      viewingDownloadId: null,
+      workScreenMode: "detail",
+      libraryEntityView: null,
+      libraryFilter: "all",
+      libraryUiState: {
+        ...defaultLibraryUiState,
+        tagFilters: {},
+        authorFilters: { [author]: "include" },
+        scrollTop: 0,
+        showFilters: false,
+      },
     });
   }, [navigateTo]);
 
   const handleBackToLibrary = useCallback(() => {
     navigateTo({
       viewingDownloadId: null,
+      workScreenMode: "detail",
+      libraryEntityView: null,
+    });
+  }, [navigateTo]);
+
+  const handleReadWork = useCallback((id: number) => {
+    navigateTo({
+      viewingDownloadId: id,
+      workScreenMode: "reader",
+      libraryEntityView: null,
+    });
+  }, [navigateTo]);
+
+  const handleEditWork = useCallback((id: number) => {
+    navigateTo({
+      viewingDownloadId: id,
+      workScreenMode: "editor",
       libraryEntityView: null,
     });
   }, [navigateTo]);
@@ -506,13 +506,11 @@ function App() {
 
     if (savedTarget) {
       try {
-        const savedDownload = await invoke<DownloadEntry | null>("db_get_download_by_source", {
-          source: savedTarget.source,
-          sourceId: savedTarget.sourceId,
-        });
+        const savedDownload = await getDownloadBySource<DownloadEntry>(savedTarget.source, savedTarget.sourceId);
         if (savedDownload) {
           navigateTo({
             viewingDownloadId: savedDownload.id,
+            workScreenMode: "detail",
             libraryEntityView: null,
           });
           showToast("保存済みの作品を開きました", "info");
@@ -528,7 +526,7 @@ function App() {
     const nextMode = isPixiv ? "pixiv" : "fanbox";
 
     if (navStateRef.current.viewMode === nextMode) {
-      invoke("navigate_embedded_browser", { url: normalizedUrl }).catch((e) => {
+      navigateEmbeddedBrowser(normalizedUrl).catch((e) => {
         console.warn("Failed to navigate embedded browser directly:", e);
       });
       pendingBrowserUrlRef.current = null;
@@ -537,6 +535,7 @@ function App() {
     navigateTo({
       viewMode: nextMode,
       viewingDownloadId: null,
+      workScreenMode: "detail",
       libraryEntityView: null,
     });
     showToast("アプリ内ブラウザで開きます", "info");
@@ -549,7 +548,7 @@ function App() {
     const nextMode = isPixiv ? "pixiv" : "fanbox";
 
     if (navStateRef.current.viewMode === nextMode) {
-      invoke("navigate_embedded_browser", { url: normalizedUrl }).catch((e) => {
+      navigateEmbeddedBrowser(normalizedUrl).catch((e) => {
         console.warn("Failed to navigate embedded browser directly:", e);
       });
       pendingBrowserUrlRef.current = null;
@@ -558,50 +557,11 @@ function App() {
     navigateTo({
       viewMode: nextMode,
       viewingDownloadId: null,
+      workScreenMode: "detail",
       libraryEntityView: null,
     });
     showToast("アプリ内ブラウザで開きます", "info");
   }, [showToast, navigateTo]);
-
-  const normalizeUrlForSidebar = useCallback((url: string) => {
-    try {
-      const parsed = new URL(url);
-      parsed.hash = "";
-      parsed.pathname = parsed.pathname.replace(/\/+$/, "") || "/";
-      return parsed.toString();
-    } catch {
-      return url.trim();
-    }
-  }, []);
-
-  const isSameSidebarUrl = useCallback((a?: string | null, b?: string | null) => {
-    if (!a || !b) return false;
-    return normalizeUrlForSidebar(a) === normalizeUrlForSidebar(b);
-  }, [normalizeUrlForSidebar]);
-
-  const detectDownloadTarget = useCallback((url: string): DownloadTargetKind => {
-    if (!url) return "unsupported";
-    const isPixiv = url.includes("pixiv.net");
-    const isFanbox = url.includes("fanbox.cc");
-
-    if (isPixiv) {
-      if (url.match(/novel\/series\/(\d+)/) || url.match(/novel\/series\/show\.php\?id=(\d+)/)) return "pixiv_series";
-      const userIdMatch = url.match(/users\/(\d+)/);
-      if (userIdMatch?.[1] && !url.includes("/novels/")) return "pixiv_user";
-      if (url.match(/novels\/(\d+)/) || url.match(/novel\/show\.php\?id=(\d+)/)) return "pixiv_single";
-    }
-
-    if (isFanbox) {
-      if (url.match(/posts\/(\d+)/)) return "fanbox_single";
-      if (getFanboxCreatorId(url)) return "fanbox_creator";
-    }
-
-    return "unsupported";
-  }, []);
-
-  const stripSidebarItemStatus = useCallback((items: SidebarItem[]) => {
-    return items.map(({ status: _status, ...item }) => ({ ...item }));
-  }, []);
 
   const openEmptyDownloadSidebar = useCallback((message: string, title = "保存候補") => {
     setSidebarTitle(title);
@@ -625,7 +585,7 @@ function App() {
     setSidebarEmptyMessage("");
     setSidebarMode("analysis");
     setShowDownloadSidebar(true);
-  }, [stripSidebarItemStatus]);
+  }, []);
 
   const applyDownloadAnalysis = useCallback((
     sourceUrl: string,
@@ -650,7 +610,7 @@ function App() {
       downloadType,
       analyzedAt: Date.now(),
     });
-  }, [stripSidebarItemStatus]);
+  }, []);
 
   // Check auth status on mount and view changes
   useEffect(() => {
@@ -686,7 +646,7 @@ function App() {
     }
 
     try {
-      const dbStats = await invoke<DbStats>("db_get_stats");
+      const dbStats = await getStats() as DbStats;
       setStats(dbStats);
     } catch (e) {
       console.error("Failed to load db stats:", e);
@@ -704,7 +664,7 @@ function App() {
   useEffect(() => {
     if (!isTauriRuntime()) return;
 
-    const unlisten = listen<string>("url-changed", (event) => {
+    const unlisten = onTauriEvent<string>("url-changed", (event) => {
       setCurrentUrl(event.payload);
     });
     return () => { unlisten.then(f => f()).catch(() => {}); };
@@ -714,7 +674,7 @@ function App() {
   useEffect(() => {
     if (!isTauriRuntime()) return;
 
-    const unlisten = listen<string>("download-log", (event) => {
+    const unlisten = onTauriEvent<string>("download-log", (event) => {
       const payload = event.payload;
       let type: "info" | "success" | "warn" | "error" = "info";
       let text = payload;
@@ -756,7 +716,7 @@ function App() {
 
     const syncUrl = async () => {
       try {
-        const url = await invoke<string>("get_embedded_browser_url");
+        const url = await getEmbeddedBrowserUrl();
         if (url && url !== currentUrl) {
           setCurrentUrl(url);
         }
@@ -799,8 +759,8 @@ function App() {
       const initialUrl = targetUrl || (viewMode === "pixiv" ? "https://www.pixiv.net" : "https://www.fanbox.cc");
       pendingBrowserUrlRef.current = null;
 
-      invoke("open_embedded_browser", {
-        url: initialUrl, x: Math.round(rect.x), y: Math.round(rect.y),
+      openEmbeddedBrowser(initialUrl, {
+        x: Math.round(rect.x), y: Math.round(rect.y),
         width: Math.round(rect.width), height: Math.round(rect.height), userAgent: undefined,
       });
     }
@@ -823,7 +783,7 @@ function App() {
         const initialUrl = targetUrl || (viewMode === "pixiv" ? "https://www.pixiv.net" : "https://www.fanbox.cc");
         pendingBrowserUrlRef.current = null;
 
-        invoke("navigate_embedded_browser", { url: initialUrl }).catch(() => updateBrowserBounds());
+        navigateEmbeddedBrowser(initialUrl).catch(() => updateBrowserBounds());
         updateBrowserBounds();
       } else {
         updateBrowserBounds();
@@ -833,7 +793,7 @@ function App() {
       return () => { window.removeEventListener("resize", debouncedUpdate); clearTimeout(timer); };
     } else {
       if (tauriAvailable && (prevViewRef.current === "pixiv" || prevViewRef.current === "fanbox")) {
-        invoke("destroy_embedded_browser");
+        destroyEmbeddedBrowser();
       }
       setCurrentUrl("");
       prevViewRef.current = viewMode;
@@ -854,16 +814,6 @@ function App() {
     }
   }, [showDownloadSidebar, showConsole, viewMode, updateBrowserBounds]);
 
-  const getFanboxCreatorId = (url: string) => {
-    try {
-      const subMatch = url.match(/https:\/\/([^.]+)\.fanbox\.cc/);
-      if (subMatch && subMatch[1] !== "www" && subMatch[1] !== "api") return subMatch[1];
-      const dirMatch = url.match(/fanbox\.cc\/@([^/?#\s]+)/);
-      if (dirMatch) return dirMatch[1];
-    } catch {}
-    return null;
-  };
-
   // DB管理ダウンロード（サイドバー表示フェーズへリニューアル）
   const handleDownload = async () => {
     if (isDownloading) return;
@@ -874,7 +824,7 @@ function App() {
 
     let activeUrl = "";
     try {
-      activeUrl = await invoke<string>("get_embedded_browser_url");
+      activeUrl = await getEmbeddedBrowserUrl();
     } catch {
       activeUrl = "";
     }
@@ -944,7 +894,7 @@ function App() {
         const seriesIdMatch = activeUrl.match(/novel\/series\/(\d+)/) || activeUrl.match(/novel\/series\/show\.php\?id=(\d+)/);
         const seriesId = seriesIdMatch?.[1];
         if (seriesId) {
-          const novels = await invoke<PixivNovel[]>("fetch_pixiv_series_novels", { seriesId, refreshToken });
+          const novels = await fetchPixivSeriesNovels<PixivNovel[]>(seriesId, refreshToken);
           if (!novels || novels.length === 0) {
             throw new Error("シリーズに小説作品が見つかりませんでした。");
           }
@@ -964,7 +914,7 @@ function App() {
         const userIdMatch = activeUrl.match(/users\/(\d+)/);
         const userId = userIdMatch?.[1];
         if (userId && !activeUrl.includes("/novels/")) {
-          const novels = await invoke<PixivNovel[]>("fetch_pixiv_user_novels", { userId, refreshToken });
+          const novels = await fetchPixivUserNovels<PixivNovel[]>(userId, refreshToken);
           if (!novels || novels.length === 0) {
             throw new Error("作家の小説作品が見つかりませんでした。");
           }
@@ -984,7 +934,7 @@ function App() {
         const novelIdMatch = activeUrl.match(/novels\/(\d+)/) || activeUrl.match(/novel\/show\.php\?id=(\d+)/);
         const novelId = novelIdMatch?.[1];
         if (novelId) {
-          const data = await invoke<PixivNovel>("fetch_pixiv_novel_by_url", { url: activeUrl, refreshToken });
+          const data = await fetchPixivNovelByUrl<PixivNovel>(activeUrl, refreshToken);
           const title = data.detail?.title || data.title || "閲覧中の小説";
           const author = data.detail?.user?.name || data.user?.name || "不明";
           const items = [{
@@ -1015,7 +965,7 @@ function App() {
         const creatorId = getFanboxCreatorId(activeUrl);
 
         if (creatorId && !postId) {
-          const posts = await invoke<FanboxPost[]>("fetch_fanbox_creator_posts", { creatorId, cookie, userAgent: ua });
+          const posts = await fetchFanboxCreatorPosts<FanboxPost[]>(creatorId, cookie, ua);
           if (!posts || posts.length === 0) {
             throw new Error("クリエイターに投稿が見つかりませんでした。");
           }
@@ -1033,7 +983,7 @@ function App() {
 
         // E. FANBOX 単一投稿
         if (postId) {
-          const data = await invoke<FanboxPost>("fetch_fanbox_post", { postId, cookie, userAgent: ua });
+          const data = await fetchFanboxPost<FanboxPost>(postId, cookie, ua);
           const title = data.title || "閲覧中の投稿";
           const author = data.user?.name || "不明";
           const items = [{
@@ -1113,7 +1063,7 @@ function App() {
           setSidebarStatusText(`「${target.title}」を処理中...`);
 
           // 重複＆更新監視の事前チェック
-          const existingEntry = await invoke<DownloadEntry | null>("db_get_download_by_source", { source: "pixiv", sourceId: target.id });
+          const existingEntry = await getDownloadBySource<DownloadEntry>("pixiv", target.id);
           if (existingEntry) {
             if (!existingEntry.watchUpdates) {
               enqueueEntityRefresh(existingEntry);
@@ -1135,7 +1085,7 @@ function App() {
               data = target.originalData as PixivNovel;
             } else {
               const novelUrl = `https://www.pixiv.net/novel/show.php?id=${target.id}`;
-              data = await invoke<PixivNovel>("fetch_pixiv_novel_by_url", { url: novelUrl, refreshToken });
+              data = await fetchPixivNovelByUrl<PixivNovel>(novelUrl, refreshToken);
             }
 
             const title = data.detail?.title || data.title || target.title || "pixiv_novel";
@@ -1156,7 +1106,7 @@ function App() {
             };
             const tags = extractTags(data).length > 0 ? extractTags(data) : extractTags(origPixivData);
 
-            const savedEntry = await invoke<DownloadEntry>("download_and_save", {
+            const savedEntry = await downloadAndSave<DownloadEntry>({
               data, source: "pixiv", sourceId: target.id, title, authorName: author, authorId,
               contentType: "novel", tags, excerpt: null,
               sourceCreatedAt: (data as any).detail?.create_date || (data as any).detail?.createDate || (data as any).create_date || (data as any).createDate || (origPixivData as any).detail?.createDate || origPixivData.createDate || null,
@@ -1188,7 +1138,7 @@ function App() {
           setSidebarStatusText(`「${target.title}」を処理中...`);
 
           // 重複＆更新監視の事前チェック
-          const existingEntry = await invoke<DownloadEntry | null>("db_get_download_by_source", { source: "fanbox", sourceId: target.id });
+          const existingEntry = await getDownloadBySource<DownloadEntry>("fanbox", target.id);
           if (existingEntry) {
             if (!existingEntry.watchUpdates) {
               enqueueEntityRefresh(existingEntry);
@@ -1209,7 +1159,7 @@ function App() {
             if (sidebarDownloadType === "fanbox_single") {
               data = target.originalData as FanboxPost;
             } else {
-              data = await invoke<FanboxPost>("fetch_fanbox_post", { postId: target.id, cookie, userAgent: ua });
+              data = await fetchFanboxPost<FanboxPost>(target.id, cookie, ua);
             }
 
             const origFanboxData = target.originalData as FanboxPost;
@@ -1218,7 +1168,7 @@ function App() {
             const authorId = data.creatorId || origFanboxData?.creatorId || data.user?.userId || origFanboxData?.user?.userId || "0";
             const tags = data.tags || origFanboxData?.tags || [];
 
-            const savedEntry = await invoke<DownloadEntry>("download_and_save", {
+            const savedEntry = await downloadAndSave<DownloadEntry>({
               data, source: "fanbox", sourceId: target.id, title, authorName: author, authorId,
               contentType: data.type || origFanboxData?.type || "article", tags, excerpt: null,
               sourceCreatedAt: data.publishedDatetime || origFanboxData?.publishedDatetime || null, cookie, userAgent: ua,
@@ -1246,16 +1196,14 @@ function App() {
         const fanboxUserAgent = await store.get<string>("fanbox_user_agent") || "Mozilla/5.0";
         for (const target of entityRefreshQueue.values()) {
           try {
-            await invoke("refresh_entity_profile", {
-              params: {
-                entityType: target.entityType,
-                source: target.source,
-                sourceKey: target.sourceKey,
-                force: false,
-                refreshToken,
-                cookie: fanboxCookie,
-                userAgent: fanboxUserAgent,
-              },
+            await refreshEntityProfile({
+              entityType: target.entityType,
+              source: target.source,
+              sourceKey: target.sourceKey,
+              force: false,
+              refreshToken,
+              cookie: fanboxCookie,
+              userAgent: fanboxUserAgent,
             });
           } catch (e) {
             addFrontLog("warn", `[PROFILE] ${target.entityType}:${target.source}:${target.sourceKey} の確認をスキップしました: ${e}`);
@@ -1323,155 +1271,66 @@ function App() {
     navigateTo({
       viewMode: mode,
       viewingDownloadId: null,
+      workScreenMode: "detail",
       libraryEntityView: null,
       libraryFilter: "all",
-      libraryUiState: { ...defaultLibraryUiState, scrollTop: 0 },
+      libraryUiState: libraryUiStateForMode(mode, libraryUiState.viewMode, { scrollTop: 0 }),
     });
-  }, [isDownloading, navigateTo, showToast]);
+  }, [isDownloading, navigateTo, showToast, libraryUiState.viewMode]);
+
+  const shellProps = {
+    viewMode,
+    isPixivAuthed,
+    isFanboxAuthed,
+    showConsole,
+    showDownloadSidebar,
+    toasts,
+    logs,
+    consoleBottomRef,
+    onNavClick: handleNavClick,
+    onBackToLibrary: handleBackToLibrary,
+    onToggleConsole: () => setShowConsole(value => !value),
+    onCloseConsole: () => setShowConsole(false),
+    onClearLogs: () => setLogs([]),
+    onConsoleScroll: setIsUserScrollingUp,
+  };
 
   if (libraryEntityView !== null) {
     return (
-      <div id="root">
-        <aside className="sidebar">
-          <div className="sidebar-header"><img src={logo} className="sidebar-logo" alt="piep" /></div>
-          <nav className="sidebar-nav">
-            <button type="button" className="nav-item home-nav-item" onClick={() => handleNavClick("home")}><HomeIcon /> ホーム</button>
-            <button type="button" className="nav-item library-nav-item active" onClick={() => handleBackToLibrary()}><LibraryIcon /> ライブラリ</button>
-            <button type="button" className="nav-item epub-nav-item" onClick={() => handleNavClick("epub")}><BookIcon /> EPUB</button>
-            <button type="button" className="nav-item update-nav-item" onClick={() => handleNavClick("update")}><RefreshIcon /> 更新管理</button>
-            <button type="button" className="nav-item pixiv-nav-item" onClick={() => handleNavClick("pixiv")}><PaletteIcon /> Pixiv</button>
-            <button type="button" className="nav-item fanbox-nav-item" onClick={() => handleNavClick("fanbox")}><HeartIcon /> FANBOX</button>
-            <button type="button" className="nav-item settings-nav-item" onClick={() => handleNavClick("settings")}><SettingsIcon /> 設定</button>
-          </nav>
-        </aside>
-        <main className="main-content">
+      <RouteRenderer shellProps={shellProps} libraryContext>
           <div className={`content-inner epub-layout-wrapper entity-layout-wrapper ${epubSidebarLayoutOpen ? "epub-sidebar-layout-open" : ""}`}>
-          <div className="library-main-content entity-main-content">
-            {libraryEntityView.type === "person" ? (
-              <PersonView
-                source={libraryEntityView.source}
-                sourceKey={libraryEntityView.sourceKey}
-                showToast={showToast}
-                onViewDetail={handleViewDetail}
-                onViewSeries={handleViewSeries}
-                onOpenSourceUrl={handleOpenUrlInAppBrowser}
-                onOpenEpubForWorks={handleOpenEntityEpub}
-                onLibraryChanged={() => {
-                  loadStats();
-                  setLibraryRestoreKey(key => key + 1);
-                }}
-                epubSidebarOpen={epubSidebarOpen}
-              />
-            ) : (
-              <SeriesView
-                source={libraryEntityView.source}
-                sourceKey={libraryEntityView.sourceKey}
-                showToast={showToast}
-                onViewDetail={handleViewDetail}
-                onViewSeries={handleViewSeries}
-                onOpenSourceUrl={handleOpenUrlInAppBrowser}
-                onOpenEpubForWorks={handleOpenEntityEpub}
-                onLibraryChanged={() => {
-                  loadStats();
-                  setLibraryRestoreKey(key => key + 1);
-                }}
-                epubSidebarOpen={epubSidebarOpen}
-              />
-            )}
-          </div>
-          <EpubSidebar
-            selectedIds={selectedEpubIds}
-            selectedItems={selectedEpubItems}
-            showToast={showToast}
-            isOpen={epubSidebarOpen}
-            onClose={() => setEpubSidebarVisible(false)}
-            showTemplateManager={showTemplateManager}
-            onCloseTemplateManager={() => setShowTemplateManager(false)}
-          />
-          </div>
-        </main>
-      </div>
-    );
-  }
-
-  if (viewingDownloadId !== null) {
-    return (
-      <div id="root">
-        <aside className="sidebar">
-          <div className="sidebar-header"><img src={logo} className="sidebar-logo" alt="piep" /></div>
-          <nav className="sidebar-nav">
-            <button type="button" className="nav-item home-nav-item" onClick={() => handleNavClick("home")}><HomeIcon /> ホーム</button>
-            <button type="button" className="nav-item library-nav-item active" onClick={() => handleBackToLibrary()}><LibraryIcon /> ライブラリ</button>
-            <button type="button" className="nav-item epub-nav-item" onClick={() => handleNavClick("epub")}><BookIcon /> EPUB</button>
-            <button type="button" className="nav-item update-nav-item" onClick={() => handleNavClick("update")}><RefreshIcon /> 更新管理</button>
-            <button type="button" className="nav-item pixiv-nav-item" onClick={() => handleNavClick("pixiv")}>
-              <PaletteIcon /> Pixiv
-              <div className={`status-dot ${isPixivAuthed ? "authed" : ""}`} title={isPixivAuthed ? "連携済み" : "未連携"} />
-            </button>
-            <button type="button" className="nav-item fanbox-nav-item" onClick={() => handleNavClick("fanbox")}>
-              <HeartIcon /> FANBOX
-              <div className={`status-dot ${isFanboxAuthed ? "authed" : ""}`} title={isFanboxAuthed ? "連携済み" : "未連携"} />
-            </button>
-            <button type="button" className="nav-item settings-nav-item" onClick={() => handleNavClick("settings")}><SettingsIcon /> 設定</button>
-          </nav>
-          <button
-            type="button"
-            className={`floating-console-toggle ${showConsole ? "active" : ""}`}
-            onClick={() => setShowConsole(!showConsole)}
-          >
-            <TerminalAlertIcon />
-            LOGS
-          </button>
-          {!showDownloadSidebar && toasts.length > 0 && (
-            <div className="sidebar-toast-container">
-              {toasts.map(toast => (
-                <div key={toast.id} className={`sidebar-toast ${toast.type}`}>
-                  {toast.type === "error" && <AlertIcon />}
-                  <span className="toast-text-content">{toast.text}</span>
-                </div>
-              ))}
-            </div>
-          )}
-        </aside>
-        <main className="main-content">
-          <div className={`content-inner epub-layout-wrapper viewer-inner ${epubSidebarLayoutOpen ? "epub-sidebar-layout-open" : ""}`}>
-            <div className="viewer-main-content">
-              <ContentViewer 
-                downloadId={viewingDownloadId} 
-                showToast={showToast} 
-                onSelectTagFilter={(tag) => {
-                  setInitialTagFilters({ [tag]: "include" });
-                  setInitialAuthorFilters({});
-                  navigateTo({
-                    viewMode: "library",
-                    viewingDownloadId: null,
-                    libraryEntityView: null,
-                    libraryFilter: "all",
-                    libraryUiState: {
-                      ...defaultLibraryUiState,
-                      tagFilters: { [tag]: "include" },
-                      authorFilters: {},
-                      scrollTop: 0,
-                      showFilters: true,
-                    },
-                  });
-                }}
-                onExportEpub={(download) => {
-                  if (epubSidebarOpen && selectedEpubIds.has(download.id) && selectedEpubIds.size === 1) {
-                    setEpubSidebarVisible(false);
-                  } else {
-                    setSelectedEpubIds(new Set([download.id]));
-                    setSelectedEpubItems([download as any]);
-                    setEpubSidebarVisible(true);
-                  }
-                }}
-                isEpubActive={epubSidebarOpen && selectedEpubIds.has(viewingDownloadId)}
-                onViewPerson={handleViewPerson}
-                onViewSeries={handleViewSeries}
-                onNavigateInternalUrl={handleNavigateContentUrl}
-                onOpenSourceUrl={handleOpenUrlInAppBrowser}
-                onDeleted={handleBackToLibrary}
-              />
+            <div className="library-main-content entity-main-content">
+              {libraryEntityView.type === "person" ? (
+                <PersonView
+                  source={libraryEntityView.source}
+                  sourceKey={libraryEntityView.sourceKey}
+                  showToast={showToast}
+                  onViewDetail={handleViewDetail}
+                  onViewSeries={handleViewSeries}
+                  onOpenSourceUrl={handleOpenUrlInAppBrowser}
+                  onOpenEpubForWorks={handleOpenEntityEpub}
+                  onLibraryChanged={() => {
+                    loadStats();
+                    setLibraryRestoreKey(key => key + 1);
+                  }}
+                  epubSidebarOpen={epubSidebarOpen}
+                />
+              ) : (
+                <SeriesView
+                  source={libraryEntityView.source}
+                  sourceKey={libraryEntityView.sourceKey}
+                  showToast={showToast}
+                  onViewDetail={handleViewDetail}
+                  onViewSeries={handleViewSeries}
+                  onOpenSourceUrl={handleOpenUrlInAppBrowser}
+                  onOpenEpubForWorks={handleOpenEntityEpub}
+                  onLibraryChanged={() => {
+                    loadStats();
+                    setLibraryRestoreKey(key => key + 1);
+                  }}
+                  epubSidebarOpen={epubSidebarOpen}
+                />
+              )}
             </div>
             <EpubSidebar
               selectedIds={selectedEpubIds}
@@ -1483,212 +1342,144 @@ function App() {
               onCloseTemplateManager={() => setShowTemplateManager(false)}
             />
           </div>
-        </main>
-      </div>
+      </RouteRenderer>
+    );
+  }
+
+  if (viewingDownloadId !== null) {
+    return (
+      <RouteRenderer shellProps={shellProps} libraryContext>
+          <div className={`content-inner epub-layout-wrapper viewer-inner ${epubSidebarLayoutOpen ? "epub-sidebar-layout-open" : ""}`}>
+            <div className="viewer-main-content">
+              {workScreenMode === "reader" ? (
+                <ReaderView
+                  downloadId={viewingDownloadId}
+                  showToast={showToast}
+                  onBack={() => handleViewDetail(viewingDownloadId)}
+                  onEdit={() => handleEditWork(viewingDownloadId)}
+                  onOpenSourceUrl={handleOpenUrlInAppBrowser}
+                />
+              ) : workScreenMode === "editor" ? (
+                <WorkEditor
+                  downloadId={viewingDownloadId}
+                  showToast={showToast}
+                  onBack={() => handleViewDetail(viewingDownloadId)}
+                  onRead={() => handleReadWork(viewingDownloadId)}
+                  onSaved={() => {
+                    loadStats();
+                    setLibraryRestoreKey(key => key + 1);
+                  }}
+                />
+              ) : (
+                <ContentViewer
+                  downloadId={viewingDownloadId}
+                  showToast={showToast}
+                  onRead={() => handleReadWork(viewingDownloadId)}
+                  onEdit={() => handleEditWork(viewingDownloadId)}
+                  onSelectTagFilter={(tag) => {
+                    setInitialTagFilters({ [tag]: "include" });
+                    setInitialAuthorFilters({});
+                    navigateTo({
+                      viewMode: "library",
+                      viewingDownloadId: null,
+                      workScreenMode: "detail",
+                      libraryEntityView: null,
+                      libraryFilter: "all",
+                      libraryUiState: {
+                        ...defaultLibraryUiState,
+                        tagFilters: { [tag]: "include" },
+                        authorFilters: {},
+                        scrollTop: 0,
+                        showFilters: true,
+                      },
+                    });
+                  }}
+                  onExportEpub={(download) => {
+                    if (epubSidebarOpen && selectedEpubIds.has(download.id) && selectedEpubIds.size === 1) {
+                      setEpubSidebarVisible(false);
+                    } else {
+                      setSelectedEpubIds(new Set([download.id]));
+                      setSelectedEpubItems([download as any]);
+                      setEpubSidebarVisible(true);
+                    }
+                  }}
+                  isEpubActive={epubSidebarOpen && selectedEpubIds.has(viewingDownloadId)}
+                  onViewPerson={handleViewPerson}
+                  onViewSeries={handleViewSeries}
+                  onNavigateInternalUrl={handleNavigateContentUrl}
+                  onOpenSourceUrl={handleOpenUrlInAppBrowser}
+                  onDeleted={handleBackToLibrary}
+                />
+              )}
+            </div>
+            {workScreenMode === "detail" && (
+              <EpubSidebar
+                selectedIds={selectedEpubIds}
+                selectedItems={selectedEpubItems}
+                showToast={showToast}
+                isOpen={epubSidebarOpen}
+                onClose={() => setEpubSidebarVisible(false)}
+                showTemplateManager={showTemplateManager}
+                onCloseTemplateManager={() => setShowTemplateManager(false)}
+              />
+            )}
+          </div>
+      </RouteRenderer>
     );
   }
 
   return (
-    <div id="root">
-      {/* Sidebar */}
-      <aside className="sidebar">
-        <div className="sidebar-header"><img src={logo} className="sidebar-logo" alt="piep" /></div>
-        <nav className="sidebar-nav">
-          <button type="button" className={`nav-item home-nav-item ${viewMode === "home" ? "active" : ""}`} onClick={() => handleNavClick("home")}><HomeIcon /> ホーム</button>
-          <button type="button" className={`nav-item library-nav-item ${viewMode === "library" ? "active" : ""}`} onClick={() => {
-            if (viewMode === "library") return;
-            handleNavClick("library");
-          }}><LibraryIcon /> ライブラリ</button>
-          <button type="button" className={`nav-item epub-nav-item ${viewMode === "epub" ? "active" : ""}`} onClick={() => {
-            if (viewMode === "epub") return;
-            handleNavClick("epub");
-          }}><BookIcon /> EPUB</button>
-          <button type="button" className={`nav-item update-nav-item ${viewMode === "update" ? "active" : ""}`} onClick={() => {
-            if (viewMode === "update") return;
-            handleNavClick("update");
-          }}><RefreshIcon /> 更新管理</button>
-          <button type="button" className={`nav-item pixiv-nav-item ${viewMode === "pixiv" ? "active" : ""}`} onClick={() => handleNavClick("pixiv")}>
-            <PaletteIcon /> Pixiv
-            <div className={`status-dot ${isPixivAuthed ? "authed" : ""}`} title={isPixivAuthed ? "連携済み" : "未連携"} />
-          </button>
-          <button type="button" className={`nav-item fanbox-nav-item ${viewMode === "fanbox" ? "active" : ""}`} onClick={() => handleNavClick("fanbox")}>
-            <HeartIcon /> FANBOX
-            <div className={`status-dot ${isFanboxAuthed ? "authed" : ""}`} title={isFanboxAuthed ? "連携済み" : "未連携"} />
-          </button>
-          <button type="button" className={`nav-item settings-nav-item ${viewMode === "settings" ? "active" : ""}`} onClick={() => handleNavClick("settings")}><SettingsIcon /> 設定</button>
-        </nav>
-        <button
-          type="button"
-          className={`floating-console-toggle ${showConsole ? "active" : ""}`}
-          onClick={() => setShowConsole(!showConsole)}
-        >
-          <TerminalAlertIcon />
-          LOGS
-        </button>
-        {!showDownloadSidebar && toasts.length > 0 && (
-          <div className="sidebar-toast-container">
-            {toasts.map(toast => (
-              <div key={toast.id} className={`sidebar-toast ${toast.type}`}>
-                {toast.type === "error" && <AlertIcon />}
-                <span className="toast-text-content">{toast.text}</span>
-              </div>
-            ))}
-          </div>
-        )}
-      </aside>
-
-      {/* Main Content */}
-      <main className="main-content">
+    <RouteRenderer shellProps={shellProps}>
         {/* Browser Toolbar */}
         {(viewMode === "pixiv" || viewMode === "fanbox") && (
-          <div className="browser-toolbar">
-            <button className="toolbar-nav-btn" title="戻る" onClick={() => invoke("go_back_embedded_browser")} disabled={!tauriAvailable}><ChevronLeftIcon /></button>
-            <button className="toolbar-nav-btn" title="進む" onClick={() => invoke("go_forward_embedded_browser")} disabled={!tauriAvailable}><ChevronRightIcon /></button>
-            <button className="toolbar-nav-btn" title="再読み込み" onClick={() => invoke("reload_embedded_browser")} disabled={!tauriAvailable}><RefreshIcon /></button>
-            <div className="url-display">
-              {viewMode === "pixiv" ? <PaletteIcon /> : <HeartIcon />}
-              {!tauriAvailable ? "Tauriアプリ内でブラウザを表示します" : currentUrl || "読み込み中..."}
-            </div>
-            {!isPixivAuthed && viewMode === "pixiv" && (
-              <button type="button" className="toolbar-auth-warning" onClick={() => handleNavClick("settings")} title="Pixivが未連携です。クリックして設定画面で連携してください。">
-                ⚠️ 未連携
-              </button>
-            )}
-            {!isFanboxAuthed && viewMode === "fanbox" && (
-              <button type="button" className="toolbar-auth-warning" onClick={() => handleNavClick("settings")} title="FANBOXが未連携です。クリックして設定画面で連携してください。">
-                ⚠️ 未連携
-              </button>
-            )}
-            <button
-              className={`toolbar-download-btn ready ${showDownloadSidebar ? "active" : ""}`}
-              onClick={() => {
-                const shouldRefreshSidebar = showDownloadSidebar
-                  && !isDownloading
-                  && currentUrl
-                  && (!lastSidebarAnalysis || !isSameSidebarUrl(currentUrl, lastSidebarAnalysis.sourceUrl))
-                  && detectDownloadTarget(currentUrl) !== "unsupported";
+          <BrowserToolbar
+            viewMode={viewMode}
+            currentUrl={currentUrl}
+            tauriAvailable={tauriAvailable}
+            isPixivAuthed={isPixivAuthed}
+            isFanboxAuthed={isFanboxAuthed}
+            showDownloadSidebar={showDownloadSidebar}
+            isDownloading={isDownloading}
+            downloadButtonText={getDownloadButtonText()}
+            onOpenSettings={() => handleNavClick("settings")}
+            onDownloadClick={() => {
+              const shouldRefreshSidebar = showDownloadSidebar
+                && !isDownloading
+                && currentUrl
+                && (!lastSidebarAnalysis || !isSameSidebarUrl(currentUrl, lastSidebarAnalysis.sourceUrl))
+                && detectDownloadTarget(currentUrl) !== "unsupported";
 
-                if (showDownloadSidebar && !shouldRefreshSidebar) {
-                  setShowDownloadSidebar(false);
-                } else {
-                  handleDownload();
-                }
-              }}
-              disabled={!tauriAvailable || (isDownloading && !showDownloadSidebar)}
-              title={!tauriAvailable ? "保存候補の取得はTauriアプリ内で利用できます" : showDownloadSidebar ? "保存候補を閉じる、または現在のページで更新" : "現在のページから保存候補を取得"}
-            >
-              <DownloadIcon />{getDownloadButtonText()}
-            </button>
-          </div>
+              if (showDownloadSidebar && !shouldRefreshSidebar) {
+                setShowDownloadSidebar(false);
+              } else {
+                handleDownload();
+              }
+            }}
+          />
         )}
 
         {/* Home */}
         {viewMode === "home" && (
           <div className="content-inner home-main-content">
-            <div className="home-container">
-
-              {/* Dashboard Meta Ribbon (目立たない読み取り専用のステータス帯) */}
-              {stats && (
-                <div className="dashboard-meta-ribbon">
-                  <span className="ribbon-title">DB STATUS</span>
-                  <span className="ribbon-divider">|</span>
-                  <span className="ribbon-value">{stats.totalAssets || 0} assets</span>
-                  <span className="ribbon-dot">·</span>
-                  <span className="ribbon-value">{formatBytes(stats.totalSizeBytes)} total</span>
-                  <span className="ribbon-dot">·</span>
-                  <span className="ribbon-value">
-                    {stats.totalDownloads > 0 ? formatBytes(stats.totalSizeBytes / stats.totalDownloads) : "0 B"} avg.
-                  </span>
-                </div>
-              )}
-
-              {/* Dashboard Statistics Grid (遷移価値のある3大アクションのみ) */}
-              <div className="dashboard-grid">
-                <button type="button" className="dashboard-card" onClick={() => {
-                  navigateTo({
-                    viewMode: "library",
-                    viewingDownloadId: null,
-                    libraryEntityView: null,
-                    libraryFilter: "all",
-                    libraryUiState: { ...defaultLibraryUiState, sourceFilter: "", scrollTop: 0 },
-                  });
-                }}>
-                  <span className="value">{stats ? stats.totalDownloads : "0"}</span>
-                  <span className="label">ALL LIBRARY</span>
-                </button>
-                <button type="button" className="dashboard-card" onClick={() => {
-                  navigateTo({
-                    viewMode: "library",
-                    viewingDownloadId: null,
-                    libraryEntityView: null,
-                    libraryFilter: "pixiv",
-                    libraryUiState: { ...defaultLibraryUiState, sourceFilter: "pixiv", scrollTop: 0 },
-                  });
-                }}>
-                  <span className="value" style={{ color: "var(--color-pixiv)" }}>{stats ? stats.pixivCount : "0"}</span>
-                  <span className="label">PIXIV</span>
-                </button>
-                <button type="button" className="dashboard-card" onClick={() => {
-                  navigateTo({
-                    viewMode: "library",
-                    viewingDownloadId: null,
-                    libraryEntityView: null,
-                    libraryFilter: "fanbox",
-                    libraryUiState: { ...defaultLibraryUiState, sourceFilter: "fanbox", scrollTop: 0 },
-                  });
-                }}>
-                  <span className="value" style={{ color: "var(--color-fanbox)" }}>{stats ? stats.fanboxCount : "0"}</span>
-                  <span className="label">FANBOX</span>
-                </button>
-              </div>
-
-              <div className="dashboard-sections">
-                <div className="dashboard-quick-grid">
-                  <button type="button" className="home-card library-card" style={{ "--card-accent": "var(--color-text-secondary)", "--card-accent-bg": "rgba(100, 116, 139, 0.08)" } as React.CSSProperties} onClick={() => navigateTo({ viewMode: "library", viewingDownloadId: null, libraryEntityView: null })}>
-                    <div className="home-card-icon" style={{ margin: 0 }}><LibraryIcon /></div>
-                    <div className="home-card-text">
-                      <h3>ライブラリ</h3>
-                      <p>作品の検索・閲覧・管理</p>
-                    </div>
-                  </button>
-                  <button type="button" className="home-card" style={{ "--card-accent": "var(--color-epub)", "--card-accent-bg": "var(--color-epub-bg)" } as React.CSSProperties} onClick={() => navigateTo({ viewMode: "epub", viewingDownloadId: null, libraryEntityView: null })}>
-                    <div className="home-card-icon" style={{ margin: 0 }}><BookIcon /></div>
-                    <div className="home-card-text">
-                      <h3>EPUB エクスポート</h3>
-                      <p>作品をEPUB形式に変換</p>
-                    </div>
-                  </button>
-                  <button type="button" className="home-card" style={{ "--card-accent": "var(--color-success)", "--card-accent-bg": "rgba(34, 197, 94, 0.08)" } as React.CSSProperties} onClick={() => navigateTo({ viewMode: "update", viewingDownloadId: null, libraryEntityView: null })}>
-                    <div className="home-card-icon" style={{ margin: 0 }}><RefreshIcon /></div>
-                    <div className="home-card-text">
-                      <h3>更新管理</h3>
-                      <p>作品更新と新作候補を確認</p>
-                    </div>
-                  </button>
-                  <button type="button" className="home-card" style={{ "--card-accent": "var(--color-pixiv)", "--card-accent-bg": "rgba(0, 150, 250, 0.08)" } as React.CSSProperties} onClick={() => navigateTo({ viewMode: "pixiv", viewingDownloadId: null, libraryEntityView: null })}>
-                    <div className="home-card-icon" style={{ margin: 0 }}><PaletteIcon /></div>
-                    <div className="home-card-text">
-                      <h3>Pixiv ブラウザ</h3>
-                      <p>Pixivを閲覧・保存</p>
-                    </div>
-                  </button>
-                  <button type="button" className="home-card" style={{ "--card-accent": "var(--color-fanbox)", "--card-accent-bg": "rgba(242, 198, 36, 0.08)" } as React.CSSProperties} onClick={() => navigateTo({ viewMode: "fanbox", viewingDownloadId: null, libraryEntityView: null })}>
-                    <div className="home-card-icon" style={{ margin: 0 }}><HeartIcon /></div>
-                    <div className="home-card-text">
-                      <h3>FANBOX ブラウザ</h3>
-                      <p>限定投稿を保存</p>
-                    </div>
-                  </button>
-                </div>
-                <button type="button" className="home-card settings-card" style={{ "--card-accent": "var(--color-text-secondary)", "--card-accent-bg": "rgba(100, 116, 139, 0.08)" } as React.CSSProperties} onClick={() => navigateTo({ viewMode: "settings", viewingDownloadId: null, libraryEntityView: null })}>
-                  <div className="home-card-icon" style={{ margin: 0 }}><SettingsIcon /></div>
-                  <div className="home-card-text">
-                    <h3>アカウント連携・設定</h3>
-                    <p>認証情報を管理</p>
-                  </div>
-                </button>
-              </div>
-            </div>
+            <HomeDashboard
+              fallbackStats={stats}
+              onOpenWork={handleViewDetail}
+              onSelectTag={handleSelectTagFilter}
+              onSelectAuthor={handleSelectAuthorFilter}
+              onOpenLibrary={(source = "") => navigateTo({
+                viewMode: "library",
+                viewingDownloadId: null,
+                libraryEntityView: null,
+                libraryFilter: source || "all",
+                libraryUiState: libraryUiStateForMode("library", libraryUiState.viewMode, { sourceFilter: source, scrollTop: 0 }),
+              })}
+              onOpenFeature={(destination) => navigateTo({
+                viewMode: destination,
+                viewingDownloadId: null,
+                libraryEntityView: null,
+                libraryUiState: libraryUiStateForMode(destination, libraryUiState.viewMode, { scrollTop: 0 }),
+              })}
+            />
           </div>
         )}
 
@@ -1697,6 +1488,7 @@ function App() {
           <div className={`library-main-content ${isRestoringScroll ? "scroll-restoring" : ""}`}>
             <LibraryView
               mode="library"
+              onOpenLibraryMode={handleNavClick}
               onViewDetail={handleViewDetail}
               onViewPerson={handleViewPerson}
               onViewSeries={handleViewSeries}
@@ -1717,6 +1509,7 @@ function App() {
             <div className={`epub-main-content ${isRestoringScroll ? "scroll-restoring" : ""}`}>
               <LibraryView
                 mode="epub"
+                onOpenLibraryMode={handleNavClick}
                 onViewDetail={handleViewDetail}
                 onViewPerson={handleViewPerson}
                 onViewSeries={handleViewSeries}
@@ -1755,6 +1548,7 @@ function App() {
             <div className={`update-main-content ${isRestoringScroll ? "scroll-restoring" : ""}`}>
               <LibraryView
                 mode="update"
+                onOpenLibraryMode={handleNavClick}
                 onViewDetail={handleViewDetail}
                 onViewPerson={handleViewPerson}
                 onViewSeries={handleViewSeries}
@@ -1788,7 +1582,7 @@ function App() {
         {viewMode === "settings" && (
           <div className="content-inner settings-main-content">
             <h2 style={{ fontSize: "1.35rem", fontWeight: 700, marginBottom: "1.5rem", letterSpacing: "-0.01em" }}>アカウント連携</h2>
-            <AuthSettings />
+            <AuthSettingsLazy />
           </div>
         )}
 
@@ -1796,213 +1590,38 @@ function App() {
 
       {/* Browser Area & Interactive Selection Sidebar */}
       {(viewMode === "pixiv" || viewMode === "fanbox") ? (
-        <div className={`browser-layout-wrapper ${showDownloadSidebar ? 'sidebar-open' : ''}`}>
-          <div ref={browserRef} className="browser-placeholder">
-            {!tauriAvailable && (
-              <div className="browser-preview-empty">
-                <h3>内蔵ブラウザはTauriアプリ内で利用できます</h3>
-                <p>開発ブラウザではレイアウトだけを確認できます。Pixiv/FANBOXの表示、URL追従、保存候補の取得はデスクトップアプリで動作します。</p>
-              </div>
-            )}
-          </div>
-          
-          {showDownloadSidebar && (
-            <aside className="download-option-sidebar">
-              <div className="sidebar-option-header">
-                <div className="sidebar-option-title-row">
-                  <h3 className="sidebar-option-title" title={sidebarTitle}>{sidebarTitle || "読み込み中..."}</h3>
-                </div>
-                
-                {!sidebarLoading && sidebarItems.length > 0 && !sidebarProgress && (
-                  <div className="sidebar-option-actions">
-                    <button className="secondary" onClick={() => selectAllSidebarItems(true)}>すべて選択</button>
-                    <button className="secondary" onClick={() => selectAllSidebarItems(false)}>すべて解除</button>
-                  </div>
-                )}
-              </div>
-
-              <div className="sidebar-option-list-container">
-                {sidebarLoading ? (
-                  <div className="skeleton-list">
-                    {[1, 2, 3, 4].map(n => (
-                      <div className="skeleton-item" key={n}>
-                        <div className="skeleton-checkbox" />
-                        <div className="skeleton-info">
-                          <div className="skeleton-title" />
-                          <div className="skeleton-subtitle" />
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                ) : sidebarItems.length === 0 ? (
-                  <div className="sidebar-empty-state">
-                    <p>{sidebarEmptyMessage || "作品が見つかりませんでした。"}</p>
-                  </div>
-                ) : (
-                  sidebarItems.map(item => (
-                    <div 
-                      key={item.id} 
-                      className={`sidebar-option-item ${item.selected ? 'checked' : ''} ${item.status ? `status-${item.status}` : ''}`}
-                      onClick={() => !isDownloading && toggleSidebarItem(item.id)}
-                    >
-                      <div className="sidebar-option-checkbox-wrapper">
-                        <input 
-                          type="checkbox" 
-                          className="sidebar-option-checkbox" 
-                          checked={item.selected} 
-                          readOnly
-                          disabled={isDownloading}
-                        />
-                      </div>
-                      <div className="sidebar-option-info">
-                        <div className="sidebar-option-text">
-                          <h4 className="sidebar-option-item-title">{item.title}</h4>
-                          {item.subtitle && <p className="sidebar-option-item-subtitle">{item.subtitle}</p>}
-                        </div>
-                        {item.status && (
-                          <span className={`sidebar-option-item-status status-badge-${item.status}`}>
-                            {item.status === 'pending' && '待機中'}
-                            {item.status === 'downloading' && '保存中'}
-                            {item.status === 'success' && '保存完了'}
-                            {item.status === 'skipped' && '保存済み'}
-                            {item.status === 'failed' && '失敗'}
-                          </span>
-                        )}
-                      </div>
-                    </div>
-                  ))
-                )}
-              </div>
-
-              <div className="sidebar-option-footer">
-                {isDownloading && sidebarProgress ? (
-                  <div className="sidebar-progress-container">
-                    <div className="sidebar-progress-label">
-                      <span>{sidebarStatusText || "ダウンロード中..."}</span>
-                      <span>{sidebarProgress.current} / {sidebarProgress.total}</span>
-                    </div>
-                    <div className="sidebar-progress-bar-bg">
-                      <div 
-                        className="sidebar-progress-bar-fill" 
-                        style={{ width: `${(sidebarProgress.current / sidebarProgress.total) * 100}%` }}
-                      />
-                    </div>
-                  </div>
-                ) : sidebarProgress ? (
-                  <button 
-                    className="primary sidebar-option-install-btn success-view" 
-                    onClick={() => {
-                      setShowDownloadSidebar(false);
-                      setSidebarProgress(null);
-                      setSidebarStatusText("");
-                      setSidebarMode("analysis");
-                      navigateTo({
-                        viewMode: "library",
-                        viewingDownloadId: null,
-                        libraryEntityView: null,
-                        libraryFilter: "all",
-                        libraryUiState: { ...defaultLibraryUiState, sourceFilter: "", scrollTop: 0 },
-                      });
-                    }}
-                  >
-                    <LibraryIcon />
-                    ライブラリへ移動して読む
-                  </button>
-                ) : sidebarMode === "empty" ? null : (
-                  <button 
-                    className="primary sidebar-option-install-btn" 
-                    onClick={executeSelectedDownloads}
-                    disabled={sidebarLoading || sidebarItems.filter(i => i.selected).length === 0}
-                  >
-                    <DownloadIcon />
-                    選択した {sidebarItems.filter(i => i.selected).length} 件を保存
-                  </button>
-                )}
-              </div>
-              {showDownloadSidebar && toasts.length > 0 && (
-                <div className="sidebar-toast-container">
-                  {toasts.map(toast => (
-                    <div key={toast.id} className={`sidebar-toast ${toast.type}`}>
-                      {toast.type === "error" && <AlertIcon />}
-                      <span className="toast-text-content">{toast.text}</span>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </aside>
-          )}
-        </div>
-      ) : null}
-      </main>
-
-
-
-      {/* Debug Console Panel */}
-      <div className={`debug-console-panel ${showConsole ? "open" : ""}`}>
-        <div className="console-header">
-          <div className="console-title">
-            <span className="pulse-dot" />
-            <h3>デバッグログコンソール</h3>
-            <span className="console-count">({logs.length} 件のログ)</span>
-          </div>
-          <div className="console-actions">
-            <button className="console-clear-btn" onClick={() => setLogs([])}>クリア</button>
-            <button className="console-close-btn" onClick={() => setShowConsole(false)}>閉じる</button>
-          </div>
-        </div>
-        <div 
-          className="console-body"
-          onScroll={(e) => {
-            const target = e.currentTarget;
-            const isUp = target.scrollHeight - target.scrollTop - target.clientHeight > 50;
-            setIsUserScrollingUp(isUp);
+        <BrowserWorkspace
+          browserRef={browserRef}
+          tauriAvailable={tauriAvailable}
+          showDownloadSidebar={showDownloadSidebar}
+          sidebarTitle={sidebarTitle}
+          sidebarLoading={sidebarLoading}
+          sidebarItems={sidebarItems}
+          sidebarProgress={sidebarProgress}
+          sidebarStatusText={sidebarStatusText}
+          sidebarMode={sidebarMode}
+          sidebarEmptyMessage={sidebarEmptyMessage}
+          isDownloading={isDownloading}
+          toasts={toasts}
+          onSelectAll={selectAllSidebarItems}
+          onToggleItem={toggleSidebarItem}
+          onExecute={executeSelectedDownloads}
+          onOpenLibraryAfterDone={() => {
+            setShowDownloadSidebar(false);
+            setSidebarProgress(null);
+            setSidebarStatusText("");
+            setSidebarMode("analysis");
+            navigateTo({
+              viewMode: "library",
+              viewingDownloadId: null,
+              libraryEntityView: null,
+              libraryFilter: "all",
+              libraryUiState: libraryUiStateForMode("library", libraryUiState.viewMode, { sourceFilter: "", scrollTop: 0 }),
+            });
           }}
-        >
-          {logs.length === 0 ? (
-            <div className="console-empty">
-              ログはありません。ダウンロードを開始するとここに詳細な進捗が表示されます。
-            </div>
-          ) : (
-            <div className="console-logs-list">
-              {logs.map((log, idx) => (
-                <div key={idx} className={`console-row ${log.type}`}>
-                  {log.type === "success" && (
-                    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" style={{ color: "var(--color-success)", flexShrink: 0 }}>
-                      <polyline points="20 6 9 17 4 12" />
-                    </svg>
-                  )}
-                  {log.type === "error" && (
-                    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" style={{ color: "var(--color-error)", flexShrink: 0 }}>
-                      <circle cx="12" cy="12" r="10" />
-                      <line x1="12" y1="8" x2="12" y2="12" />
-                      <line x1="12" y1="16" x2="12.01" y2="16" />
-                    </svg>
-                  )}
-                  {log.type === "warn" && (
-                    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" style={{ color: "var(--color-warn)", flexShrink: 0 }}>
-                      <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
-                      <line x1="12" y1="9" x2="12" y2="13" />
-                      <line x1="12" y1="17" x2="12.01" y2="17" />
-                    </svg>
-                  )}
-                  {log.type === "info" && (
-                    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" style={{ color: "var(--color-text-secondary)", flexShrink: 0 }}>
-                      <circle cx="12" cy="12" r="10" />
-                      <line x1="12" y1="16" x2="12" y2="12" />
-                      <line x1="12" y1="8" x2="12.01" y2="8" />
-                    </svg>
-                  )}
-                  <span className="log-time">[{log.time}]</span>
-                  <span className="log-badge">{log.type.toUpperCase()}</span>
-                  <span className="log-text">{log.text}</span>
-                </div>
-              ))}
-              <div ref={consoleBottomRef} />
-            </div>
-          )}
-        </div>
-      </div>
-    </div>
+        />
+      ) : null}
+    </RouteRenderer>
   );
 }
 

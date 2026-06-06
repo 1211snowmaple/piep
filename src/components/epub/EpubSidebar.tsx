@@ -1,8 +1,27 @@
 import { useState, useEffect, useMemo } from "react";
-import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
-import { save, open, ask } from "@tauri-apps/plugin-dialog";
+import { Settings2 } from "lucide-react";
 import { PlusIcon, SaveIcon, TrashIcon, BookIcon, PanelRightIcon } from "../icons/Icons";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Input } from "@/components/ui/input";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Slider } from "@/components/ui/slider";
+import { Textarea } from "@/components/ui/textarea";
+import { cn } from "@/lib/utils";
+import {
+  createEpubTemplate,
+  deleteEpubTemplate,
+  exportEpub,
+  exportEpubBatch,
+  getTemplateFiles,
+  listEpubTemplates,
+  readTemplateFile,
+  saveTemplateFile,
+} from "@/services/epubApi";
+import { askDialog, openSingleDialog, saveDialog } from "@/services/dialogApi";
+import { onTauriEvent } from "@/services/eventBus";
 
 function isTauriRuntime(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -137,7 +156,7 @@ export function EpubSidebar({ selectedIds, selectedItems = [], showToast, isOpen
   useEffect(() => {
     if (!isTauriRuntime()) return;
 
-    const unlisten = listen<ExportProgress>("epub-export-progress", (event) => {
+    const unlisten = onTauriEvent<ExportProgress>("epub-export-progress", (event) => {
       setProgress(event.payload);
     });
     return () => { unlisten.then(fn => fn()).catch(() => {}); };
@@ -150,7 +169,7 @@ export function EpubSidebar({ selectedIds, selectedItems = [], showToast, isOpen
     }
 
     try {
-      const list = await invoke<TemplateInfo[]>("list_epub_templates");
+      const list = await listEpubTemplates<TemplateInfo[]>();
       setTemplates(list);
     } catch (e) { console.error(e); }
   };
@@ -251,14 +270,14 @@ export function EpubSidebar({ selectedIds, selectedItems = [], showToast, isOpen
 
     try {
       if (ids.length === 1) {
-        const filePath = await save({ filters: [{ name: "EPUB", extensions: ["epub"] }], defaultPath: `export.epub` });
+        const filePath = await saveDialog({ filters: [{ name: "EPUB", extensions: ["epub"] }], defaultPath: `export.epub` });
         if (!filePath) { setExporting(false); return; }
-        await invoke("export_epub", { downloadId: ids[0], templateName: selectedTemplate, outputPath: filePath, compressOptions });
+        await exportEpub({ downloadId: ids[0], templateName: selectedTemplate, outputPath: filePath, compressOptions });
         showToast("EPUBエクスポート完了！", "success");
       } else {
-        const dirPath = await open({ directory: true, title: "EPUB出力先フォルダを選択" });
+        const dirPath = await openSingleDialog({ directory: true, title: "EPUB出力先フォルダを選択" });
         if (!dirPath) { setExporting(false); return; }
-        const result = await invoke<ExportBatchResult>("export_epub_batch", {
+        const result = await exportEpubBatch<ExportBatchResult>({
           downloadIds: ids, templateName: selectedTemplate, outputDir: dirPath, compressOptions
         });
         showToast(`完了: ${result.successCount}件成功, ${result.failedCount}件失敗`, result.failedCount > 0 ? "error" : "success");
@@ -275,7 +294,7 @@ export function EpubSidebar({ selectedIds, selectedItems = [], showToast, isOpen
 
   const loadTmFiles = async (name: string) => {
     try {
-      const files = await invoke<TemplateFileInfo[]>("get_template_files", { templateName: name });
+      const files = await getTemplateFiles<TemplateFileInfo[]>(name);
       setTmFiles(files);
       setTmSelectedFile(null);
       setTmFileContent("");
@@ -285,7 +304,7 @@ export function EpubSidebar({ selectedIds, selectedItems = [], showToast, isOpen
 
   const loadTmFileContent = async (tplName: string, filename: string) => {
     try {
-      const content = await invoke<string>("read_template_file", { templateName: tplName, filename });
+      const content = await readTemplateFile(tplName, filename);
       setTmFileContent(content);
       setTmDirty(false);
     } catch (e) { console.error(e); }
@@ -294,7 +313,7 @@ export function EpubSidebar({ selectedIds, selectedItems = [], showToast, isOpen
   const saveTmFile = async () => {
     if (!tmSelectedTemplate || !tmSelectedFile) return;
     try {
-      await invoke("save_template_file", { templateName: tmSelectedTemplate, filename: tmSelectedFile, content: tmFileContent });
+      await saveTemplateFile(tmSelectedTemplate, tmSelectedFile, tmFileContent);
       setTmDirty(false);
       showToast("テンプレートを保存しました", "success");
     } catch (e: any) { showToast(`保存エラー: ${e}`, "error"); }
@@ -303,7 +322,7 @@ export function EpubSidebar({ selectedIds, selectedItems = [], showToast, isOpen
   const createTemplate = async () => {
     if (!tmNewName.trim()) return;
     try {
-      await invoke("create_epub_template", { templateName: tmNewName.trim() });
+      await createEpubTemplate(tmNewName.trim());
       setTmNewName(""); setTmShowNew(false);
       loadTemplates();
       showToast("テンプレートを作成しました", "success");
@@ -311,14 +330,14 @@ export function EpubSidebar({ selectedIds, selectedItems = [], showToast, isOpen
   };
 
   const deleteTemplate = async (name: string) => {
-    const isConfirmed = await ask(
+    const isConfirmed = await askDialog(
       `テンプレート「${name}」を本当に削除しますか？\nこの操作は取り消せません。`,
       { title: "テンプレート削除の確認", kind: "warning", okLabel: "削除する", cancelLabel: "キャンセル" }
     );
     if (!isConfirmed) return;
 
     try {
-      await invoke("delete_epub_template", { templateName: name });
+      await deleteEpubTemplate(name);
       if (tmSelectedTemplate === name) { setTmSelectedTemplate(null); setTmFiles([]); }
       loadTemplates();
       showToast("テンプレートを削除しました", "success");
@@ -340,13 +359,16 @@ export function EpubSidebar({ selectedIds, selectedItems = [], showToast, isOpen
             <BookIcon />
             <span>EPUB エクスポート</span>
           </div>
-          <button
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
             className="epub-sidebar-close-btn"
             onClick={onClose}
             title="サイドバーを閉じる"
           >
             <PanelRightIcon />
-          </button>
+          </Button>
         </div>
 
         {/* Export Settings */}
@@ -356,15 +378,20 @@ export function EpubSidebar({ selectedIds, selectedItems = [], showToast, isOpen
 
             <div className="epub-section">
               <label className="epub-label">テンプレート</label>
-              <select className="epub-select" value={selectedTemplate} onChange={e => setSelectedTemplate(e.target.value)}>
-                <option value="__auto__">自動判別 (ソースに応じて自動適用)</option>
-                {templates.map(t => <option key={t.name} value={t.name}>{t.name}{t.isBuiltin ? " (ビルトイン)" : ""}</option>)}
-              </select>
+              <Select value={selectedTemplate} onValueChange={setSelectedTemplate}>
+                <SelectTrigger className="epub-select">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="__auto__">自動判別 (ソースに応じて自動適用)</SelectItem>
+                  {templates.map(t => <SelectItem key={t.name} value={t.name}>{t.name}{t.isBuiltin ? " (ビルトイン)" : ""}</SelectItem>)}
+                </SelectContent>
+              </Select>
             </div>
 
             <div className="epub-section">
               <label className="epub-label">
-                <input type="checkbox" checked={compressEnabled} onChange={e => setCompressEnabled(e.target.checked)} />
+                <Checkbox checked={compressEnabled} onCheckedChange={checked => setCompressEnabled(checked === true)} />
                 画像圧縮を有効にする
               </label>
               {compressEnabled && (
@@ -373,13 +400,13 @@ export function EpubSidebar({ selectedIds, selectedItems = [], showToast, isOpen
                     画像の容量を削減し、EPUBのファイルサイズを軽量化します。
                   </div>
 
-                  <div className="epub-compress-section-card">
+                  <Card className="epub-compress-section-card">
                     {/* JPEG Settings */}
                     <div className="epub-slider-row">
                       <div className="epub-slider-label-row">
                         <label>JPEG 品質</label>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.25rem' }}>
-                          <input
+                        <div className="flex items-center gap-1">
+                          <Input
                             type="number"
                             min="10"
                             max="100"
@@ -387,18 +414,18 @@ export function EpubSidebar({ selectedIds, selectedItems = [], showToast, isOpen
                             onChange={e => setJpegQuality(Math.max(10, Math.min(100, Number(e.target.value))))}
                             className="epub-number-input"
                           />
-                          <span style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)' }}>%</span>
+                          <span className="text-xs text-muted-foreground">%</span>
                         </div>
                       </div>
-                      <input type="range" min="10" max="100" value={jpegQuality} onChange={e => setJpegQuality(Number(e.target.value))} />
+                      <Slider min={10} max={100} value={[jpegQuality]} onValueChange={([next]) => setJpegQuality(next)} />
                     </div>
 
                     {/* WebP Settings */}
                     <div className="epub-slider-row">
                       <div className="epub-slider-label-row">
                         <label>WebP 品質</label>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.25rem' }}>
-                          <input
+                        <div className="flex items-center gap-1">
+                          <Input
                             type="number"
                             min="10"
                             max="100"
@@ -406,259 +433,272 @@ export function EpubSidebar({ selectedIds, selectedItems = [], showToast, isOpen
                             onChange={e => setWebpQuality(Math.max(10, Math.min(100, Number(e.target.value))))}
                             className="epub-number-input"
                           />
-                          <span style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)' }}>%</span>
+                          <span className="text-xs text-muted-foreground">%</span>
                         </div>
                       </div>
-                      <input type="range" min="10" max="100" value={webpQuality} onChange={e => setWebpQuality(Number(e.target.value))} />
+                      <Slider min={10} max={100} value={[webpQuality]} onValueChange={([next]) => setWebpQuality(next)} />
                     </div>
 
                     {/* PNG Settings */}
-                    <div className="epub-slider-row" style={{ flexDirection: 'column', alignItems: 'stretch', gap: '0.35rem' }}>
-                      <label style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--color-text-secondary)' }}>PNG 圧縮レベル</label>
-                      <select
+                    <div className="epub-slider-row flex-col items-stretch gap-1.5">
+                      <label className="text-xs font-semibold text-muted-foreground">PNG 圧縮レベル</label>
+                      <Select
                         value={pngCompression}
-                        onChange={e => setPngCompression(e.target.value)}
-                        className="epub-select-sm"
-                        style={{ width: '100%' }}
+                        onValueChange={setPngCompression}
                       >
-                        <option value="0">レベル 0 (圧縮なし)</option>
-                        <option value="1">レベル 1 (高速・低圧縮)</option>
-                        <option value="2">レベル 2 (推奨・標準)</option>
-                        <option value="3">レベル 3 (バランス)</option>
-                        <option value="4">レベル 4 (高圧縮)</option>
-                        <option value="5">レベル 5 (超高圧縮)</option>
-                        <option value="6">レベル 6 (最大圧縮・低速)</option>
-                      </select>
+                        <SelectTrigger className="epub-select-sm w-full">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="0">レベル 0 (圧縮なし)</SelectItem>
+                          <SelectItem value="1">レベル 1 (高速・低圧縮)</SelectItem>
+                          <SelectItem value="2">レベル 2 (推奨・標準)</SelectItem>
+                          <SelectItem value="3">レベル 3 (バランス)</SelectItem>
+                          <SelectItem value="4">レベル 4 (高圧縮)</SelectItem>
+                          <SelectItem value="5">レベル 5 (超高圧縮)</SelectItem>
+                          <SelectItem value="6">レベル 6 (最大圧縮・低速)</SelectItem>
+                        </SelectContent>
+                      </Select>
                     </div>
-                  </div>
+                  </Card>
 
 
 
 
 
-                  <div style={{ marginTop: '0.75rem', borderTop: '1px solid var(--color-border)', paddingTop: '0.75rem' }}>
-                    <button
+                  <div className="mt-3 border-t border-border pt-3">
+                    <Button
                       type="button"
-                      className={`filter-toggle-btn ${showAdvanced ? 'expanded' : ''}`}
+                      variant={showAdvanced ? "secondary" : "outline"}
+                      size="sm"
+                      className={cn("filter-toggle-btn w-full justify-between px-2 py-1.5 text-sm", showAdvanced && 'expanded')}
                       onClick={() => setShowAdvanced(!showAdvanced)}
-                      style={{ width: '100%', justifyContent: 'space-between', padding: '0.4rem 0.5rem', fontSize: '0.85rem' }}
                     >
-                      <span style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontWeight: 600 }}>
-                        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                          <circle cx="12" cy="12" r="3"></circle>
-                          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
-                        </svg>
+                      <span className="flex items-center gap-1.5 font-semibold">
+                        <Settings2 size={14} />
                         高度な詳細設定を表示する
                       </span>
                       <span className={`toggle-arrow ${showAdvanced ? 'up' : 'down'}`} />
-                    </button>
+                    </Button>
 
                     {showAdvanced && (
-                      <div className="epub-compress-advanced-panel" style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', marginTop: '0.75rem', paddingLeft: '0.25rem' }}>
+                      <div className="epub-compress-advanced-panel mt-3 flex flex-col gap-3 pl-1">
                         {/* Image Resize & Format Settings */}
-                        <div className="epub-compress-section-card advanced-card">
-                          <h5 style={{ margin: '0 0 0.5rem 0', fontSize: '0.8rem', fontWeight: 700, color: 'var(--color-text-secondary)', letterSpacing: '0.05em' }}>画像リサイズ・フォーマット変換</h5>
-                          <div className="two-cols" style={{ gap: '0.5rem' }}>
+                        <Card className="epub-compress-section-card advanced-card">
+                          <h5 className="mb-2 text-xs font-bold tracking-wide text-muted-foreground">画像リサイズ・フォーマット変換</h5>
+                          <div className="two-cols gap-2">
                             <div className="epub-input-row-vertical">
-                              <label style={{ fontSize: '0.75rem', color: 'var(--color-text-secondary)' }}>最大幅 (px)</label>
-                              <input type="number" min="1" step="1" value={maxWidth} onChange={e => setMaxWidth(e.target.value)} placeholder="制限なし" />
+                              <label className="text-xs text-muted-foreground">最大幅 (px)</label>
+                              <Input type="number" min="1" step="1" value={maxWidth} onChange={e => setMaxWidth(e.target.value)} placeholder="制限なし" />
                             </div>
                             <div className="epub-input-row-vertical">
-                              <label style={{ fontSize: '0.75rem', color: 'var(--color-text-secondary)' }}>最大高さ (px)</label>
-                              <input type="number" min="1" step="1" value={maxHeight} onChange={e => setMaxHeight(e.target.value)} placeholder="制限なし" />
+                              <label className="text-xs text-muted-foreground">最大高さ (px)</label>
+                              <Input type="number" min="1" step="1" value={maxHeight} onChange={e => setMaxHeight(e.target.value)} placeholder="制限なし" />
                             </div>
                           </div>
-                          <div className="epub-option-tip" style={{ marginTop: '0.25rem', marginBottom: '0.5rem' }}>
+                          <div className="epub-option-tip mb-2 mt-1">
                             指定したピクセル数を超える画像がある場合、アスペクト比を維持したまま縮小します。空欄で制限なしとなります。
                           </div>
-                          <div className="epub-input-row" style={{ flexDirection: 'column', alignItems: 'stretch', gap: '0.15rem' }}>
-                            <label style={{ fontSize: '0.75rem', color: 'var(--color-text-secondary)', fontWeight: 600 }}>出力アセット形式</label>
-                            <select value={outputFormat} onChange={e => setOutputFormat(e.target.value)} className="epub-select-sm" style={{ width: '100%' }}>
-                              <option value="">元の形式を維持</option>
-                              <option value="jpeg">すべての画像を JPEG に強制変換</option>
-                              <option value="png">すべての画像を PNG に強制変換</option>
-                              <option value="webp">すべての画像を WebP に強制変換</option>
-                            </select>
+                          <div className="epub-input-row flex-col items-stretch gap-1">
+                            <label className="text-xs font-semibold text-muted-foreground">出力アセット形式</label>
+                            <Select value={outputFormat || "__original__"} onValueChange={value => setOutputFormat(value === "__original__" ? "" : value)}>
+                              <SelectTrigger className="epub-select-sm w-full">
+                                <SelectValue />
+                              </SelectTrigger>
+                              <SelectContent>
+                                <SelectItem value="__original__">元の形式を維持</SelectItem>
+                                <SelectItem value="jpeg">すべての画像を JPEG に強制変換</SelectItem>
+                                <SelectItem value="png">すべての画像を PNG に強制変換</SelectItem>
+                                <SelectItem value="webp">すべての画像を WebP に強制変換</SelectItem>
+                              </SelectContent>
+                            </Select>
                           </div>
-                          <div className="epub-option-tip" style={{ marginTop: '0.25rem' }}>
+                          <div className="epub-option-tip mt-1">
                             EPUB内の画像を特定のフォーマットに統一します。WebPに変換するとファイルサイズを大幅に削減できます。
                           </div>
-                        </div>
+                        </Card>
                         {/* JPEG Advanced */}
-                        <div className="epub-compress-section-card advanced-card">
-                          <h5 style={{ margin: '0 0 0.5rem 0', fontSize: '0.8rem', fontWeight: 700, color: 'var(--color-text-secondary)', letterSpacing: '0.05em' }}>JPEG 詳細</h5>
-                          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                        <Card className="epub-compress-section-card advanced-card">
+                          <h5 className="mb-2 text-xs font-bold tracking-wide text-muted-foreground">JPEG 詳細</h5>
+                          <div className="flex flex-col gap-2">
                             <label className="epub-compress-option-checkbox-row">
-                              <input type="checkbox" checked={jpegProgressive} onChange={e => setJpegProgressive(e.target.checked)} />
+                              <Checkbox checked={jpegProgressive} onCheckedChange={checked => setJpegProgressive(checked === true)} />
                               <span>プログレッシブエンコード</span>
                             </label>
                             <label className="epub-compress-option-checkbox-row">
-                              <input type="checkbox" checked={jpegAutoOptimize} onChange={e => setJpegAutoOptimize(e.target.checked)} />
+                              <Checkbox checked={jpegAutoOptimize} onCheckedChange={checked => setJpegAutoOptimize(checked === true)} />
                               <span>トレリス最適化 (自動テーブル最適化)</span>
                             </label>
                             <label className="epub-compress-option-checkbox-row">
-                              <input type="checkbox" checked={jpegDeringing} onChange={e => setJpegDeringing(e.target.checked)} />
+                              <Checkbox checked={jpegDeringing} onCheckedChange={checked => setJpegDeringing(checked === true)} />
                               <span>リンギングノイズ低減 (Deringing)</span>
                             </label>
                             <label className="epub-compress-option-checkbox-row">
-                              <input type="checkbox" checked={jpegSeparateChromaTables} onChange={e => setJpegSeparateChromaTables(e.target.checked)} />
+                              <Checkbox checked={jpegSeparateChromaTables} onCheckedChange={checked => setJpegSeparateChromaTables(checked === true)} />
                               <span>カラー量子化テーブルの分離</span>
                             </label>
                             <label className="epub-compress-option-checkbox-row">
-                              <input type="checkbox" checked={jpegSharpYuv} onChange={e => setJpegSharpYuv(e.target.checked)} />
+                              <Checkbox checked={jpegSharpYuv} onCheckedChange={checked => setJpegSharpYuv(checked === true)} />
                               <span>SharpYUV ダウンサンプリング</span>
                             </label>
-                            <div className="epub-input-row" style={{ flexDirection: 'column', alignItems: 'stretch', gap: '0.15rem', marginTop: '0.25rem' }}>
-                              <label style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)' }}>クロマサブサンプリング</label>
-                              <select value={jpegChromaSubsampling} onChange={e => setJpegChromaSubsampling(e.target.value)} className="epub-select-sm" style={{ width: '100%' }}>
-                                <option value="4:2:0">4:2:0 (標準・最高圧縮)</option>
-                                <option value="4:2:2">4:2:2 (バランス)</option>
-                                <option value="4:4:4">4:4:4 (無劣化ダウンサンプリング・高画質)</option>
-                              </select>
+                            <div className="epub-input-row mt-1 flex-col items-stretch gap-1">
+                              <label className="text-xs text-muted-foreground">クロマサブサンプリング</label>
+                              <Select value={jpegChromaSubsampling} onValueChange={setJpegChromaSubsampling}>
+                                <SelectTrigger className="epub-select-sm w-full">
+                                  <SelectValue />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  <SelectItem value="4:2:0">4:2:0 (標準・最高圧縮)</SelectItem>
+                                  <SelectItem value="4:2:2">4:2:2 (バランス)</SelectItem>
+                                  <SelectItem value="4:4:4">4:4:4 (無劣化ダウンサンプリング・高画質)</SelectItem>
+                                </SelectContent>
+                              </Select>
                             </div>
                           </div>
-                        </div>
+                        </Card>
 
                         {/* PNG Advanced */}
-                        <div className="epub-compress-section-card advanced-card">
-                          <h5 style={{ margin: '0 0 0.5rem 0', fontSize: '0.8rem', fontWeight: 700, color: 'var(--color-text-secondary)', letterSpacing: '0.05em' }}>PNG 詳細</h5>
-                          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', marginBottom: '0.5rem', borderBottom: '1px dashed var(--color-border)', paddingBottom: '0.5rem' }}>
+                        <Card className="epub-compress-section-card advanced-card">
+                          <h5 className="mb-2 text-xs font-bold tracking-wide text-muted-foreground">PNG 詳細</h5>
+                          <div className="mb-2 flex flex-col gap-2 border-b border-dashed border-border pb-2">
                             <div>
                               <label className="epub-compress-option-checkbox-row">
-                                <input
-                                  type="checkbox"
+                                <Checkbox
                                   checked={pngInterlace}
-                                  onChange={e => setPngInterlace(e.target.checked)}
+                                  onCheckedChange={checked => setPngInterlace(checked === true)}
                                 />
                                 <span>インターレース表示を有効にする (段階表示)</span>
                               </label>
-                              <div className="epub-option-tip" style={{ marginTop: '0.1rem', marginLeft: '1.25rem' }}>
+                              <div className="epub-option-tip ml-5 mt-0.5">
                                 画像を読み込みながら徐々に鮮明に表示させます（リーダー側の対応が必要です）。
                               </div>
                             </div>
                             <div>
                               <label className="epub-compress-option-checkbox-row">
-                                <input
-                                  type="checkbox"
+                                <Checkbox
                                   checked={pngStrip}
-                                  onChange={e => setPngStrip(e.target.checked)}
+                                  onCheckedChange={checked => setPngStrip(checked === true)}
                                 />
                                 <span>メタデータを削除する (Strip)</span>
                               </label>
-                              <div className="epub-option-tip" style={{ marginTop: '0.1rem', marginLeft: '1.25rem' }}>
+                              <div className="epub-option-tip ml-5 mt-0.5">
                                 撮影情報（Exifなど）や不要な色プロファイルを削除して軽量化します（画質への影響なし）。
                               </div>
                             </div>
                           </div>
-                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem' }}>
-                            <label className="epub-compress-option-checkbox-row" style={{ flex: '1 1 45%' }}>
-                              <input type="checkbox" checked={pngOptimizeAlpha} onChange={e => setPngOptimizeAlpha(e.target.checked)} />
+                          <div className="flex flex-wrap gap-2">
+                            <label className="epub-compress-option-checkbox-row flex-1 basis-[45%]">
+                              <Checkbox checked={pngOptimizeAlpha} onCheckedChange={checked => setPngOptimizeAlpha(checked === true)} />
                               <span>透過色の最適化</span>
                             </label>
-                            <label className="epub-compress-option-checkbox-row" style={{ flex: '1 1 45%' }}>
-                              <input type="checkbox" checked={pngBitDepthReduction} onChange={e => setPngBitDepthReduction(e.target.checked)} />
+                            <label className="epub-compress-option-checkbox-row flex-1 basis-[45%]">
+                              <Checkbox checked={pngBitDepthReduction} onCheckedChange={checked => setPngBitDepthReduction(checked === true)} />
                               <span>ビット深度の削減</span>
                             </label>
-                            <label className="epub-compress-option-checkbox-row" style={{ flex: '1 1 45%' }}>
-                              <input type="checkbox" checked={pngColorTypeReduction} onChange={e => setPngColorTypeReduction(e.target.checked)} />
+                            <label className="epub-compress-option-checkbox-row flex-1 basis-[45%]">
+                              <Checkbox checked={pngColorTypeReduction} onCheckedChange={checked => setPngColorTypeReduction(checked === true)} />
                               <span>カラータイプの削減</span>
                             </label>
-                            <label className="epub-compress-option-checkbox-row" style={{ flex: '1 1 45%' }}>
-                              <input type="checkbox" checked={pngPaletteReduction} onChange={e => setPngPaletteReduction(e.target.checked)} />
+                            <label className="epub-compress-option-checkbox-row flex-1 basis-[45%]">
+                              <Checkbox checked={pngPaletteReduction} onCheckedChange={checked => setPngPaletteReduction(checked === true)} />
                               <span>パレットカラーの削減</span>
                             </label>
-                            <label className="epub-compress-option-checkbox-row" style={{ flex: '1 1 45%' }}>
-                              <input type="checkbox" checked={pngGrayscaleReduction} onChange={e => setPngGrayscaleReduction(e.target.checked)} />
+                            <label className="epub-compress-option-checkbox-row flex-1 basis-[45%]">
+                              <Checkbox checked={pngGrayscaleReduction} onCheckedChange={checked => setPngGrayscaleReduction(checked === true)} />
                               <span>グレースケール削減</span>
                             </label>
-                            <label className="epub-compress-option-checkbox-row" style={{ flex: '1 1 45%' }}>
-                              <input type="checkbox" checked={pngIdatRecoding} onChange={e => setPngIdatRecoding(e.target.checked)} />
+                            <label className="epub-compress-option-checkbox-row flex-1 basis-[45%]">
+                              <Checkbox checked={pngIdatRecoding} onCheckedChange={checked => setPngIdatRecoding(checked === true)} />
                               <span>IDAT再エンコード</span>
                             </label>
-                            <label className="epub-compress-option-checkbox-row" style={{ flex: '1 1 45%' }}>
-                              <input type="checkbox" checked={pngFastEvaluation} onChange={e => setPngFastEvaluation(e.target.checked)} />
+                            <label className="epub-compress-option-checkbox-row flex-1 basis-[45%]">
+                              <Checkbox checked={pngFastEvaluation} onCheckedChange={checked => setPngFastEvaluation(checked === true)} />
                               <span>高速評価モード</span>
                             </label>
-                            <label className="epub-compress-option-checkbox-row" style={{ flex: '1 1 45%' }}>
-                              <input type="checkbox" checked={pngForce} onChange={e => setPngForce(e.target.checked)} />
+                            <label className="epub-compress-option-checkbox-row flex-1 basis-[45%]">
+                              <Checkbox checked={pngForce} onCheckedChange={checked => setPngForce(checked === true)} />
                               <span>強制書き出し</span>
                             </label>
-                            <label className="epub-compress-option-checkbox-row" style={{ flex: '1 1 45%' }}>
-                              <input type="checkbox" checked={pngFixErrors} onChange={e => setPngFixErrors(e.target.checked)} />
+                            <label className="epub-compress-option-checkbox-row flex-1 basis-[45%]">
+                              <Checkbox checked={pngFixErrors} onCheckedChange={checked => setPngFixErrors(checked === true)} />
                               <span>破損画像の修復</span>
                             </label>
                           </div>
-                        </div>
+                        </Card>
 
                         {/* WebP Advanced */}
-                        <div className="epub-compress-section-card advanced-card">
-                          <h5 style={{ margin: '0 0 0.5rem 0', fontSize: '0.8rem', fontWeight: 700, color: 'var(--color-text-secondary)', letterSpacing: '0.05em' }}>WebP 詳細</h5>
-                          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-                            <div style={{ borderBottom: '1px dashed var(--color-border)', paddingBottom: '0.5rem', marginBottom: '0.25rem' }}>
+                        <Card className="epub-compress-section-card advanced-card">
+                          <h5 className="mb-2 text-xs font-bold tracking-wide text-muted-foreground">WebP 詳細</h5>
+                          <div className="flex flex-col gap-2">
+                            <div className="mb-1 border-b border-dashed border-border pb-2">
                               <label className="epub-compress-option-checkbox-row">
-                                <input
-                                  type="checkbox"
+                                <Checkbox
                                   checked={webpLossless}
-                                  onChange={e => setWebpLossless(e.target.checked)}
+                                  onCheckedChange={checked => setWebpLossless(checked === true)}
                                 />
                                 <span>WebP可逆圧縮 (ロスレス・無劣化)</span>
                               </label>
-                              <div className="epub-option-tip" style={{ marginTop: '0.1rem', marginLeft: '1.25rem' }}>
+                              <div className="epub-option-tip ml-5 mt-0.5">
                                 イラスト等の画質を一切劣化させずに圧縮します。有効時、上記の「WebP品質」は無視されます。
                               </div>
                             </div>
-                            <div className="epub-slider-row" style={{ margin: 0 }}>
+                            <div className="epub-slider-row m-0">
                               <div className="epub-slider-label-row">
-                                <label style={{ fontSize: '0.75rem' }}>圧縮速度 (Method)</label>
-                                <span style={{ fontSize: '0.75rem', fontWeight: 'bold' }}>{webpMethod}</span>
+                                <label className="text-xs">圧縮速度 (Method)</label>
+                                <span className="text-xs font-bold">{webpMethod}</span>
                               </div>
-                              <input type="range" min="0" max="6" value={webpMethod} onChange={e => setWebpMethod(Number(e.target.value))} />
+                              <Slider min={0} max={6} value={[webpMethod]} onValueChange={([next]) => setWebpMethod(next)} />
                             </div>
-                            <div className="epub-slider-row" style={{ margin: 0 }}>
+                            <div className="epub-slider-row m-0">
                               <div className="epub-slider-label-row">
-                                <label style={{ fontSize: '0.75rem' }}>デブロッキング強度</label>
-                                <span style={{ fontSize: '0.75rem', fontWeight: 'bold' }}>{webpFilterStrength}</span>
+                                <label className="text-xs">デブロッキング強度</label>
+                                <span className="text-xs font-bold">{webpFilterStrength}</span>
                               </div>
-                              <input type="range" min="0" max="100" value={webpFilterStrength} onChange={e => setWebpFilterStrength(Number(e.target.value))} />
+                              <Slider min={0} max={100} value={[webpFilterStrength]} onValueChange={([next]) => setWebpFilterStrength(next)} />
                             </div>
-                            <div className="epub-slider-row" style={{ margin: 0 }}>
+                            <div className="epub-slider-row m-0">
                               <div className="epub-slider-label-row">
-                                <label style={{ fontSize: '0.75rem' }}>デブロッキング鋭度</label>
-                                <span style={{ fontSize: '0.75rem', fontWeight: 'bold' }}>{webpFilterSharpness}</span>
+                                <label className="text-xs">デブロッキング鋭度</label>
+                                <span className="text-xs font-bold">{webpFilterSharpness}</span>
                               </div>
-                              <input type="range" min="0" max="7" value={webpFilterSharpness} onChange={e => setWebpFilterSharpness(Number(e.target.value))} />
+                              <Slider min={0} max={7} value={[webpFilterSharpness]} onValueChange={([next]) => setWebpFilterSharpness(next)} />
                             </div>
-                            <div className="epub-slider-row" style={{ margin: 0 }}>
+                            <div className="epub-slider-row m-0">
                               <div className="epub-slider-label-row">
-                                <label style={{ fontSize: '0.75rem' }}>空間ノイズ強度 (SNS)</label>
-                                <span style={{ fontSize: '0.75rem', fontWeight: 'bold' }}>{webpSnsStrength}</span>
+                                <label className="text-xs">空間ノイズ強度 (SNS)</label>
+                                <span className="text-xs font-bold">{webpSnsStrength}</span>
                               </div>
-                              <input type="range" min="0" max="100" value={webpSnsStrength} onChange={e => setWebpSnsStrength(Number(e.target.value))} />
+                              <Slider min={0} max={100} value={[webpSnsStrength]} onValueChange={([next]) => setWebpSnsStrength(next)} />
                             </div>
-                            <div className="epub-slider-row" style={{ margin: 0 }}>
+                            <div className="epub-slider-row m-0">
                               <div className="epub-slider-label-row">
-                                <label style={{ fontSize: '0.75rem' }}>準ロスレス強度</label>
-                                <span style={{ fontSize: '0.75rem', fontWeight: 'bold' }}>{webpNearLossless}</span>
+                                <label className="text-xs">準ロスレス強度</label>
+                                <span className="text-xs font-bold">{webpNearLossless}</span>
                               </div>
-                              <input type="range" min="0" max="100" value={webpNearLossless} onChange={e => setWebpNearLossless(Number(e.target.value))} />
+                              <Slider min={0} max={100} value={[webpNearLossless]} onValueChange={([next]) => setWebpNearLossless(next)} />
                             </div>
-                            <div className="epub-input-row" style={{ flexDirection: 'column', alignItems: 'stretch', gap: '0.15rem' }}>
-                              <label style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)' }}>フィルタータイプ</label>
-                              <select value={webpFilterType} onChange={e => setWebpFilterType(Number(e.target.value))} className="epub-select-sm" style={{ width: '100%' }}>
-                                <option value={0}>シンプル (高速)</option>
-                                <option value={1}>ストロング (高画質・輪郭維持)</option>
-                              </select>
+                            <div className="epub-input-row flex-col items-stretch gap-1">
+                              <label className="text-xs text-muted-foreground">フィルタータイプ</label>
+                              <Select value={String(webpFilterType)} onValueChange={value => setWebpFilterType(Number(value))}>
+                                <SelectTrigger className="epub-select-sm w-full">
+                                  <SelectValue />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  <SelectItem value="0">シンプル (高速)</SelectItem>
+                                  <SelectItem value="1">ストロング (高画質・輪郭維持)</SelectItem>
+                                </SelectContent>
+                              </Select>
                             </div>
                             <label className="epub-compress-option-checkbox-row">
-                              <input type="checkbox" checked={webpExact} onChange={e => setWebpExact(e.target.checked)} />
+                              <Checkbox checked={webpExact} onCheckedChange={checked => setWebpExact(checked === true)} />
                               <span>透過RGB値を維持 (Exact)</span>
                             </label>
                             <label className="epub-compress-option-checkbox-row">
-                              <input type="checkbox" checked={webpUseSharpYuv} onChange={e => setWebpUseSharpYuv(e.target.checked)} />
+                              <Checkbox checked={webpUseSharpYuv} onCheckedChange={checked => setWebpUseSharpYuv(checked === true)} />
                               <span>高精度カラー変換 (SharpYUV)</span>
                             </label>
                           </div>
-                        </div>
+                        </Card>
                       </div>
                     )}
                   </div>
@@ -681,7 +721,7 @@ export function EpubSidebar({ selectedIds, selectedItems = [], showToast, isOpen
                   <div className="epub-preview-item-list">
                     {autoGroups.pixiv.map(item => (
                       <div key={item.id} className="epub-preview-item">
-                        <span className="epub-preview-source-tag pixiv">Pixiv</span>
+                        <Badge className="epub-preview-source-tag pixiv">Pixiv</Badge>
                         <span className="epub-preview-item-title" title={item.title}>{item.title}</span>
                       </div>
                     ))}
@@ -698,7 +738,7 @@ export function EpubSidebar({ selectedIds, selectedItems = [], showToast, isOpen
                   <div className="epub-preview-item-list">
                     {autoGroups.default.map(item => (
                       <div key={item.id} className="epub-preview-item">
-                        <span className="epub-preview-source-tag fanbox">FANBOX</span>
+                        <Badge className="epub-preview-source-tag fanbox">FANBOX</Badge>
                         <span className="epub-preview-item-title" title={item.title}>{item.title}</span>
                       </div>
                     ))}
@@ -719,9 +759,9 @@ export function EpubSidebar({ selectedIds, selectedItems = [], showToast, isOpen
           )}
 
           {/* Export Button */}
-          <button className="epub-export-action-btn" onClick={handleExport} disabled={exporting || selectedIds.size === 0}>
+          <Button type="button" className="epub-export-action-btn" onClick={handleExport} disabled={exporting || selectedIds.size === 0}>
             {exporting ? "エクスポート中..." : `${selectedIds.size > 1 ? `${selectedIds.size}件を` : ""}EPUBにエクスポート`}
-          </button>
+          </Button>
         </div>
 
       </aside>
@@ -732,24 +772,24 @@ export function EpubSidebar({ selectedIds, selectedItems = [], showToast, isOpen
           <div className="template-manager-modal" onClick={e => e.stopPropagation()}>
             <div className="template-manager-modal-header">
               <h3>テンプレート管理</h3>
-              <button className="template-manager-close-btn" onClick={() => { setShowTemplateManager(false); onCloseTemplateManager(); }}>✕</button>
+              <Button type="button" variant="ghost" size="icon" className="template-manager-close-btn" onClick={() => { setShowTemplateManager(false); onCloseTemplateManager(); }}>✕</Button>
             </div>
             <div className="template-manager-body">
               {/* Pane 1: Template List */}
               <div className="template-list-panel">
                 <div className="template-list-header">
                   <span>テンプレート</span>
-                  <button className="template-add-btn" onClick={() => setTmShowNew(!tmShowNew)} style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '0.2rem' }}>
+                  <Button type="button" variant="outline" size="icon" className="template-add-btn p-1" onClick={() => setTmShowNew(!tmShowNew)}>
                     <PlusIcon />
-                  </button>
+                  </Button>
                 </div>
                 {tmShowNew && (
                   <div className="template-new-form">
-                    <input value={tmNewName} onChange={e => setTmNewName(e.target.value)} placeholder="テンプレート名" onKeyDown={e => e.key === "Enter" && createTemplate()} />
-                    <button onClick={createTemplate} style={{ display: 'flex', alignItems: 'center', gap: '0.2rem' }}>
+                    <Input value={tmNewName} onChange={e => setTmNewName(e.target.value)} placeholder="テンプレート名" onKeyDown={e => e.key === "Enter" && createTemplate()} />
+                    <Button type="button" variant="outline" size="sm" className="gap-1" onClick={createTemplate}>
                       <PlusIcon />
                       <span>作成</span>
-                    </button>
+                    </Button>
                   </div>
                 )}
                 <div className="template-list-items">
@@ -758,13 +798,13 @@ export function EpubSidebar({ selectedIds, selectedItems = [], showToast, isOpen
                       onClick={() => { setTmSelectedTemplate(t.name); loadTmFiles(t.name); }}>
                       <div className="template-item-info">
                         <span className="template-item-name">{t.name}</span>
-                        {t.isBuiltin && <span className="template-builtin-badge">BUILTIN</span>}
+                        {t.isBuiltin && <Badge variant="secondary" className="template-builtin-badge">BUILTIN</Badge>}
                         <span className="template-file-count">{t.fileCount} ファイル</span>
                       </div>
                       {!t.isBuiltin && (
-                        <button className="template-delete-btn" onClick={e => { e.stopPropagation(); deleteTemplate(t.name); }} style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                        <Button type="button" variant="ghost" size="icon" className="template-delete-btn" onClick={e => { e.stopPropagation(); deleteTemplate(t.name); }}>
                           <TrashIcon />
-                        </button>
+                        </Button>
                       )}
                     </div>
                   ))}
@@ -789,13 +829,13 @@ export function EpubSidebar({ selectedIds, selectedItems = [], showToast, isOpen
               <div className="template-editor-panel">
                 {tmSelectedFile ? (<>
                   <div className="template-editor-header">
-                    <span>{tmSelectedFile} {tmDirty && <span className="unsaved-badge">未保存</span>}</span>
-                    <button className="template-save-btn" disabled={!tmDirty || isBuiltin(tmSelectedTemplate!)} onClick={saveTmFile} style={{ display: 'flex', alignItems: 'center', gap: '0.3rem' }}>
+                    <span>{tmSelectedFile} {tmDirty && <Badge variant="secondary" className="unsaved-badge">未保存</Badge>}</span>
+                    <Button type="button" variant="outline" size="sm" className="template-save-btn gap-1.5" disabled={!tmDirty || isBuiltin(tmSelectedTemplate!)} onClick={saveTmFile}>
                       <SaveIcon />
                       <span>保存</span>
-                    </button>
+                    </Button>
                   </div>
-                  <textarea className="template-editor-textarea" value={tmFileContent}
+                  <Textarea className="template-editor-textarea" value={tmFileContent}
                     onChange={e => { setTmFileContent(e.target.value); setTmDirty(true); }}
                     readOnly={isBuiltin(tmSelectedTemplate!)} spellCheck={false} />
                   {isBuiltin(tmSelectedTemplate!) && <div className="template-editor-readonly-notice">⚠ ビルトインテンプレートは読み取り専用です。編集するには「＋」で複製してください。</div>}

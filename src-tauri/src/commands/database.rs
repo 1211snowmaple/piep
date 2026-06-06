@@ -1,22 +1,39 @@
 use crate::database::queries::EntityProfileFreshness;
 use crate::database::{
-    AssetEntry, DbStats, DownloadEntry, DownloadRelation, DownloadVersion, EntityVersion,
-    FacetCount, FilterFacets, PersonEntry, SearchIndexStatus, SearchParams, SeriesEntry,
-    UpdateTarget, UpdateTargetInput,
+    AssetEntry, BulkMutationResult, DashboardSummary, DbStats, DownloadEntry, DownloadRelation,
+    DownloadVersion, EditorDocument, EntityVersion, FacetCount, FilterFacets, NewAsset,
+    NewDownload, PersonEntry, ReaderDocument, SearchIndexStatus, SearchSuggestParams,
+    SearchSuggestResult, SearchV2Params, SearchV2Result, SeriesEntry, UpdateTarget,
+    UpdateTargetInput, WorkBlockInput, WorkEditRevision,
 };
 use crate::AppState;
-use base64::Engine as _;
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::LazyLock;
 use std::time::Instant;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 use tauri_plugin_opener::OpenerExt;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::time::{sleep, Duration};
 
 static ENTITY_REFRESH_LOCK: LazyLock<AsyncMutex<Option<Instant>>> =
     LazyLock::new(|| AsyncMutex::new(None));
+static SEARCH_REBUILD_JOBS: LazyLock<std::sync::Mutex<HashMap<String, Arc<AtomicBool>>>> =
+    LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+static SEARCH_REBUILD_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+
+async fn run_db_blocking<T, F>(app: tauri::AppHandle, f: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce(Arc<AppState>) -> Result<T, String> + Send + 'static,
+{
+    let state = app.state::<Arc<AppState>>().inner().clone();
+    tokio::task::spawn_blocking(move || f(state))
+        .await
+        .map_err(|e| format!("Database task failed: {}", e))?
+}
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -30,13 +47,164 @@ pub struct RefreshEntityProfileParams {
     user_agent: Option<String>,
 }
 
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchRebuildJobOptions {
+    batch_size: Option<i64>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchRebuildProgress {
+    job_id: String,
+    status: String,
+    total_downloads: i64,
+    indexed_downloads: i64,
+    pending_downloads: i64,
+    is_complete: bool,
+    phase: String,
+    indexed_chunks: i64,
+    embedding_provider: String,
+    gpu_enabled: bool,
+    throughput_per_sec: Option<f64>,
+}
+
 #[tauri::command]
-pub async fn db_search_downloads(
+pub async fn search_downloads_v2(
     app: tauri::AppHandle,
-    params: SearchParams,
-) -> Result<Vec<DownloadEntry>, String> {
-    let state = app.state::<Arc<AppState>>();
-    state.db.search_downloads(&params)
+    params: SearchV2Params,
+) -> Result<SearchV2Result, String> {
+    run_db_blocking(app, move |state| state.db.search_downloads_v2(&params)).await
+}
+
+#[tauri::command]
+pub async fn search_suggest(
+    app: tauri::AppHandle,
+    params: SearchSuggestParams,
+) -> Result<SearchSuggestResult, String> {
+    run_db_blocking(app, move |state| state.db.search_suggest(&params)).await
+}
+
+#[tauri::command]
+pub async fn search_rebuild_index(
+    app: tauri::AppHandle,
+    job_options: Option<SearchRebuildJobOptions>,
+) -> Result<String, String> {
+    let job_id = format!(
+        "search-index-{}-{}",
+        chrono::Utc::now().timestamp_millis(),
+        SEARCH_REBUILD_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    );
+    let cancel = Arc::new(AtomicBool::new(false));
+    SEARCH_REBUILD_JOBS
+        .lock()
+        .map_err(|e| e.to_string())?
+        .insert(job_id.clone(), cancel.clone());
+
+    let batch_size = job_options
+        .and_then(|options| options.batch_size)
+        .unwrap_or(64)
+        .clamp(1, 200);
+    let app_for_task = app.clone();
+    let job_id_for_task = job_id.clone();
+
+    tauri::async_runtime::spawn(async move {
+        let started_at = Instant::now();
+        let mut initial_indexed: Option<i64> = None;
+        loop {
+            if cancel.load(Ordering::Relaxed) {
+                if let Ok(state) = run_db_blocking(app_for_task.clone(), |state| {
+                    state.db.get_search_index_status()
+                })
+                .await
+                {
+                    emit_search_index_progress(&app_for_task, &job_id_for_task, "canceled", state);
+                }
+                break;
+            }
+
+            let status = run_db_blocking(app_for_task.clone(), move |state| {
+                state.db.rebuild_search_index_batch(batch_size)
+            })
+            .await;
+            match status {
+                Ok(mut status) => {
+                    let baseline = *initial_indexed.get_or_insert(status.indexed_downloads);
+                    let elapsed = started_at.elapsed().as_secs_f64();
+                    if elapsed > 0.0 {
+                        status.throughput_per_sec =
+                            Some(((status.indexed_downloads - baseline).max(0) as f64) / elapsed);
+                    }
+                    let state_label = if status.pending_downloads == 0 {
+                        "completed"
+                    } else {
+                        "running"
+                    };
+                    emit_search_index_progress(
+                        &app_for_task,
+                        &job_id_for_task,
+                        state_label,
+                        status.clone(),
+                    );
+                    if status.pending_downloads == 0 {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                Err(error) => {
+                    let _ = app_for_task.emit(
+                        "search-index-progress",
+                        serde_json::json!({
+                            "jobId": job_id_for_task,
+                            "status": "failed",
+                            "error": error,
+                        }),
+                    );
+                    break;
+                }
+            }
+        }
+
+        if let Ok(mut jobs) = SEARCH_REBUILD_JOBS.lock() {
+            jobs.remove(&job_id_for_task);
+        }
+    });
+
+    Ok(job_id)
+}
+
+#[tauri::command]
+pub async fn search_cancel_rebuild_index(job_id: String) -> Result<(), String> {
+    let jobs = SEARCH_REBUILD_JOBS.lock().map_err(|e| e.to_string())?;
+    let Some(cancel) = jobs.get(&job_id) else {
+        return Err("Search rebuild job not found".to_string());
+    };
+    cancel.store(true, Ordering::Relaxed);
+    Ok(())
+}
+
+fn emit_search_index_progress(
+    app: &tauri::AppHandle,
+    job_id: &str,
+    status: &str,
+    index: SearchIndexStatus,
+) {
+    let _ = app.emit(
+        "search-index-progress",
+        SearchRebuildProgress {
+            job_id: job_id.to_string(),
+            status: status.to_string(),
+            total_downloads: index.total_downloads,
+            indexed_downloads: index.indexed_downloads,
+            pending_downloads: index.pending_downloads,
+            is_complete: index.is_complete,
+            phase: index.phase,
+            indexed_chunks: index.indexed_chunks,
+            embedding_provider: index.embedding_provider,
+            gpu_enabled: index.gpu_enabled,
+            throughput_per_sec: index.throughput_per_sec,
+        },
+    );
 }
 
 #[tauri::command]
@@ -61,15 +229,93 @@ pub async fn db_delete_download(app: tauri::AppHandle, id: i64) -> Result<(), St
 }
 
 #[tauri::command]
+pub async fn db_delete_downloads(
+    app: tauri::AppHandle,
+    ids: Vec<i64>,
+) -> Result<BulkMutationResult, String> {
+    run_db_blocking(app, move |state| state.db.delete_downloads(&ids)).await
+}
+
+#[tauri::command]
+pub async fn db_delete_downloads_for_search(
+    app: tauri::AppHandle,
+    params: SearchV2Params,
+) -> Result<BulkMutationResult, String> {
+    run_db_blocking(app, move |state| {
+        state.db.delete_downloads_for_search(&params)
+    })
+    .await
+}
+
+#[tauri::command]
 pub async fn db_get_stats(app: tauri::AppHandle) -> Result<DbStats, String> {
     let state = app.state::<Arc<AppState>>();
     state.db.get_stats()
 }
 
 #[tauri::command]
+pub async fn db_get_dashboard_summary(app: tauri::AppHandle) -> Result<DashboardSummary, String> {
+    run_db_blocking(app, move |state| state.db.get_dashboard_summary()).await
+}
+
+#[tauri::command]
+pub async fn db_seed_test_data(app: tauri::AppHandle, count: i64) -> Result<i64, String> {
+    let count = count.clamp(1, 200_000);
+    run_db_blocking(app, move |state| {
+        let root = state.db.storage_dir().join("seed").join(format!("{}", chrono::Utc::now().timestamp_millis()));
+        std::fs::create_dir_all(&root).map_err(|e| format!("Seed dir creation failed: {}", e))?;
+        for index in 0..count {
+            let source = if index % 3 == 0 { "fanbox" } else { "pixiv" };
+            let source_id = format!("seed-{}", index + 1);
+            let dir = root.join(source).join(&source_id).join("v1");
+            std::fs::create_dir_all(&dir).map_err(|e| format!("Seed item dir creation failed: {}", e))?;
+            let json_path = dir.join("original.json");
+            let body = format!(
+                "検索性能検証用の本文です。番号 {}、タグ seed{}、作者 {}。日本語とASCII mixed text for search.",
+                index + 1,
+                index % 25,
+                index % 100,
+            );
+            std::fs::write(&json_path, serde_json::json!({ "text": body }).to_string())
+                .map_err(|e| format!("Seed json write failed: {}", e))?;
+            let tags = vec![
+                format!("seed{}", index % 25),
+                format!("group{}", index % 10),
+            ];
+            let created = format!("2026-{:02}-{:02}T00:00:00Z", (index % 12) + 1, (index % 27) + 1);
+            let download = NewDownload {
+                source: source.to_string(),
+                source_id: source_id.clone(),
+                title: format!("Seed Work {:06}", index + 1),
+                author_name: format!("Seed Author {:03}", index % 100),
+                author_id: format!("seed-author-{}", index % 100),
+                content_type: if source == "pixiv" { "novel" } else { "article" }.to_string(),
+                tags,
+                excerpt: Some(format!("seed excerpt {}", index + 1)),
+                cover_path: None,
+                json_path: json_path.to_string_lossy().to_string(),
+                original_json_path: Some(json_path.to_string_lossy().to_string()),
+                asset_count: 0,
+                file_size_bytes: 0,
+                downloaded_at: chrono::Utc::now().to_rfc3339(),
+                source_created_at: Some(created),
+                content_hash: Some(format!("seed-hash-{}", index + 1)),
+                text_length: body.chars().count() as i64,
+                source_updated_at: None,
+                watch_updates: index % 9 == 0,
+                current_version: 1,
+                favorite: index % 17 == 0,
+            };
+            state.db.upsert_download(&download)?;
+        }
+        Ok(count)
+    })
+    .await
+}
+
+#[tauri::command]
 pub async fn db_get_filter_facets(app: tauri::AppHandle) -> Result<FilterFacets, String> {
-    let state = app.state::<Arc<AppState>>();
-    state.db.get_filter_facets()
+    run_db_blocking(app, move |state| state.db.get_filter_facets()).await
 }
 
 #[tauri::command]
@@ -81,25 +327,18 @@ pub async fn db_get_search_index_status(
 }
 
 #[tauri::command]
-pub async fn db_rebuild_search_index_batch(
-    app: tauri::AppHandle,
-    limit: Option<i64>,
-) -> Result<SearchIndexStatus, String> {
-    let state = app.state::<Arc<AppState>>();
-    state.db.rebuild_search_index_batch(limit.unwrap_or(24))
-}
-
-#[tauri::command]
 pub async fn db_search_filter_facets(
     app: tauri::AppHandle,
     kind: String,
     query: Option<String>,
     limit: Option<i64>,
 ) -> Result<Vec<FacetCount>, String> {
-    let state = app.state::<Arc<AppState>>();
-    state
-        .db
-        .search_filter_facets(&kind, query.as_deref(), limit.unwrap_or(30))
+    run_db_blocking(app, move |state| {
+        state
+            .db
+            .search_filter_facets(&kind, query.as_deref(), limit.unwrap_or(30))
+    })
+    .await
 }
 
 fn validate_path_in_storage(path: &str, storage_dir: &std::path::Path) -> Result<(), String> {
@@ -131,32 +370,6 @@ pub async fn read_file_content(app: tauri::AppHandle, path: String) -> Result<St
     tokio::fs::read_to_string(&path)
         .await
         .map_err(|e| format!("Failed to read file: {}", e))
-}
-
-#[tauri::command]
-pub async fn read_image_base64(app: tauri::AppHandle, path: String) -> Result<String, String> {
-    let state = app.state::<Arc<AppState>>();
-    validate_path_in_storage(&path, state.db.storage_dir())?;
-
-    let bytes = tokio::fs::read(&path)
-        .await
-        .map_err(|e| format!("Failed to read image: {}", e))?;
-    let ext = std::path::Path::new(&path)
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("png");
-    let mime = match ext {
-        "jpg" | "jpeg" => "image/jpeg",
-        "png" => "image/png",
-        "gif" => "image/gif",
-        "webp" => "image/webp",
-        _ => "application/octet-stream",
-    };
-    Ok(format!(
-        "data:{};base64,{}",
-        mime,
-        base64::engine::general_purpose::STANDARD.encode(&bytes)
-    ))
 }
 
 #[tauri::command]
@@ -210,6 +423,18 @@ pub async fn db_set_watch_updates(
 ) -> Result<(), String> {
     let state = app.state::<Arc<AppState>>();
     state.db.set_watch_updates(download_id, watch)
+}
+
+#[tauri::command]
+pub async fn db_set_watch_updates_for_search(
+    app: tauri::AppHandle,
+    params: SearchV2Params,
+    watch: bool,
+) -> Result<BulkMutationResult, String> {
+    run_db_blocking(app, move |state| {
+        state.db.set_watch_updates_for_search(&params, watch)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -405,6 +630,86 @@ fn hash_json(value: &serde_json::Value) -> Result<String, String> {
         .iter()
         .map(|b| format!("{:02x}", b))
         .collect())
+}
+
+fn json_string_at<'a>(value: &'a serde_json::Value, path: &[&str]) -> Option<&'a str> {
+    let mut cursor = value;
+    for key in path {
+        cursor = cursor.get(*key)?;
+    }
+    cursor.as_str().filter(|s| !s.trim().is_empty())
+}
+
+fn first_json_string_at<'a>(value: &'a serde_json::Value, paths: &[&[&str]]) -> Option<&'a str> {
+    paths.iter().find_map(|path| json_string_at(value, path))
+}
+
+async fn fetch_pixiv_series_profile_json(
+    source_key: &str,
+    refresh_token: Option<&str>,
+    existing_title: &str,
+    existing_description: Option<&str>,
+) -> Result<Option<serde_json::Value>, String> {
+    let Some(token) = refresh_token
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+    else {
+        return Ok(None);
+    };
+    let series_id: u64 = source_key.parse().map_err(|_| "Invalid Pixiv series ID")?;
+    let api = crate::pixiv_api::aapi::AppPixivAPI::new_from_refresh_token(token.to_string());
+    let value = api
+        .novel_series(series_id, None, None, true)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let novels = value
+        .get("novels")
+        .and_then(|novels| novels.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let title = novels
+        .iter()
+        .find_map(|novel| {
+            first_json_string_at(
+                novel,
+                &[&["series", "title"], &["seriesTitle"], &["series_title"]],
+            )
+        })
+        .unwrap_or(existing_title)
+        .to_string();
+    let cover_url = novels.iter().find_map(|novel| {
+        first_json_string_at(
+            novel,
+            &[
+                &["image_urls", "large"],
+                &["imageUrls", "large"],
+                &["image_urls", "medium"],
+                &["imageUrls", "medium"],
+                &["coverUrl"],
+                &["cover_url"],
+            ],
+        )
+    });
+    let description = first_json_string_at(
+        &value,
+        &[
+            &["novel_series_detail", "caption"],
+            &["novelSeriesDetail", "caption"],
+            &["series", "caption"],
+            &["series", "description"],
+        ],
+    )
+    .or(existing_description);
+
+    Ok(Some(serde_json::json!({
+        "source": "pixiv",
+        "sourceKey": source_key,
+        "title": title,
+        "description": description,
+        "coverUrl": cover_url,
+        "sampleNovelCount": novels.len(),
+    })))
 }
 
 async fn save_entity_json(
@@ -691,13 +996,48 @@ pub async fn refresh_entity_profile(
             .as_ref()
             .map(|s| s.title.clone())
             .unwrap_or_else(|| source_key.clone());
-        let normalized = serde_json::json!({
-            "source": source,
-            "sourceKey": source_key,
-            "title": title,
-            "description": existing.as_ref().and_then(|s| s.description.clone()),
-            "coverUrl": null,
-        });
+        let description = existing.as_ref().and_then(|s| s.description.clone());
+        let normalized = if source == "pixiv" {
+            match fetch_pixiv_series_profile_json(
+                &source_key,
+                refresh_token.as_deref(),
+                &title,
+                description.as_deref(),
+            )
+            .await
+            {
+                Ok(Some(value)) => value,
+                Ok(None) => serde_json::json!({
+                    "source": source,
+                    "sourceKey": source_key,
+                    "title": title,
+                    "description": description,
+                    "coverUrl": null,
+                }),
+                Err(error) => {
+                    log::warn!(
+                        "Failed to refresh Pixiv series profile {}: {}",
+                        source_key,
+                        error
+                    );
+                    serde_json::json!({
+                        "source": source,
+                        "sourceKey": source_key,
+                        "title": title,
+                        "description": description,
+                        "coverUrl": null,
+                    })
+                }
+            }
+        } else {
+            serde_json::json!({
+                "source": source,
+                "sourceKey": source_key,
+                "title": title,
+                "description": description,
+                "coverUrl": null,
+            })
+        };
         let hash = hash_json(&normalized)?;
         let changed =
             existing.as_ref().and_then(|s| s.content_hash.as_deref()) != Some(hash.as_str());
@@ -718,6 +1058,49 @@ pub async fn refresh_entity_profile(
         } else {
             (String::new(), 0)
         };
+        let current_version = existing
+            .as_ref()
+            .map(|s| s.current_version)
+            .unwrap_or(1)
+            .max(1);
+        let asset_version = if changed {
+            next_version
+        } else {
+            current_version
+        };
+        let cover_url = normalized.get("coverUrl").and_then(|v| v.as_str());
+        let should_download_cover = cover_url.filter(|url| !url.trim().is_empty()).is_some()
+            && (changed
+                || existing
+                    .as_ref()
+                    .and_then(|s| s.cover_path.as_ref())
+                    .is_none());
+        let cover = if should_download_cover {
+            match download_entity_image(
+                &app_data,
+                "series",
+                &source,
+                &source_key,
+                asset_version,
+                "cover",
+                cover_url,
+            )
+            .await
+            {
+                Ok(value) => value,
+                Err(error) => {
+                    log::warn!("Failed to download series cover {}: {}", source_key, error);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let cover_path = cover
+            .as_ref()
+            .map(|(path, _)| path.clone())
+            .or_else(|| existing.as_ref().and_then(|s| s.cover_path.clone()));
+        let cover_size = cover.as_ref().map(|(_, size)| *size).unwrap_or(0);
         let series = state.db.upsert_series_profile(
             &source,
             &source_key,
@@ -726,11 +1109,11 @@ pub async fn refresh_entity_profile(
                 .and_then(|v| v.as_str())
                 .unwrap_or(&source_key),
             normalized.get("description").and_then(|v| v.as_str()),
-            None,
+            cover_path.as_deref(),
             &hash,
             &json_path,
-            0,
-            json_size,
+            if cover.is_some() { 1 } else { 0 },
+            json_size + cover_size,
             EntityProfileFreshness::RemoteChecked,
         )?;
         return serde_json::to_value(series).map_err(|e| e.to_string());
@@ -805,4 +1188,138 @@ pub async fn db_get_download_html(
     };
 
     Ok(html)
+}
+
+#[tauri::command]
+pub async fn db_get_reader_document(
+    app: tauri::AppHandle,
+    download_id: i64,
+    version: Option<i64>,
+) -> Result<ReaderDocument, String> {
+    let state = app.state::<Arc<AppState>>();
+    state.db.get_reader_document(download_id, version)
+}
+
+#[tauri::command]
+pub async fn db_get_editor_document(
+    app: tauri::AppHandle,
+    download_id: i64,
+) -> Result<EditorDocument, String> {
+    let state = app.state::<Arc<AppState>>();
+    state.db.get_editor_document(download_id)
+}
+
+#[tauri::command]
+pub async fn db_save_work_draft(
+    app: tauri::AppHandle,
+    download_id: i64,
+    base_version: i64,
+    blocks: Vec<WorkBlockInput>,
+) -> Result<WorkEditRevision, String> {
+    let state = app.state::<Arc<AppState>>();
+    state
+        .db
+        .save_work_draft(download_id, base_version, blocks.as_slice())
+}
+
+#[tauri::command]
+pub async fn db_activate_work_edit(
+    app: tauri::AppHandle,
+    edit_revision_id: i64,
+) -> Result<WorkEditRevision, String> {
+    let state = app.state::<Arc<AppState>>();
+    state.db.activate_work_edit(edit_revision_id)
+}
+
+#[tauri::command]
+pub async fn import_work_asset(
+    app: tauri::AppHandle,
+    download_id: i64,
+    source_path: String,
+) -> Result<AssetEntry, String> {
+    let state = app.state::<Arc<AppState>>();
+    let source = std::path::PathBuf::from(&source_path);
+    if !source.is_file() {
+        return Err("Import source is not a file".to_string());
+    }
+
+    state.db.get_download(download_id)?;
+
+    let original_name = source
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("asset");
+    let filename = crate::downloader::asset_downloader::sanitize_filename(original_name);
+    let target_dir = state
+        .db
+        .storage_dir()
+        .join("editor-assets")
+        .join(download_id.to_string());
+    tokio::fs::create_dir_all(&target_dir)
+        .await
+        .map_err(|e| format!("Failed to create editor asset directory: {}", e))?;
+
+    let mut target_path = target_dir.join(&filename);
+    if target_path.exists() {
+        let stem = target_path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or("asset");
+        let ext = target_path
+            .extension()
+            .and_then(|value| value.to_str())
+            .map(|value| format!(".{}", value))
+            .unwrap_or_default();
+        target_path = target_dir.join(format!(
+            "{}-{}{}",
+            stem,
+            chrono::Utc::now().timestamp_millis(),
+            ext
+        ));
+    }
+
+    tokio::fs::copy(&source, &target_path)
+        .await
+        .map_err(|e| format!("Failed to copy editor asset: {}", e))?;
+    let metadata = tokio::fs::metadata(&target_path)
+        .await
+        .map_err(|e| format!("Failed to inspect editor asset: {}", e))?;
+    let mime_type = target_path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|ext| match ext.to_ascii_lowercase().as_str() {
+            "jpg" | "jpeg" => "image/jpeg",
+            "png" => "image/png",
+            "webp" => "image/webp",
+            "gif" => "image/gif",
+            _ => "application/octet-stream",
+        })
+        .map(str::to_string);
+
+    let local_path = target_path.to_string_lossy().to_string();
+    let asset = NewAsset {
+        download_id,
+        asset_type: "editor_image".to_string(),
+        filename: target_path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or(&filename)
+            .to_string(),
+        local_path: local_path.clone(),
+        original_url: None,
+        mime_type: mime_type.clone(),
+        file_size_bytes: metadata.len() as i64,
+    };
+    let id = state.db.insert_asset(&asset)?;
+
+    Ok(AssetEntry {
+        id,
+        download_id,
+        asset_type: asset.asset_type,
+        filename: asset.filename,
+        local_path,
+        original_url: None,
+        mime_type,
+        file_size_bytes: asset.file_size_bytes,
+    })
 }

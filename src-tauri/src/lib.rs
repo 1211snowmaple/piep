@@ -37,6 +37,9 @@ pub fn run() {
             std::fs::create_dir_all(&app_data).expect("Failed to create app data dir");
 
             let db = Database::open(&db_path, &storage_dir).expect("Failed to open database");
+            if let Err(e) = db.recover_update_jobs_on_startup() {
+                log::warn!("Failed to recover update jobs: {}", e);
+            }
 
             // デフォルトEPUBテンプレートの初期化
             let templates_dir = app_data.join("templates");
@@ -78,23 +81,29 @@ pub fn run() {
             commands::downloader::download_and_save,
             commands::downloader::db_check_exists,
             // DB検索・閲覧 (commands::database)
-            commands::database::db_search_downloads,
+            commands::database::search_downloads_v2,
+            commands::database::search_suggest,
+            commands::database::search_rebuild_index,
+            commands::database::search_cancel_rebuild_index,
             commands::database::db_get_download,
             commands::database::db_get_assets,
             commands::database::db_delete_download,
+            commands::database::db_delete_downloads,
+            commands::database::db_delete_downloads_for_search,
             commands::database::db_get_stats,
+            commands::database::db_get_dashboard_summary,
+            commands::database::db_seed_test_data,
             commands::database::db_get_filter_facets,
             commands::database::db_get_search_index_status,
-            commands::database::db_rebuild_search_index_batch,
             commands::database::db_search_filter_facets,
             commands::database::read_file_content,
-            commands::database::read_image_base64,
             commands::database::open_local_asset,
             // バージョン管理・更新監視 (commands::database)
             commands::database::db_get_versions,
             commands::database::db_get_version,
             commands::database::db_delete_version,
             commands::database::db_set_watch_updates,
+            commands::database::db_set_watch_updates_for_search,
             commands::database::db_set_favorite,
             commands::database::db_get_watched_downloads,
             commands::database::db_upsert_update_target,
@@ -110,11 +119,26 @@ pub fn run() {
             commands::database::refresh_entity_profile,
             commands::database::db_get_download_by_source,
             commands::database::db_get_download_html,
+            commands::database::db_get_reader_document,
+            commands::database::db_get_editor_document,
+            commands::database::db_save_work_draft,
+            commands::database::db_activate_work_edit,
+            commands::database::import_work_asset,
+            // 更新ジョブ (commands::update_jobs)
+            commands::update_jobs::start_update_job,
+            commands::update_jobs::pause_update_job,
+            commands::update_jobs::resume_update_job,
+            commands::update_jobs::cancel_update_job,
+            commands::update_jobs::get_update_job,
+            commands::update_jobs::list_update_jobs,
+            commands::update_jobs::save_update_job_candidates,
+            commands::update_jobs::clear_update_job,
             // エクスポート / インポート (commands::archive)
             commands::archive::export_single,
             commands::archive::export_all_zip,
             commands::archive::export_entity_zip,
             commands::archive::import_zip,
+            commands::archive::scan_and_reimport_downloads,
             // EPUB エクスポート (commands::epub)
             commands::epub::export_epub,
             commands::epub::export_epub_batch,

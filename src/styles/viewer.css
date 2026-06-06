@@ -1,0 +1,2197 @@
+.content-viewer-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 300px;
+}
+
+.viewer-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 1.5rem;
+}
+
+.back-btn {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  background: transparent;
+  border: none;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  padding: 0.4rem 0.6rem;
+  border-radius: var(--border-radius-sm);
+  font-size: 0.85rem;
+}
+
+.back-btn:hover {
+  background: var(--color-surface-hover);
+  color: var(--color-text-primary);
+}
+
+.viewer-actions {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  justify-content: flex-start;
+  width: 100%;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+
+.viewer-action-group {
+  display: flex;
+  align-items: center;
+  gap: 0.38rem;
+  min-width: 0;
+}
+
+.file-action-group {
+  margin-left: auto;
+}
+
+.epub-action-group {
+  margin-left: 0;
+}
+
+.version-selector {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.version-selector .version-select-box {
+  max-width: 240px;
+}
+
+.sidebar-toggle-btn {
+  border-color: rgba(134, 185, 24, 0.38) !important;
+  background: rgba(134, 185, 24, 0.08) !important;
+  color: var(--color-epub) !important;
+}
+
+.sidebar-toggle-btn:hover:not(:disabled),
+.sidebar-toggle-btn.primary {
+  background: var(--color-epub) !important;
+  border-color: var(--color-epub) !important;
+  color: #ffffff !important;
+}
+
+.viewer-title-area {
+  margin-bottom: 1.5rem;
+}
+
+.viewer-title-area h2 {
+  font-size: 1.5rem;
+  font-weight: 700;
+  margin: 0.35rem 0 0.25rem;
+  letter-spacing: 0;
+}
+
+.viewer-author {
+  color: var(--color-text-secondary);
+  margin: 0 0 0.5rem;
+  font-size: 0.9rem;
+}
+
+.tag-list {
+  display: flex;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+}
+
+.tag {
+  padding: 0.15rem 0.55rem;
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: 9999px;
+  font-size: 0.72rem;
+  color: var(--color-text-secondary);
+}
+
+/* Interactive metadata click style in ContentViewer */
+.clickable-meta {
+  cursor: pointer;
+  transition: all 0.15s ease;
+  display: inline-block;
+}
+
+.viewer-author.clickable-meta:hover {
+  color: var(--color-primary) !important;
+  text-decoration: underline;
+}
+
+.tag.clickable-meta:hover {
+  background-color: var(--color-surface-hover);
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+  text-decoration: none;
+  transform: translateY(-1px);
+}
+
+.clickable-meta-link {
+  cursor: pointer;
+  color: var(--color-primary);
+  text-decoration: underline;
+  transition: opacity 0.15s ease;
+}
+
+.clickable-meta-link:hover {
+  opacity: 0.8;
+}
+
+.viewer-tabs {
+  display: flex;
+  gap: 0.25rem;
+  border-bottom: 1px solid var(--color-border);
+  margin-bottom: 1.25rem;
+}
+
+.viewer-content {
+  animation: fadeSlideIn 0.2s ease-out;
+}
+
+/* Overview */
+.overview-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+.image-gallery {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 0.75rem;
+}
+
+.gallery-thumb {
+  border-radius: var(--border-radius-sm);
+  overflow: hidden;
+  cursor: pointer;
+  transition: transform var(--transition-fast);
+  border: 1px solid var(--color-border);
+}
+
+.gallery-thumb:hover {
+  transform: scale(1.03);
+  box-shadow: var(--shadow-sm);
+}
+
+.gallery-thumb img {
+  width: 100%;
+  height: 100px;
+  object-fit: cover;
+  display: block;
+}
+
+.thumb-placeholder {
+  width: 100%;
+  height: 100px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--color-bg);
+  color: var(--color-text-muted);
+}
+
+.thumb-name {
+  display: block;
+  padding: 0.3rem 0.5rem;
+  font-size: 0.65rem;
+  color: var(--color-text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.info-table {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--border-radius);
+  overflow: hidden;
+}
+
+.info-row {
+  display: flex;
+  padding: 0.65rem 1rem;
+  border-bottom: 1px solid var(--color-border-light);
+  font-size: 0.85rem;
+}
+
+.info-row:last-child {
+  border-bottom: none;
+}
+
+.info-row span:first-child {
+  width: 120px;
+  flex-shrink: 0;
+  color: var(--color-text-muted);
+  font-weight: 500;
+}
+
+/* Text reader (アプリ外枠の下部とピタッと一致させる最強のビューポートフィット設計) */
+.text-reader {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--border-radius);
+  padding: 2.5rem 2rem;
+
+  /* 💡 動的Flexbox高さ算出: タイトルの行数に合わせて1pxの過不足なく高さを自動調整 */
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  position: relative;
+
+  /* スムーズスクロールと美しい細身スクロールバー */
+  scrollbar-width: thin;
+  scrollbar-color: rgba(0, 0, 0, 0.15) transparent;
+}
+
+/* ===================================================================
+   Reader Themes (White, Sepia, Dark) & Typography连动
+   =================================================================== */
+.text-reader.reader-theme-white {
+  background-color: #ffffff !important;
+  color: #1a1a1c !important;
+  border-color: rgba(0, 0, 0, 0.08) !important;
+  scrollbar-color: rgba(0, 0, 0, 0.15) transparent !important;
+}
+
+.text-reader.reader-theme-white .novel-text a {
+  color: #0077cc !important;
+  text-decoration: underline;
+}
+
+.text-reader.reader-theme-white .novel-text a:hover {
+  color: #0055aa !important;
+}
+
+.text-reader.reader-theme-sepia {
+  background-color: #f4ecd8 !important;
+  color: #5c4033 !important;
+  border-color: rgba(92, 64, 51, 0.15) !important;
+  scrollbar-color: rgba(92, 64, 51, 0.25) transparent !important;
+}
+
+.text-reader.reader-theme-sepia .novel-text a {
+  color: #8b4513 !important;
+  text-decoration: underline;
+}
+
+.text-reader.reader-theme-sepia .novel-text a:hover {
+  color: #a0522d !important;
+}
+
+.text-reader.reader-theme-dark {
+  background-color: #121214 !important;
+  color: #ffffff !important;
+  /* 💡 純白の文字色へ修正 */
+  border-color: rgba(255, 255, 255, 0.08) !important;
+  scrollbar-color: rgba(255, 255, 255, 0.2) transparent !important;
+}
+
+.text-reader.reader-theme-dark .novel-text a {
+  color: #58a6ff !important;
+  text-decoration: underline;
+}
+
+.text-reader.reader-theme-dark .novel-text a:hover {
+  color: #8ab4f8 !important;
+}
+
+.text-reader.reader-theme-dark img.novel-embedded-image {
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5) !important;
+  border: 1px solid rgba(255, 255, 255, 0.08) !important;
+}
+
+.text-reader.reader-theme-sepia img.novel-embedded-image {
+  box-shadow: 0 6px 20px rgba(92, 64, 51, 0.15) !important;
+  border: 1px solid rgba(92, 64, 51, 0.1) !important;
+}
+
+.text-reader.reader-theme-white img.novel-embedded-image {
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.08) !important;
+  border: 1px solid rgba(0, 0, 0, 0.05) !important;
+}
+
+/* 💡 書体（明朝・ゴシック）の切替が完璧に機能するようにスタイルを実装 */
+.text-reader.reader-font-serif,
+.text-reader.reader-font-serif .novel-text {
+  font-family: "Outfit", "Noto Serif JP", "Georgia", "Times New Roman", serif !important;
+}
+
+.text-reader.reader-font-sans,
+.text-reader.reader-font-sans .novel-text {
+  font-family: "Inter", "Noto Sans JP", -apple-system, sans-serif !important;
+}
+
+.novel-text p {
+  margin: 0 0 0.6rem;
+  line-height: inherit;
+  font-size: inherit;
+}
+
+/* Asset list */
+.asset-section {
+  margin-bottom: 1.5rem;
+}
+
+.asset-section h4 {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.9rem;
+  font-weight: 600;
+  margin: 0 0 0.75rem;
+}
+
+.asset-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 0.75rem;
+}
+
+.asset-item.image {
+  border-radius: var(--border-radius-sm);
+  overflow: hidden;
+  border: 1px solid var(--color-border);
+  cursor: pointer;
+  transition: transform var(--transition-fast);
+}
+
+.asset-item.image:hover {
+  transform: scale(1.02);
+}
+
+.asset-item.image img {
+  width: 100%;
+  height: 100px;
+  object-fit: cover;
+  display: block;
+}
+
+.asset-item.image span {
+  display: block;
+  padding: 0.25rem 0.5rem;
+  font-size: 0.7rem;
+  color: var(--color-text-muted);
+  background: var(--color-surface);
+}
+
+.asset-item.file {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.55rem 0.85rem;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--border-radius-sm);
+  font-size: 0.82rem;
+}
+
+.asset-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.asset-size {
+  color: var(--color-text-muted);
+  font-size: 0.75rem;
+}
+
+/* JSON viewer */
+.json-viewer {
+  background: #0d1117;
+  border: 1px solid var(--color-border);
+  border-radius: var(--border-radius);
+  padding: 1rem;
+  max-height: 600px;
+  overflow: auto;
+}
+
+.json-viewer pre {
+  margin: 0;
+}
+
+.json-viewer code {
+  font-family: 'Consolas', 'Monaco', monospace;
+  font-size: 0.78rem;
+  color: #e6edf3;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+/* Lightbox */
+.lightbox {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.85);
+  z-index: 3000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  animation: fadeIn 0.2s ease-out;
+}
+
+.lightbox img {
+  max-width: 90vw;
+  max-height: 90vh;
+  object-fit: contain;
+  border-radius: var(--border-radius);
+  cursor: default;
+  box-shadow: 0 0 40px rgba(0, 0, 0, 0.5);
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+/* ===================================================================
+   New Modern Design Classes for Phase 6
+   =================================================================== */
+
+/* Version Selector */
+.version-select-box {
+  padding: 6px 12px;
+  border-radius: var(--border-radius-sm);
+  border: 1px solid var(--color-border);
+  background: var(--color-surface);
+  color: var(--color-text-primary);
+  font-size: 0.8rem;
+  font-weight: 500;
+  cursor: pointer;
+  outline: none;
+  transition: all var(--transition-fast);
+}
+
+.version-select-box:hover {
+  border-color: var(--color-pixiv);
+}
+
+/* Watch Status Button */
+.watch-btn {
+  padding: 6px 12px;
+  border-radius: var(--border-radius-sm);
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  color: var(--color-text-secondary);
+  transition: all var(--transition-normal);
+}
+
+.watch-btn:hover {
+  background: var(--color-surface-hover);
+  color: var(--color-text-primary);
+  border-color: var(--color-text-muted);
+}
+
+.watch-btn.active-watch {
+  background: rgba(0, 150, 250, 0.08);
+  border-color: var(--color-pixiv);
+  color: var(--color-pixiv);
+}
+
+/* Floating Console Toggle */
+.floating-console-toggle {
+  position: absolute;
+  bottom: 1.25rem;
+  left: 1.5rem;
+  z-index: 999;
+  background: transparent !important;
+  border: none !important;
+  padding: 0 !important;
+  border-radius: 0 !important;
+  box-shadow: none !important;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 0.25rem;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 0.68rem;
+  font-weight: 700;
+  color: var(--color-text-muted) !important;
+  opacity: 0.45;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  transition: all var(--transition-fast);
+}
+
+.floating-console-toggle:hover {
+  background: transparent !important;
+  color: var(--color-text-secondary) !important;
+  opacity: 0.9;
+  text-decoration: underline;
+}
+
+.floating-console-toggle.active {
+  background: transparent !important;
+  color: var(--color-success) !important;
+  opacity: 0.9;
+  text-decoration: underline;
+}
+
+/* Brand Letter Badge */
+.brand-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  font-size: 11px;
+  font-weight: 800;
+  color: white;
+  user-select: none;
+}
+
+.brand-badge.pixiv {
+  background: #0096FA;
+}
+
+.brand-badge.fanbox {
+  background: #F2C624;
+  color: #1A1A1A;
+}
+
+/* Dashboard Statistics Grid */
+.dashboard-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0.85rem;
+  margin: 0.25rem auto 1.5rem auto;
+  max-width: 680px;
+  width: 100%;
+}
+
+.dashboard-card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--border-radius-sm);
+  padding: 0.65rem 1.25rem;
+  cursor: pointer;
+  color: inherit;
+  font-family: inherit;
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: center;
+  gap: 0.8rem;
+  box-shadow: var(--shadow-sm);
+  transition: all var(--transition-normal);
+}
+
+.dashboard-card:hover {
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-md);
+  border-color: var(--color-pixiv);
+}
+
+.dashboard-card .value {
+  font-size: 1.35rem;
+  font-weight: 800;
+  letter-spacing: 0;
+  color: var(--color-text-primary);
+  line-height: 1;
+}
+
+.dashboard-card .label {
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  line-height: 1;
+}
+
+/* Mini custom classes */
+.spinner-mini {
+  width: 12px;
+  height: 12px;
+  border: 2px solid currentColor;
+  border-top: 2px solid transparent;
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+}
+
+/* Card Tags & Interactive Metadata */
+.card-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 0.55rem;
+}
+
+.tag-badge {
+  font-size: 0.65rem;
+  font-weight: 600;
+  background-color: var(--color-surface-hover);
+  color: var(--color-text-muted);
+  padding: 2px 6px;
+  border-radius: var(--border-radius-sm);
+  border: 1px solid var(--color-border);
+  transition: all var(--transition-fast);
+  cursor: pointer;
+  user-select: none;
+  max-width: 160px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: inline-block;
+  vertical-align: middle;
+}
+
+.tag-badge:hover {
+  background-color: rgba(0, 150, 250, 0.08);
+  color: var(--color-pixiv);
+  border-color: var(--color-pixiv);
+}
+.preview-settings-bar {
+  display: flex;
+  justify-content: flex-start;
+  align-items: center;
+  gap: 0.85rem;
+  padding: 10px 14px;
+  background: var(--color-surface-hover);
+  border-bottom: 1px solid var(--color-border);
+  border-radius: 8px 8px 0 0;
+  /* 枠の上の角丸に合わせる */
+  margin: -2.5rem -2rem 2rem -2rem;
+  /* text-readerのpaddingを打ち消して上部にぴったり張り付かせる */
+  border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+  flex-wrap: wrap;
+}
+
+.reader-theme-dark .preview-settings-bar {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.preview-setting-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border-right: 1px solid var(--color-border);
+  padding-right: 0.85rem;
+}
+
+.preview-setting-group:last-child {
+  border-right: none;
+  padding-right: 0;
+}
+
+.preview-setting-label {
+  font-size: 0.72rem;
+  color: var(--color-text-secondary);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
+.preview-btn {
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  color: var(--color-text-primary);
+  font-size: 0.75rem;
+  padding: 4px 10px;
+  cursor: pointer;
+  transition: all var(--transition-fast) ease;
+  font-weight: 600;
+}
+
+.preview-btn:hover {
+  background: var(--color-surface-hover);
+  border-color: var(--color-text-muted);
+}
+
+.preview-btn.active {
+  background: var(--color-pixiv);
+  border-color: transparent;
+  color: #ffffff;
+}
+
+/* 行間スライダーのスタイリング */
+.preview-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  background: rgba(0, 0, 0, 0.08);
+  height: 4px;
+  border-radius: 2px;
+  width: 80px;
+  outline: none;
+}
+
+.reader-theme-dark .preview-slider {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.preview-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--color-pixiv);
+  cursor: pointer;
+  transition: transform 0.1s ease;
+}
+
+.preview-slider::-webkit-slider-thumb:hover {
+  transform: scale(1.2);
+}
+
+.preview-slider-val {
+  font-size: 0.72rem;
+  font-weight: 700;
+  min-width: 28px;
+  color: var(--color-text-secondary);
+}
+
+.parsed-html-text-block {
+  margin-bottom: 1.5rem;
+  white-space: normal;
+  /* brタグが正しく機能するため、不要な重複改行を防止 */
+}
+
+.novel-text ruby {
+  ruby-position: over;
+  ruby-align: center;
+}
+
+.novel-text rt {
+  font-size: 0.58em;
+  letter-spacing: normal;
+  color: var(--color-text-secondary);
+  padding: 0 1px;
+}
+
+.novel-text h2 {
+  font-size: 1.4rem;
+  margin: 3.5rem 0 1.8rem 0;
+  padding-bottom: 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  color: var(--color-text-primary);
+  font-weight: 700;
+}
+
+.novel-text a {
+  color: var(--color-pixiv);
+  text-decoration: none;
+  border-bottom: 1px dashed rgba(0, 150, 250, 0.4);
+  transition: all var(--transition-fast) ease;
+}
+
+.novel-text a:hover {
+  color: var(--color-pixiv-hover);
+  border-bottom-style: solid;
+}
+
+.novel-text .novel-embedded-image {
+  display: block;
+  max-width: 100%;
+  max-height: 70vh;
+  margin: 1.5rem auto;
+}
+
+.novel-text .missing-image-placeholder {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px dashed var(--color-border);
+  border-radius: 6px;
+  padding: 1.5rem;
+  color: var(--color-text-secondary);
+  font-size: 0.85rem;
+  font-style: italic;
+  margin: 1.5rem auto;
+}
+
+.novel-text .jump-link {
+  color: var(--color-fanbox);
+  font-weight: 600;
+  border-bottom-color: rgba(255, 64, 129, 0.4);
+}
+
+.novel-text .jump-link:hover {
+  color: var(--color-fanbox-hover);
+}
+
+/* ページネーション統合コンテナ */
+.reader-pagination-container {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 10px;
+  height: 44px;
+  /* 縦幅を拡大してクリックしやすく */
+  position: relative;
+}
+
+.pagination-left-spacer {
+  width: 90px;
+  /* 右側のアクションボタンの幅と均衡を取って、中央寄せを完璧に保つ */
+  flex-shrink: 0;
+}
+
+.reader-pagination {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 8px;
+  /* 間隔を少し広げる */
+  flex: 1;
+}
+
+.pagination-single-page {
+  font-size: 0.85rem;
+  /* サイズ拡大 */
+  color: var(--color-text-muted);
+  font-weight: 600;
+  letter-spacing: 0.05em;
+}
+
+.pagination-right-actions {
+  width: 90px;
+  display: flex;
+  justify-content: flex-end;
+  position: relative;
+  flex-shrink: 0;
+}
+
+/* Aaトグルボタン (右揃え) */
+.aa-toggle-btn {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  /* よりモダンな丸み */
+  color: var(--color-text-secondary);
+  font-size: 0.92rem;
+  /* 文字を大きく見やすく */
+  font-weight: 700;
+  width: 44px;
+  /* サイズを拡大 */
+  height: 44px;
+  /* サイズを拡大 */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all var(--transition-fast) ease;
+  user-select: none;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.05);
+}
+
+.aa-toggle-btn:hover {
+  background: var(--color-surface-hover);
+  color: var(--color-text-primary);
+  border-color: var(--color-text-muted);
+}
+
+.aa-toggle-btn.active {
+  background: var(--color-pixiv);
+  color: #ffffff;
+  border-color: transparent;
+  box-shadow: 0 4px 12px rgba(0, 150, 250, 0.3);
+}
+
+/* Aa吹き出しポップオーバー (プレミアムすりガラス・影) */
+.aa-popover-panel {
+  position: absolute;
+  bottom: 56px;
+  /* ボタンサイズ拡大に合わせて位置を調整 */
+  right: 0;
+  width: 250px;
+  background: rgba(30, 30, 34, 0.94);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  padding: 1rem;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+  z-index: 1000;
+  animation: popoverFadeIn 0.2s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  transform-origin: bottom right;
+}
+
+/* 白背景テーマ時のポップオーバーの背景調整 */
+.reader-theme-white .aa-popover-panel,
+.reader-theme-sepia .aa-popover-panel {
+  background: rgba(255, 255, 255, 0.95);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.15);
+}
+
+@keyframes popoverFadeIn {
+  from {
+    opacity: 0;
+    transform: scale(0.92) translateY(8px);
+  }
+
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+.popover-arrow {
+  position: absolute;
+  bottom: -6px;
+  right: 14px;
+  width: 12px;
+  height: 12px;
+  background: inherit;
+  border-right: 1px solid var(--color-border);
+  border-bottom: 1px solid var(--color-border);
+  transform: rotate(45deg);
+}
+
+.popover-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  padding-bottom: 0.85rem;
+}
+
+.reader-theme-white .popover-section,
+.reader-theme-sepia .popover-section {
+  border-bottom: 1px solid rgba(0, 0, 0, 0.05);
+}
+
+.popover-label {
+  font-size: 0.7rem;
+  color: var(--color-text-secondary);
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.popover-val {
+  font-size: 0.7rem;
+  font-weight: 700;
+  color: var(--color-text-primary);
+}
+
+.popover-btn-group {
+  display: flex;
+  gap: 4px;
+}
+
+.popover-btn {
+  flex: 1;
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  color: var(--color-text-primary);
+  font-size: 0.72rem;
+  padding: 4px 6px;
+  cursor: pointer;
+  transition: all var(--transition-fast) ease;
+  font-weight: 600;
+  text-align: center;
+}
+
+.popover-btn:hover {
+  background: var(--color-surface-hover);
+  border-color: var(--color-text-muted);
+}
+
+.popover-btn.active {
+  background: var(--color-pixiv);
+  border-color: transparent;
+  color: #ffffff;
+}
+
+/* ポップオーバー内スライダー */
+.popover-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  background: rgba(0, 0, 0, 0.08);
+  height: 4px;
+  border-radius: 2px;
+  width: 100%;
+  outline: none;
+}
+
+.reader-theme-dark .popover-slider,
+.reader-theme-black .popover-slider {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.popover-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--color-pixiv);
+  cursor: pointer;
+  transition: transform 0.1s ease;
+}
+
+.popover-slider::-webkit-slider-thumb:hover {
+  transform: scale(1.2);
+}
+
+.pagination-btn {
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  /* より押しやすい角丸 */
+  color: var(--color-text-secondary);
+  font-size: 0.85rem;
+  /* サイズを拡大 */
+  padding: 6px 14px;
+  /* パディングを拡大 */
+  cursor: pointer;
+  font-weight: 600;
+  transition: all var(--transition-fast) ease;
+}
+
+.pagination-btn:hover:not(:disabled) {
+  background: var(--color-surface-hover);
+  color: var(--color-text-primary);
+  border-color: var(--color-text-muted);
+}
+
+.pagination-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.pagination-btn.active {
+  background: var(--color-pixiv);
+  color: #ffffff;
+  border-color: transparent;
+}
+
+.pagination-ellipsis {
+  font-size: 0.85rem;
+  /* サイズを拡大 */
+  color: var(--color-text-muted);
+  padding: 0 6px;
+}
+
+/* 個別作品ビューアのコンテナ全体のスタイル */
+.viewer-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+/* 💡 本文やJSONのとき: 親の縦スクロールを完全に防止し、内枠の極上スクロールのみにする */
+.viewer-content.scroll-contained {
+  overflow: hidden;
+}
+
+/* 💡 概要やアセットのとき: コンテンツが長い場合に親側で滑らかに縦スクロールできるようにする */
+.viewer-content.scroll-allowed {
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(0, 0, 0, 0.15) transparent;
+  padding-right: 4px;
+  /* スクロールバー用の微細な右余白 */
+}
+
+/* ビューア全体の Flexbox 自動高さ算出レイアウト */
+.content-viewer {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  max-height: calc(100vh - 45px); /* アプリの上部余白を完璧に引き算して画面内に収める */
+  overflow: hidden; /* 親の縦スクロールを物理的に完全遮断 */
+}
+
+.viewer-title-area {
+  flex-shrink: 0;
+  /* 動的なタイトル文字数で伸びるが、縮小はさせない */
+}
+
+.viewer-tabs {
+  flex-shrink: 0;
+}
+
+/* 本文タブ用の自動伸縮ラッパー */
+.reader-tab-container {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* 微細なローディング用の無限回転キーフレーム */
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.spinning {
+  animation: spin 1s linear infinite;
+  transform-origin: center;
+}
+
+/* --- 極上のUI/UX・ダウンロード改善CSS --- */
+
+/* 1. 波打つスケルトンローダー */
+@keyframes skeleton-loading {
+  0% {
+    background-position: 200% 0;
+  }
+
+  100% {
+    background-position: -200% 0;
+  }
+}
+
+.skeleton-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 1rem 0.5rem;
+}
+
+.skeleton-item {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.75rem;
+  border-radius: 8px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+}
+
+.skeleton-checkbox {
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  background: linear-gradient(90deg, var(--color-surface-hover) 25%, var(--color-border) 50%, var(--color-surface-hover) 75%);
+  background-size: 200% 100%;
+  animation: skeleton-loading 1.5s infinite linear;
+}
+
+.skeleton-info {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.skeleton-title {
+  width: 70%;
+  height: 12px;
+  border-radius: 3px;
+  background: linear-gradient(90deg, var(--color-surface-hover) 25%, var(--color-border) 50%, var(--color-surface-hover) 75%);
+  background-size: 200% 100%;
+  animation: skeleton-loading 1.5s infinite linear;
+}
+
+.skeleton-subtitle {
+  width: 40%;
+  height: 8px;
+  border-radius: 3px;
+  background: linear-gradient(90deg, var(--color-surface-hover) 25%, var(--color-border) 50%, var(--color-surface-hover) 75%);
+  background-size: 200% 100%;
+  animation: skeleton-loading 1.5s infinite linear;
+}
+
+/* 2. リストアイテム状態バッジ */
+.sidebar-option-item-status {
+  font-size: 0.65rem;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+.status-badge-pending {
+  background: var(--color-surface-hover);
+  color: var(--color-text-secondary);
+  border: 1px solid var(--color-border);
+}
+
+.status-badge-downloading {
+  background: rgba(0, 150, 250, 0.08);
+  color: var(--color-pixiv);
+  border: 1px solid rgba(0, 150, 250, 0.2);
+  animation: pulse-downloading 1.5s infinite ease-in-out;
+}
+
+@keyframes pulse-downloading {
+  0% {
+    opacity: 0.6;
+  }
+
+  50% {
+    opacity: 1;
+  }
+
+  100% {
+    opacity: 0.6;
+  }
+}
+
+.status-badge-success {
+  background: rgba(16, 185, 129, 0.08);
+  color: var(--color-success);
+  border: 1px solid rgba(16, 185, 129, 0.2);
+}
+
+.status-badge-skipped {
+  background: var(--color-surface-hover);
+  color: var(--color-text-muted);
+  border: 1px solid var(--color-border);
+  opacity: 0.8;
+}
+
+.status-badge-failed {
+  background: rgba(239, 68, 68, 0.08);
+  color: var(--color-error);
+  border: 1px solid rgba(239, 68, 68, 0.2);
+}
+
+/* 3. ログコンソールの極上ガラスモルフィズム装飾 */
+.console-logs-list .console-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.4rem 0.75rem;
+  border-radius: 6px;
+  margin-bottom: 4px;
+  border: 1px solid transparent;
+  transition: all var(--transition-fast) ease;
+}
+
+.console-logs-list .console-row:hover {
+  background: rgba(255, 255, 255, 0.02) !important;
+}
+
+.console-row.success {
+  background: rgba(16, 185, 129, 0.04);
+  border-color: rgba(16, 185, 129, 0.08);
+  color: #e2fbf0;
+}
+
+.console-row.success .log-badge {
+  background: rgba(16, 185, 129, 0.15) !important;
+  color: #10b981 !important;
+  border: 1px solid rgba(16, 185, 129, 0.3);
+}
+
+.console-row.error {
+  background: rgba(239, 68, 68, 0.04);
+  border-color: rgba(239, 68, 68, 0.08);
+  color: #fde8e8;
+}
+
+.console-row.error .log-badge {
+  background: rgba(239, 68, 68, 0.15) !important;
+  color: #ef4444 !important;
+  border: 1px solid rgba(239, 68, 68, 0.3);
+}
+
+.console-row.warn {
+  background: rgba(245, 158, 11, 0.04);
+  border-color: rgba(245, 158, 11, 0.08);
+  color: #fef3c7;
+}
+
+.console-row.warn .log-badge {
+  background: rgba(245, 158, 11, 0.15) !important;
+  color: #f59e0b !important;
+  border: 1px solid rgba(245, 158, 11, 0.3);
+}
+
+.console-row.info {
+  background: rgba(255, 255, 255, 0.01);
+  border-color: rgba(255, 255, 255, 0.03);
+}
+
+.console-row.info .log-badge {
+  background: rgba(255, 255, 255, 0.05) !important;
+  color: var(--color-text-secondary) !important;
+  border: 1px solid var(--color-border);
+}
+
+/* 4. アクションボタン追加用 */
+.sidebar-option-install-btn.success-view {
+  background: var(--color-success) !important;
+  border-color: transparent !important;
+  box-shadow: 0 4px 12px rgba(16, 185, 129, 0.2);
+}
+
+.sidebar-option-install-btn.success-view:hover {
+  filter: brightness(1.1);
+}
+
+/* ===================================================================
+   EPUB Export & Template Manager Modals
+   =================================================================== */
+/* ===================================================================
+   Scroll To Top Floating Button
+   =================================================================== */
+
+.scroll-to-top-btn {
+  position: fixed;
+  bottom: 2rem;
+  right: 2rem;
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  background: var(--color-surface);
+  color: var(--color-text-secondary);
+  border: 1px solid var(--color-border);
+  box-shadow: var(--shadow-lg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  z-index: 999;
+  transition: transform 0.25s cubic-bezier(0.16, 1, 0.3, 1),
+    background 0.25s ease,
+    color 0.25s ease,
+    right 0.3s cubic-bezier(0.4, 0, 0.2, 1),
+    box-shadow 0.25s ease;
+  animation: scaleIn 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.scroll-to-top-btn:hover {
+  background: var(--color-surface-hover);
+  color: var(--color-pixiv);
+  box-shadow: var(--shadow-xl);
+  transform: translateY(-2px);
+}
+
+.scroll-to-top-btn:active {
+  transform: scale(0.92);
+}
+
+@keyframes scaleIn {
+  from {
+    opacity: 0;
+    transform: scale(0.7);
+  }
+
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+/* ===================================================================
+   Individual Work Viewer Premium UI/UX Improvements
+   =================================================================== */
+/* 1. Sidebar Back Navigation Button */
+.nav-item.back-nav-item {
+  color: var(--color-text-secondary);
+  border-bottom: 1px solid var(--color-border);
+  padding-bottom: 0.85rem;
+  margin-bottom: 0.85rem;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+}
+
+.nav-item.back-nav-item:hover {
+  color: var(--color-pixiv);
+  background-color: rgba(0, 150, 250, 0.05);
+}
+
+.nav-item.back-nav-item svg {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  transition: transform var(--transition-fast);
+}
+
+.nav-item.back-nav-item:hover svg {
+  transform: translateX(-3px);
+}
+
+/* 2. Premium Book Card Layout (Hero Area) */
+.viewer-hero-area {
+  display: grid;
+  grid-template-columns: minmax(170px, 31%) minmax(0, 1fr);
+  gap: 24px;
+  padding: 24px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--border-radius-lg);
+  margin-bottom: 20px;
+  box-shadow: var(--shadow-sm);
+  flex-shrink: 0;
+  align-items: stretch;
+  transition: box-shadow var(--transition-normal);
+}
+
+.viewer-hero-area.no-cover {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.viewer-hero-area.no-cover .viewer-metadata-container {
+  max-width: 680px;
+}
+
+.viewer-hero-area:hover {
+  box-shadow: var(--shadow-md);
+}
+
+@media (prefers-color-scheme: dark) {
+  .viewer-hero-area {
+    background: rgba(30, 41, 59, 0.4);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    border-color: rgba(255, 255, 255, 0.05);
+  }
+}
+
+/* 3. Book Cover Container & Hover Micro-animations */
+.viewer-cover-container {
+  position: relative;
+  /* Added for absolute positioned overlay badges */
+  width: 100%;
+  height: auto;
+  aspect-ratio: 1 / 1;
+  flex-shrink: 0;
+  border-radius: var(--border-radius-sm);
+  overflow: hidden;
+  cursor: zoom-in;
+  border: 1px solid var(--color-border);
+  background-color: var(--color-bg);
+}
+
+.viewer-cover-container:has(.image-wide) {
+  aspect-ratio: 16 / 9;
+}
+
+.viewer-cover-container:has(.image-tall) {
+  aspect-ratio: 2 / 3;
+}
+
+.viewer-cover-image {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: color-mix(in srgb, var(--color-bg) 88%, var(--color-surface));
+}
+
+/* 4. Metadata details inside Book Card */
+.viewer-metadata-container {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-start;
+  min-width: 0;
+}
+
+.viewer-metadata-container .source-tag {
+  align-self: flex-start;
+  margin-bottom: 4px;
+}
+
+.viewer-metadata-container h2 {
+  font-size: 1.2rem;
+  font-weight: 700;
+  margin: 6px 0 8px;
+  line-height: 1.35;
+  color: var(--color-text-primary);
+  word-break: break-all;
+  letter-spacing: 0;
+}
+
+.viewer-author.clickable-meta {
+  font-size: 0.9rem;
+  color: var(--color-text-secondary);
+  margin: 0 0 12px;
+  font-weight: 500;
+  display: inline-block;
+  cursor: pointer;
+  width: fit-content;
+  transition: color var(--transition-fast);
+}
+
+.viewer-author.clickable-meta:hover {
+  color: var(--color-pixiv);
+  text-decoration: underline;
+}
+
+.viewer-metadata-container .tag-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 14px;
+}
+
+.viewer-metadata-container .tag.clickable-meta {
+  background: var(--color-bg);
+  padding: 4px 8px;
+  border-radius: var(--border-radius-sm);
+  font-size: 0.75rem;
+  color: var(--color-text-secondary);
+  border: 1px solid var(--color-border);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  user-select: none;
+}
+
+.viewer-metadata-container .tag.clickable-meta:hover {
+  background: rgba(0, 150, 250, 0.08);
+  color: var(--color-pixiv);
+  border-color: rgba(0, 150, 250, 0.3);
+}
+
+/* 5. Collapsible Novel Description / Synopsis */
+.viewer-description-wrapper {
+  display: flex;
+  flex-direction: column;
+  margin-top: 8px;
+  position: relative;
+}
+
+.viewer-description-box {
+  font-size: 0.85rem;
+  line-height: 1.6;
+  background: rgba(100, 116, 139, 0.03);
+  border: 1px solid var(--color-border);
+  border-radius: var(--border-radius-sm);
+  padding: 12px 16px;
+  color: var(--color-text-secondary);
+  transition: max-height 0.35s cubic-bezier(0.4, 0, 0.2, 1);
+  position: relative;
+}
+
+.viewer-description-box.collapsed {
+  max-height: 76px;
+  /* Show only first ~3 lines */
+  overflow: hidden;
+}
+
+.viewer-description-box.collapsed::after {
+  content: '';
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 32px;
+  background: linear-gradient(to bottom, transparent, var(--color-surface));
+  pointer-events: none;
+}
+
+.viewer-description-box.expanded {
+  max-height: 320px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-border) transparent;
+}
+
+.viewer-description-box.expanded::-webkit-scrollbar {
+  width: 6px;
+}
+
+.viewer-description-box.expanded::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.viewer-description-box.expanded::-webkit-scrollbar-thumb {
+  background-color: var(--color-border);
+  border-radius: 3px;
+}
+
+@media (prefers-color-scheme: dark) {
+  .viewer-description-box {
+    background: rgba(255, 255, 255, 0.02);
+    border-color: rgba(255, 255, 255, 0.05);
+  }
+
+  .viewer-description-box.collapsed::after {
+    background: linear-gradient(to bottom, transparent, #151B2B);
+  }
+}
+
+.viewer-description-box a {
+  color: var(--color-pixiv);
+  text-decoration: none;
+}
+
+.viewer-description-box a:hover {
+  text-decoration: underline;
+}
+
+.description-toggle-btn {
+  background: transparent;
+  border: none;
+  color: var(--color-pixiv);
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 6px 0;
+  align-self: flex-end;
+  transition: all var(--transition-fast);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.description-toggle-btn:hover {
+  color: var(--color-pixiv-hover);
+  text-decoration: underline;
+}
+
+/* 6. Book Cover Relocated Badges & Wrapper Styles */
+.viewer-cover-wrapper {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  width: 100%;
+  max-width: 300px;
+  justify-self: center;
+  align-self: center;
+  flex-shrink: 0;
+}
+
+.viewer-cover-wrapper:has(.image-wide) {
+  max-width: 420px;
+}
+
+.viewer-cover-wrapper:has(.image-tall) {
+  max-width: 136px;
+}
+
+.viewer-cover-badges-row {
+  display: flex;
+  justify-content: center;
+  gap: 14px;
+  margin-top: 2px;
+  width: 100%;
+}
+
+.viewer-cover-badges-row .card-watch-badge-wrapper,
+.viewer-cover-badges-row .card-favorite-badge-wrapper {
+  position: static;
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+}
+
+.cover-badge-btn {
+  background: rgba(30, 41, 59, 0.45);
+  border: 1px solid var(--color-border);
+  border-radius: 50%;
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.12);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  cursor: pointer;
+  transition: all var(--transition-normal) cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.cover-badge-btn svg {
+  width: 15px;
+  height: 15px;
+  color: var(--color-text-secondary);
+  fill: none;
+  stroke-width: 2.5px;
+  transition: all var(--transition-fast);
+}
+
+/* Watch Button Style */
+.cover-badge-btn.watch-btn:hover {
+  background: rgba(0, 150, 250, 0.15);
+  border-color: rgba(0, 150, 250, 0.4);
+  transform: scale(1.1);
+}
+
+.cover-badge-btn.watch-btn:hover svg {
+  color: var(--color-pixiv);
+}
+
+.cover-badge-btn.watch-btn.active {
+  background: var(--color-pixiv) !important;
+  border-color: var(--color-pixiv) !important;
+  box-shadow: 0 2px 10px rgba(0, 150, 250, 0.4);
+}
+
+.cover-badge-btn.watch-btn.active svg {
+  color: #ffffff !important;
+}
+
+/* Favorite Button Style */
+.cover-badge-btn.favorite-btn:hover {
+  background: rgba(255, 71, 87, 0.15);
+  border-color: rgba(255, 71, 87, 0.4);
+  transform: scale(1.1);
+}
+
+.cover-badge-btn.favorite-btn:hover svg {
+  color: #ff4757;
+}
+
+.cover-badge-btn.favorite-btn.active {
+  background: #ff4757 !important;
+  border-color: #ff4757 !important;
+  box-shadow: 0 2px 10px rgba(255, 71, 87, 0.45);
+}
+
+.cover-badge-btn.favorite-btn.active svg {
+  color: #ffffff !important;
+  fill: #ffffff !important;
+}
+
+@media (prefers-color-scheme: dark) {
+  .cover-badge-btn {
+    background: rgba(15, 23, 42, 0.6);
+    border-color: rgba(255, 255, 255, 0.08);
+  }
+}
+
+/* ===================================================================
+   Viewer Layout and Premium Custom Elements
+   =================================================================== */
+
+.viewer-main-content {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  padding: 0.6rem 0.5rem 1.2rem 0.5rem; /* 左右パディングを0.5rem(8px)に統一、ボトムは程よい余白(1.2rem/19px)を持たせて下部との衝突を防止 */
+  margin: 0 auto;
+  width: 100%;
+  animation: fadeSlideIn 0.3s ease-out;
+  scrollbar-gutter: stable;
+  height: 100%;
+
+  /* デフォルト（1264px未満）: 一覧の3列幅（692px）と完璧に揃えて中央寄せ */
+  max-width: 692px;
+  will-change: max-width;
+  transition: max-width 200ms cubic-bezier(0.2, 0, 0, 1);
+}
+
+/* --- 通常時（右サイドバーが閉じているとき）の段階的アライメント調整 --- */
+/* 4列同期幅への拡張：1264px以上 */
+@media (min-width: 1264px) {
+  .viewer-main-content {
+    max-width: 928px;
+  }
+}
+
+/* 5列同期幅への拡張：1500px以上 */
+@media (min-width: 1500px) {
+  .viewer-main-content {
+    max-width: 1164px;
+  }
+}
+
+@media (max-width: 860px) {
+  .viewer-hero-area {
+    grid-template-columns: 1fr;
+  }
+
+  .viewer-cover-wrapper,
+  .viewer-cover-wrapper:has(.image-wide),
+  .viewer-cover-wrapper:has(.image-tall) {
+    max-width: min(100%, 420px);
+  }
+}
+
+/* 7. Inline File Attachments and URL embeds */
+.novel-file-attachment {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.85rem 1.25rem;
+  background-color: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--border-radius-md, 8px);
+  margin: 1.5rem 0;
+  cursor: pointer;
+  transition: all var(--transition-normal) cubic-bezier(0.4, 0, 0.2, 1);
+  max-width: 480px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
+}
+
+.novel-file-attachment:hover {
+  transform: translateY(-1px);
+  border-color: var(--color-pixiv);
+  background-color: var(--color-surface-hover);
+  box-shadow: 0 4px 12px rgba(0, 150, 250, 0.1);
+}
+
+.novel-file-attachment .file-icon {
+  font-size: 1.5rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--color-pixiv);
+  background: rgba(0, 150, 250, 0.08);
+  width: 42px;
+  height: 42px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.novel-file-attachment .file-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.novel-file-attachment .file-name {
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.novel-file-attachment .file-size {
+  font-size: 0.75rem;
+  color: var(--color-text-muted);
+}
+
+.missing-file-placeholder,
+.missing-image-placeholder {
+  padding: 0.75rem 1.25rem;
+  border: 1px dashed var(--color-border);
+  background: rgba(239, 68, 68, 0.04);
+  color: #ef4444;
+  border-radius: 8px;
+  font-size: 0.8rem;
+  font-style: italic;
+  margin: 1.25rem 0;
+}
+
+/* Premium Link Card Embed */
+.novel-link-card {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.85rem 1.25rem;
+  background-color: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--border-radius-md, 8px);
+  margin: 1.5rem 0;
+  text-decoration: none !important;
+  color: inherit;
+  transition: all var(--transition-normal) cubic-bezier(0.4, 0, 0.2, 1);
+  max-width: 520px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
+}
+
+.novel-link-card:hover {
+  transform: translateY(-1px);
+  border-color: var(--color-pixiv);
+  background-color: var(--color-surface-hover);
+  box-shadow: 0 4px 12px rgba(0, 150, 250, 0.1);
+}
+
+.novel-link-card .link-card-icon {
+  font-size: 1.35rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--color-pixiv);
+  background: rgba(0, 150, 250, 0.08);
+  width: 42px;
+  height: 42px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.novel-link-card .link-card-icon.fanbox-icon {
+  color: #ff5d7f;
+  background: rgba(255, 93, 127, 0.08);
+}
+
+.novel-link-card .link-card-icon.pixiv-icon {
+  color: #0096fa;
+  background: rgba(0, 150, 250, 0.08);
+}
+
+.novel-link-card .link-card-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.novel-link-card .link-card-title {
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.novel-link-card .link-card-host {
+  font-size: 0.72rem;
+  color: var(--color-text-muted);
+  text-transform: lowercase;
+}
+/* ===================================================================
+   Library Navigation Group
+   =================================================================== */
+
+.nav-subgroup {
+  display: grid;
+  gap: 2px;
+  margin: -0.15rem 0 0.35rem 1.3rem;
+  padding-left: 0.55rem;
+  border-left: 1px solid var(--color-border);
+}
+
+.nav-subitem {
+  min-height: 30px;
+  border: 0;
+  border-radius: var(--border-radius-sm);
+  background: transparent;
+  color: var(--color-text-muted);
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.35rem 0.5rem;
+  font: inherit;
+  font-size: 0.76rem;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--transition-fast), color var(--transition-fast);
+}
+
+.nav-subitem svg {
+  width: 14px;
+  height: 14px;
+}
+
+.nav-subitem:hover {
+  background: rgba(100, 116, 139, 0.08);
+  color: var(--color-text-primary);
+}
+
+.nav-subitem.active {
+  background: var(--nav-home-active-bg);
+  color: var(--color-text-primary);
+}
+
+.nav-subitem.epub.active {
+  background: var(--nav-epub-active-bg);
+  color: var(--color-epub);
+}
+
+.nav-subitem.update.active {
+  background: var(--nav-update-active-bg);
+  color: var(--color-success);
+}
+
+/* ===================================================================
+   Dedicated Reader
+   =================================================================== */
+
+.reader-screen,
+.work-editor {
+  min-height: 100%;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  background: var(--color-bg);
+  color: var(--color-text-primary);
+}
+
+.reader-loading,
+.reader-error,
+.work-editor-loading,
+.work-editor-error {
+  align-items: center;
+  justify-content: center;
+  gap: 1rem;
+}
+
+.reader-topbar,
+.work-editor-topbar {
+  position: sticky;
+  top: 0;
+  z-index: 8;
+  min-height: 68px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid var(--color-border);
+  background: color-mix(in srgb, var(--color-surface) 88%, transparent);
+  backdrop-filter: blur(16px);
+}
+
+.reader-title-block,
+.work-editor-title {
+  min-width: 0;
+}
+
+.reader-kicker,
+.work-editor-title span {
+  display: block;
+  color: var(--color-text-muted);
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.reader-title-block h1,
+.work-editor-title h1 {
+  margin: 0.1rem 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 1rem;
+  line-height: 1.25;
+}
+
+.reader-author-link,
+.work-editor-title p {
+  border: 0;
+  padding: 0;
+  margin: 0;
+  background: transparent;
+  color: var(--color-text-secondary);
+  font: inherit;
+  font-size: 0.78rem;
+  text-align: left;
+}
+
+.reader-actions,
+.work-editor-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.reader-settings-panel {
+  position: fixed;
+  top: 82px;
+  right: 1rem;
+  z-index: 20;
+  width: min(320px, calc(100vw - 2rem));
+  display: grid;
+  gap: 0.85rem;
+  padding: 1rem;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-surface);
+  box-shadow: var(--shadow-xl);
+}
+
+.reader-settings-panel label {
+  display: grid;
+  grid-template-columns: 52px minmax(0, 1fr) 50px;
+  align-items: center;
+  gap: 0.75rem;
+  color: var(--color-text-secondary);
+  font-size: 0.82rem;
+}
+
+.reader-theme-switch {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0.4rem;
+}
+
+.reader-theme-switch button {
+  min-height: 30px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-bg);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+}
+
+.reader-theme-switch button.active {
+  border-color: var(--color-pixiv);
+  color: var(--color-pixiv);
+  background: rgba(0, 150, 250, 0.08);
+}
+
+.reader-document {
+  width: min(100%, 860px);
+  margin: 0 auto;
+  padding: 3rem clamp(1rem, 5vw, 4rem) 5rem;
+}
+
+.reader-html {
+  word-break: break-word;
+}
+
+.reader-html h2 {
+  margin: 2.2em 0 1em;
+  font-size: 1.32em;
+  line-height: 1.45;
+}
+
+.reader-html p,
+.reader-html div {
+  margin: 0 0 1.15em;
+}
+
+.reader-html img,
+.reader-html .novel-image {
+  display: block;
+  max-width: min(100%, 760px);
+  max-height: 78vh;
+  object-fit: contain;
+  margin: 2rem auto;
+  border-radius: 8px;
+}
+
+.reader-theme-paper {
+  background: #f7f1e7;
+  color: #24211d;
+}
+
+.reader-theme-white {
+  background: #fff;
+  color: #111827;
+}
+
+.reader-theme-dark {
+  background: #10131a;
+  color: #e8ecf4;
+}

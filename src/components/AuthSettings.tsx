@@ -1,8 +1,13 @@
 import { useState, useEffect } from "react";
-import { invoke } from "@tauri-apps/api/core";
 import { store } from "../store";
+import { loginFanboxWebview, loginPixivWebview, verifyFanboxSession, verifyPixivToken } from "@/services/authApi";
+import { scanAndReimportDownloads } from "@/services/dbApi";
 import { AlertIcon, PaletteIcon, HeartIcon } from "./icons/Icons";
-import { ask } from "@tauri-apps/plugin-dialog";
+import { askDialog, messageDialog } from "@/services/dialogApi";
+import { Database } from "lucide-react";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
 
 interface UserData {
   name: string;
@@ -21,6 +26,8 @@ function isTauriRuntime(): boolean {
 export function AuthSettings() {
   const [pixivStatus, setPixivStatus] = useState<"idle" | "loading" | "success" | "error">("idle");
   const [fanboxStatus, setFanboxStatus] = useState<"idle" | "loading" | "success" | "error">("idle");
+  const [reimportStatus, setReimportStatus] = useState<"idle" | "loading" | "success" | "error">("idle");
+  const [reimportCount, setReimportCount] = useState(0);
 
   const [pixivUser, setPixivUser] = useState<UserData | null>(null);
   const [fanboxUser, setFanboxUser] = useState<UserData | null>(null);
@@ -34,7 +41,7 @@ export function AuthSettings() {
         const savedPixiv = await store.get<string>("pixiv_refresh_token");
         if (savedPixiv) {
           try {
-            const user: UserData = await invoke("verify_pixiv_token", { refreshToken: savedPixiv });
+            const user = await verifyPixivToken<UserData>(savedPixiv);
             setPixivUser(user);
             setPixivStatus("success");
           } catch (e) {
@@ -48,10 +55,7 @@ export function AuthSettings() {
         const savedUA = await store.get<string>("fanbox_user_agent");
         if (savedFanbox && savedUA) {
           try {
-            const user: UserData = await invoke("verify_fanbox_session", {
-              sessionId: savedFanbox,
-              userAgent: savedUA
-            });
+            const user = await verifyFanboxSession<UserData>(savedFanbox, savedUA);
             setFanboxUser(user);
             setFanboxStatus("success");
           } catch (e) {
@@ -76,7 +80,7 @@ export function AuthSettings() {
     setPixivStatus("loading");
     setErrorMsg("");
     try {
-      const [token, user] = await invoke<[string, UserData]>("login_pixiv_webview");
+      const [token, user] = await loginPixivWebview<[string, UserData]>();
       setPixivUser(user);
       setPixivStatus("success");
       await store.set("pixiv_refresh_token", token);
@@ -96,7 +100,7 @@ export function AuthSettings() {
     setFanboxStatus("loading");
     setErrorMsg("");
     try {
-      const [cookieStr, user, ua] = await invoke<[string, UserData, string]>("login_fanbox_webview");
+      const [cookieStr, user, ua] = await loginFanboxWebview<[string, UserData, string]>();
 
       setFanboxUser(user);
       setFanboxStatus("success");
@@ -112,7 +116,7 @@ export function AuthSettings() {
   const logoutPixiv = async () => {
     if (!isTauriRuntime()) return;
 
-    const isConfirmed = await ask(
+    const isConfirmed = await askDialog(
       "Pixivとの連携を解除しますか？\n保存されている認証トークンが削除されます。",
       { title: "連携解除の確認", kind: "warning", okLabel: "連携を解除", cancelLabel: "キャンセル" }
     );
@@ -130,7 +134,7 @@ export function AuthSettings() {
   const logoutFanbox = async () => {
     if (!isTauriRuntime()) return;
 
-    const isConfirmed = await ask(
+    const isConfirmed = await askDialog(
       "FANBOXとの連携を解除しますか？\n保存されているセッション資格情報が削除されます。",
       { title: "連携解除の確認", kind: "warning", okLabel: "連携を解除", cancelLabel: "キャンセル" }
     );
@@ -146,8 +150,33 @@ export function AuthSettings() {
     }
   };
 
+  const handleReimportLibrary = async () => {
+    if (!isTauriRuntime()) {
+      setErrorMsg("この操作はTauriアプリ内でのみ利用できます。");
+      return;
+    }
+
+    const isConfirmed = await askDialog(
+      "ローカルの downloads フォルダ内にある作品データをスキャンし、ライブラリのデータベース情報を再構築します。\nこの操作により、現在のライブラリ情報と検索インデックスは一度クリアされ、ローカルファイル群から完全に再インポートされます。よろしいですか？",
+      { title: "ライブラリの再構築・インポート", kind: "warning", okLabel: "インポートを実行", cancelLabel: "キャンセル" }
+    );
+    if (!isConfirmed) return;
+
+    setReimportStatus("loading");
+    setErrorMsg("");
+    try {
+      const count = await scanAndReimportDownloads();
+      setReimportCount(count);
+      setReimportStatus("success");
+      await messageDialog(`ライブラリの再構築・インポートが完了しました！\n復元された作品: ${count} 件`, { title: "インポート完了", kind: "info" });
+    } catch (err: any) {
+      setReimportStatus("error");
+      setErrorMsg(err.toString());
+    }
+  };
+
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem', width: '100%' }}>
+    <div className="flex w-full flex-col gap-5">
       {errorMsg && (
         <div className="error-banner">
           <AlertIcon />
@@ -156,12 +185,12 @@ export function AuthSettings() {
       )}
 
       {/* Pixiv Auth */}
-      <div className="card">
-        <div className="section-title" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+      <Card className="p-5">
+        <div className="section-title flex items-center gap-2">
           <PaletteIcon />
           Pixiv 連携
-          {pixivStatus === "success" && <span className="status-badge connected">連携済み</span>}
-          {pixivStatus === "error" && <span className="status-badge error" style={{ backgroundColor: 'rgba(239, 68, 68, 0.15)', color: '#ef4444', border: '1px solid rgba(239, 68, 68, 0.25)' }}>セッション切れ</span>}
+          {pixivStatus === "success" && <Badge className="status-badge connected">連携済み</Badge>}
+          {pixivStatus === "error" && <Badge variant="destructive" className="status-badge error">セッション切れ</Badge>}
         </div>
 
         <p className="section-desc">
@@ -169,13 +198,13 @@ export function AuthSettings() {
           取得したトークンはローカルに安全に保存されます。
         </p>
 
-        <button className="primary" onClick={loginPixiv} disabled={pixivStatus === "loading"} style={{ width: '100%' }}>
+        <Button type="button" className="w-full" onClick={loginPixiv} disabled={pixivStatus === "loading"}>
           {pixivStatus === "loading" ? "待機中..." : (pixivStatus === "success" ? "再連携する" : "Pixiv と連携を開始")}
-        </button>
+        </Button>
 
         {pixivStatus === "success" && pixivUser && (
-          <div className="result" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+          <div className="result flex items-center justify-between gap-3">
+            <div className="flex min-w-0 items-center gap-3">
               {pixivUser.profile_image_urls?.medium && (
                 <img src={pixivUser.profile_image_urls.medium} alt="Avatar" className="avatar" />
               )}
@@ -184,20 +213,20 @@ export function AuthSettings() {
                 <span className="user-id">ID: {pixivUser.id}</span>
               </div>
             </div>
-            <button className="btn-disconnect" onClick={logoutPixiv}>
+            <Button type="button" variant="outline" size="sm" onClick={logoutPixiv}>
               連携を解除
-            </button>
+            </Button>
           </div>
         )}
-      </div>
+      </Card>
 
       {/* FANBOX Auth */}
-      <div className="card">
-        <div className="section-title" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+      <Card className="p-5">
+        <div className="section-title flex items-center gap-2">
           <HeartIcon />
           FANBOX 連携
-          {fanboxStatus === "success" && <span className="status-badge connected">連携済み</span>}
-          {fanboxStatus === "error" && <span className="status-badge error" style={{ backgroundColor: 'rgba(239, 68, 68, 0.15)', color: '#ef4444', border: '1px solid rgba(239, 68, 68, 0.25)' }}>セッション切れ</span>}
+          {fanboxStatus === "success" && <Badge className="status-badge connected">連携済み</Badge>}
+          {fanboxStatus === "error" && <Badge variant="destructive" className="status-badge error">セッション切れ</Badge>}
         </div>
 
         <p className="section-desc">
@@ -205,13 +234,13 @@ export function AuthSettings() {
           セッション情報を自動的に取得します。
         </p>
 
-        <button className="primary" onClick={loginFanbox} disabled={fanboxStatus === "loading"} style={{ width: '100%' }}>
+        <Button type="button" className="w-full" onClick={loginFanbox} disabled={fanboxStatus === "loading"}>
           {fanboxStatus === "loading" ? "待機中..." : (fanboxStatus === "success" ? "再連携する" : "FANBOX と連携を開始")}
-        </button>
+        </Button>
 
         {fanboxStatus === "success" && fanboxUser && (
-          <div className="result" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+          <div className="result flex items-center justify-between gap-3">
+            <div className="flex min-w-0 items-center gap-3">
               {fanboxUser.iconUrl && (
                 <img src={fanboxUser.iconUrl} alt="Avatar" className="avatar" />
               )}
@@ -220,12 +249,40 @@ export function AuthSettings() {
                 <span className="user-id">ID: {fanboxUser.userId}</span>
               </div>
             </div>
-            <button className="btn-disconnect" onClick={logoutFanbox}>
+            <Button type="button" variant="outline" size="sm" onClick={logoutFanbox}>
               連携を解除
-            </button>
+            </Button>
           </div>
         )}
-      </div>
+      </Card>
+
+      {/* Library Reconstruction */}
+      <Card className="mt-2 p-5">
+        <div className="section-title flex items-center gap-2">
+          <Database size={18} className="text-primary" />
+          ローカルライブラリの再構築
+          {reimportStatus === "success" && <Badge variant="secondary" className="status-badge connected">再構築完了</Badge>}
+        </div>
+
+        <p className="section-desc">
+          ローカルフォルダ（downloads）を再走査し、保存されている作品データ（JSON、表紙、イラスト等）からデータベースおよび検索インデックスを完全に復元します。
+        </p>
+
+        <Button
+          type="button"
+          className="w-full"
+          onClick={handleReimportLibrary}
+          disabled={reimportStatus === "loading"}
+        >
+          {reimportStatus === "loading" ? "再構築中 (しばらくお待ちください)..." : "ローカルライブラリを再構築・インポート"}
+        </Button>
+
+        {reimportStatus === "success" && (
+          <div className="result mt-3 border-l-4 border-primary pl-3 text-sm text-muted-foreground">
+            前回の再構築により、合計 <strong>{reimportCount}</strong> 件の小説作品がライブラリに正常に復元されました。
+          </div>
+        )}
+      </Card>
     </div>
   );
 }

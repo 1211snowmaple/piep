@@ -1,0 +1,5 @@
+@layer components {
+  .update-sidebar [data-slot="card"] {
+    min-width: 0;
+  }
+}

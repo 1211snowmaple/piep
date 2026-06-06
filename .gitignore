@@ -27,6 +27,11 @@ dist-ssr
 src-tauri/target/
 target/
 
+# Local ML model caches
+src-tauri/.fastembed_cache/
+.fastembed_cache/
+*.onnx
+
 # App local download storage (Piep downloaded novels/assets/database)
 downloads/
 *.db

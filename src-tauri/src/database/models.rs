@@ -13,7 +13,7 @@ pub struct DownloadEntry {
     pub author_name: String,
     pub author_id: String,
     pub content_type: String,
-    pub tags: Option<String>,
+    pub tags: Vec<String>,
     pub excerpt: Option<String>,
     pub cover_path: Option<String>,
     pub json_path: String,
@@ -33,8 +33,11 @@ pub struct DownloadEntry {
     pub series_id: Option<String>,
     pub series_title: Option<String>,
     pub search_score: Option<f64>,
-    pub match_snippet: Option<String>,
     pub match_fields: Vec<String>,
+    pub score_reasons: Vec<ScoreReason>,
+    pub match_highlights: Vec<SearchHighlight>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sort_key: Option<String>,
 }
 
 /// 作者/クリエイター統合エンティティ
@@ -108,6 +111,98 @@ pub struct AssetEntry {
     pub file_size_bytes: i64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScoreReason {
+    pub field: String,
+    pub match_type: String,
+    pub term: String,
+    pub contribution: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchHighlight {
+    pub field: String,
+    pub text: String,
+    pub segments: Vec<SearchHighlightSegment>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_chunk_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub match_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchHighlightSegment {
+    pub text: String,
+    pub matched: bool,
+}
+
+/// Local edit revision for a saved work.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkEditRevision {
+    pub id: i64,
+    pub download_id: i64,
+    pub base_version: i64,
+    pub status: String,
+    pub title: Option<String>,
+    pub content_hash: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// A block in the local editor document.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkBlock {
+    pub id: i64,
+    pub edit_revision_id: i64,
+    pub order: i64,
+    pub block_type: String,
+    pub text: Option<String>,
+    pub asset_id: Option<i64>,
+    pub attrs_json: Option<String>,
+}
+
+/// Input shape for saving editor blocks from the frontend.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkBlockInput {
+    pub block_type: String,
+    pub text: Option<String>,
+    pub asset_id: Option<i64>,
+    pub attrs_json: Option<String>,
+}
+
+/// Read-optimized document payload for the dedicated reader.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReaderDocument {
+    pub download: DownloadEntry,
+    pub assets: Vec<AssetEntry>,
+    pub versions: Vec<DownloadVersion>,
+    pub html: String,
+    pub plain_text: String,
+    pub is_edited: bool,
+    pub active_edit_revision: Option<WorkEditRevision>,
+}
+
+/// Edit-optimized document payload for the block editor.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EditorDocument {
+    pub download: DownloadEntry,
+    pub assets: Vec<AssetEntry>,
+    pub active_revision: Option<WorkEditRevision>,
+    pub draft_revision: Option<WorkEditRevision>,
+    pub base_version: i64,
+    pub blocks: Vec<WorkBlock>,
+}
+
 /// データベースの統計情報
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -119,6 +214,38 @@ pub struct DbStats {
     pub total_size_bytes: i64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DashboardTrendPoint {
+    pub bucket: String,
+    pub count: i64,
+    pub total_size_bytes: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceBreakdown {
+    pub source: String,
+    pub count: i64,
+    pub total_size_bytes: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DashboardSummary {
+    pub stats: DbStats,
+    pub favorite_count: i64,
+    pub watched_count: i64,
+    pub update_target_count: i64,
+    pub indexed_count: i64,
+    pub pending_index_count: i64,
+    pub top_tags: Vec<FacetCount>,
+    pub top_authors: Vec<FacetCount>,
+    pub recent_downloads: Vec<DownloadEntry>,
+    pub source_breakdown: Vec<SourceBreakdown>,
+    pub monthly_downloads: Vec<DashboardTrendPoint>,
+}
+
 /// フィルター候補（名前と件数）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -127,12 +254,29 @@ pub struct FacetCount {
     pub count: i64,
 }
 
+/// 作者・シリーズカードで使うエンティティ候補
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EntityFacet {
+    pub source: String,
+    pub source_key: String,
+    pub display_name: String,
+    pub count: i64,
+    pub cover_path: Option<String>,
+    pub description: Option<String>,
+    pub updated_at: Option<String>,
+    pub latest_downloaded_at: Option<String>,
+    pub sample_title: Option<String>,
+}
+
 /// ライブラリの絞り込みUIで使う候補一覧
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FilterFacets {
     pub tags: Vec<FacetCount>,
     pub authors: Vec<FacetCount>,
+    pub author_entities: Vec<EntityFacet>,
+    pub series: Vec<EntityFacet>,
     pub content_types: Vec<FacetCount>,
     pub asset_types: Vec<FacetCount>,
 }
@@ -165,6 +309,121 @@ pub struct UpdateTargetInput {
     pub display_name: String,
     pub enabled: bool,
     pub metadata_json: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateCredentials {
+    pub pixiv_refresh_token: Option<String>,
+    pub fanbox_cookie: Option<String>,
+    pub fanbox_user_agent: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateJobConcurrency {
+    pub fetch: Option<i64>,
+    pub save: Option<i64>,
+    pub collection: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartUpdateJobRequest {
+    pub scope: String,
+    pub mode: String,
+    pub work_ids: Option<Vec<i64>>,
+    pub target_ids: Option<Vec<i64>>,
+    pub credentials: Option<UpdateCredentials>,
+    pub concurrency: Option<UpdateJobConcurrency>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateJobSummary {
+    pub job_id: String,
+    pub status: String,
+    pub scope: String,
+    pub mode: String,
+    pub totals: i64,
+    pub processed: i64,
+    pub candidate_count: i64,
+    pub saved_count: i64,
+    pub error_count: i64,
+    pub active_label: Option<String>,
+    pub started_at: String,
+    pub updated_at: String,
+    pub finished_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateJobLog {
+    pub id: i64,
+    pub log_type: String,
+    pub message: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateJobCandidate {
+    pub id: i64,
+    pub key: String,
+    pub source: String,
+    pub source_id: String,
+    pub title: String,
+    pub subtitle: String,
+    pub target_label: String,
+    pub target_type: String,
+    pub selected: bool,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateJobSnapshot {
+    pub job_id: String,
+    pub status: String,
+    pub scope: String,
+    pub mode: String,
+    pub totals: i64,
+    pub processed: i64,
+    pub candidate_count: i64,
+    pub saved_count: i64,
+    pub error_count: i64,
+    pub active_label: Option<String>,
+    pub logs: Vec<UpdateJobLog>,
+    pub candidates: Vec<UpdateJobCandidate>,
+    pub started_at: String,
+    pub updated_at: String,
+    pub finished_at: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct UpdateJobItem {
+    pub id: i64,
+    pub job_id: String,
+    pub item_type: String,
+    pub source: Option<String>,
+    pub source_id: Option<String>,
+    pub target_type: Option<String>,
+    pub title: String,
+    pub payload_json: String,
+    pub status: String,
+    pub error: Option<String>,
+    pub result_download_id: Option<i64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct UpdateJobItemInput {
+    pub item_type: String,
+    pub source: Option<String>,
+    pub source_id: Option<String>,
+    pub target_type: Option<String>,
+    pub title: String,
+    pub payload_json: String,
+    pub status: String,
 }
 
 /// 保存作品と著者・シリーズの関係
@@ -201,17 +460,17 @@ pub struct DownloadSeries {
     pub content_order: Option<i64>,
 }
 
-/// 検索パラメータ
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct SearchParams {
+pub struct SearchV2Params {
+    pub text: Option<String>,
     pub query: Option<String>,
     pub source: Option<String>,
     pub content_type: Option<String>,
     pub sort_by: Option<String>,
     pub sort_order: Option<String>,
     pub limit: Option<i64>,
-    pub offset: Option<i64>,
+    pub cursor: Option<String>,
     pub favorite: Option<bool>,
     pub tags_include: Option<Vec<String>>,
     pub tags_exclude: Option<Vec<String>>,
@@ -226,7 +485,61 @@ pub struct SearchParams {
     pub person_key: Option<String>,
     pub series_source: Option<String>,
     pub series_key: Option<String>,
+    pub view_mode: Option<String>,
+    pub projection: Option<String>,
     pub search_mode: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchMeta {
+    pub engine: String,
+    pub query: Option<String>,
+    pub total_estimate: Option<i64>,
+    pub index_complete: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub semantic_index_complete: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub semantic_model_ready: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchV2Result {
+    pub items: Vec<DownloadEntry>,
+    pub next_cursor: Option<String>,
+    pub total_estimate: Option<i64>,
+    pub search_meta: SearchMeta,
+    pub facets_version: i64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchSuggestParams {
+    pub text: Option<String>,
+    pub limit: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchSuggestion {
+    pub kind: String,
+    pub label: String,
+    pub value: String,
+    pub count: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchSuggestResult {
+    pub items: Vec<SearchSuggestion>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BulkMutationResult {
+    pub matched_count: i64,
+    pub changed_count: i64,
 }
 
 /// Smart Search インデックスの構築状況
@@ -237,6 +550,13 @@ pub struct SearchIndexStatus {
     pub indexed_downloads: i64,
     pub pending_downloads: i64,
     pub is_complete: bool,
+    pub phase: String,
+    pub indexed_chunks: i64,
+    pub semantic_indexed_chunks: i64,
+    pub semantic_model_ready: bool,
+    pub embedding_provider: String,
+    pub gpu_enabled: bool,
+    pub throughput_per_sec: Option<f64>,
 }
 
 /// インポート情報（新規ダウンロード挿入用）
@@ -248,7 +568,7 @@ pub struct NewDownload {
     pub author_name: String,
     pub author_id: String,
     pub content_type: String,
-    pub tags: Option<String>,
+    pub tags: Vec<String>,
     pub excerpt: Option<String>,
     pub cover_path: Option<String>,
     pub json_path: String,

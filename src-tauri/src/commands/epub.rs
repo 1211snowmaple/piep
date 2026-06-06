@@ -27,6 +27,53 @@ fn emit_progress(app: &tauri::AppHandle, progress: &ExportProgress) {
     let _ = app.emit("epub-export-progress", progress);
 }
 
+fn apply_active_edit_to_epub_data(
+    state: &Arc<AppState>,
+    download_id: i64,
+    source: &str,
+    data: &mut serde_json::Value,
+) {
+    let Ok(reader) = state.db.get_reader_document(download_id, None) else {
+        return;
+    };
+    if !reader.is_edited || reader.plain_text.trim().is_empty() {
+        return;
+    }
+
+    if source == "pixiv" {
+        data["text"] = serde_json::Value::String(reader.plain_text.clone());
+        if let Some(detail) = data
+            .get_mut("detail")
+            .and_then(|value| value.as_object_mut())
+        {
+            detail.insert(
+                "text".to_string(),
+                serde_json::Value::String(reader.plain_text.clone()),
+            );
+        }
+    } else if source == "fanbox" {
+        let blocks = reader
+            .plain_text
+            .split("\n\n")
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(|text| {
+                serde_json::json!({
+                    "type": "p",
+                    "text": text,
+                })
+            })
+            .collect::<Vec<_>>();
+        if let Some(body) = data.get_mut("body").and_then(|value| value.as_object_mut()) {
+            body.insert("blocks".to_string(), serde_json::Value::Array(blocks));
+            body.insert(
+                "text".to_string(),
+                serde_json::Value::String(reader.plain_text),
+            );
+        }
+    }
+}
+
 // ============================================================
 // 単体エクスポート
 // ============================================================
@@ -39,7 +86,7 @@ pub async fn export_epub(
     output_path: String,
     compress_options: Option<ImageCompressOptions>,
 ) -> Result<String, String> {
-    let state = app.state::<Arc<AppState>>();
+    let state = app.state::<Arc<AppState>>().inner().clone();
     let dl = state.db.get_download(download_id)?;
     let tm = get_template_manager(&app)?;
     tm.initialize_defaults()?;
@@ -70,6 +117,7 @@ pub async fn export_epub(
         .map_err(|e| format!("JSONの読み込みに失敗: {}", e))?;
     let mut data: serde_json::Value =
         serde_json::from_str(&json_content).map_err(|e| format!("JSON パースエラー: {}", e))?;
+    apply_active_edit_to_epub_data(&state, download_id, &dl.source, &mut data);
 
     let json_dir = std::path::Path::new(&target_json_path).parent().unwrap();
     let assets_dir = json_dir.join("data_assets");
@@ -280,6 +328,7 @@ pub async fn export_epub_batch(
                 .map_err(|e| format!("JSON読み込み失敗: {}", e))?;
             let mut data: serde_json::Value = serde_json::from_str(&json_content)
                 .map_err(|e| format!("JSONパース失敗: {}", e))?;
+            apply_active_edit_to_epub_data(&state, *dl_id, &dl.source, &mut data);
             let json_dir = std::path::Path::new(&target_json_path).parent().unwrap();
             let assets_dir = json_dir.join("data_assets");
 

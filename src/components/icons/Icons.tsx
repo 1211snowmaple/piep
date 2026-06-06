@@ -445,3 +445,79 @@ export function PanelRightIcon({ className = "", style }: { className?: string; 
     </svg>
   );
 }
+
+export function GalleryIcon({ className = "", style }: { className?: string; style?: React.CSSProperties } = {}) {
+  return (
+    <svg
+      className={className}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      style={{ width: "16px", height: "16px", flexShrink: 0, ...style }}
+    >
+      <rect x="3" y="3" width="7" height="7" />
+      <rect x="14" y="3" width="7" height="7" />
+      <rect x="14" y="14" width="7" height="7" />
+      <rect x="3" y="14" width="7" height="7" />
+    </svg>
+  );
+}
+
+export function CompactIcon({ className = "", style }: { className?: string; style?: React.CSSProperties } = {}) {
+  return (
+    <svg
+      className={className}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      style={{ width: "16px", height: "16px", flexShrink: 0, ...style }}
+    >
+      <line x1="3" y1="6" x2="21" y2="6" />
+      <line x1="3" y1="12" x2="21" y2="12" />
+      <line x1="3" y1="18" x2="21" y2="18" />
+    </svg>
+  );
+}
+
+export function CheckSquareIcon({ className = "", style }: { className?: string; style?: React.CSSProperties } = {}) {
+  return (
+    <svg className={className} width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, ...style }}>
+      <polyline points="9 11 12 14 22 4" />
+      <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+    </svg>
+  );
+}
+
+export function SquareIcon({ className = "", style }: { className?: string; style?: React.CSSProperties } = {}) {
+  return (
+    <svg className={className} width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, ...style }}>
+      <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+    </svg>
+  );
+}
+
+export function CheckSquaresIcon({ className = "", style }: { className?: string; style?: React.CSSProperties } = {}) {
+  return (
+    <svg className={`nav-icon ${className}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ width: "18px", height: "18px", flexShrink: 0, ...style }}>
+      <path d="M9 20h9a2 2 0 0 0 2-2V9" />
+      <path d="M13 5H7a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-6" />
+      <polyline points="9 11 12 14 20 6" />
+    </svg>
+  );
+}
+
+export function SquaresIcon({ className = "", style }: { className?: string; style?: React.CSSProperties } = {}) {
+  return (
+    <svg className={`nav-icon ${className}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ width: "18px", height: "18px", flexShrink: 0, ...style }}>
+      <path d="M9 20h9a2 2 0 0 0 2-2V9" />
+      <rect x="5" y="5" width="12" height="12" rx="2" ry="2" />
+    </svg>
+  );
+}
+

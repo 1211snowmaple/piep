@@ -4,3 +4,4 @@ pub mod browser;
 pub mod database;
 pub mod downloader;
 pub mod epub;
+pub mod update_jobs;

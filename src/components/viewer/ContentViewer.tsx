@@ -1,14 +1,36 @@
 import { useState, useEffect, useMemo } from "react";
-import { invoke } from "@tauri-apps/api/core";
-import { ask, open } from "@tauri-apps/plugin-dialog";
-import { openPath, openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
-import { store } from "../../store";
+import { BookOpen, Edit3 } from "lucide-react";
 import { ExportIcon, FileIcon, ImageIcon, FolderIcon, SyncIcon, RefreshIcon, LinkIcon, TrashIcon, BookIcon } from "../icons/Icons";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Slider } from "@/components/ui/slider";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { startUpdateJob, waitForUpdateJob } from "@/features/updates/updateJobs";
+import {
+  deleteDownload,
+  deleteVersion,
+  getAssetUrl,
+  getAssets,
+  getDownload,
+  getDownloadHtml,
+  getVersions,
+  openLocalAsset,
+  readFileContent,
+  setFavorite as setFavoriteDb,
+  setWatchUpdates as setWatchUpdatesDb,
+} from "@/services/dbApi";
+import { exportSingle } from "@/services/archiveApi";
+import { askDialog, openSingleDialog } from "@/services/dialogApi";
+import { openExternalUrl, openFilesystemPath, revealPathInFileManager } from "@/services/openerApi";
+import { cn } from "@/lib/utils";
 
 interface DownloadEntry {
   id: number; source: string; sourceId: string; title: string;
   authorName: string; authorId: string; contentType: string;
-  tags: string | null; coverPath: string | null; jsonPath: string;
+  tags: string[]; coverPath: string | null; jsonPath: string;
   originalJsonPath: string | null; assetCount: number; fileSizeBytes: number;
   downloadedAt: string; sourceCreatedAt: string | null;
   contentHash: string | null;
@@ -51,6 +73,8 @@ interface Props {
   onViewPerson?: (source: string, sourceKey: string) => void;
   onViewSeries?: (source: string, sourceKey: string) => void;
   onExportEpub?: (download: DownloadEntry) => void;
+  onRead?: () => void;
+  onEdit?: () => void;
   isEpubActive?: boolean;
   onNavigateInternalUrl?: (url: string) => void;
   onOpenSourceUrl?: (url: string) => void;
@@ -155,7 +179,7 @@ function renderSafeRichText(text: string): string {
   return root ? Array.from(root.childNodes).map(renderNode).join("") : renderText(normalized);
 }
 
-export function ContentViewer({ downloadId, showToast, onSelectTagFilter, onViewPerson, onViewSeries, onExportEpub, isEpubActive, onNavigateInternalUrl, onOpenSourceUrl, onDeleted }: Props) {
+export function ContentViewer({ downloadId, showToast, onSelectTagFilter, onViewPerson, onViewSeries, onExportEpub, onRead, onEdit, isEpubActive, onNavigateInternalUrl, onOpenSourceUrl, onDeleted }: Props) {
   const [dl, setDl] = useState<DownloadEntry | null>(null);
   const [assets, setAssets] = useState<AssetEntry[]>([]);
   const [jsonContent, setJsonContent] = useState("");
@@ -192,7 +216,7 @@ export function ContentViewer({ downloadId, showToast, onSelectTagFilter, onView
           onNavigateInternalUrl?.(targetUrl);
         } else {
           // Open in system default browser
-          openUrl(href).catch(err => {
+          openExternalUrl(href).catch(err => {
             console.error("Failed to open external URL in system browser:", err);
           });
         }
@@ -237,9 +261,9 @@ export function ContentViewer({ downloadId, showToast, onSelectTagFilter, onView
 
   const reloadMetadata = async (nextSelectedVersion?: number | null) => {
     const [download, assetList, versionList] = await Promise.all([
-      invoke<DownloadEntry>("db_get_download", { id: downloadId }),
-      invoke<AssetEntry[]>("db_get_assets", { downloadId }),
-      invoke<DownloadVersion[]>("db_get_versions", { downloadId }),
+      getDownload<DownloadEntry>(downloadId),
+      getAssets<AssetEntry[]>(downloadId),
+      getVersions<DownloadVersion[]>(downloadId),
     ]);
     setDl(download);
     setAssets(assetList);
@@ -346,9 +370,9 @@ export function ContentViewer({ downloadId, showToast, onSelectTagFilter, onView
     const loadMetadata = async () => {
       try {
         const [download, assetList, versionList] = await Promise.all([
-          invoke<DownloadEntry>("db_get_download", { id: downloadId }),
-          invoke<AssetEntry[]>("db_get_assets", { downloadId }),
-          invoke<DownloadVersion[]>("db_get_versions", { downloadId }),
+          getDownload<DownloadEntry>(downloadId),
+          getAssets<AssetEntry[]>(downloadId),
+          getVersions<DownloadVersion[]>(downloadId),
         ]);
         setDl(download);
         setAssets(assetList);
@@ -398,8 +422,8 @@ export function ContentViewer({ downloadId, showToast, onSelectTagFilter, onView
         const afterJsonPath = getPathForVersion(diffAfterVersion);
 
         const [beforeJson, afterJson] = await Promise.all([
-          invoke<string>("read_file_content", { path: beforeJsonPath }),
-          invoke<string>("read_file_content", { path: afterJsonPath })
+          readFileContent(beforeJsonPath),
+          readFileContent(afterJsonPath)
         ]);
 
         const extractText = (jsonStr: string) => {
@@ -521,7 +545,7 @@ export function ContentViewer({ downloadId, showToast, onSelectTagFilter, onView
         }
 
         try {
-          const rawOrigContent = await invoke<string>("read_file_content", { path: targetOrigPath });
+          const rawOrigContent = await readFileContent(targetOrigPath);
           setJsonContent(rawOrigContent);
         } catch (err) {
           console.warn("Failed to load original JSON, falling back to modified data.json:", err);
@@ -531,16 +555,13 @@ export function ContentViewer({ downloadId, showToast, onSelectTagFilter, onView
             const ver = versions.find(v => v.version === selectedVersion);
             if (ver) fallbackPath = ver.jsonPath;
           }
-          const content = await invoke<string>("read_file_content", { path: fallbackPath });
+          const content = await readFileContent(fallbackPath);
           setJsonContent(content);
         }
 
         // B. オンザフライで動的HTMLをパース取得 (本文タブ用)
         try {
-          const html = await invoke<string>("db_get_download_html", {
-            downloadId: dl.id,
-            version: selectedVersion
-          });
+          const html = await getDownloadHtml(dl.id, selectedVersion);
           setParsedHtml(html);
         } catch (err) {
           console.error("Failed to parse dynamic HTML:", err);
@@ -554,7 +575,7 @@ export function ContentViewer({ downloadId, showToast, onSelectTagFilter, onView
             const ver = versions.find(v => v.version === selectedVersion);
             if (ver) targetPath = ver.jsonPath;
           }
-          const content = await invoke<string>("read_file_content", { path: targetPath });
+          const content = await readFileContent(targetPath);
           const parsed = JSON.parse(content);
           let text = "";
 
@@ -588,13 +609,12 @@ export function ContentViewer({ downloadId, showToast, onSelectTagFilter, onView
 
   const handleExport = async () => {
     try {
-      const dir = await open({
+      const dir = await openSingleDialog({
         title: "保存先フォルダを選択",
         directory: true,
-        multiple: false
       });
       if (!dir) return;
-      const outputDir = await invoke<string>("export_single", { downloadId, destDir: dir });
+      const outputDir = await exportSingle(downloadId, dir);
       showToast(`保存しました: ${outputDir}`, "success");
     } catch (e: any) { showToast(`ファイル保存エラー: ${e}`, "error"); }
   };
@@ -603,7 +623,7 @@ export function ContentViewer({ downloadId, showToast, onSelectTagFilter, onView
     if (!dl) return;
     try {
       const nextWatch = !watchUpdates;
-      await invoke("db_set_watch_updates", { downloadId, watch: nextWatch });
+      await setWatchUpdatesDb(downloadId, nextWatch);
       setWatchUpdates(nextWatch);
       showToast(nextWatch ? "この作品の更新確認を有効にしました" : "この作品の更新確認を解除しました", "success");
     } catch (e: any) {
@@ -615,7 +635,7 @@ export function ContentViewer({ downloadId, showToast, onSelectTagFilter, onView
     if (!dl) return;
     try {
       const nextFav = !favorite;
-      await invoke("db_set_favorite", { downloadId, favorite: nextFav });
+      await setFavoriteDb(downloadId, nextFav);
       setFavorite(nextFav);
       showToast(nextFav ? "お気に入りに追加しました" : "お気に入りから削除しました", "success");
     } catch (e: any) {
@@ -628,9 +648,9 @@ export function ContentViewer({ downloadId, showToast, onSelectTagFilter, onView
     try {
       const dirPath = dl.jsonPath.replace(/[/\\][^/\\]+$/, "");
       try {
-        await revealItemInDir(dl.jsonPath);
+        await revealPathInFileManager(dl.jsonPath);
       } catch {
-        await openPath(dirPath);
+        await openFilesystemPath(dirPath);
       }
       showToast("ローカルフォルダを開きました", "success");
     } catch (e) {
@@ -641,7 +661,7 @@ export function ContentViewer({ downloadId, showToast, onSelectTagFilter, onView
 
   const handleOpenAsset = async (path: string) => {
     try {
-      await invoke("open_local_asset", { path });
+      await openLocalAsset(path);
     } catch (e) {
       console.error("Failed to open asset file:", e);
       showToast(`ファイルを開けませんでした: ${e}`, "error");
@@ -651,80 +671,19 @@ export function ContentViewer({ downloadId, showToast, onSelectTagFilter, onView
   const handleCheckUpdate = async () => {
     if (!dl) return;
     setIsCheckingUpdate(true);
-    showToast("最新情報の取得中...", "info");
+    showToast("この作品の更新ジョブを開始します...", "info");
     try {
-      if (dl.source === "pixiv") {
-        const refreshToken = await store.get<string>("pixiv_refresh_token");
-        if (!refreshToken) {
-          showToast("Pixivの連携が設定されていません。設定画面でログインしてください。", "error");
-          setIsCheckingUpdate(false);
-          return;
-        }
-        const novelUrl = `https://www.pixiv.net/novel/show.php?id=${dl.sourceId}`;
-        const data = await invoke<any>("fetch_pixiv_novel_by_url", { url: novelUrl, refreshToken });
-        
-        const title = data.detail?.title || data.title || dl.title;
-        const author = data.detail?.user?.name || data.user?.name || dl.authorName;
-        const authorId = String(data.detail?.user?.id || data.user?.id || dl.authorId);
-        
-        const extractTags = (novel: any) => {
-          const directTags = novel.tags || [];
-          const detailTags = novel.detail?.tags;
-          if (Array.isArray(detailTags)) {
-            return detailTags.map((t: any) => typeof t === "string" ? t : t.name);
-          } else if (detailTags && typeof detailTags === "object" && "tags" in detailTags) {
-            return (detailTags.tags as any[]).map((t: any) => t.name);
-          }
-          return directTags.map((t: any) => typeof t === "string" ? t : t.name);
-        };
-        const tagsList = extractTags(data);
-        
-        const resolvedExcerptText = data.caption || data.detail?.caption || null;
-        
-        const updated = await invoke<DownloadEntry>("download_and_save", {
-          data, source: "pixiv", sourceId: dl.sourceId, title, authorName: author, authorId,
-          contentType: "novel", tags: tagsList, excerpt: resolvedExcerptText,
-          sourceCreatedAt: data.detail?.create_date || data.detail?.createDate || data.create_date || data.createDate || null,
-          cookie: null,
-          userAgent: null,
-        });
-        
-        if (updated.currentVersion > dl.currentVersion) {
-          showToast(`アップデートを検出しました！ v${dl.currentVersion} ➔ v${updated.currentVersion}`, "success");
-          // Reload metadata
-          await reloadMetadata();
-        } else {
-          showToast("すでに最新バージョンです（更新はありませんでした）", "success");
-        }
-      } else if (dl.source === "fanbox") {
-        const cookie = await store.get<string>("fanbox_session_id");
-        const ua = await store.get<string>("fanbox_user_agent");
-        if (!cookie || !ua) {
-          showToast("FANBOXの連携が設定されていません。設定画面でログインしてください。", "error");
-          setIsCheckingUpdate(false);
-          return;
-        }
-        const data = await invoke<any>("fetch_fanbox_post", { postId: dl.sourceId, cookie, userAgent: ua });
-        
-        const title = data.title || dl.title;
-        const author = data.user?.name || dl.authorName;
-        const authorId = data.creatorId || data.user?.userId || dl.authorId;
-        const tagsList = data.tags || [];
-        const resolvedExcerptText = data.excerpt || data.body?.excerpt || null;
-        
-        const updated = await invoke<DownloadEntry>("download_and_save", {
-          data, source: "fanbox", sourceId: dl.sourceId, title, authorName: author, authorId,
-          contentType: data.type || "article", tags: tagsList, excerpt: resolvedExcerptText,
-          sourceCreatedAt: data.publishedDatetime || null, cookie, userAgent: ua,
-        });
-        
-        if (updated.currentVersion > dl.currentVersion) {
-          showToast(`アップデートを検出しました！ v${dl.currentVersion} ➔ v${updated.currentVersion}`, "success");
-          // Reload metadata
-          await reloadMetadata();
-        } else {
-          showToast("すでに最新バージョンです（更新はありませんでした）", "success");
-        }
+      const started = await startUpdateJob({ scope: "work", mode: "auto_save", workIds: [dl.id] });
+      const completed = await waitForUpdateJob(started.jobId);
+      if (completed.status === "completed" && completed.savedCount > 0) {
+        showToast("アップデートを保存しました", "success");
+        await reloadMetadata();
+      } else if (completed.status === "completed") {
+        showToast("すでに最新バージョンです（更新はありませんでした）", "success");
+      } else if (completed.status === "auth_required") {
+        showToast("認証情報が必要です。設定を確認して更新管理から再開してください。", "error");
+      } else if (completed.status === "failed") {
+        showToast(`更新ジョブで ${completed.errorCount} 件のエラーが発生しました`, "error");
       }
     } catch (e: any) {
       console.error("Update check failed:", e);
@@ -742,7 +701,7 @@ export function ContentViewer({ downloadId, showToast, onSelectTagFilter, onView
     const message = deletingWork
       ? `「${dl.title}」を完全に削除します。保存済みJSONとアセットファイルも削除されます。`
       : `v${selectedVersion} を削除します。保存済みJSONとアセットフォルダも削除されます。${isCurrent ? "\n最新バージョンを削除するため、直前のバージョンを最新として復元します。" : ""}`;
-    const ok = await ask(message, {
+    const ok = await askDialog(message, {
       title: deletingWork ? "作品削除の確認" : "バージョン削除の確認",
       kind: "warning",
       okLabel: "削除する",
@@ -753,11 +712,11 @@ export function ContentViewer({ downloadId, showToast, onSelectTagFilter, onView
     setIsDeletingVersion(true);
     try {
       if (deletingWork) {
-        await invoke("db_delete_download", { id: dl.id });
+        await deleteDownload(dl.id);
         showToast("作品を削除しました", "success");
         onDeleted?.();
       } else {
-        await invoke("db_delete_version", { downloadId: dl.id, version: selectedVersion });
+        await deleteVersion(dl.id, selectedVersion);
         showToast(`v${selectedVersion} を削除しました`, "success");
         await reloadMetadata();
       }
@@ -770,7 +729,7 @@ export function ContentViewer({ downloadId, showToast, onSelectTagFilter, onView
 
   if (!dl) return <div className="content-viewer-loading"><div className="spinner" /></div>;
 
-  const tags = dl.tags ? JSON.parse(dl.tags) as string[] : [];
+  const tags = Array.isArray(dl.tags) ? dl.tags : [];
   const imageAssets = assets.filter(a => a.mimeType?.startsWith("image/"));
   const fileAssets = assets.filter(a => !a.mimeType?.startsWith("image/"));
 
@@ -782,78 +741,115 @@ export function ContentViewer({ downloadId, showToast, onSelectTagFilter, onView
           <div className="viewer-action-group version-update-group">
             {versions.length > 0 && (
               <div className="version-selector">
-                <span style={{ fontSize: "12px", color: "var(--color-text-secondary)" }}>Ver</span>
-                <select
-                  className="version-select-box"
-                  value={selectedVersion || dl.currentVersion}
-                  onChange={(e) => setSelectedVersion(Number(e.target.value))}
+                <span className="text-xs text-muted-foreground">Ver</span>
+                <Select
+                  value={String(selectedVersion || dl.currentVersion)}
+                  onValueChange={(value) => setSelectedVersion(Number(value))}
                 >
+                  <SelectTrigger className="version-select-box h-8 w-auto min-w-40">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
                   {versions.map(v => (
-                    <option key={v.id} value={v.version}>
+                    <SelectItem key={v.id} value={String(v.version)}>
                       v{v.version} ({new Date(v.createdAt).toLocaleDateString("ja-JP")}) {v.version === dl.currentVersion ? "(最新)" : ""}
-                    </option>
+                    </SelectItem>
                   ))}
-                </select>
+                  </SelectContent>
+                </Select>
               </div>
             )}
-            <button
-              className="icon-btn"
+            <Button
+              type="button"
+              variant="outline"
+              size="icon"
               onClick={handleCheckUpdate}
               disabled={isCheckingUpdate}
               title="最新情報を取得して更新確認を行います"
             >
               {isCheckingUpdate ? (
-                <span className="spinner-mini" style={{ display: "inline-block" }} />
+                <span className="spinner-mini inline-block" />
               ) : (
                 <RefreshIcon />
               )}
-            </button>
-            <button
-              className="icon-btn"
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="icon"
               onClick={handleOpenSourceInBrowser}
               title="保存元ページをアプリ内ブラウザで開きます"
               disabled={!onOpenSourceUrl}
             >
               <LinkIcon />
-            </button>
+            </Button>
           </div>
           <div className="viewer-action-group file-action-group">
-            <button
-              className="icon-btn"
+            <Button
+              type="button"
+              variant="outline"
+              size="icon"
               onClick={handleDeleteSelectedVersion}
               disabled={isDeletingVersion || selectedVersion === null}
               title={versions.length <= 1 ? "作品を完全に削除します" : "閲覧中のバージョンを削除します"}
             >
               {isDeletingVersion ? (
-                <span className="spinner-mini" style={{ display: "inline-block" }} />
+                <span className="spinner-mini inline-block" />
               ) : (
                 <TrashIcon />
               )}
-            </button>
-            <button
-              className="icon-btn"
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="icon"
               onClick={handleOpenFolder}
               title="保存先のフォルダを開きます"
             >
               <FolderIcon />
-            </button>
-            <button
-              className="icon-btn"
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="icon"
               onClick={handleExport}
               title="この作品のテキストや画像などの物理ファイルを指定したフォルダに保存します"
             >
               <ExportIcon />
-            </button>
+            </Button>
           </div>
           {onExportEpub && (
             <div className="viewer-action-group epub-action-group">
-              <button 
-                className={`icon-btn sidebar-toggle-btn ${isEpubActive ? "primary" : ""}`} 
+              <Button
+                type="button"
+                variant="secondary"
+                size="icon"
+                onClick={onRead}
+                title="読書に特化した画面で開きます"
+                disabled={!onRead}
+              >
+                <BookOpen size={17} />
+              </Button>
+              <Button
+                type="button"
+                variant="secondary"
+                size="icon"
+                onClick={onEdit}
+                title="本文や挿絵を編集します"
+                disabled={!onEdit}
+              >
+                <Edit3 size={17} />
+              </Button>
+              <Button
+                type="button"
+                variant={isEpubActive ? "default" : "secondary"}
+                size="icon"
+                className={cn(isEpubActive && "shadow-md")}
                 onClick={() => onExportEpub(dl)}
                 title={isEpubActive ? "EPUB設定サイドバーを閉じます" : "EPUB設定サイドバーを開きます"}
               >
                 <BookIcon />
-              </button>
+              </Button>
             </div>
           )}
         </div>
@@ -897,16 +893,18 @@ export function ContentViewer({ downloadId, showToast, onSelectTagFilter, onView
           </div>
         )}
         <div className="viewer-metadata-container">
-          <span className={`source-tag ${dl.source}`}>{dl.source === "pixiv" ? "Pixiv" : "FANBOX"}</span>
+          <Badge className={cn("source-tag", dl.source)}>{dl.source === "pixiv" ? "Pixiv" : "FANBOX"}</Badge>
           {dl.seriesId && dl.seriesTitle && (
-            <button
+            <Button
               type="button"
+              variant="link"
+              size="sm"
               className="viewer-series-link"
               onClick={() => onViewSeries?.(dl.source, dl.seriesId!)}
               title="シリーズページを開く"
             >
               {dl.seriesTitle}
-            </button>
+            </Button>
           )}
           <h2>{dl.title}</h2>
           <p 
@@ -919,14 +917,15 @@ export function ContentViewer({ downloadId, showToast, onSelectTagFilter, onView
           {tags.length > 0 && (
             <div className="tag-list">
               {tags.map((t, i) => (
-                <span 
+                <Badge
                   key={i} 
+                  variant="outline"
                   className="tag clickable-meta"
                   onClick={() => onSelectTagFilter?.(t)}
                   title={`タグ #${t} でライブラリを検索`}
                 >
                   #{t}
-                </span>
+                </Badge>
               ))}
             </div>
           )}
@@ -938,25 +937,30 @@ export function ContentViewer({ downloadId, showToast, onSelectTagFilter, onView
                 className={`viewer-description-box ${isDescriptionExpanded ? "expanded" : "collapsed"}`}
                 dangerouslySetInnerHTML={{ __html: resolvedExcerpt }}
               />
-              <button 
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
                 className="description-toggle-btn"
                 onClick={() => setIsDescriptionExpanded(!isDescriptionExpanded)}
               >
                 {isDescriptionExpanded ? "閉じる ▲" : "続きを読む ▼"}
-              </button>
+              </Button>
             </div>
           )}
         </div>
       </div>
 
       {/* Tabs */}
-      <div className="viewer-tabs">
-        <button className={`tab ${tab === "overview" ? "active" : ""}`} onClick={() => setTab("overview")}>概要</button>
-        {textContent && <button className={`tab ${tab === "text" ? "active" : ""}`} onClick={() => setTab("text")}>本文</button>}
-        <button className={`tab ${tab === "assets" ? "active" : ""}`} onClick={() => setTab("assets")}>アセット ({assets.length})</button>
-        <button className={`tab ${tab === "json" ? "active" : ""}`} onClick={() => setTab("json")}>JSON</button>
-        <button className={`tab ${tab === "diff" ? "active" : ""}`} onClick={() => setTab("diff")}>差分</button>
-      </div>
+      <Tabs value={tab} onValueChange={value => setTab(value as Tab)}>
+        <TabsList className="viewer-tabs">
+          <TabsTrigger value="overview">概要</TabsTrigger>
+          {textContent && <TabsTrigger value="text">本文</TabsTrigger>}
+          <TabsTrigger value="assets">アセット ({assets.length})</TabsTrigger>
+          <TabsTrigger value="json">JSON</TabsTrigger>
+          <TabsTrigger value="diff">差分</TabsTrigger>
+        </TabsList>
+      </Tabs>
 
       {/* Tab content */}
       <div className={`viewer-content tab-${tab} ${
@@ -964,7 +968,7 @@ export function ContentViewer({ downloadId, showToast, onSelectTagFilter, onView
       }`}>
         {tab === "overview" && (
           <div className="overview-grid">
-            <div className="info-table">
+            <Card className="info-table">
               <div className="info-row"><span>ソース</span><span>{dl.source}</span></div>
               <div className="info-row"><span>ID</span><span>{dl.sourceId}</span></div>
               <div className="info-row">
@@ -994,11 +998,11 @@ export function ContentViewer({ downloadId, showToast, onSelectTagFilter, onView
               <div className="info-row"><span>最新バージョン</span><span>v{dl.currentVersion}</span></div>
               <div className="info-row"><span>閲覧中バージョン</span><span>v{selectedVersion}</span></div>
               <div className="info-row"><span>本文文字数</span><span>{dl.textLength ? `${dl.textLength.toLocaleString()} 文字` : "不明"}</span></div>
-              <div className="info-row"><span>コンテンツハッシュ</span><span style={{ fontFamily: "monospace", fontSize: "11px", wordBreak: "break-all" }}>{dl.contentHash || "未算出"}</span></div>
+              <div className="info-row"><span>コンテンツハッシュ</span><span className="break-all font-mono text-[11px]">{dl.contentHash || "未算出"}</span></div>
               <div className="info-row"><span>ダウンロード日</span><span>{formatDateTime(dl.downloadedAt)}</span></div>
               {sourcePublishedAt && <div className="info-row"><span>投稿日</span><span>{formatDateTime(sourcePublishedAt)}</span></div>}
               {sourceUpdatedAt && <div className="info-row"><span>更新日</span><span>{formatDateTime(sourceUpdatedAt)}</span></div>}
-            </div>
+            </Card>
           </div>
         )}
 
@@ -1031,7 +1035,10 @@ export function ContentViewer({ downloadId, showToast, onSelectTagFilter, onView
               <div className="reader-pagination">
                 {pages.length > 1 ? (
                   <>
-                    <button 
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
                       className="pagination-btn"
                       disabled={currentPage === 1}
                       onClick={() => {
@@ -1039,21 +1046,24 @@ export function ContentViewer({ downloadId, showToast, onSelectTagFilter, onView
                       }}
                     >
                       前へ
-                    </button>
+                    </Button>
                     
                     {Array.from({ length: pages.length }).map((_, idx) => {
                       const pNum = idx + 1;
                       if (pNum === 1 || pNum === pages.length || Math.abs(pNum - currentPage) <= 2) {
                         return (
-                          <button 
+                          <Button
+                            type="button"
+                            variant={currentPage === pNum ? "secondary" : "outline"}
+                            size="sm"
                             key={pNum}
-                            className={`pagination-btn ${currentPage === pNum ? "active" : ""}`}
+                            className={cn("pagination-btn", currentPage === pNum && "active")}
                             onClick={() => {
                               setCurrentPage(pNum);
                             }}
                           >
                             {pNum}
-                          </button>
+                          </Button>
                         );
                       } else if (pNum === 2 || pNum === pages.length - 1) {
                         return <span key={`ellipsis-${pNum}`} className="pagination-ellipsis">...</span>;
@@ -1061,7 +1071,10 @@ export function ContentViewer({ downloadId, showToast, onSelectTagFilter, onView
                       return null;
                     })}
 
-                    <button 
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
                       className="pagination-btn"
                       disabled={currentPage === pages.length}
                       onClick={() => {
@@ -1069,7 +1082,7 @@ export function ContentViewer({ downloadId, showToast, onSelectTagFilter, onView
                       }}
                     >
                       次へ
-                    </button>
+                    </Button>
                   </>
                 ) : (
                   <span className="pagination-single-page">1 / 1 ページ</span>
@@ -1078,13 +1091,16 @@ export function ContentViewer({ downloadId, showToast, onSelectTagFilter, onView
 
               {/* 右側のAa設定アクション (ポップオーバー内包) */}
               <div className="pagination-right-actions">
-                <button 
-                  className={`aa-toggle-btn ${showAaPopup ? "active" : ""}`}
+                <Button
+                  type="button"
+                  variant={showAaPopup ? "secondary" : "outline"}
+                  size="sm"
+                  className={cn("aa-toggle-btn", showAaPopup && "active")}
                   onClick={() => setShowAaPopup(!showAaPopup)}
                   title="表示設定 (Aa)"
                 >
                   Aa
-                </button>
+                </Button>
 
                 {showAaPopup && (
                   <div className="aa-popover-panel">
@@ -1094,24 +1110,33 @@ export function ContentViewer({ downloadId, showToast, onSelectTagFilter, onView
                     <div className="popover-section">
                       <span className="popover-label">背景</span>
                       <div className="popover-btn-group">
-                        <button 
-                          className={`popover-btn ${theme === "white" ? "active" : ""}`}
+                        <Button
+                          type="button"
+                          variant={theme === "white" ? "secondary" : "outline"}
+                          size="sm"
+                          className={cn("popover-btn", theme === "white" && "active")}
                           onClick={() => setTheme("white")}
                         >
                           白
-                        </button>
-                        <button 
-                          className={`popover-btn ${theme === "sepia" ? "active" : ""}`}
+                        </Button>
+                        <Button
+                          type="button"
+                          variant={theme === "sepia" ? "secondary" : "outline"}
+                          size="sm"
+                          className={cn("popover-btn", theme === "sepia" && "active")}
                           onClick={() => setTheme("sepia")}
                         >
                           茶
-                        </button>
-                        <button 
-                          className={`popover-btn ${theme === "dark" ? "active" : ""}`}
+                        </Button>
+                        <Button
+                          type="button"
+                          variant={theme === "dark" ? "secondary" : "outline"}
+                          size="sm"
+                          className={cn("popover-btn", theme === "dark" && "active")}
                           onClick={() => setTheme("dark")}
                         >
                           黒
-                        </button>
+                        </Button>
                       </div>
                     </div>
 
@@ -1119,51 +1144,55 @@ export function ContentViewer({ downloadId, showToast, onSelectTagFilter, onView
                     <div className="popover-section">
                       <span className="popover-label">書体</span>
                       <div className="popover-btn-group">
-                        <button 
-                          className={`popover-btn ${fontFamily === "serif" ? "active" : ""}`}
+                        <Button
+                          type="button"
+                          variant={fontFamily === "serif" ? "secondary" : "outline"}
+                          size="sm"
+                          className={cn("popover-btn", fontFamily === "serif" && "active")}
                           onClick={() => setFontFamily("serif")}
                         >
                           明朝
-                        </button>
-                        <button 
-                          className={`popover-btn ${fontFamily === "sans" ? "active" : ""}`}
+                        </Button>
+                        <Button
+                          type="button"
+                          variant={fontFamily === "sans" ? "secondary" : "outline"}
+                          size="sm"
+                          className={cn("popover-btn", fontFamily === "sans" && "active")}
                           onClick={() => setFontFamily("sans")}
                         >
                           ゴシック
-                        </button>
+                        </Button>
                       </div>
                     </div>
 
                     {/* 3. 文字サイズ (スライダー形式へ進化) */}
                     <div className="popover-section">
-                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "4px" }}>
-                        <span className="popover-label" style={{ marginBottom: 0 }}>文字サイズ</span>
+                      <div className="mb-1 flex items-center justify-between gap-3">
+                        <span className="popover-label mb-0">文字サイズ</span>
                         <span className="popover-val">{fontSize}px</span>
                       </div>
-                      <input 
-                        type="range" 
-                        min="13" 
-                        max="24" 
-                        step="1" 
-                        value={fontSize} 
-                        onChange={(e) => setFontSize(parseInt(e.target.value))}
+                      <Slider
+                        min={13}
+                        max={24}
+                        step={1}
+                        value={[fontSize]}
+                        onValueChange={([next]) => setFontSize(next)}
                         className="popover-slider"
                       />
                     </div>
 
                     {/* 4. 行間 (スライダー形式) */}
-                    <div className="popover-section" style={{ borderBottom: "none", paddingBottom: 0, marginBottom: 0 }}>
-                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "4px" }}>
-                        <span className="popover-label" style={{ marginBottom: 0 }}>行間</span>
+                    <div className="popover-section mb-0 border-b-0 pb-0">
+                      <div className="mb-1 flex items-center justify-between gap-3">
+                        <span className="popover-label mb-0">行間</span>
                         <span className="popover-val">{lineHeight.toFixed(2)}</span>
                       </div>
-                      <input 
-                        type="range" 
-                        min="1.4" 
-                        max="2.2" 
-                        step="0.05" 
-                        value={lineHeight} 
-                        onChange={(e) => setLineHeight(parseFloat(e.target.value))}
+                      <Slider
+                        min={1.4}
+                        max={2.2}
+                        step={0.05}
+                        value={[lineHeight]}
+                        onValueChange={([next]) => setLineHeight(next)}
                         className="popover-slider"
                       />
                     </div>
@@ -1181,10 +1210,10 @@ export function ContentViewer({ downloadId, showToast, onSelectTagFilter, onView
                 <h4><ImageIcon /> 画像 ({imageAssets.length})</h4>
                 <div className="asset-grid">
                   {imageAssets.map(a => (
-                    <div key={a.id} className="asset-item image" onClick={() => setSelectedImage(a.localPath)}>
+                    <Card key={a.id} className="asset-item image" onClick={() => setSelectedImage(a.localPath)}>
                       <LazyImage localPath={a.localPath} alt={a.filename} />
                       <span>{a.filename}</span>
-                    </div>
+                    </Card>
                   ))}
                 </div>
               </div>
@@ -1193,17 +1222,16 @@ export function ContentViewer({ downloadId, showToast, onSelectTagFilter, onView
               <div className="asset-section">
                 <h4><FileIcon /> ファイル ({fileAssets.length})</h4>
                 {fileAssets.map(a => (
-                  <div 
+                  <Card
                     key={a.id} 
                     className="asset-item file clickable-file"
                     onClick={() => handleOpenAsset(a.localPath)}
                     title="クリックしてファイルを開く"
-                    style={{ cursor: "pointer" }}
                   >
                     <FolderIcon />
                     <span className="asset-name">{a.filename}</span>
                     <span className="asset-size">{(a.fileSizeBytes / 1024).toFixed(1)} KB</span>
-                  </div>
+                  </Card>
                 ))}
               </div>
             )}
@@ -1217,97 +1245,17 @@ export function ContentViewer({ downloadId, showToast, onSelectTagFilter, onView
         )}
 
         {tab === "diff" && (
-          <div className="diff-viewer">
-            {versions.length <= 1 ? (
-              <div className="diff-empty" style={{ textAlign: "center", padding: "40px", color: "var(--color-text-secondary)" }}>
-                <p style={{ fontSize: "16px", fontWeight: "bold" }}>バージョンが1つのため差分はありません</p>
-                <p style={{ fontSize: "12px", marginTop: "8px" }}>この作品に新しいバージョン（更新）がダウンロードされると、ここに変更点の比較が表示されます。</p>
-              </div>
-            ) : (
-              <div className="diff-container" style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
-                {/* 差分バージョンセレクターツールバー */}
-                <div className="diff-toolbar" style={{ display: "flex", alignItems: "center", gap: "12px", padding: "8px 12px", background: "var(--color-bg-sidebar)", borderRadius: "6px", flexWrap: "wrap" }}>
-                  <div className="select-wrapper" style={{ display: "flex", alignItems: "center", gap: "6px" }}>
-                    <span style={{ fontSize: "12px", color: "var(--color-text-secondary)" }}>比較元 (Before):</span>
-                    <select
-                      className="version-select-box"
-                      value={diffBeforeVersion || ""}
-                      onChange={(e) => setDiffBeforeVersion(Number(e.target.value))}
-                    >
-                      {versions.map(v => (
-                        <option key={v.id} value={v.version}>v{v.version}</option>
-                      ))}
-                    </select>
-                  </div>
-                  <span style={{ color: "var(--color-text-secondary)" }}>➔</span>
-                  <div className="select-wrapper" style={{ display: "flex", alignItems: "center", gap: "6px" }}>
-                    <span style={{ fontSize: "12px", color: "var(--color-text-secondary)" }}>比較先 (After):</span>
-                    <select
-                      className="version-select-box"
-                      value={diffAfterVersion || ""}
-                      onChange={(e) => setDiffAfterVersion(Number(e.target.value))}
-                    >
-                      {versions.map(v => (
-                        <option key={v.id} value={v.version}>v{v.version} {v.version === dl.currentVersion ? "(最新)" : ""}</option>
-                      ))}
-                    </select>
-                  </div>
-                  {diffBeforeVersion === diffAfterVersion && (
-                    <span style={{ fontSize: "11px", color: "red", marginLeft: "auto" }}>
-                      ⚠️ 同じバージョンが選択されています。差分は発生しません。
-                    </span>
-                  )}
-                </div>
-
-                {/* 差分本文表示エリア */}
-                {loadingDiff ? (
-                  <div className="diff-loading" style={{ textAlign: "center", padding: "40px" }}>
-                    <div className="spinner-mini" style={{ margin: "0 auto 10px" }} />
-                    <span>差分を算出中...</span>
-                  </div>
-                ) : (
-                  <div className="diff-reader" style={{ background: "var(--color-bg-main)", borderRadius: "8px", border: "1px solid var(--color-border)", padding: "16px", overflowY: "auto", maxHeight: "65vh" }}>
-                    <div className="novel-diff-text" style={{ fontFamily: "inherit", lineHeight: "1.8", fontSize: "15px" }}>
-                      {diffLines(diffBeforeContent, diffAfterContent).map((line, idx) => {
-                        let bgColor = "transparent";
-                        let textColor = "inherit";
-                        let prefix = "";
-
-                        if (line.type === "added") {
-                          bgColor = "rgba(46, 160, 67, 0.15)";
-                          textColor = "#2ea043";
-                          prefix = "+ ";
-                        } else if (line.type === "removed") {
-                          bgColor = "rgba(248, 81, 198, 0.15)";
-                          textColor = "#f851c6";
-                          prefix = "- ";
-                        }
-
-                        return (
-                          <div
-                            key={idx}
-                            style={{
-                              backgroundColor: bgColor,
-                              color: textColor,
-                              padding: "2px 8px",
-                              margin: "2px 0",
-                              borderRadius: "4px",
-                              whiteSpace: "pre-wrap",
-                              display: "flex",
-                              gap: "4px"
-                            }}
-                          >
-                            <span style={{ opacity: 0.5, userSelect: "none", width: "16px", flexShrink: 0 }}>{prefix}</span>
-                            <span>{line.text || "\u00A0"}</span>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
+          <DiffViewer
+            versions={versions}
+            currentVersion={dl.currentVersion}
+            beforeVersion={diffBeforeVersion}
+            afterVersion={diffAfterVersion}
+            beforeContent={diffBeforeContent}
+            afterContent={diffAfterContent}
+            loading={loadingDiff}
+            onBeforeVersionChange={setDiffBeforeVersion}
+            onAfterVersionChange={setDiffAfterVersion}
+          />
         )}
       </div>
 
@@ -1324,18 +1272,8 @@ export function ContentViewer({ downloadId, showToast, onSelectTagFilter, onView
 // ---------------------------------------------------------------------------
 
 function LazyImage({ localPath, alt, className }: { localPath: string; alt?: string; className?: string }) {
-  const [src, setSrc] = useState<string | null>(null);
   const [orientation, setOrientation] = useState<"wide" | "tall" | "square">("square");
-
-  useEffect(() => {
-    let active = true;
-    invoke<string>("read_image_base64", { path: localPath })
-      .then(b64 => {
-        if (active) setSrc(b64);
-      })
-      .catch(e => console.error("LazyImage error:", e));
-    return () => { active = false; };
-  }, [localPath]);
+  const src = useMemo(() => getAssetUrl(localPath), [localPath]);
 
   if (!src) {
     return <div className="thumb-placeholder"><ImageIcon /></div>;
@@ -1356,17 +1294,7 @@ function LazyImage({ localPath, alt, className }: { localPath: string; alt?: str
 }
 
 function Lightbox({ localPath, onClose }: { localPath: string; onClose: () => void }) {
-  const [src, setSrc] = useState<string | null>(null);
-
-  useEffect(() => {
-    let active = true;
-    invoke<string>("read_image_base64", { path: localPath })
-      .then(b64 => {
-        if (active) setSrc(b64);
-      })
-      .catch(e => console.error("Lightbox error:", e));
-    return () => { active = false; };
-  }, [localPath]);
+  const src = useMemo(() => getAssetUrl(localPath), [localPath]);
 
   return (
     <div className="lightbox" onClick={onClose}>
@@ -1417,6 +1345,131 @@ function diffLines(oldText: string, newText: string) {
   return result;
 }
 
+function DiffViewer({
+  versions,
+  currentVersion,
+  beforeVersion,
+  afterVersion,
+  beforeContent,
+  afterContent,
+  loading,
+  onBeforeVersionChange,
+  onAfterVersionChange,
+}: {
+  versions: DownloadVersion[];
+  currentVersion: number;
+  beforeVersion: number | null;
+  afterVersion: number | null;
+  beforeContent: string;
+  afterContent: string;
+  loading: boolean;
+  onBeforeVersionChange: (version: number | null) => void;
+  onAfterVersionChange: (version: number | null) => void;
+}) {
+  const lines = useMemo(() => diffLines(beforeContent, afterContent), [beforeContent, afterContent]);
+  const addedCount = lines.filter(line => line.type === "added").length;
+  const removedCount = lines.filter(line => line.type === "removed").length;
+  const sameVersion = beforeVersion !== null && beforeVersion === afterVersion;
+
+  if (versions.length <= 1) {
+    return (
+      <div className="diff-viewer">
+        <Card className="diff-empty p-10 text-center text-muted-foreground">
+          <p className="text-base font-bold text-foreground">バージョンが1つのため差分はありません</p>
+          <p className="mt-2 text-xs">この作品に新しいバージョン（更新）がダウンロードされると、ここに変更点の比較が表示されます。</p>
+        </Card>
+      </div>
+    );
+  }
+
+  return (
+    <div className="diff-viewer">
+      <div className="diff-container flex flex-col gap-4">
+        <Card className="diff-toolbar flex flex-wrap items-center gap-3 p-3">
+          <div className="select-wrapper flex items-center gap-2">
+            <span className="text-xs text-muted-foreground">比較元 (Before):</span>
+            <Select
+              value={beforeVersion == null ? "__none__" : String(beforeVersion)}
+              onValueChange={(value) => onBeforeVersionChange(value === "__none__" ? null : Number(value))}
+            >
+              <SelectTrigger className="version-select-box h-8 w-auto min-w-24">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__none__">未選択</SelectItem>
+              {versions.map(version => (
+                <SelectItem key={version.id} value={String(version.version)}>v{version.version}</SelectItem>
+              ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <span className="text-muted-foreground">-&gt;</span>
+          <div className="select-wrapper flex items-center gap-2">
+            <span className="text-xs text-muted-foreground">比較先 (After):</span>
+            <Select
+              value={afterVersion == null ? "__none__" : String(afterVersion)}
+              onValueChange={(value) => onAfterVersionChange(value === "__none__" ? null : Number(value))}
+            >
+              <SelectTrigger className="version-select-box h-8 w-auto min-w-24">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__none__">未選択</SelectItem>
+              {versions.map(version => (
+                <SelectItem key={version.id} value={String(version.version)}>
+                  v{version.version} {version.version === currentVersion ? "(最新)" : ""}
+                </SelectItem>
+              ))}
+              </SelectContent>
+            </Select>
+          </div>
+          {sameVersion ? (
+            <Badge variant="destructive" className="ml-auto">同じバージョン</Badge>
+          ) : (
+            <div className="ml-auto flex items-center gap-2">
+              <Badge variant="outline">+{addedCount}</Badge>
+              <Badge variant="outline">-{removedCount}</Badge>
+            </div>
+          )}
+        </Card>
+
+        {loading ? (
+          <Card className="diff-loading space-y-3 p-10">
+            <div className="flex flex-col items-center gap-3 text-sm text-muted-foreground">
+              <div className="spinner-mini" />
+              <span>差分を算出中...</span>
+            </div>
+            <Skeleton className="h-4 w-full" />
+            <Skeleton className="h-4 w-5/6" />
+            <Skeleton className="h-4 w-3/4" />
+          </Card>
+        ) : (
+          <Card className="diff-reader max-h-[65vh] overflow-y-auto p-4">
+            <div className="novel-diff-text font-[inherit] text-[15px] leading-[1.8]">
+              {lines.map((line, index) => {
+                const prefix = line.type === "added" ? "+ " : line.type === "removed" ? "- " : "";
+                return (
+                  <div
+                    key={`${line.type}-${index}`}
+                    className={cn(
+                      "my-0.5 flex gap-1 whitespace-pre-wrap rounded px-2 py-0.5",
+                      line.type === "added" && "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300",
+                      line.type === "removed" && "bg-rose-500/15 text-rose-700 dark:text-rose-300",
+                    )}
+                  >
+                    <span className="w-4 shrink-0 select-none opacity-50">{prefix}</span>
+                    <span>{line.text || "\u00A0"}</span>
+                  </div>
+                );
+              })}
+            </div>
+          </Card>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function ParsedHtmlRenderer({ html, onJump, onLinkClick }: { html: string; onJump?: (page: number) => void; onLinkClick?: (e: React.MouseEvent) => void }) {
   if (!html) return null;
 
@@ -1444,7 +1497,7 @@ function ParsedHtmlRenderer({ html, onJump, onLinkClick }: { html: string; onJum
     const alt = match.groups?.alt || "image";
     
     parts.push(
-      <div key={`img-${match.index}`} className="reader-image-container" style={{ margin: "24px 0", textAlign: "center" }}>
+      <div key={`img-${match.index}`} className="reader-image-container my-6 text-center">
         <LazyImage localPath={localPath} alt={alt} className="novel-embedded-image" />
       </div>
     );
@@ -1487,7 +1540,7 @@ function ParsedHtmlRenderer({ html, onJump, onLinkClick }: { html: string; onJum
       e.stopPropagation();
       const localPath = fileTarget.getAttribute("data-local-path");
       if (localPath) {
-        invoke("open_local_asset", { path: localPath }).catch(err => {
+        openLocalAsset(localPath).catch(err => {
           console.error("Failed to open local file:", err);
         });
       }

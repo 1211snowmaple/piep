@@ -1,5 +1,5 @@
 use crate::database::{
-    EntityVersion, NewAsset, NewDownload, NewVersion, SearchParams, SeriesEntry, UpdateTarget,
+    EntityVersion, NewAsset, NewDownload, NewVersion, SearchV2Params, SeriesEntry, UpdateTarget,
 };
 use crate::AppState;
 use serde::{Deserialize, Serialize};
@@ -59,7 +59,8 @@ struct BackupEntry {
     author_name: String,
     author_id: String,
     content_type: String,
-    tags: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_backup_tags")]
+    tags: Vec<String>,
     excerpt: Option<String>,
     relative_cover_path: Option<String>,
     watch_updates: bool,
@@ -73,6 +74,50 @@ struct BackupEntry {
     relations: Vec<BackupDownloadRelation>,
     people: Vec<BackupDownloadPerson>,
     series: Vec<BackupDownloadSeries>,
+}
+
+fn deserialize_backup_tags<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(value.map(tags_from_json_value).unwrap_or_default())
+}
+
+fn tags_from_json_value(value: serde_json::Value) -> Vec<String> {
+    match value {
+        serde_json::Value::Array(items) => items
+            .into_iter()
+            .filter_map(|item| match item {
+                serde_json::Value::String(tag) => Some(tag),
+                serde_json::Value::Object(mut obj) => match obj.remove("name") {
+                    Some(serde_json::Value::String(tag)) => Some(tag),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .map(|tag| tag.trim().to_string())
+            .filter(|tag| !tag.is_empty())
+            .collect(),
+        serde_json::Value::String(raw) => parse_legacy_tag_string(&raw),
+        _ => Vec::new(),
+    }
+}
+
+fn parse_legacy_tag_string(raw: &str) -> Vec<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        return tags_from_json_value(value);
+    }
+    trimmed
+        .replace(['[', ']', '"', '\''], "")
+        .split(',')
+        .map(|tag| tag.trim().to_string())
+        .filter(|tag| !tag.is_empty())
+        .collect()
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -294,15 +339,16 @@ fn safe_export_name(name: &str) -> String {
     }
 }
 
-fn all_backup_search_params() -> SearchParams {
-    SearchParams {
+fn all_backup_search_params() -> SearchV2Params {
+    SearchV2Params {
+        text: None,
         query: None,
         source: None,
         content_type: None,
         sort_by: None,
         sort_order: None,
         limit: Some(10000),
-        offset: Some(0),
+        cursor: None,
         favorite: None,
         tags_include: None,
         tags_exclude: None,
@@ -317,6 +363,8 @@ fn all_backup_search_params() -> SearchParams {
         person_key: None,
         series_source: None,
         series_key: None,
+        view_mode: Some("gallery".to_string()),
+        projection: Some("libraryGallery".to_string()),
         search_mode: None,
     }
 }
@@ -328,16 +376,16 @@ pub async fn export_all_zip_internal(state: Arc<AppState>, zip_path: String) -> 
 pub async fn export_zip_with_params_internal(
     state: Arc<AppState>,
     zip_path: String,
-    params: SearchParams,
+    params: SearchV2Params,
     scoped: bool,
 ) -> Result<(), String> {
     let storage = state.db.storage_dir().to_path_buf();
-    let app_data = storage
-        .parent()
-        .unwrap_or_else(|| storage.as_path())
-        .to_path_buf();
+    let app_data = storage.parent().unwrap_or(storage.as_path()).to_path_buf();
 
-    let all = state.db.search_downloads(&params)?;
+    let all = state
+        .db
+        .search_downloads_v2_internal(&params, 20_000)?
+        .items;
 
     tokio::task::spawn_blocking(move || {
         let file = std::fs::File::create(&zip_path).map_err(|e| e.to_string())?;
@@ -748,10 +796,7 @@ pub async fn import_zip(app: tauri::AppHandle, zip_path: String) -> Result<i64, 
 
 pub async fn import_zip_internal(state: Arc<AppState>, zip_path: String) -> Result<i64, String> {
     let storage = state.db.storage_dir().to_path_buf();
-    let app_data = storage
-        .parent()
-        .unwrap_or_else(|| storage.as_path())
-        .to_path_buf();
+    let app_data = storage.parent().unwrap_or(storage.as_path()).to_path_buf();
 
     // プレミアム最適化：ZIP解凍からDB挿入までの全同期処理を、非同期ワーカースレッドへ完璧に移譲
     tokio::task::spawn_blocking(move || {
@@ -1076,6 +1121,339 @@ pub async fn import_zip_internal(state: Arc<AppState>, zip_path: String) -> Resu
 }
 
 #[tauri::command]
+pub async fn scan_and_reimport_downloads(app: tauri::AppHandle) -> Result<i64, String> {
+    use crate::commands::downloader::{
+        collect_assets_recursive, compute_content_details, extract_series_content_order,
+        extract_series_relation,
+    };
+
+    let state = app.state::<Arc<AppState>>().inner().clone();
+    let storage = state.db.storage_dir().to_path_buf();
+
+    tokio::task::spawn_blocking(move || {
+        let mut total_imported = 0i64;
+
+        if !storage.exists() {
+            return Ok(0);
+        }
+
+        // Iterate through sources (e.g. "pixiv", "fanbox")
+        for source_entry in std::fs::read_dir(&storage).map_err(|e| e.to_string())? {
+            let source_entry = source_entry.map_err(|e| e.to_string())?;
+            let source_path = source_entry.path();
+            if !source_path.is_dir() {
+                continue;
+            }
+            let source = source_path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            if source != "pixiv" && source != "fanbox" {
+                continue;
+            }
+
+            // Iterate through work IDs (e.g. "123456")
+            for id_entry in std::fs::read_dir(&source_path).map_err(|e| e.to_string())? {
+                let id_entry = id_entry.map_err(|e| e.to_string())?;
+                let id_path = id_entry.path();
+                if !id_path.is_dir() {
+                    continue;
+                }
+                let source_id = id_path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
+
+                // Find version directories "v1", "v2", ...
+                let mut versions = Vec::new();
+                for ver_entry in std::fs::read_dir(&id_path).map_err(|e| e.to_string())? {
+                    let ver_entry = ver_entry.map_err(|e| e.to_string())?;
+                    let ver_path = ver_entry.path();
+                    if !ver_path.is_dir() {
+                        continue;
+                    }
+                    let ver_name = ver_path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string();
+                    if let Some(stripped) = ver_name.strip_prefix('v') {
+                        if let Ok(v_num) = stripped.parse::<i64>() {
+                            versions.push((v_num, ver_path));
+                        }
+                    }
+                }
+
+                // Sort versions ascendingly
+                versions.sort_by_key(|v| v.0);
+
+                if versions.is_empty() {
+                    continue;
+                }
+
+                // If already exists, delete first to re-import cleanly
+                if let Ok(Some(existing)) = state.db.get_download_by_source(&source, &source_id) {
+                    let _ = state.db.delete_download(existing.id);
+                }
+
+                let mut dl_id = None;
+
+                // Import each version
+                for (v_num, ver_path) in versions {
+                    let orig_json_path = ver_path.join("original.json");
+                    let data_json_path = ver_path.join("data.json");
+                    let json_file = if orig_json_path.exists() {
+                        orig_json_path
+                    } else if data_json_path.exists() {
+                        data_json_path
+                    } else {
+                        continue;
+                    };
+
+                    let content_str =
+                        std::fs::read_to_string(&json_file).map_err(|e| e.to_string())?;
+                    let data: serde_json::Value =
+                        serde_json::from_str(&content_str).map_err(|e| e.to_string())?;
+
+                    let (new_hash, new_text_len, new_source_updated) =
+                        compute_content_details(&data, &source);
+
+                    let title = data
+                        .get("title")
+                        .or_else(|| data.get("detail").and_then(|d| d.get("title")))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("Unknown Title")
+                        .to_string();
+
+                    let author_name = if source == "pixiv" {
+                        data.get("detail")
+                            .and_then(|d| d.get("user"))
+                            .and_then(|u| u.get("name"))
+                            .and_then(|v| v.as_str())
+                            .or_else(|| {
+                                data.get("user")
+                                    .and_then(|u| u.get("name"))
+                                    .and_then(|v| v.as_str())
+                            })
+                            .unwrap_or("Unknown User")
+                            .to_string()
+                    } else {
+                        data.get("user")
+                            .and_then(|u| u.get("name"))
+                            .and_then(|v| v.as_str())
+                            .or_else(|| data.get("creatorId").and_then(|v| v.as_str()))
+                            .unwrap_or("Unknown Creator")
+                            .to_string()
+                    };
+
+                    let author_id = if source == "pixiv" {
+                        let u_id = data
+                            .get("detail")
+                            .and_then(|d| d.get("user"))
+                            .and_then(|u| u.get("id"))
+                            .or_else(|| data.get("user").and_then(|u| u.get("id")));
+                        if let Some(uid) = u_id {
+                            if let Some(s) = uid.as_str() {
+                                s.to_string()
+                            } else if let Some(n) = uid.as_u64() {
+                                n.to_string()
+                            } else {
+                                "0".to_string()
+                            }
+                        } else {
+                            "0".to_string()
+                        }
+                    } else {
+                        let u_id = data
+                            .get("creatorId")
+                            .or_else(|| data.get("user").and_then(|u| u.get("userId")));
+                        if let Some(uid) = u_id {
+                            if let Some(s) = uid.as_str() {
+                                s.to_string()
+                            } else if let Some(n) = uid.as_u64() {
+                                n.to_string()
+                            } else {
+                                "0".to_string()
+                            }
+                        } else {
+                            "0".to_string()
+                        }
+                    };
+
+                    let content_type = if source == "pixiv" {
+                        "novel".to_string()
+                    } else {
+                        data.get("type")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("article")
+                            .to_string()
+                    };
+
+                    let mut tags_list = Vec::new();
+                    if let Some(tags_val) = data
+                        .get("tags")
+                        .or_else(|| data.get("detail").and_then(|d| d.get("tags")))
+                    {
+                        if let Some(arr) = tags_val.as_array() {
+                            for t in arr {
+                                if let Some(s) = t.as_str() {
+                                    tags_list.push(s.to_string());
+                                } else if let Some(s) = t.get("name").and_then(|n| n.as_str()) {
+                                    tags_list.push(s.to_string());
+                                }
+                            }
+                        }
+                    }
+                    let excerpt = data
+                        .get("excerpt")
+                        .or_else(|| data.get("detail").and_then(|d| d.get("excerpt")))
+                        .or_else(|| data.get("caption"))
+                        .or_else(|| data.get("detail").and_then(|d| d.get("caption")))
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+
+                    let source_created_at = if source == "pixiv" {
+                        data.get("detail")
+                            .and_then(|d| d.get("create_date").or_else(|| d.get("createDate")))
+                            .and_then(|v| v.as_str())
+                            .or_else(|| {
+                                data.get("create_date")
+                                    .or_else(|| data.get("createDate"))
+                                    .and_then(|v| v.as_str())
+                            })
+                            .map(|s| s.to_string())
+                    } else {
+                        data.get("publishedDatetime")
+                            .or_else(|| data.get("published_datetime"))
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string())
+                    };
+
+                    // Scan assets
+                    let assets_dir = ver_path.join("data_assets");
+                    let mut asset_entries = Vec::new();
+                    let mut total_size = content_str.len() as i64;
+                    let mut cover_path_str = None;
+
+                    if assets_dir.exists() {
+                        let _ = collect_assets_recursive(
+                            &assets_dir,
+                            &mut asset_entries,
+                            &mut total_size,
+                            &mut cover_path_str,
+                            0,
+                        );
+                    }
+
+                    let new_dl = NewDownload {
+                        source: source.clone(),
+                        source_id: source_id.clone(),
+                        title: title.clone(),
+                        author_name: author_name.clone(),
+                        author_id: author_id.clone(),
+                        content_type: content_type.clone(),
+                        tags: tags_list,
+                        excerpt,
+                        cover_path: cover_path_str,
+                        json_path: json_file.to_string_lossy().to_string(),
+                        original_json_path: Some(json_file.to_string_lossy().to_string()),
+                        asset_count: asset_entries.len() as i64,
+                        file_size_bytes: total_size,
+                        downloaded_at: chrono::Utc::now().to_rfc3339(),
+                        source_created_at,
+                        content_hash: Some(new_hash.clone()),
+                        text_length: new_text_len,
+                        source_updated_at: new_source_updated.clone(),
+                        watch_updates: false,
+                        current_version: v_num,
+                        favorite: false,
+                    };
+
+                    let registered_id = state.db.upsert_download(&new_dl)?;
+                    dl_id = Some(registered_id);
+
+                    // Re-upsert relations
+                    let _ = state.db.upsert_download_relation(
+                        registered_id,
+                        "author",
+                        &source,
+                        &author_id,
+                        &author_name,
+                    );
+                    let _ = state.db.upsert_download_person(
+                        registered_id,
+                        &source,
+                        &author_id,
+                        if source == "fanbox" {
+                            "creator"
+                        } else {
+                            "author"
+                        },
+                        &author_name,
+                    );
+
+                    if source == "pixiv" {
+                        if let Some((series_id, series_title)) = extract_series_relation(&data) {
+                            let _ = state.db.upsert_download_relation(
+                                registered_id,
+                                "series",
+                                &source,
+                                &series_id,
+                                &series_title,
+                            );
+                            let _ = state.db.upsert_download_series(
+                                registered_id,
+                                &source,
+                                &series_id,
+                                &series_title,
+                                extract_series_content_order(&data),
+                            );
+                        }
+                    }
+
+                    // Insert assets
+                    for mut asset in asset_entries {
+                        asset.download_id = registered_id;
+                        let _ = state.db.insert_asset(&asset);
+                    }
+
+                    // Insert version history record
+                    let change_summary = format!("インポート復元 (v{})", v_num);
+                    state.db.insert_version(&NewVersion {
+                        download_id: registered_id,
+                        version: v_num,
+                        content_hash: Some(new_hash),
+                        text_length: new_text_len,
+                        json_path: json_file.to_string_lossy().to_string(),
+                        original_json_path: Some(json_file.to_string_lossy().to_string()),
+                        asset_count: new_dl.asset_count,
+                        file_size_bytes: new_dl.file_size_bytes,
+                        created_at: new_dl.downloaded_at.clone(),
+                        change_summary: Some(change_summary),
+                    })?;
+                }
+
+                if let Some(registered_id) = dl_id {
+                    let _ = state.db.reindex_download(registered_id);
+                    total_imported += 1;
+                }
+            }
+        }
+
+        // Reconstruct people and series tables from downloads & download_relations directly using fast SQLite queries!
+        if total_imported > 0 {
+            state.db.reconstruct_entities_after_import()?;
+        }
+
+        Ok::<i64, String>(total_imported)
+    })
+    .await
+    .map_err(|e| format!("Reimport thread panicked: {}", e))?
+}
+
+#[tauri::command]
 pub async fn get_storage_path(app: tauri::AppHandle) -> Result<String, String> {
     let state = app.state::<Arc<AppState>>();
     Ok(state.db.storage_dir().to_string_lossy().to_string())
@@ -1138,7 +1516,7 @@ mod tests {
             author_name: "テスト著者".to_string(),
             author_id: "999".to_string(),
             content_type: "novel".to_string(),
-            tags: Some("[\"Tag1\", \"Tag2\"]".to_string()),
+            tags: vec!["Tag1".to_string(), "Tag2".to_string()],
             excerpt: Some("あらすじ".to_string()),
             cover_path: None,
             json_path: v2_json_path.to_string_lossy().to_string(),
