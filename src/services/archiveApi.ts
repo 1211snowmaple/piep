@@ -15,3 +15,7 @@ export function exportEntityZip(entityType: string, source: string, sourceKey: s
 export function importZip(zipPath: string): Promise<number> {
   return invoke<number>("import_zip", { zipPath });
 }
+
+export function getStoragePath(): Promise<string> {
+  return invoke<string>("get_storage_path");
+}

@@ -144,7 +144,9 @@ pub struct FanboxImageBody {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct FanboxPostList {
+    #[serde(default, alias = "posts")]
     pub items: Vec<FanboxPost>,
+    #[serde(default)]
     pub next_url: Option<String>,
 }
 
@@ -167,4 +169,24 @@ pub struct FlexibleResponse {
 #[serde(rename_all = "camelCase")]
 pub struct FanboxPaginatedCreatorPosts {
     pub body: serde_json::Value, // 各ページのAPI URLリスト（極めて堅牢にパースするためにValueに変更）
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FanboxPostList;
+
+    #[test]
+    fn post_list_accepts_current_posts_field() {
+        let list: FanboxPostList = serde_json::from_value(serde_json::json!({
+            "posts": [],
+            "nextUrl": "https://api.fanbox.cc/post.listCreator?page=2"
+        }))
+        .expect("current FANBOX creator list shape should deserialize");
+
+        assert!(list.items.is_empty());
+        assert_eq!(
+            list.next_url.as_deref(),
+            Some("https://api.fanbox.cc/post.listCreator?page=2")
+        );
+    }
 }

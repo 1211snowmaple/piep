@@ -644,6 +644,33 @@ fn first_json_string_at<'a>(value: &'a serde_json::Value, paths: &[&[&str]]) -> 
     paths.iter().find_map(|path| json_string_at(value, path))
 }
 
+fn collect_profile_links(
+    candidates: impl IntoIterator<Item = String>,
+    text: Option<&str>,
+) -> Vec<String> {
+    static URL_PATTERN: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(r#"https?://[^\s<>\"']+"#).expect("profile URL regex must compile")
+    });
+    let mut links = Vec::new();
+    let mut push = |candidate: &str| {
+        let trimmed = candidate
+            .trim()
+            .trim_end_matches(['.', ',', ')', ']', '}', '。', '、']);
+        if url::Url::parse(trimmed).is_ok() && !links.iter().any(|link| link == trimmed) {
+            links.push(trimmed.to_string());
+        }
+    };
+    for candidate in candidates {
+        push(&candidate);
+    }
+    if let Some(text) = text {
+        for matched in URL_PATTERN.find_iter(text) {
+            push(matched.as_str());
+        }
+    }
+    links
+}
+
 async fn fetch_pixiv_series_profile_json(
     source_key: &str,
     refresh_token: Option<&str>,
@@ -678,18 +705,31 @@ async fn fetch_pixiv_series_profile_json(
         })
         .unwrap_or(existing_title)
         .to_string();
-    let cover_url = novels.iter().find_map(|novel| {
-        first_json_string_at(
-            novel,
-            &[
-                &["image_urls", "large"],
-                &["imageUrls", "large"],
-                &["image_urls", "medium"],
-                &["imageUrls", "medium"],
-                &["coverUrl"],
-                &["cover_url"],
-            ],
-        )
+    let cover_url = first_json_string_at(
+        &value,
+        &[
+            &["novel_series_detail", "cover_image_urls", "large"],
+            &["novelSeriesDetail", "coverImageUrls", "large"],
+            &["novel_series_detail", "cover_image_urls", "medium"],
+            &["novelSeriesDetail", "coverImageUrls", "medium"],
+            &["novel_series_detail", "cover_url"],
+            &["novelSeriesDetail", "coverUrl"],
+        ],
+    )
+    .or_else(|| {
+        novels.iter().find_map(|novel| {
+            first_json_string_at(
+                novel,
+                &[
+                    &["image_urls", "large"],
+                    &["imageUrls", "large"],
+                    &["image_urls", "medium"],
+                    &["imageUrls", "medium"],
+                    &["coverUrl"],
+                    &["cover_url"],
+                ],
+            )
+        })
     });
     let description = first_json_string_at(
         &value,
@@ -851,14 +891,21 @@ pub async fn refresh_entity_profile(
                 .user_detail(user_id, None, true)
                 .await
                 .map_err(|e| e.to_string())?;
-            let links = [
-                format!("https://www.pixiv.net/users/{}", detail.user.id),
-                detail.profile.webpage.clone().unwrap_or_default(),
-                detail.profile.twitter_url.clone().unwrap_or_default(),
-            ]
-            .into_iter()
-            .filter(|s| !s.is_empty())
-            .collect::<Vec<String>>();
+            let links = collect_profile_links(
+                [
+                    format!("https://www.pixiv.net/users/{}", detail.user.id),
+                    detail.profile.webpage.clone().unwrap_or_default(),
+                    detail.profile.twitter_url.clone().unwrap_or_default(),
+                    detail
+                        .profile
+                        .twitter_account
+                        .as_ref()
+                        .map(|account| format!("https://x.com/{}", account.trim_start_matches('@')))
+                        .unwrap_or_default(),
+                    detail.profile.pawoo_url.clone().unwrap_or_default(),
+                ],
+                detail.user.comment.as_deref(),
+            );
             serde_json::json!({
                 "source": source,
                 "sourceKey": source_key,
@@ -883,6 +930,11 @@ pub async fn refresh_entity_profile(
                 .get_creator(&source_key)
                 .await
                 .map_err(|e| e.to_string())?;
+            let links = collect_profile_links(
+                std::iter::once(format!("https://www.fanbox.cc/@{}", source_key))
+                    .chain(detail.profile_links.iter().cloned()),
+                Some(&detail.description),
+            );
             serde_json::json!({
                 "source": source,
                 "sourceKey": source_key,
@@ -890,7 +942,7 @@ pub async fn refresh_entity_profile(
                 "iconUrl": detail.user.icon_url,
                 "coverUrl": detail.cover_image_url,
                 "description": detail.description,
-                "links": detail.profile_links,
+                "links": links,
                 "profileItems": detail.profile_items,
             })
         } else {
@@ -1322,4 +1374,30 @@ pub async fn import_work_asset(
         mime_type,
         file_size_bytes: asset.file_size_bytes,
     })
+}
+
+#[cfg(test)]
+mod profile_link_tests {
+    use super::collect_profile_links;
+
+    #[test]
+    fn profile_links_are_deduplicated_and_extracted_from_text() {
+        let links = collect_profile_links(
+            [
+                "https://www.pixiv.net/users/42".to_string(),
+                "https://x.com/example".to_string(),
+                "https://x.com/example".to_string(),
+            ],
+            Some("Skeb: https://skeb.jp/@example。 portfolio https://example.com/work"),
+        );
+        assert_eq!(
+            links,
+            vec![
+                "https://www.pixiv.net/users/42",
+                "https://x.com/example",
+                "https://skeb.jp/@example",
+                "https://example.com/work",
+            ]
+        );
+    }
 }

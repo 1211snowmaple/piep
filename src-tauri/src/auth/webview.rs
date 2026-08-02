@@ -254,6 +254,8 @@ pub async fn open_fanbox_login(app: AppHandle) -> Result<(String, FanboxUser, St
 
 use tauri::{LogicalPosition, LogicalSize};
 
+static EMBEDDED_BROWSER_OPEN_LOCK: Mutex<()> = Mutex::new(());
+
 /// メインウィンドウ内に子WebViewを作成・管理する
 pub fn open_child_webview(
     app: AppHandle,
@@ -264,10 +266,20 @@ pub fn open_child_webview(
     height: f64,
     _user_agent: Option<String>,
 ) -> Result<(), String> {
+    // Initial layout and ResizeObserver can request the child WebView at the
+    // same time. Serialize creation so both requests cannot add the same label.
+    let _open_guard = EMBEDDED_BROWSER_OPEN_LOCK
+        .lock()
+        .map_err(|_| "Embedded browser lock was poisoned".to_string())?;
     let url_parsed = Url::parse(&url).map_err(|e| e.to_string())?;
 
-    // 既に存在する場合は位置とサイズのみ更新
+    // 既に存在する場合も要求されたURLへ同期する。レイアウト変更時に
+    // `open_embedded_browser` が再度呼ばれるため、同一URLでは遷移しない。
     if let Some(existing) = app.get_webview("embedded_browser") {
+        let current_url = existing.url().map_err(|e| e.to_string())?;
+        if current_url != url_parsed {
+            existing.navigate(url_parsed).map_err(|e| e.to_string())?;
+        }
         existing
             .set_position(LogicalPosition::new(x, y))
             .map_err(|e| e.to_string())?;

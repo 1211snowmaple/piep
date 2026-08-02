@@ -14,6 +14,8 @@ pub struct PixivNovelDetail {
     pub text_length: u32,
     pub series_id: Option<String>,
     pub series_title: Option<String>,
+    /// Highest resolution cover URL exposed by the App API.
+    pub cover_url: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -21,6 +23,7 @@ pub struct PixivNovelUser {
     pub id: u64,
     pub name: String,
     pub account: String,
+    pub profile_image_url: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -47,6 +50,8 @@ pub async fn get_novel_detail(
     // APIを呼び出して小説の詳細を取得
     let detail = api.novel_detail(id_u64, true).await?;
     let novel_info = detail.novel;
+    let cover_url = non_empty(novel_info.image_urls.large.clone());
+    let profile_image_url = non_empty(novel_info.user.profile_image_urls.medium.clone());
 
     let (series_id, series_title) = match novel_info.series {
         crate::pixiv_api::models::SeriesOrEmpty::Series(series) => {
@@ -62,6 +67,7 @@ pub async fn get_novel_detail(
             id: novel_info.user.id,
             name: novel_info.user.name,
             account: novel_info.user.account,
+            profile_image_url,
         },
         tags: novel_info
             .tags
@@ -73,7 +79,28 @@ pub async fn get_novel_detail(
         text_length: novel_info.text_length.try_into().unwrap_or(0),
         series_id,
         series_title,
+        cover_url,
     })
+}
+
+fn non_empty(value: String) -> Option<String> {
+    (!value.trim().is_empty()).then_some(value)
+}
+
+/// Prefer an original/master cover returned by the webview endpoint. If that
+/// endpoint only exposes a transformed thumbnail, use the App API `large` URL.
+pub fn best_novel_cover(webview_url: String, app_large_url: Option<&str>) -> String {
+    let webview_is_master = webview_url.contains("img-original")
+        || webview_url.contains("novel-cover-original")
+        || !webview_url.contains("/c/");
+    if webview_is_master && !webview_url.trim().is_empty() {
+        webview_url
+    } else {
+        app_large_url
+            .filter(|url| !url.trim().is_empty())
+            .unwrap_or(&webview_url)
+            .to_string()
+    }
 }
 
 #[allow(dead_code)]
@@ -112,4 +139,27 @@ pub fn extract_novel_id(url: &str) -> Option<String> {
         return cap.get(1).or(cap.get(2)).map(|m| m.as_str().to_string());
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::best_novel_cover;
+
+    #[test]
+    fn prefers_app_large_over_transformed_webview_thumbnail() {
+        let selected = best_novel_cover(
+            "https://i.pximg.net/c/600x600/novel-cover-master/example.jpg".into(),
+            Some("https://i.pximg.net/c/1200x1200/novel-cover-master/example.jpg"),
+        );
+        assert!(selected.contains("1200x1200"));
+    }
+
+    #[test]
+    fn keeps_original_webview_cover() {
+        let selected = best_novel_cover(
+            "https://i.pximg.net/novel-cover-original/example.jpg".into(),
+            Some("https://i.pximg.net/c/1200x1200/example.jpg"),
+        );
+        assert!(selected.contains("novel-cover-original"));
+    }
 }

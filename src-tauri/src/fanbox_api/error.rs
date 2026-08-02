@@ -7,16 +7,16 @@ pub enum FanboxError {
     #[error("認証が必要です（セッションが無効または未設定）")]
     NoAuth,
 
-    #[error("FANBOX APIエラー (status={status}): {body}")]
+    #[error("FANBOX APIエラー（HTTP {status}）")]
     ApiError { status: u16, body: String },
 
-    #[error("アクセス制限（レートリミット）に達しました: {body}")]
+    #[error("FANBOXのアクセス制限に達しました。時間をおいて再試行してください")]
     RateLimited { body: String },
 
-    #[error("リソースが見つかりませんでした: {body}")]
+    #[error("FANBOXの投稿が見つかりませんでした")]
     NotFound { body: String },
 
-    #[error("デシリアライズエラー: {error}, body: {body}")]
+    #[error("FANBOX応答の形式を解釈できませんでした: {error}")]
     Serde {
         #[source]
         error: serde_json::Error,

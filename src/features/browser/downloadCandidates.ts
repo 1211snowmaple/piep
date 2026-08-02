@@ -61,6 +61,7 @@ export interface SidebarItem {
   selected: boolean;
   originalData: PixivNovel | FanboxPost;
   status?: "pending" | "downloading" | "success" | "skipped" | "failed";
+  error?: string;
 }
 
 export type SidebarDownloadType =

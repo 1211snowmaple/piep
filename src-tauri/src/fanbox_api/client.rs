@@ -113,6 +113,14 @@ impl FanboxAPI {
         Ok(resp.body)
     }
 
+    /// 投稿APIは追加フィールドや投稿種別ごとの差が大きいため、保存経路では
+    /// 構造を失わない生のJSONを利用する。
+    pub async fn get_post_value(&self, post_id: &str) -> Result<serde_json::Value, FanboxError> {
+        let url = format!("https://api.fanbox.cc/post.info?postId={}", post_id);
+        let resp: FanboxResponse<serde_json::Value> = self.api_get(&url).await?;
+        Ok(resp.body)
+    }
+
     /// 4. 支援中クリエイターの投稿一覧
     pub async fn list_supporting_posts(
         &self,

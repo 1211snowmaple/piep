@@ -148,11 +148,87 @@ export interface EntityFacet {
   updatedAt?: string | null;
   latestDownloadedAt?: string | null;
   sampleTitle?: string | null;
+  iconPath?: string | null;
+  bannerPath?: string | null;
+}
+
+export interface FilterFacets {
+  tags: FacetCount[];
+  authors: FacetCount[];
+  authorEntities: EntityFacet[];
+  series: EntityFacet[];
+  contentTypes: FacetCount[];
+  assetTypes: FacetCount[];
+}
+
+export interface PersonEntry {
+  id: number;
+  source: string;
+  sourceKey: string;
+  displayName: string;
+  iconPath: string | null;
+  coverPath: string | null;
+  description: string | null;
+  linksJson: string | null;
+  contentHash: string | null;
+  currentVersion: number;
+  lastCheckedAt: string | null;
+  lastFetchedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+  workCount: number | null;
+}
+
+export interface SeriesEntry {
+  id: number;
+  source: string;
+  sourceKey: string;
+  title: string;
+  description: string | null;
+  coverPath: string | null;
+  contentHash: string | null;
+  currentVersion: number;
+  lastCheckedAt: string | null;
+  lastFetchedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+  workCount: number | null;
+}
+
+export interface EntityVersion {
+  id: number;
+  entityType: string;
+  source: string;
+  sourceKey: string;
+  version: number;
+  contentHash: string | null;
+  jsonPath: string;
+  assetCount: number;
+  fileSizeBytes: number;
+  createdAt: string;
+  changeSummary: string | null;
+}
+
+export interface UpdateTarget {
+  id: number;
+  targetType: "work" | "author" | "series" | string;
+  source: string;
+  sourceKey: string;
+  displayName: string;
+  enabled: boolean;
+  lastCheckedAt: string | null;
+  lastSeenSourceId: string | null;
+  lastSeenSourceUpdatedAt: string | null;
+  metadataJson: string | null;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface DashboardTrendPoint {
   bucket: string;
   count: number;
+  pixivCount: number;
+  fanboxCount: number;
   totalSizeBytes: number;
 }
 

@@ -1,8 +1,9 @@
 use crate::database::queries::EntityProfileFreshness;
 use crate::database::{DownloadEntry, NewAsset, NewDownload, NewVersion};
-use crate::downloader::fanbox::{get_post_detail, FanboxPost};
+use crate::downloader::fanbox::get_post_detail;
 use crate::downloader::pixiv::{get_novel_detail, PixivNovelContent};
 use crate::fanbox_api::client::FanboxAPI;
+use crate::fanbox_api::models::FanboxPost;
 use crate::pixiv_api;
 use crate::AppState;
 use std::path::Path;
@@ -17,10 +18,12 @@ pub async fn fetch_pixiv_novel(
     let detail = get_novel_detail(&novel_id, &refresh_token)
         .await
         .map_err(|e| e.to_string())?;
-    let (text, cover_url, illusts, images) =
+    let (text, webview_cover_url, illusts, images) =
         crate::downloader::pixiv::get_novel_text_and_assets(&novel_id, &refresh_token)
             .await
             .map_err(|e| e.to_string())?;
+    let cover_url =
+        crate::downloader::pixiv::best_novel_cover(webview_cover_url, detail.cover_url.as_deref());
     Ok(PixivNovelContent {
         detail,
         text,
@@ -45,7 +48,7 @@ pub async fn fetch_fanbox_post(
     post_id: String,
     cookie: String,
     user_agent: String,
-) -> Result<FanboxPost, String> {
+) -> Result<serde_json::Value, String> {
     get_post_detail(&post_id, &cookie, &user_agent)
         .await
         .map_err(|e| e.to_string())
@@ -180,10 +183,12 @@ pub async fn fetch_pixiv_novel_by_url(
     let detail = get_novel_detail(&novel_id, &refresh_token)
         .await
         .map_err(|e| e.to_string())?;
-    let (text, cover_url, illusts, images) =
+    let (text, webview_cover_url, illusts, images) =
         crate::downloader::pixiv::get_novel_text_and_assets(&novel_id, &refresh_token)
             .await
             .map_err(|e| e.to_string())?;
+    let cover_url =
+        crate::downloader::pixiv::best_novel_cover(webview_cover_url, detail.cover_url.as_deref());
     Ok(PixivNovelContent {
         detail,
         text,
@@ -340,7 +345,7 @@ fn fanbox_has_material_content(data: &serde_json::Value) -> bool {
                     || block
                         .get("type")
                         .and_then(|v| v.as_str())
-                        .map(|t| matches!(t, "image" | "file" | "embed"))
+                        .map(|t| matches!(t, "image" | "file" | "embed" | "url_embed"))
                         .unwrap_or(false)
             })
         })
@@ -492,25 +497,29 @@ async fn save_person_snapshot_from_download(
     if author_id.trim().is_empty() || author_name.trim().is_empty() {
         return Ok(());
     }
-    if state
-        .db
-        .get_person(source, author_id)
-        .ok()
-        .and_then(|p| p.content_hash)
-        .is_some()
-    {
-        return Ok(());
-    }
-
     let icon_url = first_string_at(
         data,
         &[
+            &["detail", "user", "profile_image_url"],
             &["detail", "user", "profile_image_urls", "medium"],
             &["user", "profile_image_urls", "medium"],
             &["user", "iconUrl"],
             &["user", "icon_url"],
         ],
     );
+    let existing = state.db.get_person(source, author_id).ok();
+    if existing
+        .as_ref()
+        .and_then(|person| person.content_hash.as_ref())
+        .is_some()
+        && (existing
+            .as_ref()
+            .and_then(|person| person.icon_path.as_ref())
+            .is_some()
+            || icon_url.is_none())
+    {
+        return Ok(());
+    }
     let description = first_string_at(
         data,
         &[&["detail", "user", "comment"], &["user", "comment"]],
@@ -530,15 +539,14 @@ async fn save_person_snapshot_from_download(
         "links": [profile_url],
     });
     let hash = sha256_json(&normalized)?;
-    let existing = state.db.get_person(source, author_id).ok();
+    let next_version = existing
+        .as_ref()
+        .map(|person| person.current_version + 1)
+        .unwrap_or(1);
     let json_path =
         if existing.as_ref().and_then(|p| p.content_hash.as_deref()) == Some(hash.as_str()) {
             String::new()
         } else {
-            let next_version = existing
-                .as_ref()
-                .map(|p| p.current_version + 1)
-                .unwrap_or(1);
             let dir = state
                 .db
                 .storage_dir()
@@ -558,19 +566,46 @@ async fn save_person_snapshot_from_download(
                 .map_err(|e| e.to_string())?;
             path.to_string_lossy().to_string()
         };
+    let (icon_path, icon_size) = match icon_url {
+        Some(url) => {
+            match download_person_snapshot_icon(state, source, author_id, next_version, url).await {
+                Ok(value) => value.map_or((None, 0), |(path, size)| (Some(path), size)),
+                Err(error) => {
+                    log::warn!(
+                        "Failed to cache profile icon for {}:{}: {}",
+                        source,
+                        author_id,
+                        error
+                    );
+                    (
+                        existing
+                            .as_ref()
+                            .and_then(|person| person.icon_path.clone()),
+                        0,
+                    )
+                }
+            }
+        }
+        None => (
+            existing
+                .as_ref()
+                .and_then(|person| person.icon_path.clone()),
+            0,
+        ),
+    };
     let links_json = serde_json::to_string(&normalized["links"]).ok();
     state.db.upsert_person_profile(
         source,
         author_id,
         author_name,
-        None,
+        icon_path.as_deref(),
         None,
         description,
         links_json.as_deref(),
         &hash,
         &json_path,
-        0,
-        0,
+        i64::from(icon_path.is_some()),
+        icon_size,
         EntityProfileFreshness::SnapshotOnly,
     )?;
     Ok(())
@@ -644,6 +679,58 @@ async fn save_series_snapshot_from_download(
         EntityProfileFreshness::SnapshotOnly,
     )?;
     Ok(())
+}
+
+async fn download_person_snapshot_icon(
+    state: &Arc<AppState>,
+    source: &str,
+    author_id: &str,
+    version: i64,
+    url: &str,
+) -> Result<Option<(String, i64)>, String> {
+    if url.trim().is_empty() {
+        return Ok(None);
+    }
+    let ext = crate::downloader::asset_downloader::extract_extension(url, "jpg");
+    let dir = state
+        .db
+        .storage_dir()
+        .parent()
+        .unwrap_or_else(|| state.db.storage_dir())
+        .join("profiles")
+        .join(safe_entity_segment(source))
+        .join(safe_entity_segment(author_id))
+        .join(format!("v{}", version))
+        .join("assets");
+    tokio::fs::create_dir_all(&dir)
+        .await
+        .map_err(|error| error.to_string())?;
+    let path = dir.join(format!("icon.{}", ext));
+    let bytes = reqwest::Client::new()
+        .get(url)
+        .header(
+            "referer",
+            if source == "fanbox" {
+                "https://www.fanbox.cc/"
+            } else {
+                "https://www.pixiv.net/"
+            },
+        )
+        .send()
+        .await
+        .map_err(|error| error.to_string())?
+        .error_for_status()
+        .map_err(|error| error.to_string())?
+        .bytes()
+        .await
+        .map_err(|error| error.to_string())?;
+    tokio::fs::write(&path, &bytes)
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(Some((
+        path.to_string_lossy().to_string(),
+        bytes.len() as i64,
+    )))
 }
 
 async fn sync_download_entities(
@@ -883,6 +970,23 @@ pub async fn download_and_save(
 
     // 2. アセットダウンロード + ローカルパスインジェクション (インメモリで実行するため、パスインジェクション結果は disk に保存せず DB登録やアセット情報収集のためにのみ一時的に使用)
     let mut modified_data = data.clone();
+    let mut source_targets = Vec::new();
+    crate::downloader::asset_downloader::extract_download_targets(
+        &data,
+        is_fanbox,
+        &mut source_targets,
+    );
+    let asset_origins = source_targets
+        .into_iter()
+        .map(|target| {
+            let asset_type = match target.sub_folder {
+                "illustrations" => "illustration",
+                "cover" => "cover",
+                _ => "file",
+            };
+            ((asset_type.to_string(), target.filename), target.url)
+        })
+        .collect::<std::collections::HashMap<_, _>>();
     // Assetsフォルダ名は "data_assets" にするため、dummyとして data.json のパスを指定します
     let dummy_json_path = item_dir.join("data.json");
 
@@ -903,7 +1007,7 @@ pub async fn download_and_save(
     let assets_dir = item_dir.join("data_assets");
 
     // プレミアム最適化：激重な再帰ディレクトリ走査とサイズ計算を非同期ワーカースレッドへ完璧に移譲
-    let (asset_entries, total_size, cover_path_str) = if assets_dir.exists() {
+    let (mut asset_entries, total_size, cover_path_str) = if assets_dir.exists() {
         let assets_dir_clone = assets_dir.clone();
         let initial_size = original_content.len() as i64;
 
@@ -919,6 +1023,11 @@ pub async fn download_and_save(
     } else {
         (Vec::new(), original_content.len() as i64, None)
     };
+    for asset in &mut asset_entries {
+        asset.original_url = asset_origins
+            .get(&(asset.asset_type.clone(), asset.filename.clone()))
+            .cloned();
+    }
 
     let json_path = original_json_path.clone();
 

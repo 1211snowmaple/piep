@@ -6,13 +6,13 @@ import type {
   EditorDocument,
   DownloadEntry,
   DownloadVersion,
-  EntityFacet,
   ReaderDocument,
   SearchV2Params,
   SearchV2Result,
   WorkBlockInput,
   WorkEditRevision,
   BulkMutationResult,
+  FilterFacets,
 } from "@/types/library";
 
 export function isTauriRuntime(): boolean {
@@ -37,15 +37,6 @@ export async function scanAndReimportDownloads(): Promise<number> {
 
 export async function searchDownloadsV2(params: SearchV2Params): Promise<SearchV2Result> {
   return invoke<SearchV2Result>("search_downloads_v2", { params });
-}
-
-export interface FilterFacets {
-  tags: { name: string; count: number }[];
-  authors: { name: string; count: number }[];
-  authorEntities: EntityFacet[];
-  series: EntityFacet[];
-  contentTypes: { name: string; count: number }[];
-  assetTypes: { name: string; count: number }[];
 }
 
 export interface SearchIndexStatus {

@@ -277,6 +277,12 @@ pub fn parse_fanbox_to_html(raw_json: &str, assets: &[AssetEntry]) -> String {
                         }
                     }
 
+                    // FANBOX sometimes returns the creator-only management URL in an
+                    // embed. Saved documents must always point at the public post URL.
+                    if url.contains(".fanbox.cc/manage/posts/") {
+                        url = url.replace(".fanbox.cc/manage/posts/", ".fanbox.cc/posts/");
+                    }
+
                     if url.is_empty() {
                         String::new()
                     } else {
@@ -303,39 +309,55 @@ pub fn parse_fanbox_to_html(raw_json: &str, assets: &[AssetEntry]) -> String {
                             })
                             .unwrap_or_else(|| "外部リンク".to_string());
 
-                        let is_fanbox_link = url.contains("fanbox.cc");
-                        let is_pixiv_link = url.contains("pixiv.net");
-
-                        let icon_html = if is_fanbox_link {
-                            r##"<span class="link-card-icon" style="background: none; width: 42px; height: 42px; padding: 0;">
-                                <svg class="nav-icon brand-icon fanbox" viewBox="0 0 24 24" fill="none" style="width: 42px; height: 42px; flex-shrink: 0; display: block;">
-                                    <circle cx="12" cy="12" r="10" fill="#F2C624" />
-                                    <text x="50%" y="50%" fill="#FFFFFF" font-size="12" font-weight="800" text-anchor="middle" font-family="'Inter', system-ui, sans-serif" dominant-baseline="central">F</text>
-                                </svg>
-                            </span>"##
-                        } else if is_pixiv_link {
-                            r##"<span class="link-card-icon" style="background: none; width: 42px; height: 42px; padding: 0;">
-                                <svg class="nav-icon brand-icon pixiv" viewBox="0 0 24 24" fill="none" style="width: 42px; height: 42px; flex-shrink: 0; display: block;">
-                                    <circle cx="12" cy="12" r="10" fill="#0096FA" />
-                                    <text x="50%" y="50%" fill="#FFFFFF" font-size="12" font-weight="800" text-anchor="middle" font-family="'Inter', system-ui, sans-serif" dominant-baseline="central">P</text>
-                                </svg>
-                            </span>"##
-                        } else {
-                            r#"<span class="link-card-icon">🔗</span>"#
+                        let is_fanbox = host == "fanbox.cc"
+                            || host.ends_with(".fanbox.cc")
+                            || info.get("type").and_then(|value| value.as_str())
+                                == Some("fanbox.post");
+                        let creator_name = info
+                            .get("postInfo")
+                            .and_then(|post| post.get("user"))
+                            .and_then(|user| user.get("name"))
+                            .and_then(|value| value.as_str())
+                            .unwrap_or("");
+                        let fee = info
+                            .get("postInfo")
+                            .and_then(|post| post.get("feeRequired"))
+                            .and_then(|value| value.as_i64())
+                            .unwrap_or(0);
+                        let meta = match (fee > 0, creator_name.is_empty()) {
+                            (true, false) => format!("¥{} · {}", fee, creator_name),
+                            (true, true) => format!("¥{}", fee),
+                            (false, false) => creator_name.to_string(),
+                            (false, true) => host.clone(),
                         };
+                        let card_class = if is_fanbox {
+                            "novel-link-card novel-link-card--fanbox"
+                        } else {
+                            "novel-link-card"
+                        };
+                        let brand = if is_fanbox { "F" } else { "↗" };
 
                         format!(
-                            r##"<a href="{}" target="_blank" rel="noopener noreferrer" class="novel-link-card">
-                                {}
-                                <div class="link-card-info">
+                            r##"<a href="{}" target="_blank" rel="noopener noreferrer" class="{}" data-provider="{}">
+                                <span class="link-card-brand">{}</span>
+                                <span class="link-card-info">
+                                    <span class="link-card-kicker">{}</span>
                                     <span class="link-card-title">{}</span>
                                     <span class="link-card-host">{}</span>
-                                </div>
+                                </span>
+                                <span class="link-card-arrow">↗</span>
                             </a>"##,
                             escape_html(&url),
-                            icon_html,
+                            card_class,
+                            if is_fanbox { "fanbox" } else { "web" },
+                            brand,
+                            if is_fanbox {
+                                "pixivFANBOX"
+                            } else {
+                                "外部リンク"
+                            },
                             escape_html(&title),
-                            escape_html(&host)
+                            escape_html(&meta)
                         )
                     }
                 } else {
@@ -445,4 +467,54 @@ fn parse_fanbox_paragraph(block: &serde_json::Value) -> String {
 
     result_html = result_html.replace("\n", "<br />\n");
     result_html
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fanbox_embed_uses_public_branded_card() {
+        let json = serde_json::json!({
+            "body": {
+                "blocks": [{ "type": "url_embed", "urlEmbedId": "post" }],
+                "urlEmbedMap": {
+                    "post": {
+                        "type": "fanbox.post",
+                        "postInfo": {
+                            "id": "123",
+                            "creatorId": "creator",
+                            "feeRequired": 500,
+                            "title": "投稿タイトル",
+                            "user": { "name": "作者" }
+                        }
+                    }
+                }
+            }
+        });
+        let html = parse_fanbox_to_html(&json.to_string(), &[]);
+        assert!(html.contains("novel-link-card--fanbox"));
+        assert!(html.contains("https://creator.fanbox.cc/posts/123"));
+        assert!(html.contains("¥500 · 作者"));
+        assert!(!html.contains('🔗'));
+    }
+
+    #[test]
+    fn fanbox_management_embed_is_rewritten_for_reading() {
+        let json = serde_json::json!({
+            "body": {
+                "blocks": [{ "type": "url_embed", "urlEmbedId": "link" }],
+                "urlEmbedMap": {
+                    "link": {
+                        "type": "default",
+                        "url": "https://creator.fanbox.cc/manage/posts/321",
+                        "host": "creator.fanbox.cc"
+                    }
+                }
+            }
+        });
+        let html = parse_fanbox_to_html(&json.to_string(), &[]);
+        assert!(html.contains("https://creator.fanbox.cc/posts/321"));
+        assert!(!html.contains("/manage/posts/"));
+    }
 }

@@ -1,7 +1,7 @@
 [package]
 name = "piep"
-version = "0.1.0"
-description = "Pixiv & FANBOX novel downloader"
+version = "0.2.0"
+description = "Local creative library for Pixiv and FANBOX"
 authors = ["1211snowmaple"]
 edition = "2021"
 

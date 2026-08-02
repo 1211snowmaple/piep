@@ -1,4 +1,5 @@
 import { useMemo } from "react";
+import { normalizeFanboxPostPayload } from "@/features/browser/downloadMetadata";
 import { store } from "@/store";
 import {
   getDownload,
@@ -198,7 +199,7 @@ export async function checkWatchedWorks({
           onLog?.("warn", "FANBOX未連携のためFANBOX作品をスキップしました");
           continue;
         }
-        const post: any = await fetchFanboxPost(dl.sourceId, credentials.fanboxCookie, credentials.fanboxUserAgent);
+        const post = normalizeFanboxPostPayload<any>(await fetchFanboxPost(dl.sourceId, credentials.fanboxCookie, credentials.fanboxUserAgent));
         const postUpdatedAt = post.updatedDatetime || post.updated_datetime || null;
         if (dl.sourceUpdatedAt === postUpdatedAt) {
           onLog?.("info", `最新: ${dl.title}`);
@@ -346,7 +347,7 @@ export async function saveUpdateCandidate(
     return savedEntry;
   }
 
-  const post: any = await fetchFanboxPost(candidate.sourceId, credentials.fanboxCookie, credentials.fanboxUserAgent);
+  const post = normalizeFanboxPostPayload<any>(await fetchFanboxPost(candidate.sourceId, credentials.fanboxCookie, credentials.fanboxUserAgent));
   return downloadAndSave<UpdateDownloadEntry>({
     data: post,
     source: "fanbox",

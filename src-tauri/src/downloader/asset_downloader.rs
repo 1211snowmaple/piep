@@ -49,7 +49,15 @@ pub fn sanitize_filename(name: &str) -> String {
 pub fn extract_download_targets(data: &Value, is_fanbox: bool, targets: &mut Vec<DownloadTarget>) {
     if is_fanbox {
         // 1. Fanboxのカバー画像
-        if let Some(cover_url) = data.get("coverImageUrl").and_then(|v| v.as_str()) {
+        if let Some(cover_url) = data
+            .get("coverImageUrl")
+            .and_then(|v| v.as_str())
+            .or_else(|| {
+                data.get("cover")
+                    .and_then(|v| v.get("url"))
+                    .and_then(|v| v.as_str())
+            })
+        {
             let filename = sanitize_filename(&extract_filename(cover_url, "cover.jpg"));
             targets.push(DownloadTarget {
                 url: cover_url.to_string(),
@@ -253,7 +261,15 @@ pub fn extract_download_targets(data: &Value, is_fanbox: bool, targets: &mut Vec
 /// ローカルアセットへの相対パスをJSONに埋め込み、オフライン再生に対応させる
 pub fn inject_local_paths(data: &mut Value, assets_dir_name: &str, is_fanbox: bool) {
     if is_fanbox {
-        if let Some(cover_url) = data.get("coverImageUrl").and_then(|v| v.as_str()) {
+        if let Some(cover_url) = data
+            .get("coverImageUrl")
+            .and_then(|v| v.as_str())
+            .or_else(|| {
+                data.get("cover")
+                    .and_then(|v| v.get("url"))
+                    .and_then(|v| v.as_str())
+            })
+        {
             let filename = sanitize_filename(&extract_filename(cover_url, "cover.jpg"));
             data["localCoverPath"] =
                 Value::String(format!("./{}/cover/{}", assets_dir_name, filename));

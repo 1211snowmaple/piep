@@ -3,6 +3,7 @@
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use r2d2::{Pool, PooledConnection};
 use r2d2_sqlite::SqliteConnectionManager;
+use regex::Regex;
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, Transaction};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -1677,11 +1678,14 @@ impl Database {
 
         let raw_json =
             self.read_download_json_for_version(&download, &versions, download.current_version)?;
-        let plain_text = serde_json::from_str::<serde_json::Value>(&raw_json)
-            .ok()
-            .map(|value| extract_search_body(&value, &download.source))
-            .unwrap_or_default();
-        let blocks = plain_text_to_editor_blocks(&plain_text);
+        let source_html = if download.source == "pixiv" {
+            super::parser::parse_pixiv_to_html(&raw_json, &assets)
+        } else if download.source == "fanbox" {
+            super::parser::parse_fanbox_to_html(&raw_json, &assets)
+        } else {
+            String::new()
+        };
+        let blocks = html_to_editor_blocks(&source_html, &assets);
 
         Ok(EditorDocument {
             download,
@@ -2428,6 +2432,8 @@ impl Database {
             .prepare(
                 "SELECT substr(downloaded_at, 1, 7) AS bucket,
                         COUNT(*) AS count,
+                        SUM(CASE WHEN source = 'pixiv' THEN 1 ELSE 0 END) AS pixiv_count,
+                        SUM(CASE WHEN source = 'fanbox' THEN 1 ELSE 0 END) AS fanbox_count,
                         COALESCE(SUM(file_size_bytes), 0) AS total_size
                  FROM downloads
                  GROUP BY bucket
@@ -2440,7 +2446,9 @@ impl Database {
                 Ok(DashboardTrendPoint {
                     bucket: row.get(0)?,
                     count: row.get(1)?,
-                    total_size_bytes: row.get(2)?,
+                    pixiv_count: row.get(2)?,
+                    fanbox_count: row.get(3)?,
+                    total_size_bytes: row.get(4)?,
                 })
             })
             .map_err(|e| format!("Dashboard trend query failed: {}", e))?;
@@ -2539,6 +2547,8 @@ impl Database {
                         updated_at: row.get(6)?,
                         latest_downloaded_at: row.get(7)?,
                         sample_title: row.get(8)?,
+                        icon_path: row.get(9)?,
+                        banner_path: row.get(10)?,
                     })
                 })
                 .map_err(|e| format!("Entity facet query failed: {}", e))?;
@@ -2583,7 +2593,9 @@ impl Database {
                         WHERE d2.source = d.source AND d2.author_id = d.author_id
                         ORDER BY COALESCE(d2.source_created_at, d2.downloaded_at) DESC, d2.id DESC
                         LIMIT 1
-                    ) AS sample_title
+                    ) AS sample_title,
+                    p.icon_path,
+                    p.cover_path AS banner_path
                  FROM downloads d
                  LEFT JOIN people p ON p.source = d.source AND p.source_key = d.author_id
                  WHERE d.author_id IS NOT NULL AND d.author_id != ''
@@ -2611,7 +2623,9 @@ impl Database {
                                  COALESCE(d2.source_created_at, d2.downloaded_at) ASC,
                                  d2.id ASC
                         LIMIT 1
-                    ) AS sample_title
+                    ) AS sample_title,
+                    NULL AS icon_path,
+                    s.cover_path AS banner_path
                  FROM download_series ds
                  LEFT JOIN series s ON s.source = ds.series_source AND s.source_key = ds.series_key
                  JOIN downloads d ON d.id = ds.download_id
@@ -3408,7 +3422,7 @@ fn split_query_terms(query: &str) -> Vec<String> {
         }
         let mut term = String::new();
         let mut in_quote = false;
-        while let Some(c) = chars.next() {
+        for c in chars.by_ref() {
             if c == '"' {
                 in_quote = !in_quote;
                 term.push(c);
@@ -4163,7 +4177,9 @@ fn normalize_block_inputs(blocks: &[WorkBlockInput]) -> Vec<WorkBlockInput> {
     let mut normalized = Vec::new();
     for block in blocks {
         let block_type = match block.block_type.as_str() {
-            "heading" | "image" | "separator" => block.block_type.clone(),
+            "heading" | "image" | "separator" | "page_break" | "quote" | "link" => {
+                block.block_type.clone()
+            }
             _ => "paragraph".to_string(),
         };
         let text = block
@@ -4172,7 +4188,11 @@ fn normalize_block_inputs(blocks: &[WorkBlockInput]) -> Vec<WorkBlockInput> {
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(str::to_string);
-        if block_type != "image" && text.is_none() && block_type != "separator" {
+        if block_type != "image"
+            && text.is_none()
+            && block_type != "separator"
+            && block_type != "page_break"
+        {
             continue;
         }
         normalized.push(WorkBlockInput {
@@ -4224,6 +4244,163 @@ fn plain_text_to_editor_blocks(text: &str) -> Vec<WorkBlock> {
         .collect()
 }
 
+fn html_to_editor_blocks(html: &str, assets: &[AssetEntry]) -> Vec<WorkBlock> {
+    if html.trim().is_empty() {
+        return plain_text_to_editor_blocks("");
+    }
+    let token_re = Regex::new(
+        r#"(?is)(<!--\s*newpage\s*-->|<h2\b[^>]*>.*?</h2>|<img\b[^>]*>|<hr\s*/?>|<a\b[^>]*class=\"[^\"]*novel-link-card[^\"]*\"[^>]*>.*?</a>)"#,
+    )
+    .expect("valid editor HTML token regex");
+    let attr_re =
+        Regex::new(r#"(?i)([a-z0-9_-]+)=\"([^\"]*)\""#).expect("valid editor attribute regex");
+    let mut blocks = Vec::new();
+    let mut cursor = 0;
+
+    let push_text = |fragment: &str, blocks: &mut Vec<WorkBlock>| {
+        let text = html_fragment_to_text(fragment);
+        for chunk in text
+            .split("\n\n")
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            blocks.push(editor_block(
+                blocks.len(),
+                "paragraph",
+                Some(chunk.to_string()),
+                None,
+                None,
+            ));
+        }
+    };
+
+    for matched in token_re.find_iter(html) {
+        push_text(&html[cursor..matched.start()], &mut blocks);
+        let token = matched.as_str();
+        let lower = token.to_ascii_lowercase();
+        if lower.starts_with("<!--") {
+            blocks.push(editor_block(blocks.len(), "page_break", None, None, None));
+        } else if lower.starts_with("<h2") {
+            blocks.push(editor_block(
+                blocks.len(),
+                "heading",
+                Some(html_fragment_to_text(token).trim().to_string()),
+                None,
+                None,
+            ));
+        } else if lower.starts_with("<img") {
+            let local_path = attr_re
+                .captures_iter(token)
+                .find(|capture| {
+                    capture
+                        .get(1)
+                        .map(|v| v.as_str().eq_ignore_ascii_case("data-local-path"))
+                        .unwrap_or(false)
+                })
+                .and_then(|capture| {
+                    capture
+                        .get(2)
+                        .map(|value| decode_editor_entities(value.as_str()))
+                });
+            let asset_id = local_path.as_deref().and_then(|path| {
+                assets
+                    .iter()
+                    .find(|asset| asset.local_path == path || asset.local_path.ends_with(path))
+                    .map(|asset| asset.id)
+            });
+            let alt = attr_re
+                .captures_iter(token)
+                .find(|capture| {
+                    capture
+                        .get(1)
+                        .map(|v| v.as_str().eq_ignore_ascii_case("alt"))
+                        .unwrap_or(false)
+                })
+                .and_then(|capture| {
+                    capture
+                        .get(2)
+                        .map(|value| decode_editor_entities(value.as_str()))
+                });
+            blocks.push(editor_block(blocks.len(), "image", alt, asset_id, None));
+        } else if lower.starts_with("<hr") {
+            blocks.push(editor_block(blocks.len(), "separator", None, None, None));
+        } else {
+            let href = attr_re
+                .captures_iter(token)
+                .find(|capture| {
+                    capture
+                        .get(1)
+                        .map(|v| v.as_str().eq_ignore_ascii_case("href"))
+                        .unwrap_or(false)
+                })
+                .and_then(|capture| {
+                    capture
+                        .get(2)
+                        .map(|value| decode_editor_entities(value.as_str()))
+                })
+                .unwrap_or_default();
+            let label = html_fragment_to_text(token)
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            let attrs = serde_json::json!({ "label": label }).to_string();
+            blocks.push(editor_block(
+                blocks.len(),
+                "link",
+                Some(href),
+                None,
+                Some(attrs),
+            ));
+        }
+        cursor = matched.end();
+    }
+    push_text(&html[cursor..], &mut blocks);
+    if blocks.is_empty() {
+        plain_text_to_editor_blocks("")
+    } else {
+        blocks
+    }
+}
+
+fn editor_block(
+    order: usize,
+    block_type: &str,
+    text: Option<String>,
+    asset_id: Option<i64>,
+    attrs_json: Option<String>,
+) -> WorkBlock {
+    WorkBlock {
+        id: 0,
+        edit_revision_id: 0,
+        order: order as i64,
+        block_type: block_type.to_string(),
+        text,
+        asset_id,
+        attrs_json,
+    }
+}
+
+fn html_fragment_to_text(fragment: &str) -> String {
+    let breaks = Regex::new(r"(?i)<br\s*/?>|</(?:p|div|h[1-6]|blockquote)>")
+        .expect("valid HTML break regex");
+    let tags = Regex::new(r"(?is)<[^>]+>").expect("valid HTML tag regex");
+    let with_breaks = breaks.replace_all(fragment, "\n");
+    decode_editor_entities(tags.replace_all(&with_breaks, "").as_ref())
+        .replace("\r\n", "\n")
+        .replace("\n\n\n", "\n\n")
+}
+
+fn decode_editor_entities(value: &str) -> String {
+    value
+        .replace("&nbsp;", " ")
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#x27;", "'")
+        .replace("&#39;", "'")
+}
+
 fn hash_blocks(blocks: &[WorkBlockInput]) -> String {
     let mut hasher = Sha256::new();
     for block in blocks {
@@ -4253,7 +4430,7 @@ fn blocks_to_plain_text(blocks: &[WorkBlock]) -> String {
     blocks
         .iter()
         .filter_map(|block| match block.block_type.as_str() {
-            "image" | "separator" => None,
+            "image" | "separator" | "page_break" => None,
             _ => block.text.as_deref(),
         })
         .collect::<Vec<_>>()
@@ -4284,6 +4461,27 @@ fn blocks_to_html(blocks: &[WorkBlock], assets: &[AssetEntry]) -> String {
                 }
             }
             "separator" => "<hr />".to_string(),
+            "page_break" => "<!-- newpage -->".to_string(),
+            "quote" => format!(
+                "<blockquote>{}</blockquote>",
+                escape_editor_html(block.text.as_deref().unwrap_or("")).replace('\n', "<br />\n")
+            ),
+            "link" => {
+                let url = block.text.as_deref().unwrap_or("");
+                let label = block
+                    .attrs_json
+                    .as_deref()
+                    .and_then(|attrs| serde_json::from_str::<serde_json::Value>(attrs).ok())
+                    .and_then(|attrs| attrs.get("label").and_then(|value| value.as_str()).map(str::to_string))
+                    .filter(|label| !label.trim().is_empty())
+                    .unwrap_or_else(|| url.to_string());
+                format!(
+                    r#"<a href="{}" target="_blank" rel="noopener noreferrer" class="novel-link-card"><span class="link-card-icon">🔗</span><span class="link-card-info"><span class="link-card-title">{}</span><span class="link-card-host">{}</span></span></a>"#,
+                    escape_editor_html(url),
+                    escape_editor_html(&label),
+                    escape_editor_html(url)
+                )
+            }
             _ => escape_editor_html(block.text.as_deref().unwrap_or("")).replace('\n', "<br />\n"),
         })
         .collect::<Vec<_>>()
@@ -4959,6 +5157,56 @@ mod search_integration_tests {
     use std::fs;
     use std::time::{Duration, Instant};
 
+    #[test]
+    fn editor_blocks_preserve_rich_content_order() {
+        let assets = vec![AssetEntry {
+            id: 42,
+            download_id: 7,
+            asset_type: "image".to_string(),
+            filename: "scene.webp".to_string(),
+            local_path: "assets/scene.webp".to_string(),
+            original_url: None,
+            mime_type: Some("image/webp".to_string()),
+            file_size_bytes: 128,
+        }];
+        let html = concat!(
+            "<p>導入<br>二行目</p>",
+            "<!-- newpage -->",
+            "<h2>章題</h2>",
+            "<img data-local-path=\"assets/scene.webp\" alt=\"挿絵\">",
+            "<a class=\"novel-link-card\" href=\"https://example.com/story\">続きはこちら</a>",
+            "<hr>",
+            "<p>結び</p>"
+        );
+
+        let blocks = html_to_editor_blocks(html, &assets);
+
+        assert_eq!(
+            blocks
+                .iter()
+                .map(|block| block.block_type.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "paragraph",
+                "page_break",
+                "heading",
+                "image",
+                "link",
+                "separator",
+                "paragraph"
+            ]
+        );
+        assert_eq!(blocks[0].text.as_deref(), Some("導入\n二行目"));
+        assert_eq!(blocks[3].asset_id, Some(42));
+        assert_eq!(blocks[3].text.as_deref(), Some("挿絵"));
+        assert_eq!(blocks[4].text.as_deref(), Some("https://example.com/story"));
+        assert!(blocks[4]
+            .attrs_json
+            .as_deref()
+            .is_some_and(|attrs| attrs.contains("続きはこちら")));
+        assert!(blocks_to_html(&blocks, &assets).contains("<!-- newpage -->"));
+    }
+
     fn temp_paths() -> (PathBuf, PathBuf) {
         let rand_val: u32 = rand::random();
         let root = std::env::temp_dir().join(format!("piep_search_test_{}", rand_val));
@@ -5036,7 +5284,18 @@ mod search_integration_tests {
         tags: &[&str],
         body: &str,
     ) -> i64 {
-        insert_download_with_reindex(db, storage, source_id, title, author, tags, body, true)
+        insert_download_with_reindex(
+            db,
+            storage,
+            TestDownloadInput {
+                source_id,
+                title,
+                author,
+                tags,
+                body,
+                reindex: true,
+            },
+        )
     }
 
     fn insert_download_unindexed(
@@ -5048,19 +5307,42 @@ mod search_integration_tests {
         tags: &[&str],
         body: &str,
     ) -> i64 {
-        insert_download_with_reindex(db, storage, source_id, title, author, tags, body, false)
+        insert_download_with_reindex(
+            db,
+            storage,
+            TestDownloadInput {
+                source_id,
+                title,
+                author,
+                tags,
+                body,
+                reindex: false,
+            },
+        )
+    }
+
+    struct TestDownloadInput<'a> {
+        source_id: &'a str,
+        title: &'a str,
+        author: &'a str,
+        tags: &'a [&'a str],
+        body: &'a str,
+        reindex: bool,
     }
 
     fn insert_download_with_reindex(
         db: &Database,
         storage: &Path,
-        source_id: &str,
-        title: &str,
-        author: &str,
-        tags: &[&str],
-        body: &str,
-        reindex: bool,
+        input: TestDownloadInput<'_>,
     ) -> i64 {
+        let TestDownloadInput {
+            source_id,
+            title,
+            author,
+            tags,
+            body,
+            reindex,
+        } = input;
         let dir = storage.join("pixiv").join(source_id).join("v1");
         fs::create_dir_all(&dir).unwrap();
         let json_path = dir.join("original.json");

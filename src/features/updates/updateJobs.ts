@@ -114,11 +114,16 @@ export async function waitForUpdateJob(jobId: string, onSnapshot?: (snapshot: Up
   return snapshot;
 }
 
-export function useUpdateJobs(onSnapshot?: (snapshot: UpdateJobSnapshot) => void) {
+export function useUpdateJobs(onSnapshot?: (snapshot: UpdateJobSnapshot) => void, enabled = true) {
   const [jobs, setJobs] = useState<UpdateJobSummary[]>([]);
   const [activeSnapshot, setActiveSnapshot] = useState<UpdateJobSnapshot | null>(null);
 
   const loadJobs = useCallback(async () => {
+    if (!enabled) {
+      setJobs([]);
+      setActiveSnapshot(null);
+      return;
+    }
     const nextJobs = await listUpdateJobsCommand();
     setJobs(nextJobs);
     const preferred = nextJobs.find(job => !isUpdateJobTerminal(job.status)) ?? nextJobs[0];
@@ -129,9 +134,17 @@ export function useUpdateJobs(onSnapshot?: (snapshot: UpdateJobSnapshot) => void
     } else {
       setActiveSnapshot(null);
     }
-  }, [onSnapshot]);
+  }, [enabled, onSnapshot]);
+
+  const selectJob = useCallback(async (jobId: string) => {
+    if (!enabled) return;
+    const snapshot = await getUpdateJobCommand(jobId);
+    setActiveSnapshot(snapshot);
+    onSnapshot?.(snapshot);
+  }, [enabled, onSnapshot]);
 
   useEffect(() => {
+    if (!enabled) return undefined;
     loadJobs().catch(() => undefined);
   }, [loadJobs]);
 
@@ -163,7 +176,7 @@ export function useUpdateJobs(onSnapshot?: (snapshot: UpdateJobSnapshot) => void
       unlisten = dispose;
     }).catch(() => undefined);
     return () => unlisten?.();
-  }, [onSnapshot]);
+  }, [enabled, onSnapshot]);
 
   useEffect(() => {
     if (!activeSnapshot || isUpdateJobTerminal(activeSnapshot.status)) return;
@@ -182,11 +195,12 @@ export function useUpdateJobs(onSnapshot?: (snapshot: UpdateJobSnapshot) => void
     jobs,
     activeSnapshot,
     loadJobs,
+    selectJob,
     start: startUpdateJob,
     pause: pauseUpdateJobCommand,
     resume: resumeUpdateJob,
     cancel: cancelUpdateJobCommand,
     clear: clearUpdateJobCommand,
     saveCandidates: saveUpdateJobCandidates,
-  }), [activeSnapshot, jobs, loadJobs]);
+  }), [activeSnapshot, jobs, loadJobs, selectJob]);
 }

@@ -4,7 +4,7 @@ use rusqlite::Connection;
 use std::path::{Path, PathBuf};
 
 /// Current official schema version.
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 2;
 
 const REQUIRED_TABLES: &[&str] = &[
     "downloads",
@@ -20,30 +20,92 @@ const REQUIRED_TABLES: &[&str] = &[
     "download_series",
     "entity_versions",
     "search_index_state",
+    "saved_searches",
     "work_edit_revisions",
     "work_edit_blocks",
     "update_jobs",
     "update_job_items",
     "update_job_logs",
-    "schema_v1_marker",
+    "schema_v2_marker",
 ];
 
-/// Create or reset the database to the official v1 schema.
+/// Open the database at the official v2 schema.
 ///
-/// This app is still preview-stage. Instead of carrying old preview migrations
-/// forever, any database that is not exactly the official v1 shape is backed up
-/// and recreated in place.
+/// Official schemas are migrated in place so saved works are never discarded.
+/// Unknown preview schemas are backed up before a clean database is created.
 pub fn initialize(conn: &Connection) -> Result<(), rusqlite::Error> {
     apply_pragmas(conn)?;
 
-    if is_official_v1_schema(conn)? {
-        initialize_v1_schema(conn)?;
+    if is_official_v2_schema(conn)? {
+        initialize_v2_schema(conn)?;
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         return Ok(());
     }
 
+    if is_official_v1_schema(conn)? {
+        migrate_v1_to_v2(conn)?;
+        initialize_v2_schema(conn)?;
+        return Ok(());
+    }
+
     backup_current_database(conn)?;
-    reset_to_v1_schema(conn)?;
+    reset_to_v2_schema(conn)?;
+    Ok(())
+}
+
+fn is_official_v1_schema(conn: &Connection) -> Result<bool, rusqlite::Error> {
+    let current_version: u32 = conn
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .unwrap_or(0);
+    if current_version != 1 || !sqlite_object_exists(conn, "table", "schema_v1_marker")? {
+        return Ok(false);
+    }
+    let marker_version = conn
+        .query_row(
+            "SELECT COALESCE(MAX(version), 0) FROM schema_v1_marker",
+            [],
+            |row| row.get::<_, u32>(0),
+        )
+        .unwrap_or(0);
+    if marker_version != 1 || column_exists(conn, "downloads", "tags")? {
+        return Ok(false);
+    }
+    for table in REQUIRED_TABLES {
+        if matches!(*table, "saved_searches" | "schema_v2_marker") {
+            continue;
+        }
+        if !sqlite_object_exists(conn, "table", table)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn migrate_v1_to_v2(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        "
+        BEGIN IMMEDIATE;
+        CREATE TABLE IF NOT EXISTS saved_searches (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            name        TEXT NOT NULL,
+            query       TEXT,
+            params_json TEXT NOT NULL,
+            created_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(name)
+        );
+        CREATE INDEX IF NOT EXISTS idx_saved_searches_updated
+            ON saved_searches(updated_at DESC);
+        CREATE TABLE IF NOT EXISTS schema_v2_marker (
+            version        INTEGER PRIMARY KEY,
+            initialized_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        INSERT OR REPLACE INTO schema_v2_marker (version) VALUES (2);
+        DROP TABLE IF EXISTS schema_v1_marker;
+        PRAGMA user_version = 2;
+        COMMIT;
+        ",
+    )?;
     Ok(())
 }
 
@@ -62,7 +124,7 @@ fn apply_pragmas(conn: &Connection) -> Result<(), rusqlite::Error> {
     Ok(())
 }
 
-fn is_official_v1_schema(conn: &Connection) -> Result<bool, rusqlite::Error> {
+fn is_official_v2_schema(conn: &Connection) -> Result<bool, rusqlite::Error> {
     let current_version: u32 = conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap_or(0);
@@ -70,9 +132,9 @@ fn is_official_v1_schema(conn: &Connection) -> Result<bool, rusqlite::Error> {
         return Ok(false);
     }
 
-    let marker_version = if sqlite_object_exists(conn, "table", "schema_v1_marker")? {
+    let marker_version = if sqlite_object_exists(conn, "table", "schema_v2_marker")? {
         conn.query_row(
-            "SELECT COALESCE(MAX(version), 0) FROM schema_v1_marker",
+            "SELECT COALESCE(MAX(version), 0) FROM schema_v2_marker",
             [],
             |row| row.get::<_, u32>(0),
         )
@@ -97,7 +159,7 @@ fn is_official_v1_schema(conn: &Connection) -> Result<bool, rusqlite::Error> {
     Ok(true)
 }
 
-fn reset_to_v1_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
+fn reset_to_v2_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute_batch("PRAGMA foreign_keys = OFF;")?;
     drop_sqlite_objects(conn, "trigger", "DROP TRIGGER IF EXISTS")?;
     drop_sqlite_objects(conn, "view", "DROP VIEW IF EXISTS")?;
@@ -105,7 +167,7 @@ fn reset_to_v1_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
     drop_sqlite_objects(conn, "index", "DROP INDEX IF EXISTS")?;
     conn.execute_batch("PRAGMA foreign_keys = ON;")?;
 
-    initialize_v1_schema(conn)?;
+    initialize_v2_schema(conn)?;
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     Ok(())
 }
@@ -220,8 +282,8 @@ fn sqlite_object_exists(
     Ok(count > 0)
 }
 
-/// Build the official v1 schema from scratch.
-fn initialize_v1_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
+/// Build the official v2 schema from scratch.
+fn initialize_v2_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute_batch(
         "
         CREATE TABLE IF NOT EXISTS downloads (
@@ -386,6 +448,16 @@ fn initialize_v1_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
             indexed_at          TEXT    NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS saved_searches (
+            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+            name                TEXT    NOT NULL,
+            query               TEXT,
+            params_json         TEXT    NOT NULL,
+            created_at          TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at          TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(name)
+        );
+
         CREATE TABLE IF NOT EXISTS work_edit_revisions (
             id                  INTEGER PRIMARY KEY AUTOINCREMENT,
             download_id         INTEGER NOT NULL REFERENCES downloads(id) ON DELETE CASCADE,
@@ -449,12 +521,12 @@ fn initialize_v1_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
             created_at          TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
 
-        CREATE TABLE IF NOT EXISTS schema_v1_marker (
+        CREATE TABLE IF NOT EXISTS schema_v2_marker (
             version             INTEGER PRIMARY KEY,
             initialized_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
 
-        INSERT OR REPLACE INTO schema_v1_marker (version) VALUES (1);
+        INSERT OR REPLACE INTO schema_v2_marker (version) VALUES (2);
 
         CREATE TRIGGER IF NOT EXISTS downloads_search_ad AFTER DELETE ON downloads BEGIN
             DELETE FROM search_index_state WHERE download_id = old.id;
@@ -490,6 +562,7 @@ fn initialize_v1_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
         CREATE INDEX IF NOT EXISTS idx_download_relations_lookup ON download_relations(relation_type, source, relation_id);
         CREATE INDEX IF NOT EXISTS idx_download_relations_download ON download_relations(download_id);
         CREATE INDEX IF NOT EXISTS idx_search_index_state_version ON search_index_state(current_version, content_hash);
+        CREATE INDEX IF NOT EXISTS idx_saved_searches_updated ON saved_searches(updated_at DESC);
 
         CREATE INDEX IF NOT EXISTS idx_work_edit_revisions_download_status
             ON work_edit_revisions(download_id, status, updated_at DESC);
@@ -514,7 +587,7 @@ mod tests {
     use std::fs;
 
     #[test]
-    fn initializes_official_v1_schema() {
+    fn initializes_official_v2_schema() {
         let conn = Connection::open_in_memory().unwrap();
         initialize(&conn).unwrap();
 
@@ -522,8 +595,50 @@ mod tests {
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
         assert_eq!(user_version, SCHEMA_VERSION);
-        assert!(is_official_v1_schema(&conn).unwrap());
+        assert!(is_official_v2_schema(&conn).unwrap());
         assert!(!column_exists(&conn, "downloads", "tags").unwrap());
+        assert!(sqlite_object_exists(&conn, "table", "saved_searches").unwrap());
+    }
+
+    #[test]
+    fn migrates_official_v1_without_losing_downloads() {
+        let conn = Connection::open_in_memory().unwrap();
+        initialize_v2_schema(&conn).unwrap();
+        conn.execute_batch(
+            "
+            DROP TABLE saved_searches;
+            DROP TABLE schema_v2_marker;
+            CREATE TABLE schema_v1_marker (
+                version INTEGER PRIMARY KEY,
+                initialized_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            INSERT INTO schema_v1_marker (version) VALUES (1);
+            PRAGMA user_version = 1;
+            INSERT INTO downloads (
+                source, source_id, title, author_name, author_id, content_type,
+                excerpt, cover_path, json_path, original_json_path, asset_count,
+                file_size_bytes, downloaded_at, source_created_at, content_hash,
+                text_length, source_updated_at, watch_updates, current_version, favorite
+            ) VALUES (
+                'pixiv', '42', 'kept', 'author', 'a1', 'novel', NULL, NULL,
+                '/tmp/kept.json', NULL, 0, 0, '2026-01-01T00:00:00Z', NULL,
+                NULL, 100, NULL, 0, 1, 0
+            );
+            ",
+        )
+        .unwrap();
+
+        initialize(&conn).unwrap();
+
+        assert!(is_official_v2_schema(&conn).unwrap());
+        let title: String = conn
+            .query_row(
+                "SELECT title FROM downloads WHERE source_id = '42'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(title, "kept");
     }
 
     #[test]
@@ -568,7 +683,7 @@ mod tests {
 
         let conn = Connection::open(&db_path).unwrap();
         initialize(&conn).unwrap();
-        assert!(is_official_v1_schema(&conn).unwrap());
+        assert!(is_official_v2_schema(&conn).unwrap());
         assert!(!column_exists(&conn, "downloads", "tags").unwrap());
         let rows: i64 = conn
             .query_row("SELECT COUNT(*) FROM downloads", [], |row| row.get(0))

@@ -219,6 +219,8 @@ pub struct DbStats {
 pub struct DashboardTrendPoint {
     pub bucket: String,
     pub count: i64,
+    pub pixiv_count: i64,
+    pub fanbox_count: i64,
     pub total_size_bytes: i64,
 }
 
@@ -267,6 +269,8 @@ pub struct EntityFacet {
     pub updated_at: Option<String>,
     pub latest_downloaded_at: Option<String>,
     pub sample_title: Option<String>,
+    pub icon_path: Option<String>,
+    pub banner_path: Option<String>,
 }
 
 /// ライブラリの絞り込みUIで使う候補一覧
