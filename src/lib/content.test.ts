@@ -13,6 +13,28 @@ describe("document content helpers", () => {
     expect(html).not.toContain("script");
   });
 
+  it("strips markup that could cover the app or survive re-parsing", () => {
+    const html = prepareDocumentHtml(
+      [
+        '<p style="position:fixed;inset:0;z-index:9999">覆い</p>',
+        "<svg><style><img src=x onerror=evil()></style></svg>",
+        '<img src="javascript:evil()">',
+        '<img src="https://i.pximg.net/a.jpg" srcset="javascript:evil()">',
+        '<a href="javascript:evil()">わな</a>',
+        '<base href="https://evil.example/">',
+      ].join(""),
+      () => null,
+    );
+    expect(html).not.toContain("position:fixed");
+    expect(html).not.toContain("style=");
+    expect(html).not.toContain("<svg");
+    expect(html).not.toContain("javascript:");
+    expect(html).not.toContain("srcset");
+    expect(html).not.toContain("<base");
+    // Legitimate remote images are untouched.
+    expect(html).toContain("https://i.pximg.net/a.jpg");
+  });
+
   it("turns stored html excerpts into readable compact text", () => {
     expect(summaryText("一行目<br />二行目 <b>強調</b> &amp; 続き")).toBe("一行目\n二行目 強調 & 続き");
   });

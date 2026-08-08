@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   ActionIcon,
   Alert,
@@ -74,7 +74,19 @@ export default function UpdatesPage() {
     { id: 1, targetType: "author", source: "pixiv", sourceKey: "8001234", displayName: "青葉しおり", enabled: true, lastCheckedAt: new Date().toISOString(), lastSeenSourceId: "12002", lastSeenSourceUpdatedAt: null, metadataJson: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
     { id: 2, targetType: "series", source: "pixiv", sourceKey: "778120", displayName: "星を編む人", enabled: true, lastCheckedAt: new Date().toISOString(), lastSeenSourceId: "12001", lastSeenSourceUpdatedAt: null, metadataJson: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
   ]) });
-  useEffect(() => { if (activeSnapshot) setSelectedCandidateIds(activeSnapshot.candidates.filter((item) => item.selected).map((item) => item.id)); }, [activeSnapshot?.jobId, activeSnapshot?.candidates]);
+  // The snapshot is polled, so re-seeding the selection from it on every
+  // arrival used to re-tick boxes the user had just cleared. Seed once per job,
+  // then only add candidates that appear later as the job discovers them.
+  const seenRef = useRef<{ jobId: string | null; ids: Set<number> }>({ jobId: null, ids: new Set() });
+  useEffect(() => {
+    if (!activeSnapshot) return;
+    const isNewJob = seenRef.current.jobId !== activeSnapshot.jobId;
+    if (isNewJob) seenRef.current = { jobId: activeSnapshot.jobId, ids: new Set() };
+    const fresh = activeSnapshot.candidates.filter((item) => item.selected && !seenRef.current.ids.has(item.id)).map((item) => item.id);
+    activeSnapshot.candidates.forEach((item) => seenRef.current.ids.add(item.id));
+    if (isNewJob) setSelectedCandidateIds(fresh);
+    else if (fresh.length) setSelectedCandidateIds((current) => [...new Set([...current, ...fresh])]);
+  }, [activeSnapshot]);
 
   const startMutation = useMutation({
     mutationFn: async (values: typeof form.values) => {
@@ -105,7 +117,7 @@ export default function UpdatesPage() {
 
   return (
     <div className="page page--contained updates-page">
-      <PageHeader eyebrow="Automation" title="更新センター" description="作品の変更、作者の新作、シリーズの続編を一つのジョブとして安全に確認・保存します。" actions={<Button leftSection={<RefreshCw size={16} />} loading={startMutation.isPending} disabled={running} onClick={() => form.onSubmit((values) => startMutation.mutate(values))()}>更新を確認</Button>} />
+      <PageHeader title="更新センター" description="作品の変更、作者の新作、シリーズの続編を一つのジョブとして安全に確認・保存します。" actions={<Button leftSection={<RefreshCw size={16} />} loading={startMutation.isPending} disabled={running} onClick={() => form.onSubmit((values) => startMutation.mutate(values))()}>更新を確認</Button>} />
       <Grid gap="lg" align="flex-start">
         <Grid.Col span={{ base: 12, lg: 4, xl: 3 }}>
           <Stack gap="lg">

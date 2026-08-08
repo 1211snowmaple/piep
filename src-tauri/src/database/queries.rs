@@ -1545,6 +1545,51 @@ impl Database {
             .map_err(|e| format!("Download not found: {}", e))
     }
 
+    /// 複数の作品をまとめて取得する。
+    ///
+    /// EPUBキューのように多数のIDを扱う画面で1件ずつ問い合わせると、
+    /// 件数分のIPCとクエリが発生する。存在しないIDは結果から除かれるので、
+    /// 呼び出し側は削除済みの項目を検出できる。
+    pub fn get_downloads(&self, ids: &[i64]) -> Result<Vec<DownloadEntry>, String> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let unique: Vec<i64> = {
+            let mut seen = std::collections::HashSet::new();
+            ids.iter().copied().filter(|id| seen.insert(*id)).collect()
+        };
+        let conn = self.read_conn()?;
+        let mut entries = Vec::with_capacity(unique.len());
+        // SQLite caps host parameters, so long queues are read in chunks.
+        for chunk in unique.chunks(400) {
+            let placeholders = std::iter::repeat_n("?", chunk.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!(
+                "{} WHERE d.id IN ({})",
+                download_select_sql_for_projection(Some("libraryGallery"), "NULL", "NULL"),
+                placeholders
+            );
+            let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map(rusqlite::params_from_iter(chunk.iter()), |row| {
+                    download_entry_from_row(row)
+                })
+                .map_err(|e| e.to_string())?;
+            for row in rows {
+                entries.push(row.map_err(|e| e.to_string())?);
+            }
+        }
+        // Preserve the caller's ordering, which is the queue order on screen.
+        let position: HashMap<i64, usize> = unique
+            .iter()
+            .enumerate()
+            .map(|(index, id)| (*id, index))
+            .collect();
+        entries.sort_by_key(|entry| position.get(&entry.id).copied().unwrap_or(usize::MAX));
+        Ok(entries)
+    }
+
     /// 特定のソースIDのダウンロードが存在するか確認する
     pub fn check_exists(&self, source: &str, source_id: &str) -> Result<bool, String> {
         let conn = self.read_conn()?;
@@ -2279,6 +2324,67 @@ impl Database {
         })
     }
 
+    /// 選択した作品のお気に入り・更新監視をまとめて更新する。
+    ///
+    /// 1件ずつコマンドを呼ぶと選択数だけIPCとトランザクションが走るため、
+    /// 大量選択時に極端に遅くなる。単一トランザクションで処理する。
+    pub fn set_flags_for_ids(
+        &self,
+        ids: &[i64],
+        favorite: Option<bool>,
+        watch: Option<bool>,
+    ) -> Result<BulkMutationResult, String> {
+        let unique: Vec<i64> = {
+            let mut seen = std::collections::HashSet::new();
+            ids.iter().copied().filter(|id| seen.insert(*id)).collect()
+        };
+        if unique.is_empty() || (favorite.is_none() && watch.is_none()) {
+            return Ok(BulkMutationResult {
+                matched_count: unique.len() as i64,
+                changed_count: 0,
+            });
+        }
+
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let mut changed_count = 0i64;
+        {
+            let mut assignments = Vec::new();
+            if favorite.is_some() {
+                assignments.push("favorite = ?1");
+            }
+            if watch.is_some() {
+                assignments.push(if favorite.is_some() {
+                    "watch_updates = ?2"
+                } else {
+                    "watch_updates = ?1"
+                });
+            }
+            let sql = format!(
+                "UPDATE downloads SET {} WHERE id = ?{}",
+                assignments.join(", "),
+                assignments.len() + 1
+            );
+            let mut stmt = tx.prepare(&sql).map_err(|e| e.to_string())?;
+            for id in &unique {
+                let affected = match (favorite, watch) {
+                    (Some(fav), Some(wat)) => stmt.execute(rusqlite::params![fav, wat, id]),
+                    (Some(fav), None) => stmt.execute(rusqlite::params![fav, id]),
+                    (None, Some(wat)) => stmt.execute(rusqlite::params![wat, id]),
+                    (None, None) => Ok(0),
+                }
+                .map_err(|e| e.to_string())?;
+                changed_count += affected as i64;
+            }
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+
+        Ok(BulkMutationResult {
+            matched_count: unique.len() as i64,
+            changed_count,
+        })
+    }
+
     /// 統計情報の取得
     pub fn get_stats(&self) -> Result<DbStats, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
@@ -2508,7 +2614,151 @@ impl Database {
     }
 
     /// ライブラリのフィルター候補一覧を取得
+    /// 作者・シリーズの一覧を検索・ページングして返す。
+    ///
+    /// `get_filter_facets` は上位60件しか返さないため、ライブラリの
+    /// 作者/シリーズタブでは大半のエンティティに到達できなかった。絞り込みと
+    /// ページングをSQL側で行い、件数に依存せず一覧できるようにする。
+    pub fn search_entity_facets(
+        &self,
+        kind: &str,
+        query: Option<&str>,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<EntityFacet>, String> {
+        let conn = self.read_conn()?;
+        let limit = limit.clamp(1, 200);
+        let offset = offset.max(0);
+        let filter = query.map(str::trim).unwrap_or("");
+        let has_filter = !filter.is_empty();
+        let like = format!("%{}%", filter.replace('%', "\\%").replace('_', "\\_"));
+
+        let sql = match kind {
+            "person" | "people" | "author" | "authors" => {
+                let having = if has_filter {
+                    "HAVING COALESCE(p.display_name, d.author_name) LIKE ?1 ESCAPE '\\'
+                         OR COALESCE(p.description, '') LIKE ?1 ESCAPE '\\'"
+                } else {
+                    ""
+                };
+                format!(
+                    "SELECT
+                        d.source,
+                        d.author_id,
+                        COALESCE(p.display_name, d.author_name) AS display_name,
+                        COUNT(DISTINCT d.id) AS count,
+                        COALESCE(p.icon_path, p.cover_path) AS cover_path,
+                        p.description,
+                        p.updated_at,
+                        MAX(d.downloaded_at) AS latest_downloaded_at,
+                        (
+                            SELECT d2.title
+                            FROM downloads d2
+                            WHERE d2.source = d.source AND d2.author_id = d.author_id
+                            ORDER BY COALESCE(d2.source_created_at, d2.downloaded_at) DESC, d2.id DESC
+                            LIMIT 1
+                        ) AS sample_title,
+                        p.icon_path,
+                        p.cover_path AS banner_path
+                     FROM downloads d
+                     LEFT JOIN people p ON p.source = d.source AND p.source_key = d.author_id
+                     WHERE d.author_id IS NOT NULL AND d.author_id != ''
+                       AND d.author_name IS NOT NULL AND d.author_name != ''
+                     GROUP BY d.source, d.author_id, COALESCE(p.display_name, d.author_name), p.icon_path, p.cover_path, p.description, p.updated_at
+                     {having}
+                     ORDER BY count DESC, display_name ASC
+                     LIMIT ?{limit_index} OFFSET ?{offset_index}",
+                    having = having,
+                    limit_index = if has_filter { 2 } else { 1 },
+                    offset_index = if has_filter { 3 } else { 2 },
+                )
+            }
+            "series" => {
+                let having = if has_filter {
+                    "HAVING COALESCE(s.title, ds.title) LIKE ?1 ESCAPE '\\'
+                         OR COALESCE(s.description, '') LIKE ?1 ESCAPE '\\'"
+                } else {
+                    ""
+                };
+                format!(
+                    "SELECT
+                        ds.series_source,
+                        ds.series_key,
+                        COALESCE(s.title, ds.title) AS title,
+                        COUNT(DISTINCT ds.download_id) AS count,
+                        s.cover_path,
+                        s.description,
+                        s.updated_at,
+                        MAX(d.downloaded_at) AS latest_downloaded_at,
+                        (
+                            SELECT d2.title
+                            FROM downloads d2
+                            JOIN download_series ds2 ON ds2.download_id = d2.id
+                            WHERE ds2.series_source = ds.series_source AND ds2.series_key = ds.series_key
+                            ORDER BY COALESCE(ds2.content_order, 9223372036854775807) ASC,
+                                     COALESCE(d2.source_created_at, d2.downloaded_at) ASC,
+                                     d2.id ASC
+                            LIMIT 1
+                        ) AS sample_title,
+                        NULL AS icon_path,
+                        s.cover_path AS banner_path
+                     FROM download_series ds
+                     LEFT JOIN series s ON s.source = ds.series_source AND s.source_key = ds.series_key
+                     JOIN downloads d ON d.id = ds.download_id
+                     GROUP BY ds.series_source, ds.series_key, COALESCE(s.title, ds.title), s.cover_path, s.description, s.updated_at
+                     {having}
+                     ORDER BY count DESC, title ASC
+                     LIMIT ?{limit_index} OFFSET ?{offset_index}",
+                    having = having,
+                    limit_index = if has_filter { 2 } else { 1 },
+                    offset_index = if has_filter { 3 } else { 2 },
+                )
+            }
+            other => return Err(format!("Unsupported entity facet kind: {}", other)),
+        };
+
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| format!("Entity facet search prepare failed: {}", e))?;
+        let map_row = |row: &rusqlite::Row<'_>| {
+            Ok(EntityFacet {
+                source: row.get(0)?,
+                source_key: row.get(1)?,
+                display_name: row.get(2)?,
+                count: row.get(3)?,
+                cover_path: row.get(4)?,
+                description: row.get(5)?,
+                updated_at: row.get(6)?,
+                latest_downloaded_at: row.get(7)?,
+                sample_title: row.get(8)?,
+                icon_path: row.get(9)?,
+                banner_path: row.get(10)?,
+            })
+        };
+        let rows = if has_filter {
+            stmt.query_map(rusqlite::params![like, limit, offset], map_row)
+        } else {
+            stmt.query_map(rusqlite::params![limit, offset], map_row)
+        }
+        .map_err(|e| format!("Entity facet search failed: {}", e))?;
+
+        let mut results = Vec::new();
+        for row in rows {
+            results.push(row.map_err(|e| format!("Entity facet row read failed: {}", e))?);
+        }
+        Ok(results)
+    }
+
     pub fn get_filter_facets(&self) -> Result<FilterFacets, String> {
+        self.get_filter_facets_with(true)
+    }
+
+    /// `include_entities` を落とすと、作者・シリーズの重い集計を省略する。
+    ///
+    /// ライブラリの絞り込みUIはタグと種別しか使わないのに、開くたびに相関
+    /// サブクエリを含む集計が2本走っていた。大規模ライブラリでは、この2本が
+    /// 画面表示の待ち時間の大半を占める。
+    pub fn get_filter_facets_with(&self, include_entities: bool) -> Result<FilterFacets, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
 
         let collect = |sql: &str| -> Result<Vec<FacetCount>, String> {
@@ -2577,7 +2827,7 @@ impl Database {
                  ORDER BY count DESC, author_name ASC
                  LIMIT 500",
             )?,
-            author_entities: collect_entities(
+            author_entities: if !include_entities { Vec::new() } else { collect_entities(
                 "SELECT
                     d.source,
                     d.author_id,
@@ -2603,8 +2853,8 @@ impl Database {
                  GROUP BY d.source, d.author_id, COALESCE(p.display_name, d.author_name), p.icon_path, p.cover_path, p.description, p.updated_at
                  ORDER BY count DESC, display_name ASC
                  LIMIT 60",
-            )?,
-            series: collect_entities(
+            )? },
+            series: if !include_entities { Vec::new() } else { collect_entities(
                 "SELECT
                     ds.series_source,
                     ds.series_key,
@@ -2632,7 +2882,7 @@ impl Database {
                  GROUP BY ds.series_source, ds.series_key, COALESCE(s.title, ds.title), s.cover_path, s.description, s.updated_at
                  ORDER BY count DESC, title ASC
                  LIMIT 60",
-            )?,
+            )? },
             content_types: collect(
                 "SELECT content_type, COUNT(*) AS count
                  FROM downloads
@@ -3590,7 +3840,16 @@ fn download_select_sql_for_projection(
         "(SELECT ds.series_key FROM download_series ds WHERE ds.download_id = d.id LIMIT 1)";
     let series_title_expr =
         "(SELECT ds.title FROM download_series ds WHERE ds.download_id = d.id LIMIT 1)";
+    // Cards show the creator's avatar beside the author name. Keyed on
+    // author_id, the same join the author listing uses.
+    let person_icon_expr =
+        "(SELECT p.icon_path FROM people p WHERE p.source = d.source AND p.source_key = d.author_id)";
 
+    // Only the card projections need the avatar; bulk reads skip the lookup.
+    let person_icon = match projection.as_str() {
+        "libraryGallery" | "libraryCompact" => person_icon_expr,
+        _ => "NULL",
+    };
     let (core_columns, person_id, person_name, series_id, series_title) = match projection.as_str()
     {
         "bulk" => (
@@ -3651,15 +3910,17 @@ fn download_select_sql_for_projection(
             "NULL",
             "NULL",
         ),
+        // The list view shows tags too; only the excerpt is surplus there.
         "libraryCompact" => (
-            "d.id,
+            format!(
+                "d.id,
                 d.source,
                 d.source_id,
                 d.title,
                 d.author_name,
                 d.author_id,
                 d.content_type,
-                '[]' AS tags,
+                {tags_expr} AS tags,
                 NULL AS excerpt,
                 d.cover_path,
                 d.json_path,
@@ -3674,7 +3935,7 @@ fn download_select_sql_for_projection(
                 d.watch_updates,
                 d.current_version,
                 d.favorite"
-                .to_string(),
+            ),
             person_id_expr,
             person_name_expr,
             series_id_expr,
@@ -3721,9 +3982,16 @@ fn download_select_sql_for_projection(
             NULL AS match_fields,
             NULL AS score_reasons,
             NULL AS match_highlights,
-            {} AS sort_key
+            {} AS sort_key,
+            {} AS person_icon_path
          FROM downloads d",
-        person_id, person_name, series_id, series_title, search_score_expr, sort_key_expr
+        person_id,
+        person_name,
+        series_id,
+        series_title,
+        search_score_expr,
+        sort_key_expr,
+        person_icon
     )
 }
 
@@ -5039,6 +5307,8 @@ fn download_entry_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Download
         score_reasons,
         match_highlights,
         sort_key: row.get(30).ok(),
+        // Appended last so the existing positional reads keep their indexes.
+        person_icon_path: row.get(31).ok(),
     })
 }
 
@@ -5382,6 +5652,42 @@ mod search_integration_tests {
     }
 
     #[test]
+    fn entity_facets_search_and_page_beyond_the_dashboard_cap() {
+        let (root, storage) = temp_paths();
+        let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+
+        // get_filter_facets only ever returns the top 60 authors, so the
+        // library tab needs a query that can reach past that.
+        for index in 0..70 {
+            insert_download_unindexed(
+                &db,
+                &storage,
+                &format!("{}", 100 + index),
+                &format!("作品{}", index),
+                &format!("作者{:02}", index),
+                &["日常"],
+                "本文",
+            );
+        }
+
+        let capped = db.get_filter_facets().unwrap();
+        assert_eq!(capped.author_entities.len(), 60);
+
+        let second_page = db.search_entity_facets("person", None, 60, 60).unwrap();
+        assert_eq!(second_page.len(), 10, "authors past the cap stay reachable");
+
+        let filtered = db.search_entity_facets("person", Some("作者69"), 60, 0).unwrap();
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].display_name, "作者69");
+        assert_eq!(filtered[0].count, 1);
+
+        let missing = db.search_entity_facets("person", Some("存在しない"), 60, 0).unwrap();
+        assert!(missing.is_empty());
+
+        assert!(db.search_entity_facets("unknown", None, 10, 0).is_err());
+    }
+
+    #[test]
     fn smart_search_ranks_metadata_over_body_and_supports_body_search() {
         let (root, storage) = temp_paths();
         let db = Database::open(&root.join("piep.db"), &storage).unwrap();
@@ -5705,6 +6011,94 @@ mod search_integration_tests {
     }
 
     #[test]
+    #[ignore = "performance smoke test for large-library browsing"]
+    fn library_browsing_stays_fast_on_a_large_library() {
+        let (root, storage) = temp_paths();
+        let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+
+        const SEEDED: usize = 20_000;
+        for index in 0..SEEDED {
+            insert_download_unindexed(
+                &db,
+                &storage,
+                &format!("scale-{}", index),
+                &format!("蔵書 {:05}", index),
+                &format!("作者 {:03}", index % 400),
+                &[&format!("tag{}", index % 30)],
+                "大規模ライブラリの一覧性能を確認するための本文です。",
+            );
+        }
+
+        // The library browses with an empty query, which is the keyset path.
+        let mut first = v2_params(None, 60, None);
+        first.projection = Some("libraryGallery".to_string());
+        let started = Instant::now();
+        let page1 = db.search_downloads_v2(&first).unwrap();
+        let first_elapsed = started.elapsed();
+        assert_eq!(page1.items.len(), 60);
+        assert_eq!(page1.total_estimate, Some(SEEDED as i64));
+        assert!(
+            page1.next_cursor.is_some(),
+            "a large library must expose more pages"
+        );
+
+        // Walk deep into the list: keyset paging must not degrade with depth.
+        let mut cursor = page1.next_cursor.clone();
+        let mut deepest = Duration::ZERO;
+        for _ in 0..40 {
+            let mut page_params = v2_params(None, 60, cursor.clone());
+            page_params.projection = Some("libraryGallery".to_string());
+            let started = Instant::now();
+            let page = db.search_downloads_v2(&page_params).unwrap();
+            deepest = deepest.max(started.elapsed());
+            cursor = page.next_cursor.clone();
+            assert!(cursor.is_some(), "paging ended earlier than expected");
+        }
+
+        let started = Instant::now();
+        let authors = db.search_entity_facets("person", None, 60, 300).unwrap();
+        let entity_elapsed = started.elapsed();
+        assert_eq!(authors.len(), 60);
+
+        let started = Instant::now();
+        let facets = db.get_filter_facets_with(false).unwrap();
+        let facet_elapsed = started.elapsed();
+        assert!(!facets.tags.is_empty());
+        assert!(
+            facets.author_entities.is_empty(),
+            "the light variant must skip the entity aggregates"
+        );
+
+        eprintln!(
+            "{} works: first page {:?}, deepest page {:?}, authors {:?}, filter options {:?}",
+            SEEDED, first_elapsed, deepest, entity_elapsed, facet_elapsed
+        );
+        assert!(
+            first_elapsed < Duration::from_millis(400),
+            "first page took {:?}",
+            first_elapsed
+        );
+        assert!(
+            deepest < Duration::from_millis(400),
+            "deep page took {:?}",
+            deepest
+        );
+        // Without idx_downloads_author_recent this listing takes ~1.9s here.
+        assert!(
+            entity_elapsed < Duration::from_millis(300),
+            "author listing took {:?}",
+            entity_elapsed
+        );
+        assert!(
+            facet_elapsed < Duration::from_millis(500),
+            "filter options took {:?}",
+            facet_elapsed
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     #[ignore = "performance smoke test for local search tuning"]
     fn smart_search_handles_5000_seed_items_under_target() {
         let (root, storage) = temp_paths();
@@ -5761,10 +6155,13 @@ mod search_integration_tests {
         assert!(!entity.contains("download_series"));
         assert!(entity.contains("d.cover_path"));
 
+        // The list view shows a tag column, so compact now pays for that
+        // lookup; the excerpt is still the one thing it does not read.
         let compact = download_select_sql_for_projection(Some("libraryCompact"), "NULL", "NULL");
-        assert!(!compact.contains("download_tags"));
+        assert!(compact.contains("download_tags"));
         assert!(compact.contains("download_people"));
         assert!(compact.contains("download_series"));
+        assert!(compact.contains("NULL AS excerpt"));
 
         let gallery = download_select_sql_for_projection(Some("libraryGallery"), "NULL", "NULL");
         assert!(gallery.contains("download_tags"));

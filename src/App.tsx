@@ -1,9 +1,11 @@
-import { Suspense, lazy } from "react";
-import { Center, Loader } from "@mantine/core";
+import { Suspense, lazy, useEffect } from "react";
+import { Center, Loader, Text } from "@mantine/core";
+import { modals } from "@mantine/modals";
 import { AppErrorBoundary } from "@/app/AppErrorBoundary";
 import { AppFrame } from "@/app/AppFrame";
 import { AppRouter, matchPath, useAppRouter } from "@/app/router";
 import { WorkspaceProvider } from "@/app/WorkspaceContext";
+import { installCloseGuard } from "@/lib/unsavedGuard";
 
 const DashboardPage = lazy(() => import("@/features/dashboard/DashboardPage"));
 const LibraryPage = lazy(() => import("@/features/library/LibraryPage"));
@@ -34,15 +36,36 @@ function CurrentRoute() {
   return <DashboardPage />;
 }
 
+function confirmDiscardOnClose(): Promise<boolean> {
+  return new Promise((resolve) => {
+    modals.openConfirmModal({
+      title: "保存していない変更があります",
+      children: <Text size="sm">終了すると編集中の内容は失われます。閉じてよろしいですか？</Text>,
+      labels: { confirm: "保存せずに終了", cancel: "アプリに戻る" },
+      confirmProps: { color: "red" },
+      onConfirm: () => resolve(true),
+      onCancel: () => resolve(false),
+      onClose: () => resolve(false),
+    });
+  });
+}
+
 function AppContent() {
   const { pathname } = useAppRouter();
+  useEffect(() => {
+    let dispose: (() => void) | undefined;
+    installCloseGuard(confirmDiscardOnClose).then((fn) => { dispose = fn; }).catch(() => undefined);
+    return () => dispose?.();
+  }, []);
   return (
     <WorkspaceProvider>
-      <Suspense fallback={<RouteFallback />}>
-        <AppFrame>
-          <AppErrorBoundary key={pathname}><CurrentRoute /></AppErrorBoundary>
-        </AppFrame>
-      </Suspense>
+      <AppFrame>
+        {/* Suspense sits inside the frame so loading a route chunk swaps the
+            content area only, instead of blanking the whole shell. */}
+        <AppErrorBoundary key={pathname}>
+          <Suspense fallback={<RouteFallback />}><CurrentRoute /></Suspense>
+        </AppErrorBoundary>
+      </AppFrame>
     </WorkspaceProvider>
   );
 }

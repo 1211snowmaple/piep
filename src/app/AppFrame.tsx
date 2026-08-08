@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, type ReactNode } from "react";
 import {
   ActionIcon,
   AppShell,
+  Badge,
   Box,
   Burger,
   Divider,
@@ -18,7 +19,7 @@ import {
   useComputedColorScheme,
   useMantineColorScheme,
 } from "@mantine/core";
-import { useDisclosure, useHotkeys } from "@mantine/hooks";
+import { useDisclosure, useHotkeys, useLocalStorage, useMediaQuery } from "@mantine/hooks";
 import { Spotlight, spotlight, type SpotlightActionData } from "@mantine/spotlight";
 import {
   ArrowLeft,
@@ -32,58 +33,77 @@ import {
   LibraryBig,
   Menu as MenuIcon,
   Moon,
+  PanelLeftClose,
+  PanelLeftOpen,
   RefreshCw,
   Search,
   Settings,
   Sun,
 } from "lucide-react";
 import piepIcon from "@/assets/icon.svg";
+import piepLockup from "@/assets/lockup.svg";
 import { useAppNavigate, useAppRouter } from "@/app/router";
 import { useWorkspace } from "@/app/WorkspaceContext";
 import { isTauriRuntime } from "@/services/dbApi";
 
 interface NavItem {
   label: string;
-  description: string;
   path: string;
   icon: typeof Home;
   badge?: number;
 }
 
+const RAIL_WIDTH = 62;
+const NAVBAR_WIDTH = 194;
+
 function PiepBrand({ collapsed = false, onClick }: { collapsed?: boolean; onClick?: () => void }) {
   return (
     <UnstyledButton className="app-brand" onClick={onClick} aria-label="ホームへ移動">
-    <Group gap="sm" wrap="nowrap">
-      <Image src={piepIcon} alt="" w={34} h={34} className="app-logo" />
-      {!collapsed && (
-        <Box>
-          <Text fw={800} fz="lg" lh={1}>piep</Text>
-          <Text size="xs" c="dimmed" mt={4}>Creative library</Text>
-        </Box>
-      )}
-    </Group>
+      {collapsed
+        ? <Image src={piepIcon} alt="piep" className="app-brand__mark" />
+        : <Image src={piepLockup} alt="piep" className="app-brand__lockup" />}
     </UnstyledButton>
   );
 }
 
-function Navigation({ onNavigate }: { onNavigate?: () => void }) {
+function NavItemLink({ item, active, railed, onSelect }: { item: NavItem; active: boolean; railed: boolean; onSelect: () => void }) {
+  const Icon = item.icon;
+  const link = (
+    <NavLink
+      className="app-nav__link"
+      active={active}
+      label={railed ? undefined : item.label}
+      leftSection={<Icon size={19} strokeWidth={1.8} />}
+      rightSection={!railed && item.badge ? <Badge size="xs" variant="light" circle>{item.badge}</Badge> : undefined}
+      onClick={onSelect}
+      aria-label={railed ? item.label : undefined}
+      aria-current={active ? "page" : undefined}
+    />
+  );
+  // In the rail the label is gone, so the tooltip is the only affordance left.
+  return railed ? <Tooltip label={item.label} position="right" withArrow>{link}</Tooltip> : link;
+}
+
+function Navigation({ railed, onNavigate }: { railed: boolean; onNavigate?: () => void }) {
   const navigate = useAppNavigate();
   const location = useAppRouter();
   const { epubQueue } = useWorkspace();
+  // The descriptions repeated what each label already said and forced the rail
+  // wide enough to eat into the content area.
   const sections: { label: string; items: NavItem[] }[] = [
     {
       label: "Workspace",
       items: [
-        { label: "ホーム", description: "今日の状況とクイック操作", path: "/", icon: Home },
-        { label: "ライブラリ", description: "保存した作品を探す", path: "/library", icon: LibraryBig },
-        { label: "保存", description: "Webから作品を取り込む", path: "/save/pixiv", icon: Download },
+        { label: "ホーム", path: "/", icon: Home },
+        { label: "ライブラリ", path: "/library", icon: LibraryBig },
+        { label: "保存", path: "/save/pixiv", icon: Download },
       ],
     },
     {
       label: "Production",
       items: [
-        { label: "EPUB", description: epubQueue.length ? `${epubQueue.length}冊を書き出し待ち` : "電子書籍を書き出す", path: "/epub", icon: BookText },
-        { label: "更新", description: "新着と変更をまとめて確認", path: "/updates", icon: RefreshCw },
+        { label: "EPUB", path: "/epub", icon: BookText, badge: epubQueue.length || undefined },
+        { label: "更新", path: "/updates", icon: RefreshCw },
       ],
     },
   ];
@@ -92,47 +112,43 @@ function Navigation({ onNavigate }: { onNavigate?: () => void }) {
     navigate(path);
     onNavigate?.();
   };
+  const isActive = (path: string) => {
+    const root = `/${path.split("/").filter(Boolean)[0] ?? ""}`;
+    return path === "/" ? location.pathname === "/" : location.pathname === root || location.pathname.startsWith(`${root}/`);
+  };
 
   return (
-    <Stack h="100%" gap={0}>
-      <Box px="md" py="lg"><PiepBrand onClick={() => go("/")} /></Box>
+    <Stack h="100%" gap={0} className="app-nav" data-railed={railed || undefined}>
+      <Box className="app-nav__brand"><PiepBrand collapsed={railed} onClick={() => go("/")} /></Box>
       <Divider />
-      <ScrollArea flex={1} px="sm" py="md" type="auto">
-        <Stack gap="lg">
+      <ScrollArea flex={1} px={railed ? 6 : "xs"} py="sm" type="auto">
+        <Stack gap="md">
           {sections.map((section) => (
-            <Stack gap={6} key={section.label}>
-              <Text px="sm" size="10px" fw={800} c="dimmed" tt="uppercase" lts="0.1em">{section.label}</Text>
-              {section.items.map((item) => {
-                const active = item.path === "/" ? location.pathname === "/" : location.pathname.startsWith(item.path);
-                const Icon = item.icon;
-                return (
-                  <NavLink
-                    key={item.path}
-                    active={active}
-                    label={item.label}
-                    description={item.description}
-                    leftSection={<Icon size={18} strokeWidth={1.8} />}
-                    onClick={() => go(item.path)}
-                    aria-current={active ? "page" : undefined}
-                  />
-                );
-              })}
+            <Stack gap={2} key={section.label}>
+              {railed
+                ? <Divider my={4} />
+                : <Text px="sm" size="10px" fw={800} c="dimmed" tt="uppercase" lts="0.1em" mb={2}>{section.label}</Text>}
+              {section.items.map((item) => (
+                <NavItemLink key={item.path} item={item} active={isActive(item.path)} railed={railed} onSelect={() => go(item.path)} />
+              ))}
             </Stack>
           ))}
         </Stack>
       </ScrollArea>
       <Divider />
-      <Stack gap={4} p="sm">
-        <NavLink label="設定" description="接続・表示・保存先" leftSection={<Settings size={18} />} active={location.pathname.startsWith("/settings")} onClick={() => go("/settings")} />
-        <Group px="sm" py={8} justify="space-between">
-          <Group gap={8}>
-            <Indicator color={isTauriRuntime() ? "green" : "gray"} size={7} processing={isTauriRuntime()}>
-              <Box w={9} h={9} />
-            </Indicator>
-            <Text size="xs" c="dimmed">{isTauriRuntime() ? "Desktop ready" : "Preview mode"}</Text>
+      <Stack gap={2} p={railed ? 6 : "xs"}>
+        <NavItemLink item={{ label: "設定", path: "/settings", icon: Settings }} active={isActive("/settings")} railed={railed} onSelect={() => go("/settings")} />
+        {!railed && (
+          <Group px="sm" py={6} justify="space-between" wrap="nowrap">
+            <Group gap={8} wrap="nowrap">
+              <Indicator color={isTauriRuntime() ? "green" : "gray"} size={7} processing={isTauriRuntime()}>
+                <Box w={9} h={9} />
+              </Indicator>
+              <Text size="xs" c="dimmed">{isTauriRuntime() ? "Desktop ready" : "Preview"}</Text>
+            </Group>
+            <Text size="xs" c="dimmed">v0.2</Text>
           </Group>
-          <Text size="xs" c="dimmed">v0.2</Text>
-        </Group>
+        )}
       </Stack>
     </Stack>
   );
@@ -142,6 +158,13 @@ export function AppFrame({ children }: { children: ReactNode }) {
   const navigate = useAppNavigate();
   const location = useAppRouter();
   const [mobileOpened, mobile] = useDisclosure(false);
+  const [railed, setRailed] = useLocalStorage({ key: "piep.nav-railed", defaultValue: false });
+  // Below the breakpoint the navbar is an overlay drawer, where a 62px rail
+  // would just be a broken-looking sliver, so the preference only applies to
+  // the docked sidebar.
+  const wideEnoughToRail = useMediaQuery("(min-width: 62em)", true);
+  const effectiveRailed = railed && wideEnoughToRail;
+  const navbarWidth = effectiveRailed ? RAIL_WIDTH : NAVBAR_WIDTH;
   const mainRef = useRef<HTMLElement>(null);
   const { setColorScheme } = useMantineColorScheme();
   const colorScheme = useComputedColorScheme("light");
@@ -186,21 +209,42 @@ export function AppFrame({ children }: { children: ReactNode }) {
       <a className="skip-link" href="#main-content">本文へ移動</a>
       <AppShell
         header={{ height: 58 }}
-        navbar={{ width: 248, breakpoint: "md", collapsed: { mobile: !mobileOpened } }}
+        navbar={{ width: navbarWidth, breakpoint: "md", collapsed: { mobile: !mobileOpened } }}
         padding={0}
         className="app-shell"
+        // Elements pinned over the content (the selection bar, the reader's
+        // pager) centre themselves against this, so it has to follow the rail.
+        style={{ "--piep-sidebar-width": `${navbarWidth}px` } as React.CSSProperties}
       >
         <AppShell.Header className="app-header">
           <Group h="100%" px={{ base: "sm", md: "md" }} justify="space-between" wrap="nowrap">
             <Group gap="sm" wrap="nowrap">
               <Burger opened={mobileOpened} onClick={mobile.toggle} hiddenFrom="md" size="sm" aria-label="ナビゲーションを開く" />
-              <Group gap={4} visibleFrom="md">
+              {/* Sits exactly where the burger appears on a narrow window, so
+                  the control for the sidebar is always in the same place. A
+                  panel glyph rather than another set of bars, which would read
+                  as a second app menu. */}
+              <Tooltip label={effectiveRailed ? "サイドバーを開く" : "サイドバーをたたむ"}>
+                <ActionIcon
+                  visibleFrom="md"
+                  variant="subtle"
+                  color="gray"
+                  aria-label={effectiveRailed ? "サイドバーを開く" : "サイドバーをたたむ"}
+                  aria-expanded={!effectiveRailed}
+                  onClick={() => setRailed((value) => !value)}
+                >
+                  {effectiveRailed ? <PanelLeftOpen size={18} /> : <PanelLeftClose size={18} />}
+                </ActionIcon>
+              </Tooltip>
+              {/* A desktop window has no browser chrome, so hiding history
+                  controls on narrow widths left no way back at all. */}
+              <Group gap={4} wrap="nowrap">
                 <Tooltip label="戻る"><ActionIcon variant="subtle" color="gray" aria-label="前の画面へ戻る" onClick={() => navigate(-1)}><ArrowLeft size={18} /></ActionIcon></Tooltip>
                 <Tooltip label="進む"><ActionIcon variant="subtle" color="gray" aria-label="次の画面へ進む" onClick={() => navigate(1)}><ArrowRight size={18} /></ActionIcon></Tooltip>
-                <Divider orientation="vertical" h={20} mx={6} />
-                <Text size="sm" fw={680}>{pageTitle}</Text>
+                <Divider orientation="vertical" h={20} mx={6} visibleFrom="md" />
+                <Text size="sm" fw={680} visibleFrom="md">{pageTitle}</Text>
               </Group>
-              <Text size="sm" fw={650} hiddenFrom="md">{pageTitle}</Text>
+              <Text size="sm" fw={650} hiddenFrom="md" className="line-clamp-1">{pageTitle}</Text>
             </Group>
             <Group gap={6} wrap="nowrap">
               <Tooltip label="検索または移動（Ctrl K）"><ActionIcon variant="subtle" color="gray" aria-label="検索または移動" onClick={() => spotlight.open()}><Search size={18} /></ActionIcon></Tooltip>
@@ -214,11 +258,8 @@ export function AppFrame({ children }: { children: ReactNode }) {
                 <Menu.Target>
                   <Tooltip label="メニュー"><ActionIcon variant="subtle" color="gray" aria-label="アプリメニュー"><MenuIcon size={18} /></ActionIcon></Tooltip>
                 </Menu.Target>
+                {/* Only what the navigation rail does not already offer. */}
                 <Menu.Dropdown>
-                  <Menu.Label>piep</Menu.Label>
-                  <Menu.Item leftSection={<LibraryBig size={15} />} onClick={() => navigate("/library")}>ライブラリを開く</Menu.Item>
-                  <Menu.Item leftSection={<Download size={15} />} onClick={() => navigate("/save/pixiv")}>新しく保存</Menu.Item>
-                  <Menu.Divider />
                   <Menu.Item leftSection={<Settings size={15} />} onClick={() => navigate("/settings")}>設定</Menu.Item>
                   <Menu.Item leftSection={<CircleHelp size={15} />} onClick={() => navigate("/settings?section=about")}>piepについて</Menu.Item>
                 </Menu.Dropdown>
@@ -226,7 +267,9 @@ export function AppFrame({ children }: { children: ReactNode }) {
             </Group>
           </Group>
         </AppShell.Header>
-        <AppShell.Navbar className="app-navbar"><Navigation onNavigate={mobile.close} /></AppShell.Navbar>
+        <AppShell.Navbar className="app-navbar">
+          <Navigation railed={effectiveRailed} onNavigate={mobile.close} />
+        </AppShell.Navbar>
         <AppShell.Main ref={mainRef} id="main-content" className="app-main" tabIndex={-1}>
           {children}
         </AppShell.Main>

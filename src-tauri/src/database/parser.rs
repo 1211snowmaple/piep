@@ -2,6 +2,27 @@
 
 use crate::database::models::AssetEntry;
 use regex::Regex;
+use std::sync::LazyLock;
+
+// These patterns are fixed, but they used to be rebuilt on every call, so
+// opening a document paid for eight regex compilations before any matching
+// started. Compiling once keeps that cost off the per-document path.
+static RE_RUBY: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\[\[rb:(?P<kanji>.+?)\s*&gt;\s*(?P<kana>.+?)\]\]").unwrap());
+static RE_CHAPTER: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\[chapter:(?P<title>.+?)\]").unwrap());
+static RE_NEWPAGE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\[+newpage\s*\]+").unwrap());
+static RE_JUMP: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\[+jump\s*:\s*(?P<page>\d+)\s*\]+").unwrap());
+static RE_JUMPURI: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\[\[jumpuri:(?P<title>.+?)\s*&gt;\s*(?P<url>https?://.+?)\]\]").unwrap()
+});
+static RE_NOVEL_SCHEME: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"pixiv://novels/(?P<id>\d+)").unwrap());
+static RE_ILLUST_SCHEME: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"pixiv://illusts/(?P<id>\d+)").unwrap());
+static RE_IMAGE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\[(?:uploadedimage|pixivimage):(?P<id>\d+)\]").unwrap());
 
 /// HTML文字を安全にエスケープするインライン軽量エスケープ
 fn escape_html(text: &str) -> String {
@@ -36,24 +57,20 @@ pub fn parse_pixiv_to_html(raw_json: &str, assets: &[AssetEntry]) -> String {
 
     // 2. ルビ [[rb:漢字 > ふりがな]] -> <ruby>漢字<rt>ふりがな</rt></ruby>
     // エスケープ後の ">" は "&gt;" になっているので "&gt;" でマッチさせる
-    let re_ruby = Regex::new(r"\[\[rb:(?P<kanji>.+?)\s*&gt;\s*(?P<kana>.+?)\]\]").unwrap();
-    html = re_ruby
+    html = RE_RUBY
         .replace_all(&html, "<ruby>$kanji<rt>$kana</rt></ruby>")
         .to_string();
 
     // 3. 見出し [chapter:タイトル] -> <h2>タイトル</h2>
-    let re_chapter = Regex::new(r"\[chapter:(?P<title>.+?)\]").unwrap();
-    html = re_chapter.replace_all(&html, "<h2>$title</h2>").to_string();
+    html = RE_CHAPTER.replace_all(&html, "<h2>$title</h2>").to_string();
 
     // 3.5 改ページ [newpage] -> HTMLコメント <!-- newpage --> (大カッコ一重・二重、大文字小文字、スペース完全許容)
-    let re_newpage = Regex::new(r"(?i)\[+newpage\s*\]+").unwrap();
-    html = re_newpage
+    html = RE_NEWPAGE
         .replace_all(&html, "<!-- newpage -->")
         .to_string();
 
     // 4. 改ページ [jump:ページ番号] -> ページ間リンク (大カッコ一重・二重、スペースの有無、大文字小文字を完全許容)
-    let re_jump = Regex::new(r"(?i)\[+jump\s*:\s*(?P<page>\d+)\s*\]+").unwrap();
-    html = re_jump
+    html = RE_JUMP
         .replace_all(
             &html,
             r##"<a href="#" class="jump-link" data-page="$page">$pageページへ</a>"##,
@@ -62,9 +79,7 @@ pub fn parse_pixiv_to_html(raw_json: &str, assets: &[AssetEntry]) -> String {
 
     // 5. 外部リンク [[jumpuri:タイトル > URL]]
     // エスケープ後の ">" は "&gt;" になっているので "&gt;" でマッチさせる
-    let re_jumpuri =
-        Regex::new(r"\[\[jumpuri:(?P<title>.+?)\s*&gt;\s*(?P<url>https?://.+?)\]\]").unwrap();
-    html = re_jumpuri
+    html = RE_JUMPURI
         .replace_all(
             &html,
             r##"<a href="$url" target="_blank" rel="noopener noreferrer">$title</a>"##,
@@ -73,20 +88,17 @@ pub fn parse_pixiv_to_html(raw_json: &str, assets: &[AssetEntry]) -> String {
 
     // 6. Pixiv内部スキーム
     // pixiv://novels/ID
-    let re_novel_scheme = Regex::new(r"pixiv://novels/(?P<id>\d+)").unwrap();
-    html = re_novel_scheme
+    html = RE_NOVEL_SCHEME
         .replace_all(&html, "https://www.pixiv.net/novel/show.php?id=$id")
         .to_string();
 
     // pixiv://illusts/ID
-    let re_illust_scheme = Regex::new(r"pixiv://illusts/(?P<id>\d+)").unwrap();
-    html = re_illust_scheme
+    html = RE_ILLUST_SCHEME
         .replace_all(&html, "https://www.pixiv.net/artworks/$id")
         .to_string();
 
     // 7. 画像置換 [uploadedimage:ID] または [pixivimage:ID]
-    let re_image = Regex::new(r"\[(?:uploadedimage|pixivimage):(?P<id>\d+)\]").unwrap();
-    html = re_image
+    html = RE_IMAGE
         .replace_all(&html, |caps: &regex::Captures| {
             let image_id = &caps["id"];
             // アセット配列から対応する画像を検索 (ファイル名に ID が含まれるものを探す)
@@ -121,10 +133,9 @@ pub fn parse_fanbox_to_html(raw_json: &str, assets: &[AssetEntry]) -> String {
 
     // 1. もし FanboxResponse ラッパーが被っている場合 (生レスポンス `{ "body": { "id": ..., "body": ... } }`)
     // ラッパーの中身を `post` に特定
-    let post = if v.get("body").and_then(|b| b.get("id")).is_some() {
-        v.get("body").unwrap()
-    } else {
-        &v
+    let post = match v.get("body") {
+        Some(body) if body.get("id").is_some() => body,
+        _ => &v,
     };
 
     // 2. 古いプレーンテキスト形式 (PostBodyText) の場合

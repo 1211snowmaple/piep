@@ -295,29 +295,16 @@ pub fn open_child_webview(
         .ok_or("Main window not found")?;
     let main_window_for_child = app.get_window("main").ok_or("Main window not found")?;
 
-    // Pixivの固定幅サイトを画面幅に自動縮小するスクリプト
-    // + SPAの遷移(pushState/replaceState)を検知して document.title や IPC を通じて
-    //   Rustへ即座に通知する
+    // Pixivの固定幅サイトを画面幅に自動縮小するスクリプト。
+    //
+    // 以前はここから `notify_url_changed` をinvokeしてSPA遷移を通知していたが、
+    // このWebViewはリモートオリジンで読み込まれるため、capabilityに `remote`
+    // を許可しない限りTauriのIPCは注入されない。リモートページにコマンド実行を
+    // 許可するのは危険なので、URL追跡は on_page_load イベントと
+    // フロント側のポーリングに任せ、ここではページ内の描画調整だけを行う。
     let init_script = r#"
         (function() {
             let lastZoom = 1;
-            let lastNotifiedUrl = '';
-
-            const notifyUrlChange = () => {
-                const currentUrl = window.location.href;
-                if (currentUrl !== lastNotifiedUrl) {
-                    lastNotifiedUrl = currentUrl;
-                    // Tauri v2 の IPC 経由で Rust 側に即座に通知する
-                    if (window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke) {
-                        window.__TAURI__.core.invoke('notify_url_changed', { url: currentUrl }).catch(() => {});
-                    } else if (window.__tauri_ipc__) {
-                        window.__tauri_ipc__({
-                            cmd: 'notify_url_changed',
-                            url: currentUrl
-                        });
-                    }
-                }
-            };
 
             const autofit = () => {
                 if (window.location.hostname.includes('pixiv.net')) {
@@ -342,27 +329,24 @@ pub fn open_child_webview(
                 }
             };
 
-            // pushState/replaceState をフック
+            // SPA遷移でもレイアウトが変わるため、履歴APIをフックして再調整する
             const originalPushState = history.pushState;
             history.pushState = function() {
                 const result = originalPushState.apply(this, arguments);
-                notifyUrlChange();
                 autofit();
                 return result;
             };
             const originalReplaceState = history.replaceState;
             history.replaceState = function() {
                 const result = originalReplaceState.apply(this, arguments);
-                notifyUrlChange();
                 autofit();
                 return result;
             };
-            window.addEventListener('popstate', () => { notifyUrlChange(); autofit(); });
+            window.addEventListener('popstate', autofit);
             window.addEventListener('resize', autofit);
-            window.addEventListener('hashchange', notifyUrlChange);
 
-            if (document.readyState === 'complete') { autofit(); notifyUrlChange(); }
-            else { window.addEventListener('load', () => { autofit(); notifyUrlChange(); }); }
+            if (document.readyState === 'complete') { autofit(); }
+            else { window.addEventListener('load', autofit); }
         })();
     "#;
 
@@ -394,6 +378,46 @@ pub fn open_child_webview(
         .map_err(|e| e.to_string())?;
 
     Ok(())
+}
+
+/// 子WebViewの位置とサイズだけを更新する。
+///
+/// レイアウト変更のたびに `open_child_webview` を呼ぶと、フロント側が保持する
+/// URLが古い場合に閲覧中のページから勝手に遷移してしまう。リサイズ経路では
+/// URLに触れないこの関数を使う。WebViewが無い場合は `false` を返す。
+pub fn set_child_webview_bounds(
+    app: AppHandle,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+) -> Result<bool, String> {
+    let Some(webview) = app.get_webview("embedded_browser") else {
+        return Ok(false);
+    };
+    webview
+        .set_position(LogicalPosition::new(x, y))
+        .map_err(|e| e.to_string())?;
+    webview
+        .set_size(LogicalSize::new(width, height))
+        .map_err(|e| e.to_string())?;
+    Ok(true)
+}
+
+/// 子WebViewの表示・非表示を切り替える。
+///
+/// 子WebViewはネイティブレイヤーとして常にDOMより手前に描画されるため、
+/// モーダルやメニューが重なる間は隠す必要がある。
+pub fn set_child_webview_visible(app: AppHandle, visible: bool) -> Result<bool, String> {
+    let Some(webview) = app.get_webview("embedded_browser") else {
+        return Ok(false);
+    };
+    if visible {
+        webview.show().map_err(|e| e.to_string())?;
+    } else {
+        webview.hide().map_err(|e| e.to_string())?;
+    }
+    Ok(true)
 }
 
 /// WebViewのURLを別のURLに変更する

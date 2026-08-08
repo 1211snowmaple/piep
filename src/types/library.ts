@@ -23,6 +23,8 @@ export interface DownloadEntry {
   favorite: boolean;
   personId?: string | null;
   personName?: string | null;
+  /** Creator avatar shown beside the author name on cards. */
+  personIconPath?: string | null;
   seriesId?: string | null;
   seriesTitle?: string | null;
   searchScore?: number | null;

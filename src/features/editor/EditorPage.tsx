@@ -47,6 +47,7 @@ import {
 import { useAppNavigate, useRouteParams } from "@/app/router";
 import { ErrorState, LoadingState } from "@/components/AsyncState";
 import { errorMessage } from "@/lib/format";
+import { registerUnsavedGuard } from "@/lib/unsavedGuard";
 import { getDemoEditor } from "@/mocks/demoData";
 import { activateWorkEdit, getAssetUrl, getEditorDocument, importWorkAsset, isTauriRuntime, saveWorkDraft } from "@/services/dbApi";
 import { openSingleDialog } from "@/services/dialogApi";
@@ -165,6 +166,11 @@ export default function EditorPage() {
     window.addEventListener("beforeunload", guard);
     return () => window.removeEventListener("beforeunload", guard);
   }, [dirty]);
+  // `beforeunload` never fires when the desktop window is closed, so the same
+  // state is registered with the native close guard as well.
+  const dirtyRef = useRef(dirty);
+  dirtyRef.current = dirty;
+  useEffect(() => registerUnsavedGuard(() => dirtyRef.current), []);
   useEffect(() => {
     if (!syncScroll) return;
     const editorViewport = editorScrollRef.current;

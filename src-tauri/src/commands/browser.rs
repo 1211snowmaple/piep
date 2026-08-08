@@ -1,6 +1,7 @@
 use crate::auth::webview::{
     close_child_webview, destroy_child_webview, get_child_webview_url, go_back_child_webview,
     go_forward_child_webview, navigate_child_webview, open_child_webview, reload_child_webview,
+    set_child_webview_bounds, set_child_webview_visible,
 };
 use tauri::{Emitter, Manager};
 
@@ -15,6 +16,25 @@ pub async fn open_embedded_browser(
     user_agent: Option<String>,
 ) -> Result<(), String> {
     open_child_webview(app, url, x, y, width, height, user_agent)
+}
+
+#[tauri::command]
+pub async fn set_embedded_browser_bounds(
+    app: tauri::AppHandle,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+) -> Result<bool, String> {
+    set_child_webview_bounds(app, x, y, width, height)
+}
+
+#[tauri::command]
+pub async fn set_embedded_browser_visible(
+    app: tauri::AppHandle,
+    visible: bool,
+) -> Result<bool, String> {
+    set_child_webview_visible(app, visible)
 }
 
 #[tauri::command]

@@ -32,7 +32,7 @@ import { useForm, isNotEmpty, type UseFormReturnType } from "@mantine/form";
 import { useDisclosure } from "@mantine/hooks";
 import { modals } from "@mantine/modals";
 import { notifications } from "@mantine/notifications";
-import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { BookOpen, Check, ChevronRight, FileCode2, FolderOpen, ImageDown, Plus, Save, Trash2, X } from "lucide-react";
 import { useAppNavigate } from "@/app/router";
 import { useWorkspace } from "@/app/WorkspaceContext";
@@ -41,7 +41,7 @@ import { PageHeader } from "@/components/PageHeader";
 import { ProviderMark } from "@/lib/providers";
 import { errorMessage, formatBytes, formatNumber } from "@/lib/format";
 import { getDemoWork } from "@/mocks/demoData";
-import { getDownload, isTauriRuntime } from "@/services/dbApi";
+import { getDownloads, isTauriRuntime } from "@/services/dbApi";
 import { openSingleDialog } from "@/services/dialogApi";
 import { createEpubTemplate, deleteEpubTemplate, exportEpubBatch, getTemplateFiles, listEpubTemplates, readTemplateFile, saveTemplateFile } from "@/services/epubApi";
 import { onTauriEvent } from "@/services/eventBus";
@@ -129,8 +129,16 @@ export default function EpubPage() {
   const [newTemplateOpened, newTemplateModal] = useDisclosure(false);
   const form = useForm<EpubValues>({ initialValues, validate: { templateName: isNotEmpty("テンプレートを選択してください"), outputDir: isNotEmpty("出力先を選択してください") }, validateInputOnBlur: true });
   const templateForm = useForm({ initialValues: { name: "" }, validate: { name: (value) => /^[a-zA-Z0-9_-]+$/.test(value) ? null : "英数字、_、-だけを使用してください" } });
-  const workQueries = useQueries({ queries: epubQueue.map((id) => ({ queryKey: ["download", id], queryFn: () => runtime ? getDownload(id) : Promise.resolve(getDemoWork(id)) })) });
-  const works = workQueries.flatMap((query) => query.data ? [query.data as DownloadEntry] : []);
+  // One request for the whole queue: a per-work query meant a queue of a few
+  // hundred books fired that many IPC round trips on every visit.
+  const queueQuery = useQuery({
+    queryKey: ["epub-queue-works", epubQueue],
+    queryFn: () => runtime
+      ? getDownloads(epubQueue)
+      : Promise.resolve(epubQueue.map((id) => getDemoWork(id)).filter((work): work is DownloadEntry => Boolean(work))),
+    enabled: epubQueue.length > 0,
+  });
+  const works = useMemo(() => queueQuery.data ?? [], [queueQuery.data]);
   const templates = useQuery({
     queryKey: ["epub-templates"],
     queryFn: () => runtime ? listEpubTemplates<TemplateInfo[]>() : Promise.resolve<TemplateInfo[]>([{ name: "default", isBuiltin: true, fileCount: 7 }, { name: "pixiv", isBuiltin: true, fileCount: 2 }]),
@@ -140,11 +148,14 @@ export default function EpubPage() {
     if (runtime) onTauriEvent<ExportProgress>("epub-export-progress", (event) => setProgress(event.payload)).then((fn) => { dispose = fn; }).catch(() => undefined);
     return () => dispose?.();
   }, [runtime]);
+  // Works deleted from the library after being queued simply do not come back
+  // from the bulk fetch, so drop them from the queue instead of showing gaps.
   useEffect(() => {
-    if (!epubQueue.length || workQueries.some((query) => query.isLoading || query.isPending)) return;
-    const staleIds = epubQueue.filter((_, index) => !workQueries[index]?.data);
+    if (!queueQuery.isSuccess || !epubQueue.length) return;
+    const found = new Set(works.map((work) => work.id));
+    const staleIds = epubQueue.filter((id) => !found.has(id));
     if (staleIds.length) removeFromEpubQueue(staleIds);
-  }, [epubQueue, removeFromEpubQueue, workQueries]);
+  }, [epubQueue, queueQuery.isSuccess, removeFromEpubQueue, works]);
 
   const exportMutation = useMutation({
     mutationFn: async (values: EpubValues): Promise<ExportBatchResult> => {
@@ -187,7 +198,7 @@ export default function EpubPage() {
 
   return (
     <div className="page page--contained epub-page">
-      <PageHeader eyebrow="Production" title="EPUB Studio" description="選んだ作品を、端末に合わせた高品質な電子書籍へ書き出します。" actions={<Button variant="default" leftSection={<FileCode2 size={15} />} onClick={templatesDrawer.open}>テンプレート管理</Button>} />
+      <PageHeader title="EPUB Studio" description="選んだ作品を、端末に合わせた高品質な電子書籍へ書き出します。" actions={<Button variant="default" leftSection={<FileCode2 size={15} />} onClick={templatesDrawer.open}>テンプレート管理</Button>} />
       {!epubQueue.length ? <EmptyState icon={BookOpen} title="EPUBキューは空です" description="ライブラリや作品詳細から、書き出したい作品をキューに追加してください。" action={<Button onClick={() => navigate("/library")}>ライブラリを開く</Button>} /> : (
         <form onSubmit={form.onSubmit((values) => exportMutation.mutate(values))}>
           <Grid gap="lg" align="flex-start">
@@ -195,7 +206,7 @@ export default function EpubPage() {
               <Stack gap="lg">
                 <Card p="lg">
                   <Group justify="space-between" mb="md"><Box><Title order={3}>書き出す作品</Title><Text size="sm" c="dimmed">{formatNumber(works.length)}件 · 元データ {formatBytes(totalSize)}</Text></Box><Button variant="subtle" color="red" size="xs" onClick={() => modals.openConfirmModal({ title: "キューを空にしますか？", children: <Text size="sm">選択中の{epubQueue.length}件をキューから外します。</Text>, confirmProps: { color: "red" }, labels: { confirm: "空にする", cancel: "キャンセル" }, onConfirm: clearEpubQueue })}>すべて解除</Button></Group>
-                  {workQueries.some((query) => query.isLoading) && <LoadingState label="作品情報を読み込んでいます" />}
+                  {queueQuery.isLoading && <LoadingState label="作品情報を読み込んでいます" />}
                   <Stack gap="xs">{works.map((work, index) => <Paper key={work.id} p="sm" withBorder><Group wrap="nowrap"><ThemeIcon variant="light" color="gray" size="lg"><Text size="xs" fw={800}>{index + 1}</Text></ThemeIcon><Stack gap={2} flex={1} miw={0}><Group gap="xs" wrap="nowrap"><ProviderMark provider={work.source} compact /><Text size="sm" fw={650} className="line-clamp-1">{work.title}</Text></Group><Text size="xs" c="dimmed">{work.authorName} · {formatNumber(work.textLength)}字 · {work.assetCount}画像</Text></Stack><Tooltip label="キューから外す"><ActionIcon variant="subtle" color="red" aria-label={`${work.title}をキューから外す`} onClick={() => removeFromEpubQueue(work.id)}><X size={16} /></ActionIcon></Tooltip></Group></Paper>)}</Stack>
                 </Card>
                 <CompressionSettings form={form} />
@@ -206,7 +217,9 @@ export default function EpubPage() {
                 <Stack gap="lg">
                   <Box><Title order={3}>出力設定</Title><Text size="sm" c="dimmed">EPUB 3形式で作品ごとに出力します。</Text></Box>
                   <Select label="テンプレート" data={(templates.data ?? []).map((item) => ({ value: item.name, label: `${item.name}${item.isBuiltin ? " · built-in" : ""}` }))} {...form.getInputProps("templateName")} rightSection={<ChevronRight size={14} />} />
-                  <TextInput label="出力先フォルダー" placeholder="フォルダーを選択" readOnly {...form.getInputProps("outputDir")} rightSection={<ActionIcon variant="subtle" aria-label="出力先を選択" onClick={selectOutput}><FolderOpen size={16} /></ActionIcon>} onClick={selectOutput} />
+                  {/* The icon sits inside the input, so its click also bubbles
+                      to the field handler and opened two pickers in a row. */}
+                  <TextInput label="出力先フォルダー" placeholder="フォルダーを選択" readOnly {...form.getInputProps("outputDir")} rightSection={<ActionIcon variant="subtle" aria-label="出力先を選択" onClick={(event) => { event.stopPropagation(); selectOutput(); }}><FolderOpen size={16} /></ActionIcon>} onClick={selectOutput} />
                   <Alert color="blue" icon={<ImageDown size={17} />}>{form.values.compression.enabled ? `画像を最大 ${form.values.compression.maxWidth} × ${form.values.compression.maxHeight}px に最適化します。` : "画像は元の品質のまま収録します。"}</Alert>
                   {progress && <Stack gap={6}><Group justify="space-between"><Text size="sm" className="line-clamp-1">{progress.currentTitle || progress.message}</Text><Text size="xs" c="dimmed">{progress.currentIndex}/{progress.totalCount}</Text></Group><Progress value={progress.totalCount ? progress.currentIndex / progress.totalCount * 100 : 5} animated /><Text size="xs" c="dimmed">{progress.message}</Text></Stack>}
                   {result && <Alert color={result.failedCount ? "yellow" : "green"} icon={<Check size={17} />} title="書き出し完了"><Stack gap="xs"><Text size="sm">成功 {result.successCount}件 / 失敗 {result.failedCount}件</Text>{form.values.outputDir && <Button size="xs" variant="light" w="fit-content" leftSection={<FolderOpen size={13} />} disabled={!runtime} onClick={() => openFilesystemPath(form.values.outputDir)}>出力先を開く</Button>}</Stack></Alert>}

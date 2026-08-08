@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActionIcon,
   Alert,
@@ -14,7 +14,6 @@ import {
   Indicator,
   Menu,
   NumberInput,
-  Pagination,
   Paper,
   Pill,
   PillsInput,
@@ -32,7 +31,7 @@ import {
 import { useDebouncedValue, useDisclosure, useLocalStorage } from "@mantine/hooks";
 import { modals } from "@mantine/modals";
 import { notifications } from "@mantine/notifications";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowDownUp,
   BookOpen,
@@ -44,6 +43,7 @@ import {
   LibraryBig,
   List,
   MoreHorizontal,
+  RefreshCw,
   Search,
   Trash2,
   Users,
@@ -61,8 +61,9 @@ import {
   getFilterFacets,
   isTauriRuntime,
   searchDownloadsV2,
+  searchEntityFacets,
   setFavorite,
-  setWatchUpdates,
+  setFlagsForIds,
 } from "@/services/dbApi";
 import { searchSuggest } from "@/services/searchApi";
 import type { FacetCount, SearchSuggestion, SearchV2Params } from "@/types/library";
@@ -96,35 +97,90 @@ const initialFilters: Filters = {
   tagsInclude: [], tagsExclude: [], tagMode: "and", minChars: "", maxChars: "",
 };
 
+const PAGE_SIZE = 60;
+
 export default function LibraryPage() {
   const runtime = isTauriRuntime();
   const queryClient = useQueryClient();
   const [urlParams, setUrlParams] = useAppSearchParams();
-  const [tab, setTab] = useState<LibraryTab>((urlParams.get("tab") as LibraryTab) || "works");
-  const [query, setQuery] = useState(urlParams.get("q") ?? "");
-  const [debouncedQuery] = useDebouncedValue(query, 260);
-  const [filters, setFilters] = useState<Filters>({ ...initialFilters, favorite: urlParams.get("favorite") === "1" });
-  const [sortBy, setSortBy] = useState("downloaded_at");
+  // Query, tab and the favourite flag live in the URL so history navigation and
+  // deep links such as /library?favorite=1 actually change what is shown.
+  // Mirroring them into state as well would let the writer and the reader
+  // overwrite each other on every change.
+  const searchText = urlParams.get("q") ?? "";
+  const tab = ((urlParams.get("tab") as LibraryTab) || "works");
+  const favorite = urlParams.get("favorite") === "1";
+  // Deep-linkable so the home tiles can open the library already filtered to
+  // exactly what their number counts.
+  const watch = urlParams.get("watch");
+  const writeUrl = useCallback((patch: { q?: string; tab?: LibraryTab; favorite?: boolean; watch?: string | null }) => {
+    const next = new URLSearchParams(urlParams);
+    const q = patch.q ?? searchText;
+    const nextTab = patch.tab ?? tab;
+    const nextFavorite = patch.favorite ?? favorite;
+    const nextWatch = patch.watch === undefined ? watch : patch.watch;
+    if (q) next.set("q", q); else next.delete("q");
+    if (nextTab !== "works") next.set("tab", nextTab); else next.delete("tab");
+    if (nextFavorite) next.set("favorite", "1"); else next.delete("favorite");
+    if (nextWatch) next.set("watch", nextWatch); else next.delete("watch");
+    if (next.toString() === urlParams.toString()) return;
+    setUrlParams(next, { replace: true });
+  }, [searchText, favorite, setUrlParams, tab, urlParams, watch]);
+  const setTab = useCallback((next: LibraryTab) => writeUrl({ tab: next }), [writeUrl]);
+
+  // The input keeps its own value so typing stays responsive, and settles into
+  // the URL once the user pauses. Only typing writes: deriving the write from a
+  // debounced value let a stale keystroke overwrite a URL that had meanwhile
+  // changed underneath it (back button, deep link), which flipped the two
+  // writers into a loop.
+  const [query, setQuery] = useState(searchText);
+  const writeUrlRef = useRef(writeUrl);
+  writeUrlRef.current = writeUrl;
+  const searchTextRef = useRef(searchText);
+  const queryWriteTimer = useRef<number | null>(null);
+  const cancelPendingQueryWrite = () => {
+    if (queryWriteTimer.current === null) return;
+    window.clearTimeout(queryWriteTimer.current);
+    queryWriteTimer.current = null;
+  };
+  useEffect(() => {
+    searchTextRef.current = searchText;
+    cancelPendingQueryWrite();
+    setQuery((current) => (current === searchText ? current : searchText));
+  }, [searchText]);
+  useEffect(() => cancelPendingQueryWrite, []);
+  const onQueryChange = useCallback((value: string) => {
+    setQuery(value);
+    cancelPendingQueryWrite();
+    queryWriteTimer.current = window.setTimeout(() => {
+      queryWriteTimer.current = null;
+      if (value !== searchTextRef.current) writeUrlRef.current({ q: value });
+    }, 260);
+  }, []);
+
+  const [otherFilters, setOtherFilters] = useState<Filters>(initialFilters);
+  const [sortBy, setSortBy] = useState(() => urlParams.get("sort") ?? "downloaded_at");
   const [view, setView] = useLocalStorage<ViewMode>({ key: "piep.library-view", defaultValue: "gallery" });
   const [savedSearches, setSavedSearches] = useLocalStorage<SavedSearch[]>({ key: "piep.saved-searches.v2", defaultValue: [] });
   const [filterOpened, filterDrawer] = useDisclosure(false);
   const [selectionMode, setSelectionMode] = useState(false);
   const [selected, setSelected] = useState<number[]>([]);
-  const [page, setPage] = useState(1);
   const { addToEpubQueue } = useWorkspace();
-  const limit = 48;
 
-  useEffect(() => {
-    const next = new URLSearchParams();
-    if (debouncedQuery) next.set("q", debouncedQuery);
-    if (tab !== "works") next.set("tab", tab);
-    if (filters.favorite) next.set("favorite", "1");
-    setUrlParams(next, { replace: true });
-  }, [debouncedQuery, filters.favorite, setUrlParams, tab]);
-  useEffect(() => { setPage(1); setSelected([]); }, [debouncedQuery, filters, sortBy, tab]);
+  // `favorite` is deep-linkable, so the URL owns it outright. Keeping a copy in
+  // the filters state as well made the two writers overwrite each other every
+  // render until React gave up on the update depth.
+  const filters = useMemo<Filters>(() => ({ ...otherFilters, favorite, watch: watch ?? otherFilters.watch }), [favorite, otherFilters, watch]);
+  const setFilters = useCallback((next: Filters) => {
+    setOtherFilters(next);
+    if (next.favorite !== favorite || (next.watch ?? null) !== watch) writeUrl({ favorite: next.favorite, watch: next.watch ?? null });
+  }, [favorite, watch, writeUrl]);
+  useEffect(() => { setSelected([]); }, [searchText, filters, sortBy, tab]);
 
   const params = useMemo<SearchV2Params>(() => ({
-    text: debouncedQuery || null,
+    text: searchText || null,
+    // Selecting both providers is the same as no provider filter; the backend
+    // takes a single source, and post-filtering a page would break paging.
     source: filters.sources.length === 1 ? filters.sources[0] : null,
     contentType: filters.contentType,
     favorite: filters.favorite || null,
@@ -136,26 +192,28 @@ export default function LibraryPage() {
     watchFilter: filters.watch,
     sortBy,
     sortOrder: sortBy === "title" || sortBy === "author_name" ? "asc" : "desc",
-    limit: 200,
+    limit: PAGE_SIZE,
     projection: view === "compact" ? "libraryCompact" : "libraryGallery",
-  }), [debouncedQuery, filters, sortBy, view]);
+  }), [searchText, filters, sortBy, view]);
 
-  const works = useQuery({
+  // Keyset pagination: fetching a fixed slab and paging it in the browser
+  // capped the library at that slab and reported the wrong total.
+  const works = useInfiniteQuery({
     queryKey: ["library", params],
-    queryFn: () => runtime ? searchDownloadsV2(params) : Promise.resolve(searchDemoWorks(debouncedQuery, filters.sources.length === 1 ? filters.sources[0] : null)),
+    queryFn: ({ pageParam }) => runtime
+      ? searchDownloadsV2({ ...params, cursor: pageParam })
+      : Promise.resolve(searchDemoWorks(searchText, filters.sources.length === 1 ? filters.sources[0] : null)),
+    initialPageParam: null as string | null,
+    getNextPageParam: (lastPage) => lastPage.nextCursor,
     enabled: tab === "works",
   });
   const facets = useQuery({ queryKey: ["library-facets"], queryFn: () => runtime ? getFilterFacets() : Promise.resolve(demoFacets) });
-  const filteredItems = useMemo(() => {
-    let items = works.data?.items ?? [];
-    if (filters.sources.length > 1) items = items.filter((item) => filters.sources.includes(item.source));
-    return items;
-  }, [filters.sources, works.data?.items]);
-  const pagedItems = filteredItems.slice((page - 1) * limit, page * limit);
-  const totalPages = Math.max(1, Math.ceil(filteredItems.length / limit));
+  const loadedItems = useMemo(() => works.data?.pages.flatMap((page) => page.items) ?? [], [works.data]);
+  const totalCount = works.data?.pages[0]?.totalEstimate ?? null;
   const activeFilterCount = filters.sources.length + Number(Boolean(filters.contentType)) + Number(filters.favorite) + Number(Boolean(filters.watch)) + filters.tagsInclude.length + filters.tagsExclude.length + Number(filters.minChars !== "") + Number(filters.maxChars !== "");
-  const pagedIds = pagedItems.map((item) => item.id);
-  const allPagedSelected = pagedIds.length > 0 && pagedIds.every((id) => selected.includes(id));
+  const loadedIds = useMemo(() => loadedItems.map((item) => item.id), [loadedItems]);
+  const selectedSet = useMemo(() => new Set(selected), [selected]);
+  const allLoadedSelected = loadedIds.length > 0 && loadedIds.every((id) => selectedSet.has(id));
 
   const favoriteMutation = useMutation({
     mutationFn: ({ id, favorite }: { id: number; favorite: boolean }) => runtime ? setFavorite(id, favorite) : Promise.resolve(),
@@ -168,20 +226,24 @@ export default function LibraryPage() {
       notifications.show({ color: "green", title: "ライブラリから削除しました", message: `${formatNumber(result.changedCount)}件を削除しました` });
       setSelected([]); setSelectionMode(false);
       queryClient.invalidateQueries({ queryKey: ["library"] });
+      queryClient.invalidateQueries({ queryKey: ["library-facets"] });
+      queryClient.invalidateQueries({ queryKey: ["library-entities"] });
       queryClient.invalidateQueries({ queryKey: ["dashboard"] });
     },
     onError: (error) => notifications.show({ color: "red", title: "削除できません", message: errorMessage(error) }),
   });
   const selectionMutation = useMutation({
+    // One bulk command instead of one call per selected work: a large
+    // selection previously fired thousands of concurrent invokes.
     mutationFn: async ({ action }: { action: "favorite" | "watch" }) => {
       if (!runtime) return selected.length;
-      if (action === "favorite") await Promise.all(selected.map((id) => setFavorite(id, true)));
-      else await Promise.all(selected.map((id) => setWatchUpdates(id, true)));
-      return selected.length;
+      const result = await setFlagsForIds(selected, action === "favorite" ? { favorite: true } : { watch: true });
+      return result.matchedCount;
     },
     onSuccess: (count, input) => {
-      notifications.show({ color: "green", message: `${count}件を${input.action === "favorite" ? "お気に入り" : "更新監視"}に追加しました` });
+      notifications.show({ color: "green", message: `${formatNumber(count)}件を${input.action === "favorite" ? "お気に入り" : "更新監視"}に追加しました` });
       queryClient.invalidateQueries({ queryKey: ["library"] });
+      queryClient.invalidateQueries({ queryKey: ["dashboard"] });
     },
     onError: (error) => notifications.show({ color: "red", title: "一括操作に失敗しました", message: errorMessage(error) }),
   });
@@ -193,13 +255,23 @@ export default function LibraryPage() {
     notifications.show({ title: "検索を保存しました", message: summary, color: "green" });
   };
   const applySavedSearch = (saved: SavedSearch) => {
-    setQuery(saved.query); setTab(saved.tab); setFilters(saved.filters); setSortBy(saved.sortBy); setPage(1);
+    onQueryChange(saved.query);
+    setOtherFilters(saved.filters);
+    setSortBy(saved.sortBy);
+    writeUrl({ q: saved.query, tab: saved.tab, favorite: saved.filters.favorite });
   };
 
-  const toggleSelected = (id: number, checked: boolean) => setSelected((current) => checked ? [...new Set([...current, id])] : current.filter((item) => item !== id));
-  const toggleVisibleSelection = () => setSelected((current) => allPagedSelected
-    ? current.filter((id) => !pagedIds.includes(id))
-    : [...new Set([...current, ...pagedIds])]);
+  // Stable across renders so the memoised cards are not all invalidated by a
+  // fresh closure every time the list re-renders.
+  const toggleSelected = useCallback((id: number, checked: boolean) => setSelected((current) => checked ? [...new Set([...current, id])] : current.filter((item) => item !== id)), []);
+  const toggleFavorite = useCallback((id: number, favorite: boolean) => favoriteMutation.mutate({ id, favorite }), [favoriteMutation]);
+  const toggleVisibleSelection = () => setSelected((current) => {
+    if (allLoadedSelected) {
+      const loaded = new Set(loadedIds);
+      return current.filter((id) => !loaded.has(id));
+    }
+    return [...new Set([...current, ...loadedIds])];
+  });
   const leaveSelection = () => { setSelectionMode(false); setSelected([]); };
   const confirmDelete = () => modals.openConfirmModal({
     title: "選択した作品を削除しますか？",
@@ -208,15 +280,28 @@ export default function LibraryPage() {
     onConfirm: () => deleteMutation.mutate(selected),
   });
 
-  const tabEntities = tab === "people" ? facets.data?.authorEntities : facets.data?.series;
-  const filteredEntities = (tabEntities ?? []).filter((entity) => !debouncedQuery || `${entity.displayName} ${entity.description ?? ""}`.toLocaleLowerCase("ja-JP").includes(debouncedQuery.toLocaleLowerCase("ja-JP")));
+  // Authors and series are searched and paged in SQLite. Filtering the
+  // dashboard facets in the browser only ever saw their top 60 rows, so most
+  // of a large library was unreachable from these tabs.
+  const entityKind = tab === "people" ? "person" : "series";
+  const entities = useInfiniteQuery({
+    queryKey: ["library-entities", entityKind, searchText],
+    queryFn: ({ pageParam }) => runtime
+      ? searchEntityFacets(entityKind, searchText || null, PAGE_SIZE, pageParam)
+      : Promise.resolve((entityKind === "person" ? demoFacets.authorEntities : demoFacets.series)
+        .filter((entity) => !searchText || `${entity.displayName} ${entity.description ?? ""}`.toLocaleLowerCase("ja-JP").includes(searchText.toLocaleLowerCase("ja-JP")))),
+    initialPageParam: 0,
+    getNextPageParam: (lastPage, allPages) => lastPage.length < PAGE_SIZE ? undefined : allPages.length * PAGE_SIZE,
+    enabled: tab !== "works",
+  });
+  const entityItems = useMemo(() => entities.data?.pages.flat() ?? [], [entities.data]);
 
   return (
     <div className="page page--contained library-page">
       <Paper p="md" className="library-toolbar" withBorder>
         <Stack gap="sm">
           <Group wrap="nowrap" align="flex-start">
-            <Box flex={1}><LibrarySearch value={query} onChange={setQuery} runtime={runtime} /></Box>
+            <Box flex={1}><LibrarySearch value={query} onChange={onQueryChange} runtime={runtime} /></Box>
             <Tooltip label="詳細フィルター">
               <Indicator label={activeFilterCount} size={16} disabled={!activeFilterCount}>
                 <Button variant="default" leftSection={<Filter size={16} />} onClick={filterDrawer.open}>絞り込み</Button>
@@ -246,9 +331,9 @@ export default function LibraryPage() {
           {activeFilterCount > 0 && (
             <Group gap="xs">
               <Text size="xs" c="dimmed" fw={600}>適用中</Text>
-              {filters.sources.map((source) => <FilterChip key={source} label={source} onRemove={() => setFilters((value) => ({ ...value, sources: value.sources.filter((item) => item !== source) }))} />)}
-              {filters.tagsInclude.map((tag) => <FilterChip key={`+${tag}`} label={`#${tag}`} onRemove={() => setFilters((value) => ({ ...value, tagsInclude: value.tagsInclude.filter((item) => item !== tag) }))} />)}
-              {filters.tagsExclude.map((tag) => <FilterChip key={`-${tag}`} label={`除外 #${tag}`} color="red" onRemove={() => setFilters((value) => ({ ...value, tagsExclude: value.tagsExclude.filter((item) => item !== tag) }))} />)}
+              {filters.sources.map((source) => <FilterChip key={source} label={source} onRemove={() => setFilters({ ...filters, sources: filters.sources.filter((item) => item !== source) })} />)}
+              {filters.tagsInclude.map((tag) => <FilterChip key={`+${tag}`} label={`#${tag}`} onRemove={() => setFilters({ ...filters, tagsInclude: filters.tagsInclude.filter((item) => item !== tag) })} />)}
+              {filters.tagsExclude.map((tag) => <FilterChip key={`-${tag}`} label={`除外 #${tag}`} color="red" onRemove={() => setFilters({ ...filters, tagsExclude: filters.tagsExclude.filter((item) => item !== tag) })} />)}
               <Button size="compact-xs" variant="subtle" color="gray" onClick={() => setFilters(initialFilters)}>すべて解除</Button>
             </Group>
           )}
@@ -264,18 +349,27 @@ export default function LibraryPage() {
       </Tabs>
 
       <Group justify="space-between" my="md">
-        <Text size="sm" c="dimmed">{tab === "works" ? `${formatNumber(filteredItems.length)}件${works.data?.searchMeta.engine ? ` · ${works.data.searchMeta.engine}` : ""}` : `${formatNumber(filteredEntities.length)}件`}</Text>
+        <Text size="sm" c="dimmed">{tab === "works"
+          ? `${formatNumber(totalCount ?? loadedItems.length)}件${totalCount !== null && loadedItems.length < totalCount ? `（${formatNumber(loadedItems.length)}件を表示中）` : ""}${works.data?.pages[0]?.searchMeta.engine ? ` · ${works.data.pages[0].searchMeta.engine}` : ""}`
+          : `${formatNumber(entityItems.length)}件${entities.hasNextPage ? "以上" : ""}`}</Text>
         {tab === "works" && !selectionMode && <Button size="xs" variant="subtle" color="gray" leftSection={<Check size={14} />} onClick={() => setSelectionMode(true)}>複数選択</Button>}
       </Group>
 
       {tab === "works" ? (
-        works.isLoading ? <LoadingState label="ライブラリを検索しています" /> : works.error ? <ErrorState error={works.error} retry={() => works.refetch()} /> : pagedItems.length ? (
+        works.isLoading ? <LoadingState label="ライブラリを検索しています" /> : works.error ? <ErrorState error={works.error} retry={() => works.refetch()} /> : loadedItems.length ? (
           <>
-            {view === "gallery" ? <div className="library-grid">{pagedItems.map((work) => <WorkCard key={work.id} work={work} selectionMode={selectionMode} selected={selected.includes(work.id)} onSelect={(checked) => toggleSelected(work.id, checked)} onToggleFavorite={(favorite) => favoriteMutation.mutate({ id: work.id, favorite })} />)}</div> : <Stack gap="xs">{pagedItems.map((work) => <WorkCard compact key={work.id} work={work} selectionMode={selectionMode} selected={selected.includes(work.id)} onSelect={(checked) => toggleSelected(work.id, checked)} onToggleFavorite={(favorite) => favoriteMutation.mutate({ id: work.id, favorite })} />)}</Stack>}
-            {totalPages > 1 && <Group justify="center" mt="xl"><Pagination value={page} onChange={setPage} total={totalPages} /></Group>}
+            {view === "gallery"
+              ? <div className="library-grid">{loadedItems.map((work) => <WorkCard key={work.id} work={work} selectionMode={selectionMode} selected={selectedSet.has(work.id)} onSelect={toggleSelected} onToggleFavorite={toggleFavorite} />)}</div>
+              : <Stack gap="xs">{loadedItems.map((work) => <WorkCard compact key={work.id} work={work} selectionMode={selectionMode} selected={selectedSet.has(work.id)} onSelect={toggleSelected} onToggleFavorite={toggleFavorite} />)}</Stack>}
+            <LoadMore hasNext={works.hasNextPage} loading={works.isFetchingNextPage} onLoad={() => works.fetchNextPage()} />
           </>
-        ) : <EmptyState icon={Search} title="一致する作品がありません" description="検索語やフィルターを減らすか、新しい作品を保存してください。" action={<Button variant="light" onClick={() => { setQuery(""); setFilters(initialFilters); }}>検索をリセット</Button>} />
-      ) : facets.isLoading ? <LoadingState /> : filteredEntities.length ? <SimpleGrid cols={{ base: 1, sm: 2, xl: 3 }}>{filteredEntities.map((entity) => <EntityCard key={`${entity.source}:${entity.sourceKey}`} entity={entity} kind={tab === "people" ? "person" : "series"} />)}</SimpleGrid> : <EmptyState icon={Users} title="一致する項目がありません" description="名前を変えて検索してください。" />}
+        ) : <EmptyState icon={Search} title="一致する作品がありません" description="検索語やフィルターを減らすか、新しい作品を保存してください。" action={<Button variant="light" onClick={() => { onQueryChange(""); setOtherFilters(initialFilters); writeUrl({ q: "", favorite: false }); }}>検索をリセット</Button>} />
+      ) : entities.isLoading ? <LoadingState /> : entities.error ? <ErrorState error={entities.error} retry={() => entities.refetch()} /> : entityItems.length ? (
+        <>
+          <SimpleGrid cols={{ base: 1, sm: 2, xl: 3 }}>{entityItems.map((entity) => <EntityCard key={`${entity.source}:${entity.sourceKey}`} entity={entity} kind={entityKind} />)}</SimpleGrid>
+          <LoadMore hasNext={entities.hasNextPage} loading={entities.isFetchingNextPage} onLoad={() => entities.fetchNextPage()} />
+        </>
+      ) : <EmptyState icon={Users} title="一致する項目がありません" description="名前を変えて検索してください。" />}
 
       <Drawer opened={filterOpened} onClose={filterDrawer.close} title="詳細フィルター" position="right" size={420} scrollAreaComponent={ScrollArea.Autosize}>
         <FilterForm value={filters} onChange={setFilters} tags={facets.data?.tags ?? []} contentTypes={facets.data?.contentTypes.map((item) => ({ value: item.name, label: `${item.name} (${item.count})` })) ?? []} onApply={filterDrawer.close} />
@@ -284,10 +378,10 @@ export default function LibraryPage() {
       {selectionMode && (
         <Paper className="selection-bar" shadow="xl" withBorder p="sm">
           <Group justify="space-between" wrap="nowrap">
-            <Group gap="sm" wrap="nowrap"><Text fw={700}>{selected.length}件を選択</Text><Button variant="subtle" size="compact-sm" onClick={toggleVisibleSelection}>{allPagedSelected ? "表示中を選択解除" : "表示中をすべて選択"}</Button>{selected.length > 0 && <Button variant="subtle" color="gray" size="compact-sm" onClick={() => setSelected([])}>選択をすべて解除</Button>}</Group>
+            <Group gap="sm" wrap="nowrap"><Text fw={700}>{selected.length}件を選択</Text><Button variant="subtle" size="compact-sm" onClick={toggleVisibleSelection}>{allLoadedSelected ? "表示中を選択解除" : "表示中をすべて選択"}</Button>{selected.length > 0 && <Button variant="subtle" color="gray" size="compact-sm" onClick={() => setSelected([])}>選択をすべて解除</Button>}</Group>
             <Group gap="xs" wrap="nowrap">
               <Button size="sm" variant="light" leftSection={<BookOpen size={15} />} disabled={!selected.length} onClick={() => { addToEpubQueue(selected); notifications.show({ color: "green", message: `${selected.length}件をEPUBキューに追加しました` }); }}>EPUB</Button>
-              <Menu position="top-end"><Menu.Target><Button size="sm" variant="default" rightSection={<MoreHorizontal size={15} />} disabled={!selected.length}>その他</Button></Menu.Target><Menu.Dropdown><Menu.Item leftSection={<Heart size={15} />} onClick={() => selectionMutation.mutate({ action: "favorite" })}>お気に入りに追加</Menu.Item><Menu.Item leftSection={<RefreshCwIcon />} onClick={() => selectionMutation.mutate({ action: "watch" })}>更新監視を有効化</Menu.Item><Menu.Divider /><Menu.Item color="red" leftSection={<Trash2 size={15} />} onClick={confirmDelete}>削除</Menu.Item></Menu.Dropdown></Menu>
+              <Menu position="top-end"><Menu.Target><Button size="sm" variant="default" rightSection={<MoreHorizontal size={15} />} disabled={!selected.length}>その他</Button></Menu.Target><Menu.Dropdown><Menu.Item leftSection={<Heart size={15} />} onClick={() => selectionMutation.mutate({ action: "favorite" })}>お気に入りに追加</Menu.Item><Menu.Item leftSection={<RefreshCw size={15} />} onClick={() => selectionMutation.mutate({ action: "watch" })}>更新監視を有効化</Menu.Item><Menu.Divider /><Menu.Item color="red" leftSection={<Trash2 size={15} />} onClick={confirmDelete}>削除</Menu.Item></Menu.Dropdown></Menu>
               <Divider orientation="vertical" h={26} mx={2} />
               <Tooltip label="複数選択を終了"><ActionIcon variant="light" color="red" aria-label="複数選択を終了" onClick={leaveSelection}><X size={18} /></ActionIcon></Tooltip>
             </Group>
@@ -298,7 +392,32 @@ export default function LibraryPage() {
   );
 }
 
-function RefreshCwIcon() { return <span style={{ display: "inline-flex" }}>↻</span>; }
+/**
+ * Keyset pagination has no page numbers, so the next page is pulled in as the
+ * reader reaches the end of the list, with an explicit button as the fallback.
+ */
+function LoadMore({ hasNext, loading, onLoad }: { hasNext: boolean; loading: boolean; onLoad: () => void }) {
+  const sentinelRef = useRef<HTMLDivElement>(null);
+  const loadRef = useRef(onLoad);
+  loadRef.current = onLoad;
+
+  useEffect(() => {
+    const node = sentinelRef.current;
+    if (!node || !hasNext) return;
+    const observer = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) loadRef.current();
+    }, { rootMargin: "480px" });
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [hasNext]);
+
+  if (!hasNext) return null;
+  return (
+    <Group justify="center" mt="xl" ref={sentinelRef}>
+      <Button variant="default" loading={loading} onClick={onLoad}>さらに読み込む</Button>
+    </Group>
+  );
+}
 
 function FilterChip({ label, onRemove, color = "blue" }: { label: string; onRemove: () => void; color?: string }) {
   return <Badge variant="light" color={color} rightSection={<ActionIcon size="xs" variant="transparent" color={color} aria-label={`${label}を解除`} onClick={onRemove}><X size={11} /></ActionIcon>}>{label}</Badge>;

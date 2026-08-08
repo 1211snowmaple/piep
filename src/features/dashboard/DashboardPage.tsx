@@ -7,7 +7,6 @@ import {
   Card,
   Grid,
   Group,
-  Image,
   Progress,
   SimpleGrid,
   Stack,
@@ -26,13 +25,13 @@ import {
   RefreshCw,
   Search,
 } from "lucide-react";
-import piepIcon from "@/assets/icon.svg";
 import { useAppNavigate } from "@/app/router";
 import { WorkCard } from "@/components/WorkCard";
 import { ErrorState, LoadingState } from "@/components/AsyncState";
 import { RuntimeNotice } from "@/components/RuntimeNotice";
 import { demoDashboard } from "@/mocks/demoData";
 import { formatBytes, formatNumber } from "@/lib/format";
+import { getProvider } from "@/lib/providers";
 import { getDashboardSummary, getSearchIndexStatus, isTauriRuntime } from "@/services/dbApi";
 import { store } from "@/store";
 
@@ -70,13 +69,7 @@ export default function DashboardPage() {
     initialValues: { url: "" },
     validate: { url: isUrl({ protocols: ["http", "https"] }, "pixivまたはFANBOXのURLを入力してください") },
   });
-  const chartData = useMemo(() => summary.data?.monthlyDownloads.map((item) => ({
-    month: new Intl.DateTimeFormat("ja-JP", { month: "short" }).format(new Date(`${item.bucket}-01T00:00:00`)),
-    total: item.count,
-    pixiv: item.pixivCount,
-    fanbox: item.fanboxCount,
-    other: Math.max(0, item.count - item.pixivCount - item.fanboxCount),
-  })) ?? [], [summary.data]);
+  const chartData = useMemo(() => buildTrend(summary.data?.monthlyDownloads ?? []), [summary.data]);
 
   if (summary.isLoading) return <div className="page"><LoadingState label="ホームを準備しています" /></div>;
   if (summary.error || !summary.data) return <div className="page"><ErrorState error={summary.error} retry={() => summary.refetch()} /></div>;
@@ -88,10 +81,13 @@ export default function DashboardPage() {
       <Stack gap="md">
         <RuntimeNotice />
         <Card className="dashboard-hero dashboard-quick-save" padding="lg">
-          <Group wrap="nowrap" align="flex-start" gap="lg">
-            <Image src={piepIcon} alt="piep" w={52} h={52} className="dashboard-quick-save__logo" />
+          <Group wrap="nowrap" align="center" gap="lg">
+            <ThemeIcon size={52} radius="lg" variant="light" className="dashboard-quick-save__logo"><Download size={26} /></ThemeIcon>
             <Stack gap="sm" flex={1} miw={0}>
-              <Group justify="space-between" align="flex-start" wrap="nowrap"><Box><Text size="sm" fw={750} c="piep.6">Webから保存</Text><Text size="sm" c="dimmed">URLを貼るだけで作品・シリーズ・作者を判定します</Text></Box><Group gap="xs" wrap="nowrap" visibleFrom="sm"><ConnectionBadge label="pixiv" connected={auth.data?.pixiv} /><ConnectionBadge label="FANBOX" connected={auth.data?.fanbox} /><Button variant="subtle" size="compact-sm" leftSection={<Download size={14} />} onClick={() => navigate("/save/pixiv")}>保存画面</Button></Group></Group>
+              {/* The status chips have a fixed intrinsic width; letting them
+                  shrink cut their labels in half on a narrow window. The
+                  description truncates instead. */}
+              <Group justify="space-between" align="flex-start" wrap="nowrap" gap="sm"><Box miw={0}><Text size="sm" fw={750} c="piep.6">Webから保存</Text><Text size="sm" c="dimmed" className="line-clamp-2">URLを貼るだけで作品・シリーズ・作者を判定します</Text></Box><Group gap="xs" wrap="nowrap" visibleFrom="sm" style={{ flex: "0 0 auto" }}><ConnectionBadge label="pixiv" connected={auth.data?.pixiv} /><ConnectionBadge label="FANBOX" connected={auth.data?.fanbox} /></Group></Group>
               <form onSubmit={quickSave.onSubmit(({ url }) => navigate(`/save/${url.includes("fanbox.cc") ? "fanbox" : "pixiv"}?url=${encodeURIComponent(url)}`))}>
                 <Group align="flex-start" wrap="nowrap">
                   <Box flex={1}><input key={quickSave.key("url")} className={`quick-save-input${quickSave.errors.url ? " quick-save-input--error" : ""}`} placeholder="作品ページのURLを貼り付け" aria-label="保存するページのURL" {...quickSave.getInputProps("url")} />{quickSave.errors.url && <Text size="xs" c="red" mt={4}>{quickSave.errors.url}</Text>}</Box>
@@ -103,18 +99,27 @@ export default function DashboardPage() {
           </Group>
         </Card>
 
+        {/* Each tile opens the library already filtered to what it counts, so
+            the number and its destination agree. */}
         <SimpleGrid cols={{ base: 2, md: 4 }} spacing="sm">
           <StatCard icon={Database} label="保存作品" value={formatNumber(data.stats.totalDownloads)} hint={`pixiv ${formatNumber(data.stats.pixivCount)} · FANBOX ${formatNumber(data.stats.fanboxCount)}`} color="#0d86f4" onClick={() => navigate("/library")} />
-          <StatCard icon={HardDrive} label="使用容量" value={formatBytes(data.stats.totalSizeBytes)} hint={`${formatNumber(data.stats.totalAssets)} アセット`} color="#31b497" onClick={() => navigate("/settings")} />
+          <StatCard icon={HardDrive} label="使用容量" value={formatBytes(data.stats.totalSizeBytes)} hint={`${formatNumber(data.stats.totalAssets)} アセット`} color="#31b497" onClick={() => navigate("/library?sort=file_size_bytes")} />
           <StatCard icon={Heart} label="お気に入り" value={formatNumber(data.favoriteCount)} hint="すぐ読み返せる作品" color="#ef5b78" onClick={() => navigate("/library?favorite=1")} />
-          <StatCard icon={RefreshCw} label="更新監視" value={formatNumber(data.watchedCount)} hint={`${formatNumber(data.updateTargetCount)} 作者・シリーズ`} color="#86b918" onClick={() => navigate("/updates")} />
+          <StatCard icon={RefreshCw} label="更新監視" value={formatNumber(data.watchedCount)} hint={`${formatNumber(data.updateTargetCount)} 作者・シリーズ`} color="#86b918" onClick={() => navigate("/library?watch=watched")} />
         </SimpleGrid>
 
         <Grid gap="lg">
           <Grid.Col span={{ base: 12, lg: 8 }}>
-            <Card p="lg" h="100%">
-              <Group justify="space-between" mb="md"><Box><Text fw={700}>保存の推移</Text><Group gap="md" mt={3}><TrendLegend color="#0096fa" label="pixiv" /><TrendLegend color="#d1a900" label="FANBOX" /></Group></Box><Badge variant="light">{formatNumber(chartData.reduce((sum, item) => sum + item.total, 0))}件</Badge></Group>
+            <Card p="lg" h="100%" className="dashboard-trend-card">
+              <Group justify="space-between" mb="md">
+                <Box>
+                  <Text fw={700}>保存の推移</Text>
+                  <Text size="xs" c="dimmed" mt={3}>直近{chartData.length}か月 · {formatNumber(data.stats.totalDownloads)}件</Text>
+                </Box>
+                <Group gap="md"><TrendLegend color="#0096fa" label="pixiv" /><TrendLegend color="#d1a900" label="FANBOX" /></Group>
+              </Group>
               <DownloadTrend data={chartData} />
+              <SourceComposition breakdown={data.sourceBreakdown} total={data.stats.totalDownloads} />
             </Card>
           </Grid.Col>
           <Grid.Col span={{ base: 12, lg: 4 }}>
@@ -149,31 +154,98 @@ function StatCard({ icon: Icon, label, value, hint, color, onClick }: { icon: ty
   return (
     <Card component="button" type="button" className="stat-card" style={{ "--stat-accent": color }} onClick={onClick}>
       <Group justify="space-between" align="flex-start"><Text size="sm" c="dimmed" fw={600}>{label}</Text><ThemeIcon variant="light" color="gray"><Icon size={17} style={{ color }} /></ThemeIcon></Group>
-      <Text fz="20px" fw={760} mt={2} lts="-0.035em">{value}</Text>
+      <Text className="stat-card__value" fz="20px" fw={760} mt={2} lts="-0.035em" ta="center">{value}</Text>
       <Group justify="space-between" gap="xs" wrap="nowrap"><Text size="xs" c="dimmed" mt={2} className="line-clamp-1">{hint}</Text><ArrowRight className="stat-card__arrow" size={14} /></Group>
     </Card>
   );
 }
 
-function DownloadTrend({ data }: { data: { month: string; total: number; pixiv: number; fanbox: number; other: number }[] }) {
+interface TrendMonth { key: string; label: string; total: number; pixiv: number; fanbox: number; other: number }
+
+/**
+ * The API returns only the months that have saves, so feeding it straight into
+ * a fixed grid left a lone bar stranded in an empty chart. This rebuilds a
+ * continuous run of months instead: it starts at the first month with a save,
+ * never reaches back further than twelve months, and always ends at the
+ * current month, so empty months read as genuine gaps.
+ */
+function buildTrend(points: { bucket: string; count: number; pixivCount: number; fanboxCount: number }[]): TrendMonth[] {
+  if (!points.length) return [];
+  const toIndex = (bucket: string) => {
+    const [year, month] = bucket.split("-").map(Number);
+    return year * 12 + (month - 1);
+  };
+  const now = new Date();
+  const current = now.getFullYear() * 12 + now.getMonth();
+  const earliest = Math.min(...points.map((point) => toIndex(point.bucket)));
+  const start = Math.max(earliest, current - 11);
+  const byIndex = new Map(points.map((point) => [toIndex(point.bucket), point]));
+  const months: TrendMonth[] = [];
+  for (let index = start; index <= current; index += 1) {
+    const point = byIndex.get(index);
+    const year = Math.floor(index / 12);
+    const month = index % 12;
+    months.push({
+      key: `${year}-${month}`,
+      label: new Intl.DateTimeFormat("ja-JP", { month: "short" }).format(new Date(year, month, 1)),
+      total: point?.count ?? 0,
+      pixiv: point?.pixivCount ?? 0,
+      fanbox: point?.fanboxCount ?? 0,
+      other: point ? Math.max(0, point.count - point.pixivCount - point.fanboxCount) : 0,
+    });
+  }
+  return months;
+}
+
+function DownloadTrend({ data }: { data: TrendMonth[] }) {
   const maximum = Math.max(1, ...data.map((item) => item.total));
-  const label = data.map((item) => `${item.month} ${item.total}件（pixiv ${item.pixiv}件、FANBOX ${item.fanbox}件）`).join("、");
+  const label = data.map((item) => `${item.label} ${item.total}件`).join("、");
   return (
-    <Box className="download-trend" role="img" aria-label={`月別の保存数。${label}`}>
+    <Box className="download-trend" style={{ "--trend-columns": data.length } as React.CSSProperties} role="img" aria-label={`月別の保存数。${label}`}>
       {data.map((item) => (
-        <Box className="download-trend__column" key={item.month}>
-          <Text size="xs" fw={700} c="dimmed">{formatNumber(item.total)}</Text>
+        <Box className="download-trend__column" key={item.key} data-empty={item.total === 0 || undefined}>
+          <Text size="xs" fw={700} c="dimmed">{item.total ? formatNumber(item.total) : ""}</Text>
           <Box className="download-trend__track" aria-hidden>
-            <Box className="download-trend__stack" style={{ height: `${Math.max(6, item.total / maximum * 100)}%` }}>
-              {item.other > 0 && <Box className="download-trend__segment" data-source="other" style={{ flexGrow: item.other }} />}
-              {item.fanbox > 0 && <Box className="download-trend__segment" data-source="fanbox" style={{ flexGrow: item.fanbox }} />}
-              {item.pixiv > 0 && <Box className="download-trend__segment" data-source="pixiv" style={{ flexGrow: item.pixiv }} />}
-            </Box>
+            {item.total > 0 && (
+              <Box className="download-trend__stack" style={{ height: `${Math.max(6, item.total / maximum * 100)}%` }}>
+                {item.other > 0 && <Box className="download-trend__segment" data-source="other" style={{ flexGrow: item.other }} />}
+                {item.fanbox > 0 && <Box className="download-trend__segment" data-source="fanbox" style={{ flexGrow: item.fanbox }} />}
+                {item.pixiv > 0 && <Box className="download-trend__segment" data-source="pixiv" style={{ flexGrow: item.pixiv }} />}
+              </Box>
+            )}
           </Box>
-          <Text size="xs" c="dimmed">{item.month}</Text>
+          <Text size="xs" c="dimmed" className="download-trend__label">{item.label}</Text>
         </Box>
       ))}
     </Box>
+  );
+}
+
+/**
+ * With one or two months on record there is no trend to draw, so the card
+ * shows what the library is actually made of instead of a single bar sitting
+ * in an otherwise empty axis.
+ */
+function SourceComposition({ breakdown, total }: { breakdown: { source: string; count: number }[]; total: number }) {
+  const items = breakdown.filter((item) => item.count > 0);
+  if (!items.length) return <Alert color="gray">まだ保存された作品がありません。</Alert>;
+  return (
+    <Stack gap="sm">
+      <Box className="source-composition" role="img" aria-label={items.map((item) => `${item.source} ${item.count}件`).join("、")}>
+        {items.map((item) => (
+          <Box key={item.source} className="source-composition__segment" data-source={item.source} style={{ flexGrow: item.count }} />
+        ))}
+      </Box>
+      <Group gap="lg">
+        {items.map((item) => (
+          <Group key={item.source} gap={7} wrap="nowrap">
+            <Box className="source-composition__dot" data-source={item.source} />
+            <Text size="sm" fw={650}>{getProvider(item.source).label}</Text>
+            <Text size="sm" c="dimmed">{formatNumber(item.count)}件 · {Math.round(item.count / Math.max(1, total) * 100)}%</Text>
+          </Group>
+        ))}
+      </Group>
+    </Stack>
   );
 }
 

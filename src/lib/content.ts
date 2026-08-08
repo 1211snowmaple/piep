@@ -1,7 +1,12 @@
 type LocalAssetResolver = (path: string | null | undefined) => string | null;
 
-const UNSAFE_ELEMENTS = "script, style, iframe, object, embed, form";
+// `style`/`svg`/`math` are re-parsed differently when the sanitised string is
+// handed back to innerHTML, which is the classic mutation-XSS route, and a
+// `style` attribute alone is enough to stretch stored content over the whole
+// window. Saved documents are third-party HTML, so all of it is dropped.
+const UNSAFE_ELEMENTS = "script, style, iframe, object, embed, form, link, base, meta, template, noscript, svg, math, portal, frame, frameset";
 const SAFE_PROTOCOLS = new Set(["http:", "https:", "mailto:"]);
+const ALLOWED_URL_ATTRIBUTES = new Set(["href", "src"]);
 
 export function prepareDocumentHtml(html: string, resolveLocalAsset: LocalAssetResolver): string {
   if (!html.trim() || typeof DOMParser === "undefined") return html;
@@ -11,7 +16,19 @@ export function prepareDocumentHtml(html: string, resolveLocalAsset: LocalAssetR
   document.body.querySelectorAll<HTMLElement>("*").forEach((node) => {
     for (const attribute of [...node.attributes]) {
       const name = attribute.name.toLowerCase();
-      if (name.startsWith("on") || name === "srcdoc") node.removeAttribute(attribute.name);
+      if (name.startsWith("on") || name === "srcdoc" || name === "style" || name === "srcset" || name === "formaction" || name === "xlink:href") {
+        node.removeAttribute(attribute.name);
+        continue;
+      }
+      // Anything that resolves to a URL and is not an anchor href or an image
+      // source is dropped rather than protocol-checked one attribute at a time.
+      if (!ALLOWED_URL_ATTRIBUTES.has(name) && /^(?:data-)?(?:action|background|ping|poster|codebase)$/.test(name)) {
+        node.removeAttribute(attribute.name);
+      }
+    }
+    if (node.tagName === "IMG") {
+      const source = node.getAttribute("src");
+      if (source && !/^(?:https?:|data:image\/|asset:|https?:\/\/asset\.localhost)/i.test(source.trim())) node.removeAttribute("src");
     }
   });
 

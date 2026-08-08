@@ -61,6 +61,8 @@ pub fn run() {
             commands::auth::login_fanbox_webview,
             // ブラウザ (commands::browser)
             commands::browser::open_embedded_browser,
+            commands::browser::set_embedded_browser_bounds,
+            commands::browser::set_embedded_browser_visible,
             commands::browser::navigate_embedded_browser,
             commands::browser::get_embedded_browser_url,
             commands::browser::close_embedded_browser,
@@ -86,6 +88,7 @@ pub fn run() {
             commands::database::search_rebuild_index,
             commands::database::search_cancel_rebuild_index,
             commands::database::db_get_download,
+            commands::database::db_get_downloads,
             commands::database::db_get_assets,
             commands::database::db_delete_download,
             commands::database::db_delete_downloads,
@@ -96,6 +99,7 @@ pub fn run() {
             commands::database::db_get_filter_facets,
             commands::database::db_get_search_index_status,
             commands::database::db_search_filter_facets,
+            commands::database::db_search_entity_facets,
             commands::database::read_file_content,
             commands::database::open_local_asset,
             // バージョン管理・更新監視 (commands::database)
@@ -105,6 +109,7 @@ pub fn run() {
             commands::database::db_set_watch_updates,
             commands::database::db_set_watch_updates_for_search,
             commands::database::db_set_favorite,
+            commands::database::db_set_flags_for_ids,
             commands::database::db_get_watched_downloads,
             commands::database::db_upsert_update_target,
             commands::database::db_list_update_targets,

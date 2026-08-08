@@ -22,6 +22,15 @@ export function formatDate(value: string | null | undefined, withTime = false): 
   }).format(date);
 }
 
+/** Compact numeric date (2026/08/05) for dense rows where a label would not fit. */
+export function formatDateNumeric(value: string | null | undefined): string {
+  if (!value) return "—";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  const pad = (part: number) => String(part).padStart(2, "0");
+  return `${date.getFullYear()}/${pad(date.getMonth() + 1)}/${pad(date.getDate())}`;
+}
+
 export function contentTypeLabel(value: string): string {
   const labels: Record<string, string> = {
     novel: "小説",

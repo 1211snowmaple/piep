@@ -542,11 +542,17 @@ fn initialize_v2_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
         CREATE INDEX IF NOT EXISTS idx_downloads_size             ON downloads(file_size_bytes DESC);
         CREATE INDEX IF NOT EXISTS idx_downloads_watch_date       ON downloads(watch_updates, downloaded_at DESC);
         CREATE INDEX IF NOT EXISTS idx_downloads_source_id        ON downloads(source, source_id);
+        -- Groups the author listing and lets its per-author newest-title
+        -- lookup seek instead of scanning. The COALESCE must match the query
+        -- expression exactly for SQLite to use the index.
+        CREATE INDEX IF NOT EXISTS idx_downloads_author_recent
+            ON downloads(source, author_id, COALESCE(source_created_at, downloaded_at) DESC, id DESC);
         CREATE INDEX IF NOT EXISTS idx_tags_name                  ON tags(name);
         CREATE INDEX IF NOT EXISTS idx_download_tags_tag          ON download_tags(tag_id);
         CREATE INDEX IF NOT EXISTS idx_download_tags_download     ON download_tags(download_id);
         CREATE INDEX IF NOT EXISTS idx_assets_download            ON assets(download_id);
         CREATE INDEX IF NOT EXISTS idx_assets_mime_download       ON assets(mime_type, download_id);
+        CREATE INDEX IF NOT EXISTS idx_assets_type                ON assets(asset_type);
         CREATE INDEX IF NOT EXISTS idx_versions_download          ON download_versions(download_id);
 
         CREATE INDEX IF NOT EXISTS idx_people_source_key ON people(source, source_key);

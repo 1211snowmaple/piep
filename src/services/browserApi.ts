@@ -12,6 +12,19 @@ export function openEmbeddedBrowser(url: string, bounds: EmbeddedBrowserBounds):
   return invoke<void>("open_embedded_browser", { url, ...bounds, userAgent: bounds.userAgent });
 }
 
+/** Moves/resizes the child WebView without touching the page it is showing. */
+export function setEmbeddedBrowserBounds(bounds: Omit<EmbeddedBrowserBounds, "userAgent">): Promise<boolean> {
+  return invoke<boolean>("set_embedded_browser_bounds", bounds);
+}
+
+/**
+ * The child WebView is a native layer that always paints above the DOM, so it
+ * has to be hidden while an overlay needs to draw over that area.
+ */
+export function setEmbeddedBrowserVisible(visible: boolean): Promise<boolean> {
+  return invoke<boolean>("set_embedded_browser_visible", { visible });
+}
+
 export function navigateEmbeddedBrowser(url: string): Promise<void> {
   return invoke<void>("navigate_embedded_browser", { url });
 }

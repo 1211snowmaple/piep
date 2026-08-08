@@ -12,6 +12,7 @@ import type {
   WorkBlockInput,
   WorkEditRevision,
   BulkMutationResult,
+  EntityFacet,
   FilterFacets,
 } from "@/types/library";
 
@@ -53,8 +54,13 @@ export interface SearchIndexStatus {
   throughputPerSec?: number | null;
 }
 
-export async function getFilterFacets(): Promise<FilterFacets> {
-  return invoke<FilterFacets>("db_get_filter_facets");
+/**
+ * The author/series aggregates are expensive and only the filter drawer's tag
+ * and content-type lists are needed for browsing; `searchEntityFacets` serves
+ * the entity tabs instead.
+ */
+export async function getFilterFacets(includeEntities = false): Promise<FilterFacets> {
+  return invoke<FilterFacets>("db_get_filter_facets", { includeEntities });
 }
 
 export async function getSearchIndexStatus(): Promise<SearchIndexStatus> {
@@ -65,8 +71,25 @@ export async function searchFilterFacets(kind: string, query: string | null, lim
   return invoke<{ name: string; count: number }[]>("db_search_filter_facets", { kind, query, limit });
 }
 
+/**
+ * Paginated, searchable author/series listing. `db_get_filter_facets` only
+ * returns the top 60 of each, which hides most of a large library.
+ */
+export async function searchEntityFacets(kind: "person" | "series", query: string | null, limit = 60, offset = 0): Promise<EntityFacet[]> {
+  return invoke<EntityFacet[]>("db_search_entity_facets", { kind, query, limit, offset });
+}
+
 export async function getDownload<T = DownloadEntry>(id: number): Promise<T> {
   return invoke<T>("db_get_download", { id });
+}
+
+/**
+ * Fetches many works in one call, preserving the requested order. Missing ids
+ * are omitted, which is how callers detect entries deleted since queueing.
+ */
+export async function getDownloads(ids: number[]): Promise<DownloadEntry[]> {
+  if (!ids.length) return [];
+  return invoke<DownloadEntry[]>("db_get_downloads", { ids });
 }
 
 export async function getDownloadBySource<T = DownloadEntry>(source: string, sourceId: string): Promise<T | null> {
@@ -107,6 +130,11 @@ export async function setWatchUpdatesForSearch(params: SearchV2Params, watch: bo
 
 export async function setFavorite(downloadId: number, favorite: boolean): Promise<void> {
   return invoke<void>("db_set_favorite", { downloadId, favorite });
+}
+
+/** Applies favourite/watch flags to many works in one transaction. */
+export async function setFlagsForIds(ids: number[], flags: { favorite?: boolean; watch?: boolean }): Promise<BulkMutationResult> {
+  return invoke<BulkMutationResult>("db_set_flags_for_ids", { ids, favorite: flags.favorite ?? null, watch: flags.watch ?? null });
 }
 
 export async function readFileContent(path: string): Promise<string> {

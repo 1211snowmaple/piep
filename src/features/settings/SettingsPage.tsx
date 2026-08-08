@@ -29,10 +29,11 @@ import { modals } from "@mantine/modals";
 import { notifications } from "@mantine/notifications";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Archive, BookOpen, Database, Download, FolderOpen, HardDrive, Info, KeyRound, Palette, RefreshCw, Search, ShieldCheck, Trash2, Upload, UserRound, X } from "lucide-react";
-import piepIcon from "@/assets/icon.svg";
+import piepLockup from "@/assets/lockup.svg";
 import { PageHeader } from "@/components/PageHeader";
 import { useAppSearchParams } from "@/app/router";
 import { RuntimeNotice } from "@/components/RuntimeNotice";
+import { applyDensity, isDense } from "@/lib/density";
 import { errorMessage, formatBytes, formatNumber } from "@/lib/format";
 import { getProvider, providers } from "@/lib/providers";
 import { exportAllZip, getStoragePath, importZip } from "@/services/archiveApi";
@@ -45,6 +46,10 @@ import { cancelSearchRebuildIndex, startSearchRebuildIndex, type SearchRebuildPr
 import { store } from "@/store";
 
 type Section = "connections" | "library" | "search" | "appearance" | "about";
+const SECTIONS: Section[] = ["connections", "library", "search", "appearance", "about"];
+function isSection(value: string | null): value is Section {
+  return value !== null && (SECTIONS as string[]).includes(value);
+}
 interface PixivUser { id: string; name: string; profile_image_urls?: { medium?: string } }
 interface FanboxUser { userId: string; name: string; iconUrl?: string | null }
 interface ConnectionState { pixiv: PixivUser | null; fanbox: FanboxUser | null }
@@ -53,15 +58,13 @@ export default function SettingsPage() {
   const runtime = isTauriRuntime();
   const [searchParams, setSearchParams] = useAppSearchParams();
   const requestedSection = searchParams.get("section");
-  const [section, setSectionState] = useState<Section>(
-    requestedSection === "connections" || requestedSection === "library" || requestedSection === "search" || requestedSection === "appearance" || requestedSection === "about"
-      ? requestedSection
-      : "connections",
-  );
+  // Derived from the URL rather than mirrored into state, so "piepについて" in
+  // the header switches sections even when Settings is already open, and the
+  // history buttons move between sections.
+  const section: Section = isSection(requestedSection) ? requestedSection : "connections";
   const setSection = (next: Section) => {
-    setSectionState(next);
     const params = new URLSearchParams(searchParams);
-    next === "connections" ? params.delete("section") : params.set("section", next);
+    if (next === "connections") params.delete("section"); else params.set("section", next);
     setSearchParams(params, { replace: true });
   };
   const queryClient = useQueryClient();
@@ -127,7 +130,7 @@ export default function SettingsPage() {
 
   return (
     <div className="page page--contained settings-page">
-      <PageHeader eyebrow="Preferences" title="設定" description="接続情報、ローカルデータ、検索と表示を管理します。" />
+      <PageHeader title="設定" description="接続情報、ローカルデータ、検索と表示を管理します。" />
       <RuntimeNotice />
       <Grid gap="xl" mt="lg" align="flex-start">
         <Grid.Col span={{ base: 12, md: 4, lg: 3 }}><Card p="xs" className="settings-nav">{nav.map((item) => { const Icon = item.icon; return <NavLink key={item.id} active={section === item.id} label={item.label} description={item.description} leftSection={<Icon size={18} />} onClick={() => setSection(item.id)} />; })}</Card></Grid.Col>
@@ -161,8 +164,9 @@ function Metric({ icon: Icon, label, value }: { icon: typeof BookOpen; label: st
 
 function SearchSection({ status, rebuild, runtime, rebuilding, start, cancel }: { status?: { totalDownloads: number; indexedDownloads: number; pendingDownloads: number; isComplete: boolean; indexedChunks: number; semanticIndexedChunks: number; semanticModelReady: boolean; embeddingProvider: string; gpuEnabled: boolean }; rebuild: SearchRebuildProgress | null; runtime: boolean; rebuilding: boolean; start: () => void; cancel: () => void }) { const progress = rebuild ? (rebuild.totalDownloads ? rebuild.indexedDownloads / rebuild.totalDownloads * 100 : 0) : status?.totalDownloads ? status.indexedDownloads / status.totalDownloads * 100 : 100; return <Stack gap="lg"><SectionIntro title="検索" description="全文検索と意味検索のインデックス状態を管理します。" /><Card p="lg"><Group justify="space-between"><Box><Group gap="xs"><Text fw={700}>検索インデックス</Text><Badge color={status?.isComplete ? "green" : "yellow"}>{status?.isComplete ? "最新" : "更新中"}</Badge></Group><Text size="sm" c="dimmed" mt={5}>{formatNumber(status?.indexedDownloads)} / {formatNumber(status?.totalDownloads)}作品 · {formatNumber(status?.indexedChunks)}チャンク</Text></Box><ThemeIcon size={48} variant="light"><Search size={22} /></ThemeIcon></Group><Progress value={progress} animated={rebuilding} mt="lg" /><Group mt="lg"><Button disabled={!runtime || rebuilding} leftSection={<RefreshCw size={15} />} onClick={start}>インデックスを再構築</Button>{rebuilding && <Button variant="subtle" color="red" leftSection={<X size={15} />} onClick={cancel}>中止</Button>}</Group></Card><Card p="lg"><Group justify="space-between"><Box><Text fw={700}>意味検索モデル</Text><Text size="sm" c="dimmed" mt={5}>{status?.embeddingProvider || "未初期化"}</Text></Box><Badge color={status?.semanticModelReady ? "green" : "gray"} variant="light">{status?.semanticModelReady ? "利用可能" : "準備中"}</Badge></Group><Divider my="md" /><Group gap="xl"><Text size="sm">意味ベクトル <b>{formatNumber(status?.semanticIndexedChunks)}</b></Text><Text size="sm">GPU <b>{status?.gpuEnabled ? "有効" : "無効"}</b></Text></Group></Card><Alert color="blue">再構築中もライブラリの通常検索は利用できます。アプリを終了した場合は次回起動時に再開できます。</Alert></Stack>; }
 
-function AppearanceSection({ colorScheme, setColorScheme }: { colorScheme: string; setColorScheme: (value: "light" | "dark" | "auto") => void }) { const [dense, setDense] = useState(localStorage.getItem("piep.dense") === "true"); return <Stack gap="lg"><SectionIntro title="外観と操作" description="デスクトップ環境に合わせて表示を調整します。" /><Card p="lg"><Stack gap="lg"><Box><Text fw={700}>カラーテーマ</Text><Text size="sm" c="dimmed" mb="sm">システム設定に追従することもできます。</Text><SegmentedControl value={colorScheme} onChange={(value) => setColorScheme(value as "light" | "dark" | "auto")} data={[{ value: "light", label: "ライト" }, { value: "dark", label: "ダーク" }, { value: "auto", label: "システム" }]} /></Box><Divider /><Switch label="高密度表示" description="リストと操作間隔を小さくします（次回画面から反映）" checked={dense} onChange={(event) => { setDense(event.currentTarget.checked); localStorage.setItem("piep.dense", String(event.currentTarget.checked)); }} /><Switch label="視覚効果を減らす" description="OSのモーション設定が優先されます" disabled /></Stack></Card><Card p="lg"><Text fw={700} mb="sm">キーボードショートカット</Text><Stack gap="xs"><Shortcut keys="Ctrl K" label="検索または画面移動" /><Shortcut keys="Ctrl L" label="ライブラリを開く" /><Shortcut keys="Ctrl Shift S" label="保存ワークスペース" /><Shortcut keys="Ctrl S" label="エディタで下書き保存" /></Stack></Card></Stack>; }
+function AppearanceSection({ colorScheme, setColorScheme }: { colorScheme: string; setColorScheme: (value: "light" | "dark" | "auto") => void }) { const [dense, setDense] = useState(isDense); return <Stack gap="lg"><SectionIntro title="外観と操作" description="デスクトップ環境に合わせて表示を調整します。" /><Card p="lg"><Stack gap="lg"><Box><Text fw={700}>カラーテーマ</Text><Text size="sm" c="dimmed" mb="sm">システム設定に追従することもできます。</Text><SegmentedControl value={colorScheme} onChange={(value) => setColorScheme(value as "light" | "dark" | "auto")} data={[{ value: "light", label: "ライト" }, { value: "dark", label: "ダーク" }, { value: "auto", label: "システム" }]} /></Box><Divider /><Switch label="高密度表示" description="ページ余白とカードの間隔を狭くします" checked={dense} onChange={(event) => { setDense(event.currentTarget.checked); applyDensity(event.currentTarget.checked); }} /><Switch label="視覚効果を減らす" description="OSのモーション設定が優先されます" disabled /></Stack></Card><Card p="lg"><Text fw={700} mb="sm">キーボードショートカット</Text><Stack gap="xs"><Shortcut keys="Ctrl K" label="検索または画面移動" /><Shortcut keys="Ctrl L" label="ライブラリを開く" /><Shortcut keys="Ctrl Shift S" label="保存ワークスペース" /><Shortcut keys="Ctrl S" label="エディタで下書き保存" /></Stack></Card></Stack>; }
 
 function Shortcut({ keys, label }: { keys: string; label: string }) { return <Group justify="space-between"><Text size="sm">{label}</Text><Code>{keys}</Code></Group>; }
 
-function AboutSection() { return <Stack gap="lg"><SectionIntro title="piepについて" description="クリエイティブ作品を自分の手元で長く楽しむためのデスクトップライブラリ。" /><Card p="xl" className="about-card"><Group><Image src={piepIcon} alt="piep" w={64} h={64} className="about-card__icon" /><Box><Title order={2}>piep</Title><Text c="dimmed">Version 0.2.0 · Tauri 2</Text></Box></Group><Divider my="lg" /><Text size="sm" c="dimmed">保存元のデータを尊重しながら、検索、読書、ローカル編集、更新監視、EPUB書き出しを一つのワークスペースにまとめます。</Text></Card><Title order={3}>プロバイダー拡張</Title><Grid>{Object.values(providers).map((provider) => <Grid.Col key={provider.id} span={{ base: 12, sm: 6 }}><Card p="md"><Group><Avatar color="gray" style={{ color: provider.color }}>{provider.icon}</Avatar><Box flex={1}><Group gap="xs"><Text fw={700}>{provider.label}</Text><Badge size="xs" color={provider.capability === "available" ? "green" : "gray"}>{provider.capability === "available" ? "対応" : "計画中"}</Badge></Group><Text size="xs" c="dimmed">{provider.description}</Text></Box></Group></Card></Grid.Col>)}</Grid><Alert color="gray" icon={<Info size={18} />}>piepは各サービスの公式アプリではありません。各サービスの利用規約と作品の権利を尊重して利用してください。</Alert></Stack>; }
+
+function AboutSection() { return <Stack gap="lg"><SectionIntro title="piepについて" description="クリエイティブ作品を自分の手元で長く楽しむためのデスクトップライブラリ。" /><Card p="xl" className="about-card"><Group><Image src={piepLockup} alt="piep" className="about-card__lockup" /><Text c="dimmed">Version 0.2.0 · Tauri 2</Text></Group><Divider my="lg" /><Text size="sm" c="dimmed">保存元のデータを尊重しながら、検索、読書、ローカル編集、更新監視、EPUB書き出しを一つのワークスペースにまとめます。</Text></Card><Title order={3}>プロバイダー拡張</Title><Grid>{Object.values(providers).map((provider) => <Grid.Col key={provider.id} span={{ base: 12, sm: 6 }}><Card p="md"><Group><Avatar color="gray" style={{ color: provider.color }}>{provider.icon}</Avatar><Box flex={1}><Group gap="xs"><Text fw={700}>{provider.label}</Text><Badge size="xs" color={provider.capability === "available" ? "green" : "gray"}>{provider.capability === "available" ? "対応" : "計画中"}</Badge></Group><Text size="xs" c="dimmed">{provider.description}</Text></Box></Group></Card></Grid.Col>)}</Grid><Alert color="gray" icon={<Info size={18} />}>piepは各サービスの公式アプリではありません。各サービスの利用規約と作品の権利を尊重して利用してください。</Alert></Stack>; }

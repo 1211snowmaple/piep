@@ -67,12 +67,12 @@ interface ProviderMarkProps extends BoxProps {
   compact?: boolean;
 }
 
-export function ProviderMark({ provider, compact = false, ...others }: ProviderMarkProps) {
+export function ProviderMark({ provider, compact = false, className, ...others }: ProviderMarkProps) {
   const item = getProvider(provider);
   return (
     <Box
       component="span"
-      className="provider-mark"
+      className={["provider-mark", className].filter(Boolean).join(" ")}
       style={{ "--provider-color": item.color, "--provider-soft": item.softColor }}
       aria-label={item.label}
       {...others}

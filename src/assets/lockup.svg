@@ -1,23 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  piep app icon.
-
-  The artwork is a landscape book (about 1.59:1), so centring it untouched in a
-  square left a wide empty border and made the icon read as small. It now sits
-  on a full-bleed rounded tile and is scaled to 88% of the icon width, which
-  fills the square and holds together down to 16px.
+  piep horizontal lockup: the book mark next to the wordmark.
+  Bauhaus 93 is the intended face; the fallbacks are geometric sans faces that
+  keep the proportions close when it is unavailable.
 -->
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="piep">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 500 200" width="500" height="200" role="img" aria-label="piep">
   <title>piep</title>
-  <defs>
-    <linearGradient id="piep-tile" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#E9F3FF" />
-      <stop offset="1" stop-color="#EEF7DE" />
-    </linearGradient>
-  </defs>
-  <rect width="512" height="512" rx="114" ry="114" fill="url(#piep-tile)" />
-  <rect x="1.5" y="1.5" width="509" height="509" rx="112.5" ry="112.5" fill="none" stroke="#14283C" stroke-opacity="0.09" stroke-width="3" />
-  <g transform="matrix(1.03823, 0, 0, 1.03823, -3.56, 12.03)">
+  <g transform="matrix(0.5128, 0, 0, 0.5128, -8.92, -20.51)">
     <ellipse style="stroke-width: 4px; stroke: rgb(85, 89, 93); fill: rgb(85, 89, 93);" cx="250" cy="353.753" rx="24.012" ry="10.316" />
     <path style="stroke-linejoin: round; stroke-width: 13; stroke: rgb(85, 89, 93); fill: rgb(255, 255, 255);" d="M 39.829 146.265 L 39.491 349.863 C 71.374 332.017 183.168 316.04 250.191 359.333 L 249.516 155.059 C 247.002 112.951 38.896 130.644 39.829 146.265 Z" />
     <path style="stroke-linejoin: round; stroke-width: 13; stroke: rgb(85, 89, 93); fill: rgb(255, 255, 255);" d="M 250.146 341.968 L 249.808 138.37 C 281.691 156.216 393.485 172.193 460.508 128.9 L 459.833 333.174 C 457.319 375.282 249.213 357.589 250.146 341.968 Z" transform="matrix(-1, 0, 0, -1, 710.315961, 488.244635)" />
@@ -30,4 +19,5 @@
       <path d="M 267.148 235.328 L 278.981 259.866 L 255.314 259.866 L 267.148 235.328 Z" style="fill: rgb(255, 255, 255); stroke: rgb(255, 255, 255); transform-box: fill-box; transform-origin: 50% 50%;" transform="matrix(0, 1.308453, -0.764261, 0, 0, 0.000009)" />
     </g>
   </g>
+  <text x="370" y="142" style="font-family: 'Bauhaus 93', 'Century Gothic', 'Futura', 'Trebuchet MS', sans-serif; font-size: 112px; font-weight: 700; text-anchor: middle; white-space: pre;"><tspan style="fill: #0096FA;">pi</tspan><tspan style="fill: #86B918;">ep</tspan></text>
 </svg>

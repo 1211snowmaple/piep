@@ -2,7 +2,9 @@
   color-scheme: light dark;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
-  --piep-sidebar-width: 248px;
+  /* Overridden on the app shell to follow the rail; this is only the fallback
+     for anything rendered outside it. */
+  --piep-sidebar-width: 194px;
 }
 
 *,
@@ -31,8 +33,9 @@ body {
   padding: 1px;
   overflow-x: hidden;
   overflow-y: auto;
+  pointer-events: none;
 }
-.mantine-Notification-root { width: 100%; max-width: 100%; overflow: hidden; }
+.mantine-Notification-root { width: 100%; max-width: 100%; overflow: hidden; pointer-events: auto; }
 .mantine-Notification-description {
   display: -webkit-box;
   max-height: 7.2em;
@@ -98,16 +101,34 @@ select {
     light-dark(#f5f7fa, #0d1117);
 }
 
-.app-logo {
-  filter: drop-shadow(0 5px 10px rgb(13 134 244 / 14%));
-}
-
 .app-brand {
+  display: block;
   width: 100%;
   padding: 4px;
   border-radius: var(--mantine-radius-md);
   transition: background-color 120ms ease, transform 120ms ease;
 }
+/* Sized like a brand, not like a banner: the lockup is 2.5:1, so anything
+   wider than this starts eating the navigation below it. */
+.app-brand__lockup { width: 112px; height: auto; }
+.app-brand__mark { width: 30px; height: 30px; }
+
+.app-nav__brand { padding: 12px 14px; }
+.app-nav[data-railed] .app-nav__brand { display: grid; place-items: center; padding: 12px 6px; }
+.app-nav[data-railed] .app-brand { width: auto; }
+.app-nav__link { border-radius: var(--mantine-radius-md); }
+/* In the rail the icon is the whole control, so it centres rather than sitting
+   in a left slot sized for a label that is no longer there. */
+.app-nav[data-railed] .app-nav__link {
+  display: flex;
+  justify-content: center;
+  padding: 10px 0;
+}
+.app-nav[data-railed] .app-nav__link .mantine-NavLink-body { display: none; }
+/* Mantine reserves a gap beside the icon slot for the label; with the label
+   gone that gap is what pushed the glyph off centre. */
+.app-nav[data-railed] .app-nav__link .mantine-NavLink-section { margin: 0; }
+.app-nav[data-railed] .app-nav__link > * { margin-inline: 0; }
 .app-brand:hover { background: light-dark(#eef3f7, #1a222d); }
 .app-brand:active { transform: translateY(1px); }
 .app-brand:focus-visible {
@@ -137,6 +158,13 @@ select {
   max-width: 1560px;
   margin-inline: auto;
 }
+
+/* Set from the appearance settings; see lib/density.ts. */
+:root[data-density="compact"] .page { padding: clamp(10px, 1.2vw, 18px); }
+:root[data-density="compact"] .library-grid,
+:root[data-density="compact"] .work-grid { gap: 10px; }
+:root[data-density="compact"] .work-card { height: 200px; }
+:root[data-density="compact"] .page-header { margin-bottom: 8px; }
 
 .page-header {
   margin-bottom: 14px;
@@ -218,6 +246,7 @@ select {
   transition: transform 140ms ease, border-color 140ms ease, box-shadow 140ms ease;
 }
 .stat-card:hover { border-color: color-mix(in srgb, var(--stat-accent) 36%, light-dark(#d8dfe7, #303944)); box-shadow: 0 8px 24px rgb(28 53 82 / 8%); transform: translateY(-1px); }
+.stat-card__value { font-variant-numeric: tabular-nums; }
 .stat-card__arrow { flex: 0 0 auto; color: var(--stat-accent); opacity: 0; transform: translateX(-4px); transition: opacity 140ms ease, transform 140ms ease; }
 .stat-card:hover .stat-card__arrow,
 .stat-card:focus-visible .stat-card__arrow { opacity: 1; transform: translateX(0); }
@@ -319,14 +348,51 @@ select {
   background: currentColor;
 }
 
+/* The track count comes from the data rather than being fixed at six, so a
+   short history is not stretched across empty columns. */
 .download-trend {
   display: grid;
-  grid-template-columns: repeat(6, minmax(48px, 1fr));
+  /* Capped so a library with one or two months shows bars, not slabs; the
+     whole run centres in the card whatever the count. */
+  grid-template-columns: repeat(var(--trend-columns, 6), minmax(0, 84px));
   align-items: end;
-  gap: var(--mantine-spacing-md);
+  justify-content: center;
+  gap: clamp(4px, 1.2cqi, 16px);
   height: 230px;
   padding-top: var(--mantine-spacing-sm);
+  container-type: inline-size;
 }
+.download-trend__column[data-empty] .download-trend__track { background: light-dark(var(--mantine-color-gray-0), var(--mantine-color-dark-7)); }
+.download-trend__column[data-empty] .download-trend__track::after {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  height: 2px;
+  background: light-dark(var(--mantine-color-gray-3), var(--mantine-color-dark-4));
+  content: "";
+}
+.download-trend__label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Past nine months the labels start colliding, so every other one is dropped. */
+@container (max-width: 560px) {
+  .download-trend__column:nth-child(even) .download-trend__label { visibility: hidden; }
+}
+
+/* The chart sits above the composition bar and the card fills the column, so
+   the trend takes the slack instead of leaving a void under the legend. */
+.dashboard-trend-card { display: flex; flex-direction: column; }
+.dashboard-trend-card .download-trend { flex: 1 1 auto; min-height: 180px; height: auto; }
+.dashboard-trend-card .source-composition { margin-top: var(--mantine-spacing-lg); }
+
+.source-composition { display: flex; overflow: hidden; height: 14px; border-radius: 999px; background: light-dark(var(--mantine-color-gray-1), var(--mantine-color-dark-6)); }
+.source-composition__segment { min-width: 3px; }
+.source-composition__dot { width: 10px; height: 10px; border-radius: 3px; }
+.source-composition__segment[data-source="pixiv"],
+.source-composition__dot[data-source="pixiv"] { background: linear-gradient(180deg, #38adff, #0087e0); }
+.source-composition__segment[data-source="fanbox"],
+.source-composition__dot[data-source="fanbox"] { background: linear-gradient(180deg, #f3cf42, #c99d00); }
+.source-composition__segment:not([data-source="pixiv"]):not([data-source="fanbox"]),
+.source-composition__dot:not([data-source="pixiv"]):not([data-source="fanbox"]) { background: light-dark(#aeb6c0, #626d79); }
 
 .download-trend__column {
   display: grid;
@@ -362,16 +428,31 @@ select {
 .download-trend__segment[data-source="fanbox"] { background: linear-gradient(180deg, #f3cf42, #c99d00); }
 .download-trend__segment[data-source="other"] { background: light-dark(#aeb6c0, #626d79); }
 
+/* Cards stretch to the tallest in their grid row instead of being pinned to a
+   fixed pixel height, so a narrower window (or denser mode) reflows rather
+   than clipping. */
 .work-card {
   min-width: 0;
-  height: 228px;
+  height: 100%;
+  container-type: inline-size;
+}
+
+.work-card__inner {
+  position: relative;
+  display: grid;
+  height: 100%;
+  min-width: 0;
+  grid-template-columns: auto minmax(0, 1fr);
 }
 
 .work-card__cover-rail {
   position: relative;
-  width: 132px;
-  flex: 0 0 132px;
-  padding: 12px 10px;
+  display: flex;
+  width: clamp(96px, 34cqi, 132px);
+  flex-direction: column;
+  justify-content: center;
+  padding: 12px 11px;
+  cursor: pointer;
   background: light-dark(#fafafa, #121820);
   border-right: 1px solid light-dark(#e7ebef, #29313b);
 }
@@ -379,25 +460,60 @@ select {
 .work-card__cover {
   position: relative;
   display: grid;
-  width: 112px;
-  height: 158px;
+  width: 100%;
+  aspect-ratio: 112 / 158;
   place-items: center;
   overflow: hidden;
   border-radius: 8px;
   box-shadow: 0 8px 22px rgb(24 32 43 / 14%);
 }
 
-.work-card__provider,
-.work-card__select {
+/* Spacing is set per pair rather than by one uniform gap: the series and the
+   title belong together, the facts and the actions do not. A single gap made
+   every relationship read as equally distant and padded the card out. */
+.work-card__body {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 0;
+  padding: 9px 12px 8px;
+}
+.work-card__body > .work-card__open { margin-top: 1px; }
+.work-card__body > .work-card__author { margin-top: 5px; }
+.work-card__body > .work-card__excerpt { margin-top: 5px; }
+.work-card__body > .work-card__tags { margin-top: 8px; }
+
+.work-card__meta { display: flex; min-width: 0; align-items: center; gap: 8px; min-height: 21px; }
+.work-card__meta > .work-card__series { min-width: 0; flex: 0 1 auto; }
+/* Stamped on the card's own top-left corner, over the cover. */
+.work-card__provider {
   position: absolute;
   z-index: 2;
+  top: 9px;
+  left: 9px;
+  max-width: calc(100% - 18px);
+  min-height: 21px;
+  padding-block: 1px;
+  background: light-dark(rgb(255 255 255 / 93%), rgb(17 23 31 / 93%));
+  box-shadow: 0 2px 8px rgb(20 28 38 / 14%);
 }
-
-.work-card__provider { left: 10px; bottom: 11px; max-width: calc(100% - 20px); }
-.work-card__provider .provider-mark { min-height: 23px; max-width: 100%; padding-block: 2px; background: light-dark(rgb(255 255 255 / 94%), rgb(17 23 31 / 94%)); box-shadow: 0 3px 10px rgb(20 28 38 / 12%); }
 .work-card__provider .mantine-Text-root { overflow: hidden; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
-.work-card__select { top: 16px; right: 16px; z-index: 3; filter: drop-shadow(0 2px 5px rgb(0 0 0 / 18%)); }
+.work-card__select { position: absolute; top: 14px; right: 14px; z-index: 3; filter: drop-shadow(0 2px 5px rgb(0 0 0 / 18%)); }
+.work-card__footer { display: flex; min-width: 0; align-items: center; gap: 8px; margin-top: auto; padding-top: 7px; }
+.work-card__footer > .work-card__facts { flex: 1 1 auto; }
+.work-card__actions { flex: 0 0 auto; }
 .work-card__actions .mantine-ActionIcon-root { flex: 0 0 auto; }
+.work-card__author { min-width: 0; cursor: pointer; border-radius: 999px; }
+.work-card__author:hover .mantine-Text-root { color: var(--mantine-color-piep-7); }
+.work-card__author:focus-visible { outline: 2px solid var(--mantine-color-piep-5); outline-offset: 2px; }
+.work-card__avatar { flex: 0 0 auto; }
+.work-card__excerpt { margin-top: -1px; }
+.work-card__version { flex: 0 0 auto; cursor: pointer; font-variant-numeric: tabular-nums; }
+
+/* Very narrow columns drop the cover rail's chrome so the text keeps room. */
+@container (max-width: 300px) {
+  .work-card__excerpt { display: none; }
+}
 
 .work-card__series {
   color: var(--mantine-color-dimmed);
@@ -406,27 +522,93 @@ select {
   letter-spacing: 0.02em;
 }
 .work-card__title { font-size: 0.9rem; }
-.work-card__open,
-.work-row__open { display: block; width: 100%; min-width: 0; color: inherit; text-align: left; }
+.work-card__open { display: block; width: 100%; min-width: 0; color: inherit; text-align: left; }
 .work-card__open:focus-visible,
 .work-row__open:focus-visible { outline: 2px solid var(--mantine-color-piep-5); outline-offset: 3px; border-radius: var(--mantine-radius-sm); }
 .work-card__cover-rail { cursor: pointer; }
 
-.work-card__tags { min-height: 20px; flex-wrap: nowrap; overflow: hidden; }
-.work-card__tags > .mantine-Badge-root:not(.work-card__tag-overflow) { min-width: 0; max-width: 94px; flex: 0 1 auto; }
-.work-card__tags > .mantine-Badge-root:not(.work-card__tag-overflow) .mantine-Badge-label { overflow: hidden; text-overflow: ellipsis; }
-.work-card__tag-overflow { cursor: pointer; font-variant-numeric: tabular-nums; }
+/* Measured by TagRow: every tag is rendered, and the ones that do not fit are
+   marked hidden so the "+N" chip can report an accurate remainder. */
+.work-card__tags {
+  display: flex;
+  min-width: 0;
+  min-height: 20px;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: nowrap;
+  overflow: hidden;
+}
+.work-card__tags [data-hidden] { display: none; }
+.work-card__tag { flex: 0 0 auto; max-width: 130px; text-decoration: none; cursor: pointer; }
+.work-card__tag .mantine-Badge-label { overflow: hidden; text-overflow: ellipsis; }
+.work-card__tag:hover { background: light-dark(var(--mantine-color-piep-0), var(--mantine-color-dark-5)); color: var(--mantine-color-piep-7); }
+/* A fixed footprint keeps the measurement in TagRow stable: if the chip grew
+   with its own label ("+3" then "+12") it would no longer fit the space that
+   was reserved for it and got clipped to a bare "+". */
+.work-card__tag-overflow {
+  min-width: 38px;
+  flex: 0 0 auto;
+  justify-content: center;
+  cursor: pointer;
+  font-variant-numeric: tabular-nums;
+}
 .work-card__tag-overflow:focus-visible { outline: 2px solid var(--mantine-color-piep-5); outline-offset: 2px; }
 .work-card__tag-popover { border-color: light-dark(#d5e9f8, #29485f); background: light-dark(#fbfdff, #121c25); }
 .work-card__tag-popover .mantine-Badge-root { cursor: pointer; }
-.work-card__facts > .mantine-Text-root { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+/* The facts row must never force the card wider than its grid column: extra
+   items wrap onto a hidden second line instead of clipping mid-glyph. */
+.work-card__facts {
+  min-width: 0;
+  height: 19px;
+  align-items: center;
+  overflow: hidden;
+  flex-wrap: wrap;
+  /* A large row gap parks any wrapped item well below the clip, so a second
+     line never peeks through as a sliver under the first. */
+  row-gap: 24px;
+}
+.work-card__facts > .mantine-Text-root { display: inline-flex; min-width: 0; max-width: 100%; align-items: center; gap: 4px; white-space: nowrap; }
 .library-toolbar { background: light-dark(rgb(255 255 255 / 90%), rgb(17 22 30 / 92%)); }
 .library-toolbar .mantine-SegmentedControl-root { display: inline-flex; align-items: center; height: 36px; }
 .library-toolbar .mantine-SegmentedControl-label { width: 42px; height: 30px; padding: 0; line-height: 1; }
 .library-toolbar .mantine-SegmentedControl-label svg { display: block; margin: auto; }
 
+/* List rows are a table: the tracks are declared once so every row aligns, and
+   the narrower the row gets the fewer columns it carries. */
 .work-row {
   min-width: 0;
+  container-type: inline-size;
+}
+
+.work-row__grid {
+  display: grid;
+  align-items: center;
+  gap: 14px;
+  grid-template-columns: auto 46px minmax(0, 2.1fr) minmax(0, 1.4fr) auto auto;
+  padding: 8px 12px;
+}
+.work-row__provider { flex: 0 0 auto; }
+
+.work-row__cover { position: relative; cursor: pointer; }
+.work-row__cover .work-cover--compact { width: 46px; height: 60px; flex: none; }
+.work-row__select { position: absolute; top: -4px; left: -4px; z-index: 2; filter: drop-shadow(0 2px 4px rgb(0 0 0 / 22%)); }
+.work-row__main { min-width: 0; }
+.work-row__meta { min-width: 0; min-height: 19px; }
+.work-row__series { min-width: 0; flex: 0 1 auto; }
+.work-row__main .work-card__author { margin-top: 2px; }
+.work-row__open { display: block; width: 100%; min-width: 0; margin-top: 1px; color: inherit; text-align: left; }
+.work-row__tags { min-width: 0; }
+.work-row__facts { flex: 0 0 auto; white-space: nowrap; }
+.work-row__facts > .mantine-Text-root { display: inline-flex; align-items: center; gap: 4px; }
+.work-row__actions { display: flex; justify-content: flex-end; }
+
+@container (max-width: 900px) {
+  .work-row__grid { grid-template-columns: auto 46px minmax(0, 1fr) auto auto; }
+  .work-row__tags { display: none; }
+}
+@container (max-width: 620px) {
+  .work-row__grid { grid-template-columns: auto 46px minmax(0, 1fr) auto; gap: 10px; }
+  .work-row__facts { display: none; }
 }
 
 .dashboard-hero {
@@ -438,7 +620,6 @@ select {
 
 .dashboard-quick-save__logo {
   flex: 0 0 auto;
-  padding: 8px;
   border-radius: var(--mantine-radius-lg);
   background: light-dark(#f2f8fd, #0d2639);
   box-shadow: inset 0 0 0 1px light-dark(#dcecf8, #24465e);
@@ -447,7 +628,23 @@ select {
 .dashboard-page,
 .dashboard-page > * { min-width: 0; }
 .dashboard-page .page-header h1 { font-size: clamp(26px, 2vw, 30px); }
-.dashboard-tag .mantine-Badge-label { display: inline-flex; align-items: center; gap: 6px; }
+/* These are filters, so they behave like buttons: a real hit area, a hover
+   that reads as clickable, and a press state. */
+.dashboard-tag {
+  height: 30px;
+  padding-inline: 11px;
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: background-color 120ms ease, border-color 120ms ease, transform 90ms ease;
+}
+.dashboard-tag:hover {
+  border-color: light-dark(var(--mantine-color-piep-3), var(--mantine-color-piep-8));
+  background: light-dark(var(--mantine-color-piep-0), var(--mantine-color-dark-5));
+  color: var(--mantine-color-piep-7);
+}
+.dashboard-tag:active { transform: translateY(1px); }
+.dashboard-tag:focus-visible { outline: 2px solid var(--mantine-color-piep-5); outline-offset: 2px; }
+.dashboard-tag .mantine-Badge-label { display: inline-flex; align-items: center; gap: 7px; }
 .dashboard-tag__count { display: inline-grid; min-width: 18px; height: 18px; padding-inline: 4px; place-items: center; border-radius: 999px; background: light-dark(#e4e8ec, #2b323c); color: var(--mantine-color-dimmed); font-size: 10px; font-variant-numeric: tabular-nums; }
 
 .quick-save-input {
@@ -502,9 +699,11 @@ select {
 .hero-art__orbit--one { width: 250px; height: 132px; }
 .hero-art__orbit--two { width: 320px; height: 190px; transform: translate(-50%, -50%) rotate(26deg); }
 
+/* Fixed column counts clipped the card contents on narrow windows, so the
+   dashboard grid tracks the same intrinsic card width as the library grid. */
 .work-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
   gap: 16px;
 }
 
@@ -660,7 +859,15 @@ select {
 .content-pagination { min-height: 32px; }
 
 .asset-card { overflow: hidden; cursor: pointer; }
-.asset-card__preview { height: 190px; display: grid; place-items: center; padding: 10px; background: light-dark(#f1f4f7, #0f151d); }
+.asset-card__preview { position: relative; display: grid; aspect-ratio: 4 / 3; place-items: center; overflow: hidden; padding: 8px; background: light-dark(#f1f4f7, #0f151d); }
+.asset-card__image { width: 100%; height: 100%; object-fit: contain; }
+.asset-card__badge { position: absolute; top: 7px; right: 7px; }
+.asset-card__meta { padding: 8px 10px 9px; }
+.asset-card__name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Title and body share one left edge; Mantine indents the message by default. */
+.work-note .mantine-Alert-message { margin-left: 0; padding-left: 0; }
+.asset-preview-modal { overflow: hidden; border-radius: var(--mantine-radius-lg); }
+.asset-preview-modal .mantine-Modal-body { overflow: auto; }
 .version-row { width: 100%; color: inherit; text-align: left; cursor: pointer; background: var(--mantine-color-body); }
 .version-row[data-active] { border-color: var(--mantine-color-piep-5); box-shadow: 0 0 0 1px var(--mantine-color-piep-4); }
 .version-preview { position: sticky; top: 82px; min-height: 310px; }
@@ -770,19 +977,47 @@ select {
 .reader-theme--night .reader-stage { color: #dce2e9; background: #151a22; }
 .reader-theme--night .reader-paper { color: #dce2e9; }
 
+/* The title page follows the reading column rather than being centred inside
+   it: the source opens the block on the left, the author closes it on the
+   right, and the title gets the full measure instead of being squeezed by
+   balanced wrapping. */
 .reader-title-page {
   padding-block: 22px 16px;
-  text-align: center;
+  text-align: left;
 }
 
 .reader-title-page h1 {
-  max-width: 680px;
-  margin: 20px auto 10px;
+  max-width: 100%;
+  margin: 14px 0 10px;
   font-family: var(--reader-font-family);
-  font-size: clamp(20px, 1.9vw, 27px);
-  line-height: 1.4;
+  font-size: clamp(21px, 2.1vw, 29px);
+  line-height: 1.36;
   letter-spacing: -0.025em;
-  text-wrap: balance;
+  text-align: center;
+}
+.reader-title-page__author,
+.reader-title-page__meta { text-align: right; }
+.reader-title-page__meta { margin-top: 4px; }
+
+/* The count is drawn inside the button so it cannot be clipped, and the button
+   itself stays the same shape as every other control in the bar. */
+.reader-bookmark { overflow: visible; }
+.reader-bookmark__count {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  display: grid;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  place-items: center;
+  border: 2px solid var(--mantine-color-body);
+  border-radius: 999px;
+  color: #fff;
+  background: var(--mantine-color-piep-6);
+  font-size: 9px;
+  font-weight: 800;
+  line-height: 1;
 }
 
 .reader-content {
@@ -818,18 +1053,25 @@ select {
 }
 
 .reader-to-top { position: fixed; right: 24px; bottom: 24px; z-index: 110; box-shadow: var(--mantine-shadow-lg); }
+/* Centred by an auto margin between both edges rather than by offsetting the
+   left edge to the middle: with only `left` set, the control's available width
+   was just the half of the screen to its right, so the pager wrapped onto a
+   second line long before it needed to. */
 .reader-page-controls {
   position: fixed;
   z-index: 110;
   bottom: 20px;
-  left: calc(var(--piep-sidebar-width) + (100vw - var(--piep-sidebar-width)) / 2);
+  left: var(--piep-sidebar-width);
+  right: 0;
+  width: max-content;
+  max-width: calc(100vw - var(--piep-sidebar-width) - 32px);
+  margin-inline: auto;
   padding: 5px 8px;
   border: 1px solid light-dark(#dde2e8, #303944);
   border-radius: 12px;
   background: light-dark(rgb(255 255 255 / 94%), rgb(20 25 33 / 94%));
   box-shadow: var(--mantine-shadow-md);
   backdrop-filter: blur(14px);
-  transform: translateX(-50%);
 }
 .reader-page-controls .mantine-Pagination-control { min-width: 30px; height: 30px; border-radius: 7px; }
 
@@ -960,7 +1202,7 @@ select {
 .editor-quote-input { padding-left: 12px; border-left: 3px solid var(--mantine-color-violet-2); }
 .editor-page-break { min-height: 34px; border: 1px dashed light-dark(#e0b56d, #70532b); border-radius: var(--mantine-radius-sm); color: light-dark(#9a640e, #e5b35f); background: light-dark(#fffaf1, #231d14); }
 .editor-image-preview { display: grid; width: 150px; height: 112px; flex: 0 0 150px; place-items: center; overflow: hidden; border: 1px solid light-dark(#e1e5ea, #303844); border-radius: var(--mantine-radius-md); color: var(--mantine-color-dimmed); background: light-dark(#f3f5f7, #10151c); }
-.about-card__icon { padding: 8px; border: 1px solid light-dark(#d9e6f0, #2e4456); border-radius: 18px; background: light-dark(#f2f8fd, #10283a); }
+.about-card__lockup { width: clamp(150px, 22vw, 220px); height: auto; }
 
 .save-page {
   display: grid;
@@ -974,12 +1216,20 @@ select {
   background: light-dark(#fff, #11161e);
 }
 
+/* The candidate column is capped as a share of this grid, not of the viewport.
+   Sizing it against 100vw ignored the sidebar and pushed the pane (and its
+   save button) outside the clipped, unscrollable page. */
 .save-layout {
   display: grid;
+  min-width: 0;
   min-height: 0;
-  grid-template-columns: minmax(440px, 1fr) 360px;
+  grid-template-columns: minmax(0, 1fr) 14px minmax(0, clamp(260px, var(--piep-candidate-width, 360px), 55%));
   gap: 6px;
   padding: 12px;
+}
+
+.save-layout[data-candidate-collapsed] {
+  grid-template-columns: minmax(0, 1fr) 14px 54px;
 }
 
 .browser-pane,
@@ -1015,7 +1265,10 @@ select {
 
 .candidate-pane { background: light-dark(#fbfcfd, #11161e); }
 .candidate-pane[data-collapsed] { display: flex; align-items: flex-start; }
-.save-resizer { display: grid; place-items: center; min-height: 0; color: var(--mantine-color-dimmed); cursor: col-resize; touch-action: none; border-radius: var(--mantine-radius-sm); }
+/* The grip is the whole column, so it centres in the gap rather than hugging
+   one side of it. */
+.save-resizer { display: flex; align-items: center; justify-content: center; min-width: 0; min-height: 0; color: var(--mantine-color-dimmed); cursor: col-resize; touch-action: none; border-radius: var(--mantine-radius-sm); }
+.save-resizer > svg { display: block; width: 18px; height: 18px; flex: none; }
 .save-resizer:hover { color: var(--mantine-color-piep-6); background: light-dark(#e8f3fc, #162b3d); }
 .candidate-list { min-height: 0; }
 
@@ -1072,20 +1325,8 @@ select {
   .selection-bar { left: 18px; right: 18px; }
 }
 
-@media (max-width: 75em) {
-  .work-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-  .work-grid > :nth-child(n + 4) { display: none; }
-}
-
 @media (max-width: 58em) {
-  .work-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .work-grid > :nth-child(n + 3) { display: none; }
   .hero-art { min-height: 190px; }
-}
-
-@media (max-width: 36em) {
-  .work-grid { grid-template-columns: 1fr; }
-  .work-grid > :nth-child(n + 2) { display: none; }
 }
 
 @media (max-width: 40em) {
@@ -1099,7 +1340,7 @@ select {
 }
 
 @media (max-width: 61.99em) {
-  .reader-page-controls { left: 50%; max-width: calc(100vw - 92px); }
+  .reader-page-controls { left: 0; max-width: calc(100vw - 32px); }
   .reader-page-controls .mantine-Pagination-control:nth-of-type(n + 6):not(:last-child) { display: none; }
 }
 

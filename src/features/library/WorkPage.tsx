@@ -48,7 +48,7 @@ import {
   Trash2,
   UserRound,
 } from "lucide-react";
-import { AppLink, useAppNavigate, useRouteParams } from "@/app/router";
+import { AppLink, useAppNavigate, useAppSearchParams, useRouteParams } from "@/app/router";
 import { useWorkspace } from "@/app/WorkspaceContext";
 import { ErrorState, LoadingState } from "@/components/AsyncState";
 import { WorkCover } from "@/components/WorkCover";
@@ -79,7 +79,15 @@ export default function WorkPage() {
   const runtime = isTauriRuntime();
   const queryClient = useQueryClient();
   const { addToEpubQueue, removeFromEpubQueue, isQueuedForEpub } = useWorkspace();
-  const [tab, setTab] = useState<string | null>("overview");
+  // Driven by the URL so the card's version chip can deep-link into the
+  // history, and so going back returns to the tab you were on.
+  const [searchParams, setSearchParams] = useAppSearchParams();
+  const tab = searchParams.get("tab") ?? "overview";
+  const setTab = (next: string | null) => {
+    const params = new URLSearchParams(searchParams);
+    if (!next || next === "overview") params.delete("tab"); else params.set("tab", next);
+    setSearchParams(params, { replace: true });
+  };
   const [contentPage, setContentPage] = useState(1);
   const [selectedVersion, setSelectedVersion] = useState<number | null>(null);
   const documentQuery = useQuery({
@@ -161,7 +169,11 @@ export default function WorkPage() {
     modals.open({
       title: asset.filename,
       size: "min(92vw, 1100px)",
-      children: <Stack><Image src={url} alt={asset.filename} mah="76vh" fit="contain" /><Group justify="space-between"><Text size="xs" c="dimmed">{formatBytes(asset.fileSizeBytes)} · {asset.mimeType}</Text><Button size="xs" variant="light" onClick={() => runtime && openLocalAsset(asset.localPath)}>元ファイルを開く</Button></Group></Stack>,
+      // The scroll area squared off the right edge of the dialog; keeping the
+      // radius on the body and clipping it keeps all four corners round.
+      radius: "lg",
+      classNames: { content: "asset-preview-modal" },
+      children: <Stack><Image src={url} alt={asset.filename} mah="76vh" fit="contain" /><Group justify="space-between"><Text size="xs" c="dimmed">{formatBytes(asset.fileSizeBytes)} · {asset.mimeType}</Text><Button size="xs" variant="light" onClick={() => runtime && openLocalAsset(asset.localPath)}>この端末のJSONを開く</Button></Group></Stack>,
     });
   };
 
@@ -180,7 +192,7 @@ export default function WorkPage() {
               <Stack gap="md">
                 <Group justify="space-between" align="flex-start" wrap="nowrap">
                   <Group gap="xs"><ProviderMark provider={work.source} /><Badge variant="light" color="gray">{contentTypeLabel(work.contentType)}</Badge>{doc.isEdited && <Badge color="violet" variant="light">ローカル編集</Badge>}</Group>
-                  <Menu position="bottom-end"><Menu.Target><Tooltip label="その他"><ActionIcon variant="subtle" color="gray" aria-label="作品のその他の操作"><Ellipsis size={20} /></ActionIcon></Tooltip></Menu.Target><Menu.Dropdown><Menu.Item leftSection={<FolderOpen size={15} />} onClick={() => runtime && openLocalAsset(work.jsonPath)}>保存場所を開く</Menu.Item><Menu.Item leftSection={<Archive size={15} />} onClick={exportArchive}>アーカイブを書き出す</Menu.Item><Menu.Divider /><Menu.Item color="red" leftSection={<Trash2 size={15} />} onClick={deleteWork}>作品を削除</Menu.Item></Menu.Dropdown></Menu>
+                  <Menu position="bottom-end"><Menu.Target><Tooltip label="その他"><ActionIcon variant="subtle" color="gray" aria-label="作品のその他の操作"><Ellipsis size={20} /></ActionIcon></Tooltip></Menu.Target><Menu.Dropdown><Menu.Item leftSection={<FolderOpen size={15} />} onClick={() => runtime && openLocalAsset(work.jsonPath)}>この端末の保存フォルダーを開く</Menu.Item><Menu.Item leftSection={<Archive size={15} />} onClick={exportArchive}>アーカイブを書き出す</Menu.Item><Menu.Divider /><Menu.Item color="red" leftSection={<Trash2 size={15} />} onClick={deleteWork}>作品を削除</Menu.Item></Menu.Dropdown></Menu>
                 </Group>
                 <Box>
                   {work.seriesTitle && <Text size="sm" c="dimmed" fw={650} mb={5}>{work.seriesTitle}</Text>}
@@ -196,7 +208,9 @@ export default function WorkPage() {
               </Stack>
               <Group justify="space-between" mt="xl">
                 <Group gap="xs"><Button leftSection={<BookOpen size={16} />} onClick={() => navigate(`/reader/${work.id}`)}>読む</Button><Button variant="light" leftSection={<Edit3 size={16} />} onClick={() => navigate(`/editor/${work.id}`)}>編集</Button><Button variant="default" leftSection={queued ? <CheckIcon /> : <Download size={16} />} onClick={() => queued ? removeFromEpubQueue(work.id) : addToEpubQueue(work.id)}>{queued ? "EPUBキュー済み" : "EPUBへ"}</Button></Group>
-                <Group gap="xs"><Tooltip label={work.favorite ? "お気に入りを解除" : "お気に入りに追加"}><ActionIcon size="lg" variant={work.favorite ? "filled" : "light"} color="orange" aria-label={work.favorite ? "お気に入りを解除" : "お気に入りに追加"} onClick={() => mutate.mutate({ favorite: !work.favorite })}><Heart size={18} fill={work.favorite ? "currentColor" : "none"} /></ActionIcon></Tooltip><Button variant="subtle" color="gray" rightSection={<ExternalLink size={14} />} onClick={openSource}>保存元を開く</Button></Group>
+                <Group gap="xs"><Tooltip label={work.favorite ? "お気に入りを解除" : "お気に入りに追加"}><ActionIcon size="lg" variant={work.favorite ? "filled" : "light"} color="orange" aria-label={work.favorite ? "お気に入りを解除" : "お気に入りに追加"} onClick={() => mutate.mutate({ favorite: !work.favorite })}><Heart size={18} fill={work.favorite ? "currentColor" : "none"} /></ActionIcon></Tooltip>{/* "保存元" read as either the website or the folder on disk; both are
+    reachable and each now says which one it is. */}
+<Button variant="subtle" color="gray" rightSection={<ExternalLink size={14} />} onClick={openSource}>元ページを開く</Button></Group>
               </Group>
             </Stack>
           </Grid.Col>
@@ -212,12 +226,16 @@ export default function WorkPage() {
           <Tabs.Tab value="json">JSON</Tabs.Tab>
         </Tabs.List>
         <Tabs.Panel value="overview" pt="lg">
-          <Grid gap="lg">
-            <Grid.Col span={{ base: 12, lg: 8 }}>
-              <Card p="lg"><Title order={3} mb="md">作品情報</Title><SimpleGrid cols={{ base: 1, sm: 2 }} spacing="lg"><Info label="作者" value={work.authorName} icon={<UserRound size={16} />} /><Info label="公開日" value={formatDate(work.sourceCreatedAt)} icon={<Calendar size={16} />} /><Info label="文字数" value={`${formatNumber(work.textLength)}字`} icon={<BookOpen size={16} />} /><Info label="ローカル容量" value={formatBytes(work.fileSizeBytes)} icon={<FolderOpen size={16} />} /><Info label="現在のバージョン" value={`v${work.currentVersion}`} icon={<History size={16} />} /><Info label="最終保存" value={formatDate(work.downloadedAt, true)} icon={<Download size={16} />} /></SimpleGrid></Card>
+          {/* Two columns from the medium breakpoint - the previous large one
+              left this stacked at ordinary window sizes - and both stretch so
+              the section reads as a single block rather than three cards of
+              unrelated heights. */}
+          <Grid gap="lg" align="stretch">
+            <Grid.Col span={{ base: 12, md: 8 }}>
+              <Card p="lg" h="100%"><Title order={3} mb="md">作品情報</Title><SimpleGrid cols={{ base: 1, sm: 2 }} spacing="lg"><Info label="作者" value={work.authorName} icon={<UserRound size={16} />} /><Info label="公開日" value={formatDate(work.sourceCreatedAt)} icon={<Calendar size={16} />} /><Info label="文字数" value={`${formatNumber(work.textLength)}字`} icon={<BookOpen size={16} />} /><Info label="ローカル容量" value={formatBytes(work.fileSizeBytes)} icon={<FolderOpen size={16} />} /><Info label="現在のバージョン" value={`v${work.currentVersion}`} icon={<History size={16} />} /><Info label="最終保存" value={formatDate(work.downloadedAt, true)} icon={<Download size={16} />} /></SimpleGrid></Card>
             </Grid.Col>
-            <Grid.Col span={{ base: 12, lg: 4 }}>
-              <Stack gap="lg"><Card p="lg"><Group justify="space-between"><Box><Text fw={700}>更新監視</Text><Text size="xs" c="dimmed" mt={3}>保存元の変更をチェック</Text></Box><Switch checked={work.watchUpdates} onChange={(event) => mutate.mutate({ watch: event.currentTarget.checked })} aria-label="更新監視" /></Group><Button fullWidth variant="light" leftSection={<RefreshCw size={15} />} mt="md" onClick={() => navigate(`/updates?work=${work.id}`)}>今すぐ更新確認</Button></Card><Alert color="blue" title="編集について">ローカル編集は元データを残したまま別リビジョンとして保存されます。</Alert></Stack>
+            <Grid.Col span={{ base: 12, md: 4 }}>
+              <Stack gap="lg" h="100%" justify="space-between"><Card p="lg"><Group justify="space-between"><Box><Text fw={700}>更新監視</Text><Text size="xs" c="dimmed" mt={3}>保存元の変更をチェック</Text></Box><Switch checked={work.watchUpdates} onChange={(event) => mutate.mutate({ watch: event.currentTarget.checked })} aria-label="更新監視" /></Group><Button fullWidth variant="light" leftSection={<RefreshCw size={15} />} mt="md" onClick={() => navigate(`/updates?work=${work.id}`)}>今すぐ更新確認</Button></Card><Alert color="blue" title="編集について" className="work-note">ローカル編集は元データを残したまま別リビジョンとして保存されます。</Alert></Stack>
             </Grid.Col>
           </Grid>
         </Tabs.Panel>
@@ -231,13 +249,24 @@ export default function WorkPage() {
           </Stack>
         </Tabs.Panel>
         <Tabs.Panel value="assets" pt="lg">
-          {doc.assets.length ? <SimpleGrid cols={{ base: 1, sm: 2, lg: 3 }}>{doc.assets.map((asset) => {
+          {doc.assets.length ? <SimpleGrid cols={{ base: 2, sm: 3, lg: 4, xl: 5 }} spacing="md">{doc.assets.map((asset) => {
             const url = getAssetUrl(asset.localPath);
             const image = asset.mimeType?.startsWith("image/") && url;
             const original = Boolean(asset.originalUrl && (/original/i.test(asset.originalUrl) || !/\/c\//.test(asset.originalUrl)));
             return <Card key={asset.id} p={0} className="asset-card surface--interactive" onClick={() => image && previewAsset(asset)}>
-              <Box className="asset-card__preview">{image ? <Image src={url} alt={asset.filename} w="100%" h="100%" fit="contain" /> : <ThemeIcon size={72} variant="light" color="gray"><File size={30} /></ThemeIcon>}</Box>
-              <Stack gap={5} p="sm"><Group justify="space-between" wrap="nowrap"><Text size="sm" fw={650} className="line-clamp-1">{asset.filename}</Text><Badge size="xs" color={original ? "green" : "gray"} variant="light">{original ? "原寸URL" : "保存済み"}</Badge></Group><Text size="xs" c="dimmed">{asset.mimeType || asset.assetType} · {formatBytes(asset.fileSizeBytes)}</Text><Group gap="xs"><Button size="compact-xs" variant="subtle" px={0} disabled={!runtime} onClick={(event) => { event.stopPropagation(); openLocalAsset(asset.localPath); }}>ファイルを開く</Button>{asset.originalUrl && <Text size="10px" c="dimmed" className="line-clamp-1" title={asset.originalUrl}>取得元URLあり</Text>}</Group></Stack>
+              <Box className="asset-card__preview">
+                {image ? <Image src={url} alt={asset.filename} className="asset-card__image" /> : <ThemeIcon size={56} variant="light" color="gray"><File size={26} /></ThemeIcon>}
+                {original && <Badge className="asset-card__badge" size="xs" color="green" variant="filled">原寸</Badge>}
+              </Box>
+              {/* Filename first and on its own line: it is what identifies the
+                  file, and crushing it beside a badge only truncated it. */}
+              <Stack gap={2} className="asset-card__meta">
+                <Text size="xs" fw={650} className="asset-card__name" title={asset.filename}>{asset.filename}</Text>
+                <Group justify="space-between" gap="xs" wrap="nowrap">
+                  <Text size="10px" c="dimmed">{formatBytes(asset.fileSizeBytes)}</Text>
+                  <Text size="10px" c="dimmed" tt="uppercase">{(asset.mimeType || asset.assetType).split("/").pop()}</Text>
+                </Group>
+              </Stack>
             </Card>;
           })}</SimpleGrid> : <Alert color="gray" icon={<FileImage size={17} />}>この作品にアセットはありません。</Alert>}
         </Tabs.Panel>
@@ -247,7 +276,7 @@ export default function WorkPage() {
             <Grid.Col span={{ base: 12, lg: 7 }}><Card p="lg" className="version-preview"><Group justify="space-between" mb="md"><Box><Text fw={700}>{selectedVersion ? `バージョン ${selectedVersion} の内容` : "履歴を選択"}</Text><Text size="xs" c="dimmed">履歴をクリックすると、その時点の本文を確認できます</Text></Box>{selectedVersion && <Button size="xs" variant="light" onClick={() => navigate(`/reader/${work.id}?version=${selectedVersion}`)}>この版を読む</Button>}</Group>{versionPreview.isLoading ? <LoadingState label="履歴を読み込んでいます" /> : selectedVersion && versionPreview.data ? <Text className="version-preview__text">{versionPreview.data.plainText.slice(0, 5000) || "本文がありません"}</Text> : <Alert color="gray">左から確認するバージョンを選択してください。</Alert>}</Card></Grid.Col>
           </Grid>
         </Tabs.Panel>
-        <Tabs.Panel value="json" pt="lg">{rawJson.isLoading ? <LoadingState /> : rawJson.error ? <ErrorState error={rawJson.error} retry={() => rawJson.refetch()} /> : <Stack gap="sm"><Group justify="space-between"><Text size="sm" c="dimmed">保存元から取得したJSONを整形表示しています。長い文字列は画面内で折り返します。</Text><Group gap="xs"><CopyButton value={rawJson.data ?? "{}"}>{({ copied, copy }) => <Button size="xs" variant="light" onClick={copy}>{copied ? "コピー済み" : "JSONをコピー"}</Button>}</CopyButton><Button size="xs" variant="default" disabled={!runtime} onClick={() => openLocalAsset(work.jsonPath)}>元ファイルを開く</Button></Group></Group><Paper className="json-view" withBorder><pre>{prettyJson(rawJson.data ?? "{}")}</pre></Paper></Stack>}</Tabs.Panel>
+        <Tabs.Panel value="json" pt="lg">{rawJson.isLoading ? <LoadingState /> : rawJson.error ? <ErrorState error={rawJson.error} retry={() => rawJson.refetch()} /> : <Stack gap="sm"><Group justify="space-between"><Text size="sm" c="dimmed">保存元から取得したJSONを整形表示しています。長い文字列は画面内で折り返します。</Text><Group gap="xs"><CopyButton value={rawJson.data ?? "{}"}>{({ copied, copy }) => <Button size="xs" variant="light" onClick={copy}>{copied ? "コピー済み" : "JSONをコピー"}</Button>}</CopyButton><Button size="xs" variant="default" disabled={!runtime} onClick={() => openLocalAsset(work.jsonPath)}>この端末のJSONを開く</Button></Group></Group><Paper className="json-view" withBorder><pre>{prettyJson(rawJson.data ?? "{}")}</pre></Paper></Stack>}</Tabs.Panel>
       </Tabs>
     </div>
   );

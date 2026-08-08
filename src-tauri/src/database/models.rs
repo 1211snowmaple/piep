@@ -30,6 +30,8 @@ pub struct DownloadEntry {
     pub favorite: bool,
     pub person_id: Option<String>,
     pub person_name: Option<String>,
+    /// Creator avatar, so cards can show a face next to the author name.
+    pub person_icon_path: Option<String>,
     pub series_id: Option<String>,
     pub series_title: Option<String>,
     pub search_score: Option<f64>,

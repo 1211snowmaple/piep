@@ -23,17 +23,63 @@ import {
   Tooltip,
 } from "@mantine/core";
 import { useDisclosure, useLocalStorage } from "@mantine/hooks";
-import { ArrowLeft, ArrowUp, BookOpen, Edit3, Expand, ExternalLink, Shrink, Settings2, Type } from "lucide-react";
+import { notifications } from "@mantine/notifications";
+import { ArrowLeft, ArrowUp, Bookmark as BookmarkIcon, BookmarkPlus, BookOpen, Edit3, Expand, ExternalLink, FolderOpen, Shrink, Settings2, Type, X } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
+import { useBookmarks, type Bookmark } from "@/features/reader/bookmarks";
 import { useAppNavigate, useAppSearchParams, useRouteParams } from "@/app/router";
 import { ErrorState, LoadingState } from "@/components/AsyncState";
 import { ProviderMark, sourceUrl } from "@/lib/providers";
-import { formatNumber } from "@/lib/format";
+import { formatDate, formatNumber } from "@/lib/format";
 import { prepareDocumentHtml, splitDocumentPages } from "@/lib/content";
 import { extractSavedSourceTarget } from "@/features/browser/downloadCandidates";
-import { getAssetUrl, getDownloadBySource, getReaderDocument, isTauriRuntime } from "@/services/dbApi";
+import { getAssetUrl, getDownloadBySource, getReaderDocument, isTauriRuntime, openLocalAsset } from "@/services/dbApi";
 import { openExternalUrl } from "@/services/openerApi";
 import { getDemoReader } from "@/mocks/demoData";
+
+function BookmarkControls({ bookmarks, onAdd, onOpen, onRemove }: {
+  bookmarks: Bookmark[];
+  onAdd: () => void;
+  onOpen: (bookmark: Bookmark) => void;
+  onRemove: (id: string) => void;
+}) {
+  const [opened, setOpened] = useState(false);
+  return (
+    <Group gap={2} wrap="nowrap">
+      <Tooltip label="現在の位置にしおりを挟む">
+        <ActionIcon variant="subtle" color="gray" aria-label="現在の位置にしおりを挟む" onClick={onAdd}><BookmarkPlus size={18} /></ActionIcon>
+      </Tooltip>
+      <Popover opened={opened} onChange={setOpened} position="bottom-end" withArrow shadow="md" width={280}>
+        <Popover.Target>
+          <Tooltip label="しおり一覧">
+            {/* A plain icon button like its neighbour, with the count drawn by
+                us: Mantine's Indicator both clipped the number and shifted the
+                glyph out of line with the rest of the bar. */}
+            <ActionIcon className="reader-bookmark" variant="subtle" color="gray" aria-label={`しおり一覧（${bookmarks.length}件）`} onClick={() => setOpened((value) => !value)}>
+              <BookmarkIcon size={18} />
+              {bookmarks.length > 0 && <span className="reader-bookmark__count">{bookmarks.length}</span>}
+            </ActionIcon>
+          </Tooltip>
+        </Popover.Target>
+        <Popover.Dropdown>
+          <Text size="xs" fw={700} mb="xs">しおり</Text>
+          {bookmarks.length ? (
+            <Stack gap={4}>
+              {bookmarks.map((bookmark) => (
+                <Group key={bookmark.id} gap={4} wrap="nowrap">
+                  <Button variant="subtle" color="gray" size="compact-xs" justify="flex-start" flex={1} onClick={() => { setOpened(false); onOpen(bookmark); }}>
+                    {bookmark.label}
+                  </Button>
+                  <ActionIcon variant="subtle" color="red" size="sm" aria-label={`${bookmark.label}のしおりを削除`} onClick={() => onRemove(bookmark.id)}><X size={14} /></ActionIcon>
+                </Group>
+              ))}
+            </Stack>
+          ) : <Text size="xs" c="dimmed">まだしおりはありません。左のボタンで現在地を記録できます。</Text>}
+        </Popover.Dropdown>
+      </Popover>
+    </Group>
+  );
+}
 
 interface ReaderSettings {
   fontSize: number;
@@ -62,6 +108,7 @@ export default function ReaderPage() {
   const [fullscreen, setFullscreen] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const restoredKeyRef = useRef<string | null>(null);
+  const { bookmarks, add: addBookmark, remove: removeBookmark } = useBookmarks(id);
   const query = useQuery({
     queryKey: ["reader-document", id, version],
     queryFn: () => runtime ? getReaderDocument(id, version) : Promise.resolve(getDemoReader(id)),
@@ -80,24 +127,13 @@ export default function ReaderPage() {
   }, []);
   useEffect(() => { setJumpPage(sourcePage); }, [sourcePage]);
 
-  useEffect(() => {
-    const viewport = scrollRef.current;
-    if (!viewport) return;
-    const update = () => {
-      const total = viewport.scrollHeight - viewport.clientHeight;
-      const next = total <= 0 ? 100 : Math.max(0, Math.min(100, viewport.scrollTop / total * 100));
-      setProgress(hasSourcePages ? ((sourcePage - 1) + next / 100) / sourcePages.length * 100 : next);
-      sessionStorage.setItem(positionKey, JSON.stringify({ page: sourcePage, top: viewport.scrollTop }));
-    };
-    viewport.addEventListener("scroll", update, { passive: true });
-    update();
-    return () => viewport.removeEventListener("scroll", update);
-  }, [hasSourcePages, positionKey, query.data, sourcePage, sourcePages.length]);
+  // Restoring is declared before persisting on purpose. Effects run in
+  // declaration order, so persisting first would write the not-yet-restored
+  // scrollTop of 0 over the stored position and lose the reader's place.
   useEffect(() => {
     const viewport = scrollRef.current;
     if (!viewport || !query.data) return;
     if (restoredKeyRef.current === positionKey) return;
-    restoredKeyRef.current = positionKey;
     let savedPage = 1;
     let savedTop = 0;
     try {
@@ -106,8 +142,41 @@ export default function ReaderPage() {
       savedTop = Math.max(0, Number(saved.top) || 0);
     } catch { /* Legacy or invalid session value: start at the beginning. */ }
     setSourcePage(savedPage);
-    requestAnimationFrame(() => { viewport.scrollTop = savedTop; });
+    // The document is still laying out on the first frame, so assigning the
+    // saved offset there just clamps it to 0. Retry until it sticks, and only
+    // then record that this document has been restored - marking it up front
+    // meant a cancelled first attempt was never retried.
+    let cancelled = false;
+    let frame = 0;
+    const deadline = performance.now() + 2000;
+    const attempt = () => {
+      if (cancelled) return;
+      viewport.scrollTop = savedTop;
+      if (Math.abs(viewport.scrollTop - savedTop) < 2 || performance.now() >= deadline) {
+        restoredKeyRef.current = positionKey;
+        return;
+      }
+      frame = requestAnimationFrame(attempt);
+    };
+    frame = requestAnimationFrame(attempt);
+    return () => { cancelled = true; cancelAnimationFrame(frame); };
   }, [positionKey, query.data, sourcePages.length]);
+  useEffect(() => {
+    const viewport = scrollRef.current;
+    if (!viewport) return;
+    const update = (event?: Event) => {
+      const total = viewport.scrollHeight - viewport.clientHeight;
+      const next = total <= 0 ? 100 : Math.max(0, Math.min(100, viewport.scrollTop / total * 100));
+      setProgress(hasSourcePages ? ((sourcePage - 1) + next / 100) / sourcePages.length * 100 : next);
+      // Only a genuine scroll writes the position. The priming call below runs
+      // before the saved offset has been applied, so persisting there would
+      // overwrite the stored place with 0 each time the reader opens.
+      if (event) sessionStorage.setItem(positionKey, JSON.stringify({ page: sourcePage, top: viewport.scrollTop }));
+    };
+    viewport.addEventListener("scroll", update, { passive: true });
+    update();
+    return () => viewport.removeEventListener("scroll", update);
+  }, [hasSourcePages, positionKey, query.data, sourcePage, sourcePages.length]);
 
   if (query.isLoading) return <div className="page"><LoadingState label="リーダーを準備しています" /></div>;
   if (query.error || !query.data) return <div className="page"><ErrorState error={query.error ?? "作品が見つかりません"} retry={() => query.refetch()} /></div>;
@@ -148,6 +217,22 @@ export default function ReaderPage() {
     setSourcePage(next);
     scrollRef.current?.scrollTo({ top: 0, behavior: "smooth" });
   };
+  const addBookmarkHere = () => {
+    const viewport = scrollRef.current;
+    const top = Math.round(viewport?.scrollTop ?? 0);
+    // Measured here rather than read from the progress state, which only
+    // catches up on the next scroll event.
+    const scrollable = (viewport?.scrollHeight ?? 0) - (viewport?.clientHeight ?? 0);
+    const percent = scrollable > 0 ? Math.round(top / scrollable * 100) : 0;
+    const label = `${hasSourcePages ? `${sourcePage}ページ · ` : ""}${percent}%`;
+    addBookmark({ page: sourcePage, top, label });
+    notifications.show({ color: "teal", message: `しおりを挟みました（${label}）` });
+  };
+  const jumpToBookmark = (bookmark: { page: number; top: number }) => {
+    setSourcePage(Math.min(Math.max(1, bookmark.page), Math.max(1, sourcePages.length)));
+    // The page swap re-renders the article, so the offset is applied after it.
+    requestAnimationFrame(() => scrollRef.current?.scrollTo({ top: bookmark.top, behavior: "smooth" }));
+  };
 
   return (
     <div className={`reader-page reader-theme--${settings.theme}`}>
@@ -156,10 +241,18 @@ export default function ReaderPage() {
           <Group wrap="nowrap" miw={0}>
             <Tooltip label="作品詳細へ戻る"><ActionIcon variant="subtle" color="gray" aria-label="作品詳細へ戻る" onClick={() => navigate(`/works/${work.id}`)}><ArrowLeft size={19} /></ActionIcon></Tooltip>
             <Divider orientation="vertical" h={24} />
-            <Box miw={0}><Text size="sm" fw={700} className="line-clamp-1">{work.title}</Text><Group gap={6}><ProviderMark provider={work.source} compact /><Text size="xs" c="dimmed" className="line-clamp-1">{work.authorName}</Text></Group></Box>
+            {/* Title only: the provider and author already head the document
+                itself, and repeating them here just crowded the bar. */}
+            <Text size="sm" fw={700} className="line-clamp-1">{work.title}</Text>
           </Group>
           <Group gap="xs" wrap="nowrap">
             {doc.isEdited && <Badge color="violet" variant="light" visibleFrom="sm">ローカル編集</Badge>}
+            <BookmarkControls
+              bookmarks={bookmarks}
+              onAdd={addBookmarkHere}
+              onOpen={jumpToBookmark}
+              onRemove={removeBookmark}
+            />
             <Select
               size="xs"
               value={String(currentVersion)}
@@ -189,9 +282,15 @@ export default function ReaderPage() {
           >
             {sourcePage === 1 && <Box className="reader-title-page">
               <ProviderMark provider={work.source} />
-              <Title order={1}>{work.title}</Title>
-              <Text c="dimmed">{work.authorName}</Text>
-              <Group justify="center" gap="lg" mt="lg"><Text size="xs" c="dimmed">{formatNumber(work.textLength)}字</Text><Button variant="subtle" size="compact-xs" rightSection={<ExternalLink size={12} />} onClick={openSource}>保存元</Button></Group>
+              <Title order={1} className="reader-title-page__title">{work.title}</Title>
+              <Text c="dimmed" className="reader-title-page__author">{work.authorName}</Text>
+              <Text size="xs" c="dimmed" className="reader-title-page__meta">{formatNumber(work.textLength)}字 · {formatDate(work.sourceCreatedAt)}</Text>
+              {/* Two destinations that were both called "保存元": one opens the
+                  page on the web, the other the folder on this machine. */}
+              <Group gap={4} mt="lg" justify="flex-end" wrap="wrap">
+                <Button variant="subtle" color="gray" size="compact-xs" rightSection={<ExternalLink size={12} />} onClick={openSource}>元ページ</Button>
+                <Button variant="subtle" color="gray" size="compact-xs" rightSection={<FolderOpen size={12} />} disabled={!runtime} onClick={() => runtime && openLocalAsset(work.jsonPath)}>保存フォルダー</Button>
+              </Group>
             </Box>}
             {sourcePage === 1 && <Divider my="xl" />}
             <article className="reader-content" onClick={handleArticleClick} dangerouslySetInnerHTML={{ __html: sourcePages[sourcePage - 1] ?? "" }} />

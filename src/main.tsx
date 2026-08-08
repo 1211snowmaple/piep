@@ -10,6 +10,7 @@ import "@mantine/spotlight/styles.css";
 import "@mantine/dropzone/styles.css";
 import "@mantine/code-highlight/styles.css";
 import App from "@/App";
+import { applyStoredDensity } from "@/lib/density";
 import { queryClient } from "@/lib/queryClient";
 import { theme } from "@/theme";
 import "@/styles/app.css";
@@ -17,6 +18,8 @@ import "@/styles/app.css";
 const container = document.getElementById("root");
 
 if (!container) throw new Error("#root element was not found");
+
+applyStoredDensity();
 
 createRoot(container).render(
   <React.StrictMode>

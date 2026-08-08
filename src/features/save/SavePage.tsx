@@ -57,6 +57,8 @@ import { normalizeFanboxPostPayload, normalizeFanboxSaveMetadata, normalizePixiv
 import { refreshEntityProfilesForEntries, type UpdateDownloadEntry } from "@/features/updates/updateWorkflow";
 import { errorMessage } from "@/lib/format";
 import { getProvider, ProviderMark } from "@/lib/providers";
+import { registerUnsavedGuard } from "@/lib/unsavedGuard";
+import { useEmbeddedBrowserOverlay } from "@/features/browser/useEmbeddedBrowserOverlay";
 import {
   closeEmbeddedBrowser,
   destroyEmbeddedBrowser,
@@ -66,6 +68,7 @@ import {
   navigateEmbeddedBrowser,
   openEmbeddedBrowser,
   reloadEmbeddedBrowser,
+  setEmbeddedBrowserBounds,
 } from "@/services/browserApi";
 import { getDownloadBySource, isTauriRuntime } from "@/services/dbApi";
 import {
@@ -104,20 +107,50 @@ export default function SavePage() {
   const [candidateWidth, setCandidateWidth] = useLocalStorage({ key: "piep.save-candidate-width", defaultValue: 360 });
   const [candidateCollapsed, setCandidateCollapsed] = useState(false);
   const browserViewportRef = useRef<HTMLDivElement>(null);
-  const currentUrlRef = useRef(currentUrl);
+  const layoutRef = useRef<HTMLDivElement>(null);
+  const addressFocusedRef = useRef(false);
 
-  useEffect(() => { currentUrlRef.current = currentUrl; }, [currentUrl]);
+  useEmbeddedBrowserOverlay(browserViewportRef, runtime);
+
+  const readBounds = useCallback(() => {
+    const element = browserViewportRef.current;
+    if (!runtime || !element) return null;
+    const rect = element.getBoundingClientRect();
+    if (rect.width < 100 || rect.height < 100) return null;
+    return { x: Math.round(rect.left), y: Math.round(rect.top), width: Math.round(rect.width), height: Math.round(rect.height) };
+  }, [runtime]);
 
   const positionBrowser = useCallback(async (url: string) => {
-    const element = browserViewportRef.current;
-    if (!runtime || !element) return;
-    const rect = element.getBoundingClientRect();
-    if (rect.width < 100 || rect.height < 100) return;
-    await openEmbeddedBrowser(url, {
-      x: Math.round(rect.left), y: Math.round(rect.top), width: Math.round(rect.width), height: Math.round(rect.height),
-      userAgent: source === "fanbox" ? await store.get<string>("fanbox_user_agent") || undefined : undefined,
-    });
-  }, [runtime, source]);
+    const userAgent = source === "fanbox" ? await store.get<string>("fanbox_user_agent") || undefined : undefined;
+    // Measured after the await: the layout can settle while the store is read.
+    const bounds = readBounds();
+    if (!bounds) return;
+    await openEmbeddedBrowser(url, { ...bounds, userAgent });
+    // Let the reconciler re-apply, since creation may land after another pass.
+    appliedBoundsRef.current = "";
+  }, [readBounds, source]);
+
+  // Resizing must never pass a URL: the tracked URL lags behind in-page (SPA)
+  // navigation, so reusing the open path here would yank the user back to a
+  // stale page mid-drag.
+  //
+  // This is a reconciliation, not an event handler. The native view drifts out
+  // of step with its placeholder for more reasons than can be caught one by one
+  // - the view being created after a layout pass, an observer callback landing
+  // before it exists, a scale change - and once it drifts nothing puts it back.
+  // Comparing against the last applied rectangle makes every call cheap enough
+  // to also run on a timer, so any drift corrects itself.
+  const appliedBoundsRef = useRef<string>("");
+  const syncBrowserBounds = useCallback(() => {
+    const bounds = readBounds();
+    if (!bounds) return;
+    const key = `${bounds.x},${bounds.y},${bounds.width},${bounds.height}`;
+    if (key === appliedBoundsRef.current) return;
+    appliedBoundsRef.current = key;
+    setEmbeddedBrowserBounds(bounds)
+      .then((applied) => { if (!applied) appliedBoundsRef.current = ""; })
+      .catch(() => { appliedBoundsRef.current = ""; });
+  }, [readBounds]);
 
   useEffect(() => {
     let cancelled = false;
@@ -131,20 +164,50 @@ export default function SavePage() {
     if (!runtime) return;
     const element = browserViewportRef.current;
     if (!element) return;
-    const observer = new ResizeObserver(() => positionBrowser(currentUrlRef.current).catch(() => undefined));
+    // Bounds updates are coalesced to one per frame; a drag-resize otherwise
+    // fires an IPC call for every intermediate pixel.
+    let frame = 0;
+    const schedule = () => { cancelAnimationFrame(frame); frame = requestAnimationFrame(syncBrowserBounds); };
+    const observer = new ResizeObserver(schedule);
     observer.observe(element);
-    const onWindowResize = () => positionBrowser(currentUrlRef.current).catch(() => undefined);
-    window.addEventListener("resize", onWindowResize);
+    // The whole save layout matters, not just the viewport box: collapsing the
+    // candidate pane or dragging the splitter moves the browser pane too.
+    if (layoutRef.current) observer.observe(layoutRef.current);
+    window.addEventListener("resize", schedule);
+    // Backstop for anything the observers miss; a no-op unless the rectangle
+    // actually moved.
+    const reconcile = window.setInterval(syncBrowserBounds, 700);
+    // The address field is only refreshed while the user is not editing it,
+    // otherwise a background URL refresh wipes what they are typing.
+    const applyUrl = (url: string) => {
+      setCurrentUrl(url);
+      if (!addressFocusedRef.current) setAddress(url);
+    };
     let dispose: (() => void) | undefined;
-    onTauriEvent<string>("url-changed", (event) => { setCurrentUrl(event.payload); setAddress(event.payload); }).then((fn) => { dispose = fn; }).catch(() => undefined);
-    const poll = window.setInterval(() => getEmbeddedBrowserUrl().then((url) => { setCurrentUrl(url); setAddress(url); }).catch(() => undefined), 2500);
-    return () => { observer.disconnect(); window.removeEventListener("resize", onWindowResize); window.clearInterval(poll); dispose?.(); closeEmbeddedBrowser().catch(() => undefined); };
-  }, [positionBrowser, runtime]);
+    onTauriEvent<string>("url-changed", (event) => applyUrl(event.payload)).then((fn) => { dispose = fn; }).catch(() => undefined);
+    // In-page navigation cannot reach us as an event: this WebView loads a
+    // remote origin, so Tauri's IPC is deliberately not injected into it.
+    const poll = window.setInterval(() => getEmbeddedBrowserUrl().then(applyUrl).catch(() => undefined), 2500);
+    return () => {
+      cancelAnimationFrame(frame);
+      observer.disconnect();
+      window.removeEventListener("resize", schedule);
+      window.clearInterval(poll);
+      window.clearInterval(reconcile);
+      appliedBoundsRef.current = "";
+      dispose?.();
+      closeEmbeddedBrowser().catch(() => undefined);
+    };
+  }, [runtime, syncBrowserBounds]);
   useEffect(() => {
     const guard = (event: BeforeUnloadEvent) => { if (saving) { event.preventDefault(); event.returnValue = ""; } };
     window.addEventListener("beforeunload", guard);
     return () => window.removeEventListener("beforeunload", guard);
   }, [saving]);
+  // Closing the desktop window mid-download would abandon the batch silently.
+  const savingRef = useRef(saving);
+  savingRef.current = saving;
+  useEffect(() => registerUnsavedGuard(() => savingRef.current), []);
 
   const selectedCount = items.filter((item) => item.selected).length;
   const targetKind = detectDownloadTarget(currentUrl);
@@ -184,13 +247,26 @@ export default function SavePage() {
   };
   const startCandidateResize = (event: React.PointerEvent<HTMLDivElement>) => {
     event.preventDefault();
+    const handle = event.currentTarget;
+    handle.setPointerCapture(event.pointerId);
     const startX = event.clientX;
     const startWidth = candidateWidth;
-    const move = (moveEvent: PointerEvent) => setCandidateWidth(Math.round(Math.max(280, Math.min(560, startWidth + startX - moveEvent.clientX))));
-    const stop = () => { window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", stop); document.body.style.removeProperty("user-select"); };
+    // Cap against the pane's own row so the candidate column can never be
+    // pushed past the edge of the clipped, unscrollable save page.
+    const available = layoutRef.current?.clientWidth ?? window.innerWidth;
+    const maxWidth = Math.max(260, Math.round(available * 0.55));
+    const move = (moveEvent: PointerEvent) => setCandidateWidth(Math.round(Math.max(260, Math.min(maxWidth, startWidth + startX - moveEvent.clientX))));
+    const stop = () => {
+      handle.releasePointerCapture?.(event.pointerId);
+      handle.removeEventListener("pointermove", move);
+      handle.removeEventListener("pointerup", stop);
+      handle.removeEventListener("pointercancel", stop);
+      document.body.style.removeProperty("user-select");
+    };
     document.body.style.userSelect = "none";
-    window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", stop, { once: true });
+    handle.addEventListener("pointermove", move);
+    handle.addEventListener("pointerup", stop, { once: true });
+    handle.addEventListener("pointercancel", stop, { once: true });
   };
   const analyze = async () => {
     if (!runtime) return notifications.show({ color: "blue", message: "候補取得はデスクトップアプリで利用できます" });
@@ -277,11 +353,16 @@ export default function SavePage() {
     <div className="save-page">
       <div className="save-page__header">
         <Group justify="space-between" h="100%" px="md" wrap="nowrap">
-          <Group gap="md" wrap="nowrap"><Box><Text size="xs" c="dimmed" fw={700}>SAVE WORKSPACE</Text><Title order={1} fz="h2">Webから保存</Title></Box><SegmentedControl value={source} onChange={switchSource} data={[{ value: "pixiv", label: <Group gap={6} wrap="nowrap"><ProviderMark provider="pixiv" compact /><Text size="xs" fw={700}>pixiv</Text></Group> }, { value: "fanbox", label: <Group gap={6} wrap="nowrap"><ProviderMark provider="fanbox" compact /><Text size="xs" fw={700}>FANBOX</Text></Group> }]} /></Group>
+          <Group gap="md" wrap="nowrap"><Title order={1} fz="h2">Webから保存</Title><SegmentedControl value={source} onChange={switchSource} data={[{ value: "pixiv", label: <Group gap={6} wrap="nowrap"><ProviderMark provider="pixiv" compact /><Text size="xs" fw={700}>pixiv</Text></Group> }, { value: "fanbox", label: <Group gap={6} wrap="nowrap"><ProviderMark provider="fanbox" compact /><Text size="xs" fw={700}>FANBOX</Text></Group> }]} /></Group>
           <Group gap="xs"><Badge color={authConnected ? "green" : "gray"} variant="light" leftSection={<span className="status-dot" />}>{authConnected ? "接続済み" : "未接続"}</Badge><Button variant="subtle" size="xs" onClick={() => navigate("/settings")}>接続設定</Button></Group>
         </Group>
       </div>
-      <div className="save-layout" style={{ gridTemplateColumns: candidateCollapsed ? "minmax(360px, 1fr) 6px 54px" : `minmax(360px, 1fr) 6px clamp(280px, ${candidateWidth}px, calc(100vw - 430px))` }}>
+      <div
+        ref={layoutRef}
+        className="save-layout"
+        data-candidate-collapsed={candidateCollapsed || undefined}
+        style={{ "--piep-candidate-width": `${candidateWidth}px` } as React.CSSProperties}
+      >
         <section className="browser-pane">
           <div className="browser-toolbar">
             <Group gap={4} wrap="nowrap">
@@ -290,7 +371,7 @@ export default function SavePage() {
               <Tooltip label="再読み込み"><ActionIcon variant="subtle" color="gray" aria-label="ページを再読み込み" disabled={!runtime} onClick={() => reloadEmbeddedBrowser()}><RotateCw size={16} /></ActionIcon></Tooltip>
               <Tooltip label="ホーム"><ActionIcon variant="subtle" color="gray" aria-label="サービスのホームを開く" onClick={() => navigateBrowser(getProvider(source).homeUrl!)}><Home size={16} /></ActionIcon></Tooltip>
               <form onSubmit={(event) => { event.preventDefault(); navigateBrowser(address); }} style={{ flex: 1 }}>
-                <TextInput value={address} onChange={(event) => setAddress(event.currentTarget.value)} leftSection={<LockKeyhole size={13} />} rightSection={<Group gap={0} wrap="nowrap"><Tooltip label="クリップボードのURLを開く"><ActionIcon type="button" variant="subtle" size="sm" aria-label="クリップボードのURLを開く" onClick={pasteUrl}><ClipboardPaste size={14} /></ActionIcon></Tooltip><ActionIcon type="submit" variant="subtle" size="sm" aria-label="URLを開く"><ArrowRight size={14} /></ActionIcon></Group>} rightSectionWidth={58} size="sm" aria-label="ブラウザのアドレス" />
+                <TextInput value={address} onChange={(event) => setAddress(event.currentTarget.value)} onFocus={() => { addressFocusedRef.current = true; }} onBlur={() => { addressFocusedRef.current = false; }} leftSection={<LockKeyhole size={13} />} rightSection={<Group gap={0} wrap="nowrap"><Tooltip label="クリップボードのURLを開く"><ActionIcon type="button" variant="subtle" size="sm" aria-label="クリップボードのURLを開く" onClick={pasteUrl}><ClipboardPaste size={14} /></ActionIcon></Tooltip><ActionIcon type="submit" variant="subtle" size="sm" aria-label="URLを開く"><ArrowRight size={14} /></ActionIcon></Group>} rightSectionWidth={58} size="sm" aria-label="ブラウザのアドレス" />
               </form>
               <Tooltip label="外部ブラウザで開く"><ActionIcon variant="subtle" color="gray" aria-label="外部ブラウザで開く" onClick={openSourceExternally}><ExternalLink size={16} /></ActionIcon></Tooltip>
             </Group>

@@ -1,7 +1,7 @@
 use crate::database::queries::EntityProfileFreshness;
 use crate::database::{
     AssetEntry, BulkMutationResult, DashboardSummary, DbStats, DownloadEntry, DownloadRelation,
-    DownloadVersion, EditorDocument, EntityVersion, FacetCount, FilterFacets, NewAsset,
+    DownloadVersion, EditorDocument, EntityFacet, EntityVersion, FacetCount, FilterFacets, NewAsset,
     NewDownload, PersonEntry, ReaderDocument, SearchIndexStatus, SearchSuggestParams,
     SearchSuggestResult, SearchV2Params, SearchV2Result, SeriesEntry, UpdateTarget,
     UpdateTargetInput, WorkBlockInput, WorkEditRevision,
@@ -214,6 +214,14 @@ pub async fn db_get_download(app: tauri::AppHandle, id: i64) -> Result<DownloadE
 }
 
 #[tauri::command]
+pub async fn db_get_downloads(
+    app: tauri::AppHandle,
+    ids: Vec<i64>,
+) -> Result<Vec<DownloadEntry>, String> {
+    run_db_blocking(app, move |state| state.db.get_downloads(&ids)).await
+}
+
+#[tauri::command]
 pub async fn db_get_assets(
     app: tauri::AppHandle,
     download_id: i64,
@@ -314,8 +322,15 @@ pub async fn db_seed_test_data(app: tauri::AppHandle, count: i64) -> Result<i64,
 }
 
 #[tauri::command]
-pub async fn db_get_filter_facets(app: tauri::AppHandle) -> Result<FilterFacets, String> {
-    run_db_blocking(app, move |state| state.db.get_filter_facets()).await
+pub async fn db_get_filter_facets(
+    app: tauri::AppHandle,
+    include_entities: Option<bool>,
+) -> Result<FilterFacets, String> {
+    let include_entities = include_entities.unwrap_or(true);
+    run_db_blocking(app, move |state| {
+        state.db.get_filter_facets_with(include_entities)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -324,6 +339,25 @@ pub async fn db_get_search_index_status(
 ) -> Result<SearchIndexStatus, String> {
     let state = app.state::<Arc<AppState>>();
     state.db.get_search_index_status()
+}
+
+#[tauri::command]
+pub async fn db_search_entity_facets(
+    app: tauri::AppHandle,
+    kind: String,
+    query: Option<String>,
+    limit: Option<i64>,
+    offset: Option<i64>,
+) -> Result<Vec<EntityFacet>, String> {
+    run_db_blocking(app, move |state| {
+        state.db.search_entity_facets(
+            &kind,
+            query.as_deref(),
+            limit.unwrap_or(60),
+            offset.unwrap_or(0),
+        )
+    })
+    .await
 }
 
 #[tauri::command]
@@ -445,6 +479,19 @@ pub async fn db_set_favorite(
 ) -> Result<(), String> {
     let state = app.state::<Arc<AppState>>();
     state.db.set_favorite(download_id, favorite)
+}
+
+#[tauri::command]
+pub async fn db_set_flags_for_ids(
+    app: tauri::AppHandle,
+    ids: Vec<i64>,
+    favorite: Option<bool>,
+    watch: Option<bool>,
+) -> Result<BulkMutationResult, String> {
+    run_db_blocking(app, move |state| {
+        state.db.set_flags_for_ids(&ids, favorite, watch)
+    })
+    .await
 }
 
 #[tauri::command]

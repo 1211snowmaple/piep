@@ -21,7 +21,7 @@ import {
   Title,
 } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Archive, BookOpen, ExternalLink, History, Library, RefreshCw, UserRound } from "lucide-react";
 import { AppLink, useAppNavigate, useRouteParams } from "@/app/router";
 import { EmptyState, ErrorState, LoadingState } from "@/components/AsyncState";
@@ -63,9 +63,18 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
       return kind === "person" ? { ...common, displayName: facet.displayName, iconPath: null, linksJson: null } : { ...common, title: facet.displayName };
     },
   });
-  const works = useQuery({
+  // Prolific authors have more works than any single request should return, so
+  // this pages through them instead of silently stopping at a fixed slab.
+  const works = useInfiniteQuery({
     queryKey: ["entity-works", kind, source, key],
-    queryFn: () => runtime ? searchDownloadsV2({ ...(kind === "person" ? { personSource: source, personKey: key } : { seriesSource: source, seriesKey: key }), limit: 200, sortBy: "source_created_at", sortOrder: "desc" }) : Promise.resolve(searchDemoWorks("", source)),
+    queryFn: ({ pageParam }) => runtime
+      ? searchDownloadsV2({
+        ...(kind === "person" ? { personSource: source, personKey: key } : { seriesSource: source, seriesKey: key }),
+        limit: 60, cursor: pageParam, sortBy: "source_created_at", sortOrder: "desc",
+      })
+      : Promise.resolve(searchDemoWorks("", source)),
+    initialPageParam: null as string | null,
+    getNextPageParam: (lastPage) => lastPage.nextCursor,
   });
   const versions = useQuery({
     queryKey: ["entity-versions", kind, source, key],
@@ -107,7 +116,7 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
   const avatarPath = kind === "person" ? (entry as PersonEntry).iconPath : coverPath;
   const sourceProfileUrl = sourceUrl(source, key, kind);
   const profileLinks = kind === "person" ? [...new Set([...parseLinks((entry as PersonEntry).linksJson), ...(sourceProfileUrl ? [sourceProfileUrl] : [])])] : [];
-  const workItems = works.data?.items ?? [];
+  const workItems = works.data?.pages.flatMap((page) => page.items) ?? [];
   const openSource = async () => {
     const url = sourceProfileUrl;
     if (!url) return;
@@ -134,7 +143,7 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
                 : <Box className="entity-hero__series-cover">{avatarPath ? <Image src={getAssetUrl(avatarPath)} alt={`${displayName}の表紙`} fit="contain" /> : <Library size={42} />}</Box>}
               <Stack gap={7} mb={5} miw={0}><ProviderMark provider={source} /><Title order={1} className="line-clamp-2">{displayName}</Title><Group gap="xs"><Badge variant="light" color="gray">{formatNumber(entry.workCount)}作品</Badge><Text size="xs" c="dimmed">更新 {formatDate(entry.updatedAt)}</Text></Group></Stack>
             </Group>
-            <Group gap="xs" className="entity-hero__actions"><Button variant="default" leftSection={<ExternalLink size={15} />} onClick={openSource}>保存元</Button><Button variant="default" leftSection={<Archive size={15} />} onClick={exportZip}>アーカイブ</Button><Button leftSection={<RefreshCw size={15} />} loading={refreshMutation.isPending} onClick={() => refreshMutation.mutate()}>情報を更新</Button></Group>
+            <Group gap="xs" className="entity-hero__actions"><Button variant="default" leftSection={<ExternalLink size={15} />} onClick={openSource}>元ページを開く</Button><Button variant="default" leftSection={<Archive size={15} />} onClick={exportZip}>アーカイブ</Button><Button leftSection={<RefreshCw size={15} />} loading={refreshMutation.isPending} onClick={() => refreshMutation.mutate()}>情報を更新</Button></Group>
           </Group>
           <Stack gap="md" mt="lg">
             {entry.description && <Text maw={860} c="dimmed" style={{ whiteSpace: "pre-wrap" }}>{entry.description}</Text>}
@@ -148,7 +157,12 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
           <Tabs value={tab} onChange={setTab}>
             <Tabs.List><Tabs.Tab value="works">作品</Tabs.Tab><Tabs.Tab value="history">プロフィール履歴</Tabs.Tab><Tabs.Tab value="json">JSON</Tabs.Tab></Tabs.List>
             <Tabs.Panel value="works" pt="lg">
-              {works.isLoading ? <LoadingState /> : works.error ? <ErrorState error={works.error} retry={() => works.refetch()} /> : workItems.length ? <div className="library-grid">{workItems.map((work) => <WorkCard key={work.id} work={work} />)}</div> : <EmptyState icon={BookOpen} title="保存作品がありません" description="このページを保存ワークスペースで開き、作品を取り込んでください。" action={<Button onClick={() => navigate(`/save/${source}`)}>保存ワークスペースを開く</Button>} />}
+              {works.isLoading ? <LoadingState /> : works.error ? <ErrorState error={works.error} retry={() => works.refetch()} /> : workItems.length ? (
+                <>
+                  <div className="library-grid">{workItems.map((work) => <WorkCard key={work.id} work={work} />)}</div>
+                  {works.hasNextPage && <Group justify="center" mt="xl"><Button variant="default" loading={works.isFetchingNextPage} onClick={() => works.fetchNextPage()}>さらに読み込む</Button></Group>}
+                </>
+              ) : <EmptyState icon={BookOpen} title="保存作品がありません" description="このページを保存ワークスペースで開き、作品を取り込んでください。" action={<Button onClick={() => navigate(`/save/${source}`)}>保存ワークスペースを開く</Button>} />}
             </Tabs.Panel>
             <Tabs.Panel value="history" pt="lg"><Paper p="lg" withBorder>{versions.isLoading ? <LoadingState /> : <Timeline active={versions.data?.length ?? 0}>{versions.data?.map((version) => <Timeline.Item key={version.id} bullet={<History size={13} />} title={`バージョン ${version.version}`}><Text size="sm" c="dimmed">{version.changeSummary || "プロフィールを保存"}</Text><Text size="xs" c="dimmed" mt={4}>{formatDate(version.createdAt, true)} · {formatBytes(version.fileSizeBytes)}</Text></Timeline.Item>)}</Timeline>}</Paper></Tabs.Panel>
             <Tabs.Panel value="json" pt="lg">{profileJson.isLoading ? <LoadingState /> : profileJson.error ? <ErrorState error={profileJson.error} retry={() => profileJson.refetch()} /> : <Stack gap="sm"><Group justify="space-between"><Text size="sm" c="dimmed">取得したプロフィール情報を折り返して表示します。</Text><CopyButton value={JSON.stringify(profileJson.data ?? {}, null, 2)}>{({ copied, copy }) => <Button size="xs" variant="light" onClick={copy}>{copied ? "コピー済み" : "コピー"}</Button>}</CopyButton></Group><Paper className="json-view" withBorder><pre>{JSON.stringify(profileJson.data ?? {}, null, 2)}</pre></Paper></Stack>}</Tabs.Panel>
