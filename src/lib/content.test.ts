@@ -52,3 +52,82 @@ describe("document content helpers", () => {
     expect(html).not.toContain("🔗");
   });
 });
+
+describe("bare URLs while reading", () => {
+  const read = (html: string) => prepareDocumentHtml(html, () => null, { linkifyBareUrls: true });
+
+  it("leaves a written-out address as text unless reading", () => {
+    // Whether a URL is a link is the author's choice, and the detail screen
+    // shows the work as they wrote it.
+    const html = prepareDocumentHtml("<p>続きは https://example.com/next です</p>", () => null);
+    expect(html).not.toContain("<a");
+  });
+
+  it("makes a followable link out of one written mid-sentence", () => {
+    const html = read("<p>続きは https://example.com/next です</p>");
+    expect(html).toContain('href="https://example.com/next"');
+    expect(html).toContain("続きは");
+    expect(html).toContain("です");
+  });
+
+  it("keeps Japanese sentence punctuation out of the address", () => {
+    expect(read("<p>詳細は https://example.com/a。</p>")).toContain('href="https://example.com/a"');
+    expect(read("<p>（https://example.com/b）</p>")).toContain('href="https://example.com/b"');
+    expect(read("<p>ここ https://example.com/c、そして</p>")).toContain('href="https://example.com/c"');
+  });
+
+  it("becomes a card when the address stands alone, as an embed would", () => {
+    const html = read("<p>https://example.com/only</p>");
+    expect(html).toContain("novel-link-card");
+  });
+
+  it("does not touch an address that is already a link", () => {
+    const html = read('<p><a href="https://example.com/x">見る</a></p>');
+    expect(html.match(/<a /g)).toHaveLength(1);
+    expect(html).toContain("見る");
+  });
+
+  it("leaves quoted code alone", () => {
+    const html = read("<pre>curl https://example.com/api</pre>");
+    expect(html).not.toContain("<a");
+  });
+
+  it("never creates a link out of a dangerous scheme", () => {
+    const html = read("<p>javascript:alert(1) data:text/html,x file:///etc/passwd</p>");
+    expect(html).not.toContain("<a");
+  });
+
+  it("handles several addresses in one paragraph", () => {
+    const html = read("<p>A https://example.com/1 と B https://example.com/2 です</p>");
+    expect(html.match(/<a /g)).toHaveLength(2);
+  });
+});
+
+describe("link card marks", () => {
+  const read = (html: string) => prepareDocumentHtml(html, () => null, { linkifyBareUrls: true });
+
+  it("uses each service's own mark, not a generic arrow", () => {
+    // pixiv links inside a work used to get the fallback arrow while the same
+    // link on an author page carried the pixiv mark.
+    const pixiv = read("<p>https://www.pixiv.net/novel/show.php?id=1</p>");
+    expect(pixiv).toContain("brand-word-glyph--pixiv");
+    expect(pixiv).toContain('data-provider="pixiv"');
+
+    const fanbox = read("<p>https://creator.fanbox.cc/posts/1</p>");
+    expect(fanbox).toContain("brand-word-glyph");
+    expect(fanbox).toContain('data-provider="fanbox"');
+  });
+
+  it("colours the mark from the one service definition", () => {
+    const pixiv = read("<p>https://www.pixiv.net/novel/show.php?id=1</p>");
+    expect(pixiv.toLowerCase()).toContain("#0096fa");
+    const fanbox = read("<p>https://creator.fanbox.cc/posts/1</p>");
+    expect(fanbox.toLowerCase()).toContain("#f2c624");
+  });
+
+  it("falls back to an arrow only for a service it does not know", () => {
+    const other = read("<p>https://example.com/thing</p>");
+    expect(other).toContain('data-provider="web"');
+    expect(other).not.toContain("brand-word-glyph--pixiv");
+  });
+});

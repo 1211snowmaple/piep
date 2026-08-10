@@ -20,7 +20,7 @@ pub struct AppState {
 // ============================================================
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
-pub fn run() {
+pub fn run() -> tauri::Result<()> {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_store::Builder::new().build())
@@ -30,20 +30,25 @@ pub fn run() {
             let app_data = app
                 .path()
                 .app_data_dir()
-                .expect("Failed to get app data dir");
+                .map_err(|e| std::io::Error::other(format!("Failed to get app data dir: {e}")))?;
             let db_path = app_data.join("piep.db");
             let storage_dir = app_data.join("downloads");
 
-            std::fs::create_dir_all(&app_data).expect("Failed to create app data dir");
+            std::fs::create_dir_all(&app_data).map_err(|e| {
+                std::io::Error::other(format!("Failed to create app data dir: {e}"))
+            })?;
 
-            let db = Database::open(&db_path, &storage_dir).expect("Failed to open database");
+            let db = Database::open(&db_path, &storage_dir)
+                .map_err(|e| std::io::Error::other(format!("Failed to open database: {e}")))?;
             if let Err(e) = db.recover_update_jobs_on_startup() {
                 log::warn!("Failed to recover update jobs: {}", e);
             }
 
             // デフォルトEPUBテンプレートの初期化
             let templates_dir = app_data.join("templates");
-            std::fs::create_dir_all(&templates_dir).expect("Failed to create templates dir");
+            std::fs::create_dir_all(&templates_dir).map_err(|e| {
+                std::io::Error::other(format!("Failed to create templates dir: {e}"))
+            })?;
             let tm = epub::template::TemplateManager::new(templates_dir);
             if let Err(e) = tm.initialize_defaults() {
                 log::warn!("デフォルトテンプレートの初期化に失敗: {}", e);
@@ -51,6 +56,10 @@ pub fn run() {
 
             app.manage(Arc::new(AppState { db }));
             log::info!("Database initialized at {:?}", db_path);
+            // The search index is derived data and has to look after itself:
+            // anything that left it behind is caught up in the background
+            // rather than waiting for someone to notice and press a button.
+            commands::database::start_automatic_index_maintenance(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -70,7 +79,9 @@ pub fn run() {
             commands::browser::go_back_embedded_browser,
             commands::browser::go_forward_embedded_browser,
             commands::browser::reload_embedded_browser,
-            commands::browser::notify_url_changed,
+            commands::browser::open_standalone_browser,
+            commands::browser::close_standalone_browser,
+            commands::browser::get_standalone_browser_url,
             // データ取得 (commands::downloader)
             commands::downloader::fetch_pixiv_novel_metadata,
             commands::downloader::fetch_pixiv_novel,
@@ -94,7 +105,16 @@ pub fn run() {
             commands::database::db_delete_downloads,
             commands::database::db_delete_downloads_for_search,
             commands::database::db_get_stats,
+            commands::database::db_get_library_diagnostics,
+            commands::database::db_maintain_library,
+            commands::database::db_optimize_search_index,
             commands::database::db_get_dashboard_summary,
+            commands::database::db_get_library_shelf_counts,
+            commands::database::db_list_entity_series,
+            commands::database::db_list_entity_tags,
+            commands::database::db_list_saved_searches,
+            commands::database::db_upsert_saved_search,
+            commands::database::db_delete_saved_search,
             commands::database::db_seed_test_data,
             commands::database::db_get_filter_facets,
             commands::database::db_get_search_index_status,
@@ -112,6 +132,7 @@ pub fn run() {
             commands::database::db_set_flags_for_ids,
             commands::database::db_get_watched_downloads,
             commands::database::db_upsert_update_target,
+            commands::database::db_get_update_target,
             commands::database::db_list_update_targets,
             commands::database::db_set_update_target_enabled,
             commands::database::db_delete_update_target,
@@ -125,6 +146,9 @@ pub fn run() {
             commands::database::db_get_download_by_source,
             commands::database::db_get_download_html,
             commands::database::db_get_reader_document,
+            commands::database::db_get_reader_metadata,
+            commands::database::db_get_reader_content_page,
+            commands::database::db_search_reader_content,
             commands::database::db_get_editor_document,
             commands::database::db_save_work_draft,
             commands::database::db_activate_work_edit,
@@ -143,6 +167,7 @@ pub fn run() {
             commands::archive::export_all_zip,
             commands::archive::export_entity_zip,
             commands::archive::import_zip,
+            commands::archive::inspect_backup,
             commands::archive::scan_and_reimport_downloads,
             // EPUB エクスポート (commands::epub)
             commands::epub::export_epub,
@@ -156,5 +181,4 @@ pub fn run() {
             commands::archive::get_storage_path,
         ])
         .run(tauri::generate_context!())
-        .expect("error while running tauri application");
 }

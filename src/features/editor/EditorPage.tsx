@@ -25,25 +25,7 @@ import { modals } from "@mantine/modals";
 import { notifications } from "@mantine/notifications";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import {
-  ArrowDown,
-  ArrowLeft,
-  ArrowUp,
-  BookOpen,
-  Check,
-  FileImage,
-  GripVertical,
-  Heading2,
-  ImagePlus,
-  Link2,
-  Minus,
-  Pilcrow,
-  Plus,
-  Quote,
-  Save,
-  ScanLine,
-  Trash2,
-} from "lucide-react";
+import { Icons, IconSize, type LucideIcon } from "@/lib/icons";
 import { useAppNavigate, useRouteParams } from "@/app/router";
 import { ErrorState, LoadingState } from "@/components/AsyncState";
 import { errorMessage } from "@/lib/format";
@@ -60,18 +42,26 @@ interface PreviewHandle {
   updateBlock: (index: number, patch: Partial<EditorBlockValue>) => void;
 }
 
-const BLOCK_META: Record<EditorBlockType, { label: string; icon: typeof Pilcrow; tone: string }> = {
-  paragraph: { label: "文章", icon: Pilcrow, tone: "gray" },
-  heading: { label: "見出し", icon: Heading2, tone: "blue" },
-  quote: { label: "引用", icon: Quote, tone: "violet" },
-  image: { label: "画像", icon: ImagePlus, tone: "teal" },
-  link: { label: "URLカード", icon: Link2, tone: "cyan" },
-  separator: { label: "区切り", icon: Minus, tone: "gray" },
-  pageBreak: { label: "改ページ", icon: BookOpen, tone: "orange" },
+const BLOCK_META: Record<EditorBlockType, { label: string; icon: LucideIcon; tone: string }> = {
+  paragraph: { label: "文章", icon: Icons.paragraph, tone: "gray" },
+  heading: { label: "見出し", icon: Icons.heading, tone: "blue" },
+  quote: { label: "引用", icon: Icons.quote, tone: "violet" },
+  image: { label: "画像", icon: Icons.insertImage, tone: "teal" },
+  link: { label: "URLカード", icon: Icons.link, tone: "cyan" },
+  separator: { label: "区切り", icon: Icons.remove, tone: "gray" },
+  pageBreak: { label: "改ページ", icon: Icons.read, tone: "orange" },
 };
 
 const editorType = (value: string): EditorBlockType => value === "page_break" ? "pageBreak" : value in BLOCK_META ? value as EditorBlockType : "paragraph";
 const persistedType = (value: EditorBlockType): string => value === "pageBreak" ? "page_break" : value;
+export const isSafeDocumentLink = (value: unknown): boolean => {
+  try {
+    const url = new URL(String(value ?? ""));
+    return url.protocol === "http:" || url.protocol === "https:";
+  } catch {
+    return false;
+  }
+};
 const estimateEditorBlockSize = (type?: EditorBlockType) => {
   if (type === "image" || type === "link") return 220;
   if (type === "separator" || type === "pageBreak") return 118;
@@ -104,7 +94,7 @@ export default function EditorPage() {
           if (!block) return null;
           if (["paragraph", "heading", "quote"].includes(block.blockType) && !String(value ?? "").trim()) return `${BLOCK_META[block.blockType].label}を入力してください`;
           if (block.blockType === "link") {
-            try { new URL(String(value ?? "")); } catch { return "http:// または https:// から始まるURLを入力してください"; }
+            if (!isSafeDocumentLink(value)) return "http:// または https:// から始まるURLを入力してください";
           }
           return null;
         },
@@ -211,7 +201,7 @@ export default function EditorPage() {
       if (!runtime) return { id: 1, downloadId: id, baseVersion: query.data.baseVersion, status: "draft", title: null, contentHash: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
       return saveWorkDraft(id, query.data.baseVersion, blocks);
     },
-    onSuccess: () => { form.resetDirty(form.getValues()); setDirty(false); notifications.show({ color: "green", icon: <Check size={15} />, title: "下書きを保存しました", message: "公開中の本文はまだ変わりません" }); queryClient.invalidateQueries({ queryKey: ["editor-document", id] }); },
+    onSuccess: () => { form.resetDirty(form.getValues()); setDirty(false); notifications.show({ color: "green", icon: <Icons.confirm size={IconSize.menu} />, title: "下書きを保存しました", message: "公開中の本文はまだ変わりません" }); queryClient.invalidateQueries({ queryKey: ["editor-document", id] }); },
     onError: (error) => notifications.show({ color: "red", title: "下書きを保存できません", message: errorMessage(error) }),
   });
   const publishMutation = useMutation({
@@ -274,11 +264,11 @@ export default function EditorPage() {
     <div className="editor-page">
       <header className="editor-toolbar">
         <Group h="100%" px="md" justify="space-between" wrap="nowrap" className="editor-toolbar__inner">
-          <Group wrap="nowrap" miw={0} className="editor-toolbar__identity"><Tooltip label="作品詳細へ戻る"><ActionIcon variant="subtle" color="gray" aria-label="作品詳細へ戻る" onClick={goBack}><ArrowLeft size={19} /></ActionIcon></Tooltip><Divider orientation="vertical" h={24} /><Box miw={0}><Text size="sm" fw={700} className="editor-toolbar__title line-clamp-1" title={doc.download.title}>{doc.download.title}</Text><Group gap="xs"><Text size="xs" c="dimmed">編集とプレビュー</Text>{dirty && <Badge size="xs" color="yellow" variant="light">未保存</Badge>}</Group></Box></Group>
+          <Group wrap="nowrap" miw={0} className="editor-toolbar__identity"><Tooltip label="作品詳細へ戻る"><ActionIcon variant="subtle" color="gray" aria-label="作品詳細へ戻る" onClick={goBack}><Icons.back size={IconSize.nav} /></ActionIcon></Tooltip><Divider orientation="vertical" h={24} /><Box miw={0}><Text size="sm" fw={700} className="editor-toolbar__title line-clamp-1" title={doc.download.title}>{doc.download.title}</Text><Group gap="xs"><Text size="xs" c="dimmed">編集とプレビュー</Text>{dirty && <Badge size="xs" color="yellow" variant="light">未保存</Badge>}</Group></Box></Group>
           <Group gap="xs" wrap="nowrap" className="editor-toolbar__actions">
-            <Tooltip label={syncScroll ? "位置同期をオフ" : "位置同期をオン"}><ActionIcon size="lg" variant={syncScroll ? "light" : "default"} color="piep" aria-label="編集ブロックとプレビューの位置を同期" aria-pressed={syncScroll} onClick={() => setSyncScroll(!syncScroll)}><ScanLine size={17} /></ActionIcon></Tooltip>
-            <Button size="sm" variant="light" leftSection={<Save size={15} />} loading={saveMutation.isPending} disabled={!dirty && Boolean(doc.draftRevision)} onClick={() => form.onSubmit(() => saveMutation.mutate())()}>下書き保存</Button>
-            <Tooltip label="保存して、リーダーとEPUBで使う本文を更新"><Button size="sm" leftSection={<Check size={15} />} loading={publishMutation.isPending} onClick={() => form.onSubmit(() => publishMutation.mutate())()}>反映</Button></Tooltip>
+            <Tooltip label={syncScroll ? "位置同期をオフ" : "位置同期をオン"}><ActionIcon size="lg" variant={syncScroll ? "light" : "default"} color="piep" aria-label="編集ブロックとプレビューの位置を同期" aria-pressed={syncScroll} onClick={() => setSyncScroll(!syncScroll)}><Icons.separator size={IconSize.action} /></ActionIcon></Tooltip>
+            <Button size="sm" variant="light" leftSection={<Icons.save size={IconSize.menu} />} loading={saveMutation.isPending} disabled={!dirty && Boolean(doc.draftRevision)} onClick={() => form.onSubmit(() => saveMutation.mutate())()}>下書き保存</Button>
+            <Tooltip label="保存して、リーダーとEPUBで使う本文を更新"><Button size="sm" leftSection={<Icons.confirm size={IconSize.menu} />} loading={publishMutation.isPending} onClick={() => form.onSubmit(() => publishMutation.mutate())()}>反映</Button></Tooltip>
           </Group>
         </Group>
       </header>
@@ -317,12 +307,12 @@ const EditorBlock = memo(function EditorBlock({ index, block, assets, total, for
   return (
     <Paper className="editor-block" withBorder data-type={block.blockType} data-active={active || undefined} data-editor-block-id={block.clientId} onClick={() => onActivate(block.clientId, "editor")} onFocusCapture={() => onActivate(block.clientId, "editor")}>
       <Group className="editor-block__bar" px="sm" py={6} justify="space-between" wrap="nowrap">
-        <Group gap={6} wrap="nowrap"><GripVertical className="editor-block__handle" size={15} /><ThemeIcon size={22} radius="sm" variant="light" color={meta.tone}><Icon size={13} /></ThemeIcon><Text size="xs" fw={750}>{meta.label}</Text><Text size="10px" c="dimmed">{index + 1}</Text></Group>
+        <Group gap={6} wrap="nowrap"><Icons.drag className="editor-block__handle" size={15} /><ThemeIcon size={22} radius="sm" variant="light" color={meta.tone}><Icon size={13} /></ThemeIcon><Text size="xs" fw={750}>{meta.label}</Text><Text size="10px" c="dimmed">{index + 1}</Text></Group>
         <Group gap={2} wrap="nowrap">
           <BlockMenuTarget allowPageBreak={allowPageBreak} onInsert={(type) => onInsert(type, index + 1)} onImage={() => onImage(index + 1)} />
-          <Tooltip label="上へ"><ActionIcon size="sm" variant="subtle" color="gray" disabled={index === 0} aria-label={`ブロック ${index + 1}を上へ`} onClick={() => onMove(index, -1)}><ArrowUp size={14} /></ActionIcon></Tooltip>
-          <Tooltip label="下へ"><ActionIcon size="sm" variant="subtle" color="gray" disabled={index === total - 1} aria-label={`ブロック ${index + 1}を下へ`} onClick={() => onMove(index, 1)}><ArrowDown size={14} /></ActionIcon></Tooltip>
-          <Tooltip label="削除"><ActionIcon size="sm" variant="subtle" color="red" aria-label={`ブロック ${index + 1}を削除`} onClick={() => onRemove(index)}><Trash2 size={14} /></ActionIcon></Tooltip>
+          <Tooltip label="上へ"><ActionIcon size="sm" variant="subtle" color="gray" disabled={index === 0} aria-label={`ブロック ${index + 1}を上へ`} onClick={() => onMove(index, -1)}><Icons.up size={IconSize.menu} /></ActionIcon></Tooltip>
+          <Tooltip label="下へ"><ActionIcon size="sm" variant="subtle" color="gray" disabled={index === total - 1} aria-label={`ブロック ${index + 1}を下へ`} onClick={() => onMove(index, 1)}><Icons.down size={IconSize.menu} /></ActionIcon></Tooltip>
+          <Tooltip label="削除"><ActionIcon size="sm" variant="subtle" color="red" aria-label={`ブロック ${index + 1}を削除`} onClick={() => onRemove(index)}><Icons.delete size={IconSize.menu} /></ActionIcon></Tooltip>
         </Group>
       </Group>
       <Box className="editor-block__body" p="sm">
@@ -330,7 +320,7 @@ const EditorBlock = memo(function EditorBlock({ index, block, assets, total, for
         {block.blockType === "heading" && <Textarea autosize minRows={1} maxRows={4} placeholder="見出し" variant="unstyled" className="editor-heading-input" key={form.key(`blocks.${index}.text`)} {...textInputProps} onChange={onTextChange} aria-label={`見出し ${index + 1}`} />}
         {block.blockType === "quote" && <Textarea autosize minRows={2} maxRows={16} placeholder="引用文" variant="unstyled" className="editor-quote-input" key={form.key(`blocks.${index}.text`)} {...textInputProps} onChange={onTextChange} aria-label={`引用 ${index + 1}`} />}
         {block.blockType === "separator" && <Divider my="md" label="区切り" labelPosition="center" />}
-        {block.blockType === "pageBreak" && <Group className="editor-page-break" justify="center" gap="xs"><ScanLine size={15} /><Text size="xs" fw={700}>ここから次のpixiv原稿ページ</Text></Group>}
+        {block.blockType === "pageBreak" && <Group className="editor-page-break" justify="center" gap="xs"><Icons.separator size={IconSize.menu} /><Text size="xs" fw={700}>ここから次のpixiv原稿ページ</Text></Group>}
         {block.blockType === "image" && <ImageBlock asset={asset} assets={assets} value={block.assetId} caption={block.text} onChange={(assetId) => { form.setFieldValue(`blocks.${index}.assetId`, assetId); onUpdate(index, { assetId }); }} onCaptionChange={(text) => { form.setFieldValue(`blocks.${index}.text`, text); onUpdate(index, { text }); }} />}
         {block.blockType === "link" && <LinkBlock url={block.text ?? ""} label={linkLabel(block.attrsJson)} onUrlChange={(text) => { form.setFieldValue(`blocks.${index}.text`, text); onUpdate(index, { text }); }} onLabelChange={(label) => { const attrsJson = JSON.stringify({ label }); form.setFieldValue(`blocks.${index}.attrsJson`, attrsJson); onUpdate(index, { attrsJson }); }} error={form.errors[`blocks.${index}.text`]} />}
       </Box>
@@ -339,28 +329,28 @@ const EditorBlock = memo(function EditorBlock({ index, block, assets, total, for
 });
 
 function BlockInsertMenu({ label, allowPageBreak, onInsert, onImage }: { label: string; allowPageBreak: boolean; onInsert: (type: EditorBlockType) => void; onImage: () => void }) {
-  return <Group justify="center" className="editor-insert-row"><Menu position="bottom"><Menu.Target><Button size="compact-xs" variant="subtle" color="gray" leftSection={<Plus size={13} />}>{label}</Button></Menu.Target><BlockMenuDropdown allowPageBreak={allowPageBreak} onInsert={onInsert} onImage={onImage} /></Menu></Group>;
+  return <Group justify="center" className="editor-insert-row"><Menu position="bottom"><Menu.Target><Button size="compact-xs" variant="subtle" color="gray" leftSection={<Icons.add size={IconSize.inline} />}>{label}</Button></Menu.Target><BlockMenuDropdown allowPageBreak={allowPageBreak} onInsert={onInsert} onImage={onImage} /></Menu></Group>;
 }
 
 function BlockMenuTarget({ allowPageBreak, onInsert, onImage }: { allowPageBreak: boolean; onInsert: (type: EditorBlockType) => void; onImage: () => void }) {
-  return <Menu position="bottom-end"><Menu.Target><Tooltip label="この下に追加"><ActionIcon size="sm" variant="subtle" color="gray" aria-label="このブロックの下に追加"><Plus size={14} /></ActionIcon></Tooltip></Menu.Target><BlockMenuDropdown allowPageBreak={allowPageBreak} onInsert={onInsert} onImage={onImage} /></Menu>;
+  return <Menu position="bottom-end"><Menu.Target><Tooltip label="この下に追加"><ActionIcon size="sm" variant="subtle" color="gray" aria-label="このブロックの下に追加"><Icons.add size={IconSize.menu} /></ActionIcon></Tooltip></Menu.Target><BlockMenuDropdown allowPageBreak={allowPageBreak} onInsert={onInsert} onImage={onImage} /></Menu>;
 }
 
 function BlockMenuDropdown({ allowPageBreak, onInsert, onImage }: { allowPageBreak: boolean; onInsert: (type: EditorBlockType) => void; onImage: () => void }) {
-  return <Menu.Dropdown><Menu.Label>ブロックを追加</Menu.Label><Menu.Item leftSection={<Pilcrow size={15} />} onClick={() => onInsert("paragraph")}>文章</Menu.Item><Menu.Item leftSection={<Heading2 size={15} />} onClick={() => onInsert("heading")}>見出し</Menu.Item><Menu.Item leftSection={<Quote size={15} />} onClick={() => onInsert("quote")}>引用</Menu.Item><Menu.Item leftSection={<Link2 size={15} />} onClick={() => onInsert("link")}>URLカード</Menu.Item><Menu.Item leftSection={<Minus size={15} />} onClick={() => onInsert("separator")}>区切り線</Menu.Item>{allowPageBreak && <Menu.Item leftSection={<ScanLine size={15} />} onClick={() => onInsert("pageBreak")}>pixiv改ページ</Menu.Item>}<Menu.Divider /><Menu.Item leftSection={<ImagePlus size={15} />} onClick={onImage}>画像ファイルを追加</Menu.Item></Menu.Dropdown>;
+  return <Menu.Dropdown><Menu.Label>ブロックを追加</Menu.Label><Menu.Item leftSection={<Icons.paragraph size={IconSize.menu} />} onClick={() => onInsert("paragraph")}>文章</Menu.Item><Menu.Item leftSection={<Icons.heading size={IconSize.menu} />} onClick={() => onInsert("heading")}>見出し</Menu.Item><Menu.Item leftSection={<Icons.quote size={IconSize.menu} />} onClick={() => onInsert("quote")}>引用</Menu.Item><Menu.Item leftSection={<Icons.link size={IconSize.menu} />} onClick={() => onInsert("link")}>URLカード</Menu.Item><Menu.Item leftSection={<Icons.remove size={IconSize.menu} />} onClick={() => onInsert("separator")}>区切り線</Menu.Item>{allowPageBreak && <Menu.Item leftSection={<Icons.separator size={IconSize.menu} />} onClick={() => onInsert("pageBreak")}>pixiv改ページ</Menu.Item>}<Menu.Divider /><Menu.Item leftSection={<Icons.insertImage size={IconSize.menu} />} onClick={onImage}>画像ファイルを追加</Menu.Item></Menu.Dropdown>;
 }
 
 function ImageBlock({ asset, assets, value, caption, onChange, onCaptionChange }: { asset?: AssetEntry; assets: AssetEntry[]; value: number | null | undefined; caption: string | null | undefined; onChange: (value: number | null) => void; onCaptionChange: (value: string) => void }) {
   const [assetId, setAssetId] = useState(value ?? null);
   const [captionValue, setCaptionValue] = useState(caption ?? "");
   const selectedAsset = assets.find((item) => item.id === assetId) ?? asset;
-  return <Group wrap="nowrap" align="flex-start"><Box className="editor-image-preview">{selectedAsset ? <Image src={getAssetUrl(selectedAsset.localPath)} alt="" w="100%" h="100%" fit="contain" /> : <FileImage size={30} />}</Box><Stack flex={1} gap="xs"><Select label="画像アセット" placeholder="選択してください" searchable data={assets.filter((item) => item.mimeType?.startsWith("image/")).map((item) => ({ value: String(item.id), label: item.filename }))} value={assetId ? String(assetId) : null} onChange={(next) => { const nextId = next ? Number(next) : null; setAssetId(nextId); onChange(nextId); }} clearable /><TextInput label="キャプション（任意）" value={captionValue} onChange={(event) => { setCaptionValue(event.currentTarget.value); onCaptionChange(event.currentTarget.value); }} /></Stack></Group>;
+  return <Group wrap="nowrap" align="flex-start"><Box className="editor-image-preview">{selectedAsset ? <Image src={getAssetUrl(selectedAsset.localPath)} alt="" w="100%" h="100%" fit="contain" /> : <Icons.imageFile size={IconSize.hero} />}</Box><Stack flex={1} gap="xs"><Select label="画像アセット" placeholder="選択してください" searchable data={assets.filter((item) => item.mimeType?.startsWith("image/")).map((item) => ({ value: String(item.id), label: item.filename }))} value={assetId ? String(assetId) : null} onChange={(next) => { const nextId = next ? Number(next) : null; setAssetId(nextId); onChange(nextId); }} clearable /><TextInput label="キャプション（任意）" value={captionValue} onChange={(event) => { setCaptionValue(event.currentTarget.value); onCaptionChange(event.currentTarget.value); }} /></Stack></Group>;
 }
 
 function LinkBlock({ url, label, onUrlChange, onLabelChange, error }: { url: string; label: string; onUrlChange: (value: string) => void; onLabelChange: (value: string) => void; error?: React.ReactNode }) {
   const [urlValue, setUrlValue] = useState(url);
   const [labelValue, setLabelValue] = useState(label);
-  return <Stack gap="xs"><TextInput label="URL" placeholder="https://example.com/…" value={urlValue} onChange={(event) => { setUrlValue(event.currentTarget.value); onUrlChange(event.currentTarget.value); }} error={error} leftSection={<Link2 size={15} />} /><TextInput label="表示名（任意）" placeholder="空欄ならURLを表示" value={labelValue} onChange={(event) => { setLabelValue(event.currentTarget.value); onLabelChange(event.currentTarget.value); }} /></Stack>;
+  return <Stack gap="xs"><TextInput label="URL" placeholder="https://example.com/…" value={urlValue} onChange={(event) => { setUrlValue(event.currentTarget.value); onUrlChange(event.currentTarget.value); }} error={error} leftSection={<Icons.link size={IconSize.menu} />} /><TextInput label="表示名（任意）" placeholder="空欄ならURLを表示" value={labelValue} onChange={(event) => { setLabelValue(event.currentTarget.value); onLabelChange(event.currentTarget.value); }} /></Stack>;
 }
 
 const EditorPreviewPane = forwardRef<PreviewHandle, {
@@ -407,7 +397,7 @@ const EditorPreviewPane = forwardRef<PreviewHandle, {
 
   return <section className="editor-preview-pane" aria-label="本文プレビュー">
     <Group className="editor-preview-toolbar" px="md" justify="space-between" wrap="nowrap">
-      <Group gap="xs"><BookOpen size={16} /><Text size="sm" fw={750}>ライブプレビュー</Text></Group>
+      <Group gap="xs"><Icons.read size={IconSize.action} /><Text size="sm" fw={750}>ライブプレビュー</Text></Group>
       <Group gap="md" wrap="nowrap" className="editor-preview-stats">{allowPageBreak && <Text size="xs" c="dimmed" fw={650}>{stats.pages}頁</Text>}<Text size="xs" c="dimmed" fw={650}>{stats.blocks.toLocaleString("ja-JP")}ブロック</Text><Text size="xs" c="dimmed" fw={650}>{stats.chars.toLocaleString("ja-JP")}字</Text><Text size="xs" c="dimmed" fw={650}>{stats.images}画像</Text></Group>
     </Group>
     <ScrollArea className="editor-preview-scroll" viewportRef={viewportRef} type="scroll" scrollbarSize={8}>
@@ -431,7 +421,7 @@ const PreviewBlock = memo(function PreviewBlock({ block, asset, pageNumber, acti
   else if (block.blockType === "separator") content = <hr />;
   else if (block.blockType === "pageBreak") content = <div className="editor-preview-page-break"><span>pixiv page {pageNumber}</span></div>;
   else if (block.blockType === "image") content = <figure>{asset ? <img src={getAssetUrl(asset.localPath) ?? undefined} alt={block.text || asset.filename} /> : <Text c="dimmed">画像を選択してください</Text>}{block.text && <figcaption>{block.text}</figcaption>}</figure>;
-  else if (block.blockType === "link") content = <a className="editor-preview-link" href={block.text || undefined} onClick={(event) => event.preventDefault()}><Link2 size={18} /><span><strong>{linkLabel(block.attrsJson) || block.text || "URLを入力"}</strong><small>{block.text}</small></span></a>;
+  else if (block.blockType === "link") content = <a className="editor-preview-link" href={block.text || undefined} onClick={(event) => event.preventDefault()}><Icons.link size={IconSize.nav} /><span><strong>{linkLabel(block.attrsJson) || block.text || "URLを入力"}</strong><small>{block.text}</small></span></a>;
   else {
     const lines = block.text?.split("\n") ?? [];
     content = <p>{lines.map((line, index) => <span key={index}>{line}{index < lines.length - 1 && <br />}</span>)}</p>;

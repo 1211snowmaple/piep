@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Accordion,
   ActionIcon,
@@ -33,7 +33,7 @@ import { useDisclosure } from "@mantine/hooks";
 import { modals } from "@mantine/modals";
 import { notifications } from "@mantine/notifications";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { BookOpen, Check, ChevronRight, FileCode2, FolderOpen, ImageDown, Plus, Save, Trash2, X } from "lucide-react";
+import { Icons, IconSize } from "@/lib/icons";
 import { useAppNavigate } from "@/app/router";
 import { useWorkspace } from "@/app/WorkspaceContext";
 import { EmptyState, ErrorState, LoadingState } from "@/components/AsyncState";
@@ -47,6 +47,7 @@ import { createEpubTemplate, deleteEpubTemplate, exportEpubBatch, getTemplateFil
 import { onTauriEvent } from "@/services/eventBus";
 import { openFilesystemPath } from "@/services/openerApi";
 import type { DownloadEntry } from "@/types/library";
+import { startOperation, type OperationController } from "@/features/jobs/operationJobs";
 
 interface TemplateInfo { name: string; isBuiltin: boolean; fileCount: number }
 interface TemplateFile { filename: string; sizeBytes: number }
@@ -127,6 +128,8 @@ export default function EpubPage() {
   const [result, setResult] = useState<ExportBatchResult | null>(null);
   const [templatesOpened, templatesDrawer] = useDisclosure(false);
   const [newTemplateOpened, newTemplateModal] = useDisclosure(false);
+  const exportOperationRef = useRef<OperationController | null>(null);
+  const retryExportRef = useRef<(values: EpubValues) => void>(() => undefined);
   const form = useForm<EpubValues>({ initialValues, validate: { templateName: isNotEmpty("テンプレートを選択してください"), outputDir: isNotEmpty("出力先を選択してください") }, validateInputOnBlur: true });
   const templateForm = useForm({ initialValues: { name: "" }, validate: { name: (value) => /^[a-zA-Z0-9_-]+$/.test(value) ? null : "英数字、_、-だけを使用してください" } });
   // One request for the whole queue: a per-work query meant a queue of a few
@@ -145,7 +148,10 @@ export default function EpubPage() {
   });
   useEffect(() => {
     let dispose: (() => void) | undefined;
-    if (runtime) onTauriEvent<ExportProgress>("epub-export-progress", (event) => setProgress(event.payload)).then((fn) => { dispose = fn; }).catch(() => undefined);
+    if (runtime) onTauriEvent<ExportProgress>("epub-export-progress", (event) => {
+      setProgress(event.payload);
+      exportOperationRef.current?.progress(event.payload.currentIndex, event.payload.totalCount, event.payload.message);
+    }).then((fn) => { dispose = fn; }).catch(() => undefined);
     return () => dispose?.();
   }, [runtime]);
   // Works deleted from the library after being queued simply do not come back
@@ -159,6 +165,13 @@ export default function EpubPage() {
 
   const exportMutation = useMutation({
     mutationFn: async (values: EpubValues): Promise<ExportBatchResult> => {
+      exportOperationRef.current = startOperation({
+        kind: "epub",
+        label: `${works.length}冊をEPUBへ書き出し`,
+        detail: values.outputDir,
+        total: works.length,
+        onRetry: () => retryExportRef.current(values),
+      });
       setResult(null); setProgress({ phase: "started", currentTitle: "", currentIndex: 0, totalCount: works.length, message: "書き出しを準備しています" });
       if (!runtime) {
         await new Promise((resolve) => window.setTimeout(resolve, 500));
@@ -176,14 +189,17 @@ export default function EpubPage() {
       });
     },
     onSuccess: (data) => {
+      exportOperationRef.current?.complete(`成功 ${data.successCount} · 失敗 ${data.failedCount}`);
+      exportOperationRef.current = null;
       setResult(data);
       setProgress(null);
       const failed = new Set(data.failedIds);
       removeFromEpubQueue(works.filter((work) => !failed.has(work.id)).map((work) => work.id));
       notifications.show({ color: data.failedCount ? "yellow" : "green", title: "EPUB書き出しが完了しました", message: `成功 ${data.successCount} · 失敗 ${data.failedCount}` });
     },
-    onError: (error) => { setProgress(null); notifications.show({ color: "red", title: "EPUBを書き出せません", message: errorMessage(error) }); },
+    onError: (error) => { exportOperationRef.current?.fail(error); exportOperationRef.current = null; setProgress(null); notifications.show({ color: "red", title: "EPUBを書き出せません", message: errorMessage(error) }); },
   });
+  retryExportRef.current = (values) => exportMutation.mutate(values);
   const createTemplateMutation = useMutation({
     mutationFn: (name: string) => runtime ? createEpubTemplate(name) : Promise.resolve(),
     onSuccess: (_, name) => { queryClient.invalidateQueries({ queryKey: ["epub-templates"] }); form.setFieldValue("templateName", name); newTemplateModal.close(); templateForm.reset(); notifications.show({ color: "green", message: "テンプレートを作成しました" }); },
@@ -198,16 +214,15 @@ export default function EpubPage() {
 
   return (
     <div className="page page--contained epub-page">
-      <PageHeader title="EPUB Studio" description="選んだ作品を、端末に合わせた高品質な電子書籍へ書き出します。" actions={<Button variant="default" leftSection={<FileCode2 size={15} />} onClick={templatesDrawer.open}>テンプレート管理</Button>} />
-      {!epubQueue.length ? <EmptyState icon={BookOpen} title="EPUBキューは空です" description="ライブラリや作品詳細から、書き出したい作品をキューに追加してください。" action={<Button onClick={() => navigate("/library")}>ライブラリを開く</Button>} /> : (
+      <PageHeader title="EPUB Studio" description="選んだ作品を、端末に合わせた高品質な電子書籍へ書き出します。" actions={<Button variant="default" leftSection={<Icons.epubTemplate size={IconSize.menu} />} onClick={templatesDrawer.open}>テンプレート管理</Button>} />
+      {!epubQueue.length ? <EmptyState icon={Icons.epub} title="EPUBキューは空です" description="ライブラリや作品詳細から、書き出したい作品をキューに追加してください。" action={<Button onClick={() => navigate("/library")}>ライブラリを開く</Button>} /> : (
         <form onSubmit={form.onSubmit((values) => exportMutation.mutate(values))}>
           <Grid gap="lg" align="flex-start">
             <Grid.Col span={{ base: 12, lg: 7 }}>
               <Stack gap="lg">
                 <Card p="lg">
                   <Group justify="space-between" mb="md"><Box><Title order={3}>書き出す作品</Title><Text size="sm" c="dimmed">{formatNumber(works.length)}件 · 元データ {formatBytes(totalSize)}</Text></Box><Button variant="subtle" color="red" size="xs" onClick={() => modals.openConfirmModal({ title: "キューを空にしますか？", children: <Text size="sm">選択中の{epubQueue.length}件をキューから外します。</Text>, confirmProps: { color: "red" }, labels: { confirm: "空にする", cancel: "キャンセル" }, onConfirm: clearEpubQueue })}>すべて解除</Button></Group>
-                  {queueQuery.isLoading && <LoadingState label="作品情報を読み込んでいます" />}
-                  <Stack gap="xs">{works.map((work, index) => <Paper key={work.id} p="sm" withBorder><Group wrap="nowrap"><ThemeIcon variant="light" color="gray" size="lg"><Text size="xs" fw={800}>{index + 1}</Text></ThemeIcon><Stack gap={2} flex={1} miw={0}><Group gap="xs" wrap="nowrap"><ProviderMark provider={work.source} compact /><Text size="sm" fw={650} className="line-clamp-1">{work.title}</Text></Group><Text size="xs" c="dimmed">{work.authorName} · {formatNumber(work.textLength)}字 · {work.assetCount}画像</Text></Stack><Tooltip label="キューから外す"><ActionIcon variant="subtle" color="red" aria-label={`${work.title}をキューから外す`} onClick={() => removeFromEpubQueue(work.id)}><X size={16} /></ActionIcon></Tooltip></Group></Paper>)}</Stack>
+                  {queueQuery.isLoading ? <LoadingState label="作品情報を読み込んでいます" /> : queueQuery.error ? <ErrorState error={queueQuery.error} retry={() => queueQuery.refetch()} /> : <Stack gap="xs">{works.map((work, index) => <Paper key={work.id} p="sm" withBorder><Group wrap="nowrap"><ThemeIcon variant="light" color="gray" size="lg"><Text size="xs" fw={800}>{index + 1}</Text></ThemeIcon><Stack gap={2} flex={1} miw={0}><Group gap="xs" wrap="nowrap"><ProviderMark provider={work.source} compact /><Text size="sm" fw={650} className="line-clamp-1">{work.title}</Text></Group><Text size="xs" c="dimmed" className="line-clamp-1">{work.authorName} · {formatNumber(work.textLength)}字 · {work.assetCount}画像</Text></Stack><Tooltip label="キューから外す"><ActionIcon variant="subtle" color="red" aria-label={`${work.title}をキューから外す`} onClick={() => removeFromEpubQueue(work.id)}><Icons.cancel size={IconSize.action} /></ActionIcon></Tooltip></Group></Paper>)}</Stack>}
                 </Card>
                 <CompressionSettings form={form} />
               </Stack>
@@ -216,14 +231,14 @@ export default function EpubPage() {
               <Card p="lg" className="epub-export-card">
                 <Stack gap="lg">
                   <Box><Title order={3}>出力設定</Title><Text size="sm" c="dimmed">EPUB 3形式で作品ごとに出力します。</Text></Box>
-                  <Select label="テンプレート" data={(templates.data ?? []).map((item) => ({ value: item.name, label: `${item.name}${item.isBuiltin ? " · built-in" : ""}` }))} {...form.getInputProps("templateName")} rightSection={<ChevronRight size={14} />} />
+                  <Select label="テンプレート" data={(templates.data ?? []).map((item) => ({ value: item.name, label: `${item.name}${item.isBuiltin ? " · 標準" : ""}` }))} disabled={templates.isLoading} {...form.getInputProps("templateName")} error={form.errors.templateName || (templates.error ? "テンプレートを読み込めません" : undefined)} rightSection={<Icons.next size={IconSize.menu} />} />
                   {/* The icon sits inside the input, so its click also bubbles
                       to the field handler and opened two pickers in a row. */}
-                  <TextInput label="出力先フォルダー" placeholder="フォルダーを選択" readOnly {...form.getInputProps("outputDir")} rightSection={<ActionIcon variant="subtle" aria-label="出力先を選択" onClick={(event) => { event.stopPropagation(); selectOutput(); }}><FolderOpen size={16} /></ActionIcon>} onClick={selectOutput} />
-                  <Alert color="blue" icon={<ImageDown size={17} />}>{form.values.compression.enabled ? `画像を最大 ${form.values.compression.maxWidth} × ${form.values.compression.maxHeight}px に最適化します。` : "画像は元の品質のまま収録します。"}</Alert>
-                  {progress && <Stack gap={6}><Group justify="space-between"><Text size="sm" className="line-clamp-1">{progress.currentTitle || progress.message}</Text><Text size="xs" c="dimmed">{progress.currentIndex}/{progress.totalCount}</Text></Group><Progress value={progress.totalCount ? progress.currentIndex / progress.totalCount * 100 : 5} animated /><Text size="xs" c="dimmed">{progress.message}</Text></Stack>}
-                  {result && <Alert color={result.failedCount ? "yellow" : "green"} icon={<Check size={17} />} title="書き出し完了"><Stack gap="xs"><Text size="sm">成功 {result.successCount}件 / 失敗 {result.failedCount}件</Text>{form.values.outputDir && <Button size="xs" variant="light" w="fit-content" leftSection={<FolderOpen size={13} />} disabled={!runtime} onClick={() => openFilesystemPath(form.values.outputDir)}>出力先を開く</Button>}</Stack></Alert>}
-                  <Button type="submit" size="lg" leftSection={<BookOpen size={17} />} loading={exportMutation.isPending} disabled={!works.length}>{works.length}冊を書き出す</Button>
+                  <TextInput label="出力先フォルダー" placeholder="フォルダーを選択" readOnly {...form.getInputProps("outputDir")} rightSection={<ActionIcon variant="subtle" aria-label="出力先を選択" onClick={(event) => { event.stopPropagation(); selectOutput(); }}><Icons.openFolder size={IconSize.action} /></ActionIcon>} onClick={selectOutput} />
+                  <Alert color="blue" icon={<Icons.epubImages size={IconSize.action} />}>{form.values.compression.enabled ? `画像を最大 ${form.values.compression.maxWidth} × ${form.values.compression.maxHeight}px に最適化します。` : "画像は元の品質のまま収録します。"}</Alert>
+                  {progress && <Stack gap={6} role="status" aria-live="polite"><Group justify="space-between"><Text size="sm" className="line-clamp-1">{progress.currentTitle || progress.message}</Text><Text size="xs" c="dimmed">{progress.currentIndex}/{progress.totalCount}</Text></Group><Progress value={progress.totalCount ? progress.currentIndex / progress.totalCount * 100 : 5} animated aria-label={`EPUB書き出し ${progress.currentIndex}/${progress.totalCount}`} /><Text size="xs" c="dimmed">{progress.message}</Text></Stack>}
+                  {result && <Alert color={result.failedCount ? "yellow" : "green"} icon={<Icons.confirm size={IconSize.action} />} title="書き出し完了"><Stack gap="xs"><Text size="sm">成功 {result.successCount}件 / 失敗 {result.failedCount}件</Text>{form.values.outputDir && <Button size="xs" variant="light" w="fit-content" leftSection={<Icons.openFolder size={IconSize.inline} />} disabled={!runtime} onClick={() => openFilesystemPath(form.values.outputDir)}>出力先を開く</Button>}</Stack></Alert>}
+                  <Button type="submit" size="lg" leftSection={<Icons.epub size={IconSize.action} />} loading={exportMutation.isPending} disabled={!works.length}>{works.length}冊を書き出す</Button>
                 </Stack>
               </Card>
             </Grid.Col>
@@ -232,7 +247,7 @@ export default function EpubPage() {
       )}
 
       <Drawer opened={templatesOpened} onClose={templatesDrawer.close} position="right" size={560} title="EPUBテンプレート">
-        <Stack gap="md"><Group justify="space-between"><Text size="sm" c="dimmed">組版・表紙・目次をカスタマイズできます。</Text><Button size="xs" leftSection={<Plus size={14} />} onClick={newTemplateModal.open}>新規作成</Button></Group>{templates.isLoading ? <LoadingState /> : templates.error ? <ErrorState error={templates.error} retry={() => templates.refetch()} /> : (templates.data ?? []).map((template) => <TemplateEditor key={template.name} template={template} runtime={runtime} onChanged={() => queryClient.invalidateQueries({ queryKey: ["epub-templates"] })} />)}</Stack>
+        <Stack gap="md"><Group justify="space-between"><Text size="sm" c="dimmed">組版・表紙・目次をカスタマイズできます。</Text><Button size="xs" leftSection={<Icons.add size={IconSize.menu} />} onClick={newTemplateModal.open}>新規作成</Button></Group>{templates.isLoading ? <LoadingState /> : templates.error ? <ErrorState error={templates.error} retry={() => templates.refetch()} /> : (templates.data ?? []).map((template) => <TemplateEditor key={template.name} template={template} runtime={runtime} onChanged={() => queryClient.invalidateQueries({ queryKey: ["epub-templates"] })} />)}</Stack>
       </Drawer>
       <Modal opened={newTemplateOpened} onClose={newTemplateModal.close} title="テンプレートを作成">
         <form onSubmit={templateForm.onSubmit(({ name }) => createTemplateMutation.mutate(name))}><Stack><TextInput label="テンプレート名" description="defaultテンプレートを複製して作成します" placeholder="my-template" {...templateForm.getInputProps("name")} /><Button type="submit" loading={createTemplateMutation.isPending}>作成</Button></Stack></form>
@@ -245,10 +260,10 @@ function CompressionSettings({ form }: { form: UseFormReturnType<EpubValues, Epu
   const enabled = form.values.compression.enabled;
   return (
     <Card p="lg"><Group justify="space-between"><Box><Title order={3}>画像最適化</Title><Text size="sm" c="dimmed">品質とファイルサイズのバランス</Text></Box><Switch checked={enabled} onChange={(event) => form.setFieldValue("compression.enabled", event.currentTarget.checked)} aria-label="画像最適化" /></Group>
-      {enabled && <Stack gap="lg" mt="lg"><Grid><Grid.Col span={6}><NumberInput label="最大幅" suffix=" px" min={320} max={8000} {...form.getInputProps("compression.maxWidth")} /></Grid.Col><Grid.Col span={6}><NumberInput label="最大高さ" suffix=" px" min={320} max={8000} {...form.getInputProps("compression.maxHeight")} /></Grid.Col></Grid><Select label="出力形式" description="自動は元画像の形式を保ちます" data={[{ value: "auto", label: "自動" }, { value: "jpeg", label: "JPEG" }, { value: "png", label: "PNG" }, { value: "webp", label: "WebP" }]} value={form.values.compression.outputFormat ?? "auto"} onChange={(value) => form.setFieldValue("compression.outputFormat", value === "auto" ? null : value)} />
+      {enabled && <Stack gap="lg" mt="lg"><Grid><Grid.Col span={6}><NumberInput label="最大幅" hideControls suffix=" px" min={320} max={8000} {...form.getInputProps("compression.maxWidth")} /></Grid.Col><Grid.Col span={6}><NumberInput label="最大高さ" hideControls suffix=" px" min={320} max={8000} {...form.getInputProps("compression.maxHeight")} /></Grid.Col></Grid><Select label="出力形式" description="自動は元画像の形式を保ちます" data={[{ value: "auto", label: "自動" }, { value: "jpeg", label: "JPEG" }, { value: "png", label: "PNG" }, { value: "webp", label: "WebP" }]} value={form.values.compression.outputFormat ?? "auto"} onChange={(value) => form.setFieldValue("compression.outputFormat", value === "auto" ? null : value)} />
         <Accordion variant="separated">
           <Accordion.Item value="jpeg"><Accordion.Control>JPEG詳細</Accordion.Control><Accordion.Panel><Stack><LabeledSlider label="品質" value={form.values.compression.jpegQuality} onChange={(value) => form.setFieldValue("compression.jpegQuality", value)} min={40} max={100} /><Select label="クロマサブサンプリング" data={["4:2:0", "4:2:2", "4:4:4"]} {...form.getInputProps("compression.jpegChromaSubsampling")} /><Checkbox label="プログレッシブ" {...form.getInputProps("compression.jpegProgressive", { type: "checkbox" })} /><Checkbox label="リンギング低減" {...form.getInputProps("compression.jpegDeringing", { type: "checkbox" })} /><Checkbox label="自動最適化（高品質・低速）" {...form.getInputProps("compression.jpegAutoOptimize", { type: "checkbox" })} /></Stack></Accordion.Panel></Accordion.Item>
-          <Accordion.Item value="png"><Accordion.Control>PNG詳細</Accordion.Control><Accordion.Panel><Stack><SegmentedControl fullWidth data={[{ value: "1", label: "高速" }, { value: "2", label: "標準" }, { value: "4", label: "高圧縮" }]} {...form.getInputProps("compression.pngCompression")} /><Checkbox label="不要なメタデータを削除" {...form.getInputProps("compression.pngStrip", { type: "checkbox" })} /><Checkbox label="ビット深度を最適化" {...form.getInputProps("compression.pngBitDepthReduction", { type: "checkbox" })} /><Checkbox label="カラーパレットを最適化" {...form.getInputProps("compression.pngPaletteReduction", { type: "checkbox" })} /></Stack></Accordion.Panel></Accordion.Item>
+          <Accordion.Item value="png"><Accordion.Control>PNG詳細</Accordion.Control><Accordion.Panel><Stack><SegmentedControl fullWidth aria-label="PNG圧縮レベル" data={[{ value: "1", label: "高速" }, { value: "2", label: "標準" }, { value: "4", label: "高圧縮" }]} {...form.getInputProps("compression.pngCompression")} /><Checkbox label="不要なメタデータを削除" {...form.getInputProps("compression.pngStrip", { type: "checkbox" })} /><Checkbox label="ビット深度を最適化" {...form.getInputProps("compression.pngBitDepthReduction", { type: "checkbox" })} /><Checkbox label="カラーパレットを最適化" {...form.getInputProps("compression.pngPaletteReduction", { type: "checkbox" })} /></Stack></Accordion.Panel></Accordion.Item>
           <Accordion.Item value="webp"><Accordion.Control>WebP詳細</Accordion.Control><Accordion.Panel><Stack><LabeledSlider label="品質" value={form.values.compression.webpQuality} onChange={(value) => form.setFieldValue("compression.webpQuality", value)} min={30} max={100} /><LabeledSlider label="圧縮方法" value={form.values.compression.webpMethod} onChange={(value) => form.setFieldValue("compression.webpMethod", value)} min={0} max={6} /><Checkbox label="ロスレス" {...form.getInputProps("compression.webpLossless", { type: "checkbox" })} /><Checkbox label="正確な透過色を保持" {...form.getInputProps("compression.webpExact", { type: "checkbox" })} /></Stack></Accordion.Panel></Accordion.Item>
         </Accordion>
       </Stack>}
@@ -256,7 +271,7 @@ function CompressionSettings({ form }: { form: UseFormReturnType<EpubValues, Epu
   );
 }
 
-function LabeledSlider({ label, value, onChange, min, max, step }: { label: string; value: number; onChange: (value: number) => void; min: number; max: number; step?: number }) { return <Box><Group justify="space-between" mb="xs"><Text size="sm" fw={500}>{label}</Text><Badge variant="light" color="gray">{value}</Badge></Group><Slider value={value} onChange={onChange} min={min} max={max} step={step} /></Box>; }
+function LabeledSlider({ label, value, onChange, min, max, step }: { label: string; value: number; onChange: (value: number) => void; min: number; max: number; step?: number }) { return <Box><Group justify="space-between" mb="xs"><Text size="sm" fw={500}>{label}</Text><Badge variant="light" color="gray">{value}</Badge></Group><Slider aria-label={label} value={value} onChange={onChange} min={min} max={max} step={step} /></Box>; }
 
 function TemplateEditor({ template, runtime, onChanged }: { template: TemplateInfo; runtime: boolean; onChanged: () => void }) {
   const [opened, setOpened] = useState(false);
@@ -284,11 +299,11 @@ function TemplateEditor({ template, runtime, onChanged }: { template: TemplateIn
   const remove = () => modals.openConfirmModal({ title: "テンプレートを削除しますか？", children: <Text size="sm">{template.name}を削除します。</Text>, confirmProps: { color: "red" }, labels: { confirm: "削除", cancel: "キャンセル" }, onConfirm: async () => { await deleteEpubTemplate(template.name); onChanged(); } });
   const visualAvailable = Boolean(selectedFile?.endsWith(".css.j2"));
   return <Card p="md">
-    <Group justify="space-between"><Box><Group gap="xs"><Text fw={700}>{template.name}</Text>{template.isBuiltin && <Badge size="xs" variant="light">built-in</Badge>}</Group><Text size="xs" c="dimmed">{template.fileCount}ファイル</Text></Box><Group gap="xs"><Button size="xs" variant="light" onClick={() => setOpened(!opened)}>{opened ? "閉じる" : "編集"}</Button>{!template.isBuiltin && <Tooltip label="削除"><ActionIcon size="sm" color="red" variant="subtle" aria-label={`${template.name}を削除`} onClick={remove}><Trash2 size={14} /></ActionIcon></Tooltip>}</Group></Group>
+    <Group justify="space-between"><Box><Group gap="xs"><Text fw={700}>{template.name}</Text>{template.isBuiltin && <Badge size="xs" variant="light">標準</Badge>}</Group><Text size="xs" c="dimmed">{template.fileCount}ファイル</Text></Box><Group gap="xs"><Button size="xs" variant="light" onClick={() => setOpened(!opened)}>{opened ? "閉じる" : "編集"}</Button>{!template.isBuiltin && <Tooltip label="削除"><ActionIcon size="sm" color="red" variant="subtle" aria-label={`${template.name}を削除`} onClick={remove}><Icons.delete size={IconSize.menu} /></ActionIcon></Tooltip>}</Group></Group>
     {opened && <Stack mt="md" gap="md">
-      <Group justify="space-between"><SegmentedControl value={editorMode} onChange={(value) => setEditorMode(value as "visual" | "code")} data={[{ value: "visual", label: "見た目で編集", disabled: !visualAvailable }, { value: "code", label: "コード編集" }]} /><Group gap="xs"><Button size="xs" variant="default" leftSection={<Save size={13} />} disabled={!runtime || !selectedFile} onClick={save}>テンプレートを保存</Button></Group></Group>
+      <Group justify="space-between"><SegmentedControl aria-label="テンプレートの編集方法" value={editorMode} onChange={(value) => setEditorMode(value as "visual" | "code")} data={[{ value: "visual", label: "見た目で編集", disabled: !visualAvailable }, { value: "code", label: "コード編集" }]} /><Group gap="xs"><Button size="xs" variant="default" leftSection={<Icons.save size={IconSize.inline} />} disabled={!runtime || !selectedFile} onClick={save}>テンプレートを保存</Button></Group></Group>
       {editorMode === "visual" && visualAvailable ? <form onSubmit={visualForm.onSubmit(applyVisual)}><Grid>
-        <Grid.Col span={{ base: 12, sm: 7 }}><Stack gap="md"><Group grow><Select label="本文書体" data={[{ value: "serif", label: "明朝体" }, { value: "sans", label: "ゴシック体" }]} {...visualForm.getInputProps("fontFamily")} /><Select label="タイトル位置" data={[{ value: "left", label: "左揃え" }, { value: "center", label: "中央" }]} {...visualForm.getInputProps("titleAlign")} /></Group><Group grow><NumberInput label="文字サイズ" suffix=" px" min={12} max={28} {...visualForm.getInputProps("fontSize")} /><NumberInput label="ページ余白" suffix=" px" min={0} max={64} {...visualForm.getInputProps("pagePadding")} /></Group><LabeledSlider label="行間" value={visualForm.values.lineHeight} onChange={(value) => visualForm.setFieldValue("lineHeight", value)} min={1.2} max={2.6} step={0.1} /><Group grow><ColorInput label="本文色" {...visualForm.getInputProps("textColor")} /><ColorInput label="背景色" {...visualForm.getInputProps("backgroundColor")} /><ColorInput label="タグ色" {...visualForm.getInputProps("accentColor")} /></Group><LabeledSlider label="表紙の横幅 (%)" value={visualForm.values.coverWidth} onChange={(value) => visualForm.setFieldValue("coverWidth", value)} min={25} max={100} /><LabeledSlider label="表紙の角丸 (px)" value={visualForm.values.coverRadius} onChange={(value) => visualForm.setFieldValue("coverRadius", value)} min={0} max={32} /><Button type="submit" w="fit-content">見た目をコードへ反映</Button></Stack></Grid.Col>
+        <Grid.Col span={{ base: 12, sm: 7 }}><Stack gap="md"><Group grow><Select label="本文書体" data={[{ value: "serif", label: "明朝体" }, { value: "sans", label: "ゴシック体" }]} {...visualForm.getInputProps("fontFamily")} /><Select label="タイトル位置" data={[{ value: "left", label: "左揃え" }, { value: "center", label: "中央" }]} {...visualForm.getInputProps("titleAlign")} /></Group><Group grow><NumberInput label="文字サイズ" hideControls suffix=" px" min={12} max={28} {...visualForm.getInputProps("fontSize")} /><NumberInput label="ページ余白" hideControls suffix=" px" min={0} max={64} {...visualForm.getInputProps("pagePadding")} /></Group><LabeledSlider label="行間" value={visualForm.values.lineHeight} onChange={(value) => visualForm.setFieldValue("lineHeight", value)} min={1.2} max={2.6} step={0.1} /><Group grow><ColorInput label="本文色" {...visualForm.getInputProps("textColor")} /><ColorInput label="背景色" {...visualForm.getInputProps("backgroundColor")} /><ColorInput label="タグ色" {...visualForm.getInputProps("accentColor")} /></Group><LabeledSlider label="表紙の横幅 (%)" value={visualForm.values.coverWidth} onChange={(value) => visualForm.setFieldValue("coverWidth", value)} min={25} max={100} /><LabeledSlider label="表紙の角丸 (px)" value={visualForm.values.coverRadius} onChange={(value) => visualForm.setFieldValue("coverRadius", value)} min={0} max={32} /><Button type="submit" w="fit-content">見た目をコードへ反映</Button></Stack></Grid.Col>
         <Grid.Col span={{ base: 12, sm: 5 }}><Paper withBorder p="lg" className="epub-template-preview" style={{ fontFamily: visualForm.values.fontFamily === "serif" ? '"Yu Mincho", serif' : '"Yu Gothic UI", sans-serif', fontSize: visualForm.values.fontSize, lineHeight: visualForm.values.lineHeight, padding: visualForm.values.pagePadding, color: visualForm.values.textColor, background: visualForm.values.backgroundColor }}><Text component="h3" ta={visualForm.values.titleAlign} fw={700} m={0}>作品タイトル</Text><Text size="sm" mt="xs">作者名</Text><Box className="epub-template-preview__cover" my="md" mx="auto" style={{ width: `${visualForm.values.coverWidth}%`, borderRadius: visualForm.values.coverRadius }} /><Text>これは本文のプレビューです。文字サイズや行間、余白を確認しながら調整できます。</Text><Text mt="sm" style={{ color: visualForm.values.accentColor }}>#創作　#小説</Text></Paper></Grid.Col>
       </Grid></form> : <Grid><Grid.Col span={4}><Stack gap={4}>{files.data?.map((file) => <Button key={file.filename} variant={selectedFile === file.filename ? "light" : "subtle"} color="gray" size="compact-xs" justify="flex-start" onClick={() => loadFile(file.filename)}>{file.filename}</Button>)}</Stack></Grid.Col><Grid.Col span={8}>{selectedFile ? <Textarea autosize minRows={16} maxRows={28} value={content} onChange={(event) => setContent(event.currentTarget.value)} styles={{ input: { fontFamily: "var(--mantine-font-family-monospace)", fontSize: 12 } }} aria-label={`${selectedFile}の内容`} /> : <Text size="xs" c="dimmed">ファイルを選択してください</Text>}</Grid.Col></Grid>}
     </Stack>}

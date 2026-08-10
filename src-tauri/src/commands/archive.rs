@@ -4,10 +4,20 @@ use crate::database::{
 use crate::AppState;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use std::io::Write;
-use std::path::Path;
+use std::io::{Read, Write};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
+use std::sync::LazyLock;
 use tauri::Manager;
+
+static IMPORT_LOCK: LazyLock<tokio::sync::Mutex<()>> =
+    LazyLock::new(|| tokio::sync::Mutex::new(()));
+
+const MAX_BACKUP_ENTRIES: usize = 250_000;
+const MAX_BACKUP_ENTRY_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+const MAX_BACKUP_TOTAL_BYTES: u64 = 64 * 1024 * 1024 * 1024;
+const MAX_BACKUP_METADATA_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_BACKUP_COMPRESSION_RATIO: u64 = 250;
 
 /// パスがストレージ内にあるか検証するヘルパー (Zip Slip や Directory Traversal を防止)
 fn validate_path_in_storage(path: &str, storage_dir: &std::path::Path) -> Result<(), String> {
@@ -209,6 +219,25 @@ struct BackupMetadata {
     update_targets: Vec<UpdateTarget>,
 }
 
+#[derive(Serialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupInspection {
+    pub valid: bool,
+    pub error: Option<String>,
+    pub backup_version: Option<String>,
+    pub entry_count: usize,
+    pub compressed_bytes: u64,
+    pub expanded_bytes: u64,
+    pub required_free_bytes: u64,
+    pub available_free_bytes: Option<u64>,
+    pub work_count: usize,
+    pub person_count: usize,
+    pub series_count: usize,
+    pub version_count: usize,
+    pub asset_count: usize,
+    pub warnings: Vec<String>,
+}
+
 fn get_relative_path(full_path: &str, storage_dir: &Path) -> Option<String> {
     let full = Path::new(full_path);
     // canonicalize して比較できるようにする
@@ -222,24 +251,496 @@ fn get_relative_path(full_path: &str, storage_dir: &Path) -> Option<String> {
     }
 }
 
-fn backup_path_root(entry_name: &str) -> &'static str {
-    if entry_name.starts_with("profiles/") || entry_name.starts_with("series/") {
-        "app_data"
+fn validated_backup_relative_path(raw: &str) -> Result<PathBuf, String> {
+    // ZIP names are defined with '/' separators. Rejecting '\\' also makes an
+    // archive produced on Unix safe to import on Windows later.
+    if raw.is_empty()
+        || raw.contains('\\')
+        || raw.chars().any(char::is_control)
+        || raw.split('/').any(|segment| {
+            segment.is_empty()
+                || segment == "."
+                || segment == ".."
+                || segment.contains(':')
+                || segment.len() > 255
+                || windows_reserved_path_component(segment)
+        })
+    {
+        return Err(format!("Invalid backup relative path: {raw}"));
+    }
+
+    let path = Path::new(raw);
+    if !path
+        .components()
+        .all(|component| matches!(component, Component::Normal(_)))
+    {
+        return Err(format!("Invalid backup relative path: {raw}"));
+    }
+    Ok(path.to_path_buf())
+}
+
+fn windows_reserved_path_component(segment: &str) -> bool {
+    if segment.ends_with('.') || segment.ends_with(' ') {
+        return true;
+    }
+    let stem = segment
+        .split('.')
+        .next()
+        .unwrap_or(segment)
+        .to_ascii_uppercase();
+    matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || stem
+            .strip_prefix("COM")
+            .or_else(|| stem.strip_prefix("LPT"))
+            .is_some_and(|number| number.len() == 1 && matches!(number.as_bytes()[0], b'1'..=b'9'))
+}
+
+fn first_backup_component(path: &Path) -> Option<&str> {
+    path.components()
+        .next()
+        .and_then(|component| match component {
+            Component::Normal(value) => value.to_str(),
+            _ => None,
+        })
+}
+
+fn resolve_zip_import_path<'a>(
+    entry_name: &str,
+    storage_dir: &'a Path,
+    app_data_dir: &'a Path,
+) -> Result<(PathBuf, &'a Path), String> {
+    let relative = validated_backup_relative_path(entry_name)?;
+    let root = match first_backup_component(&relative) {
+        Some("profiles" | "series") => app_data_dir,
+        _ => storage_dir,
+    };
+    Ok((root.join(relative), root))
+}
+
+fn resolve_storage_metadata_path(raw: &str, storage_dir: &Path) -> Result<PathBuf, String> {
+    let relative = validated_backup_relative_path(raw)?;
+    if matches!(
+        first_backup_component(&relative),
+        Some("profiles" | "series")
+    ) {
+        return Err(format!(
+            "Invalid storage metadata path (reserved app-data root): {raw}"
+        ));
+    }
+    Ok(storage_dir.join(relative))
+}
+
+fn resolve_entity_metadata_path(
+    raw: &str,
+    expected_prefix: &str,
+    app_data_dir: &Path,
+) -> Result<PathBuf, String> {
+    let relative = validated_backup_relative_path(raw)?;
+    if first_backup_component(&relative) != Some(expected_prefix) {
+        return Err(format!(
+            "Invalid {expected_prefix} metadata path outside its expected root: {raw}"
+        ));
+    }
+    Ok(app_data_dir.join(relative))
+}
+
+fn canonical_path_is_within(path: &Path, root: &Path) -> Result<(), String> {
+    let canonical_root = root
+        .canonicalize()
+        .map_err(|e| format!("Failed to resolve import root: {e}"))?;
+    let canonical_path = path
+        .canonicalize()
+        .map_err(|e| format!("Failed to resolve import path: {e}"))?;
+    if !canonical_path.starts_with(&canonical_root) {
+        return Err("Security Exception: import path escapes its expected root".to_string());
+    }
+    Ok(())
+}
+
+fn validate_import_parent_before_create(outpath: &Path, root: &Path) -> Result<(), String> {
+    let mut existing = if outpath.exists() {
+        outpath
     } else {
-        "storage"
+        outpath
+            .parent()
+            .ok_or_else(|| "Invalid import path without a parent".to_string())?
+    };
+    while !existing.exists() {
+        existing = existing
+            .parent()
+            .ok_or_else(|| "Import path has no existing ancestor".to_string())?;
+    }
+    canonical_path_is_within(existing, root)
+}
+
+fn import_collision_key(path: &Path) -> String {
+    let normalized = path.to_string_lossy().replace('\\', "/");
+    if cfg!(windows) {
+        normalized.to_lowercase()
+    } else {
+        normalized
     }
 }
 
-fn resolve_import_path(
-    entry_name: &str,
+fn validate_backup_metadata_paths(
+    metadata: &BackupMetadata,
     storage_dir: &Path,
     app_data_dir: &Path,
-) -> std::path::PathBuf {
-    if backup_path_root(entry_name) == "app_data" {
-        app_data_dir.join(entry_name)
-    } else {
-        storage_dir.join(entry_name)
+) -> Result<(), String> {
+    for person in &metadata.people {
+        if let Some(path) = &person.relative_icon_path {
+            resolve_entity_metadata_path(path, "profiles", app_data_dir)?;
+        }
+        if let Some(path) = &person.relative_cover_path {
+            resolve_entity_metadata_path(path, "profiles", app_data_dir)?;
+        }
+        for version in &person.versions {
+            resolve_entity_metadata_path(&version.relative_json_path, "profiles", app_data_dir)?;
+        }
     }
+
+    for series in &metadata.series {
+        if let Some(path) = &series.relative_cover_path {
+            resolve_entity_metadata_path(path, "series", app_data_dir)?;
+        }
+        for version in &series.versions {
+            resolve_entity_metadata_path(&version.relative_json_path, "series", app_data_dir)?;
+        }
+    }
+
+    for entry in &metadata.entries {
+        if let Some(path) = &entry.relative_cover_path {
+            resolve_storage_metadata_path(path, storage_dir)?;
+        }
+        for version in &entry.versions {
+            resolve_storage_metadata_path(&version.relative_json_path, storage_dir)?;
+            if let Some(path) = &version.relative_original_json_path {
+                resolve_storage_metadata_path(path, storage_dir)?;
+            }
+        }
+        for asset in &entry.assets {
+            resolve_storage_metadata_path(&asset.relative_local_path, storage_dir)?;
+        }
+
+        // This fallback is used for old metadata without version records. Source
+        // identifiers are untrusted metadata too, so validate the derived path.
+        resolve_storage_metadata_path(
+            &format!(
+                "{}/{}/v{}/original.json",
+                entry.source, entry.source_id, entry.current_version
+            ),
+            storage_dir,
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_backup_metadata_files_exist(
+    metadata: &BackupMetadata,
+    storage_dir: &Path,
+    app_data_dir: &Path,
+) -> Result<(), String> {
+    let require_file = |path: PathBuf, label: &str| {
+        if path.is_file() {
+            Ok(())
+        } else {
+            Err(format!("Backup is missing {label}: {}", path.display()))
+        }
+    };
+    for person in &metadata.people {
+        for path in [
+            person.relative_icon_path.as_ref(),
+            person.relative_cover_path.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            require_file(
+                resolve_entity_metadata_path(path, "profiles", app_data_dir)?,
+                "person asset",
+            )?;
+        }
+        for version in &person.versions {
+            require_file(
+                resolve_entity_metadata_path(
+                    &version.relative_json_path,
+                    "profiles",
+                    app_data_dir,
+                )?,
+                "person metadata",
+            )?;
+        }
+    }
+    for series in &metadata.series {
+        if let Some(path) = &series.relative_cover_path {
+            require_file(
+                resolve_entity_metadata_path(path, "series", app_data_dir)?,
+                "series cover",
+            )?;
+        }
+        for version in &series.versions {
+            require_file(
+                resolve_entity_metadata_path(&version.relative_json_path, "series", app_data_dir)?,
+                "series metadata",
+            )?;
+        }
+    }
+    for entry in &metadata.entries {
+        if entry.versions.is_empty() {
+            return Err(format!(
+                "Work {}/{} has no version payload",
+                entry.source, entry.source_id
+            ));
+        }
+        if let Some(path) = &entry.relative_cover_path {
+            require_file(
+                resolve_storage_metadata_path(path, storage_dir)?,
+                "work cover",
+            )?;
+        }
+        for version in &entry.versions {
+            require_file(
+                resolve_storage_metadata_path(&version.relative_json_path, storage_dir)?,
+                "work metadata",
+            )?;
+            if let Some(path) = &version.relative_original_json_path {
+                require_file(
+                    resolve_storage_metadata_path(path, storage_dir)?,
+                    "work original metadata",
+                )?;
+            }
+        }
+        for asset in &entry.assets {
+            require_file(
+                resolve_storage_metadata_path(&asset.relative_local_path, storage_dir)?,
+                "work asset",
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn referenced_backup_paths(metadata: &BackupMetadata) -> Result<Vec<String>, String> {
+    let mut paths = Vec::new();
+    for person in &metadata.people {
+        paths.extend(person.relative_icon_path.iter().cloned());
+        paths.extend(person.relative_cover_path.iter().cloned());
+        paths.extend(
+            person
+                .versions
+                .iter()
+                .map(|version| version.relative_json_path.clone()),
+        );
+    }
+    for series in &metadata.series {
+        paths.extend(series.relative_cover_path.iter().cloned());
+        paths.extend(
+            series
+                .versions
+                .iter()
+                .map(|version| version.relative_json_path.clone()),
+        );
+    }
+    for entry in &metadata.entries {
+        if entry.versions.is_empty() {
+            return Err(format!(
+                "Work {}/{} has no version payload",
+                entry.source, entry.source_id
+            ));
+        }
+        paths.extend(entry.relative_cover_path.iter().cloned());
+        for version in &entry.versions {
+            paths.push(version.relative_json_path.clone());
+            paths.extend(version.relative_original_json_path.iter().cloned());
+        }
+        paths.extend(
+            entry
+                .assets
+                .iter()
+                .map(|asset| asset.relative_local_path.clone()),
+        );
+    }
+    for path in &paths {
+        validated_backup_relative_path(path)?;
+    }
+    Ok(paths)
+}
+
+fn preflight_backup_archive(archive: &mut zip::ZipArchive<std::fs::File>) -> Result<u64, String> {
+    if archive.is_empty() || archive.len() > MAX_BACKUP_ENTRIES {
+        return Err(format!(
+            "Backup entry count is outside the allowed quota: {}",
+            archive.len()
+        ));
+    }
+    let mut total = 0u64;
+    let mut metadata_count = 0usize;
+    let mut names = HashSet::new();
+    for index in 0..archive.len() {
+        let file = archive.by_index(index).map_err(|e| e.to_string())?;
+        let name = file.name().to_string();
+        validated_backup_relative_path(&name)
+            .map_err(|e| format!("Security Exception for zip entry {name}: {e}"))?;
+        if !names.insert(name.clone()) {
+            return Err(format!("Duplicate zip entry path: {name}"));
+        }
+        if file.is_dir() {
+            continue;
+        }
+        if file
+            .unix_mode()
+            .is_some_and(|mode| mode & 0o170000 == 0o120000)
+        {
+            return Err(format!(
+                "Symbolic links are not accepted in backups: {name}"
+            ));
+        }
+        let size = file.size();
+        let compressed = file.compressed_size();
+        if size > MAX_BACKUP_ENTRY_BYTES {
+            return Err(format!("Backup entry exceeds the per-file quota: {name}"));
+        }
+        if size > 1024 * 1024
+            && (compressed == 0 || size / compressed.max(1) > MAX_BACKUP_COMPRESSION_RATIO)
+        {
+            return Err(format!(
+                "Suspicious compression ratio in backup entry: {name}"
+            ));
+        }
+        total = total
+            .checked_add(size)
+            .ok_or_else(|| "Backup expanded-size overflow".to_string())?;
+        if total > MAX_BACKUP_TOTAL_BYTES {
+            return Err("Backup exceeds the expanded-size quota".to_string());
+        }
+        if name == "backup_metadata.json" {
+            metadata_count += 1;
+            if size > MAX_BACKUP_METADATA_BYTES {
+                return Err("Backup metadata exceeds its size quota".to_string());
+            }
+        }
+    }
+    if metadata_count != 1 {
+        return Err("Backup must contain exactly one backup_metadata.json".to_string());
+    }
+    Ok(total)
+}
+
+struct PromotedFile {
+    destination: PathBuf,
+    backup: Option<PathBuf>,
+}
+
+struct StagingGuard {
+    root: PathBuf,
+    armed: bool,
+}
+
+impl StagingGuard {
+    fn new(root: PathBuf) -> Self {
+        Self { root, armed: true }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for StagingGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+}
+
+struct PromotionGuard {
+    stage_root: PathBuf,
+    files: Vec<PromotedFile>,
+    committed: bool,
+}
+
+impl PromotionGuard {
+    fn commit(mut self) {
+        self.committed = true;
+        for file in &self.files {
+            if let Some(backup) = &file.backup {
+                let _ = std::fs::remove_file(backup);
+            }
+        }
+        let _ = std::fs::remove_dir_all(&self.stage_root);
+    }
+}
+
+impl Drop for PromotionGuard {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        for file in self.files.iter().rev() {
+            let _ = std::fs::remove_file(&file.destination);
+            if let Some(backup) = &file.backup {
+                let _ = std::fs::rename(backup, &file.destination);
+            }
+        }
+        let _ = std::fs::remove_dir_all(&self.stage_root);
+    }
+}
+
+fn promote_staged_files(
+    stage_root: &Path,
+    entries: &[(PathBuf, PathBuf)],
+) -> Result<PromotionGuard, String> {
+    let rollback = stage_root.join("rollback");
+    std::fs::create_dir_all(&rollback).map_err(|e| e.to_string())?;
+    let mut guard = PromotionGuard {
+        stage_root: stage_root.to_path_buf(),
+        files: Vec::with_capacity(entries.len()),
+        committed: false,
+    };
+    for (index, (staged, destination)) in entries.iter().enumerate() {
+        if !staged.is_file() {
+            return Err(format!(
+                "Staged backup file disappeared: {}",
+                staged.display()
+            ));
+        }
+        if let Some(parent) = destination.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        let backup = if destination.exists() {
+            if !destination.is_file() {
+                return Err(format!(
+                    "Restore destination is not a file: {}",
+                    destination.display()
+                ));
+            }
+            let backup = rollback.join(index.to_string());
+            std::fs::rename(destination, &backup).map_err(|e| {
+                format!(
+                    "Could not stage existing destination {}: {e}",
+                    destination.display()
+                )
+            })?;
+            Some(backup)
+        } else {
+            None
+        };
+        if let Err(error) = std::fs::rename(staged, destination) {
+            if let Some(backup) = &backup {
+                let _ = std::fs::rename(backup, destination);
+            }
+            return Err(format!(
+                "Could not promote restored file {}: {error}",
+                destination.display()
+            ));
+        }
+        guard.files.push(PromotedFile {
+            destination: destination.clone(),
+            backup,
+        });
+    }
+    Ok(guard)
 }
 
 fn add_zip_file_once(
@@ -363,6 +864,8 @@ fn all_backup_search_params() -> SearchV2Params {
         person_key: None,
         series_source: None,
         series_key: None,
+        offset: None,
+        ids_include: None,
         view_mode: Some("gallery".to_string()),
         projection: Some("libraryGallery".to_string()),
         search_mode: None,
@@ -506,6 +1009,15 @@ pub async fn export_zip_with_params_internal(
                 .cover_path
                 .as_ref()
                 .and_then(|p| get_relative_path(p, &storage));
+            if let (Some(path), Some(relative)) = (&dl.cover_path, &relative_cover_path) {
+                add_zip_file_once(
+                    &mut zip,
+                    options,
+                    &mut written_files,
+                    relative,
+                    Path::new(path),
+                )?;
+            }
 
             backup_entries.push(BackupEntry {
                 source: dl.source.clone(),
@@ -794,7 +1306,170 @@ pub async fn import_zip(app: tauri::AppHandle, zip_path: String) -> Result<i64, 
     import_zip_internal(state, zip_path).await
 }
 
+#[tauri::command]
+pub async fn inspect_backup(
+    app: tauri::AppHandle,
+    zip_path: String,
+) -> Result<BackupInspection, String> {
+    let state = app.state::<Arc<AppState>>().inner().clone();
+    let storage = state.db.storage_dir().to_path_buf();
+    let app_data = storage.parent().unwrap_or(storage.as_path()).to_path_buf();
+    tokio::task::spawn_blocking(move || inspect_backup_internal(&zip_path, &storage, &app_data))
+        .await
+        .map_err(|e| format!("Backup inspection thread panicked: {e}"))?
+}
+
+fn inspect_backup_internal(
+    zip_path: &str,
+    storage: &Path,
+    app_data: &Path,
+) -> Result<BackupInspection, String> {
+    let compressed_bytes = std::fs::metadata(zip_path)
+        .map(|meta| meta.len())
+        .unwrap_or(0);
+    let file = std::fs::File::open(zip_path).map_err(|e| e.to_string())?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
+    let entry_count = archive.len();
+    let expanded_bytes = match preflight_backup_archive(&mut archive) {
+        Ok(size) => size,
+        Err(error) => {
+            return Ok(BackupInspection {
+                valid: false,
+                error: Some(error),
+                backup_version: None,
+                entry_count,
+                compressed_bytes,
+                expanded_bytes: 0,
+                required_free_bytes: 0,
+                available_free_bytes: crate::database::queries::available_space_bytes(app_data),
+                work_count: 0,
+                person_count: 0,
+                series_count: 0,
+                version_count: 0,
+                asset_count: 0,
+                warnings: Vec::new(),
+            });
+        }
+    };
+    let mut archive_names = HashSet::new();
+    for index in 0..archive.len() {
+        let file = archive.by_index(index).map_err(|e| e.to_string())?;
+        if !file.is_dir() {
+            archive_names.insert(file.name().to_string());
+        }
+    }
+    let mut metadata_text = String::new();
+    archive
+        .by_name("backup_metadata.json")
+        .map_err(|e| e.to_string())?
+        .take(MAX_BACKUP_METADATA_BYTES + 1)
+        .read_to_string(&mut metadata_text)
+        .map_err(|e| e.to_string())?;
+    let metadata: BackupMetadata = match serde_json::from_str(&metadata_text) {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            return Ok(BackupInspection {
+                valid: false,
+                error: Some(format!("Backup metadata is invalid: {error}")),
+                backup_version: None,
+                entry_count,
+                compressed_bytes,
+                expanded_bytes,
+                required_free_bytes: 0,
+                available_free_bytes: crate::database::queries::available_space_bytes(app_data),
+                work_count: 0,
+                person_count: 0,
+                series_count: 0,
+                version_count: 0,
+                asset_count: 0,
+                warnings: Vec::new(),
+            });
+        }
+    };
+    if let Err(error) = validate_backup_metadata_paths(&metadata, storage, app_data) {
+        return Ok(BackupInspection {
+            valid: false,
+            error: Some(format!("Invalid backup metadata: {error}")),
+            backup_version: Some(metadata.version),
+            entry_count,
+            compressed_bytes,
+            expanded_bytes,
+            required_free_bytes: 0,
+            available_free_bytes: crate::database::queries::available_space_bytes(app_data),
+            work_count: metadata.entries.len(),
+            person_count: metadata.people.len(),
+            series_count: metadata.series.len(),
+            version_count: 0,
+            asset_count: 0,
+            warnings: Vec::new(),
+        });
+    }
+    let version_count = metadata
+        .entries
+        .iter()
+        .map(|entry| entry.versions.len())
+        .sum::<usize>()
+        + metadata
+            .people
+            .iter()
+            .map(|entry| entry.versions.len())
+            .sum::<usize>()
+        + metadata
+            .series
+            .iter()
+            .map(|entry| entry.versions.len())
+            .sum::<usize>();
+    let asset_count = metadata
+        .entries
+        .iter()
+        .map(|entry| entry.assets.len())
+        .sum();
+    let required_free_bytes = expanded_bytes
+        .saturating_add(expanded_bytes / 10)
+        .saturating_add(256 * 1024 * 1024);
+    let available_free_bytes = crate::database::queries::available_space_bytes(app_data);
+    let mut warnings = Vec::new();
+    if metadata.version != "3.0" {
+        warnings.push(format!(
+            "This backup uses format {}; the current format is 3.0",
+            metadata.version
+        ));
+    }
+    let reference_error = match referenced_backup_paths(&metadata) {
+        Ok(paths) => paths
+            .into_iter()
+            .find(|path| !archive_names.contains(path))
+            .map(|path| format!("Backup is missing a referenced file: {path}")),
+        Err(error) => Some(error),
+    };
+    let disk_error = available_free_bytes
+        .filter(|available| *available < required_free_bytes)
+        .map(|available| {
+            format!(
+                "Not enough free disk space for staging (required {required_free_bytes} bytes, available {available} bytes)"
+            )
+        });
+    let error = reference_error.or(disk_error);
+    Ok(BackupInspection {
+        valid: error.is_none(),
+        error,
+        backup_version: Some(metadata.version),
+        entry_count,
+        compressed_bytes,
+        expanded_bytes,
+        required_free_bytes,
+        available_free_bytes,
+        work_count: metadata.entries.len(),
+        person_count: metadata.people.len(),
+        series_count: metadata.series.len(),
+        version_count,
+        asset_count,
+        warnings,
+    })
+}
+
 pub async fn import_zip_internal(state: Arc<AppState>, zip_path: String) -> Result<i64, String> {
+    let _import_guard = IMPORT_LOCK.lock().await;
     let storage = state.db.storage_dir().to_path_buf();
     let app_data = storage.parent().unwrap_or(storage.as_path()).to_path_buf();
 
@@ -802,8 +1477,38 @@ pub async fn import_zip_internal(state: Arc<AppState>, zip_path: String) -> Resu
     tokio::task::spawn_blocking(move || {
         let file = std::fs::File::open(&zip_path).map_err(|e| e.to_string())?;
         let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
+        let expanded_bytes = preflight_backup_archive(&mut archive)?;
+        let required_free_bytes = expanded_bytes
+            .saturating_add(expanded_bytes / 10)
+            .saturating_add(256 * 1024 * 1024);
+        if let Some(available) = crate::database::queries::available_space_bytes(&app_data) {
+            if available < required_free_bytes {
+                return Err(format!(
+                    "Not enough free disk space for staging (required {required_free_bytes} bytes, available {available} bytes)"
+                ));
+            }
+        }
+        let stage_root = app_data.join(format!(
+            ".restore-staging-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let stage_storage = stage_root.join("downloads");
+        let stage_app_data = stage_root.join("app-data");
+        std::fs::create_dir_all(&stage_storage).map_err(|e| e.to_string())?;
+        std::fs::create_dir_all(&stage_app_data).map_err(|e| e.to_string())?;
+        let mut staging_cleanup = StagingGuard::new(stage_root.clone());
+
+        // Fail before touching the live library if the staging quota is
+        // obviously unreasonable for this installation. The hard quota above
+        // remains the final protection on platforms without a free-space API.
+        if expanded_bytes > MAX_BACKUP_TOTAL_BYTES {
+            return Err("Backup staging quota exceeded".to_string());
+        }
 
         let mut imported = 0i64;
+        let mut extracted_paths = HashSet::new();
+        let mut promotion_entries = Vec::new();
 
         // ZIP内のファイルを展開
         for i in 0..archive.len() {
@@ -812,45 +1517,57 @@ pub async fn import_zip_internal(state: Arc<AppState>, zip_path: String) -> Resu
                 continue;
             }
 
-            let entry_name = file.name();
-
-            // 1. パスの単純検証 (Zip Slip 防御)
-            if entry_name.contains("..") || entry_name.starts_with('/') || entry_name.starts_with('\\') {
-                return Err(format!(
-                    "Security Exception: Invalid zip entry path detected: {}",
-                    entry_name
-                ));
+            let entry_name = file.name().to_string();
+            let (outpath, root) = resolve_zip_import_path(&entry_name, &stage_storage, &stage_app_data)
+                .map_err(|e| format!("Security Exception for zip entry {entry_name}: {e}"))?;
+            if !extracted_paths.insert(import_collision_key(&outpath)) {
+                return Err(format!("Duplicate zip entry path: {entry_name}"));
             }
 
-            let outpath = resolve_import_path(entry_name, &storage, &app_data);
-
-            // 2. 正規化された物理パスによる厳密検証 (Zip Slip 完全防御)
+            // Verify the nearest existing ancestor before creating anything. This
+            // prevents a malicious archive from creating directories outside the
+            // root before the containment check runs. Existing symlinks/reparse
+            // points are resolved by canonicalize and rejected when they escape.
+            validate_import_parent_before_create(&outpath, root)
+                .map_err(|e| format!("Security Exception for zip entry {entry_name}: {e}"))?;
             if let Some(parent) = outpath.parent() {
                 std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-
-                // 親とアプリデータの実パスを取得して比較
-                let canon_parent = std::fs::canonicalize(parent)
-                    .map_err(|e| format!("Failed to resolve canonical parent path: {}", e))?;
-                let canon_app_data = std::fs::canonicalize(&app_data)
-                    .map_err(|e| format!("Failed to resolve canonical app data path: {}", e))?;
-
-                if !canon_parent.starts_with(&canon_app_data) {
-                    return Err(format!(
-                        "Security Exception: Zip entry attempts to escape app data boundaries: {}",
-                        entry_name
-                    ));
-                }
+                canonical_path_is_within(parent, root).map_err(|e| {
+                    format!("Security Exception for zip entry {entry_name}: {e}")
+                })?;
             }
 
             let mut outfile = std::fs::File::create(&outpath).map_err(|e| e.to_string())?;
             std::io::copy(&mut file, &mut outfile).map_err(|e| e.to_string())?;
+            outfile.sync_all().map_err(|e| e.to_string())?;
+            if entry_name != "backup_metadata.json" {
+                let (destination, _) = resolve_zip_import_path(&entry_name, &storage, &app_data)?;
+                promotion_entries.push((outpath, destination));
+            }
         }
 
         // 展開されたフォルダからDBに登録
-        let metadata_path = storage.join("backup_metadata.json");
+        let metadata_path = stage_storage.join("backup_metadata.json");
         if metadata_path.exists() {
             let metadata_str = std::fs::read_to_string(&metadata_path).map_err(|e| e.to_string())?;
-            let metadata: BackupMetadata = serde_json::from_str(&metadata_str).map_err(|e| e.to_string())?;
+            let metadata: BackupMetadata =
+                serde_json::from_str(&metadata_str).map_err(|e| e.to_string())?;
+            // Validate all metadata paths before any database row is mutated. ZIP
+            // entry validation alone is insufficient because these strings are
+            // independently supplied by backup_metadata.json.
+            validate_backup_metadata_paths(&metadata, &stage_storage, &stage_app_data)
+                .map_err(|e| format!("Invalid backup metadata: {e}"))?;
+            validate_backup_metadata_files_exist(&metadata, &stage_storage, &stage_app_data)
+                .map_err(|e| format!("Incomplete backup: {e}"))?;
+            // Re-validate the same paths against their final roots before any
+            // promotion. This also rejects a reserved-root mismatch.
+            validate_backup_metadata_paths(&metadata, &storage, &app_data)
+                .map_err(|e| format!("Invalid backup metadata: {e}"))?;
+
+            let promotion = promote_staged_files(&stage_root, &promotion_entries)?;
+            staging_cleanup.disarm();
+            state.db.begin_atomic_restore()?;
+            let restore_result = (|| -> Result<i64, String> {
 
             for person in &metadata.people {
                 let restored = crate::database::PersonEntry {
@@ -860,12 +1577,16 @@ pub async fn import_zip_internal(state: Arc<AppState>, zip_path: String) -> Resu
                     display_name: person.display_name.clone(),
                     icon_path: person
                         .relative_icon_path
-                        .as_ref()
-                        .map(|p| resolve_import_path(p, &storage, &app_data).to_string_lossy().to_string()),
+                        .as_deref()
+                        .map(|p| resolve_entity_metadata_path(p, "profiles", &app_data))
+                        .transpose()?
+                        .map(|p| p.to_string_lossy().to_string()),
                     cover_path: person
                         .relative_cover_path
-                        .as_ref()
-                        .map(|p| resolve_import_path(p, &storage, &app_data).to_string_lossy().to_string()),
+                        .as_deref()
+                        .map(|p| resolve_entity_metadata_path(p, "profiles", &app_data))
+                        .transpose()?
+                        .map(|p| p.to_string_lossy().to_string()),
                     description: person.description.clone(),
                     links_json: person.links_json.clone(),
                     content_hash: person.content_hash.clone(),
@@ -885,11 +1606,11 @@ pub async fn import_zip_internal(state: Arc<AppState>, zip_path: String) -> Resu
                         source_key: version.source_key.clone(),
                         version: version.version,
                         content_hash: version.content_hash.clone(),
-                        json_path: resolve_import_path(
+                        json_path: resolve_entity_metadata_path(
                             &version.relative_json_path,
-                            &storage,
+                            "profiles",
                             &app_data,
-                        )
+                        )?
                         .to_string_lossy()
                         .to_string(),
                         asset_count: version.asset_count,
@@ -909,8 +1630,10 @@ pub async fn import_zip_internal(state: Arc<AppState>, zip_path: String) -> Resu
                     description: series.description.clone(),
                     cover_path: series
                         .relative_cover_path
-                        .as_ref()
-                        .map(|p| resolve_import_path(p, &storage, &app_data).to_string_lossy().to_string()),
+                        .as_deref()
+                        .map(|p| resolve_entity_metadata_path(p, "series", &app_data))
+                        .transpose()?
+                        .map(|p| p.to_string_lossy().to_string()),
                     content_hash: series.content_hash.clone(),
                     current_version: series.current_version,
                     last_checked_at: series.last_checked_at.clone(),
@@ -928,11 +1651,11 @@ pub async fn import_zip_internal(state: Arc<AppState>, zip_path: String) -> Resu
                         source_key: version.source_key.clone(),
                         version: version.version,
                         content_hash: version.content_hash.clone(),
-                        json_path: resolve_import_path(
+                        json_path: resolve_entity_metadata_path(
                             &version.relative_json_path,
-                            &storage,
+                            "series",
                             &app_data,
-                        )
+                        )?
                         .to_string_lossy()
                         .to_string(),
                         asset_count: version.asset_count,
@@ -950,7 +1673,7 @@ pub async fn import_zip_internal(state: Arc<AppState>, zip_path: String) -> Resu
             for entry in &metadata.entries {
                 // 重複していたら、既存のものを完全に削除して上書きリストアする
                 if let Ok(Some(existing)) = state.db.get_download_by_source(&entry.source, &entry.source_id) {
-                    let _ = state.db.delete_download(existing.id);
+                    state.db.delete_download_record_for_restore(existing.id)?;
                 }
 
                 let latest_ver = entry
@@ -961,17 +1684,27 @@ pub async fn import_zip_internal(state: Arc<AppState>, zip_path: String) -> Resu
 
                 // 相対パスを現在の storage の絶対パスにマッピングし直す
                 let final_original_json_path = if let Some(latest_ver) = latest_ver {
-                    latest_ver.relative_original_json_path.as_ref()
-                        .map(|p| storage.join(p).to_string_lossy().to_string())
-                        .or_else(|| {
-                            // If relative_original_json_path is None, try to point it to original.json in the same folder if it exists
-                            let orig_p = storage.join(&latest_ver.relative_json_path).parent().unwrap().join("original.json");
-                            if orig_p.exists() {
-                                Some(orig_p.to_string_lossy().to_string())
-                            } else {
-                                None
-                            }
-                        })
+                    if let Some(path) = &latest_ver.relative_original_json_path {
+                        Some(
+                            resolve_storage_metadata_path(path, &storage)?
+                                .to_string_lossy()
+                                .to_string(),
+                        )
+                    } else {
+                        // If relative_original_json_path is absent, use an
+                        // original.json next to the already-validated JSON path.
+                        let json_path = resolve_storage_metadata_path(
+                            &latest_ver.relative_json_path,
+                            &storage,
+                        )?;
+                        let orig_p = json_path
+                            .parent()
+                            .ok_or_else(|| "Version JSON path has no parent".to_string())?
+                            .join("original.json");
+                        orig_p
+                            .exists()
+                            .then(|| orig_p.to_string_lossy().to_string())
+                    }
                 } else {
                     None
                 };
@@ -980,13 +1713,27 @@ pub async fn import_zip_internal(state: Arc<AppState>, zip_path: String) -> Resu
                     // Prefer using original.json for json_path as well!
                     orig.clone()
                 } else if let Some(latest_ver) = latest_ver {
-                    storage.join(&latest_ver.relative_json_path).to_string_lossy().to_string()
+                    resolve_storage_metadata_path(&latest_ver.relative_json_path, &storage)?
+                        .to_string_lossy()
+                        .to_string()
                 } else {
-                    storage.join(format!("{}/{}/v{}/original.json", entry.source, entry.source_id, entry.current_version)).to_string_lossy().to_string()
+                    resolve_storage_metadata_path(
+                        &format!(
+                            "{}/{}/v{}/original.json",
+                            entry.source, entry.source_id, entry.current_version
+                        ),
+                        &storage,
+                    )?
+                    .to_string_lossy()
+                    .to_string()
                 };
 
-                let final_cover_path = entry.relative_cover_path.as_ref()
-                    .map(|p| storage.join(p).to_string_lossy().to_string());
+                let final_cover_path = entry
+                    .relative_cover_path
+                    .as_deref()
+                    .map(|p| resolve_storage_metadata_path(p, &storage))
+                    .transpose()?
+                    .map(|p| p.to_string_lossy().to_string());
 
                 let new_dl = NewDownload {
                     source: entry.source.clone(),
@@ -1012,57 +1759,67 @@ pub async fn import_zip_internal(state: Arc<AppState>, zip_path: String) -> Resu
                     favorite: entry.favorite,
                 };
 
-                match state.db.upsert_download(&new_dl) {
-                    Ok(dl_id) => {
-                        imported += 1;
+                let dl_id = state.db.upsert_download(&new_dl)?;
+                imported += 1;
 
-                        for relation in &entry.relations {
-                            let _ = state.db.upsert_download_relation(
+                for relation in &entry.relations {
+                            state.db.upsert_download_relation(
                                 dl_id,
                                 &relation.relation_type,
                                 &relation.source,
                                 &relation.relation_id,
                                 &relation.relation_name,
-                            );
+                            )?;
                         }
 
                         for person in &entry.people {
-                            let _ = state.db.upsert_download_person(
+                            state.db.upsert_download_person(
                                 dl_id,
                                 &person.person_source,
                                 &person.person_key,
                                 &person.role,
                                 &person.display_name,
-                            );
+                            )?;
                         }
 
                         for series in &entry.series {
-                            let _ = state.db.upsert_download_series(
+                            state.db.upsert_download_series(
                                 dl_id,
                                 &series.series_source,
                                 &series.series_key,
                                 &series.title,
                                 series.content_order,
-                            );
+                            )?;
                         }
 
                         // バージョン履歴の復元
                         for v in &entry.versions {
-                            let ver_orig = v.relative_original_json_path.as_ref()
-                                .map(|p| storage.join(p).to_string_lossy().to_string())
-                                .or_else(|| {
-                                    let orig_p = storage.join(&v.relative_json_path).parent().unwrap().join("original.json");
-                                    if orig_p.exists() {
-                                        Some(orig_p.to_string_lossy().to_string())
-                                    } else {
-                                        None
-                                    }
-                                });
+                            let ver_orig = if let Some(path) = &v.relative_original_json_path {
+                                Some(
+                                    resolve_storage_metadata_path(path, &storage)?
+                                        .to_string_lossy()
+                                        .to_string(),
+                                )
+                            } else {
+                                let json_path = resolve_storage_metadata_path(
+                                    &v.relative_json_path,
+                                    &storage,
+                                )?;
+                                let orig_p = json_path
+                                    .parent()
+                                    .ok_or_else(|| "Version JSON path has no parent".to_string())?
+                                    .join("original.json");
+                                orig_p
+                                    .exists()
+                                    .then(|| orig_p.to_string_lossy().to_string())
+                            };
 
                             let ver_json = if let Some(ref orig) = ver_orig {
                                 orig.clone()
                             } else {
-                                storage.join(&v.relative_json_path).to_string_lossy().to_string()
+                                resolve_storage_metadata_path(&v.relative_json_path, &storage)?
+                                    .to_string_lossy()
+                                    .to_string()
                             };
 
                             let new_ver = NewVersion {
@@ -1078,12 +1835,17 @@ pub async fn import_zip_internal(state: Arc<AppState>, zip_path: String) -> Resu
                                 change_summary: v.change_summary.clone(),
                             };
 
-                            let _ = state.db.insert_version(&new_ver);
+                            state.db.insert_version(&new_ver)?;
                         }
 
                         // アセット情報の復元
                         for asset in &entry.assets {
-                            let asset_local = storage.join(&asset.relative_local_path).to_string_lossy().to_string();
+                            let asset_local = resolve_storage_metadata_path(
+                                &asset.relative_local_path,
+                                &storage,
+                            )?
+                            .to_string_lossy()
+                            .to_string();
 
                             let new_asset = NewAsset {
                                 download_id: dl_id,
@@ -1095,23 +1857,32 @@ pub async fn import_zip_internal(state: Arc<AppState>, zip_path: String) -> Resu
                                 file_size_bytes: asset.file_size_bytes,
                             };
 
-                            let _ = state.db.insert_asset(&new_asset);
+                            state.db.insert_asset(&new_asset)?;
                         }
 
-                        if let Err(e) = state.db.reindex_download(dl_id) {
-                            log::warn!("Failed to rebuild search index for restored download {}: {}", dl_id, e);
-                        }
-                    }
-                    Err(e) => {
-                        log::error!("Failed to restore backup download {}/{}: {}", entry.source, entry.source_id, e);
-                    }
+                if let Err(e) = state.db.reindex_download(dl_id) {
+                    log::warn!("Failed to rebuild search index for restored download {}: {}", dl_id, e);
                 }
             }
 
-            // バックアップメタデータファイルをクリーンアップ
-            let _ = std::fs::remove_file(&metadata_path);
-
-            Ok::<i64, String>(imported)
+                Ok::<i64, String>(imported)
+            })();
+            match restore_result {
+                Ok(count) => {
+                    if let Err(error) = state.db.commit_atomic_restore() {
+                        state.db.rollback_atomic_restore();
+                        return Err(error);
+                    }
+                    promotion.commit();
+                    Ok(count)
+                }
+                Err(error) => {
+                    state.db.rollback_atomic_restore();
+                    // Dropping the promotion guard restores overwritten files
+                    // and removes newly promoted files in reverse order.
+                    Err(error)
+                }
+            }
         } else {
             Err("Backup metadata file not found. Old backup formats are not supported in this version.".to_string())
         }
@@ -1474,6 +2245,177 @@ mod tests {
         path
     }
 
+    fn write_test_zip(path: &Path, entries: &[(&str, &[u8])]) {
+        let file = fs::File::create(path).unwrap();
+        let mut writer = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        for (name, contents) in entries {
+            writer.start_file(*name, options).unwrap();
+            writer.write_all(contents).unwrap();
+        }
+        writer.finish().unwrap();
+    }
+
+    #[test]
+    fn backup_paths_reject_cross_platform_traversal_and_wrong_roots() {
+        for path in [
+            "../outside.txt",
+            "safe/../../outside.txt",
+            "/absolute.txt",
+            r"C:/outside.txt",
+            r"safe\..\outside.txt",
+            "//server/share/file.txt",
+            "safe/./file.txt",
+            "safe//file.txt",
+            "safe/CON/file.txt",
+            "safe/NUL.txt",
+            "safe/trailing. ",
+        ] {
+            assert!(
+                validated_backup_relative_path(path).is_err(),
+                "unsafe path was accepted: {path}"
+            );
+        }
+
+        let base = create_temp_dir();
+        let storage = base.join("downloads");
+        fs::create_dir_all(&storage).unwrap();
+        assert!(resolve_storage_metadata_path("pixiv/1/v1/data.json", &storage).is_ok());
+        assert!(resolve_storage_metadata_path("profiles/pixiv/1/icon.png", &storage).is_err());
+        assert!(
+            resolve_entity_metadata_path("profiles/pixiv/1/data.json", "profiles", &base).is_ok()
+        );
+        assert!(
+            resolve_entity_metadata_path("series/pixiv/1/data.json", "profiles", &base).is_err()
+        );
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn preflight_rejects_zip_bomb_compression_ratio() {
+        let base = create_temp_dir();
+        let zip_path = base.join("bomb.zip");
+        let file = fs::File::create(&zip_path).unwrap();
+        let mut writer = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        writer.start_file("backup_metadata.json", options).unwrap();
+        writer.write_all(b"{}").unwrap();
+        writer
+            .start_file("pixiv/1/v1/original.json", options)
+            .unwrap();
+        writer.write_all(&vec![0u8; 2 * 1024 * 1024]).unwrap();
+        writer.finish().unwrap();
+
+        let file = fs::File::open(&zip_path).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        let error = preflight_backup_archive(&mut archive).unwrap_err();
+        assert!(error.contains("compression ratio"));
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn failed_promotion_rolls_back_overwritten_files() {
+        let base = create_temp_dir();
+        let stage = base.join("stage");
+        let live = base.join("live");
+        fs::create_dir_all(&stage).unwrap();
+        fs::create_dir_all(&live).unwrap();
+        let first_staged = stage.join("first-new");
+        let second_staged = stage.join("second-new");
+        let first_live = live.join("first");
+        let second_live = live.join("second");
+        fs::write(&first_staged, b"new").unwrap();
+        fs::write(&second_staged, b"new-second").unwrap();
+        fs::write(&first_live, b"old").unwrap();
+        fs::create_dir_all(&second_live).unwrap();
+
+        let result = promote_staged_files(
+            &stage,
+            &[
+                (first_staged, first_live.clone()),
+                (second_staged, second_live),
+            ],
+        );
+        assert!(result.is_err());
+        assert_eq!(fs::read(&first_live).unwrap(), b"old");
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test]
+    async fn import_rejects_zip_slip_before_creating_outside_directories() {
+        let base = create_temp_dir();
+        let storage = base.join("downloads");
+        let db = Database::open(&base.join("piep.db"), &storage).unwrap();
+        let state = Arc::new(AppState { db });
+        let zip_path = base.join("malicious.zip");
+        let outside_name = format!("{}_outside", base.file_name().unwrap().to_string_lossy());
+        let outside_path = base.parent().unwrap().join(&outside_name);
+        let malicious_name = format!("../{outside_name}/escaped.txt");
+        write_test_zip(&zip_path, &[(malicious_name.as_str(), b"owned")]);
+
+        let error = import_zip_internal(state, zip_path.to_string_lossy().to_string())
+            .await
+            .unwrap_err();
+        assert!(error.contains("Security Exception"));
+        assert!(!outside_path.exists());
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test]
+    async fn import_rejects_traversal_in_metadata_before_database_mutation() {
+        let base = create_temp_dir();
+        let storage = base.join("downloads");
+        let db = Database::open(&base.join("piep.db"), &storage).unwrap();
+        let state = Arc::new(AppState { db });
+        let zip_path = base.join("malicious_metadata.zip");
+        let metadata = BackupMetadata {
+            version: "1".to_string(),
+            created_at: "2026-08-09T00:00:00Z".to_string(),
+            entries: vec![],
+            people: vec![BackupPerson {
+                source: "pixiv".to_string(),
+                source_key: "attacker".to_string(),
+                display_name: "attacker".to_string(),
+                relative_icon_path: Some("../outside.png".to_string()),
+                relative_cover_path: None,
+                description: None,
+                links_json: None,
+                content_hash: None,
+                current_version: 1,
+                last_checked_at: None,
+                last_fetched_at: None,
+                created_at: "2026-08-09T00:00:00Z".to_string(),
+                updated_at: "2026-08-09T00:00:00Z".to_string(),
+                versions: vec![],
+            }],
+            series: vec![],
+            update_targets: vec![],
+        };
+        let metadata_json = serde_json::to_vec(&metadata).unwrap();
+        write_test_zip(
+            &zip_path,
+            &[("backup_metadata.json", metadata_json.as_slice())],
+        );
+
+        let error = import_zip_internal(state.clone(), zip_path.to_string_lossy().to_string())
+            .await
+            .unwrap_err();
+        assert!(error.contains("Invalid backup metadata"));
+        assert!(state.db.get_person("pixiv", "attacker").is_err());
+        assert!(!fs::read_dir(&base)
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".restore-staging-")
+            }));
+        drop(state);
+        fs::remove_dir_all(base).unwrap();
+    }
+
     #[tokio::test]
     async fn test_export_and_import_integration() {
         // --- 1. テスト環境 (送信側) のセットアップ ---
@@ -1497,10 +2439,12 @@ mod tests {
         let v1_json_path = v1_dir.join("data.json");
         let v2_json_path = v2_dir.join("data.json");
         let v2_orig_json_path = v2_dir.join("original.json");
+        let cover_path = v2_dir.join("cover.jpg");
 
         fs::write(&v1_json_path, b"{\"title\":\"Ver 1 Title\"}").unwrap();
         fs::write(&v2_json_path, b"{\"title\":\"Ver 2 Title\"}").unwrap();
         fs::write(&v2_orig_json_path, b"{\"original_info\":\"something\"}").unwrap();
+        fs::write(&cover_path, b"cover bytes").unwrap();
 
         // アセットフォルダと物理ファイルの作成
         let asset_dir = v2_dir.join("data_assets").join("illustration");
@@ -1518,7 +2462,7 @@ mod tests {
             content_type: "novel".to_string(),
             tags: vec!["Tag1".to_string(), "Tag2".to_string()],
             excerpt: Some("あらすじ".to_string()),
-            cover_path: None,
+            cover_path: Some(cover_path.to_string_lossy().to_string()),
             json_path: v2_json_path.to_string_lossy().to_string(),
             original_json_path: Some(v2_orig_json_path.to_string_lossy().to_string()),
             asset_count: 1,
@@ -1601,6 +2545,18 @@ mod tests {
         let db_new = Database::open(&db_path_new, &storage_dir_new).unwrap();
         let state_new = Arc::new(AppState { db: db_new });
 
+        let inspection =
+            inspect_backup_internal(&zip_path.to_string_lossy(), &storage_dir_new, &base_dir_new)
+                .unwrap();
+        assert!(
+            inspection.valid,
+            "inspection failed: {:?}",
+            inspection.error
+        );
+        assert_eq!(inspection.work_count, 1);
+        assert_eq!(inspection.version_count, 2);
+        assert_eq!(inspection.asset_count, 1);
+
         // --- 4. バックアップインポートの実行 ---
         let count = import_zip_internal(state_new.clone(), zip_path.to_string_lossy().to_string())
             .await
@@ -1615,6 +2571,10 @@ mod tests {
             .unwrap();
         assert_eq!(restored_dl.title, "テスト小説");
         assert_eq!(restored_dl.author_name, "テスト著者");
+        assert!(restored_dl
+            .cover_path
+            .as_deref()
+            .is_some_and(|path| Path::new(path).is_file()));
         assert!(restored_dl.favorite, "Favorite flag must be restored");
         assert!(
             restored_dl.watch_updates,

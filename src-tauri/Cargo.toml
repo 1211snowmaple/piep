@@ -1,6 +1,6 @@
 [package]
 name = "piep"
-version = "0.2.0"
+version = "0.4.0"
 description = "Local creative library for Pixiv and FANBOX"
 authors = ["1211snowmaple"]
 edition = "2021"
@@ -57,6 +57,10 @@ ort = { version = "2.0.0-rc.12", features = ["directml"] }
 rayon = "1.10"
 hnsw_rs = "0.3.4"
 parking_lot = "0.12.5"
+
+[target.'cfg(windows)'.dependencies]
+webview2-com = "0.38.2"
+windows = { version = "0.61.3", features = ["Win32_UI_Input_KeyboardAndMouse"] }
 
 [profile.release]
 opt-level = 3     # Optimize preview builds for UX speed over binary size

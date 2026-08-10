@@ -3,7 +3,7 @@
 use crate::epub::intermediate::*;
 use minijinja::{context, Environment, Value as MjValue};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 
 // ============================================================
 // デフォルトテンプレート (バイナリ埋め込み)
@@ -72,6 +72,7 @@ impl TemplateManager {
     }
 
     pub fn initialize_defaults(&self) -> Result<(), String> {
+        std::fs::create_dir_all(&self.templates_dir).map_err(|e| e.to_string())?;
         let default_dir = self.templates_dir.join("default");
         if !default_dir.exists() {
             std::fs::create_dir_all(&default_dir).map_err(|e| e.to_string())?;
@@ -100,6 +101,11 @@ impl TemplateManager {
             for entry in entries.flatten() {
                 if entry.path().is_dir() {
                     let name = entry.file_name().to_string_lossy().to_string();
+                    if validate_template_name(&name).is_err()
+                        || self.existing_template_dir(&name).is_err()
+                    {
+                        continue;
+                    }
                     let is_builtin = name == "default" || name == "pixiv";
                     let file_count = std::fs::read_dir(entry.path())
                         .map(|e| e.flatten().filter(|f| f.path().is_file()).count() as u32)
@@ -117,16 +123,18 @@ impl TemplateManager {
     }
 
     pub fn get_template_files(&self, template_name: &str) -> Result<Vec<TemplateFile>, String> {
-        let dir = self.templates_dir.join(template_name);
-        if !dir.exists() {
-            return Err(format!("テンプレート '{}' が見つかりません", template_name));
-        }
+        let dir = self.existing_template_dir(template_name)?;
         let mut files = Vec::new();
         if let Ok(entries) = std::fs::read_dir(&dir) {
             for entry in entries.flatten() {
-                if entry.path().is_file() {
+                let filename = entry.file_name().to_string_lossy().to_string();
+                if validate_template_filename(&filename).is_ok()
+                    && self
+                        .existing_template_file(template_name, &filename)
+                        .is_ok()
+                {
                     files.push(TemplateFile {
-                        filename: entry.file_name().to_string_lossy().to_string(),
+                        filename,
                         size_bytes: entry.metadata().map(|m| m.len()).unwrap_or(0),
                     });
                 }
@@ -141,7 +149,8 @@ impl TemplateManager {
         template_name: &str,
         filename: &str,
     ) -> Result<String, String> {
-        std::fs::read_to_string(self.templates_dir.join(template_name).join(filename))
+        let path = self.existing_template_file(template_name, filename)?;
+        std::fs::read_to_string(path)
             .map_err(|e| format!("テンプレートファイルの読み込みに失敗: {}", e))
     }
 
@@ -151,20 +160,24 @@ impl TemplateManager {
         filename: &str,
         content: &str,
     ) -> Result<(), String> {
-        let dir = self.templates_dir.join(template_name);
-        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-        std::fs::write(dir.join(filename), content).map_err(|e| format!("保存に失敗: {}", e))
+        validate_template_name(template_name)?;
+        if is_builtin_template(template_name) {
+            return Err("ビルトインテンプレートは変更できません".to_string());
+        }
+        let path = self.existing_template_file(template_name, filename)?;
+        std::fs::write(path, content).map_err(|e| format!("保存に失敗: {}", e))
     }
 
     pub fn create_template(&self, template_name: &str) -> Result<(), String> {
+        validate_template_name(template_name)?;
+        if is_builtin_template(template_name) {
+            return Err("ビルトイン名は新規テンプレートに使用できません".to_string());
+        }
         let dest = self.templates_dir.join(template_name);
         if dest.exists() {
             return Err(format!("テンプレート '{}' は既に存在します", template_name));
         }
-        let source = self.templates_dir.join("default");
-        if !source.exists() {
-            return Err("デフォルトテンプレートが見つかりません".into());
-        }
+        let source = self.existing_template_dir("default")?;
         std::fs::create_dir_all(&dest).map_err(|e| e.to_string())?;
         if let Ok(entries) = std::fs::read_dir(&source) {
             for entry in entries.flatten() {
@@ -178,13 +191,11 @@ impl TemplateManager {
     }
 
     pub fn delete_template(&self, template_name: &str) -> Result<(), String> {
-        if template_name == "default" || template_name == "pixiv" {
+        validate_template_name(template_name)?;
+        if is_builtin_template(template_name) {
             return Err("ビルトインテンプレートは削除できません".into());
         }
-        let dir = self.templates_dir.join(template_name);
-        if !dir.exists() {
-            return Err(format!("テンプレート '{}' が見つかりません", template_name));
-        }
+        let dir = self.existing_template_dir(template_name)?;
         std::fs::remove_dir_all(&dir).map_err(|e| format!("削除に失敗: {}", e))
     }
 
@@ -193,13 +204,13 @@ impl TemplateManager {
         template_name: &str,
         filename: &str,
     ) -> Result<String, String> {
-        let primary = self.templates_dir.join(template_name).join(filename);
-        if primary.exists() {
+        validate_template_name(template_name)?;
+        validate_template_filename(filename)?;
+        if let Ok(primary) = self.existing_template_file(template_name, filename) {
             return std::fs::read_to_string(&primary)
                 .map_err(|e| format!("テンプレート読み込みエラー: {}", e));
         }
-        let fallback = self.templates_dir.join("default").join(filename);
-        if fallback.exists() {
+        if let Ok(fallback) = self.existing_template_file("default", filename) {
             return std::fs::read_to_string(&fallback)
                 .map_err(|e| format!("テンプレート読み込みエラー: {}", e));
         }
@@ -245,6 +256,88 @@ impl TemplateManager {
 
         Ok(contents)
     }
+
+    fn existing_template_dir(&self, template_name: &str) -> Result<PathBuf, String> {
+        validate_template_name(template_name)?;
+        let root = self
+            .templates_dir
+            .canonicalize()
+            .map_err(|e| format!("テンプレートルートの解決に失敗: {e}"))?;
+        let lexical = self.templates_dir.join(template_name);
+        let metadata = std::fs::symlink_metadata(&lexical)
+            .map_err(|_| format!("テンプレート '{}' が見つかりません", template_name))?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err("テンプレートディレクトリが不正です".to_string());
+        }
+        let dir = lexical
+            .canonicalize()
+            .map_err(|e| format!("テンプレートパスの解決に失敗: {e}"))?;
+        if dir.parent() != Some(root.as_path()) {
+            return Err("テンプレートパスがテンプレートルート外です".to_string());
+        }
+        Ok(dir)
+    }
+
+    fn existing_template_file(
+        &self,
+        template_name: &str,
+        filename: &str,
+    ) -> Result<PathBuf, String> {
+        validate_template_filename(filename)?;
+        let dir = self.existing_template_dir(template_name)?;
+        let lexical = dir.join(filename);
+        let metadata = std::fs::symlink_metadata(&lexical)
+            .map_err(|_| format!("テンプレートファイル '{}' が見つかりません", filename))?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err("テンプレートファイルが不正です".to_string());
+        }
+        let file = lexical
+            .canonicalize()
+            .map_err(|e| format!("テンプレートファイルの解決に失敗: {e}"))?;
+        if file.parent() != Some(dir.as_path()) {
+            return Err("テンプレートファイルがテンプレート外です".to_string());
+        }
+        Ok(file)
+    }
+}
+
+fn is_builtin_template(name: &str) -> bool {
+    matches!(name, "default" | "pixiv")
+}
+
+fn validate_template_name(name: &str) -> Result<(), String> {
+    if name.is_empty()
+        || name.len() > 64
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        return Err("テンプレート名は64文字以内の英数字・_・-のみ使用できます".to_string());
+    }
+    Ok(())
+}
+
+fn validate_template_filename(filename: &str) -> Result<(), String> {
+    let path = Path::new(filename);
+    let mut components = path.components();
+    if !matches!(components.next(), Some(Component::Normal(_))) || components.next().is_some() {
+        return Err("テンプレートファイル名にはディレクトリを指定できません".to_string());
+    }
+    if filename.is_empty()
+        || filename.len() > 128
+        || !filename
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+        || !matches!(
+            filename,
+            value if value.ends_with(".css.j2")
+                || value.ends_with(".xhtml.j2")
+                || value.ends_with(".opf.j2")
+        )
+    {
+        return Err("許可されていないテンプレートファイル名です".to_string());
+    }
+    Ok(())
 }
 
 // ============================================================
@@ -442,4 +535,65 @@ fn strip_html_tags(html: &str) -> String {
         }
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn manager() -> (PathBuf, TemplateManager) {
+        let root = std::env::temp_dir().join(format!("piep_template_{}", rand::random::<u64>()));
+        let templates = root.join("templates");
+        let manager = TemplateManager::new(templates);
+        manager.initialize_defaults().unwrap();
+        (root, manager)
+    }
+
+    #[test]
+    fn template_paths_cannot_escape_the_template_root() {
+        let (root, manager) = manager();
+        let outside = root.join("outside.xhtml.j2");
+        fs::write(&outside, "secret").unwrap();
+
+        assert!(manager.get_template_files("..").is_err());
+        assert!(manager
+            .read_template_file("default", "../../outside.xhtml.j2")
+            .is_err());
+        assert!(manager
+            .save_template_file("custom", "C:\\outside.xhtml.j2", "overwrite")
+            .is_err());
+        assert!(manager.create_template("../escape").is_err());
+        assert!(manager.delete_template("..").is_err());
+        assert_eq!(fs::read_to_string(&outside).unwrap(), "secret");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn builtins_are_read_only_and_custom_templates_edit_existing_files_only() {
+        let (root, manager) = manager();
+        assert!(manager
+            .save_template_file("default", "style.css.j2", "changed")
+            .is_err());
+
+        manager.create_template("my_template-1").unwrap();
+        manager
+            .save_template_file("my_template-1", "style.css.j2", "body {}")
+            .unwrap();
+        assert_eq!(
+            manager
+                .read_template_file("my_template-1", "style.css.j2")
+                .unwrap(),
+            "body {}"
+        );
+        assert!(manager
+            .save_template_file("my_template-1", "new.xhtml.j2", "new")
+            .is_err());
+        assert!(manager
+            .save_template_file("my_template-1", "notes.txt", "new")
+            .is_err());
+
+        let _ = fs::remove_dir_all(root);
+    }
 }

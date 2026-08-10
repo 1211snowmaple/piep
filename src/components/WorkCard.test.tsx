@@ -33,13 +33,64 @@ describe("WorkCard", () => {
     expect(window.location.hash).toBe("#/works/101");
   });
 
-  it("toggles selection instead of navigating in selection mode", () => {
+  it("opens the work from non-control card content", () => {
+    window.location.hash = "#/library";
+    renderCard();
+
+    fireEvent.click(screen.getByText("雨音が止んだ午後、閉館前の図書室で二人はもう一度出会った。"));
+
+    expect(window.location.hash).toBe("#/works/101");
+  });
+
+  it("keeps the compact row surface clickable without stealing creator clicks", () => {
+    window.location.hash = "#/library";
+    const row = renderCard({ compact: true });
+    fireEvent.click(screen.getByLabelText("雨上がりの図書室で（表紙なし）"));
+    expect(window.location.hash).toBe("#/works/101");
+    row.unmount();
+
+    window.location.hash = "#/library";
+    renderCard({ compact: true });
+    fireEvent.click(screen.getByRole("link", { name: "青葉しおりの作品を見る" }));
+    expect(window.location.hash).toBe("#/people/pixiv/8001234");
+  });
+
+  it("makes selection the only interactive action in selection mode", () => {
     const onSelect = vi.fn();
     window.location.hash = "#/library";
-    renderCard({ selectionMode: true, selected: false, onSelect });
-    fireEvent.keyDown(screen.getByRole("link", { name: /雨上がりの図書室でを開く/ }), { key: " " });
+    const view = renderCard({ selectionMode: true, selected: false, onSelect });
+    const toggle = screen.getByRole("button", { name: /雨上がりの図書室でを選択/ });
+    expect(toggle.closest("[inert]")).toBeNull();
+    expect(view.container.querySelector(".work-card__body")).toHaveAttribute("inert");
+    expect(view.container.querySelector(".work-card__footer")).toHaveAttribute("inert");
+    expect(screen.queryByRole("link")).toBeNull();
+    expect(screen.getAllByRole("button")).toEqual([toggle]);
+
+    fireEvent.click(screen.getByText("青葉しおり"));
     expect(onSelect).toHaveBeenCalledWith(demoWorks[0].id, true);
     expect(window.location.hash).toBe("#/library");
+  });
+
+  it("shows a clear selected state and lets the selection control undo it", () => {
+    const onSelect = vi.fn();
+    const view = renderCard({ selectionMode: true, selected: true, onSelect });
+
+    expect(view.container.querySelector(".work-card")).toHaveAttribute("data-selected", "true");
+    const toggle = screen.getByRole("button", { name: /雨上がりの図書室でを選択解除/ });
+    expect(toggle).toHaveAttribute("aria-pressed", "true");
+    fireEvent.click(toggle);
+    expect(onSelect).toHaveBeenCalledWith(demoWorks[0].id, false);
+  });
+
+  it("keeps only the compact selection toggle in the tab order", () => {
+    const view = renderCard({ compact: true, selectionMode: true, onSelect: vi.fn() });
+    const toggle = screen.getByRole("button", { name: /雨上がりの図書室でを選択/ });
+    expect(toggle.closest("[inert]")).toBeNull();
+    expect(view.container.querySelector(".work-row__main")).toHaveAttribute("inert");
+    expect(view.container.querySelector(".work-row__tags")).toHaveAttribute("inert");
+    expect(view.container.querySelector(".work-row__facts")).toHaveAttribute("inert");
+    expect(screen.queryByRole("link")).toBeNull();
+    expect(screen.getAllByRole("button")).toEqual([toggle]);
   });
 
   it("filters the library by a tag without opening the work", () => {
@@ -78,6 +129,7 @@ describe("WorkCard", () => {
     renderCard({ work: { ...demoWorks[0], source: "fanbox", coverPath: null } });
 
     expect(screen.getByLabelText("雨上がりの図書室で（表紙なし）")).toBeInTheDocument();
-    expect(screen.getByText("FANBOX")).toBeInTheDocument();
+    expect(screen.getByLabelText("FANBOX")).toBeInTheDocument();
+    expect(screen.queryByText("FANBOX")).toBeNull();
   });
 });

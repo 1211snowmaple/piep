@@ -10,6 +10,7 @@ import {
   Divider,
   Group,
   Loader,
+  Menu,
   Progress,
   ScrollArea,
   SegmentedControl,
@@ -23,27 +24,7 @@ import {
 import { notifications } from "@mantine/notifications";
 import { useLocalStorage } from "@mantine/hooks";
 import { useQueryClient } from "@tanstack/react-query";
-import {
-  ArrowLeft,
-  ArrowRight,
-  Check,
-  CircleAlert,
-  Download,
-  ExternalLink,
-  Globe2,
-  GripVertical,
-  Home,
-  LibraryBig,
-  Link2,
-  ListChecks,
-  LockKeyhole,
-  PanelRightClose,
-  PanelRightOpen,
-  ClipboardPaste,
-  RotateCw,
-  Search,
-  X,
-} from "lucide-react";
+import { Icons, IconSize } from "@/lib/icons";
 import { useAppNavigate, useAppSearchParams, useRouteParams } from "@/app/router";
 import {
   detectDownloadTarget,
@@ -61,14 +42,21 @@ import { registerUnsavedGuard } from "@/lib/unsavedGuard";
 import { useEmbeddedBrowserOverlay } from "@/features/browser/useEmbeddedBrowserOverlay";
 import {
   closeEmbeddedBrowser,
+  closeStandaloneBrowser,
   destroyEmbeddedBrowser,
   getEmbeddedBrowserUrl,
+  getStandaloneBrowserUrl,
   goBackEmbeddedBrowser,
   goForwardEmbeddedBrowser,
   navigateEmbeddedBrowser,
   openEmbeddedBrowser,
+  openStandaloneBrowser,
   reloadEmbeddedBrowser,
   setEmbeddedBrowserBounds,
+  setEmbeddedBrowserVisible,
+  type BrowserAcceleratorEvent,
+  type StandaloneBrowserClosedEvent,
+  type StandaloneBrowserUrlEvent,
 } from "@/services/browserApi";
 import { getDownloadBySource, isTauriRuntime } from "@/services/dbApi";
 import {
@@ -81,9 +69,9 @@ import {
   fetchPixivUserNovels,
 } from "@/services/downloadApi";
 import { onTauriEvent } from "@/services/eventBus";
-import { openExternalUrl } from "@/services/openerApi";
 import { store } from "@/store";
 import type { DownloadEntry } from "@/types/library";
+import { requestOperationCancel, startOperation, type OperationController } from "@/features/jobs/operationJobs";
 
 type SaveSource = "pixiv" | "fanbox";
 
@@ -106,11 +94,25 @@ export default function SavePage() {
   const [authConnected, setAuthConnected] = useState<boolean | null>(null);
   const [candidateWidth, setCandidateWidth] = useLocalStorage({ key: "piep.save-candidate-width", defaultValue: 360 });
   const [candidateCollapsed, setCandidateCollapsed] = useState(false);
+  // While the large window is open the in-app pane hands its job over to it:
+  // two live sessions on the same provider would fight over the login state,
+  // and the native child WebView would still paint over the app.
+  const [detached, setDetached] = useState(false);
+  const [history, setHistory] = useState<string[]>([]);
   const browserViewportRef = useRef<HTMLDivElement>(null);
   const layoutRef = useRef<HTMLDivElement>(null);
   const addressFocusedRef = useRef(false);
+  const acceleratorHandlerRef = useRef<(payload: BrowserAcceleratorEvent) => void>(() => undefined);
+  const saveOperationRef = useRef<OperationController | null>(null);
 
-  useEmbeddedBrowserOverlay(browserViewportRef, runtime);
+  useEmbeddedBrowserOverlay(browserViewportRef, runtime && !detached);
+
+  // A page is only worth remembering once, and only the most recent handful are
+  // worth offering back.
+  const rememberVisit = useCallback((url: string) => {
+    if (!url || url === "about:blank") return;
+    setHistory((current) => [url, ...current.filter((item) => item !== url)].slice(0, 24));
+  }, []);
 
   const readBounds = useCallback(() => {
     const element = browserViewportRef.current;
@@ -141,7 +143,12 @@ export default function SavePage() {
   // Comparing against the last applied rectangle makes every call cheap enough
   // to also run on a timer, so any drift corrects itself.
   const appliedBoundsRef = useRef<string>("");
+  const detachedRef = useRef(detached);
+  detachedRef.current = detached;
+  const currentUrlRef = useRef(currentUrl);
+  currentUrlRef.current = currentUrl;
   const syncBrowserBounds = useCallback(() => {
+    if (detachedRef.current) return;
     const bounds = readBounds();
     if (!bounds) return;
     const key = `${bounds.x},${bounds.y},${bounds.width},${bounds.height}`;
@@ -156,8 +163,14 @@ export default function SavePage() {
     let cancelled = false;
     const home = searchParams.get("url") || getProvider(source).homeUrl || "https://www.pixiv.net/";
     setCurrentUrl(home); setAddress(home); setItems([]); setDownloadType(null); setLastAnalysisUrl(null);
-    (source === "pixiv" ? store.get<string>("pixiv_refresh_token") : store.get<string>("fanbox_session_id")).then((value) => { if (!cancelled) setAuthConnected(Boolean(value)); });
-    if (runtime) positionBrowser(home).catch((error) => notifications.show({ color: "red", title: "内蔵ブラウザを開けません", message: errorMessage(error) }));
+    if (runtime) {
+      (source === "pixiv" ? store.get<string>("pixiv_refresh_token") : store.get<string>("fanbox_session_id"))
+        .then((value) => { if (!cancelled) setAuthConnected(Boolean(value)); })
+        .catch(() => { if (!cancelled) setAuthConnected(false); });
+      positionBrowser(home).catch((error) => notifications.show({ color: "red", title: "内蔵ブラウザを開けません", message: errorMessage(error) }));
+    } else {
+      setAuthConnected(false);
+    }
     return () => { cancelled = true; };
   }, [positionBrowser, runtime, searchParams, source]);
   useEffect(() => {
@@ -181,13 +194,34 @@ export default function SavePage() {
     // otherwise a background URL refresh wipes what they are typing.
     const applyUrl = (url: string) => {
       setCurrentUrl(url);
+      rememberVisit(url);
       if (!addressFocusedRef.current) setAddress(url);
     };
     let dispose: (() => void) | undefined;
+    let disposeAccelerator: (() => void) | undefined;
+    let disposeStandaloneUrl: (() => void) | undefined;
+    let disposeStandaloneClosed: (() => void) | undefined;
     onTauriEvent<string>("url-changed", (event) => applyUrl(event.payload)).then((fn) => { dispose = fn; }).catch(() => undefined);
+    onTauriEvent<BrowserAcceleratorEvent>("browser-accelerator", (event) => acceleratorHandlerRef.current(event.payload))
+      .then((fn) => { disposeAccelerator = fn; })
+      .catch(() => undefined);
+    // Tracking the large window's page live is what lets the candidate sidebar
+    // work against it: "候補を取得" reads the same currentUrl either way.
+    onTauriEvent<StandaloneBrowserUrlEvent>("standalone-browser-url-changed", (event) => {
+      if (event.payload.source !== source) return;
+      applyUrl(event.payload.url);
+    }).then((fn) => { disposeStandaloneUrl = fn; }).catch(() => undefined);
+    onTauriEvent<StandaloneBrowserClosedEvent>("standalone-browser-closed", (event) => {
+      if (event.payload.source !== source) return;
+      reattachRef.current();
+    }).then((fn) => { disposeStandaloneClosed = fn; }).catch(() => undefined);
     // In-page navigation cannot reach us as an event: this WebView loads a
     // remote origin, so Tauri's IPC is deliberately not injected into it.
-    const poll = window.setInterval(() => getEmbeddedBrowserUrl().then(applyUrl).catch(() => undefined), 2500);
+    // While the large window has the session, that window is the one to poll.
+    const poll = window.setInterval(() => {
+      const read = detachedRef.current ? getStandaloneBrowserUrl(source) : getEmbeddedBrowserUrl();
+      read.then((url) => { if (url) applyUrl(url); }).catch(() => undefined);
+    }, 2500);
     return () => {
       cancelAnimationFrame(frame);
       observer.disconnect();
@@ -196,9 +230,12 @@ export default function SavePage() {
       window.clearInterval(reconcile);
       appliedBoundsRef.current = "";
       dispose?.();
+      disposeAccelerator?.();
+      disposeStandaloneUrl?.();
+      disposeStandaloneClosed?.();
       closeEmbeddedBrowser().catch(() => undefined);
     };
-  }, [runtime, syncBrowserBounds]);
+  }, [rememberVisit, runtime, source, syncBrowserBounds]);
   useEffect(() => {
     const guard = (event: BeforeUnloadEvent) => { if (saving) { event.preventDefault(); event.returnValue = ""; } };
     window.addEventListener("beforeunload", guard);
@@ -216,6 +253,14 @@ export default function SavePage() {
     const normalized = /^https?:\/\//i.test(url) ? url : `https://${url}`;
     setCurrentUrl(normalized); setAddress(normalized);
     if (!runtime) return;
+    // The address bar always drives whichever browser currently holds the
+    // session, so it keeps working after the handover.
+    if (detachedRef.current) {
+      const userAgent = source === "fanbox" ? await store.get<string>("fanbox_user_agent") || undefined : undefined;
+      await openStandaloneBrowser(normalized, { source, userAgent }).catch((error) =>
+        notifications.show({ color: "red", title: "大きいウィンドウを操作できません", message: errorMessage(error) }));
+      return;
+    }
     try { await navigateEmbeddedBrowser(normalized); } catch { await positionBrowser(normalized); }
   };
   const switchSource = async (next: string) => {
@@ -226,15 +271,91 @@ export default function SavePage() {
     if (runtime) await destroyEmbeddedBrowser().catch(() => undefined);
     navigate(`/save/${next}`);
   };
-  const openSourceExternally = async () => {
+  const openSourceInWindow = async () => {
     try {
-      if (runtime) await openExternalUrl(currentUrl);
-      else window.open(currentUrl, "_blank", "noopener,noreferrer");
-      notifications.show({ color: "blue", title: "外部ブラウザで開きました", message: "保存するページのURLをコピーし、アドレス欄の貼り付けボタンから戻せます。" });
+      if (!runtime) {
+        window.open(currentUrl, "_blank", "noopener,noreferrer");
+        return;
+      }
+      const userAgent = source === "fanbox" ? await store.get<string>("fanbox_user_agent") || undefined : undefined;
+      const reused = await openStandaloneBrowser(currentUrl, { source, userAgent });
+      // Hidden rather than destroyed: the session, the cookies and the page it
+      // was on all survive, so coming back is instant.
+      setDetached(true);
+      await setEmbeddedBrowserVisible(false).catch(() => undefined);
+      notifications.show({
+        color: "blue",
+        title: reused ? "大きいウィンドウへ切り替えました" : "大きいウィンドウで開きました",
+        message: "右の保存候補はそのまま使えます。ウィンドウを閉じるとアプリ内に戻ります。",
+      });
     } catch (error) {
-      notifications.show({ color: "red", title: "外部ブラウザを開けません", message: errorMessage(error) });
+      notifications.show({ color: "red", title: "大きいウィンドウを開けません", message: errorMessage(error) });
     }
   };
+
+  /** Brings the page the large window ended on back into the in-app pane. */
+  const reattachBrowser = useCallback(async (url: string) => {
+    // The close event and the watchdog below can both fire for one closure.
+    if (!detachedRef.current) return;
+    detachedRef.current = false;
+    setDetached(false);
+    if (!runtime) return;
+    appliedBoundsRef.current = "";
+    try {
+      await navigateEmbeddedBrowser(url);
+      await setEmbeddedBrowserVisible(true);
+      syncBrowserBounds();
+    } catch {
+      // The child view may have been torn down while detached; recreate it at
+      // the page the large window was showing.
+      await positionBrowser(url).catch(() => undefined);
+    }
+  }, [positionBrowser, runtime, syncBrowserBounds]);
+
+  const returnToApp = async () => {
+    const url = currentUrl;
+    await closeStandaloneBrowser(source).catch(() => undefined);
+    await reattachBrowser(url);
+  };
+  // The listener is installed once, so it reaches the current reattach through
+  // a ref rather than re-subscribing on every URL change.
+  const reattachRef = useRef<() => void>(() => undefined);
+  reattachRef.current = () => { void reattachBrowser(currentUrlRef.current); };
+
+  // The close event is the fast path, but the pane must come back even if it
+  // never arrives - a window manager can tear a window down without one, and a
+  // browser pane stuck behind a placeholder is unusable. Asking the backend
+  // whether the window still exists needs no event at all.
+  useEffect(() => {
+    if (!runtime || !detached) return;
+    const watchdog = window.setInterval(() => {
+      getStandaloneBrowserUrl(source)
+        .then((url) => {
+          if (url) return;
+          reattachRef.current();
+        })
+        .catch(() => undefined);
+    }, 700);
+    return () => window.clearInterval(watchdog);
+  }, [detached, runtime, source]);
+
+  // On remount the large window may still be open; pick the handover back up
+  // instead of showing an in-app pane that nothing is driving.
+  useEffect(() => {
+    if (!runtime) return;
+    let cancelled = false;
+    getStandaloneBrowserUrl(source)
+      .then((url) => {
+        if (cancelled || !url) return;
+        setDetached(true);
+        setCurrentUrl(url);
+        setAddress(url);
+        rememberVisit(url);
+        void setEmbeddedBrowserVisible(false).catch(() => undefined);
+      })
+      .catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [rememberVisit, runtime, source]);
   const pasteUrl = async () => {
     try {
       const value = (await navigator.clipboard.readText()).trim();
@@ -268,10 +389,22 @@ export default function SavePage() {
     handle.addEventListener("pointerup", stop, { once: true });
     handle.addEventListener("pointercancel", stop, { once: true });
   };
-  const analyze = async () => {
+  const resizeCandidateWithKeyboard = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    const available = layoutRef.current?.clientWidth ?? window.innerWidth;
+    const maxWidth = Math.max(260, Math.round(available * 0.55));
+    let next: number | null = null;
+    if (event.key === "ArrowLeft") next = candidateWidth + 24;
+    if (event.key === "ArrowRight") next = candidateWidth - 24;
+    if (event.key === "Home") next = 260;
+    if (event.key === "End") next = maxWidth;
+    if (next === null) return;
+    event.preventDefault();
+    setCandidateWidth(Math.round(Math.max(260, Math.min(maxWidth, next))));
+  };
+  const analyze = async (analysisUrl = currentUrl) => {
     if (!runtime) return notifications.show({ color: "blue", message: "候補取得はデスクトップアプリで利用できます" });
     if (!authConnected) return notifications.show({ color: "yellow", title: `${getProvider(source).label}に接続してください`, message: "設定画面からログインすると候補を取得できます" });
-    const target = detectDownloadTarget(currentUrl);
+    const target = detectDownloadTarget(analysisUrl);
     if (target === "unsupported") return notifications.show({ color: "yellow", title: "対応ページではありません", message: "作品、シリーズ、作者・クリエイターページを開いてください" });
     setAnalyzing(true); setItems([]); setProgress(null);
     try {
@@ -280,32 +413,62 @@ export default function SavePage() {
       const fanboxUserAgent = await store.get<string>("fanbox_user_agent") || "Mozilla/5.0";
       let next: SidebarItem[] = [];
       if (target === "pixiv_single") {
-        const data = await fetchPixivNovelByUrl<PixivNovel>(currentUrl, pixivToken);
+        const data = await fetchPixivNovelByUrl<PixivNovel>(analysisUrl, pixivToken);
         const novelId = String(data.id ?? data.detail?.id ?? "");
         next = [{ id: novelId, title: data.title || data.detail?.title || "Pixiv novel", subtitle: data.user?.name || data.detail?.user?.name, selected: true, originalData: data }];
       } else if (target === "pixiv_series") {
-        const seriesId = currentUrl.match(/series(?:\/show\.php\?id=|\/)(\d+)/)?.[1] || "";
+        const seriesId = analysisUrl.match(/series(?:\/show\.php\?id=|\/)(\d+)/)?.[1] || "";
         next = (await fetchPixivSeriesNovels<PixivNovel[]>(seriesId, pixivToken)).map((novel) => ({ id: String(novel.id), title: novel.title, subtitle: novel.user?.name, selected: true, originalData: novel }));
       } else if (target === "pixiv_user") {
-        const userId = currentUrl.match(/users\/(\d+)/)?.[1] || "";
+        const userId = analysisUrl.match(/users\/(\d+)/)?.[1] || "";
         next = (await fetchPixivUserNovels<PixivNovel[]>(userId, pixivToken)).map((novel) => ({ id: String(novel.id), title: novel.title, subtitle: novel.user?.name, selected: true, originalData: novel }));
       } else if (target === "fanbox_single") {
-        const postId = currentUrl.match(/posts\/(\d+)/)?.[1] || "";
+        const postId = analysisUrl.match(/posts\/(\d+)/)?.[1] || "";
         const data = normalizeFanboxPostPayload<FanboxPost>(await fetchFanboxPost<unknown>(postId, fanboxCookie, fanboxUserAgent));
         next = [{ id: postId, title: data.title || "FANBOX投稿", subtitle: data.user?.name, selected: true, originalData: data }];
       } else if (target === "fanbox_creator") {
-        const creatorId = getFanboxCreatorId(currentUrl) || "";
+        const creatorId = getFanboxCreatorId(analysisUrl) || "";
         next = (await fetchFanboxCreatorPosts<FanboxPost[]>(creatorId, fanboxCookie, fanboxUserAgent)).map((post) => ({ id: String(post.id), title: post.title, subtitle: post.user?.name, selected: true, originalData: post }));
       }
-      setItems(next); setDownloadType(target); setLastAnalysisUrl(currentUrl);
+      setItems(next); setDownloadType(target); setLastAnalysisUrl(analysisUrl);
       notifications.show({ color: "green", title: `${next.length}件の候補を取得しました`, message: "保存する項目を確認してください" });
     } catch (error) {
       notifications.show({ color: "red", title: "候補を取得できません", message: errorMessage(error) });
     } finally { setAnalyzing(false); }
   };
+  acceleratorHandlerRef.current = (payload) => {
+    // A detached browser is provider-scoped. The embedded view belongs to the
+    // currently mounted Save page even when it temporarily visits a neutral
+    // domain, so do not discard its close/save shortcut based on URL inference.
+    if (payload.browser === "standalone" && payload.source !== source) return;
+    if (payload.action === "close") {
+      if (payload.browser === "embedded") navigate("/library");
+      return;
+    }
+    if (payload.action === "save") {
+      void (async () => {
+        setCurrentUrl(payload.url);
+        setAddress(payload.url);
+        rememberVisit(payload.url);
+        // The hidden in-app view is no longer dragged along: the candidate
+        // sidebar reads the same URL either browser reports, so pulling the
+        // background view to that page only cost a second page load.
+        await analyze(payload.url);
+      })();
+    }
+  };
   const execute = async () => {
     const selected = items.filter((item) => item.selected);
     if (!selected.length || !downloadType || !runtime) return;
+    const operation = startOperation({
+      kind: "save",
+      label: `${selected.length}件をライブラリに保存`,
+      detail: `${getProvider(source).label} · ${currentUrl}`,
+      total: selected.length,
+      onCancel: () => undefined,
+      onRetry: () => execute(),
+    });
+    saveOperationRef.current = operation;
     setSaving(true);
     let saved = 0, skipped = 0, failed = 0;
     let firstError = "";
@@ -315,13 +478,15 @@ export default function SavePage() {
       const fanboxCookie = await store.get<string>("fanbox_session_id") || "";
       const fanboxUserAgent = await store.get<string>("fanbox_user_agent") || "Mozilla/5.0";
       for (let index = 0; index < selected.length; index += 1) {
+        if (operation.isCancelRequested()) break;
         const item = selected[index];
         setProgress({ current: index + 1, total: selected.length, text: item.title });
+        operation.progress(index, selected.length, `「${item.title}」を処理しています`);
         setItems((rows) => rows.map((row) => row.id === item.id ? { ...row, status: "downloading" } : row));
         try {
           const itemSource = downloadType.startsWith("pixiv") ? "pixiv" : "fanbox";
           const existing = await getDownloadBySource<DownloadEntry>(itemSource, item.id);
-          if (existing && !existing.watchUpdates) { skipped += 1; setItems((rows) => rows.map((row) => row.id === item.id ? { ...row, status: "skipped" } : row)); continue; }
+          if (existing && !existing.watchUpdates) { skipped += 1; operation.log(`「${item.title}」は保存済みのためスキップしました`, "info"); setItems((rows) => rows.map((row) => row.id === item.id ? { ...row, status: "skipped" } : row)); continue; }
           if (itemSource === "pixiv") {
             const data = await fetchPixivNovel<PixivNovel>(item.id, pixivToken);
             const metadata = normalizePixivSaveMetadata(data, item.title, item.subtitle);
@@ -331,10 +496,11 @@ export default function SavePage() {
             const metadata = normalizeFanboxSaveMetadata(data, item.title, item.subtitle);
             savedEntries.push(await downloadAndSave<UpdateDownloadEntry>({ data, source: "fanbox", sourceId: item.id, ...metadata, cookie: fanboxCookie, userAgent: fanboxUserAgent }));
           }
-          saved += 1; setItems((rows) => rows.map((row) => row.id === item.id ? { ...row, status: "success" } : row));
+          saved += 1; operation.progress(index + 1, selected.length, `「${item.title}」を保存しました`); setItems((rows) => rows.map((row) => row.id === item.id ? { ...row, status: "success" } : row));
         } catch (error) {
           const message = errorMessage(error);
           if (!firstError) firstError = message;
+          operation.log(`「${item.title}」: ${message}`, "error");
           failed += 1; setItems((rows) => rows.map((row) => row.id === item.id ? { ...row, status: "failed", error: message } : row));
         }
       }
@@ -344,16 +510,26 @@ export default function SavePage() {
       }
       queryClient.invalidateQueries({ queryKey: ["library"] }); queryClient.invalidateQueries({ queryKey: ["dashboard"] }); queryClient.invalidateQueries({ queryKey: ["library-facets"] });
       queryClient.invalidateQueries({ queryKey: ["entity"] }); queryClient.invalidateQueries({ queryKey: ["entity-works"] });
-      notifications.show({ color: failed ? "yellow" : "green", title: "保存が完了しました", message: `保存 ${saved} · スキップ ${skipped} · 失敗 ${failed}` });
+      if (operation.isCancelRequested()) {
+        operation.cancel(`保存 ${saved} · スキップ ${skipped} · 失敗 ${failed} の時点で中止しました`);
+      } else if (failed === selected.length) {
+        operation.fail(new Error(firstError || "すべての作品を保存できませんでした"));
+      } else {
+        operation.complete(`保存 ${saved} · スキップ ${skipped} · 失敗 ${failed}`);
+      }
+      notifications.show({ color: operation.isCancelRequested() ? "gray" : failed ? "yellow" : "green", title: operation.isCancelRequested() ? "保存を中止しました" : "保存が完了しました", message: `保存 ${saved} · スキップ ${skipped} · 失敗 ${failed}` });
       if (firstError) notifications.show({ color: "red", title: "保存できなかった項目があります", message: firstError });
-    } finally { setSaving(false); setProgress(null); }
+    } catch (error) {
+      operation.fail(error);
+      notifications.show({ color: "red", title: "保存処理を完了できません", message: errorMessage(error) });
+    } finally { saveOperationRef.current = null; setSaving(false); setProgress(null); }
   };
 
   return (
     <div className="save-page">
       <div className="save-page__header">
         <Group justify="space-between" h="100%" px="md" wrap="nowrap">
-          <Group gap="md" wrap="nowrap"><Title order={1} fz="h2">Webから保存</Title><SegmentedControl value={source} onChange={switchSource} data={[{ value: "pixiv", label: <Group gap={6} wrap="nowrap"><ProviderMark provider="pixiv" compact /><Text size="xs" fw={700}>pixiv</Text></Group> }, { value: "fanbox", label: <Group gap={6} wrap="nowrap"><ProviderMark provider="fanbox" compact /><Text size="xs" fw={700}>FANBOX</Text></Group> }]} /></Group>
+          <Group gap="md" wrap="nowrap"><Title order={1} fz="h2">Webから保存</Title><SegmentedControl aria-label="保存元サービス" value={source} onChange={switchSource} data={[{ value: "pixiv", label: <Group gap={6} wrap="nowrap"><ProviderMark provider="pixiv" compact /><Text size="xs" fw={700}>pixiv</Text></Group> }, { value: "fanbox", label: <Group gap={6} wrap="nowrap"><ProviderMark provider="fanbox" compact /><Text size="xs" fw={700}>FANBOX</Text></Group> }]} /></Group>
           <Group gap="xs"><Badge color={authConnected ? "green" : "gray"} variant="light" leftSection={<span className="status-dot" />}>{authConnected ? "接続済み" : "未接続"}</Badge><Button variant="subtle" size="xs" onClick={() => navigate("/settings")}>接続設定</Button></Group>
         </Group>
       </div>
@@ -366,35 +542,60 @@ export default function SavePage() {
         <section className="browser-pane">
           <div className="browser-toolbar">
             <Group gap={4} wrap="nowrap">
-              <Tooltip label="戻る"><ActionIcon variant="subtle" color="gray" aria-label="ブラウザで戻る" disabled={!runtime} onClick={() => goBackEmbeddedBrowser()}><ArrowLeft size={17} /></ActionIcon></Tooltip>
-              <Tooltip label="進む"><ActionIcon variant="subtle" color="gray" aria-label="ブラウザで進む" disabled={!runtime} onClick={() => goForwardEmbeddedBrowser()}><ArrowRight size={17} /></ActionIcon></Tooltip>
-              <Tooltip label="再読み込み"><ActionIcon variant="subtle" color="gray" aria-label="ページを再読み込み" disabled={!runtime} onClick={() => reloadEmbeddedBrowser()}><RotateCw size={16} /></ActionIcon></Tooltip>
-              <Tooltip label="ホーム"><ActionIcon variant="subtle" color="gray" aria-label="サービスのホームを開く" onClick={() => navigateBrowser(getProvider(source).homeUrl!)}><Home size={16} /></ActionIcon></Tooltip>
+              <Tooltip label="戻る"><ActionIcon variant="subtle" color="gray" aria-label="ブラウザで戻る" disabled={!runtime || detached} onClick={() => goBackEmbeddedBrowser()}><Icons.back size={IconSize.action} /></ActionIcon></Tooltip>
+              <Tooltip label="進む"><ActionIcon variant="subtle" color="gray" aria-label="ブラウザで進む" disabled={!runtime || detached} onClick={() => goForwardEmbeddedBrowser()}><Icons.forward size={IconSize.action} /></ActionIcon></Tooltip>
+              <Tooltip label="再読み込み"><ActionIcon variant="subtle" color="gray" aria-label="ページを再読み込み" disabled={!runtime || detached} onClick={() => reloadEmbeddedBrowser()}><Icons.retry size={IconSize.action} /></ActionIcon></Tooltip>
+              <Tooltip label="ホーム"><ActionIcon variant="subtle" color="gray" aria-label="サービスのホームを開く" onClick={() => navigateBrowser(getProvider(source).homeUrl!)}><Icons.home size={IconSize.action} /></ActionIcon></Tooltip>
+              {history.length > 1 && (
+                <Menu position="bottom-start" width={420} withinPortal>
+                  <Menu.Target><Tooltip label="このセッションで開いたページ"><ActionIcon variant="subtle" color="gray" aria-label="このセッションで開いたページ"><Icons.versionHistory size={IconSize.action} /></ActionIcon></Tooltip></Menu.Target>
+                  <Menu.Dropdown>
+                    <Menu.Label>このセッションで開いたページ</Menu.Label>
+                    {history.map((url) => <Menu.Item key={url} onClick={() => navigateBrowser(url)}><Text size="xs" className="line-clamp-1">{url}</Text></Menu.Item>)}
+                  </Menu.Dropdown>
+                </Menu>
+              )}
               <form onSubmit={(event) => { event.preventDefault(); navigateBrowser(address); }} style={{ flex: 1 }}>
-                <TextInput value={address} onChange={(event) => setAddress(event.currentTarget.value)} onFocus={() => { addressFocusedRef.current = true; }} onBlur={() => { addressFocusedRef.current = false; }} leftSection={<LockKeyhole size={13} />} rightSection={<Group gap={0} wrap="nowrap"><Tooltip label="クリップボードのURLを開く"><ActionIcon type="button" variant="subtle" size="sm" aria-label="クリップボードのURLを開く" onClick={pasteUrl}><ClipboardPaste size={14} /></ActionIcon></Tooltip><ActionIcon type="submit" variant="subtle" size="sm" aria-label="URLを開く"><ArrowRight size={14} /></ActionIcon></Group>} rightSectionWidth={58} size="sm" aria-label="ブラウザのアドレス" />
+                <TextInput value={address} onChange={(event) => setAddress(event.currentTarget.value)} onFocus={() => { addressFocusedRef.current = true; }} onBlur={() => { addressFocusedRef.current = false; }} leftSection={<Icons.secureConnection size={IconSize.inline} />} rightSection={<Group gap={0} wrap="nowrap"><Tooltip label="クリップボードのURLを開く"><ActionIcon type="button" variant="subtle" size="sm" aria-label="クリップボードのURLを開く" onClick={pasteUrl}><Icons.paste size={IconSize.menu} /></ActionIcon></Tooltip><ActionIcon type="submit" variant="subtle" size="sm" aria-label="URLを開く"><Icons.forward size={IconSize.menu} /></ActionIcon></Group>} rightSectionWidth={58} size="sm" aria-label="ブラウザのアドレス" />
               </form>
-              <Tooltip label="外部ブラウザで開く"><ActionIcon variant="subtle" color="gray" aria-label="外部ブラウザで開く" onClick={openSourceExternally}><ExternalLink size={16} /></ActionIcon></Tooltip>
+              {detached
+                ? <Tooltip label="アプリ内の表示に戻す"><ActionIcon variant="light" color="piep" aria-label="アプリ内の表示に戻す" onClick={returnToApp}><Icons.minimize size={IconSize.action} /></ActionIcon></Tooltip>
+                : <Tooltip label="大きいウィンドウで開く（Ctrl+Sで候補取得）"><ActionIcon variant="subtle" color="gray" aria-label="大きいウィンドウで開く" onClick={openSourceInWindow}><Icons.maximize size={IconSize.action} /></ActionIcon></Tooltip>}
             </Group>
           </div>
-          <div ref={browserViewportRef} className="browser-viewport">
-            {!runtime && <Stack align="center" justify="center" h="100%" p="xl" ta="center"><ThemeIcon size={72} radius="xl" variant="light"><Globe2 size={34} /></ThemeIcon><Title order={3}>内蔵ブラウザ</Title><Text size="sm" c="dimmed" maw={430}>Tauriアプリでは、この領域に{getProvider(source).label}が表示されます。ページを移動して右側の「候補を取得」を押します。</Text><Button component="a" href={getProvider(source).homeUrl!} target="_blank" variant="light" rightSection={<ExternalLink size={14} />}>公式サイトを開く</Button></Stack>}
+          <div ref={browserViewportRef} className="browser-viewport" data-detached={detached || undefined}>
+            {runtime && detached && (
+              <Stack align="center" justify="center" h="100%" p="xl" ta="center" gap="sm">
+                <ThemeIcon size={64} radius="xl" variant="light"><Icons.externalLink size={IconSize.hero} /></ThemeIcon>
+                <Title order={3} fz="h4">大きいウィンドウで表示中</Title>
+                <Text size="sm" c="dimmed" maw={460}>
+                  {getProvider(source).label}は別ウィンドウで開いています。右の保存候補はそのまま使えます。ウィンドウを閉じると、このページがここに戻ります。
+                </Text>
+                <Text size="xs" c="dimmed" maw={460} className="line-clamp-2">{currentUrl}</Text>
+                <Group mt="xs">
+                  <Button variant="light" leftSection={<Icons.minimize size={IconSize.menu} />} onClick={returnToApp}>アプリ内に戻す</Button>
+                  <Button variant="default" leftSection={<Icons.externalLink size={IconSize.menu} />} onClick={openSourceInWindow}>ウィンドウを前面に</Button>
+                </Group>
+              </Stack>
+            )}
+            {!runtime && <Stack align="center" justify="center" h="100%" p="xl" ta="center"><ThemeIcon size={72} radius="xl" variant="light"><Icons.browser size={IconSize.hero} /></ThemeIcon><Title order={3}>内蔵ブラウザ</Title><Text size="sm" c="dimmed" maw={430}>Tauriアプリでは、この領域に{getProvider(source).label}が表示されます。ページを移動して右側の「候補を取得」を押します。</Text><Button component="a" href={getProvider(source).homeUrl!} target="_blank" rel="noopener noreferrer" variant="light" rightSection={<Icons.externalLink size={IconSize.menu} />}>公式サイトを開く</Button></Stack>}
           </div>
         </section>
 
-        <div className="save-resizer" role="separator" aria-orientation="vertical" aria-label="保存候補パネルの幅を変更" onPointerDown={startCandidateResize}><GripVertical size={15} /></div>
+        <div className="save-resizer" role="separator" tabIndex={0} aria-orientation="vertical" aria-label="保存候補パネルの幅を変更" aria-valuemin={260} aria-valuenow={candidateWidth} aria-valuetext={`${candidateWidth}px。左右の矢印キーで変更`} onPointerDown={startCandidateResize} onKeyDown={resizeCandidateWithKeyboard}><Icons.drag size={IconSize.menu} /></div>
 
         <aside className="candidate-pane" data-collapsed={candidateCollapsed || undefined}>
-          {candidateCollapsed ? <Tooltip label="保存候補を開く" position="left"><ActionIcon variant="subtle" color="gray" size="lg" mt="sm" mx="auto" aria-label="保存候補を開く" onClick={() => setCandidateCollapsed(false)}><PanelRightOpen size={18} /></ActionIcon></Tooltip> :
+          {candidateCollapsed ? <Tooltip label="保存候補を開く" position="left"><ActionIcon variant="subtle" color="gray" size="lg" mt="sm" mx="auto" aria-label="保存候補を開く" onClick={() => setCandidateCollapsed(false)}><Icons.panelOpen size={IconSize.nav} /></ActionIcon></Tooltip> :
           <Stack h="100%" gap={0}>
             <Box p="md">
-              <Group justify="space-between" mb="xs"><Box><Text fw={750}>保存候補</Text><Text size="xs" c="dimmed">開いているページから自動判定</Text></Box><Group gap={4}><ThemeIcon variant="light"><ListChecks size={17} /></ThemeIcon><Tooltip label="保存候補をたたむ"><ActionIcon variant="subtle" color="gray" aria-label="保存候補をたたむ" onClick={() => setCandidateCollapsed(true)}><PanelRightClose size={17} /></ActionIcon></Tooltip></Group></Group>
-              <Alert color={targetKind === "unsupported" ? "gray" : "blue"} variant="light" icon={targetKind === "unsupported" ? <Link2 size={16} /> : <Check size={16} />} py="xs">
+              <Group justify="space-between" mb="xs"><Box><Text fw={750}>保存候補</Text><Text size="xs" c="dimmed">開いているページから自動判定</Text></Box><Group gap={4}><ThemeIcon variant="light"><Icons.select size={IconSize.action} /></ThemeIcon><Tooltip label="保存候補をたたむ"><ActionIcon variant="subtle" color="gray" aria-label="保存候補をたたむ" onClick={() => setCandidateCollapsed(true)}><Icons.panelClose size={IconSize.action} /></ActionIcon></Tooltip></Group></Group>
+              <Alert color={targetKind === "unsupported" ? "gray" : "blue"} variant="light" icon={targetKind === "unsupported" ? <Icons.link size={IconSize.action} /> : <Icons.confirm size={IconSize.action} />} py="xs">
                 <Text size="xs">{targetLabel(targetKind)}</Text>
               </Alert>
-              <Button fullWidth mt="sm" leftSection={analyzing ? undefined : <Search size={15} />} loading={analyzing} disabled={!runtime || saving || targetKind === "unsupported"} onClick={analyze}>候補を取得</Button>
+              <Button fullWidth mt="sm" leftSection={analyzing ? undefined : <Icons.search size={IconSize.menu} />} loading={analyzing} disabled={!runtime || saving || targetKind === "unsupported"} onClick={() => analyze()}>候補を取得</Button>
             </Box>
             <Divider />
-            {analysisStale && <Alert color="yellow" radius={0} icon={<CircleAlert size={16} />}>ページが変わりました。候補を再取得してください。</Alert>}
+            {analysisStale && <Alert color="yellow" radius={0} icon={<Icons.notice size={IconSize.action} />}>ページが変わりました。候補を再取得してください。</Alert>}
             <Group justify="space-between" px="md" py="sm"><Text size="xs" c="dimmed">{items.length ? `${selectedCount} / ${items.length}件を選択` : "候補はまだありません"}</Text>{items.length > 0 && <Group gap={6}><Button variant="subtle" size="compact-xs" onClick={() => setItems((rows) => rows.map((item) => ({ ...item, selected: true })))}>すべて</Button><Button variant="subtle" color="gray" size="compact-xs" onClick={() => setItems((rows) => rows.map((item) => ({ ...item, selected: false })))}>解除</Button></Group>}</Group>
             <ScrollArea flex={1} px="md" type="auto" className="candidate-list">
               <Stack gap="xs" pb="md">
@@ -404,9 +605,11 @@ export default function SavePage() {
             </ScrollArea>
             <Divider />
             <Box p="md">
-              {progress && <Stack gap={5} mb="sm"><Group justify="space-between"><Text size="xs" className="line-clamp-1">{progress.text}</Text><Text size="xs" c="dimmed">{progress.current}/{progress.total}</Text></Group><Progress value={progress.current / progress.total * 100} animated /></Stack>}
-              <Button fullWidth size="md" leftSection={<Download size={16} />} loading={saving} disabled={!runtime || !selectedCount || analysisStale} onClick={execute}>{selectedCount ? `${selectedCount}件をライブラリに保存` : "保存する項目を選択"}</Button>
-              <Button fullWidth mt="xs" variant="subtle" color="gray" leftSection={<LibraryBig size={14} />} onClick={() => navigate("/library")}>ライブラリを開く</Button>
+              {progress && <Stack gap={5} mb="sm" role="status" aria-live="polite"><Group justify="space-between"><Text size="xs" className="line-clamp-1">{progress.text}</Text><Text size="xs" c="dimmed">{progress.current}/{progress.total}</Text></Group><Progress value={progress.current / progress.total * 100} animated aria-label={`保存進捗 ${progress.current}/${progress.total}`} /></Stack>}
+              {saving
+                ? <Group grow><Button size="md" leftSection={<Icons.collect size={IconSize.action} />} loading>保存中</Button><Button size="md" variant="light" color="red" leftSection={<Icons.cancel size={IconSize.action} />} onClick={() => saveOperationRef.current && requestOperationCancel(saveOperationRef.current.id)}>中止</Button></Group>
+                : <Button fullWidth size="md" leftSection={<Icons.collect size={IconSize.action} />} disabled={!runtime || !selectedCount || analysisStale} onClick={execute}>{selectedCount ? `${selectedCount}件をライブラリに保存` : "保存する項目を選択"}</Button>}
+              <Button fullWidth mt="xs" variant="subtle" color="gray" leftSection={<Icons.library size={IconSize.menu} />} onClick={() => navigate("/library")}>ライブラリを開く</Button>
             </Box>
           </Stack>}
         </aside>
@@ -435,12 +638,12 @@ function CandidateRow({ item, disabled, onToggle }: { item: SidebarItem; disable
 
 function StatusIcon({ status }: { status: SidebarItem["status"] }) {
   if (status === "downloading") return <Loader size="xs" />;
-  if (status === "success") return <ThemeIcon color="green" size="sm" radius="xl"><Check size={12} /></ThemeIcon>;
+  if (status === "success") return <ThemeIcon color="green" size="sm" radius="xl"><Icons.confirm size={IconSize.inline} /></ThemeIcon>;
   if (status === "skipped") return <Badge color="gray" size="xs">保存済み</Badge>;
-  if (status === "failed") return <ThemeIcon color="red" size="sm" radius="xl"><X size={12} /></ThemeIcon>;
+  if (status === "failed") return <ThemeIcon color="red" size="sm" radius="xl"><Icons.cancel size={IconSize.inline} /></ThemeIcon>;
   return null;
 }
 
 function EmptyCandidates({ source }: { source: SaveSource }) {
-  return <Stack align="center" ta="center" py={48} px="md"><ThemeIcon size={48} radius="xl" variant="light" color="gray"><Link2 size={22} /></ThemeIcon><Text size="sm" fw={700}>ページを開いて候補を取得</Text><Text size="xs" c="dimmed">{source === "pixiv" ? "小説、シリーズ、作者ページ" : "投稿またはクリエイターページ"}に対応しています。</Text></Stack>;
+  return <Stack align="center" ta="center" py={48} px="md"><ThemeIcon size={48} radius="xl" variant="light" color="gray"><Icons.link size={IconSize.feature} /></ThemeIcon><Text size="sm" fw={700}>ページを開いて候補を取得</Text><Text size="xs" c="dimmed">{source === "pixiv" ? "小説、シリーズ、作者ページ" : "投稿またはクリエイターページ"}に対応しています。</Text></Stack>;
 }

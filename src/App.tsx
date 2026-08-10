@@ -16,9 +16,13 @@ const EditorPage = lazy(() => import("@/features/editor/EditorPage"));
 const SavePage = lazy(() => import("@/features/save/SavePage"));
 const EpubPage = lazy(() => import("@/features/epub/EpubPage"));
 const UpdatesPage = lazy(() => import("@/features/updates/UpdatesPage"));
+const OperationsPage = lazy(() => import("@/features/jobs/OperationsPage"));
+const DiagnosticsPage = lazy(() => import("@/features/diagnostics/DiagnosticsPage"));
 const SettingsPage = lazy(() => import("@/features/settings/SettingsPage"));
 
-function RouteFallback() { return <Center h="100%" aria-label="画面を読み込んでいます"><Loader size="sm" /></Center>; }
+function RouteFallback() {
+  return <Center h="100%" role="status" aria-live="polite"><Loader size="sm" aria-hidden /><Text className="visually-hidden">画面を読み込んでいます</Text></Center>;
+}
 
 function CurrentRoute() {
   const { pathname } = useAppRouter();
@@ -32,6 +36,8 @@ function CurrentRoute() {
   if (matchPath("/save/:source?", pathname)) return <SavePage />;
   if (pathname === "/epub") return <EpubPage />;
   if (pathname === "/updates") return <UpdatesPage />;
+  if (pathname === "/operations") return <OperationsPage />;
+  if (pathname === "/diagnostics") return <DiagnosticsPage />;
   if (pathname === "/settings") return <SettingsPage />;
   return <DashboardPage />;
 }
@@ -42,6 +48,20 @@ function confirmDiscardOnClose(): Promise<boolean> {
       title: "保存していない変更があります",
       children: <Text size="sm">終了すると編集中の内容は失われます。閉じてよろしいですか？</Text>,
       labels: { confirm: "保存せずに終了", cancel: "アプリに戻る" },
+      confirmProps: { color: "red" },
+      onConfirm: () => resolve(true),
+      onCancel: () => resolve(false),
+      onClose: () => resolve(false),
+    });
+  });
+}
+
+function confirmDiscardOnNavigation(): Promise<boolean> {
+  return new Promise((resolve) => {
+    modals.openConfirmModal({
+      title: "この画面を離れますか？",
+      children: <Text size="sm">処理中の作業または保存していない変更があります。移動すると現在の作業内容が失われる可能性があります。</Text>,
+      labels: { confirm: "破棄して移動", cancel: "この画面に残る" },
       confirmProps: { color: "red" },
       onConfirm: () => resolve(true),
       onCancel: () => resolve(false),
@@ -71,5 +91,5 @@ function AppContent() {
 }
 
 export default function App() {
-  return <AppRouter><AppContent /></AppRouter>;
+  return <AppRouter confirmNavigation={confirmDiscardOnNavigation}><AppContent /></AppRouter>;
 }

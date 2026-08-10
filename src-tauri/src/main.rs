@@ -2,5 +2,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    piep_lib::run()
+    if let Err(error) = piep_lib::run() {
+        eprintln!("piep failed to start: {error}");
+        std::process::exit(1);
+    }
 }

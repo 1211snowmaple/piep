@@ -6,6 +6,14 @@ use std::path::{Path, PathBuf};
 /// Current official schema version.
 const SCHEMA_VERSION: u32 = 2;
 
+/// Tables that identify an existing database as the official v2 schema.
+///
+/// This is a recognition fingerprint, not a list of everything the app creates.
+/// A database missing any of these is treated as an unknown preview schema and
+/// is archived and replaced - so adding a newly introduced table here makes
+/// every existing library look foreign and wipes it. New tables belong only in
+/// `initialize_v2_schema`, which adds them in place with CREATE TABLE IF NOT
+/// EXISTS. Nothing may be added to this list.
 const REQUIRED_TABLES: &[&str] = &[
     "downloads",
     "tags",
@@ -448,6 +456,15 @@ fn initialize_v2_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
             indexed_at          TEXT    NOT NULL
         );
 
+        -- Which on-disk index format the rows above were written for. A format
+        -- change starts an empty index, so without this the app would believe
+        -- every work was indexed and quietly find nothing.
+        CREATE TABLE IF NOT EXISTS search_index_meta (
+            id                  INTEGER PRIMARY KEY CHECK (id = 1),
+            index_version       TEXT    NOT NULL,
+            updated_at          TEXT    NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS saved_searches (
             id                  INTEGER PRIMARY KEY AUTOINCREMENT,
             name                TEXT    NOT NULL,
@@ -535,6 +552,7 @@ fn initialize_v2_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
         CREATE INDEX IF NOT EXISTS idx_downloads_source_type_date ON downloads(source, content_type, downloaded_at DESC);
         CREATE INDEX IF NOT EXISTS idx_downloads_favorite_date    ON downloads(favorite, downloaded_at DESC);
         CREATE INDEX IF NOT EXISTS idx_downloads_author           ON downloads(author_name);
+        CREATE INDEX IF NOT EXISTS idx_downloads_author_nocase    ON downloads(author_name COLLATE NOCASE);
         CREATE INDEX IF NOT EXISTS idx_downloads_text_length      ON downloads(text_length);
         CREATE INDEX IF NOT EXISTS idx_downloads_date             ON downloads(downloaded_at DESC);
         CREATE INDEX IF NOT EXISTS idx_downloads_source_created   ON downloads(source_created_at DESC);
@@ -561,6 +579,7 @@ fn initialize_v2_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
         CREATE INDEX IF NOT EXISTS idx_download_people_download ON download_people(download_id);
         CREATE INDEX IF NOT EXISTS idx_download_series_lookup ON download_series(series_source, series_key);
         CREATE INDEX IF NOT EXISTS idx_download_series_download ON download_series(download_id);
+        CREATE INDEX IF NOT EXISTS idx_download_series_title_nocase ON download_series(title COLLATE NOCASE);
         CREATE INDEX IF NOT EXISTS idx_entity_versions_lookup ON entity_versions(entity_type, source, source_key, version DESC);
 
         CREATE INDEX IF NOT EXISTS idx_update_targets_type_enabled ON update_targets(target_type, enabled);
@@ -604,6 +623,49 @@ mod tests {
         assert!(is_official_v2_schema(&conn).unwrap());
         assert!(!column_exists(&conn, "downloads", "tags").unwrap());
         assert!(sqlite_object_exists(&conn, "table", "saved_searches").unwrap());
+    }
+
+    /// A release that adds a table must add it to existing libraries, not
+    /// decide those libraries are unrecognisable.
+    ///
+    /// This is not hypothetical: adding `search_index_meta` to REQUIRED_TABLES
+    /// made every existing v2 database fail recognition, so opening the app
+    /// archived the user's library and started an empty one.
+    #[test]
+    fn a_v2_database_missing_a_newly_added_table_is_still_recognised() {
+        let conn = Connection::open_in_memory().unwrap();
+        initialize(&conn).unwrap();
+        conn.execute_batch(
+            "INSERT INTO downloads (
+                source, source_id, title, author_name, author_id, content_type,
+                excerpt, cover_path, json_path, original_json_path, asset_count,
+                file_size_bytes, downloaded_at, source_created_at, content_hash,
+                text_length, source_updated_at, watch_updates, current_version, favorite
+             ) VALUES (
+                'pixiv', '7', 'kept work', 'author', 'a1', 'novel', NULL, NULL,
+                '/tmp/kept.json', NULL, 0, 0, '2026-01-01T00:00:00Z', NULL,
+                NULL, 100, NULL, 0, 1, 0
+             );",
+        )
+        .unwrap();
+
+        // Stand in for a library saved by an earlier release: everything the
+        // schema has ever required is present, the newest table is not.
+        conn.execute_batch("DROP TABLE search_index_meta;").unwrap();
+        assert!(
+            is_official_v2_schema(&conn).unwrap(),
+            "a library from an earlier release must still be recognised"
+        );
+
+        initialize(&conn).unwrap();
+        let kept: i64 = conn
+            .query_row("SELECT COUNT(*) FROM downloads", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(kept, 1, "reopening must never discard saved works");
+        assert!(
+            sqlite_object_exists(&conn, "table", "search_index_meta").unwrap(),
+            "the new table must be added in place"
+        );
     }
 
     #[test]

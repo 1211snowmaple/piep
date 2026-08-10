@@ -13,10 +13,28 @@ const CHANGED_EVENT = "piep:bookmarks-changed";
 
 type Store = Record<string, Bookmark[]>;
 
+function isBookmark(value: unknown): value is Bookmark {
+  if (!value || typeof value !== "object") return false;
+  const bookmark = value as Partial<Bookmark>;
+  return typeof bookmark.id === "string"
+    && bookmark.id.length > 0
+    && Number.isInteger(bookmark.page)
+    && Number(bookmark.page) > 0
+    && Number.isFinite(bookmark.top)
+    && Number(bookmark.top) >= 0
+    && typeof bookmark.label === "string"
+    && typeof bookmark.createdAt === "string";
+}
+
 function readStore(): Store {
   try {
     const raw = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "{}") as unknown;
-    return raw && typeof raw === "object" ? raw as Store : {};
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+    return Object.fromEntries(
+      Object.entries(raw)
+        .filter(([, value]) => Array.isArray(value))
+        .map(([key, value]) => [key, value.filter(isBookmark)]),
+    );
   } catch {
     return {};
   }

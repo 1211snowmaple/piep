@@ -14,26 +14,33 @@ import {
   ThemeIcon,
   Title,
 } from "@mantine/core";
-import { useForm, isUrl } from "@mantine/form";
+import { useForm } from "@mantine/form";
 import { useQuery } from "@tanstack/react-query";
-import {
-  ArrowRight,
-  Database,
-  Download,
-  HardDrive,
-  Heart,
-  RefreshCw,
-  Search,
-} from "lucide-react";
+import { Icons, IconSize, type LucideIcon } from "@/lib/icons";
 import { useAppNavigate } from "@/app/router";
 import { WorkCard } from "@/components/WorkCard";
-import { ErrorState, LoadingState } from "@/components/AsyncState";
+import { EmptyState, ErrorState, LoadingState } from "@/components/AsyncState";
 import { RuntimeNotice } from "@/components/RuntimeNotice";
 import { demoDashboard } from "@/mocks/demoData";
 import { formatBytes, formatNumber } from "@/lib/format";
 import { getProvider } from "@/lib/providers";
 import { getDashboardSummary, getSearchIndexStatus, isTauriRuntime } from "@/services/dbApi";
 import { store } from "@/store";
+
+export type QuickSaveSource = "pixiv" | "fanbox";
+
+export function quickSaveSource(value: string): QuickSaveSource | null {
+  try {
+    const url = new URL(value.trim());
+    if (url.protocol !== "https:" && url.protocol !== "http:") return null;
+    const host = url.hostname.toLowerCase();
+    if (host === "pixiv.net" || host.endsWith(".pixiv.net")) return "pixiv";
+    if (host === "fanbox.cc" || host.endsWith(".fanbox.cc")) return "fanbox";
+    return null;
+  } catch {
+    return null;
+  }
+}
 
 export default function DashboardPage() {
   const navigate = useAppNavigate();
@@ -67,7 +74,7 @@ export default function DashboardPage() {
   const quickSave = useForm({
     mode: "uncontrolled",
     initialValues: { url: "" },
-    validate: { url: isUrl({ protocols: ["http", "https"] }, "pixivまたはFANBOXのURLを入力してください") },
+    validate: { url: (value) => quickSaveSource(value) ? null : "pixiv.netまたはfanbox.ccのURLを入力してください" },
   });
   const chartData = useMemo(() => buildTrend(summary.data?.monthlyDownloads ?? []), [summary.data]);
 
@@ -79,22 +86,24 @@ export default function DashboardPage() {
   return (
     <div className="page page--contained dashboard-page">
       <Stack gap="md">
+        <Title order={1} className="visually-hidden">ホーム</Title>
         <RuntimeNotice />
         <Card className="dashboard-hero dashboard-quick-save" padding="lg">
           <Group wrap="nowrap" align="center" gap="lg">
-            <ThemeIcon size={52} radius="lg" variant="light" className="dashboard-quick-save__logo"><Download size={26} /></ThemeIcon>
+            <ThemeIcon size={52} radius="lg" variant="light" className="dashboard-quick-save__logo"><Icons.collect size={IconSize.feature} /></ThemeIcon>
             <Stack gap="sm" flex={1} miw={0}>
               {/* The status chips have a fixed intrinsic width; letting them
                   shrink cut their labels in half on a narrow window. The
                   description truncates instead. */}
-              <Group justify="space-between" align="flex-start" wrap="nowrap" gap="sm"><Box miw={0}><Text size="sm" fw={750} c="piep.6">Webから保存</Text><Text size="sm" c="dimmed" className="line-clamp-2">URLを貼るだけで作品・シリーズ・作者を判定します</Text></Box><Group gap="xs" wrap="nowrap" visibleFrom="sm" style={{ flex: "0 0 auto" }}><ConnectionBadge label="pixiv" connected={auth.data?.pixiv} /><ConnectionBadge label="FANBOX" connected={auth.data?.fanbox} /></Group></Group>
-              <form onSubmit={quickSave.onSubmit(({ url }) => navigate(`/save/${url.includes("fanbox.cc") ? "fanbox" : "pixiv"}?url=${encodeURIComponent(url)}`))}>
+              <Group justify="space-between" align="flex-start" wrap="nowrap" gap="sm"><Box miw={0}><Text size="sm" fw={750} c="piep.6">Webから保存</Text><Text size="sm" c="dimmed" className="line-clamp-2">URLを貼るだけで作品・シリーズ・作者を判定します</Text></Box><Group gap="xs" wrap="nowrap" visibleFrom="sm" style={{ flex: "0 0 auto" }}><ConnectionBadge label="pixiv" connected={auth.isError ? null : auth.data?.pixiv} /><ConnectionBadge label="FANBOX" connected={auth.isError ? null : auth.data?.fanbox} /></Group></Group>
+              <form onSubmit={quickSave.onSubmit(({ url }) => { const source = quickSaveSource(url); if (source) navigate(`/save/${source}?url=${encodeURIComponent(url.trim())}`); })}>
                 <Group align="flex-start" wrap="nowrap">
-                  <Box flex={1}><input key={quickSave.key("url")} className={`quick-save-input${quickSave.errors.url ? " quick-save-input--error" : ""}`} placeholder="作品ページのURLを貼り付け" aria-label="保存するページのURL" {...quickSave.getInputProps("url")} />{quickSave.errors.url && <Text size="xs" c="red" mt={4}>{quickSave.errors.url}</Text>}</Box>
-                  <Button type="submit" rightSection={<ArrowRight size={15} />}>候補を開く</Button>
+                  <Box flex={1}><input key={quickSave.key("url")} id="dashboard-save-url" className={`quick-save-input${quickSave.errors.url ? " quick-save-input--error" : ""}`} placeholder="作品ページのURLを貼り付け" aria-label="保存するページのURL" aria-invalid={Boolean(quickSave.errors.url)} aria-describedby={quickSave.errors.url ? "dashboard-save-url-error" : undefined} {...quickSave.getInputProps("url")} />{quickSave.errors.url && <Text id="dashboard-save-url-error" role="alert" size="xs" c="red" mt={4}>{quickSave.errors.url}</Text>}</Box>
+                  <Button type="submit" rightSection={<Icons.forward size={IconSize.menu} />}>候補を開く</Button>
                 </Group>
               </form>
-              {(!auth.data?.pixiv || !auth.data?.fanbox) && <Button variant="subtle" size="compact-xs" w="fit-content" onClick={() => navigate("/settings")}>未接続サービスを設定</Button>}
+              {auth.data && (!auth.data.pixiv || !auth.data.fanbox) && <Button variant="subtle" size="compact-xs" w="fit-content" onClick={() => navigate("/settings")}>未接続サービスを設定</Button>}
+              {auth.isError && <Button variant="subtle" color="red" size="compact-xs" w="fit-content" onClick={() => auth.refetch()}>接続状態を再確認</Button>}
             </Stack>
           </Group>
         </Card>
@@ -102,14 +111,17 @@ export default function DashboardPage() {
         {/* Each tile opens the library already filtered to what it counts, so
             the number and its destination agree. */}
         <SimpleGrid cols={{ base: 2, md: 4 }} spacing="sm">
-          <StatCard icon={Database} label="保存作品" value={formatNumber(data.stats.totalDownloads)} hint={`pixiv ${formatNumber(data.stats.pixivCount)} · FANBOX ${formatNumber(data.stats.fanboxCount)}`} color="#0d86f4" onClick={() => navigate("/library")} />
-          <StatCard icon={HardDrive} label="使用容量" value={formatBytes(data.stats.totalSizeBytes)} hint={`${formatNumber(data.stats.totalAssets)} アセット`} color="#31b497" onClick={() => navigate("/library?sort=file_size_bytes")} />
-          <StatCard icon={Heart} label="お気に入り" value={formatNumber(data.favoriteCount)} hint="すぐ読み返せる作品" color="#ef5b78" onClick={() => navigate("/library?favorite=1")} />
-          <StatCard icon={RefreshCw} label="更新監視" value={formatNumber(data.watchedCount)} hint={`${formatNumber(data.updateTargetCount)} 作者・シリーズ`} color="#86b918" onClick={() => navigate("/library?watch=watched")} />
+          <StatCard icon={Icons.database} label="保存作品" value={formatNumber(data.stats.totalDownloads)} hint={`pixiv ${formatNumber(data.stats.pixivCount)} · FANBOX ${formatNumber(data.stats.fanboxCount)}`} color="#0d86f4" onClick={() => navigate("/library")} />
+          <StatCard icon={Icons.storage} label="使用容量" value={formatBytes(data.stats.totalSizeBytes)} hint={`${formatNumber(data.stats.totalAssets)} アセット`} color="#31b497" onClick={() => navigate("/library?sort=file_size_bytes")} />
+          <StatCard icon={Icons.favorite} label="お気に入り" value={formatNumber(data.favoriteCount)} hint="すぐ読み返せる作品" color="#ef5b78" onClick={() => navigate("/library?favorite=1")} />
+          <StatCard icon={Icons.updates} label="更新監視" value={formatNumber(data.watchedCount)} hint={`${formatNumber(data.updateTargetCount)} 作者・シリーズ`} color="#86b918" onClick={() => navigate("/library?watch=watched")} />
         </SimpleGrid>
 
-        <Grid gap="lg">
-          <Grid.Col span={{ base: 12, lg: 8 }}>
+        {/* Two columns from the medium breakpoint rather than the large one:
+            at ordinary window widths everything used to stack, leaving three
+            full-width strips down the page. */}
+        <Grid gap="lg" align="stretch">
+          <Grid.Col span={{ base: 12, md: 7, lg: 8 }}>
             <Card p="lg" h="100%" className="dashboard-trend-card">
               <Group justify="space-between" mb="md">
                 <Box>
@@ -122,40 +134,42 @@ export default function DashboardPage() {
               <SourceComposition breakdown={data.sourceBreakdown} total={data.stats.totalDownloads} />
             </Card>
           </Grid.Col>
-          <Grid.Col span={{ base: 12, lg: 4 }}>
-            <Stack gap="lg" h="100%">
+          <Grid.Col span={{ base: 12, md: 5, lg: 4 }}>
+            {/* Side by side once the column is full width, so neither ends up
+                as a lonely strip. */}
+            <div className="dashboard-side">
               <Card p="lg">
-                <Group justify="space-between" mb="sm"><Group gap="xs"><Search size={17} /><Text fw={700}>検索インデックス</Text></Group><Badge color={indexProgress === 100 ? "green" : "yellow"}>{indexProgress}%</Badge></Group>
-                <Progress value={indexProgress} mb="sm" aria-label={`検索インデックス ${indexProgress}%`} />
-                <Text size="xs" c="dimmed">{index.data?.isComplete ? "全文・意味検索は最新です" : `${formatNumber(index.data?.pendingDownloads)}件を処理中`}</Text>
+                <Group justify="space-between" mb="sm"><Group gap="xs"><Icons.search size={IconSize.action} /><Text fw={700}>検索インデックス</Text></Group><Badge color={index.isError ? "red" : indexProgress === 100 ? "green" : "yellow"}>{index.isError ? "取得失敗" : `${indexProgress}%`}</Badge></Group>
+                {index.isError ? <Button variant="subtle" color="red" size="compact-xs" onClick={() => index.refetch()}>状態を再確認</Button> : <><Progress value={indexProgress} mb="sm" aria-label={`検索インデックス ${indexProgress}%`} /><Text size="xs" c="dimmed">{index.data?.isComplete ? "全文・意味検索は最新です" : `${formatNumber(index.data?.pendingDownloads)}件を処理中`}</Text></>}
               </Card>
-              <Card p="lg" flex={1}>
+              <Card p="lg">
                 <Text fw={700} mb="sm">よく使うタグ</Text>
-                <Group gap="xs">{data.topTags.slice(0, 8).map((tag) => <Badge className="dashboard-tag" key={tag.name} variant="light" color="gray" component="button" onClick={() => navigate(`/library?q=${encodeURIComponent(tag.name)}`)}><span>{tag.name}</span><span className="dashboard-tag__count">{formatNumber(tag.count)}</span></Badge>)}</Group>
+                <div className="dashboard-tags">{data.topTags.slice(0, 8).map((tag) => <Badge className="dashboard-tag" key={tag.name} variant="light" color="gray" component="button" title={`${tag.name}（${formatNumber(tag.count)}件）`} onClick={() => navigate(`/library?q=${encodeURIComponent(tag.name)}`)}><span className="dashboard-tag__name">{tag.name}</span><span className="dashboard-tag__count">{formatNumber(tag.count)}</span></Badge>)}</div>
               </Card>
-            </Stack>
+            </div>
           </Grid.Col>
         </Grid>
 
         <Box>
-          <Group justify="space-between" mb="md"><Box><Title order={2}>最近の保存</Title><Text size="sm" c="dimmed">続きから読む、整理する</Text></Box><Button variant="subtle" rightSection={<ArrowRight size={15} />} onClick={() => navigate("/library")}>すべて表示</Button></Group>
-          {data.recentDownloads.length ? <div className="work-grid">{data.recentDownloads.slice(0, 4).map((work) => <WorkCard key={work.id} work={work} />)}</div> : <Alert color="gray">まだ作品がありません。</Alert>}
+          <Group justify="space-between" mb="md"><Box><Title order={2}>最近の保存</Title><Text size="sm" c="dimmed">続きから読む、整理する</Text></Box><Button variant="subtle" rightSection={<Icons.forward size={IconSize.menu} />} onClick={() => navigate("/library")}>すべて表示</Button></Group>
+          {data.recentDownloads.length ? <div className="work-grid">{data.recentDownloads.slice(0, 4).map((work) => <WorkCard key={work.id} work={work} />)}</div> : <EmptyState icon={Icons.database} title="まだ作品がありません" description="Webから最初の作品を保存すると、ここからすぐに読み返せます。" action={<Button leftSection={<Icons.collect size={IconSize.menu} />} onClick={() => navigate("/save/pixiv")}>作品を保存する</Button>} />}
         </Box>
       </Stack>
     </div>
   );
 }
 
-function ConnectionBadge({ label, connected }: { label: string; connected?: boolean }) {
-  return <Badge color={connected ? "green" : "gray"} variant="light" leftSection={<span className="status-dot" />}>{label} {connected ? "接続済み" : "未接続"}</Badge>;
+function ConnectionBadge({ label, connected }: { label: string; connected?: boolean | null }) {
+  const status = connected === undefined ? "確認中" : connected === null ? "確認失敗" : connected ? "接続済み" : "未接続";
+  return <Badge color={connected === null ? "red" : connected ? "green" : "gray"} variant="light" leftSection={<span className="status-dot" />}>{label} {status}</Badge>;
 }
 
-function StatCard({ icon: Icon, label, value, hint, color, onClick }: { icon: typeof Database; label: string; value: string; hint: string; color: string; onClick: () => void }) {
+function StatCard({ icon: Icon, label, value, hint, color, onClick }: { icon: LucideIcon; label: string; value: string; hint: string; color: string; onClick: () => void }) {
   return (
     <Card component="button" type="button" className="stat-card" style={{ "--stat-accent": color }} onClick={onClick}>
       <Group justify="space-between" align="flex-start"><Text size="sm" c="dimmed" fw={600}>{label}</Text><ThemeIcon variant="light" color="gray"><Icon size={17} style={{ color }} /></ThemeIcon></Group>
       <Text className="stat-card__value" fz="20px" fw={760} mt={2} lts="-0.035em" ta="center">{value}</Text>
-      <Group justify="space-between" gap="xs" wrap="nowrap"><Text size="xs" c="dimmed" mt={2} className="line-clamp-1">{hint}</Text><ArrowRight className="stat-card__arrow" size={14} /></Group>
+      <Group justify="space-between" gap="xs" wrap="nowrap"><Text size="xs" c="dimmed" mt={2} className="line-clamp-1">{hint}</Text><Icons.forward className="stat-card__arrow" size={14} /></Group>
     </Card>
   );
 }

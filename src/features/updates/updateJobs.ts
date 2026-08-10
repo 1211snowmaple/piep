@@ -149,6 +149,7 @@ export function useUpdateJobs(onSnapshot?: (snapshot: UpdateJobSnapshot) => void
   }, [loadJobs]);
 
   useEffect(() => {
+    if (!enabled) return undefined;
     let unlisten: (() => void) | undefined;
     onTauriEvent<UpdateJobSnapshot>("update-job-progress", event => {
       setActiveSnapshot(event.payload);
@@ -179,7 +180,7 @@ export function useUpdateJobs(onSnapshot?: (snapshot: UpdateJobSnapshot) => void
   }, [enabled, onSnapshot]);
 
   useEffect(() => {
-    if (!activeSnapshot || isUpdateJobTerminal(activeSnapshot.status)) return;
+    if (!enabled || !activeSnapshot || isUpdateJobTerminal(activeSnapshot.status)) return;
     const id = window.setInterval(() => {
       getUpdateJobCommand(activeSnapshot.jobId)
         .then(snapshot => {
@@ -189,7 +190,7 @@ export function useUpdateJobs(onSnapshot?: (snapshot: UpdateJobSnapshot) => void
         .catch(() => undefined);
     }, 1500);
     return () => window.clearInterval(id);
-  }, [activeSnapshot, onSnapshot]);
+  }, [activeSnapshot, enabled, onSnapshot]);
 
   return useMemo(() => ({
     jobs,

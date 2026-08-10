@@ -216,6 +216,99 @@ pub struct DbStats {
     pub total_size_bytes: i64,
 }
 
+/// Small, eagerly loaded part of a reader document.  Assets and body content
+/// intentionally live behind separate commands so opening a work does not
+/// serialize a multi-megabyte payload before the first frame can render.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReaderMetadata {
+    pub download: DownloadEntry,
+    pub versions: Vec<DownloadVersion>,
+    pub asset_count: i64,
+    pub is_edited: bool,
+    pub active_edit_revision: Option<WorkEditRevision>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReaderContentPage {
+    pub page: usize,
+    pub page_count: usize,
+    pub html: String,
+    pub plain_text: String,
+    pub total_plain_text_chars: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReaderSearchHit {
+    /// One-based transport/source page number for direct navigation.
+    pub page: usize,
+    pub snippet: String,
+    pub count: usize,
+}
+
+/// Runtime measurements used by the large-library diagnostics screen.  The
+/// benchmark values are measured on demand against the user's real database;
+/// they are not synthetic estimates.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryDiagnostics {
+    pub measured_at: String,
+    pub total_downloads: i64,
+    pub total_assets: i64,
+    pub total_versions: i64,
+    pub total_text_length: i64,
+    pub database_size_bytes: u64,
+    pub wal_size_bytes: u64,
+    pub storage_size_bytes: u64,
+    pub lexical_index_size_bytes: u64,
+    pub lexical_index_file_count: u64,
+    pub lexical_index_segment_count: u64,
+    pub semantic_index_size_bytes: u64,
+    pub sqlite_page_count: i64,
+    pub sqlite_free_pages: i64,
+    pub sqlite_cache_size_bytes: u64,
+    pub live_database_bytes: u64,
+    pub fragmentation_percent: f64,
+    pub orphan_asset_rows: i64,
+    pub orphan_asset_bytes: i64,
+    pub orphan_asset_files: u64,
+    pub orphan_asset_file_bytes: u64,
+    pub process_memory_bytes: Option<u64>,
+    pub list_first_page_ms: f64,
+    pub list_p50_ms: f64,
+    pub list_p95_ms: f64,
+    pub lexical_search_ms: Option<f64>,
+    pub lexical_search_p50_ms: Option<f64>,
+    pub lexical_search_p95_ms: Option<f64>,
+    pub exact_author_p50_ms: Option<f64>,
+    pub exact_author_p95_ms: Option<f64>,
+    pub benchmark_query: Option<String>,
+    pub search_index: SearchIndexStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryMaintenanceResult {
+    pub compacted: bool,
+    pub before_bytes: u64,
+    pub after_bytes: u64,
+    pub reclaimed_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchIndexOptimizationResult {
+    pub optimized: bool,
+    pub before_segments: u64,
+    pub after_segments: u64,
+    pub before_bytes: u64,
+    pub after_bytes: u64,
+    pub reclaimed_bytes: u64,
+    pub elapsed_ms: f64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DashboardTrendPoint {
@@ -248,6 +341,49 @@ pub struct DashboardSummary {
     pub recent_downloads: Vec<DownloadEntry>,
     pub source_breakdown: Vec<SourceBreakdown>,
     pub monthly_downloads: Vec<DashboardTrendPoint>,
+}
+
+/// A named set of search conditions the reader keeps.
+///
+/// These used to live in browser storage, which made them per-install and kept
+/// them out of reach of anything but the library toolbar. They are part of the
+/// library, so they belong in it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedSearch {
+    pub id: i64,
+    pub name: String,
+    pub query: Option<String>,
+    pub params_json: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedSearchInput {
+    /// Absent for a new entry. Saving again under an existing name updates that
+    /// entry rather than failing on the unique constraint.
+    pub id: Option<i64>,
+    pub name: String,
+    pub query: Option<String>,
+    pub params_json: String,
+}
+
+/// The counts the library sidebar shows next to each shelf.
+///
+/// Kept separate from the dashboard summary, which also computes tag, author
+/// and trend data: the sidebar is on screen the whole time and must not pay for
+/// any of that.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryShelfCounts {
+    pub total: i64,
+    pub favorite: i64,
+    pub watched: i64,
+    /// How many of the supplied works still exist. Reading positions are kept
+    /// per device and outlive the works they point at.
+    pub reading: i64,
 }
 
 /// フィルター候補（名前と件数）
@@ -491,6 +627,15 @@ pub struct SearchV2Params {
     pub person_key: Option<String>,
     pub series_source: Option<String>,
     pub series_key: Option<String>,
+    /// Jumps straight to a page rather than walking there with a cursor.
+    ///
+    /// Only meaningful for an explicit column ordering: relevance paging walks
+    /// the index with a score cursor, which has no notion of an nth page.
+    pub offset: Option<i64>,
+    /// Restricts the result to these works. Backs shelves whose membership is
+    /// known to the client rather than the database - reading positions are
+    /// kept per device, so only the client knows which works are part-read.
+    pub ids_include: Option<Vec<i64>>,
     pub view_mode: Option<String>,
     pub projection: Option<String>,
     pub search_mode: Option<String>,
@@ -503,10 +648,26 @@ pub struct SearchMeta {
     pub query: Option<String>,
     pub total_estimate: Option<i64>,
     pub index_complete: bool,
+    /// Human-readable, stable facts the UI can use to explain how the query
+    /// was interpreted. These are intentionally not tied to Tantivy internals.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub explanations: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exact_entity: Option<SearchEntityIntent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub semantic_index_complete: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub semantic_model_ready: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchEntityIntent {
+    pub kind: String,
+    pub label: String,
+    pub source: Option<String>,
+    pub source_key: Option<String>,
+    pub strict: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -533,6 +694,12 @@ pub struct SearchSuggestion {
     pub label: String,
     pub value: String,
     pub count: Option<i64>,
+    #[serde(default)]
+    pub exact_match: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -3,21 +3,26 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use parking_lot::Mutex;
-use tantivy::collector::TopDocs;
+use tantivy::collector::{Count, TopDocs};
 use tantivy::query::QueryParser;
 use tantivy::schema::Value as _;
 use tantivy::schema::{Field, Schema, FAST, INDEXED, STORED, STRING, TEXT};
 use tantivy::tokenizer::{LowerCaser, NgramTokenizer, RemoveLongFilter, TextAnalyzer};
 use tantivy::{Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument, Term};
 
+use url::Url;
+
 use super::search::{parse_search_query, ParsedSearchQuery, SearchDocument, SearchTerm};
 use super::search_normalization::{
-    expand_query_for_tantivy, normalize_for_search, query_variants, reading_kana_text,
-    reading_romaji_text, search_index_text,
+    expand_query_for_tantivy, index_text, normalize_for_search, query_variants,
 };
 
 const INDEX_DIR_NAME: &str = "search-index";
-const INDEX_VERSION_DIR: &str = "v3";
+// v4 drops the body field that duplicated the body n-grams verbatim, stops
+// storing the derived forms that are only ever matched against, and no longer
+// folds the readings into the n-gram field. Existing v3 directories are left
+// alone; the app rebuilds into the new one.
+const INDEX_VERSION_DIR: &str = "v4";
 const TOKENIZER_NAME: &str = "default";
 
 static RUNTIMES: OnceLock<Mutex<HashMap<PathBuf, Arc<TantivyRuntime>>>> = OnceLock::new();
@@ -53,6 +58,22 @@ pub struct TantivyIndexDocument {
 pub struct TantivySearchHit {
     pub download_id: i64,
     pub score: f32,
+    pub segment_ord: u32,
+    pub doc_id: u32,
+    pub document: Arc<SearchDocument>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct TantivySearchCursor {
+    pub score: f32,
+    pub segment_ord: u32,
+    pub doc_id: u32,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct TantivySearchResult {
+    pub hits: Vec<TantivySearchHit>,
+    pub total_hits: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -100,11 +121,9 @@ struct TantivyFields {
     excerpt_reading_kana: Field,
     excerpt_reading_romaji: Field,
     body_exact: Field,
-    body_lower: Field,
     body_ngram: Field,
     body_reading_kana: Field,
     body_reading_romaji: Field,
-    body_chunk: Field,
     published_at: Field,
     downloaded_at: Field,
     favorite: Field,
@@ -113,10 +132,46 @@ struct TantivyFields {
     text_length: Field,
 }
 
+/// The on-disk index format. Bookkeeping in SQLite is keyed to this, so that a
+/// format change forces a rebuild instead of leaving the app searching an index
+/// that no longer holds anything.
+pub fn index_format_version() -> &'static str {
+    INDEX_VERSION_DIR
+}
+
+/// Removes index directories left behind by older formats.
+///
+/// The index is entirely derived from the library, so an obsolete copy is dead
+/// weight - and at several times the size of the current one, it is worth
+/// reclaiming rather than leaving on disk forever.
+fn remove_obsolete_index_versions(index_root: &Path) {
+    let Ok(entries) = std::fs::read_dir(index_root) else {
+        return;
+    };
+    for entry in entries.filter_map(Result::ok) {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let is_version_dir = name.len() > 1
+            && name.starts_with('v')
+            && name[1..].chars().all(|c| c.is_ascii_digit());
+        if !is_version_dir || name == INDEX_VERSION_DIR {
+            continue;
+        }
+        if entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {
+            match std::fs::remove_dir_all(entry.path()) {
+                Ok(()) => log::info!("Removed obsolete search index format {name}"),
+                // Windows can hold an mmap open; a later run collects it.
+                Err(error) => log::warn!("Could not remove obsolete search index {name}: {error}"),
+            }
+        }
+    }
+}
+
 pub fn ensure_index(storage_dir: &Path) -> Result<Index, String> {
-    let index_dir = storage_dir.join(INDEX_DIR_NAME).join(INDEX_VERSION_DIR);
+    let index_root = storage_dir.join(INDEX_DIR_NAME);
+    let index_dir = index_root.join(INDEX_VERSION_DIR);
     std::fs::create_dir_all(&index_dir)
         .map_err(|e| format!("Tantivy index dir creation failed: {}", e))?;
+    remove_obsolete_index_versions(&index_root);
 
     match Index::open_in_dir(&index_dir) {
         Ok(index) => {
@@ -194,6 +249,100 @@ pub fn upsert_documents(storage_dir: &Path, docs: &[TantivyIndexDocument]) -> Re
     Ok(())
 }
 
+/// Turns a source document into its indexable form without touching the index.
+///
+/// This is the expensive half of indexing - morphological analysis of the whole
+/// body - and it is pure, so a rebuild can run it across every core and hand
+/// the writer nothing but finished documents.
+pub fn prepare_document(storage_dir: &Path, doc: &TantivyIndexDocument) -> Result<Prepared, String> {
+    let runtime = runtime(storage_dir)?;
+    Ok(Prepared {
+        download_id: doc.download_id,
+        document: tantivy_document(&runtime.fields, doc),
+    })
+}
+
+pub struct Prepared {
+    download_id: i64,
+    document: TantivyDocument,
+}
+
+/// A writer held open for the length of a rebuild.
+///
+/// Creating one costs a thread pool and a memory arena, and every commit ends a
+/// segment, so doing both once per small batch was most of the cost of a
+/// rebuild and left the index split into hundreds of segments.
+pub struct BulkWriter {
+    runtime: Arc<TantivyRuntime>,
+    writer: IndexWriter<TantivyDocument>,
+    uncommitted: usize,
+}
+
+/// Tantivy divides this budget across its indexing threads, so it has to be
+/// generous enough that each thread still gets a workable arena.
+const BULK_WRITER_MEMORY_BUDGET: usize = 900_000_000;
+
+pub fn bulk_writer(storage_dir: &Path) -> Result<BulkWriter, String> {
+    let runtime = runtime(storage_dir)?;
+    let threads = std::thread::available_parallelism()
+        .map(|value| value.get())
+        .unwrap_or(4)
+        .clamp(1, 8);
+    let writer = runtime
+        .index
+        .writer_with_num_threads(threads, BULK_WRITER_MEMORY_BUDGET)
+        .map_err(|e| format!("Tantivy bulk writer creation failed: {e}"))?;
+    Ok(BulkWriter {
+        runtime,
+        writer,
+        uncommitted: 0,
+    })
+}
+
+impl BulkWriter {
+    pub fn upsert(&mut self, prepared: Prepared) -> Result<(), String> {
+        self.writer.delete_term(Term::from_field_u64(
+            self.runtime.fields.download_id,
+            prepared.download_id as u64,
+        ));
+        self.writer
+            .add_document(prepared.document)
+            .map_err(|e| format!("Tantivy document insert failed: {e}"))?;
+        self.uncommitted += 1;
+        Ok(())
+    }
+
+    pub fn uncommitted(&self) -> usize {
+        self.uncommitted
+    }
+
+    pub fn commit(&mut self) -> Result<(), String> {
+        if self.uncommitted == 0 {
+            return Ok(());
+        }
+        self.writer
+            .commit()
+            .map_err(|e| format!("Tantivy commit failed: {e}"))?;
+        self.runtime
+            .reader
+            .reload()
+            .map_err(|e| format!("Tantivy reader reload failed: {e}"))?;
+        self.uncommitted = 0;
+        Ok(())
+    }
+
+    /// Abandons everything added since the last commit. Used when a rebuild is
+    /// cancelled, so the index keeps the last consistent state instead of a
+    /// half-written batch.
+    pub fn rollback(&mut self) -> Result<(), String> {
+        self.writer
+            .rollback()
+            .map_err(|e| format!("Tantivy rollback failed: {e}"))?;
+        self.uncommitted = 0;
+        Ok(())
+    }
+}
+
 pub fn delete_document(storage_dir: &Path, download_id: i64) -> Result<(), String> {
     let runtime = runtime(storage_dir)?;
     let mut writer: IndexWriter<TantivyDocument> = runtime
@@ -214,13 +363,75 @@ pub fn delete_document(storage_dir: &Path, download_id: i64) -> Result<(), Strin
     Ok(())
 }
 
-pub fn search(
+pub fn searchable_segment_count(storage_dir: &Path) -> Result<usize, String> {
+    let runtime = runtime(storage_dir)?;
+    runtime
+        .index
+        .searchable_segment_ids()
+        .map(|segments| segments.len())
+        .map_err(|e| format!("Tantivy segment inspection failed: {e}"))
+}
+
+/// Atomically merges every searchable segment into one segment. Tantivy keeps
+/// the old segment set authoritative until the new one is fully written and
+/// its meta file is committed, so an interruption cannot replace a valid index
+/// with a partial merge. Unreferenced files are collected only afterwards.
+pub fn optimize_segments(storage_dir: &Path) -> Result<(usize, usize), String> {
+    let runtime = runtime(storage_dir)?;
+    let segment_ids = runtime
+        .index
+        .searchable_segment_ids()
+        .map_err(|e| format!("Tantivy segment inspection failed: {e}"))?;
+    let before = segment_ids.len();
+    let mut writer: IndexWriter<TantivyDocument> = runtime
+        .index
+        .writer(64_000_000)
+        .map_err(|e| format!("Tantivy optimization writer creation failed: {e}"))?;
+    writer.set_merge_policy(Box::new(tantivy::merge_policy::NoMergePolicy));
+    if before <= 1 {
+        // A prior merge can leave obsolete files temporarily undeletable on
+        // Windows while another reader still owns an mmap. Even when no merge
+        // is needed, an explicit optimization must retry that safe cleanup.
+        if let Err(error) = writer.garbage_collect_files().wait() {
+            log::warn!("Tantivy obsolete file collection deferred: {error}");
+        }
+        drop(writer);
+        return Ok((before, before));
+    }
+
+    writer
+        .merge(&segment_ids)
+        .wait()
+        .map_err(|e| format!("Tantivy segment merge failed: {e}"))?;
+    runtime
+        .reader
+        .reload()
+        .map_err(|e| format!("Tantivy reader reload after merge failed: {e}"))?;
+    if let Err(error) = writer.garbage_collect_files().wait() {
+        // The merged index is already committed and searchable. On Windows an
+        // in-flight reader may keep an obsolete mmap alive; a later writer or
+        // optimization run can safely retry collecting those files.
+        log::warn!("Tantivy obsolete file collection deferred: {error}");
+    }
+    drop(writer);
+    let after = runtime
+        .index
+        .searchable_segment_ids()
+        .map_err(|e| format!("Tantivy post-merge inspection failed: {e}"))?
+        .len();
+    Ok((before, after))
+}
+
+/// Returns the current top candidates together with the complete number of
+/// lexical matches. Callers can grow `limit` as a relevance cursor advances,
+/// instead of silently making everything below a fixed top-N unreachable.
+pub fn search_with_total(
     storage_dir: &Path,
     query: &str,
     limit: usize,
-) -> Result<Vec<TantivySearchHit>, String> {
+) -> Result<TantivySearchResult, String> {
     if query.trim().is_empty() || limit == 0 {
-        return Ok(Vec::new());
+        return Ok(TantivySearchResult::default());
     }
 
     let runtime = runtime(storage_dir)?;
@@ -230,7 +441,7 @@ pub fn search(
     configure_field_boosts(&mut parser, &fields);
     let parsed_query = parse_search_query(query);
     let Some(query_expr) = tantivy_query(&parsed_query) else {
-        return Ok(Vec::new());
+        return Ok(TantivySearchResult::default());
     };
     let expanded_query = expand_query_for_tantivy(query);
     let parsed = parser
@@ -238,8 +449,11 @@ pub fn search(
         .or_else(|_| parser.parse_query(&escape_query(&expanded_query)))
         .map_err(|e| format!("Tantivy query parse failed: {}", e))?;
 
-    let top_docs = searcher
-        .search(&parsed, &TopDocs::with_limit(limit).order_by_score())
+    let (top_docs, total_hits) = searcher
+        .search(
+            &parsed,
+            &(TopDocs::with_limit(limit).order_by_score(), Count),
+        )
         .map_err(|e| format!("Tantivy search failed: {}", e))?;
 
     let mut hits = Vec::with_capacity(top_docs.len());
@@ -252,11 +466,180 @@ pub fn search(
             .and_then(|value| value.as_u64())
             .map(|value| value as i64)
         {
-            hits.push(TantivySearchHit { download_id, score });
+            hits.push(TantivySearchHit {
+                download_id,
+                score,
+                segment_ord: address.segment_ord,
+                doc_id: address.doc_id,
+                document: Arc::new(search_document_from_tantivy(&retrieved, &fields)),
+            });
         }
     }
 
-    Ok(hits)
+    Ok(TantivySearchResult { hits, total_hits })
+}
+
+/// Fetches the page immediately after a relevance cursor without collecting
+/// every preceding hit again. `TopDocs::and_offset` grows its heap with the
+/// page depth; the eligibility bit below keeps the heap bounded by `limit`
+/// while Tantivy scores the matching postings once. DocAddress is Tantivy's
+/// own stable tie-breaker for a fixed reader snapshot.
+pub fn search_after_with_total(
+    storage_dir: &Path,
+    query: &str,
+    limit: usize,
+    cursor: Option<TantivySearchCursor>,
+) -> Result<TantivySearchResult, String> {
+    if query.trim().is_empty() || limit == 0 {
+        return Ok(TantivySearchResult::default());
+    }
+
+    let runtime = runtime(storage_dir)?;
+    let fields = runtime.fields;
+    let searcher = runtime.reader.searcher();
+    let mut parser = QueryParser::for_index(&runtime.index, search_fields(&fields));
+    configure_field_boosts(&mut parser, &fields);
+    let parsed_query = parse_search_query(query);
+    let Some(query_expr) = tantivy_query(&parsed_query) else {
+        return Ok(TantivySearchResult::default());
+    };
+    let expanded_query = expand_query_for_tantivy(query);
+    let parsed = parser
+        .parse_query(&query_expr)
+        .or_else(|_| parser.parse_query(&escape_query(&expanded_query)))
+        .map_err(|e| format!("Tantivy query parse failed: {e}"))?;
+
+    let segment_ord_by_id = Arc::new(
+        searcher
+            .segment_readers()
+            .iter()
+            .enumerate()
+            .map(|(segment_ord, reader)| (reader.segment_id(), segment_ord as u32))
+            .collect::<HashMap<_, _>>(),
+    );
+    let collector = TopDocs::with_limit(limit).tweak_score({
+        let segment_ord_by_id = segment_ord_by_id.clone();
+        move |segment_reader: &tantivy::SegmentReader| {
+            let segment_ord = segment_ord_by_id
+                .get(&segment_reader.segment_id())
+                .copied()
+                .unwrap_or(u32::MAX);
+            move |doc_id: tantivy::DocId, score: tantivy::Score| {
+                let eligible = cursor
+                    .map(|cursor| {
+                        score < cursor.score
+                            || (score == cursor.score
+                                && (segment_ord > cursor.segment_ord
+                                    || (segment_ord == cursor.segment_ord
+                                        && doc_id > cursor.doc_id)))
+                    })
+                    .unwrap_or(true);
+                (eligible, score)
+            }
+        }
+    });
+    let (top_docs, total_hits) = searcher
+        .search(&parsed, &(collector, Count))
+        .map_err(|e| format!("Tantivy search failed: {e}"))?;
+
+    let mut hits = Vec::with_capacity(top_docs.len());
+    for ((eligible, score), address) in top_docs {
+        if !eligible {
+            continue;
+        }
+        let retrieved = searcher
+            .doc::<TantivyDocument>(address)
+            .map_err(|e| format!("Tantivy document read failed: {e}"))?;
+        if let Some(download_id) = retrieved
+            .get_first(fields.download_id)
+            .and_then(|value| value.as_u64())
+            .map(|value| value as i64)
+        {
+            hits.push(TantivySearchHit {
+                download_id,
+                score,
+                segment_ord: address.segment_ord,
+                doc_id: address.doc_id,
+                document: Arc::new(search_document_from_tantivy(&retrieved, &fields)),
+            });
+        }
+    }
+
+    Ok(TantivySearchResult { hits, total_hits })
+}
+
+/// Returns the download id of every document matching `query`.
+///
+/// Relevance paging cannot answer "the same matches, ordered by title", so a
+/// sorted search needs the whole match set handed to SQL, which owns the
+/// ordering. Ids come from the fast field, so this never touches stored data.
+pub fn matching_download_ids(storage_dir: &Path, query: &str) -> Result<Vec<i64>, String> {
+    if query.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let runtime = runtime(storage_dir)?;
+    let searcher = runtime.reader.searcher();
+    let mut parser = QueryParser::for_index(&runtime.index, search_fields(&runtime.fields));
+    configure_field_boosts(&mut parser, &runtime.fields);
+    let parsed_query = parse_search_query(query);
+    let Some(query_expr) = tantivy_query(&parsed_query) else {
+        return Ok(Vec::new());
+    };
+    let expanded_query = expand_query_for_tantivy(query);
+    let parsed = parser
+        .parse_query(&query_expr)
+        .or_else(|_| parser.parse_query(&escape_query(&expanded_query)))
+        .map_err(|e| format!("Tantivy query parse failed: {e}"))?;
+
+    let ids = searcher
+        .search(&parsed, &DownloadIdCollector)
+        .map_err(|e| format!("Tantivy id collection failed: {e}"))?;
+    Ok(ids.into_iter().map(|id| id as i64).collect())
+}
+
+struct DownloadIdCollector;
+
+impl tantivy::collector::Collector for DownloadIdCollector {
+    type Fruit = Vec<u64>;
+    type Child = DownloadIdSegmentCollector;
+
+    fn for_segment(
+        &self,
+        _segment_local_id: tantivy::SegmentOrdinal,
+        segment: &tantivy::SegmentReader,
+    ) -> tantivy::Result<Self::Child> {
+        Ok(DownloadIdSegmentCollector {
+            column: segment.fast_fields().u64("download_id")?,
+            ids: Vec::new(),
+        })
+    }
+
+    fn requires_scoring(&self) -> bool {
+        false
+    }
+
+    fn merge_fruits(&self, segment_fruits: Vec<Vec<u64>>) -> tantivy::Result<Self::Fruit> {
+        Ok(segment_fruits.concat())
+    }
+}
+
+struct DownloadIdSegmentCollector {
+    column: tantivy::fastfield::Column<u64>,
+    ids: Vec<u64>,
+}
+
+impl tantivy::collector::SegmentCollector for DownloadIdSegmentCollector {
+    type Fruit = Vec<u64>;
+
+    fn collect(&mut self, doc: tantivy::DocId, _score: tantivy::Score) {
+        if let Some(value) = self.column.first(doc) {
+            self.ids.push(value);
+        }
+    }
+
+    fn harvest(self) -> Vec<u64> {
+        self.ids
+    }
 }
 
 fn search_fields(fields: &TantivyFields) -> Vec<Field> {
@@ -301,11 +684,9 @@ fn search_fields(fields: &TantivyFields) -> Vec<Field> {
         fields.excerpt_ngram,
         fields.excerpt_reading_kana,
         fields.excerpt_reading_romaji,
-        fields.body_lower,
         fields.body_ngram,
         fields.body_reading_kana,
         fields.body_reading_romaji,
-        fields.body_chunk,
         fields.asset_kinds,
     ]
 }
@@ -346,11 +727,9 @@ fn configure_field_boosts(parser: &mut QueryParser, fields: &TantivyFields) {
         (fields.excerpt_ngram, 3.5),
         (fields.excerpt_reading_kana, 3.2),
         (fields.excerpt_reading_romaji, 3.0),
-        (fields.body_lower, 1.2),
         (fields.body_ngram, 1.0),
         (fields.body_reading_kana, 0.9),
         (fields.body_reading_romaji, 0.8),
-        (fields.body_chunk, 0.7),
         (fields.asset_kinds, 1.0),
     ] {
         parser.set_field_boost(field, boost);
@@ -468,14 +847,21 @@ pub fn load_document(
         .doc::<TantivyDocument>(address)
         .map_err(|e| format!("Tantivy document read failed: {}", e))?;
 
-    Ok(Some(SearchDocument {
-        title: text_value(&retrieved, fields.title_exact),
-        author_name: text_value(&retrieved, fields.author_name_exact),
-        tags: text_value(&retrieved, fields.tags_exact),
-        series_title: text_value(&retrieved, fields.series_title_exact),
-        excerpt: text_value(&retrieved, fields.excerpt_exact),
-        body: text_value(&retrieved, fields.body_exact),
-    }))
+    Ok(Some(search_document_from_tantivy(&retrieved, &fields)))
+}
+
+fn search_document_from_tantivy(
+    retrieved: &TantivyDocument,
+    fields: &TantivyFields,
+) -> SearchDocument {
+    SearchDocument {
+        title: text_value(retrieved, fields.title_exact),
+        author_name: text_value(retrieved, fields.author_name_exact),
+        tags: text_value(retrieved, fields.tags_exact),
+        series_title: text_value(retrieved, fields.series_title_exact),
+        excerpt: text_value(retrieved, fields.excerpt_exact),
+        body: text_value(retrieved, fields.body_exact),
+    }
 }
 
 fn tantivy_document(fields: &TantivyFields, doc: &TantivyIndexDocument) -> TantivyDocument {
@@ -491,15 +877,7 @@ fn tantivy_document(fields: &TantivyFields, doc: &TantivyIndexDocument) -> Tanti
         fields.source_id_reading_romaji,
         &doc.source_id,
     );
-    add_search_text(
-        &mut tantivy_doc,
-        fields.source_url_exact,
-        fields.source_url_lower,
-        fields.source_url_ngram,
-        fields.source_url_reading_kana,
-        fields.source_url_reading_romaji,
-        &doc.source_url,
-    );
+    add_url_text(&mut tantivy_doc, fields, &doc.source_url);
     add_search_text(
         &mut tantivy_doc,
         fields.title_exact,
@@ -554,16 +932,14 @@ fn tantivy_document(fields: &TantivyFields, doc: &TantivyIndexDocument) -> Tanti
         fields.excerpt_reading_romaji,
         &doc.excerpt,
     );
-    add_search_text(
-        &mut tantivy_doc,
-        fields.body_exact,
-        fields.body_lower,
-        fields.body_ngram,
-        fields.body_reading_kana,
-        fields.body_reading_romaji,
-        &doc.body,
-    );
-    tantivy_doc.add_text(fields.body_chunk, search_index_text(&doc.body));
+    // The body is stored for snippets but never matched whole, so it gets no
+    // exact/lower term of its own - one term the length of a novel only bloats
+    // the dictionary.
+    tantivy_doc.add_text(fields.body_exact, &doc.body);
+    let body = index_text(&doc.body);
+    tantivy_doc.add_text(fields.body_ngram, body.surface);
+    tantivy_doc.add_text(fields.body_reading_kana, body.reading_kana);
+    tantivy_doc.add_text(fields.body_reading_romaji, body.reading_romaji);
     tantivy_doc.add_text(fields.published_at, &doc.published_at);
     tantivy_doc.add_text(fields.downloaded_at, &doc.downloaded_at);
     tantivy_doc.add_bool(fields.favorite, doc.favorite);
@@ -575,8 +951,11 @@ fn tantivy_document(fields: &TantivyFields, doc: &TantivyIndexDocument) -> Tanti
 
 fn build_schema() -> Schema {
     let mut builder = Schema::builder();
-    builder.add_u64_field("download_id", INDEXED | STORED);
-    builder.add_text_field("source_exact", STRING | STORED);
+    // FAST as well as stored: sorting a text search by a library column needs
+    // the id of every match, and reading that from a fast field costs a column
+    // lookup instead of loading each stored document (body included).
+    builder.add_u64_field("download_id", INDEXED | STORED | FAST);
+    builder.add_text_field("source_exact", STRING);
     add_text_family(&mut builder, "source_id");
     add_text_family(&mut builder, "source_url");
     add_text_family(&mut builder, "title");
@@ -585,23 +964,30 @@ fn build_schema() -> Schema {
     add_text_family(&mut builder, "tags");
     add_text_family(&mut builder, "series_title");
     add_text_family(&mut builder, "excerpt");
-    add_text_family(&mut builder, "body");
-    builder.add_text_field("body_chunk", TEXT | STORED);
-    builder.add_text_field("published_at", STRING | STORED);
-    builder.add_text_field("downloaded_at", STRING | STORED);
-    builder.add_bool_field("favorite", FAST | STORED);
-    builder.add_bool_field("watch_updates", FAST | STORED);
-    builder.add_text_field("asset_kinds", TEXT | STORED);
-    builder.add_i64_field("text_length", FAST | STORED);
+    // The body is read back for snippets and matched through its derived
+    // forms, never as one term of its own.
+    builder.add_text_field("body_exact", STORED);
+    builder.add_text_field("body_ngram", TEXT);
+    builder.add_text_field("body_reading_kana", TEXT);
+    builder.add_text_field("body_reading_romaji", TEXT);
+    builder.add_text_field("published_at", STRING);
+    builder.add_text_field("downloaded_at", STRING);
+    builder.add_bool_field("favorite", FAST);
+    builder.add_bool_field("watch_updates", FAST);
+    builder.add_text_field("asset_kinds", TEXT);
+    builder.add_i64_field("text_length", FAST);
     builder.build()
 }
 
+/// Only the verbatim value is stored: the derived forms exist to be matched
+/// against and are never read back, so storing them doubled the index for
+/// nothing.
 fn add_text_family(builder: &mut tantivy::schema::SchemaBuilder, name: &str) {
     builder.add_text_field(&format!("{}_exact", name), STRING | STORED);
-    builder.add_text_field(&format!("{}_lower", name), STRING | STORED);
-    builder.add_text_field(&format!("{}_ngram", name), TEXT | STORED);
-    builder.add_text_field(&format!("{}_reading_kana", name), TEXT | STORED);
-    builder.add_text_field(&format!("{}_reading_romaji", name), TEXT | STORED);
+    builder.add_text_field(&format!("{}_lower", name), STRING);
+    builder.add_text_field(&format!("{}_ngram", name), TEXT);
+    builder.add_text_field(&format!("{}_reading_kana", name), TEXT);
+    builder.add_text_field(&format!("{}_reading_romaji", name), TEXT);
 }
 
 fn schema_has_required_fields(schema: &Schema) -> bool {
@@ -649,11 +1035,9 @@ fn schema_has_required_fields(schema: &Schema) -> bool {
         "excerpt_reading_kana",
         "excerpt_reading_romaji",
         "body_exact",
-        "body_lower",
         "body_ngram",
         "body_reading_kana",
         "body_reading_romaji",
-        "body_chunk",
         "published_at",
         "downloaded_at",
         "favorite",
@@ -727,11 +1111,9 @@ fn fields(schema: &Schema) -> Result<TantivyFields, String> {
         excerpt_reading_kana: get("excerpt_reading_kana")?,
         excerpt_reading_romaji: get("excerpt_reading_romaji")?,
         body_exact: get("body_exact")?,
-        body_lower: get("body_lower")?,
         body_ngram: get("body_ngram")?,
         body_reading_kana: get("body_reading_kana")?,
         body_reading_romaji: get("body_reading_romaji")?,
-        body_chunk: get("body_chunk")?,
         published_at: get("published_at")?,
         downloaded_at: get("downloaded_at")?,
         favorite: get("favorite")?,
@@ -741,6 +1123,51 @@ fn fields(schema: &Schema) -> Result<TantivyFields, String> {
     })
 }
 
+/// Indexes a work's source URL by what identifies it, not by its boilerplate.
+///
+/// Every pixiv novel URL contains the path segment "novel", and the synonym
+/// table expands 物語 to "novel" - so searching 物語 matched the entire pixiv
+/// library through their URLs. Only the host and the id-bearing segments carry
+/// identifying information; the fixed path words carry none and are the only
+/// part that ever produced a false match. The verbatim URL is still indexed
+/// exactly, so pasting a full URL still finds its work.
+fn add_url_text(doc: &mut TantivyDocument, fields: &TantivyFields, url: &str) {
+    let identity = url_identity_text(url);
+    let indexed = index_text(&identity);
+    doc.add_text(fields.source_url_exact, url);
+    doc.add_text(fields.source_url_lower, normalize_for_search(url));
+    doc.add_text(fields.source_url_ngram, indexed.surface);
+    doc.add_text(fields.source_url_reading_kana, indexed.reading_kana);
+    doc.add_text(fields.source_url_reading_romaji, indexed.reading_romaji);
+}
+
+/// The host plus every path or query value carrying a digit - which is where
+/// work, post and creator ids live. Fixed words like "novel", "show.php" and
+/// "posts" are the same on every URL and identify nothing.
+fn url_identity_text(url: &str) -> String {
+    let Ok(parsed) = Url::parse(url) else {
+        return url.to_string();
+    };
+    let mut parts = Vec::new();
+    if let Some(host) = parsed.host_str() {
+        parts.push(host.to_string());
+    }
+    let carries_id = |value: &str| value.chars().any(|c| c.is_ascii_digit());
+    if let Some(segments) = parsed.path_segments() {
+        for segment in segments.filter(|segment| carries_id(segment)) {
+            parts.push(segment.to_string());
+        }
+    }
+    for (_, value) in parsed.query_pairs() {
+        if carries_id(&value) {
+            parts.push(value.to_string());
+        }
+    }
+    parts.join(" ")
+}
+
+/// One morphological pass feeds all four derived fields. Deriving them with
+/// separate helper calls re-analysed the same text once per field.
 fn add_search_text(
     doc: &mut TantivyDocument,
     exact: Field,
@@ -750,11 +1177,12 @@ fn add_search_text(
     reading_romaji: Field,
     value: &str,
 ) {
+    let indexed = index_text(value);
     doc.add_text(exact, value);
-    doc.add_text(lower, normalize_for_search(value));
-    doc.add_text(ngram, search_index_text(value));
-    doc.add_text(reading_kana, reading_kana_text(value));
-    doc.add_text(reading_romaji, reading_romaji_text(value));
+    doc.add_text(lower, indexed.normalized);
+    doc.add_text(ngram, indexed.surface);
+    doc.add_text(reading_kana, indexed.reading_kana);
+    doc.add_text(reading_romaji, indexed.reading_romaji);
 }
 
 fn text_value(doc: &TantivyDocument, field: Field) -> String {

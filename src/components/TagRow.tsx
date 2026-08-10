@@ -14,7 +14,7 @@ function tagHref(tag: string) {
  * tags on narrow ones, so the count is measured from the rendered widths and
  * re-measured whenever the row resizes.
  */
-export function TagRow({ tags }: { tags: string[] }) {
+export function TagRow({ tags, interactive = true }: { tags: string[]; interactive?: boolean }) {
   const navigate = useAppNavigate();
   const rowRef = useRef<HTMLDivElement>(null);
   const [hiddenTags, setHiddenTags] = useState<string[]>([]);
@@ -99,19 +99,22 @@ export function TagRow({ tags }: { tags: string[] }) {
           color="gray"
           size="xs"
           className="work-card__tag"
+          tabIndex={interactive ? undefined : -1}
+          aria-hidden={interactive ? undefined : true}
           onClick={(event) => { event.preventDefault(); event.stopPropagation(); navigate(tagHref(tag)); }}
         >
           {tag}
         </Badge>
       ))}
-      <TagOverflow tags={hiddenTags} />
+      <TagOverflow tags={hiddenTags} interactive={interactive} />
     </div>
   );
 }
 
-function TagOverflow({ tags }: { tags: string[] }) {
+function TagOverflow({ tags, interactive }: { tags: string[]; interactive: boolean }) {
   const navigate = useAppNavigate();
   const [opened, setOpened] = useState(false);
+  useEffect(() => { if (!interactive) setOpened(false); }, [interactive]);
 
   return (
     <Popover opened={opened} onChange={setOpened} position="top-end" withArrow shadow="md" withinPortal>
@@ -126,6 +129,9 @@ function TagOverflow({ tags }: { tags: string[] }) {
           size="xs"
           aria-label={tags.length ? `残りのタグ ${tags.join("、")}` : "残りのタグ"}
           aria-expanded={opened}
+          aria-hidden={interactive ? undefined : true}
+          tabIndex={interactive ? undefined : -1}
+          disabled={!interactive}
           onClick={(event) => { event.stopPropagation(); setOpened((value) => !value); }}
           onKeyDown={(event) => event.stopPropagation()}
         >

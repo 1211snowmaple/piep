@@ -1,4 +1,5 @@
-export type SourceKind = "pixiv" | "fanbox" | string;
+/** Known providers, while still allowing plugins to add a named provider. */
+export type SourceKind = "pixiv" | "fanbox" | (string & {});
 
 export interface DownloadEntry {
   id: number;
@@ -116,6 +117,94 @@ export interface ReaderDocument {
   plainText: string;
   isEdited: boolean;
   activeEditRevision: WorkEditRevision | null;
+}
+
+export interface ReaderMetadata {
+  download: DownloadEntry;
+  versions: DownloadVersion[];
+  assetCount: number;
+  isEdited: boolean;
+  activeEditRevision: WorkEditRevision | null;
+}
+
+export interface ReaderContentPage {
+  page: number;
+  pageCount: number;
+  html: string;
+  plainText: string;
+  totalPlainTextChars: number;
+}
+
+export interface ReaderSearchHit {
+  page: number;
+  snippet: string;
+  count: number;
+}
+
+export interface LibraryDiagnostics {
+  measuredAt: string;
+  totalDownloads: number;
+  totalAssets: number;
+  totalVersions: number;
+  totalTextLength: number;
+  databaseSizeBytes: number;
+  walSizeBytes: number;
+  storageSizeBytes: number;
+  lexicalIndexSizeBytes: number;
+  lexicalIndexFileCount: number;
+  lexicalIndexSegmentCount: number;
+  semanticIndexSizeBytes: number;
+  sqlitePageCount: number;
+  sqliteFreePages: number;
+  sqliteCacheSizeBytes: number;
+  liveDatabaseBytes: number;
+  fragmentationPercent: number;
+  orphanAssetRows: number;
+  orphanAssetBytes: number;
+  orphanAssetFiles: number;
+  orphanAssetFileBytes: number;
+  processMemoryBytes: number | null;
+  listFirstPageMs: number;
+  listP50Ms: number;
+  listP95Ms: number;
+  lexicalSearchMs: number | null;
+  lexicalSearchP50Ms: number | null;
+  lexicalSearchP95Ms: number | null;
+  exactAuthorP50Ms: number | null;
+  exactAuthorP95Ms: number | null;
+  benchmarkQuery: string | null;
+  searchIndex: SearchIndexStatus;
+}
+
+export interface SearchIndexStatus {
+  totalDownloads: number;
+  indexedDownloads: number;
+  pendingDownloads: number;
+  isComplete: boolean;
+  phase: string;
+  indexedChunks: number;
+  semanticIndexedChunks: number;
+  semanticModelReady: boolean;
+  embeddingProvider: string;
+  gpuEnabled: boolean;
+  throughputPerSec?: number | null;
+}
+
+export interface LibraryMaintenanceResult {
+  compacted: boolean;
+  beforeBytes: number;
+  afterBytes: number;
+  reclaimedBytes: number;
+}
+
+export interface SearchIndexOptimizationResult {
+  optimized: boolean;
+  beforeSegments: number;
+  afterSegments: number;
+  beforeBytes: number;
+  afterBytes: number;
+  reclaimedBytes: number;
+  elapsedMs: number;
 }
 
 export interface EditorDocument {
@@ -260,32 +349,85 @@ export type LibraryViewMode =
   | "epubSelection"
   | "updateReview";
 
+/**
+ * Sort keys accepted by the desktop search command. The snake-case aliases
+ * are kept because saved searches from earlier releases persist these values.
+ */
+export type LibrarySortBy =
+  | "downloaded_at"
+  | "source_created_at"
+  | "source_updated_at"
+  | "title"
+  | "author_name"
+  | "text_length"
+  | "file_size_bytes"
+  | "series_order"
+  /** Score ranking. Only meaningful together with a text query, where it is the
+   *  default; any other key makes the backend order the matches by that column. */
+  | "relevance";
+
+export type LibraryWatchFilter = "watched" | "unwatched";
+
+/** Counts shown beside each shelf in the library sidebar. */
+export interface LibraryShelfCounts {
+  total: number;
+  favorite: number;
+  watched: number;
+  /** Works with a recorded reading position that still exist in the library. */
+  reading: number;
+}
+
+export interface SavedSearchRecord {
+  id: number;
+  name: string;
+  query: string | null;
+  paramsJson: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SavedSearchInput {
+  /** Omitted for a new entry; reusing a name replaces that entry. */
+  id?: number | null;
+  name: string;
+  query?: string | null;
+  paramsJson: string;
+}
+export type LibraryTagFilterMode = "and" | "or";
+export type LibraryProjection = "libraryGallery" | "libraryCompact" | "bulk" | "entityFacet";
+export type LibrarySearchMode = "smart" | "exact" | "semantic";
+
 export interface SearchV2Params {
   text?: string | null;
   query?: string | null;
   source?: string | null;
   contentType?: string | null;
-  sortBy?: string | null;
+  sortBy?: LibrarySortBy | null;
   sortOrder?: "asc" | "desc" | null;
   limit?: number;
   cursor?: string | null;
   favorite?: boolean | null;
   tagsInclude?: string[] | null;
   tagsExclude?: string[] | null;
-  tagFilterMode?: "and" | "or" | string | null;
+  tagFilterMode?: LibraryTagFilterMode | null;
   authorsInclude?: string[] | null;
   authorsExclude?: string[] | null;
   minCharCount?: number | null;
   maxCharCount?: number | null;
   assetFilter?: string | null;
-  watchFilter?: string | null;
+  watchFilter?: LibraryWatchFilter | null;
   personSource?: string | null;
   personKey?: string | null;
   seriesSource?: string | null;
   seriesKey?: string | null;
+  /** Restricts results to these works. An empty array means an empty shelf. */
+  idsInclude?: number[] | null;
+  /** Jumps to a numbered page. Ignored for relevance ordering, which is walked
+   *  with a score cursor and has no nth page. */
+  offset?: number | null;
   viewMode?: LibraryViewMode;
-  projection?: "libraryGallery" | "libraryCompact" | "bulk" | "entityFacet" | null;
-  searchMode?: "smart" | "exact" | "semantic" | null;
+  projection?: LibraryProjection | null;
+  searchMode?: LibrarySearchMode | null;
 }
 
 export interface SearchV2Result {
@@ -297,6 +439,14 @@ export interface SearchV2Result {
     query: string | null;
     totalEstimate: number | null;
     indexComplete: boolean;
+    explanations?: string[];
+    exactEntity?: {
+      kind: "author" | "series" | string;
+      label: string;
+      source?: string | null;
+      sourceKey?: string | null;
+      strict: boolean;
+    } | null;
     semanticIndexComplete?: boolean | null;
     semanticModelReady?: boolean | null;
   };
@@ -318,6 +468,9 @@ export interface SearchSuggestion {
   label: string;
   value: string;
   count?: number | null;
+  exactMatch?: boolean;
+  source?: string | null;
+  sourceKey?: string | null;
 }
 
 export interface SearchSuggestResult {
@@ -326,15 +479,23 @@ export interface SearchSuggestResult {
 
 export interface SearchRebuildProgress {
   jobId: string;
+  /** "automatic" when the app caught its own index up at launch. */
+  origin?: "manual" | "automatic" | string;
   status: "running" | "completed" | "canceled" | "failed" | string;
   totalDownloads: number;
   indexedDownloads: number;
   pendingDownloads: number;
   isComplete: boolean;
   phase?: string;
+  /** Documents handled by this run. The bar tracks these, not the library-wide
+   *  counts, which only move when a batch is committed. */
+  processed?: number;
+  processedTotal?: number;
+  failed?: number;
   indexedChunks?: number;
   embeddingProvider?: string;
   gpuEnabled?: boolean;
   throughputPerSec?: number | null;
+  etaSeconds?: number | null;
   error?: string;
 }

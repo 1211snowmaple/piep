@@ -19,7 +19,7 @@ export function PageHeader({
         <Title order={1}>{title}</Title>
         {description && <Text c="dimmed" size="sm" maw={760}>{description}</Text>}
       </Stack>
-      {actions && <Group gap="sm" wrap="nowrap">{actions}</Group>}
+      {actions && <Group gap="sm" className="page-header__actions">{actions}</Group>}
     </Group>
   );
 }

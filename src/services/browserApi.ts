@@ -52,3 +52,49 @@ export function goForwardEmbeddedBrowser(): Promise<void> {
 export function reloadEmbeddedBrowser(): Promise<void> {
   return invoke<void>("reload_embedded_browser");
 }
+
+export interface StandaloneBrowserOptions {
+  source: "pixiv" | "fanbox";
+  userAgent?: string;
+}
+
+/**
+ * Opens a large native Tauri WebView window. One window is reused per source,
+ * so repeated clicks focus/navigate it instead of producing duplicates.
+ * Returns true when an existing window was reused.
+ */
+export function openStandaloneBrowser(url: string, options: StandaloneBrowserOptions): Promise<boolean> {
+  return invoke<boolean>("open_standalone_browser", {
+    url,
+    source: options.source,
+    userAgent: options.userAgent,
+  });
+}
+
+export function closeStandaloneBrowser(source: StandaloneBrowserOptions["source"]): Promise<boolean> {
+  return invoke<boolean>("close_standalone_browser", { source });
+}
+
+/**
+ * The page the large window is showing, or null when it is not open. Lets the
+ * save workspace pick the handover back up after being remounted.
+ */
+export function getStandaloneBrowserUrl(source: StandaloneBrowserOptions["source"]): Promise<string | null> {
+  return invoke<string | null>("get_standalone_browser_url", { source });
+}
+
+export interface StandaloneBrowserUrlEvent {
+  source: "pixiv" | "fanbox";
+  url: string;
+}
+
+export interface StandaloneBrowserClosedEvent {
+  source: "pixiv" | "fanbox";
+}
+
+export interface BrowserAcceleratorEvent {
+  action: "save" | "close";
+  browser: "embedded" | "standalone";
+  source: "pixiv" | "fanbox";
+  url: string;
+}

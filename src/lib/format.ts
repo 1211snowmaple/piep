@@ -10,6 +10,22 @@ export function formatNumber(value: number | null | undefined): string {
   return (value ?? 0).toLocaleString("ja-JP");
 }
 
+/**
+ * A count for somewhere narrow, where the exact figure matters less than its
+ * size.
+ *
+ * The sidebar is a fixed 194px and cannot grow, so a library that keeps growing
+ * would eventually push its own labels onto a second line. Up to five digits
+ * the real number still fits and is more useful; past that it becomes 万.
+ */
+export function formatCompactCount(value: number | null | undefined): string {
+  const count = value ?? 0;
+  if (!Number.isFinite(count)) return "0";
+  if (count < 100_000) return count.toLocaleString("ja-JP");
+  const man = count / 10_000;
+  return man >= 100 ? `${Math.round(man).toLocaleString("ja-JP")}万` : `${man.toFixed(1)}万`;
+}
+
 export function formatDate(value: string | null | undefined, withTime = false): string {
   if (!value) return "—";
   const date = new Date(value);
@@ -29,6 +45,32 @@ export function formatDateNumeric(value: string | null | undefined): string {
   if (Number.isNaN(date.getTime())) return value;
   const pad = (part: number) => String(part).padStart(2, "0");
   return `${date.getFullYear()}/${pad(date.getMonth() + 1)}/${pad(date.getDate())}`;
+}
+
+/**
+ * Human-scale duration for progress readouts. Anything under a minute is read
+ * in seconds, because "0分52秒" reads as slower than "約52秒".
+ */
+export function formatDuration(seconds: number | null | undefined): string {
+  if (seconds === null || seconds === undefined || !Number.isFinite(seconds) || seconds < 0) return "—";
+  const rounded = Math.round(seconds);
+  if (rounded < 60) return `${rounded}秒`;
+  const minutes = Math.floor(rounded / 60);
+  if (minutes < 60) {
+    const rest = rounded % 60;
+    return rest ? `${minutes}分${rest}秒` : `${minutes}分`;
+  }
+  const hours = Math.floor(minutes / 60);
+  const restMinutes = minutes % 60;
+  return restMinutes ? `${hours}時間${restMinutes}分` : `${hours}時間`;
+}
+
+/** Throughput label that stays readable when the rate drops below one per second. */
+export function formatRate(perSecond: number | null | undefined, unit = "件"): string {
+  if (perSecond === null || perSecond === undefined || !Number.isFinite(perSecond) || perSecond <= 0) return "—";
+  if (perSecond >= 10) return `${Math.round(perSecond).toLocaleString("ja-JP")} ${unit}/秒`;
+  if (perSecond >= 1) return `${perSecond.toFixed(1)} ${unit}/秒`;
+  return `${(perSecond * 60).toFixed(1)} ${unit}/分`;
 }
 
 export function contentTypeLabel(value: string): string {

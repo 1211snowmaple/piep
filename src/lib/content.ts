@@ -1,3 +1,5 @@
+import { brandGlyphElement, externalBrand } from "@/lib/providers";
+
 type LocalAssetResolver = (path: string | null | undefined) => string | null;
 
 // `style`/`svg`/`math` are re-parsed differently when the sanitised string is
@@ -8,7 +10,79 @@ const UNSAFE_ELEMENTS = "script, style, iframe, object, embed, form, link, base,
 const SAFE_PROTOCOLS = new Set(["http:", "https:", "mailto:"]);
 const ALLOWED_URL_ATTRIBUTES = new Set(["href", "src"]);
 
-export function prepareDocumentHtml(html: string, resolveLocalAsset: LocalAssetResolver): string {
+export interface PrepareDocumentOptions {
+  /**
+   * Turn URLs written as plain text into links.
+   *
+   * Whether a URL in a saved work is a link at all is decided by how its author
+   * wrote it: FANBOX only makes an embed of a URL that stands alone on its own
+   * line, so one written mid-sentence arrives as text and stays text. That is
+   * faithful to the source, which is what the work detail screen wants - but
+   * while reading, an address you cannot follow is just noise.
+   */
+  linkifyBareUrls?: boolean;
+}
+
+/**
+ * Bare URLs in prose.
+ *
+ * Japanese punctuation cannot appear unencoded in an address, so the character
+ * class stops at it - otherwise a URL followed by a comma swallows the rest of
+ * the clause.
+ */
+const BARE_URL = /https?:\/\/[^\s<>"'`、。，；：！？「」『』【】〈〉《》（）()[\]{}]+/g;
+
+/** Text inside these carries no links: they are quoting, not addressing. */
+const NO_LINKIFY_INSIDE = new Set(["A", "CODE", "PRE", "KBD", "SAMP", "TEXTAREA"]);
+
+function linkifyTextNodes(document: Document) {
+  const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+  const targets: Text[] = [];
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    const text = node as Text;
+    if (!text.data || !/https?:\/\//i.test(text.data)) continue;
+    let parent = text.parentElement;
+    let skip = false;
+    while (parent && parent !== document.body) {
+      if (NO_LINKIFY_INSIDE.has(parent.tagName)) { skip = true; break; }
+      parent = parent.parentElement;
+    }
+    if (!skip) targets.push(text);
+  }
+
+  for (const text of targets) {
+    const fragment = document.createDocumentFragment();
+    let lastIndex = 0;
+    BARE_URL.lastIndex = 0;
+    for (let match = BARE_URL.exec(text.data); match; match = BARE_URL.exec(text.data)) {
+      // Trailing sentence punctuation belongs to the prose, not the address.
+      const raw = match[0].replace(/[.,;:!?、。）)\]}>」』】]+$/, "");
+      if (!raw) continue;
+      let url: URL;
+      try {
+        url = new URL(raw);
+      } catch {
+        continue;
+      }
+      if (url.protocol !== "http:" && url.protocol !== "https:") continue;
+      fragment.append(text.data.slice(lastIndex, match.index));
+      const anchor = document.createElement("a");
+      anchor.href = raw;
+      anchor.textContent = raw;
+      fragment.append(anchor);
+      lastIndex = match.index + raw.length;
+    }
+    if (lastIndex === 0) continue;
+    fragment.append(text.data.slice(lastIndex));
+    text.replaceWith(fragment);
+  }
+}
+
+export function prepareDocumentHtml(
+  html: string,
+  resolveLocalAsset: LocalAssetResolver,
+  options: PrepareDocumentOptions = {},
+): string {
   if (!html.trim() || typeof DOMParser === "undefined") return html;
 
   const document = new DOMParser().parseFromString(html, "text/html");
@@ -31,6 +105,8 @@ export function prepareDocumentHtml(html: string, resolveLocalAsset: LocalAssetR
       if (source && !/^(?:https?:|data:image\/|asset:|https?:\/\/asset\.localhost)/i.test(source.trim())) node.removeAttribute("src");
     }
   });
+
+  if (options.linkifyBareUrls) linkifyTextNodes(document);
 
   document.body.querySelectorAll<HTMLAnchorElement>("a[href]").forEach((anchor) => {
     let url: URL;
@@ -65,6 +141,18 @@ export function prepareDocumentHtml(html: string, resolveLocalAsset: LocalAssetR
   return document.body.innerHTML;
 }
 
+/** The mark for a link card, built from the same definition the screens use. */
+function linkCardBrand(document: Document, url: URL): HTMLElement {
+  const brand = externalBrand(url.href);
+  const host = document.createElement("span");
+  host.className = "link-card-brand";
+  host.style.setProperty("--link-card-brand", brand.color);
+  host.title = brand.label;
+  if (brand.brandGlyph) host.append(brandGlyphElement(document, brand.brandGlyph));
+  else host.textContent = "↗";
+  return host;
+}
+
 function decorateDocumentLink(document: Document, anchor: HTMLAnchorElement, url: URL) {
   const hostname = url.hostname.replace(/^www\./, "");
   const fanbox = hostname === "fanbox.cc" || hostname.endsWith(".fanbox.cc");
@@ -78,20 +166,15 @@ function decorateDocumentLink(document: Document, anchor: HTMLAnchorElement, url
 
   anchor.classList.add("novel-link-card");
   if (fanbox) anchor.classList.add("novel-link-card--fanbox");
-  anchor.dataset.provider = fanbox ? "fanbox" : "web";
+  anchor.dataset.provider = externalBrand(url.href).provider ?? "web";
 
   const existingBrand = anchor.querySelector<HTMLElement>(".link-card-brand, .link-card-icon");
-  if (existingBrand) {
-    existingBrand.className = "link-card-brand";
-    existingBrand.textContent = fanbox ? "F" : "↗";
-  }
+  if (existingBrand) existingBrand.replaceWith(linkCardBrand(document, url));
 
   if (!anchor.querySelector(".link-card-info")) {
     const title = plainUrl || url.href;
     anchor.replaceChildren();
-    const brand = document.createElement("span");
-    brand.className = "link-card-brand";
-    brand.textContent = fanbox ? "F" : "↗";
+    const brand = linkCardBrand(document, url);
     const info = document.createElement("span");
     info.className = "link-card-info";
     const titleNode = document.createElement("span");

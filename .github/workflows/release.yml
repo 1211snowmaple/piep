@@ -5,22 +5,15 @@ on:
     tags:
       - "v*"
 
+# piep is a Windows application: semantic search runs on DirectML, the embedded
+# browser and the authentication window are WebView2, and every test that drives
+# a real window runs on Windows. Building installers for platforms nothing is
+# verified on would ship binaries no one has ever started.
 jobs:
   release:
     permissions:
       contents: write
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: "windows-latest"
-            args: ""
-          - platform: "macos-latest"
-            args: ""
-          - platform: "ubuntu-22.04"
-            args: ""
-
-    runs-on: ${{ matrix.platform }}
+    runs-on: windows-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -33,14 +26,6 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
-
-      - name: Install system dependencies (Linux only)
-        if: matrix.platform == 'ubuntu-22.04'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf
 
       - name: Install frontend dependencies
         run: npm ci
@@ -52,7 +37,6 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "piep v__VERSION__"
-          releaseBody: "See the assets below to download the application for your platform."
+          releaseBody: "Windows 向けインストーラーは下のアセットからダウンロードできます。"
           releaseDraft: true
           prerelease: false
-          args: ${{ matrix.args }}

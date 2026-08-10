@@ -4503,7 +4503,7 @@ dependencies = [
 
 [[package]]
 name = "piep"
-version = "0.2.0"
+version = "0.4.0"
 dependencies = [
  "arc-swap",
  "async-stream",
@@ -4544,6 +4544,8 @@ dependencies = [
  "url",
  "wana_kana",
  "webp",
+ "webview2-com",
+ "windows 0.61.3",
  "zenjpeg",
  "zip",
 ]

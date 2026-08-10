@@ -119,7 +119,9 @@ pub async fn export_epub(
         serde_json::from_str(&json_content).map_err(|e| format!("JSON パースエラー: {}", e))?;
     apply_active_edit_to_epub_data(&state, download_id, &dl.source, &mut data);
 
-    let json_dir = std::path::Path::new(&target_json_path).parent().unwrap();
+    let json_dir = std::path::Path::new(&target_json_path)
+        .parent()
+        .ok_or_else(|| "JSONパスに親ディレクトリがありません".to_string())?;
     let assets_dir = json_dir.join("data_assets");
 
     let is_fanbox = dl.source == "fanbox";
@@ -329,7 +331,9 @@ pub async fn export_epub_batch(
             let mut data: serde_json::Value = serde_json::from_str(&json_content)
                 .map_err(|e| format!("JSONパース失敗: {}", e))?;
             apply_active_edit_to_epub_data(&state, *dl_id, &dl.source, &mut data);
-            let json_dir = std::path::Path::new(&target_json_path).parent().unwrap();
+            let json_dir = std::path::Path::new(&target_json_path)
+                .parent()
+                .ok_or_else(|| "JSONパスに親ディレクトリがありません".to_string())?;
             let assets_dir = json_dir.join("data_assets");
 
             let is_fanbox = dl.source == "fanbox";

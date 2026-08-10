@@ -32,11 +32,11 @@ export const theme = createTheme({
   defaultRadius: "md",
   colors: { piep, leaf },
   fontFamily:
-    'Inter, "Noto Sans JP", "Yu Gothic UI", "Hiragino Sans", system-ui, -apple-system, sans-serif',
+    '"Segoe UI", "Yu Gothic UI", Meiryo, "Hiragino Sans", system-ui, -apple-system, sans-serif',
   fontFamilyMonospace: '"Cascadia Code", "SFMono-Regular", Consolas, monospace',
   headings: {
     fontFamily:
-      'Inter, "Noto Sans JP", "Yu Gothic UI", "Hiragino Sans", system-ui, -apple-system, sans-serif',
+      '"Segoe UI", "Yu Gothic UI", Meiryo, "Hiragino Sans", system-ui, -apple-system, sans-serif',
     fontWeight: "680",
     sizes: {
       h1: { fontSize: rem(30), lineHeight: "1.16" },

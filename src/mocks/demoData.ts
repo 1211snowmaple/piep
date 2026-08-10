@@ -28,6 +28,54 @@ export const demoWorks: DownloadEntry[] = [
     coverPath: null, jsonPath: "demo/fanbox-104.json", assetCount: 28, fileSizeBytes: 46_210_000, downloadedAt: isoDaysAgo(9), sourceCreatedAt: isoDaysAgo(14), sourceUpdatedAt: isoDaysAgo(10), currentVersion: 2, watchUpdates: false, textLength: 920, favorite: false,
     personId: "koharu_design", personName: "こはるデザイン室", seriesId: null, seriesTitle: null, matchFields: [], scoreReasons: [], matchHighlights: [],
   },
+  {
+    id: 105, source: "pixiv", sourceId: "118772304", title: "灯台守の休日", authorName: "七瀬あかり", authorId: "6620117",
+    contentType: "novel", tags: ["日常", "ほのぼの", "短編"], excerpt: "灯りを落とした朝、灯台守は初めて島の外を見に行く支度をした。",
+    coverPath: null, jsonPath: "demo/pixiv-105.json", assetCount: 2, fileSizeBytes: 1_640_000, downloadedAt: isoDaysAgo(3), sourceCreatedAt: isoDaysAgo(11), sourceUpdatedAt: isoDaysAgo(11), currentVersion: 1, watchUpdates: true, textLength: 12980, favorite: false,
+    personId: "6620117", personName: "七瀬あかり", seriesId: null, seriesTitle: null, matchFields: [], scoreReasons: [], matchHighlights: [],
+  },
+  {
+    id: 106, source: "pixiv", sourceId: "119104552", title: "星を編む人 第十一話", authorName: "遠野つむぎ", authorId: "4419281",
+    contentType: "novel", tags: ["ファンタジー", "連載", "宇宙"], excerpt: "観測塔に残されたのは、誰も読めない一枚の星図だけだった。",
+    coverPath: null, jsonPath: "demo/pixiv-106.json", assetCount: 1, fileSizeBytes: 1_080_000, downloadedAt: isoDaysAgo(5), sourceCreatedAt: isoDaysAgo(19), sourceUpdatedAt: isoDaysAgo(19), currentVersion: 2, watchUpdates: true, textLength: 30110, favorite: false,
+    personId: "4419281", personName: "遠野つむぎ", seriesId: "778120", seriesTitle: "星を編む人", matchFields: [], scoreReasons: [], matchHighlights: [],
+  },
+  {
+    id: 107, source: "fanbox", sourceId: "10502377", title: "今月のラフ集", authorName: "mizu atelier", authorId: "mizu_atelier",
+    contentType: "image", tags: ["ラフ", "制作記録", "限定"], excerpt: "採用されなかった構図もまとめて置いておきます。",
+    coverPath: null, jsonPath: "demo/fanbox-107.json", assetCount: 34, fileSizeBytes: 62_400_000, downloadedAt: isoDaysAgo(6), sourceCreatedAt: isoDaysAgo(6), sourceUpdatedAt: isoDaysAgo(6), currentVersion: 1, watchUpdates: true, textLength: 640, favorite: true,
+    personId: "mizu_atelier", personName: "mizu atelier", seriesId: null, seriesTitle: null, matchFields: [], scoreReasons: [], matchHighlights: [],
+  },
+  {
+    id: 108, source: "pixiv", sourceId: "117903466", title: "機械仕掛けの海 第三章", authorName: "白鳥ケイ", authorId: "5528830",
+    contentType: "novel", tags: ["SF", "連載", "長編"], excerpt: "潜水都市の照明が落ちる三分間だけ、彼女は本当のことを話した。",
+    coverPath: null, jsonPath: "demo/pixiv-108.json", assetCount: 1, fileSizeBytes: 2_020_000, downloadedAt: isoDaysAgo(7), sourceCreatedAt: isoDaysAgo(24), sourceUpdatedAt: isoDaysAgo(12), currentVersion: 4, watchUpdates: true, textLength: 41250, favorite: true,
+    personId: "5528830", personName: "白鳥ケイ", seriesId: "641902", seriesTitle: "機械仕掛けの海", matchFields: [], scoreReasons: [], matchHighlights: [],
+  },
+  {
+    id: 109, source: "fanbox", sourceId: "10318744", title: "配信環境をつくり直した話", authorName: "こはるデザイン室", authorId: "koharu_design",
+    contentType: "article", tags: ["制作記録", "配信", "機材"], excerpt: "机の上をやり直したら、配信の準備が十分で終わるようになりました。",
+    coverPath: null, jsonPath: "demo/fanbox-109.json", assetCount: 9, fileSizeBytes: 12_880_000, downloadedAt: isoDaysAgo(12), sourceCreatedAt: isoDaysAgo(16), sourceUpdatedAt: isoDaysAgo(16), currentVersion: 1, watchUpdates: false, textLength: 5410, favorite: false,
+    personId: "koharu_design", personName: "こはるデザイン室", seriesId: null, seriesTitle: null, matchFields: [], scoreReasons: [], matchHighlights: [],
+  },
+  {
+    id: 110, source: "pixiv", sourceId: "115880210", title: "夏、置き去りの自転車", authorName: "青葉しおり", authorId: "8001234",
+    contentType: "novel", tags: ["創作", "青春", "短編"], excerpt: "河原に一台だけ残された自転車を、その夏の終わりまで誰も動かさなかった。",
+    coverPath: null, jsonPath: "demo/pixiv-110.json", assetCount: 4, fileSizeBytes: 2_960_000, downloadedAt: isoDaysAgo(15), sourceCreatedAt: isoDaysAgo(38), sourceUpdatedAt: isoDaysAgo(31), currentVersion: 2, watchUpdates: true, textLength: 21740, favorite: true,
+    personId: "8001234", personName: "青葉しおり", seriesId: "220041", seriesTitle: "季節の栞", matchFields: [], scoreReasons: [], matchHighlights: [],
+  },
+  {
+    id: 111, source: "pixiv", sourceId: "114620935", title: "猫と喫茶店の午後", authorName: "三日月ゆの", authorId: "7714002",
+    contentType: "novel", tags: ["日常", "ほのぼの", "猫"], excerpt: "看板猫が席を選ぶので、この店では座る場所を客が決められない。",
+    coverPath: null, jsonPath: "demo/pixiv-111.json", assetCount: 2, fileSizeBytes: 1_380_000, downloadedAt: isoDaysAgo(18), sourceCreatedAt: isoDaysAgo(45), sourceUpdatedAt: isoDaysAgo(45), currentVersion: 1, watchUpdates: false, textLength: 9860, favorite: false,
+    personId: "7714002", personName: "三日月ゆの", seriesId: null, seriesTitle: null, matchFields: [], scoreReasons: [], matchHighlights: [],
+  },
+  {
+    id: 112, source: "fanbox", sourceId: "10088451", title: "壁紙セット 2026 夏", authorName: "こはるデザイン室", authorId: "koharu_design",
+    contentType: "image", tags: ["素材", "配布", "夏"], excerpt: "デスクトップとスマートフォン向けに、同じ絵柄を並べて書き出しました。",
+    coverPath: null, jsonPath: "demo/fanbox-112.json", assetCount: 16, fileSizeBytes: 28_940_000, downloadedAt: isoDaysAgo(23), sourceCreatedAt: isoDaysAgo(27), sourceUpdatedAt: isoDaysAgo(27), currentVersion: 1, watchUpdates: false, textLength: 780, favorite: false,
+    personId: "koharu_design", personName: "こはるデザイン室", seriesId: null, seriesTitle: null, matchFields: [], scoreReasons: [], matchHighlights: [],
+  },
 ];
 
 export const demoDashboard: DashboardSummary = {
@@ -38,10 +86,11 @@ export const demoDashboard: DashboardSummary = {
   indexedCount: 1284,
   pendingIndexCount: 0,
   topTags: [
-    { name: "創作", count: 326 }, { name: "小説", count: 248 }, { name: "ファンタジー", count: 192 }, { name: "制作記録", count: 84 }, { name: "短編", count: 72 },
+    { name: "創作", count: 326 }, { name: "小説", count: 248 }, { name: "ファンタジー", count: 192 }, { name: "日常", count: 138 }, { name: "SF", count: 96 },
+    { name: "制作記録", count: 84 }, { name: "短編", count: 72 }, { name: "素材", count: 41 },
   ],
   topAuthors: [
-    { name: "青葉しおり", count: 48 }, { name: "遠野つむぎ", count: 37 }, { name: "mizu atelier", count: 31 },
+    { name: "青葉しおり", count: 48 }, { name: "遠野つむぎ", count: 37 }, { name: "mizu atelier", count: 31 }, { name: "白鳥ケイ", count: 24 }, { name: "こはるデザイン室", count: 19 },
   ],
   recentDownloads: demoWorks,
   sourceBreakdown: [
@@ -65,10 +114,14 @@ export const demoFacets: FilterFacets = {
     { source: "pixiv", sourceKey: "8001234", displayName: "青葉しおり", count: 48, coverPath: null, description: "季節と日常を題材にした短編小説。", latestDownloadedAt: isoDaysAgo(1) },
     { source: "pixiv", sourceKey: "4419281", displayName: "遠野つむぎ", count: 37, coverPath: null, description: "空想科学と冒険譚を中心に執筆。", latestDownloadedAt: isoDaysAgo(4) },
     { source: "fanbox", sourceKey: "mizu_atelier", displayName: "mizu atelier", count: 31, coverPath: null, description: "背景イラストと制作ノート。", latestDownloadedAt: isoDaysAgo(2) },
+    { source: "pixiv", sourceKey: "5528830", displayName: "白鳥ケイ", count: 24, coverPath: null, description: "海と機械をめぐる長編SF。", latestDownloadedAt: isoDaysAgo(7) },
+    { source: "fanbox", sourceKey: "koharu_design", displayName: "こはるデザイン室", count: 19, coverPath: null, description: "配布素材と制作環境のノート。", latestDownloadedAt: isoDaysAgo(9) },
+    { source: "pixiv", sourceKey: "6620117", displayName: "七瀬あかり", count: 14, coverPath: null, description: "島と海辺を舞台にした掌編。", latestDownloadedAt: isoDaysAgo(3) },
   ],
   series: [
     { source: "pixiv", sourceKey: "220041", displayName: "季節の栞", count: 18, coverPath: null, description: "四季をめぐる連作短編集。", latestDownloadedAt: isoDaysAgo(1) },
     { source: "pixiv", sourceKey: "778120", displayName: "星を編む人", count: 12, coverPath: null, description: "星図の外側を旅する長編シリーズ。", latestDownloadedAt: isoDaysAgo(4) },
+    { source: "pixiv", sourceKey: "641902", displayName: "機械仕掛けの海", count: 9, coverPath: null, description: "潜水都市を舞台にした連載。", latestDownloadedAt: isoDaysAgo(7) },
   ],
   contentTypes: [{ name: "novel", count: 936 }, { name: "article", count: 276 }, { name: "image", count: 72 }],
   assetTypes: [{ name: "image", count: 7102 }, { name: "file", count: 1139 }],

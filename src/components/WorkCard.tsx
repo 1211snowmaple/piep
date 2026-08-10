@@ -1,9 +1,9 @@
 import { memo, useCallback } from "react";
-import { ActionIcon, Avatar, Badge, Card, Checkbox, Group, Menu, Text, Tooltip, UnstyledButton } from "@mantine/core";
+import { ActionIcon, Avatar, Badge, Card, Group, Menu, Text, Tooltip, UnstyledButton } from "@mantine/core";
 import { modals } from "@mantine/modals";
 import { notifications } from "@mantine/notifications";
 import { useQueryClient } from "@tanstack/react-query";
-import { BookCheck, BookOpen, BookPlus, Ellipsis, Heart, Images, Library, RefreshCw, Trash2, UserRound } from "lucide-react";
+import { Icons, IconSize } from "@/lib/icons";
 import { useAppNavigate } from "@/app/router";
 import { useWorkspace } from "@/app/WorkspaceContext";
 import { TagRow } from "@/components/TagRow";
@@ -25,12 +25,18 @@ interface WorkCardProps {
   compact?: boolean;
 }
 
+const CARD_CONTROL_SELECTOR = "a, button, input, select, textarea, [role='button'], [role='link'], [role='menuitem'], [data-card-control]";
+
+function isCardControl(target: EventTarget | null) {
+  return target instanceof Element && Boolean(target.closest(CARD_CONTROL_SELECTOR));
+}
+
 /**
  * "v1" told the reader nothing and could not be acted on. The chip now appears
  * only once a work has actually been re-saved, and opens the history tab where
  * the earlier revisions can be read and restored.
  */
-function VersionChip({ work }: { work: DownloadEntry }) {
+function VersionChip({ work, interactive = true }: { work: DownloadEntry; interactive?: boolean }) {
   const navigate = useAppNavigate();
   if (work.currentVersion <= 1) return null;
   return (
@@ -43,6 +49,9 @@ function VersionChip({ work }: { work: DownloadEntry }) {
         color="piep"
         className="work-card__version"
         aria-label={`${work.title}のバージョン履歴を開く`}
+        aria-hidden={interactive ? undefined : true}
+        tabIndex={interactive ? undefined : -1}
+        disabled={!interactive}
         onClick={(event) => { event.stopPropagation(); navigate(`/works/${work.id}?tab=history`); }}
       >
         v{work.currentVersion}
@@ -51,7 +60,27 @@ function VersionChip({ work }: { work: DownloadEntry }) {
   );
 }
 
-function AuthorLine({ work, size = 20 }: { work: DownloadEntry; size?: number }) {
+/** The series above the title doubles as the link to it. */
+function SeriesLink({ work, className, interactive = true }: { work: DownloadEntry; className?: string; interactive?: boolean }) {
+  const navigate = useAppNavigate();
+  if (!work.seriesTitle) return null;
+  const key = work.seriesId;
+  const label = <Text className={["work-card__series line-clamp-1", className].filter(Boolean).join(" ")}>{work.seriesTitle}</Text>;
+  if (!key) return label;
+  return (
+    <UnstyledButton
+      className="work-card__series-link"
+      aria-label={`シリーズ「${work.seriesTitle}」を開く`}
+      aria-hidden={interactive ? undefined : true}
+      tabIndex={interactive ? undefined : -1}
+      onClick={(event) => { event.stopPropagation(); navigate(`/series/${encodeURIComponent(work.source)}/${encodeURIComponent(key)}`); }}
+    >
+      {label}
+    </UnstyledButton>
+  );
+}
+
+function AuthorLine({ work, size = 20, interactive = true }: { work: DownloadEntry; size?: number; interactive?: boolean }) {
   const navigate = useAppNavigate();
   const name = work.personName || work.authorName;
   const icon = getAssetUrl(work.personIconPath);
@@ -61,9 +90,10 @@ function AuthorLine({ work, size = 20 }: { work: DownloadEntry; size?: number })
       gap={6}
       wrap="nowrap"
       className="work-card__author"
-      role={key ? "link" : undefined}
-      tabIndex={key ? 0 : undefined}
-      aria-label={key ? `${name}の作品を見る` : undefined}
+      role={key && interactive ? "link" : undefined}
+      tabIndex={key ? (interactive ? 0 : -1) : undefined}
+      aria-label={key && interactive ? `${name}の作品を見る` : undefined}
+      aria-hidden={interactive ? undefined : true}
       onClick={(event) => { if (!key) return; event.stopPropagation(); navigate(`/people/${encodeURIComponent(work.source)}/${encodeURIComponent(key)}`); }}
       onKeyDown={(event) => {
         if (!key || (event.key !== "Enter" && event.key !== " ")) return;
@@ -72,11 +102,58 @@ function AuthorLine({ work, size = 20 }: { work: DownloadEntry; size?: number })
         navigate(`/people/${encodeURIComponent(work.source)}/${encodeURIComponent(key)}`);
       }}
     >
-      <Avatar src={icon} size={size} radius="xl" color="gray" className="work-card__avatar">
-        <UserRound size={Math.round(size * 0.58)} />
+      <Avatar src={icon} size={size} radius="xl" color="gray" className="work-card__avatar" imageProps={{ loading: "lazy", decoding: "async" }}>
+        <Icons.person size={Math.round(size * 0.58)} />
       </Avatar>
       <Text size="xs" c="dimmed" className="line-clamp-1">{name}</Text>
     </Group>
+  );
+}
+
+const MATCH_FIELD_LABELS: Record<string, string> = {
+  title: "タイトル",
+  author_name: "作者",
+  tags: "タグ",
+  series_title: "シリーズ",
+  excerpt: "概要",
+  body: "本文",
+};
+
+function SearchMatchReason({ work }: { work: DownloadEntry }) {
+  const fields = (work.matchFields ?? []).slice(0, 3);
+  if (!fields.length) return null;
+  const details = (work.scoreReasons ?? [])
+    .slice(0, 5)
+    .map((reason) => `${MATCH_FIELD_LABELS[reason.field] ?? reason.field}: ${reason.term}（${reason.matchType}）`)
+    .join("\n");
+  return (
+    <Tooltip label={details || "検索語が一致した項目です"} multiline maw={360} withArrow>
+      <Group gap={4} wrap="nowrap" className="work-card__search-reason" aria-label={`一致理由: ${fields.map((field) => MATCH_FIELD_LABELS[field] ?? field).join("、")}`}>
+        <Icons.searchMatch size={IconSize.inline} aria-hidden />
+        <Text size="xs" c="teal" fw={650}>一致</Text>
+        {fields.map((field) => <Badge key={field} size="xs" variant="light" color="teal">{MATCH_FIELD_LABELS[field] ?? field}</Badge>)}
+      </Group>
+    </Tooltip>
+  );
+}
+
+function SelectionToggle({ work, selected, compact, onSelect }: {
+  work: DownloadEntry;
+  selected: boolean;
+  compact?: boolean;
+  onSelect?: (id: number, selected: boolean) => void;
+}) {
+  return (
+    <UnstyledButton
+      className={compact ? "work-row__select" : "work-card__select"}
+      data-checked={selected || undefined}
+      aria-label={`${work.title}を${selected ? "選択解除" : "選択"}`}
+      aria-pressed={selected}
+      onClick={(event) => { event.stopPropagation(); onSelect?.(work.id, !selected); }}
+    >
+      <span className="work-selection-toggle__indicator" aria-hidden>{selected && <Icons.confirm size={IconSize.menu} strokeWidth={3} />}</span>
+      {!compact && <span className="work-selection-toggle__label">{selected ? "選択中" : "選択"}</span>}
+    </UnstyledButton>
   );
 }
 
@@ -102,6 +179,23 @@ export const WorkCard = memo(function WorkCard({
       open();
     }
   };
+  const openFromCardSurface = (event: React.MouseEvent<HTMLElement>) => {
+    if (!isCardControl(event.target)) open();
+  };
+  // Selection mode is modal: every part of the card selects the work instead
+  // of unexpectedly following an author, series, tag, or action link.
+  const selectFromCardCapture = (event: React.MouseEvent<HTMLElement>) => {
+    if (!selectionMode || (event.target instanceof Element && event.target.closest(".work-card__select, .work-row__select"))) return;
+    event.preventDefault();
+    event.stopPropagation();
+    onSelect?.(work.id, !selected);
+  };
+  const selectFromKeyboardCapture = (event: React.KeyboardEvent<HTMLElement>) => {
+    if (!selectionMode || (event.key !== "Enter" && event.key !== " ") || (event.target instanceof Element && event.target.closest(".work-card__select, .work-row__select"))) return;
+    event.preventDefault();
+    event.stopPropagation();
+    onSelect?.(work.id, !selected);
+  };
   const actions = (
     <WorkActions
       work={work}
@@ -117,68 +211,66 @@ export const WorkCard = memo(function WorkCard({
     // eye can scan one attribute at a time, and the extra width on a wide
     // window goes to tags rather than to a title stretched across the screen.
     return (
-      <Card className="work-row surface--interactive" padding={0}>
+      <Card className="work-row surface--interactive" padding={0} onClick={openFromCardSurface} onClickCapture={selectFromCardCapture} onKeyDownCapture={selectFromKeyboardCapture} data-selection-mode={selectionMode || undefined} data-selected={selectionMode && selected || undefined}>
         <div className="work-row__grid">
-          {/* The source leads the row, ahead of the cover, matching the card's
-              top-left stamp. */}
-          <ProviderMark provider={work.source} compact className="work-row__provider" />
-          <div className="work-row__cover" onClick={(event) => { if (!(event.target as HTMLElement).closest("input")) open(); }}>
+          <div className="work-row__cover">
             <WorkCover work={work} variant="compact" />
-            {selectionMode && <Checkbox className="work-row__select" checked={selected} onChange={(e) => onSelect?.(work.id, e.currentTarget.checked)} onClick={(e) => e.stopPropagation()} aria-label={`${work.title}を選択`} />}
+            {selectionMode && <SelectionToggle work={work} selected={Boolean(selected)} compact onSelect={onSelect} />}
           </div>
-          <div className="work-row__main">
-            <Group gap={7} wrap="nowrap" className="work-row__meta">
-              {work.seriesTitle && <Text className="work-card__series line-clamp-1 work-row__series">{work.seriesTitle}</Text>}
-            </Group>
-            <UnstyledButton className="work-row__open" onClick={open} onKeyDown={keyboardOpen} role="link" aria-label={`${work.title}を開く`}>
+          <div className="work-row__main" inert={selectionMode || undefined} aria-hidden={selectionMode || undefined}>
+            <SeriesLink work={work} className="work-row__series" interactive={!selectionMode} />
+            <UnstyledButton className="work-row__open" onClick={open} onKeyDown={keyboardOpen} role={selectionMode ? undefined : "link"} aria-label={selectionMode ? undefined : `${work.title}を開く`} aria-hidden={selectionMode || undefined} tabIndex={selectionMode ? -1 : undefined}>
               <Text fw={650} size="sm" className="line-clamp-1">{work.title}</Text>
             </UnstyledButton>
-            <AuthorLine work={work} size={17} />
+            <div className="work-row__identity">
+              <AuthorLine work={work} size={17} interactive={!selectionMode} />
+              <span className="work-card__identity-divider" aria-hidden />
+              <ProviderMark provider={work.source} compact className="work-row__provider" />
+            </div>
+            <SearchMatchReason work={work} />
           </div>
-          <div className="work-row__tags"><TagRow tags={work.tags} /></div>
-          <Group gap="sm" wrap="nowrap" className="work-row__facts">
-            <Text size="xs" c="dimmed">{formatDateNumeric(work.sourceCreatedAt)}</Text>
-            <Text size="xs" c="dimmed">{formatNumber(work.textLength)}字</Text>
-            {work.assetCount > 0 && <Text size="xs" c="dimmed"><Images size={12} />{work.assetCount}</Text>}
-            <VersionChip work={work} />
+          <div className="work-row__tags" inert={selectionMode || undefined} aria-hidden={selectionMode || undefined}><TagRow tags={work.tags} interactive={!selectionMode} /></div>
+          <Group gap="sm" wrap="nowrap" className="work-row__facts" inert={selectionMode || undefined} aria-hidden={selectionMode || undefined}>
+            <Text size="xs" c="dimmed"><Icons.publishedDate size={IconSize.inline} />{formatDateNumeric(work.sourceCreatedAt)}</Text>
+            <Text size="xs" c="dimmed"><Icons.textLength size={IconSize.inline} />{formatNumber(work.textLength)}字</Text>
+            {work.assetCount > 0 && <Text size="xs" c="dimmed"><Icons.assets size={IconSize.inline} />{work.assetCount}</Text>}
+            <VersionChip work={work} interactive={!selectionMode} />
           </Group>
-          <div className="work-row__actions">{actions}</div>
+          {!selectionMode && <div className="work-row__actions">{actions}</div>}
         </div>
       </Card>
     );
   }
 
   return (
-    <Card className="work-card surface--interactive" padding={0}>
+    <Card className="work-card surface--interactive" padding={0} onClick={openFromCardSurface} onClickCapture={selectFromCardCapture} onKeyDownCapture={selectFromKeyboardCapture} data-selection-mode={selectionMode || undefined} data-selected={selectionMode && selected || undefined}>
       <div className="work-card__inner">
-        {/* The source stamps the card itself, at its top-left corner over the
-            cover, rather than living in a column of its own. */}
-        <ProviderMark provider={work.source} className="work-card__provider" />
-        <div className="work-card__cover-rail" onClick={(event) => { if (!(event.target as HTMLElement).closest("input")) open(); }}>
+        <div className="work-card__cover-rail">
           <WorkCover work={work} variant="card" className="work-card__cover" />
-          {selectionMode && <Checkbox className="work-card__select" checked={selected} onChange={(e) => onSelect?.(work.id, e.currentTarget.checked)} onClick={(e) => e.stopPropagation()} aria-label={`${work.title}を選択`} />}
+          {selectionMode && <SelectionToggle work={work} selected={Boolean(selected)} onSelect={onSelect} />}
         </div>
-        <div className="work-card__body">
-          <div className="work-card__meta">
-            {work.seriesTitle && <Text className="work-card__series line-clamp-1">{work.seriesTitle}</Text>}
-          </div>
-          <UnstyledButton className="work-card__open" onClick={open} onKeyDown={keyboardOpen} role="link" aria-label={`${work.title}を開く`}>
+        <div className="work-card__body" inert={selectionMode || undefined} aria-hidden={selectionMode || undefined}>
+          {work.seriesTitle && <div className="work-card__meta"><SeriesLink work={work} interactive={!selectionMode} /></div>}
+          <UnstyledButton className="work-card__open" onClick={open} onKeyDown={keyboardOpen} role={selectionMode ? undefined : "link"} aria-label={selectionMode ? undefined : `${work.title}を開く`} aria-hidden={selectionMode || undefined} tabIndex={selectionMode ? -1 : undefined}>
             <Text fw={720} className="work-card__title line-clamp-2" lh={1.32}>{work.title}</Text>
           </UnstyledButton>
-          <AuthorLine work={work} />
-          {work.excerpt && <Text size="xs" c="dimmed" className="line-clamp-2 work-card__excerpt">{summaryText(work.excerpt)}</Text>}
-          <TagRow tags={work.tags} />
-          {/* One bottom line: the facts read left, the controls sit right, so
-              the card ends on a single row instead of two half-empty ones. */}
-          <div className="work-card__footer">
-            <Group gap="sm" wrap="nowrap" className="work-card__facts">
-              <Text size="xs" c="dimmed">{formatDateNumeric(work.sourceCreatedAt)}</Text>
-              <Text size="xs" c="dimmed">{formatNumber(work.textLength)}字</Text>
-              {work.assetCount > 0 && <Text size="xs" c="dimmed"><Images size={12} />{work.assetCount}</Text>}
-              <VersionChip work={work} />
-            </Group>
-            {actions}
+          <div className="work-card__identity">
+            <AuthorLine work={work} interactive={!selectionMode} />
+            <span className="work-card__identity-divider" aria-hidden />
+            <ProviderMark provider={work.source} compact className="work-card__provider" />
           </div>
+          {work.excerpt && <Text size="xs" c="dimmed" className="line-clamp-2 work-card__excerpt">{summaryText(work.excerpt)}</Text>}
+          <SearchMatchReason work={work} />
+          {work.tags.length > 0 && <div className="work-card__tagslot"><TagRow tags={work.tags} interactive={!selectionMode} /></div>}
+        </div>
+        <div className="work-card__footer" inert={selectionMode || undefined} aria-hidden={selectionMode || undefined}>
+          <Group gap="sm" wrap="nowrap" className="work-card__facts">
+            <Text size="xs" c="dimmed"><Icons.publishedDate size={IconSize.inline} />{formatDateNumeric(work.sourceCreatedAt)}</Text>
+            <Text size="xs" c="dimmed"><Icons.textLength size={IconSize.inline} />{formatNumber(work.textLength)}字</Text>
+            {work.assetCount > 0 && <Text size="xs" c="dimmed"><Icons.assets size={IconSize.inline} />{work.assetCount}</Text>}
+            <VersionChip work={work} interactive={!selectionMode} />
+          </Group>
+          {!selectionMode && actions}
         </div>
       </div>
     </Card>
@@ -246,34 +338,34 @@ function WorkActions({ work, queued, onQueue, onToggleFavorite, onToggleWatch }:
   return (
     <Group gap={2} wrap="nowrap" justify="flex-end" className="work-card__actions" onClick={(event) => event.stopPropagation()}>
       <Tooltip label="読む">
-        <ActionIcon variant="light" color="piep" size="sm" aria-label={`${work.title}を読む`} onClick={() => navigate(`/reader/${work.id}`)}>
-          <BookOpen size={15} />
+        <ActionIcon variant="light" color="piep" size="md" aria-label={`${work.title}を読む`} onClick={() => navigate(`/reader/${work.id}`)}>
+          <Icons.read size={IconSize.action} />
         </ActionIcon>
       </Tooltip>
       <Tooltip label={work.favorite ? "お気に入りを解除" : "お気に入りに追加"}>
-        <ActionIcon variant={work.favorite ? "filled" : "subtle"} color="orange" size="sm" aria-label={work.favorite ? "お気に入りを解除" : "お気に入りに追加"} aria-pressed={work.favorite} onClick={toggleFavorite}>
-          <Heart size={15} fill={work.favorite ? "currentColor" : "none"} />
+        <ActionIcon variant={work.favorite ? "filled" : "subtle"} color="orange" size="md" aria-label={work.favorite ? "お気に入りを解除" : "お気に入りに追加"} aria-pressed={work.favorite} onClick={toggleFavorite}>
+          <Icons.favorite size={IconSize.action} fill={work.favorite ? "currentColor" : "none"} />
         </ActionIcon>
       </Tooltip>
       <Tooltip label={work.watchUpdates ? "更新監視をオフにする" : "更新監視をオンにする"}>
-        <ActionIcon variant={work.watchUpdates ? "filled" : "subtle"} color="teal" size="sm" aria-label={work.watchUpdates ? "更新監視をオフにする" : "更新監視をオンにする"} aria-pressed={work.watchUpdates} onClick={toggleWatch}>
-          <RefreshCw size={15} />
+        <ActionIcon variant={work.watchUpdates ? "filled" : "subtle"} color="teal" size="md" aria-label={work.watchUpdates ? "更新監視をオフにする" : "更新監視をオンにする"} aria-pressed={work.watchUpdates} onClick={toggleWatch}>
+          <Icons.watch size={IconSize.action} />
         </ActionIcon>
       </Tooltip>
       {/* Green matches the "ep" half of the wordmark; the old purple belonged
           to nothing in the palette. */}
       <Tooltip label={queued ? "EPUBキューから外す" : "EPUBキューに追加"}>
-        <ActionIcon variant={queued ? "filled" : "subtle"} color="leaf" size="sm" aria-label={queued ? "EPUBキューから外す" : "EPUBキューに追加"} aria-pressed={queued} onClick={onQueue}>
-          {queued ? <BookCheck size={15} /> : <BookPlus size={15} />}
+        <ActionIcon variant={queued ? "filled" : "subtle"} color="leaf" size="md" aria-label={queued ? "EPUBキューから外す" : "EPUBキューに追加"} aria-pressed={queued} onClick={onQueue}>
+          {queued ? <Icons.epubQueued size={IconSize.action} /> : <Icons.epubAdd size={IconSize.action} />}
         </ActionIcon>
       </Tooltip>
       <Menu position="bottom-end" withinPortal>
-        <Menu.Target><Tooltip label="その他"><ActionIcon variant="subtle" color="gray" size="sm" aria-label={`${work.title}のその他の操作`}><Ellipsis size={16} /></ActionIcon></Tooltip></Menu.Target>
+        <Menu.Target><Tooltip label="その他"><ActionIcon variant="subtle" color="gray" size="md" aria-label={`${work.title}のその他の操作`}><Icons.more size={IconSize.nav} /></ActionIcon></Tooltip></Menu.Target>
         <Menu.Dropdown>
-          <Menu.Item leftSection={<Library size={15} />} onClick={() => navigate(`/works/${work.id}`)}>詳細</Menu.Item>
-          <Menu.Item leftSection={<RefreshCw size={15} />} onClick={() => navigate(`/updates?work=${work.id}`)}>更新センターで確認</Menu.Item>
+          <Menu.Item leftSection={<Icons.workDetail size={IconSize.menu} />} onClick={() => navigate(`/works/${work.id}`)}>詳細</Menu.Item>
+          <Menu.Item leftSection={<Icons.watch size={IconSize.menu} />} onClick={() => navigate(`/updates?work=${work.id}`)}>更新センターで確認</Menu.Item>
           <Menu.Divider />
-          <Menu.Item color="red" leftSection={<Trash2 size={15} />} onClick={confirmDelete}>ライブラリから削除</Menu.Item>
+          <Menu.Item color="red" leftSection={<Icons.delete size={IconSize.menu} />} onClick={confirmDelete}>ライブラリから削除</Menu.Item>
         </Menu.Dropdown>
       </Menu>
     </Group>

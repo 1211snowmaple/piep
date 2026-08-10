@@ -2,6 +2,23 @@ import "@testing-library/jest-dom/vitest";
 import { cleanup } from "@testing-library/react";
 import { afterEach } from "vitest";
 
+// Node 26 exposes an unusable `localStorage` placeholder unless a backing file
+// is configured. jsdom tests need a deterministic, isolated implementation.
+if (!window.localStorage) {
+  let values = new Map<string, string>();
+  Object.defineProperty(window, "localStorage", {
+    configurable: true,
+    value: {
+      get length() { return values.size; },
+      clear: () => { values = new Map(); },
+      getItem: (key: string) => values.get(String(key)) ?? null,
+      key: (index: number) => [...values.keys()][index] ?? null,
+      removeItem: (key: string) => { values.delete(String(key)); },
+      setItem: (key: string, value: string) => { values.set(String(key), String(value)); },
+    } satisfies Storage,
+  });
+}
+
 afterEach(() => cleanup());
 
 Object.defineProperty(window, "matchMedia", {
@@ -17,6 +34,12 @@ Object.defineProperty(window, "matchMedia", {
     dispatchEvent: () => false,
   }),
 });
+
+// jsdom implements no scrolling at all, so the app shell's "return to the top
+// on navigation" effect throws instead of being a no-op.
+if (!Element.prototype.scrollTo) {
+  Object.defineProperty(Element.prototype, "scrollTo", { writable: true, value: () => undefined });
+}
 
 class ResizeObserverMock {
   observe() {}

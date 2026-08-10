@@ -1,31 +1,38 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
-  BulkMutationResult,
   SearchRebuildProgress,
   SearchSuggestParams,
   SearchSuggestResult,
-  SearchV2Params,
-  SearchV2Result,
 } from "@/types/library";
 
-export async function searchDownloadsV2(params: SearchV2Params): Promise<SearchV2Result> {
-  return invoke<SearchV2Result>("search_downloads_v2", { params });
-}
+export { deleteDownloadsForSearch, searchDownloadsV2 } from "@/services/dbApi";
 
 export async function searchSuggest(params: SearchSuggestParams): Promise<SearchSuggestResult> {
-  return invoke<SearchSuggestResult>("search_suggest", { params });
+  const text = params.text?.trim() || null;
+  if (!text) return { items: [] };
+  const rawLimit = params.limit ?? 8;
+  const limit = Number.isFinite(rawLimit) ? Math.min(50, Math.max(1, Math.trunc(rawLimit))) : 8;
+  return invoke<SearchSuggestResult>("search_suggest", { params: { text, limit } });
 }
 
-export async function startSearchRebuildIndex(batchSize = 64): Promise<string> {
-  return invoke<string>("search_rebuild_index", { jobOptions: { batchSize } });
+export interface SearchRebuildOptions {
+  /** Documents read and analysed together. Larger keeps more cores busy. */
+  batchSize?: number;
+  /** Also build the semantic vectors. This is the GPU-accelerated part and is
+   *  far slower than the lexical pass, so it is opt-in. */
+  includeSemantic?: boolean;
+}
+
+export async function startSearchRebuildIndex(options: SearchRebuildOptions = {}): Promise<string> {
+  const requested = options.batchSize ?? 64;
+  const batchSize = Number.isFinite(requested) ? Math.min(512, Math.max(8, Math.trunc(requested))) : 64;
+  return invoke<string>("search_rebuild_index", {
+    jobOptions: { batchSize, includeSemantic: options.includeSemantic === true },
+  });
 }
 
 export async function cancelSearchRebuildIndex(jobId: string): Promise<void> {
   return invoke<void>("search_cancel_rebuild_index", { jobId });
-}
-
-export async function deleteDownloadsForSearch(params: SearchV2Params): Promise<BulkMutationResult> {
-  return invoke<BulkMutationResult>("db_delete_downloads_for_search", { params });
 }
 
 export type { SearchRebuildProgress };

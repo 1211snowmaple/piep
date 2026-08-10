@@ -66,9 +66,11 @@ select {
   top: 8px;
   left: 8px;
   padding: 8px 12px;
+  border: 0;
   border-radius: var(--mantine-radius-md);
   color: white;
   background: var(--mantine-color-piep-7);
+  cursor: pointer;
   transform: translateY(-160%);
   transition: transform 120ms ease;
 }
@@ -94,7 +96,7 @@ select {
 
 .app-main {
   min-width: 0;
-  height: calc(100vh - var(--app-shell-header-height));
+  height: calc(100dvh - var(--app-shell-header-height));
   overflow: auto;
   background:
     radial-gradient(circle at 85% -10%, light-dark(rgb(13 134 244 / 7%), rgb(39 156 255 / 9%)), transparent 32rem),
@@ -102,15 +104,29 @@ select {
 }
 
 .app-brand {
-  display: block;
+  display: grid;
   width: 100%;
   padding: 4px;
+  place-items: center;
   border-radius: var(--mantine-radius-md);
   transition: background-color 120ms ease, transform 120ms ease;
 }
-/* Sized like a brand, not like a banner: the lockup is 2.5:1, so anything
-   wider than this starts eating the navigation below it. */
-.app-brand__lockup { width: 112px; height: auto; }
+
+/* Proportions taken from the supplied lockup: the wordmark is 0.8x the height
+   of the book, which puts the mark at about twice the type size, with a gap
+   of roughly a quarter of it. Driving all three from one variable keeps that
+   relationship at any size. */
+.piep-lockup { display: inline-flex; align-items: center; gap: calc(var(--lockup-size, 26px) * 0.27); }
+.piep-lockup__mark { display: block; width: calc(var(--lockup-size, 26px) * 1.99); height: auto; }
+.piep-lockup__word {
+  font-family: "Bauhaus 93", "Century Gothic", "Futura", "Trebuchet MS", sans-serif;
+  font-size: var(--lockup-size, 26px);
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: 0.005em;
+}
+.piep-lockup__pi { color: #0096fa; }
+.piep-lockup__ep { color: #86b918; }
 .app-brand__mark { width: 30px; height: 30px; }
 
 .app-nav__brand { padding: 12px 14px; }
@@ -163,14 +179,28 @@ select {
 :root[data-density="compact"] .page { padding: clamp(10px, 1.2vw, 18px); }
 :root[data-density="compact"] .library-grid,
 :root[data-density="compact"] .work-grid { gap: 10px; }
-:root[data-density="compact"] .work-card { height: 200px; }
+:root[data-density="compact"] .work-card { min-height: 204px; }
 :root[data-density="compact"] .page-header { margin-bottom: 8px; }
 
 .page-header {
+  gap: var(--mantine-spacing-md);
   margin-bottom: 14px;
 }
 .page-header h1 { font-size: clamp(25px, 2.2vw, 31px); line-height: 1.24; letter-spacing: -0.028em; }
+.page-header__actions { flex: 0 0 auto; justify-content: flex-end; }
 .library-page .page-header { margin-bottom: 14px; }
+
+.visually-hidden {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  padding: 0 !important;
+  margin: -1px !important;
+  overflow: hidden !important;
+  clip: rect(0, 0, 0, 0) !important;
+  white-space: nowrap !important;
+  border: 0 !important;
+}
 
 .surface {
   border: 1px solid light-dark(#e2e7ed, #252c37);
@@ -189,18 +219,24 @@ select {
   transform: translateY(-1px);
 }
 
+/* One badge shape for every provider. pixiv used a rounded square and FANBOX a
+   circle, which read as two unrelated systems; the surrounding chip now shares
+   the same corner treatment so the pair looks fitted rather than pasted on. */
 .provider-mark {
   display: inline-flex;
-  min-height: 26px;
+  min-height: 24px;
   align-items: center;
   gap: 6px;
-  padding: 3px 8px 3px 5px;
+  padding: 2px 8px 2px 4px;
   border: 1px solid color-mix(in srgb, var(--provider-color) 28%, transparent);
-  border-radius: 999px;
+  border-radius: 9px;
   color: light-dark(color-mix(in srgb, var(--provider-color) 78%, black), color-mix(in srgb, var(--provider-color) 72%, white));
   background: light-dark(var(--provider-soft), color-mix(in srgb, var(--provider-color) 14%, transparent));
   vertical-align: middle;
 }
+/* With no label the chip is square, so it hugs the glyph instead of stretching
+   into a lozenge. */
+.provider-mark:not(:has(.mantine-Text-root)) { padding: 2px; }
 
 .provider-mark__icon {
   display: inline-flex;
@@ -215,7 +251,7 @@ select {
   height: 18px;
   place-items: center;
   border: 1.5px solid currentColor;
-  border-radius: 5px;
+  border-radius: 6px;
   font-family: Arial, sans-serif;
   font-size: 12px;
   font-weight: 800;
@@ -223,7 +259,7 @@ select {
 }
 .brand-word-glyph svg { display: block; width: 15px; height: 15px; fill: currentColor; }
 .brand-word-glyph--pixiv { color: #0096fa; }
-.brand-word-glyph[data-wide] { color: #7a5d00; border-radius: 50%; }
+.brand-word-glyph[data-wide] { color: #7a5d00; }
 .external-service-mark { display: inline-flex; align-items: center; gap: 6px; color: var(--external-brand); }
 .external-service-mark__glyph { display: inline-grid; min-width: 20px; height: 20px; padding-inline: 3px; place-items: center; border: 1px solid color-mix(in srgb, var(--external-brand) 35%, transparent); border-radius: 6px; font-size: 10px; font-weight: 800; }
 
@@ -231,6 +267,7 @@ select {
   border-style: dashed;
   background: light-dark(rgb(255 255 255 / 65%), rgb(18 23 31 / 65%));
 }
+.async-error-message { overflow-wrap: anywhere; white-space: pre-wrap; }
 
 .stat-card {
   position: relative;
@@ -378,6 +415,16 @@ select {
   .download-trend__column:nth-child(even) .download-trend__label { visibility: hidden; }
 }
 
+/* Stacked beside the trend; once the column spans the page they sit side by
+   side rather than becoming two full-width strips. */
+.dashboard-side { display: grid; height: 100%; gap: var(--mantine-spacing-lg); align-content: start; }
+@media (max-width: 61.99em) {
+  .dashboard-side { grid-template-columns: 1fr 1fr; align-content: stretch; }
+}
+@media (max-width: 40em) {
+  .dashboard-side { grid-template-columns: 1fr; }
+}
+
 /* The chart sits above the composition bar and the card fills the column, so
    the trend takes the slack instead of leaving a void under the legend. */
 .dashboard-trend-card { display: flex; flex-direction: column; }
@@ -434,27 +481,51 @@ select {
 .work-card {
   min-width: 0;
   height: 100%;
+  cursor: pointer;
   container-type: inline-size;
 }
+
+.work-card[data-selection-mode],
+.work-row[data-selection-mode] { cursor: pointer; }
+
+.work-card[data-selection-mode],
+.work-row[data-selection-mode] {
+  transition: border-color 140ms ease, background-color 140ms ease, box-shadow 140ms ease, transform 120ms ease;
+}
+.work-card[data-selection-mode]:hover,
+.work-row[data-selection-mode]:hover {
+  border-color: light-dark(var(--mantine-color-piep-3), var(--mantine-color-piep-7));
+  box-shadow: 0 8px 24px rgb(18 74 116 / 10%);
+}
+.work-card[data-selected],
+.work-row[data-selected] {
+  border-color: var(--mantine-color-piep-6);
+  background: light-dark(#f4faff, #111f2c);
+  box-shadow: 0 0 0 2px light-dark(rgb(13 134 244 / 18%), rgb(73 169 238 / 24%)), 0 10px 26px rgb(18 74 116 / 12%);
+}
+.work-card[data-selected] .work-card__cover-rail { background: transparent; }
+.work-card[data-selection-mode] .work-card__actions,
+.work-row[data-selection-mode] .work-row__actions { display: none; }
 
 .work-card__inner {
   position: relative;
   display: grid;
   height: 100%;
   min-width: 0;
-  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-columns: clamp(104px, 31cqi, 132px) minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr) auto;
 }
 
 .work-card__cover-rail {
   position: relative;
   display: flex;
-  width: clamp(96px, 34cqi, 132px);
+  grid-column: 1;
+  grid-row: 1;
   flex-direction: column;
   justify-content: center;
-  padding: 12px 11px;
+  padding: 12px;
   cursor: pointer;
-  background: light-dark(#fafafa, #121820);
-  border-right: 1px solid light-dark(#e7ebef, #29313b);
+  background: var(--mantine-color-body);
 }
 
 .work-card__cover {
@@ -465,7 +536,6 @@ select {
   place-items: center;
   overflow: hidden;
   border-radius: 8px;
-  box-shadow: 0 8px 22px rgb(24 32 43 / 14%);
 }
 
 /* Spacing is set per pair rather than by one uniform gap: the series and the
@@ -473,42 +543,104 @@ select {
    every relationship read as equally distant and padded the card out. */
 .work-card__body {
   display: flex;
+  grid-column: 2;
+  grid-row: 1;
   min-width: 0;
   flex-direction: column;
+  justify-content: center;
   gap: 0;
-  padding: 9px 12px 8px;
+  padding: 10px 13px;
 }
 .work-card__body > .work-card__open { margin-top: 1px; }
-.work-card__body > .work-card__author { margin-top: 5px; }
+.work-card__body > .work-card__identity { margin-top: 5px; }
 .work-card__body > .work-card__excerpt { margin-top: 5px; }
-.work-card__body > .work-card__tags { margin-top: 8px; }
+.work-card__body > .work-card__tagslot { margin-top: 8px; }
 
-.work-card__meta { display: flex; min-width: 0; align-items: center; gap: 8px; min-height: 21px; }
+.work-card__meta { display: flex; min-width: 0; align-items: center; gap: 8px; }
 .work-card__meta > .work-card__series { min-width: 0; flex: 0 1 auto; }
-/* Stamped on the card's own top-left corner, over the cover. */
 .work-card__provider {
-  position: absolute;
-  z-index: 2;
-  top: 9px;
-  left: 9px;
-  max-width: calc(100% - 18px);
-  min-height: 21px;
+  min-height: 22px;
+  flex: 0 0 auto;
   padding-block: 1px;
-  background: light-dark(rgb(255 255 255 / 93%), rgb(17 23 31 / 93%));
-  box-shadow: 0 2px 8px rgb(20 28 38 / 14%);
 }
 .work-card__provider .mantine-Text-root { overflow: hidden; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
-.work-card__select { position: absolute; top: 14px; right: 14px; z-index: 3; filter: drop-shadow(0 2px 5px rgb(0 0 0 / 18%)); }
-.work-card__footer { display: flex; min-width: 0; align-items: center; gap: 8px; margin-top: auto; padding-top: 7px; }
+.work-card__select,
+.work-row__select {
+  z-index: 3;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid light-dark(rgb(116 130 145 / 42%), rgb(255 255 255 / 20%));
+  color: light-dark(#3f4c59, #d7e0e8);
+  background: light-dark(rgb(255 255 255 / 96%), rgb(25 32 42 / 96%));
+  box-shadow: 0 4px 12px rgb(20 31 43 / 18%);
+  transition: color 120ms ease, background-color 120ms ease, border-color 120ms ease, box-shadow 120ms ease, transform 100ms ease;
+}
+.work-card__select:hover,
+.work-row__select:hover { border-color: var(--mantine-color-piep-5); box-shadow: 0 6px 16px rgb(20 71 110 / 22%); transform: translateY(-1px); }
+.work-card__select:active,
+.work-row__select:active { transform: translateY(0); }
+.work-card__select:focus-visible,
+.work-row__select:focus-visible { outline: 3px solid rgb(13 134 244 / 24%); outline-offset: 2px; }
+.work-card__select[data-checked],
+.work-row__select[data-checked] { border-color: var(--mantine-color-piep-6); color: white; background: var(--mantine-color-piep-6); }
+.work-card__select {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  min-height: 30px;
+  gap: 6px;
+  padding: 3px 9px 3px 4px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 750;
+}
+.work-selection-toggle__indicator {
+  display: grid;
+  width: 21px;
+  height: 21px;
+  flex: 0 0 21px;
+  place-items: center;
+  border: 1.5px solid currentColor;
+  border-radius: 50%;
+}
+.work-card__select[data-checked] .work-selection-toggle__indicator,
+.work-row__select[data-checked] .work-selection-toggle__indicator { border-color: rgb(255 255 255 / 78%); background: rgb(255 255 255 / 12%); }
+.work-selection-toggle__label { line-height: 1; }
+.work-card__footer {
+  display: flex;
+  grid-column: 1 / -1;
+  grid-row: 2;
+  min-width: 0;
+  min-height: 46px;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-top: 1px solid light-dark(#e7ebef, #29313b);
+}
 .work-card__footer > .work-card__facts { flex: 1 1 auto; }
 .work-card__actions { flex: 0 0 auto; }
 .work-card__actions .mantine-ActionIcon-root { flex: 0 0 auto; }
-.work-card__author { min-width: 0; cursor: pointer; border-radius: 999px; }
+/* Only as wide as the avatar and the name: stretching to the row made the
+   whole line clickable, which gave no clue where the link actually was. */
+.work-card__author { display: inline-flex; width: fit-content; max-width: 100%; min-width: 0; min-height: 28px; padding-block: 3px; cursor: pointer; border-radius: 999px; }
 .work-card__author:hover .mantine-Text-root { color: var(--mantine-color-piep-7); }
 .work-card__author:focus-visible { outline: 2px solid var(--mantine-color-piep-5); outline-offset: 2px; }
+.work-card__identity,
+.work-row__identity { display: flex; min-width: 0; min-height: 22px; align-items: center; gap: 8px; }
+.work-card__identity .work-card__author,
+.work-row__identity .work-card__author { flex: 0 1 auto; }
+.work-card__identity-divider { width: 1px; height: 18px; flex: 0 0 auto; background: light-dark(#d5dae0, #38414c); }
+
+/* The series line above the title is the link to the series. */
+.work-card__series-link { display: inline-flex; width: fit-content; max-width: 100%; min-height: 26px; align-items: center; gap: 5px; padding: 3px 0; border: 0; cursor: pointer; background: none; }
+.work-card__series-link:hover .work-card__series { color: var(--mantine-color-piep-7); }
+.work-card__series-link:focus-visible { outline: 2px solid var(--mantine-color-piep-5); outline-offset: 2px; border-radius: 4px; }
 .work-card__avatar { flex: 0 0 auto; }
 .work-card__excerpt { margin-top: -1px; }
-.work-card__version { flex: 0 0 auto; cursor: pointer; font-variant-numeric: tabular-nums; }
+.work-card__search-reason { min-width: 0; overflow: hidden; color: var(--mantine-color-teal-7); }
+.work-card__search-reason .mantine-Badge-root { flex: 0 0 auto; }
+.work-card__version { display: inline-flex; min-height: 24px; flex: 0 0 auto; align-items: center; cursor: pointer; font-variant-numeric: tabular-nums; }
 
 /* Very narrow columns drop the cover rail's chrome so the text keeps room. */
 @container (max-width: 300px) {
@@ -521,8 +653,11 @@ select {
   font-weight: 650;
   letter-spacing: 0.02em;
 }
+/* Series and title use their natural combined height. A series + one-line
+   title therefore occupies the same space as a two-line title without a
+   series, without leaving a visibly empty reserved row between elements. */
 .work-card__title { font-size: 0.9rem; }
-.work-card__open { display: block; width: 100%; min-width: 0; color: inherit; text-align: left; }
+.work-card__open { display: flex; width: 100%; min-width: 0; min-height: 28px; align-items: center; color: inherit; text-align: left; }
 .work-card__open:focus-visible,
 .work-row__open:focus-visible { outline: 2px solid var(--mantine-color-piep-5); outline-offset: 3px; border-radius: var(--mantine-radius-sm); }
 .work-card__cover-rail { cursor: pointer; }
@@ -532,20 +667,22 @@ select {
 .work-card__tags {
   display: flex;
   min-width: 0;
-  min-height: 20px;
+  min-height: 28px;
   align-items: center;
   gap: 5px;
   flex-wrap: nowrap;
   overflow: hidden;
 }
 .work-card__tags [data-hidden] { display: none; }
-.work-card__tag { flex: 0 0 auto; max-width: 130px; text-decoration: none; cursor: pointer; }
+.work-card__tag { height: 26px; min-height: 26px; flex: 0 0 auto; max-width: 130px; text-decoration: none; cursor: pointer; }
 .work-card__tag .mantine-Badge-label { overflow: hidden; text-overflow: ellipsis; }
 .work-card__tag:hover { background: light-dark(var(--mantine-color-piep-0), var(--mantine-color-dark-5)); color: var(--mantine-color-piep-7); }
 /* A fixed footprint keeps the measurement in TagRow stable: if the chip grew
    with its own label ("+3" then "+12") it would no longer fit the space that
    was reserved for it and got clipped to a bare "+". */
 .work-card__tag-overflow {
+  height: 26px;
+  min-height: 26px;
   min-width: 38px;
   flex: 0 0 auto;
   justify-content: center;
@@ -559,13 +696,13 @@ select {
    items wrap onto a hidden second line instead of clipping mid-glyph. */
 .work-card__facts {
   min-width: 0;
-  height: 19px;
+  height: 26px;
   align-items: center;
   overflow: hidden;
   flex-wrap: wrap;
   /* A large row gap parks any wrapped item well below the clip, so a second
      line never peeks through as a sliver under the first. */
-  row-gap: 24px;
+  row-gap: 31px;
 }
 .work-card__facts > .mantine-Text-root { display: inline-flex; min-width: 0; max-width: 100%; align-items: center; gap: 4px; white-space: nowrap; }
 .library-toolbar { background: light-dark(rgb(255 255 255 / 90%), rgb(17 22 30 / 92%)); }
@@ -577,37 +714,43 @@ select {
    the narrower the row gets the fewer columns it carries. */
 .work-row {
   min-width: 0;
+  cursor: pointer;
   container-type: inline-size;
 }
 
+/* A fixed row height keeps the list even whether or not a work has a series,
+   and the centred alignment does the rest. */
 .work-row__grid {
   display: grid;
+  min-height: 92px;
   align-items: center;
   gap: 14px;
-  grid-template-columns: auto 46px minmax(0, 2.1fr) minmax(0, 1.4fr) auto auto;
-  padding: 8px 12px;
+  grid-template-columns: 52px minmax(220px, 1.8fr) minmax(140px, 1fr) auto auto;
+  padding: 10px 12px;
 }
-.work-row__provider { flex: 0 0 auto; }
+.work-row__provider { min-height: 20px; padding-block: 0; }
+.work-row__provider .provider-mark__icon { width: 16px; height: 16px; }
+.work-row__provider .mantine-Text-root { font-size: 10px; }
 
 .work-row__cover { position: relative; cursor: pointer; }
-.work-row__cover .work-cover--compact { width: 46px; height: 60px; flex: none; }
-.work-row__select { position: absolute; top: -4px; left: -4px; z-index: 2; filter: drop-shadow(0 2px 4px rgb(0 0 0 / 22%)); }
-.work-row__main { min-width: 0; }
-.work-row__meta { min-width: 0; min-height: 19px; }
-.work-row__series { min-width: 0; flex: 0 1 auto; }
-.work-row__main .work-card__author { margin-top: 2px; }
-.work-row__open { display: block; width: 100%; min-width: 0; margin-top: 1px; color: inherit; text-align: left; }
+.work-row__cover .work-cover--compact { width: 52px; height: 70px; flex: none; }
+.work-row__select { position: absolute; top: -6px; left: -6px; width: 28px; height: 28px; border-radius: 50%; }
+.work-row__select .work-selection-toggle__indicator { width: 18px; height: 18px; flex-basis: 18px; }
+.work-row__main { display: flex; min-width: 0; flex-direction: column; justify-content: center; }
+.work-row__series { display: block; min-width: 0; }
+.work-row__identity { margin-top: 3px; }
+.work-row__open { display: flex; width: 100%; min-width: 0; min-height: 26px; align-items: center; margin-top: 1px; color: inherit; text-align: left; }
 .work-row__tags { min-width: 0; }
 .work-row__facts { flex: 0 0 auto; white-space: nowrap; }
 .work-row__facts > .mantine-Text-root { display: inline-flex; align-items: center; gap: 4px; }
 .work-row__actions { display: flex; justify-content: flex-end; }
 
 @container (max-width: 900px) {
-  .work-row__grid { grid-template-columns: auto 46px minmax(0, 1fr) auto auto; }
+  .work-row__grid { grid-template-columns: 52px minmax(0, 1fr) auto auto; }
   .work-row__tags { display: none; }
 }
-@container (max-width: 620px) {
-  .work-row__grid { grid-template-columns: auto 46px minmax(0, 1fr) auto; gap: 10px; }
+@container (max-width: 720px) {
+  .work-row__grid { grid-template-columns: 52px minmax(0, 1fr) auto; gap: 10px; }
   .work-row__facts { display: none; }
 }
 
@@ -630,9 +773,20 @@ select {
 .dashboard-page .page-header h1 { font-size: clamp(26px, 2vw, 30px); }
 /* These are filters, so they behave like buttons: a real hit area, a hover
    that reads as clickable, and a press state. */
+/* Chips of different widths wrapped in a narrow column leave a ragged right
+   edge and, with one long tag, most of a row empty. Letting every chip grow
+   into the space left on its row fills each row exactly, so the block has a
+   straight edge instead of a series of holes. */
+.dashboard-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
 .dashboard-tag {
   height: 30px;
-  padding-inline: 11px;
+  flex: 1 1 auto;
+  padding-inline: 10px;
   cursor: pointer;
   border: 1px solid transparent;
   transition: background-color 120ms ease, border-color 120ms ease, transform 90ms ease;
@@ -644,7 +798,10 @@ select {
 }
 .dashboard-tag:active { transform: translateY(1px); }
 .dashboard-tag:focus-visible { outline: 2px solid var(--mantine-color-piep-5); outline-offset: 2px; }
-.dashboard-tag .mantine-Badge-label { display: inline-flex; align-items: center; gap: 7px; }
+.dashboard-tag .mantine-Badge-label { display: flex; width: 100%; align-items: center; justify-content: space-between; gap: 7px; }
+/* A very long tag would otherwise be a row of its own. It keeps its count and
+   its full name in the tooltip. */
+.dashboard-tag__name { overflow: hidden; max-width: 14ch; text-overflow: ellipsis; white-space: nowrap; }
 .dashboard-tag__count { display: inline-grid; min-width: 18px; height: 18px; padding-inline: 4px; place-items: center; border-radius: 999px; background: light-dark(#e4e8ec, #2b323c); color: var(--mantine-color-dimmed); font-size: 10px; font-variant-numeric: tabular-nums; }
 
 .quick-save-input {
@@ -719,13 +876,14 @@ select {
 
 .library-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
   gap: 16px;
 }
 
 .entity-card { position: relative; min-height: 138px; overflow: hidden; }
 .entity-card__banner { position: absolute; inset: 0; overflow: hidden; background: light-dark(#e9eef3, #1c242e); }
 .entity-card__banner > *:first-child { filter: saturate(0.92); opacity: 0.34; transform: scale(1.01); }
+.entity-card__banner > img { width: 100%; height: 100%; object-fit: cover; }
 .entity-card__wash { position: absolute; inset: 0; background: linear-gradient(90deg, light-dark(rgb(255 255 255 / 96%), rgb(17 22 30 / 96%)) 25%, light-dark(rgb(255 255 255 / 84%), rgb(17 22 30 / 84%))); }
 .entity-card__content { position: relative; min-height: 138px; }
 .entity-card__series-cover { display: grid; width: 72px; height: 98px; flex: 0 0 72px; place-items: center; overflow: hidden; border: 1px solid light-dark(rgb(255 255 255 / 72%), rgb(255 255 255 / 14%)); border-radius: 7px; color: var(--mantine-color-dimmed); background: light-dark(#f5f1ec, #202832); box-shadow: 0 8px 20px rgb(28 34 43 / 16%); }
@@ -737,12 +895,51 @@ select {
   right: 24px;
   bottom: 22px;
   left: calc(var(--piep-sidebar-width) + 24px);
-  max-width: 920px;
+  max-width: 960px;
   margin-inline: auto;
-  border-color: light-dark(#bfdcf3, #34506b);
+  border: 2px solid light-dark(var(--mantine-color-piep-5), var(--mantine-color-piep-4));
+  border-radius: 16px;
   background: light-dark(rgb(255 255 255 / 96%), rgb(20 27 36 / 96%));
+  box-shadow: 0 0 0 3px light-dark(rgb(13 134 244 / 13%), rgb(73 169 238 / 17%)), 0 18px 44px rgb(18 47 70 / 24%);
   backdrop-filter: blur(18px);
 }
+/* Bottom-right, out of the way of the selection bar, which centres itself
+   along the bottom edge and can reach the right margin on a narrow window. The
+   page raises this button while that bar is up rather than letting them stack. */
+.scroll-to-top {
+  position: fixed;
+  z-index: 190;
+  right: 24px;
+  bottom: 22px;
+  border: 1px solid light-dark(#d3dbe4, #2c3644);
+  background: light-dark(rgb(255 255 255 / 94%), rgb(22 29 38 / 94%));
+  box-shadow: 0 6px 20px rgb(18 47 70 / 18%);
+  backdrop-filter: blur(10px);
+  transition: bottom 160ms ease, transform 120ms ease;
+}
+
+.scroll-to-top:hover { transform: translateY(-2px); }
+
+@media (prefers-reduced-motion: reduce) {
+  .scroll-to-top { transition: none; }
+  .scroll-to-top:hover { transform: none; }
+}
+
+.selection-bar__inner { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 14px; }
+.selection-bar__summary { min-width: 0; flex: 1 1 auto; }
+.selection-bar__actions { flex: 0 0 auto; }
+.selection-bar__count {
+  display: inline-flex;
+  min-width: 112px;
+  min-height: 34px;
+  align-items: center;
+  gap: 5px;
+  padding-inline: 10px;
+  border-radius: 10px;
+  color: var(--mantine-color-piep-7);
+  background: light-dark(var(--mantine-color-piep-0), rgb(26 62 88 / 64%));
+}
+.selection-bar__count[data-empty] { color: var(--mantine-color-dimmed); background: light-dark(#f2f4f6, #272e38); }
 
 .work-hero {
   overflow: hidden;
@@ -755,7 +952,6 @@ select {
   place-items: center;
   overflow: hidden;
   padding: 28px;
-  border-right: 1px solid light-dark(#eceef1, #282f38);
   background: var(--mantine-color-body);
 }
 
@@ -765,9 +961,7 @@ select {
   aspect-ratio: 2 / 3;
   overflow: hidden;
   border-radius: 8px;
-  box-shadow: 0 18px 44px rgb(20 27 37 / 24%);
 }
-.work-hero__cover.work-cover[data-empty] { box-shadow: 0 12px 32px rgb(20 27 37 / 12%); }
 
 .work-breadcrumbs { display: flex; width: 100%; min-width: 0; overflow: hidden; }
 .work-breadcrumbs .mantine-Breadcrumbs-breadcrumb { min-width: 0; }
@@ -791,6 +985,57 @@ select {
 .work-caption br { display: block; content: ""; }
 .work-caption p { margin: 0 0 0.55em; }
 .work-caption a { color: var(--mantine-color-piep-7); text-decoration: underline; text-underline-offset: 2px; }
+
+.work-hero__series-link,
+.work-hero__author-link {
+  width: fit-content;
+  max-width: 100%;
+  border-radius: var(--mantine-radius-sm);
+  text-decoration: none;
+}
+.work-hero__series-link { padding: 3px 6px; margin-left: -6px; }
+.work-hero__series-link:hover,
+.work-hero__author-link:hover { color: var(--mantine-color-piep-7); background: light-dark(var(--mantine-color-piep-0), var(--mantine-color-dark-5)); }
+
+.work-hero__tags { min-height: 32px; }
+.work-hero__tag {
+  height: 30px;
+  padding-inline: 11px;
+  cursor: pointer;
+  border: 1px solid transparent;
+  text-decoration: none;
+  transition: color 120ms ease, background-color 120ms ease, border-color 120ms ease, transform 90ms ease;
+}
+.work-hero__tag:hover {
+  border-color: light-dark(var(--mantine-color-piep-3), var(--mantine-color-piep-8));
+  color: var(--mantine-color-piep-7);
+  background: light-dark(var(--mantine-color-piep-0), var(--mantine-color-dark-5));
+}
+.work-hero__tag:active { transform: translateY(1px); }
+.work-hero__tag:focus-visible { outline: 2px solid var(--mantine-color-piep-5); outline-offset: 2px; }
+
+.work-hero__facts { min-width: 0; }
+.work-hero__facts > .mantine-Text-root { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+
+.work-hero__actionbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: var(--mantine-spacing-md);
+  padding-top: 12px;
+  border-top: 1px solid light-dark(#e3e7ec, #303945);
+}
+.work-hero__actions { min-width: 0; flex: 0 1 auto; }
+.work-hero__secondary-actions { flex: 0 0 auto; }
+.work-hero__action {
+  min-height: 38px;
+  padding-inline: 13px;
+  box-shadow: 0 1px 2px rgb(20 32 45 / 5%);
+  transition: transform 90ms ease, border-color 120ms ease, box-shadow 120ms ease;
+}
+.work-hero__action:hover { border-color: light-dark(#bdcddd, #465567); box-shadow: 0 5px 14px rgb(20 32 45 / 9%); }
+.work-hero__action:active { transform: translateY(1px); box-shadow: none; }
 
 .content-preview {
   max-width: 880px;
@@ -838,6 +1083,8 @@ select {
 }
 .novel-link-card:hover { border-color: light-dark(#b9c9d8, #455363); box-shadow: 0 9px 26px rgb(25 37 51 / 11%); transform: translateY(-1px); }
 .novel-link-card--fanbox { border-color: light-dark(#e6dca7, #554a20); background: light-dark(linear-gradient(120deg, #fff, #fffdf4), linear-gradient(120deg, #191d24, #29230f)); }
+/* The colour comes from the one service definition, the same one the author
+   and save screens use, so a link card and a profile link wear the same mark. */
 .link-card-brand {
   display: inline-grid;
   width: 38px;
@@ -845,12 +1092,13 @@ select {
   flex: 0 0 38px;
   place-items: center;
   border-radius: 50%;
-  color: #705500;
-  background: #f2c624;
+  color: var(--link-card-brand, #68707a);
+  background: color-mix(in srgb, var(--link-card-brand, #68707a) 16%, transparent);
   font-size: 14px;
   font-weight: 850;
 }
-.novel-link-card:not(.novel-link-card--fanbox) .link-card-brand { color: var(--mantine-color-piep-7); background: light-dark(#e8f4fe, #183149); }
+
+.link-card-brand .brand-word-glyph { width: 18px; height: 18px; }
 .link-card-info { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 2px; }
 .link-card-kicker { color: #8a6b00; font-size: 10px; font-weight: 800; letter-spacing: 0.04em; }
 .link-card-title { overflow: hidden; color: var(--mantine-color-text); font-size: 0.88rem; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
@@ -919,6 +1167,7 @@ select {
 }
 .entity-hero__series-cover img { width: 100%; height: 100%; }
 .entity-hero__actions { flex: 0 0 auto; }
+.entity-hero__primary .provider-mark { width: fit-content; align-self: flex-start; }
 .profile-links { align-items: stretch; }
 .profile-link {
   height: 38px;
@@ -934,7 +1183,7 @@ select {
 
 .reader-page {
   position: relative;
-  height: calc(100vh - var(--app-shell-header-height));
+  height: 100%;
   overflow: hidden;
   background: #f2ede4;
 }
@@ -995,9 +1244,10 @@ select {
   letter-spacing: -0.025em;
   text-align: center;
 }
+.reader-title-page__head { min-height: 30px; }
 .reader-title-page__author,
 .reader-title-page__meta { text-align: right; }
-.reader-title-page__meta { margin-top: 4px; }
+.reader-title-page__meta { margin-top: 3px; }
 
 /* The count is drawn inside the button so it cannot be clipped, and the button
    itself stays the same shape as every other control in the bar. */
@@ -1076,7 +1326,7 @@ select {
 .reader-page-controls .mantine-Pagination-control { min-width: 30px; height: 30px; border-radius: 7px; }
 
 .editor-page {
-  height: calc(100vh - var(--app-shell-header-height));
+  height: 100%;
   overflow: hidden;
 }
 
@@ -1202,11 +1452,11 @@ select {
 .editor-quote-input { padding-left: 12px; border-left: 3px solid var(--mantine-color-violet-2); }
 .editor-page-break { min-height: 34px; border: 1px dashed light-dark(#e0b56d, #70532b); border-radius: var(--mantine-radius-sm); color: light-dark(#9a640e, #e5b35f); background: light-dark(#fffaf1, #231d14); }
 .editor-image-preview { display: grid; width: 150px; height: 112px; flex: 0 0 150px; place-items: center; overflow: hidden; border: 1px solid light-dark(#e1e5ea, #303844); border-radius: var(--mantine-radius-md); color: var(--mantine-color-dimmed); background: light-dark(#f3f5f7, #10151c); }
-.about-card__lockup { width: clamp(150px, 22vw, 220px); height: auto; }
+
 
 .save-page {
   display: grid;
-  height: calc(100vh - var(--app-shell-header-height));
+  height: 100%;
   grid-template-rows: 76px minmax(0, 1fr);
   overflow: hidden;
 }
@@ -1263,6 +1513,99 @@ select {
     light-dark(#f4f6f8, #0d1117);
 }
 
+/* Shelf counts sit at the end of their row and must not shove the label out of
+   the way, so they stay quiet and keep their digits aligned. */
+.app-nav__count {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+  font-weight: 650;
+  opacity: 0.75;
+}
+
+/* The sidebar is a fixed width and cannot grow, so a label gives up characters
+   rather than wrapping onto a second line and pushing the row's height around.
+   The full text stays available through the row's tooltip and its label. */
+.app-nav__link .mantine-NavLink-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-nav__link .mantine-NavLink-body { min-width: 0; }
+
+/* A count of two or more digits does not fit inside a circle. Mantine's circle
+   badge clips it; these stay pill-shaped and grow with their contents. */
+.app-nav__link .mantine-Badge-root,
+.app-nav__group .mantine-Badge-root {
+  min-width: 20px;
+  padding-inline: 5px;
+  border-radius: 999px;
+}
+
+/* The mode picker heads the sidebar because it decides what the rest of the
+   sidebar lists. It reads as a control rather than another destination: a
+   filled well with a chevron, not a nav row. */
+.mode-picker {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 10px;
+  border-radius: var(--mantine-radius-md);
+  border: 1px solid light-dark(#dce3ea, #29323d);
+  background: light-dark(#f1f5f9, #182029);
+  color: light-dark(#1d2530, #e4ebf3);
+  transition: background 120ms ease, border-color 120ms ease;
+}
+
+.mode-picker:hover { background: light-dark(#e7eef6, #1e2833); border-color: light-dark(#c8d4e0, #36424f); }
+.mode-picker:focus-visible { outline: 2px solid var(--mantine-color-piep-5); outline-offset: 1px; }
+.mode-picker > svg:first-child { flex: none; color: var(--mantine-color-piep-6); }
+.mode-picker__chevron { margin-left: auto; flex: none; opacity: 0.55; }
+
+.mode-picker[data-railed] { justify-content: center; padding: 8px 0; }
+
+/* In the rail every saved search would otherwise wear the same bookmark icon.
+   Its initial is the only thing at 18px that tells them apart. */
+.saved-search-mark {
+  display: inline-grid;
+  width: 18px;
+  height: 18px;
+  place-items: center;
+  border: 1.5px solid currentColor;
+  border-radius: 5px;
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 1;
+  opacity: 0.85;
+}
+
+/* Background indexing is reported in the header rather than in a dialog: it
+   needs no decision, but search is incomplete until it finishes. */
+.indexing-chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 99px;
+  border: 1px solid light-dark(#cfe3f8, #23405c);
+  background: light-dark(#eff7ff, #10202f);
+  color: light-dark(#0b5fae, #7cc0ff);
+}
+
+.indexing-chip:hover { background: light-dark(#e2f0fd, #142b3f); }
+.indexing-chip:focus-visible { outline: 2px solid var(--mantine-color-piep-5); outline-offset: 2px; }
+
+/* While the large window holds the session, the pane is a placeholder for a
+   view that is not there. Dimming it says "handed over", not "broken", and the
+   dashed edge distinguishes it from a pane that simply failed to load. */
+.browser-viewport[data-detached] {
+  background: light-dark(#eef2f6, #0b1016);
+  outline: 1px dashed light-dark(#c4ced9, #2c3644);
+  outline-offset: -6px;
+}
+
 .candidate-pane { background: light-dark(#fbfcfd, #11161e); }
 .candidate-pane[data-collapsed] { display: flex; align-items: flex-start; }
 /* The grip is the whole column, so it centres in the gap rather than hugging
@@ -1270,6 +1613,7 @@ select {
 .save-resizer { display: flex; align-items: center; justify-content: center; min-width: 0; min-height: 0; color: var(--mantine-color-dimmed); cursor: col-resize; touch-action: none; border-radius: var(--mantine-radius-sm); }
 .save-resizer > svg { display: block; width: 18px; height: 18px; flex: none; }
 .save-resizer:hover { color: var(--mantine-color-piep-6); background: light-dark(#e8f3fc, #162b3d); }
+.save-resizer:focus-visible { outline: 2px solid var(--mantine-color-piep-5); outline-offset: 2px; color: var(--mantine-color-piep-6); background: light-dark(#e8f3fc, #162b3d); }
 .candidate-list { min-height: 0; }
 
 .candidate-row {
@@ -1301,6 +1645,22 @@ select {
   border-top: 1px solid light-dark(#e5e9ee, #272f39);
 }
 
+/* At the minimum desktop width the settings sections form one compact row.
+   Keeping five full-width rows above the selected panel made every settings
+   change start with a large vertical detour. Narrow previews can scroll this
+   local strip without making the whole page overflow. */
+@media (max-width: 61.99em) {
+  .settings-nav {
+    display: grid;
+    grid-template-columns: repeat(5, minmax(158px, 1fr));
+    overflow-x: auto;
+    overscroll-behavior-inline: contain;
+  }
+  .settings-nav .mantine-NavLink-root { min-width: 158px; }
+  .settings-nav .mantine-NavLink-label,
+  .settings-nav .mantine-NavLink-description { white-space: nowrap; }
+}
+
 @media (max-width: 56em) {
   .save-layout { padding: 8px; }
 }
@@ -1311,18 +1671,23 @@ select {
   .editor-toolbar__actions .mantine-Button-root { padding-inline: 10px; }
 }
 
-@media (max-width: 70em) {
-  .library-toolbar > .mantine-Stack-root > .mantine-Group-root:first-child { flex-wrap: wrap; }
-  .library-toolbar > .mantine-Stack-root > .mantine-Group-root:first-child > :first-child { min-width: min(100%, 360px); }
-}
+/* The controls keep one line at every width: the search field gives up space
+   first, and the sort menu narrows with the window. Wrapping put the view
+   switches on a row of their own, which read as a second toolbar. */
+.library-toolbar__search { min-width: 0; flex: 1 1 auto; }
+.library-toolbar__sort { width: clamp(132px, 16vw, 206px); }
 
 @media (max-width: 48em) {
   .work-hero__cover-stage { min-height: 280px; }
   .work-hero__cover { width: 168px; }
+  .work-hero__actionbar { align-items: stretch; flex-direction: column; }
+  .work-hero__secondary-actions { justify-content: flex-end; }
 }
 
 @media (max-width: 61.99em) {
   .selection-bar { left: 18px; right: 18px; }
+  .selection-bar__inner { align-items: stretch; flex-direction: column; }
+  .selection-bar__actions { justify-content: flex-end; }
 }
 
 @media (max-width: 58em) {
@@ -1335,7 +1700,13 @@ select {
   }
 
   .page-header {
+    align-items: stretch;
     flex-direction: column;
+  }
+
+  .page-header__actions {
+    width: 100%;
+    justify-content: flex-start;
   }
 }
 

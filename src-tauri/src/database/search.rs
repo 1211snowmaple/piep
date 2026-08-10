@@ -227,34 +227,45 @@ pub fn match_fields_and_score(
     let mut fields = Vec::new();
     let mut reasons = Vec::new();
     let mut score = 0.0;
+    let document_fields = doc.fields();
+    let normalized_fields = document_fields
+        .iter()
+        .map(|(_, text, _)| normalize_search_text(text))
+        .collect::<Vec<_>>();
+    // Reading/romaji analysis invokes the Japanese tokenizer and is orders of
+    // magnitude more expensive than a direct comparison. If a query term has
+    // an exact variant anywhere in the document, there is no need to run that
+    // fallback independently for every other metadata field merely to decorate
+    // a result that Tantivy has already ranked.
+    let term_has_direct_match = parsed
+        .include
+        .iter()
+        .map(|term| {
+            document_fields.iter().zip(&normalized_fields).any(
+                |((_, field_text, _), normalized)| {
+                    term.variants.iter().any(|variant| {
+                        !variant.is_empty()
+                            && (normalized.contains(variant) || field_text.contains(variant))
+                    })
+                },
+            )
+        })
+        .collect::<Vec<_>>();
 
-    for (field_name, field_text, weight) in doc.fields() {
+    for ((field_name, field_text, weight), field_normalized) in
+        document_fields.into_iter().zip(normalized_fields)
+    {
         if field_text.is_empty() {
             continue;
         }
 
-        let field_normalized = normalize_search_text(field_text);
         let allow_expensive_analysis = field_name != "body";
-        let field_reading_kana = if allow_expensive_analysis {
-            reading_kana_text(field_text)
-        } else {
-            String::new()
-        };
-        let field_reading_romaji = if allow_expensive_analysis {
-            reading_romaji_text(field_text)
-        } else {
-            String::new()
-        };
-        let field_grams: HashSet<String> = if allow_expensive_analysis {
-            generate_ngrams_limited(field_text, 4096)
-                .into_iter()
-                .collect()
-        } else {
-            HashSet::new()
-        };
+        let mut field_reading_kana = None;
+        let mut field_reading_romaji = None;
+        let mut field_grams = None;
         let mut field_score = 0.0;
 
-        for term in &parsed.include {
+        for (term_index, term) in parsed.include.iter().enumerate() {
             let direct_match = term.variants.iter().any(|variant| {
                 !variant.is_empty()
                     && (field_normalized.contains(variant) || field_text.contains(variant))
@@ -277,6 +288,13 @@ pub fn match_fields_and_score(
                 continue;
             }
 
+            if term_has_direct_match[term_index] || !allow_expensive_analysis {
+                continue;
+            }
+
+            let field_reading_kana =
+                field_reading_kana.get_or_insert_with(|| reading_kana_text(field_text));
+
             let reading_match = term.variants.iter().any(|variant| {
                 !variant.is_empty()
                     && !field_reading_kana.is_empty()
@@ -295,6 +313,8 @@ pub fn match_fields_and_score(
                 continue;
             }
 
+            let field_reading_romaji =
+                field_reading_romaji.get_or_insert_with(|| reading_romaji_text(field_text));
             let romaji_match = term.variants.iter().any(|variant| {
                 !variant.is_empty()
                     && variant.is_ascii()
@@ -333,14 +353,15 @@ pub fn match_fields_and_score(
                 continue;
             }
 
-            if !allow_expensive_analysis {
-                continue;
-            }
-
             let grams = query_ngrams(&term.normalized);
             if grams.is_empty() {
                 continue;
             }
+            let field_grams = field_grams.get_or_insert_with(|| {
+                generate_ngrams_limited(field_text, 4096)
+                    .into_iter()
+                    .collect::<HashSet<_>>()
+            });
             let overlap = grams.iter().filter(|g| field_grams.contains(*g)).count();
             let ratio = overlap as f64 / grams.len() as f64;
             if ratio >= 0.45 {
@@ -380,6 +401,10 @@ pub fn make_match_highlights(
     parsed: &ParsedSearchQuery,
 ) -> Vec<SearchHighlight> {
     let mut highlights = Vec::new();
+    // Prefer cheap literal/synonym spans across the whole document before
+    // invoking morphological tokenization. Previously, title/author/excerpt
+    // were tokenized for every result even when a direct body/tag match was
+    // available a few fields later in this loop.
     for (field, text, _) in doc.fields() {
         if text.is_empty() {
             continue;
@@ -400,31 +425,47 @@ pub fn make_match_highlights(
                 });
                 break;
             }
-            if field != "body" {
-                if let Some((byte_idx, byte_len, _surface)) =
-                    find_token_match_span(text, &term.variants)
-                {
-                    highlights.push(SearchHighlight {
-                        field: field.to_string(),
-                        text: text.to_string(),
-                        segments: highlight_segments(text, byte_idx, byte_len),
-                        source_chunk_id: None,
-                        match_type: Some("reading".to_string()),
-                    });
-                    break;
-                }
+            if let Some((byte_idx, byte_len)) = term
+                .synonyms
+                .iter()
+                .find_map(|synonym| find_case_insensitive(text, synonym))
+            {
+                highlights.push(SearchHighlight {
+                    field: field.to_string(),
+                    text: text.to_string(),
+                    segments: highlight_segments(text, byte_idx, byte_len),
+                    source_chunk_id: None,
+                    match_type: Some("synonym".to_string()),
+                });
+                break;
             }
-            for synonym in &term.synonyms {
-                if let Some((byte_idx, byte_len)) = find_case_insensitive(text, synonym) {
-                    highlights.push(SearchHighlight {
-                        field: field.to_string(),
-                        text: text.to_string(),
-                        segments: highlight_segments(text, byte_idx, byte_len),
-                        source_chunk_id: None,
-                        match_type: Some("synonym".to_string()),
-                    });
-                    break;
-                }
+        }
+        if highlights.len() >= 3 {
+            break;
+        }
+    }
+    if !highlights.is_empty() {
+        return highlights;
+    }
+
+    // No literal span exists, so the result likely came from a kana/romaji
+    // reading field in Tantivy. Only this case pays for token analysis.
+    for (field, text, _) in doc.fields() {
+        if text.is_empty() || field == "body" {
+            continue;
+        }
+        for term in &parsed.include {
+            if let Some((byte_idx, byte_len, _surface)) =
+                find_token_match_span(text, &term.variants)
+            {
+                highlights.push(SearchHighlight {
+                    field: field.to_string(),
+                    text: text.to_string(),
+                    segments: highlight_segments(text, byte_idx, byte_len),
+                    source_chunk_id: None,
+                    match_type: Some("reading".to_string()),
+                });
+                break;
             }
         }
         if highlights.len() >= 3 {

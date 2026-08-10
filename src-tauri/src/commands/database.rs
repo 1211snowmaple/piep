@@ -1,8 +1,10 @@
 use crate::database::queries::EntityProfileFreshness;
 use crate::database::{
     AssetEntry, BulkMutationResult, DashboardSummary, DbStats, DownloadEntry, DownloadRelation,
-    DownloadVersion, EditorDocument, EntityFacet, EntityVersion, FacetCount, FilterFacets, NewAsset,
-    NewDownload, PersonEntry, ReaderDocument, SearchIndexStatus, SearchSuggestParams,
+    DownloadVersion, EditorDocument, EntityFacet, EntityVersion, FacetCount, FilterFacets,
+    LibraryDiagnostics, LibraryMaintenanceResult, LibraryShelfCounts, NewAsset, NewDownload,
+    PersonEntry, ReaderContentPage, ReaderDocument, ReaderMetadata, ReaderSearchHit, SavedSearch,
+    SavedSearchInput, SearchIndexOptimizationResult, SearchIndexStatus, SearchSuggestParams,
     SearchSuggestResult, SearchV2Params, SearchV2Result, SeriesEntry, UpdateTarget,
     UpdateTargetInput, WorkBlockInput, WorkEditRevision,
 };
@@ -51,22 +53,35 @@ pub struct RefreshEntityProfileParams {
 #[serde(rename_all = "camelCase")]
 pub struct SearchRebuildJobOptions {
     batch_size: Option<i64>,
+    include_semantic: Option<bool>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchRebuildProgress {
     job_id: String,
+    /// "manual" when someone pressed the button, "automatic" when the app
+    /// noticed the index was behind and caught it up on its own. The wording
+    /// the UI uses differs, and an automatic run must not read as an error.
+    origin: String,
     status: String,
     total_downloads: i64,
     indexed_downloads: i64,
     pending_downloads: i64,
     is_complete: bool,
     phase: String,
+    /// Documents handled by this run, which is what the progress bar tracks.
+    /// `indexed_downloads` counts the whole library and moves in commit-sized
+    /// steps, so on its own it looks stalled for minutes at a time.
+    processed: i64,
+    processed_total: i64,
+    failed: i64,
     indexed_chunks: i64,
     embedding_provider: String,
     gpu_enabled: bool,
     throughput_per_sec: Option<f64>,
+    eta_seconds: Option<f64>,
+    error: Option<String>,
 }
 
 #[tauri::command]
@@ -90,78 +105,179 @@ pub async fn search_rebuild_index(
     app: tauri::AppHandle,
     job_options: Option<SearchRebuildJobOptions>,
 ) -> Result<String, String> {
+    let options = job_options.unwrap_or(SearchRebuildJobOptions {
+        batch_size: None,
+        include_semantic: None,
+    });
+    let rebuild_options = crate::database::queries::SearchIndexRebuildOptions {
+        chunk_size: options.batch_size.unwrap_or(64).clamp(8, 512) as usize,
+        include_semantic: options.include_semantic.unwrap_or(false),
+        ..Default::default()
+    };
+    spawn_rebuild_job(app, rebuild_options, "manual")
+}
+
+/// Brings the search index up to date in the background, without being asked.
+///
+/// The index is derived data: a format change, an interrupted run or a restore
+/// can leave it behind, and there is nothing useful a person can decide about
+/// that. Making them find a button and wait for it is the app failing to do its
+/// own housekeeping, so this runs at launch and only announces itself while it
+/// has work to do.
+pub fn start_automatic_index_maintenance(app: tauri::AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        // Long enough for the first screen to settle; the work then competes
+        // with nothing the user is waiting on.
+        sleep(Duration::from_millis(1_200)).await;
+
+        let pending = match run_db_blocking(app.clone(), |state| {
+            state.db.get_search_index_status()
+        })
+        .await
+        {
+            Ok(status) => status.pending_downloads,
+            Err(error) => {
+                log::warn!("Automatic index maintenance skipped: {error}");
+                return;
+            }
+        };
+        if pending <= 0 {
+            return;
+        }
+
+        log::info!("Automatic index maintenance starting for {pending} works");
+        // Semantic vectors stay opt-in: they are far slower, and nobody asked
+        // for them to be built behind their back.
+        let options = crate::database::queries::SearchIndexRebuildOptions {
+            include_semantic: false,
+            ..Default::default()
+        };
+        if let Err(error) = spawn_rebuild_job(app, options, "automatic") {
+            log::warn!("Automatic index maintenance could not start: {error}");
+        }
+    });
+}
+
+fn spawn_rebuild_job(
+    app: tauri::AppHandle,
+    rebuild_options: crate::database::queries::SearchIndexRebuildOptions,
+    origin: &'static str,
+) -> Result<String, String> {
     let job_id = format!(
         "search-index-{}-{}",
         chrono::Utc::now().timestamp_millis(),
         SEARCH_REBUILD_SEQUENCE.fetch_add(1, Ordering::Relaxed)
     );
     let cancel = Arc::new(AtomicBool::new(false));
-    SEARCH_REBUILD_JOBS
-        .lock()
-        .map_err(|e| e.to_string())?
-        .insert(job_id.clone(), cancel.clone());
+    {
+        let mut jobs = SEARCH_REBUILD_JOBS.lock().map_err(|e| e.to_string())?;
+        // Two writers on one index would fight over the same lock, and the
+        // second would simply wait. One run at a time is also what the user
+        // sees, so a manual start during automatic maintenance joins the one
+        // already running instead of queueing behind it.
+        if let Some((existing, _)) = jobs.iter().next() {
+            return Ok(existing.clone());
+        }
+        jobs.insert(job_id.clone(), cancel.clone());
+    }
 
-    let batch_size = job_options
-        .and_then(|options| options.batch_size)
-        .unwrap_or(64)
-        .clamp(1, 200);
     let app_for_task = app.clone();
     let job_id_for_task = job_id.clone();
 
     tauri::async_runtime::spawn(async move {
         let started_at = Instant::now();
-        let mut initial_indexed: Option<i64> = None;
-        loop {
-            if cancel.load(Ordering::Relaxed) {
-                if let Ok(state) = run_db_blocking(app_for_task.clone(), |state| {
-                    state.db.get_search_index_status()
-                })
-                .await
-                {
-                    emit_search_index_progress(&app_for_task, &job_id_for_task, "canceled", state);
-                }
-                break;
-            }
+        let state = app_for_task.state::<Arc<AppState>>().inner().clone();
+        let progress_app = app_for_task.clone();
+        let progress_job = job_id_for_task.clone();
 
-            let status = run_db_blocking(app_for_task.clone(), move |state| {
-                state.db.rebuild_search_index_batch(batch_size)
-            })
-            .await;
-            match status {
-                Ok(mut status) => {
-                    let baseline = *initial_indexed.get_or_insert(status.indexed_downloads);
-                    let elapsed = started_at.elapsed().as_secs_f64();
-                    if elapsed > 0.0 {
-                        status.throughput_per_sec =
-                            Some(((status.indexed_downloads - baseline).max(0) as f64) / elapsed);
+        // The whole rebuild is one blocking task. Driving it as a sequence of
+        // short async batches meant re-counting the library between every one
+        // of them, and rebuilding the index writer with it.
+        let outcome = tokio::task::spawn_blocking(move || {
+            let cancel_flag = cancel.clone();
+            let mut last_emit = Instant::now() - Duration::from_secs(1);
+            state.db.rebuild_search_index(
+                rebuild_options,
+                &move || cancel_flag.load(Ordering::Relaxed),
+                |progress| {
+                    // Roughly ten updates a second: enough for a bar that
+                    // visibly moves, far short of flooding the event channel.
+                    let finished = progress.phase != "indexing";
+                    if !finished && last_emit.elapsed() < Duration::from_millis(100) {
+                        return;
                     }
-                    let state_label = if status.pending_downloads == 0 {
-                        "completed"
-                    } else {
-                        "running"
-                    };
-                    emit_search_index_progress(
-                        &app_for_task,
-                        &job_id_for_task,
-                        state_label,
-                        status.clone(),
-                    );
-                    if status.pending_downloads == 0 {
-                        break;
-                    }
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                }
-                Err(error) => {
-                    let _ = app_for_task.emit(
+                    last_emit = Instant::now();
+                    let throughput = (progress.elapsed_secs > 0.5)
+                        .then(|| progress.processed as f64 / progress.elapsed_secs);
+                    let eta = throughput.filter(|rate| *rate > 0.0).map(|rate| {
+                        ((progress.total - progress.processed).max(0) as f64 / rate).max(0.0)
+                    });
+                    let _ = progress_app.emit(
                         "search-index-progress",
-                        serde_json::json!({
-                            "jobId": job_id_for_task,
-                            "status": "failed",
-                            "error": error,
-                        }),
+                        SearchRebuildProgress {
+                            job_id: progress_job.clone(),
+                            origin: origin.to_string(),
+                            status: "running".to_string(),
+                            total_downloads: 0,
+                            indexed_downloads: 0,
+                            pending_downloads: (progress.total - progress.processed).max(0),
+                            is_complete: false,
+                            phase: progress.phase.to_string(),
+                            processed: progress.processed,
+                            processed_total: progress.total,
+                            failed: progress.failed,
+                            indexed_chunks: 0,
+                            embedding_provider: String::new(),
+                            gpu_enabled: false,
+                            throughput_per_sec: throughput,
+                            eta_seconds: eta,
+                            error: None,
+                        },
                     );
-                    break;
-                }
+                },
+            )
+        })
+        .await;
+
+        let result = match outcome {
+            Ok(result) => result,
+            Err(error) => Err(format!("Search rebuild task failed: {error}")),
+        };
+
+        // One final status read, rather than one per batch: the three library
+        // wide COUNT(*) queries behind it are what made progress reporting
+        // itself a measurable share of the rebuild.
+        let status = run_db_blocking(app_for_task.clone(), |state| {
+            state.db.get_search_index_status()
+        })
+        .await;
+
+        match (result, status) {
+            (Ok(outcome), Ok(status)) => emit_search_index_progress(
+                &app_for_task,
+                &job_id_for_task,
+                origin,
+                if outcome.canceled {
+                    "canceled"
+                } else {
+                    "completed"
+                },
+                status,
+                outcome.processed,
+                outcome.failed,
+                started_at.elapsed().as_secs_f64(),
+            ),
+            (Err(error), _) | (_, Err(error)) => {
+                let _ = app_for_task.emit(
+                    "search-index-progress",
+                    serde_json::json!({
+                        "jobId": job_id_for_task,
+                        "origin": origin,
+                        "status": "failed",
+                        "phase": "failed",
+                        "error": error,
+                    }),
+                );
             }
         }
 
@@ -183,26 +299,41 @@ pub async fn search_cancel_rebuild_index(job_id: String) -> Result<(), String> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_search_index_progress(
     app: &tauri::AppHandle,
     job_id: &str,
+    origin: &str,
     status: &str,
     index: SearchIndexStatus,
+    processed: i64,
+    failed: i64,
+    elapsed_secs: f64,
 ) {
     let _ = app.emit(
         "search-index-progress",
         SearchRebuildProgress {
             job_id: job_id.to_string(),
+            origin: origin.to_string(),
             status: status.to_string(),
             total_downloads: index.total_downloads,
             indexed_downloads: index.indexed_downloads,
             pending_downloads: index.pending_downloads,
             is_complete: index.is_complete,
-            phase: index.phase,
+            phase: if status == "completed" {
+                "ready".to_string()
+            } else {
+                index.phase
+            },
+            processed,
+            processed_total: processed,
+            failed,
             indexed_chunks: index.indexed_chunks,
             embedding_provider: index.embedding_provider,
             gpu_enabled: index.gpu_enabled,
-            throughput_per_sec: index.throughput_per_sec,
+            throughput_per_sec: (elapsed_secs > 0.0).then(|| processed as f64 / elapsed_secs),
+            eta_seconds: Some(0.0),
+            error: None,
         },
     );
 }
@@ -259,6 +390,139 @@ pub async fn db_delete_downloads_for_search(
 pub async fn db_get_stats(app: tauri::AppHandle) -> Result<DbStats, String> {
     let state = app.state::<Arc<AppState>>();
     state.db.get_stats()
+}
+
+#[tauri::command]
+pub async fn db_get_library_diagnostics(
+    app: tauri::AppHandle,
+) -> Result<LibraryDiagnostics, String> {
+    let emitter = app.clone();
+    run_db_blocking(app, move |state| {
+        state
+            .db
+            .get_library_diagnostics_with_progress(&|progress| {
+                let _ = emitter.emit(
+                    "library-diagnostics-progress",
+                    serde_json::json!({
+                        "phase": progress.phase,
+                        "step": progress.step,
+                        "total": progress.total,
+                    }),
+                );
+            })
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn db_maintain_library(
+    app: tauri::AppHandle,
+    compact: bool,
+) -> Result<LibraryMaintenanceResult, String> {
+    let _ = app.emit(
+        "library-maintenance-progress",
+        serde_json::json!({ "phase": if compact { "compacting" } else { "optimizing" } }),
+    );
+    let result = run_db_blocking(app.clone(), move |state| {
+        state.db.maintain_library_database(compact)
+    })
+    .await;
+    let _ = app.emit(
+        "library-maintenance-progress",
+        serde_json::json!({
+            "phase": if result.is_ok() { "complete" } else { "failed" },
+            "error": result.as_ref().err(),
+        }),
+    );
+    result
+}
+
+#[tauri::command]
+pub async fn db_optimize_search_index(
+    app: tauri::AppHandle,
+) -> Result<SearchIndexOptimizationResult, String> {
+    let segments = run_db_blocking(app.clone(), |state| state.db.search_index_segment_count())
+        .await
+        .unwrap_or(0);
+    let _ = app.emit(
+        "search-index-optimization-progress",
+        serde_json::json!({ "phase": "preflight", "segments": segments }),
+    );
+    let _ = app.emit(
+        "search-index-optimization-progress",
+        serde_json::json!({ "phase": "merging", "segments": segments }),
+    );
+    let result = run_db_blocking(app.clone(), move |state| state.db.optimize_search_index()).await;
+    let _ = app.emit(
+        "search-index-optimization-progress",
+        serde_json::json!({
+            "phase": if result.is_ok() { "complete" } else { "failed" },
+            "segments": segments,
+            "error": result.as_ref().err(),
+        }),
+    );
+    result
+}
+
+#[tauri::command]
+pub async fn db_get_library_shelf_counts(
+    app: tauri::AppHandle,
+    reading_ids: Option<Vec<i64>>,
+) -> Result<LibraryShelfCounts, String> {
+    let reading_ids = reading_ids.unwrap_or_default();
+    run_db_blocking(app, move |state| {
+        state.db.get_library_shelf_counts(&reading_ids)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn db_list_entity_series(
+    app: tauri::AppHandle,
+    source: String,
+    source_key: String,
+    limit: Option<i64>,
+) -> Result<Vec<EntityFacet>, String> {
+    run_db_blocking(app, move |state| {
+        state
+            .db
+            .list_entity_series(&source, &source_key, limit.unwrap_or(60))
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn db_list_entity_tags(
+    app: tauri::AppHandle,
+    kind: String,
+    source: String,
+    source_key: String,
+    limit: Option<i64>,
+) -> Result<Vec<FacetCount>, String> {
+    run_db_blocking(app, move |state| {
+        state
+            .db
+            .list_entity_tags(&kind, &source, &source_key, limit.unwrap_or(40))
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn db_list_saved_searches(app: tauri::AppHandle) -> Result<Vec<SavedSearch>, String> {
+    run_db_blocking(app, move |state| state.db.list_saved_searches()).await
+}
+
+#[tauri::command]
+pub async fn db_upsert_saved_search(
+    app: tauri::AppHandle,
+    input: SavedSearchInput,
+) -> Result<SavedSearch, String> {
+    run_db_blocking(app, move |state| state.db.upsert_saved_search(&input)).await
+}
+
+#[tauri::command]
+pub async fn db_delete_saved_search(app: tauri::AppHandle, id: i64) -> Result<bool, String> {
+    run_db_blocking(app, move |state| state.db.delete_saved_search(id)).await
 }
 
 #[tauri::command]
@@ -384,13 +648,7 @@ fn validate_path_in_storage(path: &str, storage_dir: &std::path::Path) -> Result
     let canon_storage = storage_dir
         .canonicalize()
         .map_err(|e| format!("Storage path resolution failed: {}", e))?;
-    let canon_app_data = storage_dir
-        .parent()
-        .unwrap_or(storage_dir)
-        .canonicalize()
-        .map_err(|e| format!("App data path resolution failed: {}", e))?;
-
-    if !canon_p.starts_with(&canon_storage) && !canon_p.starts_with(&canon_app_data) {
+    if !canon_p.starts_with(&canon_storage) {
         return Err("Access Denied: Path is outside of storage directory".to_string());
     }
     Ok(())
@@ -507,6 +765,21 @@ pub async fn db_upsert_update_target(
 ) -> Result<UpdateTarget, String> {
     let state = app.state::<Arc<AppState>>();
     state.db.upsert_update_target(&target)
+}
+
+#[tauri::command]
+pub async fn db_get_update_target(
+    app: tauri::AppHandle,
+    target_type: String,
+    source: String,
+    source_key: String,
+) -> Result<Option<UpdateTarget>, String> {
+    run_db_blocking(app, move |state| {
+        state
+            .db
+            .find_update_target(&target_type, &source, &source_key)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -1300,6 +1573,43 @@ pub async fn db_get_reader_document(
 }
 
 #[tauri::command]
+pub async fn db_get_reader_metadata(
+    app: tauri::AppHandle,
+    download_id: i64,
+) -> Result<ReaderMetadata, String> {
+    run_db_blocking(app, move |state| state.db.get_reader_metadata(download_id)).await
+}
+
+#[tauri::command]
+pub async fn db_get_reader_content_page(
+    app: tauri::AppHandle,
+    download_id: i64,
+    version: Option<i64>,
+    page: usize,
+) -> Result<ReaderContentPage, String> {
+    run_db_blocking(app, move |state| {
+        state.db.get_reader_content_page(download_id, version, page)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn db_search_reader_content(
+    app: tauri::AppHandle,
+    download_id: i64,
+    version: Option<i64>,
+    query: String,
+    limit: Option<usize>,
+) -> Result<Vec<ReaderSearchHit>, String> {
+    run_db_blocking(app, move |state| {
+        state
+            .db
+            .search_reader_content(download_id, version, &query, limit.unwrap_or(50))
+    })
+    .await
+}
+
+#[tauri::command]
 pub async fn db_get_editor_document(
     app: tauri::AppHandle,
     download_id: i64,
@@ -1425,7 +1735,8 @@ pub async fn import_work_asset(
 
 #[cfg(test)]
 mod profile_link_tests {
-    use super::collect_profile_links;
+    use super::{collect_profile_links, validate_path_in_storage};
+    use std::fs;
 
     #[test]
     fn profile_links_are_deduplicated_and_extracted_from_text() {
@@ -1446,5 +1757,21 @@ mod profile_link_tests {
                 "https://example.com/work",
             ]
         );
+    }
+
+    #[test]
+    fn file_commands_cannot_read_sibling_app_data_files() {
+        let root = std::env::temp_dir().join(format!("piep_path_scope_{}", rand::random::<u64>()));
+        let storage = root.join("downloads");
+        let allowed = storage.join("pixiv").join("work.json");
+        let sibling = root.join("piep.db");
+        fs::create_dir_all(allowed.parent().unwrap()).unwrap();
+        fs::write(&allowed, "{}").unwrap();
+        fs::write(&sibling, "secret").unwrap();
+
+        assert!(validate_path_in_storage(allowed.to_str().unwrap(), &storage).is_ok());
+        assert!(validate_path_in_storage(sibling.to_str().unwrap(), &storage).is_err());
+
+        let _ = fs::remove_dir_all(root);
     }
 }

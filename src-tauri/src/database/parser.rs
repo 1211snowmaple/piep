@@ -395,7 +395,10 @@ pub fn parse_fanbox_to_html(raw_json: &str, assets: &[AssetEntry]) -> String {
         }
     }
 
-    html_parts.join("\n")
+    // The marker is an internal transport boundary and disappears when the
+    // HTML is paged.  It lets the reader request one bounded set of complete
+    // FANBOX blocks instead of receiving the entire post through one IPC call.
+    html_parts.join("\n<!-- content-block -->\n")
 }
 
 /// FANBOXの段落ブロック内の装飾テキスト（逆順インデックス挿入アルゴリズム）を解析する

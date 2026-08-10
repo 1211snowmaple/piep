@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ActionIcon,
+  Alert,
   Badge,
   Box,
   Button,
@@ -21,19 +22,20 @@ import {
   Text,
   Title,
   Tooltip,
+  TextInput,
 } from "@mantine/core";
-import { useDisclosure, useLocalStorage } from "@mantine/hooks";
+import { useDebouncedValue, useDisclosure, useLocalStorage } from "@mantine/hooks";
 import { notifications } from "@mantine/notifications";
-import { ArrowLeft, ArrowUp, Bookmark as BookmarkIcon, BookmarkPlus, BookOpen, Edit3, Expand, ExternalLink, FolderOpen, Shrink, Settings2, Type, X } from "lucide-react";
-import { useQuery } from "@tanstack/react-query";
+import { Icons, IconSize } from "@/lib/icons";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useBookmarks, type Bookmark } from "@/features/reader/bookmarks";
 import { useAppNavigate, useAppSearchParams, useRouteParams } from "@/app/router";
 import { ErrorState, LoadingState } from "@/components/AsyncState";
 import { ProviderMark, sourceUrl } from "@/lib/providers";
 import { formatDate, formatNumber } from "@/lib/format";
-import { prepareDocumentHtml, splitDocumentPages } from "@/lib/content";
+import { prepareDocumentHtml } from "@/lib/content";
 import { extractSavedSourceTarget } from "@/features/browser/downloadCandidates";
-import { getAssetUrl, getDownloadBySource, getReaderDocument, isTauriRuntime, openLocalAsset } from "@/services/dbApi";
+import { getAssetUrl, getDownloadBySource, getReaderContentPage, getReaderMetadata, isTauriRuntime, openLocalAsset, searchReaderContent } from "@/services/dbApi";
 import { openExternalUrl } from "@/services/openerApi";
 import { getDemoReader } from "@/mocks/demoData";
 
@@ -47,7 +49,7 @@ function BookmarkControls({ bookmarks, onAdd, onOpen, onRemove }: {
   return (
     <Group gap={2} wrap="nowrap">
       <Tooltip label="現在の位置にしおりを挟む">
-        <ActionIcon variant="subtle" color="gray" aria-label="現在の位置にしおりを挟む" onClick={onAdd}><BookmarkPlus size={18} /></ActionIcon>
+        <ActionIcon variant="subtle" color="gray" aria-label="現在の位置にしおりを挟む" onClick={onAdd}><Icons.saveSearch size={IconSize.nav} /></ActionIcon>
       </Tooltip>
       <Popover opened={opened} onChange={setOpened} position="bottom-end" withArrow shadow="md" width={280}>
         <Popover.Target>
@@ -56,7 +58,7 @@ function BookmarkControls({ bookmarks, onAdd, onOpen, onRemove }: {
                 us: Mantine's Indicator both clipped the number and shifted the
                 glyph out of line with the rest of the bar. */}
             <ActionIcon className="reader-bookmark" variant="subtle" color="gray" aria-label={`しおり一覧（${bookmarks.length}件）`} onClick={() => setOpened((value) => !value)}>
-              <BookmarkIcon size={18} />
+              <Icons.savedSearch size={IconSize.nav} />
               {bookmarks.length > 0 && <span className="reader-bookmark__count">{bookmarks.length}</span>}
             </ActionIcon>
           </Tooltip>
@@ -70,7 +72,7 @@ function BookmarkControls({ bookmarks, onAdd, onOpen, onRemove }: {
                   <Button variant="subtle" color="gray" size="compact-xs" justify="flex-start" flex={1} onClick={() => { setOpened(false); onOpen(bookmark); }}>
                     {bookmark.label}
                   </Button>
-                  <ActionIcon variant="subtle" color="red" size="sm" aria-label={`${bookmark.label}のしおりを削除`} onClick={() => onRemove(bookmark.id)}><X size={14} /></ActionIcon>
+                  <ActionIcon variant="subtle" color="red" size="sm" aria-label={`${bookmark.label}のしおりを削除`} onClick={() => onRemove(bookmark.id)}><Icons.cancel size={IconSize.menu} /></ActionIcon>
                 </Group>
               ))}
             </Stack>
@@ -97,10 +99,14 @@ export default function ReaderPage() {
   const [searchParams] = useAppSearchParams();
   const id = Number(workId);
   const runtime = isTauriRuntime();
+  const queryClient = useQueryClient();
   const requestedVersion = Number(searchParams.get("version"));
   const [version, setVersion] = useState<number | null>(Number.isFinite(requestedVersion) && requestedVersion > 0 ? requestedVersion : null);
   const [settings, setSettings] = useLocalStorage<ReaderSettings>({ key: "piep.reader-settings.v4", defaultValue: defaults });
   const [settingsOpened, settingsDrawer] = useDisclosure(false);
+  const [searchOpened, searchDrawer] = useDisclosure(false);
+  const [readerSearch, setReaderSearch] = useState("");
+  const [debouncedReaderSearch] = useDebouncedValue(readerSearch, 180);
   const [progress, setProgress] = useState(0);
   const [sourcePage, setSourcePage] = useState(1);
   const [jumpPage, setJumpPage] = useState<number | string>(1);
@@ -109,15 +115,50 @@ export default function ReaderPage() {
   const scrollRef = useRef<HTMLDivElement>(null);
   const restoredKeyRef = useRef<string | null>(null);
   const { bookmarks, add: addBookmark, remove: removeBookmark } = useBookmarks(id);
-  const query = useQuery({
-    queryKey: ["reader-document", id, version],
-    queryFn: () => runtime ? getReaderDocument(id, version) : Promise.resolve(getDemoReader(id)),
+  const metadataQuery = useQuery({
+    queryKey: ["reader-metadata", id],
+    queryFn: () => runtime ? getReaderMetadata(id) : Promise.resolve((() => { const demo = getDemoReader(id); return { download: demo.download, versions: demo.versions, assetCount: demo.assets.length, isEdited: demo.isEdited, activeEditRevision: demo.activeEditRevision }; })()),
     enabled: Number.isFinite(id),
   });
-  const preparedHtml = useMemo(() => prepareDocumentHtml(query.data?.html ?? "", getAssetUrl), [query.data?.html]);
-  const sourcePages = useMemo(() => splitDocumentPages(preparedHtml, query.data?.download.source ?? ""), [preparedHtml, query.data?.download.source]);
-  const hasSourcePages = query.data?.download.source === "pixiv" && sourcePages.length > 1;
+  const contentQuery = useQuery({
+    queryKey: ["reader-content-page", id, version, sourcePage - 1],
+    queryFn: () => runtime ? getReaderContentPage(id, version, sourcePage - 1) : Promise.resolve((() => { const demo = getDemoReader(id); return { page: 0, pageCount: 1, html: demo.html, plainText: demo.plainText, totalPlainTextChars: demo.plainText.length }; })()),
+    enabled: Number.isFinite(id),
+    placeholderData: (previous) => previous,
+  });
+  const readerSearchQuery = useQuery({
+    queryKey: ["reader-content-search", id, version, debouncedReaderSearch],
+    queryFn: () => runtime ? searchReaderContent(id, debouncedReaderSearch, version) : Promise.resolve([]),
+    enabled: searchOpened && debouncedReaderSearch.trim().length > 0,
+  });
+  // Only while reading: an address you cannot follow is noise here, whereas the
+  // detail screen deliberately shows the work as its author wrote it.
+  const preparedHtml = useMemo(() => prepareDocumentHtml(contentQuery.data?.html ?? "", getAssetUrl, { linkifyBareUrls: true }), [contentQuery.data?.html]);
+  const pageCount = contentQuery.data?.pageCount ?? 1;
+  const hasSourcePages = pageCount > 1;
   const positionKey = `piep.reader-position.${id}.${version ?? "current"}`;
+
+  useEffect(() => {
+    setSourcePage(1);
+  }, [id, version]);
+  useEffect(() => {
+    const openSearch = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "f") {
+        event.preventDefault();
+        searchDrawer.open();
+      }
+    };
+    window.addEventListener("keydown", openSearch);
+    return () => window.removeEventListener("keydown", openSearch);
+  }, [searchDrawer]);
+  useEffect(() => {
+    if (contentQuery.data?.page !== sourcePage - 1) return;
+    queryClient.removeQueries({
+      queryKey: ["reader-content-page", id, version],
+      type: "inactive",
+      predicate: (query) => query.queryKey[3] !== sourcePage - 1,
+    });
+  }, [contentQuery.data?.page, id, queryClient, sourcePage, version]);
 
   useEffect(() => {
     const update = () => setFullscreen(Boolean(document.fullscreenElement));
@@ -132,13 +173,13 @@ export default function ReaderPage() {
   // scrollTop of 0 over the stored position and lose the reader's place.
   useEffect(() => {
     const viewport = scrollRef.current;
-    if (!viewport || !query.data) return;
+    if (!viewport || !metadataQuery.data || !contentQuery.data) return;
     if (restoredKeyRef.current === positionKey) return;
     let savedPage = 1;
     let savedTop = 0;
     try {
       const saved = JSON.parse(sessionStorage.getItem(positionKey) ?? "{}");
-      savedPage = Math.min(Math.max(1, Number(saved.page) || 1), Math.max(1, sourcePages.length));
+      savedPage = Math.min(Math.max(1, Number(saved.page) || 1), Math.max(1, pageCount));
       savedTop = Math.max(0, Number(saved.top) || 0);
     } catch { /* Legacy or invalid session value: start at the beginning. */ }
     setSourcePage(savedPage);
@@ -160,27 +201,33 @@ export default function ReaderPage() {
     };
     frame = requestAnimationFrame(attempt);
     return () => { cancelled = true; cancelAnimationFrame(frame); };
-  }, [positionKey, query.data, sourcePages.length]);
+  }, [positionKey, metadataQuery.data, contentQuery.data, pageCount]);
   useEffect(() => {
     const viewport = scrollRef.current;
     if (!viewport) return;
     const update = (event?: Event) => {
       const total = viewport.scrollHeight - viewport.clientHeight;
       const next = total <= 0 ? 100 : Math.max(0, Math.min(100, viewport.scrollTop / total * 100));
-      setProgress(hasSourcePages ? ((sourcePage - 1) + next / 100) / sourcePages.length * 100 : next);
+      setProgress(hasSourcePages ? ((sourcePage - 1) + next / 100) / pageCount * 100 : next);
       // Only a genuine scroll writes the position. The priming call below runs
       // before the saved offset has been applied, so persisting there would
       // overwrite the stored place with 0 each time the reader opens.
-      if (event) sessionStorage.setItem(positionKey, JSON.stringify({ page: sourcePage, top: viewport.scrollTop }));
+      if (event) {
+        try {
+          sessionStorage.setItem(positionKey, JSON.stringify({ page: sourcePage, top: viewport.scrollTop }));
+        } catch {
+          // Reading must remain usable when storage is blocked or full.
+        }
+      }
     };
     viewport.addEventListener("scroll", update, { passive: true });
     update();
     return () => viewport.removeEventListener("scroll", update);
-  }, [hasSourcePages, positionKey, query.data, sourcePage, sourcePages.length]);
+  }, [hasSourcePages, positionKey, metadataQuery.data, contentQuery.data, sourcePage, pageCount]);
 
-  if (query.isLoading) return <div className="page"><LoadingState label="リーダーを準備しています" /></div>;
-  if (query.error || !query.data) return <div className="page"><ErrorState error={query.error ?? "作品が見つかりません"} retry={() => query.refetch()} /></div>;
-  const doc = query.data;
+  if (metadataQuery.isLoading || contentQuery.isLoading) return <div className="page"><LoadingState label="リーダーを準備しています" /></div>;
+  if (metadataQuery.error || contentQuery.error || !metadataQuery.data || !contentQuery.data) return <div className="page"><ErrorState error={metadataQuery.error ?? contentQuery.error ?? "作品が見つかりません"} retry={() => { metadataQuery.refetch(); contentQuery.refetch(); }} /></div>;
+  const doc = metadataQuery.data;
   const work = doc.download;
   const currentVersion = version ?? work.currentVersion;
   const openSource = async () => {
@@ -194,7 +241,7 @@ export default function ReaderPage() {
     const jumpPage = Number(anchor.dataset.page);
     if (anchor.classList.contains("jump-link") && Number.isFinite(jumpPage)) {
       event.preventDefault();
-      setSourcePage(Math.min(Math.max(1, jumpPage), sourcePages.length));
+      setSourcePage(Math.min(Math.max(1, jumpPage), pageCount));
       scrollRef.current?.scrollTo({ top: 0, behavior: "smooth" });
       return;
     }
@@ -212,7 +259,7 @@ export default function ReaderPage() {
     if (runtime) await openExternalUrl(href); else window.open(href, "_blank", "noopener,noreferrer");
   };
   const goToSourcePage = (page: number) => {
-    const next = Math.min(Math.max(1, page), sourcePages.length);
+    const next = Math.min(Math.max(1, page), pageCount);
     if (next === sourcePage) return;
     setSourcePage(next);
     scrollRef.current?.scrollTo({ top: 0, behavior: "smooth" });
@@ -229,7 +276,7 @@ export default function ReaderPage() {
     notifications.show({ color: "teal", message: `しおりを挟みました（${label}）` });
   };
   const jumpToBookmark = (bookmark: { page: number; top: number }) => {
-    setSourcePage(Math.min(Math.max(1, bookmark.page), Math.max(1, sourcePages.length)));
+    setSourcePage(Math.min(Math.max(1, bookmark.page), Math.max(1, pageCount)));
     // The page swap re-renders the article, so the offset is applied after it.
     requestAnimationFrame(() => scrollRef.current?.scrollTo({ top: bookmark.top, behavior: "smooth" }));
   };
@@ -239,7 +286,7 @@ export default function ReaderPage() {
       <header className="reader-toolbar">
         <Group h="100%" px="md" justify="space-between" wrap="nowrap">
           <Group wrap="nowrap" miw={0}>
-            <Tooltip label="作品詳細へ戻る"><ActionIcon variant="subtle" color="gray" aria-label="作品詳細へ戻る" onClick={() => navigate(`/works/${work.id}`)}><ArrowLeft size={19} /></ActionIcon></Tooltip>
+            <Tooltip label="作品詳細へ戻る"><ActionIcon variant="subtle" color="gray" aria-label="作品詳細へ戻る" onClick={() => navigate(`/works/${work.id}`)}><Icons.back size={IconSize.nav} /></ActionIcon></Tooltip>
             <Divider orientation="vertical" h={24} />
             {/* Title only: the provider and author already head the document
                 itself, and repeating them here just crowded the bar. */}
@@ -253,6 +300,7 @@ export default function ReaderPage() {
               onOpen={jumpToBookmark}
               onRemove={removeBookmark}
             />
+            <Tooltip label="本文内を検索 (Ctrl+F)"><ActionIcon variant="subtle" color="gray" aria-label="本文内を検索" onClick={searchDrawer.open}><Icons.search size={IconSize.nav} /></ActionIcon></Tooltip>
             <Select
               size="xs"
               value={String(currentVersion)}
@@ -261,9 +309,9 @@ export default function ReaderPage() {
               w={84}
               aria-label="表示バージョン"
             />
-            <Tooltip label="表示設定"><ActionIcon variant="subtle" color="gray" aria-label="リーダーの表示設定" onClick={settingsDrawer.open}><Settings2 size={18} /></ActionIcon></Tooltip>
-            <Tooltip label={fullscreen ? "全画面を終了" : "全画面で読む"}><ActionIcon variant="subtle" color="gray" aria-label={fullscreen ? "全画面を終了" : "全画面表示"} onClick={() => fullscreen ? document.exitFullscreen() : document.documentElement.requestFullscreen()}>{fullscreen ? <Shrink size={18} /> : <Expand size={18} />}</ActionIcon></Tooltip>
-            <Button variant="subtle" color="gray" size="xs" leftSection={<Edit3 size={14} />} onClick={() => navigate(`/editor/${work.id}`)}>編集</Button>
+            <Tooltip label="表示設定"><ActionIcon variant="subtle" color="gray" aria-label="リーダーの表示設定" onClick={settingsDrawer.open}><Icons.readerSettings size={IconSize.nav} /></ActionIcon></Tooltip>
+            <Tooltip label={fullscreen ? "全画面を終了" : "全画面で読む"}><ActionIcon variant="subtle" color="gray" aria-label={fullscreen ? "全画面を終了" : "全画面表示"} onClick={() => fullscreen ? document.exitFullscreen() : document.documentElement.requestFullscreen()}>{fullscreen ? <Icons.fullscreenExit size={IconSize.nav} /> : <Icons.fullscreenEnter size={IconSize.nav} />}</ActionIcon></Tooltip>
+            <Button variant="subtle" color="gray" size="xs" leftSection={<Icons.edit size={IconSize.menu} />} onClick={() => navigate(`/editor/${work.id}`)}>編集</Button>
           </Group>
         </Group>
         <Progress value={progress} h={2} radius={0} aria-label={`読書進捗 ${Math.round(progress)}%`} />
@@ -281,40 +329,43 @@ export default function ReaderPage() {
             }}
           >
             {sourcePage === 1 && <Box className="reader-title-page">
-              <ProviderMark provider={work.source} />
+              {/* Source on the left, the two places this work lives on the
+                  right - both were once called "保存元" - all on one line above
+                  the title. */}
+              <Group justify="space-between" align="center" gap="sm" wrap="nowrap" className="reader-title-page__head">
+                <ProviderMark provider={work.source} />
+                <Group gap={2} wrap="nowrap">
+                  <Button variant="subtle" color="gray" size="compact-sm" rightSection={<Icons.externalLink size={IconSize.inline} />} onClick={openSource}>元ページ</Button>
+                  <Button variant="subtle" color="gray" size="compact-sm" rightSection={<Icons.openFolder size={IconSize.inline} />} disabled={!runtime} onClick={() => runtime && openLocalAsset(work.jsonPath)}>保存フォルダー</Button>
+                </Group>
+              </Group>
               <Title order={1} className="reader-title-page__title">{work.title}</Title>
               <Text c="dimmed" className="reader-title-page__author">{work.authorName}</Text>
-              <Text size="xs" c="dimmed" className="reader-title-page__meta">{formatNumber(work.textLength)}字 · {formatDate(work.sourceCreatedAt)}</Text>
-              {/* Two destinations that were both called "保存元": one opens the
-                  page on the web, the other the folder on this machine. */}
-              <Group gap={4} mt="lg" justify="flex-end" wrap="wrap">
-                <Button variant="subtle" color="gray" size="compact-xs" rightSection={<ExternalLink size={12} />} onClick={openSource}>元ページ</Button>
-                <Button variant="subtle" color="gray" size="compact-xs" rightSection={<FolderOpen size={12} />} disabled={!runtime} onClick={() => runtime && openLocalAsset(work.jsonPath)}>保存フォルダー</Button>
-              </Group>
+              <Text size="sm" c="dimmed" className="reader-title-page__meta">{formatDate(work.sourceCreatedAt)} · {formatNumber(work.textLength)}字</Text>
             </Box>}
             {sourcePage === 1 && <Divider my="xl" />}
-            <article className="reader-content" onClick={handleArticleClick} dangerouslySetInnerHTML={{ __html: sourcePages[sourcePage - 1] ?? "" }} />
-            {sourcePage === sourcePages.length && <Box className="reader-finish"><BookOpen size={28} /><Text fw={700}>読了</Text><Button variant="light" onClick={() => navigate(`/works/${work.id}`)}>作品詳細へ戻る</Button></Box>}
+            <article className="reader-content" onClick={handleArticleClick} dangerouslySetInnerHTML={{ __html: preparedHtml }} />
+            {sourcePage === pageCount && <Box className="reader-finish"><Icons.read size={IconSize.hero} /><Text fw={700}>読了</Text><Button variant="light" onClick={() => navigate(`/works/${work.id}`)}>作品詳細へ戻る</Button></Box>}
           </Box>
         </Box>
       </ScrollArea>
       {hasSourcePages && <Paper className="reader-page-controls" shadow="lg" withBorder radius="md" p={5} aria-label="pixiv原稿のページ操作">
         <Group gap={5} wrap="nowrap">
-          <Pagination total={sourcePages.length} value={sourcePage} onChange={goToSourcePage} siblings={1} boundaries={1} withEdges size="sm" radius="sm" />
+          <Pagination total={pageCount} value={sourcePage} onChange={goToSourcePage} siblings={1} boundaries={1} withEdges size="sm" radius="sm" />
           <Divider orientation="vertical" h={24} />
           <Popover opened={jumpOpened} onChange={setJumpOpened} position="top" withArrow shadow="md">
-            <Popover.Target><Button variant="subtle" color="gray" size="compact-sm" onClick={() => setJumpOpened((value) => !value)} aria-label="ページ番号を指定">{sourcePage} / {sourcePages.length}</Button></Popover.Target>
+            <Popover.Target><Button variant="subtle" color="gray" size="compact-sm" onClick={() => setJumpOpened((value) => !value)} aria-label="ページ番号を指定">{sourcePage} / {pageCount}</Button></Popover.Target>
             <Popover.Dropdown>
               <Stack gap="xs" w={180}>
                 <Text size="xs" fw={700}>移動先のページ</Text>
-                <NumberInput min={1} max={sourcePages.length} value={jumpPage} onChange={setJumpPage} clampBehavior="strict" aria-label="移動先ページ" />
+                <NumberInput min={1} max={pageCount} value={jumpPage} onChange={setJumpPage} clampBehavior="strict" aria-label="移動先ページ" />
                 <Button size="xs" onClick={() => { goToSourcePage(Number(jumpPage) || 1); setJumpOpened(false); }}>移動</Button>
               </Stack>
             </Popover.Dropdown>
           </Popover>
         </Group>
       </Paper>}
-      {progress > 8 && <Tooltip label="先頭へ戻る"><ActionIcon className="reader-to-top" size="lg" radius="xl" variant="filled" aria-label="本文の先頭へ戻る" onClick={() => scrollRef.current?.scrollTo({ top: 0, behavior: "smooth" })}><ArrowUp size={18} /></ActionIcon></Tooltip>}
+      {progress > 8 && <Tooltip label="先頭へ戻る"><ActionIcon className="reader-to-top" size="lg" radius="xl" variant="filled" aria-label="本文の先頭へ戻る" onClick={() => scrollRef.current?.scrollTo({ top: 0, behavior: "smooth" })}><Icons.up size={IconSize.nav} /></ActionIcon></Tooltip>}
 
       <Drawer opened={settingsOpened} onClose={settingsDrawer.close} position="right" title="読書設定" size={360}>
         <Stack gap="xl">
@@ -323,7 +374,13 @@ export default function ReaderPage() {
           <Box><Group justify="space-between" mb="sm"><Text size="sm" fw={700}>本文幅</Text><Text size="xs" c="dimmed">{settings.maxWidth}px</Text></Group><Slider min={520} max={900} step={20} value={settings.maxWidth} onChange={(maxWidth) => setSettings({ ...settings, maxWidth })} /></Box>
           <Box><Text size="sm" fw={700} mb="sm">書体</Text><SegmentedControl fullWidth value={settings.font} onChange={(font) => setSettings({ ...settings, font: font as ReaderSettings["font"] })} data={[{ value: "serif", label: "明朝" }, { value: "sans", label: "ゴシック" }]} /></Box>
           <Box><Text size="sm" fw={700} mb="sm">背景</Text><Radio.Group value={settings.theme} onChange={(theme) => setSettings({ ...settings, theme: theme as ReaderSettings["theme"] })}><Stack gap="xs"><Radio value="paper" label="紙の色" /><Radio value="white" label="白" /><Radio value="night" label="ナイト" /></Stack></Radio.Group></Box>
-          <Button variant="default" leftSection={<Type size={15} />} onClick={() => setSettings(defaults)}>初期設定に戻す</Button>
+          <Button variant="default" leftSection={<Icons.typography size={IconSize.menu} />} onClick={() => setSettings(defaults)}>初期設定に戻す</Button>
+        </Stack>
+      </Drawer>
+      <Drawer opened={searchOpened} onClose={searchDrawer.close} position="left" title="本文内を検索" size={380}>
+        <Stack gap="md">
+          <TextInput value={readerSearch} onChange={(event) => setReaderSearch(event.currentTarget.value)} leftSection={<Icons.search size={IconSize.action} />} placeholder="検索語を入力" autoFocus aria-label="本文内の検索語" />
+          {!readerSearch.trim() ? <Text size="sm" c="dimmed">全ページを対象に端末内で検索します。</Text> : readerSearchQuery.isLoading ? <LoadingState label="本文を検索しています" /> : readerSearchQuery.error ? <ErrorState error={readerSearchQuery.error} retry={() => readerSearchQuery.refetch()} /> : readerSearchQuery.data?.length ? <Stack gap="xs">{readerSearchQuery.data.map((hit) => <Button key={`${hit.page}-${hit.snippet}`} variant="default" h="auto" py="sm" px="md" justify="flex-start" onClick={() => { goToSourcePage(hit.page); searchDrawer.close(); }}><Stack gap={3} align="flex-start"><Text size="xs" fw={700}>{hit.page}ページ · {hit.count}件</Text><Text size="xs" c="dimmed" ta="left" lineClamp={3}>{hit.snippet}</Text></Stack></Button>)}</Stack> : <Alert color="gray">一致する箇所はありません。</Alert>}
         </Stack>
       </Drawer>
     </div>

@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::OnceLock;
 
 use lindera::dictionary::load_dictionary;
@@ -8,6 +9,7 @@ use unicode_normalization::UnicodeNormalization;
 use wana_kana::{ConvertJapanese, IsJapaneseStr};
 
 static TOKENIZER: OnceLock<Option<Tokenizer>> = OnceLock::new();
+static SYNONYM_READINGS: OnceLock<Vec<Vec<SynonymEntry>>> = OnceLock::new();
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnalyzedToken {
@@ -18,6 +20,147 @@ pub struct AnalyzedToken {
     pub reading_romaji: String,
     pub byte_start: usize,
     pub byte_end: usize,
+}
+
+/// Every indexable form of one field value.
+///
+/// Producing these together matters: each form needs the same morphological
+/// analysis, and analysing a novel-length body is by far the most expensive
+/// step in building the index. Deriving them one call at a time re-ran that
+/// analysis about a dozen times per document.
+#[derive(Debug, Clone, Default)]
+pub struct IndexedText {
+    /// NFKC-folded, lowercased, kana-unified surface text, still contiguous so
+    /// that n-grams spanning word boundaries survive.
+    pub normalized: String,
+    /// What the n-gram field indexes: the contiguous normalized text plus the
+    /// dictionary base forms that differ from the surface, so conjugated verbs
+    /// stay reachable. Readings are deliberately absent - they have their own
+    /// fields and the query is expanded across all of them anyway.
+    pub surface: String,
+    pub reading_kana: String,
+    pub reading_romaji: String,
+}
+
+/// Collects strings in insertion order while rejecting duplicates in constant
+/// time. The linear scan this replaces turned long documents quadratic.
+#[derive(Default)]
+struct UniqueValues {
+    values: Vec<String>,
+    seen: HashSet<String>,
+}
+
+impl UniqueValues {
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            values: Vec::with_capacity(capacity),
+            seen: HashSet::with_capacity(capacity),
+        }
+    }
+
+    fn push(&mut self, value: impl Into<String>) {
+        let value = value.into();
+        let value = value.trim();
+        if value.is_empty() || self.seen.contains(value) {
+            return;
+        }
+        self.seen.insert(value.to_string());
+        self.values.push(value.to_string());
+    }
+
+    fn into_vec(self) -> Vec<String> {
+        self.values
+    }
+
+    fn join(self) -> String {
+        self.values.join(" ")
+    }
+}
+
+struct SynonymEntry {
+    term: &'static str,
+    normalized: String,
+    reading_kana: String,
+    reading_romaji: String,
+}
+
+const SYNONYM_GROUPS: &[&[&str]] = &[
+    &[
+        "小説",
+        "しょうせつ",
+        "shousetsu",
+        "物語",
+        "ストーリー",
+        "story",
+        "novel",
+    ],
+    &["イラスト", "絵", "画像", "art", "illustration"],
+    &["漫画", "マンガ", "manga", "コミック", "comic"],
+    &["成人向け", "r18", "r-18", "18禁"],
+    &["恋愛", "ラブ", "love", "romance"],
+];
+
+/// The synonym table is fixed, so its readings are analysed once per process
+/// instead of on every field and every query.
+fn synonym_readings() -> &'static [Vec<SynonymEntry>] {
+    SYNONYM_READINGS.get_or_init(|| {
+        SYNONYM_GROUPS
+            .iter()
+            .map(|group| {
+                group
+                    .iter()
+                    .map(|term| {
+                        let indexed = index_text(term);
+                        SynonymEntry {
+                            term,
+                            normalized: indexed.normalized,
+                            reading_kana: indexed.reading_kana,
+                            reading_romaji: indexed.reading_romaji,
+                        }
+                    })
+                    .collect()
+            })
+            .collect()
+    })
+}
+
+/// Derives every indexable form of `input` from a single morphological pass.
+pub fn index_text(input: &str) -> IndexedText {
+    let normalized = normalize_for_search(input);
+    if input.trim().is_empty() {
+        return IndexedText::default();
+    }
+
+    let tokens = analyze_text(input);
+    let mut surface = UniqueValues::with_capacity(tokens.len() + 1);
+    // The contiguous text goes in first: n-grams that straddle two tokens can
+    // only be produced from text that has not been split apart.
+    surface.push(normalized.as_str());
+    let mut reading_kana = Vec::with_capacity(tokens.len());
+    let mut reading_romaji = Vec::with_capacity(tokens.len());
+
+    for token in &tokens {
+        if !token.base.is_empty() && token.base != token.normalized {
+            surface.push(token.base.as_str());
+        }
+        if !token.reading_kana.is_empty() {
+            reading_kana.push(token.reading_kana.as_str());
+        } else if !token.normalized.is_empty() {
+            reading_kana.push(token.normalized.as_str());
+        }
+        if !token.reading_romaji.is_empty() {
+            reading_romaji.push(token.reading_romaji.as_str());
+        } else if token.normalized.is_ascii() && !token.normalized.is_empty() {
+            reading_romaji.push(token.normalized.as_str());
+        }
+    }
+
+    IndexedText {
+        surface: surface.join(),
+        normalized,
+        reading_kana: reading_kana.join(" "),
+        reading_romaji: reading_romaji.join(" "),
+    }
 }
 
 pub fn normalize_for_search(input: &str) -> String {
@@ -92,47 +235,26 @@ pub fn analyze_text(input: &str) -> Vec<AnalyzedToken> {
 }
 
 pub fn reading_kana_text(input: &str) -> String {
-    analyze_text(input)
-        .into_iter()
-        .filter_map(|token| {
-            if !token.reading_kana.is_empty() {
-                Some(token.reading_kana)
-            } else if !token.normalized.is_empty() {
-                Some(token.normalized)
-            } else {
-                None
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
+    index_text(input).reading_kana
 }
 
 pub fn reading_romaji_text(input: &str) -> String {
-    analyze_text(input)
-        .into_iter()
-        .filter_map(|token| {
-            if !token.reading_romaji.is_empty() {
-                Some(token.reading_romaji)
-            } else if token.normalized.is_ascii() && !token.normalized.is_empty() {
-                Some(token.normalized)
-            } else {
-                None
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
+    index_text(input).reading_romaji
 }
 
+/// The query-side expansion: every written form a term might have been indexed
+/// under. Field values use [`index_text`] instead, which keeps the readings in
+/// their own fields rather than repeating them here.
 pub fn search_index_text(input: &str) -> String {
-    let mut values = query_variants(input);
-    let analyzed = analyze_text(input);
-    for token in analyzed {
-        push_unique(&mut values, token.normalized);
-        push_unique(&mut values, token.base);
-        push_unique(&mut values, token.reading_kana);
-        push_unique(&mut values, token.reading_romaji);
+    let indexed = index_text(input);
+    let mut values = UniqueValues::with_capacity(8);
+    for variant in variants_from(input, &indexed) {
+        values.push(variant);
     }
-    values.join(" ")
+    values.push(indexed.surface);
+    values.push(indexed.reading_kana);
+    values.push(indexed.reading_romaji);
+    values.join()
 }
 
 pub fn query_variants(input: &str) -> Vec<String> {
@@ -140,69 +262,64 @@ pub fn query_variants(input: &str) -> Vec<String> {
     if trimmed.is_empty() {
         return Vec::new();
     }
+    let indexed = index_text(trimmed);
+    variants_from(trimmed, &indexed)
+}
 
-    let mut values = Vec::new();
-    push_unique(&mut values, normalize_for_search(trimmed));
-    push_unique(&mut values, normalize_kana_reading(trimmed));
-    push_unique(&mut values, reading_kana_text(trimmed));
-    push_unique(&mut values, reading_romaji_text(trimmed));
+fn variants_from(input: &str, indexed: &IndexedText) -> Vec<String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+
+    let mut values = UniqueValues::with_capacity(12);
+    values.push(indexed.normalized.as_str());
+    values.push(normalize_kana_reading(trimmed));
+    values.push(indexed.reading_kana.as_str());
+    values.push(indexed.reading_romaji.as_str());
 
     if trimmed.is_romaji() {
         let kana = trimmed.to_kana();
-        push_unique(&mut values, normalize_for_search(&kana));
-        push_unique(&mut values, normalize_kana_reading(&kana));
+        values.push(normalize_for_search(&kana));
+        values.push(normalize_kana_reading(&kana));
     }
 
     if trimmed.is_kana() {
-        push_unique(&mut values, trimmed.to_romaji());
+        values.push(trimmed.to_romaji());
     }
 
-    for synonym in synonym_variants(trimmed) {
-        push_unique(&mut values, normalize_for_search(&synonym));
-        push_unique(&mut values, reading_kana_text(&synonym));
-        push_unique(&mut values, reading_romaji_text(&synonym));
+    for entry in matching_synonyms(indexed) {
+        values.push(entry.normalized.as_str());
+        values.push(entry.reading_kana.as_str());
+        values.push(entry.reading_romaji.as_str());
     }
 
-    values
-        .into_iter()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .collect()
+    values.into_vec()
 }
 
 pub fn synonym_variants(input: &str) -> Vec<String> {
-    let normalized = normalize_for_search(input);
-    let kana = reading_kana_text(input);
-    let romaji = reading_romaji_text(input);
-    let groups: &[&[&str]] = &[
-        &[
-            "小説",
-            "しょうせつ",
-            "shousetsu",
-            "物語",
-            "ストーリー",
-            "story",
-            "novel",
-        ],
-        &["イラスト", "絵", "画像", "art", "illustration"],
-        &["漫画", "マンガ", "manga", "コミック", "comic"],
-        &["成人向け", "r18", "r-18", "18禁"],
-        &["恋愛", "ラブ", "love", "romance"],
-    ];
+    let indexed = index_text(input);
+    matching_synonyms(&indexed)
+        .into_iter()
+        .map(|entry| entry.term.to_string())
+        .collect()
+}
 
+fn matching_synonyms(indexed: &IndexedText) -> Vec<&'static SynonymEntry> {
     let mut out = Vec::new();
-    for group in groups {
-        let matched = group.iter().any(|candidate| {
-            let candidate_norm = normalize_for_search(candidate);
-            normalized == candidate_norm
-                || kana == reading_kana_text(candidate)
-                || romaji == reading_romaji_text(candidate)
+    for group in synonym_readings() {
+        let matched = group.iter().any(|entry| {
+            indexed.normalized == entry.normalized
+                || (!entry.reading_kana.is_empty() && indexed.reading_kana == entry.reading_kana)
+                || (!entry.reading_romaji.is_empty()
+                    && indexed.reading_romaji == entry.reading_romaji)
         });
-        if matched {
-            for candidate in *group {
-                if normalize_for_search(candidate) != normalized {
-                    out.push((*candidate).to_string());
-                }
+        if !matched {
+            continue;
+        }
+        for entry in group {
+            if entry.normalized != indexed.normalized {
+                out.push(entry);
             }
         }
     }
@@ -210,14 +327,14 @@ pub fn synonym_variants(input: &str) -> Vec<String> {
 }
 
 pub fn expand_query_for_tantivy(query: &str) -> String {
-    let mut values = Vec::new();
+    let mut values = UniqueValues::with_capacity(16);
     for part in query.split_whitespace() {
         let cleaned = part.trim_matches('"').trim_start_matches('-');
         for variant in query_variants(cleaned) {
-            push_unique(&mut values, variant);
+            values.push(variant);
         }
     }
-    values.join(" ")
+    values.join()
 }
 
 pub fn find_token_match_span(text: &str, variants: &[String]) -> Option<(usize, usize, String)> {
@@ -335,14 +452,6 @@ fn push_fallback_token(input: &str, start: usize, end: usize, tokens: &mut Vec<A
     });
 }
 
-fn push_unique(values: &mut Vec<String>, value: String) {
-    let value = value.trim().to_string();
-    if value.is_empty() || values.iter().any(|item| item == &value) {
-        return;
-    }
-    values.push(value);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -364,5 +473,84 @@ mod tests {
         let variants = query_variants("小説");
         assert!(variants.iter().any(|value| value.contains("しょうせつ")));
         assert!(variants.iter().any(|value| value.contains("shousetsu")));
+    }
+
+    #[test]
+    fn one_pass_matches_the_per_field_helpers() {
+        let text = "静かな教室で手紙を書き留めた。Shizuka na kyoushitsu.";
+        let indexed = index_text(text);
+        assert_eq!(indexed.normalized, normalize_for_search(text));
+        assert_eq!(indexed.reading_kana, reading_kana_text(text));
+        assert_eq!(indexed.reading_romaji, reading_romaji_text(text));
+        // The n-gram field keeps the text contiguous so matches can span two
+        // tokens, which per-token values alone would break.
+        assert!(indexed.surface.starts_with(&indexed.normalized));
+    }
+
+    #[test]
+    fn repeated_wording_does_not_grow_the_indexed_payload() {
+        // The n-gram field is the contiguous text plus the base forms that
+        // differ from the surface. The text has to grow with the document; the
+        // base forms must not, however often the same wording comes back.
+        let phrase = "走った猫と歩いた犬を見た。";
+        let once = index_text(phrase);
+        let repeated = index_text(&phrase.repeat(50));
+        let extra = |value: &IndexedText| value.surface.len() - value.normalized.len();
+        assert!(extra(&once) > 0, "conjugated verbs should contribute base forms");
+        assert_eq!(
+            extra(&repeated),
+            extra(&once),
+            "the same base forms must be recorded once, not once per occurrence"
+        );
+    }
+
+    #[test]
+    #[ignore = "measurement harness, run with --ignored --nocapture"]
+    fn measure_body_preparation() {
+        use std::time::Instant;
+        // Real prose keeps introducing new vocabulary, so the deduplication set
+        // grows with the document. Repeating one sentence would keep it tiny and
+        // hide exactly the cost this harness exists to measure.
+        let nouns = [
+            "教室", "図書館", "海岸", "旋律", "記憶", "季節", "手紙", "灯台", "回廊", "約束",
+            "硝子", "残響", "標本", "封筒", "螺旋", "夜明", "輪郭", "潮騒", "書架", "遠雷",
+        ];
+        let verbs = [
+            "見つめていた",
+            "思い出していた",
+            "書き留めた",
+            "数えていた",
+            "聞いていた",
+            "受け止めた",
+        ];
+        let adjectives = ["静かな", "薄い", "淡い", "遠い", "冷たい", "眩しい"];
+        for size in [1_000usize, 2_000, 4_000, 8_000, 16_000] {
+            let mut text = String::new();
+            let mut seed = 0x2545_f491_4f6c_dd1du64;
+            let mut next = move || {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                seed as usize
+            };
+            while text.chars().count() < size {
+                text.push_str(adjectives[next() % adjectives.len()]);
+                text.push_str(nouns[next() % nouns.len()]);
+                text.push('と');
+                text.push_str(nouns[next() % nouns.len()]);
+                text.push_str(&format!("{}番", next() % 100_000));
+                text.push('を');
+                text.push_str(verbs[next() % verbs.len()]);
+                text.push_str("。\n");
+            }
+            let text = text.chars().take(size).collect::<String>();
+
+            let started = Instant::now();
+            let indexed = index_text(&text);
+            let field_ms = started.elapsed().as_secs_f64() * 1000.0;
+            let indexed_bytes =
+                indexed.surface.len() + indexed.reading_kana.len() + indexed.reading_romaji.len();
+            println!("{size:>6} chars | index_text {field_ms:>7.1} ms, {indexed_bytes:>8} indexed bytes");
+        }
     }
 }

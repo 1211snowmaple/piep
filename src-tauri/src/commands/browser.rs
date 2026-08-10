@@ -1,9 +1,9 @@
 use crate::auth::webview::{
-    close_child_webview, destroy_child_webview, get_child_webview_url, go_back_child_webview,
-    go_forward_child_webview, navigate_child_webview, open_child_webview, reload_child_webview,
-    set_child_webview_bounds, set_child_webview_visible,
+    close_child_webview, close_standalone_webview, destroy_child_webview, get_child_webview_url,
+    go_back_child_webview, go_forward_child_webview, navigate_child_webview, open_child_webview,
+    open_standalone_webview, reload_child_webview, set_child_webview_bounds,
+    set_child_webview_visible, standalone_webview_url,
 };
-use tauri::{Emitter, Manager};
 
 #[tauri::command]
 pub async fn open_embedded_browser(
@@ -73,9 +73,28 @@ pub async fn reload_embedded_browser(app: tauri::AppHandle) -> Result<(), String
 }
 
 #[tauri::command]
-pub async fn notify_url_changed(app: tauri::AppHandle, url: String) -> Result<(), String> {
-    if let Some(main_window) = app.get_webview_window("main") {
-        let _ = main_window.emit("url-changed", url);
-    }
-    Ok(())
+pub async fn open_standalone_browser(
+    app: tauri::AppHandle,
+    url: String,
+    source: String,
+    user_agent: Option<String>,
+) -> Result<bool, String> {
+    open_standalone_webview(app, url, source, user_agent)
+}
+
+#[tauri::command]
+pub async fn close_standalone_browser(
+    app: tauri::AppHandle,
+    source: String,
+) -> Result<bool, String> {
+    close_standalone_webview(app, source)
+}
+
+/// Returns the page the large window is showing, or null when it is not open.
+#[tauri::command]
+pub async fn get_standalone_browser_url(
+    app: tauri::AppHandle,
+    source: String,
+) -> Result<Option<String>, String> {
+    standalone_webview_url(app, source)
 }

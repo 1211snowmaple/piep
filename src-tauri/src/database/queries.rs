@@ -10,7 +10,9 @@ use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use super::models::*;
 use super::schema;
@@ -25,7 +27,31 @@ struct RankedSearchHit {
     download_id: i64,
     score: f64,
     semantic: Option<super::semantic_index::SemanticSearchHit>,
+    document: Option<Arc<SearchDocument>>,
 }
+
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+struct ReaderCacheKey {
+    storage: PathBuf,
+    download_id: i64,
+    requested_version: Option<i64>,
+    stamp: String,
+}
+
+#[derive(Clone)]
+struct ReaderCacheEntry {
+    pages: Arc<Vec<String>>,
+    total_plain_text_chars: usize,
+    bytes: usize,
+    last_used: u64,
+}
+
+const READER_CACHE_MAX_DOCUMENTS: usize = 8;
+const READER_CACHE_MAX_BYTES: usize = 64 * 1024 * 1024;
+static READER_CONTENT_CACHE: OnceLock<
+    parking_lot::Mutex<HashMap<ReaderCacheKey, ReaderCacheEntry>>,
+> = OnceLock::new();
+static READER_CACHE_TICK: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone)]
 struct SearchIndexBuildDocument {
@@ -34,6 +60,82 @@ struct SearchIndexBuildDocument {
     content_hash: Option<String>,
     tantivy: super::tantivy_index::TantivyIndexDocument,
     semantic: super::semantic_index::SemanticIndexDocument,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct DiagnosticsProgress {
+    pub step: i64,
+    pub total: i64,
+    pub phase: &'static str,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct SearchIndexRebuildOptions {
+    /// How many documents are read and analysed together. Larger chunks keep
+    /// every core busy; smaller ones report progress more often.
+    pub chunk_size: usize,
+    /// Documents buffered before a commit. Each commit ends a segment, so this
+    /// trades restart granularity against how fragmented the index becomes.
+    pub commit_every: usize,
+    /// Also build the semantic vectors, which is the only part of indexing that
+    /// can use the GPU - and much slower than the lexical pass.
+    pub include_semantic: bool,
+}
+
+impl Default for SearchIndexRebuildOptions {
+    fn default() -> Self {
+        Self {
+            chunk_size: 64,
+            commit_every: 2_000,
+            include_semantic: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct SearchIndexRebuildProgress {
+    pub phase: &'static str,
+    pub processed: i64,
+    pub total: i64,
+    pub failed: i64,
+    pub elapsed_secs: f64,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct SearchIndexRebuildOutcome {
+    pub processed: i64,
+    pub failed: i64,
+    pub canceled: bool,
+}
+
+#[derive(Debug, Clone)]
+struct IndexedState {
+    download_id: i64,
+    current_version: i64,
+    content_hash: Option<String>,
+}
+
+struct ReadyChunkEntry {
+    prepared: super::tantivy_index::Prepared,
+    state: IndexedState,
+    semantic: super::semantic_index::SemanticIndexDocument,
+}
+
+enum ChunkEntry {
+    Missing(i64),
+    // Boxed so a chunk of results is not sized by its largest variant: the
+    // ready one carries a whole prepared document.
+    Ready(Box<ReadyChunkEntry>),
+}
+
+#[derive(Default)]
+struct PreparedChunk {
+    documents: Vec<super::tantivy_index::Prepared>,
+    indexed: Vec<IndexedState>,
+    semantic: Vec<super::semantic_index::SemanticIndexDocument>,
+    missing: Vec<i64>,
+    prepared_count: i64,
+    failed: i64,
 }
 
 /// Indicates whether an entity row came from a real profile fetch or a lightweight work snapshot.
@@ -82,23 +184,307 @@ fn build_read_pool(db_path: &Path) -> Result<Pool<SqliteConnectionManager>, Stri
         .map_err(|e| format!("DB read pool creation failed: {}", e))
 }
 
+fn file_size_or_zero(path: &Path) -> u64 {
+    std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0)
+}
+
+fn recursive_file_size(root: &Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return 0;
+    };
+    entries
+        .filter_map(Result::ok)
+        .map(|entry| {
+            let path = entry.path();
+            match entry.file_type() {
+                Ok(kind) if kind.is_file() => file_size_or_zero(&path),
+                Ok(kind) if kind.is_dir() && !kind.is_symlink() => recursive_file_size(&path),
+                _ => 0,
+            }
+        })
+        .sum()
+}
+
+fn recursive_file_count(root: &Path, extension: Option<&str>) -> u64 {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return 0;
+    };
+    entries
+        .filter_map(Result::ok)
+        .map(|entry| {
+            let path = entry.path();
+            match entry.file_type() {
+                Ok(kind) if kind.is_file() => match extension {
+                    Some(expected) => {
+                        u64::from(path.extension().and_then(|ext| ext.to_str()) == Some(expected))
+                    }
+                    None => 1,
+                },
+                Ok(kind) if kind.is_dir() && !kind.is_symlink() => {
+                    recursive_file_count(&path, extension)
+                }
+                _ => 0,
+            }
+        })
+        .sum()
+}
+
+fn normalized_diagnostic_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/").to_lowercase()
+}
+
+fn orphan_asset_file_stats(root: &Path, known: &std::collections::HashSet<String>) -> (u64, u64) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return (0, 0);
+    };
+    let mut count = 0u64;
+    let mut bytes = 0u64;
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path();
+        match entry.file_type() {
+            Ok(kind) if kind.is_dir() && !kind.is_symlink() => {
+                let (child_count, child_bytes) = orphan_asset_file_stats(&path, known);
+                count = count.saturating_add(child_count);
+                bytes = bytes.saturating_add(child_bytes);
+            }
+            Ok(kind) if kind.is_file() => {
+                let is_asset = path.components().any(|part| {
+                    part.as_os_str()
+                        .to_string_lossy()
+                        .eq_ignore_ascii_case("data_assets")
+                });
+                if is_asset && !known.contains(&normalized_diagnostic_path(&path)) {
+                    count = count.saturating_add(1);
+                    bytes = bytes.saturating_add(file_size_or_zero(&path));
+                }
+            }
+            _ => {}
+        }
+    }
+    (count, bytes)
+}
+
+fn benchmark_percentiles(samples: &mut [f64]) -> (f64, f64) {
+    if samples.is_empty() {
+        return (0.0, 0.0);
+    }
+    samples.sort_by(|left, right| left.total_cmp(right));
+    let p50 = samples[(samples.len() - 1) / 2];
+    let p95_index = ((samples.len() as f64 * 0.95).ceil() as usize)
+        .saturating_sub(1)
+        .min(samples.len() - 1);
+    (p50, samples[p95_index])
+}
+
+#[cfg(windows)]
+pub(crate) fn available_space_bytes(path: &Path) -> Option<u64> {
+    use std::os::windows::ffi::OsStrExt;
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetDiskFreeSpaceExW(
+            directory_name: *const u16,
+            free_bytes_available: *mut u64,
+            total_bytes: *mut u64,
+            total_free_bytes: *mut u64,
+        ) -> i32;
+    }
+    let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+    wide.push(0);
+    let mut available = 0u64;
+    // SAFETY: `wide` is a NUL-terminated immutable UTF-16 path and the output
+    // pointer is valid for a u64 for the duration of the call.
+    let success = unsafe {
+        GetDiskFreeSpaceExW(
+            wide.as_ptr(),
+            &mut available,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    (success != 0).then_some(available)
+}
+
+#[cfg(unix)]
+pub(crate) fn available_space_bytes(path: &Path) -> Option<u64> {
+    use std::os::unix::ffi::OsStrExt;
+    #[repr(C)]
+    struct Statvfs {
+        f_bsize: u64,
+        f_frsize: u64,
+        f_blocks: u64,
+        f_bfree: u64,
+        f_bavail: u64,
+        f_files: u64,
+        f_ffree: u64,
+        f_favail: u64,
+        f_fsid: u64,
+        f_flag: u64,
+        f_namemax: u64,
+        __spare: [i32; 6],
+    }
+    extern "C" {
+        fn statvfs(path: *const std::ffi::c_char, output: *mut Statvfs) -> i32;
+    }
+    let path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    let mut output = std::mem::MaybeUninit::<Statvfs>::uninit();
+    // SAFETY: the C string is NUL terminated and statvfs initializes the
+    // output struct when it returns zero.
+    let success = unsafe { statvfs(path.as_ptr(), output.as_mut_ptr()) };
+    if success != 0 {
+        return None;
+    }
+    let output = unsafe { output.assume_init() };
+    Some(output.f_bavail.saturating_mul(output.f_frsize))
+}
+
+#[cfg(not(any(windows, unix)))]
+pub(crate) fn available_space_bytes(_path: &Path) -> Option<u64> {
+    None
+}
+
+#[cfg(windows)]
+fn current_process_memory_bytes() -> Option<u64> {
+    #[repr(C)]
+    struct ProcessMemoryCounters {
+        cb: u32,
+        page_fault_count: u32,
+        peak_working_set_size: usize,
+        working_set_size: usize,
+        quota_peak_paged_pool_usage: usize,
+        quota_paged_pool_usage: usize,
+        quota_peak_non_paged_pool_usage: usize,
+        quota_non_paged_pool_usage: usize,
+        pagefile_usage: usize,
+        peak_pagefile_usage: usize,
+    }
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetCurrentProcess() -> *mut std::ffi::c_void;
+    }
+    #[link(name = "psapi")]
+    extern "system" {
+        fn GetProcessMemoryInfo(
+            process: *mut std::ffi::c_void,
+            counters: *mut ProcessMemoryCounters,
+            size: u32,
+        ) -> i32;
+    }
+    let mut counters = ProcessMemoryCounters {
+        cb: std::mem::size_of::<ProcessMemoryCounters>() as u32,
+        page_fault_count: 0,
+        peak_working_set_size: 0,
+        working_set_size: 0,
+        quota_peak_paged_pool_usage: 0,
+        quota_paged_pool_usage: 0,
+        quota_peak_non_paged_pool_usage: 0,
+        quota_non_paged_pool_usage: 0,
+        pagefile_usage: 0,
+        peak_pagefile_usage: 0,
+    };
+    // SAFETY: both functions are stable Win32 APIs. `counters` is initialized,
+    // writable and its exact byte size is passed to the operating system.
+    let success = unsafe {
+        GetProcessMemoryInfo(
+            GetCurrentProcess(),
+            &mut counters,
+            std::mem::size_of::<ProcessMemoryCounters>() as u32,
+        )
+    };
+    (success != 0).then_some(counters.working_set_size as u64)
+}
+
+#[cfg(not(windows))]
+fn current_process_memory_bytes() -> Option<u64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let kib = status
+        .lines()
+        .find_map(|line| line.strip_prefix("VmRSS:"))?
+        .split_whitespace()
+        .next()?
+        .parse::<u64>()
+        .ok()?;
+    Some(kib.saturating_mul(1024))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SearchCursor {
     kind: String,
+    scope: Option<String>,
     sort_by: Option<String>,
     sort_order: Option<String>,
     value: Option<String>,
     id: Option<i64>,
     score: Option<f64>,
     downloaded_at: Option<String>,
+    #[serde(default)]
+    tantivy_score: Option<f32>,
+    #[serde(default)]
+    tantivy_segment_ord: Option<u32>,
+    #[serde(default)]
+    tantivy_doc_id: Option<u32>,
 }
 
 /// スレッドセーフなデータベースハンドル
+struct RestoreAwareConnection {
+    inner: Mutex<Connection>,
+    restore_owner: Mutex<Option<std::thread::ThreadId>>,
+}
+
+impl RestoreAwareConnection {
+    fn new(connection: Connection) -> Self {
+        Self {
+            inner: Mutex::new(connection),
+            restore_owner: Mutex::new(None),
+        }
+    }
+
+    fn lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>, String> {
+        let current = std::thread::current().id();
+        let owner = self.restore_owner.lock().map_err(|e| e.to_string())?;
+        if owner.is_some_and(|owner| owner != current) {
+            return Err("Library restore is in progress; try again when it completes".to_string());
+        }
+        drop(owner);
+        self.inner.lock().map_err(|e| e.to_string())
+    }
+
+    fn begin_restore_scope(&self) -> Result<(), String> {
+        let mut owner = self.restore_owner.lock().map_err(|e| e.to_string())?;
+        if owner.is_some() {
+            return Err("Another library restore is already in progress".to_string());
+        }
+        *owner = Some(std::thread::current().id());
+        Ok(())
+    }
+
+    fn end_restore_scope(&self) {
+        if let Ok(mut owner) = self.restore_owner.lock() {
+            *owner = None;
+        }
+    }
+}
+
+/// How long a search index status reading stays usable.
+///
+/// Every search reads it, and computing it means three library-wide COUNT(*)
+/// queries plus opening the semantic sidecar. It only feeds an informational
+/// banner and a cache key, so a reading that is a fraction of a second old is
+/// indistinguishable from a fresh one - and the paths that actually change it
+/// drop the cache outright.
+const INDEX_STATUS_CACHE_TTL: Duration = Duration::from_millis(750);
+
+struct CachedIndexStatus {
+    read_at: Instant,
+    status: SearchIndexStatus,
+}
+
 pub struct Database {
-    conn: Mutex<Connection>,
+    conn: RestoreAwareConnection,
     read_pool: Pool<SqliteConnectionManager>,
+    db_path: PathBuf,
     storage_dir: PathBuf,
+    index_status_cache: Mutex<Option<CachedIndexStatus>>,
 }
 
 impl Database {
@@ -106,6 +492,7 @@ impl Database {
     pub fn open(db_path: &Path, storage_dir: &Path) -> Result<Self, String> {
         let conn = Connection::open(db_path).map_err(|e| format!("DB open failed: {}", e))?;
         schema::initialize(&conn).map_err(|e| format!("DB init failed: {}", e))?;
+        reconcile_search_index_format(&conn)?;
         let read_pool = build_read_pool(db_path)?;
 
         // ストレージディレクトリを作成
@@ -113,15 +500,54 @@ impl Database {
             .map_err(|e| format!("Storage dir creation failed: {}", e))?;
 
         Ok(Self {
-            conn: Mutex::new(conn),
+            conn: RestoreAwareConnection::new(conn),
             read_pool,
+            db_path: db_path.to_path_buf(),
             storage_dir: storage_dir.to_path_buf(),
+            index_status_cache: Mutex::new(None),
         })
     }
 
     /// ストレージディレクトリのパスを取得
     pub fn storage_dir(&self) -> &Path {
         &self.storage_dir
+    }
+
+    pub(crate) fn begin_atomic_restore(&self) -> Result<(), String> {
+        self.conn.begin_restore_scope()?;
+        let result = self
+            .conn
+            .lock()?
+            .execute_batch("BEGIN IMMEDIATE")
+            .map_err(|e| format!("Restore transaction begin failed: {e}"));
+        if result.is_err() {
+            self.conn.end_restore_scope();
+        }
+        result
+    }
+
+    pub(crate) fn commit_atomic_restore(&self) -> Result<(), String> {
+        let result = self
+            .conn
+            .lock()?
+            .execute_batch("COMMIT")
+            .map_err(|e| format!("Restore transaction commit failed: {e}"));
+        self.conn.end_restore_scope();
+        result
+    }
+
+    pub(crate) fn rollback_atomic_restore(&self) {
+        if let Ok(conn) = self.conn.lock() {
+            let _ = conn.execute_batch("ROLLBACK");
+        }
+        self.conn.end_restore_scope();
+    }
+
+    pub(crate) fn delete_download_record_for_restore(&self, id: i64) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM downloads WHERE id = ?1", params![id])
+            .map_err(|e| format!("Restore delete failed: {e}"))?;
+        Ok(())
     }
 
     fn read_conn(&self) -> Result<PooledConnection<SqliteConnectionManager>, String> {
@@ -131,19 +557,48 @@ impl Database {
     }
 
     pub fn reindex_download(&self, download_id: i64) -> Result<(), String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        reindex_download_locked(&conn, &self.storage_dir, download_id)
+        let result = {
+            let conn = self.conn.lock().map_err(|e| e.to_string())?;
+            reindex_download_locked(&conn, &self.storage_dir, download_id)
+        };
+        self.invalidate_index_status();
+        result
     }
 
     pub fn get_search_index_status(&self) -> Result<SearchIndexStatus, String> {
-        let conn = self.read_conn()?;
-        search_index_status_locked(&conn, &self.storage_dir)
+        if let Ok(cache) = self.index_status_cache.lock() {
+            if let Some(cached) = cache.as_ref() {
+                if cached.read_at.elapsed() < INDEX_STATUS_CACHE_TTL {
+                    return Ok(cached.status.clone());
+                }
+            }
+        }
+        let status = {
+            let conn = self.read_conn()?;
+            search_index_status_locked(&conn, &self.storage_dir)?
+        };
+        if let Ok(mut cache) = self.index_status_cache.lock() {
+            *cache = Some(CachedIndexStatus {
+                read_at: Instant::now(),
+                status: status.clone(),
+            });
+        }
+        Ok(status)
+    }
+
+    /// Forces the next status read to measure the library again. Called from
+    /// every path that adds, removes or reindexes a work, so the settings and
+    /// diagnostics screens never show a figure that is already wrong.
+    fn invalidate_index_status(&self) {
+        if let Ok(mut cache) = self.index_status_cache.lock() {
+            *cache = None;
+        }
     }
 
     pub fn rebuild_search_index_batch(&self, limit: i64) -> Result<SearchIndexStatus, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let limit = limit.clamp(1, 200);
-        let ids = stale_search_index_ids_locked(&conn, limit)?;
+        let ids = stale_search_index_ids_locked(&conn, limit, 0)?;
         let mut docs = Vec::with_capacity(ids.len());
         for id in &ids {
             match search_index_document_locked(&conn, &self.storage_dir, *id) {
@@ -161,7 +616,220 @@ impl Database {
         if let Err(e) = index_search_documents_locked(&conn, &self.storage_dir, &docs, false) {
             log::warn!("Failed to rebuild search index batch: {}", e);
         }
-        search_index_status_locked(&conn, &self.storage_dir)
+        let status = search_index_status_locked(&conn, &self.storage_dir);
+        drop(conn);
+        self.invalidate_index_status();
+        status
+    }
+
+    /// Brings the whole search index up to date in one pass.
+    ///
+    /// The work splits cleanly in two: preparing a document is pure CPU and runs
+    /// across every core, while the index writer and the SQLite bookkeeping are
+    /// serial. Holding one writer open for the entire run - rather than building
+    /// and committing one per small batch - is what keeps the segment count and
+    /// the wall clock down.
+    pub fn rebuild_search_index<F>(
+        &self,
+        options: SearchIndexRebuildOptions,
+        should_cancel: &dyn Fn() -> bool,
+        mut on_progress: F,
+    ) -> Result<SearchIndexRebuildOutcome, String>
+    where
+        F: FnMut(SearchIndexRebuildProgress),
+    {
+        let started = std::time::Instant::now();
+        let total_pending = {
+            let conn = self.read_conn()?;
+            pending_search_index_count(&conn)?
+        };
+        on_progress(SearchIndexRebuildProgress {
+            phase: "preparing",
+            processed: 0,
+            total: total_pending,
+            failed: 0,
+            elapsed_secs: started.elapsed().as_secs_f64(),
+        });
+        if total_pending == 0 {
+            return Ok(SearchIndexRebuildOutcome {
+                processed: 0,
+                failed: 0,
+                canceled: false,
+            });
+        }
+
+        let mut writer = super::tantivy_index::bulk_writer(&self.storage_dir)?;
+        let chunk_size = options.chunk_size.clamp(8, 512) as i64;
+        let mut after_id = 0i64;
+        let mut processed = 0i64;
+        let mut failed = 0i64;
+        let mut canceled = false;
+        // Bookkeeping is withheld until the matching segment is committed, so
+        // an interrupted run resumes from the last durable point.
+        let mut uncommitted_state: Vec<IndexedState> = Vec::new();
+
+        loop {
+            if should_cancel() {
+                canceled = true;
+                break;
+            }
+            // Keyset paging over the id, not "give me the next stale rows":
+            // a document that cannot be prepared stays stale forever, and
+            // re-asking for stale rows would hand back the same one for ever.
+            let ids = {
+                let conn = self.read_conn()?;
+                stale_search_index_ids_locked(&conn, chunk_size, after_id)?
+            };
+            if ids.is_empty() {
+                break;
+            }
+            after_id = *ids.last().unwrap_or(&after_id);
+
+            let prepared = self.prepare_search_index_chunk(&ids)?;
+            failed += prepared.failed;
+
+            for missing in &prepared.missing {
+                let conn = self.conn.lock().map_err(|e| e.to_string())?;
+                if let Err(error) = clear_search_index_locked(&conn, &self.storage_dir, *missing) {
+                    log::warn!("Failed to clear missing search index row {missing}: {error}");
+                }
+            }
+
+            for document in prepared.documents {
+                writer.upsert(document)?;
+            }
+
+            if options.include_semantic && !prepared.semantic.is_empty() {
+                // One embedding call per chunk rather than per document: the
+                // model is only worth its accelerator when it is handed a batch.
+                if let Err(error) =
+                    super::semantic_index::upsert_documents(&self.storage_dir, &prepared.semantic)
+                {
+                    log::warn!("Semantic index batch skipped: {error}");
+                }
+            }
+
+            uncommitted_state.extend(prepared.indexed);
+            if writer.uncommitted() >= options.commit_every {
+                writer.commit()?;
+                self.record_indexed_documents(&uncommitted_state)?;
+                uncommitted_state.clear();
+            }
+
+            processed += prepared.prepared_count;
+            on_progress(SearchIndexRebuildProgress {
+                phase: "indexing",
+                processed,
+                total: total_pending.max(processed),
+                failed,
+                elapsed_secs: started.elapsed().as_secs_f64(),
+            });
+        }
+
+        if canceled {
+            // Everything since the last commit is dropped, so the index stays at
+            // the last state whose bookkeeping was also written.
+            writer.rollback()?;
+        } else {
+            on_progress(SearchIndexRebuildProgress {
+                phase: "committing",
+                processed,
+                total: total_pending.max(processed),
+                failed,
+                elapsed_secs: started.elapsed().as_secs_f64(),
+            });
+            writer.commit()?;
+            self.record_indexed_documents(&uncommitted_state)?;
+        }
+
+        Ok(SearchIndexRebuildOutcome {
+            processed,
+            failed,
+            canceled,
+        })
+    }
+
+    /// Reads and analyses one chunk of documents across every available core.
+    fn prepare_search_index_chunk(&self, ids: &[i64]) -> Result<PreparedChunk, String> {
+        use rayon::prelude::*;
+
+        let results = ids
+            .par_iter()
+            .map(|id| {
+                let conn = self.read_conn()?;
+                let Some(doc) = search_index_document_locked(&conn, &self.storage_dir, *id)? else {
+                    return Ok(ChunkEntry::Missing(*id));
+                };
+                drop(conn);
+                let prepared =
+                    super::tantivy_index::prepare_document(&self.storage_dir, &doc.tantivy)?;
+                Ok(ChunkEntry::Ready(Box::new(ReadyChunkEntry {
+                    prepared,
+                    state: IndexedState {
+                        download_id: doc.download_id,
+                        current_version: doc.current_version,
+                        content_hash: doc.content_hash,
+                    },
+                    semantic: doc.semantic,
+                })))
+            })
+            .collect::<Vec<Result<ChunkEntry, String>>>();
+
+        let mut chunk = PreparedChunk::default();
+        for result in results {
+            match result {
+                Ok(ChunkEntry::Missing(id)) => chunk.missing.push(id),
+                Ok(ChunkEntry::Ready(ready)) => {
+                    chunk.documents.push(ready.prepared);
+                    chunk.indexed.push(ready.state);
+                    chunk.semantic.push(ready.semantic);
+                    chunk.prepared_count += 1;
+                }
+                Err(error) => {
+                    // A single unreadable source file must not stop the rebuild.
+                    log::warn!("Failed to prepare search index document: {error}");
+                    chunk.failed += 1;
+                    chunk.prepared_count += 1;
+                }
+            }
+        }
+        Ok(chunk)
+    }
+
+    /// Marks documents as indexed only after their content reached a committed
+    /// segment, so an interrupted rebuild resumes instead of skipping them.
+    fn record_indexed_documents(&self, states: &[IndexedState]) -> Result<(), String> {
+        if states.is_empty() {
+            return Ok(());
+        }
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let tx = conn
+            .unchecked_transaction()
+            .map_err(|e| format!("Search meta transaction failed: {e}"))?;
+        let now = chrono::Utc::now().to_rfc3339();
+        {
+            let mut stmt = tx
+                .prepare_cached(
+                    "INSERT OR REPLACE INTO search_index_state (
+                        download_id, current_version, content_hash, indexed_at
+                     ) VALUES (?1, ?2, ?3, ?4)",
+                )
+                .map_err(|e| format!("Search meta prepare failed: {e}"))?;
+            for state in states {
+                stmt.execute(params![
+                    state.download_id,
+                    state.current_version,
+                    state.content_hash,
+                    now
+                ])
+                .map_err(|e| format!("Search meta insert failed: {e}"))?;
+            }
+        }
+        tx.commit()
+            .map_err(|e| format!("Search meta commit failed: {e}"))?;
+        drop(conn);
+        self.invalidate_index_status();
+        Ok(())
     }
 
     pub fn search_filter_facets(
@@ -173,44 +841,94 @@ impl Database {
         let conn = self.read_conn()?;
         let limit = limit.clamp(1, 200) as usize;
         let normalized_query = query.map(normalize_search_text).unwrap_or_default();
-
-        let sql = match kind {
-            "tags" | "tag" => {
-                "SELECT t.name, COUNT(dt.download_id) AS count
-                 FROM tags t
-                 JOIN download_tags dt ON dt.tag_id = t.id
-                 GROUP BY t.id, t.name"
+        let sql = |filtered: bool| -> Result<&'static str, String> {
+            match (kind, filtered) {
+                ("tags" | "tag", false) => Ok("SELECT t.name, COUNT(dt.download_id) AS count
+                     FROM tags t
+                     JOIN download_tags dt ON dt.tag_id = t.id
+                     GROUP BY t.id, t.name
+                     ORDER BY count DESC, t.name ASC
+                     LIMIT ?1"),
+                ("tags" | "tag", true) => Ok("SELECT t.name, COUNT(dt.download_id) AS count
+                     FROM tags t
+                     JOIN download_tags dt ON dt.tag_id = t.id
+                     WHERE t.name LIKE ?1 ESCAPE '\\' COLLATE NOCASE
+                     GROUP BY t.id, t.name
+                     ORDER BY count DESC, t.name ASC
+                     LIMIT ?2"),
+                ("authors" | "author", false) => Ok("SELECT author_name, COUNT(*) AS count
+                     FROM downloads
+                     WHERE author_name IS NOT NULL AND author_name != ''
+                     GROUP BY author_name
+                     ORDER BY count DESC, author_name ASC
+                     LIMIT ?1"),
+                ("authors" | "author", true) => Ok("SELECT author_name, COUNT(*) AS count
+                     FROM downloads
+                     WHERE author_name IS NOT NULL AND author_name != ''
+                       AND author_name LIKE ?1 ESCAPE '\\' COLLATE NOCASE
+                     GROUP BY author_name
+                     ORDER BY count DESC, author_name ASC
+                     LIMIT ?2"),
+                _ => Err(format!("Unsupported facet kind: {kind}")),
             }
-            "authors" | "author" => {
-                "SELECT author_name, COUNT(*) AS count
-                 FROM downloads
-                 WHERE author_name IS NOT NULL AND author_name != ''
-                 GROUP BY author_name"
-            }
-            _ => return Err(format!("Unsupported facet kind: {}", kind)),
         };
-
-        let mut stmt = conn
-            .prepare(sql)
-            .map_err(|e| format!("Facet search prepare failed: {}", e))?;
-        let rows = stmt
-            .query_map([], |row| {
+        let load = |statement: &str,
+                    pattern: Option<&str>,
+                    row_limit: usize|
+         -> Result<Vec<FacetCount>, String> {
+            let mut stmt = conn
+                .prepare(statement)
+                .map_err(|e| format!("Facet search prepare failed: {e}"))?;
+            let map_row = |row: &rusqlite::Row<'_>| {
                 Ok(FacetCount {
                     name: row.get(0)?,
                     count: row.get(1)?,
                 })
-            })
-            .map_err(|e| format!("Facet search failed: {}", e))?;
-
-        let mut facets = Vec::new();
-        for row in rows {
-            facets.push(row.map_err(|e| format!("Facet search row read failed: {}", e))?);
-        }
+            };
+            let mut facets = Vec::new();
+            if let Some(pattern) = pattern {
+                let rows = stmt
+                    .query_map(params![pattern, row_limit as i64], map_row)
+                    .map_err(|e| format!("Facet search failed: {e}"))?;
+                for row in rows {
+                    facets.push(row.map_err(|e| format!("Facet row read failed: {e}"))?);
+                }
+            } else {
+                let rows = stmt
+                    .query_map(params![row_limit as i64], map_row)
+                    .map_err(|e| format!("Facet search failed: {e}"))?;
+                for row in rows {
+                    facets.push(row.map_err(|e| format!("Facet row read failed: {e}"))?);
+                }
+            }
+            Ok(facets)
+        };
 
         if normalized_query.is_empty() {
-            facets.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.name.cmp(&b.name)));
-            facets.truncate(limit);
-            return Ok(facets);
+            return load(sql(false)?, None, limit);
+        }
+
+        // Exact/substring candidates are filtered before GROUP BY. A bounded
+        // popularity fallback keeps kana/romaji/fuzzy matching useful without
+        // allocating every distinct facet on each keystroke.
+        let candidate_limit = limit.saturating_mul(20).clamp(400, 4_000);
+        let raw_query = query.unwrap_or("").trim();
+        let escaped = raw_query
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+        let like = format!("%{escaped}%");
+        let mut facets = load(sql(true)?, Some(&like), candidate_limit)?;
+        if facets.len() < limit {
+            let mut names = facets
+                .iter()
+                .map(|facet| facet.name.clone())
+                .collect::<std::collections::HashSet<_>>();
+            for facet in load(sql(false)?, None, candidate_limit)? {
+                if names.insert(facet.name.clone()) {
+                    facets.push(facet);
+                }
+            }
         }
 
         let query_grams = query_ngrams(&normalized_query);
@@ -261,19 +979,22 @@ impl Database {
         &self,
         params: &SearchSuggestParams,
     ) -> Result<SearchSuggestResult, String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let conn = self.read_conn()?;
         let limit = params.limit.unwrap_or(12).clamp(1, 50);
         let text = params.text.as_deref().unwrap_or("").trim();
         if text.is_empty() {
             return Ok(SearchSuggestResult { items: Vec::new() });
         }
-        let like = format!("%{}%", text.replace('%', "\\%").replace('_', "\\_"));
+        // Suggestions are deliberately prefix based. Four `%term%` grouped
+        // scans on every keystroke become the dominant cost in a six-figure
+        // library; infix/full-body matching remains available on Enter.
+        let like = format!("{}%", text.replace('%', "\\%").replace('_', "\\_"));
         let mut items = Vec::new();
 
         collect_suggestions(
             &conn,
             "tag",
-            "SELECT t.name, t.name, COUNT(dt.download_id)
+            "SELECT t.name, t.name, COUNT(dt.download_id), NULL, NULL
              FROM tags t
              JOIN download_tags dt ON dt.tag_id = t.id
              WHERE t.name LIKE ?1 ESCAPE '\\'
@@ -287,10 +1008,11 @@ impl Database {
         collect_suggestions(
             &conn,
             "author",
-            "SELECT d.author_name, d.author_name, COUNT(*)
+            "SELECT d.author_name, d.author_name, COUNT(*), d.source,
+                    NULLIF(d.author_id, '')
              FROM downloads d
              WHERE d.author_name LIKE ?1 ESCAPE '\\'
-             GROUP BY d.author_name
+             GROUP BY d.author_name, d.source, NULLIF(d.author_id, '')
              ORDER BY COUNT(*) DESC, d.author_name ASC
              LIMIT ?2",
             &like,
@@ -300,7 +1022,8 @@ impl Database {
         collect_suggestions(
             &conn,
             "series",
-            "SELECT s.title, s.source || ':' || s.source_key, COUNT(ds.download_id)
+            "SELECT s.title, s.source || ':' || s.source_key, COUNT(ds.download_id),
+                    s.source, s.source_key
              FROM series s
              LEFT JOIN download_series ds ON ds.series_source = s.source AND ds.series_key = s.source_key
              WHERE s.title LIKE ?1 ESCAPE '\\'
@@ -314,7 +1037,7 @@ impl Database {
         collect_suggestions(
             &conn,
             "title",
-            "SELECT d.title, d.source_id, 1
+            "SELECT d.title, d.source_id, 1, d.source, CAST(d.id AS TEXT)
              FROM downloads d
              WHERE d.title LIKE ?1 ESCAPE '\\'
              ORDER BY d.downloaded_at DESC
@@ -324,7 +1047,27 @@ impl Database {
             &mut items,
         )?;
 
-        items.truncate(limit as usize * 4);
+        let normalized_text = normalize_search_text(text);
+        for item in &mut items {
+            item.exact_match = normalize_search_text(&item.label) == normalized_text;
+        }
+        items.sort_by(|left, right| {
+            right
+                .exact_match
+                .cmp(&left.exact_match)
+                .then_with(|| {
+                    suggestion_kind_priority(&left.kind).cmp(&suggestion_kind_priority(&right.kind))
+                })
+                .then_with(|| right.count.unwrap_or(0).cmp(&left.count.unwrap_or(0)))
+                .then_with(|| left.label.cmp(&right.label))
+        });
+        items.dedup_by(|left, right| {
+            left.kind == right.kind
+                && left.source == right.source
+                && left.source_key == right.source_key
+                && left.value == right.value
+        });
+        items.truncate(limit as usize);
         Ok(SearchSuggestResult { items })
     }
 
@@ -333,8 +1076,10 @@ impl Database {
         let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
 
         // 正規化インサートをアトミックに行うためのトランザクション開始
+        // A savepoint works both standalone and inside the outer transaction
+        // used by atomic backup restore.
         let tx = conn
-            .transaction()
+            .savepoint()
             .map_err(|e| format!("Transaction begin failed: {}", e))?;
 
         tx.execute(
@@ -426,6 +1171,10 @@ impl Database {
 
         tx.commit()
             .map_err(|e| format!("Transaction commit failed: {}", e))?;
+        drop(conn);
+        // A newly saved work is unindexed until something indexes it, so the
+        // pending count the UI shows has just changed.
+        self.invalidate_index_status();
         Ok(id)
     }
 
@@ -460,13 +1209,26 @@ impl Database {
         source: &str,
         source_key: &str,
     ) -> Result<UpdateTarget, String> {
+        self.find_update_target(target_type, source, source_key)?
+            .ok_or_else(|| "Update target not found".to_string())
+    }
+
+    /// Looks up one update target by its composite key without requiring the
+    /// caller to fetch and deserialize the complete target list.
+    pub fn find_update_target(
+        &self,
+        target_type: &str,
+        source: &str,
+        source_key: &str,
+    ) -> Result<Option<UpdateTarget>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.query_row(
             "SELECT * FROM update_targets WHERE target_type = ?1 AND source = ?2 AND source_key = ?3",
             params![target_type, source, source_key],
             update_target_from_row,
         )
-        .map_err(|e| format!("Update target not found: {}", e))
+        .optional()
+        .map_err(|e| format!("Failed to query update target: {e}"))
     }
 
     pub fn list_update_targets(
@@ -1313,10 +2075,13 @@ impl Database {
         params: &SearchV2Params,
         max_limit: i64,
     ) -> Result<SearchV2Result, String> {
+        let submitted_query = query_text(params).to_string();
         let mut effective_params = normalize_search_params(params);
         let limit = effective_params.limit.unwrap_or(80).clamp(1, max_limit);
         effective_params.limit = Some(limit);
-        let query = query_text(&effective_params);
+        let exact_entity =
+            self.apply_exact_entity_intent(&submitted_query, &mut effective_params)?;
+        let query = query_text(&effective_params).to_string();
         let status = self.get_search_index_status()?;
         let semantic_ready = status.semantic_model_ready;
         let semantic_complete = status.semantic_indexed_chunks > 0 || status.total_downloads == 0;
@@ -1345,13 +2110,20 @@ impl Database {
                 next_cursor,
                 total_estimate,
                 search_meta: SearchMeta {
-                    engine: "sqlite-metadata".to_string(),
-                    query: effective_params
-                        .query
-                        .clone()
-                        .or(effective_params.text.clone()),
+                    engine: if exact_entity.is_some() {
+                        "sqlite-exact-entity".to_string()
+                    } else {
+                        "sqlite-metadata".to_string()
+                    },
+                    query: (!submitted_query.is_empty()).then_some(submitted_query.clone()),
                     total_estimate,
                     index_complete: status.is_complete,
+                    explanations: search_explanations(
+                        exact_entity.as_ref(),
+                        "sqlite-metadata",
+                        status.is_complete,
+                    ),
+                    exact_entity,
                     semantic_index_complete: Some(semantic_complete),
                     semantic_model_ready: Some(semantic_ready),
                 },
@@ -1360,64 +2132,159 @@ impl Database {
         }
 
         let search_mode = effective_search_mode(&effective_params);
-        let search_limit = search_candidate_limit(&effective_params, limit);
-        let parsed_query = parse_search_query(query);
-        let lexical_hits = if search_mode != "semantic" {
-            super::tantivy_index::search(&self.storage_dir, query, search_limit)?
-        } else {
-            Vec::new()
-        };
-        let semantic_hits = if search_mode == "semantic" {
-            match super::semantic_index::search(&self.storage_dir, query, search_limit) {
-                Ok(hits) => hits,
-                Err(error) => {
-                    log::warn!("Semantic search unavailable: {}", error);
-                    Vec::new()
-                }
-            }
-        } else {
-            Vec::new()
-        };
-        let hits = blend_search_hits(&lexical_hits, &semantic_hits, &search_mode);
-        let semantic_map = hits
-            .iter()
-            .filter_map(|hit| {
-                hit.semantic
-                    .clone()
-                    .map(|semantic| (hit.download_id, semantic))
-            })
-            .collect::<HashMap<_, _>>();
-        let mut ranked_items = self.fetch_ranked_sql_matches(&effective_params, &hits)?;
-        if !parsed_query.exclude.is_empty() {
-            ranked_items =
-                filter_excluded_search_results(&self.storage_dir, ranked_items, &parsed_query);
+        let mut search_limit = search_candidate_limit(&effective_params, limit);
+        let parsed_query = parse_search_query(&query);
+        // An explicit column sort asked for while searching cannot be answered
+        // by relevance paging, so the match set moves to SQL, which owns the
+        // ordering and the keyset cursor.
+        if search_mode != "semantic" && wants_column_sort(&effective_params) {
+            return self.search_sorted_lexical_page(
+                &effective_params,
+                &query,
+                &submitted_query,
+                limit,
+                &status,
+                exact_entity,
+                &parsed_query,
+            );
         }
-        ranked_items.sort_by(|a, b| {
-            b.search_score
-                .unwrap_or(0.0)
-                .partial_cmp(&a.search_score.unwrap_or(0.0))
-                .unwrap_or(Ordering::Equal)
-                .then_with(|| b.downloaded_at.cmp(&a.downloaded_at))
-                .then_with(|| b.id.cmp(&a.id))
+        if search_mode != "semantic" {
+            return self.search_lexical_page(
+                &effective_params,
+                &query,
+                &submitted_query,
+                limit,
+                &status,
+                exact_entity,
+                &parsed_query,
+                &search_mode,
+            );
+        }
+        let cursor_scope = search_cursor_scope(&effective_params);
+        let cursor = decode_cursor(effective_params.cursor.as_deref()).filter(|candidate| {
+            candidate.kind == "search" && candidate.scope.as_deref() == Some(&cursor_scope)
         });
-        if let Some(cursor) =
-            decode_cursor(effective_params.cursor.as_deref()).filter(|c| c.kind == "search")
-        {
-            ranked_items.retain(|item| search_item_is_after_cursor(item, &cursor));
-        }
-        let total_estimate = Some(ranked_items.len() as i64);
+        let maximum_semantic_candidates =
+            usize::try_from(status.semantic_indexed_chunks.max(1)).unwrap_or(usize::MAX);
+        let mut lexical_total = None;
+        let (mut ranked_items, semantic_map, document_map, candidates_exhausted, unpaged_count) = loop {
+            let lexical_result = if search_mode != "semantic" {
+                super::tantivy_index::search_with_total(&self.storage_dir, &query, search_limit)?
+            } else {
+                super::tantivy_index::TantivySearchResult::default()
+            };
+            if search_mode != "semantic" {
+                lexical_total = Some(lexical_result.total_hits);
+            }
+            let semantic_hits = if search_mode == "semantic" {
+                match super::semantic_index::search(&self.storage_dir, &query, search_limit) {
+                    Ok(hits) => hits,
+                    Err(error) => {
+                        log::warn!("Semantic search unavailable: {}", error);
+                        Vec::new()
+                    }
+                }
+            } else {
+                Vec::new()
+            };
+            let hits = blend_search_hits(&lexical_result.hits, &semantic_hits, &search_mode);
+            let semantic_map = hits
+                .iter()
+                .filter_map(|hit| {
+                    hit.semantic
+                        .clone()
+                        .map(|semantic| (hit.download_id, semantic))
+                })
+                .collect::<HashMap<_, _>>();
+            let document_map = hits
+                .iter()
+                .filter_map(|hit| {
+                    hit.document
+                        .clone()
+                        .map(|document| (hit.download_id, document))
+                })
+                .collect::<HashMap<_, _>>();
+            let mut candidates = self.fetch_ranked_sql_matches(&effective_params, &hits)?;
+            if !parsed_query.exclude.is_empty() {
+                candidates = filter_excluded_search_results(
+                    &self.storage_dir,
+                    candidates,
+                    &parsed_query,
+                    &document_map,
+                );
+            }
+            candidates.sort_by(|a, b| {
+                b.search_score
+                    .unwrap_or(0.0)
+                    .partial_cmp(&a.search_score.unwrap_or(0.0))
+                    .unwrap_or(Ordering::Equal)
+                    .then_with(|| b.downloaded_at.cmp(&a.downloaded_at))
+                    .then_with(|| b.id.cmp(&a.id))
+            });
+            let unpaged_count = candidates.len();
+            if let Some(cursor) = cursor.as_ref() {
+                candidates.retain(|item| search_item_is_after_cursor(item, cursor));
+            }
+
+            let exhausted = if search_mode == "semantic" {
+                semantic_hits.len() < search_limit || search_limit >= maximum_semantic_candidates
+            } else {
+                search_limit >= lexical_result.total_hits
+            };
+            if candidates.len() as i64 > limit || exhausted {
+                break (
+                    candidates,
+                    semantic_map,
+                    document_map,
+                    exhausted,
+                    unpaged_count,
+                );
+            }
+
+            // Grow with cursor depth and selective metadata filters. Unlike the
+            // previous hard 1,000 cap, this eventually reaches every lexical
+            // match while keeping the common first page small and fast.
+            let maximum = if search_mode == "semantic" {
+                maximum_semantic_candidates
+            } else {
+                lexical_result.total_hits
+            };
+            let next_limit = search_limit.saturating_mul(2).min(maximum);
+            if next_limit <= search_limit {
+                break (candidates, semantic_map, document_map, true, unpaged_count);
+            }
+            search_limit = next_limit;
+        };
+        let total_estimate =
+            if !params_have_library_filters(&effective_params) && search_mode != "semantic" {
+                lexical_total.and_then(|count| i64::try_from(count).ok())
+            } else if candidates_exhausted {
+                i64::try_from(unpaged_count).ok()
+            } else {
+                // A filtered count cannot be known until all lexical candidates
+                // have been intersected with SQLite. `None` is more honest than a
+                // fixed top-N value that looks complete to the UI.
+                None
+            };
         let has_more = ranked_items.len() as i64 > limit;
         let page_items = ranked_items
             .drain(..)
             .take(limit as usize)
             .collect::<Vec<DownloadEntry>>();
         let next_cursor = if has_more {
-            page_items.last().and_then(encode_search_cursor)
+            page_items
+                .last()
+                .and_then(|item| encode_search_cursor(&effective_params, item))
         } else {
             None
         };
-        let items =
-            decorate_search_results(&self.storage_dir, page_items, &parsed_query, &semantic_map);
+        let items = decorate_search_results(
+            &self.storage_dir,
+            page_items,
+            &parsed_query,
+            &semantic_map,
+            &document_map,
+        );
 
         Ok(SearchV2Result {
             items,
@@ -1431,17 +2298,446 @@ impl Database {
                 } else {
                     "hybrid-local".to_string()
                 },
-                query: effective_params
-                    .query
-                    .clone()
-                    .or(effective_params.text.clone()),
+                query: (!submitted_query.is_empty()).then_some(submitted_query),
                 total_estimate,
                 index_complete: status.is_complete,
+                explanations: search_explanations(
+                    exact_entity.as_ref(),
+                    if search_mode == "semantic" {
+                        "semantic"
+                    } else {
+                        "tantivy"
+                    },
+                    status.is_complete,
+                ),
+                exact_entity,
                 semantic_index_complete: Some(semantic_complete),
                 semantic_model_ready: Some(semantic_ready),
             },
             facets_version: status.indexed_downloads,
         })
+    }
+
+    /// Plain, exact entity names are navigation-like intent, not fuzzy free
+    /// text. Restricting them at the relational layer prevents a body mention
+    /// from another creator from leaking into an otherwise unambiguous author
+    /// or series search. Ambiguous names deliberately remain a normal search.
+    fn apply_exact_entity_intent(
+        &self,
+        submitted_query: &str,
+        params: &mut SearchV2Params,
+    ) -> Result<Option<SearchEntityIntent>, String> {
+        let query = submitted_query.trim();
+        if !plain_entity_query(query)
+            || effective_search_mode(params) == "semantic"
+            || params.authors_include.is_some()
+            || params.person_key.is_some()
+            || params.series_key.is_some()
+        {
+            return Ok(None);
+        }
+
+        let conn = self.read_conn()?;
+        let authors = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT d.author_name, d.source, d.author_id, COUNT(*)
+                     FROM downloads d
+                     WHERE d.author_name = ?1 COLLATE NOCASE
+                     GROUP BY d.author_name, d.source, d.author_id
+                     ORDER BY COUNT(*) DESC, d.source, d.author_id
+                     LIMIT 8",
+                )
+                .map_err(|e| format!("Exact author intent prepare failed: {e}"))?;
+            let rows = stmt
+                .query_map(params![query], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })
+                .map_err(|e| format!("Exact author intent query failed: {e}"))?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(|e| format!("Exact author intent row failed: {e}"))?
+        };
+        let series = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT ds.title, ds.series_source, ds.series_key, COUNT(*)
+                     FROM download_series ds
+                     WHERE ds.title = ?1 COLLATE NOCASE
+                     GROUP BY ds.title, ds.series_source, ds.series_key
+                     ORDER BY COUNT(*) DESC, ds.series_source, ds.series_key
+                     LIMIT 8",
+                )
+                .map_err(|e| format!("Exact series intent prepare failed: {e}"))?;
+            let rows = stmt
+                .query_map(params![query], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })
+                .map_err(|e| format!("Exact series intent query failed: {e}"))?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(|e| format!("Exact series intent row failed: {e}"))?
+        };
+
+        match (authors.is_empty(), series.is_empty()) {
+            (false, true) => {
+                let label = authors[0].0.clone();
+                params.authors_include = Some(vec![label.clone()]);
+                params.query = None;
+                params.text = None;
+                let unique_identity = (authors.len() == 1).then(|| &authors[0]);
+                Ok(Some(SearchEntityIntent {
+                    kind: "author".to_string(),
+                    label,
+                    source: unique_identity.map(|author| author.1.clone()),
+                    source_key: unique_identity.map(|author| author.2.clone()),
+                    strict: true,
+                }))
+            }
+            (true, false) => {
+                let label = series[0].0.clone();
+                if series.len() == 1 {
+                    params.series_source = Some(series[0].1.clone());
+                    params.series_key = Some(series[0].2.clone());
+                } else {
+                    // The title is still unambiguous as a concept; include all
+                    // providers carrying the exact same series title.
+                    params.series_source = None;
+                    params.series_key = Some(label.clone());
+                }
+                params.query = None;
+                params.text = None;
+                Ok(Some(SearchEntityIntent {
+                    kind: "series".to_string(),
+                    label,
+                    source: (series.len() == 1).then(|| series[0].1.clone()),
+                    source_key: (series.len() == 1).then(|| series[0].2.clone()),
+                    strict: true,
+                }))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn search_lexical_page(
+        &self,
+        params: &SearchV2Params,
+        query: &str,
+        submitted_query: &str,
+        limit: i64,
+        status: &SearchIndexStatus,
+        exact_entity: Option<SearchEntityIntent>,
+        parsed_query: &ParsedSearchQuery,
+        search_mode: &str,
+    ) -> Result<SearchV2Result, String> {
+        let cursor_scope = search_cursor_scope(params);
+        let decoded_cursor = decode_cursor(params.cursor.as_deref()).filter(|candidate| {
+            candidate.kind == "tantivy-search-after"
+                && candidate.scope.as_deref() == Some(&cursor_scope)
+        });
+        let mut after = decoded_cursor.as_ref().and_then(tantivy_cursor);
+        let started_at_beginning = after.is_none();
+        let batch_size =
+            search_candidate_limit(params, limit).max(limit.saturating_add(1) as usize);
+        let mut ranked_items = Vec::with_capacity(limit.saturating_add(1) as usize);
+        let mut document_map: HashMap<i64, Arc<SearchDocument>> = HashMap::new();
+        let mut item_cursors = HashMap::new();
+        let semantic_map = HashMap::new();
+        let mut total_hits: usize;
+        let exhausted;
+
+        loop {
+            let lexical = super::tantivy_index::search_after_with_total(
+                &self.storage_dir,
+                query,
+                batch_size,
+                after,
+            )?;
+            total_hits = lexical.total_hits;
+            let fetched = lexical.hits.len();
+            if fetched == 0 {
+                exhausted = true;
+                break;
+            }
+
+            let mut cursor_for_id = HashMap::with_capacity(fetched);
+            let hits = lexical
+                .hits
+                .iter()
+                .map(|hit| {
+                    let cursor = super::tantivy_index::TantivySearchCursor {
+                        score: hit.score,
+                        segment_ord: hit.segment_ord,
+                        doc_id: hit.doc_id,
+                    };
+                    cursor_for_id.insert(hit.download_id, cursor);
+                    document_map.insert(hit.download_id, hit.document.clone());
+                    RankedSearchHit {
+                        download_id: hit.download_id,
+                        score: hit.score as f64,
+                        semantic: None,
+                        document: Some(hit.document.clone()),
+                    }
+                })
+                .collect::<Vec<_>>();
+            let last_lexical_cursor =
+                lexical
+                    .hits
+                    .last()
+                    .map(|hit| super::tantivy_index::TantivySearchCursor {
+                        score: hit.score,
+                        segment_ord: hit.segment_ord,
+                        doc_id: hit.doc_id,
+                    });
+            let mut candidates = self.fetch_ranked_sql_matches(params, &hits)?;
+            if !parsed_query.exclude.is_empty() {
+                candidates = filter_excluded_search_results(
+                    &self.storage_dir,
+                    candidates,
+                    parsed_query,
+                    &document_map,
+                );
+            }
+            for item in candidates {
+                if let Some(cursor) = cursor_for_id.get(&item.id).copied() {
+                    item_cursors.insert(item.id, cursor);
+                }
+                ranked_items.push(item);
+            }
+
+            let page_has_lookahead = ranked_items.len() as i64 > limit;
+            let source_exhausted = fetched < batch_size;
+            if page_has_lookahead || source_exhausted {
+                exhausted = source_exhausted;
+                break;
+            }
+            after = last_lexical_cursor;
+        }
+
+        let total_estimate = if !params_have_library_filters(params) {
+            i64::try_from(total_hits).ok()
+        } else if started_at_beginning && exhausted {
+            i64::try_from(ranked_items.len()).ok()
+        } else {
+            None
+        };
+        let has_more = ranked_items.len() as i64 > limit || !exhausted;
+        let page_items = ranked_items
+            .drain(..)
+            .take(limit as usize)
+            .collect::<Vec<_>>();
+        let next_cursor = if has_more {
+            page_items.last().and_then(|item| {
+                item_cursors
+                    .get(&item.id)
+                    .copied()
+                    .and_then(|cursor| encode_tantivy_search_cursor(params, item, cursor))
+            })
+        } else {
+            None
+        };
+        let items = decorate_search_results(
+            &self.storage_dir,
+            page_items,
+            parsed_query,
+            &semantic_map,
+            &document_map,
+        );
+        let semantic_complete = status.semantic_indexed_chunks > 0 || status.total_downloads == 0;
+
+        Ok(SearchV2Result {
+            items,
+            next_cursor,
+            total_estimate,
+            search_meta: SearchMeta {
+                engine: if search_mode == "exact" {
+                    "tantivy-exact".to_string()
+                } else {
+                    "hybrid-local".to_string()
+                },
+                query: (!submitted_query.is_empty()).then(|| submitted_query.to_string()),
+                total_estimate,
+                index_complete: status.is_complete,
+                explanations: search_explanations(
+                    exact_entity.as_ref(),
+                    "tantivy",
+                    status.is_complete,
+                ),
+                exact_entity,
+                semantic_index_complete: Some(semantic_complete),
+                semantic_model_ready: Some(status.semantic_model_ready),
+            },
+            facets_version: status.indexed_downloads,
+        })
+    }
+
+    /// A text search ordered by a library column rather than by relevance.
+    ///
+    /// Tantivy answers "which works match"; SQL answers "in what order", using
+    /// the same sort clause and keyset cursor as an unsearched library listing,
+    /// so paging behaves identically with and without a query.
+    #[allow(clippy::too_many_arguments)]
+    fn search_sorted_lexical_page(
+        &self,
+        params: &SearchV2Params,
+        query: &str,
+        submitted_query: &str,
+        limit: i64,
+        status: &SearchIndexStatus,
+        exact_entity: Option<SearchEntityIntent>,
+        parsed_query: &ParsedSearchQuery,
+    ) -> Result<SearchV2Result, String> {
+        let matched_ids = super::tantivy_index::matching_download_ids(&self.storage_dir, query)?;
+        let semantic_complete = status.semantic_indexed_chunks > 0 || status.total_downloads == 0;
+        let mut explanations =
+            search_explanations(exact_entity.as_ref(), "tantivy", status.is_complete);
+        explanations.push(format!(
+            "{}で並び替えています（関連度順ではありません）",
+            sort_label(params)
+        ));
+
+        if matched_ids.is_empty() {
+            return Ok(SearchV2Result {
+                items: Vec::new(),
+                next_cursor: None,
+                total_estimate: Some(0),
+                search_meta: SearchMeta {
+                    engine: "tantivy-sorted".to_string(),
+                    query: (!submitted_query.is_empty()).then(|| submitted_query.to_string()),
+                    total_estimate: Some(0),
+                    index_complete: status.is_complete,
+                    explanations,
+                    exact_entity,
+                    semantic_index_complete: Some(semantic_complete),
+                    semantic_model_ready: Some(status.semantic_model_ready),
+                },
+                facets_version: status.indexed_downloads,
+            });
+        }
+
+        let cursor_scope = search_cursor_scope(params);
+        let cursor = decode_cursor(params.cursor.as_deref()).filter(|candidate| {
+            candidate.kind == "sorted-search"
+                && candidate.scope.as_deref() == Some(&cursor_scope)
+                && candidate.sort_by == effective_sort_by(params)
+                && candidate.sort_order == effective_sort_order(params)
+        });
+
+        let conn = self.read_conn()?;
+        // The id set travels as one JSON parameter: a placeholder per id would
+        // blow past SQLite's variable limit on a broad query.
+        let id_json = serde_json::to_string(&matched_ids)
+            .map_err(|e| format!("Search id encoding failed: {e}"))?;
+        let mut sql = download_select_sql_for_projection(
+            params.projection.as_deref(),
+            "NULL",
+            &sort_key_select_expr(params),
+        );
+        let mut wheres = vec!["d.id IN (SELECT value FROM json_each(?))".to_string()];
+        let mut bind_values: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(id_json.clone())];
+        append_library_filters(params, &mut wheres, &mut bind_values);
+        append_keyset_filter(params, cursor.as_ref(), &mut wheres, &mut bind_values);
+        sql.push_str(" WHERE ");
+        sql.push_str(&wheres.join(" AND "));
+        sql.push_str(&sort_clause(params));
+        sql.push_str(" LIMIT ?");
+        bind_values.push(Box::new(limit + 1));
+        if let Some(offset) = page_offset(params) {
+            sql.push_str(" OFFSET ?");
+            bind_values.push(Box::new(offset));
+        }
+        let mut items = query_download_entries(&conn, &sql, &bind_values)?;
+        drop(conn);
+
+        if !parsed_query.exclude.is_empty() {
+            items = filter_excluded_search_results(
+                &self.storage_dir,
+                items,
+                parsed_query,
+                &HashMap::new(),
+            );
+        }
+        let has_more = items.len() as i64 > limit;
+        items.truncate(limit as usize);
+
+        let total_estimate = self.count_sorted_search_matches(&id_json, params).ok();
+        let next_cursor = if has_more {
+            items.last().and_then(|item| {
+                encode_cursor(&SearchCursor {
+                    kind: "sorted-search".to_string(),
+                    scope: Some(cursor_scope.clone()),
+                    sort_by: effective_sort_by(params),
+                    sort_order: effective_sort_order(params),
+                    value: item
+                        .sort_key
+                        .clone()
+                        .or_else(|| fallback_sort_value(params, item)),
+                    id: Some(item.id),
+                    score: None,
+                    downloaded_at: Some(item.downloaded_at.clone()),
+                    tantivy_score: None,
+                    tantivy_segment_ord: None,
+                    tantivy_doc_id: None,
+                })
+            })
+        } else {
+            None
+        };
+
+        let items = decorate_search_results(
+            &self.storage_dir,
+            items,
+            parsed_query,
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+
+        Ok(SearchV2Result {
+            items,
+            next_cursor,
+            total_estimate,
+            search_meta: SearchMeta {
+                engine: "tantivy-sorted".to_string(),
+                query: (!submitted_query.is_empty()).then(|| submitted_query.to_string()),
+                total_estimate,
+                index_complete: status.is_complete,
+                explanations,
+                exact_entity,
+                semantic_index_complete: Some(semantic_complete),
+                semantic_model_ready: Some(status.semantic_model_ready),
+            },
+            facets_version: status.indexed_downloads,
+        })
+    }
+
+    fn count_sorted_search_matches(
+        &self,
+        id_json: &str,
+        params: &SearchV2Params,
+    ) -> Result<i64, String> {
+        let conn = self.read_conn()?;
+        let mut sql =
+            "SELECT COUNT(*) FROM downloads d WHERE d.id IN (SELECT value FROM json_each(?))"
+                .to_string();
+        let mut wheres = Vec::new();
+        let mut bind_values: Vec<Box<dyn rusqlite::types::ToSql>> =
+            vec![Box::new(id_json.to_string())];
+        append_library_filters(params, &mut wheres, &mut bind_values);
+        if !wheres.is_empty() {
+            sql.push_str(" AND ");
+            sql.push_str(&wheres.join(" AND "));
+        }
+        let refs: Vec<&dyn rusqlite::types::ToSql> =
+            bind_values.iter().map(|value| value.as_ref()).collect();
+        conn.query_row(&sql, refs.as_slice(), |row| row.get(0))
+            .map_err(|e| format!("Sorted search count failed: {e}"))
     }
 
     fn search_sql_page(
@@ -1467,6 +2763,13 @@ impl Database {
         sql.push_str(&sort_clause(params));
         sql.push_str(" LIMIT ?");
         bind_values.push(Box::new(limit));
+        // A page number skips ahead instead of walking there with a cursor.
+        // Only valid alongside a stable ordering, which is why nothing offsets
+        // a relevance search.
+        if let Some(offset) = page_offset(params) {
+            sql.push_str(" OFFSET ?");
+            bind_values.push(Box::new(offset));
+        }
         query_download_entries(&conn, &sql, &bind_values)
     }
 
@@ -1629,6 +2932,176 @@ impl Database {
             results.push(row.map_err(|e| format!("Row read failed: {}", e))?);
         }
         Ok(results)
+    }
+
+    pub fn get_reader_metadata(&self, download_id: i64) -> Result<ReaderMetadata, String> {
+        let download = self.get_download(download_id)?;
+        let versions = self.get_versions(download_id)?;
+        let conn = self.read_conn()?;
+        let active_edit_revision = active_edit_revision_locked(&conn, download_id)?;
+        Ok(ReaderMetadata {
+            asset_count: download.asset_count,
+            download,
+            versions,
+            is_edited: active_edit_revision.is_some(),
+            active_edit_revision,
+        })
+    }
+
+    pub fn get_reader_content_page(
+        &self,
+        download_id: i64,
+        version: Option<i64>,
+        page: usize,
+    ) -> Result<ReaderContentPage, String> {
+        let content = self.get_cached_reader_content(download_id, version)?;
+        let page_count = content.pages.len().max(1);
+        let page = page.min(page_count.saturating_sub(1));
+        let html = content.pages.get(page).cloned().unwrap_or_default();
+        Ok(ReaderContentPage {
+            page,
+            page_count,
+            plain_text: plain_text_from_reader_html(&html),
+            html,
+            total_plain_text_chars: content.total_plain_text_chars,
+        })
+    }
+
+    pub fn search_reader_content(
+        &self,
+        download_id: i64,
+        version: Option<i64>,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<ReaderSearchHit>, String> {
+        let query = query.trim().to_lowercase();
+        if query.is_empty() {
+            return Ok(Vec::new());
+        }
+        let content = self.get_cached_reader_content(download_id, version)?;
+        let mut hits = Vec::new();
+        for (page, html) in content.pages.iter().enumerate() {
+            let plain = plain_text_from_reader_html(html);
+            let normalized = plain.to_lowercase();
+            let count = normalized.match_indices(&query).count();
+            if count == 0 {
+                continue;
+            }
+            let byte_index = normalized.find(&query).unwrap_or(0);
+            let char_index = normalized[..byte_index].chars().count();
+            let chars = plain.chars().collect::<Vec<_>>();
+            let start = char_index.saturating_sub(42);
+            let end = (char_index + query.chars().count() + 70).min(chars.len());
+            let snippet = format!(
+                "{}{}{}",
+                if start > 0 { "…" } else { "" },
+                chars[start..end].iter().collect::<String>(),
+                if end < chars.len() { "…" } else { "" }
+            );
+            hits.push(ReaderSearchHit {
+                page: page + 1,
+                snippet,
+                count,
+            });
+            if hits.len() >= limit.clamp(1, 200) {
+                break;
+            }
+        }
+        Ok(hits)
+    }
+
+    fn get_cached_reader_content(
+        &self,
+        download_id: i64,
+        version: Option<i64>,
+    ) -> Result<ReaderCacheEntry, String> {
+        let download = self.get_download(download_id)?;
+        let versions = self.get_versions(download_id)?;
+        let conn = self.read_conn()?;
+        let active_edit = if version.is_none() {
+            active_edit_revision_locked(&conn, download_id)?
+        } else {
+            None
+        };
+        let stamp = if let Some(edit) = &active_edit {
+            format!(
+                "edit:{}:{}:{}",
+                edit.id, edit.updated_at, download.asset_count
+            )
+        } else {
+            let target_version = version.unwrap_or(download.current_version);
+            let target_path = reader_version_path(&download, &versions, target_version);
+            let metadata = std::fs::metadata(&target_path).ok();
+            let modified = metadata
+                .as_ref()
+                .and_then(|meta| meta.modified().ok())
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|duration| duration.as_nanos())
+                .unwrap_or(0);
+            format!(
+                "source:{target_version}:{}:{modified}:{}:{}",
+                metadata.as_ref().map(|meta| meta.len()).unwrap_or(0),
+                download.content_hash.as_deref().unwrap_or(""),
+                download.asset_count
+            )
+        };
+        let key = ReaderCacheKey {
+            storage: self.storage_dir.clone(),
+            download_id,
+            requested_version: version,
+            stamp,
+        };
+        let tick = READER_CACHE_TICK.fetch_add(1, AtomicOrdering::Relaxed);
+        let cache = READER_CONTENT_CACHE.get_or_init(Default::default);
+        if let Some(entry) = cache.lock().get_mut(&key) {
+            entry.last_used = tick;
+            return Ok(entry.clone());
+        }
+
+        let assets = self.get_assets(download_id)?;
+        let (html, plain_text) = if let Some(edit) = active_edit {
+            let blocks = blocks_for_revision_locked(&conn, edit.id)?;
+            (
+                blocks_to_html(&blocks, &assets),
+                blocks_to_plain_text(&blocks),
+            )
+        } else {
+            drop(conn);
+            reader_source_content(self, &download, &versions, version, &assets)?
+        };
+        let pages = Arc::new(paginate_reader_html(&html, &download.source));
+        let entry = ReaderCacheEntry {
+            bytes: pages.iter().map(String::len).sum::<usize>() + plain_text.len(),
+            pages,
+            total_plain_text_chars: plain_text.chars().count(),
+            last_used: tick,
+        };
+        let mut cache = cache.lock();
+        cache.retain(|candidate, _| {
+            candidate.storage != key.storage
+                || candidate.download_id != download_id
+                || candidate.requested_version != version
+                || candidate == &key
+        });
+        cache.insert(key, entry.clone());
+        while cache.len() > READER_CACHE_MAX_DOCUMENTS
+            || cache.values().map(|entry| entry.bytes).sum::<usize>() > READER_CACHE_MAX_BYTES
+        {
+            let Some(oldest) = cache
+                .iter()
+                .min_by_key(|(_, entry)| entry.last_used)
+                .map(|(key, _)| key.clone())
+            else {
+                break;
+            };
+            // Keep one oversized current document cached; otherwise the next
+            // page request would immediately parse it again.
+            if cache.len() == 1 {
+                break;
+            }
+            cache.remove(&oldest);
+        }
+        Ok(entry)
     }
 
     pub fn get_reader_document(
@@ -1882,6 +3355,7 @@ impl Database {
             }
         }
 
+        self.invalidate_index_status();
         Ok(())
     }
 
@@ -2425,6 +3899,649 @@ impl Database {
         })
     }
 
+    pub fn get_library_diagnostics(&self) -> Result<LibraryDiagnostics, String> {
+        self.get_library_diagnostics_with_progress(&|_| {})
+    }
+
+    /// Measuring the library is not one operation but six, and the last of them
+    /// walks the whole storage tree. Reporting which one is running is the
+    /// difference between "this is working" and "this has hung".
+    pub fn get_library_diagnostics_with_progress(
+        &self,
+        on_progress: &dyn Fn(DiagnosticsProgress),
+    ) -> Result<LibraryDiagnostics, String> {
+        const STEPS: i64 = 6;
+        let report = |step: i64, phase: &'static str| {
+            on_progress(DiagnosticsProgress {
+                step,
+                total: STEPS,
+                phase,
+            });
+        };
+        report(0, "database");
+        let (
+            total_downloads,
+            total_assets,
+            total_versions,
+            total_text_length,
+            benchmark_query,
+            sqlite_page_count,
+            sqlite_free_pages,
+            sqlite_cache_size_bytes,
+            orphan_asset_rows,
+            orphan_asset_bytes,
+        ) = {
+            let conn = self.read_conn()?;
+            let total_downloads = conn
+                .query_row("SELECT COUNT(*) FROM downloads", [], |row| row.get(0))
+                .unwrap_or(0);
+            let total_assets = conn
+                .query_row("SELECT COUNT(*) FROM assets", [], |row| row.get(0))
+                .unwrap_or(0);
+            let total_versions = conn
+                .query_row("SELECT COUNT(*) FROM download_versions", [], |row| {
+                    row.get(0)
+                })
+                .unwrap_or(0);
+            let total_text_length = conn
+                .query_row(
+                    "SELECT COALESCE(SUM(text_length), 0) FROM downloads",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap_or(0);
+            // A common real author is stable enough to make repeated measurements
+            // comparable and avoids shipping any user content outside the process.
+            let benchmark_query = conn
+                .query_row(
+                    "SELECT author_name FROM downloads
+                     WHERE TRIM(author_name) != ''
+                     GROUP BY author_name
+                     ORDER BY COUNT(*) DESC, author_name ASC LIMIT 1",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .unwrap_or(None);
+            let page_size = conn
+                .query_row("PRAGMA page_size", [], |row| row.get::<_, i64>(0))
+                .unwrap_or(4096)
+                .max(1);
+            let sqlite_page_count: i64 = conn
+                .query_row("PRAGMA page_count", [], |row| row.get(0))
+                .unwrap_or(0);
+            let sqlite_free_pages: i64 = conn
+                .query_row("PRAGMA freelist_count", [], |row| row.get(0))
+                .unwrap_or(0);
+            let cache_pages = conn
+                .query_row("PRAGMA cache_size", [], |row| row.get::<_, i64>(0))
+                .unwrap_or(-64_000);
+            let sqlite_cache_size_bytes = if cache_pages < 0 {
+                cache_pages.unsigned_abs().saturating_mul(1024)
+            } else {
+                (cache_pages as u64).saturating_mul(page_size as u64)
+            };
+            let (orphan_asset_rows, orphan_asset_bytes) = conn
+                .query_row(
+                    "SELECT COUNT(*), COALESCE(SUM(a.file_size_bytes), 0)
+                     FROM assets a LEFT JOIN downloads d ON d.id = a.download_id
+                     WHERE d.id IS NULL",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap_or((0, 0));
+            (
+                total_downloads,
+                total_assets,
+                total_versions,
+                total_text_length,
+                benchmark_query,
+                sqlite_page_count,
+                sqlite_free_pages,
+                sqlite_cache_size_bytes,
+                orphan_asset_rows,
+                orphan_asset_bytes,
+            )
+        };
+
+        let base_params = SearchV2Params {
+            text: None,
+            query: None,
+            source: None,
+            content_type: None,
+            sort_by: Some("downloadedAt".to_string()),
+            sort_order: Some("desc".to_string()),
+            limit: Some(80),
+            cursor: None,
+            favorite: None,
+            tags_include: None,
+            tags_exclude: None,
+            tag_filter_mode: None,
+            authors_include: None,
+            authors_exclude: None,
+            min_char_count: None,
+            max_char_count: None,
+            asset_filter: None,
+            watch_filter: None,
+            person_source: None,
+            person_key: None,
+            series_source: None,
+            series_key: None,
+            offset: None,
+            ids_include: None,
+            view_mode: Some("list".to_string()),
+            projection: Some("libraryList".to_string()),
+            search_mode: Some("lexical".to_string()),
+        };
+        report(1, "list-benchmark");
+        let mut list_samples = Vec::with_capacity(7);
+        for _ in 0..7 {
+            let started = std::time::Instant::now();
+            let _ = self.search_downloads_v2(&base_params)?;
+            list_samples.push(started.elapsed().as_secs_f64() * 1_000.0);
+        }
+        let list_first_page_ms = list_samples[0];
+        let (list_p50_ms, list_p95_ms) = benchmark_percentiles(&mut list_samples);
+
+        report(2, "search-benchmark");
+        let lexical_samples = if let Some(query) = benchmark_query.as_ref() {
+            let mut params = base_params.clone();
+            params.query = Some(format!("\"{}\"", query.replace('"', "")));
+            params.sort_by = Some("relevance".to_string());
+            let mut samples = Vec::with_capacity(7);
+            for _ in 0..7 {
+                let started = std::time::Instant::now();
+                let _ = self.search_downloads_v2(&params)?;
+                samples.push(started.elapsed().as_secs_f64() * 1_000.0);
+            }
+            Some(samples)
+        } else {
+            None
+        };
+        let lexical_search_ms = lexical_samples.as_ref().map(|samples| samples[0]);
+        let (lexical_search_p50_ms, lexical_search_p95_ms) = lexical_samples
+            .map(|mut samples| {
+                let (p50, p95) = benchmark_percentiles(&mut samples);
+                (Some(p50), Some(p95))
+            })
+            .unwrap_or((None, None));
+        report(3, "author-benchmark");
+        let (exact_author_p50_ms, exact_author_p95_ms) =
+            if let Some(query) = benchmark_query.as_ref() {
+                let mut params = base_params.clone();
+                params.query = Some(query.clone());
+                params.sort_by = Some("relevance".to_string());
+                let mut samples = Vec::with_capacity(7);
+                for _ in 0..7 {
+                    let started = std::time::Instant::now();
+                    let _ = self.search_downloads_v2(&params)?;
+                    samples.push(started.elapsed().as_secs_f64() * 1_000.0);
+                }
+                let (p50, p95) = benchmark_percentiles(&mut samples);
+                (Some(p50), Some(p95))
+            } else {
+                (None, None)
+            };
+
+        let app_data = self
+            .storage_dir
+            .parent()
+            .unwrap_or(self.storage_dir.as_path());
+        let known_asset_paths = {
+            let conn = self.read_conn()?;
+            let mut stmt = conn
+                .prepare("SELECT local_path FROM assets")
+                .map_err(|e| format!("Asset diagnostics prepare failed: {e}"))?;
+            let paths = stmt
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(|e| format!("Asset diagnostics query failed: {e}"))?;
+            let mut known = std::collections::HashSet::new();
+            for path in paths {
+                known.insert(normalized_diagnostic_path(Path::new(
+                    &path.map_err(|e| format!("Asset diagnostics row failed: {e}"))?,
+                )));
+            }
+            known
+        };
+        report(4, "storage-scan");
+        let (orphan_asset_files, orphan_asset_file_bytes) =
+            orphan_asset_file_stats(&self.storage_dir, &known_asset_paths);
+        report(5, "index-size");
+        let wal_path = PathBuf::from(format!("{}-wal", self.db_path.display()));
+        let live_pages = sqlite_page_count.saturating_sub(sqlite_free_pages).max(0) as u64;
+        let page_size = if sqlite_page_count > 0 {
+            file_size_or_zero(&self.db_path) / sqlite_page_count as u64
+        } else {
+            0
+        };
+        let live_database_bytes = live_pages.saturating_mul(page_size);
+        let fragmentation_percent = if sqlite_page_count > 0 {
+            sqlite_free_pages.max(0) as f64 / sqlite_page_count as f64 * 100.0
+        } else {
+            0.0
+        };
+        let lexical_index_root = self.storage_dir.join("search-index");
+        Ok(LibraryDiagnostics {
+            measured_at: chrono::Utc::now().to_rfc3339(),
+            total_downloads,
+            total_assets,
+            total_versions,
+            total_text_length,
+            database_size_bytes: file_size_or_zero(&self.db_path),
+            wal_size_bytes: file_size_or_zero(&wal_path),
+            storage_size_bytes: recursive_file_size(&self.storage_dir),
+            lexical_index_size_bytes: recursive_file_size(&lexical_index_root),
+            lexical_index_file_count: recursive_file_count(&lexical_index_root, None),
+            lexical_index_segment_count: recursive_file_count(&lexical_index_root, Some("store")),
+            semantic_index_size_bytes: recursive_file_size(&app_data.join("search")),
+            sqlite_page_count,
+            sqlite_free_pages,
+            sqlite_cache_size_bytes,
+            live_database_bytes,
+            fragmentation_percent,
+            orphan_asset_rows,
+            orphan_asset_bytes,
+            orphan_asset_files,
+            orphan_asset_file_bytes,
+            process_memory_bytes: current_process_memory_bytes(),
+            list_first_page_ms,
+            list_p50_ms,
+            list_p95_ms,
+            lexical_search_ms,
+            lexical_search_p50_ms,
+            lexical_search_p95_ms,
+            exact_author_p50_ms,
+            exact_author_p95_ms,
+            benchmark_query,
+            search_index: self.get_search_index_status()?,
+        })
+    }
+
+    /// Runs SQLite's lightweight planner maintenance, and optionally performs
+    /// an explicit compaction. Compaction is never automatic: it can require a
+    /// temporary copy roughly as large as the database and blocks writers.
+    pub fn maintain_library_database(
+        &self,
+        compact: bool,
+    ) -> Result<LibraryMaintenanceResult, String> {
+        let before_bytes = file_size_or_zero(&self.db_path);
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute_batch("PRAGMA wal_checkpoint(PASSIVE); PRAGMA optimize;")
+            .map_err(|e| format!("SQLite optimize failed: {e}"))?;
+        if compact {
+            let required = before_bytes
+                .saturating_add(before_bytes / 4)
+                .saturating_add(256 * 1024 * 1024);
+            let parent = self
+                .db_path
+                .parent()
+                .ok_or_else(|| "Database path has no parent".to_string())?;
+            let available = available_space_bytes(parent).ok_or_else(|| {
+                "Could not determine free disk space; compaction was not started".to_string()
+            })?;
+            if available < required {
+                return Err(format!(
+                    "Not enough free disk space for safe compaction (required {required} bytes, available {available} bytes)"
+                ));
+            }
+            conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); VACUUM; PRAGMA optimize;")
+                .map_err(|e| format!("SQLite compaction failed: {e}"))?;
+        }
+        drop(conn);
+        let after_bytes = file_size_or_zero(&self.db_path);
+        Ok(LibraryMaintenanceResult {
+            compacted: compact,
+            before_bytes,
+            after_bytes,
+            reclaimed_bytes: before_bytes.saturating_sub(after_bytes),
+        })
+    }
+
+    /// The four numbers the library sidebar shows, in one pass over the table.
+    ///
+    /// `reading_ids` comes from the client because reading positions are kept
+    /// per device; counting how many of them still exist is what stops the
+    /// shelf from advertising works that were deleted.
+    pub fn get_library_shelf_counts(
+        &self,
+        reading_ids: &[i64],
+    ) -> Result<LibraryShelfCounts, String> {
+        let conn = self.read_conn()?;
+        let (total, favorite, watched) = conn
+            .query_row(
+                "SELECT COUNT(*),
+                        COALESCE(SUM(favorite), 0),
+                        COALESCE(SUM(watch_updates), 0)
+                 FROM downloads",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .map_err(|e| format!("Shelf count failed: {e}"))?;
+
+        let bounded = bounded_id_list(reading_ids);
+        let reading = if bounded.is_empty() {
+            0
+        } else {
+            let encoded = serde_json::to_string(&bounded)
+                .map_err(|e| format!("Shelf id encoding failed: {e}"))?;
+            conn.query_row(
+                "SELECT COUNT(*) FROM downloads WHERE id IN (SELECT value FROM json_each(?1))",
+                params![encoded],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("Reading shelf count failed: {e}"))?
+        };
+
+        Ok(LibraryShelfCounts {
+            total,
+            favorite,
+            watched,
+            reading,
+        })
+    }
+
+    /// The series an author has works in, most recent first.
+    ///
+    /// An author page that can only list works flat makes a prolific author
+    /// unreadable: the series are how their output is actually organised.
+    pub fn list_entity_series(
+        &self,
+        source: &str,
+        person_key: &str,
+        limit: i64,
+    ) -> Result<Vec<EntityFacet>, String> {
+        let conn = self.read_conn()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT ds.series_source,
+                        ds.series_key,
+                        COALESCE(s.title, ds.title) AS display_name,
+                        COUNT(DISTINCT d.id) AS count,
+                        s.cover_path,
+                        s.description,
+                        s.updated_at,
+                        MAX(d.downloaded_at) AS latest_downloaded_at,
+                        (
+                            SELECT d2.title FROM downloads d2
+                            JOIN download_series ds2 ON ds2.download_id = d2.id
+                            WHERE ds2.series_source = ds.series_source
+                              AND ds2.series_key = ds.series_key
+                            ORDER BY COALESCE(ds2.content_order, 999999), d2.id
+                            LIMIT 1
+                        ) AS sample_title
+                 FROM download_series ds
+                 JOIN downloads d ON d.id = ds.download_id
+                 JOIN download_people dp ON dp.download_id = d.id
+                 LEFT JOIN series s ON s.source = ds.series_source AND s.source_key = ds.series_key
+                 WHERE dp.person_source = ?1 AND dp.person_key = ?2
+                 GROUP BY ds.series_source, ds.series_key, COALESCE(s.title, ds.title)
+                 ORDER BY MAX(COALESCE(d.source_created_at, d.downloaded_at)) DESC, count DESC
+                 LIMIT ?3",
+            )
+            .map_err(|e| format!("Entity series prepare failed: {e}"))?;
+        let rows = stmt
+            .query_map(params![source, person_key, limit.clamp(1, 200)], |row| {
+                Ok(EntityFacet {
+                    source: row.get(0)?,
+                    source_key: row.get(1)?,
+                    display_name: row.get(2)?,
+                    count: row.get(3)?,
+                    cover_path: row.get(4)?,
+                    description: row.get(5)?,
+                    updated_at: row.get(6)?,
+                    latest_downloaded_at: row.get(7)?,
+                    sample_title: row.get(8)?,
+                    icon_path: None,
+                    banner_path: None,
+                })
+            })
+            .map_err(|e| format!("Entity series query failed: {e}"))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(|e| format!("Entity series row failed: {e}"))?);
+        }
+        Ok(out)
+    }
+
+    /// The tags the works of one author or series carry, most used first.
+    ///
+    /// A series is as worth narrowing as an author: a long one accumulates
+    /// enough tags that they are the only practical way through it.
+    pub fn list_entity_tags(
+        &self,
+        kind: &str,
+        source: &str,
+        entity_key: &str,
+        limit: i64,
+    ) -> Result<Vec<FacetCount>, String> {
+        let conn = self.read_conn()?;
+        // The relation table is the only difference; the join is otherwise the
+        // same, and the kind is a closed set rather than caller-supplied SQL.
+        let sql = if kind == "series" {
+            "SELECT t.name, COUNT(DISTINCT d.id) AS count
+             FROM download_series ds
+             JOIN downloads d ON d.id = ds.download_id
+             JOIN download_tags dt ON dt.download_id = d.id
+             JOIN tags t ON t.id = dt.tag_id
+             WHERE ds.series_source = ?1 AND ds.series_key = ?2
+             GROUP BY t.id, t.name
+             ORDER BY count DESC, t.name ASC
+             LIMIT ?3"
+        } else {
+            "SELECT t.name, COUNT(DISTINCT d.id) AS count
+             FROM download_people dp
+             JOIN downloads d ON d.id = dp.download_id
+             JOIN download_tags dt ON dt.download_id = d.id
+             JOIN tags t ON t.id = dt.tag_id
+             WHERE dp.person_source = ?1 AND dp.person_key = ?2
+             GROUP BY t.id, t.name
+             ORDER BY count DESC, t.name ASC
+             LIMIT ?3"
+        };
+        let mut stmt = conn
+            .prepare(sql)
+            .map_err(|e| format!("Entity tag prepare failed: {e}"))?;
+        let rows = stmt
+            .query_map(params![source, entity_key, limit.clamp(1, 200)], |row| {
+                Ok(FacetCount {
+                    name: row.get(0)?,
+                    count: row.get(1)?,
+                })
+            })
+            .map_err(|e| format!("Entity tag query failed: {e}"))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(|e| format!("Entity tag row failed: {e}"))?);
+        }
+        Ok(out)
+    }
+
+    pub fn list_saved_searches(&self) -> Result<Vec<SavedSearch>, String> {
+        let conn = self.read_conn()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, name, query, params_json, created_at, updated_at
+                 FROM saved_searches
+                 ORDER BY created_at ASC, id ASC",
+            )
+            .map_err(|e| format!("Saved search query prepare failed: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(SavedSearch {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    query: row.get(2)?,
+                    params_json: row.get(3)?,
+                    created_at: row.get(4)?,
+                    updated_at: row.get(5)?,
+                })
+            })
+            .map_err(|e| format!("Saved search query failed: {e}"))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(|e| format!("Saved search row read failed: {e}"))?);
+        }
+        Ok(out)
+    }
+
+    /// Creates or updates one saved search.
+    ///
+    /// Names are unique, and saving again under a name that already exists is
+    /// the reader replacing that search, not an error to report back at them.
+    pub fn upsert_saved_search(&self, input: &SavedSearchInput) -> Result<SavedSearch, String> {
+        let name = input.name.trim();
+        if name.is_empty() {
+            return Err("保存する検索の名前を入力してください".to_string());
+        }
+        if name.chars().count() > MAX_SAVED_SEARCH_NAME {
+            return Err(format!(
+                "名前は{MAX_SAVED_SEARCH_NAME}文字以内にしてください"
+            ));
+        }
+        if input.params_json.len() > MAX_SAVED_SEARCH_PARAMS_BYTES {
+            return Err("検索条件が大きすぎます".to_string());
+        }
+        serde_json::from_str::<serde_json::Value>(&input.params_json)
+            .map_err(|_| "検索条件を保存できませんでした".to_string())?;
+
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let now = chrono::Utc::now().to_rfc3339();
+        let query = input
+            .query
+            .as_deref()
+            .map(|value| value.chars().take(MAX_SAVED_SEARCH_QUERY).collect::<String>());
+
+        let existing_id: Option<i64> = match input.id {
+            Some(id) => Some(id),
+            None => conn
+                .query_row(
+                    "SELECT id FROM saved_searches WHERE name = ?1",
+                    params![name],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|e| format!("Saved search lookup failed: {e}"))?,
+        };
+
+        let id = match existing_id {
+            Some(id) => {
+                let changed = conn
+                    .execute(
+                        "UPDATE saved_searches
+                         SET name = ?2, query = ?3, params_json = ?4, updated_at = ?5
+                         WHERE id = ?1",
+                        params![id, name, query, input.params_json, now],
+                    )
+                    .map_err(|e| format!("Saved search update failed: {e}"))?;
+                if changed == 0 {
+                    return Err("保存した検索が見つかりません".to_string());
+                }
+                id
+            }
+            None => {
+                let count: i64 = conn
+                    .query_row("SELECT COUNT(*) FROM saved_searches", [], |row| row.get(0))
+                    .unwrap_or(0);
+                if count >= MAX_SAVED_SEARCHES {
+                    return Err(format!(
+                        "保存できる検索は{MAX_SAVED_SEARCHES}件までです。不要なものを削除してください"
+                    ));
+                }
+                conn.execute(
+                    "INSERT INTO saved_searches (name, query, params_json, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?4)",
+                    params![name, query, input.params_json, now],
+                )
+                .map_err(|e| format!("Saved search insert failed: {e}"))?;
+                conn.last_insert_rowid()
+            }
+        };
+
+        conn.query_row(
+            "SELECT id, name, query, params_json, created_at, updated_at
+             FROM saved_searches WHERE id = ?1",
+            params![id],
+            |row| {
+                Ok(SavedSearch {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    query: row.get(2)?,
+                    params_json: row.get(3)?,
+                    created_at: row.get(4)?,
+                    updated_at: row.get(5)?,
+                })
+            },
+        )
+        .map_err(|e| format!("Saved search read-back failed: {e}"))
+    }
+
+    pub fn delete_saved_search(&self, id: i64) -> Result<bool, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let removed = conn
+            .execute("DELETE FROM saved_searches WHERE id = ?1", params![id])
+            .map_err(|e| format!("Saved search delete failed: {e}"))?;
+        Ok(removed > 0)
+    }
+
+    pub fn search_index_segment_count(&self) -> Result<u64, String> {
+        super::tantivy_index::searchable_segment_count(&self.storage_dir).map(|count| count as u64)
+    }
+
+    /// Explicit, disk-preflighted Tantivy maintenance. This is kept separate
+    /// from the lightweight SQLite optimization because a multi-gigabyte merge
+    /// can take minutes and temporarily needs space for both segment sets.
+    pub fn optimize_search_index(&self) -> Result<SearchIndexOptimizationResult, String> {
+        let index_root = self.storage_dir.join("search-index");
+        let before_bytes = recursive_file_size(&index_root);
+        let before_segments =
+            super::tantivy_index::searchable_segment_count(&self.storage_dir)? as u64;
+        if before_segments <= 1 {
+            let started = std::time::Instant::now();
+            let (reported_before, reported_after) =
+                super::tantivy_index::optimize_segments(&self.storage_dir)?;
+            let after_bytes = recursive_file_size(&index_root);
+            return Ok(SearchIndexOptimizationResult {
+                optimized: false,
+                before_segments: reported_before as u64,
+                after_segments: reported_after as u64,
+                before_bytes,
+                after_bytes,
+                reclaimed_bytes: before_bytes.saturating_sub(after_bytes),
+                elapsed_ms: started.elapsed().as_secs_f64() * 1_000.0,
+            });
+        }
+
+        let parent = index_root
+            .parent()
+            .ok_or_else(|| "Search index path has no parent".to_string())?;
+        let required = before_bytes
+            .saturating_add(before_bytes / 10)
+            .saturating_add(512 * 1024 * 1024);
+        let available = available_space_bytes(parent).ok_or_else(|| {
+            "Could not determine free disk space; search index optimization was not started"
+                .to_string()
+        })?;
+        if available < required {
+            return Err(format!(
+                "Not enough free disk space for safe search index optimization (required {required} bytes, available {available} bytes)"
+            ));
+        }
+
+        let started = std::time::Instant::now();
+        let (reported_before, reported_after) =
+            super::tantivy_index::optimize_segments(&self.storage_dir)?;
+        let after_bytes = recursive_file_size(&index_root);
+        Ok(SearchIndexOptimizationResult {
+            optimized: reported_after < reported_before,
+            before_segments: reported_before as u64,
+            after_segments: reported_after as u64,
+            before_bytes,
+            after_bytes,
+            reclaimed_bytes: before_bytes.saturating_sub(after_bytes),
+            elapsed_ms: started.elapsed().as_secs_f64() * 1_000.0,
+        })
+    }
+
     pub fn get_dashboard_summary(&self) -> Result<DashboardSummary, String> {
         let stats = self.get_stats()?;
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
@@ -2592,6 +4709,8 @@ impl Database {
                 person_key: None,
                 series_source: None,
                 series_key: None,
+                offset: None,
+                ids_include: None,
                 view_mode: Some("compact".to_string()),
                 projection: Some("libraryCompact".to_string()),
                 search_mode: None,
@@ -2827,7 +4946,10 @@ impl Database {
                  ORDER BY count DESC, author_name ASC
                  LIMIT 500",
             )?,
-            author_entities: if !include_entities { Vec::new() } else { collect_entities(
+            author_entities: if !include_entities {
+                Vec::new()
+            } else {
+                collect_entities(
                 "SELECT
                     d.source,
                     d.author_id,
@@ -2853,8 +4975,12 @@ impl Database {
                  GROUP BY d.source, d.author_id, COALESCE(p.display_name, d.author_name), p.icon_path, p.cover_path, p.description, p.updated_at
                  ORDER BY count DESC, display_name ASC
                  LIMIT 60",
-            )? },
-            series: if !include_entities { Vec::new() } else { collect_entities(
+            )?
+            },
+            series: if !include_entities {
+                Vec::new()
+            } else {
+                collect_entities(
                 "SELECT
                     ds.series_source,
                     ds.series_key,
@@ -2882,7 +5008,8 @@ impl Database {
                  GROUP BY ds.series_source, ds.series_key, COALESCE(s.title, ds.title), s.cover_path, s.description, s.updated_at
                  ORDER BY count DESC, title ASC
                  LIMIT 60",
-            )? },
+            )?
+            },
             content_types: collect(
                 "SELECT content_type, COUNT(*) AS count
                  FROM downloads
@@ -3407,6 +5534,49 @@ fn query_text(params: &SearchV2Params) -> &str {
         .trim()
 }
 
+fn plain_entity_query(query: &str) -> bool {
+    !query.is_empty()
+        && query.chars().count() <= 160
+        && !query.contains(':')
+        && !query.contains('"')
+        && !query.starts_with('-')
+        && !query.contains(" -")
+}
+
+fn search_explanations(
+    exact_entity: Option<&SearchEntityIntent>,
+    engine: &str,
+    index_complete: bool,
+) -> Vec<String> {
+    let mut explanations = Vec::with_capacity(3);
+    if let Some(entity) = exact_entity {
+        explanations.push(format!(
+            "{}「{}」への完全一致として解釈し、関係する作品だけに限定しました",
+            if entity.kind == "series" {
+                "シリーズ"
+            } else {
+                "作者"
+            },
+            entity.label
+        ));
+    }
+    explanations.push(match engine {
+        "semantic" => "端末内の意味検索インデックスで関連度を計算しました".to_string(),
+        "tantivy" => {
+            "端末内の全文検索インデックスでタイトル・作者・タグ・シリーズ・本文を照合しました"
+                .to_string()
+        }
+        _ => "保存済みメタデータをSQLiteで厳密に絞り込みました".to_string(),
+    });
+    if !index_complete && engine != "sqlite-metadata" {
+        explanations.push(
+            "全文検索インデックスの構築中のため、未索引の作品は結果に含まれない場合があります"
+                .to_string(),
+        );
+    }
+    explanations
+}
+
 fn effective_search_mode(params: &SearchV2Params) -> String {
     match params.search_mode.as_deref() {
         Some("exact") => "exact",
@@ -3423,7 +5593,7 @@ fn search_candidate_limit(params: &SearchV2Params, page_limit: i64) -> usize {
     } else {
         (2usize, 160usize)
     };
-    page_limit.saturating_mul(multiplier).max(floor).min(1_000)
+    page_limit.saturating_mul(multiplier).max(floor)
 }
 
 fn params_have_library_filters(params: &SearchV2Params) -> bool {
@@ -3506,7 +5676,11 @@ fn blend_search_hits(
                 download_id: hit.download_id,
                 score: 0.0,
                 semantic: None,
+                document: Some(hit.document.clone()),
             });
+            if entry.document.is_none() {
+                entry.document = Some(hit.document.clone());
+            }
             entry.score += score;
         }
     }
@@ -3518,6 +5692,7 @@ fn blend_search_hits(
                 download_id: hit.download_id,
                 score: 0.0,
                 semantic: None,
+                document: None,
             });
             entry.score += score;
             if entry
@@ -3636,6 +5811,13 @@ fn extract_structured_search_filters(
                     params.series_key = Some(value.to_string());
                 }
             }
+            // Compatibility for values emitted by the pre-0.3 suggestion UI.
+            // It used `pixiv:<series-id>` as the visible query even though the
+            // token identifies a series relation, not searchable prose.
+            "pixiv" | "fanbox" if !excluded => {
+                params.series_source = Some(field);
+                params.series_key = Some(value.to_string());
+            }
             "series_title" | "title" => {
                 clean_terms.push(if excluded {
                     format!("-{}", value)
@@ -3732,19 +5914,71 @@ fn decode_cursor(raw: Option<&str>) -> Option<SearchCursor> {
     serde_json::from_slice(&bytes).ok()
 }
 
-fn effective_sort_by(params: &SearchV2Params) -> Option<String> {
-    Some(
-        match params.sort_by.as_deref() {
-            Some("title") => "title",
-            Some("author") => "author",
-            Some("date") => "date",
-            Some("published") => "published",
-            Some("series_order") => "series_order",
-            Some("size") => "size",
-            _ => "date",
+fn normalized_sort_key(params: &SearchV2Params) -> &'static str {
+    // Accept both the original UI names and the database-shaped names used by
+    // newer screens. The result is a closed internal enum represented as a
+    // string, so user input is never interpolated into SQL.
+    match params.sort_by.as_deref() {
+        Some("title") => "title",
+        Some("author" | "author_name") => "author",
+        Some("date" | "downloaded_at") => "date",
+        Some("published" | "source_created_at") => "published",
+        Some("updated" | "source_updated_at") => "updated",
+        Some("series_order") => "series_order",
+        Some("size" | "file_size_bytes") => "size",
+        Some("length" | "text_length") => "length",
+        Some("relevance" | "score") => "relevance",
+        _ => "date",
+    }
+}
+
+/// Whether a text search should be ordered by a library column instead of by
+/// relevance. Relevance stays the default, so a caller that does not ask for an
+/// ordering keeps the behaviour it had.
+fn wants_column_sort(params: &SearchV2Params) -> bool {
+    params.sort_by.is_some() && normalized_sort_key(params) != "relevance"
+}
+
+fn sort_label(params: &SearchV2Params) -> &'static str {
+    let descending = effective_sort_order(params).as_deref() != Some("asc");
+    match normalized_sort_key(params) {
+        "title" => "タイトル順",
+        "author" => "作者名順",
+        "published" => {
+            if descending {
+                "公開日の新しい順"
+            } else {
+                "公開日の古い順"
+            }
         }
-        .to_string(),
-    )
+        "updated" => "更新日順",
+        "size" => {
+            if descending {
+                "容量の大きい順"
+            } else {
+                "容量の小さい順"
+            }
+        }
+        "length" => {
+            if descending {
+                "文字数の多い順"
+            } else {
+                "文字数の少ない順"
+            }
+        }
+        "series_order" => "シリーズ順",
+        _ => {
+            if descending {
+                "保存日の新しい順"
+            } else {
+                "保存日の古い順"
+            }
+        }
+    }
+}
+
+fn effective_sort_by(params: &SearchV2Params) -> Option<String> {
+    Some(normalized_sort_key(params).to_string())
 }
 
 fn effective_sort_order(params: &SearchV2Params) -> Option<String> {
@@ -3760,6 +5994,7 @@ fn effective_sort_order(params: &SearchV2Params) -> Option<String> {
 fn encode_sql_cursor(params: &SearchV2Params, item: &DownloadEntry) -> Option<String> {
     encode_cursor(&SearchCursor {
         kind: "sql".to_string(),
+        scope: None,
         sort_by: effective_sort_by(params),
         sort_order: effective_sort_order(params),
         value: item
@@ -3769,19 +6004,65 @@ fn encode_sql_cursor(params: &SearchV2Params, item: &DownloadEntry) -> Option<St
         id: Some(item.id),
         score: None,
         downloaded_at: None,
+        tantivy_score: None,
+        tantivy_segment_ord: None,
+        tantivy_doc_id: None,
     })
 }
 
-fn encode_search_cursor(item: &DownloadEntry) -> Option<String> {
+fn encode_search_cursor(params: &SearchV2Params, item: &DownloadEntry) -> Option<String> {
     encode_cursor(&SearchCursor {
         kind: "search".to_string(),
+        scope: Some(search_cursor_scope(params)),
         sort_by: Some("relevance".to_string()),
         sort_order: Some("desc".to_string()),
         value: None,
         id: Some(item.id),
         score: item.search_score,
         downloaded_at: Some(item.downloaded_at.clone()),
+        tantivy_score: None,
+        tantivy_segment_ord: None,
+        tantivy_doc_id: None,
     })
+}
+
+fn encode_tantivy_search_cursor(
+    params: &SearchV2Params,
+    item: &DownloadEntry,
+    cursor: super::tantivy_index::TantivySearchCursor,
+) -> Option<String> {
+    encode_cursor(&SearchCursor {
+        kind: "tantivy-search-after".to_string(),
+        scope: Some(search_cursor_scope(params)),
+        sort_by: Some("relevance".to_string()),
+        sort_order: Some("desc".to_string()),
+        value: None,
+        id: Some(item.id),
+        score: item.search_score,
+        downloaded_at: None,
+        tantivy_score: Some(cursor.score),
+        tantivy_segment_ord: Some(cursor.segment_ord),
+        tantivy_doc_id: Some(cursor.doc_id),
+    })
+}
+
+fn tantivy_cursor(cursor: &SearchCursor) -> Option<super::tantivy_index::TantivySearchCursor> {
+    Some(super::tantivy_index::TantivySearchCursor {
+        score: cursor.tantivy_score?,
+        segment_ord: cursor.tantivy_segment_ord?,
+        doc_id: cursor.tantivy_doc_id?,
+    })
+}
+
+fn search_cursor_scope(params: &SearchV2Params) -> String {
+    let mut scoped = params.clone();
+    scoped.cursor = None;
+    scoped.limit = None;
+    scoped.projection = None;
+    scoped.view_mode = None;
+    let mut hasher = Sha256::new();
+    hasher.update(format!("{scoped:?}").as_bytes());
+    URL_SAFE_NO_PAD.encode(hasher.finalize())
 }
 
 fn search_item_is_after_cursor(item: &DownloadEntry, cursor: &SearchCursor) -> bool {
@@ -3811,7 +6092,13 @@ fn fallback_sort_value(params: &SearchV2Params, item: &DownloadEntry) -> Option<
             .source_created_at
             .clone()
             .unwrap_or_else(|| item.downloaded_at.clone()),
+        Some("updated") => item
+            .source_updated_at
+            .clone()
+            .or_else(|| item.source_created_at.clone())
+            .unwrap_or_else(|| item.downloaded_at.clone()),
         Some("size") => item.file_size_bytes.to_string(),
+        Some("length") => item.text_length.to_string(),
         _ => item.downloaded_at.clone(),
     })
 }
@@ -4032,6 +6319,9 @@ fn collect_suggestions(
                 label: row.get(0)?,
                 value: row.get(1)?,
                 count: row.get(2)?,
+                exact_match: false,
+                source: row.get(3)?,
+                source_key: row.get(4)?,
             })
         })
         .map_err(|e| format!("Suggest query failed: {}", e))?;
@@ -4041,6 +6331,16 @@ fn collect_suggestions(
     Ok(())
 }
 
+fn suggestion_kind_priority(kind: &str) -> u8 {
+    match kind {
+        "author" => 0,
+        "series" => 1,
+        "title" => 2,
+        "tag" => 3,
+        _ => 4,
+    }
+}
+
 fn sort_key_select_expr(params: &SearchV2Params) -> String {
     match effective_sort_by(params).as_deref() {
         Some("title") => "CAST(d.title AS TEXT)".to_string(),
@@ -4048,7 +6348,12 @@ fn sort_key_select_expr(params: &SearchV2Params) -> String {
         Some("published") => {
             "CAST(COALESCE(d.source_created_at, d.downloaded_at) AS TEXT)".to_string()
         }
+        Some("updated") => {
+            "CAST(COALESCE(d.source_updated_at, d.source_created_at, d.downloaded_at) AS TEXT)"
+                .to_string()
+        }
         Some("size") => "CAST(d.file_size_bytes AS TEXT)".to_string(),
+        Some("length") => "CAST(d.text_length AS TEXT)".to_string(),
         Some("series_order") => format!("CAST({} AS TEXT)", series_order_sort_expr()),
         _ => "CAST(d.downloaded_at AS TEXT)".to_string(),
     }
@@ -4059,7 +6364,11 @@ fn sort_compare_expr(params: &SearchV2Params) -> String {
         Some("title") => "d.title COLLATE NOCASE".to_string(),
         Some("author") => "d.author_name COLLATE NOCASE".to_string(),
         Some("published") => "COALESCE(d.source_created_at, d.downloaded_at)".to_string(),
+        Some("updated") => {
+            "COALESCE(d.source_updated_at, d.source_created_at, d.downloaded_at)".to_string()
+        }
         Some("size") => "d.file_size_bytes".to_string(),
+        Some("length") => "d.text_length".to_string(),
         Some("series_order") => series_order_sort_expr(),
         _ => "d.downloaded_at".to_string(),
     }
@@ -4083,7 +6392,10 @@ fn append_keyset_filter(
     wheres.push(format!(
         "({expr} {cmp} ? OR ({expr} = ? AND d.id {id_cmp} ?))"
     ));
-    if effective_sort_by(params).as_deref() == Some("size") {
+    if matches!(
+        effective_sort_by(params).as_deref(),
+        Some("size" | "length")
+    ) {
         let parsed = value.parse::<i64>().unwrap_or(0);
         bind_values.push(Box::new(parsed));
         bind_values.push(Box::new(parsed));
@@ -4092,6 +6404,41 @@ fn append_keyset_filter(
         bind_values.push(Box::new(value.to_string()));
     }
     bind_values.push(Box::new(id));
+}
+
+/// Caps and de-duplicates a client-supplied membership list.
+///
+/// These lists come from per-device state that nothing prunes, so they grow
+/// and can contain works that were deleted long ago. The cap keeps one
+/// malformed request from building a megabyte of SQL parameter.
+const MAX_ID_FILTER: usize = 20_000;
+
+const MAX_SAVED_SEARCHES: i64 = 100;
+const MAX_SAVED_SEARCH_NAME: usize = 80;
+const MAX_SAVED_SEARCH_QUERY: usize = 512;
+const MAX_SAVED_SEARCH_PARAMS_BYTES: usize = 16 * 1024;
+
+/// The row to start a numbered page at, when one was asked for.
+///
+/// Ignored without an explicit column ordering: relevance results are walked
+/// with a score cursor, and an offset into them would silently mean something
+/// different from the page the reader asked for.
+fn page_offset(params: &SearchV2Params) -> Option<i64> {
+    let offset = params.offset.unwrap_or(0);
+    if offset <= 0 || normalized_sort_key(params) == "relevance" {
+        return None;
+    }
+    Some(offset)
+}
+
+fn bounded_id_list(ids: &[i64]) -> Vec<i64> {
+    let mut seen = std::collections::HashSet::with_capacity(ids.len().min(MAX_ID_FILTER));
+    ids.iter()
+        .copied()
+        .filter(|id| *id > 0)
+        .filter(|id| seen.insert(*id))
+        .take(MAX_ID_FILTER)
+        .collect()
 }
 
 fn append_library_filters(
@@ -4115,6 +6462,17 @@ fn append_library_filters(
 
     if params.favorite == Some(true) {
         wheres.push("d.favorite = 1".to_string());
+    }
+
+    if let Some(ref ids) = params.ids_include {
+        // An explicit, possibly large membership list travels as one JSON
+        // parameter; a placeholder per id would run into SQLite's variable
+        // limit on a well-read library. An empty list means "nothing", which
+        // is different from "no filter" and must not quietly match everything.
+        let bounded = bounded_id_list(ids);
+        let encoded = serde_json::to_string(&bounded).unwrap_or_else(|_| "[]".to_string());
+        wheres.push("d.id IN (SELECT value FROM json_each(?))".to_string());
+        bind_values.push(Box::new(encoded));
     }
 
     if let Some(ref tags_inc) = params.tags_include {
@@ -4312,12 +6670,13 @@ fn normalized_tag_list(values: &[String]) -> Vec<String> {
 }
 
 fn sort_clause(params: &SearchV2Params) -> String {
-    let sort_col = match params.sort_by.as_deref() {
-        Some("title") => "d.title COLLATE NOCASE",
-        Some("author") => "d.author_name COLLATE NOCASE",
-        Some("date") => "d.downloaded_at",
-        Some("published") => "COALESCE(d.source_created_at, d.downloaded_at)",
-        Some("series_order") => {
+    let sort_col = match normalized_sort_key(params) {
+        "title" => "d.title COLLATE NOCASE",
+        "author" => "d.author_name COLLATE NOCASE",
+        "date" => "d.downloaded_at",
+        "published" => "COALESCE(d.source_created_at, d.downloaded_at)",
+        "updated" => "COALESCE(d.source_updated_at, d.source_created_at, d.downloaded_at)",
+        "series_order" => {
             return format!(
                 " ORDER BY {} {}, d.id {}",
                 series_order_sort_expr(),
@@ -4325,7 +6684,8 @@ fn sort_clause(params: &SearchV2Params) -> String {
                 sort_order(params)
             )
         }
-        Some("size") => "d.file_size_bytes",
+        "size" => "d.file_size_bytes",
+        "length" => "d.text_length",
         _ => "d.downloaded_at",
     };
     let sort_order = sort_order(params);
@@ -4705,6 +7065,118 @@ fn blocks_to_plain_text(blocks: &[WorkBlock]) -> String {
         .join("\n\n")
 }
 
+const READER_PAGE_TARGET_BYTES: usize = 128 * 1024;
+
+fn reader_version_path(
+    download: &DownloadEntry,
+    versions: &[DownloadVersion],
+    version: i64,
+) -> PathBuf {
+    let selected = if version == download.current_version {
+        download
+            .original_json_path
+            .as_ref()
+            .filter(|path| Path::new(path).exists())
+            .unwrap_or(&download.json_path)
+    } else if let Some(target) = versions.iter().find(|item| item.version == version) {
+        target
+            .original_json_path
+            .as_ref()
+            .filter(|path| Path::new(path).exists())
+            .unwrap_or(&target.json_path)
+    } else {
+        &download.json_path
+    };
+    PathBuf::from(selected)
+}
+
+fn reader_source_content(
+    db: &Database,
+    download: &DownloadEntry,
+    versions: &[DownloadVersion],
+    version: Option<i64>,
+    assets: &[AssetEntry],
+) -> Result<(String, String), String> {
+    let target_version = version.unwrap_or(download.current_version);
+    let raw_json = db.read_download_json_for_version(download, versions, target_version)?;
+    let html = if download.source == "pixiv" {
+        super::parser::parse_pixiv_to_html(&raw_json, assets)
+    } else if download.source == "fanbox" {
+        super::parser::parse_fanbox_to_html(&raw_json, assets)
+    } else {
+        String::new()
+    };
+    let plain_text = serde_json::from_str::<serde_json::Value>(&raw_json)
+        .ok()
+        .map(|value| extract_search_body(&value, &download.source))
+        .unwrap_or_default();
+    Ok((html, plain_text))
+}
+
+/// Converts source-level boundaries into reasonably sized transport pages.
+/// Boundaries always sit between complete source blocks, so a page can be
+/// sanitized independently without producing malformed markup.
+fn paginate_reader_html(html: &str, source: &str) -> Vec<String> {
+    if html.trim().is_empty() {
+        return Vec::new();
+    }
+    let marker = if source.eq_ignore_ascii_case("pixiv") {
+        "<!-- newpage -->"
+    } else {
+        "<!-- content-block -->"
+    };
+    let blocks = html
+        .split(marker)
+        .map(str::trim)
+        .filter(|part| !part.is_empty());
+    let mut pages = Vec::new();
+    let mut current = String::new();
+    for block in blocks {
+        // Pixiv's [newpage] is user-visible page semantics and must never be
+        // coalesced. FANBOX/editor boundaries are transport-only and can be
+        // grouped to avoid thousands of tiny IPC calls.
+        if source.eq_ignore_ascii_case("pixiv") {
+            pages.push(block.to_string());
+            continue;
+        }
+        if !current.is_empty()
+            && current.len().saturating_add(block.len()) > READER_PAGE_TARGET_BYTES
+        {
+            pages.push(std::mem::take(&mut current));
+        }
+        if !current.is_empty() {
+            current.push('\n');
+        }
+        current.push_str(block);
+    }
+    if !current.trim().is_empty() {
+        pages.push(current);
+    }
+    if pages.is_empty() {
+        pages.push(html.to_string());
+    }
+    pages
+}
+
+fn plain_text_from_reader_html(html: &str) -> String {
+    static TAGS: std::sync::LazyLock<Regex> =
+        std::sync::LazyLock::new(|| Regex::new(r"(?s)<[^>]*>").expect("valid HTML tag regex"));
+    let separated = html
+        .replace("<br />", "\n")
+        .replace("<br>", "\n")
+        .replace("</p>", "\n")
+        .replace("</h2>", "\n")
+        .replace("</blockquote>", "\n");
+    TAGS.replace_all(&separated, "")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
+        .replace("&quot;", "\"")
+        .replace("&#x27;", "'")
+        .trim()
+        .to_string()
+}
+
 fn blocks_to_html(blocks: &[WorkBlock], assets: &[AssetEntry]) -> String {
     blocks
         .iter()
@@ -4753,7 +7225,7 @@ fn blocks_to_html(blocks: &[WorkBlock], assets: &[AssetEntry]) -> String {
             _ => escape_editor_html(block.text.as_deref().unwrap_or("")).replace('\n', "<br />\n"),
         })
         .collect::<Vec<_>>()
-        .join("\n")
+        .join("\n<!-- content-block -->\n")
 }
 
 fn active_edit_plain_text_locked(
@@ -4775,27 +7247,83 @@ fn escape_editor_html(text: &str) -> String {
         .replace('\'', "&#x27;")
 }
 
-fn stale_search_index_ids_locked(conn: &Connection, limit: i64) -> Result<Vec<i64>, String> {
+fn stale_search_index_ids_locked(
+    conn: &Connection,
+    limit: i64,
+    after_id: i64,
+) -> Result<Vec<i64>, String> {
     let mut stmt = conn
         .prepare(
             "SELECT d.id
              FROM downloads d
              LEFT JOIN search_index_state m ON m.download_id = d.id
-             WHERE m.download_id IS NULL
-                OR m.current_version != d.current_version
-                OR COALESCE(m.content_hash, '') != COALESCE(d.content_hash, '')
+             WHERE d.id > ?2
+               AND (m.download_id IS NULL
+                    OR m.current_version != d.current_version
+                    OR COALESCE(m.content_hash, '') != COALESCE(d.content_hash, ''))
              ORDER BY d.id ASC
              LIMIT ?1",
         )
         .map_err(|e| format!("Search index stale query prepare failed: {}", e))?;
     let rows = stmt
-        .query_map(params![limit], |row| row.get::<_, i64>(0))
+        .query_map(params![limit, after_id], |row| row.get::<_, i64>(0))
         .map_err(|e| format!("Search index stale query failed: {}", e))?;
     let mut ids = Vec::new();
     for row in rows {
         ids.push(row.map_err(|e| format!("Search index stale row read failed: {}", e))?);
     }
     Ok(ids)
+}
+
+/// Discards the "already indexed" bookkeeping when the on-disk index format has
+/// changed under it.
+///
+/// A new format means a new, empty index directory. The rows in
+/// `search_index_state` still describe the old one, so without this the library
+/// would report itself fully indexed while every search came back empty.
+fn reconcile_search_index_format(conn: &Connection) -> Result<(), String> {
+    let current = super::tantivy_index::index_format_version();
+    let stored: Option<String> = conn
+        .query_row(
+            "SELECT index_version FROM search_index_meta WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("Search index format read failed: {e}"))?;
+    if stored.as_deref() == Some(current) {
+        return Ok(());
+    }
+
+    let cleared = conn
+        .execute("DELETE FROM search_index_state", [])
+        .map_err(|e| format!("Search index state reset failed: {e}"))?;
+    if cleared > 0 {
+        log::info!(
+            "Search index format changed to {current}; {cleared} works queued for reindexing"
+        );
+    }
+    conn.execute(
+        "INSERT OR REPLACE INTO search_index_meta (id, index_version, updated_at)
+         VALUES (1, ?1, ?2)",
+        params![current, chrono::Utc::now().to_rfc3339()],
+    )
+    .map_err(|e| format!("Search index format write failed: {e}"))?;
+    Ok(())
+}
+
+fn pending_search_index_count(conn: &Connection) -> Result<i64, String> {
+    conn.query_row(
+        "SELECT COUNT(*)
+         FROM downloads d
+         LEFT JOIN search_index_state m ON m.download_id = d.id
+         WHERE m.download_id IS NULL
+            OR m.current_version != d.current_version
+            OR COALESCE(m.content_hash, '') != COALESCE(d.content_hash, '')",
+        [],
+        |row| row.get(0),
+    )
+    .map_err(|e| format!("Search index pending count failed: {e}"))
 }
 
 fn search_index_status_locked(
@@ -5061,6 +7589,7 @@ fn filter_excluded_search_results(
     storage_dir: &Path,
     results: Vec<DownloadEntry>,
     parsed: &ParsedSearchQuery,
+    documents: &HashMap<i64, Arc<SearchDocument>>,
 ) -> Vec<DownloadEntry> {
     if parsed.exclude.is_empty() {
         return results;
@@ -5068,10 +7597,17 @@ fn filter_excluded_search_results(
 
     let mut filtered = Vec::with_capacity(results.len());
     for entry in results {
-        let Ok(Some(doc)) = super::tantivy_index::load_document(storage_dir, entry.id) else {
-            continue;
+        let loaded_document;
+        let doc = if let Some(doc) = documents.get(&entry.id) {
+            doc.as_ref()
+        } else {
+            let Ok(Some(doc)) = super::tantivy_index::load_document(storage_dir, entry.id) else {
+                continue;
+            };
+            loaded_document = doc;
+            &loaded_document
         };
-        if document_matches_excluded_term(&doc, parsed) {
+        if document_matches_excluded_term(doc, parsed) {
             continue;
         }
         filtered.push(entry);
@@ -5084,6 +7620,7 @@ fn decorate_search_results(
     results: Vec<DownloadEntry>,
     parsed: &ParsedSearchQuery,
     semantic_hits: &HashMap<i64, super::semantic_index::SemanticSearchHit>,
+    documents: &HashMap<i64, Arc<SearchDocument>>,
 ) -> Vec<DownloadEntry> {
     if parsed.include.is_empty() && semantic_hits.is_empty() {
         return results;
@@ -5091,11 +7628,18 @@ fn decorate_search_results(
 
     let mut decorated = Vec::with_capacity(results.len());
     for mut entry in results {
-        let Ok(Some(doc)) = super::tantivy_index::load_document(storage_dir, entry.id) else {
-            decorated.push(entry);
-            continue;
+        let loaded_document;
+        let doc = if let Some(doc) = documents.get(&entry.id) {
+            doc.as_ref()
+        } else {
+            let Ok(Some(doc)) = super::tantivy_index::load_document(storage_dir, entry.id) else {
+                decorated.push(entry);
+                continue;
+            };
+            loaded_document = doc;
+            &loaded_document
         };
-        let (fields, reasons, computed_score) = match_fields_and_score(&doc, parsed);
+        let (fields, reasons, computed_score) = match_fields_and_score(doc, parsed);
         if !fields.is_empty() {
             entry.match_fields = fields;
         }
@@ -5124,11 +7668,11 @@ fn decorate_search_results(
                 detail: Some(format!("semantic chunk score {:.3}", semantic.score)),
             });
             let semantic_highlight = semantic_chunk_highlight(semantic);
-            let mut highlights = make_match_highlights(&doc, parsed);
+            let mut highlights = make_match_highlights(doc, parsed);
             highlights.insert(0, semantic_highlight);
             entry.match_highlights = highlights.into_iter().take(4).collect();
         } else {
-            entry.match_highlights = make_match_highlights(&doc, parsed);
+            entry.match_highlights = make_match_highlights(doc, parsed);
         }
         if computed_score > 0.0 {
             entry.search_score = Some(entry.search_score.unwrap_or(0.0) + computed_score);
@@ -5424,8 +7968,177 @@ fn remove_dir_resilient(path: &std::path::Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod search_integration_tests {
     use super::*;
+    use std::collections::HashSet;
     use std::fs;
     use std::time::{Duration, Instant};
+
+    /// Builds prose whose vocabulary keeps growing, the way a real library does.
+    fn synthetic_body(seed: u64, chars: usize) -> String {
+        let nouns = [
+            "教室", "図書館", "海岸", "旋律", "記憶", "季節", "手紙", "灯台", "回廊", "約束",
+            "硝子", "残響", "標本", "封筒", "螺旋", "夜明", "輪郭", "潮騒", "書架", "遠雷",
+        ];
+        let verbs = [
+            "見つめていた",
+            "思い出していた",
+            "書き留めた",
+            "数えていた",
+            "聞いていた",
+            "受け止めた",
+        ];
+        let adjectives = ["静かな", "薄い", "淡い", "遠い", "冷たい", "眩しい"];
+        let mut state = seed | 1;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state as usize
+        };
+        let mut text = String::with_capacity(chars * 3);
+        while text.chars().count() < chars {
+            text.push_str(adjectives[next() % adjectives.len()]);
+            text.push_str(nouns[next() % nouns.len()]);
+            text.push('と');
+            text.push_str(nouns[next() % nouns.len()]);
+            let number = next() % 100_000;
+            text.push_str(&format!("{number}番"));
+            text.push('を');
+            text.push_str(verbs[next() % verbs.len()]);
+            text.push_str("。\n");
+        }
+        text.chars().take(chars).collect()
+    }
+
+    #[test]
+    #[ignore = "measurement harness, run with --ignored --nocapture"]
+    fn measure_full_index_rebuild() {
+        let (root, storage) = temp_paths();
+        let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+        let works: usize = std::env::var("PIEP_BENCH_WORKS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(300);
+        let body_chars: usize = std::env::var("PIEP_BENCH_CHARS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(12_000);
+
+        let seeding = Instant::now();
+        for index in 0..works {
+            insert_download_unindexed(
+                &db,
+                &storage,
+                &format!("bench-{index}"),
+                &format!("計測用作品 {index}"),
+                &format!("計測作者 {}", index % 40),
+                &["計測", "長編"],
+                &synthetic_body(index as u64 + 1, body_chars),
+            );
+        }
+        println!(
+            "seeded {works} works of {body_chars} chars in {:.1} s",
+            seeding.elapsed().as_secs_f64()
+        );
+
+        let started = Instant::now();
+        let outcome = db
+            .rebuild_search_index(
+                SearchIndexRebuildOptions::default(),
+                &|| false,
+                |_progress| {},
+            )
+            .unwrap();
+        let elapsed = started.elapsed().as_secs_f64();
+        let status = db.get_search_index_status().unwrap();
+        let index_bytes = recursive_file_size(&storage.join("search-index"));
+        println!(
+            "rebuilt {} works ({} failed) in {elapsed:.2} s = {:.1} works/s | pending {} | index {:.1} MB",
+            outcome.processed,
+            outcome.failed,
+            outcome.processed as f64 / elapsed,
+            status.pending_downloads,
+            index_bytes as f64 / 1_048_576.0,
+        );
+        assert_eq!(status.pending_downloads, 0);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn reader_transport_pages_keep_complete_source_blocks() {
+        let large = "あ".repeat(READER_PAGE_TARGET_BYTES / 3);
+        let html = format!(
+            "<p>{large}</p><!-- content-block --><p>{large}</p><!-- content-block --><p>{large}</p>"
+        );
+        let pages = paginate_reader_html(&html, "fanbox");
+        assert!(pages.len() >= 2);
+        assert!(pages.iter().all(|page| !page.contains("content-block")));
+        assert!(pages
+            .iter()
+            .all(|page| page.starts_with("<p>") && page.ends_with("</p>")));
+
+        let pixiv = paginate_reader_html("first<!-- newpage -->second", "pixiv");
+        assert_eq!(pixiv, vec!["first", "second"]);
+    }
+
+    #[test]
+    fn diagnostic_percentiles_are_stable() {
+        let mut samples = [9.0, 1.0, 7.0, 3.0, 5.0];
+        assert_eq!(benchmark_percentiles(&mut samples), (5.0, 9.0));
+    }
+
+    #[test]
+    fn atomic_restore_transaction_rolls_back_database_rows() {
+        let (root, storage) = temp_paths();
+        let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+        let id = insert_download_unindexed(
+            &db,
+            &storage,
+            "restore-rollback",
+            "残る作品",
+            "作者",
+            &[],
+            "本文",
+        );
+        db.begin_atomic_restore().unwrap();
+        db.delete_download_record_for_restore(id).unwrap();
+        std::thread::scope(|scope| {
+            let concurrent = scope
+                .spawn(|| db.delete_download_record_for_restore(id))
+                .join()
+                .unwrap();
+            assert!(concurrent.unwrap_err().contains("restore is in progress"));
+        });
+        db.rollback_atomic_restore();
+        assert_eq!(db.get_download(id).unwrap().title, "残る作品");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn reader_cache_pages_and_full_document_search_share_one_index() {
+        let (root, storage) = temp_paths();
+        let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+        let id = insert_download_unindexed(
+            &db,
+            &storage,
+            "reader-search",
+            "検索できる作品",
+            "作者",
+            &[],
+            "最初のページ [newpage] 次のページにNeedleとneedle",
+        );
+        let first = db.get_reader_content_page(id, None, 0).unwrap();
+        let second = db.get_reader_content_page(id, None, 1).unwrap();
+        assert_eq!(first.page_count, 2);
+        assert_eq!(second.page_count, 2);
+        assert!(second.html.contains("Needle"));
+
+        let hits = db.search_reader_content(id, None, "needle", 20).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].page, 2);
+        assert_eq!(hits[0].count, 2);
+        assert!(hits[0].snippet.to_lowercase().contains("needle"));
+        let _ = fs::remove_dir_all(root);
+    }
 
     #[test]
     fn editor_blocks_preserve_rich_content_order() {
@@ -5509,6 +8222,8 @@ mod search_integration_tests {
             person_key: None,
             series_source: None,
             series_key: None,
+            offset: None,
+            ids_include: None,
             view_mode: None,
             projection: None,
             search_mode: None,
@@ -5539,6 +8254,8 @@ mod search_integration_tests {
             person_key: None,
             series_source: None,
             series_key: None,
+            offset: None,
+            ids_include: None,
             view_mode: None,
             projection: None,
             search_mode: None,
@@ -5652,6 +8369,294 @@ mod search_integration_tests {
     }
 
     #[test]
+    fn sort_aliases_map_to_the_expected_safe_sql_columns() {
+        let cases = [
+            ("date", "date", "d.downloaded_at"),
+            ("downloaded_at", "date", "d.downloaded_at"),
+            ("author_name", "author", "d.author_name COLLATE NOCASE"),
+            (
+                "source_created_at",
+                "published",
+                "COALESCE(d.source_created_at, d.downloaded_at)",
+            ),
+            (
+                "source_updated_at",
+                "updated",
+                "COALESCE(d.source_updated_at, d.source_created_at, d.downloaded_at)",
+            ),
+            ("text_length", "length", "d.text_length"),
+            ("file_size_bytes", "size", "d.file_size_bytes"),
+        ];
+
+        for (requested, normalized, expected_sql) in cases {
+            let mut search = params("");
+            search.sort_by = Some(requested.to_string());
+            assert_eq!(effective_sort_by(&search).as_deref(), Some(normalized));
+            assert!(sort_clause(&search).contains(expected_sql));
+            assert!(sort_compare_expr(&search).contains(expected_sql));
+        }
+
+        let mut malicious = params("");
+        malicious.sort_by = Some("downloaded_at; DROP TABLE downloads".to_string());
+        assert_eq!(effective_sort_by(&malicious).as_deref(), Some("date"));
+        assert!(!sort_clause(&malicious).contains("DROP TABLE"));
+    }
+
+    #[test]
+    fn optional_update_target_lookup_returns_exact_match_or_none() {
+        let (root, storage) = temp_paths();
+        let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+        db.upsert_update_target(&UpdateTargetInput {
+            target_type: "person".to_string(),
+            source: "pixiv".to_string(),
+            source_key: "author-1".to_string(),
+            display_name: "作者1".to_string(),
+            enabled: true,
+            metadata_json: None,
+        })
+        .unwrap();
+
+        let found = db
+            .find_update_target("person", "pixiv", "author-1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.display_name, "作者1");
+        assert!(found.enabled);
+        assert!(db
+            .find_update_target("person", "pixiv", "missing")
+            .unwrap()
+            .is_none());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn facet_search_limits_in_sql_and_keeps_direct_rare_matches() {
+        let (root, storage) = temp_paths();
+        let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+        insert_download_unindexed(
+            &db,
+            &storage,
+            "facet-1",
+            "作品1",
+            "人気作者",
+            &["人気タグ"],
+            "本文",
+        );
+        insert_download_unindexed(
+            &db,
+            &storage,
+            "facet-2",
+            "作品2",
+            "作者%特別",
+            &["希少タグ"],
+            "本文",
+        );
+
+        assert_eq!(
+            db.search_filter_facets("authors", None, 1).unwrap().len(),
+            1
+        );
+        let escaped = db
+            .search_filter_facets("authors", Some("作者%"), 10)
+            .unwrap();
+        assert_eq!(
+            escaped.first().map(|facet| facet.name.as_str()),
+            Some("作者%特別")
+        );
+        let rare = db.search_filter_facets("tags", Some("希少"), 10).unwrap();
+        assert_eq!(
+            rare.first().map(|facet| facet.name.as_str()),
+            Some("希少タグ")
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn lexical_search_reports_full_hits_beyond_the_candidate_page() {
+        let (root, storage) = temp_paths();
+        let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+        for index in 0..3 {
+            insert_download(
+                &db,
+                &storage,
+                &format!("count-{index}"),
+                &format!("共通検索語 作品{index}"),
+                "作者",
+                &["検索"],
+                "本文",
+            );
+        }
+
+        let result =
+            super::super::tantivy_index::search_with_total(&storage, "共通検索語", 1).unwrap();
+        assert_eq!(result.hits.len(), 1);
+        assert_eq!(result.total_hits, 3);
+
+        let mut deep = params("共通検索語");
+        deep.limit = Some(600);
+        assert!(search_candidate_limit(&deep, 600) > 1_000);
+        let mut another = params("別の検索");
+        another.limit = deep.limit;
+        assert_ne!(search_cursor_scope(&deep), search_cursor_scope(&another));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn lexical_cursor_reaches_every_match_beyond_one_thousand_results() {
+        let (root, storage) = temp_paths();
+        let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+        const ITEM_COUNT: usize = 1_025;
+
+        for index in 0..ITEM_COUNT {
+            insert_download_unindexed(
+                &db,
+                &storage,
+                &format!("deep-{index:04}"),
+                &format!("全件到達テスト {index:04}"),
+                "同一作者",
+                &["ページング"],
+                "全件到達テストの共通本文",
+            );
+        }
+        loop {
+            let status = db.rebuild_search_index_batch(200).unwrap();
+            if status.pending_downloads == 0 {
+                break;
+            }
+        }
+
+        let mut request = params("全件到達テスト");
+        request.limit = Some(137);
+        let mut seen = HashSet::new();
+        let mut checked_native_cursor = false;
+        loop {
+            let result = db.search_downloads_v2(&request).unwrap();
+            assert_eq!(result.total_estimate, Some(ITEM_COUNT as i64));
+            for item in result.items {
+                assert!(
+                    seen.insert(item.id),
+                    "cursor returned duplicate id {}",
+                    item.id
+                );
+            }
+            match result.next_cursor {
+                Some(cursor) => {
+                    if !checked_native_cursor {
+                        let decoded = decode_cursor(Some(&cursor)).unwrap();
+                        assert_eq!(decoded.kind, "tantivy-search-after");
+                        assert!(tantivy_cursor(&decoded).is_some());
+                        checked_native_cursor = true;
+                    }
+                    request.cursor = Some(cursor);
+                }
+                None => break,
+            }
+        }
+
+        assert!(checked_native_cursor);
+        assert_eq!(seen.len(), ITEM_COUNT);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn lexical_search_after_does_not_skip_filtered_hits_inside_a_batch() {
+        let (root, storage) = temp_paths();
+        let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+        const ITEM_COUNT: usize = 450;
+        const EXPECTED: usize = 45;
+        for index in 0..ITEM_COUNT {
+            let tags: &[&str] = if index % 10 == 0 {
+                &["対象"]
+            } else {
+                &["対象外"]
+            };
+            insert_download_unindexed(
+                &db,
+                &storage,
+                &format!("filtered-cursor-{index:04}"),
+                &format!("絞り込みカーソル {index:04}"),
+                "カーソル作者",
+                tags,
+                "絞り込みカーソルの共通本文",
+            );
+        }
+        loop {
+            let status = db.rebuild_search_index_batch(200).unwrap();
+            if status.pending_downloads == 0 {
+                break;
+            }
+        }
+
+        let mut request = params("絞り込みカーソル");
+        request.limit = Some(17);
+        request.tags_include = Some(vec!["対象".to_string()]);
+        let mut seen = HashSet::new();
+        loop {
+            let result = db.search_downloads_v2(&request).unwrap();
+            for item in result.items {
+                assert!(seen.insert(item.id));
+                assert!(item.tags.iter().any(|tag| tag == "対象"));
+            }
+            match result.next_cursor {
+                Some(cursor) => request.cursor = Some(cursor),
+                None => break,
+            }
+        }
+        assert_eq!(seen.len(), EXPECTED);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn search_index_optimization_reduces_segments_without_changing_results() {
+        let (root, storage) = temp_paths();
+        let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+        for index in 0..24 {
+            insert_download(
+                &db,
+                &storage,
+                &format!("merge-{index:02}"),
+                &format!("索引統合検証 {index:02}"),
+                "統合テスト作者",
+                &["索引"],
+                "索引統合検証の共通本文",
+            );
+        }
+        let before_segments =
+            super::super::tantivy_index::searchable_segment_count(&storage).unwrap();
+        assert!(
+            before_segments > 1,
+            "test setup must create fragmented segments"
+        );
+        let mut search_params = params("索引統合検証");
+        search_params.limit = Some(30);
+        let before = db.search_downloads_v2(&search_params).unwrap();
+        let before_ids = before
+            .items
+            .iter()
+            .map(|item| item.id)
+            .collect::<HashSet<_>>();
+        assert_eq!(before_ids.len(), 24);
+
+        let (reported_before, reported_after) =
+            super::super::tantivy_index::optimize_segments(&storage).unwrap();
+        assert_eq!(reported_before, before_segments);
+        assert_eq!(reported_after, 1);
+        let after = db.search_downloads_v2(&search_params).unwrap();
+        let after_ids = after
+            .items
+            .iter()
+            .map(|item| item.id)
+            .collect::<HashSet<_>>();
+        assert_eq!(after.total_estimate, before.total_estimate);
+        assert_eq!(after_ids, before_ids);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn entity_facets_search_and_page_beyond_the_dashboard_cap() {
         let (root, storage) = temp_paths();
         let db = Database::open(&root.join("piep.db"), &storage).unwrap();
@@ -5676,12 +8681,16 @@ mod search_integration_tests {
         let second_page = db.search_entity_facets("person", None, 60, 60).unwrap();
         assert_eq!(second_page.len(), 10, "authors past the cap stay reachable");
 
-        let filtered = db.search_entity_facets("person", Some("作者69"), 60, 0).unwrap();
+        let filtered = db
+            .search_entity_facets("person", Some("作者69"), 60, 0)
+            .unwrap();
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].display_name, "作者69");
         assert_eq!(filtered[0].count, 1);
 
-        let missing = db.search_entity_facets("person", Some("存在しない"), 60, 0).unwrap();
+        let missing = db
+            .search_entity_facets("person", Some("存在しない"), 60, 0)
+            .unwrap();
         assert!(missing.is_empty());
 
         assert!(db.search_entity_facets("unknown", None, 10, 0).is_err());
@@ -5806,6 +8815,71 @@ mod search_integration_tests {
             .iter()
             .any(|item| item.kind == "title" && item.label == "候補タイトル"));
 
+        let exact = db
+            .search_suggest(&SearchSuggestParams {
+                text: Some("候補作者".to_string()),
+                limit: Some(2),
+            })
+            .unwrap();
+        assert!(exact.items.len() <= 2);
+        assert_eq!(
+            exact.items.first().map(|item| item.kind.as_str()),
+            Some("author")
+        );
+        assert!(exact.items.first().is_some_and(|item| item.exact_match));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn exact_author_intent_excludes_other_authors_that_only_mention_the_name() {
+        let (root, storage) = temp_paths();
+        let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+        let first = insert_download(
+            &db,
+            &storage,
+            "exact-author-1",
+            "作者本人の一作目",
+            "明確な作者名",
+            &["創作"],
+            "本文",
+        );
+        let second = insert_download(
+            &db,
+            &storage,
+            "exact-author-2",
+            "作者本人の二作目",
+            "明確な作者名",
+            &["創作"],
+            "本文",
+        );
+        insert_download(
+            &db,
+            &storage,
+            "other-author",
+            "言及だけの作品",
+            "別の作者",
+            &["評論"],
+            "本文で明確な作者名について触れている",
+        );
+
+        let result = db.search_downloads_v2(&params("明確な作者名")).unwrap();
+        let ids = result
+            .items
+            .iter()
+            .map(|item| item.id)
+            .collect::<HashSet<_>>();
+        assert_eq!(ids, HashSet::from([first, second]));
+        assert_eq!(result.search_meta.engine, "sqlite-exact-entity");
+        let intent = result.search_meta.exact_entity.unwrap();
+        assert_eq!(intent.kind, "author");
+        assert!(intent.strict);
+        assert!(result
+            .search_meta
+            .explanations
+            .iter()
+            .any(|line| line.contains("関係する作品だけ")));
+
         let _ = fs::remove_dir_all(root);
     }
 
@@ -5852,6 +8926,30 @@ mod search_integration_tests {
             vec![in_series]
         );
 
+        let legacy_suggestion_value = db.search_downloads_v2(&params("pixiv:s-100")).unwrap();
+        assert_eq!(
+            legacy_suggestion_value
+                .items
+                .iter()
+                .map(|dl| dl.id)
+                .collect::<Vec<_>>(),
+            vec![in_series]
+        );
+
+        let exact_title = db.search_downloads_v2(&params("構造化シリーズ")).unwrap();
+        assert_eq!(
+            exact_title.items.iter().map(|dl| dl.id).collect::<Vec<_>>(),
+            vec![in_series]
+        );
+        assert_eq!(
+            exact_title
+                .search_meta
+                .exact_entity
+                .as_ref()
+                .map(|intent| intent.kind.as_str()),
+            Some("series")
+        );
+
         let suggestions = db
             .search_suggest(&SearchSuggestParams {
                 text: Some("構造化".to_string()),
@@ -5859,7 +8957,11 @@ mod search_integration_tests {
             })
             .unwrap();
         assert!(suggestions.items.iter().any(|item| {
-            item.kind == "series" && item.label == "構造化シリーズ" && item.value == "pixiv:s-100"
+            item.kind == "series"
+                && item.label == "構造化シリーズ"
+                && item.value == "pixiv:s-100"
+                && item.source.as_deref() == Some("pixiv")
+                && item.source_key.as_deref() == Some("s-100")
         }));
 
         let _ = fs::remove_dir_all(root);
@@ -5931,6 +9033,448 @@ mod search_integration_tests {
             .match_highlights
             .iter()
             .any(|highlight| highlight.match_type.as_deref() == Some("semantic")));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Opens a copy of a real library and reports what survived.
+    ///
+    /// Schema recognition decides between "migrate in place" and "archive and
+    /// start empty", and the tests around it necessarily use databases this
+    /// code just created. This one can be pointed at a library saved by an
+    /// earlier release, which is the case that actually goes wrong.
+    #[test]
+    #[ignore = "set PIEP_VERIFY_DB to a real library file"]
+    fn opens_a_real_library_without_resetting_it() {
+        let Ok(source) = std::env::var("PIEP_VERIFY_DB") else {
+            panic!("set PIEP_VERIFY_DB to the database to check");
+        };
+        let source = PathBuf::from(source);
+        let before: i64 = {
+            let conn = Connection::open_with_flags(&source, OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .expect("open source read-only");
+            conn.query_row("SELECT COUNT(*) FROM downloads", [], |row| row.get(0))
+                .unwrap()
+        };
+
+        // Never open the real file for writing: work on a copy.
+        let (root, storage) = temp_paths();
+        let copy = root.join("piep.db");
+        fs::copy(&source, &copy).expect("copy the library");
+
+        let db = Database::open(&copy, &storage).expect("open the copied library");
+        let after = db.get_search_index_status().unwrap();
+        println!(
+            "works before: {before} | after opening: {} | pending index: {}",
+            after.total_downloads, after.pending_downloads
+        );
+        assert_eq!(
+            after.total_downloads, before,
+            "opening a saved library must never discard its works"
+        );
+        assert!(before > 0, "the source library should not be empty");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn index_status_is_cached_without_going_stale_across_changes() {
+        let (root, storage) = temp_paths();
+        let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+        assert_eq!(db.get_search_index_status().unwrap().total_downloads, 0);
+
+        // Reading it again immediately is served from the cache, and adding a
+        // work has to drop that cache: a count the screens keep showing after
+        // the library changed is worse than measuring it again.
+        insert_download_unindexed(&db, &storage, "cache-1", "追加された作品", "作者", &["cache"], "本文");
+        let after_insert = db.get_search_index_status().unwrap();
+        assert_eq!(after_insert.total_downloads, 1);
+        assert_eq!(after_insert.pending_downloads, 1);
+
+        db.reindex_download(
+            db.get_download_by_source("pixiv", "cache-1").unwrap().unwrap().id,
+        )
+        .unwrap();
+        let after_index = db.get_search_index_status().unwrap();
+        assert_eq!(after_index.pending_downloads, 0);
+        assert!(after_index.is_complete);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn an_author_page_can_show_their_series_and_tags_and_drill_into_both() {
+        let (root, storage) = temp_paths();
+        let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+
+        let first = insert_download(&db, &storage, "auth-1", "序章", "青葉しおり", &["ファンタジー", "長編"], "本文");
+        let second = insert_download(&db, &storage, "auth-2", "第二話", "青葉しおり", &["ファンタジー"], "本文");
+        let standalone = insert_download(&db, &storage, "auth-3", "読み切り", "青葉しおり", &["短編"], "本文");
+        let other = insert_download(&db, &storage, "auth-4", "別作者の話", "別の人", &["ファンタジー"], "本文");
+        db.upsert_download_person(first, "pixiv", "aoba", "author", "青葉しおり").unwrap();
+        db.upsert_download_person(second, "pixiv", "aoba", "author", "青葉しおり").unwrap();
+        db.upsert_download_person(standalone, "pixiv", "aoba", "author", "青葉しおり").unwrap();
+        db.upsert_download_person(other, "pixiv", "hoka", "author", "別の人").unwrap();
+        db.upsert_download_series(first, "pixiv", "s1", "季節の栞", Some(1)).unwrap();
+        db.upsert_download_series(second, "pixiv", "s1", "季節の栞", Some(2)).unwrap();
+
+        let series = db.list_entity_series("pixiv", "aoba", 20).unwrap();
+        assert_eq!(series.len(), 1, "only the series this author appears in");
+        assert_eq!(series[0].display_name, "季節の栞");
+        assert_eq!(series[0].count, 2);
+
+        let tags = db.list_entity_tags("person", "pixiv", "aoba", 20).unwrap();
+        let named = tags.iter().map(|t| (t.name.as_str(), t.count)).collect::<Vec<_>>();
+        assert_eq!(named, vec![("ファンタジー", 2), ("短編", 1), ("長編", 1)],
+            "the author's own tags, most used first, without the other author's");
+
+        // Drilling in: the author's works carrying one of their tags. Author and
+        // tag filters have to compose, or a tag on this page cannot be followed.
+        let mut params = v2_params(None, 20, None);
+        params.person_source = Some("pixiv".to_string());
+        params.person_key = Some("aoba".to_string());
+        params.tags_include = Some(vec!["ファンタジー".to_string()]);
+        let page = db.search_downloads_v2(&params).unwrap();
+        let ids = page.items.iter().map(|item| item.id).collect::<Vec<_>>();
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains(&first) && ids.contains(&second));
+        assert!(!ids.contains(&other), "another author's work with the same tag must not appear");
+
+        // An author with nothing recorded is an empty page, not an error.
+        assert!(db.list_entity_series("pixiv", "unknown", 20).unwrap().is_empty());
+        assert!(db.list_entity_tags("person", "pixiv", "unknown", 20).unwrap().is_empty());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn numbered_pages_work_for_an_ordering_and_are_refused_for_relevance() {
+        let (root, storage) = temp_paths();
+        let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+        for index in 0..7 {
+            insert_download(&db, &storage, &format!("page-{index}"), &format!("作品{index}"), "作者", &["頁"], "本文");
+        }
+
+        let page_of = |offset: i64| {
+            let mut params = v2_params(None, 3, None);
+            params.sort_by = Some("title".to_string());
+            params.sort_order = Some("asc".to_string());
+            params.offset = Some(offset);
+            db.search_downloads_v2(&params)
+                .unwrap()
+                .items
+                .iter()
+                .map(|item| item.title.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(page_of(0), vec!["作品0", "作品1", "作品2"]);
+        assert_eq!(page_of(3), vec!["作品3", "作品4", "作品5"], "the third page, without walking to it");
+        assert_eq!(page_of(6), vec!["作品6"]);
+        assert!(page_of(99).is_empty(), "past the end is empty, not an error");
+
+        // Relevance has no nth page: results are walked with a score cursor, so
+        // an offset into them would not be the page that was asked for.
+        let mut relevance = params("作品");
+        relevance.offset = Some(3);
+        let first = relevance.clone();
+        let mut without = first.clone();
+        without.offset = None;
+        assert_eq!(
+            db.search_downloads_v2(&relevance).unwrap().items.len(),
+            db.search_downloads_v2(&without).unwrap().items.len(),
+            "an offset must be ignored rather than silently shifting a relevance page"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn shelf_counts_ignore_reading_positions_for_works_that_no_longer_exist() {
+        let (root, storage) = temp_paths();
+        let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+        let first = insert_download(&db, &storage, "shelf-1", "一作目", "作者", &["棚"], "本文");
+        let second = insert_download(&db, &storage, "shelf-2", "二作目", "作者", &["棚"], "本文");
+        insert_download(&db, &storage, "shelf-3", "三作目", "作者", &["棚"], "本文");
+        db.set_favorite(first, true).unwrap();
+        db.set_watch_updates(second, true).unwrap();
+
+        let empty = db.get_library_shelf_counts(&[]).unwrap();
+        assert_eq!((empty.total, empty.favorite, empty.watched, empty.reading), (3, 1, 1, 0));
+
+        // Reading positions are per device and nothing prunes them, so a shelf
+        // must count works that exist, not entries that were left behind.
+        let counts = db
+            .get_library_shelf_counts(&[first, second, 999_999, first])
+            .unwrap();
+        assert_eq!(counts.reading, 2, "a deleted work and a duplicate must not be counted");
+
+        // The same list used as a filter returns exactly those works.
+        let mut params = v2_params(None, 20, None);
+        params.ids_include = Some(vec![first, 999_999]);
+        let page = db.search_downloads_v2(&params).unwrap();
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].id, first);
+
+        // An empty membership list means an empty shelf, never the whole library.
+        let mut none = v2_params(None, 20, None);
+        none.ids_include = Some(Vec::new());
+        assert_eq!(db.search_downloads_v2(&none).unwrap().items.len(), 0);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn saved_searches_survive_reuse_of_a_name_and_reject_nonsense() {
+        let (root, storage) = temp_paths();
+        let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+
+        let created = db
+            .upsert_saved_search(&SavedSearchInput {
+                id: None,
+                name: "  長編ファンタジー  ".to_string(),
+                query: Some("tag:ファンタジー".to_string()),
+                params_json: "{\"tagsInclude\":[\"ファンタジー\"]}".to_string(),
+            })
+            .unwrap();
+        assert_eq!(created.name, "長編ファンタジー", "the name is stored trimmed");
+
+        // Saving again under the same name replaces that search. The unique
+        // constraint must not surface as an error the reader has to decode.
+        let replaced = db
+            .upsert_saved_search(&SavedSearchInput {
+                id: None,
+                name: "長編ファンタジー".to_string(),
+                query: Some("tag:ファンタジー -短編".to_string()),
+                params_json: "{\"tagsExclude\":[\"短編\"]}".to_string(),
+            })
+            .unwrap();
+        assert_eq!(replaced.id, created.id);
+        assert_eq!(db.list_saved_searches().unwrap().len(), 1);
+        assert_eq!(replaced.query.as_deref(), Some("tag:ファンタジー -短編"));
+
+        assert!(db
+            .upsert_saved_search(&SavedSearchInput {
+                id: None,
+                name: "   ".to_string(),
+                query: None,
+                params_json: "{}".to_string(),
+            })
+            .is_err(), "a blank name is not a search anyone can find again");
+        assert!(db
+            .upsert_saved_search(&SavedSearchInput {
+                id: None,
+                name: "壊れた条件".to_string(),
+                query: None,
+                params_json: "{not json".to_string(),
+            })
+            .is_err(), "conditions that cannot be read back must not be stored");
+        assert!(db
+            .upsert_saved_search(&SavedSearchInput {
+                id: Some(4_242),
+                name: "存在しない".to_string(),
+                query: None,
+                params_json: "{}".to_string(),
+            })
+            .is_err(), "updating a search that was deleted elsewhere must say so");
+
+        assert!(db.delete_saved_search(created.id).unwrap());
+        assert!(!db.delete_saved_search(created.id).unwrap(), "a second delete is not an error");
+        assert!(db.list_saved_searches().unwrap().is_empty());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn saved_searches_keep_their_order_and_stop_at_the_limit() {
+        let (root, storage) = temp_paths();
+        let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+        for index in 0..MAX_SAVED_SEARCHES {
+            db.upsert_saved_search(&SavedSearchInput {
+                id: None,
+                name: format!("検索{index:03}"),
+                query: None,
+                params_json: "{}".to_string(),
+            })
+            .unwrap();
+        }
+        let listed = db.list_saved_searches().unwrap();
+        assert_eq!(listed.len() as i64, MAX_SAVED_SEARCHES);
+        assert_eq!(listed[0].name, "検索000", "the sidebar order must be stable");
+        assert_eq!(listed[listed.len() - 1].name, "検索099");
+
+        let overflow = db.upsert_saved_search(&SavedSearchInput {
+            id: None,
+            name: "一件多い".to_string(),
+            query: None,
+            params_json: "{}".to_string(),
+        });
+        assert!(overflow.is_err(), "the limit must be refused, not silently applied");
+        // Replacing an existing one still works when the list is full.
+        assert!(db
+            .upsert_saved_search(&SavedSearchInput {
+                id: None,
+                name: "検索000".to_string(),
+                query: Some("更新".to_string()),
+                params_json: "{}".to_string(),
+            })
+            .is_ok());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn synonyms_do_not_match_every_work_through_its_source_url() {
+        let (root, storage) = temp_paths();
+        let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+
+        // Every pixiv URL is .../novel/show.php?id=N, and the synonym table
+        // expands 物語 to "novel". Neither of these works mentions 物語.
+        insert_download(&db, &storage, "111", "海辺の記録", "作者A", &["日常"], "静かな本文です");
+        insert_download(&db, &storage, "222", "灯台の手紙", "作者B", &["日常"], "別の本文です");
+        let about = insert_download(&db, &storage, "333", "夜明けの物語", "作者C", &["創作"], "本文");
+
+        let hits = db.search_downloads_v2(&params("物語")).unwrap();
+        let ids = hits.items.iter().map(|item| item.id).collect::<Vec<_>>();
+        assert_eq!(
+            ids,
+            vec![about],
+            "only the work that actually says 物語 should match"
+        );
+
+        // The URL itself is still findable: pasting one has to reach its work.
+        let pasted = db
+            .search_downloads_v2(&params("https://www.pixiv.net/novel/show.php?id=111"))
+            .unwrap();
+        assert!(
+            pasted.items.iter().any(|item| item.source_id == "111"),
+            "a pasted source URL must still find its work"
+        );
+        // As must the bare id, which is what the URL actually identifies.
+        let by_id = db.search_downloads_v2(&params("222")).unwrap();
+        assert!(by_id.items.iter().any(|item| item.source_id == "222"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn changing_the_index_format_requeues_the_whole_library() {
+        let (root, storage) = temp_paths();
+        let db_path = root.join("piep.db");
+        let db = Database::open(&db_path, &storage).unwrap();
+        insert_download(&db, &storage, "fmt-1", "書式変更の作品", "作者", &["書式"], "本文");
+        assert_eq!(db.get_search_index_status().unwrap().pending_downloads, 0);
+        drop(db);
+
+        // Stand in for a release that changes the on-disk index layout: the
+        // bookkeeping now describes an index the app no longer reads.
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute(
+                "INSERT OR REPLACE INTO search_index_meta (id, index_version, updated_at)
+                 VALUES (1, 'v-previous', '2026-01-01T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+        }
+
+        let db = Database::open(&db_path, &storage).unwrap();
+        assert_eq!(
+            db.get_search_index_status().unwrap().pending_downloads,
+            1,
+            "a format change must queue the library for reindexing, not report it as complete"
+        );
+
+        // What the app does at launch: notice the backlog and clear it without
+        // being asked. Nothing here should need a person to press anything.
+        let outcome = db
+            .rebuild_search_index(SearchIndexRebuildOptions::default(), &|| false, |_| {})
+            .unwrap();
+        assert_eq!(outcome.processed, 1);
+        assert!(!outcome.canceled);
+        let status = db.get_search_index_status().unwrap();
+        assert_eq!(status.pending_downloads, 0);
+        assert!(status.is_complete);
+        // And the work is genuinely searchable again, not merely marked done.
+        let found = db.search_downloads_v2(&params("書式変更")).unwrap();
+        assert_eq!(found.items.len(), 1);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn sorted_search_orders_matches_by_column_and_pages_without_gaps() {
+        let (root, storage) = temp_paths();
+        let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+
+        // Titles are deliberately out of insertion order so a title sort cannot
+        // pass by accident. The shared token avoids the synonym table, which
+        // would otherwise pull in unrelated works through their source URL.
+        for (source_id, title) in [
+            ("sorted-1", "さくら花暦"),
+            ("sorted-2", "あおぞら花暦"),
+            ("sorted-3", "なのはな花暦"),
+            ("sorted-4", "かえで花暦"),
+            ("sorted-5", "たんぽぽ花暦"),
+        ] {
+            insert_download(&db, &storage, source_id, title, "並び替え作者", &["並替"], "共通の本文です");
+        }
+        // A work that must never appear: it does not match the query.
+        insert_download(&db, &storage, "sorted-x", "無関係な作品", "別作者", &["他"], "別の本文");
+
+        let mut sorted = params("花暦");
+        sorted.sort_by = Some("title".to_string());
+        sorted.sort_order = Some("asc".to_string());
+        sorted.limit = Some(2);
+
+        let mut seen = Vec::new();
+        let mut cursor = None;
+        for _ in 0..5 {
+            let mut page_params = sorted.clone();
+            page_params.cursor = cursor.clone();
+            let page = db.search_downloads_v2(&page_params).unwrap();
+            assert_eq!(page.search_meta.engine, "tantivy-sorted");
+            assert_eq!(page.total_estimate, Some(5));
+            seen.extend(page.items.iter().map(|item| item.title.clone()));
+            cursor = page.next_cursor;
+            if cursor.is_none() {
+                break;
+            }
+        }
+
+        assert_eq!(
+            seen,
+            vec![
+                "あおぞら花暦",
+                "かえで花暦",
+                "さくら花暦",
+                "たんぽぽ花暦",
+                "なのはな花暦",
+            ],
+            "every match should appear exactly once, in title order"
+        );
+
+        // Without an explicit sort the same query still ranks by relevance.
+        let relevance = db.search_downloads_v2(&params("花暦")).unwrap();
+        assert_ne!(relevance.search_meta.engine, "tantivy-sorted");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn sorted_search_respects_library_filters() {
+        let (root, storage) = temp_paths();
+        let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+        let favorite = insert_download(&db, &storage, "filter-1", "対象作品 花暦", "作者", &["絞込"], "本文");
+        insert_download(&db, &storage, "filter-2", "対象外作品 花暦", "作者", &["絞込"], "本文");
+        db.set_favorite(favorite, true).unwrap();
+
+        let mut sorted = params("花暦");
+        sorted.sort_by = Some("downloaded_at".to_string());
+        sorted.favorite = Some(true);
+        let page = db.search_downloads_v2(&sorted).unwrap();
+        assert_eq!(page.total_estimate, Some(1));
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].id, favorite);
 
         let _ = fs::remove_dir_all(root);
     }
@@ -6131,6 +9675,7 @@ mod search_integration_tests {
         let started = Instant::now();
         let result = db.search_downloads_v2(&search_params).unwrap();
         let elapsed = started.elapsed();
+        eprintln!("5000-item smart search: {elapsed:?}");
 
         assert!(!result.items.is_empty());
         assert!(

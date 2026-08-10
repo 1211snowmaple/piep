@@ -7,6 +7,12 @@ import type {
   DownloadEntry,
   DownloadVersion,
   ReaderDocument,
+  ReaderMetadata,
+  ReaderContentPage,
+  ReaderSearchHit,
+  LibraryDiagnostics,
+  LibraryMaintenanceResult,
+  SearchIndexOptimizationResult,
   SearchV2Params,
   SearchV2Result,
   WorkBlockInput,
@@ -14,7 +20,30 @@ import type {
   BulkMutationResult,
   EntityFacet,
   FilterFacets,
+  FacetCount,
+  UpdateTarget,
+  SearchIndexStatus,
 } from "@/types/library";
+export type { SearchIndexStatus } from "@/types/library";
+
+const MAX_FACET_PAGE_SIZE = 200;
+
+function normalizePageSize(value: number, fallback: number): number {
+  return Number.isFinite(value) ? Math.min(MAX_FACET_PAGE_SIZE, Math.max(1, Math.trunc(value))) : fallback;
+}
+
+function normalizeOffset(value: number): number {
+  return Number.isFinite(value) ? Math.max(0, Math.trunc(value)) : 0;
+}
+
+function uniqueDownloadIds(ids: readonly number[]): number[] {
+  const unique = new Set<number>();
+  for (const id of ids) {
+    if (!Number.isSafeInteger(id) || id <= 0) throw new RangeError(`Invalid download id: ${id}`);
+    unique.add(id);
+  }
+  return [...unique];
+}
 
 export function isTauriRuntime(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -28,6 +57,18 @@ export async function getStats(): Promise<DbStats> {
   return invoke<DbStats>("db_get_stats");
 }
 
+export async function getLibraryDiagnostics(): Promise<LibraryDiagnostics> {
+  return invoke<LibraryDiagnostics>("db_get_library_diagnostics");
+}
+
+export async function maintainLibrary(compact = false): Promise<LibraryMaintenanceResult> {
+  return invoke<LibraryMaintenanceResult>("db_maintain_library", { compact });
+}
+
+export async function optimizeSearchIndex(): Promise<SearchIndexOptimizationResult> {
+  return invoke<SearchIndexOptimizationResult>("db_optimize_search_index");
+}
+
 export async function seedTestData(count: number): Promise<number> {
   return invoke<number>("db_seed_test_data", { count });
 }
@@ -38,20 +79,6 @@ export async function scanAndReimportDownloads(): Promise<number> {
 
 export async function searchDownloadsV2(params: SearchV2Params): Promise<SearchV2Result> {
   return invoke<SearchV2Result>("search_downloads_v2", { params });
-}
-
-export interface SearchIndexStatus {
-  totalDownloads: number;
-  indexedDownloads: number;
-  pendingDownloads: number;
-  isComplete: boolean;
-  phase: string;
-  indexedChunks: number;
-  semanticIndexedChunks: number;
-  semanticModelReady: boolean;
-  embeddingProvider: string;
-  gpuEnabled: boolean;
-  throughputPerSec?: number | null;
 }
 
 /**
@@ -67,8 +94,9 @@ export async function getSearchIndexStatus(): Promise<SearchIndexStatus> {
   return invoke<SearchIndexStatus>("db_get_search_index_status");
 }
 
-export async function searchFilterFacets(kind: string, query: string | null, limit = 30): Promise<{ name: string; count: number }[]> {
-  return invoke<{ name: string; count: number }[]>("db_search_filter_facets", { kind, query, limit });
+export async function searchFilterFacets(kind: "tag" | "tags" | "author" | "authors", query: string | null, limit = 30): Promise<FacetCount[]> {
+  const normalizedQuery = query?.trim() || null;
+  return invoke<FacetCount[]>("db_search_filter_facets", { kind, query: normalizedQuery, limit: normalizePageSize(limit, 30) });
 }
 
 /**
@@ -76,7 +104,12 @@ export async function searchFilterFacets(kind: string, query: string | null, lim
  * returns the top 60 of each, which hides most of a large library.
  */
 export async function searchEntityFacets(kind: "person" | "series", query: string | null, limit = 60, offset = 0): Promise<EntityFacet[]> {
-  return invoke<EntityFacet[]>("db_search_entity_facets", { kind, query, limit, offset });
+  return invoke<EntityFacet[]>("db_search_entity_facets", {
+    kind,
+    query: query?.trim() || null,
+    limit: normalizePageSize(limit, 60),
+    offset: normalizeOffset(offset),
+  });
 }
 
 export async function getDownload<T = DownloadEntry>(id: number): Promise<T> {
@@ -88,8 +121,9 @@ export async function getDownload<T = DownloadEntry>(id: number): Promise<T> {
  * are omitted, which is how callers detect entries deleted since queueing.
  */
 export async function getDownloads(ids: number[]): Promise<DownloadEntry[]> {
-  if (!ids.length) return [];
-  return invoke<DownloadEntry[]>("db_get_downloads", { ids });
+  const unique = uniqueDownloadIds(ids);
+  if (!unique.length) return [];
+  return invoke<DownloadEntry[]>("db_get_downloads", { ids: unique });
 }
 
 export async function getDownloadBySource<T = DownloadEntry>(source: string, sourceId: string): Promise<T | null> {
@@ -109,7 +143,9 @@ export async function deleteDownload(id: number): Promise<void> {
 }
 
 export async function deleteDownloads(ids: number[]): Promise<BulkMutationResult> {
-  return invoke<BulkMutationResult>("db_delete_downloads", { ids });
+  const unique = uniqueDownloadIds(ids);
+  if (!unique.length) return { matchedCount: 0, changedCount: 0 };
+  return invoke<BulkMutationResult>("db_delete_downloads", { ids: unique });
 }
 
 export async function deleteDownloadsForSearch(params: SearchV2Params): Promise<BulkMutationResult> {
@@ -134,7 +170,11 @@ export async function setFavorite(downloadId: number, favorite: boolean): Promis
 
 /** Applies favourite/watch flags to many works in one transaction. */
 export async function setFlagsForIds(ids: number[], flags: { favorite?: boolean; watch?: boolean }): Promise<BulkMutationResult> {
-  return invoke<BulkMutationResult>("db_set_flags_for_ids", { ids, favorite: flags.favorite ?? null, watch: flags.watch ?? null });
+  const unique = uniqueDownloadIds(ids);
+  if (!unique.length || (flags.favorite === undefined && flags.watch === undefined)) {
+    return { matchedCount: unique.length, changedCount: 0 };
+  }
+  return invoke<BulkMutationResult>("db_set_flags_for_ids", { ids: unique, favorite: flags.favorite ?? null, watch: flags.watch ?? null });
 }
 
 export async function readFileContent(path: string): Promise<string> {
@@ -189,6 +229,11 @@ export async function listUpdateTargets<T>(targetType: string | null = null, ena
   return invoke<T[]>("db_list_update_targets", { targetType, enabledOnly });
 }
 
+/** Fetch one target without transferring every watched entity over IPC. */
+export async function getUpdateTarget<T = UpdateTarget>(targetType: string, source: string, sourceKey: string): Promise<T | null> {
+  return invoke<T | null>("db_get_update_target", { targetType, source, sourceKey });
+}
+
 export async function getWatchedDownloads<T = DownloadEntry>(): Promise<T[]> {
   return invoke<T[]>("db_get_watched_downloads");
 }
@@ -199,6 +244,18 @@ export async function listDownloadRelations<T>(relationType: string | null = nul
 
 export async function getReaderDocument(downloadId: number, version?: number | null): Promise<ReaderDocument> {
   return invoke<ReaderDocument>("db_get_reader_document", { downloadId, version: version ?? null });
+}
+
+export async function getReaderMetadata(downloadId: number): Promise<ReaderMetadata> {
+  return invoke<ReaderMetadata>("db_get_reader_metadata", { downloadId });
+}
+
+export async function getReaderContentPage(downloadId: number, version?: number | null, page = 0): Promise<ReaderContentPage> {
+  return invoke<ReaderContentPage>("db_get_reader_content_page", { downloadId, version: version ?? null, page });
+}
+
+export async function searchReaderContent(downloadId: number, query: string, version?: number | null, limit = 50): Promise<ReaderSearchHit[]> {
+  return invoke<ReaderSearchHit[]>("db_search_reader_content", { downloadId, version: version ?? null, query, limit });
 }
 
 export async function getEditorDocument(downloadId: number): Promise<EditorDocument> {
