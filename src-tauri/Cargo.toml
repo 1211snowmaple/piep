@@ -34,9 +34,9 @@ async-stream = "0.3"
 futures-core = "0.3"
 log = "0.4"
 tauri-plugin-dialog = "2.7.1"
-rusqlite = { version = "0.39.0", features = ["bundled"] }
+rusqlite = { version = "0.40.2", features = ["bundled"] }
 r2d2 = "0.8"
-r2d2_sqlite = { version = "0.34.0", features = ["bundled"] }
+r2d2_sqlite = { version = "0.35.0", features = ["bundled"] }
 zip = "8.6.0"
 minijinja = "2"
 image = { version = "0.25", default-features = false, features = [
@@ -57,10 +57,16 @@ ort = { version = "2.0.0-rc.12", features = ["directml"] }
 rayon = "1.10"
 hnsw_rs = "0.3.4"
 parking_lot = "0.12.5"
+tauri-plugin-notification = "2.3.3"
 
 [target.'cfg(windows)'.dependencies]
 webview2-com = "0.38.2"
-windows = { version = "0.61.3", features = ["Win32_UI_Input_KeyboardAndMouse"] }
+windows = { version = "0.61.3", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 [profile.release]
 opt-level = 3     # Optimize preview builds for UX speed over binary size

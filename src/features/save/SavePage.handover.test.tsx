@@ -22,7 +22,7 @@ const browserApi = vi.hoisted(() => ({
 }));
 
 vi.mock("@/services/browserApi", () => browserApi);
-vi.mock("@/services/eventBus", () => ({ onTauriEvent: vi.fn().mockResolvedValue(() => undefined) }));
+vi.mock("@/services/eventBus", () => ({ subscribeTauriEvent: vi.fn(() => () => undefined) }));
 vi.mock("@/store", () => ({ store: { get: vi.fn().mockResolvedValue(null), set: vi.fn(), save: vi.fn() } }));
 vi.mock("@/services/dbApi", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/services/dbApi")>()),

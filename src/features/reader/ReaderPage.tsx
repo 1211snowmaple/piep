@@ -29,18 +29,20 @@ import { notifications } from "@mantine/notifications";
 import { Icons, IconSize } from "@/lib/icons";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useBookmarks, type Bookmark } from "@/features/reader/bookmarks";
-import { useAppNavigate, useAppSearchParams, useRouteParams } from "@/app/router";
+import { readReadingPosition, writeReadingPosition } from "@/features/library/readingShelf";
+import { useAppNavigate, useAppSearchParams, useReturnTo, useRouteParams } from "@/app/router";
 import { ErrorState, LoadingState } from "@/components/AsyncState";
 import { ProviderMark, sourceUrl } from "@/lib/providers";
 import { formatDate, formatNumber } from "@/lib/format";
 import { prepareDocumentHtml } from "@/lib/content";
-import { extractSavedSourceTarget } from "@/features/browser/downloadCandidates";
-import { getAssetUrl, getDownloadBySource, getReaderContentPage, getReaderMetadata, isTauriRuntime, openLocalAsset, searchReaderContent } from "@/services/dbApi";
+import { useContentLinkNavigation } from "@/lib/contentLinks";
+import { getAssetUrl, getReaderContentPage, getReaderMetadata, isTauriRuntime, openLocalAsset, searchReaderContent } from "@/services/dbApi";
 import { openExternalUrl } from "@/services/openerApi";
 import { getDemoReader } from "@/mocks/demoData";
 
-function BookmarkControls({ bookmarks, onAdd, onOpen, onRemove }: {
+function BookmarkControls({ bookmarks, addDisabled, onAdd, onOpen, onRemove }: {
   bookmarks: Bookmark[];
+  addDisabled?: boolean;
   onAdd: () => void;
   onOpen: (bookmark: Bookmark) => void;
   onRemove: (id: string) => void;
@@ -49,7 +51,7 @@ function BookmarkControls({ bookmarks, onAdd, onOpen, onRemove }: {
   return (
     <Group gap={2} wrap="nowrap">
       <Tooltip label="現在の位置にしおりを挟む">
-        <ActionIcon variant="subtle" color="gray" aria-label="現在の位置にしおりを挟む" onClick={onAdd}><Icons.saveSearch size={IconSize.nav} /></ActionIcon>
+        <ActionIcon variant="subtle" color="gray" aria-label="現在の位置にしおりを挟む" disabled={addDisabled} onClick={onAdd}><Icons.saveSearch size={IconSize.nav} /></ActionIcon>
       </Tooltip>
       <Popover opened={opened} onChange={setOpened} position="bottom-end" withArrow shadow="md" width={280}>
         <Popover.Target>
@@ -95,13 +97,21 @@ const defaults: ReaderSettings = { fontSize: 18, lineHeight: 1.72, maxWidth: 680
 
 export default function ReaderPage() {
   const navigate = useAppNavigate();
+  // A saved work reached from inside the text opens in the reader: somebody
+  // following "前編はこちら" mid-chapter wants to keep reading.
+  const openContentLink = useContentLinkNavigation({ workRoute: (id) => `/reader/${id}` });
+  // The detail screen is normally the entry behind this one, so "戻る" goes
+  // back to it - keeping its tab and scroll position - instead of pushing a
+  // fresh copy and leaving the header pointing back into the reader.
+  const returnTo = useReturnTo();
   const { workId } = useRouteParams("/reader/:workId");
   const [searchParams] = useAppSearchParams();
   const id = Number(workId);
   const runtime = isTauriRuntime();
   const queryClient = useQueryClient();
   const requestedVersion = Number(searchParams.get("version"));
-  const [version, setVersion] = useState<number | null>(Number.isFinite(requestedVersion) && requestedVersion > 0 ? requestedVersion : null);
+  const normalizedRequestedVersion = Number.isFinite(requestedVersion) && requestedVersion > 0 ? requestedVersion : null;
+  const [version, setVersion] = useState<number | null>(normalizedRequestedVersion);
   const [settings, setSettings] = useLocalStorage<ReaderSettings>({ key: "piep.reader-settings.v4", defaultValue: defaults });
   const [settingsOpened, settingsDrawer] = useDisclosure(false);
   const [searchOpened, searchDrawer] = useDisclosure(false);
@@ -133,11 +143,14 @@ export default function ReaderPage() {
   });
   // Only while reading: an address you cannot follow is noise here, whereas the
   // detail screen deliberately shows the work as its author wrote it.
-  const preparedHtml = useMemo(() => prepareDocumentHtml(contentQuery.data?.html ?? "", getAssetUrl, { linkifyBareUrls: true }), [contentQuery.data?.html]);
+  const contentReady = !contentQuery.isPlaceholderData && contentQuery.data?.page === sourcePage - 1;
+  const currentContent = contentReady ? contentQuery.data : null;
+  const preparedHtml = useMemo(() => prepareDocumentHtml(currentContent?.html ?? "", getAssetUrl, { linkifyBareUrls: true }), [currentContent?.html]);
   const pageCount = contentQuery.data?.pageCount ?? 1;
   const hasSourcePages = pageCount > 1;
   const positionKey = `piep.reader-position.${id}.${version ?? "current"}`;
 
+  useEffect(() => { setVersion(normalizedRequestedVersion); }, [normalizedRequestedVersion]);
   useEffect(() => {
     setSourcePage(1);
   }, [id, version]);
@@ -175,14 +188,16 @@ export default function ReaderPage() {
     const viewport = scrollRef.current;
     if (!viewport || !metadataQuery.data || !contentQuery.data) return;
     if (restoredKeyRef.current === positionKey) return;
-    let savedPage = 1;
-    let savedTop = 0;
-    try {
-      const saved = JSON.parse(sessionStorage.getItem(positionKey) ?? "{}");
-      savedPage = Math.min(Math.max(1, Number(saved.page) || 1), Math.max(1, pageCount));
-      savedTop = Math.max(0, Number(saved.top) || 0);
-    } catch { /* Legacy or invalid session value: start at the beginning. */ }
-    setSourcePage(savedPage);
+    const saved = readReadingPosition(id, version);
+    const savedPage = Math.min(Math.max(1, saved?.page ?? 1), Math.max(1, pageCount));
+    const savedTop = Math.max(0, saved?.top ?? 0);
+    if (sourcePage !== savedPage) {
+      setSourcePage(savedPage);
+      return;
+    }
+    // `placeholderData` still describes the page we just left. Applying its
+    // offset would mark restoration complete before the requested page exists.
+    if (!contentReady || contentQuery.data.page !== savedPage - 1) return;
     // The document is still laying out on the first frame, so assigning the
     // saved offset there just clamps it to 0. Retry until it sticks, and only
     // then record that this document has been restored - marking it up front
@@ -201,10 +216,10 @@ export default function ReaderPage() {
     };
     frame = requestAnimationFrame(attempt);
     return () => { cancelled = true; cancelAnimationFrame(frame); };
-  }, [positionKey, metadataQuery.data, contentQuery.data, pageCount]);
+  }, [contentReady, contentQuery.data, id, metadataQuery.data, pageCount, positionKey, sourcePage, version]);
   useEffect(() => {
     const viewport = scrollRef.current;
-    if (!viewport) return;
+    if (!viewport || !contentReady) return;
     const update = (event?: Event) => {
       const total = viewport.scrollHeight - viewport.clientHeight;
       const next = total <= 0 ? 100 : Math.max(0, Math.min(100, viewport.scrollTop / total * 100));
@@ -212,18 +227,12 @@ export default function ReaderPage() {
       // Only a genuine scroll writes the position. The priming call below runs
       // before the saved offset has been applied, so persisting there would
       // overwrite the stored place with 0 each time the reader opens.
-      if (event) {
-        try {
-          sessionStorage.setItem(positionKey, JSON.stringify({ page: sourcePage, top: viewport.scrollTop }));
-        } catch {
-          // Reading must remain usable when storage is blocked or full.
-        }
-      }
+      if (event && restoredKeyRef.current === positionKey) writeReadingPosition(id, version, { page: sourcePage, top: viewport.scrollTop });
     };
     viewport.addEventListener("scroll", update, { passive: true });
     update();
     return () => viewport.removeEventListener("scroll", update);
-  }, [hasSourcePages, positionKey, metadataQuery.data, contentQuery.data, sourcePage, pageCount]);
+  }, [contentReady, hasSourcePages, id, positionKey, sourcePage, pageCount, version]);
 
   if (metadataQuery.isLoading || contentQuery.isLoading) return <div className="page"><LoadingState label="リーダーを準備しています" /></div>;
   if (metadataQuery.error || contentQuery.error || !metadataQuery.data || !contentQuery.data) return <div className="page"><ErrorState error={metadataQuery.error ?? contentQuery.error ?? "作品が見つかりません"} retry={() => { metadataQuery.refetch(); contentQuery.refetch(); }} /></div>;
@@ -245,18 +254,10 @@ export default function ReaderPage() {
       scrollRef.current?.scrollTo({ top: 0, behavior: "smooth" });
       return;
     }
-    const href = anchor.href;
-    if (!href.startsWith("http")) return;
-    event.preventDefault();
-    const target = extractSavedSourceTarget(href);
-    if (runtime && target) {
-      const saved = await getDownloadBySource(target.source, target.sourceId);
-      if (saved) {
-        navigate(`/reader/${saved.id}`);
-        return;
-      }
-    }
-    if (runtime) await openExternalUrl(href); else window.open(href, "_blank", "noopener,noreferrer");
+    // Everything else - the series, the earlier part, the author's other
+    // account - is resolved against the library first and only then handed to a
+    // browser.
+    await openContentLink(event);
   };
   const goToSourcePage = (page: number) => {
     const next = Math.min(Math.max(1, page), pageCount);
@@ -265,6 +266,7 @@ export default function ReaderPage() {
     scrollRef.current?.scrollTo({ top: 0, behavior: "smooth" });
   };
   const addBookmarkHere = () => {
+    if (!contentReady) return;
     const viewport = scrollRef.current;
     const top = Math.round(viewport?.scrollTop ?? 0);
     // Measured here rather than read from the progress state, which only
@@ -273,7 +275,7 @@ export default function ReaderPage() {
     const percent = scrollable > 0 ? Math.round(top / scrollable * 100) : 0;
     const label = `${hasSourcePages ? `${sourcePage}ページ · ` : ""}${percent}%`;
     addBookmark({ page: sourcePage, top, label });
-    notifications.show({ color: "teal", message: `しおりを挟みました（${label}）` });
+    notifications.show({ color: "piep", message: `しおりを挟みました（${label}）` });
   };
   const jumpToBookmark = (bookmark: { page: number; top: number }) => {
     setSourcePage(Math.min(Math.max(1, bookmark.page), Math.max(1, pageCount)));
@@ -286,16 +288,17 @@ export default function ReaderPage() {
       <header className="reader-toolbar">
         <Group h="100%" px="md" justify="space-between" wrap="nowrap">
           <Group wrap="nowrap" miw={0}>
-            <Tooltip label="作品詳細へ戻る"><ActionIcon variant="subtle" color="gray" aria-label="作品詳細へ戻る" onClick={() => navigate(`/works/${work.id}`)}><Icons.back size={IconSize.nav} /></ActionIcon></Tooltip>
+            <Tooltip label="作品詳細へ戻る"><ActionIcon variant="subtle" color="gray" aria-label="作品詳細へ戻る" onClick={() => returnTo(`/works/${work.id}`)}><Icons.back size={IconSize.nav} /></ActionIcon></Tooltip>
             <Divider orientation="vertical" h={24} />
             {/* Title only: the provider and author already head the document
                 itself, and repeating them here just crowded the bar. */}
             <Text size="sm" fw={700} className="line-clamp-1">{work.title}</Text>
           </Group>
           <Group gap="xs" wrap="nowrap">
-            {doc.isEdited && <Badge color="violet" variant="light" visibleFrom="sm">ローカル編集</Badge>}
+            {doc.isEdited && <Badge color="gray" variant="light" visibleFrom="sm">ローカル編集</Badge>}
             <BookmarkControls
               bookmarks={bookmarks}
+              addDisabled={!contentReady}
               onAdd={addBookmarkHere}
               onOpen={jumpToBookmark}
               onRemove={removeBookmark}
@@ -328,24 +331,26 @@ export default function ReaderPage() {
               "--reader-font-family": settings.font === "serif" ? '"Noto Serif JP", "Yu Mincho", serif' : '"Noto Sans JP", "Yu Gothic UI", sans-serif',
             }}
           >
-            {sourcePage === 1 && <Box className="reader-title-page">
+            {!contentReady ? <LoadingState label="読書位置のページを読み込んでいます" /> : <>
+              {sourcePage === 1 && <Box className="reader-title-page">
               {/* Source on the left, the two places this work lives on the
                   right - both were once called "保存元" - all on one line above
                   the title. */}
               <Group justify="space-between" align="center" gap="sm" wrap="nowrap" className="reader-title-page__head">
                 <ProviderMark provider={work.source} />
                 <Group gap={2} wrap="nowrap">
-                  <Button variant="subtle" color="gray" size="compact-sm" rightSection={<Icons.externalLink size={IconSize.inline} />} onClick={openSource}>元ページ</Button>
+                  <Button variant="subtle" color="gray" size="compact-sm" rightSection={<Icons.externalLink size={IconSize.inline} />} onClick={openSource}>元ページをブラウザで</Button>
                   <Button variant="subtle" color="gray" size="compact-sm" rightSection={<Icons.openFolder size={IconSize.inline} />} disabled={!runtime} onClick={() => runtime && openLocalAsset(work.jsonPath)}>保存フォルダー</Button>
                 </Group>
               </Group>
               <Title order={1} className="reader-title-page__title">{work.title}</Title>
               <Text c="dimmed" className="reader-title-page__author">{work.authorName}</Text>
               <Text size="sm" c="dimmed" className="reader-title-page__meta">{formatDate(work.sourceCreatedAt)} · {formatNumber(work.textLength)}字</Text>
-            </Box>}
-            {sourcePage === 1 && <Divider my="xl" />}
-            <article className="reader-content" onClick={handleArticleClick} dangerouslySetInnerHTML={{ __html: preparedHtml }} />
-            {sourcePage === pageCount && <Box className="reader-finish"><Icons.read size={IconSize.hero} /><Text fw={700}>読了</Text><Button variant="light" onClick={() => navigate(`/works/${work.id}`)}>作品詳細へ戻る</Button></Box>}
+              </Box>}
+              {sourcePage === 1 && <Divider my="xl" />}
+              <article className="reader-content" onClick={handleArticleClick} dangerouslySetInnerHTML={{ __html: preparedHtml }} />
+              {sourcePage === pageCount && <Box className="reader-finish"><Icons.read size={IconSize.hero} /><Text fw={700}>読了</Text><Button variant="light" onClick={() => returnTo(`/works/${work.id}`)}>作品詳細へ戻る</Button></Box>}
+            </>}
           </Box>
         </Box>
       </ScrollArea>

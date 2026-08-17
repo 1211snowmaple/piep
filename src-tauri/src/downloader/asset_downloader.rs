@@ -1,9 +1,14 @@
 use serde_json::Value;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use tauri::Emitter;
 use tokio::fs::{self, File};
 use tokio::io::AsyncWriteExt;
 use tokio::task::JoinSet;
+
+pub(crate) const MAX_ASSET_DOWNLOAD_BYTES: u64 = 256 * 1024 * 1024;
+pub(crate) const MAX_PROFILE_IMAGE_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_ASSET_IMAGE_PIXELS: u64 = 100_000_000;
 
 /// アセットダウンロード対象
 #[derive(Debug, Clone)]
@@ -43,6 +48,223 @@ pub fn sanitize_filename(name: &str) -> String {
     } else {
         trimmed.to_string()
     }
+}
+
+/// Authentication is supplied manually rather than through a cookie jar, so
+/// it must never follow an arbitrary asset URL from post JSON. Keep this list
+/// exact: creator subdomains and lookalike suffixes are not authentication
+/// endpoints and do not need the account session.
+fn may_send_fanbox_cookie(url: &str) -> bool {
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    parsed.scheme() == "https"
+        && parsed.port_or_known_default() == Some(443)
+        && parsed.username().is_empty()
+        && parsed.password().is_none()
+        && matches!(
+            parsed.host_str(),
+            Some("api.fanbox.cc" | "www.fanbox.cc" | "downloads.fanbox.cc")
+        )
+}
+
+fn intended_as_image(path: &Path) -> bool {
+    matches!(
+        path.extension()
+            .and_then(|extension| extension.to_str())
+            .map(|extension| extension.to_ascii_lowercase())
+            .as_deref(),
+        Some("jpg" | "jpeg" | "png" | "webp" | "gif")
+    )
+}
+
+fn validate_asset_file(
+    path: &Path,
+    intended_path: &Path,
+    max_bytes: u64,
+    require_image: bool,
+) -> Result<u64, String> {
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| format!("Failed to inspect asset file: {error}"))?;
+    if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+        return Err("Asset path is not a regular file".to_string());
+    }
+    let bytes = metadata.len();
+    if bytes == 0 {
+        return Err("Asset file is empty".to_string());
+    }
+    if bytes > max_bytes {
+        return Err(format!(
+            "Asset file is too large: {bytes} bytes (limit {max_bytes})"
+        ));
+    }
+
+    if require_image || intended_as_image(intended_path) {
+        let reader = image::ImageReader::open(path)
+            .map_err(|error| format!("Asset image cannot be opened: {error}"))?
+            .with_guessed_format()
+            .map_err(|error| format!("Asset image format cannot be detected: {error}"))?;
+        let (width, height) = reader
+            .into_dimensions()
+            .map_err(|error| format!("Asset image header is invalid: {error}"))?;
+        let pixels = u64::from(width)
+            .checked_mul(u64::from(height))
+            .ok_or_else(|| "Asset image dimensions overflow".to_string())?;
+        if width == 0 || height == 0 || pixels > MAX_ASSET_IMAGE_PIXELS {
+            return Err(format!(
+                "Asset image dimensions are unsafe: {width}x{height}"
+            ));
+        }
+    }
+
+    Ok(bytes)
+}
+
+async fn asset_file_is_valid(
+    path: &Path,
+    intended_path: &Path,
+    max_bytes: u64,
+    require_image: bool,
+) -> bool {
+    let path = path.to_path_buf();
+    let intended_path = intended_path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        validate_asset_file(&path, &intended_path, max_bytes, require_image).is_ok()
+    })
+    .await
+    .unwrap_or(false)
+}
+
+pub(crate) async fn asset_path_is_valid_image(path: &Path, max_bytes: u64) -> bool {
+    asset_file_is_valid(path, path, max_bytes, true).await
+}
+
+struct PendingAssetFile {
+    path: PathBuf,
+    file: Option<File>,
+    published: bool,
+}
+
+impl Drop for PendingAssetFile {
+    fn drop(&mut self) {
+        // Close the handle before removal so cancellation and panic cleanup also
+        // works on Windows, where an open file cannot normally be deleted.
+        self.file.take();
+        if !self.published {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+async fn create_unique_part_file(destination: &Path) -> Result<PendingAssetFile, String> {
+    let parent = destination
+        .parent()
+        .ok_or_else(|| "Asset destination has no parent directory".to_string())?;
+    let filename = destination
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("asset");
+    for _ in 0..16 {
+        let part_path = parent.join(format!(".{filename}.{:016x}.part", rand::random::<u64>()));
+        match File::options()
+            .create_new(true)
+            .write(true)
+            .open(&part_path)
+            .await
+        {
+            Ok(file) => {
+                return Ok(PendingAssetFile {
+                    path: part_path,
+                    file: Some(file),
+                    published: false,
+                })
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(format!("Failed to create asset part file: {error}")),
+        }
+    }
+    Err("Failed to allocate a unique asset part file".to_string())
+}
+
+/// Streams a response into a unique file beside the destination and publishes
+/// it with one rename only after size and format validation succeeds.
+pub(crate) async fn save_response_atomically(
+    mut response: reqwest::Response,
+    destination: &Path,
+    max_bytes: u64,
+    require_image: bool,
+) -> Result<u64, String> {
+    if let Some(content_length) = response.content_length() {
+        if content_length > max_bytes {
+            return Err(format!(
+                "Remote asset is too large: {content_length} bytes (limit {max_bytes})"
+            ));
+        }
+    }
+
+    let mut pending = create_unique_part_file(destination).await?;
+    let part_path = pending.path.clone();
+    let result = async {
+        let mut written = 0u64;
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|error| format!("Streaming chunk error: {error}"))?
+        {
+            written = written
+                .checked_add(chunk.len() as u64)
+                .ok_or_else(|| "Remote asset size overflow".to_string())?;
+            if written > max_bytes {
+                return Err(format!("Remote asset exceeded the {max_bytes} byte limit"));
+            }
+            pending
+                .file
+                .as_mut()
+                .ok_or_else(|| "Asset part file was closed unexpectedly".to_string())?
+                .write_all(&chunk)
+                .await
+                .map_err(|error| format!("Disk write error: {error}"))?;
+        }
+        let file = pending
+            .file
+            .as_mut()
+            .ok_or_else(|| "Asset part file was closed unexpectedly".to_string())?;
+        file.flush()
+            .await
+            .map_err(|error| format!("Flush error: {error}"))?;
+        file.sync_all()
+            .await
+            .map_err(|error| format!("File sync error: {error}"))?;
+        pending.file.take();
+
+        let validation_path = part_path.clone();
+        let intended_path = destination.to_path_buf();
+        let validated_bytes = tokio::task::spawn_blocking(move || {
+            validate_asset_file(&validation_path, &intended_path, max_bytes, require_image)
+        })
+        .await
+        .map_err(|error| format!("Asset validation task panicked: {error}"))??;
+
+        match fs::rename(&part_path, destination).await {
+            Ok(()) => {
+                pending.published = true;
+                Ok(validated_bytes)
+            }
+            Err(_)
+                if asset_file_is_valid(destination, destination, max_bytes, require_image)
+                    .await =>
+            {
+                // Another concurrent download published a complete copy first.
+                let _ = fs::remove_file(&part_path).await;
+                pending.published = true;
+                Ok(validated_bytes)
+            }
+            Err(rename_error) => Err(format!("Failed to publish asset file: {rename_error}")),
+        }
+    }
+    .await;
+
+    result
 }
 
 /// JSONファイルをパースし、オリジナルのアセットのダウンロードURLを抽出する
@@ -507,7 +729,7 @@ fn find_existing_asset_in_other_versions(
             .join("data_assets")
             .join(sub_folder)
             .join(filename);
-        if candidate.is_file() && candidate.metadata().map(|m| m.len() > 0).unwrap_or(false) {
+        if validate_asset_file(&candidate, &candidate, MAX_ASSET_DOWNLOAD_BYTES, false).is_ok() {
             return Some(candidate);
         }
     }
@@ -536,9 +758,15 @@ pub async fn download_and_link_assets(
     fs::create_dir_all(&assets_dir)
         .await
         .map_err(|e| e.to_string())?;
+    let canonical_assets_dir = fs::canonicalize(&assets_dir)
+        .await
+        .map_err(|error| format!("Failed to resolve assets directory: {error}"))?;
 
     let mut download_targets = Vec::new();
     extract_download_targets(json_data, is_fanbox, &mut download_targets);
+    let mut unique_destinations = HashSet::new();
+    download_targets
+        .retain(|target| unique_destinations.insert((target.sub_folder, target.filename.clone())));
 
     let msg = format!(
         "[INFO] アセットの解析中... 合計 {} 件のアセットを検出しました（is_fanbox: {}）",
@@ -565,7 +793,7 @@ pub async fn download_and_link_assets(
         .connect_timeout(std::time::Duration::from_secs(10))
         .pool_max_idle_per_host(4)
         .build()
-        .unwrap_or_else(|_| reqwest::Client::new());
+        .map_err(|error| format!("Asset HTTP client creation failed: {error}"))?;
     let mut join_set = JoinSet::new();
     let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(4));
 
@@ -577,33 +805,46 @@ pub async fn download_and_link_assets(
         let client_clone = client.clone();
         let referer_str = referer.to_string();
         let cookie_clone = cookie.clone();
+        let attach_cookie = is_fanbox && may_send_fanbox_cookie(&url);
         let ua_clone = user_agent.clone();
         let sem = semaphore.clone();
         let app_clone = app.clone();
         let filename = target.filename.clone();
         let sub_folder = target.sub_folder;
+        let canonical_assets_dir = canonical_assets_dir.clone();
 
         join_set.spawn(async move {
             fs::create_dir_all(&dest_folder)
                 .await
                 .map_err(|e| format!("Failed to create folder: {}", e))?;
+            let canonical_dest_folder = fs::canonicalize(&dest_folder)
+                .await
+                .map_err(|error| format!("Failed to resolve asset folder: {error}"))?;
+            if !canonical_dest_folder.starts_with(&canonical_assets_dir) {
+                return Err("Asset folder escapes the version directory".to_string());
+            }
 
-            // 修正：ファイルが存在し、かつファイルサイズが0より大きい場合のみスキップ (破損防止)
-            let is_valid = if fs::try_exists(&dest_path).await.unwrap_or(false) {
-                if let Ok(meta) = fs::metadata(&dest_path).await {
-                    meta.len() > 0
-                } else {
-                    false
-                }
-            } else {
-                false
-            };
-
-            if is_valid {
+            if asset_file_is_valid(
+                &dest_path,
+                &dest_path,
+                MAX_ASSET_DOWNLOAD_BYTES,
+                false,
+            )
+            .await
+            {
                 let msg = format!("[INFO] すでに保存されています（スキップします）: {}", filename);
                 let _ = app_clone.emit("download-log", &msg);
                 log::info!("{}", msg);
                 return Ok::<(), String>(());
+            }
+            if let Ok(metadata) = fs::symlink_metadata(&dest_path).await {
+                if metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+                    fs::remove_file(&dest_path)
+                        .await
+                        .map_err(|error| format!("Failed to remove invalid asset: {error}"))?;
+                } else {
+                    return Err("Asset destination is not a regular file".to_string());
+                }
             }
 
             if let Some(existing_path) =
@@ -652,9 +893,11 @@ pub async fn download_and_link_assets(
                     let mut req = client_clone.get(&url)
                         .header("Referer", &referer_str);
 
-                    if let Some(ref cookie_str) = cookie_clone {
-                        if !cookie_str.is_empty() {
-                            req = req.header("Cookie", cookie_str.as_str());
+                    if attach_cookie {
+                        if let Some(ref cookie_str) = cookie_clone {
+                            if !cookie_str.is_empty() {
+                                req = req.header("Cookie", cookie_str.as_str());
+                            }
                         }
                     }
 
@@ -668,29 +911,21 @@ pub async fn download_and_link_assets(
                         req = req.header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
                     }
 
-                    let mut response = req.send()
+                    let response = req.send()
                         .await
                         .map_err(|e| format!("Network error: {}", e))?;
 
                     if !response.status().is_success() {
                         return Err(format!("HTTP {} for {}", response.status(), url));
                     }
-
-                    let mut file = File::create(&dest_path)
-                        .await
-                        .map_err(|e| format!("Failed to create file: {}", e))?;
-
-                    while let Some(chunk) = response.chunk().await.map_err(|e| format!("Streaming chunk error: {}", e))? {
-                        file.write_all(&chunk)
-                            .await
-                            .map_err(|e| format!("Disk write error: {}", e))?;
-                    }
-
-                    file.flush()
-                        .await
-                        .map_err(|e| format!("Flush error: {}", e))?;
-
-                    Ok::<(), String>(())
+                    save_response_atomically(
+                        response,
+                        &dest_path,
+                        MAX_ASSET_DOWNLOAD_BYTES,
+                        false,
+                    )
+                    .await
+                    .map(|_| ())
                 }.await;
 
                 match res {
@@ -752,12 +987,15 @@ pub async fn download_and_link_assets(
     }
 
     let msg = format!(
-        "[SUCCESS] アセット処理完了。成功: {} 件, 失敗: {} 件",
+        "アセット処理完了。成功: {} 件, 失敗: {} 件",
         success_count, fail_count
     );
     let _ = app.emit("download-log", &msg);
     log::info!("{}", msg);
 
+    if fail_count > 0 {
+        return Err(format!("{fail_count} asset downloads failed"));
+    }
     inject_local_paths(json_data, &assets_dir_name, is_fanbox);
 
     Ok(())
@@ -767,6 +1005,45 @@ pub async fn download_and_link_assets(
 mod tests {
     use super::*;
     use serde_json::json;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    fn test_directory(label: &str) -> PathBuf {
+        let path =
+            std::env::temp_dir().join(format!("piep_asset_{label}_{}", rand::random::<u64>()));
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    async fn local_response(headers: &str, body: &[u8]) -> reqwest::Response {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let headers = headers.trim_end_matches("\r\n").to_string();
+        let body = body.to_vec();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 1024];
+            let _ = socket.read(&mut request).await;
+            let response_head =
+                format!("HTTP/1.1 200 OK\r\nConnection: close\r\n{headers}\r\n\r\n");
+            socket.write_all(response_head.as_bytes()).await.unwrap();
+            socket.write_all(&body).await.unwrap();
+        });
+        reqwest::Client::new()
+            .get(format!("http://{address}/asset"))
+            .send()
+            .await
+            .unwrap()
+    }
+
+    fn assert_no_part_files(directory: &Path) {
+        assert!(std::fs::read_dir(directory).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".part")
+        }));
+    }
 
     #[test]
     fn test_extract_pixiv_targets() {
@@ -831,5 +1108,102 @@ mod tests {
         assert_eq!(sanitize_filename("test..jpg"), "test__jpg");
         assert_eq!(sanitize_filename("illust:123/p0.png"), "illust_123_p0.png");
         assert_eq!(sanitize_filename("  "), "asset_file");
+    }
+
+    #[test]
+    fn fanbox_cookie_is_limited_to_exact_official_https_hosts() {
+        for url in [
+            "https://api.fanbox.cc/post.info?postId=1",
+            "https://www.fanbox.cc/",
+            "https://downloads.fanbox.cc/images/post/1/example.jpg",
+        ] {
+            assert!(may_send_fanbox_cookie(url), "rejected {url}");
+        }
+        for url in [
+            "http://downloads.fanbox.cc/file",
+            "https://downloads.fanbox.cc:444/file",
+            "https://creator.fanbox.cc/file",
+            "https://fanbox.cc.evil.example/file",
+            "https://evil.example/?next=https://api.fanbox.cc",
+            "not a url",
+        ] {
+            assert!(!may_send_fanbox_cookie(url), "accepted {url}");
+        }
+    }
+
+    #[test]
+    fn existing_images_require_a_valid_header_and_safe_dimensions() {
+        let directory = test_directory("validation");
+        let valid = directory.join("valid.png");
+        image::RgbImage::from_pixel(2, 2, image::Rgb([10, 20, 30]))
+            .save(&valid)
+            .unwrap();
+        assert!(validate_asset_file(&valid, &valid, 1024 * 1024, false).is_ok());
+
+        let truncated = directory.join("truncated.png");
+        std::fs::write(&truncated, b"\x89PNG\r\n\x1a\npartial").unwrap();
+        assert!(validate_asset_file(&truncated, &truncated, 1024 * 1024, false).is_err());
+
+        let empty = directory.join("empty.bin");
+        std::fs::write(&empty, []).unwrap();
+        assert!(validate_asset_file(&empty, &empty, 1024, false).is_err());
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[tokio::test]
+    async fn response_is_published_only_after_complete_atomic_write() {
+        let directory = test_directory("atomic_success");
+        let destination = directory.join("asset.bin");
+        let response = local_response("Content-Length: 4\r\n", b"good").await;
+
+        let written = save_response_atomically(response, &destination, 4, false)
+            .await
+            .unwrap();
+
+        assert_eq!(written, 4);
+        assert_eq!(std::fs::read(&destination).unwrap(), b"good");
+        assert_no_part_files(&directory);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[tokio::test]
+    async fn declared_oversize_is_rejected_without_creating_any_file() {
+        let directory = test_directory("declared_oversize");
+        let destination = directory.join("asset.bin");
+        let response = local_response("Content-Length: 5\r\n", b"large").await;
+
+        assert!(save_response_atomically(response, &destination, 4, false)
+            .await
+            .is_err());
+        assert!(!destination.exists());
+        assert_no_part_files(&directory);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[tokio::test]
+    async fn streamed_oversize_and_truncation_remove_the_part_file() {
+        let directory = test_directory("stream_failures");
+
+        let oversized_destination = directory.join("oversized.bin");
+        let oversized =
+            local_response("Transfer-Encoding: chunked\r\n", b"5\r\nlarge\r\n0\r\n\r\n").await;
+        assert!(
+            save_response_atomically(oversized, &oversized_destination, 4, false)
+                .await
+                .is_err()
+        );
+        assert!(!oversized_destination.exists());
+        assert_no_part_files(&directory);
+
+        let truncated_destination = directory.join("truncated.bin");
+        let truncated = local_response("Content-Length: 10\r\n", b"short").await;
+        assert!(
+            save_response_atomically(truncated, &truncated_destination, 16, false)
+                .await
+                .is_err()
+        );
+        assert!(!truncated_destination.exists());
+        assert_no_part_files(&directory);
+        let _ = std::fs::remove_dir_all(directory);
     }
 }

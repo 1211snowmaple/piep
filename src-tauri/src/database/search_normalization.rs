@@ -496,7 +496,10 @@ mod tests {
         let once = index_text(phrase);
         let repeated = index_text(&phrase.repeat(50));
         let extra = |value: &IndexedText| value.surface.len() - value.normalized.len();
-        assert!(extra(&once) > 0, "conjugated verbs should contribute base forms");
+        assert!(
+            extra(&once) > 0,
+            "conjugated verbs should contribute base forms"
+        );
         assert_eq!(
             extra(&repeated),
             extra(&once),
@@ -512,8 +515,26 @@ mod tests {
         // grows with the document. Repeating one sentence would keep it tiny and
         // hide exactly the cost this harness exists to measure.
         let nouns = [
-            "教室", "図書館", "海岸", "旋律", "記憶", "季節", "手紙", "灯台", "回廊", "約束",
-            "硝子", "残響", "標本", "封筒", "螺旋", "夜明", "輪郭", "潮騒", "書架", "遠雷",
+            "教室",
+            "図書館",
+            "海岸",
+            "旋律",
+            "記憶",
+            "季節",
+            "手紙",
+            "灯台",
+            "回廊",
+            "約束",
+            "硝子",
+            "残響",
+            "標本",
+            "封筒",
+            "螺旋",
+            "夜明",
+            "輪郭",
+            "潮騒",
+            "書架",
+            "遠雷",
         ];
         let verbs = [
             "見つめていた",
@@ -550,7 +571,9 @@ mod tests {
             let field_ms = started.elapsed().as_secs_f64() * 1000.0;
             let indexed_bytes =
                 indexed.surface.len() + indexed.reading_kana.len() + indexed.reading_romaji.len();
-            println!("{size:>6} chars | index_text {field_ms:>7.1} ms, {indexed_bytes:>8} indexed bytes");
+            println!(
+                "{size:>6} chars | index_text {field_ms:>7.1} ms, {indexed_bytes:>8} indexed bytes"
+            );
         }
     }
 }

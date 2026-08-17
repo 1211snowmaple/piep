@@ -8,7 +8,7 @@ use rusqlite::{params, Connection, OpenFlags, OptionalExtension, Transaction};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -48,6 +48,8 @@ struct ReaderCacheEntry {
 
 const READER_CACHE_MAX_DOCUMENTS: usize = 8;
 const READER_CACHE_MAX_BYTES: usize = 64 * 1024 * 1024;
+const UPDATE_SNAPSHOT_CANDIDATE_PAGE_SIZE: i64 = 200;
+const UPDATE_SNAPSHOT_LOG_PAGE_SIZE: i64 = 300;
 static READER_CONTENT_CACHE: OnceLock<
     parking_lot::Mutex<HashMap<ReaderCacheKey, ReaderCacheEntry>>,
 > = OnceLock::new();
@@ -158,9 +160,11 @@ fn build_read_pool(db_path: &Path) -> Result<Pool<SqliteConnectionManager>, Stri
     let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
         | OpenFlags::SQLITE_OPEN_URI
         | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    let mmap_size = super::resource_budget::sqlite_mmap_bytes() as i64;
+    let cache_kib = (super::resource_budget::sqlite_cache_bytes() / 1024) as i64;
     let manager = SqliteConnectionManager::file(db_path)
         .with_flags(flags)
-        .with_init(|conn| {
+        .with_init(move |conn| {
             conn.busy_timeout(std::time::Duration::from_millis(5_000))?;
             conn.execute_batch(
                 "
@@ -168,10 +172,10 @@ fn build_read_pool(db_path: &Path) -> Result<Pool<SqliteConnectionManager>, Stri
                 PRAGMA journal_mode = WAL;
                 PRAGMA synchronous = NORMAL;
                 PRAGMA temp_store = MEMORY;
-                PRAGMA mmap_size = 268435456;
-                PRAGMA cache_size = -64000;
                 ",
-            )
+            )?;
+            conn.pragma_update(None, "mmap_size", mmap_size)?;
+            conn.pragma_update(None, "cache_size", -cache_kib)
         });
     let parallelism = std::thread::available_parallelism()
         .map(|value| value.get() as u32)
@@ -188,80 +192,510 @@ fn file_size_or_zero(path: &Path) -> u64 {
     std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0)
 }
 
-fn recursive_file_size(root: &Path) -> u64 {
-    let Ok(entries) = std::fs::read_dir(root) else {
-        return 0;
-    };
-    entries
-        .filter_map(Result::ok)
-        .map(|entry| {
-            let path = entry.path();
-            match entry.file_type() {
-                Ok(kind) if kind.is_file() => file_size_or_zero(&path),
-                Ok(kind) if kind.is_dir() && !kind.is_symlink() => recursive_file_size(&path),
-                _ => 0,
-            }
-        })
-        .sum()
-}
-
-fn recursive_file_count(root: &Path, extension: Option<&str>) -> u64 {
-    let Ok(entries) = std::fs::read_dir(root) else {
-        return 0;
-    };
-    entries
-        .filter_map(Result::ok)
-        .map(|entry| {
-            let path = entry.path();
-            match entry.file_type() {
-                Ok(kind) if kind.is_file() => match extension {
-                    Some(expected) => {
-                        u64::from(path.extension().and_then(|ext| ext.to_str()) == Some(expected))
-                    }
-                    None => 1,
-                },
-                Ok(kind) if kind.is_dir() && !kind.is_symlink() => {
-                    recursive_file_count(&path, extension)
-                }
-                _ => 0,
-            }
-        })
-        .sum()
-}
-
+#[cfg(test)]
 fn normalized_diagnostic_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/").to_lowercase()
 }
 
-fn orphan_asset_file_stats(root: &Path, known: &std::collections::HashSet<String>) -> (u64, u64) {
-    let Ok(entries) = std::fs::read_dir(root) else {
-        return (0, 0);
-    };
-    let mut count = 0u64;
-    let mut bytes = 0u64;
-    for entry in entries.filter_map(Result::ok) {
-        let path = entry.path();
-        match entry.file_type() {
-            Ok(kind) if kind.is_dir() && !kind.is_symlink() => {
-                let (child_count, child_bytes) = orphan_asset_file_stats(&path, known);
-                count = count.saturating_add(child_count);
-                bytes = bytes.saturating_add(child_bytes);
-            }
-            Ok(kind) if kind.is_file() => {
-                let is_asset = path.components().any(|part| {
-                    part.as_os_str()
-                        .to_string_lossy()
-                        .eq_ignore_ascii_case("data_assets")
-                });
-                if is_asset && !known.contains(&normalized_diagnostic_path(&path)) {
-                    count = count.saturating_add(1);
-                    bytes = bytes.saturating_add(file_size_or_zero(&path));
-                }
-            }
-            _ => {}
+const DIAGNOSTIC_SCAN_MAX_DEPTH: usize = 64;
+const DIAGNOSTIC_SCAN_MAX_ENTRIES: usize = 5_000_000;
+const DIAGNOSTIC_MAX_FILE_REFERENCES: u64 = 20_000_000;
+const DIAGNOSTIC_FILE_ISSUE_SAMPLE_LIMIT: usize = 100;
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct LibraryFileIntegrity {
+    checked_file_references: u64,
+    missing_json_files: u64,
+    missing_asset_files: u64,
+    missing_profile_files: u64,
+    unsafe_referenced_files: u64,
+    unreadable_referenced_files: u64,
+    empty_referenced_files: u64,
+    mismatched_asset_files: u64,
+    issue_samples: Vec<LibraryFileIssue>,
+}
+
+fn diagnostic_reference_category(kind: i64) -> &'static str {
+    match kind {
+        0 => "work_json",
+        1 => "work_asset",
+        2 => "profile",
+        3 => "entity_json",
+        _ => "unknown",
+    }
+}
+
+fn bounded_diagnostic_path(path: &str) -> String {
+    const MAX_CHARS: usize = 2_048;
+    if path.chars().count() <= MAX_CHARS {
+        return path.to_string();
+    }
+    let mut bounded = path.chars().take(MAX_CHARS).collect::<String>();
+    bounded.push('…');
+    bounded
+}
+
+fn record_file_issue(
+    integrity: &mut LibraryFileIntegrity,
+    issue_type: &str,
+    kind: i64,
+    path: &str,
+    label: Option<&str>,
+    expected_size: Option<i64>,
+    actual_size: Option<u64>,
+) {
+    if integrity.issue_samples.len() >= DIAGNOSTIC_FILE_ISSUE_SAMPLE_LIMIT {
+        return;
+    }
+    integrity.issue_samples.push(LibraryFileIssue {
+        issue_type: issue_type.to_string(),
+        category: diagnostic_reference_category(kind).to_string(),
+        path: bounded_diagnostic_path(path),
+        label: label.map(|value| value.chars().take(300).collect()),
+        expected_size_bytes: expected_size.and_then(|size| u64::try_from(size).ok()),
+        actual_size_bytes: actual_size,
+    });
+}
+
+fn count_missing_reference(integrity: &mut LibraryFileIntegrity, kind: i64) {
+    match kind {
+        0 => integrity.missing_json_files = integrity.missing_json_files.saturating_add(1),
+        1 => integrity.missing_asset_files = integrity.missing_asset_files.saturating_add(1),
+        _ => {
+            integrity.missing_profile_files = integrity.missing_profile_files.saturating_add(1);
         }
     }
-    (count, bytes)
+}
+
+/// Compare every path stored in SQLite with the actual storage tree without
+/// collecting all paths in RAM. `kind` is 0 for JSON, 1 for work assets, and
+/// 2 for profile/series images. Duplicate DB references are intentionally
+/// counted as references: this keeps the query streaming and makes it clear
+/// how many rows need repair when one shared file disappears.
+fn check_library_file_integrity(
+    conn: &Connection,
+    storage_root: &Path,
+    app_data_root: &Path,
+) -> Result<LibraryFileIntegrity, String> {
+    let canonical_storage = storage_root
+        .canonicalize()
+        .map_err(|error| format!("Storage path resolution failed: {error}"))?;
+    let canonical_app_data = app_data_root
+        .canonicalize()
+        .map_err(|error| format!("App data path resolution failed: {error}"))?;
+    let canonical_profiles = canonical_app_data.join("profiles");
+    let canonical_series = canonical_app_data.join("series");
+    let mut statement = conn
+        .prepare(
+            "SELECT kind, path, expected_size, label FROM (
+                SELECT 0 AS kind, d.json_path AS path, NULL AS expected_size,
+                       d.title AS label FROM downloads d
+                UNION ALL SELECT 0, d.original_json_path, NULL, d.title FROM downloads d
+                    WHERE d.original_json_path IS NOT NULL AND TRIM(d.original_json_path) != ''
+                UNION ALL SELECT 1, d.cover_path, NULL, d.title FROM downloads d
+                    WHERE d.cover_path IS NOT NULL AND TRIM(d.cover_path) != ''
+                UNION ALL SELECT 0, v.json_path, NULL, d.title
+                    FROM download_versions v JOIN downloads d ON d.id = v.download_id
+                UNION ALL SELECT 0, v.original_json_path, NULL, d.title
+                    FROM download_versions v JOIN downloads d ON d.id = v.download_id
+                    WHERE v.original_json_path IS NOT NULL AND TRIM(v.original_json_path) != ''
+                UNION ALL SELECT 1, a.local_path, a.file_size_bytes, d.title
+                    FROM assets a JOIN downloads d ON d.id = a.download_id
+                UNION ALL SELECT 2, p.icon_path, NULL, p.display_name FROM people p
+                    WHERE p.icon_path IS NOT NULL AND TRIM(p.icon_path) != ''
+                UNION ALL SELECT 2, p.cover_path, NULL, p.display_name FROM people p
+                    WHERE p.cover_path IS NOT NULL AND TRIM(p.cover_path) != ''
+                UNION ALL SELECT 2, s.cover_path, NULL, s.title FROM series s
+                    WHERE s.cover_path IS NOT NULL AND TRIM(s.cover_path) != ''
+                UNION ALL SELECT 3, e.json_path, NULL,
+                    e.entity_type || ' ' || e.source || ':' || e.source_key
+                    FROM entity_versions e
+             ) WHERE path IS NOT NULL AND TRIM(path) != ''",
+        )
+        .map_err(|error| format!("File integrity query prepare failed: {error}"))?;
+    let mut rows = statement
+        .query([])
+        .map_err(|error| format!("File integrity query failed: {error}"))?;
+    let mut integrity = LibraryFileIntegrity::default();
+
+    while let Some(row) = rows
+        .next()
+        .map_err(|error| format!("File integrity row failed: {error}"))?
+    {
+        integrity.checked_file_references = integrity.checked_file_references.saturating_add(1);
+        if integrity.checked_file_references > DIAGNOSTIC_MAX_FILE_REFERENCES {
+            return Err(format!(
+                "File integrity check exceeded the {}-reference safety limit",
+                DIAGNOSTIC_MAX_FILE_REFERENCES
+            ));
+        }
+
+        let kind = row
+            .get::<_, i64>(0)
+            .map_err(|error| format!("File integrity kind failed: {error}"))?;
+        let stored_path = row
+            .get::<_, String>(1)
+            .map_err(|error| format!("File integrity path failed: {error}"))?;
+        let expected_size = row
+            .get::<_, Option<i64>>(2)
+            .map_err(|error| format!("File integrity size failed: {error}"))?;
+        let label = row
+            .get::<_, Option<String>>(3)
+            .map_err(|error| format!("File integrity label failed: {error}"))?;
+        if stored_path.len() > 32_768 {
+            integrity.unsafe_referenced_files = integrity.unsafe_referenced_files.saturating_add(1);
+            record_file_issue(
+                &mut integrity,
+                "unsafe",
+                kind,
+                &stored_path,
+                label.as_deref(),
+                expected_size,
+                None,
+            );
+            continue;
+        }
+        let path = Path::new(&stored_path);
+        if !path.is_absolute() {
+            integrity.unsafe_referenced_files = integrity.unsafe_referenced_files.saturating_add(1);
+            record_file_issue(
+                &mut integrity,
+                "unsafe",
+                kind,
+                &stored_path,
+                label.as_deref(),
+                expected_size,
+                None,
+            );
+            continue;
+        }
+        let metadata = match std::fs::symlink_metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                count_missing_reference(&mut integrity, kind);
+                record_file_issue(
+                    &mut integrity,
+                    "missing",
+                    kind,
+                    &stored_path,
+                    label.as_deref(),
+                    expected_size,
+                    None,
+                );
+                continue;
+            }
+            Err(_) => {
+                integrity.unreadable_referenced_files =
+                    integrity.unreadable_referenced_files.saturating_add(1);
+                record_file_issue(
+                    &mut integrity,
+                    "unreadable",
+                    kind,
+                    &stored_path,
+                    label.as_deref(),
+                    expected_size,
+                    None,
+                );
+                continue;
+            }
+        };
+        if diagnostic_metadata_is_link(&metadata) || !metadata.file_type().is_file() {
+            integrity.unsafe_referenced_files = integrity.unsafe_referenced_files.saturating_add(1);
+            record_file_issue(
+                &mut integrity,
+                "unsafe",
+                kind,
+                &stored_path,
+                label.as_deref(),
+                expected_size,
+                Some(metadata.len()),
+            );
+            continue;
+        }
+        let canonical_path = match path.canonicalize() {
+            Ok(path)
+                if match kind {
+                    // Work JSON and assets live below downloads/.
+                    0 | 1 => path.starts_with(&canonical_storage),
+                    // Entity media and version JSON deliberately live beside
+                    // downloads/, below profiles/ or series/. Treating every
+                    // reference as a downloads path made every fetched profile
+                    // look like an unsafe external file.
+                    2 | 3 => {
+                        path.starts_with(&canonical_profiles) || path.starts_with(&canonical_series)
+                    }
+                    _ => false,
+                } =>
+            {
+                path
+            }
+            _ => {
+                integrity.unsafe_referenced_files =
+                    integrity.unsafe_referenced_files.saturating_add(1);
+                record_file_issue(
+                    &mut integrity,
+                    "unsafe",
+                    kind,
+                    &stored_path,
+                    label.as_deref(),
+                    expected_size,
+                    Some(metadata.len()),
+                );
+                continue;
+            }
+        };
+        // Keep the resolved path alive through all checks. Besides making the
+        // containment decision explicit, this prevents a future refactor from
+        // accidentally comparing the unchecked input path below.
+        let _ = canonical_path;
+        if metadata.len() == 0 {
+            integrity.empty_referenced_files = integrity.empty_referenced_files.saturating_add(1);
+            record_file_issue(
+                &mut integrity,
+                "empty",
+                kind,
+                &stored_path,
+                label.as_deref(),
+                expected_size,
+                Some(0),
+            );
+        }
+        if kind == 1
+            && expected_size.is_some_and(|expected| {
+                expected > 0 && u64::try_from(expected).ok() != Some(metadata.len())
+            })
+        {
+            integrity.mismatched_asset_files = integrity.mismatched_asset_files.saturating_add(1);
+            record_file_issue(
+                &mut integrity,
+                "size_mismatch",
+                kind,
+                &stored_path,
+                label.as_deref(),
+                expected_size,
+                Some(metadata.len()),
+            );
+        }
+    }
+    Ok(integrity)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DiagnosticScanLimits {
+    max_depth: usize,
+    max_entries: usize,
+}
+
+impl Default for DiagnosticScanLimits {
+    fn default() -> Self {
+        Self {
+            max_depth: DIAGNOSTIC_SCAN_MAX_DEPTH,
+            max_entries: DIAGNOSTIC_SCAN_MAX_ENTRIES,
+        }
+    }
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct DiagnosticFileStats {
+    storage_size_bytes: u64,
+    lexical_index_size_bytes: u64,
+    lexical_index_file_count: u64,
+    lexical_index_segment_count: u64,
+    semantic_index_size_bytes: u64,
+    orphan_asset_files: u64,
+    orphan_asset_file_bytes: u64,
+    transient_files: u64,
+    transient_file_bytes: u64,
+    transient_file_samples: Vec<LibraryFileIssue>,
+    visited_entries: usize,
+}
+
+fn diagnostic_path_is_transient(path: &Path) -> bool {
+    path.components().any(|component| {
+        let name = component.as_os_str().to_string_lossy();
+        name.ends_with(".part")
+            || (name.starts_with('.') && name.contains(".stage"))
+            || name.starts_with(".piep-export-")
+    })
+}
+
+fn diagnostic_metadata_is_link(metadata: &std::fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return true;
+        }
+    }
+    false
+}
+
+fn diagnostic_scan_roots(storage: &Path, semantic: &Path) -> Vec<PathBuf> {
+    if semantic.starts_with(storage) {
+        vec![storage.to_path_buf()]
+    } else if storage.starts_with(semantic) {
+        vec![semantic.to_path_buf()]
+    } else {
+        vec![storage.to_path_buf(), semantic.to_path_buf()]
+    }
+}
+
+fn collect_diagnostic_file_stats_with_limits(
+    storage_root: &Path,
+    semantic_root: &Path,
+    is_known_asset: &mut dyn FnMut(&Path) -> Result<bool, String>,
+    limits: DiagnosticScanLimits,
+) -> Result<DiagnosticFileStats, String> {
+    if limits.max_entries == 0 {
+        return Err("Diagnostic scan entry limit must be positive".to_string());
+    }
+    let lexical_root = storage_root.join("search-index");
+    let mut stats = DiagnosticFileStats::default();
+    let mut visited_directories = HashSet::new();
+
+    for root in diagnostic_scan_roots(storage_root, semantic_root) {
+        let root_metadata = match std::fs::symlink_metadata(&root) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => continue,
+        };
+        if diagnostic_metadata_is_link(&root_metadata) || !root_metadata.file_type().is_dir() {
+            continue;
+        }
+        let canonical_root = match root.canonicalize() {
+            Ok(path) => path,
+            Err(_) => continue,
+        };
+        let mut pending = vec![(root, 0usize)];
+
+        while let Some((directory, depth)) = pending.pop() {
+            let metadata = match std::fs::symlink_metadata(&directory) {
+                Ok(metadata) => metadata,
+                Err(_) => continue,
+            };
+            if diagnostic_metadata_is_link(&metadata) || !metadata.file_type().is_dir() {
+                continue;
+            }
+            let canonical_directory = match directory.canonicalize() {
+                Ok(path) if path.starts_with(&canonical_root) => path,
+                _ => continue,
+            };
+            if !visited_directories.insert(canonical_directory) {
+                continue;
+            }
+            let entries = match std::fs::read_dir(&directory) {
+                Ok(entries) => entries,
+                Err(_) => continue,
+            };
+            for entry in entries.filter_map(Result::ok) {
+                stats.visited_entries = stats.visited_entries.saturating_add(1);
+                if stats.visited_entries > limits.max_entries {
+                    return Err(format!(
+                        "Diagnostic scan exceeded the {}-entry safety limit",
+                        limits.max_entries
+                    ));
+                }
+                let path = entry.path();
+                let metadata = match std::fs::symlink_metadata(&path) {
+                    Ok(metadata) => metadata,
+                    Err(_) => continue,
+                };
+                if diagnostic_metadata_is_link(&metadata) {
+                    continue;
+                }
+                if metadata.file_type().is_dir() {
+                    if depth >= limits.max_depth {
+                        return Err(format!(
+                            "Diagnostic scan exceeded the depth-{} safety limit",
+                            limits.max_depth
+                        ));
+                    }
+                    pending.push((path, depth + 1));
+                    continue;
+                }
+                if !metadata.file_type().is_file() {
+                    continue;
+                }
+
+                let bytes = metadata.len();
+                let in_storage = path.starts_with(storage_root);
+                if in_storage {
+                    stats.storage_size_bytes = stats.storage_size_bytes.saturating_add(bytes);
+                    if diagnostic_path_is_transient(&path) {
+                        stats.transient_files = stats.transient_files.saturating_add(1);
+                        stats.transient_file_bytes =
+                            stats.transient_file_bytes.saturating_add(bytes);
+                        if stats.transient_file_samples.len() < DIAGNOSTIC_FILE_ISSUE_SAMPLE_LIMIT {
+                            stats.transient_file_samples.push(LibraryFileIssue {
+                                issue_type: "transient".to_string(),
+                                category: "transient".to_string(),
+                                path: bounded_diagnostic_path(path.to_string_lossy().as_ref()),
+                                label: None,
+                                expected_size_bytes: None,
+                                actual_size_bytes: Some(bytes),
+                            });
+                        }
+                    }
+                }
+                if path.starts_with(&lexical_root) {
+                    stats.lexical_index_size_bytes =
+                        stats.lexical_index_size_bytes.saturating_add(bytes);
+                    stats.lexical_index_file_count =
+                        stats.lexical_index_file_count.saturating_add(1);
+                    if path.extension().and_then(|extension| extension.to_str()) == Some("store") {
+                        stats.lexical_index_segment_count =
+                            stats.lexical_index_segment_count.saturating_add(1);
+                    }
+                }
+                if path.starts_with(semantic_root) {
+                    stats.semantic_index_size_bytes =
+                        stats.semantic_index_size_bytes.saturating_add(bytes);
+                }
+                if in_storage
+                    && path.components().any(|part| {
+                        part.as_os_str()
+                            .to_string_lossy()
+                            .eq_ignore_ascii_case("data_assets")
+                    })
+                    && !diagnostic_path_is_transient(&path)
+                    && !is_known_asset(&path)?
+                {
+                    stats.orphan_asset_files = stats.orphan_asset_files.saturating_add(1);
+                    stats.orphan_asset_file_bytes =
+                        stats.orphan_asset_file_bytes.saturating_add(bytes);
+                }
+            }
+        }
+    }
+    Ok(stats)
+}
+
+fn collect_diagnostic_file_stats(
+    storage_root: &Path,
+    semantic_root: &Path,
+    is_known_asset: &mut dyn FnMut(&Path) -> Result<bool, String>,
+) -> Result<DiagnosticFileStats, String> {
+    collect_diagnostic_file_stats_with_limits(
+        storage_root,
+        semantic_root,
+        is_known_asset,
+        DiagnosticScanLimits::default(),
+    )
+}
+
+fn recursive_file_size(root: &Path) -> u64 {
+    let mut no_known_assets = |_path: &Path| Ok(false);
+    collect_diagnostic_file_stats(
+        root,
+        &root.join(".piep-no-semantic-index"),
+        &mut no_known_assets,
+    )
+    .map(|stats| stats.storage_size_bytes)
+    .unwrap_or(0)
 }
 
 fn benchmark_percentiles(samples: &mut [f64]) -> (f64, f64) {
@@ -423,6 +857,30 @@ struct SearchCursor {
     tantivy_segment_ord: Option<u32>,
     #[serde(default)]
     tantivy_doc_id: Option<u32>,
+    /// Exact filtered count carried by a sorted-search cursor.
+    #[serde(default)]
+    total_estimate: Option<i64>,
+    /// Raw lexical count carried separately because metadata filters can make
+    /// the public total unknown while still allowing later pages to skip
+    /// Tantivy's Count collector.
+    #[serde(default)]
+    tantivy_total_hits: Option<i64>,
+    /// Identifies the exact disk-backed match set used by later pages.
+    #[serde(default)]
+    snapshot_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EntitySeriesCursor {
+    scope: String,
+    library_generation: i64,
+    latest_work_at: String,
+    count: i64,
+    display_name: String,
+    source: String,
+    source_key: String,
+    total: i64,
 }
 
 /// スレッドセーフなデータベースハンドル
@@ -479,12 +937,249 @@ struct CachedIndexStatus {
     status: SearchIndexStatus,
 }
 
+const QUERY_RESULT_CACHE_TTL: Duration = Duration::from_secs(90);
+const QUERY_RESULT_CACHE_MAX_ENTRIES: usize = 128;
+const QUERY_RESULT_CACHE_MAX_BYTES: usize = 2 * 1024 * 1024;
+
+struct CachedQueryResult<T> {
+    generation: i64,
+    value: T,
+    bytes: usize,
+    expires_at: Instant,
+    last_used: u64,
+}
+
+struct BoundedQueryCache<T> {
+    entries: HashMap<String, CachedQueryResult<T>>,
+    tick: u64,
+    bytes: usize,
+    hits: u64,
+    misses: u64,
+}
+
+impl<T: Clone> BoundedQueryCache<T> {
+    fn new() -> Self {
+        Self {
+            entries: HashMap::new(),
+            tick: 0,
+            bytes: 0,
+            hits: 0,
+            misses: 0,
+        }
+    }
+
+    fn get(&mut self, key: &str, generation: i64) -> Option<T> {
+        let now = Instant::now();
+        self.retain_fresh(generation, now);
+        self.tick = self.tick.saturating_add(1);
+        if let Some(entry) = self.entries.get_mut(key) {
+            entry.last_used = self.tick;
+            self.hits = self.hits.saturating_add(1);
+            return Some(entry.value.clone());
+        }
+        self.misses = self.misses.saturating_add(1);
+        None
+    }
+
+    fn insert(&mut self, key: String, generation: i64, value: T, bytes: usize) {
+        self.retain_fresh(generation, Instant::now());
+        if let Some(previous) = self.entries.remove(&key) {
+            self.bytes = self.bytes.saturating_sub(previous.bytes);
+        }
+        self.tick = self.tick.saturating_add(1);
+        self.bytes = self.bytes.saturating_add(bytes);
+        self.entries.insert(
+            key,
+            CachedQueryResult {
+                generation,
+                value,
+                bytes,
+                expires_at: Instant::now() + QUERY_RESULT_CACHE_TTL,
+                last_used: self.tick,
+            },
+        );
+        while self.entries.len() > QUERY_RESULT_CACHE_MAX_ENTRIES
+            || self.bytes > QUERY_RESULT_CACHE_MAX_BYTES
+        {
+            let Some(oldest) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, entry)| entry.last_used)
+                .map(|(key, _)| key.clone())
+            else {
+                break;
+            };
+            if let Some(removed) = self.entries.remove(&oldest) {
+                self.bytes = self.bytes.saturating_sub(removed.bytes);
+            }
+        }
+    }
+
+    fn retain_fresh(&mut self, generation: i64, now: Instant) {
+        self.entries.retain(|_, entry| {
+            let keep = entry.generation == generation && entry.expires_at > now;
+            if !keep {
+                self.bytes = self.bytes.saturating_sub(entry.bytes);
+            }
+            keep
+        });
+    }
+}
+
+const SEARCH_SNAPSHOT_TTL: Duration = Duration::from_secs(90);
+const SEARCH_SNAPSHOT_MAX_ENTRIES: usize = 4;
+const SEARCH_SNAPSHOT_DIR: &str = ".search-snapshots";
+type SnapshotConnection = Arc<Mutex<Option<Connection>>>;
+
+struct DiskSearchSnapshot {
+    id: String,
+    key: String,
+    library_generation: i64,
+    index_generation: u64,
+    row_count: i64,
+    disk_bytes: u64,
+    expires_at: Instant,
+    path: PathBuf,
+    connection: SnapshotConnection,
+}
+
+impl Drop for DiskSearchSnapshot {
+    fn drop(&mut self) {
+        if let Ok(mut connection) = self.connection.lock() {
+            connection.take();
+        }
+        cleanup_search_snapshot_path(&self.path);
+    }
+}
+
+struct CachedDiskSearchSnapshot {
+    snapshot: Arc<DiskSearchSnapshot>,
+    last_used: u64,
+}
+
+struct SearchSnapshotCache {
+    entries: Vec<CachedDiskSearchSnapshot>,
+    tick: u64,
+    disk_bytes: u64,
+    hits: u64,
+    misses: u64,
+}
+
+impl SearchSnapshotCache {
+    fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+            tick: 0,
+            disk_bytes: 0,
+            hits: 0,
+            misses: 0,
+        }
+    }
+
+    fn get(
+        &mut self,
+        key: &str,
+        library_generation: i64,
+        index_generation: u64,
+        expected_id: Option<&str>,
+    ) -> Result<Option<Arc<DiskSearchSnapshot>>, String> {
+        self.retain_fresh(library_generation, index_generation);
+        self.tick = self.tick.saturating_add(1);
+        if let Some(entry) = self.entries.iter_mut().find(|entry| {
+            entry.snapshot.key == key
+                && expected_id
+                    .map(|expected| entry.snapshot.id == expected)
+                    .unwrap_or(true)
+        }) {
+            entry.last_used = self.tick;
+            self.hits = self.hits.saturating_add(1);
+            return Ok(Some(entry.snapshot.clone()));
+        }
+        self.misses = self.misses.saturating_add(1);
+        if expected_id.is_some() {
+            return Err(
+                "Search snapshot expired or was invalidated; restart the search".to_string(),
+            );
+        }
+        Ok(None)
+    }
+
+    fn insert(&mut self, snapshot: Arc<DiskSearchSnapshot>) -> Result<(), String> {
+        let disk_budget = super::resource_budget::search_snapshot_disk_bytes();
+        if snapshot.disk_bytes > disk_budget {
+            return Err(format!(
+                "Search snapshot requires {} bytes, above the {}-byte disk budget",
+                snapshot.disk_bytes, disk_budget
+            ));
+        }
+        self.retain_fresh(snapshot.library_generation, snapshot.index_generation);
+        if let Some(position) = self
+            .entries
+            .iter()
+            .position(|entry| entry.snapshot.key == snapshot.key)
+        {
+            self.disk_bytes = self
+                .disk_bytes
+                .saturating_sub(self.entries[position].snapshot.disk_bytes);
+            self.entries.swap_remove(position);
+        }
+        self.tick = self.tick.saturating_add(1);
+        self.disk_bytes = self.disk_bytes.saturating_add(snapshot.disk_bytes);
+        self.entries.push(CachedDiskSearchSnapshot {
+            snapshot,
+            last_used: self.tick,
+        });
+        while self.entries.len() > SEARCH_SNAPSHOT_MAX_ENTRIES || self.disk_bytes > disk_budget {
+            let Some(position) = self
+                .entries
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, entry)| entry.last_used)
+                .map(|(position, _)| position)
+            else {
+                break;
+            };
+            self.disk_bytes = self
+                .disk_bytes
+                .saturating_sub(self.entries[position].snapshot.disk_bytes);
+            self.entries.swap_remove(position);
+        }
+        Ok(())
+    }
+
+    fn retain_fresh(&mut self, library_generation: i64, index_generation: u64) {
+        let now = Instant::now();
+        let mut retained_bytes = 0u64;
+        self.entries.retain(|entry| {
+            let keep = entry.snapshot.library_generation == library_generation
+                && entry.snapshot.index_generation == index_generation
+                && entry.snapshot.expires_at > now;
+            if keep {
+                retained_bytes = retained_bytes.saturating_add(entry.snapshot.disk_bytes);
+            }
+            keep
+        });
+        self.disk_bytes = retained_bytes;
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.disk_bytes = 0;
+    }
+}
+
 pub struct Database {
     conn: RestoreAwareConnection,
     read_pool: Pool<SqliteConnectionManager>,
+    generation_conn: Mutex<Connection>,
     db_path: PathBuf,
     storage_dir: PathBuf,
     index_status_cache: Mutex<Option<CachedIndexStatus>>,
+    facet_cache: Mutex<BoundedQueryCache<Vec<FacetCount>>>,
+    entity_facet_cache: Mutex<BoundedQueryCache<Vec<EntityFacet>>>,
+    suggest_cache: Mutex<BoundedQueryCache<SearchSuggestResult>>,
+    filter_facets_cache: Mutex<BoundedQueryCache<FilterFacets>>,
+    search_snapshot_cache: Mutex<SearchSnapshotCache>,
 }
 
 impl Database {
@@ -494,17 +1189,30 @@ impl Database {
         schema::initialize(&conn).map_err(|e| format!("DB init failed: {}", e))?;
         reconcile_search_index_format(&conn)?;
         let read_pool = build_read_pool(db_path)?;
+        let generation_conn = Connection::open(db_path)
+            .map_err(|e| format!("DB generation monitor open failed: {e}"))?;
+        generation_conn
+            .pragma_update(None, "query_only", true)
+            .map_err(|e| format!("DB generation monitor setup failed: {e}"))?;
 
         // ストレージディレクトリを作成
         std::fs::create_dir_all(storage_dir)
             .map_err(|e| format!("Storage dir creation failed: {}", e))?;
+        cleanup_stale_search_snapshots(storage_dir)?;
+        recover_interrupted_download_saves(&conn, storage_dir)?;
 
         Ok(Self {
             conn: RestoreAwareConnection::new(conn),
             read_pool,
+            generation_conn: Mutex::new(generation_conn),
             db_path: db_path.to_path_buf(),
             storage_dir: storage_dir.to_path_buf(),
             index_status_cache: Mutex::new(None),
+            facet_cache: Mutex::new(BoundedQueryCache::new()),
+            entity_facet_cache: Mutex::new(BoundedQueryCache::new()),
+            suggest_cache: Mutex::new(BoundedQueryCache::new()),
+            filter_facets_cache: Mutex::new(BoundedQueryCache::new()),
+            search_snapshot_cache: Mutex::new(SearchSnapshotCache::new()),
         })
     }
 
@@ -543,6 +1251,92 @@ impl Database {
         self.conn.end_restore_scope();
     }
 
+    /// Persists the restore's file rollback directory before live files are
+    /// promoted. The row is deliberately outside the library transaction: if
+    /// the process stops before COMMIT, startup can restore those files.
+    pub(crate) fn create_restore_journal(
+        &self,
+        journal_id: &str,
+        stage_root: &Path,
+    ) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS restore_journal (
+                id TEXT PRIMARY KEY,
+                stage_root TEXT NOT NULL,
+                committed INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL
+             )",
+        )
+        .map_err(|e| format!("Restore journal schema failed: {e}"))?;
+        conn.execute(
+            "INSERT INTO restore_journal (id, stage_root, committed, created_at)
+             VALUES (?1, ?2, 0, ?3)",
+            params![
+                journal_id,
+                stage_root.to_string_lossy().to_string(),
+                chrono::Utc::now().to_rfc3339()
+            ],
+        )
+        .map_err(|e| format!("Restore journal create failed: {e}"))?;
+        Ok(())
+    }
+
+    /// Written in the same SQLite transaction as all restored rows. Therefore
+    /// startup can unambiguously distinguish COMMIT from rollback even if the
+    /// process stops immediately after SQLite returns from COMMIT.
+    pub(crate) fn mark_restore_journal_committed(&self, journal_id: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let changed = conn
+            .execute(
+                "UPDATE restore_journal SET committed = 1 WHERE id = ?1",
+                params![journal_id],
+            )
+            .map_err(|e| format!("Restore journal commit marker failed: {e}"))?;
+        if changed != 1 {
+            return Err("Restore journal disappeared before commit".to_string());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn finish_restore_journal(&self, journal_id: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM restore_journal WHERE id = ?1",
+            params![journal_id],
+        )
+        .map_err(|e| format!("Restore journal cleanup failed: {e}"))?;
+        Ok(())
+    }
+
+    pub(crate) fn pending_restore_journals(&self) -> Result<Vec<(String, PathBuf, bool)>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS restore_journal (
+                id TEXT PRIMARY KEY,
+                stage_root TEXT NOT NULL,
+                committed INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL
+             )",
+        )
+        .map_err(|e| format!("Restore journal schema failed: {e}"))?;
+        let mut statement = conn
+            .prepare("SELECT id, stage_root, committed FROM restore_journal ORDER BY created_at")
+            .map_err(|e| format!("Restore journal read failed: {e}"))?;
+        let journals = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    PathBuf::from(row.get::<_, String>(1)?),
+                    row.get::<_, i64>(2)? != 0,
+                ))
+            })
+            .map_err(|e| format!("Restore journal query failed: {e}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("Restore journal decode failed: {e}"))?;
+        Ok(journals)
+    }
+
     pub(crate) fn delete_download_record_for_restore(&self, id: i64) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM downloads WHERE id = ?1", params![id])
@@ -550,10 +1344,45 @@ impl Database {
         Ok(())
     }
 
+    /// Roll back a failed DB-only re-import while deliberately retaining its
+    /// work tree. This is called before search indexing, so no sidecar cleanup
+    /// is needed and the next scan can retry the same source files.
+    pub(crate) fn delete_download_record_for_reimport(&self, id: i64) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM downloads WHERE id = ?1", params![id])
+            .map_err(|e| format!("Re-import delete failed: {e}"))?;
+        drop(conn);
+        self.invalidate_index_status();
+        Ok(())
+    }
+
     fn read_conn(&self) -> Result<PooledConnection<SqliteConnectionManager>, String> {
         self.read_pool
             .get()
             .map_err(|e| format!("DB read pool checkout failed: {}", e))
+    }
+
+    fn library_generation(&self) -> Result<i64, String> {
+        self.generation_conn
+            .lock()
+            .map_err(|e| e.to_string())?
+            .pragma_query_value(None, "data_version", |row| row.get(0))
+            .map_err(|e| format!("Library generation read failed: {e}"))
+    }
+
+    #[cfg(test)]
+    fn query_cache_stats(&self) -> ((u64, u64), (u64, u64), (u64, u64)) {
+        let facet = self.facet_cache.lock().expect("facet cache");
+        let suggest = self.suggest_cache.lock().expect("suggest cache");
+        let snapshots = self
+            .search_snapshot_cache
+            .lock()
+            .expect("search snapshot cache");
+        (
+            (facet.hits, facet.misses),
+            (suggest.hits, suggest.misses),
+            (snapshots.hits, snapshots.misses),
+        )
     }
 
     pub fn reindex_download(&self, download_id: i64) -> Result<(), String> {
@@ -592,6 +1421,9 @@ impl Database {
     fn invalidate_index_status(&self) {
         if let Ok(mut cache) = self.index_status_cache.lock() {
             *cache = None;
+        }
+        if let Ok(mut cache) = self.search_snapshot_cache.lock() {
+            cache.clear();
         }
     }
 
@@ -702,10 +1534,10 @@ impl Database {
             if options.include_semantic && !prepared.semantic.is_empty() {
                 // One embedding call per chunk rather than per document: the
                 // model is only worth its accelerator when it is handed a batch.
-                if let Err(error) =
-                    super::semantic_index::upsert_documents(&self.storage_dir, &prepared.semantic)
+                match super::semantic_index::upsert_documents(&self.storage_dir, &prepared.semantic)
                 {
-                    log::warn!("Semantic index batch skipped: {error}");
+                    Ok(_) => self.record_semantic_indexed_documents(&prepared.indexed)?,
+                    Err(error) => log::warn!("Semantic index batch skipped: {error}"),
                 }
             }
 
@@ -832,14 +1664,36 @@ impl Database {
         Ok(())
     }
 
+    fn record_semantic_indexed_documents(&self, states: &[IndexedState]) -> Result<(), String> {
+        if states.is_empty() {
+            return Ok(());
+        }
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        record_semantic_indexed_documents_locked(&conn, states)?;
+        drop(conn);
+        self.invalidate_index_status();
+        Ok(())
+    }
+
     pub fn search_filter_facets(
         &self,
         kind: &str,
         query: Option<&str>,
         limit: i64,
     ) -> Result<Vec<FacetCount>, String> {
-        let conn = self.read_conn()?;
         let limit = limit.clamp(1, 200) as usize;
+        let generation = self.library_generation()?;
+        let cache_key = format!(
+            "{}\u{1f}{}\u{1f}{limit}",
+            kind,
+            query.map(str::trim).unwrap_or("")
+        );
+        if let Ok(mut cache) = self.facet_cache.lock() {
+            if let Some(cached) = cache.get(&cache_key, generation) {
+                return Ok(cached);
+            }
+        }
+        let conn = self.read_conn()?;
         let normalized_query = query.map(normalize_search_text).unwrap_or_default();
         let sql = |filtered: bool| -> Result<&'static str, String> {
             match (kind, filtered) {
@@ -904,87 +1758,103 @@ impl Database {
             Ok(facets)
         };
 
-        if normalized_query.is_empty() {
-            return load(sql(false)?, None, limit);
-        }
-
-        // Exact/substring candidates are filtered before GROUP BY. A bounded
-        // popularity fallback keeps kana/romaji/fuzzy matching useful without
-        // allocating every distinct facet on each keystroke.
-        let candidate_limit = limit.saturating_mul(20).clamp(400, 4_000);
-        let raw_query = query.unwrap_or("").trim();
-        let escaped = raw_query
-            .replace('\\', "\\\\")
-            .replace('%', "\\%")
-            .replace('_', "\\_");
-        let like = format!("%{escaped}%");
-        let mut facets = load(sql(true)?, Some(&like), candidate_limit)?;
-        if facets.len() < limit {
-            let mut names = facets
-                .iter()
-                .map(|facet| facet.name.clone())
-                .collect::<std::collections::HashSet<_>>();
-            for facet in load(sql(false)?, None, candidate_limit)? {
-                if names.insert(facet.name.clone()) {
-                    facets.push(facet);
+        let result = if normalized_query.is_empty() {
+            load(sql(false)?, None, limit)?
+        } else {
+            // Exact/substring candidates are filtered before GROUP BY. A bounded
+            // popularity fallback keeps kana/romaji/fuzzy matching useful without
+            // allocating every distinct facet on each keystroke.
+            let candidate_limit = limit.saturating_mul(20).clamp(400, 4_000);
+            let raw_query = query.unwrap_or("").trim();
+            let escaped = raw_query
+                .replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_");
+            let like = format!("%{escaped}%");
+            let mut facets = load(sql(true)?, Some(&like), candidate_limit)?;
+            if facets.len() < limit {
+                let mut names = facets
+                    .iter()
+                    .map(|facet| facet.name.clone())
+                    .collect::<std::collections::HashSet<_>>();
+                for facet in load(sql(false)?, None, candidate_limit)? {
+                    if names.insert(facet.name.clone()) {
+                        facets.push(facet);
+                    }
                 }
             }
-        }
 
-        let query_grams = query_ngrams(&normalized_query);
-        let mut scored = facets
-            .into_iter()
-            .filter_map(|facet| {
-                let normalized_name = normalize_search_text(&facet.name);
-                let mut score = if normalized_name == normalized_query {
-                    1000.0
-                } else if normalized_name.starts_with(&normalized_query) {
-                    800.0
-                } else if normalized_name.contains(&normalized_query) {
-                    650.0
-                } else {
-                    let name_grams = generate_ngrams_limited(&normalized_name, 512);
-                    let overlap = query_grams
-                        .iter()
-                        .filter(|gram| name_grams.contains(*gram))
-                        .count();
-                    let ratio = if query_grams.is_empty() {
-                        0.0
+            let query_grams = query_ngrams(&normalized_query);
+            let mut scored = facets
+                .into_iter()
+                .filter_map(|facet| {
+                    let normalized_name = normalize_search_text(&facet.name);
+                    let mut score = if normalized_name == normalized_query {
+                        1000.0
+                    } else if normalized_name.starts_with(&normalized_query) {
+                        800.0
+                    } else if normalized_name.contains(&normalized_query) {
+                        650.0
                     } else {
-                        overlap as f64 / query_grams.len() as f64
+                        let name_grams = generate_ngrams_limited(&normalized_name, 512);
+                        let overlap = query_grams
+                            .iter()
+                            .filter(|gram| name_grams.contains(*gram))
+                            .count();
+                        let ratio = if query_grams.is_empty() {
+                            0.0
+                        } else {
+                            overlap as f64 / query_grams.len() as f64
+                        };
+                        let fuzzy = normalized_levenshtein(&normalized_name, &normalized_query);
+                        (ratio * 430.0).max(if fuzzy >= 0.72 { fuzzy * 360.0 } else { 0.0 })
                     };
-                    let fuzzy = normalized_levenshtein(&normalized_name, &normalized_query);
-                    (ratio * 430.0).max(if fuzzy >= 0.72 { fuzzy * 360.0 } else { 0.0 })
-                };
 
-                if score <= 0.0 {
-                    return None;
-                }
-                score += (facet.count as f64 + 1.0).ln() * 12.0;
-                Some((score, facet))
-            })
-            .collect::<Vec<(f64, FacetCount)>>();
+                    if score <= 0.0 {
+                        return None;
+                    }
+                    score += (facet.count as f64 + 1.0).ln() * 12.0;
+                    Some((score, facet))
+                })
+                .collect::<Vec<(f64, FacetCount)>>();
 
-        scored.sort_by(|a, b| {
-            b.0.partial_cmp(&a.0)
-                .unwrap_or(Ordering::Equal)
-                .then_with(|| b.1.count.cmp(&a.1.count))
-                .then_with(|| a.1.name.cmp(&b.1.name))
-        });
-        scored.truncate(limit);
-        Ok(scored.into_iter().map(|(_, facet)| facet).collect())
+            scored.sort_by(|a, b| {
+                b.0.partial_cmp(&a.0)
+                    .unwrap_or(Ordering::Equal)
+                    .then_with(|| b.1.count.cmp(&a.1.count))
+                    .then_with(|| a.1.name.cmp(&b.1.name))
+            });
+            scored.truncate(limit);
+            scored.into_iter().map(|(_, facet)| facet).collect()
+        };
+        if let Ok(mut cache) = self.facet_cache.lock() {
+            cache.insert(
+                cache_key,
+                generation,
+                result.clone(),
+                facet_counts_bytes(&result),
+            );
+        }
+        Ok(result)
     }
 
     pub fn search_suggest(
         &self,
         params: &SearchSuggestParams,
     ) -> Result<SearchSuggestResult, String> {
-        let conn = self.read_conn()?;
         let limit = params.limit.unwrap_or(12).clamp(1, 50);
         let text = params.text.as_deref().unwrap_or("").trim();
         if text.is_empty() {
             return Ok(SearchSuggestResult { items: Vec::new() });
         }
+        let generation = self.library_generation()?;
+        let cache_key = format!("{text}\u{1f}{limit}");
+        if let Ok(mut cache) = self.suggest_cache.lock() {
+            if let Some(cached) = cache.get(&cache_key, generation) {
+                return Ok(cached);
+            }
+        }
+        let conn = self.read_conn()?;
         // Suggestions are deliberately prefix based. Four `%term%` grouped
         // scans on every keystroke become the dominant cost in a six-figure
         // library; infix/full-body matching remains available on Enter.
@@ -1068,7 +1938,16 @@ impl Database {
                 && left.value == right.value
         });
         items.truncate(limit as usize);
-        Ok(SearchSuggestResult { items })
+        let result = SearchSuggestResult { items };
+        if let Ok(mut cache) = self.suggest_cache.lock() {
+            cache.insert(
+                cache_key,
+                generation,
+                result.clone(),
+                suggestions_bytes(&result),
+            );
+        }
+        Ok(result)
     }
 
     /// ダウンロードを挿入（UPSERT: 既に存在する場合は更新）
@@ -1081,93 +1960,7 @@ impl Database {
         let tx = conn
             .savepoint()
             .map_err(|e| format!("Transaction begin failed: {}", e))?;
-
-        tx.execute(
-            "INSERT INTO downloads (
-                source, source_id, title, author_name, author_id,
-                content_type, excerpt, cover_path, json_path,
-                original_json_path, asset_count, file_size_bytes,
-                downloaded_at, source_created_at,
-                content_hash, text_length, source_updated_at, watch_updates, current_version, favorite
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
-            ON CONFLICT(source, source_id) DO UPDATE SET
-                title = excluded.title,
-                author_name = excluded.author_name,
-                excerpt = excluded.excerpt,
-                cover_path = excluded.cover_path,
-                json_path = excluded.json_path,
-                original_json_path = excluded.original_json_path,
-                asset_count = excluded.asset_count,
-                file_size_bytes = excluded.file_size_bytes,
-                downloaded_at = excluded.downloaded_at,
-                content_hash = excluded.content_hash,
-                text_length = excluded.text_length,
-                source_updated_at = excluded.source_updated_at,
-                watch_updates = excluded.watch_updates,
-                current_version = excluded.current_version",
-            params![
-                dl.source,
-                dl.source_id,
-                dl.title,
-                dl.author_name,
-                dl.author_id,
-                dl.content_type,
-                dl.excerpt,
-                dl.cover_path,
-                dl.json_path,
-                dl.original_json_path,
-                dl.asset_count,
-                dl.file_size_bytes,
-                dl.downloaded_at,
-                dl.source_created_at,
-                dl.content_hash,
-                dl.text_length,
-                dl.source_updated_at,
-                if dl.watch_updates { 1i64 } else { 0i64 },
-                dl.current_version,
-                if dl.favorite { 1i64 } else { 0i64 },
-            ],
-        )
-        .map_err(|e| format!("Insert download failed: {}", e))?;
-
-        // 外部キー参照整合性を担保するため、主キー id を確実にクエリ
-        let id: i64 = tx
-            .query_row(
-                "SELECT id FROM downloads WHERE source = ?1 AND source_id = ?2",
-                params![dl.source, dl.source_id],
-                |row| row.get(0),
-            )
-            .map_err(|e| format!("Failed to query upserted download ID: {}", e))?;
-
-        // 更新時の既存タグ関係を一旦クローン削除
-        tx.execute(
-            "DELETE FROM download_tags WHERE download_id = ?1",
-            params![id],
-        )
-        .map_err(|e| format!("Failed to clear old tags: {}", e))?;
-
-        // タグは download_tags を唯一の真実として同期する
-        for tag_name in normalized_tag_list(&dl.tags) {
-            tx.execute(
-                "INSERT OR IGNORE INTO tags (name) VALUES (?1)",
-                params![tag_name],
-            )
-            .map_err(|e| format!("Failed to insert tag: {}", e))?;
-
-            let tag_id: i64 = tx
-                .query_row(
-                    "SELECT id FROM tags WHERE name = ?1",
-                    params![tag_name],
-                    |row| row.get(0),
-                )
-                .map_err(|e| format!("Failed to retrieve tag ID: {}", e))?;
-
-            tx.execute(
-                "INSERT OR IGNORE INTO download_tags (download_id, tag_id) VALUES (?1, ?2)",
-                params![id, tag_id],
-            )
-            .map_err(|e| format!("Failed to insert download tag relation: {}", e))?;
-        }
+        let id = upsert_download_in_connection(&tx, dl)?;
 
         tx.commit()
             .map_err(|e| format!("Transaction commit failed: {}", e))?;
@@ -1176,6 +1969,182 @@ impl Database {
         // pending count the UI shows has just changed.
         self.invalidate_index_status();
         Ok(id)
+    }
+
+    pub(crate) fn create_download_save_journal(
+        &self,
+        source: &str,
+        source_id: &str,
+        version: i64,
+        stage_path: &Path,
+        final_path: &Path,
+    ) -> Result<String, String> {
+        let stage_parent = stage_path
+            .parent()
+            .ok_or_else(|| "Download save stage has no parent".to_string())?
+            .canonicalize()
+            .map_err(|e| format!("Download save stage parent resolution failed: {e}"))?;
+        let final_parent = final_path
+            .parent()
+            .ok_or_else(|| "Download save final path has no parent".to_string())?
+            .canonicalize()
+            .map_err(|e| format!("Download save final parent resolution failed: {e}"))?;
+        if stage_parent != final_parent {
+            return Err("Download save paths are not on the same work directory".to_string());
+        }
+        let stage_path = stage_parent.join(
+            stage_path
+                .file_name()
+                .ok_or_else(|| "Download save stage has no file name".to_string())?,
+        );
+        let final_path = final_parent.join(
+            final_path
+                .file_name()
+                .ok_or_else(|| "Download save final path has no file name".to_string())?,
+        );
+        let id = format!(
+            "download-{}-{:016x}",
+            chrono::Utc::now().timestamp_millis(),
+            rand::random::<u64>()
+        );
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        ensure_download_save_journal_schema(&conn)?;
+        conn.execute(
+            "INSERT INTO download_save_journal (
+                id, source, source_id, version, stage_path, final_path, committed, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7)",
+            params![
+                id,
+                source,
+                source_id,
+                version,
+                stage_path.to_string_lossy(),
+                final_path.to_string_lossy(),
+                chrono::Utc::now().to_rfc3339(),
+            ],
+        )
+        .map_err(|e| format!("Download save journal creation failed: {e}"))?;
+        Ok(id)
+    }
+
+    pub(crate) fn finish_download_save_journal(&self, journal_id: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM download_save_journal WHERE id = ?1",
+            params![journal_id],
+        )
+        .map_err(|e| format!("Download save journal cleanup failed: {e}"))?;
+        Ok(())
+    }
+
+    pub(crate) fn commit_download_save_with_journal(
+        &self,
+        dl: &NewDownload,
+        assets: &[NewAsset],
+        versions: &[NewVersion],
+        journal_id: &str,
+    ) -> Result<i64, String> {
+        self.commit_download_save_impl(dl, assets, versions, Some(journal_id), false)
+    }
+
+    /// Rebuild a DB record from version directories that already exist on
+    /// disk. Unlike a normal save there is no filesystem publish journal, but
+    /// the download, tags, assets, and every historical version still commit
+    /// as one SQLite transaction so a damaged folder cannot leave a half-work
+    /// in the library.
+    pub(crate) fn commit_reimported_download(
+        &self,
+        dl: &NewDownload,
+        assets: &[NewAsset],
+        versions: &[NewVersion],
+    ) -> Result<i64, String> {
+        self.commit_download_save_impl(dl, assets, versions, None, false)
+    }
+
+    fn commit_download_save_impl(
+        &self,
+        dl: &NewDownload,
+        assets: &[NewAsset],
+        versions: &[NewVersion],
+        journal_id: Option<&str>,
+        fail_before_commit: bool,
+    ) -> Result<i64, String> {
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| format!("Download save transaction begin failed: {e}"))?;
+        let download_id = upsert_download_in_connection(&tx, dl)?;
+
+        for asset in assets {
+            tx.execute(
+                "INSERT OR REPLACE INTO assets (
+                    download_id, asset_type, filename, local_path,
+                    original_url, mime_type, file_size_bytes
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    download_id,
+                    asset.asset_type,
+                    asset.filename,
+                    asset.local_path,
+                    asset.original_url,
+                    asset.mime_type,
+                    asset.file_size_bytes,
+                ],
+            )
+            .map_err(|e| format!("Download save asset insert failed: {e}"))?;
+        }
+
+        for version in versions {
+            tx.execute(
+                "INSERT INTO download_versions (
+                    download_id, version, content_hash, text_length, json_path,
+                    original_json_path, asset_count, file_size_bytes, created_at, change_summary
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![
+                    download_id,
+                    version.version,
+                    version.content_hash,
+                    version.text_length,
+                    version.json_path,
+                    version.original_json_path,
+                    version.asset_count,
+                    version.file_size_bytes,
+                    version.created_at,
+                    version.change_summary,
+                ],
+            )
+            .map_err(|e| format!("Download save version insert failed: {e}"))?;
+        }
+
+        if fail_before_commit {
+            return Err("Injected download save failure".to_string());
+        }
+        if let Some(journal_id) = journal_id {
+            let changed = tx
+                .execute(
+                    "UPDATE download_save_journal SET committed = 1 WHERE id = ?1",
+                    params![journal_id],
+                )
+                .map_err(|e| format!("Download save journal commit marker failed: {e}"))?;
+            if changed != 1 {
+                return Err("Download save journal disappeared before commit".to_string());
+            }
+        }
+        tx.commit()
+            .map_err(|e| format!("Download save transaction commit failed: {e}"))?;
+        drop(conn);
+        self.invalidate_index_status();
+        Ok(download_id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn commit_download_save_with_injected_failure(
+        &self,
+        dl: &NewDownload,
+        assets: &[NewAsset],
+        versions: &[NewVersion],
+    ) -> Result<i64, String> {
+        self.commit_download_save_impl(dl, assets, versions, None, true)
     }
 
     pub fn upsert_update_target(&self, target: &UpdateTargetInput) -> Result<UpdateTarget, String> {
@@ -1269,6 +2238,52 @@ impl Database {
         Ok(results)
     }
 
+    /// Pages every update target in composite-key order. Archive export uses
+    /// this instead of materializing the complete table in one metadata blob.
+    pub fn list_update_targets_after(
+        &self,
+        cursor: Option<(&str, &str, &str)>,
+        limit: i64,
+    ) -> Result<Vec<UpdateTarget>, String> {
+        let conn = self.read_conn()?;
+        let limit = limit.clamp(1, 5_000);
+        let (sql, bind_values): (&str, Vec<Box<dyn rusqlite::types::ToSql>>) = match cursor {
+            Some((target_type, source, source_key)) => (
+                "SELECT * FROM update_targets
+                 WHERE target_type > ?1
+                    OR (target_type = ?1 AND source > ?2)
+                    OR (target_type = ?1 AND source = ?2 AND source_key > ?3)
+                 ORDER BY target_type ASC, source ASC, source_key ASC
+                 LIMIT ?4",
+                vec![
+                    Box::new(target_type.to_string()),
+                    Box::new(source.to_string()),
+                    Box::new(source_key.to_string()),
+                    Box::new(limit),
+                ],
+            ),
+            None => (
+                "SELECT * FROM update_targets
+                 ORDER BY target_type ASC, source ASC, source_key ASC
+                 LIMIT ?1",
+                vec![Box::new(limit)],
+            ),
+        };
+        let refs = bind_values
+            .iter()
+            .map(|value| value.as_ref())
+            .collect::<Vec<_>>();
+        let mut statement = conn
+            .prepare(sql)
+            .map_err(|e| format!("Update target page prepare failed: {e}"))?;
+        let targets = statement
+            .query_map(refs.as_slice(), update_target_from_row)
+            .map_err(|e| format!("Update target page query failed: {e}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("Update target page row failed: {e}"))?;
+        Ok(targets)
+    }
+
     pub fn set_update_target_enabled(
         &self,
         target_type: &str,
@@ -1306,6 +2321,11 @@ impl Database {
         Ok(())
     }
 
+    /// 対象を確認できたことを記録する。
+    ///
+    /// `found` が 0 より大きいときだけ「最後に見つけた時刻」を進める。ここが
+    /// 何か月も古いままの対象は、監視をやめるか間隔を空ける判断の材料になる。
+    /// 確認できた時点で連続失敗は 0 に戻す。
     pub fn mark_update_target_checked(
         &self,
         target_type: &str,
@@ -1313,25 +2333,55 @@ impl Database {
         source_key: &str,
         last_seen_source_id: Option<&str>,
         last_seen_source_updated_at: Option<&str>,
+        found: i64,
     ) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let now = chrono::Utc::now().to_rfc3339();
         conn.execute(
             "UPDATE update_targets SET
                 last_checked_at = ?1,
                 last_seen_source_id = COALESCE(?2, last_seen_source_id),
                 last_seen_source_updated_at = COALESCE(?3, last_seen_source_updated_at),
+                last_hit_at = CASE WHEN ?7 > 0 THEN ?1 ELSE last_hit_at END,
+                consecutive_errors = 0,
                 updated_at = CURRENT_TIMESTAMP
              WHERE target_type = ?4 AND source = ?5 AND source_key = ?6",
             params![
-                chrono::Utc::now().to_rfc3339(),
+                now,
                 last_seen_source_id,
                 last_seen_source_updated_at,
                 target_type,
                 source,
                 source_key,
+                found,
             ],
         )
         .map_err(|e| format!("Failed to mark update target checked: {}", e))?;
+        Ok(())
+    }
+
+    /// 対象の確認に失敗したことを記録する。連続失敗が積み上がる。
+    pub fn mark_update_target_failed(
+        &self,
+        target_type: &str,
+        source: &str,
+        source_key: &str,
+    ) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE update_targets SET
+                last_checked_at = ?1,
+                consecutive_errors = consecutive_errors + 1,
+                updated_at = CURRENT_TIMESTAMP
+             WHERE target_type = ?2 AND source = ?3 AND source_key = ?4",
+            params![
+                chrono::Utc::now().to_rfc3339(),
+                target_type,
+                source,
+                source_key,
+            ],
+        )
+        .map_err(|e| format!("Failed to mark update target failed: {}", e))?;
         Ok(())
     }
 
@@ -1549,6 +2599,16 @@ impl Database {
         Ok(results)
     }
 
+    /// Lightweight keyset scan used by multipart backup cataloging. Unlike
+    /// `list_people`, this does not run a correlated work count for every row.
+    pub fn list_people_keys_after(
+        &self,
+        cursor: Option<(&str, &str)>,
+        limit: i64,
+    ) -> Result<Vec<(String, String)>, String> {
+        self.list_entity_keys_after("people", cursor, limit)
+    }
+
     pub fn restore_update_target(&self, target: &UpdateTarget) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.execute(
@@ -1616,6 +2676,65 @@ impl Database {
             results.push(row.map_err(|e| format!("Series row read failed: {}", e))?);
         }
         Ok(results)
+    }
+
+    /// Lightweight keyset scan used by multipart backup cataloging. Orphaned
+    /// series are included because the source table, not work relations, owns
+    /// the scan.
+    pub fn list_series_keys_after(
+        &self,
+        cursor: Option<(&str, &str)>,
+        limit: i64,
+    ) -> Result<Vec<(String, String)>, String> {
+        self.list_entity_keys_after("series", cursor, limit)
+    }
+
+    fn list_entity_keys_after(
+        &self,
+        table: &str,
+        cursor: Option<(&str, &str)>,
+        limit: i64,
+    ) -> Result<Vec<(String, String)>, String> {
+        let table = match table {
+            "people" => "people",
+            "series" => "series",
+            _ => return Err("Unsupported entity key table".to_string()),
+        };
+        let conn = self.read_conn()?;
+        let limit = limit.clamp(1, 5_000);
+        let (sql, values): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = match cursor {
+            Some((source, source_key)) => (
+                format!(
+                    "SELECT source, source_key FROM {table}
+                     WHERE source > ?1 OR (source = ?1 AND source_key > ?2)
+                     ORDER BY source ASC, source_key ASC LIMIT ?3"
+                ),
+                vec![
+                    Box::new(source.to_string()),
+                    Box::new(source_key.to_string()),
+                    Box::new(limit),
+                ],
+            ),
+            None => (
+                format!(
+                    "SELECT source, source_key FROM {table}
+                     ORDER BY source ASC, source_key ASC LIMIT ?1"
+                ),
+                vec![Box::new(limit)],
+            ),
+        };
+        let refs = values
+            .iter()
+            .map(|value| value.as_ref())
+            .collect::<Vec<&dyn rusqlite::types::ToSql>>();
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| format!("Entity key page prepare failed: {e}"))?;
+        let rows = stmt
+            .query_map(refs.as_slice(), |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(|e| format!("Entity key page query failed: {e}"))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("Entity key page row failed: {e}"))
     }
 
     pub fn list_entity_versions(
@@ -2084,7 +3203,7 @@ impl Database {
         let query = query_text(&effective_params).to_string();
         let status = self.get_search_index_status()?;
         let semantic_ready = status.semantic_model_ready;
-        let semantic_complete = status.semantic_indexed_chunks > 0 || status.total_downloads == 0;
+        let semantic_complete = status.semantic_pending_downloads == 0;
 
         if query.is_empty() {
             let cursor = decode_cursor(effective_params.cursor.as_deref()).filter(|cursor| {
@@ -2439,106 +3558,68 @@ impl Database {
     ) -> Result<SearchV2Result, String> {
         let cursor_scope = search_cursor_scope(params);
         let decoded_cursor = decode_cursor(params.cursor.as_deref()).filter(|candidate| {
-            candidate.kind == "tantivy-search-after"
-                && candidate.scope.as_deref() == Some(&cursor_scope)
+            candidate.kind == "ranked-search" && candidate.scope.as_deref() == Some(&cursor_scope)
         });
-        let mut after = decoded_cursor.as_ref().and_then(tantivy_cursor);
-        let started_at_beginning = after.is_none();
-        let batch_size =
-            search_candidate_limit(params, limit).max(limit.saturating_add(1) as usize);
-        let mut ranked_items = Vec::with_capacity(limit.saturating_add(1) as usize);
-        let mut document_map: HashMap<i64, Arc<SearchDocument>> = HashMap::new();
-        let mut item_cursors = HashMap::new();
-        let semantic_map = HashMap::new();
-        let mut total_hits: usize;
-        let exhausted;
-
-        loop {
-            let lexical = super::tantivy_index::search_after_with_total(
-                &self.storage_dir,
-                query,
-                batch_size,
-                after,
-            )?;
-            total_hits = lexical.total_hits;
-            let fetched = lexical.hits.len();
-            if fetched == 0 {
-                exhausted = true;
-                break;
-            }
-
-            let mut cursor_for_id = HashMap::with_capacity(fetched);
-            let hits = lexical
-                .hits
-                .iter()
-                .map(|hit| {
-                    let cursor = super::tantivy_index::TantivySearchCursor {
-                        score: hit.score,
-                        segment_ord: hit.segment_ord,
-                        doc_id: hit.doc_id,
-                    };
-                    cursor_for_id.insert(hit.download_id, cursor);
-                    document_map.insert(hit.download_id, hit.document.clone());
-                    RankedSearchHit {
-                        download_id: hit.download_id,
-                        score: hit.score as f64,
-                        semantic: None,
-                        document: Some(hit.document.clone()),
-                    }
-                })
-                .collect::<Vec<_>>();
-            let last_lexical_cursor =
-                lexical
-                    .hits
-                    .last()
-                    .map(|hit| super::tantivy_index::TantivySearchCursor {
-                        score: hit.score,
-                        segment_ord: hit.segment_ord,
-                        doc_id: hit.doc_id,
-                    });
-            let mut candidates = self.fetch_ranked_sql_matches(params, &hits)?;
-            if !parsed_query.exclude.is_empty() {
-                candidates = filter_excluded_search_results(
-                    &self.storage_dir,
-                    candidates,
-                    parsed_query,
-                    &document_map,
-                );
-            }
-            for item in candidates {
-                if let Some(cursor) = cursor_for_id.get(&item.id).copied() {
-                    item_cursors.insert(item.id, cursor);
-                }
-                ranked_items.push(item);
-            }
-
-            let page_has_lookahead = ranked_items.len() as i64 > limit;
-            let source_exhausted = fetched < batch_size;
-            if page_has_lookahead || source_exhausted {
-                exhausted = source_exhausted;
-                break;
-            }
-            after = last_lexical_cursor;
+        if decoded_cursor
+            .as_ref()
+            .is_some_and(|cursor| cursor.snapshot_id.is_none())
+        {
+            return Err("Search cursor predates ranked snapshots; restart the search".to_string());
         }
+        let expected_snapshot = decoded_cursor
+            .as_ref()
+            .and_then(|cursor| cursor.snapshot_id.as_deref());
+        let snapshot = self.ranked_search_snapshot(params, query, expected_snapshot)?;
+        let total_estimate = Some(snapshot.row_count);
 
-        let total_estimate = if !params_have_library_filters(params) {
-            i64::try_from(total_hits).ok()
-        } else if started_at_beginning && exhausted {
-            i64::try_from(ranked_items.len()).ok()
-        } else {
-            None
-        };
-        let has_more = ranked_items.len() as i64 > limit || !exhausted;
-        let page_items = ranked_items
-            .drain(..)
-            .take(limit as usize)
-            .collect::<Vec<_>>();
+        let connection = snapshot
+            .connection
+            .lock()
+            .map_err(|e| format!("Ranked search connection lock failed: {e}"))?;
+        let conn = connection
+            .as_ref()
+            .ok_or_else(|| "Ranked search snapshot was closed; restart the search".to_string())?;
+        let mut sql =
+            download_select_sql_for_projection(params.projection.as_deref(), "sm.score", "NULL")
+                .replacen(
+                    "FROM downloads d",
+                    "FROM downloads d JOIN search_matches sm ON sm.id = d.id",
+                    1,
+                );
+        let mut bind_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+        if let Some(cursor) = decoded_cursor.as_ref() {
+            if let (Some(score), Some(id)) = (cursor.tantivy_score, cursor.id) {
+                sql.push_str(" WHERE (sm.score < ? OR (sm.score = ? AND sm.id > ?))");
+                bind_values.push(Box::new(score as f64));
+                bind_values.push(Box::new(score as f64));
+                bind_values.push(Box::new(id));
+            }
+        }
+        sql.push_str(" ORDER BY sm.score DESC, sm.id ASC LIMIT ?");
+        bind_values.push(Box::new(limit + 1));
+        let mut page_items = query_download_entries(conn, &sql, &bind_values)?;
+        drop(connection);
+
+        let has_more = page_items.len() as i64 > limit;
+        page_items.truncate(limit as usize);
         let next_cursor = if has_more {
             page_items.last().and_then(|item| {
-                item_cursors
-                    .get(&item.id)
-                    .copied()
-                    .and_then(|cursor| encode_tantivy_search_cursor(params, item, cursor))
+                encode_cursor(&SearchCursor {
+                    kind: "ranked-search".to_string(),
+                    scope: Some(cursor_scope.clone()),
+                    sort_by: Some("relevance".to_string()),
+                    sort_order: Some("desc".to_string()),
+                    value: None,
+                    id: Some(item.id),
+                    score: item.search_score,
+                    downloaded_at: None,
+                    tantivy_score: item.search_score.map(|score| score as f32),
+                    tantivy_segment_ord: None,
+                    tantivy_doc_id: None,
+                    total_estimate,
+                    tantivy_total_hits: None,
+                    snapshot_id: Some(snapshot.id.clone()),
+                })
             })
         } else {
             None
@@ -2547,10 +3628,10 @@ impl Database {
             &self.storage_dir,
             page_items,
             parsed_query,
-            &semantic_map,
-            &document_map,
+            &HashMap::new(),
+            &HashMap::new(),
         );
-        let semantic_complete = status.semantic_indexed_chunks > 0 || status.total_downloads == 0;
+        let semantic_complete = status.semantic_pending_downloads == 0;
 
         Ok(SearchV2Result {
             items,
@@ -2578,6 +3659,169 @@ impl Database {
         })
     }
 
+    fn ranked_search_snapshot(
+        &self,
+        params: &SearchV2Params,
+        query: &str,
+        expected_id: Option<&str>,
+    ) -> Result<Arc<DiskSearchSnapshot>, String> {
+        self.ranked_search_snapshot_inner(params, query, expected_id, None, None)
+    }
+
+    fn ranked_search_snapshot_inner(
+        &self,
+        params: &SearchV2Params,
+        query: &str,
+        expected_id: Option<&str>,
+        fail_after_batches: Option<usize>,
+        disk_budget_override: Option<u64>,
+    ) -> Result<Arc<DiskSearchSnapshot>, String> {
+        let key = format!("ranked:{}", search_cursor_scope(params));
+        for _ in 0..3 {
+            let library_generation = self.library_generation()?;
+            let index_generation = super::tantivy_index::index_generation(&self.storage_dir)?;
+            if let Some(snapshot) = self
+                .search_snapshot_cache
+                .lock()
+                .map_err(|e| format!("Search snapshot cache lock failed: {e}"))?
+                .get(&key, library_generation, index_generation, expected_id)?
+            {
+                return Ok(snapshot);
+            }
+
+            let (id, path, connection) =
+                create_search_snapshot_connection(&self.storage_dir, &self.db_path)?;
+            let build_result = (|| {
+                {
+                    let guard = connection
+                        .lock()
+                        .map_err(|e| format!("Ranked search connection lock failed: {e}"))?;
+                    let conn = guard.as_ref().ok_or_else(|| {
+                        "Ranked search snapshot connection was closed".to_string()
+                    })?;
+                    reset_search_match_table(conn, true)?;
+                    conn.execute_batch("BEGIN IMMEDIATE")
+                        .map_err(|e| format!("Ranked search snapshot begin failed: {e}"))?;
+                }
+
+                let sink = connection.clone();
+                let batch_counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                let visited_batches = batch_counter.clone();
+                let snapshot_storage = self.storage_dir.clone();
+                let stream_result = super::tantivy_index::visit_matching_download_scores(
+                    &self.storage_dir,
+                    query,
+                    move |scores| {
+                        let batch = visited_batches.fetch_add(1, AtomicOrdering::AcqRel);
+                        if fail_after_batches.is_some_and(|limit| batch >= limit) {
+                            return Err("Injected ranked snapshot stream failure".to_string());
+                        }
+                        let guard = sink
+                            .lock()
+                            .map_err(|e| format!("Ranked search connection lock failed: {e}"))?;
+                        let conn = guard.as_ref().ok_or_else(|| {
+                            "Ranked search snapshot connection was closed".to_string()
+                        })?;
+                        insert_search_match_scores(conn, scores)?;
+                        ensure_search_snapshot_budget_with_limit(
+                            conn,
+                            &snapshot_storage,
+                            disk_budget_override.unwrap_or_else(|| {
+                                super::resource_budget::search_snapshot_disk_bytes()
+                            }),
+                        )
+                        .map(|_| ())
+                    },
+                );
+                if let Err(error) = stream_result {
+                    if let Ok(guard) = connection.lock() {
+                        if let Some(conn) = guard.as_ref() {
+                            let _ = conn.execute_batch("ROLLBACK");
+                        }
+                    }
+                    return Err(error);
+                }
+
+                let guard = connection
+                    .lock()
+                    .map_err(|e| format!("Ranked search connection lock failed: {e}"))?;
+                let conn = guard
+                    .as_ref()
+                    .ok_or_else(|| "Ranked search snapshot connection was closed".to_string())?;
+                let mut wheres = vec!["d.id = search_matches.id".to_string()];
+                let mut bind_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+                append_library_filters(params, &mut wheres, &mut bind_values);
+                let delete_sql = format!(
+                    "DELETE FROM search_matches WHERE NOT EXISTS (SELECT 1 FROM downloads d WHERE {})",
+                    wheres.join(" AND ")
+                );
+                let refs: Vec<&dyn rusqlite::types::ToSql> =
+                    bind_values.iter().map(|value| value.as_ref()).collect();
+                conn.execute(&delete_sql, refs.as_slice())
+                    .map_err(|e| format!("Ranked search filter materialization failed: {e}"))?;
+                conn.execute_batch(
+                    "CREATE INDEX search_matches_rank ON search_matches(score DESC, id ASC);
+                     COMMIT;",
+                )
+                .map_err(|e| format!("Ranked search snapshot finalize failed: {e}"))?;
+                let row_count = conn
+                    .query_row("SELECT COUNT(*) FROM search_matches", [], |row| row.get(0))
+                    .map_err(|e| format!("Ranked search snapshot count failed: {e}"))?;
+                let disk_bytes = ensure_search_snapshot_budget_with_limit(
+                    conn,
+                    &self.storage_dir,
+                    disk_budget_override
+                        .unwrap_or_else(super::resource_budget::search_snapshot_disk_bytes),
+                )?;
+                pin_search_snapshot_library(conn)?;
+                Ok((row_count, disk_bytes))
+            })();
+
+            let (row_count, disk_bytes) = match build_result {
+                Ok(result) => result,
+                Err(error) => {
+                    close_snapshot_connection(&connection);
+                    cleanup_search_snapshot_path(&path);
+                    return Err(error);
+                }
+            };
+            if self.library_generation()? != library_generation
+                || super::tantivy_index::index_generation(&self.storage_dir)? != index_generation
+            {
+                close_snapshot_connection(&connection);
+                cleanup_search_snapshot_path(&path);
+                if expected_id.is_some() {
+                    return Err(
+                        "Search snapshot was invalidated while paging; restart the search"
+                            .to_string(),
+                    );
+                }
+                continue;
+            }
+
+            let snapshot = Arc::new(DiskSearchSnapshot {
+                id,
+                key: key.clone(),
+                library_generation,
+                index_generation,
+                row_count,
+                disk_bytes,
+                expires_at: Instant::now() + SEARCH_SNAPSHOT_TTL,
+                path,
+                connection,
+            });
+            self.search_snapshot_cache
+                .lock()
+                .map_err(|e| format!("Search snapshot cache lock failed: {e}"))?
+                .insert(snapshot.clone())?;
+            return Ok(snapshot);
+        }
+        Err(
+            "Library changed repeatedly while preparing ranked search; retry the search"
+                .to_string(),
+        )
+    }
+
     /// A text search ordered by a library column rather than by relevance.
     ///
     /// Tantivy answers "which works match"; SQL answers "in what order", using
@@ -2594,8 +3838,7 @@ impl Database {
         exact_entity: Option<SearchEntityIntent>,
         parsed_query: &ParsedSearchQuery,
     ) -> Result<SearchV2Result, String> {
-        let matched_ids = super::tantivy_index::matching_download_ids(&self.storage_dir, query)?;
-        let semantic_complete = status.semantic_indexed_chunks > 0 || status.total_downloads == 0;
+        let semantic_complete = status.semantic_pending_downloads == 0;
         let mut explanations =
             search_explanations(exact_entity.as_ref(), "tantivy", status.is_complete);
         explanations.push(format!(
@@ -2603,7 +3846,30 @@ impl Database {
             sort_label(params)
         ));
 
-        if matched_ids.is_empty() {
+        let cursor_scope = search_cursor_scope(params);
+        let cursor = decode_cursor(params.cursor.as_deref()).filter(|candidate| {
+            candidate.kind == "sorted-search"
+                && candidate.scope.as_deref() == Some(&cursor_scope)
+                && candidate.sort_by == effective_sort_by(params)
+                && candidate.sort_order == effective_sort_order(params)
+        });
+        if cursor
+            .as_ref()
+            .is_some_and(|cursor| cursor.snapshot_id.is_none())
+        {
+            return Err("Search cursor predates disk snapshots; restart the search".to_string());
+        }
+
+        let expected_snapshot = cursor
+            .as_ref()
+            .and_then(|candidate| candidate.snapshot_id.as_deref());
+        // The match set lives in its own bounded SQLite file. Later pages reuse
+        // both the Tantivy scan and the disk-backed membership table, including
+        // match sets well beyond one million ids.
+        let snapshot = self.sorted_search_snapshot(query, expected_snapshot)?;
+        let matched_count = snapshot.row_count;
+
+        if matched_count == 0 {
             return Ok(SearchV2Result {
                 items: Vec::new(),
                 next_cursor: None,
@@ -2622,30 +3888,31 @@ impl Database {
             });
         }
 
-        let cursor_scope = search_cursor_scope(params);
-        let cursor = decode_cursor(params.cursor.as_deref()).filter(|candidate| {
-            candidate.kind == "sorted-search"
-                && candidate.scope.as_deref() == Some(&cursor_scope)
-                && candidate.sort_by == effective_sort_by(params)
-                && candidate.sort_order == effective_sort_order(params)
-        });
-
-        let conn = self.read_conn()?;
-        // The id set travels as one JSON parameter: a placeholder per id would
-        // blow past SQLite's variable limit on a broad query.
-        let id_json = serde_json::to_string(&matched_ids)
-            .map_err(|e| format!("Search id encoding failed: {e}"))?;
+        let connection = snapshot
+            .connection
+            .lock()
+            .map_err(|e| format!("Sorted search connection lock failed: {e}"))?;
+        let conn = connection
+            .as_ref()
+            .ok_or_else(|| "Sorted search snapshot was closed; restart the search".to_string())?;
         let mut sql = download_select_sql_for_projection(
             params.projection.as_deref(),
             "NULL",
             &sort_key_select_expr(params),
+        )
+        .replacen(
+            "FROM downloads d",
+            "FROM downloads d JOIN search_matches sm ON sm.id = d.id",
+            1,
         );
-        let mut wheres = vec!["d.id IN (SELECT value FROM json_each(?))".to_string()];
-        let mut bind_values: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(id_json.clone())];
+        let mut wheres = Vec::new();
+        let mut bind_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
         append_library_filters(params, &mut wheres, &mut bind_values);
         append_keyset_filter(params, cursor.as_ref(), &mut wheres, &mut bind_values);
-        sql.push_str(" WHERE ");
-        sql.push_str(&wheres.join(" AND "));
+        if !wheres.is_empty() {
+            sql.push_str(" WHERE ");
+            sql.push_str(&wheres.join(" AND "));
+        }
         sql.push_str(&sort_clause(params));
         sql.push_str(" LIMIT ?");
         bind_values.push(Box::new(limit + 1));
@@ -2653,21 +3920,16 @@ impl Database {
             sql.push_str(" OFFSET ?");
             bind_values.push(Box::new(offset));
         }
-        let mut items = query_download_entries(&conn, &sql, &bind_values)?;
-        drop(conn);
+        let mut items = query_download_entries(conn, &sql, &bind_values)?;
 
-        if !parsed_query.exclude.is_empty() {
-            items = filter_excluded_search_results(
-                &self.storage_dir,
-                items,
-                parsed_query,
-                &HashMap::new(),
-            );
-        }
+        let total_estimate = cursor
+            .as_ref()
+            .and_then(|cursor| cursor.total_estimate)
+            .or_else(|| self.count_sorted_search_matches(conn, params).ok());
+        drop(connection);
         let has_more = items.len() as i64 > limit;
         items.truncate(limit as usize);
 
-        let total_estimate = self.count_sorted_search_matches(&id_json, params).ok();
         let next_cursor = if has_more {
             items.last().and_then(|item| {
                 encode_cursor(&SearchCursor {
@@ -2685,6 +3947,9 @@ impl Database {
                     tantivy_score: None,
                     tantivy_segment_ord: None,
                     tantivy_doc_id: None,
+                    total_estimate,
+                    tantivy_total_hits: None,
+                    snapshot_id: Some(snapshot.id.clone()),
                 })
             })
         } else {
@@ -2719,25 +3984,137 @@ impl Database {
 
     fn count_sorted_search_matches(
         &self,
-        id_json: &str,
+        conn: &Connection,
         params: &SearchV2Params,
     ) -> Result<i64, String> {
-        let conn = self.read_conn()?;
-        let mut sql =
-            "SELECT COUNT(*) FROM downloads d WHERE d.id IN (SELECT value FROM json_each(?))"
-                .to_string();
+        let mut sql = "SELECT COUNT(*)
+            FROM search_matches sm
+            JOIN downloads d ON d.id = sm.id"
+            .to_string();
         let mut wheres = Vec::new();
-        let mut bind_values: Vec<Box<dyn rusqlite::types::ToSql>> =
-            vec![Box::new(id_json.to_string())];
+        let mut bind_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
         append_library_filters(params, &mut wheres, &mut bind_values);
         if !wheres.is_empty() {
-            sql.push_str(" AND ");
+            sql.push_str(" WHERE ");
             sql.push_str(&wheres.join(" AND "));
         }
         let refs: Vec<&dyn rusqlite::types::ToSql> =
             bind_values.iter().map(|value| value.as_ref()).collect();
         conn.query_row(&sql, refs.as_slice(), |row| row.get(0))
             .map_err(|e| format!("Sorted search count failed: {e}"))
+    }
+
+    fn sorted_search_snapshot(
+        &self,
+        query: &str,
+        expected_id: Option<&str>,
+    ) -> Result<Arc<DiskSearchSnapshot>, String> {
+        let key = format!(
+            "sorted:{}",
+            URL_SAFE_NO_PAD.encode(Sha256::digest(query.as_bytes()))
+        );
+        for _ in 0..3 {
+            let library_generation = self.library_generation()?;
+            let index_generation = super::tantivy_index::index_generation(&self.storage_dir)?;
+            if let Some(snapshot) = self
+                .search_snapshot_cache
+                .lock()
+                .map_err(|e| format!("Search snapshot cache lock failed: {e}"))?
+                .get(&key, library_generation, index_generation, expected_id)?
+            {
+                return Ok(snapshot);
+            }
+
+            let (id, path, connection) =
+                create_search_snapshot_connection(&self.storage_dir, &self.db_path)?;
+            {
+                let guard = connection
+                    .lock()
+                    .map_err(|e| format!("Sorted search connection lock failed: {e}"))?;
+                let conn = guard
+                    .as_ref()
+                    .ok_or_else(|| "Sorted search snapshot connection was closed".to_string())?;
+                reset_search_match_table(conn, false)?;
+                conn.execute_batch("BEGIN IMMEDIATE")
+                    .map_err(|e| format!("Sorted search snapshot begin failed: {e}"))?;
+            }
+            let match_conn = connection.clone();
+            let snapshot_storage = self.storage_dir.clone();
+            let stream_result = super::tantivy_index::visit_matching_download_ids(
+                &self.storage_dir,
+                query,
+                move |ids| {
+                    let guard = match_conn
+                        .lock()
+                        .map_err(|e| format!("Sorted search connection lock failed: {e}"))?;
+                    let conn = guard.as_ref().ok_or_else(|| {
+                        "Sorted search snapshot connection was closed".to_string()
+                    })?;
+                    insert_search_match_ids(conn, ids)?;
+                    ensure_search_snapshot_budget(conn, &snapshot_storage).map(|_| ())
+                },
+            );
+            if let Err(error) = stream_result {
+                if let Ok(guard) = connection.lock() {
+                    if let Some(conn) = guard.as_ref() {
+                        let _ = conn.execute_batch("ROLLBACK");
+                    }
+                }
+                close_snapshot_connection(&connection);
+                cleanup_search_snapshot_path(&path);
+                return Err(error);
+            }
+            let (matched_count, disk_bytes) = {
+                let guard = connection
+                    .lock()
+                    .map_err(|e| format!("Sorted search connection lock failed: {e}"))?;
+                let conn = guard
+                    .as_ref()
+                    .ok_or_else(|| "Sorted search snapshot connection was closed".to_string())?;
+                conn.execute_batch("COMMIT")
+                    .map_err(|e| format!("Sorted search snapshot commit failed: {e}"))?;
+                let matched_count = conn
+                    .query_row("SELECT COUNT(*) FROM search_matches", [], |row| row.get(0))
+                    .map_err(|e| format!("Sorted search snapshot count failed: {e}"))?;
+                let disk_bytes = ensure_search_snapshot_budget(conn, &self.storage_dir)?;
+                pin_search_snapshot_library(conn)?;
+                (matched_count, disk_bytes)
+            };
+
+            if self.library_generation()? != library_generation
+                || super::tantivy_index::index_generation(&self.storage_dir)? != index_generation
+            {
+                close_snapshot_connection(&connection);
+                cleanup_search_snapshot_path(&path);
+                if expected_id.is_some() {
+                    return Err(
+                        "Search snapshot was invalidated while paging; restart the search"
+                            .to_string(),
+                    );
+                }
+                continue;
+            }
+            let snapshot = Arc::new(DiskSearchSnapshot {
+                id,
+                key: key.clone(),
+                library_generation,
+                index_generation,
+                row_count: matched_count,
+                disk_bytes,
+                expires_at: Instant::now() + SEARCH_SNAPSHOT_TTL,
+                path,
+                connection,
+            });
+            self.search_snapshot_cache
+                .lock()
+                .map_err(|e| format!("Search snapshot cache lock failed: {e}"))?
+                .insert(snapshot.clone())?;
+            return Ok(snapshot);
+        }
+        Err(
+            "Library changed repeatedly while preparing sorted search; retry the search"
+                .to_string(),
+        )
     }
 
     fn search_sql_page(
@@ -3312,51 +4689,7 @@ impl Database {
 
     /// ダウンロードを削除（カスケードでアセットも削除）
     pub fn delete_download(&self, id: i64) -> Result<(), String> {
-        let json_path = {
-            let conn = self.conn.lock().map_err(|e| e.to_string())?;
-
-            let (jp, _ojp): (Option<String>, Option<String>) = conn
-                .query_row(
-                    "SELECT json_path, original_json_path FROM downloads WHERE id = ?1",
-                    params![id],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
-                .map_err(|e| format!("Download not found: {}", e))?;
-
-            // DBから削除
-            conn.execute("DELETE FROM downloads WHERE id = ?1", params![id])
-                .map_err(|e| format!("Delete failed: {}", e))?;
-
-            jp
-        }; // ここで conn (MutexGuard) がスコープ外になり、ロックが即座に解放される！
-
-        // データベースのロックが解放された安全な状態で、重いフォルダ削除（リトライ待ちが発生し得る）を実行
-        if let Some(jp) = json_path {
-            let jp_path = std::path::Path::new(&jp);
-            // jp_path は downloads/{source}/{source_id}/v{version}/data.json
-            // その parent() である version_dir は downloads/{source}/{source_id}/v{version}
-            if let Some(version_dir) = jp_path.parent() {
-                // その parent() である work_root_dir は downloads/{source}/{source_id}
-                if let Some(work_root_dir) = version_dir.parent() {
-                    if work_root_dir.exists() {
-                        if let Err(e) = remove_dir_all_resilient(work_root_dir) {
-                            log::warn!(
-                                "Failed to remove work root directory {:?}: {}",
-                                work_root_dir,
-                                e
-                            );
-                        }
-                        // その親フォルダ（ソースフォルダ: e.g. downloads/pixiv）が空ならクリーンアップ
-                        if let Some(source_dir) = work_root_dir.parent() {
-                            let _ = remove_dir_resilient(source_dir); // 空のときのみ成功
-                        }
-                    }
-                }
-            }
-        }
-
-        self.invalidate_index_status();
-        Ok(())
+        self.delete_downloads(&[id]).map(|_| ())
     }
 
     pub fn recover_update_jobs_on_startup(&self) -> Result<(), String> {
@@ -3379,6 +4712,237 @@ impl Database {
         )
         .map_err(|e| format!("Failed to recover update job items: {}", e))?;
         Ok(())
+    }
+
+    /// このシリーズの作品を書いている人（手元のライブラリから分かる範囲で）。
+    ///
+    /// 作者を監視していればシリーズの新作もその一覧に出るので、両方を走査すると
+    /// 同じものを二度取りに行くことになる。それを避ける判断に使う。
+    pub fn series_author_keys(&self, source: &str, series_key: &str) -> Result<Vec<String>, String> {
+        let conn = self.read_conn()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT DISTINCT d.author_id
+                 FROM downloads d
+                 JOIN download_series ds ON ds.download_id = d.id
+                 WHERE ds.series_source = ?1 AND ds.series_key = ?2 AND d.source = ?1
+                   AND d.author_id != ''",
+            )
+            .map_err(|e| format!("Failed to prepare series authors: {}", e))?;
+        let rows = stmt
+            .query_map(params![source, series_key], |row| row.get::<_, String>(0))
+            .map_err(|e| format!("Failed to read series authors: {}", e))?;
+        let mut keys = Vec::new();
+        for row in rows {
+            keys.push(row.map_err(|e| format!("Failed to read series author: {}", e))?);
+        }
+        Ok(keys)
+    }
+
+    /// 見つけた候補を、ジョブより長く残す。
+    ///
+    /// すでに無視すると決めた作品は `pending` に戻さない。同じ作品が
+    /// 何度見つかっても、決めた答えの方が新しい。
+    pub fn upsert_update_candidate(&self, candidate: &UpdateCandidateInput) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT INTO update_candidates (
+                source, source_id, kind, title, payload_json, target_type, status, first_seen_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'pending', ?7, ?7)
+             ON CONFLICT(source, source_id) DO UPDATE SET
+                kind = excluded.kind,
+                title = excluded.title,
+                payload_json = excluded.payload_json,
+                target_type = excluded.target_type,
+                updated_at = excluded.updated_at",
+            params![
+                candidate.source,
+                candidate.source_id,
+                candidate.kind,
+                candidate.title,
+                candidate.payload_json,
+                candidate.target_type,
+                chrono::Utc::now().to_rfc3339(),
+            ],
+        )
+        .map_err(|e| format!("Failed to record update candidate: {}", e))?;
+        Ok(())
+    }
+
+    /// まだ answer の出ていない候補。新しく見つけた順に返す。
+    pub fn list_pending_update_candidates(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<UpdateCandidateRow>, String> {
+        let conn = self.read_conn()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT source, source_id, kind, title, payload_json, target_type, status,
+                        first_seen_at, updated_at
+                 FROM update_candidates
+                 WHERE status = 'pending'
+                 ORDER BY updated_at DESC, rowid DESC
+                 LIMIT ?1",
+            )
+            .map_err(|e| format!("Failed to prepare update candidates: {}", e))?;
+        let rows = stmt
+            .query_map(params![limit], |row| {
+                Ok(UpdateCandidateRow {
+                    source: row.get(0)?,
+                    source_id: row.get(1)?,
+                    kind: row.get(2)?,
+                    title: row.get(3)?,
+                    payload_json: row.get(4)?,
+                    target_type: row.get(5)?,
+                    status: row.get(6)?,
+                    first_seen_at: row.get(7)?,
+                    updated_at: row.get(8)?,
+                })
+            })
+            .map_err(|e| format!("Failed to read update candidates: {}", e))?;
+        let mut items = Vec::new();
+        for row in rows {
+            items.push(row.map_err(|e| format!("Failed to read update candidate: {}", e))?);
+        }
+        Ok(items)
+    }
+
+    /// この作品を今後は候補に出さない。決定は取り消せる。
+    pub fn set_update_candidate_status(
+        &self,
+        source: &str,
+        source_id: &str,
+        status: &str,
+    ) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE update_candidates SET status = ?3, updated_at = ?4
+             WHERE source = ?1 AND source_id = ?2",
+            params![
+                source,
+                source_id,
+                status,
+                chrono::Utc::now().to_rfc3339()
+            ],
+        )
+        .map_err(|e| format!("Failed to set update candidate status: {}", e))?;
+        Ok(())
+    }
+
+    /// 答えの出た候補を片付ける（保存できた、あるいは無視の取り消しで再提示）。
+    pub fn clear_update_candidate(&self, source: &str, source_id: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM update_candidates WHERE source = ?1 AND source_id = ?2",
+            params![source, source_id],
+        )
+        .map_err(|e| format!("Failed to clear update candidate: {}", e))?;
+        Ok(())
+    }
+
+    pub fn update_candidate_status(
+        &self,
+        source: &str,
+        source_id: &str,
+    ) -> Result<Option<String>, String> {
+        let conn = self.read_conn()?;
+        conn.query_row(
+            "SELECT status FROM update_candidates WHERE source = ?1 AND source_id = ?2",
+            params![source, source_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("Failed to read update candidate status: {}", e))
+    }
+
+    /// 無視した件数と、いちばん新しいもの。画面の「無視した作品」の表示に使う。
+    pub fn count_dismissed_update_candidates(&self) -> Result<i64, String> {
+        let conn = self.read_conn()?;
+        conn.query_row(
+            "SELECT COUNT(*) FROM update_candidates WHERE status = 'dismissed'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("Failed to count dismissed candidates: {}", e))
+    }
+
+    /// 無視の決定をすべて取り消す。次の確認でまた候補に出る。
+    pub fn restore_dismissed_update_candidates(&self) -> Result<usize, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE update_candidates SET status = 'pending', updated_at = ?1
+             WHERE status = 'dismissed'",
+            params![chrono::Utc::now().to_rfc3339()],
+        )
+        .map_err(|e| format!("Failed to restore dismissed candidates: {}", e))
+    }
+
+    /// ジョブを始めたときの依頼内容。再開したワーカーも同じ設定で動けるように、
+    /// 認証情報を除いたものを保存してある。
+    pub fn update_job_request(&self, job_id: &str) -> Result<StartUpdateJobRequest, String> {
+        let conn = self.read_conn()?;
+        let request_json: String = conn
+            .query_row(
+                "SELECT request_json FROM update_jobs WHERE id = ?1",
+                params![job_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("Update job not found: {}", e))?;
+        serde_json::from_str(&request_json)
+            .map_err(|e| format!("Failed to read update job request: {}", e))
+    }
+
+    /// 終わったジョブの履歴を整理する。
+    ///
+    /// 起動時に一度だけ呼ぶ。新しい方から `keep_count` 件は日数に関わらず残し、
+    /// それより古いものは `keep_days` を過ぎていれば消す。走っているジョブと
+    /// 一時停止中のジョブには触れない。項目とログは外部キーの連鎖で消える。
+    pub fn prune_update_jobs(&self, keep_count: i64, keep_days: i64) -> Result<usize, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let cutoff = (chrono::Utc::now() - chrono::Duration::days(keep_days)).to_rfc3339();
+        let removed = conn
+            .execute(
+                "DELETE FROM update_jobs
+                 WHERE status IN ('completed', 'failed', 'canceled')
+                   AND COALESCE(finished_at, updated_at) < ?1
+                   AND id NOT IN (
+                       SELECT id FROM update_jobs ORDER BY updated_at DESC LIMIT ?2
+                   )",
+                params![cutoff, keep_count],
+            )
+            .map_err(|e| format!("Failed to prune update jobs: {}", e))?;
+        Ok(removed)
+    }
+
+    /// 終わった更新ジョブをすべて消す。走っているものには触れない。
+    ///
+    /// 操作履歴の「完了履歴を消去」は画面側の記録しか消せていなかった。
+    /// 更新ジョブは DB にあるので、こちらからも消せる必要がある。
+    pub fn clear_finished_update_jobs(&self) -> Result<usize, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM update_jobs WHERE status IN ('completed', 'failed', 'canceled')",
+            [],
+        )
+        .map_err(|e| format!("Failed to clear finished update jobs: {}", e))
+    }
+
+    /// 1ジョブあたりのログを頭から落として上限に収める。
+    ///
+    /// 長く走るジョブでは1件ごとに数行積まれるため、上限がないとスナップショット
+    /// の読み出しと DB がじりじり重くなる。
+    pub fn trim_update_job_logs(&self, job_id: &str, keep: i64) -> Result<usize, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let removed = conn
+            .execute(
+                "DELETE FROM update_job_logs
+                 WHERE job_id = ?1 AND id NOT IN (
+                     SELECT id FROM update_job_logs WHERE job_id = ?1 ORDER BY id DESC LIMIT ?2
+                 )",
+                params![job_id, keep],
+            )
+            .map_err(|e| format!("Failed to trim update job logs: {}", e))?;
+        Ok(removed)
     }
 
     pub fn create_update_job(
@@ -3458,6 +5022,15 @@ impl Database {
     }
 
     pub fn update_job_snapshot(&self, job_id: &str) -> Result<UpdateJobSnapshot, String> {
+        self.update_job_snapshot_page(job_id, None, None)
+    }
+
+    pub fn update_job_snapshot_page(
+        &self,
+        job_id: &str,
+        candidate_after_id: Option<i64>,
+        log_before_id: Option<i64>,
+    ) -> Result<UpdateJobSnapshot, String> {
         self.sync_update_job_counters(job_id)?;
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let summary = conn
@@ -3476,75 +5049,108 @@ impl Database {
                  FROM (
                     SELECT id, log_type, message, created_at
                     FROM update_job_logs
-                    WHERE job_id = ?1
+                    WHERE job_id = ?1 AND (?2 IS NULL OR id < ?2)
                     ORDER BY id DESC
-                    LIMIT 300
+                    LIMIT ?3
                  ) ORDER BY id ASC",
             )
             .map_err(|e| format!("Failed to prepare update job logs: {}", e))?;
         let log_rows = log_stmt
-            .query_map(params![job_id], |row| {
-                Ok(UpdateJobLog {
-                    id: row.get(0)?,
-                    log_type: row.get(1)?,
-                    message: row.get(2)?,
-                    created_at: row.get(3)?,
-                })
-            })
+            .query_map(
+                params![job_id, log_before_id, UPDATE_SNAPSHOT_LOG_PAGE_SIZE + 1],
+                |row| {
+                    Ok(UpdateJobLog {
+                        id: row.get(0)?,
+                        log_type: row.get(1)?,
+                        message: row.get(2)?,
+                        created_at: row.get(3)?,
+                    })
+                },
+            )
             .map_err(|e| format!("Failed to read update job logs: {}", e))?;
         let mut logs = Vec::new();
         for row in log_rows {
             logs.push(row.map_err(|e| format!("Failed to read update job log: {}", e))?);
         }
+        let previous_log_cursor = if logs.len() as i64 > UPDATE_SNAPSHOT_LOG_PAGE_SIZE {
+            logs.remove(0);
+            logs.first().map(|log| log.id)
+        } else {
+            None
+        };
 
         let mut candidate_stmt = conn
             .prepare(
-                "SELECT id, source, source_id, title, target_type, payload_json, status
+                "SELECT id, source, source_id, title, target_type, payload_json, status, error
                  FROM update_job_items
-                 WHERE job_id = ?1 AND item_type = 'candidate'
-                 ORDER BY id ASC",
+                 WHERE job_id = ?1 AND item_type = 'candidate' AND id > ?2
+                 ORDER BY id ASC
+                 LIMIT ?3",
             )
             .map_err(|e| format!("Failed to prepare update job candidates: {}", e))?;
         let candidate_rows = candidate_stmt
-            .query_map(params![job_id], |row| {
-                let id: i64 = row.get(0)?;
-                let source: String = row.get(1)?;
-                let source_id: String = row.get(2)?;
-                let title: String = row.get(3)?;
-                let target_type: String = row.get(4)?;
-                let payload_json: String = row.get(5)?;
-                let status: String = row.get(6)?;
-                let payload: serde_json::Value =
-                    serde_json::from_str(&payload_json).unwrap_or(serde_json::Value::Null);
-                let target_label = payload
-                    .get("targetLabel")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let subtitle = payload
-                    .get("subtitle")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                Ok(UpdateJobCandidate {
-                    id,
-                    key: format!("candidate:{}:{}:{}", source, source_id, id),
-                    source,
-                    source_id,
-                    title,
-                    subtitle,
-                    target_label,
-                    target_type,
-                    selected: matches!(status.as_str(), "candidate" | "queued"),
-                    status,
-                })
-            })
+            .query_map(
+                params![
+                    job_id,
+                    candidate_after_id.unwrap_or(0),
+                    UPDATE_SNAPSHOT_CANDIDATE_PAGE_SIZE + 1
+                ],
+                |row| {
+                    let id: i64 = row.get(0)?;
+                    let source: String = row.get(1)?;
+                    let source_id: String = row.get(2)?;
+                    let title: String = row.get(3)?;
+                    let target_type: String = row.get(4)?;
+                    let payload_json: String = row.get(5)?;
+                    let status: String = row.get(6)?;
+                    let error: Option<String> = row.get(7)?;
+                    let payload: serde_json::Value =
+                        serde_json::from_str(&payload_json).unwrap_or(serde_json::Value::Null);
+                    let target_label = payload
+                        .get("targetLabel")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let subtitle = payload
+                        .get("subtitle")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    // 古いジョブの候補には kind が無い。既定は「新作」。
+                    let kind = payload
+                        .get("kind")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("new")
+                        .to_string();
+                    Ok(UpdateJobCandidate {
+                        id,
+                        key: format!("candidate:{}:{}:{}", source, source_id, id),
+                        source,
+                        source_id,
+                        title,
+                        subtitle,
+                        target_label,
+                        target_type,
+                        selected: matches!(status.as_str(), "candidate" | "queued"),
+                        status,
+                        kind,
+                        error,
+                    })
+                },
+            )
             .map_err(|e| format!("Failed to read update job candidates: {}", e))?;
         let mut candidates = Vec::new();
         for row in candidate_rows {
             candidates
                 .push(row.map_err(|e| format!("Failed to read update job candidate: {}", e))?);
         }
+        let next_candidate_cursor = if candidates.len() as i64 > UPDATE_SNAPSHOT_CANDIDATE_PAGE_SIZE
+        {
+            candidates.pop();
+            candidates.last().map(|candidate| candidate.id)
+        } else {
+            None
+        };
 
         Ok(UpdateJobSnapshot {
             job_id: summary.job_id,
@@ -3559,6 +5165,8 @@ impl Database {
             active_label: summary.active_label,
             logs,
             candidates,
+            next_candidate_cursor,
+            previous_log_cursor,
             started_at: summary.started_at,
             updated_at: summary.updated_at,
             finished_at: summary.finished_at,
@@ -3628,6 +5236,18 @@ impl Database {
             params![job_id, log_type, message],
         )
         .map_err(|e| format!("Failed to append update job log: {}", e))?;
+        // Snapshots expose only the latest 300 records. Keeping a bounded
+        // diagnostic tail prevents a long-running monitor from growing this
+        // derived log table without limit.
+        conn.execute(
+            "DELETE FROM update_job_logs
+             WHERE job_id = ?1 AND id NOT IN (
+                SELECT id FROM update_job_logs
+                WHERE job_id = ?1 ORDER BY id DESC LIMIT 2000
+             )",
+            params![job_id],
+        )
+        .map_err(|e| format!("Failed to trim update job logs: {}", e))?;
         conn.execute(
             "UPDATE update_jobs SET updated_at = ?1 WHERE id = ?2",
             params![chrono::Utc::now().to_rfc3339(), job_id],
@@ -3702,35 +5322,31 @@ impl Database {
         &self,
         job_id: &str,
         candidate: &UpdateJobItemInput,
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        let exists: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM update_job_items
-                 WHERE job_id = ?1 AND item_type = 'candidate' AND source = ?2 AND source_id = ?3",
-                params![job_id, candidate.source, candidate.source_id],
-                |row| row.get(0),
-            )
-            .map_err(|e| format!("Failed to check candidate: {}", e))?;
-        if exists > 0 {
-            return Ok(());
-        }
-        conn.execute(
-            "INSERT INTO update_job_items (
+        let changed = conn
+            .execute(
+                "INSERT INTO update_job_items (
                 job_id, item_type, source, source_id, target_type, title, payload_json, status
-             ) VALUES (?1, 'candidate', ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![
-                job_id,
-                candidate.source,
-                candidate.source_id,
-                candidate.target_type,
-                candidate.title,
-                candidate.payload_json,
-                candidate.status,
-            ],
-        )
-        .map_err(|e| format!("Failed to insert update candidate: {}", e))?;
-        Ok(())
+             )
+             SELECT ?1, 'candidate', ?2, ?3, ?4, ?5, ?6, ?7
+             WHERE NOT EXISTS (
+                SELECT 1 FROM update_job_items
+                WHERE job_id = ?1 AND item_type = 'candidate'
+                  AND source = ?2 AND source_id = ?3
+             )",
+                params![
+                    job_id,
+                    candidate.source,
+                    candidate.source_id,
+                    candidate.target_type,
+                    candidate.title,
+                    candidate.payload_json,
+                    candidate.status,
+                ],
+            )
+            .map_err(|e| format!("Failed to insert update candidate: {}", e))?;
+        Ok(changed > 0)
     }
 
     pub fn queue_update_job_candidates(
@@ -3770,9 +5386,16 @@ impl Database {
     fn sync_update_job_counters(&self, job_id: &str) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.execute(
+            // 候補は「見つけた結果」であって作業ではない。ただし保存するために
+            // 待機列へ入れた候補は作業なので、そのぶん総数と処理済みに数える。
+            // これを外すと、自動保存で 101 件を保存している最中に進捗が
+            // 10/10（＝完了）と出てしまう。
             "UPDATE update_jobs
-             SET totals = (SELECT COUNT(*) FROM update_job_items WHERE job_id = ?1 AND item_type != 'candidate'),
-                 processed = (SELECT COUNT(*) FROM update_job_items WHERE job_id = ?1 AND item_type != 'candidate' AND status IN ('done', 'saved', 'skipped', 'failed')),
+             SET totals = (SELECT COUNT(*) FROM update_job_items
+                           WHERE job_id = ?1 AND (item_type != 'candidate' OR status != 'candidate')),
+                 processed = (SELECT COUNT(*) FROM update_job_items
+                              WHERE job_id = ?1 AND (item_type != 'candidate' OR status != 'candidate')
+                                AND status IN ('done', 'saved', 'skipped', 'failed')),
                  candidate_count = (SELECT COUNT(*) FROM update_job_items WHERE job_id = ?1 AND item_type = 'candidate'),
                  saved_count = (SELECT COUNT(*) FROM update_job_items WHERE job_id = ?1 AND status = 'saved'),
                  error_count = (SELECT COUNT(*) FROM update_job_items WHERE job_id = ?1 AND status = 'failed')
@@ -3784,17 +5407,104 @@ impl Database {
     }
 
     pub fn delete_downloads(&self, ids: &[i64]) -> Result<BulkMutationResult, String> {
-        let mut seen = std::collections::HashSet::new();
-        let mut changed_count = 0i64;
+        let unique: Vec<i64> = {
+            let mut seen = std::collections::HashSet::new();
+            ids.iter().copied().filter(|id| seen.insert(*id)).collect()
+        };
+        if unique.is_empty() {
+            return Ok(BulkMutationResult {
+                matched_count: 0,
+                changed_count: 0,
+            });
+        }
 
-        for id in ids.iter().copied().filter(|id| seen.insert(*id)) {
-            self.delete_download(id)?;
-            changed_count += 1;
+        // Resolve and validate every filesystem target before making any
+        // change, then delete all relational rows atomically. A missing or
+        // unsafe item therefore cannot leave a half-deleted bulk selection.
+        let work_root_dirs = {
+            let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+            let tx = conn
+                .transaction()
+                .map_err(|e| format!("Bulk delete transaction failed: {e}"))?;
+            let mut work_root_dirs = Vec::with_capacity(unique.len());
+            for id in &unique {
+                let (source, source_id): (String, String) = tx
+                    .query_row(
+                        "SELECT source, source_id FROM downloads WHERE id = ?1",
+                        params![id],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .map_err(|e| format!("Download not found: {e}"))?;
+
+                // Never infer the work root by walking up from json_path.
+                // Legacy records can point directly to
+                // `{source}/{source_id}/data.json`.
+                work_root_dirs.push(validated_download_work_root(
+                    &self.storage_dir,
+                    &source,
+                    &source_id,
+                )?);
+            }
+            {
+                let mut statement = tx
+                    .prepare("DELETE FROM downloads WHERE id = ?1")
+                    .map_err(|e| format!("Bulk delete prepare failed: {e}"))?;
+                for id in &unique {
+                    statement
+                        .execute(params![id])
+                        .map_err(|e| format!("Delete failed for {id}: {e}"))?;
+                }
+            }
+            tx.commit()
+                .map_err(|e| format!("Bulk delete commit failed: {e}"))?;
+            work_root_dirs
+        };
+
+        // Keep slow, retrying filesystem work outside the database lock.
+        for work_root_dir in work_root_dirs {
+            if work_root_dir.exists() {
+                if let Err(error) = remove_dir_all_resilient(&work_root_dir) {
+                    log::warn!(
+                        "Failed to remove work root directory {:?}: {}",
+                        work_root_dir,
+                        error
+                    );
+                }
+                if let Some(source_dir) = work_root_dir.parent() {
+                    let _ = remove_dir_resilient(source_dir);
+                }
+            }
+        }
+
+        // Sidecar indexes are not covered by the SQLite transaction, but both
+        // cleanup attempts must run. Each implementation commits/invalidates
+        // once for the entire selection rather than once per work.
+        let lexical_result = super::tantivy_index::delete_documents(&self.storage_dir, &unique);
+        let semantic_result = super::semantic_index::clear_documents(&self.storage_dir, &unique);
+        self.invalidate_index_status();
+
+        match (lexical_result, semantic_result) {
+            (Err(lexical), Err(semantic)) => {
+                return Err(format!(
+                    "Downloads were deleted, but both search indexes failed to update: lexical: {lexical}; semantic: {semantic}"
+                ));
+            }
+            (Err(error), _) => {
+                return Err(format!(
+                    "Downloads were deleted, but the lexical search index failed to update: {error}"
+                ));
+            }
+            (_, Err(error)) => {
+                return Err(format!(
+                    "Downloads were deleted, but the semantic search index failed to update: {error}"
+                ));
+            }
+            (Ok(()), Ok(())) => {}
         }
 
         Ok(BulkMutationResult {
-            matched_count: seen.len() as i64,
-            changed_count,
+            matched_count: unique.len() as i64,
+            changed_count: unique.len() as i64,
         })
     }
 
@@ -3910,7 +5620,7 @@ impl Database {
         &self,
         on_progress: &dyn Fn(DiagnosticsProgress),
     ) -> Result<LibraryDiagnostics, String> {
-        const STEPS: i64 = 6;
+        const STEPS: i64 = 7;
         let report = |step: i64, phase: &'static str| {
             on_progress(DiagnosticsProgress {
                 step,
@@ -4087,26 +5797,43 @@ impl Database {
             .storage_dir
             .parent()
             .unwrap_or(self.storage_dir.as_path());
-        let known_asset_paths = {
+        report(4, "file-integrity");
+        let file_integrity = {
             let conn = self.read_conn()?;
-            let mut stmt = conn
-                .prepare("SELECT local_path FROM assets")
-                .map_err(|e| format!("Asset diagnostics prepare failed: {e}"))?;
-            let paths = stmt
-                .query_map([], |row| row.get::<_, String>(0))
-                .map_err(|e| format!("Asset diagnostics query failed: {e}"))?;
-            let mut known = std::collections::HashSet::new();
-            for path in paths {
-                known.insert(normalized_diagnostic_path(Path::new(
-                    &path.map_err(|e| format!("Asset diagnostics row failed: {e}"))?,
-                )));
-            }
-            known
+            check_library_file_integrity(&conn, &self.storage_dir, app_data)?
         };
-        report(4, "storage-scan");
-        let (orphan_asset_files, orphan_asset_file_bytes) =
-            orphan_asset_file_stats(&self.storage_dir, &known_asset_paths);
-        report(5, "index-size");
+        report(5, "storage-scan");
+        let asset_lookup_conn = self.read_conn()?;
+        let mut asset_lookup = asset_lookup_conn
+            .prepare("SELECT 1 FROM assets WHERE local_path = ?1 LIMIT 1")
+            .map_err(|error| format!("Asset diagnostic lookup prepare failed: {error}"))?;
+        let mut is_known_asset = |path: &Path| {
+            asset_lookup
+                .query_row(params![path.to_string_lossy().as_ref()], |_| Ok(()))
+                .optional()
+                .map(|row| row.is_some())
+                .map_err(|error| format!("Asset diagnostic lookup failed: {error}"))
+        };
+        let diagnostic_file_stats = collect_diagnostic_file_stats(
+            &self.storage_dir,
+            &app_data.join("search"),
+            &mut is_known_asset,
+        )?;
+        log::debug!(
+            "Library diagnostics scanned {} filesystem entries",
+            diagnostic_file_stats.visited_entries
+        );
+        let mut file_issue_samples = file_integrity.issue_samples;
+        let remaining_sample_capacity =
+            DIAGNOSTIC_FILE_ISSUE_SAMPLE_LIMIT.saturating_sub(file_issue_samples.len());
+        file_issue_samples.extend(
+            diagnostic_file_stats
+                .transient_file_samples
+                .iter()
+                .take(remaining_sample_capacity)
+                .cloned(),
+        );
+        report(6, "index-size");
         let wal_path = PathBuf::from(format!("{}-wal", self.db_path.display()));
         let live_pages = sqlite_page_count.saturating_sub(sqlite_free_pages).max(0) as u64;
         let page_size = if sqlite_page_count > 0 {
@@ -4120,7 +5847,6 @@ impl Database {
         } else {
             0.0
         };
-        let lexical_index_root = self.storage_dir.join("search-index");
         Ok(LibraryDiagnostics {
             measured_at: chrono::Utc::now().to_rfc3339(),
             total_downloads,
@@ -4129,11 +5855,11 @@ impl Database {
             total_text_length,
             database_size_bytes: file_size_or_zero(&self.db_path),
             wal_size_bytes: file_size_or_zero(&wal_path),
-            storage_size_bytes: recursive_file_size(&self.storage_dir),
-            lexical_index_size_bytes: recursive_file_size(&lexical_index_root),
-            lexical_index_file_count: recursive_file_count(&lexical_index_root, None),
-            lexical_index_segment_count: recursive_file_count(&lexical_index_root, Some("store")),
-            semantic_index_size_bytes: recursive_file_size(&app_data.join("search")),
+            storage_size_bytes: diagnostic_file_stats.storage_size_bytes,
+            lexical_index_size_bytes: diagnostic_file_stats.lexical_index_size_bytes,
+            lexical_index_file_count: diagnostic_file_stats.lexical_index_file_count,
+            lexical_index_segment_count: diagnostic_file_stats.lexical_index_segment_count,
+            semantic_index_size_bytes: diagnostic_file_stats.semantic_index_size_bytes,
             sqlite_page_count,
             sqlite_free_pages,
             sqlite_cache_size_bytes,
@@ -4141,8 +5867,19 @@ impl Database {
             fragmentation_percent,
             orphan_asset_rows,
             orphan_asset_bytes,
-            orphan_asset_files,
-            orphan_asset_file_bytes,
+            orphan_asset_files: diagnostic_file_stats.orphan_asset_files,
+            orphan_asset_file_bytes: diagnostic_file_stats.orphan_asset_file_bytes,
+            checked_file_references: file_integrity.checked_file_references,
+            missing_json_files: file_integrity.missing_json_files,
+            missing_asset_files: file_integrity.missing_asset_files,
+            missing_profile_files: file_integrity.missing_profile_files,
+            unsafe_referenced_files: file_integrity.unsafe_referenced_files,
+            unreadable_referenced_files: file_integrity.unreadable_referenced_files,
+            empty_referenced_files: file_integrity.empty_referenced_files,
+            mismatched_asset_files: file_integrity.mismatched_asset_files,
+            transient_files: diagnostic_file_stats.transient_files,
+            transient_file_bytes: diagnostic_file_stats.transient_file_bytes,
+            file_issue_samples,
             process_memory_bytes: current_process_memory_bytes(),
             list_first_page_ms,
             list_p50_ms,
@@ -4303,6 +6040,238 @@ impl Database {
         Ok(out)
     }
 
+    /// Returns every series connected to a person through a stable keyset.
+    ///
+    /// The opaque cursor is scoped to the person and query and pins SQLite's
+    /// data generation. Continuing after a library mutation is rejected so a
+    /// UI can restart instead of silently showing a gap or duplicate.
+    pub fn list_entity_series_paged(
+        &self,
+        source: &str,
+        person_key: &str,
+        query: Option<&str>,
+        limit: i64,
+        cursor: Option<&str>,
+    ) -> Result<EntitySeriesPage, String> {
+        if source.trim().is_empty() || source.len() > 64 {
+            return Err("Entity series source must be 1 to 64 bytes".to_string());
+        }
+        if person_key.trim().is_empty() || person_key.len() > 1_024 {
+            return Err("Entity series source key must be 1 to 1024 bytes".to_string());
+        }
+        if query.is_some_and(|value| value.chars().count() > 200) {
+            return Err("Entity series query must not exceed 200 characters".to_string());
+        }
+        if cursor.is_some_and(|value| value.len() > 64 * 1024) {
+            return Err("Entity series cursor must not exceed 64 KiB".to_string());
+        }
+        let limit = limit.clamp(1, 200);
+        let query = query.map(str::trim).unwrap_or("");
+        let scope = entity_series_cursor_scope(source, person_key, query);
+        let library_generation = self.library_generation()?;
+        let decoded_cursor = decode_entity_series_cursor(cursor)?;
+        if let Some(cursor) = decoded_cursor.as_ref() {
+            if cursor.scope != scope {
+                return Err("Entity series cursor belongs to another person or query".to_string());
+            }
+            if cursor.library_generation != library_generation {
+                return Err(
+                    "Library changed while paging entity series; restart the list".to_string(),
+                );
+            }
+        }
+
+        let has_query = !query.is_empty();
+        let aggregate_sql = format!(
+            "WITH entity_series AS (
+                SELECT ds.series_source,
+                       ds.series_key,
+                       COALESCE(
+                           MAX(NULLIF(s.title, '')),
+                           MAX(NULLIF(ds.title, '')),
+                           ds.series_key
+                       ) AS display_name,
+                       COUNT(DISTINCT d.id) AS work_count,
+                       MAX(s.cover_path) AS cover_path,
+                       MAX(s.description) AS description,
+                       MAX(s.updated_at) AS updated_at,
+                       MAX(d.downloaded_at) AS latest_downloaded_at,
+                       MAX(COALESCE(d.source_created_at, d.downloaded_at)) AS latest_work_at
+                FROM download_people dp
+                JOIN downloads d ON d.id = dp.download_id
+                JOIN download_series ds ON ds.download_id = d.id
+                LEFT JOIN series s
+                  ON s.source = ds.series_source AND s.source_key = ds.series_key
+                WHERE dp.person_source = ? AND dp.person_key = ?
+                GROUP BY ds.series_source, ds.series_key
+                {query_having}
+             )",
+            query_having = if has_query {
+                "HAVING COALESCE(
+                            MAX(NULLIF(s.title, '')),
+                            MAX(NULLIF(ds.title, '')),
+                            ds.series_key
+                        ) LIKE ? ESCAPE '\\' COLLATE NOCASE
+                    OR COALESCE(MAX(s.description), '') LIKE ? ESCAPE '\\' COLLATE NOCASE"
+            } else {
+                ""
+            }
+        );
+        let escaped_query = query
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+        let query_pattern = format!("%{escaped_query}%");
+        let base_bind_values = || {
+            let mut values: Vec<Box<dyn rusqlite::types::ToSql>> = vec![
+                Box::new(source.to_string()),
+                Box::new(person_key.to_string()),
+            ];
+            if has_query {
+                values.push(Box::new(query_pattern.clone()));
+                values.push(Box::new(query_pattern.clone()));
+            }
+            values
+        };
+
+        let conn = self.read_conn()?;
+        let total = if let Some(cursor) = decoded_cursor.as_ref() {
+            cursor.total
+        } else {
+            let count_sql = format!("{aggregate_sql} SELECT COUNT(*) FROM entity_series");
+            let values = base_bind_values();
+            let refs = values
+                .iter()
+                .map(|value| value.as_ref())
+                .collect::<Vec<_>>();
+            conn.query_row(&count_sql, refs.as_slice(), |row| row.get(0))
+                .map_err(|e| format!("Entity series count failed: {e}"))?
+        };
+
+        let mut page_sql = format!(
+            "{aggregate_sql}
+             SELECT es.series_source,
+                    es.series_key,
+                    es.display_name,
+                    es.work_count,
+                    es.cover_path,
+                    es.description,
+                    es.updated_at,
+                    es.latest_downloaded_at,
+                    (
+                        SELECT d2.title
+                        FROM downloads d2
+                        JOIN download_series ds2 ON ds2.download_id = d2.id
+                        WHERE ds2.series_source = es.series_source
+                          AND ds2.series_key = es.series_key
+                        ORDER BY COALESCE(ds2.content_order, 999999), d2.id
+                        LIMIT 1
+                    ) AS sample_title,
+                    es.latest_work_at
+             FROM entity_series es"
+        );
+        let mut bind_values = base_bind_values();
+        if let Some(cursor) = decoded_cursor.as_ref() {
+            page_sql.push_str(
+                " WHERE es.latest_work_at < ?
+                    OR (es.latest_work_at = ? AND es.work_count < ?)
+                    OR (es.latest_work_at = ? AND es.work_count = ?
+                        AND es.display_name COLLATE NOCASE > ? COLLATE NOCASE)
+                    OR (es.latest_work_at = ? AND es.work_count = ?
+                        AND es.display_name COLLATE NOCASE = ? COLLATE NOCASE
+                        AND es.series_source > ?)
+                    OR (es.latest_work_at = ? AND es.work_count = ?
+                        AND es.display_name COLLATE NOCASE = ? COLLATE NOCASE
+                        AND es.series_source = ? AND es.series_key > ?)",
+            );
+            bind_values.push(Box::new(cursor.latest_work_at.clone()));
+            bind_values.push(Box::new(cursor.latest_work_at.clone()));
+            bind_values.push(Box::new(cursor.count));
+            bind_values.push(Box::new(cursor.latest_work_at.clone()));
+            bind_values.push(Box::new(cursor.count));
+            bind_values.push(Box::new(cursor.display_name.clone()));
+            bind_values.push(Box::new(cursor.latest_work_at.clone()));
+            bind_values.push(Box::new(cursor.count));
+            bind_values.push(Box::new(cursor.display_name.clone()));
+            bind_values.push(Box::new(cursor.source.clone()));
+            bind_values.push(Box::new(cursor.latest_work_at.clone()));
+            bind_values.push(Box::new(cursor.count));
+            bind_values.push(Box::new(cursor.display_name.clone()));
+            bind_values.push(Box::new(cursor.source.clone()));
+            bind_values.push(Box::new(cursor.source_key.clone()));
+        }
+        page_sql.push_str(
+            " ORDER BY es.latest_work_at DESC,
+                       es.work_count DESC,
+                       es.display_name COLLATE NOCASE ASC,
+                       es.series_source ASC,
+                       es.series_key ASC
+              LIMIT ?",
+        );
+        bind_values.push(Box::new(limit + 1));
+        let refs = bind_values
+            .iter()
+            .map(|value| value.as_ref())
+            .collect::<Vec<_>>();
+        let mut statement = conn
+            .prepare(&page_sql)
+            .map_err(|e| format!("Entity series page prepare failed: {e}"))?;
+        let rows = statement
+            .query_map(refs.as_slice(), |row| {
+                Ok((
+                    EntityFacet {
+                        source: row.get(0)?,
+                        source_key: row.get(1)?,
+                        display_name: row.get(2)?,
+                        count: row.get(3)?,
+                        cover_path: row.get(4)?,
+                        description: row.get(5)?,
+                        updated_at: row.get(6)?,
+                        latest_downloaded_at: row.get(7)?,
+                        sample_title: row.get(8)?,
+                        icon_path: None,
+                        banner_path: None,
+                    },
+                    row.get::<_, String>(9)?,
+                ))
+            })
+            .map_err(|e| format!("Entity series page query failed: {e}"))?;
+        let mut page = rows
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("Entity series page row failed: {e}"))?;
+        let has_more = page.len() as i64 > limit;
+        if has_more {
+            page.truncate(limit as usize);
+        }
+        let next_cursor = if has_more {
+            page.last()
+                .map(|(item, latest_work_at)| {
+                    encode_entity_series_cursor(&EntitySeriesCursor {
+                        scope: scope.clone(),
+                        library_generation,
+                        latest_work_at: latest_work_at.clone(),
+                        count: item.count,
+                        display_name: item.display_name.clone(),
+                        source: item.source.clone(),
+                        source_key: item.source_key.clone(),
+                        total,
+                    })
+                })
+                .transpose()?
+        } else {
+            None
+        };
+        if self.library_generation()? != library_generation {
+            return Err("Library changed while paging entity series; restart the list".to_string());
+        }
+
+        Ok(EntitySeriesPage {
+            items: page.into_iter().map(|(item, _)| item).collect(),
+            next_cursor,
+            total,
+        })
+    }
+
     /// The tags the works of one author or series carry, most used first.
     ///
     /// A series is as worth narrowing as an author: a long one accumulates
@@ -4406,10 +6375,12 @@ impl Database {
 
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let now = chrono::Utc::now().to_rfc3339();
-        let query = input
-            .query
-            .as_deref()
-            .map(|value| value.chars().take(MAX_SAVED_SEARCH_QUERY).collect::<String>());
+        let query = input.query.as_deref().map(|value| {
+            value
+                .chars()
+                .take(MAX_SAVED_SEARCH_QUERY)
+                .collect::<String>()
+        });
 
         let existing_id: Option<i64> = match input.id {
             Some(id) => Some(id),
@@ -4738,6 +6709,72 @@ impl Database {
     /// `get_filter_facets` は上位60件しか返さないため、ライブラリの
     /// 作者/シリーズタブでは大半のエンティティに到達できなかった。絞り込みと
     /// ページングをSQL側で行い、件数に依存せず一覧できるようにする。
+    /// エンティティ集計の「どの行をどう束ねるか」の部分。
+    ///
+    /// 1ページ分を取り出すクエリと、総件数を数えるクエリの両方がこれを使う。
+    /// 二重に書くと、片方だけ条件が変わったときに「総数が、数えているはずの
+    /// 行と一致しない」という最も気付きにくい壊れ方をするため、FROM・絞り込み
+    /// ・GROUP BY は一箇所にまとめ、呼び出し側は何を SELECT してどう締めるかだけ
+    /// を決める。フィルタは常に `?1`。
+    fn entity_facet_source(kind: &str, has_filter: bool) -> Result<String, String> {
+        match kind {
+            "person" | "people" | "author" | "authors" => Ok(format!(
+                "FROM downloads d
+                 LEFT JOIN people p ON p.source = d.source AND p.source_key = d.author_id
+                 WHERE d.author_id IS NOT NULL AND d.author_id != ''
+                   AND d.author_name IS NOT NULL AND d.author_name != ''
+                 GROUP BY d.source, d.author_id, COALESCE(p.display_name, d.author_name), p.icon_path, p.cover_path, p.description, p.updated_at
+                 {having}",
+                having = if has_filter {
+                    "HAVING COALESCE(p.display_name, d.author_name) LIKE ?1 ESCAPE '\\'
+                         OR COALESCE(p.description, '') LIKE ?1 ESCAPE '\\'"
+                } else {
+                    ""
+                },
+            )),
+            "series" => Ok(format!(
+                "FROM download_series ds
+                 LEFT JOIN series s ON s.source = ds.series_source AND s.source_key = ds.series_key
+                 JOIN downloads d ON d.id = ds.download_id
+                 GROUP BY ds.series_source, ds.series_key, COALESCE(s.title, ds.title), s.cover_path, s.description, s.updated_at
+                 {having}",
+                having = if has_filter {
+                    "HAVING COALESCE(s.title, ds.title) LIKE ?1 ESCAPE '\\'
+                         OR COALESCE(s.description, '') LIKE ?1 ESCAPE '\\'"
+                } else {
+                    ""
+                },
+            )),
+            other => Err(format!("Unsupported entity facet kind: {}", other)),
+        }
+    }
+
+    /// 作者・シリーズが何件あるか。
+    ///
+    /// 一覧そのものは1ページずつしか読まないので、これを聞かないと「全何ページ
+    /// あるか」が分からない。ページ番号で移動する以上、最後のページが存在する
+    /// ことは分かっていなければならない。
+    pub fn count_entity_facets(&self, kind: &str, query: Option<&str>) -> Result<i64, String> {
+        let conn = self.read_conn()?;
+        let filter = query.map(str::trim).unwrap_or("");
+        let has_filter = !filter.is_empty();
+        let like = format!("%{}%", filter.replace('%', "\\%").replace('_', "\\_"));
+        let sql = format!(
+            "SELECT COUNT(*) FROM (SELECT 1 {source})",
+            source = Self::entity_facet_source(kind, has_filter)?
+        );
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| format!("Entity facet count prepare failed: {}", e))?;
+        let total = if has_filter {
+            stmt.query_row(rusqlite::params![like], |row| row.get::<_, i64>(0))
+        } else {
+            stmt.query_row([], |row| row.get::<_, i64>(0))
+        }
+        .map_err(|e| format!("Entity facet count failed: {}", e))?;
+        Ok(total)
+    }
+
     pub fn search_entity_facets(
         &self,
         kind: &str,
@@ -4745,23 +6782,26 @@ impl Database {
         limit: i64,
         offset: i64,
     ) -> Result<Vec<EntityFacet>, String> {
-        let conn = self.read_conn()?;
         let limit = limit.clamp(1, 200);
         let offset = offset.max(0);
         let filter = query.map(str::trim).unwrap_or("");
+        let generation = self.library_generation()?;
+        let cache_key = format!("{kind}\u{1f}{filter}\u{1f}{limit}\u{1f}{offset}");
+        if let Ok(mut cache) = self.entity_facet_cache.lock() {
+            if let Some(cached) = cache.get(&cache_key, generation) {
+                return Ok(cached);
+            }
+        }
+        let conn = self.read_conn()?;
         let has_filter = !filter.is_empty();
         let like = format!("%{}%", filter.replace('%', "\\%").replace('_', "\\_"));
+        let source = Self::entity_facet_source(kind, has_filter)?;
+        let limit_index = if has_filter { 2 } else { 1 };
+        let offset_index = if has_filter { 3 } else { 2 };
 
         let sql = match kind {
-            "person" | "people" | "author" | "authors" => {
-                let having = if has_filter {
-                    "HAVING COALESCE(p.display_name, d.author_name) LIKE ?1 ESCAPE '\\'
-                         OR COALESCE(p.description, '') LIKE ?1 ESCAPE '\\'"
-                } else {
-                    ""
-                };
-                format!(
-                    "SELECT
+            "person" | "people" | "author" | "authors" => format!(
+                "SELECT
                         d.source,
                         d.author_id,
                         COALESCE(p.display_name, d.author_name) AS display_name,
@@ -4779,28 +6819,12 @@ impl Database {
                         ) AS sample_title,
                         p.icon_path,
                         p.cover_path AS banner_path
-                     FROM downloads d
-                     LEFT JOIN people p ON p.source = d.source AND p.source_key = d.author_id
-                     WHERE d.author_id IS NOT NULL AND d.author_id != ''
-                       AND d.author_name IS NOT NULL AND d.author_name != ''
-                     GROUP BY d.source, d.author_id, COALESCE(p.display_name, d.author_name), p.icon_path, p.cover_path, p.description, p.updated_at
-                     {having}
+                     {source}
                      ORDER BY count DESC, display_name ASC
-                     LIMIT ?{limit_index} OFFSET ?{offset_index}",
-                    having = having,
-                    limit_index = if has_filter { 2 } else { 1 },
-                    offset_index = if has_filter { 3 } else { 2 },
-                )
-            }
-            "series" => {
-                let having = if has_filter {
-                    "HAVING COALESCE(s.title, ds.title) LIKE ?1 ESCAPE '\\'
-                         OR COALESCE(s.description, '') LIKE ?1 ESCAPE '\\'"
-                } else {
-                    ""
-                };
-                format!(
-                    "SELECT
+                     LIMIT ?{limit_index} OFFSET ?{offset_index}"
+            ),
+            "series" => format!(
+                "SELECT
                         ds.series_source,
                         ds.series_key,
                         COALESCE(s.title, ds.title) AS title,
@@ -4821,18 +6845,10 @@ impl Database {
                         ) AS sample_title,
                         NULL AS icon_path,
                         s.cover_path AS banner_path
-                     FROM download_series ds
-                     LEFT JOIN series s ON s.source = ds.series_source AND s.source_key = ds.series_key
-                     JOIN downloads d ON d.id = ds.download_id
-                     GROUP BY ds.series_source, ds.series_key, COALESCE(s.title, ds.title), s.cover_path, s.description, s.updated_at
-                     {having}
+                     {source}
                      ORDER BY count DESC, title ASC
-                     LIMIT ?{limit_index} OFFSET ?{offset_index}",
-                    having = having,
-                    limit_index = if has_filter { 2 } else { 1 },
-                    offset_index = if has_filter { 3 } else { 2 },
-                )
-            }
+                     LIMIT ?{limit_index} OFFSET ?{offset_index}"
+            ),
             other => return Err(format!("Unsupported entity facet kind: {}", other)),
         };
 
@@ -4865,6 +6881,14 @@ impl Database {
         for row in rows {
             results.push(row.map_err(|e| format!("Entity facet row read failed: {}", e))?);
         }
+        if let Ok(mut cache) = self.entity_facet_cache.lock() {
+            cache.insert(
+                cache_key,
+                generation,
+                results.clone(),
+                entity_facets_bytes(&results),
+            );
+        }
         Ok(results)
     }
 
@@ -4878,6 +6902,13 @@ impl Database {
     /// サブクエリを含む集計が2本走っていた。大規模ライブラリでは、この2本が
     /// 画面表示の待ち時間の大半を占める。
     pub fn get_filter_facets_with(&self, include_entities: bool) -> Result<FilterFacets, String> {
+        let generation = self.library_generation()?;
+        let cache_key = if include_entities { "full" } else { "light" };
+        if let Ok(mut cache) = self.filter_facets_cache.lock() {
+            if let Some(cached) = cache.get(cache_key, generation) {
+                return Ok(cached);
+            }
+        }
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
 
         let collect = |sql: &str| -> Result<Vec<FacetCount>, String> {
@@ -4929,7 +6960,7 @@ impl Database {
             Ok(results)
         };
 
-        Ok(FilterFacets {
+        let result = FilterFacets {
             tags: collect(
                 "SELECT t.name, COUNT(dt.download_id) AS count
                  FROM tags t
@@ -5024,7 +7055,17 @@ impl Database {
                  GROUP BY asset_type
                  ORDER BY count DESC, asset_type ASC",
             )?,
-        })
+        };
+        drop(conn);
+        if let Ok(mut cache) = self.filter_facets_cache.lock() {
+            cache.insert(
+                cache_key.to_string(),
+                generation,
+                result.clone(),
+                filter_facets_bytes(&result),
+            );
+        }
+        Ok(result)
     }
 
     /// バージョン履歴を挿入
@@ -5302,7 +7343,45 @@ impl Database {
         Ok(())
     }
 
-    /// 更新監視（トグル）を設定する
+    /// 本文まで突き合わせたときの覚え書きを残す。
+    ///
+    /// `meta_hash` は本文を除いたメタデータの指紋、`deep_checked_at` はこの
+    /// 突き合わせを行った時刻。次の更新確認は、指紋が同じで時刻も新しければ
+    /// 本文を取りに行かずに済ませられる。
+    pub fn set_download_meta_state(
+        &self,
+        download_id: i64,
+        meta_hash: Option<&str>,
+        deep_checked_at: &str,
+    ) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE downloads SET meta_hash = ?1, last_deep_checked_at = ?2 WHERE id = ?3",
+            params![meta_hash, deep_checked_at, download_id],
+        )
+        .map_err(|e| format!("Failed to set meta state: {}", e))?;
+        Ok(())
+    }
+
+    /// 更新確認が使う覚え書き。(メタデータの指紋, 最後に本文を見た時刻)
+    pub fn get_download_meta_state(
+        &self,
+        download_id: i64,
+    ) -> Result<(Option<String>, Option<String>), String> {
+        let conn = self.read_conn()?;
+        conn.query_row(
+            "SELECT meta_hash, last_deep_checked_at FROM downloads WHERE id = ?1",
+            params![download_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|e| format!("Failed to read meta state: {}", e))
+    }
+
+    /// 更新監視（トグル）を設定する。
+    ///
+    /// 監視対象の一覧（update_targets）には触れない。作品の監視は
+    /// `downloads.watch_updates` だけで表せるうえ、そこへ 'work' の行を作ると
+    /// 「自分で選んだ作者・シリーズ」の一覧に作品名が紛れ込む。
     pub fn set_watch_updates(&self, download_id: i64, watch: bool) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.execute(
@@ -5310,29 +7389,6 @@ impl Database {
             params![if watch { 1i64 } else { 0i64 }, download_id],
         )
         .map_err(|e| format!("Failed to set watch_updates: {}", e))?;
-        if let Ok((source, source_id, title)) = conn.query_row(
-            "SELECT source, source_id, title FROM downloads WHERE id = ?1",
-            params![download_id],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            },
-        ) {
-            conn.execute(
-                "INSERT INTO update_targets (
-                    target_type, source, source_key, display_name, enabled, created_at, updated_at
-                ) VALUES ('work', ?1, ?2, ?3, ?4, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-                ON CONFLICT(target_type, source, source_key) DO UPDATE SET
-                    display_name = excluded.display_name,
-                    enabled = excluded.enabled,
-                    updated_at = CURRENT_TIMESTAMP",
-                params![source, source_id, title, if watch { 1i64 } else { 0i64 }],
-            )
-            .map_err(|e| format!("Failed to sync work update target: {}", e))?;
-        }
         Ok(())
     }
 
@@ -5341,16 +7397,47 @@ impl Database {
         params: &SearchV2Params,
         watch: bool,
     ) -> Result<BulkMutationResult, String> {
-        let mut bulk_params = params.clone();
-        bulk_params.cursor = None;
-        bulk_params.limit = Some(200_000);
-        bulk_params.projection = Some("bulk".to_string());
-        let result = self.search_downloads_v2_inner(&bulk_params, 200_000)?;
-        let ids = result.items.iter().map(|item| item.id).collect::<Vec<_>>();
-        let changed_count = self.set_watch_updates_for_ids(&ids, watch)?;
-
+        let snapshot = self.collect_search_match_snapshot(params, 1_000)?;
+        let matched_count = snapshot.row_count;
+        if matched_count == 0 {
+            return Ok(BulkMutationResult {
+                matched_count: 0,
+                changed_count: 0,
+            });
+        }
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        if self.library_generation()? != snapshot.library_generation {
+            return Err("Library changed while preparing the bulk selection; retry".to_string());
+        }
+        conn.execute(
+            "ATTACH DATABASE ?1 AS bulk_selection",
+            params![snapshot.path.to_string_lossy().to_string()],
+        )
+        .map_err(|e| format!("Bulk selection attach failed: {e}"))?;
+        let update_result: Result<i64, String> = (|| {
+            let tx = conn
+                .transaction()
+                .map_err(|e| format!("Bulk watch update transaction failed: {e}"))?;
+            let watch_value = i64::from(watch);
+            let changed_count =
+                tx.execute(
+                    "UPDATE downloads
+                     SET watch_updates = ?1
+                     WHERE id IN (SELECT id FROM bulk_selection.bulk_matches)",
+                    params![watch_value],
+                )
+                .map_err(|e| format!("Bulk watch update failed: {e}"))? as i64;
+            tx.commit()
+                .map_err(|e| format!("Bulk watch update commit failed: {e}"))?;
+            Ok(changed_count)
+        })();
+        let detach_result = conn
+            .execute_batch("DETACH DATABASE bulk_selection")
+            .map_err(|e| format!("Bulk selection detach failed: {e}"));
+        let changed_count = update_result?;
+        detach_result?;
         Ok(BulkMutationResult {
-            matched_count: ids.len() as i64,
+            matched_count,
             changed_count,
         })
     }
@@ -5359,67 +7446,280 @@ impl Database {
         &self,
         params: &SearchV2Params,
     ) -> Result<BulkMutationResult, String> {
-        let mut bulk_params = params.clone();
-        bulk_params.cursor = None;
-        bulk_params.limit = Some(200_000);
-        bulk_params.projection = Some("bulk".to_string());
-        let result = self.search_downloads_v2_inner(&bulk_params, 200_000)?;
-        let ids = result.items.iter().map(|item| item.id).collect::<Vec<_>>();
-        self.delete_downloads(&ids)
+        let snapshot = self.collect_search_match_snapshot(params, 1_000)?;
+        let matched_count = snapshot.row_count;
+        if matched_count == 0 {
+            return Ok(BulkMutationResult {
+                matched_count: 0,
+                changed_count: 0,
+            });
+        }
+
+        // Validate every filesystem target before committing relational
+        // deletion, but do not retain O(N) paths in memory.
+        {
+            let guard = snapshot
+                .connection
+                .lock()
+                .map_err(|e| format!("Bulk selection connection lock failed: {e}"))?;
+            let conn = guard
+                .as_ref()
+                .ok_or_else(|| "Bulk selection snapshot was closed".to_string())?;
+            let mut statement = conn
+                .prepare("SELECT source, source_id FROM bulk_matches ORDER BY id")
+                .map_err(|e| format!("Bulk delete validation prepare failed: {e}"))?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(|e| format!("Bulk delete validation query failed: {e}"))?;
+            for row in rows {
+                let (source, source_id) =
+                    row.map_err(|e| format!("Bulk delete validation row failed: {e}"))?;
+                validated_download_work_root(&self.storage_dir, &source, &source_id)?;
+            }
+        }
+
+        {
+            let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+            if self.library_generation()? != snapshot.library_generation {
+                return Err("Library changed while preparing the bulk selection; retry".to_string());
+            }
+            conn.execute(
+                "ATTACH DATABASE ?1 AS bulk_selection",
+                params![snapshot.path.to_string_lossy().to_string()],
+            )
+            .map_err(|e| format!("Bulk selection attach failed: {e}"))?;
+            let delete_result: Result<i64, String> = (|| {
+                let tx = conn
+                    .transaction()
+                    .map_err(|e| format!("Bulk delete transaction failed: {e}"))?;
+                let changed_count = tx
+                    .execute(
+                        "DELETE FROM downloads
+                         WHERE id IN (SELECT id FROM bulk_selection.bulk_matches)",
+                        [],
+                    )
+                    .map_err(|e| format!("Bulk relational delete failed: {e}"))?
+                    as i64;
+                tx.commit()
+                    .map_err(|e| format!("Bulk delete commit failed: {e}"))?;
+                Ok(changed_count)
+            })();
+            let detach_result = conn
+                .execute_batch("DETACH DATABASE bulk_selection")
+                .map_err(|e| format!("Bulk selection detach failed: {e}"));
+            let changed_count = delete_result?;
+            detach_result?;
+            if changed_count != matched_count {
+                return Err(format!(
+                    "Bulk delete changed {changed_count} rows after selecting {matched_count}; indexes were not modified"
+                ));
+            }
+        }
+
+        // Keep the lexical writer alive for one commit while streaming ids
+        // directly from the disk snapshot. Semantic cleanup is chunked because
+        // its current API intentionally accepts a bounded slice.
+        let lexical_result =
+            super::tantivy_index::delete_documents_from_snapshot(&self.storage_dir, &snapshot.path);
+        let semantic_result = self.clear_semantic_documents_from_snapshot(&snapshot);
+
+        // Slow filesystem work remains outside the database lock and is also
+        // streamed from the snapshot instead of retaining every path.
+        {
+            let guard = snapshot
+                .connection
+                .lock()
+                .map_err(|e| format!("Bulk selection connection lock failed: {e}"))?;
+            let conn = guard
+                .as_ref()
+                .ok_or_else(|| "Bulk selection snapshot was closed".to_string())?;
+            let mut statement = conn
+                .prepare("SELECT source, source_id FROM bulk_matches ORDER BY id")
+                .map_err(|e| format!("Bulk filesystem cleanup prepare failed: {e}"))?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(|e| format!("Bulk filesystem cleanup query failed: {e}"))?;
+            for row in rows {
+                let (source, source_id) =
+                    row.map_err(|e| format!("Bulk filesystem cleanup row failed: {e}"))?;
+                let work_root_dir =
+                    validated_download_work_root(&self.storage_dir, &source, &source_id)?;
+                if work_root_dir.exists() {
+                    if let Err(error) = remove_dir_all_resilient(&work_root_dir) {
+                        log::warn!(
+                            "Failed to remove work root directory {:?}: {}",
+                            work_root_dir,
+                            error
+                        );
+                    }
+                    if let Some(source_dir) = work_root_dir.parent() {
+                        let _ = remove_dir_resilient(source_dir);
+                    }
+                }
+            }
+        }
+        self.invalidate_index_status();
+        match (lexical_result, semantic_result) {
+            (Err(lexical), Err(semantic)) => Err(format!(
+                "Downloads were deleted, but both search indexes failed to update: lexical: {lexical}; semantic: {semantic}"
+            )),
+            (Err(error), _) => Err(format!(
+                "Downloads were deleted, but the lexical search index failed to update: {error}"
+            )),
+            (_, Err(error)) => Err(format!(
+                "Downloads were deleted, but the semantic search index failed to update: {error}"
+            )),
+            (Ok(()), Ok(())) => Ok(BulkMutationResult {
+                matched_count,
+                changed_count: matched_count,
+            }),
+        }
     }
 
-    fn set_watch_updates_for_ids(&self, ids: &[i64], watch: bool) -> Result<i64, String> {
-        if ids.is_empty() {
-            return Ok(0);
-        }
-
-        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
-        let tx = conn
-            .transaction()
-            .map_err(|e| format!("Bulk watch update transaction failed: {}", e))?;
-        let mut changed_count = 0i64;
-        let watch_value = if watch { 1i64 } else { 0i64 };
-
-        for id in ids {
-            let updated = tx
-                .execute(
-                    "UPDATE downloads SET watch_updates = ?1 WHERE id = ?2",
-                    params![watch_value, id],
+    fn clear_semantic_documents_from_snapshot(
+        &self,
+        snapshot: &DiskSearchSnapshot,
+    ) -> Result<(), String> {
+        const CHUNK_SIZE: i64 = 1_000;
+        let guard = snapshot
+            .connection
+            .lock()
+            .map_err(|e| format!("Bulk selection connection lock failed: {e}"))?;
+        let conn = guard
+            .as_ref()
+            .ok_or_else(|| "Bulk selection snapshot was closed".to_string())?;
+        let mut after_id = 0i64;
+        loop {
+            let mut statement = conn
+                .prepare(
+                    "SELECT id FROM bulk_matches
+                     WHERE id > ?1 ORDER BY id LIMIT ?2",
                 )
-                .map_err(|e| format!("Failed to set watch_updates: {}", e))?;
-            if updated == 0 {
-                continue;
+                .map_err(|e| format!("Semantic cleanup chunk prepare failed: {e}"))?;
+            let rows = statement
+                .query_map(params![after_id, CHUNK_SIZE], |row| row.get::<_, i64>(0))
+                .map_err(|e| format!("Semantic cleanup chunk query failed: {e}"))?;
+            let mut ids = Vec::with_capacity(CHUNK_SIZE as usize);
+            for row in rows {
+                ids.push(row.map_err(|e| format!("Semantic cleanup id row failed: {e}"))?);
             }
-            changed_count += updated as i64;
-
-            if let Ok((source, source_id, title)) = tx.query_row(
-                "SELECT source, source_id, title FROM downloads WHERE id = ?1",
-                params![id],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                    ))
-                },
-            ) {
-                tx.execute(
-                    "INSERT INTO update_targets (
-                        target_type, source, source_key, display_name, enabled, created_at, updated_at
-                    ) VALUES ('work', ?1, ?2, ?3, ?4, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-                    ON CONFLICT(target_type, source, source_key) DO UPDATE SET
-                        display_name = excluded.display_name,
-                        enabled = excluded.enabled,
-                        updated_at = CURRENT_TIMESTAMP",
-                    params![source, source_id, title, watch_value],
-                )
-                .map_err(|e| format!("Failed to sync work update target: {}", e))?;
-            }
+            let Some(last) = ids.last().copied() else {
+                break;
+            };
+            super::semantic_index::clear_documents(&self.storage_dir, &ids)?;
+            after_id = last;
         }
+        Ok(())
+    }
 
-        tx.commit()
-            .map_err(|e| format!("Bulk watch update commit failed: {}", e))?;
-        Ok(changed_count)
+    fn collect_search_match_snapshot(
+        &self,
+        params: &SearchV2Params,
+        page_size: i64,
+    ) -> Result<Arc<DiskSearchSnapshot>, String> {
+        let library_generation = self.library_generation()?;
+        let index_generation = super::tantivy_index::index_generation(&self.storage_dir)?;
+        let (id, path, connection) =
+            create_search_snapshot_connection(&self.storage_dir, &self.db_path)?;
+        let build_result = (|| {
+            {
+                let guard = connection
+                    .lock()
+                    .map_err(|e| format!("Bulk selection connection lock failed: {e}"))?;
+                let conn = guard
+                    .as_ref()
+                    .ok_or_else(|| "Bulk selection snapshot was closed".to_string())?;
+                conn.execute_batch(
+                    "CREATE TABLE bulk_matches (
+                        id INTEGER PRIMARY KEY,
+                        source TEXT NOT NULL,
+                        source_id TEXT NOT NULL
+                     ) WITHOUT ROWID;
+                     BEGIN IMMEDIATE;",
+                )
+                .map_err(|e| format!("Bulk selection snapshot setup failed: {e}"))?;
+            }
+
+            let mut bulk_params = params.clone();
+            bulk_params.cursor = None;
+            bulk_params.offset = None;
+            let page_size = page_size.clamp(1, 1_000);
+            bulk_params.limit = Some(page_size);
+            bulk_params.projection = Some("bulk".to_string());
+            let mut seen_cursors = HashSet::new();
+            loop {
+                let result = self.search_downloads_v2_inner(&bulk_params, page_size)?;
+                {
+                    let guard = connection
+                        .lock()
+                        .map_err(|e| format!("Bulk selection connection lock failed: {e}"))?;
+                    let conn = guard
+                        .as_ref()
+                        .ok_or_else(|| "Bulk selection snapshot was closed".to_string())?;
+                    insert_bulk_match_entries(conn, &result.items)?;
+                    ensure_search_snapshot_budget(conn, &self.storage_dir)?;
+                }
+                let Some(next_cursor) = result.next_cursor else {
+                    break;
+                };
+                if !seen_cursors.insert(next_cursor.clone()) {
+                    return Err("Bulk search paging returned a repeated cursor".to_string());
+                }
+                bulk_params.cursor = Some(next_cursor);
+            }
+
+            let guard = connection
+                .lock()
+                .map_err(|e| format!("Bulk selection connection lock failed: {e}"))?;
+            let conn = guard
+                .as_ref()
+                .ok_or_else(|| "Bulk selection snapshot was closed".to_string())?;
+            conn.execute_batch("COMMIT")
+                .map_err(|e| format!("Bulk selection snapshot commit failed: {e}"))?;
+            let row_count = conn
+                .query_row("SELECT COUNT(*) FROM bulk_matches", [], |row| row.get(0))
+                .map_err(|e| format!("Bulk selection count failed: {e}"))?;
+            Ok((
+                row_count,
+                ensure_search_snapshot_budget(conn, &self.storage_dir)?,
+            ))
+        })();
+
+        let (row_count, disk_bytes) = match build_result {
+            Ok(result) => result,
+            Err(error) => {
+                if let Ok(guard) = connection.lock() {
+                    if let Some(conn) = guard.as_ref() {
+                        let _ = conn.execute_batch("ROLLBACK");
+                    }
+                }
+                close_snapshot_connection(&connection);
+                cleanup_search_snapshot_path(&path);
+                return Err(error);
+            }
+        };
+        if self.library_generation()? != library_generation
+            || super::tantivy_index::index_generation(&self.storage_dir)? != index_generation
+        {
+            close_snapshot_connection(&connection);
+            cleanup_search_snapshot_path(&path);
+            return Err("Library changed while preparing the bulk selection; retry".to_string());
+        }
+        Ok(Arc::new(DiskSearchSnapshot {
+            id,
+            key: "bulk".to_string(),
+            library_generation,
+            index_generation,
+            row_count,
+            disk_bytes,
+            expires_at: Instant::now() + SEARCH_SNAPSHOT_TTL,
+            path,
+            connection,
+        }))
     }
 
     /// お気に入り（トグル）を設定する
@@ -5486,11 +7786,6 @@ impl Database {
 
         conn.execute_batch(
             "
-            DELETE FROM download_people;
-            DELETE FROM download_series;
-            DELETE FROM people;
-            DELETE FROM series;
-
             INSERT OR IGNORE INTO people (
                 source, source_key, display_name, current_version, created_at, updated_at
             )
@@ -5523,6 +7818,201 @@ impl Database {
 
         Ok(())
     }
+}
+
+fn is_version_stage_name(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix(".v") else {
+        return false;
+    };
+    let Some((version, suffix)) = rest.split_once('.') else {
+        return false;
+    };
+    let suffix = suffix.as_bytes();
+    !version.is_empty()
+        && version.bytes().all(|byte| byte.is_ascii_digit())
+        && suffix.len() == 22
+        && suffix[..16].iter().all(u8::is_ascii_hexdigit)
+        && &suffix[16..] == b".stage"
+}
+
+fn ensure_download_save_journal_schema(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS download_save_journal (
+            id TEXT PRIMARY KEY,
+            source TEXT NOT NULL,
+            source_id TEXT NOT NULL,
+            version INTEGER NOT NULL,
+            stage_path TEXT NOT NULL,
+            final_path TEXT NOT NULL,
+            committed INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL
+         )",
+    )
+    .map_err(|error| format!("Download save journal schema failed: {error}"))?;
+    Ok(())
+}
+
+fn remove_download_save_path(path: &Path) -> Result<(), String> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(format!("Download recovery metadata failed: {error}")),
+    };
+    if metadata.file_type().is_symlink() {
+        std::fs::remove_dir(path)
+            .or_else(|_| std::fs::remove_file(path))
+            .map_err(|error| format!("Download recovery link removal failed: {error}"))
+    } else if metadata.file_type().is_dir() {
+        std::fs::remove_dir_all(path)
+            .map_err(|error| format!("Interrupted download cleanup failed: {error}"))
+    } else {
+        Err("Download recovery path is not a directory".to_string())
+    }
+}
+
+fn validate_download_save_journal_path(
+    storage: &Path,
+    source: &str,
+    source_id: &str,
+    version: i64,
+    stage_path: &Path,
+    final_path: &Path,
+) -> Result<(), String> {
+    if !matches!(source, "pixiv" | "fanbox")
+        || source_id.is_empty()
+        || source_id.len() > 128
+        || !source_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+        || version < 1
+    {
+        return Err("Download save journal contains invalid work identity".to_string());
+    }
+    let expected_work = storage.join(source).join(source_id);
+    let expected_final = expected_work.join(format!("v{version}"));
+    let stage_name = stage_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "Download save journal has an invalid stage name".to_string())?;
+    if final_path != expected_final
+        || stage_path.parent() != Some(expected_work.as_path())
+        || !is_version_stage_name(stage_name)
+        || !stage_name.starts_with(&format!(".v{version}."))
+    {
+        return Err("Download save journal path escaped its work directory".to_string());
+    }
+    for parent in [storage.join(source), expected_work] {
+        match std::fs::symlink_metadata(&parent) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() => {
+                return Err("Download save journal parent is not a real directory".to_string())
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(format!(
+                    "Download save journal parent inspection failed: {error}"
+                ))
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Recovers the filesystem gap that cannot be handled by a Rust drop guard:
+/// process termination between publication and the SQLite commit. Only paths
+/// recorded by this save pipeline are ever treated as disposable.
+fn recover_interrupted_download_saves(conn: &Connection, storage_dir: &Path) -> Result<(), String> {
+    ensure_download_save_journal_schema(conn)?;
+
+    let storage = storage_dir
+        .canonicalize()
+        .map_err(|error| format!("Download recovery storage resolution failed: {error}"))?;
+
+    let mut statement = conn
+        .prepare(
+            "SELECT id, source, source_id, version, stage_path, final_path, committed
+             FROM download_save_journal ORDER BY created_at",
+        )
+        .map_err(|error| format!("Download save journal read failed: {error}"))?;
+    let journals = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+                PathBuf::from(row.get::<_, String>(4)?),
+                PathBuf::from(row.get::<_, String>(5)?),
+                row.get::<_, i64>(6)? != 0,
+            ))
+        })
+        .map_err(|error| format!("Download save journal query failed: {error}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("Download save journal decode failed: {error}"))?;
+    drop(statement);
+
+    for (id, source, source_id, version, stage_path, final_path, committed) in journals {
+        validate_download_save_journal_path(
+            &storage,
+            &source,
+            &source_id,
+            version,
+            &stage_path,
+            &final_path,
+        )?;
+        remove_download_save_path(&stage_path)?;
+        if !committed {
+            remove_download_save_path(&final_path)?;
+        }
+        conn.execute(
+            "DELETE FROM download_save_journal WHERE id = ?1",
+            params![id],
+        )
+        .map_err(|error| format!("Download save journal cleanup failed: {error}"))?;
+    }
+
+    // A crash may occur after creating a unique stage directory but before its
+    // journal row is durable. The exact reserved name makes these safe to reap;
+    // ordinary vN directories are deliberately never inferred to be garbage.
+    for source_entry in std::fs::read_dir(&storage)
+        .map_err(|error| format!("Download recovery source scan failed: {error}"))?
+    {
+        let source_entry = source_entry.map_err(|error| error.to_string())?;
+        let source_metadata =
+            std::fs::symlink_metadata(source_entry.path()).map_err(|error| error.to_string())?;
+        if source_metadata.file_type().is_symlink() || !source_metadata.file_type().is_dir() {
+            continue;
+        }
+        let source = source_entry.file_name().to_string_lossy().to_string();
+        if !matches!(source.as_str(), "pixiv" | "fanbox") {
+            continue;
+        }
+        for work_entry in
+            std::fs::read_dir(source_entry.path()).map_err(|error| error.to_string())?
+        {
+            let work_entry = work_entry.map_err(|error| error.to_string())?;
+            let work_metadata =
+                std::fs::symlink_metadata(work_entry.path()).map_err(|error| error.to_string())?;
+            if work_metadata.file_type().is_symlink() || !work_metadata.file_type().is_dir() {
+                continue;
+            }
+            for item_entry in
+                std::fs::read_dir(work_entry.path()).map_err(|error| error.to_string())?
+            {
+                let item_entry = item_entry.map_err(|error| error.to_string())?;
+                let metadata = std::fs::symlink_metadata(item_entry.path())
+                    .map_err(|error| error.to_string())?;
+                if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
+                    continue;
+                }
+                let name = item_entry.file_name().to_string_lossy().to_string();
+                if is_version_stage_name(&name) {
+                    remove_download_save_path(&item_entry.path())?;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn query_text(params: &SearchV2Params) -> &str {
@@ -5914,6 +8404,35 @@ fn decode_cursor(raw: Option<&str>) -> Option<SearchCursor> {
     serde_json::from_slice(&bytes).ok()
 }
 
+fn entity_series_cursor_scope(source: &str, person_key: &str, query: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(source.as_bytes());
+    hasher.update([0x1f]);
+    hasher.update(person_key.as_bytes());
+    hasher.update([0x1f]);
+    hasher.update(query.as_bytes());
+    URL_SAFE_NO_PAD.encode(hasher.finalize())
+}
+
+fn encode_entity_series_cursor(cursor: &EntitySeriesCursor) -> Result<String, String> {
+    serde_json::to_vec(cursor)
+        .map(|bytes| format!("es:{}", URL_SAFE_NO_PAD.encode(bytes)))
+        .map_err(|e| format!("Entity series cursor encode failed: {e}"))
+}
+
+fn decode_entity_series_cursor(raw: Option<&str>) -> Result<Option<EntitySeriesCursor>, String> {
+    let Some(raw) = raw else { return Ok(None) };
+    let encoded = raw
+        .strip_prefix("es:")
+        .ok_or_else(|| "Invalid entity series cursor".to_string())?;
+    let bytes = URL_SAFE_NO_PAD
+        .decode(encoded.as_bytes())
+        .map_err(|_| "Invalid entity series cursor".to_string())?;
+    serde_json::from_slice(&bytes)
+        .map(Some)
+        .map_err(|_| "Invalid entity series cursor".to_string())
+}
+
 fn normalized_sort_key(params: &SearchV2Params) -> &'static str {
     // Accept both the original UI names and the database-shaped names used by
     // newer screens. The result is a closed internal enum represented as a
@@ -6007,6 +8526,9 @@ fn encode_sql_cursor(params: &SearchV2Params, item: &DownloadEntry) -> Option<St
         tantivy_score: None,
         tantivy_segment_ord: None,
         tantivy_doc_id: None,
+        total_estimate: None,
+        tantivy_total_hits: None,
+        snapshot_id: None,
     })
 }
 
@@ -6023,34 +8545,9 @@ fn encode_search_cursor(params: &SearchV2Params, item: &DownloadEntry) -> Option
         tantivy_score: None,
         tantivy_segment_ord: None,
         tantivy_doc_id: None,
-    })
-}
-
-fn encode_tantivy_search_cursor(
-    params: &SearchV2Params,
-    item: &DownloadEntry,
-    cursor: super::tantivy_index::TantivySearchCursor,
-) -> Option<String> {
-    encode_cursor(&SearchCursor {
-        kind: "tantivy-search-after".to_string(),
-        scope: Some(search_cursor_scope(params)),
-        sort_by: Some("relevance".to_string()),
-        sort_order: Some("desc".to_string()),
-        value: None,
-        id: Some(item.id),
-        score: item.search_score,
-        downloaded_at: None,
-        tantivy_score: Some(cursor.score),
-        tantivy_segment_ord: Some(cursor.segment_ord),
-        tantivy_doc_id: Some(cursor.doc_id),
-    })
-}
-
-fn tantivy_cursor(cursor: &SearchCursor) -> Option<super::tantivy_index::TantivySearchCursor> {
-    Some(super::tantivy_index::TantivySearchCursor {
-        score: cursor.tantivy_score?,
-        segment_ord: cursor.tantivy_segment_ord?,
-        doc_id: cursor.tantivy_doc_id?,
+        total_estimate: None,
+        tantivy_total_hits: None,
+        snapshot_id: None,
     })
 }
 
@@ -6299,6 +8796,315 @@ fn query_download_entries(
         results.push(row.map_err(|e| format!("Row read failed: {}", e))?);
     }
     Ok(results)
+}
+
+fn facet_counts_bytes(facets: &[FacetCount]) -> usize {
+    facets
+        .iter()
+        .map(|facet| {
+            facet
+                .name
+                .len()
+                .saturating_add(std::mem::size_of::<FacetCount>())
+        })
+        .sum()
+}
+
+fn entity_facets_bytes(facets: &[EntityFacet]) -> usize {
+    facets
+        .iter()
+        .map(|facet| {
+            std::mem::size_of::<EntityFacet>()
+                .saturating_add(facet.source.len())
+                .saturating_add(facet.source_key.len())
+                .saturating_add(facet.display_name.len())
+                .saturating_add(facet.cover_path.as_deref().map(str::len).unwrap_or(0))
+                .saturating_add(facet.description.as_deref().map(str::len).unwrap_or(0))
+                .saturating_add(facet.sample_title.as_deref().map(str::len).unwrap_or(0))
+        })
+        .sum()
+}
+
+fn filter_facets_bytes(facets: &FilterFacets) -> usize {
+    facet_counts_bytes(&facets.tags)
+        .saturating_add(facet_counts_bytes(&facets.authors))
+        .saturating_add(entity_facets_bytes(&facets.author_entities))
+        .saturating_add(entity_facets_bytes(&facets.series))
+        .saturating_add(facet_counts_bytes(&facets.content_types))
+        .saturating_add(facet_counts_bytes(&facets.asset_types))
+}
+
+fn suggestions_bytes(result: &SearchSuggestResult) -> usize {
+    result
+        .items
+        .iter()
+        .map(|suggestion| {
+            std::mem::size_of::<SearchSuggestion>()
+                .saturating_add(suggestion.kind.len())
+                .saturating_add(suggestion.label.len())
+                .saturating_add(suggestion.value.len())
+                .saturating_add(suggestion.source.as_deref().map(str::len).unwrap_or(0))
+                .saturating_add(suggestion.source_key.as_deref().map(str::len).unwrap_or(0))
+        })
+        .sum()
+}
+
+const SORTED_SEARCH_ID_BATCH_SIZE: usize = 512;
+
+fn search_snapshot_dir(storage_dir: &Path) -> PathBuf {
+    storage_dir.join(SEARCH_SNAPSHOT_DIR)
+}
+
+fn cleanup_search_snapshot_path(path: &Path) {
+    let _ = std::fs::remove_file(path);
+    let path_text = path.to_string_lossy();
+    let _ = std::fs::remove_file(format!("{path_text}-wal"));
+    let _ = std::fs::remove_file(format!("{path_text}-shm"));
+}
+
+fn cleanup_stale_search_snapshots(storage_dir: &Path) -> Result<(), String> {
+    let directory = search_snapshot_dir(storage_dir);
+    std::fs::create_dir_all(&directory)
+        .map_err(|e| format!("Search snapshot directory creation failed: {e}"))?;
+    let entries = std::fs::read_dir(&directory)
+        .map_err(|e| format!("Search snapshot directory read failed: {e}"))?;
+    for entry in entries.filter_map(Result::ok) {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let is_snapshot = name.starts_with("snapshot-")
+            && (name.ends_with(".sqlite")
+                || name.ends_with(".sqlite-wal")
+                || name.ends_with(".sqlite-shm"));
+        if is_snapshot && entry.file_type().is_ok_and(|kind| kind.is_file()) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+    Ok(())
+}
+
+fn create_search_snapshot_connection(
+    storage_dir: &Path,
+    db_path: &Path,
+) -> Result<(String, PathBuf, SnapshotConnection), String> {
+    let directory = search_snapshot_dir(storage_dir);
+    std::fs::create_dir_all(&directory)
+        .map_err(|e| format!("Search snapshot directory creation failed: {e}"))?;
+    for _ in 0..8 {
+        let id = format!("{:032x}", rand::random::<u128>());
+        let path = directory.join(format!("snapshot-{id}.sqlite"));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(file) => drop(file),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(format!("Search snapshot create failed: {error}")),
+        }
+        let result = (|| {
+            let connection = Connection::open_with_flags(
+                &path,
+                OpenFlags::SQLITE_OPEN_READ_WRITE
+                    | OpenFlags::SQLITE_OPEN_URI
+                    | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )
+            .map_err(|e| format!("Search snapshot open failed: {e}"))?;
+            connection
+                .busy_timeout(Duration::from_secs(5))
+                .map_err(|e| format!("Search snapshot busy timeout setup failed: {e}"))?;
+            let cache_kib = (super::resource_budget::search_snapshot_cache_bytes() / 1024) as i64;
+            connection
+                .execute_batch(
+                    "PRAGMA journal_mode = OFF;
+                     PRAGMA synchronous = OFF;
+                     PRAGMA temp_store = FILE;",
+                )
+                .map_err(|e| format!("Search snapshot setup failed: {e}"))?;
+            connection
+                .pragma_update(None, "cache_size", -cache_kib)
+                .map_err(|e| format!("Search snapshot cache setup failed: {e}"))?;
+            connection
+                .execute(
+                    "ATTACH DATABASE ?1 AS library",
+                    params![db_path.to_string_lossy().to_string()],
+                )
+                .map_err(|e| format!("Library attach to search snapshot failed: {e}"))?;
+            Ok(Arc::new(Mutex::new(Some(connection))))
+        })();
+        match result {
+            Ok(connection) => return Ok((id, path, connection)),
+            Err(error) => {
+                cleanup_search_snapshot_path(&path);
+                return Err(error);
+            }
+        }
+    }
+    Err("Could not allocate a unique search snapshot file".to_string())
+}
+
+fn search_snapshot_allocated_bytes(conn: &Connection) -> Result<u64, String> {
+    let page_count: i64 = conn
+        .pragma_query_value(None, "page_count", |row| row.get(0))
+        .map_err(|e| format!("Search snapshot page count failed: {e}"))?;
+    let page_size: i64 = conn
+        .pragma_query_value(None, "page_size", |row| row.get(0))
+        .map_err(|e| format!("Search snapshot page size failed: {e}"))?;
+    Ok((page_count.max(0) as u64).saturating_mul(page_size.max(0) as u64))
+}
+
+fn ensure_search_snapshot_budget(conn: &Connection, storage_dir: &Path) -> Result<u64, String> {
+    ensure_search_snapshot_budget_with_limit(
+        conn,
+        storage_dir,
+        super::resource_budget::search_snapshot_disk_bytes(),
+    )
+}
+
+fn ensure_search_snapshot_budget_with_limit(
+    conn: &Connection,
+    storage_dir: &Path,
+    budget: u64,
+) -> Result<u64, String> {
+    let bytes = search_snapshot_allocated_bytes(conn)?;
+    let directory_bytes = std::fs::read_dir(search_snapshot_dir(storage_dir))
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .filter_map(|entry| entry.metadata().ok())
+                .filter(|metadata| metadata.is_file())
+                .map(|metadata| metadata.len())
+                .sum::<u64>()
+        })
+        .unwrap_or(bytes);
+    if bytes > budget || directory_bytes > budget {
+        return Err(format!(
+            "Search snapshots exceeded the shared {budget}-byte disk budget"
+        ));
+    }
+    Ok(bytes)
+}
+
+/// Pins the attached library to the same WAL snapshot for every page. The
+/// local match table alone is not enough: a concurrent delete from `downloads`
+/// would otherwise shorten a page and make its exact total inconsistent.
+fn pin_search_snapshot_library(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch("BEGIN DEFERRED")
+        .map_err(|e| format!("Library snapshot begin failed: {e}"))?;
+    let _: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM library.downloads ORDER BY id LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("Library snapshot pin failed: {e}"))?;
+    Ok(())
+}
+
+fn close_snapshot_connection(connection: &SnapshotConnection) {
+    if let Ok(mut guard) = connection.lock() {
+        guard.take();
+    }
+}
+
+fn reset_search_match_table(conn: &Connection, with_score: bool) -> Result<(), String> {
+    let score_column = if with_score {
+        ", score REAL NOT NULL"
+    } else {
+        ""
+    };
+    conn.execute_batch(&format!(
+        "DROP TABLE IF EXISTS search_matches;
+         CREATE TABLE search_matches (
+            id INTEGER PRIMARY KEY{score_column}
+         ) WITHOUT ROWID;"
+    ))
+    .map_err(|e| format!("Search snapshot table reset failed: {e}"))
+}
+
+fn insert_search_match_ids(conn: &Connection, ids: &[i64]) -> Result<(), String> {
+    for batch in ids.chunks(SORTED_SEARCH_ID_BATCH_SIZE) {
+        if batch.is_empty() {
+            continue;
+        }
+        // 512 values stays below SQLite's historical 999-variable floor. One
+        // statement per batch is dramatically cheaper than one VM execution
+        // per id and still uses constant memory.
+        let placeholders = (1..=batch.len())
+            .map(|index| format!("(?{index})"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!("INSERT OR IGNORE INTO search_matches (id) VALUES {placeholders}");
+        conn.execute(&sql, rusqlite::params_from_iter(batch.iter().copied()))
+            .map_err(|e| format!("Sorted search id batch insert failed: {e}"))?;
+    }
+    Ok(())
+}
+
+fn insert_search_match_scores(conn: &Connection, scores: &[(i64, f32)]) -> Result<(), String> {
+    for batch in scores.chunks(SORTED_SEARCH_ID_BATCH_SIZE / 2) {
+        if batch.is_empty() {
+            continue;
+        }
+        let placeholders = batch
+            .iter()
+            .enumerate()
+            .map(|(index, _)| format!("(?{}, ?{})", index * 2 + 1, index * 2 + 2))
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "INSERT INTO search_matches (id, score) VALUES {placeholders}
+             ON CONFLICT(id) DO UPDATE SET score = MAX(score, excluded.score)"
+        );
+        let values = batch.iter().flat_map(|(id, score)| {
+            [
+                rusqlite::types::Value::Integer(*id),
+                rusqlite::types::Value::Real(*score as f64),
+            ]
+        });
+        conn.execute(&sql, rusqlite::params_from_iter(values))
+            .map_err(|e| format!("Ranked search score batch insert failed: {e}"))?;
+    }
+    Ok(())
+}
+
+fn insert_bulk_match_entries(conn: &Connection, entries: &[DownloadEntry]) -> Result<(), String> {
+    // Three values per row keeps each statement below SQLite's historical
+    // 999-variable floor while retaining a fixed memory ceiling.
+    for batch in entries.chunks(300) {
+        if batch.is_empty() {
+            continue;
+        }
+        let placeholders = batch
+            .iter()
+            .enumerate()
+            .map(|(index, _)| {
+                format!(
+                    "(?{}, ?{}, ?{})",
+                    index * 3 + 1,
+                    index * 3 + 2,
+                    index * 3 + 3
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "INSERT OR IGNORE INTO bulk_matches (id, source, source_id) VALUES {placeholders}"
+        );
+        let values = batch.iter().flat_map(|entry| {
+            [
+                rusqlite::types::Value::Integer(entry.id),
+                rusqlite::types::Value::Text(entry.source.clone()),
+                rusqlite::types::Value::Text(entry.source_id.clone()),
+            ]
+        });
+        let inserted = conn
+            .execute(&sql, rusqlite::params_from_iter(values))
+            .map_err(|e| format!("Bulk selection batch insert failed: {e}"))?;
+        if inserted != batch.len() {
+            return Err("Bulk search paging returned a duplicate download id".to_string());
+        }
+    }
+    Ok(())
 }
 
 fn collect_suggestions(
@@ -6667,6 +9473,92 @@ fn normalized_tag_list(values: &[String]) -> Vec<String> {
     tags.sort();
     tags.dedup();
     tags
+}
+
+fn upsert_download_in_connection(conn: &Connection, dl: &NewDownload) -> Result<i64, String> {
+    conn.execute(
+        "INSERT INTO downloads (
+            source, source_id, title, author_name, author_id,
+            content_type, excerpt, cover_path, json_path,
+            original_json_path, asset_count, file_size_bytes,
+            downloaded_at, source_created_at,
+            content_hash, text_length, source_updated_at, watch_updates, current_version, favorite
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
+         ON CONFLICT(source, source_id) DO UPDATE SET
+            title = excluded.title,
+            author_name = excluded.author_name,
+            author_id = excluded.author_id,
+            content_type = excluded.content_type,
+            source_created_at = excluded.source_created_at,
+            excerpt = excluded.excerpt,
+            cover_path = excluded.cover_path,
+            json_path = excluded.json_path,
+            original_json_path = excluded.original_json_path,
+            asset_count = excluded.asset_count,
+            file_size_bytes = excluded.file_size_bytes,
+            downloaded_at = excluded.downloaded_at,
+            content_hash = excluded.content_hash,
+            text_length = excluded.text_length,
+            source_updated_at = excluded.source_updated_at,
+            watch_updates = excluded.watch_updates,
+            current_version = excluded.current_version",
+        params![
+            dl.source,
+            dl.source_id,
+            dl.title,
+            dl.author_name,
+            dl.author_id,
+            dl.content_type,
+            dl.excerpt,
+            dl.cover_path,
+            dl.json_path,
+            dl.original_json_path,
+            dl.asset_count,
+            dl.file_size_bytes,
+            dl.downloaded_at,
+            dl.source_created_at,
+            dl.content_hash,
+            dl.text_length,
+            dl.source_updated_at,
+            if dl.watch_updates { 1i64 } else { 0i64 },
+            dl.current_version,
+            if dl.favorite { 1i64 } else { 0i64 },
+        ],
+    )
+    .map_err(|e| format!("Insert download failed: {e}"))?;
+
+    let id = conn
+        .query_row(
+            "SELECT id FROM downloads WHERE source = ?1 AND source_id = ?2",
+            params![dl.source, dl.source_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("Failed to query upserted download ID: {e}"))?;
+    conn.execute(
+        "DELETE FROM download_tags WHERE download_id = ?1",
+        params![id],
+    )
+    .map_err(|e| format!("Failed to clear old tags: {e}"))?;
+    for tag_name in normalized_tag_list(&dl.tags) {
+        conn.execute(
+            "INSERT OR IGNORE INTO tags (name) VALUES (?1)",
+            params![tag_name],
+        )
+        .map_err(|e| format!("Failed to insert tag: {e}"))?;
+        let tag_id = conn
+            .query_row(
+                "SELECT id FROM tags WHERE name = ?1",
+                params![tag_name],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(|e| format!("Failed to retrieve tag ID: {e}"))?;
+        conn.execute(
+            "INSERT OR IGNORE INTO download_tags (download_id, tag_id) VALUES (?1, ?2)",
+            params![id, tag_id],
+        )
+        .map_err(|e| format!("Failed to insert download tag relation: {e}"))?;
+    }
+    Ok(id)
 }
 
 fn sort_clause(params: &SearchV2Params) -> String {
@@ -7357,6 +10249,20 @@ fn search_index_status_locked(
         )
         .map_err(|e| format!("Search index status pending failed: {}", e))?;
 
+    let semantic_indexed_downloads: i64 = conn
+        .query_row(
+            "SELECT COUNT(*)
+             FROM downloads d
+             JOIN semantic_index_state s ON s.download_id = d.id
+             WHERE s.current_version = d.current_version
+               AND COALESCE(s.content_hash, '') = COALESCE(d.content_hash, '')
+               AND s.model_id = ?1",
+            params![super::semantic_index::model_id()],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("Semantic index coverage failed: {e}"))?;
+    let semantic_pending_downloads = total_downloads.saturating_sub(semantic_indexed_downloads);
+
     let semantic = super::semantic_index::status(storage_dir);
 
     Ok(SearchIndexStatus {
@@ -7371,6 +10277,8 @@ fn search_index_status_locked(
         },
         indexed_chunks: semantic.indexed_chunks,
         semantic_indexed_chunks: semantic.indexed_chunks,
+        semantic_indexed_downloads,
+        semantic_pending_downloads,
         semantic_model_ready: semantic.model_ready,
         embedding_provider: semantic.provider,
         gpu_enabled: semantic.gpu_enabled,
@@ -7553,15 +10461,66 @@ fn index_search_documents_locked(
         .iter()
         .map(|doc| doc.semantic.clone())
         .collect::<Vec<_>>();
-    if let Err(error) = super::semantic_index::upsert_documents(storage_dir, &semantic_docs) {
-        log::warn!(
+    match super::semantic_index::upsert_documents(storage_dir, &semantic_docs) {
+        Ok(_) => {
+            let states = docs
+                .iter()
+                .map(|doc| IndexedState {
+                    download_id: doc.download_id,
+                    current_version: doc.current_version,
+                    content_hash: doc.content_hash.clone(),
+                })
+                .collect::<Vec<_>>();
+            record_semantic_indexed_documents_locked(conn, &states)?;
+        }
+        Err(error) => log::warn!(
             "Semantic index batch update skipped for {} documents: {}",
             docs.len(),
             error
-        );
+        ),
     }
 
     Ok(())
+}
+
+fn record_semantic_indexed_documents_locked(
+    conn: &Connection,
+    states: &[IndexedState],
+) -> Result<(), String> {
+    if states.is_empty() {
+        return Ok(());
+    }
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| format!("Semantic state transaction failed: {e}"))?;
+    let now = chrono::Utc::now().to_rfc3339();
+    {
+        let mut statement = tx
+            .prepare_cached(
+                "INSERT INTO semantic_index_state (
+                    download_id, current_version, content_hash, model_id, indexed_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(download_id) DO UPDATE SET
+                    current_version = excluded.current_version,
+                    content_hash = excluded.content_hash,
+                    model_id = excluded.model_id,
+                    indexed_at = excluded.indexed_at",
+            )
+            .map_err(|e| format!("Semantic state prepare failed: {e}"))?;
+        for state in states {
+            statement
+                .execute(params![
+                    state.download_id,
+                    state.current_version,
+                    state.content_hash,
+                    super::semantic_index::model_id(),
+                    now
+                ])
+                .map_err(|e| format!("Semantic state insert failed: {e}"))?;
+        }
+    }
+    tx.commit()
+        .map_err(|e| format!("Semantic state commit failed: {e}"))
 }
 
 fn clear_search_index_locked(
@@ -7577,6 +10536,11 @@ fn clear_search_index_locked(
             error
         );
     }
+    conn.execute(
+        "DELETE FROM semantic_index_state WHERE download_id = ?1",
+        params![download_id],
+    )
+    .map_err(|e| format!("Semantic state clear failed: {e}"))?;
     conn.execute(
         "DELETE FROM search_index_state WHERE download_id = ?1",
         params![download_id],
@@ -7757,6 +10721,10 @@ fn update_target_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<UpdateTar
         metadata_json: row.get(9)?,
         created_at: row.get(10)?,
         updated_at: row.get(11)?,
+        // あとから足した列。古い行や、列だけ足して一度も確認していない対象では
+        // NULL / 0 のままになる。
+        last_hit_at: row.get(12).unwrap_or(None),
+        consecutive_errors: row.get(13).unwrap_or(0),
     })
 }
 
@@ -7910,6 +10878,38 @@ fn entity_version_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<EntityVe
     })
 }
 
+fn validated_download_work_root(
+    storage_dir: &Path,
+    source: &str,
+    source_id: &str,
+) -> Result<PathBuf, String> {
+    for (label, value) in [("source", source), ("source id", source_id)] {
+        let mut components = Path::new(value).components();
+        if !matches!(components.next(), Some(std::path::Component::Normal(_)))
+            || components.next().is_some()
+        {
+            return Err(format!("Invalid download {label}: {value}"));
+        }
+    }
+
+    let work_root = storage_dir.join(source).join(source_id);
+    if work_root.exists() {
+        let storage_canonical = storage_dir
+            .canonicalize()
+            .map_err(|e| format!("Failed to validate storage directory: {e}"))?;
+        let work_canonical = work_root
+            .canonicalize()
+            .map_err(|e| format!("Failed to validate work directory: {e}"))?;
+        if !work_canonical.starts_with(&storage_canonical) {
+            return Err(format!(
+                "Refusing to delete work directory outside storage: {}",
+                work_canonical.display()
+            ));
+        }
+    }
+    Ok(work_root)
+}
+
 /// Windowsなどでファイルが掴まれているため一時的に削除に失敗するケースに備えた、
 /// リトライ機能付きのディレクトリ再帰削除ヘルパー
 fn remove_dir_all_resilient(path: &std::path::Path) -> std::io::Result<()> {
@@ -7975,8 +10975,26 @@ mod search_integration_tests {
     /// Builds prose whose vocabulary keeps growing, the way a real library does.
     fn synthetic_body(seed: u64, chars: usize) -> String {
         let nouns = [
-            "教室", "図書館", "海岸", "旋律", "記憶", "季節", "手紙", "灯台", "回廊", "約束",
-            "硝子", "残響", "標本", "封筒", "螺旋", "夜明", "輪郭", "潮騒", "書架", "遠雷",
+            "教室",
+            "図書館",
+            "海岸",
+            "旋律",
+            "記憶",
+            "季節",
+            "手紙",
+            "灯台",
+            "回廊",
+            "約束",
+            "硝子",
+            "残響",
+            "標本",
+            "封筒",
+            "螺旋",
+            "夜明",
+            "輪郭",
+            "潮騒",
+            "書架",
+            "遠雷",
         ];
         let verbs = [
             "見つめていた",
@@ -8087,6 +11105,224 @@ mod search_integration_tests {
     }
 
     #[test]
+    fn diagnostic_scan_aggregates_each_tree_in_one_bounded_walk() {
+        let (root, storage) = temp_paths();
+        let version = storage.join("pixiv/work/v1");
+        let assets = version.join("data_assets");
+        let lexical = storage.join("search-index");
+        let semantic = root.join("search");
+        fs::create_dir_all(&assets).unwrap();
+        fs::create_dir_all(&lexical).unwrap();
+        fs::create_dir_all(&semantic).unwrap();
+        fs::write(version.join("original.json"), b"12345").unwrap();
+        let known = assets.join("known.png");
+        fs::write(&known, b"123").unwrap();
+        fs::write(assets.join("orphan.png"), b"1234").unwrap();
+        fs::write(lexical.join("segment.store"), b"123456").unwrap();
+        fs::write(lexical.join("meta.json"), b"12").unwrap();
+        fs::write(semantic.join("vectors.bin"), b"1234567").unwrap();
+        let interrupted = storage.join("pixiv/work/.v2.0123abcd.stage");
+        fs::create_dir_all(&interrupted).unwrap();
+        fs::write(interrupted.join("data.json"), b"123").unwrap();
+        let known_paths = HashSet::from([normalized_diagnostic_path(&known)]);
+        let mut is_known_asset =
+            |path: &Path| Ok(known_paths.contains(&normalized_diagnostic_path(path)));
+
+        let stats =
+            collect_diagnostic_file_stats(&storage, &semantic, &mut is_known_asset).unwrap();
+
+        assert_eq!(stats.storage_size_bytes, 23);
+        assert_eq!(stats.lexical_index_size_bytes, 8);
+        assert_eq!(stats.lexical_index_file_count, 2);
+        assert_eq!(stats.lexical_index_segment_count, 1);
+        assert_eq!(stats.semantic_index_size_bytes, 7);
+        assert_eq!(stats.orphan_asset_files, 1);
+        assert_eq!(stats.orphan_asset_file_bytes, 4);
+        assert_eq!(stats.transient_files, 1);
+        assert_eq!(stats.transient_file_bytes, 3);
+        assert_eq!(
+            stats.visited_entries, 13,
+            "each directory entry is visited once, including disjoint semantic storage"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn file_integrity_check_streams_and_classifies_manual_changes() {
+        let (root, storage) = temp_paths();
+        let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+        let missing_download = storage.join("pixiv/missing/v1/original.json");
+        let missing_version = storage.join("pixiv/missing/v2/original.json");
+        let asset = storage.join("pixiv/missing/v1/data_assets/image.png");
+        let empty_profile = root.join("profiles/pixiv/empty/icon.png");
+        let entity_json = root.join("series/pixiv/series-1/v1/data.json");
+        let outside_profile = root.join("outside.png");
+        fs::create_dir_all(asset.parent().unwrap()).unwrap();
+        fs::create_dir_all(empty_profile.parent().unwrap()).unwrap();
+        fs::create_dir_all(entity_json.parent().unwrap()).unwrap();
+        fs::write(&asset, b"123").unwrap();
+        fs::write(&empty_profile, b"").unwrap();
+        fs::write(&entity_json, b"{}").unwrap();
+        fs::write(&outside_profile, b"outside").unwrap();
+
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO downloads (
+                source, source_id, title, author_name, author_id, content_type,
+                json_path, downloaded_at
+             ) VALUES ('pixiv', 'missing', '作品', '作者', 'author', 'novel', ?1, ?2)",
+            params![
+                missing_download.to_string_lossy(),
+                chrono::Utc::now().to_rfc3339()
+            ],
+        )
+        .unwrap();
+        let download_id = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO download_versions (
+                download_id, version, json_path, created_at
+             ) VALUES (?1, 2, ?2, ?3)",
+            params![
+                download_id,
+                missing_version.to_string_lossy(),
+                chrono::Utc::now().to_rfc3339()
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO assets (
+                download_id, asset_type, filename, local_path, file_size_bytes
+             ) VALUES (?1, 'image', 'image.png', ?2, 9)",
+            params![download_id, asset.to_string_lossy()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO people (source, source_key, display_name, icon_path)
+             VALUES ('pixiv', 'outside', '外部', ?1)",
+            params![outside_profile.to_string_lossy()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO series (source, source_key, title, cover_path)
+             VALUES ('pixiv', 'empty', '空', ?1)",
+            params![empty_profile.to_string_lossy()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO entity_versions (
+                entity_type, source, source_key, version, json_path, created_at
+             ) VALUES ('series', 'pixiv', 'series-1', 1, ?1, ?2)",
+            params![
+                entity_json.to_string_lossy(),
+                chrono::Utc::now().to_rfc3339()
+            ],
+        )
+        .unwrap();
+
+        let integrity = check_library_file_integrity(&conn, &storage, &root).unwrap();
+        assert_eq!(integrity.checked_file_references, 6);
+        assert_eq!(integrity.missing_json_files, 2);
+        assert_eq!(integrity.missing_asset_files, 0);
+        assert_eq!(integrity.missing_profile_files, 0);
+        assert_eq!(integrity.unsafe_referenced_files, 1);
+        assert_eq!(integrity.unreadable_referenced_files, 0);
+        assert_eq!(integrity.empty_referenced_files, 1);
+        assert_eq!(integrity.mismatched_asset_files, 1);
+        assert_eq!(integrity.issue_samples.len(), 5);
+        assert!(integrity
+            .issue_samples
+            .iter()
+            .any(|issue| issue.issue_type == "unsafe"
+                && issue.path.ends_with("outside.png")
+                && issue.label.as_deref() == Some("外部")));
+        assert!(integrity
+            .issue_samples
+            .iter()
+            .any(|issue| issue.issue_type == "missing" && issue.label.as_deref() == Some("作品")));
+        assert!(integrity
+            .issue_samples
+            .iter()
+            .any(|issue| issue.path.ends_with("icon.png")
+                && issue.category == "profile"
+                && issue.issue_type == "empty"));
+        assert!(!integrity
+            .issue_samples
+            .iter()
+            .any(|issue| issue.path.ends_with("data.json")));
+        let lookup_plan = conn
+            .prepare("EXPLAIN QUERY PLAN SELECT 1 FROM assets WHERE local_path = ?1 LIMIT 1")
+            .unwrap()
+            .query_map(params![asset.to_string_lossy()], |row| {
+                row.get::<_, String>(3)
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+            .join(" ");
+        assert!(
+            lookup_plan.contains("idx_assets_local_path"),
+            "{lookup_plan}"
+        );
+        drop(conn);
+        drop(db);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn diagnostic_scan_skips_links_and_enforces_depth_and_entry_limits() {
+        let (root, storage) = temp_paths();
+        let outside = root.join("outside");
+        fs::create_dir_all(outside.join("data_assets")).unwrap();
+        fs::write(outside.join("data_assets/escape.png"), b"outside").unwrap();
+        fs::write(storage.join("inside.bin"), b"i").unwrap();
+        let link = storage.join("linked");
+        #[cfg(unix)]
+        let link_result = std::os::unix::fs::symlink(&outside, &link);
+        #[cfg(windows)]
+        let link_result = std::os::windows::fs::symlink_dir(&outside, &link);
+        #[cfg(not(any(unix, windows)))]
+        let link_result: std::io::Result<()> = Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "links unavailable",
+        ));
+        if link_result.is_ok() {
+            let mut no_known_assets = |_path: &Path| Ok(false);
+            let stats =
+                collect_diagnostic_file_stats(&storage, &root.join("search"), &mut no_known_assets)
+                    .unwrap();
+            assert_eq!(stats.storage_size_bytes, 1);
+            assert_eq!(stats.orphan_asset_files, 0);
+        }
+
+        let mut no_known_assets = |_path: &Path| Ok(false);
+        fs::create_dir_all(storage.join("a/b")).unwrap();
+        let depth_error = collect_diagnostic_file_stats_with_limits(
+            &storage,
+            &root.join("search"),
+            &mut no_known_assets,
+            DiagnosticScanLimits {
+                max_depth: 0,
+                max_entries: 100,
+            },
+        )
+        .unwrap_err();
+        assert!(depth_error.contains("depth-0"));
+
+        let entry_error = collect_diagnostic_file_stats_with_limits(
+            &storage,
+            &root.join("search"),
+            &mut no_known_assets,
+            DiagnosticScanLimits {
+                max_depth: 64,
+                max_entries: 1,
+            },
+        )
+        .unwrap_err();
+        assert!(entry_error.contains("1-entry"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn atomic_restore_transaction_rolls_back_database_rows() {
         let (root, storage) = temp_paths();
         let db = Database::open(&root.join("piep.db"), &storage).unwrap();
@@ -8110,6 +11346,373 @@ mod search_integration_tests {
         });
         db.rollback_atomic_restore();
         assert_eq!(db.get_download(id).unwrap().title, "残る作品");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn injected_save_failure_rolls_back_download_tags_assets_and_version() {
+        let (root, storage) = temp_paths();
+        let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+        let json_path = storage.join("pixiv/atomic-save/v1/original.json");
+        let download = NewDownload {
+            source: "pixiv".to_string(),
+            source_id: "atomic-save".to_string(),
+            title: "Atomic save".to_string(),
+            author_name: "Author".to_string(),
+            author_id: "author".to_string(),
+            content_type: "novel".to_string(),
+            tags: vec!["atomic".to_string()],
+            excerpt: None,
+            cover_path: None,
+            json_path: json_path.to_string_lossy().to_string(),
+            original_json_path: Some(json_path.to_string_lossy().to_string()),
+            asset_count: 1,
+            file_size_bytes: 10,
+            downloaded_at: "2026-08-12T00:00:00Z".to_string(),
+            source_created_at: None,
+            content_hash: Some("hash".to_string()),
+            text_length: 4,
+            source_updated_at: None,
+            watch_updates: false,
+            current_version: 1,
+            favorite: false,
+        };
+        let assets = vec![NewAsset {
+            download_id: 0,
+            asset_type: "illustration".to_string(),
+            filename: "image.png".to_string(),
+            local_path: storage
+                .join("pixiv/atomic-save/v1/data_assets/image.png")
+                .to_string_lossy()
+                .to_string(),
+            original_url: None,
+            mime_type: Some("image/png".to_string()),
+            file_size_bytes: 6,
+        }];
+        let versions = vec![NewVersion {
+            download_id: 0,
+            version: 1,
+            content_hash: Some("hash".to_string()),
+            text_length: 4,
+            json_path: download.json_path.clone(),
+            original_json_path: download.original_json_path.clone(),
+            asset_count: 1,
+            file_size_bytes: 10,
+            created_at: download.downloaded_at.clone(),
+            change_summary: None,
+        }];
+
+        assert!(db
+            .commit_download_save_with_injected_failure(&download, &assets, &versions)
+            .is_err());
+
+        let duplicate_versions = vec![versions[0].clone(), versions[0].clone()];
+        assert!(db
+            .commit_reimported_download(&download, &assets, &duplicate_versions)
+            .is_err());
+
+        assert!(db
+            .get_download_by_source("pixiv", "atomic-save")
+            .unwrap()
+            .is_none());
+        let conn = db.conn.lock().unwrap();
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM download_tags", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM assets", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM download_versions", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+            0
+        );
+        drop(conn);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn startup_removes_only_journaled_uncommitted_versions_and_reserved_stages() {
+        let (root, storage) = temp_paths();
+        let db_path = root.join("piep.db");
+        let db = Database::open(&db_path, &storage).unwrap();
+        insert_download_unindexed(
+            &db,
+            &storage,
+            "crash-recovery",
+            "Committed work",
+            "Author",
+            &[],
+            "body",
+        );
+        let work = storage.join("pixiv/crash-recovery");
+        let committed = work.join("v1");
+        let unjournaled = work.join("v2");
+        let stage = work.join(".v2.0123456789abcdef.stage");
+        let published_stage = work.join(".v3.fedcba9876543210.stage");
+        let published = work.join("v3");
+        let unrelated = work.join("notes");
+        fs::create_dir_all(&unjournaled).unwrap();
+        fs::write(unjournaled.join("original.json"), b"user data").unwrap();
+        fs::create_dir_all(&stage).unwrap();
+        fs::write(stage.join("original.json"), b"staged").unwrap();
+        fs::create_dir_all(&published_stage).unwrap();
+        fs::write(published_stage.join("original.json"), b"published").unwrap();
+        db.create_download_save_journal("pixiv", "crash-recovery", 3, &published_stage, &published)
+            .unwrap();
+        fs::rename(&published_stage, &published).unwrap();
+        fs::create_dir_all(&unrelated).unwrap();
+        drop(db);
+
+        let reopened = Database::open(&db_path, &storage).unwrap();
+
+        assert!(committed.exists());
+        assert!(
+            unjournaled.exists(),
+            "an unregistered version may be user data awaiting import"
+        );
+        assert!(!stage.exists());
+        assert!(!published.exists(), "journal proves v3 was never committed");
+        assert!(unrelated.exists(), "unknown directories are user data");
+        let conn = reopened.conn.lock().unwrap();
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM download_save_journal", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+            0
+        );
+        drop(conn);
+        drop(reopened);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn startup_preserves_a_version_committed_with_its_journal_marker() {
+        let (root, storage) = temp_paths();
+        let db_path = root.join("piep.db");
+        let db = Database::open(&db_path, &storage).unwrap();
+        let work = storage.join("pixiv/committed-journal");
+        let stage = work.join(".v1.0123456789abcdef.stage");
+        let final_path = work.join("v1");
+        fs::create_dir_all(&stage).unwrap();
+        let json_path = final_path.join("original.json");
+        fs::write(stage.join("original.json"), b"committed body").unwrap();
+        let journal_id = db
+            .create_download_save_journal("pixiv", "committed-journal", 1, &stage, &final_path)
+            .unwrap();
+        fs::rename(&stage, &final_path).unwrap();
+        let download = NewDownload {
+            source: "pixiv".to_string(),
+            source_id: "committed-journal".to_string(),
+            title: "Committed work".to_string(),
+            author_name: "Author".to_string(),
+            author_id: "author".to_string(),
+            content_type: "novel".to_string(),
+            tags: Vec::new(),
+            excerpt: None,
+            cover_path: None,
+            json_path: json_path.to_string_lossy().to_string(),
+            original_json_path: Some(json_path.to_string_lossy().to_string()),
+            asset_count: 0,
+            file_size_bytes: 14,
+            downloaded_at: "2026-08-12T00:00:00Z".to_string(),
+            source_created_at: None,
+            content_hash: Some("committed-hash".to_string()),
+            text_length: 14,
+            source_updated_at: None,
+            watch_updates: false,
+            current_version: 1,
+            favorite: false,
+        };
+        let version = NewVersion {
+            download_id: 0,
+            version: 1,
+            content_hash: download.content_hash.clone(),
+            text_length: download.text_length,
+            json_path: download.json_path.clone(),
+            original_json_path: download.original_json_path.clone(),
+            asset_count: 0,
+            file_size_bytes: download.file_size_bytes,
+            created_at: download.downloaded_at.clone(),
+            change_summary: None,
+        };
+        db.commit_download_save_with_journal(&download, &[], &[version], &journal_id)
+            .unwrap();
+        drop(db);
+
+        let reopened = Database::open(&db_path, &storage).unwrap();
+
+        assert!(final_path.join("original.json").exists());
+        assert!(reopened
+            .get_download_by_source("pixiv", "committed-journal")
+            .unwrap()
+            .is_some());
+        let conn = reopened.conn.lock().unwrap();
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM download_save_journal", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+            0
+        );
+        drop(conn);
+        drop(reopened);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn reimport_record_delete_preserves_the_scanned_work_tree() {
+        let (root, storage) = temp_paths();
+        let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+        let id = insert_download_unindexed(
+            &db,
+            &storage,
+            "reimport-preserve",
+            "再取り込み作品",
+            "作者",
+            &[],
+            "本文",
+        );
+        let json_path = PathBuf::from(db.get_download(id).unwrap().json_path);
+
+        db.delete_download_record_for_reimport(id).unwrap();
+
+        assert!(
+            json_path.exists(),
+            "the scanner still needs to read this file"
+        );
+        assert!(db
+            .get_download_by_source("pixiv", "reimport-preserve")
+            .unwrap()
+            .is_none());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn deleting_a_legacy_work_never_removes_its_source_siblings() {
+        let (root, storage) = temp_paths();
+        let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+        let insert_legacy = |source_id: &str, title: &str| {
+            let work_dir = storage.join("pixiv").join(source_id);
+            fs::create_dir_all(&work_dir).unwrap();
+            let json_path = work_dir.join("data.json");
+            fs::write(&json_path, serde_json::json!({ "text": title }).to_string()).unwrap();
+            let id = db
+                .upsert_download(&NewDownload {
+                    source: "pixiv".to_string(),
+                    source_id: source_id.to_string(),
+                    title: title.to_string(),
+                    author_name: "作者".to_string(),
+                    author_id: "legacy-author".to_string(),
+                    content_type: "novel".to_string(),
+                    tags: Vec::new(),
+                    excerpt: None,
+                    cover_path: None,
+                    json_path: json_path.to_string_lossy().to_string(),
+                    original_json_path: None,
+                    asset_count: 0,
+                    file_size_bytes: 0,
+                    downloaded_at: "2026-01-01T00:00:00Z".to_string(),
+                    source_created_at: None,
+                    content_hash: None,
+                    text_length: 0,
+                    source_updated_at: None,
+                    watch_updates: false,
+                    current_version: 1,
+                    favorite: false,
+                })
+                .unwrap();
+            (id, work_dir, json_path)
+        };
+        let (deleted_id, deleted_dir, _) = insert_legacy("legacy-one", "削除対象");
+        let (_, sibling_dir, sibling_json) = insert_legacy("legacy-two", "残る作品");
+
+        db.delete_download(deleted_id).unwrap();
+
+        assert!(!deleted_dir.exists());
+        assert!(sibling_dir.exists());
+        assert!(sibling_json.exists(), "another work in pixiv must survive");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn entity_reconstruction_preserves_fetched_profiles_and_versions() {
+        let (root, storage) = temp_paths();
+        let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+        let id = insert_download_unindexed(
+            &db,
+            &storage,
+            "profile-work",
+            "プロフィール付き作品",
+            "作者",
+            &[],
+            "本文",
+        );
+        let author_key = "author-profile-work";
+        db.upsert_download_person(id, "pixiv", author_key, "author", "作者")
+            .unwrap();
+        db.upsert_download_relation(id, "series", "pixiv", "series-1", "連作")
+            .unwrap();
+        db.upsert_download_series(id, "pixiv", "series-1", "連作", Some(1))
+            .unwrap();
+        db.upsert_person_profile(
+            "pixiv",
+            author_key,
+            "作者",
+            Some("profiles/author/icon.png"),
+            Some("profiles/author/cover.png"),
+            Some("保存済みプロフィール"),
+            Some("{\"web\":\"https://example.com\"}"),
+            "person-hash",
+            "profiles/author/v1/data.json",
+            2,
+            128,
+            EntityProfileFreshness::RemoteChecked,
+        )
+        .unwrap();
+        db.upsert_series_profile(
+            "pixiv",
+            "series-1",
+            "連作",
+            Some("保存済みシリーズ説明"),
+            Some("series/series-1/cover.png"),
+            "series-hash",
+            "series/series-1/v1/data.json",
+            1,
+            64,
+            EntityProfileFreshness::RemoteChecked,
+        )
+        .unwrap();
+
+        db.reconstruct_entities_after_import().unwrap();
+
+        let person = db.get_person("pixiv", author_key).unwrap();
+        assert_eq!(person.description.as_deref(), Some("保存済みプロフィール"));
+        assert_eq!(person.current_version, 1);
+        assert_eq!(
+            db.list_entity_versions("person", "pixiv", author_key)
+                .unwrap()
+                .len(),
+            1
+        );
+        let series = db.get_series("pixiv", "series-1").unwrap();
+        assert_eq!(series.description.as_deref(), Some("保存済みシリーズ説明"));
+        assert_eq!(series.current_version, 1);
+        assert_eq!(
+            db.list_entity_versions("series", "pixiv", "series-1")
+                .unwrap()
+                .len(),
+            1
+        );
         let _ = fs::remove_dir_all(root);
     }
 
@@ -8308,6 +11911,73 @@ mod search_integration_tests {
         )
     }
 
+    /// Seed a metadata-only browsing fixture in one transaction. Creating one
+    /// directory and JSON file per work made a million-row acceptance test
+    /// measure NTFS setup/cleanup for hours instead of the library queries we
+    /// care about. The generated rows still exercise production indexes,
+    /// author aggregation, tags, shelves, dates, and cursor tie-breaks.
+    fn seed_metadata_only_library(db: &Database, works: usize) {
+        assert!((1..=1_000_000).contains(&works));
+        let mut conn = db.conn.lock().unwrap();
+        let tx = conn.transaction().unwrap();
+        tx.execute(
+            "WITH digits(d) AS (
+                 VALUES (0),(1),(2),(3),(4),(5),(6),(7),(8),(9)
+             ), numbers(n) AS (
+                 SELECT a.d + 10*b.d + 100*c.d + 1000*d.d + 10000*e.d + 100000*f.d
+                 FROM digits a
+                 CROSS JOIN digits b
+                 CROSS JOIN digits c
+                 CROSS JOIN digits d
+                 CROSS JOIN digits e
+                 CROSS JOIN digits f
+             )
+             INSERT INTO downloads (
+                 source, source_id, title, author_name, author_id, content_type,
+                 excerpt, json_path, asset_count, file_size_bytes, downloaded_at,
+                 source_created_at, content_hash, text_length, watch_updates,
+                 current_version, favorite
+             )
+             SELECT
+                 CASE WHEN n % 5 = 0 THEN 'fanbox' ELSE 'pixiv' END,
+                 printf('scale-%07d', n),
+                 printf('蔵書 %07d', n),
+                 printf('作者 %03d', n % 400),
+                 printf('author-%03d', n % 400),
+                 CASE WHEN n % 5 = 0 THEN 'article' ELSE 'novel' END,
+                 '大規模ライブラリ受入試験',
+                 printf('synthetic/scale-%07d.json', n),
+                 n % 6,
+                 4096 + (n % 1048576),
+                 printf('2026-%02d-%02dT%02d:00:00Z', 1 + n % 12, 1 + n % 27, n % 24),
+                 printf('2025-%02d-%02dT00:00:00Z', 1 + n % 12, 1 + n % 27),
+                 printf('fixture-hash-%07d', n),
+                 1000 + (n % 200000),
+                 CASE WHEN n % 13 = 0 THEN 1 ELSE 0 END,
+                 1,
+                 CASE WHEN n % 11 = 0 THEN 1 ELSE 0 END
+             FROM numbers
+             WHERE n < ?1",
+            params![works as i64],
+        )
+        .unwrap();
+        for tag in 0..30 {
+            tx.execute(
+                "INSERT INTO tags (name) VALUES (?1)",
+                params![format!("tag{tag}")],
+            )
+            .unwrap();
+        }
+        tx.execute(
+            "INSERT INTO download_tags (download_id, tag_id)
+             SELECT id, 1 + ((id - 1) % 30) FROM downloads",
+            [],
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        conn.execute_batch("ANALYZE; PRAGMA optimize;").unwrap();
+    }
+
     struct TestDownloadInput<'a> {
         source_id: &'a str,
         title: &'a str,
@@ -8366,6 +12036,52 @@ mod search_integration_tests {
             db.reindex_download(id).unwrap();
         }
         id
+    }
+
+    #[test]
+    fn bulk_delete_clears_lexical_and_semantic_sidecars() {
+        let (root, storage) = temp_paths();
+        let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+        let first = insert_download(
+            &db,
+            &storage,
+            "delete-index-one",
+            "quartzdeletemarker alpha",
+            "作者",
+            &[],
+            "意味検索からも消える本文 alpha",
+        );
+        let second = insert_download(
+            &db,
+            &storage,
+            "delete-index-two",
+            "quartzdeletemarker beta",
+            "作者",
+            &[],
+            "意味検索からも消える本文 beta",
+        );
+
+        let before =
+            crate::database::tantivy_index::matching_download_ids(&storage, "quartzdeletemarker")
+                .unwrap();
+        assert!(before.contains(&first));
+        assert!(before.contains(&second));
+        assert!(crate::database::semantic_index::status(&storage).indexed_chunks > 0);
+
+        let result = db.delete_downloads(&[first, second, first]).unwrap();
+        assert_eq!(result.matched_count, 2);
+        assert_eq!(result.changed_count, 2);
+
+        let after =
+            crate::database::tantivy_index::matching_download_ids(&storage, "quartzdeletemarker")
+                .unwrap();
+        assert!(!after.contains(&first));
+        assert!(!after.contains(&second));
+        assert_eq!(
+            crate::database::semantic_index::status(&storage).indexed_chunks,
+            0
+        );
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
@@ -8431,6 +12147,165 @@ mod search_integration_tests {
     }
 
     #[test]
+    fn update_target_keyset_pages_have_no_gaps_or_duplicates() {
+        let (root, storage) = temp_paths();
+        let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+        for (target_type, source, source_key) in [
+            ("work", "pixiv", "w2"),
+            ("person", "pixiv", "p2"),
+            ("person", "fanbox", "p1"),
+            ("person", "pixiv", "p1"),
+            ("series", "pixiv", "s1"),
+        ] {
+            db.upsert_update_target(&UpdateTargetInput {
+                target_type: target_type.to_string(),
+                source: source.to_string(),
+                source_key: source_key.to_string(),
+                display_name: source_key.to_string(),
+                enabled: true,
+                metadata_json: None,
+            })
+            .unwrap();
+        }
+
+        let mut all = Vec::new();
+        let mut cursor: Option<(String, String, String)> = None;
+        loop {
+            let page = db
+                .list_update_targets_after(
+                    cursor
+                        .as_ref()
+                        .map(|(kind, source, key)| (kind.as_str(), source.as_str(), key.as_str())),
+                    2,
+                )
+                .unwrap();
+            if page.is_empty() {
+                break;
+            }
+            let last = page.last().unwrap();
+            cursor = Some((
+                last.target_type.clone(),
+                last.source.clone(),
+                last.source_key.clone(),
+            ));
+            all.extend(
+                page.into_iter()
+                    .map(|target| (target.target_type, target.source, target.source_key)),
+            );
+        }
+        assert_eq!(all.len(), 5);
+        assert!(all.windows(2).all(|pair| pair[0] < pair[1]));
+        let unique = all.iter().collect::<HashSet<_>>();
+        assert_eq!(unique.len(), all.len());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn bulk_search_collection_crosses_the_former_single_page_boundary() {
+        let (root, storage) = temp_paths();
+        let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+        const SIMULATED_LEGACY_CAP: usize = 5;
+        const MATCHES: usize = SIMULATED_LEGACY_CAP * 2 + 3;
+        for index in 0..MATCHES {
+            insert_download_unindexed(
+                &db,
+                &storage,
+                &format!("bulk-page-{index:02}"),
+                &format!("一括対象 {index:02}"),
+                "作者",
+                &["一括"],
+                "本文",
+            );
+        }
+
+        let mut selection = v2_params(None, 1, None);
+        selection.offset = Some(9);
+        let snapshot = db
+            .collect_search_match_snapshot(&selection, SIMULATED_LEGACY_CAP as i64)
+            .unwrap();
+        assert_eq!(snapshot.row_count, MATCHES as i64);
+        let guard = snapshot.connection.lock().unwrap();
+        let conn = guard.as_ref().unwrap();
+        let (rows, distinct): (i64, i64) = conn
+            .query_row(
+                "SELECT COUNT(*), COUNT(DISTINCT id) FROM bulk_matches",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(rows, MATCHES as i64);
+        assert_eq!(distinct, MATCHES as i64);
+        drop(guard);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn bulk_search_snapshot_updates_and_deletes_without_retaining_all_ids() {
+        let (root, storage) = temp_paths();
+        let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+        const MATCHES: usize = 13;
+        for index in 0..MATCHES {
+            insert_download_unindexed(
+                &db,
+                &storage,
+                &format!("bulk-mutate-{index:02}"),
+                &format!("一括変更 {index:02}"),
+                "作者",
+                &["一括変更"],
+                "本文",
+            );
+        }
+
+        let selection = v2_params(None, 3, None);
+        let watched = db.set_watch_updates_for_search(&selection, true).unwrap();
+        assert_eq!(watched.matched_count, MATCHES as i64);
+        assert_eq!(watched.changed_count, MATCHES as i64);
+        {
+            let conn = db.conn.lock().unwrap();
+            assert_eq!(
+                conn.query_row(
+                    "SELECT COUNT(*) FROM downloads WHERE watch_updates = 1",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+                MATCHES as i64
+            );
+            // 作品の監視は downloads.watch_updates だけで表す。監視対象の一覧は
+            // 「自分で選んだ作者・シリーズ」のためのもので、作品名を混ぜない。
+            assert_eq!(
+                conn.query_row(
+                    "SELECT COUNT(*) FROM update_targets WHERE target_type = 'work'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+                0
+            );
+        }
+
+        let deleted = db.delete_downloads_for_search(&selection).unwrap();
+        assert_eq!(deleted.matched_count, MATCHES as i64);
+        assert_eq!(deleted.changed_count, MATCHES as i64);
+        assert_eq!(
+            db.conn
+                .lock()
+                .unwrap()
+                .query_row("SELECT COUNT(*) FROM downloads", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            0
+        );
+        let snapshot_files = fs::read_dir(search_snapshot_dir(&storage))
+            .unwrap()
+            .filter_map(Result::ok)
+            .count();
+        assert_eq!(snapshot_files, 0, "bulk snapshot must be cleaned up");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn facet_search_limits_in_sql_and_keeps_direct_rare_matches() {
         let (root, storage) = temp_paths();
         let db = Database::open(&root.join("piep.db"), &storage).unwrap();
@@ -8470,6 +12345,90 @@ mod search_integration_tests {
             Some("希少タグ")
         );
 
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn facet_and_suggestion_caches_hit_then_invalidate_on_commit() {
+        let (root, storage) = temp_paths();
+        let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+        insert_download(
+            &db,
+            &storage,
+            "cache-generation-1",
+            "世代候補 一冊目",
+            "世代作者",
+            &["世代タグ"],
+            "本文",
+        );
+
+        let first_facets = db.search_filter_facets("tags", None, 30).unwrap();
+        assert_eq!(
+            first_facets
+                .iter()
+                .find(|facet| facet.name == "世代タグ")
+                .map(|facet| facet.count),
+            Some(1)
+        );
+        let _ = db.search_filter_facets("tags", None, 30).unwrap();
+
+        let suggest_params = SearchSuggestParams {
+            text: Some("世代候補".to_string()),
+            limit: Some(12),
+        };
+        assert_eq!(db.search_suggest(&suggest_params).unwrap().items.len(), 1);
+        let _ = db.search_suggest(&suggest_params).unwrap();
+        let (facet_before, suggest_before, _) = db.query_cache_stats();
+        assert!(facet_before.0 >= 1, "facet cache should have a hit");
+        assert!(suggest_before.0 >= 1, "suggest cache should have a hit");
+
+        let second_id = insert_download(
+            &db,
+            &storage,
+            "cache-generation-2",
+            "世代候補 二冊目",
+            "世代作者",
+            &["世代タグ"],
+            "本文",
+        );
+        let updated_facets = db.search_filter_facets("tags", None, 30).unwrap();
+        assert_eq!(
+            updated_facets
+                .iter()
+                .find(|facet| facet.name == "世代タグ")
+                .map(|facet| facet.count),
+            Some(2),
+            "a committed write must invalidate cached aggregates"
+        );
+        assert_eq!(db.search_suggest(&suggest_params).unwrap().items.len(), 2);
+        let (facet_after, suggest_after, _) = db.query_cache_stats();
+        assert!(facet_after.1 > facet_before.1);
+        assert!(suggest_after.1 > suggest_before.1);
+
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE downloads SET title = '別の候補' WHERE id = ?1",
+                params![second_id],
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            db.search_suggest(&suggest_params).unwrap().items.len(),
+            1,
+            "a direct committed update must invalidate cached suggestions"
+        );
+
+        db.delete_download(second_id).unwrap();
+        let after_delete = db.search_filter_facets("tags", None, 30).unwrap();
+        assert_eq!(
+            after_delete
+                .iter()
+                .find(|facet| facet.name == "世代タグ")
+                .map(|facet| facet.count),
+            Some(1),
+            "a committed delete must invalidate cached aggregates"
+        );
         let _ = fs::remove_dir_all(root);
     }
 
@@ -8527,7 +12486,6 @@ mod search_integration_tests {
                 break;
             }
         }
-
         let mut request = params("全件到達テスト");
         request.limit = Some(137);
         let mut seen = HashSet::new();
@@ -8546,8 +12504,9 @@ mod search_integration_tests {
                 Some(cursor) => {
                     if !checked_native_cursor {
                         let decoded = decode_cursor(Some(&cursor)).unwrap();
-                        assert_eq!(decoded.kind, "tantivy-search-after");
-                        assert!(tantivy_cursor(&decoded).is_some());
+                        assert_eq!(decoded.kind, "ranked-search");
+                        assert!(decoded.snapshot_id.is_some());
+                        assert!(decoded.tantivy_score.is_some());
                         checked_native_cursor = true;
                     }
                     request.cursor = Some(cursor);
@@ -8594,6 +12553,7 @@ mod search_integration_tests {
         request.limit = Some(17);
         request.tags_include = Some(vec!["対象".to_string()]);
         let mut seen = HashSet::new();
+        let mut checked_internal_total = false;
         loop {
             let result = db.search_downloads_v2(&request).unwrap();
             for item in result.items {
@@ -8601,11 +12561,198 @@ mod search_integration_tests {
                 assert!(item.tags.iter().any(|tag| tag == "対象"));
             }
             match result.next_cursor {
-                Some(cursor) => request.cursor = Some(cursor),
+                Some(cursor) => {
+                    if !checked_internal_total {
+                        let decoded = decode_cursor(Some(&cursor)).unwrap();
+                        assert_eq!(decoded.total_estimate, Some(EXPECTED as i64));
+                        assert_eq!(decoded.tantivy_total_hits, None);
+                        assert!(decoded.snapshot_id.is_some());
+                        checked_internal_total = true;
+                    }
+                    request.cursor = Some(cursor);
+                }
                 None => break,
             }
         }
+        assert!(checked_internal_total);
         assert_eq!(seen.len(), EXPECTED);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn lexical_cursor_carries_the_first_page_total() {
+        let (root, storage) = temp_paths();
+        let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+        for index in 0..7 {
+            insert_download(
+                &db,
+                &storage,
+                &format!("count-cursor-{index}"),
+                &format!("総件数カーソル {index}"),
+                "作者",
+                &["件数"],
+                "総件数カーソル本文",
+            );
+        }
+
+        let mut request = params("総件数カーソル");
+        request.limit = Some(2);
+        let first = db.search_downloads_v2(&request).unwrap();
+        assert_eq!(first.total_estimate, Some(7));
+        let decoded = decode_cursor(first.next_cursor.as_deref()).unwrap();
+        assert_eq!(decoded.total_estimate, Some(7));
+        assert_eq!(decoded.tantivy_total_hits, None);
+        assert!(decoded.snapshot_id.is_some());
+
+        request.cursor = first.next_cursor;
+        let second = db.search_downloads_v2(&request).unwrap();
+        assert_eq!(second.total_estimate, Some(7));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn lexical_cursor_survives_equal_score_segment_merge() {
+        let (root, storage) = temp_paths();
+        let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+        const ITEM_COUNT: usize = 137;
+        for index in 0..ITEM_COUNT {
+            insert_download_unindexed(
+                &db,
+                &storage,
+                &format!("merge-cursor-{index:04}"),
+                &format!("同点マージ境界 {index:04}"),
+                "同一作者",
+                &["マージ"],
+                "全作品で同じ語数の同点マージ境界本文",
+            );
+        }
+        while db.get_search_index_status().unwrap().pending_downloads > 0 {
+            db.rebuild_search_index_batch(19).unwrap();
+        }
+        assert!(
+            super::super::tantivy_index::searchable_segment_count(&storage).unwrap() > 1,
+            "fixture must start with multiple segments"
+        );
+
+        let mut request = params("同点マージ境界");
+        request.limit = Some(17);
+        let first = db.search_downloads_v2(&request).unwrap();
+        let mut seen = first
+            .items
+            .iter()
+            .map(|item| item.id)
+            .collect::<HashSet<_>>();
+        request.cursor = first.next_cursor;
+
+        // DocAddress cursors become invalid here because every segment/doc id
+        // can change. The cursor's score + stable download id must not.
+        let (_, after) = super::super::tantivy_index::optimize_segments(&storage).unwrap();
+        assert_eq!(after, 1);
+        while request.cursor.is_some() {
+            let page = db.search_downloads_v2(&request).unwrap();
+            for item in &page.items {
+                assert!(seen.insert(item.id), "duplicate id {}", item.id);
+            }
+            request.cursor = page.next_cursor;
+        }
+        assert_eq!(seen.len(), ITEM_COUNT);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn ranked_snapshot_failure_rolls_back_and_removes_partial_file() {
+        let (root, storage) = temp_paths();
+        let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+        const MATCHES: usize = 519;
+        for index in 0..MATCHES {
+            insert_download_unindexed(
+                &db,
+                &storage,
+                &format!("snapshot-fail-{index:04}"),
+                &format!("失敗注入検索 {index:04}"),
+                "作者",
+                &["失敗注入"],
+                "失敗注入検索の本文",
+            );
+        }
+        loop {
+            let status = db.rebuild_search_index_batch(200).unwrap();
+            if status.pending_downloads == 0 {
+                break;
+            }
+        }
+
+        let request = params("失敗注入検索");
+        let error = db
+            .ranked_search_snapshot_inner(&request, "失敗注入検索", None, Some(1), None)
+            .err()
+            .expect("the second streamed score batch must fail");
+        assert!(error.contains("Injected ranked snapshot stream failure"));
+        assert_eq!(
+            fs::read_dir(search_snapshot_dir(&storage))
+                .unwrap()
+                .filter_map(Result::ok)
+                .count(),
+            0,
+            "a failed snapshot must leave neither the database nor sidecars"
+        );
+        assert!(db.search_snapshot_cache.lock().unwrap().entries.is_empty());
+
+        let quota_error = db
+            .ranked_search_snapshot_inner(&request, "失敗注入検索", None, None, Some(4 * 1024))
+            .err()
+            .expect("the injected disk quota must reject the snapshot");
+        assert!(quota_error.contains("shared 4096-byte disk budget"));
+        assert_eq!(
+            fs::read_dir(search_snapshot_dir(&storage))
+                .unwrap()
+                .filter_map(Result::ok)
+                .count(),
+            0,
+            "a quota failure must clean its partial snapshot"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn ranked_snapshot_cursor_expires_after_library_or_index_generation_changes() {
+        let (root, storage) = temp_paths();
+        let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+        for index in 0..5 {
+            insert_download(
+                &db,
+                &storage,
+                &format!("snapshot-generation-{index}"),
+                &format!("世代固定検索 {index}"),
+                "作者",
+                &["世代"],
+                "世代固定検索の本文",
+            );
+        }
+        let mut request = params("世代固定検索");
+        request.limit = Some(2);
+        let first = db.search_downloads_v2(&request).unwrap();
+        let cursor = first.next_cursor.expect("first page cursor");
+
+        insert_download(
+            &db,
+            &storage,
+            "snapshot-generation-new",
+            "世代固定検索 新着",
+            "作者",
+            &["世代"],
+            "世代固定検索の本文",
+        );
+        request.cursor = Some(cursor);
+        let error = db.search_downloads_v2(&request).unwrap_err();
+        assert!(
+            error.contains("expired") || error.contains("invalidated"),
+            "a cursor must never continue against a newly ranked generation: {error}"
+        );
+
+        request.cursor = None;
+        let restarted = db.search_downloads_v2(&request).unwrap();
+        assert_eq!(restarted.total_estimate, Some(6));
         let _ = fs::remove_dir_all(root);
     }
 
@@ -8657,6 +12804,44 @@ mod search_integration_tests {
     }
 
     #[test]
+    fn ordinary_tantivy_writer_is_reused_and_yields_to_bulk_writer() {
+        let (root, storage) = temp_paths();
+        let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+        insert_download(
+            &db,
+            &storage,
+            "writer-cache-1",
+            "writer cache first",
+            "author",
+            &["writer"],
+            "body",
+        );
+        assert!(
+            super::super::tantivy_index::ordinary_writer_is_cached(&storage).unwrap(),
+            "a normal save should retain its writer arena"
+        );
+
+        let bulk = super::super::tantivy_index::bulk_writer(&storage).unwrap();
+        assert!(
+            !super::super::tantivy_index::ordinary_writer_is_cached(&storage).unwrap(),
+            "the cached writer must release Tantivy's directory lock for a rebuild"
+        );
+        drop(bulk);
+
+        insert_download(
+            &db,
+            &storage,
+            "writer-cache-2",
+            "writer cache second",
+            "author",
+            &["writer"],
+            "body",
+        );
+        assert!(super::super::tantivy_index::ordinary_writer_is_cached(&storage).unwrap());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn entity_facets_search_and_page_beyond_the_dashboard_cap() {
         let (root, storage) = temp_paths();
         let db = Database::open(&root.join("piep.db"), &storage).unwrap();
@@ -8694,6 +12879,73 @@ mod search_integration_tests {
         assert!(missing.is_empty());
 
         assert!(db.search_entity_facets("unknown", None, 10, 0).is_err());
+
+        // The pager cannot name a last page without this, and a total that does
+        // not agree with the rows it is counting is worse than none at all.
+        assert_eq!(db.count_entity_facets("person", None).unwrap(), 70);
+        assert_eq!(db.count_entity_facets("person", Some("作者69")).unwrap(), 1);
+        assert_eq!(
+            db.count_entity_facets("person", Some("存在しない"))
+                .unwrap(),
+            0
+        );
+        assert!(db.count_entity_facets("unknown", None).is_err());
+
+        // Walked page by page, the rows add up to exactly what was counted.
+        let total = db.count_entity_facets("person", None).unwrap();
+        let mut walked = 0usize;
+        for page in 0..(total as usize).div_ceil(20) {
+            walked += db
+                .search_entity_facets("person", None, 20, (page * 20) as i64)
+                .unwrap()
+                .len();
+        }
+        assert_eq!(walked as i64, total);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn entity_key_pages_include_orphans_without_gaps() {
+        let (root, storage) = temp_paths();
+        let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            for (source, key) in [("fanbox", "p3"), ("pixiv", "p1"), ("pixiv", "p2")] {
+                conn.execute(
+                    "INSERT INTO people (source, source_key, display_name)
+                     VALUES (?1, ?2, ?2)",
+                    params![source, key],
+                )
+                .unwrap();
+                conn.execute(
+                    "INSERT INTO series (source, source_key, title)
+                     VALUES (?1, ?2, ?2)",
+                    params![source, key],
+                )
+                .unwrap();
+            }
+        }
+
+        let people_first = db.list_people_keys_after(None, 2).unwrap();
+        assert_eq!(
+            people_first,
+            vec![
+                ("fanbox".to_string(), "p3".to_string()),
+                ("pixiv".to_string(), "p1".to_string())
+            ]
+        );
+        let people_second = db
+            .list_people_keys_after(Some((&people_first[1].0, &people_first[1].1)), 2)
+            .unwrap();
+        assert_eq!(people_second, vec![("pixiv".to_string(), "p2".to_string())]);
+
+        let series_first = db.list_series_keys_after(None, 2).unwrap();
+        let series_second = db
+            .list_series_keys_after(Some((&series_first[1].0, &series_first[1].1)), 2)
+            .unwrap();
+        assert_eq!(series_first.len() + series_second.len(), 3);
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
@@ -9086,13 +13338,24 @@ mod search_integration_tests {
         // Reading it again immediately is served from the cache, and adding a
         // work has to drop that cache: a count the screens keep showing after
         // the library changed is worse than measuring it again.
-        insert_download_unindexed(&db, &storage, "cache-1", "追加された作品", "作者", &["cache"], "本文");
+        insert_download_unindexed(
+            &db,
+            &storage,
+            "cache-1",
+            "追加された作品",
+            "作者",
+            &["cache"],
+            "本文",
+        );
         let after_insert = db.get_search_index_status().unwrap();
         assert_eq!(after_insert.total_downloads, 1);
         assert_eq!(after_insert.pending_downloads, 1);
 
         db.reindex_download(
-            db.get_download_by_source("pixiv", "cache-1").unwrap().unwrap().id,
+            db.get_download_by_source("pixiv", "cache-1")
+                .unwrap()
+                .unwrap()
+                .id,
         )
         .unwrap();
         let after_index = db.get_search_index_status().unwrap();
@@ -9103,20 +13366,94 @@ mod search_integration_tests {
     }
 
     #[test]
+    fn semantic_completion_requires_every_current_document() {
+        let (root, storage) = temp_paths();
+        let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+        let first = insert_download_unindexed(
+            &db,
+            &storage,
+            "coverage-1",
+            "索引済み作品",
+            "作者",
+            &[],
+            "最初の本文",
+        );
+        let second = insert_download_unindexed(
+            &db,
+            &storage,
+            "coverage-2",
+            "未索引作品",
+            "作者",
+            &[],
+            "次の本文",
+        );
+
+        db.reindex_download(first).unwrap();
+        let partial = db.get_search_index_status().unwrap();
+        assert_eq!(partial.semantic_indexed_downloads, 1);
+        assert_eq!(partial.semantic_pending_downloads, 1);
+
+        db.reindex_download(second).unwrap();
+        let complete = db.get_search_index_status().unwrap();
+        assert_eq!(complete.semantic_indexed_downloads, 2);
+        assert_eq!(complete.semantic_pending_downloads, 0);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn an_author_page_can_show_their_series_and_tags_and_drill_into_both() {
         let (root, storage) = temp_paths();
         let db = Database::open(&root.join("piep.db"), &storage).unwrap();
 
-        let first = insert_download(&db, &storage, "auth-1", "序章", "青葉しおり", &["ファンタジー", "長編"], "本文");
-        let second = insert_download(&db, &storage, "auth-2", "第二話", "青葉しおり", &["ファンタジー"], "本文");
-        let standalone = insert_download(&db, &storage, "auth-3", "読み切り", "青葉しおり", &["短編"], "本文");
-        let other = insert_download(&db, &storage, "auth-4", "別作者の話", "別の人", &["ファンタジー"], "本文");
-        db.upsert_download_person(first, "pixiv", "aoba", "author", "青葉しおり").unwrap();
-        db.upsert_download_person(second, "pixiv", "aoba", "author", "青葉しおり").unwrap();
-        db.upsert_download_person(standalone, "pixiv", "aoba", "author", "青葉しおり").unwrap();
-        db.upsert_download_person(other, "pixiv", "hoka", "author", "別の人").unwrap();
-        db.upsert_download_series(first, "pixiv", "s1", "季節の栞", Some(1)).unwrap();
-        db.upsert_download_series(second, "pixiv", "s1", "季節の栞", Some(2)).unwrap();
+        let first = insert_download(
+            &db,
+            &storage,
+            "auth-1",
+            "序章",
+            "青葉しおり",
+            &["ファンタジー", "長編"],
+            "本文",
+        );
+        let second = insert_download(
+            &db,
+            &storage,
+            "auth-2",
+            "第二話",
+            "青葉しおり",
+            &["ファンタジー"],
+            "本文",
+        );
+        let standalone = insert_download(
+            &db,
+            &storage,
+            "auth-3",
+            "読み切り",
+            "青葉しおり",
+            &["短編"],
+            "本文",
+        );
+        let other = insert_download(
+            &db,
+            &storage,
+            "auth-4",
+            "別作者の話",
+            "別の人",
+            &["ファンタジー"],
+            "本文",
+        );
+        db.upsert_download_person(first, "pixiv", "aoba", "author", "青葉しおり")
+            .unwrap();
+        db.upsert_download_person(second, "pixiv", "aoba", "author", "青葉しおり")
+            .unwrap();
+        db.upsert_download_person(standalone, "pixiv", "aoba", "author", "青葉しおり")
+            .unwrap();
+        db.upsert_download_person(other, "pixiv", "hoka", "author", "別の人")
+            .unwrap();
+        db.upsert_download_series(first, "pixiv", "s1", "季節の栞", Some(1))
+            .unwrap();
+        db.upsert_download_series(second, "pixiv", "s1", "季節の栞", Some(2))
+            .unwrap();
 
         let series = db.list_entity_series("pixiv", "aoba", 20).unwrap();
         assert_eq!(series.len(), 1, "only the series this author appears in");
@@ -9124,9 +13461,15 @@ mod search_integration_tests {
         assert_eq!(series[0].count, 2);
 
         let tags = db.list_entity_tags("person", "pixiv", "aoba", 20).unwrap();
-        let named = tags.iter().map(|t| (t.name.as_str(), t.count)).collect::<Vec<_>>();
-        assert_eq!(named, vec![("ファンタジー", 2), ("短編", 1), ("長編", 1)],
-            "the author's own tags, most used first, without the other author's");
+        let named = tags
+            .iter()
+            .map(|t| (t.name.as_str(), t.count))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            named,
+            vec![("ファンタジー", 2), ("短編", 1), ("長編", 1)],
+            "the author's own tags, most used first, without the other author's"
+        );
 
         // Drilling in: the author's works carrying one of their tags. Author and
         // tag filters have to compose, or a tag on this page cannot be followed.
@@ -9138,12 +13481,242 @@ mod search_integration_tests {
         let ids = page.items.iter().map(|item| item.id).collect::<Vec<_>>();
         assert_eq!(ids.len(), 2);
         assert!(ids.contains(&first) && ids.contains(&second));
-        assert!(!ids.contains(&other), "another author's work with the same tag must not appear");
+        assert!(
+            !ids.contains(&other),
+            "another author's work with the same tag must not appear"
+        );
 
         // An author with nothing recorded is an empty page, not an error.
-        assert!(db.list_entity_series("pixiv", "unknown", 20).unwrap().is_empty());
-        assert!(db.list_entity_tags("person", "pixiv", "unknown", 20).unwrap().is_empty());
+        assert!(db
+            .list_entity_series("pixiv", "unknown", 20)
+            .unwrap()
+            .is_empty());
+        assert!(db
+            .list_entity_tags("person", "pixiv", "unknown", 20)
+            .unwrap()
+            .is_empty());
 
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn entity_series_keyset_has_no_gaps_duplicates_or_same_name_instability() {
+        let (root, storage) = temp_paths();
+        let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+        assert!(db
+            .list_entity_series_paged("", "author", None, 20, None)
+            .is_err());
+        assert!(db
+            .list_entity_series_paged(&"s".repeat(65), "author", None, 20, None)
+            .is_err());
+        assert!(db
+            .list_entity_series_paged("pixiv", &"k".repeat(1_025), None, 20, None)
+            .is_err());
+        assert!(db
+            .list_entity_series_paged("pixiv", "author", Some(&"検".repeat(201)), 20, None,)
+            .is_err());
+        assert!(db
+            .list_entity_series_paged(
+                "pixiv",
+                "author",
+                None,
+                20,
+                Some(&"c".repeat(64 * 1024 + 1)),
+            )
+            .is_err());
+        assert!(db
+            .list_entity_series_paged("pixiv", "author", None, 20, Some("malformed"))
+            .is_err());
+
+        let add = |source_id: &str,
+                   series_source: &str,
+                   series_key: &str,
+                   title: &str,
+                   created_at: &str| {
+            let id = insert_download_unindexed(
+                &db,
+                &storage,
+                source_id,
+                source_id,
+                "ページ作者",
+                &[],
+                "本文",
+            );
+            db.upsert_download_person(id, "pixiv", "paged-author", "author", "ページ作者")
+                .unwrap();
+            db.upsert_download_series(id, series_source, series_key, title, Some(1))
+                .unwrap();
+            db.conn
+                .lock()
+                .unwrap()
+                .execute(
+                    "UPDATE downloads
+                     SET downloaded_at = ?1, source_created_at = ?1
+                     WHERE id = ?2",
+                    params![created_at, id],
+                )
+                .unwrap();
+            id
+        };
+
+        add(
+            "count-a",
+            "pixiv",
+            "counted",
+            "最多",
+            "2026-05-01T00:00:00Z",
+        );
+        add(
+            "count-b",
+            "pixiv",
+            "counted",
+            "最多",
+            "2026-05-01T00:00:00Z",
+        );
+        add("alpha", "pixiv", "alpha", "Alpha", "2026-05-01T00:00:00Z");
+        add("tie-f", "fanbox", "same", "同名", "2026-05-01T00:00:00Z");
+        add("tie-p1", "pixiv", "same-1", "同名", "2026-05-01T00:00:00Z");
+        add("tie-p2", "pixiv", "same-2", "同名", "2026-05-01T00:00:00Z");
+        add("older", "pixiv", "older", "旧作", "2025-01-01T00:00:00Z");
+
+        let mut cursor = None;
+        let mut identities = Vec::new();
+        let mut first_cursor = None;
+        loop {
+            let page = db
+                .list_entity_series_paged("pixiv", "paged-author", None, 2, cursor.as_deref())
+                .unwrap();
+            assert_eq!(page.total, 6);
+            identities.extend(
+                page.items
+                    .iter()
+                    .map(|item| (item.source.clone(), item.source_key.clone())),
+            );
+            if first_cursor.is_none() {
+                first_cursor = page.next_cursor.clone();
+            }
+            cursor = page.next_cursor;
+            if cursor.is_none() {
+                break;
+            }
+        }
+        assert_eq!(
+            identities,
+            vec![
+                ("pixiv".to_string(), "counted".to_string()),
+                ("pixiv".to_string(), "alpha".to_string()),
+                ("fanbox".to_string(), "same".to_string()),
+                ("pixiv".to_string(), "same-1".to_string()),
+                ("pixiv".to_string(), "same-2".to_string()),
+                ("pixiv".to_string(), "older".to_string()),
+            ]
+        );
+        assert_eq!(identities.iter().collect::<HashSet<_>>().len(), 6);
+
+        let filtered = db
+            .list_entity_series_paged("pixiv", "paged-author", Some("同名"), 2, None)
+            .unwrap();
+        assert_eq!(filtered.total, 3);
+        assert_eq!(filtered.items.len(), 2);
+        assert!(db
+            .list_entity_series_paged(
+                "pixiv",
+                "paged-author",
+                Some("別query"),
+                2,
+                first_cursor.as_deref(),
+            )
+            .is_err());
+
+        add("mutation", "pixiv", "new", "追加", "2027-01-01T00:00:00Z");
+        assert!(db
+            .list_entity_series_paged("pixiv", "paged-author", None, 2, first_cursor.as_deref(),)
+            .is_err());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[ignore = "performance smoke test for a prolific author's series"]
+    fn entity_series_paging_stays_fast_at_twenty_thousand() {
+        let (root, storage) = temp_paths();
+        let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+        let seeded = std::env::var("PIEP_BENCH_ENTITY_SERIES")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(20_000);
+        {
+            let mut conn = db.conn.lock().unwrap();
+            let tx = conn.transaction().unwrap();
+            {
+                let mut download = tx
+                    .prepare(
+                        "INSERT INTO downloads (
+                            source, source_id, title, author_name, author_id,
+                            content_type, json_path, downloaded_at, source_created_at
+                         ) VALUES ('pixiv', ?1, ?2, '大量作者', 'large-author',
+                                   'novel', 'unused.json', ?3, ?3)",
+                    )
+                    .unwrap();
+                let mut person = tx
+                    .prepare(
+                        "INSERT INTO download_people (
+                            download_id, person_source, person_key, role, display_name
+                         ) VALUES (?1, 'pixiv', 'large-author', 'author', '大量作者')",
+                    )
+                    .unwrap();
+                let mut series = tx
+                    .prepare(
+                        "INSERT INTO series (source, source_key, title)
+                         VALUES ('pixiv', ?1, ?2)",
+                    )
+                    .unwrap();
+                let mut relation = tx
+                    .prepare(
+                        "INSERT INTO download_series (
+                            download_id, series_source, series_key, title, content_order
+                         ) VALUES (?1, 'pixiv', ?2, ?3, 1)",
+                    )
+                    .unwrap();
+                for index in 0..seeded {
+                    let key = format!("series-{index:05}");
+                    let title = format!("シリーズ {index:05}");
+                    let timestamp =
+                        format!("2026-{:02}-{:02}T00:00:00Z", index % 12 + 1, index % 27 + 1);
+                    download.execute(params![key, title, timestamp]).unwrap();
+                    let id = tx.last_insert_rowid();
+                    person.execute(params![id]).unwrap();
+                    series.execute(params![key, title]).unwrap();
+                    relation.execute(params![id, key, title]).unwrap();
+                }
+            }
+            tx.commit().unwrap();
+        }
+
+        let started = Instant::now();
+        let first = db
+            .list_entity_series_paged("pixiv", "large-author", None, 200, None)
+            .unwrap();
+        let first_elapsed = started.elapsed();
+        assert_eq!(first.total, seeded as i64);
+        assert_eq!(first.items.len(), seeded.min(200));
+
+        let mut cursor = first.next_cursor;
+        let mut deepest = Duration::ZERO;
+        for _ in 0..50 {
+            let Some(current) = cursor else { break };
+            let started = Instant::now();
+            let page = db
+                .list_entity_series_paged("pixiv", "large-author", None, 200, Some(&current))
+                .unwrap();
+            deepest = deepest.max(started.elapsed());
+            cursor = page.next_cursor;
+        }
+        eprintln!(
+            "{seeded} entity series: first {:?}, deepest {:?}",
+            first_elapsed, deepest
+        );
+        assert!(first_elapsed < Duration::from_secs(1));
+        assert!(deepest < Duration::from_secs(1));
         let _ = fs::remove_dir_all(root);
     }
 
@@ -9152,7 +13725,15 @@ mod search_integration_tests {
         let (root, storage) = temp_paths();
         let db = Database::open(&root.join("piep.db"), &storage).unwrap();
         for index in 0..7 {
-            insert_download(&db, &storage, &format!("page-{index}"), &format!("作品{index}"), "作者", &["頁"], "本文");
+            insert_download(
+                &db,
+                &storage,
+                &format!("page-{index}"),
+                &format!("作品{index}"),
+                "作者",
+                &["頁"],
+                "本文",
+            );
         }
 
         let page_of = |offset: i64| {
@@ -9168,9 +13749,16 @@ mod search_integration_tests {
                 .collect::<Vec<_>>()
         };
         assert_eq!(page_of(0), vec!["作品0", "作品1", "作品2"]);
-        assert_eq!(page_of(3), vec!["作品3", "作品4", "作品5"], "the third page, without walking to it");
+        assert_eq!(
+            page_of(3),
+            vec!["作品3", "作品4", "作品5"],
+            "the third page, without walking to it"
+        );
         assert_eq!(page_of(6), vec!["作品6"]);
-        assert!(page_of(99).is_empty(), "past the end is empty, not an error");
+        assert!(
+            page_of(99).is_empty(),
+            "past the end is empty, not an error"
+        );
 
         // Relevance has no nth page: results are walked with a score cursor, so
         // an offset into them would not be the page that was asked for.
@@ -9199,14 +13787,20 @@ mod search_integration_tests {
         db.set_watch_updates(second, true).unwrap();
 
         let empty = db.get_library_shelf_counts(&[]).unwrap();
-        assert_eq!((empty.total, empty.favorite, empty.watched, empty.reading), (3, 1, 1, 0));
+        assert_eq!(
+            (empty.total, empty.favorite, empty.watched, empty.reading),
+            (3, 1, 1, 0)
+        );
 
         // Reading positions are per device and nothing prunes them, so a shelf
         // must count works that exist, not entries that were left behind.
         let counts = db
             .get_library_shelf_counts(&[first, second, 999_999, first])
             .unwrap();
-        assert_eq!(counts.reading, 2, "a deleted work and a duplicate must not be counted");
+        assert_eq!(
+            counts.reading, 2,
+            "a deleted work and a duplicate must not be counted"
+        );
 
         // The same list used as a filter returns exactly those works.
         let mut params = v2_params(None, 20, None);
@@ -9236,7 +13830,10 @@ mod search_integration_tests {
                 params_json: "{\"tagsInclude\":[\"ファンタジー\"]}".to_string(),
             })
             .unwrap();
-        assert_eq!(created.name, "長編ファンタジー", "the name is stored trimmed");
+        assert_eq!(
+            created.name, "長編ファンタジー",
+            "the name is stored trimmed"
+        );
 
         // Saving again under the same name replaces that search. The unique
         // constraint must not surface as an error the reader has to decode.
@@ -9252,33 +13849,42 @@ mod search_integration_tests {
         assert_eq!(db.list_saved_searches().unwrap().len(), 1);
         assert_eq!(replaced.query.as_deref(), Some("tag:ファンタジー -短編"));
 
-        assert!(db
-            .upsert_saved_search(&SavedSearchInput {
+        assert!(
+            db.upsert_saved_search(&SavedSearchInput {
                 id: None,
                 name: "   ".to_string(),
                 query: None,
                 params_json: "{}".to_string(),
             })
-            .is_err(), "a blank name is not a search anyone can find again");
-        assert!(db
-            .upsert_saved_search(&SavedSearchInput {
+            .is_err(),
+            "a blank name is not a search anyone can find again"
+        );
+        assert!(
+            db.upsert_saved_search(&SavedSearchInput {
                 id: None,
                 name: "壊れた条件".to_string(),
                 query: None,
                 params_json: "{not json".to_string(),
             })
-            .is_err(), "conditions that cannot be read back must not be stored");
-        assert!(db
-            .upsert_saved_search(&SavedSearchInput {
+            .is_err(),
+            "conditions that cannot be read back must not be stored"
+        );
+        assert!(
+            db.upsert_saved_search(&SavedSearchInput {
                 id: Some(4_242),
                 name: "存在しない".to_string(),
                 query: None,
                 params_json: "{}".to_string(),
             })
-            .is_err(), "updating a search that was deleted elsewhere must say so");
+            .is_err(),
+            "updating a search that was deleted elsewhere must say so"
+        );
 
         assert!(db.delete_saved_search(created.id).unwrap());
-        assert!(!db.delete_saved_search(created.id).unwrap(), "a second delete is not an error");
+        assert!(
+            !db.delete_saved_search(created.id).unwrap(),
+            "a second delete is not an error"
+        );
         assert!(db.list_saved_searches().unwrap().is_empty());
 
         let _ = fs::remove_dir_all(root);
@@ -9299,7 +13905,10 @@ mod search_integration_tests {
         }
         let listed = db.list_saved_searches().unwrap();
         assert_eq!(listed.len() as i64, MAX_SAVED_SEARCHES);
-        assert_eq!(listed[0].name, "検索000", "the sidebar order must be stable");
+        assert_eq!(
+            listed[0].name, "検索000",
+            "the sidebar order must be stable"
+        );
         assert_eq!(listed[listed.len() - 1].name, "検索099");
 
         let overflow = db.upsert_saved_search(&SavedSearchInput {
@@ -9308,7 +13917,10 @@ mod search_integration_tests {
             query: None,
             params_json: "{}".to_string(),
         });
-        assert!(overflow.is_err(), "the limit must be refused, not silently applied");
+        assert!(
+            overflow.is_err(),
+            "the limit must be refused, not silently applied"
+        );
         // Replacing an existing one still works when the list is full.
         assert!(db
             .upsert_saved_search(&SavedSearchInput {
@@ -9329,9 +13941,33 @@ mod search_integration_tests {
 
         // Every pixiv URL is .../novel/show.php?id=N, and the synonym table
         // expands 物語 to "novel". Neither of these works mentions 物語.
-        insert_download(&db, &storage, "111", "海辺の記録", "作者A", &["日常"], "静かな本文です");
-        insert_download(&db, &storage, "222", "灯台の手紙", "作者B", &["日常"], "別の本文です");
-        let about = insert_download(&db, &storage, "333", "夜明けの物語", "作者C", &["創作"], "本文");
+        insert_download(
+            &db,
+            &storage,
+            "111",
+            "海辺の記録",
+            "作者A",
+            &["日常"],
+            "静かな本文です",
+        );
+        insert_download(
+            &db,
+            &storage,
+            "222",
+            "灯台の手紙",
+            "作者B",
+            &["日常"],
+            "別の本文です",
+        );
+        let about = insert_download(
+            &db,
+            &storage,
+            "333",
+            "夜明けの物語",
+            "作者C",
+            &["創作"],
+            "本文",
+        );
 
         let hits = db.search_downloads_v2(&params("物語")).unwrap();
         let ids = hits.items.iter().map(|item| item.id).collect::<Vec<_>>();
@@ -9361,7 +13997,15 @@ mod search_integration_tests {
         let (root, storage) = temp_paths();
         let db_path = root.join("piep.db");
         let db = Database::open(&db_path, &storage).unwrap();
-        insert_download(&db, &storage, "fmt-1", "書式変更の作品", "作者", &["書式"], "本文");
+        insert_download(
+            &db,
+            &storage,
+            "fmt-1",
+            "書式変更の作品",
+            "作者",
+            &["書式"],
+            "本文",
+        );
         assert_eq!(db.get_search_index_status().unwrap().pending_downloads, 0);
         drop(db);
 
@@ -9416,10 +14060,26 @@ mod search_integration_tests {
             ("sorted-4", "かえで花暦"),
             ("sorted-5", "たんぽぽ花暦"),
         ] {
-            insert_download(&db, &storage, source_id, title, "並び替え作者", &["並替"], "共通の本文です");
+            insert_download(
+                &db,
+                &storage,
+                source_id,
+                title,
+                "並び替え作者",
+                &["並替"],
+                "共通の本文です",
+            );
         }
         // A work that must never appear: it does not match the query.
-        insert_download(&db, &storage, "sorted-x", "無関係な作品", "別作者", &["他"], "別の本文");
+        insert_download(
+            &db,
+            &storage,
+            "sorted-x",
+            "無関係な作品",
+            "別作者",
+            &["他"],
+            "別の本文",
+        );
 
         let mut sorted = params("花暦");
         sorted.sort_by = Some("title".to_string());
@@ -9464,8 +14124,24 @@ mod search_integration_tests {
     fn sorted_search_respects_library_filters() {
         let (root, storage) = temp_paths();
         let db = Database::open(&root.join("piep.db"), &storage).unwrap();
-        let favorite = insert_download(&db, &storage, "filter-1", "対象作品 花暦", "作者", &["絞込"], "本文");
-        insert_download(&db, &storage, "filter-2", "対象外作品 花暦", "作者", &["絞込"], "本文");
+        let favorite = insert_download(
+            &db,
+            &storage,
+            "filter-1",
+            "対象作品 花暦",
+            "作者",
+            &["絞込"],
+            "本文",
+        );
+        insert_download(
+            &db,
+            &storage,
+            "filter-2",
+            "対象外作品 花暦",
+            "作者",
+            &["絞込"],
+            "本文",
+        );
         db.set_favorite(favorite, true).unwrap();
 
         let mut sorted = params("花暦");
@@ -9475,6 +14151,72 @@ mod search_integration_tests {
         assert_eq!(page.total_estimate, Some(1));
         assert_eq!(page.items.len(), 1);
         assert_eq!(page.items[0].id, favorite);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn sorted_search_uses_bounded_temp_table_batches_and_carries_total() {
+        let (root, storage) = temp_paths();
+        let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+        const MATCHES: usize = SORTED_SEARCH_ID_BATCH_SIZE * 2 + 17;
+        for index in 0..MATCHES {
+            insert_download_unindexed(
+                &db,
+                &storage,
+                &format!("streamed-{index:04}"),
+                &format!("流し込み検索 {index:04}"),
+                "作者",
+                &["一時表"],
+                "流し込み検索の本文",
+            );
+        }
+        loop {
+            let status = db.rebuild_search_index_batch(200).unwrap();
+            if status.pending_downloads == 0 {
+                break;
+            }
+        }
+        super::super::tantivy_index::optimize_segments(&storage).unwrap();
+
+        let mut request = params("流し込み検索");
+        request.sort_by = Some("title".to_string());
+        request.sort_order = Some("asc".to_string());
+        request.limit = Some(31);
+        let first = db.search_downloads_v2(&request).unwrap();
+        assert_eq!(first.total_estimate, Some(MATCHES as i64));
+        assert_eq!(first.items.len(), 31);
+        let (_, _, cache_after_first) = db.query_cache_stats();
+
+        let cursor = decode_cursor(first.next_cursor.as_deref()).unwrap();
+        assert_eq!(cursor.total_estimate, Some(MATCHES as i64));
+        request.cursor = first.next_cursor;
+        let second = db.search_downloads_v2(&request).unwrap();
+        assert_eq!(second.total_estimate, Some(MATCHES as i64));
+        assert!(first
+            .items
+            .iter()
+            .all(|left| second.items.iter().all(|right| left.id != right.id)));
+        let (_, _, cache_after_second) = db.query_cache_stats();
+        assert!(cache_after_second.0 > cache_after_first.0);
+
+        insert_download(
+            &db,
+            &storage,
+            "streamed-new",
+            "流し込み検索 新着",
+            "作者",
+            &["一時表"],
+            "流し込み検索の本文",
+        );
+        request.cursor = None;
+        let after_insert = db.search_downloads_v2(&request).unwrap();
+        assert_eq!(after_insert.total_estimate, Some(MATCHES as i64 + 1));
+        let (_, _, cache_after_insert) = db.query_cache_stats();
+        assert!(
+            cache_after_insert.1 > cache_after_second.1,
+            "library/index generation change must rebuild the snapshot"
+        );
 
         let _ = fs::remove_dir_all(root);
     }
@@ -9560,18 +14302,32 @@ mod search_integration_tests {
         let (root, storage) = temp_paths();
         let db = Database::open(&root.join("piep.db"), &storage).unwrap();
 
-        const SEEDED: usize = 20_000;
-        for index in 0..SEEDED {
-            insert_download_unindexed(
-                &db,
-                &storage,
-                &format!("scale-{}", index),
-                &format!("蔵書 {:05}", index),
-                &format!("作者 {:03}", index % 400),
-                &[&format!("tag{}", index % 30)],
-                "大規模ライブラリの一覧性能を確認するための本文です。",
-            );
+        let seeded: usize = std::env::var("PIEP_BENCH_WORKS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(20_000);
+        let metadata_only =
+            seeded >= 250_000 || std::env::var("PIEP_BENCH_METADATA_ONLY").as_deref() == Ok("1");
+        let seed_started = Instant::now();
+        if metadata_only {
+            seed_metadata_only_library(&db, seeded);
+        } else {
+            for index in 0..seeded {
+                insert_download_unindexed(
+                    &db,
+                    &storage,
+                    &format!("scale-{}", index),
+                    &format!("蔵書 {:05}", index),
+                    &format!("作者 {:03}", index % 400),
+                    &[&format!("tag{}", index % 30)],
+                    "大規模ライブラリの一覧性能を確認するための本文です。",
+                );
+            }
         }
+        let seed_elapsed = seed_started.elapsed();
+        let database_bytes = fs::metadata(root.join("piep.db"))
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
 
         // The library browses with an empty query, which is the keyset path.
         let mut first = v2_params(None, 60, None);
@@ -9580,11 +14336,15 @@ mod search_integration_tests {
         let page1 = db.search_downloads_v2(&first).unwrap();
         let first_elapsed = started.elapsed();
         assert_eq!(page1.items.len(), 60);
-        assert_eq!(page1.total_estimate, Some(SEEDED as i64));
+        assert_eq!(page1.total_estimate, Some(seeded as i64));
         assert!(
             page1.next_cursor.is_some(),
             "a large library must expose more pages"
         );
+        let started = Instant::now();
+        let warm_page1 = db.search_downloads_v2(&first).unwrap();
+        let warm_first_elapsed = started.elapsed();
+        assert_eq!(warm_page1.items.len(), page1.items.len());
 
         // Walk deep into the list: keyset paging must not degrade with depth.
         let mut cursor = page1.next_cursor.clone();
@@ -9603,6 +14363,10 @@ mod search_integration_tests {
         let authors = db.search_entity_facets("person", None, 60, 300).unwrap();
         let entity_elapsed = started.elapsed();
         assert_eq!(authors.len(), 60);
+        let started = Instant::now();
+        let warm_authors = db.search_entity_facets("person", None, 60, 300).unwrap();
+        let warm_entity_elapsed = started.elapsed();
+        assert_eq!(warm_authors.len(), authors.len());
 
         let started = Instant::now();
         let facets = db.get_filter_facets_with(false).unwrap();
@@ -9613,32 +14377,263 @@ mod search_integration_tests {
             "the light variant must skip the entity aggregates"
         );
 
-        eprintln!(
-            "{} works: first page {:?}, deepest page {:?}, authors {:?}, filter options {:?}",
-            SEEDED, first_elapsed, deepest, entity_elapsed, facet_elapsed
+        let started = Instant::now();
+        let cached_facets = db.get_filter_facets_with(false).unwrap();
+        let cached_facet_elapsed = started.elapsed();
+        assert_eq!(
+            cached_facets
+                .tags
+                .iter()
+                .map(|facet| (&facet.name, facet.count))
+                .collect::<Vec<_>>(),
+            facets
+                .tags
+                .iter()
+                .map(|facet| (&facet.name, facet.count))
+                .collect::<Vec<_>>()
         );
+
+        let suggest_params = SearchSuggestParams {
+            text: Some("蔵書".to_string()),
+            limit: Some(12),
+        };
+        let started = Instant::now();
+        let suggestions = db.search_suggest(&suggest_params).unwrap();
+        let suggest_elapsed = started.elapsed();
+        assert_eq!(suggestions.items.len(), 12);
+        let started = Instant::now();
+        let cached_suggestions = db.search_suggest(&suggest_params).unwrap();
+        let cached_suggest_elapsed = started.elapsed();
+        assert_eq!(cached_suggestions.items.len(), suggestions.items.len());
+
+        eprintln!(
+            "{} works (metadata_only={}, seed {:?}, db {} MiB): first page cold {:?}/warm {:?}, deepest page {:?}, authors cold {:?}/warm {:?}, filter options cold {:?}/warm {:?}, suggestions cold {:?}/warm {:?}",
+            seeded,
+            metadata_only,
+            seed_elapsed,
+            database_bytes / (1024 * 1024),
+            first_elapsed,
+            warm_first_elapsed,
+            deepest,
+            entity_elapsed,
+            warm_entity_elapsed,
+            facet_elapsed,
+            cached_facet_elapsed,
+            suggest_elapsed,
+            cached_suggest_elapsed
+        );
+        let first_page_budget = if seeded >= 500_000 {
+            Duration::from_secs(1)
+        } else {
+            Duration::from_millis(400)
+        };
         assert!(
-            first_elapsed < Duration::from_millis(400),
+            first_elapsed < first_page_budget,
             "first page took {:?}",
             first_elapsed
+        );
+        assert!(
+            warm_first_elapsed < Duration::from_millis(400),
+            "warm first page took {:?}",
+            warm_first_elapsed
         );
         assert!(
             deepest < Duration::from_millis(400),
             "deep page took {:?}",
             deepest
         );
+        let aggregate_budget = if seeded >= 500_000 {
+            Duration::from_secs(3)
+        } else {
+            Duration::from_millis(500)
+        };
         // Without idx_downloads_author_recent this listing takes ~1.9s here.
         assert!(
-            entity_elapsed < Duration::from_millis(300),
+            entity_elapsed < aggregate_budget,
             "author listing took {:?}",
             entity_elapsed
         );
         assert!(
-            facet_elapsed < Duration::from_millis(500),
+            warm_entity_elapsed < Duration::from_millis(100),
+            "cached author listing took {:?}",
+            warm_entity_elapsed
+        );
+        assert!(
+            facet_elapsed < aggregate_budget,
             "filter options took {:?}",
             facet_elapsed
         );
+        assert!(
+            suggest_elapsed < aggregate_budget,
+            "cold suggestions took {:?}",
+            suggest_elapsed
+        );
+        assert!(
+            cached_facet_elapsed < Duration::from_millis(50),
+            "cached filter options took {:?}",
+            cached_facet_elapsed
+        );
+        assert!(
+            cached_suggest_elapsed < Duration::from_millis(50),
+            "cached suggestions took {:?}",
+            cached_suggest_elapsed
+        );
 
+        drop(db);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[ignore = "measurement harness for disk-backed lexical snapshots"]
+    fn lexical_snapshots_scale_with_fixed_memory_batches() {
+        let (root, storage) = temp_paths();
+        let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+        let works: usize = std::env::var("PIEP_BENCH_WORKS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(100_000);
+        assert!((1_000..=1_000_000).contains(&works));
+
+        let seed_started = Instant::now();
+        seed_metadata_only_library(&db, works);
+        let seed_elapsed = seed_started.elapsed();
+        let index_started = Instant::now();
+        let mut writer = super::super::tantivy_index::bulk_writer(&storage).unwrap();
+        for index in 0..works {
+            let prepared = super::super::tantivy_index::prepare_document(
+                &storage,
+                &super::super::tantivy_index::TantivyIndexDocument {
+                    download_id: index as i64 + 1,
+                    source: "pixiv".to_string(),
+                    source_id: format!("scale-{index:07}"),
+                    source_url: format!("https://example.invalid/{index}"),
+                    title: format!("snapshotterm work {index:07}"),
+                    author_name: format!("author {:03}", index % 400),
+                    author_id: format!("author-{:03}", index % 400),
+                    tags: format!("tag{}", index % 30),
+                    series_title: String::new(),
+                    excerpt: "snapshotterm benchmark".to_string(),
+                    body: "snapshotterm bounded disk ranking".to_string(),
+                    published_at: "2026-01-01T00:00:00Z".to_string(),
+                    downloaded_at: "2026-01-01T00:00:00Z".to_string(),
+                    favorite: false,
+                    watch_updates: false,
+                    asset_kinds: String::new(),
+                    text_length: 36,
+                },
+            )
+            .unwrap();
+            writer.upsert(prepared).unwrap();
+            if writer.uncommitted() >= 20_000 {
+                writer.commit().unwrap();
+            }
+        }
+        writer.commit().unwrap();
+        drop(writer);
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT OR REPLACE INTO search_index_state (
+                    download_id, current_version, content_hash, indexed_at
+                 )
+                 SELECT id, current_version, content_hash, CURRENT_TIMESTAMP FROM downloads",
+                [],
+            )
+            .unwrap();
+        }
+        let index_elapsed = index_started.elapsed();
+
+        let mut ranked = params("snapshotterm");
+        ranked.limit = Some(60);
+        ranked.projection = Some("bulk".to_string());
+        let started = Instant::now();
+        let first = db.search_downloads_v2(&ranked).unwrap();
+        let ranked_cold = started.elapsed();
+        assert_eq!(first.total_estimate, Some(works as i64));
+        ranked.cursor = first.next_cursor;
+        let started = Instant::now();
+        let second = db.search_downloads_v2(&ranked).unwrap();
+        let ranked_warm = started.elapsed();
+        assert_eq!(second.items.len(), 60);
+
+        let mut sorted = params("snapshotterm");
+        sorted.limit = Some(60);
+        sorted.projection = Some("bulk".to_string());
+        sorted.sort_by = Some("title".to_string());
+        sorted.sort_order = Some("asc".to_string());
+        let started = Instant::now();
+        let first_sorted = db.search_downloads_v2(&sorted).unwrap();
+        let sorted_cold = started.elapsed();
+        assert_eq!(first_sorted.total_estimate, Some(works as i64));
+        sorted.cursor = first_sorted.next_cursor;
+        let started = Instant::now();
+        let second_sorted = db.search_downloads_v2(&sorted).unwrap();
+        let sorted_warm = started.elapsed();
+        assert_eq!(second_sorted.items.len(), 60);
+
+        let cache = db.search_snapshot_cache.lock().unwrap();
+        let snapshot_bytes = cache.disk_bytes;
+        let snapshot_count = cache.entries.len();
+        drop(cache);
+        eprintln!(
+            "{works} lexical matches: seed {seed_elapsed:?}, index {index_elapsed:?}, ranked cold/warm {ranked_cold:?}/{ranked_warm:?}, sorted cold/warm {sorted_cold:?}/{sorted_warm:?}, {snapshot_count} snapshots {} MiB",
+            snapshot_bytes / (1024 * 1024)
+        );
+        assert!(snapshot_count >= 2);
+        assert!(snapshot_bytes <= super::super::resource_budget::search_snapshot_disk_bytes());
+        assert!(ranked_warm < Duration::from_millis(250));
+        assert!(sorted_warm < Duration::from_millis(250));
+
+        drop(db);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn entity_facet_cache_is_invalidated_by_a_library_commit() {
+        let (root, storage) = temp_paths();
+        let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+        insert_download_unindexed(
+            &db,
+            &storage,
+            "facet-cache-one",
+            "一冊目",
+            "同じ作者",
+            &[],
+            "本文",
+        );
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE downloads SET author_id = 'same-author' WHERE source_id = 'facet-cache-one'",
+                [],
+            )
+            .unwrap();
+        let first = db.search_entity_facets("person", None, 60, 0).unwrap();
+        assert_eq!(first[0].count, 1);
+        let cached = db.search_entity_facets("person", None, 60, 0).unwrap();
+        assert_eq!(cached[0].count, 1);
+
+        insert_download_unindexed(
+            &db,
+            &storage,
+            "facet-cache-two",
+            "二冊目",
+            "同じ作者",
+            &[],
+            "本文",
+        );
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE downloads SET author_id = 'same-author' WHERE source_id = 'facet-cache-two'",
+                [],
+            )
+            .unwrap();
+        let refreshed = db.search_entity_facets("person", None, 60, 0).unwrap();
+        assert_eq!(refreshed[0].count, 2);
+        drop(db);
         let _ = fs::remove_dir_all(root);
     }
 
@@ -9778,6 +14773,8 @@ mod search_integration_tests {
             target_ids: None,
             credentials: None,
             concurrency: None,
+            watch_saved: None,
+            adhoc_targets: None,
         };
         db.create_update_job(
             "job-test",
@@ -9802,6 +14799,299 @@ mod search_integration_tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    /// 履歴は放っておくと溜まり続ける。整理は「古くて終わったもの」だけに効き、
+    /// 走っているジョブと直近の履歴には触れない。
+    #[test]
+    fn old_finished_jobs_are_pruned_but_recent_and_live_ones_stay() {
+        let (root, storage) = temp_paths();
+        let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+        let request = StartUpdateJobRequest {
+            scope: "all".to_string(),
+            mode: "check_only".to_string(),
+            work_ids: None,
+            target_ids: None,
+            credentials: None,
+            concurrency: None,
+            watch_saved: None,
+            adhoc_targets: None,
+        };
+        for id in ["job-old", "job-recent", "job-live"] {
+            db.create_update_job(id, &request, &[]).unwrap();
+        }
+        let long_ago = (chrono::Utc::now() - chrono::Duration::days(90)).to_rfc3339();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE update_jobs SET status = 'completed', finished_at = ?1, updated_at = ?1
+                 WHERE id = 'job-old'",
+                params![long_ago],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE update_jobs SET status = 'completed', finished_at = ?1, updated_at = ?1
+                 WHERE id = 'job-recent'",
+                params![chrono::Utc::now().to_rfc3339()],
+            )
+            .unwrap();
+            // job-live は running のまま。日付が古くても消してはいけない。
+            conn.execute(
+                "UPDATE update_jobs SET status = 'running', updated_at = ?1 WHERE id = 'job-live'",
+                params![long_ago],
+            )
+            .unwrap();
+        }
+
+        let removed = db.prune_update_jobs(1, 30).unwrap();
+        assert_eq!(removed, 1);
+        assert!(db.update_job_snapshot("job-old").is_err());
+        assert!(db.update_job_snapshot("job-recent").is_ok());
+        assert!(db.update_job_snapshot("job-live").is_ok());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn job_logs_are_capped_from_the_oldest_end() {
+        let (root, storage) = temp_paths();
+        let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+        let request = StartUpdateJobRequest {
+            scope: "all".to_string(),
+            mode: "check_only".to_string(),
+            work_ids: None,
+            target_ids: None,
+            credentials: None,
+            concurrency: None,
+            watch_saved: None,
+            adhoc_targets: None,
+        };
+        db.create_update_job("job-logs", &request, &[]).unwrap();
+        for index in 0..20 {
+            db.append_update_job_log("job-logs", "info", &format!("行 {index}"))
+                .unwrap();
+        }
+        // ジョブ作成時にも1行積まれるので、消えた数はそれ以上になる。
+        assert!(db.trim_update_job_logs("job-logs", 5).unwrap() >= 15);
+        let snapshot = db.update_job_snapshot("job-logs").unwrap();
+        let messages: Vec<&str> = snapshot
+            .logs
+            .iter()
+            .map(|log| log.message.as_str())
+            .collect();
+        assert_eq!(messages, vec!["行 15", "行 16", "行 17", "行 18", "行 19"]);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// シリーズの作者が手元のライブラリから分かること。
+    ///
+    /// 作者を監視しているならシリーズの新作もその一覧に出るので、両方を走査
+    /// しないための判断材料になる（同じものを二度取りに行かない）。
+    #[test]
+    fn a_series_can_name_the_author_behind_it() {
+        let (root, storage) = temp_paths();
+        let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+        let id = insert_download(&db, &storage, "novel-1", "夜明けの糸", "青葉しおり", &[], "本文");
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE downloads SET author_id = '7' WHERE id = ?1",
+                params![id],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO download_series (download_id, series_source, series_key, title)
+                 VALUES (?1, 'pixiv', '778120', '星を編む人')",
+                params![id],
+            )
+            .unwrap();
+        }
+
+        assert_eq!(
+            db.series_author_keys("pixiv", "778120").unwrap(),
+            vec!["7".to_string()]
+        );
+        // 手元に作品が無いシリーズは判断できない。そのときは走査する側に倒す。
+        assert!(db.series_author_keys("pixiv", "999999").unwrap().is_empty());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// 終わったジョブは操作履歴からまとめて消せる。走っているものは残る。
+    #[test]
+    fn finished_jobs_can_be_cleared_from_the_history() {
+        let (root, storage) = temp_paths();
+        let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+        let request = StartUpdateJobRequest {
+            scope: "all".to_string(),
+            mode: "check_only".to_string(),
+            work_ids: None,
+            target_ids: None,
+            credentials: None,
+            concurrency: None,
+            watch_saved: None,
+            adhoc_targets: None,
+        };
+        db.create_update_job("job-done", &request, &[]).unwrap();
+        db.create_update_job("job-running", &request, &[]).unwrap();
+        db.set_update_job_status("job-done", "completed", None).unwrap();
+        db.set_update_job_status("job-running", "running", None).unwrap();
+
+        assert_eq!(db.clear_finished_update_jobs().unwrap(), 1);
+        assert!(db.update_job_snapshot("job-done").is_err());
+        assert!(db.update_job_snapshot("job-running").is_ok());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// 見つけた候補は、ジョブが変わっても残る。
+    ///
+    /// 取得元の一覧は「前回見た位置」から先しか返さないので、候補をジョブ限りに
+    /// すると、保存しなかった作品が二度と現れない。実際にそれで作品が消えた。
+    #[test]
+    fn a_candidate_nobody_answered_survives_into_the_next_job() {
+        let (root, storage) = temp_paths();
+        let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+        let candidate = UpdateCandidateInput {
+            source: "pixiv".to_string(),
+            source_id: "12345".to_string(),
+            kind: "new".to_string(),
+            title: "モリゾーの最新作".to_string(),
+            payload_json: "{}".to_string(),
+            target_type: Some("author".to_string()),
+        };
+        db.upsert_update_candidate(&candidate).unwrap();
+
+        // 同じ作品を何度見つけても増えない。
+        db.upsert_update_candidate(&candidate).unwrap();
+        let pending = db.list_pending_update_candidates(100).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].title, "モリゾーの最新作");
+
+        // 「今後は出さない」と決めたら候補から外れ、見つけ直しても戻らない。
+        db.set_update_candidate_status("pixiv", "12345", "dismissed")
+            .unwrap();
+        db.upsert_update_candidate(&candidate).unwrap();
+        assert!(db.list_pending_update_candidates(100).unwrap().is_empty());
+        assert_eq!(
+            db.update_candidate_status("pixiv", "12345").unwrap().as_deref(),
+            Some("dismissed")
+        );
+        assert_eq!(db.count_dismissed_update_candidates().unwrap(), 1);
+
+        // 決定は取り消せる。
+        assert_eq!(db.restore_dismissed_update_candidates().unwrap(), 1);
+        assert_eq!(db.list_pending_update_candidates(100).unwrap().len(), 1);
+
+        // 保存できたら、もう決めていないものではない。
+        db.clear_update_candidate("pixiv", "12345").unwrap();
+        assert!(db.list_pending_update_candidates(100).unwrap().is_empty());
+        assert!(db.update_candidate_status("pixiv", "12345").unwrap().is_none());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// 進捗は「これから何件やるか」を表す。保存のために待機列へ入れた候補は
+    /// 作業なので数え、見つけただけの候補は数えない。
+    #[test]
+    fn queued_candidates_count_towards_progress_but_unanswered_ones_do_not() {
+        let (root, storage) = temp_paths();
+        let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+        let request = StartUpdateJobRequest {
+            scope: "author".to_string(),
+            mode: "check_only".to_string(),
+            work_ids: None,
+            target_ids: None,
+            credentials: None,
+            concurrency: None,
+            watch_saved: None,
+            adhoc_targets: None,
+        };
+        db.create_update_job(
+            "job-progress",
+            &request,
+            &[UpdateJobItemInput {
+                item_type: "target".to_string(),
+                source: Some("pixiv".to_string()),
+                source_id: Some("7".to_string()),
+                target_type: Some("author".to_string()),
+                title: "作者".to_string(),
+                payload_json: "{}".to_string(),
+                status: "queued".to_string(),
+            }],
+        )
+        .unwrap();
+        for index in 0..3 {
+            db.insert_update_job_candidate(
+                "job-progress",
+                &UpdateJobItemInput {
+                    item_type: "candidate".to_string(),
+                    source: Some("pixiv".to_string()),
+                    source_id: Some(format!("novel-{index}")),
+                    target_type: Some("author".to_string()),
+                    title: format!("候補 {index}"),
+                    payload_json: "{}".to_string(),
+                    status: "candidate".to_string(),
+                },
+            )
+            .unwrap();
+        }
+
+        // 見つけただけの段階: 作業は対象1件のみ。
+        let snapshot = db.update_job_snapshot("job-progress").unwrap();
+        assert_eq!(snapshot.totals, 1);
+        assert_eq!(snapshot.candidate_count, 3);
+
+        // 保存を頼んだ2件は作業に加わる。ここで進捗が 1/1 のままだと、
+        // 保存の最中に「完了」と見えてしまう。
+        let ids: Vec<i64> = snapshot.candidates.iter().take(2).map(|c| c.id).collect();
+        db.queue_update_job_candidates("job-progress", &ids).unwrap();
+        let snapshot = db.update_job_snapshot("job-progress").unwrap();
+        assert_eq!(snapshot.totals, 3);
+        assert_eq!(snapshot.processed, 0);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// 監視対象の健康状態。「確認した」と「見つかった」は別で、失敗は積み上がる。
+    #[test]
+    fn a_target_records_when_it_last_found_something_and_when_it_keeps_failing() {
+        let (root, storage) = temp_paths();
+        let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+        db.upsert_update_target(&UpdateTargetInput {
+            target_type: "author".to_string(),
+            source: "pixiv".to_string(),
+            source_key: "7".to_string(),
+            display_name: "青葉しおり".to_string(),
+            enabled: true,
+            metadata_json: None,
+        })
+        .unwrap();
+
+        // 何も見つからなかった確認では、最後に見つけた時刻は空のまま。
+        db.mark_update_target_checked("author", "pixiv", "7", None, None, 0)
+            .unwrap();
+        let target = db.list_update_targets(None, false).unwrap().remove(0);
+        assert!(target.last_checked_at.is_some());
+        assert!(target.last_hit_at.is_none());
+        assert_eq!(target.consecutive_errors, 0);
+
+        // 失敗は積み上がる。
+        db.mark_update_target_failed("author", "pixiv", "7").unwrap();
+        db.mark_update_target_failed("author", "pixiv", "7").unwrap();
+        let target = db.list_update_targets(None, false).unwrap().remove(0);
+        assert_eq!(target.consecutive_errors, 2);
+
+        // 見つかった確認で、時刻が進み、連続失敗は 0 に戻る。
+        db.mark_update_target_checked("author", "pixiv", "7", Some("12002"), None, 3)
+            .unwrap();
+        let target = db.list_update_targets(None, false).unwrap().remove(0);
+        assert!(target.last_hit_at.is_some());
+        assert_eq!(target.consecutive_errors, 0);
+        assert_eq!(target.last_seen_source_id.as_deref(), Some("12002"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
     #[test]
     fn update_job_candidates_can_be_queued_for_saving() {
         let (root, storage) = temp_paths();
@@ -9813,6 +15103,8 @@ mod search_integration_tests {
             target_ids: None,
             credentials: None,
             concurrency: None,
+            watch_saved: None,
+            adhoc_targets: None,
         };
         db.create_update_job(
             "job-candidates",
@@ -9828,24 +15120,28 @@ mod search_integration_tests {
             }],
         )
         .unwrap();
-        db.insert_update_job_candidate(
-            "job-candidates",
-            &UpdateJobItemInput {
-                item_type: "candidate".to_string(),
-                source: Some("pixiv".to_string()),
-                source_id: Some("novel-1".to_string()),
-                target_type: Some("author".to_string()),
-                title: "Novel".to_string(),
-                payload_json: serde_json::json!({
-                    "targetLabel": "Author",
-                    "subtitle": "Author / now"
-                })
-                .to_string(),
-                status: "candidate".to_string(),
-            },
-        )
-        .unwrap();
+        let candidate = UpdateJobItemInput {
+            item_type: "candidate".to_string(),
+            source: Some("pixiv".to_string()),
+            source_id: Some("novel-1".to_string()),
+            target_type: Some("author".to_string()),
+            title: "Novel".to_string(),
+            payload_json: serde_json::json!({
+                "targetLabel": "Author",
+                "subtitle": "Author / now"
+            })
+            .to_string(),
+            status: "candidate".to_string(),
+        };
+        assert!(db
+            .insert_update_job_candidate("job-candidates", &candidate)
+            .unwrap());
+        assert!(!db
+            .insert_update_job_candidate("job-candidates", &candidate)
+            .unwrap());
         let snapshot = db.update_job_snapshot("job-candidates").unwrap();
+        assert_eq!(snapshot.candidate_count, 1);
+        assert_eq!(snapshot.candidates.len(), 1);
         let candidate_id = snapshot.candidates[0].id;
         let changed = db
             .queue_update_job_candidates("job-candidates", &[candidate_id])
@@ -9853,6 +15149,50 @@ mod search_integration_tests {
         assert_eq!(changed, 1);
         let snapshot = db.update_job_snapshot("job-candidates").unwrap();
         assert_eq!(snapshot.candidates[0].status, "queued");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn update_job_snapshot_pages_candidate_payloads() {
+        let (root, storage) = temp_paths();
+        let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+        let request = StartUpdateJobRequest {
+            scope: "author".to_string(),
+            mode: "check_only".to_string(),
+            work_ids: None,
+            target_ids: None,
+            credentials: None,
+            concurrency: None,
+            watch_saved: None,
+            adhoc_targets: None,
+        };
+        db.create_update_job("job-paged", &request, &[]).unwrap();
+        for index in 0..205 {
+            db.insert_update_job_candidate(
+                "job-paged",
+                &UpdateJobItemInput {
+                    item_type: "candidate".to_string(),
+                    source: Some("pixiv".to_string()),
+                    source_id: Some(format!("novel-{index}")),
+                    target_type: Some("author".to_string()),
+                    title: format!("Novel {index}"),
+                    payload_json: "{}".to_string(),
+                    status: "candidate".to_string(),
+                },
+            )
+            .unwrap();
+        }
+
+        let first = db.update_job_snapshot("job-paged").unwrap();
+        assert_eq!(first.candidates.len(), 200);
+        let cursor = first.next_candidate_cursor.expect("next page");
+        let second = db
+            .update_job_snapshot_page("job-paged", Some(cursor), None)
+            .unwrap();
+        assert_eq!(second.candidates.len(), 5);
+        assert!(second.next_candidate_cursor.is_none());
+        assert!(second.candidates[0].id > cursor);
 
         let _ = fs::remove_dir_all(root);
     }

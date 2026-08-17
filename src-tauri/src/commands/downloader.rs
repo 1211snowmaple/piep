@@ -1,14 +1,533 @@
 use crate::database::queries::EntityProfileFreshness;
-use crate::database::{DownloadEntry, NewAsset, NewDownload, NewVersion};
+use crate::database::{Database, DownloadEntry, NewAsset, NewDownload, NewVersion};
 use crate::downloader::fanbox::get_post_detail;
 use crate::downloader::pixiv::{get_novel_detail, PixivNovelContent};
 use crate::fanbox_api::client::FanboxAPI;
 use crate::fanbox_api::models::FanboxPost;
 use crate::pixiv_api;
 use crate::AppState;
-use std::path::Path;
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, Once, OnceLock, Weak};
 use tauri::Manager;
+
+type WorkSaveMutex = tokio::sync::Mutex<()>;
+static WORK_SAVE_LOCKS: OnceLock<Mutex<HashMap<String, Weak<WorkSaveMutex>>>> = OnceLock::new();
+
+fn work_save_mutex(source: &str, source_id: &str) -> Arc<WorkSaveMutex> {
+    let key = format!("{source}\0{source_id}");
+    let mut locks = WORK_SAVE_LOCKS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) {
+        return lock;
+    }
+    let lock = Arc::new(WorkSaveMutex::new(()));
+    locks.insert(key, Arc::downgrade(&lock));
+    lock
+}
+
+const VERSION_STAGE_SYNC_MAX_DEPTH: usize = 32;
+const VERSION_STAGE_SYNC_MAX_ENTRIES: usize = 50_000;
+#[cfg(windows)]
+const WINDOWS_FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+static DIRECTORY_SYNC_UNSUPPORTED_WARNING: Once = Once::new();
+
+#[derive(Clone, Copy)]
+struct StageSyncLimits {
+    max_depth: usize,
+    max_entries: usize,
+}
+
+impl Default for StageSyncLimits {
+    fn default() -> Self {
+        Self {
+            max_depth: VERSION_STAGE_SYNC_MAX_DEPTH,
+            max_entries: VERSION_STAGE_SYNC_MAX_ENTRIES,
+        }
+    }
+}
+
+fn metadata_is_link_or_reparse(metadata: &std::fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if metadata.file_attributes() & WINDOWS_FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return true;
+        }
+    }
+    false
+}
+
+fn is_unpublished_part_file(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with('.') && name.ends_with(".part"))
+}
+
+#[cfg(windows)]
+fn open_directory_for_sync(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(windows::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS.0)
+        .open(path)
+}
+
+#[cfg(not(windows))]
+fn open_directory_for_sync(path: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::File::open(path)
+}
+
+fn directory_sync_is_unsupported(error: &std::io::Error) -> bool {
+    if matches!(
+        error.kind(),
+        std::io::ErrorKind::Unsupported | std::io::ErrorKind::InvalidInput
+    ) {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        // Windows filesystems commonly reject FlushFileBuffers for directory
+        // handles even when they support write-through rename. Only the known
+        // unsupported/invalid-handle errors are tolerated; media and I/O
+        // failures still abort the save.
+        matches!(error.raw_os_error(), Some(1 | 5 | 6 | 50 | 87))
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
+fn sync_directory_durable(path: &Path) -> Result<(), String> {
+    let result = open_directory_for_sync(path).and_then(|directory| directory.sync_all());
+    match result {
+        Ok(()) => Ok(()),
+        Err(error) if directory_sync_is_unsupported(&error) => {
+            DIRECTORY_SYNC_UNSUPPORTED_WARNING.call_once(|| {
+                log::warn!(
+                    "Directory fsync is unsupported on this filesystem; relying on synced files and atomic/write-through rename"
+                );
+            });
+            Ok(())
+        }
+        Err(error) => Err(format!("Directory durability sync failed: {error}")),
+    }
+}
+
+fn durable_sync_stage_tree_with_limits(root: &Path, limits: StageSyncLimits) -> Result<(), String> {
+    let root_metadata = std::fs::symlink_metadata(root)
+        .map_err(|error| format!("Version stage inspection failed: {error}"))?;
+    if metadata_is_link_or_reparse(&root_metadata) || !root_metadata.file_type().is_dir() {
+        return Err("Version stage is a link/reparse point or not a directory".to_string());
+    }
+
+    let mut pending = vec![(root.to_path_buf(), 0usize)];
+    let mut directories = Vec::new();
+    let mut files = Vec::new();
+    let mut entry_count = 1usize;
+    while let Some((directory, depth)) = pending.pop() {
+        if depth > limits.max_depth {
+            return Err(format!(
+                "Version stage nesting exceeds {} levels",
+                limits.max_depth
+            ));
+        }
+        let metadata = std::fs::symlink_metadata(&directory)
+            .map_err(|error| format!("Version stage directory inspection failed: {error}"))?;
+        if metadata_is_link_or_reparse(&metadata) || !metadata.file_type().is_dir() {
+            return Err("Version stage contains a linked/reparse directory".to_string());
+        }
+        directories.push(directory.clone());
+
+        let entries = std::fs::read_dir(&directory)
+            .map_err(|error| format!("Version stage traversal failed: {error}"))?;
+        for entry in entries {
+            let entry = entry.map_err(|error| format!("Version stage entry failed: {error}"))?;
+            entry_count = entry_count
+                .checked_add(1)
+                .ok_or_else(|| "Version stage entry count overflow".to_string())?;
+            if entry_count > limits.max_entries {
+                return Err(format!(
+                    "Version stage exceeds the {} entry safety limit",
+                    limits.max_entries
+                ));
+            }
+            let path = entry.path();
+            let metadata = std::fs::symlink_metadata(&path)
+                .map_err(|error| format!("Version stage entry inspection failed: {error}"))?;
+            if metadata_is_link_or_reparse(&metadata) {
+                return Err("Version stage contains a filesystem link/reparse point".to_string());
+            }
+            if metadata.file_type().is_dir() {
+                pending.push((path, depth + 1));
+            } else if metadata.file_type().is_file() {
+                if is_unpublished_part_file(&path) {
+                    return Err("Version stage contains an unpublished partial file".to_string());
+                }
+                files.push(path);
+            } else {
+                return Err("Version stage contains a special filesystem entry".to_string());
+            }
+        }
+    }
+
+    for path in files {
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .map_err(|error| format!("Version file open for durability failed: {error}"))?;
+        let metadata = file
+            .metadata()
+            .map_err(|error| format!("Version file durability inspection failed: {error}"))?;
+        if !metadata.file_type().is_file() {
+            return Err("Version file changed type during durability sync".to_string());
+        }
+        file.sync_all()
+            .map_err(|error| format!("Version file durability sync failed: {error}"))?;
+    }
+
+    // Children are synced before their parents so every directory entry is
+    // stable before the root itself is made durable.
+    for directory in directories.into_iter().rev() {
+        sync_directory_durable(&directory)?;
+    }
+    Ok(())
+}
+
+fn durable_sync_stage_tree(root: &Path) -> Result<(), String> {
+    durable_sync_stage_tree_with_limits(root, StageSyncLimits::default())
+}
+
+#[cfg(windows)]
+fn durable_rename_version(source: &Path, destination: &Path) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_WRITE_THROUGH};
+
+    // `canonicalize` yields a verbatim/extended-length Windows path, retaining
+    // compatibility with version trees whose absolute path exceeds MAX_PATH.
+    let source = source
+        .canonicalize()
+        .map_err(|error| format!("Version source resolution before publish failed: {error}"))?;
+    let destination_parent = destination
+        .parent()
+        .ok_or_else(|| "Version destination has no parent".to_string())?
+        .canonicalize()
+        .map_err(|error| format!("Version destination parent resolution failed: {error}"))?;
+    let destination = destination_parent.join(
+        destination
+            .file_name()
+            .ok_or_else(|| "Version destination has no file name".to_string())?,
+    );
+    let source: Vec<u16> = source
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let destination: Vec<u16> = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    // SAFETY: both paths are NUL-terminated and remain alive throughout the
+    // synchronous Win32 call. Omitting REPLACE_EXISTING preserves an existing
+    // version if another actor somehow creates it before publish.
+    unsafe {
+        MoveFileExW(
+            PCWSTR(source.as_ptr()),
+            PCWSTR(destination.as_ptr()),
+            MOVEFILE_WRITE_THROUGH,
+        )
+        .map_err(|error| format!("Version write-through publish failed: {error}"))
+    }
+}
+
+#[cfg(not(windows))]
+fn durable_rename_version(source: &Path, destination: &Path) -> Result<(), String> {
+    std::fs::rename(source, destination).map_err(|error| format!("Version publish failed: {error}"))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PublishFailurePoint {
+    None,
+    BeforeTreeSync,
+    AfterTreeSync,
+    AfterRename,
+}
+
+#[derive(Debug)]
+struct VersionStage {
+    staging_path: PathBuf,
+    final_path: PathBuf,
+    published: bool,
+    committed: bool,
+    cleanup_complete: bool,
+    failure_point: PublishFailurePoint,
+}
+
+#[derive(Debug)]
+struct VersionCommitError {
+    message: String,
+    rollback_durable: bool,
+    published_by_stage: Option<bool>,
+}
+
+impl VersionStage {
+    fn create(work_root: &Path, version: i64) -> Result<Self, String> {
+        let final_path = work_root.join(format!("v{version}"));
+        match std::fs::symlink_metadata(&final_path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(_) => {
+                return Err(format!(
+                    "Version directory already exists and will not be overwritten: {}",
+                    final_path.display()
+                ))
+            }
+            Err(error) => {
+                return Err(format!(
+                    "Version destination inspection failed before staging: {error}"
+                ))
+            }
+        }
+        for _ in 0..16 {
+            let staging_path =
+                work_root.join(format!(".v{version}.{:016x}.stage", rand::random::<u64>()));
+            match std::fs::create_dir(&staging_path) {
+                Ok(()) => {
+                    return Ok(Self {
+                        staging_path,
+                        final_path,
+                        published: false,
+                        committed: false,
+                        cleanup_complete: false,
+                        failure_point: PublishFailurePoint::None,
+                    })
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(format!("Version staging creation failed: {error}")),
+            }
+        }
+        Err("Failed to allocate a unique version staging directory".to_string())
+    }
+
+    fn publish_blocking(&mut self) -> Result<(), String> {
+        if self.failure_point == PublishFailurePoint::BeforeTreeSync {
+            return Err("Injected version publish failure before tree sync".to_string());
+        }
+        durable_sync_stage_tree(&self.staging_path)?;
+        let parent = self
+            .staging_path
+            .parent()
+            .ok_or_else(|| "Version stage has no parent directory".to_string())?;
+        sync_directory_durable(parent)?;
+        if self.failure_point == PublishFailurePoint::AfterTreeSync {
+            return Err("Injected version publish failure after tree sync".to_string());
+        }
+        match std::fs::symlink_metadata(&self.final_path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(_) => return Err("Version destination appeared before publish".to_string()),
+            Err(error) => {
+                return Err(format!(
+                    "Version destination inspection before publish failed: {error}"
+                ))
+            }
+        }
+        if let Err(error) = durable_rename_version(&self.staging_path, &self.final_path) {
+            // A write-through rename can theoretically report a late flush
+            // failure after the namespace move. Detect that state so rollback
+            // removes the directory we published instead of looking only for
+            // the now-absent stage path.
+            let stage_is_absent = matches!(
+                std::fs::symlink_metadata(&self.staging_path),
+                Err(inspect_error) if inspect_error.kind() == std::io::ErrorKind::NotFound
+            );
+            let final_is_directory =
+                std::fs::symlink_metadata(&self.final_path).is_ok_and(|metadata| {
+                    !metadata_is_link_or_reparse(&metadata) && metadata.file_type().is_dir()
+                });
+            self.published = stage_is_absent && final_is_directory;
+            return Err(error);
+        }
+        self.published = true;
+        if self.failure_point == PublishFailurePoint::AfterRename {
+            return Err("Injected version publish failure after rename".to_string());
+        }
+        // On Unix this is the durability boundary for the rename. Windows
+        // normally reports directory FlushFileBuffers as unsupported, in which
+        // case MOVEFILE_WRITE_THROUGH above is the platform guarantee.
+        sync_directory_durable(parent)?;
+        Ok(())
+    }
+
+    async fn publish(self) -> Result<Self, VersionCommitError> {
+        let result = tokio::task::spawn_blocking(move || {
+            let mut stage = self;
+            match stage.publish_blocking() {
+                Ok(()) => Ok(stage),
+                Err(error) => Err((stage, error)),
+            }
+        })
+        .await;
+        match result {
+            Ok(Ok(stage)) => Ok(stage),
+            Ok(Err((mut stage, message))) => {
+                let published_by_stage = stage.published;
+                let rollback_durable = stage.rollback().is_ok();
+                Err(VersionCommitError {
+                    message,
+                    rollback_durable,
+                    published_by_stage: Some(published_by_stage),
+                })
+            }
+            Err(error) => Err(VersionCommitError {
+                message: format!("Version durability worker failed: {error}"),
+                // The worker owns and drops the stage while unwinding, but the
+                // journal must remain because its directory sync result cannot
+                // be observed here.
+                rollback_durable: false,
+                published_by_stage: None,
+            }),
+        }
+    }
+
+    #[cfg(test)]
+    fn inject_publish_failure(&mut self, failure_point: PublishFailurePoint) {
+        self.failure_point = failure_point;
+    }
+
+    fn commit(&mut self) {
+        self.committed = true;
+    }
+
+    fn rollback(&mut self) -> Result<(), String> {
+        if self.committed || self.cleanup_complete {
+            return Ok(());
+        }
+        let cleanup_path = if self.published {
+            self.final_path.clone()
+        } else {
+            self.staging_path.clone()
+        };
+        match std::fs::remove_dir_all(&cleanup_path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("Version rollback removal failed: {error}")),
+        }
+        let parent = cleanup_path
+            .parent()
+            .ok_or_else(|| "Version rollback path has no parent".to_string())?;
+        sync_directory_durable(parent)?;
+        self.cleanup_complete = true;
+        Ok(())
+    }
+
+    fn final_path_for(&self, staged_path: &Path) -> Result<PathBuf, String> {
+        let relative = staged_path
+            .strip_prefix(&self.staging_path)
+            .map_err(|_| "Staged file escaped its version directory".to_string())?;
+        Ok(self.final_path.join(relative))
+    }
+}
+
+impl Drop for VersionStage {
+    fn drop(&mut self) {
+        if let Err(error) = self.rollback() {
+            log::warn!("Failed to durably roll back version directory: {error}");
+        }
+    }
+}
+
+async fn commit_published_version<F>(
+    mut stage: VersionStage,
+    commit_database: F,
+) -> Result<i64, VersionCommitError>
+where
+    F: FnOnce() -> Result<i64, String>,
+{
+    stage = stage.publish().await?;
+    let download_id = match commit_database() {
+        Ok(download_id) => download_id,
+        Err(message) => {
+            let rollback_durable = stage.rollback().is_ok();
+            return Err(VersionCommitError {
+                message,
+                rollback_durable,
+                published_by_stage: Some(true),
+            });
+        }
+    };
+    stage.commit();
+    Ok(download_id)
+}
+
+async fn commit_journaled_version<F>(
+    db: &Database,
+    source: &str,
+    source_id: &str,
+    version: i64,
+    stage: VersionStage,
+    commit_database: F,
+) -> Result<i64, String>
+where
+    F: FnOnce(&str) -> Result<i64, String>,
+{
+    let journal_id = db.create_download_save_journal(
+        source,
+        source_id,
+        version,
+        &stage.staging_path,
+        &stage.final_path,
+    )?;
+    let staging_path = stage.staging_path.clone();
+    let final_path = stage.final_path.clone();
+    let result = commit_published_version(stage, || commit_database(&journal_id)).await;
+    match result {
+        Ok(download_id) => {
+            // Files, directory entries, and the publish rename reached their
+            // durability boundary before the database transaction began. No
+            // filesystem mutation occurs after commit, so deleting only the
+            // SQLite recovery row does not require another filesystem fsync.
+            if let Err(error) = db.finish_download_save_journal(&journal_id) {
+                // The marker is committed in the same transaction as the
+                // version, so startup can safely finish journal cleanup.
+                log::warn!("Failed to finish committed download save journal: {error}");
+            }
+            Ok(download_id)
+        }
+        Err(error) => {
+            // Remove the staged/published tree before forgetting the durable
+            // rollback record. A crash during either step remains recoverable.
+            let is_absent = |path: &Path| {
+                matches!(
+                    std::fs::symlink_metadata(path),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound
+                )
+            };
+            let final_state_is_safe =
+                matches!(error.published_by_stage, Some(false)) || is_absent(&final_path);
+            if error.rollback_durable && is_absent(&staging_path) && final_state_is_safe {
+                if let Err(cleanup_error) = db.finish_download_save_journal(&journal_id) {
+                    log::warn!(
+                        "Failed to finish rolled-back download save journal: {cleanup_error}"
+                    );
+                }
+            } else {
+                log::warn!(
+                    "Retaining download save journal because durable filesystem rollback was incomplete"
+                );
+            }
+            Err(error.message)
+        }
+    }
+}
 
 #[tauri::command]
 pub async fn fetch_pixiv_novel(
@@ -66,10 +585,30 @@ pub async fn fetch_fanbox_creator_posts(
         .map_err(|e| e.to_string())
 }
 
+pub(crate) async fn fetch_fanbox_creator_posts_since(
+    creator_id: String,
+    cookie: String,
+    user_agent: String,
+    stop_source_id: Option<&str>,
+) -> Result<Vec<FanboxPost>, String> {
+    FanboxAPI::new(cookie, user_agent)
+        .get_creator_posts_since(&creator_id, stop_source_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub async fn fetch_pixiv_series_novels(
     series_id: String,
     refresh_token: String,
+) -> Result<Vec<pixiv_api::models::NovelInfo>, String> {
+    fetch_pixiv_series_novels_since(series_id, refresh_token, None).await
+}
+
+pub(crate) async fn fetch_pixiv_series_novels_since(
+    series_id: String,
+    refresh_token: String,
+    stop_source_id: Option<&str>,
 ) -> Result<Vec<pixiv_api::models::NovelInfo>, String> {
     let api = pixiv_api::aapi::AppPixivAPI::new_from_refresh_token(refresh_token);
     let id_u64: u64 = series_id.parse().map_err(|_| "Invalid series ID")?;
@@ -77,12 +616,13 @@ pub async fn fetch_pixiv_series_novels(
     let mut last_order: Option<String> = None;
     let mut all_novels = Vec::new();
     let mut page_count = 0;
+    let mut seen_cursors = std::collections::HashSet::new();
+    let mut seen_ids = std::collections::HashSet::new();
 
     loop {
         page_count += 1;
         if page_count > 100 {
-            log::warn!("fetch_pixiv_series_novels: Reached safety page limit of 100 pages. Terminating loop to prevent infinite request recursion.");
-            break;
+            return Err("Pixiv series history exceeded the 100-page safety limit".to_string());
         }
 
         let res = api
@@ -97,19 +637,38 @@ pub async fn fetch_pixiv_series_novels(
         }
 
         let parsed: NovelSeriesResponse = serde_json::from_value(res).map_err(|e| e.to_string())?;
-        all_novels.extend(parsed.novels);
-
-        if let Some(url) = parsed.next_url {
-            if let Some(pos) = url.find("last_order=") {
-                let last_order_str = &url[pos + 11..];
-                let last_order_val: String = last_order_str
-                    .chars()
-                    .take_while(|c| c.is_ascii_digit())
-                    .collect();
-                last_order = Some(last_order_val);
-            } else {
+        let mut reached_stop = false;
+        for novel in parsed.novels {
+            let id = novel.id.to_string();
+            if stop_source_id.is_some_and(|stop| stop == id) {
+                reached_stop = true;
                 break;
             }
+            if seen_ids.insert(novel.id) {
+                all_novels.push(novel);
+            }
+            if all_novels.len() >= 10_000 {
+                return Err(
+                    "Pixiv series history exceeded the 10,000-item safety limit".to_string()
+                );
+            }
+        }
+        if reached_stop {
+            break;
+        }
+
+        if let Some(url) = parsed.next_url {
+            let parsed_url = reqwest::Url::parse(&url)
+                .map_err(|error| format!("Invalid Pixiv series cursor URL: {error}"))?;
+            let cursor = parsed_url
+                .query_pairs()
+                .find_map(|(key, value)| (key == "last_order").then(|| value.into_owned()))
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| "Pixiv series response omitted last_order cursor".to_string())?;
+            if !seen_cursors.insert(cursor.clone()) {
+                return Err("Pixiv series cursor repeated without progress".to_string());
+            }
+            last_order = Some(cursor);
         } else {
             break;
         }
@@ -123,18 +682,27 @@ pub async fn fetch_pixiv_user_novels(
     user_id: String,
     refresh_token: String,
 ) -> Result<Vec<pixiv_api::models::NovelInfo>, String> {
+    fetch_pixiv_user_novels_since(user_id, refresh_token, None).await
+}
+
+pub(crate) async fn fetch_pixiv_user_novels_since(
+    user_id: String,
+    refresh_token: String,
+    stop_source_id: Option<&str>,
+) -> Result<Vec<pixiv_api::models::NovelInfo>, String> {
     let api = pixiv_api::aapi::AppPixivAPI::new_from_refresh_token(refresh_token);
     let id_u64: u64 = user_id.parse().map_err(|_| "Invalid user ID")?;
 
     let mut offset: Option<String> = None;
     let mut all_novels = Vec::new();
     let mut page_count = 0;
+    let mut seen_cursors = std::collections::HashSet::new();
+    let mut seen_ids = std::collections::HashSet::new();
 
     loop {
         page_count += 1;
         if page_count > 100 {
-            log::warn!("fetch_pixiv_user_novels: Reached safety page limit of 100 pages. Terminating loop to prevent infinite request recursion.");
-            break;
+            return Err("Pixiv author history exceeded the 100-page safety limit".to_string());
         }
 
         let res = api
@@ -142,19 +710,38 @@ pub async fn fetch_pixiv_user_novels(
             .await
             .map_err(|e| e.to_string())?;
 
-        all_novels.extend(res.novels);
-
-        if let Some(url) = res.next_url {
-            if let Some(pos) = url.find("offset=") {
-                let offset_str = &url[pos + 7..];
-                let offset_val: String = offset_str
-                    .chars()
-                    .take_while(|c| c.is_ascii_digit())
-                    .collect();
-                offset = Some(offset_val);
-            } else {
+        let mut reached_stop = false;
+        for novel in res.novels {
+            let id = novel.id.to_string();
+            if stop_source_id.is_some_and(|stop| stop == id) {
+                reached_stop = true;
                 break;
             }
+            if seen_ids.insert(novel.id) {
+                all_novels.push(novel);
+            }
+            if all_novels.len() >= 10_000 {
+                return Err(
+                    "Pixiv author history exceeded the 10,000-item safety limit".to_string()
+                );
+            }
+        }
+        if reached_stop {
+            break;
+        }
+
+        if let Some(url) = res.next_url {
+            let parsed_url = reqwest::Url::parse(&url)
+                .map_err(|error| format!("Invalid Pixiv author cursor URL: {error}"))?;
+            let cursor = parsed_url
+                .query_pairs()
+                .find_map(|(key, value)| (key == "offset").then(|| value.into_owned()))
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| "Pixiv author response omitted offset cursor".to_string())?;
+            if !seen_cursors.insert(cursor.clone()) {
+                return Err("Pixiv author cursor repeated without progress".to_string());
+            }
+            offset = Some(cursor);
         } else {
             break;
         }
@@ -318,6 +905,118 @@ pub(crate) fn compute_content_details(
     (hash, text_len, source_updated_at)
 }
 
+// ============================================================
+// pixiv の軽量な更新確認
+// ============================================================
+
+/// 本文を除いたメタデータだけの指紋。
+///
+/// pixiv の作品詳細 API（`fetch_pixiv_novel_metadata`）は本文を返さないが、
+/// ここで使う材料はすべて返す。保存時と更新確認時に同じ関数で作ることで、
+/// 「変わっていない作品の本文を取りに行かない」判断ができる。
+///
+/// **取りこぼし**: 文字数が1字も変わらない修正（誤字の置換、句読点の差し替え
+/// など）は、この指紋には現れない。呼び出し側は `last_deep_checked_at` を見て、
+/// 一定期間ごとに必ず本文まで突き合わせること。
+pub(crate) fn pixiv_meta_signature(
+    title: &str,
+    caption: &str,
+    cover_url: &str,
+    tags: &[String],
+    series_id: &str,
+    text_length: u64,
+) -> String {
+    use sha2::{Digest, Sha256};
+    let merged = format!(
+        "TITLE:{}\nCAPTION:{}\nCOVER:{}\nTAGS:{}\nSERIES:{}\nLENGTH:{}",
+        title,
+        caption,
+        cover_url,
+        tags.join(","),
+        series_id,
+        text_length
+    );
+    let mut hasher = Sha256::new();
+    hasher.update(merged.as_bytes());
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{:02x}", byte))
+        .collect()
+}
+
+/// 保存する JSON から指紋を作る。
+///
+/// **必ず `detail` を先に見る。** `PixivNovelContent` は最上位にも `cover_url` を
+/// 持つが、そちらは webview 側の原寸 URL を優先して選び直したもので、更新確認が
+/// 受け取る詳細 API の `image_urls.large` とは別物になる。最上位を先に読むと
+/// 指紋が永久に一致せず、短絡が一度も効かない。
+///
+/// 文字数が読めない形（取得経路によっては持たない）のときは `None` を返す。
+/// 指紋が無ければ更新確認は従来どおり本文まで取りに行くだけなので、精度は落ちない。
+pub(crate) fn pixiv_meta_signature_from_json(data: &serde_json::Value) -> Option<String> {
+    let detail = data.get("detail");
+    let field = |key: &str| -> Option<&serde_json::Value> {
+        detail
+            .and_then(|d| d.get(key))
+            .filter(|value| !value.is_null())
+            .or_else(|| data.get(key).filter(|value| !value.is_null()))
+    };
+    let text = |key: &str| -> String {
+        field(key)
+            .and_then(|value| value.as_str())
+            .unwrap_or("")
+            .to_string()
+    };
+
+    let text_length = field("text_length")
+        .or_else(|| field("textLength"))
+        .and_then(|value| value.as_u64())?;
+    let cover_url = {
+        let snake = text("cover_url");
+        if snake.is_empty() {
+            text("coverUrl")
+        } else {
+            snake
+        }
+    };
+    let series_id = {
+        let value = field("series_id").or_else(|| field("seriesId"));
+        match value {
+            Some(value) if value.is_number() => value.as_i64().unwrap_or_default().to_string(),
+            Some(value) => value.as_str().unwrap_or("").to_string(),
+            None => String::new(),
+        }
+    };
+    let tags = field("tags")
+        .and_then(|value| value.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .map(|item| {
+                    item.as_str()
+                        .map(str::to_string)
+                        .or_else(|| {
+                            item.get("name")
+                                .and_then(|name| name.as_str())
+                                .map(str::to_string)
+                        })
+                        .unwrap_or_default()
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    Some(pixiv_meta_signature(
+        &text("title"),
+        &text("caption"),
+        &cover_url,
+        &tags,
+        &series_id,
+        text_length,
+    ))
+}
+
 fn fanbox_has_material_content(data: &serde_json::Value) -> bool {
     let Some(body) = data.get("body").filter(|v| !v.is_null()) else {
         return false;
@@ -450,6 +1149,61 @@ fn safe_entity_segment(value: &str) -> String {
         .trim()
         .trim_matches('.')
         .to_string()
+}
+
+/// Resolve a work directory from provider-owned identifiers without allowing
+/// an IPC caller to turn either component into an absolute or relative path.
+///
+/// The character allowlist matches the identifiers currently used by Pixiv
+/// and FANBOX while retaining compatibility with synthetic/test identifiers.
+/// Canonical containment also rejects a pre-existing junction or symlink that
+/// points outside the library storage directory.
+fn secure_download_item_dir(
+    storage_dir: &Path,
+    source: &str,
+    source_id: &str,
+) -> Result<PathBuf, String> {
+    if !matches!(source, "pixiv" | "fanbox") {
+        return Err(format!("Unsupported download source: {source}"));
+    }
+    if source_id.is_empty()
+        || source_id.len() > 128
+        || !source_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+    {
+        return Err("Invalid source id: expected one safe provider identifier".to_string());
+    }
+
+    std::fs::create_dir_all(storage_dir)
+        .map_err(|e| format!("Storage directory creation failed: {e}"))?;
+    let canonical_storage = storage_dir
+        .canonicalize()
+        .map_err(|e| format!("Storage path resolution failed: {e}"))?;
+    let provider_dir = canonical_storage.join(source);
+    if !provider_dir.exists() {
+        std::fs::create_dir(&provider_dir)
+            .map_err(|e| format!("Provider directory creation failed: {e}"))?;
+    }
+    let canonical_provider = provider_dir
+        .canonicalize()
+        .map_err(|e| format!("Provider path resolution failed: {e}"))?;
+    if !canonical_provider.starts_with(&canonical_storage) || !canonical_provider.is_dir() {
+        return Err("Access denied: provider path escapes library storage".to_string());
+    }
+
+    // Join to the already resolved provider directory. This avoids creating a
+    // directory outside storage before detecting a malicious provider junction.
+    let candidate = canonical_provider.join(source_id);
+    std::fs::create_dir_all(&candidate)
+        .map_err(|e| format!("Download directory creation failed: {e}"))?;
+    let canonical_candidate = candidate
+        .canonicalize()
+        .map_err(|e| format!("Download path resolution failed: {e}"))?;
+    if !canonical_candidate.starts_with(&canonical_storage) || !canonical_candidate.is_dir() {
+        return Err("Access denied: download path escapes library storage".to_string());
+    }
+    Ok(canonical_candidate)
 }
 
 fn sha256_json(value: &serde_json::Value) -> Result<String, String> {
@@ -706,7 +1460,33 @@ async fn download_person_snapshot_icon(
         .await
         .map_err(|error| error.to_string())?;
     let path = dir.join(format!("icon.{}", ext));
-    let bytes = reqwest::Client::new()
+    if crate::downloader::asset_downloader::asset_path_is_valid_image(
+        &path,
+        crate::downloader::asset_downloader::MAX_PROFILE_IMAGE_BYTES,
+    )
+    .await
+    {
+        let bytes = tokio::fs::symlink_metadata(&path)
+            .await
+            .map_err(|error| error.to_string())?
+            .len();
+        return Ok(Some((path.to_string_lossy().to_string(), bytes as i64)));
+    }
+    if let Ok(metadata) = tokio::fs::symlink_metadata(&path).await {
+        if metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+            tokio::fs::remove_file(&path)
+                .await
+                .map_err(|error| format!("Failed to remove invalid profile image: {error}"))?;
+        } else {
+            return Err("Profile image destination is not a regular file".to_string());
+        }
+    }
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|error| format!("Profile image client creation failed: {error}"))?;
+    let response = client
         .get(url)
         .header(
             "referer",
@@ -720,17 +1500,15 @@ async fn download_person_snapshot_icon(
         .await
         .map_err(|error| error.to_string())?
         .error_for_status()
-        .map_err(|error| error.to_string())?
-        .bytes()
-        .await
         .map_err(|error| error.to_string())?;
-    tokio::fs::write(&path, &bytes)
-        .await
-        .map_err(|error| error.to_string())?;
-    Ok(Some((
-        path.to_string_lossy().to_string(),
-        bytes.len() as i64,
-    )))
+    let bytes = crate::downloader::asset_downloader::save_response_atomically(
+        response,
+        &path,
+        crate::downloader::asset_downloader::MAX_PROFILE_IMAGE_BYTES,
+        true,
+    )
+    .await?;
+    Ok(Some((path.to_string_lossy().to_string(), bytes as i64)))
 }
 
 async fn sync_download_entities(
@@ -794,21 +1572,6 @@ async fn sync_download_entities(
     }
 }
 
-/// ディレクトリを再帰的にコピーする補助関数
-fn copy_dir_all_sync(src: &Path, dst: &Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(dst)?;
-    for entry in std::fs::read_dir(src)? {
-        let entry = entry?;
-        let ty = entry.file_type()?;
-        if ty.is_dir() {
-            copy_dir_all_sync(&entry.path(), &dst.join(entry.file_name()))?;
-        } else {
-            std::fs::copy(entry.path(), dst.join(entry.file_name()))?;
-        }
-    }
-    Ok(())
-}
-
 #[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn download_and_save(
@@ -827,8 +1590,11 @@ pub async fn download_and_save(
     user_agent: Option<String>,
 ) -> Result<DownloadEntry, String> {
     let state = app.state::<Arc<AppState>>();
+    let _library_write_guard = state.library_gate.write().await;
     let storage = state.db.storage_dir().to_path_buf();
-    let root_item_dir = storage.join(&source).join(&source_id);
+    let work_lock = work_save_mutex(&source, &source_id);
+    let _work_guard = work_lock.lock().await;
+    let root_item_dir = secure_download_item_dir(&storage, &source, &source_id)?;
 
     // 1. ハッシュ値と文字数を算出
     let (new_hash, new_text_len, new_source_updated) = compute_content_details(&data, &source);
@@ -889,77 +1655,46 @@ pub async fn download_and_save(
             if let Err(e) = state.db.reindex_download(dl.id) {
                 log::warn!("Failed to refresh search index for {}: {}", dl.id, e);
             }
+            // 中身は変わっていなかったが、本文まで見たのは確か。次の確認を
+            // 軽く済ませられるよう、指紋と時刻を取り直しておく。
+            record_pixiv_meta_state(&state, dl.id, &source, &data);
             return state.db.get_download(dl.id);
         }
     }
 
-    // 新しいバージョン用のアイテムディレクトリ
-    let item_dir = root_item_dir.join(format!("v{}", next_version));
-    tokio::fs::create_dir_all(&item_dir)
-        .await
-        .map_err(|e| e.to_string())?;
-
-    // 既存 v1 への自動マイグレーション（フォルダ直下にファイルがあり、かつ v1 フォルダがまだない場合）
-    if existing_dl.is_some() && is_update && next_version == 2 {
-        let v1_dir = root_item_dir.join("v1");
-        if !v1_dir.exists() {
-            tokio::fs::create_dir_all(&v1_dir)
-                .await
-                .map_err(|e| e.to_string())?;
-
-            // プレミアム最適化：スレッドプールのワーカースレッドに同期ディスク操作を委譲
-            let src_root = root_item_dir.clone();
-            let dest_root = v1_dir.clone();
-            tokio::task::spawn_blocking(move || {
-                let paths_to_move = vec!["data.json", "original.json", "data_assets"];
-                for name in paths_to_move {
-                    let src_path = src_root.join(name);
-                    let dest_path = dest_root.join(name);
-                    if src_path.exists() {
-                        if src_path.is_dir() {
-                            copy_dir_all_sync(&src_path, &dest_path)?;
-                            std::fs::remove_dir_all(&src_path)?;
-                        } else {
-                            std::fs::copy(&src_path, &dest_path)?;
-                            std::fs::remove_file(&src_path)?;
-                        }
-                    }
-                }
-                Ok::<(), std::io::Error>(())
-            })
-            .await
-            .map_err(|e| format!("Migration thread panicked: {}", e))?
-            .map_err(|e| format!("Migration failed: {}", e))?;
-
-            // DBに v1 の履歴を追加
-            if let Some(ref dl) = existing_dl {
-                let v1_orig_path = v1_dir.join("original.json");
-                let v1_data_path = v1_dir.join("data.json");
-                let resolved_v1_path = if v1_orig_path.exists() {
-                    v1_orig_path
-                } else if v1_data_path.exists() {
-                    v1_data_path
-                } else {
-                    v1_orig_path
-                };
-
-                state.db.insert_version(&NewVersion {
+    let mut legacy_v1_version = None;
+    // Legacy files are left in place until the new version commits. Moving
+    // them before the transaction made a failed update non-retryable.
+    if existing_dl.is_some() && is_update && next_version == 2 && !root_item_dir.join("v1").exists()
+    {
+        if let Some(ref dl) = existing_dl {
+            let legacy_path = root_item_dir.join("original.json");
+            let legacy_path = if legacy_path.exists() {
+                legacy_path
+            } else {
+                root_item_dir.join("data.json")
+            };
+            if legacy_path.exists() && state.db.get_versions(dl.id)?.iter().all(|v| v.version != 1)
+            {
+                legacy_v1_version = Some(NewVersion {
                     download_id: dl.id,
                     version: 1,
                     content_hash: dl.content_hash.clone(),
                     text_length: dl.text_length,
-                    json_path: resolved_v1_path.to_string_lossy().to_string(),
-                    original_json_path: Some(resolved_v1_path.to_string_lossy().to_string()),
+                    json_path: legacy_path.to_string_lossy().to_string(),
+                    original_json_path: Some(legacy_path.to_string_lossy().to_string()),
                     asset_count: dl.asset_count,
                     file_size_bytes: dl.file_size_bytes,
                     created_at: dl.downloaded_at.clone(),
-                    change_summary: Some("初期バージョン (自動移行)".to_string()),
-                })?;
+                    change_summary: Some("初期バージョン (旧形式)".to_string()),
+                });
             }
         }
     }
 
     let is_fanbox = source == "fanbox";
+    let version_stage = VersionStage::create(&root_item_dir, next_version)?;
+    let item_dir = version_stage.staging_path.clone();
 
     // 1. オリジナルJSON保存
     let original_json_path = item_dir.join("original.json");
@@ -990,7 +1725,7 @@ pub async fn download_and_save(
     // Assetsフォルダ名は "data_assets" にするため、dummyとして data.json のパスを指定します
     let dummy_json_path = item_dir.join("data.json");
 
-    if let Err(e) = crate::downloader::asset_downloader::download_and_link_assets(
+    crate::downloader::asset_downloader::download_and_link_assets(
         &app,
         &mut modified_data,
         &dummy_json_path,
@@ -998,10 +1733,7 @@ pub async fn download_and_save(
         cookie,
         user_agent,
     )
-    .await
-    {
-        log::error!("Asset download had errors: {}", e);
-    }
+    .await?;
 
     // 3. アセットの情報を収集
     let assets_dir = item_dir.join("data_assets");
@@ -1029,7 +1761,7 @@ pub async fn download_and_save(
             .cloned();
     }
 
-    let json_path = original_json_path.clone();
+    let json_path = version_stage.final_path.join("original.json");
 
     // 5. DB登録
     let new_dl = NewDownload {
@@ -1041,9 +1773,13 @@ pub async fn download_and_save(
         content_type,
         tags: tags.unwrap_or_default(),
         excerpt,
-        cover_path: cover_path_str,
+        cover_path: cover_path_str
+            .as_deref()
+            .map(|path| version_stage.final_path_for(Path::new(path)))
+            .transpose()?
+            .map(|path| path.to_string_lossy().to_string()),
         json_path: json_path.to_string_lossy().to_string(),
-        original_json_path: Some(original_json_path.to_string_lossy().to_string()),
+        original_json_path: Some(json_path.to_string_lossy().to_string()),
         asset_count: asset_entries.len() as i64,
         file_size_bytes: total_size,
         downloaded_at: chrono::Utc::now().to_rfc3339(),
@@ -1059,7 +1795,47 @@ pub async fn download_and_save(
         favorite: existing_dl.as_ref().map(|dl| dl.favorite).unwrap_or(false),
     };
 
-    let dl_id = state.db.upsert_download(&new_dl)?;
+    for asset in &mut asset_entries {
+        asset.local_path = version_stage
+            .final_path_for(Path::new(&asset.local_path))?
+            .to_string_lossy()
+            .to_string();
+    }
+
+    let mut versions_to_insert = legacy_v1_version.into_iter().collect::<Vec<_>>();
+    versions_to_insert.push(NewVersion {
+        download_id: existing_dl.as_ref().map(|dl| dl.id).unwrap_or(0),
+        version: next_version,
+        content_hash: Some(new_hash),
+        text_length: new_text_len,
+        json_path: json_path.to_string_lossy().to_string(),
+        original_json_path: Some(json_path.to_string_lossy().to_string()),
+        asset_count: new_dl.asset_count,
+        file_size_bytes: new_dl.file_size_bytes,
+        created_at: new_dl.downloaded_at.clone(),
+        change_summary: Some(if is_update {
+            format!("本文・コンテンツの更新 (v{})", next_version)
+        } else {
+            format!("新規ダウンロード (v{})", next_version)
+        }),
+    });
+
+    let dl_id = commit_journaled_version(
+        &state.db,
+        &source,
+        &source_id,
+        next_version,
+        version_stage,
+        |journal_id| {
+            state.db.commit_download_save_with_journal(
+                &new_dl,
+                &asset_entries,
+                &versions_to_insert,
+                journal_id,
+            )
+        },
+    )
+    .await?;
 
     sync_download_entities(
         &state,
@@ -1072,43 +1848,36 @@ pub async fn download_and_save(
     )
     .await;
 
-    // アセットをDB登録
-    for mut asset in asset_entries {
-        asset.download_id = dl_id;
-        if let Err(e) = state.db.insert_asset(&asset) {
-            log::error!("Failed to insert asset to database: {}", e);
-        }
-    }
-
-    // 6. 今回のバージョン履歴レコードをDB挿入
-    // ただし、既存レコードがあり、かつ今回コンテンツ更新がなかった（is_update = false）場合は、
-    // すでにそのバージョン（e.g. v1）の履歴レコードが存在するため、一意制約エラーを避けるために挿入をスキップします。
-    if existing_dl.is_none() || is_update {
-        let change_summary = if is_update {
-            format!("本文・コンテンツの更新 (v{})", next_version)
-        } else {
-            format!("新規ダウンロード (v{})", next_version)
-        };
-
-        state.db.insert_version(&NewVersion {
-            download_id: dl_id,
-            version: next_version,
-            content_hash: Some(new_hash),
-            text_length: new_text_len,
-            json_path: json_path.to_string_lossy().to_string(),
-            original_json_path: Some(original_json_path.to_string_lossy().to_string()),
-            asset_count: new_dl.asset_count,
-            file_size_bytes: new_dl.file_size_bytes,
-            created_at: new_dl.downloaded_at.clone(),
-            change_summary: Some(change_summary),
-        })?;
-    }
-
     if let Err(e) = state.db.reindex_download(dl_id) {
         log::warn!("Failed to refresh search index for {}: {}", dl_id, e);
     }
 
+    record_pixiv_meta_state(&state, dl_id, &source, &data);
+
     state.db.get_download(dl_id)
+}
+
+/// 本文まで取り込んだ直後の覚え書きを残す（pixiv のみ）。
+///
+/// 失敗しても保存そのものは成功しているので、記録できないことは警告に留める。
+/// 次の更新確認が本文まで取りに行くだけで、結果は変わらない。
+fn record_pixiv_meta_state(
+    state: &AppState,
+    download_id: i64,
+    source: &str,
+    data: &serde_json::Value,
+) {
+    if source != "pixiv" {
+        return;
+    }
+    let signature = pixiv_meta_signature_from_json(data);
+    if let Err(error) = state.db.set_download_meta_state(
+        download_id,
+        signature.as_deref(),
+        &chrono::Utc::now().to_rfc3339(),
+    ) {
+        log::warn!("メタデータ指紋を保存できません ({download_id}): {error}");
+    }
 }
 
 pub(crate) fn collect_assets_recursive(
@@ -1116,22 +1885,131 @@ pub(crate) fn collect_assets_recursive(
     assets: &mut Vec<NewAsset>,
     total_size: &mut i64,
     cover_path: &mut Option<String>,
-    _depth: u32,
+    depth: u32,
 ) -> Result<(), String> {
+    collect_assets_recursive_with_limits(
+        dir,
+        assets,
+        total_size,
+        cover_path,
+        depth,
+        AssetScanLimits {
+            max_depth: 16,
+            max_files: 20_000,
+        },
+    )
+}
+
+#[derive(Clone, Copy)]
+struct AssetScanLimits {
+    max_depth: u32,
+    max_files: usize,
+}
+
+fn collect_assets_recursive_with_limits(
+    dir: &Path,
+    assets: &mut Vec<NewAsset>,
+    total_size: &mut i64,
+    cover_path: &mut Option<String>,
+    depth: u32,
+    limits: AssetScanLimits,
+) -> Result<(), String> {
+    let root = dir
+        .canonicalize()
+        .map_err(|error| format!("Failed to resolve asset root: {error}"))?;
+    let mut visited = std::collections::HashSet::new();
+    let mut scanned_files = 0usize;
+    collect_assets_recursive_inner(
+        dir,
+        &root,
+        assets,
+        total_size,
+        cover_path,
+        depth,
+        limits,
+        &mut scanned_files,
+        &mut visited,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_assets_recursive_inner(
+    dir: &Path,
+    root: &Path,
+    assets: &mut Vec<NewAsset>,
+    total_size: &mut i64,
+    cover_path: &mut Option<String>,
+    depth: u32,
+    limits: AssetScanLimits,
+    scanned_files: &mut usize,
+    visited: &mut std::collections::HashSet<PathBuf>,
+) -> Result<(), String> {
+    if depth > limits.max_depth {
+        return Err(format!(
+            "Asset directory nesting exceeds {} levels",
+            limits.max_depth
+        ));
+    }
+    let metadata = std::fs::symlink_metadata(dir)
+        .map_err(|error| format!("Failed to inspect asset directory: {error}"))?;
+    if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
+        return Err("Asset directory is a link or not a directory".to_string());
+    }
+    let canonical_dir = dir
+        .canonicalize()
+        .map_err(|error| format!("Failed to resolve asset directory: {error}"))?;
+    if !canonical_dir.starts_with(root) {
+        return Err("Asset directory escapes its version root".to_string());
+    }
+    if !visited.insert(canonical_dir) {
+        return Err("Asset directory contains a filesystem cycle".to_string());
+    }
+
     let entries = std::fs::read_dir(dir).map_err(|e| e.to_string())?;
     for entry in entries {
         let entry = entry.map_err(|e| e.to_string())?;
         let path = entry.path();
-        if path.is_dir() {
-            collect_assets_recursive(&path, assets, total_size, cover_path, _depth + 1)?;
-        } else {
+        let metadata = std::fs::symlink_metadata(&path)
+            .map_err(|error| format!("Failed to inspect asset entry: {error}"))?;
+        if metadata.file_type().is_symlink() {
+            return Err(format!(
+                "Asset scan refuses filesystem links: {}",
+                path.display()
+            ));
+        }
+        if metadata.file_type().is_dir() {
+            collect_assets_recursive_inner(
+                &path,
+                root,
+                assets,
+                total_size,
+                cover_path,
+                depth + 1,
+                limits,
+                scanned_files,
+                visited,
+            )?;
+        } else if metadata.file_type().is_file() {
             let filename = path
                 .file_name()
                 .unwrap_or_default()
                 .to_string_lossy()
                 .to_string();
-            let size = path.metadata().map(|m| m.len() as i64).unwrap_or(0);
-            *total_size += size;
+            if is_unpublished_part_file(&path) {
+                continue;
+            }
+            *scanned_files += 1;
+            if *scanned_files > limits.max_files {
+                return Err(format!(
+                    "Asset file count exceeds the {} file limit",
+                    limits.max_files
+                ));
+            }
+            let size = i64::try_from(metadata.len())
+                .map_err(|_| "Asset file is too large to index".to_string())?;
+            *total_size = total_size
+                .checked_add(size)
+                .ok_or_else(|| "Total asset size overflow".to_string())?;
 
             let parent_name = path
                 .parent()
@@ -1169,7 +2047,632 @@ pub(crate) fn collect_assets_recursive(
                 mime_type: mime,
                 file_size_bytes: size,
             });
+        } else {
+            return Err(format!(
+                "Asset scan refuses special filesystem entries: {}",
+                path.display()
+            ));
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod path_security_tests {
+    use super::*;
+
+    fn temp_storage() -> PathBuf {
+        let path =
+            std::env::temp_dir().join(format!("piep_download_path_test_{}", rand::random::<u64>()));
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn download_path_accepts_known_sources_and_stays_under_storage() {
+        let storage = temp_storage();
+        let resolved = secure_download_item_dir(&storage, "pixiv", "123_abc-9").unwrap();
+        assert!(resolved.starts_with(storage.canonicalize().unwrap()));
+        assert!(resolved.ends_with(Path::new("pixiv").join("123_abc-9")));
+        let _ = std::fs::remove_dir_all(storage);
+    }
+
+    #[test]
+    fn download_path_rejects_traversal_absolute_and_unknown_sources() {
+        let storage = temp_storage();
+        for (source, source_id) in [
+            ("../outside", "123"),
+            ("pixiv", "../outside"),
+            ("pixiv", "..\\outside"),
+            ("pixiv", "/outside"),
+            ("pixiv", "C:\\outside"),
+            ("unknown", "123"),
+            ("fanbox", ""),
+        ] {
+            assert!(
+                secure_download_item_dir(&storage, source, source_id).is_err(),
+                "accepted unsafe source={source:?}, source_id={source_id:?}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(storage);
+    }
+
+    #[test]
+    fn asset_scan_enforces_depth_and_file_count_limits() {
+        let root = temp_storage();
+        let deep = root.join("one").join("two");
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::write(deep.join("asset.bin"), b"asset").unwrap();
+        let mut assets = Vec::new();
+        let mut total_size = 0;
+        let mut cover = None;
+        let depth_error = collect_assets_recursive_with_limits(
+            &root,
+            &mut assets,
+            &mut total_size,
+            &mut cover,
+            0,
+            AssetScanLimits {
+                max_depth: 1,
+                max_files: 10,
+            },
+        )
+        .unwrap_err();
+        assert!(depth_error.contains("nesting"));
+
+        let flat = temp_storage();
+        for index in 0..3 {
+            std::fs::write(flat.join(format!("asset-{index}.bin")), b"asset").unwrap();
+        }
+        let mut assets = Vec::new();
+        let mut total_size = 0;
+        let mut cover = None;
+        let count_error = collect_assets_recursive_with_limits(
+            &flat,
+            &mut assets,
+            &mut total_size,
+            &mut cover,
+            0,
+            AssetScanLimits {
+                max_depth: 1,
+                max_files: 2,
+            },
+        )
+        .unwrap_err();
+        assert!(count_error.contains("file count"));
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(flat);
+    }
+
+    #[test]
+    fn asset_scan_ignores_unpublished_part_files() {
+        let root = temp_storage();
+        std::fs::write(root.join("asset.bin"), b"complete").unwrap();
+        std::fs::write(root.join(".asset.bin.123.part"), b"partial").unwrap();
+        let mut assets = Vec::new();
+        let mut total_size = 0;
+        let mut cover = None;
+
+        collect_assets_recursive(&root, &mut assets, &mut total_size, &mut cover, 0).unwrap();
+
+        assert_eq!(assets.len(), 1);
+        assert_eq!(assets[0].filename, "asset.bin");
+        assert_eq!(total_size, 8);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn asset_scan_refuses_directory_links_when_supported() {
+        let root = temp_storage();
+        let outside = temp_storage();
+        std::fs::write(outside.join("outside.bin"), b"outside").unwrap();
+        let link = root.join("linked");
+        #[cfg(unix)]
+        let link_result = std::os::unix::fs::symlink(&outside, &link);
+        #[cfg(windows)]
+        let link_result = std::os::windows::fs::symlink_dir(&outside, &link);
+        #[cfg(not(any(unix, windows)))]
+        let link_result: std::io::Result<()> = Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "links unavailable",
+        ));
+
+        if link_result.is_ok() {
+            let mut assets = Vec::new();
+            let mut total_size = 0;
+            let mut cover = None;
+            let error =
+                collect_assets_recursive(&root, &mut assets, &mut total_size, &mut cover, 0)
+                    .unwrap_err();
+            assert!(error.contains("links"));
+        }
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(outside);
+    }
+
+    #[tokio::test]
+    async fn same_work_save_lock_serializes_two_concurrent_callers() {
+        let first_lock = work_save_mutex("pixiv", "concurrent-work");
+        let first_guard = first_lock.lock().await;
+        let acquired_second = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let acquired_second_task = acquired_second.clone();
+        let second = tokio::spawn(async move {
+            let second_lock = work_save_mutex("pixiv", "concurrent-work");
+            let _second_guard = second_lock.lock().await;
+            acquired_second_task.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+
+        tokio::task::yield_now().await;
+        assert!(!acquired_second.load(std::sync::atomic::Ordering::SeqCst));
+        drop(first_guard);
+        second.await.unwrap();
+        assert!(acquired_second.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn two_concurrent_save_pipelines_publish_distinct_versions() {
+        let root = temp_storage();
+        let storage = root.join("downloads");
+        let db =
+            Arc::new(crate::database::Database::open(&root.join("piep.db"), &storage).unwrap());
+        let save = |db: Arc<crate::database::Database>, marker: &'static str| {
+            let storage = storage.clone();
+            async move {
+                let work_lock = work_save_mutex("pixiv", "parallel-save");
+                let _guard = work_lock.lock().await;
+                let work_root = secure_download_item_dir(&storage, "pixiv", "parallel-save")?;
+                let existing = db.get_download_by_source("pixiv", "parallel-save")?;
+                let version = existing
+                    .as_ref()
+                    .map(|download| download.current_version + 1)
+                    .unwrap_or(1);
+                let stage = VersionStage::create(&work_root, version)?;
+                std::fs::write(stage.staging_path.join("original.json"), marker)
+                    .map_err(|error| error.to_string())?;
+                let json_path = stage.final_path.join("original.json");
+                let download = NewDownload {
+                    source: "pixiv".to_string(),
+                    source_id: "parallel-save".to_string(),
+                    title: marker.to_string(),
+                    author_name: "Author".to_string(),
+                    author_id: "author".to_string(),
+                    content_type: "novel".to_string(),
+                    tags: Vec::new(),
+                    excerpt: None,
+                    cover_path: None,
+                    json_path: json_path.to_string_lossy().to_string(),
+                    original_json_path: Some(json_path.to_string_lossy().to_string()),
+                    asset_count: 0,
+                    file_size_bytes: marker.len() as i64,
+                    downloaded_at: chrono::Utc::now().to_rfc3339(),
+                    source_created_at: None,
+                    content_hash: Some(marker.to_string()),
+                    text_length: marker.len() as i64,
+                    source_updated_at: None,
+                    watch_updates: false,
+                    current_version: version,
+                    favorite: false,
+                };
+                let version_row = NewVersion {
+                    download_id: existing.as_ref().map(|entry| entry.id).unwrap_or(0),
+                    version,
+                    content_hash: download.content_hash.clone(),
+                    text_length: download.text_length,
+                    json_path: download.json_path.clone(),
+                    original_json_path: download.original_json_path.clone(),
+                    asset_count: 0,
+                    file_size_bytes: download.file_size_bytes,
+                    created_at: download.downloaded_at.clone(),
+                    change_summary: None,
+                };
+                commit_journaled_version(
+                    &db,
+                    "pixiv",
+                    "parallel-save",
+                    version,
+                    stage,
+                    |journal_id| {
+                        db.commit_download_save_with_journal(
+                            &download,
+                            &[],
+                            &[version_row],
+                            journal_id,
+                        )
+                    },
+                )
+                .await
+            }
+        };
+        let first = tokio::spawn(save(db.clone(), "first"));
+        let second = tokio::spawn(save(db.clone(), "second"));
+
+        first.await.unwrap().unwrap();
+        second.await.unwrap().unwrap();
+
+        let download = db
+            .get_download_by_source("pixiv", "parallel-save")
+            .unwrap()
+            .unwrap();
+        assert_eq!(download.current_version, 2);
+        assert_eq!(db.get_versions(download.id).unwrap().len(), 2);
+        let mut bodies = [
+            std::fs::read_to_string(storage.join("pixiv/parallel-save/v1/original.json")).unwrap(),
+            std::fs::read_to_string(storage.join("pixiv/parallel-save/v2/original.json")).unwrap(),
+        ];
+        bodies.sort();
+        assert_eq!(bodies, ["first", "second"]);
+        drop(db);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn durable_stage_walk_enforces_depth_and_entry_limits() {
+        let deep_root = temp_storage();
+        let deep_file = deep_root.join("one").join("two").join("asset.bin");
+        std::fs::create_dir_all(deep_file.parent().unwrap()).unwrap();
+        std::fs::write(&deep_file, b"asset").unwrap();
+        let depth_error = durable_sync_stage_tree_with_limits(
+            &deep_root,
+            StageSyncLimits {
+                max_depth: 1,
+                max_entries: 20,
+            },
+        )
+        .unwrap_err();
+        assert!(depth_error.contains("nesting"));
+
+        let wide_root = temp_storage();
+        for index in 0..3 {
+            std::fs::write(wide_root.join(format!("asset-{index}.bin")), b"asset").unwrap();
+        }
+        let count_error = durable_sync_stage_tree_with_limits(
+            &wide_root,
+            StageSyncLimits {
+                max_depth: 1,
+                // Root plus only two children are permitted.
+                max_entries: 3,
+            },
+        )
+        .unwrap_err();
+        assert!(count_error.contains("entry safety limit"));
+
+        let _ = std::fs::remove_dir_all(deep_root);
+        let _ = std::fs::remove_dir_all(wide_root);
+    }
+
+    #[tokio::test]
+    async fn durable_publish_rejects_links_and_preserves_their_targets() {
+        let root = temp_storage();
+        let work = root.join("work");
+        let outside = root.join("outside");
+        std::fs::create_dir_all(&work).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("outside.bin"), b"outside").unwrap();
+        let stage = VersionStage::create(&work, 1).unwrap();
+        let link = stage.staging_path.join("linked");
+        #[cfg(unix)]
+        let link_result = std::os::unix::fs::symlink(&outside, &link);
+        #[cfg(windows)]
+        let link_result = std::os::windows::fs::symlink_dir(&outside, &link);
+        #[cfg(not(any(unix, windows)))]
+        let link_result: std::io::Result<()> = Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "links unavailable",
+        ));
+
+        match link_result {
+            Ok(()) => {
+                let final_path = stage.final_path.clone();
+                let error = stage.publish().await.unwrap_err();
+                assert!(error.message.contains("link/reparse"));
+                assert!(!final_path.exists());
+                assert_eq!(
+                    std::fs::read(outside.join("outside.bin")).unwrap(),
+                    b"outside"
+                );
+            }
+            Err(_) => drop(stage),
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn durable_publish_rejects_and_cleans_unpublished_part_files() {
+        let root = temp_storage();
+        let work = root.join("work");
+        std::fs::create_dir(&work).unwrap();
+        let stage = VersionStage::create(&work, 1).unwrap();
+        let staging_path = stage.staging_path.clone();
+        let final_path = stage.final_path.clone();
+        std::fs::write(
+            stage.staging_path.join(".original.json.test.part"),
+            b"partial",
+        )
+        .unwrap();
+
+        let error = stage.publish().await.unwrap_err();
+        assert!(error.message.contains("partial file"));
+        assert!(!staging_path.exists());
+        assert!(!final_path.exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn a_destination_appearing_before_publish_is_never_removed_as_rollback() {
+        let root = temp_storage();
+        let storage = root.join("downloads");
+        let db_path = root.join("piep.db");
+        let db = Database::open(&db_path, &storage).unwrap();
+        let work = secure_download_item_dir(&storage, "pixiv", "publish-race").unwrap();
+        let stage = VersionStage::create(&work, 1).unwrap();
+        std::fs::write(stage.staging_path.join("original.json"), b"staged").unwrap();
+        std::fs::create_dir(&stage.final_path).unwrap();
+        let external_file = stage.final_path.join("external.txt");
+        std::fs::write(&external_file, b"must-survive").unwrap();
+
+        let error = commit_journaled_version(&db, "pixiv", "publish-race", 1, stage, |_| {
+            panic!("database commit must not run when the destination already exists")
+        })
+        .await
+        .unwrap_err();
+        assert!(error.contains("destination appeared"));
+        assert_eq!(std::fs::read(&external_file).unwrap(), b"must-survive");
+
+        drop(db);
+        let reopened = Database::open(&db_path, &storage).unwrap();
+        assert_eq!(std::fs::read(&external_file).unwrap(), b"must-survive");
+        drop(reopened);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn publish_failures_keep_old_database_and_files_and_remove_partial_stage() {
+        let root = temp_storage();
+        let storage = root.join("downloads");
+        let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+        let work = secure_download_item_dir(&storage, "pixiv", "durable-failure").unwrap();
+        let old_dir = work.join("v1");
+        std::fs::create_dir(&old_dir).unwrap();
+        let old_json = old_dir.join("original.json");
+        std::fs::write(&old_json, b"old-version").unwrap();
+        let old_download = NewDownload {
+            source: "pixiv".to_string(),
+            source_id: "durable-failure".to_string(),
+            title: "old-title".to_string(),
+            author_name: "Author".to_string(),
+            author_id: "author".to_string(),
+            content_type: "novel".to_string(),
+            tags: Vec::new(),
+            excerpt: None,
+            cover_path: None,
+            json_path: old_json.to_string_lossy().to_string(),
+            original_json_path: Some(old_json.to_string_lossy().to_string()),
+            asset_count: 0,
+            file_size_bytes: 11,
+            downloaded_at: chrono::Utc::now().to_rfc3339(),
+            source_created_at: None,
+            content_hash: Some("old-hash".to_string()),
+            text_length: 11,
+            source_updated_at: None,
+            watch_updates: false,
+            current_version: 1,
+            favorite: false,
+        };
+        let old_id = db.upsert_download(&old_download).unwrap();
+
+        for failure_point in [
+            PublishFailurePoint::BeforeTreeSync,
+            PublishFailurePoint::AfterTreeSync,
+            PublishFailurePoint::AfterRename,
+        ] {
+            let mut stage = VersionStage::create(&work, 2).unwrap();
+            std::fs::write(stage.staging_path.join("original.json"), b"new-version").unwrap();
+            let partial_dir = stage.staging_path.join("data_assets");
+            std::fs::create_dir(&partial_dir).unwrap();
+            let payload_name = if failure_point == PublishFailurePoint::BeforeTreeSync {
+                ".asset.bin.test.part"
+            } else {
+                "asset.bin"
+            };
+            std::fs::write(partial_dir.join(payload_name), b"payload").unwrap();
+            stage.inject_publish_failure(failure_point);
+            let commit_called = std::sync::atomic::AtomicBool::new(false);
+
+            let error = commit_journaled_version(&db, "pixiv", "durable-failure", 2, stage, |_| {
+                commit_called.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(old_id)
+            })
+            .await
+            .unwrap_err();
+            assert!(error.contains("Injected version publish failure"));
+            assert!(!commit_called.load(std::sync::atomic::Ordering::SeqCst));
+
+            let unchanged = db.get_download(old_id).unwrap();
+            assert_eq!(unchanged.title, "old-title");
+            assert_eq!(unchanged.current_version, 1);
+            assert_eq!(std::fs::read(&old_json).unwrap(), b"old-version");
+            assert!(!work.join("v2").exists());
+            assert!(std::fs::read_dir(&work).unwrap().all(|entry| {
+                let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+                !name.contains(".stage") && !name.ends_with(".part")
+            }));
+        }
+        drop(db);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_write_through_publish_moves_a_synced_complete_tree() {
+        use std::os::windows::ffi::OsStrExt;
+
+        let root = temp_storage();
+        let mut work = root.join("work");
+        for index in 0..6 {
+            work = work.join(format!("long-version-parent-{index}-xxxxxxxxxxxxxxxxxxxx"));
+        }
+        std::fs::create_dir_all(&work).unwrap();
+        let stage = VersionStage::create(&work, 1).unwrap();
+        let staging_path = stage.staging_path.clone();
+        let final_path = stage.final_path.clone();
+        assert!(staging_path.as_os_str().encode_wide().count() > 260);
+        let nested = stage.staging_path.join("data_assets").join("cover");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(stage.staging_path.join("original.json"), b"json").unwrap();
+        std::fs::write(nested.join("cover.bin"), b"cover").unwrap();
+
+        let mut stage = stage.publish().await.unwrap();
+        assert!(!staging_path.exists());
+        assert_eq!(
+            std::fs::read(final_path.join("original.json")).unwrap(),
+            b"json"
+        );
+        assert_eq!(
+            std::fs::read(final_path.join("data_assets/cover/cover.bin")).unwrap(),
+            b"cover"
+        );
+        stage.commit();
+        drop(stage);
+        assert!(final_path.is_dir());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn database_failure_removes_the_published_version_directory() {
+        let root = temp_storage();
+        let storage = root.join("downloads");
+        let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+        let work = secure_download_item_dir(&storage, "pixiv", "failed-save").unwrap();
+        let stage = VersionStage::create(&work, 1).unwrap();
+        std::fs::write(stage.staging_path.join("original.json"), b"staged").unwrap();
+        let final_path = stage.final_path.clone();
+
+        let error = commit_journaled_version(&db, "pixiv", "failed-save", 1, stage, |_| {
+            Err("injected database failure".to_string())
+        })
+        .await
+        .unwrap_err();
+        assert!(error.contains("injected"));
+        assert!(!final_path.exists());
+        assert!(std::fs::read_dir(&work).unwrap().all(|entry| !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .contains("stage")));
+        let _ = std::fs::remove_dir_all(root);
+    }
+}
+
+#[cfg(test)]
+mod pixiv_meta_signature_tests {
+    use super::*;
+    use crate::downloader::pixiv::{PixivNovelDetail, PixivNovelTag, PixivNovelUser};
+
+    fn detail() -> PixivNovelDetail {
+        PixivNovelDetail {
+            id: 8_842_013,
+            title: "夜明けの糸".into(),
+            user: PixivNovelUser {
+                id: 7,
+                name: "青葉しおり".into(),
+                account: "aoba_shiori".into(),
+                profile_image_url: None,
+            },
+            tags: ["創作", "ファンタジー"]
+                .iter()
+                .map(|name| PixivNovelTag {
+                    name: (*name).to_string(),
+                })
+                .collect(),
+            caption: "港町の話です".into(),
+            create_date: "2026-04-18T21:52:01+09:00".into(),
+            text_length: 12_840,
+            series_id: Some("778120".into()),
+            series_title: Some("星を編む人".into()),
+            cover_url: Some("https://i.pximg.net/c/cover.jpg".into()),
+        }
+    }
+
+    fn signature_of(detail: &PixivNovelDetail) -> String {
+        let tags: Vec<String> = detail.tags.iter().map(|tag| tag.name.clone()).collect();
+        pixiv_meta_signature(
+            &detail.title,
+            &detail.caption,
+            detail.cover_url.as_deref().unwrap_or(""),
+            &tags,
+            detail.series_id.as_deref().unwrap_or(""),
+            u64::from(detail.text_length),
+        )
+    }
+
+    /// 実際に保存される形。最上位の `cover_url` は webview 側の原寸を優先して
+    /// 選び直したもので、`detail.cover_url`（詳細 API の large）とは別物になる。
+    fn saved_json(detail: &PixivNovelDetail, text: &str) -> serde_json::Value {
+        serde_json::json!({
+            "detail": detail,
+            "text": text,
+            "cover_url": "https://i.pximg.net/novel-cover-original/img/master.jpg",
+            "illusts": {},
+            "images": {},
+        })
+    }
+
+    /// 保存した JSON から作る指紋と、更新確認で受け取る詳細から作る指紋が
+    /// 一致すること。ここがずれると短絡が一度も効かない。
+    ///
+    /// 保存側には表紙 URL が2つある（最上位＝原寸優先で選び直したもの、
+    /// detail＝詳細 API の large）。更新確認が受け取るのは後者だけなので、
+    /// 指紋も detail から作らなければならない。
+    #[test]
+    fn the_saved_work_and_the_fetched_detail_agree_on_one_signature() {
+        let detail = detail();
+        let saved = saved_json(&detail, "本文はここ");
+        assert_ne!(
+            saved.get("cover_url"),
+            saved.get("detail").and_then(|d| d.get("cover_url")),
+            "保存形の前提: 表紙 URL は2つあり、中身が違う"
+        );
+        let stored = pixiv_meta_signature_from_json(&saved).unwrap();
+        assert_eq!(stored, signature_of(&detail));
+    }
+
+    #[test]
+    fn a_changed_title_tag_or_length_shows_up_in_the_signature() {
+        let base = signature_of(&detail());
+
+        let mut renamed = detail();
+        renamed.title = "夜明けの糸（改稿）".into();
+        assert_ne!(signature_of(&renamed), base);
+
+        let mut retagged = detail();
+        retagged.tags.push(PixivNovelTag {
+            name: "長編".into(),
+        });
+        assert_ne!(signature_of(&retagged), base);
+
+        let mut longer = detail();
+        longer.text_length += 1;
+        assert_ne!(signature_of(&longer), base);
+    }
+
+    /// 取りこぼしの明文化。文字数の変わらない修正は指紋に現れない。
+    /// これを拾うのは DEEP_CHECK_INTERVAL_DAYS ごとの本文突き合わせの役目。
+    #[test]
+    fn a_same_length_body_edit_is_invisible_to_the_signature() {
+        let detail = detail();
+        let before = pixiv_meta_signature_from_json(&saved_json(&detail, "港の灯が落ちる")).unwrap();
+        let after = pixiv_meta_signature_from_json(&saved_json(&detail, "港の灯が消える")).unwrap();
+        assert_eq!(
+            before, after,
+            "本文だけの差は指紋に出ない — 深い確認で拾う前提"
+        );
+    }
+
+    /// 文字数を持たない形で保存された作品は指紋を作らない。
+    /// 指紋が無ければ更新確認は従来どおり本文まで取りに行く。
+    #[test]
+    fn a_payload_without_a_length_has_no_signature() {
+        let payload = serde_json::json!({ "title": "題", "caption": "", "tags": [] });
+        assert!(pixiv_meta_signature_from_json(&payload).is_none());
+    }
 }

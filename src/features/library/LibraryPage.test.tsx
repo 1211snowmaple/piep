@@ -5,7 +5,10 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { AppRouter } from "@/app/router";
 import { WorkspaceProvider } from "@/app/WorkspaceContext";
-import LibraryPage, { searchSuggestionAction } from "./LibraryPage";
+import { theme } from "@/theme";
+import { searchDemoWorks } from "@/mocks/demoData";
+import type { SearchV2Params } from "@/types/library";
+import LibraryPage, { resolveSortBy, rollbackWorkFlag, searchSuggestionAction, updateWorkFlag } from "./LibraryPage";
 
 describe("LibraryPage search", () => {
   beforeAll(() => {
@@ -97,6 +100,17 @@ describe("LibraryPage search", () => {
     await waitFor(() => expect(window.location.hash).toContain("favorite=1"));
   });
 
+  it("names the page and every button in the filter drawer", async () => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<MantineProvider theme={theme}><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
+
+    expect(await screen.findByRole("heading", { level: 1, name: "ライブラリ" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "絞り込み" }));
+    const drawer = await screen.findByRole("dialog", { name: "詳細フィルター" });
+    expect(within(drawer).getByRole("button", { name: "閉じる" })).toBeInTheDocument();
+    within(drawer).getAllByRole("button").forEach((button) => expect(button).toHaveAccessibleName());
+  });
+
   it("offers the paging switch beside the count, not only past the end", async () => {
     // With scrolling turned on and a few thousand works there is no end of the
     // list to reach, so controls that live only under it cannot be got back to.
@@ -108,6 +122,36 @@ describe("LibraryPage search", () => {
     const toggle = await screen.findByRole("radiogroup", { name: "一覧の読み込み方" });
     expect(within(toggle).getByRole("radio", { name: /自動/ })).toBeChecked();
     expect(within(toggle).getByRole("radio", { name: /ページ番号/ })).toBeInTheDocument();
+  });
+
+  it("keeps every filter in the address so it survives leaving the page", async () => {
+    // Opening a work unmounts the library. Anything the drawer had put in
+    // component state was gone by the time the back button brought it back,
+    // which read as the app having silently dropped the narrowing.
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
+
+    fireEvent.click(await screen.findByRole("button", { name: "絞り込み" }));
+    fireEvent.click(await screen.findByRole("checkbox", { name: "pixiv" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "最小文字数" }), { target: { value: "5000" } });
+    fireEvent.click(screen.getByRole("button", { name: "適用" }));
+
+    await waitFor(() => expect(window.location.hash).toContain("source=pixiv"));
+    expect(window.location.hash).toContain("minchars=5000");
+  });
+
+  it("restores the drawer's filters when history returns to them", async () => {
+    window.location.hash = "#/library?source=pixiv&tag=%E5%89%B5%E4%BD%9C&minchars=5000";
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
+
+    expect(await screen.findByText("適用中")).toBeInTheDocument();
+    expect(screen.getByText("#創作")).toBeInTheDocument();
+    // And the drawer opens onto the conditions actually in force, rather than
+    // an empty form that disagrees with the results behind it.
+    fireEvent.click(screen.getByRole("button", { name: "絞り込み" }));
+    expect(await screen.findByRole("checkbox", { name: "pixiv" })).toBeChecked();
+    expect(screen.getByRole("textbox", { name: "最小文字数" })).toHaveValue("5,000");
   });
 
   it("clears URL-owned watch filters during history navigation", async () => {
@@ -133,5 +177,70 @@ describe("search suggestion actions", () => {
   it("turns non-entity suggestions into explicit filters", () => {
     expect(searchSuggestionAction({ kind: "tag", label: "長編 小説", value: "長編 小説" }))
       .toEqual({ kind: "query", query: "tag:\"長編 小説\"" });
+  });
+});
+
+describe("library optimistic flag rollback", () => {
+  it("reverts only the failed work and preserves a later successful mutation", () => {
+    const result = searchDemoWorks();
+    const first = { ...result.items[0], favorite: true, watchUpdates: true };
+    const second = { ...result.items[1], favorite: true, watchUpdates: true };
+    const initial = {
+      pages: [{ ...result, items: [first, second], totalEstimate: 2, searchMeta: { ...result.searchMeta, totalEstimate: 2 } }],
+      pageParams: [null],
+    };
+    const params: SearchV2Params = { favorite: true };
+
+    // The first operation removes its row from this filtered listing. A second
+    // work then succeeds before the first request reports failure.
+    const afterFirst = updateWorkFlag(initial, first.id, { favorite: false }, params);
+    const afterSecond = updateWorkFlag(afterFirst, second.id, { watchUpdates: false }, params);
+    const rolledBack = rollbackWorkFlag(afterSecond, initial, first.id, "favorite", params);
+
+    expect(rolledBack?.pages[0].items.map((item) => item.id)).toEqual([first.id, second.id]);
+    expect(rolledBack?.pages[0].items.find((item) => item.id === first.id)?.favorite).toBe(true);
+    expect(rolledBack?.pages[0].items.find((item) => item.id === second.id)?.watchUpdates).toBe(false);
+    expect(rolledBack?.pages[0].totalEstimate).toBe(2);
+  });
+
+  it("normalizes a pasted deep page and explains how to continue without a deep OFFSET", async () => {
+    window.localStorage.setItem("piep.paging-mode", JSON.stringify("pages"));
+    window.location.hash = "#/library?page=999999";
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
+
+    await waitFor(() => expect(window.location.hash).toContain("page=251"));
+    const notice = await screen.findByRole("status");
+    expect(notice).toHaveTextContent("直接開けるのは251ページ目まで");
+    expect(notice).toHaveTextContent("自動");
+  });
+});
+
+describe("remembered library order", () => {
+  // 並び順は「この人の見かた」。アプリを閉じても続くべき設定として扱う。
+  it("uses the remembered order when the address says nothing", () => {
+    expect(resolveSortBy(null, false, "title")).toBe("title");
+    expect(resolveSortBy(null, false)).toBe("downloaded_at");
+  });
+
+  it("lets the address win, so a link opens what it says", () => {
+    expect(resolveSortBy("text_length", false, "title")).toBe("text_length");
+  });
+
+  // 検索したときの既定は関連度。覚えた順序で上書きしない。
+  it("keeps relevance as the default for a search", () => {
+    expect(resolveSortBy(null, true, "title")).toBe("relevance");
+    expect(resolveSortBy("title", true, "downloaded_at")).toBe("title");
+  });
+
+  // 関連度は検索の外では意味を持たないので、覚えていても使わない。
+  it("never falls back to relevance without a query", () => {
+    expect(resolveSortBy(null, false, "relevance")).toBe("downloaded_at");
+    expect(resolveSortBy("relevance", false, "title")).toBe("title");
+  });
+
+  // 保存先は手で書き換えられるし、並び順の名前は版で変わりうる。
+  it("falls back when the stored value is not an order any more", () => {
+    expect(resolveSortBy(null, false, "nonsense" as never)).toBe("downloaded_at");
   });
 });

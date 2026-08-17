@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   ActionIcon,
   Alert,
@@ -9,33 +9,38 @@ import {
   Breadcrumbs,
   Button,
   Card,
-  CopyButton,
   Grid,
   Group,
   Image,
   Paper,
+  Popover,
+  ScrollArea,
+  Select,
   Stack,
   Switch,
   Tabs,
   Text,
-  Popover,
-  ScrollArea,
-  Select,
-  SimpleGrid,
   TextInput,
   Timeline,
   Title,
 } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
-import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { keepPreviousData, useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Icons, IconSize } from "@/lib/icons";
-import { AppLink, useAppNavigate, useAppSearchParams, useRouteParams } from "@/app/router";
+import { Note } from "@/components/Note";
+import { useAppNavigate, useAppSearchParams, useReturnTo, useRouteParams } from "@/app/router";
 import { EmptyState, ErrorState, LoadingState } from "@/components/AsyncState";
-import { EntityCard } from "@/components/EntityCard";
-import { ListPager, PagingModeToggle, usePageSize, usePagingMode } from "@/components/ListPager";
+import { BoundedJsonView } from "@/components/BoundedJsonView";
+import { ExpandableText } from "@/components/ExpandableText";
+import { ListPager, PagingModeToggle, useBoundedNumberedPage, usePageSize, usePagingMode } from "@/components/ListPager";
+import { ScrollToTop } from "@/components/ScrollToTop";
+import { scrollRegionIntoView } from "@/lib/scroll";
 import { VirtualizedWorkList } from "@/features/library/VirtualizedWorkList";
+import { VirtualizedEntityGrid } from "@/features/library/VirtualizedEntityGrid";
+import { boundedInfiniteListOptions, INFINITE_LIST_MAX_PAGES } from "@/lib/queryLimits";
 import { externalBrand, ExternalServiceMark, ProviderMark, sourceUrl } from "@/lib/providers";
 import { errorMessage, formatBytes, formatDate, formatNumber } from "@/lib/format";
+import { runSingleCheck } from "@/features/updates/startSingleCheck";
 import { demoFacets, searchDemoWorks } from "@/mocks/demoData";
 import { exportEntityZip } from "@/services/archiveApi";
 import {
@@ -50,7 +55,7 @@ import {
   searchDownloadsV2,
   upsertUpdateTarget,
 } from "@/services/dbApi";
-import { listEntitySeries, listEntityTags } from "@/services/shelfApi";
+import { ENTITY_SERIES_PAGE_SIZE, listEntitySeriesPage, listEntityTags } from "@/services/shelfApi";
 import { saveDialog } from "@/services/dialogApi";
 import { openExternalUrl } from "@/services/openerApi";
 import { store } from "@/store";
@@ -80,17 +85,24 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
   // a valid literal '%' and corrupts keys containing encoded delimiters.
   const key = sourceKey;
   const navigate = useAppNavigate();
+  const returnTo = useReturnTo();
   const runtime = isTauriRuntime();
   const queryClient = useQueryClient();
   const [urlParams, setUrlParams] = useAppSearchParams();
   const tab = parseEntityTab(urlParams.get("tab"), kind);
+  // Switching tabs does not move the page: a tab changes what is listed, not
+  // where the reader is standing.
   const setTab = (value: string | null) => {
     const next = new URLSearchParams(urlParams);
     if (value && value !== "works") next.set("tab", value); else next.delete("tab");
     setUrlParams(next, { replace: true });
   };
-  // Narrowing lives in the URL so the back button steps back through it and a
-  // filtered view of an author can be linked to.
+  const tabsRef = useRef<HTMLDivElement>(null);
+  // Narrowing lives in the URL so it survives leaving the page - the back
+  // button from a work returns to the filtered listing rather than to an
+  // unfiltered one - and so a narrowed view of an author can be linked to. It
+  // is written with `replace`, so the narrowing itself is not a history step:
+  // one entry per keystroke in the search box would bury everything else.
   const workQuery = (urlParams.get("q") ?? "").slice(0, 200);
   const activeTags = urlParams.getAll("tag").slice(0, 20);
   const sortBy = parseEntitySort(urlParams.get("sort"));
@@ -108,11 +120,33 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
   };
   const [pagingMode] = usePagingMode();
   const [pageSize] = usePageSize();
-  const pageParam = Math.max(1, Number.parseInt(urlParams.get("page") ?? "1", 10) || 1);
+  // Relevance is walked with a score cursor and has no nth page, so numbers are
+  // only offered once an ordering has been chosen.
+  const searchingByRelevance = Boolean(workQuery) && sortBy === "source_created_at";
+  const numberedPages = pagingMode === "pages" && !searchingByRelevance;
+  const {
+    page: pageParam,
+    maxPage: maxDirectPage,
+    limitNotice: pageLimitNotice,
+    clearLimitNotice,
+  } = useBoundedNumberedPage(numberedPages, urlParams, setUrlParams, pageSize);
+  // The next page of the works lands on the tabs, not at the top of a profile
+  // the reader has already read and not halfway down a list. Set by the press:
+  // arriving at this screen is also a change of address, and that one opens at
+  // the very top, where the profile is.
+  //
+  // Spent once the new rows are on screen, so there is one movement rather than
+  // a jump to the tabs followed by the rows changing underneath.
+  const pendingPageScroll = useRef(false);
   const setPage = (page: number) => {
+    const boundedPage = Number.isFinite(page)
+      ? Math.min(maxDirectPage, Math.max(1, Math.trunc(page)))
+      : 1;
     const next = new URLSearchParams(urlParams);
-    if (page > 1) next.set("page", String(page)); else next.delete("page");
+    if (boundedPage > 1) next.set("page", String(boundedPage)); else next.delete("page");
     setUrlParams(next, { replace: false });
+    clearLimitNotice();
+    pendingPageScroll.current = true;
   };
   const toggleTag = (tag: string) => patchUrl({
     tags: activeTags.includes(tag) ? activeTags.filter((item) => item !== tag) : [...activeTags, tag],
@@ -126,13 +160,10 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
       return kind === "person" ? { ...common, displayName: facet.displayName, iconPath: null, linksJson: null } : { ...common, title: facet.displayName };
     },
   });
-  // Relevance is walked with a score cursor and has no nth page, so numbers are
-  // only offered once an ordering has been chosen.
-  const searchingByRelevance = Boolean(workQuery) && sortBy === "source_created_at";
-  const numberedPages = pagingMode === "pages" && !searchingByRelevance;
   // Prolific authors have more works than any single request should return, so
   // this pages through them instead of silently stopping at a fixed slab.
   const works = useInfiniteQuery({
+    ...boundedInfiniteListOptions,
     queryKey: ["entity-works", kind, source, key, workQuery, activeTags, sortBy, pageSize, numberedPages ? pageParam : 0],
     queryFn: ({ pageParam: cursor }) => runtime
       ? searchDownloadsV2({
@@ -154,14 +185,79 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
       const cursor = lastPage.items.length ? lastPage.nextCursor : null;
       return cursor && !allPages.slice(0, -1).some((page) => page.nextCursor === cursor) ? cursor : undefined;
     },
+    // Replacing the whole list with a spinner collapsed the page to a fraction
+    // of its height, and the browser clamped the scroll position away with it -
+    // which is what dropped the reader at the top of the profile on every page
+    // change. Holding the previous page keeps the geometry still.
+    placeholderData: keepPreviousData,
     enabled: tab === "works",
   });
+  // Series search has its own URL key: `q` already belongs to the works tab.
+  // Keeping the two separate means following a filtered-series link does not
+  // unexpectedly turn the author's works into a relevance search as well.
+  const rawSeriesQuery = urlParams.get("series_q");
+  const seriesQuery = (rawSeriesQuery ?? "").trim().slice(0, 200);
+  const serverSeriesQuery = seriesQuery;
+  const [seriesInput, setSeriesInput] = useState(seriesQuery);
+  const latestParams = useRef(urlParams);
+  latestParams.current = urlParams;
+  const seriesWriteTimer = useRef<number | null>(null);
+  const cancelSeriesWrite = () => {
+    if (seriesWriteTimer.current === null) return;
+    window.clearTimeout(seriesWriteTimer.current);
+    seriesWriteTimer.current = null;
+  };
+  const writeSeriesQuery = (value: string) => {
+    const bounded = value.trim().slice(0, 200);
+    const next = new URLSearchParams(latestParams.current);
+    if (bounded) next.set("series_q", bounded); else next.delete("series_q");
+    if (next.toString() !== latestParams.current.toString()) setUrlParams(next, { replace: true });
+  };
+  const onSeriesQueryChange = (value: string) => {
+    setSeriesInput(value);
+    cancelSeriesWrite();
+    seriesWriteTimer.current = window.setTimeout(() => {
+      seriesWriteTimer.current = null;
+      writeSeriesQuery(value);
+    }, 260);
+  };
+  const clearSeriesQuery = () => {
+    cancelSeriesWrite();
+    setSeriesInput("");
+    writeSeriesQuery("");
+  };
+  useEffect(() => {
+    cancelSeriesWrite();
+    setSeriesInput((current) => current === seriesQuery ? current : seriesQuery);
+    // Canonicalize overlong and empty deep links without adding a history step.
+    const canonical = seriesQuery || null;
+    if (rawSeriesQuery === canonical) return;
+    const next = new URLSearchParams(urlParams);
+    if (canonical) next.set("series_q", canonical); else next.delete("series_q");
+    setUrlParams(next, { replace: true });
+  }, [rawSeriesQuery, seriesQuery, setUrlParams, urlParams]);
+  useEffect(() => () => cancelSeriesWrite(), []);
+
   // What this author writes, and who they write it with: the two things a flat
-  // list of works cannot tell you.
-  const authorSeries = useQuery({
-    queryKey: ["entity-series", source, key],
-    queryFn: () => runtime ? listEntitySeries(source, key) : Promise.resolve([] as EntityFacet[]),
-    enabled: kind === "person",
+  // list of works cannot tell you. Every continuation is an opaque keyset
+  // cursor; prolific authors can move beyond the old 200-result slab, up to
+  // the same explicit in-memory safety stop used by other infinite listings.
+  const authorSeries = useInfiniteQuery({
+    ...boundedInfiniteListOptions,
+    queryKey: ["entity-series", source, key, serverSeriesQuery],
+    queryFn: ({ pageParam: cursor }) => runtime
+      ? listEntitySeriesPage(source, key, {
+        query: serverSeriesQuery || null,
+        limit: ENTITY_SERIES_PAGE_SIZE,
+        cursor,
+      })
+      : Promise.resolve({ items: [] as EntityFacet[], nextCursor: null, total: 0 }),
+    initialPageParam: null as string | null,
+    getNextPageParam: (lastPage, allPages) => {
+      const cursor = lastPage.nextCursor;
+      return cursor && !allPages.slice(0, -1).some((page) => page.nextCursor === cursor) ? cursor : undefined;
+    },
+    enabled: kind === "person" && tab === "series",
     staleTime: 5 * 60_000,
   });
   const entityTags = useQuery({
@@ -208,6 +304,33 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
       return true;
     })) ?? [];
   }, [works.data?.pages]);
+  const worksAtCacheLimit = !numberedPages
+    && (works.data?.pages.length ?? 0) >= INFINITE_LIST_MAX_PAGES
+    && Boolean(works.hasNextPage);
+  const authorSeriesItems = useMemo(() => {
+    const seen = new Set<string>();
+    return authorSeries.data?.pages.flatMap((page) => page.items.filter((series) => {
+      const identity = `${series.source}\0${series.sourceKey}`;
+      if (seen.has(identity)) return false;
+      seen.add(identity);
+      return true;
+    })) ?? [];
+  }, [authorSeries.data?.pages]);
+  const authorSeriesTotal = authorSeries.data?.pages[0]?.total ?? null;
+  const authorSeriesAtCacheLimit = (authorSeries.data?.pages.length ?? 0) >= INFINITE_LIST_MAX_PAGES
+    && Boolean(authorSeries.hasNextPage);
+
+  // The one movement, made when the rows for the page that was asked for have
+  // arrived, in the frame they are painted in.
+  const showingRequestedPage = !works.isPlaceholderData && !works.isFetching;
+  // `pageParam` is in the dependencies as well as the settled flag: a page that
+  // is already cached settles in the same render it was asked for, so the flag
+  // never changes and an effect watching only it would never run.
+  useLayoutEffect(() => {
+    if (!pendingPageScroll.current || !showingRequestedPage) return;
+    pendingPageScroll.current = false;
+    scrollRegionIntoView(tabsRef.current);
+  }, [pageParam, showingRequestedPage]);
 
   if (entity.isLoading) return <div className="page"><LoadingState /></div>;
   if (entity.error || !entity.data) return <div className="page"><ErrorState error={entity.error ?? "情報がありません"} retry={() => entity.refetch()} /></div>;
@@ -218,13 +341,20 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
   const avatarPath = kind === "person" ? (entry as PersonEntry).iconPath : coverPath;
   const sourceProfileUrl = sourceUrl(source, key, kind);
   const profileLinks = kind === "person" ? profileLinkList(parseLinks((entry as PersonEntry).linksJson), sourceProfileUrl) : [];
-  const openSource = async () => {
+  // 「開く」には行き先が2つある。アプリ内なら内蔵ブラウザで開き、そのまま
+  // 保存へ進める。外部なら普段のブラウザ（ログイン済みの環境）で開く。
+  const openSourceExternally = async () => {
     const url = sourceProfileUrl;
     if (!url) return;
     if (runtime) await openExternalUrl(url); else window.open(url, "_blank", "noopener,noreferrer");
   };
+  const openSourceInApp = () => {
+    const url = sourceProfileUrl;
+    if (!url) return;
+    navigate(`/save/${source}?url=${encodeURIComponent(url)}`);
+  };
   const exportZip = async () => {
-    if (!runtime) return notifications.show({ color: "blue", message: "書き出しはデスクトップアプリで利用できます" });
+    if (!runtime) return notifications.show({ color: "piep", message: "書き出しはデスクトップアプリで利用できます" });
     const path = await saveDialog({ title: "アーカイブを書き出す", defaultPath: `${displayName.replace(/[\\/:*?"<>|]/g, "_")}.zip`, filters: [{ name: "ZIP archive", extensions: ["zip"] }] });
     if (!path) return;
     try { await exportEntityZip(kind, source, key, path); notifications.show({ color: "green", title: "書き出しました", message: path }); }
@@ -233,7 +363,10 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
 
   return (
     <div className="page page--contained entity-page">
-      <Breadcrumbs mb="md"><Anchor component={AppLink} to={`/library?tab=${kind === "person" ? "people" : "series"}`} size="sm">{kind === "person" ? "作者・クリエイター" : "シリーズ"}</Anchor><Text size="sm" c="dimmed">{displayName}</Text></Breadcrumbs>
+      {/* Returns to the listing rather than opening a bare one: the search, the
+          sort and the row the reader came from are all still on the entry
+          behind this one, and pushing a clean copy throws them away. */}
+      <Breadcrumbs mb="md"><Anchor component="button" type="button" size="sm" onClick={() => returnTo(`/library?tab=${kind === "person" ? "people" : "series"}`)}>{kind === "person" ? "作者・クリエイター" : "シリーズ"}</Anchor><Text size="sm" c="dimmed">{displayName}</Text></Breadcrumbs>
       <Card className="entity-hero" data-kind={kind} padding={0}>
         {kind === "person" && coverPath && <Box className="entity-hero__banner"><Image src={getAssetUrl(coverPath)} alt={`${displayName}のヘッダー画像`} /></Box>}
         <Box className="entity-hero__body">
@@ -244,21 +377,27 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
                 : <Box className="entity-hero__series-cover">{avatarPath ? <Image src={getAssetUrl(avatarPath)} alt={`${displayName}の表紙`} fit="contain" /> : <Icons.series size={IconSize.avatar} />}</Box>}
               <Stack gap={7} mb={5} miw={0} align="flex-start"><ProviderMark provider={source} /><Title order={1} className="line-clamp-2">{displayName}</Title><Group gap="xs"><Badge variant="light" color="gray">{formatNumber(entry.workCount)}作品</Badge><Text size="xs" c="dimmed">更新 {formatDate(entry.updatedAt)}</Text></Group></Stack>
             </Group>
-            <Group gap="xs" className="entity-hero__actions"><Button variant="default" leftSection={<Icons.externalLink size={IconSize.menu} />} onClick={openSource}>元ページを開く</Button><Button variant="default" leftSection={<Icons.archive size={IconSize.menu} />} onClick={exportZip}>アーカイブ</Button><Button leftSection={<Icons.watch size={IconSize.menu} />} loading={refreshMutation.isPending} onClick={() => refreshMutation.mutate()}>情報を更新</Button></Group>
+            <Group gap="xs" className="entity-hero__actions">{/* 行き先を名前で分ける。アプリ内なら内蔵ブラウザで開いてそのまま保存でき、
+                ブラウザならログイン済みの普段の環境で開く。 */}
+            <Button variant="default" leftSection={<Icons.inAppBrowser size={IconSize.menu} />} onClick={openSourceInApp}>アプリ内で開く</Button>
+            <Button variant="default" leftSection={<Icons.externalLink size={IconSize.menu} />} onClick={openSourceExternally}>ブラウザで開く</Button><Button variant="default" leftSection={<Icons.archive size={IconSize.menu} />} onClick={exportZip}>アーカイブ</Button><Button leftSection={<Icons.watch size={IconSize.menu} />} loading={refreshMutation.isPending} onClick={() => refreshMutation.mutate()}>情報を更新</Button></Group>
           </Group>
           <Stack gap="md" mt="lg">
-            {entry.description && <Text maw={860} c="dimmed" style={{ whiteSpace: "pre-wrap" }}>{entry.description}</Text>}
-            {profileLinks.length > 0 && <Group gap="xs" className="profile-links">{profileLinks.map((url) => { const brand = externalBrand(url); return <Button key={url} className="profile-link" style={{ "--profile-link-color": brand.color }} variant="default" onClick={() => runtime ? openExternalUrl(url) : window.open(url, "_blank", "noopener,noreferrer")}><ExternalServiceMark url={url} /><Text component="span" size="xs" c="dimmed" className="profile-link__value">{profileLinkValue(url)}</Text></Button>; })}</Group>}
+            {/* Profiles run from one line to several screens of release notes
+                and shop links; unfolded, the long ones pushed the works this
+                page exists for off the bottom of the window. */}
+            {entry.description && <ExpandableText className="entity-description" maw={860} lines={4} label={kind === "person" ? "プロフィール" : "概要"}>{entry.description}</ExpandableText>}
+            {profileLinks.length > 0 && <Group gap="xs" className="profile-links">{profileLinks.map((url) => { const brand = externalBrand(url); return <Button key={url} className="profile-link" style={{ "--profile-link-color": brand.color }} variant="default" aria-label={`${brand.label}をブラウザで開く`} onClick={() => runtime ? openExternalUrl(url) : window.open(url, "_blank", "noopener,noreferrer")}><ExternalServiceMark url={url} /><Text component="span" size="xs" c="dimmed" className="profile-link__value">{profileLinkValue(url)}</Text><Icons.externalLink size={IconSize.inline} className="profile-link__out" aria-hidden /></Button>; })}</Group>}
           </Stack>
         </Box>
       </Card>
 
       <Grid gap="lg" mt="lg">
-        <Grid.Col span={{ base: 12, lg: 9 }}>
+        <Grid.Col span={{ base: 12, lg: 9 }} ref={tabsRef}>
           <Tabs value={tab} onChange={setTab}>
             <Tabs.List>
               <Tabs.Tab value="works" leftSection={<Icons.read size={IconSize.inline} />}>作品</Tabs.Tab>
-              {kind === "person" && <Tabs.Tab value="series" leftSection={<Icons.series size={IconSize.inline} />} rightSection={authorSeries.data?.length ? <Badge size="xs" variant="light">{formatNumber(authorSeries.data.length)}</Badge> : undefined}>シリーズ</Tabs.Tab>}
+              {kind === "person" && <Tabs.Tab value="series" leftSection={<Icons.series size={IconSize.inline} />} rightSection={authorSeriesTotal !== null ? <Badge size="xs" variant="light">{formatNumber(authorSeriesTotal)}</Badge> : undefined}>シリーズ</Tabs.Tab>}
               <Tabs.Tab value="history">プロフィール履歴</Tabs.Tab>
               <Tabs.Tab value="json">JSON</Tabs.Tab>
             </Tabs.List>
@@ -296,6 +435,11 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
                   />
                 )}
               </Stack>
+              {pageLimitNotice && (
+                <Alert color="yellow" title="ページ番号を調整しました" role="status" mt="md">
+                  負荷を抑えるため、直接開けるのは{maxDirectPage}ページ目までです。それより先は「自動」で続きを読み込むか、作品検索・タグで対象を狭めてください。
+                </Alert>
+              )}
               <Box mt="md">
                 {works.isLoading ? <LoadingState /> : works.error ? <ErrorState error={works.error} retry={() => works.refetch()} /> : workItems.length ? (
                   <>
@@ -306,15 +450,22 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
                     </Group>
                     <VirtualizedWorkList items={workItems} view="gallery" />
                     <ListPager
-                      hasNext={works.hasNextPage}
+                      hasNext={Boolean(works.hasNextPage) && !worksAtCacheLimit}
                       loading={works.isFetchingNextPage || works.isFetching}
                       loaded={workItems.length}
                       total={works.data?.pages[0]?.totalEstimate ?? null}
                       onLoad={() => works.fetchNextPage()}
+                      endMessage={worksAtCacheLimit
+                        ? searchingByRelevance
+                          ? `メモリ使用量を抑えるため${formatNumber(workItems.length)}件で停止しました。検索条件を絞ると続きへ到達できます。`
+                          : `メモリ使用量を抑えるため${formatNumber(workItems.length)}件で停止しました。「ページ番号」に切り替えると続きへ移動できます。`
+                        : undefined}
                       pages={{
                         current: pageParam,
                         size: pageSize,
                         onGoTo: setPage,
+                        maxDirectPage,
+                        limitNotice: pageLimitNotice,
                         unavailableReason: searchingByRelevance
                           ? "関連度順はページ番号で移動できません。並び順を選ぶとページ番号が使えます。"
                           : null,
@@ -332,26 +483,77 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
               </Box>
             </Tabs.Panel>
             {kind === "person" && (
-              <Tabs.Panel value="series" pt="lg">
-                {authorSeries.isLoading ? <LoadingState /> : authorSeries.error ? <ErrorState error={authorSeries.error} retry={() => authorSeries.refetch()} /> : (authorSeries.data?.length ?? 0) > 0 ? (
-                  <SimpleGrid cols={{ base: 1, sm: 2, xl: 3 }}>
-                    {authorSeries.data?.map((item) => <EntityCard key={`${item.source}:${item.sourceKey}`} entity={item} kind="series" />)}
-                  </SimpleGrid>
-                ) : <EmptyState icon={Icons.series} title="シリーズはありません" description="この作者の保存済み作品は、どのシリーズにも属していません。" />}
+              <Tabs.Panel value="series" pt="lg" aria-busy={authorSeries.isFetching}>
+                <Stack gap="md">
+                  <TextInput
+                    value={seriesInput}
+                    onChange={(event) => onSeriesQueryChange(event.currentTarget.value)}
+                    leftSection={<Icons.search size={IconSize.menu} />}
+                    rightSection={seriesInput ? <ActionIcon variant="subtle" color="gray" size="sm" aria-label="シリーズの検索語を消す" onClick={clearSeriesQuery}><Icons.cancel size={IconSize.inline} /></ActionIcon> : null}
+                    label="この作者のシリーズを検索"
+                    description="保存済みシリーズ全体を名前・説明から検索します"
+                    placeholder="シリーズ名"
+                    maxLength={200}
+                  />
+                  {authorSeries.isFetching && !authorSeries.isFetchingNextPage && !authorSeries.isLoading
+                    ? <Text size="xs" c="dimmed" role="status">シリーズを検索しています</Text>
+                    : null}
+                  {authorSeries.isLoading ? <LoadingState /> : authorSeries.error && authorSeriesItems.length === 0 ? <ErrorState error={authorSeries.error} retry={() => authorSeries.refetch()} /> : authorSeriesItems.length > 0 ? (
+                    <>
+                      {authorSeries.isFetchNextPageError && (
+                        <Alert color="red" title="シリーズの続きを読み込めません" role="alert">
+                          <Stack gap="xs">
+                            <Text size="sm">ライブラリの更新でカーソルが古くなった可能性があります。表示中のシリーズはそのまま残しています。</Text>
+                            <Group gap="xs">
+                              <Button size="xs" variant="light" color="red" onClick={() => authorSeries.fetchNextPage()}>もう一度試す</Button>
+                              <Button size="xs" variant="default" onClick={() => queryClient.resetQueries({ queryKey: ["entity-series", source, key, serverSeriesQuery], exact: true })}>先頭から読み直す</Button>
+                            </Group>
+                          </Stack>
+                        </Alert>
+                      )}
+                      <Text size="sm" c="dimmed" role="status" aria-live="polite">
+                        {authorSeriesTotal === null
+                          ? `${formatNumber(authorSeriesItems.length)}件を表示中`
+                          : `${formatNumber(authorSeriesItems.length)} / ${formatNumber(authorSeriesTotal)}件を表示中`}
+                      </Text>
+                      <VirtualizedEntityGrid items={authorSeriesItems} kind="series" />
+                      <ListPager
+                        hasNext={Boolean(authorSeries.hasNextPage) && !authorSeriesAtCacheLimit}
+                        loading={authorSeries.isFetchingNextPage}
+                        loaded={authorSeriesItems.length}
+                        total={authorSeriesTotal}
+                        onLoad={() => authorSeries.fetchNextPage()}
+                        endMessage={authorSeriesAtCacheLimit
+                          ? `メモリ使用量を抑えるため${formatNumber(authorSeriesItems.length)}件で停止しました。検索語を追加すると残りのシリーズへ到達できます。`
+                          : undefined}
+                        pages={{
+                          current: 1,
+                          size: ENTITY_SERIES_PAGE_SIZE,
+                          onGoTo: () => undefined,
+                          unavailableReason: "作者シリーズはカーソルで順に読み込みます。ページ番号への直接移動は利用できません。",
+                        }}
+                      />
+                    </>
+                  ) : serverSeriesQuery ? (
+                    <EmptyState icon={Icons.search} title="一致するシリーズがありません" description="検索語を短くするか、別の名前を試してください。" action={<Button variant="light" onClick={clearSeriesQuery}>検索を解除</Button>} />
+                  ) : <EmptyState icon={Icons.series} title="シリーズはありません" description="この作者の保存済み作品は、どのシリーズにも属していません。" />}
+                </Stack>
               </Tabs.Panel>
             )}
             <Tabs.Panel value="history" pt="lg"><Paper p="lg" withBorder>{versions.isLoading ? <LoadingState /> : <Timeline active={versions.data?.length ?? 0}>{versions.data?.map((version) => <Timeline.Item key={version.id} bullet={<Icons.versionHistory size={IconSize.inline} />} title={`バージョン ${version.version}`}><Text size="sm" c="dimmed">{version.changeSummary || "プロフィールを保存"}</Text><Text size="xs" c="dimmed" mt={4}>{formatDate(version.createdAt, true)} · {formatBytes(version.fileSizeBytes)}</Text></Timeline.Item>)}</Timeline>}</Paper></Tabs.Panel>
-            <Tabs.Panel value="json" pt="lg">{profileJson.isLoading ? <LoadingState /> : profileJson.error ? <ErrorState error={profileJson.error} retry={() => profileJson.refetch()} /> : <Stack gap="sm"><Group justify="space-between"><Text size="sm" c="dimmed">取得したプロフィール情報を折り返して表示します。</Text><CopyButton value={JSON.stringify(profileJson.data ?? {}, null, 2)}>{({ copied, copy }) => <Button size="xs" variant="light" onClick={copy}>{copied ? "コピー済み" : "コピー"}</Button>}</CopyButton></Group><Paper className="json-view" withBorder><pre>{JSON.stringify(profileJson.data ?? {}, null, 2)}</pre></Paper></Stack>}</Tabs.Panel>
+            <Tabs.Panel value="json" pt="lg">{tab !== "json" ? null : profileJson.isLoading ? <LoadingState /> : profileJson.error ? <ErrorState error={profileJson.error} retry={() => profileJson.refetch()} /> : <BoundedJsonView value={profileJson.data ?? {}} />}</Tabs.Panel>
           </Tabs>
         </Grid.Col>
         <Grid.Col span={{ base: 12, lg: 3 }}>
           <Stack gap="lg">
-            <Card p="lg"><Group justify="space-between"><Box><Text fw={700}>新着を監視</Text><Text size="xs" c="dimmed" mt={4}>{kind === "person" ? "新しい作品を検出" : "シリーズの続編を検出"}</Text></Box><Switch checked={targetMutation.isPending ? targetMutation.variables : target.data?.enabled ?? false} disabled={targetMutation.isPending || target.isLoading} onChange={(event) => targetMutation.mutate(event.currentTarget.checked)} aria-label="新着の更新監視" /></Group></Card>
+            <Card p="lg"><Stack gap="md"><Group justify="space-between"><Box><Text fw={700}>新着を監視</Text><Text size="xs" c="dimmed" mt={4}>{kind === "person" ? "新しい作品を検出" : "シリーズの続編を検出"}</Text></Box><Switch checked={targetMutation.isPending ? targetMutation.variables : target.data?.enabled ?? false} disabled={targetMutation.isPending || target.isLoading} onChange={(event) => targetMutation.mutate(event.currentTarget.checked)} aria-label="新着の更新監視" /></Group>{/* 監視に入れなくても、その場で一度だけ見に行ける。 */}<Button variant="light" leftSection={<Icons.updates size={IconSize.menu} />} onClick={() => runSingleCheck({ kind: kind === "person" ? "author" : "series", source, sourceKey: key, label: displayName }, () => navigate("/updates"))}>いま新作を確認</Button></Stack></Card>
             <Card p="lg"><Text fw={700} mb="md">プロフィール情報</Text><Stack gap="sm">{profileData.account && <Meta label="アカウント" value={`@${profileData.account}`} />}{profileStats && <><Meta label="小説" value={`${formatNumber(profileStats.totalNovels ?? 0)}作品`} /><Meta label="小説シリーズ" value={`${formatNumber(profileStats.totalNovelSeries ?? 0)}件`} /></>}{typeof profileData.sampleNovelCount === "number" && <Meta label="取得済み構成作品" value={`${formatNumber(profileData.sampleNovelCount)}件`} />}<Meta label="現在のバージョン" value={`v${entry.currentVersion}`} /><Meta label="最終取得" value={formatDate(entry.lastFetchedAt, true)} /><Meta label="最終確認" value={formatDate(entry.lastCheckedAt, true)} /></Stack></Card>
-            {!runtime && <Alert color="blue">プレビューではデモプロフィールを表示しています。</Alert>}
+            {!runtime && <Note>プレビューではデモプロフィールを表示しています。</Note>}
           </Stack>
         </Grid.Col>
       </Grid>
+      {/* A prolific author's works list is as long as the library's own. */}
+      <ScrollToTop />
     </div>
   );
 }

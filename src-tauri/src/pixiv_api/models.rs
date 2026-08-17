@@ -518,6 +518,14 @@ pub struct TokenRefreshResult {
 ///
 pub type ParsedJson = serde_json::Value;
 
+/// 通常の Pixiv API JSON はページング済みであるため十分な余裕を持たせつつ、
+/// 圧縮爆弾や異常レスポンスでメモリを無制限に消費しない上限。
+pub(crate) const MAX_PIXIV_JSON_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
+
+/// 小説 webview は本文を HTML 内に含むため、通常 JSON より大きな上限を許可する。
+pub(crate) const MAX_PIXIV_WEBVIEW_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
+const MAX_INITIAL_RESPONSE_CAPACITY: usize = 64 * 1024;
+
 // ----------------------------------------------------------------------------
 // Parsing
 // ----------------------------------------------------------------------------
@@ -545,14 +553,53 @@ pub fn parse_into<T: DeserializeOwned, S: AsRef<str> + Into<String>>(
     }
 }
 
+/// Content-Length と実際に受信した（展開後の）バイト数の両方を検査して読み込む。
+pub(crate) async fn read_response_text_limited(
+    mut response: reqwest::Response,
+    max_bytes: usize,
+) -> Result<(StatusCode, String), PixivError> {
+    let status = response.status();
+    if response
+        .content_length()
+        .is_some_and(|length| length > max_bytes as u64)
+    {
+        return Err(PixivError::ResponseTooLarge {
+            limit_bytes: max_bytes,
+        });
+    }
+
+    let initial_capacity = response
+        .content_length()
+        .and_then(|length| usize::try_from(length).ok())
+        .unwrap_or(0)
+        .min(max_bytes)
+        .min(MAX_INITIAL_RESPONSE_CAPACITY);
+    let mut body = Vec::with_capacity(initial_capacity);
+    while let Some(chunk) = response.chunk().await? {
+        let next_len = body
+            .len()
+            .checked_add(chunk.len())
+            .filter(|length| *length <= max_bytes)
+            .ok_or(PixivError::ResponseTooLarge {
+                limit_bytes: max_bytes,
+            })?;
+        body.reserve(next_len - body.len());
+        body.extend_from_slice(&chunk);
+    }
+
+    // Pixiv の JSON/HTML は UTF-8。従来の reqwest::Response::text と同様、
+    // 不正バイトだけを置換して後段の構造検証に委ねる。
+    Ok((status, String::from_utf8_lossy(&body).into_owned()))
+}
+
 /// レスポンスボディを読み込み、`T` にデシリアライズします。
 /// レートリミット (429)、未検出 (404)、および API エラーペイロードを適切に処理します。
 ///
 pub async fn parse_response_into<T: DeserializeOwned>(
     response: reqwest::Response,
 ) -> Result<T, PixivError> {
-    let status = response.status();
-    let body = response.text().await?;
+    let (status, body) =
+        read_response_text_limited(response, MAX_PIXIV_JSON_RESPONSE_BYTES).await?;
 
     match status {
         StatusCode::TOO_MANY_REQUESTS => {
@@ -587,6 +634,51 @@ pub async fn parse_response_into<T: DeserializeOwned>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    async fn response_from_wire(wire_response: &'static [u8]) -> reqwest::Response {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request).await;
+            stream.write_all(wire_response).await.unwrap();
+        });
+        let response = reqwest::get(format!("http://{address}/response"))
+            .await
+            .unwrap();
+        server.await.unwrap();
+        response
+    }
+
+    #[tokio::test]
+    async fn limited_response_rejects_declared_oversize_body() {
+        let response = response_from_wire(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nabcde",
+        )
+        .await;
+
+        let error = read_response_text_limited(response, 4).await.unwrap_err();
+        assert!(matches!(
+            error,
+            PixivError::ResponseTooLarge { limit_bytes: 4 }
+        ));
+    }
+
+    #[tokio::test]
+    async fn limited_response_rejects_chunked_oversize_body() {
+        let response = response_from_wire(
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5\r\nabcde\r\n0\r\n\r\n",
+        )
+        .await;
+
+        let error = read_response_text_limited(response, 4).await.unwrap_err();
+        assert!(matches!(
+            error,
+            PixivError::ResponseTooLarge { limit_bytes: 4 }
+        ));
+    }
 
     #[test]
     fn deserialize_user_info() {

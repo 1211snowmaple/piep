@@ -1,6 +1,16 @@
-import { renderHook } from "@testing-library/react";
-import { beforeEach, describe, expect, it } from "vitest";
-import { DEFAULT_PAGE_SIZE, PAGE_SIZE_OPTIONS, pageWindow, usePagingMode } from "@/components/ListPager";
+import { MantineProvider } from "@mantine/core";
+import { render, renderHook, screen } from "@testing-library/react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  DEFAULT_PAGE_SIZE,
+  ListPager,
+  MAX_NUMBERED_OFFSET,
+  PAGE_SIZE_OPTIONS,
+  maxDirectNumberedPage,
+  normalizeNumberedPage,
+  pageWindow,
+  usePagingMode,
+} from "@/components/ListPager";
 
 beforeEach(() => window.localStorage.clear());
 
@@ -79,6 +89,22 @@ describe("page size", () => {
   });
 });
 
+describe("bounded numbered pages", () => {
+  it("keeps direct jumps inside one OFFSET budget at every page size", () => {
+    expect(maxDirectNumberedPage(20)).toBe(251);
+    expect(maxDirectNumberedPage(100)).toBe(51);
+    expect((maxDirectNumberedPage(20) - 1) * 20).toBe(MAX_NUMBERED_OFFSET);
+    expect((maxDirectNumberedPage(100) - 1) * 100).toBe(MAX_NUMBERED_OFFSET);
+  });
+
+  it("strictly canonicalizes malformed and oversized URL pages", () => {
+    expect(normalizeNumberedPage("12oops", 20)).toMatchObject({ page: 1, exceededLimit: false, urlValue: null });
+    expect(normalizeNumberedPage("0", 20)).toMatchObject({ page: 1, exceededLimit: false, urlValue: null });
+    expect(normalizeNumberedPage("999999", 20)).toMatchObject({ page: 251, exceededLimit: true, urlValue: "251" });
+    expect(normalizeNumberedPage("9".repeat(100), 20)).toMatchObject({ page: 251, exceededLimit: true, urlValue: "251" });
+  });
+});
+
 describe("paging mode", () => {
   it("keeps anyone left on the removed third mode on a working one", () => {
     // "manual" was scrolling with the scrolling taken out; the button it left
@@ -93,5 +119,122 @@ describe("paging mode", () => {
     expect(renderHook(() => usePagingMode()).result.current[0]).toBe("pages");
     window.localStorage.setItem("piep.paging-mode", JSON.stringify("nonsense"));
     expect(renderHook(() => usePagingMode()).result.current[0]).toBe("auto");
+  });
+});
+
+describe("the pager itself", () => {
+  function renderPager(mode: "auto" | "pages") {
+    window.localStorage.setItem("piep.paging-mode", JSON.stringify(mode));
+    return render(
+      <MantineProvider>
+        <ListPager
+          hasNext
+          loading={false}
+          loaded={20}
+          total={2237}
+          onLoad={vi.fn()}
+          pages={{ current: 3, size: 20, onGoTo: vi.fn() }}
+        />
+      </MantineProvider>,
+    );
+  }
+
+  it("does not repeat the mode switch under the listing", () => {
+    // It already sits beside the count at the top of every listing. A second
+    // copy at the bottom is one more thing between the reader and the page
+    // numbers, and in scrolling mode the bottom is a moving target anyway.
+    renderPager("pages");
+    expect(screen.queryByRole("radiogroup", { name: "一覧の読み込み方" })).toBeNull();
+    expect(screen.getByRole("button", { name: "次へ" })).toBeInTheDocument();
+  });
+
+  it("keeps the mode switch out of the scrolling pager too", () => {
+    const { container } = renderPager("auto");
+    expect(screen.queryByRole("radiogroup", { name: "一覧の読み込み方" })).toBeNull();
+    expect(screen.getByRole("button", { name: /さらに読み込む/ })).toBeInTheDocument();
+    // The element that decides when the next batch is fetched has to occupy
+    // area: a zero-sized one is not reliably reported as intersecting, and the
+    // listing would then simply stop loading as you scrolled.
+    const sentinel = container.querySelector("[aria-hidden]") as HTMLElement | null;
+    expect(sentinel?.style.height).toBe("1px");
+    expect(sentinel?.style.width).toBe("100%");
+  });
+
+  it("marks where the reader is, for people who cannot see the fill", () => {
+    renderPager("pages");
+    expect(screen.getByRole("button", { name: "3ページ目" })).toHaveAttribute("aria-current", "page");
+    expect(screen.getByText("2,237件中 3 / 112ページ")).toBeInTheDocument();
+  });
+
+  it("explains a safety stop without claiming the whole result was displayed", () => {
+    window.localStorage.setItem("piep.paging-mode", JSON.stringify("auto"));
+    render(
+      <MantineProvider>
+        <ListPager hasNext={false} loading={false} loaded={500} total={10_000} onLoad={vi.fn()} endMessage="ページ番号に切り替えると続きへ移動できます。" />
+      </MantineProvider>,
+    );
+    expect(screen.getByText("ページ番号に切り替えると続きへ移動できます。")).toBeInTheDocument();
+    expect(screen.queryByText(/すべて表示しました/)).toBeNull();
+  });
+
+  it("does not offer a last-page button that would exceed the OFFSET budget", () => {
+    window.localStorage.setItem("piep.paging-mode", JSON.stringify("pages"));
+    render(
+      <MantineProvider>
+        <ListPager
+          hasNext
+          loading={false}
+          loaded={20}
+          total={1_000_000}
+          onLoad={vi.fn()}
+          pages={{ current: 1, size: 20, maxDirectPage: 251, onGoTo: vi.fn() }}
+        />
+      </MantineProvider>,
+    );
+
+    expect(screen.getByRole("button", { name: "251ページ目" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "50000ページ目" })).toBeNull();
+    expect(screen.getByText(/ページ番号で直接移動できるのは251ページ目まで/)).toBeInTheDocument();
+  });
+});
+
+describe("a listing that cannot say how long it is", () => {
+  function renderOpenEnded(hasNext: boolean, current = 1) {
+    window.localStorage.setItem("piep.paging-mode", JSON.stringify("pages"));
+    return render(
+      <MantineProvider>
+        <ListPager
+          hasNext={hasNext}
+          loading={false}
+          loaded={20}
+          total={null}
+          onLoad={vi.fn()}
+          pages={{ current, size: 20, onGoTo: vi.fn() }}
+        />
+      </MantineProvider>,
+    );
+  }
+
+  it("still offers page numbers", () => {
+    // Authors and series are counted by a query nobody wants to run twice, so
+    // the total is unknown. Refusing numbers on that basis meant the preference
+    // was silently ignored on those two tabs, with nothing said about it.
+    renderOpenEnded(true);
+    expect(screen.getByRole("button", { name: "1ページ目" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /さらに読み込む/ })).toBeNull();
+  });
+
+  it("lets the reader move on while there is more", () => {
+    renderOpenEnded(true);
+    // Treating the current page as the last one stranded the reader on page one.
+    expect(screen.getByRole("button", { name: "次へ" })).toBeEnabled();
+    expect(screen.getByText("1ページ目")).toBeInTheDocument();
+  });
+
+  it("says so once the end is reached", () => {
+    renderOpenEnded(false, 3);
+    expect(screen.getByRole("button", { name: "次へ" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "前へ" })).toBeEnabled();
+    expect(screen.getByText("3ページ目（最後）")).toBeInTheDocument();
   });
 });

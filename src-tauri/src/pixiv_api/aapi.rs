@@ -14,6 +14,21 @@ use crate::pixiv_api::models::*;
 use crate::pixiv_api::params::*;
 use crate::pixiv_api::token_manager::TokenManager;
 
+const API_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const API_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+fn build_api_client(
+    connect_timeout: Duration,
+    request_timeout: Duration,
+) -> Result<reqwest::Client, reqwest::Error> {
+    reqwest::Client::builder()
+        .connect_timeout(connect_timeout)
+        .timeout(request_timeout)
+        // 認証ヘッダーを別 URL に再送しない。API の redirect は仕様外として呼び出し側に返す。
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+}
+
 /// 内部リクエスト用のシンプルなHTTPメソッド列挙型。
 ///
 #[derive(Copy, Clone, Debug)]
@@ -57,10 +72,8 @@ impl AppPixivAPI {
     }
 
     fn new_with(token_manager: TokenManager) -> Self {
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(60))
-            .build()
-            .expect("reqwest client");
+        let client =
+            build_api_client(API_CONNECT_TIMEOUT, API_REQUEST_TIMEOUT).expect("reqwest client");
         Self {
             hosts: "https://app-api.pixiv.net".to_string(),
             client,
@@ -1853,7 +1866,8 @@ impl AppPixivAPI {
         let r = self
             .do_api_request(HttpMethod::GET, &url, None, Some(params), None, with_auth)
             .await?;
-        Ok(r.text().await?)
+        let (_, text) = read_response_text_limited(r, MAX_PIXIV_WEBVIEW_RESPONSE_BYTES).await?;
+        Ok(text)
     }
 
     /// Novel via webview. Port of `webview_novel(raw=False)`.
@@ -1948,5 +1962,69 @@ impl AppPixivAPI {
             .do_api_request(HttpMethod::GET, next_url, None, None, None, with_auth)
             .await?;
         parse_response_into(r).await
+    }
+}
+
+#[cfg(test)]
+mod http_policy_tests {
+    use super::*;
+    use reqwest::StatusCode;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn authenticated_client_never_follows_redirects() {
+        let redirect_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let redirect_address = redirect_listener.local_addr().unwrap();
+        let target_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_address = target_listener.local_addr().unwrap();
+
+        let redirect_server = tokio::spawn(async move {
+            let (mut stream, _) = redirect_listener.accept().await.unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request).await;
+            let response = format!(
+                "HTTP/1.1 302 Found\r\nLocation: http://{target_address}/credential-target\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let client = build_api_client(Duration::from_secs(1), Duration::from_secs(1)).unwrap();
+        let response = client
+            .get(format!("http://{redirect_address}/authenticated"))
+            .bearer_auth("must-not-be-forwarded")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FOUND);
+        redirect_server.await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), target_listener.accept())
+                .await
+                .is_err(),
+            "redirect target unexpectedly received the credentialed request"
+        );
+    }
+
+    #[tokio::test]
+    async fn api_client_enforces_total_request_timeout() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (_stream, _) = listener.accept().await.unwrap();
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        });
+
+        let client =
+            build_api_client(Duration::from_millis(100), Duration::from_millis(100)).unwrap();
+        let started = std::time::Instant::now();
+        let error = client
+            .get(format!("http://{address}/never-responds"))
+            .send()
+            .await
+            .unwrap_err();
+        server.abort();
+
+        assert!(error.is_timeout());
+        assert!(started.elapsed() < Duration::from_secs(2));
     }
 }

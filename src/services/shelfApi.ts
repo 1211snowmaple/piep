@@ -7,9 +7,52 @@ import type {
   SavedSearchInput,
 } from "@/types/library";
 
+/** Matches the native command's current maximum result size. */
+export const ENTITY_SERIES_LIMIT = 200;
+/** Default page size for the keyset author-series listing. */
+export const ENTITY_SERIES_PAGE_SIZE = 60;
+
+export interface EntitySeriesPage {
+  items: EntityFacet[];
+  nextCursor: string | null;
+  total: number;
+}
+
+export interface EntitySeriesPageParams {
+  query?: string | null;
+  limit?: number | null;
+  cursor?: string | null;
+}
+
 /** The series an author has works in. */
-export async function listEntitySeries(source: string, sourceKey: string, limit = 60): Promise<EntityFacet[]> {
-  return invoke<EntityFacet[]>("db_list_entity_series", { source, sourceKey, limit });
+export async function listEntitySeries(source: string, sourceKey: string, limit = ENTITY_SERIES_LIMIT): Promise<EntityFacet[]> {
+  const boundedLimit = Number.isSafeInteger(limit)
+    ? Math.min(ENTITY_SERIES_LIMIT, Math.max(1, limit))
+    : ENTITY_SERIES_LIMIT;
+  return invoke<EntityFacet[]>("db_list_entity_series", { source, sourceKey, limit: boundedLimit });
+}
+
+/**
+ * Keyset-paged series for one author. The cursor is opaque and scoped by the
+ * native command to this author and query, so the UI never derives or edits it.
+ */
+export async function listEntitySeriesPage(
+  source: string,
+  sourceKey: string,
+  params: EntitySeriesPageParams = {},
+): Promise<EntitySeriesPage> {
+  const requestedLimit = params.limit ?? ENTITY_SERIES_PAGE_SIZE;
+  const limit = Number.isSafeInteger(requestedLimit)
+    ? Math.min(ENTITY_SERIES_LIMIT, Math.max(1, requestedLimit))
+    : ENTITY_SERIES_PAGE_SIZE;
+  const query = params.query?.trim().slice(0, 200) || null;
+  return invoke<EntitySeriesPage>("db_list_entity_series_paged", {
+    source,
+    sourceKey,
+    query,
+    limit,
+    cursor: params.cursor ?? null,
+  });
 }
 
 /** The tags the works of one author or series carry, most used first. */

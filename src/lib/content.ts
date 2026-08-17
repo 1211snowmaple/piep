@@ -1,3 +1,4 @@
+import { normalizeContentLinkUrl } from "@/features/browser/downloadCandidates";
 import { brandGlyphElement, externalBrand } from "@/lib/providers";
 
 type LocalAssetResolver = (path: string | null | undefined) => string | null;
@@ -21,6 +22,15 @@ export interface PrepareDocumentOptions {
    * while reading, an address you cannot follow is just noise.
    */
   linkifyBareUrls?: boolean;
+  /**
+   * Render every link as a run of text rather than as a card.
+   *
+   * A card is a good way to show the one link a chapter ends with. A caption is
+   * mostly links - the series, the previous part, the author's other accounts -
+   * and a stack of cards there is taller than the caption itself, which is the
+   * thing the reader came to read.
+   */
+  inlineLinks?: boolean;
 }
 
 /**
@@ -109,21 +119,31 @@ export function prepareDocumentHtml(
   if (options.linkifyBareUrls) linkifyTextNodes(document);
 
   document.body.querySelectorAll<HTMLAnchorElement>("a[href]").forEach((anchor) => {
-    let url: URL;
+    // pixiv writes its own captions with `pixiv://` deep links for its app. No
+    // browser can open one, so the protocol check used to strip the address and
+    // leave an anchor behind - text that is styled as a link, underlined and
+    // blue, and does nothing at all when clicked. They name a novel, a user or
+    // an illustration, so they become the ordinary address for the same thing.
+    const raw = normalizeContentLinkUrl(anchor.getAttribute("href") ?? "");
+    let url: URL | null = null;
     try {
-      url = new URL(anchor.href, window.location.href);
+      url = new URL(raw);
     } catch {
-      anchor.removeAttribute("href");
+      url = null;
+    }
+    if (!url || !SAFE_PROTOCOLS.has(url.protocol)) {
+      // Nothing followable is left. Unwrap it rather than removing the href and
+      // keeping the anchor: an address the reader cannot go to should not still
+      // look like one they can.
+      anchor.replaceWith(...anchor.childNodes);
       return;
     }
-    if (!SAFE_PROTOCOLS.has(url.protocol)) {
-      anchor.removeAttribute("href");
-      return;
-    }
+    anchor.setAttribute("href", url.href);
     if (url.protocol === "http:" || url.protocol === "https:") {
       anchor.target = "_blank";
       anchor.rel = "noopener noreferrer";
-      decorateDocumentLink(document, anchor, url);
+      if (options.inlineLinks) anchor.classList.add("novel-inline-link");
+      else decorateDocumentLink(document, anchor, url);
     }
   });
 

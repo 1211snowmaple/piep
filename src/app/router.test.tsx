@@ -54,6 +54,54 @@ describe("AppRouter", () => {
     expect(window.location.hash).toBe("#/library");
     unregister();
   });
+
+  it("rolls a browser back navigation forward again when guarded work is kept", async () => {
+    window.location.hash = "#/library";
+    window.history.replaceState(null, "", window.location.href);
+    const confirmNavigation = vi.fn().mockResolvedValue(false);
+    const wrapper = ({ children }: { children: ReactNode }) => <AppRouter confirmNavigation={confirmNavigation}>{children}</AppRouter>;
+    const { result } = renderHook(() => useAppRouter(), { wrapper });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    act(() => result.current.navigate("/editor/101"));
+    await waitFor(() => expect(result.current.pathname).toBe("/editor/101"));
+    const unregister = registerUnsavedGuard(() => true);
+
+    act(() => {
+      const backHref = window.location.href.replace("#/editor/101", "#/library");
+      window.history.replaceState({ piepHistoryIndex: 0 }, "", backHref);
+      window.dispatchEvent(new PopStateEvent("popstate", { state: { piepHistoryIndex: 0 } }));
+    });
+
+    await waitFor(() => expect(confirmNavigation).toHaveBeenCalledOnce());
+    await waitFor(() => expect(window.location.hash).toBe("#/editor/101"));
+    expect(result.current.pathname).toBe("/editor/101");
+    unregister();
+  });
+
+  it("does not confirm a numeric navigation twice after it was authorized", async () => {
+    window.location.hash = "#/library";
+    window.history.replaceState(null, "", window.location.href);
+    const confirmNavigation = vi.fn().mockResolvedValue(true);
+    const wrapper = ({ children }: { children: ReactNode }) => <AppRouter confirmNavigation={confirmNavigation}>{children}</AppRouter>;
+    const { result } = renderHook(() => useAppRouter(), { wrapper });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    act(() => result.current.navigate("/editor/101"));
+    await waitFor(() => expect(result.current.pathname).toBe("/editor/101"));
+    const unregister = registerUnsavedGuard(() => true);
+
+    const go = vi.spyOn(window.history, "go").mockImplementation((delta) => {
+      if (delta !== -1) return;
+      const backHref = window.location.href.replace("#/editor/101", "#/library");
+      window.history.replaceState({ piepHistoryIndex: 0 }, "", backHref);
+      window.dispatchEvent(new PopStateEvent("popstate", { state: { piepHistoryIndex: 0 } }));
+    });
+    act(() => result.current.navigate(-1));
+
+    await waitFor(() => expect(result.current.pathname).toBe("/library"));
+    expect(confirmNavigation).toHaveBeenCalledOnce();
+    go.mockRestore();
+    unregister();
+  });
 });
 
 describe("navigation type", () => {
@@ -90,5 +138,55 @@ describe("navigation type", () => {
     window.location.hash = "#/";
     window.dispatchEvent(new HashChangeEvent("hashchange"));
     await waitFor(() => expect(screen.getByTestId("type")).toHaveTextContent("pop"));
+  });
+});
+
+describe("history position", () => {
+  function Probe() {
+    const { canGoBack, canGoForward, historyIndex, previousEntry } = useAppRouter();
+    const navigate = useAppNavigate();
+    return (
+      <div>
+        <span data-testid="index">{historyIndex}</span>
+        <span data-testid="back">{String(canGoBack)}</span>
+        <span data-testid="forward">{String(canGoForward)}</span>
+        <span data-testid="previous">{previousEntry ?? "none"}</span>
+        <button type="button" onClick={() => navigate("/works/7")}>work</button>
+        <button type="button" onClick={() => navigate("/reader/7")}>reader</button>
+      </div>
+    );
+  }
+
+  it("knows whether the history controls have anywhere to go", async () => {
+    window.location.hash = "#/library";
+    window.history.replaceState(null, "", window.location.href);
+    render(<AppRouter><Probe /></AppRouter>);
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+
+    // Nothing has been visited yet, so both controls would do nothing - and a
+    // desktop window has no browser chrome to make that obvious.
+    expect(screen.getByTestId("back")).toHaveTextContent("false");
+    expect(screen.getByTestId("forward")).toHaveTextContent("false");
+
+    fireEvent.click(screen.getByRole("button", { name: "work" }));
+    await waitFor(() => expect(screen.getByTestId("index")).toHaveTextContent("1"));
+    expect(screen.getByTestId("back")).toHaveTextContent("true");
+    // Pushing discards whatever was ahead.
+    expect(screen.getByTestId("forward")).toHaveTextContent("false");
+  });
+
+  it("remembers what the previous entry was showing", async () => {
+    window.location.hash = "#/library?q=%E5%89%B5%E4%BD%9C";
+    window.history.replaceState(null, "", window.location.href);
+    render(<AppRouter><Probe /></AppRouter>);
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+
+    fireEvent.click(screen.getByRole("button", { name: "work" }));
+    await waitFor(() => expect(screen.getByTestId("previous")).toHaveTextContent("/library?q=%E5%89%B5%E4%BD%9C"));
+
+    // So that a "back to the work" control can go back to the copy that still
+    // has the reader's tab and scroll position, rather than pushing a new one.
+    fireEvent.click(screen.getByRole("button", { name: "reader" }));
+    await waitFor(() => expect(screen.getByTestId("previous")).toHaveTextContent("/works/7"));
   });
 });

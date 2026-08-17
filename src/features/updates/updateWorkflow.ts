@@ -314,10 +314,16 @@ export async function findNewCandidatesForTargets({
   return { candidates, errorCount };
 }
 
+/**
+ * Saves one candidate.
+ *
+ * Nothing is added to the watch list here: a target is something the reader
+ * chooses, and quietly adding series behind a save is both a surprise and
+ * extra load on the source the next time a check runs.
+ */
 export async function saveUpdateCandidate(
   candidate: UpdateCandidate,
   credentials: UpdateCredentials,
-  options: { autoWatchSeries?: boolean } = {},
 ): Promise<UpdateDownloadEntry | null> {
   const existing = await getDownloadBySource<UpdateDownloadEntry>(candidate.source, candidate.sourceId);
   if (existing) return null;
@@ -338,11 +344,6 @@ export async function saveUpdateCandidate(
       cookie: null,
       userAgent: null,
     });
-
-    if (options.autoWatchSeries) {
-      const series = normalizePixivSeries(candidate.originalData);
-      if (series) await upsertUpdateTarget("series", "pixiv", series.id, series.title, true);
-    }
 
     return savedEntry;
   }
@@ -439,7 +440,7 @@ export async function runUpdateCheckAndAutoSave({
   for (const candidate of candidateResult.candidates) {
     try {
       onNewWorkSaving?.(candidate);
-      const savedEntry = await saveUpdateCandidate(candidate, credentials, { autoWatchSeries: true });
+      const savedEntry = await saveUpdateCandidate(candidate, credentials);
       if (savedEntry) {
         savedEntries.push(savedEntry);
         newWorksCount++;

@@ -7,4 +7,7 @@ pub mod builder;
 pub mod converter;
 pub mod image_processor;
 pub mod intermediate;
+pub mod meta;
 pub mod template;
+pub mod validate;
+pub mod xhtml;

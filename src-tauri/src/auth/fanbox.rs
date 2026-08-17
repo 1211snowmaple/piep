@@ -1,8 +1,28 @@
 use regex::Regex;
 use reqwest::Client;
 use std::error::Error;
+use std::time::Duration;
 
 use crate::fanbox_api::client::FanboxAPI;
+
+const MAX_FANBOX_HOME_BYTES: usize = 8 * 1024 * 1024;
+
+async fn bounded_home_text(mut response: reqwest::Response) -> Result<String, Box<dyn Error>> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_FANBOX_HOME_BYTES as u64)
+    {
+        return Err("FANBOX home response exceeded the size limit".into());
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        if body.len().saturating_add(chunk.len()) > MAX_FANBOX_HOME_BYTES {
+            return Err("FANBOX home response exceeded the size limit".into());
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(String::from_utf8(body)?)
+}
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -22,15 +42,20 @@ pub async fn check_fanbox_session(
         return Err(format!("Session validation failed: {:?}", e).into());
     }
 
-    let client = Client::new();
+    let client = Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?;
     let html_res = client
         .get("https://www.fanbox.cc/")
         .header("Cookie", full_cookie)
         .header("User-Agent", user_agent)
         .send()
-        .await?;
+        .await?
+        .error_for_status()?;
 
-    let html = html_res.text().await?;
+    let html = bounded_home_text(html_res).await?;
     let re_meta = Regex::new(r#"id="metadata"\s+name="metadata"\s+content='([^']+)'"#)?;
     let metadata = re_meta
         .captures(&html)

@@ -25,6 +25,31 @@ test("library shell remains stable without clipped horizontal content", async ({
   await expect(page).toHaveScreenshot("library-shell.png", { fullPage: true });
 });
 
+test("phone settings navigation wraps without an inner horizontal scroller", async ({ page }, testInfo) => {
+  test.skip(
+    testInfo.project.name !== "900x600-light-100dpi",
+    "The phone-width geometry check only needs one browser project",
+  );
+  await page.setViewportSize({ width: 360, height: 800 });
+  await page.goto("/#/settings?section=library");
+  await expect(page.getByRole("heading", { name: "ローカルライブラリ" })).toBeVisible();
+  const geometry = await page.evaluate(() => {
+    const navigation = document.querySelector<HTMLElement>(".settings-nav");
+    const main = document.querySelector<HTMLElement>(".app-main");
+    return {
+      documentWidth: document.documentElement.scrollWidth,
+      viewportWidth: document.documentElement.clientWidth,
+      mainWidth: main?.scrollWidth ?? 0,
+      mainViewport: main?.clientWidth ?? 0,
+      navigationWidth: navigation?.scrollWidth ?? 0,
+      navigationViewport: navigation?.clientWidth ?? 0,
+    };
+  });
+  expect(geometry.documentWidth).toBeLessThanOrEqual(geometry.viewportWidth + 1);
+  expect(geometry.mainWidth).toBeLessThanOrEqual(geometry.mainViewport + 1);
+  expect(geometry.navigationWidth).toBeLessThanOrEqual(geometry.navigationViewport + 1);
+});
+
 test("critical workspaces keep a stable layout", async ({ page }, testInfo) => {
   test.skip(!testInfo.project.name.endsWith("100dpi"), "Route matrix runs once per size/theme; DPI scaling is covered by the library shell matrix");
   const routes = [
@@ -34,7 +59,8 @@ test("critical workspaces keep a stable layout", async ({ page }, testInfo) => {
     ["reader", "/#/reader/1", "雨上がりの図書室で"],
     ["settings-library", "/#/settings?section=library", "ローカルライブラリ"],
     ["updates", "/#/updates", "更新センター"],
-    ["epub", "/#/epub", "EPUB Studio"],
+    ["epub", "/#/epub", "EPUB書き出し"],
+    ["epub-templates", "/#/epub/templates", "テンプレートスタジオ"],
     ["work", "/#/works/1", "雨上がりの図書室で"],
   ] as const;
   for (const [name, route, visibleText] of routes) {

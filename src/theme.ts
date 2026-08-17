@@ -51,8 +51,8 @@ export const theme = createTheme({
     ActionIcon: { defaultProps: { radius: "md" } },
     Card: { defaultProps: { radius: "lg", withBorder: true } },
     Paper: { defaultProps: { radius: "lg" } },
-    Modal: { defaultProps: { radius: "lg", centered: true } },
-    Drawer: { defaultProps: { overlayProps: { backgroundOpacity: 0.42, blur: 4 } } },
+    Modal: { defaultProps: { radius: "lg", centered: true, closeButtonProps: { "aria-label": "閉じる" } } },
+    Drawer: { defaultProps: { overlayProps: { backgroundOpacity: 0.42, blur: 4 }, closeButtonProps: { "aria-label": "閉じる" } } },
     Tooltip: { defaultProps: { openDelay: 420, withArrow: true } },
   },
 });

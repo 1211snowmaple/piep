@@ -73,7 +73,7 @@ export function JobProgress({
               : ""}
         </Text>
       </Group>
-      {note && <Text size="xs" c="orange" mt={4}>{note}</Text>}
+      {note && <Text size="xs" c="dimmed" mt={4}>{note}</Text>}
     </Box>
   );
 }

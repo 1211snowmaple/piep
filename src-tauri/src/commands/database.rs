@@ -1,12 +1,12 @@
 use crate::database::queries::EntityProfileFreshness;
 use crate::database::{
     AssetEntry, BulkMutationResult, DashboardSummary, DbStats, DownloadEntry, DownloadRelation,
-    DownloadVersion, EditorDocument, EntityFacet, EntityVersion, FacetCount, FilterFacets,
-    LibraryDiagnostics, LibraryMaintenanceResult, LibraryShelfCounts, NewAsset, NewDownload,
-    PersonEntry, ReaderContentPage, ReaderDocument, ReaderMetadata, ReaderSearchHit, SavedSearch,
-    SavedSearchInput, SearchIndexOptimizationResult, SearchIndexStatus, SearchSuggestParams,
-    SearchSuggestResult, SearchV2Params, SearchV2Result, SeriesEntry, UpdateTarget,
-    UpdateTargetInput, WorkBlockInput, WorkEditRevision,
+    DownloadVersion, EditorDocument, EntityFacet, EntitySeriesPage, EntityVersion, FacetCount,
+    FilterFacets, LibraryDiagnostics, LibraryMaintenanceResult, LibraryShelfCounts, NewAsset,
+    NewDownload, PersonEntry, ReaderContentPage, ReaderDocument, ReaderMetadata, ReaderSearchHit,
+    SavedSearch, SavedSearchInput, SearchIndexOptimizationResult, SearchIndexStatus,
+    SearchSuggestParams, SearchSuggestResult, SearchV2Params, SearchV2Result, SeriesEntry,
+    UpdateTarget, UpdateTargetInput, WorkBlockInput, WorkEditRevision,
 };
 use crate::AppState;
 use sha2::{Digest, Sha256};
@@ -35,6 +35,21 @@ where
     tokio::task::spawn_blocking(move || f(state))
         .await
         .map_err(|e| format!("Database task failed: {}", e))?
+}
+
+async fn run_library_write_blocking<T, F>(app: tauri::AppHandle, f: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce(Arc<AppState>) -> Result<T, String> + Send + 'static,
+{
+    let state = app.state::<Arc<AppState>>().inner().clone();
+    let guard = state.library_gate.clone().write_owned().await;
+    tokio::task::spawn_blocking(move || {
+        let _guard = guard;
+        f(state)
+    })
+    .await
+    .map_err(|e| format!("Database task failed: {e}"))?
 }
 
 #[derive(serde::Deserialize)]
@@ -130,17 +145,14 @@ pub fn start_automatic_index_maintenance(app: tauri::AppHandle) {
         // with nothing the user is waiting on.
         sleep(Duration::from_millis(1_200)).await;
 
-        let pending = match run_db_blocking(app.clone(), |state| {
-            state.db.get_search_index_status()
-        })
-        .await
-        {
-            Ok(status) => status.pending_downloads,
-            Err(error) => {
-                log::warn!("Automatic index maintenance skipped: {error}");
-                return;
-            }
-        };
+        let pending =
+            match run_db_blocking(app.clone(), |state| state.db.get_search_index_status()).await {
+                Ok(status) => status.pending_downloads,
+                Err(error) => {
+                    log::warn!("Automatic index maintenance skipped: {error}");
+                    return;
+                }
+            };
         if pending <= 0 {
             return;
         }
@@ -187,6 +199,7 @@ fn spawn_rebuild_job(
     tauri::async_runtime::spawn(async move {
         let started_at = Instant::now();
         let state = app_for_task.state::<Arc<AppState>>().inner().clone();
+        let library_gate = state.library_gate.clone().write_owned().await;
         let progress_app = app_for_task.clone();
         let progress_job = job_id_for_task.clone();
 
@@ -194,6 +207,7 @@ fn spawn_rebuild_job(
         // short async batches meant re-counting the library between every one
         // of them, and rebuilding the index writer with it.
         let outcome = tokio::task::spawn_blocking(move || {
+            let _library_gate = library_gate;
             let cancel_flag = cancel.clone();
             let mut last_emit = Instant::now() - Duration::from_secs(1);
             state.db.rebuild_search_index(
@@ -363,8 +377,7 @@ pub async fn db_get_assets(
 
 #[tauri::command]
 pub async fn db_delete_download(app: tauri::AppHandle, id: i64) -> Result<(), String> {
-    let state = app.state::<Arc<AppState>>();
-    state.db.delete_download(id)
+    run_library_write_blocking(app, move |state| state.db.delete_download(id)).await
 }
 
 #[tauri::command]
@@ -372,7 +385,7 @@ pub async fn db_delete_downloads(
     app: tauri::AppHandle,
     ids: Vec<i64>,
 ) -> Result<BulkMutationResult, String> {
-    run_db_blocking(app, move |state| state.db.delete_downloads(&ids)).await
+    run_library_write_blocking(app, move |state| state.db.delete_downloads(&ids)).await
 }
 
 #[tauri::command]
@@ -380,7 +393,7 @@ pub async fn db_delete_downloads_for_search(
     app: tauri::AppHandle,
     params: SearchV2Params,
 ) -> Result<BulkMutationResult, String> {
-    run_db_blocking(app, move |state| {
+    run_library_write_blocking(app, move |state| {
         state.db.delete_downloads_for_search(&params)
     })
     .await
@@ -398,18 +411,16 @@ pub async fn db_get_library_diagnostics(
 ) -> Result<LibraryDiagnostics, String> {
     let emitter = app.clone();
     run_db_blocking(app, move |state| {
-        state
-            .db
-            .get_library_diagnostics_with_progress(&|progress| {
-                let _ = emitter.emit(
-                    "library-diagnostics-progress",
-                    serde_json::json!({
-                        "phase": progress.phase,
-                        "step": progress.step,
-                        "total": progress.total,
-                    }),
-                );
-            })
+        state.db.get_library_diagnostics_with_progress(&|progress| {
+            let _ = emitter.emit(
+                "library-diagnostics-progress",
+                serde_json::json!({
+                    "phase": progress.phase,
+                    "step": progress.step,
+                    "total": progress.total,
+                }),
+            );
+        })
     })
     .await
 }
@@ -423,7 +434,7 @@ pub async fn db_maintain_library(
         "library-maintenance-progress",
         serde_json::json!({ "phase": if compact { "compacting" } else { "optimizing" } }),
     );
-    let result = run_db_blocking(app.clone(), move |state| {
+    let result = run_library_write_blocking(app.clone(), move |state| {
         state.db.maintain_library_database(compact)
     })
     .await;
@@ -452,7 +463,9 @@ pub async fn db_optimize_search_index(
         "search-index-optimization-progress",
         serde_json::json!({ "phase": "merging", "segments": segments }),
     );
-    let result = run_db_blocking(app.clone(), move |state| state.db.optimize_search_index()).await;
+    let result =
+        run_library_write_blocking(app.clone(), move |state| state.db.optimize_search_index())
+            .await;
     let _ = app.emit(
         "search-index-optimization-progress",
         serde_json::json!({
@@ -487,6 +500,27 @@ pub async fn db_list_entity_series(
         state
             .db
             .list_entity_series(&source, &source_key, limit.unwrap_or(60))
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn db_list_entity_series_paged(
+    app: tauri::AppHandle,
+    source: String,
+    source_key: String,
+    query: Option<String>,
+    limit: Option<i64>,
+    cursor: Option<String>,
+) -> Result<EntitySeriesPage, String> {
+    run_db_blocking(app, move |state| {
+        state.db.list_entity_series_paged(
+            &source,
+            &source_key,
+            query.as_deref(),
+            limit.unwrap_or(60),
+            cursor.as_deref(),
+        )
     })
     .await
 }
@@ -533,7 +567,7 @@ pub async fn db_get_dashboard_summary(app: tauri::AppHandle) -> Result<Dashboard
 #[tauri::command]
 pub async fn db_seed_test_data(app: tauri::AppHandle, count: i64) -> Result<i64, String> {
     let count = count.clamp(1, 200_000);
-    run_db_blocking(app, move |state| {
+    run_library_write_blocking(app, move |state| {
         let root = state.db.storage_dir().join("seed").join(format!("{}", chrono::Utc::now().timestamp_millis()));
         std::fs::create_dir_all(&root).map_err(|e| format!("Seed dir creation failed: {}", e))?;
         for index in 0..count {
@@ -625,6 +659,18 @@ pub async fn db_search_entity_facets(
 }
 
 #[tauri::command]
+pub async fn db_count_entity_facets(
+    app: tauri::AppHandle,
+    kind: String,
+    query: Option<String>,
+) -> Result<i64, String> {
+    run_db_blocking(app, move |state| {
+        state.db.count_entity_facets(&kind, query.as_deref())
+    })
+    .await
+}
+
+#[tauri::command]
 pub async fn db_search_filter_facets(
     app: tauri::AppHandle,
     kind: String,
@@ -703,8 +749,10 @@ pub async fn db_delete_version(
     download_id: i64,
     version: i64,
 ) -> Result<(), String> {
-    let state = app.state::<Arc<AppState>>();
-    state.db.delete_version(download_id, version)
+    run_library_write_blocking(app, move |state| {
+        state.db.delete_version(download_id, version)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -713,8 +761,10 @@ pub async fn db_set_watch_updates(
     download_id: i64,
     watch: bool,
 ) -> Result<(), String> {
-    let state = app.state::<Arc<AppState>>();
-    state.db.set_watch_updates(download_id, watch)
+    run_library_write_blocking(app, move |state| {
+        state.db.set_watch_updates(download_id, watch)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -723,7 +773,7 @@ pub async fn db_set_watch_updates_for_search(
     params: SearchV2Params,
     watch: bool,
 ) -> Result<BulkMutationResult, String> {
-    run_db_blocking(app, move |state| {
+    run_library_write_blocking(app, move |state| {
         state.db.set_watch_updates_for_search(&params, watch)
     })
     .await
@@ -735,8 +785,10 @@ pub async fn db_set_favorite(
     download_id: i64,
     favorite: bool,
 ) -> Result<(), String> {
-    let state = app.state::<Arc<AppState>>();
-    state.db.set_favorite(download_id, favorite)
+    run_library_write_blocking(app, move |state| {
+        state.db.set_favorite(download_id, favorite)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -746,7 +798,7 @@ pub async fn db_set_flags_for_ids(
     favorite: Option<bool>,
     watch: Option<bool>,
 ) -> Result<BulkMutationResult, String> {
-    run_db_blocking(app, move |state| {
+    run_library_write_blocking(app, move |state| {
         state.db.set_flags_for_ids(&ids, favorite, watch)
     })
     .await
@@ -763,8 +815,7 @@ pub async fn db_upsert_update_target(
     app: tauri::AppHandle,
     target: UpdateTargetInput,
 ) -> Result<UpdateTarget, String> {
-    let state = app.state::<Arc<AppState>>();
-    state.db.upsert_update_target(&target)
+    run_library_write_blocking(app, move |state| state.db.upsert_update_target(&target)).await
 }
 
 #[tauri::command]
@@ -802,10 +853,12 @@ pub async fn db_set_update_target_enabled(
     source_key: String,
     enabled: bool,
 ) -> Result<(), String> {
-    let state = app.state::<Arc<AppState>>();
-    state
-        .db
-        .set_update_target_enabled(&target_type, &source, &source_key, enabled)
+    run_library_write_blocking(app, move |state| {
+        state
+            .db
+            .set_update_target_enabled(&target_type, &source, &source_key, enabled)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -815,10 +868,12 @@ pub async fn db_delete_update_target(
     source: String,
     source_key: String,
 ) -> Result<(), String> {
-    let state = app.state::<Arc<AppState>>();
-    state
-        .db
-        .delete_update_target(&target_type, &source, &source_key)
+    run_library_write_blocking(app, move |state| {
+        state
+            .db
+            .delete_update_target(&target_type, &source, &source_key)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -829,15 +884,20 @@ pub async fn db_mark_update_target_checked(
     source_key: String,
     last_seen_source_id: Option<String>,
     last_seen_source_updated_at: Option<String>,
+    // found は見つかった件数。0 のときは「最後に見つけた時刻」を進めない。
+    found: Option<i64>,
 ) -> Result<(), String> {
-    let state = app.state::<Arc<AppState>>();
-    state.db.mark_update_target_checked(
-        &target_type,
-        &source,
-        &source_key,
-        last_seen_source_id.as_deref(),
-        last_seen_source_updated_at.as_deref(),
-    )
+    run_library_write_blocking(app, move |state| {
+        state.db.mark_update_target_checked(
+            &target_type,
+            &source,
+            &source_key,
+            last_seen_source_id.as_deref(),
+            last_seen_source_updated_at.as_deref(),
+            found.unwrap_or(0),
+        )
+    })
+    .await
 }
 
 #[tauri::command]
@@ -1136,7 +1196,13 @@ async fn download_entity_image(
         .filter(|s| !s.is_empty())
         .unwrap_or(kind);
     let path = dir.join(format!("{}_{}", kind, safe_entity_segment(filename)));
-    let bytes = reqwest::Client::new()
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::limited(3))
+        .build()
+        .map_err(|e| format!("Profile image client creation failed: {e}"))?;
+    let response = client
         .get(url)
         .header(
             "referer",
@@ -1150,15 +1216,84 @@ async fn download_entity_image(
         .await
         .map_err(|e| e.to_string())?
         .error_for_status()
-        .map_err(|e| e.to_string())?
-        .bytes()
-        .await
         .map_err(|e| e.to_string())?;
-    let len = bytes.len() as i64;
-    tokio::fs::write(&path, bytes)
-        .await
-        .map_err(|e| e.to_string())?;
+    let len = crate::downloader::asset_downloader::save_response_atomically(
+        response,
+        &path,
+        crate::downloader::asset_downloader::MAX_PROFILE_IMAGE_BYTES,
+        true,
+    )
+    .await? as i64;
     Ok(Some((path.to_string_lossy().to_string(), len)))
+}
+
+async fn copy_file_atomically_bounded(
+    source: &std::path::Path,
+    destination: &std::path::Path,
+    max_bytes: u64,
+) -> Result<u64, String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let parent = destination
+        .parent()
+        .ok_or_else(|| "Import destination has no parent".to_string())?;
+    let filename = destination
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("asset");
+    let (part_path, mut output) = {
+        let mut opened = None;
+        for _ in 0..16 {
+            let path = parent.join(format!(".{filename}.{:016x}.part", rand::random::<u64>()));
+            match tokio::fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&path)
+                .await
+            {
+                Ok(file) => {
+                    opened = Some((path, file));
+                    break;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(format!("Import staging creation failed: {error}")),
+            }
+        }
+        opened.ok_or_else(|| "Could not allocate an import staging file".to_string())?
+    };
+
+    let result = async {
+        let input = tokio::fs::File::open(source)
+            .await
+            .map_err(|error| format!("Import source open failed: {error}"))?;
+        let mut limited = input.take(max_bytes.saturating_add(1));
+        let copied = tokio::io::copy(&mut limited, &mut output)
+            .await
+            .map_err(|error| format!("Import copy failed: {error}"))?;
+        if copied > max_bytes {
+            return Err(format!(
+                "Import source exceeded the {max_bytes} byte safety limit"
+            ));
+        }
+        output
+            .flush()
+            .await
+            .map_err(|error| format!("Import flush failed: {error}"))?;
+        output
+            .sync_all()
+            .await
+            .map_err(|error| format!("Import sync failed: {error}"))?;
+        drop(output);
+        tokio::fs::rename(&part_path, destination)
+            .await
+            .map_err(|error| format!("Import publish failed: {error}"))?;
+        Ok(copied)
+    }
+    .await;
+    if result.is_err() {
+        let _ = tokio::fs::remove_file(&part_path).await;
+    }
+    result
 }
 
 #[tauri::command]
@@ -1185,7 +1320,7 @@ pub async fn refresh_entity_profile(
     }
     *last_refresh = Some(Instant::now());
 
-    let state = app.state::<Arc<AppState>>();
+    let state = app.state::<Arc<AppState>>().inner().clone();
     let force = force.unwrap_or(false);
     let app_data = state
         .db
@@ -1269,6 +1404,7 @@ pub async fn refresh_entity_profile(
             return Err("Unsupported person source".to_string());
         };
 
+        let _library_write_guard = state.library_gate.clone().write_owned().await;
         let hash = hash_json(&normalized)?;
         let existing = state.db.get_person(&source, &source_key).ok();
         let changed =
@@ -1356,7 +1492,7 @@ pub async fn refresh_entity_profile(
     }
 
     if entity_type == "series" {
-        let existing = state.db.get_series(&source, &source_key).ok();
+        let mut existing = state.db.get_series(&source, &source_key).ok();
         if !force {
             if let Some(series) = existing.as_ref() {
                 if recently_checked(series.last_checked_at.as_deref()) {
@@ -1410,6 +1546,8 @@ pub async fn refresh_entity_profile(
                 "coverUrl": null,
             })
         };
+        let _library_write_guard = state.library_gate.clone().write_owned().await;
+        existing = state.db.get_series(&source, &source_key).ok();
         let hash = hash_json(&normalized)?;
         let changed =
             existing.as_ref().and_then(|s| s.content_hash.as_deref()) != Some(hash.as_str());
@@ -1625,10 +1763,12 @@ pub async fn db_save_work_draft(
     base_version: i64,
     blocks: Vec<WorkBlockInput>,
 ) -> Result<WorkEditRevision, String> {
-    let state = app.state::<Arc<AppState>>();
-    state
-        .db
-        .save_work_draft(download_id, base_version, blocks.as_slice())
+    run_library_write_blocking(app, move |state| {
+        state
+            .db
+            .save_work_draft(download_id, base_version, blocks.as_slice())
+    })
+    .await
 }
 
 #[tauri::command]
@@ -1636,8 +1776,10 @@ pub async fn db_activate_work_edit(
     app: tauri::AppHandle,
     edit_revision_id: i64,
 ) -> Result<WorkEditRevision, String> {
-    let state = app.state::<Arc<AppState>>();
-    state.db.activate_work_edit(edit_revision_id)
+    run_library_write_blocking(app, move |state| {
+        state.db.activate_work_edit(edit_revision_id)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -1646,11 +1788,22 @@ pub async fn import_work_asset(
     download_id: i64,
     source_path: String,
 ) -> Result<AssetEntry, String> {
-    let state = app.state::<Arc<AppState>>();
     let source = std::path::PathBuf::from(&source_path);
-    if !source.is_file() {
+    let source_metadata = tokio::fs::symlink_metadata(&source)
+        .await
+        .map_err(|error| format!("Failed to inspect import source: {error}"))?;
+    if source_metadata.file_type().is_symlink() || !source_metadata.file_type().is_file() {
         return Err("Import source is not a file".to_string());
     }
+    if source_metadata.len() > crate::downloader::asset_downloader::MAX_ASSET_DOWNLOAD_BYTES {
+        return Err(format!(
+            "Import source exceeds the {} byte safety limit",
+            crate::downloader::asset_downloader::MAX_ASSET_DOWNLOAD_BYTES
+        ));
+    }
+
+    let state = app.state::<Arc<AppState>>().inner().clone();
+    let _library_write_guard = state.library_gate.clone().write_owned().await;
 
     state.db.get_download(download_id)?;
 
@@ -1667,6 +1820,15 @@ pub async fn import_work_asset(
     tokio::fs::create_dir_all(&target_dir)
         .await
         .map_err(|e| format!("Failed to create editor asset directory: {}", e))?;
+    let canonical_storage = tokio::fs::canonicalize(state.db.storage_dir())
+        .await
+        .map_err(|error| format!("Failed to resolve library storage: {error}"))?;
+    let canonical_target_dir = tokio::fs::canonicalize(&target_dir)
+        .await
+        .map_err(|error| format!("Failed to resolve editor asset directory: {error}"))?;
+    if !canonical_target_dir.starts_with(&canonical_storage) {
+        return Err("Editor asset directory escapes library storage".to_string());
+    }
 
     let mut target_path = target_dir.join(&filename);
     if target_path.exists() {
@@ -1687,12 +1849,12 @@ pub async fn import_work_asset(
         ));
     }
 
-    tokio::fs::copy(&source, &target_path)
-        .await
-        .map_err(|e| format!("Failed to copy editor asset: {}", e))?;
-    let metadata = tokio::fs::metadata(&target_path)
-        .await
-        .map_err(|e| format!("Failed to inspect editor asset: {}", e))?;
+    let copied = copy_file_atomically_bounded(
+        &source,
+        &target_path,
+        crate::downloader::asset_downloader::MAX_ASSET_DOWNLOAD_BYTES,
+    )
+    .await?;
     let mime_type = target_path
         .extension()
         .and_then(|value| value.to_str())
@@ -1717,9 +1879,21 @@ pub async fn import_work_asset(
         local_path: local_path.clone(),
         original_url: None,
         mime_type: mime_type.clone(),
-        file_size_bytes: metadata.len() as i64,
+        file_size_bytes: copied as i64,
     };
-    let id = state.db.insert_asset(&asset)?;
+    let id = match state.db.insert_asset(&asset) {
+        Ok(id) => id,
+        Err(error) => {
+            if let Err(cleanup_error) = tokio::fs::remove_file(&target_path).await {
+                log::warn!(
+                    "Failed to roll back imported asset {:?}: {}",
+                    target_path,
+                    cleanup_error
+                );
+            }
+            return Err(error);
+        }
+    };
 
     Ok(AssetEntry {
         id,
@@ -1735,7 +1909,7 @@ pub async fn import_work_asset(
 
 #[cfg(test)]
 mod profile_link_tests {
-    use super::{collect_profile_links, validate_path_in_storage};
+    use super::{collect_profile_links, copy_file_atomically_bounded, validate_path_in_storage};
     use std::fs;
 
     #[test]
@@ -1757,6 +1931,36 @@ mod profile_link_tests {
                 "https://example.com/work",
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn bounded_atomic_import_never_publishes_oversize_or_partial_files() {
+        let root =
+            std::env::temp_dir().join(format!("piep_editor_asset_test_{}", rand::random::<u64>()));
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("source.bin");
+        let destination = root.join("destination.bin");
+        fs::write(&source, b"12345").unwrap();
+
+        let error = copy_file_atomically_bounded(&source, &destination, 4)
+            .await
+            .unwrap_err();
+        assert!(error.contains("4 byte"));
+        assert!(!destination.exists());
+        assert!(fs::read_dir(&root).unwrap().all(|entry| !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .ends_with(".part")));
+
+        assert_eq!(
+            copy_file_atomically_bounded(&source, &destination, 5)
+                .await
+                .unwrap(),
+            5
+        );
+        assert_eq!(fs::read(&destination).unwrap(), b"12345");
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

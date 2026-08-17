@@ -12,6 +12,7 @@ import { ProviderMark } from "@/lib/providers";
 import { errorMessage, formatDateNumeric, formatNumber } from "@/lib/format";
 import { summaryText } from "@/lib/content";
 import { deleteDownload, getAssetUrl, isTauriRuntime, setFavorite, setWatchUpdates } from "@/services/dbApi";
+import { deleteThenCleanup } from "@/features/library/deletedWorkCleanup";
 import type { DownloadEntry } from "@/types/library";
 
 interface WorkCardProps {
@@ -130,8 +131,8 @@ function SearchMatchReason({ work }: { work: DownloadEntry }) {
     <Tooltip label={details || "検索語が一致した項目です"} multiline maw={360} withArrow>
       <Group gap={4} wrap="nowrap" className="work-card__search-reason" aria-label={`一致理由: ${fields.map((field) => MATCH_FIELD_LABELS[field] ?? field).join("、")}`}>
         <Icons.searchMatch size={IconSize.inline} aria-hidden />
-        <Text size="xs" c="teal" fw={650}>一致</Text>
-        {fields.map((field) => <Badge key={field} size="xs" variant="light" color="teal">{MATCH_FIELD_LABELS[field] ?? field}</Badge>)}
+        <Text size="xs" c="piep" fw={650}>一致</Text>
+        {fields.map((field) => <Badge key={field} size="xs" variant="light" color="piep">{MATCH_FIELD_LABELS[field] ?? field}</Badge>)}
       </Group>
     </Tooltip>
   );
@@ -286,10 +287,11 @@ function WorkActions({ work, queued, onQueue, onToggleFavorite, onToggleWatch }:
 }) {
   const navigate = useAppNavigate();
   const queryClient = useQueryClient();
+  const { removeFromEpubQueue } = useWorkspace();
   const refresh = () => Promise.all([
     queryClient.invalidateQueries({ queryKey: ["library"] }),
     queryClient.invalidateQueries({ queryKey: ["dashboard"] }),
-    queryClient.invalidateQueries({ queryKey: ["reader-document", work.id] }),
+    queryClient.invalidateQueries({ queryKey: ["reader-metadata", work.id] }),
   ]);
   const toggleFavorite = async () => {
     const next = !work.favorite;
@@ -309,7 +311,7 @@ function WorkActions({ work, queued, onQueue, onToggleFavorite, onToggleWatch }:
     try {
       if (isTauriRuntime()) await setWatchUpdates(work.id, next);
       await refresh();
-      notifications.show({ color: next ? "teal" : "gray", message: next ? "更新監視をオンにしました" : "更新監視をオフにしました" });
+      notifications.show({ color: next ? "piep" : "gray", message: next ? "更新監視をオンにしました" : "更新監視をオフにしました" });
     } catch (error) {
       notifications.show({ color: "red", title: "更新監視を変更できません", message: errorMessage(error) });
     }
@@ -321,13 +323,10 @@ function WorkActions({ work, queued, onQueue, onToggleFavorite, onToggleWatch }:
     confirmProps: { color: "red" },
     onConfirm: async () => {
       try {
-        if (isTauriRuntime()) await deleteDownload(work.id);
-        await Promise.all([
-          queryClient.invalidateQueries({ queryKey: ["library"] }),
-          queryClient.invalidateQueries({ queryKey: ["library-facets"] }),
-          queryClient.invalidateQueries({ queryKey: ["dashboard"] }),
-          queryClient.invalidateQueries({ queryKey: ["entity-works"] }),
-        ]);
+        await deleteThenCleanup(
+          () => isTauriRuntime() ? deleteDownload(work.id) : Promise.resolve(),
+          { queryClient, ids: [work.id], removeFromEpubQueue },
+        );
         notifications.show({ color: "green", message: "作品を削除しました" });
       } catch (error) {
         notifications.show({ color: "red", title: "削除できません", message: errorMessage(error) });
@@ -337,30 +336,37 @@ function WorkActions({ work, queued, onQueue, onToggleFavorite, onToggleWatch }:
 
   return (
     <Group gap={2} wrap="nowrap" justify="flex-end" className="work-card__actions" onClick={(event) => event.stopPropagation()}>
+      {/* Nothing here carries a filled chip. A row of five solid squares is the
+          loudest thing on a screen of two thousand works, and it competed with
+          the covers the listing exists to show. State is drawn in the glyph
+          itself: grey when off, its own colour when on, and filled in where the
+          shape has an inside to fill. */}
       <Tooltip label="読む">
-        <ActionIcon variant="light" color="piep" size="md" aria-label={`${work.title}を読む`} onClick={() => navigate(`/reader/${work.id}`)}>
+        <ActionIcon variant="subtle" style={{ "--ai-color": "var(--flag-watch)" }} size="md" aria-label={`${work.title}を読む`} onClick={() => navigate(`/reader/${work.id}`)}>
           <Icons.read size={IconSize.action} />
         </ActionIcon>
       </Tooltip>
       <Tooltip label={work.favorite ? "お気に入りを解除" : "お気に入りに追加"}>
-        <ActionIcon variant={work.favorite ? "filled" : "subtle"} color="orange" size="md" aria-label={work.favorite ? "お気に入りを解除" : "お気に入りに追加"} aria-pressed={work.favorite} onClick={toggleFavorite}>
+        <ActionIcon variant="subtle" color={work.favorite ? "red" : "gray"} style={{ "--ai-color": work.favorite ? "var(--flag-favorite)" : "var(--flag-off)", "--ai-bg": work.favorite ? "var(--flag-favorite-bg)" : "transparent" }} size="md" aria-label={work.favorite ? "お気に入りを解除" : "お気に入りに追加"} aria-pressed={work.favorite} onClick={toggleFavorite}>
           <Icons.favorite size={IconSize.action} fill={work.favorite ? "currentColor" : "none"} />
         </ActionIcon>
       </Tooltip>
+      {/* A rotating arrow has no inside, so this one can only change colour. */}
       <Tooltip label={work.watchUpdates ? "更新監視をオフにする" : "更新監視をオンにする"}>
-        <ActionIcon variant={work.watchUpdates ? "filled" : "subtle"} color="teal" size="md" aria-label={work.watchUpdates ? "更新監視をオフにする" : "更新監視をオンにする"} aria-pressed={work.watchUpdates} onClick={toggleWatch}>
+        <ActionIcon variant="subtle" color={work.watchUpdates ? "piep" : "gray"} style={{ "--ai-color": work.watchUpdates ? "var(--flag-watch)" : "var(--flag-off)", "--ai-bg": work.watchUpdates ? "var(--flag-watch-bg)" : "transparent" }} size="md" aria-label={work.watchUpdates ? "更新監視をオフにする" : "更新監視をオンにする"} aria-pressed={work.watchUpdates} onClick={toggleWatch}>
           <Icons.watch size={IconSize.action} />
         </ActionIcon>
       </Tooltip>
-      {/* Green matches the "ep" half of the wordmark; the old purple belonged
-          to nothing in the palette. */}
+      {/* One glyph in both states. Swapping the shape as well as the colour
+          said the same thing twice, and the shape that changed was the part
+          naming what the button does. Green is the "ep" half of the wordmark. */}
       <Tooltip label={queued ? "EPUBキューから外す" : "EPUBキューに追加"}>
-        <ActionIcon variant={queued ? "filled" : "subtle"} color="leaf" size="md" aria-label={queued ? "EPUBキューから外す" : "EPUBキューに追加"} aria-pressed={queued} onClick={onQueue}>
-          {queued ? <Icons.epubQueued size={IconSize.action} /> : <Icons.epubAdd size={IconSize.action} />}
+        <ActionIcon variant="subtle" color={queued ? "leaf" : "gray"} style={{ "--ai-color": queued ? "var(--flag-epub)" : "var(--flag-off)", "--ai-bg": queued ? "var(--flag-epub-bg)" : "transparent" }} size="md" aria-label={queued ? "EPUBキューから外す" : "EPUBキューに追加"} aria-pressed={queued} onClick={onQueue}>
+          <Icons.epubAdd size={IconSize.action} />
         </ActionIcon>
       </Tooltip>
       <Menu position="bottom-end" withinPortal>
-        <Menu.Target><Tooltip label="その他"><ActionIcon variant="subtle" color="gray" size="md" aria-label={`${work.title}のその他の操作`}><Icons.more size={IconSize.nav} /></ActionIcon></Tooltip></Menu.Target>
+        <Menu.Target><Tooltip label="その他"><ActionIcon variant="subtle" color="gray" style={{ "--ai-color": "var(--flag-off)" }} size="md" aria-label={`${work.title}のその他の操作`}><Icons.more size={IconSize.nav} /></ActionIcon></Tooltip></Menu.Target>
         <Menu.Dropdown>
           <Menu.Item leftSection={<Icons.workDetail size={IconSize.menu} />} onClick={() => navigate(`/works/${work.id}`)}>詳細</Menu.Item>
           <Menu.Item leftSection={<Icons.watch size={IconSize.menu} />} onClick={() => navigate(`/updates?work=${work.id}`)}>更新センターで確認</Menu.Item>

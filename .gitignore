@@ -18,6 +18,7 @@ vite.config.d.ts
 *.local
 
 # Editor directories and files
+.claude/
 .vscode/*
 !.vscode/extensions.json
 .idea
@@ -48,3 +49,6 @@ downloads/
 
 # Temporary / Scratch
 scratch/
+
+# EPUB テンプレートの見本（cargo run --example epub_specimen の出力）
+.epub-specimen/

@@ -15,6 +15,7 @@ const ReaderPage = lazy(() => import("@/features/reader/ReaderPage"));
 const EditorPage = lazy(() => import("@/features/editor/EditorPage"));
 const SavePage = lazy(() => import("@/features/save/SavePage"));
 const EpubPage = lazy(() => import("@/features/epub/EpubPage"));
+const TemplateStudioPage = lazy(() => import("@/features/epub/TemplateStudioPage"));
 const UpdatesPage = lazy(() => import("@/features/updates/UpdatesPage"));
 const OperationsPage = lazy(() => import("@/features/jobs/OperationsPage"));
 const DiagnosticsPage = lazy(() => import("@/features/diagnostics/DiagnosticsPage"));
@@ -35,6 +36,7 @@ function CurrentRoute() {
   if (matchPath("/editor/:workId", pathname)) return <EditorPage />;
   if (matchPath("/save/:source?", pathname)) return <SavePage />;
   if (pathname === "/epub") return <EpubPage />;
+  if (pathname === "/epub/templates") return <TemplateStudioPage />;
   if (pathname === "/updates") return <UpdatesPage />;
   if (pathname === "/operations") return <OperationsPage />;
   if (pathname === "/diagnostics") return <DiagnosticsPage />;

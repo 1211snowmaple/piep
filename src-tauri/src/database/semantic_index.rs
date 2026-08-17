@@ -1,13 +1,17 @@
 use std::cmp::Ordering;
 use std::collections::HashMap;
+use std::fs::OpenOptions;
+use std::io::Write;
+#[cfg(windows)]
+use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::OnceLock;
 
 #[cfg(not(test))]
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
-use hnsw_rs::prelude::{DistCosine, Hnsw};
-use parking_lot::Mutex as ParkingMutex;
+use hnsw_rs::prelude::{AnnT, DistCosine, Hnsw};
 use rusqlite::{params, Connection};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 #[cfg(not(test))]
 use std::sync::Mutex;
@@ -23,10 +27,16 @@ const MODEL_ID: &str = "intfloat/multilingual-e5-small";
 const VECTOR_DIMENSION: usize = 384;
 const CHUNK_TARGET_CHARS: usize = 620;
 const CHUNK_OVERLAP_CHARS: usize = 80;
+const ANN_MANIFEST_FILE: &str = "ann-manifest.json";
+const ANN_FORMAT_VERSION: u32 = 1;
 
 #[cfg(not(test))]
 static MODEL: OnceLock<Result<Mutex<EmbeddingRuntime>, String>> = OnceLock::new();
-static ANN_CACHE: OnceLock<ParkingMutex<HashMap<PathBuf, Arc<SemanticAnnIndex>>>> = OnceLock::new();
+static ANN_BUILD_LOCK: OnceLock<parking_lot::Mutex<()>> = OnceLock::new();
+
+pub fn model_id() -> &'static str {
+    MODEL_ID
+}
 
 #[derive(Debug, Clone)]
 pub struct SemanticIndexDocument {
@@ -84,10 +94,21 @@ struct ChunkMeta {
     text: String,
 }
 
-struct SemanticAnnIndex {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AnnManifest {
+    format_version: u32,
+    model_id: String,
+    dimension: usize,
+    shard_span: i64,
+    shards: Vec<AnnShard>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AnnShard {
+    bucket: i64,
     fingerprint: String,
-    hnsw: Hnsw<'static, f32, DistCosine>,
-    chunks: Vec<ChunkMeta>,
+    basename: String,
+    count: usize,
 }
 
 pub fn upsert_documents(
@@ -160,12 +181,33 @@ pub fn upsert_documents(
 }
 
 pub fn clear_document(storage_dir: &Path, download_id: i64) -> Result<(), String> {
-    let conn = open_index(storage_dir)?;
-    conn.execute(
-        "DELETE FROM semantic_chunks WHERE download_id = ?1",
-        params![download_id],
-    )
-    .map_err(|e| format!("Semantic clear failed: {}", e))?;
+    clear_documents(storage_dir, &[download_id])
+}
+
+/// Removes several works in one SQLite transaction and invalidates the ANN
+/// cache once. Bulk library deletion used to rebuild this cache boundary once
+/// per work, which made a large delete needlessly expensive.
+pub fn clear_documents(storage_dir: &Path, download_ids: &[i64]) -> Result<(), String> {
+    if download_ids.is_empty() {
+        return Ok(());
+    }
+
+    let mut conn = open_index(storage_dir)?;
+    let tx = conn
+        .transaction()
+        .map_err(|e| format!("Semantic clear transaction failed: {e}"))?;
+    {
+        let mut statement = tx
+            .prepare("DELETE FROM semantic_chunks WHERE download_id = ?1")
+            .map_err(|e| format!("Semantic clear prepare failed: {e}"))?;
+        for download_id in download_ids {
+            statement
+                .execute(params![download_id])
+                .map_err(|e| format!("Semantic clear failed for {download_id}: {e}"))?;
+        }
+    }
+    tx.commit()
+        .map_err(|e| format!("Semantic clear commit failed: {e}"))?;
     invalidate_ann_cache(storage_dir);
     Ok(())
 }
@@ -185,27 +227,38 @@ pub fn search(
         .next()
         .ok_or_else(|| "Semantic query embedding returned no vector".to_string())?;
 
-    let ann = ann_index(storage_dir)?;
-    let neighbours = ann.hnsw.search(
-        &query_vector,
-        limit.saturating_mul(4).max(32),
-        limit.saturating_mul(8).max(64),
-    );
-    let mut hits = Vec::with_capacity(neighbours.len());
-    for neighbour in neighbours {
-        let idx = neighbour.d_id;
-        let Some(meta) = ann.chunks.get(idx) else {
-            continue;
-        };
-        let score = (1.0 - neighbour.distance as f64).clamp(0.0, 1.0);
-        if score >= 0.18 {
-            hits.push(SemanticSearchHit {
-                download_id: meta.download_id,
-                chunk_id: meta.chunk_id.clone(),
-                field: meta.field.clone(),
-                text: meta.text.clone(),
-                score,
-            });
+    let manifest = ensure_ann_shards(storage_dir)?;
+    let conn = open_index(storage_dir)?;
+    let mut hits = Vec::with_capacity(limit.saturating_mul(manifest.shards.len().min(8)));
+    for shard in &manifest.shards {
+        let mut loader = hnsw_rs::prelude::HnswIo::new(&ann_dir(storage_dir), &shard.basename);
+        let ann: Hnsw<'_, f32, DistCosine> = loader
+            .load_hnsw::<f32, DistCosine>()
+            .map_err(|error| format!("Semantic ANN shard load failed: {error}"))?;
+        let neighbours = ann.search(
+            &query_vector,
+            limit.saturating_mul(4).max(32),
+            limit.saturating_mul(8).max(64),
+        );
+        let ids = neighbours
+            .iter()
+            .map(|neighbour| neighbour.d_id as i64)
+            .collect::<Vec<_>>();
+        let metadata = chunk_metadata_by_rowid(&conn, &ids)?;
+        for neighbour in neighbours {
+            let Some(meta) = metadata.get(&(neighbour.d_id as i64)) else {
+                continue;
+            };
+            let score = (1.0 - neighbour.distance as f64).clamp(0.0, 1.0);
+            if score >= 0.18 {
+                hits.push(SemanticSearchHit {
+                    download_id: meta.download_id,
+                    chunk_id: meta.chunk_id.clone(),
+                    field: meta.field.clone(),
+                    text: meta.text.clone(),
+                    score,
+                });
+            }
         }
     }
 
@@ -243,109 +296,268 @@ pub fn status(storage_dir: &Path) -> SemanticIndexStatus {
     }
 }
 
-fn ann_index(storage_dir: &Path) -> Result<Arc<SemanticAnnIndex>, String> {
-    let key = index_path(storage_dir);
-    let fingerprint = index_fingerprint(storage_dir)?;
-    let cache = ANN_CACHE.get_or_init(|| ParkingMutex::new(HashMap::new()));
-    if let Some(index) = cache.lock().get(&key).cloned() {
-        if index.fingerprint == fingerprint {
-            return Ok(index);
-        }
-    }
-
+fn ensure_ann_shards(storage_dir: &Path) -> Result<AnnManifest, String> {
+    let _guard = ANN_BUILD_LOCK
+        .get_or_init(|| parking_lot::Mutex::new(()))
+        .lock();
     let conn = open_index(storage_dir)?;
+    let total: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM semantic_chunks WHERE model_id = ?1 AND dimension = ?2",
+            params![MODEL_ID, VECTOR_DIMENSION as i64],
+            |row| row.get(0),
+        )
+        .map_err(|error| format!("Semantic ANN count failed: {error}"))?;
+    if total == 0 {
+        return Ok(AnnManifest {
+            format_version: ANN_FORMAT_VERSION,
+            model_id: MODEL_ID.to_string(),
+            dimension: VECTOR_DIMENSION,
+            shard_span: 1,
+            shards: Vec::new(),
+        });
+    }
+    let max_vectors = (super::resource_budget::semantic_ann_bytes()
+        / ((VECTOR_DIMENSION * std::mem::size_of::<f32>()) as u64 * 3))
+        .clamp(2_000, 50_000) as i64;
+    let shard_span = max_vectors;
+    let manifest_path = ann_dir(storage_dir).join(ANN_MANIFEST_FILE);
+    let previous = std::fs::read(&manifest_path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<AnnManifest>(&bytes).ok())
+        .filter(|manifest| {
+            manifest.format_version == ANN_FORMAT_VERSION
+                && manifest.model_id == MODEL_ID
+                && manifest.dimension == VECTOR_DIMENSION
+                && manifest.shard_span == shard_span
+        });
+
+    std::fs::create_dir_all(ann_dir(storage_dir))
+        .map_err(|error| format!("Semantic ANN directory create failed: {error}"))?;
     let mut stmt = conn
         .prepare(
-            "SELECT download_id, chunk_id, field, text, vector
+            "SELECT rowid, vector
              FROM semantic_chunks
              WHERE model_id = ?1 AND dimension = ?2
-             ORDER BY download_id, chunk_id",
+               AND rowid >= ?3 AND rowid < ?4
+             ORDER BY rowid",
         )
         .map_err(|e| format!("Semantic ANN load prepare failed: {}", e))?;
-    let rows = stmt
-        .query_map(params![MODEL_ID, VECTOR_DIMENSION as i64], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, Vec<u8>>(4)?,
-            ))
+    let max_rowid: i64 = conn
+        .query_row(
+            "SELECT COALESCE(MAX(rowid), 0) FROM semantic_chunks WHERE model_id = ?1 AND dimension = ?2",
+            params![MODEL_ID, VECTOR_DIMENSION as i64],
+            |row| row.get(0),
+        )
+        .map_err(|error| format!("Semantic ANN max row failed: {error}"))?;
+    let previous_by_bucket = previous
+        .map(|manifest| {
+            manifest
+                .shards
+                .into_iter()
+                .map(|shard| (shard.bucket, shard))
+                .collect::<HashMap<_, _>>()
         })
-        .map_err(|e| format!("Semantic ANN load failed: {}", e))?;
-
-    let mut chunks = Vec::new();
-    let mut vectors = Vec::new();
-    for row in rows {
-        let (download_id, chunk_id, field, text, blob) =
-            row.map_err(|e| format!("Semantic ANN row read failed: {}", e))?;
-        let vector = blob_to_vector(&blob);
-        if vector.len() != VECTOR_DIMENSION {
+        .unwrap_or_default();
+    let mut shards = Vec::new();
+    for bucket in 0..=(max_rowid / shard_span) {
+        let start = bucket * shard_span;
+        let end = start.saturating_add(shard_span);
+        let fingerprint: String = conn
+            .query_row(
+                "SELECT printf('%d:%s:%d', COUNT(*), COALESCE(MAX(updated_at), ''), COALESCE(SUM(LENGTH(vector)), 0))
+                 FROM semantic_chunks
+                 WHERE model_id = ?1 AND dimension = ?2 AND rowid >= ?3 AND rowid < ?4",
+                params![MODEL_ID, VECTOR_DIMENSION as i64, start, end],
+                |row| row.get(0),
+            )
+            .map_err(|error| format!("Semantic ANN fingerprint failed: {error}"))?;
+        if let Some(previous) = previous_by_bucket.get(&bucket).filter(|shard| {
+            shard.fingerprint == fingerprint && ann_files_exist(storage_dir, &shard.basename)
+        }) {
+            shards.push(previous.clone());
             continue;
         }
-        chunks.push(ChunkMeta {
-            download_id,
-            chunk_id,
-            field,
-            text,
-        });
-        vectors.push(vector);
-    }
-
-    let max_elements = vectors.len().max(1);
-    let mut hnsw = Hnsw::<f32, DistCosine>::new(16, max_elements, 16, 200, DistCosine {});
-    if vectors.len() >= 256 {
-        let refs = vectors
-            .iter()
-            .enumerate()
-            .map(|(idx, vector)| (vector, idx))
-            .collect::<Vec<_>>();
-        hnsw.parallel_insert(&refs);
-    } else {
-        for (idx, vector) in vectors.iter().enumerate() {
-            hnsw.insert((vector, idx));
+        let rows = stmt
+            .query_map(
+                params![MODEL_ID, VECTOR_DIMENSION as i64, start, end],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?)),
+            )
+            .map_err(|error| format!("Semantic ANN shard query failed: {error}"))?;
+        let mut ids = Vec::new();
+        let mut vectors = Vec::new();
+        for row in rows {
+            let (rowid, blob) = row.map_err(|error| format!("Semantic ANN row failed: {error}"))?;
+            let vector = blob_to_vector(&blob);
+            if vector.len() == VECTOR_DIMENSION {
+                ids.push(rowid as usize);
+                vectors.push(vector);
+            }
         }
+        if vectors.is_empty() {
+            continue;
+        }
+        let mut hnsw = Hnsw::<f32, DistCosine>::new(16, vectors.len(), 16, 200, DistCosine {});
+        for (vector, rowid) in vectors.iter().zip(ids.iter()) {
+            hnsw.insert((vector, *rowid));
+        }
+        hnsw.set_searching_mode(true);
+        let requested = format!("ann-{bucket}-{}", rand::random::<u64>());
+        let basename = hnsw
+            .file_dump(&ann_dir(storage_dir), &requested)
+            .map_err(|error| format!("Semantic ANN persist failed: {error}"))?;
+        shards.push(AnnShard {
+            bucket,
+            fingerprint,
+            basename,
+            count: vectors.len(),
+        });
     }
-    hnsw.set_searching_mode(true);
-
-    let index = Arc::new(SemanticAnnIndex {
-        fingerprint,
-        hnsw,
-        chunks,
-    });
-    cache.lock().insert(key, index.clone());
-    Ok(index)
+    let manifest = AnnManifest {
+        format_version: ANN_FORMAT_VERSION,
+        model_id: MODEL_ID.to_string(),
+        dimension: VECTOR_DIMENSION,
+        shard_span,
+        shards,
+    };
+    write_ann_manifest(&manifest_path, &manifest)?;
+    cleanup_old_ann_files(storage_dir, &manifest);
+    Ok(manifest)
 }
 
-fn index_fingerprint(storage_dir: &Path) -> Result<String, String> {
-    let conn = open_index(storage_dir)?;
-    conn.query_row(
-        "SELECT
-            COUNT(*),
-            COALESCE(MAX(updated_at), ''),
-            COALESCE(SUM(LENGTH(text_hash)), 0),
-            COALESCE(SUM(LENGTH(vector)), 0)
-         FROM semantic_chunks
-         WHERE model_id = ?1 AND dimension = ?2",
-        params![MODEL_ID, VECTOR_DIMENSION as i64],
-        |row| {
-            Ok(format!(
-                "{}:{}:{}:{}",
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, i64>(2)?,
-                row.get::<_, i64>(3)?
-            ))
-        },
-    )
-    .map_err(|e| format!("Semantic fingerprint failed: {}", e))
+fn invalidate_ann_cache(_storage_dir: &Path) {
+    // Shards are content-fingerprinted against SQLite and rebuilt lazily. No
+    // process-global graph or payload cache is retained.
 }
 
-fn invalidate_ann_cache(storage_dir: &Path) {
-    let Some(cache) = ANN_CACHE.get() else {
+fn ann_dir(storage_dir: &Path) -> PathBuf {
+    index_path(storage_dir)
+        .parent()
+        .unwrap_or(storage_dir)
+        .join("ann")
+}
+
+fn ann_files_exist(storage_dir: &Path, basename: &str) -> bool {
+    let directory = ann_dir(storage_dir);
+    directory.join(format!("{basename}.hnsw.graph")).is_file()
+        && directory.join(format!("{basename}.hnsw.data")).is_file()
+}
+
+fn write_ann_manifest(path: &Path, manifest: &AnnManifest) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| "Semantic ANN manifest has no parent".to_string())?;
+    std::fs::create_dir_all(parent)
+        .map_err(|error| format!("Semantic ANN directory create failed: {error}"))?;
+    let temporary = parent.join(format!(".ann-manifest-{:016x}.tmp", rand::random::<u64>()));
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&temporary)
+        .map_err(|error| format!("Semantic ANN manifest create failed: {error}"))?;
+    let write_result = (|| {
+        serde_json::to_writer(&mut file, manifest)
+            .map_err(|error| format!("Semantic ANN manifest serialize failed: {error}"))?;
+        file.flush()
+            .map_err(|error| format!("Semantic ANN manifest flush failed: {error}"))?;
+        file.sync_all()
+            .map_err(|error| format!("Semantic ANN manifest sync failed: {error}"))?;
+        replace_manifest(&temporary, path)
+    })();
+    if write_result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    write_result
+}
+
+#[cfg(windows)]
+fn replace_manifest(source: &Path, destination: &Path) -> Result<(), String> {
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::{
+        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    };
+    let mut source_wide = source.as_os_str().encode_wide().collect::<Vec<_>>();
+    source_wide.push(0);
+    let mut destination_wide = destination.as_os_str().encode_wide().collect::<Vec<_>>();
+    destination_wide.push(0);
+    // SAFETY: both paths are immutable, NUL-terminated UTF-16 buffers for the
+    // duration of this synchronous Win32 call.
+    let result = unsafe {
+        MoveFileExW(
+            PCWSTR(source_wide.as_ptr()),
+            PCWSTR(destination_wide.as_ptr()),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if let Err(error) = result {
+        return Err(format!("Semantic ANN manifest publish failed: {error}"));
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn replace_manifest(source: &Path, destination: &Path) -> Result<(), String> {
+    std::fs::rename(source, destination)
+        .map_err(|error| format!("Semantic ANN manifest publish failed: {error}"))
+}
+
+fn cleanup_old_ann_files(storage_dir: &Path, manifest: &AnnManifest) {
+    let keep = manifest
+        .shards
+        .iter()
+        .flat_map(|shard| {
+            [
+                format!("{}.hnsw.graph", shard.basename),
+                format!("{}.hnsw.data", shard.basename),
+            ]
+        })
+        .collect::<std::collections::HashSet<_>>();
+    let Ok(entries) = std::fs::read_dir(ann_dir(storage_dir)) else {
         return;
     };
-    cache.lock().remove(&index_path(storage_dir));
+    for entry in entries.filter_map(Result::ok) {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with("ann-")
+            && name != ANN_MANIFEST_FILE
+            && !name.ends_with(".tmp")
+            && !keep.contains(&name)
+        {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+fn chunk_metadata_by_rowid(
+    conn: &Connection,
+    rowids: &[i64],
+) -> Result<HashMap<i64, ChunkMeta>, String> {
+    if rowids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let json = serde_json::to_string(rowids)
+        .map_err(|error| format!("Semantic ANN row ID encode failed: {error}"))?;
+    let mut statement = conn
+        .prepare(
+            "SELECT rowid, download_id, chunk_id, field, text
+             FROM semantic_chunks
+             WHERE rowid IN (SELECT CAST(value AS INTEGER) FROM json_each(?1))",
+        )
+        .map_err(|error| format!("Semantic ANN metadata prepare failed: {error}"))?;
+    let rows = statement
+        .query_map(params![json], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                ChunkMeta {
+                    download_id: row.get(1)?,
+                    chunk_id: row.get(2)?,
+                    field: row.get(3)?,
+                    text: row.get(4)?,
+                },
+            ))
+        })
+        .map_err(|error| format!("Semantic ANN metadata query failed: {error}"))?;
+    rows.collect::<Result<HashMap<_, _>, _>>()
+        .map_err(|error| format!("Semantic ANN metadata row failed: {error}"))
 }
 
 fn build_chunks(doc: &SemanticIndexDocument) -> Vec<ChunkInput> {
@@ -661,6 +873,11 @@ mod tests {
         .unwrap();
         let hits = search(&storage, "shousetsu", 10).unwrap();
         assert!(hits.iter().any(|hit| hit.download_id == 1));
+        let manifest: AnnManifest =
+            serde_json::from_slice(&fs::read(ann_dir(&storage).join(ANN_MANIFEST_FILE)).unwrap())
+                .unwrap();
+        assert_eq!(manifest.shards.len(), 1);
+        assert!(ann_files_exist(&storage, &manifest.shards[0].basename));
         let _ = fs::remove_dir_all(root);
     }
 }

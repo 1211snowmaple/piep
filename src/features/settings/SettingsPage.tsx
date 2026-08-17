@@ -29,6 +29,7 @@ import { modals } from "@mantine/modals";
 import { notifications } from "@mantine/notifications";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Icons, IconSize, type LucideIcon } from "@/lib/icons";
+import { Note } from "@/components/Note";
 import { PiepLockup } from "@/components/PiepLockup";
 import { ErrorState, LoadingState } from "@/components/AsyncState";
 import { JobProgress } from "@/components/JobProgress";
@@ -39,7 +40,15 @@ import { applyDensity, isDense } from "@/lib/density";
 import { PAGE_SIZE_OPTIONS, usePageSize, usePagingMode, type PagingMode } from "@/components/ListPager";
 import { errorMessage, formatBytes, formatNumber } from "@/lib/format";
 import { getProvider, providers } from "@/lib/providers";
-import { exportAllZip, getStoragePath, importZip, inspectBackup, type BackupInspection } from "@/services/archiveApi";
+import {
+  exportAllMultipart,
+  getStoragePath,
+  importBackupFile,
+  inspectBackupFile,
+  multipartManifestPath,
+  type BackupFormat,
+  type BackupInspection,
+} from "@/services/archiveApi";
 import { loginFanboxWebview, loginPixivWebview, verifyFanboxSession, verifyPixivToken } from "@/services/authApi";
 import { getSearchIndexStatus, getStats, isTauriRuntime, scanAndReimportDownloads } from "@/services/dbApi";
 import { openSingleDialog, saveDialog } from "@/services/dialogApi";
@@ -59,6 +68,7 @@ function isSection(value: string | null): value is Section {
 interface PixivUser { id: string; name: string; profile_image_urls?: { medium?: string } }
 interface FanboxUser { userId: string; name: string; iconUrl?: string | null }
 interface ConnectionState { pixiv: PixivUser | null; fanbox: FanboxUser | null }
+export interface BackupReview { path: string; format: BackupFormat; inspection: BackupInspection }
 
 export default function SettingsPage() {
   const runtime = isTauriRuntime();
@@ -80,7 +90,7 @@ export default function SettingsPage() {
   const rebuild = useSearchIndexProgress();
   const rebuildOperationRef = useRef<OperationController | null>(null);
   const manualJobRef = useRef<string | null>(null);
-  const [restoreReview, setRestoreReview] = useState<{ path: string; inspection: BackupInspection } | null>(null);
+  const [restoreReview, setRestoreReview] = useState<BackupReview | null>(null);
   const { colorScheme, setColorScheme } = useMantineColorScheme();
   const auth = useQuery({
     queryKey: ["settings-auth"],
@@ -117,10 +127,10 @@ export default function SettingsPage() {
     mutationFn: async (action: "backup" | "restore" | "scan") => {
       if (!runtime) throw new Error("デスクトップアプリで利用できます");
       if (action === "restore") {
-        const path = await openSingleDialog({ title: "検査するバックアップを選択", filters: [{ name: "ZIP archive", extensions: ["zip"] }] });
+        const path = await openSingleDialog({ title: "検査するバックアップを選択", filters: [{ name: "Piep backup", extensions: ["json", "zip"] }] });
         if (!path) return "";
-        const inspection = await inspectBackup(path);
-        setRestoreReview({ path, inspection });
+        const review = await inspectBackupFile(path);
+        setRestoreReview({ path, ...review });
         return "";
       }
       const operation = startOperation({
@@ -130,12 +140,13 @@ export default function SettingsPage() {
       });
       try {
         if (action === "backup") {
-          const path = await saveDialog({ title: "ライブラリのバックアップ", defaultPath: `piep-backup-${new Date().toISOString().slice(0, 10)}.zip`, filters: [{ name: "ZIP archive", extensions: ["zip"] }] });
-          if (!path) { operation.cancel("保存先の選択をキャンセルしました"); return ""; }
-          operation.log(path);
-          await exportAllZip(path);
-          operation.complete("バックアップを書き出しました");
-          return "バックアップを書き出しました";
+          const selectedPath = await saveDialog({ title: "ライブラリのバックアップ", defaultPath: `piep-backup-${new Date().toISOString().slice(0, 10)}.json`, filters: [{ name: "Piep multipart backup manifest", extensions: ["json"] }] });
+          if (!selectedPath) { operation.cancel("保存先の選択をキャンセルしました"); return ""; }
+          const manifestPath = multipartManifestPath(selectedPath);
+          operation.log(manifestPath);
+          await exportAllMultipart(manifestPath);
+          operation.complete("分割バックアップを書き出しました");
+          return "分割バックアップを書き出しました。マニフェストと同じフォルダーのZIPパートを一緒に保管してください";
         }
         const count = await scanAndReimportDownloads();
         operation.complete(`${count}件を再取り込みしました`);
@@ -146,17 +157,23 @@ export default function SettingsPage() {
       }
     },
     onSuccess: (message) => { if (message) notifications.show({ color: "green", message }); queryClient.invalidateQueries({ queryKey: ["dashboard"] }); queryClient.invalidateQueries({ queryKey: ["library"] }); queryClient.invalidateQueries({ queryKey: ["stats"] }); },
-    onError: (error) => notifications.show({ color: "red", title: "操作に失敗しました", message: errorMessage(error) }),
+    onError: (error, action) => notifications.show({
+      color: "red",
+      title: action === "restore" ? "バックアップを検査できませんでした" : "操作に失敗しました",
+      message: action === "restore"
+        ? `${errorMessage(error)}。JSONマニフェストを選ぶ場合は、同じフォルダーにすべてのZIPパートが必要です。`
+        : errorMessage(error),
+    }),
   });
   const restoreMutation = useMutation({
-    mutationFn: async ({ path, inspection }: { path: string; inspection: BackupInspection }) => {
+    mutationFn: async ({ path, format, inspection }: BackupReview) => {
       const execute = async (): Promise<void> => {
         const operation = startOperation({ kind: "restore", label: "バックアップの復元", detail: path, total: inspection.workCount, onRetry: execute });
         operation.log(`${inspection.workCount}作品・${inspection.assetCount}アセットを検証済み`);
         try {
-          const count = await importZip(path);
+          const count = await importBackupFile(path, format);
           operation.progress(count, inspection.workCount);
-          operation.complete(`${count}件をアトミックに復元しました`);
+          operation.complete(`${count}件を復元しました`);
           notifications.show({ color: "green", message: `${count}件を復元しました` });
           setRestoreReview(null);
           await Promise.all([
@@ -171,7 +188,13 @@ export default function SettingsPage() {
       };
       await execute();
     },
-    onError: (error) => notifications.show({ color: "red", title: "復元を完了できませんでした", message: `${errorMessage(error)}。元のライブラリは変更されていません。` }),
+    onError: (error, review) => notifications.show({
+      color: "red",
+      title: "復元を完了できませんでした",
+      message: review.format === "multipart"
+        ? `${errorMessage(error)}。同じJSONマニフェストをもう一度選ぶと、完了済みパートを保ったまま安全に再開できます。`
+        : `${errorMessage(error)}。既存ライブラリは復元ジャーナルにより元の状態へ戻されます。`,
+    }),
   });
   const rebuildMutation = useMutation({
     mutationFn: async (includeSemantic: boolean) => {
@@ -234,7 +257,7 @@ export default function SettingsPage() {
       <PageHeader title="設定" description="接続情報、ローカルデータ、検索と表示を管理します。" />
       <RuntimeNotice />
       <Grid gap="xl" mt="lg" align="flex-start">
-        <Grid.Col span={{ base: 12, md: 4, lg: 3 }}><Card p="xs" className="settings-nav">{nav.map((item) => { const Icon = item.icon; return <NavLink key={item.id} active={section === item.id} aria-current={section === item.id ? "page" : undefined} label={item.label} description={item.description} leftSection={<Icon size={18} />} onClick={() => setSection(item.id)} />; })}</Card></Grid.Col>
+        <Grid.Col span={{ base: 12, md: 4, lg: 3 }}><Card p="xs" className="settings-nav">{nav.map((item) => { const Icon = item.icon; return <NavLink component="button" type="button" key={item.id} active={section === item.id} aria-current={section === item.id ? "page" : undefined} label={item.label} description={item.description} leftSection={<Icon size={18} />} onClick={() => setSection(item.id)} />; })}</Card></Grid.Col>
         <Grid.Col span={{ base: 12, md: 8, lg: 9 }}>
           {section === "connections" && (auth.isLoading ? <LoadingState label="接続状態を確認しています" /> : auth.error ? <ErrorState error={auth.error} retry={() => auth.refetch()} /> : <ConnectionsSection auth={auth.data ?? { pixiv: null, fanbox: null }} runtime={runtime} pixivForm={pixivForm} fanboxForm={fanboxForm} mutation={connectionMutation} disconnect={disconnect} />)}
           {section === "library" && (stats.isLoading || storagePath.isLoading ? <LoadingState label="ライブラリ情報を読み込んでいます" /> : stats.error || storagePath.error ? <ErrorState error={stats.error ?? storagePath.error} retry={() => { stats.refetch(); storagePath.refetch(); }} /> : <LibrarySection stats={stats.data} path={storagePath.data} runtime={runtime} pending={maintenanceMutation.isPending} run={(action) => maintenanceMutation.mutate(action)} />)}
@@ -259,23 +282,24 @@ function SectionIntro({ title, description }: { title: string; description: stri
 type ConnectionInput = { source: "pixiv" | "fanbox"; mode: "web" | "manual"; values?: Record<string, string> };
 
 function ConnectionsSection({ auth, runtime, pixivForm, fanboxForm, mutation, disconnect }: { auth: ConnectionState; runtime: boolean; pixivForm: UseFormReturnType<{ token: string }, { token: string }, any>; fanboxForm: UseFormReturnType<{ session: string; userAgent: string }, { session: string; userAgent: string }, any>; mutation: { mutate: (input: ConnectionInput) => void; isPending: boolean }; disconnect: (source: "pixiv" | "fanbox") => void }) {
-  return <Stack gap="lg"><SectionIntro title="サービス接続" description="認証情報は端末内のTauri Storeに保存され、作品取得のときだけ使用します。" /><ConnectionCard source="pixiv" user={auth.pixiv} runtime={runtime} loading={mutation.isPending} onWeb={() => mutation.mutate({ source: "pixiv", mode: "web" })} onDisconnect={() => disconnect("pixiv")} manual={<form onSubmit={pixivForm.onSubmit((values) => mutation.mutate({ source: "pixiv", mode: "manual", values }))}><Group align="flex-start"><PasswordInput flex={1} disabled={!runtime} label="リフレッシュトークン" placeholder="手動で入力" {...pixivForm.getInputProps("token")} /><Button type="submit" mt={25} variant="light" disabled={!runtime}>検証して保存</Button></Group></form>} /><ConnectionCard source="fanbox" user={auth.fanbox} runtime={runtime} loading={mutation.isPending} onWeb={() => mutation.mutate({ source: "fanbox", mode: "web" })} onDisconnect={() => disconnect("fanbox")} manual={<form onSubmit={fanboxForm.onSubmit((values) => mutation.mutate({ source: "fanbox", mode: "manual", values }))}><Stack><PasswordInput disabled={!runtime} label="FANBOXSESSID" placeholder="手動で入力" {...fanboxForm.getInputProps("session")} /><TextInput disabled={!runtime} label="User-Agent" {...fanboxForm.getInputProps("userAgent")} /><Button type="submit" variant="light" disabled={!runtime}>検証して保存</Button></Stack></form>} /><Alert color="green" icon={<Icons.secure size={IconSize.nav} />} title="ローカル保存">piepは接続情報を外部サーバーへ送信しません。各サービスへの通信とローカル保存だけに使用します。</Alert></Stack>;
+  return <Stack gap="lg"><SectionIntro title="サービス接続" description="認証情報は端末内のTauri Storeに保存され、作品取得のときだけ使用します。" /><ConnectionCard source="pixiv" user={auth.pixiv} runtime={runtime} loading={mutation.isPending} onWeb={() => mutation.mutate({ source: "pixiv", mode: "web" })} onDisconnect={() => disconnect("pixiv")} manual={<form onSubmit={pixivForm.onSubmit((values) => mutation.mutate({ source: "pixiv", mode: "manual", values }))}><Group align="flex-start"><PasswordInput flex={1} disabled={!runtime} label="リフレッシュトークン" placeholder="手動で入力" {...pixivForm.getInputProps("token")} /><Button type="submit" mt={25} variant="light" disabled={!runtime}>検証して保存</Button></Group></form>} /><ConnectionCard source="fanbox" user={auth.fanbox} runtime={runtime} loading={mutation.isPending} onWeb={() => mutation.mutate({ source: "fanbox", mode: "web" })} onDisconnect={() => disconnect("fanbox")} manual={<form onSubmit={fanboxForm.onSubmit((values) => mutation.mutate({ source: "fanbox", mode: "manual", values }))}><Stack><PasswordInput disabled={!runtime} label="FANBOXSESSID" placeholder="手動で入力" {...fanboxForm.getInputProps("session")} /><TextInput disabled={!runtime} label="User-Agent" {...fanboxForm.getInputProps("userAgent")} /><Button type="submit" variant="light" disabled={!runtime}>検証して保存</Button></Stack></form>} /><Note icon={Icons.secure} title="ローカル保存">piepは接続情報を外部サーバーへ送信しません。各サービスへの通信とローカル保存だけに使用します。</Note></Stack>;
 }
 
 function ConnectionCard({ source, user, runtime, loading, onWeb, onDisconnect, manual }: { source: "pixiv" | "fanbox"; user: PixivUser | FanboxUser | null; runtime: boolean; loading: boolean; onWeb: () => void; onDisconnect: () => void; manual: React.ReactNode }) {
   const provider = getProvider(source); const icon = user ? (source === "pixiv" ? (user as PixivUser).profile_image_urls?.medium : (user as FanboxUser).iconUrl ?? undefined) : undefined; return <Card p="lg"><Group justify="space-between" align="flex-start"><Group><Avatar src={icon} size={54} color="piep">{user ? <Icons.person size={IconSize.feature} /> : provider.icon}</Avatar><Box><Group gap="xs"><Text fw={700}>{provider.label}</Text><Badge color={user ? "green" : "gray"} variant="light">{user ? "接続済み" : "未接続"}</Badge></Group><Text size="sm" c="dimmed" mt={4}>{user?.name || provider.description}</Text></Box></Group>{user ? <Button color="red" variant="subtle" size="xs" leftSection={<Icons.delete size={IconSize.menu} />} onClick={onDisconnect}>接続解除</Button> : <Button disabled={!runtime} loading={loading} leftSection={<Icons.credentials size={IconSize.menu} />} onClick={onWeb}>ブラウザで接続</Button>}</Group>{!user && <><Divider my="lg" label="または手動入力" labelPosition="center" />{manual}</>}</Card>;
 }
 
-function LibrarySection({ stats, path, runtime, pending, run }: { stats?: { totalDownloads: number; totalAssets: number; totalSizeBytes: number }; path?: string; runtime: boolean; pending: boolean; run: (action: "backup" | "restore" | "scan") => void }) { return <Stack gap="lg"><SectionIntro title="ローカルライブラリ" description="保存ファイルとデータベースの場所、バックアップを管理します。" /><Grid><Grid.Col span={{ base: 12, sm: 4 }}><Metric icon={Icons.read} label="作品" value={formatNumber(stats?.totalDownloads)} /></Grid.Col><Grid.Col span={{ base: 12, sm: 4 }}><Metric icon={Icons.archive} label="アセット" value={formatNumber(stats?.totalAssets)} /></Grid.Col><Grid.Col span={{ base: 12, sm: 4 }}><Metric icon={Icons.storage} label="使用容量" value={formatBytes(stats?.totalSizeBytes ?? 0)} /></Grid.Col></Grid><Card p="lg"><Text fw={700}>保存先</Text><Group mt="sm" wrap="nowrap"><Code block flex={1}>{path || "読み込み中…"}</Code><ActionIcon variant="light" aria-label="保存先を開く" disabled={!runtime || !path} onClick={() => path && openFilesystemPath(path)}><Icons.openFolder size={IconSize.action} /></ActionIcon></Group></Card><Card p="lg"><Stack gap="md"><Box><Text fw={700}>バックアップと復元</Text><Text size="sm" c="dimmed">メタデータ、履歴、アセットをZIPにまとめます。</Text></Box><Group><Button disabled={!runtime} loading={pending} variant="light" leftSection={<Icons.export size={IconSize.menu} />} onClick={() => run("backup")}>バックアップを書き出す</Button><Button disabled={!runtime} loading={pending} variant="default" leftSection={<Icons.import size={IconSize.menu} />} onClick={() => run("restore")}>バックアップを復元</Button></Group><Divider /><Box><Text fw={700} size="sm">フォルダーから再取り込み</Text><Text size="xs" c="dimmed" mt={4}>DBにない保存フォルダーを検出し、ライブラリへ戻します。</Text><Button mt="sm" disabled={!runtime} loading={pending} size="xs" variant="default" leftSection={<Icons.retry size={IconSize.menu} />} onClick={() => run("scan")}>スキャンを実行</Button></Box></Stack></Card></Stack>; }
+function LibrarySection({ stats, path, runtime, pending, run }: { stats?: { totalDownloads: number; totalAssets: number; totalSizeBytes: number }; path?: string; runtime: boolean; pending: boolean; run: (action: "backup" | "restore" | "scan") => void }) { return <Stack gap="lg"><SectionIntro title="ローカルライブラリ" description="保存ファイルとデータベースの場所、バックアップを管理します。" /><Grid><Grid.Col span={{ base: 12, sm: 4 }}><Metric icon={Icons.read} label="作品" value={formatNumber(stats?.totalDownloads)} /></Grid.Col><Grid.Col span={{ base: 12, sm: 4 }}><Metric icon={Icons.archive} label="アセット" value={formatNumber(stats?.totalAssets)} /></Grid.Col><Grid.Col span={{ base: 12, sm: 4 }}><Metric icon={Icons.storage} label="使用容量" value={formatBytes(stats?.totalSizeBytes ?? 0)} /></Grid.Col></Grid><Card p="lg"><Text fw={700}>保存先</Text><Group mt="sm" wrap="nowrap"><Code block flex={1}>{path || "読み込み中…"}</Code><ActionIcon variant="light" aria-label="保存先を開く" disabled={!runtime || !path} onClick={() => path && openFilesystemPath(path)}><Icons.openFolder size={IconSize.action} /></ActionIcon></Group></Card><Card p="lg"><Stack gap="md"><Box><Text fw={700}>バックアップと復元</Text><Text size="sm" c="dimmed">大きなライブラリはJSONマニフェストと複数のZIPパートに分けて書き出します。復元には同じフォルダー内の一式が必要です。従来の単一ZIPバックアップも引き続き復元できます。</Text></Box><Group><Button disabled={!runtime} loading={pending} variant="light" leftSection={<Icons.export size={IconSize.menu} />} onClick={() => run("backup")}>分割バックアップを書き出す</Button><Button disabled={!runtime} loading={pending} variant="default" leftSection={<Icons.import size={IconSize.menu} />} onClick={() => run("restore")}>バックアップを復元</Button></Group><Divider /><Box><Text fw={700} size="sm">フォルダーから再取り込み</Text><Text size="xs" c="dimmed" mt={4}>DBにない完全な保存フォルダーだけを検出し、1作品ずつ原子的にライブラリへ戻します。既存作品は手動変更で上書きしません。</Text><Button mt="sm" disabled={!runtime} loading={pending} size="xs" variant="default" leftSection={<Icons.retry size={IconSize.menu} />} onClick={() => run("scan")}>スキャンを実行</Button></Box></Stack></Card></Stack>; }
 
-export function RestoreWizard({ review, loading, onClose, onConfirm }: { review: { path: string; inspection: BackupInspection } | null; loading: boolean; onClose: () => void; onConfirm: () => void }) {
+export function RestoreWizard({ review, loading, onClose, onConfirm }: { review: BackupReview | null; loading: boolean; onClose: () => void; onConfirm: () => void }) {
   const inspection = review?.inspection;
   const hasSpace = inspection?.availableFreeBytes == null || inspection.availableFreeBytes >= inspection.requiredFreeBytes;
   const canRestore = Boolean(inspection?.valid && hasSpace);
-  return <Modal opened={Boolean(review)} onClose={onClose} closeOnClickOutside={!loading} closeOnEscape={!loading} title="バックアップ復元ウィザード" size="lg">
+  const multipart = review?.format === "multipart";
+  return <Modal opened={Boolean(review)} onClose={onClose} withCloseButton={!loading} closeOnClickOutside={!loading} closeOnEscape={!loading} title="バックアップ復元ウィザード" size="lg">
     {review && inspection && <Stack gap="lg">
-      <Group gap="xs"><Badge variant="filled">1. 検査済み</Badge><Text c="dimmed">→</Text><Badge variant="light" color={canRestore ? "blue" : "gray"}>2. 内容確認</Badge><Text c="dimmed">→</Text><Badge variant="light" color="gray">3. アトミック復元</Badge></Group>
-      <Box><Text size="sm" fw={700}>選択したファイル</Text><Code block mt={6}>{review.path}</Code></Box>
+      <Group gap="xs" role="list" aria-label="復元手順"><Badge component="span" role="listitem" variant="filled">1. 検査済み</Badge><Text c="dimmed" aria-hidden>→</Text><Badge component="span" role="listitem" variant="light" color={canRestore ? "piep" : "gray"}>2. 内容確認</Badge><Text c="dimmed" aria-hidden>→</Text><Badge component="span" role="listitem" variant="light" color="gray">3. {multipart ? "再開可能な復元" : "アトミック復元"}</Badge></Group>
+      <Box><Text id="selected-backup-label" size="sm" fw={700}>選択した{multipart ? "JSONマニフェスト" : "ZIPバックアップ"}</Text><Code block mt={6} aria-labelledby="selected-backup-label">{review.path}</Code></Box>
       {!inspection.valid && <Alert color="red" title="このバックアップは復元できません">{inspection.error || "バックアップの整合性検査に失敗しました。"}</Alert>}
       {inspection.valid && !hasSpace && <Alert color="red" title="空き容量が不足しています">復元には一時領域を含めて {formatBytes(inspection.requiredFreeBytes)} 必要ですが、利用可能なのは {formatBytes(inspection.availableFreeBytes ?? 0)} です。</Alert>}
       {inspection.valid && <>
@@ -288,14 +312,16 @@ export function RestoreWizard({ review, loading, onClose, onConfirm }: { review:
           <Grid.Col span={{ base: 6, sm: 4 }}><Metric icon={Icons.database} label="展開後" value={formatBytes(inspection.expandedBytes)} /></Grid.Col>
         </Grid>
         <Card p="md" withBorder>
-          <Group justify="space-between"><Text size="sm">ZIPサイズ</Text><Text size="sm" fw={700}>{formatBytes(inspection.compressedBytes)}</Text></Group>
+          <Group justify="space-between"><Text size="sm">{multipart ? "ZIPパート合計" : "ZIPサイズ"}</Text><Text size="sm" fw={700}>{formatBytes(inspection.compressedBytes)}</Text></Group>
           <Group justify="space-between" mt="xs"><Text size="sm">一時領域を含む必要容量</Text><Text size="sm" fw={700}>{formatBytes(inspection.requiredFreeBytes)}</Text></Group>
           <Group justify="space-between" mt="xs"><Text size="sm">利用可能容量</Text><Text size="sm" fw={700}>{inspection.availableFreeBytes == null ? "取得できません" : formatBytes(inspection.availableFreeBytes)}</Text></Group>
-          <Group justify="space-between" mt="xs"><Text size="sm">バックアップ形式</Text><Text size="sm" fw={700}>v{inspection.backupVersion ?? "不明"}</Text></Group>
+          <Group justify="space-between" mt="xs"><Text size="sm">バックアップ形式</Text><Text size="sm" fw={700}>{multipart ? "分割" : "単一ZIP"} · v{inspection.backupVersion ?? "不明"}</Text></Group>
         </Card>
       </>}
       {inspection.warnings.map((warning) => <Alert key={warning} color="yellow">{warning}</Alert>)}
-      <Alert color="blue" title="安全な復元">すべてのファイルを一時領域へ展開・検証してから、データベースと保存ファイルを一括で切り替えます。途中で失敗した場合は元の状態へ戻します。</Alert>
+      {inspection.valid && <Note icon={Icons.secure} title={multipart ? "中断しても再開できます" : "安全な復元"}>{multipart
+        ? "すべてのZIPパートを先に検査し、パートごとに安全に復元します。途中で止まった場合は、同じJSONマニフェストをもう一度選ぶと続きから再開できます。マニフェストとZIPパートは移動・改名せず一緒に保管してください。"
+        : "すべてのファイルを一時領域へ展開・検証してから、データベースと保存ファイルを一括で切り替えます。途中で失敗した場合は復元ジャーナルにより元の状態へ戻します。"}</Note>}
       <Group justify="flex-end"><Button variant="default" disabled={loading} onClick={onClose}>キャンセル</Button><Button color="red" disabled={!canRestore} loading={loading} leftSection={<Icons.import size={IconSize.menu} />} onClick={onConfirm}>検証済みバックアップを復元</Button></Group>
     </Stack>}
   </Modal>;
@@ -362,11 +388,9 @@ function SearchSection({ status, rebuild, runtime, rebuilding, start, cancel }: 
       </Group>
       <Divider my="md" />
       <Group gap="xl"><Text size="sm">意味ベクトル <b>{formatNumber(status?.semanticIndexedChunks)}</b></Text><Text size="sm">GPU <b>{status?.gpuEnabled ? "有効" : "無効"}</b></Text></Group>
-      <Alert color="gray" variant="light" mt="md">
-        全文検索の索引づくりはCPUの処理で、GPUは使いません。GPU（DirectML）を使うのは上の「意味検索のベクトル」だけです。
-      </Alert>
+      <Note mt="md">全文検索の索引づくりはCPUの処理で、GPUは使いません。GPU（DirectML）を使うのは上の「意味検索のベクトル」だけです。</Note>
     </Card>
-    <Alert color="blue">再構築中もライブラリの通常検索は利用できます。中止したり、アプリを終了したりした場合は、確定済みのところまでが保持され、次回は続きから再開します。</Alert>
+    <Note>再構築中もライブラリの通常検索は利用できます。中止したり、アプリを終了したりした場合は、確定済みのところまでが保持され、次回は続きから再開します。</Note>
   </Stack>;
 }
 

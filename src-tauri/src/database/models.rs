@@ -251,6 +251,20 @@ pub struct ReaderSearchHit {
 /// Runtime measurements used by the large-library diagnostics screen.  The
 /// benchmark values are measured on demand against the user's real database;
 /// they are not synthetic estimates.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryFileIssue {
+    /// Stable machine-readable value: missing, unsafe, unreadable, empty,
+    /// size_mismatch, or transient.
+    pub issue_type: String,
+    /// work_json, work_asset, profile, entity_json, or transient.
+    pub category: String,
+    pub path: String,
+    pub label: Option<String>,
+    pub expected_size_bytes: Option<u64>,
+    pub actual_size_bytes: Option<u64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LibraryDiagnostics {
@@ -275,6 +289,19 @@ pub struct LibraryDiagnostics {
     pub orphan_asset_bytes: i64,
     pub orphan_asset_files: u64,
     pub orphan_asset_file_bytes: u64,
+    pub checked_file_references: u64,
+    pub missing_json_files: u64,
+    pub missing_asset_files: u64,
+    pub missing_profile_files: u64,
+    pub unsafe_referenced_files: u64,
+    pub unreadable_referenced_files: u64,
+    pub empty_referenced_files: u64,
+    pub mismatched_asset_files: u64,
+    pub transient_files: u64,
+    pub transient_file_bytes: u64,
+    /// A bounded sample for an actionable UI. Totals above remain the source
+    /// of truth; very large result sets never cross IPC in full.
+    pub file_issue_samples: Vec<LibraryFileIssue>,
     pub process_memory_bytes: Option<u64>,
     pub list_first_page_ms: f64,
     pub list_p50_ms: f64,
@@ -411,6 +438,16 @@ pub struct EntityFacet {
     pub banner_path: Option<String>,
 }
 
+/// A stable keyset page of series connected to one person/author.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EntitySeriesPage {
+    pub items: Vec<EntityFacet>,
+    pub next_cursor: Option<String>,
+    /// Exact number of series matching the person and optional query.
+    pub total: i64,
+}
+
 /// ライブラリの絞り込みUIで使う候補一覧
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -439,6 +476,12 @@ pub struct UpdateTarget {
     pub metadata_json: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    /// 最後に「新しいもの」を見つけた時刻。ずっと空なら休眠している対象。
+    #[serde(default)]
+    pub last_hit_at: Option<String>,
+    /// 連続で失敗している回数。0 に戻るのは成功したとき。
+    #[serde(default)]
+    pub consecutive_errors: i64,
 }
 
 /// 更新チェック対象の作成・更新入力
@@ -478,6 +521,26 @@ pub struct StartUpdateJobRequest {
     pub target_ids: Option<Vec<i64>>,
     pub credentials: Option<UpdateCredentials>,
     pub concurrency: Option<UpdateJobConcurrency>,
+    /// このジョブが保存した作品を、そのまま更新監視に載せるか。
+    /// 設定の「保存した作品を自動で監視する」から渡ってくる。
+    #[serde(default)]
+    pub watch_saved: Option<bool>,
+    /// 監視対象に登録せず、この一回だけ確認する作者・シリーズ。
+    ///
+    /// 作品ページや作者ページの「新作を確認」から渡ってくる。登録済みの対象と
+    /// 同じものを指したときは、その対象の前回位置を引き継いで無駄に遡らない。
+    #[serde(default)]
+    pub adhoc_targets: Option<Vec<AdhocUpdateTarget>>,
+}
+
+/// 一回きりの確認先。登録された監視対象とは別物。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdhocUpdateTarget {
+    pub target_type: String,
+    pub source: String,
+    pub source_key: String,
+    pub display_name: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -520,6 +583,12 @@ pub struct UpdateJobCandidate {
     pub target_type: String,
     pub selected: bool,
     pub status: String,
+    /// "new" | "sequel" | "revision"。画面で分類して選べるようにするための印。
+    #[serde(default)]
+    pub kind: String,
+    /// 失敗したときの理由。分類の札（[取得制限] など）を含む。
+    #[serde(default)]
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -537,6 +606,8 @@ pub struct UpdateJobSnapshot {
     pub active_label: Option<String>,
     pub logs: Vec<UpdateJobLog>,
     pub candidates: Vec<UpdateJobCandidate>,
+    pub next_candidate_cursor: Option<i64>,
+    pub previous_log_cursor: Option<i64>,
     pub started_at: String,
     pub updated_at: String,
     pub finished_at: Option<String>,
@@ -555,6 +626,31 @@ pub struct UpdateJobItem {
     pub status: String,
     pub error: Option<String>,
     pub result_download_id: Option<i64>,
+}
+
+/// 見つけたが、まだ保存も拒否もしていない作品。ジョブより長生きする。
+#[derive(Debug, Clone)]
+pub struct UpdateCandidateInput {
+    pub source: String,
+    pub source_id: String,
+    pub kind: String,
+    pub title: String,
+    pub payload_json: String,
+    pub target_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateCandidateRow {
+    pub source: String,
+    pub source_id: String,
+    pub kind: String,
+    pub title: String,
+    pub payload_json: String,
+    pub target_type: Option<String>,
+    pub status: String,
+    pub first_seen_at: String,
+    pub updated_at: String,
 }
 
 #[derive(Debug, Clone)]
@@ -726,6 +822,8 @@ pub struct SearchIndexStatus {
     pub phase: String,
     pub indexed_chunks: i64,
     pub semantic_indexed_chunks: i64,
+    pub semantic_indexed_downloads: i64,
+    pub semantic_pending_downloads: i64,
     pub semantic_model_ready: bool,
     pub embedding_provider: String,
     pub gpu_enabled: bool,

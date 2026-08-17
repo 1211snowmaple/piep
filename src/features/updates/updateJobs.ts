@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { onTauriEvent } from "@/services/eventBus";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { subscribeTauriEvent } from "@/services/eventBus";
 import {
   cancelUpdateJobCommand,
   clearUpdateJobCommand,
@@ -36,6 +36,10 @@ export interface StartUpdateJobRequest {
   mode: UpdateJobMode;
   workIds?: number[] | null;
   targetIds?: number[] | null;
+  /** Put every work this job saves under update watching. */
+  watchSaved?: boolean | null;
+  /** Authors or series to check once, without adding them to the watch list. */
+  adhocTargets?: { targetType: "author" | "series"; source: string; sourceKey: string; displayName: string }[] | null;
   credentials?: UpdateJobCredentials | null;
   concurrency?: {
     fetch?: number | null;
@@ -78,11 +82,30 @@ export interface UpdateJobCandidate {
   targetType: "work" | "author" | "series";
   selected: boolean;
   status: "candidate" | "queued" | "running" | "saved" | "failed" | "skipped" | "done";
+  /** Why this is a candidate: a work we lack, a sequel, or a rewrite of one we have. */
+  kind: "new" | "sequel" | "revision";
+  /** Set when the candidate failed; carries the classified reason. */
+  error?: string | null;
 }
 
 export interface UpdateJobSnapshot extends UpdateJobSummary {
   logs: UpdateJobLog[];
   candidates: UpdateJobCandidate[];
+  nextCandidateCursor: number | null;
+  previousLogCursor: number | null;
+}
+
+function mergeSnapshot(current: UpdateJobSnapshot | null, incoming: UpdateJobSnapshot): UpdateJobSnapshot {
+  if (!current || current.jobId !== incoming.jobId) return incoming;
+  const candidates = new Map(current.candidates.map(candidate => [candidate.id, candidate]));
+  incoming.candidates.forEach(candidate => candidates.set(candidate.id, candidate));
+  const logs = new Map(current.logs.map(log => [log.id, log]));
+  incoming.logs.forEach(log => logs.set(log.id, log));
+  return {
+    ...incoming,
+    candidates: [...candidates.values()].sort((a, b) => a.id - b.id),
+    logs: [...logs.values()].sort((a, b) => a.id - b.id),
+  };
 }
 
 export function isUpdateJobTerminal(status: UpdateJobStatus): boolean {
@@ -114,9 +137,22 @@ export async function waitForUpdateJob(jobId: string, onSnapshot?: (snapshot: Up
   return snapshot;
 }
 
+/**
+ * How long the screen waits for an event before it asks the database itself.
+ *
+ * The worker emits a snapshot after every item, so polling is only a safety
+ * net for events that never arrive (a missed listener, a worker that died).
+ * Polling on a fixed timer as well meant reading the whole snapshot twice a
+ * second for the entire length of a job.
+ */
+const EVENT_SILENCE_MS = 5_000;
+/** How often to notice that the silence has lasted long enough. */
+const SILENCE_CHECK_MS = 1_500;
+
 export function useUpdateJobs(onSnapshot?: (snapshot: UpdateJobSnapshot) => void, enabled = true) {
   const [jobs, setJobs] = useState<UpdateJobSummary[]>([]);
   const [activeSnapshot, setActiveSnapshot] = useState<UpdateJobSnapshot | null>(null);
+  const lastEventAt = useRef(0);
 
   const loadJobs = useCallback(async () => {
     if (!enabled) {
@@ -150,9 +186,9 @@ export function useUpdateJobs(onSnapshot?: (snapshot: UpdateJobSnapshot) => void
 
   useEffect(() => {
     if (!enabled) return undefined;
-    let unlisten: (() => void) | undefined;
-    onTauriEvent<UpdateJobSnapshot>("update-job-progress", event => {
-      setActiveSnapshot(event.payload);
+    return subscribeTauriEvent<UpdateJobSnapshot>("update-job-progress", event => {
+      lastEventAt.current = Date.now();
+      setActiveSnapshot(current => mergeSnapshot(current, event.payload));
       onSnapshot?.(event.payload);
       setJobs(prev => {
         const summary: UpdateJobSummary = {
@@ -173,24 +209,36 @@ export function useUpdateJobs(onSnapshot?: (snapshot: UpdateJobSnapshot) => void
         const rest = prev.filter(job => job.jobId !== summary.jobId);
         return [summary, ...rest].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
       });
-    }).then(dispose => {
-      unlisten = dispose;
-    }).catch(() => undefined);
-    return () => unlisten?.();
+    });
   }, [enabled, onSnapshot]);
 
+  // 進捗はイベントで届く。ここはその取りこぼしに備える保険なので、
+  // イベントが途切れているときだけ読みに行く。
   useEffect(() => {
     if (!enabled || !activeSnapshot || isUpdateJobTerminal(activeSnapshot.status)) return;
     const id = window.setInterval(() => {
+      if (Date.now() - lastEventAt.current < EVENT_SILENCE_MS) return;
       getUpdateJobCommand(activeSnapshot.jobId)
         .then(snapshot => {
-          setActiveSnapshot(snapshot);
+          setActiveSnapshot(current => mergeSnapshot(current, snapshot));
           onSnapshot?.(snapshot);
         })
         .catch(() => undefined);
-    }, 1500);
+    }, SILENCE_CHECK_MS);
     return () => window.clearInterval(id);
   }, [activeSnapshot, enabled, onSnapshot]);
+
+  const loadMoreCandidates = useCallback(async () => {
+    if (!enabled || !activeSnapshot?.nextCandidateCursor) return;
+    const snapshot = await getUpdateJobCommand(activeSnapshot.jobId, activeSnapshot.nextCandidateCursor, null);
+    setActiveSnapshot(current => mergeSnapshot(current, snapshot));
+  }, [activeSnapshot, enabled]);
+
+  const loadOlderLogs = useCallback(async () => {
+    if (!enabled || !activeSnapshot?.previousLogCursor) return;
+    const snapshot = await getUpdateJobCommand(activeSnapshot.jobId, null, activeSnapshot.previousLogCursor);
+    setActiveSnapshot(current => mergeSnapshot(current, snapshot));
+  }, [activeSnapshot, enabled]);
 
   return useMemo(() => ({
     jobs,
@@ -203,5 +251,7 @@ export function useUpdateJobs(onSnapshot?: (snapshot: UpdateJobSnapshot) => void
     cancel: cancelUpdateJobCommand,
     clear: clearUpdateJobCommand,
     saveCandidates: saveUpdateJobCandidates,
-  }), [activeSnapshot, jobs, loadJobs, selectJob]);
+    loadMoreCandidates,
+    loadOlderLogs,
+  }), [activeSnapshot, jobs, loadJobs, loadMoreCandidates, loadOlderLogs, selectJob]);
 }

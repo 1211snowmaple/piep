@@ -1,26 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!DOCTYPE html>
-<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="ja">
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" xml:lang="{{ settings.language }}" lang="{{ settings.language }}">
 
 <head>
-    <title>表紙</title>
     <meta charset="utf-8" />
-    <style>
-        body {
-            margin: 0;
-            padding: 0;
-            text-align: center;
-        }
-
-        img {
-            max-width: 100%;
-            height: auto;
-        }
-    </style>
+    <title>{{ strings.COVER_TITLE }}</title>
+    <link rel="stylesheet" type="text/css" href="{{ css_path }}" />
 </head>
 
-<body>
-    <div><img src="{{ cover_image_href }}" alt="カバー画像" /></div>
+<body epub:type="cover" class="cover-page">
+    <div class="cover-frame"><img src="{{ cover_image_href }}" alt="{{ strings.COVER_TITLE }}" /></div>
 </body>
 
 </html>

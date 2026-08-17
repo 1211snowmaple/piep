@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   ActionIcon,
   Alert,
@@ -19,7 +19,6 @@ import {
   PillsInput,
   Popover,
   Radio,
-  ScrollArea,
   SegmentedControl,
   Select,
   SimpleGrid,
@@ -29,23 +28,27 @@ import {
   TextInput,
   Tooltip,
   UnstyledButton,
+  VisuallyHidden,
   useCombobox,
 } from "@mantine/core";
 import { useDebouncedValue, useDisclosure, useLocalStorage } from "@mantine/hooks";
 import { modals } from "@mantine/modals";
 import { notifications } from "@mantine/notifications";
-import { useInfiniteQuery, useMutation, useQuery, useQueryClient, type InfiniteData } from "@tanstack/react-query";
+import { keepPreviousData, useInfiniteQuery, useMutation, useQuery, useQueryClient, type InfiniteData } from "@tanstack/react-query";
 import { Icons, IconSize } from "@/lib/icons";
 import { useAppNavigate, useAppSearchParams } from "@/app/router";
 import { useWorkspace } from "@/app/WorkspaceContext";
-import { EntityCard } from "@/components/EntityCard";
 import { EmptyState, ErrorState, LoadingState } from "@/components/AsyncState";
-import { ListPager, PagingModeToggle, usePageSize, usePagingMode } from "@/components/ListPager";
+import { ListPager, PagingModeToggle, useBoundedNumberedPage, usePageSize, usePagingMode } from "@/components/ListPager";
 import { ScrollToTop } from "@/components/ScrollToTop";
 import { demoFacets, searchDemoWorks } from "@/mocks/demoData";
 import { errorMessage, formatNumber } from "@/lib/format";
+import { scrollViewportToTop } from "@/lib/scroll";
 import { VirtualizedWorkList } from "@/features/library/VirtualizedWorkList";
+import { entityKey, VirtualizedEntityGrid } from "@/features/library/VirtualizedEntityGrid";
+import { boundedInfiniteListOptions, INFINITE_LIST_MAX_PAGES } from "@/lib/queryLimits";
 import {
+  countEntityFacets,
   deleteDownloads,
   getFilterFacets,
   isTauriRuntime,
@@ -55,20 +58,14 @@ import {
   setFavorite,
   setFlagsForIds,
   setWatchUpdates,
+  upsertUpdateTarget,
 } from "@/services/dbApi";
 import { searchSuggest } from "@/services/searchApi";
 import { deleteSavedSearch, listSavedSearches, upsertSavedSearch } from "@/services/shelfApi";
-import { forgetReadingPositions, readingWorkIds } from "@/features/library/readingShelf";
+import { readingWorkIds } from "@/features/library/readingShelf";
 import { useSavedSearchMigration } from "@/features/library/savedSearchMigration";
-import type {
-  FacetCount,
-  LibrarySortBy,
-  LibraryWatchFilter,
-  SavedSearchRecord,
-  SearchSuggestion,
-  SearchV2Params,
-  SearchV2Result,
-} from "@/types/library";
+import { deleteThenCleanup } from "@/features/library/deletedWorkCleanup";
+import type { EntityFacet, FacetCount, LibrarySortBy, LibraryWatchFilter, SavedSearchRecord, SearchSuggestion, SearchV2Params, SearchV2Result } from "@/types/library";
 
 type LibraryTab = "works" | "people" | "series";
 type ViewMode = "gallery" | "compact";
@@ -90,6 +87,8 @@ const initialFilters: Filters = {
   tagsInclude: [], tagsExclude: [], tagMode: "and", minChars: "", maxChars: "",
 };
 
+/** 一括で EPUB キューへ送るとき、1つの作者・シリーズから取る作品数の上限。 */
+const ENTITY_BULK_WORK_LIMIT = 500;
 const MAX_SEARCH_LENGTH = 512;
 /** Each option names its direction, so no ordering has to be guessed at. */
 const SORT_OPTIONS: { value: LibrarySortBy; label: string }[] = [
@@ -122,10 +121,17 @@ function parseSortBy(value: unknown): LibrarySortBy {
  * Relevance is the default while searching and is not offered otherwise, so the
  * default sort depends on whether there is a query. Clearing the search box
  * therefore has to fall back rather than ask for a ranking that has no meaning.
+ *
+ * `preferred` is the order this reader last chose. It stands in for the built-in
+ * default when nothing in the address says otherwise, which is what makes the
+ * choice survive closing the app. It never applies to a search: ranking by
+ * relevance is the point of typing a query.
  */
-function resolveSortBy(raw: string | null, hasQuery: boolean): LibrarySortBy {
+export function resolveSortBy(raw: string | null, hasQuery: boolean, preferred: LibrarySortBy = "downloaded_at"): LibrarySortBy {
   const parsed = typeof raw === "string" && SORT_VALUES.has(raw as LibrarySortBy) ? raw as LibrarySortBy : null;
-  if (!hasQuery) return parsed && parsed !== "relevance" ? parsed : "downloaded_at";
+  // 覚えていた値も信用しない。保存先は書き換えられるし、並び順の名前は版で変わる。
+  const fallback = SORT_VALUES.has(preferred) && preferred !== "relevance" ? preferred : "downloaded_at";
+  if (!hasQuery) return parsed && parsed !== "relevance" ? parsed : fallback;
   return parsed ?? "relevance";
 }
 
@@ -155,6 +161,10 @@ function numericFilter(value: unknown): number | "" {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : "";
 }
 
+function numericParam(value: string | null): number | "" {
+  return numericFilter(value === null ? null : Number.parseInt(value, 10));
+}
+
 function numericFilterOrNull(value: unknown): number | null {
   const normalized = numericFilter(value);
   return normalized === "" ? null : normalized;
@@ -176,6 +186,47 @@ function normalizeFilters(value: unknown): Filters {
     minChars: numericFilter(candidate.minChars),
     maxChars: numericFilter(candidate.maxChars),
   };
+}
+
+/**
+ * Every condition lives in the address.
+ *
+ * The drawer's filters used to be component state, so opening a work unmounted
+ * them and the back button returned to a library that had quietly forgotten
+ * what it was showing. They are also what a link to a narrowed library has to
+ * carry, and what the entity screens already did. `favorite` and `watch` keep
+ * the names the home tiles deep-link with.
+ */
+function readFilters(params: URLSearchParams): Filters {
+  return normalizeFilters({
+    sources: params.getAll("source"),
+    contentType: params.get("type"),
+    favorite: params.get("favorite") === "1",
+    watch: parseWatchFilter(params.get("watch")),
+    tagsInclude: params.getAll("tag"),
+    tagsExclude: params.getAll("nottag"),
+    tagMode: params.get("tagmode") === "or" ? "or" : "and",
+    minChars: numericParam(params.get("minchars")),
+    maxChars: numericParam(params.get("maxchars")),
+  });
+}
+
+function writeFilters(params: URLSearchParams, filters: Filters) {
+  params.delete("source");
+  filters.sources.forEach((source) => params.append("source", source));
+  params.delete("tag");
+  filters.tagsInclude.forEach((tag) => params.append("tag", tag));
+  params.delete("nottag");
+  filters.tagsExclude.forEach((tag) => params.append("nottag", tag));
+  const single: [string, string | null][] = [
+    ["type", filters.contentType],
+    ["favorite", filters.favorite ? "1" : null],
+    ["watch", filters.watch],
+    ["tagmode", filters.tagMode === "or" ? "or" : null],
+    ["minchars", filters.minChars === "" ? null : String(filters.minChars)],
+    ["maxchars", filters.maxChars === "" ? null : String(filters.maxChars)],
+  ];
+  for (const [key, value] of single) { if (value) params.set(key, value); else params.delete(key); }
 }
 
 /** Reads back the conditions stored with a saved search, however old they are. */
@@ -272,7 +323,7 @@ function uniqueWorks(pages: SearchV2Result[] | undefined) {
   })) ?? [];
 }
 
-function updateWorkFlag(
+export function updateWorkFlag(
   data: InfiniteData<SearchV2Result, string | null> | undefined,
   id: number,
   patch: { favorite?: boolean; watchUpdates?: boolean },
@@ -304,6 +355,48 @@ function updateWorkFlag(
   return { ...data, pages };
 }
 
+/** Reverts only the failed field, preserving optimistic/successful sibling mutations. */
+export function rollbackWorkFlag(
+  current: InfiniteData<SearchV2Result, string | null> | undefined,
+  previous: InfiniteData<SearchV2Result, string | null> | undefined,
+  id: number,
+  kind: "favorite" | "watch",
+  params: SearchV2Params,
+) {
+  if (!previous) return current;
+  const previousPageIndex = previous.pages.findIndex((page) => page.items.some((item) => item.id === id));
+  if (previousPageIndex < 0) return current;
+  const previousItemIndex = previous.pages[previousPageIndex].items.findIndex((item) => item.id === id);
+  const previousItem = previous.pages[previousPageIndex].items[previousItemIndex];
+  if (!previousItem) return current;
+  if (!current) return previous;
+  const currentContainsItem = current.pages.some((page) => page.items.some((item) => item.id === id));
+  if (currentContainsItem) {
+    return updateWorkFlag(current, id, kind === "favorite" ? { favorite: previousItem.favorite } : { watchUpdates: previousItem.watchUpdates }, params);
+  }
+
+  // A filtered listing may have optimistically removed the failed item. Put
+  // that one row back without replacing pages changed by another mutation.
+  const pages = [...current.pages];
+  const targetPageIndex = Math.min(previousPageIndex, Math.max(0, pages.length - 1));
+  const targetPage = pages[targetPageIndex];
+  if (!targetPage) return previous;
+  const items = [...targetPage.items];
+  items.splice(Math.min(previousItemIndex, items.length), 0, previousItem);
+  pages[targetPageIndex] = { ...targetPage, items };
+  if (pages[0]) {
+    pages[0] = {
+      ...pages[0],
+      totalEstimate: pages[0].totalEstimate === null ? null : pages[0].totalEstimate + 1,
+      searchMeta: {
+        ...pages[0].searchMeta,
+        totalEstimate: pages[0].searchMeta.totalEstimate === null ? null : pages[0].searchMeta.totalEstimate + 1,
+      },
+    };
+  }
+  return { ...current, pages };
+}
+
 export default function LibraryPage() {
   const runtime = isTauriRuntime();
   const queryClient = useQueryClient();
@@ -315,30 +408,32 @@ export default function LibraryPage() {
   // overwrite each other on every change.
   const searchText = (urlParams.get("q") ?? "").slice(0, MAX_SEARCH_LENGTH);
   const tab = parseLibraryTab(urlParams.get("tab"));
-  const favorite = urlParams.get("favorite") === "1";
-  // Deep-linkable so the home tiles can open the library already filtered to
-  // exactly what their number counts.
-  const watch = parseWatchFilter(urlParams.get("watch"));
-  const writeUrl = useCallback((patch: { q?: string; tab?: LibraryTab; favorite?: boolean; watch?: LibraryWatchFilter | null; sortBy?: LibrarySortBy; saved?: number | null }) => {
+  // writeUrl は URL 側の書き手。記憶した並び順は「既定はどれか」の判断にしか
+  // 使わないので、参照で渡して依存関係を増やさない。
+  const preferredSortRef = useRef<LibrarySortBy>("downloaded_at");
+  const writeUrl = useCallback((patch: { q?: string; tab?: LibraryTab; sortBy?: LibrarySortBy; saved?: number | null; filters?: Filters }) => {
     const next = new URLSearchParams(urlParams);
     const q = patch.q ?? searchText;
     const nextTab = patch.tab ?? tab;
-    const nextFavorite = patch.favorite ?? favorite;
-    const nextWatch = patch.watch === undefined ? watch : patch.watch;
-    const nextSort = patch.sortBy ?? resolveSortBy(urlParams.get("sort"), Boolean(q));
+    const nextSort = patch.sortBy ?? resolveSortBy(urlParams.get("sort"), Boolean(q), preferredSortRef.current);
     // Changing anything means this is no longer the saved search it started
     // from, so the marker is dropped unless the caller is the one applying it.
     if (patch.saved) next.set("saved", String(patch.saved)); else next.delete("saved");
     if (q) next.set("q", q); else next.delete("q");
     if (nextTab !== "works") next.set("tab", nextTab); else next.delete("tab");
-    if (nextFavorite) next.set("favorite", "1"); else next.delete("favorite");
-    if (nextWatch) next.set("watch", nextWatch); else next.delete("watch");
+    if (patch.filters) writeFilters(next, normalizeFilters(patch.filters));
     // The default depends on whether a query is active, so the parameter is
     // only written when the choice differs from the default for this state.
-    if (nextSort !== resolveSortBy(null, Boolean(q))) next.set("sort", nextSort); else next.delete("sort");
+    if (nextSort !== resolveSortBy(null, Boolean(q), preferredSortRef.current)) next.set("sort", nextSort); else next.delete("sort");
+    // Page 7 of one set of conditions is not page 7 of another.
+    next.delete("page");
     if (next.toString() === urlParams.toString()) return;
     setUrlParams(next, { replace: true });
-  }, [searchText, favorite, setUrlParams, tab, urlParams, watch]);
+  }, [searchText, setUrlParams, tab, urlParams]);
+  // Switching tabs does not move the page. Whatever the reader was looking at
+  // stays where it is - a tab is a filter on the same screen, and having the
+  // ground move under a press that was only meant to change what is listed is
+  // worse than any position the move could have chosen.
   const setTab = useCallback((next: LibraryTab) => writeUrl({ tab: next }), [writeUrl]);
 
   // The input keeps its own value so typing stays responsive, and settles into
@@ -373,21 +468,53 @@ export default function LibraryPage() {
 
   const [pagingMode] = usePagingMode();
   const [pageSize] = usePageSize();
-  const pageParam = Math.max(1, Number.parseInt(urlParams.get("page") ?? "1", 10) || 1);
-  const setPage = useCallback((page: number) => {
-    const next = new URLSearchParams(urlParams);
-    if (page > 1) next.set("page", String(page)); else next.delete("page");
-    setUrlParams(next, { replace: false });
-  }, [setUrlParams, urlParams]);
-  const [otherFilters, setOtherFilters] = useState<Filters>(initialFilters);
-  const urlSortBy = resolveSortBy(urlParams.get("sort"), Boolean(searchText));
+  // 並び順は「この人の見かた」なので覚える。検索語・絞り込み・ページ番号は
+  // 「そのときの問い」なので覚えない（保存した検索がその役目を持っている）。
+  const [storedSort, setStoredSort] = useLocalStorage<unknown>({ key: "piep.library-sort", defaultValue: "downloaded_at", getInitialValueInEffect: false });
+  const preferredSort = parseSortBy(storedSort);
+  preferredSortRef.current = preferredSort;
+  const urlSortBy = resolveSortBy(urlParams.get("sort"), Boolean(searchText), preferredSort);
   const [sortBy, setSortByState] = useState<LibrarySortBy>(urlSortBy);
   useEffect(() => setSortByState((current) => current === urlSortBy ? current : urlSortBy), [urlSortBy]);
+  // Works ranked by relevance have only a score cursor. Entity tabs and
+  // explicitly sorted works can use a bounded direct page; everything else
+  // drops a stale page parameter rather than silently ignoring it.
+  const numberedPageEnabled = pagingMode === "pages" && (tab !== "works" || sortBy !== "relevance");
+  const {
+    page: pageParam,
+    maxPage: maxDirectPage,
+    limitNotice: pageLimitNotice,
+    clearLimitNotice,
+  } = useBoundedNumberedPage(numberedPageEnabled, urlParams, setUrlParams, pageSize);
+  // A page of the library is a whole new listing, so it starts where a listing
+  // starts. Set by the press rather than watched: opening a work is also a
+  // change of address, and the two must not be treated as the same thing.
+  //
+  // Spent once the new rows are actually on screen rather than here. Scrolling
+  // on the press moved the reader to the top of the page they were leaving,
+  // held them there while the next one loaded, and swapped the rows underneath
+  // them - two movements where there should be one. It also raced the browser's
+  // scroll anchoring, which sometimes put the offset straight back.
+  const pendingPageScroll = useRef(false);
+  const setPage = useCallback((page: number) => {
+    const boundedPage = Number.isFinite(page)
+      ? Math.min(maxDirectPage, Math.max(1, Math.trunc(page)))
+      : 1;
+    const next = new URLSearchParams(urlParams);
+    if (boundedPage > 1) next.set("page", String(boundedPage)); else next.delete("page");
+    setUrlParams(next, { replace: false });
+    clearLimitNotice();
+    pendingPageScroll.current = true;
+  }, [clearLimitNotice, maxDirectPage, setUrlParams, urlParams]);
   const setSortBy = useCallback((next: LibrarySortBy) => {
     setSortByState(next);
+    // 関連度は検索の中でしか意味がない。次に開いたときの既定にはしない。
+    if (next !== "relevance") setStoredSort(next);
     writeUrl({ sortBy: next });
-  }, [writeUrl]);
-  const [storedView, setStoredView] = useLocalStorage<unknown>({ key: "piep.library-view", defaultValue: "gallery" });
+  }, [setStoredSort, writeUrl]);
+  // Read on the first render: a gallery that becomes a list one frame later
+  // rebuilds the whole virtualised grid in front of the reader.
+  const [storedView, setStoredView] = useLocalStorage<unknown>({ key: "piep.library-view", defaultValue: "gallery", getInitialValueInEffect: false });
   const view = parseViewMode(storedView);
   const setView = useCallback((next: ViewMode) => setStoredView(next), [setStoredView]);
   // Saved searches are part of the library now, not per-install browser state,
@@ -401,18 +528,29 @@ export default function LibraryPage() {
   const [filterOpened, filterDrawer] = useDisclosure(false);
   const [selectionMode, setSelectionMode] = useState(false);
   const [selected, setSelected] = useState<number[]>([]);
-  const { addToEpubQueue } = useWorkspace();
+  // 作者・シリーズは行 ID を持たないので `source:sourceKey` で数える。
+  const [selectedEntities, setSelectedEntities] = useState<EntityFacet[]>([]);
+  // 「表示中をすべて選択」が読む、いま画面に出ている一覧。
+  const entityItemsRef = useRef<EntityFacet[]>([]);
+  const selectedEntityKeys = useMemo(() => new Set(selectedEntities.map(entityKey)), [selectedEntities]);
+  const toggleEntity = useCallback((entity: EntityFacet, next: boolean) => {
+    setSelectedEntities((current) => next
+      ? (current.some((item) => entityKey(item) === entityKey(entity)) ? current : [...current, entity])
+      : current.filter((item) => entityKey(item) !== entityKey(entity)));
+  }, []);
+  const { addToEpubQueue, removeFromEpubQueue } = useWorkspace();
 
-  // Deep-linkable flags are owned outright by the URL. Falling back to a stale
-  // state copy when the URL flag is removed makes Back navigation unable to
-  // clear the filter.
-  const filters = useMemo<Filters>(() => ({ ...otherFilters, favorite, watch }), [favorite, otherFilters, watch]);
-  const setFilters = useCallback((next: Filters) => {
-    const normalized = normalizeFilters(next);
-    setOtherFilters(normalized);
-    if (normalized.favorite !== favorite || (normalized.watch ?? null) !== watch) writeUrl({ favorite: normalized.favorite, watch: normalized.watch ?? null });
-  }, [favorite, watch, writeUrl]);
-  useEffect(() => { setSelected([]); }, [searchText, filters, sortBy, tab]);
+  // Owned outright by the URL. Falling back to a state copy when a parameter is
+  // removed makes Back navigation unable to clear the filter - and keeping a
+  // second copy at all is what made the drawer's filters vanish on the way back
+  // from a work, since only the URL survives the page being unmounted.
+  const filters = useMemo<Filters>(() => readFilters(urlParams), [urlParams]);
+  const setFilters = useCallback((next: Filters) => writeUrl({ filters: next }), [writeUrl]);
+  // Compared by value: the parameters object is new on every navigation, and
+  // clearing the selection whenever any of them changed threw away a selection
+  // the moment the reader turned the page.
+  const filterKey = useMemo(() => JSON.stringify(filters), [filters]);
+  useEffect(() => { setSelected([]); setSelectedEntities([]); }, [searchText, filterKey, sortBy, tab]);
 
   // The "読みかけ" shelf is a membership list rather than a filter: reading
   // positions are kept per device, so the library is told which works to show.
@@ -422,7 +560,7 @@ export default function LibraryPage() {
 
   // Relevance is walked with a score cursor and has no nth page, so numbers
   // are only offered once an ordering has been chosen.
-  const numberedPages = pagingMode === "pages" && sortBy !== "relevance";
+  const numberedPages = numberedPageEnabled && tab === "works";
   const params = useMemo<SearchV2Params>(() => ({
     idsInclude: readingIds,
     text: searchText || null,
@@ -448,6 +586,7 @@ export default function LibraryPage() {
   // Keyset pagination: fetching a fixed slab and paging it in the browser
   // capped the library at that slab and reported the wrong total.
   const works = useInfiniteQuery({
+    ...boundedInfiniteListOptions,
     queryKey: ["library", params],
     queryFn: ({ pageParam }) => runtime
       ? searchDownloadsV2({ ...params, cursor: pageParam })
@@ -457,6 +596,11 @@ export default function LibraryPage() {
       const cursor = lastPage.items.length ? lastPage.nextCursor : null;
       return cursor && !allPages.slice(0, -1).some((page) => page.nextCursor === cursor) ? cursor : undefined;
     },
+    // Swapping the list for a spinner collapses the page to a fraction of its
+    // height, and the browser clamps the scroll position away with it. Holding
+    // the page that is already on screen keeps the geometry - and the reader's
+    // place in it - still while the next one is fetched.
+    placeholderData: keepPreviousData,
     enabled: tab === "works",
   });
   const facets = useQuery({
@@ -465,12 +609,20 @@ export default function LibraryPage() {
     enabled: filterOpened,
   });
   const loadedItems = useMemo(() => uniqueWorks(works.data?.pages), [works.data?.pages]);
+  const worksAtCacheLimit = !numberedPages
+    && (works.data?.pages.length ?? 0) >= INFINITE_LIST_MAX_PAGES
+    && Boolean(works.hasNextPage);
   const totalCount = works.data?.pages[0]?.totalEstimate ?? null;
   const searchMeta = works.data?.pages[0]?.searchMeta;
   const activeFilterCount = filters.sources.length + Number(Boolean(filters.contentType)) + Number(filters.favorite) + Number(Boolean(filters.watch)) + filters.tagsInclude.length + filters.tagsExclude.length + Number(filters.minChars !== "") + Number(filters.maxChars !== "");
   const loadedIds = useMemo(() => loadedItems.map((item) => item.id), [loadedItems]);
   const selectedSet = useMemo(() => new Set(selected), [selected]);
+  const selectionCount = tab === "works" ? selected.length : selectedEntities.length;
   const allLoadedSelected = loadedIds.length > 0 && loadedIds.every((id) => selectedSet.has(id));
+  const allVisibleEntitiesSelected = entityItemsRef.current.length > 0
+    && entityItemsRef.current.every((entity) => selectedEntityKeys.has(entityKey(entity)));
+  const allVisibleSelected = tab === "works" ? allLoadedSelected : allVisibleEntitiesSelected;
+  const flagMutationsInFlight = useRef(0);
 
   const flagMutation = useMutation({
     mutationFn: ({ id, kind, value }: { id: number; kind: "favorite" | "watch"; value: boolean }) => {
@@ -478,6 +630,7 @@ export default function LibraryPage() {
       return kind === "favorite" ? setFavorite(id, value) : setWatchUpdates(id, value);
     },
     onMutate: (input) => {
+      flagMutationsInFlight.current += 1;
       const key = ["library", params] as const;
       const previous = queryClient.getQueryData<InfiniteData<SearchV2Result, string | null>>(key);
       queryClient.setQueryData(key, updateWorkFlag(previous, input.id, input.kind === "favorite" ? { favorite: input.value } : { watchUpdates: input.value }, params));
@@ -489,26 +642,28 @@ export default function LibraryPage() {
       // does not change them reads as the click not having registered.
       queryClient.invalidateQueries({ queryKey: ["library-shelf-counts"] });
     },
-    onError: (error, _input, context) => {
-      if (context?.previous) queryClient.setQueryData(context.key, context.previous);
+    onError: (error, input, context) => {
+      if (context?.previous) queryClient.setQueryData(
+        context.key,
+        (current: InfiniteData<SearchV2Result, string | null> | undefined) => rollbackWorkFlag(current, context.previous, input.id, input.kind, params),
+      );
       notifications.show({ color: "red", title: "作品情報を更新できません", message: errorMessage(error) });
     },
-    onSettled: () => queryClient.invalidateQueries({ queryKey: ["library"], refetchType: "none" }),
+    onSettled: () => {
+      flagMutationsInFlight.current = Math.max(0, flagMutationsInFlight.current - 1);
+      if (flagMutationsInFlight.current === 0) queryClient.invalidateQueries({ queryKey: ["library"] });
+    },
   });
   const deleteMutation = useMutation({
-    mutationFn: (ids: number[]) => runtime ? deleteDownloads(ids) : Promise.resolve({ matchedCount: ids.length, changedCount: ids.length }),
-    onSuccess: (result, ids) => {
+    mutationFn: (ids: number[]) => deleteThenCleanup(
+      () => runtime ? deleteDownloads(ids) : Promise.resolve({ matchedCount: ids.length, changedCount: ids.length }),
+      { queryClient, ids, removeFromEpubQueue },
+    ),
+    onSuccess: (result) => {
       notifications.show({ color: "green", title: "ライブラリから削除しました", message: `${formatNumber(result.changedCount)}件を削除しました` });
       // Reading positions outlive the works they point at, and a "読みかけ"
       // shelf counting deleted works would never go back down.
-      ids.forEach(forgetReadingPositions);
       setSelected([]); setSelectionMode(false);
-      queryClient.resetQueries({ queryKey: ["library", params], exact: true });
-      queryClient.invalidateQueries({ queryKey: ["library"], refetchType: "none" });
-      queryClient.invalidateQueries({ queryKey: ["library-facets"] });
-      queryClient.invalidateQueries({ queryKey: ["library-entities"] });
-      queryClient.invalidateQueries({ queryKey: ["library-shelf-counts"] });
-      queryClient.invalidateQueries({ queryKey: ["dashboard"] });
     },
     onError: (error) => notifications.show({ color: "red", title: "削除できません", message: errorMessage(error) }),
   });
@@ -558,7 +713,7 @@ export default function LibraryPage() {
 
   const saveCurrentSearch = () => {
     if (!runtime) {
-      notifications.show({ color: "blue", message: "検索の保存はデスクトップアプリで利用できます" });
+      notifications.show({ color: "piep", message: "検索の保存はデスクトップアプリで利用できます" });
       return;
     }
     openSaveSearchModal(suggestedName(), (name) => saveMutation.mutate(name));
@@ -566,7 +721,6 @@ export default function LibraryPage() {
 
   const applySavedSearch = useCallback((record: SavedSearchRecord) => {
     const parsed = parseSavedParams(record.paramsJson);
-    setOtherFilters(parsed.filters);
     setSortByState(parsed.sortBy);
     const nextQuery = record.query ?? "";
     cancelPendingQueryWrite();
@@ -574,8 +728,7 @@ export default function LibraryPage() {
     writeUrl({
       q: nextQuery,
       tab: parsed.tab,
-      favorite: parsed.filters.favorite,
-      watch: parsed.filters.watch,
+      filters: parsed.filters,
       sortBy: parsed.sortBy,
       saved: record.id,
     });
@@ -610,14 +763,23 @@ export default function LibraryPage() {
   const mutateFlag = flagMutation.mutate;
   const toggleFavorite = useCallback((id: number, favorite: boolean) => mutateFlag({ id, kind: "favorite", value: favorite }), [mutateFlag]);
   const toggleWatch = useCallback((id: number, watch: boolean) => mutateFlag({ id, kind: "watch", value: watch }), [mutateFlag]);
-  const toggleVisibleSelection = () => setSelected((current) => {
+  const toggleVisibleWorkSelection = () => setSelected((current) => {
     if (allLoadedSelected) {
       const loaded = new Set(loadedIds);
       return current.filter((id) => !loaded.has(id));
     }
     return [...new Set([...current, ...loadedIds])];
   });
-  const leaveSelection = () => { setSelectionMode(false); setSelected([]); };
+  const toggleVisibleEntitySelection = () => setSelectedEntities((current) => {
+    const visible = entityItemsRef.current;
+    const visibleKeys = new Set(visible.map(entityKey));
+    const allSelected = visible.length > 0 && visible.every((entity) => current.some((item) => entityKey(item) === entityKey(entity)));
+    if (allSelected) return current.filter((item) => !visibleKeys.has(entityKey(item)));
+    const merged = new Map(current.map((item) => [entityKey(item), item]));
+    visible.forEach((entity) => merged.set(entityKey(entity), entity));
+    return [...merged.values()];
+  });
+  const leaveSelection = () => { setSelectionMode(false); setSelected([]); setSelectedEntities([]); };
   const confirmDelete = () => modals.openConfirmModal({
     title: "選択した作品を削除しますか？",
     children: <Text size="sm">{selected.length}件の作品とローカルアセットを削除します。この操作は元に戻せません。</Text>,
@@ -625,19 +787,98 @@ export default function LibraryPage() {
     onConfirm: () => deleteMutation.mutate(selected),
   });
 
+  /**
+   * What a selection of authors or series can be asked to do.
+   *
+   * Watching is registered here because the reader asked for it by selecting
+   * and pressing - the rule the update centre keeps is that nothing registers
+   * itself. Sending works to the EPUB queue resolves each entity to its works,
+   * which is the only way a queue of works can be filled from a queue of names.
+   */
+  const entitySelectionMutation = useMutation({
+    mutationFn: async (action: "epub" | "watch" | "unwatch") => {
+      if (!runtime) return 0;
+      if (action === "epub") {
+        const ids: number[] = [];
+        for (const entity of selectedEntities) {
+          const result = await searchDownloadsV2({
+            ...(entityKind === "person"
+              ? { personSource: entity.source, personKey: entity.sourceKey }
+              : { seriesSource: entity.source, seriesKey: entity.sourceKey }),
+            limit: ENTITY_BULK_WORK_LIMIT,
+            projection: "bulk",
+            sortBy: "downloaded_at",
+            sortOrder: "asc",
+          });
+          ids.push(...result.items.map((item) => item.id));
+        }
+        const unique = [...new Set(ids)];
+        addToEpubQueue(unique);
+        return unique.length;
+      }
+      for (const entity of selectedEntities) {
+        await upsertUpdateTarget({
+          targetType: entityKind === "person" ? "author" : "series",
+          source: entity.source,
+          sourceKey: entity.sourceKey,
+          displayName: entity.displayName,
+          enabled: action === "watch",
+          metadataJson: null,
+        });
+      }
+      return selectedEntities.length;
+    },
+    onSuccess: (count, action) => {
+      queryClient.invalidateQueries({ queryKey: ["update-targets"] });
+      notifications.show({
+        color: "green",
+        message: action === "epub"
+          ? `${formatNumber(count)}件の作品をEPUBキューに追加しました`
+          : action === "watch"
+            ? `${formatNumber(count)}件を更新監視に追加しました`
+            : `${formatNumber(count)}件の更新監視を止めました`,
+      });
+    },
+    onError: (error) => notifications.show({ color: "red", title: "一括操作に失敗しました", message: errorMessage(error) }),
+  });
+
   // Authors and series are searched and paged in SQLite. Filtering the
   // dashboard facets in the browser only ever saw their top 60 rows, so most
   // of a large library was unreachable from these tabs.
   const entityKind = tab === "people" ? "person" : "series";
+  // Authors and series are paged by offset, so the numbered mode applies here
+  // exactly as it does to the works. It used to be ignored on these two tabs -
+  // the preference said page numbers and the list still grew as you scrolled,
+  // with nothing on screen to say why.
+  // Not `numberedPages`, which also asks whether the works are ranked by
+  // relevance - a question these two tabs do not have.
+  const entityOffset = numberedPageEnabled ? (pageParam - 1) * pageSize : 0;
+  // The preview's stand-in for the grouped query, so it pages and counts the
+  // same way rather than handing back everything and never running out.
+  const demoEntityMatches = useCallback(() => (entityKind === "person" ? demoFacets.authorEntities : demoFacets.series)
+    .filter((entity) => !searchText || `${entity.displayName} ${entity.description ?? ""}`.toLocaleLowerCase("ja-JP").includes(searchText.toLocaleLowerCase("ja-JP"))),
+  [entityKind, searchText]);
   const entities = useInfiniteQuery({
-    queryKey: ["library-entities", entityKind, searchText, pageSize],
+    ...boundedInfiniteListOptions,
+    queryKey: ["library-entities", entityKind, searchText, pageSize, entityOffset],
     queryFn: ({ pageParam }) => runtime
       ? searchEntityFacets(entityKind, searchText || null, pageSize, pageParam)
-      : Promise.resolve((entityKind === "person" ? demoFacets.authorEntities : demoFacets.series)
-        .filter((entity) => !searchText || `${entity.displayName} ${entity.description ?? ""}`.toLocaleLowerCase("ja-JP").includes(searchText.toLocaleLowerCase("ja-JP")))),
-    initialPageParam: 0,
-    getNextPageParam: (lastPage, allPages) => lastPage.length < pageSize ? undefined : allPages.reduce((count, page) => count + page.length, 0),
+      : Promise.resolve(demoEntityMatches().slice(pageParam, pageParam + pageSize)),
+    initialPageParam: entityOffset,
+    getNextPageParam: (lastPage, _allPages, lastPageParam) => lastPage.length < pageSize
+      ? undefined
+      : lastPageParam + lastPage.length,
+    placeholderData: keepPreviousData,
     enabled: tab !== "works",
+  });
+  // One pass over the same grouping, per set of conditions rather than per page
+  // turned. Without it the pager cannot name a last page, and the count beside
+  // the tabs had to hedge with "以上".
+  const entityTotal = useQuery({
+    queryKey: ["library-entity-count", entityKind, searchText],
+    queryFn: () => runtime ? countEntityFacets(entityKind, searchText || null) : Promise.resolve(demoEntityMatches().length),
+    enabled: tab !== "works",
+    staleTime: 60_000,
   });
   const entityItems = useMemo(() => {
     const seen = new Set<string>();
@@ -648,12 +889,35 @@ export default function LibraryPage() {
       return true;
     })) ?? [];
   }, [entities.data?.pages]);
+  entityItemsRef.current = entityItems;
+  const entitiesAtCacheLimit = pagingMode !== "pages"
+    && (entities.data?.pages.length ?? 0) >= INFINITE_LIST_MAX_PAGES
+    && Boolean(entities.hasNextPage);
+
+  // The one movement, made when the rows for the page that was asked for have
+  // arrived. A layout effect so it lands in the same frame the new rows are
+  // painted in, rather than a frame after them.
+  const showingRequestedPage = tab === "works"
+    ? !works.isPlaceholderData && !works.isFetching
+    : !entities.isPlaceholderData && !entities.isFetching;
+  // `pageParam` is in the dependencies as well as the settled flag: a page that
+  // is already cached settles in the same render it was asked for, so the flag
+  // never changes and an effect watching only it would never run.
+  useLayoutEffect(() => {
+    if (!pendingPageScroll.current || !showingRequestedPage) return;
+    pendingPageScroll.current = false;
+    scrollViewportToTop(document.getElementById("main-content"));
+  }, [pageParam, showingRequestedPage]);
 
   return (
     <div className="page page--contained library-page">
+      <VisuallyHidden component="h1">ライブラリ</VisuallyHidden>
       <Paper p="md" className="library-toolbar" withBorder>
         <Stack gap="sm">
-          <Group wrap="nowrap" align="flex-start">
+          {/* Centred, not top-aligned: the search field is taller than every
+              control beside it, so aligning tops left them all sitting three
+              pixels high against it. */}
+          <Group wrap="nowrap" align="center">
             <Box className="library-toolbar__search"><LibrarySearch value={query} onChange={onQueryChange} runtime={runtime} /></Box>
             <Tooltip label="詳細フィルター">
               <Indicator label={activeFilterCount} size={16} disabled={!activeFilterCount}>
@@ -718,45 +982,74 @@ export default function LibraryPage() {
         <Group gap={8} wrap="nowrap" miw={0}>
           <Text size="sm" c="dimmed" style={{ whiteSpace: "nowrap" }}>{tab === "works"
             ? `${formatNumber(totalCount ?? loadedItems.length)}件${totalCount !== null && loadedItems.length < totalCount ? `（${formatNumber(loadedItems.length)}件を表示中）` : ""}`
-            : `${formatNumber(entityItems.length)}件${entities.hasNextPage ? "以上" : ""}`}</Text>
+            : entityTotal.data !== undefined
+              ? `${formatNumber(entityTotal.data)}件`
+              : `${formatNumber(entityItems.length)}件${entities.hasNextPage ? "以上" : ""}`}</Text>
           {tab === "works" && searchText && searchMeta?.explanations?.length
             ? <SearchInterpretation meta={searchMeta} />
             : null}
           {/* Beside the count, which is the thing it changes. */}
           <PagingModeToggle />
         </Group>
-        {tab === "works" && !selectionMode && <Button size="xs" variant="subtle" color="gray" leftSection={<Icons.confirm size={IconSize.menu} />} onClick={() => setSelectionMode(true)}>複数選択</Button>}
+        {!selectionMode && <Button size="xs" variant="subtle" color="gray" leftSection={<Icons.confirm size={IconSize.menu} />} onClick={() => setSelectionMode(true)}>複数選択</Button>}
       </Group>
+
+      {pageLimitNotice && (
+        <Alert color="yellow" title="ページ番号を調整しました" role="status" mb="md">
+          負荷を抑えるため、直接開けるのは{maxDirectPage}ページ目までです。それより先は「自動」で続きを読み込むか、検索・絞り込みで対象を狭めてください。
+        </Alert>
+      )}
 
       {tab === "works" ? (
         works.isLoading ? <LoadingState label="ライブラリを検索しています" /> : works.error ? <ErrorState error={works.error} retry={() => works.refetch()} /> : loadedItems.length ? (
           <>
             <VirtualizedWorkList items={loadedItems} view={view} selectionMode={selectionMode} selected={selectedSet} onSelect={toggleSelected} onToggleFavorite={toggleFavorite} onToggleWatch={toggleWatch} />
             <ListPager
-              hasNext={works.hasNextPage}
+              hasNext={Boolean(works.hasNextPage) && !worksAtCacheLimit}
               loading={works.isFetchingNextPage || works.isFetching}
               loaded={loadedItems.length}
               total={totalCount}
               onLoad={() => works.fetchNextPage()}
+              endMessage={worksAtCacheLimit
+                ? sortBy === "relevance"
+                  ? `メモリ使用量を抑えるため${formatNumber(loadedItems.length)}件で停止しました。検索条件を絞ると続きへ到達できます。`
+                  : `メモリ使用量を抑えるため${formatNumber(loadedItems.length)}件で停止しました。「ページ番号」に切り替えると続きへ移動できます。`
+                : undefined}
               pages={{
                 current: pageParam,
                 size: pageSize,
                 onGoTo: setPage,
+                maxDirectPage,
+                limitNotice: pageLimitNotice,
                 unavailableReason: sortBy === "relevance"
                   ? "関連度順はページ番号で移動できません。並び順を選ぶとページ番号が使えます。"
                   : null,
               }}
             />
           </>
-        ) : <EmptyState icon={Icons.search} title="一致する作品がありません" description="検索語やフィルターを減らすか、新しい作品を保存してください。" action={<Button variant="light" onClick={() => { onQueryChange(""); setOtherFilters(initialFilters); writeUrl({ q: "", favorite: false, watch: null }); }}>検索をリセット</Button>} />
+        ) : <EmptyState icon={Icons.search} title="一致する作品がありません" description="検索語やフィルターを減らすか、新しい作品を保存してください。" action={<Button variant="light" onClick={() => { onQueryChange(""); writeUrl({ q: "", filters: initialFilters }); }}>検索をリセット</Button>} />
       ) : entities.isLoading ? <LoadingState /> : entities.error ? <ErrorState error={entities.error} retry={() => entities.refetch()} /> : entityItems.length ? (
         <>
-          <SimpleGrid cols={{ base: 1, sm: 2, xl: 3 }}>{entityItems.map((entity) => <div key={`${entity.source}:${entity.sourceKey}`} style={{ contentVisibility: "auto", containIntrinsicSize: "auto 138px" }}><EntityCard entity={entity} kind={entityKind} /></div>)}</SimpleGrid>
-          <ListPager hasNext={entities.hasNextPage} loading={entities.isFetchingNextPage} loaded={entityItems.length} total={null} onLoad={() => entities.fetchNextPage()} />
+          <VirtualizedEntityGrid
+            items={entityItems}
+            kind={entityKind}
+            selectionMode={selectionMode}
+            selected={selectedEntityKeys}
+            onSelect={toggleEntity}
+          />
+          <ListPager
+            hasNext={Boolean(entities.hasNextPage) && !entitiesAtCacheLimit}
+            loading={entities.isFetchingNextPage || entities.isFetching}
+            loaded={entityItems.length}
+            total={entityTotal.data ?? null}
+            onLoad={() => entities.fetchNextPage()}
+            endMessage={entitiesAtCacheLimit ? `メモリ使用量を抑えるため${formatNumber(entityItems.length)}件で停止しました。「ページ番号」に切り替えると続きへ移動できます。` : undefined}
+            pages={{ current: pageParam, size: pageSize, onGoTo: setPage, maxDirectPage, limitNotice: pageLimitNotice }}
+          />
         </>
       ) : <EmptyState icon={Icons.people} title="一致する項目がありません" description="名前を変えて検索してください。" />}
 
-      <Drawer opened={filterOpened} onClose={filterDrawer.close} title="詳細フィルター" position="right" size={420} scrollAreaComponent={ScrollArea.Autosize}>
+      <Drawer opened={filterOpened} onClose={filterDrawer.close} title="詳細フィルター" position="right" size={420} className="filter-drawer">
         <FilterForm value={filters} runtime={runtime} tags={facets.data?.tags ?? []} contentTypes={facets.data?.contentTypes.map((item) => ({ value: item.name, label: `${item.name} (${item.count})` })) ?? []} onApply={(next) => { setFilters(next); filterDrawer.close(); }} />
       </Drawer>
 
@@ -767,17 +1060,32 @@ export default function LibraryPage() {
         <Paper className="selection-bar" shadow="xl" withBorder p="sm" role="region" aria-label="複数選択の操作">
           <div className="selection-bar__inner">
             <Group gap="sm" wrap="nowrap" className="selection-bar__summary">
-              <div className="selection-bar__count" data-empty={!selected.length || undefined}>
+              <div className="selection-bar__count" data-empty={!selectionCount || undefined}>
                 <Icons.confirm size={IconSize.action} strokeWidth={2.6} aria-hidden />
-                <Text fw={750}>{selected.length}件</Text>
+                <Text fw={750}>{selectionCount}件</Text>
                 <Text size="xs" c="dimmed">選択中</Text>
               </div>
-              <Button variant="subtle" size="compact-sm" onClick={toggleVisibleSelection}>{allLoadedSelected ? "表示中を解除" : "表示中をすべて選択"}</Button>
-              {selected.length > 0 && <Button variant="subtle" color="gray" size="compact-sm" onClick={() => setSelected([])}>すべて解除</Button>}
+              <Button variant="subtle" size="compact-sm" onClick={tab === "works" ? toggleVisibleWorkSelection : toggleVisibleEntitySelection}>{allVisibleSelected ? "表示中を解除" : "表示中をすべて選択"}</Button>
+              {selectionCount > 0 && <Button variant="subtle" color="gray" size="compact-sm" onClick={() => { setSelected([]); setSelectedEntities([]); }}>すべて解除</Button>}
             </Group>
             <Group gap="xs" wrap="nowrap" className="selection-bar__actions">
-              <Button size="sm" variant="light" leftSection={<Icons.epubAdd size={IconSize.menu} />} disabled={!selected.length} onClick={() => { addToEpubQueue(selected); notifications.show({ color: "green", message: `${selected.length}件をEPUBキューに追加しました` }); }}>EPUB</Button>
-              <Menu position="top-end"><Menu.Target><Button size="sm" variant="default" rightSection={<Icons.more size={IconSize.menu} />} disabled={!selected.length}>その他</Button></Menu.Target><Menu.Dropdown><Menu.Item leftSection={<Icons.favorite size={IconSize.menu} />} onClick={() => selectionMutation.mutate({ action: "favorite" })}>お気に入りに追加</Menu.Item><Menu.Item leftSection={<Icons.watch size={IconSize.menu} />} onClick={() => selectionMutation.mutate({ action: "watch" })}>更新監視を有効化</Menu.Item><Menu.Divider /><Menu.Item color="red" leftSection={<Icons.delete size={IconSize.menu} />} onClick={confirmDelete}>削除</Menu.Item></Menu.Dropdown></Menu>
+              {tab === "works" ? (
+                <>
+                  <Button size="sm" variant="light" leftSection={<Icons.epubAdd size={IconSize.menu} />} disabled={!selected.length} onClick={() => { addToEpubQueue(selected); notifications.show({ color: "green", message: `${selected.length}件をEPUBキューに追加しました` }); }}>EPUB</Button>
+                  <Menu position="top-end"><Menu.Target><Button size="sm" variant="default" rightSection={<Icons.more size={IconSize.menu} />} disabled={!selected.length}>その他</Button></Menu.Target><Menu.Dropdown><Menu.Item leftSection={<Icons.favorite size={IconSize.menu} />} onClick={() => selectionMutation.mutate({ action: "favorite" })}>お気に入りに追加</Menu.Item><Menu.Item leftSection={<Icons.watch size={IconSize.menu} />} onClick={() => selectionMutation.mutate({ action: "watch" })}>更新監視を有効化</Menu.Item><Menu.Divider /><Menu.Item color="red" leftSection={<Icons.delete size={IconSize.menu} />} onClick={confirmDelete}>削除</Menu.Item></Menu.Dropdown></Menu>
+                </>
+              ) : (
+                <>
+                  <Button size="sm" variant="light" leftSection={<Icons.epubAdd size={IconSize.menu} />} disabled={!selectedEntities.length || entitySelectionMutation.isPending} loading={entitySelectionMutation.isPending && entitySelectionMutation.variables === "epub"} onClick={() => entitySelectionMutation.mutate("epub")}>EPUB</Button>
+                  <Menu position="top-end">
+                    <Menu.Target><Button size="sm" variant="default" rightSection={<Icons.more size={IconSize.menu} />} disabled={!selectedEntities.length}>その他</Button></Menu.Target>
+                    <Menu.Dropdown>
+                      <Menu.Item leftSection={<Icons.watch size={IconSize.menu} />} onClick={() => entitySelectionMutation.mutate("watch")}>更新監視に追加</Menu.Item>
+                      <Menu.Item leftSection={<Icons.pause size={IconSize.menu} />} onClick={() => entitySelectionMutation.mutate("unwatch")}>更新監視を止める</Menu.Item>
+                    </Menu.Dropdown>
+                  </Menu>
+                </>
+              )}
               <Divider orientation="vertical" h={26} mx={2} />
               <Tooltip label="複数選択を終了"><ActionIcon variant="subtle" color="gray" aria-label="複数選択を終了" onClick={leaveSelection}><Icons.cancel size={IconSize.nav} /></ActionIcon></Tooltip>
             </Group>
@@ -804,7 +1112,7 @@ function SearchInterpretation({ meta }: { meta: SearchV2Result["searchMeta"] }) 
     <Badge
       size="sm"
       variant="light"
-      color={strict ? "teal" : "gray"}
+      color={strict ? "piep" : "gray"}
       leftSection={<Icons.search size={IconSize.inline} />}
       className="search-interpretation"
       style={{ cursor: rest.length ? "pointer" : "default", textTransform: "none" }}
@@ -829,7 +1137,7 @@ function SearchInterpretation({ meta }: { meta: SearchV2Result["searchMeta"] }) 
   );
 }
 
-function FilterChip({ label, onRemove, color = "blue" }: { label: string; onRemove: () => void; color?: string }) {
+function FilterChip({ label, onRemove, color = "piep" }: { label: string; onRemove: () => void; color?: string }) {
   return <Badge variant="light" color={color} rightSection={<ActionIcon size="xs" variant="transparent" color={color} aria-label={`${label}を解除`} onClick={onRemove}><Icons.cancel size={IconSize.inline} /></ActionIcon>}>{label}</Badge>;
 }
 
@@ -924,7 +1232,7 @@ function LibrarySearch({ value, onChange, runtime }: { value: string; onChange: 
       </Combobox.Target>
       <Combobox.Dropdown hidden={!value.trim() || composing}>
         <Combobox.Options>
-          {suggestions.isLoading ? <Combobox.Empty>候補を検索中…</Combobox.Empty> : items.length ? items.map((item, index) => <Combobox.Option value={`suggestion:${index}`} key={`${item.kind}:${item.source ?? ""}:${item.sourceKey ?? item.value}`}><Group justify="space-between" wrap="nowrap"><Text size="sm" lineClamp={1}>{item.label}</Text><Group gap={5} wrap="nowrap">{item.exactMatch && <Badge size="xs" variant="filled" color="teal">完全一致</Badge>}<Badge size="xs" variant="light" color={item.kind === "tag" ? "teal" : "blue"}>{SUGGESTION_KIND_LABEL[item.kind] ?? item.kind}</Badge>{typeof item.count === "number" && <Text size="xs" c="dimmed">{formatNumber(item.count)}件</Text>}</Group></Group></Combobox.Option>) : <Combobox.Empty>Enterで全文検索</Combobox.Empty>}
+          {suggestions.isLoading ? <Combobox.Empty>候補を検索中…</Combobox.Empty> : items.length ? items.map((item, index) => <Combobox.Option value={`suggestion:${index}`} key={`${item.kind}:${item.source ?? ""}:${item.sourceKey ?? item.value}`}><Group justify="space-between" wrap="nowrap"><Text size="sm" lineClamp={1}>{item.label}</Text><Group gap={5} wrap="nowrap">{item.exactMatch && <Badge size="xs" variant="filled" color="piep">完全一致</Badge>}<Badge size="xs" variant="light" color={item.kind === "tag" ? "piep" : "piep"}>{SUGGESTION_KIND_LABEL[item.kind] ?? item.kind}</Badge>{typeof item.count === "number" && <Text size="xs" c="dimmed">{formatNumber(item.count)}件</Text>}</Group></Group></Combobox.Option>) : <Combobox.Empty>Enterで全文検索</Combobox.Empty>}
         </Combobox.Options>
         <Combobox.Footer><Text size="xs" c="dimmed">例: tag:創作 -成人向け &quot;完全一致&quot;</Text></Combobox.Footer>
       </Combobox.Dropdown>
@@ -940,12 +1248,24 @@ function FilterForm({ value, runtime, tags, contentTypes, onApply }: {
   onApply: (value: Filters) => void;
 }) {
   const [draft, setDraft] = useState(() => normalizeFilters(value));
-  useEffect(() => setDraft(normalizeFilters(value)), [value]);
+  // Compared by value: the applied filters are rebuilt from the address on
+  // every navigation, and a fresh object each time reset the half-filled form.
+  const applied = JSON.stringify(value);
+  useEffect(() => setDraft(normalizeFilters(JSON.parse(applied) as Filters)), [applied]);
   const min = numericFilterOrNull(draft.minChars);
   const max = numericFilterOrNull(draft.maxChars);
   const invalidRange = min !== null && max !== null && min > max;
+  // The two buttons that make any of this take effect used to be the last thing
+  // in a long scrolling form, so on an ordinary window they opened below the
+  // bottom edge - the drawer looked like it had no way to apply anything.
   return (
-    <Stack gap="lg">
+    <div className="filter-form">
+    <Stack gap="lg" className="filter-form__fields">
+      {/* At the top, and as a line rather than a boxed notice. It qualifies
+          everything below it, so it is the one thing worth reading before any
+          of this is set - and at the end of the form it was permanently half
+          cut off by the bottom edge, which reads as something being broken. */}
+      <Text size="xs" c="dimmed" className="filter-form__scope">これらは作品タブに適用されます。作者・シリーズは上部の検索語で絞り込めます。</Text>
       <Box><Text fw={700} size="sm" mb="xs">ソース</Text><Checkbox.Group value={draft.sources} onChange={(sources) => setDraft({ ...draft, sources })}><Group><Checkbox value="pixiv" label="pixiv" /><Checkbox value="fanbox" label="FANBOX" /></Group></Checkbox.Group></Box>
       <Select label="コンテンツ種別" placeholder="すべて" clearable data={contentTypes} value={draft.contentType} onChange={(contentType) => setDraft({ ...draft, contentType })} />
       <Divider />
@@ -953,13 +1273,13 @@ function FilterForm({ value, runtime, tags, contentTypes, onApply }: {
       <TagFilterCombobox runtime={runtime} label="除外するタグ" tags={tags} value={draft.tagsExclude} onChange={(tagsExclude) => setDraft({ ...draft, tagsExclude, tagsInclude: draft.tagsInclude.filter((tag) => !tagsExclude.includes(tag)) })} />
       <Radio.Group label="複数タグの条件" value={draft.tagMode} onChange={(tagMode) => setDraft({ ...draft, tagMode: tagMode === "or" ? "or" : "and" })}><Group mt="xs"><Radio value="and" label="すべて含む" /><Radio value="or" label="いずれかを含む" /></Group></Radio.Group>
       <Divider />
-      <SimpleGrid cols={2}><NumberInput label="最小文字数" min={0} max={Number.MAX_SAFE_INTEGER} allowDecimal={false} allowNegative={false} thousandSeparator="," value={draft.minChars} onChange={(minChars) => setDraft({ ...draft, minChars })} /><NumberInput label="最大文字数" min={0} max={Number.MAX_SAFE_INTEGER} allowDecimal={false} allowNegative={false} thousandSeparator="," value={draft.maxChars} onChange={(maxChars) => setDraft({ ...draft, maxChars })} /></SimpleGrid>
+      <SimpleGrid cols={2}><NumberInput label="最小文字数" hideControls min={0} max={Number.MAX_SAFE_INTEGER} allowDecimal={false} allowNegative={false} thousandSeparator="," value={draft.minChars} onChange={(minChars) => setDraft({ ...draft, minChars })} /><NumberInput label="最大文字数" hideControls min={0} max={Number.MAX_SAFE_INTEGER} allowDecimal={false} allowNegative={false} thousandSeparator="," value={draft.maxChars} onChange={(maxChars) => setDraft({ ...draft, maxChars })} /></SimpleGrid>
       {invalidRange && <Alert color="red">最大文字数は最小文字数以上にしてください。</Alert>}
       <Select label="更新監視" clearable placeholder="すべて" data={[{ value: "watched", label: "監視中" }, { value: "unwatched", label: "未監視" }]} value={draft.watch} onChange={(watch) => setDraft({ ...draft, watch: parseWatchFilter(watch) })} />
       <Checkbox label="お気に入りのみ" checked={draft.favorite} onChange={(event) => setDraft({ ...draft, favorite: event.currentTarget.checked })} />
-      <Alert color="gray" variant="light">フィルターは作品タブに適用されます。作者・シリーズは上部の検索語で絞り込めます。</Alert>
-      <Group grow><Button variant="default" onClick={() => setDraft(initialFilters)}>リセット</Button><Button disabled={invalidRange} onClick={() => onApply(normalizeFilters(draft))}>適用</Button></Group>
     </Stack>
+    <Group grow className="filter-form__actions"><Button variant="default" onClick={() => setDraft(initialFilters)}>リセット</Button><Button disabled={invalidRange} onClick={() => onApply(normalizeFilters(draft))}>適用</Button></Group>
+    </div>
   );
 }
 

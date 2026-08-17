@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AppFrame } from "@/app/AppFrame";
 import { AppRouter } from "@/app/router";
 import { WorkspaceProvider } from "@/app/WorkspaceContext";
+import { writeReadingPosition } from "@/features/library/readingShelf";
 import type { LibraryShelfCounts, SavedSearchRecord } from "@/types/library";
 
 const shelfApi = vi.hoisted(() => ({
@@ -72,10 +73,7 @@ function nav() {
   return within(document.getElementById("app-navigation") as HTMLElement);
 }
 
-/**
- * A sidebar row by its label. These are Mantine NavLinks without an href, so
- * they carry no link role; the row itself is the element holding the state.
- */
+/** A sidebar destination by its visible label. */
 async function row(label: string | RegExp): Promise<HTMLElement> {
   const text = await nav().findByText(label);
   const element = text.closest(".app-nav__link");
@@ -156,6 +154,23 @@ describe("library sidebar", () => {
     expect(nav().getByText("書き出し")).toBeInTheDocument();
   });
 
+  it("uses native buttons for destinations and folding controls", async () => {
+    const user = userEvent.setup();
+    renderApp("#/library");
+
+    const home = await nav().findByRole("button", { name: "ホーム" });
+    expect(home).toHaveAttribute("type", "button");
+    home.focus();
+    await user.keyboard("{Enter}");
+    await waitFor(() => expect(window.location.hash).toBe("#/"));
+
+    const collect = nav().getByRole("button", { name: "保存" });
+    expect(collect).toHaveAttribute("aria-expanded", "false");
+    collect.focus();
+    await user.keyboard("{Enter}");
+    expect(collect).toHaveAttribute("aria-expanded", "true");
+  });
+
   it("unfolds a folded group without navigating anywhere", async () => {
     const user = userEvent.setup();
     renderApp("#/library");
@@ -226,6 +241,15 @@ describe("library sidebar", () => {
     await waitFor(() => expect(nav().getAllByText("0").length).toBeGreaterThan(0));
     // Zero is a fact worth stating; a blank where a number goes is not.
     expect(await row("すべて")).toHaveAttribute("aria-current", "page");
+  });
+
+  it("refreshes the persistent reading shelf when the reader records progress", async () => {
+    renderApp("#/library");
+    await waitFor(() => expect(shelfApi.getLibraryShelfCounts).toHaveBeenCalledWith([]));
+
+    writeReadingPosition(42, null, { page: 2, top: 0 });
+
+    await waitFor(() => expect(shelfApi.getLibraryShelfCounts).toHaveBeenCalledWith([42]));
   });
 });
 

@@ -51,6 +51,31 @@ describe("document content helpers", () => {
     expect(html).toContain("link-card-brand");
     expect(html).not.toContain("🔗");
   });
+
+  it("keeps pixiv's own app links followable instead of stripping them", () => {
+    // pixiv writes its captions with these. No browser accepts the scheme, so
+    // the address used to be removed and the anchor kept - underlined blue text
+    // that did nothing at all when clicked.
+    const html = prepareDocumentHtml('<a href="pixiv://novels/20563258">novel/20563258</a>', () => null, { inlineLinks: true });
+    expect(html).toContain('href="https://www.pixiv.net/novel/show.php?id=20563258"');
+    expect(html).toContain("novel/20563258");
+  });
+
+  it("stops looking like a link when there is nowhere left to go", () => {
+    const html = prepareDocumentHtml('<a href="javascript:alert(1)">押しても何も起きない</a>', () => null);
+    expect(html).not.toContain("<a");
+    expect(html).toContain("押しても何も起きない");
+  });
+
+  it("sets a caption as text rather than as a stack of cards", () => {
+    // A caption is mostly links - the series, the earlier part, the author's
+    // other accounts - and the cards were taller than the caption itself.
+    const caption = '<a href="https://www.pixiv.net/novel/series/10848521">https://www.pixiv.net/novel/series/10848521</a>';
+    expect(prepareDocumentHtml(caption, () => null, { inlineLinks: true })).not.toContain("novel-link-card");
+    expect(prepareDocumentHtml(caption, () => null, { inlineLinks: true })).toContain("novel-inline-link");
+    // The body of a work still gets the card, which is what an embed looked like.
+    expect(prepareDocumentHtml(caption, () => null)).toContain("novel-link-card");
+  });
 });
 
 describe("bare URLs while reading", () => {

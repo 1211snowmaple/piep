@@ -1,57 +1,69 @@
 <?xml version="1.0" encoding="utf-8"?>
-<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="bookid" xml:lang="ja">
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="bookid" xml:lang="{{ language }}">
     <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
-        <dc:title>{{ manifest.core.name }}</dc:title>
-        <dc:language>ja</dc:language>
-        <dc:identifier id="bookid">{{ manifest.core.id_ }}</dc:identifier>
-        <dc:creator id="author">{{ manifest.core.author.name }}</dc:creator>
+        <dc:identifier id="bookid">{{ core.id_ }}</dc:identifier>
+        <dc:title id="title">{{ core.name }}</dc:title>
+        <meta refines="#title" property="title-type">main</meta>
+        <dc:language>{{ language }}</dc:language>
+        <dc:creator id="author">{{ core.author.name }}</dc:creator>
         <meta refines="#author" property="role" scheme="marc:relators">aut</meta>
-        <dc:date>{{ manifest.core.datePublished }}</dc:date>
-        {% if manifest.core.dateModified -%}
-        <meta property="dcterms:modified">{{ manifest.core.dateModified }}</meta>
-        {% else -%}
-        <meta property="dcterms:modified">{{ manifest.core.datePublished }}</meta>
-        {% endif -%}
-
-        {% if provider_ids.novel_id -%}
-        <dc:identifier id="pixiv-id">urn:pixiv:novel:{{ provider_ids.novel_id }}</dc:identifier>
-        {% endif -%}
-
-        {% if provider_ids.post_id -%}
-        <dc:identifier id="fanbox-id">urn:fanbox:post:{{ provider_ids.post_id }}</dc:identifier>
-        {% endif -%}
-
-        {% if manifest.core.isPartOf -%}
-        <meta property="belongs-to-collection" id="series-title">{{ manifest.core.isPartOf.name }}</meta>
-        <meta refines="#series-title" property="collection-type">series</meta>
-        {% if manifest.core.isPartOf.order -%}
-        <meta refines="#series-title" property="group-position">{{ manifest.core.isPartOf.order }}</meta>
-        {% endif -%}
-
-        {% if provider_ids.series_id -%}
-        <meta property="meta" scheme="urn:{{ provider_ids.novel_id and 'pixiv' or 'fanbox' }}:series:id">{{ provider_ids.series_id }}</meta>
+        <meta refines="#author" property="file-as">{{ core.author.name }}</meta>
+        <dc:publisher>{{ core.publisher }}</dc:publisher>
+        {%- if published %}
+        <dc:date>{{ published }}</dc:date>
         {%- endif %}
-        {% endif -%}
+        {#- dcterms:modified はちょうど 1 つ、秒精度の UTC でなければならない #}
+        <meta property="dcterms:modified">{{ modified }}</meta>
+        <dc:source>{{ core.mainEntityOfPage }}</dc:source>
 
-        {% if plain_description -%}
+        {%- if provider_ids.novel_id %}
+        <dc:identifier id="pixiv-id">urn:pixiv:novel:{{ provider_ids.novel_id }}</dc:identifier>
+        {%- endif %}
+        {%- if provider_ids.post_id %}
+        <dc:identifier id="fanbox-id">urn:fanbox:post:{{ provider_ids.post_id }}</dc:identifier>
+        {%- endif %}
+
+        {%- if core.isPartOf %}
+        <meta property="belongs-to-collection" id="series">{{ core.isPartOf.name }}</meta>
+        <meta refines="#series" property="collection-type">series</meta>
+        {%- if core.isPartOf.order %}
+        <meta refines="#series" property="group-position">{{ core.isPartOf.order }}</meta>
+        {%- endif %}
+        {%- endif %}
+
+        {%- if plain_description %}
         <dc:description>{{ plain_description }}</dc:description>
-        {% endif -%}
-        {% for tag in manifest.core.keywords -%}
+        {%- endif %}
+        {%- for tag in core.keywords %}
         <dc:subject>{{ tag }}</dc:subject>
-        {% endfor -%}
+        {%- endfor %}
 
-        {% if cover_image_id -%}
+        {#- アクセシビリティのメタデータは EPUB Accessibility 1.2 の必須項目 #}
+        <meta property="schema:accessMode">textual</meta>
+        {%- if content.illustrations %}
+        <meta property="schema:accessMode">visual</meta>
+        <meta property="schema:accessModeSufficient">textual,visual</meta>
+        {%- else %}
+        <meta property="schema:accessModeSufficient">textual</meta>
+        {%- endif %}
+        <meta property="schema:accessibilityFeature">tableOfContents</meta>
+        <meta property="schema:accessibilityFeature">readingOrder</meta>
+        <meta property="schema:accessibilityHazard">none</meta>
+        <meta property="schema:accessibilitySummary">本文はテキストで、目次から各ページへ移動できます。{% if content.illustrations %}挿絵には内容を説明する代替テキストがありません。{% endif %}</meta>
+
+        {%- if cover_image_id %}
+        {#- EPUB 2 由来の書き方だが、表紙を見つけるためにこれを見る取り込み側が多い #}
         <meta name="cover" content="{{ cover_image_id }}" />
-        {% endif -%}
+        {%- endif %}
     </metadata>
     <manifest>
-        {% for item in manifest_items -%}
-        <item id="{{ item.id }}" href="{{ item.href }}" media-type="{{ item.media_type }}" {% if item.properties %}properties="{{ item.properties }}" {% endif %}/>
-        {% endfor -%}
+        {%- for item in manifest_items %}
+        <item id="{{ item.id }}" href="{{ item.href }}" media-type="{{ item.media_type }}"{% if item.properties %} properties="{{ item.properties }}"{% endif %} />
+        {%- endfor %}
     </manifest>
-    <spine>
-        {% for item in spine_itemrefs -%}
-        <itemref idref="{{ item.idref }}" {% if not item.linear %}linear="no" {% endif %}/>
-        {% endfor -%}
+    <spine{% if settings.includeNcx %} toc="ncx"{% endif %} page-progression-direction="{{ settings.pageProgression }}">
+        {%- for item in spine_itemrefs %}
+        <itemref idref="{{ item.idref }}"{% if not item.linear %} linear="no"{% endif %}{% if item.properties %} properties="{{ item.properties }}"{% endif %} />
+        {%- endfor %}
     </spine>
 </package>

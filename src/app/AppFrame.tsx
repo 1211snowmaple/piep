@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, type ReactNode } from "react";
 import {
   ActionIcon,
   AppShell,
@@ -27,6 +27,7 @@ import { useWorkspace } from "@/app/WorkspaceContext";
 import { WorkspaceNav, WorkspaceNavFooter } from "@/app/WorkspaceNav";
 import { isTauriRuntime } from "@/services/dbApi";
 import { isRebuildRunning, rebuildPercent, useSearchIndexProgress } from "@/features/search/searchIndexProgress";
+import { useUpdateScheduler } from "@/features/updates/useUpdateScheduler";
 import { APP_VERSION } from "@/lib/version";
 
 const RAIL_WIDTH = 62;
@@ -43,6 +44,24 @@ function PiepBrand({ collapsed = false, onClick }: { collapsed?: boolean; onClic
 }
 
 /**
+ * How long to keep trying after the screen last changed height.
+ *
+ * A fixed budget is the wrong shape: half a second was not enough for a library
+ * that fetches its rows over IPC, and any figure large enough for a slow machine
+ * spends most of itself waiting on a screen that finished instantly. So the
+ * clock restarts every time the content grows, and the cap below is only there
+ * to stop something that never settles from holding the position forever.
+ */
+const RESTORE_QUIET_MS = 700;
+const RESTORE_MAX_MS = 6000;
+
+/** How long the offset has to survive the screen filling in to count as settled. */
+const RESTORE_STABLE_FRAMES = 5;
+
+/** Anything the reader does to the scroll position themselves. */
+const USER_SCROLL_EVENTS = ["wheel", "touchstart", "keydown", "pointerdown"] as const;
+
+/**
  * Puts each screen back where it was left.
  *
  * A new destination opens at the top, but going back has to return you to the
@@ -50,19 +69,28 @@ function PiepBrand({ collapsed = false, onClick }: { collapsed?: boolean; onClic
  * every time you close a work makes the back button useless. Rewriting the
  * query string, which is what a tab or a filter does, must not move the page at
  * all.
+ *
+ * Positions belong to history entries rather than to addresses. Two visits to
+ * the library are two places the reader was standing, and keying by path meant
+ * whichever they left last decided where both of them resumed.
  */
 function useScrollRestoration(
   ref: React.RefObject<HTMLElement | null>,
+  historyIndex: number,
   pathname: string,
   navigationType: NavigationType,
 ) {
-  const positions = useRef(new Map<string, number>());
-  const currentPath = useRef(pathname);
+  const positions = useRef(new Map<number, number>());
+  const currentIndex = useRef(historyIndex);
+  const previousPathname = useRef(pathname);
+  const restoring = useRef(false);
 
   useEffect(() => {
     const element = ref.current;
     if (!element) return;
-    const remember = () => positions.current.set(currentPath.current, element.scrollTop);
+    // A restore scrolls too, and its intermediate offsets are not where anybody
+    // chose to be - recording them overwrites the position being restored.
+    const remember = () => { if (!restoring.current) positions.current.set(currentIndex.current, element.scrollTop); };
     element.addEventListener("scroll", remember, { passive: true });
     return () => {
       remember();
@@ -70,27 +98,68 @@ function useScrollRestoration(
     };
   }, [ref]);
 
-  useEffect(() => {
-    currentPath.current = pathname;
+  // Deliberately a layout effect. Replacing one screen with another changes the
+  // height of the document, and the browser clamps the scroll position to fit
+  // and raises a scroll event for having done so. A passive effect runs after
+  // that has already happened, so the clamped offset was filed under the entry
+  // being left - overwriting the position that entry existed to remember.
+  useLayoutEffect(() => {
+    const samePathname = previousPathname.current === pathname;
+    previousPathname.current = pathname;
+    currentIndex.current = historyIndex;
     const element = ref.current;
     if (!element || navigationType === "replace") return;
-    const target = navigationType === "pop" ? positions.current.get(pathname) ?? 0 : 0;
+    // A push that only rewrote the query string - the next page of a listing,
+    // another tab - is still the same screen, and the screen itself knows which
+    // part of it the reader just asked for. Forcing the top here scrolled past
+    // the author profile they were paging through underneath.
+    if (navigationType === "push" && samePathname) return;
+    const target = navigationType === "pop" ? positions.current.get(historyIndex) ?? 0 : 0;
     if (target === 0) {
       element.scrollTo({ top: 0, left: 0 });
       return;
     }
-    // The screen it is restoring into is still loading its rows, so the offset
-    // is reapplied until the content is tall enough to hold it.
+    // The screen it is restoring into is still fetching and measuring its rows.
+    // Each time it grows the offset has to be reapplied, and each time it is
+    // briefly short the browser clamps the offset away and reports that as a
+    // scroll - so recording stays off for the whole window, not just until the
+    // first successful attempt. Stopping at the first match was enough to lose
+    // the position to a virtualised list that finished measuring one frame
+    // later, which is what a large library does every time.
+    restoring.current = true;
     let frame = 0;
-    let attempts = 0;
+    let held = 0;
+    let height = element.scrollHeight;
+    let quietSince = performance.now();
+    const limit = performance.now() + RESTORE_MAX_MS;
+    const stop = () => {
+      restoring.current = false;
+      cancelAnimationFrame(frame);
+      for (const event of USER_SCROLL_EVENTS) element.removeEventListener(event, stop);
+    };
     const apply = () => {
       element.scrollTo({ top: target, left: 0 });
-      attempts += 1;
-      if (Math.abs(element.scrollTop - target) > 1 && attempts < 30) frame = requestAnimationFrame(apply);
+      const now = performance.now();
+      if (element.scrollHeight !== height) { height = element.scrollHeight; quietSince = now; }
+      held = Math.abs(element.scrollTop - target) <= 1 ? held + 1 : 0;
+      // Settled: the offset has survived several frames and the screen has
+      // stopped growing under it.
+      const settled = held >= RESTORE_STABLE_FRAMES && now - quietSince >= RESTORE_QUIET_MS;
+      if (settled || now >= limit) {
+        stop();
+        return;
+      }
+      frame = requestAnimationFrame(apply);
     };
-    frame = requestAnimationFrame(apply);
-    return () => cancelAnimationFrame(frame);
-  }, [navigationType, pathname, ref]);
+    // Scrolling by hand outranks the restore: being dragged back to where you
+    // were while trying to leave is worse than losing the position.
+    for (const event of USER_SCROLL_EVENTS) element.addEventListener(event, stop, { passive: true });
+    // The first attempt is made now rather than a frame from now, so a window
+    // that is not painting - minimised, in the background - still lands the
+    // position it already has the height for.
+    apply();
+    return stop;
+  }, [historyIndex, navigationType, pathname, ref]);
 }
 
 function Navigation({ railed, onNavigate }: { railed: boolean; onNavigate?: () => void }) {
@@ -157,7 +226,8 @@ export function AppFrame({ children }: { children: ReactNode }) {
   const navigate = useAppNavigate();
   const location = useAppRouter();
   const [mobileOpened, mobile] = useDisclosure(false);
-  const [railed, setRailed] = useLocalStorage({ key: "piep.nav-railed", defaultValue: false });
+  // Read on the first render, or the sidebar opens wide and snaps to the rail.
+  const [railed, setRailed] = useLocalStorage({ key: "piep.nav-railed", defaultValue: false, getInitialValueInEffect: false });
   // Below the breakpoint the navbar is an overlay drawer, where a 62px rail
   // would just be a broken-looking sliver, so the preference only applies to
   // the docked sidebar.
@@ -178,6 +248,7 @@ export function AppFrame({ children }: { children: ReactNode }) {
     if (location.pathname.startsWith("/works")) return "作品";
     if (location.pathname.startsWith("/people")) return "作者";
     if (location.pathname.startsWith("/series")) return "シリーズ";
+    if (location.pathname.startsWith("/epub/templates")) return "テンプレートスタジオ";
     if (location.pathname.startsWith("/epub")) return "EPUB";
     if (location.pathname.startsWith("/updates")) return "更新";
     if (location.pathname.startsWith("/operations")) return "操作履歴";
@@ -187,7 +258,9 @@ export function AppFrame({ children }: { children: ReactNode }) {
   }, [location.pathname]);
 
   useEffect(() => { document.title = `${pageTitle} · piep`; }, [pageTitle]);
-  useScrollRestoration(mainRef, location.pathname, location.navigationType);
+  // 自動の更新確認は、どの画面を開いていても回っていてほしい。
+  useUpdateScheduler();
+  useScrollRestoration(mainRef, location.historyIndex, location.pathname, location.navigationType);
   useHotkeys([
     ["mod+K", () => spotlight.open()],
     ["mod+P", () => spotlight.open()],
@@ -201,6 +274,7 @@ export function AppFrame({ children }: { children: ReactNode }) {
     { id: "save-pixiv", label: "pixivから保存", description: "内蔵ブラウザを開く", onClick: () => navigate("/save/pixiv"), leftSection: <Icons.collect size={IconSize.nav} /> },
     { id: "save-fanbox", label: "FANBOXから保存", description: "内蔵ブラウザを開く", onClick: () => navigate("/save/fanbox"), leftSection: <Icons.collect size={IconSize.nav} /> },
     { id: "epub", label: `EPUBキューを開く${epubQueue.length ? `（${epubQueue.length}件）` : ""}`, description: "書き出しを設定", onClick: () => navigate("/epub"), leftSection: <Icons.epub size={IconSize.nav} /> },
+    { id: "epub-templates", label: "テンプレートスタジオを開く", description: "EPUBの見た目と構成を編集", onClick: () => navigate("/epub/templates"), leftSection: <Icons.epubTemplate size={IconSize.nav} /> },
     { id: "updates", label: "更新を確認", description: "変更と新着をチェック", onClick: () => navigate("/updates"), leftSection: <Icons.updates size={IconSize.nav} /> },
     { id: "operations", label: "操作履歴を開く", description: "進行状況・再試行・ログ", onClick: () => navigate("/operations"), leftSection: <Icons.history size={IconSize.nav} /> },
     { id: "diagnostics", label: "ライブラリを診断", description: "実データ性能・容量・索引", onClick: () => navigate("/settings?section=diagnostics"), leftSection: <Icons.diagnostics size={IconSize.nav} /> },
@@ -248,10 +322,12 @@ export function AppFrame({ children }: { children: ReactNode }) {
                 </ActionIcon>
               </Tooltip>
               {/* A desktop window has no browser chrome, so hiding history
-                  controls on narrow widths left no way back at all. */}
+                  controls on narrow widths left no way back at all. They are
+                  dimmed at the ends of the history: a lit control that does
+                  nothing when pressed reads as the app having hung. */}
               <Group gap={4} wrap="nowrap">
-                <Tooltip label="戻る"><ActionIcon variant="subtle" color="gray" aria-label="前の画面へ戻る" onClick={() => navigate(-1)}><Icons.back size={IconSize.nav} /></ActionIcon></Tooltip>
-                <Tooltip label="進む"><ActionIcon variant="subtle" color="gray" aria-label="次の画面へ進む" onClick={() => navigate(1)}><Icons.forward size={IconSize.nav} /></ActionIcon></Tooltip>
+                <Tooltip label="戻る"><ActionIcon variant="subtle" color="gray" aria-label="前の画面へ戻る" disabled={!location.canGoBack} onClick={() => navigate(-1)}><Icons.back size={IconSize.nav} /></ActionIcon></Tooltip>
+                <Tooltip label="進む"><ActionIcon variant="subtle" color="gray" aria-label="次の画面へ進む" disabled={!location.canGoForward} onClick={() => navigate(1)}><Icons.forward size={IconSize.nav} /></ActionIcon></Tooltip>
                 <Divider orientation="vertical" h={20} mx={6} visibleFrom="md" />
                 <Text size="sm" fw={680} visibleFrom="md">{pageTitle}</Text>
               </Group>

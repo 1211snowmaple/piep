@@ -8,31 +8,27 @@ import {
   Button,
   Card,
   Checkbox,
-  ColorInput,
-  Drawer,
   Grid,
   Group,
-  Modal,
   NumberInput,
   Paper,
   Progress,
+  ScrollArea,
   SegmentedControl,
   Select,
   Slider,
   Stack,
   Switch,
   Text,
-  Textarea,
   TextInput,
   ThemeIcon,
   Title,
   Tooltip,
 } from "@mantine/core";
 import { useForm, isNotEmpty, type UseFormReturnType } from "@mantine/form";
-import { useDisclosure } from "@mantine/hooks";
 import { modals } from "@mantine/modals";
 import { notifications } from "@mantine/notifications";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { Icons, IconSize } from "@/lib/icons";
 import { useAppNavigate } from "@/app/router";
 import { useWorkspace } from "@/app/WorkspaceContext";
@@ -43,31 +39,16 @@ import { errorMessage, formatBytes, formatNumber } from "@/lib/format";
 import { getDemoWork } from "@/mocks/demoData";
 import { getDownloads, isTauriRuntime } from "@/services/dbApi";
 import { openSingleDialog } from "@/services/dialogApi";
-import { createEpubTemplate, deleteEpubTemplate, exportEpubBatch, getTemplateFiles, listEpubTemplates, readTemplateFile, saveTemplateFile } from "@/services/epubApi";
-import { onTauriEvent } from "@/services/eventBus";
+import { exportEpubBatch, listEpubTemplates } from "@/services/epubApi";
+import { subscribeTauriEvent } from "@/services/eventBus";
 import { openFilesystemPath } from "@/services/openerApi";
 import type { DownloadEntry } from "@/types/library";
+import type { ExportBatchResult, ExportProgress, TemplateInfo } from "@/types/epub";
 import { startOperation, type OperationController } from "@/features/jobs/operationJobs";
+import { demoTemplates } from "./templateStudioDemo";
 
-interface TemplateInfo { name: string; isBuiltin: boolean; fileCount: number }
-interface TemplateFile { filename: string; sizeBytes: number }
-interface ExportBatchResult { successCount: number; failedCount: number; failedIds: number[]; outputFiles: string[] }
-interface ExportProgress { phase: string; currentTitle: string; currentIndex: number; totalCount: number; message: string }
-
-interface VisualTemplateValues {
-  fontFamily: "serif" | "sans";
-  fontSize: number;
-  lineHeight: number;
-  pagePadding: number;
-  textColor: string;
-  backgroundColor: string;
-  accentColor: string;
-  coverWidth: number;
-  coverRadius: number;
-  titleAlign: "left" | "center";
-}
-
-const visualTemplateDefaults: VisualTemplateValues = { fontFamily: "serif", fontSize: 16, lineHeight: 1.8, pagePadding: 16, textColor: "#252525", backgroundColor: "#ffffff", accentColor: "#0073bb", coverWidth: 50, coverRadius: 10, titleAlign: "left" };
+/** Picks the template that claims each work's source, per work. */
+const AUTO_TEMPLATE = "__auto__";
 
 interface EpubValues {
   templateName: string;
@@ -110,7 +91,7 @@ interface EpubValues {
 }
 
 const initialValues: EpubValues = {
-  templateName: "default", outputDir: "",
+  templateName: AUTO_TEMPLATE, outputDir: "",
   compression: {
     enabled: true, maxWidth: 2000, maxHeight: 2000, outputFormat: null,
     jpegQuality: 85, jpegProgressive: true, jpegChromaSubsampling: "4:2:0", jpegAutoOptimize: false, jpegDeringing: true, jpegSeparateChromaTables: true, jpegSharpYuv: false,
@@ -122,16 +103,12 @@ const initialValues: EpubValues = {
 export default function EpubPage() {
   const navigate = useAppNavigate();
   const runtime = isTauriRuntime();
-  const queryClient = useQueryClient();
   const { epubQueue, removeFromEpubQueue, clearEpubQueue } = useWorkspace();
   const [progress, setProgress] = useState<ExportProgress | null>(null);
   const [result, setResult] = useState<ExportBatchResult | null>(null);
-  const [templatesOpened, templatesDrawer] = useDisclosure(false);
-  const [newTemplateOpened, newTemplateModal] = useDisclosure(false);
   const exportOperationRef = useRef<OperationController | null>(null);
   const retryExportRef = useRef<(values: EpubValues) => void>(() => undefined);
   const form = useForm<EpubValues>({ initialValues, validate: { templateName: isNotEmpty("テンプレートを選択してください"), outputDir: isNotEmpty("出力先を選択してください") }, validateInputOnBlur: true });
-  const templateForm = useForm({ initialValues: { name: "" }, validate: { name: (value) => /^[a-zA-Z0-9_-]+$/.test(value) ? null : "英数字、_、-だけを使用してください" } });
   // One request for the whole queue: a per-work query meant a queue of a few
   // hundred books fired that many IPC round trips on every visit.
   const queueQuery = useQuery({
@@ -144,15 +121,14 @@ export default function EpubPage() {
   const works = useMemo(() => queueQuery.data ?? [], [queueQuery.data]);
   const templates = useQuery({
     queryKey: ["epub-templates"],
-    queryFn: () => runtime ? listEpubTemplates<TemplateInfo[]>() : Promise.resolve<TemplateInfo[]>([{ name: "default", isBuiltin: true, fileCount: 7 }, { name: "pixiv", isBuiltin: true, fileCount: 2 }]),
+    queryFn: () => runtime ? listEpubTemplates() : Promise.resolve<TemplateInfo[]>(demoTemplates),
   });
   useEffect(() => {
-    let dispose: (() => void) | undefined;
-    if (runtime) onTauriEvent<ExportProgress>("epub-export-progress", (event) => {
+    if (!runtime) return undefined;
+    return subscribeTauriEvent<ExportProgress>("epub-export-progress", (event) => {
       setProgress(event.payload);
       exportOperationRef.current?.progress(event.payload.currentIndex, event.payload.totalCount, event.payload.message);
-    }).then((fn) => { dispose = fn; }).catch(() => undefined);
-    return () => dispose?.();
+    });
   }, [runtime]);
   // Works deleted from the library after being queued simply do not come back
   // from the bulk fetch, so drop them from the queue instead of showing gaps.
@@ -175,7 +151,7 @@ export default function EpubPage() {
       setResult(null); setProgress({ phase: "started", currentTitle: "", currentIndex: 0, totalCount: works.length, message: "書き出しを準備しています" });
       if (!runtime) {
         await new Promise((resolve) => window.setTimeout(resolve, 500));
-        return { successCount: works.length, failedCount: 0, failedIds: [], outputFiles: works.map((work) => `${values.outputDir}/${work.title}.epub`) };
+        return { successCount: works.length, failedCount: 0, failedIds: [], invalidIds: [], outputFiles: works.map((work) => `${values.outputDir}/${work.title}.epub`), invalidCount: 0, issues: [] };
       }
       const c = values.compression;
       return exportEpubBatch<ExportBatchResult>({
@@ -193,28 +169,27 @@ export default function EpubPage() {
       exportOperationRef.current = null;
       setResult(data);
       setProgress(null);
-      const failed = new Set(data.failedIds);
-      removeFromEpubQueue(works.filter((work) => !failed.has(work.id)).map((work) => work.id));
+      const retry = new Set([...data.failedIds, ...data.invalidIds]);
+      removeFromEpubQueue(works.filter((work) => !retry.has(work.id)).map((work) => work.id));
       notifications.show({ color: data.failedCount ? "yellow" : "green", title: "EPUB書き出しが完了しました", message: `成功 ${data.successCount} · 失敗 ${data.failedCount}` });
     },
     onError: (error) => { exportOperationRef.current?.fail(error); exportOperationRef.current = null; setProgress(null); notifications.show({ color: "red", title: "EPUBを書き出せません", message: errorMessage(error) }); },
   });
   retryExportRef.current = (values) => exportMutation.mutate(values);
-  const createTemplateMutation = useMutation({
-    mutationFn: (name: string) => runtime ? createEpubTemplate(name) : Promise.resolve(),
-    onSuccess: (_, name) => { queryClient.invalidateQueries({ queryKey: ["epub-templates"] }); form.setFieldValue("templateName", name); newTemplateModal.close(); templateForm.reset(); notifications.show({ color: "green", message: "テンプレートを作成しました" }); },
-    onError: (error) => notifications.show({ color: "red", title: "テンプレートを作成できません", message: errorMessage(error) }),
-  });
   const selectOutput = async () => {
     if (!runtime) return form.setFieldValue("outputDir", "C:/Users/preview/Documents/piep exports");
     const path = await openSingleDialog({ directory: true, title: "EPUBの出力先" });
     if (path) form.setFieldValue("outputDir", path);
   };
   const totalSize = useMemo(() => works.reduce((sum, work) => sum + work.fileSizeBytes, 0), [works]);
+  const templateOptions = useMemo(() => [
+    { value: AUTO_TEMPLATE, label: "自動（作品の取得元に合わせる）" },
+    ...(templates.data ?? []).map((item) => ({ value: item.name, label: `${item.settings.label || item.name}${item.isBuiltin ? "（標準）" : ""}` })),
+  ], [templates.data]);
 
   return (
     <div className="page page--contained epub-page">
-      <PageHeader title="EPUB Studio" description="選んだ作品を、端末に合わせた高品質な電子書籍へ書き出します。" actions={<Button variant="default" leftSection={<Icons.epubTemplate size={IconSize.menu} />} onClick={templatesDrawer.open}>テンプレート管理</Button>} />
+      <PageHeader title="EPUB書き出し" description="選んだ作品を、端末に合わせた高品質な電子書籍へ書き出します。" actions={<Button variant="default" leftSection={<Icons.epubTemplate size={IconSize.menu} />} onClick={() => navigate("/epub/templates")}>テンプレートスタジオ</Button>} />
       {!epubQueue.length ? <EmptyState icon={Icons.epub} title="EPUBキューは空です" description="ライブラリや作品詳細から、書き出したい作品をキューに追加してください。" action={<Button onClick={() => navigate("/library")}>ライブラリを開く</Button>} /> : (
         <form onSubmit={form.onSubmit((values) => exportMutation.mutate(values))}>
           <Grid gap="lg" align="flex-start">
@@ -231,13 +206,13 @@ export default function EpubPage() {
               <Card p="lg" className="epub-export-card">
                 <Stack gap="lg">
                   <Box><Title order={3}>出力設定</Title><Text size="sm" c="dimmed">EPUB 3形式で作品ごとに出力します。</Text></Box>
-                  <Select label="テンプレート" data={(templates.data ?? []).map((item) => ({ value: item.name, label: `${item.name}${item.isBuiltin ? " · 標準" : ""}` }))} disabled={templates.isLoading} {...form.getInputProps("templateName")} error={form.errors.templateName || (templates.error ? "テンプレートを読み込めません" : undefined)} rightSection={<Icons.next size={IconSize.menu} />} />
+                  <Select label="テンプレート" description="組版と構成はテンプレートスタジオで編集できます" data={templateOptions} disabled={templates.isLoading} {...form.getInputProps("templateName")} error={form.errors.templateName || (templates.error ? "テンプレートを読み込めません" : undefined)} rightSection={<Icons.next size={IconSize.menu} />} />
                   {/* The icon sits inside the input, so its click also bubbles
                       to the field handler and opened two pickers in a row. */}
                   <TextInput label="出力先フォルダー" placeholder="フォルダーを選択" readOnly {...form.getInputProps("outputDir")} rightSection={<ActionIcon variant="subtle" aria-label="出力先を選択" onClick={(event) => { event.stopPropagation(); selectOutput(); }}><Icons.openFolder size={IconSize.action} /></ActionIcon>} onClick={selectOutput} />
-                  <Alert color="blue" icon={<Icons.epubImages size={IconSize.action} />}>{form.values.compression.enabled ? `画像を最大 ${form.values.compression.maxWidth} × ${form.values.compression.maxHeight}px に最適化します。` : "画像は元の品質のまま収録します。"}</Alert>
+                  <Alert color="piep" icon={<Icons.epubImages size={IconSize.action} />}>{form.values.compression.enabled ? `画像を最大 ${form.values.compression.maxWidth} × ${form.values.compression.maxHeight}px に最適化します。` : "画像は元の品質のまま収録します。"}</Alert>
                   {progress && <Stack gap={6} role="status" aria-live="polite"><Group justify="space-between"><Text size="sm" className="line-clamp-1">{progress.currentTitle || progress.message}</Text><Text size="xs" c="dimmed">{progress.currentIndex}/{progress.totalCount}</Text></Group><Progress value={progress.totalCount ? progress.currentIndex / progress.totalCount * 100 : 5} animated aria-label={`EPUB書き出し ${progress.currentIndex}/${progress.totalCount}`} /><Text size="xs" c="dimmed">{progress.message}</Text></Stack>}
-                  {result && <Alert color={result.failedCount ? "yellow" : "green"} icon={<Icons.confirm size={IconSize.action} />} title="書き出し完了"><Stack gap="xs"><Text size="sm">成功 {result.successCount}件 / 失敗 {result.failedCount}件</Text>{form.values.outputDir && <Button size="xs" variant="light" w="fit-content" leftSection={<Icons.openFolder size={IconSize.inline} />} disabled={!runtime} onClick={() => openFilesystemPath(form.values.outputDir)}>出力先を開く</Button>}</Stack></Alert>}
+                  {result && <ExportResult result={result} outputDir={form.values.outputDir} runtime={runtime} />}
                   <Button type="submit" size="lg" leftSection={<Icons.epub size={IconSize.action} />} loading={exportMutation.isPending} disabled={!works.length}>{works.length}冊を書き出す</Button>
                 </Stack>
               </Card>
@@ -245,14 +220,34 @@ export default function EpubPage() {
           </Grid>
         </form>
       )}
-
-      <Drawer opened={templatesOpened} onClose={templatesDrawer.close} position="right" size={560} title="EPUBテンプレート">
-        <Stack gap="md"><Group justify="space-between"><Text size="sm" c="dimmed">組版・表紙・目次をカスタマイズできます。</Text><Button size="xs" leftSection={<Icons.add size={IconSize.menu} />} onClick={newTemplateModal.open}>新規作成</Button></Group>{templates.isLoading ? <LoadingState /> : templates.error ? <ErrorState error={templates.error} retry={() => templates.refetch()} /> : (templates.data ?? []).map((template) => <TemplateEditor key={template.name} template={template} runtime={runtime} onChanged={() => queryClient.invalidateQueries({ queryKey: ["epub-templates"] })} />)}</Stack>
-      </Drawer>
-      <Modal opened={newTemplateOpened} onClose={newTemplateModal.close} title="テンプレートを作成">
-        <form onSubmit={templateForm.onSubmit(({ name }) => createTemplateMutation.mutate(name))}><Stack><TextInput label="テンプレート名" description="defaultテンプレートを複製して作成します" placeholder="my-template" {...templateForm.getInputProps("name")} /><Button type="submit" loading={createTemplateMutation.isPending}>作成</Button></Stack></form>
-      </Modal>
     </div>
+  );
+}
+
+/**
+ * What came out, including what the validator found.
+ *
+ * Every exported book is opened again and checked, because a file that a reader
+ * or Send to Kindle silently refuses looks exactly like a successful export.
+ */
+function ExportResult({ result, outputDir, runtime }: { result: ExportBatchResult; outputDir: string; runtime: boolean }) {
+  const clean = !result.failedCount && !result.invalidCount && !result.issues.length;
+  return (
+    <Alert color={clean ? "green" : "yellow"} icon={<Icons.confirm size={IconSize.action} />} title="書き出し完了">
+      <Stack gap="xs">
+        <Text size="sm">成功 {result.successCount}件 / 失敗 {result.failedCount}件</Text>
+        {result.issues.length > 0 && (
+          <Box>
+            <Text size="sm" fw={600}>{result.invalidCount > 0 ? `${result.invalidCount}件はEPUBの検証を通過しませんでした` : "Kindle互換性について確認事項があります"}</Text>
+            <Text size="xs" c="dimmed">エラーの作品はキューに残ります。警告は書き出せますが、品質を確認してください。</Text>
+            <ScrollArea.Autosize mah={140} mt={6}>
+              <Stack gap={2}>{result.issues.slice(0, 20).map((issue, index) => <Text key={index} size="xs" c="dimmed">{issue.location}：{issue.message}</Text>)}</Stack>
+            </ScrollArea.Autosize>
+          </Box>
+        )}
+        {outputDir && <Button size="xs" variant="light" w="fit-content" leftSection={<Icons.openFolder size={IconSize.inline} />} disabled={!runtime} onClick={() => openFilesystemPath(outputDir)}>出力先を開く</Button>}
+      </Stack>
+    </Alert>
   );
 }
 
@@ -272,67 +267,3 @@ function CompressionSettings({ form }: { form: UseFormReturnType<EpubValues, Epu
 }
 
 function LabeledSlider({ label, value, onChange, min, max, step }: { label: string; value: number; onChange: (value: number) => void; min: number; max: number; step?: number }) { return <Box><Group justify="space-between" mb="xs"><Text size="sm" fw={500}>{label}</Text><Badge variant="light" color="gray">{value}</Badge></Group><Slider aria-label={label} value={value} onChange={onChange} min={min} max={max} step={step} /></Box>; }
-
-function TemplateEditor({ template, runtime, onChanged }: { template: TemplateInfo; runtime: boolean; onChanged: () => void }) {
-  const [opened, setOpened] = useState(false);
-  const [selectedFile, setSelectedFile] = useState<string | null>(null);
-  const [content, setContent] = useState("");
-  const [editorMode, setEditorMode] = useState<"visual" | "code">("visual");
-  const visualForm = useForm<VisualTemplateValues>({ initialValues: visualTemplateDefaults });
-  const files = useQuery({ queryKey: ["template-files", template.name], queryFn: () => runtime ? getTemplateFiles<TemplateFile[]>(template.name) : Promise.resolve<TemplateFile[]>([{ filename: "style.css.j2", sizeBytes: 840 }, { filename: "page_wrapper.xhtml.j2", sizeBytes: 1200 }]), enabled: opened });
-  const loadFile = async (filename: string) => {
-    const next = runtime ? await readTemplateFile(template.name, filename) : "/* Preview template */\nbody { line-height: 1.9; }";
-    setSelectedFile(filename);
-    setContent(next);
-    if (filename.endsWith(".css.j2")) visualForm.setValues(readVisualSettings(next));
-  };
-  useEffect(() => {
-    if (!opened || selectedFile || !files.data?.length) return;
-    const style = files.data.find((file) => file.filename === "style.css.j2") ?? files.data.find((file) => file.filename.endsWith(".css.j2")) ?? files.data[0];
-    loadFile(style.filename).catch((error) => notifications.show({ color: "red", message: errorMessage(error) }));
-  }, [files.data, opened, selectedFile]);
-  const save = async () => { if (!selectedFile || !runtime) return; try { await saveTemplateFile(template.name, selectedFile, content); notifications.show({ color: "green", message: "テンプレートを保存しました" }); } catch (error) { notifications.show({ color: "red", message: errorMessage(error) }); } };
-  const applyVisual = (values: VisualTemplateValues) => {
-    setContent((current) => writeVisualSettings(current, values));
-    notifications.show({ color: "blue", message: "見た目の設定をコードへ反映しました。保存するとEPUBに使用されます。" });
-  };
-  const remove = () => modals.openConfirmModal({ title: "テンプレートを削除しますか？", children: <Text size="sm">{template.name}を削除します。</Text>, confirmProps: { color: "red" }, labels: { confirm: "削除", cancel: "キャンセル" }, onConfirm: async () => { await deleteEpubTemplate(template.name); onChanged(); } });
-  const visualAvailable = Boolean(selectedFile?.endsWith(".css.j2"));
-  return <Card p="md">
-    <Group justify="space-between"><Box><Group gap="xs"><Text fw={700}>{template.name}</Text>{template.isBuiltin && <Badge size="xs" variant="light">標準</Badge>}</Group><Text size="xs" c="dimmed">{template.fileCount}ファイル</Text></Box><Group gap="xs"><Button size="xs" variant="light" onClick={() => setOpened(!opened)}>{opened ? "閉じる" : "編集"}</Button>{!template.isBuiltin && <Tooltip label="削除"><ActionIcon size="sm" color="red" variant="subtle" aria-label={`${template.name}を削除`} onClick={remove}><Icons.delete size={IconSize.menu} /></ActionIcon></Tooltip>}</Group></Group>
-    {opened && <Stack mt="md" gap="md">
-      <Group justify="space-between"><SegmentedControl aria-label="テンプレートの編集方法" value={editorMode} onChange={(value) => setEditorMode(value as "visual" | "code")} data={[{ value: "visual", label: "見た目で編集", disabled: !visualAvailable }, { value: "code", label: "コード編集" }]} /><Group gap="xs"><Button size="xs" variant="default" leftSection={<Icons.save size={IconSize.inline} />} disabled={!runtime || !selectedFile} onClick={save}>テンプレートを保存</Button></Group></Group>
-      {editorMode === "visual" && visualAvailable ? <form onSubmit={visualForm.onSubmit(applyVisual)}><Grid>
-        <Grid.Col span={{ base: 12, sm: 7 }}><Stack gap="md"><Group grow><Select label="本文書体" data={[{ value: "serif", label: "明朝体" }, { value: "sans", label: "ゴシック体" }]} {...visualForm.getInputProps("fontFamily")} /><Select label="タイトル位置" data={[{ value: "left", label: "左揃え" }, { value: "center", label: "中央" }]} {...visualForm.getInputProps("titleAlign")} /></Group><Group grow><NumberInput label="文字サイズ" hideControls suffix=" px" min={12} max={28} {...visualForm.getInputProps("fontSize")} /><NumberInput label="ページ余白" hideControls suffix=" px" min={0} max={64} {...visualForm.getInputProps("pagePadding")} /></Group><LabeledSlider label="行間" value={visualForm.values.lineHeight} onChange={(value) => visualForm.setFieldValue("lineHeight", value)} min={1.2} max={2.6} step={0.1} /><Group grow><ColorInput label="本文色" {...visualForm.getInputProps("textColor")} /><ColorInput label="背景色" {...visualForm.getInputProps("backgroundColor")} /><ColorInput label="タグ色" {...visualForm.getInputProps("accentColor")} /></Group><LabeledSlider label="表紙の横幅 (%)" value={visualForm.values.coverWidth} onChange={(value) => visualForm.setFieldValue("coverWidth", value)} min={25} max={100} /><LabeledSlider label="表紙の角丸 (px)" value={visualForm.values.coverRadius} onChange={(value) => visualForm.setFieldValue("coverRadius", value)} min={0} max={32} /><Button type="submit" w="fit-content">見た目をコードへ反映</Button></Stack></Grid.Col>
-        <Grid.Col span={{ base: 12, sm: 5 }}><Paper withBorder p="lg" className="epub-template-preview" style={{ fontFamily: visualForm.values.fontFamily === "serif" ? '"Yu Mincho", serif' : '"Yu Gothic UI", sans-serif', fontSize: visualForm.values.fontSize, lineHeight: visualForm.values.lineHeight, padding: visualForm.values.pagePadding, color: visualForm.values.textColor, background: visualForm.values.backgroundColor }}><Text component="h3" ta={visualForm.values.titleAlign} fw={700} m={0}>作品タイトル</Text><Text size="sm" mt="xs">作者名</Text><Box className="epub-template-preview__cover" my="md" mx="auto" style={{ width: `${visualForm.values.coverWidth}%`, borderRadius: visualForm.values.coverRadius }} /><Text>これは本文のプレビューです。文字サイズや行間、余白を確認しながら調整できます。</Text><Text mt="sm" style={{ color: visualForm.values.accentColor }}>#創作　#小説</Text></Paper></Grid.Col>
-      </Grid></form> : <Grid><Grid.Col span={4}><Stack gap={4}>{files.data?.map((file) => <Button key={file.filename} variant={selectedFile === file.filename ? "light" : "subtle"} color="gray" size="compact-xs" justify="flex-start" onClick={() => loadFile(file.filename)}>{file.filename}</Button>)}</Stack></Grid.Col><Grid.Col span={8}>{selectedFile ? <Textarea autosize minRows={16} maxRows={28} value={content} onChange={(event) => setContent(event.currentTarget.value)} styles={{ input: { fontFamily: "var(--mantine-font-family-monospace)", fontSize: 12 } }} aria-label={`${selectedFile}の内容`} /> : <Text size="xs" c="dimmed">ファイルを選択してください</Text>}</Grid.Col></Grid>}
-    </Stack>}
-  </Card>;
-}
-
-export function readVisualSettings(content: string): VisualTemplateValues {
-  const managed = content.match(/\/\* piep-visual:start \*\/([\s\S]*?)\/\* piep-visual:end \*\//)?.[1] ?? content;
-  const body = managed.match(/(?:^|\})\s*body\s*\{([^}]*)\}/s)?.[1] ?? managed;
-  const cover = managed.match(/\.cover-container\s+img[^\{]*\{([^}]*)\}/s)?.[1] ?? managed;
-  const heading = managed.match(/(?:^|\})\s*h3\s*\{([^}]*)\}/s)?.[1] ?? managed;
-  const number = (block: string, property: string, fallback: number) => Number(block.match(new RegExp(`(?:^|[;{\\s])${property}\\s*:\\s*([0-9.]+)`))?.[1] ?? fallback);
-  const color = (block: string, property: string, fallback: string) => block.match(new RegExp(`(?:^|[;{\\s])${property}\\s*:\\s*(#[0-9a-fA-F]{3,8})`))?.[1] ?? fallback;
-  return {
-    fontFamily: /font-family\s*:\s*[^;]*(sans-serif|Yu Gothic)/i.test(body) ? "sans" : "serif",
-    fontSize: number(body, "font-size", visualTemplateDefaults.fontSize),
-    lineHeight: number(body, "line-height", visualTemplateDefaults.lineHeight),
-    pagePadding: number(body, "padding", visualTemplateDefaults.pagePadding),
-    textColor: color(body, "color", visualTemplateDefaults.textColor),
-    backgroundColor: color(body, "background-color", visualTemplateDefaults.backgroundColor),
-    accentColor: managed.match(/--tag-color\s*:\s*(#[0-9a-fA-F]{3,8})/)?.[1] ?? visualTemplateDefaults.accentColor,
-    coverWidth: number(cover, "max-width", visualTemplateDefaults.coverWidth),
-    coverRadius: number(cover, "border-radius", visualTemplateDefaults.coverRadius),
-    titleAlign: /text-align\s*:\s*center/i.test(heading) ? "center" : "left",
-  };
-}
-
-export function writeVisualSettings(content: string, values: VisualTemplateValues): string {
-  const clean = content.replace(/\n?\/\* piep-visual:start \*\/[\s\S]*?\/\* piep-visual:end \*\/\n?/g, "\n").trimEnd();
-  const font = values.fontFamily === "serif" ? '"Yu Mincho", "Noto Serif JP", serif' : '"Yu Gothic", "Noto Sans JP", sans-serif';
-  return `${clean}\n\n/* piep-visual:start */\n:root { --tag-color: ${values.accentColor}; }\nbody { font-family: ${font}; font-size: ${values.fontSize}px; line-height: ${values.lineHeight}; padding: ${values.pagePadding}px; color: ${values.textColor}; background-color: ${values.backgroundColor}; }\nh3 { text-align: ${values.titleAlign}; }\n.cover-container img, .cover-cell img { max-width: ${values.coverWidth}%; border-radius: ${values.coverRadius}px; }\n/* piep-visual:end */\n`;
-}

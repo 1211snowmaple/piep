@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import {
   ActionIcon,
-  Alert,
   Badge,
   Box,
   Button,
@@ -24,19 +23,26 @@ import {
   Timeline,
   Title,
   Tooltip,
+  UnstyledButton,
 } from "@mantine/core";
 import { useForm, isNotEmpty, type UseFormReturnType } from "@mantine/form";
 import { modals } from "@mantine/modals";
 import { notifications } from "@mantine/notifications";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Icons, IconSize } from "@/lib/icons";
+import { Note } from "@/components/Note";
 import { useAppSearchParams } from "@/app/router";
 import { EmptyState, ErrorState, LoadingState } from "@/components/AsyncState";
 import { PageHeader } from "@/components/PageHeader";
 import { useUpdateJobs, type UpdateJobSnapshot, type UpdateJobSummary } from "@/features/updates/updateJobs";
 import { errorMessage, formatDate, formatNumber } from "@/lib/format";
 import { ProviderMark } from "@/lib/providers";
-import { deleteUpdateTarget, isTauriRuntime, listUpdateTargets, setUpdateTargetEnabled, upsertUpdateTarget } from "@/services/dbApi";
+import { deleteUpdateTarget, isTauriRuntime, listUpdateTargets, searchDownloadsV2, setUpdateTargetEnabled, upsertUpdateTarget } from "@/services/dbApi";
+import { readingWorkIds } from "@/features/library/readingShelf";
+import { countDismissedUpdateCandidatesCommand, dismissUpdateCandidateCommand, restoreDismissedUpdateCandidatesCommand } from "@/services/updateJobApi";
+import { loadSchedule } from "@/features/updates/updateSchedule";
+import { UpdateScheduleCard } from "@/features/updates/UpdateScheduleCard";
+import { useUpdateJobNotifications } from "@/features/updates/useUpdateScheduler";
 import type { UpdateTarget } from "@/types/library";
 
 const demoSnapshot: UpdateJobSnapshot = {
@@ -47,14 +53,35 @@ const demoSnapshot: UpdateJobSnapshot = {
     { id: 2, logType: "success", message: "3件の新しい候補が見つかりました", createdAt: new Date().toISOString() },
   ],
   candidates: [
-    { id: 1, key: "pixiv:12001", source: "pixiv", sourceId: "12001", title: "星を編む人 第十三話", subtitle: "32,800字", targetLabel: "星を編む人", targetType: "series", selected: true, status: "candidate" },
-    { id: 2, key: "fanbox:10920", source: "fanbox", sourceId: "10920", title: "制作ノート #25", subtitle: "画像8点", targetLabel: "mizu atelier", targetType: "author", selected: true, status: "candidate" },
-    { id: 3, key: "pixiv:12002", source: "pixiv", sourceId: "12002", title: "夏灯りの帰り道", subtitle: "短編", targetLabel: "青葉しおり", targetType: "author", selected: false, status: "candidate" },
+    { id: 1, key: "pixiv:12001", source: "pixiv", sourceId: "12001", title: "星を編む人 第十三話", subtitle: "青葉しおり ・ 2026-08-14", targetLabel: "星を編む人", targetType: "series", selected: true, status: "candidate", kind: "sequel" },
+    { id: 2, key: "fanbox:10920", source: "fanbox", sourceId: "10920", title: "制作ノート #25", subtitle: "2026-08-12", targetLabel: "mizu atelier", targetType: "author", selected: true, status: "candidate", kind: "new" },
+    { id: 3, key: "fanbox:10880", source: "fanbox", sourceId: "10880", title: "4月のまとめ（加筆）", subtitle: "2026-08-15", targetLabel: "mizu atelier", targetType: "author", selected: false, status: "candidate", kind: "revision" },
   ],
+  nextCandidateCursor: null,
+  previousLogCursor: null,
 };
 
 export function isSavableCandidateStatus(status: string): boolean {
   return status === "candidate" || status === "failed";
+}
+
+/** How many works one shelf check may cover before it stops being sensible. */
+const SHELF_SCOPE_LIMIT = 500;
+
+/**
+ * The works behind a shelf scope, or null when the scope is not a shelf.
+ *
+ * Shelves reuse the plain work check: the ids are collected here and sent as
+ * `workIds`, so the job needs no new scope of its own.
+ */
+export async function shelfWorkIds(scope: string): Promise<number[] | null> {
+  if (scope !== "favorite" && scope !== "reading") return null;
+  const params = scope === "favorite"
+    ? { favorite: true, limit: SHELF_SCOPE_LIMIT, projection: "bulk" as const }
+    : { idsInclude: readingWorkIds().slice(0, SHELF_SCOPE_LIMIT), limit: SHELF_SCOPE_LIMIT, projection: "bulk" as const };
+  if (scope === "reading" && !params.idsInclude?.length) return [];
+  const result = await searchDownloadsV2(params);
+  return result.items.map((item) => item.id);
 }
 
 export function parseWorkId(value: string | null): number | null {
@@ -81,10 +108,14 @@ export default function UpdatesPage() {
   const workId = parseWorkId(searchParams.get("work"));
   const queryClient = useQueryClient();
   const updateJobs = useUpdateJobs(undefined, runtime);
+  // 確認が終わったら OS の通知で知らせる。画面を見ていないときのための足。
+  useUpdateJobNotifications(runtime ? updateJobs.activeSnapshot : null, runtime);
   const [previewSnapshot, setPreviewSnapshot] = useState<UpdateJobSnapshot>(demoSnapshot);
   const activeSnapshot = runtime ? updateJobs.activeSnapshot : previewSnapshot;
   const jobs = runtime ? updateJobs.jobs : [demoSnapshot as UpdateJobSummary];
   const [selectedCandidateIds, setSelectedCandidateIds] = useState<number[]>([]);
+  // 非表示にした候補は、この画面ではすぐ消す（次のジョブでは元から出てこない）。
+  const [dismissedIds, setDismissedIds] = useState<number[]>([]);
   const [tab, setTab] = useState<string | null>("candidates");
   const form = useForm({
     initialValues: { scope: workId ? "work" : "all", mode: "check_only", fetchConcurrency: 3, saveConcurrency: 2, collectionConcurrency: 1 },
@@ -98,10 +129,13 @@ export default function UpdatesPage() {
     initialValues: { targetType: "author", source: "pixiv", sourceKey: "", displayName: "" },
     validate: { sourceKey: isNotEmpty("IDを入力してください"), displayName: isNotEmpty("表示名を入力してください") },
   });
-  const targets = useQuery({ queryKey: ["update-targets"], queryFn: () => runtime ? listUpdateTargets<UpdateTarget>(null, false) : Promise.resolve<UpdateTarget[]>([
+  // 一覧に出すのは「自分で選んだ作者・シリーズ」だけ。作品の監視は
+  // 作品カードのトグルが持っていて、ここに混ぜると名前が並んで分かりにくい。
+  const targets = useQuery({ queryKey: ["update-targets"], queryFn: async () => runtime ? (await listUpdateTargets<UpdateTarget>(null, false)).filter((target) => target.targetType === "author" || target.targetType === "series") : ([
     { id: 1, targetType: "author", source: "pixiv", sourceKey: "8001234", displayName: "青葉しおり", enabled: true, lastCheckedAt: new Date().toISOString(), lastSeenSourceId: "12002", lastSeenSourceUpdatedAt: null, metadataJson: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
     { id: 2, targetType: "series", source: "pixiv", sourceKey: "778120", displayName: "星を編む人", enabled: true, lastCheckedAt: new Date().toISOString(), lastSeenSourceId: "12001", lastSeenSourceUpdatedAt: null, metadataJson: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
-  ]) });
+    { id: 3, targetType: "author", source: "fanbox", sourceKey: "mizu-atelier", displayName: "mizu atelier", enabled: false, lastCheckedAt: new Date(Date.now() - 86_400_000).toISOString(), lastSeenSourceId: null, lastSeenSourceUpdatedAt: null, metadataJson: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
+  ] as UpdateTarget[]) });
   // The snapshot is polled, so re-seeding the selection from it on every
   // arrival used to re-tick boxes the user had just cleared. Seed once per job,
   // then only add candidates that appear later as the job discovers them.
@@ -125,11 +159,67 @@ export default function UpdatesPage() {
   const startMutation = useMutation({
     mutationFn: async (values: typeof form.values) => {
       if (!runtime) { await new Promise((resolve) => setTimeout(resolve, 400)); setPreviewSnapshot({ ...demoSnapshot, jobId: `preview-${Date.now()}`, startedAt: new Date().toISOString(), updatedAt: new Date().toISOString() }); return; }
-      await updateJobs.start({ scope: values.scope as "all" | "work" | "author" | "series", mode: values.mode as "check_only" | "auto_save", workIds: workId ? [workId] : null, concurrency: { fetch: normalizeConcurrency(values.fetchConcurrency, 1, 8), save: normalizeConcurrency(values.saveConcurrency, 1, 4), collection: normalizeConcurrency(values.collectionConcurrency, 1, 3) } });
+      // 棚を選んだときは、その棚の作品IDを集めて「作品」の確認として投げる。
+      // 監視のオン・オフに関わらず、いま棚にあるものを見に行ける。
+      const shelfIds = await shelfWorkIds(values.scope);
+      if (shelfIds && !shelfIds.length) throw new Error("この棚には作品がありません");
+      const schedule = await loadSchedule();
+      await updateJobs.start({
+        scope: (shelfIds ? "work" : values.scope) as "all" | "work" | "author" | "series",
+        mode: values.mode as "check_only" | "auto_save",
+        workIds: shelfIds ?? (workId ? [workId] : null),
+        watchSaved: schedule.watchSaved,
+        concurrency: { fetch: normalizeConcurrency(values.fetchConcurrency, 1, 8), save: normalizeConcurrency(values.saveConcurrency, 1, 4), collection: normalizeConcurrency(values.collectionConcurrency, 1, 3) },
+      });
       await updateJobs.loadJobs();
     },
     onError: (error) => notifications.show({ color: "red", title: "更新確認を開始できません", message: errorMessage(error) }),
   });
+  // チェックを外すのは「今は選ばない」。二度と出したくない、は別の操作にする。
+  const dismissMutation = useMutation({
+    mutationFn: async (candidate: UpdateJobSnapshot["candidates"][number]) => {
+      if (runtime) await dismissUpdateCandidateCommand(candidate.source, candidate.sourceId, true);
+      return candidate;
+    },
+    onSuccess: (candidate) => {
+      setDismissedIds((current) => [...new Set([...current, candidate.id])]);
+      queryClient.invalidateQueries({ queryKey: ["dismissed-candidates"] });
+      notifications.show({
+        color: "gray",
+        title: "今後は表示しません",
+        message: (
+          <Group gap="sm" wrap="nowrap">
+            <Text size="sm" className="line-clamp-1">{candidate.title}</Text>
+            <Button size="compact-xs" variant="default" onClick={() => undismissMutation.mutate(candidate)}>元に戻す</Button>
+          </Group>
+        ),
+      });
+    },
+    onError: (error) => notifications.show({ color: "red", title: "候補を非表示にできません", message: errorMessage(error) }),
+  });
+  const undismissMutation = useMutation({
+    mutationFn: async (candidate: UpdateJobSnapshot["candidates"][number]) => {
+      if (runtime) await dismissUpdateCandidateCommand(candidate.source, candidate.sourceId, false);
+      return candidate;
+    },
+    onSuccess: (candidate) => {
+      setDismissedIds((current) => current.filter((id) => id !== candidate.id));
+      queryClient.invalidateQueries({ queryKey: ["dismissed-candidates"] });
+    },
+  });
+  const dismissedCount = useQuery({
+    queryKey: ["dismissed-candidates"],
+    queryFn: () => (runtime ? countDismissedUpdateCandidatesCommand() : Promise.resolve(0)),
+  });
+  const restoreDismissedMutation = useMutation({
+    mutationFn: () => (runtime ? restoreDismissedUpdateCandidatesCommand() : Promise.resolve(0)),
+    onSuccess: (restored) => {
+      setDismissedIds([]);
+      queryClient.invalidateQueries({ queryKey: ["dismissed-candidates"] });
+      notifications.show({ color: "piep", title: "非表示を解除しました", message: `${restored}件が次の確認でまた候補に出ます` });
+    },
+  });
+
   const saveCandidatesMutation = useMutation({
     mutationFn: async () => { if (runtime && activeSnapshot) await updateJobs.saveCandidates(activeSnapshot.jobId, selectedSavableIds); },
     onSuccess: () => notifications.show({ color: "green", title: "保存を開始しました", message: `${selectedSavableIds.length}件を処理します` }),
@@ -151,13 +241,16 @@ export default function UpdatesPage() {
 
   return (
     <div className="page page--contained updates-page">
-      <PageHeader title="更新センター" description="作品の変更、作者の新作、シリーズの続編を一つのジョブとして安全に確認・保存します。" actions={<Button leftSection={<Icons.updates size={IconSize.action} />} loading={startMutation.isPending} disabled={running} onClick={() => form.onSubmit((values) => startMutation.mutate(values))()}>更新を確認</Button>} />
+      {/* 開始は左のカードにひとつだけ置く。同じ動作のボタンが2か所にあると、
+          設定を変えたのがどちらに効くのか分からなくなる。 */}
+      <PageHeader title="更新センター" description="作品の変更、作者の新作、シリーズの続編を一つのジョブとして安全に確認・保存します。" />
       <Grid gap="lg" align="flex-start">
         <Grid.Col span={{ base: 12, lg: 4, xl: 3 }}>
           <Stack gap="lg">
             <Card p="lg">
-              <Stack gap="md"><Title order={3}>新しい更新ジョブ</Title>{workId && <Alert color="blue">作品 ID {workId} だけを確認します。</Alert>}<SegmentedControl fullWidth aria-label="更新時の処理方法" data={[{ value: "check_only", label: "確認のみ" }, { value: "auto_save", label: "自動保存" }]} {...form.getInputProps("mode")} /><Select label="対象" data={[{ value: "all", label: "すべての監視対象" }, { value: "work", label: "作品" }, { value: "author", label: "作者・クリエイター" }, { value: "series", label: "シリーズ" }]} disabled={Boolean(workId)} {...form.getInputProps("scope")} /><Divider /><Text size="sm" fw={700}>同時実行数</Text><Group grow><NumberInput label="取得" required hideControls allowDecimal={false} allowNegative={false} clampBehavior="strict" min={1} max={8} {...form.getInputProps("fetchConcurrency")} /><NumberInput label="保存" required hideControls allowDecimal={false} allowNegative={false} clampBehavior="strict" min={1} max={4} {...form.getInputProps("saveConcurrency")} /></Group><NumberInput label="一覧取得" required hideControls allowDecimal={false} allowNegative={false} clampBehavior="strict" min={1} max={3} {...form.getInputProps("collectionConcurrency")} /><Button variant="light" leftSection={<Icons.updates size={IconSize.menu} />} disabled={running} loading={startMutation.isPending} onClick={() => form.onSubmit((values) => startMutation.mutate(values))()}>確認を開始</Button></Stack>
+              <Stack gap="md"><Title order={3}>新しい更新ジョブ</Title>{workId && <Note>作品 ID {workId} だけを確認します。</Note>}<SegmentedControl fullWidth aria-label="更新時の処理方法" data={[{ value: "check_only", label: "確認のみ" }, { value: "auto_save", label: "自動保存" }]} {...form.getInputProps("mode")} /><Select label="対象" data={[{ value: "all", label: "すべての監視対象" }, { value: "work", label: "監視中の作品" }, { value: "author", label: "作者・クリエイター" }, { value: "series", label: "シリーズ" }, { value: "favorite", label: "お気に入りの作品" }, { value: "reading", label: "読みかけの作品" }]} disabled={Boolean(workId)} {...form.getInputProps("scope")} /><Divider /><Text size="sm" fw={700}>同時実行数</Text><Group grow><NumberInput label="取得" required hideControls allowDecimal={false} allowNegative={false} clampBehavior="strict" min={1} max={8} {...form.getInputProps("fetchConcurrency")} /><NumberInput label="保存" required hideControls allowDecimal={false} allowNegative={false} clampBehavior="strict" min={1} max={4} {...form.getInputProps("saveConcurrency")} /></Group><NumberInput label="一覧取得" required hideControls allowDecimal={false} allowNegative={false} clampBehavior="strict" min={1} max={3} {...form.getInputProps("collectionConcurrency")} /><Button variant="light" leftSection={<Icons.updates size={IconSize.menu} />} disabled={running} loading={startMutation.isPending} onClick={() => form.onSubmit((values) => startMutation.mutate(values))()}>確認を開始</Button></Stack>
             </Card>
+            <UpdateScheduleCard />
             <Card p="lg"><Group justify="space-between" mb="sm"><Text fw={700}>履歴</Text><Badge variant="light" color="gray">{jobs.length}</Badge></Group><Stack gap={4}>{jobs.slice(0, 8).map((job) => <Button key={job.jobId} variant={activeSnapshot?.jobId === job.jobId ? "light" : "subtle"} color="gray" justify="space-between" size="compact-sm" onClick={() => runtime && updateJobs.selectJob(job.jobId)}><Text size="xs">{formatDate(job.startedAt, true)}</Text><StatusBadge status={job.status} /></Button>)}</Stack></Card>
           </Stack>
         </Grid.Col>
@@ -172,10 +265,32 @@ export default function UpdatesPage() {
               <Tabs value={tab} onChange={setTab}>
                 <Tabs.List><Tabs.Tab value="candidates" leftSection={<Icons.select size={IconSize.menu} />}>候補 <Badge size="xs" variant="light" ml={4}>{activeSnapshot.candidates.length}</Badge></Tabs.Tab><Tabs.Tab value="logs" leftSection={<Icons.pending size={IconSize.menu} />}>ログ</Tabs.Tab><Tabs.Tab value="targets" leftSection={<Icons.updates size={IconSize.menu} />}>監視対象</Tabs.Tab></Tabs.List>
                 <Tabs.Panel value="candidates" pt="lg">
-                  {!activeSnapshot.candidates.length ? <EmptyState icon={Icons.confirm} title="新しい候補はありません" description="監視対象はすべて最新です。" /> : <Card p={0}><Group justify="space-between" p="md"><Box><Text fw={700}>保存する候補</Text><Text size="xs" c="dimmed">{selectedSavableIds.length}件を選択中</Text></Box><Group gap="xs"><Button size="xs" variant="subtle" disabled={!selectableCandidateIds.length} onClick={() => setSelectedCandidateIds(selectableCandidateIds)}>すべて選択</Button><Button size="xs" variant="subtle" color="gray" disabled={!selectedSavableIds.length} onClick={() => setSelectedCandidateIds([])}>解除</Button><Button size="sm" leftSection={<Icons.export size={IconSize.menu} />} disabled={!selectedSavableIds.length || running} loading={saveCandidatesMutation.isPending} onClick={() => saveCandidatesMutation.mutate()}>選択候補を保存</Button></Group></Group><Divider /><Stack gap={0}>{activeSnapshot.candidates.map((candidate) => <Paper key={candidate.id} p="md" radius={0} className="update-candidate"><Group wrap="nowrap"><Checkbox checked={selectedSavableIdSet.has(candidate.id)} onChange={(event) => setSelectedCandidateIds((current) => event.currentTarget.checked ? [...new Set([...current, candidate.id])] : current.filter((id) => id !== candidate.id))} aria-label={`${candidate.title}を選択`} disabled={!isSavableCandidate(candidate)} /><ProviderMark provider={candidate.source} compact /><Stack gap={2} flex={1} miw={0}><Text size="sm" fw={650} className="line-clamp-1">{candidate.title}</Text><Text size="xs" c="dimmed">{candidate.targetLabel} · {candidate.subtitle}</Text></Stack><Badge color={candidate.status === "failed" ? "red" : candidate.status === "saved" ? "green" : "gray"} variant="light">{candidateStatusLabel(candidate.status)}</Badge></Group></Paper>)}</Stack></Card>}
+                  <CandidatesPanel
+                    candidates={activeSnapshot.candidates.filter((candidate) => !dismissedIds.includes(candidate.id))}
+                    selectedIds={selectedSavableIdSet}
+                    selectableIds={selectableCandidateIds}
+                    running={running}
+                    saving={saveCandidatesMutation.isPending}
+                    hasMore={Boolean(activeSnapshot.nextCandidateCursor)}
+                    onToggle={(id, checked) => setSelectedCandidateIds((current) => checked ? [...new Set([...current, id])] : current.filter((item) => item !== id))}
+                    onSelectMany={(ids) => setSelectedCandidateIds(ids)}
+                    onSave={() => saveCandidatesMutation.mutate()}
+                    onLoadMore={() => runtime && updateJobs.loadMoreCandidates()}
+                    onDismiss={(candidate) => dismissMutation.mutate(candidate)}
+                  />
                 </Tabs.Panel>
-                <Tabs.Panel value="logs" pt="lg"><Card p="lg"><Timeline active={activeSnapshot.logs.length}>{activeSnapshot.logs.map((log) => <Timeline.Item key={log.id} color={log.logType === "error" ? "red" : log.logType === "success" ? "green" : log.logType === "warn" ? "yellow" : "blue"} title={log.message}><Text size="xs" c="dimmed">{formatDate(log.createdAt, true)}</Text></Timeline.Item>)}</Timeline></Card></Tabs.Panel>
-                <Tabs.Panel value="targets" pt="lg"><TargetsPanel targets={targets.data ?? []} loading={targets.isLoading} error={targets.error} retry={() => targets.refetch()} form={targetForm} mutation={targetMutation} /></Tabs.Panel>
+                <Tabs.Panel value="logs" pt="lg"><Card p="lg">{activeSnapshot.previousLogCursor && <Button mb="md" variant="default" onClick={() => runtime && updateJobs.loadOlderLogs()}>以前のログを読み込む</Button>}<Timeline active={activeSnapshot.logs.length}>{activeSnapshot.logs.map((log) => <Timeline.Item key={log.id} color={log.logType === "error" ? "red" : log.logType === "success" ? "green" : log.logType === "warn" ? "yellow" : "piep"} title={log.message}><Text size="xs" c="dimmed">{formatDate(log.createdAt, true)}</Text></Timeline.Item>)}</Timeline></Card></Tabs.Panel>
+                <Tabs.Panel value="targets" pt="lg">{(dismissedCount.data ?? 0) > 0 && (
+                  <Card p="md" mb="lg">
+                    <Group justify="space-between" wrap="nowrap">
+                      <Box>
+                        <Text size="sm" fw={650}>非表示にした作品が{dismissedCount.data}件あります</Text>
+                        <Text size="xs" c="dimmed">解除すると、次の確認でまた候補に並びます。</Text>
+                      </Box>
+                      <Button size="xs" variant="default" loading={restoreDismissedMutation.isPending} onClick={() => restoreDismissedMutation.mutate()}>すべて解除</Button>
+                    </Group>
+                  </Card>
+                )}<TargetsPanel targets={targets.data ?? []} loading={targets.isLoading} error={targets.error} retry={() => targets.refetch()} form={targetForm} mutation={targetMutation} /></Tabs.Panel>
               </Tabs>
             </Stack>
           )}
@@ -189,6 +304,7 @@ type TargetValues = { targetType: string; source: string; sourceKey: string; dis
 type TargetAction = { action: "add" | "toggle" | "delete"; target?: UpdateTarget; enabled?: boolean; values?: TargetValues };
 
 function TargetsPanel({ targets, loading, error, retry, form, mutation }: { targets: UpdateTarget[]; loading: boolean; error: unknown; retry: () => void; form: UseFormReturnType<TargetValues, TargetValues, any>; mutation: { mutate: (input: TargetAction) => void; isPending: boolean } }) {
+  const [showPaused, setShowPaused] = useState(false);
   if (loading) return <LoadingState />;
   if (error) return <ErrorState error={error} retry={retry} />;
   const confirmDelete = (target: UpdateTarget) => modals.openConfirmModal({
@@ -198,7 +314,215 @@ function TargetsPanel({ targets, loading, error, retry, form, mutation }: { targ
     confirmProps: { color: "red" },
     onConfirm: () => mutation.mutate({ action: "delete", target }),
   });
-  return <Stack gap="lg"><Card p="lg"><form onSubmit={form.onSubmit((values) => mutation.mutate({ action: "add", values }))}><Stack><Title order={3}>監視対象を追加</Title><Grid><Grid.Col span={{ base: 12, sm: 3 }}><Select label="種類" data={[{ value: "author", label: "作者" }, { value: "series", label: "シリーズ" }]} {...form.getInputProps("targetType")} /></Grid.Col><Grid.Col span={{ base: 12, sm: 3 }}><Select label="ソース" data={[{ value: "pixiv", label: "pixiv" }, { value: "fanbox", label: "FANBOX" }]} {...form.getInputProps("source")} /></Grid.Col><Grid.Col span={{ base: 12, sm: 3 }}><TextInput label="ID" {...form.getInputProps("sourceKey")} /></Grid.Col><Grid.Col span={{ base: 12, sm: 3 }}><TextInput label="表示名" {...form.getInputProps("displayName")} /></Grid.Col></Grid><Button type="submit" w="fit-content" leftSection={<Icons.add size={IconSize.menu} />} loading={mutation.isPending}>追加</Button></Stack></form></Card><Card p={0}>{targets.length ? targets.map((target, index) => <Box key={target.id}>{index > 0 && <Divider />}<Group p="md" wrap="nowrap"><ProviderMark provider={target.source} compact /><ThemeIcon variant="light" color="gray" aria-hidden>{target.targetType === "series" ? "S" : "A"}</ThemeIcon><Stack gap={2} flex={1} miw={0}><Text size="sm" fw={650} className="line-clamp-1">{target.displayName}</Text><Text size="xs" c="dimmed" className="line-clamp-1">{target.targetType === "series" ? "シリーズ" : "作者"} · {target.sourceKey} · 最終確認 {formatDate(target.lastCheckedAt, true)}</Text></Stack><Switch checked={target.enabled} disabled={mutation.isPending} onChange={(event) => mutation.mutate({ action: "toggle", target, enabled: event.currentTarget.checked })} aria-label={`${target.displayName}の監視`} /><Tooltip label="削除"><ActionIcon variant="subtle" color="red" disabled={mutation.isPending} aria-label={`${target.displayName}を削除`} onClick={() => confirmDelete(target)}><Icons.delete size={IconSize.menu} /></ActionIcon></Tooltip></Group></Box>) : <Text p="lg" c="dimmed" size="sm">監視対象はありません。</Text>}</Card></Stack>;
+  const active = targets.filter((target) => target.enabled);
+  const paused = targets.filter((target) => !target.enabled);
+
+  const row = (target: UpdateTarget) => (
+    <Group p="md" wrap="nowrap" key={target.id}>
+      <ProviderMark provider={target.source} compact />
+      <ThemeIcon variant="light" color="gray" aria-hidden>{target.targetType === "series" ? "S" : "A"}</ThemeIcon>
+      <Stack gap={3} flex={1} miw={0}>
+        <Group gap={6} wrap="nowrap">
+          <Text size="sm" fw={650} className="line-clamp-1">{target.displayName}</Text>
+          <TargetHealthBadge target={target} />
+        </Group>
+        <Text size="xs" c="dimmed" className="line-clamp-1">
+          {target.targetType === "series" ? "シリーズ" : "作者"} · {target.sourceKey} · 最終確認 {formatDate(target.lastCheckedAt, true)} · 最後のヒット {target.lastHitAt ? formatDate(target.lastHitAt, true) : "なし"}
+        </Text>
+      </Stack>
+      <Tooltip label={target.enabled ? "確認を止める（一覧では下に畳まれます）" : "確認を再開する"}>
+        <Switch
+          checked={target.enabled}
+          disabled={mutation.isPending}
+          onChange={(event) => mutation.mutate({ action: "toggle", target, enabled: event.currentTarget.checked })}
+          aria-label={`${target.displayName}の監視`}
+        />
+      </Tooltip>
+      <Tooltip label="削除">
+        <ActionIcon variant="subtle" color="red" disabled={mutation.isPending} aria-label={`${target.displayName}を削除`} onClick={() => confirmDelete(target)}>
+          <Icons.delete size={IconSize.menu} />
+        </ActionIcon>
+      </Tooltip>
+    </Group>
+  );
+
+  return (
+    <Stack gap="lg">
+      <Card p="lg">
+        <form onSubmit={form.onSubmit((values) => mutation.mutate({ action: "add", values }))}>
+          <Stack>
+            <Title order={3}>監視対象を追加</Title>
+            <Text size="sm" c="dimmed" mt={-8}>ここに入るのは、自分で追加した作者とシリーズだけです。保存や更新確認で勝手に増えることはありません。</Text>
+            <Grid>
+              <Grid.Col span={{ base: 12, sm: 3 }}><Select label="種類" data={[{ value: "author", label: "作者" }, { value: "series", label: "シリーズ" }]} {...form.getInputProps("targetType")} /></Grid.Col>
+              <Grid.Col span={{ base: 12, sm: 3 }}><Select label="ソース" data={[{ value: "pixiv", label: "pixiv" }, { value: "fanbox", label: "FANBOX" }]} {...form.getInputProps("source")} /></Grid.Col>
+              <Grid.Col span={{ base: 12, sm: 3 }}><TextInput label="ID" {...form.getInputProps("sourceKey")} /></Grid.Col>
+              <Grid.Col span={{ base: 12, sm: 3 }}><TextInput label="表示名" {...form.getInputProps("displayName")} /></Grid.Col>
+            </Grid>
+            <Button type="submit" w="fit-content" leftSection={<Icons.add size={IconSize.menu} />} loading={mutation.isPending}>追加</Button>
+          </Stack>
+        </form>
+      </Card>
+
+      <Card p={0}>
+        {active.length
+          ? active.map((target, index) => <Box key={target.id}>{index > 0 && <Divider />}{row(target)}</Box>)
+          : <Text p="lg" c="dimmed" size="sm">確認中の対象はありません。</Text>}
+      </Card>
+
+      {/* 止めた対象はここへ畳む。トグルひとつで一覧から下がり、消したいときだけ
+          削除すればいい。切り替えた瞬間に消えるより戻しやすい。 */}
+      {paused.length > 0 && (
+        <Card p={0}>
+          <UnstyledButton className="update-paused__head" onClick={() => setShowPaused((open) => !open)} aria-expanded={showPaused}>
+            <Group p="md" justify="space-between" wrap="nowrap">
+              <Group gap="xs" wrap="nowrap">
+                <Icons.next size={IconSize.menu} style={{ transform: showPaused ? "rotate(90deg)" : undefined }} aria-hidden />
+                <Text size="sm" fw={650}>停止中</Text>
+                <Badge size="sm" variant="light" color="gray">{paused.length}</Badge>
+              </Group>
+              <Text size="xs" c="dimmed">確認しません。再開も削除もここから</Text>
+            </Group>
+          </UnstyledButton>
+          {showPaused && paused.map((target) => <Box key={target.id}><Divider />{row(target)}</Box>)}
+        </Card>
+      )}
+    </Stack>
+  );
+}
+
+/** 候補の種類ごとの見た目。色は意味に対応させ、数は増やさない。 */
+const CANDIDATE_KINDS = [
+  { value: "all", label: "すべて" },
+  { value: "new", label: "新作" },
+  { value: "sequel", label: "続編" },
+  { value: "revision", label: "改稿" },
+] as const;
+
+const KIND_COLOR: Record<string, string> = { new: "piep", sequel: "leaf", revision: "orange" };
+
+function kindLabel(kind: string): string {
+  return CANDIDATE_KINDS.find((item) => item.value === kind)?.label ?? "候補";
+}
+
+/**
+ * 見つかったものを選り分ける画面。
+ *
+ * 「新作」「続編」「改稿」は判断の重さが違う — 改稿は手元の版を置き換えるので、
+ * 新作をまとめて取り込むついでに混ぜたくない。だから既定は分けて見せる。
+ */
+function CandidatesPanel({ candidates, selectedIds, selectableIds, running, saving, hasMore, onToggle, onSelectMany, onSave, onLoadMore, onDismiss }: {
+  candidates: UpdateJobSnapshot["candidates"];
+  selectedIds: Set<number>;
+  selectableIds: number[];
+  running: boolean;
+  saving: boolean;
+  hasMore: boolean;
+  onToggle: (id: number, checked: boolean) => void;
+  onSelectMany: (ids: number[]) => void;
+  onSave: () => void;
+  onLoadMore: () => void;
+  onDismiss: (candidate: UpdateJobSnapshot["candidates"][number]) => void;
+}) {
+  const [kind, setKind] = useState<string>("all");
+  if (!candidates.length) {
+    return <EmptyState icon={Icons.confirm} title="新しい候補はありません" description="監視対象はすべて最新です。" />;
+  }
+  const counts = candidates.reduce<Record<string, number>>((totals, candidate) => {
+    totals[candidate.kind] = (totals[candidate.kind] ?? 0) + 1;
+    return totals;
+  }, {});
+  const shown = kind === "all" ? candidates : candidates.filter((candidate) => candidate.kind === kind);
+  const shownSelectable = shown.filter(isSavableCandidate).map((candidate) => candidate.id);
+  const selectedCount = selectableIds.filter((id) => selectedIds.has(id)).length;
+
+  return (
+    <Card p={0}>
+      <Group justify="space-between" p="md" align="flex-start" wrap="wrap">
+        <Box>
+          <Text fw={700}>保存する候補</Text>
+          <Text size="xs" c="dimmed">{selectedCount}件を選択中 · 表示 {shown.length}件</Text>
+        </Box>
+        <Group gap="xs">
+          <Button size="xs" variant="subtle" disabled={!shownSelectable.length} onClick={() => onSelectMany(shownSelectable)}>表示分を選択</Button>
+          <Button size="xs" variant="subtle" color="gray" disabled={!selectedCount} onClick={() => onSelectMany([])}>解除</Button>
+          <Button size="sm" leftSection={<Icons.export size={IconSize.menu} />} disabled={!selectedCount || running} loading={saving} onClick={onSave}>選択候補を保存</Button>
+        </Group>
+      </Group>
+      <Box px="md" pb="md">
+        <SegmentedControl
+          size="xs"
+          aria-label="候補の種類"
+          value={kind}
+          onChange={setKind}
+          data={CANDIDATE_KINDS.filter((item) => item.value === "all" || counts[item.value]).map((item) => ({
+            value: item.value,
+            label: item.value === "all" ? `${item.label} ${candidates.length}` : `${item.label} ${counts[item.value] ?? 0}`,
+          }))}
+        />
+      </Box>
+      <Divider />
+      <Stack gap={0}>
+        {shown.map((candidate) => (
+          <Paper key={candidate.id} p="md" radius={0} className="update-candidate">
+            <Group wrap="nowrap" align="flex-start">
+              <Checkbox
+                mt={2}
+                checked={selectedIds.has(candidate.id)}
+                onChange={(event) => onToggle(candidate.id, event.currentTarget.checked)}
+                aria-label={`${candidate.title}を選択`}
+                disabled={!isSavableCandidate(candidate)}
+              />
+              <ProviderMark provider={candidate.source} compact />
+              <Stack gap={2} flex={1} miw={0}>
+                <Group gap={6} wrap="nowrap">
+                  <Badge size="xs" variant="light" color={KIND_COLOR[candidate.kind] ?? "gray"}>{kindLabel(candidate.kind)}</Badge>
+                  <Text size="sm" fw={650} className="line-clamp-1">{candidate.title}</Text>
+                </Group>
+                <Text size="xs" c="dimmed" className="line-clamp-1">{candidate.targetLabel} · {candidate.subtitle}</Text>
+                {candidate.error && <Text size="xs" c="red" className="line-clamp-2">{candidate.error}</Text>}
+              </Stack>
+              <Badge color={candidate.status === "failed" ? "red" : candidate.status === "saved" ? "green" : "gray"} variant="light">{candidateStatusLabel(candidate.status)}</Badge>
+              {isSavableCandidate(candidate) && (
+                <Tooltip label="今後この作品を候補に出さない">
+                  <ActionIcon variant="subtle" color="gray" aria-label={`${candidate.title}を今後表示しない`} onClick={() => onDismiss(candidate)}>
+                    <Icons.hide size={IconSize.action} />
+                  </ActionIcon>
+                </Tooltip>
+              )}
+            </Group>
+          </Paper>
+        ))}
+      </Stack>
+      {hasMore && <Box p="md"><Button fullWidth variant="default" onClick={onLoadMore}>次の候補を読み込む</Button></Box>}
+    </Card>
+  );
+}
+
+/** 対象が何日ヒットしなければ「休眠」と見なすか。 */
+const DORMANT_DAYS = 180;
+/** 何回続けて失敗したら知らせるか。 */
+const FAILING_STREAK = 3;
+
+/**
+ * 対象の様子を一目で。
+ *
+ * 監視対象は増える一方で、放っておくと「もう更新の来ない作者」と「ずっと
+ * 失敗している対象」が同じ顔で並ぶ。どちらも確認のたびに時間を使うので、
+ * 畳むか外すかを決められるようにする。
+ */
+export function TargetHealthBadge({ target }: { target: UpdateTarget }) {
+  const errors = target.consecutiveErrors ?? 0;
+  if (errors >= FAILING_STREAK) {
+    return <Tooltip label={`${errors}回続けて確認に失敗しています`}><Badge size="xs" color="red" variant="light" style={{ flex: "none" }}>確認できていません</Badge></Tooltip>;
+  }
+  if (!target.enabled) return <Badge size="xs" color="gray" variant="light" style={{ flex: "none" }}>停止中</Badge>;
+  const reference = target.lastHitAt ?? target.createdAt;
+  const days = (Date.now() - new Date(reference).getTime()) / 86_400_000;
+  if (Number.isFinite(days) && days >= DORMANT_DAYS) {
+    return <Tooltip label={`${Math.round(days)}日、新しいものが見つかっていません`}><Badge size="xs" color="gray" variant="light" style={{ flex: "none" }}>休眠</Badge></Tooltip>;
+  }
+  return null;
 }
 
 function isSavableCandidate(candidate: UpdateJobSnapshot["candidates"][number]) {
@@ -210,7 +534,7 @@ function candidateStatusLabel(status: UpdateJobSnapshot["candidates"][number]["s
 }
 
 function StatusBadge({ status }: { status: string }) {
-  const config: Record<string, { color: string; label: string }> = { queued: { color: "gray", label: "待機中" }, running: { color: "blue", label: "実行中" }, paused: { color: "yellow", label: "一時停止" }, auth_required: { color: "orange", label: "再接続が必要" }, canceling: { color: "yellow", label: "停止中" }, canceled: { color: "gray", label: "中止" }, completed: { color: "green", label: "完了" }, failed: { color: "red", label: "失敗" } };
+  const config: Record<string, { color: string; label: string }> = { queued: { color: "gray", label: "待機中" }, running: { color: "piep", label: "実行中" }, paused: { color: "yellow", label: "一時停止" }, auth_required: { color: "yellow", label: "再接続が必要" }, canceling: { color: "yellow", label: "停止中" }, canceled: { color: "gray", label: "中止" }, completed: { color: "green", label: "完了" }, failed: { color: "red", label: "失敗" } };
   const item = config[status] ?? { color: "gray", label: status };
   return <Badge color={item.color} variant="light" leftSection={(status === "running" || status === "queued") ? <span className="status-dot" /> : undefined}>{item.label}</Badge>;
 }

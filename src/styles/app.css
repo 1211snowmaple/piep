@@ -98,6 +98,12 @@ select {
   min-width: 0;
   height: calc(100dvh - var(--app-shell-header-height));
   overflow: auto;
+  /* The browser's own anchoring competes with this app's: a listing that is
+     replaced wholesale has no anchor worth keeping, and its correction landed
+     after the deliberate scroll, which is what put the reader back at the
+     bottom of the page they had just left. Restoring a remembered position and
+     revealing a new page are both done explicitly here. */
+  overflow-anchor: none;
   background:
     radial-gradient(circle at 85% -10%, light-dark(rgb(13 134 244 / 7%), rgb(39 156 255 / 9%)), transparent 32rem),
     light-dark(#f5f7fa, #0d1117);
@@ -332,29 +338,62 @@ select {
   background: light-dark(#f4f4f2, #171d24);
 }
 .work-cover__image { width: 100%; height: 100%; object-fit: contain; background: light-dark(#f6f6f4, #11171e); }
+
+/* A shelf of covers is only useful if the ones without an image are still
+   distinguishable. The mark is unique per work, its colour shared per author,
+   and the title carries the meaning at any size that can hold it. */
 .work-cover__empty {
+  --work-cover-ink: hsl(var(--work-cover-hue) 42% 30%);
   position: relative;
   display: flex;
   width: 100%;
   height: 100%;
-  align-items: center;
-  justify-content: center;
+  align-items: stretch;
   flex-direction: column;
-  gap: 9px;
-  padding: 14px;
-  text-align: center;
-  background:
-    linear-gradient(90deg, transparent 18px, color-mix(in srgb, var(--work-cover-accent) 14%, transparent) 18px, color-mix(in srgb, var(--work-cover-accent) 14%, transparent) 19px, transparent 19px),
-    repeating-linear-gradient(0deg, transparent 0 23px, light-dark(rgb(35 43 52 / 4%), rgb(255 255 255 / 4%)) 23px 24px),
-    light-dark(#faf9f6, #191f27);
+  gap: 8px;
+  padding: 12px 11px 11px;
+  container-type: inline-size;
+  background: light-dark(hsl(var(--work-cover-hue) 38% 95%), hsl(var(--work-cover-hue) 22% 15%));
 }
+:root[data-mantine-color-scheme="dark"] .work-cover__empty { --work-cover-ink: hsl(var(--work-cover-hue) 45% 78%); }
 .work-cover__empty::before { position: absolute; top: 0; right: 0; left: 0; height: 3px; background: var(--work-cover-accent); content: ""; opacity: 0.72; }
-.work-cover__empty-icon { width: 30%; min-width: 24px; max-width: 54px; height: auto; color: color-mix(in srgb, var(--work-cover-accent) 64%, var(--mantine-color-dimmed)); }
-.work-cover__empty-kicker { font-size: 9px; font-weight: 800; letter-spacing: 0.12em; text-transform: uppercase; }
-.work-cover__empty-title { max-width: 150px; font-size: 11px; font-weight: 650; line-height: 1.45; }
+
+.work-cover__sigil {
+  display: grid;
+  width: 30cqi;
+  min-width: 26px;
+  max-width: 46px;
+  aspect-ratio: 1;
+  grid-template-columns: repeat(5, 1fr);
+  flex: none;
+}
+.work-cover__sigil i { display: block; aspect-ratio: 1; }
+.work-cover__sigil i[data-on] { background: var(--work-cover-ink); }
+
+.work-cover__caption { display: flex; min-height: 0; flex-direction: column; gap: 2px; margin-top: auto; }
+.work-cover__empty-series { color: light-dark(hsl(var(--work-cover-hue) 25% 38%), hsl(var(--work-cover-hue) 20% 65%)); font-size: 9.5px; line-height: 1.3; }
+.work-cover__empty-title {
+  overflow: hidden;
+  display: -webkit-box;
+  font-size: 12.5px;
+  font-weight: 700;
+  line-height: 1.34;
+  letter-spacing: -0.01em;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
+  word-break: auto-phrase;
+}
+.work-cover__empty-title[data-scale="lg"] { font-size: 15px; -webkit-line-clamp: 3; }
+.work-cover__empty-title[data-scale="sm"] { font-size: 11px; -webkit-line-clamp: 5; }
+
+/* At 46px nothing but the mark survives, so it fills the tile. */
 .work-cover--compact { width: 46px; height: 58px; flex: 0 0 46px; border-radius: 6px; }
-.work-cover--compact .work-cover__empty { gap: 3px; padding: 5px; }
-.work-cover--compact .work-cover__empty-kicker { display: none; }
+.work-cover--compact .work-cover__empty { padding: 7px 5px 5px; place-items: center; }
+.work-cover--compact .work-cover__sigil { width: 76%; min-width: 0; margin: auto; }
+.work-cover--detail .work-cover__empty { gap: 12px; padding: 18px 16px 16px; }
+.work-cover--detail .work-cover__sigil { width: 34cqi; max-width: 96px; }
+.work-cover--detail .work-cover__empty-title { font-size: 15px; -webkit-line-clamp: 4; }
+.work-cover--detail .work-cover__empty-title[data-scale="lg"] { font-size: 19px; }
 
 .focus-card {
   position: relative;
@@ -377,6 +416,47 @@ select {
 .line-clamp-1 { -webkit-line-clamp: 1; }
 .line-clamp-2 { -webkit-line-clamp: 2; }
 .line-clamp-3 { -webkit-line-clamp: 3; }
+
+/* Folded prose. The clamp is an attribute rather than a class so the same
+   element can carry a caption's own styling and be expanded in place, and the
+   line count is a variable because a profile and a caption want different
+   amounts of it. */
+.expandable-text[data-collapsed] {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: var(--expandable-lines, 4);
+}
+.expandable__toggle { font-weight: 600; }
+
+/* The form scrolls; the two buttons that make it take effect do not. Below a
+   tall window they used to sit past the bottom edge, so the drawer opened with
+   no visible way to apply anything. */
+.filter-drawer .mantine-Drawer-content { display: flex; flex-direction: column; }
+.filter-drawer .mantine-Drawer-body {
+  display: flex;
+  min-height: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  padding: 0;
+}
+.filter-form { display: flex; min-height: 0; flex: 1 1 auto; flex-direction: column; }
+.filter-form__fields {
+  min-height: 0;
+  flex: 1 1 auto;
+  padding: 4px var(--mantine-spacing-md) var(--mantine-spacing-md);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+/* Sits under the drawer's own title as a caption to it, so it reads as part of
+   the heading rather than as the first setting. */
+.filter-form__scope { margin-bottom: -6px; line-height: 1.6; }
+.filter-form__actions {
+  flex: 0 0 auto;
+  padding: var(--mantine-spacing-md);
+  border-top: 1px solid var(--app-shell-border-color, light-dark(#e3e8ee, #232a35));
+  background: light-dark(var(--mantine-color-white), var(--mantine-color-dark-7));
+}
 
 .status-dot {
   width: 8px;
@@ -564,6 +644,7 @@ select {
   padding-block: 1px;
 }
 .work-card__provider .mantine-Text-root { overflow: hidden; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.entity-card__select,
 .work-card__select,
 .work-row__select {
   z-index: 3;
@@ -576,12 +657,16 @@ select {
   box-shadow: 0 4px 12px rgb(20 31 43 / 18%);
   transition: color 120ms ease, background-color 120ms ease, border-color 120ms ease, box-shadow 120ms ease, transform 100ms ease;
 }
+.entity-card__select:hover,
 .work-card__select:hover,
 .work-row__select:hover { border-color: var(--mantine-color-piep-5); box-shadow: 0 6px 16px rgb(20 71 110 / 22%); transform: translateY(-1px); }
+.entity-card__select:active,
 .work-card__select:active,
 .work-row__select:active { transform: translateY(0); }
+.entity-card__select:focus-visible,
 .work-card__select:focus-visible,
 .work-row__select:focus-visible { outline: 3px solid rgb(13 134 244 / 24%); outline-offset: 2px; }
+.entity-card__select[data-checked],
 .work-card__select[data-checked],
 .work-row__select[data-checked] { border-color: var(--mantine-color-piep-6); color: white; background: var(--mantine-color-piep-6); }
 .work-card__select {
@@ -604,6 +689,7 @@ select {
   border: 1.5px solid currentColor;
   border-radius: 50%;
 }
+.entity-card__select[data-checked] .work-selection-toggle__indicator,
 .work-card__select[data-checked] .work-selection-toggle__indicator,
 .work-row__select[data-checked] .work-selection-toggle__indicator { border-color: rgb(255 255 255 / 78%); background: rgb(255 255 255 / 12%); }
 .work-selection-toggle__label { line-height: 1; }
@@ -881,6 +967,10 @@ select {
 }
 
 .entity-card { position: relative; min-height: 138px; overflow: hidden; }
+/* 選択マークは作品カードと同じ形。置き場所だけカードの形に合わせる。 */
+.entity-card__select { position: absolute; top: 10px; left: 10px; padding: 4px; border-radius: 999px; }
+.entity-card[data-selection-mode] { cursor: pointer; }
+.entity-card[data-selected] { outline: 2px solid var(--mantine-color-piep-6); outline-offset: -2px; }
 .entity-card__banner { position: absolute; inset: 0; overflow: hidden; background: light-dark(#e9eef3, #1c242e); }
 .entity-card__banner > *:first-child { filter: saturate(0.92); opacity: 0.34; transform: scale(1.01); }
 .entity-card__banner > img { width: 100%; height: 100%; object-fit: cover; }
@@ -924,6 +1014,18 @@ select {
   .scroll-to-top { transition: none; }
   .scroll-to-top:hover { transform: none; }
 }
+
+/* The pager is the control a hundred-page listing is driven by, so its targets
+   are sized to be hit rather than to be tidy, and the run of numbers is allowed
+   the full width of the listing above it. */
+.list-pager__pages { max-width: 100%; }
+.list-pager__page {
+  min-width: 44px;
+  height: 38px;
+  padding-inline: 6px;
+  font-variant-numeric: tabular-nums;
+}
+.list-pager__edge { height: 38px; flex: 0 0 auto; }
 
 .selection-bar__inner { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 14px; }
 .selection-bar__summary { min-width: 0; flex: 1 1 auto; }
@@ -1053,7 +1155,25 @@ select {
 .content-preview img { max-width: 100%; height: auto; border-radius: var(--mantine-radius-md); }
 .content-preview pre,
 .content-preview code { max-width: 100%; white-space: pre-wrap; overflow-wrap: anywhere; }
-.content-preview--paged { min-height: min(62vh, 720px); }
+.content-preview--paged { min-height: min(58vh, 660px); }
+
+/* The body reads inside a frame of its own rather than running down the page.
+   A forty-thousand character chapter laid out in the document pushed the tabs,
+   the pager and the rest of the screen far above the window - the same reason
+   the JSON view has been bounded all along. The pager below it therefore stays
+   on screen, and turning a page scrolls this rather than the app. */
+.content-frame {
+  max-width: 100%;
+  max-height: 72vh;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: clamp(20px, 2.4vw, 40px);
+  background: light-dark(var(--mantine-color-white), var(--mantine-color-dark-7));
+}
+.content-frame .content-preview { margin-inline: auto; }
+
+/* The same controls, at the same size, as the reader's own page bar. */
+.content-pagination .mantine-Pagination-control { min-width: 30px; height: 30px; border-radius: 7px; }
 .content-preview blockquote {
   margin: 1.5em 0;
   padding: 0.2em 0 0.2em 1.2em;
@@ -1140,6 +1260,14 @@ select {
   height: 100%;
   object-fit: cover;
 }
+.entity-description {
+  color: var(--mantine-color-dimmed);
+  font-size: var(--mantine-font-size-sm);
+  line-height: 1.7;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .entity-hero__body { position: relative; padding: clamp(20px, 2.5vw, 34px); }
 .entity-hero:has(.entity-hero__banner) .entity-hero__body { padding-top: 22px; }
 .entity-hero:has(.entity-hero__banner) .entity-hero__avatar { margin-top: -72px; }
@@ -1178,6 +1306,8 @@ select {
 .profile-link:hover { border-color: color-mix(in srgb, var(--profile-link-color) 60%, transparent); }
 .profile-link .mantine-Button-label { display: flex; gap: 9px; min-width: 0; }
 .profile-link__value { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 行き先が外（普段のブラウザ）だと分かる印。押すまで分からないのを避ける。 */
+.profile-link__out { margin-left: 2px; color: var(--mantine-color-dimmed); opacity: 0.75; }
 .entity-hero h1 { font-size: clamp(23px, 2vw, 30px); line-height: 1.3; letter-spacing: -0.025em; }
 .entity-page .mantine-Tabs-panel { min-height: 420px; }
 
@@ -1633,8 +1763,40 @@ select {
   border-color: light-dark(#cfe1f0, #2c4660);
   background: light-dark(linear-gradient(145deg, #fff, #f2f9ff), linear-gradient(145deg, #151b23, #102235));
 }
-.epub-template-preview { min-height: 420px; overflow: hidden; }
-.epub-template-preview__cover { aspect-ratio: 2 / 3; background: linear-gradient(145deg, var(--mantine-color-piep-4), var(--mantine-color-leaf-5)); box-shadow: 0 10px 28px rgb(20 30 40 / 18%); }
+/* --- テンプレートスタジオ --- */
+
+/* 一覧・編集・プレビューを横に並べるので、収まる幅の上限を広くとる */
+.template-studio { max-width: 1680px; }
+
+.template-studio__item { cursor: pointer; transition: border-color 120ms ease, background 120ms ease; }
+.template-studio__item:hover { border-color: light-dark(#9bcdf3, #306da0); }
+.template-studio__item[data-active] {
+  border-color: var(--mantine-color-piep-5);
+  background: light-dark(#f4faff, #10283b);
+}
+
+.template-studio__preview { position: sticky; top: 18px; }
+
+/* 端末の画面に近い見え方にしたいので、枠は白のまま固定する */
+.template-studio__frame {
+  width: 100%;
+  height: 560px;
+  border: 1px solid light-dark(#dfe5eb, #2a323c);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.template-studio__source {
+  margin: 0;
+  padding: 12px;
+  border-radius: 8px;
+  background: light-dark(#f6f8fa, #12181f);
+  font-family: var(--mantine-font-family-monospace);
+  font-size: 11px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
 
 .update-progress-card {
   border-color: light-dark(#cde2f3, #2d4c68);
@@ -1645,20 +1807,25 @@ select {
   border-top: 1px solid light-dark(#e5e9ee, #272f39);
 }
 
-/* At the minimum desktop width the settings sections form one compact row.
-   Keeping five full-width rows above the selected panel made every settings
-   change start with a large vertical detour. Narrow previews can scroll this
-   local strip without making the whole page overflow. */
+/* Below the side-by-side breakpoint the section chooser becomes a compact
+   wrapping grid. A horizontally scrolling strip exposed a second scrollbar
+   inside the page at phone widths and hid the last sections off-screen. */
 @media (max-width: 61.99em) {
   .settings-nav {
     display: grid;
-    grid-template-columns: repeat(5, minmax(158px, 1fr));
-    overflow-x: auto;
-    overscroll-behavior-inline: contain;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    overflow: visible;
   }
-  .settings-nav .mantine-NavLink-root { min-width: 158px; }
+  .settings-nav .mantine-NavLink-root { min-width: 0; }
   .settings-nav .mantine-NavLink-label,
-  .settings-nav .mantine-NavLink-description { white-space: nowrap; }
+  .settings-nav .mantine-NavLink-description {
+    overflow-wrap: anywhere;
+    white-space: normal;
+  }
+}
+
+@media (max-width: 36em) {
+  .settings-nav { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
 @media (max-width: 56em) {
@@ -1725,3 +1892,63 @@ select {
     animation-iteration-count: 1 !important;
   }
 }
+
+/* A flag on a card is drawn in the glyph rather than behind it, so the glyph
+   has to carry the colour people recognise. Mantine picks a shade for contrast
+   against the current ground, which turns the heart maroon on white and washes
+   every flag out to near-white on black - so both ends are chosen here instead.
+   The components hand these to Mantine as `--ai-color`, which it writes inline
+   and a stylesheet therefore cannot reach.
+
+   Switched on Mantine's own scheme attribute rather than with light-dark():
+   these are read through an inline var() on a deep element, where light-dark()
+   silently resolves to its light branch. */
+:root {
+  --flag-off: #868e96;      /* gray 6 */
+  --flag-favorite: #fa5252; /* red 6 */
+  --flag-watch: #0872d3;    /* piep 7 */
+  --flag-epub: #729f12;     /* leaf 6 */
+
+  /* A glyph on its own is a thin mark against white, and a row of them is easy
+     to miss. On a light ground the flag that is on sits on a wash of its own
+     colour, which reads at a glance without going back to the solid chip that
+     made the listing shout. */
+  --flag-favorite-bg: rgb(250 82 82 / 13%);
+  --flag-watch-bg: rgb(8 114 211 / 11%);
+  --flag-epub-bg: rgb(114 159 18 / 15%);
+}
+:root[data-mantine-color-scheme="dark"] {
+  --flag-off: #8b95a1;
+  --flag-favorite: #ff8787; /* red 4 */
+  --flag-watch: #8dd1ff;    /* piep 3 */
+  --flag-epub: #9dcf49;     /* leaf 4 */
+
+  /* Nothing behind the glyph here: a bright mark on a dark ground already
+     carries, and a wash under it only muddies the row. */
+  --flag-favorite-bg: transparent;
+  --flag-watch-bg: transparent;
+  --flag-epub-bg: transparent;
+}
+
+/* Diagnostics reports numbers, and a number cut in half is worse than a number
+   that wraps: "2,23…" reads as a different figure. Values shrink to fit the
+   column instead, and the latency badges keep their own width in the table. */
+.metric-card__value { overflow-wrap: anywhere; line-height: 1.25; font-size: clamp(1.05rem, 2.1vw, 1.35rem); }
+.diagnostics-page .mantine-Table-td .mantine-Badge-root { max-width: none; }
+.diagnostics-page .mantine-Table-td .mantine-Badge-label { overflow: visible; }
+.diagnostics-page .mantine-Table-td,
+.diagnostics-page .mantine-Table-th { white-space: nowrap; }
+
+/* An explanation is not a state. These used to be Alerts, and each one picked
+   its own colour - the same kind of sentence sat on blue, on green and on grey
+   across the settings screens, which made the colour look meaningful when it
+   was not. A rule rather than a hue: no fill, one hairline, dimmed prose. */
+.note {
+  padding: 12px 14px;
+  border: 1px solid var(--app-shell-border-color, light-dark(#e3e8ee, #232a35));
+  border-radius: var(--mantine-radius-md);
+  background: light-dark(#fcfdfe, rgb(255 255 255 / 2%));
+}
+.note__icon { flex: 0 0 auto; margin-top: 2px; color: var(--mantine-color-dimmed); }
+.note__title { margin-bottom: 2px; }
+.note__body { line-height: 1.7; }

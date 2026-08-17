@@ -46,6 +46,7 @@ pub fn initialize(conn: &Connection) -> Result<(), rusqlite::Error> {
 
     if is_official_v2_schema(conn)? {
         initialize_v2_schema(conn)?;
+        migrate_additive_v2_schema(conn)?;
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         return Ok(());
     }
@@ -53,11 +54,83 @@ pub fn initialize(conn: &Connection) -> Result<(), rusqlite::Error> {
     if is_official_v1_schema(conn)? {
         migrate_v1_to_v2(conn)?;
         initialize_v2_schema(conn)?;
+        migrate_additive_v2_schema(conn)?;
         return Ok(());
     }
 
     backup_current_database(conn)?;
     reset_to_v2_schema(conn)?;
+    migrate_additive_v2_schema(conn)?;
+    Ok(())
+}
+
+/// Additive tables deliberately stay out of `REQUIRED_TABLES`: adding them to
+/// the recognition fingerprint would make an older, otherwise valid v2
+/// library look foreign. `CREATE TABLE IF NOT EXISTS` upgrades it in place.
+fn migrate_additive_v2_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS semantic_index_state (
+            download_id       INTEGER PRIMARY KEY REFERENCES downloads(id) ON DELETE CASCADE,
+            current_version   INTEGER NOT NULL,
+            content_hash      TEXT,
+            model_id          TEXT NOT NULL,
+            indexed_at        TEXT NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS idx_semantic_index_state_version
+            ON semantic_index_state(current_version, content_hash, model_id);
+
+         -- 見つけたが、まだ保存も拒否もしていない作品。
+         --
+         -- 候補はジョブの持ち物だったので、ジョブが変わると消えていた。取得元の
+         -- 一覧は「前回見た位置」から先しか返さないため、一度出た作品を保存しな
+         -- ければ二度と現れない。ここに残すことで、保存するか無視すると決めるま
+         -- で候補が居続ける。
+         CREATE TABLE IF NOT EXISTS update_candidates (
+            source        TEXT NOT NULL,
+            source_id     TEXT NOT NULL,
+            kind          TEXT NOT NULL,
+            title         TEXT NOT NULL,
+            payload_json  TEXT NOT NULL,
+            target_type   TEXT,
+            status        TEXT NOT NULL DEFAULT 'pending',
+            first_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at    TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (source, source_id)
+         );
+         CREATE INDEX IF NOT EXISTS idx_update_candidates_status
+            ON update_candidates(status, updated_at DESC);",
+    )?;
+    add_missing_columns(conn)?;
+    Ok(())
+}
+
+/// 既存のライブラリに、あとから増えた列を足す。
+///
+/// どちらも「更新確認を軽くするための覚え書き」で、無くても動作は変わらない
+/// （その場合は本文まで取りに行く従来どおりの確認になる）。
+fn add_missing_columns(conn: &Connection) -> Result<(), rusqlite::Error> {
+    for (table, column, definition) in [
+        // 本文以外のメタデータの指紋。取得元の軽い応答だけで変化を判定する。
+        ("downloads", "meta_hash", "TEXT"),
+        // 最後に本文まで突き合わせた時刻。指紋が同じでも、ここが古ければ深く見る。
+        ("downloads", "last_deep_checked_at", "TEXT"),
+        // 監視対象の健康状態。最後に何か見つかったのはいつか、連続で失敗していないか。
+        ("update_targets", "last_hit_at", "TEXT"),
+        (
+            "update_targets",
+            "consecutive_errors",
+            "INTEGER NOT NULL DEFAULT 0",
+        ),
+    ] {
+        if !column_exists(conn, table, column)? {
+            conn.execute_batch(&format!(
+                "ALTER TABLE {} ADD COLUMN {} {}",
+                quote_identifier(table),
+                quote_identifier(column),
+                definition
+            ))?;
+        }
+    }
     Ok(())
 }
 
@@ -125,10 +198,15 @@ fn apply_pragmas(conn: &Connection) -> Result<(), rusqlite::Error> {
         PRAGMA journal_mode = WAL;
         PRAGMA synchronous = NORMAL;
         PRAGMA temp_store = MEMORY;
-        PRAGMA mmap_size = 268435456;
-        PRAGMA cache_size = -64000;
         ",
     )?;
+    conn.pragma_update(
+        None,
+        "mmap_size",
+        super::resource_budget::sqlite_mmap_bytes() as i64,
+    )?;
+    let cache_kib = (super::resource_budget::sqlite_cache_bytes() / 1024) as i64;
+    conn.pragma_update(None, "cache_size", -cache_kib)?;
     Ok(())
 }
 
@@ -316,6 +394,8 @@ fn initialize_v2_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
             watch_updates       INTEGER DEFAULT 0,
             current_version     INTEGER DEFAULT 1,
             favorite            INTEGER DEFAULT 0,
+            meta_hash           TEXT,
+            last_deep_checked_at TEXT,
             UNIQUE(source, source_id)
         );
 
@@ -357,6 +437,8 @@ fn initialize_v2_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
             UNIQUE(download_id, version)
         );
 
+        -- last_hit_at / consecutive_errors は add_missing_columns でも足される。
+        -- 新しいライブラリはここで、既存のライブラリは起動時に追加される。
         CREATE TABLE IF NOT EXISTS update_targets (
             id                          INTEGER PRIMARY KEY AUTOINCREMENT,
             target_type                 TEXT    NOT NULL,
@@ -560,6 +642,29 @@ fn initialize_v2_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
         CREATE INDEX IF NOT EXISTS idx_downloads_size             ON downloads(file_size_bytes DESC);
         CREATE INDEX IF NOT EXISTS idx_downloads_watch_date       ON downloads(watch_updates, downloaded_at DESC);
         CREATE INDEX IF NOT EXISTS idx_downloads_source_id        ON downloads(source, source_id);
+        -- Every library ordering uses id as its deterministic tie-breaker.
+        -- Without the same second key SQLite materializes a temporary B-tree
+        -- for ties, which becomes visible on six-figure libraries.
+        CREATE INDEX IF NOT EXISTS idx_downloads_source_type_date_id
+            ON downloads(source, content_type, downloaded_at DESC, id DESC);
+        CREATE INDEX IF NOT EXISTS idx_downloads_favorite_date_id
+            ON downloads(favorite, downloaded_at DESC, id DESC);
+        CREATE INDEX IF NOT EXISTS idx_downloads_date_id
+            ON downloads(downloaded_at DESC, id DESC);
+        CREATE INDEX IF NOT EXISTS idx_downloads_title_id
+            ON downloads(title COLLATE NOCASE DESC, id DESC);
+        CREATE INDEX IF NOT EXISTS idx_downloads_author_id_sort
+            ON downloads(author_name COLLATE NOCASE DESC, id DESC);
+        CREATE INDEX IF NOT EXISTS idx_downloads_text_length_id
+            ON downloads(text_length DESC, id DESC);
+        CREATE INDEX IF NOT EXISTS idx_downloads_size_id
+            ON downloads(file_size_bytes DESC, id DESC);
+        CREATE INDEX IF NOT EXISTS idx_downloads_watch_date_id
+            ON downloads(watch_updates, downloaded_at DESC, id DESC);
+        CREATE INDEX IF NOT EXISTS idx_downloads_published_id
+            ON downloads(COALESCE(source_created_at, downloaded_at) DESC, id DESC);
+        CREATE INDEX IF NOT EXISTS idx_downloads_updated_id
+            ON downloads(COALESCE(source_updated_at, source_created_at, downloaded_at) DESC, id DESC);
         -- Groups the author listing and lets its per-author newest-title
         -- lookup seek instead of scanning. The COALESCE must match the query
         -- expression exactly for SQLite to use the index.
@@ -569,6 +674,10 @@ fn initialize_v2_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
         CREATE INDEX IF NOT EXISTS idx_download_tags_tag          ON download_tags(tag_id);
         CREATE INDEX IF NOT EXISTS idx_download_tags_download     ON download_tags(download_id);
         CREATE INDEX IF NOT EXISTS idx_assets_download            ON assets(download_id);
+        -- Diagnostics streams the filesystem and probes one local path at a
+        -- time. Without this index a large asset library becomes one full
+        -- table scan per file, while loading all paths into RAM is unbounded.
+        CREATE INDEX IF NOT EXISTS idx_assets_local_path          ON assets(local_path);
         CREATE INDEX IF NOT EXISTS idx_assets_mime_download       ON assets(mime_type, download_id);
         CREATE INDEX IF NOT EXISTS idx_assets_type                ON assets(asset_type);
         CREATE INDEX IF NOT EXISTS idx_versions_download          ON download_versions(download_id);
@@ -623,6 +732,75 @@ mod tests {
         assert!(is_official_v2_schema(&conn).unwrap());
         assert!(!column_exists(&conn, "downloads", "tags").unwrap());
         assert!(sqlite_object_exists(&conn, "table", "saved_searches").unwrap());
+    }
+
+    /// あとから増えた列は、すでにあるライブラリにも足される。
+    /// 保存済みの行は消えず、新しい列は空のまま（＝従来どおりの確認になる）。
+    #[test]
+    fn an_existing_library_gains_the_columns_added_later() {
+        let conn = Connection::open_in_memory().unwrap();
+        initialize(&conn).unwrap();
+        conn.execute_batch(
+            "ALTER TABLE downloads DROP COLUMN meta_hash;
+             ALTER TABLE downloads DROP COLUMN last_deep_checked_at;
+             INSERT INTO downloads (source, source_id, title, author_name, author_id,
+                                    content_type, json_path, downloaded_at)
+             VALUES ('pixiv', '1', '既存の作品', '作者', '7', 'novel', 'a.json', '2026-08-01');",
+        )
+        .unwrap();
+        assert!(!column_exists(&conn, "downloads", "meta_hash").unwrap());
+
+        initialize(&conn).unwrap();
+
+        assert!(column_exists(&conn, "downloads", "meta_hash").unwrap());
+        assert!(column_exists(&conn, "downloads", "last_deep_checked_at").unwrap());
+        let (title, hash): (String, Option<String>) = conn
+            .query_row(
+                "SELECT title, meta_hash FROM downloads WHERE source_id = '1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(title, "既存の作品");
+        assert_eq!(hash, None);
+    }
+
+    #[test]
+    fn library_sort_indexes_include_the_id_tie_breaker() {
+        let conn = Connection::open_in_memory().unwrap();
+        initialize(&conn).unwrap();
+
+        for (name, first_column) in [
+            ("idx_downloads_date_id", "downloaded_at"),
+            ("idx_downloads_title_id", "title"),
+            ("idx_downloads_author_id_sort", "author_name"),
+            ("idx_downloads_text_length_id", "text_length"),
+            ("idx_downloads_size_id", "file_size_bytes"),
+        ] {
+            let columns = conn
+                .prepare(&format!("PRAGMA index_info('{name}')"))
+                .unwrap()
+                .query_map([], |row| row.get::<_, String>(2))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            assert_eq!(columns, vec![first_column, "id"], "index {name}");
+        }
+
+        let plan = conn
+            .prepare(
+                "EXPLAIN QUERY PLAN
+                 SELECT id FROM downloads
+                 ORDER BY downloaded_at DESC, id DESC LIMIT 60",
+            )
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+            .join("\n");
+        assert!(plan.contains("idx_downloads_date_id"), "{plan}");
+        assert!(!plan.contains("TEMP B-TREE"), "{plan}");
     }
 
     /// A release that adds a table must add it to existing libraries, not

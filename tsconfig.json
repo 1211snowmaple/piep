@@ -14,7 +14,7 @@
     "isolatedModules": true,
     "noEmit": true,
     "jsx": "react-jsx",
-    "baseUrl": ".",
+    /* TypeScript 7 で baseUrl は廃止。paths は tsconfig からの相対で解決される */
     "paths": {
       "@/*": ["./src/*"]
     },

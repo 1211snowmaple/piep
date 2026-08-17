@@ -6,6 +6,61 @@ use std::time::Duration;
 use crate::fanbox_api::error::FanboxError;
 use crate::fanbox_api::models::*;
 
+const FANBOX_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const FANBOX_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_FANBOX_JSON_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
+const MAX_INITIAL_RESPONSE_CAPACITY: usize = 64 * 1024;
+
+fn build_api_client(
+    connect_timeout: Duration,
+    request_timeout: Duration,
+) -> Result<Client, reqwest::Error> {
+    Client::builder()
+        .connect_timeout(connect_timeout)
+        .timeout(request_timeout)
+        // API endpoints are not expected to redirect. Refusing redirects
+        // guarantees a session header can never be replayed to a new URL.
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+}
+
+async fn read_response_text_limited(
+    mut response: reqwest::Response,
+    max_bytes: usize,
+) -> Result<(StatusCode, String), FanboxError> {
+    let status = response.status();
+    if response
+        .content_length()
+        .is_some_and(|length| length > max_bytes as u64)
+    {
+        return Err(FanboxError::Other(format!(
+            "FANBOX API response exceeded the {max_bytes}-byte safety limit"
+        )));
+    }
+
+    let initial_capacity = response
+        .content_length()
+        .and_then(|length| usize::try_from(length).ok())
+        .unwrap_or(0)
+        .min(max_bytes)
+        .min(MAX_INITIAL_RESPONSE_CAPACITY);
+    let mut body = Vec::with_capacity(initial_capacity);
+    while let Some(chunk) = response.chunk().await? {
+        let next_len = body
+            .len()
+            .checked_add(chunk.len())
+            .filter(|length| *length <= max_bytes)
+            .ok_or_else(|| {
+                FanboxError::Other(format!(
+                    "FANBOX API response exceeded the {max_bytes}-byte safety limit"
+                ))
+            })?;
+        body.reserve(next_len - body.len());
+        body.extend_from_slice(&chunk);
+    }
+    Ok((status, String::from_utf8_lossy(&body).into_owned()))
+}
+
 /// Fanbox API クライアント
 #[derive(Clone)]
 pub struct FanboxAPI {
@@ -17,9 +72,7 @@ pub struct FanboxAPI {
 impl FanboxAPI {
     /// 新規クライアントの作成
     pub fn new(cookie: String, user_agent: String) -> Self {
-        let client = Client::builder()
-            .timeout(Duration::from_secs(60))
-            .build()
+        let client = build_api_client(FANBOX_CONNECT_TIMEOUT, FANBOX_REQUEST_TIMEOUT)
             .expect("Failed to build reqwest client");
 
         Self {
@@ -49,11 +102,12 @@ impl FanboxAPI {
 
     /// 低レベル GET リクエストの共通ハンドラ
     async fn api_get<T: DeserializeOwned>(&self, url: &str) -> Result<T, FanboxError> {
+        let url = allowed_api_url(url)?;
         let headers = self.headers()?;
         let res = self.client.get(url).headers(headers).send().await?;
 
-        let status = res.status();
-        let body = res.text().await?;
+        let (status, body) =
+            read_response_text_limited(res, MAX_FANBOX_JSON_RESPONSE_BYTES).await?;
 
         match status {
             StatusCode::TOO_MANY_REQUESTS => {
@@ -200,7 +254,16 @@ impl FanboxAPI {
         &self,
         creator_id: &str,
     ) -> Result<Vec<FanboxPost>, FanboxError> {
+        self.get_creator_posts_since(creator_id, None).await
+    }
+
+    pub async fn get_creator_posts_since(
+        &self,
+        creator_id: &str,
+        stop_source_id: Option<&str>,
+    ) -> Result<Vec<FanboxPost>, FanboxError> {
         let mut all_posts = Vec::new();
+        let mut seen_ids = std::collections::HashSet::new();
 
         // 1. paginateCreatorでページURLの一覧を取得
         let url = format!(
@@ -213,6 +276,11 @@ impl FanboxAPI {
             if !arr.is_empty() {
                 if arr[0].is_string() {
                     // パターンA: ページURL의 リストが返ってきた場合 (Python版と同じ巡回アルゴリズム)
+                    if arr.len() > 500 {
+                        return Err(FanboxError::Other(
+                            "FANBOX history exceeded the 500-page safety limit".to_string(),
+                        ));
+                    }
                     for val in arr {
                         if let Some(page_url) = val.as_str() {
                             log::info!("Fetching page: {}", page_url);
@@ -221,9 +289,17 @@ impl FanboxAPI {
                             let flexible_resp: FlexibleResponse = self.api_get(page_url).await?;
 
                             // 中身を取り出して一本の配列にまとめる
-                            match flexible_resp.body {
-                                FlexiblePostList::Object(list) => all_posts.extend(list.items),
-                                FlexiblePostList::Array(posts) => all_posts.extend(posts),
+                            let posts = match flexible_resp.body {
+                                FlexiblePostList::Object(list) => list.items,
+                                FlexiblePostList::Array(posts) => posts,
+                            };
+                            if append_fanbox_posts(
+                                &mut all_posts,
+                                &mut seen_ids,
+                                posts,
+                                stop_source_id,
+                            )? {
+                                break;
                             }
                         }
                     }
@@ -238,7 +314,8 @@ impl FanboxAPI {
                             error: e,
                             body: resp.body.to_string(),
                         })?;
-                    return Ok(posts);
+                    append_fanbox_posts(&mut all_posts, &mut seen_ids, posts, stop_source_id)?;
+                    return Ok(all_posts);
                 }
             }
         }
@@ -252,9 +329,157 @@ impl FanboxAPI {
 
         // 🛠️ ここでも FlexibleResponse で安全にパースしてブレを完全に吸収！
         let flexible_resp: FlexibleResponse = self.api_get(&fallback_url).await?;
-        match flexible_resp.body {
-            FlexiblePostList::Object(list) => Ok(list.items),
-            FlexiblePostList::Array(posts) => Ok(posts),
+        let posts = match flexible_resp.body {
+            FlexiblePostList::Object(list) => list.items,
+            FlexiblePostList::Array(posts) => posts,
+        };
+        append_fanbox_posts(&mut all_posts, &mut seen_ids, posts, stop_source_id)?;
+        Ok(all_posts)
+    }
+}
+
+fn append_fanbox_posts(
+    output: &mut Vec<FanboxPost>,
+    seen_ids: &mut std::collections::HashSet<String>,
+    posts: Vec<FanboxPost>,
+    stop_source_id: Option<&str>,
+) -> Result<bool, FanboxError> {
+    for post in posts {
+        if stop_source_id.is_some_and(|stop| stop == post.id) {
+            return Ok(true);
         }
+        if seen_ids.insert(post.id.clone()) {
+            output.push(post);
+        }
+        if output.len() >= 10_000 {
+            return Err(FanboxError::Other(
+                "FANBOX history exceeded the 10,000-item safety limit".to_string(),
+            ));
+        }
+    }
+    Ok(false)
+}
+
+fn allowed_api_url(raw: &str) -> Result<reqwest::Url, FanboxError> {
+    let url = reqwest::Url::parse(raw)
+        .map_err(|e| FanboxError::Other(format!("Invalid FANBOX API URL: {e}")))?;
+    let allowed = url.scheme() == "https"
+        && url.port_or_known_default() == Some(443)
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.host_str() == Some("api.fanbox.cc");
+    if !allowed {
+        return Err(FanboxError::Other(
+            "Refusing to send FANBOX credentials to an untrusted host".to_string(),
+        ));
+    }
+    Ok(url)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    async fn response_from_wire(wire_response: &'static [u8]) -> reqwest::Response {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request).await;
+            stream.write_all(wire_response).await.unwrap();
+        });
+        let response = reqwest::get(format!("http://{address}/response"))
+            .await
+            .unwrap();
+        server.await.unwrap();
+        response
+    }
+
+    #[test]
+    fn api_cookie_destination_requires_exact_official_https_host() {
+        assert!(allowed_api_url("https://api.fanbox.cc/post.info?postId=1").is_ok());
+        for url in [
+            "http://api.fanbox.cc/post.info",
+            "https://api.fanbox.cc:444/post.info",
+            "https://www.fanbox.cc/post.info",
+            "https://api.fanbox.cc.evil.example/post.info",
+            "https://evil.example/?target=https://api.fanbox.cc",
+            "not a url",
+        ] {
+            assert!(allowed_api_url(url).is_err(), "accepted {url}");
+        }
+    }
+
+    #[tokio::test]
+    async fn json_body_limit_rejects_content_length_and_chunked_oversize() {
+        for wire_response in [
+            b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nabcde"
+                .as_slice(),
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5\r\nabcde\r\n0\r\n\r\n"
+                .as_slice(),
+        ] {
+            let response = response_from_wire(wire_response).await;
+            let error = read_response_text_limited(response, 4).await.unwrap_err();
+            assert!(error.to_string().contains("4-byte safety limit"));
+        }
+    }
+
+    #[tokio::test]
+    async fn cookie_client_never_follows_redirects() {
+        let redirect_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let redirect_address = redirect_listener.local_addr().unwrap();
+        let target_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_address = target_listener.local_addr().unwrap();
+
+        let redirect_server = tokio::spawn(async move {
+            let (mut stream, _) = redirect_listener.accept().await.unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request).await;
+            let response = format!(
+                "HTTP/1.1 302 Found\r\nLocation: http://{target_address}/credential-target\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let client = build_api_client(Duration::from_secs(1), Duration::from_secs(1)).unwrap();
+        let response = client
+            .get(format!("http://{redirect_address}/authenticated"))
+            .header(COOKIE, "FANBOXSESSID=must-not-be-forwarded")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FOUND);
+        redirect_server.await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), target_listener.accept())
+                .await
+                .is_err(),
+            "redirect target unexpectedly received the cookie"
+        );
+    }
+
+    #[tokio::test]
+    async fn api_client_enforces_total_request_timeout() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (_stream, _) = listener.accept().await.unwrap();
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        });
+
+        let client =
+            build_api_client(Duration::from_millis(100), Duration::from_millis(100)).unwrap();
+        let started = std::time::Instant::now();
+        let error = client
+            .get(format!("http://{address}/never-responds"))
+            .send()
+            .await
+            .unwrap_err();
+        server.abort();
+
+        assert!(error.is_timeout());
+        assert!(started.elapsed() < Duration::from_secs(2));
     }
 }

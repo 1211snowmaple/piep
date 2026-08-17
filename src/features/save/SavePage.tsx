@@ -58,7 +58,8 @@ import {
   type StandaloneBrowserClosedEvent,
   type StandaloneBrowserUrlEvent,
 } from "@/services/browserApi";
-import { getDownloadBySource, isTauriRuntime } from "@/services/dbApi";
+import { getDownloadBySource, isTauriRuntime, setWatchUpdates } from "@/services/dbApi";
+import { loadSchedule } from "@/features/updates/updateSchedule";
 import {
   downloadAndSave,
   fetchFanboxCreatorPosts,
@@ -68,7 +69,7 @@ import {
   fetchPixivSeriesNovels,
   fetchPixivUserNovels,
 } from "@/services/downloadApi";
-import { onTauriEvent } from "@/services/eventBus";
+import { subscribeTauriEvent } from "@/services/eventBus";
 import { store } from "@/store";
 import type { DownloadEntry } from "@/types/library";
 import { requestOperationCancel, startOperation, type OperationController } from "@/features/jobs/operationJobs";
@@ -143,6 +144,7 @@ export default function SavePage() {
   // Comparing against the last applied rectangle makes every call cheap enough
   // to also run on a timer, so any drift corrects itself.
   const appliedBoundsRef = useRef<string>("");
+  const initializedSourceRef = useRef<SaveSource | null>(null);
   const detachedRef = useRef(detached);
   detachedRef.current = detached;
   const currentUrlRef = useRef(currentUrl);
@@ -164,10 +166,25 @@ export default function SavePage() {
     const home = searchParams.get("url") || getProvider(source).homeUrl || "https://www.pixiv.net/";
     setCurrentUrl(home); setAddress(home); setItems([]); setDownloadType(null); setLastAnalysisUrl(null);
     if (runtime) {
-      (source === "pixiv" ? store.get<string>("pixiv_refresh_token") : store.get<string>("fanbox_session_id"))
-        .then((value) => { if (!cancelled) setAuthConnected(Boolean(value)); })
-        .catch(() => { if (!cancelled) setAuthConnected(false); });
-      positionBrowser(home).catch((error) => notifications.show({ color: "red", title: "内蔵ブラウザを開けません", message: errorMessage(error) }));
+      const sourceChanged = initializedSourceRef.current !== source;
+      initializedSourceRef.current = source;
+      const initialize = async () => {
+        // Tear down the previous provider only after guarded navigation has
+        // committed. Destroying it in switchSource leaves this page with a
+        // dead WebView when the user chooses to keep unsaved work.
+        if (sourceChanged) await destroyEmbeddedBrowser().catch(() => undefined);
+        const value = await (source === "pixiv"
+          ? store.get<string>("pixiv_refresh_token")
+          : store.get<string>("fanbox_session_id"));
+        if (cancelled) return;
+        setAuthConnected(Boolean(value));
+        await positionBrowser(home);
+      };
+      initialize().catch((error) => {
+        if (cancelled) return;
+        setAuthConnected(false);
+        notifications.show({ color: "red", title: "内蔵ブラウザを開けません", message: errorMessage(error) });
+      });
     } else {
       setAuthConnected(false);
     }
@@ -197,24 +214,18 @@ export default function SavePage() {
       rememberVisit(url);
       if (!addressFocusedRef.current) setAddress(url);
     };
-    let dispose: (() => void) | undefined;
-    let disposeAccelerator: (() => void) | undefined;
-    let disposeStandaloneUrl: (() => void) | undefined;
-    let disposeStandaloneClosed: (() => void) | undefined;
-    onTauriEvent<string>("url-changed", (event) => applyUrl(event.payload)).then((fn) => { dispose = fn; }).catch(() => undefined);
-    onTauriEvent<BrowserAcceleratorEvent>("browser-accelerator", (event) => acceleratorHandlerRef.current(event.payload))
-      .then((fn) => { disposeAccelerator = fn; })
-      .catch(() => undefined);
+    const dispose = subscribeTauriEvent<string>("url-changed", (event) => applyUrl(event.payload));
+    const disposeAccelerator = subscribeTauriEvent<BrowserAcceleratorEvent>("browser-accelerator", (event) => acceleratorHandlerRef.current(event.payload));
     // Tracking the large window's page live is what lets the candidate sidebar
     // work against it: "候補を取得" reads the same currentUrl either way.
-    onTauriEvent<StandaloneBrowserUrlEvent>("standalone-browser-url-changed", (event) => {
+    const disposeStandaloneUrl = subscribeTauriEvent<StandaloneBrowserUrlEvent>("standalone-browser-url-changed", (event) => {
       if (event.payload.source !== source) return;
       applyUrl(event.payload.url);
-    }).then((fn) => { disposeStandaloneUrl = fn; }).catch(() => undefined);
-    onTauriEvent<StandaloneBrowserClosedEvent>("standalone-browser-closed", (event) => {
+    });
+    const disposeStandaloneClosed = subscribeTauriEvent<StandaloneBrowserClosedEvent>("standalone-browser-closed", (event) => {
       if (event.payload.source !== source) return;
       reattachRef.current();
-    }).then((fn) => { disposeStandaloneClosed = fn; }).catch(() => undefined);
+    });
     // In-page navigation cannot reach us as an event: this WebView loads a
     // remote origin, so Tauri's IPC is deliberately not injected into it.
     // While the large window has the session, that window is the one to poll.
@@ -229,10 +240,10 @@ export default function SavePage() {
       window.clearInterval(poll);
       window.clearInterval(reconcile);
       appliedBoundsRef.current = "";
-      dispose?.();
-      disposeAccelerator?.();
-      disposeStandaloneUrl?.();
-      disposeStandaloneClosed?.();
+      dispose();
+      disposeAccelerator();
+      disposeStandaloneUrl();
+      disposeStandaloneClosed();
       closeEmbeddedBrowser().catch(() => undefined);
     };
   }, [rememberVisit, runtime, source, syncBrowserBounds]);
@@ -265,10 +276,6 @@ export default function SavePage() {
   };
   const switchSource = async (next: string) => {
     if (next === source) return;
-    // The two providers require different sessions/user agents. Reusing the
-    // hidden child WebView can also deliver a late navigation event from the
-    // previous provider and roll the selected source back.
-    if (runtime) await destroyEmbeddedBrowser().catch(() => undefined);
     navigate(`/save/${next}`);
   };
   const openSourceInWindow = async () => {
@@ -284,7 +291,7 @@ export default function SavePage() {
       setDetached(true);
       await setEmbeddedBrowserVisible(false).catch(() => undefined);
       notifications.show({
-        color: "blue",
+        color: "piep",
         title: reused ? "大きいウィンドウへ切り替えました" : "大きいウィンドウで開きました",
         message: "右の保存候補はそのまま使えます。ウィンドウを閉じるとアプリ内に戻ります。",
       });
@@ -402,7 +409,7 @@ export default function SavePage() {
     setCandidateWidth(Math.round(Math.max(260, Math.min(maxWidth, next))));
   };
   const analyze = async (analysisUrl = currentUrl) => {
-    if (!runtime) return notifications.show({ color: "blue", message: "候補取得はデスクトップアプリで利用できます" });
+    if (!runtime) return notifications.show({ color: "piep", message: "候補取得はデスクトップアプリで利用できます" });
     if (!authConnected) return notifications.show({ color: "yellow", title: `${getProvider(source).label}に接続してください`, message: "設定画面からログインすると候補を取得できます" });
     const target = detectDownloadTarget(analysisUrl);
     if (target === "unsupported") return notifications.show({ color: "yellow", title: "対応ページではありません", message: "作品、シリーズ、作者・クリエイターページを開いてください" });
@@ -507,6 +514,12 @@ export default function SavePage() {
       if (savedEntries.length > 0) {
         setProgress({ current: selected.length, total: selected.length, text: "作者・シリーズ情報を取得しています" });
         await refreshEntityProfilesForEntries(savedEntries, { refreshToken: pixivToken, fanboxCookie, fanboxUserAgent });
+        // 「保存したものは追いかける」設定のときだけ、保存直後に監視へ載せる。
+        // 失敗しても保存は済んでいるので、ここで処理を止めない。
+        const schedule = await loadSchedule();
+        if (schedule.watchSaved) {
+          await Promise.allSettled(savedEntries.map((entry) => setWatchUpdates(entry.id, true)));
+        }
       }
       queryClient.invalidateQueries({ queryKey: ["library"] }); queryClient.invalidateQueries({ queryKey: ["dashboard"] }); queryClient.invalidateQueries({ queryKey: ["library-facets"] });
       queryClient.invalidateQueries({ queryKey: ["entity"] }); queryClient.invalidateQueries({ queryKey: ["entity-works"] });
@@ -589,7 +602,7 @@ export default function SavePage() {
           <Stack h="100%" gap={0}>
             <Box p="md">
               <Group justify="space-between" mb="xs"><Box><Text fw={750}>保存候補</Text><Text size="xs" c="dimmed">開いているページから自動判定</Text></Box><Group gap={4}><ThemeIcon variant="light"><Icons.select size={IconSize.action} /></ThemeIcon><Tooltip label="保存候補をたたむ"><ActionIcon variant="subtle" color="gray" aria-label="保存候補をたたむ" onClick={() => setCandidateCollapsed(true)}><Icons.panelClose size={IconSize.action} /></ActionIcon></Tooltip></Group></Group>
-              <Alert color={targetKind === "unsupported" ? "gray" : "blue"} variant="light" icon={targetKind === "unsupported" ? <Icons.link size={IconSize.action} /> : <Icons.confirm size={IconSize.action} />} py="xs">
+              <Alert color={targetKind === "unsupported" ? "gray" : "piep"} variant="light" icon={targetKind === "unsupported" ? <Icons.link size={IconSize.action} /> : <Icons.confirm size={IconSize.action} />} py="xs">
                 <Text size="xs">{targetLabel(targetKind)}</Text>
               </Alert>
               <Button fullWidth mt="sm" leftSection={analyzing ? undefined : <Icons.search size={IconSize.menu} />} loading={analyzing} disabled={!runtime || saving || targetKind === "unsupported"} onClick={() => analyze()}>候補を取得</Button>

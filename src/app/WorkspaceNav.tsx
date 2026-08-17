@@ -1,4 +1,4 @@
-import { useMemo, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { Badge, Divider, NavLink, ScrollArea, Stack, Text, Tooltip } from "@mantine/core";
 import { useLocalStorage } from "@mantine/hooks";
 import { useQuery } from "@tanstack/react-query";
@@ -7,7 +7,7 @@ import { ProviderGlyph } from "@/lib/providers";
 import { useAppNavigate, useAppRouter } from "@/app/router";
 import { useWorkspace } from "@/app/WorkspaceContext";
 import { useOperationJobs } from "@/features/jobs/operationJobs";
-import { readingWorkIds } from "@/features/library/readingShelf";
+import { readingWorkIds, subscribeReadingPositions } from "@/features/library/readingShelf";
 import { formatCompactCount, formatNumber } from "@/lib/format";
 import { isTauriRuntime } from "@/services/dbApi";
 import { getLibraryShelfCounts, listSavedSearches } from "@/services/shelfApi";
@@ -40,6 +40,8 @@ interface RowProps {
 function Row({ label, icon: Icon, glyph, active, railed, count, onSelect }: RowProps) {
   const link = (
     <NavLink
+      component="button"
+      type="button"
       className="app-nav__link"
       active={active}
       label={railed ? undefined : label}
@@ -77,11 +79,14 @@ function NavGroup({
 }) {
   return (
     <NavLink
+      component="button"
+      type="button"
       className="app-nav__group"
       label={label}
       leftSection={<Icon size={IconSize.nav} strokeWidth={1.8} />}
       childrenOffset={14}
       opened={open}
+      aria-expanded={open}
       onChange={(next) => onToggle(id, next)}
       // The heading folds; it does not navigate. A heading that also moved the
       // reader would take them somewhere every time they tidied the sidebar.
@@ -104,7 +109,8 @@ export function WorkspaceNav({ railed, onNavigate }: { railed: boolean; onNaviga
 
   // Reading positions live in per-device storage, so their ids have to be read
   // here and resolved by the library, which alone knows what still exists.
-  const readingIds = useMemo(() => readingWorkIds(), []);
+  const [readingIds, setReadingIds] = useState(() => readingWorkIds());
+  useEffect(() => subscribeReadingPositions(() => setReadingIds(readingWorkIds())), []);
   const counts = useQuery({
     queryKey: ["library-shelf-counts", readingIds],
     queryFn: () => runtime ? getLibraryShelfCounts(readingIds) : Promise.resolve(PREVIEW_COUNTS),
@@ -168,7 +174,8 @@ export function WorkspaceNav({ railed, onNavigate }: { railed: boolean; onNaviga
     <Row key="updates" label="更新を確認" icon={Icons.updates} active={location.pathname.startsWith("/updates")} railed={railed} onSelect={() => go("/updates")} />,
   ];
   const exportRows = [
-    <Row key="epub" label="EPUBキュー" icon={Icons.epub} active={inExport} railed={railed} count={epubQueue.length || null} onSelect={() => go("/epub")} />,
+    <Row key="epub" label="EPUBキュー" icon={Icons.epub} active={location.pathname === "/epub"} railed={railed} count={epubQueue.length || null} onSelect={() => go("/epub")} />,
+    <Row key="templates" label="テンプレートスタジオ" icon={Icons.epubTemplate} active={location.pathname.startsWith("/epub/templates")} railed={railed} onSelect={() => go("/epub/templates")} />,
   ];
 
   return (
@@ -231,6 +238,8 @@ export function WorkspaceNavFooter({ railed, onNavigate }: { railed: boolean; on
     <Stack gap={2} p={railed ? 6 : "xs"}>
       <Divider mb={4} />
       <NavLink
+        component="button"
+        type="button"
         className="app-nav__link"
         active={isPath("/operations")}
         label={railed ? undefined : "アクティビティ"}

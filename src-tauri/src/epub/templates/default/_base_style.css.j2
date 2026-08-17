@@ -1,12 +1,44 @@
-/* CSSカスタムプロパティ（変数）を定義 */
+/*
+  すべてのテンプレートが土台にする基本スタイル。
+  端末側の設定（文字サイズ・余白・配色）を邪魔しない範囲に留める。
+
+  色は「地の文からの距離」だけを決める。地の文そのものには color も
+  background も指定しない — 端末の配色設定と喧嘩するため。
+*/
+
+/* epub|type セレクタを使うには名前空間の宣言が要る */
+@namespace epub "http://www.idpf.org/2007/ops";
+
 :root {
-    --tag-color: #0073bb;
-    --date-color: #888;
+    --muted-color: #6b6b6b;
+    --rule-color: #d8d8d8;
+    /* 強調に使う1色。テンプレートごとに上書きする */
+    --accent-color: #0073bb;
+    --badge-color: inherit;
+    --badge-border: #c9c9c9;
+    --adult-color: #c92a2a;
+    --cover-radius: 8px;
+    --cover-width: 60%;
+    /* 余白はこの1つから作る。詰めた版・ゆったり版を1行で切り替えられる */
+    --space: 1em;
 }
 
-/* 全体の基本設定 */
+/*
+  端末がダーク表示のときだけ、地の文からの距離を取り直す。
+  対応していない端末（Kindle など）では何も起きず、従来どおりになる。
+*/
+@media (prefers-color-scheme: dark) {
+    :root {
+        --muted-color: #a8a8a8;
+        --rule-color: #4a4a4a;
+        --accent-color: #6fc0ff;
+        --badge-border: #5a5a5a;
+        --adult-color: #ff8787;
+    }
+}
+
 body {
-    line-height: 1.7;
+    margin: 0;
     padding: 1em;
 }
 
@@ -14,60 +46,264 @@ body {
     max-width: 100%;
 }
 
-/* 作品タイトル */
+/* --- 見出し --- */
+
+h1,
+h2,
 h3 {
-    text-align: left;
-    margin-top: 0;
+    line-height: 1.35;
     font-weight: bold;
 }
 
-/* 著者名 */
-.author {
-    text-align: left;
+h1.title {
+    margin: 0 0 0.2em;
+    font-size: 1.5em;
 }
 
-/* カバー画像コンテナ */
+/*
+  本文中の見出しは、線ではなく余白と大きさで示す。罫線は情報ページの
+  区切りに取っておく（同じ装飾が本文と前付けの両方に出ると差が消える）。
+
+  太さと色だけ先に決めて style を none にしてあるのは、テンプレートスタジオの
+  「見出しの罫線」が border-bottom-style だけを切り替えるため。ここを省くと、
+  罫線を入れたときに既定の太さと文字色で引かれてしまう。
+*/
+h2 {
+    margin: calc(var(--space) * 1.8) 0 calc(var(--space) * 0.7);
+    border-bottom: 1px none var(--rule-color);
+    font-size: 1.2em;
+}
+
+.chapter > h2:first-child {
+    margin-top: 0;
+}
+
+/* --- 本文 --- */
+
+p {
+    margin: 0 0 0.2em;
+    text-indent: 0;
+}
+
+/* 原文の空行。段落の間隔として一定量だけ空ける */
+p.blank-line {
+    margin: 0;
+    line-height: 1;
+}
+
+ruby rt {
+    font-size: 0.5em;
+}
+
+/* --- 表紙 --- */
+
+.cover-page {
+    margin: 0;
+    padding: 0;
+    text-align: center;
+}
+
+.cover-frame {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+}
+
+.cover-frame img,
+.cover-frame svg {
+    max-width: 100%;
+    max-height: 100%;
+    height: auto;
+}
+
+/* 情報ページの表紙。中央に置くのは絵だけで、文字は左のまま */
 .cover-container {
     text-align: center;
-    margin: 1.5em 0;
+    margin: var(--space) 0;
 }
 
 .cover-container img {
-    max-width: 50%;
+    max-width: var(--cover-width);
     height: auto;
-    border-radius: 10px;
+    border-radius: var(--cover-radius);
 }
 
-/* 作品説明 */
+/* --- 作品情報（見出し部） --- */
+
+.series {
+    margin: 0 0 0.3em;
+    color: var(--muted-color);
+    font-size: 0.85em;
+}
+
+.author {
+    margin: 0 0 0.6em;
+}
+
 .description {
-    text-align: left;
-    margin-bottom: 1.5em;
+    margin: var(--space) 0;
 }
 
-/* タグ */
-.tags {
-    color: var(--tag-color);
-    line-height: 1.8;
+/* --- 作品情報（明細部） --- */
+
+/*
+  ラベルと値の2カラム。table を使わないのは、読み上げが「表」として扱うのと、
+  取り込み側の変換で崩れやすいため。float なら古い端末でも同じに組める。
+*/
+.details {
+    overflow: hidden;
+    margin-top: calc(var(--space) * 1.2);
+    font-size: 0.9em;
 }
 
-/* 日付 */
-.date {
-    color: var(--date-color);
-    text-align: left;
+.details .row {
+    clear: both;
+    margin: 0.3em 0;
+    overflow: hidden;
 }
 
-/* ソースURL */
-.source-link {
+/* 区切り線は最初の行が持つ。項目が1つも無ければ線も出ない */
+.details .row:first-child {
+    padding-top: calc(var(--space) * 0.7);
+    border-top: 1px solid var(--rule-color);
+}
+
+/* ラベルの下に内容が続く行（添付ファイルなど） */
+.details .row--block .label {
+    float: none;
+    width: auto;
+    margin-bottom: 0.2em;
+}
+
+.details .label {
+    float: left;
+    width: 6em;
+    color: var(--muted-color);
+}
+
+/*
+  値はブロックにする。インラインのままだと、折り返した2行目以降が
+  ラベルの下（左端）に回り込み、段が崩れる。
+*/
+.details .value {
+    display: block;
+    margin-left: 6.5em;
+}
+
+/* 画面が狭い端末では、2カラムをやめてラベルの下に置く */
+@media (max-width: 26em) {
+    .details .label {
+        float: none;
+        width: auto;
+    }
+
+    .details .value {
+        margin-left: 0;
+    }
+}
+
+.details .value a {
     word-wrap: break-word;
+    word-break: break-all;
 }
 
-/* 挿絵 */
+.tags {
+    color: var(--accent-color);
+    line-height: 1.9;
+}
+
+.date,
+.meta {
+    margin: 0.1em 0;
+    color: var(--muted-color);
+    font-size: 0.9em;
+}
+
+.meta.adult,
+.value.adult {
+    color: var(--adult-color);
+}
+
+/*
+  背景の塗りではなく枠で示す。塗りは端末の配色反転で消えることがある。
+*/
+.badge {
+    display: inline-block;
+    padding: 1px 9px;
+    border: 1px solid var(--badge-border);
+    border-radius: 20px;
+    color: var(--badge-color);
+    font-size: 0.85em;
+}
+
+.source-link {
+    margin-top: var(--space);
+    word-wrap: break-word;
+    font-size: 0.8em;
+}
+
+.attachments {
+    margin: 0.4em 0;
+    padding-left: 1.2em;
+    font-size: 0.95em;
+}
+
+/* --- 挿絵と埋め込み --- */
+
 .illustration {
     text-align: center;
-    margin: 1.5em 0;
+    margin: calc(var(--space) * 1.4) 0;
+    /* 絵と説明が別ページに割れないようにする */
+    page-break-inside: avoid;
+    break-inside: avoid;
 }
 
 .illustration img {
     max-width: 100%;
     height: auto;
+}
+
+/* 絵の説明。地の文と同じ見た目にしない */
+.illustration .caption {
+    display: block;
+    margin-top: 0.4em;
+    color: var(--muted-color);
+    font-size: 0.85em;
+}
+
+.file-link,
+.embed-link {
+    color: var(--muted-color);
+    font-size: 0.9em;
+}
+
+/* --- 目次 --- */
+
+/*
+  nav は spine に入っていて、実際に読者が開くページになる。行の高さと
+  区切りだけ整え、番号や数値は足さない（EPUB にページ番号は無い）。
+*/
+nav[epub|type~='toc'] ol {
+    list-style-type: none;
+    padding-left: 0;
+}
+
+nav[epub|type~='toc'] > ol > li > a {
+    display: block;
+    padding: 0.45em 0;
+    border-bottom: 1px solid var(--rule-color);
+    text-decoration: none;
+}
+
+nav[epub|type~='toc'] ol ol {
+    padding-left: 1em;
+}
+
+nav[epub|type~='toc'] ol ol li a {
+    display: block;
+    padding: 0.3em 0;
+    border-bottom: none;
+    color: var(--muted-color);
+    font-size: 0.95em;
+    text-decoration: none;
 }

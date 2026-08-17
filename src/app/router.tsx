@@ -15,15 +15,48 @@ interface RouterValue {
   search: string;
   searchParams: URLSearchParams;
   navigationType: NavigationType;
+  /**
+   * Where this entry sits in the session's history.
+   *
+   * Scroll positions hang off it rather than off the address: two visits to the
+   * same listing are two places the reader was standing, and a query string
+   * rewritten in place is still the one place they are standing now.
+   */
+  historyIndex: number;
+  /** Whether the header's history controls have anywhere to go. */
+  canGoBack: boolean;
+  canGoForward: boolean;
+  /** The address one step back, when this session is what put it there. */
+  previousEntry: string | null;
   navigate: (target: string | number, options?: { replace?: boolean }) => void;
 }
 
 const RouterContext = createContext<RouterValue | null>(null);
 
+/**
+ * Stamped onto every entry this session creates.
+ *
+ * `history` can say how many entries exist but not which one is showing, and a
+ * desktop window has no browser chrome to fall back on - so without a counter
+ * of our own the forward button is permanently lit whether or not it does
+ * anything, and every entry for one address shares one scroll position.
+ */
+const HISTORY_INDEX_KEY = "piepHistoryIndex";
+
 function readLocation() {
   const raw = window.location.hash.replace(/^#/, "") || "/";
   const url = new URL(raw, "https://piep.local");
   return { pathname: url.pathname || "/", search: url.search };
+}
+
+function readHistoryIndex(): number | null {
+  const state = window.history.state as Record<string, unknown> | null;
+  const value = state?.[HISTORY_INDEX_KEY];
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+function stampHistoryIndex(index: number, href = window.location.href) {
+  window.history.replaceState({ ...window.history.state, [HISTORY_INDEX_KEY]: index }, "", href);
 }
 
 interface AppRouterProps {
@@ -32,38 +65,129 @@ interface AppRouterProps {
 }
 
 export function AppRouter({ children, confirmNavigation }: AppRouterProps) {
-  const [location, setLocation] = useState(() => ({ ...readLocation(), navigationType: "push" as NavigationType }));
+  const [location, setLocation] = useState(() => ({
+    ...readLocation(),
+    navigationType: "push" as NavigationType,
+    index: readHistoryIndex() ?? 0,
+  }));
   const confirmationPending = useRef(false);
-  // A hashchange fires for our own pushes too, so the kind of the navigation is
-  // recorded as it is made; anything left over is the user's back or forward.
-  const pendingType = useRef<NavigationType | null>(null);
-  // One hash assignment can raise both hashchange and popstate. Without this
-  // the second delivery finds no pending type and reclassifies the reader's own
-  // click as a back navigation, which then restores the wrong scroll position.
+  const confirmNavigationRef = useRef(confirmNavigation);
+  confirmNavigationRef.current = confirmNavigation;
+  const authorizedPopIndexRef = useRef<number | null>(null);
+  const indexRef = useRef(location.index);
+  /** The furthest entry reached, which is where "forward" runs out. */
+  const furthestRef = useRef(location.index);
+  /** What each entry is showing, so a "back to X" control can tell whether back is X. */
+  const entriesRef = useRef(new Map<number, string>([[location.index, `${location.pathname}${location.search}`]]));
+  // One history step can raise both hashchange and popstate. Without this the
+  // second delivery re-runs the navigation and restores the wrong position.
   const lastHandledHref = useRef<string | null>(null);
   useEffect(() => {
+    if (!window.location.hash) {
+      window.history.replaceState({ [HISTORY_INDEX_KEY]: indexRef.current }, "", `${window.location.pathname}${window.location.search}#/`);
+    } else if (readHistoryIndex() === null) {
+      stampHistoryIndex(indexRef.current);
+    }
+    lastHandledHref.current = window.location.href;
+    // pushState raises neither event, so everything arriving here is the user's
+    // own back or forward - or an address from outside the app, which lands
+    // after the current entry and discards whatever was ahead of it.
+    const applyPop = (index: number) => {
+      const next = readLocation();
+      indexRef.current = index;
+      furthestRef.current = Math.max(furthestRef.current, index);
+      entriesRef.current.set(index, `${next.pathname}${next.search}`);
+      setLocation({ ...next, navigationType: "pop", index });
+    };
     const update = () => {
       if (lastHandledHref.current === window.location.href) return;
-      lastHandledHref.current = window.location.href;
-      const type = pendingType.current ?? "pop";
-      pendingType.current = null;
-      setLocation({ ...readLocation(), navigationType: type });
+      const href = window.location.href;
+      let index = readHistoryIndex();
+      if (index === null) {
+        index = indexRef.current + 1;
+        stampHistoryIndex(index);
+        furthestRef.current = index;
+      }
+
+      if (authorizedPopIndexRef.current === index) {
+        authorizedPopIndexRef.current = null;
+        lastHandledHref.current = href;
+        applyPop(index);
+        return;
+      }
+
+      const confirm = confirmNavigationRef.current;
+      if (hasUnsavedWork() && confirm) {
+        const fromIndex = indexRef.current;
+        const fromHref = lastHandledHref.current;
+        const rollback = fromIndex - index;
+        if (fromHref && rollback !== 0 && !confirmationPending.current) {
+          confirmationPending.current = true;
+          const toIndex = index;
+          const toHref = href;
+          // The browser has already moved. Put the current app route back
+          // synchronously so no unsaved editor unmounts while the dialog is
+          // pending. A confirmed discard then performs the requested pop.
+          window.history.replaceState(
+            { ...window.history.state, [HISTORY_INDEX_KEY]: fromIndex },
+            "",
+            fromHref,
+          );
+          lastHandledHref.current = fromHref;
+          authorizedPopIndexRef.current = toIndex;
+          window.history.go(rollback);
+          void confirm()
+            .then((discard) => {
+              if (!discard) {
+                authorizedPopIndexRef.current = null;
+                return;
+              }
+              window.history.replaceState(
+                { ...window.history.state, [HISTORY_INDEX_KEY]: toIndex },
+                "",
+                toHref,
+              );
+              lastHandledHref.current = toHref;
+              applyPop(toIndex);
+            })
+            .catch(() => { authorizedPopIndexRef.current = null; })
+            .finally(() => { confirmationPending.current = false; });
+          return;
+        }
+      }
+
+      lastHandledHref.current = href;
+      applyPop(index);
     };
     window.addEventListener("hashchange", update);
     window.addEventListener("popstate", update);
-    if (!window.location.hash) window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}#/`);
     return () => { window.removeEventListener("hashchange", update); window.removeEventListener("popstate", update); };
   }, []);
   const commitNavigation = useCallback((target: string | number, options?: { replace?: boolean }) => {
-    if (typeof target === "number") { window.history.go(target); return; }
+    if (typeof target === "number") {
+      authorizedPopIndexRef.current = indexRef.current + target;
+      window.history.go(target);
+      return;
+    }
     const next = target.startsWith("/") ? target : `/${target}`;
+    const href = `${window.location.pathname}${window.location.search}#${next}`;
     if (options?.replace) {
-      window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}#${next}`);
+      window.history.replaceState({ [HISTORY_INDEX_KEY]: indexRef.current }, "", href);
       lastHandledHref.current = window.location.href;
-      setLocation({ ...readLocation(), navigationType: "replace" });
+      entriesRef.current.set(indexRef.current, next);
+      setLocation({ ...readLocation(), navigationType: "replace", index: indexRef.current });
     } else if (`#${next}` !== window.location.hash) {
-      pendingType.current = "push";
-      window.location.hash = next;
+      // pushState rather than assigning the hash: an assigned entry carries no
+      // state, so nothing distinguishes it from the one before it afterwards.
+      const index = indexRef.current + 1;
+      window.history.pushState({ [HISTORY_INDEX_KEY]: index }, "", href);
+      indexRef.current = index;
+      // Pushing discards whatever was ahead.
+      furthestRef.current = index;
+      for (const known of [...entriesRef.current.keys()]) if (known > index) entriesRef.current.delete(known);
+      entriesRef.current.set(index, next);
+      lastHandledHref.current = window.location.href;
+      setLocation({ ...readLocation(), navigationType: "push", index });
     }
   }, []);
   const navigate = useCallback((target: string | number, options?: { replace?: boolean }) => {
@@ -85,7 +209,17 @@ export function AppRouter({ children, confirmNavigation }: AppRouterProps) {
       .catch(() => undefined)
       .finally(() => { confirmationPending.current = false; });
   }, [commitNavigation, confirmNavigation]);
-  const value = useMemo<RouterValue>(() => ({ ...location, searchParams: new URLSearchParams(location.search), navigate }), [location, navigate]);
+  const value = useMemo<RouterValue>(() => ({
+    pathname: location.pathname,
+    search: location.search,
+    searchParams: new URLSearchParams(location.search),
+    navigationType: location.navigationType,
+    historyIndex: location.index,
+    canGoBack: location.index > 0,
+    canGoForward: location.index < furthestRef.current,
+    previousEntry: entriesRef.current.get(location.index - 1) ?? null,
+    navigate,
+  }), [location, navigate]);
   return <RouterContext.Provider value={value}>{children}</RouterContext.Provider>;
 }
 
@@ -96,6 +230,27 @@ export function useAppRouter() {
 }
 
 export function useAppNavigate() { return useAppRouter().navigate; }
+
+/** The same screen, whatever query string it happened to be wearing. */
+function sameScreen(a: string, b: string) {
+  return a.split("?")[0] === b.split("?")[0];
+}
+
+/**
+ * Returns to a screen, rather than opening a second copy of it.
+ *
+ * "作品詳細へ戻る" that pushes leaves the header's back button pointing at the
+ * screen the reader has just closed, and the copy it opens has lost the tab,
+ * the filter and the scroll position they left there. When the place a control
+ * names is literally the previous entry, going back is what it means.
+ */
+export function useReturnTo() {
+  const { canGoBack, navigate, previousEntry } = useAppRouter();
+  return useCallback((to: string) => {
+    if (canGoBack && previousEntry && sameScreen(previousEntry, to)) navigate(-1);
+    else navigate(to);
+  }, [canGoBack, navigate, previousEntry]);
+}
 
 export function useAppSearchParams(): [URLSearchParams, (params: URLSearchParams, options?: { replace?: boolean }) => void] {
   const router = useAppRouter();

@@ -32,29 +32,30 @@ import {
   useOperationJobs,
 } from "./operationJobs";
 import { isUpdateJobTerminal, useUpdateJobs, type UpdateJobStatus } from "@/features/updates/updateJobs";
+import { clearFinishedUpdateJobsCommand } from "@/services/updateJobApi";
 
 type Filter = "all" | "active" | "failed";
 
 const kindMeta: Record<OperationKind, { label: string; icon: LucideIcon; color: string }> = {
-  save: { label: "保存", icon: Icons.collect, color: "blue" },
-  update: { label: "更新", icon: Icons.watch, color: "cyan" },
-  epub: { label: "EPUB", icon: Icons.read, color: "grape" },
-  backup: { label: "バックアップ", icon: Icons.database, color: "indigo" },
-  restore: { label: "復元", icon: Icons.restore, color: "violet" },
-  search: { label: "検索索引", icon: Icons.search, color: "teal" },
-  maintenance: { label: "保守", icon: Icons.database, color: "orange" },
+  save: { label: "保存", icon: Icons.collect, color: "gray" },
+  update: { label: "更新", icon: Icons.watch, color: "gray" },
+  epub: { label: "EPUB", icon: Icons.read, color: "gray" },
+  backup: { label: "バックアップ", icon: Icons.database, color: "gray" },
+  restore: { label: "復元", icon: Icons.restore, color: "gray" },
+  search: { label: "検索索引", icon: Icons.search, color: "gray" },
+  maintenance: { label: "保守", icon: Icons.database, color: "gray" },
 };
 
 const statusMeta: Record<OperationStatus | UpdateJobStatus, { label: string; color: string }> = {
   queued: { label: "待機中", color: "gray" },
-  running: { label: "実行中", color: "blue" },
+  running: { label: "実行中", color: "piep" },
   paused: { label: "一時停止", color: "yellow" },
-  auth_required: { label: "再接続が必要", color: "orange" },
-  canceling: { label: "中止中", color: "orange" },
+  auth_required: { label: "再接続が必要", color: "yellow" },
+  canceling: { label: "中止中", color: "gray" },
   canceled: { label: "中止", color: "gray" },
   completed: { label: "完了", color: "green" },
   failed: { label: "失敗", color: "red" },
-  interrupted: { label: "中断", color: "orange" },
+  interrupted: { label: "中断", color: "yellow" },
 };
 
 function timestamp(value: string | null) {
@@ -86,7 +87,7 @@ function OperationCard({ job }: { job: OperationJob }) {
           </Group>
         </Group>
         {(job.total !== null || job.status === "running") && <Box><Progress value={progress} animated={job.status === "running" && job.total === null} /><Text size="xs" c="dimmed" mt={5}>{job.total !== null ? `${job.current} / ${job.total}` : "処理中"}</Text></Box>}
-        {job.logs.length > 0 && <Accordion variant="contained"><Accordion.Item value="logs"><Accordion.Control>ログ {job.logs.length}件</Accordion.Control><Accordion.Panel><Timeline bulletSize={18} lineWidth={2}>{job.logs.slice().reverse().map((log) => <Timeline.Item key={log.id} color={log.level === "error" ? "red" : log.level === "warn" ? "yellow" : log.level === "success" ? "green" : "blue"} title={<Text size="sm">{log.message}</Text>}><Text size="xs" c="dimmed">{timestamp(log.createdAt)}</Text></Timeline.Item>)}</Timeline></Accordion.Panel></Accordion.Item></Accordion>}
+        {job.logs.length > 0 && <Accordion variant="contained"><Accordion.Item value="logs"><Accordion.Control>ログ {job.logs.length}件</Accordion.Control><Accordion.Panel><Timeline bulletSize={18} lineWidth={2}>{job.logs.slice().reverse().map((log) => <Timeline.Item key={log.id} color={log.level === "error" ? "red" : log.level === "warn" ? "yellow" : log.level === "success" ? "green" : "piep"} title={<Text size="sm">{log.message}</Text>}><Text size="xs" c="dimmed">{timestamp(log.createdAt)}</Text></Timeline.Item>)}</Timeline></Accordion.Panel></Accordion.Item></Accordion>}
       </Stack>
     </Card>
   );
@@ -97,6 +98,23 @@ export default function OperationsPage() {
   const localJobs = useOperationJobs();
   const updateJobs = useUpdateJobs(undefined, runtime);
   const [filter, setFilter] = useState<Filter>("all");
+  const [clearing, setClearing] = useState(false);
+  // 画面側の記録と、DB にある更新ジョブの両方を消す。片方だけだと
+  // 「消去」を押しても更新の履歴が残り続ける。
+  const clearHistory = async () => {
+    setClearing(true);
+    try {
+      clearCompletedOperations();
+      if (runtime) {
+        await clearFinishedUpdateJobsCommand();
+        await updateJobs.loadJobs();
+      }
+    } catch (error) {
+      notifications.show({ color: "red", title: "履歴を消去できません", message: errorMessage(error) });
+    } finally {
+      setClearing(false);
+    }
+  };
   const visibleLocal = useMemo(() => localJobs.filter((job) => filter === "all" || (filter === "active" ? ["queued", "running", "canceling"].includes(job.status) : ["failed", "interrupted"].includes(job.status))), [filter, localJobs]);
   const visibleUpdates = useMemo(() => updateJobs.jobs.filter((job) => filter === "all" || (filter === "active" ? !isUpdateJobTerminal(job.status) : job.status === "failed")), [filter, updateJobs.jobs]);
   const activeCount = localJobs.filter((job) => ["queued", "running", "canceling"].includes(job.status)).length + updateJobs.jobs.filter((job) => !isUpdateJobTerminal(job.status)).length;
@@ -104,7 +122,7 @@ export default function OperationsPage() {
 
   return (
     <div className="page page--contained operations-page">
-      <PageHeader title="操作履歴" description="保存、更新、EPUB、バックアップ、検索保守の進行状況とログを一か所で確認します。" actions={<Button variant="default" leftSection={<Icons.delete size={IconSize.menu} />} onClick={clearCompletedOperations}>完了履歴を消去</Button>} />
+      <PageHeader title="操作履歴" description="保存、更新、EPUB、バックアップ、検索保守の進行状況とログを一か所で確認します。" actions={<Button variant="default" leftSection={<Icons.delete size={IconSize.menu} />} loading={clearing} onClick={clearHistory}>完了履歴を消去</Button>} />
       <RuntimeNotice />
       <SimpleGrid cols={{ base: 1, sm: 3 }} mt="lg">
         <Card p="lg"><Group><ThemeIcon variant="light"><Icons.pending size={IconSize.nav} /></ThemeIcon><Box><Text size="xs" c="dimmed">実行中</Text><Text size="xl" fw={750}>{activeCount}</Text></Box></Group></Card>
@@ -116,7 +134,7 @@ export default function OperationsPage() {
         {visibleUpdates.map((job) => {
           const status = statusMeta[job.status];
           const progress = job.totals ? Math.min(100, job.processed / job.totals * 100) : 0;
-          return <Card key={`update-${job.jobId}`} p="lg"><Stack gap="md"><Group justify="space-between" align="flex-start"><Group><ThemeIcon variant="light" color="cyan" size={42}><Icons.watch size={IconSize.nav} /></ThemeIcon><Box><Group gap="xs"><Text fw={700}>更新確認 · {job.scope}</Text><Badge color={status.color} variant="light">{status.label}</Badge></Group><Text size="xs" c="dimmed" mt={4}>{timestamp(job.updatedAt)} · 保存 {job.savedCount} · エラー {job.errorCount}</Text></Box></Group><Group gap={4}>{job.status === "running" && <Tooltip label="一時停止"><ActionIcon variant="subtle" aria-label="更新確認を一時停止" onClick={() => updateJobs.pause(job.jobId).then(() => updateJobs.loadJobs())}><Icons.pause size={IconSize.action} /></ActionIcon></Tooltip>}{["paused", "auth_required"].includes(job.status) && <Tooltip label="再開"><ActionIcon variant="subtle" aria-label="更新確認を再開" onClick={() => updateJobs.resume(job.jobId).then(() => updateJobs.loadJobs())}><Icons.resume size={IconSize.action} /></ActionIcon></Tooltip>}{job.status === "failed" && <Tooltip label="失敗項目を再試行"><ActionIcon variant="subtle" aria-label="更新確認を再試行" onClick={() => updateJobs.resume(job.jobId, true).then(() => updateJobs.loadJobs())}><Icons.retry size={IconSize.action} /></ActionIcon></Tooltip>}{!isUpdateJobTerminal(job.status) && <Tooltip label="キャンセル"><ActionIcon variant="subtle" color="red" aria-label="更新確認をキャンセル" onClick={() => updateJobs.cancel(job.jobId).then(() => updateJobs.loadJobs())}><Icons.stop size={IconSize.action} /></ActionIcon></Tooltip>}</Group></Group><Progress value={progress} animated={job.status === "running"} /><Text size="xs" c="dimmed">{job.processed} / {job.totals}{job.activeLabel ? ` · ${job.activeLabel}` : ""}</Text></Stack></Card>;
+          return <Card key={`update-${job.jobId}`} p="lg"><Stack gap="md"><Group justify="space-between" align="flex-start"><Group><ThemeIcon variant="light" color="gray" size={42}><Icons.watch size={IconSize.nav} /></ThemeIcon><Box><Group gap="xs"><Text fw={700}>更新確認 · {job.scope}</Text><Badge color={status.color} variant="light">{status.label}</Badge></Group><Text size="xs" c="dimmed" mt={4}>{timestamp(job.updatedAt)} · 保存 {job.savedCount} · エラー {job.errorCount}</Text></Box></Group><Group gap={4}>{job.status === "running" && <Tooltip label="一時停止"><ActionIcon variant="subtle" aria-label="更新確認を一時停止" onClick={() => updateJobs.pause(job.jobId).then(() => updateJobs.loadJobs())}><Icons.pause size={IconSize.action} /></ActionIcon></Tooltip>}{["paused", "auth_required"].includes(job.status) && <Tooltip label="再開"><ActionIcon variant="subtle" aria-label="更新確認を再開" onClick={() => updateJobs.resume(job.jobId).then(() => updateJobs.loadJobs())}><Icons.resume size={IconSize.action} /></ActionIcon></Tooltip>}{job.status === "failed" && <Tooltip label="失敗項目を再試行"><ActionIcon variant="subtle" aria-label="更新確認を再試行" onClick={() => updateJobs.resume(job.jobId, true).then(() => updateJobs.loadJobs())}><Icons.retry size={IconSize.action} /></ActionIcon></Tooltip>}{!isUpdateJobTerminal(job.status) && <Tooltip label="キャンセル"><ActionIcon variant="subtle" color="red" aria-label="更新確認をキャンセル" onClick={() => updateJobs.cancel(job.jobId).then(() => updateJobs.loadJobs())}><Icons.stop size={IconSize.action} /></ActionIcon></Tooltip>}</Group></Group><Progress value={progress} animated={job.status === "running"} /><Text size="xs" c="dimmed">{job.processed} / {job.totals}{job.activeLabel ? ` · ${job.activeLabel}` : ""}</Text></Stack></Card>;
         })}
         {visibleLocal.map((job) => <OperationCard key={job.id} job={job} />)}
         {!visibleUpdates.length && !visibleLocal.length && <Card p="xl"><Stack align="center" gap="xs"><ThemeIcon size={48} variant="light" color="gray"><Icons.success size={IconSize.feature} /></ThemeIcon><Text fw={700}>表示する操作はありません</Text><Text size="sm" c="dimmed">処理を始めると、進行状況と失敗理由がここに残ります。</Text></Stack></Card>}

@@ -103,6 +103,17 @@ export async function searchFilterFacets(kind: "tag" | "tags" | "author" | "auth
  * Paginated, searchable author/series listing. `db_get_filter_facets` only
  * returns the top 60 of each, which hides most of a large library.
  */
+/**
+ * How many authors or series there are, which the paged listing cannot say.
+ *
+ * Asked separately because it is a second pass over the same grouping: worth
+ * doing once per set of conditions so the pager can name the last page, not
+ * worth doing again for every page turned.
+ */
+export async function countEntityFacets(kind: "person" | "series", query: string | null): Promise<number> {
+  return invoke<number>("db_count_entity_facets", { kind, query: query?.trim() || null });
+}
+
 export async function searchEntityFacets(kind: "person" | "series", query: string | null, limit = 60, offset = 0): Promise<EntityFacet[]> {
   return invoke<EntityFacet[]>("db_search_entity_facets", {
     kind,

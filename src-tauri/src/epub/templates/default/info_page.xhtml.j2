@@ -1,38 +1,104 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!DOCTYPE html>
-<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" xml:lang="ja">
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" xml:lang="{{ settings.language }}" lang="{{ settings.language }}">
 
 <head>
-    <title>{{ manifest.core.name }}</title>
     <meta charset="utf-8" />
-    {% if css_path %}
-    <link rel="stylesheet" type="text/css" href="{{ css_path }}" />{% endif %}
+    <title>{{ core.name }}</title>
+    <link rel="stylesheet" type="text/css" href="{{ css_path }}" />
 </head>
 
-<body>
-    <div class="main-content">
-        <h3>{{ manifest.core.name }}</h3>
-        <p class="author">作者：{{ manifest.core.author.name }}</p>
+<body epub:type="frontmatter" class="info-page">
+    <section class="main-content">
+        {#-
+          並べる項目と順序は設定 (template.json) の infoFields が決める。
+          ページは2部構成で、どちらも設定の順序をそのまま守る。
 
-        {% if cover_href %}
-        <div class="cover-container">
-            <img src="{{ cover_href }}" alt="カバー画像" />
+            見出し部 … 誰の・何という話か。表題まわりに置く。
+            明細部   … 数値・日付・出典。ラベルと値の2カラムで下にまとめる。
+
+          この for を書き換えれば見た目も自由に変えられるが、項目の増減と
+          並べ替えだけならテンプレートスタジオの「構成」から行える。
+        -#}
+        {%- set masthead = ["series", "title", "author", "cover", "description"] %}
+
+        {%- for field in fields %}
+
+        {%- if field.key == "series" and core.isPartOf %}
+        <p class="series">{{ core.isPartOf.name }}{% if core.isPartOf.order %} 第{{ core.isPartOf.order }}話{% endif %}</p>
+
+        {%- elif field.key == "title" %}
+        <h1 class="title">{{ core.name }}</h1>
+
+        {%- elif field.key == "author" %}
+        <p class="author">{{ field.label }}：{{ core.author.name }}</p>
+
+        {%- elif field.key == "cover" and cover_href %}
+        <div class="cover-container"><img src="{{ cover_href }}" alt="{{ strings.COVER_TITLE }}" /></div>
+
+        {%- elif field.key == "description" and core.description %}
+        {#- description_html は整形済みの XHTML。core.description を直接書くと字面で出る #}
+        <div class="description">{{ description_html }}</div>
+
+        {%- endif %}
+        {%- endfor %}
+
+        <div class="details">
+            {%- for field in fields %}
+            {%- if field.key in masthead %}
+            {#- 見出し部でもう置いた -#}
+
+            {#- ラベルが「文字数」なので、値に単位は付けない -#}
+            {%- elif field.key == "textLength" and stats.textLength %}
+            <div class="row"><span class="label">{{ field.label }}</span><span class="value">{{ stats.textLength | format_number }}</span></div>
+
+            {%- elif field.key == "tags" and core.tags %}
+            <div class="row"><span class="label">{{ field.label }}</span><span class="value tags">{% for tag in core.tags %}<span class="tag">#{{ tag.name }}</span>{% if not loop.last %} {% endif %}{% endfor %}</span></div>
+
+            {%- elif field.key == "datePublished" and formatted_date %}
+            <div class="row"><span class="label">{{ field.label }}</span><span class="value">{{ formatted_date }}</span></div>
+
+            {%- elif field.key == "dateModified" and formatted_modified %}
+            <div class="row"><span class="label">{{ field.label }}</span><span class="value">{{ formatted_modified }}</span></div>
+
+            {%- elif field.key == "source" %}
+            <div class="row"><span class="label">{{ field.label }}</span><span class="value"><a href="{{ core.mainEntityOfPage }}">{{ core.mainEntityOfPage }}</a></span></div>
+
+            {%- elif field.key == "pageCount" and stats.pageCount %}
+            <div class="row"><span class="label">{{ field.label }}</span><span class="value">{{ stats.pageCount }}</span></div>
+
+            {%- elif field.key == "imageCount" and stats.imageCount %}
+            <div class="row"><span class="label">{{ field.label }}</span><span class="value">{{ stats.imageCount }}</span></div>
+
+            {%- elif field.key == "likeCount" and stats.likeCount %}
+            <div class="row"><span class="label">{{ field.label }}</span><span class="value">{{ stats.likeCount | format_number }}</span></div>
+
+            {%- elif field.key == "commentCount" and stats.commentCount %}
+            <div class="row"><span class="label">{{ field.label }}</span><span class="value">{{ stats.commentCount | format_number }}</span></div>
+
+            {%- elif field.key == "feeRequired" and stats.feeRequired %}
+            <div class="row"><span class="label">{{ field.label }}</span><span class="value">{{ stats.feeRequired | format_number }}円</span></div>
+
+            {%- elif field.key == "adult" and stats.adult %}
+            <div class="row"><span class="label">{{ field.label }}</span><span class="value adult">R-18</span></div>
+
+            {%- elif field.key == "account" and core.author.account %}
+            <div class="row"><span class="label">{{ field.label }}</span><span class="value">{{ core.author.account }}</span></div>
+
+            {%- elif field.key == "attachments" and content.attachments %}
+            <div class="row row--block">
+                <span class="label">{{ field.label }}</span>
+                <ul class="attachments">
+                    {%- for attachment in content.attachments %}
+                    <li>{{ attachment.name }}</li>
+                    {%- endfor %}
+                </ul>
+            </div>
+
+            {%- endif %}
+            {%- endfor %}
         </div>
-        {% endif %}
-
-        {% if manifest.core.description %}
-        <div class="description">{{ manifest.core.description }}</div>
-        {% endif %}
-
-        {% if manifest.core.keywords %}
-        <p class="tags">{% for tag in manifest.core.keywords %}#{{ tag }}{% if not loop.last %} {% endif %}{% endfor %}
-        </p>
-        {% endif %}
-
-        <p class="date">{{ formatted_date }}</p>
-        <p class="source-link"><a href="{{ manifest.core.mainEntityOfPage }}">{{ manifest.core.mainEntityOfPage }}</a>
-        </p>
-    </div>
+    </section>
 </body>
 
 </html>

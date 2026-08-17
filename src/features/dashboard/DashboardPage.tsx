@@ -140,7 +140,7 @@ export default function DashboardPage() {
             <div className="dashboard-side">
               <Card p="lg">
                 <Group justify="space-between" mb="sm"><Group gap="xs"><Icons.search size={IconSize.action} /><Text fw={700}>検索インデックス</Text></Group><Badge color={index.isError ? "red" : indexProgress === 100 ? "green" : "yellow"}>{index.isError ? "取得失敗" : `${indexProgress}%`}</Badge></Group>
-                {index.isError ? <Button variant="subtle" color="red" size="compact-xs" onClick={() => index.refetch()}>状態を再確認</Button> : <><Progress value={indexProgress} mb="sm" aria-label={`検索インデックス ${indexProgress}%`} /><Text size="xs" c="dimmed">{index.data?.isComplete ? "全文・意味検索は最新です" : `${formatNumber(index.data?.pendingDownloads)}件を処理中`}</Text></>}
+                {index.isError ? <Button variant="subtle" color="red" size="compact-xs" onClick={() => index.refetch()}>状態を再確認</Button> : <><Progress value={indexProgress} mb="sm" color={indexProgress === 100 ? "green" : "yellow"} aria-label={`検索インデックス ${indexProgress}%`} /><Text size="xs" c="dimmed">{index.data?.isComplete ? "全文・意味検索は最新です" : `${formatNumber(index.data?.pendingDownloads)}件を処理中`}</Text></>}
               </Card>
               <Card p="lg">
                 <Text fw={700} mb="sm">よく使うタグ</Text>

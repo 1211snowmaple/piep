@@ -1,60 +1,76 @@
 {% include "_base_style.css.j2" %}
 
-/* --- Pixiv固有の変数の定義 --- */
+/* --- pixiv 固有の変数 --- */
 :root {
-    --series-title-color: #777;
-    --char-count-bg: rgba(0, 0, 0, 0.3);
-    --char-count-text: white;
+    --accent-color: #0073bb;
+    --cover-width: 62%;
 }
 
-/* --- Pixiv固有のスタイル定義 --- */
-
-h3 {
-    line-height: 1.2;
+@media (prefers-color-scheme: dark) {
+    :root {
+        --accent-color: #6fc0ff;
+    }
 }
 
-.series-title-inline {
-    color: var(--series-title-color);
-    font-size: 0.8em;
-    font-weight: normal;
+/* --- pixiv 固有のスタイル --- */
+
+/*
+  シリーズ帯。話数は表題の上の1行に収める。
+  数字だけを行の右端へ飛ばすと、連作を続けて読むときに視線が往復する。
+*/
+.series {
+    margin: 0 0 0.5em;
+    padding-left: 0.6em;
+    border-left: 3px solid var(--accent-color);
+    color: var(--muted-color);
+    font-size: 0.92em;
 }
 
-.cover-meta-table {
-    width: 100%;
-    border-spacing: 0;
-    margin-bottom: 1.5em;
-    border-collapse: collapse;
+.series .order {
+    color: var(--accent-color);
 }
 
-.cover-cell {
-    width: 33.3%;
-    padding: 0;
+/*
+  表紙の下に、文字数・ページ数・公開日を1行で置く。
+  中央に置くのは表紙の絵に付く説明だからで、地の文は左のまま。
+*/
+.stat-line {
+    margin: 0.5em 0 var(--space);
+    color: var(--muted-color);
+    font-size: 0.85em;
+    text-align: center;
 }
 
-.cover-cell img {
-    width: 100%;
-    height: auto;
-    display: block;
-    border-radius: 10px;
+.stat-line:empty {
+    display: none;
 }
 
-.char-count-cell {
-    width: 33.35%;
-    vertical-align: top;
-    text-align: right;
-    padding: 0;
+.stat-line span + span::before {
+    content: " ・ ";
 }
 
-.spacer-cell {
-    width: 33.35%;
-    padding: 0;
+/*
+  キャプションは改行主体で URL が混ざる。地の文と同じ体裁だと
+  本文の続きに見えるので、器に入れて折り返しも整える。
+*/
+.description {
+    padding-left: 0.8em;
+    border-left: 2px solid var(--rule-color);
+    font-size: 0.95em;
 }
 
-.char-count {
+.description a {
+    color: var(--accent-color);
+    word-wrap: break-word;
+    word-break: break-all;
+}
+
+/* タグは小片にして、長いタグが混ざった行が荒れないようにする */
+.tags .tag {
     display: inline-block;
-    background-color: var(--char-count-bg);
-    color: var(--char-count-text);
-    font-size: 0.8em;
-    padding: 2px 10px;
-    border-radius: 20px;
+    margin: 0 0.3em 0.3em 0;
+    padding: 0 0.55em;
+    border: 1px solid var(--rule-color);
+    border-radius: 1em;
+    font-size: 0.9em;
 }

@@ -26,7 +26,7 @@ import { notifications } from "@mantine/notifications";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { Icons, IconSize, type LucideIcon } from "@/lib/icons";
-import { useAppNavigate, useRouteParams } from "@/app/router";
+import { useReturnTo, useRouteParams } from "@/app/router";
 import { ErrorState, LoadingState } from "@/components/AsyncState";
 import { errorMessage } from "@/lib/format";
 import { registerUnsavedGuard } from "@/lib/unsavedGuard";
@@ -38,18 +38,23 @@ import type { AssetEntry, WorkBlockInput } from "@/types/library";
 type EditorBlockType = "paragraph" | "heading" | "quote" | "image" | "link" | "separator" | "pageBreak";
 type EditorBlockValue = WorkBlockInput & { clientId: string; blockType: EditorBlockType };
 interface EditorValues { blocks: EditorBlockValue[] }
+interface EditorSaveSnapshot {
+  values: EditorValues;
+  persistedBlocks: WorkBlockInput[];
+  fingerprint: string;
+}
 interface PreviewHandle {
   updateBlock: (index: number, patch: Partial<EditorBlockValue>) => void;
 }
 
 const BLOCK_META: Record<EditorBlockType, { label: string; icon: LucideIcon; tone: string }> = {
   paragraph: { label: "文章", icon: Icons.paragraph, tone: "gray" },
-  heading: { label: "見出し", icon: Icons.heading, tone: "blue" },
-  quote: { label: "引用", icon: Icons.quote, tone: "violet" },
-  image: { label: "画像", icon: Icons.insertImage, tone: "teal" },
-  link: { label: "URLカード", icon: Icons.link, tone: "cyan" },
+  heading: { label: "見出し", icon: Icons.heading, tone: "gray" },
+  quote: { label: "引用", icon: Icons.quote, tone: "gray" },
+  image: { label: "画像", icon: Icons.insertImage, tone: "gray" },
+  link: { label: "URLカード", icon: Icons.link, tone: "gray" },
   separator: { label: "区切り", icon: Icons.remove, tone: "gray" },
-  pageBreak: { label: "改ページ", icon: Icons.read, tone: "orange" },
+  pageBreak: { label: "改ページ", icon: Icons.read, tone: "piep" },
 };
 
 const editorType = (value: string): EditorBlockType => value === "page_break" ? "pageBreak" : value in BLOCK_META ? value as EditorBlockType : "paragraph";
@@ -75,8 +80,17 @@ const makeBlock = (blockType: EditorBlockType = "paragraph"): EditorBlockValue =
   attrsJson: blockType === "link" ? JSON.stringify({ label: "" }) : null,
 });
 
+function createEditorSaveSnapshot(values: EditorValues): EditorSaveSnapshot {
+  const clonedValues = { blocks: values.blocks.map((block) => ({ ...block })) };
+  return {
+    values: clonedValues,
+    persistedBlocks: clonedValues.blocks.map(({ clientId: _clientId, blockType, ...block }) => ({ ...block, blockType: persistedType(blockType) })),
+    fingerprint: JSON.stringify(clonedValues),
+  };
+}
+
 export default function EditorPage() {
-  const navigate = useAppNavigate();
+  const returnTo = useReturnTo();
   const { workId } = useRouteParams("/editor/:workId");
   const id = Number(workId);
   const runtime = isTauriRuntime();
@@ -194,25 +208,30 @@ export default function EditorPage() {
     if (syncTimerRef.current) window.clearTimeout(syncTimerRef.current);
   }, []);
 
+  const persistSnapshot = async (snapshot: EditorSaveSnapshot) => {
+    if (!query.data) throw new Error("編集データがありません");
+    if (!runtime) return { id: 1, downloadId: id, baseVersion: query.data.baseVersion, status: "draft", title: null, contentHash: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+    return saveWorkDraft(id, query.data.baseVersion, snapshot.persistedBlocks);
+  };
+  const clearDirtyIfCurrent = (snapshot: EditorSaveSnapshot) => {
+    if (JSON.stringify(form.getValues()) !== snapshot.fingerprint) return;
+    form.resetDirty(snapshot.values);
+    setDirty(false);
+  };
   const saveMutation = useMutation({
-    mutationFn: async () => {
-      if (!query.data) throw new Error("編集データがありません");
-      const blocks = form.getValues().blocks.map(({ clientId: _clientId, blockType, ...block }) => ({ ...block, blockType: persistedType(blockType) }));
-      if (!runtime) return { id: 1, downloadId: id, baseVersion: query.data.baseVersion, status: "draft", title: null, contentHash: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
-      return saveWorkDraft(id, query.data.baseVersion, blocks);
-    },
-    onSuccess: () => { form.resetDirty(form.getValues()); setDirty(false); notifications.show({ color: "green", icon: <Icons.confirm size={IconSize.menu} />, title: "下書きを保存しました", message: "公開中の本文はまだ変わりません" }); queryClient.invalidateQueries({ queryKey: ["editor-document", id] }); },
+    mutationFn: persistSnapshot,
+    onSuccess: (_revision, snapshot) => { clearDirtyIfCurrent(snapshot); notifications.show({ color: "green", icon: <Icons.confirm size={IconSize.menu} />, title: "下書きを保存しました", message: "公開中の本文はまだ変わりません" }); queryClient.invalidateQueries({ queryKey: ["editor-document", id] }); },
     onError: (error) => notifications.show({ color: "red", title: "下書きを保存できません", message: errorMessage(error) }),
   });
   const publishMutation = useMutation({
-    mutationFn: async () => {
-      const revision = await saveMutation.mutateAsync();
+    mutationFn: async (snapshot: EditorSaveSnapshot) => {
+      const revision = await persistSnapshot(snapshot);
       return runtime ? activateWorkEdit(revision.id) : revision;
     },
-    onSuccess: () => { form.resetDirty(form.getValues()); setDirty(false); notifications.show({ color: "green", title: "編集版を反映しました", message: "リーダーとEPUBに編集内容が使われます" }); queryClient.invalidateQueries({ queryKey: ["reader-document", id] }); queryClient.invalidateQueries({ queryKey: ["editor-document", id] }); },
+    onSuccess: (_revision, snapshot) => { clearDirtyIfCurrent(snapshot); notifications.show({ color: "green", title: "編集版を反映しました", message: "リーダーとEPUBに編集内容が使われます" }); queryClient.invalidateQueries({ queryKey: ["reader-metadata", id] }); queryClient.invalidateQueries({ queryKey: ["reader-content-page", id] }); queryClient.invalidateQueries({ queryKey: ["reader-content-search", id] }); queryClient.invalidateQueries({ queryKey: ["editor-document", id] }); },
     onError: (error) => notifications.show({ color: "red", title: "編集版を反映できません", message: errorMessage(error) }),
   });
-  useHotkeys([["mod+S", (event) => { event.preventDefault(); if (!saveMutation.isPending) form.onSubmit(() => saveMutation.mutate())(); }]]);
+  useHotkeys([["mod+S", (event) => { event.preventDefault(); if (!saveMutation.isPending && !publishMutation.isPending) form.onSubmit((values) => saveMutation.mutate(createEditorSaveSnapshot(values)))(); }]]);
   const replaceBlocks = useCallback((nextBlocks: EditorBlockValue[]) => {
     form.setFieldValue("blocks", nextBlocks);
     setBlocks(nextBlocks);
@@ -235,7 +254,7 @@ export default function EditorPage() {
   }, [form, replaceBlocks]);
   const updateBlock = useCallback((index: number, patch: Partial<EditorBlockValue>) => previewRef.current?.updateBlock(index, patch), []);
   const addAsset = useCallback(async (index = blocks.length) => {
-    if (!runtime) return notifications.show({ color: "blue", message: "画像の追加はデスクトップアプリで利用できます" });
+    if (!runtime) return notifications.show({ color: "piep", message: "画像の追加はデスクトップアプリで利用できます" });
     const doc = query.data;
     if (!doc) return;
     const path = await openSingleDialog({ title: "画像を追加", filters: [{ name: "Image", extensions: ["png", "jpg", "jpeg", "webp", "gif", "avif"] }] });
@@ -256,9 +275,12 @@ export default function EditorPage() {
   const virtualItems = editorVirtualizer.getVirtualItems();
   const renderedEditorItems = virtualItems.length ? virtualItems : blocks.slice(0, 8).map((block, index) => ({ index, key: block.clientId, start: blocks.slice(0, index).reduce((sum, item) => sum + estimateEditorBlockSize(item.blockType), 0) }));
   const virtualHeight = editorVirtualizer.getTotalSize() || blocks.reduce((sum, block) => sum + estimateEditorBlockSize(block.blockType), 0);
+  // Returns to the detail screen the editor was opened from rather than
+  // pushing a second copy of it, which left the header's back button pointing
+  // at the editor the user had just closed.
   const goBack = () => {
-    if (!dirty) return navigate(`/works/${id}`);
-    modals.openConfirmModal({ title: "未保存の変更があります", children: <Text size="sm">変更を破棄して作品詳細へ戻りますか？</Text>, labels: { confirm: "破棄して戻る", cancel: "編集を続ける" }, confirmProps: { color: "red" }, onConfirm: () => navigate(`/works/${id}`) });
+    if (!dirty) return returnTo(`/works/${id}`);
+    modals.openConfirmModal({ title: "未保存の変更があります", children: <Text size="sm">変更を破棄して作品詳細へ戻りますか？</Text>, labels: { confirm: "破棄して戻る", cancel: "編集を続ける" }, confirmProps: { color: "red" }, onConfirm: () => returnTo(`/works/${id}`) });
   };
   return (
     <div className="editor-page">
@@ -267,15 +289,15 @@ export default function EditorPage() {
           <Group wrap="nowrap" miw={0} className="editor-toolbar__identity"><Tooltip label="作品詳細へ戻る"><ActionIcon variant="subtle" color="gray" aria-label="作品詳細へ戻る" onClick={goBack}><Icons.back size={IconSize.nav} /></ActionIcon></Tooltip><Divider orientation="vertical" h={24} /><Box miw={0}><Text size="sm" fw={700} className="editor-toolbar__title line-clamp-1" title={doc.download.title}>{doc.download.title}</Text><Group gap="xs"><Text size="xs" c="dimmed">編集とプレビュー</Text>{dirty && <Badge size="xs" color="yellow" variant="light">未保存</Badge>}</Group></Box></Group>
           <Group gap="xs" wrap="nowrap" className="editor-toolbar__actions">
             <Tooltip label={syncScroll ? "位置同期をオフ" : "位置同期をオン"}><ActionIcon size="lg" variant={syncScroll ? "light" : "default"} color="piep" aria-label="編集ブロックとプレビューの位置を同期" aria-pressed={syncScroll} onClick={() => setSyncScroll(!syncScroll)}><Icons.separator size={IconSize.action} /></ActionIcon></Tooltip>
-            <Button size="sm" variant="light" leftSection={<Icons.save size={IconSize.menu} />} loading={saveMutation.isPending} disabled={!dirty && Boolean(doc.draftRevision)} onClick={() => form.onSubmit(() => saveMutation.mutate())()}>下書き保存</Button>
-            <Tooltip label="保存して、リーダーとEPUBで使う本文を更新"><Button size="sm" leftSection={<Icons.confirm size={IconSize.menu} />} loading={publishMutation.isPending} onClick={() => form.onSubmit(() => publishMutation.mutate())()}>反映</Button></Tooltip>
+            <Button size="sm" variant="light" leftSection={<Icons.save size={IconSize.menu} />} loading={saveMutation.isPending} disabled={publishMutation.isPending || (!dirty && Boolean(doc.draftRevision))} onClick={() => form.onSubmit((values) => saveMutation.mutate(createEditorSaveSnapshot(values)))()}>下書き保存</Button>
+            <Tooltip label="保存して、リーダーとEPUBで使う本文を更新"><Button size="sm" leftSection={<Icons.confirm size={IconSize.menu} />} loading={publishMutation.isPending} disabled={saveMutation.isPending} onClick={() => form.onSubmit((values) => publishMutation.mutate(createEditorSaveSnapshot(values)))()}>反映</Button></Tooltip>
           </Group>
         </Group>
       </header>
 
       <div className="editor-layout">
         <ScrollArea className="editor-main" viewportRef={editorScrollRef} type="scroll" scrollbarSize={8}>
-          <form onSubmit={form.onSubmit(() => saveMutation.mutate())} className="editor-document">
+          <form onSubmit={form.onSubmit((values) => saveMutation.mutate(createEditorSaveSnapshot(values)))} className="editor-document">
             <BlockInsertMenu label="先頭にブロックを追加" allowPageBreak={allowPageBreak} onInsert={(type) => insertBlock(type, 0)} onImage={() => addAsset(0)} />
             {blocks.length ? <Box className="editor-virtual-list" style={{ height: virtualHeight }}>
               {renderedEditorItems.map((item) => {

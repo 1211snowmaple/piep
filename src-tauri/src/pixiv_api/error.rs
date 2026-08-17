@@ -10,11 +10,17 @@ pub enum PixivError {
     /// Reqwest（HTTPクライアント）エラー。
     #[error("通信エラー: {0}")]
     Reqwest(#[from] reqwest::Error),
+    /// API レスポンスが安全上限を超えた場合。
+    #[error("APIレスポンスが大きすぎます（上限 {limit_bytes} バイト）")]
+    ResponseTooLarge {
+        /// 許可した最大レスポンスサイズ。
+        limit_bytes: usize,
+    },
     /// 認証方法が提供されていないのにトークンが必要な場合。
     #[error("認証が必要ですが、認証情報が提供されていません")]
     NoAuth,
     /// 不正なアクセストークン。
-    #[error("アクセストークンが不正です \"{access_token}\": {message}")]
+    #[error("アクセストークンが不正です: {message}")]
     BadAccessToken {
         /// 使用されたアクセストークン。
         access_token: String,
@@ -89,5 +95,17 @@ mod tests {
             body: "too many requests".to_string(),
         };
         assert!(err.to_string().contains("too many requests"));
+    }
+
+    #[test]
+    fn bad_access_token_display_never_exposes_the_token() {
+        let secret = "oauth-secret-that-must-not-be-logged";
+        let err = PixivError::BadAccessToken {
+            access_token: secret.to_string(),
+            message: "invalid header value".to_string(),
+        };
+        let displayed = err.to_string();
+        assert!(!displayed.contains(secret));
+        assert!(displayed.contains("invalid header value"));
     }
 }

@@ -1,6 +1,7 @@
 pub mod models;
 pub mod parser;
 pub mod queries;
+pub mod resource_budget;
 pub mod schema;
 pub mod search;
 pub mod search_normalization;

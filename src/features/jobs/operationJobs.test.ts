@@ -1,10 +1,12 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 describe("operation history", () => {
   beforeEach(() => {
     window.localStorage.clear();
     vi.resetModules();
   });
+
+  afterEach(() => vi.useRealTimers());
 
   it("records progress, completion and logs", async () => {
     const api = await import("./operationJobs");
@@ -34,5 +36,36 @@ describe("operation history", () => {
     operation.fail(new Error("disk full"));
     await api.retryOperation(operation.id);
     expect(retry).toHaveBeenCalledOnce();
+  });
+
+  it("batches high-frequency progress persistence while keeping in-memory state immediate", async () => {
+    vi.useFakeTimers();
+    const writes = vi.spyOn(window.localStorage, "setItem");
+    const api = await import("./operationJobs");
+    const operation = api.startOperation({ kind: "epub", label: "大量書き出し", total: 1_000 });
+    expect(writes).toHaveBeenCalledTimes(1);
+
+    for (let current = 1; current <= 100; current += 1) operation.progress(current, 1_000);
+    expect(api.getOperationJobs()[0].current).toBe(100);
+    expect(writes).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(api.OPERATION_HISTORY_PERSIST_DELAY_MS);
+    expect(writes).toHaveBeenCalledTimes(2);
+    writes.mockRestore();
+  });
+
+  it("flushes a terminal state and cancels a pending progress write", async () => {
+    vi.useFakeTimers();
+    const writes = vi.spyOn(window.localStorage, "setItem");
+    const api = await import("./operationJobs");
+    const operation = api.startOperation({ kind: "save", label: "保存", total: 10 });
+    operation.progress(5);
+    operation.complete();
+
+    expect(writes).toHaveBeenCalledTimes(2);
+    await vi.runAllTimersAsync();
+    expect(writes).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(window.localStorage.getItem("piep.operation-history.v1") ?? "[]")[0]).toMatchObject({ status: "completed", current: 10 });
+    writes.mockRestore();
   });
 });

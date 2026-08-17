@@ -15,9 +15,6 @@ pub fn process_image(
     input_path: &Path,
     options: &ImageCompressOptions,
 ) -> Result<(Vec<u8>, String), String> {
-    let original_bytes = std::fs::read(input_path)
-        .map_err(|e| format!("画像読み込みエラー ({}): {}", input_path.display(), e))?;
-
     let ext = input_path
         .extension()
         .and_then(|e| e.to_str())
@@ -36,6 +33,8 @@ pub fn process_image(
         || original_mime == "image/gif"
         || original_mime == "application/octet-stream"
     {
+        let original_bytes = std::fs::read(input_path)
+            .map_err(|e| format!("画像読み込みエラー ({}): {}", input_path.display(), e))?;
         return Ok((original_bytes, original_mime.to_string()));
     }
 

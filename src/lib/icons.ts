@@ -10,8 +10,10 @@ import {
   ArrowRight,
   ArrowUp,
   Ban,
+  EyeOff,
   Bookmark,
   BookMarked,
+  Braces,
   BookmarkPlus,
   BookCheck,
   BookOpen,
@@ -27,11 +29,13 @@ import {
   CircleHelp,
   ClipboardPaste,
   Clock3,
+  Copy as CopyIcon,
   Database,
   Download,
   Edit3,
   Ellipsis,
   Expand,
+  Eye,
   ExternalLink,
   File,
   FileCode2,
@@ -56,6 +60,7 @@ import {
   Inbox,
   Info,
   KeyRound,
+  LayoutTemplate,
   Library,
   LibraryBig,
   Link2,
@@ -148,6 +153,14 @@ export const Icons = {
   epubTemplate: FileCode2,
   /** Image handling inside an EPUB export. */
   epubImages: ImageDown,
+  /** Seeing a template rendered before exporting with it. */
+  epubPreview: Eye,
+  /** Duplicating a template into a new one. */
+  epubDuplicate: CopyIcon,
+  /** What a template can place: the fields a work provides. */
+  epubDataField: Braces,
+  /** The structure of a book: which pages it has and in what order. */
+  epubStructure: LayoutTemplate,
 
   // ---- People, series and tags -------------------------------------------
   /** One author or creator. */
@@ -216,6 +229,8 @@ export const Icons = {
   pause: Pause,
   resume: Play,
   stop: Ban,
+  /** 「今後この候補を出さない」。削除ではなく、見えなくする操作。 */
+  hide: EyeOff,
   more: Ellipsis,
   sort: ArrowDownUp,
   filter: Filter,
@@ -262,6 +277,8 @@ export const Icons = {
   credentials: KeyRound,
   secure: ShieldCheck,
   desktopApp: AppWindow,
+  /** 内蔵ブラウザで開く。保存（下向き矢印）とは別の意味なので絵も分ける。 */
+  inAppBrowser: AppWindow,
   browser: Globe2,
   secureConnection: LockKeyhole,
   readerSettings: Settings2,

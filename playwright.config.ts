@@ -27,7 +27,10 @@ export default defineConfig({
   },
   use: {
     ...devices["Desktop Chrome"],
-    baseURL: "http://127.0.0.1:1420",
+    // Match Vite/Tauri's default localhost binding. On Windows it commonly
+    // listens on ::1; reusing that healthy server through 127.0.0.1 made the
+    // visual suite fail intermittently with connection-refused chunk loads.
+    baseURL: "http://localhost:1420",
     locale: "ja-JP",
     timezoneId: "Asia/Tokyo",
     reducedMotion: "reduce",
@@ -38,8 +41,8 @@ export default defineConfig({
     use: { viewport: { width: size.width, height: size.height }, colorScheme, deviceScaleFactor },
   })))),
   webServer: {
-    command: "npm run dev -- --host 127.0.0.1",
-    url: "http://127.0.0.1:1420",
+    command: "npm run dev -- --host localhost",
+    url: "http://localhost:1420",
     reuseExistingServer: !process.env.CI,
     timeout: 120_000,
   },

@@ -7,12 +7,83 @@ pub mod fanbox_api;
 pub mod pixiv_api;
 
 use database::Database;
+use std::path::Path;
 use std::sync::Arc;
 use tauri::Manager;
+
+const LIBRARY_LOCK_FILENAME: &str = ".piep-library.lock";
+
+/// Process-wide ownership of one library directory.
+///
+/// The empty lock file deliberately remains on disk after shutdown. Deleting it
+/// would allow another process to create and lock a different inode while an
+/// existing process still holds the old one. The operating system releases the
+/// advisory lock when this handle is dropped or its process terminates.
+#[derive(Debug)]
+struct LibraryProcessLock {
+    _file: std::fs::File,
+}
+
+#[derive(Debug, thiserror::Error)]
+enum LibraryLockError {
+    #[error(
+        "このライブラリは別のpiepプロセスで使用中です。ほかのpiepウィンドウを閉じてから、もう一度起動してください。"
+    )]
+    AlreadyInUse,
+    #[error(
+        "ライブラリを安全にロックできませんでした。ほかのpiepを終了し、保存先へのアクセス権を確認してから再起動してください。"
+    )]
+    Unavailable(#[source] std::io::Error),
+}
+
+impl LibraryProcessLock {
+    fn acquire(app_data: &Path) -> Result<Self, LibraryLockError> {
+        let lock_path = app_data.join(LIBRARY_LOCK_FILENAME);
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(lock_path)
+            .map_err(LibraryLockError::Unavailable)?;
+        // 助言ロックは Rust 1.89 で標準ライブラリに入った。fs4 を使っていたのは
+        // それ以前の名残で、挙動（プロセス終了で解放される排他ロック）は同じ。
+        // 「別のプロセスが持っている」だけが WouldBlock で、他は本当の入出力失敗。
+        match file.try_lock() {
+            Ok(()) => Ok(Self { _file: file }),
+            Err(std::fs::TryLockError::WouldBlock) => Err(LibraryLockError::AlreadyInUse),
+            Err(std::fs::TryLockError::Error(error)) => Err(LibraryLockError::Unavailable(error)),
+        }
+    }
+}
 
 /// アプリ全体で共有されるDB状態
 pub struct AppState {
     pub db: Database,
+    /// Export holds a read guard while every library mutation holds a write
+    /// guard, giving backups one coherent DB/filesystem generation.
+    pub library_gate: Arc<tokio::sync::RwLock<()>>,
+    // Keep this last: struct fields are dropped in declaration order, so the
+    // database and its workers are gone before process ownership is released.
+    _library_process_lock: Option<LibraryProcessLock>,
+}
+
+impl AppState {
+    pub fn new(db: Database) -> Self {
+        Self {
+            db,
+            library_gate: Arc::new(tokio::sync::RwLock::new(())),
+            _library_process_lock: None,
+        }
+    }
+
+    fn new_with_library_lock(db: Database, library_process_lock: LibraryProcessLock) -> Self {
+        Self {
+            db,
+            library_gate: Arc::new(tokio::sync::RwLock::new(())),
+            _library_process_lock: Some(library_process_lock),
+        }
+    }
 }
 
 // ============================================================
@@ -25,6 +96,8 @@ pub fn run() -> tauri::Result<()> {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
+        // 自動確認は画面を開いていないときにも走る。結果は OS の通知で届ける。
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             // DB / ストレージの初期化
             let app_data = app
@@ -38,10 +111,27 @@ pub fn run() -> tauri::Result<()> {
                 std::io::Error::other(format!("Failed to create app data dir: {e}"))
             })?;
 
+            // Claim the whole library before SQLite, restore recovery, search
+            // sidecars, or downloaded files can be opened by this process.
+            let library_process_lock = LibraryProcessLock::acquire(&app_data)
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
             let db = Database::open(&db_path, &storage_dir)
                 .map_err(|e| std::io::Error::other(format!("Failed to open database: {e}")))?;
-            if let Err(e) = db.recover_update_jobs_on_startup() {
+            let state = Arc::new(AppState::new_with_library_lock(db, library_process_lock));
+            commands::archive::recover_interrupted_restores(&state).map_err(|e| {
+                std::io::Error::other(format!("Failed to recover interrupted restore: {e}"))
+            })?;
+            if let Err(e) = state.db.recover_update_jobs_on_startup() {
                 log::warn!("Failed to recover update jobs: {}", e);
+            }
+            // 終わったジョブは放っておくと溜まり続ける。起動時に一度だけ整理する。
+            match state.db.prune_update_jobs(
+                commands::update_jobs::KEEP_UPDATE_JOBS,
+                commands::update_jobs::KEEP_UPDATE_JOB_DAYS,
+            ) {
+                Ok(removed) if removed > 0 => log::info!("古い更新ジョブを{removed}件整理しました"),
+                Ok(_) => {}
+                Err(e) => log::warn!("Failed to prune update jobs: {}", e),
             }
 
             // デフォルトEPUBテンプレートの初期化
@@ -54,7 +144,7 @@ pub fn run() -> tauri::Result<()> {
                 log::warn!("デフォルトテンプレートの初期化に失敗: {}", e);
             }
 
-            app.manage(Arc::new(AppState { db }));
+            app.manage(state);
             log::info!("Database initialized at {:?}", db_path);
             // The search index is derived data and has to look after itself:
             // anything that left it behind is caught up in the background
@@ -111,6 +201,7 @@ pub fn run() -> tauri::Result<()> {
             commands::database::db_get_dashboard_summary,
             commands::database::db_get_library_shelf_counts,
             commands::database::db_list_entity_series,
+            commands::database::db_list_entity_series_paged,
             commands::database::db_list_entity_tags,
             commands::database::db_list_saved_searches,
             commands::database::db_upsert_saved_search,
@@ -120,6 +211,7 @@ pub fn run() -> tauri::Result<()> {
             commands::database::db_get_search_index_status,
             commands::database::db_search_filter_facets,
             commands::database::db_search_entity_facets,
+            commands::database::db_count_entity_facets,
             commands::database::read_file_content,
             commands::database::open_local_asset,
             // バージョン管理・更新監視 (commands::database)
@@ -162,12 +254,19 @@ pub fn run() -> tauri::Result<()> {
             commands::update_jobs::list_update_jobs,
             commands::update_jobs::save_update_job_candidates,
             commands::update_jobs::clear_update_job,
+            commands::update_jobs::clear_finished_update_jobs,
+            commands::update_jobs::dismiss_update_candidate,
+            commands::update_jobs::count_dismissed_update_candidates,
+            commands::update_jobs::restore_dismissed_update_candidates,
             // エクスポート / インポート (commands::archive)
             commands::archive::export_single,
             commands::archive::export_all_zip,
+            commands::archive::export_all_multipart,
             commands::archive::export_entity_zip,
             commands::archive::import_zip,
+            commands::archive::import_multipart_backup,
             commands::archive::inspect_backup,
+            commands::archive::inspect_multipart_backup,
             commands::archive::scan_and_reimport_downloads,
             // EPUB エクスポート (commands::epub)
             commands::epub::export_epub,
@@ -176,9 +275,102 @@ pub fn run() -> tauri::Result<()> {
             commands::epub::get_template_files,
             commands::epub::read_template_file,
             commands::epub::save_template_file,
+            commands::epub::reset_template_file,
             commands::epub::create_epub_template,
+            commands::epub::rename_epub_template,
             commands::epub::delete_epub_template,
+            commands::epub::get_template_settings,
+            commands::epub::save_template_settings,
+            commands::epub::list_template_file_kinds,
+            commands::epub::preview_epub_template,
+            commands::epub::validate_epub_file,
             commands::archive::get_storage_path,
         ])
         .run(tauri::generate_context!())
+}
+
+#[cfg(test)]
+mod library_lock_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    const CHILD_DIR_ENV: &str = "PIEP_TEST_LIBRARY_LOCK_CHILD_DIR";
+    static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    struct TestDirectory(std::path::PathBuf);
+
+    impl TestDirectory {
+        fn new(label: &str) -> Self {
+            let sequence = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "piep-library-lock-{label}-{}-{sequence}",
+                std::process::id()
+            ));
+            std::fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for TestDirectory {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn a_second_handle_is_rejected_without_exposing_the_library_path() {
+        let directory = TestDirectory::new("secret-library-name");
+        let first = LibraryProcessLock::acquire(&directory.0).unwrap();
+        let error = LibraryProcessLock::acquire(&directory.0).unwrap_err();
+
+        assert!(matches!(error, LibraryLockError::AlreadyInUse));
+        let displayed = error.to_string();
+        assert!(displayed.contains("別のpiepプロセス"));
+        assert!(displayed.contains("もう一度起動してください"));
+        assert!(!displayed.contains("secret-library-name"));
+        assert!(!displayed.contains(&directory.0.display().to_string()));
+
+        let unavailable = LibraryLockError::Unavailable(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "secret-path-from-the-os",
+        ));
+        let unavailable_display = unavailable.to_string();
+        assert!(unavailable_display.contains("アクセス権を確認"));
+        assert!(!unavailable_display.contains("secret-path-from-the-os"));
+
+        drop(first);
+        LibraryProcessLock::acquire(&directory.0).unwrap();
+    }
+
+    #[test]
+    fn library_lock_child_process() {
+        let Some(directory) = std::env::var_os(CHILD_DIR_ENV) else {
+            return;
+        };
+        let directory = std::path::PathBuf::from(directory);
+        let _lock = LibraryProcessLock::acquire(&directory).unwrap();
+        std::fs::write(directory.join("child-acquired"), b"locked").unwrap();
+        std::process::abort();
+    }
+
+    #[test]
+    fn an_aborted_process_releases_the_library_lock() {
+        let directory = TestDirectory::new("crash-release");
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("library_lock_tests::library_lock_child_process")
+            .arg("--nocapture")
+            .env(CHILD_DIR_ENV, &directory.0)
+            .output()
+            .unwrap();
+
+        assert!(!output.status.success(), "child was expected to abort");
+        assert!(
+            directory.0.join("child-acquired").is_file(),
+            "child did not acquire the lock before aborting; stdout: {}; stderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        LibraryProcessLock::acquire(&directory.0).unwrap();
+    }
 }

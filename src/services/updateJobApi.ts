@@ -25,6 +25,10 @@ export interface StartUpdateJobRequest {
   mode: UpdateJobMode;
   workIds?: number[] | null;
   targetIds?: number[] | null;
+  /** Put every work this job saves under update watching. */
+  watchSaved?: boolean | null;
+  /** Authors or series to check once, without adding them to the watch list. */
+  adhocTargets?: { targetType: "author" | "series"; source: string; sourceKey: string; displayName: string }[] | null;
   credentials?: UpdateJobCredentials | null;
   concurrency?: {
     fetch?: number | null;
@@ -67,11 +71,17 @@ export interface UpdateJobCandidate {
   targetType: "work" | "author" | "series";
   selected: boolean;
   status: "candidate" | "queued" | "running" | "saved" | "failed" | "skipped" | "done";
+  /** Why this is a candidate: a work we lack, a sequel, or a rewrite of one we have. */
+  kind: "new" | "sequel" | "revision";
+  /** Set when the candidate failed; carries the classified reason. */
+  error?: string | null;
 }
 
 export interface UpdateJobSnapshot extends UpdateJobSummary {
   logs: UpdateJobLog[];
   candidates: UpdateJobCandidate[];
+  nextCandidateCursor: number | null;
+  previousLogCursor: number | null;
 }
 
 export async function getUpdateJobCredentials(): Promise<UpdateJobCredentials> {
@@ -102,6 +112,24 @@ export async function resumeUpdateJobCommand(jobId: string, retryFailed = false)
   });
 }
 
+/** Stops a work from being offered again, or takes that decision back. */
+/** Removes every finished update job from the history. Running ones stay. */
+export async function clearFinishedUpdateJobsCommand(): Promise<number> {
+  return invoke<number>("clear_finished_update_jobs");
+}
+
+export async function dismissUpdateCandidateCommand(source: string, sourceId: string, dismissed: boolean): Promise<void> {
+  return invoke<void>("dismiss_update_candidate", { source, sourceId, dismissed });
+}
+
+export async function countDismissedUpdateCandidatesCommand(): Promise<number> {
+  return invoke<number>("count_dismissed_update_candidates");
+}
+
+export async function restoreDismissedUpdateCandidatesCommand(): Promise<number> {
+  return invoke<number>("restore_dismissed_update_candidates");
+}
+
 export async function saveUpdateJobCandidatesCommand(jobId: string, candidateIds: number[]): Promise<UpdateJobSnapshot> {
   return invoke<UpdateJobSnapshot>("save_update_job_candidates", {
     jobId,
@@ -110,8 +138,8 @@ export async function saveUpdateJobCandidatesCommand(jobId: string, candidateIds
   });
 }
 
-export function getUpdateJobCommand(jobId: string): Promise<UpdateJobSnapshot> {
-  return invoke<UpdateJobSnapshot>("get_update_job", { jobId });
+export function getUpdateJobCommand(jobId: string, candidateAfterId?: number | null, logBeforeId?: number | null): Promise<UpdateJobSnapshot> {
+  return invoke<UpdateJobSnapshot>("get_update_job", { jobId, candidateAfterId, logBeforeId });
 }
 
 export function listUpdateJobsCommand(): Promise<UpdateJobSummary[]> {

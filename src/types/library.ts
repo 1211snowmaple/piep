@@ -163,6 +163,17 @@ export interface LibraryDiagnostics {
   orphanAssetBytes: number;
   orphanAssetFiles: number;
   orphanAssetFileBytes: number;
+  checkedFileReferences: number;
+  missingJsonFiles: number;
+  missingAssetFiles: number;
+  missingProfileFiles: number;
+  unsafeReferencedFiles: number;
+  unreadableReferencedFiles: number;
+  emptyReferencedFiles: number;
+  mismatchedAssetFiles: number;
+  transientFiles: number;
+  transientFileBytes: number;
+  fileIssueSamples: LibraryFileIssue[];
   processMemoryBytes: number | null;
   listFirstPageMs: number;
   listP50Ms: number;
@@ -174,6 +185,15 @@ export interface LibraryDiagnostics {
   exactAuthorP95Ms: number | null;
   benchmarkQuery: string | null;
   searchIndex: SearchIndexStatus;
+}
+
+export interface LibraryFileIssue {
+  issueType: "missing" | "unsafe" | "unreadable" | "empty" | "size_mismatch" | "transient" | string;
+  category: "work_json" | "work_asset" | "profile" | "entity_json" | "transient" | string;
+  path: string;
+  label: string | null;
+  expectedSizeBytes: number | null;
+  actualSizeBytes: number | null;
 }
 
 export interface SearchIndexStatus {
@@ -313,6 +333,10 @@ export interface UpdateTarget {
   metadataJson: string | null;
   createdAt: string;
   updatedAt: string;
+  /** When this target last turned up something. Null means it never has. */
+  lastHitAt?: string | null;
+  /** Failures in a row. Reset to zero by any successful check. */
+  consecutiveErrors?: number;
 }
 
 export interface DashboardTrendPoint {

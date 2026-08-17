@@ -49,6 +49,7 @@ export interface OperationController {
 const STORAGE_KEY = "piep.operation-history.v1";
 const MAX_JOBS = 100;
 const MAX_LOGS = 100;
+export const OPERATION_HISTORY_PERSIST_DELAY_MS = 250;
 const listeners = new Set<() => void>();
 const cancelHandlers = new Map<string, () => void | Promise<void>>();
 const retryHandlers = new Map<string, () => void | Promise<void>>();
@@ -91,22 +92,39 @@ function loadJobs(): OperationJob[] {
 }
 
 let jobs = loadJobs();
+let persistTimer: ReturnType<typeof setTimeout> | null = null;
 
-function persist() {
+function writePersistedJobs() {
   try { storage()?.setItem(STORAGE_KEY, JSON.stringify(jobs.slice(0, MAX_JOBS))); }
   catch { /* History is a convenience; an unavailable/quota-full store must not break work. */ }
 }
 
-function emit() {
-  persist();
+function persistNow() {
+  if (persistTimer !== null) {
+    clearTimeout(persistTimer);
+    persistTimer = null;
+  }
+  writePersistedJobs();
+}
+
+function schedulePersist() {
+  if (persistTimer !== null) return;
+  persistTimer = setTimeout(() => {
+    persistTimer = null;
+    writePersistedJobs();
+  }, OPERATION_HISTORY_PERSIST_DELAY_MS);
+}
+
+function emit(persistence: "debounced" | "immediate" = "debounced") {
+  if (persistence === "immediate") persistNow(); else schedulePersist();
   listeners.forEach((listener) => listener());
 }
 
-function updateJob(jobId: string, updater: (job: OperationJob) => OperationJob) {
+function updateJob(jobId: string, updater: (job: OperationJob) => OperationJob, persistence: "debounced" | "immediate" = "debounced") {
   jobs = jobs.map((job) => job.id === jobId ? updater(job) : job)
     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
     .slice(0, MAX_JOBS);
-  emit();
+  emit(persistence);
 }
 
 function appendLog(job: OperationJob, message: string, level: OperationLogLevel): OperationJob {
@@ -135,7 +153,9 @@ export function startOperation(options: StartOperationOptions): OperationControl
   jobs = [job, ...jobs].slice(0, MAX_JOBS);
   if (options.onCancel) cancelHandlers.set(jobId, options.onCancel);
   if (options.onRetry) retryHandlers.set(jobId, options.onRetry);
-  emit();
+  // Persist the job before background progress starts. High-frequency updates
+  // below are batched, while terminal states are flushed synchronously.
+  emit("immediate");
 
   const finish = (status: "completed" | "failed" | "canceled", message: string, level: OperationLogLevel) => {
     const at = now();
@@ -147,7 +167,7 @@ export function startOperation(options: StartOperationOptions): OperationControl
       finishedAt: at,
       canCancel: false,
       canRetry: status === "failed" && retryHandlers.has(jobId),
-    }));
+    }), "immediate");
     cancelHandlers.delete(jobId);
     cancelRequests.delete(jobId);
   };
@@ -172,9 +192,9 @@ export async function requestOperationCancel(jobId: string): Promise<void> {
   const handler = cancelHandlers.get(jobId);
   if (!handler) return;
   cancelRequests.add(jobId);
-  updateJob(jobId, (job) => ({ ...appendLog(job, "キャンセルを要求しました", "warn"), status: "canceling", canCancel: false, updatedAt: now() }));
+  updateJob(jobId, (job) => ({ ...appendLog(job, "キャンセルを要求しました", "warn"), status: "canceling", canCancel: false, updatedAt: now() }), "immediate");
   try { await handler(); }
-  catch (error) { updateJob(jobId, (job) => ({ ...appendLog(job, error instanceof Error ? error.message : String(error), "error"), status: "running", canCancel: true, updatedAt: now() })); }
+  catch (error) { updateJob(jobId, (job) => ({ ...appendLog(job, error instanceof Error ? error.message : String(error), "error"), status: "running", canCancel: true, updatedAt: now() }), "immediate"); }
 }
 
 export async function retryOperation(jobId: string): Promise<void> {
@@ -182,14 +202,14 @@ export async function retryOperation(jobId: string): Promise<void> {
   if (!handler) return;
   // A retry is a new execution with its own duration and logs. Keep the failed
   // attempt immutable so diagnostics do not lose the original failure.
-  updateJob(jobId, (job) => ({ ...appendLog(job, "新しい操作として再試行しました", "info"), canRetry: false, updatedAt: now() }));
+  updateJob(jobId, (job) => ({ ...appendLog(job, "新しい操作として再試行しました", "info"), canRetry: false, updatedAt: now() }), "immediate");
   await handler();
 }
 
 export function clearCompletedOperations(): void {
   const active = new Set<OperationStatus>(["queued", "running", "canceling"]);
   jobs = jobs.filter((job) => active.has(job.status));
-  emit();
+  emit("immediate");
 }
 
 export function getOperationJobs(): OperationJob[] { return jobs; }

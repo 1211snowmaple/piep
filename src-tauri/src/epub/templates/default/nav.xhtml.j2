@@ -1,43 +1,44 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!DOCTYPE html>
-<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" xml:lang="ja">
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" xml:lang="{{ settings.language }}" lang="{{ settings.language }}">
 
 <head>
+    <meta charset="utf-8" />
     <title>{{ strings.TOC_TITLE }}</title>
+    <link rel="stylesheet" type="text/css" href="{{ css_path }}" />
 </head>
 
 <body>
-    <nav epub:type="toc">
+    <nav epub:type="toc" id="toc">
         <h1>{{ strings.TOC_TITLE }}</h1>
         <ol>
-            {% if toc.has_info_page %}
+            {%- for entry in entries %}
             <li>
-                <a href="{{ toc.info_page.href }}">{{ toc.info_page.title }}</a>
+                <a href="{{ entry.href }}">{{ entry.title }}</a>
+                {%- if entry.children %}
+                <ol>
+                    {%- for child in entry.children %}
+                    <li><a href="{{ child.href }}">{{ child.title }}</a></li>
+                    {%- endfor %}
+                </ol>
+                {%- endif %}
             </li>
-            {% endif %}
-            {% for page in toc.pages %}
-            <li><a href="{{ page.href }}">{{ page.title }}</a></li>
-            {% endfor %}
+            {%- endfor %}
         </ol>
     </nav>
-    <nav epub:type="landmarks" hidden="">
+    <nav epub:type="landmarks" id="landmarks" hidden="hidden">
         <h2>{{ strings.LANDMARKS_TITLE }}</h2>
         <ol>
-            {% if landmarks.has_cover %}
-            <li>
-                <a epub:type="cover" href="text/cover.xhtml">{{ strings.COVER_TITLE }}</a>
-            </li>
-            {% endif %}
-            {% if landmarks.info_page %}
-            <li>
-                <a href="{{ landmarks.info_page.href }}">{{ landmarks.info_page.title }}</a>
-            </li>
-            {% endif %}
-            {% if landmarks.start_page_href %}
-            <li>
-                <a epub:type="bodymatter" href="{{ landmarks.start_page_href }}">{{ strings.BODY_MATTER_TITLE }}</a>
-            </li>
-            {% endif %}
+            {%- if has_cover %}
+            <li><a epub:type="cover" href="text/cover.xhtml">{{ strings.COVER_TITLE }}</a></li>
+            {%- endif %}
+            {%- if settings.includeInfoPage %}
+            <li><a epub:type="frontmatter" href="text/info.xhtml">{{ strings.INFO_TITLE }}</a></li>
+            {%- endif %}
+            <li><a epub:type="toc" href="nav.xhtml">{{ strings.TOC_TITLE }}</a></li>
+            {%- if start_page_href %}
+            <li><a epub:type="bodymatter" href="{{ start_page_href }}">{{ strings.BODY_MATTER_TITLE }}</a></li>
+            {%- endif %}
         </ol>
     </nav>
 </body>
