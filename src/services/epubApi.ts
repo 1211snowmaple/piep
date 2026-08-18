@@ -16,6 +16,12 @@ export function exportEpubBatch<T = void>(payload: Record<string, unknown>): Pro
   return invoke<T>("export_epub_batch", payload);
 }
 
+/** `skipMissing` lets a collection with deleted works still be exported, with
+ *  those works left out, rather than the export refusing outright. */
+export function exportCollectionEpub(collectionId: string, templateName: string, outputDir: string, skipMissing = false): Promise<string> {
+  return invoke<string>("export_collection_epub", { collectionId, templateName, outputDir, compressOptions: null, skipMissing });
+}
+
 export function listEpubTemplates(): Promise<TemplateInfo[]> {
   return invoke<TemplateInfo[]>("list_epub_templates");
 }

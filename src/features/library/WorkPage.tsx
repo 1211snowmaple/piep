@@ -42,6 +42,7 @@ import { contentTypeLabel, errorMessage, formatBytes, formatDate, formatNumber }
 import { prepareDocumentHtml } from "@/lib/content";
 import { useContentLinkNavigation } from "@/lib/contentLinks";
 import { exportSingle } from "@/services/archiveApi";
+import { addWorkCollectionMembers, listCollectionsForWork, listWorkCollections } from "@/services/collectionApi";
 import { openSingleDialog } from "@/services/dialogApi";
 import {
   deleteDownload,
@@ -105,6 +106,30 @@ export default function WorkPage() {
     queryKey: ["reader-metadata", id],
     queryFn: () => runtime ? getReaderMetadata(id) : Promise.resolve((() => { const demo = getDemoReader(id); return { download: demo.download, versions: demo.versions, assetCount: demo.assets.length, isEdited: demo.isEdited, activeEditRevision: demo.activeEditRevision }; })()),
     enabled: validId,
+  });
+  const allCollectionsQuery = useQuery({
+    queryKey: ["work-collections"],
+    queryFn: () => runtime ? listWorkCollections() : Promise.resolve([]),
+    enabled: validId,
+  });
+  const workCollectionsQuery = useQuery({
+    queryKey: ["collections-for-work", documentQuery.data?.download.source, documentQuery.data?.download.sourceId],
+    queryFn: () => listCollectionsForWork(documentQuery.data!.download.source, documentQuery.data!.download.sourceId),
+    enabled: runtime && Boolean(documentQuery.data),
+  });
+  const addToCollectionMutation = useMutation({
+    mutationFn: (collectionId: string) => addWorkCollectionMembers(collectionId, [{
+      source: documentQuery.data!.download.source,
+      sourceId: documentQuery.data!.download.sourceId,
+      addedBy: "manual",
+    }]),
+    onSuccess: (_value, collectionId) => {
+      queryClient.invalidateQueries({ queryKey: ["work-collections"] });
+      queryClient.invalidateQueries({ queryKey: ["collections-for-work"] });
+      queryClient.invalidateQueries({ queryKey: ["collections-for-person"] });
+      notifications.show({ color: "green", message: "コレクションに追加しました", onClick: () => navigate(`/collections/${collectionId}`) });
+    },
+    onError: (error) => notifications.show({ color: "red", title: "コレクションに追加できません", message: errorMessage(error) }),
   });
   const assetsQuery = useQuery({
     queryKey: ["work-assets", id],
@@ -249,9 +274,15 @@ export default function WorkPage() {
           <Grid.Col span={{ base: 12, sm: 8, lg: 9 }}>
             <Stack p={{ base: "lg", lg: "xl" }} h="100%" gap={0}>
               <Stack gap="md">
-                <Group justify="space-between" align="flex-start" wrap="nowrap">
+                <Group justify="space-between" align="flex-start" wrap="wrap">
                   <Group gap="xs"><ProviderMark provider={work.source} /><Badge variant="light" color="gray">{contentTypeLabel(work.contentType)}</Badge>{doc.isEdited && <Badge color="gray" variant="light">ローカル編集</Badge>}</Group>
+                  <Group gap="xs" wrap="wrap" className="work-hero__utility">
+                  {/* 保存フォルダーとアーカイブは作者詳細と同じく上段の補助操作へ。
+                      下段は読む・編集のような、その作品を扱う主操作だけに保つ。 */}
+                  <Button variant="default" leftSection={<Icons.openFolder size={IconSize.menu} />} onClick={openSavedFolder}>保存フォルダー</Button>
+                  <Button variant="default" leftSection={<Icons.archive size={IconSize.menu} />} onClick={exportArchive}>アーカイブ</Button>
                   <Menu position="bottom-end"><Menu.Target><Tooltip label="その他"><ActionIcon variant="subtle" color="gray" size="lg" aria-label="作品のその他の操作"><Icons.more size={IconSize.action} /></ActionIcon></Tooltip></Menu.Target><Menu.Dropdown><Menu.Item leftSection={<Icons.inAppBrowser size={IconSize.menu} />} onClick={openSourceInApp}>元ページをアプリ内で開く</Menu.Item><Menu.Item leftSection={<Icons.externalLink size={IconSize.menu} />} onClick={openSource}>元ページをブラウザで開く</Menu.Item><Menu.Divider /><Menu.Item color="red" leftSection={<Icons.delete size={IconSize.menu} />} onClick={deleteWork}>作品を削除</Menu.Item></Menu.Dropdown></Menu>
+                  </Group>
                 </Group>
                 <Box>
                   {/* The series line is itself the link, so it is not repeated
@@ -286,16 +317,27 @@ export default function WorkPage() {
                 {work.assetCount > 0 && <Text size="sm" c="dimmed"><Icons.assets size={IconSize.menu} />{work.assetCount}アセット</Text>}
               </Group>
               <div className="work-hero__actionbar">
-                <Group gap={8} wrap="nowrap" className="work-hero__actions">
+                <Group gap={6} wrap="wrap" className="work-hero__actions">
                   <Button className="work-hero__action" leftSection={<Icons.read size={IconSize.action} />} onClick={() => navigate(`/reader/${work.id}`)}>読む</Button>
                   <Button className="work-hero__action" variant="default" leftSection={<Icons.edit size={IconSize.action} />} onClick={() => navigate(`/editor/${work.id}`)}>編集</Button>
+                  <Menu position="bottom-start" width={280}>
+                    <Menu.Target><Button className="work-hero__action" variant="default" leftSection={<Icons.collection size={IconSize.action} />}>コレクション{workCollectionsQuery.data?.length ? ` ${workCollectionsQuery.data.length}` : ""}</Button></Menu.Target>
+                    <Menu.Dropdown>
+                      <Menu.Label>コレクションに追加</Menu.Label>
+                      {(allCollectionsQuery.data ?? []).length === 0 ? <Menu.Item disabled>コレクションがありません</Menu.Item> : (allCollectionsQuery.data ?? []).map((collection) => {
+                        const included = workCollectionsQuery.data?.some((value) => value.id === collection.id) ?? false;
+                        return <Menu.Item key={collection.id} disabled={included || addToCollectionMutation.isPending} leftSection={included ? <Icons.confirm size={IconSize.menu} /> : <Icons.collection size={IconSize.menu} />} onClick={() => addToCollectionMutation.mutate(collection.id)}>{collection.name}{included ? "（追加済み）" : ""}</Menu.Item>;
+                      })}
+                      <Menu.Divider />
+                      <Menu.Item leftSection={<Icons.collectionSuggest size={IconSize.menu} />} onClick={() => navigate(`/library?tab=collections&suggest=${work.id}`)}>関連作品からひな型を作る</Menu.Item>
+                      <Menu.Item leftSection={<Icons.add size={IconSize.menu} />} onClick={() => navigate("/library?tab=collections")}>新しいコレクションを作る</Menu.Item>
+                    </Menu.Dropdown>
+                  </Menu>
                   {/* One glyph in both states, as on the cards: the label already says which way the press goes. */}
                   <Button className="work-hero__action" variant={queued ? "filled" : "default"} color="leaf" leftSection={<Icons.epubAdd size={IconSize.action} />} onClick={() => queued ? removeFromEpubQueue(work.id) : addToEpubQueue(work.id)}>{queued ? "EPUB追加済み" : "EPUB"}</Button>
-                </Group>
-                <Group gap={6} wrap="nowrap" className="work-hero__secondary-actions">
-                  <Button className="work-hero__action" variant="default" leftSection={<Icons.openFolder size={IconSize.action} />} onClick={openSavedFolder}>保存フォルダー</Button>
-                  <Button className="work-hero__action" variant="default" leftSection={<Icons.archive size={IconSize.action} />} onClick={exportArchive}>アーカイブ</Button>
-                  <Tooltip label={work.favorite ? "お気に入りを解除" : "お気に入りに追加"}><ActionIcon size="lg" variant="default" color={work.favorite ? "red" : "gray"} style={{ "--ai-color": work.favorite ? "var(--flag-favorite)" : "var(--flag-off)", "--ai-bg": work.favorite ? "var(--flag-favorite-bg)" : undefined }} aria-label={work.favorite ? "お気に入りを解除" : "お気に入りに追加"} aria-pressed={work.favorite} disabled={mutate.isPending} onClick={() => mutate.mutate({ favorite: !work.favorite })}><Icons.favorite size={IconSize.nav} fill={work.favorite ? "currentColor" : "none"} /></ActionIcon></Tooltip>
+                  {/* Last in the row, beside EPUB: it belongs with the
+                      actions for this work, not off at the bar edge. */}
+                  <Tooltip label={work.favorite ? "お気に入りを解除" : "お気に入りに追加"}><ActionIcon className="work-hero__favorite" size="lg" variant="subtle" color={work.favorite ? "red" : "gray"} style={{ "--ai-color": work.favorite ? "var(--flag-favorite)" : "var(--flag-off)", "--ai-bg": "transparent" }} aria-label={work.favorite ? "お気に入りを解除" : "お気に入りに追加"} aria-pressed={work.favorite} disabled={mutate.isPending} onClick={() => mutate.mutate({ favorite: !work.favorite })}><Icons.favorite size={IconSize.nav} fill={work.favorite ? "currentColor" : "none"} /></ActionIcon></Tooltip>
                 </Group>
               </div>
             </Stack>

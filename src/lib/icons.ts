@@ -171,6 +171,10 @@ export const Icons = {
   series: Library,
   /** The whole library. */
   library: LibraryBig,
+  /** A user-defined group of works across providers and official series. */
+  collection: GalleryHorizontalEnd,
+  /** Build or review an automatically suggested collection. */
+  collectionSuggest: Sparkles,
   /** A tag. */
   tag: Tag,
   /** One saved search in a list of them. */

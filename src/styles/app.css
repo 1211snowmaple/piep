@@ -497,9 +497,12 @@ select {
 
 /* Stacked beside the trend; once the column spans the page they sit side by
    side rather than becoming two full-width strips. */
-.dashboard-side { display: grid; height: 100%; gap: var(--mantine-spacing-lg); align-content: start; }
+/* Both cards keep their natural height and the spare room falls between them,
+   so the tag card's bottom edge still lines up with the chart beside it without
+   its rows being stretched apart to fill a height they cannot earn. */
+.dashboard-side { display: grid; height: 100%; gap: var(--mantine-spacing-lg); grid-template-rows: auto auto; align-content: space-between; }
 @media (max-width: 61.99em) {
-  .dashboard-side { grid-template-columns: 1fr 1fr; align-content: stretch; }
+  .dashboard-side { grid-template-columns: 1fr 1fr; grid-template-rows: auto; }
 }
 @media (max-width: 40em) {
   .dashboard-side { grid-template-columns: 1fr; }
@@ -863,15 +866,41 @@ select {
    edge and, with one long tag, most of a row empty. Letting every chip grow
    into the space left on its row fills each row exactly, so the block has a
    straight edge instead of a series of holes. */
+/* Chips used to stretch to fill the line, so a row often held one or two and
+   the list ran long.
+ *
+ * Three is the floor rather than a consequence of a minimum track width: the
+ * card is narrow enough that any min wide enough to look right also drops the
+ * count to two. Columns are added from the card's own width, not the window's,
+ * because this card sits in a grid column and the two do not move together.
+ * Without container query support the base rule still gives the intended three. */
+.dashboard-tags-card { container-type: inline-size; container-name: dashboard-tags; --dashboard-tag-height: 30px; }
 .dashboard-tags {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  /* Four rows whatever the column count. Rows are a fixed height and the box is
+     sized to exactly four of them, so the tags that do not fit fall outside it
+     and are clipped whole - a wider card shows more tags rather than fewer
+     rows. */
+  grid-auto-rows: var(--dashboard-tag-height);
+  height: calc(4 * var(--dashboard-tag-height) + 3 * 6px);
+  overflow: hidden;
   gap: 6px;
+}
+@container dashboard-tags (min-width: 460px) {
+  .dashboard-tags { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+}
+@container dashboard-tags (min-width: 600px) {
+  .dashboard-tags { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+}
+@container dashboard-tags (min-width: 740px) {
+  .dashboard-tags { grid-template-columns: repeat(6, minmax(0, 1fr)); }
 }
 
 .dashboard-tag {
-  height: 30px;
-  flex: 1 1 auto;
+  height: var(--dashboard-tag-height);
+  width: 100%;
+  min-width: 0;
   padding-inline: 10px;
   cursor: pointer;
   border: 1px solid transparent;
@@ -885,10 +914,10 @@ select {
 .dashboard-tag:active { transform: translateY(1px); }
 .dashboard-tag:focus-visible { outline: 2px solid var(--mantine-color-piep-5); outline-offset: 2px; }
 .dashboard-tag .mantine-Badge-label { display: flex; width: 100%; align-items: center; justify-content: space-between; gap: 7px; }
-/* A very long tag would otherwise be a row of its own. It keeps its count and
-   its full name in the tooltip. */
-.dashboard-tag__name { overflow: hidden; max-width: 14ch; text-overflow: ellipsis; white-space: nowrap; }
-.dashboard-tag__count { display: inline-grid; min-width: 18px; height: 18px; padding-inline: 4px; place-items: center; border-radius: 999px; background: light-dark(#e4e8ec, #2b323c); color: var(--mantine-color-dimmed); font-size: 10px; font-variant-numeric: tabular-nums; }
+/* The name gives way before the count does: a trimmed name still reads, a
+   trimmed number does not. The full name stays in the tooltip. */
+.dashboard-tag__name { overflow: hidden; min-width: 0; flex: 1 1 auto; text-overflow: ellipsis; white-space: nowrap; }
+.dashboard-tag__count { flex: 0 0 auto; display: inline-grid; min-width: 18px; height: 18px; padding-inline: 4px; place-items: center; border-radius: 999px; background: light-dark(#e4e8ec, #2b323c); color: var(--mantine-color-dimmed); font-size: 10px; font-variant-numeric: tabular-nums; }
 
 .quick-save-input {
   width: 100%;
@@ -1123,16 +1152,23 @@ select {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: 12px;
   margin-top: var(--mantine-spacing-md);
   padding-top: 12px;
   border-top: 1px solid light-dark(#e3e7ec, #303945);
 }
-.work-hero__actions { min-width: 0; flex: 0 1 auto; }
-.work-hero__secondary-actions { flex: 0 0 auto; }
+.work-hero__actions { min-width: 0; flex: 1 1 auto; }
+/* Keeps the far right even when the bar folds onto a second line, where
+   space-between would otherwise leave it at the start of the new row. */
+.work-hero__actionbar > .work-hero__favorite { margin-left: auto; }
+/* Same place and same weight as the author page's row, so the two detail
+   screens read as one design. */
+.work-hero__utility { flex: 0 1 auto; }
 .work-hero__action {
+  flex: 0 0 auto;
   min-height: 38px;
-  padding-inline: 13px;
+  padding-inline: 10px;
   box-shadow: 0 1px 2px rgb(20 32 45 / 5%);
   transition: transform 90ms ease, border-color 120ms ease, box-shadow 120ms ease;
 }
@@ -1294,7 +1330,7 @@ select {
   box-shadow: 0 14px 34px rgb(25 34 44 / 18%);
 }
 .entity-hero__series-cover img { width: 100%; height: 100%; }
-.entity-hero__actions { flex: 0 0 auto; }
+.entity-hero__actions { flex: 0 1 auto; flex-wrap: wrap; }
 .entity-hero__primary .provider-mark { width: fit-content; align-self: flex-start; }
 .profile-links { align-items: stretch; }
 .profile-link {
@@ -1848,7 +1884,7 @@ select {
   .work-hero__cover-stage { min-height: 280px; }
   .work-hero__cover { width: 168px; }
   .work-hero__actionbar { align-items: stretch; flex-direction: column; }
-  .work-hero__secondary-actions { justify-content: flex-end; }
+  .work-hero__actions { flex-wrap: wrap !important; }
 }
 
 @media (max-width: 61.99em) {

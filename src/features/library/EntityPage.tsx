@@ -16,6 +16,7 @@ import {
   Popover,
   ScrollArea,
   Select,
+  SimpleGrid,
   Stack,
   Switch,
   Tabs,
@@ -43,6 +44,9 @@ import { errorMessage, formatBytes, formatDate, formatNumber } from "@/lib/forma
 import { runSingleCheck } from "@/features/updates/startSingleCheck";
 import { demoFacets, searchDemoWorks } from "@/mocks/demoData";
 import { exportEntityZip } from "@/services/archiveApi";
+import { CollectionCard } from "@/features/collections/CollectionCard";
+import { listCollectionsForPerson } from "@/services/collectionApi";
+import type { WorkCollectionSummary } from "@/types/collections";
 import {
   getAssetUrl,
   getLatestEntityProfileJson,
@@ -260,6 +264,14 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
     enabled: kind === "person" && tab === "series",
     staleTime: 5 * 60_000,
   });
+  // 作者の作品を 1 件でも含むコレクション。作者詳細から、その人が関わっている
+  // まとまりへ直接辿れるようにする。
+  const personCollections = useQuery({
+    queryKey: ["collections-for-person", source, key],
+    queryFn: () => runtime ? listCollectionsForPerson(source, key) : Promise.resolve([] as WorkCollectionSummary[]),
+    enabled: kind === "person",
+    staleTime: 60_000,
+  });
   const entityTags = useQuery({
     queryKey: ["entity-tags", kind, source, key],
     queryFn: () => runtime ? listEntityTags(kind, source, key) : Promise.resolve([] as FacetCount[]),
@@ -398,6 +410,7 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
             <Tabs.List>
               <Tabs.Tab value="works" leftSection={<Icons.read size={IconSize.inline} />}>作品</Tabs.Tab>
               {kind === "person" && <Tabs.Tab value="series" leftSection={<Icons.series size={IconSize.inline} />} rightSection={authorSeriesTotal !== null ? <Badge size="xs" variant="light">{formatNumber(authorSeriesTotal)}</Badge> : undefined}>シリーズ</Tabs.Tab>}
+              {kind === "person" && personCollections.data && personCollections.data.length > 0 && <Tabs.Tab value="collections" leftSection={<Icons.collection size={IconSize.inline} />} rightSection={<Badge size="xs" variant="light">{formatNumber(personCollections.data.length)}</Badge>}>コレクション</Tabs.Tab>}
               <Tabs.Tab value="history">プロフィール履歴</Tabs.Tab>
               <Tabs.Tab value="json">JSON</Tabs.Tab>
             </Tabs.List>
@@ -540,6 +553,18 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
                 </Stack>
               </Tabs.Panel>
             )}
+            {kind === "person" && (
+              <Tabs.Panel value="collections" pt="lg">
+                <Stack gap="sm">
+                  <Text size="sm" c="dimmed">{displayName}の作品を含むコレクションです。ほかの作者の作品が一緒に入っている場合もあります。</Text>
+                  {personCollections.isLoading ? <LoadingState /> : personCollections.error ? <ErrorState error={personCollections.error} retry={() => personCollections.refetch()} /> : (personCollections.data ?? []).length === 0
+                    ? <EmptyState icon={Icons.collection} title="コレクションはありません" description="この作者の作品は、まだどのコレクションにも入っていません。" />
+                    : <SimpleGrid cols={{ base: 1, md: 2 }}>{(personCollections.data ?? []).map((collection) => (
+                        <CollectionCard key={collection.id} collection={collection} />
+                      ))}</SimpleGrid>}
+                </Stack>
+              </Tabs.Panel>
+            )}
             <Tabs.Panel value="history" pt="lg"><Paper p="lg" withBorder>{versions.isLoading ? <LoadingState /> : <Timeline active={versions.data?.length ?? 0}>{versions.data?.map((version) => <Timeline.Item key={version.id} bullet={<Icons.versionHistory size={IconSize.inline} />} title={`バージョン ${version.version}`}><Text size="sm" c="dimmed">{version.changeSummary || "プロフィールを保存"}</Text><Text size="xs" c="dimmed" mt={4}>{formatDate(version.createdAt, true)} · {formatBytes(version.fileSizeBytes)}</Text></Timeline.Item>)}</Timeline>}</Paper></Tabs.Panel>
             <Tabs.Panel value="json" pt="lg">{tab !== "json" ? null : profileJson.isLoading ? <LoadingState /> : profileJson.error ? <ErrorState error={profileJson.error} retry={() => profileJson.refetch()} /> : <BoundedJsonView value={profileJson.data ?? {}} />}</Tabs.Panel>
           </Tabs>
@@ -558,9 +583,9 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
   );
 }
 
-function parseEntityTab(value: string | null, kind: "person" | "series"): "works" | "series" | "history" | "json" {
+function parseEntityTab(value: string | null, kind: "person" | "series"): "works" | "series" | "collections" | "history" | "json" {
   if (value === "history" || value === "json") return value;
-  if (value === "series" && kind === "person") return "series";
+  if ((value === "series" || value === "collections") && kind === "person") return value;
   return "works";
 }
 

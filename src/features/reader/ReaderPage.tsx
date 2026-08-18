@@ -36,9 +36,73 @@ import { ProviderMark, sourceUrl } from "@/lib/providers";
 import { formatDate, formatNumber } from "@/lib/format";
 import { prepareDocumentHtml } from "@/lib/content";
 import { useContentLinkNavigation } from "@/lib/contentLinks";
-import { getAssetUrl, getReaderContentPage, getReaderMetadata, isTauriRuntime, openLocalAsset, searchReaderContent } from "@/services/dbApi";
+import { getWorkCollection, listCollectionsForWork } from "@/services/collectionApi";
+import { getAssetUrl, getReaderContentPage, getReaderMetadata, isTauriRuntime, openLocalAsset, searchDownloadsV2, searchReaderContent } from "@/services/dbApi";
 import { openExternalUrl } from "@/services/openerApi";
 import { getDemoReader } from "@/mocks/demoData";
+import type { WorkCollection } from "@/types/collections";
+
+interface ReadingContextRow {
+  key: string;
+  label: string;
+  detail: string;
+  collectionId?: string;
+  /** Ordered collections and official series have a real reading order, so the
+   *  neighbours can be called 前 / 次. An unordered collection only has a
+   *  display arrangement: calling its neighbours 続き would invent a sequence
+   *  the reader never asked for. */
+  sequential: boolean;
+  previous: { id: number; title: string } | null;
+  next: { id: number; title: string } | null;
+}
+
+function adjacentWorks(items: { id: number; title: string }[], currentId: number) {
+  const index = items.findIndex((item) => item.id === currentId);
+  return {
+    position: index >= 0 ? index + 1 : null,
+    total: items.length,
+    previous: index > 0 ? items[index - 1] : null,
+    next: index >= 0 && index + 1 < items.length ? items[index + 1] : null,
+  };
+}
+
+/** One continuation route offered at the end of a work.
+ *
+ *  An ordered collection or an official series really does have a next
+ *  instalment, so it gets 前の作品 / 次の作品. Anything without a reading order
+ *  — an unordered collection, an author's posting history — offers the same
+ *  neighbours but never calls them the continuation, because presenting a
+ *  themed set as a serial is exactly the misreading the arrangement invites. */
+function ReadingContextCard({ context, onOpen }: {
+  context: ReadingContextRow;
+  onOpen: (path: string) => void;
+}) {
+  const href = (id: number) => `/reader/${id}${context.collectionId ? `?collection=${encodeURIComponent(context.collectionId)}` : ""}`;
+  const previousLabel = context.sequential ? "前の作品はありません" : "ほかの作品はありません";
+  const nextLabel = context.sequential ? "次の作品はありません" : "ほかの作品はありません";
+  return (
+    <Paper withBorder p="sm" radius="md">
+      <Stack gap="xs">
+        <Group justify="space-between">
+          <Box>
+            <Text size="sm" fw={700}>{context.label}</Text>
+            <Text size="xs" c="dimmed">{context.detail}</Text>
+          </Box>
+          {context.collectionId && <Button size="compact-xs" variant="subtle" onClick={() => onOpen(`/collections/${context.collectionId}`)}>一覧</Button>}
+        </Group>
+        {!context.sequential && <Text size="xs" c="dimmed">読む順は決まっていません。同じまとまりの作品です。</Text>}
+        <Group grow>
+          {context.previous
+            ? <Button variant="default" leftSection={context.sequential ? <Icons.previous size={IconSize.menu} /> : undefined} onClick={() => onOpen(href(context.previous!.id))}>{context.previous.title}</Button>
+            : <Button variant="default" disabled>{previousLabel}</Button>}
+          {context.next
+            ? <Button variant={context.sequential ? "filled" : "default"} rightSection={context.sequential ? <Icons.next size={IconSize.menu} /> : undefined} onClick={() => onOpen(href(context.next!.id))}>{context.next.title}</Button>
+            : <Button variant="default" disabled>{nextLabel}</Button>}
+        </Group>
+      </Stack>
+    </Paper>
+  );
+}
 
 function BookmarkControls({ bookmarks, addDisabled, onAdd, onOpen, onRemove }: {
   bookmarks: Bookmark[];
@@ -110,6 +174,7 @@ export default function ReaderPage() {
   const runtime = isTauriRuntime();
   const queryClient = useQueryClient();
   const requestedVersion = Number(searchParams.get("version"));
+  const requestedCollectionId = searchParams.get("collection")?.trim() || null;
   const normalizedRequestedVersion = Number.isFinite(requestedVersion) && requestedVersion > 0 ? requestedVersion : null;
   const [version, setVersion] = useState<number | null>(normalizedRequestedVersion);
   const [settings, setSettings] = useLocalStorage<ReaderSettings>({ key: "piep.reader-settings.v4", defaultValue: defaults });
@@ -141,6 +206,79 @@ export default function ReaderPage() {
     queryFn: () => runtime ? searchReaderContent(id, debouncedReaderSearch, version) : Promise.resolve([]),
     enabled: searchOpened && debouncedReaderSearch.trim().length > 0,
   });
+  const explicitCollectionQuery = useQuery({
+    queryKey: ["reader-collection-context", requestedCollectionId],
+    queryFn: () => getWorkCollection(requestedCollectionId!),
+    enabled: runtime && Boolean(requestedCollectionId),
+  });
+  const memberCollectionsQuery = useQuery({
+    queryKey: ["reader-member-collections", metadataQuery.data?.download.source, metadataQuery.data?.download.sourceId],
+    queryFn: async () => {
+      const summaries = await listCollectionsForWork(metadataQuery.data!.download.source, metadataQuery.data!.download.sourceId);
+      return Promise.all(summaries.slice(0, 20).map((summary) => getWorkCollection(summary.id)));
+    },
+    enabled: runtime && Boolean(metadataQuery.data),
+    staleTime: 30_000,
+  });
+  const officialSeriesQuery = useQuery({
+    queryKey: ["reader-official-series", metadataQuery.data?.download.source, metadataQuery.data?.download.seriesId],
+    queryFn: () => searchDownloadsV2({ seriesSource: metadataQuery.data!.download.source, seriesKey: metadataQuery.data!.download.seriesId!, sortBy: "series_order", sortOrder: "asc", limit: 200, projection: "bulk" }),
+    enabled: runtime && Boolean(metadataQuery.data?.download.seriesId),
+    staleTime: 60_000,
+  });
+  const authorWorksQuery = useQuery({
+    queryKey: ["reader-author-sequence", metadataQuery.data?.download.source, metadataQuery.data?.download.personId ?? metadataQuery.data?.download.authorId],
+    queryFn: () => searchDownloadsV2({ personSource: metadataQuery.data!.download.source, personKey: metadataQuery.data!.download.personId || metadataQuery.data!.download.authorId, sortBy: "source_created_at", sortOrder: "asc", limit: 200, projection: "bulk" }),
+    enabled: runtime && Boolean(metadataQuery.data?.download.personId || metadataQuery.data?.download.authorId),
+    staleTime: 60_000,
+  });
+  const readingContexts = useMemo<ReadingContextRow[]>(() => {
+    const work = metadataQuery.data?.download;
+    if (!work) return [];
+    const rows: ReadingContextRow[] = [];
+    const seenCollections = new Set<string>();
+    // 読み始めた文脈を先に積む。以降は重複を弾くので、同じコレクションが
+    // 二重に並ぶことなく、開始文脈が常に先頭に来る。
+    const addCollection = (collection: WorkCollection | undefined) => {
+      if (!collection || seenCollections.has(collection.id)) return;
+      const missing = collection.memberCount - collection.availableCount;
+      const items = collection.members.flatMap((member) => member.downloadId ? [{ id: member.downloadId, title: member.title }] : []);
+      const adjacent = adjacentWorks(items, work.id);
+      if (!adjacent.previous && !adjacent.next) return;
+      seenCollections.add(collection.id);
+      const sequential = collection.collectionKind === "ordered";
+      const progress = sequential && adjacent.position
+        ? `${adjacent.position} / ${adjacent.total}`
+        : `${adjacent.total}作品`;
+      rows.push({
+        key: `collection:${collection.id}`,
+        // 公式シリーズの行と同じく、常に何のまとまりかを名乗る。作品から直接
+        // 開いた場合に名前だけが並ぶと、シリーズとの区別がつかなくなる。
+        label: `コレクション「${collection.name}」`,
+        // 順序なしは「並び」と呼ばない。表示上の並びがあるだけで、読む順ではない。
+        detail: [progress, sequential ? "読む順あり" : "順序なし", missing > 0 ? `未保存${missing}作品は除外` : null]
+          .filter(Boolean)
+          .join(" · "),
+        collectionId: collection.id,
+        sequential,
+        ...adjacent,
+      });
+    };
+    addCollection(explicitCollectionQuery.data);
+    for (const collection of memberCollectionsQuery.data ?? []) addCollection(collection);
+    if (officialSeriesQuery.data) {
+      const items = officialSeriesQuery.data.items.map((item) => ({ id: item.id, title: item.title }));
+      const adjacent = adjacentWorks(items, work.id);
+      if (adjacent.previous || adjacent.next) rows.push({ key: `series:${work.source}:${work.seriesId}`, label: work.seriesTitle ? `公式シリーズ「${work.seriesTitle}」` : "公式シリーズ", detail: `${adjacent.position ?? "-"} / ${adjacent.total} · 公式順`, sequential: true, ...adjacent });
+    }
+    if (authorWorksQuery.data) {
+      const items = authorWorksQuery.data.items.map((item) => ({ id: item.id, title: item.title }));
+      const adjacent = adjacentWorks(items, work.id);
+      // 作者の投稿順は「物語の次」ではないため、続きとしては案内しない。
+      if (adjacent.previous || adjacent.next) rows.push({ key: `author:${work.source}:${work.authorId}`, label: `${work.authorName}の作品`, detail: `${adjacent.total}作品の公開順`, sequential: false, ...adjacent });
+    }
+    return rows;
+  }, [authorWorksQuery.data, explicitCollectionQuery.data, memberCollectionsQuery.data, metadataQuery.data?.download, officialSeriesQuery.data, requestedCollectionId]);
   // Only while reading: an address you cannot follow is noise here, whereas the
   // detail screen deliberately shows the work as its author wrote it.
   const contentReady = !contentQuery.isPlaceholderData && contentQuery.data?.page === sourcePage - 1;
@@ -349,7 +487,7 @@ export default function ReaderPage() {
               </Box>}
               {sourcePage === 1 && <Divider my="xl" />}
               <article className="reader-content" onClick={handleArticleClick} dangerouslySetInnerHTML={{ __html: preparedHtml }} />
-              {sourcePage === pageCount && <Box className="reader-finish"><Icons.read size={IconSize.hero} /><Text fw={700}>読了</Text><Button variant="light" onClick={() => returnTo(`/works/${work.id}`)}>作品詳細へ戻る</Button></Box>}
+              {sourcePage === pageCount && <Box className="reader-finish"><Icons.read size={IconSize.hero} /><Text fw={700}>読了</Text>{readingContexts.length > 0 && <Stack gap="sm" w="100%" maw={620} mt="md">{readingContexts.map((context) => <ReadingContextCard key={context.key} context={context} onOpen={navigate} />)}</Stack>}<Button variant="light" mt="md" onClick={() => returnTo(`/works/${work.id}`)}>作品詳細へ戻る</Button></Box>}
             </>}
           </Box>
         </Box>

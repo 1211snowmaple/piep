@@ -13,9 +13,16 @@ export default defineConfig({
   outputDir: "./test-results/playwright",
   snapshotPathTemplate: "{testDir}/__screenshots__/{projectName}/{arg}{ext}",
   fullyParallel: true,
-  workers: process.env.CI ? 4 : undefined,
+  // Four browsers at 200dpi on a two-core runner exhausted it: sessions were
+  // closed mid-test and pages that render instantly here never appeared.
+  workers: process.env.CI ? 2 : undefined,
   forbidOnly: Boolean(process.env.CI),
-  retries: process.env.CI ? 1 : 0,
+  retries: process.env.CI ? 2 : 0,
+  // Each test opens the library, waits up to 15s for it to render, then compares
+  // a full-page screenshot - at 200dpi on a two-core runner that does not fit in
+  // the default 30s, and the ones that overran were failing on the timeout
+  // rather than on anything they measured.
+  timeout: process.env.CI ? 90_000 : 30_000,
   reporter: process.env.CI ? [["github"], ["html", { outputFolder: "playwright-report", open: "never" }]] : "list",
   expect: {
     timeout: 15_000,
@@ -41,7 +48,14 @@ export default defineConfig({
     use: { viewport: { width: size.width, height: size.height }, colorScheme, deviceScaleFactor },
   })))),
   webServer: {
-    command: "npm run dev -- --host localhost",
+    // A built bundle in CI rather than the dev server. The dev server compiles
+    // each module on request, and with several browsers pulling at once on a
+    // small runner those requests stalled long enough for pages to come up
+    // empty. Serving static files removes that; locally the dev server stays,
+    // so a run still picks up edits without a build.
+    command: process.env.CI
+      ? "npm run preview -- --host localhost --port 1420 --strictPort"
+      : "npm run dev -- --host localhost",
     url: "http://localhost:1420",
     reuseExistingServer: !process.env.CI,
     timeout: 120_000,

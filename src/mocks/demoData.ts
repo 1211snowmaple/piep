@@ -88,6 +88,12 @@ export const demoDashboard: DashboardSummary = {
   topTags: [
     { name: "創作", count: 326 }, { name: "小説", count: 248 }, { name: "ファンタジー", count: 192 }, { name: "日常", count: 138 }, { name: "SF", count: 96 },
     { name: "制作記録", count: 84 }, { name: "短編", count: 72 }, { name: "素材", count: 41 },
+    { name: "イラスト", count: 38 }, { name: "連載", count: 31 }, { name: "設定資料", count: 22 },
+    { name: "習作", count: 14 }, { name: "背景", count: 13 }, { name: "キャラクター", count: 12 },
+    { name: "ラフ", count: 11 }, { name: "水彩", count: 10 }, { name: "風景", count: 9 },
+    { name: "季節", count: 8 }, { name: "日記", count: 7 }, { name: "告知", count: 6 },
+    { name: "线画", count: 5 }, { name: "習慣", count: 4 }, { name: "旅", count: 3 },
+    { name: "音楽", count: 2 },
   ],
   topAuthors: [
     { name: "青葉しおり", count: 48 }, { name: "遠野つむぎ", count: 37 }, { name: "mizu atelier", count: 31 }, { name: "白鳥ケイ", count: 24 }, { name: "こはるデザイン室", count: 19 },

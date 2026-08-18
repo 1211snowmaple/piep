@@ -2,9 +2,15 @@ import "@testing-library/jest-dom/vitest";
 import { cleanup } from "@testing-library/react";
 import { afterEach } from "vitest";
 
-// Node 26 exposes an unusable `localStorage` placeholder unless a backing file
-// is configured. jsdom tests need a deterministic, isolated implementation.
-if (!window.localStorage) {
+// One storage implementation on every Node version, installed unconditionally.
+//
+// Two different ones used to be in play: Node 26 exposes an unusable
+// `localStorage` placeholder unless a backing file is configured, so this shim
+// took over locally, while on the LTS that CI runs jsdom's own Storage was left
+// in place. That one is a Proxy, and `vi.spyOn` cannot attach to it - the spy
+// silently records nothing - so tests that assert on writes passed here and
+// failed there. A plain object behaves the same everywhere and can be spied on.
+{
   let values = new Map<string, string>();
   Object.defineProperty(window, "localStorage", {
     configurable: true,

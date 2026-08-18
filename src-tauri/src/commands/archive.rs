@@ -1,6 +1,6 @@
 use crate::database::{
     Database, DownloadEntry, EntityVersion, NewAsset, NewDownload, NewVersion, SearchV2Params,
-    SeriesEntry, UpdateTarget,
+    SeriesEntry, UpdateTarget, WorkCollectionInput, WorkCollectionMemberInput, WorkKey,
 };
 use crate::AppState;
 use serde::{Deserialize, Serialize};
@@ -307,6 +307,35 @@ struct BackupMetadata {
     people: Vec<BackupPerson>,
     series: Vec<BackupSeries>,
     update_targets: Vec<UpdateTarget>,
+    #[serde(default)]
+    collections: Vec<BackupWorkCollection>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+struct BackupWorkCollection {
+    id: String,
+    name: String,
+    description: Option<String>,
+    collection_kind: String,
+    cover_work: Option<WorkKey>,
+    members: Vec<BackupWorkCollectionMember>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+struct BackupWorkCollectionMember {
+    source: String,
+    source_id: String,
+    #[serde(default)]
+    title_snapshot: String,
+    #[serde(default)]
+    author_snapshot: String,
+    position: i64,
+    member_role: String,
+    added_by: String,
+    pinned: bool,
+    note: Option<String>,
 }
 
 #[derive(Serialize, Debug, Clone)]
@@ -2755,6 +2784,55 @@ async fn export_zip_with_params_locked(
             });
         }
 
+        let mut backup_collections = Vec::new();
+        for summary in state.db.list_work_collections()? {
+            let collection = state.db.get_work_collection(&summary.id)?;
+            let cover_work = collection
+                .summary
+                .cover_download_id
+                .and_then(|cover_id| {
+                    collection
+                        .members
+                        .iter()
+                        .find(|member| member.download_id == Some(cover_id))
+                })
+                .map(|member| WorkKey {
+                    source: member.source.clone(),
+                    source_id: member.source_id.clone(),
+                });
+            let members = collection
+                .members
+                .iter()
+                .filter(|member| {
+                    !scoped
+                        || download_scope
+                            .contains(&(member.source.clone(), member.source_id.clone()))
+                })
+                .map(|member| BackupWorkCollectionMember {
+                    source: member.source.clone(),
+                    source_id: member.source_id.clone(),
+                    title_snapshot: member.title.clone(),
+                    author_snapshot: member.author_name.clone(),
+                    position: member.position,
+                    member_role: member.member_role.clone(),
+                    added_by: member.added_by.clone(),
+                    pinned: member.pinned,
+                    note: member.note.clone(),
+                })
+                .collect::<Vec<_>>();
+            if scoped && members.is_empty() {
+                continue;
+            }
+            backup_collections.push(BackupWorkCollection {
+                id: collection.summary.id,
+                name: collection.summary.name,
+                description: collection.summary.description,
+                collection_kind: collection.summary.collection_kind,
+                cover_work,
+                members,
+            });
+        }
+
         let metadata = BackupMetadata {
             version: "3.0".to_string(),
             created_at: chrono::Utc::now().to_rfc3339(),
@@ -2762,6 +2840,7 @@ async fn export_zip_with_params_locked(
             people: backup_people,
             series: backup_series,
             update_targets,
+            collections: backup_collections,
         };
 
         let metadata_json = serde_json::to_string_pretty(&metadata).map_err(|e| e.to_string())?;
@@ -3462,6 +3541,35 @@ async fn import_zip_locked(
 
             }
 
+                for collection in &metadata.collections {
+                    let members = collection
+                        .members
+                        .iter()
+                        .map(|member| WorkCollectionMemberInput {
+                            source: member.source.clone(),
+                            source_id: member.source_id.clone(),
+                            title_snapshot: Some(member.title_snapshot.clone()),
+                            author_snapshot: Some(member.author_snapshot.clone()),
+                            position: Some(member.position),
+                            member_role: Some(member.member_role.clone()),
+                            added_by: Some(member.added_by.clone()),
+                            pinned: Some(member.pinned),
+                            note: member.note.clone(),
+                        })
+                        .collect::<Vec<_>>();
+                    state.db.restore_work_collection(
+                        &WorkCollectionInput {
+                            id: Some(collection.id.clone()),
+                            name: collection.name.clone(),
+                            description: collection.description.clone(),
+                            collection_kind: collection.collection_kind.clone(),
+                            cover_download_id: None,
+                        },
+                        collection.cover_work.as_ref(),
+                        &members,
+                    )?;
+                }
+
                 record_restore_stale_index_ids(&stage_root, &stale_index_ids)?;
                 state.db.mark_restore_journal_committed(&journal_id)?;
                 Ok::<(i64, Vec<i64>, Vec<i64>), String>((
@@ -4061,6 +4169,27 @@ mod tests {
             people: Vec::new(),
             series: Vec::new(),
             update_targets: Vec::new(),
+            collections: vec![BackupWorkCollection {
+                id: format!("collection-{source_id}"),
+                name: "復元コレクション".to_string(),
+                description: Some("バックアップされた並び".to_string()),
+                collection_kind: "ordered".to_string(),
+                cover_work: Some(WorkKey {
+                    source: "pixiv".to_string(),
+                    source_id: source_id.to_string(),
+                }),
+                members: vec![BackupWorkCollectionMember {
+                    source: "pixiv".to_string(),
+                    source_id: source_id.to_string(),
+                    title_snapshot: title.to_string(),
+                    author_snapshot: "Restore author".to_string(),
+                    position: 0,
+                    member_role: "main".to_string(),
+                    added_by: "import".to_string(),
+                    pinned: false,
+                    note: None,
+                }],
+            }],
         };
         let metadata = serde_json::to_vec(&metadata).unwrap();
         let payload = serde_json::to_vec(&serde_json::json!({ "text": marker })).unwrap();
@@ -4351,6 +4480,10 @@ mod tests {
         )
         .unwrap()
         .is_empty());
+        assert!(state
+            .db
+            .get_work_collection("collection-crash-restore")
+            .is_err());
 
         drop(state);
         fs::remove_dir_all(base).unwrap();
@@ -4382,6 +4515,15 @@ mod tests {
             .unwrap();
         assert_ne!(restored.id, old_id);
         assert_eq!(restored.title, "New restore title");
+        let restored_collection = state
+            .db
+            .get_work_collection("collection-crash-restore")
+            .unwrap();
+        assert_eq!(restored_collection.members.len(), 1);
+        assert_eq!(
+            restored_collection.members[0].download_id,
+            Some(restored.id)
+        );
         assert!(fs::read_to_string(&json_path)
             .unwrap()
             .contains("newrestoremarker"));
@@ -4495,6 +4637,7 @@ mod tests {
             }],
             series: vec![],
             update_targets: vec![],
+            collections: vec![],
         };
         let metadata_json = serde_json::to_vec(&metadata).unwrap();
         write_test_zip(

@@ -21,7 +21,13 @@ jobs:
       - run: npm ci
       - run: npm run check
       - run: npm test
-      - run: cargo test --manifest-path src-tauri/Cargo.toml
+      # One thread: Tantivy allows a single IndexWriter per directory, and the
+      # app only ever opens one library per process - it takes an exclusive
+      # lock on it at startup. Running the index-backed tests side by side puts
+      # dozens of writers in one process, which on Windows fails commits with
+      # "Access is denied". Serial runs match how the component is really used
+      # and cost about twenty seconds against a twenty-minute compile.
+      - run: cargo test --manifest-path src-tauri/Cargo.toml -- --test-threads=1
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 
   visual-regression:
@@ -34,6 +40,9 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npx playwright install chromium
+      # Built here rather than inside the Playwright web server so a build
+      # failure reads as a build failure.
+      - run: npm run build
       - run: npm run test:visual
       - if: always()
         uses: actions/upload-artifact@v4

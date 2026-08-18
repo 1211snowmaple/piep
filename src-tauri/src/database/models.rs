@@ -397,6 +397,164 @@ pub struct SavedSearchInput {
     pub params_json: String,
 }
 
+/// 利用者が作品を横断してまとめる永続コレクション。
+///
+/// 公式シリーズや保存検索とは独立しており、同じ作品は複数のコレクションへ
+/// 所属できる。`collection_kind` は `ordered` または `unordered`。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkCollectionSummary {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub collection_kind: String,
+    pub cover_download_id: Option<i64>,
+    pub cover_path: Option<String>,
+    pub revision: i64,
+    pub member_count: i64,
+    pub available_count: i64,
+    pub total_text_length: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkCollectionInput {
+    /// 更新時だけ指定。新規作成では安定 ID をバックエンドが生成する。
+    pub id: Option<String>,
+    pub name: String,
+    pub description: Option<String>,
+    pub collection_kind: String,
+    pub cover_download_id: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkCollectionMember {
+    pub collection_id: String,
+    pub source: String,
+    pub source_id: String,
+    pub download_id: Option<i64>,
+    pub title: String,
+    pub author_name: String,
+    pub cover_path: Option<String>,
+    pub text_length: i64,
+    pub position: i64,
+    pub member_role: String,
+    pub added_by: String,
+    pub pinned: bool,
+    pub note: Option<String>,
+    pub missing: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkCollectionMemberInput {
+    pub source: String,
+    pub source_id: String,
+    /// バックアップ等で現在未保存の作品名を保つための任意スナップショット。
+    pub title_snapshot: Option<String>,
+    pub author_snapshot: Option<String>,
+    pub position: Option<i64>,
+    pub member_role: Option<String>,
+    pub added_by: Option<String>,
+    pub pinned: Option<bool>,
+    pub note: Option<String>,
+}
+
+/// 取得元をまたいでも衝突しない、保存状態に依存しない作品識別子。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkKey {
+    pub source: String,
+    pub source_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkCollection {
+    #[serde(flatten)]
+    pub summary: WorkCollectionSummary,
+    pub members: Vec<WorkCollectionMember>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkLink {
+    pub id: i64,
+    pub from_source: String,
+    pub from_source_id: String,
+    pub from_download_id: Option<i64>,
+    pub to_source: String,
+    pub to_source_id: String,
+    pub to_download_id: Option<i64>,
+    pub relation_type: String,
+    pub evidence_type: String,
+    pub anchor_text: Option<String>,
+    pub context_text: Option<String>,
+    pub confidence: f64,
+    pub status: String,
+    pub discovered_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CollectionSuggestionEvidence {
+    pub kind: String,
+    pub label: String,
+    pub contribution: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CollectionSuggestionMember {
+    pub source: String,
+    pub source_id: String,
+    pub download_id: Option<i64>,
+    pub title: String,
+    pub author_name: String,
+    pub cover_path: Option<String>,
+    pub text_length: i64,
+    pub proposed_position: i64,
+    pub score: f64,
+    pub selected: bool,
+    pub evidence: Vec<CollectionSuggestionEvidence>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CollectionSuggestion {
+    pub id: String,
+    pub proposed_name: String,
+    pub collection_kind: String,
+    pub score: f64,
+    pub rule_version: String,
+    pub state: String,
+    pub members: Vec<CollectionSuggestionMember>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CollectionSuggestionRequest {
+    pub seed_download_ids: Vec<i64>,
+    pub limit: Option<i64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcceptCollectionSuggestionInput {
+    pub suggestion_id: String,
+    pub name: Option<String>,
+    pub collection_kind: Option<String>,
+    pub member_keys: Option<Vec<WorkKey>>,
+}
+
 /// The counts the library sidebar shows next to each shelf.
 ///
 /// Kept separate from the dashboard summary, which also computes tag, author

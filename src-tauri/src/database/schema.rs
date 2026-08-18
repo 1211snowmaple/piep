@@ -3,18 +3,24 @@
 use rusqlite::Connection;
 use std::path::{Path, PathBuf};
 
-/// Current official schema version.
-const SCHEMA_VERSION: u32 = 2;
+/// Current schema version.
+///
+/// The preview-era v1 and v2 numbering was folded into a single definition:
+/// `create_schema` builds every table with CREATE TABLE IF NOT EXISTS, so one
+/// idempotent pass brings any earlier official library up to date. Existing
+/// libraries keep their rows and are simply re-stamped to this version.
+const SCHEMA_VERSION: u32 = 1;
 
-/// Tables that identify an existing database as the official v2 schema.
+/// Tables that identify a database as one of ours.
 ///
 /// This is a recognition fingerprint, not a list of everything the app creates.
-/// A database missing any of these is treated as an unknown preview schema and
-/// is archived and replaced - so adding a newly introduced table here makes
-/// every existing library look foreign and wipes it. New tables belong only in
-/// `initialize_v2_schema`, which adds them in place with CREATE TABLE IF NOT
-/// EXISTS. Nothing may be added to this list.
-const REQUIRED_TABLES: &[&str] = &[
+/// A database missing any of these is treated as a foreign schema and is
+/// archived and replaced - so adding a newly introduced table here makes every
+/// existing library look foreign and wipes it. New tables belong only in
+/// `create_schema`, which adds them in place. Nothing may be added to this
+/// list. Version markers and later additions are deliberately absent so that
+/// libraries written by any earlier build are still recognised.
+const CORE_TABLES: &[&str] = &[
     "downloads",
     "tags",
     "download_tags",
@@ -28,46 +34,86 @@ const REQUIRED_TABLES: &[&str] = &[
     "download_series",
     "entity_versions",
     "search_index_state",
-    "saved_searches",
     "work_edit_revisions",
     "work_edit_blocks",
     "update_jobs",
     "update_job_items",
     "update_job_logs",
-    "schema_v2_marker",
 ];
 
-/// Open the database at the official v2 schema.
+/// Open the database at the current schema.
 ///
-/// Official schemas are migrated in place so saved works are never discarded.
-/// Unknown preview schemas are backed up before a clean database is created.
+/// Any library this app wrote - whatever version stamp it carries - is brought
+/// up to date in place, so saved works are never discarded. Only a genuinely
+/// foreign database is backed up and replaced.
 pub fn initialize(conn: &Connection) -> Result<(), rusqlite::Error> {
     apply_pragmas(conn)?;
 
-    if is_official_v2_schema(conn)? {
-        initialize_v2_schema(conn)?;
-        migrate_additive_v2_schema(conn)?;
-        conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-        return Ok(());
-    }
-
-    if is_official_v1_schema(conn)? {
-        migrate_v1_to_v2(conn)?;
-        initialize_v2_schema(conn)?;
-        migrate_additive_v2_schema(conn)?;
+    if is_known_library(conn)? {
+        create_schema(conn)?;
+        add_missing_columns(conn)?;
+        stamp_schema_version(conn)?;
         return Ok(());
     }
 
     backup_current_database(conn)?;
-    reset_to_v2_schema(conn)?;
-    migrate_additive_v2_schema(conn)?;
+    reset_schema(conn)?;
     Ok(())
 }
 
-/// Additive tables deliberately stay out of `REQUIRED_TABLES`: adding them to
-/// the recognition fingerprint would make an older, otherwise valid v2
-/// library look foreign. `CREATE TABLE IF NOT EXISTS` upgrades it in place.
-fn migrate_additive_v2_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
+/// Recognises a database this app wrote, regardless of which build wrote it.
+///
+/// Deliberately looser than the old per-version checks: the version stamp and
+/// the marker tables are not consulted, because a library that predates the
+/// renumbering carries the older stamp and would otherwise be mistaken for a
+/// foreign database and archived. The core tables plus the absence of the
+/// pre-release `downloads.tags` column are enough to identify our own layout.
+fn is_known_library(conn: &Connection) -> Result<bool, rusqlite::Error> {
+    let empty = !sqlite_object_exists(conn, "table", "downloads")?
+        && !sqlite_object_exists(conn, "table", "people")?;
+    if empty {
+        return Ok(false);
+    }
+    for table in CORE_TABLES {
+        if !sqlite_object_exists(conn, "table", table)? {
+            return Ok(false);
+        }
+    }
+    // The abandoned preview layout kept tags as a column on downloads rather
+    // than in its own table. Those rows cannot be read by the current queries.
+    if column_exists(conn, "downloads", "tags")? {
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+/// Records the current version and clears the superseded markers, so a library
+/// carries exactly one stamp no matter which build it came from.
+fn stamp_schema_version(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        "DROP TABLE IF EXISTS schema_v1_marker;
+         DROP TABLE IF EXISTS schema_v2_marker;",
+    )?;
+    conn.execute(
+        "INSERT OR REPLACE INTO schema_marker (version) VALUES (?1)",
+        [SCHEMA_VERSION],
+    )?;
+    conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    Ok(())
+}
+
+/// Tables introduced after the first release. They deliberately stay out of
+/// `CORE_TABLES`: adding them to the recognition fingerprint would make an
+/// older, otherwise valid library look foreign and get archived.
+/// Builds every table the app uses. Idempotent, so it doubles as the upgrade
+/// path for a library written by an earlier build.
+fn create_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
+    create_core_tables(conn)?;
+    create_additional_tables(conn)?;
+    Ok(())
+}
+
+fn create_additional_tables(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS semantic_index_state (
             download_id       INTEGER PRIMARY KEY REFERENCES downloads(id) ON DELETE CASCADE,
@@ -98,7 +144,106 @@ fn migrate_additive_v2_schema(conn: &Connection) -> Result<(), rusqlite::Error> 
             PRIMARY KEY (source, source_id)
          );
          CREATE INDEX IF NOT EXISTS idx_update_candidates_status
-            ON update_candidates(status, updated_at DESC);",
+            ON update_candidates(status, updated_at DESC);
+
+         -- 利用者が作品を横断してまとめる、順序付きまたは順序なしの集合。
+         -- 取得元の series や検索条件とは別の正本なので、どちらを変更しても
+         -- 互いを暗黙に書き換えない。
+         CREATE TABLE IF NOT EXISTS work_collections (
+            id                TEXT PRIMARY KEY,
+            name              TEXT NOT NULL,
+            description       TEXT,
+            collection_kind   TEXT NOT NULL DEFAULT 'ordered'
+                                      CHECK(collection_kind IN ('ordered', 'unordered')),
+            cover_download_id INTEGER REFERENCES downloads(id) ON DELETE SET NULL,
+            revision          INTEGER NOT NULL DEFAULT 1,
+            created_at        TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at        TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+         );
+         CREATE INDEX IF NOT EXISTS idx_work_collections_updated
+            ON work_collections(updated_at DESC, name COLLATE NOCASE);
+
+         -- source + source_id が永続的な作品参照。download_id は現在保存されている
+         -- 行への解決結果に過ぎず、作品削除時は NULL になって再保存時に戻る。
+         CREATE TABLE IF NOT EXISTS work_collection_members (
+            collection_id  TEXT NOT NULL REFERENCES work_collections(id) ON DELETE CASCADE,
+            source         TEXT NOT NULL,
+            source_id      TEXT NOT NULL,
+            download_id    INTEGER REFERENCES downloads(id) ON DELETE SET NULL,
+            title_snapshot TEXT NOT NULL,
+            author_snapshot TEXT NOT NULL,
+            position       INTEGER NOT NULL,
+            member_role    TEXT NOT NULL DEFAULT 'main',
+            added_by       TEXT NOT NULL DEFAULT 'manual',
+            pinned         INTEGER NOT NULL DEFAULT 0,
+            note           TEXT,
+            created_at     TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at     TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY(collection_id, source, source_id)
+         );
+         CREATE INDEX IF NOT EXISTS idx_collection_members_order
+            ON work_collection_members(collection_id, position, source, source_id);
+         CREATE INDEX IF NOT EXISTS idx_collection_members_download
+            ON work_collection_members(download_id);
+         CREATE INDEX IF NOT EXISTS idx_collection_members_work_key
+            ON work_collection_members(source, source_id);
+
+         -- 本文・キャプション・公式シリーズ・利用者操作から得た作品間の辺。
+         -- コレクション所属とは分離し、単なる言及が自動で所属にならないようにする。
+         CREATE TABLE IF NOT EXISTS work_links (
+            id               INTEGER PRIMARY KEY AUTOINCREMENT,
+            from_source      TEXT NOT NULL,
+            from_source_id   TEXT NOT NULL,
+            from_download_id INTEGER REFERENCES downloads(id) ON DELETE SET NULL,
+            to_source        TEXT NOT NULL,
+            to_source_id     TEXT NOT NULL,
+            to_download_id   INTEGER REFERENCES downloads(id) ON DELETE SET NULL,
+            relation_type    TEXT NOT NULL DEFAULT 'mentions',
+            evidence_type    TEXT NOT NULL,
+            anchor_text      TEXT,
+            context_text     TEXT,
+            confidence       REAL NOT NULL DEFAULT 0,
+            status           TEXT NOT NULL DEFAULT 'observed'
+                                      CHECK(status IN ('observed', 'accepted', 'rejected')),
+            discovered_at    TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at       TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(from_source, from_source_id, to_source, to_source_id, evidence_type)
+         );
+         CREATE INDEX IF NOT EXISTS idx_work_links_from
+            ON work_links(from_source, from_source_id, status);
+         CREATE INDEX IF NOT EXISTS idx_work_links_to
+            ON work_links(to_source, to_source_id, status);
+         CREATE INDEX IF NOT EXISTS idx_work_links_downloads
+            ON work_links(from_download_id, to_download_id);
+
+         -- 自動下書きは承認済みコレクションと分けて保存する。規則を更新しても
+         -- 利用者の並びを勝手に変えず、却下した提案も再表示しない。
+         CREATE TABLE IF NOT EXISTS collection_suggestions (
+            id              TEXT PRIMARY KEY,
+            seed_json       TEXT NOT NULL,
+            proposed_name   TEXT NOT NULL,
+            collection_kind TEXT NOT NULL DEFAULT 'ordered',
+            members_json    TEXT NOT NULL,
+            score           REAL NOT NULL DEFAULT 0,
+            rule_version    TEXT NOT NULL,
+            state           TEXT NOT NULL DEFAULT 'pending'
+                                    CHECK(state IN ('pending', 'accepted', 'rejected')),
+            created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+         );
+         CREATE INDEX IF NOT EXISTS idx_collection_suggestions_state
+            ON collection_suggestions(state, updated_at DESC);
+
+         CREATE TABLE IF NOT EXISTS collection_pair_feedback (
+            left_source   TEXT NOT NULL,
+            left_source_id TEXT NOT NULL,
+            right_source  TEXT NOT NULL,
+            right_source_id TEXT NOT NULL,
+            decision      TEXT NOT NULL CHECK(decision IN ('accept', 'reject')),
+            rule_version  TEXT NOT NULL,
+            updated_at    TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY(left_source, left_source_id, right_source, right_source_id)
+         );",
     )?;
     add_missing_columns(conn)?;
     Ok(())
@@ -134,62 +279,6 @@ fn add_missing_columns(conn: &Connection) -> Result<(), rusqlite::Error> {
     Ok(())
 }
 
-fn is_official_v1_schema(conn: &Connection) -> Result<bool, rusqlite::Error> {
-    let current_version: u32 = conn
-        .pragma_query_value(None, "user_version", |row| row.get(0))
-        .unwrap_or(0);
-    if current_version != 1 || !sqlite_object_exists(conn, "table", "schema_v1_marker")? {
-        return Ok(false);
-    }
-    let marker_version = conn
-        .query_row(
-            "SELECT COALESCE(MAX(version), 0) FROM schema_v1_marker",
-            [],
-            |row| row.get::<_, u32>(0),
-        )
-        .unwrap_or(0);
-    if marker_version != 1 || column_exists(conn, "downloads", "tags")? {
-        return Ok(false);
-    }
-    for table in REQUIRED_TABLES {
-        if matches!(*table, "saved_searches" | "schema_v2_marker") {
-            continue;
-        }
-        if !sqlite_object_exists(conn, "table", table)? {
-            return Ok(false);
-        }
-    }
-    Ok(true)
-}
-
-fn migrate_v1_to_v2(conn: &Connection) -> Result<(), rusqlite::Error> {
-    conn.execute_batch(
-        "
-        BEGIN IMMEDIATE;
-        CREATE TABLE IF NOT EXISTS saved_searches (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            name        TEXT NOT NULL,
-            query       TEXT,
-            params_json TEXT NOT NULL,
-            created_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            updated_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(name)
-        );
-        CREATE INDEX IF NOT EXISTS idx_saved_searches_updated
-            ON saved_searches(updated_at DESC);
-        CREATE TABLE IF NOT EXISTS schema_v2_marker (
-            version        INTEGER PRIMARY KEY,
-            initialized_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        );
-        INSERT OR REPLACE INTO schema_v2_marker (version) VALUES (2);
-        DROP TABLE IF EXISTS schema_v1_marker;
-        PRAGMA user_version = 2;
-        COMMIT;
-        ",
-    )?;
-    Ok(())
-}
-
 fn apply_pragmas(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.busy_timeout(std::time::Duration::from_millis(5_000))?;
     conn.execute_batch(
@@ -210,42 +299,7 @@ fn apply_pragmas(conn: &Connection) -> Result<(), rusqlite::Error> {
     Ok(())
 }
 
-fn is_official_v2_schema(conn: &Connection) -> Result<bool, rusqlite::Error> {
-    let current_version: u32 = conn
-        .pragma_query_value(None, "user_version", |row| row.get(0))
-        .unwrap_or(0);
-    if current_version != SCHEMA_VERSION {
-        return Ok(false);
-    }
-
-    let marker_version = if sqlite_object_exists(conn, "table", "schema_v2_marker")? {
-        conn.query_row(
-            "SELECT COALESCE(MAX(version), 0) FROM schema_v2_marker",
-            [],
-            |row| row.get::<_, u32>(0),
-        )
-        .unwrap_or(0)
-    } else {
-        0
-    };
-    if marker_version != SCHEMA_VERSION {
-        return Ok(false);
-    }
-
-    for table in REQUIRED_TABLES {
-        if !sqlite_object_exists(conn, "table", table)? {
-            return Ok(false);
-        }
-    }
-
-    if column_exists(conn, "downloads", "tags")? {
-        return Ok(false);
-    }
-
-    Ok(true)
-}
-
-fn reset_to_v2_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
+fn reset_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute_batch("PRAGMA foreign_keys = OFF;")?;
     drop_sqlite_objects(conn, "trigger", "DROP TRIGGER IF EXISTS")?;
     drop_sqlite_objects(conn, "view", "DROP VIEW IF EXISTS")?;
@@ -253,8 +307,9 @@ fn reset_to_v2_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
     drop_sqlite_objects(conn, "index", "DROP INDEX IF EXISTS")?;
     conn.execute_batch("PRAGMA foreign_keys = ON;")?;
 
-    initialize_v2_schema(conn)?;
-    conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    create_schema(conn)?;
+    add_missing_columns(conn)?;
+    stamp_schema_version(conn)?;
     Ok(())
 }
 
@@ -369,7 +424,7 @@ fn sqlite_object_exists(
 }
 
 /// Build the official v2 schema from scratch.
-fn initialize_v2_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
+fn create_core_tables(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute_batch(
         "
         CREATE TABLE IF NOT EXISTS downloads (
@@ -620,12 +675,10 @@ fn initialize_v2_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
             created_at          TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
 
-        CREATE TABLE IF NOT EXISTS schema_v2_marker (
+        CREATE TABLE IF NOT EXISTS schema_marker (
             version             INTEGER PRIMARY KEY,
             initialized_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
-
-        INSERT OR REPLACE INTO schema_v2_marker (version) VALUES (2);
 
         CREATE TRIGGER IF NOT EXISTS downloads_search_ad AFTER DELETE ON downloads BEGIN
             DELETE FROM search_index_state WHERE download_id = old.id;
@@ -721,15 +774,21 @@ mod tests {
     use std::fs;
 
     #[test]
-    fn initializes_official_v2_schema() {
+    fn initializes_the_current_schema() {
         let conn = Connection::open_in_memory().unwrap();
         initialize(&conn).unwrap();
 
         let user_version: u32 = conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(user_version, SCHEMA_VERSION);
-        assert!(is_official_v2_schema(&conn).unwrap());
+        assert_eq!(user_version, 1);
+        assert!(is_known_library(&conn).unwrap());
+        let marker: u32 = conn
+            .query_row("SELECT MAX(version) FROM schema_marker", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(marker, 1);
         assert!(!column_exists(&conn, "downloads", "tags").unwrap());
         assert!(sqlite_object_exists(&conn, "table", "saved_searches").unwrap());
     }
@@ -806,7 +865,7 @@ mod tests {
     /// A release that adds a table must add it to existing libraries, not
     /// decide those libraries are unrecognisable.
     ///
-    /// This is not hypothetical: adding `search_index_meta` to REQUIRED_TABLES
+    /// This is not hypothetical: adding `search_index_meta` to CORE_TABLES
     /// made every existing v2 database fail recognition, so opening the app
     /// archived the user's library and started an empty one.
     #[test]
@@ -831,7 +890,7 @@ mod tests {
         // schema has ever required is present, the newest table is not.
         conn.execute_batch("DROP TABLE search_index_meta;").unwrap();
         assert!(
-            is_official_v2_schema(&conn).unwrap(),
+            is_known_library(&conn).unwrap(),
             "a library from an earlier release must still be recognised"
         );
 
@@ -847,13 +906,16 @@ mod tests {
     }
 
     #[test]
-    fn migrates_official_v1_without_losing_downloads() {
+    /// 旧番号のライブラリを、行を失わずそのまま現行スキーマとして取り込む。
+    /// 認識に失敗すると「見知らぬDB」と判定され、退避のうえ初期化されるため、
+    /// ここは実ライブラリの安全に直結する。
+    fn an_earlier_stamp_is_adopted_without_losing_downloads() {
         let conn = Connection::open_in_memory().unwrap();
-        initialize_v2_schema(&conn).unwrap();
+        create_core_tables(&conn).unwrap();
         conn.execute_batch(
             "
             DROP TABLE saved_searches;
-            DROP TABLE schema_v2_marker;
+            DROP TABLE schema_marker;
             CREATE TABLE schema_v1_marker (
                 version INTEGER PRIMARY KEY,
                 initialized_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -876,7 +938,13 @@ mod tests {
 
         initialize(&conn).unwrap();
 
-        assert!(is_official_v2_schema(&conn).unwrap());
+        assert!(is_known_library(&conn).unwrap());
+        let user_version: u32 = conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(user_version, 1, "旧番号は現行へ振り直される");
+        assert!(!sqlite_object_exists(&conn, "table", "schema_v1_marker").unwrap());
+        assert!(sqlite_object_exists(&conn, "table", "saved_searches").unwrap());
         let title: String = conn
             .query_row(
                 "SELECT title FROM downloads WHERE source_id = '42'",
@@ -929,7 +997,7 @@ mod tests {
 
         let conn = Connection::open(&db_path).unwrap();
         initialize(&conn).unwrap();
-        assert!(is_official_v2_schema(&conn).unwrap());
+        assert!(is_known_library(&conn).unwrap());
         assert!(!column_exists(&conn, "downloads", "tags").unwrap());
         let rows: i64 = conn
             .query_row("SELECT COUNT(*) FROM downloads", [], |row| row.get(0))

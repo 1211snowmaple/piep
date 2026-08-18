@@ -11,6 +11,7 @@ const DashboardPage = lazy(() => import("@/features/dashboard/DashboardPage"));
 const LibraryPage = lazy(() => import("@/features/library/LibraryPage"));
 const WorkPage = lazy(() => import("@/features/library/WorkPage"));
 const EntityPage = lazy(() => import("@/features/library/EntityPage"));
+const CollectionPage = lazy(() => import("@/features/collections/CollectionPage"));
 const ReaderPage = lazy(() => import("@/features/reader/ReaderPage"));
 const EditorPage = lazy(() => import("@/features/editor/EditorPage"));
 const SavePage = lazy(() => import("@/features/save/SavePage"));
@@ -32,6 +33,7 @@ function CurrentRoute() {
   if (matchPath("/works/:workId", pathname)) return <WorkPage />;
   if (matchPath("/people/:source/:sourceKey", pathname)) return <EntityPage kind="person" />;
   if (matchPath("/series/:source/:sourceKey", pathname)) return <EntityPage kind="series" />;
+  if (matchPath("/collections/:collectionId?", pathname)) return <CollectionPage />;
   if (matchPath("/reader/:workId", pathname)) return <ReaderPage />;
   if (matchPath("/editor/:workId", pathname)) return <EditorPage />;
   if (matchPath("/save/:source?", pathname)) return <SavePage />;

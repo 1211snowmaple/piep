@@ -22,6 +22,9 @@ use super::search::{
     ParsedSearchQuery, SearchDocument,
 };
 
+/// 作品コレクションは `Database` の非公開内部へ触れるため、子モジュールに置く。
+mod collections;
+
 #[derive(Debug, Clone)]
 struct RankedSearchHit {
     download_id: i64,
@@ -1391,7 +1394,12 @@ impl Database {
             reindex_download_locked(&conn, &self.storage_dir, download_id)
         };
         self.invalidate_index_status();
-        result
+        result?;
+        if let Err(error) = self.refresh_work_links(download_id) {
+            // 検索索引は完成しているため、派生グラフだけの失敗で保存全体を失敗扱いにしない。
+            log::warn!("Failed to refresh work links for {download_id}: {error}");
+        }
+        Ok(())
     }
 
     pub fn get_search_index_status(&self) -> Result<SearchIndexStatus, String> {
@@ -4718,7 +4726,11 @@ impl Database {
     ///
     /// 作者を監視していればシリーズの新作もその一覧に出るので、両方を走査すると
     /// 同じものを二度取りに行くことになる。それを避ける判断に使う。
-    pub fn series_author_keys(&self, source: &str, series_key: &str) -> Result<Vec<String>, String> {
+    pub fn series_author_keys(
+        &self,
+        source: &str,
+        series_key: &str,
+    ) -> Result<Vec<String>, String> {
         let conn = self.read_conn()?;
         let mut stmt = conn
             .prepare(
@@ -4818,12 +4830,7 @@ impl Database {
         conn.execute(
             "UPDATE update_candidates SET status = ?3, updated_at = ?4
              WHERE source = ?1 AND source_id = ?2",
-            params![
-                source,
-                source_id,
-                status,
-                chrono::Utc::now().to_rfc3339()
-            ],
+            params![source, source_id, status, chrono::Utc::now().to_rfc3339()],
         )
         .map_err(|e| format!("Failed to set update candidate status: {}", e))?;
         Ok(())
@@ -6588,7 +6595,7 @@ impl Database {
              GROUP BY t.id, t.name
              ORDER BY count DESC, t.name ASC
              LIMIT ?1",
-            12,
+            24,
         )?;
         let top_authors = collect_facets(
             "SELECT author_name, COUNT(*) AS count
@@ -7818,6 +7825,1328 @@ impl Database {
 
         Ok(())
     }
+}
+
+/// コレクション要約の集計は必ずこの一箇所で組み立てる。
+///
+/// 所属条件は EXISTS で書き、メンバー表を条件付きで join し直さない。条件に
+/// 一致する作品が同じコレクションに複数あると、join では行が複製されて作品数と
+/// 総文字数が水増しされるためである。列の並びは
+/// work_collection_summary_from_row の添字と対応しているので、片方だけを
+/// 変えてはいけない。
+const COLLECTION_SUMMARY_SELECT: &str = "
+    SELECT c.id, c.name, c.description, c.collection_kind,
+           c.cover_download_id, cover.cover_path, c.revision,
+           COUNT(m.source_id),
+           SUM(CASE WHEN m.download_id IS NOT NULL THEN 1 ELSE 0 END),
+           COALESCE(SUM(d.text_length), 0), c.created_at, c.updated_at
+      FROM work_collections c
+      LEFT JOIN work_collection_members m ON m.collection_id = c.id
+      LEFT JOIN downloads d ON d.id = m.download_id
+      LEFT JOIN downloads cover ON cover.id = c.cover_download_id";
+
+/// 同名・同時刻のコレクションでも並びが揺れないよう c.id まで比較する。
+const COLLECTION_SUMMARY_TAIL: &str = "
+      GROUP BY c.id
+      ORDER BY c.updated_at DESC, c.name COLLATE NOCASE ASC, c.id ASC";
+
+fn work_collection_summary_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<WorkCollectionSummary> {
+    Ok(WorkCollectionSummary {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        description: row.get(2)?,
+        collection_kind: row.get(3)?,
+        cover_download_id: row.get(4)?,
+        cover_path: row.get(5)?,
+        revision: row.get(6)?,
+        member_count: row.get(7)?,
+        available_count: row.get(8)?,
+        total_text_length: row.get(9)?,
+        created_at: row.get(10)?,
+        updated_at: row.get(11)?,
+    })
+}
+
+fn work_collection_member_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<WorkCollectionMember> {
+    Ok(WorkCollectionMember {
+        collection_id: row.get(0)?,
+        source: row.get(1)?,
+        source_id: row.get(2)?,
+        download_id: row.get(3)?,
+        title: row.get(4)?,
+        author_name: row.get(5)?,
+        cover_path: row.get(6)?,
+        text_length: row.get(7)?,
+        position: row.get(8)?,
+        member_role: row.get(9)?,
+        added_by: row.get(10)?,
+        pinned: row.get::<_, i64>(11)? != 0,
+        note: row.get(12)?,
+        missing: row.get::<_, i64>(13)? != 0,
+        created_at: row.get(14)?,
+        updated_at: row.get(15)?,
+    })
+}
+
+fn work_link_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkLink> {
+    Ok(WorkLink {
+        id: row.get(0)?,
+        from_source: row.get(1)?,
+        from_source_id: row.get(2)?,
+        from_download_id: row.get(3)?,
+        to_source: row.get(4)?,
+        to_source_id: row.get(5)?,
+        to_download_id: row.get(6)?,
+        relation_type: row.get(7)?,
+        evidence_type: row.get(8)?,
+        anchor_text: row.get(9)?,
+        context_text: row.get(10)?,
+        confidence: row.get(11)?,
+        status: row.get(12)?,
+        discovered_at: row.get(13)?,
+        updated_at: row.get(14)?,
+    })
+}
+
+#[derive(Debug, Clone)]
+struct SuggestionWork {
+    id: i64,
+    source: String,
+    source_id: String,
+    title: String,
+    author_name: String,
+    author_id: String,
+    cover_path: Option<String>,
+    text_length: i64,
+    published_at: String,
+}
+
+const COLLECTION_SUGGEST_RULE_VERSION: &str = "collection-suggest-v2";
+const LINK_TRAVERSAL_MAX_DEPTH: usize = 8;
+const LINK_TRAVERSAL_MAX_WORKS: usize = 240;
+const LINK_INCOMING_SEARCH_LIMIT: usize = 40;
+const LINK_REFRESH_BUDGET: usize = 160;
+
+#[derive(Debug, Clone, Copy)]
+struct LinkTraversalEvidence {
+    depth: usize,
+    confidence: f64,
+}
+
+#[derive(Debug, Clone)]
+struct StoredWorkLinkEdge {
+    from_id: i64,
+    to_id: i64,
+    relation_type: String,
+    confidence: f64,
+}
+
+#[derive(Debug, Clone)]
+struct RankedSuggestionMember {
+    work: SuggestionWork,
+    member_score: f64,
+    /// 番号なしの初回を兄弟と結びつけるための比較用語幹。
+    title_stem: String,
+    /// 既定でチェックを入れるか。設計提案 6-5 は強い候補だけを全選択の下書きに
+    /// し、弱い候補は個別確認を求めている。公式シリーズに同居しているだけの
+    /// 作品まで既定で選ぶと、短編集を丸ごと取り込んでしまう。
+    default_selected: bool,
+    evidence: Vec<CollectionSuggestionEvidence>,
+    series_order: Option<i64>,
+    link_order: Option<i64>,
+    link_depth: Option<usize>,
+    episode_order: Option<i64>,
+}
+
+fn load_suggestion_works(conn: &Connection, ids: &[i64]) -> Result<Vec<SuggestionWork>, String> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let encoded = serde_json::to_string(ids)
+        .map_err(|e| format!("Failed to encode suggestion work IDs: {e}"))?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, source, source_id, title, author_name, COALESCE(author_id, ''),
+                    cover_path, text_length,
+                    COALESCE(source_created_at, downloaded_at, '')
+             FROM downloads
+             WHERE id IN (SELECT value FROM json_each(?1))",
+        )
+        .map_err(|e| format!("Failed to prepare suggestion works: {e}"))?;
+    let works = stmt
+        .query_map(params![encoded], |row| {
+            Ok(SuggestionWork {
+                id: row.get(0)?,
+                source: row.get(1)?,
+                source_id: row.get(2)?,
+                title: row.get(3)?,
+                author_name: row.get(4)?,
+                author_id: row.get(5)?,
+                cover_path: row.get(6)?,
+                text_length: row.get(7)?,
+                published_at: row.get(8)?,
+            })
+        })
+        .map_err(|e| format!("Failed to query suggestion works: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("Failed to read suggestion works: {e}"))?;
+    Ok(works)
+}
+
+fn load_link_edges_touching(
+    conn: &Connection,
+    download_ids: &[i64],
+) -> Result<Vec<StoredWorkLinkEdge>, String> {
+    if download_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let encoded = serde_json::to_string(download_ids)
+        .map_err(|e| format!("Failed to encode linked work IDs: {e}"))?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT from_download_id, to_download_id, relation_type, confidence
+             FROM work_links
+             WHERE status != 'rejected'
+               AND from_download_id IS NOT NULL
+               AND to_download_id IS NOT NULL
+               AND (
+                 from_download_id IN (SELECT value FROM json_each(?1))
+                 OR to_download_id IN (SELECT value FROM json_each(?1))
+               )
+             ORDER BY confidence DESC, id DESC
+             LIMIT 4000",
+        )
+        .map_err(|e| format!("Failed to prepare linked work traversal: {e}"))?;
+    let edges = stmt
+        .query_map(params![encoded], |row| {
+            Ok(StoredWorkLinkEdge {
+                from_id: row.get(0)?,
+                to_id: row.get(1)?,
+                relation_type: row.get(2)?,
+                confidence: row.get(3)?,
+            })
+        })
+        .map_err(|e| format!("Failed to query linked work traversal: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("Failed to read linked work traversal: {e}"))?;
+    Ok(edges)
+}
+
+/// Build the connected component around the selected works before considering
+/// fuzzy title or semantic matches. Links are walked in both directions: an
+/// end chapter can therefore find a previous chapter that links to it, and
+/// that previous chapter becomes a new starting point for the next hop.
+///
+/// Older libraries can have a complete text index but no `work_links` rows.
+/// The focused reverse lookup refreshes only documents that contain a frontier
+/// work URL, and all budgets are bounded so a suggestion cannot reparse the
+/// entire library while holding up normal saves.
+fn discover_linked_collection_component(
+    db: &Database,
+    seeds: &[SuggestionWork],
+    already_refreshed: &mut HashSet<i64>,
+) -> Result<HashMap<i64, LinkTraversalEvidence>, String> {
+    let mut paths = seeds
+        .iter()
+        .map(|seed| {
+            (
+                seed.id,
+                LinkTraversalEvidence {
+                    depth: 0,
+                    confidence: 1.0,
+                },
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    let mut frontier = seeds.iter().map(|seed| seed.id).collect::<Vec<_>>();
+    let mut refresh_budget = LINK_REFRESH_BUDGET;
+
+    for _ in 0..LINK_TRAVERSAL_MAX_DEPTH {
+        if frontier.is_empty() || paths.len() >= LINK_TRAVERSAL_MAX_WORKS {
+            break;
+        }
+
+        // Outgoing links from every newly discovered work are authoritative
+        // enough to parse first and usually reveal the next hop immediately.
+        for download_id in &frontier {
+            if refresh_budget == 0 || !already_refreshed.insert(*download_id) {
+                continue;
+            }
+            refresh_budget -= 1;
+            if let Err(error) = db.refresh_work_links(*download_id) {
+                log::debug!("Collection link refresh skipped for {download_id}: {error}");
+            }
+        }
+
+        // Backfill incoming one-way links for older data. Search hits are not
+        // accepted as members by themselves; after refresh they still need an
+        // actual normalized work-link edge to enter the component below.
+        if refresh_budget > 0 {
+            let frontier_works = {
+                let conn = db.read_conn()?;
+                load_suggestion_works(&conn, &frontier)?
+            };
+            for work in frontier_works {
+                if refresh_budget == 0 {
+                    break;
+                }
+                let source_url =
+                    source_url_for_download(&work.source, &work.source_id, &work.author_id);
+                let result = match super::tantivy_index::search_with_total(
+                    &db.storage_dir,
+                    &source_url,
+                    LINK_INCOMING_SEARCH_LIMIT,
+                ) {
+                    Ok(result) => result,
+                    Err(error) => {
+                        log::debug!("Incoming collection-link lookup skipped: {error}");
+                        continue;
+                    }
+                };
+                for hit in result.hits {
+                    if refresh_budget == 0 {
+                        break;
+                    }
+                    if hit.download_id == work.id || !already_refreshed.insert(hit.download_id) {
+                        continue;
+                    }
+                    refresh_budget -= 1;
+                    if let Err(error) = db.refresh_work_links(hit.download_id) {
+                        log::debug!(
+                            "Incoming collection-link refresh skipped for {}: {error}",
+                            hit.download_id
+                        );
+                    }
+                }
+            }
+        }
+
+        let frontier_set = frontier.iter().copied().collect::<HashSet<_>>();
+        let edges = {
+            let conn = db.read_conn()?;
+            load_link_edges_touching(&conn, &frontier)?
+        };
+        let mut next = Vec::new();
+        for edge in edges {
+            for (current, neighbour) in [(edge.from_id, edge.to_id), (edge.to_id, edge.from_id)] {
+                if !frontier_set.contains(&current)
+                    || paths.contains_key(&neighbour)
+                    || paths.len() >= LINK_TRAVERSAL_MAX_WORKS
+                {
+                    continue;
+                }
+                let Some(parent) = paths.get(&current).copied() else {
+                    continue;
+                };
+                paths.insert(
+                    neighbour,
+                    LinkTraversalEvidence {
+                        depth: parent.depth + 1,
+                        confidence: parent.confidence.min(edge.confidence),
+                    },
+                );
+                next.push(neighbour);
+            }
+        }
+        next.sort_unstable();
+        next.dedup();
+        frontier = next;
+    }
+
+    Ok(paths)
+}
+
+fn assign_link_graph_order(
+    conn: &Connection,
+    ranked: &mut [RankedSuggestionMember],
+) -> Result<(), String> {
+    let linked_ids = ranked
+        .iter()
+        .filter(|member| member.link_depth.is_some())
+        .map(|member| member.work.id)
+        .collect::<HashSet<_>>();
+    if linked_ids.len() < 2 {
+        return Ok(());
+    }
+    let ids = linked_ids.iter().copied().collect::<Vec<_>>();
+    let edges = load_link_edges_touching(conn, &ids)?;
+    let mut outgoing: HashMap<i64, HashSet<i64>> = HashMap::new();
+    let mut indegree: HashMap<i64, usize> = HashMap::new();
+    for edge in edges {
+        if !linked_ids.contains(&edge.from_id) || !linked_ids.contains(&edge.to_id) {
+            continue;
+        }
+        let ordered = match edge.relation_type.as_str() {
+            "continues_to" => Some((edge.from_id, edge.to_id)),
+            "continues_from" => Some((edge.to_id, edge.from_id)),
+            _ => None,
+        };
+        let Some((before, after)) = ordered else {
+            continue;
+        };
+        if before == after || !outgoing.entry(before).or_default().insert(after) {
+            continue;
+        }
+        indegree.entry(before).or_insert(0);
+        *indegree.entry(after).or_insert(0) += 1;
+    }
+    if indegree.is_empty() {
+        return Ok(());
+    }
+
+    let fallback = ranked
+        .iter()
+        .map(|member| {
+            (
+                member.work.id,
+                (member.work.published_at.clone(), member.work.id),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    let compare_ids = |left: &i64, right: &i64| {
+        fallback
+            .get(left)
+            .cmp(&fallback.get(right))
+            .then_with(|| left.cmp(right))
+    };
+    let mut ready = indegree
+        .iter()
+        .filter(|(_, degree)| **degree == 0)
+        .map(|(id, _)| *id)
+        .collect::<Vec<_>>();
+    ready.sort_by(compare_ids);
+    let mut ordered = Vec::with_capacity(indegree.len());
+    while !ready.is_empty() {
+        let current = ready.remove(0);
+        ordered.push(current);
+        if let Some(targets) = outgoing.get(&current) {
+            for target in targets {
+                let Some(degree) = indegree.get_mut(target) else {
+                    continue;
+                };
+                *degree = degree.saturating_sub(1);
+                if *degree == 0 {
+                    ready.push(*target);
+                }
+            }
+            ready.sort_by(compare_ids);
+        }
+    }
+    // A malformed cycle must not make ordering nondeterministic. Put the
+    // remaining linked works after the acyclic prefix in a stable fallback.
+    let mut remaining = indegree
+        .keys()
+        .filter(|id| !ordered.contains(id))
+        .copied()
+        .collect::<Vec<_>>();
+    remaining.sort_by(compare_ids);
+    ordered.extend(remaining);
+    let positions = ordered
+        .into_iter()
+        .enumerate()
+        .map(|(position, id)| (id, position as i64))
+        .collect::<HashMap<_, _>>();
+    for member in ranked {
+        member.link_order = positions.get(&member.work.id).copied();
+    }
+    Ok(())
+}
+
+fn shared_series_with_seeds(
+    conn: &Connection,
+    candidate_id: i64,
+    seed_json: &str,
+) -> Result<Vec<(String, Option<i64>)>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT candidate.title, candidate.content_order
+             FROM download_series candidate
+             JOIN download_series seed
+               ON seed.series_source = candidate.series_source
+              AND seed.series_key = candidate.series_key
+             WHERE candidate.download_id = ?1
+               AND seed.download_id IN (SELECT value FROM json_each(?2))
+             GROUP BY candidate.series_source, candidate.series_key
+             ORDER BY candidate.content_order ASC, candidate.title COLLATE NOCASE ASC",
+        )
+        .map_err(|e| format!("Failed to prepare shared series: {e}"))?;
+    let values = stmt
+        .query_map(params![candidate_id, seed_json], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?))
+        })
+        .map_err(|e| format!("Failed to query shared series: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("Failed to read shared series: {e}"))?;
+    Ok(values)
+}
+
+fn strongest_link_with_seeds(
+    conn: &Connection,
+    candidate_id: i64,
+    seed_json: &str,
+) -> Result<Option<(String, f64, Option<i64>)>, String> {
+    conn.query_row(
+        "SELECT relation_type, confidence, from_download_id, to_download_id
+         FROM work_links
+         WHERE status != 'rejected'
+           AND (
+             (from_download_id = ?1 AND to_download_id IN (SELECT value FROM json_each(?2)))
+             OR (to_download_id = ?1 AND from_download_id IN (SELECT value FROM json_each(?2)))
+           )
+         ORDER BY confidence DESC, id DESC LIMIT 1",
+        params![candidate_id, seed_json],
+        |row| {
+            let relation = row.get::<_, String>(0)?;
+            let confidence = row.get::<_, f64>(1)?;
+            let from_id = row.get::<_, Option<i64>>(2)?;
+            let to_id = row.get::<_, Option<i64>>(3)?;
+            let relative_order = match relation.as_str() {
+                // A --continues_to--> B means A precedes B.
+                "continues_to" if from_id == Some(candidate_id) => Some(-1),
+                "continues_to" if to_id == Some(candidate_id) => Some(1),
+                // A --continues_from--> B means B precedes A.
+                "continues_from" if from_id == Some(candidate_id) => Some(1),
+                "continues_from" if to_id == Some(candidate_id) => Some(-1),
+                _ => None,
+            };
+            Ok((relation, confidence, relative_order))
+        },
+    )
+    .optional()
+    .map_err(|e| format!("Failed to query work-link evidence: {e}"))
+}
+
+fn suggestion_pair_is_rejected(
+    conn: &Connection,
+    candidate: &SuggestionWork,
+    seeds: &[SuggestionWork],
+) -> Result<bool, String> {
+    let candidate_key = WorkKey {
+        source: candidate.source.clone(),
+        source_id: candidate.source_id.clone(),
+    };
+    for seed in seeds {
+        let seed_key = WorkKey {
+            source: seed.source.clone(),
+            source_id: seed.source_id.clone(),
+        };
+        let (left, right) = canonical_work_key_pair(&candidate_key, &seed_key);
+        let rejected = conn
+            .query_row(
+                "SELECT decision, rule_version FROM collection_pair_feedback
+                 WHERE left_source = ?1 AND left_source_id = ?2
+                   AND right_source = ?3 AND right_source_id = ?4",
+                params![left.source, left.source_id, right.source, right.source_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()
+            .map_err(|e| format!("Failed to read collection feedback: {e}"))?
+            .is_some_and(|(decision, rule_version)| {
+                decision == "reject" && rule_version == COLLECTION_SUGGEST_RULE_VERSION
+            });
+        if rejected {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn add_suggestion_evidence(
+    evidence: &mut Vec<CollectionSuggestionEvidence>,
+    score: &mut f64,
+    kind: &str,
+    label: &str,
+    contribution: f64,
+) {
+    *score += contribution;
+    evidence.push(CollectionSuggestionEvidence {
+        kind: kind.to_string(),
+        label: label.to_string(),
+        contribution,
+    });
+}
+
+/// 話数を持たない特別な位置。本編の連番（`話数 * 10`）とぶつからない値を選ぶ。
+const ORDER_PROLOGUE: i64 = -10;
+const ORDER_FINALE: i64 = 1_000_000;
+const ORDER_EPILOGUE: i64 = 1_000_010;
+const ORDER_SIDE_STORY: i64 = 1_000_020;
+
+/// 単独トークンの数字を話数とみなす上限。`作品 2026` のような西暦を
+/// 話数として拾わないための歯止めで、助数詞を伴う明示的な形には適用しない。
+const MAX_BARE_EPISODE_NUMBER: i64 = 300;
+
+/// 漢数字を読む。`十二` `三十` `百二十三` と、`〇一二` のような桁並べに対応する。
+fn kanji_number(token: &str) -> Option<i64> {
+    let digit = |value: char| match value {
+        '〇' | '零' => Some(0),
+        '一' => Some(1),
+        '二' => Some(2),
+        '三' => Some(3),
+        '四' => Some(4),
+        '五' => Some(5),
+        '六' => Some(6),
+        '七' => Some(7),
+        '八' => Some(8),
+        '九' => Some(9),
+        _ => None,
+    };
+    let mut total = 0_i64;
+    let mut current = 0_i64;
+    let mut saw_any = false;
+    for value in token.chars() {
+        match value {
+            '百' => {
+                total += if current == 0 { 100 } else { current * 100 };
+                current = 0;
+                saw_any = true;
+            }
+            '十' => {
+                total += if current == 0 { 10 } else { current * 10 };
+                current = 0;
+                saw_any = true;
+            }
+            other => {
+                current = current * 10 + digit(other)?;
+                saw_any = true;
+            }
+        }
+    }
+    saw_any.then(|| total + current)
+}
+
+fn roman_to_text(mut value: i64) -> String {
+    const TABLE: [(i64, &str); 9] = [
+        (100, "c"),
+        (90, "xc"),
+        (50, "l"),
+        (40, "xl"),
+        (10, "x"),
+        (9, "ix"),
+        (5, "v"),
+        (4, "iv"),
+        (1, "i"),
+    ];
+    let mut out = String::new();
+    for (amount, text) in TABLE {
+        while value >= amount {
+            out.push_str(text);
+            value -= amount;
+        }
+    }
+    out
+}
+
+/// ローマ数字を読む。`civil` のように文字だけ揃った単語を弾くため、読んだ数を
+/// 書き戻して元の綴りと一致する場合しか採用しない。一文字は `i` や `c` が
+/// 英単語と衝突するため対象外にする。
+fn roman_number(token: &str) -> Option<i64> {
+    if token.chars().count() < 2 || token.chars().count() > 15 {
+        return None;
+    }
+    let values = token
+        .chars()
+        .map(|value| match value {
+            'i' => Some(1_i64),
+            'v' => Some(5),
+            'x' => Some(10),
+            'l' => Some(50),
+            'c' => Some(100),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let mut total = 0_i64;
+    for (index, current) in values.iter().enumerate() {
+        if values[index + 1..].iter().any(|later| later > current) {
+            total -= current;
+        } else {
+            total += current;
+        }
+    }
+    (total > 0 && roman_to_text(total) == token).then_some(total)
+}
+
+fn parse_episode_number(token: &str) -> Option<i64> {
+    token
+        .parse::<i64>()
+        .ok()
+        .or_else(|| kanji_number(token))
+        .filter(|value| *value >= 0)
+}
+
+/// 題名から比較用の共通幹と、読む順を表す数値を取り出す。
+///
+/// 入力は `normalize_search_text` を通してから扱う。その正規化は NFKC・小文字化・
+/// カタカナ→ひらがな変換に加えて、**記号をすべて空白へ潰す**。`#12` はここへ届く
+/// 時点で `12`、`【FANBOX】月下の約束（後編）` は `fanbox 月下の約束 後編` に
+/// なっている。したがって記号を手掛かりにはできず、数字・漢数字・ローマ数字と
+/// 語そのものだけで判定する。
+///
+/// 返す順序値は「話数 * 10 + 前中後編の位置」を基本とし、話数を持たない
+/// プロローグ・最終話・エピローグ・番外編には前後へ十分離れた固定値を与える。
+fn title_stem_and_order(title: &str) -> (String, Option<i64>) {
+    static COUNTER_RE: OnceLock<Regex> = OnceLock::new();
+    static DAI_RE: OnceLock<Regex> = OnceLock::new();
+    static SONO_RE: OnceLock<Regex> = OnceLock::new();
+    static MARKER_RE: OnceLock<Regex> = OnceLock::new();
+    // 助数詞を伴う形。`第12話` `12話` `第三夜` `2部` のいずれも拾う。
+    let counter_regex = COUNTER_RE.get_or_init(|| {
+        Regex::new(
+            r"(?:第\s*)?([0-9]+|[〇零一二三四五六七八九十百]+)\s*(?:話|章|回|編|夜|部|節|幕|巻)",
+        )
+        .expect("episode counter regex")
+    });
+    // 助数詞のない `第3` 形。
+    let dai_regex = DAI_RE.get_or_init(|| {
+        Regex::new(r"第\s*([0-9]+|[〇零一二三四五六七八九十百]+)").expect("episode dai regex")
+    });
+    // `その12` 形。正規化でカタカナはひらがなへ倒れている。
+    let sono_regex = SONO_RE.get_or_init(|| {
+        Regex::new(r"その\s*([0-9]+|[〇零一二三四五六七八九十百]+)").expect("episode sono regex")
+    });
+    // `final` は単語境界を要求する。`finalize` を完結編と誤らせない。
+    let marker_regex = MARKER_RE.get_or_init(|| {
+        Regex::new(
+            r"前編|前篇|中編|中篇|後編|後篇|上巻|中巻|下巻|完結編|最終話|最終回|番外編|番外|外伝|ぷろろーぐ|えぴろーぐ|\bfinal\b",
+        )
+        .expect("episode marker regex")
+    });
+
+    let normalized = normalize_search_text(title);
+
+    let mut number = None;
+    for regex in [counter_regex, dai_regex, sono_regex] {
+        if number.is_some() {
+            break;
+        }
+        number = regex
+            .captures(&normalized)
+            .and_then(|capture| capture.get(1))
+            .and_then(|value| parse_episode_number(value.as_str()));
+    }
+
+    let mut working = counter_regex.replace_all(&normalized, " ").into_owned();
+    working = dai_regex.replace_all(&working, " ").into_owned();
+    working = sono_regex.replace_all(&working, " ").into_owned();
+
+    // 助数詞のない単独トークン。`航路 01` や `星の記憶 xii` を拾う。
+    let mut bare_number_token = None;
+    if number.is_none() {
+        for token in working.split_whitespace() {
+            let parsed = token
+                .parse::<i64>()
+                .ok()
+                .filter(|value| (0..=MAX_BARE_EPISODE_NUMBER).contains(value))
+                .or_else(|| kanji_number(token))
+                .or_else(|| roman_number(token));
+            if let Some(value) = parsed {
+                number = Some(value);
+                bare_number_token = Some(token.to_string());
+                break;
+            }
+        }
+    }
+
+    let marker_offset =
+        if working.contains("前編") || working.contains("前篇") || working.contains("上巻") {
+            Some(1)
+        } else if working.contains("中編") || working.contains("中篇") || working.contains("中巻")
+        {
+            Some(2)
+        } else if working.contains("後編") || working.contains("後篇") || working.contains("下巻")
+        {
+            Some(3)
+        } else {
+            // 素の `上` `中` `下` は単独トークンのときだけ位置とみなす。
+            // `月下の約束` の `下` を後編と読まないための条件である。
+            working.split_whitespace().find_map(|token| match token {
+                "上" => Some(1),
+                "中" => Some(2),
+                "下" => Some(3),
+                _ => None,
+            })
+        };
+
+    let special_order = if working.contains("ぷろろーぐ") {
+        Some(ORDER_PROLOGUE)
+    } else if working.contains("番外編") || working.contains("番外") || working.contains("外伝")
+    {
+        Some(ORDER_SIDE_STORY)
+    } else if working.contains("えぴろーぐ") {
+        Some(ORDER_EPILOGUE)
+    } else if working.contains("完結編")
+        || working.contains("最終話")
+        || working.contains("最終回")
+        || marker_regex
+            .find(&working)
+            .is_some_and(|found| found.as_str() == "final")
+    {
+        Some(ORDER_FINALE)
+    } else {
+        None
+    };
+
+    // 話数が読めていればそれを主軸にし、前中後編を枝番として足す。話数がない
+    // ときだけ、プロローグ・最終話などの固定位置へ落とす。
+    let order = match number {
+        Some(value) => Some(value.saturating_mul(10) + marker_offset.unwrap_or(0)),
+        None => special_order.or(marker_offset),
+    };
+
+    let without_markers = marker_regex.replace_all(&working, " ");
+    let stem = without_markers
+        .split_whitespace()
+        .filter(|token| {
+            !matches!(*token, "上" | "中" | "下") && bare_number_token.as_deref() != Some(*token)
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    (stem, order)
+}
+
+/// 連載の初回は番号を振らないことが多い。番号付きの兄弟が同じ語幹で存在し、
+/// 自身にだけ番号が無い作品は「第 0 話」として先頭へ置く。順序未定を表す
+/// None は末尾へ流れるため、この補正が無いと初回が最後に並んでしまう。
+/// 本文が二重に入る候補へ印を付け、既定の選択から外す。
+///
+/// 実ライブラリには 2 種類の重複がある。pixiv と FANBOX の両方へ投稿された
+/// 同じ作品と、分冊をまとめ直した合本である。どちらもそのまま EPUB にすると
+/// 同じ本文が 2 回入る。候補からは消さず、理由を見せたうえで利用者が明示的に
+/// 選んだときだけ含める。どちらを採るかは利用者の判断に属するためである。
+fn flag_duplicate_content_members(ranked: &mut [RankedSuggestionMember]) {
+    const OMNIBUS_WORDS: [&str; 3] = ["まとめ", "合本", "総集編"];
+    const POSITION_WORDS: [&str; 7] = ["前編", "中編", "後編", "完結編", "最終話", "上巻", "下巻"];
+
+    // 取得元をまたぐ同一作品。題名と作者が一致し取得元だけが違うものを束ね、
+    // 本文が長い方（取りこぼしの少ない方）を既定に残す。
+    let mut by_title: HashMap<(String, String), Vec<usize>> = HashMap::new();
+    for (index, member) in ranked.iter().enumerate() {
+        let key = (
+            normalize_search_text(&member.work.title),
+            normalize_search_text(&member.work.author_name),
+        );
+        if key.0.is_empty() {
+            continue;
+        }
+        by_title.entry(key).or_default().push(index);
+    }
+    let mut duplicates = Vec::new();
+    for indexes in by_title.values() {
+        if indexes.len() < 2 {
+            continue;
+        }
+        let sources = indexes
+            .iter()
+            .map(|index| ranked[*index].work.source.clone())
+            .collect::<HashSet<_>>();
+        if sources.len() < 2 {
+            continue;
+        }
+        // 基準作品は利用者自身が選んだもの。重複していても既定から外さず、
+        // もう一方に印を付ける。選んだはずの作品が外れていると混乱する。
+        let seeded = indexes
+            .iter()
+            .find(|index| ranked[**index].evidence.iter().any(|e| e.kind == "seed"));
+        let keep = match seeded {
+            Some(index) => *index,
+            None => *indexes
+                .iter()
+                .max_by_key(|index| (ranked[**index].work.text_length, -ranked[**index].work.id))
+                .expect("non-empty duplicate group"),
+        };
+        for index in indexes {
+            if *index != keep {
+                duplicates.push((*index, ranked[keep].work.source.clone()));
+            }
+        }
+    }
+    for (index, kept_source) in duplicates {
+        ranked[index].default_selected = false;
+        ranked[index].evidence.push(CollectionSuggestionEvidence {
+            kind: "duplicate_work".to_string(),
+            label: format!("{kept_source} にも同じ題名の作品があります"),
+            contribution: 0.0,
+        });
+    }
+
+    // 合本。前編と中編のように位置を表す語を 2 つ以上含むか、まとめ・合本・
+    // 総集編と名乗るもの。単に「④+エピローグ」のような 1 か所だけの表記は
+    // 分冊そのものなので対象にしない。
+    let mut omnibus = Vec::new();
+    for (index, member) in ranked.iter().enumerate() {
+        let title = normalize_search_text(&member.work.title);
+        let positions = POSITION_WORDS
+            .iter()
+            .filter(|word| title.contains(**word))
+            .count();
+        let named = OMNIBUS_WORDS.iter().any(|word| title.contains(*word));
+        if positions < 2 && !named {
+            continue;
+        }
+        let siblings = ranked
+            .iter()
+            .filter(|other| {
+                other.work.id != member.work.id
+                    && stems_are_siblings(&other.title_stem, &member.title_stem)
+            })
+            .count();
+        if siblings >= 2 {
+            omnibus.push(index);
+        }
+    }
+    // 抜粋・体験版は本文が途中までしかない。合本とは逆に「足りない」重複で、
+    // 一冊にまとめると同じ話の断片が混ざる。
+    const SAMPLE_WORDS: [&str; 4] = ["さんぷる", "体験版", "お試し", "抜粋"];
+    let samples = ranked
+        .iter()
+        .enumerate()
+        .filter(|(_, member)| {
+            let title = normalize_search_text(&member.work.title);
+            SAMPLE_WORDS.iter().any(|word| title.contains(*word))
+        })
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    for index in samples {
+        ranked[index].default_selected = false;
+        ranked[index].evidence.push(CollectionSuggestionEvidence {
+            kind: "partial_sample".to_string(),
+            label: "本文の一部だけの版に見えます".to_string(),
+            contribution: 0.0,
+        });
+    }
+
+    for index in omnibus {
+        ranked[index].default_selected = false;
+        ranked[index].evidence.push(CollectionSuggestionEvidence {
+            kind: "omnibus".to_string(),
+            label: "分冊をまとめ直した版の可能性があります".to_string(),
+            contribution: 0.0,
+        });
+    }
+}
+
+fn assign_unnumbered_opening_order(ranked: &mut [RankedSuggestionMember]) {
+    let numbered_stems = ranked
+        .iter()
+        .filter(|value| value.episode_order.is_some() && !value.title_stem.is_empty())
+        .map(|value| value.title_stem.clone())
+        .collect::<Vec<_>>();
+    let openings = ranked
+        .iter()
+        .enumerate()
+        .filter(|(_, value)| value.episode_order.is_none() && !value.title_stem.is_empty())
+        .filter(|(_, value)| {
+            numbered_stems
+                .iter()
+                .any(|stem| stems_are_siblings(stem, &value.title_stem))
+        })
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    for index in openings {
+        ranked[index].episode_order = Some(0);
+    }
+}
+
+/// 同じ連載の一部と見なせる語幹かどうか。完全一致だけを見ると、副題や
+/// 「【本文全体17.5万文字】」のような注記が付いた版を取りこぼす。
+fn stems_are_siblings(left: &str, right: &str) -> bool {
+    if left.is_empty() || right.is_empty() {
+        return false;
+    }
+    left == right
+        || left.contains(right)
+        || right.contains(left)
+        || normalized_levenshtein(left, right) >= 0.8
+}
+
+fn compare_ranked_suggestion_members(
+    left: &RankedSuggestionMember,
+    right: &RankedSuggestionMember,
+) -> Ordering {
+    // 読む順は明示的な手掛かりだけで決める。スコアは「順序の手掛かりが何も
+    // 無い作品同士」の並びにしか使わない。単なる言及リンクで加点された作品が、
+    // 題名に書かれた話数を追い越すのを防ぐためである。
+    // link_depth は基準作品からのリンク到達段数、つまり「近さ」であって
+    // 読む順ではない。話数や公式順より先に効かせると、単に基準作品から
+    // 参照されているだけの作品が第1話を追い越す。同点処理にだけ使う。
+    compare_optional_order(left.link_order, right.link_order)
+        .then_with(|| compare_optional_order(left.series_order, right.series_order))
+        .then_with(|| compare_optional_order(left.episode_order, right.episode_order))
+        .then_with(|| compare_optional_order(left.link_depth, right.link_depth))
+        .then_with(|| right.member_score.total_cmp(&left.member_score))
+        .then_with(|| left.work.published_at.cmp(&right.work.published_at))
+        .then_with(|| left.work.id.cmp(&right.work.id))
+}
+
+fn compare_optional_order<T: Ord>(left: Option<T>, right: Option<T>) -> Ordering {
+    match (left, right) {
+        (Some(left), Some(right)) => left.cmp(&right),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => Ordering::Equal,
+    }
+}
+
+fn proposed_collection_name(
+    conn: &Connection,
+    ranked: &[RankedSuggestionMember],
+    seed_json: &str,
+) -> Result<String, String> {
+    for member in ranked {
+        if let Some((title, _)) = shared_series_with_seeds(conn, member.work.id, seed_json)?.first()
+        {
+            if !title.trim().is_empty() {
+                return Ok(title.trim().to_string());
+            }
+        }
+    }
+    let (stem, _) = title_stem_and_order(&ranked[0].work.title);
+    if !stem.is_empty() {
+        return Ok(format!("{stem} 関連作品"));
+    }
+    let author = ranked[0].work.author_name.trim();
+    if !author.is_empty() {
+        Ok(format!("{author}の作品コレクション"))
+    } else {
+        Ok("読書コレクション".to_string())
+    }
+}
+
+fn collection_suggestion_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<CollectionSuggestion> {
+    let members_json: String = row.get(3)?;
+    let members = serde_json::from_str(&members_json).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            members_json.len(),
+            rusqlite::types::Type::Text,
+            Box::new(error),
+        )
+    })?;
+    Ok(CollectionSuggestion {
+        id: row.get(0)?,
+        proposed_name: row.get(1)?,
+        collection_kind: row.get(2)?,
+        members,
+        score: row.get(4)?,
+        rule_version: row.get(5)?,
+        state: row.get(6)?,
+        created_at: row.get(7)?,
+        updated_at: row.get(8)?,
+    })
+}
+
+fn canonical_work_key_pair(left: &WorkKey, right: &WorkKey) -> (WorkKey, WorkKey) {
+    if (&left.source, &left.source_id) <= (&right.source, &right.source_id) {
+        (left.clone(), right.clone())
+    } else {
+        (right.clone(), left.clone())
+    }
+}
+
+fn save_pair_feedback(
+    tx: &Transaction<'_>,
+    left: &WorkKey,
+    right: &WorkKey,
+    decision: &str,
+    rule_version: &str,
+    now: &str,
+) -> Result<(), String> {
+    let (left, right) = canonical_work_key_pair(left, right);
+    tx.execute(
+        "INSERT INTO collection_pair_feedback (
+            left_source, left_source_id, right_source, right_source_id,
+            decision, rule_version, updated_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT(left_source, left_source_id, right_source, right_source_id)
+         DO UPDATE SET decision = excluded.decision,
+                       rule_version = excluded.rule_version,
+                       updated_at = excluded.updated_at",
+        params![
+            left.source,
+            left.source_id,
+            right.source,
+            right.source_id,
+            decision,
+            rule_version,
+            now,
+        ],
+    )
+    .map_err(|e| format!("Failed to save collection feedback: {e}"))?;
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct ExtractedWorkLink {
+    to_source: String,
+    to_source_id: String,
+    relation_type: String,
+    anchor_text: Option<String>,
+    context_text: Option<String>,
+    confidence: f64,
+}
+
+fn extract_work_link_evidence(
+    text: &str,
+    from_source: &str,
+    from_source_id: &str,
+) -> Vec<ExtractedWorkLink> {
+    static URL_RE: OnceLock<Regex> = OnceLock::new();
+    let regex = URL_RE.get_or_init(|| {
+        Regex::new(r#"(?i)(?:https?://[^\s\"'<>\\\[\]{}]+|pixiv://novels/\d+)"#)
+            .expect("work link URL regex")
+    });
+    let mut links: HashMap<(String, String), ExtractedWorkLink> = HashMap::new();
+    for candidate in regex.find_iter(text).take(2_000) {
+        let raw = candidate
+            .as_str()
+            .replace("&amp;", "&")
+            .replace("\\u0026", "&");
+        let raw = raw.trim_end_matches([
+            '.', ',', ':', ';', '!', '?', ')', ']', '}', '。', '、', '！', '？', '）', '】', '」',
+            '』',
+        ]);
+        let Some((to_source, to_source_id)) = normalize_linked_work_url(raw) else {
+            continue;
+        };
+        if to_source == from_source && to_source_id == from_source_id {
+            continue;
+        }
+        let context = readable_link_context(text, candidate.start(), candidate.end(), 100);
+        let normalized_context = normalize_search_text(&context);
+        let (relation_type, confidence) = if ["続き", "次話", "次編", "後編", "next"]
+            .iter()
+            .any(|marker| normalized_context.contains(marker))
+        {
+            ("continues_to", 0.94)
+        } else if ["前話", "前編", "前作", "previous", "prev"]
+            .iter()
+            .any(|marker| normalized_context.contains(marker))
+        {
+            ("continues_from", 0.94)
+        } else if ["補足", "番外", "おまけ", "関連"]
+            .iter()
+            .any(|marker| normalized_context.contains(marker))
+        {
+            ("supplement", 0.86)
+        } else {
+            ("mentions", 0.72)
+        };
+        let anchor = (!context.is_empty()).then(|| truncate_chars(&context, 120));
+        let value = ExtractedWorkLink {
+            to_source: to_source.clone(),
+            to_source_id: to_source_id.clone(),
+            relation_type: relation_type.to_string(),
+            anchor_text: anchor,
+            context_text: (!context.is_empty()).then(|| truncate_chars(&context, 240)),
+            confidence,
+        };
+        links
+            .entry((to_source, to_source_id))
+            .and_modify(|current| {
+                if value.confidence > current.confidence {
+                    *current = value.clone();
+                }
+            })
+            .or_insert(value);
+    }
+    let mut links = links.into_values().collect::<Vec<_>>();
+    links.sort_by(|left, right| {
+        right
+            .confidence
+            .partial_cmp(&left.confidence)
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| left.to_source.cmp(&right.to_source))
+            .then_with(|| left.to_source_id.cmp(&right.to_source_id))
+    });
+    links
+}
+
+fn normalize_linked_work_url(raw: &str) -> Option<(String, String)> {
+    if let Some(source_id) = raw
+        .strip_prefix("pixiv://novels/")
+        .or_else(|| raw.strip_prefix("PIXIV://NOVELS/"))
+    {
+        let source_id = source_id
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect::<String>();
+        return (!source_id.is_empty()).then(|| ("pixiv".to_string(), source_id));
+    }
+    let url = url::Url::parse(raw).ok()?;
+    let host = url.host_str()?.to_ascii_lowercase();
+    let segments = url
+        .path_segments()
+        .map(|value| value.filter(|part| !part.is_empty()).collect::<Vec<_>>())
+        .unwrap_or_default();
+    if host == "pixiv.net" || host == "www.pixiv.net" {
+        if url.path() == "/novel/show.php" {
+            let id = url
+                .query_pairs()
+                .find(|(key, _)| key == "id")
+                .map(|(_, value)| value.into_owned())?;
+            return id
+                .chars()
+                .all(|value| value.is_ascii_digit())
+                .then(|| ("pixiv".to_string(), id));
+        }
+        if segments.first().copied() == Some("novels") {
+            let id = segments.get(1)?.to_string();
+            return id
+                .chars()
+                .all(|value| value.is_ascii_digit())
+                .then(|| ("pixiv".to_string(), id));
+        }
+    }
+    if host == "fanbox.cc" || host.ends_with(".fanbox.cc") {
+        let index = segments.iter().position(|segment| *segment == "posts")?;
+        let id = segments.get(index + 1)?.to_string();
+        return id
+            .chars()
+            .all(|value| value.is_ascii_digit())
+            .then(|| ("fanbox".to_string(), id));
+    }
+    None
+}
+
+fn readable_link_context(text: &str, start: usize, end: usize, radius: usize) -> String {
+    static TAG_RE: OnceLock<Regex> = OnceLock::new();
+    let start_char = text[..start].chars().count();
+    let match_chars = text[start..end].chars().count();
+    let chars = text.chars().collect::<Vec<_>>();
+    let from = start_char.saturating_sub(radius);
+    let to = (start_char + match_chars + radius).min(chars.len());
+    let context = chars[from..to].iter().collect::<String>();
+    let without_tags = TAG_RE
+        .get_or_init(|| Regex::new(r"(?is)<[^>]*>").expect("HTML tag regex"))
+        .replace_all(&context, " ");
+    without_tags
+        .replace("&nbsp;", " ")
+        .replace("&amp;", "&")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    value.chars().take(max_chars).collect()
+}
+
+fn validate_collection_id(value: &str) -> Result<&str, String> {
+    let value = value.trim();
+    if value.is_empty() || value.len() > 160 {
+        return Err("Invalid collection ID".to_string());
+    }
+    if !value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err("Invalid collection ID".to_string());
+    }
+    Ok(value)
+}
+
+fn validate_collection_name(value: &str) -> Result<String, String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err("Collection name is required".to_string());
+    }
+    if value.chars().count() > 200 {
+        return Err("Collection name is too long".to_string());
+    }
+    Ok(value.to_string())
+}
+
+fn validate_collection_kind(value: &str) -> Result<String, String> {
+    match value.trim() {
+        "ordered" => Ok("ordered".to_string()),
+        "unordered" => Ok("unordered".to_string()),
+        _ => Err("Collection kind must be ordered or unordered".to_string()),
+    }
+}
+
+fn validate_work_key_part(value: &str, label: &str) -> Result<String, String> {
+    let value = value.trim();
+    if value.is_empty() || value.chars().count() > 500 {
+        return Err(format!("Invalid {label}"));
+    }
+    Ok(value.to_string())
+}
+
+fn normalize_bounded_optional(
+    value: &Option<String>,
+    max_chars: usize,
+    label: &str,
+) -> Result<Option<String>, String> {
+    let Some(value) = value.as_deref() else {
+        return Ok(None);
+    };
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    if value.chars().count() > max_chars {
+        return Err(format!("{label} is too long"));
+    }
+    Ok(Some(value.to_string()))
+}
+
+fn normalize_member_role(value: Option<&str>) -> Result<String, String> {
+    match value.unwrap_or("main").trim() {
+        "main" => Ok("main".to_string()),
+        "supplement" => Ok("supplement".to_string()),
+        "appendix" => Ok("appendix".to_string()),
+        _ => Err("Invalid collection member role".to_string()),
+    }
+}
+
+fn normalize_added_by(value: Option<&str>) -> Result<String, String> {
+    match value.unwrap_or("manual").trim() {
+        "manual" => Ok("manual".to_string()),
+        "suggestion" => Ok("suggestion".to_string()),
+        "import" => Ok("import".to_string()),
+        _ => Err("Invalid collection member origin".to_string()),
+    }
+}
+
+fn new_collection_id(prefix: &str) -> String {
+    let timestamp = chrono::Utc::now().timestamp_micros();
+    let serial = READER_CACHE_TICK.fetch_add(1, AtomicOrdering::Relaxed);
+    format!("{prefix}-{timestamp:x}-{serial:x}")
+}
+
+fn normalize_collection_positions(tx: &Transaction<'_>, collection_id: &str) -> Result<(), String> {
+    let keys = {
+        let mut stmt = tx
+            .prepare(
+                "SELECT source, source_id FROM work_collection_members
+                 WHERE collection_id = ?1
+                 ORDER BY position ASC, created_at ASC, source ASC, source_id ASC",
+            )
+            .map_err(|e| format!("Failed to prepare collection normalization: {e}"))?;
+        let keys = stmt
+            .query_map(params![collection_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|e| format!("Failed to query collection normalization: {e}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("Failed to read collection normalization: {e}"))?;
+        keys
+    };
+    let now = chrono::Utc::now().to_rfc3339();
+    for (position, (source, source_id)) in keys.iter().enumerate() {
+        tx.execute(
+            "UPDATE work_collection_members SET position = ?1, updated_at = ?2
+             WHERE collection_id = ?3 AND source = ?4 AND source_id = ?5",
+            params![position as i64, now, collection_id, source, source_id],
+        )
+        .map_err(|e| format!("Failed to normalize collection order: {e}"))?;
+    }
+    Ok(())
 }
 
 fn is_version_stage_name(name: &str) -> bool {
@@ -9534,6 +10863,28 @@ fn upsert_download_in_connection(conn: &Connection, dl: &NewDownload) -> Result<
             |row| row.get(0),
         )
         .map_err(|e| format!("Failed to query upserted download ID: {e}"))?;
+    // コレクションと作品リンクの正本は source + source_id。作品を削除してから
+    // 再取得しても、現在の downloads.id へ自動的に再解決する。
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "UPDATE work_collection_members
+         SET download_id = ?1, title_snapshot = ?2, author_snapshot = ?3, updated_at = ?4
+         WHERE source = ?5 AND source_id = ?6",
+        params![id, dl.title, dl.author_name, now, dl.source, dl.source_id],
+    )
+    .map_err(|e| format!("Failed to reconnect collection memberships: {e}"))?;
+    conn.execute(
+        "UPDATE work_links SET from_download_id = ?1, updated_at = ?2
+         WHERE from_source = ?3 AND from_source_id = ?4",
+        params![id, now, dl.source, dl.source_id],
+    )
+    .map_err(|e| format!("Failed to reconnect outgoing work links: {e}"))?;
+    conn.execute(
+        "UPDATE work_links SET to_download_id = ?1, updated_at = ?2
+         WHERE to_source = ?3 AND to_source_id = ?4",
+        params![id, now, dl.source, dl.source_id],
+    )
+    .map_err(|e| format!("Failed to reconnect incoming work links: {e}"))?;
     conn.execute(
         "DELETE FROM download_tags WHERE download_id = ?1",
         params![id],
@@ -10966,6 +12317,76 @@ fn remove_dir_resilient(path: &std::path::Path) -> std::io::Result<()> {
 }
 
 #[cfg(test)]
+mod title_order_tests {
+    use super::*;
+
+    fn order(title: &str) -> Option<i64> {
+        title_stem_and_order(title).1
+    }
+
+    fn stem(title: &str) -> String {
+        title_stem_and_order(title).0
+    }
+
+    /// 設計提案 6-3 が挙げる話数表記と、3 の例 C をそのまま通す。
+    #[test]
+    fn episode_numbers_cover_the_documented_notations() {
+        assert_eq!(order("第12話"), Some(120));
+        assert_eq!(order("12話"), Some(120));
+        assert_eq!(order("#12"), Some(120));
+        assert_eq!(order("その12"), Some(120));
+        assert_eq!(order("十二"), Some(120));
+        assert_eq!(order("XII"), Some(120));
+
+        // 例 C: 表記が三者三様でも同じ連番として並ぶ。
+        assert_eq!(order("航路 01"), Some(10));
+        assert_eq!(order("航路 #2"), Some(20));
+        assert_eq!(order("航路 第三夜"), Some(30));
+        assert_eq!(stem("航路 01"), stem("航路 #2"));
+        assert_eq!(stem("航路 #2"), stem("航路 第三夜"));
+    }
+
+    #[test]
+    fn front_and_back_markers_order_within_one_episode() {
+        assert!(order("月下の約束 前編") < order("月下の約束 後編"));
+        assert_eq!(order("【FANBOX】月下の約束（後編）"), Some(3));
+        assert_eq!(stem("【FANBOX】月下の約束（後編）"), "fanbox 月下の約束");
+        // 素の 上/中/下 も単独トークンなら位置として読む。
+        assert_eq!(order("旅路 上"), Some(1));
+        assert_eq!(order("旅路 中"), Some(2));
+        assert_eq!(order("旅路 下"), Some(3));
+        // 話数があるときは枝番として合成される。
+        assert_eq!(order("第3話 後編"), Some(33));
+    }
+
+    #[test]
+    fn special_positions_sit_outside_the_numbered_run() {
+        let prologue = order("ぷろろーぐ").expect("prologue");
+        let first = order("第1話").expect("first");
+        let finale = order("最終話").expect("finale");
+        let epilogue = order("エピローグ").expect("epilogue");
+        let side = order("番外編").expect("side story");
+        assert!(prologue < first);
+        assert!(first < finale);
+        assert!(finale < epilogue);
+        assert!(epilogue < side);
+    }
+
+    /// 語の一部を位置と読み違えないこと。ここが緩むと無関係な作品が混ざる。
+    #[test]
+    fn ordinary_words_are_not_mistaken_for_positions() {
+        // `月下の約束` の `下` は語中なので後編ではない。
+        assert_eq!(order("月下の約束"), None);
+        // `finalize` は完結編ではない。
+        assert_eq!(order("finalize"), None);
+        // ローマ数字に使える文字だけの英単語も話数にしない。
+        assert_eq!(order("civil"), None);
+        // 西暦は単独トークンでも話数として拾わない。
+        assert_eq!(order("記録 2026"), None);
+    }
+}
+
+#[cfg(test)]
 mod search_integration_tests {
     use super::*;
     use std::collections::HashSet;
@@ -11793,7 +13214,38 @@ mod search_integration_tests {
         assert!(blocks_to_html(&blocks, &assets).contains("<!-- newpage -->"));
     }
 
+    /// 前の実行が残した一時ディレクトリを一度だけ掃除する。
+    ///
+    /// 各テストは末尾で `remove_dir_all` を呼ぶが、panic や早期 return では
+    /// そこへ到達しない。実際に 5,000 個以上が temp へ積み上がっており、
+    /// その状態では Windows で Tantivy のコミットが ACCESS_DENIED
+    /// （os error 5）で間欠的に失敗していた。実行中の別プロセスを巻き込まない
+    /// よう、1 時間より古いものだけを対象にする。
+    fn sweep_stale_test_dirs() {
+        static SWEEP: std::sync::Once = std::sync::Once::new();
+        SWEEP.call_once(|| {
+            let Ok(entries) = fs::read_dir(std::env::temp_dir()) else {
+                return;
+            };
+            let cutoff = std::time::SystemTime::now() - std::time::Duration::from_secs(3_600);
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                if !name.to_string_lossy().starts_with("piep_search_test_") {
+                    continue;
+                }
+                let stale = entry
+                    .metadata()
+                    .and_then(|meta| meta.modified())
+                    .is_ok_and(|modified| modified < cutoff);
+                if stale {
+                    let _ = fs::remove_dir_all(entry.path());
+                }
+            }
+        });
+    }
+
     fn temp_paths() -> (PathBuf, PathBuf) {
+        sweep_stale_test_dirs();
         let rand_val: u32 = rand::random();
         let root = std::env::temp_dir().join(format!("piep_search_test_{}", rand_val));
         let storage = root.join("downloads");
@@ -12036,6 +13488,414 @@ mod search_integration_tests {
             db.reindex_download(id).unwrap();
         }
         id
+    }
+
+    /// 実ライブラリで見つかった並び順の崩れを固定する。番号のない初回が
+    /// 末尾へ流れ、単なる言及リンクで加点された作品が話数を追い越していた。
+    #[test]
+    fn unnumbered_opening_leads_and_mentions_do_not_reorder_episodes() {
+        let (root, storage) = temp_paths();
+        let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+        let opening = insert_download_unindexed(
+            &db,
+            &storage,
+            "suggest-open",
+            "灯台の話",
+            "連載作者",
+            &[],
+            "初回本文",
+        );
+        let second = insert_download_unindexed(
+            &db,
+            &storage,
+            "suggest-2",
+            "灯台の話#2",
+            "連載作者",
+            &[],
+            "二話本文",
+        );
+        let third = insert_download_unindexed(
+            &db,
+            &storage,
+            "suggest-3",
+            "灯台の話#3",
+            "連載作者",
+            &[],
+            "三話本文",
+        );
+
+        // 第2話を種にしても、無印の初回が先頭に来る。
+        let suggestion = db
+            .generate_collection_suggestion(&CollectionSuggestionRequest {
+                seed_download_ids: vec![second],
+                limit: Some(20),
+            })
+            .unwrap();
+        let order = suggestion
+            .members
+            .iter()
+            .map(|member| member.title.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(order, vec!["灯台の話", "灯台の話#2", "灯台の話#3"]);
+        assert_eq!(suggestion.collection_kind, "ordered");
+        let _ = (opening, third);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// 公式シリーズに同居しているだけの作品まで既定で選ぶと、短編集を丸ごと
+    /// 取り込んでしまう。順序も過半数で決める。
+    #[test]
+    fn series_only_siblings_are_offered_but_not_preselected() {
+        let (root, storage) = temp_paths();
+        let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+        let seed = insert_download_unindexed(
+            &db,
+            &storage,
+            "anth-seed",
+            "海の便り",
+            "短編作者",
+            &[],
+            "本文",
+        );
+        let mut others = Vec::new();
+        for index in 0..4 {
+            others.push(insert_download_unindexed(
+                &db,
+                &storage,
+                &format!("anth-{index}"),
+                &format!("まったく別の話{index}"),
+                "短編作者",
+                &[],
+                "本文",
+            ));
+        }
+        for id in std::iter::once(seed).chain(others.iter().copied()) {
+            db.upsert_download_series(id, "pixiv", "anthology", "短編集", None)
+                .unwrap();
+        }
+        let suggestion = db
+            .generate_collection_suggestion(&CollectionSuggestionRequest {
+                seed_download_ids: vec![seed],
+                limit: Some(20),
+            })
+            .unwrap();
+        assert_eq!(suggestion.collection_kind, "unordered");
+        let preselected = suggestion
+            .members
+            .iter()
+            .filter(|member| member.selected)
+            .count();
+        assert_eq!(preselected, 1, "種だけが既定で選ばれる");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn work_collections_keep_order_and_reconnect_deleted_works() {
+        let (root, storage) = temp_paths();
+        let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+        let first = insert_download_unindexed(
+            &db,
+            &storage,
+            "collection-first",
+            "夜の手紙 前編",
+            "同じ作者",
+            &[],
+            "前編本文",
+        );
+        let second = insert_download_unindexed(
+            &db,
+            &storage,
+            "collection-second",
+            "夜の手紙 後編",
+            "同じ作者",
+            &[],
+            "後編本文",
+        );
+        let collection = db
+            .upsert_work_collection(&WorkCollectionInput {
+                id: None,
+                name: "夜の手紙".to_string(),
+                description: Some("前後編".to_string()),
+                collection_kind: "ordered".to_string(),
+                cover_download_id: Some(first),
+            })
+            .unwrap();
+        let collection = db
+            .add_work_collection_members(
+                &collection.summary.id,
+                &[
+                    WorkCollectionMemberInput {
+                        source: "pixiv".to_string(),
+                        source_id: "collection-first".to_string(),
+                        title_snapshot: None,
+                        author_snapshot: None,
+                        position: None,
+                        member_role: None,
+                        added_by: None,
+                        pinned: None,
+                        note: None,
+                    },
+                    WorkCollectionMemberInput {
+                        source: "pixiv".to_string(),
+                        source_id: "collection-second".to_string(),
+                        title_snapshot: None,
+                        author_snapshot: None,
+                        position: None,
+                        member_role: None,
+                        added_by: None,
+                        pinned: None,
+                        note: None,
+                    },
+                ],
+            )
+            .unwrap();
+        assert_eq!(collection.summary.member_count, 2);
+        assert_eq!(collection.summary.available_count, 2);
+
+        let reordered = db
+            .reorder_work_collection_members(
+                &collection.summary.id,
+                &[
+                    WorkKey {
+                        source: "pixiv".to_string(),
+                        source_id: "collection-second".to_string(),
+                    },
+                    WorkKey {
+                        source: "pixiv".to_string(),
+                        source_id: "collection-first".to_string(),
+                    },
+                ],
+            )
+            .unwrap();
+        assert_eq!(reordered.members[0].download_id, Some(second));
+
+        db.delete_download(first).unwrap();
+        let missing = db.get_work_collection(&collection.summary.id).unwrap();
+        assert_eq!(missing.summary.member_count, 2);
+        assert_eq!(missing.summary.available_count, 1);
+        assert!(missing
+            .members
+            .iter()
+            .any(|member| member.source_id == "collection-first" && member.missing));
+
+        let restored = insert_download_unindexed(
+            &db,
+            &storage,
+            "collection-first",
+            "夜の手紙 前編・改訂",
+            "同じ作者",
+            &[],
+            "再取得本文",
+        );
+        assert_ne!(restored, first);
+        let reconnected = db.get_work_collection(&collection.summary.id).unwrap();
+        let first_member = reconnected
+            .members
+            .iter()
+            .find(|member| member.source_id == "collection-first")
+            .unwrap();
+        assert_eq!(first_member.download_id, Some(restored));
+        assert_eq!(first_member.title, "夜の手紙 前編・改訂");
+        assert!(!first_member.missing);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn content_links_recognize_pixiv_and_fanbox_with_direction() {
+        let links = extract_work_link_evidence(
+            "前編はこちら https://www.pixiv.net/novel/show.php?id=123 。続きは https://creator.fanbox.cc/posts/456",
+            "pixiv",
+            "999",
+        );
+        assert_eq!(links.len(), 2);
+        assert!(links
+            .iter()
+            .any(|link| link.to_source == "pixiv" && link.to_source_id == "123"));
+        assert!(links.iter().any(|link| {
+            link.to_source == "fanbox"
+                && link.to_source_id == "456"
+                && link.relation_type == "continues_to"
+        }));
+    }
+
+    #[test]
+    fn collection_suggestions_use_title_parts_and_learn_rejection() {
+        let (root, storage) = temp_paths();
+        let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+        let first = insert_download_unindexed(
+            &db,
+            &storage,
+            "suggest-first",
+            "星を待つ 前編",
+            "連載作者",
+            &[],
+            "導入",
+        );
+        let _second = insert_download_unindexed(
+            &db,
+            &storage,
+            "suggest-second",
+            "星を待つ 後編",
+            "連載作者",
+            &[],
+            "結末",
+        );
+        let suggestion = db
+            .generate_collection_suggestion(&CollectionSuggestionRequest {
+                seed_download_ids: vec![first],
+                limit: Some(20),
+            })
+            .unwrap();
+        assert_eq!(suggestion.members.len(), 2);
+        assert!(suggestion.members.iter().any(|member| {
+            member.source_id == "suggest-second"
+                && member
+                    .evidence
+                    .iter()
+                    .any(|evidence| evidence.kind == "title_similarity")
+        }));
+        assert!(db
+            .reject_collection_suggestion(&suggestion.id, None)
+            .unwrap());
+
+        let after_rejection = db.generate_collection_suggestion(&CollectionSuggestionRequest {
+            seed_download_ids: vec![first],
+            limit: Some(20),
+        });
+        assert_eq!(
+            after_rejection.unwrap_err(),
+            "関連作品は見つかりませんでした"
+        );
+
+        // Feedback belongs to the rule that produced it. A future rule can
+        // evaluate the pair again instead of leaving an irreversible dead end.
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE collection_pair_feedback SET rule_version = 'collection-suggest-v1'",
+                [],
+            )
+            .unwrap();
+        let reconsidered = db
+            .generate_collection_suggestion(&CollectionSuggestionRequest {
+                seed_download_ids: vec![first],
+                limit: Some(20),
+            })
+            .unwrap();
+        assert_eq!(reconsidered.members.len(), 2);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn collection_suggestions_walk_the_whole_link_component_from_either_end() {
+        let (root, storage) = temp_paths();
+        let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+        let first = insert_download(
+            &db,
+            &storage,
+            "410001",
+            "倉本エリカを手に入れたあなたが、棚ぼたで鈴原美紗も寝取って発情種付け立ちバック交尾を堪能しちゃうお話",
+            "連載作者",
+            &[],
+            "第一作",
+        );
+        let second = insert_download(
+            &db,
+            &storage,
+            "410002",
+            "倉本エリカと鈴原美紗を堕としたあなたが、温泉旅館で極上美女二人から迫られるハーレム3P交尾を好き放題に堪能しちゃうお話",
+            "連載作者",
+            &[],
+            "第二作",
+        );
+        let third = insert_download(
+            &db,
+            &storage,
+            "410003",
+            "超人気アイドル兼魔法少女の倉本エリカが、あなたを引き留める為にマットプレイでアナル舐め＆スパイダー騎乗位膣内射精をさせてくれる話",
+            "連載作者",
+            &[],
+            "前作はこちら https://www.pixiv.net/novel/show.php?id=410002",
+        );
+        let fourth = insert_download(
+            &db,
+            &storage,
+            "410004",
+            "超人気アイドル兼魔法少女の倉本エリカを庇ったあなたが、生殖本能むき出しの世界一気持ちいい膣内射精立ちバック交尾を出来ちゃう話",
+            "連載作者",
+            &[],
+            "前作はこちら https://www.pixiv.net/novel/show.php?id=410003",
+        );
+
+        // The first edge exists only in the caption/excerpt; the others are in
+        // the body. Both surfaces must feed the same normalized link graph.
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE downloads SET excerpt = ?1 WHERE id = ?2",
+                params![
+                    "前作はこちら https://www.pixiv.net/novel/show.php?id=410001",
+                    second
+                ],
+            )
+            .unwrap();
+        db.reindex_download(second).unwrap();
+
+        // Simulate an existing library whose full-text index predates the
+        // normalized work-link graph. Starting at the first work must discover
+        // incoming references and keep walking from every newly found work.
+        db.conn
+            .lock()
+            .unwrap()
+            .execute("DELETE FROM work_links", [])
+            .unwrap();
+        let from_first = db
+            .generate_collection_suggestion(&CollectionSuggestionRequest {
+                seed_download_ids: vec![first],
+                limit: Some(20),
+            })
+            .unwrap();
+        assert_eq!(
+            from_first
+                .members
+                .iter()
+                .map(|member| member.download_id.unwrap())
+                .collect::<Vec<_>>(),
+            vec![first, second, third, fourth]
+        );
+        assert!(from_first.members.iter().skip(1).all(|member| member
+            .evidence
+            .iter()
+            .any(|evidence| evidence.kind == "content_link")));
+        assert!(from_first.members.iter().any(|member| member
+            .evidence
+            .iter()
+            .any(|evidence| evidence.label.contains("3段追跡"))));
+
+        // The opposite endpoint works too: its outgoing "previous work" links
+        // lead back to the first chapter and are ordered by their direction.
+        db.conn
+            .lock()
+            .unwrap()
+            .execute("DELETE FROM work_links", [])
+            .unwrap();
+        let from_last = db
+            .generate_collection_suggestion(&CollectionSuggestionRequest {
+                seed_download_ids: vec![fourth],
+                limit: Some(20),
+            })
+            .unwrap();
+        assert_eq!(
+            from_last
+                .members
+                .iter()
+                .map(|member| member.download_id.unwrap())
+                .collect::<Vec<_>>(),
+            vec![first, second, third, fourth]
+        );
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
@@ -14890,7 +16750,15 @@ mod search_integration_tests {
     fn a_series_can_name_the_author_behind_it() {
         let (root, storage) = temp_paths();
         let db = Database::open(&root.join("piep.db"), &storage).unwrap();
-        let id = insert_download(&db, &storage, "novel-1", "夜明けの糸", "青葉しおり", &[], "本文");
+        let id = insert_download(
+            &db,
+            &storage,
+            "novel-1",
+            "夜明けの糸",
+            "青葉しおり",
+            &[],
+            "本文",
+        );
         {
             let conn = db.conn.lock().unwrap();
             conn.execute(
@@ -14933,8 +16801,10 @@ mod search_integration_tests {
         };
         db.create_update_job("job-done", &request, &[]).unwrap();
         db.create_update_job("job-running", &request, &[]).unwrap();
-        db.set_update_job_status("job-done", "completed", None).unwrap();
-        db.set_update_job_status("job-running", "running", None).unwrap();
+        db.set_update_job_status("job-done", "completed", None)
+            .unwrap();
+        db.set_update_job_status("job-running", "running", None)
+            .unwrap();
 
         assert_eq!(db.clear_finished_update_jobs().unwrap(), 1);
         assert!(db.update_job_snapshot("job-done").is_err());
@@ -14973,7 +16843,9 @@ mod search_integration_tests {
         db.upsert_update_candidate(&candidate).unwrap();
         assert!(db.list_pending_update_candidates(100).unwrap().is_empty());
         assert_eq!(
-            db.update_candidate_status("pixiv", "12345").unwrap().as_deref(),
+            db.update_candidate_status("pixiv", "12345")
+                .unwrap()
+                .as_deref(),
             Some("dismissed")
         );
         assert_eq!(db.count_dismissed_update_candidates().unwrap(), 1);
@@ -14985,7 +16857,10 @@ mod search_integration_tests {
         // 保存できたら、もう決めていないものではない。
         db.clear_update_candidate("pixiv", "12345").unwrap();
         assert!(db.list_pending_update_candidates(100).unwrap().is_empty());
-        assert!(db.update_candidate_status("pixiv", "12345").unwrap().is_none());
+        assert!(db
+            .update_candidate_status("pixiv", "12345")
+            .unwrap()
+            .is_none());
 
         let _ = fs::remove_dir_all(root);
     }
@@ -15044,7 +16919,8 @@ mod search_integration_tests {
         // 保存を頼んだ2件は作業に加わる。ここで進捗が 1/1 のままだと、
         // 保存の最中に「完了」と見えてしまう。
         let ids: Vec<i64> = snapshot.candidates.iter().take(2).map(|c| c.id).collect();
-        db.queue_update_job_candidates("job-progress", &ids).unwrap();
+        db.queue_update_job_candidates("job-progress", &ids)
+            .unwrap();
         let snapshot = db.update_job_snapshot("job-progress").unwrap();
         assert_eq!(snapshot.totals, 3);
         assert_eq!(snapshot.processed, 0);
@@ -15076,8 +16952,10 @@ mod search_integration_tests {
         assert_eq!(target.consecutive_errors, 0);
 
         // 失敗は積み上がる。
-        db.mark_update_target_failed("author", "pixiv", "7").unwrap();
-        db.mark_update_target_failed("author", "pixiv", "7").unwrap();
+        db.mark_update_target_failed("author", "pixiv", "7")
+            .unwrap();
+        db.mark_update_target_failed("author", "pixiv", "7")
+            .unwrap();
         let target = db.list_update_targets(None, false).unwrap().remove(0);
         assert_eq!(target.consecutive_errors, 2);
 

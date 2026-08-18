@@ -46,6 +46,7 @@ import { errorMessage, formatNumber } from "@/lib/format";
 import { scrollViewportToTop } from "@/lib/scroll";
 import { VirtualizedWorkList } from "@/features/library/VirtualizedWorkList";
 import { entityKey, VirtualizedEntityGrid } from "@/features/library/VirtualizedEntityGrid";
+import { CollectionsPanel } from "@/features/collections/CollectionsPanel";
 import { boundedInfiniteListOptions, INFINITE_LIST_MAX_PAGES } from "@/lib/queryLimits";
 import {
   countEntityFacets,
@@ -67,7 +68,7 @@ import { useSavedSearchMigration } from "@/features/library/savedSearchMigration
 import { deleteThenCleanup } from "@/features/library/deletedWorkCleanup";
 import type { EntityFacet, FacetCount, LibrarySortBy, LibraryWatchFilter, SavedSearchRecord, SearchSuggestion, SearchV2Params, SearchV2Result } from "@/types/library";
 
-type LibraryTab = "works" | "people" | "series";
+type LibraryTab = "works" | "people" | "series" | "collections";
 type ViewMode = "gallery" | "compact";
 
 interface Filters {
@@ -106,7 +107,7 @@ const SEARCH_SORT_OPTIONS = [RELEVANCE_SORT, ...SORT_OPTIONS];
 const SORT_VALUES = new Set<LibrarySortBy>(SEARCH_SORT_OPTIONS.map((option) => option.value));
 
 function parseLibraryTab(value: string | null): LibraryTab {
-  return value === "people" || value === "series" ? value : "works";
+  return value === "people" || value === "series" || value === "collections" ? value : "works";
 }
 
 function parseWatchFilter(value: unknown): LibraryWatchFilter | null {
@@ -912,7 +913,9 @@ export default function LibraryPage() {
   return (
     <div className="page page--contained library-page">
       <VisuallyHidden component="h1">ライブラリ</VisuallyHidden>
-      <Paper p="md" className="library-toolbar" withBorder>
+      {/* Search, filters and sorting narrow works and entities. Collections are
+       *  a hand-made list with its own controls, so the toolbar steps aside. */}
+      {tab !== "collections" && <Paper p="md" className="library-toolbar" withBorder>
         <Stack gap="sm">
           {/* Centred, not top-aligned: the search field is taller than every
               control beside it, so aligning tops left them all sitting three
@@ -968,16 +971,18 @@ export default function LibraryPage() {
             </Group>
           )}
         </Stack>
-      </Paper>
+      </Paper>}
 
       <Tabs value={tab} onChange={(value) => setTab((value as LibraryTab) ?? "works")} mt="lg">
         <Tabs.List>
           <Tabs.Tab value="works" leftSection={<Icons.epubAdd size={IconSize.menu} />}>作品</Tabs.Tab>
           <Tabs.Tab value="people" leftSection={<Icons.people size={IconSize.menu} />}>作者・クリエイター</Tabs.Tab>
           <Tabs.Tab value="series" leftSection={<Icons.series size={IconSize.menu} />}>シリーズ</Tabs.Tab>
+          <Tabs.Tab value="collections" leftSection={<Icons.collection size={IconSize.menu} />}>コレクション</Tabs.Tab>
         </Tabs.List>
       </Tabs>
 
+      {tab === "collections" ? <Box mt="lg"><CollectionsPanel /></Box> : <>
       <Group justify="space-between" my="md" gap="xs" wrap="nowrap">
         <Group gap={8} wrap="nowrap" miw={0}>
           <Text size="sm" c="dimmed" style={{ whiteSpace: "nowrap" }}>{tab === "works"
@@ -1048,6 +1053,7 @@ export default function LibraryPage() {
           />
         </>
       ) : <EmptyState icon={Icons.people} title="一致する項目がありません" description="名前を変えて検索してください。" />}
+      </>}
 
       <Drawer opened={filterOpened} onClose={filterDrawer.close} title="詳細フィルター" position="right" size={420} className="filter-drawer">
         <FilterForm value={filters} runtime={runtime} tags={facets.data?.tags ?? []} contentTypes={facets.data?.contentTypes.map((item) => ({ value: item.name, label: `${item.name} (${item.count})` })) ?? []} onApply={(next) => { setFilters(next); filterDrawer.close(); }} />

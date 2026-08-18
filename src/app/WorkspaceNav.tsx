@@ -131,7 +131,11 @@ export function WorkspaceNav({ railed, onNavigate }: { railed: boolean; onNaviga
 
   const shelf = activeShelf(location.pathname, location.searchParams);
   const activeSavedId = Number.parseInt(location.searchParams.get("saved") ?? "", 10);
-  const inLibrary = location.pathname === "/library" || location.pathname.startsWith("/works/");
+  // Collections are a library tab now, so a collection screen keeps the
+  // library section highlighted rather than needing an entry of its own.
+  const inLibrary = location.pathname === "/library"
+    || location.pathname.startsWith("/works/")
+    || location.pathname.startsWith("/collections");
   const inCollect = location.pathname.startsWith("/save") || location.pathname.startsWith("/updates");
   const inExport = location.pathname.startsWith("/epub");
   const saved = savedSearches.data ?? [];

@@ -317,7 +317,11 @@ impl EpubBuilder {
                 .and_then(|value| value.to_str())
                 .unwrap_or("image");
 
-            let base = if is_cover { "cover" } else { stem };
+            // A merged collection can contain files with the same original
+            // stem (for example every FANBOX post may have `image-0`).  The
+            // manifest image id is namespaced by the collection merger and is
+            // therefore the authoritative packaged name.
+            let base = if is_cover { "cover" } else { image.id.as_str() };
             let filename = unique_name(base, extension, &mut used_names);
             let id = unique_id(
                 &if is_cover {
@@ -329,12 +333,16 @@ impl EpubBuilder {
             );
             let dimensions = image_dimensions(&bytes);
 
+            let mut keys = reference_keys(stem, is_cover);
+            keys.push(image.id.clone());
+            keys.sort();
+            keys.dedup();
             packaged.push(PackagedImage {
                 zip_path: format!("OEBPS/images/{}", filename),
                 id,
                 media_type,
                 bytes,
-                keys: reference_keys(stem, is_cover),
+                keys,
                 is_cover,
                 dimensions,
             });

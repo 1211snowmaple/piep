@@ -42,6 +42,11 @@ export function quickSaveSource(value: string): QuickSaveSource | null {
   }
 }
 
+/** Enough to keep four rows however many columns the card's width allows: six
+ *  columns of four at the widest. The card shows the first four rows and clips
+ *  the rest, so the count only has to be generous, not exact. */
+const TOP_TAG_COUNT = 24;
+
 export default function DashboardPage() {
   const navigate = useAppNavigate();
   const runtime = isTauriRuntime();
@@ -121,7 +126,7 @@ export default function DashboardPage() {
             at ordinary window widths everything used to stack, leaving three
             full-width strips down the page. */}
         <Grid gap="lg" align="stretch">
-          <Grid.Col span={{ base: 12, md: 7, lg: 8 }}>
+          <Grid.Col span={{ base: 12, md: 6, lg: 7 }}>
             <Card p="lg" h="100%" className="dashboard-trend-card">
               <Group justify="space-between" mb="md">
                 <Box>
@@ -134,7 +139,7 @@ export default function DashboardPage() {
               <SourceComposition breakdown={data.sourceBreakdown} total={data.stats.totalDownloads} />
             </Card>
           </Grid.Col>
-          <Grid.Col span={{ base: 12, md: 5, lg: 4 }}>
+          <Grid.Col span={{ base: 12, md: 6, lg: 5 }}>
             {/* Side by side once the column is full width, so neither ends up
                 as a lonely strip. */}
             <div className="dashboard-side">
@@ -142,9 +147,9 @@ export default function DashboardPage() {
                 <Group justify="space-between" mb="sm"><Group gap="xs"><Icons.search size={IconSize.action} /><Text fw={700}>検索インデックス</Text></Group><Badge color={index.isError ? "red" : indexProgress === 100 ? "green" : "yellow"}>{index.isError ? "取得失敗" : `${indexProgress}%`}</Badge></Group>
                 {index.isError ? <Button variant="subtle" color="red" size="compact-xs" onClick={() => index.refetch()}>状態を再確認</Button> : <><Progress value={indexProgress} mb="sm" color={indexProgress === 100 ? "green" : "yellow"} aria-label={`検索インデックス ${indexProgress}%`} /><Text size="xs" c="dimmed">{index.data?.isComplete ? "全文・意味検索は最新です" : `${formatNumber(index.data?.pendingDownloads)}件を処理中`}</Text></>}
               </Card>
-              <Card p="lg">
+              <Card p="lg" className="dashboard-tags-card">
                 <Text fw={700} mb="sm">よく使うタグ</Text>
-                <div className="dashboard-tags">{data.topTags.slice(0, 8).map((tag) => <Badge className="dashboard-tag" key={tag.name} variant="light" color="gray" component="button" title={`${tag.name}（${formatNumber(tag.count)}件）`} onClick={() => navigate(`/library?q=${encodeURIComponent(tag.name)}`)}><span className="dashboard-tag__name">{tag.name}</span><span className="dashboard-tag__count">{formatNumber(tag.count)}</span></Badge>)}</div>
+                <div className="dashboard-tags">{data.topTags.slice(0, TOP_TAG_COUNT).map((tag) => <Badge className="dashboard-tag" key={tag.name} variant="light" color="gray" component="button" title={`${tag.name}（${formatNumber(tag.count)}件）`} onClick={() => navigate(`/library?q=${encodeURIComponent(tag.name)}`)}><span className="dashboard-tag__name">{tag.name}</span><span className="dashboard-tag__count">{formatNumber(tag.count)}</span></Badge>)}</div>
               </Card>
             </div>
           </Grid.Col>

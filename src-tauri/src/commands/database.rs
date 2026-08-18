@@ -1,12 +1,14 @@
 use crate::database::queries::EntityProfileFreshness;
 use crate::database::{
-    AssetEntry, BulkMutationResult, DashboardSummary, DbStats, DownloadEntry, DownloadRelation,
+    AcceptCollectionSuggestionInput, AssetEntry, BulkMutationResult, CollectionSuggestion,
+    CollectionSuggestionRequest, DashboardSummary, DbStats, DownloadEntry, DownloadRelation,
     DownloadVersion, EditorDocument, EntityFacet, EntitySeriesPage, EntityVersion, FacetCount,
     FilterFacets, LibraryDiagnostics, LibraryMaintenanceResult, LibraryShelfCounts, NewAsset,
     NewDownload, PersonEntry, ReaderContentPage, ReaderDocument, ReaderMetadata, ReaderSearchHit,
     SavedSearch, SavedSearchInput, SearchIndexOptimizationResult, SearchIndexStatus,
     SearchSuggestParams, SearchSuggestResult, SearchV2Params, SearchV2Result, SeriesEntry,
-    UpdateTarget, UpdateTargetInput, WorkBlockInput, WorkEditRevision,
+    UpdateTarget, UpdateTargetInput, WorkBlockInput, WorkCollection, WorkCollectionInput,
+    WorkCollectionMemberInput, WorkCollectionSummary, WorkEditRevision, WorkKey, WorkLink,
 };
 use crate::AppState;
 use sha2::{Digest, Sha256};
@@ -557,6 +559,189 @@ pub async fn db_upsert_saved_search(
 #[tauri::command]
 pub async fn db_delete_saved_search(app: tauri::AppHandle, id: i64) -> Result<bool, String> {
     run_db_blocking(app, move |state| state.db.delete_saved_search(id)).await
+}
+
+#[tauri::command]
+pub async fn db_list_work_collections(
+    app: tauri::AppHandle,
+) -> Result<Vec<WorkCollectionSummary>, String> {
+    run_db_blocking(app, move |state| state.db.list_work_collections()).await
+}
+
+#[tauri::command]
+pub async fn db_get_work_collection(
+    app: tauri::AppHandle,
+    collection_id: String,
+) -> Result<WorkCollection, String> {
+    run_db_blocking(app, move |state| {
+        state.db.get_work_collection(&collection_id)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn db_upsert_work_collection(
+    app: tauri::AppHandle,
+    input: WorkCollectionInput,
+) -> Result<WorkCollection, String> {
+    run_library_write_blocking(app, move |state| state.db.upsert_work_collection(&input)).await
+}
+
+#[tauri::command]
+pub async fn db_delete_work_collection(
+    app: tauri::AppHandle,
+    collection_id: String,
+) -> Result<(), String> {
+    run_library_write_blocking(app, move |state| {
+        state.db.delete_work_collection(&collection_id)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn db_add_work_collection_members(
+    app: tauri::AppHandle,
+    collection_id: String,
+    members: Vec<WorkCollectionMemberInput>,
+) -> Result<WorkCollection, String> {
+    run_library_write_blocking(app, move |state| {
+        state
+            .db
+            .add_work_collection_members(&collection_id, &members)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn db_remove_work_collection_members(
+    app: tauri::AppHandle,
+    collection_id: String,
+    members: Vec<WorkKey>,
+) -> Result<WorkCollection, String> {
+    run_library_write_blocking(app, move |state| {
+        state
+            .db
+            .remove_work_collection_members(&collection_id, &members)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn db_reorder_work_collection_members(
+    app: tauri::AppHandle,
+    collection_id: String,
+    members: Vec<WorkKey>,
+) -> Result<WorkCollection, String> {
+    run_library_write_blocking(app, move |state| {
+        state
+            .db
+            .reorder_work_collection_members(&collection_id, &members)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn db_list_collections_for_work(
+    app: tauri::AppHandle,
+    source: String,
+    source_id: String,
+) -> Result<Vec<WorkCollectionSummary>, String> {
+    run_db_blocking(app, move |state| {
+        state.db.list_collections_for_work(&source, &source_id)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn db_list_collections_for_person(
+    app: tauri::AppHandle,
+    source: String,
+    person_key: String,
+) -> Result<Vec<WorkCollectionSummary>, String> {
+    run_db_blocking(app, move |state| {
+        state.db.list_collections_for_person(&source, &person_key)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn db_refresh_work_links(
+    app: tauri::AppHandle,
+    download_id: i64,
+) -> Result<Vec<WorkLink>, String> {
+    run_library_write_blocking(app, move |state| state.db.refresh_work_links(download_id)).await
+}
+
+#[tauri::command]
+pub async fn db_list_work_links_for_work(
+    app: tauri::AppHandle,
+    source: String,
+    source_id: String,
+) -> Result<Vec<WorkLink>, String> {
+    run_db_blocking(app, move |state| {
+        state.db.list_work_links_for_work(&source, &source_id)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn db_generate_collection_suggestion(
+    app: tauri::AppHandle,
+    request: CollectionSuggestionRequest,
+) -> Result<CollectionSuggestion, String> {
+    run_library_write_blocking(app, move |state| {
+        state.db.generate_collection_suggestion(&request)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn db_list_collection_suggestions(
+    app: tauri::AppHandle,
+    state_filter: Option<String>,
+) -> Result<Vec<CollectionSuggestion>, String> {
+    run_db_blocking(app, move |state| {
+        state
+            .db
+            .list_collection_suggestions(state_filter.as_deref())
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn db_dismiss_collection_suggestion(
+    app: tauri::AppHandle,
+    suggestion_id: String,
+) -> Result<bool, String> {
+    run_library_write_blocking(app, move |state| {
+        state.db.dismiss_collection_suggestion(&suggestion_id)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn db_accept_collection_suggestion(
+    app: tauri::AppHandle,
+    input: AcceptCollectionSuggestionInput,
+) -> Result<WorkCollection, String> {
+    run_library_write_blocking(app, move |state| {
+        state.db.accept_collection_suggestion(&input)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn db_reject_collection_suggestion(
+    app: tauri::AppHandle,
+    suggestion_id: String,
+    member_keys: Option<Vec<WorkKey>>,
+) -> Result<bool, String> {
+    run_library_write_blocking(app, move |state| {
+        state
+            .db
+            .reject_collection_suggestion(&suggestion_id, member_keys.as_deref())
+    })
+    .await
 }
 
 #[tauri::command]
