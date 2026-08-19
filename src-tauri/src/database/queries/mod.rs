@@ -6722,19 +6722,36 @@ impl Database {
     /// 二重に書くと、片方だけ条件が変わったときに「総数が、数えているはずの
     /// 行と一致しない」という最も気付きにくい壊れ方をするため、FROM・絞り込み
     /// ・GROUP BY は一箇所にまとめ、呼び出し側は何を SELECT してどう締めるかだけ
-    /// を決める。フィルタは常に `?1`。
-    fn entity_facet_source(kind: &str, has_filter: bool) -> Result<String, String> {
+    /// を決める。
+    ///
+    /// `library_wheres` are the library's own filters, written against
+    /// `downloads d` by [`append_library_filters`] and so usable here unchanged:
+    /// both groupings already have that table in scope. They belong in WHERE
+    /// rather than HAVING - the point is to group the works that pass the
+    /// filter, so an author's count is how many of their works match.
+    ///
+    /// Binding is positional and in SQL order: the filters in WHERE come first,
+    /// then the name/description LIKE in HAVING, then whatever the caller adds.
+    fn entity_facet_source(
+        kind: &str,
+        has_filter: bool,
+        library_wheres: &[String],
+    ) -> Result<String, String> {
+        let and_filters = library_wheres
+            .iter()
+            .map(|clause| format!("\n                   AND {}", clause))
+            .collect::<String>();
         match kind {
             "person" | "people" | "author" | "authors" => Ok(format!(
                 "FROM downloads d
                  LEFT JOIN people p ON p.source = d.source AND p.source_key = d.author_id
                  WHERE d.author_id IS NOT NULL AND d.author_id != ''
-                   AND d.author_name IS NOT NULL AND d.author_name != ''
+                   AND d.author_name IS NOT NULL AND d.author_name != ''{and_filters}
                  GROUP BY d.source, d.author_id, COALESCE(p.display_name, d.author_name), p.icon_path, p.cover_path, p.description, p.updated_at
                  {having}",
                 having = if has_filter {
-                    "HAVING COALESCE(p.display_name, d.author_name) LIKE ?1 ESCAPE '\\'
-                         OR COALESCE(p.description, '') LIKE ?1 ESCAPE '\\'"
+                    "HAVING COALESCE(p.display_name, d.author_name) LIKE ? ESCAPE '\\'
+                         OR COALESCE(p.description, '') LIKE ? ESCAPE '\\'"
                 } else {
                     ""
                 },
@@ -6743,11 +6760,17 @@ impl Database {
                 "FROM download_series ds
                  LEFT JOIN series s ON s.source = ds.series_source AND s.source_key = ds.series_key
                  JOIN downloads d ON d.id = ds.download_id
+                 {where_clause}
                  GROUP BY ds.series_source, ds.series_key, COALESCE(s.title, ds.title), s.cover_path, s.description, s.updated_at
                  {having}",
+                where_clause = if library_wheres.is_empty() {
+                    String::new()
+                } else {
+                    format!("WHERE {}", library_wheres.join("\n                   AND "))
+                },
                 having = if has_filter {
-                    "HAVING COALESCE(s.title, ds.title) LIKE ?1 ESCAPE '\\'
-                         OR COALESCE(s.description, '') LIKE ?1 ESCAPE '\\'"
+                    "HAVING COALESCE(s.title, ds.title) LIKE ? ESCAPE '\\'
+                         OR COALESCE(s.description, '') LIKE ? ESCAPE '\\'"
                 } else {
                     ""
                 },
@@ -6756,30 +6779,49 @@ impl Database {
         }
     }
 
+    /// The library filters an entity listing is narrowed by, if any.
+    ///
+    /// The same builder the works listing uses, so "お気に入りだけ" means the
+    /// same thing on every tab rather than one tab's idea of it.
+    fn entity_facet_filters(
+        filters: Option<&SearchV2Params>,
+    ) -> (Vec<String>, Vec<Box<dyn rusqlite::types::ToSql>>) {
+        let mut wheres = Vec::new();
+        let mut bind_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+        if let Some(params) = filters {
+            append_library_filters(params, &mut wheres, &mut bind_values);
+        }
+        (wheres, bind_values)
+    }
+
     /// 作者・シリーズが何件あるか。
     ///
     /// 一覧そのものは1ページずつしか読まないので、これを聞かないと「全何ページ
     /// あるか」が分からない。ページ番号で移動する以上、最後のページが存在する
     /// ことは分かっていなければならない。
-    pub fn count_entity_facets(&self, kind: &str, query: Option<&str>) -> Result<i64, String> {
+    pub fn count_entity_facets(
+        &self,
+        kind: &str,
+        query: Option<&str>,
+        filters: Option<&SearchV2Params>,
+    ) -> Result<i64, String> {
         let conn = self.read_conn()?;
         let filter = query.map(str::trim).unwrap_or("");
         let has_filter = !filter.is_empty();
         let like = format!("%{}%", filter.replace('%', "\\%").replace('_', "\\_"));
+        let (library_wheres, mut bind_values) = Self::entity_facet_filters(filters);
         let sql = format!(
             "SELECT COUNT(*) FROM (SELECT 1 {source})",
-            source = Self::entity_facet_source(kind, has_filter)?
+            source = Self::entity_facet_source(kind, has_filter, &library_wheres)?
         );
-        let mut stmt = conn
-            .prepare(&sql)
-            .map_err(|e| format!("Entity facet count prepare failed: {}", e))?;
-        let total = if has_filter {
-            stmt.query_row(rusqlite::params![like], |row| row.get::<_, i64>(0))
-        } else {
-            stmt.query_row([], |row| row.get::<_, i64>(0))
+        if has_filter {
+            bind_values.push(Box::new(like.clone()));
+            bind_values.push(Box::new(like));
         }
-        .map_err(|e| format!("Entity facet count failed: {}", e))?;
-        Ok(total)
+        let refs: Vec<&dyn rusqlite::types::ToSql> =
+            bind_values.iter().map(|value| value.as_ref()).collect();
+        conn.query_row(&sql, refs.as_slice(), |row| row.get::<_, i64>(0))
+            .map_err(|e| format!("Entity facet count failed: {}", e))
     }
 
     pub fn search_entity_facets(
@@ -6788,12 +6830,17 @@ impl Database {
         query: Option<&str>,
         limit: i64,
         offset: i64,
+        filters: Option<&SearchV2Params>,
     ) -> Result<Vec<EntityFacet>, String> {
         let limit = limit.clamp(1, 200);
         let offset = offset.max(0);
         let filter = query.map(str::trim).unwrap_or("");
         let generation = self.library_generation()?;
-        let cache_key = format!("{kind}\u{1f}{filter}\u{1f}{limit}\u{1f}{offset}");
+        // The library filters are part of what was asked for, so they are part
+        // of the key. Left out of it, a favourites-only listing would be handed
+        // the rows cached for the unfiltered one.
+        let cache_key =
+            format!("{kind}\u{1f}{filter}\u{1f}{limit}\u{1f}{offset}\u{1f}{filters:?}");
         if let Ok(mut cache) = self.entity_facet_cache.lock() {
             if let Some(cached) = cache.get(&cache_key, generation) {
                 return Ok(cached);
@@ -6802,9 +6849,8 @@ impl Database {
         let conn = self.read_conn()?;
         let has_filter = !filter.is_empty();
         let like = format!("%{}%", filter.replace('%', "\\%").replace('_', "\\_"));
-        let source = Self::entity_facet_source(kind, has_filter)?;
-        let limit_index = if has_filter { 2 } else { 1 };
-        let offset_index = if has_filter { 3 } else { 2 };
+        let (library_wheres, mut bind_values) = Self::entity_facet_filters(filters);
+        let source = Self::entity_facet_source(kind, has_filter, &library_wheres)?;
 
         let sql = match kind {
             "person" | "people" | "author" | "authors" => format!(
@@ -6828,7 +6874,7 @@ impl Database {
                         p.cover_path AS banner_path
                      {source}
                      ORDER BY count DESC, display_name ASC
-                     LIMIT ?{limit_index} OFFSET ?{offset_index}"
+                     LIMIT ? OFFSET ?"
             ),
             "series" => format!(
                 "SELECT
@@ -6854,7 +6900,7 @@ impl Database {
                         s.cover_path AS banner_path
                      {source}
                      ORDER BY count DESC, title ASC
-                     LIMIT ?{limit_index} OFFSET ?{offset_index}"
+                     LIMIT ? OFFSET ?"
             ),
             other => return Err(format!("Unsupported entity facet kind: {}", other)),
         };
@@ -6877,12 +6923,17 @@ impl Database {
                 banner_path: row.get(10)?,
             })
         };
-        let rows = if has_filter {
-            stmt.query_map(rusqlite::params![like, limit, offset], map_row)
-        } else {
-            stmt.query_map(rusqlite::params![limit, offset], map_row)
+        if has_filter {
+            bind_values.push(Box::new(like.clone()));
+            bind_values.push(Box::new(like));
         }
-        .map_err(|e| format!("Entity facet search failed: {}", e))?;
+        bind_values.push(Box::new(limit));
+        bind_values.push(Box::new(offset));
+        let refs: Vec<&dyn rusqlite::types::ToSql> =
+            bind_values.iter().map(|value| value.as_ref()).collect();
+        let rows = stmt
+            .query_map(refs.as_slice(), map_row)
+            .map_err(|e| format!("Entity facet search failed: {}", e))?;
 
         let mut results = Vec::new();
         for row in rows {
@@ -14724,45 +14775,109 @@ mod search_integration_tests {
         let capped = db.get_filter_facets().unwrap();
         assert_eq!(capped.author_entities.len(), 60);
 
-        let second_page = db.search_entity_facets("person", None, 60, 60).unwrap();
+        let second_page = db.search_entity_facets("person", None, 60, 60, None).unwrap();
         assert_eq!(second_page.len(), 10, "authors past the cap stay reachable");
 
         let filtered = db
-            .search_entity_facets("person", Some("作者69"), 60, 0)
+            .search_entity_facets("person", Some("作者69"), 60, 0, None)
             .unwrap();
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].display_name, "作者69");
         assert_eq!(filtered[0].count, 1);
 
         let missing = db
-            .search_entity_facets("person", Some("存在しない"), 60, 0)
+            .search_entity_facets("person", Some("存在しない"), 60, 0, None)
             .unwrap();
         assert!(missing.is_empty());
 
-        assert!(db.search_entity_facets("unknown", None, 10, 0).is_err());
+        assert!(db.search_entity_facets("unknown", None, 10, 0, None).is_err());
 
         // The pager cannot name a last page without this, and a total that does
         // not agree with the rows it is counting is worse than none at all.
-        assert_eq!(db.count_entity_facets("person", None).unwrap(), 70);
-        assert_eq!(db.count_entity_facets("person", Some("作者69")).unwrap(), 1);
+        assert_eq!(db.count_entity_facets("person", None, None).unwrap(), 70);
+        assert_eq!(db.count_entity_facets("person", Some("作者69"), None).unwrap(), 1);
         assert_eq!(
-            db.count_entity_facets("person", Some("存在しない"))
+            db.count_entity_facets("person", Some("存在しない"), None)
                 .unwrap(),
             0
         );
-        assert!(db.count_entity_facets("unknown", None).is_err());
+        assert!(db.count_entity_facets("unknown", None, None).is_err());
 
         // Walked page by page, the rows add up to exactly what was counted.
-        let total = db.count_entity_facets("person", None).unwrap();
+        let total = db.count_entity_facets("person", None, None).unwrap();
         let mut walked = 0usize;
         for page in 0..(total as usize).div_ceil(20) {
             walked += db
-                .search_entity_facets("person", None, 20, (page * 20) as i64)
+                .search_entity_facets("person", None, 20, (page * 20) as i64, None)
                 .unwrap()
                 .len();
         }
         assert_eq!(walked as i64, total);
+    }
 
+    #[test]
+    fn entity_facets_narrow_to_the_library_filters() {
+        let (_temp, root, storage) = temp_paths();
+        let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+
+        // 作者Aは絞り込みに合う作品と合わない作品を持ち、作者Bは合う作品を
+        // 持たない。絞り込みが効いていれば、Aだけが残り、その件数も1になる。
+        let favourite =
+            insert_download_unindexed(&db, &storage, "301", "日常の話", "作者A", &["日常"], "本文");
+        let other =
+            insert_download_unindexed(&db, &storage, "302", "冒険の話", "作者A", &["冒険"], "本文");
+        insert_download_unindexed(&db, &storage, "303", "冒険の続き", "作者B", &["冒険"], "本文");
+        // 作品ごとに別の作者IDを振る補助関数なので、この2件を同じ人物にまとめる。
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE downloads SET author_id = 'author-A' WHERE id IN (?1, ?2)",
+                rusqlite::params![favourite, other],
+            )
+            .unwrap();
+        }
+        db.set_favorite(favourite, true).unwrap();
+
+        let unfiltered = db.search_entity_facets("person", None, 60, 0, None).unwrap();
+        assert_eq!(unfiltered.len(), 2);
+        assert_eq!(db.count_entity_facets("person", None, None).unwrap(), 2);
+
+        let by_tag = SearchV2Params {
+            tags_include: Some(vec!["日常".to_string()]),
+            ..params("")
+        };
+        let tagged = db
+            .search_entity_facets("person", None, 60, 0, Some(&by_tag))
+            .unwrap();
+        assert_eq!(tagged.len(), 1, "作者Bはこのタグの作品を持たない");
+        assert_eq!(tagged[0].display_name, "作者A");
+        // 件数は「条件に合う作品の数」。作者Aの2件すべてではない。
+        assert_eq!(tagged[0].count, 1);
+        assert_eq!(
+            db.count_entity_facets("person", None, Some(&by_tag)).unwrap(),
+            1,
+            "総数は数えている行と一致する"
+        );
+
+        // 名前での絞り込みと同時に効く。作者Aは条件に合うが、名前が違う。
+        let named = db
+            .search_entity_facets("person", Some("作者B"), 60, 0, Some(&by_tag))
+            .unwrap();
+        assert!(named.is_empty());
+
+        let favourites_only = SearchV2Params {
+            favorite: Some(true),
+            ..params("")
+        };
+        let favoured = db
+            .search_entity_facets("person", None, 60, 0, Some(&favourites_only))
+            .unwrap();
+        assert_eq!(favoured.len(), 1);
+        assert_eq!(favoured[0].display_name, "作者A");
+
+        // 同じキャッシュを別の条件で引かない。
+        let unfiltered_again = db.search_entity_facets("person", None, 60, 0, None).unwrap();
+        assert_eq!(unfiltered_again.len(), 2);
     }
 
     #[test]
@@ -16173,11 +16288,11 @@ mod search_integration_tests {
         }
 
         let started = Instant::now();
-        let authors = db.search_entity_facets("person", None, 60, 300).unwrap();
+        let authors = db.search_entity_facets("person", None, 60, 300, None).unwrap();
         let entity_elapsed = started.elapsed();
         assert_eq!(authors.len(), 60);
         let started = Instant::now();
-        let warm_authors = db.search_entity_facets("person", None, 60, 300).unwrap();
+        let warm_authors = db.search_entity_facets("person", None, 60, 300, None).unwrap();
         let warm_entity_elapsed = started.elapsed();
         assert_eq!(warm_authors.len(), authors.len());
 
@@ -16420,9 +16535,9 @@ mod search_integration_tests {
                 [],
             )
             .unwrap();
-        let first = db.search_entity_facets("person", None, 60, 0).unwrap();
+        let first = db.search_entity_facets("person", None, 60, 0, None).unwrap();
         assert_eq!(first[0].count, 1);
-        let cached = db.search_entity_facets("person", None, 60, 0).unwrap();
+        let cached = db.search_entity_facets("person", None, 60, 0, None).unwrap();
         assert_eq!(cached[0].count, 1);
 
         insert_download_unindexed(
@@ -16442,7 +16557,7 @@ mod search_integration_tests {
                 [],
             )
             .unwrap();
-        let refreshed = db.search_entity_facets("person", None, 60, 0).unwrap();
+        let refreshed = db.search_entity_facets("person", None, 60, 0, None).unwrap();
         assert_eq!(refreshed[0].count, 2);
         drop(db);
     }

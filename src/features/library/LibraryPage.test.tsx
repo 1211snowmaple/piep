@@ -244,3 +244,42 @@ describe("remembered library order", () => {
     expect(resolveSortBy(null, false, "nonsense" as never)).toBe("downloaded_at");
   });
 });
+
+describe("library entity paging", () => {
+  beforeEach(() => {
+    window.localStorage.clear();
+    // Small enough that the six demo authors do not fit on one page.
+    window.localStorage.setItem("piep.page-size", JSON.stringify(5));
+    window.location.hash = "#/library?tab=people";
+  });
+
+  // The drawer is on screen for every tab, so it has to mean something on
+  // every tab. It used to narrow the works and leave the creators untouched.
+  it("narrows the creator tab by the library filter", async () => {
+    window.location.hash = "#/library?tab=people&source=fanbox";
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
+
+    expect(await screen.findByLabelText("mizu atelierを開く")).toBeInTheDocument();
+    expect(screen.getByLabelText("こはるデザイン室を開く")).toBeInTheDocument();
+    expect(screen.queryByLabelText("青葉しおりを開く")).not.toBeInTheDocument();
+  });
+
+  // Scrolling and page one both start at offset zero, so the two modes used to
+  // share a cache entry: turning on page numbers after a long scroll kept every
+  // row that had been loaded and called it page one.
+  it("starts numbered paging at the first page rather than keeping the scrolled rows", async () => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
+
+    expect(await screen.findByLabelText("青葉しおりを開く")).toBeInTheDocument();
+    expect(screen.queryByLabelText("七瀬あかりを開く")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /さらに読み込む/ }));
+    expect(await screen.findByLabelText("七瀬あかりを開く")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("radio", { name: "ページ番号" }));
+    await waitFor(() => expect(screen.queryByLabelText("七瀬あかりを開く")).not.toBeInTheDocument());
+    expect(screen.getByLabelText("青葉しおりを開く")).toBeInTheDocument();
+  });
+});

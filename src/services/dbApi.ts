@@ -110,16 +110,22 @@ export async function searchFilterFacets(kind: "tag" | "tags" | "author" | "auth
  * doing once per set of conditions so the pager can name the last page, not
  * worth doing again for every page turned.
  */
-export async function countEntityFacets(kind: "person" | "series", query: string | null): Promise<number> {
-  return invoke<number>("db_count_entity_facets", { kind, query: query?.trim() || null });
+export async function countEntityFacets(kind: "person" | "series", query: string | null, filters: SearchV2Params | null = null): Promise<number> {
+  return invoke<number>("db_count_entity_facets", { kind, query: query?.trim() || null, filters });
 }
 
-export async function searchEntityFacets(kind: "person" | "series", query: string | null, limit = 60, offset = 0): Promise<EntityFacet[]> {
+/**
+ * `filters` narrows which works are grouped, using the same conditions the
+ * works listing takes: an author only appears when they have a work that
+ * passes, and their count is how many of their works do.
+ */
+export async function searchEntityFacets(kind: "person" | "series", query: string | null, limit = 60, offset = 0, filters: SearchV2Params | null = null): Promise<EntityFacet[]> {
   return invoke<EntityFacet[]>("db_search_entity_facets", {
     kind,
     query: query?.trim() || null,
     limit: normalizePageSize(limit, 60),
     offset: normalizeOffset(offset),
+    filters,
   });
 }
 

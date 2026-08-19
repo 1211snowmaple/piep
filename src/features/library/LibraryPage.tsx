@@ -854,16 +854,47 @@ export default function LibraryPage() {
   // Not `numberedPages`, which also asks whether the works are ranked by
   // relevance - a question these two tabs do not have.
   const entityOffset = numberedPageEnabled ? (pageParam - 1) * pageSize : 0;
+  // Authors and series are groupings of works, so the drawer narrows them by
+  // the same conditions it narrows the works by: an author appears when they
+  // have a work that passes, and their count is how many of theirs do. Taken
+  // from the works parameters rather than rebuilt, so the two tabs cannot drift
+  // into two readings of the same filter. Text, ordering and paging belong to
+  // the listing, not to the filter, and are left behind.
+  const entityFilters = useMemo<SearchV2Params | null>(() => {
+    const narrowed: SearchV2Params = {
+      idsInclude: params.idsInclude,
+      source: params.source,
+      contentType: params.contentType,
+      favorite: params.favorite,
+      tagsInclude: params.tagsInclude,
+      tagsExclude: params.tagsExclude,
+      // Only meaningful alongside the tags it applies to, and it always has a
+      // value - so carrying it unconditionally would make every listing look
+      // filtered to the check below.
+      tagFilterMode: params.tagsInclude ? params.tagFilterMode : null,
+      minCharCount: params.minCharCount,
+      maxCharCount: params.maxCharCount,
+      watchFilter: params.watchFilter,
+    };
+    return Object.values(narrowed).some((value) => value !== null && value !== undefined) ? narrowed : null;
+  }, [params]);
   // The preview's stand-in for the grouped query, so it pages and counts the
   // same way rather than handing back everything and never running out.
+  // Only the provider is honoured here: the demo entities are a handful of
+  // rows with no works behind them, so nothing else has anything to filter.
   const demoEntityMatches = useCallback(() => (entityKind === "person" ? demoFacets.authorEntities : demoFacets.series)
-    .filter((entity) => !searchText || `${entity.displayName} ${entity.description ?? ""}`.toLocaleLowerCase("ja-JP").includes(searchText.toLocaleLowerCase("ja-JP"))),
-  [entityKind, searchText]);
+    .filter((entity) => !searchText || `${entity.displayName} ${entity.description ?? ""}`.toLocaleLowerCase("ja-JP").includes(searchText.toLocaleLowerCase("ja-JP")))
+    .filter((entity) => !entityFilters?.source || entity.source === entityFilters.source),
+  [entityKind, searchText, entityFilters]);
   const entities = useInfiniteQuery({
     ...boundedInfiniteListOptions,
-    queryKey: ["library-entities", entityKind, searchText, pageSize, entityOffset],
+    // The mode belongs in the key, not just the offset it produces. Scrolling
+    // and page one both start at offset zero, so the two modes shared one cache
+    // entry - and switching to page numbers after scrolling a long way redrew
+    // every accumulated page as "page 1" instead of the first pageSize rows.
+    queryKey: ["library-entities", entityKind, searchText, pageSize, entityOffset, numberedPageEnabled, entityFilters],
     queryFn: ({ pageParam }) => runtime
-      ? searchEntityFacets(entityKind, searchText || null, pageSize, pageParam)
+      ? searchEntityFacets(entityKind, searchText || null, pageSize, pageParam, entityFilters)
       : Promise.resolve(demoEntityMatches().slice(pageParam, pageParam + pageSize)),
     initialPageParam: entityOffset,
     getNextPageParam: (lastPage, _allPages, lastPageParam) => lastPage.length < pageSize
@@ -876,8 +907,8 @@ export default function LibraryPage() {
   // turned. Without it the pager cannot name a last page, and the count beside
   // the tabs had to hedge with "以上".
   const entityTotal = useQuery({
-    queryKey: ["library-entity-count", entityKind, searchText],
-    queryFn: () => runtime ? countEntityFacets(entityKind, searchText || null) : Promise.resolve(demoEntityMatches().length),
+    queryKey: ["library-entity-count", entityKind, searchText, entityFilters],
+    queryFn: () => runtime ? countEntityFacets(entityKind, searchText || null, entityFilters) : Promise.resolve(demoEntityMatches().length),
     enabled: tab !== "works",
     staleTime: 60_000,
   });

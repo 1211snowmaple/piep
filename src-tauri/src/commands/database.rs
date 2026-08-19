@@ -831,6 +831,7 @@ pub async fn db_search_entity_facets(
     query: Option<String>,
     limit: Option<i64>,
     offset: Option<i64>,
+    filters: Option<SearchV2Params>,
 ) -> Result<Vec<EntityFacet>, String> {
     run_db_blocking(app, move |state| {
         state.db.search_entity_facets(
@@ -838,6 +839,7 @@ pub async fn db_search_entity_facets(
             query.as_deref(),
             limit.unwrap_or(60),
             offset.unwrap_or(0),
+            filters.as_ref(),
         )
     })
     .await
@@ -848,9 +850,12 @@ pub async fn db_count_entity_facets(
     app: tauri::AppHandle,
     kind: String,
     query: Option<String>,
+    filters: Option<SearchV2Params>,
 ) -> Result<i64, String> {
     run_db_blocking(app, move |state| {
-        state.db.count_entity_facets(&kind, query.as_deref())
+        state
+            .db
+            .count_entity_facets(&kind, query.as_deref(), filters.as_ref())
     })
     .await
 }

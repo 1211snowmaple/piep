@@ -8,6 +8,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 }));
 
 import {
+  countEntityFacets,
   deleteDownloads,
   getDownloads,
   optimizeSearchIndex,
@@ -40,7 +41,14 @@ describe("dbApi bulk and facet guards", () => {
     expect(invoke).toHaveBeenLastCalledWith("db_search_filter_facets", { kind: "tags", query: "uncommon", limit: 200 });
 
     await searchEntityFacets("person", "  author ", Number.NaN, -50);
-    expect(invoke).toHaveBeenLastCalledWith("db_search_entity_facets", { kind: "person", query: "author", limit: 60, offset: 0 });
+    expect(invoke).toHaveBeenLastCalledWith("db_search_entity_facets", { kind: "person", query: "author", limit: 60, offset: 0, filters: null });
+
+    // The entity tabs group works, so they take the same library filters the
+    // works listing does rather than ignoring the drawer.
+    await searchEntityFacets("person", null, 60, 0, { favorite: true });
+    expect(invoke).toHaveBeenLastCalledWith("db_search_entity_facets", { kind: "person", query: null, limit: 60, offset: 0, filters: { favorite: true } });
+    await countEntityFacets("series", null, { favorite: true });
+    expect(invoke).toHaveBeenLastCalledWith("db_count_entity_facets", { kind: "series", query: null, filters: { favorite: true } });
   });
 
   it("keeps expensive search index optimization behind its explicit command", async () => {
