@@ -52,3 +52,16 @@ scratch/
 
 # EPUB テンプレートの見本（cargo run --example epub_specimen の出力）
 .epub-specimen/
+
+# ドキュメント生成物。ソースから再生成できるので追跡しない。公開先は GitHub Pages。
+docs-tools/site/index.md
+docs-tools/site/policy/
+docs-tools/site/reference/
+docs-tools/site/public/
+docs-tools/site/.vitepress/cache/
+docs-tools/site/.vitepress/dist/
+docs/reference/ipc.md
+docs/reference/events.md
+docs/reference/schema.md
+docs-tools/node_modules/
+.docs-build/

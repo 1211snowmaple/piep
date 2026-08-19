@@ -1,0 +1,30 @@
+{
+  "name": "piep-docs-tools",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "piep のドキュメント生成ツール。アプリ本体とは独立した依存を持つ。",
+  "scripts": {
+    "extract:rust": "cargo run --quiet --manifest-path ../tools/ipc-extract/Cargo.toml -- --repo .. --out ../.docs-build/contract.json",
+    "extract:front": "node src/scan-frontend.mjs --repo .. --out ../.docs-build/frontend.json",
+    "extract": "npm run extract:rust && npm run extract:front",
+    "contract": "npm run extract && node src/render-contract.mjs --build ../.docs-build --out ../docs/reference",
+    "contract:check": "npm run extract && node src/render-contract.mjs --build ../.docs-build --out ../docs/reference --check",
+    "typedoc": "typedoc",
+    "rustdoc": "cargo doc --no-deps --document-private-items --manifest-path ../src-tauri/Cargo.toml",
+    "docs:build": "npm run contract && npm run typedoc && npm run rustdoc && npm run rustdoc:copy && npm run site:build",
+    "docs:check": "npm run check:emphasis && npm run contract:check",
+    "rustdoc:copy": "node src/copy-rustdoc.mjs",
+    "site:dev": "npm run assemble && vitepress dev site",
+    "site:build": "npm run assemble && vitepress build site",
+    "docs:dev": "npm run contract && npm run site:dev",
+    "assemble": "node src/assemble-site.mjs",
+    "check:emphasis": "node src/check-japanese-emphasis.mjs ../docs/policy ../docs/index.md"
+  },
+  "devDependencies": {
+    "typedoc": "^0.28.0",
+    "typedoc-plugin-markdown": "^4.4.0",
+    "typescript": "~5.9.0",
+    "vitepress": "^1.6.4"
+  }
+}

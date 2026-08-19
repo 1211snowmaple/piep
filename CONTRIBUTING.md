@@ -54,7 +54,16 @@ npx tsc --noEmit
 npx vitest run src
 cargo test --manifest-path src-tauri/Cargo.toml -- --test-threads=1
 cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+npm --prefix docs-tools run docs:check
 ```
+
+最後の1本はフロントと Rust の境界を突き合わせる。`invoke("名前")` に対応する
+コマンドが無い、`generate_handler!` への登録を忘れた、といった**実行するまで
+気付かない食い違い**をここで捕まえる。
+
+コマンドや画面を足したときは、方針書（`docs/policy/`）が古くなっていないかも見る。
+**方針書はソースの変更と同じコミットで直す。** 別のコミットに回すと、だいたい
+そのまま忘れられる。
 
 画面を変えたときは、加えて実際に動かして確認する。視覚回帰は CI と同条件で:
 

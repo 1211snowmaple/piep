@@ -1,0 +1,18 @@
+[package]
+name = "ipc-extract"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "piep のフロント・バック境界をソースから抽出する。読み取り専用。"
+
+# このクレートはアプリから独立している。src-tauri のソースを「テキストとして」
+# 読むだけで、piep_lib には一切依存しない。だからアプリのビルドには影響しない。
+[dependencies]
+syn = { version = "2", features = ["full", "parsing", "printing", "extra-traits"] }
+quote = "1"
+proc-macro2 = { version = "1", features = ["span-locations"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+walkdir = "2"
+regex = "1"
+anyhow = "1"

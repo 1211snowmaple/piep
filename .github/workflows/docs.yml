@@ -1,0 +1,73 @@
+name: "Docs"
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches: [develop, main]
+
+# 同時に走らせない。Pages への配置は最後の1本だけが意味を持つ。
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # フロントと Rust の食い違いを検査する。
+  #
+  # Linux で走らせている。ここで使うのは Node と tools/ipc-extract だけで、
+  # 後者は syn と serde しか使わない移植性のあるクレートである。アプリ本体は
+  # ビルドしないので、Windows の重い依存（DirectML、WebView2、画像コーデック）
+  # には触れない。2分弱で終わる検査を全 PR に掛けられる。
+  contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tools/ipc-extract
+      - run: npm ci
+        working-directory: docs-tools
+      - run: npm run docs:check
+        working-directory: docs-tools
+
+  # サイトを組んで GitHub Pages へ配置する。main だけ。
+  #
+  # Windows で走らせるのは cargo doc のためである。このクレートは DirectML 版の
+  # ort / fastembed を持ち、`cfg(windows)` の依存もある。Linux では依存の解決
+  # そのものが通らない。
+  deploy:
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: contract
+    runs-on: windows-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            src-tauri
+            tools/ipc-extract
+      - uses: actions/configure-pages@v5
+      - run: npm ci
+        working-directory: docs-tools
+      - run: npm run docs:build
+        working-directory: docs-tools
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs-tools/site/.vitepress/dist
+      - id: deployment
+        uses: actions/deploy-pages@v4

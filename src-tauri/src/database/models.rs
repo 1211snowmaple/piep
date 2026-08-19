@@ -744,7 +744,7 @@ pub struct UpdateJobCandidate {
     /// "new" | "sequel" | "revision"。画面で分類して選べるようにするための印。
     #[serde(default)]
     pub kind: String,
-    /// 失敗したときの理由。分類の札（[取得制限] など）を含む。
+    /// 失敗したときの理由。分類の札（`[取得制限]` など）を含む。
     #[serde(default)]
     pub error: Option<String>,
 }

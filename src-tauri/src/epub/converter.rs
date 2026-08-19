@@ -327,7 +327,7 @@ fn extract_pixiv_series(data: &Value, detail: &Value) -> Option<EpubSeries> {
     Some(series)
 }
 
-/// Pixiv小説記法をHTMLに変換し、[newpage] でページ分割する
+/// Pixiv小説記法をHTMLに変換し、`[newpage]` でページ分割する
 fn convert_pixiv_text_to_pages(text: &str) -> Vec<EpubPage> {
     let raw_pages: Vec<&str> = text.split("[newpage]").collect();
     let multi_page = raw_pages.len() > 1;
