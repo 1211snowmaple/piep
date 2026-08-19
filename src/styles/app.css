@@ -1789,6 +1789,10 @@ select {
 .save-resizer:hover { color: var(--mantine-color-piep-6); background: light-dark(#e8f3fc, #162b3d); }
 .save-resizer:focus-visible { outline: 2px solid var(--mantine-color-piep-5); outline-offset: 2px; color: var(--mantine-color-piep-6); background: light-dark(#e8f3fc, #162b3d); }
 .candidate-list { min-height: 0; }
+/* 取得したときのページから移動している一覧。消しも畳みもしないのは、選んだ
+   ものを覚えておきたいから。ただし「いま開いているページのもの」に見えては
+   困るので、一段退がらせる。 */
+.candidate-list[data-stale] { opacity: 0.55; filter: saturate(0.65); transition: opacity 120ms ease, filter 120ms ease; }
 
 .candidate-row {
   border-color: light-dark(#e1e6ec, #28313d);

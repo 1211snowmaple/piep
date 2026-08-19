@@ -258,11 +258,14 @@ export default function SavePage() {
     return () => window.removeEventListener("beforeunload", guard);
   }, [saving]);
   // Closing the desktop window mid-download would abandon the batch silently.
-  const savingRef = useRef(saving);
-  savingRef.current = saving;
   useEffect(() => registerUnsavedGuard(() => savingRef.current), []);
 
   const selectedCount = items.filter((item) => item.selected).length;
+  // 保存ボタンが名乗る件数は、実際に取りに行く件数と同じでなければならない。
+  // 済んだものは対象から外れるので、失敗が混じったあとは選択数と食い違う。
+  const isPendingSave = (item: SidebarItem) => item.selected && item.status !== "success" && item.status !== "skipped";
+  const pendingCount = items.filter(isPendingSave).length;
+  const retryCount = items.filter((item) => isPendingSave(item) && item.status === "failed").length;
   const targetKind = detectDownloadTarget(currentUrl);
   const analysisStale = Boolean(lastAnalysisUrl && lastAnalysisUrl !== currentUrl);
   const navigateBrowser = async (url: string) => {
@@ -470,17 +473,25 @@ export default function SavePage() {
     }
   };
   const execute = async () => {
-    const selected = items.filter((item) => item.selected);
-    if (!selected.length || !downloadType || !runtime) return;
+    // 済んだものは対象から外す。再試行は「残りをもう一度」であって、
+    // 保存できたものを取り直しに行くことではない - 監視中の作品は
+    // 保存済みでも取り直す作りなので、素通しにすると本当に再取得される。
+    const selected = items.filter((item) => item.selected && item.status !== "success" && item.status !== "skipped");
+    if (!selected.length || !downloadType || !runtime || savingRef.current) return;
     const operation = startOperation({
       kind: "save",
       label: `${selected.length}件をライブラリに保存`,
       detail: `${getProvider(source).label} · ${currentUrl}`,
       total: selected.length,
       onCancel: () => undefined,
-      onRetry: () => execute(),
+      // 再試行はいまの画面に対して走らせる。開始時の execute を捕まえたままだと、
+      // その描画の items を見て、成功済みも含む古い一覧を回し直してしまう。
+      onRetry: () => executeRef.current(),
     });
     saveOperationRef.current = operation;
+    // state の反映を待たずに閉める。二連打や再試行が同じ瞬間に入ると、
+    // setSaving の反映前にもう一周始まってしまう。
+    savingRef.current = true;
     setSaving(true);
     let saved = 0, skipped = 0, failed = 0;
     let firstError = "";
@@ -634,12 +645,37 @@ export default function SavePage() {
               <Alert color={targetKind === "unsupported" ? "gray" : "piep"} variant="light" icon={targetKind === "unsupported" ? <Icons.link size={IconSize.action} /> : <Icons.confirm size={IconSize.action} />} py="xs">
                 <Text size="xs">{targetLabel(targetKind)}</Text>
               </Alert>
-              <Button fullWidth mt="sm" leftSection={analyzing ? undefined : <Icons.search size={IconSize.menu} />} loading={analyzing} disabled={!runtime || saving || targetKind === "unsupported"} onClick={() => analyze()}>候補を取得</Button>
+              {/* 帯を割り込ませない。取り直しを頼む相手は、取り直すボタンである。
+                  独立した警告として一段挟むと、押す場所と読む場所が離れるうえ、
+                  ページを移るたびにパネル全体が上下に飛ぶ。 */}
+              <Button
+                fullWidth
+                mt="sm"
+                color={analysisStale ? "yellow" : undefined}
+                leftSection={analyzing ? undefined : analysisStale ? <Icons.retry size={IconSize.menu} /> : <Icons.search size={IconSize.menu} />}
+                loading={analyzing}
+                disabled={!runtime || saving || targetKind === "unsupported"}
+                onClick={() => analyze()}
+              >
+                {analysisStale ? "候補を再取得" : "候補を取得"}
+              </Button>
             </Box>
             <Divider />
-            {analysisStale && <Alert color="yellow" radius={0} icon={<Icons.notice size={IconSize.action} />}>ページが変わりました。候補を再取得してください。</Alert>}
-            <Group justify="space-between" px="md" py="sm"><Text size="xs" c="dimmed">{items.length ? `${selectedCount} / ${items.length}件を選択` : "候補はまだありません"}</Text>{items.length > 0 && <Group gap={6}><Button variant="subtle" size="compact-xs" onClick={() => setItems((rows) => rows.map((item) => ({ ...item, selected: true })))}>すべて</Button><Button variant="subtle" color="gray" size="compact-xs" onClick={() => setItems((rows) => rows.map((item) => ({ ...item, selected: false })))}>解除</Button></Group>}</Group>
-            <ScrollArea flex={1} px="md" type="auto" className="candidate-list">
+            <Group justify="space-between" px="md" py="sm" gap="xs" wrap="nowrap">
+              <Group gap={6} miw={0} wrap="nowrap">
+                <Text size="xs" c="dimmed">{items.length ? `${selectedCount} / ${items.length}件を選択` : "候補はまだありません"}</Text>
+                {/* 古いのは一覧そのものなので、印は一覧の見出しに付く。読み上げ
+                    にも出るよう status にしてある - 見えている人には色が、
+                    見えていない人には言葉が要る。 */}
+                {analysisStale && items.length > 0 && (
+                  <Tooltip label="取得したときのページから移動しています" multiline w={220}>
+                    <Badge color="yellow" variant="light" size="sm" role="status" style={{ flexShrink: 0 }}>古い</Badge>
+                  </Tooltip>
+                )}
+              </Group>
+              {items.length > 0 && <Group gap={6} wrap="nowrap"><Button variant="subtle" size="compact-xs" onClick={() => setItems((rows) => rows.map((item) => ({ ...item, selected: true })))}>すべて</Button><Button variant="subtle" color="gray" size="compact-xs" onClick={() => setItems((rows) => rows.map((item) => ({ ...item, selected: false })))}>解除</Button></Group>}
+            </Group>
+            <ScrollArea flex={1} px="md" type="auto" className="candidate-list" data-stale={analysisStale && items.length > 0 || undefined}>
               <Stack gap="xs" pb="md">
                 {!items.length && !analyzing && <EmptyCandidates source={source} />}
                 {items.map((item) => <CandidateRow key={item.id} item={item} disabled={saving} onToggle={() => setItems((rows) => rows.map((row) => row.id === item.id ? { ...row, selected: !row.selected } : row))} />)}
@@ -650,7 +686,7 @@ export default function SavePage() {
               {progress && <Stack gap={5} mb="sm" role="status" aria-live="polite"><Group justify="space-between"><Text size="xs" className="line-clamp-1">{progress.text}</Text><Text size="xs" c="dimmed">{progress.current}/{progress.total}</Text></Group><Progress value={progress.current / progress.total * 100} animated aria-label={`保存進捗 ${progress.current}/${progress.total}`} /></Stack>}
               {saving
                 ? <Group grow><Button size="md" leftSection={<Icons.collect size={IconSize.action} />} loading>保存中</Button><Button size="md" variant="light" color="red" leftSection={<Icons.cancel size={IconSize.action} />} onClick={() => saveOperationRef.current && requestOperationCancel(saveOperationRef.current.id)}>中止</Button></Group>
-                : <Button fullWidth size="md" leftSection={<Icons.collect size={IconSize.action} />} disabled={!runtime || !selectedCount || analysisStale} onClick={execute}>{selectedCount ? `${selectedCount}件をライブラリに保存` : "保存する項目を選択"}</Button>}
+                : <Button fullWidth size="md" leftSection={<Icons.collect size={IconSize.action} />} disabled={!runtime || !pendingCount || analysisStale} onClick={execute}>{analysisStale ? "取り直すと保存できます" : !pendingCount ? (selectedCount ? "選択したものは保存済みです" : "保存する項目を選択") : retryCount === pendingCount ? `失敗した${pendingCount}件をやり直す` : `${pendingCount}件をライブラリに保存`}</Button>}
               <Button fullWidth mt="xs" variant="subtle" color="gray" leftSection={<Icons.library size={IconSize.menu} />} onClick={() => navigate("/library")}>ライブラリを開く</Button>
             </Box>
           </Stack>}
