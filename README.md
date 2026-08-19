@@ -168,16 +168,28 @@ npx playwright test readme-shots --project=1440x900-light-200dpi --project=1440x
 - 3つのウィンドウ幅 × ライト／ダーク × 3段階のDPIスケールでのビジュアル回帰
 - 実際にビルドしたアプリを起動するネイティブウィンドウのスモークテスト
 
-### 設計ドキュメント
+### ドキュメント
 
-判断の経緯は `docs/` に残しています。
+設計の方針は `docs/policy/` にあります。「いつ調べたか」ではなく「今どうなって
+いるか」を書いた文書で、更新はソースの変更と同じコミットで行います。
 
-- [EPUB 3.3・Send to Kindle 互換性](docs/epub-3-3-kindle-compatibility-report-2026-08-12.md) — 生成物が何に準拠しているか
-- [EPUBの既定デザイン改善案](docs/epub-template-design-proposals-2026-08-16.md) — 標準／pixiv／FANBOXの組版
-- [複数作品を1冊にまとめる書き出し](docs/epub-merge-export-proposal-2026-08-16.md)
-- [表紙のない作品のカード表示](docs/cover-placeholder-design-proposals-2026-08-16.md)
-- [更新管理の改善案](docs/update-management-improvements-2026-08-16.md)
-- [カードの状態表示とアプリ全体の配色](docs/color-system-proposal-2026-08-11.md)
+- [piepとは何か](docs/policy/01-what-piep-is.md) — 何をして、何をしないか
+- [設計原則](docs/policy/02-principles.md) — 迷ったときに立ち返る規則
+- [アーキテクチャ](docs/policy/03-architecture.md) — 層と責務、依存の向き
+- [データの持ち方](docs/policy/04-data.md) — 原本不変、スキーマ、コレクション
+- [画面の方針](docs/policy/05-frontend.md) — 状態の置き場、スクロール、配色
+- [Rust側の方針](docs/policy/06-backend.md) — コマンド設計、検索、更新監視
+- [取得の方針](docs/policy/07-acquisition.md) — 認証、レート、規約
+- [EPUBの方針](docs/policy/08-epub.md) — 何に準拠し、何を保証しないか
+- [品質の担保](docs/policy/09-quality.md) — テストの層、CI、ドリフト検査
+- [ドキュメントの作り](docs/policy/10-documentation.md) — コメント規約と生成の仕組み
+
+API リファレンス（フロント・Rust・IPC契約・スキーマ）はソースから生成しています。
+
+```bash
+npm --prefix docs-tools ci
+npm --prefix docs-tools run docs:build
+```
 
 ---
 
