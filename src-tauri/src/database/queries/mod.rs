@@ -12451,7 +12451,7 @@ mod search_integration_tests {
     #[test]
     #[ignore = "measurement harness, run with --ignored --nocapture"]
     fn measure_full_index_rebuild() {
-        let (root, storage) = temp_paths();
+        let (_temp, root, storage) = temp_paths();
         let db = Database::open(&root.join("piep.db"), &storage).unwrap();
         let works: usize = std::env::var("PIEP_BENCH_WORKS")
             .ok()
@@ -12499,7 +12499,6 @@ mod search_integration_tests {
             index_bytes as f64 / 1_048_576.0,
         );
         assert_eq!(status.pending_downloads, 0);
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
@@ -12527,7 +12526,7 @@ mod search_integration_tests {
 
     #[test]
     fn diagnostic_scan_aggregates_each_tree_in_one_bounded_walk() {
-        let (root, storage) = temp_paths();
+        let (_temp, root, storage) = temp_paths();
         let version = storage.join("pixiv/work/v1");
         let assets = version.join("data_assets");
         let lexical = storage.join("search-index");
@@ -12565,12 +12564,11 @@ mod search_integration_tests {
             stats.visited_entries, 13,
             "each directory entry is visited once, including disjoint semantic storage"
         );
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn file_integrity_check_streams_and_classifies_manual_changes() {
-        let (root, storage) = temp_paths();
+        let (_temp, root, storage) = temp_paths();
         let db = Database::open(&root.join("piep.db"), &storage).unwrap();
         let missing_download = storage.join("pixiv/missing/v1/original.json");
         let missing_version = storage.join("pixiv/missing/v2/original.json");
@@ -12686,12 +12684,11 @@ mod search_integration_tests {
         );
         drop(conn);
         drop(db);
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn diagnostic_scan_skips_links_and_enforces_depth_and_entry_limits() {
-        let (root, storage) = temp_paths();
+        let (_temp, root, storage) = temp_paths();
         let outside = root.join("outside");
         fs::create_dir_all(outside.join("data_assets")).unwrap();
         fs::write(outside.join("data_assets/escape.png"), b"outside").unwrap();
@@ -12740,12 +12737,11 @@ mod search_integration_tests {
         )
         .unwrap_err();
         assert!(entry_error.contains("1-entry"));
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn atomic_restore_transaction_rolls_back_database_rows() {
-        let (root, storage) = temp_paths();
+        let (_temp, root, storage) = temp_paths();
         let db = Database::open(&root.join("piep.db"), &storage).unwrap();
         let id = insert_download_unindexed(
             &db,
@@ -12767,12 +12763,11 @@ mod search_integration_tests {
         });
         db.rollback_atomic_restore();
         assert_eq!(db.get_download(id).unwrap().title, "残る作品");
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn injected_save_failure_rolls_back_download_tags_assets_and_version() {
-        let (root, storage) = temp_paths();
+        let (_temp, root, storage) = temp_paths();
         let db = Database::open(&root.join("piep.db"), &storage).unwrap();
         let json_path = storage.join("pixiv/atomic-save/v1/original.json");
         let download = NewDownload {
@@ -12857,12 +12852,11 @@ mod search_integration_tests {
             0
         );
         drop(conn);
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn startup_removes_only_journaled_uncommitted_versions_and_reserved_stages() {
-        let (root, storage) = temp_paths();
+        let (_temp, root, storage) = temp_paths();
         let db_path = root.join("piep.db");
         let db = Database::open(&db_path, &storage).unwrap();
         insert_download_unindexed(
@@ -12913,12 +12907,11 @@ mod search_integration_tests {
         );
         drop(conn);
         drop(reopened);
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn startup_preserves_a_version_committed_with_its_journal_marker() {
-        let (root, storage) = temp_paths();
+        let (_temp, root, storage) = temp_paths();
         let db_path = root.join("piep.db");
         let db = Database::open(&db_path, &storage).unwrap();
         let work = storage.join("pixiv/committed-journal");
@@ -12987,12 +12980,11 @@ mod search_integration_tests {
         );
         drop(conn);
         drop(reopened);
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn reimport_record_delete_preserves_the_scanned_work_tree() {
-        let (root, storage) = temp_paths();
+        let (_temp, root, storage) = temp_paths();
         let db = Database::open(&root.join("piep.db"), &storage).unwrap();
         let id = insert_download_unindexed(
             &db,
@@ -13015,12 +13007,11 @@ mod search_integration_tests {
             .get_download_by_source("pixiv", "reimport-preserve")
             .unwrap()
             .is_none());
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn deleting_a_legacy_work_never_removes_its_source_siblings() {
-        let (root, storage) = temp_paths();
+        let (_temp, root, storage) = temp_paths();
         let db = Database::open(&root.join("piep.db"), &storage).unwrap();
         let insert_legacy = |source_id: &str, title: &str| {
             let work_dir = storage.join("pixiv").join(source_id);
@@ -13062,12 +13053,11 @@ mod search_integration_tests {
         assert!(!deleted_dir.exists());
         assert!(sibling_dir.exists());
         assert!(sibling_json.exists(), "another work in pixiv must survive");
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn entity_reconstruction_preserves_fetched_profiles_and_versions() {
-        let (root, storage) = temp_paths();
+        let (_temp, root, storage) = temp_paths();
         let db = Database::open(&root.join("piep.db"), &storage).unwrap();
         let id = insert_download_unindexed(
             &db,
@@ -13134,12 +13124,11 @@ mod search_integration_tests {
                 .len(),
             1
         );
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn reader_cache_pages_and_full_document_search_share_one_index() {
-        let (root, storage) = temp_paths();
+        let (_temp, root, storage) = temp_paths();
         let db = Database::open(&root.join("piep.db"), &storage).unwrap();
         let id = insert_download_unindexed(
             &db,
@@ -13161,7 +13150,6 @@ mod search_integration_tests {
         assert_eq!(hits[0].page, 2);
         assert_eq!(hits[0].count, 2);
         assert!(hits[0].snippet.to_lowercase().contains("needle"));
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
@@ -13216,11 +13204,9 @@ mod search_integration_tests {
 
     /// 前の実行が残した一時ディレクトリを一度だけ掃除する。
     ///
-    /// 各テストは末尾で `remove_dir_all` を呼ぶが、panic や早期 return では
-    /// そこへ到達しない。実際に 5,000 個以上が temp へ積み上がっており、
-    /// その状態では Windows で Tantivy のコミットが ACCESS_DENIED
-    /// （os error 5）で間欠的に失敗していた。実行中の別プロセスを巻き込まない
-    /// よう、1 時間より古いものだけを対象にする。
+    /// 取りこぼしを掃除するための保険。通常の後始末は `TempRoot` が行うが、
+    /// それが無かった頃の残骸が temp に積み上がっている。実行中の別プロセスを
+    /// 巻き込まないよう、1 時間より古いものだけを対象にする。
     fn sweep_stale_test_dirs() {
         static SWEEP: std::sync::Once = std::sync::Once::new();
         SWEEP.call_once(|| {
@@ -13244,13 +13230,53 @@ mod search_integration_tests {
         });
     }
 
-    fn temp_paths() -> (PathBuf, PathBuf) {
+    /// テストの一時ツリー。テスト終了時に削除する。
+    ///
+    /// 後始末は `Database` より後に走らなければならない。SQLite は削除を許す
+    /// 共有モードでファイルを開かないので、`db` が生きている間は Windows の
+    /// 削除が共有違反で失敗する。旧コードは `db` が生きたまま `remove_dir_all`
+    /// を呼んでいたため、一時ディレクトリを数千個積み残していた。`Database`
+    /// より前に束縛すればローカルは宣言と逆順に drop されるので、この順序が
+    /// 自然に得られる。末尾の `remove_dir_all` と違って panic や早期 return
+    /// でも走る。
+    ///
+    /// それでも削除は best-effort のままにしてある。接続の後始末が drop の
+    /// 直後まで尾を引くことがあり、失敗を致命扱いにすると後始末そのものが
+    /// テストを落とす要因になるからである。
+    struct TempRoot {
+        root: PathBuf,
+        storage: PathBuf,
+    }
+
+    impl Drop for TempRoot {
+        fn drop(&mut self) {
+            super::super::tantivy_index::release_runtime(&self.storage);
+            // Windows unlinks a file that still has an open handle by marking it
+            // delete-pending: the contents go, but the name survives until the
+            // last handle closes, and a directory that still holds names cannot
+            // be removed. SQLite's connections finish closing just after
+            // `Database` drops, so the first attempt clears the tree and a
+            // retry a few milliseconds later clears the directory itself.
+            for attempt in 0..5 {
+                if fs::remove_dir_all(&self.root).is_ok() || !self.root.exists() {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(2 << attempt));
+            }
+        }
+    }
+
+    fn temp_paths() -> (TempRoot, PathBuf, PathBuf) {
         sweep_stale_test_dirs();
         let rand_val: u32 = rand::random();
         let root = std::env::temp_dir().join(format!("piep_search_test_{}", rand_val));
         let storage = root.join("downloads");
         fs::create_dir_all(&storage).unwrap();
-        (root, storage)
+        let guard = TempRoot {
+            root: root.clone(),
+            storage: storage.clone(),
+        };
+        (guard, root, storage)
     }
 
     fn params(query: &str) -> SearchV2Params {
@@ -13494,7 +13520,7 @@ mod search_integration_tests {
     /// 末尾へ流れ、単なる言及リンクで加点された作品が話数を追い越していた。
     #[test]
     fn unnumbered_opening_leads_and_mentions_do_not_reorder_episodes() {
-        let (root, storage) = temp_paths();
+        let (_temp, root, storage) = temp_paths();
         let db = Database::open(&root.join("piep.db"), &storage).unwrap();
         let opening = insert_download_unindexed(
             &db,
@@ -13539,14 +13565,13 @@ mod search_integration_tests {
         assert_eq!(order, vec!["灯台の話", "灯台の話#2", "灯台の話#3"]);
         assert_eq!(suggestion.collection_kind, "ordered");
         let _ = (opening, third);
-        let _ = fs::remove_dir_all(root);
     }
 
     /// 公式シリーズに同居しているだけの作品まで既定で選ぶと、短編集を丸ごと
     /// 取り込んでしまう。順序も過半数で決める。
     #[test]
     fn series_only_siblings_are_offered_but_not_preselected() {
-        let (root, storage) = temp_paths();
+        let (_temp, root, storage) = temp_paths();
         let db = Database::open(&root.join("piep.db"), &storage).unwrap();
         let seed = insert_download_unindexed(
             &db,
@@ -13586,12 +13611,11 @@ mod search_integration_tests {
             .filter(|member| member.selected)
             .count();
         assert_eq!(preselected, 1, "種だけが既定で選ばれる");
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn work_collections_keep_order_and_reconnect_deleted_works() {
-        let (root, storage) = temp_paths();
+        let (_temp, root, storage) = temp_paths();
         let db = Database::open(&root.join("piep.db"), &storage).unwrap();
         let first = insert_download_unindexed(
             &db,
@@ -13697,7 +13721,6 @@ mod search_integration_tests {
         assert_eq!(first_member.download_id, Some(restored));
         assert_eq!(first_member.title, "夜の手紙 前編・改訂");
         assert!(!first_member.missing);
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
@@ -13720,7 +13743,7 @@ mod search_integration_tests {
 
     #[test]
     fn collection_suggestions_use_title_parts_and_learn_rejection() {
-        let (root, storage) = temp_paths();
+        let (_temp, root, storage) = temp_paths();
         let db = Database::open(&root.join("piep.db"), &storage).unwrap();
         let first = insert_download_unindexed(
             &db,
@@ -13784,12 +13807,11 @@ mod search_integration_tests {
             })
             .unwrap();
         assert_eq!(reconsidered.members.len(), 2);
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn collection_suggestions_walk_the_whole_link_component_from_either_end() {
-        let (root, storage) = temp_paths();
+        let (_temp, root, storage) = temp_paths();
         let db = Database::open(&root.join("piep.db"), &storage).unwrap();
         let first = insert_download(
             &db,
@@ -13895,12 +13917,11 @@ mod search_integration_tests {
                 .collect::<Vec<_>>(),
             vec![first, second, third, fourth]
         );
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn bulk_delete_clears_lexical_and_semantic_sidecars() {
-        let (root, storage) = temp_paths();
+        let (_temp, root, storage) = temp_paths();
         let db = Database::open(&root.join("piep.db"), &storage).unwrap();
         let first = insert_download(
             &db,
@@ -13941,7 +13962,6 @@ mod search_integration_tests {
             crate::database::semantic_index::status(&storage).indexed_chunks,
             0
         );
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
@@ -13980,7 +14000,7 @@ mod search_integration_tests {
 
     #[test]
     fn optional_update_target_lookup_returns_exact_match_or_none() {
-        let (root, storage) = temp_paths();
+        let (_temp, root, storage) = temp_paths();
         let db = Database::open(&root.join("piep.db"), &storage).unwrap();
         db.upsert_update_target(&UpdateTargetInput {
             target_type: "person".to_string(),
@@ -14002,13 +14022,11 @@ mod search_integration_tests {
             .find_update_target("person", "pixiv", "missing")
             .unwrap()
             .is_none());
-
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn update_target_keyset_pages_have_no_gaps_or_duplicates() {
-        let (root, storage) = temp_paths();
+        let (_temp, root, storage) = temp_paths();
         let db = Database::open(&root.join("piep.db"), &storage).unwrap();
         for (target_type, source, source_key) in [
             ("work", "pixiv", "w2"),
@@ -14057,12 +14075,11 @@ mod search_integration_tests {
         assert!(all.windows(2).all(|pair| pair[0] < pair[1]));
         let unique = all.iter().collect::<HashSet<_>>();
         assert_eq!(unique.len(), all.len());
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn bulk_search_collection_crosses_the_former_single_page_boundary() {
-        let (root, storage) = temp_paths();
+        let (_temp, root, storage) = temp_paths();
         let db = Database::open(&root.join("piep.db"), &storage).unwrap();
         const SIMULATED_LEGACY_CAP: usize = 5;
         const MATCHES: usize = SIMULATED_LEGACY_CAP * 2 + 3;
@@ -14096,12 +14113,11 @@ mod search_integration_tests {
         assert_eq!(rows, MATCHES as i64);
         assert_eq!(distinct, MATCHES as i64);
         drop(guard);
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn bulk_search_snapshot_updates_and_deletes_without_retaining_all_ids() {
-        let (root, storage) = temp_paths();
+        let (_temp, root, storage) = temp_paths();
         let db = Database::open(&root.join("piep.db"), &storage).unwrap();
         const MATCHES: usize = 13;
         for index in 0..MATCHES {
@@ -14162,12 +14178,11 @@ mod search_integration_tests {
             .filter_map(Result::ok)
             .count();
         assert_eq!(snapshot_files, 0, "bulk snapshot must be cleaned up");
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn facet_search_limits_in_sql_and_keeps_direct_rare_matches() {
-        let (root, storage) = temp_paths();
+        let (_temp, root, storage) = temp_paths();
         let db = Database::open(&root.join("piep.db"), &storage).unwrap();
         insert_download_unindexed(
             &db,
@@ -14204,13 +14219,11 @@ mod search_integration_tests {
             rare.first().map(|facet| facet.name.as_str()),
             Some("希少タグ")
         );
-
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn facet_and_suggestion_caches_hit_then_invalidate_on_commit() {
-        let (root, storage) = temp_paths();
+        let (_temp, root, storage) = temp_paths();
         let db = Database::open(&root.join("piep.db"), &storage).unwrap();
         insert_download(
             &db,
@@ -14289,12 +14302,11 @@ mod search_integration_tests {
             Some(1),
             "a committed delete must invalidate cached aggregates"
         );
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn lexical_search_reports_full_hits_beyond_the_candidate_page() {
-        let (root, storage) = temp_paths();
+        let (_temp, root, storage) = temp_paths();
         let db = Database::open(&root.join("piep.db"), &storage).unwrap();
         for index in 0..3 {
             insert_download(
@@ -14319,13 +14331,11 @@ mod search_integration_tests {
         let mut another = params("別の検索");
         another.limit = deep.limit;
         assert_ne!(search_cursor_scope(&deep), search_cursor_scope(&another));
-
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn lexical_cursor_reaches_every_match_beyond_one_thousand_results() {
-        let (root, storage) = temp_paths();
+        let (_temp, root, storage) = temp_paths();
         let db = Database::open(&root.join("piep.db"), &storage).unwrap();
         const ITEM_COUNT: usize = 1_025;
 
@@ -14377,12 +14387,11 @@ mod search_integration_tests {
 
         assert!(checked_native_cursor);
         assert_eq!(seen.len(), ITEM_COUNT);
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn lexical_search_after_does_not_skip_filtered_hits_inside_a_batch() {
-        let (root, storage) = temp_paths();
+        let (_temp, root, storage) = temp_paths();
         let db = Database::open(&root.join("piep.db"), &storage).unwrap();
         const ITEM_COUNT: usize = 450;
         const EXPECTED: usize = 45;
@@ -14436,12 +14445,11 @@ mod search_integration_tests {
         }
         assert!(checked_internal_total);
         assert_eq!(seen.len(), EXPECTED);
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn lexical_cursor_carries_the_first_page_total() {
-        let (root, storage) = temp_paths();
+        let (_temp, root, storage) = temp_paths();
         let db = Database::open(&root.join("piep.db"), &storage).unwrap();
         for index in 0..7 {
             insert_download(
@@ -14467,12 +14475,11 @@ mod search_integration_tests {
         request.cursor = first.next_cursor;
         let second = db.search_downloads_v2(&request).unwrap();
         assert_eq!(second.total_estimate, Some(7));
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn lexical_cursor_survives_equal_score_segment_merge() {
-        let (root, storage) = temp_paths();
+        let (_temp, root, storage) = temp_paths();
         let db = Database::open(&root.join("piep.db"), &storage).unwrap();
         const ITEM_COUNT: usize = 137;
         for index in 0..ITEM_COUNT {
@@ -14516,12 +14523,11 @@ mod search_integration_tests {
             request.cursor = page.next_cursor;
         }
         assert_eq!(seen.len(), ITEM_COUNT);
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn ranked_snapshot_failure_rolls_back_and_removes_partial_file() {
-        let (root, storage) = temp_paths();
+        let (_temp, root, storage) = temp_paths();
         let db = Database::open(&root.join("piep.db"), &storage).unwrap();
         const MATCHES: usize = 519;
         for index in 0..MATCHES {
@@ -14571,12 +14577,11 @@ mod search_integration_tests {
             0,
             "a quota failure must clean its partial snapshot"
         );
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn ranked_snapshot_cursor_expires_after_library_or_index_generation_changes() {
-        let (root, storage) = temp_paths();
+        let (_temp, root, storage) = temp_paths();
         let db = Database::open(&root.join("piep.db"), &storage).unwrap();
         for index in 0..5 {
             insert_download(
@@ -14613,12 +14618,11 @@ mod search_integration_tests {
         request.cursor = None;
         let restarted = db.search_downloads_v2(&request).unwrap();
         assert_eq!(restarted.total_estimate, Some(6));
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn search_index_optimization_reduces_segments_without_changing_results() {
-        let (root, storage) = temp_paths();
+        let (_temp, root, storage) = temp_paths();
         let db = Database::open(&root.join("piep.db"), &storage).unwrap();
         for index in 0..24 {
             insert_download(
@@ -14659,13 +14663,11 @@ mod search_integration_tests {
             .collect::<HashSet<_>>();
         assert_eq!(after.total_estimate, before.total_estimate);
         assert_eq!(after_ids, before_ids);
-
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn ordinary_tantivy_writer_is_reused_and_yields_to_bulk_writer() {
-        let (root, storage) = temp_paths();
+        let (_temp, root, storage) = temp_paths();
         let db = Database::open(&root.join("piep.db"), &storage).unwrap();
         insert_download(
             &db,
@@ -14698,12 +14700,11 @@ mod search_integration_tests {
             "body",
         );
         assert!(super::super::tantivy_index::ordinary_writer_is_cached(&storage).unwrap());
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn entity_facets_search_and_page_beyond_the_dashboard_cap() {
-        let (root, storage) = temp_paths();
+        let (_temp, root, storage) = temp_paths();
         let db = Database::open(&root.join("piep.db"), &storage).unwrap();
 
         // get_filter_facets only ever returns the top 60 authors, so the
@@ -14762,12 +14763,11 @@ mod search_integration_tests {
         }
         assert_eq!(walked as i64, total);
 
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn entity_key_pages_include_orphans_without_gaps() {
-        let (root, storage) = temp_paths();
+        let (_temp, root, storage) = temp_paths();
         let db = Database::open(&root.join("piep.db"), &storage).unwrap();
         {
             let conn = db.conn.lock().unwrap();
@@ -14805,12 +14805,11 @@ mod search_integration_tests {
             .list_series_keys_after(Some((&series_first[1].0, &series_first[1].1)), 2)
             .unwrap();
         assert_eq!(series_first.len() + series_second.len(), 3);
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn smart_search_ranks_metadata_over_body_and_supports_body_search() {
-        let (root, storage) = temp_paths();
+        let (_temp, root, storage) = temp_paths();
         let db = Database::open(&root.join("piep.db"), &storage).unwrap();
 
         let body_only = insert_download(
@@ -14853,13 +14852,11 @@ mod search_integration_tests {
             .items;
         assert!(excluded.iter().any(|dl| dl.id == body_only));
         assert!(!excluded.iter().any(|dl| dl.id == title_hit));
-
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn search_v2_uses_cursor_without_duplicate_pages() {
-        let (root, storage) = temp_paths();
+        let (_temp, root, storage) = temp_paths();
         let db = Database::open(&root.join("piep.db"), &storage).unwrap();
 
         let first = insert_download(&db, &storage, "1", "一番目", "作者A", &["日常"], "本文A");
@@ -14889,13 +14886,11 @@ mod search_integration_tests {
             .unwrap();
         assert_eq!(query.search_meta.engine, "hybrid-local");
         assert_eq!(query.items.len(), 3);
-
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn search_suggest_returns_metadata_candidates() {
-        let (root, storage) = temp_paths();
+        let (_temp, root, storage) = temp_paths();
         let db = Database::open(&root.join("piep.db"), &storage).unwrap();
 
         insert_download(
@@ -14939,13 +14934,11 @@ mod search_integration_tests {
             Some("author")
         );
         assert!(exact.items.first().is_some_and(|item| item.exact_match));
-
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn exact_author_intent_excludes_other_authors_that_only_mention_the_name() {
-        let (root, storage) = temp_paths();
+        let (_temp, root, storage) = temp_paths();
         let db = Database::open(&root.join("piep.db"), &storage).unwrap();
         let first = insert_download(
             &db,
@@ -14991,13 +14984,11 @@ mod search_integration_tests {
             .explanations
             .iter()
             .any(|line| line.contains("関係する作品だけ")));
-
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn series_token_filters_by_series_relation() {
-        let (root, storage) = temp_paths();
+        let (_temp, root, storage) = temp_paths();
         let db = Database::open(&root.join("piep.db"), &storage).unwrap();
 
         let in_series = insert_download(
@@ -15075,13 +15066,11 @@ mod search_integration_tests {
                 && item.source.as_deref() == Some("pixiv")
                 && item.source_key.as_deref() == Some("s-100")
         }));
-
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn japanese_reading_kana_and_romaji_match_same_work() {
-        let (root, storage) = temp_paths();
+        let (_temp, root, storage) = temp_paths();
         let db = Database::open(&root.join("piep.db"), &storage).unwrap();
 
         let target = insert_download(
@@ -15115,13 +15104,11 @@ mod search_integration_tests {
             .iter()
             .any(|reason| reason.match_type == "semantic"));
         assert!(!target_row.match_highlights.is_empty());
-
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn smart_search_does_not_add_semantic_reasons() {
-        let (root, storage) = temp_paths();
+        let (_temp, root, storage) = temp_paths();
         let db = Database::open(&root.join("piep.db"), &storage).unwrap();
 
         let target = insert_download(
@@ -15145,8 +15132,6 @@ mod search_integration_tests {
             .match_highlights
             .iter()
             .any(|highlight| highlight.match_type.as_deref() == Some("semantic")));
-
-        let _ = fs::remove_dir_all(root);
     }
 
     /// Opens a copy of a real library and reports what survived.
@@ -15170,7 +15155,7 @@ mod search_integration_tests {
         };
 
         // Never open the real file for writing: work on a copy.
-        let (root, storage) = temp_paths();
+        let (_temp, root, storage) = temp_paths();
         let copy = root.join("piep.db");
         fs::copy(&source, &copy).expect("copy the library");
 
@@ -15185,13 +15170,11 @@ mod search_integration_tests {
             "opening a saved library must never discard its works"
         );
         assert!(before > 0, "the source library should not be empty");
-
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn index_status_is_cached_without_going_stale_across_changes() {
-        let (root, storage) = temp_paths();
+        let (_temp, root, storage) = temp_paths();
         let db = Database::open(&root.join("piep.db"), &storage).unwrap();
         assert_eq!(db.get_search_index_status().unwrap().total_downloads, 0);
 
@@ -15221,13 +15204,11 @@ mod search_integration_tests {
         let after_index = db.get_search_index_status().unwrap();
         assert_eq!(after_index.pending_downloads, 0);
         assert!(after_index.is_complete);
-
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn semantic_completion_requires_every_current_document() {
-        let (root, storage) = temp_paths();
+        let (_temp, root, storage) = temp_paths();
         let db = Database::open(&root.join("piep.db"), &storage).unwrap();
         let first = insert_download_unindexed(
             &db,
@@ -15257,13 +15238,11 @@ mod search_integration_tests {
         let complete = db.get_search_index_status().unwrap();
         assert_eq!(complete.semantic_indexed_downloads, 2);
         assert_eq!(complete.semantic_pending_downloads, 0);
-
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn an_author_page_can_show_their_series_and_tags_and_drill_into_both() {
-        let (root, storage) = temp_paths();
+        let (_temp, root, storage) = temp_paths();
         let db = Database::open(&root.join("piep.db"), &storage).unwrap();
 
         let first = insert_download(
@@ -15355,13 +15334,11 @@ mod search_integration_tests {
             .list_entity_tags("person", "pixiv", "unknown", 20)
             .unwrap()
             .is_empty());
-
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn entity_series_keyset_has_no_gaps_duplicates_or_same_name_instability() {
-        let (root, storage) = temp_paths();
+        let (_temp, root, storage) = temp_paths();
         let db = Database::open(&root.join("piep.db"), &storage).unwrap();
         assert!(db
             .list_entity_series_paged("", "author", None, 20, None)
@@ -15492,13 +15469,12 @@ mod search_integration_tests {
         assert!(db
             .list_entity_series_paged("pixiv", "paged-author", None, 2, first_cursor.as_deref(),)
             .is_err());
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     #[ignore = "performance smoke test for a prolific author's series"]
     fn entity_series_paging_stays_fast_at_twenty_thousand() {
-        let (root, storage) = temp_paths();
+        let (_temp, root, storage) = temp_paths();
         let db = Database::open(&root.join("piep.db"), &storage).unwrap();
         let seeded = std::env::var("PIEP_BENCH_ENTITY_SERIES")
             .ok()
@@ -15577,12 +15553,11 @@ mod search_integration_tests {
         );
         assert!(first_elapsed < Duration::from_secs(1));
         assert!(deepest < Duration::from_secs(1));
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn numbered_pages_work_for_an_ordering_and_are_refused_for_relevance() {
-        let (root, storage) = temp_paths();
+        let (_temp, root, storage) = temp_paths();
         let db = Database::open(&root.join("piep.db"), &storage).unwrap();
         for index in 0..7 {
             insert_download(
@@ -15632,13 +15607,11 @@ mod search_integration_tests {
             db.search_downloads_v2(&without).unwrap().items.len(),
             "an offset must be ignored rather than silently shifting a relevance page"
         );
-
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn shelf_counts_ignore_reading_positions_for_works_that_no_longer_exist() {
-        let (root, storage) = temp_paths();
+        let (_temp, root, storage) = temp_paths();
         let db = Database::open(&root.join("piep.db"), &storage).unwrap();
         let first = insert_download(&db, &storage, "shelf-1", "一作目", "作者", &["棚"], "本文");
         let second = insert_download(&db, &storage, "shelf-2", "二作目", "作者", &["棚"], "本文");
@@ -15673,13 +15646,11 @@ mod search_integration_tests {
         let mut none = v2_params(None, 20, None);
         none.ids_include = Some(Vec::new());
         assert_eq!(db.search_downloads_v2(&none).unwrap().items.len(), 0);
-
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn saved_searches_survive_reuse_of_a_name_and_reject_nonsense() {
-        let (root, storage) = temp_paths();
+        let (_temp, root, storage) = temp_paths();
         let db = Database::open(&root.join("piep.db"), &storage).unwrap();
 
         let created = db
@@ -15746,13 +15717,11 @@ mod search_integration_tests {
             "a second delete is not an error"
         );
         assert!(db.list_saved_searches().unwrap().is_empty());
-
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn saved_searches_keep_their_order_and_stop_at_the_limit() {
-        let (root, storage) = temp_paths();
+        let (_temp, root, storage) = temp_paths();
         let db = Database::open(&root.join("piep.db"), &storage).unwrap();
         for index in 0..MAX_SAVED_SEARCHES {
             db.upsert_saved_search(&SavedSearchInput {
@@ -15790,13 +15759,11 @@ mod search_integration_tests {
                 params_json: "{}".to_string(),
             })
             .is_ok());
-
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn synonyms_do_not_match_every_work_through_its_source_url() {
-        let (root, storage) = temp_paths();
+        let (_temp, root, storage) = temp_paths();
         let db = Database::open(&root.join("piep.db"), &storage).unwrap();
 
         // Every pixiv URL is .../novel/show.php?id=N, and the synonym table
@@ -15848,13 +15815,11 @@ mod search_integration_tests {
         // As must the bare id, which is what the URL actually identifies.
         let by_id = db.search_downloads_v2(&params("222")).unwrap();
         assert!(by_id.items.iter().any(|item| item.source_id == "222"));
-
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn changing_the_index_format_requeues_the_whole_library() {
-        let (root, storage) = temp_paths();
+        let (_temp, root, storage) = temp_paths();
         let db_path = root.join("piep.db");
         let db = Database::open(&db_path, &storage).unwrap();
         insert_download(
@@ -15901,13 +15866,11 @@ mod search_integration_tests {
         // And the work is genuinely searchable again, not merely marked done.
         let found = db.search_downloads_v2(&params("書式変更")).unwrap();
         assert_eq!(found.items.len(), 1);
-
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn sorted_search_orders_matches_by_column_and_pages_without_gaps() {
-        let (root, storage) = temp_paths();
+        let (_temp, root, storage) = temp_paths();
         let db = Database::open(&root.join("piep.db"), &storage).unwrap();
 
         // Titles are deliberately out of insertion order so a title sort cannot
@@ -15976,13 +15939,11 @@ mod search_integration_tests {
         // Without an explicit sort the same query still ranks by relevance.
         let relevance = db.search_downloads_v2(&params("花暦")).unwrap();
         assert_ne!(relevance.search_meta.engine, "tantivy-sorted");
-
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn sorted_search_respects_library_filters() {
-        let (root, storage) = temp_paths();
+        let (_temp, root, storage) = temp_paths();
         let db = Database::open(&root.join("piep.db"), &storage).unwrap();
         let favorite = insert_download(
             &db,
@@ -16011,13 +15972,11 @@ mod search_integration_tests {
         assert_eq!(page.total_estimate, Some(1));
         assert_eq!(page.items.len(), 1);
         assert_eq!(page.items[0].id, favorite);
-
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn sorted_search_uses_bounded_temp_table_batches_and_carries_total() {
-        let (root, storage) = temp_paths();
+        let (_temp, root, storage) = temp_paths();
         let db = Database::open(&root.join("piep.db"), &storage).unwrap();
         const MATCHES: usize = SORTED_SEARCH_ID_BATCH_SIZE * 2 + 17;
         for index in 0..MATCHES {
@@ -16077,13 +16036,11 @@ mod search_integration_tests {
             cache_after_insert.1 > cache_after_second.1,
             "library/index generation change must rebuild the snapshot"
         );
-
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn multi_term_search_requires_each_term() {
-        let (root, storage) = temp_paths();
+        let (_temp, root, storage) = temp_paths();
         let db = Database::open(&root.join("piep.db"), &storage).unwrap();
 
         let target = insert_download(
@@ -16118,13 +16075,11 @@ mod search_integration_tests {
         assert!(result.items.iter().any(|item| item.id == target));
         assert!(!result.items.iter().any(|item| item.id == alpha_only));
         assert!(!result.items.iter().any(|item| item.id == beta_only));
-
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn semantic_mode_returns_body_chunk_highlight_and_reason() {
-        let (root, storage) = temp_paths();
+        let (_temp, root, storage) = temp_paths();
         let db = Database::open(&root.join("piep.db"), &storage).unwrap();
 
         let target = insert_download(
@@ -16152,14 +16107,12 @@ mod search_integration_tests {
                     .iter()
                     .any(|segment| segment.matched && segment.text.contains("小説本文"))
         }));
-
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     #[ignore = "performance smoke test for large-library browsing"]
     fn library_browsing_stays_fast_on_a_large_library() {
-        let (root, storage) = temp_paths();
+        let (_temp, root, storage) = temp_paths();
         let db = Database::open(&root.join("piep.db"), &storage).unwrap();
 
         let seeded: usize = std::env::var("PIEP_BENCH_WORKS")
@@ -16340,13 +16293,12 @@ mod search_integration_tests {
         );
 
         drop(db);
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     #[ignore = "measurement harness for disk-backed lexical snapshots"]
     fn lexical_snapshots_scale_with_fixed_memory_batches() {
-        let (root, storage) = temp_paths();
+        let (_temp, root, storage) = temp_paths();
         let db = Database::open(&root.join("piep.db"), &storage).unwrap();
         let works: usize = std::env::var("PIEP_BENCH_WORKS")
             .ok()
@@ -16445,12 +16397,11 @@ mod search_integration_tests {
         assert!(sorted_warm < Duration::from_millis(250));
 
         drop(db);
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn entity_facet_cache_is_invalidated_by_a_library_commit() {
-        let (root, storage) = temp_paths();
+        let (_temp, root, storage) = temp_paths();
         let db = Database::open(&root.join("piep.db"), &storage).unwrap();
         insert_download_unindexed(
             &db,
@@ -16494,13 +16445,12 @@ mod search_integration_tests {
         let refreshed = db.search_entity_facets("person", None, 60, 0).unwrap();
         assert_eq!(refreshed[0].count, 2);
         drop(db);
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     #[ignore = "performance smoke test for local search tuning"]
     fn smart_search_handles_5000_seed_items_under_target() {
-        let (root, storage) = temp_paths();
+        let (_temp, root, storage) = temp_paths();
         let db = Database::open(&root.join("piep.db"), &storage).unwrap();
 
         for index in 0..5_000 {
@@ -16538,8 +16488,6 @@ mod search_integration_tests {
             "smart search took {:?}",
             elapsed
         );
-
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
@@ -16571,7 +16519,7 @@ mod search_integration_tests {
 
     #[test]
     fn active_edit_revision_drives_reader_and_search_body() {
-        let (root, storage) = temp_paths();
+        let (_temp, root, storage) = temp_paths();
         let db = Database::open(&root.join("piep.db"), &storage).unwrap();
         let download_id = insert_download(
             &db,
@@ -16618,13 +16566,11 @@ mod search_integration_tests {
             .search_downloads_v2(&v2_params(Some("編集固有キーワード"), 10, None))
             .unwrap();
         assert_eq!(search.items.first().map(|item| item.id), Some(download_id));
-
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn update_job_schema_recovers_interrupted_jobs() {
-        let (root, storage) = temp_paths();
+        let (_temp, root, storage) = temp_paths();
         let db = Database::open(&root.join("piep.db"), &storage).unwrap();
         let request = StartUpdateJobRequest {
             scope: "work".to_string(),
@@ -16656,14 +16602,13 @@ mod search_integration_tests {
         let snapshot = db.update_job_snapshot("job-test").unwrap();
         assert_eq!(snapshot.status, "paused");
 
-        let _ = fs::remove_dir_all(root);
     }
 
     /// 履歴は放っておくと溜まり続ける。整理は「古くて終わったもの」だけに効き、
     /// 走っているジョブと直近の履歴には触れない。
     #[test]
     fn old_finished_jobs_are_pruned_but_recent_and_live_ones_stay() {
-        let (root, storage) = temp_paths();
+        let (_temp, root, storage) = temp_paths();
         let db = Database::open(&root.join("piep.db"), &storage).unwrap();
         let request = StartUpdateJobRequest {
             scope: "all".to_string(),
@@ -16707,12 +16652,11 @@ mod search_integration_tests {
         assert!(db.update_job_snapshot("job-recent").is_ok());
         assert!(db.update_job_snapshot("job-live").is_ok());
 
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn job_logs_are_capped_from_the_oldest_end() {
-        let (root, storage) = temp_paths();
+        let (_temp, root, storage) = temp_paths();
         let db = Database::open(&root.join("piep.db"), &storage).unwrap();
         let request = StartUpdateJobRequest {
             scope: "all".to_string(),
@@ -16738,8 +16682,6 @@ mod search_integration_tests {
             .map(|log| log.message.as_str())
             .collect();
         assert_eq!(messages, vec!["行 15", "行 16", "行 17", "行 18", "行 19"]);
-
-        let _ = fs::remove_dir_all(root);
     }
 
     /// シリーズの作者が手元のライブラリから分かること。
@@ -16748,7 +16690,7 @@ mod search_integration_tests {
     /// しないための判断材料になる（同じものを二度取りに行かない）。
     #[test]
     fn a_series_can_name_the_author_behind_it() {
-        let (root, storage) = temp_paths();
+        let (_temp, root, storage) = temp_paths();
         let db = Database::open(&root.join("piep.db"), &storage).unwrap();
         let id = insert_download(
             &db,
@@ -16780,14 +16722,12 @@ mod search_integration_tests {
         );
         // 手元に作品が無いシリーズは判断できない。そのときは走査する側に倒す。
         assert!(db.series_author_keys("pixiv", "999999").unwrap().is_empty());
-
-        let _ = fs::remove_dir_all(root);
     }
 
     /// 終わったジョブは操作履歴からまとめて消せる。走っているものは残る。
     #[test]
     fn finished_jobs_can_be_cleared_from_the_history() {
-        let (root, storage) = temp_paths();
+        let (_temp, root, storage) = temp_paths();
         let db = Database::open(&root.join("piep.db"), &storage).unwrap();
         let request = StartUpdateJobRequest {
             scope: "all".to_string(),
@@ -16810,7 +16750,6 @@ mod search_integration_tests {
         assert!(db.update_job_snapshot("job-done").is_err());
         assert!(db.update_job_snapshot("job-running").is_ok());
 
-        let _ = fs::remove_dir_all(root);
     }
 
     /// 見つけた候補は、ジョブが変わっても残る。
@@ -16819,7 +16758,7 @@ mod search_integration_tests {
     /// すると、保存しなかった作品が二度と現れない。実際にそれで作品が消えた。
     #[test]
     fn a_candidate_nobody_answered_survives_into_the_next_job() {
-        let (root, storage) = temp_paths();
+        let (_temp, root, storage) = temp_paths();
         let db = Database::open(&root.join("piep.db"), &storage).unwrap();
         let candidate = UpdateCandidateInput {
             source: "pixiv".to_string(),
@@ -16861,15 +16800,13 @@ mod search_integration_tests {
             .update_candidate_status("pixiv", "12345")
             .unwrap()
             .is_none());
-
-        let _ = fs::remove_dir_all(root);
     }
 
     /// 進捗は「これから何件やるか」を表す。保存のために待機列へ入れた候補は
     /// 作業なので数え、見つけただけの候補は数えない。
     #[test]
     fn queued_candidates_count_towards_progress_but_unanswered_ones_do_not() {
-        let (root, storage) = temp_paths();
+        let (_temp, root, storage) = temp_paths();
         let db = Database::open(&root.join("piep.db"), &storage).unwrap();
         let request = StartUpdateJobRequest {
             scope: "author".to_string(),
@@ -16925,13 +16862,12 @@ mod search_integration_tests {
         assert_eq!(snapshot.totals, 3);
         assert_eq!(snapshot.processed, 0);
 
-        let _ = fs::remove_dir_all(root);
     }
 
     /// 監視対象の健康状態。「確認した」と「見つかった」は別で、失敗は積み上がる。
     #[test]
     fn a_target_records_when_it_last_found_something_and_when_it_keeps_failing() {
-        let (root, storage) = temp_paths();
+        let (_temp, root, storage) = temp_paths();
         let db = Database::open(&root.join("piep.db"), &storage).unwrap();
         db.upsert_update_target(&UpdateTargetInput {
             target_type: "author".to_string(),
@@ -16966,13 +16902,11 @@ mod search_integration_tests {
         assert!(target.last_hit_at.is_some());
         assert_eq!(target.consecutive_errors, 0);
         assert_eq!(target.last_seen_source_id.as_deref(), Some("12002"));
-
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn update_job_candidates_can_be_queued_for_saving() {
-        let (root, storage) = temp_paths();
+        let (_temp, root, storage) = temp_paths();
         let db = Database::open(&root.join("piep.db"), &storage).unwrap();
         let request = StartUpdateJobRequest {
             scope: "author".to_string(),
@@ -17028,12 +16962,11 @@ mod search_integration_tests {
         let snapshot = db.update_job_snapshot("job-candidates").unwrap();
         assert_eq!(snapshot.candidates[0].status, "queued");
 
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn update_job_snapshot_pages_candidate_payloads() {
-        let (root, storage) = temp_paths();
+        let (_temp, root, storage) = temp_paths();
         let db = Database::open(&root.join("piep.db"), &storage).unwrap();
         let request = StartUpdateJobRequest {
             scope: "author".to_string(),
@@ -17071,7 +17004,5 @@ mod search_integration_tests {
         assert_eq!(second.candidates.len(), 5);
         assert!(second.next_candidate_cursor.is_none());
         assert!(second.candidates[0].id > cursor);
-
-        let _ = fs::remove_dir_all(root);
     }
 }

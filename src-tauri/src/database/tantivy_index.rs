@@ -2,15 +2,22 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 
 use parking_lot::{Condvar, Mutex};
 use rusqlite::{Connection, OpenFlags};
 use tantivy::collector::{Count, TopDocs};
+use tantivy::directory::error::{DeleteError, LockError, OpenReadError, OpenWriteError};
+use tantivy::directory::{
+    DirectoryLock, FileHandle, Lock, MmapDirectory, WatchCallback, WatchHandle, WritePtr,
+};
 use tantivy::query::QueryParser;
 use tantivy::schema::Value as _;
 use tantivy::schema::{Field, Schema, FAST, INDEXED, STORED, STRING, TEXT};
 use tantivy::tokenizer::{LowerCaser, NgramTokenizer, RemoveLongFilter, TextAnalyzer};
-use tantivy::{Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument, Term};
+use tantivy::{
+    Directory, Index, IndexReader, IndexSettings, IndexWriter, ReloadPolicy, TantivyDocument, Term,
+};
 
 use url::Url;
 
@@ -174,7 +181,7 @@ pub fn ensure_index(storage_dir: &Path) -> Result<Index, String> {
         .map_err(|e| format!("Tantivy index dir creation failed: {}", e))?;
     remove_obsolete_index_versions(&index_root);
 
-    match Index::open_in_dir(&index_dir) {
+    match open_existing_index(&index_dir) {
         Ok(index) => {
             register_tokenizer(&index)?;
             if schema_has_required_fields(&index.schema()) {
@@ -187,21 +194,145 @@ pub fn ensure_index(storage_dir: &Path) -> Result<Index, String> {
     }
 }
 
+fn open_existing_index(index_dir: &Path) -> Result<Index, String> {
+    let directory = ScanTolerantDirectory::open(index_dir)?;
+    Index::open(directory).map_err(|e| format!("Tantivy index open failed: {e}"))
+}
+
 fn reset_index_dir(index_dir: &Path) -> Result<Index, String> {
     if index_dir.exists() {
         let _ = std::fs::remove_dir_all(index_dir);
     }
     std::fs::create_dir_all(index_dir).map_err(|e| format!("Tantivy index reset failed: {}", e))?;
-    let index = Index::create_in_dir(index_dir, build_schema())
+    let directory = ScanTolerantDirectory::open(index_dir)?;
+    let index = Index::create(directory, build_schema(), IndexSettings::default())
         .map_err(|e| format!("Tantivy index creation failed: {}", e))?;
     register_tokenizer(&index)?;
     Ok(index)
 }
 
+/// Windows error 5, `ERROR_ACCESS_DENIED`.
+const ERROR_ACCESS_DENIED: i32 = 5;
+/// Windows error 32, `ERROR_SHARING_VIOLATION`.
+///
+/// The observed failures were all error 5, but Windows reports the same
+/// "someone else has this open" condition either way depending on which handle
+/// conflicts, so both are treated alike.
+const ERROR_SHARING_VIOLATION: i32 = 32;
+
+/// How long `atomic_write` keeps retrying a rename Windows refuses.
+///
+/// Observed conflicts cleared on the first retry a millisecond later, so this
+/// is far longer than needed; it is sized to outlast a scanner that is having a
+/// bad day rather than to be hit.
+const ATOMIC_WRITE_RETRY_BUDGET: Duration = Duration::from_millis(250);
+
+/// `MmapDirectory` that retries an `atomic_write` the filesystem refuses.
+///
+/// `atomic_write` writes a temp file next to the target and renames it over
+/// the target, and that rename is how every Tantivy commit publishes
+/// `meta.json` and `.managed.json`. On Windows the rename fails with
+/// `ERROR_ACCESS_DENIED` while any other process holds a handle on either
+/// file, and an on-access virus scanner takes exactly such a handle on files
+/// that were just written - which these were, microseconds earlier.
+///
+/// Measured on this repository's suite the rename failed on roughly one full
+/// `cargo test` run in six, always inside the committing test's own intact
+/// directory, and always succeeded when retried a millisecond later. No
+/// in-process handle explains it: readers and concurrent renames were both
+/// ruled out experimentally, and releasing the runtimes the suite used to leak
+/// did not change the rate.
+///
+/// Retrying here rather than around `commit()` keeps the scope honest. A failed
+/// `atomic_write` leaves the old file untouched - that is the whole point of
+/// writing through a rename - so a retry either publishes the same bytes or
+/// fails again, whereas re-running a commit would re-enter indexing state that
+/// is not idempotent.
+#[derive(Clone, Debug)]
+struct ScanTolerantDirectory {
+    inner: MmapDirectory,
+}
+
+impl ScanTolerantDirectory {
+    fn open(index_dir: &Path) -> Result<Self, String> {
+        MmapDirectory::open(index_dir)
+            .map(|inner| Self { inner })
+            .map_err(|e| format!("Tantivy index directory open failed: {e}"))
+    }
+}
+
+/// Whether a failed rename is worth another attempt.
+///
+/// Only on Windows: elsewhere a rename does not fail because someone else has
+/// the file open, and error 5 there means `EIO`, which retrying would not fix.
+fn is_transient_sharing_failure(error: &std::io::Error) -> bool {
+    cfg!(windows)
+        && matches!(
+            error.raw_os_error(),
+            Some(ERROR_ACCESS_DENIED) | Some(ERROR_SHARING_VIOLATION)
+        )
+}
+
+impl Directory for ScanTolerantDirectory {
+    fn atomic_write(&self, path: &Path, data: &[u8]) -> std::io::Result<()> {
+        let deadline = Instant::now() + ATOMIC_WRITE_RETRY_BUDGET;
+        let mut backoff = Duration::from_millis(1);
+        loop {
+            let Err(error) = self.inner.atomic_write(path, data) else {
+                return Ok(());
+            };
+            if !is_transient_sharing_failure(&error) || Instant::now() >= deadline {
+                return Err(error);
+            }
+            std::thread::sleep(backoff);
+            backoff = (backoff * 2).min(Duration::from_millis(16));
+        }
+    }
+
+    fn get_file_handle(&self, path: &Path) -> Result<Arc<dyn FileHandle>, OpenReadError> {
+        self.inner.get_file_handle(path)
+    }
+
+    fn delete(&self, path: &Path) -> Result<(), DeleteError> {
+        self.inner.delete(path)
+    }
+
+    fn exists(&self, path: &Path) -> Result<bool, OpenReadError> {
+        self.inner.exists(path)
+    }
+
+    fn open_write(&self, path: &Path) -> Result<WritePtr, OpenWriteError> {
+        self.inner.open_write(path)
+    }
+
+    fn atomic_read(&self, path: &Path) -> Result<Vec<u8>, OpenReadError> {
+        self.inner.atomic_read(path)
+    }
+
+    fn sync_directory(&self) -> std::io::Result<()> {
+        self.inner.sync_directory()
+    }
+
+    fn acquire_lock(&self, lock: &Lock) -> Result<DirectoryLock, LockError> {
+        self.inner.acquire_lock(lock)
+    }
+
+    fn watch(&self, callback: WatchCallback) -> tantivy::Result<WatchHandle> {
+        self.inner.watch(callback)
+    }
+}
+
 fn runtime(storage_dir: &Path) -> Result<Arc<TantivyRuntime>, String> {
     let key = storage_dir.join(INDEX_DIR_NAME).join(INDEX_VERSION_DIR);
     let runtimes = RUNTIMES.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Some(runtime) = runtimes.lock().get(&key).cloned() {
+    // The map stays locked across the open below. Releasing it first let two
+    // callers - `prepare_search_index_chunk` fans `prepare_document` out over
+    // rayon - both miss the entry and both run `ensure_index`, whose
+    // `reset_index_dir` deletes the directory the other one is creating its
+    // index in. Opening an index is a few milliseconds, so serializing the
+    // first open per directory costs nothing worth measuring.
+    let mut runtimes = runtimes.lock();
+    if let Some(runtime) = runtimes.get(&key).cloned() {
         return Ok(runtime);
     }
 
@@ -224,8 +355,31 @@ fn runtime(storage_dir: &Path) -> Result<Arc<TantivyRuntime>, String> {
         writer_available: Condvar::new(),
         content_generation: AtomicU64::new(1),
     });
-    runtimes.lock().insert(key, runtime.clone());
+    runtimes.insert(key, runtime.clone());
     Ok(runtime)
+}
+
+/// Drops the cached runtime for a storage directory.
+///
+/// `RUNTIMES` keeps every runtime it ever built until the process exits, and
+/// each one owns an `IndexWriter` with a 64 MB arena plus its merge threads and
+/// an `IndexReader` whose `meta.json` poller is a thread of its own. That is
+/// one set per storage directory: one in the app, but one per test in the test
+/// binary, which by the end of a run meant dozens of live writers and pollers
+/// with nothing left to index.
+///
+/// This does not affect whether the directory can be deleted - `remove_dir_all`
+/// gets through the mmaps. What blocks deletion is SQLite, which is why the
+/// tests drop their `Database` first.
+#[cfg(test)]
+pub(crate) fn release_runtime(storage_dir: &Path) {
+    let key = storage_dir.join(INDEX_DIR_NAME).join(INDEX_VERSION_DIR);
+    let Some(runtimes) = RUNTIMES.get() else {
+        return;
+    };
+    let removed = runtimes.lock().remove(&key);
+    // Dropped outside the map lock: dropping the writer joins its merge threads.
+    drop(removed);
 }
 
 pub fn upsert_documents(storage_dir: &Path, docs: &[TantivyIndexDocument]) -> Result<(), String> {
