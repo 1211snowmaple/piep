@@ -17,6 +17,7 @@ import {
   fetchPixivSeriesNovels,
   fetchPixivUserNovels,
 } from "@/services/downloadApi";
+import { createSourcePacer, isRateLimited } from "@/lib/sourcePacing";
 
 export type UpdateSource = "pixiv" | "fanbox";
 export type UpdateTargetType = "work" | "author" | "series";
@@ -390,7 +391,11 @@ export async function refreshEntityProfilesForEntries(
   }
 
   if (queue.size > 0) onLog?.("info", `作者・シリーズ情報を確認中... (${queue.size}件)`);
-  for (const target of queue.values()) {
+  // 作品の保存が終わったあとも、相手は同じ相手。ここだけ間隔なしで回すと、
+  // 本体の保存が通ったのに仕上げで断られる。
+  const pacer = createSourcePacer();
+  const targets = [...queue.values()];
+  for (const [index, target] of targets.entries()) {
     try {
       await refreshEntityProfile({
         entityType: target.entityType,
@@ -401,9 +406,12 @@ export async function refreshEntityProfilesForEntries(
         cookie: credentials.fanboxCookie,
         userAgent: credentials.fanboxUserAgent,
       });
+      pacer.relax();
     } catch (error) {
+      if (isRateLimited(error)) await pacer.backOff();
       onLog?.("warn", `${target.entityType}:${target.source}:${target.sourceKey} の確認をスキップ: ${error}`);
     }
+    if (index < targets.length - 1) await pacer.wait();
   }
 }
 

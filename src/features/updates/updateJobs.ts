@@ -41,11 +41,6 @@ export interface StartUpdateJobRequest {
   /** Authors or series to check once, without adding them to the watch list. */
   adhocTargets?: { targetType: "author" | "series"; source: string; sourceKey: string; displayName: string }[] | null;
   credentials?: UpdateJobCredentials | null;
-  concurrency?: {
-    fetch?: number | null;
-    save?: number | null;
-    collection?: number | null;
-  } | null;
 }
 
 export interface UpdateJobSummary {
@@ -110,6 +105,17 @@ function mergeSnapshot(current: UpdateJobSnapshot | null, incoming: UpdateJobSna
 
 export function isUpdateJobTerminal(status: UpdateJobStatus): boolean {
   return status === "completed" || status === "failed" || status === "canceled";
+}
+
+/**
+ * 動かしている worker が付いているか。
+ *
+ * `paused` と `auth_required` は終わってもいないが、誰も進めていない。
+ * 「終わっていない＝任せておけばよい」で判断すると、止まったままの1件が
+ * 以後の自動確認を永久に塞ぐ。待つべき相手はこちらで数える。
+ */
+export function isUpdateJobActive(status: UpdateJobStatus): boolean {
+  return status === "queued" || status === "running" || status === "canceling";
 }
 
 export { getUpdateJobCredentials };
@@ -213,9 +219,10 @@ export function useUpdateJobs(onSnapshot?: (snapshot: UpdateJobSnapshot) => void
   }, [enabled, onSnapshot]);
 
   // 進捗はイベントで届く。ここはその取りこぼしに備える保険なので、
-  // イベントが途切れているときだけ読みに行く。
+  // イベントが途切れているときだけ読みに行く。止まっているジョブ
+  // （一時停止・再接続待ち）は誰も進めないので、待つ相手がいない。
   useEffect(() => {
-    if (!enabled || !activeSnapshot || isUpdateJobTerminal(activeSnapshot.status)) return;
+    if (!enabled || !activeSnapshot || !isUpdateJobActive(activeSnapshot.status)) return;
     const id = window.setInterval(() => {
       if (Date.now() - lastEventAt.current < EVENT_SILENCE_MS) return;
       getUpdateJobCommand(activeSnapshot.jobId)

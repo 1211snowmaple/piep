@@ -1,8 +1,8 @@
 import { useEffect, useRef } from "react";
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
-import { isTauriRuntime, listUpdateTargets } from "@/services/dbApi";
+import { isTauriRuntime, listUpdateTargets, searchDownloadsV2 } from "@/services/dbApi";
 import { listUpdateJobsCommand, startUpdateJobCommand } from "@/services/updateJobApi";
-import { isUpdateJobTerminal, type UpdateJobSnapshot, type UpdateJobSummary } from "@/features/updates/updateJobs";
+import { isUpdateJobActive, isUpdateJobTerminal, type UpdateJobSnapshot, type UpdateJobSummary } from "@/features/updates/updateJobs";
 import { isRunDue, loadSchedule, readLastRun, writeLastRun } from "@/features/updates/updateSchedule";
 
 /** How often the app re-checks whether a scheduled run has come due. */
@@ -64,13 +64,19 @@ export function useUpdateScheduler(enabled = isTauriRuntime()) {
         const lastRun = await readLastRun();
         if (!isRunDue(settings, lastRun, Date.now(), startup)) return;
 
-        // すでに走っているジョブがあれば、そのまま任せる。
+        // すでに走っているジョブがあれば、そのまま任せる。待つのは worker が
+        // 付いているものだけ - 一時停止や再接続待ちのまま放置された1件を
+        // 「実行中」と数えると、以後の自動確認が永久に始まらなくなる。
         const jobs = await listUpdateJobsCommand();
-        if (jobs.some((job) => !isUpdateJobTerminal(job.status))) return;
+        if (jobs.some((job) => isUpdateJobActive(job.status))) return;
 
-        // 監視対象も監視作品も無いなら、確認する意味がない。
-        const targets = await listUpdateTargets<{ id: number }>(null, true);
-        if (!targets.length) return;
+        // 監視対象も監視作品も無いなら、確認する意味がない。作品の監視は
+        // downloads 側の旗なので、update_targets を見るだけでは数え落とす。
+        const [targets, watchedWorks] = await Promise.all([
+          listUpdateTargets<{ id: number }>(null, true),
+          searchDownloadsV2({ watchFilter: "watched", limit: 1, projection: "bulk" }),
+        ]);
+        if (!targets.length && !watchedWorks.items.length) return;
 
         // 実行する前に時刻を記録する。途中で落ちても、次の起動で
         // 何度もやり直すことにはならない。

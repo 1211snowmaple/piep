@@ -9,7 +9,6 @@ import {
   Divider,
   Grid,
   Group,
-  NumberInput,
   Paper,
   Progress,
   SegmentedControl,
@@ -90,18 +89,6 @@ export function parseWorkId(value: string | null): number | null {
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
 }
 
-export function normalizeConcurrency(value: unknown, min: number, max: number): number {
-  const parsed = typeof value === "number" ? value : Number(value);
-  if (!Number.isFinite(parsed)) return min;
-  return Math.max(min, Math.min(max, Math.trunc(parsed)));
-}
-
-function validateConcurrency(value: unknown, min: number, max: number): string | null {
-  return typeof value === "number" && Number.isInteger(value) && value >= min && value <= max
-    ? null
-    : `${min}〜${max}の整数を入力してください`;
-}
-
 export default function UpdatesPage() {
   const runtime = isTauriRuntime();
   const [searchParams] = useAppSearchParams();
@@ -118,12 +105,7 @@ export default function UpdatesPage() {
   const [dismissedIds, setDismissedIds] = useState<number[]>([]);
   const [tab, setTab] = useState<string | null>("candidates");
   const form = useForm({
-    initialValues: { scope: workId ? "work" : "all", mode: "check_only", fetchConcurrency: 3, saveConcurrency: 2, collectionConcurrency: 1 },
-    validate: {
-      fetchConcurrency: (value) => validateConcurrency(value, 1, 8),
-      saveConcurrency: (value) => validateConcurrency(value, 1, 4),
-      collectionConcurrency: (value) => validateConcurrency(value, 1, 3),
-    },
+    initialValues: { scope: workId ? "work" : "all", mode: "check_only" },
   });
   const targetForm = useForm({
     initialValues: { targetType: "author", source: "pixiv", sourceKey: "", displayName: "" },
@@ -169,7 +151,6 @@ export default function UpdatesPage() {
         mode: values.mode as "check_only" | "auto_save",
         workIds: shelfIds ?? (workId ? [workId] : null),
         watchSaved: schedule.watchSaved,
-        concurrency: { fetch: normalizeConcurrency(values.fetchConcurrency, 1, 8), save: normalizeConcurrency(values.saveConcurrency, 1, 4), collection: normalizeConcurrency(values.collectionConcurrency, 1, 3) },
       });
       await updateJobs.loadJobs();
     },
@@ -237,6 +218,9 @@ export default function UpdatesPage() {
   });
   const status = activeSnapshot?.status;
   const running = status === "queued" || status === "running" || status === "canceling";
+  // 一時停止と再接続待ちは、どちらも「止まっていて、押せば続きから動く」。
+  // 再接続が要るほうにだけボタンが無いと、連携し直しても戻る道が無くなる。
+  const stalled = status === "paused" || status === "auth_required";
   const progressValue = activeSnapshot?.totals ? activeSnapshot.processed / activeSnapshot.totals * 100 : 0;
 
   return (
@@ -248,7 +232,11 @@ export default function UpdatesPage() {
         <Grid.Col span={{ base: 12, lg: 4, xl: 3 }}>
           <Stack gap="lg">
             <Card p="lg">
-              <Stack gap="md"><Title order={3}>新しい更新ジョブ</Title>{workId && <Note>作品 ID {workId} だけを確認します。</Note>}<SegmentedControl fullWidth aria-label="更新時の処理方法" data={[{ value: "check_only", label: "確認のみ" }, { value: "auto_save", label: "自動保存" }]} {...form.getInputProps("mode")} /><Select label="対象" data={[{ value: "all", label: "すべての監視対象" }, { value: "work", label: "監視中の作品" }, { value: "author", label: "作者・クリエイター" }, { value: "series", label: "シリーズ" }, { value: "favorite", label: "お気に入りの作品" }, { value: "reading", label: "読みかけの作品" }]} disabled={Boolean(workId)} {...form.getInputProps("scope")} /><Divider /><Text size="sm" fw={700}>同時実行数</Text><Group grow><NumberInput label="取得" required hideControls allowDecimal={false} allowNegative={false} clampBehavior="strict" min={1} max={8} {...form.getInputProps("fetchConcurrency")} /><NumberInput label="保存" required hideControls allowDecimal={false} allowNegative={false} clampBehavior="strict" min={1} max={4} {...form.getInputProps("saveConcurrency")} /></Group><NumberInput label="一覧取得" required hideControls allowDecimal={false} allowNegative={false} clampBehavior="strict" min={1} max={3} {...form.getInputProps("collectionConcurrency")} /><Button variant="light" leftSection={<Icons.updates size={IconSize.menu} />} disabled={running} loading={startMutation.isPending} onClick={() => form.onSubmit((values) => startMutation.mutate(values))()}>確認を開始</Button></Stack>
+              <Stack gap="md"><Title order={3}>新しい更新ジョブ</Title>{workId && <Note>作品 ID {workId} だけを確認します。</Note>}<SegmentedControl fullWidth aria-label="更新時の処理方法" data={[{ value: "check_only", label: "確認のみ" }, { value: "auto_save", label: "自動保存" }]} {...form.getInputProps("mode")} /><Select label="対象" data={[{ value: "all", label: "すべての監視対象" }, { value: "work", label: "監視中の作品" }, { value: "author", label: "作者・クリエイター" }, { value: "series", label: "シリーズ" }, { value: "favorite", label: "お気に入りの作品" }, { value: "reading", label: "読みかけの作品" }]} disabled={Boolean(workId)} {...form.getInputProps("scope")} /><Divider />{/* 同時実行数の入力が3つ並んでいたが、ジョブは一件ずつしか
+                  処理しない。押しても何も変わらない値を required で置くのは、
+                  設定できるという嘘になる。速さは自分で決めるものではなく
+                  取得元との折り合いなので、決め方のほうを書く。 */}
+              <Note>取得元に負担をかけないよう、1件ずつ間隔をあけて確認します。制限を受けたときは自動で間隔を広げ、通るようになったら戻します。</Note><Button variant="light" leftSection={<Icons.updates size={IconSize.menu} />} disabled={running} loading={startMutation.isPending} onClick={() => form.onSubmit((values) => startMutation.mutate(values))()}>確認を開始</Button></Stack>
             </Card>
             <UpdateScheduleCard />
             <Card p="lg"><Group justify="space-between" mb="sm"><Text fw={700}>履歴</Text><Badge variant="light" color="gray">{jobs.length}</Badge></Group><Stack gap={4}>{jobs.slice(0, 8).map((job) => <Button key={job.jobId} variant={activeSnapshot?.jobId === job.jobId ? "light" : "subtle"} color="gray" justify="space-between" size="compact-sm" onClick={() => runtime && updateJobs.selectJob(job.jobId)}><Text size="xs">{formatDate(job.startedAt, true)}</Text><StatusBadge status={job.status} /></Button>)}</Stack></Card>
@@ -258,7 +246,7 @@ export default function UpdatesPage() {
           {!activeSnapshot ? <EmptyState icon={Icons.versionHistory} title="更新ジョブはまだありません" description="左側で対象と方法を選び、更新確認を開始してください。" /> : (
             <Stack gap="lg">
               <Card p="lg" className="update-progress-card">
-                <Group justify="space-between" align="flex-start"><Box><Group gap="xs"><StatusBadge status={activeSnapshot.status} /><Text size="xs" c="dimmed">{activeSnapshot.jobId}</Text></Group><Title order={2} mt="sm">{activeSnapshot.activeLabel || statusTitle(activeSnapshot.status)}</Title><Text size="sm" c="dimmed" mt={5}>{formatNumber(activeSnapshot.processed)} / {formatNumber(activeSnapshot.totals)}件を処理 · 候補 {formatNumber(activeSnapshot.candidateCount)} · エラー {formatNumber(activeSnapshot.errorCount)}</Text></Box><Group gap="xs">{running && <Button variant="default" leftSection={<Icons.pause size={IconSize.menu} />} onClick={() => runtime && updateJobs.pause(activeSnapshot.jobId)}>一時停止</Button>}{activeSnapshot.status === "paused" && <Button leftSection={<Icons.resume size={IconSize.menu} />} onClick={() => runtime && updateJobs.resume(activeSnapshot.jobId)}>再開</Button>}{running && <Button variant="subtle" color="red" leftSection={<Icons.cancel size={IconSize.menu} />} onClick={() => runtime && updateJobs.cancel(activeSnapshot.jobId)}>中止</Button>}{(activeSnapshot.status === "failed" || activeSnapshot.status === "canceled") && <Button leftSection={<Icons.undo size={IconSize.menu} />} onClick={() => runtime && updateJobs.resume(activeSnapshot.jobId, true)}>失敗分を再試行</Button>}</Group></Group>
+                <Group justify="space-between" align="flex-start"><Box><Group gap="xs"><StatusBadge status={activeSnapshot.status} /><Text size="xs" c="dimmed">{activeSnapshot.jobId}</Text></Group><Title order={2} mt="sm">{activeSnapshot.activeLabel || statusTitle(activeSnapshot.status)}</Title><Text size="sm" c="dimmed" mt={5}>{formatNumber(activeSnapshot.processed)} / {formatNumber(activeSnapshot.totals)}件を処理 · 候補 {formatNumber(activeSnapshot.candidateCount)} · エラー {formatNumber(activeSnapshot.errorCount)}</Text></Box><Group gap="xs">{running && <Button variant="default" leftSection={<Icons.pause size={IconSize.menu} />} onClick={() => runtime && updateJobs.pause(activeSnapshot.jobId)}>一時停止</Button>}{stalled && <Button leftSection={<Icons.resume size={IconSize.menu} />} onClick={() => runtime && updateJobs.resume(activeSnapshot.jobId)}>再開</Button>}{(running || stalled) && <Button variant="subtle" color="red" leftSection={<Icons.cancel size={IconSize.menu} />} onClick={() => runtime && updateJobs.cancel(activeSnapshot.jobId)}>中止</Button>}{(activeSnapshot.status === "failed" || activeSnapshot.status === "canceled") && <Button leftSection={<Icons.undo size={IconSize.menu} />} onClick={() => runtime && updateJobs.resume(activeSnapshot.jobId, true)}>失敗分を再試行</Button>}</Group></Group>
                 <Progress value={progressValue} animated={running} mt="lg" size="lg" aria-label={`更新進捗 ${Math.round(progressValue)}%`} />
               </Card>
 

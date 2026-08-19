@@ -52,6 +52,7 @@ pub fn initialize(conn: &Connection) -> Result<(), rusqlite::Error> {
     if is_known_library(conn)? {
         create_schema(conn)?;
         add_missing_columns(conn)?;
+        retire_update_job_request_blob(conn)?;
         stamp_schema_version(conn)?;
         return Ok(());
     }
@@ -246,6 +247,7 @@ fn create_additional_tables(conn: &Connection) -> Result<(), rusqlite::Error> {
          );",
     )?;
     add_missing_columns(conn)?;
+    retire_update_job_request_blob(conn)?;
     Ok(())
 }
 
@@ -266,6 +268,8 @@ fn add_missing_columns(conn: &Connection) -> Result<(), rusqlite::Error> {
             "consecutive_errors",
             "INTEGER NOT NULL DEFAULT 0",
         ),
+        // 依頼の塊をやめて、走行中に要る1つだけを列にした。
+        ("update_jobs", "watch_saved", "INTEGER NOT NULL DEFAULT 0"),
     ] {
         if !column_exists(conn, table, column)? {
             conn.execute_batch(&format!(
@@ -276,6 +280,51 @@ fn add_missing_columns(conn: &Connection) -> Result<(), rusqlite::Error> {
             ))?;
         }
     }
+    Ok(())
+}
+
+/// 依頼の塊をやめる。
+///
+/// `request_json` には画面から届いた要求がまるごと入っていたが、走り出した
+/// あと読まれるのは `watchSaved` の一つだけだった。塊のままにしておくと、
+/// 使われなくなった項目が黙って残り続け、次に形を変える人が「これは今も
+/// 効いているのか」を毎回調べ直すことになる。
+///
+/// 値は落とさずに列へ移してから、列ごと落とす。読めない行は既定（監視しない）
+/// として扱う - 掃除のために起動を止めるほどの値ではない。
+fn retire_update_job_request_blob(conn: &Connection) -> Result<(), rusqlite::Error> {
+    if !column_exists(conn, "update_jobs", "request_json")? {
+        return Ok(());
+    }
+    let carried: Vec<(String, bool)> = {
+        let mut statement = conn.prepare("SELECT id, request_json FROM update_jobs")?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        rows.map(|row| {
+            row.map(|(id, request_json)| {
+                let watch_saved = serde_json::from_str::<serde_json::Value>(&request_json)
+                    .ok()
+                    .and_then(|value| {
+                        value
+                            .get("watchSaved")
+                            .and_then(serde_json::Value::as_bool)
+                    })
+                    .unwrap_or(false);
+                (id, watch_saved)
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?
+    };
+    for (id, watch_saved) in carried {
+        if watch_saved {
+            conn.execute(
+                "UPDATE update_jobs SET watch_saved = 1 WHERE id = ?1",
+                rusqlite::params![id],
+            )?;
+        }
+    }
+    conn.execute_batch("ALTER TABLE update_jobs DROP COLUMN request_json;")?;
     Ok(())
 }
 
@@ -309,6 +358,7 @@ fn reset_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
 
     create_schema(conn)?;
     add_missing_columns(conn)?;
+    retire_update_job_request_blob(conn)?;
     stamp_schema_version(conn)?;
     Ok(())
 }
@@ -639,7 +689,10 @@ fn create_core_tables(conn: &Connection) -> Result<(), rusqlite::Error> {
             scope               TEXT    NOT NULL,
             mode                TEXT    NOT NULL,
             status              TEXT    NOT NULL,
-            request_json        TEXT    NOT NULL,
+            -- 依頼のうち、走り出したあとも要るのはこれだけ。画面から来た
+            -- 要求をまるごと漬けていたころは、使われなくなった項目が
+            -- そのまま残り続け、どれが今も効いているのか読めなくなった。
+            watch_saved         INTEGER NOT NULL DEFAULT 0,
             totals              INTEGER NOT NULL DEFAULT 0,
             processed           INTEGER NOT NULL DEFAULT 0,
             candidate_count     INTEGER NOT NULL DEFAULT 0,
@@ -791,6 +844,56 @@ mod tests {
         assert_eq!(marker, 1);
         assert!(!column_exists(&conn, "downloads", "tags").unwrap());
         assert!(sqlite_object_exists(&conn, "table", "saved_searches").unwrap());
+    }
+
+    /// 依頼の塊をやめる移行。値は落とさずに列へ移し、塊そのものは消す。
+    ///
+    /// 読まれない項目を抱えた JSON が残っていると、次に形を変える人が
+    /// 「これは今も効いているのか」を毎回調べ直すことになる。
+    #[test]
+    fn the_update_job_request_blob_is_carried_into_a_column_and_removed() {
+        let conn = Connection::open_in_memory().unwrap();
+        initialize(&conn).unwrap();
+
+        // 旧ビルドの形に戻す。使われなくなった項目まで含めて再現する。
+        conn.execute_batch(
+            r#"ALTER TABLE update_jobs DROP COLUMN watch_saved;
+               ALTER TABLE update_jobs ADD COLUMN request_json TEXT NOT NULL DEFAULT '{}';
+               INSERT INTO update_jobs (id, scope, mode, status, request_json, started_at, updated_at)
+               VALUES ('job-watch', 'all', 'auto_save',  'completed',
+                       '{"scope":"all","mode":"auto_save","watchSaved":true,"concurrency":{"fetch":3}}',
+                       '2026-08-01', '2026-08-01'),
+                      ('job-plain', 'all', 'check_only', 'completed',
+                       '{"scope":"all","mode":"check_only"}', '2026-08-01', '2026-08-01'),
+                      ('job-broken','all', 'check_only', 'completed',
+                       'not json', '2026-08-01', '2026-08-01');"#,
+        )
+        .unwrap();
+        assert!(column_exists(&conn, "update_jobs", "request_json").unwrap());
+
+        initialize(&conn).unwrap();
+
+        // 塊は消え、走行中に要る一つだけが列として残る。
+        assert!(!column_exists(&conn, "update_jobs", "request_json").unwrap());
+        assert!(column_exists(&conn, "update_jobs", "watch_saved").unwrap());
+
+        let watch_saved = |id: &str| -> i64 {
+            conn.query_row(
+                "SELECT watch_saved FROM update_jobs WHERE id = ?1",
+                [id],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(watch_saved("job-watch"), 1, "設定は移行で失われない");
+        assert_eq!(watch_saved("job-plain"), 0);
+        // 読めない行で起動を止めない。既定（監視しない）として扱う。
+        assert_eq!(watch_saved("job-broken"), 0);
+
+        // 二度目は何もしない。起動のたびに走っても同じ結果になる。
+        initialize(&conn).unwrap();
+        assert!(!column_exists(&conn, "update_jobs", "request_json").unwrap());
+        assert_eq!(watch_saved("job-watch"), 1);
     }
 
     /// あとから増えた列は、すでにあるライブラリにも足される。

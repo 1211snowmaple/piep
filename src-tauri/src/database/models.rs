@@ -662,15 +662,13 @@ pub struct UpdateCredentials {
     pub fanbox_user_agent: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UpdateJobConcurrency {
-    pub fetch: Option<i64>,
-    pub save: Option<i64>,
-    pub collection: Option<i64>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// 更新ジョブを始めるときに画面から届く依頼。
+///
+/// 受け取るだけの型で、DBには入らない。走り出したあとも要る `watch_saved` は
+/// `update_jobs` の列へ写す。依頼をまるごと漬けていたころは、使われなくなった
+/// 項目が永続データとして残り続けた。`Serialize` を持たせていないのは、
+/// うっかりまた保存しないため。
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StartUpdateJobRequest {
     pub scope: String,
@@ -678,7 +676,6 @@ pub struct StartUpdateJobRequest {
     pub work_ids: Option<Vec<i64>>,
     pub target_ids: Option<Vec<i64>>,
     pub credentials: Option<UpdateCredentials>,
-    pub concurrency: Option<UpdateJobConcurrency>,
     /// このジョブが保存した作品を、そのまま更新監視に載せるか。
     /// 設定の「保存した作品を自動で監視する」から渡ってくる。
     #[serde(default)]
@@ -1056,4 +1053,23 @@ pub struct NewVersion {
     pub file_size_bytes: i64,
     pub created_at: String,
     pub change_summary: Option<String>,
+}
+
+#[cfg(test)]
+mod start_request_shape_tests {
+    use super::StartUpdateJobRequest;
+
+    /// 画面が送らない項目は、JSON からそのまま消える（JS の undefined）。
+    /// 省略が欠損として扱われると、確認そのものが始まらなくなる。
+    #[test]
+    fn omitted_optional_fields_deserialize_as_none() {
+        let request: StartUpdateJobRequest =
+            serde_json::from_str(r#"{"scope":"all","mode":"check_only"}"#).unwrap();
+        assert_eq!(request.scope, "all");
+        assert!(request.work_ids.is_none());
+        assert!(request.target_ids.is_none());
+        assert!(request.credentials.is_none());
+        assert!(request.watch_saved.is_none());
+        assert!(request.adhoc_targets.is_none());
+    }
 }

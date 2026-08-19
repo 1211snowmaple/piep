@@ -12,7 +12,7 @@ vi.mock("@/features/library/readingShelf", async (importOriginal) => ({
   readingWorkIds: () => readingMock(),
 }));
 
-const { isSavableCandidateStatus, normalizeConcurrency, parseWorkId, shelfWorkIds } = await import(
+const { isSavableCandidateStatus, parseWorkId, shelfWorkIds } = await import(
   "@/features/updates/UpdatesPage"
 );
 
@@ -29,15 +29,6 @@ describe("update candidate selection", () => {
     for (const status of ["queued", "running", "saved", "skipped", "done"]) {
       expect(isSavableCandidateStatus(status)).toBe(false);
     }
-  });
-});
-
-describe("update concurrency normalization", () => {
-  it("clamps values to the command's integer range", () => {
-    expect(normalizeConcurrency(3.9, 1, 8)).toBe(3);
-    expect(normalizeConcurrency(99, 1, 8)).toBe(8);
-    expect(normalizeConcurrency("", 1, 4)).toBe(1);
-    expect(normalizeConcurrency(Number.NaN, 1, 3)).toBe(1);
   });
 });
 

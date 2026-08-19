@@ -30,11 +30,6 @@ export interface StartUpdateJobRequest {
   /** Authors or series to check once, without adding them to the watch list. */
   adhocTargets?: { targetType: "author" | "series"; source: string; sourceKey: string; displayName: string }[] | null;
   credentials?: UpdateJobCredentials | null;
-  concurrency?: {
-    fetch?: number | null;
-    save?: number | null;
-    collection?: number | null;
-  } | null;
 }
 
 export interface UpdateJobSummary {

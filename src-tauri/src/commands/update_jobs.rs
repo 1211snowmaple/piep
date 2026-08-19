@@ -790,12 +790,7 @@ async fn run_update_job(
 
     // 保存した作品をそのまま監視に載せるかは、ジョブを始めたときの依頼が持つ。
     // 再開したワーカーも同じ設定で動く。
-    let watch_saved = state
-        .db
-        .update_job_request(&job_id)
-        .ok()
-        .and_then(|request| request.watch_saved)
-        .unwrap_or(false);
+    let watch_saved = state.db.update_job_watch_saved(&job_id).unwrap_or(false);
     // 取得が制限されたときだけ間隔を広げ、うまくいけば元へ戻す。
     let mut backoff: u32 = 1;
     let mut rate_limit_retries: HashMap<i64, u32> = HashMap::new();

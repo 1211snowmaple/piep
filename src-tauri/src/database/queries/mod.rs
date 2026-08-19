@@ -4886,17 +4886,19 @@ impl Database {
 
     /// ジョブを始めたときの依頼内容。再開したワーカーも同じ設定で動けるように、
     /// 認証情報を除いたものを保存してある。
-    pub fn update_job_request(&self, job_id: &str) -> Result<StartUpdateJobRequest, String> {
+    /// このジョブが保存した作品を、そのまま監視に載せるか。
+    ///
+    /// 依頼のうち、走り出したあとも要るのはこれだけ。再開したワーカーも
+    /// 同じ設定で動く。
+    pub fn update_job_watch_saved(&self, job_id: &str) -> Result<bool, String> {
         let conn = self.read_conn()?;
-        let request_json: String = conn
-            .query_row(
-                "SELECT request_json FROM update_jobs WHERE id = ?1",
-                params![job_id],
-                |row| row.get(0),
-            )
-            .map_err(|e| format!("Update job not found: {}", e))?;
-        serde_json::from_str(&request_json)
-            .map_err(|e| format!("Failed to read update job request: {}", e))
+        conn.query_row(
+            "SELECT watch_saved FROM update_jobs WHERE id = ?1",
+            params![job_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|value| value != 0)
+        .map_err(|e| format!("Update job not found: {}", e))
     }
 
     /// 終わったジョブの履歴を整理する。
@@ -4963,12 +4965,12 @@ impl Database {
             .transaction()
             .map_err(|e| format!("Failed to start update job transaction: {}", e))?;
         let now = chrono::Utc::now().to_rfc3339();
-        let mut persisted_request = request.clone();
-        persisted_request.credentials = None;
-        let request_json = serde_json::to_string(&persisted_request).map_err(|e| e.to_string())?;
+        // 依頼そのものは持ち越さない。走行中に読むのは watch_saved だけで、
+        // 残りは items と scope/mode の列にもう写っている。認証情報を
+        // 抱え込まずに済むのも、必要な分だけを取り出す形の利点。
         tx.execute(
             "INSERT INTO update_jobs (
-                id, scope, mode, status, request_json, totals, processed,
+                id, scope, mode, status, watch_saved, totals, processed,
                 candidate_count, saved_count, error_count, active_label,
                 started_at, updated_at, finished_at
              ) VALUES (?1, ?2, ?3, 'queued', ?4, ?5, 0, 0, 0, 0, NULL, ?6, ?6, NULL)",
@@ -4976,7 +4978,7 @@ impl Database {
                 job_id,
                 request.scope,
                 request.mode,
-                request_json,
+                request.watch_saved.unwrap_or(false),
                 items.len() as i64,
                 now,
             ],
@@ -5294,8 +5296,13 @@ impl Database {
                 params![item.id],
             )
             .map_err(|e| format!("Failed to mark update item running: {}", e))?;
+            // 状態を 'running' へ戻せるのは、まだ誰も止めていないときだけ。
+            // 取り出しと同時に上書きすると、直前に届いたキャンセルや一時停止の
+            // 要求がここで消える - 記録が消えた要求は、二度と気付かれない。
             conn.execute(
-                "UPDATE update_jobs SET active_label = ?1, status = 'running', updated_at = ?2 WHERE id = ?3",
+                "UPDATE update_jobs
+                 SET active_label = ?1, status = 'running', updated_at = ?2
+                 WHERE id = ?3 AND status IN ('queued', 'running')",
                 params![item.title, chrono::Utc::now().to_rfc3339(), job_id],
             )
             .map_err(|e| format!("Failed to mark update job running: {}", e))?;
@@ -16693,7 +16700,6 @@ mod search_integration_tests {
             work_ids: None,
             target_ids: None,
             credentials: None,
-            concurrency: None,
             watch_saved: None,
             adhoc_targets: None,
         };
@@ -16716,7 +16722,6 @@ mod search_integration_tests {
         db.recover_update_jobs_on_startup().unwrap();
         let snapshot = db.update_job_snapshot("job-test").unwrap();
         assert_eq!(snapshot.status, "paused");
-
     }
 
     /// 履歴は放っておくと溜まり続ける。整理は「古くて終わったもの」だけに効き、
@@ -16731,7 +16736,6 @@ mod search_integration_tests {
             work_ids: None,
             target_ids: None,
             credentials: None,
-            concurrency: None,
             watch_saved: None,
             adhoc_targets: None,
         };
@@ -16766,7 +16770,6 @@ mod search_integration_tests {
         assert!(db.update_job_snapshot("job-old").is_err());
         assert!(db.update_job_snapshot("job-recent").is_ok());
         assert!(db.update_job_snapshot("job-live").is_ok());
-
     }
 
     #[test]
@@ -16779,7 +16782,6 @@ mod search_integration_tests {
             work_ids: None,
             target_ids: None,
             credentials: None,
-            concurrency: None,
             watch_saved: None,
             adhoc_targets: None,
         };
@@ -16850,7 +16852,6 @@ mod search_integration_tests {
             work_ids: None,
             target_ids: None,
             credentials: None,
-            concurrency: None,
             watch_saved: None,
             adhoc_targets: None,
         };
@@ -16864,7 +16865,6 @@ mod search_integration_tests {
         assert_eq!(db.clear_finished_update_jobs().unwrap(), 1);
         assert!(db.update_job_snapshot("job-done").is_err());
         assert!(db.update_job_snapshot("job-running").is_ok());
-
     }
 
     /// 見つけた候補は、ジョブが変わっても残る。
@@ -16929,7 +16929,6 @@ mod search_integration_tests {
             work_ids: None,
             target_ids: None,
             credentials: None,
-            concurrency: None,
             watch_saved: None,
             adhoc_targets: None,
         };
@@ -16976,7 +16975,6 @@ mod search_integration_tests {
         let snapshot = db.update_job_snapshot("job-progress").unwrap();
         assert_eq!(snapshot.totals, 3);
         assert_eq!(snapshot.processed, 0);
-
     }
 
     /// 監視対象の健康状態。「確認した」と「見つかった」は別で、失敗は積み上がる。
@@ -17029,7 +17027,6 @@ mod search_integration_tests {
             work_ids: None,
             target_ids: None,
             credentials: None,
-            concurrency: None,
             watch_saved: None,
             adhoc_targets: None,
         };
@@ -17076,7 +17073,6 @@ mod search_integration_tests {
         assert_eq!(changed, 1);
         let snapshot = db.update_job_snapshot("job-candidates").unwrap();
         assert_eq!(snapshot.candidates[0].status, "queued");
-
     }
 
     #[test]
@@ -17089,7 +17085,6 @@ mod search_integration_tests {
             work_ids: None,
             target_ids: None,
             credentials: None,
-            concurrency: None,
             watch_saved: None,
             adhoc_targets: None,
         };
