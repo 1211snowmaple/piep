@@ -27,6 +27,7 @@ import { useWorkspace } from "@/app/WorkspaceContext";
 import { WorkspaceNav, WorkspaceNavFooter } from "@/app/WorkspaceNav";
 import { isTauriRuntime } from "@/services/dbApi";
 import { isRebuildRunning, rebuildPercent, useSearchIndexProgress } from "@/features/search/searchIndexProgress";
+import { useAppUpdateNotice } from "@/app/useAppUpdateNotice";
 import { useUpdateScheduler } from "@/features/updates/useUpdateScheduler";
 import { APP_VERSION } from "@/lib/version";
 
@@ -260,6 +261,8 @@ export function AppFrame({ children }: { children: ReactNode }) {
   useEffect(() => { document.title = `${pageTitle} · piep`; }, [pageTitle]);
   // 自動の更新確認は、どの画面を開いていても回っていてほしい。
   useUpdateScheduler();
+  // こちらは piep 自身の版。見つけたら知らせるだけで、入れ替えは押させる。
+  useAppUpdateNotice(() => navigate("/settings?section=about"));
   useScrollRestoration(mainRef, location.historyIndex, location.pathname, location.navigationType);
   useHotkeys([
     ["mod+K", () => spotlight.open()],

@@ -83,6 +83,7 @@ import {
   Play,
   Plus,
   Quote,
+  CloudDownload,
   RefreshCw,
   RotateCcw,
   RotateCw,
@@ -191,6 +192,8 @@ export const Icons = {
   collect: Download,
   /** Check sources for new or changed works. */
   updates: RefreshCw,
+  /** A new version of piep itself. Not the works: this one replaces the app. */
+  appUpdate: CloudDownload,
   /** Running and finished background work. */
   activity: Activity,
   /** The operation history listing. */

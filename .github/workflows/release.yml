@@ -34,9 +34,18 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # アプリ内更新は署名された配布物しか受け付けない。鍵が無いビルドは
+          # latest.json を作れないので、更新の告知だけが止まる。
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          # 鍵にパスワードを付けていないので、この秘密は未登録でよい。未登録の
+          # 秘密は空文字として展開され、それがそのまま「パスワード無し」を意味する。
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "piep v__VERSION__"
           releaseBody: "Windows 向けインストーラーは下のアセットからダウンロードできます。"
           releaseDraft: true
           prerelease: false
+          # アプリが読みに来る更新目録。これがリリースの資材に無いと、
+          # インストール済みの piep からは新しい版が見えない。
+          includeUpdaterJson: true

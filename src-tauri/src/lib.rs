@@ -98,6 +98,10 @@ pub fn run() -> tauri::Result<()> {
         .plugin(tauri_plugin_dialog::init())
         // 自動確認は画面を開いていないときにも走る。結果は OS の通知で届ける。
         .plugin(tauri_plugin_notification::init())
+        // アプリ本体の更新。作品の更新確認とは別物で、こちらは piep 自身の版を
+        // 上げる。入れ替えたあと再起動するために process も要る。
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .setup(|app| {
             // DB / ストレージの初期化
             let app_data = app

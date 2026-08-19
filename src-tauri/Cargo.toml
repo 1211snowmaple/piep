@@ -58,6 +58,10 @@ rayon = "1.10"
 hnsw_rs = "0.3.4"
 parking_lot = "0.12.5"
 tauri-plugin-notification = "2.3.3"
+# アプリ本体の更新。updater は配布物への署名が前提なので、公開鍵は
+# tauri.conf.json、秘密鍵はリリース時の環境変数に置く。
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
 
 [target.'cfg(windows)'.dependencies]
 webview2-com = "0.38.2"

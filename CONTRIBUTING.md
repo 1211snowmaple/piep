@@ -99,6 +99,45 @@ npm run build && CI=1 npx playwright test
 
 1.0.0 は、スキーマと画面が数リリース跨いで安定してから。
 
+## アプリ内更新の署名鍵
+
+インストール済みの piep は、起動時に GitHub の最新リリースへ置かれた
+`latest.json` を見て新しい版を知る。Tauri の updater は**署名された配布物しか
+受け付けない**ので、鍵が無ければこの経路は動かない。
+
+鍵は生成済みで、公開鍵は `src-tauri/tauri.conf.json` の
+`plugins.updater.pubkey` に入っている。
+
+- 秘密鍵: `C:\Users\hiron\.tauri\piep-updater.key`（リポジトリ外。**パスワードは設定していない**ので、
+  ファイルそのものが鍵である）
+- 公開鍵: 同じ場所の `.key.pub`。中身は tauri.conf.json と同じもの
+
+秘密鍵は Actions の秘密 `TAURI_SIGNING_PRIVATE_KEY` として登録済み。入れ直す
+ときは:
+
+```bash
+gh secret set TAURI_SIGNING_PRIVATE_KEY < ~/.tauri/piep-updater.key
+```
+
+`TAURI_SIGNING_PRIVATE_KEY_PASSWORD` は登録しない。未登録の秘密は空文字として
+展開され、パスワード無しの鍵はそれで通る。あとからパスワード付きの鍵にするなら、
+そのときに登録する。
+
+`release.yml` はこの秘密を読み、`latest.json` をリリースの資材として上げる。
+リリースは下書きで作られるので、**公開するまでアプリからは見えない**。更新を
+配るときは下書きを publish するところまでを1回のリリースとする。
+
+鍵を作り直すとき（パスワードを付けたくなった、漏らした）:
+
+```bash
+npx tauri signer generate -f -w ~/.tauri/piep-updater.key
+```
+
+`npm run tauri signer generate` ではなく `npx` を使う。`npm run` は `-w` を
+自分の `--workspace` として食べてしまう。作り直したら公開鍵の差し替えと秘密の
+登録し直しが要る。**すでに配ったインストールは、新しい鍵で署名した更新を
+受け取れない。**
+
 ## リリースノート
 
 **読む人は、使う人であって作った人ではない。** 何が使えるようになったかと、操作を

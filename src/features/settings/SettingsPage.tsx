@@ -59,6 +59,7 @@ import { cancelSearchRebuildIndex, startSearchRebuildIndex, type SearchRebuildPr
 import { store } from "@/store";
 import { requestOperationCancel, startOperation, type OperationController } from "@/features/jobs/operationJobs";
 import { APP_VERSION } from "@/lib/version";
+import { AppUpdateCard } from "@/features/settings/AppUpdateCard";
 
 type Section = "connections" | "library" | "search" | "diagnostics" | "appearance" | "about";
 const SECTIONS: Section[] = ["connections", "library", "search", "diagnostics", "appearance", "about"];
@@ -264,7 +265,7 @@ export default function SettingsPage() {
           {section === "search" && (index.isLoading ? <LoadingState label="検索インデックスを確認しています" /> : index.error ? <ErrorState error={index.error} retry={() => index.refetch()} /> : <SearchSection status={index.data} rebuild={rebuild} runtime={runtime} rebuilding={rebuildMutation.isPending || rebuild?.status === "running"} start={(includeSemantic) => rebuildMutation.mutate(includeSemantic)} cancel={() => rebuildOperationRef.current ? requestOperationCancel(rebuildOperationRef.current.id) : rebuild ? cancelSearchRebuildIndex(rebuild.jobId) : undefined} />)}
           {section === "diagnostics" && <DiagnosticsPage embedded />}
           {section === "appearance" && <AppearanceSection colorScheme={colorScheme} setColorScheme={setColorScheme} />}
-          {section === "about" && <AboutSection />}
+          {section === "about" && <AboutSection runtime={runtime} />}
         </Grid.Col>
       </Grid>
       <RestoreWizard
@@ -399,4 +400,4 @@ function AppearanceSection({ colorScheme, setColorScheme }: { colorScheme: strin
 function Shortcut({ keys, label }: { keys: string; label: string }) { return <Group justify="space-between"><Text size="sm">{label}</Text><Code>{keys}</Code></Group>; }
 
 
-function AboutSection() { return <Stack gap="lg"><SectionIntro title="piepについて" description="クリエイティブ作品を自分の手元で長く楽しむためのデスクトップライブラリ。" /><Card p="xl" className="about-card"><Group><PiepLockup size={34} /><Text c="dimmed">Version {APP_VERSION} · Tauri 2</Text></Group><Divider my="lg" /><Text size="sm" c="dimmed">保存元のデータを尊重しながら、検索、読書、ローカル編集、更新監視、EPUB書き出しを一つのワークスペースにまとめます。</Text></Card><Title order={3}>プロバイダー拡張</Title><Grid>{Object.values(providers).map((provider) => <Grid.Col key={provider.id} span={{ base: 12, sm: 6 }}><Card p="md"><Group><Avatar color="gray" style={{ color: provider.color }}>{provider.icon}</Avatar><Box flex={1}><Group gap="xs"><Text fw={700}>{provider.label}</Text><Badge size="xs" color={provider.capability === "available" ? "green" : "gray"}>{provider.capability === "available" ? "対応" : "計画中"}</Badge></Group><Text size="xs" c="dimmed">{provider.description}</Text></Box></Group></Card></Grid.Col>)}</Grid><Alert color="gray" icon={<Icons.info size={IconSize.nav} />}>piepは各サービスの公式アプリではありません。各サービスの利用規約と作品の権利を尊重して利用してください。</Alert></Stack>; }
+function AboutSection({ runtime }: { runtime: boolean }) { return <Stack gap="lg"><SectionIntro title="piepについて" description="クリエイティブ作品を自分の手元で長く楽しむためのデスクトップライブラリ。" /><Card p="xl" className="about-card"><Group><PiepLockup size={34} /><Text c="dimmed">Version {APP_VERSION} · Tauri 2</Text></Group><Divider my="lg" /><Text size="sm" c="dimmed">保存元のデータを尊重しながら、検索、読書、ローカル編集、更新監視、EPUB書き出しを一つのワークスペースにまとめます。</Text></Card><AppUpdateCard runtime={runtime} /><Title order={3}>プロバイダー拡張</Title><Grid>{Object.values(providers).map((provider) => <Grid.Col key={provider.id} span={{ base: 12, sm: 6 }}><Card p="md"><Group><Avatar color="gray" style={{ color: provider.color }}>{provider.icon}</Avatar><Box flex={1}><Group gap="xs"><Text fw={700}>{provider.label}</Text><Badge size="xs" color={provider.capability === "available" ? "green" : "gray"}>{provider.capability === "available" ? "対応" : "計画中"}</Badge></Group><Text size="xs" c="dimmed">{provider.description}</Text></Box></Group></Card></Grid.Col>)}</Grid><Alert color="gray" icon={<Icons.info size={IconSize.nav} />}>piepは各サービスの公式アプリではありません。各サービスの利用規約と作品の権利を尊重して利用してください。</Alert></Stack>; }

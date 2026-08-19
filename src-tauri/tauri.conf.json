@@ -34,8 +34,17 @@
       }
     }
   },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/1211snowmaple/piep/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDc3N0U3OUI0OUJBQzY1QkYKUldTL1pheWJ0SGwrZHhMa2FaNlc2KzYwZmYyK1BoU01iS2paUzBxTExmMzFDVWRQZkxSVTRuemQK"
+    }
+  },
   "bundle": {
     "active": true,
+    "createUpdaterArtifacts": true,
     "targets": "all",
     "icon": [
       "icons/32x32.png",
