@@ -1,7 +1,8 @@
 import { Avatar, Badge, Box, Card, Group, Stack, Text, UnstyledButton } from "@mantine/core";
 import { Icons, IconSize } from "@/lib/icons";
+import { NoImageMark } from "@/components/NoImageMark";
 import { useAppNavigate } from "@/app/router";
-import { ProviderMark } from "@/lib/providers";
+import { getProvider, ProviderMark } from "@/lib/providers";
 import { formatDate, formatNumber } from "@/lib/format";
 import { getAssetUrl } from "@/services/dbApi";
 import type { EntityFacet } from "@/types/library";
@@ -17,6 +18,12 @@ export function EntityCard({ entity, kind, selectionMode = false, selected = fal
   const navigate = useAppNavigate();
   const route = kind === "person" ? "people" : "series";
   const icon = getAssetUrl(entity.iconPath ?? entity.coverPath);
+  // 保存元が画像を持ちうるのに、この人は置いていない。「まだ無い」ではなく
+  // 「置いていない」なので、保存元と同じく一枚の絵で示す。
+  //
+  // 人物だけ。あの一枚はプロフィール画像の代わりであって、縦長のシリーズ表紙枠
+  // に敷くと文字が切れる。シリーズは今までどおり記号のまま。
+  const noImage = kind === "person" && !icon && getProvider(entity.source).hasProfileImages;
   const banner = getAssetUrl(entity.bannerPath);
   const open = () => navigate(`/${route}/${encodeURIComponent(entity.source)}/${encodeURIComponent(entity.sourceKey)}`);
   // Selection mode is modal, as it is on works: the whole card picks instead of
@@ -51,7 +58,9 @@ export function EntityCard({ entity, kind, selectionMode = false, selected = fal
         <Box className="entity-card__wash" />
       </Box>
       <Group wrap="nowrap" align="center" p="md" className="entity-card__content">
-        {kind === "person" ? <Avatar src={icon} color="piep" size={64} radius="xl" imageProps={{ loading: "lazy", decoding: "async" }}><Icons.person size={IconSize.feature} /></Avatar> : <Box className="entity-card__series-cover">{icon ? <img src={icon} alt="" loading="lazy" decoding="async" /> : <Icons.series size={IconSize.feature} />}</Box>}
+        {kind === "person"
+          ? <Avatar src={icon} color="piep" size={64} radius="xl" className="entity-avatar" imageProps={{ loading: "lazy", decoding: "async" }}>{noImage ? <NoImageMark /> : <Icons.person size={IconSize.feature} />}</Avatar>
+          : <Box className="entity-card__series-cover">{icon ? <img src={icon} alt="" loading="lazy" decoding="async" /> : <Icons.series size={IconSize.feature} />}</Box>}
         <Stack gap={5} flex={1} miw={0}>
           <Text fw={700} className="line-clamp-2" lh={1.35}>{entity.displayName}</Text>
           <Text size="sm" c="dimmed" className="line-clamp-2">{entity.description || entity.sampleTitle || (kind === "person" ? "保存作品の作者" : "保存作品のシリーズ")}</Text>

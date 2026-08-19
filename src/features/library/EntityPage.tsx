@@ -28,6 +28,7 @@ import {
 import { notifications } from "@mantine/notifications";
 import { keepPreviousData, useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Icons, IconSize } from "@/lib/icons";
+import { NoImageMark } from "@/components/NoImageMark";
 import { Note } from "@/components/Note";
 import { useAppNavigate, useAppSearchParams, useReturnTo, useRouteParams } from "@/app/router";
 import { EmptyState, ErrorState, LoadingState } from "@/components/AsyncState";
@@ -39,7 +40,7 @@ import { scrollRegionIntoView } from "@/lib/scroll";
 import { VirtualizedWorkList } from "@/features/library/VirtualizedWorkList";
 import { VirtualizedEntityGrid } from "@/features/library/VirtualizedEntityGrid";
 import { boundedInfiniteListOptions, INFINITE_LIST_MAX_PAGES } from "@/lib/queryLimits";
-import { externalBrand, ExternalServiceMark, ProviderMark, sourceUrl } from "@/lib/providers";
+import { externalBrand, ExternalServiceMark, getProvider, ProviderMark, sourceUrl } from "@/lib/providers";
 import { errorMessage, formatBytes, formatDate, formatNumber } from "@/lib/format";
 import { runSingleCheck } from "@/features/updates/startSingleCheck";
 import { demoFacets, searchDemoWorks } from "@/mocks/demoData";
@@ -351,6 +352,10 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
   const profileStats = profileData.stats as Record<string, number> | undefined;
   const coverPath = entry.coverPath;
   const avatarPath = kind === "person" ? (entry as PersonEntry).iconPath : coverPath;
+  // 保存元が画像を持ちうるのに置かれていない場合は、保存元と同じく一枚の絵で
+  // 示す。概念そのものが無い保存元は、今までどおり記号のまま。人物に限るのは、
+  // あの一枚がプロフィール画像の代わりであって表紙の代わりではないからである。
+  const noImage = kind === "person" && !avatarPath && getProvider(source).hasProfileImages;
   const sourceProfileUrl = sourceUrl(source, key, kind);
   const profileLinks = kind === "person" ? profileLinkList(parseLinks((entry as PersonEntry).linksJson), sourceProfileUrl) : [];
   // 「開く」には行き先が2つある。アプリ内なら内蔵ブラウザで開き、そのまま
@@ -385,7 +390,7 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
           <Group justify="space-between" align="flex-start" wrap="nowrap" className="entity-hero__primary">
             <Group align="flex-end" wrap="nowrap" miw={0}>
               {kind === "person"
-                ? <Avatar className="entity-hero__avatar" src={getAssetUrl(avatarPath)} size={112} radius="xl" color="piep"><Icons.person size={IconSize.avatar} /></Avatar>
+                ? <Avatar className="entity-hero__avatar" src={getAssetUrl(avatarPath)} size={112} radius="xl" color="piep">{noImage ? <NoImageMark /> : <Icons.person size={IconSize.avatar} />}</Avatar>
                 : <Box className="entity-hero__series-cover">{avatarPath ? <Image src={getAssetUrl(avatarPath)} alt={`${displayName}の表紙`} fit="contain" /> : <Icons.series size={IconSize.avatar} />}</Box>}
               <Stack gap={7} mb={5} miw={0} align="flex-start"><ProviderMark provider={source} /><Title order={1} className="line-clamp-2">{displayName}</Title><Group gap="xs"><Badge variant="light" color="gray">{formatNumber(entry.workCount)}作品</Badge><Text size="xs" c="dimmed">更新 {formatDate(entry.updatedAt)}</Text></Group></Stack>
             </Group>

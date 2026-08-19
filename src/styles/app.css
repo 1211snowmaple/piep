@@ -1008,6 +1008,14 @@ select {
 .entity-card__series-cover { display: grid; width: 72px; height: 98px; flex: 0 0 72px; place-items: center; overflow: hidden; border: 1px solid light-dark(rgb(255 255 255 / 72%), rgb(255 255 255 / 14%)); border-radius: 7px; color: var(--mantine-color-dimmed); background: light-dark(#f5f1ec, #202832); box-shadow: 0 8px 20px rgb(28 34 43 / 16%); }
 .entity-card__series-cover img { width: 100%; height: 100%; object-fit: cover; }
 
+/* 保存元が出す「画像なし」の一枚そのもの。枠いっぱいに敷くので、丸くするのも
+   角を落とすのも、置かれた側の器が決める。明暗のテーマで色を変えないのは、
+   保存元でもこの一枚のまま出ているからである。 */
+.no-image-mark { display: block; width: 100%; height: 100%; object-fit: cover; }
+/* Mantine の Avatar は中身を中央へ寄せるために余白を持つ。絵は器を満たす。 */
+.entity-avatar .mantine-Avatar-placeholder,
+.entity-hero__avatar .mantine-Avatar-placeholder { padding: 0; }
+
 .selection-bar {
   position: fixed;
   z-index: 200;

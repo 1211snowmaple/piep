@@ -13,6 +13,14 @@ export interface ProviderDefinition {
   homeUrl: string | null;
   description: string;
   capability: "available" | "planned";
+  /**
+   * この保存元に「プロフィール画像」という概念があるか。
+   *
+   * ある場合、置いていない人には保存元自身が「画像なし」の一枚を出す。piep も
+   * それに倣う。概念そのものが無い保存元では、無いものを「無い画像」として
+   * 見せても嘘になるので、人型やシリーズの記号のままにする。
+   */
+  hasProfileImages: boolean;
   icon: ReactNode;
 }
 
@@ -73,6 +81,7 @@ export const providers: Record<string, ProviderDefinition> = {
     homeUrl: "https://www.pixiv.net/",
     description: "小説・シリーズ・作者ページ",
     capability: "available",
+    hasProfileImages: true,
     icon: pixivGlyph,
   },
   fanbox: {
@@ -84,6 +93,7 @@ export const providers: Record<string, ProviderDefinition> = {
     homeUrl: "https://www.fanbox.cc/",
     description: "投稿・クリエイターページ",
     capability: "available",
+    hasProfileImages: true,
     icon: fanboxGlyph,
   },
 };
@@ -98,6 +108,8 @@ export function getProvider(id: string): ProviderDefinition {
     homeUrl: null,
     description: "外部ソース",
     capability: "planned",
+    // 知らない保存元に何があるかは分からない。無い前提で扱う。
+    hasProfileImages: false,
     icon: <Icons.link size={IconSize.action} />,
   };
 }
