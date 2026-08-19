@@ -50,7 +50,7 @@ test.beforeEach(async ({ page }) => {
 test("going back returns to the row the work was opened from", async ({ page }, testInfo) => {
   onlyOnce(testInfo.project.name);
   await page.goto("/#/library");
-  await expect(page.getByRole("textbox", { name: "ライブラリを検索" })).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByRole("textbox", { name: "ライブラリを検索" })).toBeVisible();
   await page.waitForTimeout(400);
 
   await scrollMain(page, 500);
@@ -74,7 +74,7 @@ test("going back returns to the row the work was opened from", async ({ page }, 
 test("the history controls say whether they lead anywhere", async ({ page }, testInfo) => {
   onlyOnce(testInfo.project.name);
   await page.goto("/#/library");
-  await expect(page.getByRole("textbox", { name: "ライブラリを検索" })).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByRole("textbox", { name: "ライブラリを検索" })).toBeVisible();
 
   // Nothing has been visited yet. A desktop window has no browser chrome, so a
   // lit control that does nothing is indistinguishable from a hung app.
@@ -94,7 +94,7 @@ test("the history controls say whether they lead anywhere", async ({ page }, tes
 test("choosing a tab does not move the page", async ({ page }, testInfo) => {
   onlyOnce(testInfo.project.name);
   await page.goto("/#/works/101?tab=content");
-  await expect(page.getByRole("tab", { name: "本文" })).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByRole("tab", { name: "本文" })).toBeVisible();
   await page.waitForTimeout(400);
 
   await scrollMain(page, 300);
@@ -112,7 +112,7 @@ test("choosing a tab does not move the page", async ({ page }, testInfo) => {
 test("the reader returns to the detail screen instead of opening a second one", async ({ page }, testInfo) => {
   onlyOnce(testInfo.project.name);
   await page.goto("/#/works/101?tab=assets");
-  await expect(page.getByRole("tab", { name: /アセット/ })).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByRole("tab", { name: /アセット/ })).toBeVisible();
 
   await page.getByRole("button", { name: "読む" }).click();
   await expect(page).toHaveURL(/#\/reader\/101/);
@@ -127,7 +127,7 @@ test("the reader returns to the detail screen instead of opening a second one", 
 test("choosing a library tab does not move the page either", async ({ page }, testInfo) => {
   onlyOnce(testInfo.project.name);
   await page.goto("/#/library");
-  await expect(page.getByRole("textbox", { name: "ライブラリを検索" })).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByRole("textbox", { name: "ライブラリを検索" })).toBeVisible();
   await page.waitForTimeout(300);
 
   await scrollMain(page, 400);
@@ -140,7 +140,7 @@ test("choosing a library tab does not move the page either", async ({ page }, te
 test("an author screen opens at its profile, not at its works", async ({ page }, testInfo) => {
   onlyOnce(testInfo.project.name);
   await page.goto("/#/library?tab=people");
-  await expect(page.getByRole("textbox", { name: "ライブラリを検索" })).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByRole("textbox", { name: "ライブラリを検索" })).toBeVisible();
   await page.waitForTimeout(300);
 
   await page.getByRole("link", { name: /を開く$/ }).first().click();
@@ -154,7 +154,7 @@ test("an author screen opens at its profile, not at its works", async ({ page },
 test("the filter drawer keeps its apply button on screen", async ({ page }, testInfo) => {
   onlyOnce(testInfo.project.name);
   await page.goto("/#/library");
-  await expect(page.getByRole("textbox", { name: "ライブラリを検索" })).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByRole("textbox", { name: "ライブラリを検索" })).toBeVisible();
 
   await page.getByRole("button", { name: "絞り込み" }).click();
   const apply = page.getByRole("button", { name: "適用" });
@@ -187,7 +187,7 @@ test("the page you were on survives opening something from it", async ({ page },
     localStorage.setItem("piep.page-size", JSON.stringify(5));
   });
   await page.goto("/#/library?tab=people");
-  await expect(page.getByRole("textbox", { name: "ライブラリを検索" })).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByRole("textbox", { name: "ライブラリを検索" })).toBeVisible();
 
   // Authors and series are counted, so the pager can name the last page rather
   // than growing one number at a time.
@@ -209,7 +209,7 @@ test("the page you were on survives opening something from it", async ({ page },
 test("the toolbar controls sit on one line, not stepped", async ({ page }, testInfo) => {
   onlyOnce(testInfo.project.name);
   await page.goto("/#/library");
-  await expect(page.getByRole("textbox", { name: "ライブラリを検索" })).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByRole("textbox", { name: "ライブラリを検索" })).toBeVisible();
 
   // The search field is taller than every control beside it, so aligning tops
   // left the whole row after it sitting a few pixels high against it.

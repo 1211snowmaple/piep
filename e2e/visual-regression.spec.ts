@@ -6,9 +6,7 @@ test.beforeEach(async ({ page }) => {
     localStorage.setItem("piep.library-view", "gallery");
   });
   await page.goto("/#/library");
-  await expect(page.getByRole("textbox", { name: "ライブラリを検索" })).toBeVisible({
-    timeout: 15_000,
-  });
+  await expect(page.getByRole("textbox", { name: "ライブラリを検索" })).toBeVisible();
   await page.addStyleTag({ content: "*,*::before,*::after{animation:none!important;transition:none!important;caret-color:transparent!important}" });
   await page.evaluate(async () => { await document.fonts.ready; });
 });

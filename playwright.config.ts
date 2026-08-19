@@ -25,7 +25,11 @@ export default defineConfig({
   timeout: process.env.CI ? 90_000 : 30_000,
   reporter: process.env.CI ? [["github"], ["html", { outputFolder: "playwright-report", open: "never" }]] : "list",
   expect: {
-    timeout: 15_000,
+    // The app splits its routes, so opening one waits on a chunk. On the CI
+    // runner the static server shares two cores with the browsers rendering at
+    // 200dpi, and that request has been seen to take longer than the fifteen
+    // seconds a developer machine never needs.
+    timeout: process.env.CI ? 45_000 : 15_000,
     toHaveScreenshot: {
       animations: "disabled",
       caret: "hide",
