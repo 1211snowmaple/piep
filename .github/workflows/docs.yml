@@ -62,6 +62,10 @@ jobs:
             src-tauri
             tools/ipc-extract
       - uses: actions/configure-pages@v6
+      # アプリの依存も入れる。TypeDoc はアプリのソースを型検査するので、
+      # @tauri-apps/api や @mantine/core が解決できないと 966 件のエラーで
+      # 落ちる。contract ジョブは構文を読むだけなのでこれを必要としない。
+      - run: npm ci
       - run: npm ci
         working-directory: docs-tools
       - run: npm run docs:build
