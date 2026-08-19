@@ -11,4 +11,12 @@ describe("errorMessage", () => {
     expect(errorMessage('{"message":"接続できません"}')).toBe("接続できません");
     expect(errorMessage("x".repeat(500))).toHaveLength(280);
   });
+
+  // エラーを言葉にする側が投げると、扱えたはずの失敗が捕まらない失敗になる。
+  // JSON.stringify が undefined を返す型が、そのまま入ってくることがある。
+  it("never throws on values JSON.stringify cannot describe", () => {
+    for (const value of [undefined, null, () => undefined, Symbol("x")]) {
+      expect(errorMessage(value)).toBe("不明なエラー");
+    }
+  });
 });

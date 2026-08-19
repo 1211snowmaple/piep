@@ -85,8 +85,12 @@ export function contentTypeLabel(value: string): string {
 }
 
 export function errorMessage(error: unknown): string {
+  // JSON.stringify は undefined を返しうる（undefined・関数・Symbol）。
+  // 受け取ったものをそのまま .trim() すると、エラーを言葉にする途中で
+  // 別のエラーを投げることになる - 一番やってはいけない場所で。
+  if (error === null || error === undefined) return "不明なエラー";
   const raw = error instanceof Error ? error.message : typeof error === "string" ? error : (() => {
-    try { return JSON.stringify(error); } catch { return "不明なエラー"; }
+    try { return JSON.stringify(error) ?? "不明なエラー"; } catch { return "不明なエラー"; }
   })();
   let message = raw.trim();
   try {
