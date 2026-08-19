@@ -31,7 +31,9 @@ export default defineConfig(async () => ({
       : undefined,
     watch: {
       // 3. tell Vite to ignore watching `src-tauri`
-      ignored: ["**/src-tauri/**"],
+      //    Rust のビルド成果物 (target/) は監視すると Windows で
+      //    ロック中の .dll を掴んで EBUSY で落ちるため一律で除外する
+      ignored: ["**/src-tauri/**", "**/target/**", "**/tools/**"],
     },
   },
 }));
