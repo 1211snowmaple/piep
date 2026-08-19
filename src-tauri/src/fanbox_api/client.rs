@@ -10,6 +10,14 @@ const FANBOX_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const FANBOX_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_FANBOX_JSON_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_INITIAL_RESPONSE_CAPACITY: usize = 64 * 1024;
+/// 一覧を辿るときに、ページとページの間で空ける時間。
+///
+/// 長く続けている creator の履歴は数十ページになる。続けざまに取りに行けば
+/// 断られ、断られた時点で一覧そのものが手に入らなくなる。更新ジョブの
+/// 800ms と揃えてある。
+const FANBOX_PAGE_DELAY: Duration = Duration::from_millis(800);
+/// 断られたときに、同じページを何回までやり直すか。
+const FANBOX_PAGE_RETRIES: u32 = 3;
 
 fn build_api_client(
     connect_timeout: Duration,
@@ -98,6 +106,31 @@ impl FanboxAPI {
         headers.insert(USER_AGENT, ua_val);
 
         Ok(headers)
+    }
+
+    /// 一覧のページを、断られることを前提に取りに行く。
+    ///
+    /// 取得制限は「今は無理」であって「もう無い」ではない。`?` で即座に
+    /// 諦めていたころは、一度断られただけでその creator の一覧が丸ごと
+    /// 手に入らず、新作の取りこぼしになっていた。
+    async fn api_get_paged<T: DeserializeOwned>(&self, url: &str) -> Result<T, FanboxError> {
+        let mut backoff = FANBOX_PAGE_DELAY;
+        for attempt in 0..=FANBOX_PAGE_RETRIES {
+            match self.api_get::<T>(url).await {
+                Err(FanboxError::RateLimited { body }) if attempt < FANBOX_PAGE_RETRIES => {
+                    backoff *= 2;
+                    log::warn!(
+                        "FANBOX rate limited while paging ({}); retrying in {:?}: {}",
+                        url,
+                        backoff,
+                        body
+                    );
+                    tokio::time::sleep(backoff).await;
+                }
+                other => return other,
+            }
+        }
+        unreachable!("the loop returns on its last attempt")
     }
 
     /// 低レベル GET リクエストの共通ハンドラ
@@ -270,7 +303,7 @@ impl FanboxAPI {
             "https://api.fanbox.cc/post.paginateCreator?creatorId={}",
             creator_id
         );
-        let resp: FanboxPaginatedCreatorPosts = self.api_get(&url).await?;
+        let resp: FanboxPaginatedCreatorPosts = self.api_get_paged(&url).await?;
 
         if let Some(arr) = resp.body.as_array() {
             if !arr.is_empty() {
@@ -281,12 +314,17 @@ impl FanboxAPI {
                             "FANBOX history exceeded the 500-page safety limit".to_string(),
                         ));
                     }
-                    for val in arr {
+                    for (index, val) in arr.iter().enumerate() {
                         if let Some(page_url) = val.as_str() {
+                            // 2ページ目からは間を空ける。相手にとっては、
+                            // 一覧を辿る動きも普通の連続アクセスでしかない。
+                            if index > 0 {
+                                tokio::time::sleep(FANBOX_PAGE_DELAY).await;
+                            }
                             log::info!("Fetching page: {}", page_url);
 
                             // 🛠️ どちらの構造が来ても FlexibleResponse で安全にパース！
-                            let flexible_resp: FlexibleResponse = self.api_get(page_url).await?;
+                            let flexible_resp: FlexibleResponse = self.api_get_paged(page_url).await?;
 
                             // 中身を取り出して一本の配列にまとめる
                             let posts = match flexible_resp.body {
@@ -328,7 +366,7 @@ impl FanboxAPI {
         );
 
         // 🛠️ ここでも FlexibleResponse で安全にパースしてブレを完全に吸収！
-        let flexible_resp: FlexibleResponse = self.api_get(&fallback_url).await?;
+        let flexible_resp: FlexibleResponse = self.api_get_paged(&fallback_url).await?;
         let posts = match flexible_resp.body {
             FlexiblePostList::Object(list) => list.items,
             FlexiblePostList::Array(posts) => posts,

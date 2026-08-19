@@ -39,6 +39,7 @@ import { refreshEntityProfilesForEntries, type UpdateDownloadEntry } from "@/fea
 import { errorMessage } from "@/lib/format";
 import { getProvider, ProviderMark } from "@/lib/providers";
 import { registerUnsavedGuard } from "@/lib/unsavedGuard";
+import { createSourcePacer, isRateLimited, MAX_RATE_LIMIT_RETRIES } from "@/lib/sourcePacing";
 import { useEmbeddedBrowserOverlay } from "@/features/browser/useEmbeddedBrowserOverlay";
 import {
   closeEmbeddedBrowser,
@@ -105,6 +106,10 @@ export default function SavePage() {
   const addressFocusedRef = useRef(false);
   const acceleratorHandlerRef = useRef<(payload: BrowserAcceleratorEvent) => void>(() => undefined);
   const saveOperationRef = useRef<OperationController | null>(null);
+  // 保存中かどうかは、描画の外からも即座に読めなければならない - 終了ガードと
+  // 再入の防止が、どちらも state の反映を待てないため。
+  const savingRef = useRef(false);
+  const executeRef = useRef<() => void>(() => undefined);
 
   useEmbeddedBrowserOverlay(browserViewportRef, runtime && !detached);
 
@@ -484,32 +489,54 @@ export default function SavePage() {
       const pixivToken = await store.get<string>("pixiv_refresh_token") || "";
       const fanboxCookie = await store.get<string>("fanbox_session_id") || "";
       const fanboxUserAgent = await store.get<string>("fanbox_user_agent") || "Mozilla/5.0";
+      // 取得元は続けざまに叩けば断ってくる。1件ずつ間を空け、断られたら
+      // 引き下がって同じ項目をやり直す。ここに間隔が無かったころは、89件
+      // 選ぶと途中から全部が取得制限で落ちていた。
+      const pacer = createSourcePacer();
       for (let index = 0; index < selected.length; index += 1) {
         if (operation.isCancelRequested()) break;
         const item = selected[index];
         setProgress({ current: index + 1, total: selected.length, text: item.title });
         operation.progress(index, selected.length, `「${item.title}」を処理しています`);
         setItems((rows) => rows.map((row) => row.id === item.id ? { ...row, status: "downloading" } : row));
-        try {
-          const itemSource = downloadType.startsWith("pixiv") ? "pixiv" : "fanbox";
-          const existing = await getDownloadBySource<DownloadEntry>(itemSource, item.id);
-          if (existing && !existing.watchUpdates) { skipped += 1; operation.log(`「${item.title}」は保存済みのためスキップしました`, "info"); setItems((rows) => rows.map((row) => row.id === item.id ? { ...row, status: "skipped" } : row)); continue; }
-          if (itemSource === "pixiv") {
-            const data = await fetchPixivNovel<PixivNovel>(item.id, pixivToken);
-            const metadata = normalizePixivSaveMetadata(data, item.title, item.subtitle);
-            savedEntries.push(await downloadAndSave<UpdateDownloadEntry>({ data, source: "pixiv", sourceId: item.id, ...metadata, cookie: null, userAgent: null }));
-          } else {
-            const data = normalizeFanboxPostPayload<FanboxPost>(await fetchFanboxPost<unknown>(item.id, fanboxCookie, fanboxUserAgent));
-            const metadata = normalizeFanboxSaveMetadata(data, item.title, item.subtitle);
-            savedEntries.push(await downloadAndSave<UpdateDownloadEntry>({ data, source: "fanbox", sourceId: item.id, ...metadata, cookie: fanboxCookie, userAgent: fanboxUserAgent }));
+        let attempt = 0;
+        for (;;) {
+          try {
+            const itemSource = downloadType.startsWith("pixiv") ? "pixiv" : "fanbox";
+            const existing = await getDownloadBySource<DownloadEntry>(itemSource, item.id);
+            if (existing && !existing.watchUpdates) { skipped += 1; operation.log(`「${item.title}」は保存済みのためスキップしました`, "info"); setItems((rows) => rows.map((row) => row.id === item.id ? { ...row, status: "skipped" } : row)); break; }
+            if (itemSource === "pixiv") {
+              const data = await fetchPixivNovel<PixivNovel>(item.id, pixivToken);
+              const metadata = normalizePixivSaveMetadata(data, item.title, item.subtitle);
+              savedEntries.push(await downloadAndSave<UpdateDownloadEntry>({ data, source: "pixiv", sourceId: item.id, ...metadata, cookie: null, userAgent: null }));
+            } else {
+              const data = normalizeFanboxPostPayload<FanboxPost>(await fetchFanboxPost<unknown>(item.id, fanboxCookie, fanboxUserAgent));
+              const metadata = normalizeFanboxSaveMetadata(data, item.title, item.subtitle);
+              savedEntries.push(await downloadAndSave<UpdateDownloadEntry>({ data, source: "fanbox", sourceId: item.id, ...metadata, cookie: fanboxCookie, userAgent: fanboxUserAgent }));
+            }
+            saved += 1; operation.progress(index + 1, selected.length, `「${item.title}」を保存しました`); setItems((rows) => rows.map((row) => row.id === item.id ? { ...row, status: "success" } : row));
+            // 通ったぶんだけ元の速さへ戻す。制限が解けたあとも遅いままにしない。
+            pacer.relax();
+            break;
+          } catch (error) {
+            // 「今は無理」と言われただけなら、間を空けて同じ項目をやり直す。
+            if (isRateLimited(error) && attempt < MAX_RATE_LIMIT_RETRIES && !operation.isCancelRequested()) {
+              attempt += 1;
+              const waited = Math.round(pacer.currentDelayMs() * 2 / 1000);
+              operation.log(`「${item.title}」: 取得が制限されています。${waited}秒あけてやり直します`, "warn");
+              setProgress({ current: index + 1, total: selected.length, text: `取得制限のため待機中… ${item.title}` });
+              await pacer.backOff();
+              continue;
+            }
+            const message = errorMessage(error);
+            if (!firstError) firstError = message;
+            operation.log(`「${item.title}」: ${message}`, "error");
+            failed += 1; setItems((rows) => rows.map((row) => row.id === item.id ? { ...row, status: "failed", error: message } : row));
+            break;
           }
-          saved += 1; operation.progress(index + 1, selected.length, `「${item.title}」を保存しました`); setItems((rows) => rows.map((row) => row.id === item.id ? { ...row, status: "success" } : row));
-        } catch (error) {
-          const message = errorMessage(error);
-          if (!firstError) firstError = message;
-          operation.log(`「${item.title}」: ${message}`, "error");
-          failed += 1; setItems((rows) => rows.map((row) => row.id === item.id ? { ...row, status: "failed", error: message } : row));
         }
+        // 最後の1件のあとまで待つ必要はない。
+        if (index < selected.length - 1 && !operation.isCancelRequested()) await pacer.wait();
       }
       if (savedEntries.length > 0) {
         setProgress({ current: selected.length, total: selected.length, text: "作者・シリーズ情報を取得しています" });
@@ -535,8 +562,10 @@ export default function SavePage() {
     } catch (error) {
       operation.fail(error);
       notifications.show({ color: "red", title: "保存処理を完了できません", message: errorMessage(error) });
-    } finally { saveOperationRef.current = null; setSaving(false); setProgress(null); }
+    } finally { saveOperationRef.current = null; savingRef.current = false; setSaving(false); setProgress(null); }
   };
+  // 最新の execute を再試行へ届けるための一段。render ごとに差し替わる。
+  executeRef.current = execute;
 
   return (
     <div className="save-page">

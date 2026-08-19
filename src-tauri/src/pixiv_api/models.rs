@@ -539,6 +539,27 @@ pub fn is_error_response(res_body: &str) -> bool {
     false
 }
 
+/// 応答の中身が取得制限を告げているか。
+///
+/// pixiv は制限を 429 で返すとは限らず、200 のまま `error.message` に
+/// "Rate Limit" を載せて返してくることがある。状態番号だけを見ていると、
+/// 間を空ければ通るものを「壊れた応答」として扱ってしまう。
+pub fn pixiv_body_is_rate_limited(res_body: &str) -> bool {
+    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(res_body) else {
+        return false;
+    };
+    let Some(error) = parsed.get("error") else {
+        return false;
+    };
+    ["message", "reason", "user_message"]
+        .iter()
+        .filter_map(|key| error.get(*key).and_then(|value| value.as_str()))
+        .any(|text| {
+            let text = text.to_ascii_lowercase();
+            text.contains("rate limit") || text.contains("too many requests")
+        })
+}
+
 /// レスポンスボディを型 `T` にデシリアライズします。失敗した場合は `PixivError::Serde` を返します。
 ///
 pub fn parse_into<T: DeserializeOwned, S: AsRef<str> + Into<String>>(
@@ -602,7 +623,7 @@ pub async fn parse_response_into<T: DeserializeOwned>(
         read_response_text_limited(response, MAX_PIXIV_JSON_RESPONSE_BYTES).await?;
 
     match status {
-        StatusCode::TOO_MANY_REQUESTS => {
+        _ if status == StatusCode::TOO_MANY_REQUESTS || pixiv_body_is_rate_limited(&body) => {
             error!("API rate limited: {body}");
             Err(PixivError::RateLimited { body })
         }
@@ -834,6 +855,32 @@ mod tests {
             }
             SeriesOrEmpty::Empty(_) => panic!("expected Series variant"),
         }
+    }
+
+    /// pixiv は取得制限を 429 で返すとは限らない。200 のまま本文にだけ
+    /// Rate Limit と書いて返してくる経路があり、状態番号しか見ていないと
+    /// 「やり直せば通るもの」を壊れた応答として扱ってしまう。
+    #[test]
+    fn a_rate_limit_hidden_in_a_success_body_is_still_a_rate_limit() {
+        assert!(pixiv_body_is_rate_limited(
+            r#"{"error":{"user_message":"","message":"Rate Limit","reason":""}}"#
+        ));
+        assert!(pixiv_body_is_rate_limited(
+            r#"{"error":{"message":"","reason":"Too Many Requests"}}"#
+        ));
+    }
+
+    #[test]
+    fn ordinary_errors_and_payloads_are_not_mistaken_for_a_rate_limit() {
+        assert!(!pixiv_body_is_rate_limited(
+            r#"{"error":{"message":"Invalid access token"}}"#
+        ));
+        assert!(!pixiv_body_is_rate_limited(r#"{"novel":{"id":1}}"#));
+        assert!(!pixiv_body_is_rate_limited("not json"));
+        // 本文に出てくるだけの語では反応しない。
+        assert!(!pixiv_body_is_rate_limited(
+            r#"{"novel":{"title":"rate limit の話"}}"#
+        ));
     }
 
     #[test]

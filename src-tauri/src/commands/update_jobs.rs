@@ -1040,7 +1040,16 @@ fn classify_failure(error: &str) -> FailureKind {
     let normalized = error.to_ascii_lowercase();
     let has = |markers: &[&str]| markers.iter().any(|marker| normalized.contains(marker));
 
-    if has(&[
+    // 画像や添付の取得で出た 401/403 を、連携切れとして扱わない。
+    //
+    // 作品本体の API は必ずアセットより先に叩いているので、本当に session が
+    // 切れていればそちらが先に失敗する。ここまで来た 403 は i.pximg.net の
+    // 直リンク制限のような配信側の都合で、ジョブ全体を止めて「再接続して
+    // ください」と言う理由にはならない。取得制限・欠落・通信の判断は残す。
+    let from_asset_fetch = normalized.contains("asset downloads failed");
+
+    if !from_asset_fetch
+        && has(&[
         "認証が必要",
         "アクセストークンが不正",
         "セッションが無効",
@@ -1051,7 +1060,8 @@ fn classify_failure(error: &str) -> FailureKind {
         "unauthorized",
         "invalid_grant",
         "invalid token",
-    ]) {
+    ])
+    {
         return FailureKind::Auth;
     }
     if has(&[
@@ -1061,6 +1071,10 @@ fn classify_failure(error: &str) -> FailureKind {
         "rate limit",
         "http 503",
         "status: 503",
+        // 取得元の生の JSON を文面に混ぜるのをやめたので、日本語の言い回しも
+        // 拾えないと、間を空ければ通るものを取り違える。
+        "レートリミット",
+        "アクセス制限",
     ]) {
         return FailureKind::RateLimited;
     }
@@ -1698,6 +1712,57 @@ mod tests {
         ] {
             assert_eq!(classify_failure(error), expected, "{error}");
         }
+    }
+
+    /// アセットの取得失敗は、件数ではなく理由まで持ち帰る。それができて
+    /// 初めて「やり直せば通るのか」を機械が判断できる。
+    /// 取得制限の知らせは、生の JSON を見せずに日本語で届く。文面から
+    /// 本文を外した以上、分類も日本語で通らなければ意味が変わる。
+    ///
+    /// FANBOX 側は元から日本語だけで知らせていたため、英語の目印しか
+    /// 見ていなかったころは「その他のエラー」に落ち、間を空ければ通る
+    /// はずの対象がそのまま失敗として捨てられていた。
+    #[test]
+    fn a_japanese_rate_limit_message_is_still_read_as_a_rate_limit() {
+        for message in [
+            // pixiv
+            "アクセス制限（レートリミット）に達しました。時間をおいてからやり直してください",
+            // FANBOX
+            "FANBOXのアクセス制限に達しました。時間をおいて再試行してください",
+        ] {
+            assert_eq!(classify_failure(message), FailureKind::RateLimited, "{message}");
+        }
+    }
+
+    #[test]
+    fn asset_failures_are_classified_by_the_reason_they_carry() {
+        assert_eq!(
+            classify_failure("1 asset downloads failed (3 succeeded): HTTP 404 Not Found for https://i.pximg.net/a.jpg"),
+            FailureKind::Missing,
+        );
+        assert_eq!(
+            classify_failure("2 asset downloads failed (0 succeeded): HTTP 429 Too Many Requests for https://i.pximg.net/a.jpg"),
+            FailureKind::RateLimited,
+        );
+        assert_eq!(
+            classify_failure("1 asset downloads failed (0 succeeded): Network error: operation timed out"),
+            FailureKind::Network,
+        );
+    }
+
+    /// 配信側の直リンク制限でジョブ全体を止めない。本当に連携が切れて
+    /// いれば、アセットより先に叩く作品APIが 401 で落ちている。
+    #[test]
+    fn an_assets_own_forbidden_response_does_not_demand_reconnection() {
+        assert_eq!(
+            classify_failure("1 asset downloads failed (5 succeeded): HTTP 403 Forbidden for https://i.pximg.net/a.jpg"),
+            FailureKind::Other,
+        );
+        // 作品APIの 403 はこれまでどおり再接続を求める。
+        assert_eq!(
+            classify_failure("pixiv APIエラー（HTTP 403）"),
+            FailureKind::Auth,
+        );
     }
 
     #[test]

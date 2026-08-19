@@ -6,6 +6,7 @@ use std::{sync::LazyLock, time::Duration};
 
 use kv_pairs::{kv_pairs, KVPairs};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue as HV, AUTHORIZATION, HOST, USER_AGENT};
+use reqwest::StatusCode;
 use serde::de::DeserializeOwned;
 use tokio::io::AsyncWriteExt;
 
@@ -1866,7 +1867,11 @@ impl AppPixivAPI {
         let r = self
             .do_api_request(HttpMethod::GET, &url, None, Some(params), None, with_auth)
             .await?;
-        let (_, text) = read_response_text_limited(r, MAX_PIXIV_WEBVIEW_RESPONSE_BYTES).await?;
+        let (status, text) = read_response_text_limited(r, MAX_PIXIV_WEBVIEW_RESPONSE_BYTES).await?;
+        // ここは本文を HTML から切り出す経路なので、状態を見ずに読み進めていた。
+        // その結果、取得制限が「解析できないレスポンス」として上がり、やり直せば
+        // 通るものが二度と通らないものと同じ顔で並んでいた。
+        Self::classify_pixiv_response(status, &text)?;
         Ok(text)
     }
 
@@ -1888,6 +1893,27 @@ impl AppPixivAPI {
             Some(json_str) => parse_into(json_str.as_str()),
             None => Err(PixivError::UnintelligibleResponse { body: text }),
         }
+    }
+
+    /// 本文取得の応答が「読めなかった理由」を、読む前に見分ける。
+    ///
+    /// pixiv は取得制限を 429 で返すこともあれば、200 に error を載せて返す
+    /// ことも 200 のまま HTML を返すこともある。切り出しに失敗してから
+    /// 「解析できません」と言うと、間を空ければ通るものを、壊れた応答として
+    /// 扱ってしまう。
+    fn classify_pixiv_response(status: StatusCode, body: &str) -> Result<(), PixivError> {
+        if status == StatusCode::TOO_MANY_REQUESTS || pixiv_body_is_rate_limited(body) {
+            log::error!("pixiv webview rate limited ({status}): {body}");
+            return Err(PixivError::RateLimited {
+                body: body.to_string(),
+            });
+        }
+        if status == StatusCode::NOT_FOUND {
+            return Err(PixivError::NotFound {
+                body: body.to_string(),
+            });
+        }
+        Ok(())
     }
 
     /// Showcase article detail (no login required). Port of `showcase_article`. Manual: custom headers / host.

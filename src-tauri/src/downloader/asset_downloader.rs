@@ -1,5 +1,5 @@
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tauri::Emitter;
 use tokio::fs::{self, File};
@@ -29,6 +29,45 @@ pub fn extract_extension(url: &str, default: &str) -> String {
         }
     }
     default.to_string()
+}
+
+/// FANBOX の添付ファイルの保存名。
+///
+/// 名前は creator が付けるもので、一つの投稿に同名の添付が二つあることが
+/// 実際にある。名前だけで決めると保存先がぶつかり、二つ目が一つ目の中身に
+/// すり替わったまま何事もなく保存が終わる - 開くまで誰も気付けない。
+/// 投稿内で一意な id を必ず添えて、ぶつかりようのない名前にする。
+///
+/// 抽出側と JSON への埋め込み側の両方がこの関数を通る。二か所が別々に同じ
+/// 規則を書いていたことが、そもそもの穴だった。
+fn fanbox_file_filename(file: &Value) -> String {
+    let name = file.get("name").and_then(|v| v.as_str()).unwrap_or("file");
+    let url = file.get("url").and_then(|v| v.as_str()).unwrap_or("");
+    let ext = extract_extension(url, "bin");
+    let key = file
+        .get("id")
+        .and_then(|v| v.as_str().map(str::to_string).or_else(|| v.as_i64().map(|n| n.to_string())))
+        // id を持たない形で返ってきたときは URL から作る。名前が同じでも
+        // URL が違えば別物になり、同じ添付なら何度呼んでも同じ名前になる。
+        .unwrap_or_else(|| short_url_digest(url));
+    sanitize_filename(&format!("{name}_{key}.{ext}"))
+}
+
+/// FANBOX の画像の保存名。id は投稿内で一意なので、そのまま使える。
+fn fanbox_image_filename(image: &Value) -> String {
+    let id = image.get("id").and_then(|v| v.as_str()).unwrap_or("image");
+    let url = image
+        .get("originalUrl")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    sanitize_filename(&format!("{}.{}", id, extract_extension(url, "jpg")))
+}
+
+/// URL を短く畳んだ識別子。名前の衝突を解くためだけに使う。
+fn short_url_digest(url: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(url.as_bytes());
+    digest[..6].iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 /// ファイル名サニタイザー
@@ -194,7 +233,8 @@ pub(crate) async fn save_response_atomically(
     max_bytes: u64,
     require_image: bool,
 ) -> Result<u64, String> {
-    if let Some(content_length) = response.content_length() {
+    let declared_length = response.content_length();
+    if let Some(content_length) = declared_length {
         if content_length > max_bytes {
             return Err(format!(
                 "Remote asset is too large: {content_length} bytes (limit {max_bytes})"
@@ -224,6 +264,20 @@ pub(crate) async fn save_response_atomically(
                 .write_all(&chunk)
                 .await
                 .map_err(|error| format!("Disk write error: {error}"))?;
+        }
+        // 相手が申告した長さに、実際に届いた長さが届いているか。
+        //
+        // HTTP/1.1 の枠組みが崩れた切断は hyper が先に失敗として上げるので、
+        // ここは最後の砦にあたる - 間に立つプロキシや CDN が「短いのに
+        // 完結した」応答を返す経路が残る。多い側を咎めないのは、将来 gzip の
+        // 自動展開を有効にしたときに、展開後の長さと圧縮時の申告を突き合わせて
+        // 正しい保存を弾かないため。足りない側だけが、壊れた作品を生む。
+        if let Some(expected) = declared_length {
+            if written < expected {
+                return Err(format!(
+                    "Remote asset was truncated: {written} of {expected} bytes arrived"
+                ));
+            }
         }
         let file = pending
             .file
@@ -294,13 +348,10 @@ pub fn extract_download_targets(data: &Value, is_fanbox: bool, targets: &mut Vec
             if let Some(image_map) = body.get("imageMap").and_then(|v| v.as_object()) {
                 for (_, img) in image_map {
                     if let Some(orig_url) = img.get("originalUrl").and_then(|v| v.as_str()) {
-                        let id = img.get("id").and_then(|v| v.as_str()).unwrap_or("image");
-                        let ext = extract_extension(orig_url, "jpg");
-                        let filename = sanitize_filename(&format!("{}.{}", id, ext));
                         targets.push(DownloadTarget {
                             url: orig_url.to_string(),
                             sub_folder: "illustrations",
-                            filename,
+                            filename: fanbox_image_filename(img),
                         });
                     }
                 }
@@ -310,13 +361,10 @@ pub fn extract_download_targets(data: &Value, is_fanbox: bool, targets: &mut Vec
             if let Some(file_map) = body.get("fileMap").and_then(|v| v.as_object()) {
                 for (_, file) in file_map {
                     if let Some(file_url) = file.get("url").and_then(|v| v.as_str()) {
-                        let name = file.get("name").and_then(|v| v.as_str()).unwrap_or("file");
-                        let ext = extract_extension(file_url, "bin");
-                        let filename = sanitize_filename(&format!("{}.{}", name, ext));
                         targets.push(DownloadTarget {
                             url: file_url.to_string(),
                             sub_folder: "files",
-                            filename,
+                            filename: fanbox_file_filename(file),
                         });
                     }
                 }
@@ -326,13 +374,10 @@ pub fn extract_download_targets(data: &Value, is_fanbox: bool, targets: &mut Vec
             if let Some(files) = body.get("files").and_then(|v| v.as_array()) {
                 for file in files {
                     if let Some(file_url) = file.get("url").and_then(|v| v.as_str()) {
-                        let name = file.get("name").and_then(|v| v.as_str()).unwrap_or("file");
-                        let ext = extract_extension(file_url, "bin");
-                        let filename = sanitize_filename(&format!("{}.{}", name, ext));
                         targets.push(DownloadTarget {
                             url: file_url.to_string(),
                             sub_folder: "files",
-                            filename,
+                            filename: fanbox_file_filename(file),
                         });
                     }
                 }
@@ -342,13 +387,10 @@ pub fn extract_download_targets(data: &Value, is_fanbox: bool, targets: &mut Vec
             if let Some(images) = body.get("images").and_then(|v| v.as_array()) {
                 for img in images {
                     if let Some(orig_url) = img.get("originalUrl").and_then(|v| v.as_str()) {
-                        let id = img.get("id").and_then(|v| v.as_str()).unwrap_or("image");
-                        let ext = extract_extension(orig_url, "jpg");
-                        let filename = sanitize_filename(&format!("{}.{}", id, ext));
                         targets.push(DownloadTarget {
                             url: orig_url.to_string(),
                             sub_folder: "illustrations",
-                            filename,
+                            filename: fanbox_image_filename(img),
                         });
                     }
                 }
@@ -501,43 +543,25 @@ pub fn inject_local_paths(data: &mut Value, assets_dir_name: &str, is_fanbox: bo
             // article画像
             if let Some(image_map) = body.get_mut("imageMap").and_then(|v| v.as_object_mut()) {
                 for (_, img) in image_map {
-                    let id = img.get("id").and_then(|v| v.as_str()).unwrap_or("image");
-                    let orig_url = img
-                        .get("originalUrl")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    let ext = extract_extension(orig_url, "jpg");
-                    img["localPath"] = Value::String(format!(
-                        "./{}/illustrations/{}",
-                        assets_dir_name,
-                        sanitize_filename(&format!("{}.{}", id, ext))
-                    ));
+                    let filename = fanbox_image_filename(img);
+                    img["localPath"] =
+                        Value::String(format!("./{assets_dir_name}/illustrations/{filename}"));
                 }
             }
             // article添付ファイル
             if let Some(file_map) = body.get_mut("fileMap").and_then(|v| v.as_object_mut()) {
                 for (_, file) in file_map {
-                    let name = file.get("name").and_then(|v| v.as_str()).unwrap_or("file");
-                    let file_url = file.get("url").and_then(|v| v.as_str()).unwrap_or("");
-                    let ext = extract_extension(file_url, "bin");
-                    file["localPath"] = Value::String(format!(
-                        "./{}/files/{}",
-                        assets_dir_name,
-                        sanitize_filename(&format!("{}.{}", name, ext))
-                    ));
+                    let filename = fanbox_file_filename(file);
+                    file["localPath"] =
+                        Value::String(format!("./{assets_dir_name}/files/{filename}"));
                 }
             }
             // file添付ファイル
             if let Some(files) = body.get_mut("files").and_then(|v| v.as_array_mut()) {
                 for file in files {
-                    let name = file.get("name").and_then(|v| v.as_str()).unwrap_or("file");
-                    let file_url = file.get("url").and_then(|v| v.as_str()).unwrap_or("");
-                    let ext = extract_extension(file_url, "bin");
-                    file["localPath"] = Value::String(format!(
-                        "./{}/files/{}",
-                        assets_dir_name,
-                        sanitize_filename(&format!("{}.{}", name, ext))
-                    ));
+                    let filename = fanbox_file_filename(file);
+                    file["localPath"] =
+                        Value::String(format!("./{assets_dir_name}/files/{filename}"));
                 }
             }
             // image画像
@@ -764,9 +788,39 @@ pub async fn download_and_link_assets(
 
     let mut download_targets = Vec::new();
     extract_download_targets(json_data, is_fanbox, &mut download_targets);
-    let mut unique_destinations = HashSet::new();
-    download_targets
-        .retain(|target| unique_destinations.insert((target.sub_folder, target.filename.clone())));
+    // 同じ保存先に別のURLが来たら、黙って落とさず保存ごと止める。
+    //
+    // 重複排除は「同じアセットが二度参照されている」ぶんを畳むためのもので、
+    // 中身の違う二つを一つに畳んでよいという意味ではない。畳んでしまうと、
+    // 二つ目は一つ目の中身を指したまま保存が成功して終わる - 名前の付け方に
+    // 抜けが残っていたとき、それを知る手立てがこれしかない。
+    let mut destinations: HashMap<(&'static str, String), String> = HashMap::new();
+    let mut collision: Option<String> = None;
+    download_targets.retain(|target| {
+        match destinations.entry((target.sub_folder, target.filename.clone())) {
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(target.url.clone());
+                true
+            }
+            std::collections::hash_map::Entry::Occupied(slot) => {
+                if slot.get() != &target.url {
+                    collision.get_or_insert_with(|| {
+                        format!(
+                            "two different assets both want {}/{}: {} and {}",
+                            target.sub_folder,
+                            target.filename,
+                            slot.get(),
+                            target.url
+                        )
+                    });
+                }
+                false
+            }
+        }
+    });
+    if let Some(reason) = collision {
+        return Err(format!("Asset destinations collide, refusing to save: {reason}"));
+    }
 
     let msg = format!(
         "[INFO] アセットの解析中... 合計 {} 件のアセットを検出しました（is_fanbox: {}）",
@@ -963,6 +1017,10 @@ pub async fn download_and_link_assets(
 
     let mut success_count = 0;
     let mut fail_count = 0;
+    // 最初の理由だけは持ち帰る。件数しか返さなかったころは、消された画像
+    // （やり直しても無駄）と一時的な通信断（次で通る）が同じ一行になり、
+    // ジョブの失敗分類も「その他」に落ちて再試行の判断ができなかった。
+    let mut first_failure: Option<String> = None;
     while let Some(res) = join_set.join_next().await {
         match res {
             Ok(Ok(_)) => {
@@ -973,6 +1031,7 @@ pub async fn download_and_link_assets(
                 let msg = format!("[ERROR] アセットダウンロードタスクが失敗しました: {}", e);
                 let _ = app.emit("download-log", &msg);
                 log::error!("{}", msg);
+                first_failure.get_or_insert(e);
             }
             Err(e) => {
                 fail_count += 1;
@@ -982,6 +1041,7 @@ pub async fn download_and_link_assets(
                 );
                 let _ = app.emit("download-log", &msg);
                 log::error!("{}", msg);
+                first_failure.get_or_insert_with(|| format!("asset task panicked: {e}"));
             }
         }
     }
@@ -994,7 +1054,12 @@ pub async fn download_and_link_assets(
     log::info!("{}", msg);
 
     if fail_count > 0 {
-        return Err(format!("{fail_count} asset downloads failed"));
+        // 1件でも欠けたら保存そのものを取りやめる。中身の足りない版を
+        // ライブラリに置くくらいなら、保存されなかったほうが分かりやすい。
+        let reason = first_failure.unwrap_or_else(|| "reason unavailable".to_string());
+        return Err(format!(
+            "{fail_count} asset downloads failed ({success_count} succeeded): {reason}"
+        ));
     }
     inject_local_paths(json_data, &assets_dir_name, is_fanbox);
 
@@ -1148,6 +1213,62 @@ mod tests {
         std::fs::write(&empty, []).unwrap();
         assert!(validate_asset_file(&empty, &empty, 1024, false).is_err());
         let _ = std::fs::remove_dir_all(directory);
+    }
+
+    /// 同じ投稿に同名の添付が二つある、は実際に起きる - 名前を付けるのは
+    /// creator だからだ。名前だけで保存先を決めていたころは、二つ目が
+    /// 一つ目の中身を指したまま、エラーもなく保存が終わっていた。
+    #[test]
+    fn two_fanbox_attachments_sharing_a_name_get_separate_files() {
+        let post = serde_json::json!({
+            "body": {
+                "files": [
+                    { "id": "f1", "name": "資料", "url": "https://downloads.fanbox.cc/a/f1.zip" },
+                    { "id": "f2", "name": "資料", "url": "https://downloads.fanbox.cc/b/f2.zip" },
+                ]
+            }
+        });
+
+        let mut targets = Vec::new();
+        extract_download_targets(&post, true, &mut targets);
+        assert_eq!(targets.len(), 2);
+        assert_ne!(
+            targets[0].filename, targets[1].filename,
+            "同名の添付が同じ保存先を取り合っている: {:?}",
+            targets,
+        );
+
+        // 埋め込まれる参照も、それぞれ自分のファイルを指すこと。抽出側と
+        // 埋め込み側が別々に名前を組み立てていたのが、そもそもの穴だった。
+        let mut injected = post.clone();
+        inject_local_paths(&mut injected, "data_assets", true);
+        let files = injected["body"]["files"].as_array().unwrap();
+        let first = files[0]["localPath"].as_str().unwrap();
+        let second = files[1]["localPath"].as_str().unwrap();
+        assert_ne!(first, second);
+        assert!(first.ends_with(&targets[0].filename), "{first} vs {:?}", targets[0]);
+        assert!(second.ends_with(&targets[1].filename), "{second} vs {:?}", targets[1]);
+    }
+
+    /// id を返さない形にも備える。同じ添付なら何度呼んでも同じ名前になり、
+    /// 違う添付なら必ず違う名前になる、の両方が要る。
+    #[test]
+    fn attachments_without_an_id_are_still_told_apart_and_stay_stable() {
+        let post = serde_json::json!({
+            "body": {
+                "files": [
+                    { "name": "資料", "url": "https://downloads.fanbox.cc/a/x.zip" },
+                    { "name": "資料", "url": "https://downloads.fanbox.cc/b/y.zip" },
+                ]
+            }
+        });
+        let mut targets = Vec::new();
+        extract_download_targets(&post, true, &mut targets);
+        assert_ne!(targets[0].filename, targets[1].filename);
+
+        let mut again = Vec::new();
+        extract_download_targets(&post, true, &mut again);
+        assert_eq!(targets[0].filename, again[0].filename);
     }
 
     #[tokio::test]

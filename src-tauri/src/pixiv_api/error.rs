@@ -40,7 +40,10 @@ pub enum PixivError {
         body: String,
     },
     /// レートリミット（回数制限）。
-    #[error("アクセス制限（レートリミット）に達しました: {body}")]
+    ///
+    /// 応答本文は記録には残すが、文面には混ぜない。利用者が読むのは
+    /// 「どうすればいいか」であって、取得元が返した JSON ではない。
+    #[error("アクセス制限（レートリミット）に達しました。時間をおいてからやり直してください")]
     RateLimited {
         /// レスポンスボディ。
         body: String,
@@ -90,11 +93,16 @@ mod tests {
     }
 
     #[test]
+    /// 取得制限の文面には、次にどうするかだけを書く。取得元が返した JSON を
+    /// そのまま画面へ出しても、読む人にできることは増えない。
     fn display_rate_limited() {
         let err = PixivError::RateLimited {
-            body: "too many requests".to_string(),
+            body: r#"{"error":{"message":"Rate Limit"}}"#.to_string(),
         };
-        assert!(err.to_string().contains("too many requests"));
+        let shown = err.to_string();
+        assert!(shown.contains("アクセス制限"));
+        assert!(shown.contains("時間をおいて"));
+        assert!(!shown.contains("{"), "生のレスポンスを混ぜない: {shown}");
     }
 
     #[test]

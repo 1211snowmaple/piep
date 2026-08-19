@@ -1017,6 +1017,48 @@ pub(crate) fn pixiv_meta_signature_from_json(data: &serde_json::Value) -> Option
     ))
 }
 
+/// pixiv の取得結果に、作品と呼べる中身があるか。
+///
+/// webview の応答は「読めなかった」を綺麗な JSON で返してくることがある
+/// （閲覧制限・年齢確認・本文だけ落ちた部分障害）。パースが通る以上、
+/// エラーとしては上がってこない。
+fn pixiv_has_material_content(data: &serde_json::Value) -> bool {
+    let has_text = ["text"]
+        .iter()
+        .filter_map(|key| {
+            data.get(*key)
+                .or_else(|| data.get("detail").and_then(|detail| detail.get(*key)))
+        })
+        .any(|value| value.as_str().is_some_and(|text| !text.trim().is_empty()));
+    if has_text {
+        return true;
+    }
+    ["illusts", "images"].iter().any(|key| {
+        data.get(*key)
+            .map(|value| {
+                value.as_array().is_some_and(|items| !items.is_empty())
+                    || value.as_object().is_some_and(|items| !items.is_empty())
+            })
+            .unwrap_or(false)
+    })
+}
+
+/// 取得してきたものに、保存するだけの中身があるか。
+///
+/// 相手のサーバーは、落ちているときも 200 と整形式の JSON で答える。だから
+/// 「通信が成功した」は「作品が取れた」の保証にならない。手元にある版が
+/// 中身を持っているのに、取ってきたほうが空なら、それは更新ではなく欠落で、
+/// 版を上げれば読めていた作品が読めなくなる。
+fn fetched_has_material_content(data: &serde_json::Value, source: &str) -> bool {
+    match source {
+        "fanbox" => fanbox_has_material_content(data),
+        "pixiv" => pixiv_has_material_content(data),
+        // 知らない取得元は判断材料が無い。止めるほうに倒すと保存が通らなく
+        // なるので、ここは通し、既存の版と衝突しない限り従来どおり扱う。
+        _ => true,
+    }
+}
+
 fn fanbox_has_material_content(data: &serde_json::Value) -> bool {
     let Some(body) = data.get("body").filter(|v| !v.is_null()) else {
         return false;
@@ -1590,8 +1632,8 @@ pub async fn download_and_save(
     user_agent: Option<String>,
 ) -> Result<DownloadEntry, String> {
     let state = app.state::<Arc<AppState>>();
-    let _library_write_guard = state.library_gate.write().await;
     let storage = state.db.storage_dir().to_path_buf();
+    // 同じ作品を二重に保存させないのはこちらの錠。関数の最後まで持ち続ける。
     let work_lock = work_save_mutex(&source, &source_id);
     let _work_guard = work_lock.lock().await;
     let root_item_dir = secure_download_item_dir(&storage, &source, &source_id)?;
@@ -1600,16 +1642,35 @@ pub async fn download_and_save(
     let (new_hash, new_text_len, new_source_updated) = compute_content_details(&data, &source);
 
     // 2. 既存チェックとバージョン番号の特定
+    //
+    // ライブラリ全体の錠は、DBに触る間だけ握る。取得元からアセットを落として
+    // いる数分間ずっと握っていたころは、その裏で★を押しただけの操作まで
+    // 待たされていた - 待たされている理由が画面のどこにも出ないまま。
     let existing_dl = state.db.get_download_by_source(&source, &source_id)?;
     let mut next_version = 1i64;
     let mut is_update = false;
-    let mut _existing_id = None;
+
+    // 初めて保存するものが空なら、そもそもライブラリに入れない。
+    //
+    // FANBOX は支援プランが足りない投稿に 200 と `body: null` を返し、pixiv も
+    // 閲覧制限のかかった作品を本文だけ欠けた形で返す。どちらも通信としては
+    // 成功しているので、止めるならここしかない。題名だけの殻を並べておくと、
+    // 開くまで読めないことに気付けず、更新確認の対象としても数え続ける。
+    if existing_dl.is_none() && !fetched_has_material_content(&data, &source) {
+        return Err(if source == "fanbox" {
+            "この投稿の本文を取得できませんでした。支援プランが足りないか、非公開の可能性があります".to_string()
+        } else {
+            "この作品の本文を取得できませんでした。閲覧制限がかかっている可能性があります".to_string()
+        });
+    }
 
     if let Some(ref dl) = existing_dl {
-        _existing_id = Some(dl.id);
-        if source == "fanbox"
-            && (dl.text_length > 0 || dl.asset_count > 0)
-            && !fanbox_has_material_content(&data)
+        let _library_write_guard = state.library_gate.write().await;
+        // 中身が消えて見えるときは、版を上げずに手元の版を守る。作者・
+        // シリーズの結び付けと索引だけは取り直す - そちらは今回の応答でも
+        // 確かに読めた部分なので、更新して困らない。
+        if (dl.text_length > 0 || dl.asset_count > 0)
+            && !fetched_has_material_content(&data, &source)
         {
             sync_download_entities(
                 &state,
@@ -1624,9 +1685,8 @@ pub async fn download_and_save(
             if let Err(e) = state.db.reindex_download(dl.id) {
                 log::warn!("Failed to refresh search index for {}: {}", dl.id, e);
             }
-            log::info!(
-                "Skipping FANBOX version update for {} because fetched post has no material body/assets",
-                source_id
+            log::warn!(
+                "Skipping version update for {source}:{source_id} because the fetched payload has no material body/assets"
             );
             return state.db.get_download(dl.id);
         }
@@ -1819,6 +1879,25 @@ pub async fn download_and_save(
             format!("新規ダウンロード (v{})", next_version)
         }),
     });
+
+    // ここから先はDBに触る。錠を取り直し、手放していた間にこの作品が
+    // 動いていないことを確かめてから確定する。消された作品の上に版だけを
+    // 積むくらいなら、保存しなかったことにして呼び出し側にやり直させる。
+    let _library_write_guard = state.library_gate.write().await;
+    let current_dl = state.db.get_download_by_source(&source, &source_id)?;
+    let unchanged = match (&existing_dl, &current_dl) {
+        (None, None) => true,
+        (Some(before), Some(now)) => {
+            before.id == now.id && before.current_version == now.current_version
+        }
+        _ => false,
+    };
+    if !unchanged {
+        return Err(
+            "保存している間にこの作品が変更されました。保存を取りやめたので、もう一度お試しください"
+                .to_string(),
+        );
+    }
 
     let dl_id = commit_journaled_version(
         &state.db,
@@ -2674,5 +2753,65 @@ mod pixiv_meta_signature_tests {
     fn a_payload_without_a_length_has_no_signature() {
         let payload = serde_json::json!({ "title": "題", "caption": "", "tags": [] });
         assert!(pixiv_meta_signature_from_json(&payload).is_none());
+    }
+}
+
+/// 取得元は、落ちているときも 200 と整形式の JSON で答えることがある。
+/// その応答で版を上げると、読めていた作品が空の版に置き換わる。ここは
+/// 「保存しないほうが正しい」数少ない場面なので、判定を固定しておく。
+#[cfg(test)]
+mod material_content_tests {
+    use super::fetched_has_material_content;
+    use serde_json::json;
+
+    #[test]
+    fn a_pixiv_novel_with_a_body_is_material() {
+        assert!(fetched_has_material_content(
+            &json!({ "detail": { "title": "題" }, "text": "港の灯が落ちる" }),
+            "pixiv",
+        ));
+        assert!(fetched_has_material_content(
+            &json!({ "detail": { "title": "題", "text": "本文" } }),
+            "pixiv",
+        ));
+    }
+
+    /// 挿絵だけの作品もある。本文が空でも中身が無いとは限らない。
+    #[test]
+    fn a_pixiv_novel_carrying_only_illustrations_is_material() {
+        assert!(fetched_has_material_content(
+            &json!({ "text": "", "illusts": { "12": { "id": 12 } } }),
+            "pixiv",
+        ));
+    }
+
+    /// 閲覧制限や部分障害は、本文だけが空の綺麗な JSON として返ってくる。
+    #[test]
+    fn an_empty_pixiv_payload_is_not_material() {
+        for payload in [
+            json!({ "detail": { "title": "題" }, "text": "" }),
+            json!({ "detail": { "title": "題" }, "text": "   
+  " }),
+            json!({ "detail": { "title": "題" }, "text": "", "illusts": {}, "images": [] }),
+            json!({ "detail": { "title": "題" } }),
+        ] {
+            assert!(
+                !fetched_has_material_content(&payload, "pixiv"),
+                "{payload}"
+            );
+        }
+    }
+
+    #[test]
+    fn fanbox_posts_keep_their_own_judgement() {
+        assert!(fetched_has_material_content(
+            &json!({ "body": { "text": "制作ノート" } }),
+            "fanbox",
+        ));
+        assert!(!fetched_has_material_content(
+            &json!({ "body": null }),
+            "fanbox",
+        ));
+        assert!(!fetched_has_material_content(&json!({}), "fanbox"));
     }
 }
