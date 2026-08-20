@@ -267,7 +267,7 @@ export default function UpdatesPage() {
                     onDismiss={(candidate) => dismissMutation.mutate(candidate)}
                   />
                 </Tabs.Panel>
-                <Tabs.Panel value="logs" pt="lg"><Card p="lg">{activeSnapshot.previousLogCursor && <Button mb="md" variant="default" onClick={() => runtime && updateJobs.loadOlderLogs()}>以前のログを読み込む</Button>}<Timeline active={activeSnapshot.logs.length}>{activeSnapshot.logs.map((log) => <Timeline.Item key={log.id} color={log.logType === "error" ? "red" : log.logType === "success" ? "green" : log.logType === "warn" ? "yellow" : "piep"} title={log.message}><Text size="xs" c="dimmed">{formatDate(log.createdAt, true)}</Text></Timeline.Item>)}</Timeline></Card></Tabs.Panel>
+                <Tabs.Panel value="logs" pt="lg"><Card p="lg">{activeSnapshot.previousLogCursor && <Button mb="md" variant="default" onClick={() => runtime && updateJobs.loadOlderLogs()}>以前のログを読み込む</Button>}<Timeline active={activeSnapshot.logs.length}>{activeSnapshot.logs.map((log) => <Timeline.Item key={log.id} color={log.logType === "error" ? "red" : log.logType === "success" ? "green" : log.logType === "warn" ? "yellow" : "piep"} title={log.logType === "error" ? errorMessage(log.message) : log.message}><Text size="xs" c="dimmed">{formatDate(log.createdAt, true)}</Text></Timeline.Item>)}</Timeline></Card></Tabs.Panel>
                 <Tabs.Panel value="targets" pt="lg">{(dismissedCount.data ?? 0) > 0 && (
                   <Card p="md" mb="lg">
                     <Group justify="space-between" wrap="nowrap">
@@ -468,7 +468,7 @@ function CandidatesPanel({ candidates, selectedIds, selectableIds, running, savi
                   <Text size="sm" fw={650} className="line-clamp-1">{candidate.title}</Text>
                 </Group>
                 <Text size="xs" c="dimmed" className="line-clamp-1">{candidate.targetLabel} · {candidate.subtitle}</Text>
-                {candidate.error && <Text size="xs" c="red" className="line-clamp-2">{candidate.error}</Text>}
+                {candidate.error && <Text size="xs" c="red" className="line-clamp-2">{errorMessage(candidate.error)}</Text>}
               </Stack>
               <Badge color={candidate.status === "failed" ? "red" : candidate.status === "saved" ? "green" : "gray"} variant="light">{candidateStatusLabel(candidate.status)}</Badge>
               {isSavableCandidate(candidate) && (

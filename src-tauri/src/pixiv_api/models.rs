@@ -322,7 +322,7 @@ pub struct NovelInfo {
     pub novel_ai_type: i32,
     #[serde(default)]
     pub comment_access_control: Option<i32>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_option")]
     pub series_navigation: Option<SeriesNavigationOrEmpty>,
 }
 
@@ -367,14 +367,19 @@ pub struct NovelRating {
 
 /// Novel navigation entry in a series (order, title, cover).
 ///
+/// 隣の話は、読めるとは限らない。
+///
+/// マイピク限定などで読めない回は `viewable: false` と断り書きだけが返り、
+/// 題も表紙も null になる。読めない回を表せない型にしていたため、本文は
+/// 手元にあるのに保存が丸ごと失敗していた。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NovelNavigationInfo {
     pub id: u64,
     pub viewable: bool,
     pub content_order: String,
-    pub title: String,
-    pub cover_url: String,
+    pub title: Option<String>,
+    pub cover_url: Option<String>,
     pub viewable_message: Option<String>,
 }
 
@@ -397,6 +402,32 @@ pub enum SeriesNavigationOrEmpty {
     Empty(EmptyObject),
 }
 
+/// 読めなかった飾りは、捨てて先へ進む。
+///
+/// 前後の話への案内は本文の取得には要らない飾りだが、取得元が返す形は
+/// ときどき変わる。ここで型に合わないだけで、本文まで届いている保存が
+/// 丸ごと失敗していた。形が変わったことは記録に残し、値だけを手放す。
+fn lenient_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: DeserializeOwned,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    if value.is_null() {
+        return Ok(None);
+    }
+    match serde_json::from_value(value) {
+        Ok(parsed) => Ok(Some(parsed)),
+        Err(error) => {
+            warn!(
+                "{} として読めない値を無視しました: {error}",
+                std::any::type_name::<T>()
+            );
+            Ok(None)
+        }
+    }
+}
+
 /// webview HTML埋め込みから取得される小説データ。camelCaseを使用します。
 ///
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -417,6 +448,7 @@ pub struct WebviewNovel {
     pub marker: Option<String>,
     pub illusts: serde_json::Value,
     pub images: serde_json::Value,
+    #[serde(default, deserialize_with = "lenient_option")]
     pub series_navigation: Option<SeriesNavigationOrEmpty>,
     pub glossary_items: serde_json::Value,
     pub replaceable_item_ids: serde_json::Value,
@@ -567,10 +599,19 @@ pub fn parse_into<T: DeserializeOwned, S: AsRef<str> + Into<String>>(
 ) -> Result<T, PixivError> {
     match serde_json::from_str(res_body.as_ref()) {
         Ok(parsed) => Ok(parsed),
-        Err(error) => Err(PixivError::Serde {
-            error,
-            body: res_body.into(),
-        }),
+        Err(error) => {
+            // 文面から本文を外した分、記録には残す。読めなかった理由は本文の
+            // 中にしかないが、それを追うのは画面の前ではなくログの側の仕事。
+            let head: String = res_body.as_ref().chars().take(400).collect();
+            error!(
+                "{} として読めませんでした: {error}, body(先頭): {head}",
+                std::any::type_name::<T>()
+            );
+            Err(PixivError::Serde {
+                error,
+                body: res_body.into(),
+            })
+        }
     }
 }
 
@@ -908,6 +949,86 @@ mod tests {
         let body = "not json";
         let err = parse_into::<serde_json::Value, _>(body.to_string()).unwrap_err();
         assert!(matches!(err, PixivError::Serde { .. }));
+    }
+
+    /// 本文以外を埋めた webview 応答。`series_navigation` の形だけを差し替える。
+    fn webview_novel_json(series_navigation: &str) -> String {
+        format!(
+            r#"{{
+                "id": "19398164",
+                "title": "題",
+                "seriesId": "1234",
+                "seriesTitle": "連作",
+                "seriesIsWatched": false,
+                "userId": "99",
+                "coverUrl": "https://example.invalid/cover.jpg",
+                "tags": ["tag"],
+                "caption": "",
+                "cdate": "2023-05-27T00:00:01+09:00",
+                "rating": {{ "like": 1, "bookmark": 2, "view": 3 }},
+                "text": "本文",
+                "marker": null,
+                "illusts": {{}},
+                "images": {{}},
+                "seriesNavigation": {series_navigation},
+                "glossaryItems": [],
+                "replaceableItemIds": [],
+                "aiType": 1,
+                "isOriginal": false
+            }}"#
+        )
+    }
+
+    #[test]
+    fn webview_novel_accepts_unviewable_neighbor() {
+        // マイピク限定の隣の話。題も表紙も返らないが、本文は保存できる。
+        let json = webview_novel_json(
+            r##"{
+                "nextNovel": { "id": 19761392, "viewable": false, "viewableMessage": "#20はマイピク限定作品です", "contentOrder": "20", "title": null, "coverUrl": null },
+                "prevNovel": { "id": 17676921, "viewable": true, "contentOrder": "18", "title": "#18", "coverUrl": "https://example.invalid/18.jpg", "viewableMessage": null }
+            }"##,
+        );
+        let novel: WebviewNovel = serde_json::from_str(&json).unwrap();
+        let Some(SeriesNavigationOrEmpty::Info(navigation)) = novel.series_navigation else {
+            panic!("前後の話の案内が読めていない");
+        };
+        let next = navigation.next_novel.unwrap();
+        assert!(!next.viewable);
+        assert_eq!(next.title, None);
+        assert_eq!(next.cover_url, None);
+        assert_eq!(
+            navigation.prev_novel.unwrap().title.as_deref(),
+            Some("#18")
+        );
+    }
+
+    #[test]
+    fn webview_novel_accepts_empty_navigation() {
+        // 前後が無いときの `{}`。前後どちらも無い案内として読める。
+        let novel: WebviewNovel = serde_json::from_str(&webview_novel_json("{}")).unwrap();
+        let Some(SeriesNavigationOrEmpty::Info(navigation)) = novel.series_navigation else {
+            panic!("空の案内が読めていない");
+        };
+        assert!(navigation.prev_novel.is_none());
+        assert!(navigation.next_novel.is_none());
+    }
+
+    #[test]
+    fn webview_novel_survives_unknown_navigation_shape() {
+        // 案内の形が変わっても、本文は手元にある。飾りだけを捨てる。
+        let novel: WebviewNovel =
+            serde_json::from_str(&webview_novel_json(r#"["変わった形"]"#)).unwrap();
+        assert!(novel.series_navigation.is_none());
+        assert_eq!(novel.text, "本文");
+    }
+
+    #[test]
+    fn serde_error_message_leaves_out_the_body() {
+        let err = parse_into::<WebviewNovel, _>(webview_novel_json(r#"{}"#).replace("\"title\": \"題\",", ""))
+            .unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("読み取れませんでした"), "{message}");
+        assert!(!message.contains("本文"), "{message}");
     }
 
     #[test]
