@@ -55,6 +55,14 @@ select {
 
 .mantine-SegmentedControl-label { display: flex; align-items: center; justify-content: center; }
 
+/* 一行の知らせは、アイコンと同じ高さの中心に置く。
+
+   Alert の本文は縦並びの箱で、その高さは背の高い方 — たいていは 20px の
+   アイコン — が決める。中の一行は 17px 前後しかないので、上端に置かれると
+   2px ほど浮いて、アイコンより上にあるように見える。二行以上あるときは
+   本文の方が高くなるため、この指定は何もしない。 */
+.mantine-Alert-body { justify-content: center; }
+
 ::selection {
   color: var(--mantine-color-white);
   background: var(--mantine-color-piep-6);
