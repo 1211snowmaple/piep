@@ -2,7 +2,7 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use parking_lot::Mutex;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, WebviewBuilder, WebviewUrl, WebviewWindowBuilder};
 use tokio::sync::{oneshot, Mutex as AsyncMutex};
 use url::Url;
@@ -39,6 +39,26 @@ pub struct BrowserAcceleratorEvent {
 
 static PIXIV_LOGIN_LOCK: AsyncMutex<()> = AsyncMutex::const_new(());
 static FANBOX_LOGIN_LOCK: AsyncMutex<()> = AsyncMutex::const_new(());
+
+/// 同じ一押しを二度届けないための間合い。
+const ACCELERATOR_DEDUPE_WINDOW: Duration = Duration::from_millis(700);
+static LAST_ACCELERATOR: Mutex<Option<(String, Instant)>> = Mutex::new(None);
+
+/// この知らせは、直前と同じ一押しか。
+///
+/// Windows では Ctrl+S を二経路で拾っている。ページに差し込んだ keydown が
+/// カスタムスキームへ飛ばす道と、WebView2 の AcceleratorKeyPressed である。
+/// ページ側でキーが届かない場面（フォーカスが iframe にある、スクリプトが
+/// 動く前）があるのでどちらも外せないが、両方鳴ったときは一度だけ渡す。
+/// 二度渡ると、候補の取得が二周して同じ知らせが二つ並ぶ。
+fn accelerator_is_repeat(previous: Option<&(String, Instant)>, key: &str, now: Instant) -> bool {
+    match previous {
+        Some((last_key, at)) => {
+            last_key == key && now.saturating_duration_since(*at) < ACCELERATOR_DEDUPE_WINDOW
+        }
+        None => false,
+    }
+}
 
 fn query_value(url: &Url, key: &str) -> Option<String> {
     url.query_pairs()
@@ -122,6 +142,15 @@ fn emit_browser_accelerator(
     action: &str,
     current_url: &Url,
 ) {
+    let key = format!("{browser}:{source}:{action}");
+    {
+        let now = Instant::now();
+        let mut last = LAST_ACCELERATOR.lock();
+        if accelerator_is_repeat(last.as_ref(), &key, now) {
+            return;
+        }
+        *last = Some((key, now));
+    }
     let payload = BrowserAcceleratorEvent {
         action: action.to_string(),
         browser: browser.to_string(),
@@ -1090,6 +1119,36 @@ mod tests {
         assert_eq!(accelerator_action(&close), Some("close"));
         assert_eq!(accelerator_action(&unknown), None);
         assert_eq!(accelerator_action(&remote), None);
+    }
+
+    /// 一押しで二経路が鳴っても、渡すのは一度きり。押し直しは通す。
+    #[test]
+    fn browser_accelerator_collapses_the_second_report_of_one_keypress() {
+        let start = Instant::now();
+        let first = ("embedded:pixiv:save".to_string(), start);
+        assert!(!accelerator_is_repeat(None, "embedded:pixiv:save", start));
+        assert!(accelerator_is_repeat(
+            Some(&first),
+            "embedded:pixiv:save",
+            start + Duration::from_millis(30)
+        ));
+        // 押し直しは別の押し。
+        assert!(!accelerator_is_repeat(
+            Some(&first),
+            "embedded:pixiv:save",
+            start + ACCELERATOR_DEDUPE_WINDOW
+        ));
+        // 別のウィンドウ・別の操作は、たまたま近くても別のもの。
+        assert!(!accelerator_is_repeat(
+            Some(&first),
+            "standalone:pixiv:save",
+            start + Duration::from_millis(30)
+        ));
+        assert!(!accelerator_is_repeat(
+            Some(&first),
+            "embedded:pixiv:close",
+            start + Duration::from_millis(30)
+        ));
     }
 
     #[test]

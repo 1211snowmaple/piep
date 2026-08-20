@@ -3,6 +3,7 @@ import {
   createSourcePacer,
   isRateLimited,
   MAX_RATE_LIMIT_BACKOFF,
+  sleep,
   SOURCE_REQUEST_DELAY_MS,
 } from "./sourcePacing";
 
@@ -74,5 +75,35 @@ describe("取得元への当たり方", () => {
     // 元の速さより速くはならない。
     pacer.relax();
     expect(pacer.currentDelayMs()).toBe(1000);
+  });
+});
+
+/**
+ * 取得制限のあとの待ちは 30 秒近くまで伸びる。そのあいだ中止を受け付けない
+ * のは、押せていないのと変わらない。
+ */
+describe("待っている最中の中止", () => {
+  it("ends the wait as soon as it is aborted", async () => {
+    const pacer = createSourcePacer(60_000);
+    const started = Date.now();
+    const waiting = pacer.backOff();
+    pacer.abort();
+    await waiting;
+    expect(Date.now() - started).toBeLessThan(1_000);
+  });
+
+  it("does not wait at all once aborted", async () => {
+    const pacer = createSourcePacer(60_000);
+    pacer.abort();
+    const started = Date.now();
+    await pacer.wait();
+    expect(Date.now() - started).toBeLessThan(1_000);
+  });
+
+  // 合図を渡さない使い方は今までどおり。
+  it("still waits the whole time when nobody asks it to stop", async () => {
+    const started = Date.now();
+    await sleep(5);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(4);
   });
 });

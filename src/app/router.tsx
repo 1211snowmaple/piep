@@ -117,7 +117,7 @@ export function AppRouter({ children, confirmNavigation }: AppRouterProps) {
       }
 
       const confirm = confirmNavigationRef.current;
-      if (hasUnsavedWork() && confirm) {
+      if (hasUnsavedWork("navigate") && confirm) {
         const fromIndex = indexRef.current;
         const fromHref = lastHandledHref.current;
         const rollback = fromIndex - index;
@@ -196,7 +196,7 @@ export function AppRouter({ children, confirmNavigation }: AppRouterProps) {
       const next = target.startsWith("/") ? target : `/${target}`;
       if (`#${next}` === window.location.hash) return;
     }
-    if (!hasUnsavedWork() || !confirmNavigation) {
+    if (!hasUnsavedWork("navigate") || !confirmNavigation) {
       commitNavigation(target, options);
       return;
     }

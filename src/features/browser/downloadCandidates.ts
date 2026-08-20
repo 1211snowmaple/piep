@@ -104,22 +104,6 @@ export function extractSavedSourceTarget(url: string): SavedSourceTarget | null 
   return null;
 }
 
-export function normalizeUrlForSidebar(url: string): string {
-  try {
-    const parsed = new URL(url);
-    parsed.hash = "";
-    parsed.pathname = parsed.pathname.replace(/\/+$/, "") || "/";
-    return parsed.toString();
-  } catch {
-    return url.trim();
-  }
-}
-
-export function isSameSidebarUrl(a?: string | null, b?: string | null): boolean {
-  if (!a || !b) return false;
-  return normalizeUrlForSidebar(a) === normalizeUrlForSidebar(b);
-}
-
 export function getFanboxCreatorId(url: string): string | null {
   try {
     const subMatch = url.match(/https:\/\/([^.]+)\.fanbox\.cc/);
@@ -130,24 +114,54 @@ export function getFanboxCreatorId(url: string): string | null {
   return null;
 }
 
+/** そのページが指している相手。作品ID・シリーズID・作者ID・クリエイター名。 */
+export interface DownloadTarget {
+  kind: DownloadTargetKind;
+  id: string;
+}
+
+/**
+ * URLではなく、URLが指している相手を読む。
+ *
+ * 取得元はどれもSPAで、同じページを見ているあいだにもURLだけが動く
+ * （/users/789 と /users/789/novels、末尾の ?p=2、言語の /en/）。文字列を
+ * 突き合わせると、同じページに居るのに「移動した」ことになってしまう。
+ */
+export function describeDownloadTarget(url: string): DownloadTarget {
+  const none: DownloadTarget = { kind: "unsupported", id: "" };
+  if (!url) return none;
+  const normalized = normalizeContentLinkUrl(url);
+
+  if (normalized.includes("pixiv.net")) {
+    const seriesId = normalized.match(/novel\/series\/(?:show\.php\?id=)?(\d+)/)?.[1];
+    if (seriesId) return { kind: "pixiv_series", id: seriesId };
+    const userId = normalized.match(/users\/(\d+)/)?.[1];
+    if (userId && !normalized.includes("/novels/")) return { kind: "pixiv_user", id: userId };
+    const novelId = normalized.match(/novels\/(\d+)/)?.[1] || normalized.match(/novel\/show\.php\?id=(\d+)/)?.[1];
+    if (novelId) return { kind: "pixiv_single", id: novelId };
+  }
+
+  if (normalized.includes("fanbox.cc")) {
+    const postId = normalized.match(/posts\/(\d+)/)?.[1];
+    if (postId) return { kind: "fanbox_single", id: postId };
+    const creatorId = getFanboxCreatorId(normalized);
+    if (creatorId) return { kind: "fanbox_creator", id: creatorId };
+  }
+
+  return none;
+}
+
 export function detectDownloadTarget(url: string): DownloadTargetKind {
-  if (!url) return "unsupported";
-  const isPixiv = url.includes("pixiv.net");
-  const isFanbox = url.includes("fanbox.cc");
+  return describeDownloadTarget(url).kind;
+}
 
-  if (isPixiv) {
-    if (url.match(/novel\/series\/(\d+)/) || url.match(/novel\/series\/show\.php\?id=(\d+)/)) return "pixiv_series";
-    const userIdMatch = url.match(/users\/(\d+)/);
-    if (userIdMatch?.[1] && !url.includes("/novels/")) return "pixiv_user";
-    if (url.match(/novels\/(\d+)/) || url.match(/novel\/show\.php\?id=(\d+)/)) return "pixiv_single";
-  }
-
-  if (isFanbox) {
-    if (url.match(/posts\/(\d+)/)) return "fanbox_single";
-    if (getFanboxCreatorId(url)) return "fanbox_creator";
-  }
-
-  return "unsupported";
+/**
+ * 取得した一覧が「どのページのものか」を表す合言葉。対応していないページは
+ * 空文字。同じ合言葉のあいだは、取り直す必要がない。
+ */
+export function downloadTargetKey(url: string): string {
+  const { kind, id } = describeDownloadTarget(url);
+  return kind === "unsupported" ? "" : `${kind}:${id}`;
 }
 
 export function stripSidebarItemStatus(items: SidebarItem[]): SidebarItem[] {

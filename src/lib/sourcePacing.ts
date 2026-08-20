@@ -13,7 +13,23 @@ export const MAX_RATE_LIMIT_BACKOFF = 32;
 /** 同じ項目を取得制限で何回までやり直すか。 */
 export const MAX_RATE_LIMIT_RETRIES = 2;
 
-export const sleep = (ms: number) => new Promise<void>((resolve) => { setTimeout(resolve, ms); });
+/**
+ * 待つ。ただし、途中でやめられる。
+ *
+ * 取得制限のあとの待ちは 30 秒近くまで伸びる。そのあいだに中止を押した人を
+ * 待たせ続ければ、押せていないのと同じになる。
+ */
+export const sleep = (ms: number, signal?: AbortSignal) =>
+  new Promise<void>((resolve) => {
+    if (signal?.aborted) return resolve();
+    const done = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    signal?.addEventListener("abort", done, { once: true });
+  });
 
 /**
  * この失敗は「今は無理」か。
@@ -43,6 +59,8 @@ export interface SourcePacer {
   relax(): void;
   /** いまの待ち時間。表示用。 */
   currentDelayMs(): number;
+  /** もう待たない。待っている最中なら、その待ちをその場で終わらせる。 */
+  abort(): void;
 }
 
 /**
@@ -53,18 +71,21 @@ export interface SourcePacer {
  */
 export function createSourcePacer(
   delayMs = SOURCE_REQUEST_DELAY_MS,
-  wait: (ms: number) => Promise<void> = sleep,
+  wait: (ms: number, signal?: AbortSignal) => Promise<void> = sleep,
 ): SourcePacer {
   let multiplier = 1;
+  // 中止は待ちの外から来る。合図は係が自分で持ち、待つたびに渡す。
+  const stop = new AbortController();
   return {
     currentDelayMs: () => delayMs * multiplier,
-    wait: () => wait(delayMs * multiplier),
+    wait: () => wait(delayMs * multiplier, stop.signal),
     backOff: async () => {
       multiplier = Math.min(MAX_RATE_LIMIT_BACKOFF, multiplier * 2);
       const waited = delayMs * multiplier;
-      await wait(waited);
+      await wait(waited, stop.signal);
       return waited;
     },
     relax: () => { multiplier = Math.max(1, Math.floor(multiplier / 2)); },
+    abort: () => stop.abort(),
   };
 }

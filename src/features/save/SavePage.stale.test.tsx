@@ -42,6 +42,8 @@ vi.mock("@/services/dbApi", async (importOriginal) => ({
 
 const SERIES = "https://www.pixiv.net/novel/series/1000";
 const OTHER = "https://www.pixiv.net/novel/series/2000";
+/** 同じシリーズを見たまま、URLだけが動いた形。 */
+const SAME_SERIES_DRIFT = "https://www.pixiv.net/en/novel/series/1000?p=2";
 
 function renderSavePage() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -65,7 +67,7 @@ async function goTo(url: string) {
  *
  * これを黄色い帯で割り込ませていたときは、パネルの真ん中に一段生えて全体が
  * 下へずれた。帯は無くし、取り直すよう頼む相手（取得ボタン）と、古くなった
- * もの（一覧と保存ボタン）に語らせる。
+ * もの（一覧）に語らせる。
  */
 describe("SavePage stale candidates", () => {
   beforeEach(() => {
@@ -88,12 +90,45 @@ describe("SavePage stale candidates", () => {
     // 古いのは一覧なので、一覧の見出しに印が付き、中身は退がる。
     expect(screen.getByText("古い")).toBeInTheDocument();
     expect(document.querySelector(".candidate-list[data-stale]")).not.toBeNull();
-    // 押せないボタンは、押せない理由を自分で名乗る。
-    expect(screen.getByRole("button", { name: "取り直すと保存できます" })).toBeDisabled();
     // 選んだものは消さない。取り直せば戻ってくる話ではないので。
     expect(screen.getByText("第一話")).toBeInTheDocument();
 
     // 帯そのものが無い。
     expect(screen.queryByText("ページが変わりました。候補を再取得してください。")).toBeNull();
+  });
+
+  /**
+   * 目の前に一覧があり、選んであり、どこから取ったかも分かっている。保存を
+   * 断る理由がない。取っておいて押させないのは、二度手間を強いるだけだった。
+   */
+  it("still saves the list it already has after the page moves on", async () => {
+    renderSavePage();
+    await goTo(SERIES);
+    fireEvent.click(await screen.findByRole("button", { name: "候補を取得" }));
+    expect(await screen.findByText("第一話")).toBeInTheDocument();
+
+    await goTo(OTHER);
+
+    expect(await screen.findByText("古い")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "2件をライブラリに保存" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "取り直すと保存できます" })).toBeNull();
+  });
+
+  /**
+   * 取得元はどれもSPAで、同じページを見ているあいだにもURLだけが動く。文字列
+   * を突き合わせていたころは、取った直後に「古い」が点いて保存できなくなった。
+   */
+  it("does not call the list stale while the same page is still open", async () => {
+    renderSavePage();
+    await goTo(SERIES);
+    fireEvent.click(await screen.findByRole("button", { name: "候補を取得" }));
+    expect(await screen.findByText("第一話")).toBeInTheDocument();
+
+    await goTo(SAME_SERIES_DRIFT);
+
+    expect(await screen.findByRole("button", { name: "候補を取得" })).toBeEnabled();
+    expect(screen.queryByText("古い")).toBeNull();
+    expect(document.querySelector(".candidate-list[data-stale]")).toBeNull();
+    expect(screen.getByRole("button", { name: "2件をライブラリに保存" })).toBeEnabled();
   });
 });

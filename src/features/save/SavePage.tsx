@@ -27,8 +27,9 @@ import { useQueryClient } from "@tanstack/react-query";
 import { Icons, IconSize } from "@/lib/icons";
 import { useAppNavigate, useAppSearchParams, useRouteParams } from "@/app/router";
 import {
-  detectDownloadTarget,
-  getFanboxCreatorId,
+  describeDownloadTarget,
+  downloadTargetKey,
+  type DownloadTargetKind,
   type FanboxPost,
   type PixivNovel,
   type SidebarDownloadType,
@@ -91,8 +92,13 @@ export default function SavePage() {
   const [downloadType, setDownloadType] = useState<SidebarDownloadType | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
   const [saving, setSaving] = useState(false);
+  // 中止は押した瞬間に見えなければならない。取り消しが実際に効くのは次の
+  // 待ちの切れ目なので、その間ボタンが何も言わないと押せていないと読まれる。
+  const [canceling, setCanceling] = useState(false);
   const [progress, setProgress] = useState<{ current: number; total: number; text: string } | null>(null);
   const [lastAnalysisUrl, setLastAnalysisUrl] = useState<string | null>(null);
+  // 一覧がどのページのものかは、URLではなく「相手」で覚える。
+  const [lastAnalysisKey, setLastAnalysisKey] = useState<string | null>(null);
   const [authConnected, setAuthConnected] = useState<boolean | null>(null);
   const [candidateWidth, setCandidateWidth] = useLocalStorage({ key: "piep.save-candidate-width", defaultValue: 360 });
   const [candidateCollapsed, setCandidateCollapsed] = useState(false);
@@ -109,6 +115,9 @@ export default function SavePage() {
   // 保存中かどうかは、描画の外からも即座に読めなければならない - 終了ガードと
   // 再入の防止が、どちらも state の反映を待てないため。
   const savingRef = useRef(false);
+  // 取得も同じ。Ctrl+S と取得ボタンが同じ瞬間に入ると、state の反映を待たずに
+  // もう一周始まり、同じ知らせが二度出る。
+  const analyzingRef = useRef(false);
   const executeRef = useRef<() => void>(() => undefined);
 
   useEmbeddedBrowserOverlay(browserViewportRef, runtime && !detached);
@@ -169,7 +178,7 @@ export default function SavePage() {
   useEffect(() => {
     let cancelled = false;
     const home = searchParams.get("url") || getProvider(source).homeUrl || "https://www.pixiv.net/";
-    setCurrentUrl(home); setAddress(home); setItems([]); setDownloadType(null); setLastAnalysisUrl(null);
+    setCurrentUrl(home); setAddress(home); setItems([]); setDownloadType(null); setLastAnalysisUrl(null); setLastAnalysisKey(null);
     if (runtime) {
       const sourceChanged = initializedSourceRef.current !== source;
       initializedSourceRef.current = source;
@@ -258,7 +267,18 @@ export default function SavePage() {
     return () => window.removeEventListener("beforeunload", guard);
   }, [saving]);
   // Closing the desktop window mid-download would abandon the batch silently.
-  useEffect(() => registerUnsavedGuard(() => savingRef.current), []);
+  // 移動のほうは止めない - この画面を離れても保存は走り続け、進行状況も中止も
+  // アクティビティに残る。閉じるときだけは本当に消えるので、そこでは訊く。
+  useEffect(() => {
+    const unregister = registerUnsavedGuard(() => savingRef.current, ["close"]);
+    return () => {
+      unregister();
+      // 黙って居なくなると、止まったのか続いているのか分からない。
+      if (savingRef.current) {
+        notifications.show({ color: "piep", title: "保存はこのまま続きます", message: "進行状況と中止は、左下のアクティビティから操作できます" });
+      }
+    };
+  }, []);
 
   const selectedCount = items.filter((item) => item.selected).length;
   // 保存ボタンが名乗る件数は、実際に取りに行く件数と同じでなければならない。
@@ -266,8 +286,9 @@ export default function SavePage() {
   const isPendingSave = (item: SidebarItem) => item.selected && item.status !== "success" && item.status !== "skipped";
   const pendingCount = items.filter(isPendingSave).length;
   const retryCount = items.filter((item) => isPendingSave(item) && item.status === "failed").length;
-  const targetKind = detectDownloadTarget(currentUrl);
-  const analysisStale = Boolean(lastAnalysisUrl && lastAnalysisUrl !== currentUrl);
+  const targetKind = describeDownloadTarget(currentUrl).kind;
+  // 古いのは一覧のほう。一覧が無いうちは、古くなりようがない。
+  const analysisStale = items.length > 0 && Boolean(lastAnalysisKey) && lastAnalysisKey !== downloadTargetKey(currentUrl);
   const navigateBrowser = async (url: string) => {
     const normalized = /^https?:\/\//i.test(url) ? url : `https://${url}`;
     setCurrentUrl(normalized); setAddress(normalized);
@@ -419,8 +440,11 @@ export default function SavePage() {
   const analyze = async (analysisUrl = currentUrl) => {
     if (!runtime) return notifications.show({ color: "piep", message: "候補取得はデスクトップアプリで利用できます" });
     if (!authConnected) return notifications.show({ color: "yellow", title: `${getProvider(source).label}に接続してください`, message: "設定画面からログインすると候補を取得できます" });
-    const target = detectDownloadTarget(analysisUrl);
+    const { kind: target, id: targetId } = describeDownloadTarget(analysisUrl);
     if (target === "unsupported") return notifications.show({ color: "yellow", title: "対応ページではありません", message: "作品、シリーズ、作者・クリエイターページを開いてください" });
+    // 同じ取得が二重に走れば、同じ知らせも二度出る。
+    if (analyzingRef.current) return;
+    analyzingRef.current = true;
     setAnalyzing(true); setItems([]); setProgress(null);
     try {
       const pixivToken = await store.get<string>("pixiv_refresh_token") || "";
@@ -432,24 +456,20 @@ export default function SavePage() {
         const novelId = String(data.id ?? data.detail?.id ?? "");
         next = [{ id: novelId, title: data.title || data.detail?.title || "Pixiv novel", subtitle: data.user?.name || data.detail?.user?.name, selected: true, originalData: data }];
       } else if (target === "pixiv_series") {
-        const seriesId = analysisUrl.match(/series(?:\/show\.php\?id=|\/)(\d+)/)?.[1] || "";
-        next = (await fetchPixivSeriesNovels<PixivNovel[]>(seriesId, pixivToken)).map((novel) => ({ id: String(novel.id), title: novel.title, subtitle: novel.user?.name, selected: true, originalData: novel }));
+        next = (await fetchPixivSeriesNovels<PixivNovel[]>(targetId, pixivToken)).map((novel) => ({ id: String(novel.id), title: novel.title, subtitle: novel.user?.name, selected: true, originalData: novel }));
       } else if (target === "pixiv_user") {
-        const userId = analysisUrl.match(/users\/(\d+)/)?.[1] || "";
-        next = (await fetchPixivUserNovels<PixivNovel[]>(userId, pixivToken)).map((novel) => ({ id: String(novel.id), title: novel.title, subtitle: novel.user?.name, selected: true, originalData: novel }));
+        next = (await fetchPixivUserNovels<PixivNovel[]>(targetId, pixivToken)).map((novel) => ({ id: String(novel.id), title: novel.title, subtitle: novel.user?.name, selected: true, originalData: novel }));
       } else if (target === "fanbox_single") {
-        const postId = analysisUrl.match(/posts\/(\d+)/)?.[1] || "";
-        const data = normalizeFanboxPostPayload<FanboxPost>(await fetchFanboxPost<unknown>(postId, fanboxCookie, fanboxUserAgent));
-        next = [{ id: postId, title: data.title || "FANBOX投稿", subtitle: data.user?.name, selected: true, originalData: data }];
+        const data = normalizeFanboxPostPayload<FanboxPost>(await fetchFanboxPost<unknown>(targetId, fanboxCookie, fanboxUserAgent));
+        next = [{ id: targetId, title: data.title || "FANBOX投稿", subtitle: data.user?.name, selected: true, originalData: data }];
       } else if (target === "fanbox_creator") {
-        const creatorId = getFanboxCreatorId(analysisUrl) || "";
-        next = (await fetchFanboxCreatorPosts<FanboxPost[]>(creatorId, fanboxCookie, fanboxUserAgent)).map((post) => ({ id: String(post.id), title: post.title, subtitle: post.user?.name, selected: true, originalData: post }));
+        next = (await fetchFanboxCreatorPosts<FanboxPost[]>(targetId, fanboxCookie, fanboxUserAgent)).map((post) => ({ id: String(post.id), title: post.title, subtitle: post.user?.name, selected: true, originalData: post }));
       }
-      setItems(next); setDownloadType(target); setLastAnalysisUrl(analysisUrl);
+      setItems(next); setDownloadType(target); setLastAnalysisUrl(analysisUrl); setLastAnalysisKey(downloadTargetKey(analysisUrl));
       notifications.show({ color: "green", title: `${next.length}件の候補を取得しました`, message: "保存する項目を確認してください" });
     } catch (error) {
       notifications.show({ color: "red", title: "候補を取得できません", message: errorMessage(error) });
-    } finally { setAnalyzing(false); }
+    } finally { analyzingRef.current = false; setAnalyzing(false); }
   };
   acceleratorHandlerRef.current = (payload) => {
     // A detached browser is provider-scoped. The embedded view belongs to the
@@ -478,12 +498,23 @@ export default function SavePage() {
     // 保存済みでも取り直す作りなので、素通しにすると本当に再取得される。
     const selected = items.filter((item) => item.selected && item.status !== "success" && item.status !== "skipped");
     if (!selected.length || !downloadType || !runtime || savingRef.current) return;
+    // 取得元は続けざまに叩けば断ってくる。1件ずつ間を空け、断られたら
+    // 引き下がって同じ項目をやり直す。ここに間隔が無かったころは、89件
+    // 選ぶと途中から全部が取得制限で落ちていた。
+    //
+    // 中止より先に作るのは、中止がこの待ちを断ち切る相手だから。取得制限の
+    // あとの待ちは30秒近くまで伸び、そこで止まっているあいだ中止を握り潰すと
+    // 「押しても何も起きない」ことになる。
+    const pacer = createSourcePacer();
     const operation = startOperation({
       kind: "save",
       label: `${selected.length}件をライブラリに保存`,
-      detail: `${getProvider(source).label} · ${currentUrl}`,
+      // 一覧の出どころは、いま開いているページではなく取ってきたページ。
+      detail: `${getProvider(source).label} · ${lastAnalysisUrl || currentUrl}`,
       total: selected.length,
-      onCancel: () => undefined,
+      // 待ちをその場で終わらせ、押されたことを画面にも即座に出す。実際に
+      // 止まるのは次の切れ目だが、返事はここで返す。
+      onCancel: () => { pacer.abort(); setCanceling(true); },
       // 再試行はいまの画面に対して走らせる。開始時の execute を捕まえたままだと、
       // その描画の items を見て、成功済みも含む古い一覧を回し直してしまう。
       onRetry: () => executeRef.current(),
@@ -493,6 +524,7 @@ export default function SavePage() {
     // setSaving の反映前にもう一周始まってしまう。
     savingRef.current = true;
     setSaving(true);
+    setCanceling(false);
     let saved = 0, skipped = 0, failed = 0;
     let firstError = "";
     const savedEntries: UpdateDownloadEntry[] = [];
@@ -500,10 +532,6 @@ export default function SavePage() {
       const pixivToken = await store.get<string>("pixiv_refresh_token") || "";
       const fanboxCookie = await store.get<string>("fanbox_session_id") || "";
       const fanboxUserAgent = await store.get<string>("fanbox_user_agent") || "Mozilla/5.0";
-      // 取得元は続けざまに叩けば断ってくる。1件ずつ間を空け、断られたら
-      // 引き下がって同じ項目をやり直す。ここに間隔が無かったころは、89件
-      // 選ぶと途中から全部が取得制限で落ちていた。
-      const pacer = createSourcePacer();
       for (let index = 0; index < selected.length; index += 1) {
         if (operation.isCancelRequested()) break;
         const item = selected[index];
@@ -537,6 +565,13 @@ export default function SavePage() {
               operation.log(`「${item.title}」: 取得が制限されています。${waited}秒あけてやり直します`, "warn");
               setProgress({ current: index + 1, total: selected.length, text: `取得制限のため待機中… ${item.title}` });
               await pacer.backOff();
+              // 待っているあいだに中止が入っていたら、やり直しには行かない。
+              // この項目はまだ失敗ではないので、失敗としても数えない。
+              if (operation.isCancelRequested()) {
+                operation.log(`「${item.title}」の待機を中止しました`, "warn");
+                setItems((rows) => rows.map((row) => row.id === item.id ? { ...row, status: "pending" } : row));
+                break;
+              }
               continue;
             }
             const message = errorMessage(error);
@@ -549,7 +584,14 @@ export default function SavePage() {
         // 最後の1件のあとまで待つ必要はない。
         if (index < selected.length - 1 && !operation.isCancelRequested()) await pacer.wait();
       }
-      if (savedEntries.length > 0) {
+      // 仕上げの作者・シリーズ取得も、相手は同じ取得元。中止のあとにここで
+      // 何十回も叩けば、止めたはずのものが止まって見えない。作品はもう
+      // 保存できていて、作者名も入っている - 足りないのは横顔だけなので、
+      // 次の保存や更新確認のときに埋まる。
+      if (savedEntries.length > 0 && operation.isCancelRequested()) {
+        operation.log("中止したため、作者・シリーズ情報の取得は見送りました", "warn");
+      }
+      if (savedEntries.length > 0 && !operation.isCancelRequested()) {
         setProgress({ current: selected.length, total: selected.length, text: "作者・シリーズ情報を取得しています" });
         await refreshEntityProfilesForEntries(savedEntries, { refreshToken: pixivToken, fanboxCookie, fanboxUserAgent });
         // 「保存したものは追いかける」設定のときだけ、保存直後に監視へ載せる。
@@ -573,7 +615,7 @@ export default function SavePage() {
     } catch (error) {
       operation.fail(error);
       notifications.show({ color: "red", title: "保存処理を完了できません", message: errorMessage(error) });
-    } finally { saveOperationRef.current = null; savingRef.current = false; setSaving(false); setProgress(null); }
+    } finally { saveOperationRef.current = null; savingRef.current = false; setSaving(false); setCanceling(false); setProgress(null); }
   };
   // 最新の execute を再試行へ届けるための一段。render ごとに差し替わる。
   executeRef.current = execute;
@@ -683,10 +725,15 @@ export default function SavePage() {
             </ScrollArea>
             <Divider />
             <Box p="md">
-              {progress && <Stack gap={5} mb="sm" role="status" aria-live="polite"><Group justify="space-between"><Text size="xs" className="line-clamp-1">{progress.text}</Text><Text size="xs" c="dimmed">{progress.current}/{progress.total}</Text></Group><Progress value={progress.current / progress.total * 100} animated aria-label={`保存進捗 ${progress.current}/${progress.total}`} /></Stack>}
+              {progress && <Stack gap={5} mb="sm" role="status" aria-live="polite"><Group justify="space-between"><Text size="xs" className="line-clamp-1">{canceling ? `中止しています… ${progress.text}` : progress.text}</Text><Text size="xs" c="dimmed">{progress.current}/{progress.total}</Text></Group><Progress value={progress.current / progress.total * 100} animated={!canceling} color={canceling ? "gray" : undefined} aria-label={`保存進捗 ${progress.current}/${progress.total}`} /></Stack>}
               {saving
-                ? <Group grow><Button size="md" leftSection={<Icons.collect size={IconSize.action} />} loading>保存中</Button><Button size="md" variant="light" color="red" leftSection={<Icons.cancel size={IconSize.action} />} onClick={() => saveOperationRef.current && requestOperationCancel(saveOperationRef.current.id)}>中止</Button></Group>
-                : <Button fullWidth size="md" leftSection={<Icons.collect size={IconSize.action} />} disabled={!runtime || !pendingCount || analysisStale} onClick={execute}>{analysisStale ? "取り直すと保存できます" : !pendingCount ? (selectedCount ? "選択したものは保存済みです" : "保存する項目を選択") : retryCount === pendingCount ? `失敗した${pendingCount}件をやり直す` : `${pendingCount}件をライブラリに保存`}</Button>}
+                ? <Group grow>
+                    <Button size="md" leftSection={<Icons.collect size={IconSize.action} />} loading>{canceling ? "中止待ち" : "保存中"}</Button>
+                    {/* 押したことが返らないボタンは、押せなかったのと同じ。
+                        実際に止まるのは次の切れ目でも、返事はその場で返す。 */}
+                    <Button size="md" variant="light" color="red" leftSection={<Icons.cancel size={IconSize.action} />} loading={canceling} disabled={canceling} onClick={() => saveOperationRef.current && requestOperationCancel(saveOperationRef.current.id)}>{canceling ? "中止しています" : "中止"}</Button>
+                  </Group>
+                : <Button fullWidth size="md" leftSection={<Icons.collect size={IconSize.action} />} disabled={!runtime || !pendingCount} onClick={execute}>{!pendingCount ? (selectedCount ? "選択したものは保存済みです" : "保存する項目を選択") : retryCount === pendingCount ? `失敗した${pendingCount}件をやり直す` : `${pendingCount}件をライブラリに保存`}</Button>}
               <Button fullWidth mt="xs" variant="subtle" color="gray" leftSection={<Icons.library size={IconSize.menu} />} onClick={() => navigate("/library")}>ライブラリを開く</Button>
             </Box>
           </Stack>}
@@ -696,7 +743,7 @@ export default function SavePage() {
   );
 }
 
-function targetLabel(kind: ReturnType<typeof detectDownloadTarget>): string {
+function targetLabel(kind: DownloadTargetKind): string {
   const labels: Record<string, string> = { pixiv_single: "pixiv小説を保存できます", pixiv_series: "シリーズ内の小説を選択できます", pixiv_user: "作者の小説を選択できます", fanbox_single: "FANBOX投稿を保存できます", fanbox_creator: "クリエイターの投稿を選択できます", unsupported: "作品・シリーズ・作者ページを開いてください" };
   return labels[kind];
 }
