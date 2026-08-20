@@ -292,26 +292,31 @@ export default function DiagnosticsPage({ embedded = false, previewData = previe
       <Alert color="blue" title="表示だけでは変更しません">
         DBやファイルを削除せず、診断で見つかった先頭{formatNumber(data.fileIssueSamples.length)}件を表示しています。全体は{formatNumber(fileIntegrityIssues)}件です。
       </Alert>
-      <Stack gap="sm" mah="55vh" style={{ overflowY: "auto" }} pr="xs">
-        {data.fileIssueSamples.map((issue, index) => {
-          const sizeDetail = issueSizeDetail(issue);
-          const parent = parentDirectory(issue.path);
-          return <Card key={`${issue.issueType}-${issue.path}-${index}`} withBorder p="sm">
-            <Group justify="space-between" align="flex-start" wrap="nowrap">
-              <Box miw={0}>
-                <Group gap="xs">
-                  <Badge color={issue.issueType === "transient" || issue.issueType === "empty" || issue.issueType === "size_mismatch" ? "yellow" : "red"} variant="light">{FILE_ISSUE_LABEL[issue.issueType] ?? issue.issueType}</Badge>
-                  <Badge color="gray" variant="light">{FILE_CATEGORY_LABEL[issue.category] ?? issue.category}</Badge>
-                </Group>
-                {issue.label && <Text mt="xs" size="sm" fw={650}>{issue.label}</Text>}
-                <Text mt="xs" size="xs" ff="monospace" style={{ overflowWrap: "anywhere" }}>{issue.path}</Text>
-                {sizeDetail && <Text mt={4} size="xs" c="dimmed">{sizeDetail}</Text>}
-              </Box>
-              <Button size="compact-xs" variant="default" disabled={!runtime || !parent} onClick={() => openIssueParent(issue)}>親フォルダーを開く</Button>
-            </Group>
-          </Card>;
-        })}
-      </Stack>
+      {/* 縦に積む箱と、縦に流れる箱は別物である。Stack のまま高さを絞ると、
+          中の Card が flex で縮み、Card は自分の中身を切り落とす - 帯の文字が
+          上下で切れて重なっていたのはこれだった。流すのは外の箱の仕事にする。 */}
+      <Box mah="55vh" style={{ overflowY: "auto" }} pr="xs">
+        <Stack gap="sm">
+          {data.fileIssueSamples.map((issue, index) => {
+            const sizeDetail = issueSizeDetail(issue);
+            const parent = parentDirectory(issue.path);
+            return <Card key={`${issue.issueType}-${issue.path}-${index}`} withBorder p="sm">
+              <Group justify="space-between" align="flex-start" wrap="nowrap">
+                <Box miw={0}>
+                  <Group gap="xs">
+                    <Badge color={issue.issueType === "transient" || issue.issueType === "empty" || issue.issueType === "size_mismatch" ? "yellow" : "red"} variant="light">{FILE_ISSUE_LABEL[issue.issueType] ?? issue.issueType}</Badge>
+                    <Badge color="gray" variant="light">{FILE_CATEGORY_LABEL[issue.category] ?? issue.category}</Badge>
+                  </Group>
+                  {issue.label && <Text mt="xs" size="sm" fw={650}>{issue.label}</Text>}
+                  <Text mt="xs" size="xs" ff="monospace" style={{ overflowWrap: "anywhere" }}>{issue.path}</Text>
+                  {sizeDetail && <Text mt={4} size="xs" c="dimmed">{sizeDetail}</Text>}
+                </Box>
+                <Button size="compact-xs" variant="default" disabled={!runtime || !parent} onClick={() => openIssueParent(issue)}>親フォルダーを開く</Button>
+              </Group>
+            </Card>;
+          })}
+        </Stack>
+      </Box>
       {data.fileIssueSamples.length < fileIntegrityIssues && <Text size="xs" c="dimmed">画面負荷を抑えるため先頭{formatNumber(data.fileIssueSamples.length)}件だけ表示しています。原因別の総件数は診断画面のバッジで確認できます。</Text>}
     </Stack>,
   });

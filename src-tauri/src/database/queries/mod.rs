@@ -420,11 +420,19 @@ fn check_library_file_integrity(
                 if match kind {
                     // Work JSON and assets live below downloads/.
                     0 | 1 => path.starts_with(&canonical_storage),
-                    // Entity media and version JSON deliberately live beside
-                    // downloads/, below profiles/ or series/. Treating every
-                    // reference as a downloads path made every fetched profile
-                    // look like an unsafe external file.
-                    2 | 3 => {
+                    // 作者・シリーズの画像は三か所に正当に置かれる。取ってきた
+                    // 横顔は profiles/ と series/ の下だが、シリーズの表紙は
+                    // 最初に保存した作品の表紙そのもの - つまり downloads/ の
+                    // 下を指す。ここを downloads/ 抜きで見ていたころは、その
+                    // 1件1件が「許可領域外」として並び、直しようのない警告に
+                    // なっていた。
+                    2 => {
+                        path.starts_with(&canonical_profiles)
+                            || path.starts_with(&canonical_series)
+                            || path.starts_with(&canonical_storage)
+                    }
+                    // 版のJSONは、アプリが自分で書く場所しか指さない。
+                    3 => {
                         path.starts_with(&canonical_profiles) || path.starts_with(&canonical_series)
                     }
                     _ => false,
@@ -12685,6 +12693,14 @@ mod search_integration_tests {
             params![empty_profile.to_string_lossy()],
         )
         .unwrap();
+        // シリーズの表紙は、最初に保存した作品の表紙をそのまま指すことがある。
+        // downloads/ の下にあっても、これはアプリが置いたものである。
+        conn.execute(
+            "INSERT INTO series (source, source_key, title, cover_path)
+             VALUES ('pixiv', 'borrowed', '借りた表紙', ?1)",
+            params![asset.to_string_lossy()],
+        )
+        .unwrap();
         conn.execute(
             "INSERT INTO entity_versions (
                 entity_type, source, source_key, version, json_path, created_at
@@ -12697,11 +12713,14 @@ mod search_integration_tests {
         .unwrap();
 
         let integrity = check_library_file_integrity(&conn, &storage, &root).unwrap();
-        assert_eq!(integrity.checked_file_references, 6);
+        assert_eq!(integrity.checked_file_references, 7);
         assert_eq!(integrity.missing_json_files, 2);
         assert_eq!(integrity.missing_asset_files, 0);
         assert_eq!(integrity.missing_profile_files, 0);
-        assert_eq!(integrity.unsafe_referenced_files, 1);
+        assert_eq!(
+            integrity.unsafe_referenced_files, 1,
+            "作品の表紙を借りたシリーズは、許可領域外ではない"
+        );
         assert_eq!(integrity.unreadable_referenced_files, 0);
         assert_eq!(integrity.empty_referenced_files, 1);
         assert_eq!(integrity.mismatched_asset_files, 1);

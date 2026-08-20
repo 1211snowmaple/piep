@@ -306,6 +306,7 @@ pub fn run() -> tauri::Result<()> {
             commands::epub::preview_epub_template,
             commands::epub::validate_epub_file,
             commands::archive::get_storage_path,
+            commands::shell::open_managed_path,
         ])
         .run(tauri::generate_context!())
 }
