@@ -1198,7 +1198,14 @@ select {
 .work-hero__actionbar > .work-hero__favorite { margin-left: auto; }
 /* Same place and same weight as the author page's row, so the two detail
    screens read as one design. */
-.work-hero__utility { flex: 0 1 auto; }
+.work-hero__utility { flex: 0 0 auto; }
+/* 作品の上段は操作だけなので、題と場所を分け合う作者・シリーズより
+   境目が小さい。同じ「入らなくなったら畳む」を、それぞれの行の中身で測る。 */
+.work-hero__toprow { container-type: inline-size; container-name: heroactions; }
+
+/* 右の柱は、余った高さを2枚で分け合う。中身は上から流れるので、伸びても
+   文字の位置は動かない。 */
+.work-side-column > * { flex: 1 1 auto; }
 .work-hero__action {
   flex: 0 0 auto;
   min-height: 38px;
@@ -1338,7 +1345,8 @@ select {
   overflow-wrap: anywhere;
 }
 
-.entity-hero__body { position: relative; padding: clamp(20px, 2.5vw, 34px); }
+/* 操作列が名前を畳む境目は、この箱の幅で測る。 */
+.entity-hero__body { position: relative; padding: clamp(20px, 2.5vw, 34px); container-type: inline-size; container-name: hero; }
 .entity-hero:has(.entity-hero__banner) .entity-hero__body { padding-top: 22px; }
 .entity-hero:has(.entity-hero__banner) .entity-hero__avatar { margin-top: -72px; }
 .entity-hero__avatar {

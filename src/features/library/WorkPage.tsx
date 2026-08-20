@@ -30,6 +30,7 @@ import { modals } from "@mantine/modals";
 import { notifications } from "@mantine/notifications";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Icons, IconSize } from "@/lib/icons";
+import { ActionBar } from "@/components/ActionBar";
 import { Note } from "@/components/Note";
 import { runSingleCheck } from "@/features/updates/startSingleCheck";
 import { AppLink, useAppNavigate, useAppSearchParams, useReturnTo, useRouteParams } from "@/app/router";
@@ -274,17 +275,27 @@ export default function WorkPage() {
           <Grid.Col span={{ base: 12, sm: 8, lg: 9 }}>
             <Stack p={{ base: "lg", lg: "xl" }} h="100%" gap={0}>
               <Stack gap="md">
-                <Group justify="space-between" align="flex-start" wrap="wrap">
-                  <Group gap="xs"><ProviderMark provider={work.source} /><Badge variant="light" color="gray">{contentTypeLabel(work.contentType)}</Badge>{doc.isEdited && <Badge color="gray" variant="light">ローカル編集</Badge>}</Group>
-                  <Group gap="xs" wrap="wrap" className="work-hero__utility">
-                  {/* 保存フォルダーとアーカイブは作者詳細と同じく上段の補助操作へ。
-                      下段は読む・編集のような、その作品を扱う主操作だけに保つ。 */}
-                  <Button variant="default" leftSection={<Icons.openFolder size={IconSize.menu} />} onClick={openSavedFolder}>保存フォルダー</Button>
-                  <Button variant="default" leftSection={<Icons.archive size={IconSize.menu} />} onClick={exportArchive}>アーカイブ</Button>
-                  <Menu position="bottom-end"><Menu.Target><Tooltip label="その他"><ActionIcon variant="subtle" color="gray" size="lg" aria-label="作品のその他の操作"><Icons.more size={IconSize.action} /></ActionIcon></Tooltip></Menu.Target><Menu.Dropdown><Menu.Item leftSection={<Icons.inAppBrowser size={IconSize.menu} />} onClick={openSourceInApp}>元ページをアプリ内で開く</Menu.Item><Menu.Item leftSection={<Icons.externalLink size={IconSize.menu} />} onClick={openSource}>元ページをブラウザで開く</Menu.Item><Menu.Divider /><Menu.Item color="red" leftSection={<Icons.delete size={IconSize.menu} />} onClick={deleteWork}>作品を削除</Menu.Item></Menu.Dropdown></Menu>
-                  </Group>
+                {/* 作者・シリーズと同じ並び、同じ順番。3つの詳細画面で
+                    「元ページを開く・書き出す・取り直す」の位置が変わらない。
+                    印（保存元・種類）は題のほうへ寄せた - 操作の列と場所を
+                    取り合うと、名前を畳まないと1行に収まらなくなる。 */}
+                <Group justify="flex-end" align="flex-start" wrap="nowrap" className="work-hero__toprow">
+                  <Box className="work-hero__utility">
+                    <ActionBar
+                      label="作品の操作"
+                      items={[
+                        { key: "in-app", label: "アプリ内で開く", icon: Icons.inAppBrowser, onClick: openSourceInApp },
+                        { key: "browser", label: "ブラウザで開く", icon: Icons.externalLink, onClick: openSource },
+                        { key: "archive", label: "アーカイブ", icon: Icons.archive, onClick: exportArchive },
+                        { key: "refresh", label: "情報を更新", icon: Icons.watch, primary: true, onClick: () => runSingleCheck({ kind: "work", workId: work.id, label: work.title }, () => navigate("/updates")) },
+                      ]}
+                    >
+                      <Menu position="bottom-end"><Menu.Target><Tooltip label="その他"><ActionIcon variant="subtle" color="gray" size="lg" aria-label="作品のその他の操作"><Icons.more size={IconSize.action} /></ActionIcon></Tooltip></Menu.Target><Menu.Dropdown><Menu.Item leftSection={<Icons.openFolder size={IconSize.menu} />} onClick={openSavedFolder}>保存フォルダーを開く</Menu.Item><Menu.Divider /><Menu.Item color="red" leftSection={<Icons.delete size={IconSize.menu} />} onClick={deleteWork}>作品を削除</Menu.Item></Menu.Dropdown></Menu>
+                    </ActionBar>
+                  </Box>
                 </Group>
                 <Box>
+                  <Group gap="xs" wrap="wrap" mb={8}><ProviderMark provider={work.source} /><Badge variant="light" color="gray">{contentTypeLabel(work.contentType)}</Badge>{doc.isEdited && <Badge color="gray" variant="light">ローカル編集</Badge>}</Group>
                   {/* The series line is itself the link, so it is not repeated
                       as a separate button beside the author below. */}
                   {work.seriesTitle && (work.seriesId
@@ -363,7 +374,11 @@ export default function WorkPage() {
               <Card p="lg" h="100%"><Title order={3} mb="md">作品情報</Title><SimpleGrid cols={{ base: 1, sm: 2 }} spacing="lg"><Info label="作者" value={work.authorName} icon={<Icons.person size={IconSize.action} />} /><Info label="公開日" value={formatDate(work.sourceCreatedAt)} icon={<Icons.publishedDate size={IconSize.action} />} /><Info label="文字数" value={`${formatNumber(work.textLength)}字`} icon={<Icons.read size={IconSize.action} />} /><Info label="ローカル容量" value={formatBytes(work.fileSizeBytes)} icon={<Icons.openFolder size={IconSize.action} />} /><Info label="現在のバージョン" value={`v${work.currentVersion}`} icon={<Icons.versionHistory size={IconSize.action} />} /><Info label="最終保存" value={formatDate(work.downloadedAt, true)} icon={<Icons.epubAdd size={IconSize.action} />} /></SimpleGrid></Card>
             </Grid.Col>
             <Grid.Col span={{ base: 12, md: 4 }}>
-              <Stack gap="lg" h="100%" justify="space-between"><Card p="lg"><Group justify="space-between"><Box><Text fw={700}>更新監視</Text><Text size="xs" c="dimmed" mt={3}>保存元の変更をチェック</Text></Box><Switch checked={work.watchUpdates} disabled={mutate.isPending} onChange={(event) => mutate.mutate({ watch: event.currentTarget.checked })} aria-label="更新監視" /></Group><Button fullWidth variant="light" leftSection={<Icons.watch size={IconSize.menu} />} mt="md" onClick={() => runSingleCheck({ kind: "work", workId: work.id, label: work.title }, () => navigate("/updates"))}>今すぐ更新確認</Button></Card><Note title="編集について">ローカル編集は元データを残したまま別リビジョンとして保存されます。</Note></Stack>
+              {/* 両端に寄せると、外側の辺は「作品情報」と揃うかわりに真ん中が
+                  空く。2枚が余りを半分ずつ引き受ければ、辺は揃ったまま隙間だけ
+                  消える。 */}
+              <Stack gap="lg" h="100%" className="work-side-column"><Card p="lg"><Group justify="space-between"><Box><Text fw={700}>更新監視</Text><Text size="xs" c="dimmed" mt={3}>保存元の変更をチェック</Text></Box><Switch checked={work.watchUpdates} disabled={mutate.isPending} onChange={(event) => mutate.mutate({ watch: event.currentTarget.checked })} aria-label="更新監視" /></Group>{/* 「今すぐ確認」は上段の「情報を更新」と同じ動作だった。同じことを
+                  する口が2つあると、どちらが効いたのか分からなくなる。 */}</Card><Note title="編集について">ローカル編集は元データを残したまま別リビジョンとして保存されます。</Note></Stack>
             </Grid.Col>
           </Grid>
         </Tabs.Panel>

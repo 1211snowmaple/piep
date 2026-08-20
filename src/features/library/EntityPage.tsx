@@ -31,6 +31,7 @@ import { Icons, IconSize } from "@/lib/icons";
 import { NoImageMark } from "@/components/NoImageMark";
 import { Note } from "@/components/Note";
 import { useAppNavigate, useAppSearchParams, useReturnTo, useRouteParams } from "@/app/router";
+import { ActionBar } from "@/components/ActionBar";
 import { EmptyState, ErrorState, LoadingState } from "@/components/AsyncState";
 import { BoundedJsonView } from "@/components/BoundedJsonView";
 import { ExpandableText } from "@/components/ExpandableText";
@@ -394,10 +395,19 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
                 : <Box className="entity-hero__series-cover">{avatarPath ? <Image src={getAssetUrl(avatarPath)} alt={`${displayName}の表紙`} fit="contain" /> : <Icons.series size={IconSize.avatar} />}</Box>}
               <Stack gap={7} mb={5} miw={0} align="flex-start"><ProviderMark provider={source} /><Title order={1} className="line-clamp-2">{displayName}</Title><Group gap="xs"><Badge variant="light" color="gray">{formatNumber(entry.workCount)}作品</Badge><Text size="xs" c="dimmed">更新 {formatDate(entry.updatedAt)}</Text></Group></Stack>
             </Group>
-            <Group gap="xs" className="entity-hero__actions">{/* 行き先を名前で分ける。アプリ内なら内蔵ブラウザで開いてそのまま保存でき、
-                ブラウザならログイン済みの普段の環境で開く。 */}
-            <Button variant="default" leftSection={<Icons.inAppBrowser size={IconSize.menu} />} onClick={openSourceInApp}>アプリ内で開く</Button>
-            <Button variant="default" leftSection={<Icons.externalLink size={IconSize.menu} />} onClick={openSourceExternally}>ブラウザで開く</Button><Button variant="default" leftSection={<Icons.archive size={IconSize.menu} />} onClick={exportZip}>アーカイブ</Button><Button leftSection={<Icons.watch size={IconSize.menu} />} loading={refreshMutation.isPending} onClick={() => refreshMutation.mutate()}>情報を更新</Button></Group>
+            {/* 行き先を名前で分ける。アプリ内なら内蔵ブラウザで開いてそのまま
+                保存でき、ブラウザならログイン済みの普段の環境で開く。 */}
+            <Box className="entity-hero__actions">
+              <ActionBar
+                label={`${displayName}の操作`}
+                items={[
+                  { key: "in-app", label: "アプリ内で開く", icon: Icons.inAppBrowser, onClick: openSourceInApp },
+                  { key: "browser", label: "ブラウザで開く", icon: Icons.externalLink, onClick: openSourceExternally },
+                  { key: "archive", label: "アーカイブ", icon: Icons.archive, onClick: exportZip },
+                  { key: "refresh", label: "情報を更新", icon: Icons.watch, primary: true, loading: refreshMutation.isPending, onClick: () => refreshMutation.mutate() },
+                ]}
+              />
+            </Box>
           </Group>
           <Stack gap="md" mt="lg">
             {/* Profiles run from one line to several screens of release notes
