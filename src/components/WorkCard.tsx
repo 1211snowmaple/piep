@@ -144,17 +144,27 @@ function SelectionToggle({ work, selected, compact, onSelect }: {
   compact?: boolean;
   onSelect?: (id: number, selected: boolean) => void;
 }) {
+  // 一覧（リスト表示）の行は、行そのものが細いので隅の印のまま。
+  // 表紙が主役のカードだけ、中央の大きな丸に変える。
+  if (compact) {
+    return (
+      <UnstyledButton
+        className="work-row__select"
+        data-checked={selected || undefined}
+        aria-label={`${work.title}を${selected ? "選択解除" : "選択"}`}
+        aria-pressed={selected}
+        onClick={(event) => { event.stopPropagation(); onSelect?.(work.id, !selected); }}
+      >
+        <span className="work-selection-toggle__indicator" aria-hidden>{selected && <Icons.confirm size={IconSize.menu} strokeWidth={3} />}</span>
+      </UnstyledButton>
+    );
+  }
   return (
-    <UnstyledButton
-      className={compact ? "work-row__select" : "work-card__select"}
-      data-checked={selected || undefined}
-      aria-label={`${work.title}を${selected ? "選択解除" : "選択"}`}
-      aria-pressed={selected}
-      onClick={(event) => { event.stopPropagation(); onSelect?.(work.id, !selected); }}
-    >
-      <span className="work-selection-toggle__indicator" aria-hidden>{selected && <Icons.confirm size={IconSize.menu} strokeWidth={3} />}</span>
-      {!compact && <span className="work-selection-toggle__label">{selected ? "選択中" : "選択"}</span>}
-    </UnstyledButton>
+    <span className="card-select" data-checked={selected || undefined} aria-hidden>
+      <span className="card-select__ring">
+        <Icons.confirm size={IconSize.nav} strokeWidth={3} />
+      </span>
+    </span>
   );
 }
 
@@ -186,13 +196,13 @@ export const WorkCard = memo(function WorkCard({
   // Selection mode is modal: every part of the card selects the work instead
   // of unexpectedly following an author, series, tag, or action link.
   const selectFromCardCapture = (event: React.MouseEvent<HTMLElement>) => {
-    if (!selectionMode || (event.target instanceof Element && event.target.closest(".work-card__select, .work-row__select"))) return;
+    if (!selectionMode || (event.target instanceof Element && event.target.closest(".work-row__select"))) return;
     event.preventDefault();
     event.stopPropagation();
     onSelect?.(work.id, !selected);
   };
   const selectFromKeyboardCapture = (event: React.KeyboardEvent<HTMLElement>) => {
-    if (!selectionMode || (event.key !== "Enter" && event.key !== " ") || (event.target instanceof Element && event.target.closest(".work-card__select, .work-row__select"))) return;
+    if (!selectionMode || (event.key !== "Enter" && event.key !== " ") || (event.target instanceof Element && event.target.closest(".work-row__select"))) return;
     event.preventDefault();
     event.stopPropagation();
     onSelect?.(work.id, !selected);
@@ -243,12 +253,26 @@ export const WorkCard = memo(function WorkCard({
     );
   }
 
+  // 選択モードでは、カードそのものが選ぶための操作子になる。中央の印は
+  // 見た目だけなので、名前も押し込みの状態もカードが持つ - そうしないと
+  // キーボードで選べる場所がどこにも無くなる。
   return (
-    <Card className="work-card surface--interactive" padding={0} onClick={openFromCardSurface} onClickCapture={selectFromCardCapture} onKeyDownCapture={selectFromKeyboardCapture} data-selection-mode={selectionMode || undefined} data-selected={selectionMode && selected || undefined}>
+    <Card
+      className="work-card surface--interactive"
+      padding={0}
+      onClick={openFromCardSurface}
+      onClickCapture={selectFromCardCapture}
+      onKeyDownCapture={selectFromKeyboardCapture}
+      data-selection-mode={selectionMode || undefined}
+      data-selected={selectionMode && selected || undefined}
+      role={selectionMode ? "button" : undefined}
+      tabIndex={selectionMode ? 0 : undefined}
+      aria-pressed={selectionMode ? Boolean(selected) : undefined}
+      aria-label={selectionMode ? `${work.title}を${selected ? "選択解除" : "選択"}` : undefined}
+    >
       <div className="work-card__inner">
         <div className="work-card__cover-rail">
           <WorkCover work={work} variant="card" className="work-card__cover" />
-          {selectionMode && <SelectionToggle work={work} selected={Boolean(selected)} onSelect={onSelect} />}
         </div>
         <div className="work-card__body" inert={selectionMode || undefined} aria-hidden={selectionMode || undefined}>
           {work.seriesTitle && <div className="work-card__meta"><SeriesLink work={work} interactive={!selectionMode} /></div>}
@@ -273,6 +297,9 @@ export const WorkCard = memo(function WorkCard({
           </Group>
           {!selectionMode && actions}
         </div>
+        {/* カード全体を覆う。表紙の上だけに置くと、印がカードの中心ではなく
+            表紙の中心に来て、横長のカードでは左に寄って見える。 */}
+        {selectionMode && <SelectionToggle work={work} selected={Boolean(selected)} onSelect={onSelect} />}
       </div>
     </Card>
   );

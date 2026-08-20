@@ -55,30 +55,35 @@ describe("WorkCard", () => {
     expect(window.location.hash).toBe("#/people/pixiv/8001234");
   });
 
-  it("makes selection the only interactive action in selection mode", () => {
+  // 選ぶ面はカードそのもの。印は中央に大きく置くが、名前と押し込みの状態は
+  // カードが持つ - でないとキーボードで選べる場所が無くなる。
+  it("makes the whole card the only interactive action in selection mode", () => {
     const onSelect = vi.fn();
     window.location.hash = "#/library";
     const view = renderCard({ selectionMode: true, selected: false, onSelect });
-    const toggle = screen.getByRole("button", { name: /雨上がりの図書室でを選択/ });
-    expect(toggle.closest("[inert]")).toBeNull();
+    const card = screen.getByRole("button", { name: /雨上がりの図書室でを選択/ });
+    expect(card).toHaveClass("work-card");
+    expect(card).toHaveAttribute("aria-pressed", "false");
     expect(view.container.querySelector(".work-card__body")).toHaveAttribute("inert");
     expect(view.container.querySelector(".work-card__footer")).toHaveAttribute("inert");
+    expect(view.container.querySelector(".card-select")).not.toBeNull();
     expect(screen.queryByRole("link")).toBeNull();
-    expect(screen.getAllByRole("button")).toEqual([toggle]);
+    expect(screen.getAllByRole("button")).toEqual([card]);
 
     fireEvent.click(screen.getByText("青葉しおり"));
     expect(onSelect).toHaveBeenCalledWith(demoWorks[0].id, true);
     expect(window.location.hash).toBe("#/library");
   });
 
-  it("shows a clear selected state and lets the selection control undo it", () => {
+  it("shows a clear selected state and lets the card undo it", () => {
     const onSelect = vi.fn();
     const view = renderCard({ selectionMode: true, selected: true, onSelect });
 
     expect(view.container.querySelector(".work-card")).toHaveAttribute("data-selected", "true");
-    const toggle = screen.getByRole("button", { name: /雨上がりの図書室でを選択解除/ });
-    expect(toggle).toHaveAttribute("aria-pressed", "true");
-    fireEvent.click(toggle);
+    expect(view.container.querySelector(".card-select")).toHaveAttribute("data-checked", "true");
+    const card = screen.getByRole("button", { name: /雨上がりの図書室でを選択解除/ });
+    expect(card).toHaveAttribute("aria-pressed", "true");
+    fireEvent.click(card);
     expect(onSelect).toHaveBeenCalledWith(demoWorks[0].id, false);
   });
 

@@ -41,14 +41,21 @@ describe("dbApi bulk and facet guards", () => {
     expect(invoke).toHaveBeenLastCalledWith("db_search_filter_facets", { kind: "tags", query: "uncommon", limit: 200 });
 
     await searchEntityFacets("person", "  author ", Number.NaN, -50);
-    expect(invoke).toHaveBeenLastCalledWith("db_search_entity_facets", { kind: "person", query: "author", limit: 60, offset: 0, filters: null });
+    expect(invoke).toHaveBeenLastCalledWith("db_search_entity_facets", { kind: "person", query: "author", limit: 60, offset: 0, filters: null, sortBy: null, sortOrder: null, scope: null });
 
     // The entity tabs group works, so they take the same library filters the
     // works listing does rather than ignoring the drawer.
     await searchEntityFacets("person", null, 60, 0, { favorite: true });
-    expect(invoke).toHaveBeenLastCalledWith("db_search_entity_facets", { kind: "person", query: null, limit: 60, offset: 0, filters: { favorite: true } });
+    expect(invoke).toHaveBeenLastCalledWith("db_search_entity_facets", { kind: "person", query: null, limit: 60, offset: 0, filters: { favorite: true }, sortBy: null, sortOrder: null, scope: null });
     await countEntityFacets("series", null, { favorite: true });
-    expect(invoke).toHaveBeenLastCalledWith("db_count_entity_facets", { kind: "series", query: null, filters: { favorite: true } });
+    expect(invoke).toHaveBeenLastCalledWith("db_count_entity_facets", { kind: "series", query: null, filters: { favorite: true }, scope: null });
+
+    // 並べ替えと、一覧そのものの条件は、そのまま裏側へ渡る。
+    await searchEntityFacets("series", null, 60, 0, null, "source_updated_at", null, { watch: "watched", concluded: true });
+    expect(invoke).toHaveBeenLastCalledWith("db_search_entity_facets", {
+      kind: "series", query: null, limit: 60, offset: 0, filters: null,
+      sortBy: "source_updated_at", sortOrder: null, scope: { watch: "watched", concluded: true },
+    });
   });
 
   it("keeps expensive search index optimization behind its explicit command", async () => {

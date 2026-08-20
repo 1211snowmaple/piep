@@ -94,7 +94,28 @@ function SuggestionCard({ suggestion, busy, onAccept, onReject, onDismiss }: {
 
 /** The collection list as it appears inside the library, beside 作品 /
  *  作者・クリエイター / シリーズ. The detail screen stays on its own route. */
-export function CollectionsPanel() {
+/**
+ * 一覧の並べ替え。コレクションは手で作った束ねなので、鍵も作品や作者とは違う。
+ * 「いつ作ったか」「名前」「何作品入っているか」の三つで足りる。
+ */
+export type CollectionSortBy = "created_at" | "name" | "member_count";
+
+/** 名前と説明にかかる、ただの絞り込み。件数を数える側と同じ関数を使う。 */
+export function filterCollections(items: WorkCollectionSummary[], query: string): WorkCollectionSummary[] {
+  const normalized = query.trim().toLocaleLowerCase("ja-JP");
+  if (!normalized) return items;
+  return items.filter((collection) =>
+    `${collection.name} ${collection.description ?? ""}`.toLocaleLowerCase("ja-JP").includes(normalized));
+}
+
+function sortCollections(items: WorkCollectionSummary[], sortBy: CollectionSortBy): WorkCollectionSummary[] {
+  const sorted = [...items];
+  if (sortBy === "name") return sorted.sort((a, b) => a.name.localeCompare(b.name, "ja"));
+  if (sortBy === "member_count") return sorted.sort((a, b) => b.memberCount - a.memberCount || a.name.localeCompare(b.name, "ja"));
+  return sorted.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
+export function CollectionsPanel({ query = "", sortBy = "created_at" }: { query?: string; sortBy?: CollectionSortBy } = {}) {
   const runtime = isTauriRuntime();
   const navigate = useAppNavigate();
   const queryClient = useQueryClient();
@@ -160,7 +181,10 @@ export function CollectionsPanel() {
     setSearchParams(next, { replace: true });
   }, [runtime, searchParams, setSearchParams, suggestionMutation]);
 
-  const collections = collectionsQuery.data ?? [];
+  // 上のツールバーはこのタブでも出したままにする（タブを移るたびに画面が
+   // 飛ばないため）。出ている以上、検索も並べ替えもここに効かせる。
+  const normalizedQuery = query.trim();
+  const collections = sortCollections(filterCollections(collectionsQuery.data ?? [], query), sortBy);
   const suggestions = suggestionsQuery.data ?? [];
   return (
     <Stack gap="xl">
@@ -171,7 +195,9 @@ export function CollectionsPanel() {
       {!runtime && <Alert color="gray">プレビューではコレクションの変更は保存されません。</Alert>}
       {suggestionMutation.isPending && <Alert icon={<Icons.collectionSuggest size={IconSize.action} />}>本文・キャプションのリンクを双方向へたどり、その後にシリーズ、作者、タイトル、意味的な近さを補助根拠として調べています。</Alert>}
       {suggestions.length > 0 && <Stack gap="md"><Group gap="xs"><Icons.collectionSuggest size={IconSize.action} /><Title order={2} size="h3">確認待ちのひな型</Title><Badge>{suggestions.length}</Badge></Group>{suggestions.map((suggestion) => <SuggestionCard key={suggestion.id} suggestion={suggestion} busy={acceptMutation.isPending || rejectMutation.isPending || dismissMutation.isPending} onAccept={(value, keys) => acceptMutation.mutate({ suggestion: value, keys })} onReject={confirmRejectSuggestion} onDismiss={(value) => dismissMutation.mutate(value.id)} />)}<Divider /></Stack>}
-      {collectionsQuery.isLoading ? <LoadingState label="コレクションを読み込んでいます" /> : collectionsQuery.error ? <ErrorState error={collectionsQuery.error} retry={() => collectionsQuery.refetch()} /> : collections.length === 0 ? <Paper withBorder p="xl"><Stack align="center"><Icons.collection size={IconSize.hero} /><Text fw={700}>まだコレクションはありません</Text><Text size="sm" c="dimmed" ta="center">前後編、非公式の連載、pixivとFANBOXに分かれた作品などをまとめられます。</Text><Button onClick={form.open} disabled={!runtime}>最初のコレクションを作成</Button></Stack></Paper> : <SimpleGrid cols={{ base: 1, sm: 2, xl: 3 }}>{collections.map((collection) => <CollectionCard key={collection.id} collection={collection} />)}</SimpleGrid>}
+      {collectionsQuery.isLoading ? <LoadingState label="コレクションを読み込んでいます" /> : collectionsQuery.error ? <ErrorState error={collectionsQuery.error} retry={() => collectionsQuery.refetch()} /> : collections.length === 0 ? (normalizedQuery
+        ? <Paper withBorder p="xl"><Stack align="center"><Icons.search size={IconSize.hero} /><Text fw={700}>一致するコレクションがありません</Text><Text size="sm" c="dimmed" ta="center">「{query.trim()}」に当てはまるものは見つかりませんでした。</Text></Stack></Paper>
+        : <Paper withBorder p="xl"><Stack align="center"><Icons.collection size={IconSize.hero} /><Text fw={700}>まだコレクションはありません</Text><Text size="sm" c="dimmed" ta="center">前後編、非公式の連載、pixivとFANBOXに分かれた作品などをまとめられます。</Text><Button onClick={form.open} disabled={!runtime}>最初のコレクションを作成</Button></Stack></Paper>) : <SimpleGrid cols={{ base: 1, sm: 2, xl: 3 }}>{collections.map((collection) => <CollectionCard key={collection.id} collection={collection} />)}</SimpleGrid>}
       <CollectionFormModal opened={formOpened} onClose={form.close} onSave={(input) => saveMutation.mutate(input)} />
     </Stack>
   );

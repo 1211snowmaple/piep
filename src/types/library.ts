@@ -258,9 +258,35 @@ export interface EntityFacet {
   description?: string | null;
   updatedAt?: string | null;
   latestDownloadedAt?: string | null;
+  /** 配下の作品のうち、取得元でいちばん新しいものの時刻。 */
+  latestSourceUpdatedAt?: string | null;
   sampleTitle?: string | null;
   iconPath?: string | null;
   bannerPath?: string | null;
+  /** シリーズだけが持つ。null は「取得元にまだ聞いていない」。 */
+  isConcluded?: boolean | null;
+}
+
+/**
+ * 作者・シリーズの一覧を並べる鍵。
+ *
+ * 作品の並べ替えとは別の語彙を持つ。束ねに文字数も容量も無く、代わりに
+ * 「中にある作品を見て決まる」鍵がある。
+ */
+export type EntitySortBy = "work_count" | "downloaded_at" | "source_updated_at" | "name";
+
+/**
+ * 一覧そのものにかける条件。
+ *
+ * 配下の作品にかける絞り込み（保存元・タグ・お気に入り）とは層が違う。
+ * 追いかけているか、何作品以上あるか、完結しているか - どれも束ね自身の
+ * 性質で、作品の側には無い。
+ */
+export interface EntityFacetScope {
+  watch?: "watched" | "paused" | "unwatched" | null;
+  minWorkCount?: number | null;
+  /** シリーズだけに効く。null は指定なし。 */
+  concluded?: boolean | null;
 }
 
 export interface FilterFacets {

@@ -1,6 +1,6 @@
 import { useLayoutEffect, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { EntityCard } from "@/components/EntityCard";
+import { EntityCard, type EntityWatchState } from "@/components/EntityCard";
 import type { EntityFacet } from "@/types/library";
 
 interface VirtualizedEntityGridProps {
@@ -10,6 +10,9 @@ interface VirtualizedEntityGridProps {
   /** Keys of the selected entities, as `source:sourceKey`. */
   selected?: Set<string>;
   onSelect?: (entity: EntityFacet, selected: boolean) => void;
+  /** 追いかけているかどうか。一覧を開くとき1回読んだ結果を渡す。 */
+  watchState?: (entity: EntityFacet) => EntityWatchState;
+  onToggleWatch?: (entity: EntityFacet, next: boolean) => void;
 }
 
 /** One entity's identity across a list. Facets have no row id of their own. */
@@ -26,7 +29,7 @@ export function entityGridColumnCount(width: number): number {
 }
 
 /** Keep only entity rows close to AppFrame's scroll viewport in the DOM. */
-export function VirtualizedEntityGrid({ items, kind, selectionMode = false, selected, onSelect }: VirtualizedEntityGridProps) {
+export function VirtualizedEntityGrid({ items, kind, selectionMode = false, selected, onSelect, watchState, onToggleWatch }: VirtualizedEntityGridProps) {
   const gridRef = useRef<HTMLDivElement>(null);
   const [scrollElement, setScrollElement] = useState<HTMLElement | null>(null);
   const [width, setWidth] = useState(0);
@@ -74,6 +77,8 @@ export function VirtualizedEntityGrid({ items, kind, selectionMode = false, sele
       selectionMode={selectionMode}
       selected={selected?.has(entityKey(entity)) ?? false}
       onSelect={onSelect}
+      watch={watchState?.(entity) ?? null}
+      onToggleWatch={onToggleWatch}
     />
   );
 
