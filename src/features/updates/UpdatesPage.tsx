@@ -170,8 +170,9 @@ export default function UpdatesPage() {
         title: "今後は表示しません",
         message: (
           <Group gap="sm" wrap="nowrap">
-            <Text size="sm" className="line-clamp-1">{candidate.title}</Text>
-            <Button size="compact-xs" variant="default" onClick={() => undismissMutation.mutate(candidate)}>元に戻す</Button>
+            <Text size="sm" className="line-clamp-1" style={{ flex: 1, minWidth: 0 }}>{candidate.title}</Text>
+            {/* 取り消しは題より優先する。長い題に押されると「元に戻…」になってしまう。 */}
+            <Button size="compact-xs" variant="default" style={{ flex: "none" }} onClick={() => undismissMutation.mutate(candidate)}>元に戻す</Button>
           </Group>
         ),
       });
@@ -464,13 +465,14 @@ function CandidatesPanel({ candidates, selectedIds, selectableIds, running, savi
               <ProviderMark provider={candidate.source} compact />
               <Stack gap={2} flex={1} miw={0}>
                 <Group gap={6} wrap="nowrap">
-                  <Badge size="xs" variant="light" color={KIND_COLOR[candidate.kind] ?? "gray"}>{kindLabel(candidate.kind)}</Badge>
+                  {/* 縮むのは題の側。帯が縮むと「新作」が「新…」になり、種類が読めなくなる。 */}
+                  <Badge size="xs" variant="light" color={KIND_COLOR[candidate.kind] ?? "gray"} style={{ flex: "none" }}>{kindLabel(candidate.kind)}</Badge>
                   <Text size="sm" fw={650} className="line-clamp-1">{candidate.title}</Text>
                 </Group>
                 <Text size="xs" c="dimmed" className="line-clamp-1">{candidate.targetLabel} · {candidate.subtitle}</Text>
                 {candidate.error && <Text size="xs" c="red" className="line-clamp-2">{errorMessage(candidate.error)}</Text>}
               </Stack>
-              <Badge color={candidate.status === "failed" ? "red" : candidate.status === "saved" ? "green" : "gray"} variant="light">{candidateStatusLabel(candidate.status)}</Badge>
+              <Badge color={candidate.status === "failed" ? "red" : candidate.status === "saved" ? "green" : "gray"} variant="light" style={{ flex: "none" }}>{candidateStatusLabel(candidate.status)}</Badge>
               {isSavableCandidate(candidate) && (
                 <Tooltip label="今後この作品を候補に出さない">
                   <ActionIcon variant="subtle" color="gray" aria-label={`${candidate.title}を今後表示しない`} onClick={() => onDismiss(candidate)}>
