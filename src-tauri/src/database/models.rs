@@ -80,6 +80,10 @@ pub struct SeriesEntry {
     pub created_at: String,
     pub updated_at: String,
     pub work_count: Option<i64>,
+    /// 完結しているか。None は「取得元にまだ聞いていない」。
+    pub is_concluded: Option<bool>,
+    /// 取得元で公開されている話数。
+    pub published_content_count: Option<i64>,
 }
 
 /// 人物/シリーズの履歴
@@ -591,9 +595,13 @@ pub struct EntityFacet {
     pub description: Option<String>,
     pub updated_at: Option<String>,
     pub latest_downloaded_at: Option<String>,
+    /// 配下の作品のうち、取得元でいちばん新しいものの時刻。並べ替え用。
+    pub latest_source_updated_at: Option<String>,
     pub sample_title: Option<String>,
     pub icon_path: Option<String>,
     pub banner_path: Option<String>,
+    /// シリーズだけが持つ。作者は常に None。
+    pub is_concluded: Option<bool>,
 }
 
 /// A stable keyset page of series connected to one person/author.
@@ -851,6 +859,22 @@ pub struct DownloadSeries {
     pub series_key: String,
     pub title: String,
     pub content_order: Option<i64>,
+}
+
+/// 作者・シリーズの一覧そのものにかける条件。
+///
+/// 配下の作品にかける [`SearchV2Params`] とは層が違う。追いかけているか、
+/// 何作品以上あるか、完結しているか - どれも束ね自身の性質で、作品の側には
+/// 無い。混ぜると「監視中」が作品の話か作者の話か読めなくなる。
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EntityFacetScope {
+    /// "watched" | "paused" | "unwatched"。それ以外は無視する。
+    pub watch: Option<String>,
+    /// これ以上の作品を持つものだけ。1以下は条件なしと同じ。
+    pub min_work_count: Option<i64>,
+    /// 完結しているか。シリーズだけに効く。
+    pub concluded: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

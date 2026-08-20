@@ -270,6 +270,12 @@ fn add_missing_columns(conn: &Connection) -> Result<(), rusqlite::Error> {
         ),
         // 依頼の塊をやめて、走行中に要る1つだけを列にした。
         ("update_jobs", "watch_saved", "INTEGER NOT NULL DEFAULT 0"),
+        // 完結しているか。NULL は「まだ聞いていない」で、連載中（0）とは別。
+        // 取得元が言っていないことを、こちらで言い切らないための区別。
+        ("series", "is_concluded", "INTEGER"),
+        // 取得元で公開されている話数。手元の数と突き合わせるためではなく、
+        // 完結の判断と同じ返事から来る値なので、一緒に覚えておく。
+        ("series", "published_content_count", "INTEGER"),
     ] {
         if !column_exists(conn, table, column)? {
             conn.execute_batch(&format!(

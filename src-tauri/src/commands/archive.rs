@@ -3318,6 +3318,9 @@ async fn import_zip_locked(
                     created_at: series.created_at.clone(),
                     updated_at: series.updated_at.clone(),
                     work_count: None,
+                    // 取得元に聞き直せば分かることなので、控えには持たない。
+                    is_concluded: None,
+                    published_content_count: None,
                 };
                 state.db.restore_series(&restored)?;
                 for version in &series.versions {
@@ -5170,6 +5173,8 @@ mod tests {
                 0,
                 fs::metadata(&series_json).unwrap().len() as i64,
                 EntityProfileFreshness::RemoteChecked,
+                None,
+                None,
             )
             .unwrap();
         source_state

@@ -1041,6 +1041,13 @@ const SEARCH_SNAPSHOT_TTL: Duration = Duration::from_secs(90);
 const SEARCH_SNAPSHOT_MAX_ENTRIES: usize = 4;
 const SEARCH_SNAPSHOT_DIR: &str = ".search-snapshots";
 type SnapshotConnection = Arc<Mutex<Option<Connection>>>;
+/// WHERE と HAVING、それぞれに差し込む値。順番はSQLに `?` が現れる順。
+type EntityFacetClauses = (
+    Vec<String>,
+    Vec<Box<dyn rusqlite::types::ToSql>>,
+    Option<String>,
+    Vec<Box<dyn rusqlite::types::ToSql>>,
+);
 
 struct DiskSearchSnapshot {
     id: String,
@@ -2982,6 +2989,12 @@ impl Database {
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// 取得元から聞いてきたシリーズの様子。
+    ///
+    /// `is_concluded` と `published_content_count` は None を「聞けなかった」
+    /// として扱い、手元の値を消さない。取得元が黙っていることを、こちらで
+    /// 「連載中」と言い切らないため。
+    #[allow(clippy::too_many_arguments)]
     pub fn upsert_series_profile(
         &self,
         source: &str,
@@ -2994,6 +3007,8 @@ impl Database {
         asset_count: i64,
         file_size_bytes: i64,
         freshness: EntityProfileFreshness,
+        is_concluded: Option<bool>,
+        published_content_count: Option<i64>,
     ) -> Result<SeriesEntry, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let (current_hash, current_version): (Option<String>, i64) = conn
@@ -3009,6 +3024,8 @@ impl Database {
             conn.execute(
                 "UPDATE series SET title = ?1, description = ?2, cover_path = COALESCE(?3, cover_path),
                     last_checked_at = COALESCE(?4, last_checked_at),
+                    is_concluded = COALESCE(?7, is_concluded),
+                    published_content_count = COALESCE(?8, published_content_count),
                     updated_at = CURRENT_TIMESTAMP
                  WHERE source = ?5 AND source_key = ?6",
                 params![
@@ -3017,7 +3034,9 @@ impl Database {
                     cover_path,
                     checked_at,
                     source,
-                    source_key
+                    source_key,
+                    is_concluded,
+                    published_content_count
                 ],
             )
             .map_err(|e| format!("Failed to mark series checked: {}", e))?;
@@ -3026,8 +3045,9 @@ impl Database {
             conn.execute(
                 "INSERT INTO series (
                     source, source_key, title, description, cover_path, content_hash,
-                    current_version, last_checked_at, last_fetched_at, created_at, updated_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                    current_version, last_checked_at, last_fetched_at, created_at, updated_at,
+                    is_concluded, published_content_count
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?9, ?10)
                  ON CONFLICT(source, source_key) DO UPDATE SET
                     title = excluded.title,
                     description = excluded.description,
@@ -3036,6 +3056,8 @@ impl Database {
                     current_version = excluded.current_version,
                     last_checked_at = COALESCE(excluded.last_checked_at, series.last_checked_at),
                     last_fetched_at = COALESCE(excluded.last_fetched_at, series.last_fetched_at),
+                    is_concluded = COALESCE(excluded.is_concluded, series.is_concluded),
+                    published_content_count = COALESCE(excluded.published_content_count, series.published_content_count),
                     updated_at = CURRENT_TIMESTAMP",
                 params![
                     source,
@@ -3045,7 +3067,9 @@ impl Database {
                     cover_path,
                     content_hash,
                     next_version,
-                    checked_at
+                    checked_at,
+                    is_concluded,
+                    published_content_count
                 ],
             )
             .map_err(|e| format!("Failed to upsert series: {}", e))?;
@@ -6027,7 +6051,9 @@ impl Database {
                               AND ds2.series_key = ds.series_key
                             ORDER BY COALESCE(ds2.content_order, 999999), d2.id
                             LIMIT 1
-                        ) AS sample_title
+                        ) AS sample_title,
+                        MAX(COALESCE(d.source_updated_at, d.source_created_at)) AS latest_source_updated_at,
+                        s.is_concluded
                  FROM download_series ds
                  JOIN downloads d ON d.id = ds.download_id
                  JOIN download_people dp ON dp.download_id = d.id
@@ -6050,8 +6076,10 @@ impl Database {
                     updated_at: row.get(6)?,
                     latest_downloaded_at: row.get(7)?,
                     sample_title: row.get(8)?,
+                    latest_source_updated_at: row.get(9)?,
                     icon_path: None,
                     banner_path: None,
+                    is_concluded: row.get(10).unwrap_or(None),
                 })
             })
             .map_err(|e| format!("Entity series query failed: {e}"))?;
@@ -6118,6 +6146,8 @@ impl Database {
                        MAX(s.description) AS description,
                        MAX(s.updated_at) AS updated_at,
                        MAX(d.downloaded_at) AS latest_downloaded_at,
+                       MAX(COALESCE(d.source_updated_at, d.source_created_at)) AS latest_source_updated_at,
+                       MAX(s.is_concluded) AS is_concluded,
                        MAX(COALESCE(d.source_created_at, d.downloaded_at)) AS latest_work_at
                 FROM download_people dp
                 JOIN downloads d ON d.id = dp.download_id
@@ -6189,6 +6219,8 @@ impl Database {
                         ORDER BY COALESCE(ds2.content_order, 999999), d2.id
                         LIMIT 1
                     ) AS sample_title,
+                    es.latest_source_updated_at,
+                    es.is_concluded,
                     es.latest_work_at
              FROM entity_series es"
         );
@@ -6251,10 +6283,12 @@ impl Database {
                         updated_at: row.get(6)?,
                         latest_downloaded_at: row.get(7)?,
                         sample_title: row.get(8)?,
+                        latest_source_updated_at: row.get(9)?,
                         icon_path: None,
                         banner_path: None,
+                        is_concluded: row.get(10).unwrap_or(None),
                     },
-                    row.get::<_, String>(9)?,
+                    row.get::<_, String>(11)?,
                 ))
             })
             .map_err(|e| format!("Entity series page query failed: {e}"))?;
@@ -6747,51 +6781,138 @@ impl Database {
     ///
     /// Binding is positional and in SQL order: the filters in WHERE come first,
     /// then the name/description LIKE in HAVING, then whatever the caller adds.
+    /// 一覧そのものにかける条件。
+    ///
+    /// 「配下の作品の条件」（保存元・タグ・お気に入りなど）とは層が違う。
+    /// 追いかけているかどうか、何作品以上あるか、完結しているか - どれも
+    /// 束ね自身の性質で、作品には無い。
+    fn entity_facet_scope_clauses(
+        kind_is_series: bool,
+        scope: Option<&EntityFacetScope>,
+    ) -> EntityFacetClauses {
+        let mut wheres = Vec::new();
+        let mut where_binds: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+        let mut having = None;
+        let mut having_binds: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+        let Some(scope) = scope else {
+            return (wheres, where_binds, having, having_binds);
+        };
+        match scope.watch.as_deref() {
+            // 監視は登録の有無と、止めているかどうかの2段。三つを別々に言える
+            // ようにしてあるのは、「登録していない」と「止めている」が別の
+            // 決定だから。
+            Some("watched") => wheres.push("ut.id IS NOT NULL AND ut.enabled = 1".to_string()),
+            Some("paused") => wheres.push("ut.id IS NOT NULL AND ut.enabled = 0".to_string()),
+            Some("unwatched") => wheres.push("ut.id IS NULL".to_string()),
+            _ => {}
+        }
+        if kind_is_series {
+            if let Some(concluded) = scope.concluded {
+                // NULL（まだ聞いていない）はどちらにも入らない。
+                wheres.push("s.is_concluded = ?".to_string());
+                where_binds.push(Box::new(if concluded { 1_i64 } else { 0_i64 }));
+            }
+        }
+        if let Some(minimum) = scope.min_work_count.filter(|value| *value > 1) {
+            having = Some(if kind_is_series {
+                "COUNT(DISTINCT ds.download_id) >= ?".to_string()
+            } else {
+                "COUNT(DISTINCT d.id) >= ?".to_string()
+            });
+            having_binds.push(Box::new(minimum));
+        }
+        (wheres, where_binds, having, having_binds)
+    }
+
+    /// 一覧を引く土台（FROM から HAVING まで）と、その順に並んだ差し込み値。
+    ///
+    /// 値の順番を組み立てと同じ場所で決めているのは、WHERE と HAVING に
+    /// またがって `?` が並ぶため。別々に足すと、検索語のある/なしで順番が
+    /// 入れ替わり、条件が静かに別のものになる。
     fn entity_facet_source(
         kind: &str,
-        has_filter: bool,
+        like: Option<&str>,
         library_wheres: &[String],
-    ) -> Result<String, String> {
-        let and_filters = library_wheres
-            .iter()
-            .map(|clause| format!("\n                   AND {}", clause))
-            .collect::<String>();
-        match kind {
-            "person" | "people" | "author" | "authors" => Ok(format!(
-                "FROM downloads d
-                 LEFT JOIN people p ON p.source = d.source AND p.source_key = d.author_id
-                 WHERE d.author_id IS NOT NULL AND d.author_id != ''
-                   AND d.author_name IS NOT NULL AND d.author_name != ''{and_filters}
-                 GROUP BY d.source, d.author_id, COALESCE(p.display_name, d.author_name), p.icon_path, p.cover_path, p.description, p.updated_at
-                 {having}",
-                having = if has_filter {
-                    "HAVING COALESCE(p.display_name, d.author_name) LIKE ? ESCAPE '\\'
-                         OR COALESCE(p.description, '') LIKE ? ESCAPE '\\'"
-                } else {
-                    ""
-                },
-            )),
-            "series" => Ok(format!(
+        scope: Option<&EntityFacetScope>,
+    ) -> Result<(String, Vec<Box<dyn rusqlite::types::ToSql>>), String> {
+        let kind_is_series = matches!(kind, "series");
+        if !kind_is_series && !matches!(kind, "person" | "people" | "author" | "authors") {
+            return Err(format!("Unsupported entity facet kind: {}", kind));
+        }
+        let (scope_wheres, scope_where_binds, scope_having, scope_having_binds) =
+            Self::entity_facet_scope_clauses(kind_is_series, scope);
+
+        let mut all_wheres: Vec<String> = Vec::new();
+        if kind_is_series {
+            // 作者側は「作者名のある作品」だけを数える。ここは元からの条件。
+        } else {
+            all_wheres.push("d.author_id IS NOT NULL AND d.author_id != ''".to_string());
+            all_wheres.push("d.author_name IS NOT NULL AND d.author_name != ''".to_string());
+        }
+        all_wheres.extend(library_wheres.iter().cloned());
+        all_wheres.extend(scope_wheres);
+        let where_clause = if all_wheres.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {}", all_wheres.join("
+                   AND "))
+        };
+
+        let mut having_parts: Vec<String> = Vec::new();
+        if like.is_some() {
+            having_parts.push(if kind_is_series {
+                "(COALESCE(s.title, ds.title) LIKE ? ESCAPE '\\'
+                       OR COALESCE(s.description, '') LIKE ? ESCAPE '\\')"
+                    .to_string()
+            } else {
+                "(COALESCE(p.display_name, d.author_name) LIKE ? ESCAPE '\\'
+                       OR COALESCE(p.description, '') LIKE ? ESCAPE '\\')"
+                    .to_string()
+            });
+        }
+        if let Some(clause) = scope_having {
+            having_parts.push(clause);
+        }
+        let having = if having_parts.is_empty() {
+            String::new()
+        } else {
+            format!("HAVING {}", having_parts.join("
+                     AND "))
+        };
+
+        let sql = if kind_is_series {
+            format!(
                 "FROM download_series ds
                  LEFT JOIN series s ON s.source = ds.series_source AND s.source_key = ds.series_key
                  JOIN downloads d ON d.id = ds.download_id
+                 LEFT JOIN update_targets ut ON ut.target_type = 'series'
+                      AND ut.source = ds.series_source AND ut.source_key = ds.series_key
                  {where_clause}
-                 GROUP BY ds.series_source, ds.series_key, COALESCE(s.title, ds.title), s.cover_path, s.description, s.updated_at
-                 {having}",
-                where_clause = if library_wheres.is_empty() {
-                    String::new()
-                } else {
-                    format!("WHERE {}", library_wheres.join("\n                   AND "))
-                },
-                having = if has_filter {
-                    "HAVING COALESCE(s.title, ds.title) LIKE ? ESCAPE '\\'
-                         OR COALESCE(s.description, '') LIKE ? ESCAPE '\\'"
-                } else {
-                    ""
-                },
-            )),
-            other => Err(format!("Unsupported entity facet kind: {}", other)),
+                 GROUP BY ds.series_source, ds.series_key, COALESCE(s.title, ds.title), s.cover_path, s.description, s.updated_at, s.is_concluded
+                 {having}"
+            )
+        } else {
+            format!(
+                "FROM downloads d
+                 LEFT JOIN people p ON p.source = d.source AND p.source_key = d.author_id
+                 LEFT JOIN update_targets ut ON ut.target_type = 'author'
+                      AND ut.source = d.source AND ut.source_key = d.author_id
+                 {where_clause}
+                 GROUP BY d.source, d.author_id, COALESCE(p.display_name, d.author_name), p.icon_path, p.cover_path, p.description, p.updated_at
+                 {having}"
+            )
+        };
+
+        // 値は SQL に `?` が現れる順。WHERE（絞り込み → 一覧の条件）、
+        // HAVING（検索語 → 件数）。
+        let mut binds: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+        binds.extend(scope_where_binds);
+        if let Some(pattern) = like {
+            binds.push(Box::new(pattern.to_string()));
+            binds.push(Box::new(pattern.to_string()));
         }
+        binds.extend(scope_having_binds);
+        Ok((sql, binds))
     }
 
     /// The library filters an entity listing is narrowed by, if any.
@@ -6819,26 +6940,52 @@ impl Database {
         kind: &str,
         query: Option<&str>,
         filters: Option<&SearchV2Params>,
+        scope: Option<&EntityFacetScope>,
     ) -> Result<i64, String> {
         let conn = self.read_conn()?;
         let filter = query.map(str::trim).unwrap_or("");
-        let has_filter = !filter.is_empty();
-        let like = format!("%{}%", filter.replace('%', "\\%").replace('_', "\\_"));
+        let like = (!filter.is_empty())
+            .then(|| format!("%{}%", filter.replace('%', "\\%").replace('_', "\\_")));
         let (library_wheres, mut bind_values) = Self::entity_facet_filters(filters);
-        let sql = format!(
-            "SELECT COUNT(*) FROM (SELECT 1 {source})",
-            source = Self::entity_facet_source(kind, has_filter, &library_wheres)?
-        );
-        if has_filter {
-            bind_values.push(Box::new(like.clone()));
-            bind_values.push(Box::new(like));
-        }
+        let (source, source_binds) =
+            Self::entity_facet_source(kind, like.as_deref(), &library_wheres, scope)?;
+        let sql = format!("SELECT COUNT(*) FROM (SELECT 1 {source})");
+        bind_values.extend(source_binds);
         let refs: Vec<&dyn rusqlite::types::ToSql> =
             bind_values.iter().map(|value| value.as_ref()).collect();
         conn.query_row(&sql, refs.as_slice(), |row| row.get::<_, i64>(0))
             .map_err(|e| format!("Entity facet count failed: {}", e))
     }
 
+    /// 一覧の並べ替えを決める。
+    ///
+    /// SQL に外から来た文字列を混ぜないための関門でもある。知らない指定は
+    /// 既定（作品が多い順）へ落とす - 「選べるのに効かない」より、「選べない
+    /// ものは既定になる」ほうがまだ読める。
+    ///
+    /// 二番手・三番手まで決めてあるのは、同じ値が並んだときに順番が毎回
+    /// 変わらないようにするため。ページ送りは位置で切るので、境目が揺れると
+    /// 同じ作者が二度出たり、抜けたりする。
+    fn entity_facet_order_clause(sort_by: Option<&str>, sort_order: Option<&str>, name_column: &str) -> String {
+        let descending = !matches!(sort_order, Some("asc"));
+        let dir = if descending { "DESC" } else { "ASC" };
+        match sort_by.unwrap_or("work_count") {
+            "downloaded_at" => format!(
+                "ORDER BY latest_downloaded_at {dir}, count DESC, {name_column} ASC"
+            ),
+            "source_updated_at" => format!(
+                "ORDER BY latest_source_updated_at {dir}, count DESC, {name_column} ASC"
+            ),
+            // 名前だけは昇順が「正しい」と読めるので、指定が無ければ昇順。
+            "name" | "title" | "author_name" => {
+                let dir = if matches!(sort_order, Some("desc")) { "DESC" } else { "ASC" };
+                format!("ORDER BY {name_column} COLLATE NOCASE {dir}, count DESC")
+            }
+            _ => format!("ORDER BY count {dir}, {name_column} ASC"),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub fn search_entity_facets(
         &self,
         kind: &str,
@@ -6846,6 +6993,9 @@ impl Database {
         limit: i64,
         offset: i64,
         filters: Option<&SearchV2Params>,
+        sort_by: Option<&str>,
+        sort_order: Option<&str>,
+        scope: Option<&EntityFacetScope>,
     ) -> Result<Vec<EntityFacet>, String> {
         let limit = limit.clamp(1, 200);
         let offset = offset.max(0);
@@ -6853,19 +7003,22 @@ impl Database {
         let generation = self.library_generation()?;
         // The library filters are part of what was asked for, so they are part
         // of the key. Left out of it, a favourites-only listing would be handed
-        // the rows cached for the unfiltered one.
-        let cache_key =
-            format!("{kind}\u{1f}{filter}\u{1f}{limit}\u{1f}{offset}\u{1f}{filters:?}");
+        // the rows cached for the unfiltered one. 並べ替えも同じ理由で鍵に
+        // 入れる - 同じ条件でも順番が違えば、それは違う答えである。
+        let cache_key = format!(
+            "{kind}\u{1f}{filter}\u{1f}{limit}\u{1f}{offset}\u{1f}{filters:?}\u{1f}{sort_by:?}\u{1f}{sort_order:?}\u{1f}{scope:?}"
+        );
         if let Ok(mut cache) = self.entity_facet_cache.lock() {
             if let Some(cached) = cache.get(&cache_key, generation) {
                 return Ok(cached);
             }
         }
         let conn = self.read_conn()?;
-        let has_filter = !filter.is_empty();
-        let like = format!("%{}%", filter.replace('%', "\\%").replace('_', "\\_"));
+        let like = (!filter.is_empty())
+            .then(|| format!("%{}%", filter.replace('%', "\\%").replace('_', "\\_")));
         let (library_wheres, mut bind_values) = Self::entity_facet_filters(filters);
-        let source = Self::entity_facet_source(kind, has_filter, &library_wheres)?;
+        let (source, source_binds) =
+            Self::entity_facet_source(kind, like.as_deref(), &library_wheres, scope)?;
 
         let sql = match kind {
             "person" | "people" | "author" | "authors" => format!(
@@ -6886,10 +7039,13 @@ impl Database {
                             LIMIT 1
                         ) AS sample_title,
                         p.icon_path,
-                        p.cover_path AS banner_path
+                        p.cover_path AS banner_path,
+                        MAX(COALESCE(d.source_updated_at, d.source_created_at)) AS latest_source_updated_at,
+                        NULL AS is_concluded
                      {source}
-                     ORDER BY count DESC, display_name ASC
-                     LIMIT ? OFFSET ?"
+                     {order}
+                     LIMIT ? OFFSET ?",
+                order = Self::entity_facet_order_clause(sort_by, sort_order, "display_name")
             ),
             "series" => format!(
                 "SELECT
@@ -6912,10 +7068,13 @@ impl Database {
                             LIMIT 1
                         ) AS sample_title,
                         NULL AS icon_path,
-                        s.cover_path AS banner_path
+                        s.cover_path AS banner_path,
+                        MAX(COALESCE(d.source_updated_at, d.source_created_at)) AS latest_source_updated_at,
+                        s.is_concluded
                      {source}
-                     ORDER BY count DESC, title ASC
-                     LIMIT ? OFFSET ?"
+                     {order}
+                     LIMIT ? OFFSET ?",
+                order = Self::entity_facet_order_clause(sort_by, sort_order, "title")
             ),
             other => return Err(format!("Unsupported entity facet kind: {}", other)),
         };
@@ -6934,14 +7093,13 @@ impl Database {
                 updated_at: row.get(6)?,
                 latest_downloaded_at: row.get(7)?,
                 sample_title: row.get(8)?,
+                latest_source_updated_at: row.get(11)?,
                 icon_path: row.get(9)?,
                 banner_path: row.get(10)?,
+                is_concluded: row.get(12).unwrap_or(None),
             })
         };
-        if has_filter {
-            bind_values.push(Box::new(like.clone()));
-            bind_values.push(Box::new(like));
-        }
+        bind_values.extend(source_binds);
         bind_values.push(Box::new(limit));
         bind_values.push(Box::new(offset));
         let refs: Vec<&dyn rusqlite::types::ToSql> =
@@ -7020,8 +7178,12 @@ impl Database {
                         updated_at: row.get(6)?,
                         latest_downloaded_at: row.get(7)?,
                         sample_title: row.get(8)?,
+                        // 絞り込みの引き出しに並べる名前だけを作る一覧なので、
+                        // 並べ替えと完結の判定は要らない。
+                        latest_source_updated_at: None,
                         icon_path: row.get(9)?,
                         banner_path: row.get(10)?,
+                        is_concluded: None,
                     })
                 })
                 .map_err(|e| format!("Entity facet query failed: {}", e))?;
@@ -12261,21 +12423,27 @@ fn person_entry_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PersonEntr
     })
 }
 
+/// 列の位置ではなく名前で読む。
+///
+/// `SELECT s.*` に対して番号で読んでいたころは、`ALTER TABLE` で列がひとつ
+/// 増えるだけで最後の列がひとつずれ、作品数として別の値を読んでいた。
 fn series_entry_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SeriesEntry> {
     Ok(SeriesEntry {
-        id: row.get(0)?,
-        source: row.get(1)?,
-        source_key: row.get(2)?,
-        title: row.get(3)?,
-        description: row.get(4)?,
-        cover_path: row.get(5)?,
-        content_hash: row.get(6)?,
-        current_version: row.get(7)?,
-        last_checked_at: row.get(8)?,
-        last_fetched_at: row.get(9)?,
-        created_at: row.get(10)?,
-        updated_at: row.get(11)?,
-        work_count: row.get(12).ok(),
+        id: row.get("id")?,
+        source: row.get("source")?,
+        source_key: row.get("source_key")?,
+        title: row.get("title")?,
+        description: row.get("description")?,
+        cover_path: row.get("cover_path")?,
+        content_hash: row.get("content_hash")?,
+        current_version: row.get("current_version")?,
+        last_checked_at: row.get("last_checked_at")?,
+        last_fetched_at: row.get("last_fetched_at")?,
+        created_at: row.get("created_at")?,
+        updated_at: row.get("updated_at")?,
+        work_count: row.get("work_count").ok(),
+        is_concluded: row.get("is_concluded").unwrap_or(None),
+        published_content_count: row.get("published_content_count").unwrap_or(None),
     })
 }
 
@@ -13178,6 +13346,8 @@ mod search_integration_tests {
             1,
             64,
             EntityProfileFreshness::RemoteChecked,
+            None,
+            None,
         )
         .unwrap();
 
@@ -14801,44 +14971,370 @@ mod search_integration_tests {
         let capped = db.get_filter_facets().unwrap();
         assert_eq!(capped.author_entities.len(), 60);
 
-        let second_page = db.search_entity_facets("person", None, 60, 60, None).unwrap();
+        let second_page = db.search_entity_facets("person", None, 60, 60, None, None, None, None).unwrap();
         assert_eq!(second_page.len(), 10, "authors past the cap stay reachable");
 
         let filtered = db
-            .search_entity_facets("person", Some("作者69"), 60, 0, None)
+            .search_entity_facets("person", Some("作者69"), 60, 0, None, None, None, None)
             .unwrap();
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].display_name, "作者69");
         assert_eq!(filtered[0].count, 1);
 
         let missing = db
-            .search_entity_facets("person", Some("存在しない"), 60, 0, None)
+            .search_entity_facets("person", Some("存在しない"), 60, 0, None, None, None, None)
             .unwrap();
         assert!(missing.is_empty());
 
-        assert!(db.search_entity_facets("unknown", None, 10, 0, None).is_err());
+        assert!(db.search_entity_facets("unknown", None, 10, 0, None, None, None, None).is_err());
 
         // The pager cannot name a last page without this, and a total that does
         // not agree with the rows it is counting is worse than none at all.
-        assert_eq!(db.count_entity_facets("person", None, None).unwrap(), 70);
-        assert_eq!(db.count_entity_facets("person", Some("作者69"), None).unwrap(), 1);
+        assert_eq!(db.count_entity_facets("person", None, None, None).unwrap(), 70);
+        assert_eq!(db.count_entity_facets("person", Some("作者69"), None, None).unwrap(), 1);
         assert_eq!(
-            db.count_entity_facets("person", Some("存在しない"), None)
+            db.count_entity_facets("person", Some("存在しない"), None, None)
                 .unwrap(),
             0
         );
-        assert!(db.count_entity_facets("unknown", None, None).is_err());
+        assert!(db.count_entity_facets("unknown", None, None, None).is_err());
 
         // Walked page by page, the rows add up to exactly what was counted.
-        let total = db.count_entity_facets("person", None, None).unwrap();
+        let total = db.count_entity_facets("person", None, None, None).unwrap();
         let mut walked = 0usize;
         for page in 0..(total as usize).div_ceil(20) {
             walked += db
-                .search_entity_facets("person", None, 20, (page * 20) as i64, None)
+                .search_entity_facets("person", None, 20, (page * 20) as i64, None, None, None, None)
                 .unwrap()
                 .len();
         }
         assert_eq!(walked as i64, total);
+    }
+
+    /// 取得元が黙ったからといって、知っていたことを忘れない。
+    ///
+    /// 完結の有無は web からしか来ない。保存のついでに作る控え（アプリAPI
+    /// だけを見る道）が None を書き戻して消していたら、カードの印が保存の
+    /// たびに消えたり点いたりする。
+    #[test]
+    fn a_silent_source_does_not_erase_what_a_series_already_said() {
+        let (_temp, root, storage) = temp_paths();
+        let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+        db.upsert_series_profile(
+            "pixiv",
+            "9001",
+            "連作",
+            Some("説明"),
+            Some("series/9001/v1/assets/cover.jpg"),
+            "hash-1",
+            "series/9001/v1/original.json",
+            1,
+            64,
+            EntityProfileFreshness::RemoteChecked,
+            Some(true),
+            Some(89),
+        )
+        .unwrap();
+        let stored = db.get_series("pixiv", "9001").unwrap();
+        assert_eq!(stored.is_concluded, Some(true));
+        assert_eq!(stored.published_content_count, Some(89));
+
+        // 何も聞けなかった更新。表紙も完結も、手元の値が残る。
+        db.upsert_series_profile(
+            "pixiv",
+            "9001",
+            "連作",
+            Some("説明"),
+            None,
+            "hash-2",
+            "series/9001/v2/original.json",
+            0,
+            0,
+            EntityProfileFreshness::SnapshotOnly,
+            None,
+            None,
+        )
+        .unwrap();
+        let after = db.get_series("pixiv", "9001").unwrap();
+        assert_eq!(after.is_concluded, Some(true), "黙りは「連載中」ではない");
+        assert_eq!(after.published_content_count, Some(89));
+        assert_eq!(
+            after.cover_path.as_deref(),
+            Some("series/9001/v1/assets/cover.jpg"),
+            "表紙も同じ扱い"
+        );
+
+        // 連載が終われば、そう言われたときに変わる。
+        db.upsert_series_profile(
+            "pixiv",
+            "9001",
+            "連作",
+            Some("説明"),
+            None,
+            "hash-3",
+            "series/9001/v3/original.json",
+            0,
+            0,
+            EntityProfileFreshness::RemoteChecked,
+            Some(false),
+            Some(90),
+        )
+        .unwrap();
+        let latest = db.get_series("pixiv", "9001").unwrap();
+        assert_eq!(latest.is_concluded, Some(false));
+        assert_eq!(latest.published_content_count, Some(90));
+    }
+
+    /// 並べ替えの決まりそのもの。知らない指定でSQLへ文字列が漏れないことも
+    /// ここで固定する。
+    #[test]
+    fn entity_ordering_only_speaks_words_it_knows() {
+        let clause = |by: Option<&str>, order: Option<&str>| {
+            Database::entity_facet_order_clause(by, order, "display_name")
+        };
+        assert_eq!(
+            clause(None, None),
+            "ORDER BY count DESC, display_name ASC",
+            "既定は作品が多い順"
+        );
+        assert!(clause(Some("downloaded_at"), None).starts_with("ORDER BY latest_downloaded_at DESC"));
+        assert!(clause(Some("source_updated_at"), None)
+            .starts_with("ORDER BY latest_source_updated_at DESC"));
+        assert!(clause(Some("name"), None).starts_with("ORDER BY display_name COLLATE NOCASE ASC"));
+        assert!(clause(Some("name"), Some("desc")).starts_with("ORDER BY display_name COLLATE NOCASE DESC"));
+        // 知らない指定は既定へ落ちる。文字列はそのままSQLへ入らない。
+        let injected = clause(Some("1; DROP TABLE downloads"), Some("desc; --"));
+        assert_eq!(injected, "ORDER BY count DESC, display_name ASC");
+        assert!(!injected.contains("DROP"));
+        // 同じ値が並んだときの順番まで決めておく。ページの境目が揺れる。
+        assert!(clause(Some("downloaded_at"), None).contains("count DESC, display_name ASC"));
+    }
+
+    /// 一覧そのものにかける条件（監視・作品数・完結）。
+    ///
+    /// 「配下の作品の条件」と混ざっていないこと、件数（総数）も同じ条件で
+    /// 数えられていることを固定する。数が合わないページ送りは、最後の
+    /// ページが存在しないという嘘になる。
+    #[test]
+    fn entity_facets_narrow_by_what_the_listing_itself_is() {
+        let (_temp, root, storage) = temp_paths();
+        let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+        insert_download_unindexed(&db, &storage, "sc-1", "追う人の一", "追う人", &[], "本文");
+        insert_download_unindexed(&db, &storage, "sc-2", "追う人の二", "追う人", &[], "本文");
+        insert_download_unindexed(&db, &storage, "sc-3", "止めた人の一", "止めた人", &[], "本文");
+        insert_download_unindexed(&db, &storage, "sc-4", "未登録の人の一", "未登録の人", &[], "本文");
+        {
+            let conn = db.conn.lock().unwrap();
+            for (id, author) in [("sc-1", "追う人"), ("sc-2", "追う人")] {
+                conn.execute(
+                    "UPDATE downloads SET author_id = ?1, author_name = ?2 WHERE source_id = ?3",
+                    params!["author-watched", author, id],
+                )
+                .unwrap();
+            }
+            conn.execute(
+                "UPDATE downloads SET author_id = 'author-paused' WHERE source_id = 'sc-3'",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE downloads SET author_id = 'author-none' WHERE source_id = 'sc-4'",
+                [],
+            )
+            .unwrap();
+        }
+        db.upsert_update_target(&UpdateTargetInput {
+            target_type: "author".to_string(),
+            source: "pixiv".to_string(),
+            source_key: "author-watched".to_string(),
+            display_name: "追う人".to_string(),
+            enabled: true,
+            metadata_json: None,
+        })
+        .unwrap();
+        db.upsert_update_target(&UpdateTargetInput {
+            target_type: "author".to_string(),
+            source: "pixiv".to_string(),
+            source_key: "author-paused".to_string(),
+            display_name: "止めた人".to_string(),
+            enabled: false,
+            metadata_json: None,
+        })
+        .unwrap();
+
+        let names = |scope: EntityFacetScope| {
+            let listed = db
+                .search_entity_facets("person", None, 60, 0, None, None, None, Some(&scope))
+                .unwrap()
+                .into_iter()
+                .map(|facet| facet.display_name)
+                .collect::<Vec<_>>();
+            let counted = db
+                .count_entity_facets("person", None, None, Some(&scope))
+                .unwrap();
+            assert_eq!(
+                listed.len() as i64,
+                counted,
+                "総数は、数えている行と一致していなければならない"
+            );
+            listed
+        };
+
+        assert_eq!(
+            names(EntityFacetScope { watch: Some("watched".into()), ..Default::default() }),
+            vec!["追う人"]
+        );
+        assert_eq!(
+            names(EntityFacetScope { watch: Some("paused".into()), ..Default::default() }),
+            vec!["止めた人"]
+        );
+        let mut unwatched = names(EntityFacetScope { watch: Some("unwatched".into()), ..Default::default() });
+        unwatched.sort();
+        assert_eq!(unwatched, vec!["未登録の人"]);
+        // 知らない言葉は条件なしとして扱う。
+        assert_eq!(
+            names(EntityFacetScope { watch: Some("いつか".into()), ..Default::default() }).len(),
+            3
+        );
+        // 作品数の下限。1以下は条件なしと同じ。
+        assert_eq!(
+            names(EntityFacetScope { min_work_count: Some(2), ..Default::default() }),
+            vec!["追う人"]
+        );
+        assert_eq!(
+            names(EntityFacetScope { min_work_count: Some(1), ..Default::default() }).len(),
+            3
+        );
+        // 監視と作品数は同時に効く。
+        assert_eq!(
+            names(EntityFacetScope {
+                watch: Some("unwatched".into()),
+                min_work_count: Some(2),
+                ..Default::default()
+            })
+            .len(),
+            0
+        );
+    }
+
+    /// 完結の有無で絞る。まだ聞いていないシリーズは、どちらにも入らない。
+    #[test]
+    fn series_facets_narrow_by_whether_the_source_called_it_finished() {
+        let (_temp, root, storage) = temp_paths();
+        let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+        for (index, (source_id, series_key, title)) in [
+            ("cs-1", "done", "完結した連作"),
+            ("cs-2", "running", "続いている連作"),
+            ("cs-3", "unknown", "まだ聞いていない連作"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let id = insert_download_unindexed(
+                &db,
+                &storage,
+                source_id,
+                &format!("{title}#{index}"),
+                "連載作者",
+                &[],
+                "本文",
+            );
+            db.upsert_download_series(id, "pixiv", series_key, title, Some(1))
+                .unwrap();
+        }
+        for (key, title, concluded) in [
+            ("done", "完結した連作", Some(true)),
+            ("running", "続いている連作", Some(false)),
+            ("unknown", "まだ聞いていない連作", None),
+        ] {
+            db.upsert_series_profile(
+                "pixiv",
+                key,
+                title,
+                None,
+                None,
+                &format!("hash-{key}"),
+                &format!("series/{key}/v1/original.json"),
+                0,
+                0,
+                EntityProfileFreshness::RemoteChecked,
+                concluded,
+                None,
+            )
+            .unwrap();
+        }
+        let names = |concluded: Option<bool>| {
+            let scope = EntityFacetScope { concluded, ..Default::default() };
+            let listed = db
+                .search_entity_facets("series", None, 60, 0, None, Some("name"), None, Some(&scope))
+                .unwrap()
+                .into_iter()
+                .map(|facet| facet.display_name)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                listed.len() as i64,
+                db.count_entity_facets("series", None, None, Some(&scope)).unwrap()
+            );
+            listed
+        };
+        assert_eq!(names(Some(true)), vec!["完結した連作"]);
+        assert_eq!(names(Some(false)), vec!["続いている連作"]);
+        assert_eq!(names(None).len(), 3, "指定が無ければ全部");
+
+        // 完結の印は一覧まで届く。
+        let all = db
+            .search_entity_facets("series", None, 60, 0, None, Some("name"), None, None)
+            .unwrap();
+        let finished = all.iter().find(|f| f.source_key == "done").unwrap();
+        let unknown = all.iter().find(|f| f.source_key == "unknown").unwrap();
+        assert_eq!(finished.is_concluded, Some(true));
+        assert_eq!(unknown.is_concluded, None);
+    }
+
+    /// 作者・シリーズの並びは、その中にある作品を見て決まる。
+    #[test]
+    fn entity_facets_sort_by_the_works_underneath() {
+        let (_temp, root, storage) = temp_paths();
+        let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+        let a1 = insert_download_unindexed(&db, &storage, "sort-a1", "Aの一", "作者A", &[], "本文");
+        let a2 = insert_download_unindexed(&db, &storage, "sort-a2", "Aの二", "作者A", &[], "本文");
+        let b1 = insert_download_unindexed(&db, &storage, "sort-b1", "Bの一", "作者B", &[], "本文");
+        {
+            // 作者Aは作品が多く、保存は古く、取得元での更新は新しい。
+            // 作者Bはその逆。どの鍵で並べたかが順番に出る。
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE downloads SET author_id = 'author-A', author_name = '作者A',
+                    downloaded_at = '2026-01-01T00:00:00Z',
+                    source_updated_at = '2026-08-01T00:00:00Z'
+                 WHERE id IN (?1, ?2)",
+                params![a1, a2],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE downloads SET author_id = 'author-B', author_name = '作者B',
+                    downloaded_at = '2026-08-20T00:00:00Z',
+                    source_updated_at = '2026-01-05T00:00:00Z'
+                 WHERE id = ?1",
+                params![b1],
+            )
+            .unwrap();
+        }
+        let names = |by: Option<&str>| {
+            db.search_entity_facets("person", None, 60, 0, None, by, None, None)
+                .unwrap()
+                .into_iter()
+                .map(|facet| facet.display_name)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(None), vec!["作者A", "作者B"], "作品が多い順");
+        assert_eq!(names(Some("downloaded_at")), vec!["作者B", "作者A"], "保存が新しい順");
+        assert_eq!(
+            names(Some("source_updated_at")),
+            vec!["作者A", "作者B"],
+            "取得元での更新が新しい順"
+        );
+        assert_eq!(names(Some("name")), vec!["作者A", "作者B"], "名前順");
     }
 
     #[test]
@@ -14864,30 +15360,30 @@ mod search_integration_tests {
         }
         db.set_favorite(favourite, true).unwrap();
 
-        let unfiltered = db.search_entity_facets("person", None, 60, 0, None).unwrap();
+        let unfiltered = db.search_entity_facets("person", None, 60, 0, None, None, None, None).unwrap();
         assert_eq!(unfiltered.len(), 2);
-        assert_eq!(db.count_entity_facets("person", None, None).unwrap(), 2);
+        assert_eq!(db.count_entity_facets("person", None, None, None).unwrap(), 2);
 
         let by_tag = SearchV2Params {
             tags_include: Some(vec!["日常".to_string()]),
             ..params("")
         };
         let tagged = db
-            .search_entity_facets("person", None, 60, 0, Some(&by_tag))
+            .search_entity_facets("person", None, 60, 0, Some(&by_tag), None, None, None)
             .unwrap();
         assert_eq!(tagged.len(), 1, "作者Bはこのタグの作品を持たない");
         assert_eq!(tagged[0].display_name, "作者A");
         // 件数は「条件に合う作品の数」。作者Aの2件すべてではない。
         assert_eq!(tagged[0].count, 1);
         assert_eq!(
-            db.count_entity_facets("person", None, Some(&by_tag)).unwrap(),
+            db.count_entity_facets("person", None, Some(&by_tag), None).unwrap(),
             1,
             "総数は数えている行と一致する"
         );
 
         // 名前での絞り込みと同時に効く。作者Aは条件に合うが、名前が違う。
         let named = db
-            .search_entity_facets("person", Some("作者B"), 60, 0, Some(&by_tag))
+            .search_entity_facets("person", Some("作者B"), 60, 0, Some(&by_tag), None, None, None)
             .unwrap();
         assert!(named.is_empty());
 
@@ -14896,13 +15392,13 @@ mod search_integration_tests {
             ..params("")
         };
         let favoured = db
-            .search_entity_facets("person", None, 60, 0, Some(&favourites_only))
+            .search_entity_facets("person", None, 60, 0, Some(&favourites_only), None, None, None)
             .unwrap();
         assert_eq!(favoured.len(), 1);
         assert_eq!(favoured[0].display_name, "作者A");
 
         // 同じキャッシュを別の条件で引かない。
-        let unfiltered_again = db.search_entity_facets("person", None, 60, 0, None).unwrap();
+        let unfiltered_again = db.search_entity_facets("person", None, 60, 0, None, None, None, None).unwrap();
         assert_eq!(unfiltered_again.len(), 2);
     }
 
@@ -16314,11 +16810,11 @@ mod search_integration_tests {
         }
 
         let started = Instant::now();
-        let authors = db.search_entity_facets("person", None, 60, 300, None).unwrap();
+        let authors = db.search_entity_facets("person", None, 60, 300, None, None, None, None).unwrap();
         let entity_elapsed = started.elapsed();
         assert_eq!(authors.len(), 60);
         let started = Instant::now();
-        let warm_authors = db.search_entity_facets("person", None, 60, 300, None).unwrap();
+        let warm_authors = db.search_entity_facets("person", None, 60, 300, None, None, None, None).unwrap();
         let warm_entity_elapsed = started.elapsed();
         assert_eq!(warm_authors.len(), authors.len());
 
@@ -16561,9 +17057,9 @@ mod search_integration_tests {
                 [],
             )
             .unwrap();
-        let first = db.search_entity_facets("person", None, 60, 0, None).unwrap();
+        let first = db.search_entity_facets("person", None, 60, 0, None, None, None, None).unwrap();
         assert_eq!(first[0].count, 1);
-        let cached = db.search_entity_facets("person", None, 60, 0, None).unwrap();
+        let cached = db.search_entity_facets("person", None, 60, 0, None, None, None, None).unwrap();
         assert_eq!(cached[0].count, 1);
 
         insert_download_unindexed(
@@ -16583,7 +17079,7 @@ mod search_integration_tests {
                 [],
             )
             .unwrap();
-        let refreshed = db.search_entity_facets("person", None, 60, 0, None).unwrap();
+        let refreshed = db.search_entity_facets("person", None, 60, 0, None, None, None, None).unwrap();
         assert_eq!(refreshed[0].count, 2);
         drop(db);
     }

@@ -1473,6 +1473,10 @@ async fn save_series_snapshot_from_download(
         0,
         0,
         EntityProfileFreshness::SnapshotOnly,
+        // 保存のついでに作る控えなので、取得元へ聞きには行かない。完結の
+        // 有無と公開話数は「情報を更新」のときに埋まる。
+        None,
+        None,
     )?;
     Ok(())
 }

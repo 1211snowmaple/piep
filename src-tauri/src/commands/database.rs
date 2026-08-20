@@ -2,7 +2,7 @@ use crate::database::queries::EntityProfileFreshness;
 use crate::database::{
     AcceptCollectionSuggestionInput, AssetEntry, BulkMutationResult, CollectionSuggestion,
     CollectionSuggestionRequest, DashboardSummary, DbStats, DownloadEntry, DownloadRelation,
-    DownloadVersion, EditorDocument, EntityFacet, EntitySeriesPage, EntityVersion, FacetCount,
+    DownloadVersion, EditorDocument, EntityFacet, EntityFacetScope, EntitySeriesPage, EntityVersion, FacetCount,
     FilterFacets, LibraryDiagnostics, LibraryMaintenanceResult, LibraryShelfCounts, NewAsset,
     NewDownload, PersonEntry, ReaderContentPage, ReaderDocument, ReaderMetadata, ReaderSearchHit,
     SavedSearch, SavedSearchInput, SearchIndexOptimizationResult, SearchIndexStatus,
@@ -825,6 +825,7 @@ pub async fn db_get_search_index_status(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn db_search_entity_facets(
     app: tauri::AppHandle,
     kind: String,
@@ -832,6 +833,9 @@ pub async fn db_search_entity_facets(
     limit: Option<i64>,
     offset: Option<i64>,
     filters: Option<SearchV2Params>,
+    sort_by: Option<String>,
+    sort_order: Option<String>,
+    scope: Option<EntityFacetScope>,
 ) -> Result<Vec<EntityFacet>, String> {
     run_db_blocking(app, move |state| {
         state.db.search_entity_facets(
@@ -840,6 +844,9 @@ pub async fn db_search_entity_facets(
             limit.unwrap_or(60),
             offset.unwrap_or(0),
             filters.as_ref(),
+            sort_by.as_deref(),
+            sort_order.as_deref(),
+            scope.as_ref(),
         )
     })
     .await
@@ -851,11 +858,12 @@ pub async fn db_count_entity_facets(
     kind: String,
     query: Option<String>,
     filters: Option<SearchV2Params>,
+    scope: Option<EntityFacetScope>,
 ) -> Result<i64, String> {
     run_db_blocking(app, move |state| {
         state
             .db
-            .count_entity_facets(&kind, query.as_deref(), filters.as_ref())
+            .count_entity_facets(&kind, query.as_deref(), filters.as_ref(), scope.as_ref())
     })
     .await
 }
@@ -1241,24 +1249,63 @@ fn collect_profile_links(
     links
 }
 
+/// シリーズの横顔を組み立てる。
+///
+/// 相手はひとつでも、口はふたつある。
+///
+/// - アプリAPI（`/v2/novel/series`）は各話の一覧を持っている。題はここの
+///   各話が名乗るものがいちばん確かで、話数もここで数えられる。ただし
+///   トークンが要る。
+/// - web（`/ajax/novel/series/{id}`）はシリーズ自身の表紙・公開話数・完結の
+///   有無を持っている。ログインは要らず、R-18 でも読める。
+///
+/// 片方が黙っても、もう片方まで諦めない。トークンが無いときでも、web だけで
+/// 題・説明・表紙は埋まる。
 async fn fetch_pixiv_series_profile_json(
     source_key: &str,
     refresh_token: Option<&str>,
     existing_title: &str,
     existing_description: Option<&str>,
 ) -> Result<Option<serde_json::Value>, String> {
-    let Some(token) = refresh_token
+    if source_key.trim().is_empty() {
+        return Err("Invalid Pixiv series ID".to_string());
+    }
+    // web は認証が要らないので、先に聞く。失敗しても続ける。
+    let web_series = match crate::pixiv_api::web::WebPixivAPI::new() {
+        Ok(api) => match api.novel_series(source_key).await {
+            Ok(series) => Some(series),
+            Err(error) => {
+                log::warn!("pixiv web series {source_key} unavailable: {error}");
+                None
+            }
+        },
+        Err(error) => {
+            log::warn!("pixiv web client unavailable: {error}");
+            None
+        }
+    };
+
+    let value = match refresh_token
         .map(str::trim)
         .filter(|token| !token.is_empty())
-    else {
-        return Ok(None);
+    {
+        Some(token) => {
+            let series_id: u64 = source_key.parse().map_err(|_| "Invalid Pixiv series ID")?;
+            let api = crate::pixiv_api::aapi::AppPixivAPI::new_from_refresh_token(token.to_string());
+            match api.novel_series(series_id, None, None, true).await {
+                Ok(value) => Some(value),
+                // web から取れているなら、アプリAPIの失敗で全部を捨てない。
+                Err(error) if web_series.is_some() => {
+                    log::warn!("pixiv app-api series {source_key} unavailable: {error}");
+                    None
+                }
+                Err(error) => return Err(error.to_string()),
+            }
+        }
+        None if web_series.is_some() => None,
+        None => return Ok(None),
     };
-    let series_id: u64 = source_key.parse().map_err(|_| "Invalid Pixiv series ID")?;
-    let api = crate::pixiv_api::aapi::AppPixivAPI::new_from_refresh_token(token.to_string());
-    let value = api
-        .novel_series(series_id, None, None, true)
-        .await
-        .map_err(|e| e.to_string())?;
+    let value = value.unwrap_or_else(|| serde_json::json!({}));
 
     let novels = value
         .get("novels")
@@ -1273,34 +1320,42 @@ async fn fetch_pixiv_series_profile_json(
                 &[&["series", "title"], &["seriesTitle"], &["series_title"]],
             )
         })
-        .unwrap_or(existing_title)
-        .to_string();
-    let cover_url = first_json_string_at(
-        &value,
-        &[
-            &["novel_series_detail", "cover_image_urls", "large"],
-            &["novelSeriesDetail", "coverImageUrls", "large"],
-            &["novel_series_detail", "cover_image_urls", "medium"],
-            &["novelSeriesDetail", "coverImageUrls", "medium"],
-            &["novel_series_detail", "cover_url"],
-            &["novelSeriesDetail", "coverUrl"],
-        ],
-    )
-    .or_else(|| {
-        novels.iter().find_map(|novel| {
+        .map(str::to_string)
+        .or_else(|| web_series.as_ref().and_then(|series| series.title.clone()))
+        .unwrap_or_else(|| existing_title.to_string());
+    // シリーズ自身の表紙を最優先する。1話目の表紙は、それが取れなかった
+    // ときの間に合わせでしかない。
+    let cover_url = web_series
+        .as_ref()
+        .and_then(|series| series.cover_url.as_deref())
+        .or_else(|| {
             first_json_string_at(
-                novel,
+                &value,
                 &[
-                    &["image_urls", "large"],
-                    &["imageUrls", "large"],
-                    &["image_urls", "medium"],
-                    &["imageUrls", "medium"],
-                    &["coverUrl"],
-                    &["cover_url"],
+                    &["novel_series_detail", "cover_image_urls", "large"],
+                    &["novelSeriesDetail", "coverImageUrls", "large"],
+                    &["novel_series_detail", "cover_image_urls", "medium"],
+                    &["novelSeriesDetail", "coverImageUrls", "medium"],
+                    &["novel_series_detail", "cover_url"],
+                    &["novelSeriesDetail", "coverUrl"],
                 ],
             )
         })
-    });
+        .or_else(|| {
+            novels.iter().find_map(|novel| {
+                first_json_string_at(
+                    novel,
+                    &[
+                        &["image_urls", "large"],
+                        &["imageUrls", "large"],
+                        &["image_urls", "medium"],
+                        &["imageUrls", "medium"],
+                        &["coverUrl"],
+                        &["cover_url"],
+                    ],
+                )
+            })
+        });
     let description = first_json_string_at(
         &value,
         &[
@@ -1310,7 +1365,9 @@ async fn fetch_pixiv_series_profile_json(
             &["series", "description"],
         ],
     )
-    .or(existing_description);
+    .map(str::to_string)
+    .or_else(|| web_series.as_ref().and_then(|series| series.caption.clone()))
+    .or_else(|| existing_description.map(str::to_string));
 
     Ok(Some(serde_json::json!({
         "source": "pixiv",
@@ -1319,6 +1376,12 @@ async fn fetch_pixiv_series_profile_json(
         "description": description,
         "coverUrl": cover_url,
         "sampleNovelCount": novels.len(),
+        // web だけが知っていること。聞けなかったときは null のままにして、
+        // 手元の値を上書きしない。
+        "isConcluded": web_series.as_ref().and_then(|series| series.is_concluded),
+        "publishedContentCount": web_series
+            .as_ref()
+            .and_then(|series| series.published_content_count),
     })))
 }
 
@@ -1815,6 +1878,8 @@ pub async fn refresh_entity_profile(
             if cover.is_some() { 1 } else { 0 },
             json_size + cover_size,
             EntityProfileFreshness::RemoteChecked,
+            normalized.get("isConcluded").and_then(|v| v.as_bool()),
+            normalized.get("publishedContentCount").and_then(|v| v.as_i64()),
         )?;
         return serde_json::to_value(series).map_err(|e| e.to_string());
     }
@@ -2099,7 +2164,9 @@ pub async fn import_work_asset(
 
 #[cfg(test)]
 mod profile_link_tests {
-    use super::{collect_profile_links, copy_file_atomically_bounded, validate_path_in_storage};
+    use super::{
+        collect_profile_links, copy_file_atomically_bounded, validate_path_in_storage,
+    };
     use std::fs;
 
     #[test]
