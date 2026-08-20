@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ActionIcon,
   Badge,
@@ -29,17 +29,16 @@ import { modals } from "@mantine/modals";
 import { notifications } from "@mantine/notifications";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Icons, IconSize } from "@/lib/icons";
-import { Note } from "@/components/Note";
 import { useAppSearchParams } from "@/app/router";
 import { EmptyState, ErrorState, LoadingState } from "@/components/AsyncState";
 import { PageHeader } from "@/components/PageHeader";
-import { useUpdateJobs, type UpdateJobSnapshot, type UpdateJobSummary } from "@/features/updates/updateJobs";
+import { isUpdateJobTerminal, useUpdateJobs, type UpdateJobSnapshot, type UpdateJobSummary } from "@/features/updates/updateJobs";
 import { errorMessage, formatDate, formatNumber } from "@/lib/format";
 import { ProviderMark } from "@/lib/providers";
 import { deleteUpdateTarget, isTauriRuntime, listUpdateTargets, searchDownloadsV2, setUpdateTargetEnabled, upsertUpdateTarget } from "@/services/dbApi";
 import { readingWorkIds } from "@/features/library/readingShelf";
-import { countDismissedUpdateCandidatesCommand, dismissUpdateCandidateCommand, restoreDismissedUpdateCandidatesCommand } from "@/services/updateJobApi";
-import { loadSchedule } from "@/features/updates/updateSchedule";
+import { clearFinishedUpdateJobsCommand, countDismissedUpdateCandidatesCommand, dismissUpdateCandidateCommand, restoreDismissedUpdateCandidatesCommand } from "@/services/updateJobApi";
+import { loadSchedule, type UpdateScheduleSettings } from "@/features/updates/updateSchedule";
 import { UpdateScheduleCard } from "@/features/updates/UpdateScheduleCard";
 import { useUpdateJobNotifications } from "@/features/updates/useUpdateScheduler";
 import type { UpdateTarget } from "@/types/library";
@@ -62,6 +61,17 @@ const demoSnapshot: UpdateJobSnapshot = {
 
 export function isSavableCandidateStatus(status: string): boolean {
   return status === "candidate" || status === "failed";
+}
+
+/**
+ * もう手を動かす余地のない候補か。
+ *
+ * 「保存する候補」は、これから決めるものの一覧である。済んだものを同じ顔で
+ * 並べ続けると、44件保存し終えた次の日も44件が待っているように見え、どれが
+ * 残りなのか読めなくなる。消しはしない - 数えて畳み、開けば出てくる。
+ */
+export function isSettledCandidateStatus(status: string): boolean {
+  return status === "saved" || status === "skipped" || status === "done";
 }
 
 /** How many works one shelf check may cover before it stops being sensible. */
@@ -202,6 +212,37 @@ export default function UpdatesPage() {
     },
   });
 
+  /**
+   * 履歴は残すためのものだが、消せないままでは溜まる一方になる。
+   * 走っているジョブは消さない - 消してしまえば、進んでいるものの行き先が
+   * 画面から無くなる。
+   */
+  const clearJobMutation = useMutation({
+    mutationFn: async (jobId: string) => {
+      if (!runtime) return;
+      await updateJobs.clear(jobId);
+      await updateJobs.loadJobs();
+    },
+    onError: (error) => notifications.show({ color: "red", title: "履歴を消せません", message: errorMessage(error) }),
+  });
+  const clearFinishedJobsMutation = useMutation({
+    mutationFn: async () => {
+      if (!runtime) return 0;
+      const removed = await clearFinishedUpdateJobsCommand();
+      await updateJobs.loadJobs();
+      return removed;
+    },
+    onSuccess: (removed) => notifications.show({ color: "gray", title: "履歴を消しました", message: `${formatNumber(removed ?? 0)}件を消しました。走っているジョブはそのままです` }),
+    onError: (error) => notifications.show({ color: "red", title: "履歴を消せません", message: errorMessage(error) }),
+  });
+  const confirmClearFinishedJobs = () => modals.openConfirmModal({
+    title: "終わった履歴をまとめて消しますか？",
+    children: <Text size="sm">終わったジョブの記録・ログ・候補の一覧を消します。保存した作品には触れません。走っているジョブは残ります。</Text>,
+    labels: { confirm: "消す", cancel: "やめる" },
+    confirmProps: { color: "red" },
+    onConfirm: () => clearFinishedJobsMutation.mutate(),
+  });
+
   const saveCandidatesMutation = useMutation({
     mutationFn: async () => { if (runtime && activeSnapshot) await updateJobs.saveCandidates(activeSnapshot.jobId, selectedSavableIds); },
     onSuccess: () => notifications.show({ color: "green", title: "保存を開始しました", message: `${selectedSavableIds.length}件を処理します` }),
@@ -217,6 +258,35 @@ export default function UpdatesPage() {
     onSuccess: () => { targetForm.reset(); queryClient.invalidateQueries({ queryKey: ["update-targets"] }); },
     onError: (error) => notifications.show({ color: "red", title: "更新対象を変更できません", message: errorMessage(error) }),
   });
+  // 自動確認は「いまどうなっているか」だけを一行で名乗る。設定そのものは
+  // タブの中にあり、変えたらこの一行も追いつく。
+  const [scheduleRevision, setScheduleRevision] = useState(0);
+  const schedule = useQuery({
+    queryKey: ["update-schedule", scheduleRevision],
+    queryFn: () => loadSchedule(),
+    staleTime: 0,
+  });
+  const scheduleSummary = describeSchedule(schedule.data);
+  /**
+   * 取得制限に当たっているか。
+   *
+   * ジョブは制限を受けると「取得が制限されています。N秒あけて…」と記録する。
+   * 平常時の注意書きを畳んだぶん、実際に効いた瞬間はここが名乗る。
+   */
+  const throttledMessage = useMemo(() => {
+    const logs = activeSnapshot?.logs ?? [];
+    for (let index = logs.length - 1; index >= 0; index -= 1) {
+      const log = logs[index];
+      if (log.logType !== "warn") continue;
+      if (log.message.includes("取得が制限されています")) return log.message;
+      break;
+    }
+    return null;
+  }, [activeSnapshot?.logs]);
+  // 残りの数。タブの脇に出るのは、これから決めるものの件数でなければならない。
+  const openCandidateCount = (activeSnapshot?.candidates ?? [])
+    .filter((candidate) => !dismissedIds.includes(candidate.id) && !isSettledCandidateStatus(candidate.status)).length;
+  const finishedJobCount = jobs.filter((job) => isUpdateJobTerminal(job.status)).length;
   const status = activeSnapshot?.status;
   const running = status === "queued" || status === "running" || status === "canceling";
   // 一時停止と再接続待ちは、どちらも「止まっていて、押せば続きから動く」。
@@ -226,66 +296,209 @@ export default function UpdatesPage() {
 
   return (
     <div className="page page--contained updates-page">
-      {/* 開始は左のカードにひとつだけ置く。同じ動作のボタンが2か所にあると、
-          設定を変えたのがどちらに効くのか分からなくなる。 */}
       <PageHeader title="更新センター" description="作品の変更、作者の新作、シリーズの続編を一つのジョブとして安全に確認・保存します。" />
-      <Grid gap="lg" align="flex-start">
-        <Grid.Col span={{ base: 12, lg: 4, xl: 3 }}>
-          <Stack gap="lg">
-            <Card p="lg">
-              <Stack gap="md"><Title order={3}>新しい更新ジョブ</Title>{workId && <Note>作品 ID {workId} だけを確認します。</Note>}<SegmentedControl fullWidth aria-label="更新時の処理方法" data={[{ value: "check_only", label: "確認のみ" }, { value: "auto_save", label: "自動保存" }]} {...form.getInputProps("mode")} /><Select label="対象" data={[{ value: "all", label: "すべての監視対象" }, { value: "work", label: "監視中の作品" }, { value: "author", label: "作者・クリエイター" }, { value: "series", label: "シリーズ" }, { value: "favorite", label: "お気に入りの作品" }, { value: "reading", label: "読みかけの作品" }]} disabled={Boolean(workId)} {...form.getInputProps("scope")} /><Divider />{/* 同時実行数の入力が3つ並んでいたが、ジョブは一件ずつしか
-                  処理しない。押しても何も変わらない値を required で置くのは、
-                  設定できるという嘘になる。速さは自分で決めるものではなく
-                  取得元との折り合いなので、決め方のほうを書く。 */}
-              <Note>取得元に負担をかけないよう、1件ずつ間隔をあけて確認します。制限を受けたときは自動で間隔を広げ、通るようになったら戻します。</Note><Button variant="light" leftSection={<Icons.updates size={IconSize.menu} />} disabled={running} loading={startMutation.isPending} onClick={() => form.onSubmit((values) => startMutation.mutate(values))()}>確認を開始</Button></Stack>
-            </Card>
-            <UpdateScheduleCard />
-            <Card p="lg"><Group justify="space-between" mb="sm"><Text fw={700}>履歴</Text><Badge variant="light" color="gray">{jobs.length}</Badge></Group><Stack gap={4}>{jobs.slice(0, 8).map((job) => <Button key={job.jobId} variant={activeSnapshot?.jobId === job.jobId ? "light" : "subtle"} color="gray" justify="space-between" size="compact-sm" onClick={() => runtime && updateJobs.selectJob(job.jobId)}><Text size="xs">{formatDate(job.startedAt, true)}</Text><StatusBadge status={job.status} /></Button>)}</Stack></Card>
-          </Stack>
-        </Grid.Col>
-        <Grid.Col span={{ base: 12, lg: 8, xl: 9 }}>
-          {!activeSnapshot ? <EmptyState icon={Icons.versionHistory} title="更新ジョブはまだありません" description="左側で対象と方法を選び、更新確認を開始してください。" /> : (
-            <Stack gap="lg">
-              <Card p="lg" className="update-progress-card">
-                <Group justify="space-between" align="flex-start"><Box><Group gap="xs"><StatusBadge status={activeSnapshot.status} /><Text size="xs" c="dimmed">{activeSnapshot.jobId}</Text></Group><Title order={2} mt="sm">{activeSnapshot.activeLabel || statusTitle(activeSnapshot.status)}</Title><Text size="sm" c="dimmed" mt={5}>{formatNumber(activeSnapshot.processed)} / {formatNumber(activeSnapshot.totals)}件を処理 · 候補 {formatNumber(activeSnapshot.candidateCount)} · エラー {formatNumber(activeSnapshot.errorCount)}</Text></Box><Group gap="xs">{running && <Button variant="default" leftSection={<Icons.pause size={IconSize.menu} />} onClick={() => runtime && updateJobs.pause(activeSnapshot.jobId)}>一時停止</Button>}{stalled && <Button leftSection={<Icons.resume size={IconSize.menu} />} onClick={() => runtime && updateJobs.resume(activeSnapshot.jobId)}>再開</Button>}{(running || stalled) && <Button variant="subtle" color="red" leftSection={<Icons.cancel size={IconSize.menu} />} onClick={() => runtime && updateJobs.cancel(activeSnapshot.jobId)}>中止</Button>}{(activeSnapshot.status === "failed" || activeSnapshot.status === "canceled") && <Button leftSection={<Icons.undo size={IconSize.menu} />} onClick={() => runtime && updateJobs.resume(activeSnapshot.jobId, true)}>失敗分を再試行</Button>}</Group></Group>
-                <Progress value={progressValue} animated={running} mt="lg" size="lg" aria-label={`更新進捗 ${Math.round(progressValue)}%`} />
-              </Card>
 
-              <Tabs value={tab} onChange={setTab}>
-                <Tabs.List><Tabs.Tab value="candidates" leftSection={<Icons.select size={IconSize.menu} />}>候補 <Badge size="xs" variant="light" ml={4}>{activeSnapshot.candidates.length}</Badge></Tabs.Tab><Tabs.Tab value="logs" leftSection={<Icons.pending size={IconSize.menu} />}>ログ</Tabs.Tab><Tabs.Tab value="targets" leftSection={<Icons.updates size={IconSize.menu} />}>監視対象</Tabs.Tab></Tabs.List>
-                <Tabs.Panel value="candidates" pt="lg">
-                  <CandidatesPanel
-                    candidates={activeSnapshot.candidates.filter((candidate) => !dismissedIds.includes(candidate.id))}
-                    selectedIds={selectedSavableIdSet}
-                    selectableIds={selectableCandidateIds}
-                    running={running}
-                    saving={saveCandidatesMutation.isPending}
-                    hasMore={Boolean(activeSnapshot.nextCandidateCursor)}
-                    onToggle={(id, checked) => setSelectedCandidateIds((current) => checked ? [...new Set([...current, id])] : current.filter((item) => item !== id))}
-                    onSelectMany={(ids) => setSelectedCandidateIds(ids)}
-                    onSave={() => saveCandidatesMutation.mutate()}
-                    onLoadMore={() => runtime && updateJobs.loadMoreCandidates()}
-                    onDismiss={(candidate) => dismissMutation.mutate(candidate)}
-                  />
-                </Tabs.Panel>
-                <Tabs.Panel value="logs" pt="lg"><Card p="lg">{activeSnapshot.previousLogCursor && <Button mb="md" variant="default" onClick={() => runtime && updateJobs.loadOlderLogs()}>以前のログを読み込む</Button>}<Timeline active={activeSnapshot.logs.length}>{activeSnapshot.logs.map((log) => <Timeline.Item key={log.id} color={log.logType === "error" ? "red" : log.logType === "success" ? "green" : log.logType === "warn" ? "yellow" : "piep"} title={log.logType === "error" ? errorMessage(log.message) : log.message}><Text size="xs" c="dimmed">{formatDate(log.createdAt, true)}</Text></Timeline.Item>)}</Timeline></Card></Tabs.Panel>
-                <Tabs.Panel value="targets" pt="lg">{(dismissedCount.data ?? 0) > 0 && (
-                  <Card p="md" mb="lg">
-                    <Group justify="space-between" wrap="nowrap">
-                      <Box>
-                        <Text size="sm" fw={650}>非表示にした作品が{dismissedCount.data}件あります</Text>
-                        <Text size="xs" c="dimmed">解除すると、次の確認でまた候補に並びます。</Text>
-                      </Box>
-                      <Button size="xs" variant="default" loading={restoreDismissedMutation.isPending} onClick={() => restoreDismissedMutation.mutate()}>すべて解除</Button>
-                    </Group>
-                  </Card>
-                )}<TargetsPanel targets={targets.data ?? []} loading={targets.isLoading} error={targets.error} retry={() => targets.refetch()} form={targetForm} mutation={targetMutation} /></Tabs.Panel>
-              </Tabs>
-            </Stack>
+      {/* 毎回触るものだけを一列に置く。自動確認は数か月に一度しか触らない
+          設定なので、いまどうなっているかだけ名乗って、変更は開いたときに。
+          触る頻度が3桁違うものを同じ重さで並べていたころは、左の柱が画面
+          より長くなっていた。 */}
+      <Paper className="updates-toolbar" p="sm" withBorder mt="md">
+        <Group gap="sm" wrap="wrap">
+          <Select
+            aria-label="確認する対象"
+            leftSection={<Icons.select size={IconSize.menu} />}
+            data={[{ value: "all", label: "すべての監視対象" }, { value: "work", label: "監視中の作品" }, { value: "author", label: "作者・クリエイター" }, { value: "series", label: "シリーズ" }, { value: "favorite", label: "お気に入りの作品" }, { value: "reading", label: "読みかけの作品" }]}
+            disabled={Boolean(workId)}
+            w={210}
+            {...form.getInputProps("scope")}
+          />
+          <SegmentedControl aria-label="更新時の処理方法" data={[{ value: "check_only", label: "確認のみ" }, { value: "auto_save", label: "自動保存" }]} {...form.getInputProps("mode")} />
+          <Button leftSection={<Icons.updates size={IconSize.menu} />} disabled={running} loading={startMutation.isPending} onClick={() => form.onSubmit((values) => startMutation.mutate(values))()}>確認を開始</Button>
+          {/* 平常時に読ませたいのは一行だけ。詳しい話は、知りたくなった
+              ときに開く。実際に効いた瞬間は下の進捗カードが名乗る。 */}
+          <Group gap={4} wrap="nowrap">
+            <Text size="xs" c="dimmed">1件ずつ間隔をあけて確認します</Text>
+            <Tooltip
+              multiline
+              w={280}
+              label="取得元に負担をかけないよう、1件ずつ間隔をあけて確認します。制限を受けたときは自動で間隔を広げ、通るようになったら戻します。"
+            >
+              <ActionIcon variant="subtle" color="gray" size="sm" aria-label="確認の進め方について">
+                <Icons.help size={IconSize.menu} />
+              </ActionIcon>
+            </Tooltip>
+          </Group>
+          {workId && <Badge variant="light" color="gray">作品 ID {workId} のみ</Badge>}
+          <Box style={{ flex: 1 }} />
+          <Group gap={6} wrap="nowrap">
+            <Text size="xs" c="dimmed">自動確認：{scheduleSummary}</Text>
+            <Button size="compact-xs" variant="subtle" color="gray" onClick={() => setTab("schedule")}>変更</Button>
+          </Group>
+        </Group>
+      </Paper>
+
+      {activeSnapshot && (
+        <Card p="lg" className="update-progress-card" mt="lg">
+          <Group justify="space-between" align="flex-start" wrap="wrap">
+            <Box miw={0}>
+              <Group gap="xs"><StatusBadge status={activeSnapshot.status} /><Text size="xs" c="dimmed">{activeSnapshot.jobId}</Text></Group>
+              <Title order={2} mt="sm">{activeSnapshot.activeLabel || statusTitle(activeSnapshot.status)}</Title>
+              <Text size="sm" c="dimmed" mt={5}>{formatNumber(activeSnapshot.processed)} / {formatNumber(activeSnapshot.totals)}件を処理 · 候補 {formatNumber(activeSnapshot.candidateCount)} · エラー {formatNumber(activeSnapshot.errorCount)}</Text>
+            </Box>
+            <Group gap="xs">
+              {running && <Button variant="default" leftSection={<Icons.pause size={IconSize.menu} />} onClick={() => runtime && updateJobs.pause(activeSnapshot.jobId)}>一時停止</Button>}
+              {stalled && <Button leftSection={<Icons.resume size={IconSize.menu} />} onClick={() => runtime && updateJobs.resume(activeSnapshot.jobId)}>再開</Button>}
+              {(running || stalled) && <Button variant="subtle" color="red" leftSection={<Icons.cancel size={IconSize.menu} />} onClick={() => runtime && updateJobs.cancel(activeSnapshot.jobId)}>中止</Button>}
+              {(activeSnapshot.status === "failed" || activeSnapshot.status === "canceled") && <Button leftSection={<Icons.undo size={IconSize.menu} />} onClick={() => runtime && updateJobs.resume(activeSnapshot.jobId, true)}>失敗分を再試行</Button>}
+            </Group>
+          </Group>
+          {/* 間隔の説明が本当に要る瞬間はここ。「遅い」と感じたときに、
+              なぜ待っているのかが同じ場所に出る。 */}
+          {running && throttledMessage && (
+            <Group gap={6} mt="md" wrap="nowrap" role="status">
+              <ThemeIcon size="sm" radius="xl" color="yellow" variant="light"><Icons.pending size={IconSize.inline} /></ThemeIcon>
+              <Text size="xs" c="dimmed" className="line-clamp-1">{throttledMessage}</Text>
+            </Group>
           )}
-        </Grid.Col>
-      </Grid>
+          <Progress value={progressValue} animated={running} mt="lg" size="lg" aria-label={`更新進捗 ${Math.round(progressValue)}%`} />
+        </Card>
+      )}
+
+      <Tabs value={tab} onChange={setTab} mt="lg">
+        {/* 左から右へ「いま何が待っているか → どう進んだか → 前はどうだったか」、
+            区切りを挟んで「何を追いかける約束か → いつ走らせる約束か」。
+            数の帯は、伝える中身があるときだけ出す - 0 は何も言っていない。 */}
+        <Tabs.List>
+          <Tabs.Tab value="candidates" leftSection={<Icons.select size={IconSize.menu} />}>候補 {openCandidateCount > 0 && <Badge size="xs" variant="light" ml={4}>{formatNumber(openCandidateCount)}</Badge>}</Tabs.Tab>
+          <Tabs.Tab value="logs" leftSection={<Icons.pending size={IconSize.menu} />}>ログ</Tabs.Tab>
+          <Tabs.Tab value="history" leftSection={<Icons.versionHistory size={IconSize.menu} />}>履歴 {jobs.length > 0 && <Badge size="xs" variant="light" color="gray" ml={4}>{formatNumber(jobs.length)}</Badge>}</Tabs.Tab>
+          <span className="updates-tabs__divider" aria-hidden />
+          <Tabs.Tab value="targets" leftSection={<Icons.updates size={IconSize.menu} />}>監視対象</Tabs.Tab>
+          <Tabs.Tab value="schedule" leftSection={<Icons.publishedDate size={IconSize.menu} />}>自動確認</Tabs.Tab>
+        </Tabs.List>
+
+        <Tabs.Panel value="candidates" pt="lg">
+          {activeSnapshot ? (
+            <CandidatesPanel
+              candidates={activeSnapshot.candidates.filter((candidate) => !dismissedIds.includes(candidate.id))}
+              selectedIds={selectedSavableIdSet}
+              selectableIds={selectableCandidateIds}
+              running={running}
+              saving={saveCandidatesMutation.isPending}
+              hasMore={Boolean(activeSnapshot.nextCandidateCursor)}
+              onToggle={(id, checked) => setSelectedCandidateIds((current) => checked ? [...new Set([...current, id])] : current.filter((item) => item !== id))}
+              onSelectMany={(ids) => setSelectedCandidateIds(ids)}
+              onSave={() => saveCandidatesMutation.mutate()}
+              onLoadMore={() => runtime && updateJobs.loadMoreCandidates()}
+              onDismiss={(candidate) => dismissMutation.mutate(candidate)}
+            />
+          ) : (
+            <EmptyState icon={Icons.versionHistory} title="更新ジョブはまだありません" description="上の対象と方法を選び、「確認を開始」を押してください。" />
+          )}
+        </Tabs.Panel>
+
+        <Tabs.Panel value="logs" pt="lg">
+          {activeSnapshot ? (
+            <Card p="lg">
+              {activeSnapshot.previousLogCursor && <Button mb="md" variant="default" onClick={() => runtime && updateJobs.loadOlderLogs()}>以前のログを読み込む</Button>}
+              <Timeline active={activeSnapshot.logs.length}>{activeSnapshot.logs.map((log) => <Timeline.Item key={log.id} color={log.logType === "error" ? "red" : log.logType === "success" ? "green" : log.logType === "warn" ? "yellow" : "piep"} title={log.logType === "error" ? errorMessage(log.message) : log.message}><Text size="xs" c="dimmed">{formatDate(log.createdAt, true)}</Text></Timeline.Item>)}</Timeline>
+            </Card>
+          ) : (
+            <EmptyState icon={Icons.pending} title="ログはまだありません" description="確認を開始すると、ここに1件ずつの結果が並びます。" />
+          )}
+        </Tabs.Panel>
+
+        <Tabs.Panel value="targets" pt="lg">
+          {(dismissedCount.data ?? 0) > 0 && (
+            <Card p="md" mb="lg">
+              <Group justify="space-between" wrap="nowrap">
+                <Box>
+                  <Text size="sm" fw={650}>非表示にした作品が{dismissedCount.data}件あります</Text>
+                  <Text size="xs" c="dimmed">解除すると、次の確認でまた候補に並びます。</Text>
+                </Box>
+                <Button size="xs" variant="default" loading={restoreDismissedMutation.isPending} onClick={() => restoreDismissedMutation.mutate()}>すべて解除</Button>
+              </Group>
+            </Card>
+          )}
+          <TargetsPanel targets={targets.data ?? []} loading={targets.isLoading} error={targets.error} retry={() => targets.refetch()} form={targetForm} mutation={targetMutation} />
+        </Tabs.Panel>
+
+        <Tabs.Panel value="history" pt="lg">
+          <JobHistoryPanel
+            jobs={jobs}
+            activeJobId={activeSnapshot?.jobId ?? null}
+            finishedCount={finishedJobCount}
+            clearingAll={clearFinishedJobsMutation.isPending}
+            clearingJobId={clearJobMutation.isPending ? (clearJobMutation.variables ?? null) : null}
+            onSelect={(jobId) => runtime && updateJobs.selectJob(jobId)}
+            onClear={(jobId) => clearJobMutation.mutate(jobId)}
+            onClearFinished={confirmClearFinishedJobs}
+          />
+        </Tabs.Panel>
+
+        <Tabs.Panel value="schedule" pt="lg">
+          <UpdateScheduleCard onChanged={() => setScheduleRevision((value) => value + 1)} />
+        </Tabs.Panel>
+      </Tabs>
     </div>
+  );
+}
+
+/**
+ * 走らせた記録。
+ *
+ * 残すためのものだが、消せないままでは溜まる一方になる。走っているものには
+ * 消す口を出さない - 消せば、進んでいるものの行き先が画面から無くなる。
+ */
+function JobHistoryPanel({ jobs, activeJobId, finishedCount, clearingAll, clearingJobId, onSelect, onClear, onClearFinished }: {
+  jobs: UpdateJobSummary[];
+  activeJobId: string | null;
+  finishedCount: number;
+  clearingAll: boolean;
+  clearingJobId: string | null;
+  onSelect: (jobId: string) => void;
+  onClear: (jobId: string) => void;
+  onClearFinished: () => void;
+}) {
+  if (!jobs.length) {
+    return <EmptyState icon={Icons.versionHistory} title="履歴はまだありません" description="確認を開始すると、走らせた記録がここに残ります。" />;
+  }
+  return (
+    <Card p={0}>
+      <Group justify="space-between" p="md" wrap="nowrap">
+        <Box>
+          <Text fw={700}>走らせた記録</Text>
+          <Text size="xs" c="dimmed">選ぶと、その回の候補とログを開きます</Text>
+        </Box>
+        {finishedCount > 0 && (
+          <Button size="xs" variant="default" color="gray" leftSection={<Icons.delete size={IconSize.menu} />} loading={clearingAll} onClick={onClearFinished}>終わった{formatNumber(finishedCount)}件を消す</Button>
+        )}
+      </Group>
+      <Divider />
+      <Stack gap={0}>
+        {jobs.map((job) => (
+          <Group key={job.jobId} gap="sm" wrap="nowrap" px="md" py="sm" className="update-history__row" data-active={job.jobId === activeJobId || undefined}>
+            <UnstyledButton style={{ flex: 1, minWidth: 0 }} onClick={() => onSelect(job.jobId)}>
+              <Group gap="sm" wrap="nowrap">
+                <StatusBadge status={job.status} />
+                <Text size="sm" fw={job.jobId === activeJobId ? 700 : 500}>{formatDate(job.startedAt, true)}</Text>
+                {/* どの回が実りある回だったかは、開かなくても分かるほうがいい。 */}
+                <Text size="xs" c="dimmed" className="line-clamp-1">
+                  {formatNumber(job.processed)}/{formatNumber(job.totals)}件 · 候補 {formatNumber(job.candidateCount)} · 保存 {formatNumber(job.savedCount)}{job.errorCount > 0 ? ` · エラー ${formatNumber(job.errorCount)}` : ""}
+                </Text>
+              </Group>
+            </UnstyledButton>
+            {isUpdateJobTerminal(job.status) && (
+              <Tooltip label="この履歴を消す">
+                <ActionIcon className="update-history__delete" variant="subtle" color="gray" size="sm" aria-label={`${formatDate(job.startedAt, true)}の履歴を消す`} loading={clearingJobId === job.jobId} onClick={() => onClear(job.jobId)}>
+                  <Icons.cancel size={IconSize.menu} />
+                </ActionIcon>
+              </Tooltip>
+            )}
+          </Group>
+        ))}
+      </Stack>
+    </Card>
   );
 }
 
@@ -414,14 +627,29 @@ function CandidatesPanel({ candidates, selectedIds, selectableIds, running, savi
   onDismiss: (candidate: UpdateJobSnapshot["candidates"][number]) => void;
 }) {
   const [kind, setKind] = useState<string>("all");
+  // 済んだものは畳む。数は残す - 「無かったこと」にはしない。
+  const [showSettled, setShowSettled] = useState(false);
   if (!candidates.length) {
     return <EmptyState icon={Icons.confirm} title="新しい候補はありません" description="監視対象はすべて最新です。" />;
   }
-  const counts = candidates.reduce<Record<string, number>>((totals, candidate) => {
+  const settled = candidates.filter((candidate) => isSettledCandidateStatus(candidate.status));
+  const open = candidates.filter((candidate) => !isSettledCandidateStatus(candidate.status));
+  if (!open.length && !showSettled) {
+    return (
+      <EmptyState
+        icon={Icons.confirm}
+        title="この確認の候補は、ぜんぶ片付きました"
+        description={`見つかった${settled.length}件は保存済みです。次の確認では、ここに新しいぶんだけ並びます。`}
+        action={<Button variant="default" onClick={() => setShowSettled(true)}>保存済みを表示</Button>}
+      />
+    );
+  }
+  const listed = showSettled ? candidates : open;
+  const counts = listed.reduce<Record<string, number>>((totals, candidate) => {
     totals[candidate.kind] = (totals[candidate.kind] ?? 0) + 1;
     return totals;
   }, {});
-  const shown = kind === "all" ? candidates : candidates.filter((candidate) => candidate.kind === kind);
+  const shown = kind === "all" ? listed : listed.filter((candidate) => candidate.kind === kind);
   const shownSelectable = shown.filter(isSavableCandidate).map((candidate) => candidate.id);
   const selectedCount = selectableIds.filter((id) => selectedIds.has(id)).length;
 
@@ -446,7 +674,7 @@ function CandidatesPanel({ candidates, selectedIds, selectableIds, running, savi
           onChange={setKind}
           data={CANDIDATE_KINDS.filter((item) => item.value === "all" || counts[item.value]).map((item) => ({
             value: item.value,
-            label: item.value === "all" ? `${item.label} ${candidates.length}` : `${item.label} ${counts[item.value] ?? 0}`,
+            label: item.value === "all" ? `${item.label} ${listed.length}` : `${item.label} ${counts[item.value] ?? 0}`,
           }))}
         />
       </Box>
@@ -484,6 +712,15 @@ function CandidatesPanel({ candidates, selectedIds, selectableIds, running, savi
           </Paper>
         ))}
       </Stack>
+      {settled.length > 0 && (
+        <>
+          <Divider />
+          <Group justify="space-between" p="md" wrap="nowrap">
+            <Text size="xs" c="dimmed">保存済み {settled.length}件{showSettled ? "も表示しています" : "は畳んでいます"}</Text>
+            <Button size="compact-xs" variant="subtle" color="gray" onClick={() => setShowSettled((current) => !current)}>{showSettled ? "隠す" : "表示"}</Button>
+          </Group>
+        </>
+      )}
       {hasMore && <Box p="md"><Button fullWidth variant="default" onClick={onLoadMore}>次の候補を読み込む</Button></Box>}
     </Card>
   );
@@ -521,6 +758,17 @@ function isSavableCandidate(candidate: UpdateJobSnapshot["candidates"][number]) 
 
 function candidateStatusLabel(status: UpdateJobSnapshot["candidates"][number]["status"]): string {
   return ({ candidate: "候補", queued: "待機中", running: "保存中", saved: "保存済み", failed: "失敗", skipped: "スキップ", done: "処理済み" } as Record<string, string>)[status] ?? status;
+}
+
+/** 自動確認の状態を一行で。設定画面を開かなくても、いまの約束が読める。 */
+function describeSchedule(schedule: UpdateScheduleSettings | undefined): string {
+  if (!schedule) return "…";
+  const mode = schedule.mode === "auto_save" ? "確認して保存" : "確認のみ";
+  const when: string[] = [];
+  if (schedule.onStartup) when.push("起動時");
+  if (schedule.intervalHours > 0) when.push(`${schedule.intervalHours}時間ごと`);
+  if (!when.length) return "オフ";
+  return `${when.join(" · ")}・${mode}`;
 }
 
 function StatusBadge({ status }: { status: string }) {

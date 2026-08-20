@@ -12,7 +12,7 @@ vi.mock("@/features/library/readingShelf", async (importOriginal) => ({
   readingWorkIds: () => readingMock(),
 }));
 
-const { isSavableCandidateStatus, parseWorkId, shelfWorkIds } = await import(
+const { isSavableCandidateStatus, isSettledCandidateStatus, parseWorkId, shelfWorkIds } = await import(
   "@/features/updates/UpdatesPage"
 );
 
@@ -28,6 +28,19 @@ describe("update candidate selection", () => {
     expect(isSavableCandidateStatus("failed")).toBe(true);
     for (const status of ["queued", "running", "saved", "skipped", "done"]) {
       expect(isSavableCandidateStatus(status)).toBe(false);
+    }
+  });
+
+  /**
+   * 済んだものは畳む。保存し終えた44件が翌日も同じ顔で並んでいると、どれが
+   * 残りなのか読めない。処理の途中（待機中・保存中）は、まだ済んでいない。
+   */
+  it("counts only finished candidates as settled", () => {
+    for (const status of ["saved", "skipped", "done"]) {
+      expect(isSettledCandidateStatus(status)).toBe(true);
+    }
+    for (const status of ["candidate", "failed", "queued", "running"]) {
+      expect(isSettledCandidateStatus(status)).toBe(false);
     }
   });
 });

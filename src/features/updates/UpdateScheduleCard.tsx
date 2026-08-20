@@ -17,7 +17,7 @@ import {
  * Every switch here writes straight through: there is no Save button because
  * there is nothing to lose by applying a preference the moment it is set.
  */
-export function UpdateScheduleCard() {
+export function UpdateScheduleCard({ onChanged }: { onChanged?: () => void } = {}) {
   const runtime = isTauriRuntime();
   const [settings, setSettings] = useState<UpdateScheduleSettings>(updateScheduleDefaults);
   const [loaded, setLoaded] = useState(false);
@@ -36,6 +36,8 @@ export function UpdateScheduleCard() {
   const apply = (change: Partial<UpdateScheduleSettings>) => {
     const next = { ...settings, ...change };
     setSettings(next);
+    // 一行の要約を出している側にも、変わったことを伝える。
+    onChanged?.();
     saveSchedule(next).catch((error) => {
       notifications.show({ color: "red", title: "設定を保存できません", message: errorMessage(error) });
     });

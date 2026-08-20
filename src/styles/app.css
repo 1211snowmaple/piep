@@ -1022,8 +1022,6 @@ select {
 }
 
 .entity-card { position: relative; min-height: 138px; overflow: hidden; }
-/* 選択マークは作品カードと同じ形。置き場所だけカードの形に合わせる。 */
-.entity-card__select { position: absolute; top: 10px; left: 10px; padding: 4px; border-radius: 999px; }
 .entity-card[data-selection-mode] { cursor: pointer; }
 .entity-card[data-selected] { outline: 2px solid var(--mantine-color-piep-6); outline-offset: -2px; }
 .entity-card__banner { position: absolute; inset: 0; overflow: hidden; background: light-dark(#e9eef3, #1c242e); }
@@ -1916,6 +1914,29 @@ select {
 .update-candidate + .update-candidate {
   border-top: 1px solid light-dark(#e5e9ee, #272f39);
 }
+
+/* タブの境目。左は「走らせた結果」、右は「決めごと」。 */
+.updates-tabs__divider {
+  align-self: center;
+  width: 1px;
+  height: 18px;
+  margin-inline: 6px;
+  background: light-dark(#dfe5ec, #2b3541);
+}
+
+/* 毎回触るものだけを載せた一列。見出しの直下に置くので、囲いは軽く。 */
+.updates-toolbar { border-color: light-dark(#dfe5ec, #262f3a); }
+
+/* 走らせた記録。行そのものが選ぶ場所なので、居場所が分かるようにする。 */
+.update-history__row + .update-history__row { border-top: 1px solid light-dark(#e5e9ee, #272f39); }
+.update-history__row:hover { background: light-dark(#f6f8fb, #171e26); }
+.update-history__row[data-active] { background: light-dark(#eef6ff, #10273a); }
+/* 消す口は、その行に居るときだけ出す。何行ぶんもの × が常に並んでいると、
+   読みたい日付より先に目へ入る。場所は空けたままにして、出入りで行が
+   動かないようにする。キーボードでは焦点が当たった時点で見える。 */
+.update-history__delete { opacity: 0; transition: opacity 120ms ease; }
+.update-history__row:hover .update-history__delete,
+.update-history__row:focus-within .update-history__delete { opacity: 1; }
 
 /* Below the side-by-side breakpoint the section chooser becomes a compact
    wrapping grid. A horizontally scrolling strip exposed a second scrollbar
