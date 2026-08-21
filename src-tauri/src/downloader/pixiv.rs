@@ -1,4 +1,6 @@
 use crate::pixiv_api::aapi::AppPixivAPI;
+use crate::pixiv_api::error::PixivError;
+use crate::pixiv_api::web::WebPixivAPI;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::error::Error;
@@ -123,13 +125,48 @@ pub async fn get_novel_text_and_assets(
     let id_u64: u64 = novel_id.parse()?;
 
     // Webview用のAPIを使用して詳細メタデータを一挙に取得
-    let webview_novel = api.webview_novel(id_u64, true).await?;
+    match api.webview_novel(id_u64, true).await {
+        Ok(webview_novel) => Ok((
+            webview_novel.text,
+            webview_novel.cover_url,
+            webview_novel.illusts,
+            webview_novel.images,
+        )),
+        // 切り出しに失敗したときだけ、web の口へ降りる。
+        //
+        // この経路は HTML から正規表現で JSON を抜いているので、pixiv が
+        // viewer を作り直した日に、ここだけが静かに壊れる。取得制限や 404 は
+        // 別の話なので、そちらでは降りない - 相手を二度叩くだけになる。
+        Err(PixivError::UnintelligibleResponse { .. }) => {
+            log::warn!("pixiv webview から本文を切り出せません（{novel_id}）。web の口を試します");
+            novel_text_from_web(novel_id).await
+        }
+        Err(error) => Err(error.into()),
+    }
+}
 
+/// 退避路。web の `/ajax/novel/{id}` から本文を読む。
+///
+/// 本文の中身は webview 経路と完全に一致するので、保存する原本は変わらない。
+/// ただし **web は `[pixivimage:]` を解決しない**。挿絵を参照している作品で
+/// ここへ降りたときは、欠けたまま保存せずに失敗させる。0.3% の作品のために
+/// 残りを諦める必要はないが、欠けたものを黙って完全なふりで保存してはいけない。
+async fn novel_text_from_web(
+    novel_id: &str,
+) -> Result<(String, String, serde_json::Value, serde_json::Value), Box<dyn Error>> {
+    let body = WebPixivAPI::new()?.novel(novel_id).await?;
+    if body.references_unresolved_illusts() {
+        return Err(format!(
+            "作品 {novel_id} は本文に挿絵を参照していますが、退避路では挿絵を取得できません"
+        )
+        .into());
+    }
     Ok((
-        webview_novel.text,
-        webview_novel.cover_url,
-        webview_novel.illusts,
-        webview_novel.images,
+        body.text,
+        body.cover_url.unwrap_or_default(),
+        // 参照している挿絵は無い、と分かっている。空を返すのは推測ではない。
+        serde_json::Value::Object(serde_json::Map::new()),
+        body.images,
     ))
 }
 

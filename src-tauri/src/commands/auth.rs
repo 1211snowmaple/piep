@@ -1,6 +1,6 @@
 use crate::auth::fanbox::{check_fanbox_session, FanboxUser};
 use crate::auth::pixiv::{login_with_refresh_token, PixivUser};
-use crate::auth::webview::{open_fanbox_login, open_pixiv_login};
+use crate::auth::webview::{open_fanbox_login, open_pixiv_login, PixivConnection};
 
 #[tauri::command]
 pub async fn verify_pixiv_token(refresh_token: String) -> Result<PixivUser, String> {
@@ -23,7 +23,7 @@ pub async fn verify_fanbox_session(
 }
 
 #[tauri::command]
-pub async fn login_pixiv_webview(app: tauri::AppHandle) -> Result<(String, PixivUser), String> {
+pub async fn login_pixiv_webview(app: tauri::AppHandle) -> Result<PixivConnection, String> {
     open_pixiv_login(app).await
 }
 

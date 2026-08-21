@@ -9,6 +9,7 @@ use url::Url;
 
 use super::fanbox::{check_fanbox_session, FanboxUser};
 use super::pixiv::{login_with_code, PixivUser};
+use crate::pixiv_api::web::PIXIV_WEB_HOST;
 
 // ---------------------------------------------------------------------------
 // Thread communication structures
@@ -367,7 +368,60 @@ fn validate_user_agent(user_agent: Option<String>) -> Result<Option<String>, Str
 // Pixiv OAuth Login (separate window)
 // ---------------------------------------------------------------------------
 
-pub async fn open_pixiv_login(app: AppHandle) -> Result<(String, PixivUser), String> {
+/// WebView2 が持っている Cookie を、そのまま送れる1行にする。
+fn cookie_header(cookies: &[tauri::webview::Cookie<'static>]) -> String {
+    cookies
+        .iter()
+        .map(|cookie| format!("{}={}", cookie.name(), cookie.value()))
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// pixiv と接続したときに受け取るもの。
+///
+/// トークンだけでなく web のセッションも持ち帰る。pixiv のログイン画面は
+/// pixiv 自身のものなので、そこを通った時点で `.pixiv.net` の Cookie は
+/// この WebView2 プロファイルに書かれている。**新しく取りに行くのではなく、
+/// もう置いてあるものを受け取るだけ。** 利用者の手順は増えない。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PixivConnection {
+    /// アプリAPI用のリフレッシュトークン。
+    pub refresh_token: String,
+    /// 接続した利用者。
+    pub user: PixivUser,
+    /// web の一覧を読むためのセッション。**取れなくても接続は成功とする。**
+    pub cookie: Option<String>,
+    /// その Cookie を受け取ったときの UA。`cookie` と対でだけ意味を持つ。
+    pub user_agent: Option<String>,
+}
+
+/// ログイン窓から pixiv のセッションを受け取る。
+///
+/// 窓を閉じるとプロファイルへの参照ごと消えるので、**閉じる前に読む**。
+/// `PHPSESSID` が無ければ「セッションは取れなかった」として `None` を返す。
+/// FANBOX 側は Cookie が唯一の資格情報なので見つからなければ失敗にするが、
+/// pixiv では Cookie は付け足しであって、接続の条件ではない。
+fn take_pixiv_session(window: &tauri::WebviewWindow) -> Option<(String, String)> {
+    let url: Url = format!("{PIXIV_WEB_HOST}/").parse().ok()?;
+    let cookies = match window.cookies_for_url(url) {
+        Ok(cookies) => cookies,
+        Err(error) => {
+            log::warn!("pixiv のセッションを読めませんでした: {error}");
+            return None;
+        }
+    };
+    if !cookies.iter().any(|cookie| cookie.name() == "PHPSESSID") {
+        log::info!("pixiv のログインは成功しましたが、PHPSESSID は見つかりませんでした");
+        return None;
+    }
+    Some((
+        cookie_header(&cookies),
+        DEFAULT_BROWSER_USER_AGENT.to_string(),
+    ))
+}
+
+pub async fn open_pixiv_login(app: AppHandle) -> Result<PixivConnection, String> {
     let _login_guard = PIXIV_LOGIN_LOCK
         .try_lock()
         .map_err(|_| "A Pixiv login is already in progress".to_string())?;
@@ -405,6 +459,10 @@ pub async fn open_pixiv_login(app: AppHandle) -> Result<(String, PixivUser), Str
     builder = builder
         .title("Pixiv Login")
         .inner_size(400.0, 700.0)
+        // 内蔵ブラウザと同じ UA で名乗る。`cf_clearance` は発行時の UA に
+        // 紐づくので、ここで名乗ったものと、あとで一覧を読むときに送るものが
+        // 食い違うと弾かれる。既定に任せず、静的に決めておく。
+        .user_agent(DEFAULT_BROWSER_USER_AGENT)
         .on_navigation(move |url| {
             if let Some(code) = pixiv_callback_code(url) {
                 if let Some(sender) = navigation_sender.lock().take() {
@@ -435,17 +493,27 @@ pub async fn open_pixiv_login(app: AppHandle) -> Result<(String, PixivUser), Str
         }
     };
 
+    // 窓を閉じる前に読む。閉じたあとでは、もう聞く相手がいない。
+    let session = take_pixiv_session(&window_clone);
     let _ = window_clone.close();
 
     let auth_res = login_with_code(&code, &code_verifier)
         .await
         .map_err(|e| e.to_string())?;
 
-    if let Some(user) = auth_res.user {
-        Ok((auth_res.refresh_token, user))
-    } else {
-        Err("Failed to get user info".to_string())
-    }
+    let Some(user) = auth_res.user else {
+        return Err("Failed to get user info".to_string());
+    };
+    let (cookie, user_agent) = match session {
+        Some((cookie, user_agent)) => (Some(cookie), Some(user_agent)),
+        None => (None, None),
+    };
+    Ok(PixivConnection {
+        refresh_token: auth_res.refresh_token,
+        user,
+        cookie,
+        user_agent,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -578,11 +646,7 @@ pub async fn open_fanbox_login(app: AppHandle) -> Result<(String, FanboxUser, St
             log::warn!("Failed to close FANBOX login window: {error}");
         }
 
-        let cookie_str = cookies
-            .iter()
-            .map(|c| format!("{}={}", c.name(), c.value()))
-            .collect::<Vec<_>>()
-            .join("; ");
+        let cookie_str = cookie_header(&cookies);
 
         if cookies.iter().any(|cookie| cookie.name() == "FANBOXSESSID") {
             cookie_str

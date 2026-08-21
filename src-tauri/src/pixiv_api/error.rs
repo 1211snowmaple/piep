@@ -54,6 +54,19 @@ pub enum PixivError {
         /// レスポンスボディ。
         body: String,
     },
+    /// 一覧が、頼んだ数より少なく返ってきた。
+    ///
+    /// pixiv の web 一覧は、ログインしていないと R-18 の作品を **黙って** 落とす。
+    /// `error` は false のまま、件数だけが減る。これを「変わっていない」と読むと、
+    /// セッションが切れた日にライブラリ全体が「最新です」と表示される。
+    /// 数が合わないことは、それ自体が失敗である。
+    #[error("一覧が {requested} 件中 {returned} 件しか返りませんでした。pixivとの接続が切れている可能性があります")]
+    PartialListing {
+        /// 要求した件数。
+        requested: usize,
+        /// 返ってきた件数。
+        returned: usize,
+    },
     /// Serde（デシリアライズ）エラー。
     ///
     /// 応答本文は記録には残すが、文面には混ぜない。読めなかった JSON を
@@ -107,6 +120,19 @@ mod tests {
         assert!(shown.contains("アクセス制限"));
         assert!(shown.contains("時間をおいて"));
         assert!(!shown.contains("{"), "生のレスポンスを混ぜない: {shown}");
+    }
+
+    #[test]
+    /// 「少なく返ってきた」を、利用者が次にできることの言葉で伝える。
+    fn partial_listing_says_what_to_do() {
+        let err = PixivError::PartialListing {
+            requested: 100,
+            returned: 7,
+        };
+        let shown = err.to_string();
+        assert!(shown.contains("100"));
+        assert!(shown.contains('7'));
+        assert!(shown.contains("接続"));
     }
 
     #[test]

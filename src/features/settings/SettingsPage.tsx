@@ -67,6 +67,8 @@ function isSection(value: string | null): value is Section {
   return value !== null && (SECTIONS as string[]).includes(value);
 }
 interface PixivUser { id: string; name: string; profile_image_urls?: { medium?: string } }
+/// pixivと接続したときに返るもの。cookieは取れないこともある。
+interface PixivConnection { refreshToken: string; user: PixivUser; cookie: string | null; userAgent: string | null }
 interface FanboxUser { userId: string; name: string; iconUrl?: string | null }
 interface ConnectionState { pixiv: PixivUser | null; fanbox: FanboxUser | null }
 export interface BackupReview { path: string; format: BackupFormat; inspection: BackupInspection }
@@ -110,8 +112,17 @@ export default function SettingsPage() {
     mutationFn: async (input: { source: "pixiv" | "fanbox"; mode: "web" | "manual"; values?: Record<string, string> }) => {
       if (!runtime) throw new Error("接続はデスクトップアプリで利用できます");
       if (input.source === "pixiv") {
-        const [token, user] = input.mode === "web" ? await loginPixivWebview<[string, PixivUser]>() : [input.values?.token ?? "", await verifyPixivToken<PixivUser>(input.values?.token ?? "")];
-        await store.set("pixiv_refresh_token", token); await store.set("pixiv_user", user); await store.save();
+        // ブラウザ経由の接続だけが web のセッションを持ち帰る。手動でトークンを
+        // 貼った場合は Cookie が無いので、更新確認は従来の経路になる。
+        const connection = input.mode === "web"
+          ? await loginPixivWebview<PixivConnection>()
+          : { refreshToken: input.values?.token ?? "", user: await verifyPixivToken<PixivUser>(input.values?.token ?? ""), cookie: null, userAgent: null };
+        await store.set("pixiv_refresh_token", connection.refreshToken); await store.set("pixiv_user", connection.user);
+        // Cookie と UA は対でしか意味を持たない。片方だけ残らないよう、
+        // 揃っているときだけ書き、そうでなければ両方消す。
+        if (connection.cookie && connection.userAgent) { await store.set("pixiv_cookie", connection.cookie); await store.set("pixiv_user_agent", connection.userAgent); }
+        else { await store.delete("pixiv_cookie"); await store.delete("pixiv_user_agent"); }
+        await store.save();
       } else {
         const [session, user, userAgent] = input.mode === "web" ? await loginFanboxWebview<[string, FanboxUser, string]>() : [input.values?.session ?? "", await verifyFanboxSession<FanboxUser>(input.values?.session ?? "", input.values?.userAgent || "Mozilla/5.0"), input.values?.userAgent || "Mozilla/5.0"];
         await store.set("fanbox_session_id", session); await store.set("fanbox_user", user); await store.set("fanbox_user_agent", userAgent); await store.save();
@@ -122,7 +133,7 @@ export default function SettingsPage() {
   });
   const disconnect = (source: "pixiv" | "fanbox") => modals.openConfirmModal({
     title: `${getProvider(source).label}との接続を解除しますか？`, children: <Text size="sm">保存済みの作品は削除されません。再度保存・更新するには接続が必要です。</Text>, labels: { confirm: "接続を解除", cancel: "キャンセル" }, confirmProps: { color: "red" },
-    onConfirm: async () => { if (source === "pixiv") { await store.delete("pixiv_refresh_token"); await store.delete("pixiv_user"); } else { await store.delete("fanbox_session_id"); await store.delete("fanbox_user"); } await store.save(); queryClient.invalidateQueries({ queryKey: ["settings-auth"] }); queryClient.invalidateQueries({ queryKey: ["auth-status"] }); },
+    onConfirm: async () => { if (source === "pixiv") { await store.delete("pixiv_refresh_token"); await store.delete("pixiv_user"); await store.delete("pixiv_cookie"); await store.delete("pixiv_user_agent"); } else { await store.delete("fanbox_session_id"); await store.delete("fanbox_user"); } await store.save(); queryClient.invalidateQueries({ queryKey: ["settings-auth"] }); queryClient.invalidateQueries({ queryKey: ["auth-status"] }); },
   });
   const maintenanceMutation = useMutation({
     mutationFn: async (action: "backup" | "restore" | "scan") => {

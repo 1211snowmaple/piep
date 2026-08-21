@@ -35,6 +35,125 @@ static ACTIVE_UPDATE_JOBS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 static PENDING_UPDATE_RESTARTS: OnceLock<Mutex<HashMap<String, UpdateCredentials>>> =
     OnceLock::new();
 
+/// web の一覧から引けたか、引けなかったか。
+enum WebLookup {
+    /// 一覧に載っていた。
+    Found(Box<crate::pixiv_api::web::NovelListEntryWeb>),
+    /// 引けなかった。セッションが無い、伏せられている、作者が分からない、など。
+    /// **失敗ではない。** 従来どおりアプリAPIで確かめればよい。
+    Unknown,
+    /// 一覧そのものが当てにならない。再接続が要る。
+    NeedsAuth(String),
+}
+
+/// ジョブの間だけ生きる、web 一覧の覚え書き。
+///
+/// pixiv の web は 1 リクエストで 100 件ぶんの `updateDate` を返す。作者ごとに
+/// 一度聞いて覚えておけば、作品ごとにアプリAPIを叩かずに「変わっていない」が
+/// 分かる。**セッションが無ければ何もしない。** 無い状態は壊れた状態ではなく、
+/// 今までどおりの経路になるだけである。
+struct WebUpdateIndex {
+    api: Option<crate::pixiv_api::web::WebPixivAPI>,
+    asked_authors: HashSet<String>,
+    entries: HashMap<String, crate::pixiv_api::web::NovelListEntryWeb>,
+    /// 一度でも「数が合わない」を見たら、以降このジョブでは一覧を使わない。
+    /// 一件ごとに再接続を促しても、利用者にできることは増えない。
+    gave_up: bool,
+}
+
+impl WebUpdateIndex {
+    fn new(credentials: &UpdateCredentials) -> Self {
+        let session = crate::pixiv_api::web::WebSession::new(
+            credentials.pixiv_cookie.as_deref().unwrap_or_default(),
+            credentials.pixiv_user_agent.as_deref().unwrap_or_default(),
+        );
+        let api = session.and_then(|session| {
+            match crate::pixiv_api::web::WebPixivAPI::new() {
+                Ok(api) => Some(api.with_session(session)),
+                Err(error) => {
+                    log::warn!("pixiv web クライアントを作れません: {error}");
+                    None
+                }
+            }
+        });
+        Self {
+            api,
+            asked_authors: HashSet::new(),
+            entries: HashMap::new(),
+            gave_up: false,
+        }
+    }
+
+    /// この作品について、取得元での最終更新を引く。
+    ///
+    /// まだ聞いていない作者なら、**このジョブが確認する予定のその作者の作品を
+    /// まとめて**聞く。1件のために 1 リクエスト、にはしない。
+    async fn lookup(
+        &mut self,
+        state: &Arc<AppState>,
+        job_id: &str,
+        dl: &DownloadEntry,
+    ) -> WebLookup {
+        let Some(api) = self.api.as_ref() else {
+            return WebLookup::Unknown;
+        };
+        if self.gave_up || dl.author_id.trim().is_empty() {
+            return WebLookup::Unknown;
+        }
+
+        if self.asked_authors.insert(dl.author_id.clone()) {
+            let mut ids = state
+                .db
+                .pixiv_source_ids_for_job_author(job_id, &dl.author_id)
+                .unwrap_or_default();
+            if !ids.iter().any(|id| id == &dl.source_id) {
+                ids.push(dl.source_id.clone());
+            }
+            match api.user_novels_by_ids(&dl.author_id, &ids).await {
+                Ok(entries) => {
+                    for entry in entries {
+                        self.entries.insert(entry.id.clone(), entry);
+                    }
+                }
+                // 数が合わない = R-18 が黙って落ちている = セッションが切れている。
+                // これを「更新なし」として通すと、ライブラリ全体が嘘をつく。
+                Err(error @ crate::pixiv_api::error::PixivError::PartialListing { .. }) => {
+                    self.gave_up = true;
+                    return WebLookup::NeedsAuth(format!("pixiv連携の再接続が必要です（{error}）"));
+                }
+                Err(error) => {
+                    // それ以外の失敗は、この作者を諦めるだけ。従来の経路が拾う。
+                    log::warn!("pixiv web 一覧を読めません（作者 {}）: {error}", dl.author_id);
+                }
+            }
+        }
+
+        match self.entries.get(&dl.source_id) {
+            // 伏せられた作品はメタデータが当てにならない。判定に使わない。
+            Some(entry) if entry.is_masked => WebLookup::Unknown,
+            Some(entry) => WebLookup::Found(Box::new(entry.clone())),
+            None => WebLookup::Unknown,
+        }
+    }
+}
+
+/// この `updateDate` を基準値として覚えてよいか。
+///
+/// 覚えるとは「次はこの値と同じなら本文を見ない」と決めることなので、
+/// **いま手元にある本文がその更新のあとのものだ、と言えなければ覚えてはいけない。**
+/// 言えないまま覚えると、その改稿は二度と拾われなくなる。
+///
+/// 読めない時刻は「言えない」に倒す。
+fn may_remember(listed_update: Option<&str>, verified_at: Option<&str>) -> bool {
+    let Some(listed) = listed_update.and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+    else {
+        return false;
+    };
+    verified_at
+        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+        .is_some_and(|verified| verified >= listed)
+}
+
 fn active_jobs() -> &'static Mutex<HashSet<String>> {
     ACTIVE_UPDATE_JOBS.get_or_init(|| Mutex::new(HashSet::new()))
 }
@@ -589,11 +708,10 @@ pub async fn start_update_job(
     spawn_update_job(
         app.clone(),
         job_id.clone(),
-        request.credentials.clone().unwrap_or(UpdateCredentials {
-            pixiv_refresh_token: None,
-            fanbox_cookie: None,
-            fanbox_user_agent: None,
-        }),
+        request
+            .credentials
+            .clone()
+            .unwrap_or_else(snapshot_credentials_missing),
     );
     emit_snapshot(&app, &state, &job_id).await;
     Ok(snapshot)
@@ -718,6 +836,8 @@ pub async fn save_update_job_candidates(
 fn snapshot_credentials_missing() -> UpdateCredentials {
     UpdateCredentials {
         pixiv_refresh_token: None,
+        pixiv_cookie: None,
+        pixiv_user_agent: None,
         fanbox_cookie: None,
         fanbox_user_agent: None,
     }
@@ -791,6 +911,9 @@ async fn run_update_job(
     // 保存した作品をそのまま監視に載せるかは、ジョブを始めたときの依頼が持つ。
     // 再開したワーカーも同じ設定で動く。
     let watch_saved = state.db.update_job_watch_saved(&job_id).unwrap_or(false);
+    // web の一覧はジョブの間だけ覚えておく。セッションが無ければ空のまま、
+    // 何もしない置物として振る舞う。
+    let mut web_index = WebUpdateIndex::new(&credentials);
     // 取得が制限されたときだけ間隔を広げ、うまくいけば元へ戻す。
     let mut backoff: u32 = 1;
     let mut rate_limit_retries: HashMap<i64, u32> = HashMap::new();
@@ -848,7 +971,9 @@ async fn run_update_job(
             break;
         };
 
-        let outcome = process_update_job_item(&app, &state, &job_id, &item, &credentials).await;
+        let outcome =
+            process_update_job_item(&app, &state, &job_id, &item, &credentials, &mut web_index)
+                .await;
         let restart_pending = has_pending_restart(&job_id);
         match outcome {
             Ok(ItemOutcome::Done(message)) => {
@@ -1110,9 +1235,10 @@ async fn process_update_job_item(
     job_id: &str,
     item: &UpdateJobItem,
     credentials: &UpdateCredentials,
+    web_index: &mut WebUpdateIndex,
 ) -> Result<ItemOutcome, String> {
     match item.item_type.as_str() {
-        "work" => process_work_item(app, state, item, credentials).await,
+        "work" => process_work_item(app, state, job_id, item, credentials, web_index).await,
         "target" => process_target_item(state, job_id, item, credentials).await,
         "candidate" => process_candidate_item(app, state, item, credentials).await,
         _ => Ok(ItemOutcome::Skipped(format!(
@@ -1167,22 +1293,70 @@ fn is_unchanged_pixiv_work(
         })
 }
 
+/// 本文を取り直さずに終えたとき、その `updateDate` を覚えてよければ覚える。
+///
+/// 覚えてよいのは「本文まで突き合わせた時刻が、その更新より後」のときだけ
+/// （[`may_remember`]）。言い切れないときは何もしない。次の確認で従来どおり
+/// 確かめれば済むし、そのほうが取りこぼさない。
+fn remember_source_updated_at(state: &Arc<AppState>, dl: &DownloadEntry, listed: Option<&str>) {
+    let Some(listed) = listed else { return };
+    let verified = state
+        .db
+        .get_download_meta_state(dl.id)
+        .ok()
+        .and_then(|(_, checked)| checked);
+    if !may_remember(Some(listed), verified.as_deref()) {
+        return;
+    }
+    if let Err(error) = state.db.set_download_source_updated_at(dl.id, listed) {
+        log::warn!("pixiv の更新時刻を覚えられません ({}): {error}", dl.id);
+    }
+}
+
 async fn process_work_item(
     app: &tauri::AppHandle,
     state: &Arc<AppState>,
+    job_id: &str,
     item: &UpdateJobItem,
     credentials: &UpdateCredentials,
+    web_index: &mut WebUpdateIndex,
 ) -> Result<ItemOutcome, String> {
     let dl: DownloadEntry = serde_json::from_str(&item.payload_json).map_err(|e| e.to_string())?;
     if dl.source == "pixiv" {
         let Some(token) = pixiv_token(credentials) else {
             return Ok(ItemOutcome::AuthRequired("Pixiv連携が必要です".to_string()));
         };
-        // 1回目の取得は本文を含まない詳細だけ。変わっていなければここで終わる。
+
+        // 0段目。web の一覧は、100件まとめて `updateDate` を返す。ここで
+        // 「変わっていない」と分かれば、アプリAPIを一度も叩かずに終わる。
+        let listed_update = match web_index.lookup(state, job_id, &dl).await {
+            WebLookup::NeedsAuth(message) => return Ok(ItemOutcome::AuthRequired(message)),
+            WebLookup::Found(entry) => entry.update_date.clone(),
+            WebLookup::Unknown => None,
+        };
+        if let (Some(listed), Some(stored)) =
+            (listed_update.as_deref(), dl.source_updated_at.as_deref())
+        {
+            if listed == stored {
+                return Ok(ItemOutcome::Skipped(format!("最新: {}", dl.title)));
+            }
+        }
+
+        // 1段目の取得は本文を含まない詳細だけ。変わっていなければここで終わる。
         let metadata =
             super::downloader::fetch_pixiv_novel_metadata(dl.source_id.clone(), token.clone())
                 .await?;
         if is_unchanged_pixiv_work(state, &dl, &metadata) {
+            // 指紋は「変わっていない」と言い、一覧は「変わった」と言った。
+            // どちらが早く気づくのかを知りたいので、食い違いは記録に残す。
+            if listed_update.is_some() {
+                log::info!(
+                    "pixiv {}: 一覧は更新を示したが、指紋は変化なし（updateDate={:?}）",
+                    dl.source_id,
+                    listed_update
+                );
+            }
+            remember_source_updated_at(state, &dl, listed_update.as_deref());
             return Ok(ItemOutcome::Skipped(format!("最新: {}", dl.title)));
         }
         let data = super::downloader::fetch_pixiv_novel(dl.source_id.clone(), token).await?;
@@ -1221,6 +1395,12 @@ async fn process_work_item(
             None,
         )
         .await?;
+        // 本文まで取り直した直後なので、この版が手元にあると言い切れる。
+        if let Some(listed) = listed_update.as_deref() {
+            if let Err(error) = state.db.set_download_source_updated_at(updated.id, listed) {
+                log::warn!("pixiv の更新時刻を覚えられません ({}): {error}", updated.id);
+            }
+        }
         if updated.current_version > dl.current_version {
             Ok(ItemOutcome::Saved(
                 updated.id,
@@ -1652,9 +1832,57 @@ async fn process_candidate_item(
 #[cfg(test)]
 mod tests {
     use super::{
-        canceled_status_for, classify_failure, describe_text_change, make_job_id, FailureKind,
+        canceled_status_for, classify_failure, describe_text_change, make_job_id, may_remember,
+        FailureKind,
     };
     use std::collections::HashSet;
+
+    /// 基準値を覚えるとは「次はこの値と同じなら本文を見ない」と決めること。
+    /// 手元の本文がその更新より古いなら、覚えた瞬間にその改稿は永久に
+    /// 拾われなくなる。だから覚えない。
+    #[test]
+    fn an_update_newer_than_our_copy_is_never_remembered() {
+        assert!(!may_remember(
+            Some("2026-08-20T10:00:00+09:00"),
+            Some("2026-08-19T10:00:00+09:00")
+        ));
+    }
+
+    /// 本文まで突き合わせたのが更新より後なら、その版を持っていると言える。
+    #[test]
+    fn an_update_older_than_our_last_deep_check_is_safe_to_remember() {
+        assert!(may_remember(
+            Some("2026-08-19T10:00:00+09:00"),
+            Some("2026-08-20T10:00:00+09:00")
+        ));
+        assert!(
+            may_remember(
+                Some("2026-08-20T10:00:00+09:00"),
+                Some("2026-08-20T10:00:00+09:00")
+            ),
+            "同時刻はその版を見たということ"
+        );
+    }
+
+    /// 時刻の書き方が変わって読めなくなったら、覚えない側に倒す。
+    /// 読めないものを「たぶん大丈夫」と扱うと、静かに取りこぼす。
+    #[test]
+    fn a_timestamp_we_cannot_read_is_treated_as_unverified() {
+        assert!(!may_remember(Some("2026-08-20"), Some("2026-08-21T00:00:00Z")));
+        assert!(!may_remember(Some("2026-08-20T00:00:00Z"), Some("きのう")));
+        assert!(!may_remember(Some("2026-08-20T00:00:00Z"), None));
+        assert!(!may_remember(None, Some("2026-08-20T00:00:00Z")));
+    }
+
+    /// 時差の書き方が違っても、指している瞬間で比べる。
+    /// pixiv は詳細で +00:00、一覧で +09:00 を返す。
+    #[test]
+    fn timestamps_are_compared_as_instants_not_as_text() {
+        assert!(may_remember(
+            Some("2026-08-20T01:00:00+00:00"),
+            Some("2026-08-20T10:00:00+09:00")
+        ));
+    }
 
     #[test]
     fn job_ids_are_fixed_width_random_values() {

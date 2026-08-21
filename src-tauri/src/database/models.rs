@@ -666,6 +666,15 @@ pub struct UpdateTargetInput {
 #[serde(rename_all = "camelCase")]
 pub struct UpdateCredentials {
     pub pixiv_refresh_token: Option<String>,
+    /// pixiv の web セッション。無くても更新確認は動く（従来の経路になるだけ）。
+    ///
+    /// 既定を持たせてあるのは、この二つを知らない依頼が届いても
+    /// 更新確認そのものは動くべきだから。**新しい鍵が無いことは、故障ではない。**
+    #[serde(default)]
+    pub pixiv_cookie: Option<String>,
+    /// その Cookie を受け取ったときの UA。`pixiv_cookie` と対でだけ意味を持つ。
+    #[serde(default)]
+    pub pixiv_user_agent: Option<String>,
     pub fanbox_cookie: Option<String>,
     pub fanbox_user_agent: Option<String>,
 }

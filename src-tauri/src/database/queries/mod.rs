@@ -7612,6 +7612,55 @@ impl Database {
         .map_err(|e| format!("Failed to read meta state: {}", e))
     }
 
+    /// 取得元での最終更新を覚える。
+    ///
+    /// pixiv の作品詳細APIには更新時刻に当たるフィールドが無く、この値は
+    /// web の一覧からしか得られない。次の確認は、この一件と一覧の
+    /// `updateDate` を比べるだけで「変わっていない」と判断できる。
+    pub fn set_download_source_updated_at(
+        &self,
+        download_id: i64,
+        source_updated_at: &str,
+    ) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE downloads SET source_updated_at = ?1 WHERE id = ?2",
+            params![source_updated_at, download_id],
+        )
+        .map_err(|e| format!("Failed to set source updated at: {}", e))?;
+        Ok(())
+    }
+
+    /// このジョブが確認する予定の、その作者の pixiv 作品ID。
+    ///
+    /// web の一覧は 1 リクエストで 100 件を返すので、まとめて聞くために要る。
+    /// **ジョブに入っているものだけを返す。** 作者の全作品を数えにいくと、
+    /// 1件だけ確認したいときにも余計な往復が増える。
+    pub fn pixiv_source_ids_for_job_author(
+        &self,
+        job_id: &str,
+        author_id: &str,
+    ) -> Result<Vec<String>, String> {
+        let conn = self.read_conn()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT DISTINCT d.source_id
+                   FROM update_job_items i
+                   JOIN downloads d
+                     ON d.source = i.source AND d.source_id = i.source_id
+                  WHERE i.job_id = ?1
+                    AND i.item_type = 'work'
+                    AND i.source = 'pixiv'
+                    AND d.author_id = ?2",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![job_id, author_id], |row| row.get::<_, String>(0))
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("Failed to list job author works: {}", e))
+    }
+
     /// 更新監視（トグル）を設定する。
     ///
     /// 監視対象の一覧（update_targets）には触れない。作品の監視は

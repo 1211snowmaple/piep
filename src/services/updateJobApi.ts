@@ -16,6 +16,10 @@ export type UpdateJobMode = "check_only" | "auto_save";
 
 export interface UpdateJobCredentials {
   pixivRefreshToken?: string | null;
+  /** pixivのwebセッション。無くても更新確認は動く（従来の経路になるだけ）。 */
+  pixivCookie?: string | null;
+  /** そのCookieを受け取ったときのUA。pixivCookieと対でだけ意味を持つ。 */
+  pixivUserAgent?: string | null;
   fanboxCookie?: string | null;
   fanboxUserAgent?: string | null;
 }
@@ -80,8 +84,14 @@ export interface UpdateJobSnapshot extends UpdateJobSummary {
 }
 
 export async function getUpdateJobCredentials(): Promise<UpdateJobCredentials> {
+  // CookieとUAは対でしか意味を持たない。片方だけを渡すと、Cloudflareが
+  // 発行時のUAと照らして弾く。揃っていないときは両方とも渡さない。
+  const pixivCookie = await store.get<string>("pixiv_cookie") || null;
+  const pixivUserAgent = await store.get<string>("pixiv_user_agent") || null;
+  const pixivSession = pixivCookie && pixivUserAgent ? { pixivCookie, pixivUserAgent } : { pixivCookie: null, pixivUserAgent: null };
   return {
     pixivRefreshToken: await store.get<string>("pixiv_refresh_token") || null,
+    ...pixivSession,
     fanboxCookie: await store.get<string>("fanbox_session_id") || null,
     fanboxUserAgent: await store.get<string>("fanbox_user_agent") || "Mozilla/5.0",
   };
