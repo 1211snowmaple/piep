@@ -42,7 +42,10 @@ export function EntityCard({ entity, kind, selectionMode = false, selected = fal
   // 人物だけ。あの一枚はプロフィール画像の代わりであって、縦長のシリーズ表紙枠
   // に敷くと文字が切れる。シリーズは今までどおり記号のまま。
   const noImage = kind === "person" && !icon && getProvider(entity.source).hasProfileImages;
-  const banner = getAssetUrl(entity.bannerPath);
+  // シリーズの banner は cover_path そのもの - 左の表紙枠に出ているのと
+  // 同じ一枚である。同じ絵を一枚のカードに二度置いても、意味は増えない。
+  // 人物の banner はアバターとは別のプロフィール背景なので、そちらは残す。
+  const banner = kind === "person" ? getAssetUrl(entity.bannerPath) : null;
   const open = () => navigate(`/${route}/${encodeURIComponent(entity.source)}/${encodeURIComponent(entity.sourceKey)}`);
   // Selection mode is modal, as it is on works: the whole card picks instead of
   // following the link, so a press can never do the thing you did not mean.
@@ -97,6 +100,11 @@ export function EntityCard({ entity, kind, selectionMode = false, selected = fal
         {/* 状態は絵柄そのもので描く - 消えていれば灰、点いていればその色。
             登録があって止めているだけの状態は、灰に薄い下地を敷いて分ける。
             出したり消したりしないので、監視の有無で行の中身がずれない。 */}
+        {/* 監視は事実の行と同じ底辺に置く。作品カードの footer が
+            「facts と操作が一本の線に並ぶ」形なので、それに合わせる。
+            開く合図の山括弧は置かない - カード全体が押せるのは作品カードと
+            同じで、あちらにも無い。 */}
+        <Group gap={2} wrap="nowrap" className="entity-card__actions">
         {!selectionMode && onToggleWatch && (
           <Tooltip label={watchTooltip(watch, kind)}>
             <ActionIcon
@@ -112,7 +120,7 @@ export function EntityCard({ entity, kind, selectionMode = false, selected = fal
             </ActionIcon>
           </Tooltip>
         )}
-        {!selectionMode && <Icons.next size={IconSize.action} color="var(--mantine-color-dimmed)" />}
+        </Group>
       </Group>
     </Card>
   );

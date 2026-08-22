@@ -1373,6 +1373,8 @@ select {
 
 /* 一覧の監視ボタン。作品カードと同じ決まり - 消えていれば灰、点いていれば
    その色。登録があって止めているだけの状態だけ、灰に薄い下地を敷いて分ける。 */
+/* 事実の行と同じ底辺へ。作品カードの footer と同じ構図にする。 */
+.entity-card__actions { flex: 0 0 auto; align-self: flex-end; align-items: center; }
 .entity-card__watch { flex: 0 0 auto; color: var(--flag-off); }
 .entity-card__watch[data-state="watching"] { color: var(--flag-watch); background: var(--flag-watch-bg); }
 .entity-card__watch[data-state="paused"] { color: var(--flag-off); background: light-dark(#eef1f5, #202834); }
