@@ -13,8 +13,8 @@ import { invalidateAfterUpdateJob } from "./updateJobs";
 describe("更新確認のあとに古くなるもの", () => {
   const collectInvalidatedKeys = () => {
     const client = new QueryClient();
-    const keys: unknown[][] = [];
-    vi.spyOn(client, "invalidateQueries").mockImplementation((filters?: { queryKey?: unknown[] }) => {
+    const keys: (readonly unknown[])[] = [];
+    vi.spyOn(client, "invalidateQueries").mockImplementation((filters?: { queryKey?: readonly unknown[] }) => {
       if (filters?.queryKey) keys.push(filters.queryKey);
       return Promise.resolve();
     });
