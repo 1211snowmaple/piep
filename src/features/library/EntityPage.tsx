@@ -163,7 +163,7 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
       if (runtime) return kind === "person" ? getPerson<PersonEntry>(source, key) : getSeries<SeriesEntry>(source, key);
       const facet = (kind === "person" ? demoFacets.authorEntities : demoFacets.series).find((item) => item.source === source && item.sourceKey === key) ?? (kind === "person" ? demoFacets.authorEntities[0] : demoFacets.series[0]);
       const common = { id: 1, source: facet.source, sourceKey: facet.sourceKey, coverPath: null, description: facet.description ?? null, contentHash: null, currentVersion: 2, lastCheckedAt: new Date().toISOString(), lastFetchedAt: new Date().toISOString(), createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), workCount: facet.count };
-      return kind === "person" ? { ...common, displayName: facet.displayName, iconPath: null, linksJson: null } : { ...common, title: facet.displayName };
+      return kind === "person" ? { ...common, displayName: facet.displayName, iconPath: null, linksJson: null } : { ...common, title: facet.displayName, isConcluded: false, publishedContentCount: facet.count + 2 };
     },
   });
   // Prolific authors have more works than any single request should return, so
@@ -349,6 +349,12 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
   if (entity.isLoading) return <div className="page"><LoadingState /></div>;
   if (entity.error || !entity.data) return <div className="page"><ErrorState error={entity.error ?? "情報がありません"} retry={() => entity.refetch()} /></div>;
   const entry = entity.data;
+  // シリーズで知りたいのは日付ではなく「何話取りこぼしているか」である。
+  // 数が合っているときは差を出さない - そこに情報は無い。
+  const seriesEntry = kind === "series" ? (entry as SeriesEntry) : null;
+  const publishedCount = seriesEntry?.publishedContentCount ?? null;
+  const localCount = entry.workCount ?? 0;
+  const missingCount = publishedCount === null ? 0 : Math.max(0, publishedCount - localCount);
   const profileData = (profileJson.data ?? {}) as Record<string, any>;
   const profileStats = profileData.stats as Record<string, number> | undefined;
   const coverPath = entry.coverPath;
@@ -396,7 +402,7 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
               <Stack gap={7} mb={5} miw={0} align="flex-start"><ProviderMark provider={source} /><Title order={1} className="line-clamp-2">{displayName}</Title>{/* かつてここには「更新 …」と出ていたが、指していたのは取得元での更新では
                   なく piep の行が書き換わった日だった。読む側には区別がつかない。
                   取得元の話をしないなら、手元の言葉で言う。確認していなければ何も出さない。 */}
-              <Group gap="xs"><Badge variant="light" color="gray">{formatNumber(entry.workCount)}作品</Badge>{entry.lastCheckedAt && <Text size="xs" c="dimmed">{formatFreshness(entry.lastCheckedAt)}に確認</Text>}</Group></Stack>
+              <Group gap="xs">{seriesEntry ? <><Badge variant="light" color="gray">{missingCount > 0 ? `手元 ${formatNumber(localCount)}話 / 取得元 ${formatNumber(publishedCount ?? 0)}話` : `${formatNumber(localCount)}話`}</Badge>{missingCount > 0 && <Badge variant="light" color="yellow">{formatNumber(missingCount)}話 未取得</Badge>}{seriesEntry.isConcluded && <Badge variant="light" color="gray">完結</Badge>}</> : <Badge variant="light" color="gray">{formatNumber(localCount)}作品</Badge>}{entry.lastCheckedAt && <Text size="xs" c="dimmed">{formatFreshness(entry.lastCheckedAt)}に確認</Text>}</Group></Stack>
             </Group>
             {/* 行き先を名前で分ける。アプリ内なら内蔵ブラウザで開いてそのまま
                 保存でき、ブラウザならログイン済みの普段の環境で開く。 */}

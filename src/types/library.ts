@@ -330,6 +330,10 @@ export interface SeriesEntry {
   createdAt: string;
   updatedAt: string;
   workCount: number | null;
+  /** 完結しているか。null は「取得元にまだ聞いていない」。 */
+  isConcluded: boolean | null;
+  /** 取得元で公開されている話数。手元の workCount と比べると取りこぼしが分かる。 */
+  publishedContentCount: number | null;
 }
 
 export interface EntityVersion {
