@@ -38,6 +38,31 @@ export function formatDate(value: string | null | undefined, withTime = false): 
   }).format(date);
 }
 
+/**
+ * 「いつ確認したか」を、鮮度として読める形にする。
+ *
+ * 確認日は「何月何日か」より「どれだけ経ったか」が知りたい情報なので、
+ * 近いうちは相対で書く。ただし遠くなると相対は読みにくくなる
+ * （「183日前」より「2026年2月20日」のほうが早く分かる）ので、
+ * 30日を越えたら絶対日付へ戻す。
+ *
+ * 基準時刻を渡せるようにしてあるのは、時計を止めて試せるようにするため。
+ */
+export function formatFreshness(value: string | null | undefined, now: Date = new Date()): string {
+  if (!value) return "—";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  const elapsedMs = now.getTime() - date.getTime();
+  // 未来の時刻は「これから」ではなく、時計のずれとして扱う。
+  if (elapsedMs < 0) return "さっき";
+  const hours = Math.floor(elapsedMs / 3_600_000);
+  if (hours < 1) return "さっき";
+  if (hours < 24) return `${hours}時間前`;
+  const days = Math.floor(hours / 24);
+  if (days <= 30) return `${days}日前`;
+  return formatDate(value);
+}
+
 /** Compact numeric date (2026/08/05) for dense rows where a label would not fit. */
 export function formatDateNumeric(value: string | null | undefined): string {
   if (!value) return "—";

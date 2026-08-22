@@ -900,6 +900,18 @@ pub async fn count_dismissed_update_candidates(app: tauri::AppHandle) -> Result<
     state.db.count_dismissed_update_candidates()
 }
 
+/// まだ取り込んでいない改稿がある作品の鍵（`{source}:{sourceId}`）。
+///
+/// 画面はこれを一度だけ引いて、手元にある作品と突き合わせる。作品の一覧に
+/// 列を足さないのは、これが作品の属性ではなく更新側が見つけた事実だから。
+#[tauri::command]
+pub async fn list_pending_revisions(
+    app: tauri::AppHandle,
+) -> Result<Vec<crate::database::PendingRevision>, String> {
+    let state = app.state::<Arc<AppState>>();
+    state.db.pending_revision_keys()
+}
+
 /// 無視した作品をすべて戻す。次の確認でまた候補に並ぶ。
 #[tauri::command]
 pub async fn restore_dismissed_update_candidates(app: tauri::AppHandle) -> Result<usize, String> {

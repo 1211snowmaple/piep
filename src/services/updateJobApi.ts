@@ -135,6 +135,29 @@ export async function restoreDismissedUpdateCandidatesCommand(): Promise<number>
   return invoke<number>("restore_dismissed_update_candidates");
 }
 
+/** まだ取り込んでいない改稿。 */
+export interface PendingRevision {
+  /** `{source}:{sourceId}`。手元の作品と突き合わせるための鍵。 */
+  key: string;
+  /** 更新確認がこの改稿を見つけた時刻。取得元が直した日そのものは持っていない。 */
+  foundAt: string;
+}
+
+/**
+ * まだ取り込んでいない改稿の一覧。
+ *
+ * 作品の一覧に列を足さず、これを一度だけ引いて突き合わせる。
+ * 「取得元のほうが新しい」は作品の属性ではなく、更新確認が見つけた事実なので。
+ */
+export async function listPendingRevisionsCommand(): Promise<PendingRevision[]> {
+  return invoke<PendingRevision[]>("list_pending_revisions");
+}
+
+/** 作品と、改稿の一覧を突き合わせるための鍵。 */
+export function revisionKey(source: string, sourceId: string): string {
+  return `${source}:${sourceId}`;
+}
+
 export async function saveUpdateJobCandidatesCommand(jobId: string, candidateIds: number[]): Promise<UpdateJobSnapshot> {
   return invoke<UpdateJobSnapshot>("save_update_job_candidates", {
     jobId,

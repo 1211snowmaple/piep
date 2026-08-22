@@ -39,7 +39,9 @@ import { ErrorState, LoadingState } from "@/components/AsyncState";
 import { ExpandableText } from "@/components/ExpandableText";
 import { WorkCover } from "@/components/WorkCover";
 import { ProviderMark, sourceUrl } from "@/lib/providers";
-import { contentTypeLabel, errorMessage, formatBytes, formatDate, formatNumber } from "@/lib/format";
+import { contentTypeLabel, errorMessage, formatBytes, formatDate, formatFreshness, formatNumber } from "@/lib/format";
+import { hasSourceRevision } from "@/lib/workFreshness";
+import { listPendingRevisionsCommand, revisionKey } from "@/services/updateJobApi";
 import { prepareDocumentHtml } from "@/lib/content";
 import { useContentLinkNavigation } from "@/lib/contentLinks";
 import { exportSingle } from "@/services/archiveApi";
@@ -132,6 +134,12 @@ export default function WorkPage() {
     },
     onError: (error) => notifications.show({ color: "red", title: "コレクションに追加できません", message: errorMessage(error) }),
   });
+  // 取り込んでいない改稿は作品の属性ではなく、更新確認が見つけた事実なので
+  // 作品の行には入っていない。画面側で一度だけ引いて突き合わせる。
+  const pendingRevisions = useQuery({
+    queryKey: ["pending-revisions"],
+    queryFn: () => runtime ? listPendingRevisionsCommand() : Promise.resolve([]),
+  });
   const assetsQuery = useQuery({
     queryKey: ["work-assets", id],
     queryFn: () => runtime ? getAssets(id) : Promise.resolve(getDemoReader(id).assets),
@@ -203,6 +211,12 @@ export default function WorkPage() {
   if (documentQuery.error || !documentQuery.data) return <div className="page"><ErrorState error={documentQuery.error ?? "作品が見つかりません"} retry={() => documentQuery.refetch()} /></div>;
   const doc = documentQuery.data;
   const work = doc.download;
+  // 公開したきりの作品では、最終更新は公開日と同じ瞬間を指す。同じものを二度
+  // 書いても情報は増えないので、その行はそもそも作らない。
+  const sourceRevised = hasSourceRevision(work);
+  // 改稿を見つけたとき基準値はわざと書き換えない（取り直して初めて追いつく）ので、
+  // 作品の行だけを見ると照合済みに見える。候補のほうが答えである。
+  const pendingRevision = pendingRevisions.data?.find((entry) => entry.key === revisionKey(work.source, work.sourceId));
   const assets = assetsQuery.data ?? [];
   const visibleAssets = assets.slice(0, visibleAssetCount);
   const queued = isQueuedForEpub(work.id);
@@ -371,7 +385,7 @@ export default function WorkPage() {
               unrelated heights. */}
           <Grid gap="lg" align="stretch">
             <Grid.Col span={{ base: 12, md: 8 }}>
-              <Card p="lg" h="100%"><Title order={3} mb="md">作品情報</Title><SimpleGrid cols={{ base: 1, sm: 2 }} spacing="lg"><Info label="作者" value={work.authorName} icon={<Icons.person size={IconSize.action} />} /><Info label="公開日" value={formatDate(work.sourceCreatedAt)} icon={<Icons.publishedDate size={IconSize.action} />} /><Info label="文字数" value={`${formatNumber(work.textLength)}字`} icon={<Icons.read size={IconSize.action} />} /><Info label="ローカル容量" value={formatBytes(work.fileSizeBytes)} icon={<Icons.openFolder size={IconSize.action} />} /><Info label="現在のバージョン" value={`v${work.currentVersion}`} icon={<Icons.versionHistory size={IconSize.action} />} /><Info label="最終保存" value={formatDate(work.downloadedAt, true)} icon={<Icons.epubAdd size={IconSize.action} />} /></SimpleGrid></Card>
+              <Card p="lg" h="100%"><Title order={3} mb="md">作品情報</Title>{/* 取得元のことと手元のことを分ける。混ぜて並べると、どの日付が誰の  行いを指しているのかが読み取れない。 */}<Text size="xs" c="dimmed" fw={700} mb="sm">取得元</Text><SimpleGrid cols={{ base: 1, sm: 2 }} spacing="lg"><Info label="作者" value={work.authorName} icon={<Icons.person size={IconSize.action} />} /><Info label="公開日" value={formatDate(work.sourceCreatedAt)} icon={<Icons.publishedDate size={IconSize.action} />} />{sourceRevised && <Info label="最終更新" value={formatDate(work.sourceUpdatedAt)} icon={<Icons.updates size={IconSize.action} />} />}</SimpleGrid><Divider my="lg" /><Text size="xs" c="dimmed" fw={700} mb="sm">手元</Text><SimpleGrid cols={{ base: 1, sm: 2 }} spacing="lg"><Info label="文字数" value={`${formatNumber(work.textLength)}字`} icon={<Icons.read size={IconSize.action} />} /><Info label="ローカル容量" value={formatBytes(work.fileSizeBytes)} icon={<Icons.openFolder size={IconSize.action} />} /><Info label="バージョン" value={`v${work.currentVersion}`} icon={<Icons.versionHistory size={IconSize.action} />} /><Info label="保存日" value={formatDate(work.downloadedAt, true)} icon={<Icons.epubAdd size={IconSize.action} />} /></SimpleGrid></Card>
             </Grid.Col>
             <Grid.Col span={{ base: 12, md: 4 }}>
               {/* 両端に寄せると、外側の辺は「作品情報」と揃うかわりに真ん中が
@@ -418,7 +432,7 @@ export default function WorkPage() {
         </Tabs.Panel>
         <Tabs.Panel value="history" pt="lg">
           <Grid gap="lg">
-            <Grid.Col span={{ base: 12, lg: 5 }}><Stack gap="xs">{doc.versions.map((version) => <Paper component="button" type="button" key={version.id} p="md" withBorder className="version-row" data-active={selectedVersion === version.version || undefined} onClick={() => setSelectedVersion(version.version)}><Group wrap="nowrap" align="flex-start"><ThemeIcon variant="light" color={version.version === work.currentVersion ? "piep" : "gray"}><Icons.versionHistory size={IconSize.menu} /></ThemeIcon><Stack gap={3} flex={1} ta="left"><Group justify="space-between"><Text size="sm" fw={700}>バージョン {version.version}</Text>{version.version === work.currentVersion && <Badge size="xs">現在</Badge>}</Group><Text size="xs" c="dimmed">{version.changeSummary || "保存元から取得"}</Text><Text size="xs" c="dimmed">{formatDate(version.createdAt, true)} · {formatNumber(version.textLength)}字 · {formatBytes(version.fileSizeBytes)}</Text></Stack></Group></Paper>)}</Stack></Grid.Col>
+            <Grid.Col span={{ base: 12, lg: 5 }}><Stack gap="xs">{doc.versions.map((version) => <Paper component="button" type="button" key={version.id} p="md" withBorder className="version-row" data-active={selectedVersion === version.version || undefined} onClick={() => setSelectedVersion(version.version)}><Group wrap="nowrap" align="flex-start"><ThemeIcon variant="light" color={version.version === work.currentVersion ? "piep" : "gray"}><Icons.versionHistory size={IconSize.menu} /></ThemeIcon><Stack gap={3} flex={1} ta="left"><Group justify="space-between"><Text size="sm" fw={700}>バージョン {version.version}</Text>{version.version === work.currentVersion && <Badge size="xs">現在</Badge>}</Group><Text size="xs" c="dimmed">{version.changeSummary || "保存元から取得"}</Text><Text size="xs" c="dimmed">{formatDate(version.createdAt, true)} · {formatNumber(version.textLength)}字 · {formatBytes(version.fileSizeBytes)}</Text></Stack></Group></Paper>)}{/* 手元の版と取得元の版を、ひとつの時間軸に置く。改稿が無いときは出さない -     「取得元も最新です」と書いても、そこに情報は無い。 */}{pendingRevision && <Paper p="md" withBorder className="version-row" data-source-newer><Group wrap="nowrap" align="flex-start"><ThemeIcon variant="light" color="yellow"><Icons.updates size={IconSize.menu} /></ThemeIcon><Stack gap={3} flex={1} ta="left"><Group justify="space-between"><Text size="sm" fw={700}>取得元に新しい版</Text><Badge size="xs" color="yellow">改稿</Badge></Group><Text size="xs" c="dimmed">手元の v{work.currentVersion} より新しい。取り直すと v{work.currentVersion + 1} になります</Text><Text size="xs" c="dimmed">{formatFreshness(pendingRevision.foundAt)}に更新確認が見つけました</Text></Stack></Group></Paper>}</Stack></Grid.Col>
             <Grid.Col span={{ base: 12, lg: 7 }}><Card p="lg" className="version-preview"><Group justify="space-between" mb="md"><Box><Text fw={700}>{selectedVersion ? `バージョン ${selectedVersion} の内容` : "履歴を選択"}</Text><Text size="xs" c="dimmed">履歴をクリックすると、その時点の本文を確認できます</Text></Box>{selectedVersion && <Button size="xs" variant="light" onClick={() => navigate(`/reader/${work.id}?version=${selectedVersion}`)}>この版を読む</Button>}</Group>{versionPreview.isLoading ? <LoadingState label="履歴を読み込んでいます" /> : selectedVersion && versionPreview.data ? <Text className="version-preview__text">{versionPreview.data.plainText.slice(0, 5000) || "本文がありません"}</Text> : <Alert color="gray">左から確認するバージョンを選択してください。</Alert>}</Card></Grid.Col>
           </Grid>
         </Tabs.Panel>

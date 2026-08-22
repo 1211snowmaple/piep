@@ -662,6 +662,21 @@ pub struct UpdateTargetInput {
     pub metadata_json: Option<String>,
 }
 
+/// まだ取り込んでいない改稿。
+///
+/// 取得元が直した日そのものは持たない。**手元が持っているのは「更新確認が
+/// いつそれを見つけたか」だけ**で、作品行に入っている `source_updated_at` は
+/// 取り直すまで古い版のままである（取り直して初めて追いついたと言えるため）。
+/// 持っていない日付を、それらしく見せない。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingRevision {
+    /// `{source}:{sourceId}`。画面が手元の作品と突き合わせるための鍵。
+    pub key: String,
+    /// 更新確認がこの改稿を見つけた時刻。
+    pub found_at: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateCredentials {

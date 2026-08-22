@@ -1,5 +1,37 @@
 import { describe, expect, it } from "vitest";
-import { errorMessage } from "./format";
+import { errorMessage, formatFreshness } from "./format";
+
+describe("formatFreshness", () => {
+  const now = new Date("2026-08-22T12:00:00+09:00");
+
+  it("reads recent checks as elapsed time, not as a calendar date", () => {
+    expect(formatFreshness("2026-08-22T11:30:00+09:00", now)).toBe("さっき");
+    expect(formatFreshness("2026-08-22T09:00:00+09:00", now)).toBe("3時間前");
+    expect(formatFreshness("2026-08-20T12:00:00+09:00", now)).toBe("2日前");
+  });
+
+  // 「183日前」は読み解く手間がかかる。遠くなったら絶対日付のほうが早い。
+  it("falls back to a calendar date once the relative form stops helping", () => {
+    expect(formatFreshness("2026-07-23T12:00:00+09:00", now)).toBe("30日前");
+    expect(formatFreshness("2026-07-22T12:00:00+09:00", now)).toContain("2026");
+  });
+
+  // 確認したことが無い相手に「さっき」と言わない。
+  it("says nothing rather than something wrong when there is no timestamp", () => {
+    expect(formatFreshness(null, now)).toBe("—");
+    expect(formatFreshness(undefined, now)).toBe("—");
+    expect(formatFreshness("", now)).toBe("—");
+  });
+
+  // 時計のずれで未来になった値を「これから」と読ませない。
+  it("treats a future timestamp as clock skew", () => {
+    expect(formatFreshness("2026-08-22T13:00:00+09:00", now)).toBe("さっき");
+  });
+
+  it("returns an unreadable value unchanged instead of inventing one", () => {
+    expect(formatFreshness("きのう", now)).toBe("きのう");
+  });
+});
 
 describe("errorMessage", () => {
   it("does not expose an entire FANBOX response in a notification", () => {

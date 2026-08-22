@@ -42,7 +42,7 @@ import { VirtualizedWorkList } from "@/features/library/VirtualizedWorkList";
 import { VirtualizedEntityGrid } from "@/features/library/VirtualizedEntityGrid";
 import { boundedInfiniteListOptions, INFINITE_LIST_MAX_PAGES } from "@/lib/queryLimits";
 import { externalBrand, ExternalServiceMark, getProvider, ProviderMark, sourceUrl } from "@/lib/providers";
-import { errorMessage, formatBytes, formatDate, formatNumber } from "@/lib/format";
+import { errorMessage, formatBytes, formatDate, formatFreshness, formatNumber } from "@/lib/format";
 import { runSingleCheck } from "@/features/updates/startSingleCheck";
 import { demoFacets, searchDemoWorks } from "@/mocks/demoData";
 import { exportEntityZip } from "@/services/archiveApi";
@@ -393,7 +393,10 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
               {kind === "person"
                 ? <Avatar className="entity-hero__avatar" src={getAssetUrl(avatarPath)} size={112} radius="xl" color="piep">{noImage ? <NoImageMark /> : <Icons.person size={IconSize.avatar} />}</Avatar>
                 : <Box className="entity-hero__series-cover">{avatarPath ? <Image src={getAssetUrl(avatarPath)} alt={`${displayName}の表紙`} fit="contain" /> : <Icons.series size={IconSize.avatar} />}</Box>}
-              <Stack gap={7} mb={5} miw={0} align="flex-start"><ProviderMark provider={source} /><Title order={1} className="line-clamp-2">{displayName}</Title><Group gap="xs"><Badge variant="light" color="gray">{formatNumber(entry.workCount)}作品</Badge><Text size="xs" c="dimmed">更新 {formatDate(entry.updatedAt)}</Text></Group></Stack>
+              <Stack gap={7} mb={5} miw={0} align="flex-start"><ProviderMark provider={source} /><Title order={1} className="line-clamp-2">{displayName}</Title>{/* かつてここには「更新 …」と出ていたが、指していたのは取得元での更新では
+                  なく piep の行が書き換わった日だった。読む側には区別がつかない。
+                  取得元の話をしないなら、手元の言葉で言う。確認していなければ何も出さない。 */}
+              <Group gap="xs"><Badge variant="light" color="gray">{formatNumber(entry.workCount)}作品</Badge>{entry.lastCheckedAt && <Text size="xs" c="dimmed">{formatFreshness(entry.lastCheckedAt)}に確認</Text>}</Group></Stack>
             </Group>
             {/* 行き先を名前で分ける。アプリ内なら内蔵ブラウザで開いてそのまま
                 保存でき、ブラウザならログイン済みの普段の環境で開く。 */}

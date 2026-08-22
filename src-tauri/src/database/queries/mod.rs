@@ -4814,6 +4814,35 @@ impl Database {
     }
 
     /// まだ answer の出ていない候補。新しく見つけた順に返す。
+    /// まだ取り込んでいない改稿がある作品の鍵。`{source}:{sourceId}` の並び。
+    ///
+    /// 「取得元のほうが新しい」という状態は、作品の属性ではなく更新側が
+    /// 見つけた事実である。だから `downloads` に列を足さず、ここから引く。
+    /// 改稿を見つけたとき基準値をわざと書き換えないのも同じ理由で、
+    /// **取り直して初めて追いついたと言える。**
+    ///
+    /// 返るのは未処理のものだけなので、ふつうは空か、ごく少ない。
+    pub fn pending_revision_keys(&self) -> Result<Vec<PendingRevision>, String> {
+        let conn = self.read_conn()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT source || ':' || source_id, updated_at
+                   FROM update_candidates
+                  WHERE status = 'pending' AND kind = 'revision'",
+            )
+            .map_err(|e| format!("Failed to prepare revision keys: {}", e))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(PendingRevision {
+                    key: row.get(0)?,
+                    found_at: row.get(1)?,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("Failed to read revision keys: {}", e))
+    }
+
     pub fn list_pending_update_candidates(
         &self,
         limit: i64,

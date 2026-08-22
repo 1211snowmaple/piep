@@ -277,6 +277,7 @@ pub fn run() -> tauri::Result<()> {
             commands::update_jobs::clear_finished_update_jobs,
             commands::update_jobs::dismiss_update_candidate,
             commands::update_jobs::count_dismissed_update_candidates,
+            commands::update_jobs::list_pending_revisions,
             commands::update_jobs::restore_dismissed_update_candidates,
             // エクスポート / インポート (commands::archive)
             commands::archive::export_single,
