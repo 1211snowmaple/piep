@@ -664,6 +664,22 @@ pub struct UpdateTargetInput {
     pub metadata_json: Option<String>,
 }
 
+/// 手元に持っている、ある作者の pixiv 作品ひとつ。
+///
+/// 改稿の照合に要るものだけを持つ。位置で意味が決まる組にしないのは、
+/// 「保存日時」と「取得元での最終更新」を取り違えると、取りこぼしが
+/// 静かに起きるから。
+#[derive(Debug, Clone)]
+pub struct SavedPixivWork {
+    pub source_id: String,
+    /// 取得元での最終更新。まだ照合していなければ `None`。
+    pub source_updated_at: Option<String>,
+    /// piep がこの版を取った日時。
+    pub downloaded_at: String,
+    /// 手元の版。
+    pub current_version: i64,
+}
+
 /// まだ取り込んでいない改稿。
 ///
 /// 取得元が直した日そのものは持たない。**手元が持っているのは「更新確認が

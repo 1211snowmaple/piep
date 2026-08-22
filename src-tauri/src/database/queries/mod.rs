@@ -7677,25 +7677,30 @@ impl Database {
         Ok(())
     }
 
-    /// その作者の、保存済み pixiv 作品。(作品ID, 取得元での最終更新, 保存日時)
+    /// その作者の、保存済み pixiv 作品。
     ///
     /// 作者を監視しているなら、その作者の作品の改稿も同じ確認で拾えるべき。
     /// web の一覧は 100 件をまとめて返すので、全部を並べても往復は 1% で済む。
     pub fn pixiv_works_for_author(
         &self,
         author_id: &str,
-    ) -> Result<Vec<(String, Option<String>, String)>, String> {
+    ) -> Result<Vec<SavedPixivWork>, String> {
         let conn = self.read_conn()?;
         let mut stmt = conn
             .prepare(
-                "SELECT source_id, source_updated_at, downloaded_at
+                "SELECT source_id, source_updated_at, downloaded_at, current_version
                    FROM downloads
                   WHERE source = 'pixiv' AND author_id = ?1",
             )
             .map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map(params![author_id], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                Ok(SavedPixivWork {
+                    source_id: row.get(0)?,
+                    source_updated_at: row.get(1)?,
+                    downloaded_at: row.get(2)?,
+                    current_version: row.get(3)?,
+                })
             })
             .map_err(|e| e.to_string())?;
         rows.collect::<Result<Vec<_>, _>>()

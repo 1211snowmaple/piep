@@ -112,7 +112,7 @@ impl WebUpdateIndex {
                 .pixiv_works_for_author(author_id)
                 .unwrap_or_default()
                 .into_iter()
-                .map(|(source_id, _, _)| source_id)
+                .map(|work| work.source_id)
                 .collect();
             if ids.is_empty() {
                 return Ok(Some(self.entries.entry(author_id.to_string()).or_default()));
@@ -384,7 +384,19 @@ fn candidate_payload(
         "title": title,
         // 種類はバッジ、対象名は行の先頭に出る。副題はその重複を避けて
         // 「（対象と違えば）誰の」と「いつの」だけにする。
-        "subtitle": if author == target_label { date.clone() } else { format!("{} ・ {}", author, date) },
+        // 改稿は「取得元が新しい」という話なので、公開日を並べても仕方がない。
+        // 何が置き換わるのか - いま手元にある版 - を言う。
+        "subtitle": match kind {
+            CandidateKind::Revision => match (
+                item.get("localVersion").and_then(Value::as_i64),
+                string_at(item, &[&["localSavedAt"]]),
+            ) {
+                (Some(version), Some(saved)) => format!("手元は v{version}（{}に保存）", saved.chars().take(10).collect::<String>()),
+                _ => date.clone(),
+            },
+            _ if author == target_label => date.clone(),
+            _ => format!("{} ・ {}", author, date),
+        },
         "kind": kind.key(),
         "targetLabel": target_label,
         "targetType": target_type,
@@ -1617,7 +1629,9 @@ async fn scan_pixiv_revisions(
 
     let saved = state.db.pixiv_works_for_author(&target.source_key)?;
     let mut found = 0i64;
-    for (source_id, stored_update, downloaded_at) in saved {
+    for work in saved {
+        let (source_id, stored_update, downloaded_at, local_version) =
+            (work.source_id, work.source_updated_at, work.downloaded_at, work.current_version);
         let Some(entry) = entries.get(&source_id) else {
             continue;
         };
@@ -1651,11 +1665,16 @@ async fn scan_pixiv_revisions(
         {
             continue;
         }
+        // 改稿の候補では、公開日より「いま手元にあるもの」のほうが役に立つ。
+        // 取得元が直した日は持っていないので（取り直すまで基準値は古いまま）、
+        // 持っている事実だけを渡す。
         let item = serde_json::json!({
             "id": source_id,
             "title": entry.title.clone().unwrap_or_else(|| "無題".to_string()),
             "user": { "name": target.display_name },
             "create_date": entry.create_date.clone().unwrap_or_default(),
+            "localVersion": local_version,
+            "localSavedAt": downloaded_at,
         });
         if record_candidate(
             state,
@@ -1971,6 +1990,57 @@ mod tests {
         FailureKind,
     };
     use std::collections::HashSet;
+
+    /// 改稿の候補で公開日を並べても仕方がない。置き換わるもの - いま手元に
+    /// ある版 - を言う。取得元が直した日は持っていないので、そこは語らない。
+    #[test]
+    fn a_revision_says_what_is_about_to_be_replaced() {
+        let item = serde_json::json!({
+            "id": "28692755",
+            "title": "作品",
+            "user": { "name": "作者" },
+            "create_date": "2026-07-26T00:00:01+09:00",
+            "localVersion": 1,
+            "localSavedAt": "2026-08-19T14:19:33.782735500+00:00",
+        });
+        let payload =
+            super::candidate_payload("author", "作者", "pixiv", &item, super::CandidateKind::Revision)
+                .unwrap();
+        let subtitle = payload.get("subtitle").and_then(|v| v.as_str()).unwrap();
+        assert_eq!(subtitle, "手元は v1（2026-08-19に保存）");
+    }
+
+    /// 手元の版が分からなければ、作り話をせず従来どおりの副題に戻す。
+    #[test]
+    fn a_revision_without_local_facts_falls_back_rather_than_inventing() {
+        let item = serde_json::json!({
+            "id": "1", "title": "作品", "user": { "name": "作者" },
+            "create_date": "2026-07-26T00:00:01+09:00",
+        });
+        let payload =
+            super::candidate_payload("author", "作者", "pixiv", &item, super::CandidateKind::Revision)
+                .unwrap();
+        assert_eq!(
+            payload.get("subtitle").and_then(|v| v.as_str()),
+            Some("2026-07-26T00:00:01+09:00")
+        );
+    }
+
+    /// 新作の副題は変えていない。
+    #[test]
+    fn a_new_work_keeps_the_subtitle_it_always_had() {
+        let item = serde_json::json!({
+            "id": "1", "title": "作品", "user": { "name": "別の人" },
+            "create_date": "2026-07-26T00:00:01+09:00",
+        });
+        let payload =
+            super::candidate_payload("author", "作者", "pixiv", &item, super::CandidateKind::New)
+                .unwrap();
+        assert_eq!(
+            payload.get("subtitle").and_then(|v| v.as_str()),
+            Some("別の人 ・ 2026-07-26T00:00:01+09:00")
+        );
+    }
 
     /// 基準値を覚えるとは「次はこの値と同じなら本文を見ない」と決めること。
     /// 手元の本文がその更新より古いなら、覚えた瞬間にその改稿は永久に
