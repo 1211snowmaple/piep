@@ -32,7 +32,7 @@ import { Icons, IconSize } from "@/lib/icons";
 import { useAppSearchParams } from "@/app/router";
 import { EmptyState, ErrorState, LoadingState } from "@/components/AsyncState";
 import { PageHeader } from "@/components/PageHeader";
-import { isUpdateJobTerminal, useUpdateJobs, type UpdateJobSnapshot, type UpdateJobSummary } from "@/features/updates/updateJobs";
+import { invalidateAfterUpdateJob, isUpdateJobTerminal, useUpdateJobs, type UpdateJobSnapshot, type UpdateJobSummary } from "@/features/updates/updateJobs";
 import { errorMessage, formatDate, formatNumber } from "@/lib/format";
 import { ProviderMark } from "@/lib/providers";
 import { deleteUpdateTarget, isTauriRuntime, listUpdateTargets, searchDownloadsV2, setUpdateTargetEnabled, upsertUpdateTarget } from "@/services/dbApi";
@@ -175,6 +175,7 @@ export default function UpdatesPage() {
     onSuccess: (candidate) => {
       setDismissedIds((current) => [...new Set([...current, candidate.id])]);
       queryClient.invalidateQueries({ queryKey: ["dismissed-candidates"] });
+      invalidateAfterUpdateJob(queryClient);
       notifications.show({
         color: "gray",
         title: "今後は表示しません",
@@ -197,6 +198,7 @@ export default function UpdatesPage() {
     onSuccess: (candidate) => {
       setDismissedIds((current) => current.filter((id) => id !== candidate.id));
       queryClient.invalidateQueries({ queryKey: ["dismissed-candidates"] });
+      invalidateAfterUpdateJob(queryClient);
     },
   });
   const dismissedCount = useQuery({
@@ -208,6 +210,7 @@ export default function UpdatesPage() {
     onSuccess: (restored) => {
       setDismissedIds([]);
       queryClient.invalidateQueries({ queryKey: ["dismissed-candidates"] });
+      invalidateAfterUpdateJob(queryClient);
       notifications.show({ color: "piep", title: "非表示を解除しました", message: `${restored}件が次の確認でまた候補に出ます` });
     },
   });

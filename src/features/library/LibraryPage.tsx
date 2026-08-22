@@ -705,6 +705,9 @@ export default function LibraryPage() {
   const pendingRevisions = useQuery({
     queryKey: ["pending-revisions"],
     queryFn: () => runtime ? listPendingRevisionsCommand() : Promise.resolve([]),
+    // 無効化は更新確認の側から届く（invalidateAfterUpdateJob）。
+    // 隣の棚件数と同じ間隔にして、画面ごとに作法を変えない。
+    staleTime: 30_000,
   });
   // 読み込み中は空の名簿を渡す。空は「該当なし」であって「絞り込みなし」では
   // ないので、一瞬でも全件が並ぶことはない。

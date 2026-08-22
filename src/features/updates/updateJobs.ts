@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { subscribeTauriEvent } from "@/services/eventBus";
 import {
   cancelUpdateJobCommand,
@@ -103,6 +104,18 @@ function mergeSnapshot(current: UpdateJobSnapshot | null, incoming: UpdateJobSna
   };
 }
 
+/**
+ * 更新確認が終わったあと、古くなるもの。
+ *
+ * 改稿の印（カード・作品ページ）と「改稿あり」棚の件数は、確認が見つけた事実
+ * から引いている。読む側はどれも別の画面にいるので、**変えた側から知らせる**。
+ * これを忘れると、確認が終わっても画面が前の答えを出しつづける。
+ */
+export function invalidateAfterUpdateJob(client: QueryClient): void {
+  client.invalidateQueries({ queryKey: ["pending-revisions"] });
+  client.invalidateQueries({ queryKey: ["library-shelf-counts"] });
+}
+
 export function isUpdateJobTerminal(status: UpdateJobStatus): boolean {
   return status === "completed" || status === "failed" || status === "canceled";
 }
@@ -156,6 +169,7 @@ const EVENT_SILENCE_MS = 5_000;
 const SILENCE_CHECK_MS = 1_500;
 
 export function useUpdateJobs(onSnapshot?: (snapshot: UpdateJobSnapshot) => void, enabled = true) {
+  const queryClient = useQueryClient();
   const [jobs, setJobs] = useState<UpdateJobSummary[]>([]);
   const [activeSnapshot, setActiveSnapshot] = useState<UpdateJobSnapshot | null>(null);
   const lastEventAt = useRef(0);
@@ -176,7 +190,7 @@ export function useUpdateJobs(onSnapshot?: (snapshot: UpdateJobSnapshot) => void
     } else {
       setActiveSnapshot(null);
     }
-  }, [enabled, onSnapshot]);
+  }, [enabled, onSnapshot, queryClient]);
 
   const selectJob = useCallback(async (jobId: string) => {
     if (!enabled) return;
@@ -196,6 +210,7 @@ export function useUpdateJobs(onSnapshot?: (snapshot: UpdateJobSnapshot) => void
       lastEventAt.current = Date.now();
       setActiveSnapshot(current => mergeSnapshot(current, event.payload));
       onSnapshot?.(event.payload);
+      if (isUpdateJobTerminal(event.payload.status)) invalidateAfterUpdateJob(queryClient);
       setJobs(prev => {
         const summary: UpdateJobSummary = {
           jobId: event.payload.jobId,

@@ -139,6 +139,9 @@ export default function WorkPage() {
   const pendingRevisions = useQuery({
     queryKey: ["pending-revisions"],
     queryFn: () => runtime ? listPendingRevisionsCommand() : Promise.resolve([]),
+    // 無効化は更新確認の側から届く（invalidateAfterUpdateJob）。
+    // 隣の棚件数と同じ間隔にして、画面ごとに作法を変えない。
+    staleTime: 30_000,
   });
   const assetsQuery = useQuery({
     queryKey: ["work-assets", id],

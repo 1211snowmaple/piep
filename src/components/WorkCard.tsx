@@ -186,6 +186,9 @@ export const WorkCard = memo(function WorkCard({
   const pendingRevisions = useQuery({
     queryKey: ["pending-revisions"],
     queryFn: () => isTauriRuntime() ? listPendingRevisionsCommand() : Promise.resolve([]),
+    // 無効化は更新確認の側から届く（invalidateAfterUpdateJob）。
+    // 隣の棚件数と同じ間隔にして、画面ごとに作法を変えない。
+    staleTime: 30_000,
   });
   const revised = (pendingRevisions.data ?? []).some((entry) => entry.downloadId === work.id);
   const open = useCallback(() => {
