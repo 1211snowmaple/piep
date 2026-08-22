@@ -26,7 +26,7 @@ vi.mock("@/features/search/searchIndexProgress", async (importOriginal) => ({
   useSearchIndexProgress: () => null,
 }));
 
-const counts: LibraryShelfCounts = { total: 2237, favorite: 84, watched: 7, reading: 3 };
+const counts: LibraryShelfCounts = { total: 2237, favorite: 84, watched: 7, reading: 3, revised: 5 };
 
 /** The shell rails only on a wide window, which jsdom never reports. */
 let matchMediaMatches = false;
@@ -109,7 +109,7 @@ describe("library sidebar", () => {
     expect(nav().getByText("お気に入り")).toBeInTheDocument();
     expect(nav().getByText("84")).toBeInTheDocument();
     expect(nav().getByText("読みかけ")).toBeInTheDocument();
-    expect(nav().getByText("更新監視")).toBeInTheDocument();
+    expect(nav().getByText("改稿あり")).toBeInTheDocument();
   });
 
   it("marks the shelf that is actually being shown", async () => {
@@ -215,8 +215,8 @@ describe("library sidebar", () => {
 
   it("navigates to a shelf when it is chosen", async () => {
     renderApp("#/library");
-    fireEvent.click(await row("更新監視"));
-    await waitFor(() => expect(window.location.hash).toContain("watch=watched"));
+    fireEvent.click(await row("改稿あり"));
+    await waitFor(() => expect(window.location.hash).toContain("revised=1"));
   });
 
   it("opens a saved search by id rather than by copying its conditions into the link", async () => {
@@ -281,7 +281,7 @@ describe("collapsed rail", () => {
     expect(nav().getByLabelText("すべて")).toBeInTheDocument();
     expect(nav().getByLabelText("お気に入り")).toBeInTheDocument();
     expect(nav().getByLabelText("読みかけ")).toBeInTheDocument();
-    expect(nav().getByLabelText("更新監視")).toBeInTheDocument();
+    expect(nav().getByLabelText("改稿あり")).toBeInTheDocument();
   });
 
   it("keeps every saved search one click away, told apart by its initial", async () => {

@@ -2,7 +2,7 @@ import { memo, useCallback } from "react";
 import { ActionIcon, Avatar, Badge, Card, Group, Menu, Text, Tooltip, UnstyledButton } from "@mantine/core";
 import { modals } from "@mantine/modals";
 import { notifications } from "@mantine/notifications";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Icons, IconSize } from "@/lib/icons";
 import { useAppNavigate } from "@/app/router";
 import { useWorkspace } from "@/app/WorkspaceContext";
@@ -13,6 +13,7 @@ import { errorMessage, formatDateNumeric, formatNumber } from "@/lib/format";
 import { summaryText } from "@/lib/content";
 import { deleteDownload, getAssetUrl, isTauriRuntime, setFavorite, setWatchUpdates } from "@/services/dbApi";
 import { deleteThenCleanup } from "@/features/library/deletedWorkCleanup";
+import { listPendingRevisionsCommand } from "@/services/updateJobApi";
 import type { DownloadEntry } from "@/types/library";
 
 interface WorkCardProps {
@@ -180,6 +181,13 @@ export const WorkCard = memo(function WorkCard({
   const navigate = useAppNavigate();
   const { addToEpubQueue, removeFromEpubQueue, isQueuedForEpub } = useWorkspace();
   const queued = isQueuedForEpub(work.id);
+  // 印の出どころをカードの中に置くのは、カードが出るところすべてで同じ顔に
+  // するため。同じキーの問い合わせは共有されるので、何枚並んでも通信は1回。
+  const pendingRevisions = useQuery({
+    queryKey: ["pending-revisions"],
+    queryFn: () => isTauriRuntime() ? listPendingRevisionsCommand() : Promise.resolve([]),
+  });
+  const revised = (pendingRevisions.data ?? []).some((entry) => entry.downloadId === work.id);
   const open = useCallback(() => {
     if (selectionMode) onSelect?.(work.id, !selected);
     else navigate(`/works/${work.id}`);
@@ -245,7 +253,7 @@ export const WorkCard = memo(function WorkCard({
             <Text size="xs" c="dimmed"><Icons.publishedDate size={IconSize.inline} />{formatDateNumeric(work.sourceCreatedAt)}</Text>
             <Text size="xs" c="dimmed"><Icons.textLength size={IconSize.inline} />{formatNumber(work.textLength)}字</Text>
             {work.assetCount > 0 && <Text size="xs" c="dimmed"><Icons.assets size={IconSize.inline} />{work.assetCount}</Text>}
-            <VersionChip work={work} interactive={!selectionMode} />
+            {revised && <Badge size="xs" variant="light" color="yellow">改稿</Badge>}<VersionChip work={work} interactive={!selectionMode} />
           </Group>
           {!selectionMode && <div className="work-row__actions">{actions}</div>}
         </div>
@@ -293,7 +301,7 @@ export const WorkCard = memo(function WorkCard({
             <Text size="xs" c="dimmed"><Icons.publishedDate size={IconSize.inline} />{formatDateNumeric(work.sourceCreatedAt)}</Text>
             <Text size="xs" c="dimmed"><Icons.textLength size={IconSize.inline} />{formatNumber(work.textLength)}字</Text>
             {work.assetCount > 0 && <Text size="xs" c="dimmed"><Icons.assets size={IconSize.inline} />{work.assetCount}</Text>}
-            <VersionChip work={work} interactive={!selectionMode} />
+            {revised && <Badge size="xs" variant="light" color="yellow">改稿</Badge>}<VersionChip work={work} interactive={!selectionMode} />
           </Group>
           {!selectionMode && actions}
         </div>

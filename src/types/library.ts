@@ -429,6 +429,8 @@ export interface LibraryShelfCounts {
   watched: number;
   /** Works with a recorded reading position that still exist in the library. */
   reading: number;
+  /** 取り込んでいない改稿がある作品の数。 */
+  revised: number;
 }
 
 export interface SavedSearchRecord {

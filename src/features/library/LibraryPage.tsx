@@ -70,6 +70,7 @@ import {
 import { searchSuggest } from "@/services/searchApi";
 import { deleteSavedSearch, listSavedSearches, upsertSavedSearch } from "@/services/shelfApi";
 import { readingWorkIds } from "@/features/library/readingShelf";
+import { listPendingRevisionsCommand } from "@/services/updateJobApi";
 import { useSavedSearchMigration } from "@/features/library/savedSearchMigration";
 import { deleteThenCleanup } from "@/features/library/deletedWorkCleanup";
 import type { EntityFacet, EntityFacetScope, EntitySortBy, FacetCount, LibrarySortBy, LibraryWatchFilter, SavedSearchRecord, SearchSuggestion, SearchV2Params, SearchV2Result, UpdateTarget } from "@/types/library";
@@ -699,11 +700,25 @@ export default function LibraryPage() {
   const shelfParam = urlParams.get("shelf");
   const readingIds = useMemo(() => shelfParam === "reading" ? readingWorkIds() : null, [shelfParam]);
 
+  // 「改稿あり」も同じ会員名簿方式で並べる。取り込んでいない改稿は作品の列では
+  // なく更新確認が見つけた事実なので、絞り込みではなく名簿として渡す。
+  const pendingRevisions = useQuery({
+    queryKey: ["pending-revisions"],
+    queryFn: () => runtime ? listPendingRevisionsCommand() : Promise.resolve([]),
+  });
+  // 読み込み中は空の名簿を渡す。空は「該当なし」であって「絞り込みなし」では
+  // ないので、一瞬でも全件が並ぶことはない。
+  const onRevisedShelf = urlParams.get("revised") === "1";
+  const revisedIds = useMemo(
+    () => onRevisedShelf ? (pendingRevisions.data ?? []).map((entry) => entry.downloadId) : null,
+    [onRevisedShelf, pendingRevisions.data],
+  );
+
   // Relevance is walked with a score cursor and has no nth page, so numbers
   // are only offered once an ordering has been chosen.
   const numberedPages = numberedPageEnabled && tab === "works";
   const params = useMemo<SearchV2Params>(() => ({
-    idsInclude: readingIds,
+    idsInclude: readingIds ?? revisedIds,
     text: searchText || null,
     // Selecting both providers is the same as no provider filter; the backend
     // takes a single source, and post-filtering a page would break paging.
@@ -722,7 +737,7 @@ export default function LibraryPage() {
     // Numbered pages fetch one page outright; scrolling walks with a cursor.
     offset: numberedPages ? (pageParam - 1) * pageSize : null,
     projection: view === "compact" ? "libraryCompact" : "libraryGallery",
-  }), [readingIds, searchText, filters, sortBy, view, numberedPages, pageParam, pageSize]);
+  }), [readingIds, revisedIds, searchText, filters, sortBy, view, numberedPages, pageParam, pageSize]);
 
   // Keyset pagination: fetching a fixed slab and paging it in the browser
   // capped the library at that slab and reported the wrong total.

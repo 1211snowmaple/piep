@@ -18,10 +18,12 @@ const SHELF_ICON: Record<LibraryShelf, LucideIcon> = {
   all: Icons.library,
   favorite: Icons.favorite,
   reading: Icons.read,
-  watched: Icons.watch,
+  // 更新センターと同じ記号にする。「取得元が直した」と「それを見つける場所」が
+  // 別の絵だと、同じ話をしていることが伝わらない。
+  revised: Icons.updates,
 };
 
-const PREVIEW_COUNTS: LibraryShelfCounts = { total: 1284, favorite: 84, watched: 7, reading: 12 };
+const PREVIEW_COUNTS: LibraryShelfCounts = { total: 1284, favorite: 84, watched: 7, reading: 12, revised: 3 };
 
 /** Which groups are unfolded. Kept per install so the sidebar reopens as it was. */
 type GroupId = "library" | "saved" | "collect" | "export";
@@ -145,7 +147,7 @@ export function WorkspaceNav({ railed, onNavigate }: { railed: boolean; onNaviga
     if (value === "all") return data.total;
     if (value === "favorite") return data.favorite;
     if (value === "reading") return data.reading;
-    return data.watched;
+    return data.revised;
   };
 
   const shelfRows = LIBRARY_SHELVES.map((item) => (

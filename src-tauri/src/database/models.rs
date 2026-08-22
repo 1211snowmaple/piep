@@ -573,6 +573,8 @@ pub struct LibraryShelfCounts {
     /// How many of the supplied works still exist. Reading positions are kept
     /// per device and outlive the works they point at.
     pub reading: i64,
+    /// 取り込んでいない改稿がある作品の数。
+    pub revised: i64,
 }
 
 /// フィルター候補（名前と件数）

@@ -6046,11 +6046,26 @@ impl Database {
             .map_err(|e| format!("Reading shelf count failed: {e}"))?
         };
 
+        // 取り込んでいない改稿の件数。作品の列ではなく、更新確認が見つけた
+        // 事実から数える。改稿の候補は必ず手元にある作品を指すので、結合は当たる。
+        let revised = conn
+            .query_row(
+                "SELECT COUNT(*)
+                   FROM update_candidates c
+                   JOIN downloads d
+                     ON d.source = c.source AND d.source_id = c.source_id
+                  WHERE c.status = 'pending' AND c.kind = 'revision'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("Revised shelf count failed: {e}"))?;
+
         Ok(LibraryShelfCounts {
             total,
             favorite,
             watched,
             reading,
+            revised,
         })
     }
 
