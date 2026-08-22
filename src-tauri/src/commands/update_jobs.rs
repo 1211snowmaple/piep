@@ -2,6 +2,7 @@ use crate::database::{
     DownloadEntry, StartUpdateJobRequest, UpdateCandidateInput, UpdateCredentials, UpdateJobItem,
     UpdateJobItemInput, UpdateJobSnapshot, UpdateJobSummary,
 };
+use crate::pixiv_api::error::PixivError;
 use crate::AppState;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -55,7 +56,8 @@ enum WebLookup {
 struct WebUpdateIndex {
     api: Option<crate::pixiv_api::web::WebPixivAPI>,
     asked_authors: HashSet<String>,
-    entries: HashMap<String, crate::pixiv_api::web::NovelListEntryWeb>,
+    /// 作者ID → その作者の作品ID → 一覧が返したもの。
+    entries: HashMap<String, HashMap<String, crate::pixiv_api::web::NovelListEntryWeb>>,
     /// 一度でも「数が合わない」を見たら、以降このジョブでは一覧を使わない。
     /// 一件ごとに再接続を促しても、利用者にできることは増えない。
     gave_up: bool,
@@ -63,8 +65,12 @@ struct WebUpdateIndex {
 
 impl WebUpdateIndex {
     fn new(credentials: &UpdateCredentials) -> Self {
+        // 保存済みの古い値にも同じ規則を通す。繋ぎ直していない利用者から、
+        // 解析や広告の識別子が出ていくことはない。
+        let cookie =
+            crate::auth::essential_cookies(credentials.pixiv_cookie.as_deref().unwrap_or_default());
         let session = crate::pixiv_api::web::WebSession::new(
-            credentials.pixiv_cookie.as_deref().unwrap_or_default(),
+            &cookie,
             credentials.pixiv_user_agent.as_deref().unwrap_or_default(),
         );
         let api = session.and_then(|session| {
@@ -84,55 +90,68 @@ impl WebUpdateIndex {
         }
     }
 
-    /// この作品について、取得元での最終更新を引く。
+    /// その作者の、保存済み作品ぶんの一覧。
     ///
-    /// まだ聞いていない作者なら、**このジョブが確認する予定のその作者の作品を
-    /// まとめて**聞く。1件のために 1 リクエスト、にはしない。
-    async fn lookup(
+    /// **聞き方はひとつだけ。** 1件を確かめたいときも、作者の改稿をまとめて
+    /// 見たいときも、同じ「その作者の保存済み作品を全部」を聞いて覚える。
+    /// 用途ごとに違う範囲を聞き分けると、同じ作者を二度聞くことになる。
+    ///
+    /// セッションが無ければ `None`。**失敗ではない** - 呼ぶ側は従来の経路へ進む。
+    async fn author_listing(
         &mut self,
         state: &Arc<AppState>,
-        job_id: &str,
-        dl: &DownloadEntry,
-    ) -> WebLookup {
-        let Some(api) = self.api.as_ref() else {
-            return WebLookup::Unknown;
-        };
-        if self.gave_up || dl.author_id.trim().is_empty() {
-            return WebLookup::Unknown;
+        author_id: &str,
+    ) -> Result<Option<&HashMap<String, crate::pixiv_api::web::NovelListEntryWeb>>, PixivError> {
+        let author_id = author_id.trim();
+        if self.api.is_none() || self.gave_up || author_id.is_empty() {
+            return Ok(None);
         }
-
-        if self.asked_authors.insert(dl.author_id.clone()) {
-            let mut ids = state
+        if self.asked_authors.insert(author_id.to_string()) {
+            let ids: Vec<String> = state
                 .db
-                .pixiv_source_ids_for_job_author(job_id, &dl.author_id)
-                .unwrap_or_default();
-            if !ids.iter().any(|id| id == &dl.source_id) {
-                ids.push(dl.source_id.clone());
+                .pixiv_works_for_author(author_id)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(source_id, _, _)| source_id)
+                .collect();
+            if ids.is_empty() {
+                return Ok(Some(self.entries.entry(author_id.to_string()).or_default()));
             }
-            match api.user_novels_by_ids(&dl.author_id, &ids).await {
-                Ok(entries) => {
-                    for entry in entries {
-                        self.entries.insert(entry.id.clone(), entry);
+            let api = self.api.as_ref().expect("checked above");
+            match api.user_novels_by_ids(author_id, &ids).await {
+                Ok(listed) => {
+                    let bucket = self.entries.entry(author_id.to_string()).or_default();
+                    for entry in listed {
+                        bucket.insert(entry.id.clone(), entry);
                     }
                 }
                 // 数が合わない = R-18 が黙って落ちている = セッションが切れている。
                 // これを「更新なし」として通すと、ライブラリ全体が嘘をつく。
-                Err(error @ crate::pixiv_api::error::PixivError::PartialListing { .. }) => {
+                Err(error @ PixivError::PartialListing { .. }) => {
                     self.gave_up = true;
-                    return WebLookup::NeedsAuth(format!("pixiv連携の再接続が必要です（{error}）"));
+                    return Err(error);
                 }
                 Err(error) => {
                     // それ以外の失敗は、この作者を諦めるだけ。従来の経路が拾う。
-                    log::warn!("pixiv web 一覧を読めません（作者 {}）: {error}", dl.author_id);
+                    log::warn!("pixiv web 一覧を読めません（作者 {author_id}）: {error}");
+                    self.entries.entry(author_id.to_string()).or_default();
                 }
             }
         }
+        Ok(self.entries.get(author_id))
+    }
 
-        match self.entries.get(&dl.source_id) {
-            // 伏せられた作品はメタデータが当てにならない。判定に使わない。
-            Some(entry) if entry.is_masked => WebLookup::Unknown,
-            Some(entry) => WebLookup::Found(Box::new(entry.clone())),
-            None => WebLookup::Unknown,
+    /// この作品について、取得元での最終更新を引く。
+    async fn lookup(&mut self, state: &Arc<AppState>, dl: &DownloadEntry) -> WebLookup {
+        match self.author_listing(state, &dl.author_id).await {
+            Err(error) => WebLookup::NeedsAuth(format!("pixiv連携の再接続が必要です（{error}）")),
+            Ok(None) => WebLookup::Unknown,
+            Ok(Some(entries)) => match entries.get(&dl.source_id) {
+                // 伏せられた作品はメタデータが当てにならない。判定に使わない。
+                Some(entry) if entry.is_masked => WebLookup::Unknown,
+                Some(entry) => WebLookup::Found(Box::new(entry.clone())),
+                None => WebLookup::Unknown,
+            },
         }
     }
 }
@@ -1238,8 +1257,8 @@ async fn process_update_job_item(
     web_index: &mut WebUpdateIndex,
 ) -> Result<ItemOutcome, String> {
     match item.item_type.as_str() {
-        "work" => process_work_item(app, state, job_id, item, credentials, web_index).await,
-        "target" => process_target_item(state, job_id, item, credentials).await,
+        "work" => process_work_item(app, state, item, credentials, web_index).await,
+        "target" => process_target_item(state, job_id, item, credentials, web_index).await,
         "candidate" => process_candidate_item(app, state, item, credentials).await,
         _ => Ok(ItemOutcome::Skipped(format!(
             "未対応のジョブ項目をスキップ: {}",
@@ -1316,7 +1335,6 @@ fn remember_source_updated_at(state: &Arc<AppState>, dl: &DownloadEntry, listed:
 async fn process_work_item(
     app: &tauri::AppHandle,
     state: &Arc<AppState>,
-    job_id: &str,
     item: &UpdateJobItem,
     credentials: &UpdateCredentials,
     web_index: &mut WebUpdateIndex,
@@ -1329,7 +1347,7 @@ async fn process_work_item(
 
         // 0段目。web の一覧は、100件まとめて `updateDate` を返す。ここで
         // 「変わっていない」と分かれば、アプリAPIを一度も叩かずに終わる。
-        let listed_update = match web_index.lookup(state, job_id, &dl).await {
+        let listed_update = match web_index.lookup(state, &dl).await {
             WebLookup::NeedsAuth(message) => return Ok(ItemOutcome::AuthRequired(message)),
             WebLookup::Found(entry) => entry.update_date.clone(),
             WebLookup::Unknown => None,
@@ -1494,11 +1512,159 @@ async fn process_work_item(
     }
 }
 
+/// 「増えた」「変わった」を候補として残す。
+///
+/// 候補はジョブとは別に残す。保存も拒否もされないまま次の確認を迎えても、
+/// ここから戻ってくる（取得元の一覧は前回位置から先しか返さないため、
+/// ジョブ限りにすると一度きりで消えてしまう）。
+///
+/// 新作も改稿もここを通る。**見つけ方が違うだけで、候補になったあとの扱いは同じ。**
+fn record_candidate(
+    state: &Arc<AppState>,
+    job_id: &str,
+    target: &crate::database::UpdateTarget,
+    source_item: &Value,
+    kind: CandidateKind,
+    auto_save: bool,
+) -> Result<bool, String> {
+    let Some(payload) = candidate_payload(
+        &target.target_type,
+        &target.display_name,
+        &target.source,
+        source_item,
+        kind,
+    ) else {
+        return Ok(false);
+    };
+    let source = payload
+        .get("source")
+        .and_then(|v| v.as_str())
+        .unwrap_or(&target.source)
+        .to_string();
+    let source_id = payload
+        .get("sourceId")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    if source_id.is_empty() {
+        return Ok(false);
+    }
+    let title = payload
+        .get("title")
+        .and_then(|v| v.as_str())
+        .unwrap_or("無題")
+        .to_string();
+    state.db.upsert_update_candidate(&UpdateCandidateInput {
+        source: source.clone(),
+        source_id: source_id.clone(),
+        kind: kind.key().to_string(),
+        title: title.clone(),
+        payload_json: serde_json::to_string(&payload).map_err(|e| e.to_string())?,
+        target_type: Some(target.target_type.clone()),
+    })?;
+    state.db.insert_update_job_candidate(
+        job_id,
+        &item_from_payload(
+            "candidate",
+            if auto_save { "queued" } else { "candidate" },
+            Some(source),
+            Some(source_id),
+            Some(target.target_type.clone()),
+            title,
+            payload,
+        )?,
+    )
+}
+
+/// 監視している作者の、保存済み作品の改稿を拾う。
+///
+/// web の一覧は 1 リクエストで 100 件の `updateDate` を返すので、作者の全作品を
+/// 並べても往復はアプリAPIの 1% で済む。ここが pixiv で改稿を知る唯一の道である
+/// （作品詳細APIには更新時刻に当たるフィールドが無い）。
+///
+/// # 初めて見る作品
+///
+/// `source_updated_at` がまだ無い作品は、**保存より後に直されていなければ**
+/// その値を基準として覚える。後に直されていれば、手元の本文が古い可能性がある
+/// ということなので、覚えずに候補として出す。**分からないものを「最新」に
+/// しない。** これを取り違えると、その改稿は二度と拾われない。
+async fn scan_pixiv_revisions(
+    state: &Arc<AppState>,
+    job_id: &str,
+    target: &crate::database::UpdateTarget,
+    auto_save: bool,
+    web_index: &mut WebUpdateIndex,
+) -> Result<i64, String> {
+    let Some(entries) = web_index
+        .author_listing(state, &target.source_key)
+        .await
+        .map_err(|error| error.to_string())?
+    else {
+        return Ok(0);
+    };
+
+    let saved = state.db.pixiv_works_for_author(&target.source_key)?;
+    let mut found = 0i64;
+    for (source_id, stored_update, downloaded_at) in saved {
+        let Some(entry) = entries.get(&source_id) else {
+            continue;
+        };
+        // 伏せられた作品はメタデータが当てにならない。判定に使わない。
+        if entry.is_masked {
+            continue;
+        }
+        let Some(listed) = entry.update_date.as_deref() else {
+            continue;
+        };
+        match stored_update.as_deref() {
+            // 覚えている値と同じなら、取得元では何も起きていない。
+            Some(stored) if stored == listed => continue,
+            // 覚えている値と違う。改稿である。
+            Some(_) => {}
+            // 初めて見る作品。保存より前の更新なら、手元の本文はその版のもの。
+            None if may_remember(Some(listed), Some(&downloaded_at)) => {
+                if let Ok(Some(existing)) = state.db.get_download_by_source("pixiv", &source_id) {
+                    let _ = state.db.set_download_source_updated_at(existing.id, listed);
+                }
+                continue;
+            }
+            // 保存より後に直されている。古いかもしれないので、候補に出す。
+            None => {}
+        }
+        if state
+            .db
+            .update_candidate_status("pixiv", &source_id)?
+            .as_deref()
+            == Some("dismissed")
+        {
+            continue;
+        }
+        let item = serde_json::json!({
+            "id": source_id,
+            "title": entry.title.clone().unwrap_or_else(|| "無題".to_string()),
+            "user": { "name": target.display_name },
+            "create_date": entry.create_date.clone().unwrap_or_default(),
+        });
+        if record_candidate(
+            state,
+            job_id,
+            target,
+            &item,
+            CandidateKind::Revision,
+            auto_save,
+        )? {
+            found += 1;
+        }
+    }
+    Ok(found)
+}
+
 async fn process_target_item(
     state: &Arc<AppState>,
     job_id: &str,
     item: &UpdateJobItem,
     credentials: &UpdateCredentials,
+    web_index: &mut WebUpdateIndex,
 ) -> Result<ItemOutcome, String> {
     let target: crate::database::UpdateTarget =
         serde_json::from_str(&item.payload_json).map_err(|e| e.to_string())?;
@@ -1597,60 +1763,17 @@ async fn process_target_item(
             continue;
         }
 
-        let Some(payload) = candidate_payload(
-            &target.target_type,
-            &target.display_name,
-            &target.source,
-            source_item,
-            kind,
-        ) else {
-            continue;
-        };
-        let source = payload
-            .get("source")
-            .and_then(|v| v.as_str())
-            .unwrap_or(&target.source)
-            .to_string();
-        let source_id = payload
-            .get("sourceId")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        if source_id.is_empty() {
-            continue;
-        }
-        let title = payload
-            .get("title")
-            .and_then(|v| v.as_str())
-            .unwrap_or("無題")
-            .to_string();
-        // 候補はジョブとは別に残す。保存も拒否もされないまま次の確認を迎えても、
-        // ここから戻ってくる（取得元の一覧は前回位置から先しか返さないため、
-        // ジョブ限りにすると一度きりで消えてしまう）。
-        state.db.upsert_update_candidate(&UpdateCandidateInput {
-            source: source.clone(),
-            source_id: source_id.clone(),
-            kind: kind.key().to_string(),
-            title: title.clone(),
-            payload_json: serde_json::to_string(&payload).map_err(|e| e.to_string())?,
-            target_type: Some(target.target_type.clone()),
-        })?;
-
-        let inserted = state.db.insert_update_job_candidate(
-            job_id,
-            &item_from_payload(
-                "candidate",
-                if auto_save { "queued" } else { "candidate" },
-                Some(source),
-                Some(source_id),
-                Some(target.target_type.clone()),
-                title,
-                payload,
-            )?,
-        )?;
-        if inserted {
+        if record_candidate(state, job_id, &target, source_item, kind, auto_save)? {
             found += 1;
         }
+    }
+
+    // 作者を監視しているなら、その作者の作品の改稿も同じ確認で分かるべき。
+    // FANBOX は取得元の一覧が更新時刻を持つのでずっとそうなっていた。pixiv
+    // だけができなかったのは、アプリAPIの一覧に更新時刻が無いからで、
+    // web の一覧を通せばこの非対称は消える。
+    if target.source == "pixiv" && target.target_type == "author" {
+        found += scan_pixiv_revisions(state, job_id, &target, auto_save, web_index).await?;
     }
 
     let first = items.first();
@@ -1872,6 +1995,24 @@ mod tests {
         assert!(!may_remember(Some("2026-08-20T00:00:00Z"), Some("きのう")));
         assert!(!may_remember(Some("2026-08-20T00:00:00Z"), None));
         assert!(!may_remember(None, Some("2026-08-20T00:00:00Z")));
+    }
+
+    /// 手元の保存日時は、小数9桁つきで書かれている。
+    ///
+    /// これを読み損ねると `may_remember` が常に false を返し、**初めての確認で
+    /// ライブラリ全件が「改稿かもしれない」として候補に並ぶ。** 実際に DB に
+    /// 入っている書式で固定しておく。
+    #[test]
+    fn the_shape_our_own_timestamps_are_written_in_is_readable() {
+        let downloaded_at = "2026-08-19T14:19:33.782735500+00:00";
+        assert!(
+            may_remember(Some("2026-07-27T00:02:20+09:00"), Some(downloaded_at)),
+            "保存より前の更新は、その版を持っているということ"
+        );
+        assert!(
+            !may_remember(Some("2026-08-20T00:00:00+09:00"), Some(downloaded_at)),
+            "保存より後の更新は、持っているとは言えない"
+        );
     }
 
     /// 時差の書き方が違っても、指している瞬間で比べる。

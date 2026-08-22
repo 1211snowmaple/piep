@@ -368,13 +368,17 @@ fn validate_user_agent(user_agent: Option<String>) -> Result<Option<String>, Str
 // Pixiv OAuth Login (separate window)
 // ---------------------------------------------------------------------------
 
-/// WebView2 が持っている Cookie を、そのまま送れる1行にする。
+/// WebView2 が持っている Cookie を、送れる1行にする。
+///
+/// 拾ってきた山からは[要るものだけを残す](super::essential_cookies)。
+/// 解析や広告の識別子を、相手に送ることも手元に残すこともしない。
 fn cookie_header(cookies: &[tauri::webview::Cookie<'static>]) -> String {
-    cookies
+    let all = cookies
         .iter()
         .map(|cookie| format!("{}={}", cookie.name(), cookie.value()))
         .collect::<Vec<_>>()
-        .join("; ")
+        .join("; ");
+    super::essential_cookies(&all)
 }
 
 /// pixiv と接続したときに受け取るもの。

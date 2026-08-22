@@ -7631,34 +7631,29 @@ impl Database {
         Ok(())
     }
 
-    /// このジョブが確認する予定の、その作者の pixiv 作品ID。
+    /// その作者の、保存済み pixiv 作品。(作品ID, 取得元での最終更新, 保存日時)
     ///
-    /// web の一覧は 1 リクエストで 100 件を返すので、まとめて聞くために要る。
-    /// **ジョブに入っているものだけを返す。** 作者の全作品を数えにいくと、
-    /// 1件だけ確認したいときにも余計な往復が増える。
-    pub fn pixiv_source_ids_for_job_author(
+    /// 作者を監視しているなら、その作者の作品の改稿も同じ確認で拾えるべき。
+    /// web の一覧は 100 件をまとめて返すので、全部を並べても往復は 1% で済む。
+    pub fn pixiv_works_for_author(
         &self,
-        job_id: &str,
         author_id: &str,
-    ) -> Result<Vec<String>, String> {
+    ) -> Result<Vec<(String, Option<String>, String)>, String> {
         let conn = self.read_conn()?;
         let mut stmt = conn
             .prepare(
-                "SELECT DISTINCT d.source_id
-                   FROM update_job_items i
-                   JOIN downloads d
-                     ON d.source = i.source AND d.source_id = i.source_id
-                  WHERE i.job_id = ?1
-                    AND i.item_type = 'work'
-                    AND i.source = 'pixiv'
-                    AND d.author_id = ?2",
+                "SELECT source_id, source_updated_at, downloaded_at
+                   FROM downloads
+                  WHERE source = 'pixiv' AND author_id = ?1",
             )
             .map_err(|e| e.to_string())?;
         let rows = stmt
-            .query_map(params![job_id, author_id], |row| row.get::<_, String>(0))
+            .query_map(params![author_id], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
             .map_err(|e| e.to_string())?;
         rows.collect::<Result<Vec<_>, _>>()
-            .map_err(|e| format!("Failed to list job author works: {}", e))
+            .map_err(|e| format!("Failed to list author works: {}", e))
     }
 
     /// 更新監視（トグル）を設定する。
