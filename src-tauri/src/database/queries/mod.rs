@@ -4826,15 +4826,17 @@ impl Database {
         let conn = self.read_conn()?;
         let mut stmt = conn
             .prepare(
-                "SELECT source || ':' || source_id, updated_at
-                   FROM update_candidates
-                  WHERE status = 'pending' AND kind = 'revision'",
+                "SELECT d.id, c.updated_at
+                   FROM update_candidates c
+                   JOIN downloads d
+                     ON d.source = c.source AND d.source_id = c.source_id
+                  WHERE c.status = 'pending' AND c.kind = 'revision'",
             )
             .map_err(|e| format!("Failed to prepare revision keys: {}", e))?;
         let rows = stmt
             .query_map([], |row| {
                 Ok(PendingRevision {
-                    key: row.get(0)?,
+                    download_id: row.get(0)?,
                     found_at: row.get(1)?,
                 })
             })

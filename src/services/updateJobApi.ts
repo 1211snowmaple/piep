@@ -137,8 +137,8 @@ export async function restoreDismissedUpdateCandidatesCommand(): Promise<number>
 
 /** まだ取り込んでいない改稿。 */
 export interface PendingRevision {
-  /** `{source}:{sourceId}`。手元の作品と突き合わせるための鍵。 */
-  key: string;
+  /** 手元の作品ID。棚の絞り込みにも、1件の判定にも、同じこれで足りる。 */
+  downloadId: number;
   /** 更新確認がこの改稿を見つけた時刻。取得元が直した日そのものは持っていない。 */
   foundAt: string;
 }
@@ -151,11 +151,6 @@ export interface PendingRevision {
  */
 export async function listPendingRevisionsCommand(): Promise<PendingRevision[]> {
   return invoke<PendingRevision[]>("list_pending_revisions");
-}
-
-/** 作品と、改稿の一覧を突き合わせるための鍵。 */
-export function revisionKey(source: string, sourceId: string): string {
-  return `${source}:${sourceId}`;
 }
 
 export async function saveUpdateJobCandidatesCommand(jobId: string, candidateIds: number[]): Promise<UpdateJobSnapshot> {

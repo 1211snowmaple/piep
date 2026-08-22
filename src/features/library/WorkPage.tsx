@@ -41,7 +41,7 @@ import { WorkCover } from "@/components/WorkCover";
 import { ProviderMark, sourceUrl } from "@/lib/providers";
 import { contentTypeLabel, errorMessage, formatBytes, formatDate, formatFreshness, formatNumber } from "@/lib/format";
 import { hasSourceRevision } from "@/lib/workFreshness";
-import { listPendingRevisionsCommand, revisionKey } from "@/services/updateJobApi";
+import { listPendingRevisionsCommand } from "@/services/updateJobApi";
 import { prepareDocumentHtml } from "@/lib/content";
 import { useContentLinkNavigation } from "@/lib/contentLinks";
 import { exportSingle } from "@/services/archiveApi";
@@ -216,7 +216,7 @@ export default function WorkPage() {
   const sourceRevised = hasSourceRevision(work);
   // 改稿を見つけたとき基準値はわざと書き換えない（取り直して初めて追いつく）ので、
   // 作品の行だけを見ると照合済みに見える。候補のほうが答えである。
-  const pendingRevision = pendingRevisions.data?.find((entry) => entry.key === revisionKey(work.source, work.sourceId));
+  const pendingRevision = pendingRevisions.data?.find((entry) => entry.downloadId === work.id);
   const assets = assetsQuery.data ?? [];
   const visibleAssets = assets.slice(0, visibleAssetCount);
   const queued = isQueuedForEpub(work.id);

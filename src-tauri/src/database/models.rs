@@ -671,8 +671,8 @@ pub struct UpdateTargetInput {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PendingRevision {
-    /// `{source}:{sourceId}`。画面が手元の作品と突き合わせるための鍵。
-    pub key: String,
+    /// 手元の作品ID。棚の絞り込みにも、1件の判定にも、同じこれで足りる。
+    pub download_id: i64,
     /// 更新確認がこの改稿を見つけた時刻。
     pub found_at: String,
 }
