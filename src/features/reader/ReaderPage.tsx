@@ -40,7 +40,9 @@ import { getWorkCollection, listCollectionsForWork } from "@/services/collection
 import { getAssetUrl, getReaderContentPage, getReaderMetadata, isTauriRuntime, openLocalAsset, searchDownloadsV2, searchReaderContent } from "@/services/dbApi";
 import { openExternalUrl } from "@/services/openerApi";
 import { getDemoReader } from "@/mocks/demoData";
+import { RecapPanel } from "@/features/assist/RecapPanel";
 import type { WorkCollection } from "@/types/collections";
+import type { SearchV2Params, SearchV2Result } from "@/types/library";
 
 interface ReadingContextRow {
   key: string;
@@ -54,6 +56,8 @@ interface ReadingContextRow {
   sequential: boolean;
   previous: { id: number; title: string } | null;
   next: { id: number; title: string } | null;
+  /** いま読んでいる作品。「前回のあらすじ」をここにぶら下げる。 */
+  currentId: number;
 }
 
 function adjacentWorks(items: { id: number; title: string }[], currentId: number) {
@@ -64,6 +68,42 @@ function adjacentWorks(items: { id: number; title: string }[], currentId: number
     previous: index > 0 ? items[index - 1] : null,
     next: index >= 0 && index + 1 < items.length ? items[index + 1] : null,
   };
+}
+
+interface ReaderSequenceResult extends SearchV2Result {
+  truncated: boolean;
+}
+
+/**
+ * Walks an ordered search until the current work and its following neighbour
+ * are both known. Most series finish in one request; long-running series keep
+ * following the opaque cursor instead of pretending item 200 is the end.
+ */
+async function loadReaderSequence(params: SearchV2Params, currentId: number): Promise<ReaderSequenceResult> {
+  const items: SearchV2Result["items"] = [];
+  const seenCursors = new Set<string>();
+  let cursor: string | null = null;
+  let first: SearchV2Result | null = null;
+  const maxPages = 25;
+
+  for (let page = 0; page < maxPages; page += 1) {
+    const result = await searchDownloadsV2({ ...params, limit: 200, cursor });
+    first ??= result;
+    const knownIds = new Set(items.map((item) => item.id));
+    items.push(...result.items.filter((item) => !knownIds.has(item.id)));
+    const position = items.findIndex((item) => item.id === currentId);
+    if (position >= 0 && (position < items.length - 1 || !result.nextCursor)) {
+      return { ...first, items, nextCursor: result.nextCursor, truncated: false };
+    }
+    if (!result.nextCursor || seenCursors.has(result.nextCursor)) {
+      return { ...first, items, nextCursor: null, truncated: false };
+    }
+    seenCursors.add(result.nextCursor);
+    cursor = result.nextCursor;
+  }
+
+  if (!first) throw new Error("作品の並びを読み込めませんでした");
+  return { ...first, items, nextCursor: cursor, truncated: true };
 }
 
 /** One continuation route offered at the end of a work.
@@ -91,6 +131,11 @@ function ReadingContextCard({ context, onOpen }: {
           {context.collectionId && <Button size="compact-xs" variant="subtle" onClick={() => onOpen(`/collections/${context.collectionId}`)}>一覧</Button>}
         </Group>
         {!context.sequential && <Text size="xs" c="dimmed">読む順は決まっていません。同じまとまりの作品です。</Text>}
+        {/* 読む順があって、前の話があるときだけ。順序なしのまとまりで
+            「前回のあらすじ」を出すと、無い連続性をあるように見せてしまう。 */}
+        {context.sequential && context.previous && (
+          <RecapPanel currentId={context.currentId} previous={context.previous} />
+        )}
         <Group grow>
           {context.previous
             ? <Button variant="default" leftSection={context.sequential ? <Icons.previous size={IconSize.menu} /> : undefined} onClick={() => onOpen(href(context.previous!.id))}>{context.previous.title}</Button>
@@ -189,6 +234,7 @@ export default function ReaderPage() {
   const [fullscreen, setFullscreen] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const restoredKeyRef = useRef<string | null>(null);
+  const pendingBookmarkRef = useRef<{ page: number; top: number } | null>(null);
   const { bookmarks, add: addBookmark, remove: removeBookmark } = useBookmarks(id);
   const metadataQuery = useQuery({
     queryKey: ["reader-metadata", id],
@@ -215,20 +261,26 @@ export default function ReaderPage() {
     queryKey: ["reader-member-collections", metadataQuery.data?.download.source, metadataQuery.data?.download.sourceId],
     queryFn: async () => {
       const summaries = await listCollectionsForWork(metadataQuery.data!.download.source, metadataQuery.data!.download.sourceId);
-      return Promise.all(summaries.slice(0, 20).map((summary) => getWorkCollection(summary.id)));
+      const collections: WorkCollection[] = [];
+      // Avoid one unbounded Promise.all while still loading every membership;
+      // otherwise the 21st collection silently disappeared from reading context.
+      for (let index = 0; index < summaries.length; index += 8) {
+        collections.push(...await Promise.all(summaries.slice(index, index + 8).map((summary) => getWorkCollection(summary.id))));
+      }
+      return collections;
     },
     enabled: runtime && Boolean(metadataQuery.data),
     staleTime: 30_000,
   });
   const officialSeriesQuery = useQuery({
     queryKey: ["reader-official-series", metadataQuery.data?.download.source, metadataQuery.data?.download.seriesId],
-    queryFn: () => searchDownloadsV2({ seriesSource: metadataQuery.data!.download.source, seriesKey: metadataQuery.data!.download.seriesId!, sortBy: "series_order", sortOrder: "asc", limit: 200, projection: "bulk" }),
+    queryFn: () => loadReaderSequence({ seriesSource: metadataQuery.data!.download.source, seriesKey: metadataQuery.data!.download.seriesId!, sortBy: "series_order", sortOrder: "asc", projection: "bulk" }, id),
     enabled: runtime && Boolean(metadataQuery.data?.download.seriesId),
     staleTime: 60_000,
   });
   const authorWorksQuery = useQuery({
     queryKey: ["reader-author-sequence", metadataQuery.data?.download.source, metadataQuery.data?.download.personId ?? metadataQuery.data?.download.authorId],
-    queryFn: () => searchDownloadsV2({ personSource: metadataQuery.data!.download.source, personKey: metadataQuery.data!.download.personId || metadataQuery.data!.download.authorId, sortBy: "source_created_at", sortOrder: "asc", limit: 200, projection: "bulk" }),
+    queryFn: () => loadReaderSequence({ personSource: metadataQuery.data!.download.source, personKey: metadataQuery.data!.download.personId || metadataQuery.data!.download.authorId, sortBy: "source_created_at", sortOrder: "asc", projection: "bulk" }, id),
     enabled: runtime && Boolean(metadataQuery.data?.download.personId || metadataQuery.data?.download.authorId),
     staleTime: 60_000,
   });
@@ -261,6 +313,7 @@ export default function ReaderPage() {
           .join(" · "),
         collectionId: collection.id,
         sequential,
+        currentId: work.id,
         ...adjacent,
       });
     };
@@ -269,13 +322,15 @@ export default function ReaderPage() {
     if (officialSeriesQuery.data) {
       const items = officialSeriesQuery.data.items.map((item) => ({ id: item.id, title: item.title }));
       const adjacent = adjacentWorks(items, work.id);
-      if (adjacent.previous || adjacent.next) rows.push({ key: `series:${work.source}:${work.seriesId}`, label: work.seriesTitle ? `公式シリーズ「${work.seriesTitle}」` : "公式シリーズ", detail: `${adjacent.position ?? "-"} / ${adjacent.total} · 公式順`, sequential: true, ...adjacent });
+      const total = officialSeriesQuery.data.totalEstimate ?? adjacent.total;
+      if (adjacent.previous || adjacent.next) rows.push({ key: `series:${work.source}:${work.seriesId}`, label: work.seriesTitle ? `公式シリーズ「${work.seriesTitle}」` : "公式シリーズ", detail: `${adjacent.position ?? "-"} / ${total} · 公式順`, sequential: true, currentId: work.id, ...adjacent });
     }
     if (authorWorksQuery.data) {
       const items = authorWorksQuery.data.items.map((item) => ({ id: item.id, title: item.title }));
       const adjacent = adjacentWorks(items, work.id);
+      const total = authorWorksQuery.data.totalEstimate ?? adjacent.total;
       // 作者の投稿順は「物語の次」ではないため、続きとしては案内しない。
-      if (adjacent.previous || adjacent.next) rows.push({ key: `author:${work.source}:${work.authorId}`, label: `${work.authorName}の作品`, detail: `${adjacent.total}作品の公開順`, sequential: false, ...adjacent });
+      if (adjacent.previous || adjacent.next) rows.push({ key: `author:${work.source}:${work.authorId}`, label: `${work.authorName}の作品`, detail: `${total}作品の公開順`, sequential: false, currentId: work.id, ...adjacent });
     }
     return rows;
   }, [authorWorksQuery.data, explicitCollectionQuery.data, memberCollectionsQuery.data, metadataQuery.data?.download, officialSeriesQuery.data, requestedCollectionId]);
@@ -287,6 +342,7 @@ export default function ReaderPage() {
   const pageCount = contentQuery.data?.pageCount ?? 1;
   const hasSourcePages = pageCount > 1;
   const positionKey = `piep.reader-position.${id}.${version ?? "current"}`;
+  const sequenceContextLimited = Boolean(officialSeriesQuery.data?.truncated || authorWorksQuery.data?.truncated);
 
   useEffect(() => { setVersion(normalizedRequestedVersion); }, [normalizedRequestedVersion]);
   useEffect(() => {
@@ -356,6 +412,25 @@ export default function ReaderPage() {
     return () => { cancelled = true; cancelAnimationFrame(frame); };
   }, [contentReady, contentQuery.data, id, metadataQuery.data, pageCount, positionKey, sourcePage, version]);
   useEffect(() => {
+    const pending = pendingBookmarkRef.current;
+    const viewport = scrollRef.current;
+    if (!pending || !viewport || !contentReady || contentQuery.data?.page !== pending.page - 1) return;
+    let cancelled = false;
+    let frame = 0;
+    const deadline = performance.now() + 2_000;
+    const apply = () => {
+      if (cancelled) return;
+      viewport.scrollTop = pending.top;
+      if (Math.abs(viewport.scrollTop - pending.top) < 2 || performance.now() >= deadline) {
+        pendingBookmarkRef.current = null;
+        return;
+      }
+      frame = requestAnimationFrame(apply);
+    };
+    frame = requestAnimationFrame(apply);
+    return () => { cancelled = true; cancelAnimationFrame(frame); };
+  }, [contentQuery.data?.page, contentReady, sourcePage]);
+  useEffect(() => {
     const viewport = scrollRef.current;
     if (!viewport || !contentReady) return;
     const update = (event?: Event) => {
@@ -416,9 +491,15 @@ export default function ReaderPage() {
     notifications.show({ color: "piep", message: `しおりを挟みました（${label}）` });
   };
   const jumpToBookmark = (bookmark: { page: number; top: number }) => {
-    setSourcePage(Math.min(Math.max(1, bookmark.page), Math.max(1, pageCount)));
-    // The page swap re-renders the article, so the offset is applied after it.
-    requestAnimationFrame(() => scrollRef.current?.scrollTo({ top: bookmark.top, behavior: "smooth" }));
+    const page = Math.min(Math.max(1, bookmark.page), Math.max(1, pageCount));
+    if (page === sourcePage && contentReady) {
+      scrollRef.current?.scrollTo({ top: bookmark.top, behavior: "smooth" });
+      return;
+    }
+    // Keep the target until the requested page has actually replaced the
+    // placeholder. A single RAF runs long before an async page fetch completes.
+    pendingBookmarkRef.current = { page, top: bookmark.top };
+    setSourcePage(page);
   };
 
   return (
@@ -487,7 +568,7 @@ export default function ReaderPage() {
               </Box>}
               {sourcePage === 1 && <Divider my="xl" />}
               <article className="reader-content" onClick={handleArticleClick} dangerouslySetInnerHTML={{ __html: preparedHtml }} />
-              {sourcePage === pageCount && <Box className="reader-finish"><Icons.read size={IconSize.hero} /><Text fw={700}>読了</Text>{readingContexts.length > 0 && <Stack gap="sm" w="100%" maw={620} mt="md">{readingContexts.map((context) => <ReadingContextCard key={context.key} context={context} onOpen={navigate} />)}</Stack>}<Button variant="light" mt="md" onClick={() => returnTo(`/works/${work.id}`)}>作品詳細へ戻る</Button></Box>}
+              {sourcePage === pageCount && <Box className="reader-finish"><Icons.read size={IconSize.hero} /><Text fw={700}>読了</Text>{sequenceContextLimited && <Alert color="yellow" mt="md" maw={620}>作品数が非常に多いため、前後の作品を特定できない並びがあります。作品詳細からシリーズまたは作者一覧を開いてください。</Alert>}{readingContexts.length > 0 && <Stack gap="sm" w="100%" maw={620} mt="md">{readingContexts.map((context) => <ReadingContextCard key={context.key} context={context} onOpen={navigate} />)}</Stack>}<Button variant="light" mt="md" onClick={() => returnTo(`/works/${work.id}`)}>作品詳細へ戻る</Button></Box>}
             </>}
           </Box>
         </Box>
@@ -512,10 +593,10 @@ export default function ReaderPage() {
 
       <Drawer opened={settingsOpened} onClose={settingsDrawer.close} position="right" title="読書設定" size={360}>
         <Stack gap="xl">
-          <Box><Group justify="space-between" mb="sm"><Text size="sm" fw={700}>文字サイズ</Text><Text size="xs" c="dimmed">{settings.fontSize}px</Text></Group><Slider min={14} max={28} step={1} value={settings.fontSize} onChange={(fontSize) => setSettings({ ...settings, fontSize })} marks={[{ value: 14, label: "小" }, { value: 21, label: "標準" }, { value: 28, label: "大" }]} /></Box>
-          <Box><Group justify="space-between" mb="sm"><Text size="sm" fw={700}>行間</Text><Text size="xs" c="dimmed">{settings.lineHeight.toFixed(2)}</Text></Group><Slider min={1.4} max={2.4} step={0.05} value={settings.lineHeight} onChange={(lineHeight) => setSettings({ ...settings, lineHeight })} /></Box>
-          <Box><Group justify="space-between" mb="sm"><Text size="sm" fw={700}>本文幅</Text><Text size="xs" c="dimmed">{settings.maxWidth}px</Text></Group><Slider min={520} max={900} step={20} value={settings.maxWidth} onChange={(maxWidth) => setSettings({ ...settings, maxWidth })} /></Box>
-          <Box><Text size="sm" fw={700} mb="sm">書体</Text><SegmentedControl fullWidth value={settings.font} onChange={(font) => setSettings({ ...settings, font: font as ReaderSettings["font"] })} data={[{ value: "serif", label: "明朝" }, { value: "sans", label: "ゴシック" }]} /></Box>
+          <Box><Group justify="space-between" mb="sm"><Text size="sm" fw={700}>文字サイズ</Text><Text size="xs" c="dimmed">{settings.fontSize}px</Text></Group><Slider aria-label="文字サイズ" min={14} max={28} step={1} value={settings.fontSize} onChange={(fontSize) => setSettings({ ...settings, fontSize })} marks={[{ value: 14, label: "小" }, { value: 21, label: "標準" }, { value: 28, label: "大" }]} /></Box>
+          <Box><Group justify="space-between" mb="sm"><Text size="sm" fw={700}>行間</Text><Text size="xs" c="dimmed">{settings.lineHeight.toFixed(2)}</Text></Group><Slider aria-label="行間" min={1.4} max={2.4} step={0.05} value={settings.lineHeight} onChange={(lineHeight) => setSettings({ ...settings, lineHeight })} /></Box>
+          <Box><Group justify="space-between" mb="sm"><Text size="sm" fw={700}>本文幅</Text><Text size="xs" c="dimmed">{settings.maxWidth}px</Text></Group><Slider aria-label="本文幅" min={520} max={900} step={20} value={settings.maxWidth} onChange={(maxWidth) => setSettings({ ...settings, maxWidth })} /></Box>
+          <Box><Text size="sm" fw={700} mb="sm">書体</Text><SegmentedControl aria-label="書体" fullWidth value={settings.font} onChange={(font) => setSettings({ ...settings, font: font as ReaderSettings["font"] })} data={[{ value: "serif", label: "明朝" }, { value: "sans", label: "ゴシック" }]} /></Box>
           <Box><Text size="sm" fw={700} mb="sm">背景</Text><Radio.Group value={settings.theme} onChange={(theme) => setSettings({ ...settings, theme: theme as ReaderSettings["theme"] })}><Stack gap="xs"><Radio value="paper" label="紙の色" /><Radio value="white" label="白" /><Radio value="night" label="ナイト" /></Stack></Radio.Group></Box>
           <Button variant="default" leftSection={<Icons.typography size={IconSize.menu} />} onClick={() => setSettings(defaults)}>初期設定に戻す</Button>
         </Stack>

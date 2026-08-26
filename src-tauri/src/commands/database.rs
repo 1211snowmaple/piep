@@ -1,18 +1,21 @@
 use crate::database::queries::EntityProfileFreshness;
 use crate::database::{
-    AcceptCollectionSuggestionInput, AssetEntry, BulkMutationResult, CollectionSuggestion,
-    CollectionSuggestionRequest, DashboardSummary, DbStats, DownloadEntry, DownloadRelation,
-    DownloadVersion, EditorDocument, EntityFacet, EntityFacetScope, EntitySeriesPage, EntityVersion, FacetCount,
-    FilterFacets, LibraryDiagnostics, LibraryMaintenanceResult, LibraryShelfCounts, NewAsset,
-    NewDownload, PersonEntry, ReaderContentPage, ReaderDocument, ReaderMetadata, ReaderSearchHit,
-    SavedSearch, SavedSearchInput, SearchIndexOptimizationResult, SearchIndexStatus,
-    SearchSuggestParams, SearchSuggestResult, SearchV2Params, SearchV2Result, SeriesEntry,
-    UpdateTarget, UpdateTargetInput, WorkBlockInput, WorkCollection, WorkCollectionInput,
+    AcceptCollectionSuggestionInput, AssetEntry, BulkMutationResult, CollectionNameCandidate,
+    CollectionSuggestion, CollectionSuggestionRequest, CollectionSweepResult, DashboardSummary,
+    DbStats, DownloadEntry, DownloadRelation, DownloadVersion, EditorDocument, EntityFacet,
+    EntityFacetScope, EntitySeriesPage, EntityVersion, FacetCount, FilterFacets,
+    LibraryDiagnostics, LibraryMaintenanceResult, LibraryShelfCounts, NewAsset, NewDownload,
+    PersonEntry, ReaderContentPage, ReaderDocument, ReaderMetadata, ReaderSearchHit, SavedSearch,
+    SavedSearchInput, SearchIndexOptimizationResult, SearchIndexStatus, SearchSuggestParams,
+    SearchSuggestResult, SearchV2Params, SearchV2Result, SeriesEntry, UpdateTarget,
+    UpdateTargetInput, WorkBlockInput, WorkCollection, WorkCollectionInput,
     WorkCollectionMemberInput, WorkCollectionSummary, WorkEditRevision, WorkKey, WorkLink,
 };
 use crate::AppState;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::io::Cursor;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::LazyLock;
@@ -27,6 +30,8 @@ static ENTITY_REFRESH_LOCK: LazyLock<AsyncMutex<Option<Instant>>> =
 static SEARCH_REBUILD_JOBS: LazyLock<std::sync::Mutex<HashMap<String, Arc<AtomicBool>>>> =
     LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
 static SEARCH_REBUILD_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+const MAX_COLLECTION_COVER_BYTES: u64 = 20 * 1024 * 1024;
+const MAX_COLLECTION_COVER_PIXELS: u64 = 100_000_000;
 
 async fn run_db_blocking<T, F>(app: tauri::AppHandle, f: F) -> Result<T, String>
 where
@@ -579,11 +584,98 @@ pub async fn db_get_work_collection(
     .await
 }
 
+fn import_collection_cover(app_data_dir: &Path, source: &Path) -> Result<PathBuf, String> {
+    let metadata = std::fs::metadata(source).map_err(|e| format!("表紙画像を読めません: {e}"))?;
+    if !metadata.is_file() {
+        return Err("表紙画像にファイルを指定してください".to_string());
+    }
+    if metadata.len() > MAX_COLLECTION_COVER_BYTES {
+        return Err("表紙画像は20 MB以下にしてください".to_string());
+    }
+    let bytes = std::fs::read(source).map_err(|e| format!("表紙画像を読めません: {e}"))?;
+    if bytes.len() as u64 > MAX_COLLECTION_COVER_BYTES {
+        return Err("表紙画像は20 MB以下にしてください".to_string());
+    }
+    let reader = image::ImageReader::new(Cursor::new(&bytes))
+        .with_guessed_format()
+        .map_err(|e| format!("表紙画像の形式を確認できません: {e}"))?;
+    let format = reader
+        .format()
+        .ok_or_else(|| "PNG、JPEG、WebPの画像を選んでください".to_string())?;
+    let extension = match format {
+        image::ImageFormat::Png => "png",
+        image::ImageFormat::Jpeg => "jpg",
+        image::ImageFormat::WebP => "webp",
+        _ => return Err("PNG、JPEG、WebPの画像を選んでください".to_string()),
+    };
+    let (width, height) = reader
+        .into_dimensions()
+        .map_err(|e| format!("表紙画像が壊れています: {e}"))?;
+    if u64::from(width).saturating_mul(u64::from(height)) > MAX_COLLECTION_COVER_PIXELS {
+        return Err("表紙画像の縦横サイズが大きすぎます".to_string());
+    }
+
+    let digest = Sha256::digest(&bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let directory = app_data_dir.join("collection-covers");
+    std::fs::create_dir_all(&directory)
+        .map_err(|e| format!("表紙画像の保存先を作れません: {e}"))?;
+    let destination = directory.join(format!("{digest}.{extension}"));
+    if destination.exists() {
+        return Ok(destination);
+    }
+    let staging = directory.join(format!(".{digest}.{:016x}.part", rand::random::<u64>()));
+    let publish = (|| -> Result<(), String> {
+        use std::io::Write;
+        let mut output = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&staging)
+            .map_err(|e| format!("表紙画像の一時ファイルを作れません: {e}"))?;
+        output
+            .write_all(&bytes)
+            .and_then(|_| output.sync_all())
+            .map_err(|e| format!("表紙画像を保存できません: {e}"))?;
+        drop(output);
+        match std::fs::rename(&staging, &destination) {
+            Ok(()) => Ok(()),
+            Err(_) if destination.exists() => {
+                let _ = std::fs::remove_file(&staging);
+                Ok(())
+            }
+            Err(e) => Err(format!("表紙画像を確定できません: {e}")),
+        }
+    })();
+    if publish.is_err() {
+        let _ = std::fs::remove_file(&staging);
+    }
+    publish.map(|_| destination)
+}
+
 #[tauri::command]
 pub async fn db_upsert_work_collection(
     app: tauri::AppHandle,
-    input: WorkCollectionInput,
+    mut input: WorkCollectionInput,
 ) -> Result<WorkCollection, String> {
+    let source_path = input
+        .cover_image_path_patch()
+        .flatten()
+        .filter(|path| !path.trim().is_empty())
+        .map(str::to_string);
+    if let Some(source_path) = source_path {
+        let app_data_dir = app
+            .path()
+            .app_data_dir()
+            .map_err(|e| format!("アプリの保存先を確認できません: {e}"))?;
+        let managed_path = tokio::task::spawn_blocking(move || {
+            import_collection_cover(&app_data_dir, Path::new(&source_path))
+        })
+        .await
+        .map_err(|e| format!("表紙画像の取り込み処理に失敗しました: {e}"))??;
+        input.cover_image_path = Some(managed_path.to_string_lossy().to_string());
+    }
     run_library_write_blocking(app, move |state| state.db.upsert_work_collection(&input)).await
 }
 
@@ -608,6 +700,177 @@ pub async fn db_add_work_collection_members(
         state
             .db
             .add_work_collection_members(&collection_id, &members)
+    })
+    .await
+}
+
+/// 棚の複数選択から、選んだ作品をそのまま束へ入れる。
+#[tauri::command]
+pub async fn db_add_downloads_to_collection(
+    app: tauri::AppHandle,
+    collection_id: String,
+    download_ids: Vec<i64>,
+) -> Result<WorkCollection, String> {
+    run_library_write_blocking(app, move |state| {
+        state
+            .db
+            .add_downloads_to_collection(&collection_id, &download_ids)
+    })
+    .await
+}
+
+/// 選んだ作品から、新しい束をひとつ作る。
+#[tauri::command]
+pub async fn db_create_collection_from_downloads(
+    app: tauri::AppHandle,
+    name: String,
+    collection_kind: String,
+    download_ids: Vec<i64>,
+) -> Result<WorkCollection, String> {
+    run_library_write_blocking(app, move |state| {
+        state
+            .db
+            .create_collection_from_downloads(&name, &collection_kind, &download_ids)
+    })
+    .await
+}
+
+/// すでにあるコレクションに、名前の案を出し直す。保存はしない。
+#[tauri::command]
+pub async fn db_propose_collection_names(
+    app: tauri::AppHandle,
+    collection_id: String,
+) -> Result<Vec<CollectionNameCandidate>, String> {
+    run_db_blocking(app, move |state| {
+        state.db.collection_name_proposals(&collection_id)
+    })
+    .await
+}
+
+/// すでにあるコレクションの名前と説明を、モデルにも考えてもらう。
+///
+/// 提案のときと同じく、**足すだけで置き換えない**。返ってきた案を採るかどうかは
+/// 利用者が決める。送るのは題名・作者・タグ・シリーズ名だけで、本文は送らない。
+#[tauri::command]
+pub async fn db_name_collection_with_model(
+    app: tauri::AppHandle,
+    collection_id: String,
+    engine: crate::assist::AssistEngine,
+) -> Result<crate::assist::NamedBundle, String> {
+    let state = app.state::<Arc<AppState>>().inner().clone();
+    let works =
+        tokio::task::spawn_blocking(move || state.db.collection_naming_works_for(&collection_id))
+            .await
+            .map_err(|e| format!("Database task failed: {e}"))??;
+    crate::assist::name_bundle(&engine, &works).await
+}
+
+/// 設定したエンジンを、実際の仕事で試す。
+///
+/// `collection_id` を渡すとその束で、渡さなければ棚から拾った作品で試す。
+/// **保存する前に、何が返るのかを見せる**ためのもの。つながることと
+/// 使えることは別である。
+#[tauri::command]
+pub async fn db_try_naming_engine(
+    app: tauri::AppHandle,
+    engine: crate::assist::AssistEngine,
+    collection_id: Option<String>,
+) -> Result<crate::assist::TrialResult, String> {
+    let state = app.state::<Arc<AppState>>().inner().clone();
+    let works = tokio::task::spawn_blocking(move || match collection_id {
+        Some(id) => state.db.collection_naming_works_for(&id),
+        None => state.db.sample_naming_works(),
+    })
+    .await
+    .map_err(|e| format!("Database task failed: {e}"))??;
+    if works.is_empty() {
+        return Err("試すための作品がライブラリにありません".to_string());
+    }
+    crate::assist::try_engine(&engine, &works).await
+}
+
+/// 提案の名前を、利用者が選んだモデルにも考えてもらう。
+///
+/// 返ってきた案は既存の案に**足す**だけで、置き換えない。決めるのは利用者で
+/// あって、モデルではない。失敗しても提案そのものは壊れない。
+#[tauri::command]
+pub async fn db_name_collection_suggestion(
+    app: tauri::AppHandle,
+    suggestion_id: String,
+    engine: crate::assist::AssistEngine,
+) -> Result<CollectionSuggestion, String> {
+    // 材料を読むところと、外へ送るところを分ける。送っているあいだ
+    // ライブラリの錠を握ったままにしない。
+    let state = app.state::<Arc<AppState>>().inner().clone();
+    let ids = {
+        let suggestion_id = suggestion_id.clone();
+        let state = state.clone();
+        tokio::task::spawn_blocking(move || {
+            state
+                .db
+                .list_collection_suggestions(Some("all"))
+                .map(|values| {
+                    values
+                        .into_iter()
+                        .find(|value| value.id == suggestion_id)
+                        .map(|value| {
+                            value
+                                .members
+                                .into_iter()
+                                .filter_map(|member| member.download_id)
+                                .collect::<Vec<_>>()
+                        })
+                })
+        })
+        .await
+        .map_err(|e| format!("Database task failed: {e}"))??
+        .ok_or_else(|| "Collection suggestion not found".to_string())?
+    };
+    let works = {
+        let state = state.clone();
+        tokio::task::spawn_blocking(move || state.db.collection_naming_works(&ids))
+            .await
+            .map_err(|e| format!("Database task failed: {e}"))??
+    };
+    let named = crate::assist::name_bundle(&engine, &works).await?;
+    run_library_write_blocking(app, move |state| {
+        state.db.attach_llm_name_option(&suggestion_id, &named)
+    })
+    .await
+}
+
+/// 走査で出た候補を、まとめて閉じる。`track` を渡すとその系統だけ。
+#[tauri::command]
+pub async fn db_dismiss_swept_suggestions(
+    app: tauri::AppHandle,
+    track: Option<String>,
+) -> Result<usize, String> {
+    run_library_write_blocking(app, move |state| {
+        state.db.dismiss_swept_suggestions(track.as_deref())
+    })
+    .await
+}
+
+/// 棚全体を走査して、束の候補を作り直す。
+///
+/// 意味索引を全部読むので、開いた瞬間に走らせるものではない。利用者が
+/// 「探す」と言ったときだけ動かす。
+#[tauri::command]
+pub async fn db_sweep_collection_candidates(
+    app: tauri::AppHandle,
+) -> Result<CollectionSweepResult, String> {
+    run_library_write_blocking(app, move |state| state.db.sweep_collection_candidates()).await
+}
+
+/// 束の並びを、投稿日順か題名の連番順に一度で整える。
+#[tauri::command]
+pub async fn db_sort_work_collection_members(
+    app: tauri::AppHandle,
+    collection_id: String,
+    mode: String,
+) -> Result<WorkCollection, String> {
+    run_library_write_blocking(app, move |state| {
+        state.db.sort_work_collection_members(&collection_id, &mode)
     })
     .await
 }
@@ -929,16 +1192,6 @@ pub async fn db_get_versions(
 ) -> Result<Vec<DownloadVersion>, String> {
     let state = app.state::<Arc<AppState>>();
     state.db.get_versions(download_id)
-}
-
-#[tauri::command]
-pub async fn db_get_version(
-    app: tauri::AppHandle,
-    download_id: i64,
-    version: i64,
-) -> Result<DownloadVersion, String> {
-    let state = app.state::<Arc<AppState>>();
-    state.db.get_version(download_id, version)
 }
 
 #[tauri::command]
@@ -1291,7 +1544,8 @@ async fn fetch_pixiv_series_profile_json(
     {
         Some(token) => {
             let series_id: u64 = source_key.parse().map_err(|_| "Invalid Pixiv series ID")?;
-            let api = crate::pixiv_api::aapi::AppPixivAPI::new_from_refresh_token(token.to_string());
+            let api =
+                crate::pixiv_api::aapi::AppPixivAPI::new_from_refresh_token(token.to_string());
             match api.novel_series(series_id, None, None, true).await {
                 Ok(value) => Some(value),
                 // web から取れているなら、アプリAPIの失敗で全部を捨てない。
@@ -1366,7 +1620,11 @@ async fn fetch_pixiv_series_profile_json(
         ],
     )
     .map(str::to_string)
-    .or_else(|| web_series.as_ref().and_then(|series| series.caption.clone()))
+    .or_else(|| {
+        web_series
+            .as_ref()
+            .and_then(|series| series.caption.clone())
+    })
     .or_else(|| existing_description.map(str::to_string));
 
     Ok(Some(serde_json::json!({
@@ -1879,7 +2137,9 @@ pub async fn refresh_entity_profile(
             json_size + cover_size,
             EntityProfileFreshness::RemoteChecked,
             normalized.get("isConcluded").and_then(|v| v.as_bool()),
-            normalized.get("publishedContentCount").and_then(|v| v.as_i64()),
+            normalized
+                .get("publishedContentCount")
+                .and_then(|v| v.as_i64()),
         )?;
         return serde_json::to_value(series).map_err(|e| e.to_string());
     }
@@ -2165,7 +2425,8 @@ pub async fn import_work_asset(
 #[cfg(test)]
 mod profile_link_tests {
     use super::{
-        collect_profile_links, copy_file_atomically_bounded, validate_path_in_storage,
+        collect_profile_links, copy_file_atomically_bounded, import_collection_cover,
+        validate_path_in_storage, MAX_COLLECTION_COVER_BYTES,
     };
     use std::fs;
 
@@ -2188,6 +2449,38 @@ mod profile_link_tests {
                 "https://example.com/work",
             ]
         );
+    }
+
+    #[test]
+    fn collection_cover_is_validated_and_copied_into_app_data() {
+        let root = std::env::temp_dir().join(format!(
+            "piep_collection_cover_test_{}",
+            rand::random::<u64>()
+        ));
+        let app_data = root.join("app-data");
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("chosen.png");
+        image::RgbImage::from_pixel(2, 2, image::Rgb([20, 40, 60]))
+            .save(&source)
+            .unwrap();
+
+        let imported = import_collection_cover(&app_data, &source).unwrap();
+        assert!(imported.starts_with(app_data.join("collection-covers")));
+        assert_eq!(fs::read(&imported).unwrap(), fs::read(&source).unwrap());
+        assert_eq!(
+            import_collection_cover(&app_data, &source).unwrap(),
+            imported
+        );
+
+        let invalid = root.join("not-an-image.png");
+        fs::write(&invalid, b"not an image").unwrap();
+        assert!(import_collection_cover(&app_data, &invalid).is_err());
+
+        let oversized = root.join("oversized.png");
+        let file = fs::File::create(&oversized).unwrap();
+        file.set_len(MAX_COLLECTION_COVER_BYTES + 1).unwrap();
+        assert!(import_collection_cover(&app_data, &oversized).is_err());
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[tokio::test]

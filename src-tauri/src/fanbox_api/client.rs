@@ -324,7 +324,8 @@ impl FanboxAPI {
                             log::info!("Fetching page: {}", page_url);
 
                             // 🛠️ どちらの構造が来ても FlexibleResponse で安全にパース！
-                            let flexible_resp: FlexibleResponse = self.api_get_paged(page_url).await?;
+                            let flexible_resp: FlexibleResponse =
+                                self.api_get_paged(page_url).await?;
 
                             // 中身を取り出して一本の配列にまとめる
                             let posts = match flexible_resp.body {

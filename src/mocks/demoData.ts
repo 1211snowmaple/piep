@@ -1,3 +1,4 @@
+import type { WorkCollection, WorkCollectionMember, WorkCollectionSummary } from "@/types/collections";
 import type { DashboardSummary, DownloadEntry, EditorDocument, FilterFacets, ReaderDocument, SearchV2Result } from "@/types/library";
 
 const now = new Date();
@@ -19,7 +20,7 @@ export const demoWorks: DownloadEntry[] = [
   {
     id: 103, source: "pixiv", sourceId: "119238841", title: "星を編む人 第十二話", authorName: "遠野つむぎ", authorId: "4419281",
     contentType: "novel", tags: ["ファンタジー", "連載", "宇宙"], excerpt: "夜空に残された糸をたどり、ミナは星図の外側へ踏み出す。",
-    coverPath: null, jsonPath: "demo/pixiv-103.json", assetCount: 1, fileSizeBytes: 1_120_000, downloadedAt: isoDaysAgo(4), sourceCreatedAt: isoDaysAgo(5), sourceUpdatedAt: isoDaysAgo(5), currentVersion: 1, watchUpdates: true, textLength: 32640, favorite: true,
+    coverPath: "data:image/svg+xml;utf8,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20viewBox%3D%270%200%20480%20720%27%3E%3Crect%20width%3D%27480%27%20height%3D%27720%27%20fill%3D%27%2523f5e9e4%27%2F%3E%3Ccircle%20cx%3D%27240%27%20cy%3D%27240%27%20r%3D%2796%27%20fill%3D%27%2523a8552e%27%2F%3E%3Crect%20x%3D%2780%27%20y%3D%27360%27%20width%3D%27320%27%20height%3D%27240%27%20rx%3D%2734%27%20fill%3D%27%2523a8552e%27%2F%3E%3Ctext%20x%3D%27240%27%20y%3D%27710%27%20font-size%3D%2751%27%20text-anchor%3D%27middle%27%20fill%3D%27%2523a8552e%27%3E2%3A3%3C%2Ftext%3E%3C%2Fsvg%3E", jsonPath: "demo/pixiv-103.json", assetCount: 1, fileSizeBytes: 1_120_000, downloadedAt: isoDaysAgo(4), sourceCreatedAt: isoDaysAgo(5), sourceUpdatedAt: isoDaysAgo(5), currentVersion: 1, watchUpdates: true, textLength: 32640, favorite: true,
     personId: "4419281", personName: "遠野つむぎ", seriesId: "778120", seriesTitle: "星を編む人", matchFields: [], scoreReasons: [], matchHighlights: [],
   },
   {
@@ -31,13 +32,13 @@ export const demoWorks: DownloadEntry[] = [
   {
     id: 105, source: "pixiv", sourceId: "118772304", title: "灯台守の休日", authorName: "七瀬あかり", authorId: "6620117",
     contentType: "novel", tags: ["日常", "ほのぼの", "短編"], excerpt: "灯りを落とした朝、灯台守は初めて島の外を見に行く支度をした。",
-    coverPath: null, jsonPath: "demo/pixiv-105.json", assetCount: 2, fileSizeBytes: 1_640_000, downloadedAt: isoDaysAgo(3), sourceCreatedAt: isoDaysAgo(11), sourceUpdatedAt: isoDaysAgo(11), currentVersion: 1, watchUpdates: true, textLength: 12980, favorite: false,
+    coverPath: "data:image/svg+xml;utf8,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20viewBox%3D%270%200%20800%20450%27%3E%3Crect%20width%3D%27800%27%20height%3D%27450%27%20fill%3D%27%2523e9f2ea%27%2F%3E%3Ccircle%20cx%3D%27400%27%20cy%3D%27150%27%20r%3D%2790%27%20fill%3D%27%25233d6349%27%2F%3E%3Crect%20x%3D%27133%27%20y%3D%27225%27%20width%3D%27533%27%20height%3D%27150%27%20rx%3D%2732%27%20fill%3D%27%25233d6349%27%2F%3E%3Ctext%20x%3D%27400%27%20y%3D%27440%27%20font-size%3D%2732%27%20text-anchor%3D%27middle%27%20fill%3D%27%25233d6349%27%3E16%3A9%3C%2Ftext%3E%3C%2Fsvg%3E", jsonPath: "demo/pixiv-105.json", assetCount: 2, fileSizeBytes: 1_640_000, downloadedAt: isoDaysAgo(3), sourceCreatedAt: isoDaysAgo(11), sourceUpdatedAt: isoDaysAgo(11), currentVersion: 1, watchUpdates: true, textLength: 12980, favorite: false,
     personId: "6620117", personName: "七瀬あかり", seriesId: null, seriesTitle: null, matchFields: [], scoreReasons: [], matchHighlights: [],
   },
   {
     id: 106, source: "pixiv", sourceId: "119104552", title: "星を編む人 第十一話", authorName: "遠野つむぎ", authorId: "4419281",
     contentType: "novel", tags: ["ファンタジー", "連載", "宇宙"], excerpt: "観測塔に残されたのは、誰も読めない一枚の星図だけだった。",
-    coverPath: null, jsonPath: "demo/pixiv-106.json", assetCount: 1, fileSizeBytes: 1_080_000, downloadedAt: isoDaysAgo(5), sourceCreatedAt: isoDaysAgo(19), sourceUpdatedAt: isoDaysAgo(19), currentVersion: 2, watchUpdates: true, textLength: 30110, favorite: false,
+    coverPath: "data:image/svg+xml;utf8,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%20viewBox%3D%270%200%20600%20900%27%3E%3Crect%20width%3D%27600%27%20height%3D%27900%27%20fill%3D%27%2523eef0f6%27%2F%3E%3Ccircle%20cx%3D%27300%27%20cy%3D%27300%27%20r%3D%27120%27%20fill%3D%27%252340506e%27%2F%3E%3Crect%20x%3D%27100%27%20y%3D%27450%27%20width%3D%27400%27%20height%3D%27300%27%20rx%3D%2742%27%20fill%3D%27%252340506e%27%2F%3E%3Ctext%20x%3D%27300%27%20y%3D%27890%27%20font-size%3D%2764%27%20text-anchor%3D%27middle%27%20fill%3D%27%252340506e%27%3E2%3A3%3C%2Ftext%3E%3C%2Fsvg%3E", jsonPath: "demo/pixiv-106.json", assetCount: 1, fileSizeBytes: 1_080_000, downloadedAt: isoDaysAgo(5), sourceCreatedAt: isoDaysAgo(19), sourceUpdatedAt: isoDaysAgo(19), currentVersion: 2, watchUpdates: true, textLength: 30110, favorite: false,
     personId: "4419281", personName: "遠野つむぎ", seriesId: "778120", seriesTitle: "星を編む人", matchFields: [], scoreReasons: [], matchHighlights: [],
   },
   {
@@ -150,7 +151,9 @@ export function searchDemoWorks(text = "", source?: string | null): SearchV2Resu
 }
 
 export function getDemoWork(id: number): DownloadEntry {
-  return demoWorks.find((work) => work.id === id) ?? demoWorks[0];
+  const work = demoWorks.find((item) => item.id === id);
+  if (!work) throw new Error("作品が見つかりません");
+  return work;
 }
 
 const demoHtml = `
@@ -190,4 +193,98 @@ export function getDemoEditor(id: number): EditorDocument {
       { id: 3, editRevisionId: 0, order: 2, blockType: "paragraph", text: "窓辺に細く残った水滴が、雲の切れ間から差し込む光を拾っている。", assetId: null, attrsJson: null },
     ],
   };
+}
+
+/**
+ * ブラウザプレビューで見るコレクション。
+ *
+ * デスクトップ版でしか動かない画面を、プレビューでも「まだありません」以外の
+ * 姿で見られるようにしておく。作品も作者もシリーズもデモを持っているのに、
+ * コレクションだけ空だと**レイアウトの崩れが本番でしか見つからない**。
+ * 実データで起きた見え方 — 表紙のあるもの、無いもの、名前の長いもの — を
+ * ひととおり並べてある。
+ */
+function demoMember(work: DownloadEntry, position: number): WorkCollectionMember {
+  return {
+    collectionId: "demo-collection",
+    source: work.source,
+    sourceId: work.sourceId,
+    downloadId: work.id,
+    title: work.title,
+    authorName: work.authorName,
+    coverPath: work.coverPath,
+    textLength: work.textLength,
+    position,
+    memberRole: "main",
+    addedBy: "manual",
+    pinned: false,
+    note: null,
+    missing: false,
+    createdAt: isoDaysAgo(3),
+    updatedAt: isoDaysAgo(1),
+    work,
+    editions: [],
+  };
+}
+
+function demoCollection(
+  id: string,
+  name: string,
+  members: DownloadEntry[],
+  overrides: Partial<WorkCollectionSummary> = {},
+): WorkCollection {
+  return {
+    id,
+    name,
+    description: null,
+    collectionKind: "ordered",
+    coverDownloadId: members[0]?.id ?? null,
+    coverPath: members[0]?.coverPath ?? null,
+    coverMode: "mosaic",
+    coverImagePath: null,
+    coverTiles: members.slice(0, 4).map((work) => ({
+      source: work.source,
+      sourceId: work.sourceId,
+      title: work.title,
+      authorName: work.authorName,
+      coverPath: work.coverPath,
+    })),
+    nameSource: "manual",
+    track: "manual",
+    revision: 1,
+    memberCount: members.length,
+    availableCount: members.length,
+    totalTextLength: members.reduce((total, work) => total + work.textLength, 0),
+    createdAt: isoDaysAgo(9),
+    updatedAt: isoDaysAgo(1),
+    ...overrides,
+    members: members.map(demoMember),
+  };
+}
+
+export const demoCollections: WorkCollection[] = [
+  demoCollection("demo-series", "星を編む人 第十一話・第十二話", [demoWorks[5], demoWorks[2]], {
+    description: "本文のリンクで2作がつながっています",
+    track: "sequence",
+  }),
+  // 名前が長い束。カードの行送りが崩れないかを、ここで見る。
+  demoCollection(
+    "demo-long",
+    "同人女の感情 ハイスペイケメン女子の綾城さんにキモデブが溺愛されて界隈の姫になる話 関連作品",
+    [demoWorks[0], demoWorks[4], demoWorks[1]],
+    { description: "題名が連番になっている3作です", track: "sequence" },
+  ),
+  demoCollection("demo-theme", "創作 / 短編 / 青春", [demoWorks[0], demoWorks[4]], {
+    description: "「創作」を共有し、本文も近い2作です",
+    collectionKind: "unordered",
+    track: "theme",
+  }),
+  // 表紙も作品も無い束。紋だけで成り立つかを見る。
+  demoCollection("demo-empty", "あとで読む", [], { description: null }),
+];
+
+export function getDemoCollection(id: string): WorkCollection {
+  const collection = demoCollections.find((item) => item.id === id);
+  if (!collection) throw new Error("コレクションが見つかりません");
+  return collection;
 }

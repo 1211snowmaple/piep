@@ -74,6 +74,12 @@ export function AppRouter({ children, confirmNavigation }: AppRouterProps) {
   const confirmNavigationRef = useRef(confirmNavigation);
   confirmNavigationRef.current = confirmNavigation;
   const authorizedPopIndexRef = useRef<number | null>(null);
+  const pendingPopRef = useRef<{
+    fromIndex: number;
+    toIndex: number;
+    rollbackComplete: boolean;
+    decision: boolean | null;
+  } | null>(null);
   const indexRef = useRef(location.index);
   /** The furthest entry reached, which is where "forward" runs out. */
   const furthestRef = useRef(location.index);
@@ -99,8 +105,19 @@ export function AppRouter({ children, confirmNavigation }: AppRouterProps) {
       entriesRef.current.set(index, `${next.pathname}${next.search}`);
       setLocation({ ...next, navigationType: "pop", index });
     };
+    const finishPendingPop = () => {
+      const pending = pendingPopRef.current;
+      if (!pending?.rollbackComplete || pending.decision === null) return;
+      pendingPopRef.current = null;
+      confirmationPending.current = false;
+      if (!pending.decision) return;
+      // The rejected traversal has first been undone with a real history move.
+      // Confirming now replays that same move, preserving both physical entries
+      // and their state instead of rewriting either URL in place.
+      authorizedPopIndexRef.current = pending.toIndex;
+      window.history.go(pending.toIndex - pending.fromIndex);
+    };
     const update = () => {
-      if (lastHandledHref.current === window.location.href) return;
       const href = window.location.href;
       let index = readHistoryIndex();
       if (index === null) {
@@ -108,6 +125,24 @@ export function AppRouter({ children, confirmNavigation }: AppRouterProps) {
         stampHistoryIndex(index);
         furthestRef.current = index;
       }
+
+      const pending = pendingPopRef.current;
+      if (pending && !pending.rollbackComplete) {
+        if (index === pending.fromIndex) {
+          // The browser is physically back on the entry the app is still
+          // rendering. `href` can equal lastHandledHref here, so this must run
+          // before the duplicate hashchange/popstate check below.
+          pending.rollbackComplete = true;
+          lastHandledHref.current = href;
+          finishPendingPop();
+          return;
+        }
+        // One traversal can emit both hashchange and popstate. Ignore every
+        // delivery from the rejected destination while the rollback is moving.
+        if (index === pending.toIndex) return;
+      }
+
+      if (lastHandledHref.current === href) return;
 
       if (authorizedPopIndexRef.current === index) {
         authorizedPopIndexRef.current = null;
@@ -124,34 +159,30 @@ export function AppRouter({ children, confirmNavigation }: AppRouterProps) {
         if (fromHref && rollback !== 0 && !confirmationPending.current) {
           confirmationPending.current = true;
           const toIndex = index;
-          const toHref = href;
           // The browser has already moved. Put the current app route back
-          // synchronously so no unsaved editor unmounts while the dialog is
-          // pending. A confirmed discard then performs the requested pop.
-          window.history.replaceState(
-            { ...window.history.state, [HISTORY_INDEX_KEY]: fromIndex },
-            "",
-            fromHref,
-          );
-          lastHandledHref.current = fromHref;
-          authorizedPopIndexRef.current = toIndex;
+          // with a real traversal so neither the origin nor destination entry
+          // is overwritten. React keeps rendering the origin until that move
+          // and the user's decision have both completed.
+          pendingPopRef.current = {
+            fromIndex,
+            toIndex,
+            rollbackComplete: false,
+            decision: null,
+          };
           window.history.go(rollback);
           void confirm()
             .then((discard) => {
-              if (!discard) {
-                authorizedPopIndexRef.current = null;
-                return;
-              }
-              window.history.replaceState(
-                { ...window.history.state, [HISTORY_INDEX_KEY]: toIndex },
-                "",
-                toHref,
-              );
-              lastHandledHref.current = toHref;
-              applyPop(toIndex);
+              const active = pendingPopRef.current;
+              if (!active || active.fromIndex !== fromIndex || active.toIndex !== toIndex) return;
+              active.decision = discard;
+              finishPendingPop();
             })
-            .catch(() => { authorizedPopIndexRef.current = null; })
-            .finally(() => { confirmationPending.current = false; });
+            .catch(() => {
+              const active = pendingPopRef.current;
+              if (!active || active.fromIndex !== fromIndex || active.toIndex !== toIndex) return;
+              active.decision = false;
+              finishPendingPop();
+            });
           return;
         }
       }

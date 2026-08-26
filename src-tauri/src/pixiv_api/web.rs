@@ -527,7 +527,10 @@ mod tests {
         );
         assert_eq!(series.published_content_count, Some(89));
         assert_eq!(series.is_concluded, Some(false));
-        assert_eq!(series.title.as_deref(), Some("マイナーキャラ妄想短編集　陵辱物"));
+        assert_eq!(
+            series.title.as_deref(),
+            Some("マイナーキャラ妄想短編集　陵辱物")
+        );
         assert_eq!(series.tags.len(), 3);
     }
 
@@ -565,7 +568,9 @@ mod tests {
             "error": true, "message": "作品が見つかりません", "body": []
         });
         let error = parse_novel_series(&payload).unwrap_err();
-        assert!(matches!(error, PixivError::ErrResponse { body } if body.contains("見つかりません")));
+        assert!(
+            matches!(error, PixivError::ErrResponse { body } if body.contains("見つかりません"))
+        );
     }
 
     #[test]
@@ -582,10 +587,17 @@ mod tests {
     fn a_count_that_is_not_a_count_stays_unknown() {
         let mut payload = sample();
         payload["body"]["publishedContentCount"] = serde_json::json!(null);
-        assert_eq!(parse_novel_series(&payload).unwrap().published_content_count, None);
+        assert_eq!(
+            parse_novel_series(&payload)
+                .unwrap()
+                .published_content_count,
+            None
+        );
         payload["body"]["publishedContentCount"] = serde_json::json!("89");
         assert_eq!(
-            parse_novel_series(&payload).unwrap().published_content_count,
+            parse_novel_series(&payload)
+                .unwrap()
+                .published_content_count,
             Some(89)
         );
     }
@@ -626,7 +638,10 @@ mod tests {
             Some("2026-07-27T00:02:20+09:00"),
             "アプリAPIの作品詳細には、これに当たるフィールドが無い"
         );
-        assert_eq!(entry.create_date.as_deref(), Some("2026-07-26T00:00:01+09:00"));
+        assert_eq!(
+            entry.create_date.as_deref(),
+            Some("2026-07-26T00:00:01+09:00")
+        );
         assert_eq!(entry.text_count, Some(25_885));
         assert_eq!(entry.x_restrict, Some(1));
         assert_eq!(entry.tags.len(), 2);

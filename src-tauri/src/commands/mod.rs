@@ -1,4 +1,5 @@
 pub mod archive;
+pub mod assist;
 pub mod auth;
 pub mod browser;
 pub mod database;

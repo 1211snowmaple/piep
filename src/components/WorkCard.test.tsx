@@ -112,11 +112,11 @@ describe("WorkCard", () => {
   it("keeps frequent actions directly available on the card", () => {
     renderCard();
 
-    expect(screen.getByRole("button", { name: /雨上がりの図書室でを読む/ })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "お気に入りを解除" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "EPUBキューに追加" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /雨上がりの図書室で：読む/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "雨上がりの図書室で：お気に入りを解除" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "雨上がりの図書室で：EPUBキューに追加" })).toBeInTheDocument();
     // Watching is a toggle on the card, not a link to the update centre.
-    expect(screen.getByRole("button", { name: "更新監視をオフにする" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "雨上がりの図書室で：更新監視をオフにする" })).toHaveAttribute("aria-pressed", "true");
   });
 
   it("only offers the version chip once a work has more than one revision", () => {

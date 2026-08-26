@@ -1,6 +1,9 @@
+/// 実データで挙動を確かめる example から触れるように公開している。
+pub mod assist;
 mod auth;
 pub mod commands;
-mod database;
+/// 実データで規則を確かめる example から触れるように公開している。
+pub mod database;
 mod downloader;
 pub mod epub;
 pub mod fanbox_api;
@@ -186,7 +189,6 @@ pub fn run() -> tauri::Result<()> {
             commands::downloader::fetch_fanbox_creator_posts,
             // DB管理ダウンロード
             commands::downloader::download_and_save,
-            commands::downloader::db_check_exists,
             // DB検索・閲覧 (commands::database)
             commands::database::search_downloads_v2,
             commands::database::search_suggest,
@@ -215,6 +217,29 @@ pub fn run() -> tauri::Result<()> {
             commands::database::db_upsert_work_collection,
             commands::database::db_delete_work_collection,
             commands::database::db_add_work_collection_members,
+            commands::database::db_add_downloads_to_collection,
+            commands::database::db_create_collection_from_downloads,
+            commands::database::db_sort_work_collection_members,
+            commands::database::db_sweep_collection_candidates,
+            commands::database::db_dismiss_swept_suggestions,
+            commands::database::db_propose_collection_names,
+            commands::database::db_name_collection_with_model,
+            // モデルに手伝ってもらう仕事。どれも押したときだけ動く。
+            commands::assist::assist_discover_engines,
+            commands::assist::assist_runtime_profile,
+            commands::assist::assist_suggest_tags,
+            commands::assist::assist_accept_tags,
+            commands::assist::assist_work_tags,
+            commands::assist::assist_remove_tag,
+            commands::assist::assist_interpret_search,
+            commands::assist::assist_describe_author,
+            commands::assist::assist_propose_splits,
+            commands::assist::assist_summarize_work,
+            commands::assist::assist_recap_previous,
+            commands::assist::assist_load_note,
+            commands::assist::assist_delete_note,
+            commands::database::db_try_naming_engine,
+            commands::database::db_name_collection_suggestion,
             commands::database::db_remove_work_collection_members,
             commands::database::db_reorder_work_collection_members,
             commands::database::db_list_collections_for_work,
@@ -236,7 +261,6 @@ pub fn run() -> tauri::Result<()> {
             commands::database::open_local_asset,
             // バージョン管理・更新監視 (commands::database)
             commands::database::db_get_versions,
-            commands::database::db_get_version,
             commands::database::db_delete_version,
             commands::database::db_set_watch_updates,
             commands::database::db_set_watch_updates_for_search,

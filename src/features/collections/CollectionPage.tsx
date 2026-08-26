@@ -3,43 +3,46 @@ import {
   ActionIcon,
   Alert,
   Badge,
-  Box,
   Button,
-  Card,
-  Checkbox,
-  Divider,
   Group,
-  Modal,
+  Menu,
+  Paper,
+  SegmentedControl,
   Stack,
   Text,
-  TextInput,
   Tooltip,
 } from "@mantine/core";
-import { useDebouncedValue, useDisclosure } from "@mantine/hooks";
+import { useDisclosure } from "@mantine/hooks";
 import { notifications } from "@mantine/notifications";
 import { modals } from "@mantine/modals";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useAppNavigate, useRouteParams } from "@/app/router";
 import { ErrorState, LoadingState } from "@/components/AsyncState";
-import { PageHeader } from "@/components/PageHeader";
-import { WorkCover } from "@/components/WorkCover";
+import { CollectionCover } from "@/components/CollectionCover";
 import { formatNumber, errorMessage } from "@/lib/format";
 import { Icons, IconSize } from "@/lib/icons";
-import { ProviderMark } from "@/lib/providers";
+import { parseViewMode, useViewMode } from "@/lib/viewMode";
+import { CollectionSplitAssist } from "@/features/assist/CollectionSplitAssist";
 import {
   addWorkCollectionMembers,
+  createCollectionFromDownloads,
   deleteWorkCollection,
   getWorkCollection,
   removeWorkCollectionMembers,
   reorderWorkCollectionMembers,
+  sortWorkCollectionMembers,
   upsertWorkCollection,
 } from "@/services/collectionApi";
-import { isTauriRuntime, searchDownloadsV2 } from "@/services/dbApi";
+import { isTauriRuntime } from "@/services/dbApi";
+import { getDemoCollection } from "@/mocks/demoData";
 import { openSingleDialog } from "@/services/dialogApi";
 import { exportCollectionEpub } from "@/services/epubApi";
 import type { WorkCollection, WorkCollectionMember, WorkKey } from "@/types/collections";
 import type { DownloadEntry } from "@/types/library";
-import { CollectionFormModal } from "./CollectionFormModal";
+import { CollectionAddWorksModal } from "./CollectionAddWorksModal";
+import { CollectionCoverModal } from "./CollectionCoverModal";
+import { CollectionRenameModal } from "./CollectionRenameModal";
+import { CollectionMemberList } from "./CollectionMemberList";
 
 function workKey(work: { source: string; sourceId: string }): WorkKey {
   return { source: work.source, sourceId: work.sourceId };
@@ -56,8 +59,8 @@ export default function CollectionPage() {
   const [formOpened, form] = useDisclosure(false);
   const collectionQuery = useQuery({
     queryKey: ["work-collection", collectionId],
-    queryFn: () => getWorkCollection(collectionId!),
-    enabled: runtime && Boolean(collectionId),
+    queryFn: () => runtime ? getWorkCollection(collectionId!) : Promise.resolve(getDemoCollection(collectionId!)),
+    enabled: Boolean(collectionId),
   });
   const invalidate = () => {
     queryClient.invalidateQueries({ queryKey: ["work-collections"] });
@@ -76,87 +79,99 @@ export default function CollectionPage() {
   }, [collectionId, navigate]);
 
   if (!collectionId) return null;
-  if (!runtime) return <div className="page"><Alert>コレクションはデスクトップ版のローカルライブラリで利用できます。</Alert></div>;
   if (collectionQuery.isLoading) return <div className="page"><LoadingState label="コレクションを開いています" /></div>;
   if (collectionQuery.error || !collectionQuery.data) return <div className="page"><ErrorState error={collectionQuery.error ?? "コレクションが見つかりません"} retry={() => collectionQuery.refetch()} /></div>;
   return (
     <>
       <CollectionDetail
         collection={collectionQuery.data}
+        readOnly={!runtime}
         onEdit={form.open}
-        onChanged={(value) => { queryClient.setQueryData(["work-collection", collectionId], value); invalidate(); }}
+        onChanged={(value) => {
+          queryClient.setQueryData(["work-collection", collectionId], value);
+          // 返却値が詳細の確定データなので、同じ詳細を直後に再取得しない。
+          // 一覧と所属だけを同期する。
+          queryClient.invalidateQueries({ queryKey: ["work-collections"] });
+          queryClient.invalidateQueries({ queryKey: ["collections-for-work"] });
+          queryClient.invalidateQueries({ queryKey: ["collections-for-person"] });
+        }}
       />
-      <CollectionFormModal opened={formOpened} collection={collectionQuery.data} onClose={form.close} onSave={(input) => saveMutation.mutate(input)} />
+      <CollectionRenameModal
+        opened={formOpened}
+        collection={collectionQuery.data}
+        busy={saveMutation.isPending}
+        onClose={form.close}
+        onSave={(input) => saveMutation.mutate(input)}
+      />
     </>
   );
 }
 
+type MemberAction =
+  | { type: "remove"; keys: WorkKey[] }
+  | { type: "reorder"; keys: WorkKey[] }
+  | { type: "add"; works: DownloadEntry[] }
+  | { type: "sort"; mode: "published" | "episode" };
 
-/** One work inside a collection: what it is, where it sits, and the three
-  * things you can do with it from here. Ordering controls only appear on an
-  * ordered collection, because moving a work up in a themed set means nothing. */
-function MemberRow({ member, ordered, first, last, busy, onMove, onRead, onRemove }: {
-  member: WorkCollectionMember;
-  ordered: boolean;
-  first: boolean;
-  last: boolean;
-  busy: boolean;
-  onMove: (delta: number) => void;
-  onRead: () => void;
-  onRemove: () => void;
-}) {
-  return (
-    <Card withBorder padding="sm">
-      <Group wrap="nowrap" align="center">
-        <WorkCover variant="compact" work={member} />
-        <Box flex={1} miw={0}>
-          <Group gap="xs">
-            <Text fw={600} className="line-clamp-1">{member.title}</Text>
-            {member.missing && <Badge color="orange" size="xs">未保存</Badge>}
-            {member.addedBy === "suggestion" && <Badge color="violet" size="xs" variant="light">自動提案</Badge>}
-          </Group>
-          <Group gap="xs">
-            <ProviderMark provider={member.source} />
-            <Text size="xs" c="dimmed">{member.authorName} · {formatNumber(member.textLength)}字</Text>
-          </Group>
-        </Box>
-        {ordered && (
-          <Group gap={2} wrap="nowrap">
-            <Tooltip label="一つ前へ"><ActionIcon variant="subtle" disabled={first || busy} onClick={() => onMove(-1)}><Icons.up size={IconSize.menu} /></ActionIcon></Tooltip>
-            <Tooltip label="一つ後へ"><ActionIcon variant="subtle" disabled={last || busy} onClick={() => onMove(1)}><Icons.down size={IconSize.menu} /></ActionIcon></Tooltip>
-          </Group>
-        )}
-        {member.downloadId && <Button variant="light" size="xs" onClick={onRead}>読む</Button>}
-        <Tooltip label="コレクションから外す">
-          <ActionIcon color="red" variant="subtle" disabled={busy} onClick={onRemove}><Icons.delete size={IconSize.menu} /></ActionIcon>
-        </Tooltip>
-      </Group>
-    </Card>
-  );
-}
-
-function CollectionDetail({ collection, onEdit, onChanged }: { collection: WorkCollection; onEdit: () => void; onChanged: (collection: WorkCollection) => void }) {
+function CollectionDetail({ collection, readOnly, onEdit, onChanged }: { collection: WorkCollection; readOnly: boolean; onEdit: () => void; onChanged: (collection: WorkCollection) => void }) {
   const navigate = useAppNavigate();
   const queryClient = useQueryClient();
   const [addOpened, addModal] = useDisclosure(false);
-  const [query, setQuery] = useState("");
-  const [debouncedQuery] = useDebouncedValue(query, 250);
-  const [selectedIds, setSelectedIds] = useState(new Set<number>());
-  const searchQuery = useQuery({
-    queryKey: ["collection-add-search", debouncedQuery],
-    queryFn: () => searchDownloadsV2({ query: debouncedQuery || null, sortBy: debouncedQuery ? "relevance" : "downloaded_at", sortOrder: "desc", limit: 40, projection: "bulk" }),
-    enabled: addOpened,
-  });
+  const [coverOpened, coverModal] = useDisclosure(false);
+  const [splitOpened, splitModal] = useDisclosure(false);
+  const [view, setView] = useViewMode();
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selected, setSelected] = useState<number[]>([]);
+  const selectedSet = useMemo(() => new Set(selected), [selected]);
+  const ordered = collection.collectionKind === "ordered";
+
   const mutation = useMutation({
-    mutationFn: async (action: { type: "remove"; key: WorkKey } | { type: "reorder"; keys: WorkKey[] } | { type: "add"; works: DownloadEntry[] }) => {
-      if (action.type === "remove") return removeWorkCollectionMembers(collection.id, [action.key]);
+    mutationFn: async (action: MemberAction) => {
+      if (action.type === "remove") return removeWorkCollectionMembers(collection.id, action.keys);
       if (action.type === "reorder") return reorderWorkCollectionMembers(collection.id, action.keys);
+      if (action.type === "sort") return sortWorkCollectionMembers(collection.id, action.mode);
       return addWorkCollectionMembers(collection.id, action.works.map((work) => ({ ...workKey(work), addedBy: "manual" })));
     },
-    onSuccess: (value) => { onChanged(value); setSelectedIds(new Set()); addModal.close(); notifications.show({ color: "green", message: "コレクションを更新しました" }); },
+    onSuccess: (value, action) => {
+      onChanged(value);
+      setSelected([]);
+      if (action.type === "add") addModal.close();
+      if (action.type === "remove") setSelectionMode(false);
+      notifications.show({ color: "green", message: "コレクションを更新しました" });
+    },
     onError: (error) => notifications.show({ color: "red", title: "コレクションを更新できません", message: errorMessage(error) }),
   });
-  const missingCount = collection.memberCount - collection.availableCount;
+  // 分けた先は**新しい束**として作る。元の束は触らない — 分けるかどうかは
+  // 案を見てから決めることで、押した瞬間に元が壊れてはいけない。
+  const splitMutation = useMutation({
+    mutationFn: ({ name, ids }: { name: string; ids: number[] }) =>
+      createCollectionFromDownloads(name, collection.collectionKind, ids),
+    onSuccess: (created) => {
+      queryClient.invalidateQueries({ queryKey: ["work-collections"] });
+      notifications.show({
+        color: "green",
+        message: `「${created.name}」を作りました。元のコレクションはそのままです`,
+        onClick: () => navigate(`/collections/${created.id}`),
+      });
+    },
+    onError: (error) => notifications.show({ color: "red", title: "分けられません", message: errorMessage(error) }),
+  });
+
+  const coverMutation = useMutation({
+    mutationFn: upsertWorkCollection,
+    onSuccess: (value) => {
+      onChanged(value);
+      coverModal.close();
+      notifications.show({ color: "green", message: "表紙を変えました" });
+    },
+    onError: (error) => notifications.show({ color: "red", title: "表紙を変えられません", message: errorMessage(error) }),
+  });
+
+  // 本文が取れていない作品も、一冊にはできない側に数える。行はあるが中身が
+  // 無いので、そのまま入れると空の章になる。
+  const emptyCount = collection.members.filter((member) => member.work && member.work.textLength === 0).length;
+  const missingCount = collection.memberCount - collection.availableCount + emptyCount;
+  const exportableCount = collection.availableCount - emptyCount;
   const epubMutation = useMutation({
     mutationFn: async (skipMissing: boolean) => {
       const outputDir = await openSingleDialog({ directory: true, title: "一冊にまとめたEPUBの出力先" });
@@ -172,54 +187,196 @@ function CollectionDetail({ collection, onEdit, onChanged }: { collection: WorkC
     if (missingCount <= 0) { epubMutation.mutate(false); return; }
     modals.openConfirmModal({
       title: "未保存の作品があります",
-      children: <Text size="sm">「{collection.name}」の{formatNumber(missingCount)}作品はライブラリに保存されていないため、本文を収録できません。この{formatNumber(missingCount)}作品を除いて、残り{formatNumber(collection.availableCount)}作品で一冊にしますか？</Text>,
+      children: <Text size="sm">「{collection.name}」の{formatNumber(missingCount)}作品は、ライブラリに無いか本文が取れていないため収録できません。この{formatNumber(missingCount)}作品を除いて、残り{formatNumber(exportableCount)}作品で一冊にしますか？</Text>,
       labels: { confirm: "除外して書き出す", cancel: "中止する" },
       onConfirm: () => epubMutation.mutate(true),
     });
   };
+
+  const reorderTo = (members: WorkCollectionMember[]) => {
+    const previous = collection;
+    const optimistic = {
+      ...collection,
+      members: members.map((member, position) => ({ ...member, position })),
+    };
+    // 掴んだ瞬間に画面を動かし、保存に失敗したときだけ元へ戻す。
+    onChanged(optimistic);
+    mutation.mutate(
+      { type: "reorder", keys: members.map(workKey) },
+      { onError: () => onChanged(previous) },
+    );
+  };
+
   const move = (index: number, delta: number) => {
     const next = [...collection.members];
     const target = index + delta;
     if (target < 0 || target >= next.length) return;
     [next[index], next[target]] = [next[target], next[index]];
-    mutation.mutate({ type: "reorder", keys: next.map(workKey) });
+    reorderTo(next);
   };
+  /** 掴んで運ぶ並べ替えは、抜いて差し込む。入れ替えではない。 */
+  const dropAt = (from: number, to: number) => {
+    const next = [...collection.members];
+    const [moved] = next.splice(from, 1);
+    next.splice(to, 0, moved);
+    reorderTo(next);
+  };
+
+  /**
+   * 一括の整列。
+   *
+   * 束が大きくなるほど、1つずつ動かすのは現実的でなくなる。前後編が20組ある
+   * 束を手で並べ直す人はいない。
+   *
+   * 判断は保存側でする。話数の語彙（周目・丸数字・part・先頭の `03：`）を
+   * 画面側にも置くと、片方だけ直したときに黙ってずれる。
+   */
+  const sortBy = (mode: "published" | "episode") => mutation.mutate({ type: "sort", mode });
+
   const deleteCollection = () => modals.openConfirmModal({
     title: "コレクションを削除しますか？",
     children: <Text size="sm">作品そのものは削除されません。「{collection.name}」というまとまりと並びだけを削除します。</Text>,
     labels: { confirm: "削除する", cancel: "キャンセル" }, confirmProps: { color: "red" },
     onConfirm: async () => { try { await deleteWorkCollection(collection.id); queryClient.invalidateQueries({ queryKey: ["work-collections"] }); navigate("/library?tab=collections"); } catch (error) { notifications.show({ color: "red", title: "削除できません", message: errorMessage(error) }); } },
   });
-  const results = searchQuery.data?.items ?? [];
-  const existing = useMemo(() => new Set(collection.members.filter((member) => member.downloadId).map((member) => member.downloadId!)), [collection.members]);
-  const selectedWorks = results.filter((work) => selectedIds.has(work.id));
+
+  const removeSelected = () => {
+    const keys = collection.members
+      .filter((member) => member.downloadId !== null && selectedSet.has(member.downloadId))
+      .map(workKey);
+    if (keys.length === 0) return;
+    mutation.mutate({ type: "remove", keys });
+  };
+
   return (
     <div className="page">
-      <Stack gap="xl">
-        <PageHeader eyebrow="Collection" title={collection.name} description={collection.description ?? `${collection.memberCount}作品をまとめた読書コレクション`} actions={<><Button variant="default" leftSection={<Icons.epub size={IconSize.action} />} loading={epubMutation.isPending} disabled={collection.availableCount === 0} onClick={startEpubExport}>一冊のEPUB</Button><Button variant="default" onClick={onEdit}>編集</Button><Button leftSection={<Icons.add size={IconSize.action} />} onClick={addModal.open}>作品を追加</Button></>} />
-        <Group gap="xs"><Badge variant="light">{collection.collectionKind === "ordered" ? "順序付き" : "順序なし"}</Badge><Text size="sm" c="dimmed">{formatNumber(collection.memberCount)}作品 · {formatNumber(collection.totalTextLength)}字</Text>{missingCount > 0 && <Badge color="orange">未保存 {formatNumber(missingCount)}作品</Badge>}</Group>
-        {collection.members.length === 0 ? <Alert color="gray">作品を追加すると、ここから順番に読み進めたり一冊のEPUBにできます。</Alert> : <Stack gap="sm">{collection.members.map((member, index) => (
-          <MemberRow
-            key={`${member.source}:${member.sourceId}`}
-            member={member}
-            ordered={collection.collectionKind === "ordered"}
-            first={index === 0}
-            last={index === collection.members.length - 1}
-            busy={mutation.isPending}
-            onMove={(delta) => move(index, delta)}
-            onRead={() => navigate(`/reader/${member.downloadId}?collection=${encodeURIComponent(collection.id)}`)}
-            onRemove={() => mutation.mutate({ type: "remove", key: workKey(member) })}
-          />
-        ))}</Stack>}
-        <Divider /><Group justify="flex-end"><Button color="red" variant="subtle" leftSection={<Icons.delete size={IconSize.menu} />} onClick={deleteCollection}>コレクションを削除</Button></Group>
+      <Stack gap="lg">
+        {readOnly && (
+          <Alert color="gray">
+            プレビューは閲覧専用です。コレクションの変更と書き出しはデスクトップアプリで利用できます。
+          </Alert>
+        )}
+        <Paper withBorder p="md" className="collection-hero">
+          <Group wrap="nowrap" align="center" gap="md">
+            <div className="collection-hero__cover">
+              <CollectionCover collection={collection} variant="detail" />
+              <Button variant="subtle" size="compact-xs" color="gray" disabled={readOnly} onClick={coverModal.open}>表紙を変える</Button>
+            </div>
+            <Stack gap={6} flex={1} miw={0}>
+              <Text className="page-header__eyebrow">コレクション</Text>
+              <Text component="h1" fw={800} fz={24} lh={1.3}>{collection.name}</Text>
+              {collection.description && <Text size="sm" c="dimmed">{collection.description}</Text>}
+              <Group gap="xs" wrap="wrap">
+                <Badge variant="light" color={ordered ? "piep" : "gray"}>{ordered ? "順序付き" : "順序なし"}</Badge>
+                <Text size="sm" c="dimmed">{formatNumber(collection.memberCount)}作品 · {formatNumber(collection.totalTextLength)}字</Text>
+                {missingCount > 0 && <Badge color="orange" variant="light">収録できない {formatNumber(missingCount)}作品</Badge>}
+              </Group>
+              <Group gap="xs" mt={4} wrap="wrap">
+                <Button leftSection={<Icons.add size={IconSize.action} />} disabled={readOnly} onClick={addModal.open}>作品を追加</Button>
+                <Button variant="default" leftSection={<Icons.epub size={IconSize.action} />} loading={epubMutation.isPending} disabled={readOnly || exportableCount <= 0} onClick={startEpubExport}>一冊のEPUB</Button>
+                <Button variant="default" leftSection={<Icons.optimize size={IconSize.action} />} disabled={readOnly} onClick={onEdit}>名前を付け直す</Button>
+                <Menu position="bottom-end">
+                  <Menu.Target>
+                    <ActionIcon variant="default" size="lg" aria-label="このコレクションのその他の操作"><Icons.more size={IconSize.nav} /></ActionIcon>
+                  </Menu.Target>
+                  <Menu.Dropdown>
+                    <Menu.Label>並べ替え</Menu.Label>
+                    <Menu.Item leftSection={<Icons.sort size={IconSize.menu} />} disabled={readOnly || !ordered || collection.members.length < 2} onClick={() => sortBy("published")}>投稿日順に整列</Menu.Item>
+                    <Menu.Item leftSection={<Icons.sort size={IconSize.menu} />} disabled={readOnly || !ordered || collection.members.length < 2} onClick={() => sortBy("episode")}>題名の連番順に整列</Menu.Item>
+                    <Menu.Divider />
+                    <Menu.Item leftSection={<Icons.select size={IconSize.menu} />} disabled={readOnly || collection.availableCount === 0} onClick={() => { setSelectionMode(true); setSelected([]); }}>複数選択して外す</Menu.Item>
+                    {/* そう何度も使う機能ではない。常に見えている帯を一つ取る価値は無い。 */}
+                    <Menu.Item leftSection={<Icons.optimize size={IconSize.menu} />} disabled={readOnly || collection.availableCount < 4} onClick={splitModal.open}>分けたほうがよいか見てもらう</Menu.Item>
+                    <Menu.Divider />
+                    {/* 削除は最下部に大きく置いていた。押す機会より、押して
+                        しまう機会のほうが多い場所だった。 */}
+                    <Menu.Item color="red" leftSection={<Icons.delete size={IconSize.menu} />} disabled={readOnly} onClick={deleteCollection}>コレクションを削除</Menu.Item>
+                  </Menu.Dropdown>
+                </Menu>
+              </Group>
+            </Stack>
+          </Group>
+        </Paper>
+
+        {collection.members.length === 0 ? (
+          <Paper withBorder p="xl">
+            <Stack align="center" gap="sm">
+              <Icons.collection size={IconSize.hero} />
+              <Text fw={700}>まだ作品が入っていません</Text>
+              <Text size="sm" c="dimmed" ta="center">作品を追加すると、ここから順番に読み進めたり一冊のEPUBにできます。</Text>
+              <Button disabled={readOnly} onClick={addModal.open}>作品を追加</Button>
+            </Stack>
+          </Paper>
+        ) : (
+          <>
+            <Group justify="space-between" wrap="nowrap" className="collection-member-toolbar">
+              <Group gap="xs">
+                {/* 並べ替えられないときに並べ替え方を書かない。閲覧専用では
+                    取っ手も矢印も出てこないので、この一文だけが存在しない
+                    操作を案内していた。 */}
+                {selectionMode ? (
+                  <>
+                    <Text size="sm" fw={650}>{formatNumber(selected.length)}件を選択中</Text>
+                    <Button size="compact-sm" variant="subtle" color="red" disabled={selected.length === 0 || mutation.isPending} onClick={removeSelected}>選んだ作品を外す</Button>
+                    <Button size="compact-sm" variant="subtle" color="gray" onClick={() => { setSelectionMode(false); setSelected([]); }}>やめる</Button>
+                  </>
+                ) : (
+                  <Text size="sm" c="dimmed">{!ordered ? "順序なしのコレクションです。" : readOnly ? "順序付きのコレクションです。" : "掴んで運ぶか、矢印で入れ替えられます。"}</Text>
+                )}
+              </Group>
+              <SegmentedControl
+                className="view-mode-switch"
+                aria-label="コレクションの表示形式"
+                value={view}
+                onChange={(value) => setView(parseViewMode(value))}
+                data={[
+                  { value: "gallery", label: <Tooltip label="表紙で見る"><Icons.viewGrid size={IconSize.menu} aria-label="表紙表示" /></Tooltip> },
+                  { value: "compact", label: <Tooltip label="一覧で見る"><Icons.viewList size={IconSize.menu} aria-label="一覧表示" /></Tooltip> },
+                ]}
+              />
+            </Group>
+
+            <CollectionMemberList
+              members={collection.members}
+              ordered={ordered}
+              view={view}
+              busy={readOnly || mutation.isPending}
+              selectionMode={selectionMode}
+              selected={selectedSet}
+              onSelect={(id, next) => setSelected((current) => (next ? [...new Set([...current, id])] : current.filter((value) => value !== id)))}
+              onMove={move}
+              onDropAt={dropAt}
+              onRemove={(member) => mutation.mutate({ type: "remove", keys: [workKey(member)] })}
+            />
+          </>
+        )}
       </Stack>
-      <Modal opened={addOpened} onClose={addModal.close} title="コレクションに作品を追加" size="lg">
-        <Stack>
-          <TextInput value={query} onChange={(event) => setQuery(event.currentTarget.value)} leftSection={<Icons.search size={IconSize.action} />} placeholder="タイトル・作者・本文から検索" autoFocus />
-          {searchQuery.isLoading ? <LoadingState label="作品を検索しています" /> : searchQuery.error ? <ErrorState error={searchQuery.error} retry={() => searchQuery.refetch()} /> : <Stack gap={6} mah={420} style={{ overflowY: "auto" }}>{results.map((work) => <Checkbox key={work.id} disabled={existing.has(work.id)} checked={existing.has(work.id) || selectedIds.has(work.id)} onChange={(event) => { const isChecked = event.currentTarget.checked; setSelectedIds((current) => { const next = new Set(current); if (isChecked) next.add(work.id); else next.delete(work.id); return next; }); }} label={<Box><Text size="sm" fw={600}>{work.title}</Text><Text size="xs" c="dimmed">{work.authorName} · {work.source}</Text></Box>} />)}</Stack>}
-          <Group justify="flex-end"><Button variant="default" onClick={addModal.close}>キャンセル</Button><Button disabled={selectedWorks.length === 0 || mutation.isPending} onClick={() => mutation.mutate({ type: "add", works: selectedWorks })}>{selectedWorks.length}作品を追加</Button></Group>
-        </Stack>
-      </Modal>
+
+      {!readOnly && <CollectionAddWorksModal
+        opened={addOpened}
+        onClose={addModal.close}
+        collection={collection}
+        busy={mutation.isPending}
+        onAdd={(works) => mutation.mutate({ type: "add", works })}
+      />}
+      {!readOnly && <CollectionCoverModal
+        opened={coverOpened}
+        onClose={coverModal.close}
+        collection={collection}
+        busy={coverMutation.isPending}
+        onSave={(input) => coverMutation.mutate(input)}
+      />}
+      {!readOnly && <CollectionSplitAssist
+        opened={splitOpened}
+        onClose={splitModal.close}
+        collection={collection}
+        onSplit={(name, positions) => {
+          const ids = positions
+            .map((position) => collection.members[position]?.downloadId)
+            .filter((id): id is number => typeof id === "number");
+          if (ids.length > 0) splitMutation.mutate({ name, ids });
+        }}
+      />}
     </div>
   );
 }

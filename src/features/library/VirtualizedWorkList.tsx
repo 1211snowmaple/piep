@@ -68,7 +68,19 @@ export function VirtualizedWorkList({
   const virtualizer = useVirtualizer({
     count: rowCount,
     getScrollElement: () => scrollElement,
-    estimateSize: () => view === "compact" ? 92 : 238,
+    // The viewport is the whole page, not a box of our own, and attaching to it
+    // scrolls it to whatever offset we claim to be at. Left at its default that
+    // claim is zero, so opening this list - a tab, a filter, the back button -
+    // threw the page to the top under the reader. Where they already are is the
+    // only honest answer. Staying disabled until the viewport exists is what
+    // makes that answer available: the offset is settled on first use and kept,
+    // and the first use would otherwise come a render too early, when there is
+    // nothing to read a position from and zero is all it could conclude.
+    enabled: Boolean(scrollElement),
+    initialOffset: () => scrollElement?.scrollTop ?? 0,
+    // 実測値。行の下限を変えたらここも合わせる — 見積もりが小さいと、
+    // 実寸を測るまで全体の高さを短く言い、遷移の途中でつまみが跳ねる。
+    estimateSize: () => view === "compact" ? 173 : 238,
     getItemKey: (index) => `${columns}:${items[index * columns]?.id ?? index}`,
     gap: view === "compact" ? LIST_GAP : GALLERY_GAP,
     overscan: view === "compact" ? 8 : 3,

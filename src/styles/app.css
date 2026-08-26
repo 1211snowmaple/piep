@@ -22,6 +22,24 @@ body,
 
 body {
   background: light-dark(#f5f7fa, #0d1117);
+  /* 日本語の折り返しを、文節の切れ目に寄せる。
+     既定の `normal` は CJK をどの文字の間でも折るので、
+     「入れられま／す。」「キモデブ／が溺愛されて」のように
+     読みの単位を割って改行していた。表紙の見出しだけは前から
+     こうしていたが、棚のカードにも説明文にも同じことが要る。 */
+  word-break: auto-phrase;
+  line-break: strict;
+}
+
+/* 折る場所の無い長い文字列 — 保存先のパス、URL、識別子 — は例外。
+   文節では折れないので、どこでも折れるようにしないと枠を突き破る。 */
+code,
+kbd,
+samp,
+pre,
+.break-anywhere {
+  word-break: normal;
+  overflow-wrap: anywhere;
 }
 
 .mantine-Notifications-root {
@@ -298,9 +316,10 @@ select {
 }
 .stat-card:hover { border-color: color-mix(in srgb, var(--stat-accent) 36%, light-dark(#d8dfe7, #303944)); box-shadow: 0 8px 24px rgb(28 53 82 / 8%); transform: translateY(-1px); }
 .stat-card__value { font-variant-numeric: tabular-nums; }
-.stat-card__arrow { flex: 0 0 auto; color: var(--stat-accent); opacity: 0; transform: translateX(-4px); transition: opacity 140ms ease, transform 140ms ease; }
+.stat-card__hint-row { position: relative; }
+.stat-card__arrow { position: absolute; right: 0; top: 50%; color: var(--stat-accent); opacity: 0; transform: translate(-4px, -50%); transition: opacity 140ms ease, transform 140ms ease; }
 .stat-card:hover .stat-card__arrow,
-.stat-card:focus-visible .stat-card__arrow { opacity: 1; transform: translateX(0); }
+.stat-card:focus-visible .stat-card__arrow { opacity: 1; transform: translate(0, -50%); }
 
 .stat-card::after {
   position: absolute;
@@ -821,52 +840,85 @@ select {
 }
 .work-card__facts > .mantine-Text-root { display: inline-flex; min-width: 0; max-width: 100%; align-items: center; gap: 4px; white-space: nowrap; }
 .library-toolbar { background: light-dark(rgb(255 255 255 / 90%), rgb(17 22 30 / 92%)); }
-.library-toolbar .mantine-SegmentedControl-root { display: inline-flex; align-items: center; height: 36px; }
-.library-toolbar .mantine-SegmentedControl-label { width: 42px; height: 30px; padding: 0; line-height: 1; }
-.library-toolbar .mantine-SegmentedControl-label svg { display: block; margin: auto; }
+/* 絵だけの切り替え。文字が無いので、Mantine が文字の行で作っていた高さが
+   絵の高さまで縮む。高さをここで決めて、絵はその中で中央に置く。
+   `height: 100%` にしてはいけない — 親の高さはこの中身で決まるので、
+   参照が循環して auto に戻り、押せる範囲も滑る印も 15px の細さになる。 */
+.view-mode-switch.mantine-SegmentedControl-root { display: inline-flex; align-items: center; height: 36px; }
+.view-mode-switch .mantine-SegmentedControl-label {
+  display: flex;
+  width: 42px;
+  height: 30px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  line-height: 1;
+}
+.view-mode-switch .mantine-SegmentedControl-innerLabel { display: flex; align-items: center; }
+.view-mode-switch .mantine-SegmentedControl-label svg { display: block; }
+/* 焦点の輪をマスの内側へ引く。Mantine は輪をマスの outline で描くが、
+   外枠は overflow: hidden の丸角なので、既定の外向きの輪は端で切られて
+   右だけ欠けて見える。 */
+.view-mode-switch .mantine-SegmentedControl-label { outline-offset: -2px; }
 
-/* List rows are a table: the tracks are declared once so every row aligns, and
-   the narrower the row gets the fewer columns it carries. */
+/* 一行は上から、シリーズ、題名、作者とあらすじ、タグ、そして事実と操作。
+   右に別の列を立てず、表紙の横を一本の流れにする。右列にタグを置いていた
+   頃は、窓幅で列が消えるたびに行の中身が入れ替わっていた。 */
 .work-row {
   min-width: 0;
   cursor: pointer;
   container-type: inline-size;
 }
 
-/* A fixed row height keeps the list even whether or not a work has a series,
-   and the centred alignment does the rest. */
+/* 高さを揃えると、シリーズの有無で一覧が波打たない。シリーズ行を
+   含む方の高さを下限にし、無い行は中央に寄せて埋める。 */
 .work-row__grid {
   display: grid;
-  min-height: 92px;
+  min-height: 173px;
   align-items: center;
-  gap: 14px;
-  grid-template-columns: 52px minmax(220px, 1.8fr) minmax(140px, 1fr) auto auto;
-  padding: 10px 12px;
+  gap: 6px 16px;
+  grid-template-columns: 92px minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr) auto;
+  padding: 10px 14px;
 }
 .work-row__provider { min-height: 20px; padding-block: 0; }
 .work-row__provider .provider-mark__icon { width: 16px; height: 16px; }
 .work-row__provider .mantine-Text-root { font-size: 10px; }
 
-.work-row__cover { position: relative; cursor: pointer; }
-.work-row__cover .work-cover--compact { width: 52px; height: 70px; flex: none; }
+.work-row__cover { position: relative; grid-row: 1 / 3; cursor: pointer; }
+.work-row__cover .work-cover--compact { width: 92px; height: 123px; flex: none; border-radius: 8px; }
 .work-row__select { position: absolute; top: -6px; left: -6px; width: 28px; height: 28px; border-radius: 50%; }
 .work-row__select .work-selection-toggle__indicator { width: 18px; height: 18px; flex-basis: 18px; }
-.work-row__main { display: flex; min-width: 0; flex-direction: column; justify-content: center; }
+.work-row__main { display: flex; min-width: 0; grid-column: 2; grid-row: 1; flex-direction: column; justify-content: center; }
 .work-row__series { display: block; min-width: 0; }
 .work-row__identity { margin-top: 3px; }
 .work-row__open { display: flex; width: 100%; min-width: 0; min-height: 26px; align-items: center; margin-top: 1px; color: inherit; text-align: left; }
-.work-row__tags { min-width: 0; }
-.work-row__facts { flex: 0 0 auto; white-space: nowrap; }
-.work-row__facts > .mantine-Text-root { display: inline-flex; align-items: center; gap: 4px; }
-.work-row__actions { display: flex; justify-content: flex-end; }
-
-@container (max-width: 900px) {
-  .work-row__grid { grid-template-columns: 52px minmax(0, 1fr) auto auto; }
-  .work-row__tags { display: none; }
+/* 幅は中身の分だけ。余りを全部受けると、短い一文でも箱が行末まで
+   伸び、吹き出しが文字の上ではなく箱の中央——何も無い右方に出る。
+   縮むときは作者名より先にここが譲る。 */
+.work-row__excerpt {
+  min-width: 0;
+  flex: 0 100 auto;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
+/* 題名も同じ理由で、幅を行全体に広げない。 */
+.work-row__open > * { width: fit-content; max-width: 100%; }
+/* タグは題名と同じ左端から始める。 */
+.work-row__tags { min-width: 0; margin-top: 7px; }
+/* 足元はカードと同じ組み。事実が左で伸び、操作は右に固定。 */
+.work-row__footer { display: flex; min-width: 0; grid-column: 2; grid-row: 2; align-items: center; gap: 8px; }
+.work-row__facts { min-width: 0; flex: 1 1 auto; white-space: nowrap; }
+.work-row__facts > .mantine-Text-root { display: inline-flex; min-width: 0; align-items: center; gap: 4px; }
+.work-row__actions { display: flex; flex: 0 0 auto; justify-content: flex-end; }
+
 @container (max-width: 720px) {
-  .work-row__grid { grid-template-columns: 52px minmax(0, 1fr) auto; gap: 10px; }
-  .work-row__facts { display: none; }
+  .work-row__grid { grid-template-columns: 78px minmax(0, 1fr); gap: 6px 10px; }
+  .work-row__cover .work-cover--compact { width: 78px; height: 104px; }
+  /* あらすじを落とすなら、その前の仕切りも一緒に落とす。 */
+  .work-row__excerpt,
+  .work-row__excerpt-divider { display: none; }
 }
 
 .dashboard-hero {
@@ -2085,3 +2137,289 @@ select {
 .note__icon { flex: 0 0 auto; margin-top: 2px; color: var(--mantine-color-dimmed); }
 .note__title { margin-bottom: 2px; }
 .note__body { line-height: 1.7; }
+
+/* ---- コレクションの表紙 --------------------------------------------------
+   束の表紙は、メンバーの表紙を並べて作る。焼き込まずに毎回組むので、
+   メンバーが変われば表紙も勝手に追従する。マスの中身は棚とまったく同じ
+   `.work-cover` なので、表紙の無い作品には作品と同じ紋が入り、穴が空かない。 */
+
+.collection-cover {
+  position: relative;
+  display: grid;
+  overflow: hidden;
+  flex: none;
+  border: 1px solid light-dark(#dde1e5, #303741);
+  border-radius: 8px;
+  background: light-dark(#eef1f5, #151b22);
+}
+.collection-cover__image {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  height: 100%;
+  box-sizing: border-box;
+  padding: 2px;
+  object-fit: contain;
+}
+
+.collection-cover--card { width: 96px; height: 128px; }
+.collection-cover--detail { width: 112px; height: 150px; border-radius: 10px; }
+
+.collection-cover__slot { position: relative; display: block; min-width: 0; min-height: 0; overflow: hidden; }
+/* 同じ絵をぼかして敷く。表紙の縦横比は取得元によってばらばらなので、
+   切り抜けば絵が欠け、そのまま置けば枠が欠けて見える。敷けばどちらも起きない。 */
+.collection-cover__backdrop {
+  position: absolute;
+  inset: -12%;
+  width: 124%;
+  height: 124%;
+  object-fit: cover;
+  filter: blur(12px) saturate(0.45);
+  opacity: 0.18;
+}
+.collection-cover__slot .work-cover--compact { position: relative; background: transparent; }
+.collection-cover__slot .work-cover__image { box-sizing: border-box; padding: 2px; background: transparent; }
+/* マスの中では、外枠の丸みと境界だけを消す。中身は棚のカードと同じもの。 */
+.collection-cover__tile.work-cover--compact {
+  width: 100%;
+  height: 100%;
+  flex: none;
+  border: 0;
+  border-radius: 0;
+}
+
+/* 4枚そろったときだけ 2×2。半端な枚数で 2×2 にすると空きマスができる。 */
+.collection-cover--mosaic { grid-template-columns: 1fr; grid-template-rows: 1fr; gap: 1px; }
+.collection-cover--mosaic[data-tiles="2"] { grid-template-columns: 1fr 1fr; }
+.collection-cover--mosaic[data-tiles="3"] { grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; }
+.collection-cover--mosaic[data-tiles="3"] .collection-cover__slot:first-child { grid-row: 1 / 3; }
+.collection-cover--mosaic[data-tiles="4"] { grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; }
+
+/* 奥へ向かって少しずつずらす。冊数が形として見える。 */
+.collection-cover--spine { display: block; }
+.collection-cover--spine .collection-cover__slot {
+  position: absolute;
+  top: calc(var(--slot-index) * 4%);
+  bottom: 0;
+  left: calc(var(--slot-index) * 15%);
+  width: 62%;
+  box-shadow: -3px 0 8px rgb(20 26 33 / 22%);
+}
+.collection-cover--spine .collection-cover__slot:nth-child(1) { z-index: 4; }
+.collection-cover--spine .collection-cover__slot:nth-child(2) { z-index: 3; }
+.collection-cover--spine .collection-cover__slot:nth-child(3) { z-index: 2; }
+.collection-cover--spine .collection-cover__slot:nth-child(4) { z-index: 1; }
+
+.collection-cover--sigil {
+  --work-cover-ink: hsl(var(--work-cover-hue) 42% 32%);
+  place-items: center;
+  background: light-dark(hsl(var(--work-cover-hue) 34% 94%), hsl(var(--work-cover-hue) 22% 16%));
+}
+:root[data-mantine-color-scheme="dark"] .collection-cover--sigil { --work-cover-ink: hsl(var(--work-cover-hue) 45% 76%); }
+.collection-cover__sigil {
+  display: grid;
+  width: 56%;
+  aspect-ratio: 1;
+  grid-template-columns: repeat(5, 1fr);
+}
+.collection-cover__sigil i { display: block; aspect-ratio: 1; }
+.collection-cover__sigil i[data-on] { background: var(--work-cover-ink); }
+
+/* コレクションのカード。作者・シリーズのカードと同じ高さ・同じ間合いにする。 */
+.collection-card { min-height: 148px; }
+.collection-card__facts { min-width: 0; align-items: center; flex-wrap: wrap; row-gap: 4px; }
+.collection-card__facts > .mantine-Text-root {
+  display: inline-flex;
+  min-width: 0;
+  max-width: 100%;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+/* 束を選ぶ行。押せる範囲を行全体にする。丸だけを狙わせない。 */
+.collection-pick {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid light-dark(#e3e7ec, #2b323b);
+  border-radius: 8px;
+  text-align: left;
+}
+.collection-pick:hover { background: light-dark(#f3f5f8, #1c222a); }
+.collection-pick[data-selected] {
+  border-color: var(--mantine-color-piep-6);
+  background: light-dark(#f2f6fd, #172130);
+}
+.collection-pick .mantine-Radio-root { pointer-events: none; }
+.collection-pick__cover { width: 40px; height: 52px; border-radius: 5px; }
+.collection-pick__body { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 1px; }
+
+/* ---- コレクション詳細 -----------------------------------------------------
+   束の中身は棚と同じカードで描く。束にしかない情報 — 何番目か、順を動かす、
+   外す — だけを、カードの外側のレールに置く。カードの中には手を入れない。 */
+
+.collection-hero { overflow: hidden; }
+.collection-hero__cover { display: flex; flex-direction: column; align-items: center; gap: 3px; }
+.collection-member-toolbar { min-height: 34px; }
+.collections-panel__intro { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.suggestion-inbox--quiet { min-height: 30px; margin-top: -4px; }
+
+.collection-members { display: flex; flex-direction: column; gap: 10px; }
+.collection-members--gallery {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+}
+
+/* EPUB キューも作品の一覧である。束と同じく、行は棚と同じカードで描き、
+   キューにしか無い情報 — 何番目か、外す — だけをカードの外側に置く。 */
+.epub-queue-item {
+  display: grid;
+  align-items: center;
+  gap: 8px;
+  grid-template-columns: auto 1fr auto;
+}
+.epub-queue-item__body { min-width: 0; }
+.epub-queue-item__index {
+  width: 1.6em;
+  color: var(--mantine-color-dimmed);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.collection-member {
+  position: relative;
+  display: grid;
+  align-items: center;
+  gap: 8px;
+  grid-template-columns: 1fr auto;
+  border-radius: 10px;
+}
+.collection-members--compact .collection-member[data-ordered],
+.collection-members[data-ordered] .collection-member { grid-template-columns: auto 1fr auto; }
+.collection-member[data-dragging] { opacity: 0.45; }
+.collection-member[data-drop-target]::before {
+  position: absolute;
+  top: -5px;
+  right: 0;
+  left: 0;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--mantine-color-piep-6);
+  content: "";
+}
+.collection-member[data-drop-target][data-drop-after]::before { top: auto; bottom: -5px; }
+.collection-member__body { min-width: 0; }
+.collection-member__rail {
+  display: flex;
+  width: 44px;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  color: var(--mantine-color-dimmed);
+}
+.collection-member__grip { display: flex; cursor: grab; line-height: 0; touch-action: none; }
+.collection-member__grip:active { cursor: grabbing; }
+.collection-member__index { font-size: 12px; font-variant-numeric: tabular-nums; }
+.collection-member__nudge { flex-direction: column; }
+.collection-member__remove { align-self: center; }
+
+.collection-member__missing { opacity: 0.85; border-style: dashed; }
+.collection-member__editions { padding: 2px 0 0 46px; }
+.collection-member__edition-list { display: flex; flex-direction: column; gap: 6px; padding: 6px 0 2px; }
+.collection-member__edition .work-cover--compact { width: 34px; height: 44px; flex: 0 0 34px; }
+
+/* ギャラリーでも番号と並べ替えをカードの横に置く。上に別行を作ると、
+   隣のカードと上端がずれ、どの操作がどのカードのものかも曖昧になる。 */
+.collection-members--gallery .collection-member { grid-template-columns: minmax(0, 1fr) auto; align-items: stretch; }
+.collection-members--gallery[data-ordered] .collection-member { grid-template-columns: 44px minmax(0, 1fr) auto; }
+.collection-members--gallery .collection-member__rail { align-self: center; }
+.collection-members--gallery .collection-member__remove { align-self: center; }
+.collection-members--gallery .collection-member__editions { padding-left: 0; }
+
+@media (max-width: 620px) {
+  .collections-panel__header { align-items: stretch; flex-direction: column; }
+  .collections-panel__intro { white-space: normal; }
+  .collection-hero > .mantine-Group-root { align-items: flex-start; }
+  .collection-cover--detail { width: 88px; height: 118px; }
+  .collection-members--gallery { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* 作品を追加するモーダル。棚と同じカードを、選ぶために並べる。 */
+.collection-add__grid { display: flex; max-height: 46vh; flex-direction: column; gap: 8px; overflow-y: auto; }
+.collection-add__slot { position: relative; }
+.collection-add__slot[data-member] { opacity: 0.55; pointer-events: none; }
+.collection-add__badge { position: absolute; top: 8px; right: 8px; }
+
+/* 表紙にする1作を選ぶ。 */
+.collection-cover-pick { display: flex; flex-wrap: wrap; gap: 8px; padding: 2px; }
+.collection-cover-pick__item { border-radius: 7px; outline: 2px solid transparent; outline-offset: 2px; }
+.collection-cover-pick__item[data-selected] { outline-color: var(--mantine-color-piep-6); }
+
+/* ---- 見つかったまとまり ---------------------------------------------------
+   束の候補は、題名の行だけでは判断できない。知っている束かどうかは表紙で
+   分かるので、まず表紙を並べる。マスを押すとその作品だけ束から外れる。 */
+
+.suggestion-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+}
+.suggestion-card__covers { display: flex; align-items: center; gap: 4px; }
+.suggestion-card__cover {
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  cursor: pointer;
+  outline-offset: 2px;
+}
+.suggestion-card__cover[data-dropped] { opacity: 0.3; filter: grayscale(1); }
+.suggestion-card__cover:focus-visible { outline: 2px solid var(--mantine-color-piep-6); }
+.suggestion-card__cover .work-cover--compact { width: 40px; height: 52px; flex: 0 0 40px; }
+.suggestion-card__cover[data-large] .work-cover--compact { width: 72px; height: 96px; flex: 0 0 72px; }
+
+/* 6枚目から先は、広げたときだけ見せる。カードに全部並べると1枚が
+   小さくなりすぎて、知っている束かどうか分からなくなる。 */
+.suggestion-card__more {
+  width: 40px;
+  height: 52px;
+  padding: 0;
+  border: 1px dashed light-dark(#c9d0d9, #39424e);
+  border-radius: 6px;
+  color: var(--mantine-color-dimmed);
+  font-size: 11px;
+  background: none;
+  cursor: pointer;
+}
+.suggestion-card__more:hover { background: light-dark(#f2f5f9, #1c222a); }
+
+.suggestion-members {
+  display: grid;
+  max-height: 52vh;
+  gap: 12px 10px;
+  grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+  overflow-y: auto;
+}
+.suggestion-members__item { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
+.collection-member__note { padding: 2px 0 0 46px; }
+.collection-members--gallery .collection-member__note { padding-left: 0; }
+
+/* ---- モデルの手伝い -------------------------------------------------------
+   取得元の情報と、モデルが書いたものを、見た目で分ける。混ざると、どこまでが
+   事実でどこからが推測か分からなくなる。 */
+
+.assist-panel {
+  border-color: light-dark(#e0d7ef, #3a3050);
+  background: light-dark(#fbf9ff, #191527);
+}
+.assist-note {
+  padding: 8px 10px;
+  border-left: 3px solid var(--mantine-color-grape-5);
+  border-radius: 0 6px 6px 0;
+  background: light-dark(#f7f4fd, #1e1930);
+}

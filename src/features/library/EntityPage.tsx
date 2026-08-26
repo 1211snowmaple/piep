@@ -15,6 +15,7 @@ import {
   Paper,
   Popover,
   ScrollArea,
+  SegmentedControl,
   Select,
   SimpleGrid,
   Stack,
@@ -24,6 +25,7 @@ import {
   TextInput,
   Timeline,
   Title,
+  Tooltip,
 } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
 import { keepPreviousData, useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -37,15 +39,17 @@ import { BoundedJsonView } from "@/components/BoundedJsonView";
 import { ExpandableText } from "@/components/ExpandableText";
 import { ListPager, PagingModeToggle, useBoundedNumberedPage, usePageSize, usePagingMode } from "@/components/ListPager";
 import { ScrollToTop } from "@/components/ScrollToTop";
-import { scrollRegionIntoView } from "@/lib/scroll";
+import { holdRegionInPlace, scrollRegionIntoView } from "@/lib/scroll";
 import { VirtualizedWorkList } from "@/features/library/VirtualizedWorkList";
 import { VirtualizedEntityGrid } from "@/features/library/VirtualizedEntityGrid";
+import { parseViewMode, useViewMode } from "@/lib/viewMode";
 import { boundedInfiniteListOptions, INFINITE_LIST_MAX_PAGES } from "@/lib/queryLimits";
 import { externalBrand, ExternalServiceMark, getProvider, ProviderMark, sourceUrl } from "@/lib/providers";
 import { errorMessage, formatBytes, formatDate, formatFreshness, formatNumber } from "@/lib/format";
 import { runSingleCheck } from "@/features/updates/startSingleCheck";
 import { demoFacets, searchDemoWorks } from "@/mocks/demoData";
 import { exportEntityZip } from "@/services/archiveApi";
+import { AuthorAssist } from "@/features/assist/AuthorAssist";
 import { CollectionCard } from "@/features/collections/CollectionCard";
 import { listCollectionsForPerson } from "@/services/collectionApi";
 import type { WorkCollectionSummary } from "@/types/collections";
@@ -96,14 +100,19 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
   const queryClient = useQueryClient();
   const [urlParams, setUrlParams] = useAppSearchParams();
   const tab = parseEntityTab(urlParams.get("tab"), kind);
+  const tabsRef = useRef<HTMLDivElement>(null);
   // Switching tabs does not move the page: a tab changes what is listed, not
-  // where the reader is standing.
+  // where the reader is standing. Rewriting the query string cannot move it -
+  // the navigation is a replace, which scroll restoration leaves alone - but the
+  // panels themselves can: the incoming one has not fetched its rows yet, so the
+  // page collapses to a fraction of its height and the browser clamps the
+  // reader's offset away. Holding the tabs where they are outlasts that.
   const setTab = (value: string | null) => {
+    holdRegionInPlace(tabsRef.current);
     const next = new URLSearchParams(urlParams);
     if (value && value !== "works") next.set("tab", value); else next.delete("tab");
     setUrlParams(next, { replace: true });
   };
-  const tabsRef = useRef<HTMLDivElement>(null);
   // Narrowing lives in the URL so it survives leaving the page - the back
   // button from a work returns to the filtered listing rather than to an
   // unfiltered one - and so a narrowed view of an author can be linked to. It
@@ -125,6 +134,7 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
     setUrlParams(next, { replace: true });
   };
   const [pagingMode] = usePagingMode();
+  const [view, setView] = useViewMode();
   const [pageSize] = usePageSize();
   // Relevance is walked with a score cursor and has no nth page, so numbers are
   // only offered once an ordering has been chosen.
@@ -430,7 +440,12 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
 
       <Grid gap="lg" mt="lg">
         <Grid.Col span={{ base: 12, lg: 9 }} ref={tabsRef}>
-          <Tabs value={tab} onChange={setTab}>
+          {/* The panels are torn down rather than hidden. A kept-mounted panel
+              still holds a virtualiser bound to the page's own scroller, and
+              revealing it re-attaches that virtualiser and drags the page to
+              whatever offset it was left holding - which, since it was hidden
+              while the page was at its shortest, is the top. */}
+          <Tabs value={tab} onChange={setTab} keepMounted={false}>
             <Tabs.List>
               <Tabs.Tab value="works" leftSection={<Icons.read size={IconSize.inline} />}>作品</Tabs.Tab>
               {kind === "person" && <Tabs.Tab value="series" leftSection={<Icons.series size={IconSize.inline} />} rightSection={authorSeriesTotal !== null ? <Badge size="xs" variant="light">{formatNumber(authorSeriesTotal)}</Badge> : undefined}>シリーズ</Tabs.Tab>}
@@ -440,6 +455,8 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
             </Tabs.List>
             <Tabs.Panel value="works" pt="lg">
               <Stack gap="sm">
+                {/* 作風のメモ。作者のときだけ、設定してあるときだけ出る。 */}
+                {kind === "person" && <AuthorAssist source={source} personKey={key} />}
                 <Group gap="sm" wrap="nowrap" align="center">
                   <TextInput
                     flex={1}
@@ -480,12 +497,25 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
               <Box mt="md">
                 {works.isLoading ? <LoadingState /> : works.error ? <ErrorState error={works.error} retry={() => works.refetch()} /> : workItems.length ? (
                   <>
-                    <Group gap="xs" mb="sm">
+                    <Group gap="xs" mb="sm" wrap="nowrap">
                       <Text size="sm" c="dimmed">{formatNumber(works.data?.pages[0]?.totalEstimate ?? workItems.length)}件</Text>
                       {/* Beside the count, which is the thing it changes. */}
                       <PagingModeToggle />
+                      {/* ここだけ view を "gallery" に固定していた。棚で一覧を選んでいても
+                          作者を開いた瞬間にカードへ戻る、同じ作品の違う顔だった。 */}
+                      <SegmentedControl
+                        className="view-mode-switch"
+                        ml="auto"
+                        value={view}
+                        onChange={(value) => setView(parseViewMode(value))}
+                        data={[
+                          { value: "gallery", label: <Tooltip label="ギャラリー"><Icons.viewGrid size={IconSize.menu} aria-label="ギャラリー表示" /></Tooltip> },
+                          { value: "compact", label: <Tooltip label="リスト"><Icons.viewList size={IconSize.menu} aria-label="リスト表示" /></Tooltip> },
+                        ]}
+                        aria-label="表示形式"
+                      />
                     </Group>
-                    <VirtualizedWorkList items={workItems} view="gallery" />
+                    <VirtualizedWorkList items={workItems} view={view} />
                     <ListPager
                       hasNext={Boolean(works.hasNextPage) && !worksAtCacheLimit}
                       loading={works.isFetchingNextPage || works.isFetching}

@@ -60,11 +60,28 @@ import { store } from "@/store";
 import { requestOperationCancel, startOperation, type OperationController } from "@/features/jobs/operationJobs";
 import { APP_VERSION } from "@/lib/version";
 import { AppUpdateCard } from "@/features/settings/AppUpdateCard";
+import { AssistSection } from "@/features/settings/AssistSection";
 
-type Section = "connections" | "library" | "search" | "diagnostics" | "appearance" | "about";
-const SECTIONS: Section[] = ["connections", "library", "search", "diagnostics", "appearance", "about"];
+/**
+ * 設定の区画。
+ *
+ * 型と一覧を別々に書くと、片方だけ足したときに**押しても何も起きない項目**が
+ * できる（実際に「コレクションの名前」がそうなった）。区画は URL に載るので、
+ * 一覧に無い値は弾かれて既定へ戻る — 押した本人には理由が見えない。
+ * 一覧から型を導いて、ずれようがなくする。
+ */
+const SECTIONS = [
+  "connections",
+  "library",
+  "search",
+  "assist",
+  "diagnostics",
+  "appearance",
+  "about",
+] as const;
+type Section = (typeof SECTIONS)[number];
 function isSection(value: string | null): value is Section {
-  return value !== null && (SECTIONS as string[]).includes(value);
+  return value !== null && (SECTIONS as readonly string[]).includes(value);
 }
 interface PixivUser { id: string; name: string; profile_image_urls?: { medium?: string } }
 /// pixivと接続したときに返るもの。cookieは取れないこともある。
@@ -259,6 +276,7 @@ export default function SettingsPage() {
     { id: "connections" as const, label: "サービス接続", description: "pixiv・FANBOX", icon: Icons.credentials },
     { id: "library" as const, label: "ローカルライブラリ", description: "保存先・バックアップ", icon: Icons.database },
     { id: "search" as const, label: "検索", description: "インデックス・意味検索", icon: Icons.search },
+    { id: "assist" as const, label: "AIの手伝い", description: "手元のモデルに案を出させる", icon: Icons.optimize },
     { id: "diagnostics" as const, label: "診断とメンテナンス", description: "容量・性能・最適化", icon: Icons.diagnostics },
     { id: "appearance" as const, label: "外観と操作", description: "テーマ・表示", icon: Icons.appearance },
     { id: "about" as const, label: "piepについて", description: "バージョン・拡張", icon: Icons.info },
@@ -274,6 +292,7 @@ export default function SettingsPage() {
           {section === "connections" && (auth.isLoading ? <LoadingState label="接続状態を確認しています" /> : auth.error ? <ErrorState error={auth.error} retry={() => auth.refetch()} /> : <ConnectionsSection auth={auth.data ?? { pixiv: null, fanbox: null }} runtime={runtime} pixivForm={pixivForm} fanboxForm={fanboxForm} mutation={connectionMutation} disconnect={disconnect} />)}
           {section === "library" && (stats.isLoading || storagePath.isLoading ? <LoadingState label="ライブラリ情報を読み込んでいます" /> : stats.error || storagePath.error ? <ErrorState error={stats.error ?? storagePath.error} retry={() => { stats.refetch(); storagePath.refetch(); }} /> : <LibrarySection stats={stats.data} path={storagePath.data} runtime={runtime} pending={maintenanceMutation.isPending} run={(action) => maintenanceMutation.mutate(action)} />)}
           {section === "search" && (index.isLoading ? <LoadingState label="検索インデックスを確認しています" /> : index.error ? <ErrorState error={index.error} retry={() => index.refetch()} /> : <SearchSection status={index.data} rebuild={rebuild} runtime={runtime} rebuilding={rebuildMutation.isPending || rebuild?.status === "running"} start={(includeSemantic) => rebuildMutation.mutate(includeSemantic)} cancel={() => rebuildOperationRef.current ? requestOperationCancel(rebuildOperationRef.current.id) : rebuild ? cancelSearchRebuildIndex(rebuild.jobId) : undefined} />)}
+          {section === "assist" && <AssistSection />}
           {section === "diagnostics" && <DiagnosticsPage embedded />}
           {section === "appearance" && <AppearanceSection colorScheme={colorScheme} setColorScheme={setColorScheme} />}
           {section === "about" && <AboutSection runtime={runtime} />}

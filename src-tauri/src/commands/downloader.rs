@@ -751,16 +751,6 @@ pub(crate) async fn fetch_pixiv_user_novels_since(
 }
 
 #[tauri::command]
-pub async fn db_check_exists(
-    app: tauri::AppHandle,
-    source: String,
-    source_id: String,
-) -> Result<bool, String> {
-    let state = app.state::<Arc<AppState>>();
-    state.db.check_exists(&source, &source_id)
-}
-
-#[tauri::command]
 pub async fn fetch_pixiv_novel_by_url(
     url: String,
     refresh_token: String,
@@ -1303,7 +1293,10 @@ async fn save_person_snapshot_from_download(
             &["user", "icon_url"],
         ],
     );
-    let existing = state.db.get_person(source, author_id).ok();
+    let existing = {
+        let _library_write_guard = state.library_gate.write().await;
+        state.db.get_person(source, author_id).ok()
+    };
     if existing
         .as_ref()
         .and_then(|person| person.content_hash.as_ref())
@@ -1390,20 +1383,23 @@ async fn save_person_snapshot_from_download(
         ),
     };
     let links_json = serde_json::to_string(&normalized["links"]).ok();
-    state.db.upsert_person_profile(
-        source,
-        author_id,
-        author_name,
-        icon_path.as_deref(),
-        None,
-        description,
-        links_json.as_deref(),
-        &hash,
-        &json_path,
-        i64::from(icon_path.is_some()),
-        icon_size,
-        EntityProfileFreshness::SnapshotOnly,
-    )?;
+    {
+        let _library_write_guard = state.library_gate.write().await;
+        state.db.upsert_person_profile(
+            source,
+            author_id,
+            author_name,
+            icon_path.as_deref(),
+            None,
+            description,
+            links_json.as_deref(),
+            &hash,
+            &json_path,
+            i64::from(icon_path.is_some()),
+            icon_size,
+            EntityProfileFreshness::SnapshotOnly,
+        )?;
+    }
     Ok(())
 }
 
@@ -1416,11 +1412,13 @@ async fn save_series_snapshot_from_download(
     let Some((series_id, series_title)) = extract_series_relation(data) else {
         return Ok(());
     };
-    if state
-        .db
-        .get_series(source, &series_id)
-        .ok()
-        .and_then(|s| s.content_hash)
+    let existing = {
+        let _library_write_guard = state.library_gate.write().await;
+        state.db.get_series(source, &series_id).ok()
+    };
+    if existing
+        .as_ref()
+        .and_then(|series| series.content_hash.as_ref())
         .is_some()
     {
         return Ok(());
@@ -1434,7 +1432,6 @@ async fn save_series_snapshot_from_download(
         "seriesNavigation": data.get("seriesNavigation").or_else(|| data.get("detail").and_then(|d| d.get("seriesNavigation"))),
     });
     let hash = sha256_json(&normalized)?;
-    let existing = state.db.get_series(source, &series_id).ok();
     let json_path =
         if existing.as_ref().and_then(|s| s.content_hash.as_deref()) == Some(hash.as_str()) {
             String::new()
@@ -1462,22 +1459,25 @@ async fn save_series_snapshot_from_download(
                 .map_err(|e| e.to_string())?;
             path.to_string_lossy().to_string()
         };
-    state.db.upsert_series_profile(
-        source,
-        &series_id,
-        &series_title,
-        None,
-        local_cover_path,
-        &hash,
-        &json_path,
-        0,
-        0,
-        EntityProfileFreshness::SnapshotOnly,
-        // 保存のついでに作る控えなので、取得元へ聞きには行かない。完結の
-        // 有無と公開話数は「情報を更新」のときに埋まる。
-        None,
-        None,
-    )?;
+    {
+        let _library_write_guard = state.library_gate.write().await;
+        state.db.upsert_series_profile(
+            source,
+            &series_id,
+            &series_title,
+            None,
+            local_cover_path,
+            &hash,
+            &json_path,
+            0,
+            0,
+            EntityProfileFreshness::SnapshotOnly,
+            // 保存のついでに作る控えなので、取得元へ聞きには行かない。完結の
+            // 有無と公開話数は「情報を更新」のときに埋まる。
+            None,
+            None,
+        )?;
+    }
     Ok(())
 }
 
@@ -1566,25 +1566,52 @@ async fn sync_download_entities(
     author_name: &str,
     cover_path: Option<&str>,
 ) {
-    if let Err(e) =
-        state
-            .db
-            .upsert_download_relation(download_id, "author", source, author_id, author_name)
+    // 関連行の書き込みだけをライブラリの錠で囲む。この後の画像HTTP
+    // 取得中に錠を保持すると、無関係なお気に入りや削除まで止まる。
     {
-        log::warn!("Failed to register author relation: {}", e);
-    }
-    if let Err(e) = state.db.upsert_download_person(
-        download_id,
-        source,
-        author_id,
-        if source == "fanbox" {
-            "creator"
-        } else {
-            "author"
-        },
-        author_name,
-    ) {
-        log::warn!("Failed to register person relation: {}", e);
+        let _library_write_guard = state.library_gate.write().await;
+        if let Err(e) =
+            state
+                .db
+                .upsert_download_relation(download_id, "author", source, author_id, author_name)
+        {
+            log::warn!("Failed to register author relation: {}", e);
+        }
+        if let Err(e) = state.db.upsert_download_person(
+            download_id,
+            source,
+            author_id,
+            if source == "fanbox" {
+                "creator"
+            } else {
+                "author"
+            },
+            author_name,
+        ) {
+            log::warn!("Failed to register person relation: {}", e);
+        }
+        if source == "pixiv" {
+            if let Some((series_id, series_title)) = extract_series_relation(data) {
+                if let Err(e) = state.db.upsert_download_relation(
+                    download_id,
+                    "series",
+                    source,
+                    &series_id,
+                    &series_title,
+                ) {
+                    log::warn!("Failed to register series relation: {}", e);
+                }
+                if let Err(e) = state.db.upsert_download_series(
+                    download_id,
+                    source,
+                    &series_id,
+                    &series_title,
+                    extract_series_content_order(data),
+                ) {
+                    log::warn!("Failed to register normalized series relation: {}", e);
+                }
+            }
+        }
     }
     if let Err(e) =
         save_person_snapshot_from_download(state, data, source, author_id, author_name).await
@@ -1592,26 +1619,6 @@ async fn sync_download_entities(
         log::warn!("Failed to save person snapshot: {}", e);
     }
     if source == "pixiv" {
-        if let Some((series_id, series_title)) = extract_series_relation(data) {
-            if let Err(e) = state.db.upsert_download_relation(
-                download_id,
-                "series",
-                source,
-                &series_id,
-                &series_title,
-            ) {
-                log::warn!("Failed to register series relation: {}", e);
-            }
-            if let Err(e) = state.db.upsert_download_series(
-                download_id,
-                source,
-                &series_id,
-                &series_title,
-                extract_series_content_order(data),
-            ) {
-                log::warn!("Failed to register normalized series relation: {}", e);
-            }
-        }
         if let Err(e) = save_series_snapshot_from_download(state, data, source, cover_path).await {
             log::warn!("Failed to save series snapshot: {}", e);
         }
@@ -1662,9 +1669,11 @@ pub async fn download_and_save(
     // 開くまで読めないことに気付けず、更新確認の対象としても数え続ける。
     if existing_dl.is_none() && !fetched_has_material_content(&data, &source) {
         return Err(if source == "fanbox" {
-            "この投稿の本文を取得できませんでした。支援プランが足りないか、非公開の可能性があります".to_string()
+            "この投稿の本文を取得できませんでした。支援プランが足りないか、非公開の可能性があります"
+                .to_string()
         } else {
-            "この作品の本文を取得できませんでした。閲覧制限がかかっている可能性があります".to_string()
+            "この作品の本文を取得できませんでした。閲覧制限がかかっている可能性があります"
+                .to_string()
         });
     }
 
@@ -1676,6 +1685,7 @@ pub async fn download_and_save(
         if (dl.text_length > 0 || dl.asset_count > 0)
             && !fetched_has_material_content(&data, &source)
         {
+            drop(_library_write_guard);
             sync_download_entities(
                 &state,
                 &data,
@@ -1686,6 +1696,7 @@ pub async fn download_and_save(
                 dl.cover_path.as_deref(),
             )
             .await;
+            let _library_write_guard = state.library_gate.write().await;
             if let Err(e) = state.db.reindex_download(dl.id) {
                 log::warn!("Failed to refresh search index for {}: {}", dl.id, e);
             }
@@ -1706,6 +1717,7 @@ pub async fn download_and_save(
             is_update = true;
             next_version = dl.current_version + 1;
         } else {
+            drop(_library_write_guard);
             sync_download_entities(
                 &state,
                 &data,
@@ -1716,6 +1728,7 @@ pub async fn download_and_save(
                 dl.cover_path.as_deref(),
             )
             .await;
+            let _library_write_guard = state.library_gate.write().await;
             if let Err(e) = state.db.reindex_download(dl.id) {
                 log::warn!("Failed to refresh search index for {}: {}", dl.id, e);
             }
@@ -1920,6 +1933,7 @@ pub async fn download_and_save(
     )
     .await?;
 
+    drop(_library_write_guard);
     sync_download_entities(
         &state,
         &data,
@@ -1931,6 +1945,7 @@ pub async fn download_and_save(
     )
     .await;
 
+    let _library_write_guard = state.library_gate.write().await;
     if let Err(e) = state.db.reindex_download(dl_id) {
         log::warn!("Failed to refresh search index for {}: {}", dl_id, e);
     }
@@ -2743,7 +2758,8 @@ mod pixiv_meta_signature_tests {
     #[test]
     fn a_same_length_body_edit_is_invisible_to_the_signature() {
         let detail = detail();
-        let before = pixiv_meta_signature_from_json(&saved_json(&detail, "港の灯が落ちる")).unwrap();
+        let before =
+            pixiv_meta_signature_from_json(&saved_json(&detail, "港の灯が落ちる")).unwrap();
         let after = pixiv_meta_signature_from_json(&saved_json(&detail, "港の灯が消える")).unwrap();
         assert_eq!(
             before, after,

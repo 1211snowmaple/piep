@@ -1,3 +1,4 @@
+pub mod collection_rules;
 pub mod models;
 pub mod parser;
 pub mod queries;

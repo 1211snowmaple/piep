@@ -1,6 +1,8 @@
+use crate::database::queries::{PortableCollectionPairFeedback, PortableTag, PortableWorkEdit};
 use crate::database::{
-    Database, DownloadEntry, EntityVersion, NewAsset, NewDownload, NewVersion, SearchV2Params,
-    SeriesEntry, UpdateTarget, WorkCollectionInput, WorkCollectionMemberInput, WorkKey,
+    Database, DownloadEntry, EntityVersion, NewAsset, NewDownload, NewVersion, SavedSearch,
+    SearchV2Params, SeriesEntry, UpdateTarget, WorkCollectionInput, WorkCollectionMemberInput,
+    WorkKey,
 };
 use crate::AppState;
 use serde::{Deserialize, Serialize};
@@ -161,6 +163,9 @@ struct BackupEntry {
     content_type: String,
     #[serde(default, deserialize_with = "deserialize_backup_tags")]
     tags: Vec<String>,
+    /// `tags` remains for old archives. New archives also preserve where every tag came from.
+    #[serde(default)]
+    tag_sources: Vec<PortableTag>,
     excerpt: Option<String>,
     relative_cover_path: Option<String>,
     watch_updates: bool,
@@ -174,6 +179,8 @@ struct BackupEntry {
     relations: Vec<BackupDownloadRelation>,
     people: Vec<BackupDownloadPerson>,
     series: Vec<BackupDownloadSeries>,
+    #[serde(default)]
+    work_edits: Vec<PortableWorkEdit>,
 }
 
 fn deserialize_backup_tags<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
@@ -309,6 +316,10 @@ struct BackupMetadata {
     update_targets: Vec<UpdateTarget>,
     #[serde(default)]
     collections: Vec<BackupWorkCollection>,
+    #[serde(default)]
+    saved_searches: Vec<SavedSearch>,
+    #[serde(default)]
+    collection_pair_feedback: Vec<PortableCollectionPairFeedback>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -319,6 +330,15 @@ struct BackupWorkCollection {
     description: Option<String>,
     collection_kind: String,
     cover_work: Option<WorkKey>,
+    #[serde(default)]
+    cover_mode: Option<String>,
+    /// A managed, app-data relative file. Absolute source paths never enter an archive.
+    #[serde(default)]
+    relative_cover_image_path: Option<String>,
+    #[serde(default)]
+    name_source: Option<String>,
+    #[serde(default)]
+    track: Option<String>,
     members: Vec<BackupWorkCollectionMember>,
 }
 
@@ -430,7 +450,7 @@ fn resolve_zip_import_path<'a>(
 ) -> Result<(PathBuf, &'a Path), String> {
     let relative = validated_backup_relative_path(entry_name)?;
     let root = match first_backup_component(&relative) {
-        Some("profiles" | "series") => app_data_dir,
+        Some("profiles" | "series" | "collection-covers") => app_data_dir,
         _ => storage_dir,
     };
     Ok((root.join(relative), root))
@@ -440,7 +460,7 @@ fn resolve_storage_metadata_path(raw: &str, storage_dir: &Path) -> Result<PathBu
     let relative = validated_backup_relative_path(raw)?;
     if matches!(
         first_backup_component(&relative),
-        Some("profiles" | "series")
+        Some("profiles" | "series" | "collection-covers")
     ) {
         return Err(format!(
             "Invalid storage metadata path (reserved app-data root): {raw}"
@@ -527,6 +547,12 @@ fn validate_backup_metadata_paths(
         }
     }
 
+    for collection in &metadata.collections {
+        if let Some(path) = &collection.relative_cover_image_path {
+            resolve_entity_metadata_path(path, "collection-covers", app_data_dir)?;
+        }
+    }
+
     for entry in &metadata.entries {
         if let Some(path) = &entry.relative_cover_path {
             resolve_storage_metadata_path(path, storage_dir)?;
@@ -604,6 +630,14 @@ fn validate_backup_metadata_files_exist(
             )?;
         }
     }
+    for collection in &metadata.collections {
+        if let Some(path) = &collection.relative_cover_image_path {
+            require_file(
+                resolve_entity_metadata_path(path, "collection-covers", app_data_dir)?,
+                "collection cover",
+            )?;
+        }
+    }
     for entry in &metadata.entries {
         if entry.versions.is_empty() {
             return Err(format!(
@@ -659,6 +693,9 @@ fn referenced_backup_paths(metadata: &BackupMetadata) -> Result<Vec<String>, Str
                 .iter()
                 .map(|version| version.relative_json_path.clone()),
         );
+    }
+    for collection in &metadata.collections {
+        paths.extend(collection.relative_cover_image_path.iter().cloned());
     }
     for entry in &metadata.entries {
         if entry.versions.is_empty() {
@@ -1322,6 +1359,18 @@ fn add_zip_file_once(
     relative_path: &str,
     source_path: &Path,
 ) -> Result<(), String> {
+    let link_metadata = std::fs::symlink_metadata(source_path).map_err(|error| {
+        format!(
+            "Backup source file is missing or unreadable ({}): {error}",
+            source_path.display()
+        )
+    })?;
+    if archive_metadata_is_link(&link_metadata) {
+        return Err(format!(
+            "Backup source must not be a link or reparse point: {}",
+            source_path.display()
+        ));
+    }
     let mut source = std::fs::File::open(source_path).map_err(|error| {
         format!(
             "Backup source file is missing or unreadable ({}): {error}",
@@ -2323,6 +2372,8 @@ async fn export_zip_with_params_locked(
             download_scope.insert((dl.source.clone(), dl.source_id.clone()));
             let versions = state.db.get_versions(dl.id)?;
             let assets = state.db.get_assets(dl.id)?;
+            let tag_sources = state.db.archive_tags(dl.id)?;
+            let mut work_edits = state.db.archive_work_edits(dl.id)?;
             let relations = state.db.get_download_relations_for_download(dl.id)?;
             let people = state.db.get_download_people(dl.id)?;
             let series = state.db.get_download_series_list(dl.id)?;
@@ -2499,6 +2550,18 @@ async fn export_zip_with_params_locked(
                 });
             }
 
+            for revision in &mut work_edits {
+                for block in &mut revision.blocks {
+                    if let Some(path) = block.asset_path.as_deref() {
+                        block.asset_path = Some(required_export_relative_path(
+                            path,
+                            &storage,
+                            &format!("work {}/{} edit asset", dl.source, dl.source_id),
+                        )?);
+                    }
+                }
+            }
+
             let relative_cover_path = dl
                 .cover_path
                 .as_deref()
@@ -2528,6 +2591,7 @@ async fn export_zip_with_params_locked(
                 author_id: dl.author_id.clone(),
                 content_type: dl.content_type.clone(),
                 tags: dl.tags.clone(),
+                tag_sources,
                 excerpt: dl.excerpt.clone(),
                 relative_cover_path,
                 watch_updates: dl.watch_updates,
@@ -2565,6 +2629,7 @@ async fn export_zip_with_params_locked(
                         content_order: s.content_order,
                     })
                     .collect(),
+                work_edits,
             });
         }
 
@@ -2823,15 +2888,58 @@ async fn export_zip_with_params_locked(
             if scoped && members.is_empty() {
                 continue;
             }
+            let relative_cover_image_path = collection
+                .summary
+                .cover_image_path
+                .as_deref()
+                .filter(|_| collection.summary.cover_mode == "file")
+                .map(|source| {
+                    let source_path = Path::new(source);
+                    let extension = source_path
+                        .extension()
+                        .and_then(|value| value.to_str())
+                        .map(|value| value.to_ascii_lowercase())
+                        .filter(|value| {
+                            matches!(
+                                value.as_str(),
+                                "png" | "jpg" | "jpeg" | "webp" | "avif" | "gif"
+                            )
+                        })
+                        .unwrap_or_else(|| "img".to_string());
+                    let relative = format!(
+                        "collection-covers/{}/cover.{extension}",
+                        safe_export_name(&collection.summary.id)
+                    );
+                    validated_backup_relative_path(&relative)?;
+                    add_zip_file_once(
+                        &mut zip,
+                        options,
+                        &mut written_files,
+                        &relative,
+                        source_path,
+                    )?;
+                    Ok::<_, String>(relative)
+                })
+                .transpose()?;
             backup_collections.push(BackupWorkCollection {
                 id: collection.summary.id,
                 name: collection.summary.name,
                 description: collection.summary.description,
                 collection_kind: collection.summary.collection_kind,
                 cover_work,
+                cover_mode: Some(collection.summary.cover_mode),
+                relative_cover_image_path,
+                name_source: Some(collection.summary.name_source),
+                track: Some(collection.summary.track),
                 members,
             });
         }
+
+        let saved_searches = state.db.list_saved_searches()?;
+        // Pair feedback is keyed by stable provider ids and can span multipart boundaries.
+        // Repeating this small idempotent set in each part is safer than silently losing every
+        // decision whose two works happened to land in different parts.
+        let collection_pair_feedback = state.db.archive_collection_pair_feedback()?;
 
         let metadata = BackupMetadata {
             version: "3.0".to_string(),
@@ -2841,6 +2949,8 @@ async fn export_zip_with_params_locked(
             series: backup_series,
             update_targets,
             collections: backup_collections,
+            saved_searches,
+            collection_pair_feedback,
         };
 
         let metadata_json = serde_json::to_string_pretty(&metadata).map_err(|e| e.to_string())?;
@@ -3423,7 +3533,11 @@ async fn import_zip_locked(
                     author_name: entry.author_name.clone(),
                     author_id: entry.author_id.clone(),
                     content_type: entry.content_type.clone(),
-                    tags: entry.tags.clone(),
+                    tags: if entry.tag_sources.is_empty() {
+                        entry.tags.clone()
+                    } else {
+                        entry.tag_sources.iter().map(|tag| tag.name.clone()).collect()
+                    },
                     excerpt: entry.excerpt.clone(),
                     cover_path: final_cover_path,
                     json_path: final_json_path,
@@ -3441,6 +3555,9 @@ async fn import_zip_locked(
                 };
 
                 let dl_id = state.db.upsert_download(&new_dl)?;
+                if !entry.tag_sources.is_empty() {
+                    state.db.restore_tags(dl_id, &entry.tag_sources)?;
+                }
                 imported += 1;
                 restored_ids.push(dl_id);
 
@@ -3542,7 +3659,28 @@ async fn import_zip_locked(
                             state.db.insert_asset(&new_asset)?;
                         }
 
+                        let mut work_edits = entry.work_edits.clone();
+                        for revision in &mut work_edits {
+                            for block in &mut revision.blocks {
+                                if let Some(path) = block.asset_path.as_deref() {
+                                    block.asset_path = Some(
+                                        resolve_storage_metadata_path(path, &storage)?
+                                            .to_string_lossy()
+                                            .to_string(),
+                                    );
+                                }
+                            }
+                        }
+                        state.db.restore_work_edits(dl_id, &work_edits)?;
+
             }
+
+                for search in &metadata.saved_searches {
+                    state.db.restore_saved_search(search)?;
+                }
+                for feedback in &metadata.collection_pair_feedback {
+                    state.db.restore_collection_pair_feedback(feedback)?;
+                }
 
                 for collection in &metadata.collections {
                     let members = collection
@@ -3567,6 +3705,24 @@ async fn import_zip_locked(
                             description: collection.description.clone(),
                             collection_kind: collection.collection_kind.clone(),
                             cover_download_id: None,
+                            cover_mode: collection.cover_mode.clone(),
+                            cover_image_path: collection
+                                .relative_cover_image_path
+                                .as_deref()
+                                .map(|path| {
+                                    resolve_entity_metadata_path(
+                                        path,
+                                        "collection-covers",
+                                        &app_data,
+                                    )
+                                })
+                                .transpose()?
+                                .map(|path| path.to_string_lossy().to_string()),
+                            name_source: collection
+                                .name_source
+                                .clone()
+                                .or_else(|| Some("manual".to_string())),
+                            track: collection.track.clone(),
                         },
                         collection.cover_work.as_ref(),
                         &members,
@@ -4146,6 +4302,7 @@ mod tests {
                 author_id: "restore-author".to_string(),
                 content_type: "novel".to_string(),
                 tags: Vec::new(),
+                tag_sources: Vec::new(),
                 excerpt: None,
                 relative_cover_path: None,
                 watch_updates: false,
@@ -4168,6 +4325,7 @@ mod tests {
                 relations: Vec::new(),
                 people: Vec::new(),
                 series: Vec::new(),
+                work_edits: Vec::new(),
             }],
             people: Vec::new(),
             series: Vec::new(),
@@ -4181,6 +4339,10 @@ mod tests {
                     source: "pixiv".to_string(),
                     source_id: source_id.to_string(),
                 }),
+                cover_mode: Some("mosaic".to_string()),
+                relative_cover_image_path: None,
+                name_source: Some("title".to_string()),
+                track: Some("sequence".to_string()),
                 members: vec![BackupWorkCollectionMember {
                     source: "pixiv".to_string(),
                     source_id: source_id.to_string(),
@@ -4193,6 +4355,8 @@ mod tests {
                     note: None,
                 }],
             }],
+            saved_searches: Vec::new(),
+            collection_pair_feedback: Vec::new(),
         };
         let metadata = serde_json::to_vec(&metadata).unwrap();
         let payload = serde_json::to_vec(&serde_json::json!({ "text": marker })).unwrap();
@@ -4641,6 +4805,8 @@ mod tests {
             series: vec![],
             update_targets: vec![],
             collections: vec![],
+            saved_searches: vec![],
+            collection_pair_feedback: vec![],
         };
         let metadata_json = serde_json::to_vec(&metadata).unwrap();
         write_test_zip(
@@ -4854,6 +5020,104 @@ mod tests {
         };
         state.db.insert_asset(&new_asset).unwrap();
 
+        state
+            .db
+            .restore_tags(
+                dl_id,
+                &[
+                    PortableTag {
+                        name: "Tag1".into(),
+                        source: "origin".into(),
+                    },
+                    PortableTag {
+                        name: "手動".into(),
+                        source: "manual".into(),
+                    },
+                    PortableTag {
+                        name: "モデル".into(),
+                        source: "llm".into(),
+                    },
+                ],
+            )
+            .unwrap();
+        state
+            .db
+            .restore_work_edits(
+                dl_id,
+                &[PortableWorkEdit {
+                    base_version: 2,
+                    status: "active".into(),
+                    title: Some("利用者が直した題名".into()),
+                    content_hash: Some("edit-hash".into()),
+                    created_at: "2026-05-22T00:00:00Z".into(),
+                    updated_at: "2026-05-23T00:00:00Z".into(),
+                    blocks: vec![crate::database::queries::PortableWorkEditBlock {
+                        order: 0,
+                        block_type: "image".into(),
+                        text: Some("利用者のキャプション".into()),
+                        asset_path: Some(asset_file_path.to_string_lossy().to_string()),
+                        attrs_json: Some("{\"align\":\"center\"}".into()),
+                    }],
+                }],
+            )
+            .unwrap();
+        state
+            .db
+            .restore_saved_search(&SavedSearch {
+                id: 0,
+                name: "あとで読む催眠".into(),
+                query: Some("催眠".into()),
+                params_json: "{\"favorite\":true}".into(),
+                created_at: "2026-05-22T00:00:00Z".into(),
+                updated_at: "2026-05-23T00:00:00Z".into(),
+            })
+            .unwrap();
+        state
+            .db
+            .restore_collection_pair_feedback(&PortableCollectionPairFeedback {
+                left_source: source.clone(),
+                left_source_id: source_id.clone(),
+                right_source: "fanbox".into(),
+                right_source_id: "other-work".into(),
+                decision: "reject".into(),
+                rule_version: "collection-suggest-v2".into(),
+                updated_at: "2026-05-23T00:00:00Z".into(),
+            })
+            .unwrap();
+        let custom_cover = base_dir.join("chosen-cover.png");
+        fs::write(&custom_cover, b"custom collection cover").unwrap();
+        state
+            .db
+            .restore_work_collection(
+                &WorkCollectionInput {
+                    id: Some("collection-backup-state".into()),
+                    name: "モデルが付けた束名".into(),
+                    description: Some("利用者の説明".into()),
+                    collection_kind: "unordered".into(),
+                    cover_download_id: Some(dl_id),
+                    cover_mode: Some("file".into()),
+                    cover_image_path: Some(custom_cover.to_string_lossy().to_string()),
+                    name_source: Some("llm".into()),
+                    track: Some("theme".into()),
+                },
+                Some(&WorkKey {
+                    source: source.clone(),
+                    source_id: source_id.clone(),
+                }),
+                &[WorkCollectionMemberInput {
+                    source: source.clone(),
+                    source_id: source_id.clone(),
+                    title_snapshot: Some("テスト小説".into()),
+                    author_snapshot: Some("テスト著者".into()),
+                    position: Some(0),
+                    member_role: Some("main".into()),
+                    added_by: Some("manual".into()),
+                    pinned: Some(true),
+                    note: Some("利用者のメモ".into()),
+                }],
+            )
+            .unwrap();
+
         // ZIPの書き出しパス
         let zip_path = base_dir.join("backup.zip");
         fs::write(&zip_path, b"previous backup").unwrap();
@@ -4898,6 +5162,23 @@ mod tests {
             .unwrap();
         assert_eq!(restored_dl.title, "テスト小説");
         assert_eq!(restored_dl.author_name, "テスト著者");
+        assert_eq!(
+            state_new.db.archive_tags(restored_dl.id).unwrap(),
+            vec![
+                PortableTag {
+                    name: "Tag1".into(),
+                    source: "origin".into()
+                },
+                PortableTag {
+                    name: "モデル".into(),
+                    source: "llm".into()
+                },
+                PortableTag {
+                    name: "手動".into(),
+                    source: "manual".into()
+                },
+            ]
+        );
         assert!(restored_dl
             .cover_path
             .as_deref()
@@ -4965,6 +5246,44 @@ mod tests {
             fs::read_to_string(&restored_assets[0].local_path).unwrap(),
             "dummy png binary data"
         );
+        let edits = state_new.db.archive_work_edits(restored_dl.id).unwrap();
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].title.as_deref(), Some("利用者が直した題名"));
+        assert_eq!(
+            edits[0].blocks[0].text.as_deref(),
+            Some("利用者のキャプション")
+        );
+        assert!(edits[0].blocks[0]
+            .asset_path
+            .as_deref()
+            .is_some_and(|path| Path::new(path).is_file()));
+        let searches = state_new.db.list_saved_searches().unwrap();
+        assert_eq!(searches.len(), 1);
+        assert_eq!(searches[0].name, "あとで読む催眠");
+        assert_eq!(
+            state_new.db.archive_collection_pair_feedback().unwrap(),
+            vec![PortableCollectionPairFeedback {
+                left_source: source.clone(),
+                left_source_id: source_id.clone(),
+                right_source: "fanbox".into(),
+                right_source_id: "other-work".into(),
+                decision: "reject".into(),
+                rule_version: "collection-suggest-v2".into(),
+                updated_at: "2026-05-23T00:00:00Z".into(),
+            }]
+        );
+        let restored_collection = state_new
+            .db
+            .get_work_collection("collection-backup-state")
+            .unwrap();
+        assert_eq!(restored_collection.summary.cover_mode, "file");
+        assert_eq!(restored_collection.summary.name_source, "llm");
+        assert_eq!(restored_collection.summary.track, "theme");
+        assert!(restored_collection
+            .summary
+            .cover_image_path
+            .as_deref()
+            .is_some_and(|path| Path::new(path).is_file()));
 
         // クリーンアップ
         let _ = fs::remove_dir_all(&base_dir);

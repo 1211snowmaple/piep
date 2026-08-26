@@ -9,11 +9,13 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use super::collection_rules;
 use super::models::*;
 use super::schema;
 use super::search::{
@@ -23,6 +25,13 @@ use super::search::{
 };
 
 /// 作品コレクションは `Database` の非公開内部へ触れるため、子モジュールに置く。
+mod assist_inputs;
+pub use assist_inputs::{AiNote, TaggedName};
+mod archive_state;
+pub use archive_state::{
+    PortableCollectionPairFeedback, PortableTag, PortableWorkEdit, PortableWorkEditBlock,
+};
+mod collection_sweep;
 mod collections;
 
 #[derive(Debug, Clone)]
@@ -65,6 +74,15 @@ struct SearchIndexBuildDocument {
     content_hash: Option<String>,
     tantivy: super::tantivy_index::TantivyIndexDocument,
     semantic: super::semantic_index::SemanticIndexDocument,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StagedDeleteEntry {
+    download_id: i64,
+    source: String,
+    source_id: String,
+    staged_name: String,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1205,6 +1223,12 @@ impl Database {
     pub fn open(db_path: &Path, storage_dir: &Path) -> Result<Self, String> {
         let conn = Connection::open(db_path).map_err(|e| format!("DB open failed: {}", e))?;
         schema::initialize(&conn).map_err(|e| format!("DB init failed: {}", e))?;
+        recover_staged_deletes(&conn, db_path, storage_dir)?;
+        if let Err(error) = cleanup_orphaned_collection_covers(&conn, db_path, storage_dir) {
+            // 表紙のGCは容量回収であって、ライブラリを開けなくする理由ではない。
+            // 次回起動で再試行できるよう、失敗したファイルはその場に残す。
+            log::warn!("Failed to clean orphaned collection covers: {error}");
+        }
         reconcile_search_index_format(&conn)?;
         let read_pool = build_read_pool(db_path)?;
         let generation_conn = Connection::open(db_path)
@@ -5496,32 +5520,117 @@ impl Database {
         }
 
         // Resolve and validate every filesystem target before making any
-        // change, then delete all relational rows atomically. A missing or
-        // unsafe item therefore cannot leave a half-deleted bulk selection.
-        let work_root_dirs = {
-            let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
-            let tx = conn
-                .transaction()
-                .map_err(|e| format!("Bulk delete transaction failed: {e}"))?;
+        // change. Work directories are moved out of the import tree before
+        // the database commit: a locked file therefore stops the operation
+        // before the library row disappears, and a later recovery scan cannot
+        // resurrect a successfully deleted work from files we failed to
+        // remove.
+        let (work_root_dirs, deleted_cover_paths) = {
+            let conn = self.read_conn()?;
             let mut work_root_dirs = Vec::with_capacity(unique.len());
+            let mut deleted_cover_paths = Vec::new();
             for id in &unique {
-                let (source, source_id): (String, String) = tx
+                let (source, source_id, cover_path): (String, String, Option<String>) = conn
                     .query_row(
-                        "SELECT source, source_id FROM downloads WHERE id = ?1",
+                        "SELECT source, source_id, cover_path FROM downloads WHERE id = ?1",
                         params![id],
-                        |row| Ok((row.get(0)?, row.get(1)?)),
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                     )
                     .map_err(|e| format!("Download not found: {e}"))?;
 
                 // Never infer the work root by walking up from json_path.
                 // Legacy records can point directly to
                 // `{source}/{source_id}/data.json`.
-                work_root_dirs.push(validated_download_work_root(
-                    &self.storage_dir,
-                    &source,
-                    &source_id,
-                )?);
+                let root = validated_download_work_root(&self.storage_dir, &source, &source_id)?;
+                work_root_dirs.push((*id, source, source_id, root));
+                if let Some(path) = cover_path.filter(|path| !path.trim().is_empty()) {
+                    deleted_cover_paths.push(path);
+                }
             }
+            (work_root_dirs, deleted_cover_paths)
+        };
+
+        let delete_staging_root = self
+            .db_path
+            .parent()
+            .unwrap_or(&self.storage_dir)
+            .join("delete-staging");
+        std::fs::create_dir_all(&delete_staging_root)
+            .map_err(|e| format!("Failed to create delete staging directory: {e}"))?;
+        let operation_dir = delete_staging_root.join(format!(
+            "{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        std::fs::create_dir(&operation_dir)
+            .map_err(|e| format!("Failed to create delete operation directory: {e}"))?;
+
+        let manifest = work_root_dirs
+            .iter()
+            .enumerate()
+            .map(
+                |(index, (download_id, source, source_id, _))| StagedDeleteEntry {
+                    download_id: *download_id,
+                    source: source.clone(),
+                    source_id: source_id.clone(),
+                    staged_name: index.to_string(),
+                },
+            )
+            .collect::<Vec<_>>();
+        let manifest_path = operation_dir.join("manifest.json");
+        let persist_manifest = (|| -> Result<(), String> {
+            let manifest_bytes = serde_json::to_vec_pretty(&manifest)
+                .map_err(|e| format!("Failed to encode delete manifest: {e}"))?;
+            let mut manifest_file = std::fs::File::create(&manifest_path)
+                .map_err(|e| format!("Failed to create delete manifest: {e}"))?;
+            manifest_file
+                .write_all(&manifest_bytes)
+                .and_then(|_| manifest_file.sync_all())
+                .map_err(|e| format!("Failed to persist delete manifest: {e}"))
+        })();
+        if let Err(error) = persist_manifest {
+            let _ = std::fs::remove_dir_all(&operation_dir);
+            return Err(error);
+        }
+
+        let mut staged = Vec::<(PathBuf, PathBuf)>::new();
+        for (index, (_, _, _, original)) in work_root_dirs.iter().enumerate() {
+            if !original.exists() {
+                continue;
+            }
+            let staged_path = operation_dir.join(index.to_string());
+            if let Err(error) = std::fs::rename(original, &staged_path) {
+                let mut rollback_errors = Vec::new();
+                for (rollback_original, rollback_staged) in staged.iter().rev() {
+                    if let Err(rollback_error) = std::fs::rename(rollback_staged, rollback_original)
+                    {
+                        rollback_errors.push(format!(
+                            "{} -> {}: {}",
+                            rollback_staged.display(),
+                            rollback_original.display(),
+                            rollback_error
+                        ));
+                    }
+                }
+                if rollback_errors.is_empty() {
+                    let _ = std::fs::remove_dir_all(&operation_dir);
+                    return Err(format!(
+                        "Could not stage work files for deletion (nothing was deleted): {error}"
+                    ));
+                }
+                return Err(format!(
+                    "Could not stage work files for deletion: {error}; additionally failed to restore staged files: {}",
+                    rollback_errors.join("; ")
+                ));
+            }
+            staged.push((original.clone(), staged_path));
+        }
+
+        let database_delete = (|| -> Result<(), String> {
+            let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+            let tx = conn
+                .transaction()
+                .map_err(|e| format!("Bulk delete transaction failed: {e}"))?;
             {
                 let mut statement = tx
                     .prepare("DELETE FROM downloads WHERE id = ?1")
@@ -5532,24 +5641,90 @@ impl Database {
                         .map_err(|e| format!("Delete failed for {id}: {e}"))?;
                 }
             }
+            // A snapshot-only series may point at the first saved work's
+            // cover. Once that work is deleted, move the entity reference to
+            // another surviving work in the same series (or clear it) so the
+            // diagnostics screen never reports a path we deliberately removed.
+            for cover_path in &deleted_cover_paths {
+                tx.execute(
+                    "UPDATE series
+                     SET cover_path = (
+                         SELECT d.cover_path
+                         FROM download_series ds
+                         JOIN downloads d ON d.id = ds.download_id
+                         WHERE ds.series_source = series.source
+                           AND ds.series_key = series.source_key
+                           AND d.cover_path IS NOT NULL
+                           AND TRIM(d.cover_path) != ''
+                         ORDER BY COALESCE(ds.content_order, 9223372036854775807), d.id
+                         LIMIT 1
+                     )
+                     WHERE cover_path = ?1",
+                    params![cover_path],
+                )
+                .map_err(|e| format!("Failed to repair series cover after deletion: {e}"))?;
+            }
+            // AI notes deliberately use stable string keys rather than a
+            // foreign key because recap notes may refer to two works. Clean
+            // every exact/sided occurrence while both IDs are still known.
+            for id in &unique {
+                let exact = id.to_string();
+                tx.execute(
+                    "DELETE FROM ai_notes
+                     WHERE subject_type = 'work'
+                       AND (subject_key = ?1 OR subject_key LIKE ?2 OR subject_key LIKE ?3)",
+                    params![exact, format!("{id}:%"), format!("%:{id}")],
+                )
+                .map_err(|e| format!("Failed to remove AI notes for {id}: {e}"))?;
+            }
             tx.commit()
-                .map_err(|e| format!("Bulk delete commit failed: {e}"))?;
-            work_root_dirs
-        };
+                .map_err(|e| format!("Bulk delete commit failed: {e}"))
+        })();
 
-        // Keep slow, retrying filesystem work outside the database lock.
-        for work_root_dir in work_root_dirs {
-            if work_root_dir.exists() {
-                if let Err(error) = remove_dir_all_resilient(&work_root_dir) {
-                    log::warn!(
-                        "Failed to remove work root directory {:?}: {}",
-                        work_root_dir,
-                        error
-                    );
+        if let Err(error) = database_delete {
+            let mut rollback_errors = Vec::new();
+            for (original, staged_path) in staged.iter().rev() {
+                if let Err(rollback_error) = std::fs::rename(staged_path, original) {
+                    rollback_errors.push(format!(
+                        "{} -> {}: {}",
+                        staged_path.display(),
+                        original.display(),
+                        rollback_error
+                    ));
                 }
-                if let Some(source_dir) = work_root_dir.parent() {
-                    let _ = remove_dir_resilient(source_dir);
-                }
+            }
+            if rollback_errors.is_empty() {
+                let _ = std::fs::remove_dir_all(&operation_dir);
+                return Err(error);
+            }
+            return Err(format!(
+                "{error}; additionally failed to restore staged files: {}",
+                rollback_errors.join("; ")
+            ));
+        }
+
+        // The database no longer references the work and the files are
+        // outside the import tree. Failure here leaves only reclaimable
+        // staging data; it cannot make the work reappear.
+        let mut staging_cleanup_complete = true;
+        for (_, staged_path) in &staged {
+            if let Err(error) = remove_dir_all_resilient(staged_path) {
+                staging_cleanup_complete = false;
+                log::warn!(
+                    "Failed to remove staged work directory {:?}: {}",
+                    staged_path,
+                    error
+                );
+            }
+        }
+        if staging_cleanup_complete {
+            let _ = std::fs::remove_file(&manifest_path);
+            let _ = std::fs::remove_dir(&operation_dir);
+        }
+        let _ = std::fs::remove_dir(&delete_staging_root);
+        for (_, _, _, work_root_dir) in &work_root_dirs {
+            if let Some(source_dir) = work_root_dir.parent() {
+                let _ = remove_dir_resilient(source_dir);
             }
         }
 
@@ -5560,23 +5735,17 @@ impl Database {
         let semantic_result = super::semantic_index::clear_documents(&self.storage_dir, &unique);
         self.invalidate_index_status();
 
-        match (lexical_result, semantic_result) {
-            (Err(lexical), Err(semantic)) => {
-                return Err(format!(
-                    "Downloads were deleted, but both search indexes failed to update: lexical: {lexical}; semantic: {semantic}"
-                ));
-            }
-            (Err(error), _) => {
-                return Err(format!(
-                    "Downloads were deleted, but the lexical search index failed to update: {error}"
-                ));
-            }
-            (_, Err(error)) => {
-                return Err(format!(
-                    "Downloads were deleted, but the semantic search index failed to update: {error}"
-                ));
-            }
-            (Ok(()), Ok(())) => {}
+        if let Err(error) = lexical_result {
+            log::warn!(
+                "Downloads were deleted, but the lexical search index cleanup failed: {}",
+                error
+            );
+        }
+        if let Err(error) = semantic_result {
+            log::warn!(
+                "Downloads were deleted, but the semantic search index cleanup failed: {}",
+                error
+            );
         }
 
         Ok(BulkMutationResult {
@@ -5974,6 +6143,27 @@ impl Database {
     /// Runs SQLite's lightweight planner maintenance, and optionally performs
     /// an explicit compaction. Compaction is never automatic: it can require a
     /// temporary copy roughly as large as the database and blocks writers.
+    /// 意味索引から、実在しない作品の行を落とす。
+    ///
+    /// 実在する id の**全体**を渡す必要があるので、ここで読んでから渡す。
+    /// 部分集合を渡すと、渡さなかった分が全部消える。
+    fn prune_semantic_index(&self) -> Result<usize, String> {
+        let conn = self.read_conn()?;
+        let mut stmt = conn
+            .prepare("SELECT id FROM downloads")
+            .map_err(|e| format!("Failed to prepare live work scan: {e}"))?;
+        let alive = stmt
+            .query_map([], |row| row.get::<_, i64>(0))
+            .map_err(|e| format!("Failed to query live works: {e}"))?
+            .collect::<Result<HashSet<_>, _>>()
+            .map_err(|e| format!("Failed to read live works: {e}"))?;
+        drop(stmt);
+        drop(conn);
+        // Query failures have already returned above. An empty set here is a
+        // valid empty library, so every remaining semantic row is an orphan.
+        super::semantic_index::prune_missing_documents(&self.storage_dir, &alive)
+    }
+
     pub fn maintain_library_database(
         &self,
         compact: bool,
@@ -6002,6 +6192,11 @@ impl Database {
                 .map_err(|e| format!("SQLite compaction failed: {e}"))?;
         }
         drop(conn);
+        // 索引の掃除もここでやる。削除のたびの `clear_documents` は取りこぼす
+        // ことがあり、実測で 8 件の幽霊が残っていた。
+        if let Err(error) = self.prune_semantic_index() {
+            log::warn!("Semantic index prune skipped: {error}");
+        }
         let after_bytes = file_size_or_zero(&self.db_path);
         Ok(LibraryMaintenanceResult {
             compacted: compact,
@@ -6900,8 +7095,13 @@ impl Database {
         let where_clause = if all_wheres.is_empty() {
             String::new()
         } else {
-            format!("WHERE {}", all_wheres.join("
-                   AND "))
+            format!(
+                "WHERE {}",
+                all_wheres.join(
+                    "
+                   AND "
+                )
+            )
         };
 
         let mut having_parts: Vec<String> = Vec::new();
@@ -6922,8 +7122,13 @@ impl Database {
         let having = if having_parts.is_empty() {
             String::new()
         } else {
-            format!("HAVING {}", having_parts.join("
-                     AND "))
+            format!(
+                "HAVING {}",
+                having_parts.join(
+                    "
+                     AND "
+                )
+            )
         };
 
         let sql = if kind_is_series {
@@ -7012,19 +7217,27 @@ impl Database {
     /// 二番手・三番手まで決めてあるのは、同じ値が並んだときに順番が毎回
     /// 変わらないようにするため。ページ送りは位置で切るので、境目が揺れると
     /// 同じ作者が二度出たり、抜けたりする。
-    fn entity_facet_order_clause(sort_by: Option<&str>, sort_order: Option<&str>, name_column: &str) -> String {
+    fn entity_facet_order_clause(
+        sort_by: Option<&str>,
+        sort_order: Option<&str>,
+        name_column: &str,
+    ) -> String {
         let descending = !matches!(sort_order, Some("asc"));
         let dir = if descending { "DESC" } else { "ASC" };
         match sort_by.unwrap_or("work_count") {
-            "downloaded_at" => format!(
-                "ORDER BY latest_downloaded_at {dir}, count DESC, {name_column} ASC"
-            ),
-            "source_updated_at" => format!(
-                "ORDER BY latest_source_updated_at {dir}, count DESC, {name_column} ASC"
-            ),
+            "downloaded_at" => {
+                format!("ORDER BY latest_downloaded_at {dir}, count DESC, {name_column} ASC")
+            }
+            "source_updated_at" => {
+                format!("ORDER BY latest_source_updated_at {dir}, count DESC, {name_column} ASC")
+            }
             // 名前だけは昇順が「正しい」と読めるので、指定が無ければ昇順。
             "name" | "title" | "author_name" => {
-                let dir = if matches!(sort_order, Some("desc")) { "DESC" } else { "ASC" };
+                let dir = if matches!(sort_order, Some("desc")) {
+                    "DESC"
+                } else {
+                    "ASC"
+                };
                 format!("ORDER BY {name_column} COLLATE NOCASE {dir}, count DESC")
             }
             _ => format!("ORDER BY count {dir}, {name_column} ASC"),
@@ -7681,10 +7894,7 @@ impl Database {
     ///
     /// 作者を監視しているなら、その作者の作品の改稿も同じ確認で拾えるべき。
     /// web の一覧は 100 件をまとめて返すので、全部を並べても往復は 1% で済む。
-    pub fn pixiv_works_for_author(
-        &self,
-        author_id: &str,
-    ) -> Result<Vec<SavedPixivWork>, String> {
+    pub fn pixiv_works_for_author(&self, author_id: &str) -> Result<Vec<SavedPixivWork>, String> {
         let conn = self.read_conn()?;
         let mut stmt = conn
             .prepare(
@@ -8157,16 +8367,45 @@ impl Database {
 /// 総文字数が水増しされるためである。列の並びは
 /// work_collection_summary_from_row の添字と対応しているので、片方だけを
 /// 変えてはいけない。
+/// 一覧のカードが表紙を描けるだけの材料を、1問い合わせで返す。
+///
+/// 表紙の元は前から `COLLECTION_COVER_TILES` 枚。表紙を持たないメンバーも
+/// `coverPath: null` のまま席を残す。詰めてしまうと、4作のうち2作しか表紙が
+/// 無い束が2作の束と同じ顔になってしまう。
 const COLLECTION_SUMMARY_SELECT: &str = "
     SELECT c.id, c.name, c.description, c.collection_kind,
            c.cover_download_id, cover.cover_path, c.revision,
            COUNT(m.source_id),
            SUM(CASE WHEN m.download_id IS NOT NULL THEN 1 ELSE 0 END),
-           COALESCE(SUM(d.text_length), 0), c.created_at, c.updated_at
+           COALESCE(SUM(d.text_length), 0), c.created_at, c.updated_at,
+           c.cover_mode, c.cover_image_path, c.name_source, c.track,
+           COALESCE((
+             SELECT json_group_array(json_object(
+                      'source', tile.source,
+                      'sourceId', tile.source_id,
+                      'title', tile.title,
+                      'authorName', tile.author_name,
+                      'coverPath', tile.cover_path))
+               FROM (
+                 SELECT tm.source AS source, tm.source_id AS source_id,
+                        COALESCE(td.title, tm.title_snapshot) AS title,
+                        COALESCE(td.author_name, tm.author_snapshot) AS author_name,
+                        td.cover_path AS cover_path
+                   FROM work_collection_members tm
+                   LEFT JOIN downloads td ON td.id = tm.download_id
+                  WHERE tm.collection_id = c.id
+                  ORDER BY tm.position ASC, tm.created_at ASC, tm.source ASC, tm.source_id ASC
+                  LIMIT 4
+               ) tile
+           ), '[]')
       FROM work_collections c
       LEFT JOIN work_collection_members m ON m.collection_id = c.id
       LEFT JOIN downloads d ON d.id = m.download_id
       LEFT JOIN downloads cover ON cover.id = c.cover_download_id";
+
+/// モザイクは2×2までにする。それ以上並べると1マスが小さくなりすぎて、
+/// 表紙が何の絵なのか分からなくなる。
+const COLLECTION_COVER_TILES: usize = 4;
 
 /// 同名・同時刻のコレクションでも並びが揺れないよう c.id まで比較する。
 const COLLECTION_SUMMARY_TAIL: &str = "
@@ -8189,6 +8428,24 @@ fn work_collection_summary_from_row(
         total_text_length: row.get(9)?,
         created_at: row.get(10)?,
         updated_at: row.get(11)?,
+        cover_mode: row
+            .get::<_, Option<String>>(12)?
+            .unwrap_or_else(|| "mosaic".to_string()),
+        cover_image_path: row.get(13)?,
+        name_source: row
+            .get::<_, Option<String>>(14)?
+            .unwrap_or_else(|| "manual".to_string()),
+        track: row
+            .get::<_, Option<String>>(15)?
+            .unwrap_or_else(|| "manual".to_string()),
+        // 壊れた JSON で一覧全体を落とさない。表紙が出ないだけで済ませる。
+        cover_tiles: row
+            .get::<_, Option<String>>(16)?
+            .and_then(|raw| serde_json::from_str::<Vec<CollectionCoverTile>>(&raw).ok())
+            .unwrap_or_default()
+            .into_iter()
+            .take(COLLECTION_COVER_TILES)
+            .collect(),
     })
 }
 
@@ -8212,6 +8469,10 @@ fn work_collection_member_from_row(
         missing: row.get::<_, i64>(13)? != 0,
         created_at: row.get(14)?,
         updated_at: row.get(15)?,
+        // 作品そのものと別版は、まとめて1回引いてから差し込む。
+        // メンバーごとに引くと、100作の束で100往復になる。
+        work: None,
+        editions: Vec::new(),
     })
 }
 
@@ -8246,6 +8507,9 @@ struct SuggestionWork {
     cover_path: Option<String>,
     text_length: i64,
     published_at: String,
+    /// 告知記事を束から外すのに要る。短い `article` は作品ではなく案内である
+    /// ことが多いが、短い `novel` は掌編なので、字数だけでは決められない。
+    content_type: String,
 }
 
 const COLLECTION_SUGGEST_RULE_VERSION: &str = "collection-suggest-v2";
@@ -8295,7 +8559,7 @@ fn load_suggestion_works(conn: &Connection, ids: &[i64]) -> Result<Vec<Suggestio
         .prepare(
             "SELECT id, source, source_id, title, author_name, COALESCE(author_id, ''),
                     cover_path, text_length,
-                    COALESCE(source_created_at, downloaded_at, '')
+                    COALESCE(source_created_at, downloaded_at, ''), content_type
              FROM downloads
              WHERE id IN (SELECT value FROM json_each(?1))",
         )
@@ -8312,12 +8576,66 @@ fn load_suggestion_works(conn: &Connection, ids: &[i64]) -> Result<Vec<Suggestio
                 cover_path: row.get(6)?,
                 text_length: row.get(7)?,
                 published_at: row.get(8)?,
+                content_type: row.get(9)?,
             })
         })
         .map_err(|e| format!("Failed to query suggestion works: {e}"))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| format!("Failed to read suggestion works: {e}"))?;
     Ok(works)
+}
+
+/// これだけの本数のリンクを持ち、かつ本文が薄い作品は、橋として使わない。
+const LINK_HUB_MIN_DEGREE: i64 = 5;
+
+/// ハブ判定で「薄い」とみなす字数。
+///
+/// 実データでは「【重要なお知らせ】小説作品の公開方針を変更いたします」
+/// （2,395字）が16本のリンクを持ち、無関係な17作を1つの束へ縫い合わせていた。
+const LINK_HUB_THIN_TEXT: i64 = 4_000;
+
+/// 橋として使わない作品の集合。
+///
+/// 告知記事は「関連作品はこちら」と何十作も並べる。リンクの向こう側に本当の
+/// 続きがあるのではなく、**そこが目次だった**というだけである。目次を渡って
+/// しまうと、目次に載っている全部が一つの束になる。
+fn load_link_hub_ids(conn: &Connection) -> Result<HashSet<i64>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT d.id, d.title, d.content_type, d.text_length, COUNT(*) AS degree
+             FROM downloads d
+             JOIN (
+               SELECT from_download_id AS id FROM work_links
+                WHERE status != 'rejected' AND from_download_id IS NOT NULL
+               UNION ALL
+               SELECT to_download_id AS id FROM work_links
+                WHERE status != 'rejected' AND to_download_id IS NOT NULL
+             ) edge ON edge.id = d.id
+             GROUP BY d.id
+             HAVING degree >= ?1",
+        )
+        .map_err(|e| format!("Failed to prepare link hub lookup: {e}"))?;
+    let rows = stmt
+        .query_map(params![LINK_HUB_MIN_DEGREE], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        })
+        .map_err(|e| format!("Failed to query link hubs: {e}"))?;
+    let mut hubs = HashSet::new();
+    for row in rows {
+        let (id, title, content_type, text_length) =
+            row.map_err(|e| format!("Failed to read link hubs: {e}"))?;
+        if collection_rules::is_administrative_post(&title, &content_type, text_length)
+            || text_length < LINK_HUB_THIN_TEXT
+        {
+            hubs.insert(id);
+        }
+    }
+    Ok(hubs)
 }
 
 fn load_link_edges_touching(
@@ -8387,6 +8705,13 @@ fn discover_linked_collection_component(
         .collect::<HashMap<_, _>>();
     let mut frontier = seeds.iter().map(|seed| seed.id).collect::<Vec<_>>();
     let mut refresh_budget = LINK_REFRESH_BUDGET;
+    // 目次や告知は端点として拾ってよいが、そこを渡って先へ行ってはいけない。
+    // 種は利用者が明示的に選んだものなので、この制限から外す。
+    let seed_ids = seeds.iter().map(|seed| seed.id).collect::<HashSet<_>>();
+    let hubs = {
+        let conn = db.read_conn()?;
+        load_link_hub_ids(&conn)?
+    };
 
     for _ in 0..LINK_TRAVERSAL_MAX_DEPTH {
         if frontier.is_empty() || paths.len() >= LINK_TRAVERSAL_MAX_WORKS {
@@ -8460,6 +8785,9 @@ fn discover_linked_collection_component(
                     || paths.contains_key(&neighbour)
                     || paths.len() >= LINK_TRAVERSAL_MAX_WORKS
                 {
+                    continue;
+                }
+                if hubs.contains(&current) && !seed_ids.contains(&current) {
                     continue;
                 }
                 let Some(parent) = paths.get(&current).copied() else {
@@ -9114,29 +9442,275 @@ fn compare_optional_order<T: Ord>(left: Option<T>, right: Option<T>) -> Ordering
     }
 }
 
-fn proposed_collection_name(
+/// 束の名前に使える長さ。棚のカードは2行までしか読めない。
+const COLLECTION_NAME_MAX_CHARS: usize = 42;
+
+/// 名前の案を、確からしい順に並べて返す。
+///
+/// 一つに決めて押し付けない。どの案も外れることがあり、外れたときに直せる
+/// のは利用者だけだからである。先頭が既定の `proposed_name` になる。
+///
+/// 以前はここが `title_stem_and_order` の返り値をそのまま名前にしていた。
+/// あれは**検索用の正規化キー**で、カタカナはひらがなへ倒れ記号も落ちている。
+/// 「はいすぺいけめん女子の綾城さん」はそうやって生まれた。
+fn collection_name_options(
     conn: &Connection,
     ranked: &[RankedSuggestionMember],
     seed_json: &str,
-) -> Result<String, String> {
+) -> Result<Vec<CollectionNameCandidate>, String> {
+    fn push(options: &mut Vec<CollectionNameCandidate>, source: &str, label: &str, name: String) {
+        let name = collection_rules::clamp_name(&name, COLLECTION_NAME_MAX_CHARS);
+        // 1文字の名前は棚で見分けが付かない。案として立てない。
+        if name.chars().count() < 2 || options.iter().any(|value| value.name == name) {
+            return;
+        }
+        options.push(CollectionNameCandidate {
+            source: source.to_string(),
+            label: label.to_string(),
+            name,
+        });
+    }
+    let mut options: Vec<CollectionNameCandidate> = Vec::new();
+
+    // 案A 題名。いちばん多くのメンバーが共有する語幹を、いちばん短い題名の
+    // 表記で出す。短いものを選ぶのは、長い方には枝葉が付いていることが多いため。
+    let mut families: HashMap<String, Vec<&RankedSuggestionMember>> = HashMap::new();
     for member in ranked {
-        if let Some((title, _)) = shared_series_with_seeds(conn, member.work.id, seed_json)?.first()
-        {
-            if !title.trim().is_empty() {
-                return Ok(title.trim().to_string());
+        let key = collection_rules::family_match_key(&member.work.title);
+        if key.chars().count() >= 6 {
+            families.entry(key).or_default().push(member);
+        }
+    }
+    if let Some((_, group)) = families
+        .iter()
+        .max_by_key(|(key, group)| (group.len(), key.chars().count()))
+    {
+        if group.len() >= 2 {
+            if let Some(shortest) = group
+                .iter()
+                .min_by_key(|member| member.work.title.chars().count())
+            {
+                push(
+                    &mut options,
+                    "title",
+                    "題名の共通部分",
+                    collection_rules::display_title_stem(&shortest.work.title),
+                );
             }
         }
     }
-    let (stem, _) = title_stem_and_order(&ranked[0].work.title);
-    if !stem.is_empty() {
-        return Ok(format!("{stem} 関連作品"));
+
+    // 案B 公式シリーズ。ただし作者の管理用ラベルは名前にしない。
+    // 「有償依頼」151作が1つの物語だったことは一度も無い。
+    for member in ranked {
+        if let Some((title, _)) = shared_series_with_seeds(conn, member.work.id, seed_json)?.first()
+        {
+            if !collection_rules::is_administrative_series_label(title) {
+                push(
+                    &mut options,
+                    "series",
+                    "公式シリーズ",
+                    title.trim().to_string(),
+                );
+                break;
+            }
+        }
     }
-    let author = ranked[0].work.author_name.trim();
-    if !author.is_empty() {
-        Ok(format!("{author}の作品コレクション"))
-    } else {
-        Ok("読書コレクション".to_string())
+
+    // 案C 共有タグ。原作・人物・題材の順に並ぶよう、珍しいタグを先に置く。
+    let ids = ranked.iter().map(|value| value.work.id).collect::<Vec<_>>();
+    let shared = shared_member_tags(conn, &ids, 3)?;
+    if !shared.is_empty() {
+        push(&mut options, "tags", "共有タグ", shared.join(" / "));
     }
+
+    // 案D 作者。ここまで何も言えなかったときだけ。
+    if let Some(first) = ranked.first() {
+        let author = first.work.author_name.trim();
+        if !author.is_empty() {
+            push(
+                &mut options,
+                "author",
+                "作者",
+                format!("{author}のまとまり"),
+            );
+        }
+    }
+    if options.is_empty() {
+        push(
+            &mut options,
+            "author",
+            "既定",
+            "読書コレクション".to_string(),
+        );
+    }
+    Ok(options)
+}
+
+/// 候補と基準作品が、同じ公式シリーズで**隣り合っているか**。
+///
+/// 同じシリーズに載っていることと、続けて読むべきことは違う。151作の
+/// 「有償依頼」に同居しているだけの2作は、隣り合ってはいない。返すのは
+/// シリーズ名と話数の隔たりで、隔たりが小さいときだけ束の証拠として扱う。
+fn shared_series_run_with_seeds(
+    conn: &Connection,
+    candidate_id: i64,
+    seed_json: &str,
+) -> Result<Option<(String, i64)>, String> {
+    conn.query_row(
+        "SELECT candidate.title, MIN(ABS(candidate.content_order - seed.content_order))
+         FROM download_series candidate
+         JOIN download_series seed
+           ON seed.series_source = candidate.series_source
+          AND seed.series_key = candidate.series_key
+         WHERE candidate.download_id = ?1
+           AND seed.download_id IN (SELECT value FROM json_each(?2))
+           AND seed.download_id != ?1
+           AND candidate.content_order IS NOT NULL
+           AND seed.content_order IS NOT NULL
+         GROUP BY candidate.series_source, candidate.series_key
+         ORDER BY 2 ASC
+         LIMIT 1",
+        params![candidate_id, seed_json],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+    )
+    .optional()
+    .map_err(|e| format!("Failed to query series adjacency: {e}"))
+}
+
+/// 候補と基準作品が共有している、束を言い表せるタグの数。
+fn shared_tags_with_seeds(
+    conn: &Connection,
+    candidate_id: i64,
+    seed_json: &str,
+) -> Result<Vec<String>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT DISTINCT t.name
+             FROM download_tags candidate
+             JOIN download_tags seed ON seed.tag_id = candidate.tag_id
+             JOIN tags t ON t.id = candidate.tag_id
+             WHERE candidate.download_id = ?1
+               AND seed.download_id IN (SELECT value FROM json_each(?2))
+               AND seed.download_id != ?1
+             ORDER BY t.name COLLATE NOCASE",
+        )
+        .map_err(|e| format!("Failed to prepare shared tag lookup: {e}"))?;
+    let rows = stmt
+        .query_map(params![candidate_id, seed_json], |row| {
+            row.get::<_, String>(0)
+        })
+        .map_err(|e| format!("Failed to query shared tags: {e}"))?;
+    let mut out = Vec::new();
+    for row in rows {
+        let name = row.map_err(|e| format!("Failed to read shared tags: {e}"))?;
+        if collection_rules::is_informative_tag(&name) {
+            out.push(name);
+        }
+    }
+    Ok(out)
+}
+
+/// 二つの投稿日が何日離れているか。読めない日付は「分からない」を返す。
+fn published_days_apart(left: &str, right: &str) -> Option<i64> {
+    let parse = |value: &str| {
+        chrono::DateTime::parse_from_rfc3339(value)
+            .ok()
+            .map(|value| value.date_naive())
+            .or_else(|| {
+                chrono::NaiveDate::parse_from_str(&value[..value.len().min(10)], "%Y-%m-%d").ok()
+            })
+    };
+    let left = parse(left)?;
+    let right = parse(right)?;
+    Some((left - right).num_days().abs())
+}
+
+/// なぜこれが束なのかを、一行で書く。
+///
+/// 「確度 74%」は根拠になっていないのに、数字であるという理由だけで信じて
+/// しまう。何が根拠なのかを言葉で出せば、利用者はそれが当たっているかを
+/// 自分で確かめられる。強い証拠から順に見て、最初に見つかったものを使う。
+fn suggestion_evidence_summary(
+    members: &[CollectionSuggestionMember],
+    seed_ids: &HashSet<i64>,
+) -> String {
+    let others = members
+        .iter()
+        .filter(|member| member.download_id.is_none_or(|id| !seed_ids.contains(&id)))
+        .collect::<Vec<_>>();
+    let count = |kind: &str| {
+        others
+            .iter()
+            .filter(|member| member.evidence.iter().any(|value| value.kind == kind))
+            .count()
+    };
+    let total = members.len();
+    let linked = count("content_link");
+    if linked > 0 {
+        return format!("本文のリンクで{}作がつながっています", linked + 1);
+    }
+    let ordered = members
+        .iter()
+        .filter(|member| collection_rules::has_ordinal_marker(&member.title))
+        .count();
+    if ordered * 2 > total && total > 1 {
+        return format!("題名が連番になっている{total}作です");
+    }
+    if count("title_similarity") > 0 {
+        return format!("題名の共通する{total}作です");
+    }
+    if let Some(label) = others
+        .iter()
+        .flat_map(|member| member.evidence.iter())
+        .find(|value| value.kind == "official_series")
+        .map(|value| value.label.clone())
+    {
+        return format!("{label}に並ぶ{total}作です");
+    }
+    if count("semantic_similarity") > 0 {
+        return format!("本文の内容が近い{total}作です");
+    }
+    format!("同じ作者の{total}作です")
+}
+
+/// 束のメンバーが共有しているタグを、珍しい順に返す。
+///
+/// 半数以上が持っているものだけを共有とみなす。全員に揃えると、1作だけ
+/// 抜けているタグが落ちて何も残らない束が出る。
+fn shared_member_tags(conn: &Connection, ids: &[i64], limit: usize) -> Result<Vec<String>, String> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let encoded =
+        serde_json::to_string(ids).map_err(|e| format!("Failed to encode tag member IDs: {e}"))?;
+    let threshold = ids.len().div_ceil(2).max(2) as i64;
+    let mut stmt = conn
+        .prepare(
+            "SELECT t.name, COUNT(*) AS shared,
+                    (SELECT COUNT(*) FROM download_tags dt2 WHERE dt2.tag_id = t.id) AS total
+             FROM download_tags dt
+             JOIN tags t ON t.id = dt.tag_id
+             WHERE dt.download_id IN (SELECT value FROM json_each(?1))
+             GROUP BY t.id
+             HAVING shared >= ?2
+             ORDER BY shared DESC, total ASC, t.name COLLATE NOCASE ASC",
+        )
+        .map_err(|e| format!("Failed to prepare shared tags: {e}"))?;
+    let rows = stmt
+        .query_map(params![encoded, threshold], |row| row.get::<_, String>(0))
+        .map_err(|e| format!("Failed to query shared tags: {e}"))?;
+    let mut out = Vec::new();
+    for row in rows {
+        let name = row.map_err(|e| format!("Failed to read shared tags: {e}"))?;
+        if collection_rules::is_informative_tag(&name) {
+            out.push(name);
+        }
+        if out.len() >= limit {
+            break;
+        }
+    }
+    Ok(out)
 }
 
 fn collection_suggestion_from_row(
@@ -9150,10 +9724,31 @@ fn collection_suggestion_from_row(
             Box::new(error),
         )
     })?;
+    let proposed_name: String = row.get(1)?;
+    // 案が保存されていない古い行でも、既定の名前だけは案として立てる。
+    let name_options = row
+        .get::<_, Option<String>>(9)?
+        .and_then(|raw| serde_json::from_str::<Vec<CollectionNameCandidate>>(&raw).ok())
+        .filter(|values| !values.is_empty())
+        .unwrap_or_else(|| {
+            vec![CollectionNameCandidate {
+                source: "title".to_string(),
+                label: "題名".to_string(),
+                name: proposed_name.clone(),
+            }]
+        });
     Ok(CollectionSuggestion {
         id: row.get(0)?,
-        proposed_name: row.get(1)?,
+        proposed_name,
+        name_options,
         collection_kind: row.get(2)?,
+        track: row
+            .get::<_, Option<String>>(10)?
+            .unwrap_or_else(|| "sequence".to_string()),
+        origin: row
+            .get::<_, Option<String>>(11)?
+            .unwrap_or_else(|| "seed".to_string()),
+        evidence_summary: row.get::<_, Option<String>>(12)?.unwrap_or_default(),
         members,
         score: row.get(4)?,
         rule_version: row.get(5)?,
@@ -9390,6 +9985,46 @@ fn validate_collection_kind(value: &str) -> Result<String, String> {
         "unordered" => Ok("unordered".to_string()),
         _ => Err("Collection kind must be ordered or unordered".to_string()),
     }
+}
+
+/// 省略（`None`）は「変えない」。呼び出し側が `COALESCE` で既存値を残す。
+fn validate_one_of(
+    value: Option<&str>,
+    allowed: &[&str],
+    message: &str,
+) -> Result<Option<String>, String> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    if allowed.contains(&value) {
+        Ok(Some(value.to_string()))
+    } else {
+        Err(message.to_string())
+    }
+}
+
+fn validate_cover_mode(value: Option<&str>) -> Result<Option<String>, String> {
+    validate_one_of(
+        value,
+        &["mosaic", "spine", "single", "sigil", "file"],
+        "Unknown collection cover mode",
+    )
+}
+
+fn validate_name_source(value: Option<&str>) -> Result<Option<String>, String> {
+    validate_one_of(
+        value,
+        &["manual", "title", "series", "tags", "author", "llm"],
+        "Unknown collection name source",
+    )
+}
+
+fn validate_collection_track(value: Option<&str>) -> Result<Option<String>, String> {
+    validate_one_of(
+        value,
+        &["manual", "sequence", "theme"],
+        "Unknown collection track",
+    )
 }
 
 fn validate_work_key_part(value: &str, label: &str) -> Result<String, String> {
@@ -10346,37 +10981,6 @@ fn download_select_sql_for_projection(
             "NULL",
             "NULL",
         ),
-        // The list view shows tags too; only the excerpt is surplus there.
-        "libraryCompact" => (
-            format!(
-                "d.id,
-                d.source,
-                d.source_id,
-                d.title,
-                d.author_name,
-                d.author_id,
-                d.content_type,
-                {tags_expr} AS tags,
-                NULL AS excerpt,
-                d.cover_path,
-                d.json_path,
-                d.original_json_path,
-                d.asset_count,
-                d.file_size_bytes,
-                d.downloaded_at,
-                d.source_created_at,
-                d.content_hash,
-                d.text_length,
-                d.source_updated_at,
-                d.watch_updates,
-                d.current_version,
-                d.favorite"
-            ),
-            person_id_expr,
-            person_name_expr,
-            series_id_expr,
-            series_title_expr,
-        ),
         _ => (
             format!(
                 "d.id,
@@ -11208,8 +11812,11 @@ fn upsert_download_in_connection(conn: &Connection, dl: &NewDownload) -> Result<
         params![id, now, dl.source, dl.source_id],
     )
     .map_err(|e| format!("Failed to reconnect incoming work links: {e}"))?;
+    // 消してよいのは取得元が付けたタグだけ。利用者が足したものと、モデルの案を
+    // 利用者が採ったものは、取り直しても残す — **取得元が知らないことを
+    // 取得元の都合で消してはいけない。**
     conn.execute(
-        "DELETE FROM download_tags WHERE download_id = ?1",
+        "DELETE FROM download_tags WHERE download_id = ?1 AND tag_source = 'origin'",
         params![id],
     )
     .map_err(|e| format!("Failed to clear old tags: {e}"))?;
@@ -11226,8 +11833,11 @@ fn upsert_download_in_connection(conn: &Connection, dl: &NewDownload) -> Result<
                 |row| row.get::<_, i64>(0),
             )
             .map_err(|e| format!("Failed to retrieve tag ID: {e}"))?;
+        // 取得元が付けているなら、それは取得元のタグである。前にモデルの案として
+        // 採ったものが、あとから取得元にも現れたら、出どころは取得元へ移す。
         conn.execute(
-            "INSERT OR IGNORE INTO download_tags (download_id, tag_id) VALUES (?1, ?2)",
+            "INSERT INTO download_tags (download_id, tag_id, tag_source) VALUES (?1, ?2, 'origin')
+             ON CONFLICT(download_id, tag_id) DO UPDATE SET tag_source = 'origin'",
             params![id, tag_id],
         )
         .map_err(|e| format!("Failed to insert download tag relation: {e}"))?;
@@ -12556,6 +13166,208 @@ fn entity_version_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<EntityVe
         created_at: row.get(9)?,
         change_summary: row.get(10)?,
     })
+}
+
+fn recover_staged_deletes(
+    conn: &Connection,
+    db_path: &Path,
+    storage_dir: &Path,
+) -> Result<(), String> {
+    let staging_root = db_path
+        .parent()
+        .unwrap_or(storage_dir)
+        .join("delete-staging");
+    if !staging_root.exists() {
+        return Ok(());
+    }
+
+    let operations = std::fs::read_dir(&staging_root)
+        .map_err(|e| format!("Failed to scan delete staging directory: {e}"))?;
+    let mut deleted_ids = Vec::new();
+    for operation in operations {
+        let operation = operation.map_err(|e| format!("Failed to read staged delete: {e}"))?;
+        let operation_path = operation.path();
+        if !operation_path.is_dir() {
+            continue;
+        }
+        let manifest_path = operation_path.join("manifest.json");
+        if !manifest_path.exists() {
+            let is_empty = std::fs::read_dir(&operation_path)
+                .map(|mut entries| entries.next().is_none())
+                .unwrap_or(false);
+            if is_empty {
+                let _ = std::fs::remove_dir(&operation_path);
+                continue;
+            }
+            return Err(format!(
+                "Delete staging data has no recovery manifest: {}",
+                operation_path.display()
+            ));
+        }
+        let raw = std::fs::read(&manifest_path)
+            .map_err(|e| format!("Failed to read delete recovery manifest: {e}"))?;
+        let entries: Vec<StagedDeleteEntry> = serde_json::from_slice(&raw)
+            .map_err(|e| format!("Failed to decode delete recovery manifest: {e}"))?;
+
+        let mut operation_complete = true;
+        for entry in entries {
+            let mut staged_components = Path::new(&entry.staged_name).components();
+            if !matches!(
+                staged_components.next(),
+                Some(std::path::Component::Normal(_))
+            ) || staged_components.next().is_some()
+            {
+                return Err("Invalid path in delete recovery manifest".to_string());
+            }
+            let original =
+                validated_download_work_root(storage_dir, &entry.source, &entry.source_id)?;
+            let staged = operation_path.join(&entry.staged_name);
+            let still_exists = conn
+                .query_row(
+                    "SELECT 1 FROM downloads
+                     WHERE id = ?1 AND source = ?2 AND source_id = ?3",
+                    params![entry.download_id, entry.source, entry.source_id],
+                    |_| Ok(()),
+                )
+                .optional()
+                .map_err(|e| format!("Failed to reconcile staged delete: {e}"))?
+                .is_some();
+
+            if still_exists {
+                if staged.exists() {
+                    if original.exists() {
+                        return Err(format!(
+                            "Both original and staged work directories exist: {}",
+                            original.display()
+                        ));
+                    }
+                    if let Some(parent) = original.parent() {
+                        std::fs::create_dir_all(parent).map_err(|e| {
+                            format!("Failed to recreate work parent directory: {e}")
+                        })?;
+                    }
+                    std::fs::rename(&staged, &original)
+                        .map_err(|e| format!("Failed to restore interrupted delete: {e}"))?;
+                }
+            } else {
+                deleted_ids.push(entry.download_id);
+                if staged.exists() && remove_dir_all_resilient(&staged).is_err() {
+                    operation_complete = false;
+                }
+            }
+        }
+
+        if operation_complete {
+            let _ = std::fs::remove_file(&manifest_path);
+            let _ = std::fs::remove_dir(&operation_path);
+        }
+    }
+    if !deleted_ids.is_empty() {
+        if let Err(error) = super::tantivy_index::delete_documents(storage_dir, &deleted_ids) {
+            log::warn!("Failed to recover lexical index cleanup: {error}");
+        }
+        if let Err(error) = super::semantic_index::clear_documents(storage_dir, &deleted_ids) {
+            log::warn!("Failed to recover semantic index cleanup: {error}");
+        }
+    }
+    let _ = std::fs::remove_dir(&staging_root);
+    Ok(())
+}
+
+/// `collection-covers/` はアプリが管理するコピーだけを置く場所である。
+///
+/// 表紙の取り込みはDB書き込みより先に完了させるため、書き込み失敗や異常終了で
+/// 未参照ファイルが残り得る。復元バックアップの表紙は1段下のディレクトリへ
+/// 入るので、リンクを辿らない有界走査で両方を回収する。
+fn cleanup_orphaned_collection_covers(
+    conn: &Connection,
+    db_path: &Path,
+    storage_dir: &Path,
+) -> Result<(), String> {
+    const MAX_ENTRIES: usize = 10_000;
+    const MAX_DEPTH: usize = 8;
+
+    let app_data = db_path
+        .parent()
+        .or_else(|| storage_dir.parent())
+        .unwrap_or(storage_dir);
+    let root = app_data.join("collection-covers");
+    if !root.exists() {
+        return Ok(());
+    }
+    let canonical_root = root
+        .canonicalize()
+        .map_err(|e| format!("Collection cover directory cannot be resolved: {e}"))?;
+
+    let mut statement = conn
+        .prepare(
+            "SELECT cover_image_path FROM work_collections
+             WHERE cover_image_path IS NOT NULL AND TRIM(cover_image_path) != ''",
+        )
+        .map_err(|e| format!("Collection cover references cannot be read: {e}"))?;
+    let referenced = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|e| format!("Collection cover references cannot be queried: {e}"))?
+        .filter_map(Result::ok)
+        .filter_map(|path| PathBuf::from(path).canonicalize().ok())
+        .filter(|path| path.starts_with(&canonical_root))
+        .collect::<HashSet<_>>();
+
+    let mut pending = vec![(root.clone(), 0usize)];
+    let mut directories = Vec::new();
+    let mut visited = 0usize;
+    while let Some((directory, depth)) = pending.pop() {
+        let metadata = std::fs::symlink_metadata(&directory)
+            .map_err(|e| format!("Collection cover directory cannot be inspected: {e}"))?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            continue;
+        }
+        directories.push(directory.clone());
+        for entry in std::fs::read_dir(&directory)
+            .map_err(|e| format!("Collection cover directory cannot be scanned: {e}"))?
+        {
+            let entry = entry.map_err(|e| format!("Collection cover entry cannot be read: {e}"))?;
+            visited = visited.saturating_add(1);
+            if visited > MAX_ENTRIES {
+                return Err(format!(
+                    "Collection cover cleanup exceeded the {MAX_ENTRIES}-entry safety limit"
+                ));
+            }
+            let path = entry.path();
+            let metadata = std::fs::symlink_metadata(&path)
+                .map_err(|e| format!("Collection cover entry cannot be inspected: {e}"))?;
+            if metadata.file_type().is_symlink() {
+                continue;
+            }
+            if metadata.is_dir() {
+                if depth >= MAX_DEPTH {
+                    return Err(format!(
+                        "Collection cover cleanup exceeded the depth-{MAX_DEPTH} safety limit"
+                    ));
+                }
+                pending.push((path, depth + 1));
+                continue;
+            }
+            if !metadata.is_file() {
+                continue;
+            }
+            let canonical = path
+                .canonicalize()
+                .map_err(|e| format!("Collection cover file cannot be resolved: {e}"))?;
+            if canonical.starts_with(&canonical_root) && !referenced.contains(&canonical) {
+                std::fs::remove_file(&path)
+                    .map_err(|e| format!("Orphaned collection cover cannot be removed: {e}"))?;
+            }
+        }
+    }
+
+    directories.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
+    for directory in directories {
+        if directory != root {
+            let _ = std::fs::remove_dir(&directory);
+        }
+    }
+    Ok(())
 }
 
 fn validated_download_work_root(
@@ -13909,10 +14721,14 @@ mod search_integration_tests {
         let _ = (opening, third);
     }
 
-    /// 公式シリーズに同居しているだけの作品まで既定で選ぶと、短編集を丸ごと
-    /// 取り込んでしまう。順序も過半数で決める。
+    /// 公式シリーズに同居しているだけの短編集は、束にならない。
+    ///
+    /// 以前は「候補には出すが既定では選ばない」だった。しかしチェックの
+    /// 付かない候補が並ぶことに価値は無く、151作のシリーズを種にすると
+    /// 60件がそうやって画面を埋めた。**同じ棚に載っていることは、同じ束に
+    /// 属する証拠ではない。**話数が隣り合っていて初めて証拠になる。
     #[test]
-    fn series_only_siblings_are_offered_but_not_preselected() {
+    fn sharing_an_anthology_shelf_yields_no_bundle() {
         let (_temp, root, storage) = temp_paths();
         let db = Database::open(&root.join("piep.db"), &storage).unwrap();
         let seed = insert_download_unindexed(
@@ -13940,19 +14756,44 @@ mod search_integration_tests {
             db.upsert_download_series(id, "pixiv", "anthology", "短編集", None)
                 .unwrap();
         }
+        let result = db.generate_collection_suggestion(&CollectionSuggestionRequest {
+            seed_download_ids: vec![seed],
+            limit: Some(20),
+        });
+        assert_eq!(
+            result.unwrap_err(),
+            "関連作品は見つかりませんでした",
+            "同じ短編集に載っているだけの作品を束にしてはいけない"
+        );
+
+        // 話数が入れば話は別。隣り合う2作だけが束になる。
+        for (id, order) in std::iter::once(seed)
+            .chain(others.iter().copied())
+            .zip([1_i64, 2, 40, 41, 42])
+        {
+            db.upsert_download_series(id, "pixiv", "anthology", "短編集", Some(order))
+                .unwrap();
+        }
         let suggestion = db
             .generate_collection_suggestion(&CollectionSuggestionRequest {
                 seed_download_ids: vec![seed],
                 limit: Some(20),
             })
             .unwrap();
-        assert_eq!(suggestion.collection_kind, "unordered");
-        let preselected = suggestion
-            .members
-            .iter()
-            .filter(|member| member.selected)
-            .count();
-        assert_eq!(preselected, 1, "種だけが既定で選ばれる");
+        assert_eq!(
+            suggestion.members.len(),
+            2,
+            "隣接する1作だけが加わる: {:?}",
+            suggestion
+                .members
+                .iter()
+                .map(|member| member.title.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            suggestion.members.iter().all(|member| member.selected),
+            "証拠のあるものだけが残るので、全部が既定で選ばれる"
+        );
     }
 
     #[test]
@@ -13979,11 +14820,11 @@ mod search_integration_tests {
         );
         let collection = db
             .upsert_work_collection(&WorkCollectionInput {
-                id: None,
                 name: "夜の手紙".to_string(),
                 description: Some("前後編".to_string()),
                 collection_kind: "ordered".to_string(),
                 cover_download_id: Some(first),
+                ..Default::default()
             })
             .unwrap();
         let collection = db
@@ -14081,6 +14922,497 @@ mod search_integration_tests {
                 && link.to_source_id == "456"
                 && link.relation_type == "continues_to"
         }));
+    }
+
+    /// 同じシリーズに同居しているだけの作品を、候補にしない。
+    ///
+    /// 以前は公式シリーズ 0.58 と同一作者 0.12 を足して必ず 0.70 になり、
+    /// 採用閾値 0.44 を越えて候補に並んでいた。既定では選ばれないので、
+    /// 「チェックの付かない候補」が151作のシリーズから60件出ていた。
+    #[test]
+    fn sharing_a_series_shelf_is_not_evidence_of_a_bundle() {
+        let (_temp, root, storage) = temp_paths();
+        let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+        let seed = insert_download_unindexed(
+            &db,
+            &storage,
+            "shelf-seed",
+            "夜の灯",
+            "受注作者",
+            &[],
+            "本文",
+        );
+        let far = insert_download_unindexed(
+            &db,
+            &storage,
+            "shelf-far",
+            "まったく別の話",
+            "受注作者",
+            &[],
+            "本文",
+        );
+        let neighbour = insert_download_unindexed(
+            &db,
+            &storage,
+            "shelf-neighbour",
+            "続きもの その2",
+            "受注作者",
+            &[],
+            "本文",
+        );
+        {
+            let conn = db.conn.lock().unwrap();
+            for (id, order) in [(seed, 1), (far, 90), (neighbour, 2)] {
+                conn.execute(
+                    "INSERT INTO download_series
+                       (download_id, series_source, series_key, title, content_order)
+                     VALUES (?1, 'pixiv', 'req-1', '有償依頼', ?2)",
+                    params![id, order],
+                )
+                .unwrap();
+            }
+        }
+
+        let suggestion = db
+            .generate_collection_suggestion(&CollectionSuggestionRequest {
+                seed_download_ids: vec![seed],
+                limit: Some(20),
+            })
+            .unwrap();
+        let ids = suggestion
+            .members
+            .iter()
+            .map(|member| member.source_id.as_str())
+            .collect::<Vec<_>>();
+        // 90話離れた同居作は、もう候補に入らない。
+        assert!(
+            !ids.contains(&"shelf-far"),
+            "同じ棚に載っているだけの作品が候補に残っている: {ids:?}"
+        );
+        // 話数が隣り合っているものは束の証拠として残る。
+        assert!(
+            ids.contains(&"shelf-neighbour"),
+            "話数が隣接する作品が落ちている: {ids:?}"
+        );
+
+        // 名前が管理用ラベル「有償依頼」にならない。
+        assert_ne!(suggestion.proposed_name, "有償依頼");
+        assert!(!suggestion.name_options.is_empty());
+        // 確度%ではなく、言葉で根拠が出る。
+        assert!(!suggestion.evidence_summary.is_empty());
+    }
+
+    /// 棚全体の走査。1作ずつ種を選ばなくても束が出てくる。
+    #[test]
+    fn sweeping_the_shelf_finds_bundles_without_a_seed() {
+        let (_temp, root, storage) = temp_paths();
+        let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+        // 語幹は9文字以上ないと束ねない。短い語幹は無関係な作品どうしを
+        // 結びつけるので、実データに近い長さで確かめる。
+        for (source_id, title) in [
+            ("sweep-1", "岬の灯台守が季節はずれの手紙を受け取る話 第1話"),
+            ("sweep-2", "岬の灯台守が季節はずれの手紙を受け取る話 第2話"),
+            ("sweep-3", "岬の灯台守が季節はずれの手紙を受け取る話 第3話"),
+        ] {
+            insert_download_unindexed(&db, &storage, source_id, title, "連載作者", &[], "本文");
+        }
+        {
+            // 試験の下ごしらえは作品ごとに違う author_id を振る。同じ作者の
+            // 連載であることを、束ねる側が見ている形にそろえる。
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE downloads SET author_id = 'writer-1' WHERE author_name = '連載作者'",
+                [],
+            )
+            .unwrap();
+        }
+        // 無関係な単発。束にはならない。
+        insert_download_unindexed(&db, &storage, "sweep-solo", "別の話", "別作者", &[], "本文");
+        // 告知は走査の対象外。
+        let notice = insert_download_unindexed(
+            &db,
+            &storage,
+            "sweep-notice",
+            "2023年5月進捗のご報告と6月の展望",
+            "連載作者",
+            &[],
+            "本文",
+        );
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE downloads SET content_type = 'article', text_length = 800 WHERE id = ?1",
+                params![notice],
+            )
+            .unwrap();
+        }
+
+        let swept = db.sweep_collection_candidates().unwrap().bundles;
+        assert_eq!(swept.len(), 1, "束がひとつだけ出るはず: {swept:?}");
+        let bundle = &swept[0];
+        assert_eq!(bundle.origin, "sweep");
+        assert_eq!(bundle.track, "sequence");
+        assert_eq!(bundle.members.len(), 3);
+        // 話数の順に並ぶ。
+        let order = bundle
+            .members
+            .iter()
+            .map(|member| member.source_id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(order, vec!["sweep-1", "sweep-2", "sweep-3"]);
+        // 確度%ではなく、言葉で根拠が出る。
+        assert!(
+            bundle.evidence_summary.contains("連番"),
+            "{}",
+            bundle.evidence_summary
+        );
+        // 名前が検索用の正規化キーになっていない。
+        assert!(
+            bundle.proposed_name.contains("灯台守"),
+            "{}",
+            bundle.proposed_name
+        );
+        assert!(
+            !bundle.proposed_name.contains("第1話"),
+            "{}",
+            bundle.proposed_name
+        );
+
+        // 二度走らせても、同じ束が1つだけ残る。走査は積み上げない。
+        let again = db.sweep_collection_candidates().unwrap().bundles;
+        assert_eq!(again.len(), 1);
+        assert_eq!(
+            db.list_collection_suggestions(Some("pending"))
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    /// タグの出どころを混ぜない。
+    ///
+    /// 取得元が付けたタグとモデルが足したタグは確からしさが違う。**どちらか
+    /// 分からなくなった時点で、両方が信用できなくなる。** 取り直しで消えるのは
+    /// 取得元のぶんだけで、利用者が採った案は残る。
+    #[test]
+    fn assisted_tags_stay_distinguishable_and_survive_a_refetch() {
+        let (_temp, root, storage) = temp_paths();
+        let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+        let id = insert_download_unindexed(
+            &db,
+            &storage,
+            "tagged-1",
+            "催眠アプリで人生を染められる話",
+            "作者",
+            &["催眠", "R-18"],
+            "本文",
+        );
+
+        let added = db
+            .add_assisted_tags(id, &["洗脳".to_string(), "催眠".to_string()])
+            .unwrap();
+        // すでに取得元が付けている「催眠」は触らない。
+        assert_eq!(added, vec!["洗脳".to_string()]);
+
+        let tags = db.work_tags_with_source(id).unwrap();
+        let by_name = tags
+            .iter()
+            .map(|value| (value.name.as_str(), value.source.as_str()))
+            .collect::<HashMap<_, _>>();
+        assert_eq!(by_name.get("催眠"), Some(&"origin"));
+        assert_eq!(by_name.get("洗脳"), Some(&"llm"));
+
+        // 取り直しても、モデルの案から採ったタグは残る。
+        insert_download_unindexed(
+            &db,
+            &storage,
+            "tagged-1",
+            "催眠アプリで人生を染められる話",
+            "作者",
+            &["催眠", "R-18", "常識改変"],
+            "本文",
+        );
+        let after = db.work_tags_with_source(id).unwrap();
+        let names = after
+            .iter()
+            .map(|v| v.name.as_str())
+            .collect::<HashSet<_>>();
+        assert!(
+            names.contains("洗脳"),
+            "モデルのタグが消えている: {names:?}"
+        );
+        assert!(
+            names.contains("常識改変"),
+            "取得元の新しいタグが入っていない"
+        );
+
+        // 外せるのはモデルのぶんだけ。取得元のタグは外せない。
+        assert!(!db.remove_assisted_tag(id, "催眠").unwrap());
+        assert!(db.remove_assisted_tag(id, "洗脳").unwrap());
+        let finally = db.work_tags_with_source(id).unwrap();
+        assert!(finally.iter().all(|value| value.name != "洗脳"));
+        assert!(finally.iter().any(|value| value.name == "催眠"));
+    }
+
+    /// 覚え書きは、書いたモデルと一緒に残す。
+    #[test]
+    fn ai_notes_remember_which_model_wrote_them() {
+        let (_temp, root, storage) = temp_paths();
+        let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+        assert!(db.load_ai_note("work", "1", "synopsis").unwrap().is_none());
+
+        db.save_ai_note("work", "1", "synopsis", "最初の文", "model-a")
+            .unwrap();
+        let note = db.load_ai_note("work", "1", "synopsis").unwrap().unwrap();
+        assert_eq!(note.text, "最初の文");
+        assert_eq!(note.model_id, "model-a");
+
+        // 書き直すと、モデルの名前も一緒に入れ替わる。古い文が別のモデルの
+        // ものとして残らない。
+        db.save_ai_note("work", "1", "synopsis", "書き直した文", "model-b")
+            .unwrap();
+        let note = db.load_ai_note("work", "1", "synopsis").unwrap().unwrap();
+        assert_eq!(note.text, "書き直した文");
+        assert_eq!(note.model_id, "model-b");
+
+        assert!(db.delete_ai_note("work", "1", "synopsis").unwrap());
+        assert!(db.load_ai_note("work", "1", "synopsis").unwrap().is_none());
+    }
+
+    /// 走査で出た候補は、まとめて閉じられる。
+    ///
+    /// 300件を1件ずつ閉じる人はいない。**一括で消せないなら、出さないほうが
+    /// まし**になってしまう。閉じるのは下書きだけで、否定は記録しない。
+    #[test]
+    fn swept_candidates_can_be_closed_in_one_go() {
+        let (_temp, root, storage) = temp_paths();
+        let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+        for (source_id, title) in [
+            ("bulk-1", "岬の灯台守が季節はずれの手紙を受け取る話 第1話"),
+            ("bulk-2", "岬の灯台守が季節はずれの手紙を受け取る話 第2話"),
+        ] {
+            insert_download_unindexed(&db, &storage, source_id, title, "連載作者", &[], "本文");
+        }
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute("UPDATE downloads SET author_id = 'writer-1'", [])
+                .unwrap();
+        }
+        assert_eq!(db.sweep_collection_candidates().unwrap().bundles.len(), 1);
+
+        assert_eq!(
+            db.dismiss_swept_suggestions(Some("theme")).unwrap(),
+            0,
+            "系統が違えば消えない"
+        );
+        assert_eq!(db.dismiss_swept_suggestions(None).unwrap(), 1);
+        assert!(db
+            .list_collection_suggestions(Some("pending"))
+            .unwrap()
+            .is_empty());
+
+        // 否定は記録していないので、もう一度走査すれば同じものが出てくる。
+        assert_eq!(db.sweep_collection_candidates().unwrap().bundles.len(), 1);
+    }
+
+    /// 合本は、分冊がそろっているときだけ畳む。
+    #[test]
+    fn a_combined_volume_folds_only_when_its_parts_are_there() {
+        let (_temp, root, storage) = temp_paths();
+        let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+        let base = "財閥系お嬢様に貸し切られた電車の中で搾り尽くされる話";
+        for (source_id, title) in [
+            ("omni-1", format!("【前編】{base}")),
+            ("omni-2", format!("【中編】{base}")),
+            ("omni-3", format!("【後編】{base}")),
+            ("omni-all", format!("【前編＋中編】{base}")),
+        ] {
+            insert_download_unindexed(&db, &storage, source_id, &title, "連載作者", &[], "本文");
+        }
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute("UPDATE downloads SET author_id = 'writer-2'", [])
+                .unwrap();
+        }
+        let swept = db.sweep_collection_candidates().unwrap().bundles;
+        let ids = swept
+            .iter()
+            .flat_map(|bundle| bundle.members.iter())
+            .map(|member| member.source_id.as_str())
+            .collect::<Vec<_>>();
+        assert!(
+            !ids.contains(&"omni-all"),
+            "分冊がそろっているのに合本が残っている: {ids:?}"
+        );
+        assert!(
+            ids.contains(&"omni-1") && ids.contains(&"omni-3"),
+            "{ids:?}"
+        );
+    }
+
+    /// 束にできないほど大きなタグは、黙って捨てずに絞り込みとして勧める。
+    #[test]
+    fn a_tag_too_large_to_bundle_is_offered_as_a_saved_search() {
+        let (_temp, root, storage) = temp_paths();
+        let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+        for index in 0..70 {
+            insert_download_unindexed(
+                &db,
+                &storage,
+                &format!("wide-{index}"),
+                &format!("それぞれ無関係な話 {index}"),
+                &format!("作者{index}"),
+                &["催眠"],
+                "本文",
+            );
+        }
+        let swept = db.sweep_collection_candidates().unwrap();
+        let idea = swept
+            .saved_search_suggestions
+            .iter()
+            .find(|value| value.tag == "催眠")
+            .expect("大きすぎるタグが勧められていない");
+        assert_eq!(idea.work_count, 70);
+        assert!(idea.reason.contains("大きい"), "{}", idea.reason);
+        // 束としては出さない。まとまりではなく絞り込みの結果だからである。
+        assert!(swept.bundles.iter().all(|bundle| bundle.track != "theme"));
+    }
+
+    /// 取得元をまたいだ同じ作品を、続きとして二度並べない。
+    ///
+    /// `author_id` は取得元ごとに違う（同じ人が pixiv では数字、FANBOX では
+    /// 英字を名乗る）。ID で突き合わせていたころは、pixiv 版と FANBOX 版が
+    /// 別の作品として同じ束に二度出ていた。
+    #[test]
+    fn the_same_work_from_two_sources_is_one_member_not_two() {
+        let (_temp, root, storage) = temp_paths();
+        let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+        let title = "ギアスにかけられた純血派の活動資金援助を条件にする話";
+        let pixiv = insert_download_unindexed(
+            &db,
+            &storage,
+            "cross-pixiv",
+            title,
+            "キモデブ君",
+            &[],
+            "本文",
+        );
+        let fanbox = insert_download_unindexed(
+            &db,
+            &storage,
+            "cross-fanbox",
+            title,
+            "キモデブ君",
+            &[],
+            "本文がもっと長い",
+        );
+        let other = insert_download_unindexed(
+            &db,
+            &storage,
+            "cross-other",
+            "ギアスにかけられた純血派の活動資金援助を条件にする話 第2話",
+            "キモデブ君",
+            &[],
+            "続き",
+        );
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE downloads SET source = 'fanbox', author_id = 'kimodebu-kun' WHERE id = ?1",
+                params![fanbox],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE downloads SET author_id = '3259258' WHERE id IN (?1, ?2)",
+                params![pixiv, other],
+            )
+            .unwrap();
+        }
+
+        let swept = db.sweep_collection_candidates().unwrap().bundles;
+        let bundle = swept
+            .iter()
+            .find(|value| value.members.len() >= 2)
+            .expect("題名の連番で束になるはず");
+        let sources = bundle
+            .members
+            .iter()
+            .map(|member| member.source_id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(sources.len(), 2, "同じ作品が二度並んでいる: {sources:?}");
+        // 代表は本文の長いほう。サンプルは導入だけのことが多い。
+        assert!(sources.contains(&"cross-fanbox"), "{sources:?}");
+        assert!(!sources.contains(&"cross-pixiv"), "{sources:?}");
+    }
+
+    /// 告知記事は束ねない。目次を渡って先へも行かない。
+    #[test]
+    fn notices_neither_join_a_bundle_nor_bridge_one() {
+        let (_temp, root, storage) = temp_paths();
+        let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+        let seed = insert_download_unindexed(
+            &db,
+            &storage,
+            "notice-seed",
+            "灯台 前編",
+            "作者",
+            &[],
+            "本文",
+        );
+        let sequel = insert_download_unindexed(
+            &db,
+            &storage,
+            "notice-next",
+            "灯台 後編",
+            "作者",
+            &[],
+            "本文",
+        );
+        let notice = insert_download_unindexed(
+            &db,
+            &storage,
+            "notice-post",
+            "【重要なお知らせ】公開方針を変更いたします",
+            "作者",
+            &[],
+            "本文",
+        );
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE downloads SET content_type = 'article', text_length = 900 WHERE id = ?1",
+                params![notice],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO work_links
+                   (from_source, from_source_id, from_download_id,
+                    to_source, to_source_id, to_download_id,
+                    relation_type, evidence_type, confidence, status)
+                 VALUES ('pixiv', 'notice-seed', ?1, 'pixiv', 'notice-post', ?2,
+                         'mentions', 'content_link', 0.9, 'observed')",
+                params![seed, notice],
+            )
+            .unwrap();
+        }
+
+        let suggestion = db
+            .generate_collection_suggestion(&CollectionSuggestionRequest {
+                seed_download_ids: vec![seed],
+                limit: Some(20),
+            })
+            .unwrap();
+        let ids = suggestion
+            .members
+            .iter()
+            .map(|member| member.source_id.as_str())
+            .collect::<Vec<_>>();
+        assert!(
+            !ids.contains(&"notice-post"),
+            "告知記事が束に入っている: {ids:?}"
+        );
+        assert!(ids.contains(&"notice-next"), "続きが落ちている: {ids:?}");
+        assert_eq!(sequel, sequel);
     }
 
     #[test]
@@ -14283,6 +15615,16 @@ mod search_integration_tests {
             &[],
             "意味検索からも消える本文 beta",
         );
+        db.save_ai_note("work", &first.to_string(), "synopsis", "要約", "model")
+            .unwrap();
+        db.save_ai_note(
+            "work",
+            &format!("{second}:{first}"),
+            "recap",
+            "前回まで",
+            "model",
+        )
+        .unwrap();
 
         let before =
             crate::database::tantivy_index::matching_download_ids(&storage, "quartzdeletemarker")
@@ -14304,6 +15646,219 @@ mod search_integration_tests {
             crate::database::semantic_index::status(&storage).indexed_chunks,
             0
         );
+        assert!(!storage.join("pixiv").join("delete-index-one").exists());
+        assert!(!storage.join("pixiv").join("delete-index-two").exists());
+        assert!(db
+            .load_ai_note("work", &first.to_string(), "synopsis")
+            .unwrap()
+            .is_none());
+        assert!(db
+            .load_ai_note("work", &format!("{second}:{first}"), "recap")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn deleting_a_series_cover_selects_a_surviving_work_or_clears_it() {
+        let (_temp, root, storage) = temp_paths();
+        let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+        let first = insert_download_unindexed(
+            &db,
+            &storage,
+            "series-cover-first",
+            "連作 第一話",
+            "作者",
+            &[],
+            "第一話",
+        );
+        let second = insert_download_unindexed(
+            &db,
+            &storage,
+            "series-cover-second",
+            "連作 第二話",
+            "作者",
+            &[],
+            "第二話",
+        );
+        let first_cover = storage
+            .join("pixiv")
+            .join("series-cover-first")
+            .join("v1")
+            .join("cover.jpg");
+        let second_cover = storage
+            .join("pixiv")
+            .join("series-cover-second")
+            .join("v1")
+            .join("cover.jpg");
+        fs::write(&first_cover, b"first cover").unwrap();
+        fs::write(&second_cover, b"second cover").unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE downloads SET cover_path = ?1 WHERE id = ?2",
+                params![first_cover.to_string_lossy(), first],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE downloads SET cover_path = ?1 WHERE id = ?2",
+                params![second_cover.to_string_lossy(), second],
+            )
+            .unwrap();
+        }
+        db.upsert_download_series(first, "pixiv", "series-cover", "連作", Some(1))
+            .unwrap();
+        db.upsert_download_series(second, "pixiv", "series-cover", "連作", Some(2))
+            .unwrap();
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE series SET cover_path = ?1
+                 WHERE source = 'pixiv' AND source_key = 'series-cover'",
+                params![first_cover.to_string_lossy()],
+            )
+            .unwrap();
+
+        db.delete_downloads(&[first]).unwrap();
+        assert_eq!(
+            db.get_series("pixiv", "series-cover")
+                .unwrap()
+                .cover_path
+                .as_deref(),
+            Some(second_cover.to_string_lossy().as_ref())
+        );
+
+        db.delete_downloads(&[second]).unwrap();
+        assert!(db
+            .get_series("pixiv", "series-cover")
+            .unwrap()
+            .cover_path
+            .is_none());
+    }
+
+    #[test]
+    fn semantic_prune_clears_orphans_when_library_is_empty() {
+        let (_temp, root, storage) = temp_paths();
+        let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+        let id = insert_download(
+            &db,
+            &storage,
+            "last-semantic-work",
+            "最後の作品",
+            "作者",
+            &[],
+            "索引へ残してからDB行だけ消す本文",
+        );
+        assert!(crate::database::semantic_index::status(&storage).indexed_chunks > 0);
+
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute("DELETE FROM downloads WHERE id = ?1", params![id])
+                .unwrap();
+        }
+
+        assert!(db.prune_semantic_index().unwrap() > 0);
+        assert_eq!(
+            crate::database::semantic_index::status(&storage).indexed_chunks,
+            0
+        );
+    }
+
+    #[test]
+    fn opening_database_recovers_both_sides_of_an_interrupted_delete() {
+        let (_temp, root, storage) = temp_paths();
+        let db_path = root.join("piep.db");
+        let db = Database::open(&db_path, &storage).unwrap();
+        let id = insert_download(
+            &db,
+            &storage,
+            "delete-recovery",
+            "復旧対象",
+            "作者",
+            &[],
+            "削除処理の途中で停止する本文",
+        );
+        let original = storage.join("pixiv").join("delete-recovery");
+        let operation = root.join("delete-staging").join("before-commit");
+        fs::create_dir_all(&operation).unwrap();
+        let manifest = vec![StagedDeleteEntry {
+            download_id: id,
+            source: "pixiv".to_string(),
+            source_id: "delete-recovery".to_string(),
+            staged_name: "0".to_string(),
+        }];
+        fs::write(
+            operation.join("manifest.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        fs::rename(&original, operation.join("0")).unwrap();
+        drop(db);
+
+        // SQLite still has the row, so startup rolls the file move back.
+        let db = Database::open(&db_path, &storage).unwrap();
+        assert!(original.exists());
+        assert!(db.get_download(id).is_ok());
+
+        // Simulate a crash just after SQLite committed but before staged files
+        // and sidecars were removed. Startup completes the deletion instead.
+        let operation = root.join("delete-staging").join("after-commit");
+        fs::create_dir_all(&operation).unwrap();
+        fs::write(
+            operation.join("manifest.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        fs::rename(&original, operation.join("0")).unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute("DELETE FROM downloads WHERE id = ?1", params![id])
+                .unwrap();
+        }
+        drop(db);
+
+        let reopened = Database::open(&db_path, &storage).unwrap();
+        assert!(!original.exists());
+        assert!(!operation.exists());
+        assert!(reopened.get_download(id).is_err());
+        assert_eq!(
+            crate::database::semantic_index::status(&storage).indexed_chunks,
+            0
+        );
+    }
+
+    #[test]
+    fn opening_database_prunes_only_unreferenced_managed_collection_covers() {
+        let (_temp, root, storage) = temp_paths();
+        let db_path = root.join("piep.db");
+        let cover_root = root.join("collection-covers");
+        let referenced = cover_root.join("referenced.png");
+        let orphaned = cover_root.join("orphaned.png");
+        let nested_orphan = cover_root.join("old-collection").join("cover.webp");
+
+        let db = Database::open(&db_path, &storage).unwrap();
+        db.upsert_work_collection(&WorkCollectionInput {
+            name: "表紙を残す束".to_string(),
+            collection_kind: "ordered".to_string(),
+            cover_mode: Some("file".to_string()),
+            cover_image_path: Some(referenced.to_string_lossy().to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+        fs::create_dir_all(nested_orphan.parent().unwrap()).unwrap();
+        fs::write(&referenced, b"referenced").unwrap();
+        fs::write(&orphaned, b"orphaned").unwrap();
+        fs::write(&nested_orphan, b"nested orphan").unwrap();
+        drop(db);
+
+        let reopened = Database::open(&db_path, &storage).unwrap();
+        assert!(referenced.exists());
+        assert!(!orphaned.exists());
+        assert!(!nested_orphan.exists());
+        assert!(reopened.list_work_collections().unwrap()[0]
+            .cover_image_path
+            .as_deref()
+            .is_some_and(|path| path == referenced.to_string_lossy()));
     }
 
     #[test]
@@ -15066,7 +16621,9 @@ mod search_integration_tests {
         let capped = db.get_filter_facets().unwrap();
         assert_eq!(capped.author_entities.len(), 60);
 
-        let second_page = db.search_entity_facets("person", None, 60, 60, None, None, None, None).unwrap();
+        let second_page = db
+            .search_entity_facets("person", None, 60, 60, None, None, None, None)
+            .unwrap();
         assert_eq!(second_page.len(), 10, "authors past the cap stay reachable");
 
         let filtered = db
@@ -15081,12 +16638,21 @@ mod search_integration_tests {
             .unwrap();
         assert!(missing.is_empty());
 
-        assert!(db.search_entity_facets("unknown", None, 10, 0, None, None, None, None).is_err());
+        assert!(db
+            .search_entity_facets("unknown", None, 10, 0, None, None, None, None)
+            .is_err());
 
         // The pager cannot name a last page without this, and a total that does
         // not agree with the rows it is counting is worse than none at all.
-        assert_eq!(db.count_entity_facets("person", None, None, None).unwrap(), 70);
-        assert_eq!(db.count_entity_facets("person", Some("作者69"), None, None).unwrap(), 1);
+        assert_eq!(
+            db.count_entity_facets("person", None, None, None).unwrap(),
+            70
+        );
+        assert_eq!(
+            db.count_entity_facets("person", Some("作者69"), None, None)
+                .unwrap(),
+            1
+        );
         assert_eq!(
             db.count_entity_facets("person", Some("存在しない"), None, None)
                 .unwrap(),
@@ -15099,7 +16665,16 @@ mod search_integration_tests {
         let mut walked = 0usize;
         for page in 0..(total as usize).div_ceil(20) {
             walked += db
-                .search_entity_facets("person", None, 20, (page * 20) as i64, None, None, None, None)
+                .search_entity_facets(
+                    "person",
+                    None,
+                    20,
+                    (page * 20) as i64,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
                 .unwrap()
                 .len();
         }
@@ -15192,11 +16767,14 @@ mod search_integration_tests {
             "ORDER BY count DESC, display_name ASC",
             "既定は作品が多い順"
         );
-        assert!(clause(Some("downloaded_at"), None).starts_with("ORDER BY latest_downloaded_at DESC"));
+        assert!(
+            clause(Some("downloaded_at"), None).starts_with("ORDER BY latest_downloaded_at DESC")
+        );
         assert!(clause(Some("source_updated_at"), None)
             .starts_with("ORDER BY latest_source_updated_at DESC"));
         assert!(clause(Some("name"), None).starts_with("ORDER BY display_name COLLATE NOCASE ASC"));
-        assert!(clause(Some("name"), Some("desc")).starts_with("ORDER BY display_name COLLATE NOCASE DESC"));
+        assert!(clause(Some("name"), Some("desc"))
+            .starts_with("ORDER BY display_name COLLATE NOCASE DESC"));
         // 知らない指定は既定へ落ちる。文字列はそのままSQLへ入らない。
         let injected = clause(Some("1; DROP TABLE downloads"), Some("desc; --"));
         assert_eq!(injected, "ORDER BY count DESC, display_name ASC");
@@ -15216,8 +16794,24 @@ mod search_integration_tests {
         let db = Database::open(&root.join("piep.db"), &storage).unwrap();
         insert_download_unindexed(&db, &storage, "sc-1", "追う人の一", "追う人", &[], "本文");
         insert_download_unindexed(&db, &storage, "sc-2", "追う人の二", "追う人", &[], "本文");
-        insert_download_unindexed(&db, &storage, "sc-3", "止めた人の一", "止めた人", &[], "本文");
-        insert_download_unindexed(&db, &storage, "sc-4", "未登録の人の一", "未登録の人", &[], "本文");
+        insert_download_unindexed(
+            &db,
+            &storage,
+            "sc-3",
+            "止めた人の一",
+            "止めた人",
+            &[],
+            "本文",
+        );
+        insert_download_unindexed(
+            &db,
+            &storage,
+            "sc-4",
+            "未登録の人の一",
+            "未登録の人",
+            &[],
+            "本文",
+        );
         {
             let conn = db.conn.lock().unwrap();
             for (id, author) in [("sc-1", "追う人"), ("sc-2", "追う人")] {
@@ -15276,28 +16870,48 @@ mod search_integration_tests {
         };
 
         assert_eq!(
-            names(EntityFacetScope { watch: Some("watched".into()), ..Default::default() }),
+            names(EntityFacetScope {
+                watch: Some("watched".into()),
+                ..Default::default()
+            }),
             vec!["追う人"]
         );
         assert_eq!(
-            names(EntityFacetScope { watch: Some("paused".into()), ..Default::default() }),
+            names(EntityFacetScope {
+                watch: Some("paused".into()),
+                ..Default::default()
+            }),
             vec!["止めた人"]
         );
-        let mut unwatched = names(EntityFacetScope { watch: Some("unwatched".into()), ..Default::default() });
+        let mut unwatched = names(EntityFacetScope {
+            watch: Some("unwatched".into()),
+            ..Default::default()
+        });
         unwatched.sort();
         assert_eq!(unwatched, vec!["未登録の人"]);
         // 知らない言葉は条件なしとして扱う。
         assert_eq!(
-            names(EntityFacetScope { watch: Some("いつか".into()), ..Default::default() }).len(),
+            names(EntityFacetScope {
+                watch: Some("いつか".into()),
+                ..Default::default()
+            })
+            .len(),
             3
         );
         // 作品数の下限。1以下は条件なしと同じ。
         assert_eq!(
-            names(EntityFacetScope { min_work_count: Some(2), ..Default::default() }),
+            names(EntityFacetScope {
+                min_work_count: Some(2),
+                ..Default::default()
+            }),
             vec!["追う人"]
         );
         assert_eq!(
-            names(EntityFacetScope { min_work_count: Some(1), ..Default::default() }).len(),
+            names(EntityFacetScope {
+                min_work_count: Some(1),
+                ..Default::default()
+            })
+            .len(),
             3
         );
         // 監視と作品数は同時に効く。
@@ -15359,16 +16973,29 @@ mod search_integration_tests {
             .unwrap();
         }
         let names = |concluded: Option<bool>| {
-            let scope = EntityFacetScope { concluded, ..Default::default() };
+            let scope = EntityFacetScope {
+                concluded,
+                ..Default::default()
+            };
             let listed = db
-                .search_entity_facets("series", None, 60, 0, None, Some("name"), None, Some(&scope))
+                .search_entity_facets(
+                    "series",
+                    None,
+                    60,
+                    0,
+                    None,
+                    Some("name"),
+                    None,
+                    Some(&scope),
+                )
                 .unwrap()
                 .into_iter()
                 .map(|facet| facet.display_name)
                 .collect::<Vec<_>>();
             assert_eq!(
                 listed.len() as i64,
-                db.count_entity_facets("series", None, None, Some(&scope)).unwrap()
+                db.count_entity_facets("series", None, None, Some(&scope))
+                    .unwrap()
             );
             listed
         };
@@ -15423,7 +17050,11 @@ mod search_integration_tests {
                 .collect::<Vec<_>>()
         };
         assert_eq!(names(None), vec!["作者A", "作者B"], "作品が多い順");
-        assert_eq!(names(Some("downloaded_at")), vec!["作者B", "作者A"], "保存が新しい順");
+        assert_eq!(
+            names(Some("downloaded_at")),
+            vec!["作者B", "作者A"],
+            "保存が新しい順"
+        );
         assert_eq!(
             names(Some("source_updated_at")),
             vec!["作者A", "作者B"],
@@ -15443,7 +17074,15 @@ mod search_integration_tests {
             insert_download_unindexed(&db, &storage, "301", "日常の話", "作者A", &["日常"], "本文");
         let other =
             insert_download_unindexed(&db, &storage, "302", "冒険の話", "作者A", &["冒険"], "本文");
-        insert_download_unindexed(&db, &storage, "303", "冒険の続き", "作者B", &["冒険"], "本文");
+        insert_download_unindexed(
+            &db,
+            &storage,
+            "303",
+            "冒険の続き",
+            "作者B",
+            &["冒険"],
+            "本文",
+        );
         // 作品ごとに別の作者IDを振る補助関数なので、この2件を同じ人物にまとめる。
         {
             let conn = db.conn.lock().unwrap();
@@ -15455,9 +17094,14 @@ mod search_integration_tests {
         }
         db.set_favorite(favourite, true).unwrap();
 
-        let unfiltered = db.search_entity_facets("person", None, 60, 0, None, None, None, None).unwrap();
+        let unfiltered = db
+            .search_entity_facets("person", None, 60, 0, None, None, None, None)
+            .unwrap();
         assert_eq!(unfiltered.len(), 2);
-        assert_eq!(db.count_entity_facets("person", None, None, None).unwrap(), 2);
+        assert_eq!(
+            db.count_entity_facets("person", None, None, None).unwrap(),
+            2
+        );
 
         let by_tag = SearchV2Params {
             tags_include: Some(vec!["日常".to_string()]),
@@ -15471,14 +17115,24 @@ mod search_integration_tests {
         // 件数は「条件に合う作品の数」。作者Aの2件すべてではない。
         assert_eq!(tagged[0].count, 1);
         assert_eq!(
-            db.count_entity_facets("person", None, Some(&by_tag), None).unwrap(),
+            db.count_entity_facets("person", None, Some(&by_tag), None)
+                .unwrap(),
             1,
             "総数は数えている行と一致する"
         );
 
         // 名前での絞り込みと同時に効く。作者Aは条件に合うが、名前が違う。
         let named = db
-            .search_entity_facets("person", Some("作者B"), 60, 0, Some(&by_tag), None, None, None)
+            .search_entity_facets(
+                "person",
+                Some("作者B"),
+                60,
+                0,
+                Some(&by_tag),
+                None,
+                None,
+                None,
+            )
             .unwrap();
         assert!(named.is_empty());
 
@@ -15487,13 +17141,24 @@ mod search_integration_tests {
             ..params("")
         };
         let favoured = db
-            .search_entity_facets("person", None, 60, 0, Some(&favourites_only), None, None, None)
+            .search_entity_facets(
+                "person",
+                None,
+                60,
+                0,
+                Some(&favourites_only),
+                None,
+                None,
+                None,
+            )
             .unwrap();
         assert_eq!(favoured.len(), 1);
         assert_eq!(favoured[0].display_name, "作者A");
 
         // 同じキャッシュを別の条件で引かない。
-        let unfiltered_again = db.search_entity_facets("person", None, 60, 0, None, None, None, None).unwrap();
+        let unfiltered_again = db
+            .search_entity_facets("person", None, 60, 0, None, None, None, None)
+            .unwrap();
         assert_eq!(unfiltered_again.len(), 2);
     }
 
@@ -16905,11 +18570,15 @@ mod search_integration_tests {
         }
 
         let started = Instant::now();
-        let authors = db.search_entity_facets("person", None, 60, 300, None, None, None, None).unwrap();
+        let authors = db
+            .search_entity_facets("person", None, 60, 300, None, None, None, None)
+            .unwrap();
         let entity_elapsed = started.elapsed();
         assert_eq!(authors.len(), 60);
         let started = Instant::now();
-        let warm_authors = db.search_entity_facets("person", None, 60, 300, None, None, None, None).unwrap();
+        let warm_authors = db
+            .search_entity_facets("person", None, 60, 300, None, None, None, None)
+            .unwrap();
         let warm_entity_elapsed = started.elapsed();
         assert_eq!(warm_authors.len(), authors.len());
 
@@ -17152,9 +18821,13 @@ mod search_integration_tests {
                 [],
             )
             .unwrap();
-        let first = db.search_entity_facets("person", None, 60, 0, None, None, None, None).unwrap();
+        let first = db
+            .search_entity_facets("person", None, 60, 0, None, None, None, None)
+            .unwrap();
         assert_eq!(first[0].count, 1);
-        let cached = db.search_entity_facets("person", None, 60, 0, None, None, None, None).unwrap();
+        let cached = db
+            .search_entity_facets("person", None, 60, 0, None, None, None, None)
+            .unwrap();
         assert_eq!(cached[0].count, 1);
 
         insert_download_unindexed(
@@ -17174,7 +18847,9 @@ mod search_integration_tests {
                 [],
             )
             .unwrap();
-        let refreshed = db.search_entity_facets("person", None, 60, 0, None, None, None, None).unwrap();
+        let refreshed = db
+            .search_entity_facets("person", None, 60, 0, None, None, None, None)
+            .unwrap();
         assert_eq!(refreshed[0].count, 2);
         drop(db);
     }
@@ -17235,13 +18910,13 @@ mod search_integration_tests {
         assert!(!entity.contains("download_series"));
         assert!(entity.contains("d.cover_path"));
 
-        // The list view shows a tag column, so compact now pays for that
-        // lookup; the excerpt is still the one thing it does not read.
+        // 一覧もタグとあらすじを出すようになったので、読むものはギャラリーと同じである。
+        // 別の射影を残しておくと、片方に列を足したときにもう片方が取り残される。
         let compact = download_select_sql_for_projection(Some("libraryCompact"), "NULL", "NULL");
         assert!(compact.contains("download_tags"));
         assert!(compact.contains("download_people"));
         assert!(compact.contains("download_series"));
-        assert!(compact.contains("NULL AS excerpt"));
+        assert!(compact.contains("d.excerpt"));
 
         let gallery = download_select_sql_for_projection(Some("libraryGallery"), "NULL", "NULL");
         assert!(gallery.contains("download_tags"));

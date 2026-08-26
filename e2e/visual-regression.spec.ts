@@ -54,12 +54,15 @@ test("critical workspaces keep a stable layout", async ({ page }, testInfo) => {
     ["diagnostics", "/#/diagnostics", "ライブラリ診断"],
     ["operations", "/#/operations", "操作履歴"],
     ["save", "/#/save/pixiv", "Webから保存"],
-    ["reader", "/#/reader/1", "雨上がりの図書室で"],
+    ["reader", "/#/reader/101", "雨上がりの図書室で"],
+    ["library-collections", "/#/library?tab=collections", "新しいコレクション"],
+    ["collection", "/#/collections/demo-long", "同人女の感情 ハイスペイケメン女子の綾城さんにキモデブが溺愛されて界隈の姫になる話 関連作品"],
     ["settings-library", "/#/settings?section=library", "ローカルライブラリ"],
+    ["settings-assist", "/#/settings?section=assist", "AIの手伝い"],
     ["updates", "/#/updates", "更新センター"],
     ["epub", "/#/epub", "EPUB書き出し"],
     ["epub-templates", "/#/epub/templates", "テンプレートスタジオ"],
-    ["work", "/#/works/1", "雨上がりの図書室で"],
+    ["work", "/#/works/101", "雨上がりの図書室で"],
   ] as const;
   for (const [name, route, visibleText] of routes) {
     await page.goto(route);
@@ -67,4 +70,16 @@ test("critical workspaces keep a stable layout", async ({ page }, testInfo) => {
     await page.addStyleTag({ content: "*,*::before,*::after{animation:none!important;transition:none!important;caret-color:transparent!important}" });
     await expect(page).toHaveScreenshot(`${name}.png`, { fullPage: true });
   }
+});
+
+test("collection list view keeps covers, order controls, and actions aligned", async ({ page }, testInfo) => {
+  test.skip(!testInfo.project.name.endsWith("100dpi"), "List layout runs once per size/theme; DPI scaling is covered by the library shell matrix");
+  // 見方は束だけの好みではなくなったので、beforeEach と同じ鍵を上書きする。
+  // addInitScript では効かない — 下の goto は断片だけの遷移で同じ文書のままなので、
+  // 初期スクリプトが一度も走らず、黙ってギャラリーの画を撮ることになっていた。
+  await page.evaluate(() => localStorage.setItem("piep.library-view", "compact"));
+  await page.goto("/#/collections/demo-long");
+  await expect(page.locator("main").getByText("同人女の感情 ハイスペイケメン女子の綾城さんにキモデブが溺愛されて界隈の姫になる話 関連作品", { exact: true }).first()).toBeVisible();
+  await page.addStyleTag({ content: "*,*::before,*::after{animation:none!important;transition:none!important;caret-color:transparent!important}" });
+  await expect(page).toHaveScreenshot("collection-list.png", { fullPage: true });
 });

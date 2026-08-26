@@ -37,6 +37,7 @@ import { EmptyState, ErrorState, LoadingState } from "@/components/AsyncState";
 import { PageHeader } from "@/components/PageHeader";
 import { ProviderMark } from "@/lib/providers";
 import { errorMessage } from "@/lib/format";
+import { registerUnsavedGuard } from "@/lib/unsavedGuard";
 import { getDownloads, isTauriRuntime, searchDownloadsV2 } from "@/services/dbApi";
 import {
   createEpubTemplate,
@@ -70,6 +71,12 @@ import {
 import { demoFileContent, demoFileKinds, demoFiles, demoPreview, demoTemplates } from "./templateStudioDemo";
 
 const STYLE_FILE = "style.css.j2";
+
+function useUnsavedTemplateGuard(blocked: boolean) {
+  const blockedRef = useRef(blocked);
+  blockedRef.current = blocked;
+  useEffect(() => registerUnsavedGuard(() => blockedRef.current), []);
+}
 
 type PreviewTarget = "info" | "cover" | "page" | "nav" | "opf" | "ncx";
 
@@ -316,7 +323,7 @@ function TemplateWorkspace({ template, runtime, sampleId, onSampleChange, onChan
                 : "ブラウザプレビューでは保存できません。"}
             </Alert>
           )}
-          <Tabs value={tab} onChange={setTab}>
+          <Tabs value={tab} onChange={setTab} keepMounted>
             <Tabs.List mb="md">
               <Tabs.Tab value="structure" leftSection={<Icons.epubStructure size={IconSize.menu} />}>構成</Tabs.Tab>
               <Tabs.Tab value="visual" leftSection={<Icons.appearance size={IconSize.menu} />}>見た目</Tabs.Tab>
@@ -375,6 +382,7 @@ function StructureEditor({ template, readOnly, onSaved }: { template: TemplateIn
     onSuccess: (saved) => { setSettings(saved); setDirty(false); onSaved(); notifications.show({ color: "green", message: "構成を保存しました" }); },
     onError: (error) => notifications.show({ color: "red", title: "構成を保存できません", message: errorMessage(error) }),
   });
+  useUnsavedTemplateGuard(dirty || save.isPending);
 
   return (
     <Stack gap="lg">
@@ -477,6 +485,7 @@ function VisualEditor({ template, readOnly, onSaved }: { template: TemplateInfo;
     onSuccess: () => { setDirty(false); style.refetch(); onSaved(); notifications.show({ color: "green", message: "見た目を保存しました" }); },
     onError: (error) => notifications.show({ color: "red", title: "保存できません", message: errorMessage(error) }),
   });
+  useUnsavedTemplateGuard(dirty || save.isPending);
 
   if (style.isLoading) return <LoadingState label="スタイルを読み込んでいます" />;
 
@@ -584,6 +593,26 @@ function CodeEditor({ template, readOnly, onSaved }: { template: TemplateInfo; r
     onSuccess: (restored) => { setContent(restored); setDirty(false); files.refetch(); onSaved(); notifications.show({ color: "green", message: "既定の内容に戻しました" }); },
     onError: (error) => notifications.show({ color: "red", title: "戻せません", message: errorMessage(error) }),
   });
+  useUnsavedTemplateGuard(dirty || save.isPending || reset.isPending);
+
+  const selectFile = (next: string) => {
+    if (next === active) return;
+    const commit = () => {
+      setDirty(false);
+      setFilename(next);
+    };
+    if (!dirty) {
+      commit();
+      return;
+    }
+    modals.openConfirmModal({
+      title: "保存していないコードを破棄しますか？",
+      children: <Text size="sm">別のファイルへ移ると、いまの変更は失われます。</Text>,
+      labels: { confirm: "破棄して移動", cancel: "編集を続ける" },
+      confirmProps: { color: "red" },
+      onConfirm: commit,
+    });
+  };
 
   const purpose = kinds.data?.find((kind: TemplateFileKind) => kind.filename === active)?.purpose;
 
@@ -594,7 +623,7 @@ function CodeEditor({ template, readOnly, onSaved }: { template: TemplateInfo; r
       <Grid.Col span={{ base: 12, sm: 4 }}>
         <Stack gap={2}>
           {(files.data ?? []).map((entry: TemplateFile) => (
-            <Button key={entry.filename} variant={entry.filename === active ? "light" : "subtle"} color="gray" size="compact-sm" justify="flex-start" onClick={() => { setFilename(entry.filename); setDirty(false); }}>
+            <Button key={entry.filename} variant={entry.filename === active ? "light" : "subtle"} color="gray" size="compact-sm" justify="flex-start" disabled={save.isPending || reset.isPending} onClick={() => selectFile(entry.filename)}>
               <Group gap={6} wrap="nowrap" w="100%">
                 <Text size="xs" className="line-clamp-1" flex={1} ta="left">{entry.filename}</Text>
                 {entry.customized && <Badge size="xs" variant="light" color="piep">変更済</Badge>}

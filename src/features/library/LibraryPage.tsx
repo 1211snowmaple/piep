@@ -45,13 +45,15 @@ import { demoFacets, searchDemoWorks } from "@/mocks/demoData";
 import { errorMessage, formatNumber } from "@/lib/format";
 import { scrollViewportToTop } from "@/lib/scroll";
 import { VirtualizedWorkList } from "@/features/library/VirtualizedWorkList";
+import { parseViewMode, useViewMode } from "@/lib/viewMode";
 import { entityKey, VirtualizedEntityGrid } from "@/features/library/VirtualizedEntityGrid";
 import { exportEntityZip } from "@/services/archiveApi";
 import { openSingleDialog } from "@/services/dialogApi";
 import type { EntityWatchState } from "@/components/EntityCard";
-import { CollectionsPanel, filterCollections, type CollectionSortBy } from "@/features/collections/CollectionsPanel";
-import { listWorkCollections } from "@/services/collectionApi";
-import type { WorkCollectionSummary } from "@/types/collections";
+import { SearchAssistModal } from "@/features/assist/SearchAssistModal";
+import { useAssist } from "@/features/assist/useAssist";
+import { AddToCollectionModal } from "@/features/collections/AddToCollectionModal";
+import { CollectionsPanel, type CollectionSortBy } from "@/features/collections/CollectionsPanel";
 import { boundedInfiniteListOptions, INFINITE_LIST_MAX_PAGES } from "@/lib/queryLimits";
 import {
   countEntityFacets,
@@ -76,7 +78,6 @@ import { deleteThenCleanup } from "@/features/library/deletedWorkCleanup";
 import type { EntityFacet, EntityFacetScope, EntitySortBy, FacetCount, LibrarySortBy, LibraryWatchFilter, SavedSearchRecord, SearchSuggestion, SearchV2Params, SearchV2Result, UpdateTarget } from "@/types/library";
 
 type LibraryTab = "works" | "people" | "series" | "collections";
-type ViewMode = "gallery" | "compact";
 
 interface Filters {
   sources: string[];
@@ -225,10 +226,6 @@ export function resolveSortBy(raw: string | null, hasQuery: boolean, preferred: 
 /** Ascending only reads as "correct" for the alphabetical keys. */
 function sortOrderFor(sortBy: LibrarySortBy): "asc" | "desc" {
   return sortBy === "title" || sortBy === "author_name" ? "asc" : "desc";
-}
-
-function parseViewMode(value: unknown): ViewMode {
-  return value === "compact" ? "compact" : "gallery";
 }
 
 function stringList(value: unknown): string[] {
@@ -644,11 +641,7 @@ export default function LibraryPage() {
     };
     return scope.watch || scope.minWorkCount || scope.concluded !== null ? scope : null;
   }, [entityScope, tab]);
-  // Read on the first render: a gallery that becomes a list one frame later
-  // rebuilds the whole virtualised grid in front of the reader.
-  const [storedView, setStoredView] = useLocalStorage<unknown>({ key: "piep.library-view", defaultValue: "gallery", getInitialValueInEffect: false });
-  const view = parseViewMode(storedView);
-  const setView = useCallback((next: ViewMode) => setStoredView(next), [setStoredView]);
+  const [view, setView] = useViewMode();
   // Saved searches are part of the library now, not per-install browser state,
   // so the sidebar can list them and they survive a reinstall.
   const savedSearchesQuery = useQuery({
@@ -657,17 +650,11 @@ export default function LibraryPage() {
     staleTime: 60_000,
   });
   const savedSearches = savedSearchesQuery.data ?? [];
-  // 件数の行は全タブに出す。コレクションの数は同じ問い合わせを共有するので、
-  // 二重に読みには行かない。
-  const collectionsForCount = useQuery({
-    queryKey: ["work-collections"],
-    queryFn: () => runtime ? listWorkCollections() : Promise.resolve([] as WorkCollectionSummary[]),
-    enabled: tab === "collections",
-    staleTime: 30_000,
-  });
-  const collectionCount = collectionsForCount.data ? filterCollections(collectionsForCount.data, searchText).length : undefined;
   const [filterOpened, filterDrawer] = useDisclosure(false);
   const [selectionMode, setSelectionMode] = useState(false);
+  const [collectOpened, collectModal] = useDisclosure(false);
+  const [searchAssistOpened, searchAssist] = useDisclosure(false);
+  const { engine: assistEngine } = useAssist();
   const [selected, setSelected] = useState<number[]>([]);
   // 作者・シリーズは行 ID を持たないので `source:sourceKey` で数える。
   const [selectedEntities, setSelectedEntities] = useState<EntityFacet[]>([]);
@@ -1200,6 +1187,23 @@ export default function LibraryPage() {
               pixels high against it. */}
           <Group wrap="nowrap" align="center">
             <Box className="library-toolbar__search"><LibrarySearch value={query} onChange={onQueryChange} runtime={runtime} /></Box>
+            {/* 言葉で探す。設定していなければ出ない。押すと絞り込みが入るだけで、
+                入った条件は画面に見えるので、外れていれば分かる。
+                文字を添えると道具が一本分太り、隣の並べ替えや検索欄の文字の
+                ほうが先に切られていたので、絵だけにする。 */}
+            {tab === "works" && assistEngine && (
+              <Tooltip label="覚えている言葉から棚を絞る">
+                <ActionIcon
+                  variant="default"
+                  color="grape"
+                  size={36}
+                  aria-label="言葉で探す"
+                  onClick={searchAssist.open}
+                >
+                  <Icons.optimize size={IconSize.action} />
+                </ActionIcon>
+              </Tooltip>
+            )}
             {tab !== "collections" && (
               <Tooltip label="詳細フィルター">
                 <Indicator label={activeFilterCount} size={16} disabled={!activeFilterCount}>
@@ -1224,6 +1228,7 @@ export default function LibraryPage() {
             {/* 表示形式と保存した検索は、作品・作者・シリーズの道具。
                 コレクションでは意味を持たないので出さない。高さは変わらない。 */}
             {tab !== "collections" && <SegmentedControl
+              className="view-mode-switch"
               value={view}
               onChange={(value) => setView(parseViewMode(value))}
               data={[{ value: "gallery", label: <Tooltip label="ギャラリー"><Icons.viewGrid size={IconSize.menu} aria-label="ギャラリー表示" /></Tooltip> }, { value: "compact", label: <Tooltip label="リスト"><Icons.viewList size={IconSize.menu} aria-label="リスト表示" /></Tooltip> }]}
@@ -1273,24 +1278,24 @@ export default function LibraryPage() {
         </Tabs.List>
       </Tabs>
 
-      {/* 件数の行も、タブで消さない。ここが消えると下がもう一段跳ねる。 */}
-      <Group justify="space-between" my="md" gap="xs" wrap="nowrap">
+      {/* 件数の行はタブで消さない。消えると下がもう一段跳ねる。
+          束のタブだけは例外で、同じ位置に同じ高さの行（件数・探す・作る）を
+          束の側が出す。消すのではなく差し替えるので、跳ねは起きない。 */}
+      {tab !== "collections" && <Group justify="space-between" my="md" gap="xs" wrap="nowrap">
         <Group gap={8} wrap="nowrap" miw={0}>
           <Text size="sm" c="dimmed" style={{ whiteSpace: "nowrap" }}>{tab === "works"
             ? `${formatNumber(totalCount ?? loadedItems.length)}件${totalCount !== null && loadedItems.length < totalCount ? `（${formatNumber(loadedItems.length)}件を表示中）` : ""}`
-            : tab === "collections"
-              ? `${formatNumber(collectionCount ?? 0)}件`
-              : entityTotal.data !== undefined
-                ? `${formatNumber(entityTotal.data)}件`
-                : `${formatNumber(entityItems.length)}件${entities.hasNextPage ? "以上" : ""}`}</Text>
+            : entityTotal.data !== undefined
+              ? `${formatNumber(entityTotal.data)}件`
+              : `${formatNumber(entityItems.length)}件${entities.hasNextPage ? "以上" : ""}`}</Text>
           {tab === "works" && searchText && searchMeta?.explanations?.length
             ? <SearchInterpretation meta={searchMeta} />
             : null}
           {/* Beside the count, which is the thing it changes. */}
-          {tab !== "collections" && <PagingModeToggle />}
+          <PagingModeToggle />
         </Group>
-        {tab !== "collections" && !selectionMode && <Button size="xs" variant="subtle" color="gray" leftSection={<Icons.confirm size={IconSize.menu} />} onClick={() => setSelectionMode(true)}>複数選択</Button>}
-      </Group>
+        {!selectionMode && <Button size="xs" variant="subtle" color="gray" leftSection={<Icons.confirm size={IconSize.menu} />} onClick={() => setSelectionMode(true)}>複数選択</Button>}
+      </Group>}
 
       {tab === "collections" ? <CollectionsPanel query={searchText} sortBy={collectionSortBy} /> : <>
 
@@ -1367,7 +1372,25 @@ export default function LibraryPage() {
       {/* Raised while the selection bar is up so the two never stack. */}
       <ScrollToTop offsetBottom={selectionMode ? 104 : undefined} />
 
-      {/* コレクションには複数選択がまだ無いので、帯も出さない。 */}
+      <AddToCollectionModal opened={collectOpened} onClose={collectModal.close} downloadIds={selected} />
+      <SearchAssistModal
+        opened={searchAssistOpened}
+        onClose={searchAssist.close}
+        onApply={(intent) => {
+          // 検索するのは piep。モデルが選んだのはタグと語だけで、
+          // 入った条件はそのまま画面に出るので、外れていれば見て分かる。
+          setFilters({
+            ...filters,
+            tagsInclude: intent.includeTags,
+            tagsExclude: intent.excludeTags,
+            // 複数のタグは「どれも満たす」で入れる。広げたければ絞り込みの
+            // 画面で「いずれか」に変えられる。
+            tagMode: "and",
+          });
+          onQueryChange(intent.query);
+        }}
+      />
+      {/* コレクションのタブは束そのものが単位なので、作品の複数選択は出さない。 */}
       {selectionMode && tab !== "collections" && (
         <Paper className="selection-bar" shadow="xl" withBorder p="sm" role="region" aria-label="複数選択の操作">
           <div className="selection-bar__inner">
@@ -1385,6 +1408,10 @@ export default function LibraryPage() {
             <Group gap="xs" wrap="nowrap" className="selection-bar__actions">
               {tab === "works" ? (
                 <>
+                  {/* 束ねる操作は、束の画面ではなく棚の側に置く。カードを
+                      見ながら選び、そのまままとめられるのが要点で、
+                      「入れたい作品の題名を思い出す」を要求しない。 */}
+                  <Button size="sm" variant="light" leftSection={<Icons.collection size={IconSize.menu} />} disabled={!selected.length} onClick={collectModal.open}>コレクション</Button>
                   <Button size="sm" variant="light" leftSection={<Icons.epubAdd size={IconSize.menu} />} disabled={!selected.length} onClick={() => { addToEpubQueue(selected); notifications.show({ color: "green", message: `${selected.length}件をEPUBキューに追加しました` }); }}>EPUB</Button>
                   <Menu position="top-end"><Menu.Target><Button size="sm" variant="default" rightSection={<Icons.more size={IconSize.menu} />} disabled={!selected.length}>その他</Button></Menu.Target><Menu.Dropdown><Menu.Item leftSection={<Icons.favorite size={IconSize.menu} />} onClick={() => selectionMutation.mutate({ action: "favorite" })}>お気に入りに追加</Menu.Item><Menu.Item leftSection={<Icons.watch size={IconSize.menu} />} onClick={() => selectionMutation.mutate({ action: "watch" })}>更新監視を有効化</Menu.Item>{/* 追加できて解除できないのは片手落ちだった。 */}<Menu.Item leftSection={<Icons.pause size={IconSize.menu} />} onClick={() => selectionMutation.mutate({ action: "unwatch" })}>更新監視を止める</Menu.Item><Menu.Divider /><Menu.Item color="red" leftSection={<Icons.delete size={IconSize.menu} />} onClick={confirmDelete}>削除</Menu.Item></Menu.Dropdown></Menu>
                 </>

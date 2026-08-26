@@ -315,6 +315,15 @@ export async function importWorkAsset(downloadId: number, sourcePath: string): P
 }
 
 export function getAssetUrl(path: string | null | undefined): string | null {
-  if (!path || !isTauriRuntime()) return null;
+  if (!path) return null;
+  if (!isTauriRuntime()) {
+    // ブラウザプレビューのデモデータだけは埋め込み画像や公開ダミー画像を使う。
+    return path.startsWith("data:") || path.startsWith("http://") || path.startsWith("https://")
+      ? path
+      : null;
+  }
+  // native の値はローカル管理ファイルだけ。DBやimportにURLが紛れ込んでも、棚を
+  // 開いただけで外部へ画像requestを送らない。
+  if (/^(?:data|https?|asset):/i.test(path)) return null;
   return convertFileSrc(path);
 }

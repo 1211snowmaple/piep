@@ -1,0 +1,159 @@
+import { MantineProvider } from "@mantine/core";
+import { ModalsProvider } from "@mantine/modals";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { fireEvent, render, screen } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
+import { AppRouter } from "@/app/router";
+import { WorkspaceProvider } from "@/app/WorkspaceContext";
+import { CollectionMemberList } from "@/features/collections/CollectionMemberList";
+import { demoWorks } from "@/mocks/demoData";
+import type { WorkCollectionMember } from "@/types/collections";
+
+function member(overrides: Partial<WorkCollectionMember> = {}): WorkCollectionMember {
+  const work = demoWorks[0];
+  return {
+    collectionId: "collection-1",
+    source: work.source,
+    sourceId: work.sourceId,
+    downloadId: work.id,
+    title: work.title,
+    authorName: work.authorName,
+    coverPath: work.coverPath,
+    textLength: work.textLength,
+    position: 0,
+    memberRole: "main",
+    addedBy: "manual",
+    pinned: false,
+    note: null,
+    missing: false,
+    createdAt: "2026-01-01T00:00:00Z",
+    updatedAt: "2026-01-01T00:00:00Z",
+    work,
+    editions: [],
+    ...overrides,
+  };
+}
+
+function renderList(props: Partial<React.ComponentProps<typeof CollectionMemberList>> = {}) {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const merged: React.ComponentProps<typeof CollectionMemberList> = {
+    members: [member(), member({ sourceId: "202", downloadId: 102, title: "つづき", position: 1, work: { ...demoWorks[1], id: 102 } })],
+    ordered: true,
+    view: "compact",
+    busy: false,
+    selectionMode: false,
+    selected: new Set<number>(),
+    onSelect: vi.fn(),
+    onMove: vi.fn(),
+    onDropAt: vi.fn(),
+    onRemove: vi.fn(),
+    ...props,
+  };
+  return {
+    props: merged,
+    ...render(
+      <MantineProvider>
+        <QueryClientProvider client={client}>
+          <ModalsProvider>
+            <AppRouter>
+              <WorkspaceProvider>
+                <CollectionMemberList {...merged} />
+              </WorkspaceProvider>
+            </AppRouter>
+          </ModalsProvider>
+        </QueryClientProvider>
+      </MantineProvider>,
+    ),
+  };
+}
+
+describe("CollectionMemberList", () => {
+  it("draws members with the same card the shelf uses", () => {
+    renderList();
+    // 束の中でも棚と同じカードが出る。タグ行は縮小した投影では作れなかった。
+    expect(document.querySelectorAll(".work-row").length).toBe(2);
+    expect(screen.getAllByText(demoWorks[0].tags[0]).length).toBeGreaterThan(0);
+  });
+
+  it("keeps a keyboard path for reordering, not only drag", () => {
+    const { props } = renderList();
+    fireEvent.click(screen.getByRole("button", { name: `${demoWorks[0].title}を一つ後へ` }));
+    expect(props.onMove).toHaveBeenCalledWith(0, 1);
+    // 先頭は前へ動かせない。端で操作子が生きていると、押しても何も起きない。
+    expect(screen.getByRole("button", { name: `${demoWorks[0].title}を一つ前へ` })).toBeDisabled();
+  });
+
+  // HTML5 の drag は使わない。取っ手は button で、Chromium は button の上で
+  // 始まった仕草から祖先の drag を開始しない。掴んでも一度も動かなかったのは
+  // これが理由で、いまはマウスも指も同じ pointer の道を通る。
+  it("carries a member to another position with the pointer, whatever the pointer is", () => {
+    const { props } = renderList({ view: "gallery" });
+    const rows = Array.from(document.querySelectorAll<HTMLElement>(".collection-member"));
+    const grip = screen.getByLabelText(`${demoWorks[0].title}を掴んで並べ替え`);
+    // jsdom に elementFromPoint は無い。実際の広さも無いので、下に何があるかはここで答える。
+    Object.defineProperty(document, "elementFromPoint", { value: () => rows[1], configurable: true });
+
+    fireEvent.pointerDown(grip, { pointerId: 1, pointerType: "mouse", button: 0 });
+    expect(rows[0]).toHaveAttribute("data-dragging");
+    fireEvent.pointerMove(grip, { pointerId: 1, pointerType: "mouse", clientX: 10, clientY: 200 });
+    expect(rows[1]).toHaveAttribute("data-drop-target");
+    fireEvent.pointerUp(grip, { pointerId: 1, pointerType: "mouse", clientX: 10, clientY: 200 });
+
+    expect(props.onDropAt).toHaveBeenCalledWith(0, 1);
+    expect(rows[0]).not.toHaveAttribute("data-dragging");
+  });
+
+  it("drops the grab when Escape is pressed, without moving anything", () => {
+    const { props } = renderList({ view: "gallery" });
+    const rows = Array.from(document.querySelectorAll<HTMLElement>(".collection-member"));
+    const grip = screen.getByLabelText(`${demoWorks[0].title}を掴んで並べ替え`);
+
+    fireEvent.pointerDown(grip, { pointerId: 1, pointerType: "mouse", button: 0 });
+    expect(rows[0]).toHaveAttribute("data-dragging");
+    fireEvent.keyDown(window, { key: "Escape" });
+
+    expect(rows[0]).not.toHaveAttribute("data-dragging");
+    expect(props.onDropAt).not.toHaveBeenCalled();
+  });
+
+  it("hides ordering controls when the collection has no reading order", () => {
+    renderList({ ordered: false });
+    expect(screen.queryByRole("button", { name: /一つ後へ/ })).toBeNull();
+  });
+
+  it("shows an unsaved member without pretending it is a work card", () => {
+    renderList({
+      members: [member({ downloadId: null, work: null, missing: true, title: "手元に無い話" })],
+    });
+    expect(screen.getByText("手元に無い話")).toBeInTheDocument();
+    expect(screen.getByText("未保存")).toBeInTheDocument();
+    expect(document.querySelectorAll(".work-row").length).toBe(0);
+  });
+
+  it("folds editions instead of listing them as separate members", () => {
+    renderList({
+      members: [member({ editions: [{ ...demoWorks[1], id: 900, title: "【FANBOXサンプル】同じ話" }] })],
+    });
+    // 畳んだ状態では、別版の題名は開くまで数に入らない。
+    const toggle = screen.getByRole("button", { name: /別版 1件/ });
+    expect(toggle).toBeInTheDocument();
+    fireEvent.click(toggle);
+    expect(screen.getByText("【FANBOXサンプル】同じ話")).toBeInTheDocument();
+  });
+
+  it("progressively reveals a very large collection instead of mounting every card", () => {
+    const members = Array.from({ length: 121 }, (_, index) => member({
+      sourceId: `missing-${index + 1}`,
+      downloadId: null,
+      title: `member-${index + 1}`,
+      position: index,
+      work: null,
+      missing: true,
+    }));
+    renderList({ members, ordered: false });
+
+    expect(screen.queryByText("member-121")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "さらに表示（残り1件）" }));
+    expect(screen.getByText("member-121")).toBeInTheDocument();
+  });
+});

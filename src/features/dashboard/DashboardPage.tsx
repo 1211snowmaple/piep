@@ -174,7 +174,7 @@ function StatCard({ icon: Icon, label, value, hint, color, onClick }: { icon: Lu
     <Card component="button" type="button" className="stat-card" style={{ "--stat-accent": color }} onClick={onClick}>
       <Group justify="space-between" align="flex-start"><Text size="sm" c="dimmed" fw={600}>{label}</Text><ThemeIcon variant="light" color="gray"><Icon size={17} style={{ color }} /></ThemeIcon></Group>
       <Text className="stat-card__value" fz="20px" fw={760} mt={2} lts="-0.035em" ta="center">{value}</Text>
-      <Group justify="space-between" gap="xs" wrap="nowrap"><Text size="xs" c="dimmed" mt={2} className="line-clamp-1">{hint}</Text><Icons.forward className="stat-card__arrow" size={14} /></Group>
+      <Box className="stat-card__hint-row"><Text size="xs" c="dimmed" mt={2} className="line-clamp-1" ta="center">{hint}</Text><Icons.forward className="stat-card__arrow" size={14} /></Box>
     </Card>
   );
 }
@@ -255,7 +255,7 @@ function SourceComposition({ breakdown, total }: { breakdown: { source: string; 
           <Box key={item.source} className="source-composition__segment" data-source={item.source} style={{ flexGrow: item.count }} />
         ))}
       </Box>
-      <Group gap="lg">
+      <Group gap="lg" justify="center">
         {items.map((item) => (
           <Group key={item.source} gap={7} wrap="nowrap">
             <Box className="source-composition__dot" data-source={item.source} />

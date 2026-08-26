@@ -1867,7 +1867,8 @@ impl AppPixivAPI {
         let r = self
             .do_api_request(HttpMethod::GET, &url, None, Some(params), None, with_auth)
             .await?;
-        let (status, text) = read_response_text_limited(r, MAX_PIXIV_WEBVIEW_RESPONSE_BYTES).await?;
+        let (status, text) =
+            read_response_text_limited(r, MAX_PIXIV_WEBVIEW_RESPONSE_BYTES).await?;
         // ここは本文を HTML から切り出す経路なので、状態を見ずに読み進めていた。
         // その結果、取得制限が「解析できないレスポンス」として上がり、やり直せば
         // 通るものが二度と通らないものと同じ顔で並んでいた。

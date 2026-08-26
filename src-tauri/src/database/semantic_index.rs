@@ -1,5 +1,5 @@
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::OpenOptions;
 use std::io::Write;
 #[cfg(windows)]
@@ -270,6 +270,99 @@ pub fn search(
     });
     hits.truncate(limit);
     Ok(hits)
+}
+
+/// 索引に残った、もう存在しない作品の行を落とす。
+///
+/// 削除のたびに `clear_documents` を呼んではいるが、取りこぼしはたまる。
+/// 実測で索引 3,946 件に対して実在 3,938 件 — 8 件が幽霊として残っていた。
+/// 検索の結果からは弾かれるので害は小さいが、走査のたびに読む無駄が残り、
+/// 「索引の件数」が棚の件数と合わない気持ち悪さも残る。
+///
+/// `alive` は実在する `download_id` の全体。**部分集合を渡してはいけない** —
+/// 渡した分以外が全部消える。
+pub fn prune_missing_documents(storage_dir: &Path, alive: &HashSet<i64>) -> Result<usize, String> {
+    let conn = open_index(storage_dir)?;
+    let indexed = conn
+        .prepare("SELECT DISTINCT download_id FROM semantic_chunks")
+        .and_then(|mut stmt| {
+            stmt.query_map([], |row| row.get::<_, i64>(0))?
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .map_err(|e| format!("Semantic prune scan failed: {e}"))?;
+    let orphans = indexed
+        .into_iter()
+        .filter(|id| !alive.contains(id))
+        .collect::<Vec<_>>();
+    if orphans.is_empty() {
+        return Ok(0);
+    }
+    drop(conn);
+    clear_documents(storage_dir, &orphans)?;
+    Ok(orphans.len())
+}
+
+/// 作品ごとの本文ベクトル。全チャンクの平均を、長さ1にそろえて返す。
+///
+/// 検索は「問いに近いチャンク」を探すが、束ねるときに要るのは
+/// **作品そのものがどのあたりにあるか**である。章の平均はその代わりになる。
+///
+/// 索引には削除済み作品の行が残っていることがあるので、呼び出し側が
+/// 実在する id を渡す。ここでは渡された id 以外を返さない。
+pub fn work_centroids(
+    storage_dir: &Path,
+    wanted: &HashSet<i64>,
+) -> Result<HashMap<i64, Vec<f32>>, String> {
+    if wanted.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let conn = open_index(storage_dir)?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT download_id, vector FROM semantic_chunks
+              WHERE field = 'body' AND model_id = ?1 AND dimension = ?2",
+        )
+        .map_err(|e| format!("Semantic centroid prepare failed: {e}"))?;
+    let rows = stmt
+        .query_map(params![MODEL_ID, VECTOR_DIMENSION as i64], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })
+        .map_err(|e| format!("Semantic centroid query failed: {e}"))?;
+
+    let mut sums: HashMap<i64, (Vec<f64>, usize)> = HashMap::new();
+    for row in rows {
+        let (download_id, blob) = row.map_err(|e| format!("Semantic centroid read failed: {e}"))?;
+        if !wanted.contains(&download_id) {
+            continue;
+        }
+        let vector = blob_to_vector(&blob);
+        if vector.len() != VECTOR_DIMENSION {
+            continue;
+        }
+        let entry = sums
+            .entry(download_id)
+            .or_insert_with(|| (vec![0.0; VECTOR_DIMENSION], 0));
+        for (slot, value) in entry.0.iter_mut().zip(vector.iter()) {
+            *slot += *value as f64;
+        }
+        entry.1 += 1;
+    }
+
+    let mut out = HashMap::with_capacity(sums.len());
+    for (download_id, (sum, count)) in sums {
+        if count == 0 {
+            continue;
+        }
+        let norm = sum.iter().map(|value| value * value).sum::<f64>().sqrt();
+        if norm <= f64::EPSILON {
+            continue;
+        }
+        out.insert(
+            download_id,
+            sum.iter().map(|value| (value / norm) as f32).collect(),
+        );
+    }
+    Ok(out)
 }
 
 pub fn status(storage_dir: &Path) -> SemanticIndexStatus {

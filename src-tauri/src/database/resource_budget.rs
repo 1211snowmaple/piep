@@ -60,7 +60,7 @@ pub fn search_snapshot_cache_bytes() -> u64 {
 }
 
 #[cfg(windows)]
-fn available_memory_bytes() -> Option<u64> {
+pub(crate) fn available_memory_bytes() -> Option<u64> {
     #[repr(C)]
     struct MemoryStatusEx {
         length: u32,
@@ -95,7 +95,7 @@ fn available_memory_bytes() -> Option<u64> {
 }
 
 #[cfg(not(windows))]
-fn available_memory_bytes() -> Option<u64> {
+pub(crate) fn available_memory_bytes() -> Option<u64> {
     let text = std::fs::read_to_string("/proc/meminfo").ok()?;
     let kib = text
         .lines()

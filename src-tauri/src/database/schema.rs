@@ -50,10 +50,14 @@ pub fn initialize(conn: &Connection) -> Result<(), rusqlite::Error> {
     apply_pragmas(conn)?;
 
     if is_known_library(conn)? {
-        create_schema(conn)?;
-        add_missing_columns(conn)?;
-        retire_update_job_request_blob(conn)?;
-        stamp_schema_version(conn)?;
+        // DDL も SQLite のトランザクション対象。列追加や値の移送の途中で
+        // 起動が止まっても、「半分だけ新しいDB」を残さない。
+        let tx = conn.unchecked_transaction()?;
+        create_schema(&tx)?;
+        add_missing_columns(&tx)?;
+        retire_update_job_request_blob(&tx)?;
+        stamp_schema_version(&tx)?;
+        tx.commit()?;
         return Ok(());
     }
 
@@ -235,6 +239,22 @@ fn create_additional_tables(conn: &Connection) -> Result<(), rusqlite::Error> {
          CREATE INDEX IF NOT EXISTS idx_collection_suggestions_state
             ON collection_suggestions(state, updated_at DESC);
 
+         -- モデルに書いてもらった覚え書き。あらすじ・前回のあらすじ・作風。
+         --
+         -- 本文から作るものなので作り直しが高くつく。ただし**失われても
+         -- 作品は失われない**派生物なので、消えても作り直せばよい。
+         -- どのモデルが書いたかを残すのは、モデルを替えたときに
+         -- 古い文が混ざっていることに気づけるようにするため。
+         CREATE TABLE IF NOT EXISTS ai_notes (
+            subject_type  TEXT NOT NULL CHECK(subject_type IN ('work', 'person', 'collection')),
+            subject_key   TEXT NOT NULL,
+            note_kind     TEXT NOT NULL,
+            text          TEXT NOT NULL,
+            model_id      TEXT NOT NULL,
+            created_at    TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY(subject_type, subject_key, note_kind)
+         );
+
          CREATE TABLE IF NOT EXISTS collection_pair_feedback (
             left_source   TEXT NOT NULL,
             left_source_id TEXT NOT NULL,
@@ -276,6 +296,58 @@ fn add_missing_columns(conn: &Connection) -> Result<(), rusqlite::Error> {
         // 取得元で公開されている話数。手元の数と突き合わせるためではなく、
         // 完結の判断と同じ返事から来る値なので、一緒に覚えておく。
         ("series", "published_content_count", "INTEGER"),
+        // 表紙の作り方。メンバーの表紙を並べる（mosaic）、重ねる（spine）、
+        // 1作を選ぶ（single）、紋を描く（sigil）、画像を指す（file）。
+        // 既定を自動にしておくと、作った直後から表紙のある棚になる。
+        (
+            "work_collections",
+            "cover_mode",
+            "TEXT NOT NULL DEFAULT 'mosaic'",
+        ),
+        // cover_mode = 'file' のときだけ使う。表紙用に選んだ画像の場所。
+        ("work_collections", "cover_image_path", "TEXT"),
+        // 名前がどこから来たか。命名規則を後で入れ替えたときに、
+        // **手で直した名前を上書きしない**ための目印。
+        (
+            "work_collections",
+            "name_source",
+            "TEXT NOT NULL DEFAULT 'manual'",
+        ),
+        // 束の出自。sequence（読む順のある続き物）／theme（味が同じ）／manual。
+        // collection_kind が「利用者がどう並べたいか」なのに対し、こちらは
+        // 「どうやって見つかったか」で、後から証拠を説明するのに要る。
+        (
+            "work_collections",
+            "track",
+            "TEXT NOT NULL DEFAULT 'manual'",
+        ),
+        // 候補の側にも同じ区別を持たせる。画面のタブがこれで分かれる。
+        (
+            "collection_suggestions",
+            "track",
+            "TEXT NOT NULL DEFAULT 'sequence'",
+        ),
+        // 1作から広げたのか、棚全体の走査で見つかったのか。
+        (
+            "collection_suggestions",
+            "origin",
+            "TEXT NOT NULL DEFAULT 'seed'",
+        ),
+        // 「確度74%」の代わりに出す、なぜ束なのかの一行。
+        ("collection_suggestions", "evidence_summary", "TEXT"),
+        // 名前の案。利用者に選ばせるので、1つに決めずに持っておく。
+        ("collection_suggestions", "name_options_json", "TEXT"),
+        // タグの出どころ。`origin`（取得元が付けていた）／`manual`（利用者）／
+        // `llm`（モデルの案を利用者が採った）。
+        //
+        // 混ぜてはいけない。取得元が付けたタグとモデルが足したタグは、
+        // 確からしさが違う。**どちらか分からなくなった時点で、両方が信用
+        // できなくなる。** 取り直しのときに消してよいのも `origin` だけである。
+        (
+            "download_tags",
+            "tag_source",
+            "TEXT NOT NULL DEFAULT 'origin'",
+        ),
     ] {
         if !column_exists(conn, table, column)? {
             conn.execute_batch(&format!(
@@ -311,11 +383,7 @@ fn retire_update_job_request_blob(conn: &Connection) -> Result<(), rusqlite::Err
             row.map(|(id, request_json)| {
                 let watch_saved = serde_json::from_str::<serde_json::Value>(&request_json)
                     .ok()
-                    .and_then(|value| {
-                        value
-                            .get("watchSaved")
-                            .and_then(serde_json::Value::as_bool)
-                    })
+                    .and_then(|value| value.get("watchSaved").and_then(serde_json::Value::as_bool))
                     .unwrap_or(false);
                 (id, watch_saved)
             })
@@ -356,17 +424,23 @@ fn apply_pragmas(conn: &Connection) -> Result<(), rusqlite::Error> {
 
 fn reset_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute_batch("PRAGMA foreign_keys = OFF;")?;
-    drop_sqlite_objects(conn, "trigger", "DROP TRIGGER IF EXISTS")?;
-    drop_sqlite_objects(conn, "view", "DROP VIEW IF EXISTS")?;
-    drop_sqlite_objects(conn, "table", "DROP TABLE IF EXISTS")?;
-    drop_sqlite_objects(conn, "index", "DROP INDEX IF EXISTS")?;
-    conn.execute_batch("PRAGMA foreign_keys = ON;")?;
-
-    create_schema(conn)?;
-    add_missing_columns(conn)?;
-    retire_update_job_request_blob(conn)?;
-    stamp_schema_version(conn)?;
-    Ok(())
+    let reset_result = (|| {
+        let tx = conn.unchecked_transaction()?;
+        drop_sqlite_objects(&tx, "trigger", "DROP TRIGGER IF EXISTS")?;
+        drop_sqlite_objects(&tx, "view", "DROP VIEW IF EXISTS")?;
+        drop_sqlite_objects(&tx, "table", "DROP TABLE IF EXISTS")?;
+        drop_sqlite_objects(&tx, "index", "DROP INDEX IF EXISTS")?;
+        create_schema(&tx)?;
+        add_missing_columns(&tx)?;
+        retire_update_job_request_blob(&tx)?;
+        stamp_schema_version(&tx)?;
+        tx.commit()
+    })();
+    // 失敗時も同じ接続を外部鍵無効のまま返さない。元のエラーを
+    // 優先しつつ、復帰に失敗した場合も必ず呼び出し側へ伝える。
+    let foreign_keys_result = conn.execute_batch("PRAGMA foreign_keys = ON;");
+    reset_result?;
+    foreign_keys_result
 }
 
 fn drop_sqlite_objects(

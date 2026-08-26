@@ -11,7 +11,6 @@ import {
   Grid,
   Group,
   NumberInput,
-  Paper,
   Progress,
   ScrollArea,
   SegmentedControl,
@@ -21,7 +20,6 @@ import {
   Switch,
   Text,
   TextInput,
-  ThemeIcon,
   Title,
   Tooltip,
 } from "@mantine/core";
@@ -29,14 +27,14 @@ import { useForm, isNotEmpty, type UseFormReturnType } from "@mantine/form";
 import { modals } from "@mantine/modals";
 import { notifications } from "@mantine/notifications";
 import { useMutation, useQuery } from "@tanstack/react-query";
+import { WorkCard } from "@/components/WorkCard";
 import { Icons, IconSize } from "@/lib/icons";
 import { useAppNavigate } from "@/app/router";
 import { useWorkspace } from "@/app/WorkspaceContext";
 import { EmptyState, ErrorState, LoadingState } from "@/components/AsyncState";
 import { PageHeader } from "@/components/PageHeader";
-import { ProviderMark } from "@/lib/providers";
 import { errorMessage, formatBytes, formatNumber } from "@/lib/format";
-import { getDemoWork } from "@/mocks/demoData";
+import { demoWorks } from "@/mocks/demoData";
 import { getDownloads, isTauriRuntime } from "@/services/dbApi";
 import { openSingleDialog } from "@/services/dialogApi";
 import { exportEpubBatch, listEpubTemplates } from "@/services/epubApi";
@@ -115,7 +113,7 @@ export default function EpubPage() {
     queryKey: ["epub-queue-works", epubQueue],
     queryFn: () => runtime
       ? getDownloads(epubQueue)
-      : Promise.resolve(epubQueue.map((id) => getDemoWork(id)).filter((work): work is DownloadEntry => Boolean(work))),
+      : Promise.resolve(epubQueue.map((id) => demoWorks.find((work) => work.id === id)).filter((work): work is DownloadEntry => Boolean(work))),
     enabled: epubQueue.length > 0,
   });
   const works = useMemo(() => queueQuery.data ?? [], [queueQuery.data]);
@@ -171,7 +169,8 @@ export default function EpubPage() {
       setProgress(null);
       const retry = new Set([...data.failedIds, ...data.invalidIds]);
       removeFromEpubQueue(works.filter((work) => !retry.has(work.id)).map((work) => work.id));
-      notifications.show({ color: data.failedCount ? "yellow" : "green", title: "EPUB書き出しが完了しました", message: `成功 ${data.successCount} · 失敗 ${data.failedCount}` });
+      const needsReview = data.failedCount > 0 || data.invalidCount > 0 || data.issues.length > 0;
+      notifications.show({ color: needsReview ? "yellow" : "green", title: "EPUB書き出しが完了しました", message: `成功 ${data.successCount} · 失敗 ${data.failedCount}${data.invalidCount ? ` · 検証不合格 ${data.invalidCount}` : ""}` });
     },
     onError: (error) => { exportOperationRef.current?.fail(error); exportOperationRef.current = null; setProgress(null); notifications.show({ color: "red", title: "EPUBを書き出せません", message: errorMessage(error) }); },
   });
@@ -197,7 +196,7 @@ export default function EpubPage() {
               <Stack gap="lg">
                 <Card p="lg">
                   <Group justify="space-between" mb="md"><Box><Title order={3}>書き出す作品</Title><Text size="sm" c="dimmed">{formatNumber(works.length)}件 · 元データ {formatBytes(totalSize)}</Text></Box><Button variant="subtle" color="red" size="xs" onClick={() => modals.openConfirmModal({ title: "キューを空にしますか？", children: <Text size="sm">選択中の{epubQueue.length}件をキューから外します。</Text>, confirmProps: { color: "red" }, labels: { confirm: "空にする", cancel: "キャンセル" }, onConfirm: clearEpubQueue })}>すべて解除</Button></Group>
-                  {queueQuery.isLoading ? <LoadingState label="作品情報を読み込んでいます" /> : queueQuery.error ? <ErrorState error={queueQuery.error} retry={() => queueQuery.refetch()} /> : <Stack gap="xs">{works.map((work, index) => <Paper key={work.id} p="sm" withBorder><Group wrap="nowrap"><ThemeIcon variant="light" color="gray" size="lg"><Text size="xs" fw={800}>{index + 1}</Text></ThemeIcon><Stack gap={2} flex={1} miw={0}><Group gap="xs" wrap="nowrap"><ProviderMark provider={work.source} compact /><Text size="sm" fw={650} className="line-clamp-1">{work.title}</Text></Group><Text size="xs" c="dimmed" className="line-clamp-1">{work.authorName} · {formatNumber(work.textLength)}字 · {work.assetCount}画像</Text></Stack><Tooltip label="キューから外す"><ActionIcon variant="subtle" color="red" aria-label={`${work.title}をキューから外す`} onClick={() => removeFromEpubQueue(work.id)}><Icons.cancel size={IconSize.action} /></ActionIcon></Tooltip></Group></Paper>)}</Stack>}
+                  {queueQuery.isLoading ? <LoadingState label="作品情報を読み込んでいます" /> : queueQuery.error ? <ErrorState error={queueQuery.error} retry={() => queueQuery.refetch()} /> : <Stack gap="xs">{works.map((work, index) => <div key={work.id} className="epub-queue-item"><Text className="epub-queue-item__index" fw={700}>{index + 1}</Text><div className="epub-queue-item__body"><WorkCard work={work} compact /></div><Tooltip label="キューから外す"><ActionIcon variant="subtle" color="red" aria-label={`${work.title}をキューから外す`} onClick={() => removeFromEpubQueue(work.id)}><Icons.cancel size={IconSize.action} /></ActionIcon></Tooltip></div>)}</Stack>}
                 </Card>
                 <CompressionSettings form={form} />
               </Stack>

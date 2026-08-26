@@ -85,6 +85,34 @@ describe("ReaderPage position restoration", () => {
     expect(JSON.parse(window.localStorage.getItem("piep.reader-position.101.current") ?? "null")).toEqual({ page: 2, top: 360 });
   });
 
+  it("applies a bookmark offset only after its async source page is ready", async () => {
+    const pageTwo = deferred<ReaderContentPage>();
+    dbApi.getReaderContentPage.mockImplementation((_id: number, _version: number | null, page: number) => (
+      page === 0 ? Promise.resolve(content(0, "<p>1ページの本文</p>")) : pageTwo.promise
+    ));
+    window.localStorage.setItem("piep.bookmarks.v1", JSON.stringify({
+      101: [{ id: "page-two", page: 2, top: 240, label: "2ページ · 20%", createdAt: "2026-08-23T00:00:00.000Z" }],
+    }));
+
+    const view = renderReader();
+    expect(await screen.findByText("1ページの本文")).toBeInTheDocument();
+    const viewport = view.container.querySelector<HTMLElement>(".reader-scroll .mantine-ScrollArea-viewport");
+    expect(viewport).not.toBeNull();
+    Object.defineProperties(viewport!, {
+      scrollHeight: { configurable: true, value: 1_000 },
+      clientHeight: { configurable: true, value: 400 },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "しおり一覧（1件）" }));
+    fireEvent.click(await screen.findByRole("button", { name: "2ページ · 20%" }));
+    await waitFor(() => expect(dbApi.getReaderContentPage).toHaveBeenCalledWith(101, null, 1));
+    expect(viewport!.scrollTop).not.toBe(240);
+
+    await act(async () => { pageTwo.resolve(content(1, "<p>2ページの本文</p>")); });
+    await waitFor(() => expect(screen.getByText("2ページの本文")).toBeInTheDocument());
+    await waitFor(() => expect(viewport!.scrollTop).toBe(240));
+  });
+
   it("hides the previous version while history navigation loads another version", async () => {
     const nextVersion = deferred<ReaderContentPage>();
     dbApi.getReaderContentPage.mockImplementation((_id: number, version: number | null) => (

@@ -414,6 +414,19 @@ pub struct WorkCollectionSummary {
     pub collection_kind: String,
     pub cover_download_id: Option<i64>,
     pub cover_path: Option<String>,
+    /// 表紙の作り方。`mosaic` / `spine` / `single` / `sigil` / `file`。
+    pub cover_mode: String,
+    /// `cover_mode = "file"` のときだけ使う、選んだ画像の場所。
+    pub cover_image_path: Option<String>,
+    /// 並び順の先頭から集めたメンバーの表紙。モザイクと背表紙が使う。
+    ///
+    /// 表紙を持たないメンバーも席を空けずに `null` で残す。詰めてしまうと
+    /// 4枚のうち2枚しか表紙が無い束が、2作の束と同じ顔になる。
+    pub cover_tiles: Vec<CollectionCoverTile>,
+    /// 名前の出どころ。`manual` なら自動命名で上書きしない。
+    pub name_source: String,
+    /// 束の出自。`sequence` / `theme` / `manual`。
+    pub track: String,
     pub revision: i64,
     pub member_count: i64,
     pub available_count: i64,
@@ -422,6 +435,22 @@ pub struct WorkCollectionSummary {
     pub updated_at: String,
 }
 
+/// モザイク表紙の1マス。表紙が無いメンバーも、紋を描くための材料を持つ。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CollectionCoverTile {
+    pub source: String,
+    pub source_id: String,
+    pub title: String,
+    pub author_name: String,
+    pub cover_path: Option<String>,
+}
+
+/// 省略された項目は「変えない」を意味するので、既定値を持てる。
+///
+/// `cover_download_id` と `cover_image_path` は `null` で明示的に消せる。
+/// serde の field default は「キー自体が無い」場合にだけ使われるので、
+/// 内部用の sentinel で missing と null を区別する。
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkCollectionInput {
@@ -430,7 +459,85 @@ pub struct WorkCollectionInput {
     pub name: String,
     pub description: Option<String>,
     pub collection_kind: String,
+    #[serde(
+        default = "missing_collection_cover_download_id",
+        deserialize_with = "deserialize_collection_cover_download_id"
+    )]
     pub cover_download_id: Option<i64>,
+    /// 省略時は既存値（新規なら `mosaic`）を保つ。
+    pub cover_mode: Option<String>,
+    #[serde(
+        default = "missing_collection_cover_image_path",
+        deserialize_with = "deserialize_collection_cover_image_path"
+    )]
+    pub cover_image_path: Option<String>,
+    /// 画面から保存されたものは常に `manual`。自動命名はここを見て手を止める。
+    pub name_source: Option<String>,
+    pub track: Option<String>,
+}
+
+const COLLECTION_PATCH_UNSET_ID: i64 = i64::MIN;
+const COLLECTION_PATCH_UNSET_PATH: &str = "\0piep:unchanged\0";
+
+fn missing_collection_cover_download_id() -> Option<i64> {
+    Some(COLLECTION_PATCH_UNSET_ID)
+}
+
+fn deserialize_collection_cover_download_id<'de, D>(
+    deserializer: D,
+) -> Result<Option<i64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<i64>::deserialize(deserializer)
+}
+
+fn missing_collection_cover_image_path() -> Option<String> {
+    Some(COLLECTION_PATCH_UNSET_PATH.to_string())
+}
+
+fn deserialize_collection_cover_image_path<'de, D>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer)
+}
+
+impl Default for WorkCollectionInput {
+    fn default() -> Self {
+        Self {
+            id: None,
+            name: String::new(),
+            description: None,
+            collection_kind: String::new(),
+            cover_download_id: missing_collection_cover_download_id(),
+            cover_mode: None,
+            cover_image_path: missing_collection_cover_image_path(),
+            name_source: None,
+            track: None,
+        }
+    }
+}
+
+impl WorkCollectionInput {
+    /// `None` = 省略、`Some(None)` = 明示的な null、`Some(Some(id))` = 更新。
+    pub(crate) fn cover_download_id_patch(&self) -> Option<Option<i64>> {
+        if self.cover_download_id == Some(COLLECTION_PATCH_UNSET_ID) {
+            None
+        } else {
+            Some(self.cover_download_id)
+        }
+    }
+
+    /// `None` = 省略、`Some(None)` = 明示的な null、`Some(Some(path))` = 更新。
+    pub(crate) fn cover_image_path_patch(&self) -> Option<Option<&str>> {
+        match self.cover_image_path.as_deref() {
+            Some(COLLECTION_PATCH_UNSET_PATH) => None,
+            value => Some(value),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -452,6 +559,13 @@ pub struct WorkCollectionMember {
     pub missing: bool,
     pub created_at: String,
     pub updated_at: String,
+    /// 保存済みメンバーの作品そのもの。
+    ///
+    /// これがあることで、コレクションの中でも棚と同じ `WorkCard` が描ける。
+    /// 縮小した投影を返していたころは、良いカードに差し込む型が無かった。
+    pub work: Option<DownloadEntry>,
+    /// 同じ作品の別版。続きではないので、束の中では畳んで代表だけを見せる。
+    pub editions: Vec<DownloadEntry>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -534,13 +648,54 @@ pub struct CollectionSuggestionMember {
 pub struct CollectionSuggestion {
     pub id: String,
     pub proposed_name: String,
+    /// 名前の案。一つに決めず、利用者に選ばせる。先頭が `proposed_name`。
+    pub name_options: Vec<CollectionNameCandidate>,
     pub collection_kind: String,
+    /// `sequence`（読む順のある続き物）か `theme`（味が同じ）か。
+    pub track: String,
+    /// `seed`（1作から広げた）か `sweep`（棚全体の走査）か。
+    pub origin: String,
+    /// 「なぜこれが束なのか」の一行。確度%の代わりに画面へ出す。
+    pub evidence_summary: String,
     pub score: f64,
     pub rule_version: String,
     pub state: String,
     pub members: Vec<CollectionSuggestionMember>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+/// 棚の走査の結果。
+///
+/// 束にならなかったものも返す。「催眠」759作は**まとまりではなく絞り込みの
+/// 結果**なので、束としては出さない。ただし利用者にとっては確かに一つの
+/// 見方なので、保存した検索として提案する。黙って捨てない。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CollectionSweepResult {
+    pub bundles: Vec<CollectionSuggestion>,
+    pub saved_search_suggestions: Vec<SavedSearchSuggestion>,
+}
+
+/// 束にするには大きすぎるタグ。保存した検索としてなら意味がある。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedSearchSuggestion {
+    pub tag: String,
+    pub work_count: i64,
+    /// なぜ束にしなかったのかの一行。
+    pub reason: String,
+}
+
+/// 束の名前の案。どこから来た案かが分かるようにしておく。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CollectionNameCandidate {
+    /// `title` / `series` / `tags` / `author` / `llm`
+    pub source: String,
+    pub name: String,
+    /// 画面に出す短い説明。「題名の共通部分」「共有タグ」など。
+    pub label: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1123,7 +1278,7 @@ pub struct NewVersion {
 
 #[cfg(test)]
 mod start_request_shape_tests {
-    use super::StartUpdateJobRequest;
+    use super::{StartUpdateJobRequest, WorkCollectionInput};
 
     /// 画面が送らない項目は、JSON からそのまま消える（JS の undefined）。
     /// 省略が欠損として扱われると、確認そのものが始まらなくなる。
@@ -1137,5 +1292,28 @@ mod start_request_shape_tests {
         assert!(request.credentials.is_none());
         assert!(request.watch_saved.is_none());
         assert!(request.adhoc_targets.is_none());
+    }
+
+    #[test]
+    fn collection_patch_distinguishes_omitted_fields_from_null() {
+        let omitted: WorkCollectionInput =
+            serde_json::from_str(r#"{"id":"collection-a","name":"A","collectionKind":"ordered"}"#)
+                .unwrap();
+        assert_eq!(omitted.cover_download_id_patch(), None);
+        assert_eq!(omitted.cover_image_path_patch(), None);
+
+        let cleared: WorkCollectionInput = serde_json::from_str(
+            r#"{"id":"collection-a","name":"A","collectionKind":"ordered","coverDownloadId":null,"coverImagePath":null}"#,
+        )
+        .unwrap();
+        assert_eq!(cleared.cover_download_id_patch(), Some(None));
+        assert_eq!(cleared.cover_image_path_patch(), Some(None));
+
+        let changed: WorkCollectionInput = serde_json::from_str(
+            r#"{"id":"collection-a","name":"A","collectionKind":"ordered","coverDownloadId":42,"coverImagePath":"cover.png"}"#,
+        )
+        .unwrap();
+        assert_eq!(changed.cover_download_id_patch(), Some(Some(42)));
+        assert_eq!(changed.cover_image_path_patch(), Some(Some("cover.png")));
     }
 }

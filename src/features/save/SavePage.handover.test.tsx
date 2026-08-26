@@ -41,6 +41,12 @@ function renderSavePage() {
   );
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
 describe("SavePage handover to the large window", () => {
   beforeEach(() => {
     window.location.hash = "#/save/pixiv";
@@ -80,5 +86,32 @@ describe("SavePage handover to the large window", () => {
 
     expect(await screen.findByText("大きいウィンドウで表示中")).toBeInTheDocument();
     await waitFor(() => expect(browserApi.setEmbeddedBrowserVisible).toHaveBeenCalledWith(false));
+  });
+
+  it("serializes provider initialization so a stale slow WebView cannot win", async () => {
+    const firstOpen = deferred<void>();
+    const originalElementFromPoint = document.elementFromPoint;
+    Object.defineProperty(document, "elementFromPoint", { configurable: true, value: () => null });
+    browserApi.openEmbeddedBrowser
+      .mockImplementationOnce(() => firstOpen.promise)
+      .mockResolvedValue(undefined);
+    const bounds = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({
+      x: 0, y: 0, top: 0, left: 0, right: 900, bottom: 600, width: 900, height: 600, toJSON: () => ({}),
+    });
+    renderSavePage();
+    await waitFor(() => expect(browserApi.openEmbeddedBrowser).toHaveBeenCalledTimes(1));
+
+    fireEvent.click(screen.getByText("FANBOX"));
+    await waitFor(() => expect(window.location.hash).toBe("#/save/fanbox"));
+    // The second provider waits for the non-cancellable first IPC to settle.
+    expect(browserApi.openEmbeddedBrowser).toHaveBeenCalledTimes(1);
+
+    firstOpen.resolve();
+    await waitFor(() => expect(browserApi.openEmbeddedBrowser).toHaveBeenCalledTimes(2));
+    const lastOpen = browserApi.openEmbeddedBrowser.mock.calls[browserApi.openEmbeddedBrowser.mock.calls.length - 1];
+    expect(lastOpen?.[0]).toBe("https://www.fanbox.cc/");
+    bounds.mockRestore();
+    if (originalElementFromPoint) Object.defineProperty(document, "elementFromPoint", { configurable: true, value: originalElementFromPoint });
+    else delete (document as Partial<Document>).elementFromPoint;
   });
 });

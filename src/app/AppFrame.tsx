@@ -249,6 +249,8 @@ export function AppFrame({ children }: { children: ReactNode }) {
     if (location.pathname.startsWith("/works")) return "作品";
     if (location.pathname.startsWith("/people")) return "作者";
     if (location.pathname.startsWith("/series")) return "シリーズ";
+    // 抜けていた。コレクションを開くと窓の題が「piep · piep」になっていた。
+    if (location.pathname.startsWith("/collections")) return "コレクション";
     if (location.pathname.startsWith("/epub/templates")) return "テンプレートスタジオ";
     if (location.pathname.startsWith("/epub")) return "EPUB";
     if (location.pathname.startsWith("/updates")) return "更新";

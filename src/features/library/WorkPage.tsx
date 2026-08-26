@@ -45,6 +45,7 @@ import { listPendingRevisionsCommand } from "@/services/updateJobApi";
 import { prepareDocumentHtml } from "@/lib/content";
 import { useContentLinkNavigation } from "@/lib/contentLinks";
 import { exportSingle } from "@/services/archiveApi";
+import { WorkAssist } from "@/features/assist/WorkAssist";
 import { addWorkCollectionMembers, listCollectionsForWork, listWorkCollections } from "@/services/collectionApi";
 import { openSingleDialog } from "@/services/dialogApi";
 import {
@@ -382,6 +383,8 @@ export default function WorkPage() {
           <Tabs.Tab value="json">JSON</Tabs.Tab>
         </Tabs.List>
         <Tabs.Panel value="overview" pt="lg">
+          {/* モデルの手伝い。設定していなければ何も出ない。 */}
+          <Box mb="lg"><WorkAssist downloadId={work.id} /></Box>
           {/* Two columns from the medium breakpoint - the previous large one
               left this stacked at ordinary window sizes - and both stretch so
               the section reads as a single block rather than three cards of

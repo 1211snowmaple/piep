@@ -1,7 +1,6 @@
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use tauri::Emitter;
 use tokio::fs::{self, File};
 use tokio::io::AsyncWriteExt;
 use tokio::task::JoinSet;
@@ -46,7 +45,11 @@ fn fanbox_file_filename(file: &Value) -> String {
     let ext = extract_extension(url, "bin");
     let key = file
         .get("id")
-        .and_then(|v| v.as_str().map(str::to_string).or_else(|| v.as_i64().map(|n| n.to_string())))
+        .and_then(|v| {
+            v.as_str()
+                .map(str::to_string)
+                .or_else(|| v.as_i64().map(|n| n.to_string()))
+        })
         // id を持たない形で返ってきたときは URL から作る。名前が同じでも
         // URL が違えば別物になり、同じ添付なら何度呼んでも同じ名前になる。
         .unwrap_or_else(|| short_url_digest(url));
@@ -67,7 +70,10 @@ fn fanbox_image_filename(image: &Value) -> String {
 fn short_url_digest(url: &str) -> String {
     use sha2::{Digest, Sha256};
     let digest = Sha256::digest(url.as_bytes());
-    digest[..6].iter().map(|byte| format!("{byte:02x}")).collect()
+    digest[..6]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 /// ファイル名サニタイザー
@@ -763,7 +769,7 @@ fn find_existing_asset_in_other_versions(
 
 /// 全てのアセットを一括並行ダウンロードし、ローカルリンクをバインドする
 pub async fn download_and_link_assets(
-    app: &tauri::AppHandle,
+    _app: &tauri::AppHandle,
     json_data: &mut Value,
     json_path: &Path,
     is_fanbox: bool,
@@ -819,7 +825,9 @@ pub async fn download_and_link_assets(
         }
     });
     if let Some(reason) = collision {
-        return Err(format!("Asset destinations collide, refusing to save: {reason}"));
+        return Err(format!(
+            "Asset destinations collide, refusing to save: {reason}"
+        ));
     }
 
     let msg = format!(
@@ -827,12 +835,10 @@ pub async fn download_and_link_assets(
         download_targets.len(),
         is_fanbox
     );
-    let _ = app.emit("download-log", &msg);
     log::info!("{}", msg);
 
     if download_targets.is_empty() {
         let msg = "[INFO] ダウンロード対象のアセットは見つかりませんでした。";
-        let _ = app.emit("download-log", &msg);
         log::info!("{}", msg);
         return Ok(());
     }
@@ -862,7 +868,6 @@ pub async fn download_and_link_assets(
         let attach_cookie = is_fanbox && may_send_fanbox_cookie(&url);
         let ua_clone = user_agent.clone();
         let sem = semaphore.clone();
-        let app_clone = app.clone();
         let filename = target.filename.clone();
         let sub_folder = target.sub_folder;
         let canonical_assets_dir = canonical_assets_dir.clone();
@@ -887,7 +892,6 @@ pub async fn download_and_link_assets(
             .await
             {
                 let msg = format!("[INFO] すでに保存されています（スキップします）: {}", filename);
-                let _ = app_clone.emit("download-log", &msg);
                 log::info!("{}", msg);
                 return Ok::<(), String>(());
             }
@@ -916,7 +920,6 @@ pub async fn download_and_link_assets(
                             "[INFO] 過去バージョンの同一アセットを再利用しました: {}",
                             filename
                         );
-                        let _ = app_clone.emit("download-log", &msg);
                         log::info!("{}", msg);
                         return Ok::<(), String>(());
                     }
@@ -936,7 +939,6 @@ pub async fn download_and_link_assets(
                 .map_err(|e| format!("Failed to acquire semaphore permit: {}", e))?;
 
             let msg = format!("[INFO] アセットのダウンロードを開始: {} -> {}", url, filename);
-            let _ = app_clone.emit("download-log", &msg);
             log::info!("{}", msg);
 
             let mut attempts = 4;
@@ -985,7 +987,6 @@ pub async fn download_and_link_assets(
                 match res {
                     Ok(_) => {
                         let msg = format!("[SUCCESS] 保存完了: {}", filename);
-                        let _ = app_clone.emit("download-log", &msg);
                         log::info!("{}", msg);
                         break;
                     }
@@ -993,7 +994,6 @@ pub async fn download_and_link_assets(
                         attempts -= 1;
                         if attempts == 0 {
                             let msg = format!("[ERROR] アセットのダウンロードに失敗しました: {}. エラー: {}", url, e);
-                            let _ = app_clone.emit("download-log", &msg);
                             log::error!("{}", msg);
                             return Err(e);
                         }
@@ -1003,7 +1003,6 @@ pub async fn download_and_link_assets(
                             delay,
                             e
                         );
-                        let _ = app_clone.emit("download-log", &msg);
                         log::warn!("{}", msg);
                         tokio::time::sleep(delay).await;
                         delay *= 2;
@@ -1029,7 +1028,6 @@ pub async fn download_and_link_assets(
             Ok(Err(e)) => {
                 fail_count += 1;
                 let msg = format!("[ERROR] アセットダウンロードタスクが失敗しました: {}", e);
-                let _ = app.emit("download-log", &msg);
                 log::error!("{}", msg);
                 first_failure.get_or_insert(e);
             }
@@ -1039,7 +1037,6 @@ pub async fn download_and_link_assets(
                     "[ERROR] アセットダウンロードタスクがパニックしました: {:?}",
                     e
                 );
-                let _ = app.emit("download-log", &msg);
                 log::error!("{}", msg);
                 first_failure.get_or_insert_with(|| format!("asset task panicked: {e}"));
             }
@@ -1050,7 +1047,6 @@ pub async fn download_and_link_assets(
         "アセット処理完了。成功: {} 件, 失敗: {} 件",
         success_count, fail_count
     );
-    let _ = app.emit("download-log", &msg);
     log::info!("{}", msg);
 
     if fail_count > 0 {
@@ -1246,8 +1242,16 @@ mod tests {
         let first = files[0]["localPath"].as_str().unwrap();
         let second = files[1]["localPath"].as_str().unwrap();
         assert_ne!(first, second);
-        assert!(first.ends_with(&targets[0].filename), "{first} vs {:?}", targets[0]);
-        assert!(second.ends_with(&targets[1].filename), "{second} vs {:?}", targets[1]);
+        assert!(
+            first.ends_with(&targets[0].filename),
+            "{first} vs {:?}",
+            targets[0]
+        );
+        assert!(
+            second.ends_with(&targets[1].filename),
+            "{second} vs {:?}",
+            targets[1]
+        );
     }
 
     /// id を返さない形にも備える。同じ添付なら何度呼んでも同じ名前になり、

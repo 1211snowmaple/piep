@@ -33,7 +33,10 @@ export default defineConfig({
     toHaveScreenshot: {
       animations: "disabled",
       caret: "hide",
-      maxDiffPixelRatio: 0.025,
+      // A 2.5% allowance let an entire light-background detail panel vanish:
+      // its borders and text occupied fewer pixels than the threshold. Keep a
+      // small anti-aliasing allowance, but make structural omissions fail.
+      maxDiffPixelRatio: 0.005,
     },
   },
   use: {

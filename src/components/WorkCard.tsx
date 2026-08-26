@@ -191,6 +191,7 @@ export const WorkCard = memo(function WorkCard({
     staleTime: 30_000,
   });
   const revised = (pendingRevisions.data ?? []).some((entry) => entry.downloadId === work.id);
+  const excerpt = work.excerpt ? summaryText(work.excerpt) : "";
   const open = useCallback(() => {
     if (selectionMode) onSelect?.(work.id, !selected);
     else navigate(`/works/${work.id}`);
@@ -242,23 +243,38 @@ export const WorkCard = memo(function WorkCard({
           <div className="work-row__main" inert={selectionMode || undefined} aria-hidden={selectionMode || undefined}>
             <SeriesLink work={work} className="work-row__series" interactive={!selectionMode} />
             <UnstyledButton className="work-row__open" onClick={open} onKeyDown={keyboardOpen} role={selectionMode ? undefined : "link"} aria-label={selectionMode ? undefined : `${work.title}を開く`} aria-hidden={selectionMode || undefined} tabIndex={selectionMode ? -1 : undefined}>
-              <Text fw={650} size="sm" className="line-clamp-1">{work.title}</Text>
+              <Tooltip label={work.title} multiline maw={480} openDelay={350} withArrow>
+                <Text fw={650} size="sm" className="line-clamp-2">{work.title}</Text>
+              </Tooltip>
             </UnstyledButton>
             <div className="work-row__identity">
               <AuthorLine work={work} size={17} interactive={!selectionMode} />
               <span className="work-card__identity-divider" aria-hidden />
               <ProviderMark provider={work.source} compact className="work-row__provider" />
+              {work.excerpt && (
+                <>
+                  <span className="work-card__identity-divider work-row__excerpt-divider" aria-hidden />
+                  {/* 題名の下に1行占めさせず、作者の横の余りを受ける。窓が狭まれば
+                      行を増やさずここが先に縮む。切れた先は題名と同じくホバーで読める。 */}
+                  <Tooltip label={excerpt} multiline maw={480} openDelay={350} withArrow>
+                    <Text size="xs" c="dimmed" className="work-row__excerpt">{excerpt}</Text>
+                  </Tooltip>
+                </>
+              )}
             </div>
             <SearchMatchReason work={work} />
+            <div className="work-row__tags" inert={selectionMode || undefined} aria-hidden={selectionMode || undefined}><TagRow tags={work.tags} interactive={!selectionMode} /></div>
           </div>
-          <div className="work-row__tags" inert={selectionMode || undefined} aria-hidden={selectionMode || undefined}><TagRow tags={work.tags} interactive={!selectionMode} /></div>
-          <Group gap="sm" wrap="nowrap" className="work-row__facts" inert={selectionMode || undefined} aria-hidden={selectionMode || undefined}>
-            <Text size="xs" c="dimmed"><Icons.publishedDate size={IconSize.inline} />{formatDateNumeric(work.sourceCreatedAt)}</Text>
-            <Text size="xs" c="dimmed"><Icons.textLength size={IconSize.inline} />{formatNumber(work.textLength)}字</Text>
-            {work.assetCount > 0 && <Text size="xs" c="dimmed"><Icons.assets size={IconSize.inline} />{work.assetCount}</Text>}
-            {revised && <Badge size="xs" variant="light" color="yellow">改稿</Badge>}<VersionChip work={work} interactive={!selectionMode} />
-          </Group>
-          {!selectionMode && <div className="work-row__actions">{actions}</div>}
+          {/* 最後の行はカードの足元と同じ組み。事実が左、操作が右。 */}
+          <div className="work-row__footer">
+            <Group gap="sm" wrap="nowrap" className="work-row__facts" inert={selectionMode || undefined} aria-hidden={selectionMode || undefined}>
+              <Text size="xs" c="dimmed"><Icons.publishedDate size={IconSize.inline} />{formatDateNumeric(work.sourceCreatedAt)}</Text>
+              <Text size="xs" c="dimmed"><Icons.textLength size={IconSize.inline} />{formatNumber(work.textLength)}字</Text>
+              {work.assetCount > 0 && <Text size="xs" c="dimmed"><Icons.assets size={IconSize.inline} />{work.assetCount}</Text>}
+              {revised && <Badge size="xs" variant="light" color="yellow">改稿</Badge>}<VersionChip work={work} interactive={!selectionMode} />
+            </Group>
+            {!selectionMode && <div className="work-row__actions">{actions}</div>}
+          </div>
         </div>
       </Card>
     );
@@ -288,14 +304,16 @@ export const WorkCard = memo(function WorkCard({
         <div className="work-card__body" inert={selectionMode || undefined} aria-hidden={selectionMode || undefined}>
           {work.seriesTitle && <div className="work-card__meta"><SeriesLink work={work} interactive={!selectionMode} /></div>}
           <UnstyledButton className="work-card__open" onClick={open} onKeyDown={keyboardOpen} role={selectionMode ? undefined : "link"} aria-label={selectionMode ? undefined : `${work.title}を開く`} aria-hidden={selectionMode || undefined} tabIndex={selectionMode ? -1 : undefined}>
-            <Text fw={720} className="work-card__title line-clamp-2" lh={1.32}>{work.title}</Text>
+            <Tooltip label={work.title} multiline maw={480} openDelay={350} withArrow>
+              <Text fw={720} className="work-card__title line-clamp-2" lh={1.32}>{work.title}</Text>
+            </Tooltip>
           </UnstyledButton>
           <div className="work-card__identity">
             <AuthorLine work={work} interactive={!selectionMode} />
             <span className="work-card__identity-divider" aria-hidden />
             <ProviderMark provider={work.source} compact className="work-card__provider" />
           </div>
-          {work.excerpt && <Text size="xs" c="dimmed" className="line-clamp-2 work-card__excerpt">{summaryText(work.excerpt)}</Text>}
+          {work.excerpt && <Text size="xs" c="dimmed" className="line-clamp-2 work-card__excerpt">{excerpt}</Text>}
           <SearchMatchReason work={work} />
           {work.tags.length > 0 && <div className="work-card__tagslot"><TagRow tags={work.tags} interactive={!selectionMode} /></div>}
         </div>
@@ -372,6 +390,13 @@ function WorkActions({ work, queued, onQueue, onToggleFavorite, onToggleWatch }:
     },
   });
 
+  // ツールチップの文言をそのまま読み上げ名にも使う。一覧に何千枚も並ぶので、
+  // 題名を前に付けてボタン名を一意にする。見えている文言と読み上げの文言が
+  // 食い違うと、音声操作で名前を呼んでも押せない。
+  const favoriteLabel = work.favorite ? "お気に入りを解除" : "お気に入りに追加";
+  const watchLabel = work.watchUpdates ? "更新監視をオフにする" : "更新監視をオンにする";
+  const queueLabel = queued ? "EPUBキューから外す" : "EPUBキューに追加";
+
   return (
     <Group gap={2} wrap="nowrap" justify="flex-end" className="work-card__actions" onClick={(event) => event.stopPropagation()}>
       {/* Nothing here carries a filled chip. A row of five solid squares is the
@@ -380,31 +405,31 @@ function WorkActions({ work, queued, onQueue, onToggleFavorite, onToggleWatch }:
           itself: grey when off, its own colour when on, and filled in where the
           shape has an inside to fill. */}
       <Tooltip label="読む">
-        <ActionIcon variant="subtle" style={{ "--ai-color": "var(--flag-watch)" }} size="md" aria-label={`${work.title}を読む`} onClick={() => navigate(`/reader/${work.id}`)}>
+        <ActionIcon variant="subtle" style={{ "--ai-color": "var(--flag-watch)" }} size="md" aria-label={`${work.title}：読む`} onClick={() => navigate(`/reader/${work.id}`)}>
           <Icons.read size={IconSize.action} />
         </ActionIcon>
       </Tooltip>
-      <Tooltip label={work.favorite ? "お気に入りを解除" : "お気に入りに追加"}>
-        <ActionIcon variant="subtle" color={work.favorite ? "red" : "gray"} style={{ "--ai-color": work.favorite ? "var(--flag-favorite)" : "var(--flag-off)", "--ai-bg": work.favorite ? "var(--flag-favorite-bg)" : "transparent" }} size="md" aria-label={work.favorite ? "お気に入りを解除" : "お気に入りに追加"} aria-pressed={work.favorite} onClick={toggleFavorite}>
+      <Tooltip label={favoriteLabel}>
+        <ActionIcon variant="subtle" color={work.favorite ? "red" : "gray"} style={{ "--ai-color": work.favorite ? "var(--flag-favorite)" : "var(--flag-off)", "--ai-bg": work.favorite ? "var(--flag-favorite-bg)" : "transparent" }} size="md" aria-label={`${work.title}：${favoriteLabel}`} aria-pressed={work.favorite} onClick={toggleFavorite}>
           <Icons.favorite size={IconSize.action} fill={work.favorite ? "currentColor" : "none"} />
         </ActionIcon>
       </Tooltip>
       {/* A rotating arrow has no inside, so this one can only change colour. */}
-      <Tooltip label={work.watchUpdates ? "更新監視をオフにする" : "更新監視をオンにする"}>
-        <ActionIcon variant="subtle" color={work.watchUpdates ? "piep" : "gray"} style={{ "--ai-color": work.watchUpdates ? "var(--flag-watch)" : "var(--flag-off)", "--ai-bg": work.watchUpdates ? "var(--flag-watch-bg)" : "transparent" }} size="md" aria-label={work.watchUpdates ? "更新監視をオフにする" : "更新監視をオンにする"} aria-pressed={work.watchUpdates} onClick={toggleWatch}>
+      <Tooltip label={watchLabel}>
+        <ActionIcon variant="subtle" color={work.watchUpdates ? "piep" : "gray"} style={{ "--ai-color": work.watchUpdates ? "var(--flag-watch)" : "var(--flag-off)", "--ai-bg": work.watchUpdates ? "var(--flag-watch-bg)" : "transparent" }} size="md" aria-label={`${work.title}：${watchLabel}`} aria-pressed={work.watchUpdates} onClick={toggleWatch}>
           <Icons.watch size={IconSize.action} />
         </ActionIcon>
       </Tooltip>
       {/* One glyph in both states. Swapping the shape as well as the colour
           said the same thing twice, and the shape that changed was the part
           naming what the button does. Green is the "ep" half of the wordmark. */}
-      <Tooltip label={queued ? "EPUBキューから外す" : "EPUBキューに追加"}>
-        <ActionIcon variant="subtle" color={queued ? "leaf" : "gray"} style={{ "--ai-color": queued ? "var(--flag-epub)" : "var(--flag-off)", "--ai-bg": queued ? "var(--flag-epub-bg)" : "transparent" }} size="md" aria-label={queued ? "EPUBキューから外す" : "EPUBキューに追加"} aria-pressed={queued} onClick={onQueue}>
+      <Tooltip label={queueLabel}>
+        <ActionIcon variant="subtle" color={queued ? "leaf" : "gray"} style={{ "--ai-color": queued ? "var(--flag-epub)" : "var(--flag-off)", "--ai-bg": queued ? "var(--flag-epub-bg)" : "transparent" }} size="md" aria-label={`${work.title}：${queueLabel}`} aria-pressed={queued} onClick={onQueue}>
           <Icons.epubAdd size={IconSize.action} />
         </ActionIcon>
       </Tooltip>
       <Menu position="bottom-end" withinPortal>
-        <Menu.Target><Tooltip label="その他"><ActionIcon variant="subtle" color="gray" style={{ "--ai-color": "var(--flag-off)" }} size="md" aria-label={`${work.title}のその他の操作`}><Icons.more size={IconSize.nav} /></ActionIcon></Tooltip></Menu.Target>
+        <Menu.Target><Tooltip label="その他"><ActionIcon variant="subtle" color="gray" style={{ "--ai-color": "var(--flag-off)" }} size="md" aria-label={`${work.title}：その他`}><Icons.more size={IconSize.nav} /></ActionIcon></Tooltip></Menu.Target>
         <Menu.Dropdown>
           <Menu.Item leftSection={<Icons.workDetail size={IconSize.menu} />} onClick={() => navigate(`/works/${work.id}`)}>詳細</Menu.Item>
           <Menu.Item leftSection={<Icons.watch size={IconSize.menu} />} onClick={() => navigate(`/updates?work=${work.id}`)}>更新センターで確認</Menu.Item>

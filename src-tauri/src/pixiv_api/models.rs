@@ -996,10 +996,7 @@ mod tests {
         assert!(!next.viewable);
         assert_eq!(next.title, None);
         assert_eq!(next.cover_url, None);
-        assert_eq!(
-            navigation.prev_novel.unwrap().title.as_deref(),
-            Some("#18")
-        );
+        assert_eq!(navigation.prev_novel.unwrap().title.as_deref(), Some("#18"));
     }
 
     #[test]
@@ -1024,8 +1021,10 @@ mod tests {
 
     #[test]
     fn serde_error_message_leaves_out_the_body() {
-        let err = parse_into::<WebviewNovel, _>(webview_novel_json(r#"{}"#).replace("\"title\": \"題\",", ""))
-            .unwrap_err();
+        let err = parse_into::<WebviewNovel, _>(
+            webview_novel_json(r#"{}"#).replace("\"title\": \"題\",", ""),
+        )
+        .unwrap_err();
         let message = err.to_string();
         assert!(message.contains("読み取れませんでした"), "{message}");
         assert!(!message.contains("本文"), "{message}");

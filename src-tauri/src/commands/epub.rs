@@ -584,10 +584,15 @@ pub async fn export_epub(
     compress_options: Option<ImageCompressOptions>,
 ) -> Result<String, String> {
     let state = app.state::<Arc<AppState>>().inner().clone();
+    let _library_snapshot_guard = state.library_gate.clone().read_owned().await;
     let tm = get_template_manager(&app)?;
     let compress = compress_options.unwrap_or_default();
 
-    let (manifest, source, title) = load_manifest(&state, download_id)?;
+    let load_state = state.clone();
+    let (manifest, source, title) =
+        tokio::task::spawn_blocking(move || load_manifest(&load_state, download_id))
+            .await
+            .map_err(|error| format!("EPUB変換ワーカーが予期せず終了しました: {error}"))??;
     emit_progress(
         &app,
         &ExportProgress {
@@ -694,14 +699,23 @@ pub async fn export_collection_epub(
     skip_missing: Option<bool>,
 ) -> Result<String, String> {
     let state = app.state::<Arc<AppState>>().inner().clone();
-    let collection = state.db.get_work_collection(&collection_id)?;
+    let _library_snapshot_guard = state.library_gate.clone().read_owned().await;
+    let collection_state = state.clone();
+    let collection = tokio::task::spawn_blocking(move || {
+        collection_state.db.get_work_collection(&collection_id)
+    })
+    .await
+    .map_err(|error| format!("コレクション読み込みワーカーが予期せず終了しました: {error}"))??;
     if collection.members.is_empty() {
         return Err("コレクションに作品がありません".to_string());
     }
+    // 本文が0字の作品も「収録できない」側に数える。手元に行はあるが中身が
+    // 無い（有料記事を取り切れていない）ので、そのまま入れると空の章になる。
+    // 実測で 29 件あった。
     let missing = collection
         .members
         .iter()
-        .filter(|member| member.download_id.is_none())
+        .filter(|member| member.download_id.is_none() || member.text_length == 0)
         .map(|member| member.title.clone())
         .collect::<Vec<_>>();
     // 欠落は既定では中止だが、利用者が承知のうえで「除外して続行」を選べる。
@@ -709,7 +723,7 @@ pub async fn export_collection_epub(
     // なるのを避けるための分岐で、除外した件数は完了メッセージにも残す。
     if !missing.is_empty() && !skip_missing.unwrap_or(false) {
         return Err(format!(
-            "未保存の作品が{}件あるため、内容を欠かさず一冊にできません: {}",
+            "本文を収録できない作品が{}件あるため、内容を欠かさず一冊にできません: {}",
             missing.len(),
             missing
                 .iter()
@@ -722,7 +736,7 @@ pub async fn export_collection_epub(
     let exportable = collection
         .members
         .iter()
-        .filter(|member| member.download_id.is_some())
+        .filter(|member| member.download_id.is_some() && member.text_length > 0)
         .collect::<Vec<_>>();
     if exportable.is_empty() {
         return Err("保存済みの作品がないため一冊にできません".to_string());
@@ -751,8 +765,12 @@ pub async fn export_collection_epub(
                 message: format!("[{}/{}] 「{}」を変換中", index + 1, total, member.title),
             },
         );
-        let (manifest, _, _) = load_manifest(&state, download_id)
-            .map_err(|error| format!("「{}」を変換できません: {error}", member.title))?;
+        let load_state = state.clone();
+        let loaded = tokio::task::spawn_blocking(move || load_manifest(&load_state, download_id))
+            .await
+            .map_err(|error| format!("EPUB変換ワーカーが予期せず終了しました: {error}"))?;
+        let (manifest, _, _) =
+            loaded.map_err(|error| format!("「{}」を変換できません: {error}", member.title))?;
         manifests.push((download_id, manifest));
     }
     let manifest = merge_collection_manifests(&collection, manifests)?;
@@ -767,13 +785,13 @@ pub async fn export_collection_epub(
     let settings = manager.read_settings(&resolved_template);
     let compress = compress_options.unwrap_or_default();
     let output_base = PathBuf::from(&output_dir);
-    std::fs::create_dir_all(&output_base)
-        .map_err(|error| format!("出力先を作成できません: {error}"))?;
     let destination = output_base.join(sanitize_epub_filename(&collection.summary.name));
     let reported_destination = destination.clone();
     let app_clone = app.clone();
     let title = collection.summary.name.clone();
     tokio::task::spawn_blocking(move || {
+        std::fs::create_dir_all(&output_base)
+            .map_err(|error| format!("出力先を作成できません: {error}"))?;
         let builder = EpubBuilder::new(manifest, contents, settings, compress);
         let mut issues = Vec::new();
         let valid = build_validate_and_publish(
@@ -984,6 +1002,7 @@ pub async fn export_epub_batch(
     compress_options: Option<ImageCompressOptions>,
 ) -> Result<ExportBatchResult, String> {
     let state = app.state::<Arc<AppState>>().inner().clone();
+    let _library_snapshot_guard = state.library_gate.clone().read_owned().await;
     let templates_dir = get_templates_dir(&app)?;
     TemplateManager::new(templates_dir.clone()).initialize_defaults()?;
     let compress = compress_options.unwrap_or_default();
@@ -1222,11 +1241,18 @@ pub async fn preview_epub_template(
     download_id: Option<i64>,
 ) -> Result<TemplatePreview, String> {
     let state = app.state::<Arc<AppState>>().inner().clone();
+    let _library_snapshot_guard = state.library_gate.clone().read_owned().await;
     let tm = get_template_manager(&app)?;
 
     let (manifest, source, title, resolved_id) = match download_id {
         Some(id) => {
-            let (manifest, source, title) = load_manifest(&state, id)?;
+            let load_state = state.clone();
+            let (manifest, source, title) =
+                tokio::task::spawn_blocking(move || load_manifest(&load_state, id))
+                    .await
+                    .map_err(|error| {
+                        format!("EPUBプレビューワーカーが予期せず終了しました: {error}")
+                    })??;
             (manifest, source, title, Some(id))
         }
         None => {
@@ -1739,6 +1765,11 @@ mod tests {
                 collection_kind: "ordered".into(),
                 cover_download_id: None,
                 cover_path: None,
+                cover_mode: "mosaic".into(),
+                cover_image_path: None,
+                cover_tiles: Vec::new(),
+                name_source: "manual".into(),
+                track: "manual".into(),
                 revision: 3,
                 member_count: 2,
                 available_count: 2,

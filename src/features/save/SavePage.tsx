@@ -159,6 +159,10 @@ export default function SavePage() {
   // to also run on a timer, so any drift corrects itself.
   const appliedBoundsRef = useRef<string>("");
   const initializedSourceRef = useRef<SaveSource | null>(null);
+  // WebView creation is not cancellable once it has crossed IPC. Serialize
+  // provider initializations so a slow, stale open can never finish after the
+  // current provider and take the pane back to the wrong site.
+  const browserInitQueueRef = useRef<Promise<void>>(Promise.resolve());
   const detachedRef = useRef(detached);
   detachedRef.current = detached;
   const currentUrlRef = useRef(currentUrl);
@@ -183,18 +187,26 @@ export default function SavePage() {
       const sourceChanged = initializedSourceRef.current !== source;
       initializedSourceRef.current = source;
       const initialize = async () => {
+        if (cancelled) return;
         // Tear down the previous provider only after guarded navigation has
         // committed. Destroying it in switchSource leaves this page with a
         // dead WebView when the user chooses to keep unsaved work.
         if (sourceChanged) await destroyEmbeddedBrowser().catch(() => undefined);
+        if (cancelled) return;
         const value = await (source === "pixiv"
           ? store.get<string>("pixiv_refresh_token")
           : store.get<string>("fanbox_session_id"));
         if (cancelled) return;
         setAuthConnected(Boolean(value));
         await positionBrowser(home);
+        // `openEmbeddedBrowser` itself cannot be cancelled. If this task became
+        // stale while IPC was in flight, tear down its late result before the
+        // serialized current-provider task proceeds.
+        if (cancelled) await destroyEmbeddedBrowser().catch(() => undefined);
       };
-      initialize().catch((error) => {
+      const queued = browserInitQueueRef.current.then(initialize);
+      browserInitQueueRef.current = queued.catch(() => undefined);
+      queued.catch((error) => {
         if (cancelled) return;
         setAuthConnected(false);
         notifications.show({ color: "red", title: "内蔵ブラウザを開けません", message: errorMessage(error) });

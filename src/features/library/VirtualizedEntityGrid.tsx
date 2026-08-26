@@ -59,6 +59,16 @@ export function VirtualizedEntityGrid({ items, kind, selectionMode = false, sele
   const virtualizer = useVirtualizer({
     count: rowCount,
     getScrollElement: () => scrollElement,
+    // The viewport is the whole page, not a box of our own, and attaching to it
+    // scrolls it to whatever offset we claim to be at. Left at its default that
+    // claim is zero, so opening this grid - a tab, a filter, the back button -
+    // threw the page to the top under the reader. Where they already are is the
+    // only honest answer. Staying disabled until the viewport exists is what
+    // makes that answer available: the offset is settled on first use and kept,
+    // and the first use would otherwise come a render too early, when there is
+    // nothing to read a position from and zero is all it could conclude.
+    enabled: Boolean(scrollElement),
+    initialOffset: () => scrollElement?.scrollTop ?? 0,
     estimateSize: () => 154,
     getItemKey: (index) => {
       const entity = items[index * columns];

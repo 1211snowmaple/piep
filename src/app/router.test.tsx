@@ -66,16 +66,38 @@ describe("AppRouter", () => {
     await waitFor(() => expect(result.current.pathname).toBe("/editor/101"));
     const unregister = registerUnsavedGuard(() => true);
 
-    act(() => {
-      const backHref = window.location.href.replace("#/editor/101", "#/library");
-      window.history.replaceState({ piepHistoryIndex: 0 }, "", backHref);
-      window.dispatchEvent(new PopStateEvent("popstate", { state: { piepHistoryIndex: 0 } }));
-    });
+    act(() => window.history.back());
 
     await waitFor(() => expect(confirmNavigation).toHaveBeenCalledOnce());
     await waitFor(() => expect(window.location.hash).toBe("#/editor/101"));
     expect(result.current.pathname).toBe("/editor/101");
+
+    // Canceling must not overwrite the physical entry we tried to visit.
+    // Once the guard is gone, Back reaches that same library entry normally.
     unregister();
+    act(() => window.history.back());
+    await waitFor(() => expect(window.location.hash).toBe("#/library"));
+  });
+
+  it("replays a confirmed browser back without reversing the physical stack", async () => {
+    window.location.hash = "#/library";
+    window.history.replaceState(null, "", window.location.href);
+    const confirmNavigation = vi.fn().mockResolvedValue(true);
+    const wrapper = ({ children }: { children: ReactNode }) => <AppRouter confirmNavigation={confirmNavigation}>{children}</AppRouter>;
+    const { result } = renderHook(() => useAppRouter(), { wrapper });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    act(() => result.current.navigate("/editor/101"));
+    await waitFor(() => expect(result.current.pathname).toBe("/editor/101"));
+    const unregister = registerUnsavedGuard(() => true);
+
+    act(() => window.history.back());
+    await waitFor(() => expect(confirmNavigation).toHaveBeenCalledOnce());
+    await waitFor(() => expect(result.current.pathname).toBe("/library"));
+
+    // The editor entry remains in front of the library entry after confirming.
+    unregister();
+    act(() => window.history.forward());
+    await waitFor(() => expect(result.current.pathname).toBe("/editor/101"));
   });
 
   it("does not confirm a numeric navigation twice after it was authorized", async () => {

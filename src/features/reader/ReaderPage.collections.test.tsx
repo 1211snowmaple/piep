@@ -56,6 +56,10 @@ function collectionOf(kind: CollectionKind): WorkCollection {
     missing: false,
     createdAt: "2026-01-01T00:00:00Z",
     updatedAt: "2026-01-01T00:00:00Z",
+    // リーダーの前後移動は download_id と並びだけで決まる。作品そのものは
+    // 読み込み済みのものを使うので、この画面の試験には要らない。
+    work: null,
+    editions: [],
   });
   return {
     id: "collection-1",
@@ -64,6 +68,11 @@ function collectionOf(kind: CollectionKind): WorkCollection {
     collectionKind: kind,
     coverDownloadId: null,
     coverPath: null,
+    coverMode: "mosaic" as const,
+    coverImagePath: null,
+    coverTiles: [],
+    nameSource: "manual" as const,
+    track: "manual" as const,
     revision: 1,
     memberCount: 2,
     availableCount: 2,
@@ -123,5 +132,26 @@ describe("ReaderPage collection continuation", () => {
     expect(screen.queryByText(/\d+ \/ \d+/)).toBeNull();
     // 隣の作品自体は開ける。順序を主張しないだけである。
     expect(screen.getByRole("button", { name: "となりの話" })).toBeInTheDocument();
+  });
+
+  it("follows the series cursor when the current work is the last item of a page", async () => {
+    const demo = getDemoReader(101);
+    dbApi.getReaderMetadata.mockResolvedValue({
+      download: { ...demo.download, id: 101, source: "pixiv", sourceId: "101", seriesId: "long-series", seriesTitle: "長い連載", personId: null, authorId: "" },
+      versions: demo.versions,
+      assetCount: demo.assets.length,
+      isEdited: demo.isEdited,
+      activeEditRevision: demo.activeEditRevision,
+    });
+    collectionApi.listCollectionsForWork.mockResolvedValue([]);
+    dbApi.searchDownloadsV2.mockImplementation(({ cursor }: { cursor?: string | null }) => Promise.resolve(cursor
+      ? { items: [{ ...demo.download, id: 102, title: "二百一話" }], nextCursor: null, totalEstimate: 201, searchMeta: {}, facetsVersion: 1 }
+      : { items: [{ ...demo.download, id: 101, title: "二百話" }], nextCursor: "page-2", totalEstimate: 201, searchMeta: {}, facetsVersion: 1 }));
+
+    renderReader();
+
+    expect(await screen.findByText("公式シリーズ「長い連載」")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "二百一話" })).toBeInTheDocument();
+    expect(dbApi.searchDownloadsV2).toHaveBeenCalledWith(expect.objectContaining({ cursor: "page-2" }));
   });
 });

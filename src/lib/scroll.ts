@@ -11,6 +11,12 @@ const DEFAULT_GAP = 12;
  */
 const SETTLE_MS = 1200;
 
+/** Long enough to tell "the panel has finished growing" from "between rows". */
+const QUIET_MS = 250;
+
+/** Frames the held offset has to survive before it counts as taken. */
+const STABLE_FRAMES = 3;
+
 /** Anything the reader does to the scroll position themselves. */
 const USER_SCROLL_EVENTS = ["wheel", "touchstart", "keydown", "pointerdown"] as const;
 
@@ -66,6 +72,54 @@ export function scrollRegionIntoView(element: HTMLElement | null | undefined, ga
   };
   // Scrolling by hand outranks this: being pulled back while trying to leave is
   // worse than not being moved in the first place.
+  for (const event of USER_SCROLL_EVENTS) viewport.addEventListener(event, stop, { passive: true });
+  apply();
+  return stop;
+}
+
+/**
+ * Keeps a region where it is on screen while what hangs below it is replaced.
+ *
+ * Swapping a tab's panel empties the page for a moment: the incoming panel has
+ * not fetched its rows yet, so the document is briefly shorter than the offset
+ * the reader is holding, the browser clamps that offset away to fit, and the
+ * screen appears to throw itself back to the top on its own.
+ *
+ * Unlike scrollRegionIntoView this cannot stop at the first frame that already
+ * matches - at the moment of the press nothing has moved yet, so every frame
+ * matches until the panel swaps. It stops once the offset has survived a few
+ * frames and the page has stopped changing height. A page too short to hold the
+ * offset at all never satisfies the first half, so a panel that sits on a
+ * loading state for a while - where the height is perfectly quiet and the
+ * content is not final - is still waited out, up to the deadline.
+ */
+export function holdRegionInPlace(element: HTMLElement | null | undefined): () => void {
+  const viewport = element && viewportFor(element);
+  if (!element || !viewport) return () => undefined;
+  // Where the region sits on screen right now is the gap to preserve, so the
+  // offset this recomputes each frame is the one the reader already has.
+  const gap = element.getBoundingClientRect().top - viewport.getBoundingClientRect().top;
+  let frame = 0;
+  let held = 0;
+  let height = viewport.scrollHeight;
+  let quietSince = performance.now();
+  const deadline = performance.now() + SETTLE_MS;
+  const stop = () => {
+    cancelAnimationFrame(frame);
+    for (const event of USER_SCROLL_EVENTS) viewport.removeEventListener(event, stop);
+  };
+  const apply = () => {
+    const target = offsetOf(element, viewport, gap);
+    viewport.scrollTo({ top: target, left: 0 });
+    const now = performance.now();
+    if (viewport.scrollHeight !== height) { height = viewport.scrollHeight; quietSince = now; }
+    held = Math.abs(viewport.scrollTop - target) <= 1 ? held + 1 : 0;
+    if ((held >= STABLE_FRAMES && now - quietSince >= QUIET_MS) || now >= deadline) {
+      stop();
+      return;
+    }
+    frame = requestAnimationFrame(apply);
+  };
   for (const event of USER_SCROLL_EVENTS) viewport.addEventListener(event, stop, { passive: true });
   apply();
   return stop;

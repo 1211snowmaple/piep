@@ -73,13 +73,11 @@ impl WebUpdateIndex {
             &cookie,
             credentials.pixiv_user_agent.as_deref().unwrap_or_default(),
         );
-        let api = session.and_then(|session| {
-            match crate::pixiv_api::web::WebPixivAPI::new() {
-                Ok(api) => Some(api.with_session(session)),
-                Err(error) => {
-                    log::warn!("pixiv web クライアントを作れません: {error}");
-                    None
-                }
+        let api = session.and_then(|session| match crate::pixiv_api::web::WebPixivAPI::new() {
+            Ok(api) => Some(api.with_session(session)),
+            Err(error) => {
+                log::warn!("pixiv web クライアントを作れません: {error}");
+                None
             }
         });
         Self {
@@ -101,7 +99,8 @@ impl WebUpdateIndex {
         &mut self,
         state: &Arc<AppState>,
         author_id: &str,
-    ) -> Result<Option<&HashMap<String, crate::pixiv_api::web::NovelListEntryWeb>>, PixivError> {
+    ) -> Result<Option<&HashMap<String, crate::pixiv_api::web::NovelListEntryWeb>>, PixivError>
+    {
         let author_id = author_id.trim();
         if self.api.is_none() || self.gave_up || author_id.is_empty() {
             return Ok(None);
@@ -164,7 +163,8 @@ impl WebUpdateIndex {
 ///
 /// 読めない時刻は「言えない」に倒す。
 fn may_remember(listed_update: Option<&str>, verified_at: Option<&str>) -> bool {
-    let Some(listed) = listed_update.and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+    let Some(listed) =
+        listed_update.and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
     else {
         return false;
     };
@@ -504,9 +504,10 @@ fn build_initial_items(
         if adhoc.target_type != "author" && adhoc.target_type != "series" {
             continue;
         }
-        let registered = state
-            .db
-            .find_update_target(&adhoc.target_type, &adhoc.source, &adhoc.source_key)?;
+        let registered =
+            state
+                .db
+                .find_update_target(&adhoc.target_type, &adhoc.source, &adhoc.source_key)?;
         let target = registered.unwrap_or_else(|| crate::database::UpdateTarget {
             id: 0,
             target_type: adhoc.target_type.clone(),
@@ -540,7 +541,10 @@ fn build_initial_items(
     // これをやらないと、取得元の一覧が前回位置から先しか返さないぶん、
     // 「一度出たきり二度と出ない作品」が生まれる。
     if include_author || include_series {
-        for candidate in state.db.list_pending_update_candidates(PENDING_CANDIDATE_LIMIT)? {
+        for candidate in state
+            .db
+            .list_pending_update_candidates(PENDING_CANDIDATE_LIMIT)?
+        {
             // すでに手元にあるものは、改稿として見つけた場合だけ残す。
             let saved = state
                 .db
@@ -1106,9 +1110,12 @@ async fn run_update_job(
                             UPDATE_JOB_DELAY_MS * u64::from(backoff) / 1000,
                             item.title
                         );
-                        state
-                            .db
-                            .complete_update_job_item(item.id, "queued", Some(&message), None)?;
+                        state.db.complete_update_job_item(
+                            item.id,
+                            "queued",
+                            Some(&message),
+                            None,
+                        )?;
                         state.db.append_update_job_log(&job_id, "warn", &message)?;
                         emit_snapshot(&app, &state, &job_id).await;
                         tokio::time::sleep(std::time::Duration::from_millis(
@@ -1218,17 +1225,17 @@ fn classify_failure(error: &str) -> FailureKind {
 
     if !from_asset_fetch
         && has(&[
-        "認証が必要",
-        "アクセストークンが不正",
-        "セッションが無効",
-        "http 401",
-        "http 403",
-        "status: 401",
-        "status: 403",
-        "unauthorized",
-        "invalid_grant",
-        "invalid token",
-    ])
+            "認証が必要",
+            "アクセストークンが不正",
+            "セッションが無効",
+            "http 401",
+            "http 403",
+            "status: 401",
+            "status: 403",
+            "unauthorized",
+            "invalid_grant",
+            "invalid token",
+        ])
     {
         return FailureKind::Auth;
     }
@@ -1312,11 +1319,7 @@ fn is_unchanged_pixiv_work(
     let Some(stored_hash) = stored_hash else {
         return false;
     };
-    let tags: Vec<String> = metadata
-        .tags
-        .iter()
-        .map(|tag| tag.name.clone())
-        .collect();
+    let tags: Vec<String> = metadata.tags.iter().map(|tag| tag.name.clone()).collect();
     let signature = super::downloader::pixiv_meta_signature(
         &metadata.title,
         &metadata.caption,
@@ -1630,8 +1633,12 @@ async fn scan_pixiv_revisions(
     let saved = state.db.pixiv_works_for_author(&target.source_key)?;
     let mut found = 0i64;
     for work in saved {
-        let (source_id, stored_update, downloaded_at, local_version) =
-            (work.source_id, work.source_updated_at, work.downloaded_at, work.current_version);
+        let (source_id, stored_update, downloaded_at, local_version) = (
+            work.source_id,
+            work.source_updated_at,
+            work.downloaded_at,
+            work.current_version,
+        );
         let Some(entry) = entries.get(&source_id) else {
             continue;
         };
@@ -1766,17 +1773,18 @@ async fn process_target_item(
         let Some(listed_id) = listed_id.filter(|id| !id.is_empty()) else {
             continue;
         };
-        let kind = match state.db.get_download_by_source(&target.source, &listed_id)? {
+        let kind = match state
+            .db
+            .get_download_by_source(&target.source, &listed_id)?
+        {
             None => default_kind,
             Some(existing) => {
                 // すでに持っている作品。一覧が更新時刻を持っていて、それが
                 // 保存済みのものと違うときだけ「改稿」として拾う。
                 // pixiv の一覧は投稿日しか持たないので、そちらは監視オンの
                 // 作品を辿る経路（work 項目）に任せる。
-                let listed_updated = string_at(
-                    source_item,
-                    &[&["updatedDatetime"], &["updated_datetime"]],
-                );
+                let listed_updated =
+                    string_at(source_item, &[&["updatedDatetime"], &["updated_datetime"]]);
                 match (listed_updated, existing.source_updated_at.as_deref()) {
                     (Some(listed), Some(stored)) if listed != stored => CandidateKind::Revision,
                     _ => continue,
@@ -2003,9 +2011,14 @@ mod tests {
             "localVersion": 1,
             "localSavedAt": "2026-08-19T14:19:33.782735500+00:00",
         });
-        let payload =
-            super::candidate_payload("author", "作者", "pixiv", &item, super::CandidateKind::Revision)
-                .unwrap();
+        let payload = super::candidate_payload(
+            "author",
+            "作者",
+            "pixiv",
+            &item,
+            super::CandidateKind::Revision,
+        )
+        .unwrap();
         let subtitle = payload.get("subtitle").and_then(|v| v.as_str()).unwrap();
         assert_eq!(subtitle, "手元は v1（2026-08-19に保存）");
     }
@@ -2017,9 +2030,14 @@ mod tests {
             "id": "1", "title": "作品", "user": { "name": "作者" },
             "create_date": "2026-07-26T00:00:01+09:00",
         });
-        let payload =
-            super::candidate_payload("author", "作者", "pixiv", &item, super::CandidateKind::Revision)
-                .unwrap();
+        let payload = super::candidate_payload(
+            "author",
+            "作者",
+            "pixiv",
+            &item,
+            super::CandidateKind::Revision,
+        )
+        .unwrap();
         assert_eq!(
             payload.get("subtitle").and_then(|v| v.as_str()),
             Some("2026-07-26T00:00:01+09:00")
@@ -2073,7 +2091,10 @@ mod tests {
     /// 読めないものを「たぶん大丈夫」と扱うと、静かに取りこぼす。
     #[test]
     fn a_timestamp_we_cannot_read_is_treated_as_unverified() {
-        assert!(!may_remember(Some("2026-08-20"), Some("2026-08-21T00:00:00Z")));
+        assert!(!may_remember(
+            Some("2026-08-20"),
+            Some("2026-08-21T00:00:00Z")
+        ));
         assert!(!may_remember(Some("2026-08-20T00:00:00Z"), Some("きのう")));
         assert!(!may_remember(Some("2026-08-20T00:00:00Z"), None));
         assert!(!may_remember(None, Some("2026-08-20T00:00:00Z")));
@@ -2181,7 +2202,11 @@ mod tests {
             // FANBOX
             "FANBOXのアクセス制限に達しました。時間をおいて再試行してください",
         ] {
-            assert_eq!(classify_failure(message), FailureKind::RateLimited, "{message}");
+            assert_eq!(
+                classify_failure(message),
+                FailureKind::RateLimited,
+                "{message}"
+            );
         }
     }
 
@@ -2196,7 +2221,9 @@ mod tests {
             FailureKind::RateLimited,
         );
         assert_eq!(
-            classify_failure("1 asset downloads failed (0 succeeded): Network error: operation timed out"),
+            classify_failure(
+                "1 asset downloads failed (0 succeeded): Network error: operation timed out"
+            ),
             FailureKind::Network,
         );
     }

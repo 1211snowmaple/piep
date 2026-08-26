@@ -29,7 +29,8 @@
         "scope": [
           "$APPDATA/downloads/**/*",
           "$APPDATA/profiles/**/*",
-          "$APPDATA/series/**/*"
+          "$APPDATA/series/**/*",
+          "$APPDATA/collection-covers/**/*"
         ]
       }
     }

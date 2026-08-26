@@ -10,6 +10,7 @@ import {
   listCollectionsForPerson,
   rejectCollectionSuggestion,
   reorderWorkCollectionMembers,
+  suggestionNameOverride,
 } from "@/services/collectionApi";
 import { exportCollectionEpub } from "@/services/epubApi";
 
@@ -48,6 +49,11 @@ describe("collectionApi", () => {
     expect(invoke).toHaveBeenLastCalledWith("db_accept_collection_suggestion", {
       input: { suggestionId: "suggestion-1", memberKeys },
     });
+  });
+
+  it("does not turn an untouched automatic suggestion name into a manual name", () => {
+    expect(suggestionNameOverride("題名からの案", "題名からの案")).toBeUndefined();
+    expect(suggestionNameOverride("題名からの案", "利用者が直した名前")).toBe("利用者が直した名前");
   });
 
   /** 却下は「提案まるごと」ではなく、利用者が残した作品だけを対象にする。

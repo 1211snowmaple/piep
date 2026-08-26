@@ -11,6 +11,12 @@ if (-not $resolvedExecutable.StartsWith($resolvedWorkspace, [System.StringCompar
 }
 
 New-Item -ItemType Directory -Force -Path $ArtifactDirectory | Out-Null
+$resolvedArtifacts = (Resolve-Path -LiteralPath $ArtifactDirectory).Path
+# A smoke test must never open or migrate the developer/runner's real library.
+# Tauri derives its application directories from these Windows locations.
+$env:APPDATA = Join-Path $resolvedArtifacts "appdata"
+$env:LOCALAPPDATA = Join-Path $resolvedArtifacts "localappdata"
+New-Item -ItemType Directory -Force -Path $env:APPDATA, $env:LOCALAPPDATA | Out-Null
 $process = Start-Process -FilePath $resolvedExecutable -PassThru -WindowStyle Normal
 try {
   $deadline = [DateTime]::UtcNow.AddSeconds(45)
