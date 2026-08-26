@@ -27,13 +27,11 @@ fn open_request_is_allowed(canonical: &Path, is_dir: bool, roots: &[PathBuf]) ->
     is_dir && canonical.extension().is_none()
 }
 
-#[tauri::command]
-pub async fn open_managed_path(app: tauri::AppHandle, path: String) -> Result<(), String> {
+fn resolve_allowed_path(app: &tauri::AppHandle, path: &str) -> Result<PathBuf, String> {
     if path.trim().is_empty() {
         return Err("開く場所が指定されていません".to_string());
     }
-    let requested = PathBuf::from(&path);
-    let canonical = requested
+    let canonical = PathBuf::from(path)
         .canonicalize()
         .map_err(|error| format!("この場所を開けません（{error}）: {path}"))?;
     let is_dir = canonical.is_dir();
@@ -49,17 +47,31 @@ pub async fn open_managed_path(app: tauri::AppHandle, path: String) -> Result<()
             roots.push(resolved);
         }
     }
-    // 保存先がアプリデータの外にあっても、その親までは辿らない。開いてよいのは
-    // 保存先そのものと、その下だけである。
     if !open_request_is_allowed(&canonical, is_dir, &roots) {
         return Err(format!(
             "アプリが管理していないファイルは開けません: {}",
             canonical.display()
         ));
     }
+    Ok(canonical)
+}
+
+#[tauri::command]
+pub async fn open_managed_path(app: tauri::AppHandle, path: String) -> Result<(), String> {
+    let canonical = resolve_allowed_path(&app, &path)?;
     app.opener()
         .open_path(canonical.to_string_lossy().to_string(), None::<&str>)
         .map_err(|error| format!("この場所を開けません: {error}"))
+}
+
+/// 管理しているファイルを、起動せずにファイルマネージャー上で選択する。
+/// WebView へ opener の無制限 reveal 権限は渡さず、この検証を唯一の入口にする。
+#[tauri::command]
+pub async fn reveal_managed_path(app: tauri::AppHandle, path: String) -> Result<(), String> {
+    let canonical = resolve_allowed_path(&app, &path)?;
+    app.opener()
+        .reveal_item_in_dir(&canonical)
+        .map_err(|error| format!("この場所をファイルマネージャーで表示できません: {error}"))
 }
 
 #[cfg(test)]

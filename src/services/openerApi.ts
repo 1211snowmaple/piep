@@ -1,4 +1,4 @@
-import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { invoke } from "@tauri-apps/api/core";
 
 export function openExternalUrl(url: string): Promise<void> {
@@ -18,5 +18,5 @@ export function openFilesystemPath(path: string): Promise<void> {
 }
 
 export function revealPathInFileManager(path: string): Promise<void> {
-  return revealItemInDir(path);
+  return invoke<void>("reveal_managed_path", { path });
 }
