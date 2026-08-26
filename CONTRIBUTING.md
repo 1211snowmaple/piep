@@ -47,6 +47,7 @@
 
 ## ローカルのゲート
 
+CI とローカルで同じ結果を再現できるよう、Node.js 24.x と Rust 1.97.1 を使う。
 コミット前に通すもの。CI と同じ内容を先に手元で確認する。
 
 ```bash
@@ -54,6 +55,7 @@ npx tsc --noEmit
 npx vitest run src
 cargo test --manifest-path src-tauri/Cargo.toml -- --test-threads=1
 cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
 npm --prefix docs-tools run docs:check
 ```
 
@@ -92,7 +94,7 @@ npm run build && CI=1 npx playwright test
 - タグは `vX.Y.Z` の注釈付きタグ（`git tag -a`）
 - **タグを押すとリリースのビルドが走る。** 過去の節目へ後からタグを足さない
 - タグを打つ前に、その commit の CI が緑であることを確認する
-- バージョンを上げるときは4箇所すべてを揃える:
+- バージョンを上げるときは5ファイルすべてを揃える:
   `package.json` / `package-lock.json` / `src-tauri/Cargo.toml` /
   `src-tauri/tauri.conf.json` / `src/lib/version.ts`（`cargo check` で
   `Cargo.lock` も追随させる）

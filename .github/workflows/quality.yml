@@ -10,14 +10,15 @@ jobs:
   checks:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
-          node-version: lts/*
+          node-version: 24
           cache: npm
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5 # 1.97.1
         with:
-          components: clippy
+          toolchain: 1.97.1
+          components: clippy,rustfmt
       - run: npm ci
       - run: npm run check
       - run: npm test
@@ -29,14 +30,15 @@ jobs:
       # and cost about twenty seconds against a twenty-minute compile.
       - run: cargo test --manifest-path src-tauri/Cargo.toml -- --test-threads=1
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+      - run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
 
   visual-regression:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
-          node-version: lts/*
+          node-version: 24
           cache: npm
       - run: npm ci
       - run: npx playwright install chromium
@@ -45,7 +47,7 @@ jobs:
       - run: npm run build
       - run: npm run test:visual
       - if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: visual-regression-report
           path: |
@@ -55,18 +57,22 @@ jobs:
   native-window-smoke:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
-          node-version: lts/*
+          node-version: 24
           cache: npm
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5 # 1.97.1
+        with:
+          toolchain: 1.97.1
       - run: npm ci
-      - run: npm run tauri -- build --debug --no-bundle
+      # npm 12 treats dashed arguments after `npm run ... --` as npm config
+      # flags on Windows. Invoke the already-installed local binary directly.
+      - run: npx --no-install tauri build --debug --no-bundle
       - shell: powershell
         run: ./e2e/native-window-smoke.ps1 -Executable ./src-tauri/target/debug/piep.exe
       - if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: native-window-smoke
           path: test-results/native
