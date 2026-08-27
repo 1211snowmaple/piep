@@ -92,7 +92,12 @@ function loadJobs(): OperationJob[] {
         canRetry: false,
         finishedAt: loadedAt,
         updatedAt: loadedAt,
-        logs: [...(job.logs ?? []), { id: id(), level: "warn" as const, message: "アプリ終了により処理状態を引き継げませんでした", createdAt: loadedAt }].slice(-MAX_LOGS),
+        // 何が起きたかだけでなく、**次に何をすればいいか**まで書く。
+        // ここに残るのは、走っている最中に画面かアプリが消えたジョブである。
+        // 保存も取り込みも、済んだものは相手先IDで見分けて飛ばすので、
+        // 同じ操作をもう一度始めれば続きから進む。それを知らないと、
+        // 800件のうち500件まで進んだ人が最初からやり直すことになる。
+        logs: [...(job.logs ?? []), { id: id(), level: "warn" as const, message: "処理の途中で画面が閉じられたため、状態を引き継げませんでした。同じ操作をやり直すと、済んでいるものは飛ばして続きから進みます", createdAt: loadedAt }].slice(-MAX_LOGS),
       };
     });
   } catch { return []; }

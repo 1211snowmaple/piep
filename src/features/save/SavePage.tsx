@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
 import {
   ActionIcon,
   Alert,
@@ -125,6 +125,15 @@ export default function SavePage() {
   const executeRef = useRef<() => void>(() => undefined);
 
   useEmbeddedBrowserOverlay(browserViewportRef, runtime && !detached);
+
+  // 一行ごとの押し先。**毎回作り直さない。**
+  //
+  // ここで新しい関数を作ると、行に渡す props が毎回変わってメモ化が素通しに
+  // なる。保存中は1件ごとに `items` を組み直すので、素通しのままだと全行が
+  // そのたびに描き直される。
+  const toggleCandidate = useCallback((id: string) => {
+    setItems((rows) => rows.map((row) => row.id === id ? { ...row, selected: !row.selected } : row));
+  }, []);
 
   // A page is only worth remembering once, and only the most recent handful are
   // worth offering back.
@@ -738,7 +747,7 @@ export default function SavePage() {
             <ScrollArea flex={1} px="md" type="auto" className="candidate-list" data-stale={analysisStale && items.length > 0 || undefined}>
               <Stack gap="xs" pb="md">
                 {!items.length && !analyzing && <EmptyCandidates source={source} />}
-                {items.map((item) => <CandidateRow key={item.id} item={item} disabled={saving} onToggle={() => setItems((rows) => rows.map((row) => row.id === item.id ? { ...row, selected: !row.selected } : row))} />)}
+                {items.map((item) => <CandidateRow key={item.id} item={item} disabled={saving} onToggle={toggleCandidate} />)}
               </Stack>
             </ScrollArea>
             <Divider />
@@ -766,18 +775,29 @@ function targetLabel(kind: DownloadTargetKind): string {
   return labels[kind];
 }
 
-function CandidateRow({ item, disabled, onToggle }: { item: SidebarItem; disabled: boolean; onToggle: () => void }) {
+/**
+ * 一行。**メモ化しておく。**
+ *
+ * 保存は1件ごとに `items` を組み直すので、素のままだと**そのたびに全行が
+ * 描き直される**。818件の保存なら 818行 x 2回 x 818件で百万回を超え、
+ * その確保が積み上がって画面のプロセスがメモリ不足で落ちた（実際に落ちた）。
+ * 変わるのは1行だけなので、他の行は前の結果を使い回す。
+ *
+ * そのためには押したときの関数も毎回作り直さないことが要る。作り直すと
+ * props が毎回変わり、メモ化は素通しになる。
+ */
+const CandidateRow = memo(function CandidateRow({ item, disabled, onToggle }: { item: SidebarItem; disabled: boolean; onToggle: (id: string) => void }) {
   const status = item.status;
   return (
     <Card p="sm" className="candidate-row" data-selected={item.selected || undefined}>
       <Group wrap="nowrap" align="flex-start">
-        <Checkbox checked={item.selected} disabled={disabled || status === "success" || status === "skipped"} onChange={onToggle} aria-label={`${item.title}を保存対象にする`} mt={3} />
+        <Checkbox checked={item.selected} disabled={disabled || status === "success" || status === "skipped"} onChange={() => onToggle(item.id)} aria-label={`${item.title}を保存対象にする`} mt={3} />
         <Stack gap={3} flex={1} miw={0}><Text size="sm" fw={650} className="line-clamp-2">{item.title}</Text>{item.subtitle && <Text size="xs" c="dimmed" className="line-clamp-1">{item.subtitle}</Text>}{item.error && <Text size="xs" c="red" className="line-clamp-3">{item.error}</Text>}<Text size="10px" c="dimmed">ID {item.id}</Text></Stack>
         <StatusIcon status={status} />
       </Group>
     </Card>
   );
-}
+});
 
 function StatusIcon({ status }: { status: SidebarItem["status"] }) {
   if (status === "downloading") return <Loader size="xs" />;
