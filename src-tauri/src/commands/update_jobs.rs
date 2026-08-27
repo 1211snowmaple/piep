@@ -987,6 +987,9 @@ async fn run_update_job(
                 .db
                 .append_update_job_log(&job_id, "warn", "更新ジョブをキャンセルしました")?;
             emit_snapshot(&app, &state, &job_id).await;
+            // 中止でも、そこまでに保存できた作品は手元に残っている。完了と
+            // 同じように索引の遅れを拾う。
+            crate::commands::database::start_automatic_index_maintenance(app.clone());
             break;
         }
 
@@ -1015,6 +1018,12 @@ async fn run_update_job(
                 label,
             )?;
             emit_snapshot(&app, &state, &job_id).await;
+            // 取り込んだ作品は保存のたびに索引へ入るが、そこで失敗したものは
+            // 「古い」印だけが残る。起動時の保守は次にアプリを開くまで走らない
+            // ので、それまで**保存できているのに検索に出ない作品**ができる。
+            // 取り込みが一区切りしたここで拾っておく。索引に遅れが無ければ
+            // 件数を見て何もせずに戻るので、通常の終了は何も変わらない。
+            crate::commands::database::start_automatic_index_maintenance(app.clone());
             break;
         };
 
