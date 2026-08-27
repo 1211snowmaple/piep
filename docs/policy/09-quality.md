@@ -66,7 +66,7 @@ npm --prefix docs-tools run docs:check
 
 | ジョブ | 内容 |
 |---|---|
-| `checks` | 型検査、フロント単体テスト、`cargo test`、警告ゼロの `clippy` |
+| `checks` | 型検査、フロント単体テスト、`cargo test`、警告ゼロの `clippy`、EPUBCheck |
 | `visual-regression` | 3幅 × 明暗 × 3 DPI の視覚回帰 |
 | `native-window-smoke` | 実際にビルドしたアプリを起動する |
 

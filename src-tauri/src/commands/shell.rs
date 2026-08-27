@@ -93,7 +93,9 @@ mod windows_tests {
     #[test]
     fn managed_files_and_folders_open() {
         assert!(open_request_is_allowed(
-            Path::new(r"\\?\C:\Users\reader\AppData\Roaming\com.hiron.piep\profiles\pixiv\1\v1\assets\icon.jpg"),
+            Path::new(
+                r"\\?\C:\Users\reader\AppData\Roaming\com.hiron.piep\profiles\pixiv\1\v1\assets\icon.jpg"
+            ),
             false,
             &roots()
         ));

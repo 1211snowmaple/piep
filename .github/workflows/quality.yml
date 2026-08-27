@@ -32,6 +32,41 @@ jobs:
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
 
+      # 適合の根拠は EPUBCheck に置いている（docs/policy/02-principles.md）。
+      # 内蔵の検証器は自分で書いた規則しか知らないので、外の権威の代わりには
+      # ならない。手で一度走らせた結果は EPUB のコードが変わった時点で根拠で
+      # なくなるため、変更のたびに取り直す。原稿は利用者のライブラリを要さない。
+      # クレートは前の手順で組み上がっているので、ここは1分もかからない。
+      - run: cargo run --manifest-path src-tauri/Cargo.toml --example epub_conformance -- ${{ runner.temp }}/epub-conformance
+      - name: EPUBCheck
+        shell: pwsh
+        run: |
+          $version = '5.3.0'
+          # 手元で「致命的0・エラー0・警告0」を確認した配布物そのものを指す。
+          # 版と指紋の両方を固定しないと、通ったのがどれだったのか後から言えない。
+          $expected = '6C07E68584B2E2CE2F89FE06E1246DFEAD3EB36B46B340E7D93524F29DCFF6C5'
+          if (-not (Get-Command java -ErrorAction SilentlyContinue)) {
+            throw 'java が見つかりません。ランナーの構成が変わった可能性があります'
+          }
+          $zip = Join-Path $env:RUNNER_TEMP 'epubcheck.zip'
+          Invoke-WebRequest -Uri "https://github.com/w3c/epubcheck/releases/download/v$version/epubcheck-$version.zip" -OutFile $zip
+          $actual = (Get-FileHash -Algorithm SHA256 $zip).Hash
+          if ($actual -ne $expected) { throw "EPUBCheck の指紋が違います: $actual" }
+          $root = Join-Path $env:RUNNER_TEMP 'epubcheck'
+          Expand-Archive -Path $zip -DestinationPath $root -Force
+          $jar = Join-Path $root "epubcheck-$version/epubcheck.jar"
+          $books = Get-ChildItem (Join-Path $env:RUNNER_TEMP 'epub-conformance') -Filter *.epub
+          if ($books.Count -eq 0) { throw '検証する EPUB がありません' }
+          $failed = @()
+          foreach ($book in $books) {
+            Write-Host "--- $($book.Name)"
+            # 警告も落とす。いまは0件なので、増えた時点で気づけるようにする。
+            # 文言はランナーの地域設定に左右させない。読めない記録は根拠にならない。
+            & java -jar $jar --locale en --failonwarnings $book.FullName
+            if ($LASTEXITCODE -ne 0) { $failed += $book.Name }
+          }
+          if ($failed.Count -gt 0) { throw "EPUBCheck が問題を報告しました: $($failed -join ', ')" }
+
   visual-regression:
     runs-on: windows-latest
     steps:
