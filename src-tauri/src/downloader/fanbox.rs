@@ -13,7 +13,10 @@ pub async fn get_post_detail(
     match api.get_post_value(post_id).await {
         Ok(post) => Ok(post),
         Err(e) => {
-            log::error!("Failed to get Fanbox post: {:?}", e);
+            // 文面のほうを出す。`{:?}` は応答の本文まで書き出すが、
+            // `FanboxError` の文面は**それを混ぜないように書いてある**。
+            // 記録だけ設計を裏切っていた。
+            log::error!("Failed to get Fanbox post: {e}");
             Err(Box::new(e))
         }
     }

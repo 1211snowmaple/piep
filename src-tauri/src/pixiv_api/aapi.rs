@@ -1976,6 +1976,32 @@ impl AppPixivAPI {
     }
 }
 
+/// 次のページの宛先として追ってよいか。
+///
+/// 一覧の続きは `next_url` として**取得元の応答の中に書かれている**。そこへは
+/// アクセストークンを付けて出ていくので、宛先が変わっていないことを確かめる。
+/// FANBOX 側には同じ門（`allowed_api_url`）があるのに、こちらだけ素通しだった。
+///
+/// 期待するホストは設定中の API の基点から取る。プロキシを差した場合でも、
+/// 「いま話している相手以外へは出ていかない」という条件は変わらない。
+fn allowed_next_url(raw: &str, api_base: &str) -> Result<(), PixivError> {
+    let expected_host = reqwest::Url::parse(api_base)
+        .ok()
+        .and_then(|base| base.host_str().map(str::to_string));
+    let url = reqwest::Url::parse(raw).map_err(|_| PixivError::UntrustedNextUrl)?;
+    let allowed = url.scheme() == "https"
+        && url.port_or_known_default() == Some(443)
+        && url.username().is_empty()
+        && url.password().is_none()
+        && expected_host.is_some()
+        && url.host_str() == expected_host.as_deref();
+    if allowed {
+        Ok(())
+    } else {
+        Err(PixivError::UntrustedNextUrl)
+    }
+}
+
 /// Paged API calls (NOT port of `AppPixivAPI` methods).
 impl AppPixivAPI {
     /// Fetch the next page of results from a paged API response. The URL is typically from `next_url` in the previous response.
@@ -1985,10 +2011,61 @@ impl AppPixivAPI {
         next_url: &str,
         with_auth: bool,
     ) -> Result<T, PixivError> {
+        allowed_next_url(next_url, &self.hosts)?;
         let r = self
             .do_api_request(HttpMethod::GET, next_url, None, None, None, with_auth)
             .await?;
         parse_response_into(r).await
+    }
+}
+
+#[cfg(test)]
+mod next_url_tests {
+    use super::*;
+
+    const BASE: &str = "https://app-api.pixiv.net";
+
+    /// 続きの宛先は取得元の応答に書かれている。そこへトークンを付けて出ていく
+    /// ので、いま話している相手であることを確かめてから追う。
+    #[test]
+    fn a_next_url_must_stay_on_the_host_we_are_already_talking_to() {
+        assert!(allowed_next_url(
+            "https://app-api.pixiv.net/v1/user/novels?user_id=1&offset=30",
+            BASE
+        )
+        .is_ok());
+
+        for raw in [
+            // 別のホスト。
+            "https://evil.example/v1/user/novels",
+            // 前方一致では通ってしまう形。
+            "https://app-api.pixiv.net.evil.example/v1/user/novels",
+            // 平文。
+            "http://app-api.pixiv.net/v1/user/novels",
+            // 既定でない港。
+            "https://app-api.pixiv.net:8443/v1/user/novels",
+            // 資格情報を混ぜた形。
+            "https://user:pass@app-api.pixiv.net/v1/user/novels",
+            // そもそも URL ではない。
+            "not a url",
+        ] {
+            assert!(
+                matches!(
+                    allowed_next_url(raw, BASE),
+                    Err(PixivError::UntrustedNextUrl)
+                ),
+                "追ってしまった: {raw}"
+            );
+        }
+    }
+
+    /// 宛先そのものは文面に混ぜない。応答が寄越した文字列をそのまま画面へ
+    /// 出すことになるうえ、読む人にできることは増えない。
+    #[test]
+    fn the_refusal_does_not_repeat_the_address() {
+        let shown = PixivError::UntrustedNextUrl.to_string();
+        assert!(!shown.contains("http"));
+        assert!(shown.contains("中止"));
     }
 }
 
