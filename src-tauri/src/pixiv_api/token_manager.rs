@@ -28,6 +28,25 @@ pub const DEFAULT_EXPIRES_IN: u64 = 3600;
 pub const TOKEN_REFRESH_SAFE_MARGIN: u64 = 300;
 const MAX_TOKEN_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 
+/// 更新に失敗したあと、次にやり直すまで待つ時間。
+///
+/// 失敗を覚えていなかったころは、待たされていた取得が順に自分でやり直して
+/// いた。**同じ失敗を、同時実行の数だけ踏み直す。** 接続の待ち時間は30秒
+/// なので、8本走っていれば4分かかってようやく全部が同じ結論に着く。
+/// その間ずっと、落ちている相手を叩き続けることにもなる。
+const REFRESH_FAILURE_COOLDOWN_SECS: i64 = 30;
+
+/// いまやり直してよいか。`None` は「まだ一度も失敗していない」。
+fn refresh_is_cooling_down(last_failure: Option<DateTime<Utc>>, now: DateTime<Utc>) -> bool {
+    let Some(failed_at) = last_failure else {
+        return false;
+    };
+    // 時計が巻き戻ることはある。負の差で永久に待たないよう、未来の記録は
+    // 「いま失敗した」と同じに扱う。
+    let elapsed = now.signed_duration_since(failed_at).num_seconds();
+    (0..REFRESH_FAILURE_COOLDOWN_SECS).contains(&elapsed) || elapsed < 0
+}
+
 fn token_cache_seconds(expires_in: Option<i64>) -> u64 {
     let advertised_seconds = match expires_in {
         Some(seconds) if seconds > 0 => seconds as u64,
@@ -54,6 +73,8 @@ pub enum TokenManager {
         refresh_token: String,
         /// 現在のアクセストークンとその有効期限。
         access_token_and_expires_at: ArcSwapOption<(String, DateTime<Utc>)>,
+        /// 直前に更新へ失敗した時刻。成功したら消す。
+        last_failure_at: ArcSwapOption<DateTime<Utc>>,
         /// 更新用ロック。
         update_lock: AsyncMutex<()>,
     },
@@ -75,6 +96,7 @@ impl TokenManager {
         Self::RefreshToken {
             refresh_token,
             access_token_and_expires_at: ArcSwapOption::default(),
+            last_failure_at: ArcSwapOption::default(),
             update_lock: AsyncMutex::new(()),
         }
     }
@@ -128,6 +150,7 @@ impl TokenManager {
             Self::AccessToken { access_token } => Ok(access_token.clone()),
             Self::RefreshToken {
                 access_token_and_expires_at,
+                last_failure_at,
                 update_lock,
                 refresh_token,
             } => {
@@ -147,13 +170,30 @@ impl TokenManager {
                     return Ok(access_token);
                 }
 
+                // 直前に失敗したばかりなら、ここで折り返す。待っていた取得が
+                // 順番に同じ失敗を踏み直すと、同時実行の数だけ時間がかかり、
+                // そのあいだ落ちている相手を叩き続けることになる。
+                if refresh_is_cooling_down(last_failure_at.load().as_deref().copied(), Utc::now()) {
+                    return Err(PixivError::RefreshCoolingDown);
+                }
+
                 // トークンのリフレッシュ
                 info!("トークンをリフレッシュしています...");
-                let (access_token, expires_at) = Self::try_refresh_token(refresh_token).await?;
+                let refreshed = Self::try_refresh_token(refresh_token).await;
+                let (access_token, expires_at) = match refreshed {
+                    Ok(pair) => pair,
+                    Err(error) => {
+                        // 失敗を覚える。**古いトークンは消さない。** 一時的な
+                        // 不通で消してしまうと、繋ぎ直すまで何も取れなくなる。
+                        last_failure_at.store(Some(Arc::new(Utc::now())));
+                        return Err(error);
+                    }
+                };
                 info!(
                     "トークンのリフレッシュに成功しました。有効期限: {}",
                     expires_at
                 );
+                last_failure_at.store(None);
                 access_token_and_expires_at
                     .store(Some(Arc::new((access_token.clone(), expires_at))));
                 Ok(access_token)
@@ -188,6 +228,99 @@ mod tests {
         assert_eq!(token_cache_seconds(Some(299)), 0);
         assert_eq!(token_cache_seconds(Some(300)), 0);
         assert_eq!(token_cache_seconds(Some(301)), 1);
+    }
+
+    /// 失敗を覚える時間の判定。
+    ///
+    /// 一度も失敗していなければ待たない。失敗直後は待つ。時間が経てば待たない。
+    /// 時計が巻き戻っても、永久に待ち続けない。
+    #[test]
+    fn the_cooldown_covers_only_the_window_after_a_failure() {
+        let now = Utc::now();
+        assert!(!refresh_is_cooling_down(None, now));
+        assert!(refresh_is_cooling_down(Some(now), now));
+        assert!(refresh_is_cooling_down(
+            Some(now - chrono::Duration::seconds(REFRESH_FAILURE_COOLDOWN_SECS - 1)),
+            now
+        ));
+        assert!(!refresh_is_cooling_down(
+            Some(now - chrono::Duration::seconds(REFRESH_FAILURE_COOLDOWN_SECS)),
+            now
+        ));
+        // 時計が進んだ／巻き戻った場合。未来の記録で永久に待たない。
+        assert!(refresh_is_cooling_down(
+            Some(now + chrono::Duration::seconds(5)),
+            now
+        ));
+    }
+
+    /// 期限の切れた控えは使わない。まだ生きているものはそのまま返す。
+    #[test]
+    fn a_saved_token_is_only_reused_while_it_is_still_valid() {
+        let now = Utc::now();
+        let fresh = ArcSwapOption::from(Some(Arc::new((
+            "fresh".to_string(),
+            now + chrono::Duration::seconds(60),
+        ))));
+        assert_eq!(
+            TokenManager::try_get_saved_token(&fresh),
+            Ok("fresh".to_string())
+        );
+
+        let stale = ArcSwapOption::from(Some(Arc::new((
+            "stale".to_string(),
+            now - chrono::Duration::seconds(1),
+        ))));
+        assert!(TokenManager::try_get_saved_token(&stale).is_err());
+
+        let empty: ArcSwapOption<(String, DateTime<Utc>)> = ArcSwapOption::default();
+        assert!(TokenManager::try_get_saved_token(&empty).is_err());
+    }
+
+    /// 失敗した直後は、**通信せずに**折り返す。
+    ///
+    /// ここで毎回やり直していたころは、待たされていた取得が順番に同じ失敗を
+    /// 踏み直していた。この試験は宛先を持たないので、通信に出れば時間切れで
+    /// 落ちる - 折り返していることが、返るまでの速さで分かる。
+    #[test]
+    fn a_recent_failure_is_answered_without_going_out_again() {
+        let manager = TokenManager::RefreshToken {
+            refresh_token: "token".to_string(),
+            access_token_and_expires_at: ArcSwapOption::default(),
+            last_failure_at: ArcSwapOption::from(Some(Arc::new(Utc::now()))),
+            update_lock: AsyncMutex::new(()),
+        };
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let started = std::time::Instant::now();
+        let result = rt.block_on(manager.get_access_token());
+
+        assert!(matches!(result, Err(PixivError::RefreshCoolingDown)));
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "通信に出ている: {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// 生きている控えがあるなら、失敗を覚えていても素通しで返す。
+    ///
+    /// 覚えているのは「更新に失敗した」ことであって、「使えない」ことではない。
+    #[test]
+    fn a_valid_token_is_still_returned_while_cooling_down() {
+        let manager = TokenManager::RefreshToken {
+            refresh_token: "token".to_string(),
+            access_token_and_expires_at: ArcSwapOption::from(Some(Arc::new((
+                "still-good".to_string(),
+                Utc::now() + chrono::Duration::seconds(600),
+            )))),
+            last_failure_at: ArcSwapOption::from(Some(Arc::new(Utc::now()))),
+            update_lock: AsyncMutex::new(()),
+        };
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        assert_eq!(
+            rt.block_on(manager.get_access_token()).unwrap(),
+            "still-good"
+        );
     }
 
     #[test]

@@ -756,7 +756,10 @@ fn shelf_baseline(centroids: &HashMap<i64, Vec<f32>>) -> ShelfBaseline {
         if left == right {
             continue;
         }
-        values.push(cosine(&centroids[&left], &centroids[&right]));
+        // 比べられない組は、棚のふつうを測る材料にしない。
+        if let Some(value) = cosine(&centroids[&left], &centroids[&right]) {
+            values.push(value);
+        }
     }
     if values.is_empty() {
         return ShelfBaseline {
@@ -804,13 +807,26 @@ fn tighten_to_baseline(
         let mut total = 0.0;
         for left in &kept {
             let mut sum = 0.0;
+            let mut compared = 0usize;
             for right in &kept {
                 if left == right {
                     continue;
                 }
-                sum += cosine(&centroids[left], &centroids[right]);
+                if let Some(value) = cosine(&centroids[left], &centroids[right]) {
+                    sum += value;
+                    compared += 1;
+                }
             }
-            let average = sum / (kept.len() - 1) as f64;
+            // 比べた相手の数で割る。比べられなかった組まで分母に数えると、
+            // 近さが実際より低く出て、まとまるはずの束が落ちる。
+            //
+            // 誰とも比べられなければ 0 とする。この作品は束の近さを語れない
+            // ので、次の周回で真っ先に外れる（外すのは平均が最も低いもの）。
+            let average = if compared == 0 {
+                0.0
+            } else {
+                sum / compared as f64
+            };
             total += average;
             averages.push((average, *left));
         }
@@ -833,12 +849,24 @@ fn tighten_to_baseline(
     None
 }
 
-fn cosine(left: &[f32], right: &[f32]) -> f64 {
-    // どちらも長さ1にそろえてあるので、内積がそのまま余弦になる。
-    left.iter()
-        .zip(right.iter())
-        .map(|(a, b)| (*a as f64) * (*b as f64))
-        .sum()
+/// 二つの向きの近さ。比べられないときは `None`。
+///
+/// どちらも長さ1にそろえてあるので、内積がそのまま余弦になる。
+///
+/// **長さが違うものを比べない。** `zip` は短いほうで打ち切るので、次元の違う
+/// ベクトルを渡すと**前半だけの内積**を「近さ」として返してしまう。埋め込みの
+/// モデルを替えれば次元は変わるし、入れ替えの途中では新旧が混ざる。そこで
+/// 静かに間違った数を返すと、無関係な作品が束にまとまる形で表に出る。
+fn cosine(left: &[f32], right: &[f32]) -> Option<f64> {
+    if left.is_empty() || left.len() != right.len() {
+        return None;
+    }
+    Some(
+        left.iter()
+            .zip(right.iter())
+            .map(|(a, b)| (*a as f64) * (*b as f64))
+            .sum(),
+    )
 }
 
 /// ほぼ同じ塊を見つけた束を、ひとつにまとめる。
@@ -1053,4 +1081,96 @@ fn connected_components(adjacency: &HashMap<i64, HashSet<i64>>) -> Vec<Vec<i64>>
         out.push(component);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn centroids(entries: &[(i64, &[f32])]) -> HashMap<i64, Vec<f32>> {
+        entries
+            .iter()
+            .map(|(id, vector)| (*id, vector.to_vec()))
+            .collect()
+    }
+
+    /// 長さの違う向きは比べない。
+    ///
+    /// `zip` は短いほうで打ち切るので、放っておくと**前半だけの内積**が
+    /// 「近さ」として返る。埋め込みのモデルを替えれば次元は変わるので、
+    /// 入れ替えの途中には新旧が並ぶ。
+    #[test]
+    fn vectors_of_different_lengths_are_not_comparable() {
+        assert_eq!(cosine(&[1.0, 0.0, 0.0], &[1.0, 0.0, 0.0]), Some(1.0));
+        assert_eq!(cosine(&[1.0, 0.0], &[0.0, 1.0]), Some(0.0));
+        assert_eq!(cosine(&[1.0, 0.0, 0.0], &[1.0, 0.0]), None);
+        assert_eq!(cosine(&[], &[]), None);
+    }
+
+    /// 次元の合わない作品は、束に**入れない**。
+    ///
+    /// 前半だけの内積を返していたころ、`[1,0]` は `[1,0,0]` と「完全に同じ」に
+    /// 見えた。無関係な作品が束の中に混ざる形で表に出る。
+    #[test]
+    fn a_work_indexed_by_another_model_is_left_out_of_the_bundle() {
+        let centroids = centroids(&[
+            (1, &[1.0, 0.0, 0.0]),
+            (2, &[1.0, 0.0, 0.0]),
+            (3, &[1.0, 0.0, 0.0]),
+            // 次元が違う。前半だけを見ると、上の3件と見分けが付かない。
+            (4, &[1.0, 0.0]),
+        ]);
+        let baseline = ShelfBaseline {
+            mean: 0.0,
+            deviation: 0.4,
+        };
+
+        let kept = tighten_to_baseline(&[1, 2, 3, 4], &centroids, &baseline)
+            .expect("そろっている3件で束になる");
+
+        assert_eq!(kept, vec![1, 2, 3], "次元の違う4番が残っている");
+    }
+
+    /// 棚のふつうを測る材料にも、比べられない組は数えない。
+    #[test]
+    fn the_shelf_baseline_ignores_pairs_it_cannot_compare() {
+        let mixed = shelf_baseline(&centroids(&[
+            (1, &[1.0, 0.0, 0.0]),
+            (2, &[1.0, 0.0, 0.0]),
+            (3, &[1.0, 0.0]),
+        ]));
+        let clean = shelf_baseline(&centroids(&[(1, &[1.0, 0.0, 0.0]), (2, &[1.0, 0.0, 0.0])]));
+        assert!(
+            (mixed.mean - clean.mean).abs() < 1e-9,
+            "比べられない組が平均を動かしている: {} と {}",
+            mixed.mean,
+            clean.mean
+        );
+    }
+
+    /// 歩幅をずらすための互いに素の判定。ここが狂うと同じ対ばかり拾う。
+    #[test]
+    fn gcd_finds_the_common_divisor() {
+        assert_eq!(gcd(12, 18), 6);
+        assert_eq!(gcd(7, 13), 1);
+        assert_eq!(gcd(5, 0), 5);
+        assert_eq!(gcd(0, 5), 5);
+    }
+
+    /// つながっているものをひとまとまりにする。
+    #[test]
+    fn connected_components_groups_what_is_linked() {
+        let mut adjacency: HashMap<i64, HashSet<i64>> = HashMap::new();
+        adjacency.entry(1).or_default().insert(2);
+        adjacency.entry(2).or_default().insert(1);
+        adjacency.entry(2).or_default().insert(3);
+        adjacency.entry(3).or_default().insert(2);
+        adjacency.entry(9).or_default().insert(10);
+        adjacency.entry(10).or_default().insert(9);
+
+        let mut groups = connected_components(&adjacency);
+        groups.sort();
+
+        assert_eq!(groups, vec![vec![1, 2, 3], vec![9, 10]]);
+    }
 }

@@ -15,6 +15,15 @@ use crate::pixiv_api::models::*;
 use crate::pixiv_api::params::*;
 use crate::pixiv_api::token_manager::TokenManager;
 
+/// 一覧を辿るページ数の上限。
+///
+/// 続きの宛先は**取得元の応答に書かれている**。そこが自分自身や前のページを
+/// 指していれば、こちらは永久に取り続ける。相手側の不具合が、そのままこちらの
+/// 無限ループと、相手への無限のリクエストになる。
+///
+/// 1ページ30件として12,000件ぶん。実際の作者ページはこれに遠く届かない。
+const MAX_PAGES_FOLLOWED: usize = 400;
+
 const API_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const API_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -257,7 +266,7 @@ impl AppPixivAPI {
             ("{}: 最初のページをリクエスト中 エンドポイント: {}", stringify! (user_illusts_iter),
             "/v1/user/illusts"); let mut result =
             self.user_illusts(user_id, type_, filter, offset, with_auth).await ? ;
-            let mut next_url = result.next_url; loop
+            let mut next_url = result.next_url; let mut pages_followed = 0usize; loop
             {
                 for item in result.illusts { yield item; } match & next_url
                 {
@@ -265,7 +274,7 @@ impl AppPixivAPI {
                     {
                         log::debug!
                         ("{}: 次のページをリクエスト中 エンドポイント: {}", stringify! (user_illusts_iter),
-                        url); result = self.visit_next_url :: < UserIllustrations >
+                        url); if pages_followed >= MAX_PAGES_FOLLOWED { log::warn!("一覧の取得を{}ページで打ち切りました", MAX_PAGES_FOLLOWED); break; } pages_followed += 1; result = self.visit_next_url :: < UserIllustrations >
                         (url, with_auth).await ? ; next_url = result.next_url;
                     } None =>
                     {
@@ -343,7 +352,7 @@ impl AppPixivAPI {
             ("{}: 最初のページをリクエスト中 エンドポイント: {}", stringify! (user_bookmarks_illust_iter),
             "/v1/user/bookmarks/illust"); let mut result =
             self.user_bookmarks_illust(user_id, restrict, filter, max_bookmark_id,
-            tag, with_auth).await ? ; let mut next_url = result.next_url; loop
+            tag, with_auth).await ? ; let mut next_url = result.next_url; let mut pages_followed = 0usize; loop
             {
                 for item in result.illusts { yield item; } match & next_url
                 {
@@ -351,7 +360,7 @@ impl AppPixivAPI {
                     {
                         log::debug!
                         ("{}: 次のページをリクエスト中 エンドポイント: {}", stringify!
-                        (user_bookmarks_illust_iter), url); result =
+                        (user_bookmarks_illust_iter), url); if pages_followed >= MAX_PAGES_FOLLOWED { log::warn!("一覧の取得を{}ページで打ち切りました", MAX_PAGES_FOLLOWED); break; } pages_followed += 1; result =
                         self.visit_next_url :: < UserBookmarksIllustrations >
                         (url, with_auth).await ? ; next_url = result.next_url;
                     } None =>
@@ -430,7 +439,7 @@ impl AppPixivAPI {
             ("{}: 最初のページをリクエスト中 エンドポイント: {}", stringify! (user_bookmarks_novel_iter),
             "/v1/user/bookmarks/novel"); let mut result =
             self.user_bookmarks_novel(user_id, restrict, filter, max_bookmark_id,
-            tag, with_auth).await ? ; let mut next_url = result.next_url; loop
+            tag, with_auth).await ? ; let mut next_url = result.next_url; let mut pages_followed = 0usize; loop
             {
                 for item in result.novels { yield item; } match & next_url
                 {
@@ -438,7 +447,7 @@ impl AppPixivAPI {
                     {
                         log::debug!
                         ("{}: 次のページをリクエスト中 エンドポイント: {}", stringify!
-                        (user_bookmarks_novel_iter), url); result =
+                        (user_bookmarks_novel_iter), url); if pages_followed >= MAX_PAGES_FOLLOWED { log::warn!("一覧の取得を{}ページで打ち切りました", MAX_PAGES_FOLLOWED); break; } pages_followed += 1; result =
                         self.visit_next_url :: < UserBookmarksNovel >
                         (url, with_auth).await ? ; next_url = result.next_url;
                     } None =>
@@ -771,7 +780,7 @@ impl AppPixivAPI {
             "/v1/search/illust"); let mut result =
             self.search_illust(word, search_target, sort, duration, start_date,
             end_date, filter, search_ai_type, offset, with_auth).await ? ; let mut
-            next_url = result.next_url; loop
+            next_url = result.next_url; let mut pages_followed = 0usize; loop
             {
                 for item in result.illusts { yield item; } match & next_url
                 {
@@ -779,7 +788,7 @@ impl AppPixivAPI {
                     {
                         log::debug!
                         ("{}: 次のページをリクエスト中 エンドポイント: {}", stringify! (search_illust_iter),
-                        url); result = self.visit_next_url :: < SearchIllustrations
+                        url); if pages_followed >= MAX_PAGES_FOLLOWED { log::warn!("一覧の取得を{}ページで打ち切りました", MAX_PAGES_FOLLOWED); break; } pages_followed += 1; result = self.visit_next_url :: < SearchIllustrations
                         > (url, with_auth).await ? ; next_url = result.next_url;
                     } None =>
                     {
@@ -892,7 +901,7 @@ impl AppPixivAPI {
             self.search_novel(word, search_target, sort,
             merge_plain_keyword_results, include_translated_tag_results,
             start_date, end_date, filter, search_ai_type, offset, with_auth).await
-            ? ; let mut next_url = result.next_url; loop
+            ? ; let mut next_url = result.next_url; let mut pages_followed = 0usize; loop
             {
                 for item in result.novels { yield item; } match & next_url
                 {
@@ -900,7 +909,7 @@ impl AppPixivAPI {
                     {
                         log::debug!
                         ("{}: 次のページをリクエスト中 エンドポイント: {}", stringify! (search_novel_iter),
-                        url); result = self.visit_next_url :: < SearchNovel >
+                        url); if pages_followed >= MAX_PAGES_FOLLOWED { log::warn!("一覧の取得を{}ページで打ち切りました", MAX_PAGES_FOLLOWED); break; } pages_followed += 1; result = self.visit_next_url :: < SearchNovel >
                         (url, with_auth).await ? ; next_url = result.next_url;
                     } None =>
                     {
@@ -1075,7 +1084,7 @@ impl AppPixivAPI {
             ("{}: 最初のページをリクエスト中 エンドポイント: {}", stringify! (user_following_iter),
             "/v1/user/following"); let mut result =
             self.user_following(user_id, restrict, offset, with_auth).await ? ;
-            let mut next_url = result.next_url; loop
+            let mut next_url = result.next_url; let mut pages_followed = 0usize; loop
             {
                 for item in result.user_previews { yield item; } match & next_url
                 {
@@ -1083,7 +1092,7 @@ impl AppPixivAPI {
                     {
                         log::debug!
                         ("{}: 次のページをリクエスト中 エンドポイント: {}", stringify! (user_following_iter),
-                        url); result = self.visit_next_url :: < UserFollowing >
+                        url); if pages_followed >= MAX_PAGES_FOLLOWED { log::warn!("一覧の取得を{}ページで打ち切りました", MAX_PAGES_FOLLOWED); break; } pages_followed += 1; result = self.visit_next_url :: < UserFollowing >
                         (url, with_auth).await ? ; next_url = result.next_url;
                     } None =>
                     {
@@ -1280,7 +1289,7 @@ impl AppPixivAPI {
             ("{}: 最初のページをリクエスト中 エンドポイント: {}", stringify! (user_novels_iter),
             "/v1/user/novels"); let mut result =
             self.user_novels(user_id, filter, offset, with_auth).await ? ; let mut
-            next_url = result.next_url; loop
+            next_url = result.next_url; let mut pages_followed = 0usize; loop
             {
                 for item in result.novels { yield item; } match & next_url
                 {
@@ -1288,7 +1297,7 @@ impl AppPixivAPI {
                     {
                         log::debug!
                         ("{}: 次のページをリクエスト中 エンドポイント: {}", stringify! (user_novels_iter),
-                        url); result = self.visit_next_url :: < UserNovels >
+                        url); if pages_followed >= MAX_PAGES_FOLLOWED { log::warn!("一覧の取得を{}ページで打ち切りました", MAX_PAGES_FOLLOWED); break; } pages_followed += 1; result = self.visit_next_url :: < UserNovels >
                         (url, with_auth).await ? ; next_url = result.next_url;
                     } None =>
                     {
@@ -1417,7 +1426,7 @@ impl AppPixivAPI {
             ("{}: 最初のページをリクエスト中 エンドポイント: {}", stringify! (novel_comments_iter),
             "/v1/novel/comments"); let mut result =
             self.novel_comments(novel_id, offset, include_total_comments,
-            with_auth).await ? ; let mut next_url = result.next_url; loop
+            with_auth).await ? ; let mut next_url = result.next_url; let mut pages_followed = 0usize; loop
             {
                 for item in result.comments { yield item; } match & next_url
                 {
@@ -1425,7 +1434,7 @@ impl AppPixivAPI {
                     {
                         log::debug!
                         ("{}: 次のページをリクエスト中 エンドポイント: {}", stringify! (novel_comments_iter),
-                        url); result = self.visit_next_url :: < NovelComments >
+                        url); if pages_followed >= MAX_PAGES_FOLLOWED { log::warn!("一覧の取得を{}ページで打ち切りました", MAX_PAGES_FOLLOWED); break; } pages_followed += 1; result = self.visit_next_url :: < NovelComments >
                         (url, with_auth).await ? ; next_url = result.next_url;
                     } None =>
                     {
