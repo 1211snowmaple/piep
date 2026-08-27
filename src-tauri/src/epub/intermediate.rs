@@ -486,3 +486,124 @@ pub struct ExportProgress {
     pub total_count: u32,
     pub message: String,
 }
+
+#[cfg(test)]
+mod template_settings_tests {
+    use super::*;
+
+    /// 版を上げて項目が増えても、利用者が保存した並びと選択を壊さない。
+    ///
+    /// 既定を丸ごと当て直すと、並べ替えも「出さない」の選択も消える。
+    /// 足りないものだけを末尾に足す、という約束をここで留める。
+    #[test]
+    fn a_new_field_appears_without_disturbing_the_saved_order() {
+        let saved = TemplateSettings {
+            info_fields: vec![
+                InfoField::new("tags", "タグ", false),
+                InfoField::new("title", "タイトル", true),
+            ],
+            ..TemplateSettings::default()
+        };
+
+        let normalized = saved.normalized();
+
+        assert_eq!(normalized.info_fields[0].key, "tags", "保存した並びが先頭");
+        assert_eq!(normalized.info_fields[1].key, "title");
+        assert!(
+            !normalized.info_fields[0].enabled,
+            "切ってあった選択が戻っている"
+        );
+        assert_eq!(
+            normalized.info_fields.len(),
+            default_info_fields().len(),
+            "足りない項目が末尾に足されていない"
+        );
+    }
+
+    /// 無くなった項目は落とす。残すと、描く側が知らない鍵を渡されることになる。
+    #[test]
+    fn a_field_that_no_longer_exists_is_dropped() {
+        let mut saved = TemplateSettings::default();
+        saved
+            .info_fields
+            .push(InfoField::new("obsolete", "むかしの項目", true));
+
+        let normalized = saved.normalized();
+
+        assert!(
+            !normalized.info_fields.iter().any(|f| f.key == "obsolete"),
+            "知らない項目が残っている"
+        );
+    }
+
+    /// 書き換えた文言は残す。足りないものだけ既定で埋める。
+    #[test]
+    fn saved_wording_is_kept_and_only_the_gaps_are_filled() {
+        let mut saved = TemplateSettings::default();
+        let (key, default_value) = default_strings()
+            .into_iter()
+            .next()
+            .expect("既定の文言が一つも無い");
+        saved.strings.clear();
+        saved
+            .strings
+            .insert(key.clone(), "自分で書いた文言".to_string());
+
+        let normalized = saved.normalized();
+
+        assert_eq!(
+            normalized.strings.get(&key).map(String::as_str),
+            Some("自分で書いた文言"),
+            "書き換えた文言が既定で上書きされている"
+        );
+        assert_ne!(default_value, "自分で書いた文言");
+        assert_eq!(
+            normalized.strings.len(),
+            default_strings().len(),
+            "足りない文言が埋まっていない"
+        );
+    }
+
+    /// 空や知らない値は、開ける形へ倒す。読めない EPUB を作らない。
+    #[test]
+    fn an_empty_language_and_an_unknown_direction_fall_back() {
+        let saved = TemplateSettings {
+            language: "   ".to_string(),
+            page_progression: "sideways".to_string(),
+            ..TemplateSettings::default()
+        };
+
+        let normalized = saved.normalized();
+
+        assert_eq!(normalized.language, "ja");
+        assert_eq!(normalized.page_progression, "ltr");
+    }
+
+    /// 選んだ向きは残す。既定へ倒すのは、知らない値のときだけ。
+    #[test]
+    fn a_known_direction_is_left_alone() {
+        let saved = TemplateSettings {
+            page_progression: "rtl".to_string(),
+            ..TemplateSettings::default()
+        };
+
+        assert_eq!(saved.normalized().page_progression, "rtl");
+    }
+
+    /// 出す項目だけを並べる。
+    #[test]
+    fn only_enabled_fields_are_listed() {
+        let saved = TemplateSettings {
+            info_fields: vec![
+                InfoField::new("title", "タイトル", true),
+                InfoField::new("tags", "タグ", false),
+            ],
+            ..TemplateSettings::default()
+        };
+
+        let enabled = saved.enabled_info_fields();
+
+        assert_eq!(enabled.len(), 1);
+        assert_eq!(enabled[0].key, "title");
+    }
+}

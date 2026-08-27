@@ -1876,10 +1876,96 @@ fn text_value(doc: &TantivyDocument, field: Field) -> String {
         .to_string()
 }
 
+/// 組み立てた式が解析できなかったときの逃げ道。語ごとに丸ごと引用符で包む。
+///
+/// **`\` も退避する。** `"` だけを退避していたころ、`\` で終わる語は
+/// `"a\\"` になった - 末尾の `\` が閉じ引用符を打ち消し、逃げ道のほうも
+/// 解析に失敗する。そこまで落ちると検索は結果ゼロではなく**エラー**になる。
+/// 主経路（`query_literal`）は最初からこの順で退避している。
 fn escape_query(query: &str) -> String {
     query
         .split_whitespace()
-        .map(|part| format!("\"{}\"", part.replace('"', "\\\"")))
+        .map(|part| {
+            format!(
+                "\"{}\"",
+                // 順番が要る。先に `"` を退避すると、そこで足した `\` を
+                // あとから二重に退避してしまう。
+                part.replace('\\', "\\\\").replace('"', "\\\"")
+            )
+        })
         .collect::<Vec<String>>()
         .join(" ")
+}
+
+#[cfg(test)]
+mod query_escaping_tests {
+    use super::*;
+    use tantivy::schema::Schema;
+
+    /// tantivy に実際に読ませる。組み立てた文字列が「それらしい」かではなく、
+    /// **解析器が受け取れるか**が知りたいことである。
+    fn parses(expression: &str) -> bool {
+        let mut builder = Schema::builder();
+        let body = builder.add_text_field("body", TEXT);
+        let index = Index::create_in_ram(builder.build());
+        QueryParser::for_index(&index, vec![body])
+            .parse_query(expression)
+            .is_ok()
+    }
+
+    /// 逃げ道に落ちた語も、必ず解析できる形にする。
+    ///
+    /// `"` だけを退避していたころ、`\` で終わる語は `"a\"` になった。末尾の
+    /// `\` が閉じ引用符を打ち消すので、逃げ道のほうも解析に失敗する。両方
+    /// 落ちると、検索は**結果ゼロではなくエラー**になる。
+    ///
+    /// 日本語配列では `¥` の位置がそのまま `\` を出す。打てない文字ではない。
+    #[test]
+    fn the_fallback_survives_a_backslash() {
+        for raw in [
+            r"a\",
+            r"C:\path\to\file",
+            r"\\",
+            "say \"hi\"",
+            r#"quote" and slash\"#,
+        ] {
+            let escaped = escape_query(raw);
+            assert!(parses(&escaped), "解析できない: {raw} -> {escaped}");
+        }
+    }
+
+    /// 逃げ道は語を丸ごと引用符で包む。演算子に見える語も、ただの語になる。
+    #[test]
+    fn the_fallback_turns_operators_into_plain_words() {
+        for raw in ["AND", "OR NOT", "-除外", "title:値", "*"] {
+            let escaped = escape_query(raw);
+            assert!(parses(&escaped), "解析できない: {raw} -> {escaped}");
+        }
+    }
+
+    /// 主経路も同じ文字を退避する。二つの規則が食い違っていないことを見る。
+    #[test]
+    fn the_primary_path_escapes_what_the_fallback_escapes() {
+        for raw in [
+            r"a\",
+            r"C:\path",
+            "space あり",
+            "-除外",
+            "title:値",
+            "*",
+            "(かっこ)",
+        ] {
+            let literal = query_literal(raw);
+            assert!(!literal.is_empty(), "空になった: {raw}");
+            assert!(parses(&literal), "解析できない: {raw} -> {literal}");
+        }
+    }
+
+    /// 空白だけ、空文字は語にならない。
+    #[test]
+    fn nothing_becomes_an_empty_expression() {
+        assert_eq!(query_literal(""), "");
+        assert_eq!(query_literal("   "), "");
+        assert_eq!(escape_query("   "), "");
+    }
 }
