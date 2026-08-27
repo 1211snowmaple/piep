@@ -5,7 +5,8 @@ import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { AppRouter } from "@/app/router";
 import { WorkspaceProvider } from "@/app/WorkspaceContext";
-import CollectionPage from "./CollectionPage";
+import { getDemoCollection } from "@/mocks/demoData";
+import CollectionPage, { optimisticCollectionOrder } from "./CollectionPage";
 
 function renderPage(path: string) {
   window.localStorage.removeItem("piep.library-view");
@@ -23,6 +24,15 @@ function renderPage(path: string) {
 }
 
 describe("CollectionPage browser preview", () => {
+  it("updates mosaic tiles together with an optimistic member reorder", () => {
+    const collection = getDemoCollection("demo-series");
+    const reversed = [...collection.members].reverse();
+    const optimistic = optimisticCollectionOrder(collection, reversed);
+    expect(optimistic.members[0].sourceId).toBe(reversed[0].sourceId);
+    expect(optimistic.members.map((member) => member.position)).toEqual([0, 1]);
+    expect(optimistic.coverTiles[0].sourceId).toBe(reversed[0].sourceId);
+  });
+
   it("renders demo details read-only instead of exposing failing desktop mutations", async () => {
     renderPage("#/collections/demo-series");
 

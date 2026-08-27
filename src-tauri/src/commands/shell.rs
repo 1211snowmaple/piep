@@ -74,24 +74,70 @@ pub async fn reveal_managed_path(app: tauri::AppHandle, path: String) -> Result<
         .map_err(|error| format!("この場所をファイルマネージャーで表示できません: {error}"))
 }
 
-#[cfg(test)]
-mod tests {
+/// 配布しているのは Windows 版だけで、`resolve_allowed_path` は判定の前に
+/// `canonicalize` を通す。Windows の `canonicalize` が返すのは `\\?\C:\...`
+/// という verbatim 接頭辞つきのパスであって、`/app/data` のような形ではない。
+/// ここの試験は、**実際に判定へ渡る形**で書く。
+#[cfg(all(test, windows))]
+mod windows_tests {
     use super::*;
 
+    /// canonicalize が返す形。接頭辞まで含めて根に持つ。
     fn roots() -> Vec<PathBuf> {
-        vec![PathBuf::from("/app/data"), PathBuf::from("/library/piep")]
+        vec![
+            PathBuf::from(r"\\?\C:\Users\reader\AppData\Roaming\com.hiron.piep"),
+            PathBuf::from(r"\\?\D:\piep-library"),
+        ]
     }
 
     #[test]
     fn managed_files_and_folders_open() {
         assert!(open_request_is_allowed(
-            Path::new("/app/data/profiles/pixiv/1/v1/assets/icon.jpg"),
+            Path::new(r"\\?\C:\Users\reader\AppData\Roaming\com.hiron.piep\profiles\pixiv\1\v1\assets\icon.jpg"),
             false,
             &roots()
         ));
         assert!(open_request_is_allowed(
-            Path::new("/library/piep/pixiv/12/v1"),
+            Path::new(r"\\?\D:\piep-library\pixiv\12\v1"),
             true,
+            &roots()
+        ));
+    }
+
+    /// 前方一致で判定していると通ってしまう形。`Path::starts_with` は文字列
+    /// ではなく構成要素ごとに比べるので、隣のフォルダーは根の内側にならない。
+    #[test]
+    fn a_sibling_directory_sharing_the_prefix_is_refused() {
+        assert!(!open_request_is_allowed(
+            Path::new(r"\\?\D:\piep-library-backup\secrets.txt"),
+            false,
+            &roots()
+        ));
+        assert!(!open_request_is_allowed(
+            Path::new(r"\\?\C:\Users\reader\AppData\Roaming\com.hiron.piep.old\notes.txt"),
+            false,
+            &roots()
+        ));
+    }
+
+    #[test]
+    fn another_drive_is_not_inside_the_library() {
+        assert!(!open_request_is_allowed(
+            Path::new(r"\\?\E:\piep-library\pixiv\12\v1\body.txt"),
+            false,
+            &roots()
+        ));
+    }
+
+    /// Windows のパスは大小を区別しないが、`Path::starts_with` は区別する。
+    /// 判定が成り立つのは、**両側とも canonicalize を通しているから**である。
+    /// 片側だけ生のパスを渡すと、管理下のファイルが開けなくなる（危険な側では
+    /// なく、閉じる側に倒れる）。その前提をここに残しておく。
+    #[test]
+    fn both_sides_must_come_from_canonicalize() {
+        assert!(!open_request_is_allowed(
+            Path::new(r"\\?\D:\PIEP-LIBRARY\pixiv\12\v1\body.txt"),
+            false,
             &roots()
         ));
     }
@@ -100,7 +146,7 @@ mod tests {
     #[test]
     fn folders_outside_the_managed_area_still_open() {
         assert!(open_request_is_allowed(
-            Path::new("/home/reader/Documents/piep exports"),
+            Path::new(r"\\?\C:\Users\reader\Documents\piep exports"),
             true,
             &roots()
         ));
@@ -110,15 +156,50 @@ mod tests {
     #[test]
     fn files_outside_the_managed_area_are_refused() {
         assert!(!open_request_is_allowed(
-            Path::new("/windows/system32/cmd.exe"),
+            Path::new(r"\\?\C:\Windows\System32\cmd.exe"),
             false,
             &roots()
         ));
         // 中身がフォルダーでも、拡張子を持つものは起動しうる。
         assert!(!open_request_is_allowed(
-            Path::new("/Applications/Malware.app"),
+            Path::new(r"\\?\C:\Program Files\Malware.app"),
             true,
             &roots()
+        ));
+    }
+}
+
+/// どの OS でも同じでなければならない規則だけを、ここに置く。
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_extensionless_directory_outside_every_root_still_opens() {
+        assert!(open_request_is_allowed(
+            Path::new("exports"),
+            true,
+            &[PathBuf::from("library")]
+        ));
+    }
+
+    #[test]
+    fn a_file_outside_every_root_is_refused() {
+        assert!(!open_request_is_allowed(
+            Path::new("payload.exe"),
+            false,
+            &[PathBuf::from("library")]
+        ));
+    }
+
+    /// 拡張子を持つものは、中身がフォルダーでも開かない。macOS の
+    /// アプリバンドルは、フォルダーのまま起動できてしまう。
+    #[test]
+    fn a_directory_with_an_extension_is_refused() {
+        assert!(!open_request_is_allowed(
+            Path::new("Malware.app"),
+            true,
+            &[PathBuf::from("library")]
         ));
     }
 }

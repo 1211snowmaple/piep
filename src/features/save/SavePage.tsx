@@ -62,6 +62,7 @@ import {
 } from "@/services/browserApi";
 import { getDownloadBySource, isTauriRuntime, setWatchUpdates } from "@/services/dbApi";
 import { loadSchedule } from "@/features/updates/updateSchedule";
+import { invalidateWorkSetViews } from "@/features/library/workSetInvalidation";
 import {
   downloadAndSave,
   fetchFanboxCreatorPosts,
@@ -115,6 +116,9 @@ export default function SavePage() {
   // 保存中かどうかは、描画の外からも即座に読めなければならない - 終了ガードと
   // 再入の防止が、どちらも state の反映を待てないため。
   const savingRef = useRef(false);
+  // 終了ガードの解除。**保存が終わったときに呼ぶ**もので、画面を離れたときでは
+  // ない。保存は画面より長生きするので、寿命は保存に合わせる。
+  const closeGuardRef = useRef<(() => void) | null>(null);
   // 取得も同じ。Ctrl+S と取得ボタンが同じ瞬間に入ると、state の反映を待たずに
   // もう一周始まり、同じ知らせが二度出る。
   const analyzingRef = useRef(false);
@@ -281,15 +285,15 @@ export default function SavePage() {
   // Closing the desktop window mid-download would abandon the batch silently.
   // 移動のほうは止めない - この画面を離れても保存は走り続け、進行状況も中止も
   // アクティビティに残る。閉じるときだけは本当に消えるので、そこでは訊く。
-  useEffect(() => {
-    const unregister = registerUnsavedGuard(() => savingRef.current, ["close"]);
-    return () => {
-      unregister();
-      // 黙って居なくなると、止まったのか続いているのか分からない。
-      if (savingRef.current) {
-        notifications.show({ color: "piep", title: "保存はこのまま続きます", message: "進行状況と中止は、左下のアクティビティから操作できます" });
-      }
-    };
+  // ガードはここでは外さない。以前はこの後片付けで解除していたが、保存は画面を
+  // 離れても走り続ける設計なので、**守るべきものが残っているのに守りだけが消え**
+  // ていた。保存中にライブラリへ移ってウィンドウを閉じると、何も訊かれずに終了し、
+  // 走っていた保存が消える。登録と解除は execute の開始と finally に置いてある。
+  useEffect(() => () => {
+    // 黙って居なくなると、止まったのか続いているのか分からない。
+    if (savingRef.current) {
+      notifications.show({ color: "piep", title: "保存はこのまま続きます", message: "進行状況と中止は、左下のアクティビティから操作できます" });
+    }
   }, []);
 
   const selectedCount = items.filter((item) => item.selected).length;
@@ -535,6 +539,8 @@ export default function SavePage() {
     // state の反映を待たずに閉める。二連打や再試行が同じ瞬間に入ると、
     // setSaving の反映前にもう一周始まってしまう。
     savingRef.current = true;
+    closeGuardRef.current?.();
+    closeGuardRef.current = registerUnsavedGuard(() => savingRef.current, ["close"]);
     setSaving(true);
     setCanceling(false);
     let saved = 0, skipped = 0, failed = 0;
@@ -613,8 +619,8 @@ export default function SavePage() {
           await Promise.allSettled(savedEntries.map((entry) => setWatchUpdates(entry.id, true)));
         }
       }
-      queryClient.invalidateQueries({ queryKey: ["library"] }); queryClient.invalidateQueries({ queryKey: ["dashboard"] }); queryClient.invalidateQueries({ queryKey: ["library-facets"] });
-      queryClient.invalidateQueries({ queryKey: ["entity"] }); queryClient.invalidateQueries({ queryKey: ["entity-works"] });
+      queryClient.invalidateQueries({ queryKey: ["library"] }); queryClient.invalidateQueries({ queryKey: ["entity"] });
+      invalidateWorkSetViews(queryClient);
       if (operation.isCancelRequested()) {
         operation.cancel(`保存 ${saved} · スキップ ${skipped} · 失敗 ${failed} の時点で中止しました`);
       } else if (failed === selected.length) {
@@ -627,7 +633,7 @@ export default function SavePage() {
     } catch (error) {
       operation.fail(error);
       notifications.show({ color: "red", title: "保存処理を完了できません", message: errorMessage(error) });
-    } finally { saveOperationRef.current = null; savingRef.current = false; setSaving(false); setCanceling(false); setProgress(null); }
+    } finally { saveOperationRef.current = null; savingRef.current = false; closeGuardRef.current?.(); closeGuardRef.current = null; setSaving(false); setCanceling(false); setProgress(null); }
   };
   // 最新の execute を再試行へ届けるための一段。render ごとに差し替わる。
   executeRef.current = execute;

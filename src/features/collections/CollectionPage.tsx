@@ -15,7 +15,7 @@ import {
 import { useDisclosure } from "@mantine/hooks";
 import { notifications } from "@mantine/notifications";
 import { modals } from "@mantine/modals";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { useAppNavigate, useRouteParams } from "@/app/router";
 import { ErrorState, LoadingState } from "@/components/AsyncState";
 import { CollectionCover } from "@/components/CollectionCover";
@@ -48,6 +48,36 @@ function workKey(work: { source: string; sourceId: string }): WorkKey {
   return { source: work.source, sourceId: work.sourceId };
 }
 
+export function optimisticCollectionOrder(
+  collection: WorkCollection,
+  members: WorkCollectionMember[],
+): WorkCollection {
+  return {
+    ...collection,
+    members: members.map((member, position) => ({ ...member, position })),
+    coverTiles: members.slice(0, 4).map((member) => ({
+      source: member.source,
+      sourceId: member.sourceId,
+      title: member.title,
+      authorName: member.authorName,
+      coverPath: member.coverPath,
+    })),
+  };
+}
+
+/** Every screen that mentions a collection reads one of these four keys.
+ *
+ *  Kept in one place because the two components below both need it: while the
+ *  list was invalidated by hand in each caller, the delete path refreshed only
+ *  ["work-collections"], so the 所属 menus on the work and author pages went on
+ *  offering a collection that no longer existed. */
+function invalidateCollectionViews(queryClient: QueryClient) {
+  queryClient.invalidateQueries({ queryKey: ["work-collections"] });
+  queryClient.invalidateQueries({ queryKey: ["work-collection"] });
+  queryClient.invalidateQueries({ queryKey: ["collections-for-work"] });
+  queryClient.invalidateQueries({ queryKey: ["collections-for-person"] });
+}
+
 /** The detail screen for one collection. The list of collections lives in the
  *  library beside 作者・クリエイター and シリーズ, so a bare `/collections`
  *  sends the reader there rather than showing a second, competing list. */
@@ -62,12 +92,7 @@ export default function CollectionPage() {
     queryFn: () => runtime ? getWorkCollection(collectionId!) : Promise.resolve(getDemoCollection(collectionId!)),
     enabled: Boolean(collectionId),
   });
-  const invalidate = () => {
-    queryClient.invalidateQueries({ queryKey: ["work-collections"] });
-    queryClient.invalidateQueries({ queryKey: ["work-collection"] });
-    queryClient.invalidateQueries({ queryKey: ["collections-for-work"] });
-    queryClient.invalidateQueries({ queryKey: ["collections-for-person"] });
-  };
+  const invalidate = () => invalidateCollectionViews(queryClient);
   const saveMutation = useMutation({
     mutationFn: upsertWorkCollection,
     onSuccess: () => { invalidate(); form.close(); notifications.show({ color: "green", message: "コレクションを保存しました" }); },
@@ -126,6 +151,10 @@ function CollectionDetail({ collection, readOnly, onEdit, onChanged }: { collect
   const ordered = collection.collectionKind === "ordered";
 
   const mutation = useMutation({
+    // 同じ束への操作は直列に流す。並べ替えは押すたびに飛ぶので、走らせたままだと
+    // 応答の到着順で決まってしまう。onSuccess はサーバが返した並びをそのまま
+    // 確定させるため、遅れて届いた古い応答が画面と保存済みの並びを上書きしうる。
+    scope: { id: `work-collection:${collection.id}` },
     mutationFn: async (action: MemberAction) => {
       if (action.type === "remove") return removeWorkCollectionMembers(collection.id, action.keys);
       if (action.type === "reorder") return reorderWorkCollectionMembers(collection.id, action.keys);
@@ -193,33 +222,35 @@ function CollectionDetail({ collection, readOnly, onEdit, onChanged }: { collect
     });
   };
 
-  const reorderTo = (members: WorkCollectionMember[]) => {
+  const reorderTo = async (members: WorkCollectionMember[]): Promise<boolean> => {
     const previous = collection;
-    const optimistic = {
-      ...collection,
-      members: members.map((member, position) => ({ ...member, position })),
-    };
+    // mosaic/spine は先頭4件から作る。本文の並びだけ先に動かして表紙を
+    // 古いままにすると、保存中だけ二つの順序が同時に見えてしまう。
+    const optimistic = optimisticCollectionOrder(collection, members);
     // 掴んだ瞬間に画面を動かし、保存に失敗したときだけ元へ戻す。
     onChanged(optimistic);
-    mutation.mutate(
-      { type: "reorder", keys: members.map(workKey) },
-      { onError: () => onChanged(previous) },
-    );
+    try {
+      await mutation.mutateAsync({ type: "reorder", keys: members.map(workKey) });
+      return true;
+    } catch {
+      onChanged(previous);
+      return false;
+    }
   };
 
-  const move = (index: number, delta: number) => {
+  const move = async (index: number, delta: number) => {
     const next = [...collection.members];
     const target = index + delta;
-    if (target < 0 || target >= next.length) return;
+    if (target < 0 || target >= next.length) return false;
     [next[index], next[target]] = [next[target], next[index]];
-    reorderTo(next);
+    return reorderTo(next);
   };
   /** 掴んで運ぶ並べ替えは、抜いて差し込む。入れ替えではない。 */
-  const dropAt = (from: number, to: number) => {
+  const dropAt = async (from: number, to: number) => {
     const next = [...collection.members];
     const [moved] = next.splice(from, 1);
     next.splice(to, 0, moved);
-    reorderTo(next);
+    return reorderTo(next);
   };
 
   /**
@@ -237,7 +268,12 @@ function CollectionDetail({ collection, readOnly, onEdit, onChanged }: { collect
     title: "コレクションを削除しますか？",
     children: <Text size="sm">作品そのものは削除されません。「{collection.name}」というまとまりと並びだけを削除します。</Text>,
     labels: { confirm: "削除する", cancel: "キャンセル" }, confirmProps: { color: "red" },
-    onConfirm: async () => { try { await deleteWorkCollection(collection.id); queryClient.invalidateQueries({ queryKey: ["work-collections"] }); navigate("/library?tab=collections"); } catch (error) { notifications.show({ color: "red", title: "削除できません", message: errorMessage(error) }); } },
+    // Deleting touches the same caches every other edit on this screen does.
+    // Invalidating only the list left the work and author pages still counting
+    // this collection in their 所属 menus. The deleted collection's own entry is
+    // removed rather than invalidated: refetching it would only ask for a row
+    // that is gone.
+    onConfirm: async () => { try { await deleteWorkCollection(collection.id); queryClient.removeQueries({ queryKey: ["work-collection", collection.id] }); invalidateCollectionViews(queryClient); navigate("/library?tab=collections"); } catch (error) { notifications.show({ color: "red", title: "削除できません", message: errorMessage(error) }); } },
   });
 
   const removeSelected = () => {

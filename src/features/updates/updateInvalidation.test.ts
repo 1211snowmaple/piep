@@ -28,8 +28,22 @@ describe("更新確認のあとに古くなるもの", () => {
     expect(invalidated).toContain("library-shelf-counts");
   });
 
+  /**
+   * 自動保存のジョブは作品を増やす。増えたことを知らないままだと、確認が
+   * 終わっても棚は前の一覧、ホームは前の件数を出しつづける。増えたときに
+   * 古くなる場所は、消したときに古くなる場所と同じである。
+   */
+  it("取り込みで増えた作品を、棚とホームにも知らせる", () => {
+    const invalidated = collectInvalidatedKeys();
+    expect(invalidated).toContain("library");
+    expect(invalidated).toContain("library-facets");
+    expect(invalidated).toContain("library-entities");
+    expect(invalidated).toContain("entity-works");
+    expect(invalidated).toContain("dashboard");
+  });
+
   // 増やすのはよいが、減らすと静かに壊れる。数も見張っておく。
   it("知らせ先を取りこぼしていない", () => {
-    expect(collectInvalidatedKeys()).toHaveLength(2);
+    expect(collectInvalidatedKeys()).toHaveLength(7);
   });
 });

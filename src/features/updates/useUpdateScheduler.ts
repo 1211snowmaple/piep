@@ -45,8 +45,8 @@ function describeResult(snapshot: UpdateJobSnapshot | UpdateJobSummary): string 
  * Runs the update check on the schedule the settings describe.
  *
  * Deliberately modest: it only runs while the app is open, never starts a
- * second job on top of a live one, and records the run before starting so a
- * crash mid-check cannot turn into a loop of retries on the next start.
+ * second job on top of a live one, and records the run only after the worker
+ * has accepted it so a transient start failure remains eligible for retry.
  */
 export function useUpdateScheduler(enabled = isTauriRuntime()) {
   const startupDone = useRef(false);
@@ -78,14 +78,14 @@ export function useUpdateScheduler(enabled = isTauriRuntime()) {
         ]);
         if (!targets.length && !watchedWorks.items.length) return;
 
-        // 実行する前に時刻を記録する。途中で落ちても、次の起動で
-        // 何度もやり直すことにはならない。
-        await writeLastRun(Date.now());
         const snapshot = await startUpdateJobCommand({
           scope: "all",
           mode: settings.mode,
           watchSaved: settings.watchSaved,
         });
+        // ジョブを作れた時刻だけを記録する。開始前に保存すると、一時的な
+        // IPC/DB失敗でも次の間隔まで確認を丸ごと飛ばしてしまう。
+        await writeLastRun(Date.now());
         if (settings.notify) {
           await notify("更新の自動確認を開始しました", `対象 ${snapshot.totals}件`);
         }

@@ -768,9 +768,6 @@ export default function LibraryPage() {
   const selectedSet = useMemo(() => new Set(selected), [selected]);
   const selectionCount = tab === "works" ? selected.length : selectedEntities.length;
   const allLoadedSelected = loadedIds.length > 0 && loadedIds.every((id) => selectedSet.has(id));
-  const allVisibleEntitiesSelected = entityItemsRef.current.length > 0
-    && entityItemsRef.current.every((entity) => selectedEntityKeys.has(entityKey(entity)));
-  const allVisibleSelected = tab === "works" ? allLoadedSelected : allVisibleEntitiesSelected;
   const flagMutationsInFlight = useRef(0);
 
   const flagMutation = useMutation({
@@ -1154,6 +1151,13 @@ export default function LibraryPage() {
     })) ?? [];
   }, [entities.data?.pages]);
   entityItemsRef.current = entityItems;
+  // `entityItems` を直接見る。ref はレンダー中に代入してもレンダーを起こさない
+  // ので、この判定を ref の代入より前に書いていたときは常に前回の一覧を指して
+  // いた。「さらに読み込む」で行が増えても、ボタンは「表示中を解除」のまま
+  // 残っていた（押したときの動作だけは、ハンドラが読み直すので正しかった）。
+  const allVisibleEntitiesSelected = entityItems.length > 0
+    && entityItems.every((entity) => selectedEntityKeys.has(entityKey(entity)));
+  const allVisibleSelected = tab === "works" ? allLoadedSelected : allVisibleEntitiesSelected;
   const entitiesAtCacheLimit = pagingMode !== "pages"
     && (entities.data?.pages.length ?? 0) >= INFINITE_LIST_MAX_PAGES
     && Boolean(entities.hasNextPage);

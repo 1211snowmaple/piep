@@ -29,11 +29,25 @@ describe("operation history", () => {
     expect(api.getOperationJobs()[0].status).toBe("canceled");
   });
 
+  it("clears a rejected cancel request so the operation can continue", async () => {
+    const api = await import("./operationJobs");
+    const operation = api.startOperation({
+      kind: "save",
+      label: "保存",
+      onCancel: vi.fn().mockRejectedValue(new Error("worker refused")),
+    });
+    await api.requestOperationCancel(operation.id);
+    expect(operation.isCancelRequested()).toBe(false);
+    expect(api.getOperationJobs()[0]).toMatchObject({ status: "running", canCancel: true });
+  });
+
   it("keeps failed jobs retryable during the session", async () => {
     const api = await import("./operationJobs");
     const retry = vi.fn();
     const operation = api.startOperation({ kind: "backup", label: "バックアップ", onRetry: retry });
     operation.fail(new Error("disk full"));
+    await api.retryOperation(operation.id);
+    expect(retry).toHaveBeenCalledOnce();
     await api.retryOperation(operation.id);
     expect(retry).toHaveBeenCalledOnce();
   });

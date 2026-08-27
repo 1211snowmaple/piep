@@ -242,11 +242,11 @@ export const WorkCard = memo(function WorkCard({
           </div>
           <div className="work-row__main" inert={selectionMode || undefined} aria-hidden={selectionMode || undefined}>
             <SeriesLink work={work} className="work-row__series" interactive={!selectionMode} />
-            <UnstyledButton className="work-row__open" onClick={open} onKeyDown={keyboardOpen} role={selectionMode ? undefined : "link"} aria-label={selectionMode ? undefined : `${work.title}を開く`} aria-hidden={selectionMode || undefined} tabIndex={selectionMode ? -1 : undefined}>
-              <Tooltip label={work.title} multiline maw={480} openDelay={350} withArrow>
+            <Tooltip label={work.title} multiline maw={480} openDelay={350} withArrow>
+              <UnstyledButton className="work-row__open" onClick={open} onKeyDown={keyboardOpen} role={selectionMode ? undefined : "link"} aria-label={selectionMode ? undefined : `${work.title}を開く`} aria-hidden={selectionMode || undefined} tabIndex={selectionMode ? -1 : undefined}>
                 <Text fw={650} size="sm" className="line-clamp-2">{work.title}</Text>
-              </Tooltip>
-            </UnstyledButton>
+              </UnstyledButton>
+            </Tooltip>
             <div className="work-row__identity">
               <AuthorLine work={work} size={17} interactive={!selectionMode} />
               <span className="work-card__identity-divider" aria-hidden />
@@ -303,11 +303,11 @@ export const WorkCard = memo(function WorkCard({
         </div>
         <div className="work-card__body" inert={selectionMode || undefined} aria-hidden={selectionMode || undefined}>
           {work.seriesTitle && <div className="work-card__meta"><SeriesLink work={work} interactive={!selectionMode} /></div>}
-          <UnstyledButton className="work-card__open" onClick={open} onKeyDown={keyboardOpen} role={selectionMode ? undefined : "link"} aria-label={selectionMode ? undefined : `${work.title}を開く`} aria-hidden={selectionMode || undefined} tabIndex={selectionMode ? -1 : undefined}>
-            <Tooltip label={work.title} multiline maw={480} openDelay={350} withArrow>
+          <Tooltip label={work.title} multiline maw={480} openDelay={350} withArrow>
+            <UnstyledButton className="work-card__open" onClick={open} onKeyDown={keyboardOpen} role={selectionMode ? undefined : "link"} aria-label={selectionMode ? undefined : `${work.title}を開く`} aria-hidden={selectionMode || undefined} tabIndex={selectionMode ? -1 : undefined}>
               <Text fw={720} className="work-card__title line-clamp-2" lh={1.32}>{work.title}</Text>
-            </Tooltip>
-          </UnstyledButton>
+            </UnstyledButton>
+          </Tooltip>
           <div className="work-card__identity">
             <AuthorLine work={work} interactive={!selectionMode} />
             <span className="work-card__identity-divider" aria-hidden />
@@ -344,9 +344,19 @@ function WorkActions({ work, queued, onQueue, onToggleFavorite, onToggleWatch }:
   const navigate = useAppNavigate();
   const queryClient = useQueryClient();
   const { removeFromEpubQueue } = useWorkspace();
+  // This card is also rendered from lists the library keys do not cover: the
+  // author and series pages read ["entity-works"], a collection reads
+  // ["work-collection"] and the EPUB queue reads ["epub-queue-works"]. Leaving
+  // them out makes the heart stay grey on those screens, which reads as the
+  // click not having registered. The sidebar shelf counts are on screen the
+  // whole time and need the same treatment.
   const refresh = () => Promise.all([
     queryClient.invalidateQueries({ queryKey: ["library"] }),
+    queryClient.invalidateQueries({ queryKey: ["library-shelf-counts"] }),
     queryClient.invalidateQueries({ queryKey: ["dashboard"] }),
+    queryClient.invalidateQueries({ queryKey: ["entity-works"] }),
+    queryClient.invalidateQueries({ queryKey: ["work-collection"] }),
+    queryClient.invalidateQueries({ queryKey: ["epub-queue-works"] }),
     queryClient.invalidateQueries({ queryKey: ["reader-metadata", work.id] }),
   ]);
   const toggleFavorite = async () => {

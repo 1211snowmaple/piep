@@ -17,9 +17,13 @@ pub fn application_memory_budget_bytes() -> u64 {
 }
 
 pub fn sqlite_cache_bytes() -> u64 {
+    // `cache_size` is per connection. The read pool can open up to sixteen
+    // connections in addition to the writer, so assigning the old app-wide
+    // 1/16 share to every connection could consume the whole envelope on the
+    // read caches alone. Keep the aggregate below roughly one quarter.
     application_memory_budget_bytes()
-        .saturating_div(16)
-        .clamp(16 * MIB, 64 * MIB)
+        .saturating_div(64)
+        .clamp(4 * MIB, 16 * MIB)
 }
 
 pub fn sqlite_mmap_bytes() -> u64 {
@@ -115,6 +119,7 @@ mod tests {
     fn component_budgets_are_bounded_by_application_envelope() {
         let total = application_memory_budget_bytes();
         assert!(sqlite_cache_bytes() <= total);
+        assert!(sqlite_cache_bytes().saturating_mul(17) <= total);
         assert!(sqlite_mmap_bytes() <= total);
         assert!(tantivy_writer_bytes() as u64 <= total);
         assert!(semantic_ann_bytes() <= total);

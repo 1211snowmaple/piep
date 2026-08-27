@@ -244,6 +244,22 @@ impl Database {
                 added.push(name.to_string());
             }
         }
+        if !added.is_empty() {
+            // Tags are part of both lexical and semantic documents. Remove the
+            // success markers in the same transaction as the tag mutation so
+            // a later reindex failure is visible as pending, never as a
+            // falsely complete index containing the previous tags.
+            tx.execute(
+                "DELETE FROM search_index_state WHERE download_id = ?1",
+                params![download_id],
+            )
+            .map_err(|e| format!("Failed to invalidate search index state: {e}"))?;
+            tx.execute(
+                "DELETE FROM semantic_index_state WHERE download_id = ?1",
+                params![download_id],
+            )
+            .map_err(|e| format!("Failed to invalidate semantic index state: {e}"))?;
+        }
         tx.commit().map_err(|e| format!("Tag commit failed: {e}"))?;
         Ok(added)
     }
@@ -273,8 +289,11 @@ impl Database {
 
     /// モデルの案から採ったタグを外す。取得元のタグは外せない。
     pub fn remove_assisted_tag(&self, download_id: i64, tag: &str) -> Result<bool, String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        let removed = conn
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| format!("Tag transaction failed: {e}"))?;
+        let removed = tx
             .execute(
                 "DELETE FROM download_tags
                  WHERE download_id = ?1 AND tag_source = 'llm'
@@ -282,6 +301,19 @@ impl Database {
                 params![download_id, tag],
             )
             .map_err(|e| format!("Failed to remove tag: {e}"))?;
+        if removed > 0 {
+            tx.execute(
+                "DELETE FROM search_index_state WHERE download_id = ?1",
+                params![download_id],
+            )
+            .map_err(|e| format!("Failed to invalidate search index state: {e}"))?;
+            tx.execute(
+                "DELETE FROM semantic_index_state WHERE download_id = ?1",
+                params![download_id],
+            )
+            .map_err(|e| format!("Failed to invalidate semantic index state: {e}"))?;
+        }
+        tx.commit().map_err(|e| format!("Tag commit failed: {e}"))?;
         Ok(removed > 0)
     }
 

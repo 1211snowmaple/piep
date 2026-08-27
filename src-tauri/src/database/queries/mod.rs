@@ -15108,11 +15108,45 @@ mod search_integration_tests {
             "本文",
         );
 
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO search_index_state (download_id, current_version, content_hash, indexed_at)
+                 SELECT id, current_version, content_hash, 'before-tag-change' FROM downloads WHERE id = ?1",
+                params![id],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO semantic_index_state (download_id, current_version, content_hash, model_id, indexed_at)
+                 SELECT id, current_version, content_hash, 'test-model', 'before-tag-change' FROM downloads WHERE id = ?1",
+                params![id],
+            )
+            .unwrap();
+        }
+
         let added = db
             .add_assisted_tags(id, &["洗脳".to_string(), "催眠".to_string()])
             .unwrap();
         // すでに取得元が付けている「催眠」は触らない。
         assert_eq!(added, vec!["洗脳".to_string()]);
+        {
+            let conn = db.conn.lock().unwrap();
+            let lexical: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM search_index_state WHERE download_id = ?1",
+                    params![id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let semantic: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM semantic_index_state WHERE download_id = ?1",
+                    params![id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!((lexical, semantic), (0, 0));
+        }
 
         let tags = db.work_tags_with_source(id).unwrap();
         let by_name = tags

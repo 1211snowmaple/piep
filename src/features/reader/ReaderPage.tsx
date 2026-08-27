@@ -253,7 +253,10 @@ export default function ReaderPage() {
     enabled: searchOpened && debouncedReaderSearch.trim().length > 0,
   });
   const explicitCollectionQuery = useQuery({
-    queryKey: ["reader-collection-context", requestedCollectionId],
+    // 取得関数はコレクション詳細と同じ getWorkCollection なので、キーも同じに
+    // する。別名で持っていたため、束から作品を外した直後にリーダーへ戻ると、
+    // 前後移動が外したはずの作品を指したままだった。
+    queryKey: ["work-collection", requestedCollectionId],
     queryFn: () => getWorkCollection(requestedCollectionId!),
     enabled: runtime && Boolean(requestedCollectionId),
   });
@@ -273,13 +276,18 @@ export default function ReaderPage() {
     staleTime: 30_000,
   });
   const officialSeriesQuery = useQuery({
-    queryKey: ["reader-official-series", metadataQuery.data?.download.source, metadataQuery.data?.download.seriesId],
+    // `id` belongs in the key: loadReaderSequence stops walking once this work
+    // and its neighbour are known, so the cached list is an answer to "where is
+    // this work", not "what is in this series". Without it, opening episode 1
+    // of a long series cached the first 200 items and episode 250 read that
+    // cache, found itself missing, and dropped the continuation row entirely.
+    queryKey: ["reader-official-series", metadataQuery.data?.download.source, metadataQuery.data?.download.seriesId, id],
     queryFn: () => loadReaderSequence({ seriesSource: metadataQuery.data!.download.source, seriesKey: metadataQuery.data!.download.seriesId!, sortBy: "series_order", sortOrder: "asc", projection: "bulk" }, id),
     enabled: runtime && Boolean(metadataQuery.data?.download.seriesId),
     staleTime: 60_000,
   });
   const authorWorksQuery = useQuery({
-    queryKey: ["reader-author-sequence", metadataQuery.data?.download.source, metadataQuery.data?.download.personId ?? metadataQuery.data?.download.authorId],
+    queryKey: ["reader-author-sequence", metadataQuery.data?.download.source, metadataQuery.data?.download.personId ?? metadataQuery.data?.download.authorId, id],
     queryFn: () => loadReaderSequence({ personSource: metadataQuery.data!.download.source, personKey: metadataQuery.data!.download.personId || metadataQuery.data!.download.authorId, sortBy: "source_created_at", sortOrder: "asc", projection: "bulk" }, id),
     enabled: runtime && Boolean(metadataQuery.data?.download.personId || metadataQuery.data?.download.authorId),
     staleTime: 60_000,

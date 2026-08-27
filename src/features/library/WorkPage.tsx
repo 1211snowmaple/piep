@@ -194,6 +194,10 @@ export default function WorkPage() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["library"], refetchType: "none" });
+      // The sidebar shelf counts stay on screen while this page is open, so a
+      // favourite that does not move them reads as the click not registering.
+      // The shelf list on LibraryPage already does this for the same action.
+      queryClient.invalidateQueries({ queryKey: ["library-shelf-counts"] });
       queryClient.invalidateQueries({ queryKey: ["dashboard"] });
     },
     onError: (error, _input, context) => {

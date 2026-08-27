@@ -1,5 +1,6 @@
 import type { QueryClient } from "@tanstack/react-query";
 import { forgetReadingPositions } from "@/features/library/readingShelf";
+import { invalidateWorkSetViews } from "@/features/library/workSetInvalidation";
 
 const WORK_QUERY_PREFIXES = [
   "reader-metadata",
@@ -28,11 +29,7 @@ export function cleanupDeletedWorks({ queryClient, ids, removeFromEpubQueue }: D
   // Every saved search can contain a deleted work; keeping any listing cache
   // would let a card reopen data that no longer exists.
   queryClient.removeQueries({ queryKey: ["library"] });
-  queryClient.invalidateQueries({ queryKey: ["library-facets"] });
-  queryClient.invalidateQueries({ queryKey: ["library-entities"] });
-  queryClient.invalidateQueries({ queryKey: ["entity-works"] });
-  queryClient.invalidateQueries({ queryKey: ["library-shelf-counts"] });
-  queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+  invalidateWorkSetViews(queryClient);
 }
 
 /** Cleanup is deliberately sequenced after success; a failed delete retains all local state. */

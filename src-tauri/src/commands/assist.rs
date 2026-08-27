@@ -32,6 +32,21 @@ where
         .map_err(|e| format!("Database task failed: {e}"))?
 }
 
+/// Mutations participate in the same library gate as downloads, restores and
+/// archives. This keeps a backup snapshot from observing half of an accepted
+/// tag/note change while still releasing the gate during model inference.
+async fn write_blocking<T, F>(app: &tauri::AppHandle, f: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce(Arc<AppState>) -> Result<T, String> + Send + 'static,
+{
+    let state = app.state::<Arc<AppState>>().inner().clone();
+    let _library_write_guard = state.library_gate.clone().write_owned().await;
+    tokio::task::spawn_blocking(move || f(state))
+        .await
+        .map_err(|e| format!("Database task failed: {e}"))?
+}
+
 /// この端末で動いている推論サーバーを探す。
 #[tauri::command]
 pub async fn assist_discover_engines() -> Vec<DiscoveredEngine> {
@@ -72,7 +87,7 @@ pub async fn assist_accept_tags(
     download_id: i64,
     tags: Vec<String>,
 ) -> Result<Vec<TaggedName>, String> {
-    read_blocking(&app, move |state| {
+    write_blocking(&app, move |state| {
         state.db.add_assisted_tags(download_id, &tags)?;
         // Tantivy の文書はタグも持つ。DB だけ更新すると、再起動や全再構築まで
         // 新しいタグで検索できないため、採用と同じ操作で同期する。
@@ -101,7 +116,7 @@ pub async fn assist_remove_tag(
     download_id: i64,
     tag: String,
 ) -> Result<Vec<TaggedName>, String> {
-    read_blocking(&app, move |state| {
+    write_blocking(&app, move |state| {
         state.db.remove_assisted_tag(download_id, &tag)?;
         state.db.reindex_download(download_id)?;
         state.db.work_tags_with_source(download_id)
@@ -145,7 +160,7 @@ pub async fn assist_describe_author(
     let note = assist::describe_author(&engine, &author, &works).await?;
     let model = engine.model.clone();
     let text = note.text.clone();
-    read_blocking(&app, move |state| {
+    write_blocking(&app, move |state| {
         state
             .db
             .save_ai_note("person", &key, "style", &text, &model)
@@ -186,7 +201,7 @@ pub async fn assist_summarize_work(
     let note = assist::summarize_work(&engine, &work, &body).await?;
     let model = engine.model.clone();
     let text = note.text.clone();
-    read_blocking(&app, move |state| {
+    write_blocking(&app, move |state| {
         state
             .db
             .save_ai_note("work", &download_id.to_string(), "synopsis", &text, &model)
@@ -214,7 +229,7 @@ pub async fn assist_recap_previous(
     let key = format!("{current_download_id}:{previous_download_id}");
     let model = engine.model.clone();
     let text = note.text.clone();
-    read_blocking(&app, move |state| {
+    write_blocking(&app, move |state| {
         state.db.save_ai_note("work", &key, "recap", &text, &model)
     })
     .await?;
@@ -247,7 +262,7 @@ pub async fn assist_delete_note(
     subject_key: String,
     note_kind: String,
 ) -> Result<bool, String> {
-    read_blocking(&app, move |state| {
+    write_blocking(&app, move |state| {
         state
             .db
             .delete_ai_note(&subject_type, &subject_key, &note_kind)

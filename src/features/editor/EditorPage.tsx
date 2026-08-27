@@ -21,7 +21,6 @@ import {
 } from "@mantine/core";
 import { useForm, type UseFormReturnType } from "@mantine/form";
 import { useHotkeys, useLocalStorage } from "@mantine/hooks";
-import { modals } from "@mantine/modals";
 import { notifications } from "@mantine/notifications";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useVirtualizer } from "@tanstack/react-virtual";
@@ -228,7 +227,9 @@ export default function EditorPage() {
       const revision = await persistSnapshot(snapshot);
       return runtime ? activateWorkEdit(revision.id) : revision;
     },
-    onSuccess: (_revision, snapshot) => { clearDirtyIfCurrent(snapshot); notifications.show({ color: "green", title: "編集版を反映しました", message: "リーダーとEPUBに編集内容が使われます" }); queryClient.invalidateQueries({ queryKey: ["reader-metadata", id] }); queryClient.invalidateQueries({ queryKey: ["reader-content-page", id] }); queryClient.invalidateQueries({ queryKey: ["reader-content-search", id] }); queryClient.invalidateQueries({ queryKey: ["editor-document", id] }); },
+    // 反映は本文を差し替えるので、カードが出している字数と版の印も変わる。
+    // それらは棚と作者ページの一覧から引いているため、そこも古くしておく。
+    onSuccess: (_revision, snapshot) => { clearDirtyIfCurrent(snapshot); notifications.show({ color: "green", title: "編集版を反映しました", message: "リーダーとEPUBに編集内容が使われます" }); queryClient.invalidateQueries({ queryKey: ["reader-metadata", id] }); queryClient.invalidateQueries({ queryKey: ["reader-content-page", id] }); queryClient.invalidateQueries({ queryKey: ["reader-content-search", id] }); queryClient.invalidateQueries({ queryKey: ["editor-document", id] }); queryClient.invalidateQueries({ queryKey: ["library"] }); queryClient.invalidateQueries({ queryKey: ["entity-works"] }); },
     onError: (error) => notifications.show({ color: "red", title: "編集版を反映できません", message: errorMessage(error) }),
   });
   useHotkeys([["mod+S", (event) => { event.preventDefault(); if (!saveMutation.isPending && !publishMutation.isPending) form.onSubmit((values) => saveMutation.mutate(createEditorSaveSnapshot(values)))(); }]]);
@@ -278,10 +279,11 @@ export default function EditorPage() {
   // Returns to the detail screen the editor was opened from rather than
   // pushing a second copy of it, which left the header's back button pointing
   // at the editor the user had just closed.
-  const goBack = () => {
-    if (!dirty) return returnTo(`/works/${id}`);
-    modals.openConfirmModal({ title: "未保存の変更があります", children: <Text size="sm">変更を破棄して作品詳細へ戻りますか？</Text>, labels: { confirm: "破棄して戻る", cancel: "編集を続ける" }, confirmProps: { color: "red" }, onConfirm: () => returnTo(`/works/${id}`) });
-  };
+  // 訊くのはルータのガードに任せる。ここでも訊いていたとき、破棄を選んだ直後に
+  // まだ dirty のまま navigate へ入るので、同じ問いがもう一枚開いていた。
+  // 未保存の登録（177行）は既定スコープで navigate も見ているため、この一行で
+  // 確認は変わらず出る。テンプレート編集の画面も同じ作りになっている。
+  const goBack = () => returnTo(`/works/${id}`);
   return (
     <div className="editor-page">
       <header className="editor-toolbar">
@@ -322,6 +324,17 @@ const EditorBlock = memo(function EditorBlock({ index, block, assets, total, for
   const Icon = meta.icon;
   const asset = assets.find((item) => item.id === block.assetId);
   const textInputProps = form.getInputProps(`blocks.${index}.text`);
+  /**
+   * いま form が持っている、このブロックの値。
+   *
+   * `blocks` は打鍵では更新しない（毎打鍵で一覧全体が再描画されるため）。
+   * 一方この一覧は仮想化されていて、窓から出た行は本当にアンマウントされる。
+   * 画像とリンクのブロックは props から一度だけ状態の種を取るので、`blocks`
+   * を渡していると、スクロールして戻ったときに入力前の値へ巻き戻って見えた。
+   * 文章ブロックが `form.key` + defaultValue で form を読み直しているのと
+   * 同じ考え方で、種も form から取る。
+   */
+  const liveBlock = form.getValues().blocks?.[index] ?? block;
   const onTextChange = (event: React.ChangeEvent<HTMLTextAreaElement>) => {
     textInputProps.onChange?.(event);
     onUpdate(index, { text: event.currentTarget.value });
@@ -343,8 +356,8 @@ const EditorBlock = memo(function EditorBlock({ index, block, assets, total, for
         {block.blockType === "quote" && <Textarea autosize minRows={2} maxRows={16} placeholder="引用文" variant="unstyled" className="editor-quote-input" key={form.key(`blocks.${index}.text`)} {...textInputProps} onChange={onTextChange} aria-label={`引用 ${index + 1}`} />}
         {block.blockType === "separator" && <Divider my="md" label="区切り" labelPosition="center" />}
         {block.blockType === "pageBreak" && <Group className="editor-page-break" justify="center" gap="xs"><Icons.separator size={IconSize.menu} /><Text size="xs" fw={700}>ここから次のpixiv原稿ページ</Text></Group>}
-        {block.blockType === "image" && <ImageBlock asset={asset} assets={assets} value={block.assetId} caption={block.text} onChange={(assetId) => { form.setFieldValue(`blocks.${index}.assetId`, assetId); onUpdate(index, { assetId }); }} onCaptionChange={(text) => { form.setFieldValue(`blocks.${index}.text`, text); onUpdate(index, { text }); }} />}
-        {block.blockType === "link" && <LinkBlock url={block.text ?? ""} label={linkLabel(block.attrsJson)} onUrlChange={(text) => { form.setFieldValue(`blocks.${index}.text`, text); onUpdate(index, { text }); }} onLabelChange={(label) => { const attrsJson = JSON.stringify({ label }); form.setFieldValue(`blocks.${index}.attrsJson`, attrsJson); onUpdate(index, { attrsJson }); }} error={form.errors[`blocks.${index}.text`]} />}
+        {block.blockType === "image" && <ImageBlock asset={asset} assets={assets} value={liveBlock.assetId} caption={liveBlock.text} onChange={(assetId) => { form.setFieldValue(`blocks.${index}.assetId`, assetId); onUpdate(index, { assetId }); }} onCaptionChange={(text) => { form.setFieldValue(`blocks.${index}.text`, text); onUpdate(index, { text }); }} />}
+        {block.blockType === "link" && <LinkBlock url={liveBlock.text ?? ""} label={linkLabel(liveBlock.attrsJson)} onUrlChange={(text) => { form.setFieldValue(`blocks.${index}.text`, text); onUpdate(index, { text }); }} onLabelChange={(label) => { const attrsJson = JSON.stringify({ label }); form.setFieldValue(`blocks.${index}.attrsJson`, attrsJson); onUpdate(index, { attrsJson }); }} error={form.errors[`blocks.${index}.text`]} />}
       </Box>
     </Paper>
   );

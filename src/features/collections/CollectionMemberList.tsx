@@ -20,8 +20,8 @@ interface MemberListProps {
   selectionMode: boolean;
   selected: ReadonlySet<number>;
   onSelect: (downloadId: number, selected: boolean) => void;
-  onMove: (index: number, delta: number) => void;
-  onDropAt: (from: number, to: number) => void;
+  onMove: (index: number, delta: number) => void | boolean | Promise<boolean>;
+  onDropAt: (from: number, to: number) => void | boolean | Promise<boolean>;
   onRemove: (member: WorkCollectionMember) => void;
 }
 
@@ -53,6 +53,9 @@ export function CollectionMemberList({
   const [dragOver, setDragOver] = useState<number | null>(null);
   const dragFromRef = useRef<number | null>(null);
   const dragOverRef = useRef<number | null>(null);
+  const autoScrollFrameRef = useRef<number | null>(null);
+  const scrollContainerRef = useRef<HTMLElement | null>(null);
+  const pointerRef = useRef({ x: 0, y: 0 });
   const [announcement, setAnnouncement] = useState("");
   const [visibleCount, setVisibleCount] = useState(INITIAL_MEMBER_RENDER);
   const draggable = ordered && !selectionMode && !busy;
@@ -64,7 +67,15 @@ export function CollectionMemberList({
     dragOverRef.current = index;
     setDragOver(index);
   };
+  const stopAutoScroll = () => {
+    if (autoScrollFrameRef.current !== null) {
+      window.cancelAnimationFrame(autoScrollFrameRef.current);
+      autoScrollFrameRef.current = null;
+    }
+    scrollContainerRef.current = null;
+  };
   const clearDrag = () => {
+    stopAutoScroll();
     dragFromRef.current = null;
     dragOverRef.current = null;
     setDragFrom(null);
@@ -83,6 +94,7 @@ export function CollectionMemberList({
     window.addEventListener("keydown", cancel);
     return () => window.removeEventListener("keydown", cancel);
   }, [dragFrom]);
+  useEffect(() => () => stopAutoScroll(), []);
   const memberAtPoint = (x: number, y: number) => {
     // 坐標から引けない環境もある。引けなければ直前の行へ戻るだけで、例外にはしない。
     const row = document.elementFromPoint?.(x, y)?.closest<HTMLElement>(".collection-member");
@@ -92,15 +104,61 @@ export function CollectionMemberList({
   const announceMove = (member: WorkCollectionMember, to: number) => {
     setAnnouncement(`${member.title}を${to + 1}番目へ移動しました`);
   };
+  const announceMoveResult = (
+    result: void | boolean | Promise<boolean>,
+    member: WorkCollectionMember,
+    to: number,
+  ) => {
+    void Promise.resolve(result).then((saved) => {
+      if (saved === false) {
+        setAnnouncement(`${member.title}の順序を保存できなかったため、元の位置へ戻しました`);
+      } else {
+        announceMove(member, to);
+      }
+    }, () => {
+      setAnnouncement(`${member.title}の順序を保存できなかったため、元の位置へ戻しました`);
+    });
+  };
   const moveWithKeyboard = (index: number, delta: number) => {
     const to = index + delta;
-    onMove(index, delta);
-    announceMove(members[index], to);
+    announceMoveResult(onMove(index, delta), members[index], to);
+  };
+  const continueAutoScroll = () => {
+    if (autoScrollFrameRef.current !== null) return;
+    const step = () => {
+      autoScrollFrameRef.current = null;
+      if (dragFromRef.current === null) return;
+      const scroller = scrollContainerRef.current;
+      if (!scroller) return;
+      const rect = scroller === document.scrollingElement
+        ? { top: 0, bottom: window.innerHeight }
+        : scroller.getBoundingClientRect();
+      const edge = Math.min(72, Math.max(40, (rect.bottom - rect.top) / 5));
+      const { x, y } = pointerRef.current;
+      const topRatio = y < rect.top + edge ? (rect.top + edge - y) / edge : 0;
+      const bottomRatio = y > rect.bottom - edge ? (y - (rect.bottom - edge)) / edge : 0;
+      const delta = Math.round(Math.max(-1, Math.min(1, bottomRatio - topRatio)) * 18);
+      if (delta === 0) return;
+      scroller.scrollTop += delta;
+      if (delta > 0) {
+        // ドラッグ中に描画上限へ着いたら次の塊を出す。取っ手を離して
+        // 「さらに表示」を押し直さなくても、末尾まで運べる。
+        const remaining = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
+        if (remaining < 320) {
+          setVisibleCount((count) => Math.min(members.length, count + INITIAL_MEMBER_RENDER));
+        }
+      }
+      const target = memberAtPoint(x, y);
+      if (target !== null) markDragOver(target);
+      autoScrollFrameRef.current = window.requestAnimationFrame(step);
+    };
+    autoScrollFrameRef.current = window.requestAnimationFrame(step);
   };
 
   return (
-    <div className={`collection-members collection-members--${view}`} data-ordered={ordered || undefined} role={ordered ? "list" : undefined} aria-label={ordered ? "コレクションの作品順" : undefined}>
+    <>
       <span className="visually-hidden" aria-live="polite" aria-atomic="true">{announcement}</span>
+      <div className={`collection-members collection-members--${view}`} data-ordered={ordered || undefined} role={ordered ? "list" : undefined} aria-label={ordered ? "コレクションの作品順" : undefined}>
       {visibleMembers.map((member, index) => (
         <div
           key={`${member.source}:${member.sourceId}`}
@@ -122,7 +180,8 @@ export function CollectionMemberList({
                     variant="subtle"
                     color="gray"
                     size={40}
-                    aria-label={`${member.title}を掴んで並べ替え`}
+                    aria-hidden="true"
+                    tabIndex={-1}
                     onPointerDown={(event) => {
                       if (event.pointerType === "mouse" && event.button !== 0) return;
                       // 既定を止めないと、文字選択が始まって運んでいる途中の行が青くなる。
@@ -134,23 +193,28 @@ export function CollectionMemberList({
                       } catch {
                         // 捕捉できないだけ。掴んだ状態は続ける。
                       }
+                      scrollContainerRef.current = event.currentTarget.closest<HTMLElement>(".app-main")
+                        ?? document.scrollingElement as HTMLElement | null;
+                      pointerRef.current = { x: event.clientX, y: event.clientY };
                       beginDrag(index);
                     }}
                     onPointerMove={(event) => {
                       if (dragFromRef.current === null) return;
                       event.preventDefault();
+                      pointerRef.current = { x: event.clientX, y: event.clientY };
                       const target = memberAtPoint(event.clientX, event.clientY);
                       if (target !== null) markDragOver(target);
+                      continueAutoScroll();
                     }}
                     onPointerUp={(event) => {
                       const from = dragFromRef.current;
                       if (from === null) return;
                       const to = memberAtPoint(event.clientX, event.clientY) ?? dragOverRef.current;
-                      if (to !== null && from !== to) {
-                        onDropAt(from, to);
-                        announceMove(members[from], to);
-                      }
+                      const moved = members[from];
                       clearDrag();
+                      if (to !== null && from !== to) {
+                        announceMoveResult(onDropAt(from, to), moved, to);
+                      }
                     }}
                     onPointerCancel={clearDrag}
                   >
@@ -222,7 +286,8 @@ export function CollectionMemberList({
           </Button>
         </Group>
       )}
-    </div>
+      </div>
+    </>
   );
 }
 

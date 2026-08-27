@@ -172,7 +172,10 @@ export default function DiagnosticsPage({ embedded = false, previewData = previe
     onSuccess: (result) => {
       operationRef.current?.complete(result.compacted ? `${formatBytes(result.reclaimedBytes)}を回収しました` : "最適化が完了しました");
       operationRef.current = null;
-      queryClient.invalidateQueries({ queryKey: ["library-diagnostics"] });
+      // 計測クエリは enabled: false なので、invalidate しても再取得は起きない。
+      // 印だけ古くなって、画面には最適化前の容量が残りつづける。取り込み直しの
+      // 側（下の refetch）と同じく、ここも明示的に取り直す。
+      diagnostics.refetch();
       notifications.show({ color: "green", title: result.compacted ? "データベースを圧縮しました" : "ライブラリを最適化しました", message: result.compacted ? `${formatBytes(result.beforeBytes)} → ${formatBytes(result.afterBytes)}` : "検索統計とWALを整理しました" });
     },
     onError: (error) => { operationRef.current = null; notifications.show({ color: "red", title: "保守操作に失敗しました", message: errorMessage(error) }); },
@@ -195,7 +198,7 @@ export default function DiagnosticsPage({ embedded = false, previewData = previe
       const detail = result.optimized ? `${formatNumber(result.beforeSegments)} → ${formatNumber(result.afterSegments)}セグメント · ${formatBytes(result.reclaimedBytes)}回収` : "索引はすでに最適です";
       operationRef.current?.complete(detail);
       operationRef.current = null;
-      queryClient.invalidateQueries({ queryKey: ["library-diagnostics"] });
+      diagnostics.refetch();
       queryClient.invalidateQueries({ queryKey: ["library"] });
       notifications.show({ color: "green", title: result.optimized ? "全文検索索引を最適化しました" : "最適化は不要でした", message: detail });
     },

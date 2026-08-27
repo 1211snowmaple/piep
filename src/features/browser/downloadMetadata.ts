@@ -43,12 +43,19 @@ export function normalizeFanboxPostPayload<T = any>(value: unknown): T {
   return current as T;
 }
 
-export function normalizePixivSaveMetadata(data: any, fallbackTitle = "pixiv小説", fallbackAuthor = "unknown"): NormalizedSaveMetadata {
+/**
+ * `fallbackAuthorId` は、取り直しのときに要る。
+ *
+ * 新規保存なら作者が分からなければ "0" でよいが、すでに手元にある作品を
+ * 取り直すときに "0" へ落とすと、**作者との紐付けが切れて作者ページから
+ * 消える**。呼ぶ側が知っている作者IDを渡せるようにしておく。
+ */
+export function normalizePixivSaveMetadata(data: any, fallbackTitle = "pixiv小説", fallbackAuthor = "unknown", fallbackAuthorId = "0"): NormalizedSaveMetadata {
   const detail = data?.detail ?? data ?? {};
   return {
     title: firstString(detail.title, data?.title, fallbackTitle) ?? fallbackTitle,
     authorName: firstString(detail.user?.name, data?.user?.name, fallbackAuthor) ?? fallbackAuthor,
-    authorId: String(detail.user?.id ?? data?.user?.id ?? "0"),
+    authorId: String(detail.user?.id ?? data?.user?.id ?? fallbackAuthorId),
     contentType: "novel",
     tags: normalizeTags(detail.tags ?? data?.tags),
     excerpt: firstString(detail.caption, data?.caption),
@@ -56,12 +63,12 @@ export function normalizePixivSaveMetadata(data: any, fallbackTitle = "pixiv小�
   };
 }
 
-export function normalizeFanboxSaveMetadata(data: any, fallbackTitle = "FANBOX投稿", fallbackAuthor = "unknown"): NormalizedSaveMetadata {
+export function normalizeFanboxSaveMetadata(data: any, fallbackTitle = "FANBOX投稿", fallbackAuthor = "unknown", fallbackAuthorId = "0"): NormalizedSaveMetadata {
   data = normalizeFanboxPostPayload(data);
   return {
     title: firstString(data?.title, fallbackTitle) ?? fallbackTitle,
     authorName: firstString(data?.user?.name, fallbackAuthor) ?? fallbackAuthor,
-    authorId: String(data?.creatorId ?? data?.creator_id ?? data?.user?.userId ?? data?.user?.user_id ?? "0"),
+    authorId: String(data?.creatorId ?? data?.creator_id ?? data?.user?.userId ?? data?.user?.user_id ?? fallbackAuthorId),
     contentType: firstString(data?.type, data?.postType, data?.post_type, "article") ?? "article",
     tags: normalizeTags(data?.tags),
     excerpt: firstString(data?.excerpt),

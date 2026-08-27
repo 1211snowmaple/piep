@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { subscribeTauriEvent } from "@/services/eventBus";
+import { invalidateWorkSetViews } from "@/features/library/workSetInvalidation";
 import {
   cancelUpdateJobCommand,
   clearUpdateJobCommand,
@@ -110,10 +111,15 @@ function mergeSnapshot(current: UpdateJobSnapshot | null, incoming: UpdateJobSna
  * 改稿の印（カード・作品ページ）と「改稿あり」棚の件数は、確認が見つけた事実
  * から引いている。読む側はどれも別の画面にいるので、**変えた側から知らせる**。
  * これを忘れると、確認が終わっても画面が前の答えを出しつづける。
+ *
+ * 「自動保存」を選んだジョブは、確認するだけでなく**作品そのものを増やす**。
+ * 増えた分が古くするのは、消したときに古くなるものと同じ場所である。
+ * 一覧の定義は `deletedWorkCleanup.ts` にあるので、そちらに合わせる。
  */
 export function invalidateAfterUpdateJob(client: QueryClient): void {
   client.invalidateQueries({ queryKey: ["pending-revisions"] });
-  client.invalidateQueries({ queryKey: ["library-shelf-counts"] });
+  client.invalidateQueries({ queryKey: ["library"] });
+  invalidateWorkSetViews(client);
 }
 
 export function isUpdateJobTerminal(status: UpdateJobStatus): boolean {

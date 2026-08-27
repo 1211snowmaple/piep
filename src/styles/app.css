@@ -212,6 +212,7 @@ select {
 :root[data-density="compact"] .library-grid,
 :root[data-density="compact"] .work-grid { gap: 10px; }
 :root[data-density="compact"] .work-card { min-height: 204px; }
+:root[data-density="compact"] .work-row__grid { min-height: 151px; padding-block: 6px; }
 :root[data-density="compact"] .page-header { margin-bottom: 8px; }
 
 .page-header {
@@ -919,6 +920,24 @@ select {
   /* あらすじを落とすなら、その前の仕切りも一緒に落とす。 */
   .work-row__excerpt,
   .work-row__excerpt-divider { display: none; }
+}
+
+/* A phone-sized list has no room for metadata and five actions on one line.
+   Keep the title and tags wide, place the footer on two deliberate rows, and
+   remove only the redundant "read" action (the title/card already opens it). */
+@container (max-width: 480px) {
+  .work-row__grid {
+    min-height: 184px;
+    gap: 5px 8px;
+    grid-template-columns: 64px minmax(0, 1fr);
+    padding: 8px;
+  }
+  .work-row__cover .work-cover--compact { width: 64px; height: 86px; }
+  .work-row__footer { align-items: stretch; flex-direction: column; gap: 1px; }
+  .work-row__facts { width: 100%; height: 24px; overflow: hidden; }
+  .work-row__actions { align-self: flex-end; }
+  .work-row__actions .work-card__actions > .mantine-Tooltip-root:first-child,
+  .work-row__actions .work-card__actions > .mantine-ActionIcon-root:first-child { display: none; }
 }
 
 .dashboard-hero {
@@ -2344,9 +2363,15 @@ select {
 @media (max-width: 620px) {
   .collections-panel__header { align-items: stretch; flex-direction: column; }
   .collections-panel__intro { white-space: normal; }
-  .collection-hero > .mantine-Group-root { align-items: flex-start; }
+  .collection-hero > .mantine-Group-root { align-items: flex-start; flex-wrap: wrap; }
   .collection-cover--detail { width: 88px; height: 118px; }
   .collection-members--gallery { grid-template-columns: minmax(0, 1fr); }
+  .collection-members[data-ordered] .collection-member,
+  .collection-members--gallery[data-ordered] .collection-member {
+    gap: 4px;
+    grid-template-columns: 38px minmax(0, 1fr) auto;
+  }
+  .collection-member__rail { width: 38px; }
 }
 
 /* 作品を追加するモーダル。棚と同じカードを、選ぶために並べる。 */

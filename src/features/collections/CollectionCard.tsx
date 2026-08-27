@@ -21,25 +21,24 @@ export function CollectionCard({ collection }: { collection: WorkCollectionSumma
   const missing = collection.memberCount - collection.availableCount;
   const track = TRACK_LABEL[collection.track];
   return (
-    <Card
-      component={AppLink}
-      to={`/collections/${collection.id}`}
-      withBorder
-      padding="md"
-      className="collection-card surface--interactive focus-card"
-    >
-      <Group wrap="nowrap" align="stretch" gap="md">
-        <CollectionCover collection={collection} variant="card" />
-        <Stack gap={6} flex={1} miw={0} justify="center">
+    <Tooltip label={collection.name} multiline maw={480} openDelay={350} withArrow>
+      <Card
+        component={AppLink}
+        to={`/collections/${collection.id}`}
+        withBorder
+        padding="md"
+        className="collection-card surface--interactive focus-card"
+      >
+        <Group wrap="nowrap" align="stretch" gap="md">
+          <CollectionCover collection={collection} variant="card" />
+          <Stack gap={6} flex={1} miw={0} justify="center">
           <Group gap={6} wrap="nowrap">
             <Badge size="xs" variant="light" color={collection.collectionKind === "ordered" ? "piep" : "gray"}>
               {collection.collectionKind === "ordered" ? "順序付き" : "順序なし"}
             </Badge>
             {track && <Badge size="xs" variant="outline" color="gray">{track}</Badge>}
           </Group>
-          <Tooltip label={collection.name} multiline maw={480} openDelay={350} withArrow>
             <Text fw={720} size="md" lh={1.35} className="line-clamp-2">{collection.name}</Text>
-          </Tooltip>
           {collection.description && (
             <Text size="xs" c="dimmed" className="line-clamp-2">{collection.description}</Text>
           )}
@@ -53,8 +52,9 @@ export function CollectionCard({ collection }: { collection: WorkCollectionSumma
             <Text size="xs" c="dimmed">{formatDate(collection.updatedAt)}</Text>
             {missing > 0 && <Badge size="xs" color="orange" variant="light">未保存 {formatNumber(missing)}</Badge>}
           </Group>
-        </Stack>
-      </Group>
-    </Card>
+          </Stack>
+        </Group>
+      </Card>
+    </Tooltip>
   );
 }

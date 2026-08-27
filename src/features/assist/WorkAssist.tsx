@@ -120,6 +120,10 @@ function TagPanel({ downloadId }: { downloadId: number }) {
       setPicked(new Set());
       queryClient.setQueryData(tagsKey, next);
       queryClient.invalidateQueries({ queryKey: ["library"] });
+      // The tag row in the work hero directly above this panel is served by
+      // ["reader-metadata"], not by tagsKey, so it keeps the pre-accept tags
+      // until the page is reopened unless it is invalidated here too.
+      queryClient.invalidateQueries({ queryKey: ["reader-metadata", downloadId] });
       notifications.show({ color: "green", message: "タグを付けました" });
     },
     onError: (error) => notifications.show({ color: "red", title: "タグを付けられません", message: errorMessage(error) }),
@@ -130,6 +134,7 @@ function TagPanel({ downloadId }: { downloadId: number }) {
     onSuccess: (next) => {
       queryClient.setQueryData(tagsKey, next);
       queryClient.invalidateQueries({ queryKey: ["library"] });
+      queryClient.invalidateQueries({ queryKey: ["reader-metadata", downloadId] });
     },
   });
 

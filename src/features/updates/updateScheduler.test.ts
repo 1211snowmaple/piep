@@ -67,6 +67,13 @@ describe("automatic update checks", () => {
     expect(startUpdateJobCommand).not.toHaveBeenCalled();
   });
 
+  it("does not postpone the next run when creating the job fails", async () => {
+    listUpdateTargets.mockResolvedValue([{ id: 1 }]);
+    startUpdateJobCommand.mockRejectedValue(new Error("database busy"));
+    await runStartupTick();
+    expect(storeValues.has("update_schedule_last_run")).toBe(false);
+  });
+
   // 止まったままのジョブに worker はいない。「終わっていない」を理由に譲ると、
   // 放置された1件が以後の自動確認を永久に塞ぐ。
   it.each(["paused", "auth_required"])("does not defer forever to a %s job", async (status) => {

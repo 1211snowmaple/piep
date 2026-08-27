@@ -300,7 +300,10 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
     enabled: Boolean(entity.data),
   });
   const target = useQuery({
-    queryKey: ["update-target", kind, source, key],
+    // Same namespace as the shelf and the update centre. A singular key looked
+    // tidier but shares no prefix with ["update-targets"], so turning watching
+    // on here left those screens showing the old state, and vice versa.
+    queryKey: ["update-targets", kind, source, key],
     queryFn: () => runtime ? getUpdateTarget<UpdateTarget>(kind === "person" ? "author" : "series", source, key) : Promise.resolve(null),
   });
   const displayName = useMemo(() => entity.data ? (kind === "person" ? (entity.data as PersonEntry).displayName : (entity.data as SeriesEntry).title) : "", [entity.data, kind]);
@@ -317,7 +320,7 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
       if (!runtime) return;
       await upsertUpdateTarget({ targetType: kind === "person" ? "author" : "series", source, sourceKey: key, displayName, enabled, metadataJson: null });
     },
-    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ["update-target", kind, source, key] }); notifications.show({ color: "green", message: "更新監視を変更しました" }); },
+    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ["update-targets"] }); notifications.show({ color: "green", message: "更新監視を変更しました" }); },
     onError: (error) => notifications.show({ color: "red", title: "更新監視を変更できません", message: errorMessage(error) }),
   });
   const workItems = useMemo(() => {

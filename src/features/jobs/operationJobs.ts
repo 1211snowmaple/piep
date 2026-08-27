@@ -55,6 +55,13 @@ const cancelHandlers = new Map<string, () => void | Promise<void>>();
 const retryHandlers = new Map<string, () => void | Promise<void>>();
 const cancelRequests = new Set<string>();
 
+function pruneDetachedHandlers() {
+  const retained = new Set(jobs.map((job) => job.id));
+  for (const jobId of cancelHandlers.keys()) if (!retained.has(jobId)) cancelHandlers.delete(jobId);
+  for (const jobId of retryHandlers.keys()) if (!retained.has(jobId)) retryHandlers.delete(jobId);
+  for (const jobId of cancelRequests) if (!retained.has(jobId)) cancelRequests.delete(jobId);
+}
+
 function now() { return new Date().toISOString(); }
 function id() {
   return typeof crypto !== "undefined" && "randomUUID" in crypto
@@ -124,6 +131,7 @@ function updateJob(jobId: string, updater: (job: OperationJob) => OperationJob, 
   jobs = jobs.map((job) => job.id === jobId ? updater(job) : job)
     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
     .slice(0, MAX_JOBS);
+  pruneDetachedHandlers();
   emit(persistence);
 }
 
@@ -151,6 +159,7 @@ export function startOperation(options: StartOperationOptions): OperationControl
     logs: [{ id: id(), level: "info", message: "処理を開始しました", createdAt }],
   };
   jobs = [job, ...jobs].slice(0, MAX_JOBS);
+  pruneDetachedHandlers();
   if (options.onCancel) cancelHandlers.set(jobId, options.onCancel);
   if (options.onRetry) retryHandlers.set(jobId, options.onRetry);
   // Persist the job before background progress starts. High-frequency updates
@@ -170,6 +179,7 @@ export function startOperation(options: StartOperationOptions): OperationControl
     }), "immediate");
     cancelHandlers.delete(jobId);
     cancelRequests.delete(jobId);
+    if (status !== "failed") retryHandlers.delete(jobId);
   };
 
   return {
@@ -194,7 +204,10 @@ export async function requestOperationCancel(jobId: string): Promise<void> {
   cancelRequests.add(jobId);
   updateJob(jobId, (job) => ({ ...appendLog(job, "キャンセルを要求しました", "warn"), status: "canceling", canCancel: false, updatedAt: now() }), "immediate");
   try { await handler(); }
-  catch (error) { updateJob(jobId, (job) => ({ ...appendLog(job, error instanceof Error ? error.message : String(error), "error"), status: "running", canCancel: true, updatedAt: now() }), "immediate"); }
+  catch (error) {
+    cancelRequests.delete(jobId);
+    updateJob(jobId, (job) => ({ ...appendLog(job, error instanceof Error ? error.message : String(error), "error"), status: "running", canCancel: true, updatedAt: now() }), "immediate");
+  }
 }
 
 export async function retryOperation(jobId: string): Promise<void> {
@@ -203,11 +216,19 @@ export async function retryOperation(jobId: string): Promise<void> {
   // A retry is a new execution with its own duration and logs. Keep the failed
   // attempt immutable so diagnostics do not lose the original failure.
   updateJob(jobId, (job) => ({ ...appendLog(job, "新しい操作として再試行しました", "info"), canRetry: false, updatedAt: now() }), "immediate");
+  retryHandlers.delete(jobId);
   await handler();
 }
 
 export function clearCompletedOperations(): void {
   const active = new Set<OperationStatus>(["queued", "running", "canceling"]);
+  for (const job of jobs) {
+    if (!active.has(job.status)) {
+      cancelHandlers.delete(job.id);
+      cancelRequests.delete(job.id);
+      retryHandlers.delete(job.id);
+    }
+  }
   jobs = jobs.filter((job) => active.has(job.status));
   emit("immediate");
 }

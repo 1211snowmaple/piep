@@ -330,9 +330,9 @@ export function AssistSection() {
           </Group>
 
           {profileQuery.data && (
-            <Alert color="blue" icon={<Icons.optimize size={IconSize.action} />} title="この環境に合わせて自動調整">
+            <Alert color={profileQuery.data.summaryChunkChars > 0 ? "blue" : "orange"} icon={<Icons.optimize size={IconSize.action} />} title="検出できた能力から安全枠を計算">
               <Group gap={6} wrap="wrap">
-                <Badge variant="light" color="gray">CPU {formatNumber(profileQuery.data.logicalCpuCores)}スレッド</Badge>
+                <Badge variant="light" color="gray">論理CPU {formatNumber(profileQuery.data.logicalCpuCores)}</Badge>
                 {profileQuery.data.availableMemoryBytes !== null && (
                   <Badge variant="light" color="gray">空きメモリ {formatBytes(profileQuery.data.availableMemoryBytes)}</Badge>
                 )}
@@ -345,11 +345,17 @@ export function AssistSection() {
                 {profileQuery.data.flashAttention && <Badge variant="light" color="green">Flash Attention</Badge>}
                 {profileQuery.data.kvCacheOnGpu && <Badge variant="light" color="green">KV cache GPU</Badge>}
               </Group>
-              <Text size="sm" mt={6}>
-                長文は最大約{formatNumber(profileQuery.data.summaryChunkChars)}文字ずつ、
-                {formatNumber(profileQuery.data.concurrentRequests)}件まで同時に処理します。
-                サーバーが能力を公開しない項目は推測せず、安全な1件ずつで動かします。
-              </Text>
+              {profileQuery.data.summaryChunkChars > 0 ? (
+                <Text size="sm" mt={6}>
+                  長文は最大約{formatNumber(profileQuery.data.summaryChunkChars)}文字ずつ、
+                  この推論先へはアプリ全体で最大{formatNumber(profileQuery.data.concurrentRequests)}件まで同時に処理します。
+                  サーバーが公開したロード設定と空きメモリを上限として使い、ロード設定そのものは変更しません。
+                </Text>
+              ) : (
+                <Text size="sm" mt={6}>
+                  現在の文脈長では本文要約の入力と出力を安全に収められません。8K以上の文脈長でモデルを読み直してください。
+                </Text>
+              )}
             </Alert>
           )}
 
@@ -423,7 +429,8 @@ export function AssistSection() {
           </Text>
           <Text size="sm">
             <b>本文</b> — あらすじと「前回のあらすじ」だけ。上で明示的に許可したときに限り、
-            本文全体を約2,800字ずつ隙間なく送り、部分ごとの記録を段階的に統合します。画像は送りません。
+            本文全体を、モデルが公開した文脈長に収まる大きさ（不明時は約2,800字）で隙間なく送り、
+            部分ごとの記録を段階的に統合します。画像は送りません。
           </Text>
           <Text size="sm">
             返ってきたものはすべて<b>案</b>です。採るかどうかは利用者が決めます。

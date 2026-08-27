@@ -21,10 +21,11 @@
 //! 婉曲な名前しか返さないモデルもある。piep 側で回避はしない。
 //! **どのエンジンを使うかを決める権利は利用者にある。**
 
-use std::sync::LazyLock;
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
-use futures_util::StreamExt;
+use futures_util::{StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
 
 use crate::database::collection_rules;
@@ -354,6 +355,50 @@ static ASSIST_CLIENT: LazyLock<Result<reqwest::Client, String>> = LazyLock::new(
         .map_err(|error| format!("命名エンジンに接続できません: {error}"))
 });
 
+#[derive(Clone)]
+struct RequestLimiter {
+    limit: usize,
+    semaphore: Arc<tokio::sync::Semaphore>,
+}
+
+/// All assist commands share a limiter per endpoint/model. Without this, two
+/// long summaries can each obey the server's advertised parallelism while the
+/// combined requests exceed it and exhaust the same KV cache.
+static ASSIST_REQUEST_LIMITERS: LazyLock<Mutex<HashMap<String, RequestLimiter>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn limiter_key(engine: &AssistEngine) -> String {
+    format!(
+        "{}\n{}",
+        normalized_base_url(&engine.base_url)
+            .unwrap_or_else(|_| engine.base_url.trim().to_string()),
+        engine.model.trim()
+    )
+}
+
+fn request_limiter(
+    engine: &AssistEngine,
+    detected_limit: Option<usize>,
+) -> Arc<tokio::sync::Semaphore> {
+    let key = limiter_key(engine);
+    let limit = detected_limit.unwrap_or(1).clamp(1, 8);
+    let mut limiters = ASSIST_REQUEST_LIMITERS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(current) = limiters.get(&key) {
+        if detected_limit.is_none() || current.limit == limit {
+            return current.semaphore.clone();
+        }
+    }
+    let limiter = RequestLimiter {
+        limit,
+        semaphore: Arc::new(tokio::sync::Semaphore::new(limit)),
+    };
+    let semaphore = limiter.semaphore.clone();
+    limiters.insert(key, limiter);
+    semaphore
+}
+
 fn client() -> Result<&'static reqwest::Client, String> {
     ASSIST_CLIENT.as_ref().map_err(Clone::clone)
 }
@@ -549,6 +594,9 @@ pub async fn runtime_profile(engine: &AssistEngine) -> Result<AssistRuntimeProfi
     } else {
         1
     };
+    // Register the detected ceiling before any parallel summary jobs start.
+    // Other assist commands using the same endpoint share these permits.
+    request_limiter(engine, Some(concurrent_requests));
     Ok(AssistRuntimeProfile {
         local_server,
         logical_cpu_cores,
@@ -652,10 +700,7 @@ async fn ask_json_with_profile(
     // `finish_reason=length` を捨てて解析側へ渡すと「途中で切れています」としか
     // 分からない。同じ入力を一度だけ、より広い出力枠でやり直す。JSONとして
     // 閉じていない応答も同じ扱いにする（思考型モデルで同じ症状になる）。
-    let retry_budget = first_budget
-        .saturating_mul(2)
-        .max(max_tokens.saturating_mul(4))
-        .min(MAX_GENERATION_TOKENS);
+    let retry_budget = retry_generation_budget(profile, max_tokens);
     let retry = ask_json_once(engine, system, user, schema, profile, retry_budget).await?;
     if json_is_complete(&retry.content) {
         return Ok(retry.content);
@@ -663,6 +708,13 @@ async fn ask_json_with_profile(
     Err(format!(
         "モデルが回答を最後まで返せませんでした（出力上限 {retry_budget} トークン）。LM Studioで十分な文脈長を確保するか、別のモデルを試してください"
     ))
+}
+
+fn retry_generation_budget(profile: GenerationProfile, requested: u32) -> u32 {
+    generation_budget(profile, requested)
+        .saturating_mul(2)
+        .max(requested.saturating_mul(4))
+        .min(MAX_GENERATION_TOKENS)
 }
 
 struct ChatAnswer {
@@ -678,6 +730,10 @@ async fn ask_json_once(
     profile: GenerationProfile,
     max_tokens: u32,
 ) -> Result<ChatAnswer, String> {
+    let _request_permit = request_limiter(engine, None)
+        .acquire_owned()
+        .await
+        .map_err(|_| "推論リクエストの実行枠を確保できません".to_string())?;
     // 検証した正規化URLをそのまま実行値にする。前後空白や末尾 `/` を含む
     // 入力が検証だけ通り、raw文字列で接続に失敗してはいけない。
     let base_url = normalized_base_url(&engine.base_url)?;
@@ -703,16 +759,26 @@ async fn ask_json_once(
             body["chat_template_kwargs"] = serde_json::json!({ "enable_thinking": false });
         }
     }
-    let request = checked_request_body(&body)?;
-    let response = client()?
-        .post(endpoint(&base_url, "chat/completions"))
-        .header(reqwest::header::CONTENT_TYPE, "application/json")
-        .body(request)
-        .send()
-        .await
-        .map_err(|error| format!("モデルに接続できません: {error}"))?;
-    let status = response.status();
-    let response_body = read_response_limited(response).await?;
+    let (mut status, mut response_body) = post_chat_request(&base_url, &body).await?;
+    if profile.qwen35_sampling
+        && !status.is_success()
+        && provider_rejected_optional_parameters(status.as_u16(), &response_body)
+    {
+        // Qwen向けの推奨値はOpenAI標準外であり、互換サーバーによっては
+        // unknown fieldとして拒否される。同じ要求を標準payloadで一度だけ
+        // 再送し、モデル選択だけで互換性を失わないようにする。
+        if let Some(object) = body.as_object_mut() {
+            for key in [
+                "top_k",
+                "presence_penalty",
+                "repetition_penalty",
+                "chat_template_kwargs",
+            ] {
+                object.remove(key);
+            }
+        }
+        (status, response_body) = post_chat_request(&base_url, &body).await?;
+    }
     if !status.is_success() {
         // 中身を読む。「HTTP 400」だけでは、文脈に入らなかったのか、モデル名が
         // 違うのか、`response_format` に対応していないのかが分からない。
@@ -734,6 +800,41 @@ async fn ask_json_once(
         content,
         finish_reason: choice.finish_reason,
     })
+}
+
+async fn post_chat_request(
+    base_url: &str,
+    body: &serde_json::Value,
+) -> Result<(reqwest::StatusCode, Vec<u8>), String> {
+    let request = checked_request_body(body)?;
+    let response = client()?
+        .post(endpoint(base_url, "chat/completions"))
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .body(request)
+        .send()
+        .await
+        .map_err(|error| format!("モデルに接続できません: {error}"))?;
+    let status = response.status();
+    let response_body = read_response_limited(response).await?;
+    Ok((status, response_body))
+}
+
+fn provider_rejected_optional_parameters(status: u16, response_body: &[u8]) -> bool {
+    if !matches!(status, 400 | 422) {
+        return false;
+    }
+    let detail = String::from_utf8_lossy(response_body).to_ascii_lowercase();
+    [
+        "top_k",
+        "presence_penalty",
+        "repetition_penalty",
+        "chat_template_kwargs",
+    ]
+    .iter()
+    .any(|key| detail.contains(key))
+        && ["unknown", "unsupported", "unrecognized", "extra", "invalid"]
+            .iter()
+            .any(|marker| detail.contains(marker))
 }
 
 fn finish_reason_is_length(reason: Option<&str>) -> bool {
@@ -796,6 +897,25 @@ async fn read_response_limited(response: reqwest::Response) -> Result<Vec<u8>, S
 
 /// 失敗の中身を、直せる言葉にして返す。
 fn describe_http_failure(status: u16, detail: &str) -> String {
+    match status {
+        401 | 403 => {
+            return format!(
+                "推論サーバーに拒否されました。認証と接続先を確認してください（HTTP {status}）"
+            )
+        }
+        404 => return "モデルが見つかりません。設定でモデルを選び直してください".to_string(),
+        408 => return "推論サーバーが時間内に要求を受け付けませんでした（HTTP 408）".to_string(),
+        429 => {
+            return "推論サーバーが混み合っています。少し待ってから再試行してください（HTTP 429）"
+                .to_string()
+        }
+        500..=599 => {
+            return format!(
+            "推論サーバー側で処理に失敗しました。サーバーのログを確認してください（HTTP {status}）"
+        )
+        }
+        _ => {}
+    }
     let lower = detail.to_ascii_lowercase();
     if lower.contains("context")
         || lower.contains("token")
@@ -813,9 +933,6 @@ fn describe_http_failure(status: u16, detail: &str) -> String {
         return format!(
             "このモデルは決まった形での出力に対応していないようです。別のモデルで試してください（HTTP {status}）"
         );
-    }
-    if status == 404 {
-        return "モデルが見つかりません。設定でモデルを選び直してください".to_string();
     }
     let snippet = detail.chars().take(180).collect::<String>();
     if snippet.trim().is_empty() {
@@ -1205,26 +1322,27 @@ pub struct BundleSplit {
     pub reason: String,
 }
 
-/// 大きくなった束を、分けたほうがよいか見てもらう。
-///
-/// 分けるのは利用者で、ここは案を出すだけ。**分ける必要が無ければ空を返す**の
-/// が正しい答えなので、そう頼む。
-pub async fn propose_splits(
+#[derive(Deserialize)]
+struct BundleSplitResponse {
+    groups: Vec<BundleSplitRaw>,
+}
+
+#[derive(Deserialize)]
+struct BundleSplitRaw {
+    name: String,
+    positions: Vec<i64>,
+    #[serde(default)]
+    reason: String,
+}
+
+async fn propose_split_batch(
     engine: &AssistEngine,
-    works: &[WorkFacts],
-) -> Result<Vec<BundleSplit>, String> {
-    if works.len() < 4 {
-        return Err("分ける案を出すには作品が少なすぎます".to_string());
-    }
+    listed: Vec<serde_json::Value>,
+) -> Result<Vec<BundleSplitRaw>, String> {
     let system = "ひとつのまとまりに入っている作品の一覧を見て、二つ以上に分けたほうが読みやすいかを判断します。\n\
 分ける必要が無ければ groups を空にしてください。それが正しい答えであることは多いです。\n\
 分ける場合、各 group の positions には一覧の番号（0から）を入れ、name は18文字以内、\n\
 reason には題名やタグのどこで分けたかを短く書きます。どの作品も高々ひとつの group に入れます。";
-    let listed = works
-        .iter()
-        .enumerate()
-        .map(|(index, work)| serde_json::json!({ "番号": index, "作品": work }))
-        .collect::<Vec<_>>();
     let schema = object_schema(
         "bundle_splits",
         serde_json::json!({
@@ -1245,24 +1363,65 @@ reason には題名やタグのどこで分けたかを短く書きます。ど�
         vec!["groups"],
     );
     let content = ask_json(engine, system, &encode(&listed)?, schema, 900).await?;
-
-    #[derive(Deserialize)]
-    struct Raw {
-        groups: Vec<GroupRaw>,
-    }
-    #[derive(Deserialize)]
-    struct GroupRaw {
-        name: String,
-        positions: Vec<i64>,
-        #[serde(default)]
-        reason: String,
-    }
-    let raw: Raw = serde_json::from_str(extract_json(&content)?)
+    let raw: BundleSplitResponse = serde_json::from_str(extract_json(&content)?)
         .map_err(|error| format!("モデルの応答を読めません: {error}"))?;
+    Ok(raw.groups)
+}
+
+/// 大きくなった束を、分けたほうがよいか見てもらう。
+///
+/// 分けるのは利用者で、ここは案を出すだけ。**分ける必要が無ければ空を返す**の
+/// が正しい答えなので、そう頼む。
+pub async fn propose_splits(
+    engine: &AssistEngine,
+    works: &[WorkFacts],
+) -> Result<Vec<BundleSplit>, String> {
+    if works.len() < 4 {
+        return Err("分ける案を出すには作品が少なすぎます".to_string());
+    }
+    let runtime = runtime_profile(engine).await?;
+    // Large collections used to become one unbounded JSON request. Compact
+    // each item to the evidence this task needs, then size batches from the
+    // loaded context while retaining the original global positions.
+    let listed = works
+        .iter()
+        .enumerate()
+        .map(|(index, work)| {
+            serde_json::json!({
+                "番号": index,
+                "題名": clamp_line(&work.title, 120),
+                "作者": clamp_line(&work.author_name, 60),
+                "タグ": work.tags.iter().take(8).map(|tag| clamp_line(tag, 50)).collect::<Vec<_>>()
+            })
+        })
+        .collect::<Vec<_>>();
+    let batch_size = runtime
+        .context_length
+        .map(|tokens| tokens.saturating_sub(2_048) / 256)
+        .unwrap_or(32)
+        // Each compact item is capped at roughly 580 Japanese characters;
+        // forty remain below the 128 KiB UTF-8 request ceiling even at three
+        // bytes per character, with room for schema and prompts.
+        .clamp(4, 40);
+    // 添字で切る。`chunks()` の `&[Value]` を受ける閉包にすると、返す Future が
+    // その借用に縛られ、rustc が `for<'a>` の実装を導けずに
+    // 「implementation of `FnOnce` is not general enough」で落ちる。
+    // 閉包が受け取るのを `usize` にすれば借用は引数に乗らない。切り出しは
+    // 従来どおり、その一括を走らせる直前にだけ複製する。
+    let jobs = (0..listed.len()).step_by(batch_size).map(|start| {
+        let end = (start + batch_size).min(listed.len());
+        propose_split_batch(engine, listed[start..end].to_vec())
+    });
+    let raw = futures_util::stream::iter(jobs)
+        .buffered(runtime.concurrent_requests.max(1))
+        .try_collect::<Vec<_>>()
+        .await?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
     let limit = works.len() as i64;
     let mut used = std::collections::HashSet::new();
     Ok(raw
-        .groups
         .into_iter()
         .map(|group| BundleSplit {
             name: clamp_line(&group.name, MAX_NAME_CHARS),
@@ -1339,6 +1498,18 @@ const MAX_SUMMARY_CHUNK_CHARS: usize = 24_000;
 const MAX_SUMMARY_MERGE_CHARS: usize = 16_000;
 const MAX_PARTIAL_SUMMARY_CHARS: usize = 520;
 const MAX_FINAL_SUMMARY_CHARS: usize = 300;
+/// system prompt, JSON schema and request framing that surround each excerpt.
+const SUMMARY_PROMPT_RESERVE_TOKENS: usize = 1_536;
+/// Intermediate merging asks for the largest output budget in this pipeline.
+const SUMMARY_MAX_REQUESTED_OUTPUT_TOKENS: u32 = 900;
+/// Below this input room, forcing even a tiny excerpt only produces repeated
+/// context errors. A known-small model should fail before sending any work.
+const MIN_SUMMARY_INPUT_TOKENS: usize = 1_024;
+/// Two maximum-size partial notes (including their headings) must fit in one
+/// merge group. Otherwise every round can reproduce exactly the same number
+/// of notes and never converge.
+const MIN_SUMMARY_MERGE_CHARS: usize = (MAX_PARTIAL_SUMMARY_CHARS + 36) * 2;
+const MAX_SUMMARY_MERGE_ROUNDS: usize = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SummaryPlan {
@@ -1355,22 +1526,27 @@ fn summary_plan(context_length: Option<usize>, model: Option<&str>) -> SummaryPl
     };
     // context_lengthはtoken、こちらで切る本文は文字数である。1:1と断定せず、
     // system・schema・JSON枠と、思考型モデルの実際の生成枠を先に予約する。
-    // 小さいcontextでは予約だけで全てを使わないよう最大75%に抑え、必ず本文の
-    // 席を残す。残りも全量を文字へ換算せず75%だけ使う。
+    // 実行側のretryは requested * 4 との大きい方を使う。同じ計算で予約し、
+    // 予約だけで埋まる既知の小contextを無理に640文字へ広げない。
     let profile = summary_generation_profile(model.unwrap_or_default());
-    let first_output = generation_budget(profile, 700) as usize;
-    let retry_output = first_output
-        .saturating_mul(2)
-        .min(MAX_GENERATION_TOKENS as usize);
-    let desired_reserve = retry_output.saturating_add(1_536);
-    let reserve = desired_reserve.min(context_length.saturating_mul(3) / 4);
+    let retry_output =
+        retry_generation_budget(profile, SUMMARY_MAX_REQUESTED_OUTPUT_TOKENS) as usize;
+    let reserve = retry_output.saturating_add(SUMMARY_PROMPT_RESERVE_TOKENS);
     let usable = context_length.saturating_sub(reserve);
+    if usable < MIN_SUMMARY_INPUT_TOKENS {
+        return SummaryPlan {
+            chunk_chars: 0,
+            merge_chars: 0,
+        };
+    }
     SummaryPlan {
         chunk_chars: usable
             .saturating_mul(3)
             .saturating_div(4)
             .clamp(640, MAX_SUMMARY_CHUNK_CHARS),
-        merge_chars: usable.saturating_div(2).clamp(800, MAX_SUMMARY_MERGE_CHARS),
+        merge_chars: usable
+            .saturating_div(2)
+            .clamp(MIN_SUMMARY_MERGE_CHARS, MAX_SUMMARY_MERGE_CHARS),
     }
 }
 
@@ -1484,6 +1660,12 @@ async fn hierarchical_body_summary(
         chunk_chars: runtime.summary_chunk_chars,
         merge_chars: runtime.summary_merge_chars,
     };
+    if plan.chunk_chars == 0 || plan.merge_chars == 0 {
+        return Err(
+            "このモデルの文脈長では本文要約を安全に実行できません。8K以上の文脈長でモデルを読み直してください"
+                .to_string(),
+        );
+    }
     let chunks = split_text_chunks(body, plan.chunk_chars);
     if chunks.is_empty() {
         return Err("本文がありません".to_string());
@@ -1530,11 +1712,10 @@ async fn hierarchical_body_summary(
             })
         });
     }
-    let partial_results = futures_util::stream::iter(chunk_jobs)
+    let mut partials = futures_util::stream::iter(chunk_jobs)
         .buffered(concurrent_requests)
-        .collect::<Vec<_>>()
-        .await;
-    let mut partials = partial_results.into_iter().collect::<Result<Vec<_>, _>>()?;
+        .try_collect::<Vec<_>>()
+        .await?;
 
     // 1チャンクでも、部分抽出をそのまま最終文にせず、同じ最終指示で整える。
     // 複数階層になっても各段の全出力を次段へ渡し、位置を落とさない。
@@ -1543,10 +1724,16 @@ async fn hierarchical_body_summary(
 前後で同じ出来事はまとめますが、後の部分で起きた変化や結末を落としません。本文にない推測や評価は足しません。\n\
 textには完成した要約本文だけを書きます。入力の見出し、番号、JSON、部分記録、原文の長い引用を複写しません。\n{final_instruction}"
     );
-    loop {
+    for _round in 0..MAX_SUMMARY_MERGE_ROUNDS {
         let groups = group_partial_summaries(&partials, plan.merge_chars);
+        if partials.len() > 1 && groups.len() >= partials.len() {
+            return Err(
+                "部分要約をこれ以上まとめられませんでした。文脈長を大きくするか、別のモデルで試してください"
+                    .to_string(),
+            );
+        }
         let final_round = groups.len() == 1;
-        let merged_results = futures_util::stream::iter(groups.into_iter().map(|group| {
+        let mut merged = futures_util::stream::iter(groups.into_iter().map(|group| {
             let merge_system = &merge_system;
             async move {
                 let max_chars = if final_round {
@@ -1608,9 +1795,8 @@ textには完成した要約本文だけを書きます。入力の見出し、�
             }
         }))
         .buffered(concurrent_requests)
-        .collect::<Vec<_>>()
-        .await;
-        let mut merged = merged_results.into_iter().collect::<Result<Vec<_>, _>>()?;
+        .try_collect::<Vec<_>>()
+        .await?;
         if final_round {
             return Ok(AssistNote {
                 text: merged.remove(0).text,
@@ -1618,6 +1804,7 @@ textには完成した要約本文だけを書きます。入力の見出し、�
         }
         partials = merged;
     }
+    Err("本文要約の統合回数が安全上限を超えました。文脈長を大きくするか、別のモデルで試してください".to_string())
 }
 
 fn encode<T: Serialize>(value: &T) -> Result<String, String> {
@@ -1864,16 +2051,30 @@ mod tests {
         assert_eq!(fallback.chunk_chars, FALLBACK_SUMMARY_CHUNK_CHARS);
 
         let four_k = summary_plan(Some(4_096), Some("generic"));
-        assert_eq!(four_k.chunk_chars, 870);
-        assert_eq!(four_k.merge_chars, 800);
+        assert_eq!(four_k.chunk_chars, 0);
+        assert_eq!(four_k.merge_chars, 0);
 
         let thirty_two_k = summary_plan(Some(32_768), Some("generic"));
-        assert_eq!(thirty_two_k.chunk_chars, 22_374);
-        assert_eq!(thirty_two_k.merge_chars, 14_916);
+        assert_eq!(thirty_two_k.chunk_chars, 20_724);
+        assert_eq!(thirty_two_k.merge_chars, 13_816);
         assert!(thirty_two_k.chunk_chars <= MAX_SUMMARY_CHUNK_CHARS);
 
         let qwen = summary_plan(Some(32_768), Some("qwen3.5-9b"));
         assert!(qwen.chunk_chars < thirty_two_k.chunk_chars);
+    }
+
+    #[test]
+    fn minimum_merge_plan_always_combines_two_maximum_partial_notes() {
+        let parts = (0..2)
+            .map(|index| PartialSummary {
+                start_chunk: index + 1,
+                end_chunk: index + 1,
+                text: "要".repeat(MAX_PARTIAL_SUMMARY_CHARS),
+            })
+            .collect::<Vec<_>>();
+        let groups = group_partial_summaries(&parts, MIN_SUMMARY_MERGE_CHARS);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].len(), 2);
     }
 
     #[test]
@@ -1886,6 +2087,32 @@ mod tests {
         let mut response = Vec::new();
         append_response_chunk(&mut response, &vec![0; MAX_RESPONSE_BYTES]).unwrap();
         assert!(append_response_chunk(&mut response, &[0]).is_err());
+    }
+
+    #[test]
+    fn http_status_takes_priority_over_incidental_token_wording() {
+        let auth = describe_http_failure(401, "invalid token");
+        assert!(auth.contains("認証"));
+        assert!(!auth.contains("文脈"));
+        let busy = describe_http_failure(429, "maximum token quota reached");
+        assert!(busy.contains("混み合って"));
+        assert!(!busy.contains("文脈"));
+    }
+
+    #[test]
+    fn optional_qwen_parameters_are_retried_only_when_named_as_unsupported() {
+        assert!(provider_rejected_optional_parameters(
+            400,
+            br#"{"error":"unknown field chat_template_kwargs"}"#,
+        ));
+        assert!(!provider_rejected_optional_parameters(
+            400,
+            br#"{"error":"context too long"}"#,
+        ));
+        assert!(!provider_rejected_optional_parameters(
+            500,
+            br#"{"error":"unsupported top_k"}"#,
+        ));
     }
 
     #[test]

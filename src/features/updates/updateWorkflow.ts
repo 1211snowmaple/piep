@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import { normalizeFanboxPostPayload } from "@/features/browser/downloadMetadata";
+import { normalizeFanboxPostPayload, normalizeFanboxSaveMetadata, normalizePixivSaveMetadata } from "@/features/browser/downloadMetadata";
 import { store } from "@/store";
 import {
   getDownload,
@@ -103,13 +103,6 @@ export function normalizePixivSeries(item: any): { id: string; title: string } |
   return id ? { id, title: title || "シリーズ" } : null;
 }
 
-export function pixivTags(data: any): string[] {
-  const tags = data.detail?.tags ?? data.tags ?? [];
-  if (Array.isArray(tags)) return tags.map((tag: any) => tag.name || tag).filter(Boolean);
-  if (Array.isArray(tags.tags)) return tags.tags.map((tag: any) => tag.name || tag).filter(Boolean);
-  return [];
-}
-
 export async function getUpdateCredentials(): Promise<UpdateCredentials> {
   return {
     refreshToken: await store.get<string>("pixiv_refresh_token") || "",
@@ -185,13 +178,7 @@ export async function checkWatchedWorks({
           data,
           source: "pixiv",
           sourceId: dl.sourceId,
-          title: data.detail?.title || dl.title,
-          authorName: data.detail?.user?.name || dl.authorName,
-          authorId: String(data.detail?.user?.id || dl.authorId),
-          contentType: "novel",
-          tags: pixivTags(data),
-          excerpt: data.detail?.caption || null,
-          sourceCreatedAt: data.detail?.create_date || null,
+          ...normalizePixivSaveMetadata(data, dl.title, dl.authorName, String(dl.authorId ?? "0")),
           cookie: null,
           userAgent: null,
         });
@@ -210,13 +197,7 @@ export async function checkWatchedWorks({
           data: post,
           source: "fanbox",
           sourceId: dl.sourceId,
-          title: post.title || dl.title,
-          authorName: post.user?.name || dl.authorName,
-          authorId: post.creatorId || post.creator_id || dl.authorId,
-          contentType: post.type || post.postType || post.post_type || "article",
-          tags: post.tags || [],
-          excerpt: post.excerpt || null,
-          sourceCreatedAt: post.publishedDatetime || post.published_datetime || null,
+          ...normalizeFanboxSaveMetadata(post, dl.title, dl.authorName, String(dl.authorId ?? "0")),
           cookie: credentials.fanboxCookie,
           userAgent: credentials.fanboxUserAgent,
         });
@@ -331,17 +312,14 @@ export async function saveUpdateCandidate(
 
   if (candidate.source === "pixiv") {
     const data: any = await fetchPixivNovel(candidate.sourceId, credentials.refreshToken);
+    const metadata = normalizePixivSaveMetadata(data, candidate.title, candidate.originalData.user?.name || "unknown", String(candidate.originalData.user?.id ?? "0"));
     const savedEntry = await downloadAndSave<UpdateDownloadEntry>({
       data,
       source: "pixiv",
       sourceId: candidate.sourceId,
-      title: data.detail?.title || candidate.title,
-      authorName: data.detail?.user?.name || candidate.originalData.user?.name || "unknown",
-      authorId: String(data.detail?.user?.id || candidate.originalData.user?.id || "0"),
-      contentType: "novel",
-      tags: pixivTags(data),
-      excerpt: data.detail?.caption || null,
-      sourceCreatedAt: data.detail?.create_date || candidate.originalData.create_date || null,
+      ...metadata,
+      // 候補の一覧が持っている公開日は、本文の取得が返さなかったときの最後の頼り。
+      sourceCreatedAt: metadata.sourceCreatedAt ?? candidate.originalData.create_date ?? null,
       cookie: null,
       userAgent: null,
     });
@@ -354,13 +332,7 @@ export async function saveUpdateCandidate(
     data: post,
     source: "fanbox",
     sourceId: candidate.sourceId,
-    title: post.title || candidate.title,
-    authorName: post.user?.name || candidate.originalData.user?.name || "unknown",
-    authorId: post.creatorId || post.creator_id || candidate.originalData.creatorId || candidate.originalData.creator_id || "0",
-    contentType: post.type || post.postType || post.post_type || "article",
-    tags: post.tags || [],
-    excerpt: post.excerpt || null,
-    sourceCreatedAt: post.publishedDatetime || post.published_datetime || null,
+    ...normalizeFanboxSaveMetadata(post, candidate.title, candidate.originalData.user?.name || "unknown", String(candidate.originalData.creatorId ?? candidate.originalData.creator_id ?? "0")),
     cookie: credentials.fanboxCookie,
     userAgent: credentials.fanboxUserAgent,
   });

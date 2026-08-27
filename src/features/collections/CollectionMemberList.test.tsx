@@ -57,7 +57,7 @@ function renderList(props: Partial<React.ComponentProps<typeof CollectionMemberL
           <ModalsProvider>
             <AppRouter>
               <WorkspaceProvider>
-                <CollectionMemberList {...merged} />
+                <div className="app-main"><CollectionMemberList {...merged} /></div>
               </WorkspaceProvider>
             </AppRouter>
           </ModalsProvider>
@@ -86,18 +86,18 @@ describe("CollectionMemberList", () => {
   // HTML5 の drag は使わない。取っ手は button で、Chromium は button の上で
   // 始まった仕草から祖先の drag を開始しない。掴んでも一度も動かなかったのは
   // これが理由で、いまはマウスも指も同じ pointer の道を通る。
-  it("carries a member to another position with the pointer, whatever the pointer is", () => {
+  it.each(["mouse", "touch", "pen"])("carries a member with a %s pointer", (pointerType) => {
     const { props } = renderList({ view: "gallery" });
     const rows = Array.from(document.querySelectorAll<HTMLElement>(".collection-member"));
-    const grip = screen.getByLabelText(`${demoWorks[0].title}を掴んで並べ替え`);
+    const grip = document.querySelectorAll<HTMLElement>(".collection-member__grip")[0];
     // jsdom に elementFromPoint は無い。実際の広さも無いので、下に何があるかはここで答える。
     Object.defineProperty(document, "elementFromPoint", { value: () => rows[1], configurable: true });
 
-    fireEvent.pointerDown(grip, { pointerId: 1, pointerType: "mouse", button: 0 });
+    fireEvent.pointerDown(grip, { pointerId: 1, pointerType, button: 0 });
     expect(rows[0]).toHaveAttribute("data-dragging");
-    fireEvent.pointerMove(grip, { pointerId: 1, pointerType: "mouse", clientX: 10, clientY: 200 });
+    fireEvent.pointerMove(grip, { pointerId: 1, pointerType, clientX: 10, clientY: 200 });
     expect(rows[1]).toHaveAttribute("data-drop-target");
-    fireEvent.pointerUp(grip, { pointerId: 1, pointerType: "mouse", clientX: 10, clientY: 200 });
+    fireEvent.pointerUp(grip, { pointerId: 1, pointerType, clientX: 10, clientY: 200 });
 
     expect(props.onDropAt).toHaveBeenCalledWith(0, 1);
     expect(rows[0]).not.toHaveAttribute("data-dragging");
@@ -106,7 +106,7 @@ describe("CollectionMemberList", () => {
   it("drops the grab when Escape is pressed, without moving anything", () => {
     const { props } = renderList({ view: "gallery" });
     const rows = Array.from(document.querySelectorAll<HTMLElement>(".collection-member"));
-    const grip = screen.getByLabelText(`${demoWorks[0].title}を掴んで並べ替え`);
+    const grip = document.querySelectorAll<HTMLElement>(".collection-member__grip")[0];
 
     fireEvent.pointerDown(grip, { pointerId: 1, pointerType: "mouse", button: 0 });
     expect(rows[0]).toHaveAttribute("data-dragging");
@@ -114,6 +114,38 @@ describe("CollectionMemberList", () => {
 
     expect(rows[0]).not.toHaveAttribute("data-dragging");
     expect(props.onDropAt).not.toHaveBeenCalled();
+  });
+
+  it("auto-scrolls the collection when a held pointer reaches the viewport edge", () => {
+    const frames: FrameRequestCallback[] = [];
+    const requestFrame = vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {
+      frames.push(callback);
+      return 1;
+    });
+    const cancelFrame = vi.spyOn(window, "cancelAnimationFrame").mockImplementation(() => undefined);
+    renderList({ view: "gallery" });
+    const rows = Array.from(document.querySelectorAll<HTMLElement>(".collection-member"));
+    const grip = document.querySelectorAll<HTMLElement>(".collection-member__grip")[0];
+    const scroller = document.querySelector<HTMLElement>(".app-main")!;
+    Object.defineProperties(scroller, {
+      scrollTop: { value: 0, writable: true, configurable: true },
+      scrollHeight: { value: 1_000, configurable: true },
+      clientHeight: { value: 100, configurable: true },
+    });
+    vi.spyOn(scroller, "getBoundingClientRect").mockReturnValue({
+      x: 0, y: 0, top: 0, right: 300, bottom: 100, left: 0, width: 300, height: 100,
+      toJSON: () => ({}),
+    });
+    Object.defineProperty(document, "elementFromPoint", { value: () => rows[1], configurable: true });
+
+    fireEvent.pointerDown(grip, { pointerId: 2, pointerType: "touch", clientX: 20, clientY: 50 });
+    fireEvent.pointerMove(grip, { pointerId: 2, pointerType: "touch", clientX: 20, clientY: 99 });
+    expect(frames.length).toBeGreaterThan(0);
+    frames[frames.length - 1](0);
+    expect(scroller.scrollTop).toBeGreaterThan(0);
+    fireEvent.pointerCancel(grip, { pointerId: 2, pointerType: "touch" });
+    requestFrame.mockRestore();
+    cancelFrame.mockRestore();
   });
 
   it("hides ordering controls when the collection has no reading order", () => {

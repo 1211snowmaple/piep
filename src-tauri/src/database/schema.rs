@@ -11,34 +11,18 @@ use std::path::{Path, PathBuf};
 /// libraries keep their rows and are simply re-stamped to this version.
 const SCHEMA_VERSION: u32 = 1;
 
-/// Tables that identify a database as one of ours.
+/// Stable columns that identify the `downloads` table as ours.
 ///
-/// This is a recognition fingerprint, not a list of everything the app creates.
-/// A database missing any of these is treated as a foreign schema and is
-/// archived and replaced - so adding a newly introduced table here makes every
-/// existing library look foreign and wipes it. New tables belong only in
-/// `create_schema`, which adds them in place. Nothing may be added to this
-/// list. Version markers and later additions are deliberately absent so that
-/// libraries written by any earlier build are still recognised.
-const CORE_TABLES: &[&str] = &[
-    "downloads",
-    "tags",
-    "download_tags",
-    "assets",
-    "download_versions",
-    "update_targets",
-    "download_relations",
-    "people",
-    "series",
-    "download_people",
-    "download_series",
-    "entity_versions",
-    "search_index_state",
-    "work_edit_revisions",
-    "work_edit_blocks",
-    "update_jobs",
-    "update_job_items",
-    "update_job_logs",
+/// Table presence is not a safe fingerprint: a partially damaged library can
+/// lose one auxiliary table, and that must be repaired in place rather than
+/// interpreted as permission to erase every surviving row.
+const DOWNLOAD_FINGERPRINT_COLUMNS: &[&str] = &[
+    "id",
+    "source",
+    "source_id",
+    "title",
+    "json_path",
+    "downloaded_at",
 ];
 
 /// Open the database at the current schema.
@@ -68,26 +52,25 @@ pub fn initialize(conn: &Connection) -> Result<(), rusqlite::Error> {
 
 /// Recognises a database this app wrote, regardless of which build wrote it.
 ///
-/// Deliberately looser than the old per-version checks: the version stamp and
-/// the marker tables are not consulted, because a library that predates the
-/// renumbering carries the older stamp and would otherwise be mistaken for a
-/// foreign database and archived. The core tables plus the absence of the
-/// pre-release `downloads.tags` column are enough to identify our own layout.
+/// A valid `downloads` fingerprint or one of our schema markers is enough.
+/// Missing auxiliary tables are created by `create_schema`; requiring every
+/// table here would turn a recoverable partial database into an empty one.
 fn is_known_library(conn: &Connection) -> Result<bool, rusqlite::Error> {
-    let empty = !sqlite_object_exists(conn, "table", "downloads")?
-        && !sqlite_object_exists(conn, "table", "people")?;
-    if empty {
-        return Ok(false);
-    }
-    for table in CORE_TABLES {
-        if !sqlite_object_exists(conn, "table", table)? {
-            return Ok(false);
-        }
+    let has_marker = sqlite_object_exists(conn, "table", "schema_marker")?
+        || sqlite_object_exists(conn, "table", "schema_v1_marker")?
+        || sqlite_object_exists(conn, "table", "schema_v2_marker")?;
+    if !sqlite_object_exists(conn, "table", "downloads")? {
+        return Ok(has_marker);
     }
     // The abandoned preview layout kept tags as a column on downloads rather
     // than in its own table. Those rows cannot be read by the current queries.
     if column_exists(conn, "downloads", "tags")? {
         return Ok(false);
+    }
+    for column in DOWNLOAD_FINGERPRINT_COLUMNS {
+        if !column_exists(conn, "downloads", column)? {
+            return Ok(false);
+        }
     }
     Ok(true)
 }
@@ -1086,6 +1069,35 @@ mod tests {
             sqlite_object_exists(&conn, "table", "search_index_meta").unwrap(),
             "the new table must be added in place"
         );
+    }
+
+    #[test]
+    fn a_library_missing_an_auxiliary_table_is_repaired_without_losing_works() {
+        let conn = Connection::open_in_memory().unwrap();
+        initialize(&conn).unwrap();
+        conn.execute_batch(
+            "INSERT INTO downloads (
+                source, source_id, title, author_name, author_id, content_type,
+                excerpt, cover_path, json_path, original_json_path, asset_count,
+                file_size_bytes, downloaded_at, source_created_at, content_hash,
+                text_length, source_updated_at, watch_updates, current_version, favorite
+             ) VALUES (
+                'pixiv', 'repair-1', '残す作品', 'author', 'a1', 'novel', NULL,
+                NULL, '/tmp/repair.json', NULL, 0, 0, '2026-01-01T00:00:00Z',
+                NULL, NULL, 100, NULL, 0, 1, 0
+             );
+             DROP TABLE update_job_logs;",
+        )
+        .unwrap();
+
+        assert!(is_known_library(&conn).unwrap());
+        initialize(&conn).unwrap();
+
+        let kept: i64 = conn
+            .query_row("SELECT COUNT(*) FROM downloads", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(kept, 1);
+        assert!(sqlite_object_exists(&conn, "table", "update_job_logs").unwrap());
     }
 
     #[test]

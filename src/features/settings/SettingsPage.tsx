@@ -54,6 +54,7 @@ import { getSearchIndexStatus, getStats, isTauriRuntime, scanAndReimportDownload
 import { openSingleDialog, saveDialog } from "@/services/dialogApi";
 import { openFilesystemPath } from "@/services/openerApi";
 import { useSearchIndexProgress } from "@/features/search/searchIndexProgress";
+import { invalidateWorkSetViews } from "@/features/library/workSetInvalidation";
 import DiagnosticsPage from "@/features/diagnostics/DiagnosticsPage";
 import { cancelSearchRebuildIndex, startSearchRebuildIndex, type SearchRebuildProgress } from "@/services/searchApi";
 import { store } from "@/store";
@@ -185,7 +186,9 @@ export default function SettingsPage() {
         throw error;
       }
     },
-    onSuccess: (message) => { if (message) notifications.show({ color: "green", message }); queryClient.invalidateQueries({ queryKey: ["dashboard"] }); queryClient.invalidateQueries({ queryKey: ["library"] }); queryClient.invalidateQueries({ queryKey: ["stats"] }); },
+    // 再取り込みは作品を丸ごと増やすので、増えたときに古くなる場所すべてに
+    // 知らせる（保存フォルダーから数百件戻ることがある）。
+    onSuccess: (message) => { if (message) notifications.show({ color: "green", message }); queryClient.invalidateQueries({ queryKey: ["library"] }); queryClient.invalidateQueries({ queryKey: ["stats"] }); invalidateWorkSetViews(queryClient); },
     onError: (error, action) => notifications.show({
       color: "red",
       title: action === "restore" ? "バックアップを検査できませんでした" : "操作に失敗しました",
@@ -206,10 +209,10 @@ export default function SettingsPage() {
           notifications.show({ color: "green", message: `${count}件を復元しました` });
           setRestoreReview(null);
           await Promise.all([
-            queryClient.invalidateQueries({ queryKey: ["dashboard"] }),
             queryClient.invalidateQueries({ queryKey: ["library"] }),
             queryClient.invalidateQueries({ queryKey: ["stats"] }),
           ]);
+          invalidateWorkSetViews(queryClient);
         } catch (error) {
           operation.fail(error);
           throw error;
