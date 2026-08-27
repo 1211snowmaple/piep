@@ -39,6 +39,16 @@ describe("what a link inside saved text names", () => {
       .toEqual({ kind: "person", source: "fanbox", sourceKey: "kimodebu-kun" });
   });
 
+  it("does not trust FANBOX-looking links on an unsafe scheme or port", () => {
+    for (const url of [
+      "http://rope-less.fanbox.cc/posts/8421",
+      "https://rope-less.fanbox.cc:444/posts/8421",
+      "https://name:secret@rope-less.fanbox.cc/posts/8421",
+    ]) {
+      expect(contentLinkTarget(url), url).toBeNull();
+    }
+  });
+
   it("leaves addresses the library cannot hold to the browser", () => {
     expect(contentLinkTarget("https://skeb.jp/@miyu_hypno")).toBeNull();
     expect(contentLinkTarget("https://www.pixiv.net/requests/12")).toBeNull();

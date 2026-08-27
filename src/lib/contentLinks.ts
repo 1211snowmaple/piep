@@ -40,6 +40,10 @@ export function contentLinkTarget(raw: string): ContentLinkTarget | null {
   } catch {
     return null;
   }
+  // 取得元の内部リンクとして扱うのは、ブラウザで同じサービスへ安全に渡せる
+  // 形だけ。`http:` や資格情報付きの見た目だけ FANBOX の URL を、手元の作品へ
+  // 解決して本物らしく見せない。
+  if (url.protocol !== "https:" || url.port || url.username || url.password) return null;
   const host = url.hostname.replace(/^www\./, "");
 
   if (host === "pixiv.net") {

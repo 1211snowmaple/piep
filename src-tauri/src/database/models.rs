@@ -988,6 +988,19 @@ pub struct UpdateJobItem {
     pub result_download_id: Option<i64>,
 }
 
+/// ジョブの項目ひとつの、いまの状態。画面が行に印を付けるために使う。
+///
+/// `payload_json` は返さない。何百件もの項目を画面へ渡すのに、使わない本文を
+/// 一緒に運ぶ理由が無い。**画面へ渡すものは、画面が使うものだけにする。**
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateJobItemState {
+    pub source: Option<String>,
+    pub source_id: Option<String>,
+    pub status: String,
+    pub error: Option<String>,
+}
+
 /// 見つけたが、まだ保存も拒否もしていない作品。ジョブより長生きする。
 #[derive(Debug, Clone)]
 pub struct UpdateCandidateInput {

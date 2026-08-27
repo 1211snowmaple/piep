@@ -62,13 +62,13 @@ where
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RefreshEntityProfileParams {
-    entity_type: String,
-    source: String,
-    source_key: String,
-    force: Option<bool>,
-    refresh_token: Option<String>,
-    cookie: Option<String>,
-    user_agent: Option<String>,
+    pub entity_type: String,
+    pub source: String,
+    pub source_key: String,
+    pub force: Option<bool>,
+    pub refresh_token: Option<String>,
+    pub cookie: Option<String>,
+    pub user_agent: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -558,12 +558,12 @@ pub async fn db_upsert_saved_search(
     app: tauri::AppHandle,
     input: SavedSearchInput,
 ) -> Result<SavedSearch, String> {
-    run_db_blocking(app, move |state| state.db.upsert_saved_search(&input)).await
+    run_library_write_blocking(app, move |state| state.db.upsert_saved_search(&input)).await
 }
 
 #[tauri::command]
 pub async fn db_delete_saved_search(app: tauri::AppHandle, id: i64) -> Result<bool, String> {
-    run_db_blocking(app, move |state| state.db.delete_saved_search(id)).await
+    run_library_write_blocking(app, move |state| state.db.delete_saved_search(id)).await
 }
 
 #[tauri::command]

@@ -17,6 +17,10 @@ use crate::assist::{
 use crate::database::queries::{AiNote, TaggedName};
 use crate::AppState;
 
+fn recap_note_key(current_download_id: i64, previous_download_id: i64) -> String {
+    format!("{current_download_id}:{previous_download_id}")
+}
+
 /// 材料を読むところと、外へ送るところを分ける。
 ///
 /// 送っているあいだライブラリの錠を握ったままにしない。手元のモデルでも
@@ -226,7 +230,7 @@ pub async fn assist_recap_previous(
     let note = assist::recap_previous(&engine, &work.title, &body).await?;
     // 覚え書きは**読もうとしている話**にぶら下げる。同じ前の話でも、
     // どの続きを読む前かで欲しいものが変わることがある。
-    let key = format!("{current_download_id}:{previous_download_id}");
+    let key = recap_note_key(current_download_id, previous_download_id);
     let model = engine.model.clone();
     let text = note.text.clone();
     write_blocking(&app, move |state| {
@@ -234,6 +238,17 @@ pub async fn assist_recap_previous(
     })
     .await?;
     Ok(note)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::recap_note_key;
+
+    #[test]
+    fn recap_is_owned_by_the_chapter_being_opened() {
+        assert_eq!(recap_note_key(20, 19), "20:19");
+        assert_ne!(recap_note_key(20, 19), recap_note_key(19, 20));
+    }
 }
 
 // ---- 覚え書きの読み書き ---------------------------------------------------

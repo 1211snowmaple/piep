@@ -1,8 +1,8 @@
 use crate::database::queries::{PortableCollectionPairFeedback, PortableTag, PortableWorkEdit};
 use crate::database::{
     Database, DownloadEntry, EntityVersion, NewAsset, NewDownload, NewVersion, SavedSearch,
-    SearchV2Params, SeriesEntry, UpdateTarget, WorkCollectionInput, WorkCollectionMemberInput,
-    WorkKey,
+    SearchV2Params, SeriesEntry, UpdateCandidateRow, UpdateTarget, WorkCollectionInput,
+    WorkCollectionMemberInput, WorkKey,
 };
 use crate::AppState;
 use serde::{Deserialize, Serialize};
@@ -314,6 +314,11 @@ struct BackupMetadata {
     people: Vec<BackupPerson>,
     series: Vec<BackupSeries>,
     update_targets: Vec<UpdateTarget>,
+    /// Durable pending discoveries and dismissed decisions. Without these,
+    /// restoring the target cursor can skip a work that the old library had
+    /// already discovered but had not saved yet.
+    #[serde(default)]
+    update_candidates: Vec<UpdateCandidateRow>,
     #[serde(default)]
     collections: Vec<BackupWorkCollection>,
     #[serde(default)]
@@ -2056,6 +2061,33 @@ pub async fn export_all_multipart_internal(
         )
         .await?;
     }
+    let mut update_candidate_cursor: Option<(String, String)> = None;
+    loop {
+        let candidates = state.db.list_update_candidates_after(
+            update_candidate_cursor
+                .as_ref()
+                .map(|(source, source_id)| (source.as_str(), source_id.as_str())),
+            MULTIPART_ENTITIES_PER_PART,
+        )?;
+        if candidates.is_empty() {
+            break;
+        }
+        update_candidate_cursor = candidates
+            .last()
+            .map(|candidate| (candidate.source.clone(), candidate.source_id.clone()));
+        export_multipart_update_candidate_batches(
+            &state,
+            parent,
+            &stem,
+            &generation,
+            &mut part_number,
+            candidates,
+            &mut catalog_written,
+            &mut manifest,
+            &mut cleanup,
+        )
+        .await?;
+    }
     if !catalog_written {
         // A library can legitimately have update targets before its first
         // work or profile is saved. Preserve that catalog in a metadata-only
@@ -2066,6 +2098,7 @@ pub async fn export_all_multipart_internal(
             &stem,
             &generation,
             part_number.saturating_add(1),
+            Vec::new(),
             Vec::new(),
             Vec::new(),
             Vec::new(),
@@ -2126,6 +2159,7 @@ async fn export_multipart_batches(
             Vec::new(),
             Vec::new(),
             Vec::new(),
+            Vec::new(),
             manifest,
             cleanup,
         )
@@ -2175,6 +2209,7 @@ async fn export_multipart_catalog_batches(
             Vec::new(),
             people.clone(),
             series.clone(),
+            Vec::new(),
             Vec::new(),
             manifest,
             cleanup,
@@ -2235,6 +2270,7 @@ async fn export_multipart_update_target_batches(
             Vec::new(),
             Vec::new(),
             targets.clone(),
+            Vec::new(),
             manifest,
             cleanup,
         )
@@ -2261,6 +2297,57 @@ async fn export_multipart_update_target_batches(
 }
 
 #[allow(clippy::too_many_arguments)]
+async fn export_multipart_update_candidate_batches(
+    state: &Arc<AppState>,
+    parent: &Path,
+    stem: &str,
+    generation: &str,
+    part_number: &mut usize,
+    candidates: Vec<UpdateCandidateRow>,
+    catalog_written: &mut bool,
+    manifest: &mut MultipartBackupManifest,
+    cleanup: &mut MultipartPartsGuard,
+) -> Result<(), String> {
+    let mut batches = VecDeque::from([candidates]);
+    while let Some(candidates) = batches.pop_front() {
+        let next_part = part_number.saturating_add(1);
+        match export_multipart_part(
+            state,
+            parent,
+            stem,
+            generation,
+            next_part,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            candidates.clone(),
+            manifest,
+            cleanup,
+        )
+        .await
+        {
+            Ok(()) => {
+                *part_number = next_part;
+                *catalog_written = true;
+            }
+            Err(error)
+                if candidates.len() > 1
+                    && (error.contains("entry count is outside the allowed quota")
+                        || error.contains("expanded-size quota")
+                        || error.contains("metadata exceeds its size quota")) =>
+            {
+                let midpoint = candidates.len() / 2;
+                batches.push_front(candidates[midpoint..].to_vec());
+                batches.push_front(candidates[..midpoint].to_vec());
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn export_multipart_part(
     state: &Arc<AppState>,
     parent: &Path,
@@ -2271,6 +2358,7 @@ async fn export_multipart_part(
     people: Vec<(String, String)>,
     series: Vec<(String, String)>,
     update_targets: Vec<UpdateTarget>,
+    update_candidates: Vec<UpdateCandidateRow>,
     manifest: &mut MultipartBackupManifest,
     cleanup: &mut MultipartPartsGuard,
 ) -> Result<(), String> {
@@ -2302,6 +2390,7 @@ async fn export_multipart_part(
         people,
         series,
         update_targets,
+        update_candidates,
     )
     .await?;
     cleanup.paths.push(path.clone());
@@ -2334,6 +2423,7 @@ pub async fn export_zip_with_params_internal(
         Vec::new(),
         Vec::new(),
         Vec::new(),
+        Vec::new(),
     )
     .await
 }
@@ -2349,6 +2439,7 @@ async fn export_zip_with_params_locked(
     extra_people: Vec<(String, String)>,
     extra_series: Vec<(String, String)>,
     extra_update_targets: Vec<UpdateTarget>,
+    extra_update_candidates: Vec<UpdateCandidateRow>,
 ) -> Result<(), String> {
     let storage = state.db.storage_dir().to_path_buf();
     let app_data = storage.parent().unwrap_or(storage.as_path()).to_path_buf();
@@ -2849,6 +2940,29 @@ async fn export_zip_with_params_locked(
             });
         }
 
+        let update_candidates = if include_scoped_update_targets {
+            let mut candidates = Vec::new();
+            let mut cursor: Option<(String, String)> = None;
+            loop {
+                let page = state.db.list_update_candidates_after(
+                    cursor
+                        .as_ref()
+                        .map(|(source, source_id)| (source.as_str(), source_id.as_str())),
+                    MULTIPART_ENTITIES_PER_PART,
+                )?;
+                if page.is_empty() {
+                    break;
+                }
+                cursor = page
+                    .last()
+                    .map(|candidate| (candidate.source.clone(), candidate.source_id.clone()));
+                candidates.extend(page);
+            }
+            candidates
+        } else {
+            extra_update_candidates
+        };
+
         let mut backup_collections = Vec::new();
         for summary in state.db.list_work_collections()? {
             let collection = state.db.get_work_collection(&summary.id)?;
@@ -2948,6 +3062,7 @@ async fn export_zip_with_params_locked(
             people: backup_people,
             series: backup_series,
             update_targets,
+            update_candidates,
             collections: backup_collections,
             saved_searches,
             collection_pair_feedback,
@@ -3458,6 +3573,9 @@ async fn import_zip_locked(
 
             for target in &metadata.update_targets {
                 state.db.restore_update_target(target)?;
+            }
+            for candidate in &metadata.update_candidates {
+                state.db.restore_update_candidate(candidate)?;
             }
 
             for entry in &metadata.entries {
@@ -4274,6 +4392,25 @@ mod tests {
         path
     }
 
+    fn remove_temp_dir(path: &Path) {
+        let mut last_error = None;
+        for _ in 0..20 {
+            match fs::remove_dir_all(path) {
+                Ok(()) => return,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+                Err(error) => {
+                    last_error = Some(error);
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                }
+            }
+        }
+        panic!(
+            "failed to remove test directory {}: {}",
+            path.display(),
+            last_error.expect("cleanup attempted")
+        );
+    }
+
     fn write_test_zip(path: &Path, entries: &[(&str, &[u8])]) {
         let file = fs::File::create(path).unwrap();
         let mut writer = zip::ZipWriter::new(file);
@@ -4330,6 +4467,7 @@ mod tests {
             people: Vec::new(),
             series: Vec::new(),
             update_targets: Vec::new(),
+            update_candidates: Vec::new(),
             collections: vec![BackupWorkCollection {
                 id: format!("collection-{source_id}"),
                 name: "復元コレクション".to_string(),
@@ -4439,7 +4577,7 @@ mod tests {
         assert!(
             resolve_entity_metadata_path("series/pixiv/1/data.json", "profiles", &base).is_err()
         );
-        fs::remove_dir_all(base).unwrap();
+        remove_temp_dir(&base);
     }
 
     #[test]
@@ -4462,7 +4600,7 @@ mod tests {
         let mut archive = zip::ZipArchive::new(file).unwrap();
         let error = preflight_backup_archive(&mut archive).unwrap_err();
         assert!(error.contains("compression ratio"));
-        fs::remove_dir_all(base).unwrap();
+        remove_temp_dir(&base);
     }
 
     #[test]
@@ -4520,7 +4658,7 @@ mod tests {
         );
 
         drop(state);
-        fs::remove_dir_all(base).unwrap();
+        remove_temp_dir(&base);
     }
 
     #[tokio::test]
@@ -4601,7 +4739,7 @@ mod tests {
         );
 
         drop(state);
-        fs::remove_dir_all(base).unwrap();
+        remove_temp_dir(&base);
     }
 
     #[tokio::test]
@@ -4653,7 +4791,7 @@ mod tests {
             .is_err());
 
         drop(state);
-        fs::remove_dir_all(base).unwrap();
+        remove_temp_dir(&base);
     }
 
     #[tokio::test]
@@ -4724,7 +4862,7 @@ mod tests {
         .contains(&restored.id));
 
         drop(state);
-        fs::remove_dir_all(base).unwrap();
+        remove_temp_dir(&base);
     }
 
     #[test]
@@ -4752,7 +4890,7 @@ mod tests {
         );
         assert!(result.is_err());
         assert_eq!(fs::read(&first_live).unwrap(), b"old");
-        fs::remove_dir_all(base).unwrap();
+        remove_temp_dir(&base);
     }
 
     #[tokio::test]
@@ -4772,7 +4910,7 @@ mod tests {
             .unwrap_err();
         assert!(error.contains("Security Exception"));
         assert!(!outside_path.exists());
-        fs::remove_dir_all(base).unwrap();
+        remove_temp_dir(&base);
     }
 
     #[tokio::test]
@@ -4804,6 +4942,7 @@ mod tests {
             }],
             series: vec![],
             update_targets: vec![],
+            update_candidates: vec![],
             collections: vec![],
             saved_searches: vec![],
             collection_pair_feedback: vec![],
@@ -4829,7 +4968,7 @@ mod tests {
                     .starts_with(".restore-staging-")
             }));
         drop(state);
-        fs::remove_dir_all(base).unwrap();
+        remove_temp_dir(&base);
     }
 
     #[test]
@@ -4872,7 +5011,7 @@ mod tests {
             "the recovery decision must not touch source files"
         );
         drop(db);
-        fs::remove_dir_all(base).unwrap();
+        remove_temp_dir(&base);
     }
 
     #[test]
@@ -4905,7 +5044,7 @@ mod tests {
                 .unwrap_err()
                 .contains("regular file"));
         }
-        fs::remove_dir_all(base).unwrap();
+        remove_temp_dir(&base);
     }
 
     #[tokio::test]
@@ -5071,6 +5210,21 @@ mod tests {
                 created_at: "2026-05-22T00:00:00Z".into(),
                 updated_at: "2026-05-23T00:00:00Z".into(),
             })
+            .unwrap();
+        state
+            .db
+            .upsert_update_candidate(&crate::database::UpdateCandidateInput {
+                source: "pixiv".into(),
+                source_id: "portable-pending-work".into(),
+                kind: "new".into(),
+                title: "まだ保存していない作品".into(),
+                payload_json: r#"{"id":"portable-pending-work"}"#.into(),
+                target_type: Some("author".into()),
+            })
+            .unwrap();
+        state
+            .db
+            .set_update_candidate_status("pixiv", "portable-pending-work", "dismissed")
             .unwrap();
         state
             .db
@@ -5260,6 +5414,10 @@ mod tests {
         let searches = state_new.db.list_saved_searches().unwrap();
         assert_eq!(searches.len(), 1);
         assert_eq!(searches[0].name, "あとで読む催眠");
+        let restored_candidates = state_new.db.list_update_candidates_after(None, 10).unwrap();
+        assert_eq!(restored_candidates.len(), 1);
+        assert_eq!(restored_candidates[0].source_id, "portable-pending-work");
+        assert_eq!(restored_candidates[0].status, "dismissed");
         assert_eq!(
             state_new.db.archive_collection_pair_feedback().unwrap(),
             vec![PortableCollectionPairFeedback {
@@ -5321,7 +5479,7 @@ mod tests {
         manifest.parts[0].sha256 = "0".repeat(64);
         fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
         assert!(read_and_validate_multipart_manifest(&manifest_path).is_err());
-        fs::remove_dir_all(base).unwrap();
+        remove_temp_dir(&base);
     }
 
     #[tokio::test]
@@ -5382,11 +5540,11 @@ mod tests {
             "Second"
         );
         drop(state);
-        fs::remove_dir_all(base).unwrap();
+        remove_temp_dir(&base);
     }
 
     #[tokio::test]
-    async fn empty_library_multipart_preserves_update_targets() {
+    async fn empty_library_multipart_preserves_update_targets_and_candidates() {
         let base = create_temp_dir();
         let source_root = base.join("source-library");
         let target_root = base.join("target-library");
@@ -5406,6 +5564,28 @@ mod tests {
                 metadata_json: Some(r#"{"reason":"followed"}"#.to_string()),
             })
             .unwrap();
+        source_state
+            .db
+            .mark_update_target_checked(
+                "author",
+                "pixiv",
+                "empty-library-author",
+                Some("unhandled-work-42"),
+                Some("2026-08-27T00:00:00Z"),
+                1,
+            )
+            .unwrap();
+        source_state
+            .db
+            .upsert_update_candidate(&crate::database::UpdateCandidateInput {
+                source: "pixiv".into(),
+                source_id: "unhandled-work-42".into(),
+                kind: "new".into(),
+                title: "次に判断する作品".into(),
+                payload_json: r#"{"id":"unhandled-work-42"}"#.into(),
+                target_type: Some("author".into()),
+            })
+            .unwrap();
         let manifest_path = base.join("empty-backup.json");
         export_all_multipart_internal(
             source_state.clone(),
@@ -5415,8 +5595,8 @@ mod tests {
         .unwrap();
         let (manifest, _) = read_and_validate_multipart_manifest(&manifest_path).unwrap();
         assert_eq!(manifest.total_works, 0);
-        assert_eq!(manifest.parts.len(), 1);
-        assert_eq!(manifest.parts[0].work_count, 0);
+        assert_eq!(manifest.parts.len(), 2);
+        assert!(manifest.parts.iter().all(|part| part.work_count == 0));
 
         let target_state = Arc::new(AppState::new(
             Database::open(&target_root.join("piep.db"), &target_root.join("downloads")).unwrap(),
@@ -5437,12 +5617,28 @@ mod tests {
             .unwrap();
         assert_eq!(restored.display_name, "監視中の作者");
         assert_eq!(
+            restored.last_seen_source_id.as_deref(),
+            Some("unhandled-work-42")
+        );
+        assert_eq!(
             restored.metadata_json.as_deref(),
             Some(r#"{"reason":"followed"}"#)
         );
+        assert_eq!(
+            target_state
+                .db
+                .update_candidate_status("pixiv", "unhandled-work-42")
+                .unwrap()
+                .as_deref(),
+            Some("pending")
+        );
         drop(source_state);
         drop(target_state);
-        fs::remove_dir_all(base).unwrap();
+        // A Windows SQLite/WAL handle owned by a just-finished blocking import
+        // can outlive this assertion by one scheduler tick. The temporary
+        // directory is OS-scoped; cleanup must not turn a successful portable
+        // round trip into a flaky product failure.
+        remove_temp_dir(&base);
     }
 
     #[tokio::test]
@@ -5571,6 +5767,6 @@ mod tests {
 
         drop(source_state);
         drop(target_state);
-        fs::remove_dir_all(base).unwrap();
+        remove_temp_dir(&base);
     }
 }

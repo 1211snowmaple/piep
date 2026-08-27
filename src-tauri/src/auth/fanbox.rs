@@ -32,6 +32,36 @@ pub struct FanboxUser {
     pub icon_url: Option<String>,
 }
 
+fn fanbox_user_from_home(html: &str) -> Result<FanboxUser, Box<dyn Error>> {
+    let re_meta = Regex::new(r#"id="metadata"\s+name="metadata"\s+content='([^']+)'"#)?;
+    let metadata = re_meta
+        .captures(html)
+        .and_then(|caps| caps.get(1))
+        .map(|m| m.as_str())
+        .ok_or("Failed to extract Fanbox metadata from HTML")?;
+    let json: serde_json::Value = serde_json::from_str(metadata)
+        .map_err(|e| format!("Failed to parse Fanbox metadata JSON: {}", e))?;
+    let user = json["context"]["user"]
+        .as_object()
+        .ok_or("User data not found in Fanbox metadata JSON")?;
+    Ok(FanboxUser {
+        user_id: user
+            .get("userId")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        name: user
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        icon_url: user
+            .get("iconUrl")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+    })
+}
+
 /// Fanboxセッションの有効性を確認し、ユーザー情報を返す
 pub async fn check_fanbox_session(
     full_cookie: &str,
@@ -56,35 +86,23 @@ pub async fn check_fanbox_session(
         .error_for_status()?;
 
     let html = bounded_home_text(html_res).await?;
-    let re_meta = Regex::new(r#"id="metadata"\s+name="metadata"\s+content='([^']+)'"#)?;
-    let metadata = re_meta
-        .captures(&html)
-        .and_then(|caps| caps.get(1))
-        .map(|m| m.as_str())
-        .ok_or("Failed to extract Fanbox metadata from HTML")?;
-    let json: serde_json::Value = serde_json::from_str(metadata)
-        .map_err(|e| format!("Failed to parse Fanbox metadata JSON: {}", e))?;
+    fanbox_user_from_home(&html)
+}
 
-    let user = json["context"]["user"]
-        .as_object()
-        .ok_or("User data not found in Fanbox metadata JSON")?;
+#[cfg(test)]
+mod tests {
+    use super::fanbox_user_from_home;
 
-    let user_data = FanboxUser {
-        user_id: user
-            .get("userId")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string(),
-        name: user
-            .get("name")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string(),
-        icon_url: user
-            .get("iconUrl")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string()),
-    };
-
-    Ok(user_data)
+    #[test]
+    fn home_metadata_is_parsed_without_accepting_nearby_scripts() {
+        let html = r#"<script id="other">{}</script><meta id="metadata" name="metadata" content='{"context":{"user":{"userId":"7","name":"作者","iconUrl":"https://example.test/icon.png"}}}'>"#;
+        let user = fanbox_user_from_home(html).unwrap();
+        assert_eq!(user.user_id, "7");
+        assert_eq!(user.name, "作者");
+        assert_eq!(
+            user.icon_url.as_deref(),
+            Some("https://example.test/icon.png")
+        );
+        assert!(fanbox_user_from_home("<html></html>").is_err());
+    }
 }

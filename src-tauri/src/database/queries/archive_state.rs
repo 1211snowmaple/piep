@@ -52,6 +52,18 @@ pub struct PortableCollectionPairFeedback {
     pub updated_at: String,
 }
 
+fn valid_tag_source(source: &str) -> bool {
+    matches!(source, "origin" | "manual" | "llm")
+}
+
+fn valid_edit_status(status: &str) -> bool {
+    matches!(status, "draft" | "active" | "archived")
+}
+
+fn valid_pair_decision(decision: &str) -> bool {
+    matches!(decision, "accept" | "reject")
+}
+
 impl Database {
     pub fn archive_tags(&self, download_id: i64) -> Result<Vec<PortableTag>, String> {
         let conn = self.read_conn()?;
@@ -91,7 +103,7 @@ impl Database {
             if name.is_empty() || name.chars().count() > 100 {
                 return Err("Backup contains an invalid tag name".to_string());
             }
-            if !matches!(tag.source.as_str(), "origin" | "manual" | "llm") {
+            if !valid_tag_source(&tag.source) {
                 return Err(format!(
                     "Backup contains an invalid tag source: {}",
                     tag.source
@@ -174,7 +186,7 @@ impl Database {
         // This participates in archive.rs' outer atomic restore transaction.
         let conn = self.conn.lock().map_err(|error| error.to_string())?;
         for revision in revisions {
-            if !matches!(revision.status.as_str(), "draft" | "active" | "archived") {
+            if !valid_edit_status(&revision.status) {
                 return Err(format!(
                     "Backup contains an invalid edit status: {}",
                     revision.status
@@ -284,7 +296,7 @@ impl Database {
         &self,
         feedback: &PortableCollectionPairFeedback,
     ) -> Result<(), String> {
-        if !matches!(feedback.decision.as_str(), "accept" | "reject") {
+        if !valid_pair_decision(&feedback.decision) {
             return Err(format!(
                 "Backup contains invalid collection feedback: {}",
                 feedback.decision
@@ -310,5 +322,24 @@ impl Database {
         )
         .map_err(|error| format!("Failed to restore collection feedback: {error}"))?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{valid_edit_status, valid_pair_decision, valid_tag_source};
+
+    #[test]
+    fn portable_enums_reject_values_that_cannot_be_restored_safely() {
+        assert!(["origin", "manual", "llm"]
+            .into_iter()
+            .all(valid_tag_source));
+        assert!(["draft", "active", "archived"]
+            .into_iter()
+            .all(valid_edit_status));
+        assert!(["accept", "reject"].into_iter().all(valid_pair_decision));
+        assert!(!valid_tag_source("model"));
+        assert!(!valid_edit_status("published"));
+        assert!(!valid_pair_decision("maybe"));
     }
 }

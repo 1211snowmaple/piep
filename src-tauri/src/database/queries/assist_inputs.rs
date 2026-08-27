@@ -17,6 +17,11 @@ const TAG_VOCABULARY_LIMIT: usize = 400;
 /// 作風をまとめるときに渡す作品数の上限。
 const AUTHOR_SAMPLE_LIMIT: usize = 30;
 
+fn assisted_tag_name(value: &str) -> Option<&str> {
+    let name = value.trim();
+    (!name.is_empty() && name.chars().count() <= 100).then_some(name)
+}
+
 impl Database {
     /// 棚でよく使われているタグの語彙。
     ///
@@ -216,10 +221,9 @@ impl Database {
             .map_err(|e| format!("Tag transaction failed: {e}"))?;
         let mut added = Vec::new();
         for name in tags {
-            let name = name.trim();
-            if name.is_empty() || name.chars().count() > 100 {
+            let Some(name) = assisted_tag_name(name) else {
                 continue;
-            }
+            };
             tx.execute(
                 "INSERT OR IGNORE INTO tags (name) VALUES (?1)",
                 params![name],
@@ -406,4 +410,17 @@ pub struct AiNote {
     /// どのモデルが書いたか。モデルを替えたときに古い文が混ざるのを防ぐ。
     pub model_id: String,
     pub created_at: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::assisted_tag_name;
+
+    #[test]
+    fn model_tags_are_trimmed_and_bounded_in_characters() {
+        assert_eq!(assisted_tag_name("  幻想  "), Some("幻想"));
+        assert!(assisted_tag_name("   ").is_none());
+        assert!(assisted_tag_name(&"界".repeat(100)).is_some());
+        assert!(assisted_tag_name(&"界".repeat(101)).is_none());
+    }
 }

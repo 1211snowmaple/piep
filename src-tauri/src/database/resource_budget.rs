@@ -98,7 +98,7 @@ pub(crate) fn available_memory_bytes() -> Option<u64> {
     (success != 0).then_some(status.avail_phys)
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
 pub(crate) fn available_memory_bytes() -> Option<u64> {
     let text = std::fs::read_to_string("/proc/meminfo").ok()?;
     let kib = text
@@ -109,6 +109,88 @@ pub(crate) fn available_memory_bytes() -> Option<u64> {
         .parse::<u64>()
         .ok()?;
     Some(kib.saturating_mul(1024))
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn available_memory_bytes() -> Option<u64> {
+    type MachPort = u32;
+    type KernReturn = i32;
+    type MachCount = u32;
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct VmStatistics64 {
+        free_count: u32,
+        active_count: u32,
+        inactive_count: u32,
+        wire_count: u32,
+        zero_fill_count: u64,
+        reactivations: u64,
+        pageins: u64,
+        pageouts: u64,
+        faults: u64,
+        cow_faults: u64,
+        lookups: u64,
+        hits: u64,
+        purges: u64,
+        purgeable_count: u32,
+        speculative_count: u32,
+        decompressions: u64,
+        compressions: u64,
+        swapins: u64,
+        swapouts: u64,
+        compressor_page_count: u32,
+        throttled_count: u32,
+        external_page_count: u32,
+        internal_page_count: u32,
+        total_uncompressed_pages_in_compressor: u64,
+        swapped_count: u64,
+    }
+
+    const HOST_VM_INFO64: i32 = 4;
+    #[link(name = "System", kind = "dylib")]
+    extern "C" {
+        fn mach_host_self() -> MachPort;
+        fn host_page_size(host: MachPort, page_size: *mut u32) -> KernReturn;
+        fn host_statistics64(
+            host: MachPort,
+            flavor: i32,
+            info: *mut i32,
+            count: *mut MachCount,
+        ) -> KernReturn;
+    }
+
+    let host = unsafe { mach_host_self() };
+    let mut page_size = 0u32;
+    // SAFETY: both functions receive writable pointers to correctly sized C
+    // layouts. The count is expressed in `integer_t` units, as Mach expects.
+    if unsafe { host_page_size(host, &mut page_size) } != 0 || page_size == 0 {
+        return None;
+    }
+    let mut stats = VmStatistics64::default();
+    let mut count = (std::mem::size_of::<VmStatistics64>() / std::mem::size_of::<i32>()) as u32;
+    if unsafe {
+        host_statistics64(
+            host,
+            HOST_VM_INFO64,
+            (&mut stats as *mut VmStatistics64).cast::<i32>(),
+            &mut count,
+        )
+    } != 0
+    {
+        return None;
+    }
+    // XNU documents speculative pages as already included in `free_count`.
+    // Keep this estimate conservative and avoid counting either speculative or
+    // purgeable pages twice through another VM bucket.
+    let reclaimable_pages =
+        u64::from(stats.free_count).saturating_add(u64::from(stats.inactive_count));
+    Some(reclaimable_pages.saturating_mul(u64::from(page_size)))
+}
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+pub(crate) fn available_memory_bytes() -> Option<u64> {
+    None
 }
 
 #[cfg(test)]

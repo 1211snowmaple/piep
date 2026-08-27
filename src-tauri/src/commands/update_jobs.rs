@@ -1,6 +1,6 @@
 use crate::database::{
     DownloadEntry, StartUpdateJobRequest, UpdateCandidateInput, UpdateCredentials, UpdateJobItem,
-    UpdateJobItemInput, UpdateJobSnapshot, UpdateJobSummary,
+    UpdateJobItemInput, UpdateJobItemState, UpdateJobSnapshot, UpdateJobSummary,
 };
 use crate::pixiv_api::error::PixivError;
 use crate::AppState;
@@ -752,6 +752,98 @@ pub async fn start_update_job(
     Ok(snapshot)
 }
 
+/// まとめ保存で預かる作品ひとつ。取得元とそのIDが分かれば足りる。
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveJobWork {
+    pub source: String,
+    pub source_id: String,
+    pub title: String,
+}
+
+/// 選んだ作品のまとめ保存を、こちら側の仕事として預かる。
+///
+/// 保存の繰り返しは画面の側にあった。818件を40分かけて取る仕事が画面と同じ
+/// 寿命なので、**画面が消えれば仕事も消える**。実際に消えた - 描画側がメモリ
+/// 不足で落ち、548件まで進んだ保存がまるごと失われた。再開する手立ても無く、
+/// 「済んだものは飛ばす」に頼ってやり直すしかなかった。
+///
+/// 更新ジョブは同じ仕事を、DBに状態を持ち、起動時に再開し、一時停止も中止も
+/// できる形でやっている。まとめ保存もそこへ載せる。項目の種類は候補と同じで
+/// よい - `process_candidate_item` が取得元IDから取ってきて保存する。
+#[tauri::command]
+pub async fn start_save_job(
+    app: tauri::AppHandle,
+    works: Vec<SaveJobWork>,
+    watch_saved: Option<bool>,
+    credentials: Option<UpdateCredentials>,
+) -> Result<UpdateJobSnapshot, String> {
+    let state = app.state::<Arc<AppState>>().inner().clone();
+    let items = build_save_items(&works);
+    if items.is_empty() {
+        return Err("保存する作品が選ばれていません".to_string());
+    }
+    let request = StartUpdateJobRequest {
+        // 走らせるのは候補の保存だけ。監視対象は見に行かない。
+        scope: "save".to_string(),
+        mode: "save".to_string(),
+        work_ids: None,
+        target_ids: None,
+        credentials: credentials.clone(),
+        watch_saved,
+        adhoc_targets: None,
+    };
+    let job_id = make_job_id();
+    let snapshot = state.db.create_update_job(&job_id, &request, &items)?;
+    state.db.append_update_job_log(
+        &job_id,
+        "info",
+        &format!("{}件の保存を預かりました", items.len()),
+    )?;
+    spawn_update_job(
+        app.clone(),
+        job_id.clone(),
+        credentials.unwrap_or_else(snapshot_credentials_missing),
+    );
+    emit_snapshot(&app, &state, &job_id).await;
+    Ok(snapshot)
+}
+
+/// 取得元とIDが揃っているものだけを、同じ相手先で一度ずつ預かる。
+///
+/// 同じ作品が二度並ぶと、二度取りに行って二度目は「保存済み」で飛ぶ。
+/// 無駄なだけでなく、件数の分母が実際より大きく出る。
+fn build_save_items(works: &[SaveJobWork]) -> Vec<UpdateJobItemInput> {
+    let mut seen = HashSet::new();
+    let mut items = Vec::new();
+    for work in works {
+        let source = work.source.trim();
+        let source_id = work.source_id.trim();
+        if (source != "pixiv" && source != "fanbox") || source_id.is_empty() {
+            continue;
+        }
+        if !seen.insert((source.to_string(), source_id.to_string())) {
+            continue;
+        }
+        let title = if work.title.trim().is_empty() {
+            source_id.to_string()
+        } else {
+            work.title.trim().to_string()
+        };
+        items.push(UpdateJobItemInput {
+            item_type: "candidate".to_string(),
+            source: Some(source.to_string()),
+            source_id: Some(source_id.to_string()),
+            target_type: None,
+            title,
+            // `kind` は保存済みの扱いを分ける。`save` は監視中のものだけ取り直す。
+            payload_json: serde_json::json!({ "kind": "save" }).to_string(),
+            status: "queued".to_string(),
+        });
+    }
+    items
+}
+
 #[tauri::command]
 pub async fn pause_update_job(
     app: tauri::AppHandle,
@@ -830,6 +922,19 @@ pub async fn get_update_job(
     state
         .db
         .update_job_snapshot_page(&job_id, candidate_after_id, log_before_id)
+}
+
+/// ジョブの項目ひとつひとつが、いまどうなっているかを返す。
+///
+/// 一覧の要約は「何件済んだか」しか持たない。画面が行ごとに印を付けるには、
+/// どの作品がどうなったかが要る。
+#[tauri::command]
+pub async fn list_update_job_item_states(
+    app: tauri::AppHandle,
+    job_id: String,
+) -> Result<Vec<UpdateJobItemState>, String> {
+    let state = app.state::<Arc<AppState>>();
+    state.db.list_update_job_item_states(&job_id)
 }
 
 #[tauri::command]
@@ -965,6 +1070,10 @@ async fn run_update_job(
     let mut backoff: u32 = 1;
     let mut rate_limit_retries: HashMap<i64, u32> = HashMap::new();
     let mut processed_since_trim: u32 = 0;
+    // このワーカーが保存できたもの。終わりに、作者とシリーズの横顔をまとめて
+    // 取りに行くための控え。再開で別のワーカーに替わったら空から数え直す -
+    // 横顔は取り逃しても次の機会に埋まるので、跨いで持ち回るほどではない。
+    let mut saved_download_ids: Vec<i64> = Vec::new();
 
     loop {
         if has_pending_restart(&job_id) {
@@ -995,6 +1104,20 @@ async fn run_update_job(
 
         let Some(item) = state.db.next_update_job_item(&job_id)? else {
             let snapshot = state.db.update_job_snapshot(&job_id)?;
+            // 仕上げは、完了と印を付ける前に。「完了」が出てからまだ取りに
+            // 行っているのでは、画面が閉じられる頃に途中で切れる。
+            // ただし横顔の補完を約束していたのは Web からのまとめ保存だけ。
+            // 通常の更新ジョブまで延ばすと、完了直前に別の通信が何十件も増える。
+            if snapshot.scope == "save" {
+                refresh_profiles_for_saved_downloads(
+                    &app,
+                    &state,
+                    &job_id,
+                    &saved_download_ids,
+                    &credentials,
+                )
+                .await;
+            }
             let final_status = if snapshot.error_count > 0 {
                 "failed"
             } else {
@@ -1042,6 +1165,7 @@ async fn run_update_job(
             }
             Ok(ItemOutcome::Saved(download_id, message)) => {
                 backoff = 1;
+                saved_download_ids.push(download_id);
                 state
                     .db
                     .complete_update_job_item(item.id, "saved", None, Some(download_id))?;
@@ -1184,6 +1308,78 @@ async fn run_update_job(
     }
 
     Ok(())
+}
+
+/// 保存できた作品の、作者とシリーズの横顔を取りに行く。
+///
+/// 本文が入っても、作者の顔と紹介文は別の取得になる。ここを飛ばすと一覧には
+/// 名前だけが並び、次に同じ作者を保存する日まで埋まらない。画面側の保存は
+/// 最後にこれを回していた。ジョブに移すなら、これも一緒に連れて来ないと
+/// **保存のたびに横顔が欠ける**。
+///
+/// 取得元は作品と同じ相手。`refresh_entity_profile` が自前で 3 秒の間隔を
+/// 持っているので、ここでは待たない。1 件ごとの失敗は記録だけに留める -
+/// 本文はもう手元にあり、横顔は次の機会にも埋められる。
+async fn refresh_profiles_for_saved_downloads(
+    app: &tauri::AppHandle,
+    state: &Arc<AppState>,
+    job_id: &str,
+    download_ids: &[i64],
+    credentials: &UpdateCredentials,
+) {
+    if download_ids.is_empty() {
+        return;
+    }
+    // 同じ作者の作品を 10 件保存しても、取りに行くのは 1 回でいい。
+    let mut targets: Vec<(&'static str, String, String)> = Vec::new();
+    let mut seen: HashSet<(&'static str, String, String)> = HashSet::new();
+    for id in download_ids {
+        let Ok(entry) = state.db.get_download(*id) else {
+            continue;
+        };
+        // person_id が無い作品もある。その場合は作者IDが同じ役をする。
+        let person = entry
+            .person_id
+            .clone()
+            .filter(|key| !key.trim().is_empty())
+            .unwrap_or_else(|| entry.author_id.clone());
+        if !person.trim().is_empty() {
+            let key = ("person", entry.source.clone(), person);
+            if seen.insert(key.clone()) {
+                targets.push(key);
+            }
+        }
+        if let Some(series) = entry.series_id.clone().filter(|key| !key.trim().is_empty()) {
+            let key = ("series", entry.source.clone(), series);
+            if seen.insert(key.clone()) {
+                targets.push(key);
+            }
+        }
+    }
+    if targets.is_empty() {
+        return;
+    }
+    let _ = state.db.append_update_job_log(
+        job_id,
+        "info",
+        &format!("作者・シリーズ情報を確認しています（{}件）", targets.len()),
+    );
+    for (entity_type, source, source_key) in targets {
+        let params = crate::commands::database::RefreshEntityProfileParams {
+            entity_type: entity_type.to_string(),
+            source: source.clone(),
+            source_key: source_key.clone(),
+            force: Some(false),
+            refresh_token: pixiv_token(credentials),
+            cookie: fanbox_cookie(credentials),
+            user_agent: Some(fanbox_user_agent(credentials)),
+        };
+        if let Err(error) =
+            crate::commands::database::refresh_entity_profile(app.clone(), params).await
+        {
+            log::warn!("{entity_type}:{source}:{source_key} の情報を取れません: {error}");
+        }
+    }
 }
 
 enum ItemOutcome {
@@ -1867,11 +2063,20 @@ async fn process_candidate_item(
     let payload: Value = serde_json::from_str(&item.payload_json).map_err(|e| e.to_string())?;
     let source = item.source.as_deref().unwrap_or("");
     let source_id = item.source_id.as_deref().unwrap_or("");
+    let kind = payload.get("kind").and_then(|v| v.as_str());
+    let existing = state.db.get_download_by_source(source, source_id)?;
     // 改稿の候補は「すでに手元にある作品」が対象なので、保存済みでも取りに行く。
     // 中身が本当に変わっていなければ download_and_save 側が版を上げずに終わる。
-    let is_revision = payload.get("kind").and_then(|v| v.as_str()) == Some("revision");
-    let existing = state.db.get_download_by_source(source, source_id)?;
-    if existing.is_some() && !is_revision {
+    //
+    // まとめ保存も、監視に載っている作品は取り直す。監視しているということは
+    // 「続きが出たら欲しい」ということなので、まとめて取り直すときに飛ばす
+    // 理由が無い。画面の側でループしていたころと同じ判断である。
+    let refetch_existing = kind == Some("revision")
+        || (kind == Some("save")
+            && existing
+                .as_ref()
+                .is_some_and(|download| download.watch_updates));
+    if existing.is_some() && !refetch_existing {
         return Ok(ItemOutcome::Skipped(format!(
             "保存済みのためスキップ: {}",
             item.title
@@ -2003,8 +2208,8 @@ async fn process_candidate_item(
 #[cfg(test)]
 mod tests {
     use super::{
-        canceled_status_for, classify_failure, describe_text_change, make_job_id, may_remember,
-        FailureKind,
+        build_save_items, canceled_status_for, classify_failure, describe_text_change, make_job_id,
+        may_remember, FailureKind, SaveJobWork,
     };
     use std::collections::HashSet;
 
@@ -2146,6 +2351,71 @@ mod tests {
                 && id.starts_with("job-")
                 && id[4..].bytes().all(|byte| byte.is_ascii_hexdigit())
         }));
+    }
+
+    /// 預かるのは、取得元とIDが揃っているものだけ。
+    ///
+    /// 同じ作品が二度並ぶと、二度取りに行って二度目は「保存済み」で飛ぶ。
+    /// 無駄なだけでなく、件数の分母が実際より大きく出る。
+    #[test]
+    fn a_save_job_takes_each_work_once() {
+        let works = vec![
+            SaveJobWork {
+                source: "pixiv".into(),
+                source_id: "1".into(),
+                title: "一つ目".into(),
+            },
+            // 同じ相手先。二度は預からない。
+            SaveJobWork {
+                source: "pixiv".into(),
+                source_id: "1".into(),
+                title: "一つ目（重複）".into(),
+            },
+            // 取得元が違えば別の作品。
+            SaveJobWork {
+                source: "fanbox".into(),
+                source_id: "1".into(),
+                title: "別の取得元".into(),
+            },
+            // 知らない取得元は預からない。
+            SaveJobWork {
+                source: "unknown".into(),
+                source_id: "9".into(),
+                title: "知らない相手".into(),
+            },
+            // IDが無いものも預からない。
+            SaveJobWork {
+                source: "pixiv".into(),
+                source_id: "   ".into(),
+                title: "IDが無い".into(),
+            },
+        ];
+
+        let items = build_save_items(&works);
+
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].source.as_deref(), Some("pixiv"));
+        assert_eq!(items[0].source_id.as_deref(), Some("1"));
+        assert_eq!(items[1].source.as_deref(), Some("fanbox"));
+        // 種類は候補と同じ。取得元IDから取ってくる処理をそのまま使う。
+        assert!(items.iter().all(|item| item.item_type == "candidate"));
+        // `kind` で保存済みの扱いを分ける。
+        assert!(items
+            .iter()
+            .all(|item| item.payload_json.contains("\"save\"")));
+    }
+
+    /// 題名が空でも預かる。一覧に「（無題）」ではなくIDが出る。
+    #[test]
+    fn a_work_without_a_title_still_gets_one() {
+        let items = build_save_items(&[SaveJobWork {
+            source: "pixiv".into(),
+            source_id: "12345".into(),
+            title: "  ".into(),
+        }]);
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].title, "12345");
     }
 
     #[test]

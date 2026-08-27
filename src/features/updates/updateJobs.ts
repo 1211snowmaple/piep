@@ -14,83 +14,28 @@ import {
   startUpdateJobCommand,
 } from "@/services/updateJobApi";
 
-export type UpdateJobStatus =
-  | "queued"
-  | "running"
-  | "paused"
-  | "auth_required"
-  | "canceling"
-  | "canceled"
-  | "completed"
-  | "failed";
+import type {
+  StartUpdateJobRequest,
+  UpdateJobCredentials,
+  UpdateJobSnapshot,
+  UpdateJobStatus,
+  UpdateJobSummary,
+} from "@/services/updateJobApi";
 
-export type UpdateJobScope = "all" | "work" | "author" | "series";
-export type UpdateJobMode = "check_only" | "auto_save";
-
-export interface UpdateJobCredentials {
-  pixivRefreshToken?: string | null;
-  fanboxCookie?: string | null;
-  fanboxUserAgent?: string | null;
-}
-
-export interface StartUpdateJobRequest {
-  scope: UpdateJobScope;
-  mode: UpdateJobMode;
-  workIds?: number[] | null;
-  targetIds?: number[] | null;
-  /** Put every work this job saves under update watching. */
-  watchSaved?: boolean | null;
-  /** Authors or series to check once, without adding them to the watch list. */
-  adhocTargets?: { targetType: "author" | "series"; source: string; sourceKey: string; displayName: string }[] | null;
-  credentials?: UpdateJobCredentials | null;
-}
-
-export interface UpdateJobSummary {
-  jobId: string;
-  status: UpdateJobStatus;
-  scope: UpdateJobScope;
-  mode: UpdateJobMode;
-  totals: number;
-  processed: number;
-  candidateCount: number;
-  savedCount: number;
-  errorCount: number;
-  activeLabel: string | null;
-  startedAt: string;
-  updatedAt: string;
-  finishedAt: string | null;
-}
-
-export interface UpdateJobLog {
-  id: number;
-  logType: "info" | "success" | "warn" | "error";
-  message: string;
-  createdAt: string;
-}
-
-export interface UpdateJobCandidate {
-  id: number;
-  key: string;
-  source: "pixiv" | "fanbox";
-  sourceId: string;
-  title: string;
-  subtitle: string;
-  targetLabel: string;
-  targetType: "work" | "author" | "series";
-  selected: boolean;
-  status: "candidate" | "queued" | "running" | "saved" | "failed" | "skipped" | "done";
-  /** Why this is a candidate: a work we lack, a sequel, or a rewrite of one we have. */
-  kind: "new" | "sequel" | "revision";
-  /** Set when the candidate failed; carries the classified reason. */
-  error?: string | null;
-}
-
-export interface UpdateJobSnapshot extends UpdateJobSummary {
-  logs: UpdateJobLog[];
-  candidates: UpdateJobCandidate[];
-  nextCandidateCursor: number | null;
-  previousLogCursor: number | null;
-}
+// 形は IPC の側が持つ。ここで同じものを書き写していたころ、`updateJobApi` に
+// 種類をひとつ足すたびに、こちらでも同じ手を入れないと型が食い違った。
+// **同じ形をふたつ置かない。**
+export type {
+  UpdateJobStatus,
+  UpdateJobScope,
+  UpdateJobMode,
+  UpdateJobCredentials,
+  StartUpdateJobRequest,
+  UpdateJobSummary,
+  UpdateJobLog,
+  UpdateJobCandidate,
+  UpdateJobSnapshot,
+} from "@/services/updateJobApi";
 
 function mergeSnapshot(current: UpdateJobSnapshot | null, incoming: UpdateJobSnapshot): UpdateJobSnapshot {
   if (!current || current.jobId !== incoming.jobId) return incoming;

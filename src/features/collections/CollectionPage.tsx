@@ -376,8 +376,8 @@ function CollectionDetail({ collection, readOnly, onEdit, onChanged }: { collect
           </Paper>
         ) : (
           <>
-            <Group justify="space-between" wrap="nowrap" className="collection-member-toolbar">
-              <Group gap="xs" wrap="nowrap">
+            <Group justify="space-between" wrap="wrap" className="collection-member-toolbar">
+              <Group gap="xs" wrap="wrap">
                 {/* 読み込み方は左端に置く。ここにあった「掴んで運ぶか、矢印で
                     入れ替えられます」は、取っ手も矢印も見えているものの説明で
                     しかなかった。並べ替えられない束でだけ、そう言えない理由を

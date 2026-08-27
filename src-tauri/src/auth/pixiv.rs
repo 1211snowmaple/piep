@@ -40,6 +40,12 @@ pub struct PixivAuthResponse {
     pub refresh_token: String,
     pub user: Option<PixivUser>,
 }
+
+fn parse_auth_response(text: &str) -> Result<PixivAuthResponse, Box<dyn Error>> {
+    let json_value: serde_json::Value = serde_json::from_str(text)?;
+    let response = json_value.get("response").unwrap_or(&json_value);
+    Ok(serde_json::from_value(response.clone())?)
+}
 pub async fn login_with_refresh_token(
     refresh_token: &str,
 ) -> Result<PixivAuthResponse, Box<dyn Error>> {
@@ -62,11 +68,7 @@ pub async fn login_with_refresh_token(
         .await?;
 
     if res.status().is_success() {
-        let json_value: serde_json::Value =
-            serde_json::from_str(&bounded_response_text(res).await?)?;
-        let resp = json_value.get("response").unwrap_or(&json_value);
-        let auth_resp: PixivAuthResponse = serde_json::from_value(resp.clone())?;
-        Ok(auth_resp)
+        parse_auth_response(&bounded_response_text(res).await?)
     } else {
         let err_text = bounded_response_text(res).await?;
         log::error!("Pixiv API Error Response: {}", err_text);
@@ -103,14 +105,28 @@ pub async fn login_with_code(
         .await?;
 
     if res.status().is_success() {
-        let json_value: serde_json::Value =
-            serde_json::from_str(&bounded_response_text(res).await?)?;
-        let resp = json_value.get("response").unwrap_or(&json_value);
-        let auth_resp: PixivAuthResponse = serde_json::from_value(resp.clone())?;
-        Ok(auth_resp)
+        parse_auth_response(&bounded_response_text(res).await?)
     } else {
         let err_text = bounded_response_text(res).await?;
         log::error!("Pixiv API Error Response: {}", err_text);
         Err(format!("Pixiv Auth Error: {}", err_text).into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_auth_response;
+
+    #[test]
+    fn auth_payload_accepts_both_documented_envelopes() {
+        for json in [
+            r#"{"access_token":"a","refresh_token":"r","user":null}"#,
+            r#"{"response":{"access_token":"a","refresh_token":"r","user":null}}"#,
+        ] {
+            let parsed = parse_auth_response(json).unwrap();
+            assert_eq!(parsed.access_token, "a");
+            assert_eq!(parsed.refresh_token, "r");
+        }
+        assert!(parse_auth_response(r#"{"response":{}}"#).is_err());
     }
 }

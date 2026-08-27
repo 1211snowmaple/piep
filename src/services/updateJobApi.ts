@@ -11,8 +11,9 @@ export type UpdateJobStatus =
   | "completed"
   | "failed";
 
-export type UpdateJobScope = "all" | "work" | "author" | "series";
-export type UpdateJobMode = "check_only" | "auto_save";
+/** `save` は「選んだ作品をまとめて保存する」ジョブ。監視対象は見に行かない。 */
+export type UpdateJobScope = "all" | "work" | "author" | "series" | "save";
+export type UpdateJobMode = "check_only" | "auto_save" | "save";
 
 export interface UpdateJobCredentials {
   pixivRefreshToken?: string | null;
@@ -107,6 +108,43 @@ export async function startUpdateJobCommand(
       credentials,
     },
   });
+}
+
+/** まとめ保存に渡す1件。取得元とIDが分かれば、本文は向こうが取りに行く。 */
+export interface SaveJobWork {
+  source: "pixiv" | "fanbox";
+  sourceId: string;
+  title: string;
+}
+
+/**
+ * 選んだ作品のまとめ保存を、Rust 側の仕事として預ける。
+ *
+ * 画面が閉じても、落ちても、保存は走り続ける。返ってくるのは開始直後の様子で、
+ * 続きは `getUpdateJobCommand` と `update-job` イベントで追う。
+ */
+export async function startSaveJobCommand(
+  works: SaveJobWork[],
+  watchSaved: boolean,
+  credentials?: UpdateJobCredentials | null,
+): Promise<UpdateJobSnapshot> {
+  return invoke<UpdateJobSnapshot>("start_save_job", {
+    works,
+    watchSaved,
+    credentials: credentials ?? await getUpdateJobCredentials(),
+  });
+}
+
+/** ジョブの項目ひとつひとつの、いまの状態。行に印を付けるために使う。 */
+export interface UpdateJobItemState {
+  source: string | null;
+  sourceId: string | null;
+  status: string;
+  error: string | null;
+}
+
+export async function listUpdateJobItemStatesCommand(jobId: string): Promise<UpdateJobItemState[]> {
+  return invoke<UpdateJobItemState[]>("list_update_job_item_states", { jobId });
 }
 
 export async function resumeUpdateJobCommand(jobId: string, retryFailed = false): Promise<UpdateJobSnapshot> {

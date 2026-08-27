@@ -254,3 +254,44 @@ pub fn extension_to_mime(ext: &str) -> &str {
         _ => "application/octet-stream",
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{extension_to_mime, mime_to_extension, resize_if_needed};
+    use crate::epub::intermediate::ImageCompressOptions;
+    use image::DynamicImage;
+
+    #[test]
+    fn known_image_types_round_trip_to_their_epub_extensions() {
+        for (extension, mime) in [
+            ("jpeg", "image/jpeg"),
+            ("PNG", "image/png"),
+            ("webp", "image/webp"),
+            ("gif", "image/gif"),
+        ] {
+            let expected_extension = if extension == "jpeg" {
+                "jpg".to_string()
+            } else {
+                extension.to_lowercase()
+            };
+            assert_eq!(
+                mime_to_extension(extension_to_mime(extension)),
+                expected_extension
+            );
+            assert_eq!(extension_to_mime(mime_to_extension(mime)), mime);
+        }
+        assert_eq!(extension_to_mime("svg"), "application/octet-stream");
+    }
+
+    #[test]
+    fn resize_never_enlarges_a_small_image() {
+        let image = DynamicImage::new_rgb8(20, 10);
+        let options = ImageCompressOptions {
+            max_width: Some(100),
+            max_height: Some(100),
+            ..ImageCompressOptions::default()
+        };
+        let unchanged = resize_if_needed(image, &options);
+        assert_eq!((unchanged.width(), unchanged.height()), (20, 10));
+    }
+}

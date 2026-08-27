@@ -35,12 +35,10 @@ import {
   type SidebarDownloadType,
   type SidebarItem,
 } from "@/features/browser/downloadCandidates";
-import { normalizeFanboxPostPayload, normalizeFanboxSaveMetadata, normalizePixivSaveMetadata } from "@/features/browser/downloadMetadata";
-import { refreshEntityProfilesForEntries, type UpdateDownloadEntry } from "@/features/updates/updateWorkflow";
+import { normalizeFanboxPostPayload } from "@/features/browser/downloadMetadata";
 import { errorMessage } from "@/lib/format";
 import { getProvider, ProviderMark } from "@/lib/providers";
 import { registerUnsavedGuard } from "@/lib/unsavedGuard";
-import { createSourcePacer, isRateLimited, MAX_RATE_LIMIT_RETRIES } from "@/lib/sourcePacing";
 import { useEmbeddedBrowserOverlay } from "@/features/browser/useEmbeddedBrowserOverlay";
 import {
   closeEmbeddedBrowser,
@@ -60,24 +58,45 @@ import {
   type StandaloneBrowserClosedEvent,
   type StandaloneBrowserUrlEvent,
 } from "@/services/browserApi";
-import { getDownloadBySource, isTauriRuntime, setWatchUpdates } from "@/services/dbApi";
+import { isTauriRuntime } from "@/services/dbApi";
 import { loadSchedule } from "@/features/updates/updateSchedule";
 import { invalidateWorkSetViews } from "@/features/library/workSetInvalidation";
 import {
-  downloadAndSave,
   fetchFanboxCreatorPosts,
   fetchFanboxPost,
-  fetchPixivNovel,
   fetchPixivNovelByUrl,
   fetchPixivSeriesNovels,
   fetchPixivUserNovels,
 } from "@/services/downloadApi";
 import { subscribeTauriEvent } from "@/services/eventBus";
 import { store } from "@/store";
-import type { DownloadEntry } from "@/types/library";
 import { requestOperationCancel, startOperation, type OperationController } from "@/features/jobs/operationJobs";
+import { waitForUpdateJob } from "@/features/updates/updateJobs";
+import {
+  cancelUpdateJobCommand,
+  listUpdateJobItemStatesCommand,
+  startSaveJobCommand,
+  type UpdateJobSnapshot,
+} from "@/services/updateJobApi";
 
 type SaveSource = "pixiv" | "fanbox";
+
+const SAVE_JOB_ROW_STATUS: Record<string, SidebarItem["status"]> = {
+  queued: "pending",
+  running: "downloading",
+  saved: "success",
+  done: "success",
+  skipped: "skipped",
+  failed: "failed",
+};
+
+const SAVE_JOB_STATUS_RANK: Partial<Record<Exclude<SidebarItem["status"], undefined>, number>> = {
+  pending: 0,
+  downloading: 1,
+  success: 2,
+  skipped: 2,
+  failed: 2,
+};
 
 export default function SavePage() {
   const { source: routeSource } = useRouteParams("/save/:source?");
@@ -113,6 +132,7 @@ export default function SavePage() {
   const addressFocusedRef = useRef(false);
   const acceleratorHandlerRef = useRef<(payload: BrowserAcceleratorEvent) => void>(() => undefined);
   const saveOperationRef = useRef<OperationController | null>(null);
+  const saveJobIdRef = useRef<string | null>(null);
   // 保存中かどうかは、描画の外からも即座に読めなければならない - 終了ガードと
   // 再入の防止が、どちらも state の反映を待てないため。
   const savingRef = useRef(false);
@@ -517,29 +537,83 @@ export default function SavePage() {
       })();
     }
   };
+  // ジョブの様子を、行と進捗に写し取る。**保存はこの関数の中では起きない** -
+  // 走っているのは Rust の中で、ここはそれを覗いているだけ。だからこの画面を
+  // 離れても、描画側が落ちても、保存は最後まで進む。
+  const followSaveJob = async (
+    jobId: string,
+    itemSource: "pixiv" | "fanbox",
+    operation: OperationController,
+    total: number,
+  ) => {
+    let forwardedLogId = 0;
+    const applyItemStates = async () => {
+      const states = await listUpdateJobItemStatesCommand(jobId).catch(() => null);
+      if (!states) return;
+      const byId = new Map(
+        states
+          .filter((state) => state.source === itemSource && state.sourceId)
+          .map((state) => [state.sourceId as string, state]),
+      );
+      setItems((rows) => rows.map((row) => {
+        const state = byId.get(row.id);
+        if (!state) return row;
+        const status = SAVE_JOB_ROW_STATUS[state.status];
+        if (!status) return row;
+        // 状態取得は複数回が重なりうる。古い応答があとから戻っても、保存済みの
+        // 行を「処理中」へ巻き戻さない。
+        const currentRank = row.status ? (SAVE_JOB_STATUS_RANK[row.status] ?? 0) : 0;
+        if (currentRank > (SAVE_JOB_STATUS_RANK[status] ?? 0)) return row;
+        if (row.status === status && (row.error ?? null) === state.error) return row;
+        return { ...row, status, error: state.error ?? undefined };
+      }));
+    };
+    const applySnapshot = (snapshot: UpdateJobSnapshot) => {
+      const done = Math.min(snapshot.processed, total);
+      setProgress({
+        current: done,
+        total,
+        text: snapshot.activeLabel || `${done}/${total} 件を処理しました`,
+      });
+      operation.progress(done, total, snapshot.activeLabel || `${done}/${total} 件を処理しました`);
+      // ジョブのログはそのまま作業の記録へ流す。同じ行を二度出さないよう、
+      // どこまで送ったかを覚えておく。
+      const fresh = snapshot.logs.filter((log) => log.id > forwardedLogId).sort((a, b) => a.id - b.id);
+      for (const log of fresh) {
+        operation.log(log.message, log.logType === "success" ? "info" : log.logType);
+        forwardedLogId = log.id;
+      }
+    };
+
+    const final = await waitForUpdateJob(jobId, (snapshot) => {
+      applySnapshot(snapshot);
+      void applyItemStates();
+    });
+    // 最後の1件ぶんは、終わりの様子が届いたあとで書き戻す。
+    await applyItemStates();
+    return final;
+  };
+
   const execute = async () => {
     // 済んだものは対象から外す。再試行は「残りをもう一度」であって、
     // 保存できたものを取り直しに行くことではない - 監視中の作品は
     // 保存済みでも取り直す作りなので、素通しにすると本当に再取得される。
     const selected = items.filter((item) => item.selected && item.status !== "success" && item.status !== "skipped");
     if (!selected.length || !downloadType || !runtime || savingRef.current) return;
-    // 取得元は続けざまに叩けば断ってくる。1件ずつ間を空け、断られたら
-    // 引き下がって同じ項目をやり直す。ここに間隔が無かったころは、89件
-    // 選ぶと途中から全部が取得制限で落ちていた。
-    //
-    // 中止より先に作るのは、中止がこの待ちを断ち切る相手だから。取得制限の
-    // あとの待ちは30秒近くまで伸び、そこで止まっているあいだ中止を握り潰すと
-    // 「押しても何も起きない」ことになる。
-    const pacer = createSourcePacer();
+    const itemSource: "pixiv" | "fanbox" = downloadType.startsWith("pixiv") ? "pixiv" : "fanbox";
     const operation = startOperation({
       kind: "save",
       label: `${selected.length}件をライブラリに保存`,
       // 一覧の出どころは、いま開いているページではなく取ってきたページ。
       detail: `${getProvider(source).label} · ${lastAnalysisUrl || currentUrl}`,
       total: selected.length,
-      // 待ちをその場で終わらせ、押されたことを画面にも即座に出す。実際に
+      // 中止はジョブへ伝える。押されたことは画面にも即座に出す - 実際に
       // 止まるのは次の切れ目だが、返事はここで返す。
-      onCancel: () => { pacer.abort(); setCanceling(true); },
+      onCancel: () => {
+        setCanceling(true);
+        const jobId = saveJobIdRef.current;
+        if (jobId) void cancelUpdateJobCommand(jobId).catch(() => undefined);
+      },
       // 再試行はいまの画面に対して走らせる。開始時の execute を捕まえたままだと、
       // その描画の items を見て、成功済みも含む古い一覧を回し直してしまう。
       onRetry: () => executeRef.current(),
@@ -552,97 +626,43 @@ export default function SavePage() {
     closeGuardRef.current = registerUnsavedGuard(() => savingRef.current, ["close"]);
     setSaving(true);
     setCanceling(false);
-    let saved = 0, skipped = 0, failed = 0;
-    let firstError = "";
-    const savedEntries: UpdateDownloadEntry[] = [];
+    setProgress({ current: 0, total: selected.length, text: "保存の準備をしています" });
     try {
-      const pixivToken = await store.get<string>("pixiv_refresh_token") || "";
-      const fanboxCookie = await store.get<string>("fanbox_session_id") || "";
-      const fanboxUserAgent = await store.get<string>("fanbox_user_agent") || "Mozilla/5.0";
-      for (let index = 0; index < selected.length; index += 1) {
-        if (operation.isCancelRequested()) break;
-        const item = selected[index];
-        setProgress({ current: index + 1, total: selected.length, text: item.title });
-        operation.progress(index, selected.length, `「${item.title}」を処理しています`);
-        setItems((rows) => rows.map((row) => row.id === item.id ? { ...row, status: "downloading" } : row));
-        let attempt = 0;
-        for (;;) {
-          try {
-            const itemSource = downloadType.startsWith("pixiv") ? "pixiv" : "fanbox";
-            const existing = await getDownloadBySource<DownloadEntry>(itemSource, item.id);
-            if (existing && !existing.watchUpdates) { skipped += 1; operation.log(`「${item.title}」は保存済みのためスキップしました`, "info"); setItems((rows) => rows.map((row) => row.id === item.id ? { ...row, status: "skipped" } : row)); break; }
-            if (itemSource === "pixiv") {
-              const data = await fetchPixivNovel<PixivNovel>(item.id, pixivToken);
-              const metadata = normalizePixivSaveMetadata(data, item.title, item.subtitle);
-              savedEntries.push(await downloadAndSave<UpdateDownloadEntry>({ data, source: "pixiv", sourceId: item.id, ...metadata, cookie: null, userAgent: null }));
-            } else {
-              const data = normalizeFanboxPostPayload<FanboxPost>(await fetchFanboxPost<unknown>(item.id, fanboxCookie, fanboxUserAgent));
-              const metadata = normalizeFanboxSaveMetadata(data, item.title, item.subtitle);
-              savedEntries.push(await downloadAndSave<UpdateDownloadEntry>({ data, source: "fanbox", sourceId: item.id, ...metadata, cookie: fanboxCookie, userAgent: fanboxUserAgent }));
-            }
-            saved += 1; operation.progress(index + 1, selected.length, `「${item.title}」を保存しました`); setItems((rows) => rows.map((row) => row.id === item.id ? { ...row, status: "success" } : row));
-            // 通ったぶんだけ元の速さへ戻す。制限が解けたあとも遅いままにしない。
-            pacer.relax();
-            break;
-          } catch (error) {
-            // 「今は無理」と言われただけなら、間を空けて同じ項目をやり直す。
-            if (isRateLimited(error) && attempt < MAX_RATE_LIMIT_RETRIES && !operation.isCancelRequested()) {
-              attempt += 1;
-              const waited = Math.round(pacer.currentDelayMs() * 2 / 1000);
-              operation.log(`「${item.title}」: 取得が制限されています。${waited}秒あけてやり直します`, "warn");
-              setProgress({ current: index + 1, total: selected.length, text: `取得制限のため待機中… ${item.title}` });
-              await pacer.backOff();
-              // 待っているあいだに中止が入っていたら、やり直しには行かない。
-              // この項目はまだ失敗ではないので、失敗としても数えない。
-              if (operation.isCancelRequested()) {
-                operation.log(`「${item.title}」の待機を中止しました`, "warn");
-                setItems((rows) => rows.map((row) => row.id === item.id ? { ...row, status: "pending" } : row));
-                break;
-              }
-              continue;
-            }
-            const message = errorMessage(error);
-            if (!firstError) firstError = message;
-            operation.log(`「${item.title}」: ${message}`, "error");
-            failed += 1; setItems((rows) => rows.map((row) => row.id === item.id ? { ...row, status: "failed", error: message } : row));
-            break;
-          }
-        }
-        // 最後の1件のあとまで待つ必要はない。
-        if (index < selected.length - 1 && !operation.isCancelRequested()) await pacer.wait();
-      }
-      // 仕上げの作者・シリーズ取得も、相手は同じ取得元。中止のあとにここで
-      // 何十回も叩けば、止めたはずのものが止まって見えない。作品はもう
-      // 保存できていて、作者名も入っている - 足りないのは横顔だけなので、
-      // 次の保存や更新確認のときに埋まる。
-      if (savedEntries.length > 0 && operation.isCancelRequested()) {
-        operation.log("中止したため、作者・シリーズ情報の取得は見送りました", "warn");
-      }
-      if (savedEntries.length > 0 && !operation.isCancelRequested()) {
-        setProgress({ current: selected.length, total: selected.length, text: "作者・シリーズ情報を取得しています" });
-        await refreshEntityProfilesForEntries(savedEntries, { refreshToken: pixivToken, fanboxCookie, fanboxUserAgent });
-        // 「保存したものは追いかける」設定のときだけ、保存直後に監視へ載せる。
-        // 失敗しても保存は済んでいるので、ここで処理を止めない。
-        const schedule = await loadSchedule();
-        if (schedule.watchSaved) {
-          await Promise.allSettled(savedEntries.map((entry) => setWatchUpdates(entry.id, true)));
-        }
-      }
-      queryClient.invalidateQueries({ queryKey: ["library"] }); queryClient.invalidateQueries({ queryKey: ["entity"] });
-      invalidateWorkSetViews(queryClient);
+      const schedule = await loadSchedule();
+      const snapshot = await startSaveJobCommand(
+        selected.map((item) => ({ source: itemSource, sourceId: item.id, title: item.title })),
+        schedule.watchSaved ?? false,
+      );
+      saveJobIdRef.current = snapshot.jobId;
       if (operation.isCancelRequested()) {
-        operation.cancel(`保存 ${saved} · スキップ ${skipped} · 失敗 ${failed} の時点で中止しました`);
-      } else if (failed === selected.length) {
-        operation.fail(new Error(firstError || "すべての作品を保存できませんでした"));
-      } else {
-        operation.complete(`保存 ${saved} · スキップ ${skipped} · 失敗 ${failed}`);
+        await cancelUpdateJobCommand(snapshot.jobId).catch(() => undefined);
       }
-      notifications.show({ color: operation.isCancelRequested() ? "gray" : failed ? "yellow" : "green", title: operation.isCancelRequested() ? "保存を中止しました" : "保存が完了しました", message: `保存 ${saved} · スキップ ${skipped} · 失敗 ${failed}` });
-      if (firstError) notifications.show({ color: "red", title: "保存できなかった項目があります", message: firstError });
+      const final = await followSaveJob(snapshot.jobId, itemSource, operation, selected.length);
+      queryClient.invalidateQueries({ queryKey: ["library"] });
+      queryClient.invalidateQueries({ queryKey: ["entity"] });
+      invalidateWorkSetViews(queryClient);
+      const saved = final.savedCount;
+      const failed = final.errorCount;
+      const skipped = Math.max(0, final.processed - saved - failed);
+      const tally = `保存 ${saved} · 保存済み ${skipped} · 失敗 ${failed}`;
+      if (final.status === "canceled" || final.status === "canceling") {
+        operation.cancel(`${tally} の時点で中止しました`);
+        notifications.show({ color: "gray", title: "保存を中止しました", message: tally });
+      } else if (final.status === "paused" || final.status === "auth_required") {
+        // 止まっただけで、失敗ではない。ジョブは残っているので続きから再開できる。
+        operation.complete(`${tally}（${final.activeLabel || "中断しました"}）`);
+        notifications.show({ color: "yellow", title: "保存を中断しました", message: `${tally} · 更新の画面から再開できます` });
+      } else if (saved === 0 && failed > 0) {
+        operation.fail(new Error(final.activeLabel || "すべての作品を保存できませんでした"));
+        notifications.show({ color: "red", title: "保存できませんでした", message: tally });
+      } else {
+        operation.complete(tally);
+        notifications.show({ color: failed ? "yellow" : "green", title: "保存が完了しました", message: tally });
+      }
     } catch (error) {
       operation.fail(error);
       notifications.show({ color: "red", title: "保存処理を完了できません", message: errorMessage(error) });
-    } finally { saveOperationRef.current = null; savingRef.current = false; closeGuardRef.current?.(); closeGuardRef.current = null; setSaving(false); setCanceling(false); setProgress(null); }
+    } finally { saveJobIdRef.current = null; saveOperationRef.current = null; savingRef.current = false; closeGuardRef.current?.(); closeGuardRef.current = null; setSaving(false); setCanceling(false); setProgress(null); }
   };
   // 最新の execute を再試行へ届けるための一段。render ごとに差し替わる。
   executeRef.current = execute;
