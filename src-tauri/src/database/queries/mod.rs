@@ -1595,6 +1595,22 @@ impl Database {
                 uncommitted_state.clear();
             }
 
+            // 保存や削除が索引の書き手を待っているなら、区切りをつけて場所を
+            // 空ける。**再構築は後ろで走ってよい仕事で、利用者が押した保存は
+            // そうではない。** 譲らなかったころは、1万件の再構築のあいだ保存が
+            // 数分止まり、しかも止まっていることが画面のどこにも出なかった。
+            //
+            // 確定させてから渡す。抱えたまま手放すと書き手ごと消えるので、
+            // ここまでの成果が失われる。
+            if writer.has_waiting_writers() {
+                if writer.uncommitted() > 0 {
+                    writer.commit()?;
+                    self.record_indexed_documents(&uncommitted_state)?;
+                    uncommitted_state.clear();
+                }
+                writer.yield_now()?;
+            }
+
             processed += prepared.prepared_count;
             on_progress(SearchIndexRebuildProgress {
                 phase: "indexing",
@@ -16631,6 +16647,66 @@ mod search_integration_tests {
             "body",
         );
         assert!(super::super::tantivy_index::ordinary_writer_is_cached(&storage).unwrap());
+    }
+
+    /// 再構築の最中でも、保存や削除は待たされ続けない。
+    ///
+    /// tantivy は 1 ディレクトリに 1 つしか書き手を許さないので、再構築が場所を
+    /// 占めているあいだ、ふつうの書き手は待つしかない。譲らなかったころは、
+    /// その待ちが**再構築の全期間**だった。1万件なら数分、しかも止まっている
+    /// ことが画面のどこにも出ない。区切りのいいところで場所を空ければ、待ちは
+    /// 一区切りぶんで済む。
+    #[test]
+    fn a_rebuild_hands_the_index_back_to_a_waiting_save() {
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+
+        let (_temp, root, storage) = temp_paths();
+        let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+        insert_download(
+            &db,
+            &storage,
+            "yield-1",
+            "yield first",
+            "author",
+            &["yield"],
+            "body",
+        );
+
+        let mut bulk = super::super::tantivy_index::bulk_writer(&storage).unwrap();
+        assert!(!bulk.has_waiting_writers(), "まだ誰も待っていない");
+
+        let (done_tx, done_rx) = mpsc::channel();
+        let storage_for_waiter = storage.clone();
+        let waiter = std::thread::spawn(move || {
+            let result =
+                super::super::tantivy_index::delete_documents(&storage_for_waiter, &[9_999]);
+            let _ = done_tx.send(result);
+        });
+
+        // 待ちに入ったことを、名乗りで確かめる。名乗らない実装では、再構築は
+        // 「誰も待っていない」と判断して最後まで場所を占め続ける。
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !bulk.has_waiting_writers() {
+            assert!(Instant::now() < deadline, "削除が待ちに入らなかった");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            done_rx.recv_timeout(Duration::from_millis(100)).is_err(),
+            "場所を空ける前に通ってしまった"
+        );
+
+        bulk.yield_now().unwrap();
+
+        done_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("場所を空けたのに、待っていた削除が通らなかった")
+            .expect("削除そのものは成功する");
+        waiter.join().unwrap();
+
+        // 譲ったあとも再構築は続けられる。取り直せていなければここで落ちる。
+        assert!(!bulk.has_waiting_writers());
+        bulk.commit().unwrap();
     }
 
     #[test]

@@ -48,6 +48,12 @@ struct TantivyRuntime {
 struct WriterState {
     ordinary: Option<IndexWriter<TantivyDocument>>,
     exclusive: bool,
+    /// 排他の書き手が終わるのを待っている、ふつうの書き手の数。
+    ///
+    /// 再構築は後ろで走ってよい仕事で、利用者が押した保存はそうではない。
+    /// 待っている人がいるかどうかが分からないと、再構築は最後まで場所を
+    /// 占め続けるしかなく、保存はそのあいだ無言で止まる。
+    waiting: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -351,6 +357,7 @@ fn runtime(storage_dir: &Path) -> Result<Arc<TantivyRuntime>, String> {
         writer_state: Mutex::new(WriterState {
             ordinary: None,
             exclusive: false,
+            waiting: 0,
         }),
         writer_available: Condvar::new(),
         content_generation: AtomicU64::new(1),
@@ -413,13 +420,30 @@ pub fn upsert_documents(storage_dir: &Path, docs: &[TantivyIndexDocument]) -> Re
 
 const ORDINARY_WRITER_MEMORY_BUDGET: usize = 64_000_000;
 
+/// 再構築が場所を空けたあと、待っていた書き手が捌けるのを待つ上限。
+///
+/// 上限を置くのは、渡す相手が何かの理由で進めなくなったときに再構築まで
+/// 道連れにしないため。索引の正しさには関わらないので、諦めても続ける。
+const WRITER_HANDOVER_TIMEOUT: Duration = Duration::from_secs(30);
+
 fn with_ordinary_writer<T>(
     runtime: &Arc<TantivyRuntime>,
     operation: impl FnOnce(&mut IndexWriter<TantivyDocument>) -> Result<T, String>,
 ) -> Result<T, String> {
     let mut state = runtime.writer_state.lock();
-    while state.exclusive {
-        runtime.writer_available.wait(&mut state);
+    // 待つ前に名乗る。再構築はこの数を見て、区切りのいいところで場所を空ける。
+    // 名乗らずに待つと、再構築は「誰も待っていない」ものとして最後まで走り、
+    // 保存は数分のあいだ無言で止まったままになる。
+    if state.exclusive {
+        state.waiting += 1;
+        while state.exclusive {
+            runtime.writer_available.wait(&mut state);
+        }
+        state.waiting -= 1;
+        // 渡し終わるのを待っている再構築へ知らせる。この先の書き込みはこの
+        // ロックを握ったまま行うので、再構築が取り直せるのは書き終えたあとに
+        // なる - 起こしただけで追い越される、ということが起きない。
+        runtime.writer_available.notify_all();
     }
     if state.ordinary.is_none() {
         state.ordinary = Some(
@@ -529,7 +553,10 @@ pub struct Prepared {
 /// rebuild and left the index split into hundreds of segments.
 pub struct BulkWriter {
     runtime: Arc<TantivyRuntime>,
-    writer: ExclusiveWriter,
+    /// 手放しているあいだだけ `None` になる。`yield_now` の途中でしか空かない。
+    writer: Option<ExclusiveWriter>,
+    threads: usize,
+    memory_budget: usize,
     uncommitted: usize,
 }
 
@@ -544,26 +571,99 @@ pub fn bulk_writer(storage_dir: &Path) -> Result<BulkWriter, String> {
         .unwrap_or(4)
         .clamp(1, 8)
         .min(memory_threads);
-    let writer = exclusive_writer(&runtime, || {
-        runtime
-            .index
-            .writer_with_num_threads(threads, memory_budget)
-            .map_err(|e| format!("Tantivy bulk writer creation failed: {e}"))
-    })?;
+    let writer = acquire_bulk_writer(&runtime, threads, memory_budget)?;
     Ok(BulkWriter {
         runtime,
-        writer,
+        writer: Some(writer),
+        threads,
+        memory_budget,
         uncommitted: 0,
     })
 }
 
+fn acquire_bulk_writer(
+    runtime: &Arc<TantivyRuntime>,
+    threads: usize,
+    memory_budget: usize,
+) -> Result<ExclusiveWriter, String> {
+    exclusive_writer(runtime, || {
+        runtime
+            .index
+            .writer_with_num_threads(threads, memory_budget)
+            .map_err(|e| format!("Tantivy bulk writer creation failed: {e}"))
+    })
+}
+
 impl BulkWriter {
-    pub fn upsert(&mut self, prepared: Prepared) -> Result<(), String> {
-        self.writer.delete_term(Term::from_field_u64(
-            self.runtime.fields.download_id,
-            prepared.download_id as u64,
-        ));
+    fn writer(&mut self) -> Result<&mut ExclusiveWriter, String> {
         self.writer
+            .as_mut()
+            .ok_or_else(|| "Tantivy bulk writer was released".to_string())
+    }
+
+    /// 索引の書き手を待っている保存や削除があるか。
+    pub fn has_waiting_writers(&self) -> bool {
+        self.runtime.writer_state.lock().waiting > 0
+    }
+
+    /// いったん場所を空けて、待っている書き手に順番を渡してから取り直す。
+    ///
+    /// **未確定のものを抱えたまま呼んではならない。** 手放すと書き手ごと消える。
+    /// 呼ぶ側は commit と記録を済ませてから呼ぶ。
+    ///
+    /// 取り直しには書き手の作り直しが要る（tantivy は 1 ディレクトリに 1 つしか
+    /// 書き手を許さないので、先に新しいほうを作ってから差し替えることはできない）。
+    /// それでも、待っている人がいるときにしか起きない。誰も待っていなければ
+    /// 何もせずに戻るので、ふだんの再構築の速さは変わらない。
+    pub fn yield_now(&mut self) -> Result<(), String> {
+        if self.uncommitted != 0 {
+            return Err("Tantivy bulk writer yielded with uncommitted documents".to_string());
+        }
+        if !self.has_waiting_writers() {
+            return Ok(());
+        }
+        // 先に落とす。Drop が排他の印を外し、待っている側を起こす。
+        self.writer.take();
+        // 待っていた側が書き終えるまで、取り直さない。
+        //
+        // 起こしてすぐ取り直すと、**起こしただけで自分が先に入り直す**ことが
+        // ある。`parking_lot` の Mutex は順番を約束しないので、これは運任せに
+        // なる。待ちの数が捌けるまで待てば、渡ったことが確かになる。
+        // ここで新しく待ちに入る者は増えない - 排他の印はもう外れているので、
+        // 後から来た書き手は待たずにそのまま通る。
+        {
+            let mut state = self.runtime.writer_state.lock();
+            let deadline = Instant::now() + WRITER_HANDOVER_TIMEOUT;
+            while state.waiting > 0 {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    // 渡しきれなくても再構築は続ける。ここで諦めるのは待ち時間の
+                    // 話でしかなく、索引の正しさには関わらない。
+                    log::warn!(
+                        "Index writer handover timed out with {} writers still waiting",
+                        state.waiting
+                    );
+                    break;
+                }
+                self.runtime
+                    .writer_available
+                    .wait_for(&mut state, remaining);
+            }
+        }
+        self.writer = Some(acquire_bulk_writer(
+            &self.runtime,
+            self.threads,
+            self.memory_budget,
+        )?);
+        Ok(())
+    }
+
+    pub fn upsert(&mut self, prepared: Prepared) -> Result<(), String> {
+        let download_id = prepared.download_id as u64;
+        let field = self.runtime.fields.download_id;
+        let writer = self.writer()?;
+        writer.delete_term(Term::from_field_u64(field, download_id));
+        writer
             .add_document(prepared.document)
             .map_err(|e| format!("Tantivy document insert failed: {e}"))?;
         self.uncommitted += 1;
@@ -578,7 +678,7 @@ impl BulkWriter {
         if self.uncommitted == 0 {
             return Ok(());
         }
-        self.writer
+        self.writer()?
             .commit()
             .map_err(|e| format!("Tantivy commit failed: {e}"))?;
         self.runtime
@@ -596,7 +696,7 @@ impl BulkWriter {
     /// cancelled, so the index keeps the last consistent state instead of a
     /// half-written batch.
     pub fn rollback(&mut self) -> Result<(), String> {
-        self.writer
+        self.writer()?
             .rollback()
             .map_err(|e| format!("Tantivy rollback failed: {e}"))?;
         self.uncommitted = 0;
