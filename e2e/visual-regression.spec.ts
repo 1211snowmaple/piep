@@ -9,10 +9,10 @@ test.beforeEach(async ({ page }) => {
   await expect(page.getByRole("textbox", { name: "ライブラリを検索" })).toBeVisible();
   await page.addStyleTag({ content: `
     *,*::before,*::after{animation:none!important;transition:none!important;caret-color:transparent!important}
-    /* Playwright's Windows image can also contain Noto Serif JP, while an
-       ordinary Windows installation usually falls through to Yu Mincho. A
-       screenshot must not change merely because that optional font exists. */
-    .reader-shell{--reader-font-family:"Yu Mincho",serif!important}
+    /* Reader prose normally follows the user's serif preference. The Windows
+       runner and an ordinary installation carry different Japanese serif
+       faces, so layout snapshots use the same stable UI face as the shell. */
+    .reader-paper{--reader-font-family:"Yu Gothic UI",sans-serif!important}
   ` });
   await page.evaluate(async () => { await document.fonts.ready; });
 });
