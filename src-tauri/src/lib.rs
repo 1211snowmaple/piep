@@ -7,6 +7,7 @@ pub mod database;
 mod downloader;
 pub mod epub;
 pub mod fanbox_api;
+mod logging;
 pub mod pixiv_api;
 
 use database::Database;
@@ -117,6 +118,10 @@ pub fn run() -> tauri::Result<()> {
             std::fs::create_dir_all(&app_data).map_err(|e| {
                 std::io::Error::other(format!("Failed to create app data dir: {e}"))
             })?;
+
+            // 記録の行き先を、他の何よりも先に決める。ここから下の初期化は
+            // どれも失敗しうるのに、失敗したことがどこにも残らなかった。
+            logging::install(&app_data);
 
             // Claim the whole library before SQLite, restore recovery, search
             // sidecars, or downloaded files can be opened by this process.
