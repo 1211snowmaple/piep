@@ -39,7 +39,7 @@ import { Icons, IconSize } from "@/lib/icons";
 import { useAppNavigate, useAppSearchParams } from "@/app/router";
 import { useWorkspace } from "@/app/WorkspaceContext";
 import { EmptyState, ErrorState, LoadingState } from "@/components/AsyncState";
-import { ListPager, PagingModeToggle, useBoundedNumberedPage, usePageSize, usePagingMode } from "@/components/ListPager";
+import { ListPager, PagingModeToggle, useBoundedNumberedPage, usePageSize, usePagingMode, type PagingScope } from "@/components/ListPager";
 import { ScrollToTop } from "@/components/ScrollToTop";
 import { demoFacets, searchDemoWorks } from "@/mocks/demoData";
 import { errorMessage, formatNumber } from "@/lib/format";
@@ -570,7 +570,14 @@ export default function LibraryPage() {
     }, 260);
   }, []);
 
-  const [pagingMode] = usePagingMode();
+  // 読み込み方は一覧ごとに覚える。ここは一つの画面だが、作品・作者・
+  // コレクションは件数も中身も違うので、同じ好みで縛る理由が無い。
+  const pagingScope: PagingScope = tab === "works"
+    ? "library-works"
+    : tab === "collections"
+      ? "library-collections"
+      : "library-entities";
+  const [pagingMode] = usePagingMode(pagingScope);
   const [pageSize] = usePageSize();
   // 並び順は「この人の見かた」なので覚える。検索語・絞り込み・ページ番号は
   // 「そのときの問い」なので覚えない（保存した検索がその役目を持っている）。
@@ -1296,7 +1303,7 @@ export default function LibraryPage() {
             ? <SearchInterpretation meta={searchMeta} />
             : null}
           {/* Beside the count, which is the thing it changes. */}
-          <PagingModeToggle />
+          <PagingModeToggle scope={pagingScope} />
         </Group>
         {!selectionMode && <Button size="xs" variant="subtle" color="gray" leftSection={<Icons.confirm size={IconSize.menu} />} onClick={() => setSelectionMode(true)}>複数選択</Button>}
       </Group>}
@@ -1314,6 +1321,7 @@ export default function LibraryPage() {
           <>
             <VirtualizedWorkList items={loadedItems} view={view} selectionMode={selectionMode} selected={selectedSet} onSelect={toggleSelected} onToggleFavorite={toggleFavorite} onToggleWatch={toggleWatch} />
             <ListPager
+              scope={pagingScope}
               hasNext={Boolean(works.hasNextPage) && !worksAtCacheLimit}
               loading={works.isFetchingNextPage || works.isFetching}
               loaded={loadedItems.length}
@@ -1349,6 +1357,7 @@ export default function LibraryPage() {
             onToggleWatch={toggleEntityWatch}
           />
           <ListPager
+            scope={pagingScope}
             hasNext={Boolean(entities.hasNextPage) && !entitiesAtCacheLimit}
             loading={entities.isFetchingNextPage || entities.isFetching}
             loaded={entityItems.length}

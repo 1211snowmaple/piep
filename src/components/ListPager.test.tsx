@@ -1,5 +1,5 @@
 import { MantineProvider } from "@mantine/core";
-import { render, renderHook, screen } from "@testing-library/react";
+import { act, render, renderHook, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   DEFAULT_PAGE_SIZE,
@@ -110,15 +110,44 @@ describe("paging mode", () => {
     // "manual" was scrolling with the scrolling taken out; the button it left
     // behind is still there in "auto", so there was nothing to keep.
     window.localStorage.setItem("piep.paging-mode", JSON.stringify("manual"));
-    const { result } = renderHook(() => usePagingMode());
+    const { result } = renderHook(() => usePagingMode("library-works"));
     expect(result.current[0]).toBe("auto");
   });
 
   it("remembers the choice that remains", () => {
     window.localStorage.setItem("piep.paging-mode", JSON.stringify("pages"));
-    expect(renderHook(() => usePagingMode()).result.current[0]).toBe("pages");
+    expect(renderHook(() => usePagingMode("library-works")).result.current[0]).toBe("pages");
     window.localStorage.setItem("piep.paging-mode", JSON.stringify("nonsense"));
-    expect(renderHook(() => usePagingMode()).result.current[0]).toBe("auto");
+    expect(renderHook(() => usePagingMode("library-works")).result.current[0]).toBe("auto");
+  });
+
+  /**
+   * 一覧ごとに覚える。全体の既定は「まだ自分で決めていない一覧」のためにある。
+   *
+   * ここを取り違えると、束の中で番号にした人が棚まで番号になったり、逆に
+   * 設定でまとめて変えたのに個別に決めた一覧まで巻き込んだりする。
+   */
+  it("個別に決めていない一覧は、全体の既定に従う", () => {
+    window.localStorage.setItem("piep.paging-mode", JSON.stringify("pages"));
+    expect(renderHook(() => usePagingMode("collection-members")).result.current[0]).toBe("pages");
+  });
+
+  it("個別に決めた一覧は、全体の既定より自分の設定を採る", () => {
+    window.localStorage.setItem("piep.paging-mode", JSON.stringify("pages"));
+    window.localStorage.setItem("piep.paging-mode.collection-members", JSON.stringify("auto"));
+    expect(renderHook(() => usePagingMode("collection-members")).result.current[0]).toBe("auto");
+    // 隣の一覧は巻き込まれない。
+    expect(renderHook(() => usePagingMode("library-works")).result.current[0]).toBe("pages");
+  });
+
+  it("ボタンで変えると、その一覧の設定として残る", () => {
+    window.localStorage.setItem("piep.paging-mode", JSON.stringify("auto"));
+    const { result } = renderHook(() => usePagingMode("library-collections"));
+    act(() => result.current[1]("pages"));
+
+    expect(JSON.parse(window.localStorage.getItem("piep.paging-mode.library-collections") ?? "null")).toBe("pages");
+    // 全体の既定は動かさない。押した一覧の話でしかない。
+    expect(JSON.parse(window.localStorage.getItem("piep.paging-mode") ?? "null")).toBe("auto");
   });
 });
 
@@ -128,6 +157,7 @@ describe("the pager itself", () => {
     return render(
       <MantineProvider>
         <ListPager
+          scope="library-works"
           hasNext
           loading={false}
           loaded={20}
@@ -170,7 +200,7 @@ describe("the pager itself", () => {
     window.localStorage.setItem("piep.paging-mode", JSON.stringify("auto"));
     render(
       <MantineProvider>
-        <ListPager hasNext={false} loading={false} loaded={500} total={10_000} onLoad={vi.fn()} endMessage="ページ番号に切り替えると続きへ移動できます。" />
+        <ListPager scope="library-works" hasNext={false} loading={false} loaded={500} total={10_000} onLoad={vi.fn()} endMessage="ページ番号に切り替えると続きへ移動できます。" />
       </MantineProvider>,
     );
     expect(screen.getByText("ページ番号に切り替えると続きへ移動できます。")).toBeInTheDocument();
@@ -182,6 +212,7 @@ describe("the pager itself", () => {
     render(
       <MantineProvider>
         <ListPager
+          scope="library-works"
           hasNext
           loading={false}
           loaded={20}
@@ -204,6 +235,7 @@ describe("a listing that cannot say how long it is", () => {
     return render(
       <MantineProvider>
         <ListPager
+          scope="library-works"
           hasNext={hasNext}
           loading={false}
           loaded={20}

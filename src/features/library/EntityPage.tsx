@@ -133,7 +133,7 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
     next.delete("page");
     setUrlParams(next, { replace: true });
   };
-  const [pagingMode] = usePagingMode();
+  const [pagingMode] = usePagingMode("entity");
   const [view, setView] = useViewMode();
   const [pageSize] = usePageSize();
   // Relevance is walked with a score cursor and has no nth page, so numbers are
@@ -503,7 +503,7 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
                     <Group gap="xs" mb="sm" wrap="nowrap">
                       <Text size="sm" c="dimmed">{formatNumber(works.data?.pages[0]?.totalEstimate ?? workItems.length)}件</Text>
                       {/* Beside the count, which is the thing it changes. */}
-                      <PagingModeToggle />
+                      <PagingModeToggle scope="entity" />
                       {/* ここだけ view を "gallery" に固定していた。棚で一覧を選んでいても
                           作者を開いた瞬間にカードへ戻る、同じ作品の違う顔だった。 */}
                       <SegmentedControl
@@ -520,6 +520,7 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
                     </Group>
                     <VirtualizedWorkList items={workItems} view={view} />
                     <ListPager
+                      scope="entity"
                       hasNext={Boolean(works.hasNextPage) && !worksAtCacheLimit}
                       loading={works.isFetchingNextPage || works.isFetching}
                       loaded={workItems.length}
@@ -588,6 +589,7 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
                       </Text>
                       <VirtualizedEntityGrid items={authorSeriesItems} kind="series" />
                       <ListPager
+                        scope="entity"
                         hasNext={Boolean(authorSeries.hasNextPage) && !authorSeriesAtCacheLimit}
                         loading={authorSeries.isFetchingNextPage}
                         loaded={authorSeriesItems.length}

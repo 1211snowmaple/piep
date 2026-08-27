@@ -17,6 +17,32 @@ import { formatNumber } from "@/lib/format";
  */
 export type PagingMode = "auto" | "pages";
 
+/**
+ * 読み込み方を別々に覚える単位。
+ *
+ * 画面ではなく**一覧**ごとに分ける。ライブラリは一つの画面だが、作品・作者・
+ * コレクションは中身も件数も違うので、同じ好みで縛る理由が無い。
+ * 増やしたときは `PAGING_SCOPES` にも足す - 設定画面はそこから作る。
+ */
+export type PagingScope =
+  | "library-works"
+  | "library-entities"
+  | "library-collections"
+  | "entity"
+  | "collection-members";
+
+/** 個別の設定。`inherit` は「全体に従う」。 */
+export type PagingPreference = PagingMode | "inherit";
+
+/** 設定画面が個別に並べる一覧。名前は画面上の呼び方に合わせる。 */
+export const PAGING_SCOPES: { value: PagingScope; label: string }[] = [
+  { value: "library-works", label: "ライブラリ · 作品" },
+  { value: "library-entities", label: "ライブラリ · 作者とシリーズ" },
+  { value: "library-collections", label: "ライブラリ · コレクション" },
+  { value: "entity", label: "作者・シリーズのページ" },
+  { value: "collection-members", label: "コレクションの中身" },
+];
+
 const STORAGE_KEY = "piep.paging-mode";
 const PAGE_SIZE_KEY = "piep.page-size";
 
@@ -133,12 +159,53 @@ export function usePageSize(): [number, (size: number) => void] {
   return [size, (next) => setStored(next)];
 }
 
-export function usePagingMode(): [PagingMode, (mode: PagingMode) => void] {
-  const [stored, setStored] = useLocalStorage<unknown>({ key: STORAGE_KEY, defaultValue: "auto", ...READ_ON_FIRST_RENDER });
+function readMode(stored: unknown): PagingMode {
   // "manual" was a third mode that only turned scrolling off; anyone left on it
   // gets scrolling back, which still has its button.
-  const mode: PagingMode = stored === "pages" ? "pages" : "auto";
-  return [mode, (next) => setStored(next)];
+  return stored === "pages" ? "pages" : "auto";
+}
+
+/**
+ * 全体の既定。個別に決めていない一覧は、これに従う。
+ *
+ * 設定画面の「まとめて変える」がここを書く。個別の上書きも同時に消すので、
+ * 押した結果がどの画面でも同じになる。
+ */
+export function useDefaultPagingMode(): [PagingMode, (mode: PagingMode) => void] {
+  const [stored, setStored] = useLocalStorage<unknown>({ key: STORAGE_KEY, defaultValue: "auto", ...READ_ON_FIRST_RENDER });
+  return [readMode(stored), (next) => setStored(next)];
+}
+
+/**
+ * 一覧ひとつぶんの上書き。`inherit` は「全体に従う」。
+ *
+ * 設定画面が個別に選ばせる単位でもある。一覧の読み込み方は画面ごとに向き不向き
+ * があり（束の中身は番号で飛びたいが、棚は流し読みしたい、など）、全部を一つの
+ * 好みに縛ると、どちらかが必ず不便になる。
+ */
+export function useScopedPagingPreference(
+  scope: PagingScope,
+): [PagingPreference, (preference: PagingPreference) => void] {
+  const [stored, setStored] = useLocalStorage<unknown>({
+    key: `${STORAGE_KEY}.${scope}`,
+    defaultValue: "inherit",
+    ...READ_ON_FIRST_RENDER,
+  });
+  const preference: PagingPreference = stored === "pages" || stored === "auto" ? stored : "inherit";
+  return [preference, (next) => setStored(next)];
+}
+
+/**
+ * その一覧で実際に使う読み込み方。
+ *
+ * **ボタンで変えると、その一覧の上書きとして残る。** localStorage なので、
+ * アプリを閉じても次に開いたときの状態は同じである。上書きを持たない一覧は
+ * 全体の既定に従うので、設定でまとめて変えるとそれらは追いついてくる。
+ */
+export function usePagingMode(scope: PagingScope): [PagingMode, (mode: PagingMode) => void] {
+  const [fallback] = useDefaultPagingMode();
+  const [preference, setPreference] = useScopedPagingPreference(scope);
+  return [preference === "inherit" ? fallback : preference, (next) => setPreference(next)];
 }
 
 /**
@@ -149,8 +216,8 @@ export function usePagingMode(): [PagingMode, (mode: PagingMode) => void] {
  * same switch under the pager is unreachable while scrolling keeps extending
  * the list, which left the settings screen as the only way back out.
  */
-export function PagingModeToggle({ size = "xs" }: { size?: "xs" | "sm" }) {
-  const [mode, setMode] = usePagingMode();
+export function PagingModeToggle({ scope, size = "xs" }: { scope: PagingScope; size?: "xs" | "sm" }) {
+  const [mode, setMode] = usePagingMode(scope);
   const options: { value: PagingMode; label: string; icon: LucideIcon; hint: string }[] = [
     { value: "auto", label: "自動", icon: Icons.pagingContinuous, hint: "スクロールすると続きを自動で読み込みます" },
     { value: "pages", label: "ページ番号", icon: Icons.pagingNumbered, hint: "ページ番号で移動します（並び順を選んでいるときのみ）" },
@@ -177,6 +244,8 @@ export function PagingModeToggle({ size = "xs" }: { size?: "xs" | "sm" }) {
 }
 
 export interface ListPagerProps {
+  /** どの一覧か。読み込み方をこの単位で覚える。 */
+  scope: PagingScope;
   hasNext: boolean;
   loading: boolean;
   /** How many items are on screen now. */
@@ -275,8 +344,8 @@ function usePageSlots(ref: React.RefObject<HTMLDivElement | null>): number {
  * do; the preference exists because it also makes the end of the page a moving
  * target, which is miserable when you are trying to reach the controls below it.
  */
-export function ListPager({ hasNext, loading, loaded, total, onLoad, endMessage, unit = "件", pages }: ListPagerProps) {
-  const [stored] = usePagingMode();
+export function ListPager({ scope, hasNext, loading, loaded, total, onLoad, endMessage, unit = "件", pages }: ListPagerProps) {
+  const [stored] = usePagingMode(scope);
   // Numbers were asked for but this listing cannot honour them: fall back to
   // scrolling rather than showing controls that would land somewhere else.
   const numbersUnavailable = stored === "pages" && (!pages || Boolean(pages.unavailableReason));

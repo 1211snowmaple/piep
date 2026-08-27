@@ -37,7 +37,7 @@ import { PageHeader } from "@/components/PageHeader";
 import { useAppSearchParams } from "@/app/router";
 import { RuntimeNotice } from "@/components/RuntimeNotice";
 import { applyDensity, isDense } from "@/lib/density";
-import { PAGE_SIZE_OPTIONS, usePageSize, usePagingMode, type PagingMode } from "@/components/ListPager";
+import { PAGE_SIZE_OPTIONS, PAGING_SCOPES, useDefaultPagingMode, usePageSize, useScopedPagingPreference, type PagingMode, type PagingPreference, type PagingScope } from "@/components/ListPager";
 import { errorMessage, formatBytes, formatNumber } from "@/lib/format";
 import { getProvider, providers } from "@/lib/providers";
 import {
@@ -436,7 +436,58 @@ function SearchSection({ status, rebuild, runtime, rebuilding, start, cancel }: 
   </Stack>;
 }
 
-function AppearanceSection({ colorScheme, setColorScheme }: { colorScheme: string; setColorScheme: (value: "light" | "dark" | "auto") => void }) { const [dense, setDense] = useState(isDense); const [pagingMode, setPagingMode] = usePagingMode(); const [pageSize, setPageSize] = usePageSize(); return <Stack gap="lg"><SectionIntro title="外観と操作" description="デスクトップ環境に合わせて表示を調整します。" /><Card p="lg"><Box><Text fw={700}>一覧の読み込み方</Text><Text size="sm" c="dimmed" mb="sm">ライブラリや作者ページで、続きをどう読み込むかを決めます。各一覧の件数表示の横でも切り替えられます。</Text><SegmentedControl aria-label="一覧の読み込み方" value={pagingMode} onChange={(value) => setPagingMode(value as PagingMode)} data={[{ value: "auto", label: "スクロールで自動" }, { value: "pages", label: "ページ番号" }]} /><Text size="xs" c="dimmed" mt="sm">ページ番号は並び順を選んでいるときだけ使えます。関連度順は一致度の高い順に辿る仕組みで「何ページ目」が定まらないため、自動スクロールになります。</Text><Divider my="md" /><Text fw={700}>1ページの件数</Text><Text size="sm" c="dimmed" mb="sm">ページ番号で表示する1ページ分の件数です。スクロールで読み込む1回分の件数にもなります。</Text><SegmentedControl aria-label="1ページの件数" value={String(pageSize)} onChange={(value) => setPageSize(Number(value))} data={PAGE_SIZE_OPTIONS.map((size) => ({ value: String(size), label: `${size}件` }))} /></Box></Card><Card p="lg"><Stack gap="lg"><Box><Text fw={700}>カラーテーマ</Text><Text size="sm" c="dimmed" mb="sm">システム設定に追従することもできます。</Text><SegmentedControl aria-label="カラーテーマ" value={colorScheme} onChange={(value) => setColorScheme(value as "light" | "dark" | "auto")} data={[{ value: "light", label: "ライト" }, { value: "dark", label: "ダーク" }, { value: "auto", label: "システム" }]} /></Box><Divider /><Switch label="高密度表示" description="ページ余白とカードの間隔を狭くします" checked={dense} onChange={(event) => { setDense(event.currentTarget.checked); applyDensity(event.currentTarget.checked); }} /><Group justify="space-between" wrap="nowrap"><Box miw={0}><Text size="sm" fw={500}>視覚効果を減らす</Text><Text size="xs" c="dimmed">OSのモーション設定に自動で従います</Text></Box><Badge variant="light" color="gray">システム設定</Badge></Group></Stack></Card><Card p="lg"><Text fw={700} mb="sm">キーボードショートカット</Text><Stack gap="xs"><Shortcut keys="Ctrl K" label="検索または画面移動" /><Shortcut keys="Ctrl L" label="ライブラリを開く" /><Shortcut keys="Ctrl Shift S" label="保存ワークスペース" /><Shortcut keys="Ctrl S" label="エディタで下書き保存" /></Stack></Card></Stack>; }
+function AppearanceSection({ colorScheme, setColorScheme }: { colorScheme: string; setColorScheme: (value: "light" | "dark" | "auto") => void }) { const [dense, setDense] = useState(isDense); const [pageSize, setPageSize] = usePageSize(); return <Stack gap="lg"><SectionIntro title="外観と操作" description="デスクトップ環境に合わせて表示を調整します。" /><Card p="lg"><Box><Text fw={700}>一覧の読み込み方</Text><Text size="sm" c="dimmed" mb="sm">ライブラリや作者ページで、続きをどう読み込むかを決めます。各一覧の件数表示の横でも切り替えられ、押した結果はその一覧の設定として残ります。</Text><PagingSettings /><Text size="xs" c="dimmed" mt="sm">ページ番号は並び順を選んでいるときだけ使えます。関連度順は一致度の高い順に辿る仕組みで「何ページ目」が定まらないため、自動スクロールになります。</Text><Divider my="md" /><Text fw={700}>1ページの件数</Text><Text size="sm" c="dimmed" mb="sm">ページ番号で表示する1ページ分の件数です。スクロールで読み込む1回分の件数にもなります。</Text><SegmentedControl aria-label="1ページの件数" value={String(pageSize)} onChange={(value) => setPageSize(Number(value))} data={PAGE_SIZE_OPTIONS.map((size) => ({ value: String(size), label: `${size}件` }))} /></Box></Card><Card p="lg"><Stack gap="lg"><Box><Text fw={700}>カラーテーマ</Text><Text size="sm" c="dimmed" mb="sm">システム設定に追従することもできます。</Text><SegmentedControl aria-label="カラーテーマ" value={colorScheme} onChange={(value) => setColorScheme(value as "light" | "dark" | "auto")} data={[{ value: "light", label: "ライト" }, { value: "dark", label: "ダーク" }, { value: "auto", label: "システム" }]} /></Box><Divider /><Switch label="高密度表示" description="ページ余白とカードの間隔を狭くします" checked={dense} onChange={(event) => { setDense(event.currentTarget.checked); applyDensity(event.currentTarget.checked); }} /><Group justify="space-between" wrap="nowrap"><Box miw={0}><Text size="sm" fw={500}>視覚効果を減らす</Text><Text size="xs" c="dimmed">OSのモーション設定に自動で従います</Text></Box><Badge variant="light" color="gray">システム設定</Badge></Group></Stack></Card><Card p="lg"><Text fw={700} mb="sm">キーボードショートカット</Text><Stack gap="xs"><Shortcut keys="Ctrl K" label="検索または画面移動" /><Shortcut keys="Ctrl L" label="ライブラリを開く" /><Shortcut keys="Ctrl Shift S" label="保存ワークスペース" /><Shortcut keys="Ctrl S" label="エディタで下書き保存" /></Stack></Card></Stack>; }
+
+/**
+ * 読み込み方を、まとめてと一覧ごとの二段で決める。
+ *
+ * 一覧の性質は同じではない。束の中身は番号で飛びたいが棚は流し読みしたい、と
+ * いった向き不向きがあるので、全部を一つの好みに縛るとどちらかが必ず不便になる。
+ * かといって毎回ここへ来るのも面倒なので、**まとめて変える**を上に置く。
+ *
+ * まとめて変えると個別の指定も消える。消さないと「まとめて変えたのに変わらない
+ * 一覧がある」ことになり、押した本人にはその理由が見えない。
+ */
+function PagingSettings() {
+  const [defaultMode, setDefaultMode] = useDefaultPagingMode();
+  return (
+    <Stack gap="sm">
+      <SegmentedControl
+        aria-label="一覧の読み込み方"
+        value={defaultMode}
+        onChange={(value) => {
+          setDefaultMode(value as PagingMode);
+          PAGING_SCOPES.forEach(({ value: scope }) => window.localStorage.removeItem(`piep.paging-mode.${scope}`));
+        }}
+        data={[{ value: "auto", label: "スクロールで自動" }, { value: "pages", label: "ページ番号" }]}
+      />
+      <Text size="xs" c="dimmed">まとめて変えると、一覧ごとの指定は「全体に合わせる」へ戻ります。</Text>
+      <Divider my={4} />
+      <Text size="sm" fw={650}>一覧ごとに変える</Text>
+      {PAGING_SCOPES.map((scope) => <ScopedPagingRow key={scope.value} scope={scope} />)}
+    </Stack>
+  );
+}
+
+function ScopedPagingRow({ scope }: { scope: { value: PagingScope; label: string } }) {
+  const [preference, setPreference] = useScopedPagingPreference(scope.value);
+  return (
+    <Group justify="space-between" wrap="nowrap" gap="sm">
+      <Text size="sm" miw={0}>{scope.label}</Text>
+      <SegmentedControl
+        size="xs"
+        aria-label={`${scope.label}の読み込み方`}
+        value={preference}
+        onChange={(value) => setPreference(value as PagingPreference)}
+        data={[
+          { value: "inherit", label: "全体に合わせる" },
+          { value: "auto", label: "自動" },
+          { value: "pages", label: "ページ番号" },
+        ]}
+      />
+    </Group>
+  );
+}
 
 function Shortcut({ keys, label }: { keys: string; label: string }) { return <Group justify="space-between"><Text size="sm">{label}</Text><Code>{keys}</Code></Group>; }
 

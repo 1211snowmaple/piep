@@ -13,6 +13,7 @@ import { notifications } from "@mantine/notifications";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useAppNavigate, useAppSearchParams } from "@/app/router";
 import { ErrorState, LoadingState } from "@/components/AsyncState";
+import { ListPager, PagingModeToggle, useBoundedNumberedPage, usePageSize, usePagingMode } from "@/components/ListPager";
 import { errorMessage, formatNumber } from "@/lib/format";
 import { Icons, IconSize } from "@/lib/icons";
 import { generateCollectionSuggestion, sweepCollectionCandidates, upsertWorkCollection } from "@/services/collectionApi";
@@ -87,6 +88,30 @@ export function CollectionsPanel({ query = "", sortBy = "created_at" }: { query?
    // 飛ばないため）。出ている以上、検索も並べ替えもここに効かせる。
   const normalizedQuery = query.trim();
   const collections = sortCollections(filterCollections(collectionsQuery.data ?? [], query), sortBy);
+  // 束の一覧は一度に全件を持っている。棚のようにサーバーへ問い直す必要は無い
+  // ので、ページ番号は手元の配列を切るだけで足りる。
+  const [pagingMode] = usePagingMode("library-collections");
+  const [pageSize] = usePageSize();
+  const numberedPages = pagingMode === "pages";
+  const {
+    page: requestedPage,
+    maxPage: maxDirectPage,
+    limitNotice: pageLimitNotice,
+    clearLimitNotice,
+  } = useBoundedNumberedPage(numberedPages, searchParams, setSearchParams, pageSize);
+  const lastPage = Math.max(1, Math.ceil(collections.length / pageSize));
+  // 束を消したり絞り込んだりすると最後のページが消える。URL が残っていても、
+  // 表示は必ず存在するページに収める。
+  const currentPage = Math.min(requestedPage, lastPage);
+  const visibleCollections = numberedPages
+    ? collections.slice((currentPage - 1) * pageSize, currentPage * pageSize)
+    : collections;
+  const goToPage = (next: number) => {
+    clearLimitNotice();
+    const params = new URLSearchParams(searchParams);
+    if (next > 1) params.set("page", String(next)); else params.delete("page");
+    setSearchParams(params);
+  };
   // 走査を始める操作は一覧の見出しに一本だけ置く。結果を並べるのは受信箱で、
   // 見つからなかったときに空の受信箱が行を一つ取ることはしない。
   const [savedSearchIdeas, setSavedSearchIdeas] = useState<SavedSearchSuggestion[]>([]);
@@ -111,7 +136,10 @@ export function CollectionsPanel({ query = "", sortBy = "created_at" }: { query?
           棚そのものが画面の下へ押し出されていた。何ができるかは操作の名前が
           言っているので、案内の一文は要らない。 */}
       <Group justify="space-between" align="center" my="md" gap="xs" wrap="nowrap" className="collections-panel__header">
-        <Text size="sm" c="dimmed">{formatNumber(collections.length)}件</Text>
+        <Group gap="xs" wrap="nowrap">
+          <Text size="sm" c="dimmed">{formatNumber(collections.length)}件</Text>
+          <PagingModeToggle scope="library-collections" />
+        </Group>
         <Group gap="xs" wrap="nowrap">
           <Button
             variant="subtle"
@@ -132,7 +160,20 @@ export function CollectionsPanel({ query = "", sortBy = "created_at" }: { query?
       <SuggestionInbox sweeping={sweepMutation.isPending} savedSearchIdeas={savedSearchIdeas} onSweep={() => sweepMutation.mutate()} />
       {collectionsQuery.isLoading ? <LoadingState label="コレクションを読み込んでいます" /> : collectionsQuery.error ? <ErrorState error={collectionsQuery.error} retry={() => collectionsQuery.refetch()} /> : collections.length === 0 ? (normalizedQuery
         ? <Paper withBorder p="xl"><Stack align="center"><Icons.search size={IconSize.hero} /><Text fw={700}>一致するコレクションがありません</Text><Text size="sm" c="dimmed" ta="center">「{query.trim()}」に当てはまるものは見つかりませんでした。</Text></Stack></Paper>
-        : <Paper withBorder p="xl"><Stack align="center"><Icons.collection size={IconSize.hero} /><Text fw={700}>まだコレクションはありません</Text><Text size="sm" c="dimmed" ta="center">前後編、非公式の連載、pixivとFANBOXに分かれた作品などをまとめられます。</Text><Button onClick={form.open} disabled={!runtime}>最初のコレクションを作成</Button></Stack></Paper>) : <SimpleGrid cols={{ base: 1, sm: 2, xl: 3 }}>{collections.map((collection) => <CollectionCard key={collection.id} collection={collection} />)}</SimpleGrid>}
+        : <Paper withBorder p="xl"><Stack align="center"><Icons.collection size={IconSize.hero} /><Text fw={700}>まだコレクションはありません</Text><Text size="sm" c="dimmed" ta="center">前後編、非公式の連載、pixivとFANBOXに分かれた作品などをまとめられます。</Text><Button onClick={form.open} disabled={!runtime}>最初のコレクションを作成</Button></Stack></Paper>) : <SimpleGrid cols={{ base: 1, sm: 2, xl: 3 }}>{visibleCollections.map((collection) => <CollectionCard key={collection.id} collection={collection} />)}</SimpleGrid>}
+      {/* 番号で見るときだけ出す。「自動」のときは全件がそのまま並んでいる。 */}
+      {numberedPages && collections.length > pageSize && (
+        <ListPager
+          scope="library-collections"
+          hasNext={false}
+          loading={false}
+          loaded={visibleCollections.length}
+          total={collections.length}
+          onLoad={() => undefined}
+          unit="件"
+          pages={{ current: currentPage, size: pageSize, onGoTo: goToPage, maxDirectPage, limitNotice: pageLimitNotice }}
+        />
+      )}
       <CollectionFormModal opened={formOpened} onClose={form.close} onSave={(input) => saveMutation.mutate(input)} />
     </Stack>
   );

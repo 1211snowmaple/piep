@@ -153,10 +153,10 @@ function CollectionDetail({ collection, readOnly, onEdit, onChanged }: { collect
 
   // ページ番号は棚と同じ仕組みを使う。束の中身はすでに全件が手元にあるので、
   // 棚のようにサーバーへ問い直すのではなく、持っている配列を切るだけでよい。
-  // 読み込み方の好みは画面ごとに覚えない - 棚で「ページ番号」を選んだ人は、
-  // 束の中でも同じ動きを期待する。
+  // 読み込み方はこの一覧ぶんだけを覚える。束は番号で飛びたいが棚は流し読み
+  // したい、という分かれ方をするので、全部を一つの好みで縛らない。
   const [urlParams, setUrlParams] = useAppSearchParams();
-  const [pagingMode] = usePagingMode();
+  const [pagingMode] = usePagingMode("collection-members");
   const [pageSize] = usePageSize();
   const numberedPages = pagingMode === "pages";
   const {
@@ -377,22 +377,23 @@ function CollectionDetail({ collection, readOnly, onEdit, onChanged }: { collect
         ) : (
           <>
             <Group justify="space-between" wrap="nowrap" className="collection-member-toolbar">
-              <Group gap="xs">
-                {/* 並べ替えられないときに並べ替え方を書かない。閲覧専用では
-                    取っ手も矢印も出てこないので、この一文だけが存在しない
-                    操作を案内していた。 */}
+              <Group gap="xs" wrap="nowrap">
+                {/* 読み込み方は左端に置く。ここにあった「掴んで運ぶか、矢印で
+                    入れ替えられます」は、取っ手も矢印も見えているものの説明で
+                    しかなかった。並べ替えられない束でだけ、そう言えない理由を
+                    残す（閲覧専用では取っ手も矢印も出てこない）。 */}
+                <PagingModeToggle scope="collection-members" />
                 {selectionMode ? (
                   <>
                     <Text size="sm" fw={650}>{formatNumber(selected.length)}件を選択中</Text>
                     <Button size="compact-sm" variant="subtle" color="red" disabled={selected.length === 0 || mutation.isPending} onClick={removeSelected}>選んだ作品を外す</Button>
                     <Button size="compact-sm" variant="subtle" color="gray" onClick={() => { setSelectionMode(false); setSelected([]); }}>やめる</Button>
                   </>
-                ) : (
-                  <Text size="sm" c="dimmed">{!ordered ? "順序なしのコレクションです。" : readOnly ? "順序付きのコレクションです。" : "掴んで運ぶか、矢印で入れ替えられます。"}</Text>
+                ) : (!ordered || readOnly) && (
+                  <Text size="sm" c="dimmed">{!ordered ? "順序なしのコレクションです。" : "順序付きのコレクションです。"}</Text>
                 )}
               </Group>
               <Group gap="xs" wrap="nowrap">
-                <PagingModeToggle />
                 <SegmentedControl
                   className="view-mode-switch"
                   aria-label="コレクションの表示形式"
@@ -423,6 +424,7 @@ function CollectionDetail({ collection, readOnly, onEdit, onChanged }: { collect
             {/* 番号で見るときだけ出す。「自動」のときは一覧が自分で続きを出す。 */}
             {numberedPages && memberCount > pageSize && (
               <ListPager
+                scope="collection-members"
                 hasNext={false}
                 loading={false}
                 loaded={memberWindow ? Math.min(memberWindow.end, memberCount) - memberWindow.start : memberCount}
