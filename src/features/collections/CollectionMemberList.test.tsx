@@ -188,4 +188,60 @@ describe("CollectionMemberList", () => {
     fireEvent.click(screen.getByRole("button", { name: "さらに表示（残り1件）" }));
     expect(screen.getByText("member-121")).toBeInTheDocument();
   });
+
+  /**
+   * ページ番号で見ているときも、位置は束の中での絶対位置でなければならない。
+   *
+   * 切った配列をそのまま `map` すると index はページ内の番号になる。そうなると
+   * 2ページ目の先頭は「0番目」として扱われ、一つ前へ動かしたつもりで1ページ目の
+   * 先頭が動く。しかも先頭は端として無効化されるので、ページをまたいで動かす
+   * 手段そのものが消える。どちらも画面を見ただけでは気づきにくい。
+   */
+  describe("ページ番号で見ているとき", () => {
+    const paged = (count: number) => Array.from({ length: count }, (_, index) => member({
+      sourceId: `paged-${index + 1}`,
+      downloadId: 1000 + index,
+      title: `${index + 1}番目`,
+      position: index,
+      work: { ...demoWorks[0], id: 1000 + index, title: `${index + 1}番目` },
+    }));
+
+    it("そのページのぶんだけ描く", () => {
+      renderList({ members: paged(8), page: { start: 4, end: 8 } });
+
+      expect(screen.queryByText("4番目")).toBeNull();
+      expect(screen.getByText("5番目")).toBeInTheDocument();
+      expect(screen.getByText("8番目")).toBeInTheDocument();
+    });
+
+    it("並べ替えは、ページ内の番号ではなく束の中の位置で伝える", () => {
+      const onMove = vi.fn();
+      renderList({ members: paged(8), page: { start: 4, end: 8 }, onMove });
+
+      fireEvent.click(screen.getByRole("button", { name: "5番目を一つ前へ" }));
+
+      expect(onMove).toHaveBeenCalledWith(4, -1);
+    });
+
+    it("ページの先頭を、前のページへ動かせる", () => {
+      renderList({ members: paged(8), page: { start: 4, end: 8 } });
+
+      // ページ内の番号で見ていると端と判定され、この操作が無効化される。
+      expect(screen.getByRole("button", { name: "5番目を一つ前へ" })).toBeEnabled();
+    });
+
+    it("読み上げの「何番目」も束の中での位置で名乗る", () => {
+      renderList({ members: paged(8), page: { start: 4, end: 8 } });
+
+      const rows = document.querySelectorAll<HTMLElement>(".collection-member");
+      expect(rows[0]?.getAttribute("aria-posinset")).toBe("5");
+      expect(rows[0]?.getAttribute("aria-setsize")).toBe("8");
+    });
+
+    it("ページで見ているあいだは「さらに表示」を出さない", () => {
+      renderList({ members: paged(8), page: { start: 0, end: 4 } });
+
+      expect(screen.queryByRole("button", { name: /さらに表示/ })).toBeNull();
+    });
+  });
 });

@@ -23,6 +23,14 @@ interface MemberListProps {
   onMove: (index: number, delta: number) => void | boolean | Promise<boolean>;
   onDropAt: (from: number, to: number) => void | boolean | Promise<boolean>;
   onRemove: (member: WorkCollectionMember) => void;
+  /**
+   * ページ番号で見るときの範囲。「自動」のときは渡さない。
+   *
+   * 渡しても**位置は束の中での絶対位置のまま**にする。並べ替えも読み上げの
+   * 「何番目」も束全体を指しているので、ページ内の番号に変えると2ページ目の
+   * 先頭を動かしたときに1ページ目の先頭が動く。
+   */
+  page?: { start: number; end: number };
 }
 
 /**
@@ -48,6 +56,7 @@ export function CollectionMemberList({
   onMove,
   onDropAt,
   onRemove,
+  page,
 }: MemberListProps) {
   const [dragFrom, setDragFrom] = useState<number | null>(null);
   const [dragOver, setDragOver] = useState<number | null>(null);
@@ -62,7 +71,14 @@ export function CollectionMemberList({
   useEffect(() => {
     setVisibleCount((current) => Math.min(members.length, Math.max(INITIAL_MEMBER_RENDER, current)));
   }, [members.length]);
-  const visibleMembers = members.slice(0, visibleCount);
+  // 位置は必ず束の中での絶対位置で持ち回る。`slice` した配列を `map` すると
+  // index はページ内の番号になり、並べ替えも読み上げの「何番目」もずれる。
+  // 組にして持つことで、以降の index は数え直す余地なく絶対位置になる。
+  const windowStart = page ? page.start : 0;
+  const windowEnd = page ? page.end : visibleCount;
+  const visibleEntries = members
+    .slice(windowStart, windowEnd)
+    .map((member, offset) => ({ member, index: windowStart + offset }));
   const markDragOver = (index: number | null) => {
     dragOverRef.current = index;
     setDragOver(index);
@@ -159,7 +175,7 @@ export function CollectionMemberList({
     <>
       <span className="visually-hidden" aria-live="polite" aria-atomic="true">{announcement}</span>
       <div className={`collection-members collection-members--${view}`} data-ordered={ordered || undefined} role={ordered ? "list" : undefined} aria-label={ordered ? "コレクションの作品順" : undefined}>
-      {visibleMembers.map((member, index) => (
+      {visibleEntries.map(({ member, index }) => (
         <div
           key={`${member.source}:${member.sourceId}`}
           className="collection-member"
@@ -279,10 +295,10 @@ export function CollectionMemberList({
           )}
         </div>
       ))}
-      {visibleMembers.length < members.length && (
+      {!page && visibleEntries.length < members.length && (
         <Group justify="center" py="md" style={{ gridColumn: "1 / -1" }}>
           <Button variant="default" onClick={() => setVisibleCount((count) => Math.min(members.length, count + INITIAL_MEMBER_RENDER))}>
-            さらに表示（残り{formatNumber(members.length - visibleMembers.length)}件）
+            さらに表示（残り{formatNumber(members.length - visibleEntries.length)}件）
           </Button>
         </Group>
       )}

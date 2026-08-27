@@ -16,8 +16,9 @@ import { useDisclosure } from "@mantine/hooks";
 import { notifications } from "@mantine/notifications";
 import { modals } from "@mantine/modals";
 import { useMutation, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
-import { useAppNavigate, useRouteParams } from "@/app/router";
+import { useAppNavigate, useAppSearchParams, useRouteParams } from "@/app/router";
 import { ErrorState, LoadingState } from "@/components/AsyncState";
+import { ListPager, PagingModeToggle, useBoundedNumberedPage, usePageSize, usePagingMode } from "@/components/ListPager";
 import { CollectionCover } from "@/components/CollectionCover";
 import { formatNumber, errorMessage } from "@/lib/format";
 import { Icons, IconSize } from "@/lib/icons";
@@ -149,6 +150,36 @@ function CollectionDetail({ collection, readOnly, onEdit, onChanged }: { collect
   const [selected, setSelected] = useState<number[]>([]);
   const selectedSet = useMemo(() => new Set(selected), [selected]);
   const ordered = collection.collectionKind === "ordered";
+
+  // ページ番号は棚と同じ仕組みを使う。束の中身はすでに全件が手元にあるので、
+  // 棚のようにサーバーへ問い直すのではなく、持っている配列を切るだけでよい。
+  // 読み込み方の好みは画面ごとに覚えない - 棚で「ページ番号」を選んだ人は、
+  // 束の中でも同じ動きを期待する。
+  const [urlParams, setUrlParams] = useAppSearchParams();
+  const [pagingMode] = usePagingMode();
+  const [pageSize] = usePageSize();
+  const numberedPages = pagingMode === "pages";
+  const {
+    page: requestedPage,
+    maxPage: maxDirectPage,
+    limitNotice: pageLimitNotice,
+    clearLimitNotice,
+  } = useBoundedNumberedPage(numberedPages, urlParams, setUrlParams, pageSize);
+  const memberCount = collection.members.length;
+  const lastPage = Math.max(1, Math.ceil(memberCount / pageSize));
+  // 束から作品を外すと最後のページが消えることがある。URL が残っていても、
+  // 表示は必ず存在するページに収める。
+  const currentPage = Math.min(requestedPage, lastPage);
+  const memberWindow = numberedPages
+    ? { start: (currentPage - 1) * pageSize, end: currentPage * pageSize }
+    : undefined;
+  const goToPage = (next: number) => {
+    clearLimitNotice();
+    const params = new URLSearchParams(urlParams);
+    if (next > 1) params.set("page", String(next));
+    else params.delete("page");
+    setUrlParams(params);
+  };
 
   const mutation = useMutation({
     // 同じ束への操作は直列に流す。並べ替えは押すたびに飛ぶので、走らせたままだと
@@ -360,16 +391,19 @@ function CollectionDetail({ collection, readOnly, onEdit, onChanged }: { collect
                   <Text size="sm" c="dimmed">{!ordered ? "順序なしのコレクションです。" : readOnly ? "順序付きのコレクションです。" : "掴んで運ぶか、矢印で入れ替えられます。"}</Text>
                 )}
               </Group>
-              <SegmentedControl
-                className="view-mode-switch"
-                aria-label="コレクションの表示形式"
-                value={view}
-                onChange={(value) => setView(parseViewMode(value))}
-                data={[
-                  { value: "gallery", label: <Tooltip label="表紙で見る"><Icons.viewGrid size={IconSize.menu} aria-label="表紙表示" /></Tooltip> },
-                  { value: "compact", label: <Tooltip label="一覧で見る"><Icons.viewList size={IconSize.menu} aria-label="一覧表示" /></Tooltip> },
-                ]}
-              />
+              <Group gap="xs" wrap="nowrap">
+                <PagingModeToggle />
+                <SegmentedControl
+                  className="view-mode-switch"
+                  aria-label="コレクションの表示形式"
+                  value={view}
+                  onChange={(value) => setView(parseViewMode(value))}
+                  data={[
+                    { value: "gallery", label: <Tooltip label="表紙で見る"><Icons.viewGrid size={IconSize.menu} aria-label="表紙表示" /></Tooltip> },
+                    { value: "compact", label: <Tooltip label="一覧で見る"><Icons.viewList size={IconSize.menu} aria-label="一覧表示" /></Tooltip> },
+                  ]}
+                />
+              </Group>
             </Group>
 
             <CollectionMemberList
@@ -383,7 +417,27 @@ function CollectionDetail({ collection, readOnly, onEdit, onChanged }: { collect
               onMove={move}
               onDropAt={dropAt}
               onRemove={(member) => mutation.mutate({ type: "remove", keys: [workKey(member)] })}
+              page={memberWindow}
             />
+
+            {/* 番号で見るときだけ出す。「自動」のときは一覧が自分で続きを出す。 */}
+            {numberedPages && memberCount > pageSize && (
+              <ListPager
+                hasNext={false}
+                loading={false}
+                loaded={memberWindow ? Math.min(memberWindow.end, memberCount) - memberWindow.start : memberCount}
+                total={memberCount}
+                onLoad={() => undefined}
+                unit="作品"
+                pages={{
+                  current: currentPage,
+                  size: pageSize,
+                  onGoTo: goToPage,
+                  maxDirectPage,
+                  limitNotice: pageLimitNotice,
+                }}
+              />
+            )}
           </>
         )}
       </Stack>
