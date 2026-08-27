@@ -18,6 +18,9 @@ use std::time::{Duration, Instant};
 use super::collection_rules;
 use super::models::*;
 use super::schema;
+// 本文を組み立てるエスケープは、取り込み側と同じものを使う。同じ規則を二か所に
+// 書いていたので、片方だけ直すとリーダーとエディタで表示が食い違う余地があった。
+use super::parser::escape_html as escape_editor_html;
 use super::search::{
     extract_search_body, generate_ngrams_limited, make_match_highlights, match_fields_and_score,
     normalize_search_text, normalized_levenshtein, parse_search_query, query_ngrams,
@@ -12429,14 +12432,6 @@ fn active_edit_plain_text_locked(
     };
     let blocks = blocks_for_revision_locked(conn, revision.id)?;
     Ok(Some(blocks_to_plain_text(&blocks)))
-}
-
-fn escape_editor_html(text: &str) -> String {
-    text.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#x27;")
 }
 
 fn stale_search_index_ids_locked(

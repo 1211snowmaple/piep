@@ -25,7 +25,7 @@ static RE_IMAGE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\[(?:uploadedimage|pixivimage):(?P<id>\d+)\]").unwrap());
 
 /// HTML文字を安全にエスケープするインライン軽量エスケープ
-fn escape_html(text: &str) -> String {
+pub(crate) fn escape_html(text: &str) -> String {
     text.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
@@ -185,16 +185,19 @@ pub fn parse_fanbox_to_html(raw_json: &str, assets: &[AssetEntry]) -> String {
                 let found_asset = assets
                     .iter()
                     .find(|a| a.filename.contains(image_id) || a.local_path.contains(image_id));
+                // `imageId` は応答の文字列そのまま。pixiv 側と違って数字とは
+                // 限らないので、他の値と同じように通してから埋める。
+                let safe_image_id = escape_html(image_id);
                 if let Some(asset) = found_asset {
                     format!(
                         r#"<img class="novel-image" data-local-path="{}" alt="image_{}" />"#,
                         escape_html(&asset.local_path),
-                        image_id
+                        safe_image_id
                     )
                 } else {
                     format!(
                         r#"<div class="missing-image-placeholder">画像 {}(見つかりません)</div>"#,
-                        image_id
+                        safe_image_id
                     )
                 }
             }
@@ -412,6 +415,32 @@ fn parse_fanbox_paragraph(block: &serde_json::Value) -> String {
     let mut result_html = String::new();
     let chars: Vec<char> = text_str.chars().collect();
 
+    // FANBOX の `offset` / `length` は JS の文字列の添字、つまり **UTF-16 の
+    // 単位** である。Rust の `char` はコードポイントなので、絵文字のように
+    // UTF-16 で2つぶんを占める文字が混ざると、そこから先が1文字ずつずれる。
+    // ずれても例外にはならないぶん、太字やリンクが隣の文字に掛かった本文が
+    // 黙って保存されていた。
+    //
+    // 文字ごとの UTF-16 位置を先に並べておき、取得元の添字はここを引いて
+    // `chars` の位置へ直す。
+    let mut utf16_positions: Vec<usize> = Vec::with_capacity(chars.len() + 1);
+    let mut utf16_len = 0usize;
+    for character in &chars {
+        utf16_positions.push(utf16_len);
+        utf16_len += character.len_utf16();
+    }
+    utf16_positions.push(utf16_len);
+    let position_of = |utf16_offset: usize| -> usize {
+        // 本文の外へ出た位置は末尾へ寄せる。捨てると閉じタグだけが消え、
+        // 開いたままのタグが以降の本文を飲み込む。
+        let bounded = utf16_offset.min(utf16_len);
+        match utf16_positions.binary_search(&bounded) {
+            Ok(index) => index,
+            // サロゲートの途中を指していたら、その文字の頭へ寄せる。
+            Err(index) => index.saturating_sub(1),
+        }
+    };
+
     let mut inserts_map: Vec<Vec<String>> = vec![Vec::new(); chars.len() + 1];
     let mut all_tags = Vec::new();
 
@@ -422,8 +451,12 @@ fn parse_fanbox_paragraph(block: &serde_json::Value) -> String {
             let length = style.get("length").and_then(|l| l.as_u64()).unwrap_or(0) as usize;
 
             if style_type == "bold" {
-                all_tags.push((offset, "<b>".to_string(), true));
-                all_tags.push((offset + length, "</b>".to_string(), false));
+                all_tags.push((position_of(offset), "<b>".to_string(), true));
+                all_tags.push((
+                    position_of(offset.saturating_add(length)),
+                    "</b>".to_string(),
+                    false,
+                ));
             }
         }
     }
@@ -436,14 +469,18 @@ fn parse_fanbox_paragraph(block: &serde_json::Value) -> String {
 
             let escaped_url = escape_html(url);
             all_tags.push((
-                offset,
+                position_of(offset),
                 format!(
                     r#"<a href="{}" target="_blank" rel="noopener noreferrer">"#,
                     escaped_url
                 ),
                 true,
             ));
-            all_tags.push((offset + length, "</a>".to_string(), false));
+            all_tags.push((
+                position_of(offset.saturating_add(length)),
+                "</a>".to_string(),
+                false,
+            ));
         }
     }
 
@@ -455,10 +492,10 @@ fn parse_fanbox_paragraph(block: &serde_json::Value) -> String {
         }
     });
 
+    // `position_of` が必ず `0..=chars.len()` へ収めているので、ここで落とす
+    // ものは無い。範囲外だからと捨てていたのが、閉じないタグの原因だった。
     for (offset, tag, _) in all_tags {
-        if offset <= chars.len() {
-            inserts_map[offset].push(tag);
-        }
+        inserts_map[offset].push(tag);
     }
 
     for i in 0..=chars.len() {
@@ -486,6 +523,85 @@ fn parse_fanbox_paragraph(block: &serde_json::Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fanbox_block(block: serde_json::Value) -> String {
+        let json = serde_json::json!({ "body": { "blocks": [block] } });
+        parse_fanbox_to_html(&json.to_string(), &[])
+    }
+
+    /// FANBOX の `offset` / `length` は JS の文字列の添字、つまり UTF-16 の
+    /// 単位である。Rust の `char` はコードポイントなので、絵文字のように
+    /// UTF-16 で2つぶんを占める文字が混ざると、そこから先が1文字ずつずれる。
+    ///
+    /// ずれても例外にはならないので、**太字やリンクが隣の文字に掛かった本文**
+    /// が黙って保存される。
+    #[test]
+    fn fanbox_styles_are_placed_by_utf16_offsets() {
+        // 😀 は UTF-16 で2つぶん。offset 2 は「あ」を指す。
+        let html = fanbox_block(serde_json::json!({
+            "type": "p",
+            "text": "😀あいうえお",
+            "styles": [{ "type": "bold", "offset": 2, "length": 3 }]
+        }));
+        assert!(
+            html.contains("<b>あいう</b>"),
+            "太字が UTF-16 の位置に置かれていない: {html}"
+        );
+    }
+
+    #[test]
+    fn fanbox_links_are_placed_by_utf16_offsets() {
+        let html = fanbox_block(serde_json::json!({
+            "type": "p",
+            "text": "😀あいうえお",
+            "links": [{ "url": "https://example.com/", "offset": 2, "length": 3 }]
+        }));
+        assert!(
+            html.contains(">あいう</a>"),
+            "リンクが UTF-16 の位置に置かれていない: {html}"
+        );
+    }
+
+    /// 範囲が本文の外へ出ていても、開いたタグは必ず閉じる。
+    ///
+    /// 閉じるほうだけを捨てていたころは、`<b>` や `<a>` が閉じないまま以降の
+    /// 本文をすべて飲み込んでいた。取得元が長さを多めに寄越すことは実際に
+    /// あるので、ここは落とさずに末尾へ寄せる。
+    #[test]
+    fn a_style_running_past_the_end_still_closes() {
+        let html = fanbox_block(serde_json::json!({
+            "type": "p",
+            "text": "あいう",
+            "styles": [{ "type": "bold", "offset": 0, "length": 99 }]
+        }));
+        assert!(html.contains("<b>あいう</b>"), "閉じていない: {html}");
+    }
+
+    #[test]
+    fn a_link_running_past_the_end_still_closes() {
+        let html = fanbox_block(serde_json::json!({
+            "type": "p",
+            "text": "あいう",
+            "links": [{ "url": "https://example.com/", "offset": 0, "length": 99 }]
+        }));
+        assert!(html.contains("</a>"), "閉じていない: {html}");
+    }
+
+    /// 取得元から来た値は、どれも同じように通してから組む。
+    ///
+    /// pixiv の画像IDは正規表現が数字だけに限っているが、FANBOX の `imageId` は
+    /// 応答の文字列そのままである。ここだけ素で埋めていたので、`"` や `<` を
+    /// 含む値が来ると**組み立てた HTML のほうが壊れる**。取り込んだ書庫を
+    /// 復元する経路もあるので、値の出どころは取得元だけとは限らない。
+    #[test]
+    fn a_fanbox_image_id_cannot_break_out_of_the_markup() {
+        let html = fanbox_block(serde_json::json!({
+            "type": "image",
+            "imageId": "a\"><script>alert(1)</script>"
+        }));
+        assert!(!html.contains("<script>"), "生のタグが残っている: {html}");
+        assert!(!html.contains("\"><"), "属性から抜け出せている: {html}");
+    }
 
     #[test]
     fn fanbox_embed_uses_public_branded_card() {
