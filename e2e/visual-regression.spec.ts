@@ -7,7 +7,13 @@ test.beforeEach(async ({ page }) => {
   });
   await page.goto("/#/library");
   await expect(page.getByRole("textbox", { name: "ライブラリを検索" })).toBeVisible();
-  await page.addStyleTag({ content: "*,*::before,*::after{animation:none!important;transition:none!important;caret-color:transparent!important}" });
+  await page.addStyleTag({ content: `
+    *,*::before,*::after{animation:none!important;transition:none!important;caret-color:transparent!important}
+    /* Playwright's Windows image can also contain Noto Serif JP, while an
+       ordinary Windows installation usually falls through to Yu Mincho. A
+       screenshot must not change merely because that optional font exists. */
+    .reader-shell{--reader-font-family:"Yu Mincho",serif!important}
+  ` });
   await page.evaluate(async () => { await document.fonts.ready; });
 });
 
