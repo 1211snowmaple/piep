@@ -4,7 +4,9 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use r2d2::{Pool, PooledConnection};
 use r2d2_sqlite::SqliteConnectionManager;
 use regex::Regex;
-use rusqlite::{params, Connection, OpenFlags, OptionalExtension, Transaction};
+use rusqlite::{
+    params, Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
@@ -859,7 +861,7 @@ fn current_process_memory_bytes() -> Option<u64> {
     (success != 0).then_some(counters.working_set_size as u64)
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
 fn current_process_memory_bytes() -> Option<u64> {
     let status = std::fs::read_to_string("/proc/self/status").ok()?;
     let kib = status
@@ -870,6 +872,65 @@ fn current_process_memory_bytes() -> Option<u64> {
         .parse::<u64>()
         .ok()?;
     Some(kib.saturating_mul(1024))
+}
+
+#[cfg(target_os = "macos")]
+fn current_process_memory_bytes() -> Option<u64> {
+    type MachPort = u32;
+    type KernReturn = i32;
+    type MachCount = u32;
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct TimeValue {
+        seconds: i32,
+        microseconds: i32,
+    }
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct MachTaskBasicInfo {
+        virtual_size: u64,
+        resident_size: u64,
+        resident_size_max: u64,
+        user_time: TimeValue,
+        system_time: TimeValue,
+        policy: i32,
+        suspend_count: i32,
+    }
+
+    const MACH_TASK_BASIC_INFO: i32 = 20;
+    #[link(name = "System", kind = "dylib")]
+    extern "C" {
+        static mach_task_self_: MachPort;
+        fn task_info(
+            target_task: MachPort,
+            flavor: i32,
+            task_info_out: *mut i32,
+            task_info_count: *mut MachCount,
+        ) -> KernReturn;
+    }
+
+    let mut info = MachTaskBasicInfo::default();
+    // Mach reports the count in 32-bit `natural_t` units rather than bytes.
+    let mut count =
+        (std::mem::size_of::<MachTaskBasicInfo>() / std::mem::size_of::<i32>()) as MachCount;
+    // SAFETY: `mach_task_self_` is the task send right exported by libSystem;
+    // `info` is a writable C-layout buffer and `count` describes its size.
+    let success = unsafe {
+        task_info(
+            mach_task_self_,
+            MACH_TASK_BASIC_INFO,
+            (&mut info as *mut MachTaskBasicInfo).cast::<i32>(),
+            &mut count,
+        )
+    };
+    (success == 0).then_some(info.resident_size)
+}
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+fn current_process_memory_bytes() -> Option<u64> {
+    None
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -4925,6 +4986,102 @@ impl Database {
         Ok(items)
     }
 
+    /// Pages every durable candidate in primary-key order for portable
+    /// backups. Dismissed rows are included because they record an explicit
+    /// user decision and prevent an already-rejected work from reappearing.
+    pub fn list_update_candidates_after(
+        &self,
+        cursor: Option<(&str, &str)>,
+        limit: i64,
+    ) -> Result<Vec<UpdateCandidateRow>, String> {
+        let conn = self.read_conn()?;
+        let limit = limit.clamp(1, 5_000);
+        let (sql, bind_values): (&str, Vec<Box<dyn rusqlite::types::ToSql>>) = match cursor {
+            Some((source, source_id)) => (
+                "SELECT source, source_id, kind, title, payload_json, target_type, status,
+                        first_seen_at, updated_at
+                   FROM update_candidates
+                  WHERE source > ?1 OR (source = ?1 AND source_id > ?2)
+                  ORDER BY source ASC, source_id ASC
+                  LIMIT ?3",
+                vec![
+                    Box::new(source.to_string()),
+                    Box::new(source_id.to_string()),
+                    Box::new(limit),
+                ],
+            ),
+            None => (
+                "SELECT source, source_id, kind, title, payload_json, target_type, status,
+                        first_seen_at, updated_at
+                   FROM update_candidates
+                  ORDER BY source ASC, source_id ASC
+                  LIMIT ?1",
+                vec![Box::new(limit)],
+            ),
+        };
+        let refs = bind_values
+            .iter()
+            .map(|value| value.as_ref())
+            .collect::<Vec<_>>();
+        let mut statement = conn
+            .prepare(sql)
+            .map_err(|e| format!("Update candidate page prepare failed: {e}"))?;
+        let rows = statement
+            .query_map(refs.as_slice(), |row| {
+                Ok(UpdateCandidateRow {
+                    source: row.get(0)?,
+                    source_id: row.get(1)?,
+                    kind: row.get(2)?,
+                    title: row.get(3)?,
+                    payload_json: row.get(4)?,
+                    target_type: row.get(5)?,
+                    status: row.get(6)?,
+                    first_seen_at: row.get(7)?,
+                    updated_at: row.get(8)?,
+                })
+            })
+            .map_err(|e| format!("Update candidate page query failed: {e}"))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("Update candidate page row failed: {e}"))
+    }
+
+    pub fn restore_update_candidate(&self, candidate: &UpdateCandidateRow) -> Result<(), String> {
+        if !matches!(candidate.status.as_str(), "pending" | "dismissed") {
+            return Err(format!(
+                "Backup update candidate has an unsupported status: {}",
+                candidate.status
+            ));
+        }
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT INTO update_candidates (
+                source, source_id, kind, title, payload_json, target_type, status,
+                first_seen_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(source, source_id) DO UPDATE SET
+                kind = excluded.kind,
+                title = excluded.title,
+                payload_json = excluded.payload_json,
+                target_type = excluded.target_type,
+                status = excluded.status,
+                first_seen_at = excluded.first_seen_at,
+                updated_at = excluded.updated_at",
+            params![
+                candidate.source,
+                candidate.source_id,
+                candidate.kind,
+                candidate.title,
+                candidate.payload_json,
+                candidate.target_type,
+                candidate.status,
+                candidate.first_seen_at,
+                candidate.updated_at,
+            ],
+        )
+        .map_err(|e| format!("Failed to restore update candidate: {e}"))?;
+        Ok(())
+    }
+
     /// この作品を今後は候補に出さない。決定は取り消せる。
     pub fn set_update_candidate_status(
         &self,
@@ -5382,14 +5539,26 @@ impl Database {
     }
 
     pub fn next_update_job_item(&self, job_id: &str) -> Result<Option<UpdateJobItem>, String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        let item = conn
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        // Claiming an item and deciding whether the worker may still run are
+        // one operation. A pause/cancel can arrive after the worker's outer
+        // status check, so checking only there would let one fresh network or
+        // save operation start after the stop request was already recorded.
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|e| format!("Failed to begin update item claim: {e}"))?;
+        let item = tx
             .query_row(
                 "SELECT id, job_id, item_type, source, source_id, target_type, title,
                         payload_json, status, error, result_download_id
-                 FROM update_job_items
-                 WHERE job_id = ?1 AND status = 'queued'
-                 ORDER BY CASE item_type WHEN 'work' THEN 0 WHEN 'target' THEN 1 ELSE 2 END, id ASC
+                 FROM update_job_items i
+                 WHERE i.job_id = ?1 AND i.status = 'queued'
+                   AND EXISTS (
+                       SELECT 1 FROM update_jobs j
+                       WHERE j.id = i.job_id AND j.status IN ('queued', 'running')
+                   )
+                 ORDER BY CASE i.item_type WHEN 'work' THEN 0 WHEN 'target' THEN 1 ELSE 2 END,
+                          i.id ASC
                  LIMIT 1",
                 params![job_id],
                 update_job_item_from_row,
@@ -5397,26 +5566,43 @@ impl Database {
             .optional()
             .map_err(|e| format!("Failed to fetch next update item: {}", e))?;
         if let Some(item) = item {
-            conn.execute(
-                "UPDATE update_job_items SET status = 'running', updated_at = CURRENT_TIMESTAMP WHERE id = ?1",
-                params![item.id],
-            )
-            .map_err(|e| format!("Failed to mark update item running: {}", e))?;
-            // 状態を 'running' へ戻せるのは、まだ誰も止めていないときだけ。
-            // 取り出しと同時に上書きすると、直前に届いたキャンセルや一時停止の
-            // 要求がここで消える - 記録が消えた要求は、二度と気付かれない。
-            conn.execute(
-                "UPDATE update_jobs
-                 SET active_label = ?1, status = 'running', updated_at = ?2
-                 WHERE id = ?3 AND status IN ('queued', 'running')",
-                params![item.title, chrono::Utc::now().to_rfc3339(), job_id],
-            )
-            .map_err(|e| format!("Failed to mark update job running: {}", e))?;
+            let claimed = tx
+                .execute(
+                    "UPDATE update_job_items
+                     SET status = 'running', updated_at = CURRENT_TIMESTAMP
+                     WHERE id = ?1 AND status = 'queued'
+                       AND EXISTS (
+                           SELECT 1 FROM update_jobs
+                           WHERE id = ?2 AND status IN ('queued', 'running')
+                       )",
+                    params![item.id, job_id],
+                )
+                .map_err(|e| format!("Failed to mark update item running: {}", e))?;
+            if claimed == 0 {
+                tx.commit()
+                    .map_err(|e| format!("Failed to finish empty update item claim: {e}"))?;
+                return Ok(None);
+            }
+            let job_claimed = tx
+                .execute(
+                    "UPDATE update_jobs
+                  SET active_label = ?1, status = 'running', updated_at = ?2
+                  WHERE id = ?3 AND status IN ('queued', 'running')",
+                    params![item.title, chrono::Utc::now().to_rfc3339(), job_id],
+                )
+                .map_err(|e| format!("Failed to mark update job running: {}", e))?;
+            if job_claimed != 1 {
+                return Err("Update job stopped while its next item was being claimed".to_string());
+            }
+            tx.commit()
+                .map_err(|e| format!("Failed to commit update item claim: {e}"))?;
             return Ok(Some(UpdateJobItem {
                 status: "running".to_string(),
                 ..item
             }));
         }
+        tx.commit()
+            .map_err(|e| format!("Failed to finish update item claim: {e}"))?;
         Ok(None)
     }
 
@@ -16644,6 +16830,45 @@ mod search_integration_tests {
         assert!(super::super::tantivy_index::ordinary_writer_is_cached(&storage).unwrap());
     }
 
+    /// 段に分けて統合しても、最後は1つに収まる。
+    ///
+    /// 一度に全部を混ぜていたころは、そのあいだ保存も削除も待たされた。段に
+    /// 分けたことで途中で場所を空けられるようになったが、**分けたせいで
+    /// 途中で止まってはいけない**。
+    ///
+    /// なお 1 段の上限（16）を超えるセグメントは、この試験では作れない。
+    /// ふつうの保存は tantivy の既定の方針で自動的に統合されるので、80件
+    /// 入れても3つにしかならない。段をまたぐ経路そのものは、ここでは通らない。
+    #[test]
+    fn optimizing_a_multi_segment_index_still_ends_with_one() {
+        let (_temp, root, storage) = temp_paths();
+        let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+        // 1件ずつ確定するので、作品の数だけセグメントができる。
+        for index in 0..30 {
+            insert_download(
+                &db,
+                &storage,
+                &format!("segment-{index}"),
+                &format!("段 {index} 番目"),
+                "author",
+                &["segment"],
+                "本文",
+            );
+        }
+        let before = super::super::tantivy_index::searchable_segment_count(&storage).unwrap();
+        assert!(before > 1, "統合するものが要る: {before}");
+
+        let (reported_before, after) =
+            super::super::tantivy_index::optimize_segments(&storage).unwrap();
+
+        assert_eq!(reported_before, before);
+        assert_eq!(after, 1, "統合が途中で止まっている");
+        assert_eq!(
+            super::super::tantivy_index::searchable_segment_count(&storage).unwrap(),
+            1
+        );
+    }
+
     /// 再構築の最中でも、保存や削除は待たされ続けない。
     ///
     /// tantivy は 1 ディレクトリに 1 つしか書き手を許さないので、再構築が場所を
@@ -19112,6 +19337,93 @@ mod search_integration_tests {
         db.recover_update_jobs_on_startup().unwrap();
         let snapshot = db.update_job_snapshot("job-test").unwrap();
         assert_eq!(snapshot.status, "paused");
+    }
+
+    #[test]
+    fn stopped_update_jobs_leave_their_next_item_queued() {
+        let (_temp, root, storage) = temp_paths();
+        let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+        let request = StartUpdateJobRequest {
+            scope: "work".to_string(),
+            mode: "auto_save".to_string(),
+            work_ids: None,
+            target_ids: None,
+            credentials: None,
+            watch_saved: None,
+            adhoc_targets: None,
+        };
+
+        for status in ["paused", "canceling", "canceled"] {
+            let job_id = format!("job-{status}");
+            db.create_update_job(
+                &job_id,
+                &request,
+                &[UpdateJobItemInput {
+                    item_type: "work".to_string(),
+                    source: Some("pixiv".to_string()),
+                    source_id: Some(status.to_string()),
+                    target_type: Some("work".to_string()),
+                    title: format!("{status} item"),
+                    payload_json: "{}".to_string(),
+                    status: "queued".to_string(),
+                }],
+            )
+            .unwrap();
+            db.set_update_job_status(&job_id, status, Some(status))
+                .unwrap();
+
+            assert!(db.next_update_job_item(&job_id).unwrap().is_none());
+            let (job_status, item_status): (String, String) = db
+                .conn
+                .lock()
+                .unwrap()
+                .query_row(
+                    "SELECT j.status, i.status
+                     FROM update_jobs j
+                     JOIN update_job_items i ON i.job_id = j.id
+                     WHERE j.id = ?1",
+                    params![job_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(job_status, status);
+            assert_eq!(item_status, "queued");
+        }
+    }
+
+    #[test]
+    fn active_update_job_claims_its_next_item_atomically() {
+        let (_temp, root, storage) = temp_paths();
+        let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+        let request = StartUpdateJobRequest {
+            scope: "work".to_string(),
+            mode: "auto_save".to_string(),
+            work_ids: None,
+            target_ids: None,
+            credentials: None,
+            watch_saved: None,
+            adhoc_targets: None,
+        };
+        db.create_update_job(
+            "job-claim",
+            &request,
+            &[UpdateJobItemInput {
+                item_type: "work".to_string(),
+                source: Some("pixiv".to_string()),
+                source_id: Some("claim".to_string()),
+                target_type: Some("work".to_string()),
+                title: "Claim me".to_string(),
+                payload_json: "{}".to_string(),
+                status: "queued".to_string(),
+            }],
+        )
+        .unwrap();
+
+        let item = db.next_update_job_item("job-claim").unwrap().unwrap();
+        assert_eq!(item.status, "running");
+        let snapshot = db.update_job_snapshot("job-claim").unwrap();
+        assert_eq!(snapshot.status, "running");
+        assert_eq!(snapshot.active_label.as_deref(), Some("Claim me"));
     }
 
     /// 履歴は放っておくと溜まり続ける。整理は「古くて終わったもの」だけに効き、

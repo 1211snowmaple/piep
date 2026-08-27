@@ -594,6 +594,62 @@ fn acquire_bulk_writer(
     })
 }
 
+/// 索引の書き手を待っている保存や削除があるか。
+fn ordinary_writers_waiting(runtime: &Arc<TantivyRuntime>) -> bool {
+    runtime.writer_state.lock().waiting > 0
+}
+
+/// いったん場所を空けて、待っている書き手に順番を渡してから取り直す。
+///
+/// 再構築と最適化のどちらもこれを通る。**排他の書き手を長く持つ仕事は、
+/// 区切りのいいところで場所を空ける** - 再構築は後ろで走ってよい仕事で、
+/// 利用者が押した保存はそうではない。
+///
+/// 取り直しには書き手の作り直しが要る（tantivy は 1 ディレクトリに 1 つしか
+/// 書き手を許さないので、先に新しいほうを作ってから差し替えることはできない）。
+/// それでも、待っている人がいるときにしか起きない。誰も待っていなければ
+/// 何もせずに戻るので、ふだんの速さは変わらない。
+///
+/// **確定していないものを抱えたまま呼んではならない。** 手放すと書き手ごと
+/// 消える。確定は呼ぶ側の責任である。
+fn hand_over_exclusive_writer(
+    runtime: &Arc<TantivyRuntime>,
+    writer: &mut Option<ExclusiveWriter>,
+    create: impl FnOnce() -> Result<IndexWriter<TantivyDocument>, String>,
+) -> Result<(), String> {
+    if !ordinary_writers_waiting(runtime) {
+        return Ok(());
+    }
+    // 先に落とす。Drop が排他の印を外し、待っている側を起こす。
+    writer.take();
+    // 待っていた側が書き終えるまで、取り直さない。
+    //
+    // 起こしてすぐ取り直すと、**起こしただけで自分が先に入り直す**ことが
+    // ある。`parking_lot` の Mutex は順番を約束しないので、これは運任せに
+    // なる。待ちの数が捌けるまで待てば、渡ったことが確かになる。
+    // ここで新しく待ちに入る者は増えない - 排他の印はもう外れているので、
+    // 後から来た書き手は待たずにそのまま通る。
+    {
+        let mut state = runtime.writer_state.lock();
+        let deadline = Instant::now() + WRITER_HANDOVER_TIMEOUT;
+        while state.waiting > 0 {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                // 渡しきれなくても仕事は続ける。ここで諦めるのは待ち時間の
+                // 話でしかなく、索引の正しさには関わらない。
+                log::warn!(
+                    "Index writer handover timed out with {} writers still waiting",
+                    state.waiting
+                );
+                break;
+            }
+            runtime.writer_available.wait_for(&mut state, remaining);
+        }
+    }
+    *writer = Some(exclusive_writer(runtime, create)?);
+    Ok(())
+}
+
 impl BulkWriter {
     fn writer(&mut self) -> Result<&mut ExclusiveWriter, String> {
         self.writer
@@ -603,7 +659,7 @@ impl BulkWriter {
 
     /// 索引の書き手を待っている保存や削除があるか。
     pub fn has_waiting_writers(&self) -> bool {
-        self.runtime.writer_state.lock().waiting > 0
+        ordinary_writers_waiting(&self.runtime)
     }
 
     /// いったん場所を空けて、待っている書き手に順番を渡してから取り直す。
@@ -619,43 +675,15 @@ impl BulkWriter {
         if self.uncommitted != 0 {
             return Err("Tantivy bulk writer yielded with uncommitted documents".to_string());
         }
-        if !self.has_waiting_writers() {
-            return Ok(());
-        }
-        // 先に落とす。Drop が排他の印を外し、待っている側を起こす。
-        self.writer.take();
-        // 待っていた側が書き終えるまで、取り直さない。
-        //
-        // 起こしてすぐ取り直すと、**起こしただけで自分が先に入り直す**ことが
-        // ある。`parking_lot` の Mutex は順番を約束しないので、これは運任せに
-        // なる。待ちの数が捌けるまで待てば、渡ったことが確かになる。
-        // ここで新しく待ちに入る者は増えない - 排他の印はもう外れているので、
-        // 後から来た書き手は待たずにそのまま通る。
-        {
-            let mut state = self.runtime.writer_state.lock();
-            let deadline = Instant::now() + WRITER_HANDOVER_TIMEOUT;
-            while state.waiting > 0 {
-                let remaining = deadline.saturating_duration_since(Instant::now());
-                if remaining.is_zero() {
-                    // 渡しきれなくても再構築は続ける。ここで諦めるのは待ち時間の
-                    // 話でしかなく、索引の正しさには関わらない。
-                    log::warn!(
-                        "Index writer handover timed out with {} writers still waiting",
-                        state.waiting
-                    );
-                    break;
-                }
-                self.runtime
-                    .writer_available
-                    .wait_for(&mut state, remaining);
-            }
-        }
-        self.writer = Some(acquire_bulk_writer(
-            &self.runtime,
-            self.threads,
-            self.memory_budget,
-        )?);
-        Ok(())
+        let runtime = self.runtime.clone();
+        let threads = self.threads;
+        let memory_budget = self.memory_budget;
+        hand_over_exclusive_writer(&runtime, &mut self.writer, || {
+            runtime
+                .index
+                .writer_with_num_threads(threads, memory_budget)
+                .map_err(|e| format!("Tantivy bulk writer creation failed: {e}"))
+        })
     }
 
     pub fn upsert(&mut self, prepared: Prepared) -> Result<(), String> {
@@ -806,39 +834,104 @@ pub fn index_generation(storage_dir: &Path) -> Result<u64, String> {
 /// the old segment set authoritative until the new one is fully written and
 /// its meta file is committed, so an interruption cannot replace a valid index
 /// with a partial merge. Unreferenced files are collected only afterwards.
+/// 一度に統合するセグメントの数。
+///
+/// 全部を一度に混ぜると、そのあいだ保存も削除も待たされる。段に分ければ、
+/// 段の切れ目で場所を空けられる。段を重ねれば最後は1つに収束する。
+const OPTIMIZE_MERGE_BATCH: usize = 16;
+
+/// 統合を繰り返す回数の上限。
+///
+/// 1段で 16 分の 1 になるので、通常は数回で終わる。収束しない事態
+/// （統合が進まないのに残り続ける）で回り続けないよう、上限を置く。
+const MAX_OPTIMIZE_ROUNDS: usize = 16;
+
+fn optimize_writer(runtime: &Arc<TantivyRuntime>) -> Result<IndexWriter<TantivyDocument>, String> {
+    runtime
+        .index
+        .writer(64_000_000)
+        .map_err(|e| format!("Tantivy optimization writer creation failed: {e}"))
+}
+
+/// 明示の統合中は、自動の統合を止める。取り直すたびに掛け直す必要がある
+/// （新しい書き手は既定の方針で始まる）。
+fn hold_merges(writer: &mut Option<ExclusiveWriter>) -> Result<(), String> {
+    writer
+        .as_mut()
+        .ok_or_else(|| "Tantivy optimization writer was released".to_string())?
+        .set_merge_policy(Box::new(tantivy::merge_policy::NoMergePolicy));
+    Ok(())
+}
+
+fn optimizing_writer(writer: &mut Option<ExclusiveWriter>) -> Result<&mut ExclusiveWriter, String> {
+    writer
+        .as_mut()
+        .ok_or_else(|| "Tantivy optimization writer was released".to_string())
+}
+
 pub fn optimize_segments(storage_dir: &Path) -> Result<(usize, usize), String> {
     let runtime = runtime(storage_dir)?;
-    let segment_ids = runtime
+    let before = runtime
         .index
         .searchable_segment_ids()
-        .map_err(|e| format!("Tantivy segment inspection failed: {e}"))?;
-    let before = segment_ids.len();
-    let mut writer = exclusive_writer(&runtime, || {
-        runtime
-            .index
-            .writer(64_000_000)
-            .map_err(|e| format!("Tantivy optimization writer creation failed: {e}"))
-    })?;
-    writer.set_merge_policy(Box::new(tantivy::merge_policy::NoMergePolicy));
+        .map_err(|e| format!("Tantivy segment inspection failed: {e}"))?
+        .len();
+    let mut writer = Some(exclusive_writer(&runtime, || optimize_writer(&runtime))?);
+    hold_merges(&mut writer)?;
     if before <= 1 {
         // A prior merge can leave obsolete files temporarily undeletable on
         // Windows while another reader still owns an mmap. Even when no merge
         // is needed, an explicit optimization must retry that safe cleanup.
-        if let Err(error) = writer.garbage_collect_files().wait() {
+        if let Err(error) = optimizing_writer(&mut writer)?
+            .garbage_collect_files()
+            .wait()
+        {
             log::warn!("Tantivy obsolete file collection deferred: {error}");
         }
         return Ok((before, before));
     }
 
-    writer
-        .merge(&segment_ids)
-        .wait()
-        .map_err(|e| format!("Tantivy segment merge failed: {e}"))?;
+    // 段に分けて統合し、段の切れ目で待っている保存に順番を渡す。
+    // **最適化は後ろで走ってよい仕事で、利用者が押した保存はそうではない。**
+    for round in 0..MAX_OPTIMIZE_ROUNDS {
+        let ids = runtime
+            .index
+            .searchable_segment_ids()
+            .map_err(|e| format!("Tantivy segment inspection failed: {e}"))?;
+        if ids.len() <= 1 {
+            break;
+        }
+        let mut merged = false;
+        for chunk in ids.chunks(OPTIMIZE_MERGE_BATCH) {
+            if chunk.len() < 2 {
+                continue;
+            }
+            optimizing_writer(&mut writer)?
+                .merge(chunk)
+                .wait()
+                .map_err(|e| format!("Tantivy segment merge failed: {e}"))?;
+            merged = true;
+            hand_over_exclusive_writer(&runtime, &mut writer, || optimize_writer(&runtime))?;
+            hold_merges(&mut writer)?;
+        }
+        if !merged {
+            // 2つ以上あるのに1つも統合できなかった。回り続けても同じなので抜ける。
+            log::warn!(
+                "Tantivy optimization made no progress at round {round} with {} segments",
+                ids.len()
+            );
+            break;
+        }
+    }
+
     runtime
         .reader
         .reload()
         .map_err(|e| format!("Tantivy reader reload after merge failed: {e}"))?;
-    if let Err(error) = writer.garbage_collect_files().wait() {
+    if let Err(error) = optimizing_writer(&mut writer)?
+        .garbage_collect_files()
+        .wait()
+    {
         // The merged index is already committed and searchable. On Windows an
         // in-flight reader may keep an obsolete mmap alive; a later writer or
         // optimization run can safely retry collecting those files.
