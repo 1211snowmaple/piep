@@ -12819,7 +12819,6 @@ fn search_index_status_locked(
         } else {
             "indexing".to_string()
         },
-        indexed_chunks: semantic.indexed_chunks,
         semantic_indexed_chunks: semantic.indexed_chunks,
         semantic_indexed_downloads,
         semantic_pending_downloads,

@@ -200,10 +200,14 @@ export interface SearchIndexStatus {
   totalDownloads: number;
   indexedDownloads: number;
   pendingDownloads: number;
+  /** 全文索引だけの話。意味索引の遅れはここに出ない。 */
   isComplete: boolean;
   phase: string;
-  indexedChunks: number;
   semanticIndexedChunks: number;
+  /** 意味索引が最新の版で覆えている作品数。断片数と違い、棚の何割かが分かる。 */
+  semanticIndexedDownloads: number;
+  /** 意味索引がまだ追いついていない作品数。 */
+  semanticPendingDownloads: number;
   semanticModelReady: boolean;
   embeddingProvider: string;
   gpuEnabled: boolean;
@@ -548,7 +552,6 @@ export interface SearchRebuildProgress {
   processed?: number;
   processedTotal?: number;
   failed?: number;
-  indexedChunks?: number;
   embeddingProvider?: string;
   gpuEnabled?: boolean;
   throughputPerSec?: number | null;

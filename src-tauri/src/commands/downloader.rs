@@ -529,7 +529,10 @@ where
     }
 }
 
-#[tauri::command]
+/// 作品ひとつを本文ごと取り寄せる。
+///
+/// IPC には出さない。画面から始まる保存は `start_save_job` が、監視から始まる
+/// 取り直しは更新ジョブが、どちらも Rust の中でこれを呼ぶ。
 pub async fn fetch_pixiv_novel(
     novel_id: String,
     refresh_token: String,
@@ -552,7 +555,9 @@ pub async fn fetch_pixiv_novel(
     })
 }
 
-#[tauri::command]
+/// 本文を伴わない作品詳細。改稿の有無を指紋で見るときに使う。
+///
+/// IPC には出さない。呼ぶのは更新ジョブだけである。
 pub async fn fetch_pixiv_novel_metadata(
     novel_id: String,
     refresh_token: String,
@@ -1625,8 +1630,12 @@ async fn sync_download_entities(
     }
 }
 
+/// 取り寄せた中身をライブラリへ入れる。版の判断もここで行う。
+///
+/// IPC には出さない。**題名・作者・タグをどう読むかは取得元の作法であって
+/// 画面の都合ではない**ので、材料を画面から受け取る形にはしない。保存ジョブと
+/// 更新ジョブが、取り寄せた応答をそのまま渡して呼ぶ。
 #[allow(clippy::too_many_arguments)]
-#[tauri::command]
 pub async fn download_and_save(
     app: tauri::AppHandle,
     data: serde_json::Value,

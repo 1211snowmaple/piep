@@ -42,6 +42,36 @@ export function quickSaveSource(value: string): QuickSaveSource | null {
   }
 }
 
+/** 索引の状態を、ホームの一行で言うときの言葉。 */
+export interface SearchIndexNoteInput {
+  pendingDownloads: number;
+  isComplete: boolean;
+  semanticIndexedChunks: number;
+  semanticPendingDownloads: number;
+}
+
+/**
+ * 索引の様子を一文で言う。
+ *
+ * **意味索引の遅れを、全文索引の完成度で覆い隠さない。** この行は長らく
+ * `isComplete` ひとつで「全文・意味検索は最新です」と書いていたが、その旗が
+ * 見ているのは全文索引だけである。意味索引は作るのが桁違いに遅く、GPU と
+ * 数百MBのモデルが要るので、まだ一度も作っていない棚もある。
+ * 追いついているか知らないものを「最新」と呼ばない。
+ *
+ * 意味ベクトルが一つも無い棚には何も言わない。作っていないことは異常ではなく、
+ * **既定の状態には印を付けない**。
+ */
+export function searchIndexNote(status: SearchIndexNoteInput | undefined): string {
+  if (!status) return "";
+  if (!status.isComplete) return `${formatNumber(status.pendingDownloads)}件を処理中`;
+  if (status.semanticIndexedChunks === 0) return "全文検索は最新です";
+  if (status.semanticPendingDownloads > 0) {
+    return `全文検索は最新です · 意味検索は${formatNumber(status.semanticPendingDownloads)}件が未反映`;
+  }
+  return "全文・意味検索は最新です";
+}
+
 /** Enough to keep four rows however many columns the card's width allows: six
  *  columns of four at the widest. The card shows the first four rows and clips
  *  the rest, so the count only has to be generous, not exact. */
@@ -62,8 +92,9 @@ export default function DashboardPage() {
       pendingDownloads: 0,
       isComplete: true,
       phase: "ready",
-      indexedChunks: 4192,
       semanticIndexedChunks: 4192,
+      semanticIndexedDownloads: demoDashboard.stats.totalDownloads,
+      semanticPendingDownloads: 0,
       semanticModelReady: true,
       embeddingProvider: "preview",
       gpuEnabled: true,
@@ -145,7 +176,7 @@ export default function DashboardPage() {
             <div className="dashboard-side">
               <Card p="lg">
                 <Group justify="space-between" mb="sm"><Group gap="xs"><Icons.search size={IconSize.action} /><Text fw={700}>検索インデックス</Text></Group><Badge color={index.isError ? "red" : indexProgress === 100 ? "green" : "yellow"}>{index.isError ? "取得失敗" : `${indexProgress}%`}</Badge></Group>
-                {index.isError ? <Button variant="subtle" color="red" size="compact-xs" onClick={() => index.refetch()}>状態を再確認</Button> : <><Progress value={indexProgress} mb="sm" color={indexProgress === 100 ? "green" : "yellow"} aria-label={`検索インデックス ${indexProgress}%`} /><Text size="xs" c="dimmed">{index.data?.isComplete ? "全文・意味検索は最新です" : `${formatNumber(index.data?.pendingDownloads)}件を処理中`}</Text></>}
+                {index.isError ? <Button variant="subtle" color="red" size="compact-xs" onClick={() => index.refetch()}>状態を再確認</Button> : <><Progress value={indexProgress} mb="sm" color={indexProgress === 100 ? "green" : "yellow"} aria-label={`検索インデックス ${indexProgress}%`} /><Text size="xs" c="dimmed">{searchIndexNote(index.data)}</Text></>}
               </Card>
               <Card p="lg" className="dashboard-tags-card">
                 <Text fw={700} mb="sm">よく使うタグ</Text>

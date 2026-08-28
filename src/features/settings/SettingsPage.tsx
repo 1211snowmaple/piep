@@ -50,7 +50,9 @@ import {
   type BackupInspection,
 } from "@/services/archiveApi";
 import { loginFanboxWebview, loginPixivWebview, verifyFanboxSession, verifyPixivToken } from "@/services/authApi";
+import type { FanboxUser, PixivUser } from "@/services/authApi";
 import { getSearchIndexStatus, getStats, isTauriRuntime, scanAndReimportDownloads } from "@/services/dbApi";
+import type { SearchIndexStatus } from "@/types/library";
 import { openSingleDialog, saveDialog } from "@/services/dialogApi";
 import { openFilesystemPath } from "@/services/openerApi";
 import { useSearchIndexProgress } from "@/features/search/searchIndexProgress";
@@ -84,12 +86,24 @@ type Section = (typeof SECTIONS)[number];
 function isSection(value: string | null): value is Section {
   return value !== null && (SECTIONS as readonly string[]).includes(value);
 }
-interface PixivUser { id: string; name: string; profile_image_urls?: { medium?: string } }
-/// pixivと接続したときに返るもの。cookieは取れないこともある。
-interface PixivConnection { refreshToken: string; user: PixivUser; cookie: string | null; userAgent: string | null }
-interface FanboxUser { userId: string; name: string; iconUrl?: string | null }
 interface ConnectionState { pixiv: PixivUser | null; fanbox: FanboxUser | null }
 export interface BackupReview { path: string; format: BackupFormat; inspection: BackupInspection }
+
+/** ブラウザプレビュー用の索引の様子。追いついた棚を見せる。 */
+const PREVIEW_INDEX_STATUS: SearchIndexStatus = {
+  totalDownloads: 1284,
+  indexedDownloads: 1284,
+  pendingDownloads: 0,
+  isComplete: true,
+  phase: "ready",
+  semanticIndexedChunks: 4192,
+  semanticIndexedDownloads: 1284,
+  semanticPendingDownloads: 0,
+  semanticModelReady: true,
+  embeddingProvider: "DirectML (preview)",
+  gpuEnabled: true,
+  throughputPerSec: null,
+};
 
 export default function SettingsPage() {
   const runtime = isTauriRuntime();
@@ -123,7 +137,7 @@ export default function SettingsPage() {
   });
   const stats = useQuery({ queryKey: ["stats"], queryFn: () => runtime ? getStats() : Promise.resolve({ totalDownloads: 1284, pixivCount: 936, fanboxCount: 348, totalAssets: 8241, totalSizeBytes: 14_680_000_000 }) });
   const storagePath = useQuery({ queryKey: ["storage-path"], queryFn: () => runtime ? getStoragePath() : Promise.resolve("C:\\Users\\preview\\AppData\\Roaming\\com.hiron.piep\\downloads") });
-  const index = useQuery({ queryKey: ["search-index-status"], queryFn: () => runtime ? getSearchIndexStatus() : Promise.resolve({ totalDownloads: 1284, indexedDownloads: 1284, pendingDownloads: 0, isComplete: true, phase: "ready", indexedChunks: 4192, semanticIndexedChunks: 4192, semanticModelReady: true, embeddingProvider: "DirectML (preview)", gpuEnabled: true }) });
+  const index = useQuery({ queryKey: ["search-index-status"], queryFn: () => runtime ? getSearchIndexStatus() : Promise.resolve(PREVIEW_INDEX_STATUS) });
   const pixivForm = useForm({ initialValues: { token: "" }, validate: { token: isNotEmpty("リフレッシュトークンを入力してください") } });
   const fanboxForm = useForm({ initialValues: { session: "", userAgent: "Mozilla/5.0" }, validate: { session: isNotEmpty("FANBOXSESSIDを入力してください") } });
   const connectionMutation = useMutation({
@@ -133,8 +147,8 @@ export default function SettingsPage() {
         // ブラウザ経由の接続だけが web のセッションを持ち帰る。手動でトークンを
         // 貼った場合は Cookie が無いので、更新確認は従来の経路になる。
         const connection = input.mode === "web"
-          ? await loginPixivWebview<PixivConnection>()
-          : { refreshToken: input.values?.token ?? "", user: await verifyPixivToken<PixivUser>(input.values?.token ?? ""), cookie: null, userAgent: null };
+          ? await loginPixivWebview()
+          : { refreshToken: input.values?.token ?? "", user: await verifyPixivToken(input.values?.token ?? ""), cookie: null, userAgent: null };
         await store.set("pixiv_refresh_token", connection.refreshToken); await store.set("pixiv_user", connection.user);
         // Cookie と UA は対でしか意味を持たない。片方だけ残らないよう、
         // 揃っているときだけ書き、そうでなければ両方消す。
@@ -142,7 +156,7 @@ export default function SettingsPage() {
         else { await store.delete("pixiv_cookie"); await store.delete("pixiv_user_agent"); }
         await store.save();
       } else {
-        const [session, user, userAgent] = input.mode === "web" ? await loginFanboxWebview<[string, FanboxUser, string]>() : [input.values?.session ?? "", await verifyFanboxSession<FanboxUser>(input.values?.session ?? "", input.values?.userAgent || "Mozilla/5.0"), input.values?.userAgent || "Mozilla/5.0"];
+        const [session, user, userAgent] = input.mode === "web" ? await loginFanboxWebview() : [input.values?.session ?? "", await verifyFanboxSession(input.values?.session ?? "", input.values?.userAgent || "Mozilla/5.0"), input.values?.userAgent || "Mozilla/5.0"] as const;
         await store.set("fanbox_session_id", session); await store.set("fanbox_user", user); await store.set("fanbox_user_agent", userAgent); await store.save();
       }
     },
@@ -379,7 +393,7 @@ const REBUILD_PHASE_LABEL: Record<string, string> = {
   failed: "失敗しました",
 };
 
-function SearchSection({ status, rebuild, runtime, rebuilding, start, cancel }: { status?: { totalDownloads: number; indexedDownloads: number; pendingDownloads: number; isComplete: boolean; indexedChunks: number; semanticIndexedChunks: number; semanticModelReady: boolean; embeddingProvider: string; gpuEnabled: boolean }; rebuild: SearchRebuildProgress | null; runtime: boolean; rebuilding: boolean; start: (includeSemantic: boolean) => void; cancel: () => void }) {
+function SearchSection({ status, rebuild, runtime, rebuilding, start, cancel }: { status?: SearchIndexStatus; rebuild: SearchRebuildProgress | null; runtime: boolean; rebuilding: boolean; start: (includeSemantic: boolean) => void; cancel: () => void }) {
   const [includeSemantic, setIncludeSemantic] = useState(false);
   const indexedRatio = status?.totalDownloads ? status.indexedDownloads / status.totalDownloads * 100 : 100;
   const running = rebuilding && rebuild && rebuild.status === "running";
@@ -429,7 +443,13 @@ function SearchSection({ status, rebuild, runtime, rebuilding, start, cancel }: 
         <Badge color={status?.semanticModelReady ? "green" : "gray"} variant="light">{status?.semanticModelReady ? "利用可能" : "準備中"}</Badge>
       </Group>
       <Divider my="md" />
-      <Group gap="xl"><Text size="sm">意味ベクトル <b>{formatNumber(status?.semanticIndexedChunks)}</b></Text><Text size="sm">GPU <b>{status?.gpuEnabled ? "有効" : "無効"}</b></Text></Group>
+      {/* 断片の数だけでは、棚のどこまで届いているのかが分からない。作品数で言う。 */}
+      <Group gap="xl">
+        <Text size="sm">覆えている作品 <b>{formatNumber(status?.semanticIndexedDownloads)}</b> / {formatNumber(status?.totalDownloads)}</Text>
+        <Text size="sm">意味ベクトル <b>{formatNumber(status?.semanticIndexedChunks)}</b></Text>
+        <Text size="sm">GPU <b>{status?.gpuEnabled ? "有効" : "無効"}</b></Text>
+      </Group>
+      {Boolean(status?.semanticPendingDownloads) && <Note mt="md">{formatNumber(status?.semanticPendingDownloads)}件は意味検索の対象になっていません。上の「意味検索のベクトルも同時に作成する」を入れて再構築すると追いつきます。</Note>}
       <Note mt="md">全文検索の索引づくりはCPUの処理で、GPUは使いません。GPU（DirectML）を使うのは上の「意味検索のベクトル」だけです。</Note>
     </Card>
     <Note>再構築中もライブラリの通常検索は利用できます。中止したり、アプリを終了したりした場合は、確定済みのところまでが保持され、次回は続きから再開します。</Note>

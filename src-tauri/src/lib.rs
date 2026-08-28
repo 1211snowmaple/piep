@@ -185,15 +185,11 @@ pub fn run() -> tauri::Result<()> {
             commands::browser::close_standalone_browser,
             commands::browser::get_standalone_browser_url,
             // データ取得 (commands::downloader)
-            commands::downloader::fetch_pixiv_novel_metadata,
-            commands::downloader::fetch_pixiv_novel,
             commands::downloader::fetch_pixiv_novel_by_url,
             commands::downloader::fetch_pixiv_series_novels,
             commands::downloader::fetch_pixiv_user_novels,
             commands::downloader::fetch_fanbox_post,
             commands::downloader::fetch_fanbox_creator_posts,
-            // DB管理ダウンロード
-            commands::downloader::download_and_save,
             // DB検索・閲覧 (commands::database)
             commands::database::search_downloads_v2,
             commands::database::search_suggest,

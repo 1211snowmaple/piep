@@ -1207,9 +1207,10 @@ pub struct SearchIndexStatus {
     pub total_downloads: i64,
     pub indexed_downloads: i64,
     pub pending_downloads: i64,
+    /// 全文索引だけの話。意味索引の遅れはここに入らないので、画面が
+    /// 「意味検索も最新」と言うために使ってはいけない。
     pub is_complete: bool,
     pub phase: String,
-    pub indexed_chunks: i64,
     pub semantic_indexed_chunks: i64,
     pub semantic_indexed_downloads: i64,
     pub semantic_pending_downloads: i64,
