@@ -20,7 +20,9 @@ export function subscribeTauriEvent<T>(event: string, handler: EventCallback<T>)
       if (disposed) registered();
       else unlisten = registered;
     })
-    .catch(() => undefined);
+    .catch((error) => {
+      console.error(`Tauriイベント「${event}」を購読できませんでした`, error);
+    });
   return () => {
     disposed = true;
     unlisten?.();

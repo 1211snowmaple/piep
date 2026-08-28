@@ -105,12 +105,10 @@ export function extractSavedSourceTarget(url: string): SavedSourceTarget | null 
 }
 
 export function getFanboxCreatorId(url: string): string | null {
-  try {
-    const subMatch = url.match(/https:\/\/([^.]+)\.fanbox\.cc/);
-    if (subMatch && subMatch[1] !== "www" && subMatch[1] !== "api") return subMatch[1];
-    const dirMatch = url.match(/fanbox\.cc\/@([^/?#\s]+)/);
-    if (dirMatch) return dirMatch[1];
-  } catch {}
+  const subMatch = url.match(/https:\/\/([^.]+)\.fanbox\.cc/);
+  if (subMatch && subMatch[1] !== "www" && subMatch[1] !== "api") return subMatch[1];
+  const dirMatch = url.match(/fanbox\.cc\/@([^/?#\s]+)/);
+  if (dirMatch) return dirMatch[1];
   return null;
 }
 

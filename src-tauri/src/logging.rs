@@ -11,8 +11,8 @@
 //! 外部の実装は足さない。要るのは「行を1本、順番に、落とさずに書く」ことだけ
 //! で、そのために依存を増やす理由が無い。
 //!
-//! **記録のために落ちない。** 書けなかったときは黙って捨てる。ログが取れない
-//! ことは困るが、ログが取れないせいでアプリが止まるほうがもっと困る。
+//! **記録のために落ちない。** ファイルへ書けないときは標準エラーへ理由を出し、
+//! アプリ本体は続ける。記録障害まで黙って捨てると調査不能になる。
 
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -25,6 +25,11 @@ use std::sync::{Mutex, OnceLock};
 /// ファイルを利用者のディスクに置きたくない。
 const MAX_BYTES: u64 = 8 * 1024 * 1024;
 
+fn report_file_error(action: &str, error: &dyn std::fmt::Display) {
+    // log:: を使うと同じロガーへ戻って再帰するため、ここだけは直接stderrへ出す。
+    eprintln!("piep logger: {action}: {error}");
+}
+
 struct FileLogger {
     path: PathBuf,
     file: Mutex<Option<File>>,
@@ -32,23 +37,38 @@ struct FileLogger {
 
 impl FileLogger {
     fn rotate_if_needed(&self, file: &mut Option<File>) {
-        let too_big = file
-            .as_ref()
-            .and_then(|handle| handle.metadata().ok())
-            .is_some_and(|meta| meta.len() >= MAX_BYTES);
+        let too_big = match file.as_ref().map(File::metadata).transpose() {
+            Ok(metadata) => metadata.is_some_and(|meta| meta.len() >= MAX_BYTES),
+            Err(error) => {
+                report_file_error("ログサイズを確認できません", &error);
+                false
+            }
+        };
         if !too_big {
             return;
         }
         // 先に閉じてから動かす。Windows は開いたままのファイルを名前変更できない。
         *file = None;
         let previous = self.path.with_extension("log.1");
-        let _ = std::fs::remove_file(&previous);
-        let _ = std::fs::rename(&self.path, &previous);
-        *file = OpenOptions::new()
+        if let Err(error) = std::fs::remove_file(&previous) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                report_file_error("前回ログを削除できません", &error);
+            }
+        }
+        if let Err(error) = std::fs::rename(&self.path, &previous) {
+            report_file_error("ログをローテーションできません", &error);
+        }
+        *file = match OpenOptions::new()
             .create(true)
             .append(true)
             .open(&self.path)
-            .ok();
+        {
+            Ok(handle) => Some(handle),
+            Err(error) => {
+                report_file_error("ログファイルを開き直せません", &error);
+                None
+            }
+        };
     }
 }
 
@@ -73,7 +93,10 @@ impl log::Log for FileLogger {
         };
         self.rotate_if_needed(&mut guard);
         if let Some(handle) = guard.as_mut() {
-            let _ = handle.write_all(line.as_bytes());
+            if let Err(error) = handle.write_all(line.as_bytes()) {
+                report_file_error("ログを書き込めません", &error);
+                *guard = None;
+            }
         }
         // 端末からも読めるようにしておく。`tauri dev` はここを拾う。
         eprint!("{line}");
@@ -82,7 +105,10 @@ impl log::Log for FileLogger {
     fn flush(&self) {
         if let Ok(mut guard) = self.file.lock() {
             if let Some(handle) = guard.as_mut() {
-                let _ = handle.flush();
+                if let Err(error) = handle.flush() {
+                    report_file_error("ログをflushできません", &error);
+                    *guard = None;
+                }
             }
         }
     }
@@ -98,15 +124,17 @@ pub fn install(app_data: &Path) {
         return;
     }
     let dir = app_data.join("logs");
-    if std::fs::create_dir_all(&dir).is_err() {
-        return;
+    if let Err(error) = std::fs::create_dir_all(&dir) {
+        report_file_error("ログディレクトリを作成できません", &error);
     }
     let path = dir.join("piep.log");
-    let file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .ok();
+    let file = match OpenOptions::new().create(true).append(true).open(&path) {
+        Ok(handle) => Some(handle),
+        Err(error) => {
+            report_file_error("ログファイルを開けません", &error);
+            None
+        }
+    };
     let logger = FileLogger {
         path,
         file: Mutex::new(file),
@@ -117,11 +145,15 @@ pub fn install(app_data: &Path) {
     } else {
         log::LevelFilter::Info
     };
-    if log::set_boxed_logger(Box::new(logger)).is_ok() {
-        log::set_max_level(level);
-        let _ = INSTALLED.set(());
-        log::info!("piep {} の記録を開始しました", env!("CARGO_PKG_VERSION"));
+    if let Err(error) = log::set_boxed_logger(Box::new(logger)) {
+        report_file_error("ロガーを登録できません", &error);
+        return;
     }
+    log::set_max_level(level);
+    if INSTALLED.set(()).is_err() {
+        eprintln!("piep logger: 初期化状態を記録できません");
+    }
+    log::info!("piep {} の記録を開始しました", env!("CARGO_PKG_VERSION"));
 }
 
 #[cfg(test)]

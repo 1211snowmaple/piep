@@ -152,7 +152,9 @@ export function useUpdateJobs(onSnapshot?: (snapshot: UpdateJobSnapshot) => void
 
   useEffect(() => {
     if (!enabled) return undefined;
-    loadJobs().catch(() => undefined);
+    loadJobs().catch((error) => {
+      console.error("更新ジョブ一覧を読み込めませんでした", error);
+    });
   }, [loadJobs]);
 
   useEffect(() => {
@@ -196,7 +198,9 @@ export function useUpdateJobs(onSnapshot?: (snapshot: UpdateJobSnapshot) => void
           setActiveSnapshot(current => mergeSnapshot(current, snapshot));
           onSnapshot?.(snapshot);
         })
-        .catch(() => undefined);
+        .catch((error) => {
+          console.warn(`更新ジョブ ${activeSnapshot.jobId} の進捗を再取得できませんでした`, error);
+        });
     }, SILENCE_CHECK_MS);
     return () => window.clearInterval(id);
   }, [activeSnapshot, enabled, onSnapshot]);

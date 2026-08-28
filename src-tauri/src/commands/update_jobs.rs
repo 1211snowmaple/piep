@@ -630,8 +630,15 @@ fn build_initial_items(
 }
 
 async fn emit_snapshot(app: &tauri::AppHandle, state: &Arc<AppState>, job_id: &str) {
-    if let Ok(snapshot) = state.db.update_job_snapshot(job_id) {
-        let _ = app.emit("update-job-progress", snapshot);
+    match state.db.update_job_snapshot(job_id) {
+        Ok(snapshot) => {
+            if let Err(error) = app.emit("update-job-progress", snapshot) {
+                log::warn!("更新ジョブ {job_id} の進捗を画面へ送れません: {error}");
+            }
+        }
+        Err(error) => {
+            log::error!("更新ジョブ {job_id} の進捗をDBから読めません: {error}");
+        }
     }
 }
 
@@ -664,7 +671,9 @@ fn spawn_update_job(app: tauri::AppHandle, job_id: String, credentials: UpdateCr
         };
         if let Err(error) = run_result {
             let state = app.state::<Arc<AppState>>().inner().clone();
-            let _ = state.db.append_update_job_log(&job_id, "error", &error);
+            if let Err(log_error) = state.db.append_update_job_log(&job_id, "error", &error) {
+                log::error!("更新ジョブ {job_id} の失敗をDBへ記録できません: {log_error}");
+            }
             if has_pending_restart(&job_id) {
                 // The replacement worker owns the queued state. A panic or
                 // late failure from the retired worker must not overwrite it.
@@ -674,13 +683,25 @@ fn spawn_update_job(app: tauri::AppHandle, job_id: String, credentials: UpdateCr
                 // user canceled it while an item was in flight.
                 match state.db.update_job_status_value(&job_id).as_deref() {
                     Ok("canceling") => {
-                        let _ = finish_update_job_cancellation(&app, &state, &job_id).await;
+                        if let Err(cancel_error) =
+                            finish_update_job_cancellation(&app, &state, &job_id).await
+                        {
+                            log::error!(
+                                "更新ジョブ {job_id} のキャンセルを確定できません: {cancel_error}"
+                            );
+                        }
                     }
                     Ok("canceled") => {}
                     _ => {
-                        let _ = state
-                            .db
-                            .set_update_job_status(&job_id, "failed", Some(&error));
+                        if let Err(status_error) =
+                            state
+                                .db
+                                .set_update_job_status(&job_id, "failed", Some(&error))
+                        {
+                            log::error!(
+                                "更新ジョブ {job_id} を失敗状態へ移せません: {status_error}"
+                            );
+                        }
                     }
                 }
                 emit_snapshot(&app, &state, &job_id).await;
@@ -1184,7 +1205,11 @@ async fn run_update_job(
                 if let (Some(source), Some(source_id)) =
                     (item.source.as_deref(), item.source_id.as_deref())
                 {
-                    let _ = state.db.clear_update_candidate(source, source_id);
+                    if let Err(error) = state.db.clear_update_candidate(source, source_id) {
+                        log::warn!(
+                            "保存済み候補 {source}:{source_id} を候補一覧から外せません: {error}"
+                        );
+                    }
                 }
                 state
                     .db
@@ -1287,9 +1312,15 @@ async fn run_update_job(
                         item.source_id.as_deref(),
                         item.target_type.as_deref(),
                     ) {
-                        let _ = state
-                            .db
-                            .mark_update_target_failed(target_type, source, source_key);
+                        if let Err(error) =
+                            state
+                                .db
+                                .mark_update_target_failed(target_type, source, source_key)
+                        {
+                            log::warn!(
+                                "更新対象 {target_type}:{source}:{source_key} の失敗回数を記録できません: {error}"
+                            );
+                        }
                     }
                 }
             }
@@ -1299,7 +1330,9 @@ async fn run_update_job(
         processed_since_trim += 1;
         if processed_since_trim >= LOG_TRIM_INTERVAL {
             processed_since_trim = 0;
-            let _ = state.db.trim_update_job_logs(&job_id, MAX_UPDATE_JOB_LOGS);
+            if let Err(error) = state.db.trim_update_job_logs(&job_id, MAX_UPDATE_JOB_LOGS) {
+                log::warn!("更新ジョブ {job_id} の古いログを整理できません: {error}");
+            }
         }
         if restart_pending {
             break;
@@ -1370,11 +1403,13 @@ async fn refresh_profiles_for_saved_downloads(
     if targets.is_empty() {
         return;
     }
-    let _ = state.db.append_update_job_log(
+    if let Err(error) = state.db.append_update_job_log(
         job_id,
         "info",
         &format!("作者・シリーズ情報を確認しています（{}件）", targets.len()),
-    );
+    ) {
+        log::warn!("更新ジョブ {job_id} のプロフィール確認ログを記録できません: {error}");
+    }
     for (entity_type, source, source_key) in targets {
         let params = crate::commands::database::RefreshEntityProfileParams {
             entity_type: entity_type.to_string(),
@@ -1872,8 +1907,10 @@ async fn scan_pixiv_revisions(
             Some(_) => {}
             // 初めて見る作品。保存より前の更新なら、手元の本文はその版のもの。
             None if may_remember(Some(listed), Some(&downloaded_at)) => {
-                if let Ok(Some(existing)) = state.db.get_download_by_source("pixiv", &source_id) {
-                    let _ = state.db.set_download_source_updated_at(existing.id, listed);
+                if let Some(existing) = state.db.get_download_by_source("pixiv", &source_id)? {
+                    state
+                        .db
+                        .set_download_source_updated_at(existing.id, listed)?;
                 }
                 continue;
             }

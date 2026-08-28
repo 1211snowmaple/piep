@@ -95,6 +95,17 @@ export function AppUpdateCard({ runtime }: { runtime: boolean }) {
     }
   };
 
+  const restart = async () => {
+    try {
+      await restartForAppUpdate();
+    } catch (error) {
+      if (!mounted.current) return;
+      setMessage(`更新後の再起動に失敗しました（${errorMessage(error)}）`);
+      setBenign(false);
+      setPhase("error");
+    }
+  };
+
   const notes = summarizeNotes(update?.body);
   const percent = progress ? downloadPercent(progress.downloaded, progress.total) : null;
 
@@ -152,7 +163,7 @@ export function AppUpdateCard({ runtime }: { runtime: boolean }) {
                 ? (
                   <Group>
                     <Text size="sm">入れ替えの準備ができました。再起動すると新しい版で開きます。</Text>
-                    <Button size="xs" leftSection={<Icons.retry size={IconSize.menu} />} onClick={() => void restartForAppUpdate()}>いま再起動する</Button>
+                    <Button size="xs" leftSection={<Icons.retry size={IconSize.menu} />} onClick={() => void restart()}>いま再起動する</Button>
                   </Group>
                 )
                 : (

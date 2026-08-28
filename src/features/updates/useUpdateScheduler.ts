@@ -89,8 +89,10 @@ export function useUpdateScheduler(enabled = isTauriRuntime()) {
         if (settings.notify) {
           await notify("更新の自動確認を開始しました", `対象 ${snapshot.totals}件`);
         }
-      } catch {
-        /* 自動実行の失敗で画面を止めない。次の機会に再試行される。 */
+      } catch (error) {
+        // 自動実行の失敗で画面は止めないが、調査できるよう理由は残す。
+        // lastRun は成功時しか更新しないため、次のtickで再試行される。
+        console.error("更新の自動確認を開始できませんでした", error);
       } finally {
         running.current = false;
       }

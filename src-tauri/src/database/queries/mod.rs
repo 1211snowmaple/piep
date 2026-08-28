@@ -7,7 +7,7 @@ use regex::Regex;
 use rusqlite::{
     params, Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior,
 };
-use serde::{Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
@@ -6604,7 +6604,7 @@ impl Database {
                     latest_source_updated_at: row.get(9)?,
                     icon_path: None,
                     banner_path: None,
-                    is_concluded: row.get(10).unwrap_or(None),
+                    is_concluded: row.get(10)?,
                 })
             })
             .map_err(|e| format!("Entity series query failed: {e}"))?;
@@ -6811,7 +6811,7 @@ impl Database {
                         latest_source_updated_at: row.get(9)?,
                         icon_path: None,
                         banner_path: None,
-                        is_concluded: row.get(10).unwrap_or(None),
+                        is_concluded: row.get(10)?,
                     },
                     row.get::<_, String>(11)?,
                 ))
@@ -7639,7 +7639,7 @@ impl Database {
                 latest_source_updated_at: row.get(11)?,
                 icon_path: row.get(9)?,
                 banner_path: row.get(10)?,
-                is_concluded: row.get(12).unwrap_or(None),
+                is_concluded: row.get(12)?,
             })
         };
         bind_values.extend(source_binds);
@@ -13294,8 +13294,8 @@ fn update_target_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<UpdateTar
         updated_at: row.get(11)?,
         // あとから足した列。古い行や、列だけ足して一度も確認していない対象では
         // NULL / 0 のままになる。
-        last_hit_at: row.get(12).unwrap_or(None),
-        consecutive_errors: row.get(13).unwrap_or(0),
+        last_hit_at: row.get(12)?,
+        consecutive_errors: row.get(13)?,
     })
 }
 
@@ -13333,31 +13333,27 @@ fn update_job_item_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<UpdateJ
     })
 }
 
+fn json_column_or_default<T>(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<T>
+where
+    T: DeserializeOwned + Default,
+{
+    let Some(raw) = row.get::<_, Option<String>>(index)? else {
+        return Ok(T::default());
+    };
+    serde_json::from_str(&raw).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            index,
+            rusqlite::types::Type::Text,
+            Box::new(error),
+        )
+    })
+}
+
 fn download_entry_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DownloadEntry> {
-    let tags = row
-        .get::<_, Option<String>>(7)
-        .ok()
-        .flatten()
-        .and_then(|raw| serde_json::from_str::<Vec<String>>(&raw).ok())
-        .unwrap_or_default();
-    let match_fields = row
-        .get::<_, Option<String>>(27)
-        .ok()
-        .flatten()
-        .and_then(|raw| serde_json::from_str(&raw).ok())
-        .unwrap_or_default();
-    let score_reasons = row
-        .get::<_, Option<String>>(28)
-        .ok()
-        .flatten()
-        .and_then(|raw| serde_json::from_str(&raw).ok())
-        .unwrap_or_default();
-    let match_highlights = row
-        .get::<_, Option<String>>(29)
-        .ok()
-        .flatten()
-        .and_then(|raw| serde_json::from_str(&raw).ok())
-        .unwrap_or_default();
+    let tags = json_column_or_default(row, 7)?;
+    let match_fields = json_column_or_default(row, 27)?;
+    let score_reasons = json_column_or_default(row, 28)?;
+    let match_highlights = json_column_or_default(row, 29)?;
     Ok(DownloadEntry {
         id: row.get(0)?,
         source: row.get(1)?,
@@ -13381,17 +13377,17 @@ fn download_entry_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Download
         watch_updates: row.get::<_, i64>(19)? != 0,
         current_version: row.get(20)?,
         favorite: row.get::<_, i64>(21)? != 0,
-        person_id: row.get(22).ok(),
-        person_name: row.get(23).ok(),
-        series_id: row.get(24).ok(),
-        series_title: row.get(25).ok(),
-        search_score: row.get(26).ok(),
+        person_id: row.get(22)?,
+        person_name: row.get(23)?,
+        series_id: row.get(24)?,
+        series_title: row.get(25)?,
+        search_score: row.get(26)?,
         match_fields,
         score_reasons,
         match_highlights,
-        sort_key: row.get(30).ok(),
+        sort_key: row.get(30)?,
         // Appended last so the existing positional reads keep their indexes.
-        person_icon_path: row.get(31).ok(),
+        person_icon_path: row.get(31)?,
     })
 }
 
@@ -13411,7 +13407,7 @@ fn person_entry_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PersonEntr
         last_fetched_at: row.get(11)?,
         created_at: row.get(12)?,
         updated_at: row.get(13)?,
-        work_count: row.get(14).ok(),
+        work_count: row.get(14)?,
     })
 }
 
@@ -13433,9 +13429,9 @@ fn series_entry_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SeriesEntr
         last_fetched_at: row.get("last_fetched_at")?,
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
-        work_count: row.get("work_count").ok(),
-        is_concluded: row.get("is_concluded").unwrap_or(None),
-        published_content_count: row.get("published_content_count").unwrap_or(None),
+        work_count: row.get("work_count")?,
+        is_concluded: row.get("is_concluded")?,
+        published_content_count: row.get("published_content_count")?,
     })
 }
 
