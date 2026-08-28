@@ -3046,7 +3046,16 @@ async fn export_zip_with_params_locked(
                     note: member.note.clone(),
                 })
                 .collect::<Vec<_>>();
-            if scoped && members.is_empty() {
+            // **束そのものは、目録の側で必ず書き出す。**
+            //
+            // 作品ごとに分けたパートでは、その作品を含まない束のメンバーは空に
+            // なる。それを理由に飛ばしていたので、まだ一作も入れていない束
+            // （名前と説明と表紙だけ作った束）は、どのパートの条件にも当たらず
+            // 一度も書き出されなかった。復元しても戻らず、警告も出ない。
+            // 目録のパート（更新監視と候補を持つ側）だけは、中身が空でも書く。
+            // 復元側の `restore_work_collection` は upsert なので、定義と
+            // メンバーが別のパートに分かれていても安全に合流する。
+            if scoped && members.is_empty() && !include_scoped_update_targets {
                 continue;
             }
             let relative_cover_image_path = collection
@@ -3372,6 +3381,49 @@ fn inspect_backup_internal(
     })
 }
 
+/// いま棚にあって、この書庫が上書きするファイルの合計サイズ。
+///
+/// 昇格の前に、置き換える相手を `stage_root/rollback/` へ丸ごと控える。つまり
+/// 復元のピークは「展開ぶん」ではなく「展開ぶん + 控えぶん」である。事前検査が
+/// 展開ぶんしか見ていなかったので、40GB の空きで 30GB の棚を戻し始め、
+/// **何時間も展開したあとに**控えのコピーで力尽きる、ということが起きえた。
+fn overwritten_bytes_for_backup(
+    archive: &mut zip::ZipArchive<std::fs::File>,
+    storage: &Path,
+    app_data: &Path,
+) -> u64 {
+    let Ok(mut entry) = archive.by_name("backup_metadata.json") else {
+        return 0;
+    };
+    let mut text = String::new();
+    if (&mut entry)
+        .take(MAX_BACKUP_METADATA_BYTES + 1)
+        .read_to_string(&mut text)
+        .is_err()
+    {
+        return 0;
+    }
+    drop(entry);
+    let Ok(metadata) = serde_json::from_str::<BackupMetadata>(&text) else {
+        return 0;
+    };
+    let Ok(paths) = referenced_backup_paths(&metadata) else {
+        return 0;
+    };
+    let mut total = 0u64;
+    for path in paths {
+        let Ok((destination, _)) = resolve_zip_import_path(&path, storage, app_data) else {
+            continue;
+        };
+        if let Ok(meta) = std::fs::metadata(&destination) {
+            if meta.is_file() {
+                total = total.saturating_add(meta.len());
+            }
+        }
+    }
+    total
+}
+
 pub async fn import_zip_internal(state: Arc<AppState>, zip_path: String) -> Result<i64, String> {
     import_zip_internal_with_failpoint(state, zip_path, None).await
 }
@@ -3399,7 +3451,11 @@ async fn import_zip_locked(
         let file = std::fs::File::open(&zip_path).map_err(|e| e.to_string())?;
         let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
         let expanded_bytes = preflight_backup_archive(&mut archive)?;
+        // 控えのぶんも数える。読めなかったときは 0 になるので、少なくとも
+        // 今までより厳しくなることはあっても緩くはならない。
+        let rollback_bytes = overwritten_bytes_for_backup(&mut archive, &storage, &app_data);
         let required_free_bytes = expanded_bytes
+            .saturating_add(rollback_bytes)
             .saturating_add(expanded_bytes / 10)
             .saturating_add(256 * 1024 * 1024);
         if let Some(available) = crate::database::queries::available_space_bytes(&app_data) {
@@ -3480,7 +3536,7 @@ async fn import_zip_locked(
             outfile.sync_all().map_err(|e| e.to_string())?;
             if entry_name != "backup_metadata.json" {
                 let (destination, _) = resolve_zip_import_path(&entry_name, &storage, &app_data)?;
-                promotion_entries.push((outpath, destination));
+                promotion_entries.push((entry_name.clone(), outpath, destination));
             }
         }
 
@@ -3501,6 +3557,24 @@ async fn import_zip_locked(
             // promotion. This also rejects a reserved-root mismatch.
             validate_backup_metadata_paths(&metadata, &storage, &app_data)
                 .map_err(|e| format!("Invalid backup metadata: {e}"))?;
+
+            // **目録が指していないものは、棚へ上げない。**
+            //
+            // ここまでは書庫の中身を丸ごとライブラリへ置いていた。Zip Slip は
+            // 塞いであるので置き場所はライブラリの中に収まるが、DBに記録されない
+            // ので二度と回収されない。無関係なファイルを何万個でも置ける。
+            // 上げるのは `backup_metadata.json` が名前を挙げているものだけにする。
+            let referenced: HashSet<String> = referenced_backup_paths(&metadata)?
+                .into_iter()
+                .collect();
+            let promotion_entries: Vec<(PathBuf, PathBuf)> = promotion_entries
+                .into_iter()
+                .filter_map(|(name, staged, destination)| {
+                    referenced
+                        .contains(&name)
+                        .then_some((staged, destination))
+                })
+                .collect();
 
             let journal_id = format!(
                 "restore-{}-{}",
@@ -4049,8 +4123,19 @@ fn work_needs_reimport(db: &Database, source: &str, source_id: &str) -> Result<b
     Ok(db.get_download_by_source(source, source_id)?.is_none())
 }
 
+/// 保存フォルダーを走査した結果。
+///
+/// **件数だけでは足りない。** 途中で読めないものがあっても取り込みは続くので、
+/// 何件入って何件を飛ばしたのかを両方返す。飛ばした理由は画面に出す。
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ReimportOutcome {
+    pub imported: i64,
+    pub skipped: Vec<String>,
+}
+
 #[tauri::command]
-pub async fn scan_and_reimport_downloads(app: tauri::AppHandle) -> Result<i64, String> {
+pub async fn scan_and_reimport_downloads(app: tauri::AppHandle) -> Result<ReimportOutcome, String> {
     use crate::commands::downloader::{
         collect_assets_recursive, compute_content_details, extract_series_content_order,
         extract_series_relation,
@@ -4063,9 +4148,14 @@ pub async fn scan_and_reimport_downloads(app: tauri::AppHandle) -> Result<i64, S
     tokio::task::spawn_blocking(move || {
         let _library_write_guard = library_write_guard;
         let mut total_imported = 0i64;
+        // 飛ばした作品と理由。**途中結果を捨てない。**
+        let mut skipped: Vec<String> = Vec::new();
 
         if !storage.exists() {
-            return Ok(0);
+            return Ok(ReimportOutcome {
+                imported: 0,
+                skipped: Vec::new(),
+            });
         }
         let storage_metadata = std::fs::symlink_metadata(&storage)
             .map_err(|error| format!("Storage metadata failed: {error}"))?;
@@ -4159,204 +4249,220 @@ pub async fn scan_and_reimport_downloads(app: tauri::AppHandle) -> Result<i64, S
                 let mut latest_data = None;
 
                 // Import each version
-                for (v_num, ver_path) in versions {
-                    let orig_json_path = ver_path.join("original.json");
-                    let data_json_path = ver_path.join("data.json");
-                    let json_file = if orig_json_path.try_exists().map_err(|error| {
-                        format!("Reimport JSON existence check failed: {error}")
-                    })? {
-                        canonical_reimport_json(&orig_json_path, &ver_path)?
-                    } else if data_json_path.try_exists().map_err(|error| {
-                        format!("Reimport JSON existence check failed: {error}")
-                    })? {
-                        canonical_reimport_json(&data_json_path, &ver_path)?
-                    } else {
-                        return Err(format!(
-                            "Reimport work {source}/{source_id} v{v_num} has no original.json or data.json"
-                        ));
-                    };
+                // **一つの版が読めないことを、全体の失敗にしない。**
+                //
+                // かつてここは `return Err` で関数ごと抜けていた。保存フォルダーに
+                // 更新の中断跡（JSON の無い `v3`）が一つ混じっているだけで、
+                // それまでに取り込んだ何百件も破棄され、画面には「操作に失敗
+                // しました」としか出ない。作者・シリーズの再構築も走らない。
+                // 再実行しても同じ場所で止まるので、利用者が自力でその
+                // フォルダーを見つけるまで永久に完了しない。
+                let version_result = (|| -> Result<(), String> {
+                    for (v_num, ver_path) in versions {
+                        let orig_json_path = ver_path.join("original.json");
+                        let data_json_path = ver_path.join("data.json");
+                        let json_file = if orig_json_path.try_exists().map_err(|error| {
+                            format!("Reimport JSON existence check failed: {error}")
+                        })? {
+                            canonical_reimport_json(&orig_json_path, &ver_path)?
+                        } else if data_json_path.try_exists().map_err(|error| {
+                            format!("Reimport JSON existence check failed: {error}")
+                        })? {
+                            canonical_reimport_json(&data_json_path, &ver_path)?
+                        } else {
+                            return Err(format!(
+                                "Reimport work {source}/{source_id} v{v_num} has no original.json or data.json"
+                            ));
+                        };
 
-                    let content_str =
-                        std::fs::read_to_string(&json_file).map_err(|e| e.to_string())?;
-                    let data: serde_json::Value =
-                        serde_json::from_str(&content_str).map_err(|e| e.to_string())?;
+                        let content_str =
+                            std::fs::read_to_string(&json_file).map_err(|e| e.to_string())?;
+                        let data: serde_json::Value =
+                            serde_json::from_str(&content_str).map_err(|e| e.to_string())?;
 
-                    let (new_hash, new_text_len, new_source_updated) =
-                        compute_content_details(&data, &source);
+                        let (new_hash, new_text_len, new_source_updated) =
+                            compute_content_details(&data, &source);
 
-                    let title = data
-                        .get("title")
-                        .or_else(|| data.get("detail").and_then(|d| d.get("title")))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("Unknown Title")
-                        .to_string();
-
-                    let author_name = if source == "pixiv" {
-                        data.get("detail")
-                            .and_then(|d| d.get("user"))
-                            .and_then(|u| u.get("name"))
+                        let title = data
+                            .get("title")
+                            .or_else(|| data.get("detail").and_then(|d| d.get("title")))
                             .and_then(|v| v.as_str())
-                            .or_else(|| {
-                                data.get("user")
-                                    .and_then(|u| u.get("name"))
-                                    .and_then(|v| v.as_str())
-                            })
-                            .unwrap_or("Unknown User")
-                            .to_string()
-                    } else {
-                        data.get("user")
-                            .and_then(|u| u.get("name"))
-                            .and_then(|v| v.as_str())
-                            .or_else(|| data.get("creatorId").and_then(|v| v.as_str()))
-                            .unwrap_or("Unknown Creator")
-                            .to_string()
-                    };
+                            .unwrap_or("Unknown Title")
+                            .to_string();
 
-                    let author_id = if source == "pixiv" {
-                        let u_id = data
-                            .get("detail")
-                            .and_then(|d| d.get("user"))
-                            .and_then(|u| u.get("id"))
-                            .or_else(|| data.get("user").and_then(|u| u.get("id")));
-                        if let Some(uid) = u_id {
-                            if let Some(s) = uid.as_str() {
-                                s.to_string()
-                            } else if let Some(n) = uid.as_u64() {
-                                n.to_string()
+                        let author_name = if source == "pixiv" {
+                            data.get("detail")
+                                .and_then(|d| d.get("user"))
+                                .and_then(|u| u.get("name"))
+                                .and_then(|v| v.as_str())
+                                .or_else(|| {
+                                    data.get("user")
+                                        .and_then(|u| u.get("name"))
+                                        .and_then(|v| v.as_str())
+                                })
+                                .unwrap_or("Unknown User")
+                                .to_string()
+                        } else {
+                            data.get("user")
+                                .and_then(|u| u.get("name"))
+                                .and_then(|v| v.as_str())
+                                .or_else(|| data.get("creatorId").and_then(|v| v.as_str()))
+                                .unwrap_or("Unknown Creator")
+                                .to_string()
+                        };
+
+                        let author_id = if source == "pixiv" {
+                            let u_id = data
+                                .get("detail")
+                                .and_then(|d| d.get("user"))
+                                .and_then(|u| u.get("id"))
+                                .or_else(|| data.get("user").and_then(|u| u.get("id")));
+                            if let Some(uid) = u_id {
+                                if let Some(s) = uid.as_str() {
+                                    s.to_string()
+                                } else if let Some(n) = uid.as_u64() {
+                                    n.to_string()
+                                } else {
+                                    "0".to_string()
+                                }
                             } else {
                                 "0".to_string()
                             }
                         } else {
-                            "0".to_string()
-                        }
-                    } else {
-                        let u_id = data
-                            .get("creatorId")
-                            .or_else(|| data.get("user").and_then(|u| u.get("userId")));
-                        if let Some(uid) = u_id {
-                            if let Some(s) = uid.as_str() {
-                                s.to_string()
-                            } else if let Some(n) = uid.as_u64() {
-                                n.to_string()
+                            let u_id = data
+                                .get("creatorId")
+                                .or_else(|| data.get("user").and_then(|u| u.get("userId")));
+                            if let Some(uid) = u_id {
+                                if let Some(s) = uid.as_str() {
+                                    s.to_string()
+                                } else if let Some(n) = uid.as_u64() {
+                                    n.to_string()
+                                } else {
+                                    "0".to_string()
+                                }
                             } else {
                                 "0".to_string()
                             }
+                        };
+
+                        let content_type = if source == "pixiv" {
+                            "novel".to_string()
                         } else {
-                            "0".to_string()
-                        }
-                    };
+                            data.get("type")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("article")
+                                .to_string()
+                        };
 
-                    let content_type = if source == "pixiv" {
-                        "novel".to_string()
-                    } else {
-                        data.get("type")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("article")
-                            .to_string()
-                    };
-
-                    let mut tags_list = Vec::new();
-                    if let Some(tags_val) = data
-                        .get("tags")
-                        .or_else(|| data.get("detail").and_then(|d| d.get("tags")))
-                    {
-                        if let Some(arr) = tags_val.as_array() {
-                            for t in arr {
-                                if let Some(s) = t.as_str() {
-                                    tags_list.push(s.to_string());
-                                } else if let Some(s) = t.get("name").and_then(|n| n.as_str()) {
-                                    tags_list.push(s.to_string());
+                        let mut tags_list = Vec::new();
+                        if let Some(tags_val) = data
+                            .get("tags")
+                            .or_else(|| data.get("detail").and_then(|d| d.get("tags")))
+                        {
+                            if let Some(arr) = tags_val.as_array() {
+                                for t in arr {
+                                    if let Some(s) = t.as_str() {
+                                        tags_list.push(s.to_string());
+                                    } else if let Some(s) = t.get("name").and_then(|n| n.as_str()) {
+                                        tags_list.push(s.to_string());
+                                    }
                                 }
                             }
                         }
-                    }
-                    let excerpt = data
-                        .get("excerpt")
-                        .or_else(|| data.get("detail").and_then(|d| d.get("excerpt")))
-                        .or_else(|| data.get("caption"))
-                        .or_else(|| data.get("detail").and_then(|d| d.get("caption")))
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string());
-
-                    let source_created_at = if source == "pixiv" {
-                        data.get("detail")
-                            .and_then(|d| d.get("create_date").or_else(|| d.get("createDate")))
+                        let excerpt = data
+                            .get("excerpt")
+                            .or_else(|| data.get("detail").and_then(|d| d.get("excerpt")))
+                            .or_else(|| data.get("caption"))
+                            .or_else(|| data.get("detail").and_then(|d| d.get("caption")))
                             .and_then(|v| v.as_str())
-                            .or_else(|| {
-                                data.get("create_date")
-                                    .or_else(|| data.get("createDate"))
-                                    .and_then(|v| v.as_str())
-                            })
-                            .map(|s| s.to_string())
-                    } else {
-                        data.get("publishedDatetime")
-                            .or_else(|| data.get("published_datetime"))
-                            .and_then(|v| v.as_str())
-                            .map(|s| s.to_string())
-                    };
+                            .map(|s| s.to_string());
 
-                    // Scan assets
-                    let assets_dir = ver_path.join("data_assets");
-                    let mut asset_entries = Vec::new();
-                    let mut total_size = content_str.len() as i64;
-                    let mut cover_path_str = None;
+                        let source_created_at = if source == "pixiv" {
+                            data.get("detail")
+                                .and_then(|d| d.get("create_date").or_else(|| d.get("createDate")))
+                                .and_then(|v| v.as_str())
+                                .or_else(|| {
+                                    data.get("create_date")
+                                        .or_else(|| data.get("createDate"))
+                                        .and_then(|v| v.as_str())
+                                })
+                                .map(|s| s.to_string())
+                        } else {
+                            data.get("publishedDatetime")
+                                .or_else(|| data.get("published_datetime"))
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string())
+                        };
 
-                    if assets_dir.try_exists().map_err(|error| {
-                        format!("Reimport asset directory existence check failed: {error}")
-                    })? {
-                        let assets_dir = canonical_reimport_directory(&assets_dir, &ver_path)?;
-                        collect_assets_recursive(
-                            &assets_dir,
-                            &mut asset_entries,
-                            &mut total_size,
-                            &mut cover_path_str,
-                            0,
-                        )?;
+                        // Scan assets
+                        let assets_dir = ver_path.join("data_assets");
+                        let mut asset_entries = Vec::new();
+                        let mut total_size = content_str.len() as i64;
+                        let mut cover_path_str = None;
+
+                        if assets_dir.try_exists().map_err(|error| {
+                            format!("Reimport asset directory existence check failed: {error}")
+                        })? {
+                            let assets_dir = canonical_reimport_directory(&assets_dir, &ver_path)?;
+                            collect_assets_recursive(
+                                &assets_dir,
+                                &mut asset_entries,
+                                &mut total_size,
+                                &mut cover_path_str,
+                                0,
+                            )?;
+                        }
+
+                        let new_dl = NewDownload {
+                            source: source.clone(),
+                            source_id: source_id.clone(),
+                            title: title.clone(),
+                            author_name: author_name.clone(),
+                            author_id: author_id.clone(),
+                            content_type: content_type.clone(),
+                            tags: tags_list,
+                            excerpt,
+                            cover_path: cover_path_str,
+                            json_path: json_file.to_string_lossy().to_string(),
+                            original_json_path: Some(json_file.to_string_lossy().to_string()),
+                            asset_count: asset_entries.len() as i64,
+                            file_size_bytes: total_size,
+                            downloaded_at: chrono::Utc::now().to_rfc3339(),
+                            source_created_at,
+                            content_hash: Some(new_hash.clone()),
+                            text_length: new_text_len,
+                            source_updated_at: new_source_updated.clone(),
+                            watch_updates: false,
+                            current_version: v_num,
+                            favorite: false,
+                        };
+                        prepared_versions.push(NewVersion {
+                            // The transaction replaces this placeholder with the
+                            // ID assigned to the recovered work.
+                            download_id: 0,
+                            version: v_num,
+                            content_hash: Some(new_hash),
+                            text_length: new_text_len,
+                            json_path: json_file.to_string_lossy().to_string(),
+                            original_json_path: Some(json_file.to_string_lossy().to_string()),
+                            asset_count: new_dl.asset_count,
+                            file_size_bytes: new_dl.file_size_bytes,
+                            created_at: new_dl.downloaded_at.clone(),
+                            change_summary: Some(format!("インポート復元 (v{})", v_num)),
+                        });
+                        prepared_assets.extend(asset_entries.into_iter().map(|mut asset| {
+                            asset.download_id = 0;
+                            asset
+                        }));
+                        prepared_download = Some(new_dl);
+                        latest_data = Some(data);
                     }
-
-                    let new_dl = NewDownload {
-                        source: source.clone(),
-                        source_id: source_id.clone(),
-                        title: title.clone(),
-                        author_name: author_name.clone(),
-                        author_id: author_id.clone(),
-                        content_type: content_type.clone(),
-                        tags: tags_list,
-                        excerpt,
-                        cover_path: cover_path_str,
-                        json_path: json_file.to_string_lossy().to_string(),
-                        original_json_path: Some(json_file.to_string_lossy().to_string()),
-                        asset_count: asset_entries.len() as i64,
-                        file_size_bytes: total_size,
-                        downloaded_at: chrono::Utc::now().to_rfc3339(),
-                        source_created_at,
-                        content_hash: Some(new_hash.clone()),
-                        text_length: new_text_len,
-                        source_updated_at: new_source_updated.clone(),
-                        watch_updates: false,
-                        current_version: v_num,
-                        favorite: false,
-                    };
-                    prepared_versions.push(NewVersion {
-                        // The transaction replaces this placeholder with the
-                        // ID assigned to the recovered work.
-                        download_id: 0,
-                        version: v_num,
-                        content_hash: Some(new_hash),
-                        text_length: new_text_len,
-                        json_path: json_file.to_string_lossy().to_string(),
-                        original_json_path: Some(json_file.to_string_lossy().to_string()),
-                        asset_count: new_dl.asset_count,
-                        file_size_bytes: new_dl.file_size_bytes,
-                        created_at: new_dl.downloaded_at.clone(),
-                        change_summary: Some(format!("インポート復元 (v{})", v_num)),
-                    });
-                    prepared_assets.extend(asset_entries.into_iter().map(|mut asset| {
-                        asset.download_id = 0;
-                        asset
-                    }));
-                    prepared_download = Some(new_dl);
-                    latest_data = Some(data);
+                    Ok(())
+                })();
+                if let Err(error) = version_result {
+                    log::warn!("再取り込みで {source}/{source_id} を飛ばしました: {error}");
+                    skipped.push(format!("{source}/{source_id}: {error}"));
+                    continue;
                 }
 
                 let Some(new_dl) = prepared_download else {
@@ -4430,8 +4536,18 @@ pub async fn scan_and_reimport_downloads(app: tauri::AppHandle) -> Result<i64, S
         if total_imported > 0 {
             state.db.reconstruct_entities_after_import()?;
         }
+        if !skipped.is_empty() {
+            log::warn!(
+                "再取り込みで {} 件を飛ばしました: {}",
+                skipped.len(),
+                skipped.join(" / ")
+            );
+        }
 
-        Ok::<i64, String>(total_imported)
+        Ok::<ReimportOutcome, String>(ReimportOutcome {
+            imported: total_imported,
+            skipped,
+        })
     })
     .await
     .map_err(|e| format!("Reimport thread panicked: {}", e))?

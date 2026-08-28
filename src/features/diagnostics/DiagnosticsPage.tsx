@@ -214,27 +214,36 @@ export default function DiagnosticsPage({ embedded = false, previewData = previe
         onRetry: () => reimportRetryRef.current(),
       });
       try {
-        const count = await scanAndReimportDownloads();
-        operation.complete(count > 0 ? `${formatNumber(count)}件を再取り込みしました` : "再取り込み対象はありませんでした");
-        return count;
+        const outcome = await scanAndReimportDownloads();
+        outcome.skipped.forEach((reason) => operation.log(reason, "warn"));
+        operation.complete(outcome.imported > 0 ? `${formatNumber(outcome.imported)}件を再取り込みしました` : "再取り込み対象はありませんでした");
+        return outcome;
       } catch (error) {
         operation.fail(error);
         throw error;
       }
     },
-    onSuccess: async (count) => {
+    onSuccess: async (outcome) => {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["dashboard"] }),
         queryClient.invalidateQueries({ queryKey: ["library"] }),
         queryClient.invalidateQueries({ queryKey: ["stats"] }),
       ]);
       await diagnostics.refetch();
+      // 飛ばした作品があることは、件数と同じ行で伝える。黙っていると
+      // 「全部戻ったはずなのに数が合わない」だけが残る。
+      const skippedNote = outcome.skipped.length
+        ? `${formatNumber(outcome.skipped.length)}件は読めずに飛ばしました。詳しい理由は操作の記録に出しています。`
+        : "";
       notifications.show({
-        color: count > 0 ? "green" : "blue",
-        title: count > 0 ? "再取り込みが完了しました" : "再取り込み対象はありませんでした",
-        message: count > 0
-          ? `${formatNumber(count)}件をライブラリへ戻しました。診断結果も更新しました。`
-          : "DBに登録済みの作品は上書きしません。参照切れはバックアップ復元または元サービスからの再保存を使用してください。",
+        color: outcome.skipped.length ? "yellow" : outcome.imported > 0 ? "green" : "blue",
+        title: outcome.imported > 0 ? "再取り込みが完了しました" : "再取り込み対象はありませんでした",
+        message: [
+          outcome.imported > 0
+            ? `${formatNumber(outcome.imported)}件をライブラリへ戻しました。診断結果も更新しました。`
+            : "DBに登録済みの作品は上書きしません。参照切れはバックアップ復元または元サービスからの再保存を使用してください。",
+          skippedNote,
+        ].filter(Boolean).join(" "),
       });
     },
     onError: (error) => notifications.show({ color: "red", title: "再取り込みできませんでした", message: errorMessage(error) }),

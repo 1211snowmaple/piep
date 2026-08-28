@@ -29,7 +29,7 @@ vi.mock("@/services/dbApi", async (importOriginal) => ({
   isTauriRuntime: () => true,
   getStats: vi.fn().mockResolvedValue({ totalDownloads: 12, totalAssets: 108, totalSizeBytes: 32_000_000 }),
   getSearchIndexStatus: vi.fn().mockResolvedValue({ totalDownloads: 12, indexedDownloads: 12, pendingDownloads: 0, isComplete: true, phase: "ready", semanticIndexedChunks: 0, semanticIndexedDownloads: 0, semanticPendingDownloads: 12, semanticModelReady: false, embeddingProvider: "CPU", gpuEnabled: false, throughputPerSec: null }),
-  scanAndReimportDownloads: vi.fn().mockResolvedValue(0),
+  scanAndReimportDownloads: vi.fn().mockResolvedValue({ imported: 0, skipped: [] }),
 }));
 vi.mock("@/store", () => ({
   store: {

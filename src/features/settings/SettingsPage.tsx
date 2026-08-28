@@ -192,9 +192,15 @@ export default function SettingsPage() {
           operation.complete("分割バックアップを書き出しました");
           return "分割バックアップを書き出しました。マニフェストと同じフォルダーのZIPパートを一緒に保管してください";
         }
-        const count = await scanAndReimportDownloads();
-        operation.complete(`${count}件を再取り込みしました`);
-        return `${count}件を再取り込みしました`;
+        const outcome = await scanAndReimportDownloads();
+        // 飛ばしたものがあることを黙っていると、件数が合わない理由が誰にも
+        // 分からない。何件・なぜ、を同じ行に出す。
+        const summary = outcome.skipped.length
+          ? `${outcome.imported}件を再取り込みし、${outcome.skipped.length}件は読めずに飛ばしました`
+          : `${outcome.imported}件を再取り込みしました`;
+        outcome.skipped.forEach((reason) => operation.log(reason, "warn"));
+        operation.complete(summary);
+        return summary;
       } catch (error) {
         operation.fail(error);
         throw error;

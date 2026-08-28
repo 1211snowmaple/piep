@@ -69,8 +69,15 @@ export async function optimizeSearchIndex(): Promise<SearchIndexOptimizationResu
   return invoke<SearchIndexOptimizationResult>("db_optimize_search_index");
 }
 
-export async function scanAndReimportDownloads(): Promise<number> {
-  return invoke<number>("scan_and_reimport_downloads");
+/** 保存フォルダーを走査した結果。読めなかったものは飛ばして続ける。 */
+export interface ReimportOutcome {
+  imported: number;
+  /** 飛ばした作品と理由。空なら全部読めた。 */
+  skipped: string[];
+}
+
+export async function scanAndReimportDownloads(): Promise<ReimportOutcome> {
+  return invoke<ReimportOutcome>("scan_and_reimport_downloads");
 }
 
 export async function searchDownloadsV2(params: SearchV2Params): Promise<SearchV2Result> {
