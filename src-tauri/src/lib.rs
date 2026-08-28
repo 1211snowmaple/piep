@@ -130,9 +130,12 @@ pub fn run() -> tauri::Result<()> {
             let db = Database::open(&db_path, &storage_dir)
                 .map_err(|e| std::io::Error::other(format!("Failed to open database: {e}")))?;
             let state = Arc::new(AppState::new_with_library_lock(db, library_process_lock));
-            commands::archive::recover_interrupted_restores(&state).map_err(|e| {
-                std::io::Error::other(format!("Failed to recover interrupted restore: {e}"))
-            })?;
+            // 中断した復元の後始末は、起動の条件にしない。片付かなかった分は
+            // 控えを残したまま次の起動でもう一度試せる。ここで止めると、読める
+            // 棚を持っている人が窓を開けられなくなる。
+            for unresolved in commands::archive::recover_interrupted_restores(&state) {
+                log::error!("前回の復元を回復できていません: {unresolved}");
+            }
             if let Err(e) = state.db.recover_update_jobs_on_startup() {
                 log::warn!("Failed to recover update jobs: {}", e);
             }

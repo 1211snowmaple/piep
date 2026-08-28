@@ -1173,8 +1173,13 @@ pub async fn open_local_asset(app: tauri::AppHandle, path: String) -> Result<(),
     let state = app.state::<Arc<AppState>>();
     validate_path_in_storage(&path, state.db.storage_dir())?;
 
-    if !std::path::Path::new(&path).is_file() {
+    let target = std::path::Path::new(&path);
+    if !target.is_file() {
         return Err("File not found or path is not a file".to_string());
+    }
+    // 保存先の中身は、取得元と書庫から来る。**置いてある場所ではなく種類で断る。**
+    if !super::shell::file_extension_is_openable(target) {
+        return Err("この種類のファイルはアプリから開けません".to_string());
     }
 
     app.opener()

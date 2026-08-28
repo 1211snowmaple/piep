@@ -732,6 +732,18 @@ fn recursive_file_size(root: &Path) -> u64 {
     .unwrap_or(0)
 }
 
+/// 直前のコミットを、本体ファイルまで落とし切る。
+///
+/// 通常の書き込みは `synchronous = NORMAL` のままでよい - 毎回同期すると
+/// 取り込みが何倍も遅くなるし、整合性はそれでも守られる。守られないのは
+/// 「最後のコミットが残っているか」だけで、それが問題になるのは復元のように
+/// **ファイルの置き換えと DB の更新が対になっている**ときだけである。
+/// 復元は数分の操作なので、ここで数百ミリ秒を払う価値がある。
+fn checkpoint_for_durability(conn: &Connection, what: &str) -> Result<(), String> {
+    conn.query_row("PRAGMA wal_checkpoint(FULL)", [], |_| Ok(()))
+        .map_err(|e| format!("Durable checkpoint after {what} failed: {e}"))
+}
+
 fn benchmark_percentiles(samples: &mut [f64]) -> (f64, f64) {
     if samples.is_empty() {
         return (0.0, 0.0);
@@ -1341,11 +1353,16 @@ impl Database {
     }
 
     pub(crate) fn commit_atomic_restore(&self) -> Result<(), String> {
-        let result = self
-            .conn
-            .lock()?
+        let conn = self.conn.lock()?;
+        let result = conn
             .execute_batch("COMMIT")
             .map_err(|e| format!("Restore transaction commit failed: {e}"));
+        // コミットが通ったことを、本体ファイルまで落とし切ってから先へ進む。
+        // ここが巻き戻ると「ファイルは新しいのに DB は古い」棚ができる。
+        if result.is_ok() {
+            checkpoint_for_durability(&conn, "restore commit")?;
+        }
+        drop(conn);
         self.conn.end_restore_scope();
         result
     }
@@ -1360,6 +1377,13 @@ impl Database {
     /// Persists the restore's file rollback directory before live files are
     /// promoted. The row is deliberately outside the library transaction: if
     /// the process stops before COMMIT, startup can restore those files.
+    ///
+    /// **この行だけは、電源が落ちても残っていなければ意味が無い。** 普段の
+    /// `synchronous = NORMAL` は WAL をコミットごとに同期しないので、直前の
+    /// コミットは停電で巻き戻りうる。一方でファイルの置き換えは
+    /// `ReplaceFileW` / `MoveFileExW(WRITE_THROUGH)` で即座に永続化される。
+    /// つまり「どちらが真か」を決める側のほうが弱かった。書いたあとに
+    /// チェックポイントを打って、本体ファイルまで落とし切る。
     pub(crate) fn create_restore_journal(
         &self,
         journal_id: &str,
@@ -1385,6 +1409,7 @@ impl Database {
             ],
         )
         .map_err(|e| format!("Restore journal create failed: {e}"))?;
+        checkpoint_for_durability(&conn, "restore journal create")?;
         Ok(())
     }
 
@@ -5389,7 +5414,10 @@ impl Database {
                     let source: String = row.get(1)?;
                     let source_id: String = row.get(2)?;
                     let title: String = row.get(3)?;
-                    let target_type: String = row.get(4)?;
+                    // v0.11.0 で作られたまとめ保存ジョブは target_type を NULL で
+                    // 記録していた。作品を直接保存する候補なので `work` として読み、
+                    // 既存ジョブも更新後すぐ再開・表示できるようにする。
+                    let target_type: Option<String> = row.get(4)?;
                     let payload_json: String = row.get(5)?;
                     let status: String = row.get(6)?;
                     let error: Option<String> = row.get(7)?;
@@ -5419,7 +5447,7 @@ impl Database {
                         title,
                         subtitle,
                         target_label,
-                        target_type,
+                        target_type: target_type.unwrap_or_else(|| "work".to_string()),
                         selected: matches!(status.as_str(), "candidate" | "queued"),
                         status,
                         kind,

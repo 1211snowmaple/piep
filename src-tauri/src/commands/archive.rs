@@ -993,7 +993,13 @@ fn rollback_promoted_files_from_journal(
             if let Some(parent) = destination.parent() {
                 std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
             }
-            std::fs::rename(&backup, &destination).map_err(|error| {
+            // **控えは消費せずに複製する。** かつては `rename` で戻していたが、
+            // それだと途中の1件で失敗した時点で、そこまでに戻した控えが
+            // 手元から消えている。次の起動でやり直そうとしても控えが無く、
+            // 「戻せない」と言って落ちるだけになる - つまり一度失敗すると
+            // 二度と回復できない。複製なら何度でも同じ結果になる。
+            // 控えごと staging を消すのは、全件を戻し終えたあとである。
+            std::fs::copy(&backup, &destination).map_err(|error| {
                 format!(
                     "Could not restore previous file {}: {error}",
                     destination.display()
@@ -1007,12 +1013,48 @@ fn rollback_promoted_files_from_journal(
 /// Completes or rolls back any restore that stopped between file promotion and
 /// cleanup. The SQLite marker is the commit authority: it changes in the same
 /// transaction as the restored rows, so there is no ambiguous COMMIT window.
-pub fn recover_interrupted_restores(state: &AppState) -> Result<(), String> {
+///
+/// **回復できなかったことを、起動できない理由にしない。** 戻せなかったファイルが
+/// 一つあるだけで窓が出ないと、読める棚を人質に取ることになる。回復は次の起動でも
+/// 試せる（控えは消費しない）ので、ここでは何が残ったかを返して先へ進む。
+/// 返り値は回復できなかったジャーナルの説明で、空なら全部片付いている。
+pub fn recover_interrupted_restores(state: &AppState) -> Vec<String> {
     let storage = state.db.storage_dir().to_path_buf();
     let app_data = storage.parent().unwrap_or(storage.as_path()).to_path_buf();
-    for (journal_id, stage_root, committed) in state.db.pending_restore_journals()? {
-        if !stage_root.starts_with(&app_data)
-            || stage_root.parent() != Some(app_data.as_path())
+    let pending = match state.db.pending_restore_journals() {
+        Ok(pending) => pending,
+        Err(error) => return vec![format!("中断した復元の記録を読めません: {error}")],
+    };
+    let mut unresolved = Vec::new();
+    for (journal_id, stage_root, committed) in pending {
+        // 一つのジャーナルの失敗で、残りのジャーナルを見ないのは筋が悪い。
+        if let Err(error) = recover_one_restore_journal(
+            state,
+            &storage,
+            &app_data,
+            &journal_id,
+            &stage_root,
+            committed,
+        ) {
+            log::error!("中断した復元を回復できません（{journal_id}）: {error}");
+            unresolved.push(error);
+        }
+    }
+    unresolved
+}
+
+fn recover_one_restore_journal(
+    state: &AppState,
+    storage: &Path,
+    app_data: &Path,
+    journal_id: &str,
+    stage_root: &Path,
+    committed: bool,
+) -> Result<(), String> {
+    {
+        let stage_root = stage_root.to_path_buf();
+        if !stage_root.starts_with(app_data)
+            || stage_root.parent() != Some(app_data)
             || !stage_root
                 .file_name()
                 .is_some_and(|name| name.to_string_lossy().starts_with(".restore-staging-"))
@@ -1045,11 +1087,11 @@ pub fn recover_interrupted_restores(state: &AppState) -> Result<(), String> {
             if stage_root.exists() {
                 let journal = read_restore_file_journal(&stage_root)?;
                 let lexical = crate::database::tantivy_index::delete_documents(
-                    &storage,
+                    storage,
                     &journal.stale_index_ids,
                 );
                 let semantic = crate::database::semantic_index::clear_documents(
-                    &storage,
+                    storage,
                     &journal.stale_index_ids,
                 );
                 if let Err(error) = lexical.and(semantic) {
@@ -1058,7 +1100,7 @@ pub fn recover_interrupted_restores(state: &AppState) -> Result<(), String> {
                     // SQLite. Keep the journal for another startup retry rather
                     // than making a derived-index outage block the application.
                     log::warn!("Interrupted restore index cleanup will retry: {error}");
-                    continue;
+                    return Ok(());
                 }
             }
             if stage_root.exists() {
@@ -1067,11 +1109,11 @@ pub fn recover_interrupted_restores(state: &AppState) -> Result<(), String> {
                 })?;
             }
         } else {
-            rollback_promoted_files_from_journal(&stage_root, &storage, &app_data)?;
+            rollback_promoted_files_from_journal(&stage_root, storage, app_data)?;
             std::fs::remove_dir_all(&stage_root)
                 .map_err(|error| format!("Could not clean rolled-back restore staging: {error}"))?;
         }
-        state.db.finish_restore_journal(&journal_id)?;
+        state.db.finish_restore_journal(journal_id)?;
     }
     Ok(())
 }
@@ -1456,11 +1498,16 @@ pub async fn export_single(
 
         let src = std::path::Path::new(&asset.local_path);
         if src.exists() {
-            let asset_type_dest = assets_dest.join(&asset.asset_type);
+            // 古い書庫から復元した棚には、清められる前の名前が残っている。
+            // 書き出す側でも通す - DB の中身を無条件に信じてパスを組み立てない。
+            let asset_type_dest = assets_dest.join(
+                crate::downloader::asset_downloader::sanitize_filename(&asset.asset_type),
+            );
             tokio::fs::create_dir_all(&asset_type_dest)
                 .await
                 .map_err(|e| e.to_string())?;
-            tokio::fs::copy(src, asset_type_dest.join(&asset.filename))
+            let filename = crate::downloader::asset_downloader::sanitize_filename(&asset.filename);
+            tokio::fs::copy(src, asset_type_dest.join(filename))
                 .await
                 .map_err(|e| e.to_string())?;
         }
@@ -3389,6 +3436,11 @@ async fn import_zip_locked(
         let mut imported = 0i64;
         let mut extracted_paths = HashSet::new();
         let mut promotion_entries = Vec::new();
+        // 事前検査（`preflight_backup_archive`）が見ているのは、書庫が自分で
+        // 申告したサイズである。**申告と実際が一致する保証は無い。** 1MiBだと
+        // 名乗って1GiBに膨らむ枝を並べれば、検査は通り、展開でディスクが埋まる。
+        // 書いたバイトを実際に数えて、申告と総量の両方で止める。
+        let mut written_total: u64 = 0;
 
         // ZIP内のファイルを展開
         for i in 0..archive.len() {
@@ -3417,8 +3469,20 @@ async fn import_zip_locked(
                 })?;
             }
 
+            let declared = file.size();
             let mut outfile = std::fs::File::create(&outpath).map_err(|e| e.to_string())?;
-            std::io::copy(&mut file, &mut outfile).map_err(|e| e.to_string())?;
+            // 申告より1バイトだけ多く読ませる。余分が出たら申告が嘘である。
+            let written = std::io::copy(&mut (&mut file).take(declared.saturating_add(1)), &mut outfile)
+                .map_err(|e| e.to_string())?;
+            if written > declared {
+                return Err(format!(
+                    "Zip entry {entry_name} expands beyond its declared size ({declared} bytes)"
+                ));
+            }
+            written_total = written_total.saturating_add(written);
+            if written_total > MAX_BACKUP_TOTAL_BYTES {
+                return Err("Backup staging quota exceeded".to_string());
+            }
             outfile.sync_all().map_err(|e| e.to_string())?;
             if entry_name != "backup_metadata.json" {
                 let (destination, _) = resolve_zip_import_path(&entry_name, &storage, &app_data)?;
@@ -3764,10 +3828,19 @@ async fn import_zip_locked(
                             .to_string_lossy()
                             .to_string();
 
+                            // **名前はパスとして使われる。** 取得経路は必ず
+                            // `sanitize_filename` を通るのに、復元だけがここを
+                            // 迂回して、書庫の言うままの名前を DB へ書いていた。
+                            // 絶対パスを名乗る名前が入ると、あとで作品を書き出す
+                            // ときの `join` がその絶対パスへ飛ぶ。
                             let new_asset = NewAsset {
                                 download_id: dl_id,
-                                asset_type: asset.asset_type.clone(),
-                                filename: asset.filename.clone(),
+                                asset_type: crate::downloader::asset_downloader::sanitize_filename(
+                                    &asset.asset_type,
+                                ),
+                                filename: crate::downloader::asset_downloader::sanitize_filename(
+                                    &asset.filename,
+                                ),
                                 local_path: asset_local,
                                 original_url: asset.original_url.clone(),
                                 mime_type: asset.mime_type.clone(),
@@ -4794,6 +4867,32 @@ mod tests {
         remove_temp_dir(&base);
     }
 
+    /// 回復できない後始末が残っていても、起動そのものは止めない。
+    ///
+    /// かつてここは `Err` を返し、`lib.rs` の `?` がそれを起動失敗にしていた。
+    /// しかも控えを `rename` で消費していたので、一度失敗すると次の起動では
+    /// 控えが無く、同じ場所で永久に落ち続けた。読める棚を人質に取る形だった。
+    #[test]
+    fn unrecoverable_restore_journal_is_reported_without_blocking_startup() {
+        let base = create_temp_dir();
+        let (state, _json_path, _old_id) = restore_target(&base);
+        let missing_stage = base.join(format!(".restore-staging-{}-gone", std::process::id()));
+        state
+            .db
+            .create_restore_journal("journal-gone", &missing_stage)
+            .unwrap();
+
+        let first = recover_interrupted_restores(&state);
+        assert_eq!(first.len(), 1, "unexpected recovery result: {first:?}");
+        // 何度でも同じ答えになる。次の起動でやり直せる。
+        let second = recover_interrupted_restores(&state);
+        assert_eq!(second, first);
+        assert_eq!(state.db.pending_restore_journals().unwrap().len(), 1);
+
+        drop(state);
+        remove_temp_dir(&base);
+    }
+
     #[tokio::test]
     async fn restore_failure_after_commit_is_finalized_by_startup_recovery() {
         let base = create_temp_dir();
@@ -4845,7 +4944,7 @@ mod tests {
             "derived index must not update before DB commit processing"
         );
 
-        recover_interrupted_restores(&state).unwrap();
+        assert!(recover_interrupted_restores(&state).is_empty());
         assert!(state.db.pending_restore_journals().unwrap().is_empty());
         assert!(!crate::database::tantivy_index::matching_download_ids(
             state.db.storage_dir(),

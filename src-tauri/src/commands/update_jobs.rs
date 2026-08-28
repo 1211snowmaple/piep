@@ -834,7 +834,10 @@ fn build_save_items(works: &[SaveJobWork]) -> Vec<UpdateJobItemInput> {
             item_type: "candidate".to_string(),
             source: Some(source.to_string()),
             source_id: Some(source_id.to_string()),
-            target_type: None,
+            // 監視対象を経由せず作品そのものを保存する項目。
+            // 候補一覧の公開型は targetType を必須としているので、作品を示す
+            // `work` を保存してDBと画面の型を揃える。
+            target_type: Some("work".to_string()),
             title,
             // `kind` は保存済みの扱いを分ける。`save` は監視中のものだけ取り直す。
             payload_json: serde_json::json!({ "kind": "save" }).to_string(),
@@ -951,9 +954,15 @@ pub async fn save_update_job_candidates(
     credentials: Option<UpdateCredentials>,
 ) -> Result<UpdateJobSnapshot, String> {
     let state = app.state::<Arc<AppState>>().inner().clone();
-    let changed = state
-        .db
-        .queue_update_job_candidates(&job_id, &candidate_ids)?;
+    // `update_candidates` はバックアップに載る。書き出しの最中に書き換えると、
+    // パートごとに別の世代が写る。`AppState.library_gate` の約束は
+    // 「すべての変更が write を取る」なので、ここも取る。
+    let changed = {
+        let _library_write_guard = state.library_gate.clone().write_owned().await;
+        state
+            .db
+            .queue_update_job_candidates(&job_id, &candidate_ids)?
+    };
     if changed > 0 {
         state.db.append_update_job_log(
             &job_id,
@@ -1008,6 +1017,7 @@ pub async fn dismiss_update_candidate(
     dismissed: bool,
 ) -> Result<(), String> {
     let state = app.state::<Arc<AppState>>();
+    let _library_write_guard = state.library_gate.clone().write_owned().await;
     state.db.set_update_candidate_status(
         &source,
         &source_id,
@@ -1037,6 +1047,7 @@ pub async fn list_pending_revisions(
 #[tauri::command]
 pub async fn restore_dismissed_update_candidates(app: tauri::AppHandle) -> Result<usize, String> {
     let state = app.state::<Arc<AppState>>();
+    let _library_write_guard = state.library_gate.clone().write_owned().await;
     state.db.restore_dismissed_update_candidates()
 }
 
@@ -1888,14 +1899,19 @@ async fn scan_pixiv_revisions(
             "localVersion": local_version,
             "localSavedAt": downloaded_at,
         });
-        if record_candidate(
-            state,
-            job_id,
-            target,
-            &item,
-            CandidateKind::Revision,
-            auto_save,
-        )? {
+        // 候補もバックアップに載る。書き出し中の書き換えを避ける。
+        let recorded = {
+            let _library_write_guard = state.library_gate.clone().write_owned().await;
+            record_candidate(
+                state,
+                job_id,
+                target,
+                &item,
+                CandidateKind::Revision,
+                auto_save,
+            )?
+        };
+        if recorded {
             found += 1;
         }
     }
@@ -2007,7 +2023,11 @@ async fn process_target_item(
             continue;
         }
 
-        if record_candidate(state, job_id, &target, source_item, kind, auto_save)? {
+        let recorded = {
+            let _library_write_guard = state.library_gate.clone().write_owned().await;
+            record_candidate(state, job_id, &target, source_item, kind, auto_save)?
+        };
+        if recorded {
             found += 1;
         }
     }
@@ -2399,6 +2419,10 @@ mod tests {
         assert_eq!(items[1].source.as_deref(), Some("fanbox"));
         // 種類は候補と同じ。取得元IDから取ってくる処理をそのまま使う。
         assert!(items.iter().all(|item| item.item_type == "candidate"));
+        // 監視対象を経由しない、作品そのものの保存。
+        assert!(items
+            .iter()
+            .all(|item| item.target_type.as_deref() == Some("work")));
         // `kind` で保存済みの扱いを分ける。
         assert!(items
             .iter()

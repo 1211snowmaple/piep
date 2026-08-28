@@ -13,18 +13,43 @@ use std::sync::Arc;
 use tauri::Manager;
 use tauri_plugin_opener::OpenerExt;
 
+/// 起動してよいファイルの種類。
+///
+/// **「管理下にある」は「安全」ではない。** 保存先の中身は取得元から来た
+/// ものと、書庫から復元したものである。他人の作った書庫を取り込めば、その
+/// 中身が保存先に置かれる。管理下かどうかだけで判断していたころは、
+/// `.exe` を仕込んだ書庫を復元させ、作品ページの「この端末のJSONを開く」を
+/// 押させれば起動できた。piep が実際に作る種類だけを通す。
+const OPENABLE_FILE_EXTENSIONS: &[&str] = &[
+    "json", "txt", "md", "csv", "log", "epub", "zip", "html", "xhtml", "css", "opf", "ncx", "png",
+    "jpg", "jpeg", "webp", "gif", "avif", "bmp", "svg",
+];
+
+pub(crate) fn file_extension_is_openable(canonical: &Path) -> bool {
+    canonical
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            let lowered = extension.to_ascii_lowercase();
+            OPENABLE_FILE_EXTENSIONS.contains(&lowered.as_str())
+        })
+}
+
 /// 開いてよいか。
 ///
-/// アプリが面倒を見ている場所（アプリデータと保存先）なら、ファイルでも
-/// フォルダーでも開く。その外側は、拡張子の無いフォルダーだけ - フォルダーを
-/// 開くのはファイルマネージャーを出すことであって、何かを起動することでは
-/// ない。拡張子を除くのは macOS のアプリバンドル対策で、あれは中身が
-/// フォルダーのまま起動できてしまう。
+/// フォルダーは、アプリが面倒を見ている場所（アプリデータと保存先）なら開く。
+/// その外側は、拡張子の無いフォルダーだけ - フォルダーを開くのはファイル
+/// マネージャーを出すことであって、何かを起動することではない。拡張子を
+/// 除くのは macOS のアプリバンドル対策で、あれは中身がフォルダーのまま
+/// 起動できてしまう。
+///
+/// ファイルは、管理下にあることに加えて**種類でも絞る**。
 fn open_request_is_allowed(canonical: &Path, is_dir: bool, roots: &[PathBuf]) -> bool {
-    if roots.iter().any(|root| canonical.starts_with(root)) {
-        return true;
+    let managed = roots.iter().any(|root| canonical.starts_with(root));
+    if is_dir {
+        return managed || canonical.extension().is_none();
     }
-    is_dir && canonical.extension().is_none()
+    managed && file_extension_is_openable(canonical)
 }
 
 fn resolve_allowed_path(app: &tauri::AppHandle, path: &str) -> Result<PathBuf, String> {
@@ -203,5 +228,43 @@ mod tests {
             true,
             &[PathBuf::from("library")]
         ));
+    }
+
+    /// 管理下にあることは、起動してよい理由にならない。保存先の中身には
+    /// 他人の作った書庫から復元したものが混じりうる。
+    #[test]
+    fn an_executable_inside_the_library_is_refused() {
+        let roots = [PathBuf::from("library")];
+        assert!(!open_request_is_allowed(
+            Path::new("library/pixiv/1/v1/original.json.exe"),
+            false,
+            &roots
+        ));
+        assert!(!open_request_is_allowed(
+            Path::new("library/pixiv/1/v1/run.bat"),
+            false,
+            &roots
+        ));
+        assert!(!open_request_is_allowed(
+            Path::new("library/pixiv/1/v1/no-extension"),
+            false,
+            &roots
+        ));
+    }
+
+    /// piep が実際に作るものは、これまでどおり開ける。大文字でも同じ。
+    #[test]
+    fn the_kinds_piep_writes_still_open() {
+        let roots = [PathBuf::from("library")];
+        for name in [
+            "library/pixiv/1/v1/original.json",
+            "library/pixiv/1/v1/data_assets/image/cover.PNG",
+            "library/exports/book.epub",
+        ] {
+            assert!(
+                open_request_is_allowed(Path::new(name), false, &roots),
+                "should still open: {name}"
+            );
+        }
     }
 }
