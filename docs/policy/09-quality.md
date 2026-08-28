@@ -12,14 +12,10 @@
 
 ## 手元で通すもの
 
-コミット前に、CI と同じ内容を先に確認する。
-
-```bash
-npx tsc --noEmit
-npx vitest run src
-cargo test --manifest-path src-tauri/Cargo.toml -- --test-threads=1
-cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
-```
+コミット前に、CI と同じ内容を先に確認する。**一覧の正本は
+[CONTRIBUTING.md](https://github.com/1211snowmaple/piep/blob/main/CONTRIBUTING.md)
+に一つだけ置く。** 二箇所に書いていたころ、こちらには `cargo fmt --check` と
+境界のドリフト検査が入っておらず、方針書を信じた人だけが CI で落ちた。
 
 画面を変えたときは、加えて実際に動かして確認する。視覚回帰は CI と同条件で:
 
@@ -54,21 +50,34 @@ npm --prefix docs-tools run docs:check
 | `uncalled` | 警告 | 誰も呼んでいないコマンド。意図的なこともある |
 | `emit-unlistened` / `listen-unemitted` | 警告 | イベントの送出と購読が片側だけ |
 
-**説明の付与率はラチェットにしてある。** 140個すべてに一度で書くのは現実的で
-ないので、現在値を `docs-tools/coverage-baseline.json` に残し「下がらないこと」
-だけを強制する。触ったコマンドに書き足していけば自然に上がる。
+**説明の付与率はラチェットにしてある。** すべてに一度で書くのは現実的でないので、
+現在値を `docs-tools/coverage-baseline.json` に残し「下がらないこと」だけを強制する。
+触ったコマンドに書き足していけば自然に上がる。**上がったら基準も締め直す** —
+生成（`npm --prefix docs-tools run contract`）が現在値を書き戻す。書き戻さないと、
+増やした説明をあとから全部消しても緑のままで、ラチェットが名前だけのものになる。
+
+### 薄皮を「呼び出し」に数えない
+
+`uncalled` は長らく一度も発火しなかった。`services/` の包み関数は必ず
+`invoke("名前")` を1回含むので、**その包みを誰も使っていなくても呼び出しは1件ある**
+ことになっていたからである。実際、16個のコマンドが死んだ包みに守られて残っていた。
+
+いまは走査が「その包みの名前が、宣言以外の場所に現れるか」も見る。現れなければ
+その `invoke` は数えない。警告に出ているものは、**使うか消すかを決めていない
+入口**であって、放っておいてよい印ではない。
 
 → [ドキュメントの作り](10-documentation.md)
 
 ## CI
 
-`push` と `pull_request` のたびに GitHub Actions（Windows）で走る。
+`push` と `pull_request` のたびに GitHub Actions で走る。**4つある。**
 
-| ジョブ | 内容 |
-|---|---|
-| `checks` | 型検査、フロント単体テスト、`cargo test`、警告ゼロの `clippy`、EPUBCheck |
-| `visual-regression` | 3幅 × 明暗 × 3 DPI の視覚回帰 |
-| `native-window-smoke` | 実際にビルドしたアプリを起動する |
+| ジョブ | ワークフロー | 内容 |
+|---|---|---|
+| `checks` | Quality（Windows） | 型検査、フロント単体テスト、`cargo test`、警告ゼロの `clippy`、`cargo fmt --check`、EPUBCheck |
+| `visual-regression` | Quality（Windows） | 3幅 × 明暗 × 3 DPI の視覚回帰 |
+| `native-window-smoke` | Quality（Windows） | 実際にビルドしたアプリを起動する |
+| `contract` | Docs（Linux） | 境界のドリフト検査。フロントと Rust の食い違いを落とす |
 
 Windows で走らせるのは、意味検索の GPU 実行（DirectML）、内蔵ブラウザと認証
 （WebView2）、実ウィンドウを起動するテストがいずれも Windows 前提だからである。
@@ -81,7 +90,7 @@ Node のバージョン差、並列度、ランナーのコア数で結果は変
 - 緑を1回見ただけで「直った」と判断しない。断続的な失敗を疑うときは、同じ条件で
   複数回確認してから結論を出す
 - `main` は **CI が緑であることを実際に確認した状態だけ**を指す
-  （`gh run watch` で見る）
+  （`gh run watch` で見る）。見るのは3つではなく**4つ**である
 
 ## 性能の主張は実測に基づく
 

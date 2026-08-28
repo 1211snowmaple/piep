@@ -93,13 +93,28 @@ function inspect(contract, frontend) {
   }
 
   // 4. 誰も呼んでいないコマンド。意図的な場合もあるので警告に留める。
+  //
+  // **薄皮そのものを「呼び出し」に数えない。** `services/` の包み関数は
+  // 必ず `invoke("名前")` を1回含むので、包みが誰からも使われていなくても
+  // 呼び出しは1件あることになる。それではこの規則は永久に発火しない。
+  // 実際、16 個のコマンドが死んだ包みに守られて残っていた。
+  const liveInvokedBy = new Map();
+  for (const [name, sites] of invokedBy) {
+    const live = sites.filter((s) => s.callerUsed !== false);
+    if (live.length) liveInvokedBy.set(name, live);
+  }
   for (const c of contract.commands) {
-    if (!invokedBy.has(c.name)) {
+    if (!liveInvokedBy.has(c.name)) {
       findings.push({
         level: "warn",
         code: "uncalled",
         message: `${c.name} を呼ぶフロントのコードが無い`,
-        detail: `${c.file}:${c.line}`,
+        detail: invokedBy.has(c.name)
+          ? `${c.file}:${c.line}（包みはあるが、その包みを誰も使っていない: ${invokedBy
+              .get(c.name)
+              .map((s) => `${s.file}:${s.line}`)
+              .join(", ")}）`
+          : `${c.file}:${c.line}`,
       });
     }
   }
@@ -282,8 +297,16 @@ function main() {
   const frontend = read(resolve(opt.build, "frontend.json"));
 
   const findings = inspect(contract, frontend);
-  const cov = ratchet(contract, resolve(import.meta.dirname, "..", "coverage-baseline.json"));
+  const baselinePath = resolve(import.meta.dirname, "..", "coverage-baseline.json");
+  const cov = ratchet(contract, baselinePath);
   findings.push(...cov.findings);
+  // 改善したら基準を締め直す。書き戻さないと、増やした説明をあとから全部
+  // 消しても検査は緑のまま - ラチェットが名前だけのものになる。
+  // `--check`（CI）は生成物を書き換えないので、そこでは締め直さない。
+  if (cov.improved && !opt.check) {
+    writeFileSync(baselinePath, `${JSON.stringify(cov.current, null, 2)}
+`);
+  }
 
   const files = {
     "ipc.md": renderIpc(contract, frontend),
@@ -301,7 +324,13 @@ function main() {
   console.log(`生成: ${Object.keys(files).join(", ")} → ${opt.out}`);
   console.log(
     `説明のあるコマンド: ${cov.current.documented}/${cov.current.total}` +
-      (cov.created ? "（基準を新規作成した）" : cov.improved ? "（基準より改善）" : ""),
+      (cov.created
+        ? "（基準を新規作成した）"
+        : cov.improved
+          ? opt.check
+            ? `（基準 ${cov.base.documented}/${cov.base.total} より改善。生成を1回走らせて基準を締め直すこと）`
+            : `（基準を ${cov.base.documented}/${cov.base.total} から締め直した）`
+          : ""),
   );
   console.log("");
 

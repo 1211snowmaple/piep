@@ -98,6 +98,10 @@ function main() {
   const program = createProgram(repo);
   const invocations = [];
   const subscriptions = [];
+  // 宣言そのものの名前は「参照」に数えない。数えてしまうと、誰も使っていない
+  // 薄皮でも「使われている」ことになり、`uncalled` が永久に発火しない。
+  const declarationNames = new Set();
+  const identifierNodes = [];
 
   for (const sf of program.getSourceFiles()) {
     if (sf.isDeclarationFile) continue;
@@ -105,7 +109,15 @@ function main() {
     if (!file.startsWith("src/")) continue;
 
     const visit = (node, enclosing) => {
-      const here = declarationAt(node, sf) ?? enclosing;
+      if (ts.isIdentifier(node)) identifierNodes.push(node);
+      const declared = declarationAt(node, sf);
+      if (declared) {
+        const nameNode = ts.isVariableStatement(declared.node)
+          ? declared.node.declarationList.declarations[0]?.name
+          : declared.node.name;
+        if (nameNode) declarationNames.add(nameNode);
+      }
+      const here = declared ?? enclosing;
       if (ts.isCallExpression(node)) {
         const name = calleeName(node.expression);
         const first = node.arguments[0];
@@ -126,6 +138,16 @@ function main() {
       ts.forEachChild(node, (child) => visit(child, here));
     };
     visit(sf, null);
+  }
+
+  // その包み関数の名前が、宣言以外の場所に一度でも現れるか。
+  const referenced = new Set();
+  for (const node of identifierNodes) {
+    if (!declarationNames.has(node)) referenced.add(node.text);
+  }
+  for (const record of [...invocations, ...subscriptions]) {
+    // 包みの外（画面のコード）から直に呼ばれているものは、常に生きている。
+    record.callerUsed = record.caller === null || referenced.has(record.caller);
   }
 
   const sortKey = (a, b) => a.name.localeCompare(b.name) || a.file.localeCompare(b.file) || a.line - b.line;
