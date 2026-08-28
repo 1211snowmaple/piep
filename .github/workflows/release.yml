@@ -32,6 +32,9 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      - name: Install documentation tool dependencies
+        run: npm --prefix docs-tools ci
+
       - name: Verify release tag and version files
         shell: pwsh
         run: |
