@@ -1005,6 +1005,10 @@ export default function LibraryPage() {
     },
     onSuccess: (count, action) => {
       queryClient.invalidateQueries({ queryKey: ["update-targets"] });
+      // 「監視中だけ」で絞り込んだ一覧は、絞り込み自体がこの印で決まっている。
+      // 印だけ塗り替えると、名乗りと中身が食い違った行が残る。
+      queryClient.invalidateQueries({ queryKey: ["library-entities"] });
+      queryClient.invalidateQueries({ queryKey: ["library-entity-count"] });
       if (action === "archive" && count === 0) return;
       notifications.show({
         color: "green",
@@ -1131,6 +1135,8 @@ export default function LibraryPage() {
     },
     onSuccess: (_result, input) => {
       queryClient.invalidateQueries({ queryKey: ["update-targets"] });
+      queryClient.invalidateQueries({ queryKey: ["library-entities"] });
+      queryClient.invalidateQueries({ queryKey: ["library-entity-count"] });
       notifications.show({
         color: input.next ? "piep" : "gray",
         message: `${input.entity.displayName}の更新監視を${input.next ? "開始しました" : "止めました"}`,

@@ -42,8 +42,20 @@ describe("更新確認のあとに古くなるもの", () => {
     expect(invalidated).toContain("dashboard");
   });
 
+  /**
+   * 作者・シリーズの見出しに出る作品数と、一覧の件数は別の鍵から引いている。
+   * 一覧だけ新しくすると、行は増えたのにバッジは前の数のまま残り、頁送りの
+   * 最終ページが実在しない番号を指す。
+   */
+  it("作者・シリーズの作品数と一覧の件数にも知らせる", () => {
+    const invalidated = collectInvalidatedKeys();
+    expect(invalidated).toContain("entity");
+    expect(invalidated).toContain("entity-tags");
+    expect(invalidated).toContain("library-entity-count");
+  });
+
   // 増やすのはよいが、減らすと静かに壊れる。数も見張っておく。
   it("知らせ先を取りこぼしていない", () => {
-    expect(collectInvalidatedKeys()).toHaveLength(7);
+    expect(collectInvalidatedKeys()).toHaveLength(10);
   });
 });

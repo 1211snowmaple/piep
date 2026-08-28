@@ -13,6 +13,7 @@ import { errorMessage, formatDateNumeric, formatNumber } from "@/lib/format";
 import { summaryText } from "@/lib/content";
 import { deleteDownload, getAssetUrl, isTauriRuntime, setFavorite, setWatchUpdates } from "@/services/dbApi";
 import { deleteThenCleanup } from "@/features/library/deletedWorkCleanup";
+import { invalidateWorkFlagViews } from "@/features/library/workSetInvalidation";
 import { listPendingRevisionsCommand } from "@/services/updateJobApi";
 import type { DownloadEntry } from "@/types/library";
 
@@ -344,21 +345,7 @@ function WorkActions({ work, queued, onQueue, onToggleFavorite, onToggleWatch }:
   const navigate = useAppNavigate();
   const queryClient = useQueryClient();
   const { removeFromEpubQueue } = useWorkspace();
-  // This card is also rendered from lists the library keys do not cover: the
-  // author and series pages read ["entity-works"], a collection reads
-  // ["work-collection"] and the EPUB queue reads ["epub-queue-works"]. Leaving
-  // them out makes the heart stay grey on those screens, which reads as the
-  // click not having registered. The sidebar shelf counts are on screen the
-  // whole time and need the same treatment.
-  const refresh = () => Promise.all([
-    queryClient.invalidateQueries({ queryKey: ["library"] }),
-    queryClient.invalidateQueries({ queryKey: ["library-shelf-counts"] }),
-    queryClient.invalidateQueries({ queryKey: ["dashboard"] }),
-    queryClient.invalidateQueries({ queryKey: ["entity-works"] }),
-    queryClient.invalidateQueries({ queryKey: ["work-collection"] }),
-    queryClient.invalidateQueries({ queryKey: ["epub-queue-works"] }),
-    queryClient.invalidateQueries({ queryKey: ["reader-metadata", work.id] }),
-  ]);
+  const refresh = () => invalidateWorkFlagViews(queryClient, work.id);
   const toggleFavorite = async () => {
     const next = !work.favorite;
     if (onToggleFavorite) return onToggleFavorite(work.id, next);

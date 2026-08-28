@@ -15,7 +15,8 @@ import {
 import { useDisclosure } from "@mantine/hooks";
 import { notifications } from "@mantine/notifications";
 import { modals } from "@mantine/modals";
-import { useMutation, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { invalidateCollectionViews } from "./collectionQueries";
 import { useAppNavigate, useAppSearchParams, useRouteParams } from "@/app/router";
 import { ErrorState, LoadingState } from "@/components/AsyncState";
 import { ListPager, PagingModeToggle, useBoundedNumberedPage, usePageSize, usePagingMode } from "@/components/ListPager";
@@ -72,12 +73,7 @@ export function optimisticCollectionOrder(
  *  list was invalidated by hand in each caller, the delete path refreshed only
  *  ["work-collections"], so the 所属 menus on the work and author pages went on
  *  offering a collection that no longer existed. */
-function invalidateCollectionViews(queryClient: QueryClient) {
-  queryClient.invalidateQueries({ queryKey: ["work-collections"] });
-  queryClient.invalidateQueries({ queryKey: ["work-collection"] });
-  queryClient.invalidateQueries({ queryKey: ["collections-for-work"] });
-  queryClient.invalidateQueries({ queryKey: ["collections-for-person"] });
-}
+
 
 /** The detail screen for one collection. The list of collections lives in the
  *  library beside 作者・クリエイター and シリーズ, so a bare `/collections`

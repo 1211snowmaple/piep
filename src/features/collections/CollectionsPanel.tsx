@@ -19,7 +19,7 @@ import { Icons, IconSize } from "@/lib/icons";
 import { generateCollectionSuggestion, sweepCollectionCandidates, upsertWorkCollection } from "@/services/collectionApi";
 import { isTauriRuntime } from "@/services/dbApi";
 import type { SavedSearchSuggestion, WorkCollectionSummary } from "@/types/collections";
-import { workCollectionsQueryOptions } from "./collectionQueries";
+import { invalidateCollectionViews, workCollectionsQueryOptions } from "./collectionQueries";
 import { CollectionCard } from "./CollectionCard";
 import { CollectionFormModal } from "./CollectionFormModal";
 import { SuggestionInbox } from "./SuggestionInbox";
@@ -56,10 +56,7 @@ export function CollectionsPanel({ query = "", sortBy = "created_at" }: { query?
   const generatedSeed = useRef<number | null>(null);
   const collectionsQuery = useQuery(workCollectionsQueryOptions());
   const invalidate = () => {
-    queryClient.invalidateQueries({ queryKey: ["work-collections"] });
-    queryClient.invalidateQueries({ queryKey: ["work-collection"] });
-    queryClient.invalidateQueries({ queryKey: ["collections-for-work"] });
-    queryClient.invalidateQueries({ queryKey: ["collections-for-person"] });
+    invalidateCollectionViews(queryClient);
     queryClient.invalidateQueries({ queryKey: ["collection-suggestions"] });
   };
   const saveMutation = useMutation({

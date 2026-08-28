@@ -63,6 +63,7 @@ import {
 import { openExternalUrl, revealPathInFileManager } from "@/services/openerApi";
 import { getDemoReader } from "@/mocks/demoData";
 import { deleteThenCleanup } from "@/features/library/deletedWorkCleanup";
+import { invalidateWorkFlagViews } from "@/features/library/workSetInvalidation";
 import type { ReaderMetadata } from "@/types/library";
 
 type WorkTab = "overview" | "content" | "assets" | "history" | "json";
@@ -193,12 +194,9 @@ export default function WorkPage() {
       return { key, previous };
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["library"], refetchType: "none" });
-      // The sidebar shelf counts stay on screen while this page is open, so a
-      // favourite that does not move them reads as the click not registering.
-      // The shelf list on LibraryPage already does this for the same action.
-      queryClient.invalidateQueries({ queryKey: ["library-shelf-counts"] });
-      queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+      // カードのハートと同じ範囲を知らせる。作者ページ・束・EPUBキューから
+      // 開いた作品でも、戻った先の印が押した通りになる。
+      void invalidateWorkFlagViews(queryClient, id);
     },
     onError: (error, _input, context) => {
       if (context?.previous) queryClient.setQueryData(context.key, context.previous);

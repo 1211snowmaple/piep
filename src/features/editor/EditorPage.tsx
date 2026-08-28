@@ -263,6 +263,10 @@ export default function EditorPage() {
     try {
       const asset = await importWorkAsset(id, path);
       queryClient.setQueryData(["editor-document", id], { ...doc, assets: [...doc.assets, asset] });
+      // 画像は作品に属する。エディタの手元だけ増やすと、作品詳細のアセット欄と
+      // タブの件数が古いままになる。
+      queryClient.invalidateQueries({ queryKey: ["work-assets", id] });
+      queryClient.invalidateQueries({ queryKey: ["reader-metadata", id] });
       const nextBlocks = [...form.getValues().blocks];
       nextBlocks.splice(index, 0, { ...makeBlock("image"), assetId: asset.id });
       replaceBlocks(nextBlocks);

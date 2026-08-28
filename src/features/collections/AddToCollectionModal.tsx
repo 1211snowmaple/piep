@@ -19,7 +19,7 @@ import { CollectionCover } from "@/components/CollectionCover";
 import { errorMessage, formatNumber } from "@/lib/format";
 import { Icons, IconSize } from "@/lib/icons";
 import { addDownloadsToCollection, createCollectionFromDownloads } from "@/services/collectionApi";
-import { workCollectionsQueryOptions } from "./collectionQueries";
+import { invalidateCollectionViews, workCollectionsQueryOptions } from "./collectionQueries";
 import { isTauriRuntime } from "@/services/dbApi";
 import type { CollectionKind } from "@/types/collections";
 
@@ -63,12 +63,7 @@ export function AddToCollectionModal({
     setTarget("__new__");
   }, [opened, defaultName]);
 
-  const invalidate = () => {
-    queryClient.invalidateQueries({ queryKey: ["work-collections"] });
-    queryClient.invalidateQueries({ queryKey: ["work-collection"] });
-    queryClient.invalidateQueries({ queryKey: ["collections-for-work"] });
-    queryClient.invalidateQueries({ queryKey: ["collections-for-person"] });
-  };
+  const invalidate = () => invalidateCollectionViews(queryClient);
 
   const mutation = useMutation({
     mutationFn: async () => {
