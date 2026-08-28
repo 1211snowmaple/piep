@@ -7,7 +7,13 @@ edition = "2021"
 
 [lib]
 name = "piep_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+# piep is a Windows desktop application. The Tauri template also enables
+# staticlib/cdylib for Android and iOS entry points, but those extra artifacts
+# are neither loaded nor distributed here. On MSVC the unused cdylib makes
+# link.exe create an import library and print a normal status line to stdout;
+# rustc then reports that line as a `linker_messages` warning. Build only the
+# Rust library the desktop executable actually links.
+crate-type = ["rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

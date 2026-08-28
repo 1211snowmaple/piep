@@ -198,28 +198,6 @@ pub fn query_ngrams(term: &str) -> Vec<String> {
     generate_ngrams_limited(term, 64)
 }
 
-#[allow(dead_code)]
-pub fn ngram_threshold(count: usize) -> i64 {
-    if count <= 2 {
-        count as i64
-    } else {
-        ((count as f64) * 0.45).ceil().max(2.0) as i64
-    }
-}
-
-#[allow(dead_code)]
-pub fn fts_query(parsed: &ParsedSearchQuery) -> Option<String> {
-    let mut parts = Vec::new();
-    for term in &parsed.include {
-        parts.push(format!("\"{}\"", term.normalized.replace('"', "\"\"")));
-    }
-    if parts.is_empty() {
-        None
-    } else {
-        Some(parts.join(" AND "))
-    }
-}
-
 pub fn match_fields_and_score(
     doc: &SearchDocument,
     parsed: &ParsedSearchQuery,

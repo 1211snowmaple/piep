@@ -105,17 +105,6 @@ pub fn best_novel_cover(webview_url: String, app_large_url: Option<&str>) -> Str
     }
 }
 
-#[allow(dead_code)]
-pub async fn get_novel_text(novel_id: &str, refresh_token: &str) -> Result<String, Box<dyn Error>> {
-    let api = AppPixivAPI::new_from_refresh_token(refresh_token.to_string());
-    let id_u64: u64 = novel_id.parse()?;
-
-    // Webview用のAPIを使用して本文を取得
-    let webview_novel = api.webview_novel(id_u64, true).await?;
-
-    Ok(webview_novel.text)
-}
-
 /// 本文とアセット（表紙、挿絵）の全データを取得する
 pub async fn get_novel_text_and_assets(
     novel_id: &str,

@@ -396,9 +396,8 @@ pub struct SeriesNavigation {
 ///
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
-#[allow(clippy::large_enum_variant)]
 pub enum SeriesNavigationOrEmpty {
-    Info(SeriesNavigation),
+    Info(Box<SeriesNavigation>),
     Empty(EmptyObject),
 }
 
