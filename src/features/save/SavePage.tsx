@@ -159,7 +159,12 @@ export default function SavePage() {
   // worth offering back.
   const rememberVisit = useCallback((url: string) => {
     if (!url || url === "about:blank") return;
-    setHistory((current) => [url, ...current.filter((item) => item !== url)].slice(0, 24));
+    setHistory((current) => {
+      // 2.5秒ごとの見回りがここを通る。同じ場所に居るあいだも毎回新しい配列を
+      // 返していたので、URL が1文字も動いていないのに画面が作り直されていた。
+      if (current[0] === url) return current;
+      return [url, ...current.filter((item) => item !== url)].slice(0, 24);
+    });
   }, []);
 
   const readBounds = useCallback(() => {

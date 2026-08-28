@@ -217,6 +217,35 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
   const [seriesInput, setSeriesInput] = useState(seriesQuery);
   const latestParams = useRef(urlParams);
   latestParams.current = urlParams;
+  // 作品の検索欄。**URL を直に握らせない。**
+  //
+  // ここだけ `onChange` が毎打鍵で `history.replaceState` と IPC を撃っていた。
+  // 日本語では変換中の中間状態（`a` `ao` `あ` `あお` …）まで一つずつ飛ぶうえ、
+  // 制御値を変換の途中で差し戻すので、WebView2 では変換そのものが切れることが
+  // ある。隣のシリーズ検索は最初からこの形で、同じ画面で作りが割れていた。
+  const [workInput, setWorkInput] = useState(workQuery);
+  const workComposing = useRef(false);
+  const workWriteTimer = useRef<number | null>(null);
+  const cancelWorkWrite = () => {
+    if (workWriteTimer.current === null) return;
+    window.clearTimeout(workWriteTimer.current);
+    workWriteTimer.current = null;
+  };
+  const scheduleWorkQuery = (value: string) => {
+    setWorkInput(value);
+    cancelWorkWrite();
+    // 変換中は確定していない。確定を待ってから書く。
+    if (workComposing.current) return;
+    workWriteTimer.current = window.setTimeout(() => {
+      workWriteTimer.current = null;
+      patchUrl({ q: value.trim().slice(0, 200) });
+    }, 260);
+  };
+  const clearWorkQuery = () => {
+    cancelWorkWrite();
+    setWorkInput("");
+    patchUrl({ q: "" });
+  };
   const seriesWriteTimer = useRef<number | null>(null);
   const cancelSeriesWrite = () => {
     if (seriesWriteTimer.current === null) return;
@@ -253,6 +282,11 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
     setUrlParams(next, { replace: true });
   }, [rawSeriesQuery, seriesQuery, setUrlParams, urlParams]);
   useEffect(() => () => cancelSeriesWrite(), []);
+  useEffect(() => () => cancelWorkWrite(), []);
+  // 戻る・保存した検索の復元など、URL が外から変わったときは手元を合わせる。
+  useEffect(() => {
+    if (workWriteTimer.current === null && !workComposing.current) setWorkInput(workQuery);
+  }, [workQuery]);
 
   // What this author writes, and who they write it with: the two things a flat
   // list of works cannot tell you. Every continuation is an opaque keyset
@@ -464,10 +498,12 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
                   <TextInput
                     flex={1}
                     size="sm"
-                    value={workQuery}
-                    onChange={(event) => patchUrl({ q: event.currentTarget.value })}
+                    value={workInput}
+                    onChange={(event) => scheduleWorkQuery(event.currentTarget.value)}
+                    onCompositionStart={() => { workComposing.current = true; cancelWorkWrite(); }}
+                    onCompositionEnd={(event) => { workComposing.current = false; scheduleWorkQuery(event.currentTarget.value); }}
                     leftSection={<Icons.search size={IconSize.menu} />}
-                    rightSection={workQuery ? <ActionIcon variant="subtle" color="gray" size="sm" aria-label="検索語を消す" onClick={() => patchUrl({ q: "" })}><Icons.cancel size={IconSize.inline} /></ActionIcon> : null}
+                    rightSection={workInput ? <ActionIcon variant="subtle" color="gray" size="sm" aria-label="検索語を消す" onClick={clearWorkQuery}><Icons.cancel size={IconSize.inline} /></ActionIcon> : null}
                     placeholder={`${displayName}の作品を検索`}
                     aria-label={`${displayName}の作品を検索`}
                     maxLength={200}

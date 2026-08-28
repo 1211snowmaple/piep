@@ -80,9 +80,10 @@ export function TagRow({ tags, interactive = true }: { tags: string[]; interacti
     const observer = new ResizeObserver(measure);
     observer.observe(row);
     // Text metrics change when the real font arrives, which happens after the
-    // first layout pass.
-    document.fonts?.ready.then(measure).catch(() => undefined);
-    return () => observer.disconnect();
+    // first layout pass. 書体が届くころにはカードが捨てられていることもある。
+    let alive = true;
+    document.fonts?.ready.then(() => { if (alive) measure(); }).catch(() => undefined);
+    return () => { alive = false; observer.disconnect(); };
   }, [measure]);
 
   if (!tags.length) return null;
