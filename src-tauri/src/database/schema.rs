@@ -40,6 +40,7 @@ pub fn initialize(conn: &Connection) -> Result<(), rusqlite::Error> {
         create_schema(&tx)?;
         add_missing_columns(&tx)?;
         retire_update_job_request_blob(&tx)?;
+        normalize_legacy_save_job_target_types(&tx)?;
         stamp_schema_version(&tx)?;
         tx.commit()?;
         return Ok(());
@@ -385,6 +386,31 @@ fn retire_update_job_request_blob(conn: &Connection) -> Result<(), rusqlite::Err
     Ok(())
 }
 
+/// v0.11.0 が作ったまとめ保存ジョブの候補を、現在の型へ正規化する。
+///
+/// まとめ保存は監視対象（作者・シリーズ）を経由せず作品を直接扱うのに、当時の
+/// 書込みは `target_type` を NULL にしていた。一方、候補一覧の公開型はこの値を
+/// 必須としているため、スナップショットの読込みで型エラーになった。
+///
+/// `scope = 'save'` の候補だけを `work` にする。作者・シリーズ確認から生まれた
+/// 候補の由来を推測で書き換えない。起動のたびに呼ばれても同じ結果になる。
+fn normalize_legacy_save_job_target_types(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute(
+        "UPDATE update_job_items
+            SET target_type = 'work'
+          WHERE item_type = 'candidate'
+            AND target_type IS NULL
+            AND EXISTS (
+                SELECT 1
+                  FROM update_jobs
+                 WHERE update_jobs.id = update_job_items.job_id
+                   AND update_jobs.scope = 'save'
+            )",
+        [],
+    )?;
+    Ok(())
+}
+
 fn apply_pragmas(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.busy_timeout(std::time::Duration::from_millis(5_000))?;
     conn.execute_batch(
@@ -416,6 +442,7 @@ fn reset_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
         create_schema(&tx)?;
         add_missing_columns(&tx)?;
         retire_update_job_request_blob(&tx)?;
+        normalize_legacy_save_job_target_types(&tx)?;
         stamp_schema_version(&tx)?;
         tx.commit()
     })();
@@ -957,6 +984,41 @@ mod tests {
         initialize(&conn).unwrap();
         assert!(!column_exists(&conn, "update_jobs", "request_json").unwrap());
         assert_eq!(watch_saved("job-watch"), 1);
+    }
+
+    /// 旧版が残した NULL は読込時に隠すだけでなく、起動時の移行で直す。
+    /// 作者・シリーズ由来かもしれない別スコープの値には触れない。
+    #[test]
+    fn legacy_save_job_target_types_are_normalized_in_place() {
+        let conn = Connection::open_in_memory().unwrap();
+        initialize(&conn).unwrap();
+        conn.execute_batch(
+            "INSERT INTO update_jobs (id, scope, mode, status, started_at, updated_at)
+             VALUES ('job-save', 'save', 'save', 'failed', '2026-08-01', '2026-08-01'),
+                    ('job-author', 'author', 'check_only', 'completed', '2026-08-01', '2026-08-01');
+             INSERT INTO update_job_items
+                    (job_id, item_type, source, source_id, target_type, title, payload_json, status)
+             VALUES ('job-save', 'candidate', 'pixiv', '1', NULL, '保存候補', '{\"kind\":\"save\"}', 'queued'),
+                    ('job-author', 'candidate', 'pixiv', '2', NULL, '由来不明の候補', '{}', 'candidate');",
+        )
+        .unwrap();
+
+        initialize(&conn).unwrap();
+
+        let target_type = |job_id: &str| -> Option<String> {
+            conn.query_row(
+                "SELECT target_type FROM update_job_items WHERE job_id = ?1",
+                [job_id],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(target_type("job-save").as_deref(), Some("work"));
+        assert_eq!(target_type("job-author"), None);
+
+        // 再実行しても結果が変わらない。
+        initialize(&conn).unwrap();
+        assert_eq!(target_type("job-save").as_deref(), Some("work"));
     }
 
     /// あとから増えた列は、すでにあるライブラリにも足される。

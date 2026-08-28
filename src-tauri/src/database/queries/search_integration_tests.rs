@@ -3,6 +3,21 @@ use std::collections::HashSet;
 use std::fs;
 use std::time::{Duration, Instant};
 
+#[test]
+fn malformed_json_projection_is_reported_instead_of_becoming_empty_data() {
+    let conn = Connection::open_in_memory().unwrap();
+    let error = conn
+        .query_row("SELECT 'not-json'", [], |row| {
+            json_column_or_default::<Vec<String>>(row, 0)
+        })
+        .unwrap_err();
+
+    assert!(
+        matches!(error, rusqlite::Error::FromSqlConversionFailure(..)),
+        "unexpected error: {error}"
+    );
+}
+
 /// Builds prose whose vocabulary keeps growing, the way a real library does.
 fn synthetic_body(seed: u64, chars: usize) -> String {
     let nouns = [
@@ -6075,6 +6090,41 @@ fn update_job_candidates_can_be_queued_for_saving() {
     assert_eq!(changed, 1);
     let snapshot = db.update_job_snapshot("job-candidates").unwrap();
     assert_eq!(snapshot.candidates[0].status, "queued");
+}
+
+/// v0.11.0 のまとめ保存ジョブは target_type を NULL で記録していた。
+/// アップデート後も、そのジョブを一覧表示して再開できる。
+#[test]
+fn update_job_snapshot_reads_legacy_save_candidates_without_target_type() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let request = StartUpdateJobRequest {
+        scope: "save".to_string(),
+        mode: "save".to_string(),
+        work_ids: None,
+        target_ids: None,
+        credentials: None,
+        watch_saved: None,
+        adhoc_targets: None,
+    };
+    db.create_update_job(
+        "job-legacy-save",
+        &request,
+        &[UpdateJobItemInput {
+            item_type: "candidate".to_string(),
+            source: Some("pixiv".to_string()),
+            source_id: Some("novel-1".to_string()),
+            target_type: None,
+            title: "Legacy save".to_string(),
+            payload_json: serde_json::json!({ "kind": "save" }).to_string(),
+            status: "queued".to_string(),
+        }],
+    )
+    .unwrap();
+
+    let snapshot = db.update_job_snapshot("job-legacy-save").unwrap();
+    assert_eq!(snapshot.candidates.len(), 1);
+    assert_eq!(snapshot.candidates[0].target_type, "work");
 }
 
 #[test]
