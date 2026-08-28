@@ -149,7 +149,14 @@ fn rootfile_path(entries: &HashMap<String, Vec<u8>>) -> Option<String> {
     let container = text_of(entries.get("META-INF/container.xml")?)?;
     let at = container.find("full-path=")?;
     let rest = &container[at + "full-path=".len()..];
+    // 直後の1文字を「引用符（1バイト）」と決め打ちして `rest[1..]` を切っていた。
+    // そこにマルチバイト文字が来ると文字の途中を切ることになり、**パニックする**。
+    // release は `panic = "abort"` なので、その場でプロセスが死ぬ。検証器は
+    // 他人が作った EPUB を読む道具なので、中身が何であれ落ちてはいけない。
     let quote = rest.chars().next()?;
+    if quote != '"' && quote != '\'' {
+        return None;
+    }
     let end = rest[1..].find(quote)? + 1;
     Some(rest[1..end].to_string())
 }
@@ -820,8 +827,14 @@ fn is_name_char(ch: char) -> bool {
     ch.is_alphanumeric() || matches!(ch, '_' | '-' | '.' | ':')
 }
 
+/// XML 1.0 の Char。**上限も見る。**
+///
+/// 下限しか見ていなかったので、U+FFFE / U+FFFF のような非文字を通していた。
+/// 組み立て側（`xhtml::is_xml_char`）は正しく上限を持っている。検証器のほうが
+/// 緩いと、「別の目で見る」という役目を果たせない。
 fn is_allowed_char(ch: char) -> bool {
-    matches!(ch, '\t' | '\n' | '\r') || ch >= ' '
+    matches!(ch, '\t' | '\n' | '\r')
+        || matches!(ch, ' '..='\u{D7FF}' | '\u{E000}'..='\u{FFFD}' | '\u{10000}'..='\u{10FFFF}')
 }
 
 fn is_ncname(value: &str) -> bool {
@@ -974,6 +987,51 @@ fn parse_spine_idrefs(opf: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
+    /// 他人が作った EPUB を読むための道具なので、中身が何であれ落ちない。
+    ///
+    /// `full-path=` の直後を「引用符（1バイト）」と決め打ちして切っていたので、
+    /// そこにマルチバイト文字が来ると文字の途中を切ってパニックした。
+    /// release は `panic = "abort"` なので、その場でプロセスが死ぬ。
+    #[test]
+    fn a_multibyte_character_after_full_path_is_refused_not_fatal() {
+        let mut entries: HashMap<String, Vec<u8>> = HashMap::new();
+        entries.insert(
+            "META-INF/container.xml".to_string(),
+            "<rootfile full-path=\u{201C}OEBPS/content.opf\u{201D} media-type=\"x\"/>"
+                .as_bytes()
+                .to_vec(),
+        );
+        assert_eq!(super::rootfile_path(&entries), None);
+    }
+
+    #[test]
+    fn an_ordinary_container_still_resolves() {
+        let mut entries: HashMap<String, Vec<u8>> = HashMap::new();
+        entries.insert(
+            "META-INF/container.xml".to_string(),
+            "<rootfile full-path=\"OEBPS/content.opf\" media-type=\"x\"/>"
+                .as_bytes()
+                .to_vec(),
+        );
+        assert_eq!(
+            super::rootfile_path(&entries).as_deref(),
+            Some("OEBPS/content.opf")
+        );
+    }
+
+    /// XML 1.0 の Char には上限もある。組み立て側は守っているのに検証側が
+    /// 通していたら、「別の目で見る」という役目を果たせない。
+    #[test]
+    fn xml_noncharacters_are_not_allowed() {
+        assert!(super::is_allowed_char('あ'));
+        assert!(super::is_allowed_char('\u{FFFD}'));
+        assert!(!super::is_allowed_char('\u{FFFE}'));
+        assert!(!super::is_allowed_char('\u{FFFF}'));
+        assert!(!super::is_allowed_char('\u{0007}'));
+    }
+
     use super::*;
     use std::io::Write;
 

@@ -120,9 +120,8 @@ impl EpubBuilder {
             "  本文ページ生成: {} ページ",
             self.manifest.content.pages.len()
         );
-        let mut used_images: HashSet<String> = HashSet::new();
         for page in &self.manifest.content.pages {
-            let html = self.resolve_page_images(&page.html_content, &images, &mut used_images);
+            let html = self.resolve_page_images(&page.html_content, &images);
             let rendered = renderer.render_page(&self.manifest, page, &html)?;
             let filename = format!("OEBPS/text/{}", page_filename(page.order));
             self.write_text_entry(&mut zip, &filename, &rendered)?;
@@ -271,22 +270,28 @@ impl EpubBuilder {
                 .metadata()
                 .map_err(|error| format!("画像情報を取得できません ({}): {error}", path.display()))?
                 .len();
+            // **一枚の大きさで本ごと落とさない。** すぐ下のデコード失敗は
+            // 「その一枚を除いて続ける」のに、上限超えだけが書き出し全体を
+            // 止めていた。挿絵50枚のうち1枚が大きいだけで、本文も残り49枚も
+            // 出てこない。方針は一つにする - 入らない絵は置いていく。
             if source_size > MAX_SOURCE_IMAGE_BYTES {
-                return Err(format!(
-                    "画像が1ファイルの上限（{} MiB）を超えています: {}",
+                log::warn!(
+                    "画像が1ファイルの上限（{} MiB）を超えるため除外します: {}",
                     MAX_SOURCE_IMAGE_BYTES / 1024 / 1024,
                     path.display()
-                ));
+                );
+                continue;
             }
             if let Some((width, height)) = image_dimensions_from_path(path) {
                 if u64::from(width).saturating_mul(u64::from(height)) > MAX_IMAGE_PIXELS {
-                    return Err(format!(
-                        "画像の画素数が上限（{} MP）を超えています: {} ({}x{})",
+                    log::warn!(
+                        "画像の画素数が上限（{} MP）を超えるため除外します: {} ({}x{})",
                         MAX_IMAGE_PIXELS / 1_000_000,
                         path.display(),
                         width,
                         height
-                    ));
+                    );
+                    continue;
                 }
             }
             let (bytes, media_type) =
@@ -356,12 +361,7 @@ impl EpubBuilder {
     /// 変換の段階では拡張子まで確定できない（元が png でも圧縮で jpg になる）。
     /// つなげられなかった参照は、その `<img>` ごと落とす。指す先の無い参照は
     /// EPUB を無効にし、取り込み側に丸ごと拒否される。
-    fn resolve_page_images(
-        &self,
-        html: &str,
-        images: &[PackagedImage],
-        used: &mut HashSet<String>,
-    ) -> String {
+    fn resolve_page_images(&self, html: &str, images: &[PackagedImage]) -> String {
         xhtml::sanitize_fragment_with(html, &mut |src| {
             let Some(reference) = src.rsplit('/').next() else {
                 return ImageRef::Drop;
@@ -385,10 +385,7 @@ impl EpubBuilder {
                 });
 
             match matched {
-                Some(image) => {
-                    used.insert(image.id.clone());
-                    ImageRef::Keep(relative_href(&image.zip_path, "OEBPS/text"))
-                }
+                Some(image) => ImageRef::Keep(relative_href(&image.zip_path, "OEBPS/text")),
                 None => {
                     log::warn!("参照先の画像が無いため除外します: {}", src);
                     ImageRef::Drop
@@ -730,7 +727,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_an_image_before_reading_it_when_the_source_quota_is_exceeded() {
+    fn leaves_out_an_image_before_reading_it_when_the_source_quota_is_exceeded() {
         let path = std::env::temp_dir().join(format!(
             "piep_epub_oversize_{:016x}.jpg",
             rand::random::<u64>()
@@ -755,11 +752,16 @@ mod tests {
             TemplateSettings::default(),
             ImageCompressOptions::default(),
         );
-        let error = match builder.package_images() {
-            Err(error) => error,
-            Ok(_) => panic!("quota must reject image"),
-        };
-        assert!(error.contains("1ファイルの上限"));
+        // 上限を超えた一枚は**読まずに**除く。読んでしまえば上限の意味が無い。
+        // そして本ごと落とさない - 挿絵が一枚入らないことと、本が出てこない
+        // ことは別である。
+        let packaged = builder
+            .package_images()
+            .expect("oversized image must not fail the book");
+        assert!(
+            !packaged.iter().any(|image| image.id == "oversize"),
+            "the oversized image must be left out"
+        );
         let _ = std::fs::remove_file(path);
     }
 

@@ -161,7 +161,7 @@ impl AppPixivAPI {
                 AUTHORIZATION,
                 HV::from_str(&format!("Bearer {}", access_token)).map_err(|e| {
                     PixivError::BadAccessToken {
-                        access_token,
+                        access_token: crate::pixiv_api::error::Redacted::new(access_token),
                         message: format!("{}", e),
                     }
                 })?,

@@ -25,8 +25,21 @@ pub fn process_image(
         "png" => "image/png",
         "webp" => "image/webp",
         "gif" => "image/gif",
+        // EPUB 3 が中核として認めるのはこの5つ。SVG は最適化しないが、型と
+        // しては正しいので通す。
+        "svg" => "image/svg+xml",
         _ => "application/octet-stream",
     };
+    // **知らない形式を `application/octet-stream` のまま本に入れない。**
+    // OPF の media-type がこれだと `<img>` の参照先として無効で、EPUBCheck も
+    // 多くのリーダーも受け付けない。0バイトや壊れたファイルも、ここまで一度も
+    // デコードされずに来る。入れずに断るほうが、開けない本を渡すより良い。
+    if original_mime == "application/octet-stream" {
+        return Err(format!(
+            "EPUB に入れられない画像形式です（.{ext}）: {}",
+            input_path.display()
+        ));
+    }
 
     // 圧縮が無効、または未対応形式
     if !options.enabled

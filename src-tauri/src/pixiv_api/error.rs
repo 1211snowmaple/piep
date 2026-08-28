@@ -1,5 +1,37 @@
 //! エラー型と共有型（pixivpy3.utils の移植版）。
 
+/// 中身を表に出さない文字列。
+///
+/// `PixivError` は `std::error::Error` なので `Debug` を外せない。しかし
+/// アクセストークンをそのまま持たせておくと、誰かが `{:?}` を1行書いた瞬間に
+/// トークンがログへ落ちる。**持てるが、見せない**形にしておく。
+/// `Display` も伏せる - 文面へ混ぜない方針は `RateLimited` と同じ。
+#[derive(Clone, PartialEq, Eq)]
+pub struct Redacted(String);
+
+impl Redacted {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    /// 本当に中身が要るときだけ。ログや文面へ渡さないこと。
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for Redacted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("<伏せ字>")
+    }
+}
+
+impl std::fmt::Display for Redacted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("<伏せ字>")
+    }
+}
+
 /// PixivAPIで発生したエラー。
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -34,8 +66,8 @@ pub enum PixivError {
     /// 不正なアクセストークン。
     #[error("アクセストークンが不正です: {message}")]
     BadAccessToken {
-        /// 使用されたアクセストークン。
-        access_token: String,
+        /// 使用されたアクセストークン。**中身は表に出ない。**
+        access_token: Redacted,
         /// 詳細メッセージ。
         message: String,
     },
@@ -151,11 +183,17 @@ mod tests {
     fn bad_access_token_display_never_exposes_the_token() {
         let secret = "oauth-secret-that-must-not-be-logged";
         let err = PixivError::BadAccessToken {
-            access_token: secret.to_string(),
+            access_token: Redacted::new(secret),
             message: "invalid header value".to_string(),
         };
         let displayed = err.to_string();
         assert!(!displayed.contains(secret));
         assert!(displayed.contains("invalid header value"));
+        // `{:?}` でも出ない。ここが漏れの入口になりやすい。
+        let debugged = format!("{err:?}");
+        assert!(
+            !debugged.contains(secret),
+            "Debug leaked the token: {debugged}"
+        );
     }
 }

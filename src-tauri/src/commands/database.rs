@@ -2,13 +2,12 @@ use crate::database::queries::EntityProfileFreshness;
 use crate::database::{
     AcceptCollectionSuggestionInput, AssetEntry, BulkMutationResult, CollectionNameCandidate,
     CollectionSuggestion, CollectionSuggestionRequest, CollectionSweepResult, DashboardSummary,
-    DbStats, DownloadEntry, EditorDocument, EntityFacet,
-    EntityFacetScope, EntitySeriesPage, EntityVersion, FacetCount, FilterFacets,
-    LibraryDiagnostics, LibraryMaintenanceResult, LibraryShelfCounts, NewAsset,
-    PersonEntry, ReaderContentPage, ReaderMetadata, ReaderSearchHit, SavedSearch,
-    SavedSearchInput, SearchIndexOptimizationResult, SearchIndexStatus, SearchSuggestParams,
-    SearchSuggestResult, SearchV2Params, SearchV2Result, SeriesEntry, UpdateTarget,
-    UpdateTargetInput, WorkBlockInput, WorkCollection, WorkCollectionInput,
+    DbStats, DownloadEntry, EditorDocument, EntityFacet, EntityFacetScope, EntitySeriesPage,
+    EntityVersion, FacetCount, FilterFacets, LibraryDiagnostics, LibraryMaintenanceResult,
+    LibraryShelfCounts, NewAsset, PersonEntry, ReaderContentPage, ReaderMetadata, ReaderSearchHit,
+    SavedSearch, SavedSearchInput, SearchIndexOptimizationResult, SearchIndexStatus,
+    SearchSuggestParams, SearchSuggestResult, SearchV2Params, SearchV2Result, SeriesEntry,
+    UpdateTarget, UpdateTargetInput, WorkBlockInput, WorkCollection, WorkCollectionInput,
     WorkCollectionMemberInput, WorkCollectionSummary, WorkEditRevision, WorkKey,
 };
 use crate::AppState;
@@ -150,6 +149,16 @@ pub fn start_automatic_index_maintenance(app: tauri::AppHandle) {
         // Long enough for the first screen to settle; the work then competes
         // with nothing the user is waiting on.
         sleep(Duration::from_millis(1_200)).await;
+
+        // 記録より先に実物を見る。索引が消えているのに「索引済み」の記録だけが
+        // 残っていると、待っている件数は 0 と出て、この仕事は何もせずに帰る。
+        match run_db_blocking(app.clone(), |state| state.db.resync_search_index_state()).await {
+            Ok(cleared) if cleared > 0 => {
+                log::info!("全文索引が失われていたため、{cleared}件を作り直しの対象へ戻しました");
+            }
+            Ok(_) => {}
+            Err(error) => log::warn!("索引の記録を実物と突き合わせられません: {error}"),
+        }
 
         let pending =
             match run_db_blocking(app.clone(), |state| state.db.get_search_index_status()).await {

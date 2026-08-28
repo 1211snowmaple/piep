@@ -1516,6 +1516,43 @@ impl Database {
         )
     }
 
+    /// 索引が空なのに「索引済み」の記録だけ残っている状態を直す。
+    ///
+    /// `ensure_index` は索引を開けなかった**あらゆる**失敗でディレクトリごと
+    /// 作り直す（Windows の一時的な共有違反も含む）。ところが SQLite 側の
+    /// `search_index_state` はそのとき触られないので、索引は空・記録は
+    /// 「全件済み」・画面は「最新です」・**全文検索は永久に0件**、という
+    /// 組み合わせが残る。手で再構築を押すまで直らない。
+    ///
+    /// 版の照合（`reconcile_search_index_format`）は形が変わったときしか
+    /// 効かないので、ここでは**実物を見て**判断する。索引に断片が一つも無く、
+    /// 記録だけがあるなら、その記録は嘘である。ディレクトリを消された場合も
+    /// 同じ形で拾える。
+    pub fn resync_search_index_state(&self) -> Result<usize, String> {
+        let segments = super::tantivy_index::searchable_segment_count(&self.storage_dir)?;
+        if segments > 0 {
+            return Ok(0);
+        }
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let recorded: i64 = conn
+            .query_row("SELECT COUNT(*) FROM search_index_state", [], |row| {
+                row.get(0)
+            })
+            .map_err(|e| format!("Search index state count failed: {e}"))?;
+        if recorded == 0 {
+            return Ok(0);
+        }
+        let cleared = conn
+            .execute("DELETE FROM search_index_state", [])
+            .map_err(|e| format!("Search index state reset failed: {e}"))?;
+        drop(conn);
+        self.invalidate_index_status();
+        log::warn!(
+            "全文索引が空でした。{cleared}件の「索引済み」の記録を取り消し、作り直しの対象に戻します"
+        );
+        Ok(cleared)
+    }
+
     pub fn reindex_download(&self, download_id: i64) -> Result<(), String> {
         let result = {
             let conn = self.conn.lock().map_err(|e| e.to_string())?;

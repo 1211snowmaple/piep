@@ -15,7 +15,8 @@ use crate::pixiv_api::web::PIXIV_WEB_HOST;
 // Thread communication structures
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+// セッションを持つので Debug は付けない（`PixivConnection` と同じ理由）。
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct FanboxAuthData {
     pub session: String,
     pub ua: String,
@@ -387,7 +388,11 @@ fn cookie_header(cookies: &[tauri::webview::Cookie<'static>]) -> String {
 /// pixiv 自身のものなので、そこを通った時点で `.pixiv.net` の Cookie は
 /// この WebView2 プロファイルに書かれている。**新しく取りに行くのではなく、
 /// もう置いてあるものを受け取るだけ。** 利用者の手順は増えない。
-#[derive(Debug, Clone, serde::Serialize)]
+// **Debug を付けない。** リフレッシュトークンと Cookie を持つので、誰かが
+// 調べもので `{:?}` を1行書いた瞬間に、その中身がログファイルへ落ちる。
+// 付いていなければコンパイルが止める。同じ理由で `FanboxAPI` と
+// `TokenManager` にも付いていない。
+#[derive(Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PixivConnection {
     /// アプリAPI用のリフレッシュトークン。

@@ -33,6 +33,31 @@ pub(crate) fn escape_html(text: &str) -> String {
         .replace('\'', "&#x27;")
 }
 
+/// リンク先として置いてよい URL だけを返す。
+///
+/// 取得元の JSON に入っていた文字列を、そのまま `href` にしていた。
+/// `escape_html` は `<` や `"` を潰すだけで**スキームは見ない**ので、
+/// `javascript:` が押せるリンクとして読書画面に並ぶ。EPUB 側
+/// （`epub::xhtml::sanitize_uri`）は最初からこれを弾いており、画面側だけが
+/// 素通しだった。取り込んだ書庫を復元する経路では、中身は他人が書いたもので
+/// ありうる。
+///
+/// 通すのは http / https と、アプリが自分で組み立てる `#` だけ。
+pub(crate) fn safe_link_href(url: &str) -> Option<String> {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    // 制御文字（改行やタブ）を途中に挟んでスキームを隠す逃げ道を、先に潰す。
+    let compact: String = trimmed.chars().filter(|c| !c.is_control()).collect();
+    let lowered = compact.to_ascii_lowercase();
+    if lowered.starts_with("http://") || lowered.starts_with("https://") {
+        Some(escape_html(&compact))
+    } else {
+        None
+    }
+}
+
 /// Pixiv小説のプレーンテキストを XHTML/HTML へと動的パースする
 pub fn parse_pixiv_to_html(raw_json: &str, assets: &[AssetEntry]) -> String {
     let v: serde_json::Value = match serde_json::from_str(raw_json) {
@@ -297,6 +322,11 @@ pub fn parse_fanbox_to_html(raw_json: &str, assets: &[AssetEntry]) -> String {
                         url = url.replace(".fanbox.cc/manage/posts/", ".fanbox.cc/posts/");
                     }
 
+                    // 通せない相手はカードにしない。押せるリンクを作るのは、
+                    // 相手が http(s) だと確かめられたときだけ。
+                    let Some(safe_url) = safe_link_href(&url) else {
+                        return String::new();
+                    };
                     if url.is_empty() {
                         String::new()
                     } else {
@@ -361,7 +391,7 @@ pub fn parse_fanbox_to_html(raw_json: &str, assets: &[AssetEntry]) -> String {
                                 </span>
                                 <span class="link-card-arrow">↗</span>
                             </a>"##,
-                            escape_html(&url),
+                            safe_url,
                             card_class,
                             if is_fanbox { "fanbox" } else { "web" },
                             brand,
@@ -467,12 +497,15 @@ fn parse_fanbox_paragraph(block: &serde_json::Value) -> String {
             let offset = link.get("offset").and_then(|o| o.as_u64()).unwrap_or(0) as usize;
             let length = link.get("length").and_then(|l| l.as_u64()).unwrap_or(0) as usize;
 
-            let escaped_url = escape_html(url);
+            // 通せない相手はリンクにしない。文字は本文に残る。
+            let Some(safe_url) = safe_link_href(url) else {
+                continue;
+            };
             all_tags.push((
                 position_of(offset),
                 format!(
                     r#"<a href="{}" target="_blank" rel="noopener noreferrer">"#,
-                    escaped_url
+                    safe_url
                 ),
                 true,
             ));
@@ -522,6 +555,44 @@ fn parse_fanbox_paragraph(block: &serde_json::Value) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::safe_link_href;
+
+    /// 本文のリンク先は取得元から来る。書庫を復元した棚では、それを書いたのは
+    /// 他人でありうる。`escape_html` は `<` や `"` を潰すだけでスキームを見ない。
+    #[test]
+    fn only_http_and_https_become_links() {
+        assert!(safe_link_href("https://www.pixiv.net/novel/show.php?id=1").is_some());
+        assert!(safe_link_href("http://example.com/").is_some());
+        assert!(safe_link_href("HTTPS://EXAMPLE.COM/").is_some());
+
+        assert_eq!(safe_link_href("javascript:alert(1)"), None);
+        assert_eq!(safe_link_href("data:text/html,<script>x</script>"), None);
+        assert_eq!(safe_link_href("vbscript:msgbox"), None);
+        assert_eq!(safe_link_href("file:///C:/Windows/system32"), None);
+        assert_eq!(safe_link_href(""), None);
+        assert_eq!(safe_link_href("   "), None);
+    }
+
+    /// 制御文字を挟んでスキームを隠す形も通さない。
+    #[test]
+    fn control_characters_cannot_hide_the_scheme() {
+        assert_eq!(safe_link_href("java\nscript:alert(1)"), None);
+        assert_eq!(safe_link_href("java\tscript:alert(1)"), None);
+        // 折り返しの入った本物の URL は、詰めたうえで通す。
+        assert_eq!(
+            safe_link_href("https://example.com/\u{0001}a").as_deref(),
+            Some("https://example.com/a")
+        );
+    }
+
+    /// 通した URL も、属性値として安全な形にしてから返す。
+    #[test]
+    fn a_passed_url_is_still_escaped_for_the_attribute() {
+        let href = safe_link_href("https://example.com/?a=1&b=\"x\"").expect("http is allowed");
+        assert!(!href.contains('"'));
+        assert!(href.contains("&amp;"));
+    }
+
     use super::*;
 
     fn fanbox_block(block: serde_json::Value) -> String {

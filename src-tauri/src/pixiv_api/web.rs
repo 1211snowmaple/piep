@@ -47,7 +47,8 @@ pub const MAX_IDS_PER_REQUEST: usize = 100;
 /// Cookie と UA は **対でしか意味を持たない**。`cf_clearance` は発行された
 /// ときの UA に紐づいていて、別の UA で送ると弾かれる。片方だけ保存して
 /// おいて後からもう片方を作る、ということはできない。
-#[derive(Debug, Clone, PartialEq, Eq)]
+// Cookie を持つので Debug は付けない（`PixivConnection` と同じ理由）。
+#[derive(Clone, PartialEq, Eq)]
 pub struct WebSession {
     /// `PHPSESSID=…; cf_clearance=…` の形の Cookie 文字列。
     pub cookie: String,
