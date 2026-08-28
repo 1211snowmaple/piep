@@ -19,6 +19,11 @@ jobs:
         run: |
           rustup toolchain install 1.97.1 --profile minimal --component clippy,rustfmt
           rustup default 1.97.1
+      # 依存木に ort・DirectML・tantivy・lindera・画像コーデックが入るので、
+      # 素で組むと1ジョブ20分かかる。`docs.yml` は既にこれを使っている。
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: src-tauri
       - run: npm ci
       - run: npm run check
       - run: npm test
@@ -101,6 +106,11 @@ jobs:
         run: |
           rustup toolchain install 1.97.1 --profile minimal
           rustup default 1.97.1
+      # 依存木に ort・DirectML・tantivy・lindera・画像コーデックが入るので、
+      # 素で組むと1ジョブ20分かかる。`docs.yml` は既にこれを使っている。
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: src-tauri
       - run: npm ci
       # npm 12 treats dashed arguments after `npm run ... --` as npm config
       # flags on Windows. Invoke the already-installed local binary directly.

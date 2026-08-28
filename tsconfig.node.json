@@ -5,7 +5,13 @@
     "module": "ESNext",
     "moduleResolution": "bundler",
     "allowSyntheticDefaultImports": true,
-    "types": ["node"]
+    "types": ["node"],
+    /* 生成物をリポジトリの外へ逃がす。ここを既定のままにすると `tsc` が
+       `vite.config.js` を吐き、**Vite は .ts より .js を先に選ぶ**ので、
+       以後この設定ファイルを直しても手元では効かなくなる。CI は新しく
+       チェックアウトするので .ts を読み、手元だけが古い設定で動く。 */
+    "outDir": "./node_modules/.cache/tsconfig-node",
+    "tsBuildInfoFile": "./node_modules/.cache/tsconfig-node/tsconfig.node.tsbuildinfo"
   },
   "include": ["vite.config.ts"]
 }

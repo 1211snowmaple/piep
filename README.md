@@ -130,8 +130,9 @@ AI補助は既定で無効で、外部宛先はHTTPSと宛先ごとの同意が�
 
 ### 必要なもの
 
-- Node.js（LTS）
-- Rust（stable）
+- Node.js 24.x
+- Rust 1.97.1（CI が固定している版。`clippy` を `-D warnings` で通すので、
+  新しい stable では新規の lint に当たって落ちることがある）
 - OSごとのTauri前提環境（Windows: WebView2 / Linux: `libwebkit2gtk-4.1-dev` ほか）— [Tauri 2 の前提条件](https://v2.tauri.app/start/prerequisites/)
 
 ### コマンド
@@ -146,7 +147,7 @@ npm run test:visual    # 画面のビジュアル回帰テスト
 npx --no-install tauri build    # 配布用ビルド
 ```
 
-Rust側は `cargo test --manifest-path src-tauri/Cargo.toml`、lintは `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings` で確認します。
+コミット前に通すものは [CONTRIBUTING.md](CONTRIBUTING.md#ローカルのゲート) にまとめてあります。
 
 READMEのスクリーンショットは次のコマンドで撮り直せます。
 
@@ -166,11 +167,13 @@ npx playwright test readme-shots --project=1440x900-light-200dpi --project=1440x
 
 ### 品質チェック
 
-`push` と `pull_request` のたびに、GitHub Actions（Windows）で次を実行しています。
+`push` と `pull_request` のたびに、GitHub Actions で次を実行しています。
 
-- 型検査、フロント単体テスト、`cargo test`、警告ゼロの `clippy`
+- 型検査、フロント単体テスト、`cargo test`、警告ゼロの `clippy`、`cargo fmt --check`
+- EPUB の適合性を EPUBCheck（外部の権威）で確認
 - 3つのウィンドウ幅 × ライト／ダーク × 3段階のDPIスケールでのビジュアル回帰
 - 実際にビルドしたアプリを起動するネイティブウィンドウのスモークテスト
+- フロントと Rust の境界のドリフト検査（`invoke` の名前・イベント・スキーマ）
 
 ### ドキュメント
 

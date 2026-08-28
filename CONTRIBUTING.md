@@ -78,7 +78,9 @@ npm run build && CI=1 npx playwright test
 `develop` で作業し、`main` は **CI が緑であることを確認した状態だけ**を指す。
 
 1. `develop` へ push する
-2. CI が3ジョブとも緑になるのを**実際に確認する**（`gh run watch`）
+2. CI が**4ジョブとも**緑になるのを**実際に確認する**（`gh run watch`）。
+   Quality の3つ（`checks` / `visual-regression` / `native-window-smoke`）に
+   加えて、Docs の `contract`（境界のドリフト検査）も同じ push で走る
 3. 緑を確認してから `main` を進めて push する
 
 手元が緑でも CI が緑とは限らない。Node のバージョン差、並列度、ランナーの

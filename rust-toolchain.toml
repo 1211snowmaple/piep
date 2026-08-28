@@ -1,0 +1,11 @@
+# Rust の版を一箇所で決める。
+#
+# ここを置くまで、1.97.1 は3つのワークフローに5回コピペされているだけだった。
+# README には「stable」と書いてあり、手元と CI が違う版で動く。`clippy` を
+# `-D warnings` で通しているので、新しい stable に上がった日に、触っていない
+# コードが新規の lint で落ちる。
+#
+# 上げるときは、この1行と CONTRIBUTING の記述をそろえて直す。
+[toolchain]
+channel = "1.97.1"
+components = ["clippy", "rustfmt"]

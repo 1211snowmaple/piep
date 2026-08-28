@@ -13,8 +13,10 @@ dist-ssr
 playwright-report/
 test-results/
 *.tsbuildinfo
-vite.config.js
-vite.config.d.ts
+# vite.config.js / vite.config.d.ts はもう作られない（tsconfig.node.json の
+# outDir をリポジトリの外へ向けてある）。無視し続けると、また作られたときに
+# `git status` が黙る - Vite は .ts より .js を先に読むので、それは
+# 「手元だけ古い設定で動く」という気づきにくい食い違いになる。
 *.local
 
 # Editor directories and files
