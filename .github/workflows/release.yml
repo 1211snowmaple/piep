@@ -39,9 +39,9 @@ jobs:
             throw 'Release tag must be vX.Y.Z'
           }
           $expected = '${{ github.ref_name }}'.Substring(1)
-          $package = (Get-Content -LiteralPath package.json -Raw | ConvertFrom-Json).version
-          $packageLock = (Get-Content -LiteralPath package-lock.json -Raw | ConvertFrom-Json).version
-          $tauri = (Get-Content -LiteralPath src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          $package = (Get-Content -LiteralPath package.json -Raw | ConvertFrom-Json -AsHashtable)['version']
+          $packageLock = (Get-Content -LiteralPath package-lock.json -Raw | ConvertFrom-Json -AsHashtable)['version']
+          $tauri = (Get-Content -LiteralPath src-tauri/tauri.conf.json -Raw | ConvertFrom-Json -AsHashtable)['version']
           $cargo = [regex]::Match((Get-Content -LiteralPath src-tauri/Cargo.toml -Raw), '(?m)^version\s*=\s*"([^"]+)"').Groups[1].Value
           $frontend = [regex]::Match((Get-Content -LiteralPath src/lib/version.ts -Raw), '"([0-9]+\.[0-9]+\.[0-9]+)"').Groups[1].Value
           $versions = @($package, $packageLock, $tauri, $cargo, $frontend)
