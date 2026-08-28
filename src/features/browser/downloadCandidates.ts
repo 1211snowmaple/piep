@@ -162,6 +162,3 @@ export function downloadTargetKey(url: string): string {
   return kind === "unsupported" ? "" : `${kind}:${id}`;
 }
 
-export function stripSidebarItemStatus(items: SidebarItem[]): SidebarItem[] {
-  return items.map(({ status: _status, ...item }) => ({ ...item }));
-}

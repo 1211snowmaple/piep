@@ -3144,12 +3144,6 @@ async fn export_zip_with_params_locked(
 }
 
 #[tauri::command]
-pub async fn export_all_zip(app: tauri::AppHandle, zip_path: String) -> Result<(), String> {
-    let state = app.state::<Arc<AppState>>().inner().clone();
-    export_all_zip_internal(state, zip_path).await
-}
-
-#[tauri::command]
 pub async fn export_all_multipart(
     app: tauri::AppHandle,
     manifest_path: String,

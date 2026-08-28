@@ -2,14 +2,14 @@ use crate::database::queries::EntityProfileFreshness;
 use crate::database::{
     AcceptCollectionSuggestionInput, AssetEntry, BulkMutationResult, CollectionNameCandidate,
     CollectionSuggestion, CollectionSuggestionRequest, CollectionSweepResult, DashboardSummary,
-    DbStats, DownloadEntry, DownloadRelation, DownloadVersion, EditorDocument, EntityFacet,
+    DbStats, DownloadEntry, EditorDocument, EntityFacet,
     EntityFacetScope, EntitySeriesPage, EntityVersion, FacetCount, FilterFacets,
-    LibraryDiagnostics, LibraryMaintenanceResult, LibraryShelfCounts, NewAsset, NewDownload,
-    PersonEntry, ReaderContentPage, ReaderDocument, ReaderMetadata, ReaderSearchHit, SavedSearch,
+    LibraryDiagnostics, LibraryMaintenanceResult, LibraryShelfCounts, NewAsset,
+    PersonEntry, ReaderContentPage, ReaderMetadata, ReaderSearchHit, SavedSearch,
     SavedSearchInput, SearchIndexOptimizationResult, SearchIndexStatus, SearchSuggestParams,
     SearchSuggestResult, SearchV2Params, SearchV2Result, SeriesEntry, UpdateTarget,
     UpdateTargetInput, WorkBlockInput, WorkCollection, WorkCollectionInput,
-    WorkCollectionMemberInput, WorkCollectionSummary, WorkEditRevision, WorkKey, WorkLink,
+    WorkCollectionMemberInput, WorkCollectionSummary, WorkEditRevision, WorkKey,
 };
 use crate::AppState;
 use sha2::{Digest, Sha256};
@@ -354,12 +354,6 @@ fn emit_search_index_progress(
             error: None,
         },
     );
-}
-
-#[tauri::command]
-pub async fn db_get_download(app: tauri::AppHandle, id: i64) -> Result<DownloadEntry, String> {
-    let state = app.state::<Arc<AppState>>();
-    state.db.get_download(id)
 }
 
 #[tauri::command]
@@ -925,26 +919,6 @@ pub async fn db_list_collections_for_person(
 }
 
 #[tauri::command]
-pub async fn db_refresh_work_links(
-    app: tauri::AppHandle,
-    download_id: i64,
-) -> Result<Vec<WorkLink>, String> {
-    run_library_write_blocking(app, move |state| state.db.refresh_work_links(download_id)).await
-}
-
-#[tauri::command]
-pub async fn db_list_work_links_for_work(
-    app: tauri::AppHandle,
-    source: String,
-    source_id: String,
-) -> Result<Vec<WorkLink>, String> {
-    run_db_blocking(app, move |state| {
-        state.db.list_work_links_for_work(&source, &source_id)
-    })
-    .await
-}
-
-#[tauri::command]
 pub async fn db_generate_collection_suggestion(
     app: tauri::AppHandle,
     request: CollectionSuggestionRequest,
@@ -1007,61 +981,6 @@ pub async fn db_reject_collection_suggestion(
 #[tauri::command]
 pub async fn db_get_dashboard_summary(app: tauri::AppHandle) -> Result<DashboardSummary, String> {
     run_db_blocking(app, move |state| state.db.get_dashboard_summary()).await
-}
-
-#[tauri::command]
-pub async fn db_seed_test_data(app: tauri::AppHandle, count: i64) -> Result<i64, String> {
-    let count = count.clamp(1, 200_000);
-    run_library_write_blocking(app, move |state| {
-        let root = state.db.storage_dir().join("seed").join(format!("{}", chrono::Utc::now().timestamp_millis()));
-        std::fs::create_dir_all(&root).map_err(|e| format!("Seed dir creation failed: {}", e))?;
-        for index in 0..count {
-            let source = if index % 3 == 0 { "fanbox" } else { "pixiv" };
-            let source_id = format!("seed-{}", index + 1);
-            let dir = root.join(source).join(&source_id).join("v1");
-            std::fs::create_dir_all(&dir).map_err(|e| format!("Seed item dir creation failed: {}", e))?;
-            let json_path = dir.join("original.json");
-            let body = format!(
-                "検索性能検証用の本文です。番号 {}、タグ seed{}、作者 {}。日本語とASCII mixed text for search.",
-                index + 1,
-                index % 25,
-                index % 100,
-            );
-            std::fs::write(&json_path, serde_json::json!({ "text": body }).to_string())
-                .map_err(|e| format!("Seed json write failed: {}", e))?;
-            let tags = vec![
-                format!("seed{}", index % 25),
-                format!("group{}", index % 10),
-            ];
-            let created = format!("2026-{:02}-{:02}T00:00:00Z", (index % 12) + 1, (index % 27) + 1);
-            let download = NewDownload {
-                source: source.to_string(),
-                source_id: source_id.clone(),
-                title: format!("Seed Work {:06}", index + 1),
-                author_name: format!("Seed Author {:03}", index % 100),
-                author_id: format!("seed-author-{}", index % 100),
-                content_type: if source == "pixiv" { "novel" } else { "article" }.to_string(),
-                tags,
-                excerpt: Some(format!("seed excerpt {}", index + 1)),
-                cover_path: None,
-                json_path: json_path.to_string_lossy().to_string(),
-                original_json_path: Some(json_path.to_string_lossy().to_string()),
-                asset_count: 0,
-                file_size_bytes: 0,
-                downloaded_at: chrono::Utc::now().to_rfc3339(),
-                source_created_at: Some(created),
-                content_hash: Some(format!("seed-hash-{}", index + 1)),
-                text_length: body.chars().count() as i64,
-                source_updated_at: None,
-                watch_updates: index % 9 == 0,
-                current_version: 1,
-                favorite: index % 17 == 0,
-            };
-            state.db.upsert_download(&download)?;
-        }
-        Ok(count)
-    })
-    .await
 }
 
 #[tauri::command]
@@ -1188,27 +1107,6 @@ pub async fn open_local_asset(app: tauri::AppHandle, path: String) -> Result<(),
 }
 
 #[tauri::command]
-pub async fn db_get_versions(
-    app: tauri::AppHandle,
-    download_id: i64,
-) -> Result<Vec<DownloadVersion>, String> {
-    let state = app.state::<Arc<AppState>>();
-    state.db.get_versions(download_id)
-}
-
-#[tauri::command]
-pub async fn db_delete_version(
-    app: tauri::AppHandle,
-    download_id: i64,
-    version: i64,
-) -> Result<(), String> {
-    run_library_write_blocking(app, move |state| {
-        state.db.delete_version(download_id, version)
-    })
-    .await
-}
-
-#[tauri::command]
 pub async fn db_set_watch_updates(
     app: tauri::AppHandle,
     download_id: i64,
@@ -1216,18 +1114,6 @@ pub async fn db_set_watch_updates(
 ) -> Result<(), String> {
     run_library_write_blocking(app, move |state| {
         state.db.set_watch_updates(download_id, watch)
-    })
-    .await
-}
-
-#[tauri::command]
-pub async fn db_set_watch_updates_for_search(
-    app: tauri::AppHandle,
-    params: SearchV2Params,
-    watch: bool,
-) -> Result<BulkMutationResult, String> {
-    run_library_write_blocking(app, move |state| {
-        state.db.set_watch_updates_for_search(&params, watch)
     })
     .await
 }
@@ -1255,12 +1141,6 @@ pub async fn db_set_flags_for_ids(
         state.db.set_flags_for_ids(&ids, favorite, watch)
     })
     .await
-}
-
-#[tauri::command]
-pub async fn db_get_watched_downloads(app: tauri::AppHandle) -> Result<Vec<DownloadEntry>, String> {
-    let state = app.state::<Arc<AppState>>();
-    state.db.get_watched_downloads()
 }
 
 #[tauri::command]
@@ -1327,39 +1207,6 @@ pub async fn db_delete_update_target(
             .delete_update_target(&target_type, &source, &source_key)
     })
     .await
-}
-
-#[tauri::command]
-pub async fn db_mark_update_target_checked(
-    app: tauri::AppHandle,
-    target_type: String,
-    source: String,
-    source_key: String,
-    last_seen_source_id: Option<String>,
-    last_seen_source_updated_at: Option<String>,
-    // found は見つかった件数。0 のときは「最後に見つけた時刻」を進めない。
-    found: Option<i64>,
-) -> Result<(), String> {
-    run_library_write_blocking(app, move |state| {
-        state.db.mark_update_target_checked(
-            &target_type,
-            &source,
-            &source_key,
-            last_seen_source_id.as_deref(),
-            last_seen_source_updated_at.as_deref(),
-            found.unwrap_or(0),
-        )
-    })
-    .await
-}
-
-#[tauri::command]
-pub async fn db_list_download_relations(
-    app: tauri::AppHandle,
-    relation_type: Option<String>,
-) -> Result<Vec<DownloadRelation>, String> {
-    let state = app.state::<Arc<AppState>>();
-    state.db.list_download_relations(relation_type.as_deref())
 }
 
 #[tauri::command]
@@ -2166,65 +2013,6 @@ pub async fn db_get_download_by_source(
 ) -> Result<Option<DownloadEntry>, String> {
     let state = app.state::<Arc<AppState>>();
     state.db.get_download_by_source(&source, &source_id)
-}
-
-#[tauri::command]
-pub async fn db_get_download_html(
-    app: tauri::AppHandle,
-    download_id: i64,
-    version: i64,
-) -> Result<String, String> {
-    let state = app.state::<Arc<AppState>>();
-
-    // 1. ダウンロードエントリを取得
-    let dl = state.db.get_download(download_id)?;
-
-    // 2. 指定バージョンのJSONパスを特定
-    let mut target_json_path = dl
-        .original_json_path
-        .clone()
-        .filter(|p| std::path::Path::new(p).exists())
-        .unwrap_or_else(|| dl.json_path.clone());
-    if version != dl.current_version {
-        let versions = state.db.get_versions(download_id)?;
-        if let Some(v) = versions.iter().find(|x| x.version == version) {
-            target_json_path = v
-                .original_json_path
-                .clone()
-                .filter(|p| std::path::Path::new(p).exists())
-                .unwrap_or_else(|| v.json_path.clone());
-        }
-    }
-
-    // 3. JSONファイルを非同期ロード
-    validate_path_in_storage(&target_json_path, state.db.storage_dir())?;
-    let raw_json = tokio::fs::read_to_string(&target_json_path)
-        .await
-        .map_err(|e| format!("Failed to read JSON file: {}", e))?;
-
-    // 4. 紐づくアセット一覧を取得
-    let assets = state.db.get_assets(download_id)?;
-
-    // 5. ソースに応じて構文解析を実行
-    let html = if dl.source == "pixiv" {
-        crate::database::parser::parse_pixiv_to_html(&raw_json, &assets)
-    } else if dl.source == "fanbox" {
-        crate::database::parser::parse_fanbox_to_html(&raw_json, &assets)
-    } else {
-        return Err(format!("Unsupported source: {}", dl.source));
-    };
-
-    Ok(html)
-}
-
-#[tauri::command]
-pub async fn db_get_reader_document(
-    app: tauri::AppHandle,
-    download_id: i64,
-    version: Option<i64>,
-) -> Result<ReaderDocument, String> {
-    let state = app.state::<Arc<AppState>>();
-    state.db.get_reader_document(download_id, version)
 }
 
 #[tauri::command]

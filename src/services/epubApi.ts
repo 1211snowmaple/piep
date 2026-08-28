@@ -1,16 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
-  EpubValidationReport,
   TemplateFile,
   TemplateFileKind,
   TemplateInfo,
   TemplatePreview,
   TemplateSettings,
 } from "@/types/epub";
-
-export function exportEpub(payload: Record<string, unknown>): Promise<string> {
-  return invoke<string>("export_epub", payload);
-}
 
 export function exportEpubBatch<T = void>(payload: Record<string, unknown>): Promise<T> {
   return invoke<T>("export_epub_batch", payload);
@@ -59,10 +54,6 @@ export function deleteEpubTemplate(templateName: string): Promise<void> {
   return invoke<void>("delete_epub_template", { templateName });
 }
 
-export function getTemplateSettings(templateName: string): Promise<TemplateSettings> {
-  return invoke<TemplateSettings>("get_template_settings", { templateName });
-}
-
 export function saveTemplateSettings(templateName: string, settings: TemplateSettings): Promise<TemplateSettings> {
   return invoke<TemplateSettings>("save_template_settings", { templateName, settings });
 }
@@ -71,6 +62,3 @@ export function previewEpubTemplate(templateName: string, downloadId: number | n
   return invoke<TemplatePreview>("preview_epub_template", { templateName, downloadId });
 }
 
-export function validateEpubFile(path: string): Promise<EpubValidationReport> {
-  return invoke<EpubValidationReport>("validate_epub_file", { path });
-}

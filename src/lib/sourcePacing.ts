@@ -10,9 +10,6 @@
 export const SOURCE_REQUEST_DELAY_MS = 900;
 /** 断られたときに間隔を何倍まで広げるか。900ms × 32 ≒ 29秒。 */
 export const MAX_RATE_LIMIT_BACKOFF = 32;
-/** 同じ項目を取得制限で何回までやり直すか。 */
-export const MAX_RATE_LIMIT_RETRIES = 2;
-
 /**
  * 待つ。ただし、途中でやめられる。
  *

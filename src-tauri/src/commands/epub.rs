@@ -575,118 +575,6 @@ fn deduplicate_download_ids(download_ids: Vec<i64>) -> Vec<i64> {
 // 単体エクスポート
 // ============================================================
 
-#[tauri::command]
-pub async fn export_epub(
-    app: tauri::AppHandle,
-    download_id: i64,
-    template_name: String,
-    output_path: String,
-    compress_options: Option<ImageCompressOptions>,
-) -> Result<String, String> {
-    let state = app.state::<Arc<AppState>>().inner().clone();
-    let _library_snapshot_guard = state.library_gate.clone().read_owned().await;
-    let tm = get_template_manager(&app)?;
-    let compress = compress_options.unwrap_or_default();
-
-    let load_state = state.clone();
-    let (manifest, source, title) =
-        tokio::task::spawn_blocking(move || load_manifest(&load_state, download_id))
-            .await
-            .map_err(|error| format!("EPUB変換ワーカーが予期せず終了しました: {error}"))??;
-    emit_progress(
-        &app,
-        &ExportProgress {
-            phase: "started".into(),
-            current_title: title.clone(),
-            current_index: 1,
-            total_count: 1,
-            message: format!("「{}」のエクスポートを開始", title),
-        },
-    );
-
-    let resolved_template = resolve_template(&tm, &template_name, &source);
-    let template_contents = tm.load_template_contents(&resolved_template)?;
-    let settings = tm.read_settings(&resolved_template);
-    log::info!(
-        "EPUB export: template '{}' resolved and loaded ({} files)",
-        resolved_template,
-        template_contents.len()
-    );
-
-    emit_progress(
-        &app,
-        &ExportProgress {
-            phase: "building".into(),
-            current_title: title.clone(),
-            current_index: 1,
-            total_count: 1,
-            message: format!("「{}」のEPUBを生成中...", title),
-        },
-    );
-
-    let out_path = PathBuf::from(&output_path);
-    let app_clone = app.clone();
-    let title_clone = title.clone();
-
-    tokio::task::spawn_blocking(move || {
-        let builder = EpubBuilder::new(manifest, template_contents, settings, compress);
-        let mut issues = Vec::new();
-        let result = build_validate_and_publish(
-            &out_path,
-            |staged_path| builder.build(staged_path),
-            |staged_path| validate_and_collect(staged_path, &out_path, &mut issues),
-        )
-        .and_then(|valid| {
-            if valid {
-                return Ok(());
-            }
-            let detail = issues
-                .iter()
-                .take(3)
-                .map(|issue| format!("{}: {}", issue.code, issue.message))
-                .collect::<Vec<_>>()
-                .join(" / ");
-            Err(format!(
-                "生成後のEPUB検証を通過しませんでした{}",
-                if detail.is_empty() {
-                    String::new()
-                } else {
-                    format!(": {detail}")
-                }
-            ))
-        });
-        if let Err(error) = &result {
-            log::error!("EPUB build failed: {}", error);
-            emit_progress(
-                &app_clone,
-                &ExportProgress {
-                    phase: "failed".into(),
-                    current_title: title_clone.clone(),
-                    current_index: 1,
-                    total_count: 1,
-                    message: format!("「{}」の生成に失敗: {}", title_clone, error),
-                },
-            );
-        }
-        result
-    })
-    .await
-    .map_err(|e| format!("スレッドパニック: {}", e))??;
-
-    emit_progress(
-        &app,
-        &ExportProgress {
-            phase: "completed".into(),
-            current_title: title.clone(),
-            current_index: 1,
-            total_count: 1,
-            message: format!("「{}」のEPUBエクスポートが完了しました！", title),
-        },
-    );
-
-    Ok(output_path)
-}
-
 /// コレクションの順序をそのまま一冊の reading order / 目次へ変換する。
 /// 作品ごとの出所と作者は各作品の先頭にも残し、混在取得元でも追跡できる。
 #[tauri::command]
@@ -1153,14 +1041,6 @@ pub async fn delete_epub_template(
     template_name: String,
 ) -> Result<(), String> {
     get_template_manager(&app)?.delete_template(&template_name)
-}
-
-#[tauri::command]
-pub async fn get_template_settings(
-    app: tauri::AppHandle,
-    template_name: String,
-) -> Result<TemplateSettings, String> {
-    Ok(get_template_manager(&app)?.read_settings(&template_name))
 }
 
 #[tauri::command]
@@ -1655,13 +1535,6 @@ fn sample_manifest() -> EpubManifest {
 // ============================================================
 // 検証
 // ============================================================
-
-#[tauri::command]
-pub async fn validate_epub_file(path: String) -> Result<EpubValidationReport, String> {
-    tokio::task::spawn_blocking(move || validate::validate_epub(Path::new(&path)))
-        .await
-        .map_err(|e| format!("スレッドパニック: {}", e))?
-}
 
 #[cfg(test)]
 mod tests {

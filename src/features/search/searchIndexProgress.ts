@@ -69,11 +69,3 @@ export function rebuildPercent(progress: SearchRebuildProgress | null): number |
   return Math.min(100, (progress.processed ?? 0) / progress.processedTotal * 100);
 }
 
-/** Test seam: resets the module state between cases. */
-export function __resetSearchIndexProgress() {
-  if (clearTimer !== undefined) window.clearTimeout(clearTimer);
-  clearTimer = undefined;
-  current = null;
-  subscribed = false;
-  listeners.clear();
-}

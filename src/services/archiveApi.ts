@@ -4,10 +4,6 @@ export function exportSingle(downloadId: number, destDir: string): Promise<strin
   return invoke<string>("export_single", { downloadId, destDir });
 }
 
-export function exportAllZip(zipPath: string): Promise<void> {
-  return invoke<void>("export_all_zip", { zipPath });
-}
-
 export function exportAllMultipart(manifestPath: string): Promise<void> {
   return invoke<void>("export_all_multipart", { manifestPath });
 }

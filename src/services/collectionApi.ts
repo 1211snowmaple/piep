@@ -9,7 +9,6 @@ import type {
   WorkCollectionMemberInput,
   WorkCollectionSummary,
   WorkKey,
-  WorkLink,
 } from "@/types/collections";
 
 export function listWorkCollections(): Promise<WorkCollectionSummary[]> {
@@ -61,14 +60,6 @@ export function reorderWorkCollectionMembers(collectionId: string, members: Work
 
 export function listCollectionsForWork(source: string, sourceId: string): Promise<WorkCollectionSummary[]> {
   return invoke<WorkCollectionSummary[]>("db_list_collections_for_work", { source, sourceId });
-}
-
-export function refreshWorkLinks(downloadId: number): Promise<WorkLink[]> {
-  return invoke<WorkLink[]>("db_refresh_work_links", { downloadId });
-}
-
-export function listWorkLinksForWork(source: string, sourceId: string): Promise<WorkLink[]> {
-  return invoke<WorkLink[]>("db_list_work_links_for_work", { source, sourceId });
 }
 
 export function generateCollectionSuggestion(seedDownloadIds: number[], limit = 60): Promise<CollectionSuggestion> {

@@ -1,6 +1,4 @@
 import {
-  ask,
-  message,
   open,
   save,
   type DialogFilter,
@@ -9,18 +7,6 @@ import {
   type OpenDialogOptions,
   type SaveDialogOptions,
 } from "@tauri-apps/plugin-dialog";
-
-export function askDialog(messageText: string, options?: string | ConfirmDialogOptions): Promise<boolean> {
-  return ask(messageText, options);
-}
-
-export async function messageDialog(messageText: string, options?: string | MessageDialogOptions): Promise<void> {
-  await message(messageText, options);
-}
-
-export function openDialog(options?: OpenDialogOptions) {
-  return open(options);
-}
 
 export async function openSingleDialog(options?: OpenDialogOptions): Promise<string | null> {
   const result = await open({ ...options, multiple: false });

@@ -5,8 +5,6 @@ import type {
   DbStats,
   EditorDocument,
   DownloadEntry,
-  DownloadVersion,
-  ReaderDocument,
   ReaderMetadata,
   ReaderContentPage,
   ReaderSearchHit,
@@ -69,10 +67,6 @@ export async function maintainLibrary(compact = false): Promise<LibraryMaintenan
 
 export async function optimizeSearchIndex(): Promise<SearchIndexOptimizationResult> {
   return invoke<SearchIndexOptimizationResult>("db_optimize_search_index");
-}
-
-export async function seedTestData(count: number): Promise<number> {
-  return invoke<number>("db_seed_test_data", { count });
 }
 
 export async function scanAndReimportDownloads(): Promise<number> {
@@ -148,10 +142,6 @@ export async function searchEntityFacets(
   });
 }
 
-export async function getDownload<T = DownloadEntry>(id: number): Promise<T> {
-  return invoke<T>("db_get_download", { id });
-}
-
 /**
  * Fetches many works in one call, preserving the requested order. Missing ids
  * are omitted, which is how callers detect entries deleted since queueing.
@@ -170,10 +160,6 @@ export async function getAssets<T = AssetEntry[]>(downloadId: number): Promise<T
   return invoke<T>("db_get_assets", { downloadId });
 }
 
-export async function getVersions<T = DownloadVersion[]>(downloadId: number): Promise<T> {
-  return invoke<T>("db_get_versions", { downloadId });
-}
-
 export async function deleteDownload(id: number): Promise<void> {
   return invoke<void>("db_delete_download", { id });
 }
@@ -188,16 +174,8 @@ export async function deleteDownloadsForSearch(params: SearchV2Params): Promise<
   return invoke<BulkMutationResult>("db_delete_downloads_for_search", { params });
 }
 
-export async function deleteVersion(downloadId: number, version: number): Promise<void> {
-  return invoke<void>("db_delete_version", { downloadId, version });
-}
-
 export async function setWatchUpdates(downloadId: number, watch: boolean): Promise<void> {
   return invoke<void>("db_set_watch_updates", { downloadId, watch });
-}
-
-export async function setWatchUpdatesForSearch(params: SearchV2Params, watch: boolean): Promise<BulkMutationResult> {
-  return invoke<BulkMutationResult>("db_set_watch_updates_for_search", { params, watch });
 }
 
 export async function setFavorite(downloadId: number, favorite: boolean): Promise<void> {
@@ -219,10 +197,6 @@ export async function readFileContent(path: string): Promise<string> {
 
 export async function openLocalAsset(path: string): Promise<void> {
   return invoke<void>("open_local_asset", { path });
-}
-
-export async function getDownloadHtml(downloadId: number, version: number): Promise<string> {
-  return invoke<string>("db_get_download_html", { downloadId, version });
 }
 
 export async function getPerson<T>(source: string, sourceKey: string): Promise<T> {
@@ -249,10 +223,6 @@ export async function upsertUpdateTarget(target: Record<string, unknown>): Promi
   await invoke("db_upsert_update_target", { target });
 }
 
-export async function markUpdateTargetChecked(payload: Record<string, unknown>): Promise<void> {
-  await invoke("db_mark_update_target_checked", payload);
-}
-
 export async function setUpdateTargetEnabled(targetType: string, source: string, sourceKey: string, enabled: boolean): Promise<void> {
   return invoke<void>("db_set_update_target_enabled", { targetType, source, sourceKey, enabled });
 }
@@ -268,18 +238,6 @@ export async function listUpdateTargets<T>(targetType: string | null = null, ena
 /** Fetch one target without transferring every watched entity over IPC. */
 export async function getUpdateTarget<T = UpdateTarget>(targetType: string, source: string, sourceKey: string): Promise<T | null> {
   return invoke<T | null>("db_get_update_target", { targetType, source, sourceKey });
-}
-
-export async function getWatchedDownloads<T = DownloadEntry>(): Promise<T[]> {
-  return invoke<T[]>("db_get_watched_downloads");
-}
-
-export async function listDownloadRelations<T>(relationType: string | null = null): Promise<T[]> {
-  return invoke<T[]>("db_list_download_relations", { relationType });
-}
-
-export async function getReaderDocument(downloadId: number, version?: number | null): Promise<ReaderDocument> {
-  return invoke<ReaderDocument>("db_get_reader_document", { downloadId, version: version ?? null });
 }
 
 export async function getReaderMetadata(downloadId: number): Promise<ReaderMetadata> {
