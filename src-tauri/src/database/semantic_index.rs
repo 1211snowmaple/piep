@@ -16,9 +16,8 @@ use sha2::{Digest, Sha256};
 #[cfg(not(test))]
 use std::sync::Mutex;
 
-use super::search_normalization::query_variants;
 #[cfg(test)]
-use super::search_normalization::search_index_text;
+use super::search_normalization::{query_variants, search_index_text};
 
 const INDEX_DIR_NAME: &str = "search";
 const INDEX_VERSION_DIR: &str = "semantic-v1";
