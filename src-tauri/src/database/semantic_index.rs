@@ -16,9 +16,9 @@ use sha2::{Digest, Sha256};
 #[cfg(not(test))]
 use std::sync::Mutex;
 
+use super::search_normalization::query_variants;
 #[cfg(test)]
 use super::search_normalization::search_index_text;
-use super::search_normalization::{normalize_for_search, query_variants, synonym_variants};
 
 const INDEX_DIR_NAME: &str = "search";
 const INDEX_VERSION_DIR: &str = "semantic-v1";
@@ -227,11 +227,23 @@ pub fn search(
     query: &str,
     limit: usize,
 ) -> Result<Vec<SemanticSearchHit>, String> {
-    if query.trim().is_empty() || limit == 0 {
+    search_with_query_text(storage_dir, &semantic_query_text(query), limit)
+}
+
+/// 問いの作り方だけを差し替えて測るための口。
+///
+/// 索引側は本文をそのまま `passage:` として渡すのに、検索側が何を `query:` と
+/// して渡すかで結果が変わる。**どちらが良いかは実測でしか言えない**ので、
+/// 前処理を外から与えられるようにしてある（`examples/semantic_query_probe.rs`）。
+pub fn search_with_query_text(
+    storage_dir: &Path,
+    query_text: &str,
+    limit: usize,
+) -> Result<Vec<SemanticSearchHit>, String> {
+    if query_text.trim().is_empty() || limit == 0 {
         return Ok(Vec::new());
     }
 
-    let query_text = semantic_query_text(query);
     let query_vector = embed_texts(vec![format!("query: {}", query_text)])?
         .into_iter()
         .next()
@@ -381,6 +393,42 @@ pub fn work_centroids(
         );
     }
     Ok(out)
+}
+
+/// 測るために、索引から作品と本文の断片を拾う。
+///
+/// `examples/semantic_query_probe.rs` が使う。正解を人手で用意せずに問いの
+/// 作り方を比べるため、**作品自身を答えにする**ので、その材料がここから要る。
+pub struct ProbeSample {
+    pub download_id: i64,
+    pub text: String,
+}
+
+pub fn probe_samples(storage_dir: &Path, limit: usize) -> Result<Vec<ProbeSample>, String> {
+    let conn = open_index(storage_dir)?;
+    let mut statement = conn
+        .prepare(
+            "SELECT download_id, text
+               FROM semantic_chunks
+              WHERE model_id = ?1 AND dimension = ?2 AND field = 'body'
+              GROUP BY download_id
+              ORDER BY download_id
+              LIMIT ?3",
+        )
+        .map_err(|e| format!("Semantic probe prepare failed: {e}"))?;
+    let rows = statement
+        .query_map(
+            params![MODEL_ID, VECTOR_DIMENSION as i64, limit as i64],
+            |row| {
+                Ok(ProbeSample {
+                    download_id: row.get(0)?,
+                    text: row.get(1)?,
+                })
+            },
+        )
+        .map_err(|e| format!("Semantic probe query failed: {e}"))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("Semantic probe read failed: {e}"))
 }
 
 pub fn status(storage_dir: &Path) -> SemanticIndexStatus {
@@ -736,16 +784,30 @@ fn split_text_chunks(text: &str) -> Vec<String> {
     chunks
 }
 
-fn semantic_query_text(query: &str) -> String {
-    let mut values = query_variants(query);
-    for synonym in synonym_variants(query) {
-        values.push(synonym);
-    }
-    if values.is_empty() {
-        normalize_for_search(query)
-    } else {
-        values.join(" ")
-    }
+/// いま使っている問いの作り方。measure 用に公開している。
+/// 意味検索に渡す問い。**索引側と同じ姿で渡す。**
+///
+/// 索引側は題名も本文もそのまま `passage: {原文}` として埋め込んでいる
+/// （[`build_chunks`] を見ること）。だから問いも `query: {原文}` でよい。
+///
+/// 0.11.0 まではここで、かな・ローマ字・同義語を空白で連ねた袋を作っていた。
+/// multilingual-e5 は**両側に自然文を期待する**モデルなので、片側だけ語彙の
+/// 袋にすると埋め込みが本来の位置から離れる。棚（163,393 断片・188 作品）で
+/// 測ったのが次の表で、本文の一文を問いにして、その作品が何位に出るか:
+///
+/// | 問いの作り方     |  1位  |  MRR  |
+/// |------------------|-------|-------|
+/// | 変形形＋同義語   |  6.9% | 0.098 |
+/// | 正規化した自然文 | 50.5% | 0.546 |
+/// | **そのまま**     | 69.7% | 0.739 |
+///
+/// 題名を問いにしたときも 26.6% → 69.7%（MRR 0.340 → 0.756）で同じ向き。
+/// 測り直すときは `cargo run --release --example semantic_query_probe`。
+///
+/// かなやローマ字で引き当てるのは**字面の索引（tantivy）の仕事**で、
+/// 検索はその二つを束ねている。ここで面倒を見る必要はない。
+pub fn semantic_query_text(query: &str) -> String {
+    query.trim().to_string()
 }
 
 fn tail_chars(text: &str, count: usize) -> String {
@@ -967,6 +1029,24 @@ fn hash_text(text: &str) -> String {
 mod tests {
     use super::*;
     use std::fs;
+
+    /// 問いは索引側と同じ姿でなければならない。**前置きを剥がさないこと。**
+    ///
+    /// ここに正規化や語の展開を足し戻すと、意味検索の当たりが目に見えて落ちる
+    /// （[`semantic_query_text`] の表を見ること）。足すなら
+    /// `examples/semantic_query_probe` で測り直してからにすること。
+    #[test]
+    fn the_query_reaches_the_model_the_way_it_was_typed() {
+        for query in [
+            "雨上がりの図書室",
+            "アイリ", // 片仮名は片仮名のまま。索引側も畳んでいない。
+            "Cafe au lait",
+            "彼女は窓の外を見て、何も言わなかった。",
+        ] {
+            assert_eq!(semantic_query_text(query), query);
+        }
+        assert_eq!(semantic_query_text("  余白  "), "余白");
+    }
 
     #[test]
     fn semantic_sidecar_returns_chunk_hits() {
