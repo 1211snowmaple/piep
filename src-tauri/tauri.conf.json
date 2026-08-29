@@ -40,19 +40,42 @@
       "endpoints": [
         "https://github.com/1211snowmaple/piep/releases/latest/download/latest.json"
       ],
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDc3N0U3OUI0OUJBQzY1QkYKUldTL1pheWJ0SGwrZHhMa2FaNlc2KzYwZmYyK1BoU01iS2paUzBxTExmMzFDVWRQZkxSVTRuemQK"
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDc3N0U3OUI0OUJBQzY1QkYKUldTL1pheWJ0SGwrZHhMa2FaNlc2KzYwZmYyK1BoU01iS2paUzBxTExmMzFDVWRQZkxSVTRuemQK",
+      "windows": {
+        "installMode": "passive"
+      }
     }
   },
   "bundle": {
     "active": true,
     "createUpdaterArtifacts": true,
     "targets": "all",
+    "shortDescription": "pixiv と FANBOX を、自分のPCに丸ごと残して読む",
+    "longDescription": "pixiv・FANBOX の小説と記事を、本文・画像・タグごとローカルへ保存します。保存・検索・読書・EPUB への書き出しまで、ネットにつながっていなくても完結します。",
+    "publisher": "1211snowmaple",
+    "copyright": "© 1211snowmaple",
+    "category": "Productivity",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "windows": {
+      "nsis": {
+        "displayLanguageSelector": false,
+        "languages": ["Japanese"],
+        "installerIcon": "icons/icon.ico",
+        "headerImage": "installer/nsis-header.bmp",
+        "sidebarImage": "installer/nsis-sidebar.bmp",
+        "installMode": "currentUser"
+      },
+      "wix": {
+        "language": ["ja-JP"],
+        "bannerPath": "installer/wix-banner.bmp",
+        "dialogImagePath": "installer/wix-dialog.bmp"
+      }
+    }
   }
 }
