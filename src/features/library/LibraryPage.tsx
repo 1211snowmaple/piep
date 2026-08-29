@@ -532,6 +532,27 @@ export default function LibraryPage() {
     // Page 7 of one set of conditions is not page 7 of another.
     next.delete("page");
     if (next.toString() === urlParams.toString()) return;
+    // **一覧が総入れ替えになる操作は、先頭へ戻す。**
+    //
+    // 書き換えはすべて `replace` なので、履歴に紐づくスクロール復元は動かない
+    // （`AppFrame` は replace では位置を触らない - タブや並べ替えで足元が
+    // 動かないようにするための決まりである）。ところが検索語や絞り込みを
+    // 変えると中身は別物になるのに、画面は前の一覧の 12000px 地点に立った
+    // ままだった。上位150件を一度も見ないまま「150件目あたり」に置かれる。
+    // ページ番号送りだけは先頭へ戻っていたので、**同じ「一覧が入れ替わる操作」
+    // で挙動が割れていた。**
+    //
+    // タブの切り替えはこれまでどおり動かさない。タブは同じ画面の絞り込みで、
+    // 押した先で足元が動くほうが分かりにくい。
+    const replacesTheList =
+      patch.q !== undefined
+      || patch.filters !== undefined
+      || patch.entityScope !== undefined
+      || patch.sortBy !== undefined
+      || patch.entitySortBy !== undefined
+      || patch.collectionSortBy !== undefined
+      || patch.saved !== undefined;
+    if (replacesTheList) pendingPageScroll.current = true;
     setUrlParams(next, { replace: true });
   }, [searchText, setUrlParams, tab, urlParams]);
   // Switching tabs does not move the page. Whatever the reader was looking at

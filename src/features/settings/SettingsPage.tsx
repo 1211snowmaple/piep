@@ -287,7 +287,12 @@ export default function SettingsPage() {
     }
     rebuildOperationRef.current = null;
     queryClient.invalidateQueries({ queryKey: ["search-index-status"] });
-    queryClient.invalidateQueries({ queryKey: ["library-diagnostics"] });
+    // 診断の計測は `enabled: false` なので、**古いと印を付けても取り直されない。**
+    // 印だけ付けて放っておくと、再構築のあとも前の数字が出つづける。かといって
+    // 勝手に測り直すのは筋が違う - 実データでの検索速度まで測る重い処理で、
+    // 「走ることのほうが頼まれるのを待つ」というのがこの画面の決まりである。
+    // 嘘の数字を残さず、測っていない状態へ戻す。
+    queryClient.removeQueries({ queryKey: ["library-diagnostics"] });
   }, [queryClient, rebuild]);
   // An automatic run still changes the numbers this page shows.
   const automaticFinished = rebuild && rebuild.origin === "automatic" && rebuild.status === "completed";

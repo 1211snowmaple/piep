@@ -82,7 +82,11 @@ describe("ReaderPage position restoration", () => {
 
     viewport!.scrollTop = 360;
     fireEvent.scroll(viewport!);
-    expect(JSON.parse(window.localStorage.getItem("piep.reader-position.101.current") ?? "null")).toEqual({ page: 2, top: 360 });
+    // 書き込みは間引いてある（指を滑らせている間に毎回 localStorage を
+    // 読み書きすると長い本で引っかかる）。落ち着いてから書かれる。
+    await waitFor(() => {
+      expect(JSON.parse(window.localStorage.getItem("piep.reader-position.101.current") ?? "null")).toEqual({ page: 2, top: 360 });
+    });
   });
 
   it("applies a bookmark offset only after its async source page is ready", async () => {

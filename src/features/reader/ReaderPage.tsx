@@ -441,6 +441,19 @@ export default function ReaderPage() {
   useEffect(() => {
     const viewport = scrollRef.current;
     if (!viewport || !contentReady) return;
+    // 読んでいる位置の保存は、スクロールのたびに `getItem` + `parse` +
+    // `stringify` + `setItem` を同期で走らせていた。指を滑らせている間は
+    // 1秒に数十回になり、長い本ではその分だけ引っかかる。**進み具合の表示は
+    // 毎回更新し、書き込みだけを間引く。** 離れるときに必ず書き切るので、
+    // 最後に読んでいた場所は失われない。
+    let pendingTop: number | null = null;
+    let saveTimer: number | null = null;
+    const flush = () => {
+      saveTimer = null;
+      if (pendingTop === null) return;
+      writeReadingPosition(id, version, { page: sourcePage, top: pendingTop });
+      pendingTop = null;
+    };
     const update = (event?: Event) => {
       const total = viewport.scrollHeight - viewport.clientHeight;
       const next = total <= 0 ? 100 : Math.max(0, Math.min(100, viewport.scrollTop / total * 100));
@@ -448,11 +461,17 @@ export default function ReaderPage() {
       // Only a genuine scroll writes the position. The priming call below runs
       // before the saved offset has been applied, so persisting there would
       // overwrite the stored place with 0 each time the reader opens.
-      if (event && restoredKeyRef.current === positionKey) writeReadingPosition(id, version, { page: sourcePage, top: viewport.scrollTop });
+      if (!event || restoredKeyRef.current !== positionKey) return;
+      pendingTop = viewport.scrollTop;
+      if (saveTimer === null) saveTimer = window.setTimeout(flush, 400);
     };
     viewport.addEventListener("scroll", update, { passive: true });
     update();
-    return () => viewport.removeEventListener("scroll", update);
+    return () => {
+      viewport.removeEventListener("scroll", update);
+      if (saveTimer !== null) window.clearTimeout(saveTimer);
+      flush();
+    };
   }, [contentReady, hasSourcePages, id, positionKey, sourcePage, pageCount, version]);
 
   if (metadataQuery.isLoading || contentQuery.isLoading) return <div className="page"><LoadingState label="リーダーを準備しています" /></div>;
