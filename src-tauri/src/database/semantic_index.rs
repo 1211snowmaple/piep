@@ -57,8 +57,12 @@ pub fn set_model_cache_dir(storage_dir: &Path) {
         return;
     }
     // すでに落としてあるものを捨てさせない。同じ器の中なら付け替えるだけで済む。
+    //
+    // ただし、**そこにあるのが piep のものだとは限らない。** fastembed を使う
+    // 別のものが同じ名前で置いている可能性があるので、いま使うモデルが入って
+    // いることを確かめてからでなければ動かさない。
     let legacy = Path::new(FASTEMBED_DEFAULT_CACHE_DIR);
-    if !legacy.is_dir() {
+    if !legacy.join(hf_hub_dir_name(MODEL_ID)).is_dir() {
         return;
     }
     if let Some(parent) = target.parent() {
@@ -72,6 +76,11 @@ pub fn set_model_cache_dir(storage_dir: &Path) {
             "以前の置き場を移せないので、モデルは取り直しになります（{legacy:?}）: {error}"
         ),
     }
+}
+
+/// hf-hub がモデルを置くときのディレクトリ名（`a/b` → `models--a--b`）。
+fn hf_hub_dir_name(model_id: &str) -> String {
+    format!("models--{}", model_id.replace('/', "--"))
 }
 
 fn model_cache_dir_for(storage_dir: &Path) -> PathBuf {
@@ -1086,6 +1095,16 @@ fn hash_text(text: &str) -> String {
 mod tests {
     use super::*;
     use std::fs;
+
+    /// 移してよいのは piep のモデルが入っているときだけ。名前の作り方を間違える
+    /// と、他所の置き場を丸ごと持っていくか、自分のものを見落として取り直す。
+    #[test]
+    fn the_old_cache_is_recognised_by_the_model_it_holds() {
+        assert_eq!(
+            hf_hub_dir_name(MODEL_ID),
+            "models--intfloat--multilingual-e5-small"
+        );
+    }
 
     /// モデルは棚の**隣**に置く。中へ入れてはならない。
     ///
