@@ -62,14 +62,6 @@ const SAMPLE_WORKS: usize = 150;
 /// 何位まで見るか。
 const RANK_LIMIT: usize = 20;
 
-struct Candidate {
-    label: String,
-    query_prefix: &'static str,
-    embedder: TextEmbedding,
-    /// 断片ごとの文書ベクトル。`chunks` と同じ並び。
-    vectors: Vec<Vec<f32>>,
-}
-
 #[derive(Default)]
 struct Tally {
     asked: usize,
@@ -219,26 +211,19 @@ fn embed_all(
 }
 
 /// 総当たりで探して、その作品が何位に来たかを返す。断片ではなく**作品**で数える。
+///
+/// 問いのベクトルは**先にまとめて作っておいたもの**を受け取る。1問ずつ
+/// `embed` を呼んでいたころ、900 回の往復でモデルを抱えたまま止まった。
 fn rank_of(
-    candidate: &mut Candidate,
+    doc_vectors: &[Vec<f32>],
     owners: &[i64],
-    query: &str,
+    query_vector: &[f32],
     want: i64,
-) -> Result<Option<usize>, String> {
-    let query_vector = candidate
-        .embedder
-        .embed(vec![format!("{}{}", candidate.query_prefix, query)], None)
-        .map_err(|error| format!("問いの埋め込みに失敗: {error}"))?
-        .into_iter()
-        .next()
-        .ok_or("問いの埋め込みが返らない")?;
-    let query_vector = normalized(&query_vector);
-
-    let mut scored: Vec<(f32, i64)> = candidate
-        .vectors
+) -> Option<usize> {
+    let mut scored: Vec<(f32, i64)> = doc_vectors
         .iter()
         .zip(owners)
-        .map(|(vector, owner)| (dot(&query_vector, vector), *owner))
+        .map(|(vector, owner)| (dot(query_vector, vector), *owner))
         .collect();
     // 上位だけ要る。全体を並べ替える必要はない。
     let take = scored.len().min(RANK_LIMIT * 64);
@@ -254,13 +239,13 @@ fn rank_of(
         }
         rank += 1;
         if owner == want {
-            return Ok(Some(rank));
+            return Some(rank);
         }
         if rank >= RANK_LIMIT {
             break;
         }
     }
-    Ok(None)
+    None
 }
 
 /// 本文の真ん中あたりから一文を取る。`semantic_query_probe` と同じ取り方。
@@ -331,33 +316,6 @@ fn main() -> Result<(), String> {
         return Err("索引が空である".into());
     }
 
-    println!("\n■ 文書側を用意する");
-    println!("  いまのモデル: 索引に入っているものをそのまま使う");
-    let mut candidates = vec![Candidate {
-        label: "multilingual-e5-small (384)".to_string(),
-        query_prefix: "query: ",
-        embedder: build_current_model()?,
-        vectors: current_vectors,
-    }];
-
-    for dir in &model_dirs {
-        let name = dir
-            .file_name()
-            .and_then(|value| value.to_str())
-            .unwrap_or("model")
-            .to_string();
-        let mut model = build_ruri(dir)?;
-        let vectors = embed_all(&mut model, "検索文書: ", &texts, &name)?;
-        let dimension = vectors.first().map(Vec::len).unwrap_or(0);
-        candidates.push(Candidate {
-            // 何本渡されるか分からないので、名前は借り物ではなく持ち物にする。
-            label: format!("{name} ({dimension})"),
-            query_prefix: "検索クエリ: ",
-            embedder: model,
-            vectors,
-        });
-    }
-
     // 問いにする作品を選ぶ。一作品につき一本。
     let mut chosen = HashSet::new();
     let mut samples: Vec<(i64, String, String)> = Vec::new();
@@ -376,30 +334,83 @@ fn main() -> Result<(), String> {
         }
         samples.push((download_id, entry.title, text));
     }
-    println!("\n測る作品: {} 件", samples.len());
+    println!("測る作品: {} 件", samples.len());
 
-    let mut by_title: Vec<Tally> = candidates.iter().map(|_| Tally::default()).collect();
-    let mut by_passage: Vec<Tally> = candidates.iter().map(|_| Tally::default()).collect();
-    for (index, (download_id, title, text)) in samples.iter().enumerate() {
-        if index % 25 == 0 {
-            println!("  ... {index}/{}", samples.len());
-        }
-        let sentence = middle_sentence(text);
-        for (slot, candidate) in candidates.iter_mut().enumerate() {
-            by_title[slot].record(rank_of(candidate, &owners, title, *download_id)?);
-            if let Some(sentence) = &sentence {
-                by_passage[slot].record(rank_of(candidate, &owners, sentence, *download_id)?);
+    // 問いは先に文字列として並べておく。**モデルごとに同じ問いを使う。**
+    let titles: Vec<String> = samples.iter().map(|(_, title, _)| title.clone()).collect();
+    let sentences: Vec<Option<String>> = samples
+        .iter()
+        .map(|(_, _, text)| middle_sentence(text))
+        .collect();
+    let asked: Vec<String> = sentences.iter().flatten().cloned().collect();
+
+    // **モデルは1本ずつ、終わったら手放す。** 3本ぶんのベクトルとセッションを
+    // 同時に抱えたときは 10GB を超え、問いを1つずつ埋め込む往復のどこかで
+    // 止まった。文書も問いもまとめて通し、順位を数えたら次へ渡す。
+    let mut results: Vec<(String, Tally, Tally)> = Vec::new();
+    for slot in 0..=model_dirs.len() {
+        let (label, query_prefix, doc_vectors, mut embedder) = if slot == 0 {
+            println!("\n■ multilingual-e5-small: 索引に入っているものをそのまま使う");
+            (
+                "multilingual-e5-small (384)".to_string(),
+                "query: ",
+                std::mem::take(&mut current_vectors),
+                build_current_model()?,
+            )
+        } else {
+            let dir = model_dirs[slot - 1];
+            let name = dir
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("model")
+                .to_string();
+            println!("\n■ {name}");
+            let mut model = build_ruri(dir)?;
+            let vectors = embed_all(&mut model, "検索文書: ", &texts, &name)?;
+            let dimension = vectors.first().map(Vec::len).unwrap_or(0);
+            (
+                format!("{name} ({dimension})"),
+                "検索クエリ: ",
+                vectors,
+                model,
+            )
+        };
+
+        let title_vectors = embed_all(&mut embedder, query_prefix, &titles, "題名の問い")?;
+        let passage_vectors = embed_all(&mut embedder, query_prefix, &asked, "本文の問い")?;
+        // 問いを作り終えたら、モデルはもう要らない。
+        drop(embedder);
+
+        let mut by_title = Tally::default();
+        let mut by_passage = Tally::default();
+        let mut passage_slot = 0usize;
+        for (index, (download_id, _, _)) in samples.iter().enumerate() {
+            by_title.record(rank_of(
+                &doc_vectors,
+                &owners,
+                &title_vectors[index],
+                *download_id,
+            ));
+            if sentences[index].is_some() {
+                by_passage.record(rank_of(
+                    &doc_vectors,
+                    &owners,
+                    &passage_vectors[passage_slot],
+                    *download_id,
+                ));
+                passage_slot += 1;
             }
         }
+        results.push((label, by_title, by_passage));
     }
 
     println!("\n■ 題名を問いにしたとき");
-    for (slot, candidate) in candidates.iter().enumerate() {
-        by_title[slot].report(&candidate.label);
+    for (label, by_title, _) in &results {
+        by_title.report(label);
     }
     println!("\n■ 本文の一文を問いにしたとき");
-    for (slot, candidate) in candidates.iter().enumerate() {
-        by_passage[slot].report(&candidate.label);
+    for (label, _, by_passage) in &results {
+        by_passage.report(label);
     }
     println!("\n総当たりで比べている。ANN の近似は入っていない。");
     Ok(())
