@@ -228,6 +228,11 @@ fn normalized_diagnostic_path(path: &Path) -> String {
 const DIAGNOSTIC_SCAN_MAX_DEPTH: usize = 64;
 const DIAGNOSTIC_SCAN_MAX_ENTRIES: usize = 5_000_000;
 const DIAGNOSTIC_MAX_FILE_REFERENCES: u64 = 20_000_000;
+/// 未参照ファイルを数えるとき、一度に持てる参照の上限。
+///
+/// [`DIAGNOSTIC_MAX_FILE_REFERENCES`] は流しながら数える側の上限なので桁が違う。
+/// **こちらは全部を集合に持つ**ぶん、持てる量で止める必要がある。
+const DIAGNOSTIC_MAX_REFERENCED_PATHS: u64 = 2_000_000;
 const DIAGNOSTIC_FILE_ISSUE_SAMPLE_LIMIT: usize = 100;
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -329,6 +334,14 @@ fn referenced_library_paths(conn: &Connection) -> Result<HashSet<String>, String
     let mut paths = HashSet::new();
     for row in rows {
         let path = row.map_err(|error| format!("Referenced path row failed: {error}"))?;
+        // 隣の整合チェックは流しながら数えるので 2,000 万件まで許せるが、
+        // こちらは**全部を持つ**。持てる量で止める。いまの棚は 5,410 作品で
+        // 約 29,000 件なので、この上限は 30 万作品ぶんにあたる。
+        if paths.len() as u64 >= DIAGNOSTIC_MAX_REFERENCED_PATHS {
+            return Err(format!(
+                "Referenced path set exceeded the {DIAGNOSTIC_MAX_REFERENCED_PATHS}-path safety limit"
+            ));
+        }
         paths.insert(comparable_library_path(Path::new(&path)));
     }
     Ok(paths)
