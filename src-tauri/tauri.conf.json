@@ -67,6 +67,7 @@
         "displayLanguageSelector": false,
         "languages": ["Japanese"],
         "installerIcon": "icons/icon.ico",
+        "installerHooks": "installer/hooks.nsh",
         "headerImage": "installer/nsis-header.bmp",
         "sidebarImage": "installer/nsis-sidebar.bmp",
         "installMode": "currentUser"
