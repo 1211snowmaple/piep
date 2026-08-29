@@ -7,17 +7,105 @@ use crate::database::{
 use crate::AppState;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{Read, Write};
 #[cfg(windows)]
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::LazyLock;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 static IMPORT_LOCK: LazyLock<tokio::sync::Mutex<()>> =
     LazyLock::new(|| tokio::sync::Mutex::new(()));
+
+/// 復元の進み具合。**進捗も中止も無いままでよい長さではない。**
+///
+/// 数万件・数十GBの棚では復元は数時間かかりうる。それまで画面に出るのは
+/// 「検証済み」の一行だけで、進捗は 0% のまま最後に 100% になり、押し間違えた
+/// 復元を止める手段が無かった。その間ライブラリの錠は握りっぱなしなので、
+/// ほかの操作もすべて待たされる。
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchiveProgress {
+    pub job_id: String,
+    /// `extract` / `promote` / `database` / `part`。
+    pub phase: String,
+    pub processed: i64,
+    pub total: i64,
+    /// いま扱っているものの名前。ファイル名やパート名。
+    pub label: Option<String>,
+}
+
+/// 走っている復元と、その中止の合図。
+static ARCHIVE_JOBS: LazyLock<std::sync::Mutex<HashMap<String, Arc<AtomicBool>>>> =
+    LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+/// 復元の進み具合を、いま走っているジョブへ結び付けて運ぶ。
+///
+/// **`tauri::AppHandle` を持たない。** 持たせていたころ、テスト用バイナリが
+/// Wry の実体を道連れに引き込み、WebView2 のシンボルを解決できずに
+/// `STATUS_ENTRYPOINT_NOT_FOUND` で起動しなくなった（コンパイルは通るので、
+/// 走らせるまで分からない）。送り先は呼ぶ側が閉じ込めて渡す。
+#[derive(Clone)]
+pub(crate) struct ArchiveReporter {
+    emit: Option<Arc<dyn Fn(ArchiveProgress) + Send + Sync>>,
+    job_id: String,
+    cancel: Arc<AtomicBool>,
+}
+
+impl ArchiveReporter {
+    /// 画面を持たない経路（テスト、`example`）では何も送らず、中止もされない。
+    pub(crate) fn detached() -> Self {
+        Self {
+            emit: None,
+            job_id: String::new(),
+            cancel: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    fn register(app: tauri::AppHandle, job_id: String) -> Self {
+        let cancel = Arc::new(AtomicBool::new(false));
+        if let Ok(mut jobs) = ARCHIVE_JOBS.lock() {
+            jobs.insert(job_id.clone(), cancel.clone());
+        }
+        Self {
+            emit: Some(Arc::new(move |progress: ArchiveProgress| {
+                // 受け手が居ないことは異常ではない（方針書のとおり）。
+                let _ = app.emit("archive-progress", progress);
+            })),
+            job_id,
+            cancel,
+        }
+    }
+
+    fn finish(&self) {
+        if let Ok(mut jobs) = ARCHIVE_JOBS.lock() {
+            jobs.remove(&self.job_id);
+        }
+    }
+
+    /// **止めてよい場所でだけ確かめる。** ライブラリを書き換え始めたあとは、
+    /// 途中で降りるほうが危ない。
+    pub(crate) fn check_cancelled(&self) -> Result<(), String> {
+        if self.cancel.load(Ordering::Relaxed) {
+            return Err("復元を中止しました".to_string());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn report(&self, phase: &str, processed: i64, total: i64, label: Option<String>) {
+        let Some(emit) = &self.emit else { return };
+        emit(ArchiveProgress {
+            job_id: self.job_id.clone(),
+            phase: phase.to_string(),
+            processed,
+            total,
+            label,
+        });
+    }
+}
 
 const MAX_BACKUP_ENTRIES: usize = 250_000;
 const MAX_BACKUP_ENTRY_BYTES: u64 = 8 * 1024 * 1024 * 1024;
@@ -3192,7 +3280,30 @@ pub async fn export_entity_zip(
 #[tauri::command]
 pub async fn import_zip(app: tauri::AppHandle, zip_path: String) -> Result<i64, String> {
     let state = app.state::<Arc<AppState>>().inner().clone();
-    import_zip_internal(state, zip_path).await
+    let reporter = ArchiveReporter::register(app, new_archive_job_id());
+    let result = import_zip_with_reporter(state, zip_path, &reporter).await;
+    reporter.finish();
+    result
+}
+
+/// 走っている復元を止める。
+///
+/// 一度に走るのは一つ（`IMPORT_LOCK` とライブラリの錠がそれを保証する）なので、
+/// 番号を渡してもらう必要はない。**止まるのはライブラリを書き換える前まで**で、
+/// 書き換えが始まったあとは途中で降りるほうが危ない。
+#[tauri::command]
+pub async fn cancel_archive_restore() -> Result<bool, String> {
+    let jobs = ARCHIVE_JOBS.lock().map_err(|e| e.to_string())?;
+    let mut stopped = false;
+    for cancel in jobs.values() {
+        cancel.store(true, Ordering::Relaxed);
+        stopped = true;
+    }
+    Ok(stopped)
+}
+
+fn new_archive_job_id() -> String {
+    format!("archive-{}-{}", std::process::id(), rand::random::<u64>())
 }
 
 #[tauri::command]
@@ -3201,7 +3312,10 @@ pub async fn import_multipart_backup(
     manifest_path: String,
 ) -> Result<i64, String> {
     let state = app.state::<Arc<AppState>>().inner().clone();
-    import_multipart_backup_internal(state, manifest_path).await
+    let reporter = ArchiveReporter::register(app, new_archive_job_id());
+    let result = import_multipart_with_reporter(state, manifest_path, &reporter).await;
+    reporter.finish();
+    result
 }
 
 #[tauri::command]
@@ -3428,6 +3542,16 @@ pub async fn import_zip_internal(state: Arc<AppState>, zip_path: String) -> Resu
     import_zip_internal_with_failpoint(state, zip_path, None).await
 }
 
+async fn import_zip_with_reporter(
+    state: Arc<AppState>,
+    zip_path: String,
+    reporter: &ArchiveReporter,
+) -> Result<i64, String> {
+    let _import_guard = IMPORT_LOCK.lock().await;
+    let _library_write_guard = state.library_gate.clone().write_owned().await;
+    import_zip_locked(state, zip_path, None, reporter).await
+}
+
 async fn import_zip_internal_with_failpoint(
     state: Arc<AppState>,
     zip_path: String,
@@ -3435,16 +3559,18 @@ async fn import_zip_internal_with_failpoint(
 ) -> Result<i64, String> {
     let _import_guard = IMPORT_LOCK.lock().await;
     let _library_write_guard = state.library_gate.clone().write_owned().await;
-    import_zip_locked(state, zip_path, failpoint).await
+    import_zip_locked(state, zip_path, failpoint, &ArchiveReporter::detached()).await
 }
 
 async fn import_zip_locked(
     state: Arc<AppState>,
     zip_path: String,
     failpoint: Option<&'static str>,
+    reporter: &ArchiveReporter,
 ) -> Result<i64, String> {
     let storage = state.db.storage_dir().to_path_buf();
     let app_data = storage.parent().unwrap_or(storage.as_path()).to_path_buf();
+    let reporter = reporter.clone();
 
     // プレミアム最適化：ZIP解凍からDB挿入までの全同期処理を、非同期ワーカースレッドへ完璧に移譲
     tokio::task::spawn_blocking(move || {
@@ -3493,13 +3619,21 @@ async fn import_zip_locked(
         let mut written_total: u64 = 0;
 
         // ZIP内のファイルを展開
+        let entry_total = archive.len() as i64;
         for i in 0..archive.len() {
+            // **展開の途中は、まだライブラリを触っていない。** 止めるならここ。
+            // 昇格が始まったあとは、途中で降りるほうが危ない。
+            reporter.check_cancelled()?;
             let mut file = archive.by_index(i).map_err(|e| e.to_string())?;
             if file.is_dir() {
                 continue;
             }
 
             let entry_name = file.name().to_string();
+            // 数万ファイルでは1件ごとに送ると多すぎる。区切って知らせる。
+            if i % 64 == 0 {
+                reporter.report("extract", i as i64, entry_total, Some(entry_name.clone()));
+            }
             let (outpath, root) = resolve_zip_import_path(&entry_name, &stage_storage, &stage_app_data)
                 .map_err(|e| format!("Security Exception for zip entry {entry_name}: {e}"))?;
             if !extracted_paths.insert(import_collision_key(&outpath)) {
@@ -3710,7 +3844,14 @@ async fn import_zip_locked(
                 state.db.restore_update_candidate(candidate)?;
             }
 
-            for entry in &metadata.entries {
+            // ここから先はライブラリを書き換えている。**中止は受け付けない** -
+            // 途中で降りるより、最後まで通してから戻すほうが安全である。
+            // 進み具合だけは知らせる。
+            let entry_total = metadata.entries.len() as i64;
+            for (position, entry) in metadata.entries.iter().enumerate() {
+                if position % 32 == 0 {
+                    reporter.report("database", position as i64, entry_total, None);
+                }
                 // 重複していたら、既存のものを完全に削除して上書きリストアする
                 if let Ok(Some(existing)) = state.db.get_download_by_source(&entry.source, &entry.source_id) {
                     stale_index_ids.push(existing.id);
@@ -4080,6 +4221,14 @@ pub async fn import_multipart_backup_internal(
     state: Arc<AppState>,
     manifest_path: String,
 ) -> Result<i64, String> {
+    import_multipart_with_reporter(state, manifest_path, &ArchiveReporter::detached()).await
+}
+
+async fn import_multipart_with_reporter(
+    state: Arc<AppState>,
+    manifest_path: String,
+    reporter: &ArchiveReporter,
+) -> Result<i64, String> {
     let storage = state.db.storage_dir().to_path_buf();
     let app_data = storage.parent().unwrap_or(storage.as_path()).to_path_buf();
     let manifest_path_buf = PathBuf::from(&manifest_path);
@@ -4123,7 +4272,23 @@ pub async fn import_multipart_backup_internal(
         if (index as i64) < completed {
             continue;
         }
-        match import_zip_locked(state.clone(), path.to_string_lossy().to_string(), None).await {
+        // パートの切れ目は、まだライブラリを書き換えていない安全な場所。
+        reporter.check_cancelled()?;
+        reporter.report(
+            "part",
+            done,
+            total_parts,
+            path.file_name()
+                .map(|name| name.to_string_lossy().to_string()),
+        );
+        match import_zip_locked(
+            state.clone(),
+            path.to_string_lossy().to_string(),
+            None,
+            reporter,
+        )
+        .await
+        {
             Ok(count) => {
                 imported = imported.saturating_add(count);
                 done += 1;

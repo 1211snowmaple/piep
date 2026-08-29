@@ -81,6 +81,26 @@ export function importBackupFile(path: string, format: BackupFormat): Promise<nu
   return format === "multipart" ? importMultipartBackup(path) : importZip(path);
 }
 
+/** 復元の進み具合。`archive-progress` で届く。 */
+export interface ArchiveProgress {
+  jobId: string;
+  /** `extract` / `part` / `database`。 */
+  phase: string;
+  processed: number;
+  total: number;
+  label: string | null;
+}
+
+/**
+ * 走っている復元を止める。
+ *
+ * **止まるのはライブラリを書き換える前まで。** 書き換えが始まったあとは、
+ * 途中で降りるほうが危ないので受け付けない。返り値は「止める相手が居たか」。
+ */
+export function cancelArchiveRestore(): Promise<boolean> {
+  return invoke<boolean>("cancel_archive_restore");
+}
+
 export function getStoragePath(): Promise<string> {
   return invoke<string>("get_storage_path");
 }

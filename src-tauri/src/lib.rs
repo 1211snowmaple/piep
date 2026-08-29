@@ -314,6 +314,7 @@ pub fn run() -> tauri::Result<()> {
             commands::archive::export_all_multipart,
             commands::archive::export_entity_zip,
             commands::archive::import_zip,
+            commands::archive::cancel_archive_restore,
             commands::archive::import_multipart_backup,
             commands::archive::inspect_backup,
             commands::archive::inspect_multipart_backup,

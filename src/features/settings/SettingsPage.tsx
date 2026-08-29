@@ -41,11 +41,13 @@ import { PAGE_SIZE_OPTIONS, PAGING_SCOPES, useDefaultPagingMode, usePageSize, us
 import { errorMessage, formatBytes, formatNumber } from "@/lib/format";
 import { getProvider, providers } from "@/lib/providers";
 import {
+  cancelArchiveRestore,
   exportAllMultipart,
   getStoragePath,
   importBackupFile,
   inspectBackupFile,
   multipartManifestPath,
+  type ArchiveProgress,
   type BackupFormat,
   type BackupInspection,
 } from "@/services/archiveApi";
@@ -55,6 +57,7 @@ import { getSearchIndexStatus, getStats, isTauriRuntime, scanAndReimportDownload
 import type { SearchIndexStatus } from "@/types/library";
 import { openSingleDialog, saveDialog } from "@/services/dialogApi";
 import { openFilesystemPath } from "@/services/openerApi";
+import { subscribeTauriEvent } from "@/services/eventBus";
 import { useSearchIndexProgress } from "@/features/search/searchIndexProgress";
 import { invalidateWorkSetViews } from "@/features/library/workSetInvalidation";
 import DiagnosticsPage from "@/features/diagnostics/DiagnosticsPage";
@@ -88,6 +91,13 @@ function isSection(value: string | null): value is Section {
 }
 interface ConnectionState { pixiv: PixivUser | null; fanbox: FanboxUser | null }
 export interface BackupReview { path: string; format: BackupFormat; inspection: BackupInspection }
+
+/** 復元の段どりを、そのまま画面の言葉にする。 */
+const PHASE_LABEL: Record<string, string> = {
+  extract: "書庫を展開しています",
+  part: "パートを取り込んでいます",
+  database: "ライブラリへ書き込んでいます",
+};
 
 /** ブラウザプレビュー用の索引の様子。追いついた棚を見せる。 */
 const PREVIEW_INDEX_STATUS: SearchIndexStatus = {
@@ -220,8 +230,24 @@ export default function SettingsPage() {
   const restoreMutation = useMutation({
     mutationFn: async ({ path, format, inspection }: BackupReview) => {
       const execute = async (): Promise<void> => {
-        const operation = startOperation({ kind: "restore", label: "バックアップの復元", detail: path, total: inspection.workCount, onRetry: execute });
+        // **数時間かかりうる操作に、進捗も中止も無いままにしない。**
+        // 検証済みの一行だけを出して 0% のまま待たせ、押し間違えても止められ
+        // なかった。中止が効くのはライブラリを書き換える前までである。
+        const operation = startOperation({
+          kind: "restore",
+          label: "バックアップの復元",
+          detail: path,
+          total: inspection.workCount,
+          onRetry: execute,
+          onCancel: () => { void cancelArchiveRestore(); },
+        });
         operation.log(`${inspection.workCount}作品・${inspection.assetCount}アセットを検証済み`);
+        const disposeProgress = subscribeTauriEvent<ArchiveProgress>("archive-progress", (event) => {
+          const { phase, processed, total, label } = event.payload;
+          const shown = PHASE_LABEL[phase] ?? phase;
+          operation.progress(processed, total || null);
+          operation.log(label ? `${shown}: ${label}` : shown);
+        });
         try {
           const count = await importBackupFile(path, format);
           operation.progress(count, inspection.workCount);
@@ -236,6 +262,8 @@ export default function SettingsPage() {
         } catch (error) {
           operation.fail(error);
           throw error;
+        } finally {
+          disposeProgress();
         }
       };
       await execute();
