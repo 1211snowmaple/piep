@@ -6378,3 +6378,56 @@ fn a_work_missing_only_its_vectors_is_still_work_for_the_rebuild() {
         .unwrap()
         .is_empty());
 }
+
+/// 意味ベクトルだけ遅れている作品で、字面の索引をやり直さない。
+///
+/// 追いつきの対象に選ばれても、字面の索引が最新なら作り直す理由が無い。
+/// やり直していたころ、2,239 件の追いつきで**形態素解析も読みの展開も全件に
+/// 走り**、新しいセグメントが増えてあとで統合の仕事まで作っていた。
+#[test]
+fn catching_up_on_vectors_does_not_redo_the_lexical_index() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let fresh = insert_download_unindexed(
+        &db,
+        &storage,
+        "lex-fresh",
+        "既に索引済み",
+        "作者",
+        &[],
+        "本文",
+    );
+    db.rebuild_search_index(SearchIndexRebuildOptions::default(), &|| false, |_| {})
+        .unwrap();
+
+    // ここで新しい作品を足す。こちらは字面も意味も遅れている。
+    let behind = insert_download_unindexed(
+        &db,
+        &storage,
+        "lex-behind",
+        "まだ索引していない",
+        "作者",
+        &[],
+        "本文",
+    );
+
+    let conn = db.read_conn().unwrap();
+    let selected = stale_search_index_ids_locked(&conn, 10, 0, true).unwrap();
+    assert!(
+        selected.contains(&fresh) && selected.contains(&behind),
+        "意味も作るなら、両方が対象になるはず: {selected:?}"
+    );
+
+    // そのうち字面をやり直すのは、本当に古いほうだけ。
+    let lexical = lexically_stale_subset(&conn, &selected).unwrap();
+    assert!(!lexical.contains(&fresh), "索引済みの作品をやり直している");
+    assert!(lexical.contains(&behind));
+
+    // 組み立ての段でも、やり直さない作品は tantivy の形を持たない。
+    drop(conn);
+    let prepared = db.prepare_search_index_chunk(&selected, &lexical).unwrap();
+    assert_eq!(prepared.documents.len(), 1, "字面へ入れるのは1件だけ");
+    assert_eq!(prepared.indexed.len(), 1);
+    assert_eq!(prepared.semantic.len(), 2, "意味ベクトルは両方に要る");
+    assert_eq!(prepared.semantic_indexed.len(), 2);
+}

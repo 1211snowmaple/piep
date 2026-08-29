@@ -146,7 +146,8 @@ struct IndexedState {
 }
 
 struct ReadyChunkEntry {
-    prepared: super::tantivy_index::Prepared,
+    /// 字面の索引をやり直さない作品では `None`。
+    prepared: Option<super::tantivy_index::Prepared>,
     state: IndexedState,
     semantic: super::semantic_index::SemanticIndexDocument,
 }
@@ -161,8 +162,11 @@ enum ChunkEntry {
 #[derive(Default)]
 struct PreparedChunk {
     documents: Vec<super::tantivy_index::Prepared>,
+    /// 字面の索引へ**実際に入れ直した**ものだけ。状態を書き戻す相手がこれ。
     indexed: Vec<IndexedState>,
     semantic: Vec<super::semantic_index::SemanticIndexDocument>,
+    /// 意味索引へ入れたもの。字面をやり直していない作品も含む。
+    semantic_indexed: Vec<IndexedState>,
     missing: Vec<i64>,
     prepared_count: i64,
     failed: i64,
@@ -1904,7 +1908,15 @@ impl Database {
             }
             after_id = *ids.last().unwrap_or(&after_id);
 
-            let prepared = self.prepare_search_index_chunk(&ids)?;
+            // 選ばれた作品のうち、**字面の索引が本当に古いもの**だけを
+            // やり直す。意味も作るときは、字面が最新の作品も選ばれてくる。
+            let lexically_stale = if options.include_semantic {
+                let conn = self.read_conn()?;
+                lexically_stale_subset(&conn, &ids)?
+            } else {
+                ids.iter().copied().collect()
+            };
+            let prepared = self.prepare_search_index_chunk(&ids, &lexically_stale)?;
             failed += prepared.failed;
 
             for missing in &prepared.missing {
@@ -1923,7 +1935,7 @@ impl Database {
                 // model is only worth its accelerator when it is handed a batch.
                 match super::semantic_index::upsert_documents(&self.storage_dir, &prepared.semantic)
                 {
-                    Ok(_) => self.record_semantic_indexed_documents(&prepared.indexed)?,
+                    Ok(_) => self.record_semantic_indexed_documents(&prepared.semantic_indexed)?,
                     Err(error) => log::warn!("Semantic index batch skipped: {error}"),
                 }
             }
@@ -1985,7 +1997,18 @@ impl Database {
     }
 
     /// Reads and analyses one chunk of documents across every available core.
-    fn prepare_search_index_chunk(&self, ids: &[i64]) -> Result<PreparedChunk, String> {
+    /// 索引に入れる形へ組み立てる。
+    ///
+    /// `lexically_stale` に入っていない作品は、**字面の索引をやり直さない**。
+    /// 意味ベクトルだけが遅れている作品にとって、字面の作り直しは丸ごと無駄で
+    /// ある。形態素解析も読みの展開もそこで起き、新しいセグメントが増え、
+    /// あとで統合の仕事まで作る。2,239 件の追いつきで、記録が tantivy の
+    /// 書き込みで埋まっていたのはこれだった。
+    fn prepare_search_index_chunk(
+        &self,
+        ids: &[i64],
+        lexically_stale: &HashSet<i64>,
+    ) -> Result<PreparedChunk, String> {
         use rayon::prelude::*;
 
         let results = ids
@@ -1996,15 +2019,22 @@ impl Database {
                     return Ok(ChunkEntry::Missing(*id));
                 };
                 drop(conn);
-                let prepared =
-                    super::tantivy_index::prepare_document(&self.storage_dir, &doc.tantivy)?;
+                let state = IndexedState {
+                    download_id: doc.download_id,
+                    current_version: doc.current_version,
+                    content_hash: doc.content_hash,
+                };
+                let prepared = if lexically_stale.contains(id) {
+                    Some(super::tantivy_index::prepare_document(
+                        &self.storage_dir,
+                        &doc.tantivy,
+                    )?)
+                } else {
+                    None
+                };
                 Ok(ChunkEntry::Ready(Box::new(ReadyChunkEntry {
                     prepared,
-                    state: IndexedState {
-                        download_id: doc.download_id,
-                        current_version: doc.current_version,
-                        content_hash: doc.content_hash,
-                    },
+                    state,
                     semantic: doc.semantic,
                 })))
             })
@@ -2015,9 +2045,12 @@ impl Database {
             match result {
                 Ok(ChunkEntry::Missing(id)) => chunk.missing.push(id),
                 Ok(ChunkEntry::Ready(ready)) => {
-                    chunk.documents.push(ready.prepared);
-                    chunk.indexed.push(ready.state);
+                    if let Some(prepared) = ready.prepared {
+                        chunk.documents.push(prepared);
+                        chunk.indexed.push(ready.state.clone());
+                    }
                     chunk.semantic.push(ready.semantic);
+                    chunk.semantic_indexed.push(ready.state);
                     chunk.prepared_count += 1;
                 }
                 Err(error) => {
@@ -12185,6 +12218,37 @@ fn active_edit_plain_text_locked(
     };
     let blocks = blocks_for_revision_locked(conn, revision.id)?;
     Ok(Some(blocks_to_plain_text(&blocks)))
+}
+
+/// 渡した id のうち、**字面の索引が古いもの**だけを返す。
+///
+/// 意味ベクトルの遅れも拾って選んだあと、どれを本当に作り直すのかを分けるのに
+/// 使う。`stale_search_index_predicate(false, ..)` と同じ条件でなければならない。
+fn lexically_stale_subset(conn: &Connection, ids: &[i64]) -> Result<HashSet<i64>, String> {
+    if ids.is_empty() {
+        return Ok(HashSet::new());
+    }
+    let placeholders = std::iter::repeat_n("?", ids.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        "SELECT d.id
+         FROM downloads d
+         LEFT JOIN search_index_state m ON m.download_id = d.id
+         WHERE d.id IN ({placeholders})
+           AND {}",
+        stale_search_index_predicate(false, "?0")
+    );
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| format!("Lexical stale subset prepare failed: {e}"))?;
+    let rows = stmt
+        .query_map(rusqlite::params_from_iter(ids.iter()), |row| {
+            row.get::<_, i64>(0)
+        })
+        .map_err(|e| format!("Lexical stale subset query failed: {e}"))?;
+    rows.collect::<Result<HashSet<_>, _>>()
+        .map_err(|e| format!("Lexical stale subset read failed: {e}"))
 }
 
 fn stale_search_index_ids_locked(

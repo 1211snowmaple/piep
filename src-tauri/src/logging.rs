@@ -73,7 +73,16 @@ impl FileLogger {
 }
 
 impl log::Log for FileLogger {
-    fn enabled(&self, _metadata: &log::Metadata) -> bool {
+    fn enabled(&self, metadata: &log::Metadata) -> bool {
+        // **他所の Debug は書かない。** 索引を作り直すあいだ、tantivy は
+        // ファイルを開くたびに1行出す。開発版では記録がそれで埋まり
+        // （8.4MB まで膨らんで回転していた）、こちらの記録が読めなくなるうえ、
+        // 1行ごとの同期書き込みが作り直しそのものを遅くする。
+        //
+        // piep が自分で書いたものは全部残す。困ったときに読むのはこちらである。
+        if metadata.level() > log::Level::Info && !metadata.target().starts_with("piep") {
+            return false;
+        }
         true
     }
 
@@ -184,6 +193,28 @@ mod tests {
             path,
             file: Mutex::new(file),
         }
+    }
+
+    /// 他所の Debug は書かない。索引の作り直し中、tantivy はファイルを開く
+    /// たびに1行出す。記録がそれで埋まると、こちらの記録が読めなくなる。
+    /// **piep が自分で書いたものは段階に関わらず残す。**
+    #[test]
+    fn only_our_own_chatter_survives_at_debug_level() {
+        use log::Log;
+        let logger = logger_at(&temp_dir("filter"));
+        let allowed = |level: log::Level, target: &str| {
+            logger.enabled(&log::Metadata::builder().level(level).target(target).build())
+        };
+        assert!(!allowed(
+            log::Level::Debug,
+            "tantivy::directory::mmap_directory"
+        ));
+        assert!(!allowed(log::Level::Trace, "rustls::client::hs"));
+        assert!(allowed(log::Level::Debug, "piep::commands::database"));
+        assert!(allowed(log::Level::Trace, "piep_lib::database"));
+        // 外から来たものでも、警告と誤りは落とさない。
+        assert!(allowed(log::Level::Warn, "tantivy::indexer"));
+        assert!(allowed(log::Level::Info, "tauri_plugin_updater::updater"));
     }
 
     /// 記録は残らなければ意味が無い。行の形まで含めて確かめる。
