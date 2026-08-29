@@ -237,7 +237,15 @@ pub fn search(
         .next()
         .ok_or_else(|| "Semantic query embedding returned no vector".to_string())?;
 
+    // **読み終えるまで、床板を抜かれないようにする。**
+    //
+    // マニフェストを受け取ったあとロックが外れていたので、その隙に別の
+    // スレッドが作り直すと、`cleanup_old_ann_files` が古いファイルを消す。
+    // こちらの `load_hnsw` は失敗し、呼び出し元は warn を出して空を返す -
+    // 利用者からは「意味検索がときどき何も返さない」に見える。
+    // 組み立てと同じ錠を、読み終わるまで握る。
     let manifest = ensure_ann_shards(storage_dir)?;
+    let _shard_guard = ann_build_lock().lock();
     let conn = open_index(storage_dir)?;
     let mut hits = Vec::with_capacity(limit.saturating_mul(manifest.shards.len().min(8)));
     for shard in &manifest.shards {
@@ -399,10 +407,12 @@ pub fn status(storage_dir: &Path) -> SemanticIndexStatus {
     }
 }
 
+fn ann_build_lock() -> &'static parking_lot::Mutex<()> {
+    ANN_BUILD_LOCK.get_or_init(|| parking_lot::Mutex::new(()))
+}
+
 fn ensure_ann_shards(storage_dir: &Path) -> Result<AnnManifest, String> {
-    let _guard = ANN_BUILD_LOCK
-        .get_or_init(|| parking_lot::Mutex::new(()))
-        .lock();
+    let _guard = ann_build_lock().lock();
     let conn = open_index(storage_dir)?;
     let total: i64 = conn
         .query_row(

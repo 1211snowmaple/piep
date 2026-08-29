@@ -351,6 +351,11 @@ impl WebPixivAPI {
 
     /// 宛先を差し替えられるようにしてあるのは、通信そのものを試すため。
     pub fn with_host(host: &str) -> Result<Self, PixivError> {
+        // ここだけ転送を追うのは意図的である。web の一覧はログインの状態で
+        // 行き先が変わる（言語別のパスや正規化された URL へ寄せられる）。
+        // Cookie を積んだクライアントで転送を追うのは本来避けたいが、reqwest は
+        // 別ホストへ移る時点で `Cookie` を落とすので、行き先は pixiv 自身に
+        // 限られる。API 側（`aapi` / `token_manager` / FANBOX）は `none()`。
         let client = reqwest::Client::builder()
             .connect_timeout(CONNECT_TIMEOUT)
             .timeout(REQUEST_TIMEOUT)

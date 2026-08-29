@@ -848,8 +848,17 @@ pub async fn download_and_link_assets(
     } else {
         "https://www.pixiv.net/"
     };
+    // **総時間ではなく、無音の時間で切る。**
+    //
+    // `timeout` は接続から完了までの合計に効く。30秒だと、上限の 256MiB を
+    // 落とし切るのに 68Mbps 以上の持続速度が要る計算になり、回線が細い人や
+    // 大きな添付では**構造的に間に合わない**。しかも再試行は毎回まっさらな
+    // 一時ファイルへ最初から落とし直すので、同じ理由で何度でも失敗する。
+    //
+    // 止まっている接続を捨てたいだけなので、見るのは「次のかたまりが来ない
+    // 時間」でよい。落ち切るまでの合計には上限を置かない。
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
+        .read_timeout(std::time::Duration::from_secs(30))
         .connect_timeout(std::time::Duration::from_secs(10))
         .pool_max_idle_per_host(4)
         .build()

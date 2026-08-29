@@ -70,9 +70,12 @@ pub async fn login_with_refresh_token(
     if res.status().is_success() {
         parse_auth_response(&bounded_response_text(res).await?)
     } else {
+        // 取得元が返した本文は記録にだけ残す。何が返るかは向こう次第で、
+        // 利用者が読んでも次にできることは増えない（`PixivError` の他の
+        // 変種と同じ方針）。
         let err_text = bounded_response_text(res).await?;
         log::error!("Pixiv API Error Response: {}", err_text);
-        Err(format!("Pixiv Auth Error: {}", err_text).into())
+        Err("pixivとの接続に失敗しました。トークンを取り直してから、もう一度お試しください".into())
     }
 }
 
@@ -107,9 +110,12 @@ pub async fn login_with_code(
     if res.status().is_success() {
         parse_auth_response(&bounded_response_text(res).await?)
     } else {
+        // 取得元が返した本文は記録にだけ残す。何が返るかは向こう次第で、
+        // 利用者が読んでも次にできることは増えない（`PixivError` の他の
+        // 変種と同じ方針）。
         let err_text = bounded_response_text(res).await?;
         log::error!("Pixiv API Error Response: {}", err_text);
-        Err(format!("Pixiv Auth Error: {}", err_text).into())
+        Err("pixivとの接続に失敗しました。トークンを取り直してから、もう一度お試しください".into())
     }
 }
 

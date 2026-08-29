@@ -115,7 +115,7 @@ impl FanboxAPI {
     async fn api_get_paged<T: DeserializeOwned>(&self, url: &str) -> Result<T, FanboxError> {
         let mut backoff = FANBOX_PAGE_DELAY;
         for attempt in 0..=FANBOX_PAGE_RETRIES {
-            match self.api_get::<T>(url).await {
+            match self.api_get_once::<T>(url).await {
                 Err(FanboxError::RateLimited { body }) if attempt < FANBOX_PAGE_RETRIES => {
                     backoff *= 2;
                     log::warn!(
@@ -132,8 +132,27 @@ impl FanboxAPI {
         unreachable!("the loop returns on its last attempt")
     }
 
-    /// 低レベル GET リクエストの共通ハンドラ
+    /// 低レベル GET リクエストの共通ハンドラ。
+    ///
+    /// 取得制限だけは、一覧と同じように待って試し直す。一覧（`api_get_paged`）
+    /// にはこれがあり、単発の投稿・クリエイター取得には無かった。断られる
+    /// 理由は同じなのに、扱いが場所によって違っていた。
     async fn api_get<T: DeserializeOwned>(&self, url: &str) -> Result<T, FanboxError> {
+        let mut backoff = FANBOX_PAGE_DELAY;
+        for attempt in 0..=FANBOX_PAGE_RETRIES {
+            match self.api_get_once::<T>(url).await {
+                Err(FanboxError::RateLimited { body }) if attempt < FANBOX_PAGE_RETRIES => {
+                    backoff *= 2;
+                    log::warn!("FANBOX rate limited ({url}); retrying in {backoff:?}: {body}");
+                    tokio::time::sleep(backoff).await;
+                }
+                other => return other,
+            }
+        }
+        unreachable!("the loop returns on its last attempt")
+    }
+
+    async fn api_get_once<T: DeserializeOwned>(&self, url: &str) -> Result<T, FanboxError> {
         let url = allowed_api_url(url)?;
         let headers = self.headers()?;
         let res = self.client.get(url).headers(headers).send().await?;
