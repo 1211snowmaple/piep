@@ -38,7 +38,9 @@ use fastembed::{
 /// ruri-v3 の前置き。e5 の `query:` / `passage:` とは別の語を使う。
 const QUERY_PREFIX: &str = "検索クエリ: ";
 const DOCUMENT_PREFIX: &str = "検索文書: ";
-const EXPECTED_DIMENSION: usize = 256;
+/// 次元はモデルが決める。**こちらが決め打ちにしない** - 30m は 256、130m は 512。
+/// 索引の寸法が変わるという事実だけを、はっきり出す。
+const CURRENT_DIMENSION: usize = 384;
 
 fn read(dir: &Path, name: &str) -> Result<Vec<u8>, String> {
     std::fs::read(dir.join(name)).map_err(|e| format!("{name} を読めません: {e}"))
@@ -125,12 +127,15 @@ fn main() -> Result<(), String> {
     let embed_secs = started.elapsed().as_secs_f64();
 
     let dimension = vectors.first().map(Vec::len).unwrap_or(0);
-    println!("次元: {dimension}（期待 {EXPECTED_DIMENSION}）");
+    println!("次元: {dimension}（いまの索引は {CURRENT_DIMENSION}）");
     println!("4本の埋め込みに {embed_secs:.2}秒");
-    if dimension != EXPECTED_DIMENSION {
-        return Err(format!(
-            "次元が {dimension}。索引の寸法が変わるので、そのままでは使えない"
-        ));
+    if dimension == 0 {
+        return Err("ベクトルが空である".into());
+    }
+    if dimension != CURRENT_DIMENSION {
+        println!(
+            "  索引の寸法が {CURRENT_DIMENSION} から {dimension} へ変わる。乗り換えるなら全作り直し。"
+        );
     }
 
     let query_vector = vectors.last().ok_or("問いの埋め込みが無い")?;

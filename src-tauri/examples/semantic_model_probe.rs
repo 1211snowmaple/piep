@@ -1,8 +1,9 @@
 //! いまのモデルと乗り換え候補を、**同じ棚・同じ問い**で比べる。
 //!
 //!     cargo run --release --example semantic_model_probe -- \
-//!         <piep.db の写し> <storage_dir> <ruri のモデル置き場>
+//!         <piep.db の写し> <storage_dir> <モデル置き場>...
 //!
+//! 置き場は何本でも渡せる。名前は**ディレクトリの名前**をそのまま使う。
 //! 書き込みはしないが、**写しを渡すこと**。
 //!
 //! # 何をしているか
@@ -62,7 +63,7 @@ const SAMPLE_WORKS: usize = 150;
 const RANK_LIMIT: usize = 20;
 
 struct Candidate {
-    label: &'static str,
+    label: String,
     query_prefix: &'static str,
     embedder: TextEmbedding,
     /// 断片ごとの文書ベクトル。`chunks` と同じ並び。
@@ -276,13 +277,13 @@ fn middle_sentence(text: &str) -> Option<String> {
 
 fn main() -> Result<(), String> {
     let args: Vec<String> = std::env::args().collect();
-    if args.len() != 4 {
+    if args.len() < 4 {
         return Err(
-            "usage: semantic_model_probe <piep.db の写し> <storage_dir> <ruri の置き場>".into(),
+            "usage: semantic_model_probe <piep.db の写し> <storage_dir> <モデル置き場>...".into(),
         );
     }
     let storage = Path::new(&args[2]);
-    let ruri_dir = Path::new(&args[3]);
+    let model_dirs: Vec<&Path> = args[3..].iter().map(Path::new).collect();
     let db = Database::open(Path::new(&args[1]), storage)?;
 
     // 索引に入っている断片を、そのまま読む。**作り直さない。**
@@ -333,20 +334,29 @@ fn main() -> Result<(), String> {
     println!("\n■ 文書側を用意する");
     println!("  いまのモデル: 索引に入っているものをそのまま使う");
     let mut candidates = vec![Candidate {
-        label: "multilingual-e5-small (384)",
+        label: "multilingual-e5-small (384)".to_string(),
         query_prefix: "query: ",
         embedder: build_current_model()?,
         vectors: current_vectors,
     }];
 
-    let mut ruri = build_ruri(ruri_dir)?;
-    let ruri_vectors = embed_all(&mut ruri, "検索文書: ", &texts, "ruri-v3-30m")?;
-    candidates.push(Candidate {
-        label: "ruri-v3-30m (256)",
-        query_prefix: "検索クエリ: ",
-        embedder: ruri,
-        vectors: ruri_vectors,
-    });
+    for dir in &model_dirs {
+        let name = dir
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("model")
+            .to_string();
+        let mut model = build_ruri(dir)?;
+        let vectors = embed_all(&mut model, "検索文書: ", &texts, &name)?;
+        let dimension = vectors.first().map(Vec::len).unwrap_or(0);
+        candidates.push(Candidate {
+            // 何本渡されるか分からないので、名前は借り物ではなく持ち物にする。
+            label: format!("{name} ({dimension})"),
+            query_prefix: "検索クエリ: ",
+            embedder: model,
+            vectors,
+        });
+    }
 
     // 問いにする作品を選ぶ。一作品につき一本。
     let mut chosen = HashSet::new();
@@ -385,11 +395,11 @@ fn main() -> Result<(), String> {
 
     println!("\n■ 題名を問いにしたとき");
     for (slot, candidate) in candidates.iter().enumerate() {
-        by_title[slot].report(candidate.label);
+        by_title[slot].report(&candidate.label);
     }
     println!("\n■ 本文の一文を問いにしたとき");
     for (slot, candidate) in candidates.iter().enumerate() {
-        by_passage[slot].report(candidate.label);
+        by_passage[slot].report(&candidate.label);
     }
     println!("\n総当たりで比べている。ANN の近似は入っていない。");
     Ok(())
