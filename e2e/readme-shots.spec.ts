@@ -11,8 +11,12 @@ import { test, type Page } from "@playwright/test";
  */
 const projects = ["1440x900-light-200dpi", "1440x900-dark-200dpi"];
 
+type ShotTheme = "light" | "dark";
+
 /** Screen, route, a text that proves it rendered, and the themes it is shot in. */
-const shots = [
+const shots: ReadonlyArray<
+  readonly [name: string, route: string, visibleText: string, themes: readonly ShotTheme[]]
+> = [
   ["home", "/#/", "最近の保存", ["light"]],
   ["library", "/#/library", "作品", ["light", "dark"]],
   ["library-people", "/#/library?tab=people", "作者・クリエイター", ["light"]],
@@ -22,7 +26,7 @@ const shots = [
   ["updates", "/#/updates", "更新センター", ["light"]],
   ["epub", "/#/epub", "EPUB書き出し", ["light"]],
   ["diagnostics", "/#/diagnostics", "ライブラリ診断", ["light"]],
-] as const;
+];
 
 test("capture readme screenshots", async ({ page }, testInfo) => {
   test.skip(!projects.includes(testInfo.project.name), "The README is shot at one size, in both themes");

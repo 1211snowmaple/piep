@@ -18,7 +18,9 @@ pub fn scan_tables(schema_rs: &Path, repo_root: &Path) -> anyhow::Result<Vec<Tab
     let text = std::fs::read_to_string(schema_rs)?;
     let rel = crate::rust_scan::relative(schema_rs, repo_root);
     let skip = test_line_ranges(&text);
-    let re = regex::Regex::new(r"(?i)CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*\(")?;
+    let re = regex::Regex::new(
+        r"(?i)CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*\(",
+    )?;
 
     let mut out = Vec::new();
     for m in re.captures_iter(&text) {
@@ -126,7 +128,12 @@ fn parse_columns(body: &str) -> Vec<Column> {
     parts.push(cur);
 
     const CONSTRAINTS: &[&str] = &[
-        "PRIMARY", "FOREIGN", "UNIQUE", "CHECK", "CONSTRAINT", "INDEX",
+        "PRIMARY",
+        "FOREIGN",
+        "UNIQUE",
+        "CHECK",
+        "CONSTRAINT",
+        "INDEX",
     ];
 
     parts

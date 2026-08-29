@@ -141,7 +141,7 @@ export function useUpdateJobs(onSnapshot?: (snapshot: UpdateJobSnapshot) => void
     } else {
       setActiveSnapshot(null);
     }
-  }, [enabled, onSnapshot, queryClient]);
+  }, [enabled, onSnapshot]);
 
   const selectJob = useCallback(async (jobId: string) => {
     if (!enabled) return;
@@ -155,7 +155,7 @@ export function useUpdateJobs(onSnapshot?: (snapshot: UpdateJobSnapshot) => void
     loadJobs().catch((error) => {
       console.error("更新ジョブ一覧を読み込めませんでした", error);
     });
-  }, [loadJobs]);
+  }, [enabled, loadJobs]);
 
   useEffect(() => {
     if (!enabled) return undefined;
@@ -184,7 +184,7 @@ export function useUpdateJobs(onSnapshot?: (snapshot: UpdateJobSnapshot) => void
         return [summary, ...rest].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
       });
     });
-  }, [enabled, onSnapshot]);
+  }, [enabled, onSnapshot, queryClient]);
 
   // 進捗はイベントで届く。ここはその取りこぼしに備える保険なので、
   // イベントが途切れているときだけ読みに行く。止まっているジョブ

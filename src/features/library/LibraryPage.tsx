@@ -677,7 +677,9 @@ export default function LibraryPage() {
     queryFn: () => runtime ? listSavedSearches() : Promise.resolve([] as SavedSearchRecord[]),
     staleTime: 60_000,
   });
-  const savedSearches = savedSearchesQuery.data ?? [];
+  // `?? []` を直に書くと、読み込み中は毎レンダー新しい配列になり、これを
+  // 依存に持つ効果が毎回走る。
+  const savedSearches = useMemo(() => savedSearchesQuery.data ?? [], [savedSearchesQuery.data]);
   const [filterOpened, filterDrawer] = useDisclosure(false);
   const [selectionMode, setSelectionMode] = useState(false);
   const [collectOpened, collectModal] = useDisclosure(false);
@@ -1003,7 +1005,7 @@ export default function LibraryPage() {
         if (!directory) return 0;
         let written = 0;
         for (const entity of selectedEntities) {
-          const name = entity.displayName.replace(/[\/:*?"<>|]/g, "_").slice(0, 80) || entity.sourceKey;
+          const name = entity.displayName.replace(/[/:*?"<>|]/g, "_").slice(0, 80) || entity.sourceKey;
           await exportEntityZip(entityKind, entity.source, entity.sourceKey, `${directory}/${name}.zip`);
           written += 1;
         }

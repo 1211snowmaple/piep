@@ -27,11 +27,17 @@ jobs:
           node-version: 24
       - name: Install Rust 1.97.1
         run: |
-          rustup toolchain install 1.97.1 --profile minimal
+          rustup toolchain install 1.97.1 --profile minimal --component clippy,rustfmt
           rustup default 1.97.1
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: tools/ipc-extract
+      # 境界を守っている当のコードが、いちばん検証されていなかった。抽出器が
+      # `#[tauri::command]` を静かに取りこぼしても、教えてくれるものが何も
+      # 無い。ドリフト検査は「取りこぼしが無い」という前提の上に建っている。
+      - run: cargo test --manifest-path tools/ipc-extract/Cargo.toml
+      - run: cargo clippy --manifest-path tools/ipc-extract/Cargo.toml --all-targets -- -D warnings
+      - run: cargo fmt --manifest-path tools/ipc-extract/Cargo.toml --all -- --check
       - run: npm ci
         working-directory: docs-tools
       - run: npm run docs:check

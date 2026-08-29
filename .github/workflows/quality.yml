@@ -26,6 +26,9 @@ jobs:
           workspaces: src-tauri
       - run: npm ci
       - run: npm run check
+      # Rust は `-D warnings` で通しているのに、28k 行の React 側は型検査だけ
+      # だった。hooks の依存漏れと Promise の取りこぼしは型では捕まらない。
+      - run: npm run lint
       - run: npm test
       # One thread: Tantivy allows a single IndexWriter per directory, and the
       # app only ever opens one library per process - it takes an exclusive

@@ -51,13 +51,20 @@ CI とローカルで同じ結果を再現できるよう、Node.js 24.x と Rus
 コミット前に通すもの。CI と同じ内容を先に手元で確認する。
 
 ```bash
-npx tsc --noEmit
+npm run check
+npm run lint
 npx vitest run src
 cargo test --manifest-path src-tauri/Cargo.toml -- --test-threads=1
 cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+cargo test --manifest-path tools/ipc-extract/Cargo.toml
 npm --prefix docs-tools run docs:check
 ```
+
+`npm run check` は `src/` と `e2e/` の両方を見る。`e2e/` を含めるまで、視覚回帰
+の spec と `playwright.config.ts` は誰にも型検査されていなかった（Playwright は
+型を剥がすだけなので、走らせても誤りは出ない）。含めた時点で、**ずっと効いて
+いなかった設定**が一つ見つかっている。
 
 最後の1本はフロントと Rust の境界を突き合わせる。`invoke("名前")` に対応する
 コマンドが無い、`generate_handler!` への登録を忘れた、といった**実行するまで

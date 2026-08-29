@@ -42,7 +42,7 @@ export async function loadAssistSettings(): Promise<AssistSettings> {
   const stored = await getSetting<Partial<AssistSettings>>(SETTING_KEY);
   if (stored) return { ...DEFAULT_ASSIST_SETTINGS, ...stored };
   const legacy = await getSetting<Partial<AssistSettings>>(LEGACY_KEY);
-  return { ...DEFAULT_ASSIST_SETTINGS, ...(legacy ?? {}) };
+  return { ...DEFAULT_ASSIST_SETTINGS, ...legacy };
 }
 
 export function saveAssistSettings(settings: AssistSettings): Promise<void> {

@@ -12,6 +12,8 @@
 mod model;
 mod rust_scan;
 mod sql_scan;
+#[cfg(test)]
+mod tests;
 
 use model::Contract;
 use std::path::PathBuf;

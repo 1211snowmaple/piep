@@ -55,6 +55,8 @@ import {
   Home,
   ImageDown,
   ImagePlus,
+  // lucide の図像名。組み込みの `Infinity` を隠すが、名前は向こうのもの。
+  // oxlint-disable-next-line no-shadow-restricted-names
   Infinity,
   Images,
   Inbox,

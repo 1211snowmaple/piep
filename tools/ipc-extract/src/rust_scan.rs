@@ -45,8 +45,8 @@ pub fn scan_commands(commands_dir: &Path, repo_root: &Path) -> anyhow::Result<Ve
             continue;
         }
         let text = std::fs::read_to_string(path)?;
-        let file = syn::parse_file(&text)
-            .map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
+        let file =
+            syn::parse_file(&text).map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
         let rel = relative(path, repo_root);
         for item in &file.items {
             let Item::Fn(f) = item else { continue };
@@ -89,7 +89,9 @@ fn doc_of(attrs: &[Attribute]) -> Option<String> {
         if !a.path().is_ident("doc") {
             continue;
         }
-        let Meta::NameValue(nv) = &a.meta else { continue };
+        let Meta::NameValue(nv) = &a.meta else {
+            continue;
+        };
         let Expr::Lit(ExprLit {
             lit: Lit::Str(s), ..
         }) = &nv.value
@@ -303,7 +305,7 @@ pub fn scan_events(src_dir: &Path, repo_root: &Path) -> anyhow::Result<Vec<Event
                 // バイト位置から行番号を数える。改行を跨いで一致するため、
                 // 一致開始位置までの行数がそのまま送出の行になる。
                 line: text[..at].lines().count(),
-                });
+            });
         }
     }
     out.sort_by(|a, b| (&a.name, &a.file, a.line).cmp(&(&b.name, &b.file, b.line)));

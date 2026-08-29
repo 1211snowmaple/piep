@@ -284,11 +284,13 @@ export function useReturnTo() {
 }
 
 export function useAppSearchParams(): [URLSearchParams, (params: URLSearchParams, options?: { replace?: boolean }) => void] {
-  const router = useAppRouter();
+  // 依存はオブジェクトの中の値ではなく、値そのものを取り出して並べる。
+  // `router.navigate` のような形は、依存として正しく追えない。
+  const { navigate, pathname, searchParams } = useAppRouter();
   const setSearchParams = useCallback((params: URLSearchParams, options?: { replace?: boolean }) => {
-    router.navigate(`${router.pathname}${params.size ? `?${params.toString()}` : ""}`, options);
-  }, [router.navigate, router.pathname]);
-  return [router.searchParams, setSearchParams];
+    navigate(`${pathname}${params.size ? `?${params.toString()}` : ""}`, options);
+  }, [navigate, pathname]);
+  return [searchParams, setSearchParams];
 }
 
 export function matchPath(pattern: string, pathname: string): Record<string, string> | null {

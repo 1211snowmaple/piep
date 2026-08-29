@@ -47,7 +47,10 @@ export default defineConfig({
     baseURL: "http://localhost:1420",
     locale: "ja-JP",
     timezoneId: "Asia/Tokyo",
-    reducedMotion: "reduce",
+    // `use.reducedMotion` は Playwright の設定に無い。書いても黙って無視され、
+    // **この指定はずっと効いていなかった**（型検査が e2e に届いていなかった
+    // ので誰も気づかなかった）。正しい置き場所は `contextOptions`。
+    contextOptions: { reducedMotion: "reduce" },
     trace: "retain-on-failure",
   },
   projects: sizes.flatMap((size) => themes.flatMap((colorScheme) => scales.map((deviceScaleFactor) => ({

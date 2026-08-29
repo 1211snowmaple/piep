@@ -1,4 +1,4 @@
-import { useCallback } from "react";
+import { useCallback, useRef } from "react";
 import type { MouseEvent } from "react";
 import { useAppNavigate } from "@/app/router";
 import { normalizeContentLinkUrl } from "@/features/browser/downloadCandidates";
@@ -104,7 +104,11 @@ export function useContentLinkNavigation(options: {
   workRoute?: (id: number) => string;
 } = {}) {
   const navigate = useAppNavigate();
-  const workRoute = options.workRoute ?? ((id: number) => `/works/${id}`);
+  // 既定の行き先は毎レンダー新しい関数になる。そのまま依存に置くと、
+  // 返すハンドラの同一性が毎回変わり、貼り替えが起きつづける。最新の値だけを
+  // 参照で持ち回る。
+  const workRouteRef = useRef(options.workRoute);
+  workRouteRef.current = options.workRoute;
   return useCallback(async (event: MouseEvent<HTMLElement>) => {
     const anchor = (event.target as HTMLElement).closest<HTMLAnchorElement>("a[href], a[data-content-href]");
     if (!anchor) return;
@@ -116,6 +120,7 @@ export function useContentLinkNavigation(options: {
     const runtime = isTauriRuntime();
     const target = contentLinkTarget(raw);
     if (target && runtime) {
+      const workRoute = workRouteRef.current ?? ((id: number) => `/works/${id}`);
       const path = await resolveInApp(target, workRoute);
       if (path) {
         navigate(path);
@@ -125,5 +130,5 @@ export function useContentLinkNavigation(options: {
     const external = normalizeContentLinkUrl(raw);
     if (!/^https?:/i.test(external)) return;
     if (runtime) await openExternalUrl(external); else window.open(external, "_blank", "noopener,noreferrer");
-  }, [navigate, workRoute]);
+  }, [navigate]);
 }

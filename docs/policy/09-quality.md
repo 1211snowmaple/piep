@@ -4,6 +4,7 @@
 
 | 層 | 道具 | 何を守るか |
 |---|---|---|
+| フロント静的検査 | tsc + oxlint | 型、hooks の依存、取りこぼした Promise |
 | フロント単体 | Vitest + Testing Library | 純粋な道具（`lib/`）、画面の状態遷移、部品の振る舞い |
 | Rust 単体・結合 | `cargo test` | スキーマ移行、検索、EPUB の組み立てと検証、解析 |
 | 視覚回帰 | Playwright | 3つのウィンドウ幅 × ライト／ダーク × 3段階の DPI |
@@ -22,6 +23,23 @@
 ```bash
 npm run build && CI=1 npx playwright test
 ```
+
+### linter は、意味のある規則だけを門にする
+
+`oxlint` を入れているが、既定の全部を門にはしていない。React Compiler 由来の
+助言（`set-state-in-effect` / `refs` / `immutability` / `purity` ほか）は、この
+コードベースが意図して選んでいる書き方にも当たるので切ってある。**常に警告が
+出る門は、誰も読まなくなる。**
+
+残してあるのは、外すと実際に壊れるものだけ:
+
+- `react-hooks/exhaustive-deps` — 依存の漏れは stale closure になる。入れた
+  当日に7件見つかった
+- `react-hooks/rules-of-hooks`
+- `typescript/no-floating-promises` — `await` 忘れは失敗が消える
+
+`unicorn/no-useless-spread` は切ってある。反復しながら同じコレクションを変更する
+箇所（ライブ NodeList、Map のイテレータ）で複製は必須で、外すと壊れる。
 
 ### `--test-threads=1` の理由
 
