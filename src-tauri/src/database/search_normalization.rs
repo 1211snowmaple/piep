@@ -453,6 +453,77 @@ fn push_fallback_token(input: &str, start: usize, end: usize, tokens: &mut Vec<A
 }
 
 #[cfg(test)]
+mod one_character_query_tests {
+    use super::{index_text, query_variants};
+
+    /// 部分一致の n-gram は下限が 2 なので、**2文字に満たない語はどの
+    /// n-gram 欄にも当たらない**。ではどこまでが実害かを、ここで固定しておく。
+    ///
+    /// 漢字1文字は読みを経由して伸びる。「血」は読み「チ」でも1文字だが、
+    /// ローマ字にすると `chi` になり、`*_reading_romaji` の 2-gram / 3-gram に
+    /// 当たる。**単漢字の検索が引けないという話にはならない。**
+    #[test]
+    fn a_single_kanji_grows_long_enough_through_its_reading() {
+        for kanji in ["血", "木", "手", "日", "猫", "雨"] {
+            let longest = query_variants(kanji)
+                .into_iter()
+                .map(|variant| variant.chars().filter(|c| !c.is_whitespace()).count())
+                .max()
+                .unwrap_or(0);
+            assert!(
+                longest >= 2,
+                "{kanji}: どの変形形も1文字のままで、n-gram に当たらない"
+            );
+        }
+    }
+
+    /// 同義語を持つ1文字も、そこを通って伸びる。
+    ///
+    /// 「え」は「絵」の読みとして拾われ、`いらすと` / `irasuto` / `画像` /
+    /// `illustration` まで広がる。**意味のある1文字の問いは、たいていここか
+    /// 読みのどちらかで救われる。**
+    #[test]
+    fn a_single_character_with_a_synonym_grows_through_it() {
+        let variants = query_variants("え");
+        assert!(
+            variants.iter().any(|value| value.chars().count() >= 2),
+            "{variants:?}"
+        );
+    }
+
+    /// 残る穴は、読みも同義語も持たない1文字だけ。**ここは埋めない。**
+    ///
+    /// 「あ」を含むものを全部出す検索に意味は無い。n-gram の下限を 1 へ下げれば
+    /// 引けるようにはなるが、CJK では文字ごとに転置が増えるうえ索引の形が
+    /// 変わるので**全作品の作り直し**が要る。穴の中身に対して代償が大きい。
+    /// 下げるときは `tantivy_index` の `INDEX_VERSION_DIR` も上げること。
+    #[test]
+    fn a_bare_single_character_stays_short_and_that_is_accepted() {
+        for short in ["あ", "z"] {
+            let longest = query_variants(short)
+                .into_iter()
+                .map(|variant| variant.chars().filter(|c| !c.is_whitespace()).count())
+                .max()
+                .unwrap_or(0);
+            assert_eq!(
+                longest, 1,
+                "{short}: 伸びるようになったなら、この決めごとを見直すこと"
+            );
+        }
+    }
+
+    /// 読みそのものは、索引側と検索側で同じ道具から出ている。片方だけ変えると
+    /// その語は永久に引けなくなるので、同じ入力から同じ読みが出ることを固定する。
+    #[test]
+    fn the_reading_is_the_same_on_both_sides() {
+        let indexed = index_text("雨上がりの図書室");
+        assert!(!indexed.reading_kana.is_empty());
+        assert!(!indexed.reading_romaji.is_empty());
+        assert!(query_variants("雨上がりの図書室").contains(&indexed.reading_romaji));
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
