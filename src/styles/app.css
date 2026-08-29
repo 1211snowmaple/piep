@@ -356,6 +356,21 @@ select {
   content: "";
 }
 
+/* 表紙の形。**表紙を置く枠は、どこでもこれを使う。**
+   pixiv が返す表紙は 240x338（0.710）でほぼ揃っている（棚の 400 枚を数えたら
+   396 枚がこの寸法だった）。カードのタイルだけがそれに合わせて 112/158
+   （0.709）になっていて、他は各自ばらばらの寸法を持っていた。
+
+     作品カード       112/158  0.709  ← これだけ合っていた
+     一覧の行         92x123   0.748  表紙が縦に合わされ、左右に余白
+     シリーズのカード 72x98    0.735  しかも `object-fit: cover` で切っていた
+     シリーズの見出し 126x174  0.724  `object-fit` の指定が無く伸びていた
+     コレクション     96x128   0.750
+
+   同じ「表紙を置く枠」が5つの形を持っていたということで、どれが正しいのかは
+   どこにも書かれていなかった。形はここだけに書く。 */
+:root { --work-cover-shape: 112 / 158; }
+
 .work-cover {
   position: relative;
   display: grid;
@@ -365,7 +380,19 @@ select {
   color: var(--mantine-color-dimmed);
   background: light-dark(#f4f4f2, #171d24);
 }
-.work-cover__image { width: 100%; height: 100%; object-fit: contain; background: light-dark(#f6f6f4, #11171e); }
+/* **枠にぴったり貼る。割合の高さに頼らない。**
+   `height: 100%` は grid の行が内容で決まる場面では auto に落ちる。落ちると
+   画像は幅なりの実寸に伸び、`overflow: hidden` が**下を切る**。リストの表紙で
+   実際にそうなっていた（枠 92x123 に対して絵の箱が 90x127）。`inset: 0` なら
+   箱は必ず枠と同じで、あとは `object-fit` が中身を収める。 */
+.work-cover__image {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: light-dark(#f6f6f4, #11171e);
+}
 
 /* A shelf of covers is only useful if the ones without an image are still
    distinguishable. The mark is unique per work, its colour shared per author,
@@ -643,7 +670,7 @@ select {
   position: relative;
   display: grid;
   width: 100%;
-  aspect-ratio: 112 / 158;
+  aspect-ratio: var(--work-cover-shape);
   place-items: center;
   overflow: hidden;
   border-radius: 8px;
@@ -887,7 +914,7 @@ select {
 .work-row__provider .mantine-Text-root { font-size: 10px; }
 
 .work-row__cover { position: relative; grid-row: 1 / 3; cursor: pointer; }
-.work-row__cover .work-cover--compact { width: 92px; height: 123px; flex: none; border-radius: 8px; }
+.work-row__cover .work-cover--compact { width: 92px; height: auto; aspect-ratio: var(--work-cover-shape); flex: none; border-radius: 8px; }
 .work-row__select { position: absolute; top: -6px; left: -6px; width: 28px; height: 28px; border-radius: 50%; }
 .work-row__select .work-selection-toggle__indicator { width: 18px; height: 18px; flex-basis: 18px; }
 .work-row__main { display: flex; min-width: 0; grid-column: 2; grid-row: 1; flex-direction: column; justify-content: center; }
@@ -916,7 +943,7 @@ select {
 
 @container (max-width: 720px) {
   .work-row__grid { grid-template-columns: 78px minmax(0, 1fr); gap: 6px 10px; }
-  .work-row__cover .work-cover--compact { width: 78px; height: 104px; }
+  .work-row__cover .work-cover--compact { width: 78px; height: auto; aspect-ratio: var(--work-cover-shape); }
   /* あらすじを落とすなら、その前の仕切りも一緒に落とす。 */
   .work-row__excerpt,
   .work-row__excerpt-divider { display: none; }
@@ -932,7 +959,7 @@ select {
     grid-template-columns: 64px minmax(0, 1fr);
     padding: 8px;
   }
-  .work-row__cover .work-cover--compact { width: 64px; height: 86px; }
+  .work-row__cover .work-cover--compact { width: 64px; height: auto; aspect-ratio: var(--work-cover-shape); }
   .work-row__footer { align-items: stretch; flex-direction: column; gap: 1px; }
   .work-row__facts { width: 100%; height: 24px; overflow: hidden; }
   .work-row__actions { align-self: flex-end; }
@@ -1100,8 +1127,8 @@ select {
 .entity-card__banner > img { width: 100%; height: 100%; object-fit: cover; }
 .entity-card__wash { position: absolute; inset: 0; background: linear-gradient(90deg, light-dark(rgb(255 255 255 / 96%), rgb(17 22 30 / 96%)) 25%, light-dark(rgb(255 255 255 / 84%), rgb(17 22 30 / 84%))); }
 .entity-card__content { position: relative; min-height: 138px; }
-.entity-card__series-cover { display: grid; width: 72px; height: 98px; flex: 0 0 72px; place-items: center; overflow: hidden; border: 1px solid light-dark(rgb(255 255 255 / 72%), rgb(255 255 255 / 14%)); border-radius: 7px; color: var(--mantine-color-dimmed); background: light-dark(#f5f1ec, #202832); box-shadow: 0 8px 20px rgb(28 34 43 / 16%); }
-.entity-card__series-cover img { width: 100%; height: 100%; object-fit: cover; }
+.entity-card__series-cover { display: grid; width: 72px; aspect-ratio: var(--work-cover-shape); flex: 0 0 72px; place-items: center; overflow: hidden; border: 1px solid light-dark(rgb(255 255 255 / 72%), rgb(255 255 255 / 14%)); border-radius: 7px; color: var(--mantine-color-dimmed); background: light-dark(#f5f1ec, #202832); box-shadow: 0 8px 20px rgb(28 34 43 / 16%); }
+.entity-card__series-cover img { width: 100%; height: 100%; object-fit: contain; }
 
 /* 保存元が出す「画像なし」の一枚そのもの。枠いっぱいに敷くので、丸くするのも
    角を落とすのも、置かれた側の器が決める。明暗のテーマで色を変えないのは、
@@ -1189,10 +1216,15 @@ select {
   background: var(--mantine-color-body);
 }
 
+/* 表紙の形は表紙が決める。棚のタイルは揃っていないと読めないので固定の枠に
+   入れるが、作品ページには揃える相手がいない。2/3 に固定していたころ、pixiv の
+   表紙（240x338 = 0.71）は幅で合わされて上下に余白ができ、カードより小さく、
+   **下が詰まって見えた**。読み込めた表紙の比を `--work-cover-ratio` で受け取り、
+   表紙が無いときだけ 2/3 に戻す。 */
 .work-hero__cover {
   position: relative;
   width: min(100%, 190px);
-  aspect-ratio: 2 / 3;
+  aspect-ratio: var(--work-cover-ratio, 2 / 3);
   overflow: hidden;
   border-radius: 8px;
 }
@@ -1430,7 +1462,7 @@ select {
 .entity-hero__series-cover {
   display: grid;
   width: 126px;
-  height: 174px;
+  aspect-ratio: var(--work-cover-shape);
   flex: 0 0 126px;
   place-items: center;
   overflow: hidden;
@@ -1440,7 +1472,7 @@ select {
   background: light-dark(#f4f0ea, #1c242d);
   box-shadow: 0 14px 34px rgb(25 34 44 / 18%);
 }
-.entity-hero__series-cover img { width: 100%; height: 100%; }
+.entity-hero__series-cover img { width: 100%; height: 100%; object-fit: contain; }
 
 /* 一覧の監視ボタン。作品カードと同じ決まり - 消えていれば灰、点いていれば
    その色。登録があって止めているだけの状態だけ、灰に薄い下地を敷いて分ける。 */
@@ -2181,8 +2213,8 @@ select {
   object-fit: contain;
 }
 
-.collection-cover--card { width: 96px; height: 128px; }
-.collection-cover--detail { width: 112px; height: 150px; border-radius: 10px; }
+.collection-cover--card { width: 96px; aspect-ratio: var(--work-cover-shape); }
+.collection-cover--detail { width: 112px; aspect-ratio: var(--work-cover-shape); border-radius: 10px; }
 
 .collection-cover__slot { position: relative; display: block; min-width: 0; min-height: 0; overflow: hidden; }
 /* 同じ絵をぼかして敷く。表紙の縦横比は取得元によってばらばらなので、
@@ -2364,7 +2396,7 @@ select {
   .collections-panel__header { align-items: stretch; flex-direction: column; }
   .collections-panel__intro { white-space: normal; }
   .collection-hero > .mantine-Group-root { align-items: flex-start; flex-wrap: wrap; }
-  .collection-cover--detail { width: 88px; height: 118px; }
+  .collection-cover--detail { width: 88px; }
   .collection-members--gallery { grid-template-columns: minmax(0, 1fr); }
   .collection-members[data-ordered] .collection-member,
   .collection-members--gallery[data-ordered] .collection-member {

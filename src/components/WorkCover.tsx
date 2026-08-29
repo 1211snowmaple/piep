@@ -20,29 +20,40 @@ type WorkCoverData = Pick<DownloadEntry, "coverPath" | "source" | "sourceId" | "
 export function WorkCover({ work, variant = "card", className }: { work: WorkCoverData; variant?: "compact" | "card" | "detail"; className?: string }) {
   const cover = getAssetUrl(work.coverPath);
   const [failed, setFailed] = useState(false);
+  // 表紙そのものの縦横比。棚のタイルは揃っていないと読めないので使わないが、
+  // 作品ページには揃える相手がいない。**表紙の形は表紙が決める。**
+  const [ratio, setRatio] = useState<number | null>(null);
   const provider = getProvider(work.source);
   const sigil = useMemo(() => coverSigil(work), [work]);
 
-  useEffect(() => setFailed(false), [cover]);
+  useEffect(() => {
+    setFailed(false);
+    setRatio(null);
+  }, [cover]);
 
   return (
     <Box
       className={["work-cover", `work-cover--${variant}`, className].filter(Boolean).join(" ")}
       data-empty={!cover || failed || undefined}
-      style={{ "--work-cover-accent": provider.color }}
+      style={{ "--work-cover-accent": provider.color, ...(ratio ? { "--work-cover-ratio": ratio } : {}) }}
     >
       {cover && !failed ? (
         <Image
           src={cover}
           alt={`${work.title}の表紙`}
           className="work-cover__image"
-          // Mantine Image defaults to `cover`. The gallery frame happens to
-          // be close to a novel-cover ratio, so that crop was hard to notice;
-          // the wider compact frame exposed it. Set the component variable
-          // explicitly instead of relying on stylesheet order.
+          // 枠に合わせて切らない。`app.css` も `object-fit: contain` を指定して
+          // いるが、Mantine の Image は自前の変数越しに `cover` を既定にする。
+          // **どちらが後に来るかに寄りかからない。**
           fit="contain"
           loading={variant === "detail" ? "eager" : "lazy"}
           decoding="async"
+          onLoad={(event) => {
+            const image = event.currentTarget;
+            if (image.naturalWidth > 0 && image.naturalHeight > 0) {
+              setRatio(image.naturalWidth / image.naturalHeight);
+            }
+          }}
           onError={() => setFailed(true)}
         />
       ) : (
