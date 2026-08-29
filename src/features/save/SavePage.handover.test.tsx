@@ -115,3 +115,51 @@ describe("SavePage handover to the large window", () => {
     else delete (document as Partial<Document>).elementFromPoint;
   });
 });
+
+/**
+ * 大きいウィンドウは、この画面より長生きする。
+ *
+ * 切り離したまま別の画面へ行くと、片付けで閉じるのは埋め込みだけで、大きい
+ * ウィンドウは残る。切り離していたという記憶は画面と一緒に消えるので、戻って
+ * きたときに埋め込みまで開き、**同じサイトが二つの窓に出ていた**。
+ */
+describe("returning to the save screen", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    browserApi.openStandaloneBrowser.mockResolvedValue(false);
+    browserApi.setEmbeddedBrowserBounds.mockResolvedValue(true);
+    browserApi.setEmbeddedBrowserVisible.mockResolvedValue(true);
+    browserApi.getEmbeddedBrowserUrl.mockResolvedValue("https://www.pixiv.net/");
+  });
+
+  it("adopts the large window that is still open instead of opening a second one", async () => {
+    browserApi.getStandaloneBrowserUrl.mockResolvedValue("https://www.pixiv.net/users/15884098");
+    window.location.hash = "#/save/pixiv";
+    renderSavePage();
+
+    await waitFor(() => expect(browserApi.getStandaloneBrowserUrl).toHaveBeenCalled());
+    // 埋め込みは開かない。開くと同じサイトが二つ出る。
+    await waitFor(() => expect(browserApi.setEmbeddedBrowserVisible).toHaveBeenCalledWith(false));
+    expect(browserApi.openEmbeddedBrowser).not.toHaveBeenCalled();
+    // 大きいウィンドウが見ている頁を、この画面も引き継ぐ。
+    expect(await screen.findByDisplayValue("https://www.pixiv.net/users/15884098")).toBeInTheDocument();
+  });
+
+  it("opens the in-app browser when no large window is standing", async () => {
+    browserApi.getStandaloneBrowserUrl.mockResolvedValue(null);
+    // 埋め込みは枠の寸法が取れないと作らない。jsdom は 0 を返すので与える。
+    const originalElementFromPoint = document.elementFromPoint;
+    Object.defineProperty(document, "elementFromPoint", { configurable: true, value: () => null });
+    const bounds = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({
+      x: 0, y: 0, top: 0, left: 0, right: 900, bottom: 600, width: 900, height: 600, toJSON: () => ({}),
+    });
+    window.location.hash = "#/save/pixiv";
+    const page = renderSavePage();
+
+    await waitFor(() => expect(browserApi.openEmbeddedBrowser).toHaveBeenCalled());
+    page.unmount();
+    bounds.mockRestore();
+    if (originalElementFromPoint) Object.defineProperty(document, "elementFromPoint", { configurable: true, value: originalElementFromPoint });
+    else delete (document as Partial<Document>).elementFromPoint;
+  });
+});

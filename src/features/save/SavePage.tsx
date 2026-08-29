@@ -289,6 +289,22 @@ export default function SavePage() {
           : store.get<string>("fanbox_session_id"));
         if (cancelled) return;
         setAuthConnected(Boolean(value));
+        // **大きいウィンドウは、この画面より長生きする。**
+        // 切り離したまま別の画面へ行くと、片付けで閉じるのは埋め込みだけで、
+        // 大きいウィンドウはそのまま残る。切り離していたという記憶は
+        // 画面と一緒に消えるので、戻ってきたときに埋め込みも開き、**同じ
+        // サイトが二つの窓に出ていた**。残っているなら、その状態を引き継ぐ。
+        const standing = await getStandaloneBrowserUrl(source).catch(() => null);
+        if (cancelled) return;
+        if (standing) {
+          detachedRef.current = true;
+          setDetached(true);
+          setCurrentUrl(standing);
+          setAddress(standing);
+          rememberVisit(standing);
+          await setEmbeddedBrowserVisible(false).catch(() => undefined);
+          return;
+        }
         await positionBrowser(home);
         // `openEmbeddedBrowser` itself cannot be cancelled. If this task became
         // stale while IPC was in flight, tear down its late result before the
@@ -312,7 +328,7 @@ export default function SavePage() {
     return () => {
       cancelled = true;
     };
-  }, [positionBrowser, runtime, searchParams, source]);
+  }, [positionBrowser, rememberVisit, runtime, searchParams, source]);
   useEffect(() => {
     if (!runtime) return;
     const element = browserViewportRef.current;
@@ -555,25 +571,10 @@ export default function SavePage() {
     return () => window.clearInterval(watchdog);
   }, [detached, runtime, source]);
 
-  // On remount the large window may still be open; pick the handover back up
-  // instead of showing an in-app pane that nothing is driving.
-  useEffect(() => {
-    if (!runtime) return;
-    let cancelled = false;
-    getStandaloneBrowserUrl(source)
-      .then((url) => {
-        if (cancelled || !url) return;
-        setDetached(true);
-        setCurrentUrl(url);
-        setAddress(url);
-        rememberVisit(url);
-        void setEmbeddedBrowserVisible(false).catch(() => undefined);
-      })
-      .catch(() => undefined);
-    return () => {
-      cancelled = true;
-    };
-  }, [rememberVisit, runtime, source]);
+  // 開いたままの大きいウィンドウを引き継ぐ判断は、**埋め込みを作る前**の
+  // 初期化で行う（この上の `useEffect`）。ここにも同じ判断を置いていたころ、
+  // 作る側（`openEmbeddedBrowser` は作ると同時に表示する）と隠す側が競争し、
+  // 順番が入れ替わると**同じサイトが二つの窓に出た**。判断はひとつの場所で。
   const pasteUrl = async () => {
     try {
       const value = (await navigator.clipboard.readText()).trim();
