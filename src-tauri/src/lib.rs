@@ -263,6 +263,7 @@ pub fn run() -> tauri::Result<()> {
             commands::database::db_reorder_work_collection_members,
             commands::database::db_list_collections_for_work,
             commands::database::db_list_collections_for_person,
+            commands::database::db_list_collections_for_series,
             commands::database::db_generate_collection_suggestion,
             commands::database::db_list_collection_suggestions,
             commands::database::db_accept_collection_suggestion,

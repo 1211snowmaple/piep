@@ -51,7 +51,7 @@ import { demoFacets, searchDemoWorks } from "@/mocks/demoData";
 import { exportEntityZip } from "@/services/archiveApi";
 import { AuthorAssist } from "@/features/assist/AuthorAssist";
 import { CollectionCard } from "@/features/collections/CollectionCard";
-import { listCollectionsForPerson } from "@/services/collectionApi";
+import { listCollectionsForPerson, listCollectionsForSeries } from "@/services/collectionApi";
 import type { WorkCollectionSummary } from "@/types/collections";
 import {
   getAssetUrl,
@@ -307,15 +307,21 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
       const cursor = lastPage.nextCursor;
       return cursor && !allPages.slice(0, -1).some((page) => page.nextCursor === cursor) ? cursor : undefined;
     },
-    enabled: kind === "person" && tab === "series",
+    // **タブを開くまで待たない。** 見出しの件数はこの問い合わせの `total` から
+    // 出しているので、開いてから取りに行くと数字が遅れて現れる。1ページ分
+    // （60件）は開いたときに要るものでもあるので、先に取っておけば
+    // タブの中身も待たされない。
+    enabled: kind === "person",
     staleTime: 5 * 60_000,
   });
-  // 作者の作品を 1 件でも含むコレクション。作者詳細から、その人が関わっている
-  // まとまりへ直接辿れるようにする。
-  const personCollections = useQuery({
-    queryKey: ["collections-for-person", source, key],
-    queryFn: () => runtime ? listCollectionsForPerson(source, key) : Promise.resolve([] as WorkCollectionSummary[]),
-    enabled: kind === "person",
+  // この作者・このシリーズの作品を 1 件でも含むコレクション。詳細から、
+  // それが関わっているまとまりへ直接辿れるようにする。**作者にしか無いと、
+  // 同じ画面で作りが割れる。**
+  const entityCollections = useQuery({
+    queryKey: ["collections-for-entity", kind, source, key],
+    queryFn: () => runtime
+      ? (kind === "person" ? listCollectionsForPerson(source, key) : listCollectionsForSeries(source, key))
+      : Promise.resolve([] as WorkCollectionSummary[]),
     staleTime: 60_000,
   });
   const entityTags = useQuery({
@@ -486,7 +492,7 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
             <Tabs.List>
               <Tabs.Tab value="works" leftSection={<Icons.read size={IconSize.inline} />}>作品</Tabs.Tab>
               {kind === "person" && <Tabs.Tab value="series" leftSection={<Icons.series size={IconSize.inline} />} rightSection={authorSeriesTotal !== null ? <Badge size="xs" variant="light">{formatNumber(authorSeriesTotal)}</Badge> : undefined}>シリーズ</Tabs.Tab>}
-              {kind === "person" && personCollections.data && personCollections.data.length > 0 && <Tabs.Tab value="collections" leftSection={<Icons.collection size={IconSize.inline} />} rightSection={<Badge size="xs" variant="light">{formatNumber(personCollections.data.length)}</Badge>}>コレクション</Tabs.Tab>}
+              {entityCollections.data && entityCollections.data.length > 0 && <Tabs.Tab value="collections" leftSection={<Icons.collection size={IconSize.inline} />} rightSection={<Badge size="xs" variant="light">{formatNumber(entityCollections.data.length)}</Badge>}>コレクション</Tabs.Tab>}
               <Tabs.Tab value="history">プロフィール履歴</Tabs.Tab>
               <Tabs.Tab value="json">JSON</Tabs.Tab>
             </Tabs.List>
@@ -648,18 +654,16 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
                 </Stack>
               </Tabs.Panel>
             )}
-            {kind === "person" && (
-              <Tabs.Panel value="collections" pt="lg">
-                <Stack gap="sm">
-                  <Text size="sm" c="dimmed">{displayName}の作品を含むコレクションです。ほかの作者の作品が一緒に入っている場合もあります。</Text>
-                  {personCollections.isLoading ? <LoadingState /> : personCollections.error ? <ErrorState error={personCollections.error} retry={() => personCollections.refetch()} /> : (personCollections.data ?? []).length === 0
-                    ? <EmptyState icon={Icons.collection} title="コレクションはありません" description="この作者の作品は、まだどのコレクションにも入っていません。" />
-                    : <SimpleGrid cols={{ base: 1, md: 2 }}>{(personCollections.data ?? []).map((collection) => (
-                        <CollectionCard key={collection.id} collection={collection} />
-                      ))}</SimpleGrid>}
-                </Stack>
-              </Tabs.Panel>
-            )}
+            <Tabs.Panel value="collections" pt="lg">
+              <Stack gap="sm">
+                <Text size="sm" c="dimmed">{displayName}の作品を含むコレクションです。{kind === "person" ? "ほかの作者" : "ほかのシリーズ"}の作品が一緒に入っている場合もあります。</Text>
+                {entityCollections.isLoading ? <LoadingState /> : entityCollections.error ? <ErrorState error={entityCollections.error} retry={() => entityCollections.refetch()} /> : (entityCollections.data ?? []).length === 0
+                  ? <EmptyState icon={Icons.collection} title="コレクションはありません" description={`この${kind === "person" ? "作者" : "シリーズ"}の作品は、まだどのコレクションにも入っていません。`} />
+                  : <SimpleGrid cols={{ base: 1, md: 2 }}>{(entityCollections.data ?? []).map((collection) => (
+                      <CollectionCard key={collection.id} collection={collection} />
+                    ))}</SimpleGrid>}
+              </Stack>
+            </Tabs.Panel>
             <Tabs.Panel value="history" pt="lg"><Paper p="lg" withBorder>{versions.isLoading ? <LoadingState /> : <Timeline active={versions.data?.length ?? 0}>{versions.data?.map((version) => <Timeline.Item key={version.id} bullet={<Icons.versionHistory size={IconSize.inline} />} title={`バージョン ${version.version}`}><Text size="sm" c="dimmed">{version.changeSummary || "プロフィールを保存"}</Text><Text size="xs" c="dimmed" mt={4}>{formatDate(version.createdAt, true)} · {formatBytes(version.fileSizeBytes)}</Text></Timeline.Item>)}</Timeline>}</Paper></Tabs.Panel>
             <Tabs.Panel value="json" pt="lg">{tab !== "json" ? null : profileJson.isLoading ? <LoadingState /> : profileJson.error ? <ErrorState error={profileJson.error} retry={() => profileJson.refetch()} /> : <BoundedJsonView value={profileJson.data ?? {}} />}</Tabs.Panel>
           </Tabs>
@@ -679,8 +683,9 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
 }
 
 function parseEntityTab(value: string | null, kind: "person" | "series"): "works" | "series" | "collections" | "history" | "json" {
-  if (value === "history" || value === "json") return value;
-  if ((value === "series" || value === "collections") && kind === "person") return value;
+  if (value === "history" || value === "json" || value === "collections") return value;
+  // シリーズの中にシリーズは無い。コレクションは作者にもシリーズにもある。
+  if (value === "series" && kind === "person") return value;
   return "works";
 }
 

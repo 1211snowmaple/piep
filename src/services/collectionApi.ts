@@ -132,3 +132,8 @@ export function dismissCollectionSuggestion(suggestionId: string): Promise<boole
 export function listCollectionsForPerson(source: string, personKey: string): Promise<WorkCollectionSummary[]> {
   return invoke<WorkCollectionSummary[]>("db_list_collections_for_person", { source, personKey });
 }
+
+/** シリーズの作品を 1 件でも含むコレクション。作者に対するものと対になる。 */
+export function listCollectionsForSeries(source: string, seriesKey: string): Promise<WorkCollectionSummary[]> {
+  return invoke<WorkCollectionSummary[]>("db_list_collections_for_series", { source, seriesKey });
+}

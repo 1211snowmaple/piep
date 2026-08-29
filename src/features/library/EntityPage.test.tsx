@@ -16,8 +16,16 @@ const shelfApi = vi.hoisted(() => ({
   deleteSavedSearch: vi.fn(),
 }));
 const dbApi = vi.hoisted(() => ({ searchDownloadsV2: vi.fn(), getPerson: vi.fn(), getSeries: vi.fn() }));
+const collectionApi = vi.hoisted(() => ({
+  listCollectionsForPerson: vi.fn(),
+  listCollectionsForSeries: vi.fn(),
+}));
 
 vi.mock("@/services/shelfApi", () => shelfApi);
+vi.mock("@/services/collectionApi", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/services/collectionApi")>()),
+  ...collectionApi,
+}));
 vi.mock("@/services/dbApi", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/services/dbApi")>()),
   isTauriRuntime: () => true,
@@ -76,6 +84,19 @@ describe("author page", () => {
     });
     shelfApi.listEntitySeriesPage.mockResolvedValue({ items: [series()], nextCursor: null, total: 1 });
     shelfApi.listEntityTags.mockResolvedValue(tags);
+    collectionApi.listCollectionsForPerson.mockResolvedValue([]);
+    collectionApi.listCollectionsForSeries.mockResolvedValue([]);
+  });
+
+  /**
+   * シリーズの件数は、タブを開くまで取りに行っていなかった。数字はその
+   * 問い合わせの `total` から出しているので、**開いてから遅れて現れる**。
+   * 見出しに出す数字は、見出しが出た時点で揃っていること。
+   */
+  it("puts the series count on the tab without waiting for the tab to be opened", async () => {
+    renderAuthor();
+    const seriesTab = await screen.findByRole("tab", { name: /シリーズ/ });
+    await waitFor(() => expect(within(seriesTab).getByText("1")).toBeInTheDocument());
   });
 
   it("shows the tags this author uses, with counts", async () => {
@@ -260,6 +281,39 @@ describe("series page", () => {
       searchMeta: { engine: "sqlite-metadata", query: null, totalEstimate: 0, indexComplete: true, explanations: [] },
       facetsVersion: 0,
     });
+    shelfApi.listEntityTags.mockResolvedValue(tags);
+    collectionApi.listCollectionsForPerson.mockResolvedValue([]);
+    collectionApi.listCollectionsForSeries.mockResolvedValue([]);
+  });
+
+  /**
+   * コレクションへの入口は作者にしか無く、同じ画面で作りが割れていた。
+   * 辿る経路が `download_people` か `download_series` かの違いしかない。
+   */
+  it("opens the collections this series belongs to, the same way an author does", async () => {
+    collectionApi.listCollectionsForSeries.mockResolvedValue([{
+      id: "collection-1", name: "連作の棚", description: null, collectionKind: "unordered",
+      coverDownloadId: null, coverPath: null, coverMode: "mosaic", coverImagePath: null,
+      coverTiles: [], nameSource: "manual", track: "manual", revision: 1,
+      memberCount: 2, availableCount: 2, totalTextLength: 1200,
+      createdAt: "2026-08-01T00:00:00Z", updatedAt: "2026-08-01T00:00:00Z",
+    }]);
+    window.location.hash = "#/series/pixiv/s1?tab=collections";
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <MantineProvider>
+        <QueryClientProvider client={client}>
+          <AppRouter><EntityPage kind="series" /></AppRouter>
+        </QueryClientProvider>
+      </MantineProvider>,
+    );
+
+    const tab = await screen.findByRole("tab", { name: /コレクション/ });
+    expect(within(tab).getByText("1")).toBeInTheDocument();
+    expect(collectionApi.listCollectionsForSeries).toHaveBeenCalledWith("pixiv", "s1");
+    // 作者側の入口は、シリーズを開いたときには使わない。
+    expect(collectionApi.listCollectionsForPerson).not.toHaveBeenCalled();
+    expect(await screen.findByText("連作の棚")).toBeInTheDocument();
   });
 
   it("does not ask for author-only data", async () => {

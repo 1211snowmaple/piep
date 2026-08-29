@@ -1228,6 +1228,41 @@ impl Database {
         Ok(collections)
     }
 
+    /// シリーズの作品を 1 件でも含むコレクション。
+    ///
+    /// 作者に対する [`Self::list_collections_for_person`] と同じ役目で、辿る
+    /// 経路が `download_people` ではなく `download_series` になるだけである。
+    /// **片方だけにあると、同じ画面で作りが割れる。**
+    pub fn list_collections_for_series(
+        &self,
+        source: &str,
+        series_key: &str,
+    ) -> Result<Vec<WorkCollectionSummary>, String> {
+        let source = validate_work_key_part(source, "Source")?;
+        let series_key = validate_work_key_part(series_key, "Series key")?;
+        let conn = self.read_conn()?;
+        let mut stmt = conn
+            .prepare(&format!(
+                "{COLLECTION_SUMMARY_SELECT}
+                     WHERE EXISTS (
+                         SELECT 1 FROM work_collection_members sel
+                         JOIN download_series ds ON ds.download_id = sel.download_id
+                         WHERE sel.collection_id = c.id
+                           AND ds.series_source = ?1 AND ds.series_key = ?2
+                     ){COLLECTION_SUMMARY_TAIL}"
+            ))
+            .map_err(|e| format!("Failed to prepare series collections: {e}"))?;
+        let collections = stmt
+            .query_map(
+                params![source, series_key],
+                work_collection_summary_from_row,
+            )
+            .map_err(|e| format!("Failed to query series collections: {e}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("Failed to read series collections: {e}"))?;
+        Ok(collections)
+    }
+
     /// 本文・キャプションに現れる pixiv/FANBOX の作品 URL を解析し、
     /// コレクション候補生成で利用できる有向グラフとして更新する。
     pub fn refresh_work_links(&self, download_id: i64) -> Result<Vec<WorkLink>, String> {

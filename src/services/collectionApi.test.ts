@@ -8,6 +8,7 @@ import {
   addWorkCollectionMembers,
   generateCollectionSuggestion,
   listCollectionsForPerson,
+  listCollectionsForSeries,
   rejectCollectionSuggestion,
   reorderWorkCollectionMembers,
   suggestionNameOverride,
@@ -80,6 +81,16 @@ describe("collectionApi", () => {
     expect(invoke).toHaveBeenLastCalledWith("db_list_collections_for_person", {
       source: "fanbox",
       personKey: "creator-9",
+    });
+  });
+
+  /** シリーズにも同じ入口がある。作者にしか無いと、同じ画面で作りが割れる。 */
+  it("asks the series collections by the stable series key", async () => {
+    invoke.mockResolvedValue([]);
+    await listCollectionsForSeries("pixiv", "series-42");
+    expect(invoke).toHaveBeenLastCalledWith("db_list_collections_for_series", {
+      source: "pixiv",
+      seriesKey: "series-42",
     });
   });
 

@@ -6212,3 +6212,61 @@ fn saved_update_job_download_ids_survive_item_lookup_after_worker_restart() {
     assert_eq!(delta.changed_item.unwrap().status, "saved");
     assert_eq!(delta.latest_log.unwrap().message, "Saved");
 }
+
+/// シリーズからも、その作品が入っているコレクションへ辿れる。
+///
+/// 作者にはこの入口があったのにシリーズには無く、同じ画面で作りが割れていた。
+/// **経路が `download_people` か `download_series` かの違いしかない。**
+#[test]
+fn a_series_finds_the_collections_its_works_belong_to() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let first = insert_download_unindexed(
+        &db,
+        &storage,
+        "series-collection-1",
+        "連作の一話",
+        "連載作者",
+        &[],
+        "導入",
+    );
+    let second = insert_download_unindexed(
+        &db,
+        &storage,
+        "series-collection-2",
+        "連作の二話",
+        "連載作者",
+        &[],
+        "続き",
+    );
+    let outsider = insert_download_unindexed(
+        &db,
+        &storage,
+        "series-collection-3",
+        "関係のない話",
+        "別の作者",
+        &[],
+        "単発",
+    );
+    db.upsert_download_series(first, "pixiv", "saga", "連作", Some(1))
+        .unwrap();
+    db.upsert_download_series(second, "pixiv", "saga", "連作", Some(2))
+        .unwrap();
+
+    let inside = db
+        .create_collection_from_downloads("連作の棚", "unordered", &[second])
+        .unwrap();
+    // シリーズの作品を含まない棚は出てこない。
+    db.create_collection_from_downloads("よその棚", "unordered", &[outsider])
+        .unwrap();
+
+    let found = db.list_collections_for_series("pixiv", "saga").unwrap();
+    assert_eq!(found.len(), 1, "含む棚だけが返るはず: {found:?}");
+    assert_eq!(found[0].id, inside.summary.id);
+
+    // 別のシリーズ名では引けない。鍵の取り違えに気づけるようにしておく。
+    assert!(db
+        .list_collections_for_series("pixiv", "another")
+        .unwrap()
+        .is_empty());
+}

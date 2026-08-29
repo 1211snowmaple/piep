@@ -928,6 +928,18 @@ pub async fn db_list_collections_for_person(
 }
 
 #[tauri::command]
+pub async fn db_list_collections_for_series(
+    app: tauri::AppHandle,
+    source: String,
+    series_key: String,
+) -> Result<Vec<WorkCollectionSummary>, String> {
+    run_db_blocking(app, move |state| {
+        state.db.list_collections_for_series(&source, &series_key)
+    })
+    .await
+}
+
+#[tauri::command]
 pub async fn db_generate_collection_suggestion(
     app: tauri::AppHandle,
     request: CollectionSuggestionRequest,
