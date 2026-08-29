@@ -23,6 +23,10 @@ use crate::pixiv_api::token_manager::TokenManager;
 /// 1ページ30件として12,000件ぶん。実際の作者ページはこれに遠く届かない。
 const MAX_PAGES_FOLLOWED: usize = 400;
 
+/// 取得制限で断られたときに待つ最初の長さ。以後は倍にする。
+const API_RATE_LIMIT_DELAY: Duration = Duration::from_millis(750);
+/// 取得制限だけを理由に何度やり直すか。
+const API_RATE_LIMIT_RETRIES: u32 = 3;
 const API_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const API_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -1903,7 +1907,13 @@ impl AppPixivAPI {
 
         match WEBVIEW_NOVEL_REGEX.captures(&text).and_then(|c| c.get(1)) {
             Some(json_str) => parse_into(json_str.as_str()),
-            None => Err(PixivError::UnintelligibleResponse { body: text }),
+            None => {
+                crate::pixiv_api::error::log_response_body(
+                    "pixiv の応答から本文を読み取れません",
+                    &text,
+                );
+                Err(PixivError::UnintelligibleResponse { body: text })
+            }
         }
     }
 
@@ -1993,10 +2003,27 @@ impl AppPixivAPI {
         with_auth: bool,
     ) -> Result<T, PixivError> {
         allowed_next_url(next_url, &self.hosts)?;
-        let r = self
-            .do_api_request(HttpMethod::GET, next_url, None, None, None, with_auth)
-            .await?;
-        parse_response_into(r).await
+        // **取得制限は「今は無理」であって「もう無い」ではない。** 即座に
+        // 諦めていたころは、400ページまで辿る一覧の途中で一度断られただけで、
+        // そこまでの取得が丸ごと無駄になり全体が失敗した。FANBOX 側は最初から
+        // これを持っていて（`api_get_paged`）、pixiv だけが素通しだった。
+        let mut backoff = API_RATE_LIMIT_DELAY;
+        for attempt in 0..=API_RATE_LIMIT_RETRIES {
+            let response = self
+                .do_api_request(HttpMethod::GET, next_url, None, None, None, with_auth)
+                .await?;
+            match parse_response_into::<T>(response).await {
+                Err(PixivError::RateLimited { .. }) if attempt < API_RATE_LIMIT_RETRIES => {
+                    log::warn!(
+                        "pixiv に取得を断られました。{backoff:?} 待って続きから辿り直します"
+                    );
+                    tokio::time::sleep(backoff).await;
+                    backoff *= 2;
+                }
+                other => return other,
+            }
+        }
+        unreachable!("the loop returns on its last attempt")
     }
 }
 

@@ -1416,6 +1416,125 @@ impl Database {
     /// Written in the same SQLite transaction as all restored rows. Therefore
     /// startup can unambiguously distinguish COMMIT from rollback even if the
     /// process stops immediately after SQLite returns from COMMIT.
+    /// 分割バックアップが、いま何パートまで入ったか。
+    ///
+    /// **パートをまたぐ復元は原子的にならない。** 10パートのうち5で落ちると、
+    /// 1〜4はコミット済み・5はロールバック・6〜10は未着手のまま残る。
+    /// 失敗の文面は「同じマニフェストで再実行すれば安全に再開できる」と言うが、
+    /// 実際には毎回パート0からやり直していたし、**復元が未完了であること自体を
+    /// 記録している場所がどこにも無かった**ので、利用者が再実行しなければ
+    /// その状態が永久に残る。
+    ///
+    /// 戻り値は、すでに終わっているパート数。
+    pub(crate) fn begin_restore_manifest(
+        &self,
+        manifest_id: &str,
+        manifest_path: &str,
+        total_parts: i64,
+    ) -> Result<i64, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS restore_manifest_journal (
+                id TEXT PRIMARY KEY,
+                manifest_path TEXT NOT NULL,
+                total_parts INTEGER NOT NULL,
+                completed_parts INTEGER NOT NULL DEFAULT 0,
+                started_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+             )",
+        )
+        .map_err(|e| format!("Restore manifest journal schema failed: {e}"))?;
+        let now = chrono::Utc::now().to_rfc3339();
+        let existing: Option<i64> = conn
+            .query_row(
+                "SELECT completed_parts FROM restore_manifest_journal WHERE id = ?1",
+                params![manifest_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| format!("Restore manifest journal read failed: {e}"))?;
+        if let Some(completed) = existing {
+            conn.execute(
+                "UPDATE restore_manifest_journal
+                    SET manifest_path = ?2, total_parts = ?3, updated_at = ?4
+                  WHERE id = ?1",
+                params![manifest_id, manifest_path, total_parts, now],
+            )
+            .map_err(|e| format!("Restore manifest journal refresh failed: {e}"))?;
+            checkpoint_for_durability(&conn, "restore manifest resume")?;
+            return Ok(completed.clamp(0, total_parts));
+        }
+        conn.execute(
+            "INSERT INTO restore_manifest_journal
+                (id, manifest_path, total_parts, completed_parts, started_at, updated_at)
+             VALUES (?1, ?2, ?3, 0, ?4, ?4)",
+            params![manifest_id, manifest_path, total_parts, now],
+        )
+        .map_err(|e| format!("Restore manifest journal create failed: {e}"))?;
+        checkpoint_for_durability(&conn, "restore manifest start")?;
+        Ok(0)
+    }
+
+    pub(crate) fn advance_restore_manifest(
+        &self,
+        manifest_id: &str,
+        completed_parts: i64,
+    ) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE restore_manifest_journal
+                SET completed_parts = ?2, updated_at = ?3
+              WHERE id = ?1",
+            params![
+                manifest_id,
+                completed_parts,
+                chrono::Utc::now().to_rfc3339()
+            ],
+        )
+        .map_err(|e| format!("Restore manifest journal advance failed: {e}"))?;
+        checkpoint_for_durability(&conn, "restore manifest advance")?;
+        Ok(())
+    }
+
+    pub(crate) fn finish_restore_manifest(&self, manifest_id: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM restore_manifest_journal WHERE id = ?1",
+            params![manifest_id],
+        )
+        .map_err(|e| format!("Restore manifest journal cleanup failed: {e}"))?;
+        Ok(())
+    }
+
+    /// 途中で終わっている分割復元。起動時に利用者へ伝えるために読む。
+    pub fn unfinished_restore_manifests(&self) -> Result<Vec<(String, i64, i64)>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let exists: bool = conn
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'restore_manifest_journal'",
+                [],
+                |_| Ok(true),
+            )
+            .optional()
+            .map_err(|e| format!("Restore manifest journal probe failed: {e}"))?
+            .unwrap_or(false);
+        if !exists {
+            return Ok(Vec::new());
+        }
+        let mut statement = conn
+            .prepare(
+                "SELECT manifest_path, completed_parts, total_parts
+                   FROM restore_manifest_journal
+                  ORDER BY started_at",
+            )
+            .map_err(|e| format!("Restore manifest journal list failed: {e}"))?;
+        let rows = statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .map_err(|e| format!("Restore manifest journal list failed: {e}"))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("Restore manifest journal list failed: {e}"))
+    }
+
     pub(crate) fn mark_restore_journal_committed(&self, journal_id: &str) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let changed = conn

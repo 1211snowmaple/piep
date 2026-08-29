@@ -134,7 +134,22 @@ impl TokenManager {
             )
             .header("User-Agent", AUTH_USER_AGENT);
         let response = request.send().await?;
-        let (_, body) = read_response_text_limited(response, MAX_TOKEN_RESPONSE_BYTES).await?;
+        // **状態コードを捨てない。** 捨てていたころは、429（取得制限）も
+        // 401（再認証が要る）も 5xx（向こうの不調）も、`access_token` が
+        // 無いという理由で全部「レスポンスを解析できませんでした」になった。
+        // 認証を続けられるかどうかを支える最重要の経路なのに、呼び出し元は
+        // 何が起きたのか言い分けられない。
+        let (status, body) = read_response_text_limited(response, MAX_TOKEN_RESPONSE_BYTES).await?;
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            return Err(PixivError::RateLimited { body });
+        }
+        if !status.is_success() {
+            crate::pixiv_api::error::log_response_body(
+                &format!("pixiv のトークン更新が失敗しました（{status}）"),
+                &body,
+            );
+            return Err(PixivError::ErrResponse { body });
+        }
         let parsed: TokenRefreshResult = parse_into(body)?;
 
         let access_token = parsed.access_token;

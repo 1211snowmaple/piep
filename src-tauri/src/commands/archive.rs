@@ -4098,10 +4098,39 @@ pub async fn import_multipart_backup_internal(
 
     let _import_guard = IMPORT_LOCK.lock().await;
     let _library_write_guard = state.library_gate.clone().write_owned().await;
+
+    // **どこまで入ったかを残す。** パートごとの取り込みはそれぞれ原子的だが、
+    // パートをまたぐと原子的にならない。途中で落ちれば「バックアップ由来の
+    // 作品」と「元の作品」が混ざった棚が残るのに、それを記録している場所が
+    // どこにも無かった。身元はパートの指紋から作るので、同じ書庫なら置き場所が
+    // 変わっても同じになる。
+    let manifest_id = multipart_manifest_id(&manifest);
+    let total_parts = manifest.parts.len() as i64;
+    let completed = state
+        .db
+        .begin_restore_manifest(&manifest_id, &manifest_path, total_parts)?;
+    if completed > 0 {
+        log::info!(
+            "分割復元を再開します（{completed}/{total_parts} パートまで済み）: {manifest_path}"
+        );
+    }
+
     let mut imported = 0i64;
+    let mut done = completed;
     for (index, path) in paths.into_iter().enumerate() {
+        // 済んだパートはやり直さない。取り込み自体は冪等だが、900/1000 で
+        // 失敗したときに 900 パートを読み直すのは、待つ側には失敗と変わらない。
+        if (index as i64) < completed {
+            continue;
+        }
         match import_zip_locked(state.clone(), path.to_string_lossy().to_string(), None).await {
-            Ok(count) => imported = imported.saturating_add(count),
+            Ok(count) => {
+                imported = imported.saturating_add(count);
+                done += 1;
+                if let Err(error) = state.db.advance_restore_manifest(&manifest_id, done) {
+                    log::warn!("分割復元の進み具合を記録できません: {error}");
+                }
+            }
             Err(error) => {
                 return Err(format!(
                     "Multipart restore stopped after {index} of {} parts: {error}. Re-run the same manifest to resume safely.",
@@ -4110,13 +4139,41 @@ pub async fn import_multipart_backup_internal(
             }
         }
     }
-    if imported != manifest.total_works {
+    if done != total_parts {
+        return Err(format!(
+            "Multipart restore did not finish: {done} of {total_parts} parts"
+        ));
+    }
+    state.db.finish_restore_manifest(&manifest_id)?;
+    // 再開したときの `imported` は、この回で入れたぶんだけである。件数の
+    // 突き合わせは一度で通したときにしかできない。
+    if completed == 0 && imported != manifest.total_works {
         return Err(format!(
             "Multipart restore count mismatch: expected {}, imported {imported}",
             manifest.total_works
         ));
     }
     Ok(imported)
+}
+
+/// 同じ書庫なら、置き場所が変わっても同じ身元になる。
+fn multipart_manifest_id(manifest: &MultipartBackupManifest) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(manifest.total_works.to_string().as_bytes());
+    for part in &manifest.parts {
+        hasher.update(
+            b"
+",
+        );
+        hasher.update(part.sha256.as_bytes());
+    }
+    let digest = hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("multipart-{digest}")
 }
 
 fn work_needs_reimport(db: &Database, source: &str, source_id: &str) -> Result<bool, String> {
@@ -5748,6 +5805,9 @@ mod tests {
                 .title,
             "Second"
         );
+        // 全パートが入り切ったら、途中経過の記録は残さない。残っていると
+        // 起動のたびに「復元が途中で終わっています」と言い続けることになる。
+        assert!(state.db.unfinished_restore_manifests().unwrap().is_empty());
         drop(state);
         remove_temp_dir(&base);
     }

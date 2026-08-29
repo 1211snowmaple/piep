@@ -136,6 +136,18 @@ pub fn run() -> tauri::Result<()> {
             for unresolved in commands::archive::recover_interrupted_restores(&state) {
                 log::error!("前回の復元を回復できていません: {unresolved}");
             }
+            // 分割復元はパートをまたぐと原子的にならない。途中で終わっていれば
+            // 棚は「書庫由来」と「元のまま」が混ざった状態なので、黙っていない。
+            match state.db.unfinished_restore_manifests() {
+                Ok(unfinished) => {
+                    for (path, done, total) in unfinished {
+                        log::warn!(
+                            "分割バックアップの復元が途中で終わっています（{done}/{total} パート）。同じマニフェストをもう一度開くと続きから再開します: {path}"
+                        );
+                    }
+                }
+                Err(error) => log::warn!("分割復元の記録を読めません: {error}"),
+            }
             if let Err(e) = state.db.recover_update_jobs_on_startup() {
                 log::warn!("Failed to recover update jobs: {}", e);
             }

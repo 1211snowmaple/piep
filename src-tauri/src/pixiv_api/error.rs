@@ -1,5 +1,30 @@
 //! エラー型と共有型（pixivpy3.utils の移植版）。
 
+/// 取得元の応答を、記録にだけ残す。
+///
+/// 文面から本文を外したぶん、**どこにも残らなくなっては調べようがない。**
+/// 記録は開発者が読むものなので中身をそのまま置くが、長さは切る -
+/// 取得ページ全体が入りうるので、切らないとログが一件で埋まる。
+pub(crate) fn log_response_body(context: &str, body: &str) {
+    const MAX_LOGGED: usize = 2_000;
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        log::warn!("{context}: 応答は空でした");
+        return;
+    }
+    let cut = trimmed
+        .char_indices()
+        .map(|(index, _)| index)
+        .take_while(|index| *index <= MAX_LOGGED)
+        .last()
+        .unwrap_or(0);
+    if cut < trimmed.len() {
+        log::warn!("{context}: {}…（以下略）", &trimmed[..cut]);
+    } else {
+        log::warn!("{context}: {trimmed}");
+    }
+}
+
 /// 中身を表に出さない文字列。
 ///
 /// `PixivError` は `std::error::Error` なので `Debug` を外せない。しかし
@@ -72,13 +97,19 @@ pub enum PixivError {
         message: String,
     },
     /// レスポンスにエラーが含まれている場合。
-    #[error("APIレスポンスにエラーが含まれています: {body}")]
+    ///
+    /// 応答本文は記録には残すが、文面には混ぜない（`RateLimited` と同じ方針）。
+    #[error("取得元がエラーを返しました。時間をおいてからやり直してください")]
     ErrResponse {
         /// レスポンスボディ。
         body: String,
     },
     /// 解析不能なレスポンス。
-    #[error("レスポンスを解析できませんでした: {body}")]
+    ///
+    /// **本文を文面に混ぜない。** ここに入るのは、正規表現が当たらなかった
+    /// ときの取得ページ**全体**（最大64MB）でありうる。それがそのまま画面の
+    /// エラー文言になっていた。
+    #[error("取得元の応答を読み取れませんでした。取得元の作りが変わった可能性があります")]
     UnintelligibleResponse {
         /// レスポンスボディ。
         body: String,
@@ -93,7 +124,7 @@ pub enum PixivError {
         body: String,
     },
     /// 見つかりません（404）。
-    #[error("リソースが見つかりませんでした: {body}")]
+    #[error("取得元に見つかりませんでした。削除されたか、非公開になった可能性があります")]
     NotFound {
         /// レスポンスボディ。
         body: String,
@@ -144,13 +175,30 @@ mod tests {
         assert!(err.to_string().contains("認証が必要です"));
     }
 
+    /// 応答本文は文面へ混ぜない。`RateLimited` と同じ方針である。
+    ///
+    /// `UnintelligibleResponse` に入るのは、正規表現が当たらなかったときの
+    /// 取得ページ**全体**でありうる。それが画面のエラー文言になっていた。
     #[test]
-    fn display_err_response() {
-        let err = PixivError::ErrResponse {
-            body: "invalid request".to_string(),
-        };
-        assert!(err.to_string().contains("invalid request"));
-        assert!(err.to_string().contains("エラー"));
+    fn response_bodies_never_reach_the_message() {
+        for err in [
+            PixivError::ErrResponse {
+                body: "invalid request".to_string(),
+            },
+            PixivError::NotFound {
+                body: "invalid request".to_string(),
+            },
+            PixivError::UnintelligibleResponse {
+                body: "invalid request".to_string(),
+            },
+        ] {
+            let displayed = err.to_string();
+            assert!(
+                !displayed.contains("invalid request"),
+                "leaked: {displayed}"
+            );
+            assert!(!displayed.is_empty());
+        }
     }
 
     #[test]

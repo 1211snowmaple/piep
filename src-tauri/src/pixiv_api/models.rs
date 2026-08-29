@@ -680,6 +680,10 @@ pub async fn parse_response_into<T: DeserializeOwned>(
                 // If it failed to parse, check if it's an error response
                 if let PixivError::Serde { error, body } = e {
                     if is_error_response(&body) {
+                        crate::pixiv_api::error::log_response_body(
+                            "pixiv がエラーを返しました",
+                            &body,
+                        );
                         PixivError::ErrResponse { body }
                     } else {
                         PixivError::Serde { error, body }
