@@ -295,6 +295,53 @@ fn count_missing_reference(integrity: &mut LibraryFileIntegrity, kind: i64) {
     }
 }
 
+/// ライブラリが**どこかの列から名指ししている**ファイルを、ひとつの集合にする。
+///
+/// 列は [`check_library_file_integrity`] が UNION しているものと同じである。
+/// 孤立ファイルの数え上げは長いあいだ `assets.local_path` だけを見ていて、
+/// 表紙（`downloads.cover_path`）も本文の記録（`json_path`）も「未参照」に
+/// 数えていた。**利用者には消してよいゴミとして 462.9MB が見えていた。**
+/// 実際に指されていないのは版が上がった作品の古い `original.json` だけだった。
+///
+/// 比べ方も揃える。DB は Windows の拡張長接頭辞を付けて持っているが、歩いて
+/// 拾う側は付いていない。剥がしてから、大文字小文字を無視して比べる。
+fn referenced_library_paths(conn: &Connection) -> Result<HashSet<String>, String> {
+    let mut statement = conn
+        .prepare(
+            "SELECT path FROM (
+                SELECT d.json_path AS path FROM downloads d
+                UNION ALL SELECT d.original_json_path FROM downloads d
+                UNION ALL SELECT d.cover_path FROM downloads d
+                UNION ALL SELECT v.json_path FROM download_versions v
+                UNION ALL SELECT v.original_json_path FROM download_versions v
+                UNION ALL SELECT a.local_path FROM assets a
+                UNION ALL SELECT p.icon_path FROM people p
+                UNION ALL SELECT p.cover_path FROM people p
+                UNION ALL SELECT s.cover_path FROM series s
+                UNION ALL SELECT e.json_path FROM entity_versions e
+                UNION ALL SELECT c.cover_image_path FROM work_collections c
+             ) WHERE path IS NOT NULL AND TRIM(path) != ''",
+        )
+        .map_err(|error| format!("Referenced path query prepare failed: {error}"))?;
+    let rows = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|error| format!("Referenced path query failed: {error}"))?;
+    let mut paths = HashSet::new();
+    for row in rows {
+        let path = row.map_err(|error| format!("Referenced path row failed: {error}"))?;
+        paths.insert(comparable_library_path(Path::new(&path)));
+    }
+    Ok(paths)
+}
+
+/// 拡張長接頭辞（`\\?\`）を剥がし、大文字小文字を無視できる形にする。
+fn comparable_library_path(path: &Path) -> String {
+    const EXTENDED_LENGTH_PREFIX: &str = r"\\?\";
+    let text = path.to_string_lossy();
+    let trimmed = text.strip_prefix(EXTENDED_LENGTH_PREFIX).unwrap_or(&text);
+    trimmed.to_lowercase()
+}
+
 /// Compare every path stored in SQLite with the actual storage tree without
 /// collecting all paths in RAM. `kind` is 0 for JSON, 1 for work assets, and
 /// 2 for profile/series images. Duplicate DB references are intentionally
@@ -5731,17 +5778,21 @@ impl Database {
             check_library_file_integrity(&conn, &self.storage_dir, app_data)?
         };
         report(5, "storage-scan");
-        let asset_lookup_conn = self.read_conn()?;
-        let mut asset_lookup = asset_lookup_conn
-            .prepare("SELECT 1 FROM assets WHERE local_path = ?1 LIMIT 1")
-            .map_err(|error| format!("Asset diagnostic lookup prepare failed: {error}"))?;
-        let mut is_known_asset = |path: &Path| {
-            asset_lookup
-                .query_row(params![path.to_string_lossy().as_ref()], |_| Ok(()))
-                .optional()
-                .map(|row| row.is_some())
-                .map_err(|error| format!("Asset diagnostic lookup failed: {error}"))
+        // **「参照されている」を `assets` だけで決めない。** 表紙は
+        // `downloads.cover_path`、本文の記録は `json_path`、古い版は
+        // `download_versions` が指している。`assets` しか見ていなかったころ、
+        // 5,410 作品の棚で 3,628 件・462.9MB が「保存フォルダーにある未参照
+        // ファイル」として出ていた。実際に指されていないのは、版が上がった
+        // 作品の古い `original.json` 3 件だけだった。
+        //
+        // 一件ずつ問い合わせるのもやめる。13,000 ファイルに 13,000 回の
+        // 問い合わせを投げるより、一度集めて突き合わせるほうが速い。
+        let referenced = {
+            let conn = self.read_conn()?;
+            referenced_library_paths(&conn)?
         };
+        let mut is_known_asset =
+            |path: &Path| Ok(referenced.contains(&comparable_library_path(path)));
         let diagnostic_file_stats = collect_diagnostic_file_stats(
             &self.storage_dir,
             &app_data.join("search"),

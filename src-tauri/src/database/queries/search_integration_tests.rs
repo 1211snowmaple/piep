@@ -6270,3 +6270,67 @@ fn a_series_finds_the_collections_its_works_belong_to() {
         .unwrap()
         .is_empty());
 }
+
+/// 「保存フォルダーにある未参照ファイル」は、`assets` だけで決めてはいけない。
+///
+/// 表紙は `downloads.cover_path`、本文の記録は `json_path`、古い版は
+/// `download_versions` が指している。`assets` しか見ていなかったころ、5,410
+/// 作品の棚で **3,628 件・462.9MB が「未参照」として出ていた**。実際に
+/// 指されていないのは、版が上がった作品の古い `original.json` 3 件だけだった。
+#[test]
+fn a_file_named_by_any_column_is_not_counted_as_an_orphan() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let id = insert_download_unindexed(
+        &db,
+        &storage,
+        "orphan-scan",
+        "表紙のある作品",
+        "作者",
+        &[],
+        "本文",
+    );
+
+    // 表紙は `assets` ではなく `downloads.cover_path` が指す形にする。
+    let cover = storage.join("pixiv/orphan-scan/v1/data_assets/cover/front.jpg");
+    std::fs::create_dir_all(cover.parent().unwrap()).unwrap();
+    std::fs::write(&cover, b"jpeg").unwrap();
+    {
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE downloads SET cover_path = ?1 WHERE id = ?2",
+            params![cover.to_string_lossy().as_ref(), id],
+        )
+        .unwrap();
+    }
+
+    let referenced = {
+        let conn = db.read_conn().unwrap();
+        referenced_library_paths(&conn).unwrap()
+    };
+    assert!(
+        referenced.contains(&comparable_library_path(&cover)),
+        "表紙が集合に入っていない: {referenced:?}"
+    );
+
+    // 誰も指していないファイルは、これまでどおり数える。
+    let stray = storage.join("pixiv/orphan-scan/v1/data_assets/cover/stray.jpg");
+    std::fs::write(&stray, b"jpeg").unwrap();
+    assert!(!referenced.contains(&comparable_library_path(&stray)));
+}
+
+/// 拡張長接頭辞の有無で取り違えない。DB は付けて持ち、歩いて拾う側は付けない。
+#[test]
+fn the_extended_length_prefix_does_not_split_one_file_into_two() {
+    let plain = Path::new(r"C:\lib\downloads\pixiv\1\v1\cover.jpg");
+    let extended = Path::new(r"\\?\C:\lib\downloads\pixiv\1\v1\cover.jpg");
+    assert_eq!(
+        comparable_library_path(plain),
+        comparable_library_path(extended)
+    );
+    let shouting = Path::new(r"C:\LIB\Downloads\PIXIV\1\V1\Cover.JPG");
+    assert_eq!(
+        comparable_library_path(plain),
+        comparable_library_path(shouting)
+    );
+}
