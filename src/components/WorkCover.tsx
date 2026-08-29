@@ -36,6 +36,11 @@ export function WorkCover({ work, variant = "card", className }: { work: WorkCov
           src={cover}
           alt={`${work.title}の表紙`}
           className="work-cover__image"
+          // Mantine Image defaults to `cover`. The gallery frame happens to
+          // be close to a novel-cover ratio, so that crop was hard to notice;
+          // the wider compact frame exposed it. Set the component variable
+          // explicitly instead of relying on stylesheet order.
+          fit="contain"
           loading={variant === "detail" ? "eager" : "lazy"}
           decoding="async"
           onError={() => setFailed(true)}

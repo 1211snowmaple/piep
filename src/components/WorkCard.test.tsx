@@ -119,6 +119,27 @@ describe("WorkCard", () => {
     expect(screen.getByRole("button", { name: "雨上がりの図書室で：更新監視をオフにする" })).toHaveAttribute("aria-pressed", "true");
   });
 
+  it("shows the full caption and series on hover in both card layouts", async () => {
+    const caption = demoWorks[0].excerpt as string;
+    const series = demoWorks[0].seriesTitle as string;
+    const card = renderCard();
+
+    const captionElement = screen.getByText(caption);
+    fireEvent.mouseEnter(captionElement);
+    expect(await screen.findByRole("tooltip")).toHaveTextContent(caption);
+    fireEvent.mouseLeave(captionElement);
+    card.unmount();
+
+    const row = renderCard({ compact: true });
+    fireEvent.mouseEnter(screen.getByRole("button", { name: `シリーズ「${series}」を開く` }));
+    expect(await screen.findByRole("tooltip")).toHaveTextContent(series);
+    row.unmount();
+
+    renderCard();
+    fireEvent.mouseEnter(screen.getByRole("button", { name: `シリーズ「${series}」を開く` }));
+    expect(await screen.findByRole("tooltip")).toHaveTextContent(series);
+  });
+
   it("only offers the version chip once a work has more than one revision", () => {
     const single = renderCard({ work: { ...demoWorks[0], currentVersion: 1 } });
     expect(screen.queryByRole("button", { name: /バージョン履歴/ })).toBeNull();

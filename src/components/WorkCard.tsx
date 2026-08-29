@@ -69,8 +69,7 @@ function SeriesLink({ work, className, interactive = true }: { work: DownloadEnt
   if (!work.seriesTitle) return null;
   const key = work.seriesId;
   const label = <Text className={["work-card__series line-clamp-1", className].filter(Boolean).join(" ")}>{work.seriesTitle}</Text>;
-  if (!key) return label;
-  return (
+  const content = !key ? label : (
     <UnstyledButton
       className="work-card__series-link"
       aria-label={`シリーズ「${work.seriesTitle}」を開く`}
@@ -80,6 +79,11 @@ function SeriesLink({ work, className, interactive = true }: { work: DownloadEnt
     >
       {label}
     </UnstyledButton>
+  );
+  return (
+    <Tooltip label={work.seriesTitle} multiline maw={480} openDelay={350} withArrow disabled={!interactive}>
+      {content}
+    </Tooltip>
   );
 }
 
@@ -314,7 +318,11 @@ export const WorkCard = memo(function WorkCard({
             <span className="work-card__identity-divider" aria-hidden />
             <ProviderMark provider={work.source} compact className="work-card__provider" />
           </div>
-          {work.excerpt && <Text size="xs" c="dimmed" className="line-clamp-2 work-card__excerpt">{excerpt}</Text>}
+          {work.excerpt && (
+            <Tooltip label={excerpt} multiline maw={480} openDelay={350} withArrow disabled={selectionMode}>
+              <Text size="xs" c="dimmed" className="line-clamp-2 work-card__excerpt">{excerpt}</Text>
+            </Tooltip>
+          )}
           <SearchMatchReason work={work} />
           {work.tags.length > 0 && <div className="work-card__tagslot"><TagRow tags={work.tags} interactive={!selectionMode} /></div>}
         </div>
