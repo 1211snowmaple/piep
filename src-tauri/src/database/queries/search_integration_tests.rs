@@ -2283,7 +2283,7 @@ fn semantic_prune_clears_orphans_when_library_is_empty() {
             .unwrap();
     }
 
-    assert!(db.prune_semantic_index().unwrap() > 0);
+    assert!(db.prune_search_indexes().unwrap() > 0);
     assert_eq!(
         crate::database::semantic_index::status(&storage).indexed_chunks,
         0

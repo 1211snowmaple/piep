@@ -211,92 +211,11 @@ impl FanboxAPI {
         Ok(resp.body)
     }
 
-    /// 3. 単一投稿の詳細取得
-    pub async fn get_post(&self, post_id: &str) -> Result<FanboxPost, FanboxError> {
-        let url = format!("https://api.fanbox.cc/post.info?postId={}", post_id);
-        let resp: FanboxResponse<FanboxPost> = self.api_get(&url).await?;
-        Ok(resp.body)
-    }
-
     /// 投稿APIは追加フィールドや投稿種別ごとの差が大きいため、保存経路では
     /// 構造を失わない生のJSONを利用する。
     pub async fn get_post_value(&self, post_id: &str) -> Result<serde_json::Value, FanboxError> {
         let url = format!("https://api.fanbox.cc/post.info?postId={}", post_id);
         let resp: FanboxResponse<serde_json::Value> = self.api_get(&url).await?;
-        Ok(resp.body)
-    }
-
-    /// 4. 支援中クリエイターの投稿一覧
-    pub async fn list_supporting_posts(
-        &self,
-        limit: Option<u32>,
-    ) -> Result<FanboxPostList, FanboxError> {
-        let limit = limit.unwrap_or(20);
-        let url = format!("https://api.fanbox.cc/post.listSupporting?limit={}", limit);
-        let resp: FanboxResponse<FanboxPostList> = self.api_get(&url).await?;
-        Ok(resp.body)
-    }
-
-    /// 5. 支援中プラン一覧
-    pub async fn list_supporting_plans(&self) -> Result<Vec<FanboxPlan>, FanboxError> {
-        let url = "https://api.fanbox.cc/plan.listSupporting";
-        let resp: FanboxResponse<Vec<FanboxPlan>> = self.api_get(url).await?;
-        Ok(resp.body)
-    }
-
-    /// 6. クリエイターの投稿ページネーションURLの一覧取得
-    pub async fn paginate_creator_posts(
-        &self,
-        creator_id: &str,
-    ) -> Result<Vec<String>, FanboxError> {
-        let url = format!(
-            "https://api.fanbox.cc/post.paginateCreator?creatorId={}",
-            creator_id
-        );
-        let resp: FanboxPaginatedCreatorPosts = self.api_get(&url).await?;
-
-        let mut urls = Vec::new();
-        if let Some(arr) = resp.body.as_array() {
-            for val in arr {
-                if let Some(s) = val.as_str() {
-                    urls.push(s.to_string());
-                }
-            }
-        } else {
-            log::warn!(
-                "post.paginateCreator returned non-array body: {:?}",
-                resp.body
-            );
-        }
-        Ok(urls)
-    }
-
-    /// 7. クリエイターの投稿一覧取得（特定のURLまたはパラメータから）
-    pub async fn list_creator_posts(
-        &self,
-        creator_id: &str,
-        limit: Option<u32>,
-    ) -> Result<FanboxPostList, FanboxError> {
-        let limit = limit.unwrap_or(20);
-        let url = format!(
-            "https://api.fanbox.cc/post.listCreator?creatorId={}&limit={}",
-            creator_id, limit
-        );
-        let resp: FanboxResponse<FanboxPostList> = self.api_get(&url).await?;
-        Ok(resp.body)
-    }
-
-    /// ホームタイムラインの投稿一覧取得
-    pub async fn list_home_posts(&self, limit: Option<u32>) -> Result<FanboxPostList, FanboxError> {
-        let limit = limit.unwrap_or(20);
-        let url = format!("https://api.fanbox.cc/post.listHome?limit={}", limit);
-        let resp: FanboxResponse<FanboxPostList> = self.api_get(&url).await?;
-        Ok(resp.body)
-    }
-
-    /// next_url またはページネーションURLから汎用的に投稿リストを取得
-    pub async fn get_posts_by_url(&self, url: &str) -> Result<FanboxPostList, FanboxError> {
-        let resp: FanboxResponse<FanboxPostList> = self.api_get(url).await?;
         Ok(resp.body)
     }
 

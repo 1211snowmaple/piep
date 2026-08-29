@@ -6609,11 +6609,11 @@ impl Database {
     /// Runs SQLite's lightweight planner maintenance, and optionally performs
     /// an explicit compaction. Compaction is never automatic: it can require a
     /// temporary copy roughly as large as the database and blocks writers.
-    /// 意味索引から、実在しない作品の行を落とす。
+    /// 二つの索引から、実在しない作品の行を落とす。
     ///
     /// 実在する id の**全体**を渡す必要があるので、ここで読んでから渡す。
     /// 部分集合を渡すと、渡さなかった分が全部消える。
-    fn prune_semantic_index(&self) -> Result<usize, String> {
+    fn prune_search_indexes(&self) -> Result<usize, String> {
         let conn = self.read_conn()?;
         let mut stmt = conn
             .prepare("SELECT id FROM downloads")
@@ -6627,7 +6627,14 @@ impl Database {
         drop(conn);
         // Query failures have already returned above. An empty set here is a
         // valid empty library, so every remaining semantic row is an orphan.
-        super::semantic_index::prune_missing_documents(&self.storage_dir, &alive)
+        let semantic = super::semantic_index::prune_missing_documents(&self.storage_dir, &alive)?;
+        // 全文索引にも同じ取りこぼしが積もる。件数の水増しはここから来る。
+        let lexical = super::tantivy_index::prune_missing_documents(&self.storage_dir, &alive)
+            .unwrap_or_else(|error| {
+                log::warn!("全文索引の掃除に失敗しました: {error}");
+                0
+            });
+        Ok(semantic + lexical)
     }
 
     pub fn maintain_library_database(
@@ -6660,7 +6667,7 @@ impl Database {
         drop(conn);
         // 索引の掃除もここでやる。削除のたびの `clear_documents` は取りこぼす
         // ことがあり、実測で 8 件の幽霊が残っていた。
-        if let Err(error) = self.prune_semantic_index() {
+        if let Err(error) = self.prune_search_indexes() {
             log::warn!("Semantic index prune skipped: {error}");
         }
         let after_bytes = file_size_or_zero(&self.db_path);

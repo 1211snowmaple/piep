@@ -1022,6 +1022,64 @@ const MATCH_ID_BATCH_SIZE: usize = 512;
 /// This is used by column-sorted full-text search. Keeping the callback in the
 /// collector avoids constructing both a million-element Vec and its much
 /// larger JSON representation before SQLite can start filtering.
+/// 索引にあって、棚に無い作品を落とす。
+///
+/// 削除の掃除は「作品を消したときに索引からも消す」で足りるはずだが、その
+/// 掃除は失敗しても warn で流れる（本体の削除は済んでいるので、そこで止める
+/// ほうが困る）。意味索引には取りこぼしを見越した掃除機があり、実測で幽霊が
+/// 8件残っていた記録もある。**全文索引だけ、それが無かった。**
+///
+/// 幽霊は結果一覧には出ない（SQL と突き合わせるので落ちる）。しかし
+/// `total_hits` はそのまま数えるので、**表示される件数が水増しされ**、
+/// ページ送りの終了判定も余分に回る。
+///
+/// `alive` には実在する id の**全体**を渡すこと。部分集合を渡すと、渡さな
+/// かった分が全部消える。
+pub fn prune_missing_documents(
+    storage_dir: &Path,
+    alive: &std::collections::HashSet<i64>,
+) -> Result<usize, String> {
+    let runtime = runtime(storage_dir)?;
+    let searcher = runtime.reader.searcher();
+    let field = runtime.fields.download_id;
+    let mut orphans: Vec<i64> = Vec::new();
+    for reader in searcher.segment_readers() {
+        let column = reader
+            .fast_fields()
+            .u64("download_id")
+            .map_err(|e| format!("Tantivy download_id column missing: {e}"))?;
+        for doc in 0..reader.max_doc() {
+            if reader
+                .alive_bitset()
+                .is_some_and(|alive| !alive.is_alive(doc))
+            {
+                continue;
+            }
+            let Some(raw) = column.first(doc) else {
+                continue;
+            };
+            let id = raw as i64;
+            if id > 0 && !alive.contains(&id) {
+                orphans.push(id);
+            }
+        }
+    }
+    if orphans.is_empty() {
+        return Ok(0);
+    }
+    orphans.sort_unstable();
+    orphans.dedup();
+    let removed = orphans.len();
+    with_ordinary_writer(&runtime, |writer| {
+        for id in &orphans {
+            writer.delete_term(Term::from_field_u64(field, *id as u64));
+        }
+        Ok(())
+    })?;
+    log::info!("全文索引から、棚に無い {removed} 件を落としました");
+    Ok(removed)
+}
+
 pub fn visit_matching_download_ids<F>(
     storage_dir: &Path,
     query: &str,
@@ -1748,6 +1806,20 @@ fn schema_has_required_fields(schema: &Schema) -> bool {
     .all(|field| schema.get_field(field).is_ok())
 }
 
+/// 部分一致のための n-gram。**下限は 2 である。**
+///
+/// つまり検索語が1文字のとき、クエリ側も同じ解析器を通るのでトークンが0個に
+/// なり、`_ngram` / `_reading_kana` / `_reading_romaji` のどれにも当たらない。
+/// 残るのは `raw` の `_exact` / `_lower` だけで、これは欄全体との完全一致しか
+/// 通さない。
+///
+/// 実際に引けないのは「1文字の平仮名・ASCII」と「読みが1モーラの漢字」に限られる。
+/// 読みが2モーラ以上ある漢字（猫→ねこ／neko）は読みの欄で拾えるからである。
+/// 下限を 1 にすれば塞がるが、CJK では文字ごとに転置が増えるうえ、索引の形が
+/// 変わるので**全作品の作り直し**が要る。穴の狭さに対して代償が大きいので、
+/// いまは塞がずに書き残しておく。塞ぐときは `INDEX_VERSION_DIR` も上げること。
+///
+/// なお SQL 側（`search::ngram_terms`）は1文字をそのまま語として扱う。
 fn register_tokenizer(index: &Index) -> Result<(), String> {
     let tokenizer = TextAnalyzer::builder(
         NgramTokenizer::all_ngrams(2, 3)
