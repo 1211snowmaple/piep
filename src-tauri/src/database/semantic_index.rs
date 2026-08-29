@@ -37,16 +37,19 @@ static MODEL_CACHE_DIR: OnceLock<PathBuf> = OnceLock::new();
 const FASTEMBED_DEFAULT_CACHE_DIR: &str = ".fastembed_cache";
 const MODEL_DIR_NAME: &str = "models";
 
-/// 埋め込みモデルの置き場を、棚の隣に固定する。
+/// 埋め込みモデルの置き場を、棚と同じ器の中に固定する。
 ///
 /// fastembed の既定は `./.fastembed_cache`、つまり**起動した場所**である。
 /// piep はこれを指定していなかったので、別の場所から起動するたびに 465MB の
 /// モデルを落とし直し、その場に置き去りにしていた（この作業機にも二つあった）。
-/// 棚と同じところに置けば、どこから起動しても一つで済み、片付けの範囲にも入る。
+///
+/// 置き場は `downloads` とも `search` とも**並べる**。診断が歩くのはこの二つ
+/// なので、中に入れると 465MB が「身元不明のファイル」か「索引の大きさ」に
+/// 化ける。モデルはそのどちらでもない。
 ///
 /// 起動時に一度だけ呼ぶ。呼ばれなかったときは fastembed の既定のままにする。
 pub fn set_model_cache_dir(storage_dir: &Path) {
-    let target = storage_dir.join(INDEX_DIR_NAME).join(MODEL_DIR_NAME);
+    let target = model_cache_dir_for(storage_dir);
     if MODEL_CACHE_DIR.set(target.clone()).is_err() {
         return;
     }
@@ -69,6 +72,13 @@ pub fn set_model_cache_dir(storage_dir: &Path) {
             "以前の置き場を移せないので、モデルは取り直しになります（{legacy:?}）: {error}"
         ),
     }
+}
+
+fn model_cache_dir_for(storage_dir: &Path) -> PathBuf {
+    storage_dir
+        .parent()
+        .unwrap_or(storage_dir)
+        .join(MODEL_DIR_NAME)
 }
 
 #[cfg(not(test))]
@@ -1076,6 +1086,29 @@ fn hash_text(text: &str) -> String {
 mod tests {
     use super::*;
     use std::fs;
+
+    /// モデルは棚の**隣**に置く。中へ入れてはならない。
+    ///
+    /// 診断が歩くのは `downloads` と `search` の二つで、前者の下にあるものは
+    /// 身元不明のファイル、後者の下にあるものは索引の大きさとして数えられる。
+    /// 465MB のモデルはそのどちらでもないので、どちらの下にも置かない。
+    #[test]
+    fn the_model_sits_beside_the_shelf_not_inside_it() {
+        let storage = Path::new("C:/data/piep/downloads");
+        let model = model_cache_dir_for(storage);
+        assert_eq!(model, Path::new("C:/data/piep/models"));
+        assert!(!model.starts_with(storage), "棚の中にモデルを置いている");
+        let index_root = index_path(storage)
+            .parent()
+            .and_then(Path::parent)
+            .unwrap()
+            .to_path_buf();
+        assert!(
+            !model.starts_with(&index_root),
+            "索引の中にモデルを置いている: {index_root:?}"
+        );
+        assert_eq!(model.parent(), index_root.parent(), "同じ器に入っていない");
+    }
 
     /// 問いは索引側と同じ姿でなければならない。**前置きを剥がさないこと。**
     ///
