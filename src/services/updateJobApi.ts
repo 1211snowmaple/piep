@@ -33,7 +33,14 @@ export interface StartUpdateJobRequest {
   /** Put every work this job saves under update watching. */
   watchSaved?: boolean | null;
   /** Authors or series to check once, without adding them to the watch list. */
-  adhocTargets?: { targetType: "author" | "series"; source: string; sourceKey: string; displayName: string }[] | null;
+  adhocTargets?:
+    | {
+        targetType: "author" | "series";
+        source: string;
+        sourceKey: string;
+        displayName: string;
+      }[]
+    | null;
   credentials?: UpdateJobCredentials | null;
 }
 
@@ -70,7 +77,14 @@ export interface UpdateJobCandidate {
   targetLabel: string;
   targetType: "work" | "author" | "series";
   selected: boolean;
-  status: "candidate" | "queued" | "running" | "saved" | "failed" | "skipped" | "done";
+  status:
+    | "candidate"
+    | "queued"
+    | "running"
+    | "saved"
+    | "failed"
+    | "skipped"
+    | "done";
   /** Why this is a candidate: a work we lack, a sequel, or a rewrite of one we have. */
   kind: "new" | "sequel" | "revision";
   /** Set when the candidate failed; carries the classified reason. */
@@ -87,21 +101,27 @@ export interface UpdateJobSnapshot extends UpdateJobSummary {
 export async function getUpdateJobCredentials(): Promise<UpdateJobCredentials> {
   // CookieとUAは対でしか意味を持たない。片方だけを渡すと、Cloudflareが
   // 発行時のUAと照らして弾く。揃っていないときは両方とも渡さない。
-  const pixivCookie = await store.get<string>("pixiv_cookie") || null;
-  const pixivUserAgent = await store.get<string>("pixiv_user_agent") || null;
-  const pixivSession = pixivCookie && pixivUserAgent ? { pixivCookie, pixivUserAgent } : { pixivCookie: null, pixivUserAgent: null };
+  const pixivCookie = (await store.get<string>("pixiv_cookie")) || null;
+  const pixivUserAgent = (await store.get<string>("pixiv_user_agent")) || null;
+  const pixivSession =
+    pixivCookie && pixivUserAgent
+      ? { pixivCookie, pixivUserAgent }
+      : { pixivCookie: null, pixivUserAgent: null };
   return {
-    pixivRefreshToken: await store.get<string>("pixiv_refresh_token") || null,
+    pixivRefreshToken: (await store.get<string>("pixiv_refresh_token")) || null,
     ...pixivSession,
-    fanboxCookie: await store.get<string>("fanbox_session_id") || null,
-    fanboxUserAgent: await store.get<string>("fanbox_user_agent") || "Mozilla/5.0",
+    fanboxCookie: (await store.get<string>("fanbox_session_id")) || null,
+    fanboxUserAgent:
+      (await store.get<string>("fanbox_user_agent")) || "Mozilla/5.0",
   };
 }
 
 export async function startUpdateJobCommand(
-  request: Omit<StartUpdateJobRequest, "credentials"> & { credentials?: UpdateJobCredentials | null },
+  request: Omit<StartUpdateJobRequest, "credentials"> & {
+    credentials?: UpdateJobCredentials | null;
+  },
 ): Promise<UpdateJobSnapshot> {
-  const credentials = request.credentials ?? await getUpdateJobCredentials();
+  const credentials = request.credentials ?? (await getUpdateJobCredentials());
   return invoke<UpdateJobSnapshot>("start_update_job", {
     request: {
       ...request,
@@ -131,7 +151,7 @@ export async function startSaveJobCommand(
   return invoke<UpdateJobSnapshot>("start_save_job", {
     works,
     watchSaved,
-    credentials: credentials ?? await getUpdateJobCredentials(),
+    credentials: credentials ?? (await getUpdateJobCredentials()),
   });
 }
 
@@ -143,11 +163,23 @@ export interface UpdateJobItemState {
   error: string | null;
 }
 
-export async function listUpdateJobItemStatesCommand(jobId: string): Promise<UpdateJobItemState[]> {
+/** Small event emitted for one live job transition. Full pages stay on getUpdateJob. */
+export interface UpdateJobProgressDelta {
+  summary: UpdateJobSummary;
+  changedItem: UpdateJobItemState | null;
+  latestLog: UpdateJobLog | null;
+}
+
+export async function listUpdateJobItemStatesCommand(
+  jobId: string,
+): Promise<UpdateJobItemState[]> {
   return invoke<UpdateJobItemState[]>("list_update_job_item_states", { jobId });
 }
 
-export async function resumeUpdateJobCommand(jobId: string, retryFailed = false): Promise<UpdateJobSnapshot> {
+export async function resumeUpdateJobCommand(
+  jobId: string,
+  retryFailed = false,
+): Promise<UpdateJobSnapshot> {
   return invoke<UpdateJobSnapshot>("resume_update_job", {
     jobId,
     credentials: await getUpdateJobCredentials(),
@@ -161,8 +193,16 @@ export async function clearFinishedUpdateJobsCommand(): Promise<number> {
   return invoke<number>("clear_finished_update_jobs");
 }
 
-export async function dismissUpdateCandidateCommand(source: string, sourceId: string, dismissed: boolean): Promise<void> {
-  return invoke<void>("dismiss_update_candidate", { source, sourceId, dismissed });
+export async function dismissUpdateCandidateCommand(
+  source: string,
+  sourceId: string,
+  dismissed: boolean,
+): Promise<void> {
+  return invoke<void>("dismiss_update_candidate", {
+    source,
+    sourceId,
+    dismissed,
+  });
 }
 
 export async function countDismissedUpdateCandidatesCommand(): Promise<number> {
@@ -187,11 +227,16 @@ export interface PendingRevision {
  * 作品の一覧に列を足さず、これを一度だけ引いて突き合わせる。
  * 「取得元のほうが新しい」は作品の属性ではなく、更新確認が見つけた事実なので。
  */
-export async function listPendingRevisionsCommand(): Promise<PendingRevision[]> {
+export async function listPendingRevisionsCommand(): Promise<
+  PendingRevision[]
+> {
   return invoke<PendingRevision[]>("list_pending_revisions");
 }
 
-export async function saveUpdateJobCandidatesCommand(jobId: string, candidateIds: number[]): Promise<UpdateJobSnapshot> {
+export async function saveUpdateJobCandidatesCommand(
+  jobId: string,
+  candidateIds: number[],
+): Promise<UpdateJobSnapshot> {
   return invoke<UpdateJobSnapshot>("save_update_job_candidates", {
     jobId,
     candidateIds,
@@ -199,19 +244,31 @@ export async function saveUpdateJobCandidatesCommand(jobId: string, candidateIds
   });
 }
 
-export function getUpdateJobCommand(jobId: string, candidateAfterId?: number | null, logBeforeId?: number | null): Promise<UpdateJobSnapshot> {
-  return invoke<UpdateJobSnapshot>("get_update_job", { jobId, candidateAfterId, logBeforeId });
+export function getUpdateJobCommand(
+  jobId: string,
+  candidateAfterId?: number | null,
+  logBeforeId?: number | null,
+): Promise<UpdateJobSnapshot> {
+  return invoke<UpdateJobSnapshot>("get_update_job", {
+    jobId,
+    candidateAfterId,
+    logBeforeId,
+  });
 }
 
 export function listUpdateJobsCommand(): Promise<UpdateJobSummary[]> {
   return invoke<UpdateJobSummary[]>("list_update_jobs");
 }
 
-export function pauseUpdateJobCommand(jobId: string): Promise<UpdateJobSnapshot> {
+export function pauseUpdateJobCommand(
+  jobId: string,
+): Promise<UpdateJobSnapshot> {
   return invoke<UpdateJobSnapshot>("pause_update_job", { jobId });
 }
 
-export function cancelUpdateJobCommand(jobId: string): Promise<UpdateJobSnapshot> {
+export function cancelUpdateJobCommand(
+  jobId: string,
+): Promise<UpdateJobSnapshot> {
   return invoke<UpdateJobSnapshot>("cancel_update_job", { jobId });
 }
 

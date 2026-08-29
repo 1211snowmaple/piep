@@ -1001,6 +1001,19 @@ pub struct UpdateJobItemState {
     pub error: Option<String>,
 }
 
+/// A small progress notification for a running update/save job.
+///
+/// Full snapshots carry candidate and log pages and are intentionally kept for
+/// explicit screen loads. Per-item worker events use this delta so an 800-item
+/// save does not serialize the same hundreds of rows after every item.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateJobProgressDelta {
+    pub summary: UpdateJobSummary,
+    pub changed_item: Option<UpdateJobItemState>,
+    pub latest_log: Option<UpdateJobLog>,
+}
+
 /// 見つけたが、まだ保存も拒否もしていない作品。ジョブより長生きする。
 #[derive(Debug, Clone)]
 pub struct UpdateCandidateInput {

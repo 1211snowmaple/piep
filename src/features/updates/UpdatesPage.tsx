@@ -32,7 +32,7 @@ import { Icons, IconSize } from "@/lib/icons";
 import { useAppSearchParams } from "@/app/router";
 import { EmptyState, ErrorState, LoadingState } from "@/components/AsyncState";
 import { PageHeader } from "@/components/PageHeader";
-import { invalidateAfterUpdateJob, isUpdateJobTerminal, useUpdateJobs, type UpdateJobSnapshot, type UpdateJobSummary } from "@/features/updates/updateJobs";
+import { UPDATE_JOB_STATUS_META, invalidateAfterUpdateJob, isUpdateJobTerminal, useUpdateJobs, type UpdateJobSnapshot, type UpdateJobSummary } from "@/features/updates/updateJobs";
 import { errorMessage, formatDate, formatNumber } from "@/lib/format";
 import { ProviderMark } from "@/lib/providers";
 import { deleteUpdateTarget, isTauriRuntime, listUpdateTargets, searchDownloadsV2, setUpdateTargetEnabled, upsertUpdateTarget } from "@/services/dbApi";
@@ -775,8 +775,7 @@ function describeSchedule(schedule: UpdateScheduleSettings | undefined): string 
 }
 
 function StatusBadge({ status }: { status: string }) {
-  const config: Record<string, { color: string; label: string }> = { queued: { color: "gray", label: "待機中" }, running: { color: "piep", label: "実行中" }, paused: { color: "yellow", label: "一時停止" }, auth_required: { color: "yellow", label: "再接続が必要" }, canceling: { color: "yellow", label: "停止中" }, canceled: { color: "gray", label: "中止" }, completed: { color: "green", label: "完了" }, failed: { color: "red", label: "失敗" } };
-  const item = config[status] ?? { color: "gray", label: status };
+  const item = UPDATE_JOB_STATUS_META[status as keyof typeof UPDATE_JOB_STATUS_META] ?? { color: "gray", label: status };
   return <Badge color={item.color} variant="light" leftSection={(status === "running" || status === "queued") ? <span className="status-dot" /> : undefined}>{item.label}</Badge>;
 }
 

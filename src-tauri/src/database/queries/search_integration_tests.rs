@@ -6167,3 +6167,48 @@ fn update_job_snapshot_pages_candidate_payloads() {
     assert!(second.next_candidate_cursor.is_none());
     assert!(second.candidates[0].id > cursor);
 }
+
+#[test]
+fn saved_update_job_download_ids_survive_item_lookup_after_worker_restart() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let request = StartUpdateJobRequest {
+        scope: "save".to_string(),
+        mode: "save".to_string(),
+        work_ids: None,
+        target_ids: None,
+        credentials: None,
+        watch_saved: None,
+        adhoc_targets: None,
+    };
+    db.create_update_job(
+        "job-saved-ids",
+        &request,
+        &[UpdateJobItemInput {
+            item_type: "candidate".to_string(),
+            source: Some("pixiv".to_string()),
+            source_id: Some("novel-1".to_string()),
+            target_type: Some("work".to_string()),
+            title: "Saved".to_string(),
+            payload_json: r#"{"kind":"save"}"#.to_string(),
+            status: "queued".to_string(),
+        }],
+    )
+    .unwrap();
+    let item = db.next_update_job_item("job-saved-ids").unwrap().unwrap();
+    db.complete_update_job_item(item.id, "saved", None, Some(42))
+        .unwrap();
+    db.append_update_job_log("job-saved-ids", "success", "Saved")
+        .unwrap();
+    assert_eq!(
+        db.saved_update_job_download_ids("job-saved-ids").unwrap(),
+        vec![42]
+    );
+    let delta = db
+        .update_job_progress_delta("job-saved-ids", Some(item.id))
+        .unwrap();
+    assert_eq!(delta.summary.processed, 1);
+    assert_eq!(delta.summary.saved_count, 1);
+    assert_eq!(delta.changed_item.unwrap().status, "saved");
+    assert_eq!(delta.latest_log.unwrap().message, "Saved");
+}

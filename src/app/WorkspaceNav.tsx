@@ -7,6 +7,8 @@ import { ProviderGlyph } from "@/lib/providers";
 import { useAppNavigate, useAppRouter } from "@/app/router";
 import { useWorkspace } from "@/app/WorkspaceContext";
 import { useOperationJobs } from "@/features/jobs/operationJobs";
+import { countActiveActivities } from "@/features/jobs/activityAggregation";
+import { useUpdateJobSummaries } from "@/features/updates/updateJobs";
 import { readingWorkIds, subscribeReadingPositions } from "@/features/library/readingShelf";
 import { formatCompactCount, formatNumber } from "@/lib/format";
 import { isTauriRuntime } from "@/services/dbApi";
@@ -234,7 +236,8 @@ export function WorkspaceNavFooter({ railed, onNavigate }: { railed: boolean; on
   const navigate = useAppNavigate();
   const location = useAppRouter();
   const operationJobs = useOperationJobs();
-  const active = operationJobs.filter((job) => ["queued", "running", "canceling"].includes(job.status)).length;
+  const updateJobs = useUpdateJobSummaries(isTauriRuntime());
+  const active = countActiveActivities(operationJobs, updateJobs);
   const go = (path: string) => {
     navigate(path);
     onNavigate?.();

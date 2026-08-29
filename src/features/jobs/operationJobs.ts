@@ -1,7 +1,15 @@
 import { useSyncExternalStore } from "react";
 
-export type OperationKind = "save" | "update" | "epub" | "backup" | "restore" | "search" | "maintenance";
-export type OperationStatus = "queued" | "running" | "canceling" | "canceled" | "completed" | "failed" | "interrupted";
+export type OperationKind =
+  "save" | "update" | "epub" | "backup" | "restore" | "search" | "maintenance";
+export type OperationStatus =
+  | "queued"
+  | "running"
+  | "canceling"
+  | "canceled"
+  | "completed"
+  | "failed"
+  | "interrupted";
 export type OperationLogLevel = "info" | "success" | "warn" | "error";
 
 export interface OperationLog {
@@ -25,6 +33,8 @@ export interface OperationJob {
   canCancel: boolean;
   canRetry: boolean;
   logs: OperationLog[];
+  /** Corresponding persistent/backend job, when this UI operation mirrors one. */
+  externalJobId?: string | null;
 }
 
 export interface StartOperationOptions {
@@ -44,11 +54,14 @@ export interface OperationController {
   fail: (error: unknown) => void;
   cancel: (message?: string) => void;
   isCancelRequested: () => boolean;
+  linkExternalJob: (jobId: string) => void;
 }
 
 const STORAGE_KEY = "piep.operation-history.v1";
 const MAX_JOBS = 100;
-const MAX_LOGS = 100;
+// 画面中は全件を保持するが、localStorage は容量が有限なので、再起動後に
+// 復元する履歴だけはDBの更新ジョブと同じ2000件までに抑える。
+const MAX_PERSISTED_LOGS = 2_000;
 export const OPERATION_HISTORY_PERSIST_DELAY_MS = 250;
 const listeners = new Set<() => void>();
 const cancelHandlers = new Map<string, () => void | Promise<void>>();
@@ -57,12 +70,17 @@ const cancelRequests = new Set<string>();
 
 function pruneDetachedHandlers() {
   const retained = new Set(jobs.map((job) => job.id));
-  for (const jobId of cancelHandlers.keys()) if (!retained.has(jobId)) cancelHandlers.delete(jobId);
-  for (const jobId of retryHandlers.keys()) if (!retained.has(jobId)) retryHandlers.delete(jobId);
-  for (const jobId of cancelRequests) if (!retained.has(jobId)) cancelRequests.delete(jobId);
+  for (const jobId of cancelHandlers.keys())
+    if (!retained.has(jobId)) cancelHandlers.delete(jobId);
+  for (const jobId of retryHandlers.keys())
+    if (!retained.has(jobId)) retryHandlers.delete(jobId);
+  for (const jobId of cancelRequests)
+    if (!retained.has(jobId)) cancelRequests.delete(jobId);
 }
 
-function now() { return new Date().toISOString(); }
+function now() {
+  return new Date().toISOString();
+}
 function id() {
   return typeof crypto !== "undefined" && "randomUUID" in crypto
     ? crypto.randomUUID()
@@ -70,8 +88,11 @@ function id() {
 }
 
 function storage(): Storage | null {
-  try { return typeof window === "undefined" ? null : window.localStorage; }
-  catch { return null; }
+  try {
+    return typeof window === "undefined" ? null : window.localStorage;
+  } catch {
+    return null;
+  }
 }
 
 function loadJobs(): OperationJob[] {
@@ -79,10 +100,18 @@ function loadJobs(): OperationJob[] {
     const raw = storage()?.getItem(STORAGE_KEY);
     const parsed = raw ? JSON.parse(raw) : [];
     if (!Array.isArray(parsed)) return [];
-    const loaded = parsed.filter((job): job is OperationJob => Boolean(job && typeof job.id === "string" && typeof job.label === "string"));
+    const loaded = parsed.filter((job): job is OperationJob =>
+      Boolean(
+        job && typeof job.id === "string" && typeof job.label === "string",
+      ),
+    );
     const loadedAt = now();
     return loaded.slice(0, MAX_JOBS).map((job) => {
-      if (job.status !== "queued" && job.status !== "running" && job.status !== "canceling") {
+      if (
+        job.status !== "queued" &&
+        job.status !== "running" &&
+        job.status !== "canceling"
+      ) {
         return { ...job, canCancel: false, canRetry: false };
       }
       return {
@@ -97,18 +126,36 @@ function loadJobs(): OperationJob[] {
         // 保存も取り込みも、済んだものは相手先IDで見分けて飛ばすので、
         // 同じ操作をもう一度始めれば続きから進む。それを知らないと、
         // 800件のうち500件まで進んだ人が最初からやり直すことになる。
-        logs: [...(job.logs ?? []), { id: id(), level: "warn" as const, message: "処理の途中で画面が閉じられたため、状態を引き継げませんでした。同じ操作をやり直すと、済んでいるものは飛ばして続きから進みます", createdAt: loadedAt }].slice(-MAX_LOGS),
+        logs: [
+          ...(job.logs ?? []),
+          {
+            id: id(),
+            level: "warn" as const,
+            message:
+              "処理の途中で画面が閉じられたため、状態を引き継げませんでした。同じ操作をやり直すと、済んでいるものは飛ばして続きから進みます",
+            createdAt: loadedAt,
+          },
+        ],
       };
     });
-  } catch { return []; }
+  } catch {
+    return [];
+  }
 }
 
 let jobs = loadJobs();
 let persistTimer: ReturnType<typeof setTimeout> | null = null;
 
 function writePersistedJobs() {
-  try { storage()?.setItem(STORAGE_KEY, JSON.stringify(jobs.slice(0, MAX_JOBS))); }
-  catch { /* History is a convenience; an unavailable/quota-full store must not break work. */ }
+  try {
+    const persisted = jobs.slice(0, MAX_JOBS).map((job) => ({
+      ...job,
+      logs: job.logs.slice(-MAX_PERSISTED_LOGS),
+    }));
+    storage()?.setItem(STORAGE_KEY, JSON.stringify(persisted));
+  } catch {
+    /* History is a convenience; an unavailable/quota-full store must not break work. */
+  }
 }
 
 function persistNow() {
@@ -128,24 +175,42 @@ function schedulePersist() {
 }
 
 function emit(persistence: "debounced" | "immediate" = "debounced") {
-  if (persistence === "immediate") persistNow(); else schedulePersist();
+  if (persistence === "immediate") persistNow();
+  else schedulePersist();
   listeners.forEach((listener) => listener());
 }
 
-function updateJob(jobId: string, updater: (job: OperationJob) => OperationJob, persistence: "debounced" | "immediate" = "debounced") {
-  jobs = jobs.map((job) => job.id === jobId ? updater(job) : job)
+function updateJob(
+  jobId: string,
+  updater: (job: OperationJob) => OperationJob,
+  persistence: "debounced" | "immediate" = "debounced",
+) {
+  jobs = jobs
+    .map((job) => (job.id === jobId ? updater(job) : job))
     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
     .slice(0, MAX_JOBS);
   pruneDetachedHandlers();
   emit(persistence);
 }
 
-function appendLog(job: OperationJob, message: string, level: OperationLogLevel): OperationJob {
+function appendLog(
+  job: OperationJob,
+  message: string,
+  level: OperationLogLevel,
+): OperationJob {
   if (!message.trim()) return job;
-  return { ...job, logs: [...job.logs, { id: id(), level, message: message.trim(), createdAt: now() }].slice(-MAX_LOGS) };
+  return {
+    ...job,
+    logs: [
+      ...job.logs,
+      { id: id(), level, message: message.trim(), createdAt: now() },
+    ],
+  };
 }
 
-export function startOperation(options: StartOperationOptions): OperationController {
+export function startOperation(
+  options: StartOperationOptions,
+): OperationController {
   const createdAt = now();
   const jobId = id();
   const job: OperationJob = {
@@ -161,7 +226,9 @@ export function startOperation(options: StartOperationOptions): OperationControl
     finishedAt: null,
     canCancel: Boolean(options.onCancel),
     canRetry: Boolean(options.onRetry),
-    logs: [{ id: id(), level: "info", message: "処理を開始しました", createdAt }],
+    logs: [
+      { id: id(), level: "info", message: "処理を開始しました", createdAt },
+    ],
   };
   jobs = [job, ...jobs].slice(0, MAX_JOBS);
   pruneDetachedHandlers();
@@ -171,17 +238,28 @@ export function startOperation(options: StartOperationOptions): OperationControl
   // below are batched, while terminal states are flushed synchronously.
   emit("immediate");
 
-  const finish = (status: "completed" | "failed" | "canceled", message: string, level: OperationLogLevel) => {
+  const finish = (
+    status: "completed" | "failed" | "canceled",
+    message: string,
+    level: OperationLogLevel,
+  ) => {
     const at = now();
-    updateJob(jobId, (current) => ({
-      ...appendLog(current, message, level),
-      status,
-      current: status === "completed" && current.total !== null ? current.total : current.current,
-      updatedAt: at,
-      finishedAt: at,
-      canCancel: false,
-      canRetry: status === "failed" && retryHandlers.has(jobId),
-    }), "immediate");
+    updateJob(
+      jobId,
+      (current) => ({
+        ...appendLog(current, message, level),
+        status,
+        current:
+          status === "completed" && current.total !== null
+            ? current.total
+            : current.current,
+        updatedAt: at,
+        finishedAt: at,
+        canCancel: false,
+        canRetry: status === "failed" && retryHandlers.has(jobId),
+      }),
+      "immediate",
+    );
     cancelHandlers.delete(jobId);
     cancelRequests.delete(jobId);
     if (status !== "failed") retryHandlers.delete(jobId);
@@ -189,17 +267,40 @@ export function startOperation(options: StartOperationOptions): OperationControl
 
   return {
     id: jobId,
-    progress: (current, total, message) => updateJob(jobId, (job) => ({
-      ...appendLog(job, message ?? "", "info"),
-      current: Math.max(0, Math.trunc(current)),
-      total: total === undefined ? job.total : total === null ? null : Math.max(0, Math.trunc(total)),
-      updatedAt: now(),
-    })),
-    log: (message, level = "info") => updateJob(jobId, (job) => ({ ...appendLog(job, message, level), updatedAt: now() })),
-    complete: (message = "処理が完了しました") => finish("completed", message, "success"),
-    fail: (error) => finish("failed", error instanceof Error ? error.message : String(error), "error"),
-    cancel: (message = "処理をキャンセルしました") => finish("canceled", message, "warn"),
+    progress: (current, total, message) =>
+      updateJob(jobId, (job) => ({
+        ...appendLog(job, message ?? "", "info"),
+        current: Math.max(0, Math.trunc(current)),
+        total:
+          total === undefined
+            ? job.total
+            : total === null
+              ? null
+              : Math.max(0, Math.trunc(total)),
+        updatedAt: now(),
+      })),
+    log: (message, level = "info") =>
+      updateJob(jobId, (job) => ({
+        ...appendLog(job, message, level),
+        updatedAt: now(),
+      })),
+    complete: (message = "処理が完了しました") =>
+      finish("completed", message, "success"),
+    fail: (error) =>
+      finish(
+        "failed",
+        error instanceof Error ? error.message : String(error),
+        "error",
+      ),
+    cancel: (message = "処理をキャンセルしました") =>
+      finish("canceled", message, "warn"),
     isCancelRequested: () => cancelRequests.has(jobId),
+    linkExternalJob: (externalJobId) =>
+      updateJob(
+        jobId,
+        (job) => ({ ...job, externalJobId, updatedAt: now() }),
+        "immediate",
+      ),
   };
 }
 
@@ -207,11 +308,34 @@ export async function requestOperationCancel(jobId: string): Promise<void> {
   const handler = cancelHandlers.get(jobId);
   if (!handler) return;
   cancelRequests.add(jobId);
-  updateJob(jobId, (job) => ({ ...appendLog(job, "キャンセルを要求しました", "warn"), status: "canceling", canCancel: false, updatedAt: now() }), "immediate");
-  try { await handler(); }
-  catch (error) {
+  updateJob(
+    jobId,
+    (job) => ({
+      ...appendLog(job, "キャンセルを要求しました", "warn"),
+      status: "canceling",
+      canCancel: false,
+      updatedAt: now(),
+    }),
+    "immediate",
+  );
+  try {
+    await handler();
+  } catch (error) {
     cancelRequests.delete(jobId);
-    updateJob(jobId, (job) => ({ ...appendLog(job, error instanceof Error ? error.message : String(error), "error"), status: "running", canCancel: true, updatedAt: now() }), "immediate");
+    updateJob(
+      jobId,
+      (job) => ({
+        ...appendLog(
+          job,
+          error instanceof Error ? error.message : String(error),
+          "error",
+        ),
+        status: "running",
+        canCancel: true,
+        updatedAt: now(),
+      }),
+      "immediate",
+    );
   }
 }
 
@@ -220,7 +344,15 @@ export async function retryOperation(jobId: string): Promise<void> {
   if (!handler) return;
   // A retry is a new execution with its own duration and logs. Keep the failed
   // attempt immutable so diagnostics do not lose the original failure.
-  updateJob(jobId, (job) => ({ ...appendLog(job, "新しい操作として再試行しました", "info"), canRetry: false, updatedAt: now() }), "immediate");
+  updateJob(
+    jobId,
+    (job) => ({
+      ...appendLog(job, "新しい操作として再試行しました", "info"),
+      canRetry: false,
+      updatedAt: now(),
+    }),
+    "immediate",
+  );
   retryHandlers.delete(jobId);
   await handler();
 }
@@ -238,6 +370,13 @@ export function clearCompletedOperations(): void {
   emit("immediate");
 }
 
-export function getOperationJobs(): OperationJob[] { return jobs; }
-function subscribe(listener: () => void) { listeners.add(listener); return () => listeners.delete(listener); }
-export function useOperationJobs(): OperationJob[] { return useSyncExternalStore(subscribe, getOperationJobs, getOperationJobs); }
+export function getOperationJobs(): OperationJob[] {
+  return jobs;
+}
+function subscribe(listener: () => void) {
+  listeners.add(listener);
+  return () => listeners.delete(listener);
+}
+export function useOperationJobs(): OperationJob[] {
+  return useSyncExternalStore(subscribe, getOperationJobs, getOperationJobs);
+}

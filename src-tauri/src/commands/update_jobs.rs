@@ -11,10 +11,12 @@ use tauri::{Emitter, Manager};
 
 const UPDATE_JOB_DELAY_MS: u64 = 800;
 
-/// 取得が制限されたときに間隔を掛ける倍率の上限（800ms → 最大 25.6 秒）。
-const MAX_RATE_LIMIT_BACKOFF: u32 = 32;
 /// 制限で止まった項目を、同じジョブの中でやり直す回数の上限。
-const MAX_RATE_LIMIT_RETRIES: u32 = 2;
+/// pixiv の 429 は数秒では解除されないことがあるため、短い固定回数で
+/// 失敗扱いにせず、十分な時間をかけて段階的に待つ。
+const MAX_RATE_LIMIT_RETRIES: u32 = 5;
+const RATE_LIMIT_BACKOFF_BASE_MS: u64 = 5_000;
+const MAX_RATE_LIMIT_BACKOFF_MS: u64 = 5 * 60 * 1_000;
 /// 1ジョブが持つログの上限。超えた分は古い方から落とす。
 const MAX_UPDATE_JOB_LOGS: i64 = 2_000;
 /// 何項目ごとにログの上限を確かめるか。
@@ -642,6 +644,30 @@ async fn emit_snapshot(app: &tauri::AppHandle, state: &Arc<AppState>, job_id: &s
     }
 }
 
+/// Emit the small, per-transition form of progress.
+///
+/// A full snapshot contains up to 200 candidates and 300 logs. Sending that
+/// after every item made a long save repeatedly serialize the same pages and
+/// starved the WebView animation thread. Full snapshots are still used for
+/// explicit loads and terminal/control transitions.
+async fn emit_progress_delta(
+    app: &tauri::AppHandle,
+    state: &Arc<AppState>,
+    job_id: &str,
+    changed_item_id: Option<i64>,
+) {
+    match state.db.update_job_progress_delta(job_id, changed_item_id) {
+        Ok(delta) => {
+            if let Err(error) = app.emit("update-job-progress-delta", delta) {
+                log::warn!("更新ジョブ {job_id} の差分進捗を画面へ送れません: {error}");
+            }
+        }
+        Err(error) => {
+            log::error!("更新ジョブ {job_id} の差分進捗をDBから読めません: {error}");
+        }
+    }
+}
+
 fn spawn_update_job(app: tauri::AppHandle, job_id: String, credentials: UpdateCredentials) {
     let inserted = active_jobs()
         .lock()
@@ -1141,14 +1167,35 @@ async fn run_update_job(
             // ただし横顔の補完を約束していたのは Web からのまとめ保存だけ。
             // 通常の更新ジョブまで延ばすと、完了直前に別の通信が何十件も増える。
             if snapshot.scope == "save" {
+                // A worker can be replaced after an app restart or a rate-limit
+                // pause. Rebuild the complete saved set from durable items so
+                // profiles saved by an earlier worker are not omitted.
+                let profile_download_ids = state
+                    .db
+                    .saved_update_job_download_ids(&job_id)
+                    .unwrap_or_else(|error| {
+                        log::warn!("更新ジョブ {job_id} の保存済み作品を復元できません: {error}");
+                        saved_download_ids.clone()
+                    });
                 refresh_profiles_for_saved_downloads(
                     &app,
                     &state,
                     &job_id,
-                    &saved_download_ids,
+                    &profile_download_ids,
                     &credentials,
                 )
                 .await;
+                // プロフィール取得中に停止要求が来た場合、仕上げを完了扱いに
+                // してしまわない。残りの作品は保存済みなので、次回の保存で
+                // プロフィールを再取得できる。
+                match state.db.update_job_status_value(&job_id)?.as_str() {
+                    "canceling" => {
+                        finish_update_job_cancellation(&app, &state, &job_id).await?;
+                        break;
+                    }
+                    "paused" => break,
+                    _ => {}
+                }
             }
             let final_status = if snapshot.error_count > 0 {
                 "failed"
@@ -1181,6 +1228,10 @@ async fn run_update_job(
             crate::commands::database::start_automatic_index_maintenance(app.clone());
             break;
         };
+
+        // Claiming the row already changed its state and active label. Tell the
+        // save screen which single row became active without shipping all rows.
+        emit_progress_delta(&app, &state, &job_id, Some(item.id)).await;
 
         let outcome =
             process_update_job_item(&app, &state, &job_id, &item, &credentials, &mut web_index)
@@ -1273,10 +1324,10 @@ async fn run_update_job(
                     let attempts = rate_limit_retries.entry(item.id).or_insert(0);
                     *attempts += 1;
                     if *attempts <= MAX_RATE_LIMIT_RETRIES {
-                        backoff = (backoff * 2).min(MAX_RATE_LIMIT_BACKOFF);
+                        let delay_ms = rate_limit_delay_ms(*attempts);
                         let message = format!(
                             "取得が制限されています。{}秒あけて「{}」をやり直します",
-                            UPDATE_JOB_DELAY_MS * u64::from(backoff) / 1000,
+                            delay_ms / 1000,
                             item.title
                         );
                         state.db.complete_update_job_item(
@@ -1286,13 +1337,29 @@ async fn run_update_job(
                             None,
                         )?;
                         state.db.append_update_job_log(&job_id, "warn", &message)?;
-                        emit_snapshot(&app, &state, &job_id).await;
-                        tokio::time::sleep(std::time::Duration::from_millis(
-                            UPDATE_JOB_DELAY_MS * u64::from(backoff),
-                        ))
-                        .await;
+                        state
+                            .db
+                            .set_update_job_status(&job_id, "running", Some(&message))?;
+                        emit_progress_delta(&app, &state, &job_id, Some(item.id)).await;
+                        wait_for_retry_or_control(&state, &job_id, delay_ms).await?;
                         continue;
                     }
+                    // 制限が長引いた場合も作品を「失敗消費」しない。項目を
+                    // queued のまま一時停止し、利用者が時間を置いて再開すれば
+                    // 同じ作品から続けられるようにする。
+                    let message = format!(
+                        "取得制限が続いているため一時停止しました。「{}」は再開時に再試行します",
+                        item.title
+                    );
+                    state
+                        .db
+                        .complete_update_job_item(item.id, "queued", Some(&message), None)?;
+                    state.db.append_update_job_log(&job_id, "warn", &message)?;
+                    state
+                        .db
+                        .set_update_job_status(&job_id, "paused", Some(&message))?;
+                    emit_snapshot(&app, &state, &job_id).await;
+                    break;
                 }
 
                 // 失敗の理由を項目とログの両方に残す。あとで「何を再試行すべきか」
@@ -1337,7 +1404,7 @@ async fn run_update_job(
         if restart_pending {
             break;
         }
-        emit_snapshot(&app, &state, &job_id).await;
+        emit_progress_delta(&app, &state, &job_id, Some(item.id)).await;
         if state.db.update_job_status_value(&job_id)? == "canceling" {
             finish_update_job_cancellation(&app, &state, &job_id).await?;
             break;
@@ -1410,7 +1477,23 @@ async fn refresh_profiles_for_saved_downloads(
     ) {
         log::warn!("更新ジョブ {job_id} のプロフィール確認ログを記録できません: {error}");
     }
-    for (entity_type, source, source_key) in targets {
+    let total = targets.len();
+    for (index, (entity_type, source, source_key)) in targets.into_iter().enumerate() {
+        let current_status = state.db.update_job_status_value(job_id).unwrap_or_default();
+        if matches!(current_status.as_str(), "canceling" | "paused") {
+            break;
+        }
+        let label = format!(
+            "作者・シリーズ情報を確認しています（{}/{total}）",
+            index + 1
+        );
+        if let Err(error) = state
+            .db
+            .set_update_job_status(job_id, "running", Some(&label))
+        {
+            log::warn!("更新ジョブ {job_id} のプロフィール進捗を記録できません: {error}");
+        }
+        emit_progress_delta(app, state, job_id, None).await;
         let params = crate::commands::database::RefreshEntityProfileParams {
             entity_type: entity_type.to_string(),
             source: source.clone(),
@@ -1424,6 +1507,11 @@ async fn refresh_profiles_for_saved_downloads(
             crate::commands::database::refresh_entity_profile(app.clone(), params).await
         {
             log::warn!("{entity_type}:{source}:{source_key} の情報を取れません: {error}");
+            let _ = state.db.append_update_job_log(
+                job_id,
+                "warn",
+                &format!("{entity_type}:{source}:{source_key} の情報を取得できません: {error}"),
+            );
         }
     }
 }
@@ -1528,6 +1616,37 @@ fn classify_failure(error: &str) -> FailureKind {
         return FailureKind::Network;
     }
     FailureKind::Other
+}
+
+/// レート制限の再試行間隔（attempt は 1 始まり）。
+fn rate_limit_delay_ms(attempt: u32) -> u64 {
+    let shift = attempt.saturating_sub(1).min(6);
+    RATE_LIMIT_BACKOFF_BASE_MS
+        .saturating_mul(1u64 << shift)
+        .min(MAX_RATE_LIMIT_BACKOFF_MS)
+}
+
+/// Long rate-limit waits must not make pause/cancel feel ignored. Wake in short
+/// intervals and return to the worker loop as soon as a control request lands.
+async fn wait_for_retry_or_control(
+    state: &Arc<AppState>,
+    job_id: &str,
+    delay_ms: u64,
+) -> Result<(), String> {
+    const CONTROL_POLL_MS: u64 = 500;
+    let mut remaining_ms = delay_ms;
+    while remaining_ms > 0 {
+        let step_ms = remaining_ms.min(CONTROL_POLL_MS);
+        tokio::time::sleep(std::time::Duration::from_millis(step_ms)).await;
+        remaining_ms -= step_ms;
+        if !matches!(
+            state.db.update_job_status_value(job_id)?.as_str(),
+            "queued" | "running"
+        ) {
+            break;
+        }
+    }
+    Ok(())
 }
 
 async fn process_update_job_item(
@@ -2266,7 +2385,7 @@ async fn process_candidate_item(
 mod tests {
     use super::{
         build_save_items, canceled_status_for, classify_failure, describe_text_change, make_job_id,
-        may_remember, FailureKind, SaveJobWork,
+        may_remember, rate_limit_delay_ms, FailureKind, SaveJobWork, MAX_RATE_LIMIT_BACKOFF_MS,
     };
     use std::collections::HashSet;
 
@@ -2548,6 +2667,15 @@ mod tests {
                 "{message}"
             );
         }
+    }
+
+    #[test]
+    fn rate_limit_retries_use_a_real_exponential_wait() {
+        assert_eq!(rate_limit_delay_ms(1), 5_000);
+        assert_eq!(rate_limit_delay_ms(2), 10_000);
+        assert_eq!(rate_limit_delay_ms(3), 20_000);
+        assert_eq!(rate_limit_delay_ms(5), 80_000);
+        assert!(rate_limit_delay_ms(99) <= MAX_RATE_LIMIT_BACKOFF_MS);
     }
 
     #[test]

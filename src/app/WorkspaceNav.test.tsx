@@ -15,8 +15,15 @@ const shelfApi = vi.hoisted(() => ({
   upsertSavedSearch: vi.fn(),
   deleteSavedSearch: vi.fn(),
 }));
+const updateJobApi = vi.hoisted(() => ({
+  listUpdateJobsCommand: vi.fn(),
+}));
 
 vi.mock("@/services/shelfApi", () => shelfApi);
+vi.mock("@/services/updateJobApi", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/services/updateJobApi")>()),
+  listUpdateJobsCommand: updateJobApi.listUpdateJobsCommand,
+}));
 vi.mock("@/services/dbApi", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/services/dbApi")>()),
   isTauriRuntime: () => true,
@@ -100,6 +107,7 @@ describe("library sidebar", () => {
     window.localStorage.clear();
     shelfApi.getLibraryShelfCounts.mockResolvedValue(counts);
     shelfApi.listSavedSearches.mockResolvedValue([saved()]);
+    updateJobApi.listUpdateJobsCommand.mockResolvedValue([]);
   });
 
   it("lists the shelves with their counts instead of a menu of screens", async () => {
@@ -211,6 +219,32 @@ describe("library sidebar", () => {
       expect(nav().getByText("設定")).toBeInTheDocument();
       view.unmount();
     }
+  });
+
+  it("counts an automatic backend update in the activity badge", async () => {
+    updateJobApi.listUpdateJobsCommand.mockResolvedValue([
+      {
+        jobId: "automatic-1",
+        status: "running",
+        scope: "all",
+        mode: "check_only",
+        totals: 12,
+        processed: 3,
+        candidateCount: 0,
+        savedCount: 0,
+        errorCount: 0,
+        activeLabel: "更新を確認しています",
+        startedAt: "2026-08-29T00:00:00Z",
+        updatedAt: "2026-08-29T00:01:00Z",
+        finishedAt: null,
+      },
+    ]);
+    renderApp("#/library");
+
+    const activity = await row("アクティビティ");
+    await waitFor(() =>
+      expect(within(activity).getByText("1")).toBeInTheDocument(),
+    );
   });
 
   it("navigates to a shelf when it is chosen", async () => {

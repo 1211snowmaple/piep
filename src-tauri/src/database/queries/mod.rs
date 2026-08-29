@@ -4934,6 +4934,69 @@ impl Database {
         Ok(out)
     }
 
+    /// Read only the fields needed by a live progress event.
+    ///
+    /// Candidate/log pages remain available through `update_job_snapshot`; a
+    /// worker calls this after one small state transition, so returning those
+    /// pages here would make event cost grow with the length of the job.
+    pub fn update_job_progress_delta(
+        &self,
+        job_id: &str,
+        changed_item_id: Option<i64>,
+    ) -> Result<UpdateJobProgressDelta, String> {
+        self.sync_update_job_counters(job_id)?;
+        let conn = self.read_conn()?;
+        let summary = conn
+            .query_row(
+                "SELECT id, status, scope, mode, totals, processed, candidate_count,
+                        saved_count, error_count, active_label, started_at, updated_at, finished_at
+                 FROM update_jobs WHERE id = ?1",
+                params![job_id],
+                update_job_summary_from_row,
+            )
+            .map_err(|e| format!("Update job not found: {e}"))?;
+        let changed_item = match changed_item_id {
+            Some(item_id) => conn
+                .query_row(
+                    "SELECT source, source_id, status, error
+                     FROM update_job_items WHERE id = ?1 AND job_id = ?2",
+                    params![item_id, job_id],
+                    |row| {
+                        Ok(UpdateJobItemState {
+                            source: row.get(0)?,
+                            source_id: row.get(1)?,
+                            status: row.get(2)?,
+                            error: row.get(3)?,
+                        })
+                    },
+                )
+                .optional()
+                .map_err(|e| format!("Failed to read changed update item: {e}"))?,
+            None => None,
+        };
+        let latest_log = conn
+            .query_row(
+                "SELECT id, log_type, message, created_at
+                 FROM update_job_logs WHERE job_id = ?1 ORDER BY id DESC LIMIT 1",
+                params![job_id],
+                |row| {
+                    Ok(UpdateJobLog {
+                        id: row.get(0)?,
+                        log_type: row.get(1)?,
+                        message: row.get(2)?,
+                        created_at: row.get(3)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(|e| format!("Failed to read latest update log: {e}"))?;
+        Ok(UpdateJobProgressDelta {
+            summary,
+            changed_item,
+            latest_log,
+        })
+    }
+
     pub fn next_update_job_item(&self, job_id: &str) -> Result<Option<UpdateJobItem>, String> {
         let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
         // Claiming an item and deciding whether the worker may still run are
@@ -5000,6 +5063,24 @@ impl Database {
         tx.commit()
             .map_err(|e| format!("Failed to finish update item claim: {e}"))?;
         Ok(None)
+    }
+
+    /// 保存ジョブで実際に保存できた作品を、ワーカー再起動後も復元する。
+    pub fn saved_update_job_download_ids(&self, job_id: &str) -> Result<Vec<i64>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut statement = conn
+            .prepare(
+                "SELECT result_download_id
+                 FROM update_job_items
+                 WHERE job_id = ?1 AND status = 'saved' AND result_download_id IS NOT NULL
+                 ORDER BY id ASC",
+            )
+            .map_err(|e| format!("Failed to prepare saved update item query: {e}"))?;
+        let rows = statement
+            .query_map(params![job_id], |row| row.get::<_, i64>(0))
+            .map_err(|e| format!("Failed to query saved update items: {e}"))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("Failed to read saved update items: {e}"))
     }
 
     pub fn complete_update_job_item(
