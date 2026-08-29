@@ -1608,7 +1608,8 @@ function LibrarySearch({ value, onChange, runtime }: { value: string; onChange: 
       else onChange(action.query);
       combobox.closeDropdown();
     }} withinPortal>
-      <Combobox.Target>
+      {/* 候補が開いているかを支援技術へ伝える。Mantine の既定では出ない。 */}
+      <Combobox.Target withExpandedAttribute>
         <InputBase
           value={value}
           onChange={(event) => {
@@ -1620,6 +1621,18 @@ function LibrarySearch({ value, onChange, runtime }: { value: string; onChange: 
           onFocus={() => combobox.openDropdown()}
           onClick={() => combobox.openDropdown()}
           onBlur={() => combobox.closeDropdown()}
+          onKeyDown={(event) => {
+            // 候補があるときの Enter は Combobox のもの（選んだものを確定する）。
+            // 候補が無いときは誰も受けていなかったので、**押しても何も起きな
+            // かった**。検索欄で Enter が無反応なのは、それだけで壊れて見える。
+            //
+            // 変換の確定で飛んでくる Enter は数えない。`isComposing` は
+            // `onCompositionEnd` より前に立つので、こちらで見る必要がある。
+            if (event.key !== "Enter" || composing || event.nativeEvent.isComposing) return;
+            if (items.length) return;
+            event.preventDefault();
+            combobox.closeDropdown();
+          }}
           leftSection={<Icons.search size={IconSize.action} />}
           rightSection={value ? <Combobox.ClearButton onClear={() => onChange("")} /> : null}
           rightSectionPointerEvents={value ? "all" : "none"}
@@ -1631,7 +1644,7 @@ function LibrarySearch({ value, onChange, runtime }: { value: string; onChange: 
       </Combobox.Target>
       <Combobox.Dropdown hidden={!value.trim() || composing}>
         <Combobox.Options>
-          {suggestions.isLoading ? <Combobox.Empty>候補を検索中…</Combobox.Empty> : items.length ? items.map((item, index) => <Combobox.Option value={`suggestion:${index}`} key={`${item.kind}:${item.source ?? ""}:${item.sourceKey ?? item.value}`}><Group justify="space-between" wrap="nowrap"><Text size="sm" lineClamp={1}>{item.label}</Text><Group gap={5} wrap="nowrap">{item.exactMatch && <Badge size="xs" variant="filled" color="piep">完全一致</Badge>}<Badge size="xs" variant="light" color={item.kind === "tag" ? "piep" : "piep"}>{SUGGESTION_KIND_LABEL[item.kind] ?? item.kind}</Badge>{typeof item.count === "number" && <Text size="xs" c="dimmed">{formatNumber(item.count)}件</Text>}</Group></Group></Combobox.Option>) : <Combobox.Empty>Enterで全文検索</Combobox.Empty>}
+          {suggestions.isLoading ? <Combobox.Empty>候補を検索中…</Combobox.Empty> : items.length ? items.map((item, index) => <Combobox.Option value={`suggestion:${index}`} key={`${item.kind}:${item.source ?? ""}:${item.sourceKey ?? item.value}`}><Group justify="space-between" wrap="nowrap"><Text size="sm" lineClamp={1}>{item.label}</Text><Group gap={5} wrap="nowrap">{item.exactMatch && <Badge size="xs" variant="filled" color="piep">完全一致</Badge>}<Badge size="xs" variant="light" color={item.kind === "tag" ? "piep" : "piep"}>{SUGGESTION_KIND_LABEL[item.kind] ?? item.kind}</Badge>{typeof item.count === "number" && <Text size="xs" c="dimmed">{formatNumber(item.count)}件</Text>}</Group></Group></Combobox.Option>) : <Combobox.Empty>候補はありません。入力した言葉でそのまま探しています</Combobox.Empty>}
         </Combobox.Options>
         <Combobox.Footer><Text size="xs" c="dimmed">例: tag:創作 -成人向け &quot;完全一致&quot;</Text></Combobox.Footer>
       </Combobox.Dropdown>

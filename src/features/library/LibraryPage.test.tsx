@@ -50,6 +50,34 @@ describe("LibraryPage search", () => {
     expect(sort).toHaveValue("関連度が高い順");
   });
 
+  /**
+   * 検索欄の Enter が無反応だった。候補が無いときの案内は「Enterで全文検索」と
+   * 言っていたのに、**受ける処理が一行も無かった**。しかも押さなくても既に
+   * 全文検索は走っている（入力は即座に反映される）ので、案内も二重に嘘だった。
+   *
+   * 変換の確定で飛んでくる Enter は数えない。数えると、日本語を打っている
+   * 途中で候補が閉じる。
+   */
+  it("answers Enter by closing the suggestions instead of doing nothing", async () => {
+    window.location.hash = "#/library";
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
+    const input = await screen.findByLabelText("ライブラリを検索");
+    fireEvent.focus(input);
+    fireEvent.change(input, { target: { value: "モテモテのハーレム" } });
+    // 開いているかどうかは `aria-expanded` に出る。候補の中身は非同期で
+    // 変わるし、閉じても節点は DOM に残るので、そこでは判定できない。
+    await waitFor(() => expect(input).toHaveAttribute("aria-expanded", "true"));
+
+    // 変換の確定で飛ぶ Enter は数えない。数えると打っている途中で閉じる。
+    fireEvent.keyDown(input, { key: "Enter", isComposing: true });
+    expect(input).toHaveAttribute("aria-expanded", "true");
+
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => expect(input).toHaveAttribute("aria-expanded", "false"));
+    expect(input).toHaveValue("モテモテのハーレム");
+  });
+
   it("keeps a column sort selectable during a search and drops it when the query is cleared", async () => {
     window.location.hash = "#/library?q=%E6%97%A5%E6%9C%AC&sort=title";
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
