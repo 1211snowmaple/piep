@@ -6,7 +6,7 @@ test.beforeEach(async ({ page }) => {
     localStorage.setItem("piep.library-view", "gallery");
   });
   await page.goto("/#/library");
-  await expect(page.getByRole("textbox", { name: "ライブラリを検索" })).toBeVisible();
+  await expect(page.getByRole("combobox", { name: "ライブラリを検索" })).toBeVisible();
   await page.addStyleTag({ content: `
     *,*::before,*::after{animation:none!important;transition:none!important;caret-color:transparent!important}
     /* Reader prose normally follows the user's serif preference. The Windows
