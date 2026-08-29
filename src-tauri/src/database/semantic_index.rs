@@ -32,6 +32,52 @@ const ANN_FORMAT_VERSION: u32 = 1;
 #[cfg(not(test))]
 static MODEL: OnceLock<Result<Mutex<EmbeddingRuntime>, String>> = OnceLock::new();
 static ANN_BUILD_LOCK: OnceLock<parking_lot::Mutex<()>> = OnceLock::new();
+static MODEL_CACHE_DIR: OnceLock<PathBuf> = OnceLock::new();
+/// fastembed が指定なしのときに使う置き場。**現在の作業ディレクトリ相対**。
+const FASTEMBED_DEFAULT_CACHE_DIR: &str = ".fastembed_cache";
+const MODEL_DIR_NAME: &str = "models";
+
+/// 埋め込みモデルの置き場を、棚の隣に固定する。
+///
+/// fastembed の既定は `./.fastembed_cache`、つまり**起動した場所**である。
+/// piep はこれを指定していなかったので、別の場所から起動するたびに 465MB の
+/// モデルを落とし直し、その場に置き去りにしていた（この作業機にも二つあった）。
+/// 棚と同じところに置けば、どこから起動しても一つで済み、片付けの範囲にも入る。
+///
+/// 起動時に一度だけ呼ぶ。呼ばれなかったときは fastembed の既定のままにする。
+pub fn set_model_cache_dir(storage_dir: &Path) {
+    let target = storage_dir.join(INDEX_DIR_NAME).join(MODEL_DIR_NAME);
+    if MODEL_CACHE_DIR.set(target.clone()).is_err() {
+        return;
+    }
+    if target.exists() {
+        return;
+    }
+    // すでに落としてあるものを捨てさせない。同じ器の中なら付け替えるだけで済む。
+    let legacy = Path::new(FASTEMBED_DEFAULT_CACHE_DIR);
+    if !legacy.is_dir() {
+        return;
+    }
+    if let Some(parent) = target.parent() {
+        if std::fs::create_dir_all(parent).is_err() {
+            return;
+        }
+    }
+    match std::fs::rename(legacy, &target) {
+        Ok(()) => log::info!("埋め込みモデルの置き場を棚の隣へ移しました: {target:?}"),
+        Err(error) => log::info!(
+            "以前の置き場を移せないので、モデルは取り直しになります（{legacy:?}）: {error}"
+        ),
+    }
+}
+
+#[cfg(not(test))]
+fn model_cache_dir() -> PathBuf {
+    MODEL_CACHE_DIR
+        .get()
+        .cloned()
+        .unwrap_or_else(|| PathBuf::from(FASTEMBED_DEFAULT_CACHE_DIR))
+}
 
 pub fn model_id() -> &'static str {
     MODEL_ID
@@ -876,6 +922,7 @@ fn init_embedding_runtime() -> Result<EmbeddingRuntime, String> {
     #[cfg(windows)]
     {
         let gpu_options = InitOptions::new(EmbeddingModel::MultilingualE5Small)
+            .with_cache_dir(model_cache_dir())
             .with_show_download_progress(true)
             .with_intra_threads(2)
             .with_execution_providers(vec![ort::ep::DirectML::default().build()]);
@@ -901,6 +948,7 @@ fn init_embedding_runtime() -> Result<EmbeddingRuntime, String> {
         .unwrap_or(4);
     TextEmbedding::try_new(
         InitOptions::new(EmbeddingModel::MultilingualE5Small)
+            .with_cache_dir(model_cache_dir())
             .with_show_download_progress(true)
             .with_intra_threads(threads),
     )

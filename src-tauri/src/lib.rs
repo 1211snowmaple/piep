@@ -123,6 +123,10 @@ pub fn run() -> tauri::Result<()> {
             // どれも失敗しうるのに、失敗したことがどこにも残らなかった。
             logging::install(&app_data);
 
+            // 埋め込みモデルの置き場は、開く前に決めておく。既定は起動した場所
+            // なので、決めないと起動場所ごとに 465MB を落として置き去りにする。
+            database::semantic_index::set_model_cache_dir(&storage_dir);
+
             // Claim the whole library before SQLite, restore recovery, search
             // sidecars, or downloaded files can be opened by this process.
             let library_process_lock = LibraryProcessLock::acquire(&app_data)
