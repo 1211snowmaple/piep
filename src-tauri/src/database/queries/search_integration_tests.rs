@@ -6334,3 +6334,47 @@ fn the_extended_length_prefix_does_not_split_one_file_into_two() {
         comparable_library_path(shouting)
     );
 }
+
+/// 意味ベクトルだけが遅れている作品も、作り直しの対象になる。
+///
+/// 残り件数を字面の索引の古さだけで数えていたころ、索引が最新
+/// （5,410/5,410）なら残りは 0 と出て `rebuild_search_index` はそこで戻った。
+/// **「意味検索のベクトルも同時に作成する」を入れても必ず 0 件で終わり**、
+/// 意味索引に届いていない 2,239 件は永久に追いつかなかった。
+#[test]
+fn a_work_missing_only_its_vectors_is_still_work_for_the_rebuild() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let id = insert_download_unindexed(&db, &storage, "vectors-behind", "題", "作者", &[], "本文");
+
+    // 字面の索引だけ最新にする。意味索引には何も入れない。
+    db.rebuild_search_index(
+        SearchIndexRebuildOptions {
+            include_semantic: false,
+            ..Default::default()
+        },
+        &|| false,
+        |_| {},
+    )
+    .unwrap();
+
+    let conn = db.read_conn().unwrap();
+    assert_eq!(
+        pending_search_index_count(&conn, false).unwrap(),
+        0,
+        "字面の索引は追いついているはず"
+    );
+    assert_eq!(
+        pending_search_index_count(&conn, true).unwrap(),
+        1,
+        "意味ベクトルが無いのだから、意味も作るなら残っているはず"
+    );
+    assert_eq!(
+        stale_search_index_ids_locked(&conn, 10, 0, true).unwrap(),
+        vec![id],
+        "選ぶ側と数える側は同じ条件でなければならない"
+    );
+    assert!(stale_search_index_ids_locked(&conn, 10, 0, false)
+        .unwrap()
+        .is_empty());
+}

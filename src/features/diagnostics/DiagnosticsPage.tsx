@@ -58,8 +58,18 @@ function MetricCard({ label, value, detail, icon: Icon, color = "piep" }: { labe
   return <Card p="lg"><Group wrap="nowrap" align="flex-start" gap="sm"><ThemeIcon size={38} variant="light" color={color} style={{ flex: "0 0 auto" }}><Icon size={18} /></ThemeIcon><Box miw={0} style={{ flex: "1 1 auto" }}><Text size="xs" c="dimmed" className="line-clamp-1">{label}</Text><Text fz="xl" fw={760} className="metric-card__value">{value}</Text><Text size="xs" c="dimmed" mt={4}>{detail}</Text></Box></Group></Card>;
 }
 
-function PerformanceRow({ name, current, p50, p95 }: { name: string; current: number | null; p50: number | null; p95: number | null }) {
-  return <Table.Tr><Table.Td><Text fw={650} size="sm">{name}</Text></Table.Td><Table.Td><Badge variant="light" color={scoreColor(current)} tt="none">{formatLatency(current)}</Badge></Table.Td><Table.Td>{formatLatency(p50)}</Table.Td><Table.Td>{formatLatency(p95)}</Table.Td></Table.Tr>;
+/**
+ * 色は **p50 に付ける**。
+ *
+ * 「初回」は7回測ったうちの1回目で、索引のセグメントもページキャッシュも
+ * 冷えている。**構造的に必ずいちばん遅い**ので、そこへ閾値の色を付けると
+ * 何度測っても赤いままになり、壊れているように見える。実際に効いていたのは
+ * これで、5,410 作品の棚で「初回 919ms・p50 366ms」が毎回赤く出ていた。
+ *
+ * 初回の数字自体は捨てない。アプリを開いて最初に引くときの体感がそれである。
+ */
+function PerformanceRow({ name, cold, p50, p95 }: { name: string; cold: number | null; p50: number | null; p95: number | null }) {
+  return <Table.Tr><Table.Td><Text fw={650} size="sm">{name}</Text></Table.Td><Table.Td c="dimmed">{formatLatency(cold)}</Table.Td><Table.Td><Badge variant="light" color={scoreColor(p50)} tt="none">{formatLatency(p50)}</Badge></Table.Td><Table.Td>{formatLatency(p95)}</Table.Td></Table.Tr>;
 }
 
 /** Named so the wait reads as work in progress rather than a stalled screen. */
@@ -424,7 +434,7 @@ export default function DiagnosticsPage({ embedded = false, previewData = previe
       </Alert>
 
       <SimpleGrid cols={{ base: 1, lg: 2 }}>
-        <Card p="lg"><Group justify="space-between"><Box><Title order={3}>実データ性能</Title><Text size="sm" c="dimmed">同じ処理を複数回測定したアプリ内部時間</Text></Box><ThemeIcon size={44} variant="light" color="green"><Icons.diagnostics size={IconSize.feature} /></ThemeIcon></Group><Table.ScrollContainer minWidth={380} type="native"><Table mt="lg" verticalSpacing="sm"><Table.Thead><Table.Tr><Table.Th>処理</Table.Th><Table.Th>今回</Table.Th><Table.Th>p50</Table.Th><Table.Th>p95</Table.Th></Table.Tr></Table.Thead><Table.Tbody><PerformanceRow name="一覧の先頭80件" current={data.listFirstPageMs} p50={data.listP50Ms} p95={data.listP95Ms} /><PerformanceRow name="最多作者名の全文検索" current={data.lexicalSearchMs} p50={data.lexicalSearchP50Ms} p95={data.lexicalSearchP95Ms} /><PerformanceRow name="作者の完全一致絞り込み" current={data.exactAuthorP50Ms} p50={data.exactAuthorP50Ms} p95={data.exactAuthorP95Ms} /></Table.Tbody></Table></Table.ScrollContainer>{data.benchmarkQuery && <Text size="xs" c="dimmed" mt="md">作者名の実データを端末内だけで使用して計測しました。</Text>}</Card>
+        <Card p="lg"><Group justify="space-between"><Box><Title order={3}>実データ性能</Title><Text size="sm" c="dimmed">同じ処理を複数回測定したアプリ内部時間</Text></Box><ThemeIcon size={44} variant="light" color="green"><Icons.diagnostics size={IconSize.feature} /></ThemeIcon></Group><Table.ScrollContainer minWidth={380} type="native"><Table mt="lg" verticalSpacing="sm"><Table.Thead><Table.Tr><Table.Th>処理</Table.Th><Table.Th>初回（冷えた状態）</Table.Th><Table.Th>p50</Table.Th><Table.Th>p95</Table.Th></Table.Tr></Table.Thead><Table.Tbody><PerformanceRow name="一覧の先頭80件" cold={data.listFirstPageMs} p50={data.listP50Ms} p95={data.listP95Ms} /><PerformanceRow name="最多作者名の全文検索" cold={data.lexicalSearchMs} p50={data.lexicalSearchP50Ms} p95={data.lexicalSearchP95Ms} /><PerformanceRow name="作者の完全一致絞り込み" cold={data.exactAuthorP50Ms} p50={data.exactAuthorP50Ms} p95={data.exactAuthorP95Ms} /></Table.Tbody></Table></Table.ScrollContainer>{data.benchmarkQuery && <Text size="xs" c="dimmed" mt="md">作者名の実データを端末内だけで使用して計測しました。</Text>}</Card>
         <Card p="lg"><Title order={3}>索引と保存領域</Title><Stack gap="md" mt="lg"><Box><Group justify="space-between"><Box><Text size="sm">全文索引</Text><Text size="xs" c="dimmed">{formatNumber(data.lexicalIndexSegmentCount)}セグメント · {formatNumber(data.lexicalIndexFileCount)}ファイル</Text></Box><Text size="sm" fw={650}>{formatBytes(data.lexicalIndexSizeBytes)}</Text></Group><Group justify="space-between" mt="sm"><Box><Text size="sm">意味検索索引</Text><Text size="xs" c="dimmed">{formatNumber(data.searchIndex.semanticIndexedDownloads)} / {formatNumber(data.searchIndex.totalDownloads)}作品{data.searchIndex.semanticPendingDownloads ? ` · ${formatNumber(data.searchIndex.semanticPendingDownloads)}件が未反映` : ""}</Text></Box><Text size="sm" fw={650}>{formatBytes(data.semanticIndexSizeBytes)}</Text></Group></Box><Divider /><Box><Group justify="space-between"><Text size="sm">索引完成度</Text><Text size="xs" c="dimmed">{data.searchIndex.pendingDownloads}件待機</Text></Group><Progress value={indexRatio} mt="xs" color={data.searchIndex.isComplete ? "green" : "yellow"} /></Box><Divider /><Group justify="space-between"><Box><Text size="sm">孤立アセットDB行</Text><Text size="xs" c="dimmed">作品との関連を失った記録</Text></Box><Badge variant="light" color={data.orphanAssetRows ? "red" : "green"}>{data.orphanAssetRows ? `${formatNumber(data.orphanAssetRows)}件 · ${formatBytes(data.orphanAssetBytes)}` : "0件"}</Badge></Group><Group justify="space-between"><Box><Text size="sm">孤立アセットファイル</Text><Text size="xs" c="dimmed">保存フォルダーにある未参照ファイル</Text></Box><Badge variant="light" color={data.orphanAssetFiles ? "yellow" : "green"}>{data.orphanAssetFiles ? `${formatNumber(data.orphanAssetFiles)}件 · ${formatBytes(data.orphanAssetFileBytes)}` : "0件"}</Badge></Group></Stack></Card>
       </SimpleGrid>
       <Text size="xs" c="dimmed">最終計測: {new Date(data.measuredAt).toLocaleString("ja-JP")} · 計測値はこの端末から送信されません。</Text>

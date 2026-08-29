@@ -1810,7 +1810,9 @@ impl Database {
     pub fn rebuild_search_index_batch(&self, limit: i64) -> Result<SearchIndexStatus, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let limit = limit.clamp(1, 200);
-        let ids = stale_search_index_ids_locked(&conn, limit, 0)?;
+        // 起動後の追いつきは字面の索引だけ。意味ベクトルは GPU を使うので、
+        // 利用者が「意味検索のベクトルも同時に作成する」を入れたときだけ作る。
+        let ids = stale_search_index_ids_locked(&conn, limit, 0, false)?;
         let mut docs = Vec::with_capacity(ids.len());
         for id in &ids {
             match search_index_document_locked(&conn, &self.storage_dir, *id) {
@@ -1853,7 +1855,7 @@ impl Database {
         let started = std::time::Instant::now();
         let total_pending = {
             let conn = self.read_conn()?;
-            pending_search_index_count(&conn)?
+            pending_search_index_count(&conn, options.include_semantic)?
         };
         on_progress(SearchIndexRebuildProgress {
             phase: "preparing",
@@ -1890,7 +1892,12 @@ impl Database {
             // re-asking for stale rows would hand back the same one for ever.
             let ids = {
                 let conn = self.read_conn()?;
-                stale_search_index_ids_locked(&conn, chunk_size, after_id)?
+                stale_search_index_ids_locked(
+                    &conn,
+                    chunk_size,
+                    after_id,
+                    options.include_semantic,
+                )?
             };
             if ids.is_empty() {
                 break;
@@ -12184,22 +12191,28 @@ fn stale_search_index_ids_locked(
     conn: &Connection,
     limit: i64,
     after_id: i64,
+    include_semantic: bool,
 ) -> Result<Vec<i64>, String> {
     let mut stmt = conn
-        .prepare(
+        .prepare(&format!(
             "SELECT d.id
              FROM downloads d
              LEFT JOIN search_index_state m ON m.download_id = d.id
              WHERE d.id > ?2
-               AND (m.download_id IS NULL
-                    OR m.current_version != d.current_version
-                    OR COALESCE(m.content_hash, '') != COALESCE(d.content_hash, ''))
+               AND {}
              ORDER BY d.id ASC
              LIMIT ?1",
-        )
+            stale_search_index_predicate(include_semantic, "?3")
+        ))
         .map_err(|e| format!("Search index stale query prepare failed: {}", e))?;
+    // 束ねる値は文のほうに合わせる。余らせても足りなくても rusqlite は断る。
+    let model = super::semantic_index::model_id();
+    let mut binds: Vec<&dyn rusqlite::ToSql> = vec![&limit, &after_id];
+    if include_semantic {
+        binds.push(&model);
+    }
     let rows = stmt
-        .query_map(params![limit, after_id], |row| row.get::<_, i64>(0))
+        .query_map(binds.as_slice(), |row| row.get::<_, i64>(0))
         .map_err(|e| format!("Search index stale query failed: {}", e))?;
     let mut ids = Vec::new();
     for row in rows {
@@ -12245,18 +12258,53 @@ fn reconcile_search_index_format(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
-fn pending_search_index_count(conn: &Connection) -> Result<i64, String> {
-    conn.query_row(
+/// 作り直しの残り。**意味ベクトルも作るなら、その遅れも残りに数える。**
+///
+/// 数えていなかったころ、字面の索引が最新（5,410/5,410）なら残りは 0 と
+/// 出て、`rebuild_search_index` はそこで戻っていた。「意味検索のベクトルも
+/// 同時に作成する」を入れても **必ず 0 件で終わり**、意味索引に届いていない
+/// 2,239 件は永久に追いつかなかった。
+fn pending_search_index_count(conn: &Connection, include_semantic: bool) -> Result<i64, String> {
+    let sql = format!(
         "SELECT COUNT(*)
          FROM downloads d
          LEFT JOIN search_index_state m ON m.download_id = d.id
-         WHERE m.download_id IS NULL
-            OR m.current_version != d.current_version
-            OR COALESCE(m.content_hash, '') != COALESCE(d.content_hash, '')",
-        [],
-        |row| row.get(0),
+         WHERE {}",
+        stale_search_index_predicate(include_semantic, "?1")
+    );
+    // 束ねる値は文のほうに合わせる。余らせても足りなくても rusqlite は断る。
+    let model = super::semantic_index::model_id();
+    let binds: Vec<&dyn rusqlite::ToSql> = if include_semantic {
+        vec![&model]
+    } else {
+        Vec::new()
+    };
+    conn.query_row(&sql, binds.as_slice(), |row| row.get(0))
+        .map_err(|e| format!("Search index pending count failed: {e}"))
+}
+
+/// 「まだ index に追いついていない」の条件。数える側と選ぶ側で**同じ文**を使う。
+/// 片方だけ変えると、残り件数と実際に処理される件数が食い違う。
+///
+/// `model_placeholder` は呼ぶ側の束縛の位置。数える側は `?1`、選ぶ側は
+/// `?1`（件数）と `?2`（続きの位置）を先に使っているので `?3` になる。
+fn stale_search_index_predicate(include_semantic: bool, model_placeholder: &str) -> String {
+    const LEXICAL: &str = "(m.download_id IS NULL
+                    OR m.current_version != d.current_version
+                    OR COALESCE(m.content_hash, '') != COALESCE(d.content_hash, ''))";
+    if !include_semantic {
+        return LEXICAL.to_string();
+    }
+    format!(
+        "({LEXICAL}
+                 OR NOT EXISTS (
+                    SELECT 1 FROM semantic_index_state s
+                     WHERE s.download_id = d.id
+                       AND s.current_version = d.current_version
+                       AND COALESCE(s.content_hash, '') = COALESCE(d.content_hash, '')
+                       AND s.model_id = {model_placeholder}
+                 ))"
     )
-    .map_err(|e| format!("Search index pending count failed: {e}"))
 }
 
 fn search_index_status_locked(
