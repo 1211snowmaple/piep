@@ -262,9 +262,11 @@ fn middle_sentence(text: &str) -> Option<String> {
 
 fn main() -> Result<(), String> {
     let args: Vec<String> = std::env::args().collect();
-    if args.len() < 4 {
+    // 置き場を渡さなくても回る。いまのモデルだけを測って、抽出や集計が
+    // 壊れていないかを短時間で確かめるのに使う。
+    if args.len() < 3 {
         return Err(
-            "usage: semantic_model_probe <piep.db の写し> <storage_dir> <モデル置き場>...".into(),
+            "usage: semantic_model_probe <piep.db の写し> <storage_dir> [モデル置き場]...".into(),
         );
     }
     let storage = Path::new(&args[2]);
@@ -293,25 +295,53 @@ fn main() -> Result<(), String> {
         })
         .map_err(|error| format!("断片を読めません: {error}"))?;
 
+    // 棚を絞れるようにしておく。**重いモデルは棚全体を通せない。**
+    // ruri-v3-130m は本番の断片で 18 断片/秒しか出ず、163,393 本なら 2.5 時間
+    // かかる。相手を比べるだけなら、同じ小さい棚を両方に通せば足りる。
+    // 絞るのは**作品の単位**で行う。断片だけ間引くと、答えの断片が棚から
+    // 抜け落ちて「引けない」が測定の都合で起きる。
+    let chunk_cap: usize = std::env::var("PIEP_PROBE_CHUNK_CAP")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(usize::MAX);
+
     let mut owners: Vec<i64> = Vec::new();
     let mut texts: Vec<String> = Vec::new();
     let mut current_vectors: Vec<Vec<f32>> = Vec::new();
     let mut body_samples: Vec<(i64, String)> = Vec::new();
+    // **二つの集合を混ぜないこと。** 棚に入れた作品と、本文の見本を取った作品は
+    // 別である。同じ集合にしたら、作品の先頭（metadata の断片）で「見た」印が
+    // 付いてしまい、続く本文の断片が一本も見本にならなかった。
+    let mut in_corpus: HashSet<i64> = HashSet::new();
     let mut sampled_works: HashSet<i64> = HashSet::new();
+    let mut capped = false;
     for row in rows {
         let (download_id, field, text, blob) = row.map_err(|error| error.to_string())?;
+        // 上限に届いたら、いま読んでいる作品の続きだけ入れて打ち切る。
+        if owners.len() >= chunk_cap && !in_corpus.contains(&download_id) {
+            capped = true;
+            break;
+        }
         // **一作品につき一本。** 断片は作品ごとにまとまって並ぶので、先頭から
         // 順に取ると同じ作品ばかりになる（最初はそれで1件しか測れていなかった）。
         if field == "body" && text.chars().count() >= 200 && sampled_works.insert(download_id) {
             body_samples.push((download_id, text.clone()));
         }
+        in_corpus.insert(download_id);
         owners.push(download_id);
         texts.push(text);
         current_vectors.push(normalized(&blob_to_vector(&blob)));
     }
-    println!("断片: {} 本 / 作品: {} 件", texts.len(), {
-        owners.iter().collect::<HashSet<_>>().len()
-    });
+    println!(
+        "断片: {} 本 / 作品: {} 件{}",
+        texts.len(),
+        owners.iter().collect::<HashSet<_>>().len(),
+        if capped {
+            "（PIEP_PROBE_CHUNK_CAP で絞ってある。棚が小さいぶん、どちらの数字も甘く出る）"
+        } else {
+            ""
+        }
+    );
     if texts.is_empty() {
         return Err("索引が空である".into());
     }
