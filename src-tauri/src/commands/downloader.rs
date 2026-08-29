@@ -584,7 +584,7 @@ pub async fn fetch_fanbox_creator_posts(
     cookie: String,
     user_agent: String,
 ) -> Result<Vec<FanboxPost>, String> {
-    let api = FanboxAPI::new(cookie, user_agent);
+    let api = FanboxAPI::new(cookie, user_agent).map_err(|error| error.to_string())?;
     api.get_all_creator_posts(&creator_id)
         .await
         .map_err(|e| e.to_string())
@@ -597,6 +597,7 @@ pub(crate) async fn fetch_fanbox_creator_posts_since(
     stop_source_id: Option<&str>,
 ) -> Result<Vec<FanboxPost>, String> {
     FanboxAPI::new(cookie, user_agent)
+        .map_err(|error| error.to_string())?
         .get_creator_posts_since(&creator_id, stop_source_id)
         .await
         .map_err(|e| e.to_string())
@@ -615,7 +616,8 @@ pub(crate) async fn fetch_pixiv_series_novels_since(
     refresh_token: String,
     stop_source_id: Option<&str>,
 ) -> Result<Vec<pixiv_api::models::NovelInfo>, String> {
-    let api = pixiv_api::aapi::AppPixivAPI::new_from_refresh_token(refresh_token);
+    let api = pixiv_api::aapi::AppPixivAPI::new_from_refresh_token(refresh_token)
+        .map_err(|error| error.to_string())?;
     let id_u64: u64 = series_id.parse().map_err(|_| "Invalid series ID")?;
 
     let mut last_order: Option<String> = None;
@@ -695,7 +697,8 @@ pub(crate) async fn fetch_pixiv_user_novels_since(
     refresh_token: String,
     stop_source_id: Option<&str>,
 ) -> Result<Vec<pixiv_api::models::NovelInfo>, String> {
-    let api = pixiv_api::aapi::AppPixivAPI::new_from_refresh_token(refresh_token);
+    let api = pixiv_api::aapi::AppPixivAPI::new_from_refresh_token(refresh_token)
+        .map_err(|error| error.to_string())?;
     let id_u64: u64 = user_id.parse().map_err(|_| "Invalid user ID")?;
 
     let mut offset: Option<String> = None;

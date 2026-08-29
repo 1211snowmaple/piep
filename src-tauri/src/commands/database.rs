@@ -1403,7 +1403,8 @@ async fn fetch_pixiv_series_profile_json(
         Some(token) => {
             let series_id: u64 = source_key.parse().map_err(|_| "Invalid Pixiv series ID")?;
             let api =
-                crate::pixiv_api::aapi::AppPixivAPI::new_from_refresh_token(token.to_string());
+                crate::pixiv_api::aapi::AppPixivAPI::new_from_refresh_token(token.to_string())
+                    .map_err(|error| error.to_string())?;
             match api.novel_series(series_id, None, None, true).await {
                 Ok(value) => Some(value),
                 // web から取れているなら、アプリAPIの失敗で全部を捨てない。
@@ -1710,7 +1711,8 @@ pub async fn refresh_entity_profile(
         let normalized = if source == "pixiv" {
             let token = refresh_token.ok_or("Pixivプロフィール更新にはrefreshTokenが必要です")?;
             let user_id: u64 = source_key.parse().map_err(|_| "Invalid Pixiv user ID")?;
-            let api = crate::pixiv_api::aapi::AppPixivAPI::new_from_refresh_token(token);
+            let api = crate::pixiv_api::aapi::AppPixivAPI::new_from_refresh_token(token)
+                .map_err(|error| error.to_string())?;
             let detail = api
                 .user_detail(user_id, None, true)
                 .await
@@ -1749,7 +1751,8 @@ pub async fn refresh_entity_profile(
         } else if source == "fanbox" {
             let cookie = cookie.ok_or("FANBOXプロフィール更新にはcookieが必要です")?;
             let user_agent = user_agent.unwrap_or_else(|| "Mozilla/5.0".to_string());
-            let api = crate::fanbox_api::client::FanboxAPI::new(cookie, user_agent);
+            let api = crate::fanbox_api::client::FanboxAPI::new(cookie, user_agent)
+                .map_err(|error| error.to_string())?;
             let detail = api
                 .get_creator(&source_key)
                 .await

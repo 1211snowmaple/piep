@@ -1530,26 +1530,52 @@ impl Database {
     /// 同じ形で拾える。
     pub fn resync_search_index_state(&self) -> Result<usize, String> {
         let segments = super::tantivy_index::searchable_segment_count(&self.storage_dir)?;
-        if segments > 0 {
+        // 意味索引にも版の照合が無い。器の版（`semantic-vN`）や ANN の版を
+        // 上げると新しい空のディレクトリができるのに、記録は「索引済み」のまま
+        // 残り、意味検索が静かに0件になる。ここも**実物を見て**判断すれば、
+        // 版を上げたときも、ディレクトリを消されたときも、同じ形で拾える。
+        // 身元（`model_id`）に版を混ぜる手もあるが、それだと今ある棚が
+        // 一度だけ無用に作り直しになる。
+        let chunks = super::semantic_index::status(&self.storage_dir).indexed_chunks;
+        if segments > 0 && chunks > 0 {
             return Ok(0);
         }
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        let recorded: i64 = conn
-            .query_row("SELECT COUNT(*) FROM search_index_state", [], |row| {
-                row.get(0)
-            })
-            .map_err(|e| format!("Search index state count failed: {e}"))?;
-        if recorded == 0 {
-            return Ok(0);
+        let mut cleared = 0usize;
+        if segments == 0 {
+            let recorded: i64 = conn
+                .query_row("SELECT COUNT(*) FROM search_index_state", [], |row| {
+                    row.get(0)
+                })
+                .map_err(|e| format!("Search index state count failed: {e}"))?;
+            if recorded > 0 {
+                let removed = conn
+                    .execute("DELETE FROM search_index_state", [])
+                    .map_err(|e| format!("Search index state reset failed: {e}"))?;
+                log::warn!(
+                    "全文索引が空でした。{removed}件の「索引済み」の記録を取り消し、作り直しの対象に戻します"
+                );
+                cleared += removed;
+            }
         }
-        let cleared = conn
-            .execute("DELETE FROM search_index_state", [])
-            .map_err(|e| format!("Search index state reset failed: {e}"))?;
+        if chunks == 0 {
+            let recorded: i64 = conn
+                .query_row("SELECT COUNT(*) FROM semantic_index_state", [], |row| {
+                    row.get(0)
+                })
+                .map_err(|e| format!("Semantic index state count failed: {e}"))?;
+            if recorded > 0 {
+                let removed = conn
+                    .execute("DELETE FROM semantic_index_state", [])
+                    .map_err(|e| format!("Semantic index state reset failed: {e}"))?;
+                log::warn!("意味索引が空でした。{removed}件の「索引済み」の記録を取り消します");
+                cleared += removed;
+            }
+        }
         drop(conn);
-        self.invalidate_index_status();
-        log::warn!(
-            "全文索引が空でした。{cleared}件の「索引済み」の記録を取り消し、作り直しの対象に戻します"
-        );
+        if cleared > 0 {
+            self.invalidate_index_status();
+        }
         Ok(cleared)
     }
 

@@ -79,15 +79,14 @@ pub struct FanboxAPI {
 
 impl FanboxAPI {
     /// 新規クライアントの作成
-    pub fn new(cookie: String, user_agent: String) -> Self {
-        let client = build_api_client(FANBOX_CONNECT_TIMEOUT, FANBOX_REQUEST_TIMEOUT)
-            .expect("Failed to build reqwest client");
-
-        Self {
+    /// **組み立ての失敗で落ちない。** 詳しい理由は `AppPixivAPI::new_with` に。
+    pub fn new(cookie: String, user_agent: String) -> Result<Self, FanboxError> {
+        let client = build_api_client(FANBOX_CONNECT_TIMEOUT, FANBOX_REQUEST_TIMEOUT)?;
+        Ok(Self {
             client,
             cookie,
             user_agent,
-        }
+        })
     }
 
     /// 共通ヘッダーを生成する

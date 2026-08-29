@@ -67,7 +67,7 @@ pub async fn check_fanbox_session(
     full_cookie: &str,
     user_agent: &str,
 ) -> Result<FanboxUser, Box<dyn Error>> {
-    let api = FanboxAPI::new(full_cookie.to_string(), user_agent.to_string());
+    let api = FanboxAPI::new(full_cookie.to_string(), user_agent.to_string())?;
     if let Err(e) = api.check_session().await {
         return Err(format!("Session validation failed: {:?}", e).into());
     }

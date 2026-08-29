@@ -148,6 +148,16 @@ pub fn upsert_documents(
         )
         .map_err(|e| format!("Semantic clear failed: {}", e))?;
     }
+    // **`zip` は短いほうで黙って打ち切る。** 直前にその作品の断片を全部
+    // 消しているので、返ったベクトルが足りなければ、消したぶんの一部が二度と
+    // 入らない。エラーにもならず、意味検索からその作品が静かに欠ける。
+    if records.len() != vectors.len() {
+        return Err(format!(
+            "Semantic embedding count mismatch: sent {}, received {}",
+            records.len(),
+            vectors.len()
+        ));
+    }
     for (record, vector) in records.iter().zip(vectors.iter()) {
         if vector.len() != VECTOR_DIMENSION {
             return Err(format!(

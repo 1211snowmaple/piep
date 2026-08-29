@@ -8,7 +8,6 @@ use kv_pairs::{kv_pairs, KVPairs};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue as HV, AUTHORIZATION, HOST, USER_AGENT};
 use reqwest::StatusCode;
 use serde::de::DeserializeOwned;
-use tokio::io::AsyncWriteExt;
 
 use crate::pixiv_api::error::PixivError;
 use crate::pixiv_api::models::*;
@@ -62,33 +61,36 @@ pub struct AppPixivAPI {
 impl AppPixivAPI {
     /// 認証なしのAPIクライアントを作成します。認証が必要な呼び出しは `PixivError::NoAuth` で失敗します。
     ///
-    pub fn new_no_auth() -> Self {
+    pub fn new_no_auth() -> Result<Self, PixivError> {
         log::debug!("認証なしで AppPixivAPI を作成しています");
         Self::new_with(TokenManager::new_no_auth())
     }
 
     /// 既存のアクセストークンからAPIクライアントを作成します。リフレッシュは行われません。
     ///
-    pub fn new_from_access_token(access_token: String) -> Self {
+    pub fn new_from_access_token(access_token: String) -> Result<Self, PixivError> {
         log::debug!("アクセストークンを使用して AppPixivAPI を作成しています");
         Self::new_with(TokenManager::new_from_access_token(access_token))
     }
 
     /// リフレッシュトークンからAPIクライアントを作成します。アクセストークンは必要に応じて取得・更新されます。
     ///
-    pub fn new_from_refresh_token(refresh_token: String) -> Self {
+    pub fn new_from_refresh_token(refresh_token: String) -> Result<Self, PixivError> {
         log::debug!("リフレッシュトークンを使用して AppPixivAPI を作成しています");
         Self::new_with(TokenManager::new_from_refresh_token(refresh_token))
     }
 
-    fn new_with(token_manager: TokenManager) -> Self {
-        let client =
-            build_api_client(API_CONNECT_TIMEOUT, API_REQUEST_TIMEOUT).expect("reqwest client");
-        Self {
+    /// **組み立ての失敗で落ちない。** `expect` を置いていたころ、証明書ストアの
+    /// 破損や一部のセキュリティソフトで TLS の土台が用意できない環境に当たると、
+    /// release は `panic = "abort"` なので**理由を出さずにアプリが消えた**。
+    /// 起きる頻度は低いが、起きたときの見え方が最悪だった。
+    fn new_with(token_manager: TokenManager) -> Result<Self, PixivError> {
+        let client = build_api_client(API_CONNECT_TIMEOUT, API_REQUEST_TIMEOUT)?;
+        Ok(Self {
             hosts: "https://app-api.pixiv.net".to_string(),
             client,
             token_manager,
-        }
+        })
     }
 
     /// 認証が設定されていることを確認し、アクセストークンを取得します。
@@ -1952,36 +1954,6 @@ impl AppPixivAPI {
             )
             .await?;
         parse_response_into(r).await
-    }
-
-    /// Download URL to file. Port of `download`.
-    ///
-    pub async fn download(
-        &self,
-        url: &str,
-        path: &std::path::Path,
-        name: Option<&str>,
-        replace: bool,
-        referer: &str,
-    ) -> Result<bool, PixivError> {
-        let filename = name.unwrap_or_else(|| url.split('/').next_back().unwrap_or("download"));
-        let filepath = path.join(filename);
-        if !replace && tokio::fs::try_exists(&filepath).await.unwrap_or(false) {
-            return Ok(false);
-        }
-        let mut res = self
-            .client
-            .get(url)
-            .header("Referer", referer)
-            .send()
-            .await?;
-
-        let mut file = tokio::fs::File::create(&filepath).await?;
-        while let Some(chunk) = res.chunk().await? {
-            file.write_all(&chunk).await?;
-        }
-        file.flush().await?;
-        Ok(true)
     }
 }
 

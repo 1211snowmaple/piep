@@ -46,7 +46,7 @@ pub async fn get_novel_detail(
     novel_id: &str,
     refresh_token: &str,
 ) -> Result<PixivNovelDetail, Box<dyn Error>> {
-    let api = AppPixivAPI::new_from_refresh_token(refresh_token.to_string());
+    let api = AppPixivAPI::new_from_refresh_token(refresh_token.to_string())?;
     let id_u64: u64 = novel_id.parse()?;
 
     // APIを呼び出して小説の詳細を取得
@@ -110,7 +110,7 @@ pub async fn get_novel_text_and_assets(
     novel_id: &str,
     refresh_token: &str,
 ) -> Result<(String, String, serde_json::Value, serde_json::Value), Box<dyn Error>> {
-    let api = AppPixivAPI::new_from_refresh_token(refresh_token.to_string());
+    let api = AppPixivAPI::new_from_refresh_token(refresh_token.to_string())?;
     let id_u64: u64 = novel_id.parse()?;
 
     // Webview用のAPIを使用して詳細メタデータを一挙に取得

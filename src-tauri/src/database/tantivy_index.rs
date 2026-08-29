@@ -393,6 +393,15 @@ pub fn upsert_documents(storage_dir: &Path, docs: &[TantivyIndexDocument]) -> Re
     if docs.is_empty() {
         return Ok(());
     }
+    // 削除側（`delete_documents_from_snapshot`）は 0 以下の id を弾いている。
+    // 書き込み側だけ素通しにすると、`as u64` が負を巨大な値へ折り返した文書が
+    // 索引に入り、**削除も更新も二度と当たらない**。片方だけ守っても意味がない。
+    if let Some(bad) = docs.iter().find(|doc| doc.download_id <= 0) {
+        return Err(format!(
+            "Invalid download id for indexing: {}",
+            bad.download_id
+        ));
+    }
     let runtime = runtime(storage_dir)?;
     with_ordinary_writer(&runtime, |writer| {
         for doc in docs {
@@ -687,6 +696,12 @@ impl BulkWriter {
     }
 
     pub fn upsert(&mut self, prepared: Prepared) -> Result<(), String> {
+        if prepared.download_id <= 0 {
+            return Err(format!(
+                "Invalid download id for indexing: {}",
+                prepared.download_id
+            ));
+        }
         let download_id = prepared.download_id as u64;
         let field = self.runtime.fields.download_id;
         let writer = self.writer()?;
