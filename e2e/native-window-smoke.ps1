@@ -19,14 +19,6 @@ $env:LOCALAPPDATA = Join-Path $resolvedArtifacts "localappdata"
 New-Item -ItemType Directory -Force -Path $env:APPDATA, $env:LOCALAPPDATA | Out-Null
 $process = Start-Process -FilePath $resolvedExecutable -PassThru -WindowStyle Normal
 try {
-  $deadline = [DateTime]::UtcNow.AddSeconds(45)
-  do {
-    Start-Sleep -Milliseconds 250
-    $process.Refresh()
-  } until ($process.MainWindowHandle -ne 0 -or [DateTime]::UtcNow -gt $deadline -or $process.HasExited)
-  if ($process.HasExited) { throw "piep exited before opening a window" }
-  if ($process.MainWindowHandle -eq 0) { throw "piep did not create a main window" }
-
   Add-Type @"
 using System;
 using System.Runtime.InteropServices;
@@ -39,10 +31,24 @@ public static class PiepNativeWindow {
   [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetClassName(IntPtr hwnd, System.Text.StringBuilder text, int maxCount);
 }
 "@
+  # **取っ手ができたことと、大きさが決まったことは別。** 取っ手が出た瞬間に
+  # 読むと、まだ形の決まっていない窓が 16x16 で返る。実際にそれで、同じ
+  # コミットが Quality では通りリリースでだけ落ちた。大きさが決まるまで待つ。
+  # 窓が出ないまま時間切れになれば、それはそれで失敗として残る。
+  $deadline = [DateTime]::UtcNow.AddSeconds(45)
   $rect = New-Object PiepNativeWindow+RECT
-  if (-not [PiepNativeWindow]::GetWindowRect($process.MainWindowHandle, [ref]$rect)) { throw "Unable to read window bounds" }
-  $width = $rect.Right - $rect.Left
-  $height = $rect.Bottom - $rect.Top
+  $width = 0
+  $height = 0
+  do {
+    Start-Sleep -Milliseconds 250
+    $process.Refresh()
+    if ($process.HasExited) { throw "piep exited before opening a window" }
+    if ($process.MainWindowHandle -eq 0) { continue }
+    if (-not [PiepNativeWindow]::GetWindowRect($process.MainWindowHandle, [ref]$rect)) { continue }
+    $width = $rect.Right - $rect.Left
+    $height = $rect.Bottom - $rect.Top
+  } until (($width -ge 900 -and $height -ge 600) -or [DateTime]::UtcNow -gt $deadline)
+  if ($process.MainWindowHandle -eq 0) { throw "piep did not create a main window" }
   if ($width -lt 900 -or $height -lt 600) { throw "Initial window is smaller than 900x600: ${width}x${height}" }
 
   [PiepNativeWindow]::SetForegroundWindow($process.MainWindowHandle) | Out-Null
