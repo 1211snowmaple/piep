@@ -15,7 +15,11 @@ interface VirtualizedWorkListProps {
   onToggleWatch?: (id: number, watch: boolean) => void;
 }
 
-const GALLERY_MIN_WIDTH = 360;
+// Entity pages keep a shared author/series detail rail. At the default desktop
+// width their work column is about 680px, so 360px cards could never form the
+// two-column gallery the switch promises. 328px still leaves the 104px cover
+// and five footer actions intact, while making two columns fit at 672px.
+const GALLERY_MIN_WIDTH = 328;
 const GALLERY_GAP = 16;
 const LIST_GAP = 10;
 const INITIAL_RENDER_LIMIT = 120;

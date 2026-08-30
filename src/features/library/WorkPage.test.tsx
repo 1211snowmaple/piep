@@ -61,4 +61,23 @@ describe("WorkPage content preview", () => {
     await act(async () => { pageTwo.resolve(content(1, "<p>2ページ本文</p>")); });
     await waitFor(() => expect(screen.getByText("2ページ本文")).toBeInTheDocument());
   });
+
+  it("shows the complete primary title on the detail page", async () => {
+    const longTitle = "マイナーキャラ妄想短編集　陵辱物　とても長い正式な作品名";
+    const demo = getDemoReader(101);
+    dbApi.getReaderMetadata.mockResolvedValue({
+      download: { ...demo.download, title: longTitle },
+      versions: demo.versions,
+      assetCount: demo.assets.length,
+      isEdited: demo.isEdited,
+      activeEditRevision: demo.activeEditRevision,
+    });
+    dbApi.getReaderContentPage.mockResolvedValue(content(0, "<p>本文</p>"));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><WorkPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
+
+    const heading = await screen.findByRole("heading", { name: longTitle });
+    expect(heading).toHaveClass("work-hero__title");
+    expect(heading).not.toHaveClass("line-clamp-2");
+  });
 });

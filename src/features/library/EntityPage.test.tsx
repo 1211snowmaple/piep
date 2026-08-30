@@ -88,6 +88,23 @@ describe("author page", () => {
     collectionApi.listCollectionsForSeries.mockResolvedValue([]);
   });
 
+  it("does not truncate the primary entity title on its own detail page", async () => {
+    dbApi.getPerson.mockResolvedValue({
+      ...person,
+      displayName: "催眠アプリに翻弄されるLOビアンたち",
+    });
+    renderAuthor();
+
+    const heading = await screen.findByRole("heading", {
+      name: "催眠アプリに翻弄されるLOビアンたち",
+    });
+    expect(heading).toHaveClass("entity-hero__title");
+    expect(heading).not.toHaveClass("line-clamp-2");
+    const actions = screen.getByRole("group", { name: "催眠アプリに翻弄されるLOビアンたちの操作" });
+    expect(actions.closest(".entity-hero__identity-copy")).not.toBeNull();
+    expect(actions.compareDocumentPosition(heading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
   /**
    * シリーズの件数は、タブを開くまで取りに行っていなかった。数字はその
    * 問い合わせの `total` から出しているので、**開いてから遅れて現れる**。

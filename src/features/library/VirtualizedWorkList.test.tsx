@@ -10,8 +10,8 @@ import { libraryColumnCount, VirtualizedWorkList } from "@/features/library/Virt
 
 describe("VirtualizedWorkList", () => {
   it("matches the gallery's responsive minimum column width", () => {
-    expect(libraryColumnCount(359, "gallery")).toBe(1);
-    expect(libraryColumnCount(736, "gallery")).toBe(2);
+    expect(libraryColumnCount(671, "gallery")).toBe(1);
+    expect(libraryColumnCount(672, "gallery")).toBe(2);
     expect(libraryColumnCount(1500, "gallery")).toBe(4);
     expect(libraryColumnCount(1500, "compact")).toBe(1);
   });

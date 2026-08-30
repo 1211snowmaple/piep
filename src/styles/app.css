@@ -1115,7 +1115,9 @@ select {
 
 .library-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+  /* Must match VirtualizedWorkList's measured threshold. This also governs the
+     non-virtualized first paint, so both layouts change columns at 672px. */
+  grid-template-columns: repeat(auto-fill, minmax(328px, 1fr));
   gap: 16px;
 }
 
@@ -1484,10 +1486,9 @@ select {
 .entity-card__watch:hover { background: light-dark(#e9eef4, #232c37); }
 .entity-card__watch[data-state="watching"]:hover { background: var(--flag-watch-bg); }
 
-/* 見出しの脇の操作列。折り返さないこと自体が決まりなので、幅が足りなく
-   なったら名前のほうを畳んで絵にする。畳む境目は「この列が置かれている
-   箱」の幅で測る - 画面幅で測ると、サイドバーの開閉ぶん（130px）だけ
-   毎回ずれる。 */
+/* 詳細見出しに付随する操作列。折り返さないこと自体が決まりなので、幅が
+   足りなくなったらボタンの文字を畳んで絵にする。畳む境目は「この列が
+   置かれている箱」の幅で測る。 */
 .action-bar { flex: 0 0 auto; }
 .action-bar__item { flex: 0 0 auto; }
 @container hero (max-width: 820px) {
@@ -1500,10 +1501,17 @@ select {
   .action-bar__item { padding-inline: 10px; }
   .action-bar__item .mantine-Button-section[data-position="left"] { margin-inline-end: 0; }
 }
-/* 縮むのは題の側。題は2行で切り詰められるが、ボタンは縮めば折り返し、
-   折り返した1つだけが左端に取り残されて壊れて見える。 */
-.entity-hero__primary > :first-child { flex: 1 1 auto; min-width: 0; }
-.entity-hero__actions { flex: 0 0 auto; }
+/* 正式名称と操作列は別段。長いシリーズ名が四つのボタンに押されて不自然な
+   位置で改行されないよう、表紙以外の幅を名前へ丸ごと渡す。 */
+.entity-hero__identity { width: 100%; }
+.entity-hero__identity-copy { flex: 1 1 auto; width: 0; }
+.entity-hero__actions {
+  width: 100%;
+  margin-bottom: 9px;
+  container-type: inline-size;
+  container-name: heroactions;
+}
+.entity-hero__actions .action-bar { justify-content: flex-end; }
 .entity-hero__primary .provider-mark { width: fit-content; align-self: flex-start; }
 .profile-links { align-items: stretch; }
 .profile-link {
@@ -1518,6 +1526,7 @@ select {
 /* 行き先が外（普段のブラウザ）だと分かる印。押すまで分からないのを避ける。 */
 .profile-link__out { margin-left: 2px; color: var(--mantine-color-dimmed); opacity: 0.75; }
 .entity-hero h1 { font-size: clamp(23px, 2vw, 30px); line-height: 1.3; letter-spacing: -0.025em; }
+.entity-hero__title { overflow-wrap: anywhere; }
 .entity-page .mantine-Tabs-panel { min-height: 420px; }
 
 .reader-page {

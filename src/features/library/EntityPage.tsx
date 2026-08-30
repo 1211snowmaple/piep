@@ -447,30 +447,33 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
       <Card className="entity-hero" data-kind={kind} padding={0}>
         {kind === "person" && coverPath && <Box className="entity-hero__banner"><Image src={getAssetUrl(coverPath)} alt={`${displayName}のヘッダー画像`} /></Box>}
         <Box className="entity-hero__body">
-          <Group justify="space-between" align="flex-start" wrap="nowrap" className="entity-hero__primary">
-            <Group align="flex-end" wrap="nowrap" miw={0}>
+          <Box className="entity-hero__primary">
+            <Group align="flex-start" wrap="nowrap" miw={0} className="entity-hero__identity">
               {kind === "person"
                 ? <Avatar className="entity-hero__avatar" src={getAssetUrl(avatarPath)} size={112} radius="xl" color="piep">{noImage ? <NoImageMark /> : <Icons.person size={IconSize.avatar} />}</Avatar>
                 : <Box className="entity-hero__series-cover">{avatarPath ? <Image src={getAssetUrl(avatarPath)} alt={`${displayName}の表紙`} fit="contain" /> : <Icons.series size={IconSize.avatar} />}</Box>}
-              <Stack gap={7} mb={5} miw={0} align="flex-start"><ProviderMark provider={source} /><Title order={1} className="line-clamp-2">{displayName}</Title>{/* かつてここには「更新 …」と出ていたが、指していたのは取得元での更新では
-                  なく piep の行が書き換わった日だった。読む側には区別がつかない。
-                  取得元の話をしないなら、手元の言葉で言う。確認していなければ何も出さない。 */}
-              <Group gap="xs">{seriesEntry ? <><Badge variant="light" color="gray">{missingCount > 0 ? `手元 ${formatNumber(localCount)}話 / 取得元 ${formatNumber(publishedCount ?? 0)}話` : `${formatNumber(localCount)}話`}</Badge>{missingCount > 0 && <Badge variant="light" color="yellow">{formatNumber(missingCount)}話 未取得</Badge>}{seriesEntry.isConcluded && <Badge variant="light" color="gray">完結</Badge>}</> : <Badge variant="light" color="gray">{formatNumber(localCount)}作品</Badge>}{entry.lastCheckedAt && <Text size="xs" c="dimmed">{formatFreshness(entry.lastCheckedAt)}に確認</Text>}</Group></Stack>
+              <Stack gap={7} mb={5} miw={0} align="flex-start" className="entity-hero__identity-copy">
+                {/* 作品詳細と同じく、操作を上、名前を下に置く。別段なので長い
+                    正式名称の表示幅は奪わない。 */}
+                <Box className="entity-hero__actions">
+                  <ActionBar
+                    label={`${displayName}の操作`}
+                    items={[
+                      { key: "in-app", label: "アプリ内で開く", icon: Icons.inAppBrowser, onClick: openSourceInApp },
+                      { key: "browser", label: "ブラウザで開く", icon: Icons.externalLink, onClick: openSourceExternally },
+                      { key: "archive", label: "アーカイブ", icon: Icons.archive, onClick: exportZip },
+                      { key: "refresh", label: "情報を更新", icon: Icons.watch, primary: true, loading: refreshMutation.isPending, onClick: () => refreshMutation.mutate() },
+                    ]}
+                  />
+                </Box>
+                <ProviderMark provider={source} />
+                <Title order={1} className="entity-hero__title">{displayName}</Title>{/* かつてここには「更新 …」と出ていたが、指していたのは取得元での更新では
+                    なく piep の行が書き換わった日だった。読む側には区別がつかない。
+                    取得元の話をしないなら、手元の言葉で言う。確認していなければ何も出さない。 */}
+                <Group gap="xs">{seriesEntry ? <><Badge variant="light" color="gray">{missingCount > 0 ? `手元 ${formatNumber(localCount)}話 / 取得元 ${formatNumber(publishedCount ?? 0)}話` : `${formatNumber(localCount)}話`}</Badge>{missingCount > 0 && <Badge variant="light" color="yellow">{formatNumber(missingCount)}話 未取得</Badge>}{seriesEntry.isConcluded && <Badge variant="light" color="gray">完結</Badge>}</> : <Badge variant="light" color="gray">{formatNumber(localCount)}作品</Badge>}{entry.lastCheckedAt && <Text size="xs" c="dimmed">{formatFreshness(entry.lastCheckedAt)}に確認</Text>}</Group>
+              </Stack>
             </Group>
-            {/* 行き先を名前で分ける。アプリ内なら内蔵ブラウザで開いてそのまま
-                保存でき、ブラウザならログイン済みの普段の環境で開く。 */}
-            <Box className="entity-hero__actions">
-              <ActionBar
-                label={`${displayName}の操作`}
-                items={[
-                  { key: "in-app", label: "アプリ内で開く", icon: Icons.inAppBrowser, onClick: openSourceInApp },
-                  { key: "browser", label: "ブラウザで開く", icon: Icons.externalLink, onClick: openSourceExternally },
-                  { key: "archive", label: "アーカイブ", icon: Icons.archive, onClick: exportZip },
-                  { key: "refresh", label: "情報を更新", icon: Icons.watch, primary: true, loading: refreshMutation.isPending, onClick: () => refreshMutation.mutate() },
-                ]}
-              />
-            </Box>
-          </Group>
+          </Box>
           <Stack gap="md" mt="lg">
             {/* Profiles run from one line to several screens of release notes
                 and shop links; unfolded, the long ones pushed the works this

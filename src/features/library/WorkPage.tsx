@@ -321,7 +321,7 @@ export default function WorkPage() {
                   {work.seriesTitle && (work.seriesId
                     ? <Anchor component="button" type="button" size="sm" fw={650} c="dimmed" mb={5} display="block" ta="left" className="work-hero__series-link" onClick={() => navigate(`/series/${encodeURIComponent(work.source)}/${encodeURIComponent(work.seriesId!)}`)}>{work.seriesTitle}</Anchor>
                     : <Text size="sm" c="dimmed" fw={650} mb={5}>{work.seriesTitle}</Text>)}
-                  <Title order={1} className="work-hero__title line-clamp-2" title={work.title}>{work.title}</Title>
+                  <Title order={1} className="work-hero__title">{work.title}</Title>
                   {/* Captions were cut off at three lines with no way to read
                       the rest anywhere in the app; the ones people write run
                       from a sentence to a page of notes, so they fold. */}
