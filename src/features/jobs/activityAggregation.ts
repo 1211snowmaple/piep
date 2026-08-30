@@ -10,6 +10,16 @@ import type { OperationJob } from "./operationJobs";
  */
 const ACTIVE_LOCAL_STATUSES = new Set(["queued", "running", "canceling"]);
 
+type ActivityOrderKey = { status: string; updatedAt: string };
+
+/** Running work stays visible; within the same state the newest change wins. */
+export function compareActivityOrder(a: ActivityOrderKey, b: ActivityOrderKey): number {
+  const aActive = ACTIVE_LOCAL_STATUSES.has(a.status);
+  const bActive = ACTIVE_LOCAL_STATUSES.has(b.status);
+  if (aActive !== bActive) return aActive ? -1 : 1;
+  return Date.parse(b.updatedAt) - Date.parse(a.updatedAt);
+}
+
 /** Whether a page-local operation is only the UI mirror of a durable save job. */
 export function isMirroredSaveOperation(
   operation: OperationJob,

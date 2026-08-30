@@ -56,10 +56,46 @@ vi.mock("@/services/updateJobApi", () => ({
   clearFinishedUpdateJobsCommand: vi.fn().mockResolvedValue(undefined),
   getUpdateJobCommand: mocks.getJob,
 }));
+vi.mock("./operationJobs", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./operationJobs")>()),
+  useOperationJobs: () => [{
+    id: "profile-repair",
+    kind: "maintenance",
+    label: "作者・シリーズ情報を修復",
+    detail: "残件を確認しています",
+    status: "running",
+    current: 28,
+    total: 102,
+    startedAt: "2026-08-28T23:00:00Z",
+    updatedAt: "2026-08-28T23:30:00Z",
+    finishedAt: null,
+    canCancel: true,
+    canRetry: false,
+    logs: [],
+  }],
+}));
 
 import OperationsPage from "./OperationsPage";
 
 describe("OperationsPage update-job logs", () => {
+  it("shows active maintenance before older persisted save jobs", () => {
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    render(
+      <MantineProvider>
+        <QueryClientProvider client={client}>
+          <OperationsPage />
+        </QueryClientProvider>
+      </MantineProvider>,
+    );
+
+    const repair = screen.getByTestId("operation-maintenance");
+    const save = screen.getByText("2件をライブラリに保存").closest(".mantine-Card-root");
+    expect(save).not.toBeNull();
+    expect(repair.compareDocumentPosition(save!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
   it("shows persistent job logs and pages backward beyond the first page", async () => {
     mocks.selectJob.mockResolvedValue(latest);
     mocks.getJob.mockResolvedValue({

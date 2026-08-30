@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { UpdateJobSummary } from "@/services/updateJobApi";
 import type { OperationJob } from "./operationJobs";
 import {
+  compareActivityOrder,
   countActiveActivities,
   dedupeActivityOperations,
 } from "./activityAggregation";
@@ -68,5 +69,19 @@ describe("activity aggregation", () => {
         updateJob({ jobId: "done", status: "completed" }),
       ]),
     ).toBe(0);
+  });
+
+  it("keeps running maintenance above older completed saves", () => {
+    const rows = [
+      { status: "completed", updatedAt: "2026-08-30T02:00:00Z", label: "保存" },
+      { status: "running", updatedAt: "2026-08-30T01:00:00Z", label: "プロフィール修復" },
+      { status: "completed", updatedAt: "2026-08-30T03:00:00Z", label: "新しい完了" },
+    ].sort(compareActivityOrder);
+
+    expect(rows.map((row) => row.label)).toEqual([
+      "プロフィール修復",
+      "新しい完了",
+      "保存",
+    ]);
   });
 });

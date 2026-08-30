@@ -32,6 +32,7 @@ import {
   useOperationJobs,
 } from "./operationJobs";
 import {
+  compareActivityOrder,
   countActiveActivities,
   dedupeActivityOperations,
 } from "./activityAggregation";
@@ -285,6 +286,13 @@ export default function OperationsPage() {
       ),
     [filter, updateJobs.jobs],
   );
+  const visibleActivities = useMemo(
+    () => [
+      ...visibleUpdates.map((job) => ({ type: "update" as const, job })),
+      ...visibleLocal.map((job) => ({ type: "local" as const, job })),
+    ].sort((a, b) => compareActivityOrder(a.job, b.job)),
+    [visibleLocal, visibleUpdates],
+  );
   const activeCount = countActiveActivities(localJobs, updateJobs.jobs);
   const failedCount =
     localJobsForDisplay.filter((job) =>
@@ -371,7 +379,11 @@ export default function OperationsPage() {
         </Text>
       </Group>
       <Stack gap="md" mt="md">
-        {visibleUpdates.map((job) => {
+        {visibleActivities.map((activity) => {
+          if (activity.type === "local") {
+            return <OperationCard key={`local-${activity.job.id}`} job={activity.job} />;
+          }
+          const job = activity.job;
           const status = UPDATE_JOB_STATUS_META[job.status];
           const progress = job.totals
             ? Math.min(100, (job.processed / job.totals) * 100)
@@ -602,10 +614,7 @@ export default function OperationsPage() {
             </Card>
           );
         })}
-        {visibleLocal.map((job) => (
-          <OperationCard key={job.id} job={job} />
-        ))}
-        {!visibleUpdates.length && !visibleLocal.length && (
+        {!visibleActivities.length && (
           <Card p="xl">
             <Stack align="center" gap="xs">
               <ThemeIcon size={48} variant="light" color="gray">
