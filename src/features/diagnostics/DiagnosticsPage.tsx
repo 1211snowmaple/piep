@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
   Alert,
   Badge,
@@ -19,7 +19,7 @@ import { modals } from "@mantine/modals";
 import { notifications } from "@mantine/notifications";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Icons, IconSize, type LucideIcon } from "@/lib/icons";
-import { EmptyState, ErrorState } from "@/components/AsyncState";
+import { ErrorState } from "@/components/AsyncState";
 import { JobProgress } from "@/components/JobProgress";
 import { PageHeader } from "@/components/PageHeader";
 import { RuntimeNotice } from "@/components/RuntimeNotice";
@@ -27,7 +27,18 @@ import { useAppNavigate } from "@/app/router";
 import { startOperation, type OperationController } from "@/features/jobs/operationJobs";
 import { errorMessage, formatBytes, formatNumber } from "@/lib/format";
 import { getStoragePath } from "@/services/archiveApi";
-import { getLibraryDiagnostics, isTauriRuntime, maintainLibrary, optimizeSearchIndex, scanAndReimportDownloads } from "@/services/dbApi";
+import {
+  cancelEntityProfileRepair,
+  getEntityProfileRepairStatus,
+  getLibraryDiagnostics,
+  isTauriRuntime,
+  maintainLibrary,
+  optimizeSearchIndex,
+  repairIncompleteEntityProfiles,
+  scanAndReimportDownloads,
+  type EntityProfileRepairProgress,
+} from "@/services/dbApi";
+import { getUpdateJobCredentials } from "@/services/updateJobApi";
 import { onTauriEvent, subscribeTauriEvent } from "@/services/eventBus";
 import { openFilesystemPath } from "@/services/openerApi";
 import type { LibraryDiagnostics, LibraryFileIssue } from "@/types/library";
@@ -56,6 +67,22 @@ function formatLatency(ms: number | null) {
 
 function MetricCard({ label, value, detail, icon: Icon, color = "piep" }: { label: string; value: string; detail: string; icon: LucideIcon; color?: string }) {
   return <Card p="lg"><Group wrap="nowrap" align="flex-start" gap="sm"><ThemeIcon size={38} variant="light" color={color} style={{ flex: "0 0 auto" }}><Icon size={18} /></ThemeIcon><Box miw={0} style={{ flex: "1 1 auto" }}><Text size="xs" c="dimmed" className="line-clamp-1">{label}</Text><Text fz="xl" fw={760} className="metric-card__value">{value}</Text><Text size="xs" c="dimmed" mt={4}>{detail}</Text></Box></Group></Card>;
+}
+
+function MaintenanceTaskCard({ icon: Icon, title, description, status, action }: { icon: LucideIcon; title: string; description: string; status: ReactNode; action: ReactNode }) {
+  return <Card p="lg" className="maintenance-task-card">
+    <Stack gap="md" h="100%">
+      <Group wrap="nowrap" align="flex-start" gap="sm">
+        <ThemeIcon size={40} variant="light" color="piep" style={{ flex: "0 0 auto" }}><Icon size={19} /></ThemeIcon>
+        <Box miw={0}>
+          <Text fw={720}>{title}</Text>
+          <Text size="xs" c="dimmed" mt={3}>{description}</Text>
+        </Box>
+      </Group>
+      <Box>{status}</Box>
+      <Box mt="auto">{action}</Box>
+    </Stack>
+  </Card>;
 }
 
 /**
@@ -146,11 +173,14 @@ export default function DiagnosticsPage({ embedded = false, previewData = previe
   const navigate = useAppNavigate();
   const queryClient = useQueryClient();
   const operationRef = useRef<OperationController | null>(null);
+  const profileRepairOperationRef = useRef<OperationController | null>(null);
   const retryRef = useRef<(compact: boolean) => void>(() => undefined);
   const indexRetryRef = useRef<() => void>(() => undefined);
   const reimportRetryRef = useRef<() => void>(() => undefined);
+  const profileRepairRetryRef = useRef<() => void>(() => undefined);
   const [measurePhase, setMeasurePhase] = useState<{ phase: string; step: number; total: number } | null>(null);
   const [optimizePhase, setOptimizePhase] = useState<{ phase: string; segments: number } | null>(null);
+  const [profileRepairProgress, setProfileRepairProgress] = useState<EntityProfileRepairProgress | null>(null);
   // Never on arrival. Measuring walks the whole storage folder and runs three
   // benchmarks against the real library; on a large one that is seconds of work
   // and disk, started by nothing more than opening a screen. A result already
@@ -163,6 +193,13 @@ export default function DiagnosticsPage({ embedded = false, previewData = previe
     enabled: false,
   });
   const measured = Boolean(diagnostics.data);
+  const profileRepairStatus = useQuery({
+    queryKey: ["entity-profile-repair-status"],
+    queryFn: () => runtime
+      ? getEntityProfileRepairStatus()
+      : Promise.resolve({ personCount: 0, seriesCount: 0, totalCount: 0 }),
+    staleTime: 30_000,
+  });
   useEffect(() => {
     if (!runtime) return;
     return subscribeTauriEvent<{ phase: string; step: number; total: number }>("library-diagnostics-progress", ({ payload }) => setMeasurePhase(payload));
@@ -259,6 +296,69 @@ export default function DiagnosticsPage({ embedded = false, previewData = previe
     onError: (error) => notifications.show({ color: "red", title: "再取り込みできませんでした", message: errorMessage(error) }),
   });
   reimportRetryRef.current = () => reimport.mutate();
+  const profileRepair = useMutation({
+    mutationFn: async () => {
+      profileRepairOperationRef.current = startOperation({
+        kind: "maintenance",
+        label: "作者・シリーズ情報を修復",
+        detail: "完全取得できていないプロフィールを残件から再取得します",
+        total: profileRepairStatus.data?.totalCount ?? null,
+        onCancel: async () => { await cancelEntityProfileRepair(); },
+        onRetry: () => profileRepairRetryRef.current(),
+      });
+      let dispose: (() => void) | undefined;
+      if (runtime) {
+        dispose = await onTauriEvent<EntityProfileRepairProgress>("entity-profile-repair-progress", ({ payload }) => {
+          setProfileRepairProgress(payload);
+          profileRepairOperationRef.current?.progress(
+            payload.completed,
+            payload.total,
+            payload.activeLabel ? `確認中: ${payload.activeLabel}` : undefined,
+          );
+          if (payload.error) profileRepairOperationRef.current?.log(`${payload.activeLabel ?? "プロフィール"}: ${payload.error}`, "warn");
+        });
+      }
+      try {
+        return await repairIncompleteEntityProfiles(await getUpdateJobCredentials());
+      } catch (error) {
+        profileRepairOperationRef.current?.fail(error);
+        throw error;
+      } finally {
+        dispose?.();
+      }
+    },
+    onSuccess: async (result) => {
+      if (result.canceled) {
+        profileRepairOperationRef.current?.cancel(`${formatNumber(result.attempted)}件を確認した時点で中止しました`);
+      } else {
+        profileRepairOperationRef.current?.complete(
+          result.remaining
+            ? `${formatNumber(result.repaired)}件を修復、${formatNumber(result.remaining)}件は次回再試行できます`
+            : `${formatNumber(result.repaired)}件を修復し、未完了はなくなりました`,
+        );
+      }
+      profileRepairOperationRef.current = null;
+      setProfileRepairProgress(null);
+      await profileRepairStatus.refetch();
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["library"] }),
+        queryClient.invalidateQueries({ queryKey: ["entity"] }),
+      ]);
+      notifications.show({
+        color: result.canceled ? "gray" : result.remaining ? "yellow" : "green",
+        title: result.canceled ? "プロフィール修復を中止しました" : "プロフィール修復が完了しました",
+        message: result.remaining
+          ? `${formatNumber(result.repaired)}件を修復しました。残り${formatNumber(result.remaining)}件は、再実行すると続きから確認します。`
+          : `${formatNumber(result.repaired)}件を修復しました。`,
+      });
+    },
+    onError: (error) => {
+      profileRepairOperationRef.current = null;
+      setProfileRepairProgress(null);
+      notifications.show({ color: "red", title: "作者・シリーズ情報を修復できません", message: errorMessage(error) });
+    },
+  });
+  profileRepairRetryRef.current = () => profileRepair.mutate();
   const data = diagnostics.data;
   const indexRatio = data?.searchIndex.totalDownloads ? data.searchIndex.indexedDownloads / data.searchIndex.totalDownloads * 100 : 100;
   const reclaimable = data ? Math.max(0, data.databaseSizeBytes - data.liveDatabaseBytes) : 0;
@@ -288,6 +388,20 @@ export default function DiagnosticsPage({ embedded = false, previewData = previe
     labels: { confirm: "検査して再取り込み", cancel: "キャンセル" },
     onConfirm: () => reimport.mutate(),
   });
+
+  const confirmProfileRepair = () => {
+    const status = profileRepairStatus.data;
+    if (!status?.totalCount) return;
+    modals.openConfirmModal({
+      title: "作者・シリーズ情報を修復しますか？",
+      children: <Stack gap="sm">
+        <Text size="sm">保存済み作品との紐付けは変えず、完全取得できていない作者{formatNumber(status.personCount)}件・シリーズ{formatNumber(status.seriesCount)}件の情報だけを取得元から埋め直します。</Text>
+        <Alert color="blue" title="途中で止めても続きから再開できます">取得元への負荷を抑えるため1件ずつ間隔を空けます。現在の件数では数分かかる場合があります。成功した対象はその都度確定し、通信失敗・中止・アプリ終了後も残件だけを再実行できます。</Alert>
+      </Stack>,
+      labels: { confirm: "修復を開始", cancel: "キャンセル" },
+      onConfirm: () => profileRepair.mutate(),
+    });
+  };
 
   const openStorageFolder = async () => {
     try {
@@ -344,9 +458,68 @@ export default function DiagnosticsPage({ embedded = false, previewData = previe
   });
 
   return <div className={embedded ? "diagnostics-page" : "page page--contained diagnostics-page"}>
-    <PageHeader title="ライブラリ診断" description="実データで容量、索引完成度、検索時間、SQLiteの健全性を測定します。" actions={<Group>{(measured || diagnostics.isFetching) && <Button variant="default" leftSection={<Icons.retry size={IconSize.menu} />} loading={diagnostics.isFetching} onClick={() => diagnostics.refetch()}>再計測</Button>}<Button variant="light" leftSection={<Icons.optimize size={IconSize.menu} />} loading={maintenance.isPending} disabled={!runtime || indexOptimization.isPending} onClick={() => maintenance.mutate(false)}>DBを最適化</Button><Button color="yellow" variant="light" leftSection={<Icons.search size={IconSize.menu} />} loading={indexOptimization.isPending} disabled={!runtime || maintenance.isPending || !data || data.lexicalIndexSegmentCount <= 1} onClick={confirmIndexOptimization}>検索索引を最適化</Button></Group>} />
+    <PageHeader title="ライブラリ診断" description="状態を確認し、必要な保守だけを実行します。計測は自動では始まりません。" />
     {/* Settings already carries one at the top of the screen. */}
     {!embedded && <RuntimeNotice />}
+
+    <Box mt="lg">
+      <SimpleGrid cols={{ base: 1, md: 3 }}>
+        <MaintenanceTaskCard
+          icon={Icons.diagnostics}
+          title="ライブラリを計測"
+          description="容量、ファイル整合性、検索時間を読み取ります。"
+          status={measured
+            ? <Badge color="green" variant="light">{`計測済み · ${new Date(data!.measuredAt).toLocaleString("ja-JP")}`}</Badge>
+            : <><Badge color="gray" variant="light">未計測</Badge><Text size="xs" c="dimmed" mt={6}>保存フォルダーも走査するため、作品数が多いと数十秒かかります。</Text></>}
+          action={<Button fullWidth variant={measured ? "default" : "filled"} leftSection={<Icons.retry size={IconSize.menu} />} loading={diagnostics.isFetching} onClick={() => diagnostics.refetch()}>{measured ? "再計測" : "計測する"}</Button>}
+        />
+        <MaintenanceTaskCard
+          icon={Icons.database}
+          title="データベース"
+          description="検索統計と一時ログを軽く整理します。計測なしでも実行できます。"
+          status={<Badge color="blue" variant="light">日常的な保守</Badge>}
+          action={<Button fullWidth variant="light" leftSection={<Icons.optimize size={IconSize.menu} />} loading={maintenance.isPending} disabled={!runtime || indexOptimization.isPending} onClick={() => maintenance.mutate(false)}>DBを最適化</Button>}
+        />
+        <MaintenanceTaskCard
+          icon={Icons.search}
+          title="全文検索索引"
+          description="分割された索引を統合し、検索時の負担を減らします。"
+          status={!data
+            ? <><Badge color="gray" variant="light">状態不明</Badge><Text size="xs" c="dimmed" mt={6}>計測すると最適化が必要か判断できます。</Text></>
+            : data.lexicalIndexSegmentCount <= 1
+              ? <Badge color="green" variant="light">最適です</Badge>
+              : <Badge color={data.lexicalIndexSegmentCount >= 16 ? "yellow" : "blue"} variant="light">{formatNumber(data.lexicalIndexSegmentCount)}セグメント</Badge>}
+          action={<Button fullWidth variant="light" color={data && data.lexicalIndexSegmentCount >= 16 ? "yellow" : "piep"} leftSection={<Icons.search size={IconSize.menu} />} loading={indexOptimization.isPending} disabled={!runtime || maintenance.isPending || !data || data.lexicalIndexSegmentCount <= 1} onClick={confirmIndexOptimization}>検索索引を最適化</Button>}
+        />
+      </SimpleGrid>
+    </Box>
+
+    {profileRepairStatus.error && <Alert mt="lg" color="red" icon={<Icons.warning size={IconSize.nav} />} title="作者・シリーズ情報の状態を確認できません">
+      <Group justify="space-between"><Text size="sm">{errorMessage(profileRepairStatus.error)}</Text><Button size="xs" variant="default" onClick={() => profileRepairStatus.refetch()}>再確認</Button></Group>
+    </Alert>}
+    {profileRepairStatus.data && <Card p="lg" mt="lg" className="maintenance-integrity-card">
+      <Group justify="space-between" align="flex-start" wrap="nowrap">
+        <Group align="flex-start" wrap="nowrap" miw={0}>
+          <ThemeIcon variant="light" color={profileRepairStatus.data.totalCount ? "yellow" : "green"}>{profileRepairStatus.data.totalCount ? <Icons.warning size={IconSize.menu} /> : <Icons.success size={IconSize.menu} />}</ThemeIcon>
+          <Box miw={0}>
+            <Group gap="xs">
+              <Text fw={720}>作者・シリーズ情報</Text>
+              <Badge color={profileRepairStatus.data.totalCount ? "yellow" : "green"} variant="light">{profileRepairStatus.data.totalCount ? `${formatNumber(profileRepairStatus.data.totalCount)}件 未完了` : "問題なし"}</Badge>
+            </Group>
+            <Text size="xs" c="dimmed" mt={5}>{profileRepairStatus.data.totalCount ? "保存の中断や通信失敗で簡易情報のまま残った項目があります。作品との紐付けは保たれています。" : "保存済み作品から参照される情報はすべて取得済みです。"}</Text>
+            {profileRepairStatus.data.totalCount > 0 && <Group gap="xs" mt="xs"><Badge color="yellow" variant="light">作者 {formatNumber(profileRepairStatus.data.personCount)}</Badge><Badge color="yellow" variant="light">シリーズ {formatNumber(profileRepairStatus.data.seriesCount)}</Badge></Group>}
+          </Box>
+        </Group>
+        {profileRepairStatus.data.totalCount > 0 && (profileRepair.isPending
+          ? <Button color="red" variant="subtle" leftSection={<Icons.stop size={IconSize.menu} />} onClick={() => void cancelEntityProfileRepair()}>中止</Button>
+          : <Button leftSection={<Icons.retry size={IconSize.menu} />} disabled={!runtime || maintenance.isPending || indexOptimization.isPending} onClick={confirmProfileRepair}>残件を修復</Button>)}
+      </Group>
+      {profileRepairProgress && <Box mt="md">
+        <Group justify="space-between" mb={6}><Text size="xs" c="dimmed">{profileRepairProgress.activeLabel ? `確認中: ${profileRepairProgress.activeLabel}` : "修復を準備しています"}</Text><Text size="xs" c="dimmed">{formatNumber(profileRepairProgress.completed)} / {formatNumber(profileRepairProgress.total)}</Text></Group>
+        <Progress value={profileRepairProgress.total ? profileRepairProgress.completed / profileRepairProgress.total * 100 : 0} animated />
+        <Text size="xs" c="dimmed" mt={6}>修復 {formatNumber(profileRepairProgress.repaired)}件 · 今回失敗 {formatNumber(profileRepairProgress.failed)}件</Text>
+      </Box>}
+    </Card>}
     {(diagnostics.isFetching || optimizePhase) && (
       <Card p="md" mt="md">
         {diagnostics.isFetching && (
@@ -370,16 +543,13 @@ export default function DiagnosticsPage({ embedded = false, previewData = previe
         )}
       </Card>
     )}
-    {!measured && !diagnostics.isFetching && !diagnostics.error ? (
-      <Card p="xl" mt="lg">
-        <EmptyState
-          icon={Icons.diagnostics}
-          title="まだ計測していません"
-          description="保存フォルダーの走査と3種類のベンチマークを実行します。作品数が多いと数十秒かかることがあり、その間ライブラリの読み書きが遅くなります。"
-          action={<Button leftSection={<Icons.retry size={IconSize.menu} />} onClick={() => diagnostics.refetch()}>計測する</Button>}
-        />
-      </Card>
-    ) : diagnostics.error ? <ErrorState error={diagnostics.error} retry={() => diagnostics.refetch()} /> : data && <Stack gap="lg" mt="lg">
+    {!measured && !diagnostics.isFetching && !diagnostics.error
+      ? <Text size="sm" c="dimmed" mt="lg">まだ計測していません。上の「ライブラリを計測」から開始できます。</Text>
+      : diagnostics.error ? <Box mt="lg"><ErrorState error={diagnostics.error} retry={() => diagnostics.refetch()} /></Box> : data && <Stack gap="lg" mt="xl">
+      <Box>
+        <Title order={2}>診断結果</Title>
+        <Text size="sm" c="dimmed" mt={4}>計測結果と、対応が必要な項目だけを表示します。</Text>
+      </Box>
       <SimpleGrid cols={{ base: 1, sm: 2, xl: 4 }}>
         <MetricCard label="作品" value={`${formatNumber(data.totalDownloads)}件`} detail={`${formatNumber(data.totalTextLength)}文字 · ${formatNumber(data.totalVersions)}版`} icon={Icons.database} />
         <MetricCard label="保存データ" value={formatBytes(data.storageSizeBytes)} detail={`${formatNumber(data.totalAssets)}アセット`} icon={Icons.storage} color="gray" />
@@ -389,10 +559,6 @@ export default function DiagnosticsPage({ embedded = false, previewData = previe
 
       {data.fragmentationPercent >= 20 && <Alert color={data.fragmentationPercent >= 70 ? "red" : "yellow"} icon={<Icons.warning size={IconSize.nav} />} title={`DBの${data.fragmentationPercent.toFixed(2)}%が再利用待ち領域です`}>
         <Group justify="space-between" align="flex-end"><Text size="sm" maw={720}>論理使用量は約{formatBytes(data.liveDatabaseBytes)}ですが、物理ファイルは{formatBytes(data.databaseSizeBytes)}あります。検索結果の正しさには影響しませんが、バックアップ容量とディスクI/Oを増やします。</Text><Button color="yellow" loading={maintenance.isPending} disabled={!runtime} onClick={confirmCompact}>空き容量を検査して圧縮</Button></Group>
-      </Alert>}
-
-      {data.lexicalIndexSegmentCount >= 16 && <Alert color={data.lexicalIndexSegmentCount >= 64 ? "red" : "yellow"} icon={<Icons.warning size={IconSize.nav} />} title={`全文検索索引が${formatNumber(data.lexicalIndexSegmentCount)}セグメントに分割されています`}>
-        <Group justify="space-between" align="flex-end"><Text size="sm" maw={720}>検索のたびに多数のセグメントを横断するため、作品数が多いほど待ち時間とメモリ使用量が増えます。統合は検索内容を変えず、索引ファイルを整理します。</Text><Button color="yellow" loading={indexOptimization.isPending} disabled={!runtime || maintenance.isPending} onClick={confirmIndexOptimization}>空き容量を検査して統合</Button></Group>
       </Alert>}
 
       <Alert

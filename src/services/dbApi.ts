@@ -24,6 +24,7 @@ import type {
   UpdateTarget,
   SearchIndexStatus,
 } from "@/types/library";
+import type { UpdateJobCredentials } from "@/services/updateJobApi";
 export type { SearchIndexStatus } from "@/types/library";
 
 const MAX_FACET_PAGE_SIZE = 200;
@@ -59,6 +60,42 @@ export async function getStats(): Promise<DbStats> {
 
 export async function getLibraryDiagnostics(): Promise<LibraryDiagnostics> {
   return invoke<LibraryDiagnostics>("db_get_library_diagnostics");
+}
+
+export interface EntityProfileRepairStatus {
+  personCount: number;
+  seriesCount: number;
+  totalCount: number;
+}
+
+export interface EntityProfileRepairProgress {
+  phase: "running" | "complete" | "canceled";
+  completed: number;
+  total: number;
+  repaired: number;
+  failed: number;
+  activeLabel: string | null;
+  error: string | null;
+}
+
+export interface EntityProfileRepairResult {
+  attempted: number;
+  repaired: number;
+  failed: number;
+  canceled: boolean;
+  remaining: number;
+}
+
+export function getEntityProfileRepairStatus(): Promise<EntityProfileRepairStatus> {
+  return invoke<EntityProfileRepairStatus>("db_get_entity_profile_repair_status");
+}
+
+export function repairIncompleteEntityProfiles(credentials: UpdateJobCredentials): Promise<EntityProfileRepairResult> {
+  return invoke<EntityProfileRepairResult>("repair_incomplete_entity_profiles", { credentials });
+}
+
+export function cancelEntityProfileRepair(): Promise<boolean> {
+  return invoke<boolean>("cancel_entity_profile_repair");
 }
 
 export async function maintainLibrary(compact = false): Promise<LibraryMaintenanceResult> {

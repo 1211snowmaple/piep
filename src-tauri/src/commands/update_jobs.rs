@@ -1164,19 +1164,20 @@ async fn run_update_job(
             let snapshot = state.db.update_job_snapshot(&job_id)?;
             // 仕上げは、完了と印を付ける前に。「完了」が出てからまだ取りに
             // 行っているのでは、画面が閉じられる頃に途中で切れる。
-            // ただし横顔の補完を約束していたのは Web からのまとめ保存だけ。
-            // 通常の更新ジョブまで延ばすと、完了直前に別の通信が何十件も増える。
-            if snapshot.scope == "save" {
-                // A worker can be replaced after an app restart or a rate-limit
-                // pause. Rebuild the complete saved set from durable items so
-                // profiles saved by an earlier worker are not omitted.
-                let profile_download_ids = state
-                    .db
-                    .saved_update_job_download_ids(&job_id)
-                    .unwrap_or_else(|error| {
-                        log::warn!("更新ジョブ {job_id} の保存済み作品を復元できません: {error}");
-                        saved_download_ids.clone()
-                    });
+            // まとめ保存だけでなく、更新監視が新作を自動保存した場合にも
+            // 作者・シリーズの簡易情報が生まれる。保存済み項目がある全ジョブで
+            // 未完了だけを仕上げる。
+            // A worker can be replaced after an app restart or a rate-limit pause.
+            // Rebuild the complete saved set from durable items so profiles saved
+            // by an earlier worker are not omitted.
+            let profile_download_ids = state
+                .db
+                .saved_update_job_download_ids(&job_id)
+                .unwrap_or_else(|error| {
+                    log::warn!("更新ジョブ {job_id} の保存済み作品を復元できません: {error}");
+                    saved_download_ids.clone()
+                });
+            if !profile_download_ids.is_empty() {
                 refresh_profiles_for_saved_downloads(
                     &app,
                     &state,
@@ -1456,13 +1457,31 @@ async fn refresh_profiles_for_saved_downloads(
             .unwrap_or_else(|| entry.author_id.clone());
         if !person.trim().is_empty() {
             let key = ("person", entry.source.clone(), person);
-            if seen.insert(key.clone()) {
+            let incomplete = state
+                .db
+                .get_person(&key.1, &key.2)
+                .map(|profile| {
+                    profile.current_version <= 0
+                        || profile.content_hash.is_none()
+                        || profile.last_fetched_at.is_none()
+                })
+                .unwrap_or(true);
+            if incomplete && seen.insert(key.clone()) {
                 targets.push(key);
             }
         }
         if let Some(series) = entry.series_id.clone().filter(|key| !key.trim().is_empty()) {
             let key = ("series", entry.source.clone(), series);
-            if seen.insert(key.clone()) {
+            let incomplete = state
+                .db
+                .get_series(&key.1, &key.2)
+                .map(|profile| {
+                    profile.current_version <= 0
+                        || profile.content_hash.is_none()
+                        || profile.last_fetched_at.is_none()
+                })
+                .unwrap_or(true);
+            if incomplete && seen.insert(key.clone()) {
                 targets.push(key);
             }
         }

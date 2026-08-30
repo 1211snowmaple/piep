@@ -18,8 +18,13 @@ describe("DiagnosticsPage", () => {
     // against the real library. Opening a screen is not a request for that.
     renderPage();
     expect(await screen.findByRole("heading", { name: "ライブラリ診断" })).toBeInTheDocument();
-    expect(screen.getByText("まだ計測していません")).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "状態確認と最適化" })).toBeNull();
+    expect(screen.getByText("ライブラリを計測")).toBeInTheDocument();
+    expect(screen.getByText("データベース")).toBeInTheDocument();
+    expect(screen.getByText("全文検索索引")).toBeInTheDocument();
+    expect(screen.getByText(/まだ計測していません/)).toBeInTheDocument();
     expect(screen.queryByText("実データ性能")).toBeNull();
+    expect(await screen.findByText("問題なし")).toBeInTheDocument();
   });
 
   it("explains measured performance and storage health once it has run", async () => {

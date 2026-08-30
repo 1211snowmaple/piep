@@ -2776,6 +2776,82 @@ impl Database {
         .map_err(|e| format!("Person not found: {}", e))
     }
 
+    /// 作品から実際に参照されているプロフィールだけを対象にする。
+    ///
+    /// 保存中にアプリが止まっても、簡易スナップショットは
+    /// `last_fetched_at = NULL` のまま残る。専用の一時キューではなく、この
+    /// 永続状態を再試行リストとして使うので、再起動しても取りこぼさない。
+    pub fn incomplete_entity_profiles(&self) -> Result<Vec<IncompleteEntityProfile>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut statement = conn
+            .prepare(
+                "SELECT entity_type, source, source_key, display_name
+                 FROM (
+                     SELECT 'person' AS entity_type, p.source, p.source_key,
+                            p.display_name AS display_name, 0 AS entity_order
+                     FROM people p
+                     WHERE (p.current_version <= 0 OR p.content_hash IS NULL OR p.last_fetched_at IS NULL)
+                       AND EXISTS (
+                           SELECT 1 FROM download_people dp
+                           WHERE dp.person_source = p.source AND dp.person_key = p.source_key
+                       )
+                     UNION ALL
+                     SELECT 'series' AS entity_type, s.source, s.source_key,
+                            s.title AS display_name, 1 AS entity_order
+                     FROM series s
+                     WHERE (s.current_version <= 0 OR s.content_hash IS NULL OR s.last_fetched_at IS NULL)
+                       AND EXISTS (
+                           SELECT 1 FROM download_series ds
+                           WHERE ds.series_source = s.source AND ds.series_key = s.source_key
+                       )
+                 )
+                 ORDER BY entity_order ASC, display_name COLLATE NOCASE ASC, source_key ASC",
+            )
+            .map_err(|e| format!("Failed to prepare incomplete profile query: {e}"))?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok(IncompleteEntityProfile {
+                    entity_type: row.get(0)?,
+                    source: row.get(1)?,
+                    source_key: row.get(2)?,
+                    display_name: row.get(3)?,
+                })
+            })
+            .map_err(|e| format!("Failed to query incomplete profiles: {e}"))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("Failed to read incomplete profiles: {e}"))
+    }
+
+    pub fn entity_profile_repair_status(&self) -> Result<EntityProfileRepairStatus, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT
+                (SELECT COUNT(*) FROM people p
+                 WHERE (p.current_version <= 0 OR p.content_hash IS NULL OR p.last_fetched_at IS NULL)
+                   AND EXISTS (
+                       SELECT 1 FROM download_people dp
+                       WHERE dp.person_source = p.source AND dp.person_key = p.source_key
+                   )),
+                (SELECT COUNT(*) FROM series s
+                 WHERE (s.current_version <= 0 OR s.content_hash IS NULL OR s.last_fetched_at IS NULL)
+                   AND EXISTS (
+                       SELECT 1 FROM download_series ds
+                       WHERE ds.series_source = s.source AND ds.series_key = s.source_key
+                   ))",
+            [],
+            |row| {
+                let person_count = row.get::<_, i64>(0)?;
+                let series_count = row.get::<_, i64>(1)?;
+                Ok(EntityProfileRepairStatus {
+                    person_count,
+                    series_count,
+                    total_count: person_count + series_count,
+                })
+            },
+        )
+        .map_err(|e| format!("Failed to count incomplete profiles: {e}"))
+    }
+
     pub fn list_people(&self) -> Result<Vec<PersonEntry>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn

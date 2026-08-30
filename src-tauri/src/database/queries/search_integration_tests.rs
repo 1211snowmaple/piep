@@ -773,6 +773,51 @@ fn entity_reconstruction_preserves_fetched_profiles_and_versions() {
 }
 
 #[test]
+fn incomplete_entity_profiles_are_retryable_until_remote_checked() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let id = insert_download_unindexed(
+        &db,
+        &storage,
+        "repair-profile-work",
+        "修復対象作品",
+        "途中の作者",
+        &[],
+        "本文",
+    );
+    db.upsert_download_person(id, "pixiv", "repair-person", "author", "途中の作者")
+        .unwrap();
+    db.upsert_download_series(id, "pixiv", "repair-series", "途中のシリーズ", Some(1))
+        .unwrap();
+
+    let initial = db.entity_profile_repair_status().unwrap();
+    assert_eq!(initial.person_count, 1);
+    assert_eq!(initial.series_count, 1);
+    assert_eq!(initial.total_count, 2);
+
+    db.upsert_person_profile(
+        "pixiv",
+        "repair-person",
+        "取得済み作者",
+        None,
+        None,
+        Some("完全な説明"),
+        None,
+        "person-hash",
+        "profiles/repair-person/v1/data.json",
+        0,
+        32,
+        EntityProfileFreshness::RemoteChecked,
+    )
+    .unwrap();
+
+    let remaining = db.incomplete_entity_profiles().unwrap();
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].entity_type, "series");
+    assert_eq!(remaining[0].source_key, "repair-series");
+}
+
+#[test]
 fn reader_cache_pages_and_full_document_search_share_one_index() {
     let (_temp, root, storage) = temp_paths();
     let db = Database::open(&root.join("piep.db"), &storage).unwrap();

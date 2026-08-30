@@ -2,12 +2,13 @@ use crate::database::queries::EntityProfileFreshness;
 use crate::database::{
     AcceptCollectionSuggestionInput, AssetEntry, BulkMutationResult, CollectionNameCandidate,
     CollectionSuggestion, CollectionSuggestionRequest, CollectionSweepResult, DashboardSummary,
-    DbStats, DownloadEntry, EditorDocument, EntityFacet, EntityFacetScope, EntitySeriesPage,
-    EntityVersion, FacetCount, FilterFacets, LibraryDiagnostics, LibraryMaintenanceResult,
-    LibraryShelfCounts, NewAsset, PersonEntry, ReaderContentPage, ReaderMetadata, ReaderSearchHit,
-    SavedSearch, SavedSearchInput, SearchIndexOptimizationResult, SearchIndexStatus,
-    SearchSuggestParams, SearchSuggestResult, SearchV2Params, SearchV2Result, SeriesEntry,
-    UpdateTarget, UpdateTargetInput, WorkBlockInput, WorkCollection, WorkCollectionInput,
+    DbStats, DownloadEntry, EditorDocument, EntityFacet, EntityFacetScope,
+    EntityProfileRepairStatus, EntitySeriesPage, EntityVersion, FacetCount, FilterFacets,
+    LibraryDiagnostics, LibraryMaintenanceResult, LibraryShelfCounts, NewAsset, PersonEntry,
+    ReaderContentPage, ReaderMetadata, ReaderSearchHit, SavedSearch, SavedSearchInput,
+    SearchIndexOptimizationResult, SearchIndexStatus, SearchSuggestParams, SearchSuggestResult,
+    SearchV2Params, SearchV2Result, SeriesEntry, UpdateCredentials, UpdateTarget,
+    UpdateTargetInput, WorkBlockInput, WorkCollection, WorkCollectionInput,
     WorkCollectionMemberInput, WorkCollectionSummary, WorkEditRevision, WorkKey,
 };
 use crate::AppState;
@@ -26,6 +27,8 @@ use tokio::time::{sleep, Duration};
 
 static ENTITY_REFRESH_LOCK: LazyLock<AsyncMutex<Option<Instant>>> =
     LazyLock::new(|| AsyncMutex::new(None));
+static ENTITY_PROFILE_REPAIR_RUNNING: AtomicBool = AtomicBool::new(false);
+static ENTITY_PROFILE_REPAIR_CANCEL: AtomicBool = AtomicBool::new(false);
 static SEARCH_REBUILD_JOBS: LazyLock<std::sync::Mutex<HashMap<String, Arc<AtomicBool>>>> =
     LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
 static SEARCH_REBUILD_SEQUENCE: AtomicU64 = AtomicU64::new(1);
@@ -68,6 +71,37 @@ pub struct RefreshEntityProfileParams {
     pub refresh_token: Option<String>,
     pub cookie: Option<String>,
     pub user_agent: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EntityProfileRepairProgress {
+    phase: String,
+    completed: usize,
+    total: usize,
+    repaired: usize,
+    failed: usize,
+    active_label: Option<String>,
+    error: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EntityProfileRepairResult {
+    attempted: usize,
+    repaired: usize,
+    failed: usize,
+    canceled: bool,
+    remaining: i64,
+}
+
+struct EntityProfileRepairRunGuard;
+
+impl Drop for EntityProfileRepairRunGuard {
+    fn drop(&mut self) {
+        ENTITY_PROFILE_REPAIR_RUNNING.store(false, Ordering::Release);
+        ENTITY_PROFILE_REPAIR_CANCEL.store(false, Ordering::Release);
+    }
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -1899,27 +1933,15 @@ pub async fn refresh_entity_profile(
             .await
             {
                 Ok(Some(value)) => value,
-                Ok(None) => serde_json::json!({
-                    "source": source,
-                    "sourceKey": source_key,
-                    "title": title,
-                    "description": description,
-                    "coverUrl": null,
-                }),
-                Err(error) => {
-                    log::warn!(
-                        "Failed to refresh Pixiv series profile {}: {}",
-                        source_key,
-                        error
-                    );
-                    serde_json::json!({
-                        "source": source,
-                        "sourceKey": source_key,
-                        "title": title,
-                        "description": description,
-                        "coverUrl": null,
-                    })
+                // `None` means neither the web endpoint nor the app API yielded
+                // series data. A save-time snapshot is still useful, but it is
+                // not a completed remote refresh and must stay retryable.
+                Ok(None) => {
+                    return Err(format!(
+                        "Pixivシリーズ情報を取得できませんでした ({source_key})"
+                    ))
                 }
+                Err(error) => return Err(error),
             }
         } else {
             serde_json::json!({
@@ -2018,6 +2040,128 @@ pub async fn refresh_entity_profile(
     }
 
     Err("Unsupported entity type".to_string())
+}
+
+#[tauri::command]
+pub async fn db_get_entity_profile_repair_status(
+    app: tauri::AppHandle,
+) -> Result<EntityProfileRepairStatus, String> {
+    run_db_blocking(app, |state| state.db.entity_profile_repair_status()).await
+}
+
+/// 完全取得できていない作者・シリーズを、成功したものから順に埋め直す。
+///
+/// 再開位置は一時的なメモリではなく各エンティティの `last_fetched_at`。
+/// アプリ終了やキャンセル後も、次回は残件だけが対象になる。
+#[tauri::command]
+pub async fn repair_incomplete_entity_profiles(
+    app: tauri::AppHandle,
+    credentials: UpdateCredentials,
+) -> Result<EntityProfileRepairResult, String> {
+    ENTITY_PROFILE_REPAIR_RUNNING
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .map_err(|_| "作者・シリーズ情報の修復はすでに実行中です".to_string())?;
+    let _run_guard = EntityProfileRepairRunGuard;
+    ENTITY_PROFILE_REPAIR_CANCEL.store(false, Ordering::Release);
+
+    let targets =
+        run_db_blocking(app.clone(), |state| state.db.incomplete_entity_profiles()).await?;
+    let total = targets.len();
+    let mut repaired = 0usize;
+    let mut failed = 0usize;
+    let mut completed = 0usize;
+
+    let _ = app.emit(
+        "entity-profile-repair-progress",
+        EntityProfileRepairProgress {
+            phase: "running".to_string(),
+            completed,
+            total,
+            repaired,
+            failed,
+            active_label: None,
+            error: None,
+        },
+    );
+
+    for target in targets {
+        if ENTITY_PROFILE_REPAIR_CANCEL.load(Ordering::Acquire) {
+            break;
+        }
+        let params = RefreshEntityProfileParams {
+            entity_type: target.entity_type.clone(),
+            source: target.source.clone(),
+            source_key: target.source_key.clone(),
+            force: Some(false),
+            refresh_token: credentials.pixiv_refresh_token.clone(),
+            cookie: credentials.fanbox_cookie.clone(),
+            user_agent: credentials.fanbox_user_agent.clone(),
+        };
+        let result = refresh_entity_profile(app.clone(), params).await;
+        completed += 1;
+        let error = match result {
+            Ok(_) => {
+                repaired += 1;
+                None
+            }
+            Err(error) => {
+                failed += 1;
+                log::warn!(
+                    "{}:{}:{} のプロフィール修復に失敗しました: {}",
+                    target.entity_type,
+                    target.source,
+                    target.source_key,
+                    error
+                );
+                Some(error)
+            }
+        };
+        let _ = app.emit(
+            "entity-profile-repair-progress",
+            EntityProfileRepairProgress {
+                phase: "running".to_string(),
+                completed,
+                total,
+                repaired,
+                failed,
+                active_label: Some(target.display_name),
+                error,
+            },
+        );
+    }
+
+    let canceled = ENTITY_PROFILE_REPAIR_CANCEL.load(Ordering::Acquire);
+    let remaining = run_db_blocking(app.clone(), |state| state.db.entity_profile_repair_status())
+        .await?
+        .total_count;
+    let _ = app.emit(
+        "entity-profile-repair-progress",
+        EntityProfileRepairProgress {
+            phase: if canceled { "canceled" } else { "complete" }.to_string(),
+            completed,
+            total,
+            repaired,
+            failed,
+            active_label: None,
+            error: None,
+        },
+    );
+    Ok(EntityProfileRepairResult {
+        attempted: completed,
+        repaired,
+        failed,
+        canceled,
+        remaining,
+    })
+}
+
+#[tauri::command]
+pub fn cancel_entity_profile_repair() -> bool {
+    if !ENTITY_PROFILE_REPAIR_RUNNING.load(Ordering::Acquire) {
+        return false;
+    }
+    ENTITY_PROFILE_REPAIR_CANCEL.store(true, Ordering::Release);
+    true
 }
 
 fn recently_checked(value: Option<&str>) -> bool {

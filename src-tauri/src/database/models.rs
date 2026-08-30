@@ -86,6 +86,26 @@ pub struct SeriesEntry {
     pub published_content_count: Option<i64>,
 }
 
+/// 保存済み作品から参照されているが、取得元での完全確認が終わっていない
+/// 作者・シリーズ。`last_fetched_at` が埋まるまで何度でも検出できるため、
+/// アプリ終了や通信失敗を跨いだ修復の再開位置にもなる。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IncompleteEntityProfile {
+    pub entity_type: String,
+    pub source: String,
+    pub source_key: String,
+    pub display_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EntityProfileRepairStatus {
+    pub person_count: i64,
+    pub series_count: i64,
+    pub total_count: i64,
+}
+
 /// 人物/シリーズの履歴
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
