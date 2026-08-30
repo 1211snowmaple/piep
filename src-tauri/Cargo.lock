@@ -4612,7 +4612,7 @@ dependencies = [
 
 [[package]]
 name = "piep"
-version = "0.12.1"
+version = "0.13.0"
 dependencies = [
  "arc-swap",
  "async-stream",
