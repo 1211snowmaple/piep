@@ -35,6 +35,20 @@ export function libraryColumnCount(width: number, view: WorkListView): number {
  * retain every fetched item for selection and cursor continuity without
  * growing the WebView DOM to tens of thousands of cards.
  */
+/**
+ * 一覧の幅を、外れているあいだも覚えておく。
+ *
+ * タブを切り替えると仮想リストは丸ごと外れて付け直される。付け直した最初の
+ * 描画では幅がまだ 0 なので、**高さ 0 の空div**を返していた。そこでスクロール
+ * 容器の高さが一瞬つぶれ、ブラウザは scrollTop を 0 へ切り詰める。戻ってきた
+ * ときに読み直す位置は、その切り詰められた 0 である。
+ *
+ * 幅は「この一覧の状態」ではなく「いまの画面の形」なので、部品が外れても
+ * 失う理由がない。覚えておけば、付け直した一枚目から本物の行を出せる。
+ * 窓の大きさが変わっていたら、直後の layout effect が測り直して直す。
+ */
+const lastKnownWidth = new Map<string, number>();
+
 export function VirtualizedWorkList({
   items,
   view,
@@ -52,7 +66,7 @@ export function VirtualizedWorkList({
   const [scrollElement, setScrollElement] = useState<HTMLElement | null>(() =>
     document.getElementById("main-content"),
   );
-  const [width, setWidth] = useState(0);
+  const [width, setWidth] = useState(() => lastKnownWidth.get(view) ?? 0);
   const [scrollMargin, setScrollMargin] = useState(0);
   const columns = libraryColumnCount(width, view);
   const rowCount = Math.ceil(items.length / columns);
@@ -63,7 +77,14 @@ export function VirtualizedWorkList({
     const scroller = node.closest<HTMLElement>(".app-main");
     setScrollElement(scroller);
     const updateGeometry = () => {
-      setWidth((current) => current === node.clientWidth ? current : node.clientWidth);
+      const measured = node.clientWidth;
+      // 0 は「幅が無い」ではなく「まだ測れていない」。タブを隠したときや
+      // 付け直した直後に ResizeObserver が 0 を報せることがあり、それを
+      // 採ると一覧が高さ 0 につぶれ、スクロール位置が切り詰められる。
+      // 一度測った幅がある間は、0 で上書きしない。
+      if (measured <= 0) return;
+      lastKnownWidth.set(view, measured);
+      setWidth((current) => current === measured ? current : measured);
       if (scroller) {
         const nextMargin = node.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop;
         setScrollMargin((current) => Math.abs(current - nextMargin) < 0.5 ? current : nextMargin);

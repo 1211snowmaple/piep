@@ -81,6 +81,54 @@ describe("VirtualizedWorkList", () => {
   });
 
   /**
+   * タブを切り替えると、この一覧は丸ごと外れて付け直される。
+   *
+   * 付け直した最初の描画で幅がまだ 0 だと、**高さ 0 の空div**を返していた。
+   * そこでスクロール容器の高さが一瞬つぶれ、ブラウザは scrollTop を 0 へ
+   * 切り詰める。戻ってきたときに読み直す位置は、その切り詰められた 0 である。
+   *
+   * 幅は画面の形であって一覧の状態ではないので、外れても覚えておける。
+   */
+  it("draws rows on the first frame after a remount, without measuring again", () => {
+    const works = Array.from({ length: 40 }, (_, index) => ({ ...demoWorks[0], id: index + 1 }));
+
+    // 一度きちんと測っておく。
+    const first = withLayout(1500, 800);
+    try {
+      render(<VirtualizedWorkList items={works} view="gallery" />, { container: first.scroller });
+      expect(screen.getAllByTestId("virtual-work").length).toBeGreaterThan(0);
+    } finally {
+      first.restore();
+    }
+
+    // タブから戻った直後。まだ配置されていないので箱の幅は 0 を返す。
+    const scroller = document.createElement("div");
+    scroller.className = "app-main";
+    Object.defineProperties(scroller, {
+      clientHeight: { configurable: true, value: 800 },
+      clientWidth: { configurable: true, value: 1500 },
+      offsetHeight: { configurable: true, value: 800 },
+      offsetWidth: { configurable: true, value: 1500 },
+      scrollTop: { configurable: true, writable: true, value: 0 },
+    });
+    scroller.getBoundingClientRect = () => ({
+      top: 0, left: 0, right: 1500, bottom: 800, width: 1500, height: 800, x: 0, y: 0, toJSON: () => ({}),
+    });
+    document.body.append(scroller);
+    const clientWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "clientWidth");
+    Object.defineProperty(HTMLElement.prototype, "clientWidth", { configurable: true, get: () => 0 });
+    try {
+      const view = render(<VirtualizedWorkList items={works} view="gallery" />, { container: scroller });
+      // 空の採寸用 div を出さない。覚えていた幅で、いきなり本物の行を描く。
+      expect(view.container.querySelector("[data-virtualization-measuring]")).toBeNull();
+      expect(screen.getAllByTestId("virtual-work").length).toBeGreaterThan(0);
+    } finally {
+      if (clientWidth) Object.defineProperty(HTMLElement.prototype, "clientWidth", clientWidth);
+      scroller.remove();
+    }
+  });
+
+  /**
    * 列数が変わると行の中身も変わる。鍵に列数が入っていないと、React は
    * 幅を変える前の行を使い回して、別の作品が並んだままになる。
    */

@@ -6731,3 +6731,59 @@ fn catching_up_on_vectors_does_not_redo_the_lexical_index() {
     assert_eq!(prepared.semantic.len(), 2, "意味ベクトルは両方に要る");
     assert_eq!(prepared.semantic_indexed.len(), 2);
 }
+
+/// 索引が揃っている棚では、自動保守は仕事を持たない。
+///
+/// 起動 1.2 秒後の自動保守は、走るときに `library_gate` の書き込み権を
+/// **再構築が終わるまで握り続ける**。保存・削除・タグ編集はその間ずっと待つ。
+///
+/// これを許しているのは「揃っている棚では走らない」という一点である
+/// （`start_automatic_index_maintenance` は `pending <= 0` で帰る）。その前提が
+/// 崩れると、毎回の起動が黙って書き込みを止めることになるので、ここで留める。
+///
+/// あわせて、走るときも棚全体ではなく**遅れている文書だけ**が対象であることを
+/// 確かめる。全件を作り直す実装に変わると、待ち時間は棚の大きさに比例する。
+#[test]
+fn a_current_shelf_gives_automatic_maintenance_nothing_to_do() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+
+    for index in 0..5 {
+        insert_download_unindexed(
+            &db,
+            &storage,
+            &format!("gate-{index}"),
+            &format!("門の作品{index}"),
+            "作者",
+            &["タグ"],
+            "本文をいくらか置く。索引の対象になる長さがあればよい。",
+        );
+    }
+
+    // 入れたばかりは全部が遅れている。ここで自動保守は仕事を持つ。
+    let before = db.get_search_index_status().unwrap();
+    assert_eq!(before.pending_downloads, 5, "{before:?}");
+
+    db.rebuild_search_index(SearchIndexRebuildOptions::default(), &|| false, |_| {})
+        .unwrap();
+
+    // 追いついた棚では 0。自動保守はここで帰るので、門を取らない。
+    let after = db.get_search_index_status().unwrap();
+    assert_eq!(after.pending_downloads, 0, "{after:?}");
+
+    // もう一度足したぶんだけが次の対象になる。全件ではない。
+    insert_download_unindexed(
+        &db,
+        &storage,
+        "gate-new",
+        "あとから来た作品",
+        "作者",
+        &["タグ"],
+        "本文をいくらか置く。",
+    );
+    let incremental = db.get_search_index_status().unwrap();
+    assert_eq!(
+        incremental.pending_downloads, 1,
+        "遅れているぶんだけが対象であること: {incremental:?}"
+    );
+}

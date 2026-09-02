@@ -28,13 +28,27 @@ export function entityGridColumnCount(width: number): number {
   return Math.max(1, Math.floor((Math.max(0, width) + GRID_GAP) / (MIN_COLUMN_WIDTH + GRID_GAP)));
 }
 
+/**
+ * 一覧の幅を、外れているあいだも覚えておく。
+ *
+ * タブを切り替えると仮想リストは丸ごと外れて付け直される。付け直した最初の
+ * 描画では幅がまだ 0 なので、**高さ 0 の空div**を返していた。そこでスクロール
+ * 容器の高さが一瞬つぶれ、ブラウザは scrollTop を 0 へ切り詰める。戻ってきた
+ * ときに読み直す位置は、その切り詰められた 0 である。
+ *
+ * 幅は「この一覧の状態」ではなく「いまの画面の形」なので、部品が外れても
+ * 失う理由がない。覚えておけば、付け直した一枚目から本物の行を出せる。
+ * 窓の大きさが変わっていたら、直後の layout effect が測り直して直す。
+ */
+const lastKnownWidth = new Map<string, number>();
+
 /** Keep only entity rows close to AppFrame's scroll viewport in the DOM. */
 export function VirtualizedEntityGrid({ items, kind, selectionMode = false, selected, onSelect, watchState, onToggleWatch }: VirtualizedEntityGridProps) {
   const gridRef = useRef<HTMLDivElement>(null);
   const [scrollElement, setScrollElement] = useState<HTMLElement | null>(() =>
     document.getElementById("main-content"),
   );
-  const [width, setWidth] = useState(0);
+  const [width, setWidth] = useState(() => lastKnownWidth.get("entity") ?? 0);
   const [scrollMargin, setScrollMargin] = useState(0);
   const columns = entityGridColumnCount(width);
   const rowCount = Math.ceil(items.length / columns);
@@ -45,7 +59,14 @@ export function VirtualizedEntityGrid({ items, kind, selectionMode = false, sele
     const scroller = node.closest<HTMLElement>(".app-main");
     setScrollElement(scroller);
     const updateGeometry = () => {
-      setWidth((current) => current === node.clientWidth ? current : node.clientWidth);
+      const measured = node.clientWidth;
+      // 0 は「幅が無い」ではなく「まだ測れていない」。タブを隠したときや
+      // 付け直した直後に ResizeObserver が 0 を報せることがあり、それを
+      // 採ると一覧が高さ 0 につぶれ、スクロール位置が切り詰められる。
+      // 一度測った幅がある間は、0 で上書きしない。
+      if (measured <= 0) return;
+      lastKnownWidth.set("entity", measured);
+      setWidth((current) => current === measured ? current : measured);
       if (scroller) {
         const nextMargin = node.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop;
         setScrollMargin((current) => Math.abs(current - nextMargin) < 0.5 ? current : nextMargin);
