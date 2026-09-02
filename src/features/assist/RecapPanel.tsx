@@ -22,7 +22,7 @@ export function RecapPanel({
   /** 直前の話。順序のある文脈でだけ渡す。 */
   previous: { id: number; title: string };
 }) {
-  const { engine, body } = useAssist();
+  const { engine, body } = useAssist("reader_recap");
   const queryClient = useQueryClient();
   const subjectKey = `${currentId}:${previous.id}`;
   const key = ["assist-note", "work", subjectKey, "recap"] as const;
@@ -51,6 +51,7 @@ export function RecapPanel({
   if (!isTauriRuntime()) return null;
   return (
     <AssistPanel
+      featureId="reader_recap"
       title="前回のあらすじ"
       hint={`「${previous.title}」の要点を3文で。間を空けて続きを読むときに。`}
       engineReady={Boolean(engine)}
@@ -65,6 +66,9 @@ export function RecapPanel({
           text={note.data.text}
           modelId={note.data.modelId}
           createdAt={note.data.createdAt}
+          promptVersion={note.data.promptVersion}
+          promptStale={note.data.promptStale}
+          inputStale={note.data.inputStale}
           onDiscard={() => discard.mutate()}
         />
       )}

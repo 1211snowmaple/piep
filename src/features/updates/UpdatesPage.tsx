@@ -53,7 +53,7 @@ const demoSnapshot: UpdateJobSnapshot = {
   candidates: [
     { id: 1, key: "pixiv:12001", source: "pixiv", sourceId: "12001", title: "星を編む人 第十三話", subtitle: "青葉しおり ・ 2026-08-14", targetLabel: "星を編む人", targetType: "series", selected: true, status: "candidate", kind: "sequel" },
     { id: 2, key: "fanbox:10920", source: "fanbox", sourceId: "10920", title: "制作ノート #25", subtitle: "2026-08-12", targetLabel: "mizu atelier", targetType: "author", selected: true, status: "candidate", kind: "new" },
-    { id: 3, key: "fanbox:10880", source: "fanbox", sourceId: "10880", title: "4月のまとめ（加筆）", subtitle: "2026-08-15", targetLabel: "mizu atelier", targetType: "author", selected: false, status: "candidate", kind: "revision" },
+    { id: 3, key: "fanbox:10880", source: "fanbox", sourceId: "10880", title: "4月のまとめ（加筆）", subtitle: "手元は v1", targetLabel: "mizu atelier", targetType: "author", selected: true, status: "candidate", kind: "revision" },
   ],
   nextCandidateCursor: null,
   previousLogCursor: null,
@@ -661,12 +661,12 @@ function CandidatesPanel({ candidates, selectedIds, selectableIds, running, savi
       <Group justify="space-between" p="md" align="flex-start" wrap="wrap">
         <Box>
           <Text fw={700}>保存する候補</Text>
-          <Text size="xs" c="dimmed">{selectedCount}件を選択中 · 表示 {shown.length}件</Text>
+          <Text size="xs" c="dimmed">新作・続編・改稿をまとめて処理 · {selectedCount}件を選択中 · 表示 {shown.length}件</Text>
         </Box>
         <Group gap="xs">
           <Button size="xs" variant="subtle" disabled={!shownSelectable.length} onClick={() => onSelectMany(shownSelectable)}>表示分を選択</Button>
           <Button size="xs" variant="subtle" color="gray" disabled={!selectedCount} onClick={() => onSelectMany([])}>解除</Button>
-          <Button size="sm" leftSection={<Icons.export size={IconSize.menu} />} disabled={!selectedCount || running} loading={saving} onClick={onSave}>選択候補を保存</Button>
+          <Button size="sm" leftSection={<Icons.export size={IconSize.menu} />} disabled={!selectedCount || running} loading={saving} onClick={onSave}>選択候補をまとめて保存</Button>
         </Group>
       </Group>
       <Box px="md" pb="md">
@@ -698,7 +698,10 @@ function CandidatesPanel({ candidates, selectedIds, selectableIds, running, savi
                 <Group gap={6} wrap="nowrap">
                   {/* 縮むのは題の側。帯が縮むと「新作」が「新…」になり、種類が読めなくなる。 */}
                   <Badge size="xs" variant="light" color={KIND_COLOR[candidate.kind] ?? "gray"} style={{ flex: "none" }}>{kindLabel(candidate.kind)}</Badge>
-                  <Text size="sm" fw={650} className="line-clamp-1">{candidate.title}</Text>
+                  {/* 題名は折らない。候補は同じ連載の続きが並ぶので、1行で
+                      切ると全部が同じ文字列になり、どれを保存するのか
+                      決められない。 */}
+                  <Text size="sm" fw={650}>{candidate.title}</Text>
                 </Group>
                 <Text size="xs" c="dimmed" className="line-clamp-1">{candidate.targetLabel} · {candidate.subtitle}</Text>
                 {candidate.error && <Text size="xs" c="red" className="line-clamp-2">{errorMessage(candidate.error)}</Text>}

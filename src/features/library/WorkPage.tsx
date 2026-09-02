@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   ActionIcon,
   Alert,
@@ -9,7 +9,6 @@ import {
   Breadcrumbs,
   Button,
   Card,
-  CopyButton,
   Divider,
   Grid,
   Group,
@@ -38,10 +37,12 @@ import { useWorkspace } from "@/app/WorkspaceContext";
 import { ErrorState, LoadingState } from "@/components/AsyncState";
 import { ExpandableText } from "@/components/ExpandableText";
 import { WorkCover } from "@/components/WorkCover";
+import { BoundedJsonView } from "@/components/BoundedJsonView";
+import { RevisionDiff } from "@/components/RevisionDiff";
 import { ProviderMark, sourceUrl } from "@/lib/providers";
 import { contentTypeLabel, errorMessage, formatBytes, formatDate, formatFreshness, formatNumber } from "@/lib/format";
 import { hasSourceRevision } from "@/lib/workFreshness";
-import { listPendingRevisionsCommand } from "@/services/updateJobApi";
+import { listPendingRevisionsCommand, previewPendingRevisionCommand } from "@/services/updateJobApi";
 import { prepareDocumentHtml } from "@/lib/content";
 import { useContentLinkNavigation } from "@/lib/contentLinks";
 import { exportSingle } from "@/services/archiveApi";
@@ -67,6 +68,11 @@ import { invalidateWorkFlagViews } from "@/features/library/workSetInvalidation"
 import type { ReaderMetadata } from "@/types/library";
 
 type WorkTab = "overview" | "content" | "assets" | "history" | "json";
+
+// React StrictMode briefly mounts, cleans up, and mounts an effect again in
+// development. Track the active work so that rehearsal does not evict the
+// cache the second mount is about to reuse.
+const activeWorkPages = new Set<number>();
 
 function parseWorkTab(value: string | null): WorkTab {
   return value === "content" || value === "assets" || value === "history" || value === "json" ? value : "overview";
@@ -100,11 +106,13 @@ export default function WorkPage() {
   // to its top and leaves the screen around it exactly where it was - the same
   // thing the reader does with its own pages.
   const contentFrameRef = useRef<HTMLDivElement>(null);
+  const workHeroRef = useRef<HTMLDivElement>(null);
+  const workMarksRef = useRef<HTMLDivElement>(null);
   const goToContentPage = (page: number) => {
     setContentPage(page);
     contentFrameRef.current?.scrollTo({ top: 0, behavior: "smooth" });
   };
-  const [selectedVersion, setSelectedVersion] = useState<number | null>(null);
+  const [selectedVersion, setSelectedVersion] = useState<number | "pending" | null>(null);
   const [visibleAssetCount, setVisibleAssetCount] = useState(80);
   useEffect(() => setVisibleAssetCount(80), [id]);
   const documentQuery = useQuery({
@@ -112,6 +120,16 @@ export default function WorkPage() {
     queryFn: () => runtime ? getReaderMetadata(id) : Promise.resolve((() => { const demo = getDemoReader(id); return { download: demo.download, versions: demo.versions, assetCount: demo.assets.length, isEdited: demo.isEdited, activeEditRevision: demo.activeEditRevision }; })()),
     enabled: validId,
   });
+  const historyVersions = useMemo(
+    () => [...(documentQuery.data?.versions ?? [])].sort((left, right) => right.version - left.version),
+    [documentQuery.data?.versions],
+  );
+  const comparisonVersion = useMemo(() => {
+    if (selectedVersion === null) return null;
+    if (selectedVersion === "pending") return documentQuery.data?.download.currentVersion ?? null;
+    return historyVersions.find((version) => version.version < selectedVersion)?.version ?? null;
+  }, [documentQuery.data?.download.currentVersion, historyVersions, selectedVersion]);
+  useEffect(() => setSelectedVersion(null), [id]);
   const allCollectionsQuery = useQuery({
     queryKey: ["work-collections"],
     queryFn: () => runtime ? listWorkCollections() : Promise.resolve([]),
@@ -145,6 +163,16 @@ export default function WorkPage() {
     // 隣の棚件数と同じ間隔にして、画面ごとに作法を変えない。
     staleTime: 30_000,
   });
+  const pendingRevision = pendingRevisions.data?.find((entry) => entry.downloadId === id);
+  useEffect(() => {
+    if (tab !== "history" || !documentQuery.data || pendingRevisions.isLoading) return;
+    setSelectedVersion((current) => {
+      if (current === "pending" && pendingRevision) return current;
+      if (typeof current === "number" && historyVersions.some((version) => version.version === current)) return current;
+      if (pendingRevision && searchParams.get("compare") === "pending") return "pending";
+      return pendingRevision ? "pending" : documentQuery.data.download.currentVersion;
+    });
+  }, [documentQuery.data, historyVersions, pendingRevision, pendingRevisions.isLoading, searchParams, tab]);
   const assetsQuery = useQuery({
     queryKey: ["work-assets", id],
     queryFn: () => runtime ? getAssets(id) : Promise.resolve(getDemoReader(id).assets),
@@ -169,10 +197,68 @@ export default function WorkPage() {
     queryFn: () => runtime && documentQuery.data ? readFileContent(documentQuery.data.download.jsonPath) : Promise.resolve(JSON.stringify(documentQuery.data?.download ?? {}, null, 2)),
     enabled: tab === "json" && Boolean(documentQuery.data),
   });
-  const versionPreview = useQuery({
-    queryKey: ["reader-content-page", id, selectedVersion, 0],
-    queryFn: () => runtime ? getReaderContentPage(id, selectedVersion, 0) : Promise.resolve((() => { const demo = getDemoReader(id); return { page: 0, pageCount: 1, html: demo.html, plainText: demo.plainText, totalPlainTextChars: demo.plainText.length }; })()),
-    enabled: validId && tab === "history" && selectedVersion !== null,
+  // 表紙はカードの頭ではなく、保存元・種類の印から始まる。操作列の高さや
+  // 印の折り返しが変わっても、実際に描かれた印の位置を基準にする。
+  useLayoutEffect(() => {
+    const hero = workHeroRef.current;
+    const marks = workMarksRef.current;
+    if (!hero || !marks || !documentQuery.data) return;
+    const align = () => {
+      const offset = Math.max(28, marks.getBoundingClientRect().top - hero.getBoundingClientRect().top);
+      const value = `${Math.round(offset)}px`;
+      if (hero.style.getPropertyValue("--work-cover-mark-offset") !== value) {
+        hero.style.setProperty("--work-cover-mark-offset", value);
+      }
+    };
+    align();
+    const observer = new ResizeObserver(align);
+    observer.observe(hero);
+    observer.observe(marks);
+    window.addEventListener("resize", align);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", align);
+    };
+  }, [documentQuery.data]);
+  useEffect(() => {
+    activeWorkPages.add(id);
+    return () => {
+      activeWorkPages.delete(id);
+      // Keep a panel's fetched payload while this work remains open. Deleting it
+      // on every tab change made returning to a tab flash the same loading state
+      // and repeat the IPC read. Release the work-scoped payloads when this page
+      // is actually left (or a different work replaces it), so this does not
+      // accumulate across the library.
+      window.setTimeout(() => {
+        if (activeWorkPages.has(id)) return;
+        queryClient.removeQueries({ queryKey: ["work-assets", id], exact: true });
+        queryClient.removeQueries({ queryKey: ["work-json", id], exact: false });
+        queryClient.removeQueries({ queryKey: ["reader-version-text", id], exact: false });
+        queryClient.removeQueries({ queryKey: ["pending-revision-preview", id], exact: true });
+      }, 0);
+    };
+  }, [id, queryClient]);
+  const selectedVersionText = useQuery({
+    queryKey: ["reader-version-text", id, selectedVersion],
+    queryFn: () => typeof selectedVersion !== "number"
+      ? Promise.resolve("")
+      : runtime ? getWholeVersionText(id, selectedVersion) : Promise.resolve(getDemoReader(id).plainText),
+    enabled: validId && tab === "history" && typeof selectedVersion === "number",
+  });
+  const comparisonVersionText = useQuery({
+    queryKey: ["reader-version-text", id, comparisonVersion],
+    queryFn: () => comparisonVersion === null
+      ? Promise.resolve("")
+      : runtime ? getWholeVersionText(id, comparisonVersion) : Promise.resolve(getDemoReader(id).plainText),
+    enabled: validId && tab === "history" && comparisonVersion !== null,
+  });
+  const pendingRevisionPreview = useQuery({
+    queryKey: ["pending-revision-preview", id],
+    queryFn: () => runtime
+      ? previewPendingRevisionCommand(id)
+      : Promise.resolve({ downloadId: id, baseVersion: documentQuery.data?.download.currentVersion ?? 1, text: getDemoReader(id).plainText, textLength: getDemoReader(id).plainText.length }),
+    enabled: validId && tab === "history" && selectedVersion === "pending" && Boolean(pendingRevision),
+    staleTime: 0,
   });
   const mutate = useMutation({
     mutationFn: async (input: { favorite?: boolean; watch?: boolean }) => {
@@ -222,7 +308,6 @@ export default function WorkPage() {
   const sourceRevised = hasSourceRevision(work);
   // 改稿を見つけたとき基準値はわざと書き換えない（取り直して初めて追いつく）ので、
   // 作品の行だけを見ると照合済みに見える。候補のほうが答えである。
-  const pendingRevision = pendingRevisions.data?.find((entry) => entry.downloadId === work.id);
   const assets = assetsQuery.data ?? [];
   const visibleAssets = assets.slice(0, visibleAssetCount);
   const queued = isQueuedForEpub(work.id);
@@ -285,7 +370,7 @@ export default function WorkPage() {
       {/* Goes back to the library rather than opening a fresh one, so the search,
           the filters and the row this work was opened from are still there. */}
       <Breadcrumbs mb="md" className="work-breadcrumbs"><Anchor component="button" type="button" size="sm" onClick={() => returnTo("/library")}>ライブラリ</Anchor><Text size="sm" c="dimmed" className="line-clamp-1">{work.title}</Text></Breadcrumbs>
-      <Card className="work-hero" padding={0}>
+      <Card ref={workHeroRef} className="work-hero" padding={0}>
         <Grid gap={0} align="stretch">
           <Grid.Col span={{ base: 12, sm: 4, lg: 3 }}>
             <Box className="work-hero__cover-stage">
@@ -315,7 +400,7 @@ export default function WorkPage() {
                   </Box>
                 </Group>
                 <Box>
-                  <Group gap="xs" wrap="wrap" mb={8}><ProviderMark provider={work.source} /><Badge variant="light" color="gray">{contentTypeLabel(work.contentType)}</Badge>{doc.isEdited && <Badge color="gray" variant="light">ローカル編集</Badge>}</Group>
+                  <Group ref={workMarksRef} gap="xs" wrap="wrap" mb={8}><ProviderMark provider={work.source} /><Badge variant="light" color="gray">{contentTypeLabel(work.contentType)}</Badge>{doc.isEdited && <Badge color="gray" variant="light">ローカル編集</Badge>}</Group>
                   {/* The series line is itself the link, so it is not repeated
                       as a separate button beside the author below. */}
                   {work.seriesTitle && (work.seriesId
@@ -376,7 +461,7 @@ export default function WorkPage() {
         </Grid>
       </Card>
 
-      <Tabs value={tab} onChange={setTab} mt="lg">
+      <Tabs value={tab} onChange={setTab} mt="lg" keepMounted={false}>
         <Tabs.List>
           <Tabs.Tab value="overview">概要</Tabs.Tab>
           <Tabs.Tab value="content">本文</Tabs.Tab>
@@ -440,14 +525,80 @@ export default function WorkPage() {
         </Tabs.Panel>
         <Tabs.Panel value="history" pt="lg">
           <Grid gap="lg">
-            <Grid.Col span={{ base: 12, lg: 5 }}><Stack gap="xs">{doc.versions.map((version) => <Paper component="button" type="button" key={version.id} p="md" withBorder className="version-row" data-active={selectedVersion === version.version || undefined} onClick={() => setSelectedVersion(version.version)}><Group wrap="nowrap" align="flex-start"><ThemeIcon variant="light" color={version.version === work.currentVersion ? "piep" : "gray"}><Icons.versionHistory size={IconSize.menu} /></ThemeIcon><Stack gap={3} flex={1} ta="left"><Group justify="space-between"><Text size="sm" fw={700}>バージョン {version.version}</Text>{version.version === work.currentVersion && <Badge size="xs">現在</Badge>}</Group><Text size="xs" c="dimmed">{version.changeSummary || "保存元から取得"}</Text><Text size="xs" c="dimmed">{formatDate(version.createdAt, true)} · {formatNumber(version.textLength)}字 · {formatBytes(version.fileSizeBytes)}</Text></Stack></Group></Paper>)}{/* 手元の版と取得元の版を、ひとつの時間軸に置く。改稿が無いときは出さない -     「取得元も最新です」と書いても、そこに情報は無い。 */}{pendingRevision && <Paper p="md" withBorder className="version-row" data-source-newer><Group wrap="nowrap" align="flex-start"><ThemeIcon variant="light" color="yellow"><Icons.updates size={IconSize.menu} /></ThemeIcon><Stack gap={3} flex={1} ta="left"><Group justify="space-between"><Text size="sm" fw={700}>取得元に新しい版</Text><Badge size="xs" color="yellow">改稿</Badge></Group><Text size="xs" c="dimmed">手元の v{work.currentVersion} より新しい。取り直すと v{work.currentVersion + 1} になります</Text><Text size="xs" c="dimmed">{formatFreshness(pendingRevision.foundAt)}に更新確認が見つけました</Text></Stack></Group></Paper>}</Stack></Grid.Col>
-            <Grid.Col span={{ base: 12, lg: 7 }}><Card p="lg" className="version-preview"><Group justify="space-between" mb="md"><Box><Text fw={700}>{selectedVersion ? `バージョン ${selectedVersion} の内容` : "履歴を選択"}</Text><Text size="xs" c="dimmed">履歴をクリックすると、その時点の本文を確認できます</Text></Box>{selectedVersion && <Button size="xs" variant="light" onClick={() => navigate(`/reader/${work.id}?version=${selectedVersion}`)}>この版を読む</Button>}</Group>{versionPreview.isLoading ? <LoadingState label="履歴を読み込んでいます" /> : selectedVersion && versionPreview.data ? <Text className="version-preview__text">{versionPreview.data.plainText.slice(0, 5000) || "本文がありません"}</Text> : <Alert color="gray">左から確認するバージョンを選択してください。</Alert>}</Card></Grid.Col>
+            <Grid.Col span={{ base: 12, lg: 5 }}>
+              <Stack gap="xs">
+                {pendingRevision && <Paper component="button" type="button" p="md" withBorder className="version-row" data-source-newer data-active={selectedVersion === "pending" || undefined} onClick={() => setSelectedVersion("pending")}>
+                  <Group wrap="nowrap" align="flex-start">
+                    <ThemeIcon variant="light" color="yellow"><Icons.updates size={IconSize.menu} /></ThemeIcon>
+                    <Stack gap={3} flex={1} ta="left">
+                      <Group justify="space-between"><Text size="sm" fw={700}>取得元の改稿</Text><Badge size="xs" color="yellow">未保存</Badge></Group>
+                      <Text size="xs" c="dimmed">保存済み v{work.currentVersion} と比較できます。開くだけでは保存されません</Text>
+                      <Text size="xs" c="dimmed">{formatFreshness(pendingRevision.foundAt)}に更新確認が見つけました</Text>
+                    </Stack>
+                  </Group>
+                </Paper>}
+                {historyVersions.map((version) => <Paper component="button" type="button" key={version.id} p="md" withBorder className="version-row" data-active={selectedVersion === version.version || undefined} onClick={() => setSelectedVersion(version.version)}>
+                  <Group wrap="nowrap" align="flex-start">
+                    <ThemeIcon variant="light" color={version.version === work.currentVersion ? "piep" : "gray"}><Icons.versionHistory size={IconSize.menu} /></ThemeIcon>
+                    <Stack gap={3} flex={1} ta="left">
+                      <Group justify="space-between"><Text size="sm" fw={700}>保存済み v{version.version}</Text>{version.version === work.currentVersion && <Badge size="xs">現在</Badge>}</Group>
+                      <Text size="xs" c="dimmed">{version.changeSummary || "保存元から取得"}</Text>
+                      <Text size="xs" c="dimmed">{formatDate(version.createdAt, true)} · {formatNumber(version.textLength)}字 · {formatBytes(version.fileSizeBytes)}</Text>
+                    </Stack>
+                  </Group>
+                </Paper>)}
+              </Stack>
+            </Grid.Col>
+            <Grid.Col span={{ base: 12, lg: 7 }}>
+              <Card p="lg" className="version-preview">
+                {(typeof selectedVersion === "number" && selectedVersionText.isLoading)
+                  || (comparisonVersion !== null && comparisonVersionText.isLoading)
+                  || (selectedVersion === "pending" && pendingRevisionPreview.isLoading)
+                  ? <LoadingState label="比較する本文を読み込んでいます" />
+                  : selectedVersionText.error || comparisonVersionText.error || pendingRevisionPreview.error
+                    ? <ErrorState error={selectedVersionText.error ?? comparisonVersionText.error ?? pendingRevisionPreview.error} retry={() => { selectedVersionText.refetch(); comparisonVersionText.refetch(); pendingRevisionPreview.refetch(); }} />
+                    : selectedVersion === "pending" && pendingRevisionPreview.data
+                      ? <RevisionDiff
+                          beforeVersion={work.currentVersion}
+                          afterVersion={work.currentVersion + 1}
+                          beforeLabel={`保存済み v${work.currentVersion}`}
+                          afterLabel="取得元の改稿（未保存）"
+                          beforeText={comparisonVersionText.data ?? ""}
+                          afterText={pendingRevisionPreview.data.text}
+                          actions={<Button size="xs" variant="default" onClick={() => navigate("/updates")}>更新センターで保存</Button>}
+                        />
+                    : typeof selectedVersion === "number" && selectedVersionText.data !== undefined
+                      ? <RevisionDiff
+                          beforeVersion={comparisonVersion}
+                          afterVersion={selectedVersion}
+                          beforeText={comparisonVersion === null ? null : comparisonVersionText.data ?? ""}
+                          afterText={selectedVersionText.data}
+                          actions={<Button size="xs" variant="light" onClick={() => navigate(`/reader/${work.id}?version=${selectedVersion}`)}>この版を読む</Button>}
+                        />
+                      : <Alert color="gray">左から確認するバージョンを選択してください。</Alert>}
+              </Card>
+            </Grid.Col>
           </Grid>
         </Tabs.Panel>
-        <Tabs.Panel value="json" pt="lg">{rawJson.isLoading ? <LoadingState /> : rawJson.error ? <ErrorState error={rawJson.error} retry={() => rawJson.refetch()} /> : <Stack gap="sm"><Group justify="space-between"><Text size="sm" c="dimmed">保存元から取得したJSONを整形表示しています。長い文字列は画面内で折り返します。</Text><Group gap="xs"><CopyButton value={rawJson.data ?? "{}"}>{({ copied, copy }) => <Button size="xs" variant="light" onClick={copy}>{copied ? "コピー済み" : "JSONをコピー"}</Button>}</CopyButton><Button size="xs" variant="default" disabled={!runtime} onClick={() => openLocalAsset(work.jsonPath)}>この端末のJSONを開く</Button></Group></Group><Paper className="json-view" withBorder><pre>{prettyJson(rawJson.data ?? "{}")}</pre></Paper></Stack>}</Tabs.Panel>
+        <Tabs.Panel value="json" pt="lg">{rawJson.isLoading ? <LoadingState /> : rawJson.error ? <ErrorState error={rawJson.error} retry={() => rawJson.refetch()} /> : <BoundedJsonView jsonText={rawJson.data ?? "{}"} description="保存元から取得したJSONを、画面負荷を抑えて表示します" actions={<Button size="xs" variant="default" disabled={!runtime} onClick={() => openLocalAsset(work.jsonPath)}>この端末のJSONを開く</Button>} />}</Tabs.Panel>
       </Tabs>
     </div>
   );
+}
+
+/** Read every source page for one saved version while keeping IPC bursts small. */
+async function getWholeVersionText(downloadId: number, version: number): Promise<string> {
+  const first = await getReaderContentPage(downloadId, version, 0);
+  if (first.pageCount <= 1) return first.plainText;
+  const pages = Array.from({ length: first.pageCount }, () => "");
+  pages[0] = first.plainText;
+  const batchSize = 4;
+  for (let start = 1; start < first.pageCount; start += batchSize) {
+    const batch = Array.from({ length: Math.min(batchSize, first.pageCount - start) }, (_, offset) => start + offset);
+    const loaded = await Promise.all(batch.map((page) => getReaderContentPage(downloadId, version, page)));
+    loaded.forEach((entry) => { pages[entry.page] = entry.plainText; });
+  }
+  return pages.join("\n");
 }
 
 /**
@@ -464,11 +615,6 @@ function ContentPagination({ current, total, onChange }: { current: number; tota
     <Divider orientation="vertical" h={24} />
     <Text size="sm" fw={650} ff="monospace" c="dimmed">{current} / {total}</Text>
   </Group>;
-}
-
-function prettyJson(raw: string): string {
-  try { return JSON.stringify(JSON.parse(raw), null, 2); }
-  catch { return raw; }
 }
 
 function Info({ label, value, icon }: { label: string; value: string; icon: React.ReactNode }) {

@@ -4,6 +4,7 @@ import { notifications } from "@mantine/notifications";
 import { useMutation } from "@tanstack/react-query";
 import { errorMessage, formatNumber } from "@/lib/format";
 import { Icons, IconSize } from "@/lib/icons";
+import { NamedWorkList } from "@/components/NamedWorkList";
 import { useAssist } from "@/features/assist/useAssist";
 import { proposeSplits, type BundleSplit } from "@/services/assistApi";
 import type { WorkCollection } from "@/types/collections";
@@ -27,15 +28,22 @@ export function CollectionSplitAssist({
   opened: boolean;
   onClose: () => void;
   collection: WorkCollection;
-  /** 選んだ塊で新しい束を作る。位置は一覧の並び順（0 始まり）。 */
-  onSplit: (name: string, positions: number[]) => void;
+  /**
+   * 選んだ塊で新しい束を作る。位置は一覧の並び順（0 始まり）。
+   *
+   * 作れたかどうかを返してもらう。作れなかったのに窓を閉じると、**モデルが
+   * 出した案ごと消える** — もう一度モデルを呼ぶところからやり直しになる。
+   */
+  onSplit: (name: string, positions: number[]) => Promise<boolean>;
 }) {
-  const { engine } = useAssist();
+  const { engine } = useAssist("collection_split");
   const [splits, setSplits] = useState<BundleSplit[] | null>(null);
+  /** いま作っている塊の名前。作成中の重ね押しを止める。 */
+  const [creating, setCreating] = useState<string | null>(null);
 
   // 開き直したら白紙から。前に開いたときの案が、いまの中身の案に見えてしまう。
   useEffect(() => {
-    if (!opened) setSplits(null);
+    if (!opened) { setSplits(null); setCreating(null); }
   }, [opened]);
 
   const run = useMutation({
@@ -95,18 +103,32 @@ export function CollectionSplitAssist({
                       <Badge size="xs" variant="light">{formatNumber(split.positions.length)}作品</Badge>
                     </Group>
                     <Text size="xs" c="dimmed">{split.reason}</Text>
-                    {/* 題名は何が入るかの見当を付けるためだけ。全部読ませる場所ではない。 */}
-                    <Text size="xs" c="dimmed" className="line-clamp-1">
-                      {split.positions
-                        .map((position) => collection.members[position]?.title)
-                        .filter(Boolean)
-                        .join(" / ")}
-                    </Text>
+                    {/* どの作品がこちらへ行くのかを、題名で読めるようにする。
+                        「 / 」でつないで1行に切っていたので、2作目以降は
+                        ほぼ必ず省略の向こうにあった。**束を割る操作で、割った
+                        中身が見えない**のでは、案を比べようがない。 */}
+                    <NamedWorkList
+                      works={split.positions
+                        .map((position) => collection.members[position])
+                        .filter((member): member is NonNullable<typeof member> => Boolean(member))
+                        .map((member) => ({ title: member.title, authorName: member.authorName }))}
+                    />
                   </div>
                   <Button
                     size="compact-xs"
                     variant="light"
-                    onClick={() => { onSplit(split.name, split.positions); onClose(); }}
+                    loading={creating === split.name}
+                    disabled={creating !== null && creating !== split.name}
+                    onClick={async () => {
+                      setCreating(split.name);
+                      try {
+                        // 作れたときだけ閉じる。失敗したら案を残したままにして、
+                        // もう一度押せるようにする。
+                        if (await onSplit(split.name, split.positions)) onClose();
+                      } finally {
+                        setCreating(null);
+                      }
+                    }}
                   >
                     この束を作る
                   </Button>

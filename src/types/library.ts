@@ -174,7 +174,13 @@ export interface LibraryDiagnostics {
   transientFiles: number;
   transientFileBytes: number;
   fileIssueSamples: LibraryFileIssue[];
+  /** Tauri host and all descendant WebView processes. */
   processMemoryBytes: number | null;
+  processPrivateMemoryBytes: number | null;
+  processCount: number;
+  webviewProcessCount: number;
+  gpuDedicatedMemoryBytes: number | null;
+  gpuSharedMemoryBytes: number | null;
   listFirstPageMs: number;
   listP50Ms: number;
   listP95Ms: number;
@@ -208,6 +214,8 @@ export interface SearchIndexStatus {
   semanticIndexedDownloads: number;
   /** 意味索引がまだ追いついていない作品数。 */
   semanticPendingDownloads: number;
+  /** Persistent policy shared by rebuilds and incremental updates. */
+  semanticEnabled: boolean;
   semanticModelReady: boolean;
   embeddingProvider: string;
   gpuEnabled: boolean;

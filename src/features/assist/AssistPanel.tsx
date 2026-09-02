@@ -1,6 +1,9 @@
 import type { ReactNode } from "react";
 import { Alert, Button, Card, Group, Loader, Stack, Text } from "@mantine/core";
 import { Icons, IconSize } from "@/lib/icons";
+import { AssistLauncher } from "@/features/assist/AssistLauncher";
+import type { AssistFeatureId } from "@/services/assistApi";
+import { usePageAssist } from "@/app/PageAssistContext";
 
 /**
  * モデルに何かを頼むところの、共通の見た目。
@@ -17,6 +20,7 @@ import { Icons, IconSize } from "@/lib/icons";
  */
 export function AssistPanel({
   title,
+  featureId,
   hint,
   engineReady,
   needsBody = false,
@@ -25,9 +29,12 @@ export function AssistPanel({
   actionLabel,
   onRun,
   disabled,
+  placement = "local",
+  registrationKey,
   children,
 }: {
   title: string;
+  featureId: AssistFeatureId;
   hint: string;
   /** モデルの手伝いが使える状態か。使えないときは新規実行だけを隠す。 */
   engineReady: boolean;
@@ -38,14 +45,39 @@ export function AssistPanel({
   actionLabel: string;
   onRun: () => void;
   disabled?: boolean;
+  placement?: "local" | "header";
+  registrationKey?: string;
   /** 返ってきた案。無ければ何も渡さない。 */
   children?: ReactNode;
 }) {
-  // 保存済みメモや採用済みタグはモデルを切っても利用者のデータである。
-  // 子が無い場合だけ節ごと隠し、子があれば閲覧・削除を残す。
-  if (!engineReady && !children) return null;
-
   const blockedByBody = needsBody && !bodyAllowed;
+  const launcherItems = [{
+    id: featureId,
+    label: actionLabel,
+    description: hint,
+    enabled: engineReady && !busy && !disabled && !blockedByBody,
+    unavailableReason: busy
+      ? "処理中です"
+      : blockedByBody
+        ? "設定で本文の送信を許可してください"
+        : engineReady
+          ? "現在は実行できません"
+          : "設定でこの機能を有効にしてください",
+    onSelect: onRun,
+  }];
+  const headerHosted = usePageAssist(
+    registrationKey ?? `assist-${featureId}`,
+    `${title}の手伝い`,
+    launcherItems,
+    placement === "header",
+  );
+  const launcher = (
+    <AssistLauncher size="lg" label={`${title}の手伝い`} items={launcherItems} />
+  );
+
+  // Before a result exists, the feature occupies one icon only. Availability,
+  // the explanation, and the settings link all live in its menu.
+  if (!children && !busy) return headerHosted && placement === "header" ? null : <Group justify="flex-end">{launcher}</Group>;
 
   return (
     <Card withBorder padding="md" className="assist-panel">
@@ -58,21 +90,10 @@ export function AssistPanel({
             </Group>
             <Text size="xs" c="dimmed">{hint}</Text>
           </div>
-          {engineReady && (
-            <Button
-              size="compact-sm"
-              variant="light"
-              color="grape"
-              loading={busy}
-              disabled={disabled || blockedByBody}
-              onClick={onRun}
-            >
-              {actionLabel}
-            </Button>
-          )}
+          {(!headerHosted || placement === "local") && launcher}
         </Group>
 
-        {engineReady && blockedByBody && (
+        {blockedByBody && (
           <Alert color="gray" icon={<Icons.secure size={IconSize.action} />} p="xs">
             <Text size="xs">
               これは本文をモデルへ送ります。設定の「AIの手伝い」で
@@ -103,11 +124,17 @@ export function AssistNoteBody({
   text,
   modelId,
   createdAt,
+  promptVersion,
+  promptStale = false,
+  inputStale = false,
   onDiscard,
 }: {
   text: string;
   modelId?: string;
   createdAt?: string;
+  promptVersion?: string;
+  promptStale?: boolean;
+  inputStale?: boolean;
   onDiscard?: () => void;
 }) {
   return (
@@ -117,6 +144,9 @@ export function AssistNoteBody({
         <Text size="xs" c="dimmed">
           モデルが書いた文です{modelId ? ` · ${modelId}` : ""}
           {createdAt ? ` · ${new Date(createdAt).toLocaleDateString("ja-JP")}` : ""}
+          {promptVersion ? ` · 指示 ${promptVersion}` : ""}
+          {promptStale ? " · 指示が更新されています" : ""}
+          {inputStale ? " · 元の作品情報が変わっています" : ""}
         </Text>
         {onDiscard && (
           <Button size="compact-xs" variant="subtle" color="gray" onClick={onDiscard}>消す</Button>

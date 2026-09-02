@@ -130,7 +130,18 @@ fn load_member_editions(
         let (id, title, author) = row.map_err(|e| format!("Failed to read edition scan: {e}"))?;
         scanned += 1;
         if scanned > EDITION_SCAN_LIMIT {
-            return Ok(HashMap::new());
+            // ここまでに集めたぶんは捨てない。
+            //
+            // 空を返していたが、SQL は束に居る**すべての作者**をまとめて
+            // 引いている。つまり中くらいの作者が数人そろっただけで上限に触れ、
+            // その一人のためではなく**全員ぶんの別版畳み込みが消えていた**。
+            //
+            // 途中まででも畳めた組は正しい。畳み損ねたぶんは行が数本増える
+            // だけで、これはこの上限がもともと引き受けている損である。
+            log::warn!(
+                "Edition scan stopped at {EDITION_SCAN_LIMIT} rows; folding what was gathered"
+            );
+            break;
         }
         if member_set.contains(&id) {
             continue;
@@ -936,6 +947,7 @@ impl Database {
                     source: collection.summary.name_source.clone(),
                     label: "いまの名前".to_string(),
                     name: collection.summary.name.clone(),
+                    ..Default::default()
                 },
             );
         }
@@ -956,13 +968,14 @@ impl Database {
         self.collection_naming_works(&ids)
     }
 
-    /// 提案に、モデルが考えた名前を案として足す。
+    /// 提案のモデル候補を、最新の生成結果へ入れ替える。
     ///
-    /// 既存の案は消さない。**モデルの案は候補の一つ**であって、決定ではない。
+    /// 通常案は消さない。**モデルの案は候補の一つ**であって、決定ではない。
     pub fn attach_llm_name_option(
         &self,
         suggestion_id: &str,
         named: &crate::assist::NamedBundle,
+        provenance: &crate::assist::AssistProvenance,
     ) -> Result<CollectionSuggestion, String> {
         let suggestion_id = validate_collection_id(suggestion_id)?.to_string();
         let mut suggestion = self
@@ -970,17 +983,18 @@ impl Database {
             .into_iter()
             .find(|value| value.id == suggestion_id)
             .ok_or_else(|| "Collection suggestion not found".to_string())?;
-        if suggestion
+        // Regeneration replaces the previous model answer but never touches
+        // deterministic title/tag/series candidates.
+        suggestion
             .name_options
-            .iter()
-            .any(|option| option.name == named.name)
-        {
-            return Ok(suggestion);
-        }
+            .retain(|option| option.source != "llm");
         suggestion.name_options.push(CollectionNameCandidate {
             source: "llm".to_string(),
             label: "モデルの案".to_string(),
             name: named.name.clone(),
+            model_id: Some(provenance.model_id.clone()),
+            prompt_version: Some(provenance.prompt_version.clone()),
+            created_at: Some(provenance.created_at.clone()),
         });
         let encoded = serde_json::to_string(&suggestion.name_options)
             .map_err(|e| format!("Failed to encode suggestion names: {e}"))?;
@@ -1448,26 +1462,22 @@ impl Database {
             discover_linked_collection_component(self, &seed_works, &mut refreshed_link_ids)?;
         candidate_ids.extend(link_paths.keys().copied());
 
-        // 意味索引は準備済みの場合だけ使う。提案作成がモデル取得を突然始めることはない。
+        // 作品から作品を引く経路では、保存済みの作品ベクトル同士を比べる。
+        // 自由文の埋め込みは行わないので、提案作成がモデル取得を突然始める
+        // ことも、本文断片の多い長編だけが有利になることもない。
         let semantic_status = crate::database::semantic_index::status(&self.storage_dir);
         let mut semantic_scores: HashMap<i64, f64> = HashMap::new();
-        if semantic_status.indexed_chunks > 0 && semantic_status.model_ready {
-            for seed in &seed_works {
-                let query = format!("{} {}", seed.title, seed.author_name);
-                match crate::database::semantic_index::search(&self.storage_dir, &query, 80) {
-                    Ok(hits) => {
-                        for hit in hits {
-                            candidate_ids.insert(hit.download_id);
-                            semantic_scores
-                                .entry(hit.download_id)
-                                .and_modify(|score| *score = score.max(hit.score))
-                                .or_insert(hit.score);
-                        }
+        if semantic_status.indexed_works > 0 {
+            match crate::database::semantic_index::similar_works(&self.storage_dir, &seed_ids, 160)
+            {
+                Ok(hits) => {
+                    for (download_id, score) in hits {
+                        candidate_ids.insert(download_id);
+                        semantic_scores.insert(download_id, score);
                     }
-                    Err(error) => {
-                        log::warn!("Semantic collection suggestion failed: {error}");
-                        break;
-                    }
+                }
+                Err(error) => {
+                    log::warn!("Semantic collection suggestion failed: {error}");
                 }
             }
         }
@@ -1859,13 +1869,15 @@ impl Database {
             "SELECT id, proposed_name, collection_kind, members_json, score,
                     rule_version, state, created_at, updated_at,
                     name_options_json, track, origin, evidence_summary
-             FROM collection_suggestions ORDER BY updated_at DESC, id DESC"
+             FROM collection_suggestions ORDER BY score DESC, updated_at DESC, id DESC"
         } else {
             "SELECT id, proposed_name, collection_kind, members_json, score,
                     rule_version, state, created_at, updated_at,
                     name_options_json, track, origin, evidence_summary
              FROM collection_suggestions WHERE state = ?1
-             ORDER BY updated_at DESC, id DESC"
+             -- 確かなものを先に。走査で作った候補は同じ時刻に一括で入るので、
+             -- updated_at で並べると残りは id の順、つまり無作為だった。
+             ORDER BY score DESC, updated_at DESC, id DESC"
         };
         let mut stmt = conn
             .prepare(sql)
@@ -2358,11 +2370,13 @@ mod collection_write_tests {
                     source: "title".to_string(),
                     name: "題名からの案".to_string(),
                     label: "題名".to_string(),
+                    ..Default::default()
                 },
                 CollectionNameCandidate {
                     source: "llm".to_string(),
                     name: "モデルの案".to_string(),
                     label: "モデル".to_string(),
+                    ..Default::default()
                 },
             ],
             collection_kind: "ordered".to_string(),

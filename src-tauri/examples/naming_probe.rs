@@ -49,6 +49,7 @@ async fn main() -> Result<(), String> {
         model: engine.models[0].clone(),
         remote_consent_url: None,
         allow_body: false,
+        feature_profile: None,
     };
     match piep_lib::assist::try_engine(&config, &works).await {
         Ok(result) => println!(

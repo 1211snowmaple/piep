@@ -48,6 +48,8 @@ export type {
   UpdateJobSnapshot,
 } from "@/services/updateJobApi";
 
+export const MAX_LIVE_UPDATE_LOGS = 2_000;
+
 function mergeSnapshot(
   current: UpdateJobSnapshot | null,
   incoming: UpdateJobSnapshot,
@@ -64,7 +66,7 @@ function mergeSnapshot(
   return {
     ...incoming,
     candidates: [...candidates.values()].sort((a, b) => a.id - b.id),
-    logs: [...logs.values()].sort((a, b) => a.id - b.id),
+    logs: [...logs.values()].sort((a, b) => a.id - b.id).slice(-MAX_LIVE_UPDATE_LOGS),
   };
 }
 
@@ -77,7 +79,7 @@ function mergeProgressDelta(
         ...new Map(
           [...current.logs, delta.latestLog].map((log) => [log.id, log]),
         ).values(),
-      ].sort((a, b) => a.id - b.id)
+      ].sort((a, b) => a.id - b.id).slice(-MAX_LIVE_UPDATE_LOGS)
     : current.logs;
   const changed = delta.changedItem;
   const candidates =

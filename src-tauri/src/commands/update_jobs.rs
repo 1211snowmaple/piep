@@ -452,6 +452,7 @@ fn build_initial_items(
     request: &StartUpdateJobRequest,
 ) -> Result<Vec<UpdateJobItemInput>, String> {
     let mut items = Vec::new();
+    let mut included_work_keys = HashSet::new();
     let scope = request.scope.as_str();
     let include_work = matches!(scope, "all" | "work");
     let include_author = matches!(scope, "all" | "author");
@@ -479,6 +480,7 @@ fn build_initial_items(
             if dl.source != "pixiv" && dl.source != "fanbox" {
                 continue;
             }
+            included_work_keys.insert((dl.source.clone(), dl.source_id.clone()));
             let title = dl.title.clone();
             let payload = serde_json::to_value(dl).map_err(|e| e.to_string())?;
             items.push(item_from_payload(
@@ -542,11 +544,21 @@ fn build_initial_items(
     // 前のジョブで見つけたまま、保存も拒否もされていない候補を先に戻す。
     // これをやらないと、取得元の一覧が前回位置から先しか返さないぶん、
     // 「一度出たきり二度と出ない作品」が生まれる。
-    if include_author || include_series {
+    if include_work || include_author || include_series {
         for candidate in state
             .db
             .list_pending_update_candidates(PENDING_CANDIDATE_LIMIT)?
         {
+            // 作品だけを確認するときは、その確認対象の改稿だけを戻す。
+            // 作者・シリーズ由来の新作候補や、別の作品の改稿まで混ぜない。
+            if !include_author
+                && !include_series
+                && (candidate.kind != CandidateKind::Revision.key()
+                    || !included_work_keys
+                        .contains(&(candidate.source.clone(), candidate.source_id.clone())))
+            {
+                continue;
+            }
             // すでに手元にあるものは、改稿として見つけた場合だけ残す。
             let saved = state
                 .db
@@ -1090,6 +1102,68 @@ pub async fn list_pending_revisions(
     state.db.pending_revision_keys()
 }
 
+/// A provider revision fetched only for comparison. It is deliberately not
+/// written to `downloads` or `download_versions`; opening a diff must not
+/// silently accept the revision as a new saved version.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingRevisionPreview {
+    pub download_id: i64,
+    pub base_version: i64,
+    pub text: String,
+    pub text_length: i64,
+}
+
+#[tauri::command]
+pub async fn preview_pending_revision(
+    app: tauri::AppHandle,
+    download_id: i64,
+    credentials: UpdateCredentials,
+) -> Result<PendingRevisionPreview, String> {
+    let state = app.state::<Arc<AppState>>();
+    if !state
+        .db
+        .pending_revision_keys()?
+        .iter()
+        .any(|revision| revision.download_id == download_id)
+    {
+        return Err("この作品には未保存の改稿がありません".to_string());
+    }
+
+    let download = state.db.get_download(download_id)?;
+    let value = match download.source.as_str() {
+        "pixiv" => {
+            let token = pixiv_token(&credentials)
+                .ok_or_else(|| "差分の取得にはPixiv連携が必要です".to_string())?;
+            let novel =
+                super::downloader::fetch_pixiv_novel(download.source_id.clone(), token).await?;
+            serde_json::to_value(novel).map_err(|error| error.to_string())?
+        }
+        "fanbox" => {
+            let cookie = fanbox_cookie(&credentials)
+                .ok_or_else(|| "差分の取得にはFANBOX連携が必要です".to_string())?;
+            super::downloader::fetch_fanbox_post(
+                download.source_id.clone(),
+                cookie,
+                fanbox_user_agent(&credentials),
+            )
+            .await?
+        }
+        _ => return Err("この取得元の改稿比較には対応していません".to_string()),
+    };
+    let text = super::downloader::fetched_plain_text(&value, &download.source);
+    if text.trim().is_empty() {
+        return Err("取得元から比較できる本文を取得できませんでした".to_string());
+    }
+    let text_length = text.chars().count() as i64;
+    Ok(PendingRevisionPreview {
+        download_id,
+        base_version: download.current_version,
+        text,
+        text_length,
+    })
+}
+
 /// 無視した作品をすべて戻す。次の確認でまた候補に並ぶ。
 #[tauri::command]
 pub async fn restore_dismissed_update_candidates(app: tauri::AppHandle) -> Result<usize, String> {
@@ -1278,6 +1352,21 @@ async fn run_update_job(
                 state
                     .db
                     .complete_update_job_item(item.id, "skipped", None, None)?;
+                // 候補を実際に取りに行き、正常に「保存不要」と判定できたなら
+                // 未処理として残さない。改稿では、取得元の更新時刻だけが動いて
+                // 本文は同じだった場合がある。認証待ちと取得失敗は別分岐なので、
+                // 再試行が必要な候補までここで消えることはない。
+                if item.item_type == "candidate" {
+                    if let (Some(source), Some(source_id)) =
+                        (item.source.as_deref(), item.source_id.as_deref())
+                    {
+                        if let Err(error) = state.db.clear_update_candidate(source, source_id) {
+                            log::warn!(
+                                "処理済み候補 {source}:{source_id} を候補一覧から外せません: {error}"
+                            );
+                        }
+                    }
+                }
                 state.db.append_update_job_log(&job_id, "info", &message)?;
             }
             Ok(ItemOutcome::AuthRequired(message)) => {
@@ -1677,7 +1766,7 @@ async fn process_update_job_item(
     web_index: &mut WebUpdateIndex,
 ) -> Result<ItemOutcome, String> {
     match item.item_type.as_str() {
-        "work" => process_work_item(app, state, item, credentials, web_index).await,
+        "work" => process_work_item(app, state, job_id, item, credentials, web_index).await,
         "target" => process_target_item(state, job_id, item, credentials, web_index).await,
         "candidate" => process_candidate_item(app, state, item, credentials).await,
         _ => Ok(ItemOutcome::Skipped(format!(
@@ -1751,11 +1840,13 @@ fn remember_source_updated_at(state: &Arc<AppState>, dl: &DownloadEntry, listed:
 async fn process_work_item(
     app: &tauri::AppHandle,
     state: &Arc<AppState>,
+    job_id: &str,
     item: &UpdateJobItem,
     credentials: &UpdateCredentials,
     web_index: &mut WebUpdateIndex,
 ) -> Result<ItemOutcome, String> {
     let dl: DownloadEntry = serde_json::from_str(&item.payload_json).map_err(|e| e.to_string())?;
+    let auto_save = state.db.update_job_mode_value(job_id)? == "auto_save";
     if dl.source == "pixiv" {
         let Some(token) = pixiv_token(credentials) else {
             return Ok(ItemOutcome::AuthRequired("Pixiv連携が必要です".to_string()));
@@ -1795,6 +1886,11 @@ async fn process_work_item(
         }
         let data = super::downloader::fetch_pixiv_novel(dl.source_id.clone(), token).await?;
         let value = serde_json::to_value(&data).map_err(|e| e.to_string())?;
+        let (fetched_hash, _, _) = super::downloader::compute_content_details(&value, "pixiv");
+        if !auto_save && dl.content_hash.as_deref() != Some(fetched_hash.as_str()) {
+            record_work_revision_candidate(state, job_id, &dl, &value, false).await?;
+            return Ok(ItemOutcome::Done(format!("改稿を検出: {}", dl.title)));
+        }
         let title =
             string_at(&value, &[&["detail", "title"], &["title"]]).unwrap_or(dl.title.clone());
         let author_name = string_at(&value, &[&["detail", "user", "name"], &["user", "name"]])
@@ -1866,6 +1962,14 @@ async fn process_work_item(
         if dl.source_updated_at == updated_at && dl.source_updated_at.is_some() {
             return Ok(ItemOutcome::Skipped(format!("最新: {}", dl.title)));
         }
+        let (fetched_hash, _, fetched_updated_at) =
+            super::downloader::compute_content_details(&value, "fanbox");
+        let content_changed = dl.content_hash.as_deref() != Some(fetched_hash.as_str())
+            || dl.source_updated_at != fetched_updated_at;
+        if !auto_save && content_changed {
+            record_work_revision_candidate(state, job_id, &dl, &value, false).await?;
+            return Ok(ItemOutcome::Done(format!("改稿を検出: {}", dl.title)));
+        }
         let title = string_at(&value, &[&["title"]]).unwrap_or(dl.title.clone());
         let author_name = string_at(&value, &[&["user", "name"]]).unwrap_or(dl.author_name.clone());
         let author_id = string_at(
@@ -1926,6 +2030,61 @@ async fn process_work_item(
             dl.source
         )))
     }
+}
+
+/// 作品単体の確認で見つけた改稿を、作者・シリーズで見つけたものと同じ候補へ入れる。
+/// 保存処理は候補の種類を問わず同じキューを使うため、利用者が保存ボタンを押すと
+/// 新作・続編と一緒に処理される。
+async fn record_work_revision_candidate(
+    state: &Arc<AppState>,
+    job_id: &str,
+    download: &DownloadEntry,
+    fetched: &Value,
+    auto_save: bool,
+) -> Result<bool, String> {
+    if state
+        .db
+        .update_candidate_status(&download.source, &download.source_id)?
+        .as_deref()
+        == Some("dismissed")
+    {
+        return Ok(false);
+    }
+
+    let title = string_at(fetched, &[&["title"], &["detail", "title"]])
+        .unwrap_or_else(|| download.title.clone());
+    let item = serde_json::json!({
+        "id": download.source_id,
+        "title": title,
+        "user": { "name": download.author_name },
+        "localVersion": download.current_version,
+        "localSavedAt": download.downloaded_at,
+    });
+    let target = crate::database::UpdateTarget {
+        id: 0,
+        target_type: "work".to_string(),
+        source: download.source.clone(),
+        source_key: download.source_id.clone(),
+        display_name: download.author_name.clone(),
+        enabled: true,
+        last_checked_at: None,
+        last_seen_source_id: None,
+        last_seen_source_updated_at: None,
+        metadata_json: None,
+        created_at: download.downloaded_at.clone(),
+        updated_at: download.downloaded_at.clone(),
+        last_hit_at: None,
+        consecutive_errors: 0,
+    };
+    let _library_write_guard = state.library_gate.clone().write_owned().await;
+    record_candidate(
+        state,
+        job_id,
+        &target,
+        &item,
+        CandidateKind::Revision,
+        auto_save,
+    )
 }
 
 /// 「増えた」「変わった」を候補として残す。

@@ -2,14 +2,16 @@ import { describe, expect, it } from "vitest";
 import {
   DEFAULT_ASSIST_SETTINGS,
   assistReady,
+  assistFeatureReady,
   assistTarget,
   normalizeAssistBaseUrl,
+  toEngine,
   validateAssistSettings,
   type AssistSettings,
 } from "@/services/assistApi";
 
 function settings(overrides: Partial<AssistSettings>): AssistSettings {
-  return { ...DEFAULT_ASSIST_SETTINGS, ...overrides };
+  return { ...structuredClone(DEFAULT_ASSIST_SETTINGS), ...overrides };
 }
 
 describe("assist settings safety", () => {
@@ -46,5 +48,54 @@ describe("assist settings safety", () => {
     expect(normalizeAssistBaseUrl("ftp://models.example/v1")).toBeNull();
     expect(normalizeAssistBaseUrl("https://user:secret@models.example/v1")).toBeNull();
     expect(normalizeAssistBaseUrl("https://models.example/v1?token=secret")).toBeNull();
+  });
+
+  it("builds a feature-scoped engine without changing the fixed output contract", () => {
+    const configured = settings({ enabled: true, model: "common-model" });
+    configured.verifiedTarget = assistTarget(configured);
+    configured.featureProfiles.work_tagging = {
+      ...configured.featureProfiles.work_tagging,
+      model: "tag-model",
+      additionalInstructions: "短い理由だけを書く",
+      inputPolicy: { includeTitle: true, includeAuthor: false, includeTags: true, maxItems: 20 },
+    };
+
+    expect(toEngine(configured, "work_tagging")).toMatchObject({
+      model: "tag-model",
+      featureProfile: {
+        profileId: "default:work_tagging",
+        featureId: "work_tagging",
+        additionalInstructions: "短い理由だけを書く",
+        inputPolicy: { includeAuthor: false, maxItems: 20 },
+      },
+    });
+  });
+
+  it("keeps the engine ready while allowing individual features to be disabled", () => {
+    const configured = settings({ enabled: true, model: "model-a" });
+    configured.verifiedTarget = assistTarget(configured);
+    configured.featureProfiles.reader_recap = { ...configured.featureProfiles.reader_recap, enabled: false };
+    expect(assistReady(configured)).toBe(true);
+    expect(assistFeatureReady(configured, "reader_recap")).toBe(false);
+    expect(assistFeatureReady(configured, "work_tagging")).toBe(true);
+  });
+
+  it("requires a separate trial when a feature overrides the common model", () => {
+    const configured = settings({ enabled: true, model: "common-model" });
+    configured.verifiedTarget = assistTarget(configured);
+    configured.featureProfiles.work_tagging = {
+      ...configured.featureProfiles.work_tagging,
+      model: "tag-model",
+      verifiedTarget: null,
+    };
+    expect(validateAssistSettings(configured)).toMatch(/タグの補完.*試して/);
+    expect(assistFeatureReady(configured, "work_tagging")).toBe(false);
+
+    configured.featureProfiles.work_tagging.verifiedTarget = assistTarget({
+      baseUrl: configured.baseUrl,
+      model: "tag-model",
+    });
+    expect(validateAssistSettings(configured)).toBeNull();
+    expect(assistFeatureReady(configured, "work_tagging")).toBe(true);
   });
 });

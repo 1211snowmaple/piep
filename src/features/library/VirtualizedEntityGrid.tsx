@@ -31,7 +31,9 @@ export function entityGridColumnCount(width: number): number {
 /** Keep only entity rows close to AppFrame's scroll viewport in the DOM. */
 export function VirtualizedEntityGrid({ items, kind, selectionMode = false, selected, onSelect, watchState, onToggleWatch }: VirtualizedEntityGridProps) {
   const gridRef = useRef<HTMLDivElement>(null);
-  const [scrollElement, setScrollElement] = useState<HTMLElement | null>(null);
+  const [scrollElement, setScrollElement] = useState<HTMLElement | null>(() =>
+    document.getElementById("main-content"),
+  );
   const [width, setWidth] = useState(0);
   const [scrollMargin, setScrollMargin] = useState(0);
   const columns = entityGridColumnCount(width);
@@ -94,7 +96,10 @@ export function VirtualizedEntityGrid({ items, kind, selectionMode = false, sele
 
   // AppFrame supplies the production viewport. The bounded fallback prevents
   // an empty first paint and remains safe in isolated previews and tests.
-  if (!scrollElement || width <= 0) {
+  if (scrollElement && width <= 0) {
+    return <div ref={gridRef} data-entity-virtualization-measuring />;
+  }
+  if (!scrollElement) {
     return (
       <div
         ref={gridRef}

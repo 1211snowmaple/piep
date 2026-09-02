@@ -60,8 +60,8 @@ describe("SavePage handover to the large window", () => {
     fireEvent.click(await screen.findByRole("button", { name: "大きいウィンドウで開く" }));
 
     await waitFor(() => expect(browserApi.openStandaloneBrowser).toHaveBeenCalled());
-    // Hidden, not destroyed: the login session and the current page survive.
-    await waitFor(() => expect(browserApi.setEmbeddedBrowserVisible).toHaveBeenCalledWith(false));
+    // The standalone view owns the page; do not retain a second renderer.
+    await waitFor(() => expect(browserApi.destroyEmbeddedBrowser).toHaveBeenCalled());
     expect(await screen.findByText("大きいウィンドウで表示中")).toBeInTheDocument();
     // The candidate sidebar is the whole point of the handover, so it stays.
     expect(screen.getByRole("button", { name: "候補を取得" })).toBeInTheDocument();
@@ -69,15 +69,25 @@ describe("SavePage handover to the large window", () => {
   });
 
   it("brings the page back into the app when the large window is dismissed", async () => {
+    const originalElementFromPoint = document.elementFromPoint;
+    Object.defineProperty(document, "elementFromPoint", { configurable: true, value: () => null });
+    const bounds = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({
+      x: 0, y: 0, top: 0, left: 0, right: 900, bottom: 600, width: 900, height: 600, toJSON: () => ({}),
+    });
     renderSavePage();
     fireEvent.click(await screen.findByRole("button", { name: "大きいウィンドウで開く" }));
     const back = await screen.findByRole("button", { name: "アプリ内に戻す" });
+    browserApi.openEmbeddedBrowser.mockClear();
+    browserApi.navigateEmbeddedBrowser.mockRejectedValueOnce(new Error("embedded view was destroyed"));
 
     fireEvent.click(back);
 
     await waitFor(() => expect(browserApi.closeStandaloneBrowser).toHaveBeenCalledWith("pixiv"));
-    await waitFor(() => expect(browserApi.setEmbeddedBrowserVisible).toHaveBeenCalledWith(true));
+    await waitFor(() => expect(browserApi.openEmbeddedBrowser).toHaveBeenCalled());
     await waitFor(() => expect(screen.queryByText("大きいウィンドウで表示中")).toBeNull());
+    bounds.mockRestore();
+    if (originalElementFromPoint) Object.defineProperty(document, "elementFromPoint", { configurable: true, value: originalElementFromPoint });
+    else delete (document as Partial<Document>).elementFromPoint;
   });
 
   it("picks the handover back up when the page mounts with the window already open", async () => {
@@ -85,7 +95,7 @@ describe("SavePage handover to the large window", () => {
     renderSavePage();
 
     expect(await screen.findByText("大きいウィンドウで表示中")).toBeInTheDocument();
-    await waitFor(() => expect(browserApi.setEmbeddedBrowserVisible).toHaveBeenCalledWith(false));
+    await waitFor(() => expect(browserApi.destroyEmbeddedBrowser).toHaveBeenCalled());
   });
 
   it("serializes provider initialization so a stale slow WebView cannot win", async () => {
@@ -139,7 +149,7 @@ describe("returning to the save screen", () => {
 
     await waitFor(() => expect(browserApi.getStandaloneBrowserUrl).toHaveBeenCalled());
     // 埋め込みは開かない。開くと同じサイトが二つ出る。
-    await waitFor(() => expect(browserApi.setEmbeddedBrowserVisible).toHaveBeenCalledWith(false));
+    await waitFor(() => expect(browserApi.destroyEmbeddedBrowser).toHaveBeenCalled());
     expect(browserApi.openEmbeddedBrowser).not.toHaveBeenCalled();
     // 大きいウィンドウが見ている頁を、この画面も引き継ぐ。
     expect(await screen.findByDisplayValue("https://www.pixiv.net/users/15884098")).toBeInTheDocument();

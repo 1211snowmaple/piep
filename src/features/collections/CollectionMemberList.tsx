@@ -330,9 +330,11 @@ function MissingMemberCard({ member }: { member: WorkCollectionMember }) {
         />
         <Box flex={1} miw={0}>
           <Group gap="xs" wrap="nowrap">
-            <Tooltip label={member.title} multiline maw={480} openDelay={350} withArrow>
-              <Text fw={650} size="sm" className="line-clamp-1">{member.title}</Text>
-            </Tooltip>
+            {/* 題名は折らない。この束は同じ連載の続きが並ぶので、書き出しが
+                同じ作品ばかりになる。1行で切ると全部が同じ文字列に見え、
+                **どれを上へ動かすのかが決められない**。ツールチップは残すが、
+                指で触る人にも読める形が先である。 */}
+            <Text fw={650} size="sm">{member.title}</Text>
             <Badge size="xs" color="orange" variant="light">未保存</Badge>
           </Group>
           <Group gap="xs">
@@ -371,9 +373,8 @@ function EditionFold({ member }: { member: WorkCollectionMember }) {
             <Group key={edition.id} gap="xs" wrap="nowrap" className="collection-member__edition">
               <WorkCover work={edition} variant="compact" />
               <Box flex={1} miw={0}>
-                <Tooltip label={edition.title} multiline maw={480} openDelay={350} withArrow>
-                  <Text size="xs" fw={600} className="line-clamp-1">{edition.title}</Text>
-                </Tooltip>
+                {/* 版違いは題名の一部だけが違う。切ったら見分けられない。 */}
+                <Text size="xs" fw={600}>{edition.title}</Text>
                 <Text size="xs" c="dimmed">{formatNumber(edition.textLength)}字</Text>
               </Box>
             </Group>

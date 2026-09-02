@@ -101,6 +101,9 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
   const [urlParams, setUrlParams] = useAppSearchParams();
   const tab = parseEntityTab(urlParams.get("tab"), kind);
   const tabsRef = useRef<HTMLDivElement>(null);
+  const entityHeroRef = useRef<HTMLDivElement>(null);
+  const entityMarksRef = useRef<HTMLDivElement>(null);
+  const seriesCoverRef = useRef<HTMLDivElement>(null);
   // Switching tabs does not move the page: a tab changes what is listed, not
   // where the reader is standing. Rewriting the query string cannot move it -
   // the navigation is a replace, which scroll restoration leaves alone - but the
@@ -307,6 +310,10 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
       const cursor = lastPage.nextCursor;
       return cursor && !allPages.slice(0, -1).some((page) => page.nextCursor === cursor) ? cursor : undefined;
     },
+    // A debounced search changes the query key. Keep the list that is already
+    // painted until the replacement arrives instead of flashing a full-height
+    // loading state between keystrokes.
+    placeholderData: keepPreviousData,
     // **タブを開くまで待たない。** 見出しの件数はこの問い合わせの `total` から
     // 出しているので、開いてから取りに行くと数字が遅れて現れる。1ページ分
     // （60件）は開いたときに要るものでもあるので、先に取っておけば
@@ -398,6 +405,36 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
     pendingPageScroll.current = false;
     scrollRegionIntoView(tabsRef.current);
   }, [pageParam, showingRequestedPage]);
+  // 作品と同じ視線の始点にする。操作列の高さを決め打ちせず、実際の
+  // 保存元表示（pixiv など）の上辺へ表紙を合わせる。
+  useLayoutEffect(() => {
+    if (kind !== "series") return;
+    const hero = entityHeroRef.current;
+    const marks = entityMarksRef.current;
+    const cover = seriesCoverRef.current;
+    if (!hero || !marks || !cover || !entity.data) return;
+    const align = () => {
+      // The cover already carries the previous measurement as margin. Remove
+      // that value from its rendered position so repeated ResizeObserver runs
+      // keep measuring the same, unshifted origin instead of toggling to zero.
+      const appliedMargin = Number.parseFloat(getComputedStyle(cover).marginTop) || 0;
+      const coverOrigin = cover.getBoundingClientRect().top - appliedMargin;
+      const offset = Math.max(0, marks.getBoundingClientRect().top - coverOrigin);
+      const value = `${Math.round(offset)}px`;
+      if (hero.style.getPropertyValue("--series-cover-mark-offset") !== value) {
+        hero.style.setProperty("--series-cover-mark-offset", value);
+      }
+    };
+    align();
+    const observer = new ResizeObserver(align);
+    observer.observe(hero);
+    observer.observe(marks);
+    window.addEventListener("resize", align);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", align);
+    };
+  }, [entity.data, kind]);
 
   if (entity.isLoading) return <div className="page"><LoadingState /></div>;
   if (entity.error || !entity.data) return <div className="page"><ErrorState error={entity.error ?? "情報がありません"} retry={() => entity.refetch()} /></div>;
@@ -444,14 +481,14 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
           sort and the row the reader came from are all still on the entry
           behind this one, and pushing a clean copy throws them away. */}
       <Breadcrumbs mb="md"><Anchor component="button" type="button" size="sm" onClick={() => returnTo(`/library?tab=${kind === "person" ? "people" : "series"}`)}>{kind === "person" ? "作者・クリエイター" : "シリーズ"}</Anchor><Text size="sm" c="dimmed">{displayName}</Text></Breadcrumbs>
-      <Card className="entity-hero" data-kind={kind} padding={0}>
+      <Card ref={entityHeroRef} className="entity-hero" data-kind={kind} padding={0}>
         {kind === "person" && coverPath && <Box className="entity-hero__banner"><Image src={getAssetUrl(coverPath)} alt={`${displayName}のヘッダー画像`} /></Box>}
         <Box className="entity-hero__body">
           <Box className="entity-hero__primary">
             <Group align="flex-start" wrap="nowrap" miw={0} className="entity-hero__identity">
               {kind === "person"
                 ? <Avatar className="entity-hero__avatar" src={getAssetUrl(avatarPath)} size={112} radius="xl" color="piep">{noImage ? <NoImageMark /> : <Icons.person size={IconSize.avatar} />}</Avatar>
-                : <Box className="entity-hero__series-cover">{avatarPath ? <Image src={getAssetUrl(avatarPath)} alt={`${displayName}の表紙`} fit="contain" /> : <Icons.series size={IconSize.avatar} />}</Box>}
+                : <Box ref={seriesCoverRef} className="entity-hero__series-cover">{avatarPath ? <Image src={getAssetUrl(avatarPath)} alt={`${displayName}の表紙`} fit="contain" /> : <Icons.series size={IconSize.avatar} />}</Box>}
               <Stack gap={7} mb={5} miw={0} align="flex-start" className="entity-hero__identity-copy">
                 {/* 作品詳細と同じく、操作を上、名前を下に置く。別段なので長い
                     正式名称の表示幅は奪わない。 */}
@@ -466,7 +503,7 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
                     ]}
                   />
                 </Box>
-                <ProviderMark provider={source} />
+                <Box ref={entityMarksRef}><ProviderMark provider={source} /></Box>
                 <Title order={1} className="entity-hero__title">{displayName}</Title>{/* かつてここには「更新 …」と出ていたが、指していたのは取得元での更新では
                     なく piep の行が書き換わった日だった。読む側には区別がつかない。
                     取得元の話をしないなら、手元の言葉で言う。確認していなければ何も出さない。 */}

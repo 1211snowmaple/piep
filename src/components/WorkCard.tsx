@@ -19,6 +19,9 @@ import type { DownloadEntry } from "@/types/library";
 
 interface WorkCardProps {
   work: DownloadEntry;
+  /** Lists that already loaded the revision set pass the membership result so
+   * hundreds of cards do not each subscribe to and scan the same query. */
+  revised?: boolean;
   selected?: boolean;
   selectionMode?: boolean;
   /** Receives the work id so lists can pass one stable handler for every card. */
@@ -43,7 +46,7 @@ function VersionChip({ work, interactive = true }: { work: DownloadEntry; intera
   const navigate = useAppNavigate();
   if (work.currentVersion <= 1) return null;
   return (
-    <Tooltip label={`${work.currentVersion}版まで保存されています。履歴を開く`}>
+    <Tooltip label={`手元に${work.currentVersion}版保存されています。保存済み履歴を開く`}>
       <Badge
         component="button"
         type="button"
@@ -57,7 +60,34 @@ function VersionChip({ work, interactive = true }: { work: DownloadEntry; intera
         disabled={!interactive}
         onClick={(event) => { event.stopPropagation(); navigate(`/works/${work.id}?tab=history`); }}
       >
-        v{work.currentVersion}
+        履歴 {work.currentVersion}版
+      </Badge>
+    </Tooltip>
+  );
+}
+
+/** A provider rewrite that has been found but is not one of the saved versions. */
+function PendingRevisionChip({ work, visible, interactive = true }: { work: DownloadEntry; visible: boolean; interactive?: boolean }) {
+  const navigate = useAppNavigate();
+  if (!visible) return null;
+  return (
+    <Tooltip label="取得元に未保存の改稿があります。保存せずに差分を確認">
+      <Badge
+        component="button"
+        type="button"
+        size="xs"
+        variant="light"
+        color="yellow"
+        aria-label={`${work.title}の未保存の改稿を比較`}
+        aria-hidden={interactive ? undefined : true}
+        tabIndex={interactive ? undefined : -1}
+        disabled={!interactive}
+        onClick={(event) => {
+          event.stopPropagation();
+          navigate(`/works/${work.id}?tab=history&compare=pending`);
+        }}
+      >
+        未保存の改稿
       </Badge>
     </Tooltip>
   );
@@ -176,6 +206,7 @@ function SelectionToggle({ work, selected, compact, onSelect }: {
 
 export const WorkCard = memo(function WorkCard({
   work,
+  revised: revisedFromList,
   selected,
   selectionMode = false,
   onSelect,
@@ -194,8 +225,10 @@ export const WorkCard = memo(function WorkCard({
     // 無効化は更新確認の側から届く（invalidateAfterUpdateJob）。
     // 隣の棚件数と同じ間隔にして、画面ごとに作法を変えない。
     staleTime: 30_000,
+    enabled: revisedFromList === undefined,
   });
-  const revised = (pendingRevisions.data ?? []).some((entry) => entry.downloadId === work.id);
+  const revised = revisedFromList
+    ?? (pendingRevisions.data ?? []).some((entry) => entry.downloadId === work.id);
   const excerpt = work.excerpt ? summaryText(work.excerpt) : "";
   const open = useCallback(() => {
     if (selectionMode) onSelect?.(work.id, !selected);
@@ -276,7 +309,8 @@ export const WorkCard = memo(function WorkCard({
               <Text size="xs" c="dimmed"><Icons.publishedDate size={IconSize.inline} />{formatDateNumeric(work.sourceCreatedAt)}</Text>
               <Text size="xs" c="dimmed"><Icons.textLength size={IconSize.inline} />{formatNumber(work.textLength)}字</Text>
               {work.assetCount > 0 && <Text size="xs" c="dimmed"><Icons.assets size={IconSize.inline} />{work.assetCount}</Text>}
-              {revised && <Badge size="xs" variant="light" color="yellow">改稿</Badge>}<VersionChip work={work} interactive={!selectionMode} />
+              <PendingRevisionChip work={work} visible={revised} interactive={!selectionMode} />
+              <VersionChip work={work} interactive={!selectionMode} />
             </Group>
             {!selectionMode && <div className="work-row__actions">{actions}</div>}
           </div>
@@ -331,7 +365,8 @@ export const WorkCard = memo(function WorkCard({
             <Text size="xs" c="dimmed"><Icons.publishedDate size={IconSize.inline} />{formatDateNumeric(work.sourceCreatedAt)}</Text>
             <Text size="xs" c="dimmed"><Icons.textLength size={IconSize.inline} />{formatNumber(work.textLength)}字</Text>
             {work.assetCount > 0 && <Text size="xs" c="dimmed"><Icons.assets size={IconSize.inline} />{work.assetCount}</Text>}
-            {revised && <Badge size="xs" variant="light" color="yellow">改稿</Badge>}<VersionChip work={work} interactive={!selectionMode} />
+            <PendingRevisionChip work={work} visible={revised} interactive={!selectionMode} />
+            <VersionChip work={work} interactive={!selectionMode} />
           </Group>
           {!selectionMode && actions}
         </div>

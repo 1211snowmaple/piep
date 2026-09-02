@@ -136,6 +136,9 @@ export interface CollectionNameCandidate {
   source: CollectionNameSource;
   name: string;
   label: string;
+  modelId?: string | null;
+  promptVersion?: string | null;
+  createdAt?: string | null;
 }
 
 export interface CollectionSuggestion {
@@ -164,6 +167,45 @@ export interface CollectionSuggestion {
 export interface CollectionSweepResult {
   bundles: CollectionSuggestion[];
   savedSearchSuggestions: SavedSearchSuggestion[];
+  /** 題材の束まで探せたか。意味索引が読めないと続き物だけになる。 */
+  semanticUsed: boolean;
+  /** 探せなかったときの理由。探せたなら null。 */
+  note: string | null;
+}
+
+/**
+ * すでにあるコレクションへ、あとから入れるとよさそうな一作。
+ *
+ * 束は作った時点で閉じない。新作は毎日届くし、旧作をあとから保存することも
+ * ある。「作ったときの顔ぶれ」に縛られる理由が無いのは、名前と同じである。
+ */
+export interface CollectionAdditionCandidate {
+  source: string;
+  sourceId: string;
+  downloadId: number;
+  title: string;
+  authorName: string;
+  coverPath: string | null;
+  textLength: number;
+  publishedAt: string;
+  /** 0.0〜1.0。走査の束と同じ尺度。 */
+  confidence: number;
+  /** なぜこの一作なのかの一行。 */
+  reason: string;
+  evidence: CollectionSuggestionEvidence[];
+}
+
+/** 追加候補を探した結果。空であることと、探せなかったことを混ぜない。 */
+export interface CollectionAdditionResult {
+  collectionId: string;
+  collectionName: string;
+  candidates: CollectionAdditionCandidate[];
+  /** 本文ベクトルまで見て測れたか。 */
+  semanticUsed: boolean;
+  /** 測れなかったときの理由。使えたなら null。 */
+  note: string | null;
+  /** 下限を越えた候補の総数。出したのはこのうち上位だけ。 */
+  eligibleCount: number;
 }
 
 /** 束にするには大きすぎるタグ。保存した検索としてなら意味がある。 */

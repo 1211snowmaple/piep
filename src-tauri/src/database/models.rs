@@ -326,7 +326,14 @@ pub struct LibraryDiagnostics {
     /// A bounded sample for an actionable UI. Totals above remain the source
     /// of truth; very large result sets never cross IPC in full.
     pub file_issue_samples: Vec<LibraryFileIssue>,
+    /// Working set summed across the Tauri host and its WebView2 descendants.
     pub process_memory_bytes: Option<u64>,
+    /// Private commit summed across the same process tree.
+    pub process_private_memory_bytes: Option<u64>,
+    pub process_count: u32,
+    pub webview_process_count: u32,
+    pub gpu_dedicated_memory_bytes: Option<u64>,
+    pub gpu_shared_memory_bytes: Option<u64>,
     pub list_first_page_ms: f64,
     pub list_p50_ms: f64,
     pub list_p95_ms: f64,
@@ -695,6 +702,54 @@ pub struct CollectionSuggestion {
 pub struct CollectionSweepResult {
     pub bundles: Vec<CollectionSuggestion>,
     pub saved_search_suggestions: Vec<SavedSearchSuggestion>,
+    /// 題材の束を探すところまで届いたか。
+    ///
+    /// 意味索引が読めないと、走査は続き物しか出せない。それを黙って
+    /// 「テーマの束は見つかりませんでした」と見せると、**壊れていることと
+    /// 何も無いことが見分けられない**。
+    pub semantic_used: bool,
+    /// 届かなかったときの理由。使えたなら `None`。
+    pub note: Option<String>,
+}
+
+/// すでにあるコレクションに、あとから入れるとよさそうな一作。
+///
+/// 束は作った時点で閉じない。新作は毎日届くし、あとから保存した旧作もある。
+/// 「作ったときの顔ぶれ」に縛られる理由が無いのは、名前と同じである。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CollectionAdditionCandidate {
+    pub source: String,
+    pub source_id: String,
+    pub download_id: i64,
+    pub title: String,
+    pub author_name: String,
+    pub cover_path: Option<String>,
+    pub text_length: i64,
+    pub published_at: String,
+    /// 0.0〜1.0。走査の束と同じ尺度で測る。
+    pub confidence: f64,
+    /// なぜこの一作なのかを一行で。
+    pub reason: String,
+    pub evidence: Vec<CollectionSuggestionEvidence>,
+}
+
+/// 追加候補を探した結果。
+///
+/// 候補が空であることと、探せなかったことを混ぜない。意味索引が無い棚では
+/// 規則だけで探すが、そのことは黙って隠さず `semantic_used` で返す。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CollectionAdditionResult {
+    pub collection_id: String,
+    pub collection_name: String,
+    pub candidates: Vec<CollectionAdditionCandidate>,
+    /// 本文ベクトルまで見て測れたか。
+    pub semantic_used: bool,
+    /// 測れなかったときの理由。使えたなら `None`。
+    pub note: Option<String>,
+    /// 下限を越えた候補の総数。出したのはこのうち上位だけ。
+    pub eligible_count: i64,
 }
 
 /// 束にするには大きすぎるタグ。保存した検索としてなら意味がある。
@@ -708,7 +763,7 @@ pub struct SavedSearchSuggestion {
 }
 
 /// 束の名前の案。どこから来た案かが分かるようにしておく。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CollectionNameCandidate {
     /// `title` / `series` / `tags` / `author` / `llm`
@@ -716,6 +771,12 @@ pub struct CollectionNameCandidate {
     pub name: String,
     /// 画面に出す短い説明。「題名の共通部分」「共有タグ」など。
     pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1247,6 +1308,7 @@ pub struct SearchIndexStatus {
     pub semantic_indexed_chunks: i64,
     pub semantic_indexed_downloads: i64,
     pub semantic_pending_downloads: i64,
+    pub semantic_enabled: bool,
     pub semantic_model_ready: bool,
     pub embedding_provider: String,
     pub gpu_enabled: bool,

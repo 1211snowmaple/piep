@@ -1218,6 +1218,14 @@ select {
   background: var(--mantine-color-body);
 }
 
+@media (min-width: 48em) {
+  .work-hero__cover-stage {
+    height: 100%;
+    align-items: start;
+    padding-top: var(--work-cover-mark-offset, 28px);
+  }
+}
+
 /* 表紙の形は表紙が決める。棚のタイルは揃っていないと読めないので固定の枠に
    入れるが、作品ページには揃える相手がいない。2/3 に固定していたころ、pixiv の
    表紙（240x338 = 0.71）は幅で合わされて上下に余白ができ、カードより小さく、
@@ -1261,9 +1269,17 @@ select {
   border-radius: var(--mantine-radius-sm);
   text-decoration: none;
 }
-.work-hero__series-link { padding: 3px 6px; margin-left: -6px; }
+.work-hero__series-link { padding: 3px 0; }
 .work-hero__series-link:hover,
-.work-hero__author-link:hover { color: var(--mantine-color-piep-7); background: light-dark(var(--mantine-color-piep-0), var(--mantine-color-dark-5)); }
+.work-hero__author-link:hover {
+  color: var(--mantine-color-piep-7);
+  background: transparent;
+}
+.work-hero__series-link:focus-visible,
+.work-hero__author-link:focus-visible {
+  outline: 2px solid var(--mantine-color-piep-5);
+  outline-offset: 2px;
+}
 
 .work-hero__tags { min-height: 32px; }
 .work-hero__tag {
@@ -1420,6 +1436,32 @@ select {
 .version-row[data-active] { border-color: var(--mantine-color-piep-5); box-shadow: 0 0 0 1px var(--mantine-color-piep-4); }
 .version-preview { position: sticky; top: 82px; min-height: 310px; }
 .version-preview__text { max-height: 58vh; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-family: "Noto Serif JP", "Yu Mincho", serif; line-height: 1.9; }
+.revision-diff__content {
+  max-height: 58vh;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: "Noto Serif JP", "Yu Mincho", serif;
+  line-height: 1.9;
+}
+.revision-diff__part { border-radius: 3px; text-decoration-thickness: 1px; text-underline-offset: 3px; }
+.revision-diff__part[data-kind="added"] {
+  color: light-dark(var(--mantine-color-green-9), var(--mantine-color-green-2));
+  background: light-dark(var(--mantine-color-green-0), rgb(30 87 53 / 42%));
+  text-decoration: underline;
+}
+.revision-diff__part[data-kind="removed"] {
+  color: light-dark(var(--mantine-color-red-9), var(--mantine-color-red-2));
+  background: light-dark(var(--mantine-color-red-0), rgb(112 38 42 / 44%));
+}
+.revision-diff__omission {
+  display: block;
+  margin-block: 12px;
+  color: var(--mantine-color-dimmed);
+  font-family: var(--mantine-font-family);
+  font-size: var(--mantine-font-size-xs);
+  text-align: center;
+}
 .json-view { max-width: 100%; max-height: 68vh; overflow: auto; background: light-dark(#fafbfc, #0d1218); }
 .json-view pre { margin: 0; padding: 18px; max-width: 100%; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 0.78rem; line-height: 1.65; }
 
@@ -1476,6 +1518,12 @@ select {
 }
 .entity-hero__series-cover img { width: 100%; height: 100%; object-fit: contain; }
 
+@media (min-width: 48em) {
+  .entity-hero[data-kind="series"] .entity-hero__series-cover {
+    margin-top: var(--series-cover-mark-offset, 0px);
+  }
+}
+
 /* 一覧の監視ボタン。作品カードと同じ決まり - 消えていれば灰、点いていれば
    その色。登録があって止めているだけの状態だけ、灰に薄い下地を敷いて分ける。 */
 /* 事実の行と同じ底辺へ。作品カードの footer と同じ構図にする。 */
@@ -1512,6 +1560,15 @@ select {
   container-name: heroactions;
 }
 .entity-hero__actions .action-bar { justify-content: flex-end; }
+.entity-hero[data-kind="person"]:has(.entity-hero__banner) .entity-hero__actions {
+  position: absolute;
+  z-index: 4;
+  top: calc(24px - clamp(190px, 22vw, 300px));
+  right: 24px;
+  width: min(620px, calc(100% - 48px));
+  margin: 0;
+  filter: drop-shadow(0 4px 12px rgb(12 21 31 / 18%));
+}
 .entity-hero__primary .provider-mark { width: fit-content; align-self: flex-start; }
 .profile-links { align-items: stretch; }
 .profile-link {
@@ -2089,6 +2146,44 @@ select {
 .library-toolbar__search { min-width: 0; flex: 1 1 auto; }
 .library-toolbar__sort { width: clamp(132px, 16vw, 206px); }
 
+/* A chosen tag is the same object in the drawer and in the applied-filter
+   summary. The previous grey input pill looked like inert text while the blue
+   summary badge looked clickable, even though both removed the same filter. */
+.filter-token {
+  border: 1px solid light-dark(var(--mantine-color-piep-2), var(--mantine-color-piep-8));
+  background: light-dark(var(--mantine-color-piep-1), rgb(22 66 101 / 72%));
+  color: light-dark(var(--mantine-color-piep-8), var(--mantine-color-piep-1));
+  font-weight: 650;
+}
+
+.app-header .mantine-ActionIcon-root[data-placement="header"] {
+  color: var(--mantine-color-text);
+  background: transparent;
+}
+
+.app-header .mantine-ActionIcon-root[data-placement="header"]:not([data-assist-ready]) {
+  color: light-dark(var(--mantine-color-gray-5), var(--mantine-color-dark-1));
+}
+
+.app-header .mantine-ActionIcon-root[data-placement="header"]:not([data-assist-ready]) svg {
+  fill: light-dark(var(--mantine-color-gray-2), var(--mantine-color-dark-4));
+}
+
+.app-header .mantine-ActionIcon-root[data-placement="header"][data-assist-ready]:is(:hover, :focus-visible, [aria-expanded="true"]) {
+  color: light-dark(var(--mantine-color-grape-7), var(--mantine-color-grape-3));
+  background: transparent;
+}
+
+.filter-token .mantine-Pill-remove {
+  color: inherit;
+}
+
+.filter-token[data-tone="exclude"] {
+  border-color: light-dark(var(--mantine-color-red-2), var(--mantine-color-red-8));
+  background: light-dark(var(--mantine-color-red-0), rgb(104 31 38 / 58%));
+  color: light-dark(var(--mantine-color-red-8), var(--mantine-color-red-1));
+}
+
 @media (max-width: 48em) {
   .work-hero__cover-stage { min-height: 280px; }
   .work-hero__cover { width: 168px; }
@@ -2435,43 +2530,73 @@ select {
   gap: 12px;
   grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
 }
-.suggestion-card__covers { display: flex; align-items: center; gap: 4px; }
-.suggestion-card__cover {
-  padding: 0;
-  border: 0;
-  border-radius: 6px;
+/* 束へ足す候補の一行。外した作品は薄くなるが、消えはしない — 戻せることが
+   見えていなければ、外すのは取り消せない操作に見える。 */
+.addition-row {
+  display: flex;
+  align-items: flex-start;
+  padding: 4px 8px;
+  border: 1px solid var(--mantine-color-default-border);
+  border-radius: 8px;
+  gap: 8px;
+}
+.addition-row[data-dropped] { opacity: 0.55; }
+/* 押す的は行いっぱい。表紙だけだと、表紙の無い作品では的が見えない。 */
+.addition-row__pick { flex: 1; min-width: 0; }
+/* 束に入る作品は、題名で読めるように縦に積む。
+   //
+   // 表紙を横に5枚並べていた。この棚の作品は表紙を持たないものが多く、持って
+   // いても 40px に縮めれば何の話か分からない。しかも題名はツールチップの中に
+   // しか無かったので、2作の束では**何を束ねようとしているのか読む方法が
+   // 一つも無かった**。判断の材料は題名と作者である。 */
+/* 確認の窓に並べる題名。長い題名で窓が横に伸びないよう、1行で止める。 */
+.confirm-work-list {
+  max-height: 40vh;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: light-dark(#f4f6fa, #191d24);
+  overflow-y: auto;
+}
+
+.suggestion-members { display: flex; min-width: 0; flex-direction: column; gap: 4px; }
+.suggestion-member {
+  display: flex;
+  align-items: center;
+  padding: 4px 6px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  gap: 8px;
   background: none;
   cursor: pointer;
   outline-offset: 2px;
+  text-align: start;
 }
-.suggestion-card__cover[data-dropped] { opacity: 0.3; filter: grayscale(1); }
-.suggestion-card__cover:focus-visible { outline: 2px solid var(--mantine-color-piep-6); }
-.suggestion-card__cover .work-cover--compact { width: 40px; height: 52px; flex: 0 0 40px; }
-.suggestion-card__cover[data-large] .work-cover--compact { width: 72px; height: 96px; flex: 0 0 72px; }
-
-/* 6枚目から先は、広げたときだけ見せる。カードに全部並べると1枚が
-   小さくなりすぎて、知っている束かどうか分からなくなる。 */
-.suggestion-card__more {
-  width: 40px;
-  height: 52px;
-  padding: 0;
-  border: 1px dashed light-dark(#c9d0d9, #39424e);
-  border-radius: 6px;
+.suggestion-member:hover { background: light-dark(#f2f5f9, #1c222a); }
+.suggestion-member:focus-visible { outline: 2px solid var(--mantine-color-piep-6); }
+/* 外した作品は消さずに薄くする。戻せることが見えていなければ、外すのは
+   取り消せない操作に見える。 */
+.suggestion-member[data-dropped] { opacity: 0.5; }
+.suggestion-member[data-dropped] .suggestion-member__body { text-decoration: line-through; }
+.suggestion-member__mark {
+  display: flex;
+  width: 18px;
+  height: 18px;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 18px;
+  border-radius: 4px;
+  color: #fff;
+  background: var(--mantine-color-piep-6);
+}
+.suggestion-member[data-dropped] .suggestion-member__mark {
   color: var(--mantine-color-dimmed);
-  font-size: 11px;
-  background: none;
-  cursor: pointer;
+  background: light-dark(#dfe4ea, #39424e);
 }
-.suggestion-card__more:hover { background: light-dark(#f2f5f9, #1c222a); }
-
-.suggestion-members {
-  display: grid;
-  max-height: 52vh;
-  gap: 12px 10px;
-  grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
-  overflow-y: auto;
-}
-.suggestion-members__item { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
+.suggestion-member__cover { display: flex; flex: 0 0 32px; }
+.suggestion-member__cover .work-cover--compact { width: 32px; height: 42px; flex: 0 0 32px; }
+.suggestion-member[data-dropped] .suggestion-member__cover { filter: grayscale(1); }
+/* 題名は折り返して読ませる。ここが縮むと、また何も読めなくなる。 */
+.suggestion-member__body { min-width: 0; flex: 1; }
 .collection-member__note { padding: 2px 0 0 46px; }
 .collection-members--gallery .collection-member__note { padding-left: 0; }
 

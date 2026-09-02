@@ -35,6 +35,8 @@ const INDEX_VERSION_DIR: &str = "v4";
 const TOKENIZER_NAME: &str = "default";
 
 static RUNTIMES: OnceLock<Mutex<HashMap<PathBuf, Arc<TantivyRuntime>>>> = OnceLock::new();
+#[cfg(not(test))]
+static WRITER_REAPER_STARTED: OnceLock<()> = OnceLock::new();
 
 struct TantivyRuntime {
     index: Index,
@@ -48,6 +50,7 @@ struct TantivyRuntime {
 struct WriterState {
     ordinary: Option<IndexWriter<TantivyDocument>>,
     exclusive: bool,
+    last_used: Instant,
     /// 排他の書き手が終わるのを待っている、ふつうの書き手の数。
     ///
     /// 再構築は後ろで走ってよい仕事で、利用者が押した保存はそうではない。
@@ -329,6 +332,7 @@ impl Directory for ScanTolerantDirectory {
 }
 
 fn runtime(storage_dir: &Path) -> Result<Arc<TantivyRuntime>, String> {
+    start_writer_reaper();
     let key = storage_dir.join(INDEX_DIR_NAME).join(INDEX_VERSION_DIR);
     let runtimes = RUNTIMES.get_or_init(|| Mutex::new(HashMap::new()));
     // The map stays locked across the open below. Releasing it first let two
@@ -357,6 +361,7 @@ fn runtime(storage_dir: &Path) -> Result<Arc<TantivyRuntime>, String> {
         writer_state: Mutex::new(WriterState {
             ordinary: None,
             exclusive: false,
+            last_used: Instant::now(),
             waiting: 0,
         }),
         writer_available: Condvar::new(),
@@ -365,6 +370,47 @@ fn runtime(storage_dir: &Path) -> Result<Arc<TantivyRuntime>, String> {
     runtimes.insert(key, runtime.clone());
     Ok(runtime)
 }
+
+#[cfg(not(test))]
+fn start_writer_reaper() {
+    WRITER_REAPER_STARTED.get_or_init(|| {
+        if let Err(error) = std::thread::Builder::new()
+            .name("piep-index-writer-reaper".to_string())
+            .spawn(|| loop {
+                std::thread::sleep(Duration::from_secs(60));
+                let runtimes = RUNTIMES
+                    .get()
+                    .map(|runtimes| runtimes.lock().values().cloned().collect::<Vec<_>>())
+                    .unwrap_or_default();
+                for runtime in runtimes {
+                    let removed = {
+                        let mut state = runtime.writer_state.lock();
+                        if state.exclusive
+                            || state.ordinary.is_none()
+                            || state.last_used.elapsed() < ORDINARY_WRITER_IDLE_TIMEOUT
+                        {
+                            None
+                        } else {
+                            state.ordinary.take()
+                        }
+                    };
+                    if removed.is_some() {
+                        // Dropping can join Tantivy merge threads. Do it after
+                        // releasing WriterState so a new foreground save does
+                        // not wait on teardown while holding the coordination lock.
+                        drop(removed);
+                        log::info!("5分間使われていない全文索引writerを解放しました");
+                    }
+                }
+            })
+        {
+            log::warn!("全文索引writerの解放監視を開始できません: {error}");
+        }
+    });
+}
+
+#[cfg(test)]
+fn start_writer_reaper() {}
 
 /// Drops the cached runtime for a storage directory.
 ///
@@ -428,6 +474,8 @@ pub fn upsert_documents(storage_dir: &Path, docs: &[TantivyIndexDocument]) -> Re
 }
 
 const ORDINARY_WRITER_MEMORY_BUDGET: usize = 64_000_000;
+#[cfg(not(test))]
+const ORDINARY_WRITER_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
 /// 再構築が場所を空けたあと、待っていた書き手が捌けるのを待つ上限。
 ///
@@ -463,6 +511,7 @@ fn with_ordinary_writer<T>(
         );
     }
     let result = operation(state.ordinary.as_mut().expect("writer initialized"));
+    state.last_used = Instant::now();
     if result.is_err() {
         // A failed add/commit may leave uncommitted state. Dropping the writer
         // is the safest rollback boundary; the next operation recreates it.
@@ -1074,6 +1123,16 @@ pub fn prune_missing_documents(
         for id in &orphans {
             writer.delete_term(Term::from_field_u64(field, *id as u64));
         }
+        writer
+            .commit()
+            .map_err(|e| format!("Tantivy orphan prune commit failed: {e}"))?;
+        runtime
+            .content_generation
+            .fetch_add(1, AtomicOrdering::AcqRel);
+        runtime
+            .reader
+            .reload()
+            .map_err(|e| format!("Tantivy orphan prune reload failed: {e}"))?;
         Ok(())
     })?;
     log::info!("全文索引から、棚に無い {removed} 件を落としました");

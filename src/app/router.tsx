@@ -1,4 +1,4 @@
-import { createContext, forwardRef, useCallback, useContext, useEffect, useMemo, useRef, useState, type AnchorHTMLAttributes, type MouseEvent, type ReactNode } from "react";
+import { createContext, forwardRef, startTransition, useCallback, useContext, useEffect, useMemo, useRef, useState, type AnchorHTMLAttributes, type MouseEvent, type ReactNode } from "react";
 import { hasUnsavedWork } from "@/lib/unsavedGuard";
 
 /**
@@ -70,6 +70,17 @@ export function AppRouter({ children, confirmNavigation }: AppRouterProps) {
     navigationType: "push" as NavigationType,
     index: readHistoryIndex() ?? 0,
   }));
+  const locationRef = useRef(location);
+  locationRef.current = location;
+  const setNextLocation = useCallback((next: typeof location) => {
+    if (next.pathname === locationRef.current.pathname) {
+      // Query-string changes drive tabs, filters and controlled inputs. They
+      // do not load a route bundle and must stay synchronous with the URL.
+      setLocation(next);
+      return;
+    }
+    startTransition(() => setLocation(next));
+  }, []);
   const confirmationPending = useRef(false);
   const confirmNavigationRef = useRef(confirmNavigation);
   confirmNavigationRef.current = confirmNavigation;
@@ -103,7 +114,11 @@ export function AppRouter({ children, confirmNavigation }: AppRouterProps) {
       indexRef.current = index;
       furthestRef.current = Math.max(furthestRef.current, index);
       entriesRef.current.set(index, `${next.pathname}${next.search}`);
-      setLocation({ ...next, navigationType: "pop", index });
+      // A route can suspend while its split bundle is evaluated. Treat the
+      // location change as a transition so React keeps the already-painted
+      // screen in place instead of replacing it with the route fallback for a
+      // frame or two.
+      setNextLocation({ ...next, navigationType: "pop", index });
     };
     const finishPendingPop = () => {
       const pending = pendingPopRef.current;
@@ -193,7 +208,7 @@ export function AppRouter({ children, confirmNavigation }: AppRouterProps) {
     window.addEventListener("hashchange", update);
     window.addEventListener("popstate", update);
     return () => { window.removeEventListener("hashchange", update); window.removeEventListener("popstate", update); };
-  }, []);
+  }, [setNextLocation]);
   const commitNavigation = useCallback((target: string | number, options?: { replace?: boolean }) => {
     if (typeof target === "number") {
       authorizedPopIndexRef.current = indexRef.current + target;
@@ -206,7 +221,7 @@ export function AppRouter({ children, confirmNavigation }: AppRouterProps) {
       window.history.replaceState({ [HISTORY_INDEX_KEY]: indexRef.current }, "", href);
       lastHandledHref.current = window.location.href;
       entriesRef.current.set(indexRef.current, next);
-      setLocation({ ...readLocation(), navigationType: "replace", index: indexRef.current });
+      setNextLocation({ ...readLocation(), navigationType: "replace", index: indexRef.current });
     } else if (`#${next}` !== window.location.hash) {
       // pushState rather than assigning the hash: an assigned entry carries no
       // state, so nothing distinguishes it from the one before it afterwards.
@@ -218,9 +233,9 @@ export function AppRouter({ children, confirmNavigation }: AppRouterProps) {
       for (const known of [...entriesRef.current.keys()]) if (known > index) entriesRef.current.delete(known);
       entriesRef.current.set(index, next);
       lastHandledHref.current = window.location.href;
-      setLocation({ ...readLocation(), navigationType: "push", index });
+      setNextLocation({ ...readLocation(), navigationType: "push", index });
     }
-  }, []);
+  }, [setNextLocation]);
   const navigate = useCallback((target: string | number, options?: { replace?: boolean }) => {
     if (target === 0) return;
     if (typeof target === "string") {

@@ -84,11 +84,13 @@ function AppContent() {
   return (
     <WorkspaceProvider>
       <AppFrame>
-        {/* Suspense sits inside the frame so loading a route chunk swaps the
-            content area only, instead of blanking the whole shell. */}
-        <AppErrorBoundary key={pathname}>
-          <Suspense fallback={<RouteFallback />}><CurrentRoute /></Suspense>
-        </AppErrorBoundary>
+        {/* Keep one already-revealed Suspense boundary across routes. Route
+            errors still reset per pathname, while a transition that needs a
+            split bundle can retain the current screen instead of flashing the
+            fallback. */}
+        <Suspense fallback={<RouteFallback />}>
+          <AppErrorBoundary key={pathname}><CurrentRoute /></AppErrorBoundary>
+        </Suspense>
       </AppFrame>
     </WorkspaceProvider>
   );

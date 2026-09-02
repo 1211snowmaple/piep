@@ -221,6 +221,14 @@ export interface PendingRevision {
   foundAt: string;
 }
 
+/** A provider revision fetched for comparison but not accepted into history. */
+export interface PendingRevisionPreview {
+  downloadId: number;
+  baseVersion: number;
+  text: string;
+  textLength: number;
+}
+
 /**
  * まだ取り込んでいない改稿の一覧。
  *
@@ -231,6 +239,16 @@ export async function listPendingRevisionsCommand(): Promise<
   PendingRevision[]
 > {
   return invoke<PendingRevision[]>("list_pending_revisions");
+}
+
+/** Fetch the pending provider body without creating a saved version. */
+export async function previewPendingRevisionCommand(
+  downloadId: number,
+): Promise<PendingRevisionPreview> {
+  return invoke<PendingRevisionPreview>("preview_pending_revision", {
+    downloadId,
+    credentials: await getUpdateJobCredentials(),
+  });
 }
 
 export async function saveUpdateJobCandidatesCommand(

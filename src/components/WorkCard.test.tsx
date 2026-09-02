@@ -2,11 +2,21 @@ import { MantineProvider } from "@mantine/core";
 import { ModalsProvider } from "@mantine/modals";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AppRouter } from "@/app/router";
 import { WorkspaceProvider } from "@/app/WorkspaceContext";
 import { WorkCard } from "@/components/WorkCard";
 import { demoWorks } from "@/mocks/demoData";
+
+const updateJobApi = vi.hoisted(() => ({ listPendingRevisionsCommand: vi.fn() }));
+vi.mock("@/services/updateJobApi", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/services/updateJobApi")>()),
+  listPendingRevisionsCommand: updateJobApi.listPendingRevisionsCommand,
+}));
+vi.mock("@/services/dbApi", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/services/dbApi")>()),
+  isTauriRuntime: () => true,
+}));
 
 function renderCard(props: Partial<React.ComponentProps<typeof WorkCard>> = {}) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -26,6 +36,8 @@ function renderCard(props: Partial<React.ComponentProps<typeof WorkCard>> = {}) 
 }
 
 describe("WorkCard", () => {
+  beforeEach(() => updateJobApi.listPendingRevisionsCommand.mockResolvedValue([]));
+
   it("is keyboard accessible and opens the work route", () => {
     window.location.hash = "#/library";
     renderCard();
@@ -149,6 +161,16 @@ describe("WorkCard", () => {
     window.location.hash = "#/library";
     fireEvent.click(screen.getByRole("button", { name: /バージョン履歴/ }));
     expect(window.location.hash).toBe("#/works/101?tab=history");
+  });
+
+  it("labels and deep-links an unsaved rewrite separately from saved history", async () => {
+    updateJobApi.listPendingRevisionsCommand.mockResolvedValue([{ downloadId: 101, foundAt: "2026-09-01T00:00:00Z" }]);
+    renderCard({ work: { ...demoWorks[0], currentVersion: 2 } });
+
+    expect(await screen.findByRole("button", { name: /未保存の改稿を比較/ })).toHaveTextContent("未保存の改稿");
+    expect(screen.getByRole("button", { name: /バージョン履歴/ })).toHaveTextContent("履歴 2版");
+    fireEvent.click(screen.getByRole("button", { name: /未保存の改稿を比較/ }));
+    expect(window.location.hash).toBe("#/works/101?tab=history&compare=pending");
   });
 
   it("uses the shared no-cover treatment and keeps the provider visible", () => {

@@ -41,7 +41,7 @@ const THEME_TAG_MIN: usize = 3;
 /// 測るべきは「その棚のふつうの近さと比べて、どれだけ近いか」である。
 /// 対の余弦の平均と標準偏差を棚から取り、そこからの隔たりで判断する。
 /// 実測では上位の束が z = 2.1、タグ束の中央値が z = 0.85 だった。
-const THEME_MIN_Z: f64 = 2.0;
+pub(super) const THEME_MIN_Z: f64 = 2.0;
 /// 棚の水準を測るために取る対の数。
 const BASELINE_PAIRS: usize = 20_000;
 /// テーマの束に入れる上限。
@@ -49,11 +49,27 @@ const BASELINE_PAIRS: usize = 20_000;
 /// 40作の「まとまり」は、まとまりではなく棚である。読む単位として持てる
 /// 大きさに収まるまで締める。
 const THEME_MAX_MEMBERS: usize = 24;
-/// 走査でいちどに作る候補の上限。系統ごとに分けて数える。
+/// 走査でいちどに出す候補の上限。系統ごとに分けて数える。
 ///
 /// 一つの上限を共有すると、数の多いほうが少ないほうを押し出す。実データでは
 /// テーマ331件が続き物を69件まで削っていた。
-const MAX_SWEEP_PER_TRACK: usize = 200;
+///
+/// 200件だったものを8件へ落とした。**200件の候補は、候補ではなく仕事である。**
+/// 1件ずつ中身を確かめて採否を決める操作なので、一度に出す量は一画面に収まり、
+/// その場で片付く数でなければならない。取りこぼしは「もう一度探す」で拾う —
+/// 選び方に乱れを入れてあるので、二度目には別の束が上がってくる。
+const MAX_SWEEP_PER_TRACK: usize = 8;
+/// これを下回る確度の束は、そもそも出さない。
+///
+/// 上限を8件にしただけでは足りない。棚に弱い束しか無いとき、上位8件は
+/// 「いちばんマシな8件」であって「出すに値する8件」ではないからである。
+pub(super) const MIN_STRENGTH: f64 = 0.55;
+/// 重み付き抽出の効き具合。大きいほど確度の高い束に寄る。
+///
+/// 毎回まったく同じ8件を出すと、9番目以降は永久に日の目を見ない。かといって
+/// 一様な籤にすると、確度を測った意味が無くなる。確度の累乗を重みにして、
+/// 強い束をほぼ必ず含みつつ、下位にも席を残す。
+const SELECTION_SHARPNESS: f64 = 8.0;
 /// 保存した検索として勧めるタグの数。多く出しても、どれも保存されない。
 const MAX_SAVED_SEARCH_SUGGESTIONS: usize = 8;
 
@@ -104,6 +120,29 @@ enum BundleKind {
     Theme { tag: String },
 }
 
+/// 題材の束を探した結果。
+///
+/// 束と、束にしなかったタグと、**そもそも探しきれなかった事情**の三つを返す。
+/// 三つ目を落とすと、意味索引が読めないことと題材の束が無いことが、画面では
+/// 同じ「見つかりませんでした」になる。
+struct ThemeSweep {
+    bundles: Vec<SweepBundle>,
+    saved_searches: Vec<SavedSearchSuggestion>,
+    /// 探しきれなかった理由。最後まで探せたなら `None`。
+    note: Option<String>,
+}
+
+impl ThemeSweep {
+    /// 意味索引に届かなかったとき。続き物だけは出せるので、失敗にはしない。
+    fn skipped(saved_searches: Vec<SavedSearchSuggestion>, note: &str) -> Self {
+        Self {
+            bundles: Vec::new(),
+            saved_searches,
+            note: Some(note.to_string()),
+        }
+    }
+}
+
 /// 洗い出した束ひとつ。保存する前の、まだ提案でしかない状態。
 struct SweepBundle {
     ids: Vec<i64>,
@@ -111,6 +150,16 @@ struct SweepBundle {
     kind: BundleKind,
     /// 束ごとの証拠。メンバー全員に同じものが付く。
     member_evidence: Vec<CollectionSuggestionEvidence>,
+    /// この束を出すに値するか、0.0〜1.0 で。
+    ///
+    /// **大きさは確度ではない。** これまでは大きい束から順に200件を採っていた
+    /// が、それは「いちばん自信のある束」ではなく「いちばん大きい束」を選ぶ
+    /// 規則である。24作のテーマ束より、本文リンクでつながった3作のほうが
+    /// ずっと確かなことは日常的に起きる。
+    ///
+    /// 見つけ方ごとに意味の違う数（リンクの確信度、話数の揃い、棚の水準からの
+    /// 隔たり）を、ここで一本の尺度へそろえる。
+    strength: f64,
 }
 
 impl SweepBundle {
@@ -160,6 +209,8 @@ impl Database {
             return Ok(CollectionSweepResult {
                 bundles: Vec::new(),
                 saved_search_suggestions: Vec::new(),
+                semantic_used: false,
+                note: Some("棚に作品が足りないので、まとまりを探せません。".to_string()),
             });
         }
         let by_id = works
@@ -173,17 +224,19 @@ impl Database {
         bundles.extend(self.sweep_series_runs(&by_id)?);
         let sequences = merge_overlapping(bundles);
 
-        let (themes, saved_search_suggestions) = self.sweep_themes(&by_id)?;
+        let themes = self.sweep_themes(&by_id)?;
 
         // 続き物を先に置く。読む順のある束は、見つかったときの価値が大きい。
         // 上限は系統ごとにかける — 数の多いほうが少ないほうを押し出さないため。
-        let mut all = cap_track(sequences);
-        all.extend(cap_track(themes));
+        let mut all = select_track(sequences);
+        all.extend(select_track(themes.bundles));
 
         let bundles = self.replace_swept_suggestions(&all, &by_id)?;
         Ok(CollectionSweepResult {
             bundles,
-            saved_search_suggestions,
+            saved_search_suggestions: themes.saved_searches,
+            semantic_used: themes.note.is_none(),
+            note: themes.note,
         })
     }
 
@@ -260,8 +313,12 @@ impl Database {
             .map_err(|e| format!("Failed to query sweep links: {e}"))?;
 
         let mut adjacency: HashMap<i64, HashSet<i64>> = HashMap::new();
+        // 辺の確信度は捨てない。「本文リンクでつながっている」の一言で束ねて
+        // いたが、0.61 でつながった塊と 0.98 でつながった塊は別物である。
+        // 鍵は小さいほうの id を先に置いて、向きの違いで二重に数えない。
+        let mut edge_confidence: HashMap<(i64, i64), f64> = HashMap::new();
         for row in rows {
-            let (from, to, _confidence) =
+            let (from, to, confidence) =
                 row.map_err(|e| format!("Failed to read sweep links: {e}"))?;
             // 告知として落とした作品はここに居ない。ハブは端点にはなれるが、
             // 渡って先へ行く橋にはしない。
@@ -273,6 +330,12 @@ impl Database {
             }
             adjacency.entry(from).or_default().insert(to);
             adjacency.entry(to).or_default().insert(from);
+            let key = if from <= to { (from, to) } else { (to, from) };
+            // 同じ二作に両向きの行があるなら、強いほうを採る。
+            edge_confidence
+                .entry(key)
+                .and_modify(|value| *value = value.max(confidence))
+                .or_insert(confidence);
         }
 
         Ok(connected_components(&adjacency)
@@ -285,6 +348,7 @@ impl Database {
                     label: "本文・キャプションのリンク".to_string(),
                     contribution: 0.8,
                 }],
+                strength: link_component_strength(&ids, &edge_confidence),
                 ids,
                 track: "sequence",
             })
@@ -333,6 +397,10 @@ impl Database {
                         label: format!("公式シリーズ「{title}」の連番"),
                         contribution: 0.52,
                     }],
+                    // 取得元が「これは同じシリーズの何話目である」と言っている
+                    // うえ、話数が途切れずに並んでいる。棚の中でいちばん確かな
+                    // 根拠なので、推測を重ねずここは高く置く。
+                    strength: 0.95,
                     ids: run.iter().map(|(id, _)| *id).collect(),
                     track: "sequence",
                 });
@@ -363,10 +431,7 @@ impl Database {
     /// タグだけでは足りない — 同じタグの作品は棚に何百とある。逆に本文の
     /// 近さだけでも足りない — 近いだけの作品は言葉で説明できない。
     /// **タグで起点を決め、本文の近さで削る**と、説明のつく束だけが残る。
-    fn sweep_themes(
-        &self,
-        by_id: &HashMap<i64, SweepWork>,
-    ) -> Result<(Vec<SweepBundle>, Vec<SavedSearchSuggestion>), String> {
+    fn sweep_themes(&self, by_id: &HashMap<i64, SweepWork>) -> Result<ThemeSweep, String> {
         let conn = self.read_conn()?;
         let mut stmt = conn
             .prepare(
@@ -418,12 +483,20 @@ impl Database {
                 Ok(values) => values,
                 Err(error) => {
                     // 意味索引が無くても走査そのものは成り立つ。続き物だけ出す。
+                    // ただし**黙って**続き物だけにはしない。索引が壊れている
+                    // ことと、題材の束が本当に無いことは別の話である。
                     log::warn!("Theme sweep skipped, semantic index unavailable: {error}");
-                    return Ok((Vec::new(), oversized));
+                    return Ok(ThemeSweep::skipped(
+                        oversized,
+                        "意味索引が読めないので、題材の束は探せませんでした。続き物だけを出しています。",
+                    ));
                 }
             };
         if centroids.len() < THEME_TAG_MIN {
-            return Ok((Vec::new(), oversized));
+            return Ok(ThemeSweep::skipped(
+                oversized,
+                "本文ベクトルがまだ足りないので、題材の束は探せませんでした。続き物だけを出しています。",
+            ));
         }
         // 本文ベクトルの無い作品は、近さを測れないので束の材料から外す。
         for ids in by_tag.values_mut() {
@@ -449,7 +522,7 @@ impl Database {
                 continue;
             }
             ids.sort_unstable();
-            let Some(kept) = tighten_to_baseline(&ids, &centroids, &baseline) else {
+            let Some((kept, z)) = tighten_to_baseline(&ids, &centroids, &baseline) else {
                 continue;
             };
             out.push(SweepBundle {
@@ -466,6 +539,7 @@ impl Database {
                         contribution: 0.3,
                     },
                 ],
+                strength: theme_strength(z),
                 ids: kept,
                 track: "theme",
             });
@@ -479,7 +553,32 @@ impl Database {
                 .cmp(&left.ids.len())
                 .then_with(|| left.ids.first().cmp(&right.ids.first()))
         });
-        Ok((merge_overlapping(out), oversized))
+
+        // まとめたあとに、もう一度締める。
+        //
+        // `merge_overlapping` の上限は MAX_BUNDLE(40) で、テーマの上限
+        // THEME_MAX_MEMBERS(24) ではない。だから重なりの大きい二つのテーマ束を
+        // まとめると、**24作までと決めたはずの束が40作になって出てくる**。
+        // しかも近さを測り直さないので、根拠の一行は「本文も近い40作です」と
+        // 言う — その40作でそれを確かめたことは一度も無いのに。
+        //
+        // 締め直せば、大きさも隔たりも最後の顔ぶれで測った値になる。ここで
+        // 落ちる束は、まとめる前は通っていても、まとまった姿では束と呼べない
+        // ものである。
+        let mut themes = Vec::new();
+        for mut bundle in merge_overlapping(out) {
+            let Some((kept, z)) = tighten_to_baseline(&bundle.ids, &centroids, &baseline) else {
+                continue;
+            };
+            bundle.ids = kept;
+            bundle.strength = theme_strength(z);
+            themes.push(bundle);
+        }
+        Ok(ThemeSweep {
+            bundles: themes,
+            saved_searches: oversized,
+            note: None,
+        })
     }
 
     /// 走査で作った候補を入れ替える。種から作った候補には触らない。
@@ -493,6 +592,7 @@ impl Database {
         let mut prepared = Vec::new();
         {
             let conn = self.read_conn()?;
+            let rejected_pairs = load_rejected_pairs(&conn)?;
             for bundle in bundles {
                 let members = bundle
                     .ids
@@ -502,7 +602,7 @@ impl Database {
                 if members.len() < MIN_BUNDLE {
                     continue;
                 }
-                if bundle_is_rejected(&conn, &members)? {
+                if bundle_is_rejected(&rejected_pairs, &members)? {
                     continue;
                 }
                 let members = fold_composite_volumes(members);
@@ -573,14 +673,15 @@ impl Database {
                     id, seed_json, proposed_name, collection_kind, members_json,
                     score, rule_version, state, created_at, updated_at,
                     name_options_json, track, origin, evidence_summary
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, 1.0, ?6, 'pending', ?7, ?7,
-                           ?8, ?9, 'sweep', ?10)",
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'pending', ?8, ?8,
+                           ?9, ?10, 'sweep', ?11)",
                 params![
                     id,
                     ids_json,
                     proposed_name,
                     kind,
                     members_json,
+                    bundle.strength,
                     rule_version,
                     now,
                     names_json,
@@ -597,7 +698,7 @@ impl Database {
                 track: bundle.track.to_string(),
                 origin: "sweep".to_string(),
                 evidence_summary: evidence,
-                score: 1.0,
+                score: bundle.strength,
                 rule_version: rule_version.clone(),
                 state: "pending".to_string(),
                 members,
@@ -700,6 +801,7 @@ fn sweep_title_families(works: &[SweepWork]) -> Vec<SweepBundle> {
                 label: "題名の連番".to_string(),
                 contribution: 0.6,
             }],
+            strength: title_family_strength(&group),
             ids: group.iter().map(|work| work.id).collect(),
             track: "sequence",
         })
@@ -709,18 +811,78 @@ fn sweep_title_families(works: &[SweepWork]) -> Vec<SweepBundle> {
     out
 }
 
+/// 本文リンクの塊の確からしさ。
+///
+/// 塊の中にある辺の確信度の平均。リンク抽出が 0.6 を下限にしているので、
+/// ここへ来る値は 0.6〜1.0 に収まる。それをそのまま尺度に使う — 「つながって
+/// いる」という事実より「どれだけ確かにつながっているか」で並べたい。
+///
+/// 辺が一本も見つからないことは起こらない（塊は辺から作られる）が、その場合は
+/// 下限を返す。数え損ねを高い確度として通さない。
+fn link_component_strength(ids: &[i64], edges: &HashMap<(i64, i64), f64>) -> f64 {
+    let members = ids.iter().copied().collect::<HashSet<_>>();
+    let mut total = 0.0;
+    let mut count = 0usize;
+    for ((left, right), confidence) in edges {
+        if members.contains(left) && members.contains(right) {
+            total += *confidence;
+            count += 1;
+        }
+    }
+    if count == 0 {
+        return 0.6;
+    }
+    (total / count as f64).clamp(0.0, 1.0)
+}
+
+/// 題名族の確からしさ。
+///
+/// 二つのことを見る。
+///
+///   1. 何割に話数の語（「その3」「③」「後編」）が付いているか。1作だけに
+///      付いた族は、連載ではなく偶然かもしれない。
+///   2. 共通の語幹がどれだけ長いか。9文字でぎりぎり通した族と、26文字が
+///      丸ごと一致する族を同じ確度で扱う理由は無い。
+fn title_family_strength(group: &[&SweepWork]) -> f64 {
+    if group.is_empty() {
+        return 0.0;
+    }
+    let ordinals = group
+        .iter()
+        .filter(|work| collection_rules::has_ordinal_marker(&work.title))
+        .count();
+    let ordinal_ratio = ordinals as f64 / group.len() as f64;
+    // 族の鍵は全員で同じなので、先頭の一作から測れば足りる。
+    let stem = collection_rules::family_match_key(&group[0].title)
+        .chars()
+        .count()
+        .min(26);
+    let stem_score = ((stem.saturating_sub(9)) as f64 / 17.0).clamp(0.0, 1.0);
+    (0.50 + 0.30 * ordinal_ratio + 0.20 * stem_score).clamp(0.0, 1.0)
+}
+
+/// テーマ束の確からしさ。
+///
+/// 棚の水準からの隔たり（z）を 0.55〜1.0 へ写す。z = 2.0 は束と認める下限
+/// なので、そこがちょうど下限の確度になる。z = 6.0 で振り切る — それ以上の
+/// 隔たりは実測でもめったに出ず、区別しても意味がない。
+pub(super) fn theme_strength(z: f64) -> f64 {
+    let span = ((z - THEME_MIN_Z) / 4.0).clamp(0.0, 1.0);
+    MIN_STRENGTH + (1.0 - MIN_STRENGTH) * span
+}
+
 /// 棚のふつうの近さ。
 ///
 /// 対の余弦の平均と散らばり。同じ題材ばかりの棚では平均が 0.94 まで上がり、
 /// 別々の棚では別の値になる。**しきい値は棚ごとに違う**ので、固定値は置けない。
-struct ShelfBaseline {
+pub(super) struct ShelfBaseline {
     mean: f64,
     deviation: f64,
 }
 
 impl ShelfBaseline {
     /// 棚のふつうから、いくつぶん離れているか。
-    fn z(&self, value: f64) -> f64 {
+    pub(super) fn z(&self, value: f64) -> f64 {
         if self.deviation <= f64::EPSILON {
             return 0.0;
         }
@@ -733,7 +895,7 @@ impl ShelfBaseline {
 /// 乱数は使わない。同じ棚を二度走査したら同じ答えが出るべきで、走らせるたびに
 /// 束の顔ぶれが揺れると「直したのか壊れたのか」が分からなくなる。互いに素な
 /// 歩幅で拾えば、規則的でありながら偏らない。
-fn shelf_baseline(centroids: &HashMap<i64, Vec<f32>>) -> ShelfBaseline {
+pub(super) fn shelf_baseline(centroids: &HashMap<i64, Vec<f32>>) -> ShelfBaseline {
     let mut ids = centroids.keys().copied().collect::<Vec<_>>();
     ids.sort_unstable();
     if ids.len() < 2 {
@@ -751,8 +913,14 @@ fn shelf_baseline(centroids: &HashMap<i64, Vec<f32>>) -> ShelfBaseline {
     let samples = BASELINE_PAIRS.min(count.saturating_mul(4));
     let mut values = Vec::with_capacity(samples);
     for step in 0..samples {
-        let left = ids[step % count];
-        let right = ids[(step * stride + 1) % count];
+        let index = step % count;
+        let round = step / count;
+        let left = ids[index];
+        // 周回ごとに相手を一つずらす。ずらさないと `(step * stride + 1) % count`
+        // は step が count 増えても同じ値へ戻るので、2周目以降は1周目と
+        // **まったく同じ対**を数え直すだけになる。実際、3,938作の棚で
+        // 15,752回まわして拾えていた対は 3,938 種類しかなかった。
+        let right = ids[(index * stride + 1 + round) % count];
         if left == right {
             continue;
         }
@@ -796,7 +964,7 @@ fn tighten_to_baseline(
     ids: &[i64],
     centroids: &HashMap<i64, Vec<f32>>,
     baseline: &ShelfBaseline,
-) -> Option<Vec<i64>> {
+) -> Option<(Vec<i64>, f64)> {
     let mut kept = ids
         .iter()
         .copied()
@@ -833,9 +1001,13 @@ fn tighten_to_baseline(
         let mean = total / kept.len() as f64;
         // 近さだけでなく大きさも条件にする。棚のふつうより近くても、24作を
         // 超える束は「読む単位」ではなく絞り込みの結果である。
-        if baseline.z(mean) >= THEME_MIN_Z && kept.len() <= THEME_MAX_MEMBERS {
+        let z = baseline.z(mean);
+        if z >= THEME_MIN_Z && kept.len() <= THEME_MAX_MEMBERS {
             kept.sort_unstable();
-            return Some(kept);
+            // 隔たりも返す。締め終えた**その顔ぶれ**で測った値なので、
+            // あとから件数を削られても食い違わない。捨てると、束の確度を
+            // 二度と測り直せなくなる。
+            return Some((kept, z));
         }
         // いちばん浮いているものを落とす。同点は id で決めて、走査を再現可能に。
         averages.sort_by(|left, right| {
@@ -857,7 +1029,7 @@ fn tighten_to_baseline(
 /// ベクトルを渡すと**前半だけの内積**を「近さ」として返してしまう。埋め込みの
 /// モデルを替えれば次元は変わるし、入れ替えの途中では新旧が混ざる。そこで
 /// 静かに間違った数を返すと、無関係な作品が束にまとまる形で表に出る。
-fn cosine(left: &[f32], right: &[f32]) -> Option<f64> {
+pub(super) fn cosine(left: &[f32], right: &[f32]) -> Option<f64> {
     if left.is_empty() || left.len() != right.len() {
         return None;
     }
@@ -903,6 +1075,9 @@ fn merge_overlapping(bundles: Vec<SweepBundle>) -> Vec<SweepBundle> {
             let mut ids = union.into_iter().collect::<Vec<_>>();
             ids.sort_unstable();
             existing.ids = ids;
+            // まとめた束の確度は、強いほうを引き継ぐ。二つの根拠が同じ顔ぶれを
+            // 指しているのだから、弱いほうに引きずられる理由は無い。
+            existing.strength = existing.strength.max(bundle.strength);
             for evidence in bundle.member_evidence.iter() {
                 if !existing
                     .member_evidence
@@ -948,8 +1123,42 @@ fn order_bundle_members<'a>(members: &[&'a SweepWork], track: &str) -> Vec<&'a S
     ordered
 }
 
+/// 「二度と出さない」と言われた組を、いまの規則版ぶんだけ一度に読む。
+///
+/// 組ごとに問い合わせていた。40作の束なら 780 回、走査ぜんぶで数十万回の
+/// 往復になる。表は利用者が押した回数ぶんしか行が無いので、丸ごと持てる。
+type RejectedPairs = HashSet<(String, String, String, String)>;
+
+fn load_rejected_pairs(conn: &Connection) -> Result<RejectedPairs, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT left_source, left_source_id, right_source, right_source_id
+               FROM collection_pair_feedback
+              WHERE decision = 'reject' AND rule_version = ?1",
+        )
+        .map_err(|e| format!("Failed to prepare sweep feedback: {e}"))?;
+    let rows = stmt
+        .query_map(params![COLLECTION_SUGGEST_RULE_VERSION], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
+        .map_err(|e| format!("Failed to query sweep feedback: {e}"))?;
+    let mut out = HashSet::new();
+    for row in rows {
+        out.insert(row.map_err(|e| format!("Failed to read sweep feedback: {e}"))?);
+    }
+    Ok(out)
+}
+
 /// この組合せを、利用者がすでに「二度と出さない」と言っていないか。
-fn bundle_is_rejected(conn: &Connection, members: &[&SweepWork]) -> Result<bool, String> {
+fn bundle_is_rejected(rejected: &RejectedPairs, members: &[&SweepWork]) -> Result<bool, String> {
+    if rejected.is_empty() {
+        return Ok(false);
+    }
     for (index, left) in members.iter().enumerate() {
         for right in members.iter().skip(index + 1) {
             let (a, b) = canonical_work_key_pair(
@@ -962,25 +1171,7 @@ fn bundle_is_rejected(conn: &Connection, members: &[&SweepWork]) -> Result<bool,
                     source_id: right.source_id.clone(),
                 },
             );
-            let rejected = conn
-                .query_row(
-                    "SELECT 1 FROM collection_pair_feedback
-                     WHERE left_source = ?1 AND left_source_id = ?2
-                       AND right_source = ?3 AND right_source_id = ?4
-                       AND decision = 'reject' AND rule_version = ?5",
-                    params![
-                        a.source,
-                        a.source_id,
-                        b.source,
-                        b.source_id,
-                        COLLECTION_SUGGEST_RULE_VERSION
-                    ],
-                    |_| Ok(()),
-                )
-                .optional()
-                .map_err(|e| format!("Failed to read sweep feedback: {e}"))?
-                .is_some();
-            if rejected {
+            if rejected.contains(&(a.source, a.source_id, b.source, b.source_id)) {
                 return Ok(true);
             }
         }
@@ -1036,6 +1227,7 @@ fn sweep_name_options(
                     source: "tags".to_string(),
                     label: "共有タグ".to_string(),
                     name: tag.to_string(),
+                    ..Default::default()
                 },
             );
         }
@@ -1044,16 +1236,69 @@ fn sweep_name_options(
 }
 
 /// 大きい束から順に、系統ごとの上限まで残す。
-fn cap_track(mut bundles: Vec<SweepBundle>) -> Vec<SweepBundle> {
-    bundles.sort_by(|left, right| {
+/// 系統ひとつぶんから、出す束を選ぶ。
+///
+/// 以前はここが「大きい順に200件」だった。二つとも間違っていた。
+///
+/// **大きさで並べるのが間違い。** 大きい束ほど根拠が薄い。共有タグで24作が
+/// 集まったものより、本文リンクでつながった3作のほうが確かである。大きい順に
+/// 採ると、いちばん確かなものから順に切り捨てることになる。
+///
+/// **200件出すのが間違い。** 候補は1件ずつ中身を見て採否を決めるものなので、
+/// 200件は候補ではなく仕事である。実際、利用者は全部閉じるほうを選んだ。
+///
+/// そこで確度で並べ、下限を切り、少数だけ採る。ただし毎回まったく同じ顔ぶれに
+/// はしない — 確度の累乗を重みにした籤で引く（Efraimidis–Spirakis）。強い束は
+/// ほぼ必ず入るが、下位にも席が回るので、もう一度探せば別の束が出てくる。
+fn select_track(bundles: Vec<SweepBundle>) -> Vec<SweepBundle> {
+    let mut eligible = bundles
+        .into_iter()
+        .filter(|bundle| bundle.strength >= MIN_STRENGTH)
+        .collect::<Vec<_>>();
+    if eligible.len() <= MAX_SWEEP_PER_TRACK {
+        // 選ぶ余地が無いなら籤も引かない。乱数を使わなければ、この場合の
+        // 結果は走査するたびに同じになる。
+        eligible.sort_by(|left, right| {
+            right
+                .strength
+                .total_cmp(&left.strength)
+                .then_with(|| left.ids.first().cmp(&right.ids.first()))
+        });
+        return eligible;
+    }
+
+    // 鍵は u^(1/w)。対数を取ると ln(u)/w で、ln(u) は負なので w が大きいほど
+    // 0 に近づく＝鍵が大きい。上位 k 件を採ると、重み w に比例した非復元抽出に
+    // なる。w = 確度^SELECTION_SHARPNESS。
+    let mut keyed = eligible
+        .into_iter()
+        .map(|bundle| {
+            let weight = bundle.strength.powf(SELECTION_SHARPNESS).max(f64::MIN_POSITIVE);
+            // 0 を引くと ln が -inf になる。開区間へ寄せてから取る。
+            let uniform = rand::random::<f64>().clamp(f64::MIN_POSITIVE, 1.0);
+            (uniform.ln() / weight, bundle)
+        })
+        .collect::<Vec<_>>();
+    keyed.sort_by(|left, right| {
         right
-            .ids
-            .len()
-            .cmp(&left.ids.len())
+            .0
+            .total_cmp(&left.0)
+            .then_with(|| left.1.ids.first().cmp(&right.1.ids.first()))
+    });
+    keyed.truncate(MAX_SWEEP_PER_TRACK);
+    let mut out = keyed
+        .into_iter()
+        .map(|(_, bundle)| bundle)
+        .collect::<Vec<_>>();
+    // 画面に出す順は籤の順ではなく確度の順。何が選ばれたかは籤で決まるが、
+    // 選ばれたものの中では確かなものを先に見せる。
+    out.sort_by(|left, right| {
+        right
+            .strength
+            .total_cmp(&left.strength)
             .then_with(|| left.ids.first().cmp(&right.ids.first()))
     });
-    bundles.truncate(MAX_SWEEP_PER_TRACK);
-    bundles
+    out
 }
 
 /// 無向グラフの連結成分。
@@ -1094,6 +1339,154 @@ mod tests {
             .collect()
     }
 
+    fn bundle(first_id: i64, size: usize, strength: f64) -> SweepBundle {
+        SweepBundle {
+            ids: (first_id..first_id + size as i64).collect(),
+            track: "theme",
+            kind: BundleKind::Theme {
+                tag: "タグ".to_string(),
+            },
+            member_evidence: Vec::new(),
+            strength,
+        }
+    }
+
+    /// 出す束は、大きい順ではなく確かな順に選ぶ。
+    ///
+    /// 以前は `ids.len()` の降順に200件を採っていた。共有タグで24作が集まった
+    /// ゆるい束が、本文リンクでつながった3作より先に採られる規則だった。
+    #[test]
+    fn selection_prefers_the_confident_bundle_over_the_big_one() {
+        let picked = select_track(vec![
+            bundle(1, 24, 0.58),
+            bundle(100, 3, 0.97),
+            bundle(200, 18, 0.60),
+        ]);
+        assert_eq!(picked.len(), 3, "下限を越えた束は全部残る");
+        assert_eq!(
+            picked.first().unwrap().ids.len(),
+            3,
+            "いちばん確かな3作の束が先頭に来ていない"
+        );
+    }
+
+    /// 下限を下回る束は、上位に他が無くても出さない。
+    ///
+    /// 「いちばんマシな8件」と「出すに値する8件」は違う。
+    #[test]
+    fn a_shelf_with_only_weak_bundles_yields_nothing() {
+        let picked = select_track(vec![bundle(1, 10, 0.30), bundle(50, 6, 0.51)]);
+        assert!(picked.is_empty(), "{}件出ている", picked.len());
+    }
+
+    /// 上限を超えたら籤で引く。強い束はほぼ必ず残り、順序は確度の順になる。
+    #[test]
+    fn selection_caps_the_count_and_orders_by_confidence() {
+        let mut bundles = vec![bundle(0, 4, 0.99)];
+        for index in 1..30 {
+            bundles.push(bundle(index * 10, 4, 0.60));
+        }
+        let picked = select_track(bundles);
+        assert_eq!(picked.len(), MAX_SWEEP_PER_TRACK);
+        assert_eq!(picked.first().unwrap().strength, 0.99);
+        for pair in picked.windows(2) {
+            assert!(pair[0].strength >= pair[1].strength);
+        }
+    }
+
+    /// 選ぶ余地が無いときは籤を引かない。同じ棚を二度走査したら同じ答えになる。
+    #[test]
+    fn a_small_pool_is_deterministic() {
+        let make = || vec![bundle(1, 3, 0.9), bundle(10, 5, 0.7)];
+        let first = select_track(make());
+        let second = select_track(make());
+        let ids = |bundles: &[SweepBundle]| {
+            bundles.iter().map(|value| value.ids.clone()).collect::<Vec<_>>()
+        };
+        assert_eq!(ids(&first), ids(&second));
+    }
+
+    /// 籤を引く回でも、上限より多い候補から選び直せば顔ぶれは変わりうる。
+    ///
+    /// 確度が同じ束ばかりを並べて、20回引いて一度も違いが出なければ、
+    /// 乱れが効いていない。
+    #[test]
+    fn selection_is_not_always_the_same_faces() {
+        let make = || {
+            (0..40)
+                .map(|index| bundle(index * 10, 4, 0.80))
+                .collect::<Vec<_>>()
+        };
+        let first = select_track(make())
+            .iter()
+            .map(|value| value.ids[0])
+            .collect::<Vec<_>>();
+        let changed = (0..20).any(|_| {
+            select_track(make())
+                .iter()
+                .map(|value| value.ids[0])
+                .collect::<Vec<_>>()
+                != first
+        });
+        assert!(changed, "20回引いても同じ8件しか出ない");
+    }
+
+    /// テーマ束の確度は、棚の水準からの隔たりで決まる。
+    #[test]
+    fn theme_confidence_starts_at_the_bar_and_saturates() {
+        assert!((theme_strength(THEME_MIN_Z) - MIN_STRENGTH).abs() < 1e-9);
+        assert!(theme_strength(4.0) > theme_strength(2.5));
+        assert!(theme_strength(99.0) <= 1.0);
+        // 下限に届かない隔たりでも、確度が下限を割り込むことはない
+        // （そこへ来る前に `tighten_to_baseline` が束を認めない）。
+        assert!(theme_strength(0.0) >= MIN_STRENGTH);
+    }
+
+    /// 本文リンクの塊は、辺の確信度の平均で測る。
+    #[test]
+    fn a_weakly_linked_component_scores_below_a_strongly_linked_one() {
+        let mut weak = HashMap::new();
+        weak.insert((1, 2), 0.61);
+        weak.insert((2, 3), 0.62);
+        let mut strong = HashMap::new();
+        strong.insert((1, 2), 0.98);
+        strong.insert((2, 3), 0.99);
+        assert!(
+            link_component_strength(&[1, 2, 3], &weak)
+                < link_component_strength(&[1, 2, 3], &strong)
+        );
+        // 塊の外の辺は数えない。
+        let mut mixed = strong.clone();
+        mixed.insert((9, 10), 0.10);
+        assert_eq!(
+            link_component_strength(&[1, 2, 3], &mixed),
+            link_component_strength(&[1, 2, 3], &strong)
+        );
+    }
+
+    /// 棚の水準を測る対は、周回ごとに違う相手を見る。
+    ///
+    /// `(step * stride + 1) % count` は step が count 増えても同じ値へ戻る。
+    /// ずらさないと、4周まわしても拾える対は count 種類しか無い。
+    #[test]
+    fn the_baseline_samples_more_pairs_than_it_has_works() {
+        // 同一ベクトルばかりだと散らばりが 0 になるので、少しずつ向きを変える。
+        let entries = (0..40)
+            .map(|index| {
+                let angle = index as f32 * 0.1;
+                (index, vec![angle.cos(), angle.sin()])
+            })
+            .collect::<Vec<_>>();
+        let centroids = entries
+            .iter()
+            .map(|(id, vector)| (*id, vector.clone()))
+            .collect::<HashMap<_, _>>();
+        let baseline = shelf_baseline(&centroids);
+        // 対がすべて同一なら散らばりは 0 になる。周回ごとに相手が変われば、
+        // 別の近さが混ざるので 0 にはならない。
+        assert!(baseline.deviation > 0.0, "{}", baseline.deviation);
+    }
+
     /// 長さの違う向きは比べない。
     ///
     /// `zip` は短いほうで打ち切るので、放っておくと**前半だけの内積**が
@@ -1125,10 +1518,12 @@ mod tests {
             deviation: 0.4,
         };
 
-        let kept = tighten_to_baseline(&[1, 2, 3, 4], &centroids, &baseline)
+        let (kept, z) = tighten_to_baseline(&[1, 2, 3, 4], &centroids, &baseline)
             .expect("そろっている3件で束になる");
 
         assert_eq!(kept, vec![1, 2, 3], "次元の違う4番が残っている");
+        // 隔たりも返る。これが束の確度になるので、捨てずに持ち帰る。
+        assert!(z >= THEME_MIN_Z, "{z}");
     }
 
     /// 棚のふつうを測る材料にも、比べられない組は数えない。

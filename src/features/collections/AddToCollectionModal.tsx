@@ -129,7 +129,9 @@ export function AddToCollectionModal({
                       <Radio value={collection.id} aria-label={`${collection.name}に入れる`} />
                       <CollectionCover collection={collection} variant="card" className="collection-pick__cover" />
                       <span className="collection-pick__body">
-                        <Text size="sm" fw={650} className="line-clamp-1">{collection.name}</Text>
+                        {/* 束の名前は題名から作るので長い。1行で切ると、同じ
+                            連載から作った束が全部同じ名前に見える。 */}
+                        <Text size="sm" fw={650}>{collection.name}</Text>
                         <Text size="xs" c="dimmed">
                           {formatNumber(collection.memberCount)}作品 · {formatNumber(collection.totalTextLength)}字
                         </Text>

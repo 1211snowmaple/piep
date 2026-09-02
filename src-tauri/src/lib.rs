@@ -213,6 +213,7 @@ pub fn run() -> tauri::Result<()> {
             commands::database::search_downloads_v2,
             commands::database::search_suggest,
             commands::database::search_rebuild_index,
+            commands::database::search_set_semantic_enabled,
             commands::database::search_cancel_rebuild_index,
             commands::database::db_get_downloads,
             commands::database::db_get_assets,
@@ -240,6 +241,7 @@ pub fn run() -> tauri::Result<()> {
             commands::database::db_create_collection_from_downloads,
             commands::database::db_sort_work_collection_members,
             commands::database::db_sweep_collection_candidates,
+            commands::database::db_suggest_collection_additions,
             commands::database::db_dismiss_swept_suggestions,
             commands::database::db_propose_collection_names,
             commands::database::db_name_collection_with_model,
@@ -316,6 +318,7 @@ pub fn run() -> tauri::Result<()> {
             commands::update_jobs::dismiss_update_candidate,
             commands::update_jobs::count_dismissed_update_candidates,
             commands::update_jobs::list_pending_revisions,
+            commands::update_jobs::preview_pending_revision,
             commands::update_jobs::restore_dismissed_update_candidates,
             // エクスポート / インポート (commands::archive)
             commands::archive::export_single,

@@ -22,4 +22,12 @@ describe("BoundedJsonView", () => {
     render(<MantineProvider><BoundedJsonView value={cyclic} /></MantineProvider>);
     expect(screen.getByText(/JSONを表示できません/)).toBeInTheDocument();
   });
+
+  it("renders already serialized JSON without serializing it again", () => {
+    const jsonText = '{"raw":true,"body":"already serialized"}';
+    const view = render(
+      <MantineProvider><BoundedJsonView jsonText={jsonText} /></MantineProvider>,
+    );
+    expect(view.container.querySelector("pre")?.textContent).toBe(jsonText);
+  });
 });

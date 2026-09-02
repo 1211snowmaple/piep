@@ -47,10 +47,10 @@ export const previewDiagnostics: LibraryDiagnostics = {
   measuredAt: "2026-08-09T12:00:00.000Z", totalDownloads: 1284, totalAssets: 8241, totalVersions: 1392, totalTextLength: 31_400_000,
   databaseSizeBytes: 94_000_000, walSizeBytes: 1_200_000, storageSizeBytes: 14_680_000_000, lexicalIndexSizeBytes: 36_000_000, lexicalIndexFileCount: 120, lexicalIndexSegmentCount: 8, semanticIndexSizeBytes: 210_000_000,
   sqlitePageCount: 22949, sqliteFreePages: 140, sqliteCacheSizeBytes: 8_000_000, liveDatabaseBytes: 93_400_000, fragmentationPercent: 0.61,
-  orphanAssetRows: 0, orphanAssetBytes: 0, orphanAssetFiles: 0, orphanAssetFileBytes: 0, processMemoryBytes: 286_000_000, listFirstPageMs: 8.3, listP50Ms: 8.1, listP95Ms: 10.7,
+  orphanAssetRows: 0, orphanAssetBytes: 0, orphanAssetFiles: 0, orphanAssetFileBytes: 0, processMemoryBytes: 286_000_000, processPrivateMemoryBytes: 244_000_000, processCount: 7, webviewProcessCount: 6, gpuDedicatedMemoryBytes: 67_000_000, gpuSharedMemoryBytes: 9_000_000, listFirstPageMs: 8.3, listP50Ms: 8.1, listP95Ms: 10.7,
   checkedFileReferences: 9633, missingJsonFiles: 0, missingAssetFiles: 0, missingProfileFiles: 0, unsafeReferencedFiles: 0, unreadableReferencedFiles: 0, emptyReferencedFiles: 0, mismatchedAssetFiles: 0, transientFiles: 0, transientFileBytes: 0, fileIssueSamples: [],
   lexicalSearchMs: 43.2, lexicalSearchP50Ms: 42.8, lexicalSearchP95Ms: 51.4, exactAuthorP50Ms: 5.2, exactAuthorP95Ms: 7.8, benchmarkQuery: "preview author",
-  searchIndex: { totalDownloads: 1284, indexedDownloads: 1284, pendingDownloads: 0, isComplete: true, phase: "ready", semanticIndexedChunks: 4192, semanticIndexedDownloads: 1284, semanticPendingDownloads: 0, semanticModelReady: true, embeddingProvider: "DirectML (preview)", gpuEnabled: true, throughputPerSec: null },
+  searchIndex: { totalDownloads: 1284, indexedDownloads: 1284, pendingDownloads: 0, isComplete: true, phase: "ready", semanticIndexedChunks: 1284, semanticIndexedDownloads: 1284, semanticPendingDownloads: 0, semanticEnabled: true, semanticModelReady: true, embeddingProvider: "DirectML (preview)", gpuEnabled: true, throughputPerSec: null },
 };
 
 function scoreColor(ms: number | null) {
@@ -554,7 +554,8 @@ export default function DiagnosticsPage({ embedded = false, previewData = previe
         <MetricCard label="作品" value={`${formatNumber(data.totalDownloads)}件`} detail={`${formatNumber(data.totalTextLength)}文字 · ${formatNumber(data.totalVersions)}版`} icon={Icons.database} />
         <MetricCard label="保存データ" value={formatBytes(data.storageSizeBytes)} detail={`${formatNumber(data.totalAssets)}アセット`} icon={Icons.storage} color="gray" />
         <MetricCard label="検索索引" value={`${indexRatio.toFixed(1)}%`} detail={`${formatNumber(data.searchIndex.indexedDownloads)} / ${formatNumber(data.searchIndex.totalDownloads)}作品`} icon={Icons.search} color={data.searchIndex.isComplete ? "green" : "yellow"} />
-        <MetricCard label="プロセスメモリ" value={data.processMemoryBytes === null ? "取得不可" : formatBytes(data.processMemoryBytes)} detail={`Cache ${formatBytes(data.sqliteCacheSizeBytes)}`} icon={Icons.activity} color="gray" />
+        <MetricCard label="アプリ全体メモリ" value={data.processPrivateMemoryBytes === null ? (data.processMemoryBytes === null ? "取得不可" : formatBytes(data.processMemoryBytes)) : formatBytes(data.processPrivateMemoryBytes)} detail={`${formatNumber(data.processCount)}プロセス · WebView ${formatNumber(data.webviewProcessCount)} · WS ${data.processMemoryBytes === null ? "取得不可" : formatBytes(data.processMemoryBytes)}`} icon={Icons.activity} color="gray" />
+        <MetricCard label="GPUメモリ" value={data.gpuDedicatedMemoryBytes === null ? "取得不可" : formatBytes(data.gpuDedicatedMemoryBytes)} detail={`共有 ${data.gpuSharedMemoryBytes === null ? "取得不可" : formatBytes(data.gpuSharedMemoryBytes)}`} icon={Icons.activity} color="gray" />
       </SimpleGrid>
 
       {data.fragmentationPercent >= 20 && <Alert color={data.fragmentationPercent >= 70 ? "red" : "yellow"} icon={<Icons.warning size={IconSize.nav} />} title={`DBの${data.fragmentationPercent.toFixed(2)}%が再利用待ち領域です`}>

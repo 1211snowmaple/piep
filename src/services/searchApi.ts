@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   SearchRebuildProgress,
+  SearchIndexStatus,
   SearchSuggestParams,
   SearchSuggestResult,
 } from "@/types/library";
@@ -27,8 +28,15 @@ export async function startSearchRebuildIndex(options: SearchRebuildOptions = {}
   const requested = options.batchSize ?? 64;
   const batchSize = Number.isFinite(requested) ? Math.min(512, Math.max(8, Math.trunc(requested))) : 64;
   return invoke<string>("search_rebuild_index", {
-    jobOptions: { batchSize, includeSemantic: options.includeSemantic === true },
+    jobOptions: {
+      batchSize,
+      ...(options.includeSemantic === undefined ? {} : { includeSemantic: options.includeSemantic }),
+    },
   });
+}
+
+export async function setSemanticSearchEnabled(enabled: boolean): Promise<SearchIndexStatus> {
+  return invoke<SearchIndexStatus>("search_set_semantic_enabled", { enabled });
 }
 
 export async function cancelSearchRebuildIndex(jobId: string): Promise<void> {

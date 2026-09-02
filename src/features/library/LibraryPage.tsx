@@ -52,13 +52,17 @@ import { openSingleDialog } from "@/services/dialogApi";
 import type { EntityWatchState } from "@/components/EntityCard";
 import { SearchAssistModal } from "@/features/assist/SearchAssistModal";
 import { useAssist } from "@/features/assist/useAssist";
+import { usePageAssist } from "@/app/PageAssistContext";
+import { FilterToken } from "@/components/FilterToken";
 import { AddToCollectionModal } from "@/features/collections/AddToCollectionModal";
+import { NamedWorkList } from "@/components/NamedWorkList";
 import { CollectionsPanel, type CollectionSortBy } from "@/features/collections/CollectionsPanel";
 import { boundedInfiniteListOptions, INFINITE_LIST_MAX_PAGES } from "@/lib/queryLimits";
 import {
   countEntityFacets,
   deleteDownloads,
   getFilterFacets,
+  getSearchIndexStatus,
   isTauriRuntime,
   searchDownloadsV2,
   searchEntityFacets,
@@ -314,18 +318,32 @@ function writeFilters(params: URLSearchParams, filters: Filters) {
 }
 
 /** Reads back the conditions stored with a saved search, however old they are. */
-function parseSavedParams(json: string): { tab: LibraryTab; filters: Filters; sortBy: LibrarySortBy } {
+export function parseSavedParams(json: string): {
+  tab: LibraryTab;
+  filters: Filters;
+  sortBy: LibrarySortBy;
+  searchMode: "semantic" | null;
+} {
   try {
-    const raw = JSON.parse(json) as { tab?: unknown; filters?: unknown; sortBy?: unknown };
+    const raw = JSON.parse(json) as {
+      tab?: unknown;
+      filters?: unknown;
+      sortBy?: unknown;
+      searchMode?: unknown;
+    };
     return {
       tab: parseLibraryTab(typeof raw.tab === "string" ? raw.tab : null),
       filters: normalizeFilters(raw.filters),
       sortBy: parseSortBy(raw.sortBy),
+      // 「言葉で探す」で作った検索は、意味の検索として保存されなければ
+      // 意味がない。字面の検索に落として開き直すと、**モデルが言い換えた
+      // 文字列で字面検索する**という、どちらとも違うものになる。
+      searchMode: raw.searchMode === "semantic" ? "semantic" : null,
     };
   } catch {
     // A saved search whose conditions cannot be read still opens the library,
     // just unfiltered - better than an error where a list of works should be.
-    return { tab: "works", filters: initialFilters, sortBy: "downloaded_at" };
+    return { tab: "works", filters: initialFilters, sortBy: "downloaded_at", searchMode: null };
   }
 }
 
@@ -492,6 +510,9 @@ export default function LibraryPage() {
   // overwrite each other on every change.
   const searchText = (urlParams.get("q") ?? "").slice(0, MAX_SEARCH_LENGTH);
   const tab = parseLibraryTab(urlParams.get("tab"));
+  // Natural-language assist is the only library entry that asks the work
+  // semantic index. Ordinary typing always stays lexical.
+  const semanticIntent = tab === "works" && urlParams.get("intent") === "semantic";
   // writeUrl は URL 側の書き手。記憶した並び順は「既定はどれか」の判断にしか
   // 使わないので、参照で渡して依存関係を増やさない。
   const preferredSortRef = useRef<LibrarySortBy>("downloaded_at");
@@ -502,6 +523,7 @@ export default function LibraryPage() {
     entitySortBy?: EntitySortBy;
     collectionSortBy?: CollectionSortBy;
     saved?: number | null;
+    searchMode?: "semantic" | null;
     filters?: Filters;
     entityScope?: EntityScopeFilters;
   }) => {
@@ -513,6 +535,8 @@ export default function LibraryPage() {
     // from, so the marker is dropped unless the caller is the one applying it.
     if (patch.saved) next.set("saved", String(patch.saved)); else next.delete("saved");
     if (q) next.set("q", q); else next.delete("q");
+    if (patch.searchMode === "semantic" && q) next.set("intent", "semantic");
+    else if (patch.q !== undefined || patch.searchMode !== undefined) next.delete("intent");
     if (nextTab !== "works") next.set("tab", nextTab); else next.delete("tab");
     if (patch.filters) writeFilters(next, normalizeFilters(patch.filters));
     if (patch.entityScope) writeEntityScope(next, patch.entityScope);
@@ -684,7 +708,13 @@ export default function LibraryPage() {
   const [selectionMode, setSelectionMode] = useState(false);
   const [collectOpened, collectModal] = useDisclosure(false);
   const [searchAssistOpened, searchAssist] = useDisclosure(false);
-  const { engine: assistEngine } = useAssist();
+  const { engine: assistEngine } = useAssist("search_interpretation");
+  const semanticCapability = useQuery({
+    queryKey: ["search-index-status"],
+    queryFn: getSearchIndexStatus,
+    enabled: runtime,
+    staleTime: 15_000,
+  });
   const [selected, setSelected] = useState<number[]>([]);
   // 作者・シリーズは行 ID を持たないので `source:sourceKey` で数える。
   const [selectedEntities, setSelectedEntities] = useState<EntityFacet[]>([]);
@@ -733,6 +763,10 @@ export default function LibraryPage() {
     () => onRevisedShelf ? (pendingRevisions.data ?? []).map((entry) => entry.downloadId) : null,
     [onRevisedShelf, pendingRevisions.data],
   );
+  const pendingRevisionIds = useMemo(
+    () => new Set((pendingRevisions.data ?? []).map((entry) => entry.downloadId)),
+    [pendingRevisions.data],
+  );
 
   // Relevance is walked with a score cursor and has no nth page, so numbers
   // are only offered once an ordering has been chosen.
@@ -756,8 +790,13 @@ export default function LibraryPage() {
     limit: pageSize,
     // Numbered pages fetch one page outright; scrolling walks with a cursor.
     offset: numberedPages ? (pageParam - 1) * pageSize : null,
-    projection: view === "compact" ? "libraryCompact" : "libraryGallery",
-  }), [readingIds, revisedIds, searchText, filters, sortBy, view, numberedPages, pageParam, pageSize]);
+    // Both card layouts consume the same DownloadEntry fields, and the backend
+    // currently produces the same SELECT for both projections. Keeping the
+    // data shape stable means a presentation-only switch does not create a new
+    // query, repeat IPC, or replace the infinite-query observer.
+    projection: "libraryGallery",
+    searchMode: semanticIntent ? "semantic" : null,
+  }), [readingIds, revisedIds, searchText, filters, sortBy, numberedPages, pageParam, pageSize, semanticIntent]);
 
   // Keyset pagination: fetching a fixed slab and paging it in the browser
   // capped the library at that slab and reported the wrong total.
@@ -796,6 +835,12 @@ export default function LibraryPage() {
   const activeFilterCount = workFilterCount + (tab === "works" ? 0 : entityScopeCount(entityScope));
   const loadedIds = useMemo(() => loadedItems.map((item) => item.id), [loadedItems]);
   const selectedSet = useMemo(() => new Set(selected), [selected]);
+  // 選んだ作品の題名。読み込み上限で一覧から落ちたぶんは名前を出せないので、
+  // 出せなかった数は確認の窓で正直に言う。
+  const selectedWorks = useMemo(
+    () => loadedItems.filter((work) => selectedSet.has(work.id)),
+    [loadedItems, selectedSet],
+  );
   const selectionCount = tab === "works" ? selected.length : selectedEntities.length;
   const allLoadedSelected = loadedIds.length > 0 && loadedIds.every((id) => selectedSet.has(id));
   const flagMutationsInFlight = useRef(0);
@@ -875,7 +920,13 @@ export default function LibraryPage() {
     mutationFn: (name: string) => upsertSavedSearch({
       name,
       query: query.slice(0, MAX_SEARCH_LENGTH) || null,
-      paramsJson: JSON.stringify({ tab, filters: normalizeFilters(filters), sortBy }),
+      // 検索の種類も条件のうち。保存しないと、開き直したときに別の検索になる。
+      paramsJson: JSON.stringify({
+        tab,
+        filters: normalizeFilters(filters),
+        sortBy,
+        searchMode: semanticIntent ? "semantic" : null,
+      }),
     }),
     onSuccess: (record) => {
       notifications.show({ color: "green", title: "検索を保存しました", message: `サイドバーの「保存した検索」から開けます · ${record.name}` });
@@ -912,6 +963,7 @@ export default function LibraryPage() {
       tab: parsed.tab,
       filters: parsed.filters,
       sortBy: parsed.sortBy,
+      searchMode: parsed.searchMode,
       saved: record.id,
     });
   }, [writeUrl]);
@@ -964,7 +1016,21 @@ export default function LibraryPage() {
   const leaveSelection = () => { setSelectionMode(false); setSelected([]); setSelectedEntities([]); };
   const confirmDelete = () => modals.openConfirmModal({
     title: "選択した作品を削除しますか？",
-    children: <Text size="sm">{selected.length}件の作品とローカルアセットを削除します。この操作は元に戻せません。</Text>,
+    // 「元に戻せません」と書いてある窓で、対象を数でしか示していなかった。
+    // 「すべて選択」で積み上げた選択は、画面を離れたぶんが見えていない。
+    children: (
+      <Stack gap="xs">
+        <Text size="sm">
+          次の{formatNumber(selected.length)}件の作品とローカルアセットを削除します。この操作は元に戻せません。
+        </Text>
+        <NamedWorkList works={selectedWorks} />
+        {selectedWorks.length < selected.length && (
+          <Text size="xs" c="dimmed">
+            うち{formatNumber(selected.length - selectedWorks.length)}件は一覧から外れているため題名を出せません。
+          </Text>
+        )}
+      </Stack>
+    ),
     confirmProps: { color: "red" }, labels: { confirm: "削除する", cancel: "キャンセル" },
     onConfirm: () => deleteMutation.mutate(selected),
   });
@@ -1213,6 +1279,20 @@ export default function LibraryPage() {
     scrollViewportToTop(document.getElementById("main-content"));
   }, [pageParam, showingRequestedPage]);
 
+  usePageAssist("library-search", "ライブラリで使えるAIの手伝い", tab === "works" ? [{
+    id: "search_interpretation",
+    label: "言葉で探す",
+    description: "覚えている内容をタグと意味検索へ翻訳します",
+    enabled: Boolean(assistEngine && semanticCapability.data?.semanticEnabled),
+    unavailableReason: assistEngine
+      ? "作品単位の意味検索を有効にすると使えます"
+      : "言語モデルと「言葉で探す」を設定すると使えます",
+    onSelect: searchAssist.open,
+    badge: semanticCapability.data?.semanticPendingDownloads
+      ? `${formatNumber(semanticCapability.data.semanticPendingDownloads)}件未反映`
+      : undefined,
+  }] : [], tab === "works");
+
   return (
     <div className="page page--contained library-page">
       <VisuallyHidden component="h1">ライブラリ</VisuallyHidden>
@@ -1227,23 +1307,6 @@ export default function LibraryPage() {
               pixels high against it. */}
           <Group wrap="nowrap" align="center">
             <Box className="library-toolbar__search"><LibrarySearch value={query} onChange={onQueryChange} runtime={runtime} /></Box>
-            {/* 言葉で探す。設定していなければ出ない。押すと絞り込みが入るだけで、
-                入った条件は画面に見えるので、外れていれば分かる。
-                文字を添えると道具が一本分太り、隣の並べ替えや検索欄の文字の
-                ほうが先に切られていたので、絵だけにする。 */}
-            {tab === "works" && assistEngine && (
-              <Tooltip label="覚えている言葉から棚を絞る">
-                <ActionIcon
-                  variant="default"
-                  color="grape"
-                  size={36}
-                  aria-label="言葉で探す"
-                  onClick={searchAssist.open}
-                >
-                  <Icons.optimize size={IconSize.action} />
-                </ActionIcon>
-              </Tooltip>
-            )}
             {tab !== "collections" && (
               <Tooltip label="詳細フィルター">
                 <Indicator label={activeFilterCount} size={16} disabled={!activeFilterCount}>
@@ -1345,10 +1408,30 @@ export default function LibraryPage() {
         </Alert>
       )}
 
+      {/* 「作成中」と「そもそも作っていない」を、同じ一文で済ませない。
+          待てば終わるのか、自分で始めないと何も起きないのかは、利用者が
+          次に取る行動を変える。 */}
+      {semanticIntent && searchMeta?.semanticIndexComplete === false && (
+        semanticCapability.data?.semanticEnabled === false ? (
+          <Alert color="yellow" title="作品単位の意味検索が無効です" role="status" mb="md">
+            いまは字面の一致だけで探しています。設定の「作品単位の意味検索」を有効にすると、
+            意味の近さでも探せるようになります。
+          </Alert>
+        ) : (
+          <Alert color="yellow" title="意味検索の索引を作成中です" role="status" mb="md">
+            まだ作品の一部だけが対象です。
+            {semanticCapability.data
+              ? `${formatNumber(semanticCapability.data.semanticIndexedDownloads)} / ${formatNumber(semanticCapability.data.totalDownloads)}作品まで進んでいます。`
+              : ""}
+            設定の「作品単位の意味検索」で構築状況を確認できます。
+          </Alert>
+        )
+      )}
+
       {tab === "works" ? (
         works.isLoading ? <LoadingState label="ライブラリを検索しています" /> : works.error ? <ErrorState error={works.error} retry={() => works.refetch()} /> : loadedItems.length ? (
           <>
-            <VirtualizedWorkList items={loadedItems} view={view} selectionMode={selectionMode} selected={selectedSet} onSelect={toggleSelected} onToggleFavorite={toggleFavorite} onToggleWatch={toggleWatch} />
+            <VirtualizedWorkList items={loadedItems} view={view} selectionMode={selectionMode} selected={selectedSet} revisedIds={pendingRevisionIds} onSelect={toggleSelected} onToggleFavorite={toggleFavorite} onToggleWatch={toggleWatch} />
             <ListPager
               scope={pagingScope}
               hasNext={Boolean(works.hasNextPage) && !worksAtCacheLimit}
@@ -1419,17 +1502,25 @@ export default function LibraryPage() {
         opened={searchAssistOpened}
         onClose={searchAssist.close}
         onApply={(intent) => {
-          // 検索するのは piep。モデルが選んだのはタグと語だけで、
-          // 入った条件はそのまま画面に出るので、外れていれば見て分かる。
-          setFilters({
-            ...filters,
-            tagsInclude: intent.includeTags,
-            tagsExclude: intent.excludeTags,
+          // The model narrows the request, but piep owns retrieval. Preserve
+          // the person's existing filters and send only this rewritten query
+          // to the one-work/one-vector index.
+          const tagsInclude = [...new Set([...filters.tagsInclude, ...intent.includeTags])];
+          const includeSet = new Set(tagsInclude);
+          const tagsExclude = [...new Set([...filters.tagsExclude, ...intent.excludeTags])]
+            .filter((tag) => !includeSet.has(tag));
+          writeUrl({
+            q: intent.query,
+            searchMode: "semantic",
+            filters: {
+              ...filters,
+              tagsInclude,
+              tagsExclude,
             // 複数のタグは「どれも満たす」で入れる。広げたければ絞り込みの
             // 画面で「いずれか」に変えられる。
-            tagMode: "and",
+              tagMode: "and",
+            },
           });
-          onQueryChange(intent.query);
         }}
       />
       {/* コレクションのタブは束そのものが単位なので、作品の複数選択は出さない。 */}
@@ -1537,7 +1628,7 @@ function SearchInterpretation({ meta }: { meta: SearchV2Result["searchMeta"] }) 
 }
 
 function FilterChip({ label, onRemove, color = "piep" }: { label: string; onRemove: () => void; color?: string }) {
-  return <Badge variant="light" color={color} rightSection={<ActionIcon size="xs" variant="transparent" color={color} aria-label={`${label}を解除`} onClick={onRemove}><Icons.cancel size={IconSize.inline} /></ActionIcon>}>{label}</Badge>;
+  return <FilterToken label={label} tone={color === "red" ? "exclude" : "include"} onRemove={onRemove} />;
 }
 
 export type SearchSuggestionAction =
@@ -1776,7 +1867,7 @@ function TagFilterCombobox({ label, runtime, tags, value, onChange }: { label: s
     <Combobox.DropdownTarget>
       <PillsInput label={label} onClick={() => combobox.openDropdown()} rightSection={<Combobox.Chevron />}>
         <Pill.Group>
-          {value.map((tag) => <Pill key={tag} withRemoveButton onRemove={() => onChange(value.filter((item) => item !== tag))}>{tag}</Pill>)}
+          {value.map((tag) => <FilterToken key={tag} label={tag} onRemove={() => onChange(value.filter((item) => item !== tag))} />)}
           <Combobox.EventsTarget>
             <PillsInput.Field value={search} maxLength={120} onChange={(event) => { setSearch(event.currentTarget.value); combobox.openDropdown(); combobox.updateSelectedOptionIndex(); }} onFocus={() => combobox.openDropdown()} onKeyDown={(event) => { if (event.key === "Backspace" && !search && value.length) onChange(value.slice(0, -1)); }} placeholder={value.length ? "タグを追加" : "タグを検索して選択"} />
           </Combobox.EventsTarget>

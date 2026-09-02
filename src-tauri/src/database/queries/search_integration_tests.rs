@@ -2168,6 +2168,7 @@ fn collection_suggestions_walk_the_whole_link_component_from_either_end() {
 fn bulk_delete_clears_lexical_and_semantic_sidecars() {
     let (_temp, root, storage) = temp_paths();
     let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    db.set_semantic_index_enabled(true).unwrap();
     let first = insert_download(
         &db,
         &storage,
@@ -2311,6 +2312,7 @@ fn deleting_a_series_cover_selects_a_surviving_work_or_clears_it() {
 fn semantic_prune_clears_orphans_when_library_is_empty() {
     let (_temp, root, storage) = temp_paths();
     let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    db.set_semantic_index_enabled(true).unwrap();
     let id = insert_download(
         &db,
         &storage,
@@ -2336,10 +2338,106 @@ fn semantic_prune_clears_orphans_when_library_is_empty() {
 }
 
 #[test]
+fn lexical_prune_commits_orphans_and_reloads_the_reader() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let id = insert_download(
+        &db,
+        &storage,
+        "lexical-orphan",
+        "消えるべき孤立作品",
+        "作者",
+        &[],
+        "孤立確認本文",
+    );
+    assert_eq!(
+        crate::database::tantivy_index::search_with_total(&storage, "孤立作品", 10)
+            .unwrap()
+            .total_hits,
+        1
+    );
+    db.conn
+        .lock()
+        .unwrap()
+        .execute("DELETE FROM downloads WHERE id = ?1", params![id])
+        .unwrap();
+
+    assert!(db.prune_search_indexes().unwrap() > 0);
+    assert_eq!(
+        crate::database::tantivy_index::search_with_total(&storage, "孤立作品", 10)
+            .unwrap()
+            .total_hits,
+        0
+    );
+}
+
+#[test]
+fn resync_repairs_partial_semantic_coverage_not_just_an_empty_sidecar() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let first = insert_download_unindexed(
+        &db,
+        &storage,
+        "partial-semantic-1",
+        "残っている作品",
+        "作者",
+        &[],
+        "意味索引に実体がある本文",
+    );
+    let second = insert_download_unindexed(
+        &db,
+        &storage,
+        "partial-semantic-2",
+        "欠けた作品",
+        "作者",
+        &[],
+        "状態だけが残っている本文",
+    );
+    crate::database::semantic_index::upsert_documents(
+        &storage,
+        &[crate::database::semantic_index::SemanticIndexDocument {
+            download_id: first,
+            title: "残っている作品".to_string(),
+            author_name: "作者".to_string(),
+            tags: String::new(),
+            series_title: String::new(),
+            excerpt: String::new(),
+            body: "意味索引に実体がある本文".to_string(),
+        }],
+    )
+    .unwrap();
+    {
+        let conn = db.conn.lock().unwrap();
+        for id in [first, second] {
+            conn.execute(
+                "INSERT INTO semantic_index_state
+                    (download_id, current_version, content_hash, model_id, indexed_at)
+                 SELECT id, current_version, content_hash, ?2, CURRENT_TIMESTAMP
+                   FROM downloads WHERE id = ?1",
+                params![id, crate::database::semantic_index::model_id()],
+            )
+            .unwrap();
+        }
+    }
+
+    assert_eq!(db.resync_search_index_state().unwrap(), 1);
+    let conn = db.conn.lock().unwrap();
+    let remaining: Vec<i64> = conn
+        .prepare("SELECT download_id FROM semantic_index_state ORDER BY download_id")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(remaining, vec![first]);
+}
+
+#[test]
 fn opening_database_recovers_both_sides_of_an_interrupted_delete() {
     let (_temp, root, storage) = temp_paths();
     let db_path = root.join("piep.db");
     let db = Database::open(&db_path, &storage).unwrap();
+    db.set_semantic_index_enabled(true).unwrap();
     let id = insert_download(
         &db,
         &storage,
@@ -3947,7 +4045,7 @@ fn search_v2_uses_cursor_without_duplicate_pages() {
     let query = db
         .search_downloads_v2(&v2_params(Some("番目"), 10, None))
         .unwrap();
-    assert_eq!(query.search_meta.engine, "hybrid-local");
+    assert_eq!(query.search_meta.engine, "tantivy-lexical");
     assert_eq!(query.items.len(), 3);
 }
 
@@ -4186,7 +4284,7 @@ fn smart_search_does_not_add_semantic_reasons() {
     let result = db.search_downloads_v2(&params("novel")).unwrap();
     let target_row = result.items.iter().find(|dl| dl.id == target).unwrap();
 
-    assert_eq!(result.search_meta.engine, "hybrid-local");
+    assert_eq!(result.search_meta.engine, "tantivy-lexical");
     assert!(!target_row
         .score_reasons
         .iter()
@@ -4273,6 +4371,7 @@ fn index_status_is_cached_without_going_stale_across_changes() {
 fn semantic_completion_requires_every_current_document() {
     let (_temp, root, storage) = temp_paths();
     let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    db.set_semantic_index_enabled(true).unwrap();
     let first = insert_download_unindexed(
         &db,
         &storage,
@@ -5138,9 +5237,10 @@ fn multi_term_search_requires_each_term() {
 }
 
 #[test]
-fn semantic_mode_returns_body_chunk_highlight_and_reason() {
+fn semantic_mode_returns_work_content_highlight_and_reason() {
     let (_temp, root, storage) = temp_paths();
     let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    db.set_semantic_index_enabled(true).unwrap();
 
     let target = insert_download(
         &db,
@@ -5167,6 +5267,103 @@ fn semantic_mode_returns_body_chunk_highlight_and_reason() {
                 .iter()
                 .any(|segment| segment.matched && segment.text.contains("小説本文"))
     }));
+}
+
+#[test]
+fn ai_note_reports_when_its_work_input_has_changed() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let id = insert_download_unindexed(
+        &db,
+        &storage,
+        "note-stale-1",
+        "最初の題名",
+        "作者",
+        &["旅"],
+        "雨の駅で別れる本文",
+    );
+    let (work, body) = db.work_facts_with_body(id).unwrap();
+    let input = serde_json::json!({ "work": work, "body": body });
+    let provenance = crate::assist::AssistProvenance {
+        feature_id: crate::assist::FEATURE_WORK_SYNOPSIS.to_string(),
+        prompt_version: crate::assist::current_prompt_version(crate::assist::FEATURE_WORK_SYNOPSIS)
+            .to_string(),
+        model_id: "test-model".to_string(),
+        input_fingerprint: crate::assist::generation_input_fingerprint(
+            crate::assist::FEATURE_WORK_SYNOPSIS,
+            &input,
+        )
+        .unwrap(),
+        config_fingerprint: "test-config".to_string(),
+        created_at: chrono::Utc::now().to_rfc3339(),
+    };
+    db.save_ai_note_with_provenance("work", &id.to_string(), "synopsis", "覚え書き", &provenance)
+        .unwrap();
+    assert!(
+        !db.load_ai_note("work", &id.to_string(), "synopsis")
+            .unwrap()
+            .unwrap()
+            .input_stale
+    );
+
+    db.conn
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE downloads SET title = '変更後の題名' WHERE id = ?1",
+            params![id],
+        )
+        .unwrap();
+    assert!(
+        db.load_ai_note("work", &id.to_string(), "synopsis")
+            .unwrap()
+            .unwrap()
+            .input_stale
+    );
+}
+
+#[test]
+fn semantic_feature_switch_controls_incremental_indexing_and_removes_vectors() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    assert!(!db.get_search_index_status().unwrap().semantic_enabled);
+
+    insert_download(
+        &db,
+        &storage,
+        "semantic-disabled",
+        "無効時の作品",
+        "作者",
+        &[],
+        "無効ならモデルにも作品索引にも渡さない本文",
+    );
+    assert_eq!(
+        crate::database::semantic_index::status(&storage).indexed_works,
+        0
+    );
+
+    db.set_semantic_index_enabled(true).unwrap();
+    insert_download(
+        &db,
+        &storage,
+        "semantic-enabled",
+        "有効時の作品",
+        "作者",
+        &[],
+        "有効なら個別保存でも追随する本文",
+    );
+    assert_eq!(
+        crate::database::semantic_index::status(&storage).indexed_works,
+        1
+    );
+
+    let disabled = db.set_semantic_index_enabled(false).unwrap();
+    assert!(!disabled.semantic_enabled);
+    assert_eq!(disabled.semantic_indexed_downloads, 0);
+    assert_eq!(
+        crate::database::semantic_index::status(&storage).indexed_works,
+        0
+    );
 }
 
 #[test]
@@ -6135,6 +6332,64 @@ fn update_job_candidates_can_be_queued_for_saving() {
     assert_eq!(changed, 1);
     let snapshot = db.update_job_snapshot("job-candidates").unwrap();
     assert_eq!(snapshot.candidates[0].status, "queued");
+}
+
+#[test]
+fn new_work_and_revision_enter_the_same_save_queue() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let request = StartUpdateJobRequest {
+        scope: "all".to_string(),
+        mode: "check_only".to_string(),
+        work_ids: None,
+        target_ids: None,
+        credentials: None,
+        watch_saved: None,
+        adhoc_targets: None,
+    };
+    db.create_update_job("job-mixed-candidates", &request, &[])
+        .unwrap();
+
+    for (source_id, kind) in [("new-1", "new"), ("revision-1", "revision")] {
+        db.insert_update_job_candidate(
+            "job-mixed-candidates",
+            &UpdateJobItemInput {
+                item_type: "candidate".to_string(),
+                source: Some("pixiv".to_string()),
+                source_id: Some(source_id.to_string()),
+                target_type: Some("work".to_string()),
+                title: source_id.to_string(),
+                payload_json: serde_json::json!({
+                    "kind": kind,
+                    "targetLabel": "作者",
+                    "subtitle": "候補"
+                })
+                .to_string(),
+                status: "candidate".to_string(),
+            },
+        )
+        .unwrap();
+    }
+
+    let before = db.update_job_snapshot("job-mixed-candidates").unwrap();
+    assert_eq!(before.candidates.len(), 2);
+    assert!(before.candidates.iter().all(|candidate| candidate.selected));
+    let ids = before
+        .candidates
+        .iter()
+        .map(|candidate| candidate.id)
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        db.queue_update_job_candidates("job-mixed-candidates", &ids)
+            .unwrap(),
+        2
+    );
+    let after = db.update_job_snapshot("job-mixed-candidates").unwrap();
+    assert!(after
+        .candidates
+        .iter()
+        .all(|candidate| candidate.status == "queued"));
 }
 
 /// v0.11.0 のまとめ保存ジョブは target_type を NULL で記録していた。

@@ -38,6 +38,7 @@ mod archive_state;
 pub use archive_state::{
     PortableCollectionPairFeedback, PortableTag, PortableWorkEdit, PortableWorkEditBlock,
 };
+mod collection_additions;
 mod collection_sweep;
 mod collections;
 
@@ -107,8 +108,9 @@ pub struct SearchIndexRebuildOptions {
     /// Documents buffered before a commit. Each commit ends a segment, so this
     /// trades restart granularity against how fragmented the index becomes.
     pub commit_every: usize,
-    /// Also build the semantic vectors, which is the only part of indexing that
-    /// can use the GPU - and much slower than the lexical pass.
+    /// Requested value for the persistent semantic feature switch.  Rebuilds,
+    /// automatic maintenance, and per-work updates all read the same stored
+    /// value; this field is applied before a manual rebuild begins.
     pub include_semantic: bool,
 }
 
@@ -891,7 +893,7 @@ pub(crate) fn available_space_bytes(_path: &Path) -> Option<u64> {
 #[cfg(windows)]
 fn current_process_memory_bytes() -> Option<u64> {
     #[repr(C)]
-    struct ProcessMemoryCounters {
+    struct ProcessMemoryCountersEx {
         cb: u32,
         page_fault_count: u32,
         peak_working_set_size: usize,
@@ -902,6 +904,7 @@ fn current_process_memory_bytes() -> Option<u64> {
         quota_non_paged_pool_usage: usize,
         pagefile_usage: usize,
         peak_pagefile_usage: usize,
+        private_usage: usize,
     }
     #[link(name = "kernel32")]
     extern "system" {
@@ -911,12 +914,12 @@ fn current_process_memory_bytes() -> Option<u64> {
     extern "system" {
         fn GetProcessMemoryInfo(
             process: *mut std::ffi::c_void,
-            counters: *mut ProcessMemoryCounters,
+            counters: *mut ProcessMemoryCountersEx,
             size: u32,
         ) -> i32;
     }
-    let mut counters = ProcessMemoryCounters {
-        cb: std::mem::size_of::<ProcessMemoryCounters>() as u32,
+    let mut counters = ProcessMemoryCountersEx {
+        cb: std::mem::size_of::<ProcessMemoryCountersEx>() as u32,
         page_fault_count: 0,
         peak_working_set_size: 0,
         working_set_size: 0,
@@ -926,6 +929,7 @@ fn current_process_memory_bytes() -> Option<u64> {
         quota_non_paged_pool_usage: 0,
         pagefile_usage: 0,
         peak_pagefile_usage: 0,
+        private_usage: 0,
     };
     // SAFETY: both functions are stable Win32 APIs. `counters` is initialized,
     // writable and its exact byte size is passed to the operating system.
@@ -933,7 +937,7 @@ fn current_process_memory_bytes() -> Option<u64> {
         GetProcessMemoryInfo(
             GetCurrentProcess(),
             &mut counters,
-            std::mem::size_of::<ProcessMemoryCounters>() as u32,
+            std::mem::size_of::<ProcessMemoryCountersEx>() as u32,
         )
     };
     (success != 0).then_some(counters.working_set_size as u64)
@@ -1009,6 +1013,240 @@ fn current_process_memory_bytes() -> Option<u64> {
 #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 fn current_process_memory_bytes() -> Option<u64> {
     None
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct ProcessResourceSnapshot {
+    working_set_bytes: Option<u64>,
+    private_bytes: Option<u64>,
+    process_count: u32,
+    webview_process_count: u32,
+    gpu_dedicated_bytes: Option<u64>,
+    gpu_shared_bytes: Option<u64>,
+}
+
+#[cfg(windows)]
+fn process_resource_snapshot() -> ProcessResourceSnapshot {
+    use std::collections::HashSet;
+
+    #[repr(C)]
+    struct ProcessEntry32W {
+        size: u32,
+        usage: u32,
+        process_id: u32,
+        default_heap_id: usize,
+        module_id: u32,
+        threads: u32,
+        parent_process_id: u32,
+        priority_class_base: i32,
+        flags: u32,
+        executable: [u16; 260],
+    }
+
+    #[repr(C)]
+    struct ProcessMemoryCountersEx {
+        cb: u32,
+        page_fault_count: u32,
+        peak_working_set_size: usize,
+        working_set_size: usize,
+        quota_peak_paged_pool_usage: usize,
+        quota_paged_pool_usage: usize,
+        quota_peak_non_paged_pool_usage: usize,
+        quota_non_paged_pool_usage: usize,
+        pagefile_usage: usize,
+        peak_pagefile_usage: usize,
+        private_usage: usize,
+    }
+
+    const TH32CS_SNAPPROCESS: u32 = 0x0000_0002;
+    const PROCESS_QUERY_INFORMATION: u32 = 0x0400;
+    const PROCESS_VM_READ: u32 = 0x0010;
+    const INVALID_HANDLE_VALUE: isize = -1;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn CreateToolhelp32Snapshot(flags: u32, process_id: u32) -> isize;
+        fn Process32FirstW(snapshot: isize, entry: *mut ProcessEntry32W) -> i32;
+        fn Process32NextW(snapshot: isize, entry: *mut ProcessEntry32W) -> i32;
+        fn OpenProcess(access: u32, inherit_handle: i32, process_id: u32) -> *mut std::ffi::c_void;
+        fn CloseHandle(handle: isize) -> i32;
+    }
+    #[link(name = "psapi")]
+    extern "system" {
+        fn GetProcessMemoryInfo(
+            process: *mut std::ffi::c_void,
+            counters: *mut ProcessMemoryCountersEx,
+            size: u32,
+        ) -> i32;
+    }
+
+    #[derive(Clone)]
+    struct ProcessInfo {
+        id: u32,
+        parent_id: u32,
+        executable: String,
+    }
+
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+    if snapshot == INVALID_HANDLE_VALUE {
+        return ProcessResourceSnapshot {
+            working_set_bytes: current_process_memory_bytes(),
+            process_count: 1,
+            ..Default::default()
+        };
+    }
+
+    let mut entry = ProcessEntry32W {
+        size: std::mem::size_of::<ProcessEntry32W>() as u32,
+        usage: 0,
+        process_id: 0,
+        default_heap_id: 0,
+        module_id: 0,
+        threads: 0,
+        parent_process_id: 0,
+        priority_class_base: 0,
+        flags: 0,
+        executable: [0; 260],
+    };
+    let mut processes = Vec::new();
+    let mut available = unsafe { Process32FirstW(snapshot, &mut entry) } != 0;
+    while available {
+        let end = entry
+            .executable
+            .iter()
+            .position(|value| *value == 0)
+            .unwrap_or(entry.executable.len());
+        processes.push(ProcessInfo {
+            id: entry.process_id,
+            parent_id: entry.parent_process_id,
+            executable: String::from_utf16_lossy(&entry.executable[..end]),
+        });
+        entry.size = std::mem::size_of::<ProcessEntry32W>() as u32;
+        available = unsafe { Process32NextW(snapshot, &mut entry) } != 0;
+    }
+    unsafe { CloseHandle(snapshot) };
+
+    let mut descendants = HashSet::from([std::process::id()]);
+    loop {
+        let before = descendants.len();
+        for process in &processes {
+            if descendants.contains(&process.parent_id) {
+                descendants.insert(process.id);
+            }
+        }
+        if descendants.len() == before {
+            break;
+        }
+    }
+
+    let mut working_set_bytes = 0u64;
+    let mut private_bytes = 0u64;
+    let mut measured = 0u32;
+    for process_id in &descendants {
+        let handle =
+            unsafe { OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, 0, *process_id) };
+        if handle.is_null() {
+            continue;
+        }
+        let mut counters = ProcessMemoryCountersEx {
+            cb: std::mem::size_of::<ProcessMemoryCountersEx>() as u32,
+            page_fault_count: 0,
+            peak_working_set_size: 0,
+            working_set_size: 0,
+            quota_peak_paged_pool_usage: 0,
+            quota_paged_pool_usage: 0,
+            quota_peak_non_paged_pool_usage: 0,
+            quota_non_paged_pool_usage: 0,
+            pagefile_usage: 0,
+            peak_pagefile_usage: 0,
+            private_usage: 0,
+        };
+        let success = unsafe {
+            GetProcessMemoryInfo(
+                handle,
+                &mut counters,
+                std::mem::size_of::<ProcessMemoryCountersEx>() as u32,
+            )
+        };
+        unsafe { CloseHandle(handle as isize) };
+        if success != 0 {
+            working_set_bytes = working_set_bytes.saturating_add(counters.working_set_size as u64);
+            private_bytes = private_bytes.saturating_add(counters.private_usage as u64);
+            measured = measured.saturating_add(1);
+        }
+    }
+
+    let webview_process_count = processes
+        .iter()
+        .filter(|process| {
+            descendants.contains(&process.id)
+                && process
+                    .executable
+                    .eq_ignore_ascii_case("msedgewebview2.exe")
+        })
+        .count() as u32;
+    let (gpu_dedicated_bytes, gpu_shared_bytes) = gpu_memory_for_processes(&descendants);
+    ProcessResourceSnapshot {
+        working_set_bytes: (measured > 0).then_some(working_set_bytes),
+        private_bytes: (measured > 0).then_some(private_bytes),
+        process_count: descendants.len() as u32,
+        webview_process_count,
+        gpu_dedicated_bytes,
+        gpu_shared_bytes,
+    }
+}
+
+#[cfg(all(windows, not(test)))]
+fn gpu_memory_for_processes(
+    process_ids: &std::collections::HashSet<u32>,
+) -> (Option<u64>, Option<u64>) {
+    use std::os::windows::process::CommandExt;
+
+    let ids = process_ids
+        .iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    let script = format!(
+        "$ids=@({ids});$d=[uint64]0;$s=[uint64]0;\
+         $c=(Get-Counter '\\GPU Process Memory(*)\\Dedicated Usage','\\GPU Process Memory(*)\\Shared Usage' -ErrorAction Stop).CounterSamples;\
+         foreach($x in $c){{if($x.InstanceName -match '^pid_(\\d+)_' -and $ids -contains [uint32]$Matches[1]){{\
+         if($x.Path -like '*\\dedicated usage'){{$d += [uint64]$x.CookedValue}}else{{$s += [uint64]$x.CookedValue}}}}}};\
+         [Console]::WriteLine(('{{0}},{{1}}' -f $d,$s))"
+    );
+    let mut command = std::process::Command::new("powershell.exe");
+    command
+        .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script]);
+    let Ok(output) = command.output() else {
+        return (None, None);
+    };
+    if !output.status.success() {
+        return (None, None);
+    }
+    let Ok(stdout) = String::from_utf8(output.stdout) else {
+        return (None, None);
+    };
+    let Some((dedicated, shared)) = stdout.trim().split_once(',') else {
+        return (None, None);
+    };
+    (dedicated.parse::<u64>().ok(), shared.parse::<u64>().ok())
+}
+
+#[cfg(all(windows, test))]
+fn gpu_memory_for_processes(
+    _process_ids: &std::collections::HashSet<u32>,
+) -> (Option<u64>, Option<u64>) {
+    (None, None)
+}
+
+#[cfg(not(windows))]
+fn process_resource_snapshot() -> ProcessResourceSnapshot {
+    ProcessResourceSnapshot {
+        working_set_bytes: current_process_memory_bytes(),
+        process_count: 1,
+        ..Default::default()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1721,10 +1959,7 @@ impl Database {
         // 版を上げたときも、ディレクトリを消されたときも、同じ形で拾える。
         // 身元（`model_id`）に版を混ぜる手もあるが、それだと今ある棚が
         // 一度だけ無用に作り直しになる。
-        let chunks = super::semantic_index::status(&self.storage_dir).indexed_chunks;
-        if segments > 0 && chunks > 0 {
-            return Ok(0);
-        }
+        let chunks = super::semantic_index::indexed_download_count(&self.storage_dir)?;
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut cleared = 0usize;
         if segments == 0 {
@@ -1755,6 +1990,50 @@ impl Database {
                     .map_err(|e| format!("Semantic index state reset failed: {e}"))?;
                 log::warn!("意味索引が空でした。{removed}件の「索引済み」の記録を取り消します");
                 cleared += removed;
+            }
+        } else {
+            let recorded_count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM semantic_index_state WHERE model_id = ?1",
+                    params![super::semantic_index::model_id()],
+                    |row| row.get(0),
+                )
+                .map_err(|e| format!("Semantic index state count failed: {e}"))?;
+            // Healthy libraries stop at the two counts. Only a mismatch pays
+            // for reading and comparing every ID from both databases.
+            if recorded_count != chunks {
+                let semantic_ids =
+                    super::semantic_index::indexed_download_ids(&self.storage_dir)?;
+                let recorded = conn
+                .prepare("SELECT download_id FROM semantic_index_state WHERE model_id = ?1")
+                .and_then(|mut statement| {
+                    statement
+                        .query_map(params![super::semantic_index::model_id()], |row| row.get(0))?
+                        .collect::<Result<Vec<i64>, _>>()
+                })
+                .map_err(|e| format!("Semantic index state scan failed: {e}"))?;
+                let stale = recorded
+                    .into_iter()
+                    .filter(|id| !semantic_ids.contains(id))
+                    .collect::<Vec<_>>();
+                if !stale.is_empty() {
+                    let mut statement = conn
+                        .prepare(
+                            "DELETE FROM semantic_index_state
+                              WHERE download_id = ?1 AND model_id = ?2",
+                        )
+                        .map_err(|e| format!("Semantic state repair prepare failed: {e}"))?;
+                    for id in &stale {
+                        statement
+                            .execute(params![id, super::semantic_index::model_id()])
+                            .map_err(|e| format!("Semantic state repair failed: {e}"))?;
+                    }
+                    log::warn!(
+                        "意味索引の実物が無い{}件を「索引済み」から戻します",
+                        stale.len()
+                    );
+                    cleared += stale.len();
+                }
             }
         }
         drop(conn);
@@ -1799,6 +2078,39 @@ impl Database {
         Ok(status)
     }
 
+    pub fn semantic_index_enabled(&self) -> Result<bool, String> {
+        let conn = self.read_conn()?;
+        semantic_index_enabled_locked(&conn)
+    }
+
+    pub fn set_semantic_index_enabled(&self, enabled: bool) -> Result<SearchIndexStatus, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT INTO search_feature_settings (singleton_id, semantic_enabled, updated_at)
+             VALUES (1, ?1, ?2)
+             ON CONFLICT(singleton_id) DO UPDATE SET
+                semantic_enabled = excluded.semantic_enabled,
+                updated_at = excluded.updated_at",
+            params![enabled as i64, chrono::Utc::now().to_rfc3339()],
+        )
+        .map_err(|e| format!("Semantic feature setting update failed: {e}"))?;
+        if !enabled {
+            // Disabled means the feature consumes neither compute nor disk.
+            // Re-enabling deliberately starts from an honest pending count and
+            // rebuilds the compact work index from the library.
+            super::semantic_index::clear_all_works(&self.storage_dir)?;
+            conn.execute("DELETE FROM semantic_index_state", [])
+                .map_err(|e| format!("Semantic coverage clear failed: {e}"))?;
+            // Clearing the sidecar alone did not release the cached ONNX
+            // Runtime/DirectML session, so VRAM stayed allocated until exit.
+            super::semantic_index::release_model();
+        }
+        let status = search_index_status_locked(&conn, &self.storage_dir)?;
+        drop(conn);
+        self.invalidate_index_status();
+        Ok(status)
+    }
+
     /// Forces the next status read to measure the library again. Called from
     /// every path that adds, removes or reindexes a work, so the settings and
     /// diagnostics screens never show a figure that is already wrong.
@@ -1814,9 +2126,8 @@ impl Database {
     pub fn rebuild_search_index_batch(&self, limit: i64) -> Result<SearchIndexStatus, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let limit = limit.clamp(1, 200);
-        // 起動後の追いつきは字面の索引だけ。意味ベクトルは GPU を使うので、
-        // 利用者が「意味検索のベクトルも同時に作成する」を入れたときだけ作る。
-        let ids = stale_search_index_ids_locked(&conn, limit, 0, false)?;
+        let include_semantic = semantic_index_enabled_locked(&conn)?;
+        let ids = stale_search_index_ids_locked(&conn, limit, 0, include_semantic)?;
         let mut docs = Vec::with_capacity(ids.len());
         for id in &ids {
             match search_index_document_locked(&conn, &self.storage_dir, *id) {
@@ -1831,7 +2142,9 @@ impl Database {
                 }
             }
         }
-        if let Err(e) = index_search_documents_locked(&conn, &self.storage_dir, &docs, false) {
+        if let Err(e) =
+            index_search_documents_locked(&conn, &self.storage_dir, &docs, include_semantic)
+        {
             log::warn!("Failed to rebuild search index batch: {}", e);
         }
         let status = search_index_status_locked(&conn, &self.storage_dir);
@@ -1857,9 +2170,14 @@ impl Database {
         F: FnMut(SearchIndexRebuildProgress),
     {
         let started = std::time::Instant::now();
+        // Manual callers apply their requested feature value once. Every path
+        // below then follows the persisted value, including later incremental
+        // updates and automatic maintenance.
+        self.set_semantic_index_enabled(options.include_semantic)?;
+        let include_semantic = self.semantic_index_enabled()?;
         let total_pending = {
             let conn = self.read_conn()?;
-            pending_search_index_count(&conn, options.include_semantic)?
+            pending_search_index_count(&conn, include_semantic)?
         };
         on_progress(SearchIndexRebuildProgress {
             phase: "preparing",
@@ -1896,12 +2214,7 @@ impl Database {
             // re-asking for stale rows would hand back the same one for ever.
             let ids = {
                 let conn = self.read_conn()?;
-                stale_search_index_ids_locked(
-                    &conn,
-                    chunk_size,
-                    after_id,
-                    options.include_semantic,
-                )?
+                stale_search_index_ids_locked(&conn, chunk_size, after_id, include_semantic)?
             };
             if ids.is_empty() {
                 break;
@@ -1910,7 +2223,7 @@ impl Database {
 
             // 選ばれた作品のうち、**字面の索引が本当に古いもの**だけを
             // やり直す。意味も作るときは、字面が最新の作品も選ばれてくる。
-            let lexically_stale = if options.include_semantic {
+            let lexically_stale = if include_semantic {
                 let conn = self.read_conn()?;
                 lexically_stale_subset(&conn, &ids)?
             } else {
@@ -1930,12 +2243,21 @@ impl Database {
                 writer.upsert(document)?;
             }
 
-            if options.include_semantic && !prepared.semantic.is_empty() {
+            if include_semantic && !prepared.semantic.is_empty() {
                 // One embedding call per chunk rather than per document: the
                 // model is only worth its accelerator when it is handed a batch.
                 match super::semantic_index::upsert_documents(&self.storage_dir, &prepared.semantic)
                 {
-                    Ok(_) => self.record_semantic_indexed_documents(&prepared.semantic_indexed)?,
+                    Ok(indexed) => {
+                        let indexed = indexed.into_iter().collect::<HashSet<_>>();
+                        let states = prepared
+                            .semantic_indexed
+                            .iter()
+                            .filter(|state| indexed.contains(&state.download_id))
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        self.record_semantic_indexed_documents(&states)?;
+                    }
                     Err(error) => log::warn!("Semantic index batch skipped: {error}"),
                 }
             }
@@ -3541,7 +3863,16 @@ impl Database {
             });
         }
 
-        let search_mode = effective_search_mode(&effective_params);
+        // The semantic feature switch is persistent and authoritative. A
+        // disabled library never initializes the model merely because a stale
+        // caller still submits the old semantic mode; it falls back to the
+        // normal lexical search instead.
+        let requested_search_mode = effective_search_mode(&effective_params);
+        let search_mode = if requested_search_mode == "semantic" && !status.semantic_enabled {
+            "smart".to_string()
+        } else {
+            requested_search_mode
+        };
         let mut search_limit = search_candidate_limit(&effective_params, limit);
         let parsed_query = parse_search_query(&query);
         // An explicit column sort asked for while searching cannot be answered
@@ -3575,29 +3906,14 @@ impl Database {
             candidate.kind == "search" && candidate.scope.as_deref() == Some(&cursor_scope)
         });
         let maximum_semantic_candidates =
-            usize::try_from(status.semantic_indexed_chunks.max(1)).unwrap_or(usize::MAX);
-        let mut lexical_total = None;
+            usize::try_from(status.semantic_indexed_downloads.max(1)).unwrap_or(usize::MAX);
         let (mut ranked_items, semantic_map, document_map, candidates_exhausted, unpaged_count) = loop {
-            let lexical_result = if search_mode != "semantic" {
-                super::tantivy_index::search_with_total(&self.storage_dir, &query, search_limit)?
-            } else {
-                super::tantivy_index::TantivySearchResult::default()
-            };
-            if search_mode != "semantic" {
-                lexical_total = Some(lexical_result.total_hits);
-            }
-            let semantic_hits = if search_mode == "semantic" {
-                match super::semantic_index::search(&self.storage_dir, &query, search_limit) {
-                    Ok(hits) => hits,
-                    Err(error) => {
-                        log::warn!("Semantic search unavailable: {}", error);
-                        Vec::new()
-                    }
-                }
-            } else {
-                Vec::new()
-            };
-            let hits = blend_search_hits(&lexical_result.hits, &semantic_hits, &search_mode);
+            // An explicit natural-language search must distinguish "no match"
+            // from a model/index failure. Returning an empty successful page
+            // would make a broken capability indistinguishable in the UI.
+            let semantic_hits =
+                super::semantic_index::search(&self.storage_dir, &query, search_limit)?;
+            let hits = rank_semantic_hits(&semantic_hits);
             let semantic_map = hits
                 .iter()
                 .filter_map(|hit| {
@@ -3636,11 +3952,8 @@ impl Database {
                 candidates.retain(|item| search_item_is_after_cursor(item, cursor));
             }
 
-            let exhausted = if search_mode == "semantic" {
-                semantic_hits.len() < search_limit || search_limit >= maximum_semantic_candidates
-            } else {
-                search_limit >= lexical_result.total_hits
-            };
+            let exhausted =
+                semantic_hits.len() < search_limit || search_limit >= maximum_semantic_candidates;
             if candidates.len() as i64 > limit || exhausted {
                 break (
                     candidates,
@@ -3654,28 +3967,22 @@ impl Database {
             // Grow with cursor depth and selective metadata filters. Unlike the
             // previous hard 1,000 cap, this eventually reaches every lexical
             // match while keeping the common first page small and fast.
-            let maximum = if search_mode == "semantic" {
-                maximum_semantic_candidates
-            } else {
-                lexical_result.total_hits
-            };
-            let next_limit = search_limit.saturating_mul(2).min(maximum);
+            let next_limit = search_limit
+                .saturating_mul(2)
+                .min(maximum_semantic_candidates);
             if next_limit <= search_limit {
                 break (candidates, semantic_map, document_map, true, unpaged_count);
             }
             search_limit = next_limit;
         };
-        let total_estimate =
-            if !params_have_library_filters(&effective_params) && search_mode != "semantic" {
-                lexical_total.and_then(|count| i64::try_from(count).ok())
-            } else if candidates_exhausted {
-                i64::try_from(unpaged_count).ok()
-            } else {
-                // A filtered count cannot be known until all lexical candidates
-                // have been intersected with SQLite. `None` is more honest than a
-                // fixed top-N value that looks complete to the UI.
-                None
-            };
+        let total_estimate = if candidates_exhausted {
+            i64::try_from(unpaged_count).ok()
+        } else {
+            // A filtered count cannot be known until all lexical candidates
+            // have been intersected with SQLite. `None` is more honest than a
+            // fixed top-N value that looks complete to the UI.
+            None
+        };
         let has_more = ranked_items.len() as i64 > limit;
         let page_items = ranked_items
             .drain(..)
@@ -3701,23 +4008,13 @@ impl Database {
             next_cursor,
             total_estimate,
             search_meta: SearchMeta {
-                engine: if search_mode == "exact" {
-                    "tantivy-exact".to_string()
-                } else if search_mode == "semantic" {
-                    "semantic-local".to_string()
-                } else {
-                    "hybrid-local".to_string()
-                },
+                engine: "semantic-work-local".to_string(),
                 query: (!submitted_query.is_empty()).then_some(submitted_query),
                 total_estimate,
                 index_complete: status.is_complete,
                 explanations: search_explanations(
                     exact_entity.as_ref(),
-                    if search_mode == "semantic" {
-                        "semantic"
-                    } else {
-                        "tantivy"
-                    },
+                    "semantic",
                     status.is_complete,
                 ),
                 exact_entity,
@@ -3932,7 +4229,7 @@ impl Database {
                 engine: if search_mode == "exact" {
                     "tantivy-exact".to_string()
                 } else {
-                    "hybrid-local".to_string()
+                    "tantivy-lexical".to_string()
                 },
                 query: (!submitted_query.is_empty()).then(|| submitted_query.to_string()),
                 total_estimate,
@@ -4763,6 +5060,13 @@ impl Database {
             .transaction()
             .map_err(|e| format!("Failed to start update job transaction: {}", e))?;
         let now = chrono::Utc::now().to_rfc3339();
+        let initial_counts = items.iter().fold([0_i64; 5], |mut counts, item| {
+            let contribution = update_job_item_counter_contribution(&item.item_type, &item.status);
+            for (count, value) in counts.iter_mut().zip(contribution) {
+                *count += value;
+            }
+            counts
+        });
         // 依頼そのものは持ち越さない。走行中に読むのは watch_saved だけで、
         // 残りは items と scope/mode の列にもう写っている。認証情報を
         // 抱え込まずに済むのも、必要な分だけを取り出す形の利点。
@@ -4771,13 +5075,17 @@ impl Database {
                 id, scope, mode, status, watch_saved, totals, processed,
                 candidate_count, saved_count, error_count, active_label,
                 started_at, updated_at, finished_at
-             ) VALUES (?1, ?2, ?3, 'queued', ?4, ?5, 0, 0, 0, 0, NULL, ?6, ?6, NULL)",
+             ) VALUES (?1, ?2, ?3, 'queued', ?4, ?5, ?6, ?7, ?8, ?9, NULL, ?10, ?10, NULL)",
             params![
                 job_id,
                 request.scope,
                 request.mode,
                 request.watch_saved.unwrap_or(false),
-                items.len() as i64,
+                initial_counts[0],
+                initial_counts[1],
+                initial_counts[2],
+                initial_counts[3],
+                initial_counts[4],
                 now,
             ],
         )
@@ -5076,6 +5384,16 @@ impl Database {
         .map_err(|e| format!("Update job not found: {}", e))
     }
 
+    pub fn update_job_mode_value(&self, job_id: &str) -> Result<String, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT mode FROM update_jobs WHERE id = ?1",
+            params![job_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("Update job not found: {}", e))
+    }
+
     /// ジョブの項目の、いまの状態を並べる。
     ///
     /// 画面は行ごとに印を付けたい。それには「どの作品がどうなったか」だけが
@@ -5120,7 +5438,6 @@ impl Database {
         job_id: &str,
         changed_item_id: Option<i64>,
     ) -> Result<UpdateJobProgressDelta, String> {
-        self.sync_update_job_counters(job_id)?;
         let conn = self.read_conn()?;
         let summary = conn
             .query_row(
@@ -5266,14 +5583,57 @@ impl Database {
         error: Option<&str>,
         result_download_id: Option<i64>,
     ) -> Result<(), String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        conn.execute(
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| format!("Failed to begin update item completion: {e}"))?;
+        let (job_id, item_type, previous_status): (String, String, String) = tx
+            .query_row(
+                "SELECT job_id, item_type, status FROM update_job_items WHERE id = ?1",
+                params![item_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .map_err(|e| format!("Failed to read update job item before completion: {e}"))?;
+        let changed = tx.execute(
             "UPDATE update_job_items
              SET status = ?1, error = ?2, result_download_id = ?3, updated_at = CURRENT_TIMESTAMP
              WHERE id = ?4",
             params![status, error, result_download_id, item_id],
         )
         .map_err(|e| format!("Failed to update job item: {}", e))?;
+        if changed == 1 && previous_status != status {
+            let previous = update_job_item_counter_contribution(&item_type, &previous_status);
+            let next = update_job_item_counter_contribution(&item_type, status);
+            let delta = [
+                next[0] - previous[0],
+                next[1] - previous[1],
+                next[2] - previous[2],
+                next[3] - previous[3],
+                next[4] - previous[4],
+            ];
+            tx.execute(
+                "UPDATE update_jobs
+                    SET totals = MAX(0, totals + ?1),
+                        processed = MAX(0, processed + ?2),
+                        candidate_count = MAX(0, candidate_count + ?3),
+                        saved_count = MAX(0, saved_count + ?4),
+                        error_count = MAX(0, error_count + ?5),
+                        updated_at = ?6
+                  WHERE id = ?7",
+                params![
+                    delta[0],
+                    delta[1],
+                    delta[2],
+                    delta[3],
+                    delta[4],
+                    chrono::Utc::now().to_rfc3339(),
+                    job_id,
+                ],
+            )
+            .map_err(|e| format!("Failed to advance update job counters: {e}"))?;
+        }
+        tx.commit()
+            .map_err(|e| format!("Failed to commit update item completion: {e}"))?;
         Ok(())
     }
 
@@ -5282,8 +5642,11 @@ impl Database {
         job_id: &str,
         candidate: &UpdateJobItemInput,
     ) -> Result<bool, String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        let changed = conn
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| format!("Failed to begin update candidate insert: {e}"))?;
+        let changed = tx
             .execute(
                 "INSERT INTO update_job_items (
                 job_id, item_type, source, source_id, target_type, title, payload_json, status
@@ -5305,6 +5668,32 @@ impl Database {
                 ],
             )
             .map_err(|e| format!("Failed to insert update candidate: {}", e))?;
+        if changed > 0 {
+            let contribution =
+                update_job_item_counter_contribution("candidate", &candidate.status);
+            tx.execute(
+                "UPDATE update_jobs
+                    SET totals = totals + ?1,
+                        processed = processed + ?2,
+                        candidate_count = candidate_count + ?3,
+                        saved_count = saved_count + ?4,
+                        error_count = error_count + ?5,
+                        updated_at = ?6
+                  WHERE id = ?7",
+                params![
+                    contribution[0],
+                    contribution[1],
+                    contribution[2],
+                    contribution[3],
+                    contribution[4],
+                    chrono::Utc::now().to_rfc3339(),
+                    job_id,
+                ],
+            )
+            .map_err(|e| format!("Failed to advance update candidate counters: {e}"))?;
+        }
+        tx.commit()
+            .map_err(|e| format!("Failed to commit update candidate insert: {e}"))?;
         Ok(changed > 0)
     }
 
@@ -5955,6 +6344,7 @@ impl Database {
         } else {
             0.0
         };
+        let process_resources = process_resource_snapshot();
         Ok(LibraryDiagnostics {
             measured_at: chrono::Utc::now().to_rfc3339(),
             total_downloads,
@@ -5988,7 +6378,12 @@ impl Database {
             transient_files: diagnostic_file_stats.transient_files,
             transient_file_bytes: diagnostic_file_stats.transient_file_bytes,
             file_issue_samples,
-            process_memory_bytes: current_process_memory_bytes(),
+            process_memory_bytes: process_resources.working_set_bytes,
+            process_private_memory_bytes: process_resources.private_bytes,
+            process_count: process_resources.process_count,
+            webview_process_count: process_resources.webview_process_count,
+            gpu_dedicated_memory_bytes: process_resources.gpu_dedicated_bytes,
+            gpu_shared_memory_bytes: process_resources.gpu_shared_bytes,
             list_first_page_ms,
             list_p50_ms,
             list_p95_ms,
@@ -9337,6 +9732,7 @@ fn collection_name_options(
             source: source.to_string(),
             label: label.to_string(),
             name,
+            ..Default::default()
         });
     }
     let mut options: Vec<CollectionNameCandidate> = Vec::new();
@@ -9604,6 +10000,7 @@ fn collection_suggestion_from_row(
                 source: "title".to_string(),
                 label: "題名".to_string(),
                 name: proposed_name.clone(),
+                ..Default::default()
             }]
         });
     Ok(CollectionSuggestion {
@@ -10308,57 +10705,21 @@ fn params_have_library_filters(params: &SearchV2Params) -> bool {
             .unwrap_or(false)
 }
 
-fn blend_search_hits(
-    lexical_hits: &[super::tantivy_index::TantivySearchHit],
+fn rank_semantic_hits(
     semantic_hits: &[super::semantic_index::SemanticSearchHit],
-    search_mode: &str,
 ) -> Vec<RankedSearchHit> {
-    let mut merged: HashMap<i64, RankedSearchHit> = HashMap::new();
-    if search_mode != "semantic" {
-        for (idx, hit) in lexical_hits.iter().enumerate() {
-            let rrf = 1.0 / (60.0 + (idx + 1) as f64);
-            let score = (hit.score as f64).min(80.0) + rrf * 900.0;
-            let entry = merged.entry(hit.download_id).or_insert(RankedSearchHit {
-                download_id: hit.download_id,
-                score: 0.0,
-                semantic: None,
-                document: Some(hit.document.clone()),
-            });
-            if entry.document.is_none() {
-                entry.document = Some(hit.document.clone());
-            }
-            entry.score += score;
-        }
-    }
-    if search_mode != "exact" {
-        for (idx, hit) in semantic_hits.iter().enumerate() {
-            let rrf = 1.0 / (60.0 + (idx + 1) as f64);
-            let score = hit.score.max(0.0) * 120.0 + rrf * 900.0;
-            let entry = merged.entry(hit.download_id).or_insert(RankedSearchHit {
-                download_id: hit.download_id,
-                score: 0.0,
-                semantic: None,
-                document: None,
-            });
-            entry.score += score;
-            if entry
-                .semantic
-                .as_ref()
-                .map(|existing| existing.score < hit.score)
-                .unwrap_or(true)
-            {
-                entry.semantic = Some(hit.clone());
-            }
-        }
-    }
-    let mut hits = merged.into_values().collect::<Vec<_>>();
-    hits.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(Ordering::Equal)
-            .then_with(|| a.download_id.cmp(&b.download_id))
-    });
-    hits
+    // semantic_index::search already guarantees one row per work.  Do not sum
+    // scores by download_id here: that was the source of the long-work bias in
+    // the former passage-based implementation.
+    semantic_hits
+        .iter()
+        .map(|hit| RankedSearchHit {
+            download_id: hit.download_id,
+            score: hit.score.max(0.0) * 120.0,
+            semantic: Some(hit.clone()),
+            document: None,
+        })
+        .collect()
 }
 
 fn normalize_search_params(params: &SearchV2Params) -> SearchV2Params {
@@ -12478,6 +12839,7 @@ fn search_index_status_locked(
         )
         .map_err(|e| format!("Search index status pending failed: {}", e))?;
 
+    let semantic_enabled = semantic_index_enabled_locked(conn)?;
     let semantic_indexed_downloads: i64 = conn
         .query_row(
             "SELECT COUNT(*)
@@ -12507,6 +12869,7 @@ fn search_index_status_locked(
         semantic_indexed_chunks: semantic.indexed_chunks,
         semantic_indexed_downloads,
         semantic_pending_downloads,
+        semantic_enabled,
         semantic_model_ready: semantic.model_ready,
         embedding_provider: semantic.provider,
         gpu_enabled: semantic.gpu_enabled,
@@ -12523,7 +12886,18 @@ fn reindex_download_locked(
         clear_search_index_locked(conn, storage_dir, download_id)?;
         return Ok(());
     };
-    index_search_documents_locked(conn, storage_dir, &[doc], true)
+    let include_semantic = semantic_index_enabled_locked(conn)?;
+    index_search_documents_locked(conn, storage_dir, &[doc], include_semantic)
+}
+
+fn semantic_index_enabled_locked(conn: &Connection) -> Result<bool, String> {
+    conn.query_row(
+        "SELECT semantic_enabled FROM search_feature_settings WHERE singleton_id = 1",
+        [],
+        |row| row.get::<_, i64>(0),
+    )
+    .map(|value| value != 0)
+    .map_err(|e| format!("Semantic feature setting read failed: {e}"))
 }
 
 fn search_index_document_locked(
@@ -12690,9 +13064,11 @@ fn index_search_documents_locked(
         .map(|doc| doc.semantic.clone())
         .collect::<Vec<_>>();
     match super::semantic_index::upsert_documents(storage_dir, &semantic_docs) {
-        Ok(_) => {
+        Ok(indexed) => {
+            let indexed = indexed.into_iter().collect::<HashSet<_>>();
             let states = docs
                 .iter()
+                .filter(|doc| indexed.contains(&doc.download_id))
                 .map(|doc| IndexedState {
                     download_id: doc.download_id,
                     current_version: doc.current_version,
@@ -12954,6 +13330,22 @@ fn update_target_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<UpdateTar
         last_hit_at: row.get(12)?,
         consecutive_errors: row.get(13)?,
     })
+}
+
+/// Contributions of one item to totals, processed, candidates, saved, errors.
+/// Keeping this definition beside both creation and state transitions lets
+/// live progress update counters in O(1); a full aggregate remains in the
+/// snapshot path as a repair boundary for databases written by older builds.
+fn update_job_item_counter_contribution(item_type: &str, status: &str) -> [i64; 5] {
+    let counts_as_work = item_type != "candidate" || status != "candidate";
+    let terminal = matches!(status, "done" | "saved" | "skipped" | "failed");
+    [
+        i64::from(counts_as_work),
+        i64::from(counts_as_work && terminal),
+        i64::from(item_type == "candidate"),
+        i64::from(status == "saved"),
+        i64::from(status == "failed"),
+    ]
 }
 
 fn update_job_summary_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<UpdateJobSummary> {

@@ -1,4 +1,10 @@
-import type { WorkCollection, WorkCollectionMember, WorkCollectionSummary } from "@/types/collections";
+import type {
+  CollectionSuggestion,
+  CollectionSuggestionMember,
+  WorkCollection,
+  WorkCollectionMember,
+  WorkCollectionSummary,
+} from "@/types/collections";
 import type { DashboardSummary, DownloadEntry, EditorDocument, FilterFacets, ReaderDocument, SearchV2Result } from "@/types/library";
 
 const now = new Date();
@@ -281,6 +287,96 @@ export const demoCollections: WorkCollection[] = [
   }),
   // 表紙も作品も無い束。紋だけで成り立つかを見る。
   demoCollection("demo-empty", "あとで読む", [], { description: null }),
+];
+
+/**
+ * プレビューで見る、走査の候補。
+ *
+ * 束のカードと同じ理由でここに置く。**空のままだと、カードの崩れが
+ * デスクトップ版でしか見つからない。** 実際、2作の束で構成作品が読めない
+ * ことに気づいたのは、実機の画面を見てからだった。
+ *
+ * 意図的に極端なものを混ぜてある。2作だけの束（「＋N」が出ない）、題名が
+ * 長い束（行送りと省略）、12作の束（畳んだ一覧）、表紙の無い束。
+ */
+function demoSuggestionMember(work: DownloadEntry, position: number): CollectionSuggestionMember {
+  return {
+    source: work.source,
+    sourceId: work.sourceId,
+    downloadId: work.id,
+    title: work.title,
+    authorName: work.authorName,
+    coverPath: work.coverPath,
+    textLength: work.textLength,
+    proposedPosition: position,
+    score: 1,
+    selected: true,
+    evidence: [],
+  };
+}
+
+function demoSuggestion(
+  id: string,
+  proposedName: string,
+  members: DownloadEntry[],
+  overrides: Partial<CollectionSuggestion> = {},
+): CollectionSuggestion {
+  return {
+    id,
+    proposedName,
+    nameOptions: [
+      { source: "title", name: proposedName, label: "題名の共通部分" },
+      { source: "tags", name: members.flatMap((work) => work.tags).slice(0, 3).join(" / "), label: "共有タグ" },
+      { source: "author", name: `${members[0]?.authorName ?? "作者"}のまとまり`, label: "作者" },
+    ],
+    collectionKind: "ordered",
+    track: "sequence",
+    origin: "sweep",
+    evidenceSummary: `題名が連番になっている${members.length}作です`,
+    score: 0.9,
+    ruleVersion: "demo",
+    state: "pending",
+    members: members.map(demoSuggestionMember),
+    createdAt: isoDaysAgo(1),
+    updatedAt: isoDaysAgo(1),
+    ...overrides,
+  };
+}
+
+export const demoSuggestions: CollectionSuggestion[] = [
+  // 2作だけ。「＋N」が出ないので、ここで構成作品が読めなければ判断できない。
+  //
+  // 題名は**わざと長く、書き出しを同じにしてある**。実データの束はこうなる
+  // （同じ連載の続きが束になるので当然である）。切って出すと二作とも同じ
+  // 文字列になり、見分けるための一文字が一つ残らず省略の向こうへ行く。
+  {
+    ...demoSuggestion("demo-sug-pair", "鉄壁の聖騎士さまが催眠ねっちょりポリネシアンセックスで防御スキルを剥がされる話", [demoWorks[5], demoWorks[2]], {
+      evidenceSummary: "本文のリンクで2作がつながっています",
+    }),
+    members: [
+      { ...demoSuggestionMember(demoWorks[5], 0), title: "鉄壁の聖騎士さまが催眠ねっちょりポリネシアンセックスで防御スキルを剥がされる話・前編" },
+      { ...demoSuggestionMember(demoWorks[2], 1), title: "鉄壁の聖騎士さまが催眠ねっちょりポリネシアンセックスで防御スキルを剥がされる話・後編" },
+    ],
+  },
+  // 題名も名前案も長い束。カードからはみ出さないかを、ここで見る。
+  demoSuggestion(
+    "demo-sug-long",
+    "同人女の感情 ハイスペイケメン女子の綾城さんにキモデブが溺愛されて界隈の姫になる話 関連作品",
+    [demoWorks[0], demoWorks[4], demoWorks[1]],
+    { evidenceSummary: "題名が連番になっている3作です（作者2人）" },
+  ),
+  // 12作。畳んだ一覧の側を見る。
+  demoSuggestion(
+    "demo-sug-many",
+    "創作 / 短編 / 青春",
+    [...demoWorks, ...demoWorks].slice(0, 12),
+    {
+      track: "theme",
+      collectionKind: "unordered",
+      evidenceSummary: "「創作」を共有し、本文も近い12作です（作者4人）",
+      score: 0.66,
+    },
+  ),
 ];
 
 export function getDemoCollection(id: string): WorkCollection {

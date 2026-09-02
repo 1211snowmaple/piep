@@ -78,10 +78,15 @@ pub fn validate_epub(path: &Path) -> Result<EpubValidationReport, String> {
                 "mimetype は無圧縮で格納しなければなりません",
             ));
         }
+        // Presence checks need every path, but validation only inspects
+        // container/package/document text. Keeping every JPEG/PNG payload in
+        // this map made image-heavy books consume their full expanded size.
         let mut bytes = Vec::new();
-        entry
-            .read_to_end(&mut bytes)
-            .map_err(|e| format!("'{}' の読み込みに失敗: {}", name, e))?;
+        if retain_entry_contents(&name) {
+            entry
+                .read_to_end(&mut bytes)
+                .map_err(|e| format!("'{}' の読み込みに失敗: {}", name, e))?;
+        }
         order.push(name.clone());
         if entries.insert(name.clone(), bytes).is_some() {
             issues.push(EpubValidationIssue::error(
@@ -94,6 +99,7 @@ pub fn validate_epub(path: &Path) -> Result<EpubValidationReport, String> {
 
     check_ocf(&order, &entries, &mut issues);
     let package_path = rootfile_path(&entries).unwrap_or_else(|| "OEBPS/content.opf".to_string());
+    hydrate_cover_images(&mut archive, &package_path, &mut entries)?;
     check_package(&package_path, &entries, &mut issues);
     check_documents(&entries, &mut issues);
     check_kindle_limits(file_size_bytes, &entries, &mut issues);
@@ -104,6 +110,53 @@ pub fn validate_epub(path: &Path) -> Result<EpubValidationReport, String> {
         file_size_bytes,
         issues,
     })
+}
+
+fn retain_entry_contents(name: &str) -> bool {
+    if name == "mimetype" {
+        return true;
+    }
+    let lowercase = name.to_ascii_lowercase();
+    [".xml", ".opf", ".xhtml", ".html", ".ncx"]
+        .iter()
+        .any(|extension| lowercase.ends_with(extension))
+}
+
+fn hydrate_cover_images(
+    archive: &mut zip::ZipArchive<std::fs::File>,
+    package_path: &str,
+    entries: &mut HashMap<String, Vec<u8>>,
+) -> Result<(), String> {
+    let Some(opf) = entries.get(package_path).and_then(|bytes| text_of(bytes)) else {
+        return Ok(());
+    };
+    let base_dir = package_path
+        .rsplit_once('/')
+        .map(|(directory, _)| directory)
+        .unwrap_or("");
+    let covers = parse_manifest_items(&opf)
+        .into_iter()
+        .filter(|item| {
+            item.properties
+                .as_deref()
+                .is_some_and(|value| value.split_whitespace().any(|token| token == "cover-image"))
+        })
+        .map(|item| join_path(base_dir, &decode_path(&item.href)))
+        .collect::<Vec<_>>();
+    for cover in covers {
+        if !entries.get(&cover).is_some_and(Vec::is_empty) {
+            continue;
+        }
+        let mut entry = archive
+            .by_name(&cover)
+            .map_err(|error| format!("表紙画像 '{}' の読み込みに失敗: {error}", cover))?;
+        let mut bytes = Vec::new();
+        entry
+            .read_to_end(&mut bytes)
+            .map_err(|error| format!("表紙画像 '{}' の読み込みに失敗: {error}", cover))?;
+        entries.insert(cover, bytes);
+    }
+    Ok(())
 }
 
 // ============================================================
@@ -988,6 +1041,15 @@ fn parse_spine_idrefs(opf: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+
+    #[test]
+    fn image_payloads_are_not_retained_unless_validation_needs_them() {
+        assert!(super::retain_entry_contents("mimetype"));
+        assert!(super::retain_entry_contents("OEBPS/content.opf"));
+        assert!(super::retain_entry_contents("OEBPS/text/chapter.XHTML"));
+        assert!(!super::retain_entry_contents("OEBPS/images/page-001.jpg"));
+        assert!(!super::retain_entry_contents("OEBPS/fonts/book.woff2"));
+    }
 
     /// 他人が作った EPUB を読むための道具なので、中身が何であれ落ちない。
     ///

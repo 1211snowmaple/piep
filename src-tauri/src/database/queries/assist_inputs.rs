@@ -322,6 +322,45 @@ impl Database {
     }
 
     /// モデルに書いてもらった覚え書きを保存する。
+    pub fn save_ai_note_with_provenance(
+        &self,
+        subject_type: &str,
+        subject_key: &str,
+        note_kind: &str,
+        text: &str,
+        provenance: &crate::assist::AssistProvenance,
+    ) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT INTO ai_notes (
+                subject_type, subject_key, note_kind, text, model_id, feature_id,
+                prompt_version, input_fingerprint, config_fingerprint, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             ON CONFLICT(subject_type, subject_key, note_kind)
+             DO UPDATE SET text = excluded.text, model_id = excluded.model_id,
+                           feature_id = excluded.feature_id,
+                           prompt_version = excluded.prompt_version,
+                           input_fingerprint = excluded.input_fingerprint,
+                           config_fingerprint = excluded.config_fingerprint,
+                           created_at = excluded.created_at",
+            params![
+                subject_type,
+                subject_key,
+                note_kind,
+                text,
+                provenance.model_id,
+                provenance.feature_id,
+                provenance.prompt_version,
+                provenance.input_fingerprint,
+                provenance.config_fingerprint,
+                provenance.created_at,
+            ],
+        )
+        .map_err(|e| format!("Failed to save note: {e}"))?;
+        Ok(())
+    }
+
+    /// テスト用・非LLM経路向けの簡易保存。生成経路は必ず provenance 版を使う。
     pub fn save_ai_note(
         &self,
         subject_type: &str,
@@ -330,24 +369,20 @@ impl Database {
         text: &str,
         model_id: &str,
     ) -> Result<(), String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        conn.execute(
-            "INSERT INTO ai_notes (subject_type, subject_key, note_kind, text, model_id, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-             ON CONFLICT(subject_type, subject_key, note_kind)
-             DO UPDATE SET text = excluded.text, model_id = excluded.model_id,
-                           created_at = excluded.created_at",
-            params![
-                subject_type,
-                subject_key,
-                note_kind,
-                text,
-                model_id,
-                chrono::Utc::now().to_rfc3339()
-            ],
+        self.save_ai_note_with_provenance(
+            subject_type,
+            subject_key,
+            note_kind,
+            text,
+            &crate::assist::AssistProvenance {
+                feature_id: "legacy".to_string(),
+                prompt_version: "legacy/v1".to_string(),
+                model_id: model_id.to_string(),
+                input_fingerprint: String::new(),
+                config_fingerprint: String::new(),
+                created_at: chrono::Utc::now().to_rfc3339(),
+            },
         )
-        .map_err(|e| format!("Failed to save note: {e}"))?;
-        Ok(())
     }
 
     /// 保存してある覚え書きを読む。無ければ `None`。
@@ -358,20 +393,87 @@ impl Database {
         note_kind: &str,
     ) -> Result<Option<AiNote>, String> {
         let conn = self.read_conn()?;
-        conn.query_row(
-            "SELECT text, model_id, created_at FROM ai_notes
+        let note = conn
+            .query_row(
+                "SELECT text, model_id, feature_id, prompt_version, input_fingerprint,
+                    config_fingerprint, created_at FROM ai_notes
              WHERE subject_type = ?1 AND subject_key = ?2 AND note_kind = ?3",
-            params![subject_type, subject_key, note_kind],
-            |row| {
-                Ok(AiNote {
-                    text: row.get(0)?,
-                    model_id: row.get(1)?,
-                    created_at: row.get(2)?,
+                params![subject_type, subject_key, note_kind],
+                |row| {
+                    Ok(AiNote {
+                        text: row.get(0)?,
+                        model_id: row.get(1)?,
+                        feature_id: row.get(2)?,
+                        prompt_version: row.get(3)?,
+                        input_fingerprint: row.get(4)?,
+                        config_fingerprint: row.get(5)?,
+                        created_at: row.get(6)?,
+                        prompt_stale: false,
+                        input_stale: false,
+                    })
+                },
+            )
+            .optional()
+            .map_err(|e| format!("Failed to read note: {e}"))?;
+        drop(conn);
+        let Some(mut note) = note else {
+            return Ok(None);
+        };
+        note.prompt_stale =
+            note.prompt_version != crate::assist::current_prompt_version(&note.feature_id);
+        if let Some(current) = self.current_ai_note_input_fingerprint(
+            subject_type,
+            subject_key,
+            note_kind,
+            &note.feature_id,
+        )? {
+            note.input_stale = current != note.input_fingerprint;
+        }
+        Ok(Some(note))
+    }
+
+    fn current_ai_note_input_fingerprint(
+        &self,
+        subject_type: &str,
+        subject_key: &str,
+        note_kind: &str,
+        feature_id: &str,
+    ) -> Result<Option<String>, String> {
+        let input = match (subject_type, note_kind, feature_id) {
+            ("work", "synopsis", crate::assist::FEATURE_WORK_SYNOPSIS) => {
+                let Ok(download_id) = subject_key.parse::<i64>() else {
+                    return Ok(None);
+                };
+                let (work, body) = self.work_facts_with_body(download_id)?;
+                serde_json::json!({ "work": work, "body": body })
+            }
+            ("person", "style", crate::assist::FEATURE_AUTHOR_STYLE) => {
+                let Some((source, person_key)) = subject_key.split_once(':') else {
+                    return Ok(None);
+                };
+                let (author, works) = self.author_facts(source, person_key)?;
+                serde_json::json!({ "author": author, "works": works })
+            }
+            ("work", "recap", crate::assist::FEATURE_READER_RECAP) => {
+                let Some((current, previous)) = subject_key.split_once(':') else {
+                    return Ok(None);
+                };
+                let (Ok(current_download_id), Ok(previous_download_id)) =
+                    (current.parse::<i64>(), previous.parse::<i64>())
+                else {
+                    return Ok(None);
+                };
+                let (work, body) = self.work_facts_with_body(previous_download_id)?;
+                serde_json::json!({
+                    "previousDownloadId": previous_download_id,
+                    "currentDownloadId": current_download_id,
+                    "work": work,
+                    "body": body
                 })
-            },
-        )
-        .optional()
-        .map_err(|e| format!("Failed to read note: {e}"))
+            }
+            _ => return Ok(None),
+        };
+        crate::assist::generation_input_fingerprint(feature_id, &input).map(Some)
     }
 
     /// 覚え書きを消す。作り直したいときと、要らなくなったとき。
@@ -409,7 +511,15 @@ pub struct AiNote {
     pub text: String,
     /// どのモデルが書いたか。モデルを替えたときに古い文が混ざるのを防ぐ。
     pub model_id: String,
+    pub feature_id: String,
+    pub prompt_version: String,
+    pub input_fingerprint: String,
+    pub config_fingerprint: String,
     pub created_at: String,
+    /// 固定promptの版が現在と異なる。入力・設定のstale判定には各fingerprintを使う。
+    pub prompt_stale: bool,
+    /// Title, tags, body, or other feature input changed after generation.
+    pub input_stale: bool,
 }
 
 #[cfg(test)]

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Alert, Badge, Button, Group, Loader, Modal, Stack, Text, Textarea, TextInput, UnstyledButton } from "@mantine/core";
+import { Badge, Button, Group, Loader, Modal, Stack, Text, Textarea, TextInput, UnstyledButton } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { errorMessage } from "@/lib/format";
@@ -33,12 +33,14 @@ export function CollectionRenameModal({
   onClose,
   collection,
   busy,
+  modelAssist,
   onSave,
 }: {
   opened: boolean;
   onClose: () => void;
   collection: WorkCollection;
   busy: boolean;
+  modelAssist: boolean;
   onSave: (input: WorkCollectionInput) => void;
 }) {
   const runtime = isTauriRuntime();
@@ -53,7 +55,7 @@ export function CollectionRenameModal({
     queryFn: () => (runtime ? proposeCollectionNames(collection.id) : Promise.resolve([])),
     enabled: opened,
   });
-  const { engine } = useAssist();
+  const { engine } = useAssist("collection_naming");
 
   useEffect(() => {
     if (!opened) return;
@@ -69,8 +71,15 @@ export function CollectionRenameModal({
       if (!engine) return Promise.reject(new Error("モデルの手伝いが設定されていません"));
       return nameCollectionWithModel(collection.id, engine);
     },
-    onSuccess: (named) => {
-      setModelOption({ source: "llm", label: SOURCE_LABEL.llm, name: named.name });
+    onSuccess: ({ value: named, provenance }) => {
+      setModelOption({
+        source: "llm",
+        label: SOURCE_LABEL.llm,
+        name: named.name,
+        modelId: provenance.modelId,
+        promptVersion: provenance.promptVersion,
+        createdAt: provenance.createdAt,
+      });
       setName(named.name);
       setSource("llm");
       // 書いてある説明を黙って消さない。ただし黙って捨てもしない —
@@ -135,8 +144,13 @@ export function CollectionRenameModal({
                 onClick={() => { setName(option.name); setSource(option.source); }}
               >
                 <span className="collection-pick__body">
-                  <Text size="sm" fw={650} className="line-clamp-2">{option.name}</Text>
-                  <Text size="xs" c="dimmed">{option.label || SOURCE_LABEL[option.source] || option.source}</Text>
+                  {/* 名前を選ぶ操作で、名前を切らない。 */}
+                  <Text size="sm" fw={650}>{option.name}</Text>
+                  <Text size="xs" c="dimmed">
+                    {option.label || SOURCE_LABEL[option.source] || option.source}
+                    {option.modelId ? ` · ${option.modelId}` : ""}
+                    {option.createdAt ? ` · ${new Date(option.createdAt).toLocaleDateString("ja-JP")}` : ""}
+                  </Text>
                 </span>
                 {name === option.name && <Icons.confirm size={IconSize.menu} />}
               </UnstyledButton>
@@ -144,7 +158,7 @@ export function CollectionRenameModal({
           )}
         </Stack>
 
-        {engine ? (
+        {modelAssist && engine && (
           <Button
             variant="light"
             color="grape"
@@ -155,13 +169,6 @@ export function CollectionRenameModal({
           >
             モデルに名前と説明を考えてもらう
           </Button>
-        ) : (
-          <Alert color="gray" icon={<Icons.info size={IconSize.action} />}>
-            <Text size="sm">
-              手元の言語モデルにも案を出させたい場合は、設定の「AIの手伝い」で
-              つなぎ先を選んでください。切ったままでも上の案から選べます。
-            </Text>
-          </Alert>
         )}
 
         <Group justify="space-between">

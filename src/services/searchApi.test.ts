@@ -7,7 +7,7 @@ vi.mock("@tauri-apps/api/core", () => ({
   convertFileSrc: (path: string) => `asset://${path}`,
 }));
 
-import { searchSuggest, startSearchRebuildIndex } from "@/services/searchApi";
+import { searchSuggest, setSemanticSearchEnabled, startSearchRebuildIndex } from "@/services/searchApi";
 
 describe("searchApi input normalization", () => {
   beforeEach(() => invoke.mockReset());
@@ -24,16 +24,22 @@ describe("searchApi input normalization", () => {
 
     invoke.mockResolvedValueOnce("job-id");
     await startSearchRebuildIndex({ batchSize: -4 });
-    expect(invoke).toHaveBeenLastCalledWith("search_rebuild_index", { jobOptions: { batchSize: 8, includeSemantic: false } });
+    expect(invoke).toHaveBeenLastCalledWith("search_rebuild_index", { jobOptions: { batchSize: 8 } });
 
     invoke.mockResolvedValueOnce("job-id");
     await startSearchRebuildIndex({ batchSize: 100_000, includeSemantic: true });
     expect(invoke).toHaveBeenLastCalledWith("search_rebuild_index", { jobOptions: { batchSize: 512, includeSemantic: true } });
   });
 
-  it("defaults to a lexical-only rebuild", async () => {
+  it("preserves the persistent semantic policy when no override is supplied", async () => {
     invoke.mockResolvedValueOnce("job-id");
     await startSearchRebuildIndex();
-    expect(invoke).toHaveBeenLastCalledWith("search_rebuild_index", { jobOptions: { batchSize: 64, includeSemantic: false } });
+    expect(invoke).toHaveBeenLastCalledWith("search_rebuild_index", { jobOptions: { batchSize: 64 } });
+  });
+
+  it("updates the persistent semantic capability explicitly", async () => {
+    invoke.mockResolvedValueOnce({ semanticEnabled: true });
+    await setSemanticSearchEnabled(true);
+    expect(invoke).toHaveBeenLastCalledWith("search_set_semantic_enabled", { enabled: true });
   });
 });

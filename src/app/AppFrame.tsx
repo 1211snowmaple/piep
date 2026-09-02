@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   ActionIcon,
   AppShell,
@@ -30,6 +30,8 @@ import { isRebuildRunning, rebuildPercent, useSearchIndexProgress } from "@/feat
 import { useAppUpdateNotice } from "@/app/useAppUpdateNotice";
 import { useUpdateScheduler } from "@/features/updates/useUpdateScheduler";
 import { APP_VERSION } from "@/lib/version";
+import { PageAssistProvider, type PageAssistRegistration } from "@/app/PageAssistContext";
+import { AssistLauncher } from "@/features/assist/AssistLauncher";
 
 const RAIL_WIDTH = 62;
 const NAVBAR_WIDTH = 194;
@@ -239,6 +241,11 @@ export function AppFrame({ children }: { children: ReactNode }) {
   const { setColorScheme } = useMantineColorScheme();
   const colorScheme = useComputedColorScheme("light");
   const { epubQueue } = useWorkspace();
+  const [pageAssist, setPageAssist] = useState<PageAssistRegistration[]>([]);
+  const pageAssistItems = useMemo(() => pageAssist.flatMap((registration) => registration.items), [pageAssist]);
+  const pageAssistLabel = pageAssist.length === 1
+    ? pageAssist[0].label
+    : "この画面で使えるAIの手伝い";
 
   const pageTitle = useMemo(() => {
     if (location.pathname === "/") return "ホーム";
@@ -287,7 +294,8 @@ export function AppFrame({ children }: { children: ReactNode }) {
   ];
 
   return (
-    <>
+    <PageAssistProvider onChange={setPageAssist}>
+      <>
       {/* A normal #main-content link would replace this app's hash route. */}
       <button type="button" className="skip-link" onClick={() => mainRef.current?.focus()}>本文へ移動</button>
       <AppShell
@@ -341,6 +349,16 @@ export function AppFrame({ children }: { children: ReactNode }) {
             <Group gap={6} wrap="nowrap">
               <IndexingIndicator />
               <Tooltip label="検索または移動（Ctrl K）"><ActionIcon variant="subtle" color="gray" aria-label="検索または移動" onClick={() => spotlight.open()}><Icons.search size={IconSize.nav} /></ActionIcon></Tooltip>
+              {/* Search stays first because it is the everyday action. The
+                  page-scoped AI tool sits beside it in the same fixed header;
+                  a disabled grey state explains configuration instead of
+                  vanishing. */}
+              <AssistLauncher
+                placement="header"
+                size="lg"
+                label={pageAssistLabel}
+                items={pageAssistItems}
+              />
               <Tooltip label={colorScheme === "dark" ? "ライトモード" : "ダークモード"}>
                 <ActionIcon variant="subtle" color="gray" aria-label={colorScheme === "dark" ? "ライトモードに切替" : "ダークモードに切替"} onClick={() => setColorScheme(colorScheme === "dark" ? "light" : "dark")}>
                   {colorScheme === "dark" ? <Icons.themeLight size={IconSize.nav} /> : <Icons.themeDark size={IconSize.nav} />}
@@ -372,6 +390,7 @@ export function AppFrame({ children }: { children: ReactNode }) {
         highlightQuery
         searchProps={{ leftSection: <Icons.search size={IconSize.nav} />, placeholder: "画面や操作を検索…", "aria-label": "画面や操作を検索" }}
       />
-    </>
+      </>
+    </PageAssistProvider>
   );
 }

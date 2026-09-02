@@ -15,17 +15,84 @@ export interface AssistEngine {
   remoteConsentUrl: string | null;
   /** **本文を送ることを、利用者が明示的に許したか。** 既定は許さない。 */
   allowBody: boolean;
+  /** 機能別の指示と、送信してよい情報の上限。 */
+  featureProfile?: AssistRequestProfile;
+}
+
+export interface AssistInputPolicy {
+  includeTitle?: boolean;
+  includeAuthor?: boolean;
+  includeTags?: boolean;
+  includeExcerpt?: boolean;
+  maxItems?: number;
+  maxTagsPerItem?: number;
+}
+
+export interface AssistRequestProfile {
+  profileId: string;
+  featureId: AssistFeatureId;
+  additionalInstructions?: string;
+  inputPolicy?: AssistInputPolicy;
+}
+
+export type AssistFeatureId =
+  | "search_interpretation"
+  | "work_synopsis"
+  | "work_tagging"
+  | "author_style"
+  | "reader_recap"
+  | "collection_split"
+  | "collection_naming";
+
+export interface AssistFeatureProfile {
+  enabled: boolean;
+  /** 空なら共通モデルを使う。 */
+  model: string;
+  /** Exact base URL + override model that passed a structured-output trial. */
+  verifiedTarget: string | null;
+  additionalInstructions: string;
+  inputPolicy: AssistInputPolicy;
 }
 
 export interface AssistSettings extends AssistEngine {
   enabled: boolean;
   /** 試し書きに成功した URL とモデル。URL/モデルを変えたら破棄する。 */
   verifiedTarget: string | null;
+  featureProfiles: Record<AssistFeatureId, AssistFeatureProfile>;
 }
 
 const SETTING_KEY = "assist_engine";
-/** 命名だけだったころの鍵。読むだけの後方互換で、書くのは新しい鍵。 */
-const LEGACY_KEY = "collection_naming_engine";
+export const ASSIST_FEATURES: ReadonlyArray<{
+  id: AssistFeatureId;
+  label: string;
+  description: string;
+  needsBody: boolean;
+}> = [
+  { id: "search_interpretation", label: "言葉で探す", description: "読みたい内容を棚の条件へ翻訳", needsBody: false },
+  { id: "work_synopsis", label: "作品のあらすじ", description: "本文から再読用の短い覚え書きを作成", needsBody: true },
+  { id: "work_tagging", label: "タグの補完", description: "棚にあるタグだけを候補として提案", needsBody: false },
+  { id: "author_style", label: "作者の作風メモ", description: "題名とタグから傾向を要約", needsBody: false },
+  { id: "reader_recap", label: "前回のあらすじ", description: "前の作品の本文から要点を作成", needsBody: true },
+  { id: "collection_split", label: "コレクションの分割案", description: "題名とタグから分け方を提案", needsBody: false },
+  { id: "collection_naming", label: "コレクションの命名", description: "内容に沿う名前と説明を提案", needsBody: false },
+] as const;
+
+function defaultProfiles(): Record<AssistFeatureId, AssistFeatureProfile> {
+  return Object.fromEntries(ASSIST_FEATURES.map((feature) => [feature.id, {
+    enabled: true,
+    model: "",
+    verifiedTarget: null,
+    additionalInstructions: "",
+    inputPolicy: {
+      includeTitle: true,
+      includeAuthor: true,
+      includeTags: true,
+      includeExcerpt: feature.needsBody,
+      maxItems: 200,
+      maxTagsPerItem: 30,
+    },
+  }])) as Record<AssistFeatureId, AssistFeatureProfile>;
+}
 
 /** 既定は切ってある。切ったままでも piep は完結する。 */
 export const DEFAULT_ASSIST_SETTINGS: AssistSettings = {
@@ -36,13 +103,20 @@ export const DEFAULT_ASSIST_SETTINGS: AssistSettings = {
   remoteConsentUrl: null,
   allowBody: false,
   verifiedTarget: null,
+  featureProfiles: defaultProfiles(),
 };
 
 export async function loadAssistSettings(): Promise<AssistSettings> {
   const stored = await getSetting<Partial<AssistSettings>>(SETTING_KEY);
-  if (stored) return { ...DEFAULT_ASSIST_SETTINGS, ...stored };
-  const legacy = await getSetting<Partial<AssistSettings>>(LEGACY_KEY);
-  return { ...DEFAULT_ASSIST_SETTINGS, ...legacy };
+  const profiles = defaultProfiles();
+  for (const feature of ASSIST_FEATURES) {
+    profiles[feature.id] = { ...profiles[feature.id], ...stored?.featureProfiles?.[feature.id] };
+  }
+  return {
+    ...DEFAULT_ASSIST_SETTINGS,
+    ...stored,
+    featureProfiles: profiles,
+  };
 }
 
 export function saveAssistSettings(settings: AssistSettings): Promise<void> {
@@ -61,14 +135,21 @@ export function saveAssistSettings(settings: AssistSettings): Promise<void> {
 }
 
 /** 設定から、送るときの形だけを取り出す。 */
-export function toEngine(settings: AssistSettings): AssistEngine {
+export function toEngine(settings: AssistSettings, featureId: AssistFeatureId = "collection_naming"): AssistEngine {
+  const profile = settings.featureProfiles[featureId];
   return {
     baseUrl: normalizeAssistBaseUrl(settings.baseUrl) ?? settings.baseUrl.trim(),
-    model: settings.model.trim(),
+    model: profile.model.trim() || settings.model.trim(),
     remoteConsentUrl: settings.remoteConsentUrl
       ? normalizeAssistBaseUrl(settings.remoteConsentUrl)
       : null,
     allowBody: settings.allowBody,
+    featureProfile: {
+      profileId: `default:${featureId}`,
+      featureId,
+      additionalInstructions: profile.additionalInstructions.trim() || undefined,
+      inputPolicy: profile.inputPolicy,
+    },
   };
 }
 
@@ -112,12 +193,27 @@ export function validateAssistSettings(settings: AssistSettings): string | null 
   if (settings.verifiedTarget !== assistTarget(settings)) {
     return "このつなぎ先とモデルで試し書きをしてから有効にしてください";
   }
+  for (const feature of ASSIST_FEATURES) {
+    const profile = settings.featureProfiles[feature.id];
+    const override = profile.model.trim();
+    if (profile.enabled && override && profile.verifiedTarget !== assistTarget({ baseUrl: settings.baseUrl, model: override })) {
+      return `「${feature.label}」の機能別モデルを試してから保存してください`;
+    }
+  }
   return null;
 }
 
 /** 手伝いが使える状態か。送信時と同じ検証を通った設定だけを返す。 */
 export function assistReady(settings: AssistSettings | undefined): settings is AssistSettings {
   return Boolean(settings?.enabled && !validateAssistSettings(settings));
+}
+
+export function assistFeatureReady(settings: AssistSettings | undefined, featureId: AssistFeatureId): settings is AssistSettings {
+  if (!assistReady(settings)) return false;
+  const profile = settings.featureProfiles[featureId];
+  if (!profile?.enabled) return false;
+  const override = profile.model.trim();
+  return !override || profile.verifiedTarget === assistTarget({ baseUrl: settings.baseUrl, model: override });
 }
 
 // ---- 設定 -----------------------------------------------------------------
@@ -186,7 +282,7 @@ export interface TagProposal {
 
 /** この作品に足りていないタグを、棚の語彙から挙げてもらう。付けはしない。 */
 export function suggestTags(engine: AssistEngine, downloadId: number): Promise<TagProposal[]> {
-  return invoke<TagProposal[]>("assist_suggest_tags", { engine, downloadId });
+  return invokeGenerated<TagProposal[]>("assist_suggest_tags", { engine, downloadId });
 }
 
 /** 案から選んだタグを、`llm` 印で付ける。 */
@@ -217,7 +313,7 @@ export interface SearchIntent {
 
 /** 「こういうのが読みたい」を、棚のタグと検索語に翻訳する。検索はしない。 */
 export function interpretSearch(engine: AssistEngine, phrase: string): Promise<SearchIntent> {
-  return invoke<SearchIntent>("assist_interpret_search", { engine, phrase });
+  return invokeGenerated<SearchIntent>("assist_interpret_search", { engine, phrase });
 }
 
 // ---- 覚え書き -------------------------------------------------------------
@@ -231,6 +327,30 @@ export interface StoredNote {
   text: string;
   modelId: string;
   createdAt: string;
+  featureId: AssistFeatureId;
+  promptVersion: string;
+  inputFingerprint: string;
+  configFingerprint: string;
+  promptStale: boolean;
+  inputStale: boolean;
+}
+
+export interface AssistProvenance {
+  featureId: AssistFeatureId;
+  promptVersion: string;
+  modelId: string;
+  inputFingerprint: string;
+  configFingerprint: string;
+  createdAt: string;
+}
+
+export interface GeneratedAssist<T> {
+  value: T;
+  provenance: AssistProvenance;
+}
+
+async function invokeGenerated<T>(command: string, args: Record<string, unknown>): Promise<T> {
+  return (await invoke<GeneratedAssist<T>>(command, args)).value;
 }
 
 export type NoteSubject = "work" | "person" | "collection";
@@ -247,12 +367,12 @@ export function deleteNote(subjectType: NoteSubject, subjectKey: string, noteKin
 
 /** この作者の作風を、題名とタグからまとめてもらう。本文は送らない。 */
 export function describeAuthor(engine: AssistEngine, source: string, personKey: string): Promise<AssistNote> {
-  return invoke<AssistNote>("assist_describe_author", { engine, source, personKey });
+  return invokeGenerated<AssistNote>("assist_describe_author", { engine, source, personKey });
 }
 
 /** 本文から、あとで思い出すためのあらすじを作ってもらう。**本文を送る。** */
 export function summarizeWork(engine: AssistEngine, downloadId: number): Promise<AssistNote> {
-  return invoke<AssistNote>("assist_summarize_work", { engine, downloadId });
+  return invokeGenerated<AssistNote>("assist_summarize_work", { engine, downloadId });
 }
 
 /** 直前の話の要点を出す。**本文を送る。** */
@@ -261,7 +381,7 @@ export function recapPrevious(
   previousDownloadId: number,
   currentDownloadId: number,
 ): Promise<AssistNote> {
-  return invoke<AssistNote>("assist_recap_previous", { engine, previousDownloadId, currentDownloadId });
+  return invokeGenerated<AssistNote>("assist_recap_previous", { engine, previousDownloadId, currentDownloadId });
 }
 
 // ---- 束 -------------------------------------------------------------------
@@ -275,7 +395,7 @@ export interface BundleSplit {
 
 /** この束を分けたほうがよいか、案を出してもらう。分けはしない。 */
 export function proposeSplits(engine: AssistEngine, collectionId: string): Promise<BundleSplit[]> {
-  return invoke<BundleSplit[]>("assist_propose_splits", { engine, collectionId });
+  return invokeGenerated<BundleSplit[]>("assist_propose_splits", { engine, collectionId });
 }
 
 /** 提案の名前を、モデルにも考えてもらう。既存の案に足すだけで置き換えない。 */
@@ -290,6 +410,6 @@ export interface NamedBundle {
 }
 
 /** すでにあるコレクションの名前と説明を、モデルにも考えてもらう。 */
-export function nameCollectionWithModel(collectionId: string, engine: AssistEngine): Promise<NamedBundle> {
-  return invoke<NamedBundle>("db_name_collection_with_model", { collectionId, engine });
+export function nameCollectionWithModel(collectionId: string, engine: AssistEngine): Promise<GeneratedAssist<NamedBundle>> {
+  return invoke<GeneratedAssist<NamedBundle>>("db_name_collection_with_model", { collectionId, engine });
 }

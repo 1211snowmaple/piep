@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
 import {
   Alert,
+  Badge,
   Button,
   Group,
   Paper,
@@ -16,13 +17,14 @@ import { ErrorState, LoadingState } from "@/components/AsyncState";
 import { ListPager, PagingModeToggle, useBoundedNumberedPage, usePageSize, usePagingMode } from "@/components/ListPager";
 import { errorMessage, formatNumber } from "@/lib/format";
 import { Icons, IconSize } from "@/lib/icons";
-import { generateCollectionSuggestion, sweepCollectionCandidates, upsertWorkCollection } from "@/services/collectionApi";
+import { generateCollectionSuggestion, listCollectionSuggestions, upsertWorkCollection } from "@/services/collectionApi";
 import { isTauriRuntime } from "@/services/dbApi";
-import type { SavedSearchSuggestion, WorkCollectionSummary } from "@/types/collections";
+import { demoSuggestions } from "@/mocks/demoData";
+import type { WorkCollectionSummary } from "@/types/collections";
 import { invalidateCollectionViews, workCollectionsQueryOptions } from "./collectionQueries";
 import { CollectionCard } from "./CollectionCard";
 import { CollectionFormModal } from "./CollectionFormModal";
-import { SuggestionInbox } from "./SuggestionInbox";
+import { CollectionSweepModal } from "./CollectionSweepModal";
 
 /** The collection list as it appears inside the library, beside 作品 /
  *  作者・クリエイター / シリーズ. The detail screen stays on its own route. */
@@ -109,24 +111,15 @@ export function CollectionsPanel({ query = "", sortBy = "created_at" }: { query?
     if (next > 1) params.set("page", String(next)); else params.delete("page");
     setSearchParams(params);
   };
-  // 走査を始める操作は一覧の見出しに一本だけ置く。結果を並べるのは受信箱で、
-  // 見つからなかったときに空の受信箱が行を一つ取ることはしない。
-  const [savedSearchIdeas, setSavedSearchIdeas] = useState<SavedSearchSuggestion[]>([]);
-  const sweepMutation = useMutation({
-    mutationFn: sweepCollectionCandidates,
-    onSuccess: (result) => {
-      queryClient.invalidateQueries({ queryKey: ["collection-suggestions"] });
-      queryClient.invalidateQueries({ queryKey: ["work-collections"] });
-      setSavedSearchIdeas(result.savedSearchSuggestions);
-      notifications.show({
-        color: result.bundles.length > 0 ? "green" : "gray",
-        message: result.bundles.length > 0
-          ? `${formatNumber(result.bundles.length)}件のまとまりが見つかりました`
-          : "新しいまとまりは見つかりませんでした",
-      });
-    },
-    onError: (error) => notifications.show({ color: "red", title: "棚を走査できません", message: errorMessage(error) }),
+  // 走査はオーバーレイの中で完結させる。棚の一覧に結果を差し込んでいたころは、
+  // 候補が出ているあいだコレクションそのものが下へ押し出されていた。
+  // 見出しに残すのは入口の一本だけで、まだ片付けていない候補の数を添える。
+  const [sweepOpened, sweepModal] = useDisclosure(false);
+  const pendingSuggestions = useQuery({
+    queryKey: ["collection-suggestions", "pending"],
+    queryFn: () => (runtime ? listCollectionSuggestions("pending") : Promise.resolve(demoSuggestions)),
   });
+  const pendingCount = pendingSuggestions.data?.length ?? 0;
   return (
     <Stack gap="md" className="collections-panel">
       {/* 件数・探す・作るを一行に畳む。説明文と件数と操作で三行使っていた頃は、
@@ -141,9 +134,8 @@ export function CollectionsPanel({ query = "", sortBy = "created_at" }: { query?
           <Button
             variant="subtle"
             leftSection={<Icons.search size={IconSize.action} />}
-            disabled={!runtime}
-            loading={sweepMutation.isPending}
-            onClick={() => sweepMutation.mutate()}
+            rightSection={pendingCount > 0 ? <Badge size="sm" variant="filled" circle>{formatNumber(pendingCount)}</Badge> : undefined}
+            onClick={sweepModal.open}
           >
             まとまりを探す
           </Button>
@@ -152,9 +144,6 @@ export function CollectionsPanel({ query = "", sortBy = "created_at" }: { query?
       </Group>
       {!runtime && <Alert color="gray">プレビューではコレクションの変更は保存されません。</Alert>}
       {suggestionMutation.isPending && <Alert icon={<Icons.collectionSuggest size={IconSize.action} />}>本文・キャプションのリンクを双方向へたどり、その後にシリーズ、作者、タイトル、意味的な近さを補助根拠として調べています。</Alert>}
-      {/* 候補は一箇所にまとめる。1作から広げたものと棚の走査で出たものを
-          別の場所に置くと、同じ束が二度出てくるように見える。 */}
-      <SuggestionInbox sweeping={sweepMutation.isPending} savedSearchIdeas={savedSearchIdeas} onSweep={() => sweepMutation.mutate()} />
       {collectionsQuery.isLoading ? <LoadingState label="コレクションを読み込んでいます" /> : collectionsQuery.error ? <ErrorState error={collectionsQuery.error} retry={() => collectionsQuery.refetch()} /> : collections.length === 0 ? (normalizedQuery
         ? <Paper withBorder p="xl"><Stack align="center"><Icons.search size={IconSize.hero} /><Text fw={700}>一致するコレクションがありません</Text><Text size="sm" c="dimmed" ta="center">「{query.trim()}」に当てはまるものは見つかりませんでした。</Text></Stack></Paper>
         : <Paper withBorder p="xl"><Stack align="center"><Icons.collection size={IconSize.hero} /><Text fw={700}>まだコレクションはありません</Text><Text size="sm" c="dimmed" ta="center">前後編、非公式の連載、pixivとFANBOXに分かれた作品などをまとめられます。</Text><Button onClick={form.open} disabled={!runtime}>最初のコレクションを作成</Button></Stack></Paper>) : <SimpleGrid cols={{ base: 1, sm: 2, xl: 3 }}>{visibleCollections.map((collection) => <CollectionCard key={collection.id} collection={collection} />)}</SimpleGrid>}
@@ -172,6 +161,9 @@ export function CollectionsPanel({ query = "", sortBy = "created_at" }: { query?
         />
       )}
       <CollectionFormModal opened={formOpened} onClose={form.close} onSave={(input) => saveMutation.mutate(input)} />
+      {/* 候補は一箇所にまとめる。1作から広げたものと棚の走査で出たものを
+          別の場所に置くと、同じ束が二度出てくるように見える。 */}
+      <CollectionSweepModal opened={sweepOpened} onClose={sweepModal.close} />
     </Stack>
   );
 }

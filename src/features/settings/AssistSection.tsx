@@ -9,11 +9,13 @@ import {
   Group,
   List,
   Loader,
+  NumberInput,
   Select,
   Stack,
   Switch,
   Text,
   TextInput,
+  Textarea,
   ThemeIcon,
   UnstyledButton,
 } from "@mantine/core";
@@ -24,6 +26,7 @@ import { errorMessage, formatBytes, formatNumber } from "@/lib/format";
 import { Icons, IconSize } from "@/lib/icons";
 import {
   DEFAULT_ASSIST_SETTINGS,
+  ASSIST_FEATURES,
   assistTarget,
   discoverAssistEngines,
   getAssistRuntimeProfile,
@@ -35,10 +38,12 @@ import {
   tryAssistEngine,
   validateAssistSettings,
   type AssistSettings,
+  type AssistFeatureId,
   type DiscoveredEngine,
   type TrialResult,
 } from "@/services/assistApi";
-import { isTauriRuntime } from "@/services/dbApi";
+import { getSearchIndexStatus, isTauriRuntime } from "@/services/dbApi";
+import { setSemanticSearchEnabled, startSearchRebuildIndex } from "@/services/searchApi";
 
 /**
  * コレクションの名前を、手元の言語モデルにも考えてもらうための設定。
@@ -54,15 +59,26 @@ export function AssistSection() {
   const runtime = isTauriRuntime();
   const queryClient = useQueryClient();
   const [draft, setDraft] = useState<AssistSettings>(DEFAULT_ASSIST_SETTINGS);
+  const [semanticEnabled, setSemanticEnabled] = useState(false);
   const [found, setFound] = useState<DiscoveredEngine[] | null>(null);
   const [trial, setTrial] = useState<TrialResult | null>(null);
   const [manualOpened, manual] = useDisclosure(false);
   const [helpOpened, help] = useDisclosure(false);
 
   const settingsQuery = useQuery({ queryKey: ["naming-settings"], queryFn: loadAssistSettings });
+  const semanticStatusQuery = useQuery({
+    queryKey: ["search-index-status"],
+    queryFn: getSearchIndexStatus,
+    enabled: runtime,
+  });
   useEffect(() => {
     if (settingsQuery.data) setDraft(settingsQuery.data);
   }, [settingsQuery.data]);
+  useEffect(() => {
+    if (semanticStatusQuery.data) {
+      setSemanticEnabled(semanticStatusQuery.data.semanticEnabled);
+    }
+  }, [semanticStatusQuery.data]);
 
   const profileQuery = useQuery({
     queryKey: ["assist-runtime-profile", normalizeAssistBaseUrl(draft.baseUrl), draft.model.trim()],
@@ -73,9 +89,24 @@ export function AssistSection() {
   });
 
   const save = useMutation({
-    mutationFn: (next: AssistSettings) => saveAssistSettings(next),
+    mutationFn: async (next: AssistSettings) => {
+      if (runtime) {
+        // 意味検索の入り切りが**変わったときだけ**触る。
+        //
+        // 以前は保存のたびに再構築を頼んでいた。追加指示の一文を直して保存した
+        // だけで索引の作り直しが始まり、棚の書き込み権を取り、アクティビティに
+        // 身に覚えのない行が並んでいた。
+        const wasEnabled = semanticStatusQuery.data?.semanticEnabled;
+        if (semanticEnabled !== wasEnabled) {
+          if (semanticEnabled) await startSearchRebuildIndex({ includeSemantic: true });
+          else await setSemanticSearchEnabled(false);
+        }
+      }
+      await saveAssistSettings(next);
+    },
     onSuccess: (_result, next) => {
       queryClient.invalidateQueries({ queryKey: ["naming-settings"] });
+      queryClient.invalidateQueries({ queryKey: ["search-index-status"] });
       notifications.show({
         color: "green",
         message: next.enabled ? "モデルを使う設定にしました" : "モデルを使わない設定にしました",
@@ -107,7 +138,18 @@ export function AssistSection() {
     mutationFn: async () => {
       const target = assistTarget(draft);
       if (!target) throw new Error("つなぎ先とモデルを指定してください");
-      return { target, result: await tryAssistEngine(toEngine(draft)) };
+      // This button verifies the shared model. `toEngine` normally applies a
+      // feature override (collection naming by default), which could make a
+      // different model pass and incorrectly mark the shared target verified.
+      const engine = toEngine(draft);
+      return {
+        target,
+        result: await tryAssistEngine({
+          ...engine,
+          model: draft.model.trim(),
+          featureProfile: undefined,
+        }),
+      };
     },
     onSuccess: ({ target, result }) => {
       setTrial(result);
@@ -119,6 +161,33 @@ export function AssistSection() {
     },
   });
 
+  const verifyFeatureModel = useMutation({
+    mutationFn: async (featureId: AssistFeatureId) => {
+      const engine = toEngine(draft, featureId);
+      const target = assistTarget({ baseUrl: engine.baseUrl, model: engine.model });
+      if (!target) throw new Error("つなぎ先とモデルを指定してください");
+      // The connection trial checks structured output. The actual feature
+      // profile is intentionally omitted because the trial material is the
+      // small built-in naming sample, not library data.
+      const result = await tryAssistEngine({ ...engine, featureProfile: undefined });
+      return { featureId, target, result };
+    },
+    onSuccess: ({ featureId, target, result }) => {
+      setDraft((current) => ({
+        ...current,
+        featureProfiles: {
+          ...current.featureProfiles,
+          [featureId]: { ...current.featureProfiles[featureId], verifiedTarget: target },
+        },
+      }));
+      notifications.show({
+        color: "green",
+        message: `${ASSIST_FEATURES.find((feature) => feature.id === featureId)?.label ?? featureId}のモデルを確認しました（${formatNumber(result.elapsedMs)}ミリ秒）`,
+      });
+    },
+    onError: (error) => notifications.show({ color: "red", title: "このモデルを試せません", message: errorMessage(error) }),
+  });
+
   const normalizedUrl = normalizeAssistBaseUrl(draft.baseUrl);
   const local = isLocalAssistUrl(draft.baseUrl);
   const externalSecure = local || Boolean(normalizedUrl?.startsWith("https://"));
@@ -128,6 +197,15 @@ export function AssistSection() {
   const saveProblem = validateAssistSettings(draft);
   const selected = found?.find((engine) => engine.baseUrl === draft.baseUrl);
   const models = selected?.models ?? (draft.model ? [draft.model] : []);
+  const updateFeature = (featureId: AssistFeatureId, change: Partial<AssistSettings["featureProfiles"][AssistFeatureId]>) => {
+    setDraft((current) => ({
+      ...current,
+      featureProfiles: {
+        ...current.featureProfiles,
+        [featureId]: { ...current.featureProfiles[featureId], ...change },
+      },
+    }));
+  };
 
   return (
     <Stack gap="lg">
@@ -251,6 +329,118 @@ export function AssistSection() {
               disabled={!runtime}
             />
           </Collapse>
+        </Stack>
+      </Card>
+
+      <Card withBorder p="lg">
+        <Stack gap="md">
+          <div>
+            <Text fw={650}>機能ごとの設定</Text>
+            <Text size="sm" c="dimmed">
+              使う機能だけを有効にし、モデル・追加指示・送る情報の上限を個別に決めます。
+              追加指示は piep の出力契約の後ろに足され、形式や安全条件は変更できません。
+            </Text>
+          </div>
+          {ASSIST_FEATURES.map((feature) => {
+            const profile = draft.featureProfiles[feature.id];
+            const limitsWorks = ["author_style", "collection_split", "collection_naming"].includes(feature.id);
+            const limitsTags = ["work_tagging", "author_style", "collection_split", "collection_naming"].includes(feature.id);
+            const sendsTitle = feature.id !== "search_interpretation";
+            const sendsAuthor = ["work_tagging", "collection_split", "collection_naming"].includes(feature.id);
+            const sendsTags = feature.id !== "search_interpretation";
+            const sendsExcerpt = feature.id === "work_tagging";
+            return (
+              <Card key={feature.id} withBorder padding="sm" bg="var(--mantine-color-default-hover)">
+                <Stack gap="sm">
+                  <Group justify="space-between" align="flex-start" wrap="nowrap">
+                    <div>
+                      <Text size="sm" fw={650}>{feature.label}</Text>
+                      <Text size="xs" c="dimmed">{feature.description}</Text>
+                    </div>
+                    <Switch
+                      aria-label={`${feature.label}を使う`}
+                      checked={profile.enabled}
+                      onChange={(event) => updateFeature(feature.id, { enabled: event.currentTarget.checked })}
+                    />
+                  </Group>
+                  {profile.enabled && (
+                    <>
+                      <TextInput
+                        label="この機能だけで使うモデル"
+                        description="空なら上で選んだ共通モデルを使います"
+                        placeholder={draft.model || "共通モデル"}
+                        value={profile.model}
+                        onChange={(event) => updateFeature(feature.id, { model: event.currentTarget.value, verifiedTarget: null })}
+                      />
+                      {profile.model.trim() && (
+                        <Group justify="space-between" gap="sm">
+                          <Text size="xs" c={profile.verifiedTarget === assistTarget({ baseUrl: draft.baseUrl, model: profile.model }) ? "green" : "dimmed"}>
+                            {profile.verifiedTarget === assistTarget({ baseUrl: draft.baseUrl, model: profile.model })
+                              ? "この接続先とモデルは確認済みです"
+                              : "機能別モデルは一度試してから使えます"}
+                          </Text>
+                          <Button
+                            size="compact-xs"
+                            variant="light"
+                            loading={verifyFeatureModel.isPending && verifyFeatureModel.variables === feature.id}
+                            disabled={!runtime || !normalizeAssistBaseUrl(draft.baseUrl)}
+                            onClick={() => verifyFeatureModel.mutate(feature.id)}
+                          >
+                            このモデルを試す
+                          </Button>
+                        </Group>
+                      )}
+                      <Textarea
+                        label="追加の指示"
+                        description="文体や重視する観点だけを書きます。秘密情報は入力しないでください。"
+                        value={profile.additionalInstructions}
+                        onChange={(event) => updateFeature(feature.id, { additionalInstructions: event.currentTarget.value })}
+                        autosize
+                        minRows={2}
+                        maxRows={5}
+                        maxLength={2_000}
+                      />
+                      {(limitsWorks || limitsTags) && <Group grow align="flex-end">
+                        {limitsWorks && <NumberInput
+                          label="送る作品数の上限"
+                          min={1}
+                          max={1_000}
+                          value={profile.inputPolicy.maxItems ?? 200}
+                          onChange={(value) => updateFeature(feature.id, { inputPolicy: { ...profile.inputPolicy, maxItems: Number(value) || 1 } })}
+                        />}
+                        {limitsTags && <NumberInput
+                          label="1作品あたりのタグ上限"
+                          min={1}
+                          max={100}
+                          value={profile.inputPolicy.maxTagsPerItem ?? 30}
+                          onChange={(value) => updateFeature(feature.id, { inputPolicy: { ...profile.inputPolicy, maxTagsPerItem: Number(value) || 1 } })}
+                        />}
+                      </Group>}
+                      {(sendsTitle || sendsAuthor || sendsTags || sendsExcerpt) && (
+                        <Group gap="lg">
+                          {sendsTitle && <Switch size="sm" label="題名" checked={profile.inputPolicy.includeTitle ?? true} onChange={(event) => updateFeature(feature.id, { inputPolicy: { ...profile.inputPolicy, includeTitle: event.currentTarget.checked } })} />}
+                          {sendsAuthor && <Switch size="sm" label="作者名" checked={profile.inputPolicy.includeAuthor ?? true} onChange={(event) => updateFeature(feature.id, { inputPolicy: { ...profile.inputPolicy, includeAuthor: event.currentTarget.checked } })} />}
+                          {sendsTags && <Switch size="sm" label="タグ" checked={profile.inputPolicy.includeTags ?? true} onChange={(event) => updateFeature(feature.id, { inputPolicy: { ...profile.inputPolicy, includeTags: event.currentTarget.checked } })} />}
+                          {sendsExcerpt && <Switch size="sm" label="概要" checked={profile.inputPolicy.includeExcerpt ?? false} onChange={(event) => updateFeature(feature.id, { inputPolicy: { ...profile.inputPolicy, includeExcerpt: event.currentTarget.checked } })} />}
+                        </Group>
+                      )}
+                    </>
+                  )}
+                </Stack>
+              </Card>
+            );
+          })}
+        </Stack>
+      </Card>
+
+      <Card withBorder p="lg">
+        <Stack gap="sm">
+          <Switch
+            label="作品単位の意味検索を使う"
+            description="言葉で探すとき、作品ごとに一つのベクトルで候補を探します。通常の検索は従来どおり字面検索です。"
+            checked={semanticEnabled}
+            onChange={(event) => setSemanticEnabled(event.currentTarget.checked)}
+          />
         </Stack>
       </Card>
 

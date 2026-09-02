@@ -13,7 +13,7 @@ import { isTauriRuntime } from "@/services/dbApi";
  * 題名とタグだけで作風は言い当てられる。
  */
 export function AuthorAssist({ source, personKey }: { source: string; personKey: string }) {
-  const { engine } = useAssist();
+  const { engine } = useAssist("author_style");
   const queryClient = useQueryClient();
   const subjectKey = `${source}:${personKey}`;
   const key = ["assist-note", "person", subjectKey, "style"] as const;
@@ -41,18 +41,24 @@ export function AuthorAssist({ source, personKey }: { source: string; personKey:
   if (!isTauriRuntime()) return null;
   return (
     <AssistPanel
+      featureId="author_style"
       title="作風のメモ"
       hint="この作者の作品の題名とタグから、よく書いているものを2文でまとめます。本文は送りません。"
       engineReady={Boolean(engine)}
       busy={run.isPending}
       actionLabel={note.data ? "まとめ直す" : "作風をまとめてもらう"}
       onRun={() => run.mutate()}
+      placement="header"
+      registrationKey={`author-style-${source}-${personKey}`}
     >
       {note.data && (
         <AssistNoteBody
           text={note.data.text}
           modelId={note.data.modelId}
           createdAt={note.data.createdAt}
+          promptVersion={note.data.promptVersion}
+          promptStale={note.data.promptStale}
+          inputStale={note.data.inputStale}
           onDiscard={() => discard.mutate()}
         />
       )}

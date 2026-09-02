@@ -34,6 +34,7 @@ vi.mock("@/services/updateJobApi", () => ({
 }));
 
 import {
+  MAX_LIVE_UPDATE_LOGS,
   refreshUpdateJobSummaries,
   useUpdateJobSummaries,
   waitForUpdateJob,
@@ -105,6 +106,38 @@ describe("waitForUpdateJob", () => {
     expect(onItemState).toHaveBeenCalledWith(delta.changedItem);
     expect(onSnapshot).toHaveBeenCalledTimes(2);
     expect(mocks.getJob).toHaveBeenCalledTimes(1);
+  });
+
+  it("bounds a long-running job's live log tail", async () => {
+    const waiting = waitForUpdateJob("save-1", vi.fn());
+    await vi.waitFor(() =>
+      expect(mocks.listeners.has("update-job-progress-delta")).toBe(true),
+    );
+
+    for (let id = 1; id <= MAX_LIVE_UPDATE_LOGS + 20; id += 1) {
+      const terminal = id === MAX_LIVE_UPDATE_LOGS + 20;
+      mocks.listeners.get("update-job-progress-delta")?.({
+        payload: {
+          summary: {
+            ...initial,
+            status: terminal ? "completed" : "running",
+            finishedAt: terminal ? "2026-08-29T00:01:00Z" : null,
+          },
+          changedItem: null,
+          latestLog: {
+            id,
+            logType: "info",
+            message: `log-${id}`,
+            createdAt: "2026-08-29T00:01:00Z",
+          },
+        } satisfies UpdateJobProgressDelta,
+      });
+    }
+
+    const result = await waiting;
+    expect(result.logs).toHaveLength(MAX_LIVE_UPDATE_LOGS);
+    expect(result.logs[0].id).toBe(21);
+    expect(result.logs[result.logs.length - 1].id).toBe(MAX_LIVE_UPDATE_LOGS + 20);
   });
 
   it("shares backend summaries and applies live delta events", async () => {

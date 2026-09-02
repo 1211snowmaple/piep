@@ -1,7 +1,8 @@
 use crate::database::queries::EntityProfileFreshness;
 use crate::database::{
     AcceptCollectionSuggestionInput, AssetEntry, BulkMutationResult, CollectionNameCandidate,
-    CollectionSuggestion, CollectionSuggestionRequest, CollectionSweepResult, DashboardSummary,
+    CollectionAdditionResult, CollectionSuggestion, CollectionSuggestionRequest,
+    CollectionSweepResult, DashboardSummary,
     DbStats, DownloadEntry, EditorDocument, EntityFacet, EntityFacetScope,
     EntityProfileRepairStatus, EntitySeriesPage, EntityVersion, FacetCount, FilterFacets,
     LibraryDiagnostics, LibraryMaintenanceResult, LibraryShelfCounts, NewAsset, PersonEntry,
@@ -163,12 +164,37 @@ pub async fn search_rebuild_index(
         batch_size: None,
         include_semantic: None,
     });
+    let semantic_enabled = match options.include_semantic {
+        Some(enabled) => {
+            run_db_blocking(app.clone(), move |state| {
+                state
+                    .db
+                    .set_semantic_index_enabled(enabled)
+                    .map(|_| enabled)
+            })
+            .await?
+        }
+        None => run_db_blocking(app.clone(), |state| state.db.semantic_index_enabled()).await?,
+    };
     let rebuild_options = crate::database::queries::SearchIndexRebuildOptions {
         chunk_size: options.batch_size.unwrap_or(64).clamp(8, 512) as usize,
-        include_semantic: options.include_semantic.unwrap_or(false),
+        include_semantic: semantic_enabled,
         ..Default::default()
     };
     spawn_rebuild_job(app, rebuild_options, "manual")
+}
+
+/// Persistent capability switch shared by manual rebuilds, automatic
+/// maintenance, and every incremental work update.
+#[tauri::command]
+pub async fn search_set_semantic_enabled(
+    app: tauri::AppHandle,
+    enabled: bool,
+) -> Result<SearchIndexStatus, String> {
+    run_db_blocking(app, move |state| {
+        state.db.set_semantic_index_enabled(enabled)
+    })
+    .await
 }
 
 /// Brings the search index up to date in the background, without being asked.
@@ -186,6 +212,7 @@ pub fn start_automatic_index_maintenance(app: tauri::AppHandle) {
 
         // 記録より先に実物を見る。索引が消えているのに「索引済み」の記録だけが
         // 残っていると、待っている件数は 0 と出て、この仕事は何もせずに帰る。
+        let resync_started = Instant::now();
         match run_db_blocking(app.clone(), |state| state.db.resync_search_index_state()).await {
             Ok(cleared) if cleared > 0 => {
                 log::info!("全文索引が失われていたため、{cleared}件を作り直しの対象へ戻しました");
@@ -193,24 +220,37 @@ pub fn start_automatic_index_maintenance(app: tauri::AppHandle) {
             Ok(_) => {}
             Err(error) => log::warn!("索引の記録を実物と突き合わせられません: {error}"),
         }
+        let resync_elapsed = resync_started.elapsed();
 
-        let pending =
+        let status_started = Instant::now();
+        let status =
             match run_db_blocking(app.clone(), |state| state.db.get_search_index_status()).await {
-                Ok(status) => status.pending_downloads,
+                Ok(status) => status,
                 Err(error) => {
                     log::warn!("Automatic index maintenance skipped: {error}");
                     return;
                 }
             };
+        let status_elapsed = status_started.elapsed();
+        let pending = if status.semantic_enabled {
+            status
+                .pending_downloads
+                .max(status.semantic_pending_downloads)
+        } else {
+            status.pending_downloads
+        };
+        log::info!(
+            "Automatic index preflight: resync {:.1} ms, status {:.1} ms, pending {pending}",
+            resync_elapsed.as_secs_f64() * 1_000.0,
+            status_elapsed.as_secs_f64() * 1_000.0,
+        );
         if pending <= 0 {
             return;
         }
 
         log::info!("Automatic index maintenance starting for {pending} works");
-        // Semantic vectors stay opt-in: they are far slower, and nobody asked
-        // for them to be built behind their back.
         let options = crate::database::queries::SearchIndexRebuildOptions {
-            include_semantic: false,
+            include_semantic: status.semantic_enabled,
             ..Default::default()
         };
         if let Err(error) = spawn_rebuild_job(app, options, "automatic") {
@@ -248,7 +288,10 @@ fn spawn_rebuild_job(
     tauri::async_runtime::spawn(async move {
         let started_at = Instant::now();
         let state = app_for_task.state::<Arc<AppState>>().inner().clone();
+        let gate_wait_started = Instant::now();
         let library_gate = state.library_gate.clone().write_owned().await;
+        let gate_wait_elapsed = gate_wait_started.elapsed();
+        let gate_hold_started = Instant::now();
         let progress_app = app_for_task.clone();
         let progress_job = job_id_for_task.clone();
 
@@ -256,55 +299,71 @@ fn spawn_rebuild_job(
         // short async batches meant re-counting the library between every one
         // of them, and rebuilding the index writer with it.
         let outcome = tokio::task::spawn_blocking(move || {
-            let _library_gate = library_gate;
-            let cancel_flag = cancel.clone();
-            let mut last_emit = Instant::now() - Duration::from_secs(1);
-            state.db.rebuild_search_index(
-                rebuild_options,
-                &move || cancel_flag.load(Ordering::Relaxed),
-                |progress| {
-                    // Roughly ten updates a second: enough for a bar that
-                    // visibly moves, far short of flooding the event channel.
-                    let finished = progress.phase != "indexing";
-                    if !finished && last_emit.elapsed() < Duration::from_millis(100) {
-                        return;
-                    }
-                    last_emit = Instant::now();
-                    let throughput = (progress.elapsed_secs > 0.5)
-                        .then(|| progress.processed as f64 / progress.elapsed_secs);
-                    let eta = throughput.filter(|rate| *rate > 0.0).map(|rate| {
-                        ((progress.total - progress.processed).max(0) as f64 / rate).max(0.0)
-                    });
-                    let _ = progress_app.emit(
-                        "search-index-progress",
-                        SearchRebuildProgress {
-                            job_id: progress_job.clone(),
-                            origin: origin.to_string(),
-                            status: "running".to_string(),
-                            total_downloads: 0,
-                            indexed_downloads: 0,
-                            pending_downloads: (progress.total - progress.processed).max(0),
-                            is_complete: false,
-                            phase: progress.phase.to_string(),
-                            processed: progress.processed,
-                            processed_total: progress.total,
-                            failed: progress.failed,
-                            embedding_provider: String::new(),
-                            gpu_enabled: false,
-                            throughput_per_sec: throughput,
-                            eta_seconds: eta,
-                            error: None,
-                        },
-                    );
-                },
-            )
+            let result = {
+                let _library_gate = library_gate;
+                let cancel_flag = cancel.clone();
+                let mut last_emit = Instant::now() - Duration::from_secs(1);
+                state.db.rebuild_search_index(
+                    rebuild_options,
+                    &move || cancel_flag.load(Ordering::Relaxed),
+                    |progress| {
+                        // Roughly ten updates a second: enough for a bar that
+                        // visibly moves, far short of flooding the event channel.
+                        let finished = progress.phase != "indexing";
+                        if !finished && last_emit.elapsed() < Duration::from_millis(100) {
+                            return;
+                        }
+                        last_emit = Instant::now();
+                        let throughput = (progress.elapsed_secs > 0.5)
+                            .then(|| progress.processed as f64 / progress.elapsed_secs);
+                        let eta = throughput.filter(|rate| *rate > 0.0).map(|rate| {
+                            ((progress.total - progress.processed).max(0) as f64 / rate).max(0.0)
+                        });
+                        let _ = progress_app.emit(
+                            "search-index-progress",
+                            SearchRebuildProgress {
+                                job_id: progress_job.clone(),
+                                origin: origin.to_string(),
+                                status: "running".to_string(),
+                                total_downloads: 0,
+                                indexed_downloads: 0,
+                                pending_downloads: (progress.total - progress.processed).max(0),
+                                is_complete: false,
+                                phase: progress.phase.to_string(),
+                                processed: progress.processed,
+                                processed_total: progress.total,
+                                failed: progress.failed,
+                                embedding_provider: String::new(),
+                                gpu_enabled: false,
+                                throughput_per_sec: throughput,
+                                eta_seconds: eta,
+                                error: None,
+                            },
+                        );
+                    },
+                )
+            };
+            (result, gate_hold_started.elapsed())
         })
         .await;
 
-        let result = match outcome {
-            Ok(result) => result,
-            Err(error) => Err(format!("Search rebuild task failed: {error}")),
+        let (result, gate_hold_elapsed) = match outcome {
+            Ok((result, elapsed)) => (result, Some(elapsed)),
+            Err(error) => (Err(format!("Search rebuild task failed: {error}")), None),
         };
+        match gate_hold_elapsed {
+            Some(elapsed) => log::info!(
+                "Search index {origin} job {job_id_for_task}: gate wait {:.1} ms, gate held {:.1} ms, rebuild task elapsed {:.1} ms",
+                gate_wait_elapsed.as_secs_f64() * 1_000.0,
+                elapsed.as_secs_f64() * 1_000.0,
+                started_at.elapsed().as_secs_f64() * 1_000.0,
+            ),
+            None => log::warn!(
+                "Search index {origin} job {job_id_for_task}: gate wait {:.1} ms, gate held unknown (blocking task failed), rebuild task elapsed {:.1} ms",
+                gate_wait_elapsed.as_secs_f64() * 1_000.0,
+                started_at.elapsed().as_secs_f64() * 1_000.0,
+            ),
+        }
 
         // One final status read, rather than one per batch: the three library
         // wide COUNT(*) queries behind it are what made progress reporting
@@ -790,13 +849,19 @@ pub async fn db_name_collection_with_model(
     app: tauri::AppHandle,
     collection_id: String,
     engine: crate::assist::AssistEngine,
-) -> Result<crate::assist::NamedBundle, String> {
+) -> Result<crate::assist::GeneratedAssist<crate::assist::NamedBundle>, String> {
     let state = app.state::<Arc<AppState>>().inner().clone();
     let works =
         tokio::task::spawn_blocking(move || state.db.collection_naming_works_for(&collection_id))
             .await
             .map_err(|e| format!("Database task failed: {e}"))??;
-    crate::assist::name_bundle(&engine, &works).await
+    let provenance = crate::assist::generation_provenance(
+        &engine,
+        crate::assist::FEATURE_COLLECTION_NAMING,
+        &works,
+    )?;
+    let value = crate::assist::name_bundle(&engine, &works).await?;
+    Ok(crate::assist::GeneratedAssist { value, provenance })
 }
 
 /// 設定したエンジンを、実際の仕事で試す。
@@ -825,8 +890,8 @@ pub async fn db_try_naming_engine(
 
 /// 提案の名前を、利用者が選んだモデルにも考えてもらう。
 ///
-/// 返ってきた案は既存の案に**足す**だけで、置き換えない。決めるのは利用者で
-/// あって、モデルではない。失敗しても提案そのものは壊れない。
+/// 返ってきた案は決定せず、モデル候補だけを更新する。題名・タグなどから作った
+/// 通常候補は置き換えない。失敗しても提案そのものは壊れない。
 #[tauri::command]
 pub async fn db_name_collection_suggestion(
     app: tauri::AppHandle,
@@ -866,9 +931,16 @@ pub async fn db_name_collection_suggestion(
             .await
             .map_err(|e| format!("Database task failed: {e}"))??
     };
+    let provenance = crate::assist::generation_provenance(
+        &engine,
+        crate::assist::FEATURE_COLLECTION_NAMING,
+        &works,
+    )?;
     let named = crate::assist::name_bundle(&engine, &works).await?;
     run_library_write_blocking(app, move |state| {
-        state.db.attach_llm_name_option(&suggestion_id, &named)
+        state
+            .db
+            .attach_llm_name_option(&suggestion_id, &named, &provenance)
     })
     .await
 }
@@ -894,6 +966,20 @@ pub async fn db_sweep_collection_candidates(
     app: tauri::AppHandle,
 ) -> Result<CollectionSweepResult, String> {
     run_library_write_blocking(app, move |state| state.db.sweep_collection_candidates()).await
+}
+
+/// すでにある束へ、あとから入れるとよさそうな作品を探す。
+///
+/// 保存はしない。読むだけの操作なので、棚の書き込み権は取らない。
+#[tauri::command]
+pub async fn db_suggest_collection_additions(
+    app: tauri::AppHandle,
+    collection_id: String,
+) -> Result<CollectionAdditionResult, String> {
+    run_db_blocking(app, move |state| {
+        state.db.suggest_collection_additions(&collection_id)
+    })
+    .await
 }
 
 /// 束の並びを、投稿日順か題名の連番順に一度で整える。

@@ -1,5 +1,5 @@
 import { act, fireEvent, render, renderHook, screen, waitFor } from "@testing-library/react";
-import type { ReactNode } from "react";
+import { lazy, Suspense, type ReactNode } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { AppRouter, matchPath, useAppNavigate, useAppRouter } from "@/app/router";
 import { registerUnsavedGuard } from "@/lib/unsavedGuard";
@@ -53,6 +53,34 @@ describe("AppRouter", () => {
     await act(async () => { result.current.navigate("/library"); });
     expect(window.location.hash).toBe("#/library");
     unregister();
+  });
+
+  it("keeps the painted route visible while the next route bundle loads", async () => {
+    window.location.hash = "#/";
+    let reveal!: () => void;
+    const LazyPage = lazy(() => new Promise<{ default: () => ReactNode }>((resolve) => {
+      reveal = () => resolve({ default: () => <div>next-screen</div> });
+    }));
+    function RouteProbe() {
+      const { pathname, navigate } = useAppRouter();
+      return (
+        <>
+          <button type="button" onClick={() => navigate("/next")}>next</button>
+          {pathname === "/" ? <div>current-screen</div> : <LazyPage />}
+        </>
+      );
+    }
+    render(
+      <AppRouter>
+        <Suspense fallback={<div>route-fallback</div>}><RouteProbe /></Suspense>
+      </AppRouter>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "next" }));
+    expect(screen.getByText("current-screen")).toBeInTheDocument();
+    expect(screen.queryByText("route-fallback")).toBeNull();
+    await act(async () => reveal());
+    expect(await screen.findByText("next-screen")).toBeInTheDocument();
   });
 
   it("rolls a browser back navigation forward again when guarded work is kept", async () => {

@@ -1,7 +1,7 @@
 //! モデルに手伝ってもらう仕事の入口。
 //!
 //! **どれも、利用者が押したときだけ動く。** 裏で走るものは一つも無く、
-//! 設定していなければ画面に出ない。返ってくるのはどれも案であって、
+//! 設定していなければ実行できない状態になる。返ってくるのはどれも案であって、
 //! 保存するかどうかは別のコマンドで、利用者が決めてから呼ぶ。
 //!
 //! 本文を送る仕事（あらすじ・前回のあらすじ）は、材料を読む前に許可を確かめる。
@@ -12,7 +12,9 @@ use tauri::Manager;
 
 use crate::assist::{
     self, AssistEngine, AssistNote, AssistRuntimeProfile, BundleSplit, DiscoveredEngine,
-    SearchIntent, TagProposal,
+    GeneratedAssist, SearchIntent, TagProposal, FEATURE_AUTHOR_STYLE, FEATURE_COLLECTION_SPLIT,
+    FEATURE_NATURAL_LANGUAGE_SEARCH, FEATURE_READER_RECAP, FEATURE_TAG_SUGGESTION,
+    FEATURE_WORK_SYNOPSIS,
 };
 use crate::database::queries::{AiNote, TaggedName};
 use crate::AppState;
@@ -73,7 +75,7 @@ pub async fn assist_suggest_tags(
     app: tauri::AppHandle,
     engine: AssistEngine,
     download_id: i64,
-) -> Result<Vec<TagProposal>, String> {
+) -> Result<GeneratedAssist<Vec<TagProposal>>, String> {
     let (work, vocabulary) = read_blocking(&app, move |state| {
         Ok((
             state.db.work_facts(download_id)?,
@@ -81,7 +83,13 @@ pub async fn assist_suggest_tags(
         ))
     })
     .await?;
-    assist::suggest_tags(&engine, &work, &vocabulary).await
+    let provenance = assist::generation_provenance(
+        &engine,
+        FEATURE_TAG_SUGGESTION,
+        &serde_json::json!({ "work": &work, "vocabulary": &vocabulary }),
+    )?;
+    let value = assist::suggest_tags(&engine, &work, &vocabulary).await?;
+    Ok(GeneratedAssist { value, provenance })
 }
 
 /// 案から選んだタグを、`llm` 印で付ける。
@@ -139,9 +147,15 @@ pub async fn assist_interpret_search(
     app: tauri::AppHandle,
     engine: AssistEngine,
     phrase: String,
-) -> Result<SearchIntent, String> {
+) -> Result<GeneratedAssist<SearchIntent>, String> {
     let vocabulary = read_blocking(&app, move |state| state.db.tag_vocabulary()).await?;
-    assist::interpret_search(&engine, &phrase, &vocabulary).await
+    let provenance = assist::generation_provenance(
+        &engine,
+        FEATURE_NATURAL_LANGUAGE_SEARCH,
+        &serde_json::json!({ "phrase": &phrase, "vocabulary": &vocabulary }),
+    )?;
+    let value = assist::interpret_search(&engine, &phrase, &vocabulary).await?;
+    Ok(GeneratedAssist { value, provenance })
 }
 
 // ---- 作風のメモ -----------------------------------------------------------
@@ -153,7 +167,7 @@ pub async fn assist_describe_author(
     engine: AssistEngine,
     source: String,
     person_key: String,
-) -> Result<AssistNote, String> {
+) -> Result<GeneratedAssist<AssistNote>, String> {
     let key = format!("{source}:{person_key}");
     let (author, works) = read_blocking(&app, {
         let source = source.clone();
@@ -161,16 +175,21 @@ pub async fn assist_describe_author(
         move |state| state.db.author_facts(&source, &person_key)
     })
     .await?;
-    let note = assist::describe_author(&engine, &author, &works).await?;
-    let model = engine.model.clone();
-    let text = note.text.clone();
+    let provenance = assist::generation_provenance(
+        &engine,
+        FEATURE_AUTHOR_STYLE,
+        &serde_json::json!({ "author": &author, "works": &works }),
+    )?;
+    let value = assist::describe_author(&engine, &author, &works).await?;
+    let saved_provenance = provenance.clone();
+    let text = value.text.clone();
     write_blocking(&app, move |state| {
         state
             .db
-            .save_ai_note("person", &key, "style", &text, &model)
+            .save_ai_note_with_provenance("person", &key, "style", &text, &saved_provenance)
     })
     .await?;
-    Ok(note)
+    Ok(GeneratedAssist { value, provenance })
 }
 
 // ---- 束を分ける -----------------------------------------------------------
@@ -181,9 +200,11 @@ pub async fn assist_propose_splits(
     app: tauri::AppHandle,
     engine: AssistEngine,
     collection_id: String,
-) -> Result<Vec<BundleSplit>, String> {
+) -> Result<GeneratedAssist<Vec<BundleSplit>>, String> {
     let works = read_blocking(&app, move |state| state.db.collection_facts(&collection_id)).await?;
-    assist::propose_splits(&engine, &works).await
+    let provenance = assist::generation_provenance(&engine, FEATURE_COLLECTION_SPLIT, &works)?;
+    let value = assist::propose_splits(&engine, &works).await?;
+    Ok(GeneratedAssist { value, provenance })
 }
 
 // ---- あらすじ -------------------------------------------------------------
@@ -196,22 +217,31 @@ pub async fn assist_summarize_work(
     app: tauri::AppHandle,
     engine: AssistEngine,
     download_id: i64,
-) -> Result<AssistNote, String> {
+) -> Result<GeneratedAssist<AssistNote>, String> {
     assist::ensure_body_allowed(&engine)?;
     let (work, body) = read_blocking(&app, move |state| {
         state.db.work_facts_with_body(download_id)
     })
     .await?;
-    let note = assist::summarize_work(&engine, &work, &body).await?;
-    let model = engine.model.clone();
-    let text = note.text.clone();
+    let provenance = assist::generation_provenance(
+        &engine,
+        FEATURE_WORK_SYNOPSIS,
+        &serde_json::json!({ "work": &work, "body": &body }),
+    )?;
+    let value = assist::summarize_work(&engine, &work, &body).await?;
+    let saved_provenance = provenance.clone();
+    let text = value.text.clone();
     write_blocking(&app, move |state| {
-        state
-            .db
-            .save_ai_note("work", &download_id.to_string(), "synopsis", &text, &model)
+        state.db.save_ai_note_with_provenance(
+            "work",
+            &download_id.to_string(),
+            "synopsis",
+            &text,
+            &saved_provenance,
+        )
     })
     .await?;
-    Ok(note)
+    Ok(GeneratedAssist { value, provenance })
 }
 
 /// 直前の話の要点を出す。連載の続きを、間を空けて読むときのため。
@@ -221,23 +251,35 @@ pub async fn assist_recap_previous(
     engine: AssistEngine,
     previous_download_id: i64,
     current_download_id: i64,
-) -> Result<AssistNote, String> {
+) -> Result<GeneratedAssist<AssistNote>, String> {
     assist::ensure_body_allowed(&engine)?;
     let (work, body) = read_blocking(&app, move |state| {
         state.db.work_facts_with_body(previous_download_id)
     })
     .await?;
-    let note = assist::recap_previous(&engine, &work.title, &body).await?;
+    let provenance = assist::generation_provenance(
+        &engine,
+        FEATURE_READER_RECAP,
+        &serde_json::json!({
+            "previousDownloadId": previous_download_id,
+            "currentDownloadId": current_download_id,
+            "work": &work,
+            "body": &body
+        }),
+    )?;
+    let value = assist::recap_previous(&engine, &work.title, &body).await?;
     // 覚え書きは**読もうとしている話**にぶら下げる。同じ前の話でも、
     // どの続きを読む前かで欲しいものが変わることがある。
     let key = recap_note_key(current_download_id, previous_download_id);
-    let model = engine.model.clone();
-    let text = note.text.clone();
+    let saved_provenance = provenance.clone();
+    let text = value.text.clone();
     write_blocking(&app, move |state| {
-        state.db.save_ai_note("work", &key, "recap", &text, &model)
+        state
+            .db
+            .save_ai_note_with_provenance("work", &key, "recap", &text, &saved_provenance)
     })
     .await?;
-    Ok(note)
+    Ok(GeneratedAssist { value, provenance })
 }
 
 #[cfg(test)]

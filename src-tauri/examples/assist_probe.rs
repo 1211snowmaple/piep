@@ -27,6 +27,7 @@ async fn main() -> Result<(), String> {
         model: discovered.models[0].clone(),
         remote_consent_url: None,
         allow_body: true,
+        feature_profile: None,
     };
     println!("使うモデル: {} @ {}\n", engine.model, engine.base_url);
 

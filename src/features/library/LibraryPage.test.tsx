@@ -8,7 +8,7 @@ import { WorkspaceProvider } from "@/app/WorkspaceContext";
 import { theme } from "@/theme";
 import { searchDemoWorks } from "@/mocks/demoData";
 import type { SearchV2Params } from "@/types/library";
-import LibraryPage, { resolveSortBy, rollbackWorkFlag, searchSuggestionAction, updateWorkFlag } from "./LibraryPage";
+import LibraryPage, { parseSavedParams, resolveSortBy, rollbackWorkFlag, searchSuggestionAction, updateWorkFlag } from "./LibraryPage";
 
 describe("LibraryPage search", () => {
   beforeAll(() => {
@@ -117,6 +117,23 @@ describe("LibraryPage search", () => {
     expect(screen.getByLabelText("ギャラリー表示")).toBeInTheDocument();
   });
 
+  it("does not create a second library query when only the presentation changes", async () => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
+
+    await screen.findAllByText("雨上がりの図書室で");
+    const before = client.getQueryCache().findAll({ queryKey: ["library"] })[0];
+    expect(before).toBeDefined();
+    const updatedAt = before?.state.dataUpdatedAt;
+
+    fireEvent.click(screen.getByLabelText("リスト表示"));
+
+    await waitFor(() => expect(window.localStorage.getItem("piep.library-view")).toBe(JSON.stringify("compact")));
+    const libraryQueries = client.getQueryCache().findAll({ queryKey: ["library"] });
+    expect(libraryQueries).toEqual([before]);
+    expect(libraryQueries[0]?.state.dataUpdatedAt).toBe(updatedAt);
+  });
+
   it("stages expensive filters until Apply and validates the URL-owned flags once", async () => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
@@ -174,11 +191,13 @@ describe("LibraryPage search", () => {
     render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
 
     expect(await screen.findByText("適用中")).toBeInTheDocument();
-    expect(screen.getByText("#創作")).toBeInTheDocument();
+    expect(screen.getByText("#創作").closest(".filter-token")).toBeInTheDocument();
     // And the drawer opens onto the conditions actually in force, rather than
     // an empty form that disagrees with the results behind it.
     fireEvent.click(screen.getByRole("button", { name: "絞り込み" }));
-    expect(await screen.findByRole("checkbox", { name: "pixiv" })).toBeChecked();
+    const drawer = await screen.findByRole("dialog", { name: "詳細フィルター" });
+    expect(within(drawer).getByRole("checkbox", { name: "pixiv" })).toBeChecked();
+    expect(within(drawer).getByText("創作").closest(".filter-token")).toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: "最小文字数" })).toHaveValue("5,000");
   });
 
@@ -309,5 +328,32 @@ describe("library entity paging", () => {
     fireEvent.click(screen.getByRole("radio", { name: "ページ番号" }));
     await waitFor(() => expect(screen.queryByLabelText("七瀬あかりを開く")).not.toBeInTheDocument());
     expect(screen.getByLabelText("青葉しおりを開く")).toBeInTheDocument();
+  });
+});
+
+/**
+ * 保存した検索は、条件だけでなく**検索の種類**も覚えていなければならない。
+ *
+ * 「言葉で探す」で作った検索を保存し、サイドバーから開き直すと、意味検索が
+ * 字面検索に落ちていた。しかも検索欄に残っているのは利用者が打った言葉では
+ * なくモデルの言い換えなので、開き直した結果は元の検索とも、素直な字面検索とも
+ * 違うものになる。いちばん静かな壊れ方だった。
+ */
+describe("saved search parameters", () => {
+  it("remembers that a search was a semantic one", () => {
+    const saved = JSON.stringify({ tab: "works", filters: {}, sortBy: "downloaded_at", searchMode: "semantic" });
+    expect(parseSavedParams(saved).searchMode).toBe("semantic");
+  });
+
+  it("treats an ordinary search as an ordinary search", () => {
+    const saved = JSON.stringify({ tab: "works", filters: {}, sortBy: "downloaded_at" });
+    expect(parseSavedParams(saved).searchMode).toBeNull();
+  });
+
+  /** 知らない値を意味検索として扱わない。壊れた保存が検索の種類を変えない。 */
+  it("does not promote an unknown mode to semantic", () => {
+    const saved = JSON.stringify({ tab: "works", filters: {}, searchMode: "hybrid" });
+    expect(parseSavedParams(saved).searchMode).toBeNull();
+    expect(parseSavedParams("{ not json").searchMode).toBeNull();
   });
 });

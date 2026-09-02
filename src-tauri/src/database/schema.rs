@@ -38,8 +38,9 @@ pub fn initialize(conn: &Connection) -> Result<(), rusqlite::Error> {
         // 起動が止まっても、「半分だけ新しいDB」を残さない。
         let tx = conn.unchecked_transaction()?;
         create_schema(&tx)?;
-        add_missing_columns(&tx)?;
-        retire_update_job_request_blob(&tx)?;
+        // create_schema -> create_additional_tables already performs the
+        // idempotent column checks and legacy request migration. Repeating
+        // both here doubled the schema PRAGMA traffic on every startup.
         normalize_legacy_save_job_target_types(&tx)?;
         stamp_schema_version(&tx)?;
         tx.commit()?;
@@ -113,6 +114,15 @@ fn create_additional_tables(conn: &Connection) -> Result<(), rusqlite::Error> {
          );
          CREATE INDEX IF NOT EXISTS idx_semantic_index_state_version
             ON semantic_index_state(current_version, content_hash, model_id);
+
+         CREATE TABLE IF NOT EXISTS search_feature_settings (
+            singleton_id     INTEGER PRIMARY KEY CHECK(singleton_id = 1),
+            semantic_enabled INTEGER NOT NULL DEFAULT 0 CHECK(semantic_enabled IN (0, 1)),
+            updated_at       TEXT NOT NULL
+         );
+         INSERT OR IGNORE INTO search_feature_settings (
+            singleton_id, semantic_enabled, updated_at
+         ) VALUES (1, 0, CURRENT_TIMESTAMP);
 
          -- 見つけたが、まだ保存も拒否もしていない作品。
          --
@@ -235,6 +245,10 @@ fn create_additional_tables(conn: &Connection) -> Result<(), rusqlite::Error> {
             note_kind     TEXT NOT NULL,
             text          TEXT NOT NULL,
             model_id      TEXT NOT NULL,
+            feature_id    TEXT NOT NULL,
+            prompt_version TEXT NOT NULL,
+            input_fingerprint TEXT NOT NULL,
+            config_fingerprint TEXT NOT NULL,
             created_at    TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY(subject_type, subject_key, note_kind)
          );
@@ -332,6 +346,16 @@ fn add_missing_columns(conn: &Connection) -> Result<(), rusqlite::Error> {
             "tag_source",
             "TEXT NOT NULL DEFAULT 'origin'",
         ),
+        // LLM派生物は、モデル名だけでは作り直すべきか判断できない。
+        // 固定prompt・入力・機能設定の各指紋を独立して残す。
+        ("ai_notes", "feature_id", "TEXT NOT NULL DEFAULT 'legacy'"),
+        (
+            "ai_notes",
+            "prompt_version",
+            "TEXT NOT NULL DEFAULT 'legacy/v1'",
+        ),
+        ("ai_notes", "input_fingerprint", "TEXT NOT NULL DEFAULT ''"),
+        ("ai_notes", "config_fingerprint", "TEXT NOT NULL DEFAULT ''"),
     ] {
         if !column_exists(conn, table, column)? {
             conn.execute_batch(&format!(

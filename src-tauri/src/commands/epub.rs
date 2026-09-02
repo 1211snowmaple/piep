@@ -725,9 +725,11 @@ pub async fn export_collection_epub(
 // バッチエクスポート
 // ============================================================
 
-/// Image conversion is CPU- and memory-heavy. Two workers keep the async
-/// runtime responsive without multiplying the per-book image quota unchecked.
-const MAX_CONCURRENT_EPUB_BUILDS: usize = 2;
+/// Image decoding/compression and validation both have a large per-book peak.
+/// Run one book at a time: parallel books made batch export compete with the
+/// UI for RAM and CPU even though each individual build is already parallel
+/// where the image codec benefits from it.
+const MAX_CONCURRENT_EPUB_BUILDS: usize = 1;
 
 enum BatchItemStatus {
     Published(String),

@@ -1,17 +1,13 @@
-use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
-use std::fs::OpenOptions;
-use std::io::Write;
-#[cfg(windows)]
-use std::os::windows::ffi::OsStrExt;
+use std::cmp::{Ordering, Reverse};
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+#[cfg(not(test))]
+use std::time::{Duration, Instant};
 
 #[cfg(not(test))]
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
-use hnsw_rs::prelude::{AnnT, DistCosine, Hnsw};
-use rusqlite::{params, Connection};
-use serde::{Deserialize, Serialize};
+use rusqlite::{params, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 #[cfg(not(test))]
 use std::sync::Mutex;
@@ -20,19 +16,22 @@ use std::sync::Mutex;
 use super::search_normalization::{query_variants, search_index_text};
 
 const INDEX_DIR_NAME: &str = "search";
-const INDEX_VERSION_DIR: &str = "semantic-v1";
+const INDEX_VERSION_DIR: &str = "semantic-v2";
 const INDEX_FILE_NAME: &str = "index.sqlite";
 const MODEL_ID: &str = "intfloat/multilingual-e5-small";
 const VECTOR_DIMENSION: usize = 384;
 const CHUNK_TARGET_CHARS: usize = 620;
 const CHUNK_OVERLAP_CHARS: usize = 80;
-const ANN_MANIFEST_FILE: &str = "ann-manifest.json";
-const ANN_FORMAT_VERSION: u32 = 1;
 
 #[cfg(not(test))]
-static MODEL: OnceLock<Result<Mutex<EmbeddingRuntime>, String>> = OnceLock::new();
-static ANN_BUILD_LOCK: OnceLock<parking_lot::Mutex<()>> = OnceLock::new();
+// Only successful initialization is cached. A transient download/runtime
+// failure must not poison semantic search until the whole app is restarted.
+static MODEL: OnceLock<Mutex<EmbeddingRuntimeSlot>> = OnceLock::new();
+#[cfg(not(test))]
+static MODEL_REAPER_STARTED: OnceLock<()> = OnceLock::new();
 static MODEL_CACHE_DIR: OnceLock<PathBuf> = OnceLock::new();
+#[cfg(not(test))]
+const MODEL_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 /// fastembed が指定なしのときに使う置き場。**現在の作業ディレクトリ相対**。
 const FASTEMBED_DEFAULT_CACHE_DIR: &str = ".fastembed_cache";
 const MODEL_DIR_NAME: &str = "models";
@@ -124,6 +123,10 @@ pub struct SemanticSearchHit {
 
 #[derive(Debug, Clone, Default)]
 pub struct SemanticIndexStatus {
+    /// Number of searchable works.  One row is always one library work.
+    pub indexed_works: i64,
+    /// Kept as a wire-compatible alias while the UI is renamed from chunks to
+    /// works.  This is deliberately the work count, not a passage count.
     pub indexed_chunks: i64,
     pub model_ready: bool,
     pub provider: String,
@@ -132,7 +135,6 @@ pub struct SemanticIndexStatus {
 
 #[derive(Debug, Clone)]
 struct ChunkInput {
-    chunk_id: String,
     field: String,
     text: String,
 }
@@ -144,57 +146,32 @@ struct EmbeddingRuntime {
     gpu_enabled: bool,
 }
 
-#[derive(Debug, Clone)]
-struct ChunkRecord {
-    download_id: i64,
-    chunk: ChunkInput,
-}
-
-#[derive(Debug, Clone)]
-struct ChunkMeta {
-    download_id: i64,
-    chunk_id: String,
-    field: String,
-    text: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct AnnManifest {
-    format_version: u32,
-    model_id: String,
-    dimension: usize,
-    shard_span: i64,
-    shards: Vec<AnnShard>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct AnnShard {
-    bucket: i64,
-    fingerprint: String,
-    basename: String,
-    count: usize,
+#[cfg(not(test))]
+#[derive(Default)]
+struct EmbeddingRuntimeSlot {
+    runtime: Option<EmbeddingRuntime>,
+    last_used: Option<Instant>,
 }
 
 pub fn upsert_documents(
     storage_dir: &Path,
     docs: &[SemanticIndexDocument],
-) -> Result<usize, String> {
+) -> Result<Vec<i64>, String> {
     if docs.is_empty() {
-        return Ok(0);
+        return Ok(Vec::new());
     }
 
-    let mut records = Vec::new();
-    for doc in docs {
-        records.extend(build_chunks(doc).into_iter().map(|chunk| ChunkRecord {
-            download_id: doc.download_id,
-            chunk,
-        }));
-    }
+    // Keep the chunks grouped by work. Rebuilding every work's chunks again
+    // after inference doubled the text scanning and allocations for long
+    // documents, precisely while a large-library rebuild is already busy.
+    let chunks_by_doc = docs.iter().map(build_chunks).collect::<Vec<_>>();
 
-    let passages = records
+    let passages = chunks_by_doc
         .iter()
-        .map(|record| format!("passage: {}", record.chunk.text))
+        .flatten()
+        .map(|record| format!("passage: {}", record.text))
         .collect::<Vec<_>>();
+    let passage_count = passages.len();
     let vectors = if passages.is_empty() {
         Vec::new()
     } else {
@@ -207,7 +184,7 @@ pub fn upsert_documents(
         .map_err(|e| format!("Semantic transaction failed: {}", e))?;
     for doc in docs {
         tx.execute(
-            "DELETE FROM semantic_chunks WHERE download_id = ?1",
+            "DELETE FROM semantic_works WHERE download_id = ?1",
             params![doc.download_id],
         )
         .map_err(|e| format!("Semantic clear failed: {}", e))?;
@@ -215,14 +192,14 @@ pub fn upsert_documents(
     // **`zip` は短いほうで黙って打ち切る。** 直前にその作品の断片を全部
     // 消しているので、返ったベクトルが足りなければ、消したぶんの一部が二度と
     // 入らない。エラーにもならず、意味検索からその作品が静かに欠ける。
-    if records.len() != vectors.len() {
+    if passage_count != vectors.len() {
         return Err(format!(
             "Semantic embedding count mismatch: sent {}, received {}",
-            records.len(),
+            passage_count,
             vectors.len()
         ));
     }
-    for (record, vector) in records.iter().zip(vectors.iter()) {
+    for vector in &vectors {
         if vector.len() != VECTOR_DIMENSION {
             return Err(format!(
                 "Semantic model dimension mismatch: expected {}, got {}",
@@ -230,28 +207,111 @@ pub fn upsert_documents(
                 vector.len()
             ));
         }
+    }
+
+    let mut offset = 0usize;
+    let mut indexed = Vec::with_capacity(docs.len());
+    for (doc, chunks) in docs.iter().zip(chunks_by_doc.iter()) {
+        let end = offset.saturating_add(chunks.len());
+        let doc_vectors = vectors
+            .get(offset..end)
+            .ok_or_else(|| "Semantic work vector range is incomplete".to_string())?;
+        offset = end;
+
+        let body_vectors = chunks
+            .iter()
+            .zip(doc_vectors.iter())
+            .filter(|(chunk, _)| chunk.field == "body")
+            .map(|(_, vector)| vector.as_slice())
+            .collect::<Vec<_>>();
+        let content_vector = mean_normalized_vector(&body_vectors);
+        let content_preview = chunks
+            .iter()
+            .find(|chunk| chunk.field == "body")
+            .map(|chunk| chunk.text.as_str())
+            .unwrap_or("");
+        let metadata_index = chunks.iter().position(|chunk| chunk.field == "metadata");
+        // A body-only work is still searchable. Previously it was skipped here
+        // but its SQLite coverage row was recorded as successful, making it
+        // permanently absent from semantic results. Use the normalized body
+        // centroid as its metadata fallback and report only actually inserted
+        // ids to the caller.
+        let (metadata_text, metadata_vector) = match metadata_index {
+            Some(index) => {
+                let Some(vector) = unit_vector(doc_vectors[index].clone()) else {
+                    log::warn!(
+                        "Semantic metadata vector for {} had no direction; skipping",
+                        doc.download_id
+                    );
+                    continue;
+                };
+                (chunks[index].text.as_str(), vector)
+            }
+            None => {
+                let Some(vector) = content_vector.clone() else {
+                    continue;
+                };
+                (content_preview, vector)
+            }
+        };
+
         tx.execute(
-            "INSERT OR REPLACE INTO semantic_chunks (
-                download_id, chunk_id, field, text, text_hash, model_id, dimension, vector, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "INSERT OR REPLACE INTO semantic_works (
+                download_id, metadata_text, content_preview, metadata_hash, content_hash,
+                model_id, dimension, metadata_vector, content_vector, content_chunk_count,
+                updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
-                record.download_id,
-                record.chunk.chunk_id,
-                record.chunk.field,
-                record.chunk.text,
-                hash_text(&record.chunk.text),
+                doc.download_id,
+                metadata_text,
+                content_preview,
+                hash_text(metadata_text),
+                hash_text(&doc.body),
                 MODEL_ID,
                 VECTOR_DIMENSION as i64,
-                vector_to_blob(vector),
+                vector_to_blob(&metadata_vector),
+                content_vector.as_deref().map(vector_to_blob),
+                body_vectors.len() as i64,
                 chrono::Utc::now().to_rfc3339(),
             ],
         )
-        .map_err(|e| format!("Semantic chunk insert failed: {}", e))?;
+        .map_err(|e| format!("Semantic work insert failed: {e}"))?;
+        indexed.push(doc.download_id);
     }
     tx.commit()
         .map_err(|e| format!("Semantic transaction commit failed: {}", e))?;
-    invalidate_ann_cache(storage_dir);
-    Ok(records.len())
+    Ok(indexed)
+}
+
+#[derive(Debug)]
+struct RankedSemanticCandidate {
+    download_id: i64,
+    score: f64,
+    content: bool,
+}
+
+impl PartialEq for RankedSemanticCandidate {
+    fn eq(&self, other: &Self) -> bool {
+        self.score.total_cmp(&other.score) == Ordering::Equal
+            && self.download_id == other.download_id
+    }
+}
+
+impl Eq for RankedSemanticCandidate {}
+
+impl PartialOrd for RankedSemanticCandidate {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for RankedSemanticCandidate {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.score
+            .total_cmp(&other.score)
+            // At an equal score the smaller id is the stable better result.
+            .then_with(|| other.download_id.cmp(&self.download_id))
+    }
 }
 
 pub fn clear_document(storage_dir: &Path, download_id: i64) -> Result<(), String> {
@@ -272,7 +332,7 @@ pub fn clear_documents(storage_dir: &Path, download_ids: &[i64]) -> Result<(), S
         .map_err(|e| format!("Semantic clear transaction failed: {e}"))?;
     {
         let mut statement = tx
-            .prepare("DELETE FROM semantic_chunks WHERE download_id = ?1")
+            .prepare("DELETE FROM semantic_works WHERE download_id = ?1")
             .map_err(|e| format!("Semantic clear prepare failed: {e}"))?;
         for download_id in download_ids {
             statement
@@ -282,7 +342,13 @@ pub fn clear_documents(storage_dir: &Path, download_ids: &[i64]) -> Result<(), S
     }
     tx.commit()
         .map_err(|e| format!("Semantic clear commit failed: {e}"))?;
-    invalidate_ann_cache(storage_dir);
+    Ok(())
+}
+
+pub fn clear_all_works(storage_dir: &Path) -> Result<(), String> {
+    let conn = open_index(storage_dir)?;
+    conn.execute("DELETE FROM semantic_works", [])
+        .map_err(|e| format!("Semantic work index clear failed: {e}"))?;
     Ok(())
 }
 
@@ -311,59 +377,103 @@ pub fn search_with_query_text(
     let query_vector = embed_texts(vec![format!("query: {}", query_text)])?
         .into_iter()
         .next()
+        .and_then(unit_vector)
         .ok_or_else(|| "Semantic query embedding returned no vector".to_string())?;
 
-    // **読み終えるまで、床板を抜かれないようにする。**
-    //
-    // マニフェストを受け取ったあとロックが外れていたので、その隙に別の
-    // スレッドが作り直すと、`cleanup_old_ann_files` が古いファイルを消す。
-    // こちらの `load_hnsw` は失敗し、呼び出し元は warn を出して空を返す -
-    // 利用者からは「意味検索がときどき何も返さない」に見える。
-    // 組み立てと同じ錠を、読み終わるまで握る。
-    let manifest = ensure_ann_shards(storage_dir)?;
-    let _shard_guard = ann_build_lock().lock();
     let conn = open_index(storage_dir)?;
-    let mut hits = Vec::with_capacity(limit.saturating_mul(manifest.shards.len().min(8)));
-    for shard in &manifest.shards {
-        let mut loader = hnsw_rs::prelude::HnswIo::new(&ann_dir(storage_dir), &shard.basename);
-        let ann: Hnsw<'_, f32, DistCosine> = loader
-            .load_hnsw::<f32, DistCosine>()
-            .map_err(|error| format!("Semantic ANN shard load failed: {error}"))?;
-        let neighbours = ann.search(
-            &query_vector,
-            limit.saturating_mul(4).max(32),
-            limit.saturating_mul(8).max(64),
-        );
-        let ids = neighbours
-            .iter()
-            .map(|neighbour| neighbour.d_id as i64)
-            .collect::<Vec<_>>();
-        let metadata = chunk_metadata_by_rowid(&conn, &ids)?;
-        for neighbour in neighbours {
-            let Some(meta) = metadata.get(&(neighbour.d_id as i64)) else {
-                continue;
+    let mut statement = conn
+        .prepare(
+            "SELECT download_id, metadata_vector, content_vector
+               FROM semantic_works
+              WHERE model_id = ?1 AND dimension = ?2",
+        )
+        .map_err(|e| format!("Semantic work search prepare failed: {e}"))?;
+    let rows = statement
+        .query_map(params![MODEL_ID, VECTOR_DIMENSION as i64], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, Vec<u8>>(1)?,
+                row.get::<_, Option<Vec<u8>>>(2)?,
+            ))
+        })
+        .map_err(|e| format!("Semantic work search failed: {e}"))?;
+    // Keep only the requested top-k while scanning. The former Vec retained
+    // and sorted every qualifying work, and also loaded both preview strings
+    // for the entire library. Text is fetched only for the final results.
+    let mut candidates = BinaryHeap::<Reverse<RankedSemanticCandidate>>::new();
+    for row in rows {
+        let (download_id, metadata_blob, content_blob) =
+            row.map_err(|e| format!("Semantic work search read failed: {e}"))?;
+        let metadata_score = cosine_similarity_blob(&query_vector, &metadata_blob);
+        let content_score = content_blob
+            .as_deref()
+            .filter(|blob| blob.len() == VECTOR_DIMENSION * std::mem::size_of::<f32>())
+            .map(|blob| cosine_similarity_blob(&query_vector, blob));
+        let (score, content) = match content_score {
+            Some(content_score) => {
+                let combined = metadata_score * 0.35 + content_score * 0.65;
+                if content_score >= metadata_score {
+                    (combined.max(content_score * 0.9), true)
+                } else {
+                    (combined.max(metadata_score * 0.9), false)
+                }
+            }
+            None => (metadata_score, false),
+        };
+        if score >= 0.18 {
+            let candidate = RankedSemanticCandidate {
+                download_id,
+                score,
+                content,
             };
-            let score = (1.0 - neighbour.distance as f64).clamp(0.0, 1.0);
-            if score >= 0.18 {
-                hits.push(SemanticSearchHit {
-                    download_id: meta.download_id,
-                    chunk_id: meta.chunk_id.clone(),
-                    field: meta.field.clone(),
-                    text: meta.text.clone(),
-                    score,
-                });
+            if candidates.len() < limit {
+                candidates.push(Reverse(candidate));
+            } else if candidates
+                .peek()
+                .is_some_and(|worst| candidate > worst.0)
+            {
+                candidates.pop();
+                candidates.push(Reverse(candidate));
             }
         }
     }
 
-    hits.sort_by(|a, b| {
+    let mut candidates = candidates
+        .into_iter()
+        .map(|entry| entry.0)
+        .collect::<Vec<_>>();
+    candidates.sort_by(|a, b| {
         b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(Ordering::Equal)
+            .total_cmp(&a.score)
             .then_with(|| a.download_id.cmp(&b.download_id))
     });
-    hits.truncate(limit);
-    Ok(hits)
+    let mut text_statement = conn
+        .prepare(
+            "SELECT metadata_text, content_preview FROM semantic_works WHERE download_id = ?1",
+        )
+        .map_err(|e| format!("Semantic result text prepare failed: {e}"))?;
+    candidates
+        .into_iter()
+        .map(|candidate| {
+            let (metadata, content): (String, String) = text_statement
+                .query_row(params![candidate.download_id], |row| {
+                    Ok((row.get(0)?, row.get(1)?))
+                })
+                .map_err(|e| format!("Semantic result text read failed: {e}"))?;
+            Ok(SemanticSearchHit {
+                download_id: candidate.download_id,
+                chunk_id: "work".to_string(),
+                field: if candidate.content {
+                    "content"
+                } else {
+                    "metadata"
+                }
+                .to_string(),
+                text: if candidate.content { content } else { metadata },
+                score: candidate.score,
+            })
+        })
+        .collect()
 }
 
 /// 索引に残った、もう存在しない作品の行を落とす。
@@ -378,7 +488,7 @@ pub fn search_with_query_text(
 pub fn prune_missing_documents(storage_dir: &Path, alive: &HashSet<i64>) -> Result<usize, String> {
     let conn = open_index(storage_dir)?;
     let indexed = conn
-        .prepare("SELECT DISTINCT download_id FROM semantic_chunks")
+        .prepare("SELECT download_id FROM semantic_works")
         .and_then(|mut stmt| {
             stmt.query_map([], |row| row.get::<_, i64>(0))?
                 .collect::<Result<Vec<_>, _>>()
@@ -413,8 +523,8 @@ pub fn work_centroids(
     let conn = open_index(storage_dir)?;
     let mut stmt = conn
         .prepare(
-            "SELECT download_id, vector FROM semantic_chunks
-              WHERE field = 'body' AND model_id = ?1 AND dimension = ?2",
+            "SELECT download_id, content_vector FROM semantic_works
+              WHERE content_vector IS NOT NULL AND model_id = ?1 AND dimension = ?2",
         )
         .map_err(|e| format!("Semantic centroid prepare failed: {e}"))?;
     let rows = stmt
@@ -423,7 +533,7 @@ pub fn work_centroids(
         })
         .map_err(|e| format!("Semantic centroid query failed: {e}"))?;
 
-    let mut sums: HashMap<i64, (Vec<f64>, usize)> = HashMap::new();
+    let mut out = HashMap::new();
     for row in rows {
         let (download_id, blob) = row.map_err(|e| format!("Semantic centroid read failed: {e}"))?;
         if !wanted.contains(&download_id) {
@@ -433,30 +543,122 @@ pub fn work_centroids(
         if vector.len() != VECTOR_DIMENSION {
             continue;
         }
-        let entry = sums
-            .entry(download_id)
-            .or_insert_with(|| (vec![0.0; VECTOR_DIMENSION], 0));
-        for (slot, value) in entry.0.iter_mut().zip(vector.iter()) {
-            *slot += *value as f64;
-        }
-        entry.1 += 1;
-    }
-
-    let mut out = HashMap::with_capacity(sums.len());
-    for (download_id, (sum, count)) in sums {
-        if count == 0 {
-            continue;
-        }
-        let norm = sum.iter().map(|value| value * value).sum::<f64>().sqrt();
-        if norm <= f64::EPSILON {
-            continue;
-        }
-        out.insert(
-            download_id,
-            sum.iter().map(|value| (value / norm) as f32).collect(),
-        );
+        out.insert(download_id, vector);
     }
     Ok(out)
+}
+
+/// Finds related works from already-indexed work vectors without loading the
+/// embedding model.  Collection suggestions use this path: their input is a
+/// work, not a free-form query, so embedding its title again only loses
+/// information and can unexpectedly start a model download.
+pub fn similar_works(
+    storage_dir: &Path,
+    seed_ids: &[i64],
+    limit: usize,
+) -> Result<Vec<(i64, f64)>, String> {
+    if seed_ids.is_empty() || limit == 0 {
+        return Ok(Vec::new());
+    }
+    let conn = open_index(storage_dir)?;
+    let seed_set = seed_ids.iter().copied().collect::<HashSet<_>>();
+    let mut seed_statement = conn
+        .prepare(
+            "SELECT metadata_vector, content_vector
+               FROM semantic_works
+              WHERE download_id = ?1 AND model_id = ?2 AND dimension = ?3",
+        )
+        .map_err(|e| format!("Semantic seed prepare failed: {e}"))?;
+    let mut seeds = Vec::with_capacity(seed_set.len());
+    for id in &seed_set {
+        let row = seed_statement
+            .query_row(params![id, MODEL_ID, VECTOR_DIMENSION as i64], |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, Option<Vec<u8>>>(1)?,
+                ))
+            })
+            .optional()
+            .map_err(|e| format!("Semantic seed read failed: {e}"))?;
+        if let Some((metadata, content)) = row {
+            let metadata = blob_to_vector(&metadata);
+            let content = content.as_deref().map(blob_to_vector);
+            if metadata.len() == VECTOR_DIMENSION
+                && content.as_ref().is_none_or(|vector| vector.len() == VECTOR_DIMENSION)
+            {
+                seeds.push((metadata, content));
+            }
+        }
+    }
+    if seeds.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut statement = conn
+        .prepare(
+            "SELECT download_id, metadata_vector, content_vector
+               FROM semantic_works
+              WHERE model_id = ?1 AND dimension = ?2",
+        )
+        .map_err(|e| format!("Semantic related-work prepare failed: {e}"))?;
+    let rows = statement
+        .query_map(params![MODEL_ID, VECTOR_DIMENSION as i64], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, Vec<u8>>(1)?,
+                row.get::<_, Option<Vec<u8>>>(2)?,
+            ))
+        })
+        .map_err(|e| format!("Semantic related-work query failed: {e}"))?;
+
+    let mut candidates = BinaryHeap::<Reverse<RankedSemanticCandidate>>::new();
+    for row in rows {
+        let (id, metadata, content) =
+            row.map_err(|e| format!("Semantic related-work read failed: {e}"))?;
+        if seed_set.contains(&id) {
+            continue;
+        }
+        let score = seeds
+            .iter()
+            .map(|(seed_metadata, seed_content)| {
+                let metadata_score = cosine_similarity_blob(seed_metadata, &metadata);
+                match (seed_content.as_deref(), content.as_deref()) {
+                    (Some(seed), Some(candidate)) => {
+                        metadata_score * 0.30 + cosine_similarity_blob(seed, candidate) * 0.70
+                    }
+                    _ => metadata_score,
+                }
+            })
+            .fold(0.0_f64, f64::max);
+        if score < 0.18 {
+            continue;
+        }
+        let candidate = RankedSemanticCandidate {
+            download_id: id,
+            score,
+            content: false,
+        };
+        if candidates.len() < limit {
+            candidates.push(Reverse(candidate));
+        } else if candidates
+            .peek()
+            .is_some_and(|worst| candidate > worst.0)
+        {
+            candidates.pop();
+            candidates.push(Reverse(candidate));
+        }
+    }
+    let mut scored = candidates
+        .into_iter()
+        .map(|entry| (entry.0.download_id, entry.0.score))
+        .collect::<Vec<_>>();
+    scored.sort_by(|left, right| {
+        right
+            .1
+            .total_cmp(&left.1)
+            .then_with(|| left.0.cmp(&right.0))
+    });
+    Ok(scored)
 }
 
 /// 測るために、索引から作品と本文の断片を拾う。
@@ -472,10 +674,9 @@ pub fn probe_samples(storage_dir: &Path, limit: usize) -> Result<Vec<ProbeSample
     let conn = open_index(storage_dir)?;
     let mut statement = conn
         .prepare(
-            "SELECT download_id, text
-               FROM semantic_chunks
-              WHERE model_id = ?1 AND dimension = ?2 AND field = 'body'
-              GROUP BY download_id
+            "SELECT download_id, content_preview
+               FROM semantic_works
+              WHERE model_id = ?1 AND dimension = ?2 AND content_vector IS NOT NULL
               ORDER BY download_id
               LIMIT ?3",
         )
@@ -496,293 +697,63 @@ pub fn probe_samples(storage_dir: &Path, limit: usize) -> Result<Vec<ProbeSample
 }
 
 pub fn status(storage_dir: &Path) -> SemanticIndexStatus {
+    release_model_if_idle();
     let Ok(conn) = open_index(storage_dir) else {
         return SemanticIndexStatus {
+            indexed_works: 0,
             indexed_chunks: 0,
             model_ready: semantic_model_ready(),
             provider: embedding_provider(),
             gpu_enabled: embedding_gpu_enabled(),
         };
     };
-    let indexed_chunks = conn
+    let indexed_works = conn
         .query_row(
-            "SELECT COUNT(*) FROM semantic_chunks WHERE model_id = ?1 AND dimension = ?2",
+            "SELECT COUNT(*) FROM semantic_works WHERE model_id = ?1 AND dimension = ?2",
             params![MODEL_ID, VECTOR_DIMENSION as i64],
             |row| row.get(0),
         )
         .unwrap_or(0);
     SemanticIndexStatus {
-        indexed_chunks,
+        indexed_works,
+        indexed_chunks: indexed_works,
         model_ready: semantic_model_ready(),
         provider: embedding_provider(),
         gpu_enabled: embedding_gpu_enabled(),
     }
 }
 
-fn ann_build_lock() -> &'static parking_lot::Mutex<()> {
-    ANN_BUILD_LOCK.get_or_init(|| parking_lot::Mutex::new(()))
-}
-
-fn ensure_ann_shards(storage_dir: &Path) -> Result<AnnManifest, String> {
-    let _guard = ann_build_lock().lock();
+/// IDs physically present in the current sidecar format/model.
+///
+/// Coverage metadata lives in the main database, so startup recovery compares
+/// it with this set. A count alone cannot detect a partially rebuilt sidecar
+/// whose surviving rows happen to be fewer but non-zero.
+pub fn indexed_download_ids(storage_dir: &Path) -> Result<HashSet<i64>, String> {
     let conn = open_index(storage_dir)?;
-    let total: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM semantic_chunks WHERE model_id = ?1 AND dimension = ?2",
-            params![MODEL_ID, VECTOR_DIMENSION as i64],
-            |row| row.get(0),
-        )
-        .map_err(|error| format!("Semantic ANN count failed: {error}"))?;
-    if total == 0 {
-        return Ok(AnnManifest {
-            format_version: ANN_FORMAT_VERSION,
-            model_id: MODEL_ID.to_string(),
-            dimension: VECTOR_DIMENSION,
-            shard_span: 1,
-            shards: Vec::new(),
-        });
-    }
-    let max_vectors = (super::resource_budget::semantic_ann_bytes()
-        / ((VECTOR_DIMENSION * std::mem::size_of::<f32>()) as u64 * 3))
-        .clamp(2_000, 50_000) as i64;
-    let shard_span = max_vectors;
-    let manifest_path = ann_dir(storage_dir).join(ANN_MANIFEST_FILE);
-    let previous = std::fs::read(&manifest_path)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<AnnManifest>(&bytes).ok())
-        .filter(|manifest| {
-            manifest.format_version == ANN_FORMAT_VERSION
-                && manifest.model_id == MODEL_ID
-                && manifest.dimension == VECTOR_DIMENSION
-                && manifest.shard_span == shard_span
-        });
-
-    std::fs::create_dir_all(ann_dir(storage_dir))
-        .map_err(|error| format!("Semantic ANN directory create failed: {error}"))?;
-    let mut stmt = conn
-        .prepare(
-            "SELECT rowid, vector
-             FROM semantic_chunks
-             WHERE model_id = ?1 AND dimension = ?2
-               AND rowid >= ?3 AND rowid < ?4
-             ORDER BY rowid",
-        )
-        .map_err(|e| format!("Semantic ANN load prepare failed: {}", e))?;
-    let max_rowid: i64 = conn
-        .query_row(
-            "SELECT COALESCE(MAX(rowid), 0) FROM semantic_chunks WHERE model_id = ?1 AND dimension = ?2",
-            params![MODEL_ID, VECTOR_DIMENSION as i64],
-            |row| row.get(0),
-        )
-        .map_err(|error| format!("Semantic ANN max row failed: {error}"))?;
-    let previous_by_bucket = previous
-        .map(|manifest| {
-            manifest
-                .shards
-                .into_iter()
-                .map(|shard| (shard.bucket, shard))
-                .collect::<HashMap<_, _>>()
-        })
-        .unwrap_or_default();
-    let mut shards = Vec::new();
-    for bucket in 0..=(max_rowid / shard_span) {
-        let start = bucket * shard_span;
-        let end = start.saturating_add(shard_span);
-        let fingerprint: String = conn
-            .query_row(
-                "SELECT printf('%d:%s:%d', COUNT(*), COALESCE(MAX(updated_at), ''), COALESCE(SUM(LENGTH(vector)), 0))
-                 FROM semantic_chunks
-                 WHERE model_id = ?1 AND dimension = ?2 AND rowid >= ?3 AND rowid < ?4",
-                params![MODEL_ID, VECTOR_DIMENSION as i64, start, end],
-                |row| row.get(0),
-            )
-            .map_err(|error| format!("Semantic ANN fingerprint failed: {error}"))?;
-        if let Some(previous) = previous_by_bucket.get(&bucket).filter(|shard| {
-            shard.fingerprint == fingerprint && ann_files_exist(storage_dir, &shard.basename)
-        }) {
-            shards.push(previous.clone());
-            continue;
-        }
-        let rows = stmt
-            .query_map(
-                params![MODEL_ID, VECTOR_DIMENSION as i64, start, end],
-                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?)),
-            )
-            .map_err(|error| format!("Semantic ANN shard query failed: {error}"))?;
-        let mut ids = Vec::new();
-        let mut vectors = Vec::new();
-        for row in rows {
-            let (rowid, blob) = row.map_err(|error| format!("Semantic ANN row failed: {error}"))?;
-            let vector = blob_to_vector(&blob);
-            if vector.len() == VECTOR_DIMENSION {
-                ids.push(rowid as usize);
-                vectors.push(vector);
-            }
-        }
-        if vectors.is_empty() {
-            continue;
-        }
-        let mut hnsw = Hnsw::<f32, DistCosine>::new(16, vectors.len(), 16, 200, DistCosine {});
-        for (vector, rowid) in vectors.iter().zip(ids.iter()) {
-            hnsw.insert((vector, *rowid));
-        }
-        hnsw.set_searching_mode(true);
-        let requested = format!("ann-{bucket}-{}", rand::random::<u64>());
-        let basename = hnsw
-            .file_dump(&ann_dir(storage_dir), &requested)
-            .map_err(|error| format!("Semantic ANN persist failed: {error}"))?;
-        shards.push(AnnShard {
-            bucket,
-            fingerprint,
-            basename,
-            count: vectors.len(),
-        });
-    }
-    let manifest = AnnManifest {
-        format_version: ANN_FORMAT_VERSION,
-        model_id: MODEL_ID.to_string(),
-        dimension: VECTOR_DIMENSION,
-        shard_span,
-        shards,
-    };
-    write_ann_manifest(&manifest_path, &manifest)?;
-    cleanup_old_ann_files(storage_dir, &manifest);
-    Ok(manifest)
-}
-
-fn invalidate_ann_cache(_storage_dir: &Path) {
-    // Shards are content-fingerprinted against SQLite and rebuilt lazily. No
-    // process-global graph or payload cache is retained.
-}
-
-fn ann_dir(storage_dir: &Path) -> PathBuf {
-    index_path(storage_dir)
-        .parent()
-        .unwrap_or(storage_dir)
-        .join("ann")
-}
-
-fn ann_files_exist(storage_dir: &Path, basename: &str) -> bool {
-    let directory = ann_dir(storage_dir);
-    directory.join(format!("{basename}.hnsw.graph")).is_file()
-        && directory.join(format!("{basename}.hnsw.data")).is_file()
-}
-
-fn write_ann_manifest(path: &Path, manifest: &AnnManifest) -> Result<(), String> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| "Semantic ANN manifest has no parent".to_string())?;
-    std::fs::create_dir_all(parent)
-        .map_err(|error| format!("Semantic ANN directory create failed: {error}"))?;
-    let temporary = parent.join(format!(".ann-manifest-{:016x}.tmp", rand::random::<u64>()));
-    let mut file = OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(&temporary)
-        .map_err(|error| format!("Semantic ANN manifest create failed: {error}"))?;
-    let write_result = (|| {
-        serde_json::to_writer(&mut file, manifest)
-            .map_err(|error| format!("Semantic ANN manifest serialize failed: {error}"))?;
-        file.flush()
-            .map_err(|error| format!("Semantic ANN manifest flush failed: {error}"))?;
-        file.sync_all()
-            .map_err(|error| format!("Semantic ANN manifest sync failed: {error}"))?;
-        replace_manifest(&temporary, path)
-    })();
-    if write_result.is_err() {
-        let _ = std::fs::remove_file(&temporary);
-    }
-    write_result
-}
-
-#[cfg(windows)]
-fn replace_manifest(source: &Path, destination: &Path) -> Result<(), String> {
-    use windows::core::PCWSTR;
-    use windows::Win32::Storage::FileSystem::{
-        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
-    };
-    let mut source_wide = source.as_os_str().encode_wide().collect::<Vec<_>>();
-    source_wide.push(0);
-    let mut destination_wide = destination.as_os_str().encode_wide().collect::<Vec<_>>();
-    destination_wide.push(0);
-    // SAFETY: both paths are immutable, NUL-terminated UTF-16 buffers for the
-    // duration of this synchronous Win32 call.
-    let result = unsafe {
-        MoveFileExW(
-            PCWSTR(source_wide.as_ptr()),
-            PCWSTR(destination_wide.as_ptr()),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    };
-    if let Err(error) = result {
-        return Err(format!("Semantic ANN manifest publish failed: {error}"));
-    }
-    Ok(())
-}
-
-#[cfg(not(windows))]
-fn replace_manifest(source: &Path, destination: &Path) -> Result<(), String> {
-    std::fs::rename(source, destination)
-        .map_err(|error| format!("Semantic ANN manifest publish failed: {error}"))
-}
-
-fn cleanup_old_ann_files(storage_dir: &Path, manifest: &AnnManifest) {
-    let keep = manifest
-        .shards
-        .iter()
-        .flat_map(|shard| {
-            [
-                format!("{}.hnsw.graph", shard.basename),
-                format!("{}.hnsw.data", shard.basename),
-            ]
-        })
-        .collect::<std::collections::HashSet<_>>();
-    let Ok(entries) = std::fs::read_dir(ann_dir(storage_dir)) else {
-        return;
-    };
-    for entry in entries.filter_map(Result::ok) {
-        let name = entry.file_name().to_string_lossy().to_string();
-        if name.starts_with("ann-")
-            && name != ANN_MANIFEST_FILE
-            && !name.ends_with(".tmp")
-            && !keep.contains(&name)
-        {
-            let _ = std::fs::remove_file(entry.path());
-        }
-    }
-}
-
-fn chunk_metadata_by_rowid(
-    conn: &Connection,
-    rowids: &[i64],
-) -> Result<HashMap<i64, ChunkMeta>, String> {
-    if rowids.is_empty() {
-        return Ok(HashMap::new());
-    }
-    let json = serde_json::to_string(rowids)
-        .map_err(|error| format!("Semantic ANN row ID encode failed: {error}"))?;
     let mut statement = conn
         .prepare(
-            "SELECT rowid, download_id, chunk_id, field, text
-             FROM semantic_chunks
-             WHERE rowid IN (SELECT CAST(value AS INTEGER) FROM json_each(?1))",
+            "SELECT download_id FROM semantic_works
+              WHERE model_id = ?1 AND dimension = ?2",
         )
-        .map_err(|error| format!("Semantic ANN metadata prepare failed: {error}"))?;
+        .map_err(|e| format!("Semantic id scan prepare failed: {e}"))?;
     let rows = statement
-        .query_map(params![json], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                ChunkMeta {
-                    download_id: row.get(1)?,
-                    chunk_id: row.get(2)?,
-                    field: row.get(3)?,
-                    text: row.get(4)?,
-                },
-            ))
-        })
-        .map_err(|error| format!("Semantic ANN metadata query failed: {error}"))?;
-    rows.collect::<Result<HashMap<_, _>, _>>()
-        .map_err(|error| format!("Semantic ANN metadata row failed: {error}"))
+        .query_map(params![MODEL_ID, VECTOR_DIMENSION as i64], |row| row.get(0))
+        .map_err(|e| format!("Semantic id scan failed: {e}"))?;
+    rows.collect::<Result<HashSet<_>, _>>()
+        .map_err(|e| format!("Semantic id scan read failed: {e}"))
+}
+
+/// Cheap common-case coverage check used during startup. The full ID scan is
+/// reserved for a count mismatch, which avoids allocating every work ID on
+/// every launch of a healthy large library.
+pub fn indexed_download_count(storage_dir: &Path) -> Result<i64, String> {
+    let conn = open_index(storage_dir)?;
+    conn.query_row(
+        "SELECT COUNT(*) FROM semantic_works WHERE model_id = ?1 AND dimension = ?2",
+        params![MODEL_ID, VECTOR_DIMENSION as i64],
+        |row| row.get(0),
+    )
+    .map_err(|e| format!("Semantic work count failed: {e}"))
 }
 
 fn build_chunks(doc: &SemanticIndexDocument) -> Vec<ChunkInput> {
@@ -801,14 +772,12 @@ fn build_chunks(doc: &SemanticIndexDocument) -> Vec<ChunkInput> {
     .join("\n");
     if !meta.trim().is_empty() {
         chunks.push(ChunkInput {
-            chunk_id: "meta-0".to_string(),
             field: "metadata".to_string(),
             text: meta,
         });
     }
-    for (idx, text) in split_text_chunks(&doc.body).into_iter().enumerate() {
+    for text in split_text_chunks(&doc.body) {
         chunks.push(ChunkInput {
-            chunk_id: format!("body-{}", idx),
             field: "body".to_string(),
             text,
         });
@@ -889,22 +858,21 @@ fn open_index(storage_dir: &Path) -> Result<Connection, String> {
     let conn = Connection::open(&path).map_err(|e| format!("Semantic index open failed: {}", e))?;
     conn.execute_batch(
         "PRAGMA journal_mode = WAL;
-         CREATE TABLE IF NOT EXISTS semantic_chunks (
-            download_id INTEGER NOT NULL,
-            chunk_id TEXT NOT NULL,
-            field TEXT NOT NULL,
-            text TEXT NOT NULL,
-            text_hash TEXT NOT NULL,
+         CREATE TABLE IF NOT EXISTS semantic_works (
+            download_id INTEGER PRIMARY KEY,
+            metadata_text TEXT NOT NULL,
+            content_preview TEXT NOT NULL,
+            metadata_hash TEXT NOT NULL,
+            content_hash TEXT NOT NULL,
             model_id TEXT NOT NULL,
             dimension INTEGER NOT NULL,
-            vector BLOB NOT NULL,
-            updated_at TEXT NOT NULL,
-            PRIMARY KEY(download_id, chunk_id)
+            metadata_vector BLOB NOT NULL,
+            content_vector BLOB,
+            content_chunk_count INTEGER NOT NULL,
+            updated_at TEXT NOT NULL
          );
-         CREATE INDEX IF NOT EXISTS idx_semantic_chunks_model
-            ON semantic_chunks(model_id, dimension);
-         CREATE INDEX IF NOT EXISTS idx_semantic_chunks_download
-            ON semantic_chunks(download_id);",
+         CREATE INDEX IF NOT EXISTS idx_semantic_works_model
+            ON semantic_works(model_id, dimension);",
     )
     .map_err(|e| format!("Semantic schema init failed: {}", e))?;
     Ok(conn)
@@ -921,20 +889,95 @@ fn index_path(storage_dir: &Path) -> PathBuf {
 
 #[cfg(not(test))]
 fn embed_texts(texts: Vec<String>) -> Result<Vec<Vec<f32>>, String> {
-    let model = MODEL.get_or_init(|| {
-        init_embedding_runtime()
-            .map(Mutex::new)
-            .map_err(|e| format!("Semantic model init failed: {}", e))
-    });
-    let mutex = model.as_ref().map_err(Clone::clone)?;
-    let mut runtime = mutex
+    start_model_reaper();
+    let model = MODEL.get_or_init(|| Mutex::new(EmbeddingRuntimeSlot::default()));
+    let mut slot = model
         .lock()
         .map_err(|e| format!("Semantic model lock failed: {}", e))?;
-    runtime
+    if slot.runtime.is_none() {
+        slot.runtime =
+            Some(init_embedding_runtime().map_err(|e| format!("Semantic model init failed: {e}"))?);
+    }
+    let result = slot
+        .runtime
+        .as_mut()
+        .expect("semantic runtime was initialized above")
         .model
         .embed(texts, None)
-        .map_err(|e| format!("Semantic embedding failed: {}", e))
+        .map_err(|e| format!("Semantic embedding failed: {}", e));
+    slot.last_used = Some(Instant::now());
+    result
 }
+
+#[cfg(not(test))]
+fn start_model_reaper() {
+    MODEL_REAPER_STARTED.get_or_init(|| {
+        if let Err(error) = std::thread::Builder::new()
+            .name("semantic-model-reaper".to_string())
+            .spawn(|| loop {
+                std::thread::sleep(Duration::from_secs(60));
+                release_model_if_idle();
+            })
+        {
+            log::warn!("意味検索モデルの待機時解放スレッドを開始できません: {error}");
+        }
+    });
+}
+
+/// Releases the ONNX Runtime session and its DirectML allocations.
+///
+/// The mutex is held throughout embedding, so `take` cannot race an active
+/// inference. Drop outside the lock because ORT may synchronously tear down
+/// provider resources and that work must not block status readers.
+#[cfg(not(test))]
+pub fn release_model() -> bool {
+    let Some(model) = MODEL.get() else {
+        return false;
+    };
+    let removed = {
+        let Ok(mut slot) = model.lock() else {
+            return false;
+        };
+        slot.last_used = None;
+        slot.runtime.take()
+    };
+    let released = removed.is_some();
+    drop(removed);
+    if released {
+        log::info!("意味検索モデルをメモリから解放しました");
+    }
+    released
+}
+
+#[cfg(test)]
+pub fn release_model() -> bool {
+    false
+}
+
+#[cfg(not(test))]
+fn release_model_if_idle() {
+    let Some(model) = MODEL.get() else {
+        return;
+    };
+    let removed = {
+        let Ok(mut slot) = model.lock() else {
+            return;
+        };
+        let idle = slot
+            .last_used
+            .is_some_and(|last_used| last_used.elapsed() >= MODEL_IDLE_TIMEOUT);
+        if !idle {
+            return;
+        }
+        slot.last_used = None;
+        slot.runtime.take()
+    };
+    drop(removed);
+    log::info!("5分間使われていない意味検索モデルをメモリから解放しました");
+}
+
+#[cfg(test)]
+fn release_model_if_idle() {}
 
 #[cfg(not(test))]
 fn init_embedding_runtime() -> Result<EmbeddingRuntime, String> {
@@ -989,7 +1032,10 @@ fn embed_texts(texts: Vec<String>) -> Result<Vec<Vec<f32>>, String> {
 
 #[cfg(not(test))]
 fn semantic_model_ready() -> bool {
-    MODEL.get().map(|state| state.is_ok()).unwrap_or(false)
+    MODEL
+        .get()
+        .and_then(|slot| slot.lock().ok().map(|slot| slot.runtime.is_some()))
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -1001,8 +1047,12 @@ fn semantic_model_ready() -> bool {
 fn embedding_provider() -> String {
     MODEL
         .get()
-        .and_then(|state| state.as_ref().ok())
-        .and_then(|runtime| runtime.lock().ok().map(|runtime| runtime.provider.clone()))
+        .and_then(|slot| slot.lock().ok())
+        .and_then(|slot| {
+            slot.runtime
+                .as_ref()
+                .map(|runtime| runtime.provider.clone())
+        })
         .unwrap_or_else(|| {
             if cfg!(windows) {
                 "fastembed/directml-pending".to_string()
@@ -1021,8 +1071,8 @@ fn embedding_provider() -> String {
 fn embedding_gpu_enabled() -> bool {
     MODEL
         .get()
-        .and_then(|state| state.as_ref().ok())
-        .and_then(|runtime| runtime.lock().ok().map(|runtime| runtime.gpu_enabled))
+        .and_then(|slot| slot.lock().ok())
+        .and_then(|slot| slot.runtime.as_ref().map(|runtime| runtime.gpu_enabled))
         .unwrap_or(false)
 }
 
@@ -1066,6 +1116,70 @@ fn blob_to_vector(blob: &[u8]) -> Vec<f32> {
         .collect()
 }
 
+fn mean_normalized_vector(vectors: &[&[f32]]) -> Option<Vec<f32>> {
+    if vectors.is_empty() {
+        return None;
+    }
+    let mut sum = vec![0.0_f64; VECTOR_DIMENSION];
+    for vector in vectors {
+        if vector.len() != VECTOR_DIMENSION {
+            return None;
+        }
+        for (slot, value) in sum.iter_mut().zip(vector.iter()) {
+            *slot += *value as f64;
+        }
+    }
+    let norm = sum.iter().map(|value| value * value).sum::<f64>().sqrt();
+    (norm > f64::EPSILON).then(|| sum.into_iter().map(|value| (value / norm) as f32).collect())
+}
+
+/// 向きだけを残して、長さを1にそろえる。
+///
+/// `cosine_similarity` は内積をそのまま余弦として使う。それが成り立つのは
+/// **両方が長さ1のとき**だけである。本文の重心は `mean_normalized_vector` が
+/// そろえているが、メタデータの向きは埋め込みが返したものをそのまま保存して
+/// いた。つまり「fastembed は正規化して返す」という、どこにも書いていない
+/// 前提の上に余弦が乗っていた。
+///
+/// しかも破れても見えない。`cosine_similarity` の `.clamp(0.0, 1.0)` が、
+/// 1を超えた内積を 1.0 に丸めて隠してしまう。モデルを差し替えた日に、
+/// 「なんとなく結果が変わった」としてしか現れない種類の壊れ方である。
+///
+/// すでに長さ1なら、これは何もしない。ただならぬのは、そうでなかったときに
+/// **何も起きないこと**のほうである。
+fn unit_vector(vector: Vec<f32>) -> Option<Vec<f32>> {
+    let norm = vector
+        .iter()
+        .map(|value| *value as f64 * *value as f64)
+        .sum::<f64>()
+        .sqrt();
+    (norm > f64::EPSILON)
+        .then(|| vector.into_iter().map(|value| (value as f64 / norm) as f32).collect())
+}
+
+#[cfg(test)]
+fn cosine_similarity(left: &[f32], right: &[f32]) -> f64 {
+    if left.len() != right.len() || left.is_empty() {
+        return 0.0;
+    }
+    left.iter()
+        .zip(right.iter())
+        .map(|(left, right)| *left as f64 * *right as f64)
+        .sum::<f64>()
+        .clamp(0.0, 1.0)
+}
+
+fn cosine_similarity_blob(left: &[f32], right: &[u8]) -> f64 {
+    if right.len() != left.len() * std::mem::size_of::<f32>() || left.is_empty() {
+        return 0.0;
+    }
+    left.iter()
+        .zip(right.as_chunks::<4>().0.iter())
+        .map(|(left, bytes)| *left as f64 * f32::from_le_bytes(*bytes) as f64)
+        .sum::<f64>()
+        .clamp(0.0, 1.0)
+}
+
 #[cfg(test)]
 fn normalize_vector(mut vector: Vec<f32>) -> Vec<f32> {
     let norm = vector
@@ -1095,6 +1209,45 @@ fn hash_text(text: &str) -> String {
 mod tests {
     use super::*;
     use std::fs;
+
+    /// 内積を余弦として使う以上、しまう向きは長さ1でなければならない。
+    ///
+    /// 埋め込みの実装が正規化して返すことに頼っていた。頼れなくなった日に
+    /// 気づけない — `cosine_similarity` の丸めが、1を超えた内積を隠すからである。
+    #[test]
+    fn a_direction_is_stored_with_unit_length() {
+        let stretched = vec![3.0_f32, 4.0, 0.0];
+        let unit = unit_vector(stretched).expect("向きがある");
+        let norm = unit.iter().map(|value| *value as f64 * *value as f64).sum::<f64>().sqrt();
+        assert!((norm - 1.0).abs() < 1e-6, "{norm}");
+
+        // すでに長さ1のものは、そのまま。正規化が結果を動かさない。
+        let already = vec![1.0_f32, 0.0, 0.0];
+        assert_eq!(unit_vector(already.clone()).unwrap(), already);
+    }
+
+    /// 長さの無い向きは、比べようがない。1.0 を返す代わりに何も返さない。
+    #[test]
+    fn a_vector_without_direction_is_not_normalised_into_one() {
+        assert!(unit_vector(vec![0.0_f32; 8]).is_none());
+    }
+
+    /// 正規化しないままだと、余弦は 1.0 に丸められて**同じに見える**。
+    ///
+    /// この試験は壊れ方そのものを写している。長さ2の向きと自分自身の内積は
+    /// 4.0 になるが、`cosine_similarity` はそれを 1.0 に丸める。長さをそろえて
+    /// おけば、内積は本当に 1.0 になる。
+    #[test]
+    fn clamping_would_have_hidden_an_unnormalised_vector() {
+        let stretched = vec![2.0_f32, 0.0, 0.0];
+        // 丸めのせいで、間違った値と正しい値が見分けられない。
+        assert_eq!(cosine_similarity(&stretched, &stretched), 1.0);
+        let unit = unit_vector(stretched).unwrap();
+        assert!((cosine_similarity(&unit, &unit) - 1.0).abs() < 1e-6);
+        // 直交する向きは、そろえたあとでも直交したまま。
+        let other = unit_vector(vec![0.0_f32, 5.0, 0.0]).unwrap();
+        assert!(cosine_similarity(&unit, &other) < 1e-6);
+    }
 
     /// 移してよいのは piep のモデルが入っているときだけ。名前の作り方を間違える
     /// と、他所の置き場を丸ごと持っていくか、自分のものを見落として取り直す。
@@ -1148,7 +1301,7 @@ mod tests {
     }
 
     #[test]
-    fn semantic_sidecar_returns_chunk_hits() {
+    fn semantic_sidecar_returns_one_hit_per_work() {
         let root =
             std::env::temp_dir().join(format!("piep_semantic_test_{}", rand::random::<u32>()));
         let storage = root.join("downloads");
@@ -1168,11 +1321,69 @@ mod tests {
         .unwrap();
         let hits = search(&storage, "shousetsu", 10).unwrap();
         assert!(hits.iter().any(|hit| hit.download_id == 1));
-        let manifest: AnnManifest =
-            serde_json::from_slice(&fs::read(ann_dir(&storage).join(ANN_MANIFEST_FILE)).unwrap())
-                .unwrap();
-        assert_eq!(manifest.shards.len(), 1);
-        assert!(ann_files_exist(&storage, &manifest.shards[0].basename));
+        assert_eq!(hits.iter().filter(|hit| hit.download_id == 1).count(), 1);
+        assert_eq!(status(&storage).indexed_works, 1);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_body_only_work_is_indexed_and_reported_as_inserted() {
+        let root =
+            std::env::temp_dir().join(format!("piep_semantic_body_{}", rand::random::<u32>()));
+        let storage = root.join("downloads");
+        fs::create_dir_all(&storage).unwrap();
+        let inserted = upsert_documents(
+            &storage,
+            &[SemanticIndexDocument {
+                download_id: 2,
+                title: String::new(),
+                author_name: String::new(),
+                tags: String::new(),
+                series_title: String::new(),
+                excerpt: String::new(),
+                body: "題名が無くても、この本文は意味検索の対象になる。".to_string(),
+            }],
+        )
+        .unwrap();
+        assert_eq!(inserted, vec![2]);
+        assert!(search(&storage, "意味検索", 10)
+            .unwrap()
+            .iter()
+            .any(|hit| hit.download_id == 2));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn related_work_scan_keeps_only_the_requested_best_results() {
+        let root = std::env::temp_dir().join(format!(
+            "piep_semantic_related_{}",
+            rand::random::<u32>()
+        ));
+        let storage = root.join("downloads");
+        fs::create_dir_all(&storage).unwrap();
+        let document = |download_id, title: &str, body: &str| SemanticIndexDocument {
+            download_id,
+            title: title.to_string(),
+            author_name: "作者".to_string(),
+            tags: "小説".to_string(),
+            series_title: String::new(),
+            excerpt: String::new(),
+            body: body.to_string(),
+        };
+        upsert_documents(
+            &storage,
+            &[
+                document(1, "雨の図書室", "雨音を聞きながら本を読む。"),
+                document(2, "雨の図書室", "雨音を聞きながら本を読む。"),
+                document(3, "宇宙船", "遠い惑星へ向かう。"),
+            ],
+        )
+        .unwrap();
+
+        let related = similar_works(&storage, &[1], 1).unwrap();
+        assert_eq!(related.len(), 1);
+        assert_eq!(related[0].0, 2);
+        assert!(related[0].1 > 0.9);
         let _ = fs::remove_dir_all(root);
     }
 }

@@ -25,7 +25,7 @@ export function SearchAssistModal({
   onClose: () => void;
   onApply: (intent: SearchIntent) => void;
 }) {
-  const { engine } = useAssist();
+  const { engine } = useAssist("search_interpretation");
   const [phrase, setPhrase] = useState("");
   const [intent, setIntent] = useState<SearchIntent | null>(null);
 

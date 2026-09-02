@@ -1,6 +1,6 @@
 import { MantineProvider } from "@mantine/core";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, waitFor, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AppFrame } from "@/app/AppFrame";
@@ -8,6 +8,7 @@ import { AppRouter } from "@/app/router";
 import { WorkspaceProvider } from "@/app/WorkspaceContext";
 import { writeReadingPosition } from "@/features/library/readingShelf";
 import type { LibraryShelfCounts, SavedSearchRecord } from "@/types/library";
+import { usePageAssist } from "@/app/PageAssistContext";
 
 const shelfApi = vi.hoisted(() => ({
   getLibraryShelfCounts: vi.fn(),
@@ -64,16 +65,27 @@ function saved(overrides: Partial<SavedSearchRecord> = {}): SavedSearchRecord {
   };
 }
 
-function renderApp(hash: string) {
+function renderApp(hash: string, child = <div />) {
   window.location.hash = hash;
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <MantineProvider>
       <QueryClientProvider client={client}>
-        <AppRouter><WorkspaceProvider><AppFrame><div /></AppFrame></WorkspaceProvider></AppRouter>
+        <AppRouter><WorkspaceProvider><AppFrame>{child}</AppFrame></WorkspaceProvider></AppRouter>
       </QueryClientProvider>
     </MantineProvider>,
   );
+}
+
+function PageAssistFixture({ onSelect }: { onSelect: () => void }) {
+  usePageAssist("test-page-assist", "この画面のAI", [{
+    id: "test-action",
+    label: "画面の内容をまとめる",
+    description: "現在の画面だけを対象にします",
+    enabled: true,
+    onSelect,
+  }]);
+  return null;
 }
 
 function nav() {
@@ -219,6 +231,28 @@ describe("library sidebar", () => {
       expect(nav().getByText("設定")).toBeInTheDocument();
       view.unmount();
     }
+  });
+
+  it("hosts one page-scoped AI entry in the persistent header", async () => {
+    const onSelect = vi.fn();
+    renderApp("#/library", <PageAssistFixture onSelect={onSelect} />);
+
+    const launcher = await screen.findByRole("button", { name: "この画面のAI" });
+    const search = screen.getByRole("button", { name: "検索または移動" });
+    expect(search.compareDocumentPosition(launcher) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(launcher).toHaveAttribute("data-placement", "header");
+    expect(launcher).toHaveAttribute("data-assist-ready", "true");
+    expect(launcher.querySelector("svg")).toHaveAttribute("fill", "none");
+    fireEvent.click(launcher);
+    fireEvent.click(await screen.findByText("画面の内容をまとめる"));
+    expect(onSelect).toHaveBeenCalledOnce();
+  });
+
+  it("fills the header star only when no page AI action is available", async () => {
+    renderApp("#/library");
+    const launcher = await screen.findByRole("button", { name: "この画面で使えるAIの手伝い" });
+    expect(launcher).not.toHaveAttribute("data-assist-ready");
+    expect(launcher.querySelector("svg")).toHaveAttribute("fill", "currentColor");
   });
 
   it("counts an automatic backend update in the activity badge", async () => {

@@ -45,7 +45,6 @@ import { getProvider, ProviderMark } from "@/lib/providers";
 import { registerUnsavedGuard } from "@/lib/unsavedGuard";
 import { useEmbeddedBrowserOverlay } from "@/features/browser/useEmbeddedBrowserOverlay";
 import {
-  closeEmbeddedBrowser,
   closeStandaloneBrowser,
   destroyEmbeddedBrowser,
   getEmbeddedBrowserUrl,
@@ -302,7 +301,9 @@ export default function SavePage() {
           setCurrentUrl(standing);
           setAddress(standing);
           rememberVisit(standing);
-          await setEmbeddedBrowserVisible(false).catch(() => undefined);
+          // A detached page must have a single renderer. This also clears an
+          // embedded view left behind by an interrupted previous mount.
+          await destroyEmbeddedBrowser().catch(() => undefined);
           return;
         }
         await positionBrowser(home);
@@ -404,7 +405,9 @@ export default function SavePage() {
       disposeAccelerator();
       disposeStandaloneUrl();
       disposeStandaloneClosed();
-      closeEmbeddedBrowser().catch(() => undefined);
+      // A hidden WebView keeps its renderer, decoded images and GPU surfaces.
+      // Leaving the workspace is a durable boundary; recreate it on return.
+      destroyEmbeddedBrowser().catch(() => undefined);
     };
   }, [rememberVisit, runtime, source, syncBrowserBounds]);
   useEffect(() => {
@@ -499,10 +502,11 @@ export default function SavePage() {
         source,
         userAgent,
       });
-      // Hidden rather than destroyed: the session, the cookies and the page it
-      // was on all survive, so coming back is instant.
+      // The standalone window owns the live page now. Keeping an additional
+      // hidden renderer doubles the expensive part of the browser workspace.
+      detachedRef.current = true;
       setDetached(true);
-      await setEmbeddedBrowserVisible(false).catch(() => undefined);
+      await destroyEmbeddedBrowser().catch(() => undefined);
       notifications.show({
         color: "piep",
         title: reused

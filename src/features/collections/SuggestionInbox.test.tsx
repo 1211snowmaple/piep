@@ -58,7 +58,7 @@ function renderInbox() {
   return render(
     <MantineProvider>
       <QueryClientProvider client={client}>
-        <SuggestionInbox sweeping={false} savedSearchIdeas={[]} onSweep={vi.fn()} />
+        <SuggestionInbox sweeping={false} savedSearchIdeas={[]} note={null} />
       </QueryClientProvider>
     </MantineProvider>,
   );
@@ -94,10 +94,10 @@ describe("SuggestionInbox", () => {
    */
   it("外した作品は、採用の顔ぶれから抜ける", async () => {
     renderInbox();
-    const drop = await screen.findByRole("button", { name: "作品2を外す" });
+    const drop = await screen.findByRole("button", { name: "作品2を束から外す" });
     await userEvent.click(drop);
     // 外したことが画面に出る（戻す側の名前に変わる）。
-    expect(await screen.findByRole("button", { name: "作品2を戻す" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "作品2を束に戻す" })).toBeInTheDocument();
 
     // 押せるボタンの文言そのものが、送る顔ぶれの数を名乗る。
     await userEvent.click(await screen.findByRole("button", { name: "2作品で作る" }));
@@ -107,6 +107,19 @@ describe("SuggestionInbox", () => {
       { source: "pixiv", sourceId: "1" },
       { source: "pixiv", sourceId: "3" },
     ]);
+  });
+
+  /**
+   * **束に何が入るのかが読めること。** 表紙を5枚並べるだけだったので、表紙の
+   * 無い作品は真っ黒な四角になり、題名はツールチップの中にしか無かった。
+   * 一覧を開く「＋N」は6作以上のときしか出ないので、2作の束では中身を読む
+   * 方法が一つも無かった。
+   */
+  it("束に入る作品を、題名と作者で読める", async () => {
+    renderInbox();
+    expect(await screen.findByText("作品1")).toBeInTheDocument();
+    expect(screen.getByText("作品2")).toBeInTheDocument();
+    expect(screen.getByText("作品3")).toBeInTheDocument();
   });
 
   it("閉じるは、その提案だけを閉じる", async () => {

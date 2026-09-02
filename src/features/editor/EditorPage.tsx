@@ -459,7 +459,7 @@ const PreviewBlock = memo(function PreviewBlock({ block, asset, pageNumber, acti
   else if (block.blockType === "quote") content = <blockquote>{block.text}</blockquote>;
   else if (block.blockType === "separator") content = <hr />;
   else if (block.blockType === "pageBreak") content = <div className="editor-preview-page-break"><span>pixiv page {pageNumber}</span></div>;
-  else if (block.blockType === "image") content = <figure>{asset ? <img src={getAssetUrl(asset.localPath) ?? undefined} alt={block.text || asset.filename} /> : <Text c="dimmed">画像を選択してください</Text>}{block.text && <figcaption>{block.text}</figcaption>}</figure>;
+  else if (block.blockType === "image") content = <figure>{asset ? <img src={getAssetUrl(asset.localPath) ?? undefined} alt={block.text || asset.filename} loading="lazy" decoding="async" /> : <Text c="dimmed">画像を選択してください</Text>}{block.text && <figcaption>{block.text}</figcaption>}</figure>;
   else if (block.blockType === "link") content = <a className="editor-preview-link" href={block.text || undefined} onClick={(event) => event.preventDefault()}><Icons.link size={IconSize.nav} /><span><strong>{linkLabel(block.attrsJson) || block.text || "URLを入力"}</strong><small>{block.text}</small></span></a>;
   else {
     const lines = block.text?.split("\n") ?? [];

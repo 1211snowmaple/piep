@@ -13,6 +13,7 @@ interface VirtualizedWorkListProps {
   onSelect?: (id: number, selected: boolean) => void;
   onToggleFavorite?: (id: number, favorite: boolean) => void;
   onToggleWatch?: (id: number, watch: boolean) => void;
+  revisedIds?: ReadonlySet<number>;
 }
 
 // Entity pages keep a shared author/series detail rail. At the default desktop
@@ -42,9 +43,15 @@ export function VirtualizedWorkList({
   onSelect,
   onToggleFavorite,
   onToggleWatch,
+  revisedIds,
 }: VirtualizedWorkListProps) {
   const listRef = useRef<HTMLDivElement>(null);
-  const [scrollElement, setScrollElement] = useState<HTMLElement | null>(null);
+  // AppFrame is already mounted before a route child renders. Discovering its
+  // viewport here avoids first constructing up to 120 real cards only to tear
+  // them down in the following layout effect when virtualization activates.
+  const [scrollElement, setScrollElement] = useState<HTMLElement | null>(() =>
+    document.getElementById("main-content"),
+  );
   const [width, setWidth] = useState(0);
   const [scrollMargin, setScrollMargin] = useState(0);
   const columns = libraryColumnCount(width, view);
@@ -97,6 +104,7 @@ export function VirtualizedWorkList({
       key={work.id}
       compact={view === "compact"}
       work={work}
+      revised={revisedIds?.has(work.id)}
       selectionMode={selectionMode}
       selected={selected?.has(work.id)}
       onSelect={onSelect}
@@ -108,7 +116,10 @@ export function VirtualizedWorkList({
   // AppFrame supplies the scroll container in production. Keeping a bounded
   // regular layout until it is discovered avoids an empty first paint and
   // supports isolated component/test rendering without a synthetic viewport.
-  if (!scrollElement || width <= 0) {
+  if (scrollElement && width <= 0) {
+    return <div ref={listRef} data-virtualization-measuring />;
+  }
+  if (!scrollElement) {
     return <div ref={listRef} className={view === "gallery" ? "library-grid" : undefined} style={view === "compact" ? { display: "grid", gap: LIST_GAP } : undefined} data-virtualization-pending>{items.slice(0, INITIAL_RENDER_LIMIT).map(renderWork)}</div>;
   }
 

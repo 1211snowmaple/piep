@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  CollectionAdditionResult,
   CollectionKind,
   CollectionNameCandidate,
   CollectionSuggestion,
@@ -86,6 +87,17 @@ export function proposeCollectionNames(collectionId: string): Promise<Collection
  */
 export function sweepCollectionCandidates(): Promise<CollectionSweepResult> {
   return invoke<CollectionSweepResult>("db_sweep_collection_candidates");
+}
+
+/**
+ * すでにあるコレクションへ、あとから入れるとよさそうな作品を探す。
+ *
+ * 束は作った時点で閉じない。新作は毎日届くし、旧作をあとから保存することも
+ * ある。押しても保存はしない — 返るのは案だけで、入れるかどうかは利用者が
+ * 決める。
+ */
+export function suggestCollectionAdditions(collectionId: string): Promise<CollectionAdditionResult> {
+  return invoke<CollectionAdditionResult>("db_suggest_collection_additions", { collectionId });
 }
 
 /**

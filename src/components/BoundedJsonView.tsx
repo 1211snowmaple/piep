@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Button, CopyButton, Group, Paper, Stack, Text } from "@mantine/core";
 import { formatNumber } from "@/lib/format";
 
@@ -19,8 +19,22 @@ export function stringifyJson(value: unknown): string {
  * value stays available through copy without making the browser lay out a
  * multi-megabyte <pre> node.
  */
-export function BoundedJsonView({ value }: { value: unknown }) {
-  const json = useMemo(() => stringifyJson(value), [value]);
+export function BoundedJsonView({
+  value,
+  jsonText,
+  description = "取得したプロフィール情報を折り返して表示します",
+  actions,
+}: {
+  value?: unknown;
+  /** Already serialized JSON. It is deliberately not parsed/stringified again. */
+  jsonText?: string;
+  description?: string;
+  actions?: ReactNode;
+}) {
+  const json = useMemo(
+    () => jsonText ?? stringifyJson(value),
+    [jsonText, value],
+  );
   const [renderLimit, setRenderLimit] = useState(JSON_INITIAL_RENDER_CHARS);
 
   useEffect(() => setRenderLimit(JSON_INITIAL_RENDER_CHARS), [json]);
@@ -33,8 +47,11 @@ export function BoundedJsonView({ value }: { value: unknown }) {
   return (
     <Stack gap="sm">
       <Group justify="space-between" align="flex-start">
-        <Text size="sm" c="dimmed">取得したプロフィール情報を折り返して表示します（{formatNumber(json.length)}文字）。</Text>
-        <CopyButton value={json}>{({ copied, copy }) => <Button size="xs" variant="light" onClick={copy}>{copied ? "コピー済み" : "全体をコピー"}</Button>}</CopyButton>
+        <Text size="sm" c="dimmed">{description}（{formatNumber(json.length)}文字）。</Text>
+        <Group gap="xs">
+          <CopyButton value={json}>{({ copied, copy }) => <Button size="xs" variant="light" onClick={copy}>{copied ? "コピー済み" : "全体をコピー"}</Button>}</CopyButton>
+          {actions}
+        </Group>
       </Group>
       <Paper className="json-view" withBorder>
         <pre>{visibleJson}{visibleLength < json.length ? `\n\n… 残り${formatNumber(json.length - visibleLength)}文字は省略されています` : ""}</pre>

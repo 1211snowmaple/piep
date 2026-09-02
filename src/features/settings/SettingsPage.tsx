@@ -109,6 +109,7 @@ const PREVIEW_INDEX_STATUS: SearchIndexStatus = {
   semanticIndexedChunks: 4192,
   semanticIndexedDownloads: 1284,
   semanticPendingDownloads: 0,
+  semanticEnabled: true,
   semanticModelReady: true,
   embeddingProvider: "DirectML (preview)",
   gpuEnabled: true,
@@ -438,7 +439,8 @@ const REBUILD_PHASE_LABEL: Record<string, string> = {
 };
 
 function SearchSection({ status, rebuild, runtime, rebuilding, start, cancel }: { status?: SearchIndexStatus; rebuild: SearchRebuildProgress | null; runtime: boolean; rebuilding: boolean; start: (includeSemantic: boolean) => void; cancel: () => void }) {
-  const [includeSemantic, setIncludeSemantic] = useState(false);
+  const [includeSemantic, setIncludeSemantic] = useState(status?.semanticEnabled ?? false);
+  useEffect(() => setIncludeSemantic(status?.semanticEnabled ?? false), [status?.semanticEnabled]);
   const indexedRatio = status?.totalDownloads ? status.indexedDownloads / status.totalDownloads * 100 : 100;
   const running = rebuilding && rebuild && rebuild.status === "running";
   return <Stack gap="lg">
@@ -477,8 +479,8 @@ function SearchSection({ status, rebuild, runtime, rebuilding, start, cancel }: 
         checked={includeSemantic}
         disabled={rebuilding}
         onChange={(event) => setIncludeSemantic(event.currentTarget.checked)}
-        label="意味検索のベクトルも同時に作成する"
-        description="GPUを使う処理です。全文検索だけの再構築より大幅に時間がかかります。"
+        label="作品単位の意味検索を使う"
+        description="この設定は保存され、新規作品と自動保守にも適用されます。無効にして再構築すると意味ベクトルを削除します。"
       />
     </Card>
     <Card p="lg">
@@ -490,10 +492,10 @@ function SearchSection({ status, rebuild, runtime, rebuilding, start, cancel }: 
       {/* 断片の数だけでは、棚のどこまで届いているのかが分からない。作品数で言う。 */}
       <Group gap="xl">
         <Text size="sm">覆えている作品 <b>{formatNumber(status?.semanticIndexedDownloads)}</b> / {formatNumber(status?.totalDownloads)}</Text>
-        <Text size="sm">意味ベクトル <b>{formatNumber(status?.semanticIndexedChunks)}</b></Text>
+        <Text size="sm">作品ベクトル <b>{formatNumber(status?.semanticIndexedChunks)}</b></Text>
         <Text size="sm">GPU <b>{status?.gpuEnabled ? "有効" : "無効"}</b></Text>
       </Group>
-      {Boolean(status?.semanticPendingDownloads) && <Note mt="md">{formatNumber(status?.semanticPendingDownloads)}件は意味検索の対象になっていません。上の「意味検索のベクトルも同時に作成する」を入れて再構築すると追いつきます。</Note>}
+      {status?.semanticEnabled && Boolean(status?.semanticPendingDownloads) && <Note mt="md">{formatNumber(status?.semanticPendingDownloads)}件は意味検索の対象になっていません。上の「作品単位の意味検索」を有効にして再構築すると追いつきます。</Note>}
       <Note mt="md">全文検索の索引づくりはCPUの処理で、GPUは使いません。GPU（DirectML）を使うのは上の「意味検索のベクトル」だけです。</Note>
     </Card>
     <Note>再構築中もライブラリの通常検索は利用できます。中止したり、アプリを終了したりした場合は、確定済みのところまでが保持され、次回は続きから再開します。</Note>

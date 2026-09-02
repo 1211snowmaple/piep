@@ -903,6 +903,53 @@ pub(crate) fn compute_content_details(
     (hash, text_len, source_updated_at)
 }
 
+/// Pull the readable prose out of a freshly fetched provider payload without
+/// saving it. The revision preview and the save path must compare the same
+/// text; keeping this beside `compute_content_details` prevents the two views
+/// of a FANBOX block document from drifting apart.
+pub(crate) fn fetched_plain_text(data: &serde_json::Value, source: &str) -> String {
+    if source == "pixiv" {
+        return data
+            .get("text")
+            .or_else(|| data.get("detail").and_then(|detail| detail.get("text")))
+            .and_then(|value| value.as_str())
+            .unwrap_or("")
+            .to_string();
+    }
+
+    if source == "fanbox" {
+        let Some(body) = data.get("body") else {
+            return String::new();
+        };
+        if let Some(blocks) = body.get("blocks").and_then(|value| value.as_array()) {
+            return blocks
+                .iter()
+                .filter_map(|block| {
+                    matches!(
+                        block.get("type").and_then(|value| value.as_str()),
+                        Some("p" | "header")
+                    )
+                    .then(|| {
+                        block
+                            .get("text")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or("")
+                    })
+                })
+                .filter(|text| !text.trim().is_empty())
+                .collect::<Vec<_>>()
+                .join("\n\n");
+        }
+        return body
+            .get("text")
+            .and_then(|value| value.as_str())
+            .unwrap_or("")
+            .to_string();
+    }
+
+    String::new()
+}
+
 // ============================================================
 // pixiv の軽量な更新確認
 // ============================================================
@@ -2793,7 +2840,7 @@ mod pixiv_meta_signature_tests {
 /// 「保存しないほうが正しい」数少ない場面なので、判定を固定しておく。
 #[cfg(test)]
 mod material_content_tests {
-    use super::fetched_has_material_content;
+    use super::{fetched_has_material_content, fetched_plain_text};
     use serde_json::json;
 
     #[test]
@@ -2845,5 +2892,24 @@ mod material_content_tests {
             "fanbox",
         ));
         assert!(!fetched_has_material_content(&json!({}), "fanbox"));
+    }
+
+    #[test]
+    fn revision_preview_uses_the_same_readable_provider_text() {
+        assert_eq!(
+            fetched_plain_text(&json!({ "text": "改稿後の本文" }), "pixiv"),
+            "改稿後の本文"
+        );
+        assert_eq!(
+            fetched_plain_text(
+                &json!({ "body": { "blocks": [
+                    { "type": "header", "text": "見出し" },
+                    { "type": "image", "text": "本文ではない" },
+                    { "type": "p", "text": "段落" }
+                ] } }),
+                "fanbox"
+            ),
+            "見出し\n\n段落"
+        );
     }
 }
