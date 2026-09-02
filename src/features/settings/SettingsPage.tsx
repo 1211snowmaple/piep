@@ -63,7 +63,7 @@ import { invalidateWorkSetViews } from "@/features/library/workSetInvalidation";
 import DiagnosticsPage from "@/features/diagnostics/DiagnosticsPage";
 import { cancelSearchRebuildIndex, startSearchRebuildIndex, type SearchRebuildProgress } from "@/services/searchApi";
 import { store } from "@/store";
-import { requestOperationCancel, startOperation, type OperationController } from "@/features/jobs/operationJobs";
+import { reportJobAction, requestOperationCancel, startOperation, type OperationController } from "@/features/jobs/operationJobs";
 import { APP_VERSION } from "@/lib/version";
 import { AppUpdateCard } from "@/features/settings/AppUpdateCard";
 import { AssistSection } from "@/features/settings/AssistSection";
@@ -240,7 +240,11 @@ export default function SettingsPage() {
           detail: path,
           total: inspection.workCount,
           onRetry: execute,
-          onCancel: () => { void cancelArchiveRestore(); },
+          // 約束をそのまま返す。`void` で捨てていたので、`requestOperationCancel`
+          // は「中止できた」と受け取り、実際には走り続けている復元を
+          // 「中止しています」と表示したままにしていた。返せば、失敗は
+          // あちらの catch が拾って記録し、状態を running へ戻す。
+          onCancel: async () => { await cancelArchiveRestore(); },
         });
         operation.log(`${inspection.workCount}作品・${inspection.assetCount}アセットを検証済み`);
         const disposeProgress = subscribeTauriEvent<ArchiveProgress>("archive-progress", (event) => {
@@ -348,7 +352,7 @@ export default function SettingsPage() {
         <Grid.Col span={{ base: 12, md: 8, lg: 9 }}>
           {section === "connections" && (auth.isLoading ? <LoadingState label="接続状態を確認しています" /> : auth.error ? <ErrorState error={auth.error} retry={() => auth.refetch()} /> : <ConnectionsSection auth={auth.data ?? { pixiv: null, fanbox: null }} runtime={runtime} pixivForm={pixivForm} fanboxForm={fanboxForm} mutation={connectionMutation} disconnect={disconnect} />)}
           {section === "library" && (stats.isLoading || storagePath.isLoading ? <LoadingState label="ライブラリ情報を読み込んでいます" /> : stats.error || storagePath.error ? <ErrorState error={stats.error ?? storagePath.error} retry={() => { stats.refetch(); storagePath.refetch(); }} /> : <LibrarySection stats={stats.data} path={storagePath.data} runtime={runtime} pending={maintenanceMutation.isPending} run={(action) => maintenanceMutation.mutate(action)} />)}
-          {section === "search" && (index.isLoading ? <LoadingState label="検索インデックスを確認しています" /> : index.error ? <ErrorState error={index.error} retry={() => index.refetch()} /> : <SearchSection status={index.data} rebuild={rebuild} runtime={runtime} rebuilding={rebuildMutation.isPending || rebuild?.status === "running"} start={(includeSemantic) => rebuildMutation.mutate(includeSemantic)} cancel={() => rebuildOperationRef.current ? requestOperationCancel(rebuildOperationRef.current.id) : rebuild ? cancelSearchRebuildIndex(rebuild.jobId) : undefined} />)}
+          {section === "search" && (index.isLoading ? <LoadingState label="検索インデックスを確認しています" /> : index.error ? <ErrorState error={index.error} retry={() => index.refetch()} /> : <SearchSection status={index.data} rebuild={rebuild} runtime={runtime} rebuilding={rebuildMutation.isPending || rebuild?.status === "running"} start={(includeSemantic) => rebuildMutation.mutate(includeSemantic)} cancel={() => { if (rebuildOperationRef.current) { void requestOperationCancel(rebuildOperationRef.current.id); return; } if (rebuild) reportJobAction(cancelSearchRebuildIndex(rebuild.jobId), "索引の作り直しを中止できません"); }} />)}
           {section === "assist" && <AssistSection />}
           {section === "diagnostics" && <DiagnosticsPage embedded />}
           {section === "appearance" && <AppearanceSection colorScheme={colorScheme} setColorScheme={setColorScheme} />}

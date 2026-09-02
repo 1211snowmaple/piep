@@ -29,6 +29,26 @@ fn work_save_mutex(source: &str, source_id: &str) -> Arc<WorkSaveMutex> {
     lock
 }
 
+/// 作者・シリーズのプロフィール保存を、対象ごとに直列化する。
+///
+/// 作品の保存は `work_save_mutex` で直列化してあるが、そこから枝分かれする
+/// プロフィールの保存には鍵が無かった。`library_gate` は読むときと書き戻すとき
+/// だけ短く取り、そのあいだにある**版番号の決定・original.json の書き出し・
+/// アイコンの取得（最大30秒の通信）**は誰も守っていない。
+///
+/// 同じ作者の作品が二つ並行して保存されると（更新ジョブと手動保存など）、
+/// 両方が「次は版N」と決め、同じ `vN/original.json` へ書き、両方が upsert する。
+/// アイコンの取得は速さがまちまちなので、**遅いほう・失敗したほうが後に着けば
+/// 良い icon_path を上書きする**。
+///
+/// 作品の鍵と同じ表を使う。前置きを付けて、作品の鍵と衝突させない。
+fn profile_save_mutex(kind: &str, source: &str, entity_id: &str) -> Arc<WorkSaveMutex> {
+    work_save_mutex(
+        &format!("profile:{kind}"),
+        &format!("{source}\0{entity_id}"),
+    )
+}
+
 const VERSION_STAGE_SYNC_MAX_DEPTH: usize = 32;
 const VERSION_STAGE_SYNC_MAX_ENTRIES: usize = 50_000;
 #[cfg(windows)]
@@ -1338,6 +1358,10 @@ async fn save_person_snapshot_from_download(
     if author_id.trim().is_empty() || author_name.trim().is_empty() {
         return Ok(());
     }
+    // 同じ作者を同時に二人で書かない。読んでから書き戻すまでのあいだに
+    // 通信が挟まるので、その全体を一つの鍵で囲う。
+    let guard = profile_save_mutex("person", source, author_id);
+    let _serialized = guard.lock().await;
     let icon_url = first_string_at(
         data,
         &[
@@ -1467,6 +1491,9 @@ async fn save_series_snapshot_from_download(
     let Some((series_id, series_title)) = extract_series_relation(data) else {
         return Ok(());
     };
+    // 作者と同じ理由で、シリーズも対象ごとに直列化する。
+    let guard = profile_save_mutex("series", source, &series_id);
+    let _serialized = guard.lock().await;
     let existing = {
         let _library_write_guard = state.library_gate.write().await;
         state.db.get_series(source, &series_id).ok()
@@ -2911,5 +2938,44 @@ mod material_content_tests {
             ),
             "見出し\n\n段落"
         );
+    }
+}
+
+#[cfg(test)]
+mod profile_save_lock_tests {
+    use super::{profile_save_mutex, work_save_mutex};
+
+    /// 同じ作者は同じ鍵、別の作者は別の鍵。
+    ///
+    /// 対象ごとに直列化できなければ、並行して走る二つの保存が同じ版番号を
+    /// 決め、同じ `vN/original.json` を書き、遅いほうがアイコンを消す。
+    #[test]
+    fn one_lock_per_entity_and_never_shared_with_another() {
+        let left = profile_save_mutex("person", "pixiv", "3259258");
+        let same = profile_save_mutex("person", "pixiv", "3259258");
+        assert!(std::sync::Arc::ptr_eq(&left, &same));
+
+        let other_author = profile_save_mutex("person", "pixiv", "9999999");
+        assert!(!std::sync::Arc::ptr_eq(&left, &other_author));
+
+        // 取得元をまたいだ同じ ID は、別人である。
+        let other_source = profile_save_mutex("person", "fanbox", "3259258");
+        assert!(!std::sync::Arc::ptr_eq(&left, &other_source));
+    }
+
+    /// 作者とシリーズは、ID が同じでも別の鍵。
+    #[test]
+    fn a_person_and_a_series_with_the_same_id_do_not_block_each_other() {
+        let person = profile_save_mutex("person", "pixiv", "1234");
+        let series = profile_save_mutex("series", "pixiv", "1234");
+        assert!(!std::sync::Arc::ptr_eq(&person, &series));
+    }
+
+    /// 作品の鍵とも混ざらない。混ざると、無関係な保存どうしが待ち合う。
+    #[test]
+    fn a_profile_lock_is_not_the_work_lock() {
+        let work = work_save_mutex("pixiv", "1234");
+        let profile = profile_save_mutex("person", "pixiv", "1234");
+        assert!(!std::sync::Arc::ptr_eq(&work, &profile));
     }
 }

@@ -60,8 +60,13 @@ test("going back returns to the row the work was opened from", async ({ page }, 
   // view, which would undo the position this test is about before opening it.
   await page.getByRole("link", { name: /を開く$/ }).first().dispatchEvent("click");
   await expect(page).toHaveURL(/#\/works\//);
+  // 住所が変わった瞬間ではなく、行き先が出てから測る。分割読み込みのあいだは
+  // 前の画面を出したままにする（白い枠へ置き換えない）ので、住所の変化と
+  // 画面の入れ替わりは同じ瞬間ではない。**利用者が見るのも入れ替わった後**で、
+  // その時点で上から始まっていることがこの試験の言いたいことである。
+  await expect(page.getByRole("combobox", { name: "ライブラリを検索" })).toBeHidden();
   // A new destination opens at its own top.
-  expect(await mainScrollTop(page)).toBe(0);
+  await expect.poll(() => mainScrollTop(page), { timeout: 4000 }).toBe(0);
 
   await page.getByLabel("前の画面へ戻る").click();
   await expect(page).toHaveURL(/#\/library/);

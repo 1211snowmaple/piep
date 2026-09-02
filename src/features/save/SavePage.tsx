@@ -936,10 +936,19 @@ export default function SavePage() {
       total: selected.length,
       // 中止はジョブへ伝える。押されたことは画面にも即座に出す - 実際に
       // 止まるのは次の切れ目だが、返事はここで返す。
-      onCancel: () => {
+      onCancel: async () => {
         setCanceling(true);
         const jobId = saveJobIdRef.current;
-        if (jobId) void cancelUpdateJobCommand(jobId).catch(() => undefined);
+        if (!jobId) return;
+        try {
+          await cancelUpdateJobCommand(jobId);
+        } catch (error) {
+          // 握りつぶしていた。中止が届かなかったのに「中止しています」の
+          // ままボタンが沈み、保存はそのまま最後まで走って成功の報せが出る。
+          // 押した人には、自分の中止がどこへ行ったのか分からない。
+          setCanceling(false);
+          throw error;
+        }
       },
       // 再試行はいまの画面に対して走らせる。開始時の execute を捕まえたままだと、
       // その描画の items を見て、成功済みも含む古い一覧を回し直してしまう。
@@ -1028,6 +1037,12 @@ export default function SavePage() {
       }
     } catch (error) {
       operation.fail(error);
+      // 見失っただけで、保存そのものは保存側で走り続けている。ここで棚の
+      // 取り置きを捨てないと、実際には増えているのに古い一覧を出したまま
+      // 「失敗しました」と言うことになる。
+      queryClient.invalidateQueries({ queryKey: ["library"] });
+      queryClient.invalidateQueries({ queryKey: ["entity"] });
+      invalidateWorkSetViews(queryClient);
       notifications.show({
         color: "red",
         title: "保存処理を完了できません",

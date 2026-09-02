@@ -24,7 +24,7 @@ import { JobProgress } from "@/components/JobProgress";
 import { PageHeader } from "@/components/PageHeader";
 import { RuntimeNotice } from "@/components/RuntimeNotice";
 import { useAppNavigate } from "@/app/router";
-import { startOperation, type OperationController } from "@/features/jobs/operationJobs";
+import { requestOperationCancel, startOperation, type OperationController } from "@/features/jobs/operationJobs";
 import { errorMessage, formatBytes, formatNumber } from "@/lib/format";
 import { getStoragePath } from "@/services/archiveApi";
 import {
@@ -174,6 +174,19 @@ export default function DiagnosticsPage({ embedded = false, previewData = previe
   const queryClient = useQueryClient();
   const operationRef = useRef<OperationController | null>(null);
   const profileRepairOperationRef = useRef<OperationController | null>(null);
+  /**
+   * 中止は、ほかの操作と同じ道を通す。
+   *
+   * ここだけ IPC を直に呼んで `void` で捨てていた。失敗しても何も出ず、
+   * アクティビティにも「中止しています」の行すら出ない — 押した人には
+   * 押せたのかどうかも分からなかった。
+   */
+  const cancelProfileRepair = () => {
+    const operation = profileRepairOperationRef.current;
+    if (operation) { void requestOperationCancel(operation.id); return; }
+    void cancelEntityProfileRepair().catch((error) =>
+      notifications.show({ color: "red", title: "中止できません", message: errorMessage(error) }));
+  };
   const retryRef = useRef<(compact: boolean) => void>(() => undefined);
   const indexRetryRef = useRef<() => void>(() => undefined);
   const reimportRetryRef = useRef<() => void>(() => undefined);
@@ -511,7 +524,7 @@ export default function DiagnosticsPage({ embedded = false, previewData = previe
           </Box>
         </Group>
         {profileRepairStatus.data.totalCount > 0 && (profileRepair.isPending
-          ? <Button color="red" variant="subtle" leftSection={<Icons.stop size={IconSize.menu} />} onClick={() => void cancelEntityProfileRepair()}>中止</Button>
+          ? <Button color="red" variant="subtle" leftSection={<Icons.stop size={IconSize.menu} />} onClick={cancelProfileRepair}>中止</Button>
           : <Button leftSection={<Icons.retry size={IconSize.menu} />} disabled={!runtime || maintenance.isPending || indexOptimization.isPending} onClick={confirmProfileRepair}>残件を修復</Button>)}
       </Group>
       {profileRepairProgress && <Box mt="md">

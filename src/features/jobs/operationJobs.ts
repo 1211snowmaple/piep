@@ -1,4 +1,5 @@
 import { useSyncExternalStore } from "react";
+import { notifications } from "@mantine/notifications";
 
 export type OperationKind =
   "save" | "update" | "epub" | "backup" | "restore" | "search" | "maintenance";
@@ -379,4 +380,21 @@ function subscribe(listener: () => void) {
 }
 export function useOperationJobs(): OperationJob[] {
   return useSyncExternalStore(subscribe, getOperationJobs, getOperationJobs);
+}
+
+/**
+ * ジョブへの指示が届かなかったことを、黙って落とさない。
+ *
+ * 一時停止・再開・中止・やり直しは `invoke` の薄い包みで、失敗しても例外が
+ * どこにも受け取られていなかった。押しても**何も起きない**のと、押したのに
+ * 効いていないのは、画面の上では見分けがつかない。
+ */
+export function reportJobAction(action: Promise<unknown>, title: string): void {
+  void action.catch((error) => {
+    notifications.show({
+      color: "red",
+      title,
+      message: error instanceof Error ? error.message : String(error),
+    });
+  });
 }
