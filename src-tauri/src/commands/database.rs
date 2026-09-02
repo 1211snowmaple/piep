@@ -1,12 +1,11 @@
 use crate::database::queries::EntityProfileFreshness;
 use crate::database::{
-    AcceptCollectionSuggestionInput, AssetEntry, BulkMutationResult, CollectionNameCandidate,
-    CollectionAdditionResult, CollectionSuggestion, CollectionSuggestionRequest,
-    CollectionSweepResult, DashboardSummary,
-    DbStats, DownloadEntry, EditorDocument, EntityFacet, EntityFacetScope,
-    EntityProfileRepairStatus, EntitySeriesPage, EntityVersion, FacetCount, FilterFacets,
-    LibraryDiagnostics, LibraryMaintenanceResult, LibraryShelfCounts, NewAsset, PersonEntry,
-    ReaderContentPage, ReaderMetadata, ReaderSearchHit, SavedSearch, SavedSearchInput,
+    AcceptCollectionSuggestionInput, AssetEntry, BulkMutationResult, CollectionAdditionResult,
+    CollectionNameCandidate, CollectionSuggestion, CollectionSuggestionRequest,
+    CollectionSweepResult, DashboardSummary, DbStats, DownloadEntry, EditorDocument, EntityFacet,
+    EntityFacetScope, EntityProfileRepairStatus, EntitySeriesPage, EntityVersion, FacetCount,
+    FilterFacets, LibraryDiagnostics, LibraryMaintenanceResult, LibraryShelfCounts, NewAsset,
+    PersonEntry, ReaderContentPage, ReaderMetadata, ReaderSearchHit, SavedSearch, SavedSearchInput,
     SearchIndexOptimizationResult, SearchIndexStatus, SearchSuggestParams, SearchSuggestResult,
     SearchV2Params, SearchV2Result, SeriesEntry, UpdateCredentials, UpdateTarget,
     UpdateTargetInput, WorkBlockInput, WorkCollection, WorkCollectionInput,

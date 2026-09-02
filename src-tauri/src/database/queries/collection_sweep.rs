@@ -478,20 +478,22 @@ impl Database {
         oversized.truncate(MAX_SAVED_SEARCH_SUGGESTIONS);
 
         let wanted = by_id.keys().copied().collect::<HashSet<_>>();
-        let centroids =
-            match crate::database::semantic_index::work_centroids(&self.storage_dir, &wanted) {
-                Ok(values) => values,
-                Err(error) => {
-                    // 意味索引が無くても走査そのものは成り立つ。続き物だけ出す。
-                    // ただし**黙って**続き物だけにはしない。索引が壊れている
-                    // ことと、題材の束が本当に無いことは別の話である。
-                    log::warn!("Theme sweep skipped, semantic index unavailable: {error}");
-                    return Ok(ThemeSweep::skipped(
+        let centroids = match crate::database::semantic_index::work_centroids(
+            &self.storage_dir,
+            &wanted,
+        ) {
+            Ok(values) => values,
+            Err(error) => {
+                // 意味索引が無くても走査そのものは成り立つ。続き物だけ出す。
+                // ただし**黙って**続き物だけにはしない。索引が壊れている
+                // ことと、題材の束が本当に無いことは別の話である。
+                log::warn!("Theme sweep skipped, semantic index unavailable: {error}");
+                return Ok(ThemeSweep::skipped(
                         oversized,
                         "意味索引が読めないので、題材の束は探せませんでした。続き物だけを出しています。",
                     ));
-                }
-            };
+            }
+        };
         if centroids.len() < THEME_TAG_MIN {
             return Ok(ThemeSweep::skipped(
                 oversized,
@@ -1273,7 +1275,10 @@ fn select_track(bundles: Vec<SweepBundle>) -> Vec<SweepBundle> {
     let mut keyed = eligible
         .into_iter()
         .map(|bundle| {
-            let weight = bundle.strength.powf(SELECTION_SHARPNESS).max(f64::MIN_POSITIVE);
+            let weight = bundle
+                .strength
+                .powf(SELECTION_SHARPNESS)
+                .max(f64::MIN_POSITIVE);
             // 0 を引くと ln が -inf になる。開区間へ寄せてから取る。
             let uniform = rand::random::<f64>().clamp(f64::MIN_POSITIVE, 1.0);
             (uniform.ln() / weight, bundle)
@@ -1401,7 +1406,10 @@ mod tests {
         let first = select_track(make());
         let second = select_track(make());
         let ids = |bundles: &[SweepBundle]| {
-            bundles.iter().map(|value| value.ids.clone()).collect::<Vec<_>>()
+            bundles
+                .iter()
+                .map(|value| value.ids.clone())
+                .collect::<Vec<_>>()
         };
         assert_eq!(ids(&first), ids(&second));
     }

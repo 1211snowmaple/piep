@@ -30,9 +30,8 @@ const MAX_ADDITION_CANDIDATES: usize = 6;
 const MIN_ADDITION_CONFIDENCE: f64 = 0.62;
 /// 束へ足す候補は、棚から新しい束を見つけるときより厳しく。すでにある束を
 /// 汚すほうが、見つけ損なうより高くつく。組み上げの時点で守らせる。
-const _: () = assert!(
-    MIN_ADDITION_CONFIDENCE >= crate::database::queries::collection_sweep::MIN_STRENGTH
-);
+const _: () =
+    assert!(MIN_ADDITION_CONFIDENCE >= crate::database::queries::collection_sweep::MIN_STRENGTH);
 /// 重み付き抽出の効き具合。走査より強く上位へ寄せる。
 ///
 /// 走査は「棚に何があるか」を見せる操作なので幅が要るが、こちらは
@@ -143,27 +142,29 @@ impl Database {
 
         // 意味索引は「あれば使う」。無い棚でも規則だけで答えは出る。
         let wanted = works.iter().map(|work| work.id).collect::<HashSet<_>>();
-        let (centroids, semantic_note) =
-            match crate::database::semantic_index::work_centroids(&self.storage_dir, &wanted) {
-                Ok(values) if values.len() >= 2 => (values, None),
-                Ok(_) => (
+        let (centroids, semantic_note) = match crate::database::semantic_index::work_centroids(
+            &self.storage_dir,
+            &wanted,
+        ) {
+            Ok(values) if values.len() >= 2 => (values, None),
+            Ok(_) => (
+                HashMap::new(),
+                Some(
+                    "本文ベクトルがまだ足りないので、題名・作者・タグ・リンクだけで探しました。"
+                        .to_string(),
+                ),
+            ),
+            Err(error) => {
+                log::warn!("Collection additions ran without semantic index: {error}");
+                (
                     HashMap::new(),
                     Some(
-                        "本文ベクトルがまだ足りないので、題名・作者・タグ・リンクだけで探しました。"
+                        "意味索引が読めないので、題名・作者・タグ・リンクだけで探しました。"
                             .to_string(),
                     ),
-                ),
-                Err(error) => {
-                    log::warn!("Collection additions ran without semantic index: {error}");
-                    (
-                        HashMap::new(),
-                        Some(
-                            "意味索引が読めないので、題名・作者・タグ・リンクだけで探しました。"
-                                .to_string(),
-                        ),
-                    )
-                }
-            };
+                )
+            }
+        };
         let semantic_used = !centroids.is_empty();
         let baseline = semantic_used.then(|| shelf_baseline(&centroids));
         let seed_vectors = seeds
@@ -400,7 +401,9 @@ impl MemberProfile {
         let mut series_label: HashMap<String, String> = HashMap::new();
         {
             let mut stmt = conn
-                .prepare("SELECT download_id, series_source, series_key, title FROM download_series")
+                .prepare(
+                    "SELECT download_id, series_source, series_key, title FROM download_series",
+                )
                 .map_err(|e| format!("Failed to prepare addition series: {e}"))?;
             let rows = stmt
                 .query_map([], |row| {
@@ -539,9 +542,9 @@ impl MemberProfile {
             .iter()
             .filter(|key| {
                 series_size.get(*key).copied().unwrap_or(0) > SERIES_AS_STRONG_EVIDENCE_MAX
-                    || series_label
-                        .get(*key)
-                        .is_some_and(|title| collection_rules::is_administrative_series_label(title))
+                    || series_label.get(*key).is_some_and(|title| {
+                        collection_rules::is_administrative_series_label(title)
+                    })
             })
             .cloned()
             .collect::<HashSet<String>>();
@@ -553,12 +556,7 @@ impl MemberProfile {
             }
         }
         let mut ranked_tags = tag_counts.into_iter().collect::<Vec<_>>();
-        ranked_tags.sort_by(|left, right| {
-            right
-                .1
-                .cmp(&left.1)
-                .then_with(|| left.0.cmp(&right.0))
-        });
+        ranked_tags.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
         let profile_tags = ranked_tags
             .into_iter()
             .take(MAX_PROFILE_TAGS)
@@ -594,7 +592,11 @@ impl MemberProfile {
     fn shared_tags(&self, work: &AdditionWork) -> usize {
         self.tags_by_work
             .get(&work.id)
-            .map(|tags| tags.iter().filter(|tag| self.profile_tags.contains(*tag)).count())
+            .map(|tags| {
+                tags.iter()
+                    .filter(|tag| self.profile_tags.contains(*tag))
+                    .count()
+            })
             .unwrap_or(0)
     }
 
@@ -607,9 +609,10 @@ impl MemberProfile {
 
     /// 「置き場」を共有しているだけか。近いことは近いが、それだけでは足せない。
     fn shares_oversized_series(&self, work: &AdditionWork) -> bool {
-        self.series_by_work
-            .get(&work.id)
-            .is_some_and(|keys| keys.iter().any(|key| self.oversized_series_keys.contains(key)))
+        self.series_by_work.get(&work.id).is_some_and(|keys| {
+            keys.iter()
+                .any(|key| self.oversized_series_keys.contains(key))
+        })
     }
 
     fn shares_family(&self, work: &AdditionWork) -> bool {
@@ -744,7 +747,11 @@ fn combine(
             // 二つの独立した根拠が同じ作品を指している。どちらか一方より
             // 確かだが、足し合わせて 1.0 を超えさせはしない。
             let confidence = (rule_confidence.max(semantic_confidence) + 0.05).min(1.0);
-            Some((confidence, format!("{reason}。本文の内容も近いです"), evidence))
+            Some((
+                confidence,
+                format!("{reason}。本文の内容も近いです"),
+                evidence,
+            ))
         }
         (Some(found), None) => Some(found),
         (None, Some((confidence, z))) => Some((
@@ -848,12 +855,18 @@ mod tests {
         assert_eq!(seeds.len(), MAX_SEED_MEMBERS);
         assert_eq!(seeds.first().unwrap().id, 0);
         // 最後の起点が末尾の近くにある＝束の端まで代表できている。
-        assert!(seeds.last().unwrap().id >= 90, "{}", seeds.last().unwrap().id);
+        assert!(
+            seeds.last().unwrap().id >= 90,
+            "{}",
+            seeds.last().unwrap().id
+        );
     }
 
     #[test]
     fn a_short_bundle_uses_every_member_as_a_seed() {
-        let members = (0..5).map(|index| work(index, "短い", "作者")).collect::<Vec<_>>();
+        let members = (0..5)
+            .map(|index| work(index, "短い", "作者"))
+            .collect::<Vec<_>>();
         assert_eq!(pick_seed_members(&members).len(), 5);
     }
 
@@ -925,8 +938,8 @@ mod tests {
             .series_by_work
             .insert(7, HashSet::from(["pixiv:8434120".to_string()]));
 
-        let (confidence, _, _) =
-            rule_confidence(&work(7, "無関係な依頼もの", "作者"), &profile).expect("手がかりはある");
+        let (confidence, _, _) = rule_confidence(&work(7, "無関係な依頼もの", "作者"), &profile)
+            .expect("手がかりはある");
         // 手がかりではあるが、これだけでは束に入れない。
         assert_eq!(confidence, OVERSIZED_SERIES_CONFIDENCE);
         assert!(confidence < MIN_ADDITION_CONFIDENCE, "{confidence}");

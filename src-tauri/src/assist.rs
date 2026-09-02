@@ -1188,14 +1188,16 @@ pub async fn name_bundle(
                 .min(MAX_WORKS_SENT),
         )
         .map(|work| NamingWork {
-            title: policy
-                .include_title
-                .then(|| work.title.clone())
-                .unwrap_or_default(),
-            author_name: policy
-                .include_author
-                .then(|| work.author_name.clone())
-                .unwrap_or_default(),
+            title: if policy.include_title {
+                work.title.clone()
+            } else {
+                String::new()
+            },
+            author_name: if policy.include_author {
+                work.author_name.clone()
+            } else {
+                String::new()
+            },
             series_title: work.series_title.clone(),
             tags: if policy.include_tags {
                 work.tags
@@ -1318,14 +1320,16 @@ pub async fn suggest_tags(
 evidence には、根拠となる題名・概要・既存タグ内の文字列を一字も変えずに引用します。\n\
 直接引用できない候補は出しません。reason には、その引用がタグを示す理由を短く書きます。";
     let work = WorkFacts {
-        title: policy
-            .include_title
-            .then(|| work.title.clone())
-            .unwrap_or_default(),
-        author_name: policy
-            .include_author
-            .then(|| work.author_name.clone())
-            .unwrap_or_default(),
+        title: if policy.include_title {
+            work.title.clone()
+        } else {
+            String::new()
+        },
+        author_name: if policy.include_author {
+            work.author_name.clone()
+        } else {
+            String::new()
+        },
         tags: if policy.include_tags {
             work.tags
                 .iter()
@@ -1534,10 +1538,11 @@ pub async fn describe_author(
                 .min(AUTHOR_WORKS_SENT),
         )
         .map(|work| WorkFacts {
-            title: policy
-                .include_title
-                .then(|| work.title.clone())
-                .unwrap_or_default(),
+            title: if policy.include_title {
+                work.title.clone()
+            } else {
+                String::new()
+            },
             author_name: String::new(),
             tags: if policy.include_tags {
                 work.tags
@@ -1645,8 +1650,8 @@ pub async fn propose_splits(
         .map(|(index, work)| {
             serde_json::json!({
                 "番号": index,
-                "題名": policy.include_title.then(|| clamp_line(&work.title, 120)).unwrap_or_default(),
-                "作者": policy.include_author.then(|| clamp_line(&work.author_name, 60)).unwrap_or_default(),
+                "題名": if policy.include_title { clamp_line(&work.title, 120) } else { String::new() },
+                "作者": if policy.include_author { clamp_line(&work.author_name, 60) } else { String::new() },
                 "タグ": if policy.include_tags {
                     work.tags.iter().take(policy.max_tags_per_item.unwrap_or(8).min(8)).map(|tag| clamp_line(tag, 50)).collect::<Vec<_>>()
                 } else { Vec::new() }

@@ -428,10 +428,7 @@ pub fn search_with_query_text(
             };
             if candidates.len() < limit {
                 candidates.push(Reverse(candidate));
-            } else if candidates
-                .peek()
-                .is_some_and(|worst| candidate > worst.0)
-            {
+            } else if candidates.peek().is_some_and(|worst| candidate > worst.0) {
                 candidates.pop();
                 candidates.push(Reverse(candidate));
             }
@@ -448,9 +445,7 @@ pub fn search_with_query_text(
             .then_with(|| a.download_id.cmp(&b.download_id))
     });
     let mut text_statement = conn
-        .prepare(
-            "SELECT metadata_text, content_preview FROM semantic_works WHERE download_id = ?1",
-        )
+        .prepare("SELECT metadata_text, content_preview FROM semantic_works WHERE download_id = ?1")
         .map_err(|e| format!("Semantic result text prepare failed: {e}"))?;
     candidates
         .into_iter()
@@ -573,10 +568,7 @@ pub fn similar_works(
     for id in &seed_set {
         let row = seed_statement
             .query_row(params![id, MODEL_ID, VECTOR_DIMENSION as i64], |row| {
-                Ok((
-                    row.get::<_, Vec<u8>>(0)?,
-                    row.get::<_, Option<Vec<u8>>>(1)?,
-                ))
+                Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Option<Vec<u8>>>(1)?))
             })
             .optional()
             .map_err(|e| format!("Semantic seed read failed: {e}"))?;
@@ -584,7 +576,9 @@ pub fn similar_works(
             let metadata = blob_to_vector(&metadata);
             let content = content.as_deref().map(blob_to_vector);
             if metadata.len() == VECTOR_DIMENSION
-                && content.as_ref().is_none_or(|vector| vector.len() == VECTOR_DIMENSION)
+                && content
+                    .as_ref()
+                    .is_none_or(|vector| vector.len() == VECTOR_DIMENSION)
             {
                 seeds.push((metadata, content));
             }
@@ -640,10 +634,7 @@ pub fn similar_works(
         };
         if candidates.len() < limit {
             candidates.push(Reverse(candidate));
-        } else if candidates
-            .peek()
-            .is_some_and(|worst| candidate > worst.0)
-        {
+        } else if candidates.peek().is_some_and(|worst| candidate > worst.0) {
             candidates.pop();
             candidates.push(Reverse(candidate));
         }
@@ -1153,8 +1144,12 @@ fn unit_vector(vector: Vec<f32>) -> Option<Vec<f32>> {
         .map(|value| *value as f64 * *value as f64)
         .sum::<f64>()
         .sqrt();
-    (norm > f64::EPSILON)
-        .then(|| vector.into_iter().map(|value| (value as f64 / norm) as f32).collect())
+    (norm > f64::EPSILON).then(|| {
+        vector
+            .into_iter()
+            .map(|value| (value as f64 / norm) as f32)
+            .collect()
+    })
 }
 
 #[cfg(test)]
@@ -1170,7 +1165,7 @@ fn cosine_similarity(left: &[f32], right: &[f32]) -> f64 {
 }
 
 fn cosine_similarity_blob(left: &[f32], right: &[u8]) -> f64 {
-    if right.len() != left.len() * std::mem::size_of::<f32>() || left.is_empty() {
+    if right.len() != std::mem::size_of_val(left) || left.is_empty() {
         return 0.0;
     }
     left.iter()
@@ -1218,7 +1213,11 @@ mod tests {
     fn a_direction_is_stored_with_unit_length() {
         let stretched = vec![3.0_f32, 4.0, 0.0];
         let unit = unit_vector(stretched).expect("向きがある");
-        let norm = unit.iter().map(|value| *value as f64 * *value as f64).sum::<f64>().sqrt();
+        let norm = unit
+            .iter()
+            .map(|value| *value as f64 * *value as f64)
+            .sum::<f64>()
+            .sqrt();
         assert!((norm - 1.0).abs() < 1e-6, "{norm}");
 
         // すでに長さ1のものは、そのまま。正規化が結果を動かさない。
@@ -1355,10 +1354,8 @@ mod tests {
 
     #[test]
     fn related_work_scan_keeps_only_the_requested_best_results() {
-        let root = std::env::temp_dir().join(format!(
-            "piep_semantic_related_{}",
-            rand::random::<u32>()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("piep_semantic_related_{}", rand::random::<u32>()));
         let storage = root.join("downloads");
         fs::create_dir_all(&storage).unwrap();
         let document = |download_id, title: &str, body: &str| SemanticIndexDocument {

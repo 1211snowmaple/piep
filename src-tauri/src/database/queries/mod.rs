@@ -2002,16 +2002,17 @@ impl Database {
             // Healthy libraries stop at the two counts. Only a mismatch pays
             // for reading and comparing every ID from both databases.
             if recorded_count != chunks {
-                let semantic_ids =
-                    super::semantic_index::indexed_download_ids(&self.storage_dir)?;
+                let semantic_ids = super::semantic_index::indexed_download_ids(&self.storage_dir)?;
                 let recorded = conn
-                .prepare("SELECT download_id FROM semantic_index_state WHERE model_id = ?1")
-                .and_then(|mut statement| {
-                    statement
-                        .query_map(params![super::semantic_index::model_id()], |row| row.get(0))?
-                        .collect::<Result<Vec<i64>, _>>()
-                })
-                .map_err(|e| format!("Semantic index state scan failed: {e}"))?;
+                    .prepare("SELECT download_id FROM semantic_index_state WHERE model_id = ?1")
+                    .and_then(|mut statement| {
+                        statement
+                            .query_map(params![super::semantic_index::model_id()], |row| {
+                                row.get(0)
+                            })?
+                            .collect::<Result<Vec<i64>, _>>()
+                    })
+                    .map_err(|e| format!("Semantic index state scan failed: {e}"))?;
                 let stale = recorded
                     .into_iter()
                     .filter(|id| !semantic_ids.contains(id))
@@ -5594,13 +5595,14 @@ impl Database {
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .map_err(|e| format!("Failed to read update job item before completion: {e}"))?;
-        let changed = tx.execute(
-            "UPDATE update_job_items
+        let changed = tx
+            .execute(
+                "UPDATE update_job_items
              SET status = ?1, error = ?2, result_download_id = ?3, updated_at = CURRENT_TIMESTAMP
              WHERE id = ?4",
-            params![status, error, result_download_id, item_id],
-        )
-        .map_err(|e| format!("Failed to update job item: {}", e))?;
+                params![status, error, result_download_id, item_id],
+            )
+            .map_err(|e| format!("Failed to update job item: {}", e))?;
         if changed == 1 && previous_status != status {
             let previous = update_job_item_counter_contribution(&item_type, &previous_status);
             let next = update_job_item_counter_contribution(&item_type, status);
@@ -5669,8 +5671,7 @@ impl Database {
             )
             .map_err(|e| format!("Failed to insert update candidate: {}", e))?;
         if changed > 0 {
-            let contribution =
-                update_job_item_counter_contribution("candidate", &candidate.status);
+            let contribution = update_job_item_counter_contribution("candidate", &candidate.status);
             tx.execute(
                 "UPDATE update_jobs
                     SET totals = totals + ?1,

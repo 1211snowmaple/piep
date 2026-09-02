@@ -55,7 +55,11 @@ fn main() -> Result<(), String> {
             "    {}件を提示（下限を越えたのは{}件／意味索引 {}）",
             result.candidates.len(),
             result.eligible_count,
-            if result.semantic_used { "あり" } else { "なし" }
+            if result.semantic_used {
+                "あり"
+            } else {
+                "なし"
+            }
         );
         for candidate in &result.candidates {
             println!(

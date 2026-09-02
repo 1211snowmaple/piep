@@ -924,17 +924,17 @@ pub(crate) fn fetched_plain_text(data: &serde_json::Value, source: &str) -> Stri
         if let Some(blocks) = body.get("blocks").and_then(|value| value.as_array()) {
             return blocks
                 .iter()
-                .filter_map(|block| {
+                .filter(|block| {
                     matches!(
                         block.get("type").and_then(|value| value.as_str()),
                         Some("p" | "header")
                     )
-                    .then(|| {
-                        block
-                            .get("text")
-                            .and_then(|value| value.as_str())
-                            .unwrap_or("")
-                    })
+                })
+                .map(|block| {
+                    block
+                        .get("text")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("")
                 })
                 .filter(|text| !text.trim().is_empty())
                 .collect::<Vec<_>>()
