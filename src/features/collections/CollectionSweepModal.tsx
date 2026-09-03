@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Button, Group, Modal, Stack } from "@mantine/core";
+import { Button, Group, Modal, Stack, Text } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { errorMessage, formatNumber } from "@/lib/format";
@@ -120,7 +120,14 @@ export function CollectionSweepModal({ opened, onClose }: {
         />
         {/* 操作は下に貼り付ける。候補は縦に長いので、下まで送らないと押せない
             操作は「使いにくい」ではなく無いに等しい。 */}
-        <Group className="overlay-actions" justify="flex-end" wrap="nowrap">
+        <Group className="overlay-actions" justify="space-between" wrap="nowrap">
+          {/* 前置きの段落を消したぶん、更新が何をするかだけをここに置く。
+              説明は、それが要る場所の隣にあるときだけ読まれる。 */}
+          <Text size="xs" c="dimmed">
+            {pendingCount === 0
+              ? "採用するまで、棚のコレクションは変わりません。"
+              : "押すたびに、別の束が上がってきます。採用するまで何も変わりません。"}
+          </Text>
           <Button
             leftSection={<Icons.retry size={IconSize.action} />}
             loading={sweep.isPending}
