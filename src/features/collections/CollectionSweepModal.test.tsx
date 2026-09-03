@@ -32,6 +32,37 @@ vi.mock("@/components/WorkCover", () => ({ WorkCover: () => <span /> }));
 
 import { CollectionSweepModal } from "./CollectionSweepModal";
 
+/** 候補が1件ある状態。カードが描けるだけの最小限を埋める。 */
+function oneSuggestion() {
+  return [{
+    id: "sug-1",
+    proposedName: "雨の連作",
+    nameOptions: [{ source: "title", name: "雨の連作", label: "題名の共通部分" }],
+    collectionKind: "ordered",
+    track: "sequence",
+    origin: "sweep",
+    evidenceSummary: "題名が連番になっている2作です",
+    score: 0.9,
+    ruleVersion: "test",
+    state: "pending",
+    members: [1, 2].map((index) => ({
+      source: "pixiv",
+      sourceId: String(index),
+      downloadId: index,
+      title: `作品${index}`,
+      authorName: "作者",
+      coverPath: null,
+      textLength: 1000,
+      proposedPosition: index,
+      score: 1,
+      selected: true,
+      evidence: [],
+    })),
+    createdAt: "2026-09-01",
+    updatedAt: "2026-09-01",
+  }];
+}
+
 function renderModal(onClose = vi.fn()) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
@@ -47,6 +78,7 @@ function renderModal(onClose = vi.fn()) {
 describe("CollectionSweepModal", () => {
   beforeEach(() => {
     collectionApi.listCollectionSuggestions.mockReset().mockResolvedValue([]);
+    collectionApi.dismissSweptSuggestions.mockReset().mockResolvedValue(1);
     collectionApi.sweepCollectionCandidates.mockReset().mockResolvedValue({
       bundles: [],
       savedSearchSuggestions: [],
@@ -62,13 +94,41 @@ describe("CollectionSweepModal", () => {
     expect(collectionApi.sweepCollectionCandidates).not.toHaveBeenCalled();
   });
 
-  it("sweeps when the reader asks, and offers to look again", async () => {
+  it("sweeps when the reader asks", async () => {
     renderModal();
     await userEvent.click(await screen.findByRole("button", { name: "棚から探す" }));
     await waitFor(() => expect(collectionApi.sweepCollectionCandidates).toHaveBeenCalledTimes(1));
-    // 二度目には別の束が上がってくる。選び方に乱れが入っているので、
-    // 「もう一度探す」に意味がある。
-    expect(await screen.findByRole("button", { name: "もう一度探す" })).toBeInTheDocument();
+  });
+
+  /**
+   * 走査は毎回、確度を重みにした籤で選び直す。だから「更新」は同じものを
+   * 取り直す操作ではなく、**別の顔ぶれを引き直す**操作である。候補があるうちは
+   * その名前で出す。
+   */
+  it("calls the button 更新 once there is something to re-roll", async () => {
+    collectionApi.listCollectionSuggestions.mockResolvedValue(oneSuggestion());
+    renderModal();
+    expect(await screen.findByRole("button", { name: "更新" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "棚から探す" })).not.toBeInTheDocument();
+  });
+
+  /**
+   * まとめて閉じるは、畳んだメニューの中ではなく表に置く。**唯一使う項目を
+   * 隠していた**ので、系統別の項目ごとやめた。
+   */
+  it("offers closing them all without a menu, and only when there is something to close", async () => {
+    renderModal();
+    expect(await screen.findByRole("button", { name: "すべて閉じる" })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "まとめて" })).not.toBeInTheDocument();
+
+    collectionApi.listCollectionSuggestions.mockResolvedValue(oneSuggestion());
+    renderModal();
+    const found = await screen.findAllByRole("button", { name: "すべて閉じる" });
+    const closeAll = found[found.length - 1];
+    await waitFor(() => expect(closeAll).toBeEnabled());
+    // 確認の窓は挟まない。戻すのは「更新」一手なので、確認のほうが高くつく。
+    await userEvent.click(closeAll);
+    await waitFor(() => expect(collectionApi.dismissSweptSuggestions).toHaveBeenCalled());
   });
 
   /**

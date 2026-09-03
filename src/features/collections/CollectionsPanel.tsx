@@ -127,8 +127,9 @@ export function CollectionsPanel({ query = "", sortBy = "created_at" }: { query?
           言っているので、案内の一文は要らない。 */}
       <Group justify="space-between" align="center" my="md" gap="xs" wrap="nowrap" className="collections-panel__header">
         <Group gap="xs" wrap="nowrap">
-          <Text size="sm" c="dimmed">{formatNumber(collections.length)}件</Text>
+          {/* 棚と同じ並び。読み込み方が先、件数が後。 */}
           <PagingModeToggle scope="library-collections" />
+          <Text size="sm" c="dimmed">{formatNumber(collections.length)}件</Text>
         </Group>
         <Group gap="xs" wrap="nowrap">
           <Button

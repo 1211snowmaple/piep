@@ -1386,6 +1386,16 @@ export default function LibraryPage() {
           束の側が出す。消すのではなく差し替えるので、跳ねは起きない。 */}
       {tab !== "collections" && <Group justify="space-between" my="md" gap="xs" wrap="nowrap">
         <Group gap={8} wrap="nowrap" miw={0}>
+          {/* 読み込み方は件数の**手前**に置く。
+          //
+          // 件数は伸び縮みする。自動で読み進めると「（20件を表示中）」の
+          // 桁が増え、最後まで読むと括弧ごと消える。後ろに置いた押しボタンは
+          // そのぶん横へ動く — 実測で、桁が増えるたび7〜11px、括弧が消える
+          // 瞬間に128px。押そうとした先が指の下から逃げる。
+          //
+          // 幅の変わらないものを先に置けば、動くのは右側の文字だけになる。
+          // コレクションの中身では既にそうしてある。 */}
+          <PagingModeToggle scope={pagingScope} />
           <Text size="sm" c="dimmed" style={{ whiteSpace: "nowrap" }}>{tab === "works"
             ? `${formatNumber(totalCount ?? loadedItems.length)}件${totalCount !== null && loadedItems.length < totalCount ? `（${formatNumber(loadedItems.length)}件を表示中）` : ""}`
             : entityTotal.data !== undefined
@@ -1394,8 +1404,6 @@ export default function LibraryPage() {
           {tab === "works" && searchText && searchMeta?.explanations?.length
             ? <SearchInterpretation meta={searchMeta} />
             : null}
-          {/* Beside the count, which is the thing it changes. */}
-          <PagingModeToggle scope={pagingScope} />
         </Group>
         {!selectionMode && <Button size="xs" variant="subtle" color="gray" leftSection={<Icons.confirm size={IconSize.menu} />} onClick={() => setSelectionMode(true)}>複数選択</Button>}
       </Group>}

@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { Alert, Badge, Box, Button, Card, Chip, Group, Menu, Stack, Text, Tooltip, UnstyledButton } from "@mantine/core";
+import { Alert, Badge, Box, Button, Card, Chip, Group, Stack, Text, Tooltip, UnstyledButton } from "@mantine/core";
 import { modals } from "@mantine/modals";
 import { notifications } from "@mantine/notifications";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -11,7 +11,6 @@ import { Icons, IconSize } from "@/lib/icons";
 import {
   acceptCollectionSuggestion,
   dismissCollectionSuggestion,
-  dismissSweptSuggestions,
   listCollectionSuggestions,
   rejectCollectionSuggestion,
   suggestionNameOverride,
@@ -89,73 +88,13 @@ export function SuggestionInbox({ sweeping, savedSearchIdeas, note }: {
     queryClient.invalidateQueries({ queryKey: ["work-collections"] });
   };
 
-  const dismissAll = useMutation({
-    mutationFn: (scope: Track) => dismissSweptSuggestions(scope === "all" ? undefined : scope),
-    onSuccess: (removed) => {
-      invalidate();
-      notifications.show({ message: `${formatNumber(removed)}件の候補を閉じました` });
-    },
-    onError: (error) => notifications.show({ color: "red", title: "候補を閉じられません", message: errorMessage(error) }),
-  });
-
-  const confirmDismissAll = (scope: Track) => modals.openConfirmModal({
-    title: "候補をまとめて閉じますか？",
-    children: (
-      <Text size="sm">
-        {scope === "all" ? "走査で見つかった候補すべて" : scope === "sequence" ? "続き物の候補すべて" : "テーマの候補すべて"}を
-        画面から消します。<b>「二度と出さない」とは記録しません</b>ので、もう一度走査すれば同じものが出てきます。
-        作ったコレクションはそのまま残ります。
-      </Text>
-    ),
-    labels: { confirm: "閉じる", cancel: "キャンセル" },
-    onConfirm: () => dismissAll.mutate(scope),
-  });
 
   return (
     <Stack gap="md">
-      <Group justify="space-between" align="flex-start" wrap="nowrap">
-        <Box miw={0}>
-          <Text size="sm" c="dimmed">
-            棚を一度なめて、続き物と、題材の近い束を洗い出します。確かなものから少しだけ出すので、
-            もう一度押せば別の束が上がってきます。採用するまで何も変わりません。
-          </Text>
-        </Box>
-        {counts.all > 0 && (
-          <Menu position="bottom-end">
-            <Menu.Target>
-              {/* 縮ませない。`wrap="nowrap"` の Group では、隣の長い段落が
-                  伸びるぶんだけボタンが潰れて「まと…」になっていた。 */}
-              {/* 縮ませない。`wrap="nowrap"` の Group では、隣の長い段落が
-                  伸びるぶんだけボタンが潰れて「まと…」になっていた。
-                  //
-                  // 点three つ（Ellipsis）もやめる。開く先があることを示す印の
-                  // つもりだったが、文字の隣に置くと**文が省略された印**にしか
-                  // 見えない。実際「まとめて....」と読まれた。開くものには
-                  // 下向きの山を置く。 */}
-              <Button
-                variant="default"
-                style={{ flexShrink: 0 }}
-                rightSection={<Icons.expand size={IconSize.menu} />}
-                loading={dismissAll.isPending}
-              >
-                まとめて
-              </Button>
-            </Menu.Target>
-            <Menu.Dropdown>
-              <Menu.Label>候補を閉じる</Menu.Label>
-              <Menu.Item leftSection={<Icons.hide size={IconSize.menu} />} onClick={() => confirmDismissAll("all")}>
-                すべて閉じる（{formatNumber(counts.all)}件）
-              </Menu.Item>
-              <Menu.Item disabled={counts.sequence === 0} leftSection={<Icons.hide size={IconSize.menu} />} onClick={() => confirmDismissAll("sequence")}>
-                続き物だけ閉じる（{formatNumber(counts.sequence)}件）
-              </Menu.Item>
-              <Menu.Item disabled={counts.theme === 0} leftSection={<Icons.hide size={IconSize.menu} />} onClick={() => confirmDismissAll("theme")}>
-                テーマだけ閉じる（{formatNumber(counts.theme)}件）
-              </Menu.Item>
-            </Menu.Dropdown>
-          </Menu>
-        )}
-      </Group>
+      <Text size="sm" c="dimmed">
+        棚を一度なめて、続き物と、題材の近い束を洗い出します。確かなものから少しだけ出すので、
+        <b>「更新」を押すたびに別の束が上がってきます</b>。採用するまで何も変わりません。
+      </Text>
 
       {sweeping && (
         <Alert icon={<Icons.collectionSuggest size={IconSize.action} />}>

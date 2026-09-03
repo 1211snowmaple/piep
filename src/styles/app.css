@@ -1430,8 +1430,9 @@ select {
 .asset-card__name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* Title and body share one left edge; Mantine indents the message by default. */
 .work-note .mantine-Alert-message { margin-left: 0; padding-left: 0; }
-.asset-preview-modal { overflow: hidden; border-radius: var(--mantine-radius-lg); }
-.asset-preview-modal .mantine-Modal-body { overflow: auto; }
+/* 本体の丸めと切り抜きは、窓ぜんぶに効く規則が引き受けるようになった。
+   ここに残すのは、この窓だけ角を一段大きく取ること。 */
+.asset-preview-modal { border-radius: var(--mantine-radius-lg); }
 .version-row { width: 100%; color: inherit; text-align: left; cursor: pointer; background: var(--mantine-color-body); }
 .version-row[data-active] { border-color: var(--mantine-color-piep-5); box-shadow: 0 0 0 1px var(--mantine-color-piep-4); }
 .version-preview { position: sticky; top: 82px; min-height: 310px; }
@@ -2549,6 +2550,39 @@ select {
    // いても 40px に縮めれば何の話か分からない。しかも題名はツールチップの中に
    // しか無かったので、2作の束では**何を束ねようとしているのか読む方法が
    // 一つも無かった**。判断の材料は題名と作者である。 */
+/* ---- 窓（Modal） -----------------------------------------------------------
+
+   **角が丸いのに、右だけ角ばって見えていた。**
+
+   Mantine は `.mantine-Modal-content` に `border-radius: 16px` を置き、同じ箱に
+   縦スクロールも持たせる。Windows のスクロールバーは 15px の実体を持つ「classic」
+   なので、丸めたはずの右上・右下の角の**上に四角く描かれる**。左だけ丸くて右が
+   切り落とされて見えるのは、これが理由である。
+
+   丸い箱は「切り抜く側」に徹させ、スクロールは中身に持たせる。ついでに見出しが
+   上に留まるので、長い一覧を送っても題と閉じるボタンが見えたままになる。 */
+.mantine-Modal-content {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.mantine-Modal-body {
+  min-height: 0;
+  flex: 1;
+  overflow-y: auto;
+}
+
+/* 窓の操作は下に貼り付ける。中身が縦に長い窓では、下まで送らないと押せない
+   操作は「使いにくい」ではなく**無い**に等しい。 */
+.overlay-actions {
+  position: sticky;
+  z-index: 1;
+  bottom: 0;
+  padding-top: 10px;
+  border-top: 1px solid var(--mantine-color-default-border);
+  background: var(--mantine-color-body);
+}
+
 /* 確認の窓に並べる題名。長い題名で窓が横に伸びないよう、1行で止める。 */
 .confirm-work-list {
   max-height: 40vh;

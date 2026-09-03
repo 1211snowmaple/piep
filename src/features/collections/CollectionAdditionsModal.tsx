@@ -123,7 +123,9 @@ export function CollectionAdditionsModal({ opened, onClose, collection, busy, on
           </Stack>
         )}
 
-        <Group justify="space-between" wrap="nowrap">
+        {/* 操作は下に貼り付ける。候補は縦に長いので、下まで送らないと押せない
+            操作は「使いにくい」ではなく無いに等しい。 */}
+        <Group className="overlay-actions" justify="space-between" wrap="nowrap">
           <Text size="xs" c="dimmed">行を押すと、その作品だけ外れます。</Text>
           <Group gap="xs" wrap="nowrap">
             <Button variant="default" onClick={onClose} disabled={busy}>閉じる</Button>

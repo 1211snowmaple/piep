@@ -1673,7 +1673,29 @@ async fn download_entity_image(
     url: Option<&str>,
 ) -> Result<Option<(String, i64)>, String> {
     let Some(url) = url else { return Ok(None) };
-    if url.trim().is_empty() {
+    let url = url.trim();
+    if url.is_empty() {
+        return Ok(None);
+    }
+    // 取得先を https に限る。
+    //
+    // この一本だけ、取得元の応答に入っていた URL をそのまま `reqwest` へ
+    // 渡していた。ほかの外向きの要求は例外なく宛先を絞ってある
+    // （`allowed_next_url` / `allowed_api_url`）。ここは資格情報を付けないので
+    // 漏れる情報は無いが、`file:` や `http:` を踏みに行く筋を残す理由も無い。
+    //
+    // ホスト名までは固定しない。表紙とアイコンは取得元の CDN が配るもので、
+    // その名前は向こうの都合で変わる。固定すると、変わった日に**画像が黙って
+    // 出なくなる**。
+    //
+    // 綴りの大小は問わない。scheme は RFC 3986 で大小を区別しないので、
+    // 厳密に小文字だけを通すと、`HTTPS://` を返してきた日に**画像が黙って
+    // 出なくなる**。守りたいのは scheme の種類であって、綴りではない。
+    if !url
+        .get(..8)
+        .is_some_and(|head| head.eq_ignore_ascii_case("https://"))
+    {
+        log::warn!("Entity image skipped, not an https URL: {kind}");
         return Ok(None);
     }
     let root = if entity_type == "series" {
@@ -2570,5 +2592,34 @@ mod profile_link_tests {
         assert!(validate_path_in_storage(sibling.to_str().unwrap(), &storage).is_err());
 
         let _ = fs::remove_dir_all(root);
+    }
+}
+
+#[cfg(test)]
+mod entity_image_url_tests {
+    /// 表紙とアイコンの取得先を https に限る。
+    ///
+    /// この一本だけ、取得元の応答に入っていた URL をそのまま渡していた。
+    /// ほかの外向きの要求は例外なく宛先を絞ってある。
+    #[test]
+    fn only_https_urls_are_fetched() {
+        let allowed = |url: &str| {
+            let url = url.trim();
+            url.get(..8)
+                .is_some_and(|head| head.eq_ignore_ascii_case("https://"))
+        };
+        assert!(allowed("https://i.pximg.net/user-profile/x.jpg"));
+        assert!(allowed("  https://downloads.fanbox.cc/cover.png  "));
+
+        assert!(!allowed("http://i.pximg.net/x.jpg"));
+        assert!(!allowed("file:///C:/Windows/win.ini"));
+        assert!(!allowed("data:image/png;base64,AAAA"));
+        assert!(!allowed("//i.pximg.net/x.jpg"));
+        assert!(!allowed(""));
+        // scheme の綴りの大小は問わない。RFC 3986 で区別しないものを区別すると、
+        // 取得元が大文字で返した日に画像が黙って出なくなる。
+        assert!(allowed("HTTPS://i.pximg.net/x.jpg"));
+        // 短すぎて scheme が入りきらない文字列で落ちない。
+        assert!(!allowed("http"));
     }
 }
