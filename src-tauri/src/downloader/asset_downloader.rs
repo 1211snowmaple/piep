@@ -330,6 +330,7 @@ pub(crate) async fn save_response_atomically(
 /// JSONファイルをパースし、オリジナルのアセットのダウンロードURLを抽出する
 pub fn extract_download_targets(data: &Value, is_fanbox: bool, targets: &mut Vec<DownloadTarget>) {
     if is_fanbox {
+        let data = crate::fanbox_api::payload::post_or_self(data);
         // 1. Fanboxのカバー画像
         if let Some(cover_url) = data
             .get("coverImageUrl")
@@ -531,6 +532,7 @@ pub fn extract_download_targets(data: &Value, is_fanbox: bool, targets: &mut Vec
 /// ローカルアセットへの相対パスをJSONに埋め込み、オフライン再生に対応させる
 pub fn inject_local_paths(data: &mut Value, assets_dir_name: &str, is_fanbox: bool) {
     if is_fanbox {
+        let data = crate::fanbox_api::payload::post_mut_or_self(data);
         if let Some(cover_url) = data
             .get("coverImageUrl")
             .and_then(|v| v.as_str())
@@ -1261,6 +1263,29 @@ mod tests {
             "{second} vs {:?}",
             targets[1]
         );
+    }
+
+    #[test]
+    fn current_fanbox_wrapper_keeps_asset_extraction_and_injection_working() {
+        let mut wrapped = serde_json::json!({
+            "body": { "post": {
+                "id": "1",
+                "title": "画像投稿",
+                "body": { "images": [{
+                    "id": "image-1",
+                    "extension": "jpg",
+                    "originalUrl": "https://downloads.fanbox.cc/images/image-1.jpg"
+                }] }
+            }}
+        });
+        let mut targets = Vec::new();
+        extract_download_targets(&wrapped, true, &mut targets);
+        assert_eq!(targets.len(), 1);
+
+        inject_local_paths(&mut wrapped, "data_assets", true);
+        assert!(wrapped["body"]["post"]["body"]["images"][0]["localPath"]
+            .as_str()
+            .is_some_and(|path| path.ends_with("image-1.jpg")));
     }
 
     /// id を返さない形にも備える。同じ添付なら何度呼んでも同じ名前になり、

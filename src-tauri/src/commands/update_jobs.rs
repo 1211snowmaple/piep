@@ -1638,6 +1638,8 @@ enum FailureKind {
     Auth,
     /// 取得が制限されている。間隔を空けて、この項目はやり直す。
     RateLimited,
+    /// FANBOX の支援額・閲覧権限が現在の連携アカウントでは足りない。
+    Restricted,
     /// 消された・非公開になった。やり直しても結果は変わらない。
     Missing,
     /// 通信が届かなかった。次の実行で拾えることが多い。
@@ -1651,6 +1653,7 @@ impl FailureKind {
         match self {
             FailureKind::Auth => "再接続が必要",
             FailureKind::RateLimited => "取得制限",
+            FailureKind::Restricted => "閲覧制限",
             FailureKind::Missing => "見つからない",
             FailureKind::Network => "通信エラー",
             FailureKind::Other => "エラー",
@@ -1699,6 +1702,14 @@ fn classify_failure(error: &str) -> FailureKind {
         "アクセス制限",
     ]) {
         return FailureKind::RateLimited;
+    }
+    if has(&[
+        "現在のfanbox連携ではこの投稿を閲覧できません",
+        "支援プランが足りない",
+        "支援中のアカウント",
+        "閲覧権限",
+    ]) {
+        return FailureKind::Restricted;
     }
     if has(&[
         "http 404",
@@ -1958,14 +1969,23 @@ async fn process_work_item(
         )
         .await?;
         let value = serde_json::to_value(&post).map_err(|e| e.to_string())?;
-        let updated_at = string_at(&value, &[&["updatedDatetime"], &["updated_datetime"]]);
-        if dl.source_updated_at == updated_at && dl.source_updated_at.is_some() {
-            return Ok(ItemOutcome::Skipped(format!("最新: {}", dl.title)));
-        }
+        // A previously restricted/imported post can gain a readable body without
+        // updatedDatetime changing. We already fetched the full post, so compare its
+        // content hash instead of trusting the timestamp and skipping the repair.
         let (fetched_hash, _, fetched_updated_at) =
             super::downloader::compute_content_details(&value, "fanbox");
+        // 添付の取り直しは、保存側とまったく同じ物差しで測る。等値比較にすると、
+        // 失効したURLを持つ投稿が更新確認のたびに改稿候補へ挙がり続ける。
+        let held_assets = state.db.get_assets(dl.id)?;
+        let asset_state = super::downloader::fanbox_asset_state_fingerprint(&value, &held_assets);
+        let assets_need_repair = super::downloader::fanbox_asset_repair_needed(
+            state.db.asset_repair_fingerprint(dl.id)?.as_deref(),
+            &asset_state,
+            super::downloader::fanbox_assets_are_complete(&value, &held_assets),
+        );
         let content_changed = dl.content_hash.as_deref() != Some(fetched_hash.as_str())
-            || dl.source_updated_at != fetched_updated_at;
+            || dl.source_updated_at != fetched_updated_at
+            || assets_need_repair;
         if !auto_save && content_changed {
             record_work_revision_candidate(state, job_id, &dl, &value, false).await?;
             return Ok(ItemOutcome::Done(format!("改稿を検出: {}", dl.title)));
@@ -2813,6 +2833,14 @@ mod tests {
             ("pixiv APIエラー（HTTP 429）", FailureKind::RateLimited),
             ("Too Many Requests", FailureKind::RateLimited),
             ("FANBOX APIエラー（HTTP 503）", FailureKind::RateLimited),
+            (
+                "現在のFANBOX連携ではこの投稿を閲覧できません（必要な支援額: 月額500円以上）",
+                FailureKind::Restricted,
+            ),
+            (
+                "この投稿の本文を取得できませんでした。支援プランが足りないか、非公開の可能性があります",
+                FailureKind::Restricted,
+            ),
             ("HTTP 404 Not Found", FailureKind::Missing),
             ("この作品は削除されました", FailureKind::Missing),
             ("request timed out", FailureKind::Network),

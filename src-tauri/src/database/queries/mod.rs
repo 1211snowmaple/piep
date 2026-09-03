@@ -4873,6 +4873,36 @@ impl Database {
     }
 
     /// ダウンロードのアセット一覧取得
+    /// 添付の取り直しについて、前回どこまで試したか。
+    ///
+    /// `DownloadEntry` には載せない。画面が読む値ではなく、保存側が次に何を
+    /// するかを決めるためだけの覚え書きである。
+    pub fn asset_repair_fingerprint(&self, download_id: i64) -> Result<Option<String>, String> {
+        let conn = self.read_conn()?;
+        conn.query_row(
+            "SELECT asset_repair_fingerprint FROM downloads WHERE id = ?1",
+            params![download_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .map(Option::flatten)
+        .map_err(|e| format!("Failed to read asset repair fingerprint: {e}"))
+    }
+
+    pub fn set_asset_repair_fingerprint(
+        &self,
+        download_id: i64,
+        fingerprint: &str,
+    ) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE downloads SET asset_repair_fingerprint = ?2 WHERE id = ?1",
+            params![download_id, fingerprint],
+        )
+        .map_err(|e| format!("Failed to record asset repair fingerprint: {e}"))?;
+        Ok(())
+    }
+
     pub fn get_assets(&self, download_id: i64) -> Result<Vec<AssetEntry>, String> {
         let conn = self.read_conn()?;
         let mut stmt = conn

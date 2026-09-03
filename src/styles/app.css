@@ -689,7 +689,7 @@ select {
   gap: 0;
   padding: 10px 13px;
 }
-.work-card__body > .work-card__open { margin-top: 1px; }
+.work-card__body > .work-card__open { margin-top: 0; }
 .work-card__body > .work-card__identity { margin-top: 5px; }
 .work-card__body > .work-card__excerpt { margin-top: 5px; }
 .work-card__body > .work-card__tagslot { margin-top: 8px; }
@@ -795,7 +795,7 @@ select {
 .work-card__identity-divider { width: 1px; height: 18px; flex: 0 0 auto; background: light-dark(#d5dae0, #38414c); }
 
 /* The series line above the title is the link to the series. */
-.work-card__series-link { display: inline-flex; width: fit-content; max-width: 100%; min-height: 26px; align-items: center; gap: 5px; padding: 3px 0; border: 0; cursor: pointer; background: none; }
+.work-card__series-link { display: inline-flex; width: fit-content; max-width: 100%; min-height: 20px; align-items: center; gap: 5px; padding: 0; border: 0; cursor: pointer; background: none; }
 .work-card__series-link:hover .work-card__series { color: var(--mantine-color-piep-7); }
 .work-card__series-link:focus-visible { outline: 2px solid var(--mantine-color-piep-5); outline-offset: 2px; border-radius: 4px; }
 .work-card__avatar { flex: 0 0 auto; }
@@ -811,8 +811,9 @@ select {
 
 .work-card__series {
   color: var(--mantine-color-dimmed);
-  font-size: 0.68rem;
+  font-size: 0.75rem;
   font-weight: 650;
+  line-height: 1.25;
   letter-spacing: 0.02em;
 }
 /* Series and title use their natural combined height. A series + one-line
@@ -820,6 +821,7 @@ select {
    series, without leaving a visibly empty reserved row between elements. */
 .work-card__title { font-size: 0.9rem; }
 .work-card__open { display: flex; width: 100%; min-width: 0; min-height: 28px; align-items: center; color: inherit; text-align: left; }
+.work-card__meta + .work-card__open { align-items: flex-start; }
 .work-card__open:focus-visible,
 .work-row__open:focus-visible { outline: 2px solid var(--mantine-color-piep-5); outline-offset: 3px; border-radius: var(--mantine-radius-sm); }
 .work-card__cover-rail { cursor: pointer; }
@@ -921,6 +923,7 @@ select {
 .work-row__series { display: block; min-width: 0; }
 .work-row__identity { margin-top: 3px; }
 .work-row__open { display: flex; width: 100%; min-width: 0; min-height: 26px; align-items: center; margin-top: 1px; color: inherit; text-align: left; }
+.work-row__main > :is(.work-card__series-link, .work-row__series) + .work-row__open { align-items: flex-start; margin-top: 0; }
 /* 幅は中身の分だけ。余りを全部受けると、短い一文でも箱が行末まで
    伸び、吹き出しが文字の上ではなく箱の中央——何も無い右方に出る。
    縮むときは作者名より先にここが譲る。 */

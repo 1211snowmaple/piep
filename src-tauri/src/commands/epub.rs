@@ -98,6 +98,11 @@ fn load_manifest(
         .map_err(|e| format!("JSONの読み込みに失敗: {}", e))?;
     let mut data: serde_json::Value =
         serde_json::from_str(&json_content).map_err(|e| format!("JSON パースエラー: {}", e))?;
+    if dl.source == "fanbox" {
+        data = crate::fanbox_api::payload::into_post(data).ok_or_else(|| {
+            "FANBOX投稿JSONの形式を解釈できないためEPUBを作成できません".to_string()
+        })?;
+    }
     apply_active_edit_to_epub_data(state, download_id, &dl.source, &mut data);
 
     let assets_dir = Path::new(&target_json_path)

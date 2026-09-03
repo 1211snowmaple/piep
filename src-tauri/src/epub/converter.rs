@@ -134,6 +134,7 @@ fn has_adult_tag(detail: &Value) -> bool {
 // ============================================================
 
 fn convert_fanbox(data: &Value, assets_dir: &Path) -> EpubManifest {
+    let data = crate::fanbox_api::payload::post_or_self(data);
     let post_id = read_id(data.get("id")).unwrap_or_default();
     let title = read_str(data.get("title")).unwrap_or_else(|| "無題".to_string());
     let author_name = read_str(data.get("user").and_then(|u| u.get("name")))
@@ -1059,9 +1060,11 @@ mod tests {
     fn fanbox_image_posts_carry_their_images_even_without_blocks() {
         let manifest = convert_fanbox(
             &json!({
-                "id": "1", "title": "画像投稿", "creatorId": "c", "type": "image",
-                "user": {"userId": "9", "name": "作者"},
-                "body": {"images": [{"id": "one", "extension": "png"}], "text": "ひとこと"},
+                "body": { "post": {
+                    "id": "1", "title": "画像投稿", "creatorId": "c", "type": "image",
+                    "user": {"userId": "9", "name": "作者"},
+                    "body": {"images": [{"id": "one", "extension": "png"}], "text": "ひとこと"}
+                }}
             }),
             Path::new("/nonexistent"),
         );

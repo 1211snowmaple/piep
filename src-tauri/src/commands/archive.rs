@@ -4501,6 +4501,15 @@ pub async fn scan_and_reimport_downloads(app: tauri::AppHandle) -> Result<Reimpo
                             std::fs::read_to_string(&json_file).map_err(|e| e.to_string())?;
                         let data: serde_json::Value =
                             serde_json::from_str(&content_str).map_err(|e| e.to_string())?;
+                        let data = if source == "fanbox" {
+                            crate::fanbox_api::payload::into_post(data).ok_or_else(|| {
+                                format!(
+                                    "Reimport FANBOX work {source_id} v{v_num} has an unrecognized post wrapper"
+                                )
+                            })?
+                        } else {
+                            data
+                        };
 
                         let (new_hash, new_text_len, new_source_updated) =
                             compute_content_details(&data, &source);

@@ -68,6 +68,29 @@ describe("SavePage handover to the large window", () => {
     expect(screen.queryByRole("button", { name: "大きいウィンドウで開く" })).toBeNull();
   });
 
+  it("switches the large browser to the other provider without opening the small pane", async () => {
+    renderSavePage();
+
+    fireEvent.click(await screen.findByRole("button", { name: "大きいウィンドウで開く" }));
+    await screen.findByText("大きいウィンドウで表示中");
+    const fanbox = screen.getByRole("radio", { name: /FANBOX/ });
+    expect(fanbox).not.toBeDisabled();
+
+    browserApi.openStandaloneBrowser.mockClear();
+    browserApi.closeStandaloneBrowser.mockClear();
+    browserApi.openEmbeddedBrowser.mockClear();
+    fireEvent.click(fanbox);
+
+    await waitFor(() => expect(window.location.hash).toBe("#/save/fanbox"));
+    await waitFor(() => expect(browserApi.openStandaloneBrowser).toHaveBeenCalledWith(
+      "https://www.fanbox.cc/",
+      { source: "fanbox", userAgent: undefined },
+    ));
+    await waitFor(() => expect(browserApi.closeStandaloneBrowser).toHaveBeenCalledWith("pixiv"));
+    expect(await screen.findByText("大きいウィンドウで表示中")).toBeInTheDocument();
+    expect(browserApi.openEmbeddedBrowser).not.toHaveBeenCalled();
+  });
+
   it("brings the page back into the app when the large window is dismissed", async () => {
     const originalElementFromPoint = document.elementFromPoint;
     Object.defineProperty(document, "elementFromPoint", { configurable: true, value: () => null });

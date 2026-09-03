@@ -156,12 +156,8 @@ pub fn parse_fanbox_to_html(raw_json: &str, assets: &[AssetEntry]) -> String {
         Err(_) => return String::new(),
     };
 
-    // 1. もし FanboxResponse ラッパーが被っている場合 (生レスポンス `{ "body": { "id": ..., "body": ... } }`)
-    // ラッパーの中身を `post` に特定
-    let post = match v.get("body") {
-        Some(body) if body.get("id").is_some() => body,
-        _ => &v,
-    };
+    // 保存元やAPI世代によって異なるラッパーを共通の投稿形へ寄せる。
+    let post = crate::fanbox_api::payload::post_or_self(&v);
 
     // 2. 古いプレーンテキスト形式 (PostBodyText) の場合
     if let Some(text) = post.get("text").and_then(|t| t.as_str()) {
@@ -174,16 +170,95 @@ pub fn parse_fanbox_to_html(raw_json: &str, assets: &[AssetEntry]) -> String {
         None => return String::new(),
     };
 
-    // body.text がプレーンテキスト形式の場合のフォールバック
-    if let Some(text) = body.get("text").and_then(|t| t.as_str()) {
-        let escaped = escape_html(text);
-        return escaped.replace("\n", "<br />\n");
-    }
-
-    // body.blocks を取得
-    let blocks = match body.get("blocks").and_then(|b| b.as_array()) {
-        Some(arr) => arr,
-        None => return String::new(),
+    // image/file 投稿は text と配列を併せ持つ。text だけを返してしまうと、
+    // 正常に保存済みの画像・添付が閲覧画面から消える。
+    let Some(blocks) = body.get("blocks").and_then(|b| b.as_array()) else {
+        let mut parts = Vec::new();
+        if let Some(text) = body.get("text").and_then(|t| t.as_str()) {
+            let escaped = escape_html(text).replace("\n", "<br />\n");
+            if !escaped.trim().is_empty() {
+                parts.push(escaped);
+            }
+        }
+        if let Some(images) = body.get("images").and_then(|value| value.as_array()) {
+            for image in images {
+                let image_id = image
+                    .get("id")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("");
+                let found = assets.iter().find(|asset| {
+                    (!image_id.is_empty()
+                        && (asset.filename.contains(image_id)
+                            || asset.local_path.contains(image_id)))
+                        || image
+                            .get("localPath")
+                            .and_then(|value| value.as_str())
+                            .is_some_and(|path| {
+                                asset.local_path.ends_with(path.trim_start_matches("./"))
+                            })
+                });
+                parts.push(match found {
+                    Some(asset) => format!(
+                        r#"<img class="novel-image" data-local-path="{}" alt="image_{}" />"#,
+                        escape_html(&asset.local_path),
+                        escape_html(image_id)
+                    ),
+                    None => format!(
+                        r#"<div class="missing-image-placeholder">画像 {}(見つかりません)</div>"#,
+                        escape_html(image_id)
+                    ),
+                });
+            }
+        }
+        if let Some(files) = body.get("files").and_then(|value| value.as_array()) {
+            for file in files {
+                let id = file
+                    .get("id")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("");
+                let name = file
+                    .get("name")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("添付ファイル");
+                let extension = file
+                    .get("extension")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("");
+                let full_name = if extension.is_empty() {
+                    name.to_string()
+                } else {
+                    format!("{name}.{extension}")
+                };
+                let size = file
+                    .get("size")
+                    .and_then(|value| value.as_i64())
+                    .unwrap_or(0);
+                let found = assets.iter().find(|asset| {
+                    asset.filename
+                        == crate::downloader::asset_downloader::sanitize_filename(&full_name)
+                        || (!id.is_empty() && asset.local_path.contains(id))
+                });
+                parts.push(match found {
+                    Some(asset) => format!(
+                        r##"<div class="novel-file-attachment clickable-file" data-local-path="{}">
+                            <span class="file-icon">📎</span>
+                            <div class="file-info">
+                                <span class="file-name">{}</span>
+                                <span class="file-size">{:.1} KB</span>
+                            </div>
+                        </div>"##,
+                        escape_html(&asset.local_path),
+                        escape_html(&full_name),
+                        (size as f64) / 1024.0
+                    ),
+                    None => format!(
+                        r#"<div class="missing-file-placeholder">ファイル {}(見つかりません)</div>"#,
+                        escape_html(&full_name)
+                    ),
+                });
+            }
+        }
+        return parts.join("\n");
     };
 
     let mut html_parts = Vec::new();
@@ -717,5 +792,58 @@ mod tests {
         let html = parse_fanbox_to_html(&json.to_string(), &[]);
         assert!(html.contains("https://creator.fanbox.cc/posts/321"));
         assert!(!html.contains("/manage/posts/"));
+    }
+
+    #[test]
+    fn current_api_wrapper_is_unwrapped_for_reading() {
+        let json = serde_json::json!({
+            "body": { "post": {
+                "id": "5106430",
+                "title": "投稿",
+                "body": { "text": "包まれた本文" }
+            }}
+        });
+        assert!(parse_fanbox_to_html(&json.to_string(), &[]).contains("包まれた本文"));
+    }
+
+    #[test]
+    fn image_and_file_posts_keep_text_and_attachments() {
+        let json = serde_json::json!({
+            "id": "1",
+            "title": "画像とファイル",
+            "body": {
+                "text": "説明文",
+                "images": [{ "id": "image-1", "extension": "jpg" }],
+                "files": [{
+                    "id": "file-1", "name": "資料", "extension": "zip", "size": 2048
+                }]
+            }
+        });
+        let assets = vec![
+            AssetEntry {
+                id: 1,
+                download_id: 1,
+                asset_type: "illustration".to_string(),
+                filename: "image-1.jpg".to_string(),
+                local_path: "C:/library/image-1.jpg".to_string(),
+                original_url: None,
+                mime_type: Some("image/jpeg".to_string()),
+                file_size_bytes: 1,
+            },
+            AssetEntry {
+                id: 2,
+                download_id: 1,
+                asset_type: "file".to_string(),
+                filename: "資料.zip".to_string(),
+                local_path: "C:/library/資料.zip".to_string(),
+                original_url: None,
+                mime_type: Some("application/zip".to_string()),
+                file_size_bytes: 2048,
+            },
+        ];
+        let html = parse_fanbox_to_html(&json.to_string(), &assets);
+        assert!(html.contains("説明文"));
+        assert!(html.contains("C:/library/image-1.jpg"));
+        assert!(html.contains("資料.zip"));
     }
 }

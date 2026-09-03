@@ -874,7 +874,8 @@ pub(crate) fn compute_content_details(
             title, caption, cover_url, tags_str, series_id, text
         );
     } else if source == "fanbox" {
-        if let Some(body) = data.get("body") {
+        let post = crate::fanbox_api::payload::post_or_self(data);
+        if let Some(body) = post.get("body") {
             if let Some(blocks) = body.get("blocks").and_then(|b| b.as_array()) {
                 let parts: Vec<String> = blocks
                     .iter()
@@ -897,7 +898,7 @@ pub(crate) fn compute_content_details(
                 text = txt.to_string();
             }
         }
-        source_updated_at = data
+        source_updated_at = post
             .get("updatedDatetime")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
@@ -911,7 +912,12 @@ pub(crate) fn compute_content_details(
         if !text.is_empty() {
             hasher.update(text.as_bytes());
         } else {
-            hasher.update(serde_json::to_string(data).unwrap_or_default().as_bytes());
+            let value = if source == "fanbox" {
+                crate::fanbox_api::payload::post_or_self(data)
+            } else {
+                data
+            };
+            hasher.update(serde_json::to_string(value).unwrap_or_default().as_bytes());
         }
     }
     let hash_bytes = hasher.finalize();
@@ -938,7 +944,8 @@ pub(crate) fn fetched_plain_text(data: &serde_json::Value, source: &str) -> Stri
     }
 
     if source == "fanbox" {
-        let Some(body) = data.get("body") else {
+        let post = crate::fanbox_api::payload::post_or_self(data);
+        let Some(body) = post.get("body") else {
             return String::new();
         };
         if let Some(blocks) = body.get("blocks").and_then(|value| value.as_array()) {
@@ -1125,7 +1132,8 @@ fn fetched_has_material_content(data: &serde_json::Value, source: &str) -> bool 
 }
 
 fn fanbox_has_material_content(data: &serde_json::Value) -> bool {
-    let Some(body) = data.get("body").filter(|v| !v.is_null()) else {
+    let post = crate::fanbox_api::payload::post_or_self(data);
+    let Some(body) = post.get("body").filter(|v| !v.is_null()) else {
         return false;
     };
 
@@ -1170,6 +1178,169 @@ fn fanbox_has_material_content(data: &serde_json::Value) -> bool {
                 })
                 .unwrap_or(false)
         })
+}
+
+/// 「この投稿が要求する添付」と「いま実際に持っている添付」を、一つの文字列に
+/// する。
+///
+/// 取り直しの判断をこの指紋の**変化**で行う。持ち物と要求を直接突き合わせて
+/// 「違えば修復」としてはいけない。FANBOX の配信URLは失効するので、消えた画像を
+/// 含む投稿は永久に一致せず、更新確認のたびに版が増え、版ごとにフォルダが増え、
+/// いつまでも「改稿あり」に見える。実測で見つかった添付欠落106件・879ファイルは、
+/// まさに一度取り直しても埋まらない可能性がある。
+///
+/// 指紋なら、
+///
+///   - 初めて見た投稿 → 記録が無いので一度試す
+///   - 投稿に画像が増えた → 要求が変わるので、また試す
+///   - 手元のファイルが消えた／壊れた → 持ち物が変わるので、また試す
+///
+/// になる。「取れないものを取ろうとし続けない」と「取れるようになったら取る」を
+/// 同時に満たせる。
+///
+/// ただし**一度で諦めてはいけない**。通信が一瞬途切れただけの失敗と、URLが
+/// 失効して永久に取れない失敗は、その場では見分けがつかない。同じ指紋のままでも
+/// [`FANBOX_ASSET_REPAIR_ATTEMPTS`] 回までは試す。回数は指紋と一緒に覚える。
+/// 同じ状況のまま、何度まで取り直しを試すか。
+///
+/// 1回では足りない（通信の瞬断で永久に諦めることになる）。無制限も駄目で、
+/// 失効したURLを持つ投稿が更新確認のたびに版を増やし続ける。数回で止める。
+pub(crate) const FANBOX_ASSET_REPAIR_ATTEMPTS: u32 = 3;
+
+/// 添付の取り直しについて、前回どこまで試したか。
+///
+/// 覚え書きは `"<指紋>|<試した回数>"`。回数の無い古い記録は0回として読む。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AssetRepairMemo {
+    pub fingerprint: String,
+    pub attempts: u32,
+}
+
+impl AssetRepairMemo {
+    pub fn parse(raw: &str) -> Self {
+        match raw.rsplit_once('|') {
+            Some((fingerprint, attempts)) => Self {
+                fingerprint: fingerprint.to_string(),
+                attempts: attempts.parse().unwrap_or(0),
+            },
+            None => Self {
+                fingerprint: raw.to_string(),
+                attempts: 0,
+            },
+        }
+    }
+
+    pub fn encode(&self) -> String {
+        format!("{}|{}", self.fingerprint, self.attempts)
+    }
+}
+
+/// この投稿の添付を、いま取り直すべきか。
+///
+/// 欠けが無いなら何もしない。欠けているなら、状況が前回と変われば試すし、
+/// 変わっていなくても数回までは試す。
+pub(crate) fn fanbox_asset_repair_needed(
+    stored: Option<&str>,
+    fingerprint: &str,
+    complete: bool,
+) -> bool {
+    if complete {
+        return false;
+    }
+    match stored.map(AssetRepairMemo::parse) {
+        None => true,
+        Some(memo) if memo.fingerprint != fingerprint => true,
+        Some(memo) => memo.attempts < FANBOX_ASSET_REPAIR_ATTEMPTS,
+    }
+}
+
+/// 取り直しを試したあとに残す覚え書き。
+///
+/// 状況が変わっていれば回数を1から数え直す。同じ状況で失敗を重ねたぶんだけ
+/// 積み上げ、上限に達したらそこで止まる。
+pub(crate) fn fanbox_asset_repair_memo(stored: Option<&str>, fingerprint: &str) -> String {
+    let attempts = match stored.map(AssetRepairMemo::parse) {
+        Some(memo) if memo.fingerprint == fingerprint => memo.attempts.saturating_add(1),
+        _ => 1,
+    };
+    AssetRepairMemo {
+        fingerprint: fingerprint.to_string(),
+        attempts,
+    }
+    .encode()
+}
+
+/// 投稿が要求する添付を、すべて読める形で持っているか。
+pub(crate) fn fanbox_assets_are_complete(
+    data: &serde_json::Value,
+    assets: &[crate::database::models::AssetEntry],
+) -> bool {
+    let mut targets = Vec::new();
+    crate::downloader::asset_downloader::extract_download_targets(data, true, &mut targets);
+    let held = assets
+        .iter()
+        .filter(|asset| {
+            std::fs::metadata(&asset.local_path)
+                .map(|metadata| metadata.is_file() && metadata.len() > 0)
+                .unwrap_or(false)
+        })
+        .filter_map(|asset| asset.original_url.as_deref())
+        .collect::<std::collections::HashSet<_>>();
+    targets
+        .iter()
+        .all(|target| held.contains(target.url.as_str()))
+}
+
+pub(crate) fn fanbox_asset_state_fingerprint(
+    data: &serde_json::Value,
+    assets: &[crate::database::models::AssetEntry],
+) -> String {
+    use sha2::{Digest, Sha256};
+    let mut targets = Vec::new();
+    crate::downloader::asset_downloader::extract_download_targets(data, true, &mut targets);
+    let mut expected = targets
+        .iter()
+        .map(|target| target.url.clone())
+        .collect::<Vec<_>>();
+    expected.sort_unstable();
+    expected.dedup();
+
+    // 持ち物は「どの添付か」と「本当に読めるか」の両方で数える。行はあるのに
+    // 中身が0バイトのファイルは、持っていないのと同じである。
+    let mut held = assets
+        .iter()
+        .map(|asset| {
+            let usable = std::fs::metadata(&asset.local_path)
+                .map(|metadata| metadata.is_file() && metadata.len() > 0)
+                .unwrap_or(false);
+            format!(
+                "{}|{}|{}",
+                asset.original_url.as_deref().unwrap_or(""),
+                asset.filename,
+                usable
+            )
+        })
+        .collect::<Vec<_>>();
+    held.sort_unstable();
+
+    let mut hasher = Sha256::new();
+    hasher.update(b"fanbox-assets/v1\n");
+    for url in &expected {
+        hasher.update(url.as_bytes());
+        hasher.update(b"\n");
+    }
+    hasher.update(b"--\n");
+    for entry in &held {
+        hasher.update(entry.as_bytes());
+        hasher.update(b"\n");
+    }
+    // 16進にするのは棚の他の指紋と同じ書き方で。`{:x}` は sha2 の出力型には
+    // 効かない（`Array` は `LowerHex` を持たない）。
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 pub(crate) fn json_string_at<'a>(value: &'a serde_json::Value, keys: &[&str]) -> Option<&'a str> {
@@ -1728,6 +1899,14 @@ pub async fn download_and_save(
     cookie: Option<String>,
     user_agent: Option<String>,
 ) -> Result<DownloadEntry, String> {
+    let data = if source == "fanbox" {
+        crate::fanbox_api::payload::into_post(data).ok_or_else(|| {
+            "FANBOX投稿データの形式を解釈できませんでした（応答形式が変わった可能性があります）"
+                .to_string()
+        })?
+    } else {
+        data
+    };
     let state = app.state::<Arc<AppState>>();
     let storage = state.db.storage_dir().to_path_buf();
     // 同じ作品を二重に保存させないのはこちらの錠。関数の最後まで持ち続ける。
@@ -1755,8 +1934,7 @@ pub async fn download_and_save(
     // 開くまで読めないことに気付けず、更新確認の対象としても数え続ける。
     if existing_dl.is_none() && !fetched_has_material_content(&data, &source) {
         return Err(if source == "fanbox" {
-            "この投稿の本文を取得できませんでした。支援プランが足りないか、非公開の可能性があります"
-                .to_string()
+            fanbox_missing_material_error(&data)
         } else {
             "この作品の本文を取得できませんでした。閲覧制限がかかっている可能性があります"
                 .to_string()
@@ -1768,9 +1946,7 @@ pub async fn download_and_save(
         // 中身が消えて見えるときは、版を上げずに手元の版を守る。作者・
         // シリーズの結び付けと索引だけは取り直す - そちらは今回の応答でも
         // 確かに読めた部分なので、更新して困らない。
-        if (dl.text_length > 0 || dl.asset_count > 0)
-            && !fetched_has_material_content(&data, &source)
-        {
+        if !fetched_has_material_content(&data, &source) {
             drop(_library_write_guard);
             sync_download_entities(
                 &state,
@@ -1789,7 +1965,11 @@ pub async fn download_and_save(
             log::warn!(
                 "Skipping version update for {source}:{source_id} because the fetched payload has no material body/assets"
             );
-            return state.db.get_download(dl.id);
+            return Err(if source == "fanbox" {
+                fanbox_missing_material_error(&data)
+            } else {
+                "取得した作品に本文も挿絵もありません。手元の版は変更せずに保護しました".to_string()
+            });
         }
 
         let hash_changed = dl.content_hash.as_deref() != Some(&new_hash);
@@ -1798,8 +1978,26 @@ pub async fn download_and_save(
         } else {
             false
         };
+        // 添付の取り直しは、指紋が変わったときだけ。等値比較にすると、失効した
+        // URLを持つ投稿が更新確認のたびに版を増やし続ける。
+        let asset_fingerprint = if source == "fanbox" {
+            Some(fanbox_asset_state_fingerprint(
+                &data,
+                &state.db.get_assets(dl.id)?,
+            ))
+        } else {
+            None
+        };
+        let assets_need_repair = match asset_fingerprint.as_deref() {
+            Some(current) => fanbox_asset_repair_needed(
+                state.db.asset_repair_fingerprint(dl.id)?.as_deref(),
+                current,
+                fanbox_assets_are_complete(&data, &state.db.get_assets(dl.id)?),
+            ),
+            None => false,
+        };
 
-        if hash_changed || updated_changed {
+        if hash_changed || updated_changed || assets_need_repair {
             is_update = true;
             next_version = dl.current_version + 1;
         } else {
@@ -2038,7 +2236,62 @@ pub async fn download_and_save(
 
     record_pixiv_meta_state(&state, dl_id, &source, &data);
 
+    // 添付を取り直したあとの姿を残す。埋まっても埋まらなくても記録する —
+    // 「試した」ことを覚えるのが目的で、取れなかった添付を次も追いかけない
+    // ようにするためである。手元のファイルが消えれば指紋が変わり、また試す。
+    if source == "fanbox" {
+        match state.db.get_assets(dl_id) {
+            Ok(assets) => {
+                let fingerprint = fanbox_asset_state_fingerprint(&data, &assets);
+                // 欠けが無くなったら回数を捨てて指紋だけ残す。次に欠けたときは
+                // また1回目から数え直したい。
+                let memo = if fanbox_assets_are_complete(&data, &assets) {
+                    AssetRepairMemo {
+                        fingerprint,
+                        attempts: 0,
+                    }
+                    .encode()
+                } else {
+                    let stored = state.db.asset_repair_fingerprint(dl_id).ok().flatten();
+                    fanbox_asset_repair_memo(stored.as_deref(), &fingerprint)
+                };
+                if let Err(error) = state.db.set_asset_repair_fingerprint(dl_id, &memo) {
+                    log::warn!("Failed to record FANBOX asset state for {dl_id}: {error}");
+                }
+            }
+            Err(error) => {
+                log::warn!(
+                    "Failed to read assets while recording FANBOX state for {dl_id}: {error}"
+                )
+            }
+        }
+    }
+
     state.db.get_download(dl_id)
+}
+
+fn fanbox_missing_material_error(data: &serde_json::Value) -> String {
+    let post = crate::fanbox_api::payload::post_or_self(data);
+    if post
+        .get("isRestricted")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+    {
+        let fee = post
+            .get("feeRequired")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0);
+        let requirement = if fee > 0 {
+            format!("（必要な支援額: 月額{fee}円以上）")
+        } else {
+            String::new()
+        };
+        return format!(
+            "現在のFANBOX連携ではこの投稿を閲覧できません{requirement}。支援中のアカウントでFANBOXをつなぎ直してください"
+        );
+    }
+    "FANBOXから投稿本文と添付が空の応答を受け取りました。時間をおいて再取得し、続く場合は投稿の公開状態を確認してください"
+        .to_string()
 }
 
 /// 本文まで取り込んだ直後の覚え書きを残す（pixiv のみ）。
@@ -2867,7 +3120,8 @@ mod pixiv_meta_signature_tests {
 /// 「保存しないほうが正しい」数少ない場面なので、判定を固定しておく。
 #[cfg(test)]
 mod material_content_tests {
-    use super::{fetched_has_material_content, fetched_plain_text};
+    use super::{fanbox_asset_state_fingerprint, fetched_has_material_content, fetched_plain_text};
+    use crate::database::models::AssetEntry;
     use serde_json::json;
 
     #[test]
@@ -2919,6 +3173,12 @@ mod material_content_tests {
             "fanbox",
         ));
         assert!(!fetched_has_material_content(&json!({}), "fanbox"));
+        assert!(fetched_has_material_content(
+            &json!({ "body": { "post": {
+                "id": "1", "title": "投稿", "body": { "text": "制作ノート" }
+            }}}),
+            "fanbox",
+        ));
     }
 
     #[test]
@@ -2938,6 +3198,109 @@ mod material_content_tests {
             ),
             "見出し\n\n段落"
         );
+        assert_eq!(
+            fetched_plain_text(
+                &json!({ "body": { "post": {
+                    "id": "1", "title": "投稿", "body": { "text": "包まれた本文" }
+                }}}),
+                "fanbox"
+            ),
+            "包まれた本文"
+        );
+    }
+
+    fn image_post(url: &str) -> serde_json::Value {
+        json!({
+            "id": "1",
+            "title": "画像投稿",
+            "body": { "images": [{ "id": "image-1", "originalUrl": url }] }
+        })
+    }
+
+    fn asset(url: Option<&str>, filename: &str, local_path: &str) -> AssetEntry {
+        AssetEntry {
+            id: 1,
+            download_id: 1,
+            asset_type: "illustration".to_string(),
+            filename: filename.to_string(),
+            local_path: local_path.to_string(),
+            original_url: url.map(str::to_string),
+            mime_type: None,
+            file_size_bytes: 0,
+        }
+    }
+
+    /// 添付を持たない取り込みは、持っている取り込みと違う姿になる。
+    ///
+    /// ここが同じ指紋になると、実測で見つかった「JSONに画像URLがあるのに
+    /// ファイルが0件」の106件を、誰も取り直さない。
+    #[test]
+    fn a_post_missing_its_assets_differs_from_one_that_has_them() {
+        let post = image_post("https://downloads.fanbox.cc/images/image-1.jpg");
+        let empty = fanbox_asset_state_fingerprint(&post, &[]);
+        let held = fanbox_asset_state_fingerprint(
+            &post,
+            &[asset(
+                Some("https://downloads.fanbox.cc/images/image-1.jpg"),
+                "image-1.jpg",
+                "/does/not/exist.jpg",
+            )],
+        );
+        assert_ne!(empty, held);
+    }
+
+    /// **取れなかった添付を、いつまでも追いかけない。**
+    ///
+    /// 持ち物と要求を突き合わせて「違えば修復」としていたころ、FANBOX の配信URL
+    /// が失効した投稿は永久に一致せず、更新確認のたびに版が増え、版ごとに
+    /// フォルダが増え続けた。同じ状況なら同じ指紋になることが、その歯止めである。
+    #[test]
+    fn an_unreachable_asset_settles_instead_of_asking_forever() {
+        let post = image_post("https://downloads.fanbox.cc/images/gone.jpg");
+        let before = fanbox_asset_state_fingerprint(&post, &[]);
+        let after = fanbox_asset_state_fingerprint(&post, &[]);
+        assert_eq!(before, after, "同じ状況なら、二度目は「試した」で止まる");
+    }
+
+    /// 投稿に画像が増えたら、もう一度試す。
+    #[test]
+    fn a_post_that_gained_an_image_is_looked_at_again() {
+        let one = fanbox_asset_state_fingerprint(&image_post("https://a/1.jpg"), &[]);
+        let two = fanbox_asset_state_fingerprint(
+            &json!({
+                "id": "1",
+                "title": "画像投稿",
+                "body": { "images": [
+                    { "id": "image-1", "originalUrl": "https://a/1.jpg" },
+                    { "id": "image-2", "originalUrl": "https://a/2.jpg" }
+                ] }
+            }),
+            &[],
+        );
+        assert_ne!(one, two);
+    }
+
+    /// 本文だけの投稿は、添付を要求しない。何度見ても同じ姿である。
+    #[test]
+    fn a_text_only_post_has_a_stable_shape() {
+        let post = json!({ "id": "2", "title": "文章", "body": { "text": "本文" } });
+        assert_eq!(
+            fanbox_asset_state_fingerprint(&post, &[]),
+            fanbox_asset_state_fingerprint(&post, &[])
+        );
+    }
+
+    /// 出どころの分からない添付も、持ち物として数える。
+    ///
+    /// `original_url` は空でありうる（別の版から持ってきたファイルなど）。
+    /// 数えないでいると、持っているのに「足りない」と言い続ける。
+    #[test]
+    fn an_asset_without_a_recorded_url_still_counts_as_held() {
+        let post = image_post("https://a/1.jpg");
+        let none = fanbox_asset_state_fingerprint(&post, &[]);
+        let unlabelled =
+            fanbox_asset_state_fingerprint(&post, &[asset(None, "1.jpg", "/tmp/1.jpg")]);
+        assert_ne!(none, unlabelled);
     }
 }
 
@@ -2977,5 +3340,76 @@ mod profile_save_lock_tests {
         let work = work_save_mutex("pixiv", "1234");
         let profile = profile_save_mutex("person", "pixiv", "1234");
         assert!(!std::sync::Arc::ptr_eq(&work, &profile));
+    }
+}
+
+/// 添付の取り直しを、いつまで試すか。
+///
+/// 一度で諦めると、通信が一瞬途切れただけの投稿が永久に不完全なまま残る。
+/// 無制限に試すと、URLが失効した投稿が更新確認のたびに版を増やし続ける。
+/// **その中間を、回数で持つ。**
+#[cfg(test)]
+mod asset_repair_memo_tests {
+    use super::{
+        fanbox_asset_repair_memo, fanbox_asset_repair_needed, AssetRepairMemo,
+        FANBOX_ASSET_REPAIR_ATTEMPTS,
+    };
+
+    #[test]
+    fn a_post_that_is_missing_nothing_is_never_repaired() {
+        // 欠けが無いなら、記録が何であっても触らない。
+        assert!(!fanbox_asset_repair_needed(None, "abc", true));
+        assert!(!fanbox_asset_repair_needed(Some("zzz|0"), "abc", true));
+    }
+
+    #[test]
+    fn a_post_we_have_never_looked_at_is_repaired_once() {
+        // 旧プログラムから取り込んだ1,313件はここから始まる。記録が無い。
+        assert!(fanbox_asset_repair_needed(None, "abc", false));
+    }
+
+    #[test]
+    fn a_transient_failure_is_retried_a_few_times_and_then_left_alone() {
+        let mut stored: Option<String> = None;
+        let mut tries = 0;
+        // 状況が変わらないまま失敗し続ける投稿。何回試したかを数える。
+        while fanbox_asset_repair_needed(stored.as_deref(), "abc", false) {
+            stored = Some(fanbox_asset_repair_memo(stored.as_deref(), "abc"));
+            tries += 1;
+            assert!(tries <= 10, "取り直しが止まらない");
+        }
+        assert_eq!(tries, FANBOX_ASSET_REPAIR_ATTEMPTS);
+    }
+
+    #[test]
+    fn a_changed_situation_starts_the_count_again() {
+        // 上限まで試して止まったあと、投稿に画像が増えた（＝指紋が変わった）。
+        let exhausted = format!("abc|{FANBOX_ASSET_REPAIR_ATTEMPTS}");
+        assert!(!fanbox_asset_repair_needed(Some(&exhausted), "abc", false));
+        assert!(fanbox_asset_repair_needed(Some(&exhausted), "def", false));
+
+        // 数え直しは1から。前の回数を引き継がない。
+        let memo = AssetRepairMemo::parse(&fanbox_asset_repair_memo(Some(&exhausted), "def"));
+        assert_eq!(memo.fingerprint, "def");
+        assert_eq!(memo.attempts, 1);
+    }
+
+    /// 回数を持たない古い記録も読めること。`asset_repair_fingerprint` 列は
+    /// 指紋だけを入れていた時期がある。
+    #[test]
+    fn a_memo_without_a_count_reads_as_untried() {
+        let memo = AssetRepairMemo::parse("abc");
+        assert_eq!(memo.fingerprint, "abc");
+        assert_eq!(memo.attempts, 0);
+        // なので、まだ試す余地があると読む。
+        assert!(fanbox_asset_repair_needed(Some("abc"), "abc", false));
+    }
+
+    /// 指紋そのものに `|` が入っても、回数と取り違えない。
+    #[test]
+    fn a_fingerprint_is_split_at_its_last_separator() {
+        let memo = AssetRepairMemo::parse("ab|cd|2");
+        assert_eq!(memo.fingerprint, "ab|cd");
+        assert_eq!(memo.attempts, 2);
     }
 }

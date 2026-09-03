@@ -1626,6 +1626,90 @@ fn sweeping_the_shelf_finds_bundles_without_a_seed() {
     );
 }
 
+/// すでにコレクションにした顔ぶれを、棚の走査が新しい束として出し直さない。
+#[test]
+fn sweeping_the_shelf_skips_an_existing_collection_with_the_same_members() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    for (source_id, title) in [
+        ("existing-sweep-1", "古い時計塔から手紙が届く話 第1話"),
+        ("existing-sweep-2", "古い時計塔から手紙が届く話 第2話"),
+        ("existing-sweep-3", "古い時計塔から手紙が届く話 第3話"),
+    ] {
+        insert_download_unindexed(&db, &storage, source_id, title, "時計塔作者", &[], "本文");
+    }
+    {
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE downloads SET author_id = 'clock-writer' WHERE author_name = '時計塔作者'",
+            [],
+        )
+        .unwrap();
+    }
+
+    // まず、既存コレクションが無ければ走査対象になる束だと確かめる。
+    assert_eq!(db.sweep_collection_candidates().unwrap().bundles.len(), 1);
+    db.dismiss_swept_suggestions().unwrap();
+
+    let collection = db
+        .upsert_work_collection(&WorkCollectionInput {
+            name: "古い時計塔から手紙が届く話".to_string(),
+            collection_kind: "ordered".to_string(),
+            ..Default::default()
+        })
+        .unwrap();
+    // コレクションの並びと候補の並びが逆でも、顔ぶれが同じなら同一の束。
+    db.add_work_collection_members(
+        &collection.summary.id,
+        &[
+            WorkCollectionMemberInput {
+                source: "pixiv".to_string(),
+                source_id: "existing-sweep-3".to_string(),
+                title_snapshot: None,
+                author_snapshot: None,
+                position: None,
+                member_role: None,
+                added_by: None,
+                pinned: None,
+                note: None,
+            },
+            WorkCollectionMemberInput {
+                source: "pixiv".to_string(),
+                source_id: "existing-sweep-2".to_string(),
+                title_snapshot: None,
+                author_snapshot: None,
+                position: None,
+                member_role: None,
+                added_by: None,
+                pinned: None,
+                note: None,
+            },
+            WorkCollectionMemberInput {
+                source: "pixiv".to_string(),
+                source_id: "existing-sweep-1".to_string(),
+                title_snapshot: None,
+                author_snapshot: None,
+                position: None,
+                member_role: None,
+                added_by: None,
+                pinned: None,
+                note: None,
+            },
+        ],
+    )
+    .unwrap();
+
+    let swept = db.sweep_collection_candidates().unwrap().bundles;
+    assert!(
+        swept.is_empty(),
+        "既存コレクションと同じ束が出ている: {swept:?}"
+    );
+    assert!(db
+        .list_collection_suggestions(Some("pending"))
+        .unwrap()
+        .is_empty());
+}
+
 /// タグの出どころを混ぜない。
 ///
 /// 取得元が付けたタグとモデルが足したタグは確からしさが違う。**どちらか

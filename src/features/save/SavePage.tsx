@@ -242,6 +242,10 @@ export default function SavePage() {
   const browserInitQueueRef = useRef<Promise<void>>(Promise.resolve());
   const detachedRef = useRef(detached);
   detachedRef.current = detached;
+  // Which provider currently owns the large browser. This is separate from
+  // the route source during a provider handover, when the route has changed
+  // but the replacement large window is still being created.
+  const detachedSourceRef = useRef<SaveSource | null>(null);
   const currentUrlRef = useRef(currentUrl);
   currentUrlRef.current = currentUrl;
   const syncBrowserBounds = useCallback(() => {
@@ -293,10 +297,15 @@ export default function SavePage() {
         // 大きいウィンドウはそのまま残る。切り離していたという記憶は
         // 画面と一緒に消えるので、戻ってきたときに埋め込みも開き、**同じ
         // サイトが二つの窓に出ていた**。残っているなら、その状態を引き継ぐ。
-        const standing = await getStandaloneBrowserUrl(source).catch(() => null);
+        const otherSource: SaveSource = source === "pixiv" ? "fanbox" : "pixiv";
+        const [standing, otherStanding] = await Promise.all([
+          getStandaloneBrowserUrl(source).catch(() => null),
+          getStandaloneBrowserUrl(otherSource).catch(() => null),
+        ]);
         if (cancelled) return;
         if (standing) {
           detachedRef.current = true;
+          detachedSourceRef.current = source;
           setDetached(true);
           setCurrentUrl(standing);
           setAddress(standing);
@@ -304,8 +313,45 @@ export default function SavePage() {
           // A detached page must have a single renderer. This also clears an
           // embedded view left behind by an interrupted previous mount.
           await destroyEmbeddedBrowser().catch(() => undefined);
+          // Older builds allowed one large window per provider to remain on
+          // screen. Collapse that stale state back to the single workspace.
+          if (otherStanding)
+            await closeStandaloneBrowser(otherSource).catch(() => undefined);
           return;
         }
+        const previousDetachedSource =
+          detachedSourceRef.current && detachedSourceRef.current !== source
+            ? detachedSourceRef.current
+            : otherStanding
+              ? otherSource
+              : null;
+        if (previousDetachedSource) {
+          const userAgent =
+            source === "fanbox"
+              ? (await store.get<string>("fanbox_user_agent")) || undefined
+              : undefined;
+          await openStandaloneBrowser(home, { source, userAgent });
+          // Opening a native WebView cannot be cancelled. If another switch
+          // overtook this one, remove the stale window before its successor.
+          if (cancelled) {
+            await closeStandaloneBrowser(source).catch(() => undefined);
+            return;
+          }
+          detachedRef.current = true;
+          detachedSourceRef.current = source;
+          setDetached(true);
+          setCurrentUrl(home);
+          setAddress(home);
+          rememberVisit(home);
+          await destroyEmbeddedBrowser().catch(() => undefined);
+          await closeStandaloneBrowser(previousDetachedSource).catch(
+            () => undefined,
+          );
+          return;
+        }
+        detachedRef.current = false;
+        detachedSourceRef.current = null;
+        setDetached(false);
         await positionBrowser(home);
         // `openEmbeddedBrowser` itself cannot be cancelled. If this task became
         // stale while IPC was in flight, tear down its late result before the
@@ -378,6 +424,7 @@ export default function SavePage() {
         "standalone-browser-closed",
         (event) => {
           if (event.payload.source !== source) return;
+          if (detachedSourceRef.current !== event.payload.source) return;
           reattachRef.current();
         },
       );
@@ -505,6 +552,7 @@ export default function SavePage() {
       // The standalone window owns the live page now. Keeping an additional
       // hidden renderer doubles the expensive part of the browser workspace.
       detachedRef.current = true;
+      detachedSourceRef.current = source;
       setDetached(true);
       await destroyEmbeddedBrowser().catch(() => undefined);
       notifications.show({
@@ -530,6 +578,7 @@ export default function SavePage() {
       // The close event and the watchdog below can both fire for one closure.
       if (!detachedRef.current) return;
       detachedRef.current = false;
+      detachedSourceRef.current = null;
       setDetached(false);
       if (!runtime) return;
       appliedBoundsRef.current = "";
@@ -565,6 +614,9 @@ export default function SavePage() {
   useEffect(() => {
     if (!runtime || !detached) return;
     const watchdog = window.setInterval(() => {
+      // During a provider handover the old window is intentionally closing and
+      // the new route is already mounted. It must not resurrect a child view.
+      if (detachedSourceRef.current !== source) return;
       getStandaloneBrowserUrl(source)
         .then((url) => {
           if (url) return;
