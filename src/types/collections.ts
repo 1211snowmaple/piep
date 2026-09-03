@@ -10,7 +10,14 @@ export type CollectionKind = "ordered" | "unordered";
 /** 表紙の作り方。既定はメンバーの表紙を並べる `mosaic`。 */
 export type CollectionCoverMode = "mosaic" | "spine" | "single" | "sigil" | "file";
 
-/** 束の出自。読む順のある続き物か、味が同じテーマか、手で作ったか。 */
+/**
+ * 候補の見つかり方。読む順のある続き物か、味が同じテーマか。
+ *
+ * これは**候補を見比べるとき**の手がかりである。どの証拠で見つかったかで、
+ * 採るかどうかの判断が変わる。作ったあとの束には出さない — 走査は続き物を
+ * 順序付き、テーマを順序なしで作るので、「順序付き」の紋とほぼ必ず一致し、
+ * 二つ並べても片方がもう片方の言い換えになるだけだった。
+ */
 export type CollectionTrack = "manual" | "sequence" | "theme";
 
 /** 名前がどこから来たか。`manual` は自動命名で上書きしない。 */
@@ -37,7 +44,6 @@ export interface WorkCollectionSummary {
   /** 並び順の先頭から最大4件。表紙が無いメンバーも席を残す。 */
   coverTiles: CollectionCoverTile[];
   nameSource: CollectionNameSource;
-  track: CollectionTrack;
   revision: number;
   memberCount: number;
   availableCount: number;
@@ -82,7 +88,6 @@ export interface WorkCollectionInput {
   coverMode?: CollectionCoverMode | null;
   coverImagePath?: string | null;
   nameSource?: CollectionNameSource | null;
-  track?: CollectionTrack | null;
 }
 
 export interface WorkCollectionMemberInput extends WorkKey {

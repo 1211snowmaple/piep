@@ -1771,12 +1771,7 @@ fn swept_candidates_can_be_closed_in_one_go() {
     }
     assert_eq!(db.sweep_collection_candidates().unwrap().bundles.len(), 1);
 
-    assert_eq!(
-        db.dismiss_swept_suggestions(Some("theme")).unwrap(),
-        0,
-        "系統が違えば消えない"
-    );
-    assert_eq!(db.dismiss_swept_suggestions(None).unwrap(), 1);
+    assert_eq!(db.dismiss_swept_suggestions().unwrap(), 1);
     assert!(db
         .list_collection_suggestions(Some("pending"))
         .unwrap()

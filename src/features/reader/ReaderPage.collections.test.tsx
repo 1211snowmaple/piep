@@ -72,7 +72,6 @@ function collectionOf(kind: CollectionKind): WorkCollection {
     coverImagePath: null,
     coverTiles: [],
     nameSource: "manual" as const,
-    track: "manual" as const,
     revision: 1,
     memberCount: 2,
     availableCount: 2,

@@ -101,13 +101,14 @@ export function suggestCollectionAdditions(collectionId: string): Promise<Collec
 }
 
 /**
- * 走査で出た候補を、まとめて閉じる。
+ * 走査で出た候補を、まとめて片付ける。
  *
- * 300件を1件ずつ閉じる人はいない。消えるのは下書きだけで、「二度と出さない」
- * とは記録しない — 規則が変われば、また出てくる。
+ * 消えるのは下書きだけで、「二度と出さない」とは記録しない — 規則が変われば、
+ * また出てくる。系統を選んで閉じる引数は持たない。系統を選んで閉じたい人は
+ * いなかったので、その道ごとやめた。
  */
-export function dismissSweptSuggestions(track?: "sequence" | "theme"): Promise<number> {
-  return invoke<number>("db_dismiss_swept_suggestions", { track: track ?? null });
+export function dismissSweptSuggestions(): Promise<number> {
+  return invoke<number>("db_dismiss_swept_suggestions");
 }
 
 export function listCollectionSuggestions(stateFilter: "pending" | "accepted" | "rejected" | "all" = "pending"): Promise<CollectionSuggestion[]> {

@@ -946,14 +946,8 @@ pub async fn db_name_collection_suggestion(
 
 /// 走査で出た候補を、まとめて閉じる。`track` を渡すとその系統だけ。
 #[tauri::command]
-pub async fn db_dismiss_swept_suggestions(
-    app: tauri::AppHandle,
-    track: Option<String>,
-) -> Result<usize, String> {
-    run_library_write_blocking(app, move |state| {
-        state.db.dismiss_swept_suggestions(track.as_deref())
-    })
-    .await
+pub async fn db_dismiss_swept_suggestions(app: tauri::AppHandle) -> Result<usize, String> {
+    run_library_write_blocking(app, move |state| state.db.dismiss_swept_suggestions()).await
 }
 
 /// 棚全体を走査して、束の候補を作り直す。

@@ -53,8 +53,12 @@ export function CollectionSweepModal({ opened, onClose }: {
   });
   const pendingCount = pending.data?.length ?? 0;
 
+  // プレビューは閲覧専用で、保存側がいない。見本を出すために窓は開けるように
+  // してあるので、押したときだけ本物を呼ばないよう、ここで止める。
   const sweep = useMutation({
-    mutationFn: sweepCollectionCandidates,
+    mutationFn: () => (runtime
+      ? sweepCollectionCandidates()
+      : Promise.resolve({ bundles: demoSuggestions, savedSearchSuggestions: [], semanticUsed: true, note: null })),
     onSuccess: (result) => {
       invalidate();
       setSavedSearchIdeas(result.savedSearchSuggestions);
@@ -72,7 +76,7 @@ export function CollectionSweepModal({ opened, onClose }: {
   });
 
   const dismissAll = useMutation({
-    mutationFn: () => dismissSweptSuggestions(),
+    mutationFn: () => (runtime ? dismissSweptSuggestions() : Promise.resolve(0)),
     onSuccess: (removed) => {
       invalidate();
       setSavedSearchIdeas([]);
