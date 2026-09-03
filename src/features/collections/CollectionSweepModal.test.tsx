@@ -113,22 +113,39 @@ describe("CollectionSweepModal", () => {
   });
 
   /**
-   * まとめて閉じるは、畳んだメニューの中ではなく表に置く。**唯一使う項目を
-   * 隠していた**ので、系統別の項目ごとやめた。
+   * **閉じることが、片付けることである。**
+   *
+   * 候補は下書きで、閉じるとは見終わったということ。それを二つの操作へ分けると、
+   * 窓を閉じたのに数字だけが棚の入口に残る。✕ を押したらそのまま片付く。
    */
-  it("offers closing them all without a menu, and only when there is something to close", async () => {
-    renderModal();
-    expect(await screen.findByRole("button", { name: "すべて閉じる" })).toBeDisabled();
-    expect(screen.queryByRole("button", { name: "まとめて" })).not.toBeInTheDocument();
+  it("clears the candidates when the window is closed", async () => {
+    collectionApi.listCollectionSuggestions.mockResolvedValue(oneSuggestion());
+    const onClose = renderModal();
+    await screen.findByRole("button", { name: "更新" });
 
+    // ✕ の名前が、何が起きるかを言っている。
+    await userEvent.click(screen.getByRole("button", { name: "閉じて候補を片付ける" }));
+    expect(onClose).toHaveBeenCalled();
+    await waitFor(() => expect(collectionApi.dismissSweptSuggestions).toHaveBeenCalled());
+  });
+
+  /** 押すものは一つだけ。片付けるための別のボタンは置かない。 */
+  it("keeps a single action, and no separate close-all button", async () => {
     collectionApi.listCollectionSuggestions.mockResolvedValue(oneSuggestion());
     renderModal();
-    const found = await screen.findAllByRole("button", { name: "すべて閉じる" });
-    const closeAll = found[found.length - 1];
-    await waitFor(() => expect(closeAll).toBeEnabled());
-    // 確認の窓は挟まない。戻すのは「更新」一手なので、確認のほうが高くつく。
-    await userEvent.click(closeAll);
-    await waitFor(() => expect(collectionApi.dismissSweptSuggestions).toHaveBeenCalled());
+    expect(await screen.findByRole("button", { name: "更新" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "すべて閉じる" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "まとめて" })).not.toBeInTheDocument();
+  });
+
+  /** 片付けるものが無いときに、空の書き込みを送らない。 */
+  it("does not write anything when there was nothing to clear", async () => {
+    const onClose = renderModal();
+    await screen.findByRole("button", { name: "棚から探す" });
+    // 片付けるものが無いときは、名前も「閉じる」だけになる。
+    await userEvent.click(screen.getByRole("button", { name: "閉じる" }));
+    expect(onClose).toHaveBeenCalled();
+    expect(collectionApi.dismissSweptSuggestions).not.toHaveBeenCalled();
   });
 
   /**

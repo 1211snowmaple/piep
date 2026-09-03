@@ -94,6 +94,7 @@ export function SuggestionInbox({ sweeping, savedSearchIdeas, note }: {
       <Text size="sm" c="dimmed">
         棚を一度なめて、続き物と、題材の近い束を洗い出します。確かなものから少しだけ出すので、
         <b>「更新」を押すたびに別の束が上がってきます</b>。採用するまで何も変わりません。
+        閉じると、出ている候補は片付きます。
       </Text>
 
       {sweeping && (
