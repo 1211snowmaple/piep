@@ -2143,6 +2143,92 @@ pub async fn refresh_entity_profile(
     Err("Unsupported entity type".to_string())
 }
 
+/// 取りこぼした FANBOX の添付を数えた結果。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FanboxRepairScan {
+    /// 取り直しの対象になる作品の id。そのまま更新ジョブへ渡せる。
+    pub work_ids: Vec<i64>,
+    /// 手元に無い添付の総数。
+    pub missing_files: i64,
+    /// そのうち、支援していないと取れない投稿の数。
+    pub restricted_works: i64,
+    /// 走査した FANBOX の行数。
+    pub scanned_works: i64,
+}
+
+/// 原本JSONが求める添付を、実際に持っているかどうかで数える。
+///
+/// 旧プログラムから取り込んだ投稿には、JSONに画像があるのに実ファイルが
+/// 一つも無いものがある。本文も更新日時も同じなので、従来の更新確認では
+/// 素通りしていた。しかも**これらは一件も監視対象になっていない**ので、
+/// 更新ジョブは触りに行かない。数えて、id を渡せる形にして返す。
+///
+/// 読むだけで、棚には何も書かない。
+#[tauri::command]
+pub async fn db_scan_fanbox_asset_gaps(app: tauri::AppHandle) -> Result<FanboxRepairScan, String> {
+    run_db_blocking(app, |state| {
+        let rows = state.db.fanbox_rows_with_json()?;
+        let scanned_works = rows.len() as i64;
+        let mut work_ids = Vec::new();
+        let mut missing_files = 0i64;
+        let mut restricted_works = 0i64;
+
+        for (download_id, json_path) in rows {
+            let Ok(text) = std::fs::read_to_string(&json_path) else {
+                continue;
+            };
+            let Ok(data) = serde_json::from_str::<serde_json::Value>(&text) else {
+                continue;
+            };
+            let assets = state.db.get_assets(download_id)?;
+            if crate::commands::downloader::fanbox_assets_are_complete(&data, &assets) {
+                continue;
+            }
+            let mut targets = Vec::new();
+            crate::downloader::asset_downloader::extract_download_targets(
+                &data,
+                true,
+                &mut targets,
+            );
+            let held = assets
+                .iter()
+                .filter(|asset| {
+                    std::fs::metadata(&asset.local_path)
+                        .map(|meta| meta.is_file() && meta.len() > 0)
+                        .unwrap_or(false)
+                })
+                .filter_map(|asset| asset.original_url.as_deref())
+                .collect::<std::collections::HashSet<_>>();
+            let missing = targets
+                .iter()
+                .filter(|target| !held.contains(target.url.as_str()))
+                .count();
+            if missing == 0 {
+                continue;
+            }
+            missing_files += missing as i64;
+            work_ids.push(download_id);
+            let post = crate::fanbox_api::payload::post_or_self(&data);
+            if post
+                .get("isRestricted")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                restricted_works += 1;
+            }
+        }
+
+        Ok(FanboxRepairScan {
+            work_ids,
+            missing_files,
+            restricted_works,
+            scanned_works,
+        })
+    })
+    .await
+}
+
 #[tauri::command]
 pub async fn db_get_entity_profile_repair_status(
     app: tauri::AppHandle,

@@ -3376,7 +3376,11 @@ fn optimizing_a_multi_segment_index_still_ends_with_one() {
     let (reported_before, after) =
         super::super::tantivy_index::optimize_segments(&storage).unwrap();
 
-    assert_eq!(reported_before, before);
+    // 「統合前は何個だったか」を、別々の時点で測った二つの数の一致で確かめない。
+    // Tantivy は背後でも併合するので、`before` を測ってから `optimize_segments`
+    // が数えるまでのあいだに減りうる（実測で 9 → 2）。ここで言いたいのは
+    // 「統合すべきものが確かにあった」ことなので、そう書く。
+    assert!(reported_before > 1, "統合前が1個以下: {reported_before}");
     assert_eq!(after, 1, "統合が途中で止まっている");
     assert_eq!(
         super::super::tantivy_index::searchable_segment_count(&storage).unwrap(),

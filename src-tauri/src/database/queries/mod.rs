@@ -4903,6 +4903,31 @@ impl Database {
         Ok(())
     }
 
+    /// FANBOX の行を、原本JSONの置き場所と一緒に並べる。
+    ///
+    /// 添付の取りこぼしを数えるのに使う。本文はJSONの中にしか無いので、
+    /// 「何を要求しているか」は行だけでは分からない。
+    pub fn fanbox_rows_with_json(&self) -> Result<Vec<(i64, String)>, String> {
+        let conn = self.read_conn()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, json_path FROM downloads
+                 WHERE source = 'fanbox' AND json_path IS NOT NULL AND json_path != ''
+                 ORDER BY id",
+            )
+            .map_err(|e| format!("Failed to prepare FANBOX row scan: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|e| format!("Failed to query FANBOX rows: {e}"))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(|e| format!("Failed to read FANBOX rows: {e}"))?);
+        }
+        Ok(out)
+    }
+
     pub fn get_assets(&self, download_id: i64) -> Result<Vec<AssetEntry>, String> {
         let conn = self.read_conn()?;
         let mut stmt = conn

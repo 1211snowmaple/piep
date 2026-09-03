@@ -292,6 +292,7 @@ pub fn run() -> tauri::Result<()> {
             commands::database::db_list_entity_versions,
             commands::database::db_get_latest_entity_profile_json,
             commands::database::refresh_entity_profile,
+            commands::database::db_scan_fanbox_asset_gaps,
             commands::database::db_get_entity_profile_repair_status,
             commands::database::repair_incomplete_entity_profiles,
             commands::database::cancel_entity_profile_repair,

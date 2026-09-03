@@ -86,6 +86,28 @@ export interface EntityProfileRepairResult {
   remaining: number;
 }
 
+/** 取りこぼした FANBOX の添付を数えた結果。読むだけで、棚には何も書かない。 */
+export interface FanboxRepairScan {
+  /** 取り直しの対象になる作品の id。そのまま更新ジョブへ渡せる。 */
+  workIds: number[];
+  /** 手元に無い添付の総数。 */
+  missingFiles: number;
+  /** そのうち、支援していないと取れない投稿の数。 */
+  restrictedWorks: number;
+  /** 走査した FANBOX の行数。 */
+  scannedWorks: number;
+}
+
+/**
+ * 原本JSONが求める添付を、実際に持っているかどうかで数える。
+ *
+ * 旧プログラムから取り込んだ投稿には、JSONに画像があるのに実ファイルが一つも
+ * 無いものがある。本文も更新日時も同じなので、従来の更新確認は素通りしていた。
+ */
+export function scanFanboxAssetGaps(): Promise<FanboxRepairScan> {
+  return invoke<FanboxRepairScan>("db_scan_fanbox_asset_gaps");
+}
+
 export function getEntityProfileRepairStatus(): Promise<EntityProfileRepairStatus> {
   return invoke<EntityProfileRepairStatus>("db_get_entity_profile_repair_status");
 }
