@@ -131,8 +131,10 @@ fn read_file(dir: &Path, name: &str) -> Result<Vec<u8>, String> {
 
 /// 保存されているベクトルは 4バイトずつのリトルエンディアン（`vector_to_blob`）。
 fn blob_to_vector(blob: &[u8]) -> Vec<f32> {
-    blob.chunks_exact(4)
-        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+    blob.as_chunks::<4>()
+        .0
+        .iter()
+        .map(|chunk| f32::from_le_bytes(*chunk))
         .collect()
 }
 

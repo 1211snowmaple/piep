@@ -24,10 +24,10 @@ jobs:
           node-version: 24
           cache: 'npm'
 
-      - name: Install Rust 1.97.1
+      - name: Install Rust 1.98.1
         run: |
-          rustup toolchain install 1.97.1 --profile minimal --component clippy,rustfmt
-          rustup default 1.97.1
+          rustup toolchain install 1.98.1 --profile minimal --component clippy,rustfmt
+          rustup default 1.98.1
 
       - name: Install frontend dependencies
         run: npm ci

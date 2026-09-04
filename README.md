@@ -132,7 +132,7 @@ AI補助は既定で無効で、外部宛先はHTTPSと宛先ごとの同意が�
 ### 必要なもの
 
 - Node.js 24.x
-- Rust 1.97.1（CI が固定している版。`clippy` を `-D warnings` で通すので、
+- Rust 1.98.1（CI が固定している版。`clippy` を `-D warnings` で通すので、
   新しい stable では新規の lint に当たって落ちることがある）
 - OSごとのTauri前提環境（Windows: WebView2 / Linux: `libwebkit2gtk-4.1-dev` ほか）— [Tauri 2 の前提条件](https://v2.tauri.app/start/prerequisites/)
 
