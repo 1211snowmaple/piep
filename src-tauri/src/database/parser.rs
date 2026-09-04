@@ -116,7 +116,7 @@ pub(crate) fn embed_service_label(provider: &str) -> String {
 static HTML_EMBED_URL: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"(?i)(href|src)\s*=\s*["'](https?://[^"'\s]+)["']"#).unwrap());
 
-/// 埋め込みの中継先。ここを指しても、読み手の役には立たない。
+/// 埋め込みの中継先。カードを描くための入れ物であって、宛先そのものではない。
 const EMBED_RELAY_HOSTS: [&str; 5] = [
     "iframely",
     "embedly",
@@ -125,20 +125,84 @@ const EMBED_RELAY_HOSTS: [&str; 5] = [
     "if-cdn.com",
 ];
 
+/// その URL が、宛先ではなく埋め込みの中継先か。
+pub(crate) fn is_embed_relay(url: &str) -> bool {
+    let lowered = url.to_ascii_lowercase();
+    EMBED_RELAY_HOSTS.iter().any(|host| lowered.contains(host))
+}
+
+/// pixiv の埋め込み枠を、作品そのものの住所へ直す。
+///
+/// FANBOX に貼られた pixiv の作品は `embed.pixiv.net/oembed_iframe.php` という
+/// **枠**の住所で保存されている。枠のままでは棚の作品と結び付かないので、
+/// 作品の住所へ直す ―― 手元のライブラリで数えると、この形の埋め込み 41 件は
+/// すべて保存済みの作品を指していた。
+fn pixiv_embed_target(url: &str) -> Option<String> {
+    let parsed = url::Url::parse(url).ok()?;
+    if !parsed.host_str()?.eq_ignore_ascii_case("embed.pixiv.net") {
+        return None;
+    }
+    let mut kind = None;
+    let mut id = None;
+    for (key, value) in parsed.query_pairs() {
+        match key.as_ref() {
+            "type" => kind = Some(value.to_string()),
+            "id" => id = Some(value.to_string()),
+            _ => {}
+        }
+    }
+    let id = id.filter(|value| value.chars().all(|c| c.is_ascii_digit()) && !value.is_empty())?;
+    match kind.as_deref() {
+        Some("novel") => Some(format!("https://www.pixiv.net/novel/show.php?id={id}")),
+        Some("illust") => Some(format!("https://www.pixiv.net/artworks/{id}")),
+        _ => None,
+    }
+}
+
+/// 中継先が元の住所を包んでいることがある（`?url=…`）。包みを解く。
+fn unwrapped_relay_target(url: &str) -> Option<String> {
+    if !is_embed_relay(url) {
+        return None;
+    }
+    let parsed = url::Url::parse(url).ok()?;
+    parsed
+        .query_pairs()
+        .find(|(key, _)| key == "url" || key == "src")
+        .map(|(_, value)| value.to_string())
+        .filter(|value| {
+            let lowered = value.to_ascii_lowercase();
+            lowered.starts_with("http://") || lowered.starts_with("https://")
+        })
+}
+
+/// 取り出した URL を、人が辿れる形へ直す。
+fn resolve_embed_url(url: &str) -> String {
+    pixiv_embed_target(url)
+        .or_else(|| unwrapped_relay_target(url))
+        .unwrap_or_else(|| url.to_string())
+}
+
 /// 埋め込みの HTML から、人が辿れる URL を1つ取り出す。
 ///
 /// URL を持たず HTML だけを返す埋め込みがある。カードを組めないからと
 /// 捨てていたが、その HTML の中には元のページの宛先が書いてある。
+///
+/// 宛先が中継先しか無いこともある（iframely は元の住所を持たせず、番号だけで
+/// カードを配る）。**その番号も残す** ―― 開けば元のカードに辿り着くので、
+/// 何も無いより辿れる。呼び手が `is_embed_relay` で見分けて、そう名乗る。
 pub(crate) fn first_public_url_in_html(html: &str) -> Option<String> {
     let mut from_src: Option<String> = None;
+    let mut relay: Option<String> = None;
     for captures in HTML_EMBED_URL.captures_iter(html) {
-        let raw = captures.get(2)?.as_str();
-        let url = raw
+        let Some(raw) = captures.get(2) else { continue };
+        let decoded = raw
+            .as_str()
             .replace("&amp;", "&")
             .replace("&#39;", "'")
             .replace("&quot;", "\"");
-        let lowered = url.to_ascii_lowercase();
-        if EMBED_RELAY_HOSTS.iter().any(|host| lowered.contains(host)) {
+        let url = resolve_embed_url(&decoded);
+        if is_embed_relay(&url) {
+            relay.get_or_insert(url);
             continue;
         }
         if captures
@@ -149,7 +213,7 @@ pub(crate) fn first_public_url_in_html(html: &str) -> Option<String> {
         }
         from_src.get_or_insert(url);
     }
-    from_src
+    from_src.or(relay)
 }
 
 /// 本文に置くリンクカード1枚。
@@ -592,6 +656,7 @@ pub fn parse_fanbox_to_html(raw_json: &str, assets: &[AssetEntry]) -> String {
                     // 消しはしない** ―― そこに何かが貼られていた事実まで
                     // 失われると、読み手は本文が欠けたことにも気づけない。
                     let safe_url = safe_link_href(&url);
+                    let via_relay = is_embed_relay(&url);
                     let host = info
                         .get("host")
                         .and_then(|h| h.as_str())
@@ -616,7 +681,13 @@ pub fn parse_fanbox_to_html(raw_json: &str, assets: &[AssetEntry]) -> String {
                         .filter(|value| !value.trim().is_empty())
                         .unwrap_or_else(|| {
                             if url.trim().is_empty() {
-                                "リンク先を取り出せない埋め込み".to_string()
+                                "リンク先の分からない埋め込み".to_string()
+                            } else if via_relay {
+                                // 取得元は宛先を持たず、カードを配る番号だけを
+                                // 保存している。開けば元のカードに着くので、
+                                // その通りに名乗る ―― 宛先を知っているふりも、
+                                // 何も無いふりもしない。
+                                "外部サイトの埋め込み（開くと元のカードへ）".to_string()
                             } else {
                                 url.clone()
                             }
@@ -1049,7 +1120,8 @@ mod tests {
             html.contains("埋め込みより後"),
             "後の本文が消えている: {html}"
         );
-        assert!(!html.contains("iframe"));
+        // 枠の markup そのものは本文に持ち込まない（宛先としての住所は残す）。
+        assert!(!html.contains("<iframe"), "{html}");
         // 何が貼られていたかの札は残す。跡形もなく消すと、本文が欠けたことに
         // 読み手が気づけない。
         assert!(html.contains("novel-link-card"), "札まで消えている: {html}");
@@ -1131,6 +1203,80 @@ mod tests {
         assert_eq!(
             embed_service_url("youtube", "https://evil.example/x").as_deref(),
             Some("https://evil.example/x")
+        );
+    }
+
+    /// FANBOX に貼られた pixiv の作品は、作品の住所ではなく **埋め込み枠**の
+    /// 住所で保存されている。枠のままでは棚の作品と結び付かない。
+    #[test]
+    fn a_pixiv_embed_frame_becomes_the_work_it_shows() {
+        let json = serde_json::json!({
+            "id": "1",
+            "title": "活動報告",
+            "body": {
+                "blocks": [{ "type": "url_embed", "urlEmbedId": "e" }],
+                "urlEmbedMap": { "e": { "type": "html", "html":
+                    "<div class=\"iframely-pixiv iframely-embed\"><div class=\"iframely-responsive\"><iframe src=\"https://embed.pixiv.net/oembed_iframe.php?type=novel&amp;id=26223262\" allowfullscreen></iframe></div></div>" } }
+            }
+        });
+        let html = parse_fanbox_to_html(&json.to_string(), &[]);
+        assert!(
+            html.contains("https://www.pixiv.net/novel/show.php?id=26223262"),
+            "作品の住所になっていない: {html}"
+        );
+        assert!(
+            !html.contains("oembed_iframe"),
+            "枠の住所が残っている: {html}"
+        );
+    }
+
+    #[test]
+    fn a_pixiv_illustration_embed_points_at_the_artwork() {
+        assert_eq!(
+            pixiv_embed_target("https://embed.pixiv.net/oembed_iframe.php?type=illust&id=98765")
+                .as_deref(),
+            Some("https://www.pixiv.net/artworks/98765")
+        );
+        // 番号でないものは組み立てない。
+        assert_eq!(
+            pixiv_embed_target("https://embed.pixiv.net/oembed_iframe.php?type=novel&id=abc"),
+            None
+        );
+        assert_eq!(
+            pixiv_embed_target("https://example.com/?type=novel&id=1"),
+            None
+        );
+    }
+
+    /// 中継先しか無い埋め込みは、宛先を保存していない。それでも開けば元の
+    /// カードには着くので、押せる形のまま「そう名乗る」。
+    #[test]
+    fn a_relay_only_embed_is_still_something_you_can_open() {
+        let json = serde_json::json!({
+            "id": "1",
+            "title": "活動報告",
+            "body": {
+                "blocks": [{ "type": "url_embed", "urlEmbedId": "e" }],
+                "urlEmbedMap": { "e": { "type": "html.card", "html":
+                    "<div class=\"iframely-card\"><div><iframe src=\"https://cdn.iframe.ly/wM4miT8A?language=ja-JP&amp;app=1\"></iframe></div></div>" } }
+            }
+        });
+        let html = parse_fanbox_to_html(&json.to_string(), &[]);
+        assert!(html.contains("https://cdn.iframe.ly/wM4miT8A"), "{html}");
+        assert!(html.contains("外部サイトの埋め込み"), "{html}");
+        // 押せる形であること（宛先を知っているふりはしない）。
+        assert!(html.contains("<a href="), "{html}");
+    }
+
+    /// 中継先が元の住所を包んでいる形は、包みを解く。
+    #[test]
+    fn a_wrapped_relay_url_is_unwrapped() {
+        assert_eq!(
+            first_public_url_in_html(
+                r#"<iframe src="https://cdn.embedly.com/widgets/media.html?url=https%3A%2F%2Fexample.com%2Farticle"></iframe>"#
+            )
+            .as_deref(),
+            Some("https://example.com/article")
         );
     }
 

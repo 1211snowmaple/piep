@@ -105,6 +105,26 @@ test("critical workspaces keep a stable layout", async ({ page }, testInfo) => {
   }
 });
 
+/**
+ * 本文に貼られたリンクカードと、その提供元の印。
+ *
+ * 画面まるごとの見張りは、読書画面では**窓に見えているぶんしか**写らない
+ * （本文は内側の器で送るため）。カードは本文の末尾に来るので、そこまで送って
+ * から撮る。2文字の印（Sk・Ci・Yt…）が枠と重なって潰れていたのに、どの基準
+ * 画像にもカードが一枚も無かったため、誰にも見えていなかった。
+ */
+test("link cards in the body keep their service marks inside the frame", async ({ page }, testInfo) => {
+  test.skip(!testInfo.project.name.endsWith("100dpi"), "Card layout runs once per size/theme; DPI scaling is covered by the library shell matrix");
+  await page.goto("/#/reader/101");
+  const cards = page.locator(".reader-content .novel-link-card");
+  await expect(cards.first()).toBeAttached();
+  await page.locator(".reader-scroll [data-scrollarea-viewport]").evaluate((viewport) => {
+    viewport.scrollTop = viewport.scrollHeight;
+  });
+  await expect(cards).toHaveCount(2);
+  await expect(page.locator(".reader-content")).toHaveScreenshot("reader-link-cards.png");
+});
+
 test("collection list view keeps covers, order controls, and actions aligned", async ({ page }, testInfo) => {
   test.skip(!testInfo.project.name.endsWith("100dpi"), "List layout runs once per size/theme; DPI scaling is covered by the library shell matrix");
   // 見方は束だけの好みではなくなったので、beforeEach と同じ鍵を上書きする。
