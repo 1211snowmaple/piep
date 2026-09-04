@@ -168,8 +168,7 @@ function linkCardBrand(document: Document, url: URL): HTMLElement {
   host.className = "link-card-brand";
   host.style.setProperty("--link-card-brand", brand.color);
   host.title = brand.label;
-  if (brand.brandGlyph) host.append(brandGlyphElement(document, brand.brandGlyph));
-  else host.textContent = "↗";
+  host.append(brandGlyphElement(document, brand.brandGlyph));
   return host;
 }
 

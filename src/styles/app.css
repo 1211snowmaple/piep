@@ -280,15 +280,10 @@ select {
   align-items: center;
   justify-content: center;
 }
-/* 2文字の印は、四角の幅が足りずに枠と重なっていた（Sk・Pe・Ci・Yt・Mi・Bs・
-   Pv・Od・Az のすべて）。字数に合わせて横へ伸ばす ―― 隣の
-   `.external-service-mark__glyph` は最初からこの形で、こちらだけ 1 文字ぶんの
-   寸法で止まっていた。 */
 .brand-word-glyph {
   display: inline-grid;
   min-width: 18px;
   height: 18px;
-  padding-inline: 3px;
   place-items: center;
   border: 1.5px solid currentColor;
   border-radius: 6px;
@@ -298,12 +293,15 @@ select {
   line-height: 1;
   white-space: nowrap;
 }
+/* 2文字の印（Sk・Pe・Ci・Yt・Mi・Bs・Pv・Od・Az）は、1文字ぶんの字の大きさの
+   まま押し込まれて枠と重なっていた。**四角は変えず、字を詰める** ―― 印の
+   大きさが字数で変わると、並んだときに背の高さが揃わない。 */
+.brand-word-glyph[data-chars="2"] { font-size: 10px; }
 .brand-word-glyph svg { display: block; width: 15px; height: 15px; fill: currentColor; }
-/* 絵で描く印は正方形のまま。字のための余白を足すと、枠だけが横に伸びる。 */
-.brand-word-glyph--pixiv { width: 18px; padding-inline: 0; color: #0096fa; }
+/* 絵で描く印は正方形のまま。 */
+.brand-word-glyph--pixiv { width: 18px; color: #0096fa; }
 .brand-word-glyph[data-wide] { color: #7a5d00; }
 .external-service-mark { display: inline-flex; align-items: center; gap: 6px; color: var(--external-brand); }
-.external-service-mark__glyph { display: inline-grid; min-width: 20px; height: 20px; padding-inline: 3px; place-items: center; border: 1px solid color-mix(in srgb, var(--external-brand) 35%, transparent); border-radius: 6px; font-size: 10px; font-weight: 800; }
 
 .empty-state {
   border-style: dashed;
@@ -1426,7 +1424,8 @@ select {
   font-weight: 850;
 }
 
-.link-card-brand .brand-word-glyph { min-width: 18px; height: 18px; }
+/* 寸法は印そのものの決め（`.brand-word-glyph`）に任せる。ここで別の寸法を
+   重ねていたので、同じ印がカードの中だけ違う形になっていた。 */
 .link-card-info { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 2px; }
 .link-card-kicker { color: #8a6b00; font-size: 10px; font-weight: 800; letter-spacing: 0.04em; }
 .link-card-title { overflow: hidden; color: var(--mantine-color-text); font-size: 0.88rem; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
