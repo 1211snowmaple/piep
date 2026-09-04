@@ -58,6 +58,44 @@ pub(crate) fn safe_link_href(url: &str) -> Option<String> {
     }
 }
 
+/// 本文を pixiv の改ページで割る。
+///
+/// 読書画面と EPUB が**同じ見分け方**を使うための一点。片方が正規表現で
+/// もう片方が完全一致だったころは、`[[newpage]]` と書かれた作品が、読むと
+/// ページが分かれ、本にすると 1 ページに融合していた。
+pub(crate) fn split_pixiv_pages(text: &str) -> Vec<&str> {
+    RE_NEWPAGE.split(text).collect()
+}
+
+/// 編集画面で足した区切り線を、本文の記法として表す印。
+///
+/// pixiv 本来の記法には区切り線が無いので、取り込んだ本文には現れない。
+/// 反映済みの編集を EPUB へ渡すときだけ使う。
+pub(crate) const EDITOR_SEPARATOR_NOTATION: &str = "[piep:separator]";
+
+/// 行内記法 ―― ルビ・ページ内移動・外部リンク ―― を HTML へ開く。
+///
+/// 取り込みと、編集した本文の書き戻しの**両方**がここを通る。編集画面が扱う
+/// のは記法のままの文字列なので、書いたルビはそのまま読書画面と EPUB に効く。
+/// 開くだけの片道だったころは、編集画面を一度開くと `[[rb:漢字>かんじ]]` が
+/// 「漢字かんじ」という地の文になり、外部リンクは宛先を失っていた。
+///
+/// 受け取るのは **エスケープ済み** の文字列。記法の `>` は `&gt;` になって
+/// いるので、正規表現もそちらでマッチする。
+pub(crate) fn expand_pixiv_inline_notation(escaped_html: &str) -> String {
+    let html = RE_RUBY.replace_all(escaped_html, "<ruby>$kanji<rt>$kana</rt></ruby>");
+    let html = RE_JUMP.replace_all(
+        &html,
+        r##"<a href="#" class="jump-link" data-page="$page">$pageページへ</a>"##,
+    );
+    RE_JUMPURI
+        .replace_all(
+            &html,
+            r##"<a href="$url" target="_blank" rel="noopener noreferrer">$title</a>"##,
+        )
+        .to_string()
+}
+
 /// Pixiv小説のプレーンテキストを XHTML/HTML へと動的パースする
 pub fn parse_pixiv_to_html(raw_json: &str, assets: &[AssetEntry]) -> String {
     let v: serde_json::Value = match serde_json::from_str(raw_json) {
@@ -80,11 +118,8 @@ pub fn parse_pixiv_to_html(raw_json: &str, assets: &[AssetEntry]) -> String {
     // 1. 安全のためにHTMLエスケープ
     let mut html = escape_html(text);
 
-    // 2. ルビ [[rb:漢字 > ふりがな]] -> <ruby>漢字<rt>ふりがな</rt></ruby>
-    // エスケープ後の ">" は "&gt;" になっているので "&gt;" でマッチさせる
-    html = RE_RUBY
-        .replace_all(&html, "<ruby>$kanji<rt>$kana</rt></ruby>")
-        .to_string();
+    // 2. 行内記法（ルビ・ページ内移動・外部リンク）を開く
+    html = expand_pixiv_inline_notation(&html);
 
     // 3. 見出し [chapter:タイトル] -> <h2>タイトル</h2>
     html = RE_CHAPTER.replace_all(&html, "<h2>$title</h2>").to_string();
@@ -92,23 +127,6 @@ pub fn parse_pixiv_to_html(raw_json: &str, assets: &[AssetEntry]) -> String {
     // 3.5 改ページ [newpage] -> HTMLコメント <!-- newpage --> (大カッコ一重・二重、大文字小文字、スペース完全許容)
     html = RE_NEWPAGE
         .replace_all(&html, "<!-- newpage -->")
-        .to_string();
-
-    // 4. 改ページ [jump:ページ番号] -> ページ間リンク (大カッコ一重・二重、スペースの有無、大文字小文字を完全許容)
-    html = RE_JUMP
-        .replace_all(
-            &html,
-            r##"<a href="#" class="jump-link" data-page="$page">$pageページへ</a>"##,
-        )
-        .to_string();
-
-    // 5. 外部リンク [[jumpuri:タイトル > URL]]
-    // エスケープ後の ">" は "&gt;" になっているので "&gt;" でマッチさせる
-    html = RE_JUMPURI
-        .replace_all(
-            &html,
-            r##"<a href="$url" target="_blank" rel="noopener noreferrer">$title</a>"##,
-        )
         .to_string();
 
     // 6. Pixiv内部スキーム

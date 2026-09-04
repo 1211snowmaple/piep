@@ -480,9 +480,29 @@ function VisualEditor({ template, readOnly, onSaved }: { template: TemplateInfo;
     setDirty(true);
   };
 
+  /**
+   * 見た目を保存する。縦書きにしたときは、綴じ方向も一緒に右から左へ倒す。
+   *
+   * 二つは別のタブに置かれていて、説明文で「綴じ方向も変えてください」と
+   * 頼んでいるだけだった。片方だけを切り替えると、**縦書きなのに左から
+   * めくる本**ができる ―― 読み手には理由の分からない壊れ方をする。
+   */
   const save = useMutation({
-    mutationFn: () => saveTemplateFile(template.name, STYLE_FILE, writeVisualSettings(source, values)),
-    onSuccess: () => { setDirty(false); style.refetch(); onSaved(); notifications.show({ color: "green", message: "見た目を保存しました" }); },
+    mutationFn: async () => {
+      await saveTemplateFile(template.name, STYLE_FILE, writeVisualSettings(source, values));
+      const wantsRtl = values.verticalWriting;
+      if (wantsRtl && template.settings.pageProgression !== "rtl") {
+        await saveTemplateSettings(template.name, { ...template.settings, pageProgression: "rtl" });
+        return { boundToRtl: true };
+      }
+      return { boundToRtl: false };
+    },
+    onSuccess: (result) => {
+      setDirty(false);
+      style.refetch();
+      onSaved();
+      notifications.show({ color: "green", message: result.boundToRtl ? "見た目を保存し、綴じ方向を「右から左」に合わせました" : "見た目を保存しました" });
+    },
     onError: (error) => notifications.show({ color: "red", title: "保存できません", message: errorMessage(error) }),
   });
   useUnsavedTemplateGuard(dirty || save.isPending);
@@ -502,7 +522,7 @@ function VisualEditor({ template, readOnly, onSaved }: { template: TemplateInfo;
         <LabeledSlider label="行頭の字下げ (em)" value={values.textIndent} min={0} max={2} step={0.5} disabled={readOnly} onChange={(value) => set("textIndent", value)} />
         <Group>
           <Switch label="両端揃え" disabled={readOnly} checked={values.justify} onChange={(event) => set("justify", event.currentTarget.checked)} />
-          <Switch label="縦書き" description="綴じ方向も「右から左」にしてください" disabled={readOnly} checked={values.verticalWriting} onChange={(event) => set("verticalWriting", event.currentTarget.checked)} />
+          <Switch label="縦書き" description="保存すると綴じ方向も右から左に合わせます" disabled={readOnly} checked={values.verticalWriting} onChange={(event) => set("verticalWriting", event.currentTarget.checked)} />
         </Group>
         <LabeledSlider label="ルビの大きさ (em)" value={values.rubySize} min={0.3} max={0.8} step={0.05} disabled={readOnly} onChange={(value) => set("rubySize", value)} />
       </Section>

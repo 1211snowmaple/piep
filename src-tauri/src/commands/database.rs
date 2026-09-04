@@ -5,11 +5,12 @@ use crate::database::{
     CollectionSweepResult, DashboardSummary, DbStats, DownloadEntry, EditorDocument, EntityFacet,
     EntityFacetScope, EntityProfileRepairStatus, EntitySeriesPage, EntityVersion, FacetCount,
     FilterFacets, LibraryDiagnostics, LibraryMaintenanceResult, LibraryShelfCounts, NewAsset,
-    PersonEntry, ReaderContentPage, ReaderMetadata, ReaderSearchHit, SavedSearch, SavedSearchInput,
-    SearchIndexOptimizationResult, SearchIndexStatus, SearchSuggestParams, SearchSuggestResult,
-    SearchV2Params, SearchV2Result, SeriesEntry, UpdateCredentials, UpdateTarget,
-    UpdateTargetInput, WorkBlockInput, WorkCollection, WorkCollectionInput,
-    WorkCollectionMemberInput, WorkCollectionSummary, WorkEditRevision, WorkKey,
+    PersonEntry, ReaderContentPage, ReaderMetadata, ReaderOutlineEntry, ReaderSearchHit,
+    SavedSearch, SavedSearchInput, SearchIndexOptimizationResult, SearchIndexStatus,
+    SearchSuggestParams, SearchSuggestResult, SearchV2Params, SearchV2Result, SeriesEntry,
+    UpdateCredentials, UpdateTarget, UpdateTargetInput, WorkBlockInput, WorkCollection,
+    WorkCollectionInput, WorkCollectionMemberInput, WorkCollectionSummary, WorkEditRevision,
+    WorkKey,
 };
 use crate::AppState;
 use sha2::{Digest, Sha256};
@@ -2384,9 +2385,25 @@ pub async fn db_get_reader_content_page(
     download_id: i64,
     version: Option<i64>,
     page: usize,
+    include_plain_text: Option<bool>,
 ) -> Result<ReaderContentPage, String> {
+    let include_plain_text = include_plain_text.unwrap_or(false);
     run_db_blocking(app, move |state| {
-        state.db.get_reader_content_page(download_id, version, page)
+        state
+            .db
+            .get_reader_content_page(download_id, version, page, include_plain_text)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn db_get_reader_outline(
+    app: tauri::AppHandle,
+    download_id: i64,
+    version: Option<i64>,
+) -> Result<Vec<ReaderOutlineEntry>, String> {
+    run_db_blocking(app, move |state| {
+        state.db.get_reader_outline(download_id, version)
     })
     .await
 }
@@ -2421,12 +2438,16 @@ pub async fn db_save_work_draft(
     app: tauri::AppHandle,
     download_id: i64,
     base_version: i64,
+    title: Option<String>,
     blocks: Vec<WorkBlockInput>,
 ) -> Result<WorkEditRevision, String> {
     run_library_write_blocking(app, move |state| {
-        state
-            .db
-            .save_work_draft(download_id, base_version, blocks.as_slice())
+        state.db.save_work_draft(
+            download_id,
+            base_version,
+            title.as_deref(),
+            blocks.as_slice(),
+        )
     })
     .await
 }
@@ -2440,6 +2461,14 @@ pub async fn db_activate_work_edit(
         state.db.activate_work_edit(edit_revision_id)
     })
     .await
+}
+
+#[tauri::command]
+pub async fn db_deactivate_work_edit(
+    app: tauri::AppHandle,
+    download_id: i64,
+) -> Result<(), String> {
+    run_library_write_blocking(app, move |state| state.db.deactivate_work_edit(download_id)).await
 }
 
 #[tauri::command]

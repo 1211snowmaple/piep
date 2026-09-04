@@ -50,6 +50,7 @@ import { WorkAssist } from "@/features/assist/WorkAssist";
 import { addWorkCollectionMembers, listCollectionsForWork, listWorkCollections } from "@/services/collectionApi";
 import { openSingleDialog } from "@/services/dialogApi";
 import {
+  deactivateWorkEdit,
   deleteDownload,
   getAssetUrl,
   getAssets,
@@ -259,6 +260,22 @@ export default function WorkPage() {
       : Promise.resolve({ downloadId: id, baseVersion: documentQuery.data?.download.currentVersion ?? 1, text: getDemoReader(id).plainText, textLength: getDemoReader(id).plainText.length }),
     enabled: validId && tab === "history" && selectedVersion === "pending" && Boolean(pendingRevision),
     staleTime: 0,
+  });
+  // 反映した編集を下ろす。版は履歴に残るので、押し間違えても作った本文は
+  // 消えない ―― これが無かったころは、一度反映すると元の本文へ戻る道が
+  // どこにも無かった。
+  const revertEdit = useMutation({
+    mutationFn: () => runtime ? deactivateWorkEdit(id) : Promise.resolve(),
+    onSuccess: () => {
+      notifications.show({ color: "green", title: "取り込んだ本文に戻しました", message: "編集した版は履歴に残っています" });
+      queryClient.invalidateQueries({ queryKey: ["reader-metadata", id] });
+      queryClient.invalidateQueries({ queryKey: ["reader-content-page", id] });
+      queryClient.invalidateQueries({ queryKey: ["reader-content-search", id] });
+      queryClient.invalidateQueries({ queryKey: ["editor-document", id] });
+      queryClient.invalidateQueries({ queryKey: ["library"] });
+      queryClient.invalidateQueries({ queryKey: ["entity-works"] });
+    },
+    onError: (error) => notifications.show({ color: "red", title: "元の本文に戻せません", message: errorMessage(error) }),
   });
   const mutate = useMutation({
     mutationFn: async (input: { favorite?: boolean; watch?: boolean }) => {
@@ -485,7 +502,7 @@ export default function WorkPage() {
                   空く。2枚が余りを半分ずつ引き受ければ、辺は揃ったまま隙間だけ
                   消える。 */}
               <Stack gap="lg" h="100%" className="work-side-column"><Card p="lg"><Group justify="space-between"><Box><Text fw={700}>更新監視</Text><Text size="xs" c="dimmed" mt={3}>保存元の変更をチェック</Text></Box><Switch checked={work.watchUpdates} disabled={mutate.isPending} onChange={(event) => mutate.mutate({ watch: event.currentTarget.checked })} aria-label="更新監視" /></Group>{/* 「今すぐ確認」は上段の「情報を更新」と同じ動作だった。同じことを
-                  する口が2つあると、どちらが効いたのか分からなくなる。 */}</Card><Note title="編集について">ローカル編集は元データを残したまま別リビジョンとして保存されます。</Note></Stack>
+                  する口が2つあると、どちらが効いたのか分からなくなる。 */}</Card>{doc.isEdited ? <Card p="lg"><Group justify="space-between" wrap="nowrap" mb="xs"><Box><Text fw={700}>ローカル編集</Text><Text size="xs" c="dimmed" mt={3}>いま読める本文は編集版です</Text></Box><Badge color="gray" variant="light">反映中</Badge></Group><Text size="xs" c="dimmed" mb="sm">取り込んだ本文はそのまま残っています。戻しても、編集した版は履歴から選び直せます。</Text><Button variant="default" size="xs" leftSection={<Icons.undo size={IconSize.menu} />} loading={revertEdit.isPending} onClick={() => modals.openConfirmModal({ title: "取り込んだ本文に戻しますか？", children: <Text size="sm">リーダーとEPUBは取り込んだままの本文を使うようになります。編集した版は履歴に残ります。</Text>, labels: { confirm: "元に戻す", cancel: "キャンセル" }, onConfirm: () => revertEdit.mutate() })}>取り込んだ本文に戻す</Button></Card> : <Note title="編集について">ローカル編集は元データを残したまま別リビジョンとして保存されます。</Note>}</Stack>
             </Grid.Col>
           </Grid>
         </Tabs.Panel>

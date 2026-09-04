@@ -28,7 +28,7 @@ function deferred<T>() {
 }
 
 function content(page: number, html: string): ReaderContentPage {
-  return { page, pageCount: 2, html, plainText: html.replace(/<[^>]+>/g, ""), totalPlainTextChars: 200 };
+  return { page, pageCount: 2, html, plainText: html.replace(/<[^>]+>/g, ""), totalPlainTextChars: 200, sourcePageStarts: [0, 1] };
 }
 
 function renderReader() {
@@ -73,7 +73,7 @@ describe("ReaderPage position restoration", () => {
     });
     viewport!.scrollTop = 90;
     fireEvent.scroll(viewport!);
-    expect(JSON.parse(window.localStorage.getItem("piep.reader-position.101.current") ?? "null")).toEqual({ page: 2, top: 240 });
+    expect(JSON.parse(window.localStorage.getItem("piep.reader-position.101.current") ?? "null")).toMatchObject({ page: 2, top: 240 });
 
     await act(async () => { pageTwo.resolve(content(1, "<p>2ページの本文</p>")); });
     await waitFor(() => expect(screen.getByText("2ページの本文")).toBeInTheDocument());
@@ -84,9 +84,14 @@ describe("ReaderPage position restoration", () => {
     fireEvent.scroll(viewport!);
     // 書き込みは間引いてある（指を滑らせている間に毎回 localStorage を
     // 読み書きすると長い本で引っかかる）。落ち着いてから書かれる。
+    //
+    // 行の目印（anchor）も一緒に憶える。px だけで憶えていたころは、文字の
+    // 大きさを変えた瞬間に読みかけの位置がずれた。
     await waitFor(() => {
-      expect(JSON.parse(window.localStorage.getItem("piep.reader-position.101.current") ?? "null")).toEqual({ page: 2, top: 360 });
+      expect(JSON.parse(window.localStorage.getItem("piep.reader-position.101.current") ?? "null")).toMatchObject({ page: 2, top: 360 });
     });
+    const stored = JSON.parse(window.localStorage.getItem("piep.reader-position.101.current") ?? "null");
+    expect(Number.isSafeInteger(stored.anchor)).toBe(true);
   });
 
   it("applies a bookmark offset only after its async source page is ready", async () => {
@@ -115,6 +120,51 @@ describe("ReaderPage position restoration", () => {
     await act(async () => { pageTwo.resolve(content(1, "<p>2ページの本文</p>")); });
     await waitFor(() => expect(screen.getByText("2ページの本文")).toBeInTheDocument());
     await waitFor(() => expect(viewport!.scrollTop).toBe(240));
+  });
+
+  /**
+   * 探した語のところまで連れて行くこと。
+   *
+   * 以前はページ番号を返すだけで、押しても本文の頭へ動くだけだった。
+   * `[newpage]` の無い作品はページが 1 つしかないので、**押しても何も
+   * 起こらなかった**。
+   */
+  it("marks every hit on the page and moves to the first one", async () => {
+    dbApi.getReaderContentPage.mockImplementation(() =>
+      Promise.resolve({ ...content(0, "<p>雨の日と雨の夜、そして雨。</p>"), pageCount: 1, sourcePageStarts: [0] }));
+    dbApi.searchReaderContent.mockResolvedValue([{ page: 1, snippet: "雨の日と雨の夜", count: 3 }]);
+
+    const view = renderReader();
+    expect(await screen.findByText(/雨の日と雨の夜/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "本文内を検索" }));
+    fireEvent.change(await screen.findByLabelText("本文内の検索語"), { target: { value: "雨" } });
+
+    const hit = await screen.findByText("3件");
+    fireEvent.click(hit.closest("button")!);
+
+    await waitFor(() => expect(view.container.querySelectorAll("mark.reader-hit").length).toBe(3));
+    expect(await screen.findByText("1 / 3")).toBeInTheDocument();
+    expect(view.container.querySelectorAll(".reader-hit--current").length).toBe(1);
+
+    // 次の一致へ進める。ページ番号だけでは、2件目から先へ行く手立てが無かった。
+    fireEvent.click(screen.getByRole("button", { name: "次の一致へ" }));
+    expect(await screen.findByText("2 / 3")).toBeInTheDocument();
+  });
+
+  it("finds katakana written as hiragana", async () => {
+    dbApi.getReaderContentPage.mockImplementation(() =>
+      Promise.resolve({ ...content(0, "<p>彼はカタカナで書いた。</p>"), pageCount: 1, sourcePageStarts: [0] }));
+    dbApi.searchReaderContent.mockResolvedValue([{ page: 1, snippet: "彼はカタカナで", count: 1 }]);
+
+    const view = renderReader();
+    expect(await screen.findByText(/カタカナ/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "本文内を検索" }));
+    fireEvent.change(await screen.findByLabelText("本文内の検索語"), { target: { value: "かたかな" } });
+    fireEvent.click((await screen.findByText("1件")).closest("button")!);
+
+    await waitFor(() => expect(view.container.querySelectorAll("mark.reader-hit").length).toBe(1));
+    expect(view.container.querySelector("mark.reader-hit")?.textContent).toBe("カタカナ");
   });
 
   it("hides the previous version while history navigation loads another version", async () => {

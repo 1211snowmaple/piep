@@ -35,7 +35,7 @@ vi.mock("@/services/collectionApi", () => ({
 
 /** A single-page work, so the finish panel is on screen straight away. */
 function onlyPage(html: string): ReaderContentPage {
-  return { page: 0, pageCount: 1, html, plainText: html.replace(/<[^>]+>/g, ""), totalPlainTextChars: 100 };
+  return { page: 0, pageCount: 1, html, plainText: html.replace(/<[^>]+>/g, ""), totalPlainTextChars: 100, sourcePageStarts: [0] };
 }
 
 function collectionOf(kind: CollectionKind): WorkCollection {

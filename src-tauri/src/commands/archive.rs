@@ -5754,7 +5754,10 @@ mod tests {
             .get_download_by_source(&source, &source_id)
             .unwrap()
             .unwrap();
-        assert_eq!(restored_dl.title, "テスト小説");
+        // 反映済みの編集が題を持っているので、棚に出るのは利用者が直した題。
+        // 取得元の題は `downloads.title` にそのまま残っていて、編集を下ろせば
+        // 戻る（この書庫にも元の題のまま入っている）。
+        assert_eq!(restored_dl.title, "利用者が直した題名");
         assert_eq!(restored_dl.author_name, "テスト著者");
         assert_eq!(
             state_new.db.archive_tags(restored_dl.id).unwrap(),

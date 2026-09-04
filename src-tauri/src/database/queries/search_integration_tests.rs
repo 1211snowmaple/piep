@@ -132,19 +132,23 @@ fn reader_transport_pages_keep_complete_source_blocks() {
     let html = format!(
         "<p>{large}</p><!-- content-block --><p>{large}</p><!-- content-block --><p>{large}</p>"
     );
-    let pages = paginate_reader_html(&html, "fanbox");
+    let (pages, _) = paginate_reader_html(&html, "fanbox");
     assert!(pages.len() >= 2);
     assert!(pages.iter().all(|page| !page.contains("content-block")));
     assert!(pages
         .iter()
         .all(|page| page.starts_with("<p>") && page.ends_with("</p>")));
 
-    let pixiv = paginate_reader_html("first<!-- newpage -->second", "pixiv");
+    let (pixiv, pixiv_starts) = paginate_reader_html("first<!-- newpage -->second", "pixiv");
     assert_eq!(pixiv, vec!["first", "second"]);
+    // 割られていないので、原稿のページと転送のページは 1 対 1。
+    assert_eq!(pixiv_starts, vec![0, 1]);
 
     // 明示的な1ページが巨大でも、1回の IPC に丸ごと載せない。
     let line = format!("{}<br />\n", "あ".repeat(READER_PAGE_TARGET_BYTES / 6));
-    let oversized_pixiv = paginate_reader_html(&line.repeat(4), "pixiv");
+    let (oversized_pixiv, oversized_starts) = paginate_reader_html(&line.repeat(4), "pixiv");
+    // 1 つの原稿ページが割られても、始まりは最初の転送ページのまま。
+    assert_eq!(oversized_starts, vec![0]);
     assert!(oversized_pixiv.len() >= 2);
     assert_eq!(oversized_pixiv.concat(), line.repeat(4).trim());
     assert!(oversized_pixiv
@@ -830,8 +834,8 @@ fn reader_cache_pages_and_full_document_search_share_one_index() {
         &[],
         "最初のページ [newpage] 次のページにNeedleとneedle",
     );
-    let first = db.get_reader_content_page(id, None, 0).unwrap();
-    let second = db.get_reader_content_page(id, None, 1).unwrap();
+    let first = db.get_reader_content_page(id, None, 0, false).unwrap();
+    let second = db.get_reader_content_page(id, None, 1, false).unwrap();
     assert_eq!(first.page_count, 2);
     assert_eq!(second.page_count, 2);
     assert!(second.html.contains("Needle"));
@@ -5889,6 +5893,7 @@ fn active_edit_revision_drives_reader_and_search_body() {
         .save_work_draft(
             download_id,
             1,
+            None,
             &[
                 WorkBlockInput {
                     block_type: "heading".to_string(),

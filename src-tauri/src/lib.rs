@@ -302,7 +302,9 @@ pub fn run() -> tauri::Result<()> {
             commands::database::db_search_reader_content,
             commands::database::db_get_editor_document,
             commands::database::db_save_work_draft,
+            commands::database::db_get_reader_outline,
             commands::database::db_activate_work_edit,
+            commands::database::db_deactivate_work_edit,
             commands::database::import_work_asset,
             // 更新ジョブ (commands::update_jobs)
             commands::update_jobs::start_update_job,
@@ -333,6 +335,7 @@ pub fn run() -> tauri::Result<()> {
             commands::archive::scan_and_reimport_downloads,
             // EPUB エクスポート (commands::epub)
             commands::epub::export_epub_batch,
+            commands::epub::cancel_epub_export,
             commands::epub::export_collection_epub,
             commands::epub::list_epub_templates,
             commands::epub::get_template_files,

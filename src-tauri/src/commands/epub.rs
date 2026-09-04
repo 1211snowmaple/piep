@@ -15,6 +15,25 @@ use tauri::{Emitter, Manager};
 /// 書き出しごとに集める検査結果の上限。何百冊でも通知が壊れないようにする。
 const MAX_REPORTED_ISSUES: usize = 50;
 
+/// 書き出しを途中でやめるための合図。
+///
+/// 数百冊をキューに入れて実行したら、終わるまで止められなかった。更新の
+/// 確認には一時停止も中止もあるのに、こちらには何も無かった。1 冊の書き出し
+/// は中断しない ―― 半端な EPUB を残さないよう、いま作っている本は書き切って
+/// から止まる。
+static EPUB_EXPORT_CANCEL: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+fn epub_export_canceled() -> bool {
+    EPUB_EXPORT_CANCEL.load(std::sync::atomic::Ordering::Acquire)
+}
+
+#[tauri::command]
+pub async fn cancel_epub_export() -> Result<(), String> {
+    EPUB_EXPORT_CANCEL.store(true, std::sync::atomic::Ordering::Release);
+    Ok(())
+}
+
 fn get_templates_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     let app_data = app
         .path()
@@ -35,48 +54,45 @@ fn emit_progress(app: &tauri::AppHandle, progress: &ExportProgress) {
     let _ = app.emit("epub-export-progress", progress);
 }
 
+/// 反映済みの編集を、書き出し用の JSON へ差し込む。
+///
+/// 取得元が書いていたのと**同じ形**で渡す。平文へ均して渡していたころは、
+/// 挿絵・改ページ・見出し・区切りがまとめて落ち、編集した作品の EPUB には
+/// 絵が 1 枚も入らないまま「成功」と表示されていた。
 fn apply_active_edit_to_epub_data(
     state: &Arc<AppState>,
     download_id: i64,
     source: &str,
     data: &mut serde_json::Value,
 ) {
-    let Ok(reader) = state.db.get_reader_document(download_id, None) else {
+    let Ok(Some(edit)) = state.db.active_edit_source_form(download_id) else {
         return;
     };
-    if !reader.is_edited || reader.plain_text.trim().is_empty() {
+    if edit.plain_text.trim().is_empty() {
         return;
     }
 
     if source == "pixiv" {
-        data["text"] = serde_json::Value::String(reader.plain_text.clone());
+        data["text"] = serde_json::Value::String(edit.pixiv_text.clone());
         if let Some(detail) = data
             .get_mut("detail")
             .and_then(|value| value.as_object_mut())
         {
             detail.insert(
                 "text".to_string(),
-                serde_json::Value::String(reader.plain_text.clone()),
+                serde_json::Value::String(edit.pixiv_text),
             );
         }
     } else if source == "fanbox" {
-        let blocks = reader
-            .plain_text
-            .split("\n\n")
-            .map(str::trim)
-            .filter(|text| !text.is_empty())
-            .map(|text| {
-                serde_json::json!({
-                    "type": "p",
-                    "text": text,
-                })
-            })
-            .collect::<Vec<_>>();
         if let Some(body) = data.get_mut("body").and_then(|value| value.as_object_mut()) {
-            body.insert("blocks".to_string(), serde_json::Value::Array(blocks));
+            body.insert(
+                "blocks".to_string(),
+                serde_json::Value::Array(edit.fanbox_blocks),
+            );
+            // 古いプレーンテキスト形式で読む経路のための控え。
             body.insert(
                 "text".to_string(),
-                serde_json::Value::String(reader.plain_text),
+                serde_json::Value::String(edit.plain_text),
             );
         }
     }
@@ -118,6 +134,22 @@ fn load_manifest(
 
     let manifest = converter::convert_to_manifest(&data, &dl.source, &assets_dir)?;
     Ok((manifest, dl.source, dl.title))
+}
+
+/// ページ内移動のリンクを、束ねた本での通し番号へずらす。
+///
+/// 作品ごとに変換した時点では、その作品の中での番号で書かれている。束ねると
+/// ページは通しで振り直されるので、同じだけずらさないと隣の作品を指す。
+fn shift_page_jump_targets(html: &str, offset: u32) -> String {
+    static PAGE_HREF: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r#"href="page_(\d{3})\.xhtml""#).expect("valid page href regex")
+    });
+    PAGE_HREF
+        .replace_all(html, |captures: &regex::Captures| {
+            let page: u32 = captures[1].parse().unwrap_or(0);
+            format!(r#"href="page_{:03}.xhtml""#, page.saturating_add(offset))
+        })
+        .into_owned()
 }
 
 /// One source manifest becomes one or more chapters in a collection EPUB.
@@ -272,8 +304,15 @@ fn merge_collection_manifests(
         }
         illustrations.append(&mut manifest.content.illustrations);
         attachments.append(&mut manifest.content.attachments);
+        // 束ねた本ではページ番号を通しで振り直す。作品ごとに焼き込まれた
+        // ページ内移動のリンクも一緒にずらさないと、2 作目の「2ページへ」が
+        // 1 作目の 2 ページ目を指す ―― 行き先はあるのに、別の作品になる。
+        let page_offset = pages.len() as u32;
         for mut page in manifest.content.pages.drain(..) {
             page.order = (pages.len() + 1) as u32;
+            if page_offset > 0 {
+                page.html_content = shift_page_jump_targets(&page.html_content, page_offset);
+            }
             pages.push(page);
         }
         stats.text_length = stats.text_length.saturating_add(manifest.stats.text_length);
@@ -761,6 +800,8 @@ fn aggregate_batch_results(mut completed: Vec<BatchItemResult>) -> ExportBatchRe
         output_files: Vec::new(),
         invalid_count: 0,
         issues: Vec::new(),
+        canceled: false,
+        skipped_ids: Vec::new(),
     };
     for item in completed {
         for issue in item.issues {
@@ -918,11 +959,16 @@ pub async fn export_epub_batch(
         },
     );
 
+    EPUB_EXPORT_CANCEL.store(false, std::sync::atomic::Ordering::Release);
     let mut tasks = tokio::task::JoinSet::new();
     let mut pending = download_ids.into_iter().enumerate();
     let mut completed = Vec::with_capacity(total as usize);
     loop {
         while tasks.len() < MAX_CONCURRENT_EPUB_BUILDS {
+            // 止めると言われたら、そこから先は始めない。
+            if epub_export_canceled() {
+                break;
+            }
             let Some((index, download_id)) = pending.next() else {
                 break;
             };
@@ -957,19 +1003,32 @@ pub async fn export_epub_batch(
         completed.push(joined);
     }
 
-    let result = aggregate_batch_results(completed);
+    let canceled = epub_export_canceled();
+    EPUB_EXPORT_CANCEL.store(false, std::sync::atomic::Ordering::Release);
+    let mut result = aggregate_batch_results(completed);
+    result.canceled = canceled;
+    // 一度も試していない作品はキューに残す。止めた結果として棚から
+    // 消えてしまっては、中止が「取り下げ」になってしまう。
+    result.skipped_ids = pending.map(|(_, download_id)| download_id).collect();
 
     emit_progress(
         &app,
         &ExportProgress {
-            phase: "completed".into(),
+            phase: if canceled { "canceled" } else { "completed" }.into(),
             current_title: String::new(),
             current_index: total,
             total_count: total,
-            message: format!(
-                "エクスポート完了: {}件成功, {}件失敗",
-                result.success_count, result.failed_count
-            ),
+            message: if canceled {
+                format!(
+                    "書き出しを中止しました: {}件成功, {}件失敗（残りはキューに戻します）",
+                    result.success_count, result.failed_count
+                )
+            } else {
+                format!(
+                    "エクスポート完了: {}件成功, {}件失敗",
+                    result.success_count, result.failed_count
+                )
+            },
         },
     );
 
@@ -1546,6 +1605,25 @@ fn sample_manifest() -> EpubManifest {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 束ねた本の中で、ページ内移動が自分の作品を指し続けること。
+    ///
+    /// 作品ごとに焼き込まれた番号のままだと、2 作目の「2ページへ」が
+    /// 1 作目の 2 ページ目を開く。行き先はあるのに別の作品なので、
+    /// 検証では捕まらない種類の壊れ方をする。
+    #[test]
+    fn page_jumps_follow_their_work_when_books_are_bound_together() {
+        let html = r#"<p><a href="page_002.xhtml">2ページへ</a></p>"#;
+        assert_eq!(
+            shift_page_jump_targets(html, 5),
+            r#"<p><a href="page_007.xhtml">2ページへ</a></p>"#
+        );
+        // 先頭の作品はずらさない（呼び手が offset 0 で呼ばない作り）。
+        assert_eq!(shift_page_jump_targets(html, 0), html);
+        // 画像や章のリンクには触れない。
+        let other = r##"<img src="../images/w0001-img0001.jpg" /><a href="#chapter-001">章</a>"##;
+        assert_eq!(shift_page_jump_targets(other, 3), other);
+    }
 
     #[test]
     fn the_data_dictionary_covers_everything_a_template_can_place() {

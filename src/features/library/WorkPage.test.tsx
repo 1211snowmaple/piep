@@ -37,7 +37,7 @@ function deferred<T>() {
 }
 
 function content(page: number, html: string): ReaderContentPage {
-  return { page, pageCount: 2, html, plainText: html.replace(/<[^>]+>/g, ""), totalPlainTextChars: 200 };
+  return { page, pageCount: 2, html, plainText: html.replace(/<[^>]+>/g, ""), totalPlainTextChars: 200, sourcePageStarts: [0, 1] };
 }
 
 describe("WorkPage content preview", () => {

@@ -1712,6 +1712,91 @@ select {
 }
 
 .reader-to-top { position: fixed; right: 24px; bottom: 24px; z-index: 110; box-shadow: var(--mantine-shadow-lg); }
+
+/* 探した語の印。地の色をそのままにして、下に線だけ引く ―― 塗ると本文の
+   流れが切れて、続きが読みにくくなる。 */
+.reader-hit {
+  padding: 0;
+  color: inherit;
+  background: light-dark(rgb(255 214 92 / 45%), rgb(255 196 0 / 26%));
+  border-radius: 2px;
+}
+
+.reader-hit--current {
+  background: light-dark(rgb(255 186 20 / 78%), rgb(255 186 20 / 52%));
+  box-shadow: 0 0 0 2px light-dark(rgb(255 186 20 / 40%), rgb(255 186 20 / 30%));
+}
+
+.reader-hit-bar {
+  position: fixed;
+  z-index: 115;
+  top: 74px;
+  right: 24px;
+  padding: 5px 8px;
+  border: 1px solid light-dark(#dde2e8, #303944);
+  background: light-dark(rgb(255 255 255 / 96%), rgb(20 25 33 / 96%));
+}
+
+.reader-zoom .mantine-Modal-body { padding: 0; }
+.reader-zoom__image {
+  display: block;
+  max-width: min(92vw, 1600px);
+  max-height: 88vh;
+  cursor: zoom-out;
+  object-fit: contain;
+}
+
+/* 挿絵は押すと大きくなる。押せることが見て分かるようにしておく。 */
+.reader-content img { cursor: zoom-in; }
+
+.reader-content figure { margin: 2em 0; text-align: center; }
+.reader-content figcaption {
+  margin-top: 8px;
+  color: var(--mantine-color-dimmed);
+  font-family: "Noto Sans JP", sans-serif;
+  font-size: 0.78em;
+}
+
+/* --- 縦書き ---
+   本文は右から左へ流れる。行の長さの設定（`--reader-max-width`）は、横書きの
+   「1行の幅」から縦書きの「1行の高さ」へそのまま移る。
+
+   ScrollArea の viewport は overflow を inline で持っているので触らない。
+   代わりに高さの連鎖だけ通し、桁が窓の高さにぴたりと収まるようにする。
+   縦にあふれさせないのは、縦書きで上下にも動くと行を見失うため。 */
+.reader-page--vertical .reader-scroll [data-scrollarea-viewport] > * { height: 100%; }
+
+.reader-page--vertical .reader-stage {
+  min-height: 0;
+  height: 100%;
+  padding: clamp(20px, 2.5vw, 40px) clamp(24px, 4vw, 64px);
+}
+
+/* flex にはしない。縦書きの flex は主軸が縦になるので、`align-items` が
+   横方向へ効いてしまい、行の長さの設定が桁の「幅」に化ける。 */
+.reader-page--vertical .reader-paper {
+  width: auto;
+  height: 100%;
+  writing-mode: vertical-rl;
+  text-orientation: mixed;
+}
+
+.reader-page--vertical .reader-content {
+  max-width: none;
+  height: min(100%, var(--reader-max-width));
+  margin-inline: 0;
+}
+
+/* 扉は横組みのまま。取得元の印と操作ボタンが並ぶ帯で、縦に倒すと読みにくい。 */
+.reader-page--vertical .reader-title-page {
+  writing-mode: horizontal-tb;
+  width: min(62vw, var(--reader-max-width));
+  height: 100%;
+  padding: 0 26px;
+}
+
+.reader-page--vertical .reader-content img { max-height: 68%; }
+.reader-page--vertical .reader-finish { writing-mode: horizontal-tb; width: min(70vw, 640px); }
 /* Centred by an auto margin between both edges rather than by offsetting the
    left edge to the middle: with only `left` set, the control's available width
    was just the half of the screen to its right, so the pager wrapped onto a
@@ -1735,6 +1820,7 @@ select {
 .reader-page-controls .mantine-Pagination-control { min-width: 30px; height: 30px; border-radius: 7px; }
 
 .editor-page {
+  position: relative;
   height: 100%;
   overflow: hidden;
 }
@@ -1849,9 +1935,47 @@ select {
 }
 .editor-block[data-active] { border-color: var(--mantine-color-piep-4); box-shadow: 0 0 0 2px rgb(13 134 244 / 8%); }
 
+/* 取っ手は掴める。前は cursor だけが grab で、掴んでも何も起きなかった。 */
 .editor-block__handle {
+  display: inline-flex;
+  align-items: center;
   color: var(--mantine-color-dimmed);
   cursor: grab;
+  touch-action: none;
+}
+
+.editor-block__handle:active { cursor: grabbing; }
+
+.editor-block[data-dragging] { opacity: 0.45; }
+
+/* 落とす先を線で示す。掴んでいる間、どこへ入るのかが分からないと動かせない。 */
+.editor-block[data-drop-target] {
+  box-shadow: 0 -3px 0 0 var(--mantine-color-piep-6);
+}
+
+/* 題も直せる。誤字のある題を直す手立てが、これまでどこにも無かった。
+   見た目は見出しのまま ―― 押すと書けることは、触れば分かる。 */
+.editor-toolbar__titlebox { flex: 1 1 auto; min-width: 0; }
+.editor-toolbar__title input {
+  padding: 0;
+  height: auto;
+  min-height: 0;
+  font-size: var(--mantine-font-size-sm);
+  font-weight: 700;
+  line-height: 1.3;
+}
+.editor-toolbar__title input:hover { background: light-dark(rgb(0 0 0 / 4%), rgb(255 255 255 / 6%)); }
+.editor-toolbar__title input:focus { background: light-dark(rgb(0 0 0 / 5%), rgb(255 255 255 / 8%)); }
+
+.editor-preview-virtual-list { position: relative; width: 100%; }
+.editor-preview-virtual-row { position: absolute; top: 0; left: 0; width: 100%; }
+
+.editor-find {
+  position: absolute;
+  z-index: 40;
+  top: 74px;
+  right: 18px;
+  background: light-dark(rgb(255 255 255 / 97%), rgb(20 25 33 / 97%));
 }
 
 .editor-heading-input textarea {

@@ -31,18 +31,29 @@ function legacySessionStorage(): Storage | null {
 export interface ReadingPosition {
   page: number;
   top: number;
+  /**
+   * 何行目にいたか。組み方に依らないので、文字サイズや行間を変えても同じ
+   * ところへ戻れる。無いときは `top` に落とす（古い記録と、行の目印が
+   * 一つも無い本文のため）。
+   */
+  anchor?: number;
 }
 
 function keyFor(workId: number, version: number | null): string {
   return `${POSITION_PREFIX}${workId}.${version ?? "current"}`;
 }
 
-function normalizePosition(page: unknown, top: unknown): ReadingPosition | null {
+function normalizePosition(page: unknown, top: unknown, anchor?: unknown): ReadingPosition | null {
   const normalizedPage = Number(page);
   const normalizedTop = Number(top);
   if (!Number.isSafeInteger(normalizedPage) || normalizedPage < 1) return null;
   if (!Number.isFinite(normalizedTop) || normalizedTop < 0) return null;
-  return { page: normalizedPage, top: normalizedTop };
+  const normalizedAnchor = Number(anchor);
+  const position: ReadingPosition = { page: normalizedPage, top: normalizedTop };
+  if (anchor !== undefined && Number.isSafeInteger(normalizedAnchor) && normalizedAnchor >= 0) {
+    position.anchor = normalizedAnchor;
+  }
+  return position;
 }
 
 /** Reads both the current object schema and scroll-offset values from older builds. */
@@ -52,8 +63,8 @@ function parsePosition(raw: string | null): ReadingPosition | null {
     const parsed: unknown = JSON.parse(raw);
     if (typeof parsed === "number" || typeof parsed === "string") return normalizePosition(1, parsed);
     if (parsed && typeof parsed === "object") {
-      const value = parsed as { page?: unknown; top?: unknown };
-      return normalizePosition(value.page, value.top);
+      const value = parsed as { page?: unknown; top?: unknown; anchor?: unknown };
+      return normalizePosition(value.page, value.top, value.anchor);
     }
   } catch {
     // The oldest build stored an unquoted numeric offset.
@@ -94,7 +105,7 @@ export function readReadingPosition(workId: number, version: number | null): Rea
 /** Writes the single schema consumed by both the reader and the shelf. */
 export function writeReadingPosition(workId: number, version: number | null, position: ReadingPosition): void {
   if (!Number.isSafeInteger(workId) || workId <= 0) return;
-  const normalized = normalizePosition(position.page, position.top);
+  const normalized = normalizePosition(position.page, position.top, position.anchor);
   const store = storage();
   if (!normalized || !store) return;
   const key = keyFor(workId, version);

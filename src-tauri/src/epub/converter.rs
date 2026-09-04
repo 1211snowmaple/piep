@@ -9,9 +9,11 @@
 use crate::epub::intermediate::*;
 use crate::epub::meta;
 use crate::epub::xhtml;
+use regex::Regex;
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::LazyLock;
 
 // ============================================================
 // パブリック API
@@ -330,15 +332,20 @@ fn extract_pixiv_series(data: &Value, detail: &Value) -> Option<EpubSeries> {
 
 /// Pixiv小説記法をHTMLに変換し、`[newpage]` でページ分割する
 fn convert_pixiv_text_to_pages(text: &str) -> Vec<EpubPage> {
-    let raw_pages: Vec<&str> = text.split("[newpage]").collect();
+    // 改ページの見分け方は読書画面と同じものを使う。こちらだけが
+    // `"[newpage]"` の完全一致だったので、`[[newpage]]` や `[NewPage]` と
+    // 書かれた作品は、読むときはページが分かれるのに本にすると 1 ページに
+    // 融合していた。同じ作品が、読むときと本にするときで別の構造になる。
+    let raw_pages: Vec<&str> = crate::database::parser::split_pixiv_pages(text);
     let multi_page = raw_pages.len() > 1;
+    let page_count = raw_pages.len();
     let mut chapter_seq = 0usize;
 
     raw_pages
         .iter()
         .enumerate()
         .map(|(index, page_text)| {
-            let rendered = pixiv_text_to_html(page_text, &mut chapter_seq);
+            let rendered = pixiv_text_to_html(page_text, &mut chapter_seq, page_count);
             // 章見出しで始まるページは、その見出しを目次の見出しにする。
             let title = rendered
                 .chapters
@@ -362,7 +369,7 @@ struct RenderedText {
 }
 
 /// Pixiv小説記法を XHTML に変換
-fn pixiv_text_to_html(text: &str, chapter_seq: &mut usize) -> RenderedText {
+fn pixiv_text_to_html(text: &str, chapter_seq: &mut usize, page_count: usize) -> RenderedText {
     let mut html = String::new();
     let mut chapters = Vec::new();
     // 連続する空行は段落の区切りとして一度だけ空ける。行ごとに <br /> を積むと
@@ -399,6 +406,13 @@ fn pixiv_text_to_html(text: &str, chapter_seq: &mut usize) -> RenderedText {
             continue;
         }
 
+        // 編集画面で足した区切り線。pixiv 本来の記法には無い印なので、
+        // 取り込んだ本文がこれに当たることはない。
+        if trimmed.trim() == crate::database::parser::EDITOR_SEPARATOR_NOTATION {
+            html.push_str("<hr />\n");
+            continue;
+        }
+
         // [pixivimage:xxxxx] → 挿絵
         if let Some(reference) = bracketed(trimmed.trim(), "[pixivimage:") {
             // "12345-2" は作品 12345 の 2 枚目。ファイル名は 0 起点で付く。
@@ -422,7 +436,10 @@ fn pixiv_text_to_html(text: &str, chapter_seq: &mut usize) -> RenderedText {
             continue;
         }
 
-        html.push_str(&format!("<p>{}</p>\n", inline_pixiv_notation(trimmed)));
+        html.push_str(&format!(
+            "<p>{}</p>\n",
+            inline_pixiv_notation(trimmed, page_count)
+        ));
     }
 
     RenderedText { html, chapters }
@@ -441,8 +458,27 @@ fn illustration_html(reference: &str, alt: &str) -> String {
     )
 }
 
+/// pixiv のアプリ内アドレスを、誰でも辿れる住所へ置き換える。
+///
+/// 読書画面は最初からこうしている。EPUB だけが `pixiv://…` を素通しにして
+/// いたので、本の中には**どの端末でも開けないリンク**が残っていた。
+fn rewrite_pixiv_scheme(url: &str) -> String {
+    static NOVEL: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"^pixiv://novels/(\d+)$").expect("valid novel scheme regex"));
+    static ILLUST: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"^pixiv://illusts/(\d+)$").expect("valid illust scheme regex")
+    });
+    if let Some(captures) = NOVEL.captures(url) {
+        return format!("https://www.pixiv.net/novel/show.php?id={}", &captures[1]);
+    }
+    if let Some(captures) = ILLUST.captures(url) {
+        return format!("https://www.pixiv.net/artworks/{}", &captures[1]);
+    }
+    url.to_string()
+}
+
 /// 行内記法（ルビ・リンク）を展開しつつ、それ以外をすべてエスケープする。
-fn inline_pixiv_notation(text: &str) -> String {
+fn inline_pixiv_notation(text: &str, page_count: usize) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
 
@@ -469,12 +505,13 @@ fn inline_pixiv_notation(text: &str) -> String {
         if let Some(body) = inner.strip_prefix("jumpuri:") {
             match body.split_once('>') {
                 Some((label, url)) => {
-                    let url = url.trim();
+                    // pixiv のアプリ内アドレスは、読書画面と同じく普通の住所へ。
+                    let url = rewrite_pixiv_scheme(url.trim());
                     // 外部リンクは残すが、読み手が辿れない書式なら文字として置く。
                     if url.starts_with("http://") || url.starts_with("https://") {
                         out.push_str(&format!(
                             "<a href=\"{}\">{}</a>",
-                            xhtml::escape_attr(url),
+                            xhtml::escape_attr(&url),
                             xhtml::escape_text(label.trim())
                         ));
                     } else {
@@ -490,8 +527,25 @@ fn inline_pixiv_notation(text: &str) -> String {
     }
 
     out.push_str(&xhtml::escape_text(rest));
-    // [jump:N] はページ内移動。EPUB では飛び先を保証できないので字面を残す。
-    out
+    // [jump:N] はページ内移動。飛び先が本の中にあるなら、本の中のリンクにする。
+    // 字面を残していたころは、読み手には `[jump:5]` という壊れた文字列だけが
+    // 見えていた。組み立て終わった文字列の上で置き換えるので、ここで足す
+    // タグが二重にエスケープされることはない。
+    static JUMP: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"(?i)\[+jump\s*:\s*(\d+)\s*\]+").expect("valid jump regex"));
+    JUMP.replace_all(&out, |captures: &regex::Captures| {
+        let page: usize = captures[1].parse().unwrap_or(0);
+        if page >= 1 && page <= page_count {
+            format!(
+                r#"<a href="page_{:03}.xhtml">{}ページへ</a>"#,
+                page as u32, page
+            )
+        } else {
+            // 飛び先が無いページ番号は、リンクにしても行き止まりになる。
+            captures[0].to_string()
+        }
+    })
+    .into_owned()
 }
 
 // ============================================================
@@ -537,7 +591,12 @@ fn convert_fanbox_body_to_pages(data: &Value) -> (Vec<EpubPage>, u64, Vec<EpubAt
                     }
                     pending_blank = false;
                     text_length += text.chars().count() as u64;
-                    html.push_str(&format!("<p>{}</p>\n", decorate_fanbox_text(&text, block)));
+                    // 段落の途中の改行は投稿者が入れた行送り。そのまま流すと
+                    // XHTML では空白 1 つに畳まれ、詩や会話が 1 行に潰れる。
+                    html.push_str(&format!(
+                        "<p>{}</p>\n",
+                        decorate_fanbox_text(&text, block).replace('\n', "<br />")
+                    ));
                 }
                 "header" => {
                     pending_blank = false;
@@ -960,6 +1019,69 @@ mod tests {
             }),
             Path::new("/nonexistent"),
         )
+    }
+
+    /// 読書画面と EPUB が、同じ本文を同じ構造として読むこと。
+    ///
+    /// 片方が正規表現でもう片方が完全一致だったので、同じ作品が「読むとき」と
+    /// 「本にするとき」で別の形になっていた。
+    #[test]
+    fn the_page_break_is_recognised_the_same_way_the_reader_recognises_it() {
+        for text in [
+            "前<br>[newpage]<br>後",
+            "前
+[newpage]
+後",
+            "前
+[[newpage]]
+後",
+            "前
+[NewPage]
+後",
+            "前
+[newpage ]
+後",
+        ] {
+            let pages = pixiv(text).content.pages;
+            assert_eq!(pages.len(), 2, "改ページを見落としている: {text:?}");
+        }
+    }
+
+    #[test]
+    fn a_page_jump_becomes_a_link_the_reader_can_follow() {
+        let manifest = pixiv(
+            "最初
+[jump:2]
+[newpage]
+二ページ目",
+        );
+        let first = &manifest.content.pages[0].html_content;
+        assert!(
+            first.contains(r#"<a href="page_002.xhtml">2ページへ</a>"#),
+            "ページ内移動が字面のまま残っている: {first}"
+        );
+    }
+
+    #[test]
+    fn a_jump_with_no_destination_stays_as_plain_text() {
+        // 行き止まりのリンクを作るくらいなら、字面のほうがまだ正直。
+        let manifest = pixiv(
+            "本文
+[jump:9]",
+        );
+        assert!(!manifest.content.pages[0]
+            .html_content
+            .contains("<a href=\"page_"));
+    }
+
+    #[test]
+    fn a_pixiv_app_address_becomes_one_anybody_can_open() {
+        let manifest = pixiv("[[jumpuri:前編 > pixiv://novels/12345]]");
+        let html = &manifest.content.pages[0].html_content;
+        assert!(
+            html.contains("https://www.pixiv.net/novel/show.php?id=12345"),
+            "アプリ内アドレスが本の中に残っている: {html}"
+        );
     }
 
     #[test]
