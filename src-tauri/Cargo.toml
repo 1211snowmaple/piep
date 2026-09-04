@@ -23,13 +23,13 @@ tauri = { version = "2", features = ["protocol-asset", "unstable"] }
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
-reqwest = { version = "0.13.3", features = ["form", "json", "query", "stream"] }
-tokio = { version = "1.52.3", features = ["full"] }
-tauri-plugin-store = "2.4.3"
+reqwest = { version = "0.13.4", features = ["form", "json", "query", "stream"] }
+tokio = { version = "1.53.1", features = ["full"] }
+tauri-plugin-store = "2.4.4"
 sha2 = "0.11.0"
-base64 = "0.22.1"
+base64 = "0.23.1"
 url = "2.5.8"
-rand = "0.10.1"
+rand = "0.10.2"
 regex = "1"
 chrono = { version = "0.4", features = ["serde"] }
 strum = { version = "0.28", features = ["derive"] }
@@ -42,7 +42,7 @@ futures-core = "0.3"
 # 待ち時間は1回ぶんで済む。
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 log = { version = "0.4", features = ["std"] }
-tauri-plugin-dialog = "2.7.1"
+tauri-plugin-dialog = "2.7.3"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 r2d2 = "0.8"
 r2d2_sqlite = { version = "0.35.0", features = ["bundled"] }
@@ -53,25 +53,37 @@ image = { version = "0.25", default-features = false, features = [
     "png",
     "webp",
 ] }
-zenjpeg = "0.8.3"
-magetypes = "=0.9.16"
-oxipng = { version = "10.1.1", default-features = false }
+zenjpeg = "0.8.4"
+oxipng = { version = "10.2.1", default-features = false }
 webp = "0.3"
 tantivy = "0.26.1"
 unicode-normalization = "0.1"
 wana_kana = "5"
-lindera = { version = "3", features = ["embed-ipadic"] }
-fastembed = { version = "5", features = ["directml"] }
-ort = { version = "2.0.0-rc.12", features = ["directml"] }
+lindera = { version = "6", features = ["embed-ipadic"] }
+# v5 で解析の連なり（Tokenizer と各種フィルタ）が本体から切り出された。
+# 素の分かち書きだけなら本体で足りるが、piep は品詞と読みを見るので要る。
+lindera-analysis = "6"
+fastembed = { version = "6", features = ["directml"] }
+ort = { version = "2.0.0-rc.13", features = ["directml"] }
 rayon = "1.10"
 parking_lot = "0.12.5"
-tauri-plugin-notification = "2.3.3"
+tauri-plugin-notification = "2.4.0"
 # アプリ本体の更新。updater は配布物への署名が前提なので、公開鍵は
 # tauri.conf.json、秘密鍵はリリース時の環境変数に置く。
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 
 [target.'cfg(windows)'.dependencies]
+# この2つは Tauri に合わせて据え置く。新しいほうが出ていても上げない。
+#
+# tauri 2.11.5 と wry 0.55.1 が要るのは `windows ^0.61` と
+# `webview2-com ^0.38`。piep だけ 0.62／0.39 にすると、依存木に COM の
+# 束が二組できる。`auth/webview.rs` は Tauri から借りた controller に
+# こちらで作った handler を渡すので、そこで別々の束の型が出会う。
+# 実際に上げて確かめると、`add_AcceleratorKeyPressed` が
+# 「windows_core 0.61 の `Interface` が 0.62 生成の
+# `ICoreWebView2AcceleratorKeyPressedEventHandler` に実装されていない」
+# として通らない。編集器は古いと言うが、Tauri が動くまでここが上限。
 webview2-com = "0.38.2"
 windows = { version = "0.61.3", features = [
     "Win32_Foundation",

@@ -31,7 +31,11 @@ const INDEX_DIR_NAME: &str = "search-index";
 // storing the derived forms that are only ever matched against, and no longer
 // folds the readings into the n-gram field. Existing v3 directories are left
 // alone; the app rebuilds into the new one.
-const INDEX_VERSION_DIR: &str = "v4";
+// v5: lindera 6 で未知語の梯子が入り、切れ方が変わった（`search_normalization`
+// の `tokenizer()` に測った結果がある）。索引は前の切り方で書かれているので、
+// ここを上げて作り直しへ回す。上げないと、既にある作品と今から入る作品で語が
+// 食い違ったまま同じ索引に同居する。
+const INDEX_VERSION_DIR: &str = "v5";
 const TOKENIZER_NAME: &str = "default";
 
 static RUNTIMES: OnceLock<Mutex<HashMap<PathBuf, Arc<TantivyRuntime>>>> = OnceLock::new();
@@ -2119,5 +2123,68 @@ mod query_escaping_tests {
         assert_eq!(query_literal(""), "");
         assert_eq!(query_literal("   "), "");
         assert_eq!(escape_query("   "), "");
+    }
+}
+
+#[cfg(test)]
+mod index_format_migration_tests {
+    use super::*;
+
+    struct TempRoot(PathBuf);
+
+    impl Drop for TempRoot {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn temp_storage() -> (TempRoot, PathBuf) {
+        let rand_val: u32 = rand::random();
+        let root = std::env::temp_dir().join(format!("piep_index_format_{rand_val}"));
+        let storage = root.join("downloads");
+        std::fs::create_dir_all(&storage).unwrap();
+        (TempRoot(root), storage)
+    }
+
+    fn touch(dir: &Path, name: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join(name), b"stale").unwrap();
+    }
+
+    /// 索引の形を変えたら、前の版は消えて新しい版が空から始まる。
+    ///
+    /// 切り方を変えるたびにここを通る。**古い版が残ると害になる**。索引は棚
+    /// まるごとぶんの大きさがあるので、置きっぱなしは現物の何倍かの容量を
+    /// 黙って食う。そして `search_index_state` は作り直しへ回されるので、
+    /// 残った古い索引はもう誰も読まない。
+    ///
+    /// 併せて、意味検索の置き場に手を出さないことも見る。掃除は `v` と数字の
+    /// 名前だけを対象にしていて、`semantic-v2` は 465MB のモデルで作った
+    /// ベクトルが入っている ―― 巻き添えで消すと、作り直しに何十分もかかる。
+    #[test]
+    fn a_new_index_format_clears_the_old_one_and_leaves_the_semantic_index_alone() {
+        let (_guard, storage) = temp_storage();
+        let index_root = storage.join(INDEX_DIR_NAME);
+
+        // 実際に上がってきた版（v4）と、それより前の版を置く。
+        touch(&index_root.join("v0"), "meta.json");
+        touch(&index_root.join("v4"), "meta.json");
+        touch(&index_root.join("semantic-v2"), "index.sqlite");
+
+        ensure_index(&storage).expect("索引を作れること");
+
+        assert!(
+            index_root.join(INDEX_VERSION_DIR).is_dir(),
+            "いまの版の置き場ができていること"
+        );
+        assert!(!index_root.join("v0").exists(), "前の版が残っている");
+        assert!(!index_root.join("v4").exists(), "前の版が残っている");
+        assert!(
+            index_root
+                .join("semantic-v2")
+                .join("index.sqlite")
+                .is_file(),
+            "意味検索の置き場を巻き添えにしている"
+        );
     }
 }
