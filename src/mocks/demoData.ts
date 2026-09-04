@@ -170,6 +170,26 @@ const demoHtml = `
   <p>「まだ、ここにいたんだ」</p>
   <p>懐かしい声だった。何年も前から知っていて、けれど今朝までは二度と聞けないと思っていた声。</p>
   <p>開いた窓から、濡れた木々の匂いが流れ込んだ。栞は答える代わりに、机の向かい側の椅子を引いた。</p>
+  <!-- 本文に貼られるリンクカード。画面で確かめる作品にこれが一枚も無かった
+       ため、2文字の印が枠と重なって潰れていることに誰も気づかなかった。 -->
+  <a href="https://sio.fanbox.cc/posts/8421" target="_blank" rel="noopener noreferrer" class="novel-link-card novel-link-card--fanbox" data-provider="fanbox">
+    <span class="link-card-brand">F</span>
+    <span class="link-card-info">
+      <span class="link-card-kicker">pixivFANBOX</span>
+      <span class="link-card-title">前編：雨の降り出す前に</span>
+      <span class="link-card-host">青葉しおり</span>
+    </span>
+    <span class="link-card-arrow">↗</span>
+  </a>
+  <a href="https://skeb.jp/@aoba_shiori" target="_blank" rel="noopener noreferrer" class="novel-link-card" data-provider="web">
+    <span class="link-card-brand">↗</span>
+    <span class="link-card-info">
+      <span class="link-card-kicker">外部リンク</span>
+      <span class="link-card-title">リクエストはこちら</span>
+      <span class="link-card-host">skeb.jp</span>
+    </span>
+    <span class="link-card-arrow">↗</span>
+  </a>
 `;
 
 export function getDemoReader(id: number): ReaderDocument {

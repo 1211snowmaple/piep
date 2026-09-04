@@ -71,7 +71,7 @@ export function contentLinkTarget(raw: string): ContentLinkTarget | null {
 
 /** 手元にあると分かったもの。作品だけは、行き先が画面によって変わる。 */
 type ResolvedLink =
-  | { kind: "work"; downloadId: number }
+  | { kind: "work"; downloadId: number; title: string }
   | { kind: "path"; path: string }
   | null;
 
@@ -79,8 +79,8 @@ type ResolvedLink =
 async function resolveTarget(target: ContentLinkTarget): Promise<ResolvedLink> {
   try {
     if (target.kind === "work") {
-      const saved = await getDownloadBySource<{ id: number }>(target.source, target.sourceId);
-      return saved ? { kind: "work", downloadId: saved.id } : null;
+      const saved = await getDownloadBySource<{ id: number; title?: string }>(target.source, target.sourceId);
+      return saved ? { kind: "work", downloadId: saved.id, title: saved.title ?? "" } : null;
     }
     const route = target.kind === "person" ? "people" : "series";
     const path = `/${route}/${encodeURIComponent(target.source)}/${encodeURIComponent(target.sourceKey)}`;
@@ -214,6 +214,13 @@ export function useLibraryLinkMarks(
             element.dataset.inLibrary = "1";
             if (element.classList.contains("novel-link-card")) {
               const info = element.querySelector(".link-card-info");
+              // 題を持たない埋め込みは、カードに住所そのものが並ぶ。手元に
+              // あるものなら、その作品の題を出す ―― `.../show.php?id=26223262`
+              // では、それが何なのか読み手には分からない。
+              const heading = element.querySelector(".link-card-title");
+              if (resolved.kind === "work" && resolved.title && heading && /^https?:\/\/\S+$/.test((heading.textContent ?? "").trim())) {
+                heading.textContent = resolved.title;
+              }
               if (info && !info.querySelector(`.${SAVED_BADGE_CLASS}`)) {
                 const badge = document.createElement("span");
                 badge.className = SAVED_BADGE_CLASS;

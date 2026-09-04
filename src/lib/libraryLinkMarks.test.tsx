@@ -47,6 +47,28 @@ describe("本文のリンクに、手元にあることを示す印", () => {
     expect(dbApi.getDownloadBySource).toHaveBeenCalledWith("fanbox", "8421");
   });
 
+  /**
+   * 題を持たない埋め込みは、カードに住所そのものが並ぶ。FANBOX に貼られた
+   * pixiv の作品がまさにこれで、`.../show.php?id=26223262` では何なのか
+   * 分からない。手元にあるなら、その作品の題を出す。
+   */
+  it("住所しか書かれていないカードには、手元の題を出す", async () => {
+    dbApi.getDownloadBySource.mockResolvedValue({ id: 7, title: "人妻と密約（FANBOXおまけver）" });
+    const html = `<a href="https://www.pixiv.net/novel/show.php?id=26278569" class="novel-link-card"><span class="link-card-info"><span class="link-card-title">https://www.pixiv.net/novel/show.php?id=26278569</span></span></a>`;
+    const view = render(<Body html={html} />);
+
+    await waitFor(() => expect(view.container.querySelector(".link-card-title")?.textContent).toBe("人妻と密約（FANBOXおまけver）"));
+  });
+
+  it("投稿者が書いた題は、手元の題で上書きしない", async () => {
+    dbApi.getDownloadBySource.mockResolvedValue({ id: 7, title: "棚での題" });
+    const html = `<a href="https://sio.fanbox.cc/posts/8421" class="novel-link-card"><span class="link-card-info"><span class="link-card-title">前編はこちら</span></span></a>`;
+    const view = render(<Body html={html} />);
+
+    await waitFor(() => expect(view.container.querySelector("a")?.dataset.inLibrary).toBe("1"));
+    expect(view.container.querySelector(".link-card-title")?.textContent).toBe("前編はこちら");
+  });
+
   it("保存していない宛先には、何も足さない", async () => {
     dbApi.getDownloadBySource.mockResolvedValue(null);
     const view = render(<Body html={`<a href="https://sio.fanbox.cc/posts/999" class="novel-link-card"><span class="link-card-info"></span></a>`} />);

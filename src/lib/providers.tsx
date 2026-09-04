@@ -47,6 +47,9 @@ export function brandGlyphElement(document: Document, glyph: BrandGlyph): HTMLEl
   host.className = "brand-word-glyph";
   if (glyph.kind === "word") {
     if (glyph.wide) host.dataset.wide = "true";
+    // 字数を持たせる。CSS は文字を数えられないので、2文字の印を正方形へ
+    // 収めるための手がかりをここで渡す。
+    host.dataset.chars = String([...glyph.text].length);
     host.textContent = glyph.text;
     return host;
   }
@@ -63,7 +66,7 @@ export function brandGlyphElement(document: Document, glyph: BrandGlyph): HTMLEl
 
 function renderGlyph(glyph: BrandGlyph) {
   if (glyph.kind === "word") {
-    return <span className="brand-word-glyph" data-wide={glyph.wide || undefined}>{glyph.text}</span>;
+    return <span className="brand-word-glyph" data-wide={glyph.wide || undefined} data-chars={[...glyph.text].length}>{glyph.text}</span>;
   }
   return <span className="brand-word-glyph brand-word-glyph--pixiv"><svg viewBox="0 0 18 18" role="presentation"><path d={glyph.d} /></svg></span>;
 }
@@ -192,8 +195,8 @@ export interface BrandMarkDefinition {
   glyph: string;
   /** Set when this service is one the app can save from. */
   provider: string | null;
-  /** The drawn mark, when the service has one of its own. */
-  brandGlyph: BrandGlyph | null;
+  /** 描く印。どの相手にも必ずある（知らない相手は「↗」）。 */
+  brandGlyph: BrandGlyph;
 }
 
 function matchesHost(host: string, candidates: readonly string[]): boolean {
@@ -205,7 +208,7 @@ export function externalBrand(url: string): BrandMarkDefinition {
   try {
     host = new URL(url).hostname.replace(/^www\./, "").toLowerCase();
   } catch {
-    return { label: "Web", color: "#68707a", glyph: "↗", provider: null, brandGlyph: null };
+    return { label: "Web", color: "#68707a", glyph: "↗", provider: null, brandGlyph: { kind: "word", text: "↗" } };
   }
   for (const [id, hosts] of Object.entries(PROVIDER_BRAND_HOSTS)) {
     if (!matchesHost(host, hosts)) continue;
@@ -222,10 +225,17 @@ export function externalBrand(url: string): BrandMarkDefinition {
   const brand = LINK_ONLY_BRANDS.find((candidate) => matchesHost(host, candidate.hosts));
   return brand
     ? { label: brand.label, color: brand.color, glyph: brand.glyph, provider: null, brandGlyph: { kind: "word", text: brand.glyph } }
-    : { label: host, color: "#68707a", glyph: "↗", provider: null, brandGlyph: null };
+    : { label: host, color: "#68707a", glyph: "↗", provider: null, brandGlyph: { kind: "word", text: "↗" } };
 }
 
+/**
+ * 外部サービスの印。
+ *
+ * 印の描き方はアプリ全体で1つ ―― ここだけ別の見た目を持っていたので、同じ
+ * サービスが画面によって違う大きさ・違う字の詰まり方で出ていた。取得元
+ * （pixiv・FANBOX）は `ProviderGlyph`、それ以外は同じ `renderGlyph` を通す。
+ */
 export function ExternalServiceMark({ url }: { url: string }) {
   const brand = externalBrand(url);
-  return <Box component="span" className="external-service-mark" style={{ "--external-brand": brand.color }}>{brand.provider ? <ProviderGlyph provider={brand.provider} /> : <span className="external-service-mark__glyph">{brand.glyph}</span>}<Text component="span" size="xs" fw={700}>{brand.label}</Text><Icons.externalLink size={IconSize.inline} /></Box>;
+  return <Box component="span" className="external-service-mark" style={{ "--external-brand": brand.color }}>{brand.provider ? <ProviderGlyph provider={brand.provider} /> : renderGlyph(brand.brandGlyph)}<Text component="span" size="xs" fw={700}>{brand.label}</Text><Icons.externalLink size={IconSize.inline} /></Box>;
 }

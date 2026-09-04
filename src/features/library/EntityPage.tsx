@@ -176,7 +176,16 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
       if (runtime) return kind === "person" ? getPerson<PersonEntry>(source, key) : getSeries<SeriesEntry>(source, key);
       const facet = (kind === "person" ? demoFacets.authorEntities : demoFacets.series).find((item) => item.source === source && item.sourceKey === key) ?? (kind === "person" ? demoFacets.authorEntities[0] : demoFacets.series[0]);
       const common = { id: 1, source: facet.source, sourceKey: facet.sourceKey, coverPath: null, description: facet.description ?? null, contentHash: null, currentVersion: 2, lastCheckedAt: new Date().toISOString(), lastFetchedAt: new Date().toISOString(), createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), workCount: facet.count };
-      return kind === "person" ? { ...common, displayName: facet.displayName, iconPath: null, linksJson: null } : { ...common, title: facet.displayName, isConcluded: false, publishedContentCount: facet.count + 2 };
+      // 外部サービスの印が並ぶ帯は、プレビューでも空だった。印の描き方が
+      // 崩れても画面で気づけないので、代表的な行き先を持たせておく。
+      const demoLinks = JSON.stringify([
+        "https://www.pixiv.net/users/8001234",
+        "https://aoba-shiori.fanbox.cc/",
+        "https://x.com/aoba_shiori",
+        "https://skeb.jp/@aoba_shiori",
+        "https://ci-en.dlsite.com/creator/8001",
+      ]);
+      return kind === "person" ? { ...common, displayName: facet.displayName, iconPath: null, linksJson: demoLinks } : { ...common, title: facet.displayName, isConcluded: false, publishedContentCount: facet.count + 2 };
     },
   });
   // Prolific authors have more works than any single request should return, so
