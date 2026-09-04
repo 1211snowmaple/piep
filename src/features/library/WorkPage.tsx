@@ -603,16 +603,19 @@ export default function WorkPage() {
   );
 }
 
-/** Read every source page for one saved version while keeping IPC bursts small. */
+/** Read every source page for one saved version while keeping IPC bursts small.
+ *
+ *  版どうしを比べるのはここだけなので、平文を頼むのもここだけ。読書画面は
+ *  HTML しか使わないため、既定では積まずに運ぶ。 */
 async function getWholeVersionText(downloadId: number, version: number): Promise<string> {
-  const first = await getReaderContentPage(downloadId, version, 0);
+  const first = await getReaderContentPage(downloadId, version, 0, true);
   if (first.pageCount <= 1) return first.plainText;
   const pages = Array.from({ length: first.pageCount }, () => "");
   pages[0] = first.plainText;
   const batchSize = 4;
   for (let start = 1; start < first.pageCount; start += batchSize) {
     const batch = Array.from({ length: Math.min(batchSize, first.pageCount - start) }, (_, offset) => start + offset);
-    const loaded = await Promise.all(batch.map((page) => getReaderContentPage(downloadId, version, page)));
+    const loaded = await Promise.all(batch.map((page) => getReaderContentPage(downloadId, version, page, true)));
     loaded.forEach((entry) => { pages[entry.page] = entry.plainText; });
   }
   return pages.join("\n");
