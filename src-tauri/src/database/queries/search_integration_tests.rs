@@ -5923,6 +5923,102 @@ fn active_edit_revision_drives_reader_and_search_body() {
     assert_eq!(search.items.first().map(|item| item.id), Some(download_id));
 }
 
+/// 編集画面を開いて、何も変えずに反映する ―― それだけで本文が壊れないこと。
+///
+/// 実際の道筋（保存した本文 → ブロック → 下書き → 反映 → 読書画面）を通す。
+/// 純粋な関数の試験はブロックの組み替えを見ているが、壊れていたのはこの
+/// 一連の受け渡しなので、ここでも押さえておく。
+#[test]
+fn publishing_an_untouched_work_through_the_database_keeps_its_lines() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let body = "一行目\n二行目\n\n段落が変わる";
+    let download_id = insert_download(
+        &db,
+        &storage,
+        "roundtrip-1",
+        "往復する作品",
+        "作者A",
+        &[],
+        body,
+    );
+
+    let before = db
+        .get_reader_content_page(download_id, None, 0, false)
+        .unwrap();
+
+    // 編集画面が受け取るブロックを、そのまま下書きとして戻す。
+    let editor = db.get_editor_document(download_id).unwrap();
+    let blocks = editor
+        .blocks
+        .iter()
+        .map(|block| WorkBlockInput {
+            block_type: block.block_type.clone(),
+            text: block.text.clone(),
+            asset_id: block.asset_id,
+            attrs_json: block.attrs_json.clone(),
+        })
+        .collect::<Vec<_>>();
+    let draft = db.save_work_draft(download_id, 1, None, &blocks).unwrap();
+    db.activate_work_edit(draft.id).unwrap();
+
+    let after = db
+        .get_reader_content_page(download_id, None, 0, false)
+        .unwrap();
+    // 画面に出るものだけを比べる。転送用の印と、HTML では畳まれる改行は
+    // 見え方を変えない。
+    let visible = |html: &str| {
+        html.replace("<!-- content-block -->", "")
+            .replace('\n', "")
+            .replace("<br />", "\n")
+    };
+    assert_eq!(
+        visible(&before.html),
+        visible(&after.html),
+        "何も変えずに反映しただけで本文の見え方が変わった\n元: {:?}\n後: {:?}",
+        before.html,
+        after.html
+    );
+}
+
+/// 直した題が、棚にも索引にも届くこと。
+#[test]
+fn an_edited_title_reaches_the_library_and_the_index() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let download_id = insert_download(&db, &storage, "title-1", "取得元の題", "作者A", &[], "本文");
+
+    let draft = db
+        .save_work_draft(
+            download_id,
+            1,
+            Some("読み手が直した題"),
+            &[WorkBlockInput {
+                block_type: "paragraph".to_string(),
+                text: Some("本文".to_string()),
+                asset_id: None,
+                attrs_json: None,
+            }],
+        )
+        .unwrap();
+    // 下書きのうちは、まだ棚の題は変わらない。
+    assert_eq!(db.get_download(download_id).unwrap().title, "取得元の題");
+
+    db.activate_work_edit(draft.id).unwrap();
+    assert_eq!(
+        db.get_download(download_id).unwrap().title,
+        "読み手が直した題"
+    );
+    let search = db
+        .search_downloads_v2(&v2_params(Some("読み手が直した題"), 10, None))
+        .unwrap();
+    assert_eq!(search.items.first().map(|item| item.id), Some(download_id));
+
+    // 下ろせば、取得元の題に戻る。
+    db.deactivate_work_edit(download_id).unwrap();
+    assert_eq!(db.get_download(download_id).unwrap().title, "取得元の題");
+}
+
 #[test]
 fn update_job_schema_recovers_interrupted_jobs() {
     let (_temp, root, storage) = temp_paths();
