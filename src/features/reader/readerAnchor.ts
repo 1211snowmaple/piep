@@ -22,14 +22,25 @@ function marks(article: HTMLElement): HTMLElement[] {
   return [...article.querySelectorAll<HTMLElement>(MARK_SELECTOR)];
 }
 
-/** いま画面の上端にいちばん近い、上側の目印の番号。 */
-export function currentAnchor(viewport: HTMLElement, article: HTMLElement): number | null {
+/**
+ * いま読んでいるところの手前にある、いちばん近い目印の番号。
+ *
+ * 「手前」は組み方で変わる。横書きなら窓の上端より上、縦書きなら窓の右端より
+ * 右 ―― 縦書きでは行が上から下へ並び、桁が右から左へ進むので、上端で測ると
+ * どの段落もほぼ同じ高さになり、**最初の目印で必ず打ち切られて null になる**。
+ * 目印が無ければ px へ落ちるが、縦書きの px（scrollTop）は常に 0 なので、
+ * 縦書きで読んだ場所は一つも憶えられていなかった。
+ */
+export function currentAnchor(viewport: HTMLElement, article: HTMLElement, vertical = false): number | null {
   const found = marks(article);
   if (!found.length) return null;
-  const viewportTop = viewport.getBoundingClientRect().top;
+  const box = viewport.getBoundingClientRect();
   let anchor: number | null = null;
   for (let index = 0; index < found.length; index += 1) {
-    if (found[index].getBoundingClientRect().top - viewportTop > 0) break;
+    const rect = found[index].getBoundingClientRect();
+    // まだ読んでいない側へ出たら、その手前が現在地。
+    const beyond = vertical ? box.right - rect.right : rect.top - box.top;
+    if (beyond > 1) break;
     anchor = index;
   }
   return anchor;
@@ -77,4 +88,39 @@ export function scrollToStart(viewport: HTMLElement, vertical: boolean, smooth =
     left: vertical ? viewport.scrollWidth : 0,
     behavior: smooth ? "smooth" : "auto",
   });
+}
+
+/** 読み始めからの距離を指定して寄せる。向きの取り決めはここだけが知っている。 */
+export function scrollToFlowOffset(viewport: HTMLElement, vertical: boolean, offset: number): void {
+  const total = flowLength(viewport, vertical);
+  const bounded = Math.max(0, Math.min(offset, Math.max(0, total)));
+  if (vertical) viewport.scrollLeft = total - bounded;
+  else viewport.scrollTop = bounded;
+}
+
+/**
+ * 画面 1 枚ぶん読み進める（戻る）。
+ *
+ * 読む道具として当たり前の操作が、この画面には無かった。矢印も Space も
+ * 本文を1行も動かさず、PageDown は**転送の都合で割られた 128KB のページ**を
+ * まるごと飛ばしていた。押した人は、読んでいない十数画面を跳び越していた。
+ */
+export function scrollByScreen(viewport: HTMLElement, vertical: boolean, direction: 1 | -1): void {
+  // 読んでいた行を見失わないよう、少しだけ重ねて送る。
+  const overlap = 48;
+  const step = Math.max(80, (vertical ? viewport.clientWidth : viewport.clientHeight) - overlap);
+  viewport.scrollBy({
+    top: vertical ? 0 : step * direction,
+    // 縦書きは右から左へ進む。進む向きは scrollLeft が減る向き。
+    left: vertical ? -step * direction : 0,
+    behavior: "auto",
+  });
+}
+
+/** これ以上は同じページに読むところが無い、という端。 */
+export function atFlowEdge(viewport: HTMLElement, vertical: boolean, direction: 1 | -1): boolean {
+  const offset = flowOffset(viewport, vertical);
+  const total = flowLength(viewport, vertical);
+  // 2px は端末ごとの端数。ここを 0 にすると最後の一押しが効かない。
+  return direction === 1 ? offset >= total - 2 : offset <= 2;
 }

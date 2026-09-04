@@ -59,16 +59,28 @@ function writeStore(store: Store) {
 }
 
 /**
+ * どの作品の、どの版に挟んだしおりか。
+ *
+ * 作品ごとにまとめていたころは、版を切り替えると別の本文に同じ番号の
+ * しおりが刺さっていた。ページの割れ方も行数も違うので、着く場所は
+ * 挟んだ場所と無関係になる。読んでいる位置の記録は最初から版ごとだった。
+ */
+function bucketKey(workId: number, version: number | null): string {
+  return version === null ? String(workId) : `${workId}.${version}`;
+}
+
+/**
  * Bookmarks live in local storage rather than the library database: they are a
  * per-device reading aid, and keeping them here means adding one costs nothing
  * and works the same in the browser preview.
  */
-export function useBookmarks(workId: number) {
+export function useBookmarks(workId: number, version: number | null = null) {
   const [bookmarks, setBookmarks] = useState<Bookmark[]>([]);
+  const key = bucketKey(workId, version);
 
   const refresh = useCallback(() => {
-    setBookmarks(readStore()[String(workId)] ?? []);
-  }, [workId]);
+    setBookmarks(readStore()[key] ?? []);
+  }, [key]);
 
   useEffect(() => {
     refresh();
@@ -83,20 +95,18 @@ export function useBookmarks(workId: number) {
 
   const add = useCallback((bookmark: Omit<Bookmark, "id" | "createdAt">) => {
     const store = readStore();
-    const key = String(workId);
     const entry: Bookmark = { ...bookmark, id: crypto.randomUUID(), createdAt: new Date().toISOString() };
     store[key] = [...(store[key] ?? []), entry].sort((a, b) => a.page - b.page || a.top - b.top);
     writeStore(store);
     return entry;
-  }, [workId]);
+  }, [key]);
 
   const remove = useCallback((id: string) => {
     const store = readStore();
-    const key = String(workId);
     store[key] = (store[key] ?? []).filter((item) => item.id !== id);
     if (!store[key].length) delete store[key];
     writeStore(store);
-  }, [workId]);
+  }, [key]);
 
   return { bookmarks, add, remove };
 }

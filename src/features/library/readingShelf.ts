@@ -30,6 +30,10 @@ function legacySessionStorage(): Storage | null {
 
 export interface ReadingPosition {
   page: number;
+  /**
+   * 読み始めからの距離。横書きなら下向き、縦書きなら右から左向きに測る。
+   * どちらで測ったかは `mode` が持つ。
+   */
   top: number;
   /**
    * 何行目にいたか。組み方に依らないので、文字サイズや行間を変えても同じ
@@ -37,13 +41,18 @@ export interface ReadingPosition {
    * 一つも無い本文のため）。
    */
   anchor?: number;
+  /**
+   * `top` をどちらの組み方で測ったか。縦書きと横書きでは距離の意味が違うので、
+   * 組み方を変えたあとの `top` は当てにしない。
+   */
+  mode?: "horizontal" | "vertical";
 }
 
 function keyFor(workId: number, version: number | null): string {
   return `${POSITION_PREFIX}${workId}.${version ?? "current"}`;
 }
 
-function normalizePosition(page: unknown, top: unknown, anchor?: unknown): ReadingPosition | null {
+function normalizePosition(page: unknown, top: unknown, anchor?: unknown, mode?: unknown): ReadingPosition | null {
   const normalizedPage = Number(page);
   const normalizedTop = Number(top);
   if (!Number.isSafeInteger(normalizedPage) || normalizedPage < 1) return null;
@@ -53,6 +62,7 @@ function normalizePosition(page: unknown, top: unknown, anchor?: unknown): Readi
   if (anchor !== undefined && Number.isSafeInteger(normalizedAnchor) && normalizedAnchor >= 0) {
     position.anchor = normalizedAnchor;
   }
+  if (mode === "horizontal" || mode === "vertical") position.mode = mode;
   return position;
 }
 
@@ -63,8 +73,8 @@ function parsePosition(raw: string | null): ReadingPosition | null {
     const parsed: unknown = JSON.parse(raw);
     if (typeof parsed === "number" || typeof parsed === "string") return normalizePosition(1, parsed);
     if (parsed && typeof parsed === "object") {
-      const value = parsed as { page?: unknown; top?: unknown; anchor?: unknown };
-      return normalizePosition(value.page, value.top, value.anchor);
+      const value = parsed as { page?: unknown; top?: unknown; anchor?: unknown; mode?: unknown };
+      return normalizePosition(value.page, value.top, value.anchor, value.mode);
     }
   } catch {
     // The oldest build stored an unquoted numeric offset.
@@ -105,7 +115,7 @@ export function readReadingPosition(workId: number, version: number | null): Rea
 /** Writes the single schema consumed by both the reader and the shelf. */
 export function writeReadingPosition(workId: number, version: number | null, position: ReadingPosition): void {
   if (!Number.isSafeInteger(workId) || workId <= 0) return;
-  const normalized = normalizePosition(position.page, position.top, position.anchor);
+  const normalized = normalizePosition(position.page, position.top, position.anchor, position.mode);
   const store = storage();
   if (!normalized || !store) return;
   const key = keyFor(workId, version);
@@ -148,6 +158,25 @@ export function readingWorkIds(): number[] {
     if (ids.size >= MAX_SHELF_IDS) break;
   }
   return [...ids].sort((a, b) => a - b);
+}
+
+/**
+ * 読み終えた1つを、読みかけの棚から降ろす。
+ *
+ * 位置を消す口が「作品を消したとき」しか無かったので、最後まで読んだ本も
+ * 棚に残り続けていた。棚は読みかけを並べる場所であって、履歴ではない。
+ */
+export function clearReadingPosition(workId: number, version: number | null): void {
+  const store = storage();
+  if (!store || !Number.isSafeInteger(workId) || workId <= 0) return;
+  const key = keyFor(workId, version);
+  try {
+    const wasPartRead = isPartRead(parsePosition(store.getItem(key)));
+    store.removeItem(key);
+    if (wasPartRead) announcePositionChange();
+  } catch {
+    // 消せなくても読書は続く。
+  }
 }
 
 /** Drops the recorded position for a work, used when it leaves the library. */

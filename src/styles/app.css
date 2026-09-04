@@ -43,11 +43,13 @@ pre,
 }
 
 .mantine-Notifications-root {
+  /* 固定ヘッドバー（58px）の直下に、少し呼吸できる間隔を空ける。 */
+  top: 70px !important;
   right: 16px !important;
-  bottom: 16px !important;
+  bottom: auto !important;
   width: min(360px, calc(100vw - 32px)) !important;
   max-width: calc(100vw - 32px) !important;
-  max-height: calc(100dvh - 32px);
+  max-height: calc(100dvh - 86px);
   padding: 1px;
   overflow-x: hidden;
   overflow-y: auto;
@@ -1423,6 +1425,43 @@ select {
 .link-card-title { overflow: hidden; color: var(--mantine-color-text); font-size: 0.88rem; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
 .link-card-host { overflow: hidden; color: var(--mantine-color-dimmed); font-size: 0.7rem; text-overflow: ellipsis; white-space: nowrap; }
 .link-card-arrow { flex: 0 0 auto; color: var(--mantine-color-dimmed); font-family: "Noto Sans JP", sans-serif; font-size: 14px; }
+
+/* 宛先を確かめられなかった埋め込み。何が貼られていたかは残すが、押せる
+   ようには見せない ―― 押しても何も起きないカードは、壊れたリンクと同じ。 */
+.novel-link-card--plain {
+  border-style: dashed;
+  box-shadow: none;
+  cursor: default;
+}
+.novel-link-card--plain:hover { border-color: light-dark(#dce2e8, #303944); box-shadow: none; transform: none; }
+
+/* 取得元が新しい種類のブロックを増やしたとき。文字を持つものは本文として
+   出すので、ここへ落ちるのは中身の無いブロックだけ。 */
+.fallback-block {
+  margin: 1.25em 0;
+  padding: 0.9em 1em;
+  border: 1px dashed light-dark(#dce2e8, #303944);
+  border-radius: 10px;
+  color: var(--mantine-color-dimmed);
+  font-size: 0.82rem;
+}
+
+/* 手元にある作品・作者を指しているリンク。押せばアプリの中で開く。
+   押してみるまで分からなかったころは、外部リンクと見分けが付かなかった。 */
+.link-card-saved,
+.novel-inline-link--saved::after {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 999px;
+  color: light-dark(#1f6f43, #7fdcab);
+  background: light-dark(#e4f6ec, #17321f);
+  font-size: 10px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+.link-card-saved { align-self: flex-start; margin-top: 2px; }
+.novel-inline-link--saved::after { content: "ライブラリ"; margin-left: 4px; transform: translateY(-1px); }
+.novel-link-card[data-in-library] { border-color: light-dark(#a8d8bd, #2f6b48); }
 .content-pagination { min-height: 32px; }
 
 .asset-card { overflow: hidden; cursor: pointer; }
@@ -1707,6 +1746,30 @@ select {
   color: var(--mantine-color-dimmed);
 }
 
+/* 転送のために割っただけの切れ目に、続きがあることを置く。何も無いと、
+   そこで作品が終わったように見える。 */
+.reader-continue {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  margin-top: 56px;
+  padding-top: 28px;
+  border-top: 1px dashed light-dark(#e5ded3, #323943);
+}
+.reader-page--vertical .reader-continue {
+  width: min(70vw, 420px);
+  height: auto;
+  align-self: center;
+  margin-top: 0;
+  margin-inline-start: 40px;
+  padding-top: 0;
+  padding-inline-start: 28px;
+  border-top: 0;
+  border-inline-start: 1px dashed light-dark(#e5ded3, #323943);
+  writing-mode: horizontal-tb;
+}
+
 .reader-finish {
   display: flex;
   flex-direction: column;
@@ -1983,6 +2046,25 @@ select {
   top: 74px;
   right: 18px;
   background: light-dark(rgb(255 255 255 / 97%), rgb(20 25 33 / 97%));
+}
+
+/* 取り込み直した本文があるのに、編集が古い版の上に載っているとき。
+   本文の頭に置く ―― 開いた人が最初に見る場所で、かつ組みを崩さない。 */
+.editor-stale-base { margin-bottom: 14px; }
+
+/* プレビューの中の行内記法。読書画面と同じ姿にしつつ、押しても飛ばない
+   ことが見て分かるようにしておく。 */
+.editor-preview-notation-link {
+  color: var(--mantine-color-piep-7);
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+}
+.editor-preview-notation-jump {
+  padding: 0 5px;
+  border: 1px dashed light-dark(#cdd5de, #3a4450);
+  border-radius: 5px;
+  color: var(--mantine-color-dimmed);
+  font-size: 0.82em;
 }
 
 .editor-heading-input textarea {

@@ -75,7 +75,7 @@ import {
 } from "@/services/dbApi";
 import { searchSuggest } from "@/services/searchApi";
 import { deleteSavedSearch, listSavedSearches, upsertSavedSearch } from "@/services/shelfApi";
-import { readingWorkIds } from "@/features/library/readingShelf";
+import { forgetReadingPositions, readingWorkIds } from "@/features/library/readingShelf";
 import { listPendingRevisionsCommand } from "@/services/updateJobApi";
 import { useSavedSearchMigration } from "@/features/library/savedSearchMigration";
 import { deleteThenCleanup } from "@/features/library/deletedWorkCleanup";
@@ -1554,7 +1554,9 @@ export default function LibraryPage() {
                       「入れたい作品の題名を思い出す」を要求しない。 */}
                   <Button size="sm" variant="light" leftSection={<Icons.collection size={IconSize.menu} />} disabled={!selected.length} onClick={collectModal.open}>コレクション</Button>
                   <Button size="sm" variant="light" leftSection={<Icons.epubAdd size={IconSize.menu} />} disabled={!selected.length} onClick={() => { addToEpubQueue(selected); notifications.show({ color: "green", message: `${selected.length}件をEPUBキューに追加しました` }); }}>EPUB</Button>
-                  <Menu position="top-end"><Menu.Target><Button size="sm" variant="default" rightSection={<Icons.more size={IconSize.menu} />} disabled={!selected.length}>その他</Button></Menu.Target><Menu.Dropdown><Menu.Item leftSection={<Icons.favorite size={IconSize.menu} />} onClick={() => selectionMutation.mutate({ action: "favorite" })}>お気に入りに追加</Menu.Item><Menu.Item leftSection={<Icons.watch size={IconSize.menu} />} onClick={() => selectionMutation.mutate({ action: "watch" })}>更新監視を有効化</Menu.Item>{/* 追加できて解除できないのは片手落ちだった。 */}<Menu.Item leftSection={<Icons.pause size={IconSize.menu} />} onClick={() => selectionMutation.mutate({ action: "unwatch" })}>更新監視を止める</Menu.Item><Menu.Divider /><Menu.Item color="red" leftSection={<Icons.delete size={IconSize.menu} />} onClick={confirmDelete}>削除</Menu.Item></Menu.Dropdown></Menu>
+                  <Menu position="top-end"><Menu.Target><Button size="sm" variant="default" rightSection={<Icons.more size={IconSize.menu} />} disabled={!selected.length}>その他</Button></Menu.Target><Menu.Dropdown><Menu.Item leftSection={<Icons.favorite size={IconSize.menu} />} onClick={() => selectionMutation.mutate({ action: "favorite" })}>お気に入りに追加</Menu.Item><Menu.Item leftSection={<Icons.watch size={IconSize.menu} />} onClick={() => selectionMutation.mutate({ action: "watch" })}>更新監視を有効化</Menu.Item>{/* 追加できて解除できないのは片手落ちだった。 */}<Menu.Item leftSection={<Icons.pause size={IconSize.menu} />} onClick={() => selectionMutation.mutate({ action: "unwatch" })}>更新監視を止める</Menu.Item>{/* 読みかけの棚から降ろす口が、作品を消すことしか無かった。
+                      途中でやめた作品が、いつまでも棚に積まれ続けていた。 */}
+                  {shelfParam === "reading" && <Menu.Item leftSection={<Icons.read size={IconSize.menu} />} onClick={() => { selected.forEach((id) => forgetReadingPositions(id)); notifications.show({ color: "piep", message: `${selected.length}件を読みかけから外しました` }); setSelected([]); setSelectionMode(false); }}>読みかけから外す</Menu.Item>}<Menu.Divider /><Menu.Item color="red" leftSection={<Icons.delete size={IconSize.menu} />} onClick={confirmDelete}>削除</Menu.Item></Menu.Dropdown></Menu>
                 </>
               ) : (
                 <>

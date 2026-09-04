@@ -44,7 +44,7 @@ import { contentTypeLabel, errorMessage, formatBytes, formatDate, formatFreshnes
 import { hasSourceRevision } from "@/lib/workFreshness";
 import { listPendingRevisionsCommand, previewPendingRevisionCommand } from "@/services/updateJobApi";
 import { prepareDocumentHtml } from "@/lib/content";
-import { useContentLinkNavigation } from "@/lib/contentLinks";
+import { useContentLinkNavigation, useLibraryLinkMarks } from "@/lib/contentLinks";
 import { exportSingle } from "@/services/archiveApi";
 import { WorkAssist } from "@/features/assist/WorkAssist";
 import { addWorkCollectionMembers, listCollectionsForWork, listWorkCollections } from "@/services/collectionApi";
@@ -107,6 +107,8 @@ export default function WorkPage() {
   // to its top and leaves the screen around it exactly where it was - the same
   // thing the reader does with its own pages.
   const contentFrameRef = useRef<HTMLDivElement>(null);
+  // 本文の中のリンクに「ライブラリにあります」の印を付けるための器。
+  const contentBodyRef = useRef<HTMLDivElement>(null);
   const workHeroRef = useRef<HTMLDivElement>(null);
   const workMarksRef = useRef<HTMLDivElement>(null);
   const goToContentPage = (page: number) => {
@@ -314,6 +316,10 @@ export default function WorkPage() {
   // other accounts - so they are set as text rather than as a stack of cards
   // taller than the caption itself.
   const captionHtml = useMemo(() => prepareDocumentHtml(documentQuery.data?.download.excerpt ?? "", getAssetUrl, { inlineLinks: true }), [documentQuery.data?.download.excerpt]);
+  // 本文が指している作品・作者のうち、手元にあるものに印を付ける。FANBOX の
+  // 投稿は続きの回や関連記事をカードで指すので、ここが分かるかどうかで
+  // 「保存できている」かどうかの手応えが変わる。
+  useLibraryLinkMarks(contentBodyRef, preparedHtml);
   useEffect(() => { if (tab !== "content") setContentPage(1); }, [id, tab]);
 
   if (documentQuery.isLoading) return <div className="page"><LoadingState label="作品を開いています" /></div>;
@@ -513,7 +519,7 @@ export default function WorkPage() {
                 frame of its own instead, the way the JSON already does, so the
                 screen around it stays put while you read. */}
             <Paper className="content-frame" withBorder ref={contentFrameRef}>
-              <div className="content-preview content-preview--paged" onClick={openContentLink} dangerouslySetInnerHTML={{ __html: preparedHtml }} />
+              <div ref={contentBodyRef} className="content-preview content-preview--paged" onClick={openContentLink} dangerouslySetInnerHTML={{ __html: preparedHtml }} />
             </Paper>
             <ContentPagination current={contentPage} total={contentQuery.data?.pageCount ?? 1} onChange={goToContentPage} />
           </Stack>}

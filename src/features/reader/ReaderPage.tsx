@@ -30,15 +30,15 @@ import { notifications } from "@mantine/notifications";
 import { Icons, IconSize } from "@/lib/icons";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useBookmarks, type Bookmark } from "@/features/reader/bookmarks";
-import { currentAnchor, flowLength, flowOffset, scrollElementIntoView, scrollToAnchor, scrollToStart } from "@/features/reader/readerAnchor";
+import { atFlowEdge, currentAnchor, flowLength, flowOffset, scrollByScreen, scrollElementIntoView, scrollToAnchor, scrollToFlowOffset, scrollToStart } from "@/features/reader/readerAnchor";
 import { HIT_ATTRIBUTE, highlightMatches } from "@/features/reader/readerSearch";
-import { readReadingPosition, writeReadingPosition } from "@/features/library/readingShelf";
+import { clearReadingPosition, readReadingPosition, writeReadingPosition } from "@/features/library/readingShelf";
 import { useAppNavigate, useAppSearchParams, useReturnTo, useRouteParams } from "@/app/router";
 import { ErrorState, LoadingState } from "@/components/AsyncState";
 import { ProviderMark, sourceUrl } from "@/lib/providers";
 import { formatDate, formatNumber } from "@/lib/format";
 import { prepareDocumentHtml } from "@/lib/content";
-import { useContentLinkNavigation } from "@/lib/contentLinks";
+import { useContentLinkNavigation, useLibraryLinkMarks } from "@/lib/contentLinks";
 import { getWorkCollection, listCollectionsForWork } from "@/services/collectionApi";
 import { getAssetUrl, getReaderContentPage, getReaderMetadata, getReaderOutline, isTauriRuntime, openLocalAsset, searchDownloadsV2, searchReaderContent } from "@/services/dbApi";
 import { openExternalUrl } from "@/services/openerApi";
@@ -207,16 +207,20 @@ function BookmarkControls({ bookmarks, addDisabled, onAdd, onOpen, onRemove }: {
  * しおりの見出しが「3ページ · 42%」だけでは、並んだときにどれがどれだか
  * 分からない。挟んだところに何が書いてあったかを一緒に憶えておく。
  */
-function excerptAt(viewport: HTMLElement | null, article: HTMLElement | null): string {
+function excerptAt(viewport: HTMLElement | null, article: HTMLElement | null, vertical = false): string {
   if (!viewport || !article || typeof document === "undefined") return "";
-  const viewportTop = viewport.getBoundingClientRect().top;
+  const box = viewport.getBoundingClientRect();
   const walker = document.createTreeWalker(article, NodeFilter.SHOW_TEXT);
   for (let node = walker.nextNode(); node; node = walker.nextNode()) {
     const text = node as Text;
     if (!text.data.trim()) continue;
     const range = document.createRange();
     range.selectNodeContents(text);
-    if (range.getBoundingClientRect().bottom < viewportTop) continue;
+    const rect = range.getBoundingClientRect();
+    // 読み終えた側にあるものは飛ばす。縦書きでは「上」ではなく「右」が
+    // 読み終えた側 ―― 上端で測っていたころは、どこに挟んでも本文の
+    // 書き出しが控えられていた。
+    if (vertical ? rect.right > box.right + 1 : rect.bottom < box.top) continue;
     return text.data.trim().slice(0, 40);
   }
   return "";
@@ -280,9 +284,11 @@ export default function ReaderPage() {
   const pendingBookmarkRef = useRef<{ page: number; top: number; anchor?: number } | null>(null);
   // ページを跨いで検索結果へ飛ぶとき、そのページが届くまで持っておく。
   const pendingHitRef = useRef<number | null>(null);
+  // 目次から飛ぶとき、その見出しが何番目かを届くまで持っておく。
+  const pendingOutlineRef = useRef<number | null>(null);
   // ページを送ったあと、届いた本文の先頭へ寄せるための印。
   const pendingPageStartRef = useRef(false);
-  const { bookmarks, add: addBookmark, remove: removeBookmark } = useBookmarks(id);
+  const { bookmarks, add: addBookmark, remove: removeBookmark } = useBookmarks(id, version);
   const metadataQuery = useQuery({
     queryKey: ["reader-metadata", id],
     queryFn: () => runtime ? getReaderMetadata(id) : Promise.resolve((() => { const demo = getDemoReader(id); return { download: demo.download, versions: demo.versions, assetCount: demo.assets.length, isEdited: demo.isEdited, activeEditRevision: demo.activeEditRevision }; })()),
@@ -305,6 +311,24 @@ export default function ReaderPage() {
     queryFn: () => runtime ? searchReaderContent(id, debouncedReaderSearch, version) : Promise.resolve([]),
     enabled: searchOpened && debouncedReaderSearch.trim().length > 0,
   });
+  /**
+   * 印を付けている語が、どのページに何件あるか。
+   *
+   * 隣のページしか見ていなかったころは、そこに一致が無いと前後ボタンが
+   * どちらも押せなくなり、**探した語の続きへ行く手立てが無くなっていた**。
+   * 端末側は全ページぶんの答えを持っているので、それを頼りに次の当たりまで送る。
+   * 検索窓と同じ問い合わせなので、結果を押して来たときは往復が増えない。
+   */
+  const markedPagesQuery = useQuery({
+    queryKey: ["reader-content-search", id, version, markedTerm],
+    queryFn: () => runtime ? searchReaderContent(id, markedTerm, version) : Promise.resolve([]),
+    enabled: markedTerm.trim().length > 0,
+    staleTime: 60_000,
+  });
+  const markedPages = useMemo(
+    () => (markedPagesQuery.data ?? []).map((hit) => hit.page).sort((a, b) => a - b),
+    [markedPagesQuery.data],
+  );
   const explicitCollectionQuery = useQuery({
     // 取得関数はコレクション詳細と同じ getWorkCollection なので、キーも同じに
     // する。別名で持っていたため、束から作品を外した直後にリーダーへ戻ると、
@@ -431,21 +455,58 @@ export default function ReaderPage() {
         searchDrawer.open();
         return;
       }
-      if (event.key === "Escape") {
-        // 印だけを消す。窓が開いていればそちらは Mantine が閉じる。
+      // 入力中の Escape は、その欄と窓のためのもの。印まで消してしまうと、
+      // 検索語を打ち直そうとしただけで見つけた場所を見失う。
+      if (event.key === "Escape" && !isTyping(event.target)) {
         setMarkedTerm("");
         return;
       }
       if (isTyping(event.target) || event.ctrlKey || event.metaKey || event.altKey) return;
-      const turn = (delta: number) => {
+      // 開いている窓の中で押した鍵は、その窓のもの。後ろの本文をめくらない。
+      if ((event.target as HTMLElement | null)?.closest?.("[role='dialog'], .mantine-Drawer-content, .mantine-Modal-content")) return;
+      const viewport = scrollRef.current;
+      const turn = (delta: 1 | -1) => {
         event.preventDefault();
         goToPageRef.current(sourcePageRef.current + delta);
+      };
+      /**
+       * まず 1 画面ぶん読み進め、そのページの端に着いていたときだけ次へ送る。
+       *
+       * 以前は押した瞬間に転送ページ（128KB ＝ 数万字）が変わっていたので、
+       * **読んでいない十数画面を跳び越していた**。本を読む道具として、
+       * PageDown が「次の画面」でないのは通らない。
+       */
+      const advance = (direction: 1 | -1) => {
+        event.preventDefault();
+        if (!viewport) return;
+        if (!atFlowEdge(viewport, vertical, direction)) {
+          scrollByScreen(viewport, vertical, direction);
+          return;
+        }
+        const next = sourcePageRef.current + direction;
+        if (next < 1 || next > pageCount) return;
+        goToPageRef.current(next);
       };
       // 縦書きは右から左へ進む。矢印の向きも本の向きに合わせる。
       const forward = vertical ? "ArrowLeft" : "ArrowRight";
       const backward = vertical ? "ArrowRight" : "ArrowLeft";
-      if (event.key === forward || event.key === "PageDown") return turn(1);
-      if (event.key === backward || event.key === "PageUp") return turn(-1);
+      // ボタンやリンクに焦点があるときの Space は、その部品を押す合図。
+      // 本文送りに使ってしまうと、鍵盤だけで操作している人が押せなくなる。
+      const onControl = (event.target as HTMLElement | null)?.closest?.("button, a[href], [role='button']");
+      // 矢印は転送ページの送り。Space / PageDown は読み進み。
+      if (event.key === forward) return turn(1);
+      if (event.key === backward) return turn(-1);
+      if (event.key === "PageDown" || (event.key === " " && !event.shiftKey && !onControl)) return advance(1);
+      if (event.key === "PageUp" || (event.key === " " && event.shiftKey && !onControl)) return advance(-1);
+      // 上下は一行ぶんの送り。縦書きでも「読み進む向き」へ動かす ―― 縦書きの
+      // 本文は窓の高さに収まっていて、上下に動かす余地がそもそも無い。
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        if (!viewport) return;
+        event.preventDefault();
+        const step = event.key === "ArrowDown" ? 80 : -80;
+        viewport.scrollBy({ top: vertical ? 0 : step, left: vertical ? -step : 0, behavior: "auto" });
+        return;
+      }
       if (event.key === "Home") { event.preventDefault(); return goToPageRef.current(1); }
       if (event.key === "End") { event.preventDefault(); return goToPageRef.current(pageCount); }
       if (event.key === "t") { event.preventDefault(); return outlineDrawer.open(); }
@@ -516,6 +577,22 @@ export default function ReaderPage() {
     scrollElementIntoView(target, { block: "center", inline: "center", behavior: "smooth" });
   }, [contentReady, hitCount, hitIndex, markedTerm, preparedHtml]);
 
+  /**
+   * 目次で選んだ見出しへ寄せる。
+   *
+   * ページ番号しか見ていなかったころは、同じページに載っている見出しが
+   * すべて同じ場所 ―― ページの先頭 ―― へ着いた。転送ページは 128KB あるので、
+   * 20 個の章が並ぶページでは目次が目次として働いていなかった。
+   */
+  useEffect(() => {
+    const index = pendingOutlineRef.current;
+    const article = articleRef.current;
+    if (index === null || !article || !contentReady) return;
+    pendingOutlineRef.current = null;
+    const heading = article.querySelectorAll<HTMLElement>("h2")[index];
+    if (heading) scrollElementIntoView(heading, { block: "start", inline: "start", behavior: "auto" });
+  }, [contentReady, preparedHtml, sourcePage]);
+
   // Restoring is declared before persisting on purpose. Effects run in
   // declaration order, so persisting first would write the not-yet-restored
   // scrollTop of 0 over the stored position and lose the reader's place.
@@ -542,6 +619,9 @@ export default function ReaderPage() {
     // 縦書きで、桁の組み上がりを待つための控え。
     let lastLength = -1;
     const deadline = performance.now() + 2000;
+    // 組み方を変えたあとの px は当てにしない。縦書きの「読み進んだ量」は
+    // 横書きのそれと別の軸で測ったもので、そのまま使うと見当違いの場所へ着く。
+    const sameMode = (saved?.mode ?? "horizontal") === (vertical ? "vertical" : "horizontal");
     const attempt = () => {
       if (cancelled) return;
       // 行の目印があればそれで戻す。文字の大きさを変えていても同じ行へ着く。
@@ -552,16 +632,16 @@ export default function ReaderPage() {
         return;
       }
       if (vertical) {
-        // 縦書きは右端が本の先頭。px で憶えた位置は縦のものなので当てにせず、
-        // 行の目印が無いときは先頭から読み直してもらう。
-        //
-        // 桁がまだ組み上がっていない最初のフレームでは横幅が窓と同じで、
-        // 「先頭」も 0 になってしまう。**幅が二フレーム続けて変わらなく
-        // なるまで**待つ ―― 一度で諦めていたころは、縦書きで開くと本の
-        // 最後のページが出ていた。
+        // 縦書きは右端が本の先頭。桁がまだ組み上がっていない最初のフレームでは
+        // 横幅が窓と同じで、「先頭」も 0 になってしまう。**幅が二フレーム続けて
+        // 変わらなくなるまで**待つ ―― 一度で諦めていたころは、縦書きで開くと
+        // 本の最後のページが出ていた。
         const length = flowLength(viewport, true);
-        scrollToStart(viewport, true, false);
-        if ((length === lastLength && flowOffset(viewport, true) < 2) || performance.now() >= deadline) {
+        if (sameMode && savedTop > 0) scrollToFlowOffset(viewport, true, savedTop);
+        else scrollToStart(viewport, true, false);
+        const settled = length === lastLength
+          && Math.abs(flowOffset(viewport, true) - (sameMode ? Math.min(savedTop, length) : 0)) < 2;
+        if (settled || performance.now() >= deadline) {
           restoredKeyRef.current = positionKey;
           return;
         }
@@ -569,8 +649,8 @@ export default function ReaderPage() {
         frame = requestAnimationFrame(attempt);
         return;
       }
-      viewport.scrollTop = savedTop;
-      if (Math.abs(viewport.scrollTop - savedTop) < 2 || performance.now() >= deadline) {
+      viewport.scrollTop = sameMode ? savedTop : 0;
+      if (Math.abs(viewport.scrollTop - (sameMode ? savedTop : 0)) < 2 || performance.now() >= deadline) {
         restoredKeyRef.current = positionKey;
         return;
       }
@@ -595,8 +675,8 @@ export default function ReaderPage() {
         pendingBookmarkRef.current = null;
         return;
       }
-      viewport.scrollTop = pending.top;
-      if (Math.abs(viewport.scrollTop - pending.top) < 2 || performance.now() >= deadline) {
+      scrollToFlowOffset(viewport, vertical, pending.top);
+      if (Math.abs(flowOffset(viewport, vertical) - pending.top) < 2 || performance.now() >= deadline) {
         pendingBookmarkRef.current = null;
         return;
       }
@@ -604,7 +684,7 @@ export default function ReaderPage() {
     };
     frame = requestAnimationFrame(apply);
     return () => { cancelled = true; cancelAnimationFrame(frame); };
-  }, [contentQuery.data?.page, contentReady, sourcePage]);
+  }, [contentQuery.data?.page, contentReady, sourcePage, vertical]);
   useEffect(() => {
     const viewport = scrollRef.current;
     if (!viewport || !contentReady) return;
@@ -620,9 +700,21 @@ export default function ReaderPage() {
       if (pendingTop === null) return;
       // 行の目印は書き込むときにだけ数える。スクロールのたびに数えていては、
       // 行の多い本で指を滑らせている間じゅう本文を走査することになる。
+      // 最後のページを読み切ったら、読みかけの棚から降ろす。降ろす口が
+      // 「作品を消したとき」しか無かったので、読み終えた本も棚に積まれ続けていた。
+      if (sourcePage >= pageCount && atFlowEdge(viewport, vertical, 1)) {
+        clearReadingPosition(id, version);
+        pendingTop = null;
+        return;
+      }
       const article = articleRef.current;
-      const anchor = article ? currentAnchor(viewport, article) : null;
-      writeReadingPosition(id, version, { page: sourcePage, top: pendingTop, ...(anchor === null ? {} : { anchor }) });
+      const anchor = article ? currentAnchor(viewport, article, vertical) : null;
+      writeReadingPosition(id, version, {
+        page: sourcePage,
+        top: pendingTop,
+        mode: vertical ? "vertical" : "horizontal",
+        ...(anchor === null ? {} : { anchor }),
+      });
       pendingTop = null;
     };
     const update = (event?: Event) => {
@@ -635,7 +727,9 @@ export default function ReaderPage() {
       // before the saved offset has been applied, so persisting there would
       // overwrite the stored place with 0 each time the reader opens.
       if (!event || restoredKeyRef.current !== positionKey) return;
-      pendingTop = viewport.scrollTop;
+      // 縦書きの `scrollTop` は常に 0 なので、そのまま憶えると「先頭」しか
+      // 記録されない。読み始めからの距離で憶える。
+      pendingTop = flowOffset(viewport, vertical);
       if (saveTimer === null) saveTimer = window.setTimeout(flush, 400);
     };
     viewport.addEventListener("scroll", update, { passive: true });
@@ -646,12 +740,19 @@ export default function ReaderPage() {
       flush();
     };
   }, [contentReady, hasSourcePages, id, positionKey, sourcePage, pageCount, version, vertical]);
+  // 手元にある作品・作者を指すリンクに印を付ける。押す前に、それがこの道具の
+  // 中の場所だと分かる。
+  useLibraryLinkMarks(articleRef, preparedHtml);
 
   if (metadataQuery.isLoading || contentQuery.isLoading) return <div className="page"><LoadingState label="リーダーを準備しています" /></div>;
   if (metadataQuery.error || contentQuery.error || !metadataQuery.data || !contentQuery.data) return <div className="page"><ErrorState error={metadataQuery.error ?? contentQuery.error ?? "作品が見つかりません"} retry={() => { metadataQuery.refetch(); contentQuery.refetch(); }} /></div>;
   const doc = metadataQuery.data;
   const work = doc.download;
   const currentVersion = version ?? work.currentVersion;
+  // 反映中の編集が、いま手元にある版より古い本文の上に載っているか。
+  const staleEditBase = doc.activeEditRevision && doc.activeEditRevision.baseVersion < work.currentVersion
+    ? doc.activeEditRevision.baseVersion
+    : null;
   const openSource = async () => {
     const url = sourceUrl(work.source, work.sourceId, work.contentType, work.personId || work.authorId);
     if (!url) return;
@@ -695,24 +796,36 @@ export default function ReaderPage() {
     // 送り先が決まっていないときだけ、新しいページの先頭から読み始める。
     // ここで直に動かしていたころは、まだ届いていないページの寸法に対して
     // 動かしていたので、縦書きでは着く場所が定まらなかった。
-    if (pendingBookmarkRef.current === null && pendingHitRef.current === null) pendingPageStartRef.current = true;
+    if (pendingBookmarkRef.current === null && pendingHitRef.current === null && pendingOutlineRef.current === null) pendingPageStartRef.current = true;
     setSourcePage(next);
+  };
+  /** 目次の項目へ。同じページなら、その場でその見出しまで寄せる。 */
+  const goToOutline = (entry: { page: number; index: number }) => {
+    if (entry.page === sourcePage && contentReady) {
+      const heading = articleRef.current?.querySelectorAll<HTMLElement>("h2")[entry.index];
+      if (heading) scrollElementIntoView(heading, { block: "start", inline: "start", behavior: "smooth" });
+      return;
+    }
+    pendingOutlineRef.current = entry.index;
+    goToSourcePage(entry.page);
   };
   goToPageRef.current = goToSourcePage;
   const addBookmarkHere = () => {
     if (!contentReady) return;
     const viewport = scrollRef.current;
     const article = articleRef.current;
-    const top = Math.round(viewport?.scrollTop ?? 0);
+    // 読み始めからの距離で測る。`scrollTop` は縦書きでは常に 0 なので、
+    // どこに挟んでも「0%」のしおりばかりが並んでいた。
+    const top = viewport ? Math.round(flowOffset(viewport, vertical)) : 0;
     // Measured here rather than read from the progress state, which only
     // catches up on the next scroll event.
-    const scrollable = (viewport?.scrollHeight ?? 0) - (viewport?.clientHeight ?? 0);
+    const scrollable = viewport ? flowLength(viewport, vertical) : 0;
     const percent = scrollable > 0 ? Math.round(top / scrollable * 100) : 0;
     const label = `${hasSourcePages ? `${sourcePage}ページ · ` : ""}${percent}%`;
-    const anchor = viewport && article ? currentAnchor(viewport, article) : null;
+    const anchor = viewport && article ? currentAnchor(viewport, article, vertical) : null;
     // 番号と割合だけでは、どのしおりがどれだか分からない。挟んだところの
     // 書き出しを一緒に憶えておく。
-    const excerpt = excerptAt(viewport, article);
+    const excerpt = excerptAt(viewport, article, vertical);
     addBookmark({ page: sourcePage, top, label, ...(anchor === null ? {} : { anchor }), ...(excerpt ? { excerpt } : {}) });
     notifications.show({ color: "piep", message: `しおりを挟みました（${label}）` });
   };
@@ -722,7 +835,7 @@ export default function ReaderPage() {
       const viewport = scrollRef.current;
       const article = articleRef.current;
       if (bookmark.anchor !== undefined && viewport && article && scrollToAnchor(viewport, article, bookmark.anchor)) return;
-      viewport?.scrollTo({ top: bookmark.top, behavior: "smooth" });
+      if (viewport) scrollToFlowOffset(viewport, vertical, bookmark.top);
       return;
     }
     // Keep the target until the requested page has actually replaced the
@@ -742,15 +855,24 @@ export default function ReaderPage() {
       goToSourcePage(page);
     }
   };
-  const stepHit = (delta: number) => {
-    if (hitCount === 0) return;
+  /** その向きに、まだ一致の残っているページがあるか。 */
+  const nextHitPage = (delta: number): number | undefined => delta > 0
+    ? markedPages.find((page) => page > sourcePage)
+    : [...markedPages].reverse().find((page) => page < sourcePage);
+  const canStepHit = (delta: number) => {
     const next = hitIndex + delta;
-    if (next >= 0 && next < hitCount) { setHitIndex(next); return; }
-    // ページの端まで来たら、隣のページの端から続ける。
-    const wrapPage = next < 0 ? sourcePage - 1 : sourcePage + 1;
-    if (wrapPage < 1 || wrapPage > pageCount) return;
-    pendingHitRef.current = next < 0 ? -1 : 0;
-    goToSourcePage(wrapPage);
+    if (hitCount > 0 && next >= 0 && next < hitCount) return true;
+    return nextHitPage(delta) !== undefined;
+  };
+  const stepHit = (delta: number) => {
+    const next = hitIndex + delta;
+    if (hitCount > 0 && next >= 0 && next < hitCount) { setHitIndex(next); return; }
+    // このページの端まで来たら、次に一致のあるページまで送る。**隣**ではなく
+    // 次の当たりまで。隣に一致が無いだけで行き止まりになっていた。
+    const target = nextHitPage(delta);
+    if (target === undefined) return;
+    pendingHitRef.current = delta > 0 ? 0 : -1;
+    goToSourcePage(target);
   };
 
   return (
@@ -765,7 +887,13 @@ export default function ReaderPage() {
             <Text size="sm" fw={700} className="line-clamp-1">{work.title}</Text>
           </Group>
           <Group gap="xs" wrap="nowrap">
-            {doc.isEdited && <Badge color="gray" variant="light" visibleFrom="sm">ローカル編集</Badge>}
+            {/* 編集版が古い版の上に載っているときは、そう名乗る。取り込み直した
+                本文があるのに、読み手にはそれが見えないままだった。 */}
+            {doc.isEdited && (staleEditBase === null
+              ? <Badge color="gray" variant="light" visibleFrom="sm">ローカル編集</Badge>
+              : <Tooltip label={`この編集版は v${staleEditBase} の本文をもとにしています。取り込み済みの v${work.currentVersion} は表示されていません。`}>
+                  <Badge color="yellow" variant="light" visibleFrom="sm">ローカル編集（v{staleEditBase}基準）</Badge>
+                </Tooltip>)}
             <BookmarkControls
               bookmarks={bookmarks}
               addDisabled={!contentReady}
@@ -797,7 +925,16 @@ export default function ReaderPage() {
         <Progress value={progress} h={2} radius={0} aria-label={`読書進捗 ${Math.round(progress)}%`} />
       </header>
 
-      <ScrollArea className="reader-scroll" viewportRef={scrollRef} type="auto" scrollbarSize={8}>
+      {/* 本文の器そのものに焦点を持たせる。焦点が外側の `main` に載っていた
+          ころは、矢印も Space も PageDown も本文を1行も動かさなかった ――
+          鍵盤だけで読む人には、そもそも読めない画面だった。 */}
+      <ScrollArea
+        className="reader-scroll"
+        viewportRef={scrollRef}
+        type="auto"
+        scrollbarSize={8}
+        viewportProps={{ tabIndex: 0, role: "region", "aria-label": "本文" }}
+      >
         <Box className="reader-stage">
           <Box
             className="reader-paper"
@@ -826,6 +963,12 @@ export default function ReaderPage() {
               </Box>}
               {sourcePage === 1 && <Divider my="xl" />}
               <article ref={articleRef} className="reader-content" onClick={handleArticleClick} dangerouslySetInnerHTML={{ __html: preparedHtml }} />
+              {/* 本文の終わりに、まだ続きがあることを置く。転送のために割った
+                  だけの切れ目なので、何も無いと作品が終わったように見える。 */}
+              {sourcePage < pageCount && <Box className="reader-continue">
+                <Text size="sm" c="dimmed">{sourcePage} / {pageCount} ページ</Text>
+                <Button variant="light" rightSection={<Icons.next size={IconSize.menu} />} onClick={() => goToSourcePage(sourcePage + 1)}>次のページを読む</Button>
+              </Box>}
               {sourcePage === pageCount && <Box className="reader-finish"><Icons.read size={IconSize.hero} /><Text fw={700}>読了</Text>{sequenceContextLimited && <Alert color="yellow" mt="md" maw={620}>作品数が非常に多いため、前後の作品を特定できない並びがあります。作品詳細からシリーズまたは作者一覧を開いてください。</Alert>}{readingContexts.length > 0 && <Stack gap="sm" w="100%" maw={620} mt="md">{readingContexts.map((context) => <ReadingContextCard key={context.key} context={context} onOpen={navigate} />)}</Stack>}<Button variant="light" mt="md" onClick={() => returnTo(`/works/${work.id}`)}>作品詳細へ戻る</Button></Box>}
             </>}
           </Box>
@@ -855,9 +998,9 @@ export default function ReaderPage() {
       {markedTerm && <Paper className="reader-hit-bar" shadow="lg" withBorder radius="md" p={5} aria-label="本文内検索の移動">
         <Group gap={6} wrap="nowrap">
           <Text size="xs" fw={700} px={4} className="line-clamp-1" maw={160}>{markedTerm}</Text>
-          <Text size="xs" c="dimmed">{hitCount ? `${hitIndex + 1} / ${hitCount}` : "このページには無し"}</Text>
-          <ActionIcon variant="subtle" color="gray" size="sm" aria-label="前の一致へ" disabled={!hitCount} onClick={() => stepHit(-1)}><Icons.up size={IconSize.menu} /></ActionIcon>
-          <ActionIcon variant="subtle" color="gray" size="sm" aria-label="次の一致へ" disabled={!hitCount} onClick={() => stepHit(1)}><Icons.down size={IconSize.menu} /></ActionIcon>
+          <Text size="xs" c="dimmed">{hitCount ? `${hitIndex + 1} / ${hitCount}` : markedPages.length ? `このページには無し（他${markedPages.length}ページ）` : "一致なし"}</Text>
+          <ActionIcon variant="subtle" color="gray" size="sm" aria-label="前の一致へ" disabled={!canStepHit(-1)} onClick={() => stepHit(-1)}><Icons.up size={IconSize.menu} /></ActionIcon>
+          <ActionIcon variant="subtle" color="gray" size="sm" aria-label="次の一致へ" disabled={!canStepHit(1)} onClick={() => stepHit(1)}><Icons.down size={IconSize.menu} /></ActionIcon>
           <Divider orientation="vertical" h={20} />
           <ActionIcon variant="subtle" color="gray" size="sm" aria-label="印を消す" onClick={() => setMarkedTerm("")}><Icons.cancel size={IconSize.menu} /></ActionIcon>
         </Group>
@@ -870,7 +1013,7 @@ export default function ReaderPage() {
       <Drawer opened={outlineOpened} onClose={outlineDrawer.close} position="left" title="目次" size={340}>
         {outlineQuery.isLoading ? <LoadingState label="目次を読み込んでいます" /> : !outlineQuery.data?.length ? <Alert color="gray">この作品には見出しがありません。</Alert> : <Stack gap={2}>
           {outlineQuery.data.map((entry) => (
-            <Button key={`${entry.page}-${entry.index}-${entry.title}`} variant={entry.page === sourcePage ? "light" : "subtle"} color="gray" size="compact-sm" h="auto" py={8} justify="flex-start" onClick={() => { goToSourcePage(entry.page); outlineDrawer.close(); }}>
+            <Button key={`${entry.page}-${entry.index}-${entry.title}`} variant={entry.page === sourcePage ? "light" : "subtle"} color="gray" size="compact-sm" h="auto" py={8} justify="flex-start" onClick={() => { goToOutline(entry); outlineDrawer.close(); }}>
               <Stack gap={2} align="flex-start"><Text size="sm" ta="left" lineClamp={2}>{entry.title}</Text>{hasSourcePages && <Text size="xs" c="dimmed">{entry.page}ページ</Text>}</Stack>
             </Button>
           ))}

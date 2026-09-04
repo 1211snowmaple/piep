@@ -2453,6 +2453,11 @@ pub async fn db_save_work_draft(
 }
 
 #[tauri::command]
+pub async fn db_discard_work_draft(app: tauri::AppHandle, download_id: i64) -> Result<(), String> {
+    run_library_write_blocking(app, move |state| state.db.discard_work_draft(download_id)).await
+}
+
+#[tauri::command]
 pub async fn db_activate_work_edit(
     app: tauri::AppHandle,
     edit_revision_id: i64,

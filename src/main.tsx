@@ -25,7 +25,7 @@ createRoot(container).render(
       <QueryClientProvider client={queryClient}>
         <ModalsProvider labels={{ confirm: "実行", cancel: "キャンセル" }}>
           <App />
-          <Notifications position="bottom-right" containerWidth={360} notificationMaxHeight="min(220px, calc(100dvh - 32px))" limit={3} zIndex={3000} />
+          <Notifications position="top-right" containerWidth={360} notificationMaxHeight="min(220px, calc(100dvh - 32px))" limit={3} zIndex={3000} />
         </ModalsProvider>
       </QueryClientProvider>
     </MantineProvider>

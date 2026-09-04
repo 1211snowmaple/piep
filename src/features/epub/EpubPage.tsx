@@ -44,59 +44,9 @@ import type { DownloadEntry } from "@/types/library";
 import type { ExportBatchResult, ExportProgress, TemplateInfo } from "@/types/epub";
 import { startOperation, type OperationController } from "@/features/jobs/operationJobs";
 import { demoTemplates } from "./templateStudioDemo";
+import { AUTO_TEMPLATE, readExportSettings, toCompressOptions, writeExportSettings, type EpubExportSettings } from "./exportSettings";
 
-/** Picks the template that claims each work's source, per work. */
-const AUTO_TEMPLATE = "__auto__";
-
-interface EpubValues {
-  templateName: string;
-  outputDir: string;
-  compression: {
-    enabled: boolean;
-    maxWidth: number | string;
-    maxHeight: number | string;
-    outputFormat: string | null;
-    jpegQuality: number;
-    jpegProgressive: boolean;
-    jpegChromaSubsampling: string;
-    jpegAutoOptimize: boolean;
-    jpegDeringing: boolean;
-    jpegSeparateChromaTables: boolean;
-    jpegSharpYuv: boolean;
-    pngCompression: string;
-    pngInterlace: boolean;
-    pngStrip: boolean;
-    pngOptimizeAlpha: boolean;
-    pngBitDepthReduction: boolean;
-    pngColorTypeReduction: boolean;
-    pngPaletteReduction: boolean;
-    pngGrayscaleReduction: boolean;
-    pngIdatRecoding: boolean;
-    pngFastEvaluation: boolean;
-    pngForce: boolean;
-    pngFixErrors: boolean;
-    webpQuality: number;
-    webpLossless: boolean;
-    webpMethod: number;
-    webpFilterStrength: number;
-    webpFilterSharpness: number;
-    webpFilterType: number;
-    webpSnsStrength: number;
-    webpNearLossless: number;
-    webpExact: boolean;
-    webpUseSharpYuv: boolean;
-  };
-}
-
-const initialValues: EpubValues = {
-  templateName: AUTO_TEMPLATE, outputDir: "",
-  compression: {
-    enabled: true, maxWidth: 2000, maxHeight: 2000, outputFormat: null,
-    jpegQuality: 85, jpegProgressive: true, jpegChromaSubsampling: "4:2:0", jpegAutoOptimize: false, jpegDeringing: true, jpegSeparateChromaTables: true, jpegSharpYuv: false,
-    pngCompression: "2", pngInterlace: false, pngStrip: true, pngOptimizeAlpha: false, pngBitDepthReduction: true, pngColorTypeReduction: true, pngPaletteReduction: true, pngGrayscaleReduction: true, pngIdatRecoding: true, pngFastEvaluation: false, pngForce: false, pngFixErrors: true,
-    webpQuality: 78, webpLossless: false, webpMethod: 4, webpFilterStrength: 60, webpFilterSharpness: 0, webpFilterType: 1, webpSnsStrength: 50, webpNearLossless: 100, webpExact: false, webpUseSharpYuv: false,
-  },
-};
+type EpubValues = EpubExportSettings;
 
 export default function EpubPage() {
   const navigate = useAppNavigate();
@@ -106,7 +56,9 @@ export default function EpubPage() {
   const [result, setResult] = useState<ExportBatchResult | null>(null);
   const exportOperationRef = useRef<OperationController | null>(null);
   const retryExportRef = useRef<(values: EpubValues) => void>(() => undefined);
-  const form = useForm<EpubValues>({ initialValues, validate: { templateName: isNotEmpty("テンプレートを選択してください"), outputDir: isNotEmpty("出力先を選択してください") }, validateInputOnBlur: true });
+  // 前に書き出したときの決めごとから始める。開くたびに初期値へ戻り、出力先
+  // フォルダーまで毎回選び直しだった。
+  const form = useForm<EpubValues>({ initialValues: readExportSettings(), validate: { templateName: isNotEmpty("テンプレートを選択してください"), outputDir: isNotEmpty("出力先を選択してください") }, validateInputOnBlur: true });
   // One request for the whole queue: a per-work query meant a queue of a few
   // hundred books fired that many IPC round trips on every visit.
   const queueQuery = useQuery({
@@ -154,15 +106,12 @@ export default function EpubPage() {
         await new Promise((resolve) => window.setTimeout(resolve, 500));
         return { successCount: works.length, failedCount: 0, failedIds: [], invalidIds: [], outputFiles: works.map((work) => `${values.outputDir}/${work.title}.epub`), invalidCount: 0, issues: [], canceled: false, skippedIds: [] };
       }
-      const c = values.compression;
       return exportEpubBatch<ExportBatchResult>({
-        downloadIds: works.map((work) => work.id), templateName: values.templateName, outputDir: values.outputDir,
-        compressOptions: {
-          enabled: c.enabled, maxWidth: typeof c.maxWidth === "number" ? c.maxWidth : null, maxHeight: typeof c.maxHeight === "number" ? c.maxHeight : null, outputFormat: c.outputFormat,
-          jpegQuality: c.jpegQuality, jpegProgressive: c.jpegProgressive, jpegChromaSubsampling: c.jpegChromaSubsampling, jpegAutoOptimize: c.jpegAutoOptimize, jpegDeringing: c.jpegDeringing, jpegSeparateChromaTables: c.jpegSeparateChromaTables, jpegSharpYuv: c.jpegSharpYuv,
-          pngCompression: c.pngCompression, pngInterlace: c.pngInterlace, pngStrip: c.pngStrip, pngOptimizeAlpha: c.pngOptimizeAlpha, pngBitDepthReduction: c.pngBitDepthReduction, pngColorTypeReduction: c.pngColorTypeReduction, pngPaletteReduction: c.pngPaletteReduction, pngGrayscaleReduction: c.pngGrayscaleReduction, pngIdatRecoding: c.pngIdatRecoding, pngFastEvaluation: c.pngFastEvaluation, pngForce: c.pngForce, pngFixErrors: c.pngFixErrors,
-          webpQuality: c.webpQuality, webpLossless: c.webpLossless, webpMethod: c.webpMethod, webpFilterStrength: c.webpFilterStrength, webpFilterSharpness: c.webpFilterSharpness, webpFilterType: c.webpFilterType, webpSnsStrength: c.webpSnsStrength, webpNearLossless: c.webpNearLossless, webpExact: c.webpExact, webpUseSharpYuv: c.webpUseSharpYuv,
-        },
+        downloadIds: works.map((work) => work.id),
+        templateName: values.templateName,
+        outputDir: values.outputDir,
+        writingMode: values.writingMode,
+        compressOptions: toCompressOptions(values.compression),
       });
     },
     onSuccess: (data) => {
@@ -191,7 +140,10 @@ export default function EpubPage() {
   const selectOutput = async () => {
     if (!runtime) return form.setFieldValue("outputDir", "C:/Users/preview/Documents/piep exports");
     const path = await openSingleDialog({ directory: true, title: "EPUBの出力先" });
-    if (path) form.setFieldValue("outputDir", path);
+    if (!path) return;
+    form.setFieldValue("outputDir", path);
+    // 選んだ先はその場で憶える。書き出す前に画面を離れても、次は選び直さずに済む。
+    writeExportSettings({ ...form.getValues(), outputDir: path });
   };
   const totalSize = useMemo(() => works.reduce((sum, work) => sum + work.fileSizeBytes, 0), [works]);
   const templateOptions = useMemo(() => [
@@ -203,7 +155,7 @@ export default function EpubPage() {
     <div className="page page--contained epub-page">
       <PageHeader title="EPUB書き出し" description="選んだ作品を、端末に合わせた高品質な電子書籍へ書き出します。" actions={<Button variant="default" leftSection={<Icons.epubTemplate size={IconSize.menu} />} onClick={() => navigate("/epub/templates")}>テンプレートスタジオ</Button>} />
       {!epubQueue.length ? <EmptyState icon={Icons.epub} title="EPUBキューは空です" description="ライブラリや作品詳細から、書き出したい作品をキューに追加してください。" action={<Button onClick={() => navigate("/library")}>ライブラリを開く</Button>} /> : (
-        <form onSubmit={form.onSubmit((values) => exportMutation.mutate(values))}>
+        <form onSubmit={form.onSubmit((values) => { writeExportSettings(values); exportMutation.mutate(values); })}>
           <Grid gap="lg" align="flex-start">
             <Grid.Col span={{ base: 12, lg: 7 }}>
               <Stack gap="lg">
@@ -222,6 +174,21 @@ export default function EpubPage() {
                   {/* The icon sits inside the input, so its click also bubbles
                       to the field handler and opened two pickers in a row. */}
                   <TextInput label="出力先フォルダー" placeholder="フォルダーを選択" readOnly {...form.getInputProps("outputDir")} rightSection={<ActionIcon variant="subtle" aria-label="出力先を選択" onClick={(event) => { event.stopPropagation(); selectOutput(); }}><Icons.openFolder size={IconSize.action} /></ActionIcon>} onClick={selectOutput} />
+                  {/* 読む画面には縦書きがあるのに、書き出す本は必ず横書きだった。
+                      テンプレートを自分で作らないかぎり縦組みにできない、という
+                      のは、日本語の小説を持ち出す道具として通らない。 */}
+                  <Box>
+                    <Text size="sm" fw={500} mb={6}>組み方</Text>
+                    <SegmentedControl
+                      fullWidth
+                      size="xs"
+                      aria-label="EPUBの組み方"
+                      value={form.values.writingMode ?? "template"}
+                      onChange={(value) => form.setFieldValue("writingMode", value === "template" ? null : value as "vertical" | "horizontal")}
+                      data={[{ value: "template", label: "テンプレートに従う" }, { value: "vertical", label: "縦書き" }, { value: "horizontal", label: "横書き" }]}
+                    />
+                    <Text size="xs" c="dimmed" mt={6}>標準のテンプレートは横書きです。縦書きを選んだときだけ、綴じ方向も右から左になります。</Text>
+                  </Box>
                   <Alert color="piep" icon={<Icons.epubImages size={IconSize.action} />}>{form.values.compression.enabled ? `画像を最大 ${form.values.compression.maxWidth} × ${form.values.compression.maxHeight}px に最適化します。` : "画像は元の品質のまま収録します。"}</Alert>
                   {progress && <Stack gap={6} role="status" aria-live="polite"><Group justify="space-between"><Text size="sm" className="line-clamp-1">{progress.currentTitle || progress.message}</Text><Text size="xs" c="dimmed">{progress.currentIndex}/{progress.totalCount}</Text></Group><Progress value={progress.totalCount ? progress.currentIndex / progress.totalCount * 100 : 5} animated aria-label={`EPUB書き出し ${progress.currentIndex}/${progress.totalCount}`} /><Text size="xs" c="dimmed">{progress.message}</Text></Stack>}
                   {result && <ExportResult result={result} outputDir={form.values.outputDir} runtime={runtime} />}

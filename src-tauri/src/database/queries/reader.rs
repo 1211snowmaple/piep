@@ -506,8 +506,12 @@ impl Database {
                     params![revision_id, base_version, content_hash, now, title],
                 )
                 .map_err(|e| format!("Failed to update the draft revision: {}", e))?;
+                // 表の名前は `work_edit_blocks`。`work_blocks` を消そうとして
+                // いたので、**二度目からの下書き保存が毎回失敗していた** ――
+                // 自動保存は同じ1本を書き換え続ける作りなので、最初の一回より
+                // あとに書いたものは、どこにも残らなかった。
                 tx.execute(
-                    "DELETE FROM work_blocks WHERE edit_revision_id = ?1",
+                    "DELETE FROM work_edit_blocks WHERE edit_revision_id = ?1",
                     params![revision_id],
                 )
                 .map_err(|e| format!("Failed to clear the draft blocks: {}", e))?;
@@ -530,6 +534,33 @@ impl Database {
             .map_err(|e| format!("Editor transaction commit failed: {}", e))?;
 
         get_work_edit_revision_locked(&conn, revision_id)
+    }
+
+    /// 書きかけを捨てて、取り込んだままの本文（反映中ならその版）へ戻す。
+    ///
+    /// 捨てる口がどこにも無かった。自動保存は触りはじめて6秒で下書きを作るので、
+    /// 一度でも編集画面を開いて何か触れば、**そこから先はいつ開いても書きかけが
+    /// 出てくる**。元の本文に戻る道は、手で全部打ち直すことしかなかった。
+    pub fn discard_work_draft(&self, download_id: i64) -> Result<(), String> {
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| format!("Editor transaction begin failed: {}", e))?;
+        tx.execute(
+            "DELETE FROM work_edit_blocks
+             WHERE edit_revision_id IN (
+                 SELECT id FROM work_edit_revisions WHERE download_id = ?1 AND status = 'draft'
+             )",
+            params![download_id],
+        )
+        .map_err(|e| format!("Failed to clear the draft blocks: {}", e))?;
+        tx.execute(
+            "DELETE FROM work_edit_revisions WHERE download_id = ?1 AND status = 'draft'",
+            params![download_id],
+        )
+        .map_err(|e| format!("Failed to delete the draft revision: {}", e))?;
+        tx.commit()
+            .map_err(|e| format!("Editor transaction commit failed: {}", e))
     }
 
     pub fn activate_work_edit(&self, edit_revision_id: i64) -> Result<WorkEditRevision, String> {

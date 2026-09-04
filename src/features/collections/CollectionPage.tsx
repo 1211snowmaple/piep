@@ -44,6 +44,7 @@ import { isTauriRuntime } from "@/services/dbApi";
 import { getDemoCollection } from "@/mocks/demoData";
 import { openSingleDialog } from "@/services/dialogApi";
 import { exportCollectionEpub } from "@/services/epubApi";
+import { readExportSettings, toCompressOptions } from "@/features/epub/exportSettings";
 import type { WorkCollection, WorkCollectionMember, WorkKey } from "@/types/collections";
 import type { DownloadEntry } from "@/types/library";
 import { CollectionAddWorksModal } from "./CollectionAddWorksModal";
@@ -291,7 +292,10 @@ function CollectionDetail({ collection, readOnly, onEdit, onChanged }: { collect
     mutationFn: async (skipMissing: boolean) => {
       const outputDir = await openSingleDialog({ directory: true, title: "一冊にまとめたEPUBの出力先" });
       if (!outputDir) return null;
-      return exportCollectionEpub(collection.id, "__auto__", outputDir, skipMissing);
+      // 画像最適化と組み方は、EPUB画面で決めたものをそのまま使う。ここだけ
+      // 渡す口が塞がっていたので、**いちばん大きくなる本だけが無圧縮**だった。
+      const settings = readExportSettings();
+      return exportCollectionEpub(collection.id, "__auto__", outputDir, skipMissing, toCompressOptions(settings.compression), settings.writingMode);
     },
     onSuccess: (path) => { if (path) notifications.show({ color: "green", title: "一冊のEPUBを書き出しました", message: path }); },
     onError: (error) => notifications.show({ color: "red", title: "EPUBを書き出せません", message: errorMessage(error) }),

@@ -99,12 +99,27 @@ describe("collectionApi", () => {
     invoke.mockResolvedValue("C:/out/collection.epub");
     await exportCollectionEpub("collection-1", "__auto__", "C:/out");
     expect(invoke).toHaveBeenLastCalledWith("export_collection_epub", {
-      collectionId: "collection-1", templateName: "__auto__", outputDir: "C:/out", compressOptions: null, skipMissing: false,
+      collectionId: "collection-1", templateName: "__auto__", outputDir: "C:/out", compressOptions: null, skipMissing: false, writingMode: null,
     });
 
     await exportCollectionEpub("collection-1", "__auto__", "C:/out", true);
     expect(invoke).toHaveBeenLastCalledWith("export_collection_epub", {
-      collectionId: "collection-1", templateName: "__auto__", outputDir: "C:/out", compressOptions: null, skipMissing: true,
+      collectionId: "collection-1", templateName: "__auto__", outputDir: "C:/out", compressOptions: null, skipMissing: true, writingMode: null,
+    });
+  });
+
+  /** 画像最適化と組み方を渡す口が塞がっていたころは、シリーズを束ねた
+   *  いちばん大きい本だけが無圧縮・横書きで出ていた。 */
+  it("carries the image and writing-mode choices into the collection EPUB export", async () => {
+    invoke.mockResolvedValue("C:/out/collection.epub");
+    await exportCollectionEpub("collection-1", "__auto__", "C:/out", true, { enabled: true, webpQuality: 78 }, "vertical");
+    expect(invoke).toHaveBeenLastCalledWith("export_collection_epub", {
+      collectionId: "collection-1",
+      templateName: "__auto__",
+      outputDir: "C:/out",
+      compressOptions: { enabled: true, webpQuality: 78 },
+      skipMissing: true,
+      writingMode: "vertical",
     });
   });
 });

@@ -10,6 +10,21 @@ use std::io::Cursor;
 use std::path::Path;
 use zenjpeg::encoder::{ChromaSubsampling, EncoderConfig, PixelLayout, Unstoppable};
 
+/// ファイルの中身から media-type を見分ける。
+///
+/// 見分けられなければ `None` を返し、呼び手が拡張子に頼る。SVG は中身が
+/// テキストなので `image` crate では見分けられず、拡張子のままでよい。
+fn sniff_image_mime(path: &Path) -> Option<&'static str> {
+    let format = ImageReader::open(path).ok()?.with_guessed_format().ok()?.format()?;
+    match format {
+        ImageFormat::Jpeg => Some("image/jpeg"),
+        ImageFormat::Png => Some("image/png"),
+        ImageFormat::WebP => Some("image/webp"),
+        ImageFormat::Gif => Some("image/gif"),
+        _ => None,
+    }
+}
+
 /// 画像を圧縮・リサイズし、バイト列として返す。
 pub fn process_image(
     input_path: &Path,
@@ -20,7 +35,7 @@ pub fn process_image(
         .and_then(|e| e.to_str())
         .unwrap_or("")
         .to_lowercase();
-    let original_mime = match ext.as_str() {
+    let by_extension = match ext.as_str() {
         "jpg" | "jpeg" => "image/jpeg",
         "png" => "image/png",
         "webp" => "image/webp",
@@ -30,6 +45,10 @@ pub fn process_image(
         "svg" => "image/svg+xml",
         _ => "application/octet-stream",
     };
+    // **中身を見て決める。** 拡張子だけで media-type を名乗ると、名前を
+    // 付け替えただけのファイルで「宣言と中身が食い違う本」ができる。取得元の
+    // 画像は URL から名前を作っているので、この食い違いは実際に起こりうる。
+    let original_mime = sniff_image_mime(input_path).unwrap_or(by_extension);
     // **知らない形式を `application/octet-stream` のまま本に入れない。**
     // OPF の media-type がこれだと `<img>` の参照先として無効で、EPUBCheck も
     // 多くのリーダーも受け付けない。0バイトや壊れたファイルも、ここまで一度も
@@ -51,8 +70,11 @@ pub fn process_image(
         return Ok((original_bytes, original_mime.to_string()));
     }
 
-    // デコード
+    // デコード。読み手（デコーダ）も中身から選ぶ ―― 拡張子で選んでいたころは、
+    // 名前と中身の違うファイルがそこで落ちて、挿絵が黙って消えていた。
     let img = ImageReader::open(input_path)
+        .map_err(|e| format!("画像デコードエラー: {}", e))?
+        .with_guessed_format()
         .map_err(|e| format!("画像デコードエラー: {}", e))?
         .decode()
         .map_err(|e| format!("画像デコードエラー: {}", e))?;

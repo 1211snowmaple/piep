@@ -230,6 +230,73 @@ struct PartialStats {
 }
 
 #[allow(clippy::too_many_arguments)]
+/// 1つの XHTML に収める本文の上限（バイト）。
+///
+/// 読書画面は同じ本文を 128KB で割って運んでいるのに、本にするときは割らずに
+/// 1枚へ詰めていた。`[newpage]` を一度も使わない長編や、FANBOX の長い投稿は
+/// **全文が1つの XHTML** になる。数十万字の1ファイルは、非力な端末や
+/// Send to Kindle の変換で不利になる。
+const MAX_PAGE_HTML_BYTES: usize = 200 * 1024;
+
+/// 長すぎるページを、要素の切れ目で割る。
+///
+/// 割った続きも元のページ番号を持ったままにする（`part` が枝番）。番号を
+/// 振り直すと、本文に書かれた `[jump:5]` の行き先が軒並みずれる。
+fn split_long_pages(pages: Vec<EpubPage>) -> Vec<EpubPage> {
+    let mut out = Vec::with_capacity(pages.len());
+    for page in pages {
+        if page.html_content.len() <= MAX_PAGE_HTML_BYTES {
+            out.push(page);
+            continue;
+        }
+        let pieces = split_html_at_block_boundaries(&page.html_content, MAX_PAGE_HTML_BYTES);
+        let base_title = page.title.clone();
+        for (index, html) in pieces.into_iter().enumerate() {
+            // 見出しは、その錨（id）が載っている側へ付いていく。
+            let chapters = page
+                .chapters
+                .iter()
+                .filter(|chapter| html.contains(&format!("id=\"{}\"", chapter.id)))
+                .cloned()
+                .collect::<Vec<_>>();
+            let title = match (index, &base_title) {
+                (0, title) => title.clone(),
+                (index, Some(title)) => Some(format!("{title}（続き{index}）")),
+                (index, None) => Some(format!("ページ {}（続き{index}）", page.order)),
+            };
+            out.push(EpubPage {
+                title,
+                html_content: html,
+                order: page.order,
+                chapters,
+                part: index as u32,
+            });
+        }
+    }
+    out
+}
+
+/// 要素の切れ目でだけ割る。タグの途中で割れば、その本は開けなくなる。
+fn split_html_at_block_boundaries(html: &str, limit: usize) -> Vec<String> {
+    let mut pieces = Vec::new();
+    let mut current = String::new();
+    for line in html.split_inclusive('\n') {
+        // 新しい要素が始まる行でだけ割る。`<p>` の中の改行では割らない。
+        let starts_element = line.trim_start().starts_with('<');
+        if starts_element && !current.is_empty() && current.len() + line.len() > limit {
+            pieces.push(std::mem::take(&mut current));
+        }
+        current.push_str(line);
+    }
+    if !current.trim().is_empty() {
+        pieces.push(current);
+    }
+    if pieces.is_empty() {
+        pieces.push(html.to_string());
+    }
+    pieces
+}
+
 fn build_manifest(
     core: EpubCore,
     provider: ProviderData,
@@ -251,6 +318,9 @@ fn build_manifest(
         fee_required: partial.fee_required,
         adult: partial.adult,
     };
+    // 数え上げたあとで割る。「ページ数」は取得元の改ページの数であって、
+    // 転送や描画の都合で割った枚数ではない。
+    let pages = split_long_pages(pages);
     EpubManifest {
         core,
         provider,
@@ -358,6 +428,7 @@ fn convert_pixiv_text_to_pages(text: &str) -> Vec<EpubPage> {
                 html_content: rendered.html,
                 order: (index + 1) as u32,
                 chapters: rendered.chapters,
+                part: 0,
             }
         })
         .collect()
@@ -567,6 +638,7 @@ fn convert_fanbox_body_to_pages(data: &Value) -> (Vec<EpubPage>, u64, Vec<EpubAt
                 html_content: html,
                 order: 1,
                 chapters,
+                part: 0,
             }],
             0,
             attachments,
@@ -652,6 +724,27 @@ fn convert_fanbox_body_to_pages(data: &Value) -> (Vec<EpubPage>, u64, Vec<EpubAt
                         ));
                     }
                 }
+                // 動画・音源・フォームの埋め込み。読書画面と同じ組み直し方を
+                // 使う。ここが無かったころは、貼られていたこと自体が本から
+                // 落ちていた。
+                "embed" => {
+                    pending_blank = false;
+                    if let Some((label, url)) =
+                        read_str(block.get("embedId")).and_then(|id| fanbox_service_embed(body, &id))
+                    {
+                        match url {
+                            Some(url) => html.push_str(&format!(
+                                "<p class=\"embed-link\"><a href=\"{}\">{}</a></p>\n",
+                                xhtml::escape_attr(&url),
+                                xhtml::escape_text(&label)
+                            )),
+                            None => html.push_str(&format!(
+                                "<p class=\"embed-link\">{}</p>\n",
+                                xhtml::escape_text(&format!("{label}（埋め込み）"))
+                            )),
+                        }
+                    }
+                }
                 _ => {
                     if !text.trim().is_empty() {
                         pending_blank = false;
@@ -708,11 +801,20 @@ fn convert_fanbox_body_to_pages(data: &Value) -> (Vec<EpubPage>, u64, Vec<EpubAt
         }
     }
 
+    // 題は、先頭の見出しがあればそれ。pixiv 側と同じ決め方にする。「本文」で
+    // 固定していたころは、見出しを持つ投稿の目次が必ず「本文 › 同じ見出し」と
+    // 一段深くなり、同じ道具の中で FANBOX だけ目次の形が違っていた。
     let pages = vec![EpubPage {
-        title: Some("本文".to_string()),
+        title: Some(
+            chapters
+                .first()
+                .map(|chapter| chapter.title.clone())
+                .unwrap_or_else(|| "本文".to_string()),
+        ),
         html_content: html,
         order: 1,
         chapters,
+        part: 0,
     }];
 
     (pages, text_length, attachments)
@@ -770,13 +872,37 @@ fn fanbox_embed(body: &Value, embed_id: &str) -> Option<(String, String)> {
         return Some((label, url));
     }
     // FANBOX の投稿を指す埋め込みは URL を持たず、投稿情報だけを持つ。
-    let post = embed.get("postInfo")?;
-    let post_id = read_id(post.get("id"))?;
-    let creator = read_str(post.get("creatorId"))?;
-    let title = read_str(post.get("title")).unwrap_or_else(|| post_id.clone());
+    if let Some(post) = embed.get("postInfo") {
+        if let (Some(post_id), Some(creator)) =
+            (read_id(post.get("id")), read_str(post.get("creatorId")))
+        {
+            let title = read_str(post.get("title")).unwrap_or_else(|| post_id.clone());
+            return Some((
+                title,
+                format!("https://{}.fanbox.cc/posts/{}", creator, post_id),
+            ));
+        }
+    }
+    // URL も投稿情報も持たず、HTML だけを返す埋め込みがある。その HTML には
+    // 元のページの宛先が書いてあるので、読書画面と同じやり方で拾う。
+    let html = read_str(embed.get("html"))?;
+    let url = crate::database::parser::first_public_url_in_html(&html)?;
+    let label = read_str(embed.get("host")).unwrap_or_else(|| url.clone());
+    Some((label, url))
+}
+
+/// `embed` ブロックが指す先。提供元と id しか無いので、URL は組み直す。
+///
+/// 組み直せない提供元でも、何が貼られていたかは返す。EPUB から黙って
+/// 消えるより、名前だけでも残っていたほうが辿れる。
+fn fanbox_service_embed(body: &Value, embed_id: &str) -> Option<(String, Option<String>)> {
+    let embed = body.get("embedMap").and_then(|value| value.get(embed_id))?;
+    let provider = read_str(embed.get("serviceProvider")).unwrap_or_default();
+    let content_id = read_str(embed.get("contentId")).unwrap_or_default();
+    let label = crate::database::parser::embed_service_label(&provider);
     Some((
-        title,
-        format!("https://{}.fanbox.cc/posts/{}", creator, post_id),
+        label,
+        crate::database::parser::embed_service_url(&provider, &content_id),
     ))
 }
 
@@ -1238,5 +1364,106 @@ mod tests {
     #[test]
     fn illustrations_sort_the_way_a_reader_expects() {
         assert!(natural_key("img-123_p2") < natural_key("img-123_p10"));
+    }
+
+    /// 読書画面は同じ本文を 128KB で割って運んでいるのに、本にするときだけ
+    /// 割らずに 1 枚へ詰めていた。数十万字の 1 ファイルは、非力な端末でも
+    /// Send to Kindle でも不利になる。
+    #[test]
+    fn a_very_long_page_is_split_into_several_files() {
+        let paragraph = format!("<p>{}</p>\n", "あ".repeat(2_000));
+        let html = format!(
+            "<h2 id=\"chapter-001\">序</h2>\n{}<h2 id=\"chapter-002\">破</h2>\n{}",
+            paragraph.repeat(20),
+            paragraph.repeat(20)
+        );
+        let pages = split_long_pages(vec![EpubPage {
+            title: Some("ページ 1".into()),
+            html_content: html,
+            order: 1,
+            chapters: vec![
+                EpubChapter { id: "chapter-001".into(), title: "序".into() },
+                EpubChapter { id: "chapter-002".into(), title: "破".into() },
+            ],
+            part: 0,
+        }]);
+
+        assert!(pages.len() > 1, "割られていない: {}", pages.len());
+        // 元のページ番号は動かさない。`[jump:1]` は page_001.xhtml を指している。
+        assert!(pages.iter().all(|page| page.order == 1));
+        assert_eq!(pages[0].part, 0);
+        assert_eq!(pages[1].part, 1);
+        // 見出しは、その錨が載っている側へ付いていく。
+        assert!(pages[0].chapters.iter().any(|c| c.id == "chapter-001"));
+        assert!(pages.iter().flat_map(|page| &page.chapters).any(|c| c.id == "chapter-002"));
+        assert_eq!(
+            pages.iter().flat_map(|page| &page.chapters).count(),
+            2,
+            "見出しが二重に数えられている"
+        );
+        // 割った先も、要素の切れ目で始まっていること。
+        for page in &pages {
+            assert!(page.html_content.trim_start().starts_with('<'), "{}", &page.html_content[..40]);
+        }
+        // 本文は一文字も落とさない。
+        let joined = pages.iter().map(|page| page.html_content.as_str()).collect::<String>();
+        assert_eq!(joined.matches("</p>").count(), 40);
+    }
+
+    #[test]
+    fn a_short_page_is_left_alone() {
+        let pages = split_long_pages(vec![EpubPage {
+            title: Some("ページ 1".into()),
+            html_content: "<p>短い</p>\n".into(),
+            order: 3,
+            chapters: Vec::new(),
+            part: 0,
+        }]);
+        assert_eq!(pages.len(), 1);
+        assert_eq!(pages[0].order, 3);
+        assert_eq!(pages[0].part, 0);
+    }
+
+    /// FANBOX の投稿だけ、ページの題が「本文」で固定されていた。見出しを持つ
+    /// 投稿では目次が必ず「本文 › 同じ見出し」と一段深くなっていた。
+    #[test]
+    fn a_fanbox_post_takes_its_first_heading_as_the_page_title() {
+        let data = serde_json::json!({
+            "id": "1",
+            "title": "投稿",
+            "body": { "blocks": [
+                { "type": "header", "text": "はじめに" },
+                { "type": "p", "text": "本文です。" }
+            ] }
+        });
+        let (pages, _, _) = convert_fanbox_body_to_pages(&data);
+        assert_eq!(pages[0].title.as_deref(), Some("はじめに"));
+    }
+
+    #[test]
+    fn a_fanbox_post_without_headings_is_still_called_the_body() {
+        let data = serde_json::json!({
+            "id": "1",
+            "title": "投稿",
+            "body": { "blocks": [{ "type": "p", "text": "見出しのない投稿。" }] }
+        });
+        let (pages, _, _) = convert_fanbox_body_to_pages(&data);
+        assert_eq!(pages[0].title.as_deref(), Some("本文"));
+    }
+
+    /// `embed` ブロックは提供元と id しか持たない。組み直さないと、本文に
+    /// 貼られた動画や音源が本から丸ごと落ちる。
+    #[test]
+    fn a_service_embed_becomes_a_link_in_the_book() {
+        let data = serde_json::json!({
+            "id": "1",
+            "title": "投稿",
+            "body": {
+                "blocks": [{ "type": "embed", "embedId": "e1" }],
+                "embedMap": { "e1": { "serviceProvider": "youtube", "contentId": "abc123" } }
+            }
+        });
+        let (pages, _, _) = convert_fanbox_body_to_pages(&data);
+        assert!(pages[0].html_content.contains("https://www.youtube.com/watch?v=abc123"), "{}", pages[0].html_content);
     }
 }
