@@ -264,6 +264,29 @@ fn check_package(
         }
     }
 
+    // 有るだけでは足りない。テンプレートの綴り違いは、その場でも組み立てでも
+    // 検証でも何も言われないまま、**題の空いた本**を「検証合格」で通していた。
+    for (needle, code, label) in [
+        ("<dc:title", "OPF-TITLE-EMPTY", "dc:title"),
+        ("<dc:identifier", "OPF-IDENTIFIER-EMPTY", "dc:identifier"),
+        ("<dc:language", "OPF-LANGUAGE-EMPTY", "dc:language"),
+    ] {
+        if opf.contains(needle) && !has_non_empty_element(&opf, needle) {
+            issues.push(EpubValidationIssue::error(
+                code,
+                package_path,
+                format!("{label} が空です。テンプレートの差し込みを確かめてください"),
+            ));
+        }
+    }
+    if opf.contains("<dc:creator") && !has_non_empty_element(&opf, "<dc:creator") {
+        issues.push(EpubValidationIssue::warning(
+            "OPF-CREATOR-EMPTY",
+            package_path,
+            "dc:creator が空です",
+        ));
+    }
+
     check_modified(&opf, package_path, issues);
     check_unique_identifier(&opf, package_path, issues);
 
@@ -907,6 +930,37 @@ fn text_of(bytes: &[u8]) -> Option<String> {
     String::from_utf8(bytes.to_vec()).ok()
 }
 
+/// その要素が、中身のある文字を持っているか。
+///
+/// 同じ名前の要素がいくつあっても、一つでも中身があればよい（`dc:title` が
+/// 副題を伴って二つ書かれることがある）。
+fn has_non_empty_element(xml: &str, open_tag: &str) -> bool {
+    let name = open_tag.trim_start_matches('<');
+    let mut rest = xml;
+    while let Some(start) = rest.find(open_tag) {
+        let after_tag = &rest[start + open_tag.len()..];
+        let Some(open_end) = after_tag.find('>') else {
+            return false;
+        };
+        // 自己終了タグは中身を持たない。
+        if after_tag[..open_end].trim_end().ends_with('/') {
+            rest = &after_tag[open_end + 1..];
+            continue;
+        }
+        let body = &after_tag[open_end + 1..];
+        let close = format!("</{name}>");
+        if let Some(end) = body.find(&close) {
+            if !body[..end].trim().is_empty() {
+                return true;
+            }
+            rest = &body[end + close.len()..];
+        } else {
+            return false;
+        }
+    }
+    false
+}
+
 fn attribute_value(text: &str, key: &str) -> Option<String> {
     let needle = format!("{}=\"", key);
     let at = text.find(&needle)?;
@@ -1123,6 +1177,31 @@ mod tests {
         assert!(check_well_formed("<a x=\"1\" x=\"2\"></a>").is_err());
         assert!(check_well_formed("<a>text").is_err());
         assert!(check_well_formed("text only").is_err());
+    }
+
+    /// 差し込みの綴りを間違えたテンプレートは、保存でも組み立てでも何も
+    /// 言われない。せめて出来上がった本を見たときに、題の空きに気づくこと。
+    #[test]
+    fn an_empty_title_is_not_a_valid_book() {
+        assert!(has_non_empty_element(
+            r#"<dc:title id="title">雨の日</dc:title>"#,
+            "<dc:title"
+        ));
+        assert!(!has_non_empty_element(
+            r#"<dc:title id="title"></dc:title>"#,
+            "<dc:title"
+        ));
+        assert!(!has_non_empty_element(
+            "<dc:title id=\"title\">\n   \n</dc:title>",
+            "<dc:title"
+        ));
+        // 副題つきで二つ書かれていても、中身があれば通す。
+        assert!(has_non_empty_element(
+            "<dc:title></dc:title><dc:title>副題</dc:title>",
+            "<dc:title"
+        ));
+        // 閉じていないものは、中身があるとは言えない。
+        assert!(!has_non_empty_element("<dc:title>途中", "<dc:title"));
     }
 
     #[test]

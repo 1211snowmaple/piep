@@ -126,6 +126,12 @@ pub struct EpubPage {
     pub order: u32,
     /// ページ内の見出し。目次を二階層にするために使う。
     pub chapters: Vec<EpubChapter>,
+    /// 長すぎるページを割ったときの、何枚目か。0 はページそのもの。
+    ///
+    /// 割った先も `order` は変えない。`[jump:5]` は `page_005.xhtml` を指して
+    /// おり、番号を振り直すと**本文のページ内リンクが軒並みずれる**。
+    #[serde(default)]
+    pub part: u32,
 }
 
 /// ページ内の見出しひとつ。`id` は同じページの XHTML 内のアンカー。

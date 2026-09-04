@@ -17,9 +17,19 @@ export function cancelEpubExport(): Promise<void> {
 }
 
 /** `skipMissing` lets a collection with deleted works still be exported, with
- *  those works left out, rather than the export refusing outright. */
-export function exportCollectionEpub(collectionId: string, templateName: string, outputDir: string, skipMissing = false): Promise<string> {
-  return invoke<string>("export_collection_epub", { collectionId, templateName, outputDir, compressOptions: null, skipMissing });
+ *  those works left out, rather than the export refusing outright.
+ *
+ *  画像最適化と組み方も受け取る。渡す口が塞がっていたころは、シリーズを
+ *  まとめた**いちばん大きな本だけ**が無圧縮・横書きで出ていた。 */
+export function exportCollectionEpub(
+  collectionId: string,
+  templateName: string,
+  outputDir: string,
+  skipMissing = false,
+  compressOptions: Record<string, unknown> | null = null,
+  writingMode: "vertical" | "horizontal" | null = null,
+): Promise<string> {
+  return invoke<string>("export_collection_epub", { collectionId, templateName, outputDir, compressOptions, skipMissing, writingMode });
 }
 
 export function listEpubTemplates(): Promise<TemplateInfo[]> {

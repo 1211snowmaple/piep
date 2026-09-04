@@ -1581,13 +1581,13 @@ export default function SavePage() {
               <Box p="md">
                 {progress && (
                   <Stack gap={5} mb="sm" role="status" aria-live="polite">
-                    <Group justify="space-between">
-                      <Text size="xs" className="line-clamp-1">
+                    <Group justify="space-between" wrap="nowrap">
+                      <Text size="xs" className="line-clamp-1" flex={1} miw={0}>
                         {canceling
                           ? `中止しています… ${progress.text}`
                           : progress.text}
                       </Text>
-                      <Text size="xs" c="dimmed">
+                      <Text size="xs" c="dimmed" style={{ flexShrink: 0 }}>
                         {progress.current}/{progress.total}
                       </Text>
                     </Group>

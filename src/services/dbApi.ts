@@ -349,6 +349,16 @@ export async function saveWorkDraft(
   return invoke<WorkEditRevision>("db_save_work_draft", { downloadId, baseVersion, title, blocks });
 }
 
+/**
+ * 書きかけを捨てて、取り込んだままの本文へ戻す。
+ *
+ * 自動保存は触りはじめて6秒で下書きを作る。捨てる口が無かったので、一度でも
+ * 編集画面を触れば、そこから先はいつ開いても書きかけが出てきた。
+ */
+export async function discardWorkDraft(downloadId: number): Promise<void> {
+  return invoke<void>("db_discard_work_draft", { downloadId });
+}
+
 export async function activateWorkEdit(editRevisionId: number): Promise<WorkEditRevision> {
   return invoke<WorkEditRevision>("db_activate_work_edit", { editRevisionId });
 }

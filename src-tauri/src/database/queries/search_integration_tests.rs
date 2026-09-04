@@ -5923,6 +5923,99 @@ fn active_edit_revision_drives_reader_and_search_body() {
     assert_eq!(search.items.first().map(|item| item.id), Some(download_id));
 }
 
+/// 下書きは何度でも上書きできる。
+///
+/// 自動保存は6秒ごとに同じ下書きを書き換えるので、二度目が通らなければ
+/// **書いたものは最初の一回しか残らない**。書き換えの経路にだけ在る不具合は、
+/// 一度しか保存しない試験では見つからない。
+#[test]
+fn a_draft_can_be_saved_again_and_again() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let download_id = insert_download(
+        &db,
+        &storage,
+        "draft-rewrite",
+        "下書きを書き換える",
+        "作者A",
+        &["編集"],
+        "取り込んだままの本文。",
+    );
+
+    let block = |text: &str| WorkBlockInput {
+        block_type: "paragraph".to_string(),
+        text: Some(text.to_string()),
+        asset_id: None,
+        attrs_json: None,
+    };
+
+    let first = db
+        .save_work_draft(download_id, 1, None, &[block("一度目の下書き")])
+        .unwrap();
+    let second = db
+        .save_work_draft(download_id, 1, None, &[block("二度目の下書き")])
+        .expect("下書きの二度目の保存が通らない");
+    // 版を増やさずに同じ1本を書き換える。増やすと履歴が自動保存で埋まる。
+    assert_eq!(first.id, second.id);
+
+    let editor = db.get_editor_document(download_id).unwrap();
+    assert_eq!(editor.blocks.len(), 1);
+    assert_eq!(
+        editor.blocks[0].text.as_deref(),
+        Some("二度目の下書き"),
+        "書き換えたはずの下書きが古いままになっている"
+    );
+}
+
+/// 下書きは捨てられる。捨てたら、取り込んだままの本文が編集画面へ戻る。
+#[test]
+fn a_draft_can_be_discarded_back_to_the_imported_text() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let download_id = insert_download(
+        &db,
+        &storage,
+        "draft-discard",
+        "下書きを捨てる",
+        "作者A",
+        &["編集"],
+        "取り込んだままの本文。",
+    );
+
+    db.save_work_draft(
+        download_id,
+        1,
+        Some("差し替えた題"),
+        &[WorkBlockInput {
+            block_type: "paragraph".to_string(),
+            text: Some("書きかけの本文".to_string()),
+            asset_id: None,
+            attrs_json: None,
+        }],
+    )
+    .unwrap();
+    assert!(db
+        .get_editor_document(download_id)
+        .unwrap()
+        .draft_revision
+        .is_some());
+
+    db.discard_work_draft(download_id).unwrap();
+
+    let editor = db.get_editor_document(download_id).unwrap();
+    assert!(editor.draft_revision.is_none(), "下書きが残っている");
+    assert!(
+        editor.blocks.iter().any(|block| block
+            .text
+            .as_deref()
+            .is_some_and(|text| text.contains("取り込んだまま"))),
+        "取り込んだままの本文が戻っていない: {:?}",
+        editor.blocks
+    );
+    // 捨てるものが無くても、そのことでは失敗しない。
+    db.discard_work_draft(download_id).unwrap();
+}
+
 /// 編集画面を開いて、何も変えずに反映する ―― それだけで本文が壊れないこと。
 ///
 /// 実際の道筋（保存した本文 → ブロック → 下書き → 反映 → 読書画面）を通す。

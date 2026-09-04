@@ -54,6 +54,13 @@ pub struct EpubBuilder {
     template_contents: HashMap<String, String>,
     settings: TemplateSettings,
     compress_options: ImageCompressOptions,
+    /// 書き出しのときに指定された組み方。テンプレートの決めより優先する。
+    writing_mode: Option<&'static str>,
+    /// 収録できずに置いていった画像の名前。
+    ///
+    /// 除いたことはログにしか残らず、統計にも書き出し結果にも出ていなかった。
+    /// 挿絵50枚のうち数枚が落ちても、利用者には成功としか見えない。
+    skipped_images: std::cell::RefCell<Vec<String>>,
 }
 
 impl EpubBuilder {
@@ -68,7 +75,59 @@ impl EpubBuilder {
             template_contents,
             settings,
             compress_options,
+            writing_mode: None,
+            skipped_images: std::cell::RefCell::new(Vec::new()),
         }
+    }
+
+    /// 収録できずに置いていった画像。組み立てのあとに読む。
+    pub fn skipped_images(&self) -> Vec<String> {
+        self.skipped_images.borrow().clone()
+    }
+
+    fn note_skipped_image(&self, name: &str, reason: &str) {
+        let label = Path::new(name)
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or(name);
+        self.skipped_images
+            .borrow_mut()
+            .push(format!("{label}（{reason}）"));
+    }
+
+    /// 組み方を書き出しのたびに選べるようにする。
+    ///
+    /// 読む画面には縦書きがあるのに、書き出す本は必ず横書きだった。縦組みに
+    /// するにはテンプレートスタジオで自分のテンプレートを作るしかなく、
+    /// 日本語の小説を持ち出す道具としてそれは通らない。綴じ方向も一緒に
+    /// 倒す ―― 縦書きなのに左から右へ綴じた本は、ページの送りが逆になる。
+    pub fn with_writing_mode(mut self, mode: Option<&str>) -> Self {
+        self.writing_mode = match mode {
+            Some("vertical") => Some("vertical-rl"),
+            Some("horizontal") => Some("horizontal-tb"),
+            _ => None,
+        };
+        if let Some(mode) = self.writing_mode {
+            self.settings.page_progression = if mode == "vertical-rl" {
+                "rtl".to_string()
+            } else {
+                "ltr".to_string()
+            };
+        }
+        self
+    }
+
+    /// 指定された組み方を、組み上がったスタイルの末尾に重ねる。
+    ///
+    /// 縦書きは標準の名前だけでは多くの端末で効かない。Apple Books は
+    /// `-epub-` 付きを、古い WebKit 系は `-webkit-` 付きを見る。三つとも書く。
+    fn writing_mode_css(&self) -> String {
+        let Some(mode) = self.writing_mode else {
+            return String::new();
+        };
+        format!(
+            "\n/* piep: 書き出しのときに選ばれた組み方 */\nhtml {{\n    -epub-writing-mode: {mode};\n    -webkit-writing-mode: {mode};\n    writing-mode: {mode};\n}}\n"
+        )
     }
 
     /// EPUB ファイルを生成して指定パスに書き出す
@@ -92,7 +151,11 @@ impl EpubBuilder {
         let cover = images.iter().find(|image| image.is_cover);
 
         // 3. スタイルシート
-        let css = renderer.render_style(&self.manifest)?;
+        let css = format!(
+            "{}{}",
+            renderer.render_style(&self.manifest)?,
+            self.writing_mode_css()
+        );
         self.write_text_entry(&mut zip, "OEBPS/style/style.css", &css)?;
 
         // 4. 表紙
@@ -123,7 +186,7 @@ impl EpubBuilder {
         for page in &self.manifest.content.pages {
             let html = self.resolve_page_images(&page.html_content, &images);
             let rendered = renderer.render_page(&self.manifest, page, &html)?;
-            let filename = format!("OEBPS/text/{}", page_filename(page.order));
+            let filename = format!("OEBPS/text/{}", page_filename(page.order, page.part));
             self.write_text_entry(&mut zip, &filename, &rendered)?;
         }
 
@@ -142,7 +205,7 @@ impl EpubBuilder {
                 .content
                 .pages
                 .first()
-                .map(|page| format!("text/{}", page_filename(page.order)))
+                .map(|page| format!("text/{}", page_filename(page.order, page.part)))
                 .as_deref(),
         )?;
         self.write_text_entry(&mut zip, "OEBPS/nav.xhtml", &nav)?;
@@ -264,6 +327,7 @@ impl EpubBuilder {
             let path = Path::new(&image.local_path);
             if !path.exists() {
                 log::warn!("画像が見つからないため除外します: {}", image.local_path);
+                self.note_skipped_image(&image.local_path, "見つかりません");
                 continue;
             }
             let source_size = path
@@ -280,6 +344,7 @@ impl EpubBuilder {
                     MAX_SOURCE_IMAGE_BYTES / 1024 / 1024,
                     path.display()
                 );
+                self.note_skipped_image(&image.local_path, "大きすぎます");
                 continue;
             }
             if let Some((width, height)) = image_dimensions_from_path(path) {
@@ -291,6 +356,7 @@ impl EpubBuilder {
                         width,
                         height
                     );
+                    self.note_skipped_image(&image.local_path, "画素数が多すぎます");
                     continue;
                 }
             }
@@ -304,6 +370,7 @@ impl EpubBuilder {
                             image.local_path,
                             error
                         );
+                        self.note_skipped_image(&image.local_path, "読み取れません");
                         continue;
                     }
                 };
@@ -420,7 +487,7 @@ impl EpubBuilder {
         for page in &self.manifest.content.pages {
             order += 1;
             let page_order = order;
-            let href = format!("text/{}", page_filename(page.order));
+            let href = format!("text/{}", page_filename(page.order, page.part));
             let mut children = Vec::new();
             if settings.chapter_toc {
                 // 見出しがページの題を兼ねているときは、目次に二度出さない。
@@ -440,7 +507,7 @@ impl EpubBuilder {
                 }
             }
             entries.push(NavEntry {
-                id: format!("page-{:03}", page.order),
+                id: page_manifest_id(page),
                 order: page_order,
                 href,
                 title: page
@@ -524,10 +591,10 @@ impl EpubBuilder {
         });
 
         for page in &self.manifest.content.pages {
-            let id = format!("page-{:03}", page.order);
+            let id = page_manifest_id(page);
             items.push(ManifestItem {
                 id: id.clone(),
-                href: format!("text/{}", page_filename(page.order)),
+                href: format!("text/{}", page_filename(page.order, page.part)),
                 media_type: "application/xhtml+xml".into(),
                 properties: None,
             });
@@ -560,8 +627,25 @@ impl EpubBuilder {
 // ヘルパー
 // ============================================================
 
-fn page_filename(order: u32) -> String {
-    format!("page_{:03}.xhtml", order)
+/// 割られたページの続きは、元のページ名に枝番を足す。
+///
+/// `page_005.xhtml` はそのまま残るので、本文の `[jump:5]` は割ったあとも
+/// 同じところへ着く。番号を振り直していたら、長い作品ほどリンクがずれた。
+fn page_filename(order: u32, part: u32) -> String {
+    if part == 0 {
+        format!("page_{:03}.xhtml", order)
+    } else {
+        format!("page_{:03}_{}.xhtml", order, part + 1)
+    }
+}
+
+/// マニフェスト内での、そのページの id。割られた続きも別物として名乗る。
+fn page_manifest_id(page: &EpubPage) -> String {
+    if page.part == 0 {
+        format!("page-{:03}", page.order)
+    } else {
+        format!("page-{:03}-{}", page.order, page.part + 1)
+    }
 }
 
 /// ZIP 内の絶対パスを、ある文書から見た相対 URL にする。
@@ -856,12 +940,14 @@ mod tests {
                             id: "chapter-001".into(),
                             title: "第一章 & そのあと".into(),
                         }],
+                        part: 0,
                     },
                     EpubPage {
                         title: Some("ページ 2".into()),
                         html_content: "<p>つづき</p>".into(),
                         order: 2,
                         chapters: Vec::new(),
+                        part: 0,
                     },
                 ],
                 cover_image: None,
@@ -1136,6 +1222,65 @@ mod tests {
         assert!(opf.contains("page-progression-direction=\"rtl\""));
         assert!(!opf.contains("toc=\"ncx\""));
 
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// 読む画面には縦書きがあるのに、書き出す本は必ず横書きだった。
+    /// 縦組みにするにはテンプレートを自分で作るしかなく、日本語の小説を
+    /// 持ち出す道具としてそれは通らない。
+    #[test]
+    fn the_export_can_choose_vertical_writing() {
+        let path =
+            std::env::temp_dir().join(format!("piep_epub_tategaki_{}.epub", rand::random::<u64>()));
+        EpubBuilder::new(
+            hostile_manifest(),
+            builtin_template_contents("pixiv"),
+            builtin_settings("pixiv"),
+            ImageCompressOptions::default(),
+        )
+        .with_writing_mode(Some("vertical"))
+        .build(&path)
+        .expect("build");
+
+        let report = crate::epub::validate::validate_epub(&path).expect("validate");
+        assert!(report.valid, "検証に失敗しました: {:#?}", report.issues);
+
+        let mut archive = zip::ZipArchive::new(std::fs::File::open(&path).unwrap()).unwrap();
+        let mut css = String::new();
+        std::io::Read::read_to_string(
+            &mut archive.by_name("OEBPS/style/style.css").unwrap(),
+            &mut css,
+        )
+        .unwrap();
+        // 標準の名前だけでは多くの端末で効かない。三つとも書いてあること。
+        assert!(css.contains("writing-mode: vertical-rl"), "{css}");
+        assert!(css.contains("-epub-writing-mode: vertical-rl"), "{css}");
+        assert!(css.contains("-webkit-writing-mode: vertical-rl"), "{css}");
+
+        let mut opf = String::new();
+        std::io::Read::read_to_string(&mut archive.by_name("OEBPS/content.opf").unwrap(), &mut opf)
+            .unwrap();
+        // 縦書きなのに左から右へ綴じた本は、ページの送りが逆になる。
+        assert!(opf.contains("page-progression-direction=\"rtl\""), "{opf}");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// 何も指定しなければ、テンプレートの決めをそのまま使う。
+    #[test]
+    fn without_a_choice_the_template_still_decides() {
+        let path = build_to_temp(hostile_manifest(), builtin_settings("pixiv"));
+        let mut archive = zip::ZipArchive::new(std::fs::File::open(&path).unwrap()).unwrap();
+        let mut css = String::new();
+        std::io::Read::read_to_string(
+            &mut archive.by_name("OEBPS/style/style.css").unwrap(),
+            &mut css,
+        )
+        .unwrap();
+        assert!(
+            !css.contains("piep: 書き出しのときに選ばれた組み方"),
+            "{css}"
+        );
         let _ = std::fs::remove_file(path);
     }
 }

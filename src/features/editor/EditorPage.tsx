@@ -20,6 +20,7 @@ import {
   Tooltip,
 } from "@mantine/core";
 import { useForm, type UseFormReturnType } from "@mantine/form";
+import { modals } from "@mantine/modals";
 import { useDisclosure, useHotkeys, useLocalStorage } from "@mantine/hooks";
 import { notifications } from "@mantine/notifications";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -29,14 +30,24 @@ import { useReturnTo, useRouteParams } from "@/app/router";
 import { ErrorState, LoadingState } from "@/components/AsyncState";
 import { errorMessage } from "@/lib/format";
 import { registerUnsavedGuard } from "@/lib/unsavedGuard";
+import { renderNotation, renderNotationLines } from "@/features/editor/notation";
 import { getDemoEditor } from "@/mocks/demoData";
-import { activateWorkEdit, getAssetUrl, getEditorDocument, importWorkAsset, isTauriRuntime, saveWorkDraft } from "@/services/dbApi";
+import { activateWorkEdit, discardWorkDraft, getAssetUrl, getEditorDocument, importWorkAsset, isTauriRuntime, saveWorkDraft } from "@/services/dbApi";
 import { openSingleDialog } from "@/services/dialogApi";
 import type { AssetEntry, WorkBlockInput } from "@/types/library";
 
 type EditorBlockType = "paragraph" | "heading" | "quote" | "image" | "link" | "separator" | "pageBreak";
 type EditorBlockValue = WorkBlockInput & { clientId: string; blockType: EditorBlockType };
 interface EditorValues { blocks: EditorBlockValue[] }
+/**
+ * 取り消しのための控え1つぶん。
+ *
+ * `textual` は「文字そのものを書き換えた操作」の印。一括置換を取り消すときは
+ * 控えた文字へ戻し、並べ替えや削除を取り消すときは、そのあとに書いた文字を
+ * そのまま残す。区別が無かったころは、段落を1つ戻すだけで、そのあとに
+ * 書いた一段落が消えていた。
+ */
+interface HistoryEntry { blocks: EditorBlockValue[]; textual: boolean }
 interface EditorSaveSnapshot {
   values: EditorValues;
   persistedBlocks: WorkBlockInput[];
@@ -45,6 +56,15 @@ interface EditorSaveSnapshot {
   title?: string;
   /** 自動保存。押していないものを知らせても、手が止まるだけ。 */
   silent?: boolean;
+}
+
+/** 探す語が、文字を持つブロックに何件あるか。URL やキャプションは数えない。 */
+function countMatches(blocks: EditorBlockValue[], term: string): number {
+  if (!term) return 0;
+  return blocks.reduce((sum, block) => {
+    if (!["paragraph", "heading", "quote"].includes(block.blockType)) return sum;
+    return sum + (String(block.text ?? "").split(term).length - 1);
+  }, 0);
 }
 
 /** 保存に出せる形かどうか。自動保存が、書きかけを弾かれて騒がないための判断。 */
@@ -141,12 +161,16 @@ export default function EditorPage() {
   // 取り消しのための控え。**文章を扱う画面に取り消しが無い**というのが、
   // この編集画面でいちばん痛い欠けだった。段落を一つ消すと戻す手立ては
   // どこにも無く、書き直すしかなかった。
-  const historyRef = useRef<EditorBlockValue[][]>([]);
-  const futureRef = useRef<EditorBlockValue[][]>([]);
+  const historyRef = useRef<HistoryEntry[]>([]);
+  const futureRef = useRef<HistoryEntry[]>([]);
   const [historyDepth, setHistoryDepth] = useState({ undo: 0, redo: 0 });
+  // 行を作り直させるための世代。取り消しと一括置換のあとだけ進む。
+  const [generation, setGeneration] = useState(0);
   const [dragFrom, setDragFrom] = useState<number | null>(null);
   const [dragOver, setDragOver] = useState<number | null>(null);
   const [savedAt, setSavedAt] = useState<Date | null>(null);
+  /** 自動保存が、整っていない書きかけのために止まっている。 */
+  const [autoSaveBlocked, setAutoSaveBlocked] = useState(false);
   const [findOpened, findPanel] = useDisclosure(false);
   const [findTerm, setFindTerm] = useState("");
   const [replaceTerm, setReplaceTerm] = useState("");
@@ -267,6 +291,37 @@ export default function EditorPage() {
     },
     onError: (error) => notifications.show({ color: "red", title: "下書きを保存できません", message: errorMessage(error) }),
   });
+  /**
+   * 書きかけを捨てて、取り込んだままの本文（反映中ならその版）へ戻す。
+   *
+   * 自動保存が下書きを作ったあとは、編集画面を開くたびにその書きかけが出る。
+   * 元の本文に戻る道が、手で全部打ち直すことしか無かった。
+   */
+  const discardMutation = useMutation({
+    mutationFn: async () => {
+      if (!runtime) return getDemoEditor(id);
+      await discardWorkDraft(id);
+      return getEditorDocument(id);
+    },
+    onSuccess: (fresh) => {
+      // form は一度きりしか初期化できないので、値と行の id を入れ替えて
+      // 組み直す。id が変わると入力欄が作り直され、消したはずの書きかけが
+      // 画面に残らない。
+      const nextBlocks = fresh.blocks.map((block) => ({ clientId: crypto.randomUUID(), blockType: editorType(block.blockType), text: block.text, assetId: block.assetId, attrsJson: block.attrsJson }));
+      form.setValues({ blocks: nextBlocks });
+      form.resetDirty({ blocks: nextBlocks });
+      setBlocks(nextBlocks);
+      setTitle(fresh.download.title);
+      setDirty(false);
+      historyRef.current = [];
+      futureRef.current = [];
+      setHistoryDepth({ undo: 0, redo: 0 });
+      setAutoSaveBlocked(false);
+      queryClient.setQueryData(["editor-document", id], fresh);
+      notifications.show({ color: "green", title: "下書きを破棄しました", message: "取り込んだままの本文に戻しました" });
+    },
+    onError: (error) => notifications.show({ color: "red", title: "下書きを破棄できません", message: errorMessage(error) }),
+  });
   const publishMutation = useMutation({
     mutationFn: async (snapshot: EditorSaveSnapshot) => {
       const revision = await persistSnapshot(snapshot);
@@ -313,8 +368,14 @@ export default function EditorPage() {
     if (!autoSave || !dirty || !query.data || busy) return undefined;
     const timer = window.setTimeout(() => {
       const values = form.getValues();
-      // 書きかけで整っていないうちは、黙って待つ。赤字を出しに行かない。
-      if (!blocksAreSavable(values)) return;
+      // 書きかけで整っていないうちは待つ。ただし**黙って**待たない ――
+      // 空のブロックが1つあるだけで自動保存が止まるのに、画面はいつまでも
+      // 「未保存」のままで、止まっていることが誰にも分からなかった。
+      if (!blocksAreSavable(values)) {
+        setAutoSaveBlocked(true);
+        return;
+      }
+      setAutoSaveBlocked(false);
       save({ ...createEditorSaveSnapshot(values), title, silent: true });
     }, 6_000);
     return () => window.clearTimeout(timer);
@@ -333,29 +394,35 @@ export default function EditorPage() {
     ["mod+Y", (event) => { event.preventDefault(); redo(); }],
   ]);
   /**
-   * `rekey` は、中身を丸ごと差し替えたときに使う。
+   * `remount` は、中身を丸ごと差し替えたときに使う。
    *
    * 入力欄は非制御なので、同じ行が同じ id のまま値だけ変わっても、画面の
    * 文字は書き換わらない。取り消しと一括置換はまさにそれをやるので、
-   * 行に新しい id を振って組み立て直させる。並べ替えや削除では振らない
-   * ―― 打鍵の途中で id が変わると、入力中の欄から焦点が外れる。
+   * **世代の番号**を進めて行を作り直させる。並べ替えや削除では進めない
+   * ―― 打鍵の途中で行が作り直されると、入力中の欄から焦点が外れる。
+   *
+   * 行の id そのものは振り直さない。id は行の身元で、取り消しの前後で
+   * 同じ行だと分かるのはこれだけ。振り直していたころは、一度取り消すと
+   * 身元が切れ、やり直したときにそのあいだに書いた文字が消えていた。
    */
-  const applyBlocks = useCallback((nextBlocks: EditorBlockValue[], rekey = false) => {
-    const applied = rekey ? nextBlocks.map((block) => ({ ...block, clientId: crypto.randomUUID() })) : nextBlocks;
-    form.setFieldValue("blocks", applied);
-    setBlocks(applied);
+  const applyBlocks = useCallback((nextBlocks: EditorBlockValue[], remount = false) => {
+    form.setFieldValue("blocks", nextBlocks);
+    setBlocks(nextBlocks);
+    if (remount) setGeneration((value) => value + 1);
     setDirty(true);
   }, [form]);
   /** いまの中身を控える。文字の打鍵は入力欄自身の取り消しに任せ、ここでは
    *  ブロックの出入りと並べ替えだけを憶える。消えた段落が戻せればよい。 */
   const snapshotBlocks = useCallback(() => form.getValues().blocks.map((block) => ({ ...block })), [form]);
-  const replaceBlocks = useCallback((nextBlocks: EditorBlockValue[], rekey = false) => {
-    historyRef.current.push(snapshotBlocks());
+  const replaceBlocks = useCallback((nextBlocks: EditorBlockValue[], textual = false) => {
+    // `textual` は「文字そのものを書き換えた操作」の印。取り消したときに
+    // いまの文字を残すのか、控えた文字へ戻すのかが、ここで分かれる。
+    historyRef.current.push({ blocks: snapshotBlocks(), textual });
     // 際限なく貯めない。深いところまで戻れることより、重くならないこと。
     if (historyRef.current.length > 120) historyRef.current.shift();
     futureRef.current = [];
     setHistoryDepth({ undo: historyRef.current.length, redo: 0 });
-    applyBlocks(nextBlocks, rekey);
+    applyBlocks(nextBlocks, textual);
   }, [applyBlocks, snapshotBlocks]);
 
   /**
@@ -364,27 +431,27 @@ export default function EditorPage() {
    * 探すのは文字を持つブロックだけ。URL やキャプションまで巻き込むと、
    * 「本文の誤字を直したらリンクが壊れた」が起こる。
    */
-  const findMatches = useMemo(() => {
-    const term = findTerm;
-    if (!term) return 0;
-    return blocks.reduce((sum, block) => {
-      if (!["paragraph", "heading", "quote"].includes(block.blockType)) return sum;
-      return sum + (String(block.text ?? "").split(term).length - 1);
-    }, 0);
-  }, [blocks, findTerm]);
+  // 数えるのは `blocks` ではなく、いま form が持っている値。`blocks` は打鍵では
+  // 更新しない（毎打鍵で一覧全体が描き直されるため）ので、**さっき打った語を
+  // 探すと 0 件になり、「すべて置換」も押せないまま**だった。
+  //
+  // 憶えずに毎回数える。探す語を打つたびに再描画が起きるので控えても効かず、
+  // 語が空のときは即座に 0 で戻る。
+  const findMatches = countMatches(form.getValues().blocks, findTerm);
   const replaceAll = useCallback(() => {
     if (!findTerm) return;
-    const nextBlocks = form.getValues().blocks.map((block) => {
+    const current = form.getValues().blocks;
+    const nextBlocks = current.map((block) => {
       if (!["paragraph", "heading", "quote"].includes(block.blockType)) return block;
       const text = String(block.text ?? "");
       if (!text.includes(findTerm)) return block;
       return { ...block, text: text.split(findTerm).join(replaceTerm) };
     });
-    const changed = nextBlocks.filter((block, index) => block !== blocks[index]).length;
+    const changed = nextBlocks.filter((block, index) => block !== current[index]).length;
     if (!changed) return;
     replaceBlocks(nextBlocks, true);
     notifications.show({ color: "piep", message: `${changed}個のブロックで置き換えました（元に戻すで取り消せます）` });
-  }, [blocks, findTerm, form, replaceBlocks, replaceTerm]);
+  }, [findTerm, form, replaceBlocks, replaceTerm]);
   const jumpToMatch = useCallback(() => {
     if (!findTerm) return;
     const index = form.getValues().blocks.findIndex((block) => ["paragraph", "heading", "quote"].includes(block.blockType) && String(block.text ?? "").includes(findTerm));
@@ -394,20 +461,39 @@ export default function EditorPage() {
     if (block) setActiveBlock(block.clientId);
   }, [editorVirtualizer, findTerm, form]);
 
+  /**
+   * 控えた並びへ戻しつつ、そのあとに書いた文章は残す。
+   *
+   * 控えは「ブロックを消した／動かした」時点のものなので、そのまま戻すと
+   * **それ以降に打った文字までまとめて消えていた**。段落を1つ戻したいだけの
+   * 人が、書いたばかりの一段落を失う。行が同じもの（clientId が同じ）なら、
+   * 中身はいまの値を採る。丸ごと入れ替えた取り消し（一括置換）は行に新しい
+   * id を振ってあるので、ここでは一致せず、狙いどおり文章ごと戻る。
+   */
+  const mergeLiveText = useCallback((entry: HistoryEntry) => {
+    // 一括置換のように**文字そのものを書き換えた**操作は、控えた文字へ戻す。
+    // それ以外は並びだけを戻し、文字はいまのものを残す。
+    if (entry.textual) return entry.blocks;
+    const live = new Map(form.getValues().blocks.map((block) => [block.clientId, block]));
+    return entry.blocks.map((block) => {
+      const current = live.get(block.clientId);
+      return current ? { ...block, text: current.text, assetId: current.assetId, attrsJson: current.attrsJson } : block;
+    });
+  }, [form]);
   const undo = useCallback(() => {
     const previous = historyRef.current.pop();
     if (!previous) return;
-    futureRef.current.push(snapshotBlocks());
-    applyBlocks(previous, true);
+    futureRef.current.push({ blocks: snapshotBlocks(), textual: previous.textual });
+    applyBlocks(mergeLiveText(previous), true);
     setHistoryDepth({ undo: historyRef.current.length, redo: futureRef.current.length });
-  }, [applyBlocks, snapshotBlocks]);
+  }, [applyBlocks, mergeLiveText, snapshotBlocks]);
   const redo = useCallback(() => {
     const next = futureRef.current.pop();
     if (!next) return;
-    historyRef.current.push(snapshotBlocks());
-    applyBlocks(next, true);
+    historyRef.current.push({ blocks: snapshotBlocks(), textual: next.textual });
+    applyBlocks(mergeLiveText(next), true);
     setHistoryDepth({ undo: historyRef.current.length, redo: futureRef.current.length });
-  }, [applyBlocks, snapshotBlocks]);
+  }, [applyBlocks, mergeLiveText, snapshotBlocks]);
   const insertBlock = useCallback((blockType: EditorBlockType, index = blocks.length) => {
     const nextBlocks = [...form.getValues().blocks];
     nextBlocks.splice(index, 0, makeBlock(blockType));
@@ -457,6 +543,9 @@ export default function EditorPage() {
   const doc = query.data;
   const assets = doc.assets;
   const allowPageBreak = doc.download.source === "pixiv";
+  // 編集が載っている土台の版と、いま手元にある版。ずれていれば知らせる。
+  const editBase = doc.draftRevision?.baseVersion ?? doc.activeRevision?.baseVersion ?? null;
+  const staleBase = editBase !== null && editBase < doc.download.currentVersion ? editBase : null;
   const virtualItems = editorVirtualizer.getVirtualItems();
   const renderedEditorItems = virtualItems.length ? virtualItems : blocks.slice(0, 8).map((block, index) => ({ index, key: block.clientId, start: blocks.slice(0, index).reduce((sum, item) => sum + estimateEditorBlockSize(item.blockType), 0) }));
   const virtualHeight = editorVirtualizer.getTotalSize() || blocks.reduce((sum, block) => sum + estimateEditorBlockSize(block.blockType), 0);
@@ -472,13 +561,20 @@ export default function EditorPage() {
     <div className="editor-page">
       <header className="editor-toolbar">
         <Group h="100%" px="md" justify="space-between" wrap="nowrap" className="editor-toolbar__inner">
-          <Group wrap="nowrap" miw={0} className="editor-toolbar__identity"><Tooltip label="作品詳細へ戻る"><ActionIcon variant="subtle" color="gray" aria-label="作品詳細へ戻る" onClick={goBack}><Icons.back size={IconSize.nav} /></ActionIcon></Tooltip><Divider orientation="vertical" h={24} /><Box miw={0} className="editor-toolbar__titlebox"><TextInput size="xs" variant="unstyled" className="editor-toolbar__title" aria-label="この作品のタイトル" value={title} placeholder="タイトル" onChange={(event) => { setTitle(event.currentTarget.value); setDirty(true); }} /><Group gap="xs"><Text size="xs" c="dimmed">編集とプレビュー</Text>{dirty ? <Badge size="xs" color="yellow" variant="light">未保存</Badge> : savedAt && <Text size="xs" c="dimmed">{savedAt.toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" })}に保存</Text>}</Group></Box></Group>
+          <Group wrap="nowrap" miw={0} className="editor-toolbar__identity"><Tooltip label="作品詳細へ戻る"><ActionIcon variant="subtle" color="gray" aria-label="作品詳細へ戻る" onClick={goBack}><Icons.back size={IconSize.nav} /></ActionIcon></Tooltip><Divider orientation="vertical" h={24} /><Box miw={0} className="editor-toolbar__titlebox"><TextInput size="xs" variant="unstyled" className="editor-toolbar__title" aria-label="この作品のタイトル" value={title} placeholder="タイトル" onChange={(event) => { setTitle(event.currentTarget.value); setDirty(true); }} /><Group gap="xs"><Text size="xs" c="dimmed">編集とプレビュー</Text>{dirty ? <Badge size="xs" color="yellow" variant="light">未保存</Badge> : savedAt && <Text size="xs" c="dimmed">{savedAt.toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" })}に保存</Text>}{autoSaveBlocked && dirty && <Tooltip label="空のブロックがあるあいだは自動保存を止めています。文字を入れるか、そのブロックを削除してください。"><Badge size="xs" color="red" variant="light">自動保存 停止中</Badge></Tooltip>}</Group></Box></Group>
           <Group gap="xs" wrap="nowrap" className="editor-toolbar__actions">
             <Tooltip label="元に戻す (Ctrl+Z)"><ActionIcon size="lg" variant="default" aria-label="元に戻す" disabled={historyDepth.undo === 0} onClick={undo}><Icons.undo size={IconSize.action} /></ActionIcon></Tooltip>
             <Tooltip label="やり直す (Ctrl+Shift+Z)"><ActionIcon size="lg" variant="default" aria-label="やり直す" disabled={historyDepth.redo === 0} onClick={redo}><Icons.redo size={IconSize.action} /></ActionIcon></Tooltip>
             <Tooltip label="本文を検索・置換 (Ctrl+F)"><ActionIcon size="lg" variant={findOpened ? "light" : "default"} color="piep" aria-label="本文を検索・置換" aria-pressed={findOpened} onClick={findPanel.toggle}><Icons.search size={IconSize.action} /></ActionIcon></Tooltip>
             <Tooltip label={syncScroll ? "位置同期をオフ" : "位置同期をオン"}><ActionIcon size="lg" variant={syncScroll ? "light" : "default"} color="piep" aria-label="編集ブロックとプレビューの位置を同期" aria-pressed={syncScroll} onClick={() => setSyncScroll(!syncScroll)}><Icons.separator size={IconSize.action} /></ActionIcon></Tooltip>
             <Tooltip label={autoSave ? "自動保存をオフ" : "自動保存をオン"}><ActionIcon size="lg" variant={autoSave ? "light" : "default"} color="piep" aria-label="自動保存" aria-pressed={autoSave} onClick={() => setAutoSave(!autoSave)}><Icons.save size={IconSize.action} /></ActionIcon></Tooltip>
+            {doc.draftRevision && <Tooltip label="書きかけを捨てて、取り込んだままの本文に戻す"><Button size="sm" variant="subtle" color="gray" leftSection={<Icons.delete size={IconSize.menu} />} loading={discardMutation.isPending} disabled={busy} onClick={() => modals.openConfirmModal({
+              title: "下書きを破棄しますか？",
+              children: <Text size="sm">保存されている書きかけを消して、取り込んだままの本文に戻します。反映済みの編集版がある場合は、そちらは残ります。</Text>,
+              confirmProps: { color: "red" },
+              labels: { confirm: "破棄する", cancel: "やめる" },
+              onConfirm: () => discardMutation.mutate(),
+            })}>下書きを破棄</Button></Tooltip>}
             <Button size="sm" variant="light" leftSection={<Icons.save size={IconSize.menu} />} loading={saveMutation.isPending} disabled={publishMutation.isPending || (!dirty && Boolean(doc.draftRevision))} onClick={submitDraft}>下書き保存</Button>
             <Tooltip label="保存して、リーダーとEPUBで使う本文を更新"><Button size="sm" leftSection={<Icons.confirm size={IconSize.menu} />} loading={publishMutation.isPending} disabled={saveMutation.isPending} onClick={submitPublish}>反映</Button></Tooltip>
           </Group>
@@ -500,12 +596,21 @@ export default function EditorPage() {
       <div className="editor-layout">
         <ScrollArea className="editor-main" viewportRef={editorScrollRef} type="scroll" scrollbarSize={8}>
           <form onSubmit={(event) => { event.preventDefault(); submitDraft(); }} className="editor-document">
+            {/* 取り込み直したのに、編集は古い版の上に載ったまま ―― これを誰も
+                知らせていなかった。反映中の編集版は読書画面と EPUB と一覧の題まで
+                上書きするので、新しい本文が黙って隠れる。 */}
+            {staleBase !== null && <Alert className="editor-stale-base" color="yellow" icon={<Icons.warning size={IconSize.action} />} title="取り込み直した本文があります">
+              <Text size="sm">この編集は v{staleBase} の本文をもとにしています。取得元からは v{doc.download.currentVersion} を取り込み済みです。{doc.activeRevision ? "反映中の編集版が新しい本文を覆っているため、読書画面とEPUBには古い本文が出ます。" : "下書きは古い本文のままです。"}</Text>
+              <Text size="xs" c="dimmed" mt={4}>新しい本文で編集し直すには、下書きを破棄してから開き直してください。</Text>
+            </Alert>}
             <BlockInsertMenu label="先頭にブロックを追加" allowPageBreak={allowPageBreak} onInsert={(type) => insertBlock(type, 0)} onImage={() => addAsset(0)} />
             {blocks.length ? <Box className="editor-virtual-list" style={{ height: virtualHeight }}>
               {renderedEditorItems.map((item) => {
                 const block = blocks[item.index];
                 if (!block) return null;
-                return <Box key={block.clientId} ref={editorVirtualizer.measureElement} data-index={item.index} className="editor-virtual-row" style={{ transform: `translateY(${item.start}px)` }}>
+                // 世代を鍵に混ぜる。取り消しや一括置換のあとだけ番号が進み、
+                // 行が作り直されて、非制御の入力欄が新しい値を読み直す。
+                return <Box key={`${block.clientId}#${generation}`} ref={editorVirtualizer.measureElement} data-index={item.index} className="editor-virtual-row" style={{ transform: `translateY(${item.start}px)` }}>
                   <EditorBlock index={item.index} block={block} assets={assets} total={blocks.length} form={form} active={activeBlock === block.clientId} allowPageBreak={allowPageBreak} dragging={dragFrom === item.index} dropTarget={dragFrom !== null && dragOver === item.index && dragOver !== dragFrom} onActivate={activateBlock} onInsert={insertBlock} onImage={addAsset} onMove={moveBlock} onRemove={removeBlock} onUpdate={updateBlock} onDragBegin={setDragFrom} onDragEnter={setDragOver} onDragFinish={() => { if (dragFrom !== null && dragOver !== null) moveBlockTo(dragFrom, dragOver); setDragFrom(null); setDragOver(null); }} />
                 </Box>;
               })}
@@ -706,16 +811,15 @@ const EditorPreviewPane = forwardRef<PreviewHandle, {
 
 const PreviewBlock = memo(function PreviewBlock({ block, asset, pageNumber, active, onActivate }: { block: EditorBlockValue; asset?: AssetEntry; pageNumber: number; active: boolean; onActivate: (clientId: string, origin: "editor" | "preview") => void }) {
   let content: React.ReactNode;
-  if (block.blockType === "heading") content = <h2>{block.text}</h2>;
-  else if (block.blockType === "quote") content = <blockquote>{block.text}</blockquote>;
+  // 記法は開いて描く。読書画面ではルビやリンクになるものが、仕上がりを
+  // 確かめる画面にだけ素の `[[rb:...]]` のまま並んでいた。
+  if (block.blockType === "heading") content = <h2>{renderNotation(block.text ?? "")}</h2>;
+  else if (block.blockType === "quote") content = <blockquote>{renderNotationLines(block.text)}</blockquote>;
   else if (block.blockType === "separator") content = <hr />;
   else if (block.blockType === "pageBreak") content = <div className="editor-preview-page-break"><span>pixiv page {pageNumber}</span></div>;
   else if (block.blockType === "image") content = <figure>{asset ? <img src={getAssetUrl(asset.localPath) ?? undefined} alt={block.text || asset.filename} loading="lazy" decoding="async" /> : <Text c="dimmed">画像を選択してください</Text>}{block.text && <figcaption>{block.text}</figcaption>}</figure>;
   else if (block.blockType === "link") content = <a className="editor-preview-link" href={block.text || undefined} onClick={(event) => event.preventDefault()}><Icons.link size={IconSize.nav} /><span><strong>{linkLabel(block.attrsJson) || block.text || "URLを入力"}</strong><small>{block.text}</small></span></a>;
-  else {
-    const lines = block.text?.split("\n") ?? [];
-    content = <p>{lines.map((line, index) => <span key={index}>{line}{index < lines.length - 1 && <br />}</span>)}</p>;
-  }
+  else content = <p>{renderNotationLines(block.text)}</p>;
   return <div className="editor-preview-block" data-active={active || undefined} data-preview-block-id={block.clientId} onClick={() => onActivate(block.clientId, "preview")}>{content}</div>;
 });
 

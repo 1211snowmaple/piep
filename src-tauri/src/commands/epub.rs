@@ -140,14 +140,25 @@ fn load_manifest(
 ///
 /// 作品ごとに変換した時点では、その作品の中での番号で書かれている。束ねると
 /// ページは通しで振り直されるので、同じだけずらさないと隣の作品を指す。
-fn shift_page_jump_targets(html: &str, offset: u32) -> String {
+/// 作品の中でのページ番号を、束ねた本での番号へ読み替える。
+///
+/// 単純に足し算でずらしていたが、長いページは XHTML を割ってあるので、
+/// 「N 番目のページ」と「ページ N」はもう同じではない。作品ごとに作った
+/// 対応表で引き直す ―― 割られた作品を束ねると、足し算では別の場所を指した。
+fn remap_page_jump_targets(html: &str, mapping: &HashMap<u32, u32>) -> String {
     static PAGE_HREF: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-        regex::Regex::new(r#"href="page_(\d{3})\.xhtml""#).expect("valid page href regex")
+        regex::Regex::new(r#"href="page_(\d{3})(?:_(\d+))?\.xhtml""#)
+            .expect("valid page href regex")
     });
     PAGE_HREF
         .replace_all(html, |captures: &regex::Captures| {
             let page: u32 = captures[1].parse().unwrap_or(0);
-            format!(r#"href="page_{:03}.xhtml""#, page.saturating_add(offset))
+            match mapping.get(&page) {
+                Some(next) => format!(r#"href="page_{:03}.xhtml""#, next),
+                // 行き先の分からない番号は、そのままにしておく。書き換えて
+                // 別の作品を指すより、そこで止まったほうがまだ分かる。
+                None => captures[0].to_string(),
+            }
         })
         .into_owned()
 }
@@ -307,12 +318,21 @@ fn merge_collection_manifests(
         // 束ねた本ではページ番号を通しで振り直す。作品ごとに焼き込まれた
         // ページ内移動のリンクも一緒にずらさないと、2 作目の「2ページへ」が
         // 1 作目の 2 ページ目を指す ―― 行き先はあるのに、別の作品になる。
-        let page_offset = pages.len() as u32;
-        for mut page in manifest.content.pages.drain(..) {
-            page.order = (pages.len() + 1) as u32;
-            if page_offset > 0 {
-                page.html_content = shift_page_jump_targets(&page.html_content, page_offset);
+        // 割られたページも、束ねた本では 1 枚ずつの通し番号を持つ。作品の中で
+        // 使われていたページ番号との対応表を先に作ってから、本文のリンクを
+        // 引き直す。
+        let base = pages.len() as u32;
+        let work_pages = manifest.content.pages.drain(..).collect::<Vec<_>>();
+        let mut mapping: HashMap<u32, u32> = HashMap::new();
+        for (index, page) in work_pages.iter().enumerate() {
+            if page.part == 0 {
+                mapping.insert(page.order, base + index as u32 + 1);
             }
+        }
+        for (index, mut page) in work_pages.into_iter().enumerate() {
+            page.order = base + index as u32 + 1;
+            page.part = 0;
+            page.html_content = remap_page_jump_targets(&page.html_content, &mapping);
             pages.push(page);
         }
         stats.text_length = stats.text_length.saturating_add(manifest.stats.text_length);
@@ -419,6 +439,46 @@ fn batch_output_filename(
     let title: String = title.chars().take(title_limit.max(1)).collect();
 
     format!("{} {}.epub", title, suffix)
+}
+
+/// 収録できなかった画像を、書き出しの結果へ載せる。
+///
+/// 除いたことはログにしか残っていなかった。挿絵が数枚落ちた本でも、画面には
+/// 「成功」としか出ない ―― 落ちたことを知る手立てが利用者側に無かった。
+fn report_skipped_images(
+    builder: &EpubBuilder,
+    reported_path: &Path,
+    issues: &mut Vec<EpubValidationIssue>,
+) {
+    let skipped = builder.skipped_images();
+    if skipped.is_empty() || issues.len() >= MAX_REPORTED_ISSUES {
+        return;
+    }
+    let name = reported_path
+        .file_name()
+        .map(|value| value.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let shown = skipped
+        .iter()
+        .take(5)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(" / ");
+    let more = skipped.len().saturating_sub(5);
+    issues.push(EpubValidationIssue::warning(
+        "EPUB-IMAGES-SKIPPED",
+        &name,
+        format!(
+            "{}枚の画像を収録できませんでした: {}{}",
+            skipped.len(),
+            shown,
+            if more > 0 {
+                format!(" ほか{more}枚")
+            } else {
+                String::new()
+            }
+        ),
+    ));
 }
 
 /// 出来上がった EPUB を開き直して検査し、問題を積む。
@@ -629,6 +689,7 @@ pub async fn export_collection_epub(
     output_dir: String,
     compress_options: Option<ImageCompressOptions>,
     skip_missing: Option<bool>,
+    writing_mode: Option<String>,
 ) -> Result<String, String> {
     let state = app.state::<Arc<AppState>>().inner().clone();
     let _library_snapshot_guard = state.library_gate.clone().read_owned().await;
@@ -724,13 +785,20 @@ pub async fn export_collection_epub(
     tokio::task::spawn_blocking(move || {
         std::fs::create_dir_all(&output_base)
             .map_err(|error| format!("出力先を作成できません: {error}"))?;
-        let builder = EpubBuilder::new(manifest, contents, settings, compress);
+        let builder = EpubBuilder::new(manifest, contents, settings, compress)
+            .with_writing_mode(writing_mode.as_deref());
         let mut issues = Vec::new();
         let valid = build_validate_and_publish(
             &destination,
             |staged_path| builder.build(staged_path),
             |staged_path| validate_and_collect(staged_path, &destination, &mut issues),
         )?;
+        report_skipped_images(&builder, &destination, &mut issues);
+        for issue in &issues {
+            if issue.code == "EPUB-IMAGES-SKIPPED" {
+                log::warn!("{}: {}", issue.location, issue.message);
+            }
+        }
         if valid {
             Ok(())
         } else {
@@ -843,6 +911,7 @@ fn export_batch_item(
     template_name: String,
     output_base: PathBuf,
     compress: ImageCompressOptions,
+    writing_mode: Option<String>,
 ) -> BatchItemResult {
     let title = state
         .db
@@ -869,12 +938,16 @@ fn export_batch_item(
         let settings = manager.read_settings(&resolved);
         let filename = batch_output_filename(&loaded_title, &source, &manifest, download_id);
         let destination = output_base.join(filename);
-        let builder = EpubBuilder::new(manifest, contents, settings, compress);
+        let builder = EpubBuilder::new(manifest, contents, settings, compress)
+            .with_writing_mode(writing_mode.as_deref());
         let valid = build_validate_and_publish(
             &destination,
             |staged_path| builder.build(staged_path),
             |staged_path| validate_and_collect(staged_path, &destination, &mut issues),
         )?;
+        // 置いていった絵は、ログではなく書き出しの結果に出す。挿絵が数枚
+        // 落ちても「成功」としか見えなかった。
+        report_skipped_images(&builder, &destination, &mut issues);
         Ok::<_, String>((destination, valid))
     })();
 
@@ -936,6 +1009,7 @@ pub async fn export_epub_batch(
     template_name: String,
     output_dir: String,
     compress_options: Option<ImageCompressOptions>,
+    writing_mode: Option<String>,
 ) -> Result<ExportBatchResult, String> {
     let state = app.state::<Arc<AppState>>().inner().clone();
     let _library_snapshot_guard = state.library_gate.clone().read_owned().await;
@@ -978,6 +1052,7 @@ pub async fn export_epub_batch(
             let template_name = template_name.clone();
             let output_base = output_base.clone();
             let compress = compress.clone();
+            let writing_mode = writing_mode.clone();
             tasks.spawn_blocking(move || {
                 export_batch_item(
                     app,
@@ -989,6 +1064,7 @@ pub async fn export_epub_batch(
                     template_name,
                     output_base,
                     compress,
+                    writing_mode,
                 )
             });
         }
@@ -1533,6 +1609,7 @@ fn sample_manifest() -> EpubManifest {
             id: "chapter-001".into(),
             title: "第一章 はじまり".into(),
         }],
+        part: 0,
     }];
     EpubManifest {
         core: EpubCore {
@@ -1614,15 +1691,24 @@ mod tests {
     #[test]
     fn page_jumps_follow_their_work_when_books_are_bound_together() {
         let html = r#"<p><a href="page_002.xhtml">2ページへ</a></p>"#;
+        let mapping = HashMap::from([(1u32, 6u32), (2, 7)]);
         assert_eq!(
-            shift_page_jump_targets(html, 5),
+            remap_page_jump_targets(html, &mapping),
             r#"<p><a href="page_007.xhtml">2ページへ</a></p>"#
         );
-        // 先頭の作品はずらさない（呼び手が offset 0 で呼ばない作り）。
-        assert_eq!(shift_page_jump_targets(html, 0), html);
+        // 対応表に無い番号は書き換えない。別の作品を指すより、そこで止まる。
+        assert_eq!(
+            remap_page_jump_targets(r#"<a href="page_009.xhtml">9</a>"#, &mapping),
+            r#"<a href="page_009.xhtml">9</a>"#
+        );
+        // 割られたページの続きも、元のページの行き先へ読み替える。
+        assert_eq!(
+            remap_page_jump_targets(r#"<a href="page_002_2.xhtml">2</a>"#, &mapping),
+            r#"<a href="page_007.xhtml">2</a>"#
+        );
         // 画像や章のリンクには触れない。
         let other = r##"<img src="../images/w0001-img0001.jpg" /><a href="#chapter-001">章</a>"##;
-        assert_eq!(shift_page_jump_targets(other, 3), other);
+        assert_eq!(remap_page_jump_targets(other, &mapping), other);
     }
 
     #[test]

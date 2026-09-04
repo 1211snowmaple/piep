@@ -1,4 +1,4 @@
-import { useCallback, useRef } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import type { MouseEvent } from "react";
 import { useAppNavigate } from "@/app/router";
 import { normalizeContentLinkUrl } from "@/features/browser/downloadCandidates";
@@ -69,24 +69,68 @@ export function contentLinkTarget(raw: string): ContentLinkTarget | null {
   return null;
 }
 
+/** 手元にあると分かったもの。作品だけは、行き先が画面によって変わる。 */
+type ResolvedLink =
+  | { kind: "work"; downloadId: number }
+  | { kind: "path"; path: string }
+  | null;
+
 /** Whether the library actually holds it, without turning a miss into an error. */
-async function resolveInApp(target: ContentLinkTarget, workRoute: (id: number) => string): Promise<string | null> {
+async function resolveTarget(target: ContentLinkTarget): Promise<ResolvedLink> {
   try {
     if (target.kind === "work") {
       const saved = await getDownloadBySource<{ id: number }>(target.source, target.sourceId);
-      return saved ? workRoute(saved.id) : null;
+      return saved ? { kind: "work", downloadId: saved.id } : null;
     }
     const route = target.kind === "person" ? "people" : "series";
     const path = `/${route}/${encodeURIComponent(target.source)}/${encodeURIComponent(target.sourceKey)}`;
     const entry = target.kind === "person"
       ? await getPerson<unknown>(target.source, target.sourceKey)
       : await getSeries<unknown>(target.source, target.sourceKey);
-    return entry ? path : null;
+    return entry ? { kind: "path", path } : null;
   } catch {
     // Not saved, or the lookup failed - either way the outside address is still
     // a working answer, so this is not worth an error message.
     return null;
   }
+}
+
+export function contentLinkKey(target: ContentLinkTarget): string {
+  return target.kind === "work"
+    ? `work:${target.source}:${target.sourceId}`
+    : `${target.kind}:${target.source}:${target.sourceKey}`;
+}
+
+/**
+ * 一度引いた答えを憶えておく置き場。
+ *
+ * 1つの投稿に同じ作者へのリンクが何本も並ぶことがあり、印を付けるためだけに
+ * その数だけ端末へ問い合わせていては、本文が出るのが遅くなる。棚は読んでいる
+ * 間にも変わりうるので、しばらく経った答えは引き直す。
+ */
+const RESOLVE_TTL_MS = 120_000;
+const resolveCache = new Map<string, { at: number; value: Promise<ResolvedLink> }>();
+
+function cachedResolve(target: ContentLinkTarget): Promise<ResolvedLink> {
+  const key = contentLinkKey(target);
+  const hit = resolveCache.get(key);
+  if (hit && Date.now() - hit.at < RESOLVE_TTL_MS) return hit.value;
+  const value = resolveTarget(target);
+  resolveCache.set(key, { at: Date.now(), value });
+  // 引けなかったものは憶えておかない。次に開いたときにもう一度試す。
+  void value.catch(() => resolveCache.delete(key));
+  return value;
+}
+
+/** 棚が変わったら忘れる。保存した直後のリンクが、外部リンクのままにならないように。 */
+export function forgetContentLinkResolutions(): void {
+  resolveCache.clear();
+}
+
+async function resolveInApp(target: ContentLinkTarget, workRoute: (id: number) => string): Promise<string | null> {
+  const resolved = await cachedResolve(target);
+  if (!resolved) return null;
+  return resolved.kind === "work" ? workRoute(resolved.downloadId) : resolved.path;
 }
 
 /**
@@ -131,4 +175,59 @@ export function useContentLinkNavigation(options: {
     if (!/^https?:/i.test(external)) return;
     if (runtime) await openExternalUrl(external); else window.open(external, "_blank", "noopener,noreferrer");
   }, [navigate]);
+}
+
+const SAVED_BADGE_CLASS = "link-card-saved";
+
+/**
+ * 手元にあるものを指しているリンクに、そう見える印を付ける。
+ *
+ * FANBOX の投稿は、続きの回・別の作者・関連する記事をカードで指す。その宛先が
+ * 棚にあるなら、それは外の住所ではなく**この道具の中の場所**なのに、押して
+ * みるまで区別が付かなかった。保存できているという手応えは、ここに出る。
+ */
+export function useLibraryLinkMarks(
+  container: React.RefObject<HTMLElement | null>,
+  /** 中身が入れ替わったことを知るための印。HTML そのもので構わない。 */
+  revision: unknown,
+): void {
+  useEffect(() => {
+    const root = container.current;
+    if (!root || !isTauriRuntime()) return;
+    let cancelled = false;
+    const anchors = [...root.querySelectorAll<HTMLAnchorElement>("a[href], a[data-content-href]")];
+    const pending = new Map<string, HTMLAnchorElement[]>();
+    for (const anchor of anchors) {
+      const raw = anchor.dataset.contentHref ?? anchor.getAttribute("href") ?? "";
+      const target = raw ? contentLinkTarget(raw) : null;
+      if (!target) continue;
+      const key = contentLinkKey(target);
+      const group = pending.get(key);
+      if (group) group.push(anchor);
+      else pending.set(key, [anchor]);
+      // 同じ宛先は一度だけ引く。同じ作者を10回指す投稿でも、問い合わせは1回。
+      if (!group) {
+        void cachedResolve(target).then((resolved) => {
+          if (cancelled || !resolved) return;
+          for (const element of pending.get(key) ?? []) {
+            if (!element.isConnected) continue;
+            element.dataset.inLibrary = "1";
+            if (element.classList.contains("novel-link-card")) {
+              const info = element.querySelector(".link-card-info");
+              if (info && !info.querySelector(`.${SAVED_BADGE_CLASS}`)) {
+                const badge = document.createElement("span");
+                badge.className = SAVED_BADGE_CLASS;
+                badge.textContent = "ライブラリにあります";
+                info.append(badge);
+              }
+            } else {
+              element.classList.add("novel-inline-link--saved");
+            }
+            element.title = "ライブラリに保存済み — アプリ内で開きます";
+          }
+        });
+      }
+    }
+    return () => { cancelled = true; };
+  }, [container, revision]);
 }

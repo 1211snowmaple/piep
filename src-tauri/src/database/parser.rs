@@ -58,6 +58,148 @@ pub(crate) fn safe_link_href(url: &str) -> Option<String> {
     }
 }
 
+/// 埋め込みの `contentId` として置いてよい形。
+///
+/// 取得元の値をそのまま URL へ差し込むので、経路を書き換えられる文字は
+/// 通さない。空白や `<` が混ざったものは、そもそも埋め込みの id ではない。
+pub(crate) fn safe_embed_content_id(value: &str) -> Option<&str> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.len() > 256 {
+        return None;
+    }
+    let allowed = trimmed
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || "-_.~:/?#[]@!$&'()*+,;=%".contains(c));
+    allowed.then_some(trimmed)
+}
+
+/// FANBOX の `embed` ブロックが指す先を、公開 URL へ直す。
+///
+/// FANBOX は埋め込みを「提供元の名前 + その中での id」で持っている。URL は
+/// 保存された JSON のどこにも書かれていないので、ここで組み直さないと
+/// **本文に貼られた動画や音源へ辿る手立てが無くなる**。
+pub(crate) fn embed_service_url(provider: &str, content_id: &str) -> Option<String> {
+    let id = safe_embed_content_id(content_id)?;
+    // 取得元が完全な URL を入れてくることもある。そのときは組み立てない。
+    let lowered_id = id.to_ascii_lowercase();
+    if lowered_id.starts_with("http://") || lowered_id.starts_with("https://") {
+        return Some(id.to_string());
+    }
+    let url = match provider.trim().to_ascii_lowercase().as_str() {
+        "youtube" => format!("https://www.youtube.com/watch?v={id}"),
+        "vimeo" => format!("https://vimeo.com/{id}"),
+        "soundcloud" => format!("https://soundcloud.com/{id}"),
+        "twitter" => format!("https://twitter.com/i/web/status/{id}"),
+        "gist" => format!("https://gist.github.com/{id}"),
+        "google_forms" => format!("https://docs.google.com/forms/d/e/{id}/viewform"),
+        _ => return None,
+    };
+    Some(url)
+}
+
+/// 埋め込みの提供元を、読み手に見せる名前へ。
+pub(crate) fn embed_service_label(provider: &str) -> String {
+    match provider.trim().to_ascii_lowercase().as_str() {
+        "youtube" => "YouTube".to_string(),
+        "vimeo" => "Vimeo".to_string(),
+        "soundcloud" => "SoundCloud".to_string(),
+        "twitter" => "X (Twitter)".to_string(),
+        "gist" => "GitHub Gist".to_string(),
+        "google_forms" => "Google フォーム".to_string(),
+        "" => "埋め込み".to_string(),
+        // 知らない提供元は、名乗っている名前をそのまま見せる。長すぎるものは
+        // 詰める ―― 取得元の文字列をそのまま札にするので、際限を持たせない。
+        other => other.replace('_', " ").chars().take(40).collect(),
+    }
+}
+
+static HTML_EMBED_URL: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"(?i)(href|src)\s*=\s*["'](https?://[^"'\s]+)["']"#).unwrap());
+
+/// 埋め込みの中継先。ここを指しても、読み手の役には立たない。
+const EMBED_RELAY_HOSTS: [&str; 5] = [
+    "iframely",
+    "embedly",
+    "embed.ly",
+    "cdn.iframe.ly",
+    "if-cdn.com",
+];
+
+/// 埋め込みの HTML から、人が辿れる URL を1つ取り出す。
+///
+/// URL を持たず HTML だけを返す埋め込みがある。カードを組めないからと
+/// 捨てていたが、その HTML の中には元のページの宛先が書いてある。
+pub(crate) fn first_public_url_in_html(html: &str) -> Option<String> {
+    let mut from_src: Option<String> = None;
+    for captures in HTML_EMBED_URL.captures_iter(html) {
+        let raw = captures.get(2)?.as_str();
+        let url = raw
+            .replace("&amp;", "&")
+            .replace("&#39;", "'")
+            .replace("&quot;", "\"");
+        let lowered = url.to_ascii_lowercase();
+        if EMBED_RELAY_HOSTS.iter().any(|host| lowered.contains(host)) {
+            continue;
+        }
+        if captures
+            .get(1)
+            .is_some_and(|kind| kind.as_str().eq_ignore_ascii_case("href"))
+        {
+            return Some(url);
+        }
+        from_src.get_or_insert(url);
+    }
+    from_src
+}
+
+/// 本文に置くリンクカード1枚。
+///
+/// 宛先を確かめられたものだけが押せるカードになり、確かめられないものは
+/// 同じ姿のまま押せない札になる。**消してしまうと、そこに何かが貼られて
+/// いた事実ごと失われる。**
+fn link_card_html(
+    href: Option<&str>,
+    provider: &str,
+    kicker: &str,
+    title: &str,
+    meta: &str,
+) -> String {
+    let brand = match provider {
+        "fanbox" => "F",
+        _ => "↗",
+    };
+    let body = format!(
+        r##"<span class="link-card-brand">{}</span>
+                                <span class="link-card-info">
+                                    <span class="link-card-kicker">{}</span>
+                                    <span class="link-card-title">{}</span>
+                                    <span class="link-card-host">{}</span>
+                                </span>"##,
+        brand,
+        escape_html(kicker),
+        escape_html(title),
+        escape_html(meta)
+    );
+    let card_class = if provider == "fanbox" {
+        "novel-link-card novel-link-card--fanbox"
+    } else {
+        "novel-link-card"
+    };
+    match href {
+        Some(href) => format!(
+            r##"<a href="{href}" target="_blank" rel="noopener noreferrer" class="{card_class}" data-provider="{provider}">
+                                {body}
+                                <span class="link-card-arrow">↗</span>
+                            </a>"##
+        ),
+        None => format!(
+            r##"<div class="{card_class} novel-link-card--plain" data-provider="{provider}">
+                                {body}
+                            </div>"##
+        ),
+    }
+}
+
 /// 本文を pixiv の改ページで割る。
 ///
 /// 読書画面と EPUB が**同じ見分け方**を使うための一点。片方が正規表現で
@@ -178,7 +320,14 @@ pub fn parse_fanbox_to_html(raw_json: &str, assets: &[AssetEntry]) -> String {
     let post = crate::fanbox_api::payload::post_or_self(&v);
 
     // 2. 古いプレーンテキスト形式 (PostBodyText) の場合
-    if let Some(text) = post.get("text").and_then(|t| t.as_str()) {
+    //
+    // 空文字の `text` を持ったまま `body.blocks` に本文がある形もある。中身の
+    // 無い `text` でここを抜けると、**投稿全体が空になる**。
+    if let Some(text) = post
+        .get("text")
+        .and_then(|t| t.as_str())
+        .filter(|text| !text.trim().is_empty())
+    {
         let escaped = escape_html(text);
         return escaped.replace("\n", "<br />\n");
     }
@@ -387,8 +536,8 @@ pub fn parse_fanbox_to_html(raw_json: &str, assets: &[AssetEntry]) -> String {
                         .unwrap_or("")
                         .to_string();
                     if url.is_empty() {
-                        if let Some(t_str) = info.get("type").and_then(|t| t.as_str()) {
-                            if t_str == "fanbox.post" {
+                        match info.get("type").and_then(|t| t.as_str()) {
+                            Some("fanbox.post") => {
                                 let post_id = info
                                     .get("postInfo")
                                     .and_then(|pi| pi.get("id"))
@@ -406,6 +555,30 @@ pub fn parse_fanbox_to_html(raw_json: &str, assets: &[AssetEntry]) -> String {
                                     );
                                 }
                             }
+                            // 作者を指す埋め込み。手元にその作者がいれば、
+                            // アプリの中の作者ページへ入っていける。
+                            Some("fanbox.creator") => {
+                                let creator_id = info
+                                    .get("profile")
+                                    .and_then(|profile| profile.get("creatorId"))
+                                    .or_else(|| info.get("creatorId"))
+                                    .and_then(|value| value.as_str())
+                                    .unwrap_or("");
+                                if !creator_id.is_empty() {
+                                    url = format!("https://{creator_id}.fanbox.cc");
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    // URL を持たず HTML だけを返す埋め込みがある。その HTML の
+                    // 中には元のページの宛先が書いてあるので、そこから拾う。
+                    if url.trim().is_empty() {
+                        if let Some(html) = info.get("html").and_then(|value| value.as_str()) {
+                            if let Some(found) = first_public_url_in_html(html) {
+                                url = found;
+                            }
                         }
                     }
 
@@ -415,98 +588,131 @@ pub fn parse_fanbox_to_html(raw_json: &str, assets: &[AssetEntry]) -> String {
                         url = url.replace(".fanbox.cc/manage/posts/", ".fanbox.cc/posts/");
                     }
 
-                    // 通せない相手はカードにしない。押せるリンクを作るのは、
-                    // 相手が http(s) だと確かめられたときだけ。
-                    let Some(safe_url) = safe_link_href(&url) else {
-                        return String::new();
-                    };
-                    if url.is_empty() {
-                        String::new()
-                    } else {
-                        let title = info
-                            .get("postInfo")
-                            .and_then(|pi| pi.get("title"))
-                            .and_then(|t| t.as_str())
-                            .map(|s| s.to_string())
-                            .or_else(|| {
-                                info.get("title")
-                                    .and_then(|t| t.as_str())
-                                    .map(|s| s.to_string())
-                            })
-                            .unwrap_or_else(|| url.clone());
-
-                        let host = info
-                            .get("host")
-                            .and_then(|h| h.as_str())
-                            .map(|s| s.to_string())
-                            .or_else(|| {
-                                url::Url::parse(&url)
-                                    .ok()
-                                    .and_then(|u| u.host_str().map(|h| h.to_string()))
-                            })
-                            .unwrap_or_else(|| "外部リンク".to_string());
-
-                        let is_fanbox = host == "fanbox.cc"
-                            || host.ends_with(".fanbox.cc")
-                            || info.get("type").and_then(|value| value.as_str())
-                                == Some("fanbox.post");
-                        let creator_name = info
-                            .get("postInfo")
-                            .and_then(|post| post.get("user"))
-                            .and_then(|user| user.get("name"))
-                            .and_then(|value| value.as_str())
-                            .unwrap_or("");
-                        let fee = info
-                            .get("postInfo")
-                            .and_then(|post| post.get("feeRequired"))
-                            .and_then(|value| value.as_i64())
-                            .unwrap_or(0);
-                        let meta = match (fee > 0, creator_name.is_empty()) {
-                            (true, false) => format!("¥{} · {}", fee, creator_name),
-                            (true, true) => format!("¥{}", fee),
-                            (false, false) => creator_name.to_string(),
-                            (false, true) => host.clone(),
-                        };
-                        let card_class = if is_fanbox {
-                            "novel-link-card novel-link-card--fanbox"
-                        } else {
-                            "novel-link-card"
-                        };
-                        let brand = if is_fanbox { "F" } else { "↗" };
-
-                        format!(
-                            r##"<a href="{}" target="_blank" rel="noopener noreferrer" class="{}" data-provider="{}">
-                                <span class="link-card-brand">{}</span>
-                                <span class="link-card-info">
-                                    <span class="link-card-kicker">{}</span>
-                                    <span class="link-card-title">{}</span>
-                                    <span class="link-card-host">{}</span>
-                                </span>
-                                <span class="link-card-arrow">↗</span>
-                            </a>"##,
-                            safe_url,
-                            card_class,
-                            if is_fanbox { "fanbox" } else { "web" },
-                            brand,
-                            if is_fanbox {
-                                "pixivFANBOX"
+                    // 通せない相手は押せるリンクにしない。ただし**カードごと
+                    // 消しはしない** ―― そこに何かが貼られていた事実まで
+                    // 失われると、読み手は本文が欠けたことにも気づけない。
+                    let safe_url = safe_link_href(&url);
+                    let host = info
+                        .get("host")
+                        .and_then(|h| h.as_str())
+                        .filter(|value| !value.trim().is_empty())
+                        .map(|s| s.to_string())
+                        .or_else(|| {
+                            url::Url::parse(&url)
+                                .ok()
+                                .and_then(|u| u.host_str().map(|h| h.to_string()))
+                        })
+                        .unwrap_or_else(|| "外部リンク".to_string());
+                    let title = info
+                        .get("postInfo")
+                        .and_then(|pi| pi.get("title"))
+                        .and_then(|t| t.as_str())
+                        .map(|s| s.to_string())
+                        .or_else(|| {
+                            info.get("title")
+                                .and_then(|t| t.as_str())
+                                .map(|s| s.to_string())
+                        })
+                        .filter(|value| !value.trim().is_empty())
+                        .unwrap_or_else(|| {
+                            if url.trim().is_empty() {
+                                "リンク先を取り出せない埋め込み".to_string()
                             } else {
-                                "外部リンク"
-                            },
-                            escape_html(&title),
-                            escape_html(&meta)
-                        )
-                    }
+                                url.clone()
+                            }
+                        });
+
+                    let is_fanbox = host == "fanbox.cc"
+                        || host.ends_with(".fanbox.cc")
+                        || info.get("type").and_then(|value| value.as_str()) == Some("fanbox.post");
+                    let creator_name = info
+                        .get("postInfo")
+                        .and_then(|post| post.get("user"))
+                        .and_then(|user| user.get("name"))
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("");
+                    let fee = info
+                        .get("postInfo")
+                        .and_then(|post| post.get("feeRequired"))
+                        .and_then(|value| value.as_i64())
+                        .unwrap_or(0);
+                    let meta = match (fee > 0, creator_name.is_empty()) {
+                        (true, false) => format!("¥{} · {}", fee, creator_name),
+                        (true, true) => format!("¥{}", fee),
+                        (false, false) => creator_name.to_string(),
+                        (false, true) => host.clone(),
+                    };
+                    link_card_html(
+                        safe_url.as_deref(),
+                        if is_fanbox { "fanbox" } else { "web" },
+                        if is_fanbox {
+                            "pixivFANBOX"
+                        } else {
+                            "外部リンク"
+                        },
+                        &title,
+                        &meta,
+                    )
                 } else {
                     String::new()
                 }
             }
+            // 動画・音源・フォームの埋め込み。URL は保存された JSON に書かれて
+            // いないので、提供元と id から組み直す。組み直せない提供元でも、
+            // 何が貼られていたかは残す。
+            "embed" => {
+                let embed_id = block
+                    .get("embedId")
+                    .and_then(|id| id.as_str())
+                    .unwrap_or("");
+                let embed_info = body
+                    .get("embedMap")
+                    .or_else(|| body.get("embed_map"))
+                    .or_else(|| post.get("embedMap"))
+                    .or_else(|| post.get("embed_map"))
+                    .and_then(|m| m.get(embed_id));
+
+                match embed_info {
+                    Some(info) => {
+                        let provider = info
+                            .get("serviceProvider")
+                            .or_else(|| info.get("service_provider"))
+                            .and_then(|value| value.as_str())
+                            .unwrap_or("");
+                        let content_id = info
+                            .get("contentId")
+                            .or_else(|| info.get("content_id"))
+                            .and_then(|value| value.as_str())
+                            .unwrap_or("");
+                        let url = embed_service_url(provider, content_id);
+                        let safe_url = url.as_deref().and_then(safe_link_href);
+                        let label = embed_service_label(provider);
+                        let title = match &url {
+                            Some(url) => url.clone(),
+                            None if content_id.trim().is_empty() => label.clone(),
+                            None => content_id.trim().to_string(),
+                        };
+                        link_card_html(safe_url.as_deref(), "web", &label, &title, "埋め込み")
+                    }
+                    None => String::new(),
+                }
+            }
             _ => {
-                // 未対応ブロックのフォールバック
-                format!(
-                    r#"<div class="fallback-block" style="padding: 1em; margin: 1em 0; border: 1px dashed var(--color-border); color: var(--color-text-secondary); font-style: italic; border-radius: 6px;">サポートされていないコンテンツブロック (タイプ: {}) は表示できません。</div>"#,
-                    escape_html(block_type)
-                )
+                // 知らないブロックでも、文字を持っているなら本文として出す。
+                // 「表示できません」の札だけを置いていたころは、取得元が種類を
+                // 増やすたびに、読める本文が札に置き換わっていた。
+                if block
+                    .get("text")
+                    .and_then(|value| value.as_str())
+                    .is_some_and(|text| !text.trim().is_empty())
+                {
+                    parse_fanbox_paragraph(block)
+                } else {
+                    format!(
+                        r#"<div class="fallback-block">この形式のブロック（{}）は表示できません。</div>"#,
+                        escape_html(block_type)
+                    )
+                }
             }
         };
 
@@ -810,6 +1016,170 @@ mod tests {
         let html = parse_fanbox_to_html(&json.to_string(), &[]);
         assert!(html.contains("https://creator.fanbox.cc/posts/321"));
         assert!(!html.contains("/manage/posts/"));
+    }
+
+    /// iframely の HTML しか持たない埋め込みは、安全なリンクへ変換できない。
+    /// そこで投稿全体を空にすると、その前後にある正常な本文まで読めなくなる。
+    #[test]
+    fn an_unrenderable_embed_does_not_erase_the_rest_of_a_fanbox_post() {
+        let json = serde_json::json!({
+            "id": "12329460",
+            "title": "活動報告",
+            "body": {
+                "blocks": [
+                    { "type": "p", "text": "埋め込みより前" },
+                    { "type": "url_embed", "urlEmbedId": "card" },
+                    { "type": "p", "text": "埋め込みより後" }
+                ],
+                "urlEmbedMap": {
+                    "card": {
+                        "type": "html.card",
+                        "html": "<iframe src=\"https://iframely.net/example\"></iframe>"
+                    }
+                }
+            }
+        });
+
+        let html = parse_fanbox_to_html(&json.to_string(), &[]);
+        assert!(
+            html.contains("埋め込みより前"),
+            "前の本文が消えている: {html}"
+        );
+        assert!(
+            html.contains("埋め込みより後"),
+            "後の本文が消えている: {html}"
+        );
+        assert!(!html.contains("iframe"));
+        // 何が貼られていたかの札は残す。跡形もなく消すと、本文が欠けたことに
+        // 読み手が気づけない。
+        assert!(html.contains("novel-link-card"), "札まで消えている: {html}");
+    }
+
+    /// URL を持たず HTML だけを返す埋め込みでも、その HTML に本物の宛先が
+    /// 書いてあることがある。中継先ではなく、そちらを拾う。
+    #[test]
+    fn an_html_only_embed_keeps_the_address_written_inside_it() {
+        let json = serde_json::json!({
+            "id": "1",
+            "title": "紹介",
+            "body": {
+                "blocks": [{ "type": "url_embed", "urlEmbedId": "card" }],
+                "urlEmbedMap": {
+                    "card": {
+                        "type": "html.card",
+                        "html": "<div class=\"iframely-embed\"><a href=\"https://example.com/article/1\">記事</a><iframe src=\"https://cdn.iframe.ly/abc\"></iframe></div>"
+                    }
+                }
+            }
+        });
+
+        let html = parse_fanbox_to_html(&json.to_string(), &[]);
+        assert!(html.contains("https://example.com/article/1"), "{html}");
+        assert!(!html.contains("iframe.ly"), "中継先を指している: {html}");
+    }
+
+    /// `embed` ブロックは提供元と id しか持たない。URL を組み直さないと、
+    /// 本文に貼られた動画や音源へ辿る手立てがどこにも残らない。
+    #[test]
+    fn a_service_embed_becomes_a_link_to_the_service() {
+        let json = serde_json::json!({
+            "id": "1",
+            "title": "動画",
+            "body": {
+                "blocks": [{ "type": "embed", "embedId": "e1" }],
+                "embedMap": {
+                    "e1": { "id": "e1", "serviceProvider": "youtube", "contentId": "dQw4w9WgXcQ" }
+                }
+            }
+        });
+
+        let html = parse_fanbox_to_html(&json.to_string(), &[]);
+        assert!(
+            html.contains("https://www.youtube.com/watch?v=dQw4w9WgXcQ"),
+            "{html}"
+        );
+        assert!(html.contains("YouTube"), "{html}");
+        assert!(!html.contains("表示できません"), "{html}");
+    }
+
+    /// 知らない提供元でも、貼られていたことは残す。押せないだけ。
+    #[test]
+    fn an_unknown_service_embed_is_still_shown() {
+        let json = serde_json::json!({
+            "id": "1",
+            "title": "埋め込み",
+            "body": {
+                "blocks": [{ "type": "embed", "embedId": "e1" }],
+                "embedMap": { "e1": { "serviceProvider": "unknown_service", "contentId": "abc" } }
+            }
+        });
+
+        let html = parse_fanbox_to_html(&json.to_string(), &[]);
+        assert!(html.contains("novel-link-card"), "{html}");
+        assert!(html.contains("unknown service"), "{html}");
+        assert!(
+            !html.contains("<a "),
+            "宛先を確かめずにリンクにしている: {html}"
+        );
+    }
+
+    /// 埋め込みの id に経路を書き換える文字が混ざっていても、組み立てない。
+    #[test]
+    fn an_embed_id_cannot_escape_the_service_url() {
+        assert_eq!(embed_service_url("youtube", "abc\" onmouseover=\"x"), None);
+        assert_eq!(embed_service_url("youtube", "  "), None);
+        assert_eq!(
+            embed_service_url("youtube", "https://evil.example/x").as_deref(),
+            Some("https://evil.example/x")
+        );
+    }
+
+    /// 中身の無い `text` を持ったまま、本文は `body.blocks` にある形がある。
+    /// そこで抜けてしまうと、投稿全体が空になる。
+    #[test]
+    fn an_empty_text_field_does_not_hide_the_blocks() {
+        let json = serde_json::json!({
+            "id": "1",
+            "title": "投稿",
+            "text": "",
+            "body": { "blocks": [{ "type": "p", "text": "本文はこちらにある" }] }
+        });
+        let html = parse_fanbox_to_html(&json.to_string(), &[]);
+        assert!(html.contains("本文はこちらにある"), "{html}");
+    }
+
+    /// 作者を指す埋め込みも、辿れる住所にする。手元にその作者がいれば、
+    /// 画面側がアプリの中の作者ページへ読み替える。
+    #[test]
+    fn a_creator_embed_points_at_the_creator_page() {
+        let json = serde_json::json!({
+            "id": "1",
+            "title": "紹介",
+            "body": {
+                "blocks": [{ "type": "url_embed", "urlEmbedId": "c1" }],
+                "urlEmbedMap": {
+                    "c1": { "type": "fanbox.creator", "profile": { "creatorId": "mizu-atelier" } }
+                }
+            }
+        });
+        let html = parse_fanbox_to_html(&json.to_string(), &[]);
+        assert!(html.contains("https://mizu-atelier.fanbox.cc"), "{html}");
+    }
+
+    /// 取得元が種類を増やしても、文字を持つブロックは本文として読める。
+    #[test]
+    fn an_unknown_block_still_shows_the_text_it_carries() {
+        let json = serde_json::json!({
+            "id": "1",
+            "title": "投稿",
+            "body": {
+                "blocks": [{ "type": "quote", "text": "引用された一文" }]
+            }
+        });
+
+        let html = parse_fanbox_to_html(&json.to_string(), &[]);
+        assert!(html.contains("引用された一文"), "{html}");
+        assert!(!html.contains("表示できません"), "{html}");
     }
 
     #[test]
