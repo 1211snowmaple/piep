@@ -106,16 +106,15 @@ pub(crate) fn embed_service_label(provider: &str) -> String {
         "twitter" => "X (Twitter)".to_string(),
         "gist" => "GitHub Gist".to_string(),
         "google_forms" => "Google フォーム".to_string(),
-        other if other.is_empty() => "埋め込み".to_string(),
+        "" => "埋め込み".to_string(),
         // 知らない提供元は、名乗っている名前をそのまま見せる。長すぎるものは
         // 詰める ―― 取得元の文字列をそのまま札にするので、際限を持たせない。
         other => other.replace('_', " ").chars().take(40).collect(),
     }
 }
 
-static HTML_EMBED_URL: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?i)(href|src)\s*=\s*["'](https?://[^"'\s]+)["']"#).unwrap()
-});
+static HTML_EMBED_URL: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"(?i)(href|src)\s*=\s*["'](https?://[^"'\s]+)["']"#).unwrap());
 
 /// 埋め込みの中継先。ここを指しても、読み手の役には立たない。
 const EMBED_RELAY_HOSTS: [&str; 5] = [
@@ -142,7 +141,10 @@ pub(crate) fn first_public_url_in_html(html: &str) -> Option<String> {
         if EMBED_RELAY_HOSTS.iter().any(|host| lowered.contains(host)) {
             continue;
         }
-        if captures.get(1).is_some_and(|kind| kind.as_str().eq_ignore_ascii_case("href")) {
+        if captures
+            .get(1)
+            .is_some_and(|kind| kind.as_str().eq_ignore_ascii_case("href"))
+        {
             return Some(url);
         }
         from_src.get_or_insert(url);
@@ -155,7 +157,13 @@ pub(crate) fn first_public_url_in_html(html: &str) -> Option<String> {
 /// 宛先を確かめられたものだけが押せるカードになり、確かめられないものは
 /// 同じ姿のまま押せない札になる。**消してしまうと、そこに何かが貼られて
 /// いた事実ごと失われる。**
-fn link_card_html(href: Option<&str>, provider: &str, kicker: &str, title: &str, meta: &str) -> String {
+fn link_card_html(
+    href: Option<&str>,
+    provider: &str,
+    kicker: &str,
+    title: &str,
+    meta: &str,
+) -> String {
     let brand = match provider {
         "fanbox" => "F",
         _ => "↗",
@@ -616,8 +624,7 @@ pub fn parse_fanbox_to_html(raw_json: &str, assets: &[AssetEntry]) -> String {
 
                     let is_fanbox = host == "fanbox.cc"
                         || host.ends_with(".fanbox.cc")
-                        || info.get("type").and_then(|value| value.as_str())
-                            == Some("fanbox.post");
+                        || info.get("type").and_then(|value| value.as_str()) == Some("fanbox.post");
                     let creator_name = info
                         .get("postInfo")
                         .and_then(|post| post.get("user"))
@@ -638,7 +645,11 @@ pub fn parse_fanbox_to_html(raw_json: &str, assets: &[AssetEntry]) -> String {
                     link_card_html(
                         safe_url.as_deref(),
                         if is_fanbox { "fanbox" } else { "web" },
-                        if is_fanbox { "pixivFANBOX" } else { "外部リンク" },
+                        if is_fanbox {
+                            "pixivFANBOX"
+                        } else {
+                            "外部リンク"
+                        },
                         &title,
                         &meta,
                     )
@@ -1106,7 +1117,10 @@ mod tests {
         let html = parse_fanbox_to_html(&json.to_string(), &[]);
         assert!(html.contains("novel-link-card"), "{html}");
         assert!(html.contains("unknown service"), "{html}");
-        assert!(!html.contains("<a "), "宛先を確かめずにリンクにしている: {html}");
+        assert!(
+            !html.contains("<a "),
+            "宛先を確かめずにリンクにしている: {html}"
+        );
     }
 
     /// 埋め込みの id に経路を書き換える文字が混ざっていても、組み立てない。

@@ -147,7 +147,8 @@ fn load_manifest(
 /// 対応表で引き直す ―― 割られた作品を束ねると、足し算では別の場所を指した。
 fn remap_page_jump_targets(html: &str, mapping: &HashMap<u32, u32>) -> String {
     static PAGE_HREF: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-        regex::Regex::new(r#"href="page_(\d{3})(?:_(\d+))?\.xhtml""#).expect("valid page href regex")
+        regex::Regex::new(r#"href="page_(\d{3})(?:_(\d+))?\.xhtml""#)
+            .expect("valid page href regex")
     });
     PAGE_HREF
         .replace_all(html, |captures: &regex::Captures| {
@@ -457,7 +458,12 @@ fn report_skipped_images(
         .file_name()
         .map(|value| value.to_string_lossy().to_string())
         .unwrap_or_default();
-    let shown = skipped.iter().take(5).cloned().collect::<Vec<_>>().join(" / ");
+    let shown = skipped
+        .iter()
+        .take(5)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(" / ");
     let more = skipped.len().saturating_sub(5);
     issues.push(EpubValidationIssue::warning(
         "EPUB-IMAGES-SKIPPED",
@@ -466,7 +472,11 @@ fn report_skipped_images(
             "{}枚の画像を収録できませんでした: {}{}",
             skipped.len(),
             shown,
-            if more > 0 { format!(" ほか{more}枚") } else { String::new() }
+            if more > 0 {
+                format!(" ほか{more}枚")
+            } else {
+                String::new()
+            }
         ),
     ));
 }

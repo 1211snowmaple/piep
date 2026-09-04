@@ -229,7 +229,6 @@ struct PartialStats {
     adult: bool,
 }
 
-#[allow(clippy::too_many_arguments)]
 /// 1つの XHTML に収める本文の上限（バイト）。
 ///
 /// 読書画面は同じ本文を 128KB で割って運んでいるのに、本にするときは割らずに
@@ -297,6 +296,7 @@ fn split_html_at_block_boundaries(html: &str, limit: usize) -> Vec<String> {
     pieces
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_manifest(
     core: EpubCore,
     provider: ProviderData,
@@ -729,8 +729,8 @@ fn convert_fanbox_body_to_pages(data: &Value) -> (Vec<EpubPage>, u64, Vec<EpubAt
                 // 落ちていた。
                 "embed" => {
                     pending_blank = false;
-                    if let Some((label, url)) =
-                        read_str(block.get("embedId")).and_then(|id| fanbox_service_embed(body, &id))
+                    if let Some((label, url)) = read_str(block.get("embedId"))
+                        .and_then(|id| fanbox_service_embed(body, &id))
                     {
                         match url {
                             Some(url) => html.push_str(&format!(
@@ -1382,8 +1382,14 @@ mod tests {
             html_content: html,
             order: 1,
             chapters: vec![
-                EpubChapter { id: "chapter-001".into(), title: "序".into() },
-                EpubChapter { id: "chapter-002".into(), title: "破".into() },
+                EpubChapter {
+                    id: "chapter-001".into(),
+                    title: "序".into(),
+                },
+                EpubChapter {
+                    id: "chapter-002".into(),
+                    title: "破".into(),
+                },
             ],
             part: 0,
         }]);
@@ -1395,7 +1401,10 @@ mod tests {
         assert_eq!(pages[1].part, 1);
         // 見出しは、その錨が載っている側へ付いていく。
         assert!(pages[0].chapters.iter().any(|c| c.id == "chapter-001"));
-        assert!(pages.iter().flat_map(|page| &page.chapters).any(|c| c.id == "chapter-002"));
+        assert!(pages
+            .iter()
+            .flat_map(|page| &page.chapters)
+            .any(|c| c.id == "chapter-002"));
         assert_eq!(
             pages.iter().flat_map(|page| &page.chapters).count(),
             2,
@@ -1403,10 +1412,17 @@ mod tests {
         );
         // 割った先も、要素の切れ目で始まっていること。
         for page in &pages {
-            assert!(page.html_content.trim_start().starts_with('<'), "{}", &page.html_content[..40]);
+            assert!(
+                page.html_content.trim_start().starts_with('<'),
+                "{}",
+                &page.html_content[..40]
+            );
         }
         // 本文は一文字も落とさない。
-        let joined = pages.iter().map(|page| page.html_content.as_str()).collect::<String>();
+        let joined = pages
+            .iter()
+            .map(|page| page.html_content.as_str())
+            .collect::<String>();
         assert_eq!(joined.matches("</p>").count(), 40);
     }
 
@@ -1464,6 +1480,12 @@ mod tests {
             }
         });
         let (pages, _, _) = convert_fanbox_body_to_pages(&data);
-        assert!(pages[0].html_content.contains("https://www.youtube.com/watch?v=abc123"), "{}", pages[0].html_content);
+        assert!(
+            pages[0]
+                .html_content
+                .contains("https://www.youtube.com/watch?v=abc123"),
+            "{}",
+            pages[0].html_content
+        );
     }
 }

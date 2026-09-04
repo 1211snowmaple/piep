@@ -5994,17 +5994,21 @@ fn a_draft_can_be_discarded_back_to_the_imported_text() {
         }],
     )
     .unwrap();
-    assert!(db.get_editor_document(download_id).unwrap().draft_revision.is_some());
+    assert!(db
+        .get_editor_document(download_id)
+        .unwrap()
+        .draft_revision
+        .is_some());
 
     db.discard_work_draft(download_id).unwrap();
 
     let editor = db.get_editor_document(download_id).unwrap();
     assert!(editor.draft_revision.is_none(), "下書きが残っている");
     assert!(
-        editor
-            .blocks
-            .iter()
-            .any(|block| block.text.as_deref().is_some_and(|text| text.contains("取り込んだまま"))),
+        editor.blocks.iter().any(|block| block
+            .text
+            .as_deref()
+            .is_some_and(|text| text.contains("取り込んだまま"))),
         "取り込んだままの本文が戻っていない: {:?}",
         editor.blocks
     );

@@ -1230,7 +1230,8 @@ mod tests {
     /// 持ち出す道具としてそれは通らない。
     #[test]
     fn the_export_can_choose_vertical_writing() {
-        let path = std::env::temp_dir().join(format!("piep_epub_tategaki_{}.epub", rand::random::<u64>()));
+        let path =
+            std::env::temp_dir().join(format!("piep_epub_tategaki_{}.epub", rand::random::<u64>()));
         EpubBuilder::new(
             hostile_manifest(),
             builtin_template_contents("pixiv"),
@@ -1276,7 +1277,10 @@ mod tests {
             &mut css,
         )
         .unwrap();
-        assert!(!css.contains("piep: 書き出しのときに選ばれた組み方"), "{css}");
+        assert!(
+            !css.contains("piep: 書き出しのときに選ばれた組み方"),
+            "{css}"
+        );
         let _ = std::fs::remove_file(path);
     }
 }

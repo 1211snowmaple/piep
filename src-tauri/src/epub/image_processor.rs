@@ -15,7 +15,11 @@ use zenjpeg::encoder::{ChromaSubsampling, EncoderConfig, PixelLayout, Unstoppabl
 /// 見分けられなければ `None` を返し、呼び手が拡張子に頼る。SVG は中身が
 /// テキストなので `image` crate では見分けられず、拡張子のままでよい。
 fn sniff_image_mime(path: &Path) -> Option<&'static str> {
-    let format = ImageReader::open(path).ok()?.with_guessed_format().ok()?.format()?;
+    let format = ImageReader::open(path)
+        .ok()?
+        .with_guessed_format()
+        .ok()?
+        .format()?;
     match format {
         ImageFormat::Jpeg => Some("image/jpeg"),
         ImageFormat::Png => Some("image/png"),
