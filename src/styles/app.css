@@ -1477,7 +1477,7 @@ select {
 }
 
 .entity-hero__banner {
-  height: clamp(190px, 22vw, 300px);
+  height: clamp(160px, 18vw, 240px);
   overflow: hidden;
   background: light-dark(#edf1f4, #1b222b);
 }
@@ -1496,8 +1496,7 @@ select {
 
 /* 操作列が名前を畳む境目は、この箱の幅で測る。 */
 .entity-hero__body { position: relative; padding: clamp(20px, 2.5vw, 34px); container-type: inline-size; container-name: hero; }
-.entity-hero:has(.entity-hero__banner) .entity-hero__body { padding-top: 22px; }
-.entity-hero:has(.entity-hero__banner) .entity-hero__avatar { margin-top: -72px; }
+.entity-hero__primary { position: relative; }
 .entity-hero__avatar {
   flex: 0 0 auto;
   border: 4px solid light-dark(#fff, #141a22);
@@ -1563,16 +1562,15 @@ select {
   container-type: inline-size;
   container-name: heroactions;
 }
-.entity-hero__actions .action-bar { justify-content: flex-end; }
-.entity-hero[data-kind="person"]:has(.entity-hero__banner) .entity-hero__actions {
+.entity-hero[data-kind="person"] .entity-hero__actions {
   position: absolute;
   z-index: 4;
-  top: calc(24px - clamp(190px, 22vw, 300px));
-  right: 24px;
-  width: min(620px, calc(100% - 48px));
+  top: 0;
+  right: 0;
+  width: min(620px, calc(100% - 136px));
   margin: 0;
-  filter: drop-shadow(0 4px 12px rgb(12 21 31 / 18%));
 }
+.entity-hero__actions .action-bar { justify-content: flex-end; }
 .entity-hero__primary .provider-mark { width: fit-content; align-self: flex-start; }
 .profile-links { align-items: stretch; }
 .profile-link {
@@ -1589,6 +1587,15 @@ select {
 .entity-hero h1 { font-size: clamp(23px, 2vw, 30px); line-height: 1.3; letter-spacing: -0.025em; }
 .entity-hero__title { overflow-wrap: anywhere; }
 .entity-page .mantine-Tabs-panel { min-height: 420px; }
+
+/* 狭い幅では操作列の下に人物情報を置き、アイコンと文字のための幅を確保する。 */
+@container hero (max-width: 36rem) {
+  .entity-hero[data-kind="person"] .entity-hero__actions {
+    position: static;
+    width: 100%;
+    margin-bottom: 16px;
+  }
+}
 
 .reader-page {
   position: relative;

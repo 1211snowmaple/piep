@@ -101,7 +101,8 @@ describe("author page", () => {
     expect(heading).toHaveClass("entity-hero__title");
     expect(heading).not.toHaveClass("line-clamp-2");
     const actions = screen.getByRole("group", { name: "催眠アプリに翻弄されるLOビアンたちの操作" });
-    expect(actions.closest(".entity-hero__identity-copy")).not.toBeNull();
+    expect(actions.closest(".entity-hero__primary")).not.toBeNull();
+    expect(actions.closest(".entity-hero__identity-copy")).toBeNull();
     expect(actions.compareDocumentPosition(heading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 

@@ -474,6 +474,12 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
     try { await exportEntityZip(kind, source, key, path); notifications.show({ color: "green", title: "書き出しました", message: path }); }
     catch (error) { notifications.show({ color: "red", title: "書き出しに失敗しました", message: errorMessage(error) }); }
   };
+  const entityActions = [
+    { key: "in-app", label: "アプリ内で開く", icon: Icons.inAppBrowser, onClick: openSourceInApp },
+    { key: "browser", label: "ブラウザで開く", icon: Icons.externalLink, onClick: openSourceExternally },
+    { key: "archive", label: "アーカイブ", icon: Icons.archive, onClick: exportZip },
+    { key: "refresh", label: "情報を更新", icon: Icons.watch, primary: true, loading: refreshMutation.isPending, onClick: () => refreshMutation.mutate() },
+  ];
 
   return (
     <div className="page page--contained entity-page">
@@ -485,24 +491,15 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
         {kind === "person" && coverPath && <Box className="entity-hero__banner"><Image src={getAssetUrl(coverPath)} alt={`${displayName}のヘッダー画像`} /></Box>}
         <Box className="entity-hero__body">
           <Box className="entity-hero__primary">
-            <Group align="flex-start" wrap="nowrap" miw={0} className="entity-hero__identity">
+            {/* 操作は人物情報とは別の段として扱う。作者名のまとまりをアイコンの
+                中央へ置いても、ヘッダーの有無で操作やアイコンが動かない。 */}
+            {kind === "person" && <Box className="entity-hero__actions"><ActionBar label={`${displayName}の操作`} items={entityActions} /></Box>}
+            <Group align={kind === "person" ? "center" : "flex-start"} wrap="nowrap" miw={0} className="entity-hero__identity">
               {kind === "person"
                 ? <Avatar className="entity-hero__avatar" src={getAssetUrl(avatarPath)} size={112} radius="xl" color="piep">{noImage ? <NoImageMark /> : <Icons.person size={IconSize.avatar} />}</Avatar>
                 : <Box ref={seriesCoverRef} className="entity-hero__series-cover">{avatarPath ? <Image src={getAssetUrl(avatarPath)} alt={`${displayName}の表紙`} fit="contain" /> : <Icons.series size={IconSize.avatar} />}</Box>}
               <Stack gap={7} mb={5} miw={0} align="flex-start" className="entity-hero__identity-copy">
-                {/* 作品詳細と同じく、操作を上、名前を下に置く。別段なので長い
-                    正式名称の表示幅は奪わない。 */}
-                <Box className="entity-hero__actions">
-                  <ActionBar
-                    label={`${displayName}の操作`}
-                    items={[
-                      { key: "in-app", label: "アプリ内で開く", icon: Icons.inAppBrowser, onClick: openSourceInApp },
-                      { key: "browser", label: "ブラウザで開く", icon: Icons.externalLink, onClick: openSourceExternally },
-                      { key: "archive", label: "アーカイブ", icon: Icons.archive, onClick: exportZip },
-                      { key: "refresh", label: "情報を更新", icon: Icons.watch, primary: true, loading: refreshMutation.isPending, onClick: () => refreshMutation.mutate() },
-                    ]}
-                  />
-                </Box>
+                {kind === "series" && <Box className="entity-hero__actions"><ActionBar label={`${displayName}の操作`} items={entityActions} /></Box>}
                 <Box ref={entityMarksRef}><ProviderMark provider={source} /></Box>
                 <Title order={1} className="entity-hero__title">{displayName}</Title>{/* かつてここには「更新 …」と出ていたが、指していたのは取得元での更新では
                     なく piep の行が書き換わった日だった。読む側には区別がつかない。
