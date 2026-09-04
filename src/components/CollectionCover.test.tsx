@@ -26,7 +26,6 @@ function summary(overrides: Partial<WorkCollectionSummary> = {}): WorkCollection
     coverImagePath: null,
     coverTiles: [],
     nameSource: "manual",
-    track: "manual",
     revision: 1,
     memberCount: 0,
     availableCount: 0,

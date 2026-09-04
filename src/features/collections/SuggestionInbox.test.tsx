@@ -48,7 +48,10 @@ function suggestion(): CollectionSuggestion {
     proposedName: "雨の連作",
     reason: "題名の話数が続いている",
     confidence: 0.9,
-    nameOptions: [{ name: "雨の連作", source: "rule" }],
+    nameOptions: [
+      { name: "雨の連作", source: "rule" },
+      { name: "青葉しおりのまとまり", source: "author", label: "作者" },
+    ],
     members: [member(1), member(2), member(3)],
   } as unknown as CollectionSuggestion;
 }
@@ -120,6 +123,22 @@ describe("SuggestionInbox", () => {
     expect(await screen.findByText("作品1")).toBeInTheDocument();
     expect(screen.getByText("作品2")).toBeInTheDocument();
     expect(screen.getByText("作品3")).toBeInTheDocument();
+  });
+
+  /**
+   * 名前の案は畳んでおく。全文を縦に並べていたころ、カードの42%が名前の案で、
+   * 構成作品より大きかった。名前は作ったあとで「名前を付け直す」から直せる
+   * ので、ここで必ず決める必要はない。
+   */
+  it("名前の案は畳んであり、開くと他の案だけが出る", async () => {
+    renderInbox();
+    // 畳んである間は、案の中身は出ていない。
+    expect(await screen.findByRole("button", { name: /他の名前の案/ })).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: /他の名前の案/ }));
+    // 選ばれている名前は見出しにあるので、開いた先には出さない。数が合う。
+    const label = screen.getByRole("button", { name: /他の名前の案/ }).textContent ?? "";
+    expect(label).toContain("1");
   });
 
   it("閉じるは、その提案だけを閉じる", async () => {

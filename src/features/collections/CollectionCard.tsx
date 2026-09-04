@@ -5,11 +5,6 @@ import { formatDate, formatNumber } from "@/lib/format";
 import { Icons, IconSize } from "@/lib/icons";
 import type { WorkCollectionSummary } from "@/types/collections";
 
-const TRACK_LABEL: Record<string, string> = {
-  sequence: "続き物",
-  theme: "テーマ",
-};
-
 /**
  * 束をひとつ、ひと目で。ライブラリのタブと作者ページが共有する。
  *
@@ -19,7 +14,6 @@ const TRACK_LABEL: Record<string, string> = {
  */
 export function CollectionCard({ collection }: { collection: WorkCollectionSummary }) {
   const missing = collection.memberCount - collection.availableCount;
-  const track = TRACK_LABEL[collection.track];
   return (
     <Tooltip label={collection.name} multiline maw={480} openDelay={350} withArrow>
       <Card
@@ -32,12 +26,16 @@ export function CollectionCard({ collection }: { collection: WorkCollectionSumma
         <Group wrap="nowrap" align="stretch" gap="md">
           <CollectionCover collection={collection} variant="card" />
           <Stack gap={6} flex={1} miw={0} justify="center">
-          <Group gap={6} wrap="nowrap">
-            <Badge size="xs" variant="light" color={collection.collectionKind === "ordered" ? "piep" : "gray"}>
-              {collection.collectionKind === "ordered" ? "順序付き" : "順序なし"}
-            </Badge>
-            {track && <Badge size="xs" variant="outline" color="gray">{track}</Badge>}
-          </Group>
+          {/* 出自（続き物／テーマ）の紋はやめた。
+              //
+              // 走査は続き物を `ordered`、テーマを `unordered` で作るので、
+              // 隣の「順序付き」とほぼ必ず一致する。二つ並べても、片方が
+              // もう片方の言い換えになっているだけだった。独自に持っていた
+              // 情報は「棚から見つけたのか、自分で作ったのか」だけで、それは
+              // 束を使うときに要らない。 */}
+          <Badge size="xs" variant="light" color={collection.collectionKind === "ordered" ? "piep" : "gray"}>
+            {collection.collectionKind === "ordered" ? "順序付き" : "順序なし"}
+          </Badge>
             <Text fw={720} size="md" lh={1.35} className="line-clamp-2">{collection.name}</Text>
           {collection.description && (
             <Text size="xs" c="dimmed" className="line-clamp-2">{collection.description}</Text>

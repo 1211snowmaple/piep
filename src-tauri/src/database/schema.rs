@@ -356,6 +356,16 @@ fn add_missing_columns(conn: &Connection) -> Result<(), rusqlite::Error> {
         ),
         ("ai_notes", "input_fingerprint", "TEXT NOT NULL DEFAULT ''"),
         ("ai_notes", "config_fingerprint", "TEXT NOT NULL DEFAULT ''"),
+        // 添付の取り直しを、一度で終わらせるための覚え書き。
+        //
+        // 「JSONが要求する添付」と「実際に持っている添付」を突き合わせるだけ
+        // では、**取れない添付があるかぎり毎回「修復が必要」になる**。FANBOX の
+        // 配信URLは失効するので、消えた画像を持つ投稿は更新確認のたびに版が
+        // 増え、版ごとにフォルダが増え、いつまでも「改稿あり」に見える。
+        //
+        // 試した時点の姿を残しておけば、状況が変わったときだけもう一度試せる。
+        // 空なら「まだ一度も見ていない」で、既存のライブラリはそこから始まる。
+        ("downloads", "asset_repair_fingerprint", "TEXT"),
     ] {
         if !column_exists(conn, table, column)? {
             conn.execute_batch(&format!(

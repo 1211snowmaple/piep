@@ -242,6 +242,36 @@ function CollectionDetail({ collection, readOnly, onEdit, onChanged }: { collect
     onError: (error) => notifications.show({ color: "red", title: "コレクションに入れられません", message: errorMessage(error) }),
   });
 
+  /**
+   * 並び方を切り替える。
+   *
+   * 作るときの一度きりしか選べなかった。束は作ったあとで性格が変わる —
+   * テーマのつもりで集めたら読む順が見えてきた、その逆もある。名前を
+   * 付け直せるのと同じ理由で、これも直せるべきである。
+   *
+   * 並びそのものは失わない。メンバーは順序なしでも position を持ったままで、
+   * 順序付きへ戻せば元の並びがそのまま効く。
+   */
+  const kindMutation = useMutation({
+    mutationFn: (collectionKind: "ordered" | "unordered") => upsertWorkCollection({
+      id: collection.id,
+      name: collection.name,
+      description: collection.description,
+      collectionKind,
+      coverDownloadId: collection.coverDownloadId,
+    }),
+    onSuccess: (value) => {
+      onChanged(value);
+      notifications.show({
+        color: "green",
+        message: value.collectionKind === "ordered"
+          ? "順序付きにしました。並べ替えと整列が使えます"
+          : "順序なしにしました。並びは覚えたままです",
+      });
+    },
+    onError: (error) => notifications.show({ color: "red", title: "並び方を変えられません", message: errorMessage(error) }),
+  });
+
   const coverMutation = useMutation({
     mutationFn: upsertWorkCollection,
     onSuccess: (value) => {
@@ -437,6 +467,22 @@ function CollectionDetail({ collection, readOnly, onEdit, onChanged }: { collect
                   </Menu.Target>
                   <Menu.Dropdown>
                     <Menu.Label>並べ替え</Menu.Label>
+                    {/* 並び方の切り替えは、それが効くものの隣に置く。
+                        //
+                        // 作るときの一度きりしか選べなかった。保存側は最初から
+                        // 更新に対応していて、編集用の画面まで作ってあったのに、
+                        // 編集の入口が名前だけのモーダルへ移ったときに置き去りに
+                        // なっていた。
+                        //
+                        // ここに置くと、下の二つが灰色になっている理由も同時に
+                        // 分かる。順序なしの束に「整列」は無い。 */}
+                    <Menu.Item
+                      leftSection={<Icons.collection size={IconSize.menu} />}
+                      disabled={readOnly || kindMutation.isPending}
+                      onClick={() => kindMutation.mutate(ordered ? "unordered" : "ordered")}
+                    >
+                      {ordered ? "順序なしにする" : "順序付きにする"}
+                    </Menu.Item>
                     <Menu.Item leftSection={<Icons.sort size={IconSize.menu} />} disabled={readOnly || !ordered || collection.members.length < 2} onClick={() => sortBy("published")}>投稿日順に整列</Menu.Item>
                     <Menu.Item leftSection={<Icons.sort size={IconSize.menu} />} disabled={readOnly || !ordered || collection.members.length < 2} onClick={() => sortBy("episode")}>題名の連番順に整列</Menu.Item>
                     <Menu.Divider />

@@ -169,6 +169,12 @@ impl FanboxAPI {
                 log::error!("Fanbox Resource Not Found: {}", body);
                 Err(FanboxError::NotFound { body })
             }
+            StatusCode::FORBIDDEN if is_cloudflare_challenge(&body) => {
+                log::warn!("Fanbox API temporarily refused an automated request");
+                Err(FanboxError::RateLimited {
+                    body: "Cloudflare challenge".to_string(),
+                })
+            }
             StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
                 log::warn!("Fanbox API Authentication Required: {}", body);
                 Err(FanboxError::NoAuth)
@@ -216,7 +222,12 @@ impl FanboxAPI {
     pub async fn get_post_value(&self, post_id: &str) -> Result<serde_json::Value, FanboxError> {
         let url = format!("https://api.fanbox.cc/post.info?postId={}", post_id);
         let resp: FanboxResponse<serde_json::Value> = self.api_get(&url).await?;
-        Ok(resp.body)
+        crate::fanbox_api::payload::into_post(resp.body).ok_or_else(|| {
+            FanboxError::Other(
+                "FANBOX投稿応答の構造を解釈できませんでした（応答形式が変わった可能性があります）"
+                    .to_string(),
+            )
+        })
     }
 
     /// 8. クリエイターの全投稿を走査して一括取得するヘルパーメソッド (ページネーションの全トラバース)
@@ -240,60 +251,35 @@ impl FanboxAPI {
             "https://api.fanbox.cc/post.paginateCreator?creatorId={}",
             creator_id
         );
-        let resp: FanboxPaginatedCreatorPosts = self.api_get_paged(&url).await?;
+        let resp: FanboxResponse<serde_json::Value> = self.api_get_paged(&url).await?;
 
-        if let Some(arr) = resp.body.as_array() {
-            if !arr.is_empty() {
-                if arr[0].is_string() {
-                    // パターンA: ページURL의 リストが返ってきた場合 (Python版と同じ巡回アルゴリズム)
-                    if arr.len() > 500 {
-                        return Err(FanboxError::Other(
-                            "FANBOX history exceeded the 500-page safety limit".to_string(),
-                        ));
-                    }
-                    for (index, val) in arr.iter().enumerate() {
-                        if let Some(page_url) = val.as_str() {
-                            // 2ページ目からは間を空ける。相手にとっては、
-                            // 一覧を辿る動きも普通の連続アクセスでしかない。
-                            if index > 0 {
-                                tokio::time::sleep(FANBOX_PAGE_DELAY).await;
-                            }
-                            log::info!("Fetching page: {}", page_url);
-
-                            // 🛠️ どちらの構造が来ても FlexibleResponse で安全にパース！
-                            let flexible_resp: FlexibleResponse =
-                                self.api_get_paged(page_url).await?;
-
-                            // 中身を取り出して一本の配列にまとめる
-                            let posts = match flexible_resp.body {
-                                FlexiblePostList::Object(list) => list.items,
-                                FlexiblePostList::Array(posts) => posts,
-                            };
-                            if append_fanbox_posts(
-                                &mut all_posts,
-                                &mut seen_ids,
-                                posts,
-                                stop_source_id,
-                            )? {
-                                break;
-                            }
-                        }
-                    }
-                    return Ok(all_posts);
-                } else if arr[0].is_object() {
-                    // パターンB: paginateCreator自体が直接投稿配列を返してきた場合
-                    log::info!(
-                        "paginateCreator directly returned post array. Deserializing directly..."
-                    );
-                    let posts: Vec<FanboxPost> = serde_json::from_value(resp.body.clone())
-                        .map_err(|e| FanboxError::Serde {
-                            error: e,
-                            body: resp.body.to_string(),
-                        })?;
-                    append_fanbox_posts(&mut all_posts, &mut seen_ids, posts, stop_source_id)?;
+        // Current FANBOX responses wrap the URL array as `{ body: { pageUrls: [...] } }`.
+        // Older responses returned the array directly, so accept both deliberately.
+        if let Some(page_urls) = pagination_page_urls(&resp.body) {
+            if page_urls.len() > 500 {
+                return Err(FanboxError::Other(
+                    "FANBOX history exceeded the 500-page safety limit".to_string(),
+                ));
+            }
+            for (index, page_url) in page_urls.iter().enumerate() {
+                if index > 0 {
+                    tokio::time::sleep(FANBOX_PAGE_DELAY).await;
+                }
+                log::info!("Fetching page: {}", page_url);
+                let page: FanboxResponse<serde_json::Value> = self.api_get_paged(page_url).await?;
+                let (posts, _) = decode_post_list(page.body)?;
+                if append_fanbox_posts(&mut all_posts, &mut seen_ids, posts, stop_source_id)? {
                     return Ok(all_posts);
                 }
             }
+            if !page_urls.is_empty() {
+                return Ok(all_posts);
+            }
+        } else if post_list_shape(&resp.body) {
+            // Some historical versions returned posts from paginateCreator itself.
+            let (posts, _) = decode_post_list(resp.body)?;
+            append_fanbox_posts(&mut all_posts, &mut seen_ids, posts, stop_source_id)?;
+            return Ok(all_posts);
         }
 
         // 2. 究極のフォールバック (URL配列が得られなかった場合)
@@ -303,15 +289,83 @@ impl FanboxAPI {
             creator_id
         );
 
-        // 🛠️ ここでも FlexibleResponse で安全にパースしてブレを完全に吸収！
-        let flexible_resp: FlexibleResponse = self.api_get_paged(&fallback_url).await?;
-        let posts = match flexible_resp.body {
-            FlexiblePostList::Object(list) => list.items,
-            FlexiblePostList::Array(posts) => posts,
-        };
-        append_fanbox_posts(&mut all_posts, &mut seen_ids, posts, stop_source_id)?;
+        // Follow nextUrl as well. The previous one-shot fallback silently truncated
+        // creators with more than 100 posts when paginateCreator changed shape.
+        let mut next_url = Some(fallback_url);
+        let mut seen_urls = std::collections::HashSet::new();
+        let mut page_index = 0usize;
+        while let Some(page_url) = next_url.take() {
+            if page_index >= 500 {
+                return Err(FanboxError::Other(
+                    "FANBOX history exceeded the 500-page safety limit".to_string(),
+                ));
+            }
+            if !seen_urls.insert(page_url.clone()) {
+                return Err(FanboxError::Other(
+                    "FANBOX pagination returned the same page repeatedly".to_string(),
+                ));
+            }
+            if page_index > 0 {
+                tokio::time::sleep(FANBOX_PAGE_DELAY).await;
+            }
+            let page: FanboxResponse<serde_json::Value> = self.api_get_paged(&page_url).await?;
+            let (posts, following_url) = decode_post_list(page.body)?;
+            if append_fanbox_posts(&mut all_posts, &mut seen_ids, posts, stop_source_id)? {
+                break;
+            }
+            next_url = following_url;
+            page_index += 1;
+        }
         Ok(all_posts)
     }
+}
+
+fn pagination_page_urls(body: &serde_json::Value) -> Option<Vec<String>> {
+    let array = body
+        .get("pageUrls")
+        .and_then(|value| value.as_array())
+        .or_else(|| {
+            body.as_array()
+                .filter(|items| items.is_empty() || items.iter().all(serde_json::Value::is_string))
+        })?;
+    Some(
+        array
+            .iter()
+            .filter_map(|value| value.as_str().map(str::to_string))
+            .collect(),
+    )
+}
+
+fn post_list_shape(body: &serde_json::Value) -> bool {
+    body.as_array()
+        .is_some_and(|items| items.first().is_some_and(serde_json::Value::is_object))
+        || body
+            .as_object()
+            .is_some_and(|object| object.contains_key("posts") || object.contains_key("items"))
+}
+
+fn decode_post_list(
+    body: serde_json::Value,
+) -> Result<(Vec<FanboxPost>, Option<String>), FanboxError> {
+    let body_for_error = body.to_string();
+    if body.is_array() {
+        let posts = serde_json::from_value(body).map_err(|error| FanboxError::Serde {
+            error,
+            body: body_for_error,
+        })?;
+        return Ok((posts, None));
+    }
+    if !post_list_shape(&body) {
+        return Err(FanboxError::Other(
+            "FANBOX投稿一覧の応答形式を解釈できませんでした".to_string(),
+        ));
+    }
+    let list: FanboxPostList =
+        serde_json::from_value(body).map_err(|error| FanboxError::Serde {
+            error,
+            body: body_for_error,
+        })?;
+    Ok((list.items, list.next_url))
 }
 
 fn append_fanbox_posts(
@@ -352,9 +406,23 @@ fn allowed_api_url(raw: &str) -> Result<reqwest::Url, FanboxError> {
     Ok(url)
 }
 
+fn is_cloudflare_challenge(body: &str) -> bool {
+    let body = body.to_ascii_lowercase();
+    [
+        "cf-chl-",
+        "challenge-platform",
+        "just a moment",
+        "attention required",
+        "cloudflare ray id",
+    ]
+    .iter()
+    .any(|marker| body.contains(marker))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     async fn response_from_wire(wire_response: &'static [u8]) -> reqwest::Response {
@@ -373,6 +441,55 @@ mod tests {
         response
     }
 
+    fn listed_post(id: &str) -> serde_json::Value {
+        json!({
+            "id": id,
+            "title": "投稿",
+            "feeRequired": 0,
+            "type": "text",
+            "coverImageUrl": null,
+            "cover": null,
+            "creatorId": "ponkan",
+            "publishedDatetime": "2026-09-03T00:00:00+09:00",
+            "updatedDatetime": "2026-09-03T00:00:00+09:00",
+            "body": null,
+            "user": null,
+            "nextPost": null,
+            "prevPost": null
+        })
+    }
+
+    #[test]
+    fn pagination_accepts_current_page_urls_wrapper_and_legacy_array() {
+        let url = "https://api.fanbox.cc/post.listCreator?creatorId=ponkan&maxPublishedDatetime=x";
+        assert_eq!(
+            pagination_page_urls(&json!({ "pageUrls": [url] })),
+            Some(vec![url.to_string()])
+        );
+        assert_eq!(
+            pagination_page_urls(&json!([url])),
+            Some(vec![url.to_string()])
+        );
+    }
+
+    #[test]
+    fn post_lists_accept_posts_items_and_direct_arrays_with_next_url() {
+        let (posts, next) = decode_post_list(json!({
+            "posts": [listed_post("1")],
+            "nextUrl": "https://api.fanbox.cc/post.listCreator?page=2"
+        }))
+        .unwrap();
+        assert_eq!(posts[0].id, "1");
+        assert_eq!(
+            next.as_deref(),
+            Some("https://api.fanbox.cc/post.listCreator?page=2")
+        );
+
+        let (posts, next) = decode_post_list(json!([listed_post("2")])).unwrap();
+        assert_eq!(posts[0].id, "2");
+        assert!(next.is_none());
+    }
+
     #[test]
     fn api_cookie_destination_requires_exact_official_https_host() {
         assert!(allowed_api_url("https://api.fanbox.cc/post.info?postId=1").is_ok());
@@ -386,6 +503,14 @@ mod tests {
         ] {
             assert!(allowed_api_url(url).is_err(), "accepted {url}");
         }
+    }
+
+    #[test]
+    fn cloudflare_challenges_are_temporary_limits_not_bad_credentials() {
+        assert!(is_cloudflare_challenge(
+            "<title>Just a moment...</title><script src=\"/cdn-cgi/challenge-platform/x\"></script>"
+        ));
+        assert!(!is_cloudflare_challenge(r#"{"error":"forbidden"}"#));
     }
 
     #[tokio::test]

@@ -261,6 +261,35 @@ pub struct ReaderContentPage {
     pub html: String,
     pub plain_text: String,
     pub total_plain_text_chars: usize,
+    /// pixiv の原稿ページ（`[newpage]` 区切り）が、転送用の何ページ目から
+    /// 始まるか。長い原稿ページは転送のために割られるので、これが無いと
+    /// `[jump:5]` が 5 ページ目とは違う場所へ飛ぶ。
+    pub source_page_starts: Vec<usize>,
+}
+
+/// 反映済みの編集を、取得元と同じ書式へ組み直したもの。
+///
+/// 書き出しは保存した JSON を組み替えて本にする。編集版をそこへ差し込むには、
+/// 取得元が書いていたのと同じ形 ―― pixiv なら本文記法、FANBOX ならブロックの
+/// 並び ―― で渡す必要がある。平文だけを渡していたころは、挿絵も改ページも
+/// 見出しも、その一手前で落ちていた。
+#[derive(Debug, Clone)]
+pub struct EditedSourceForm {
+    pub pixiv_text: String,
+    pub fanbox_blocks: Vec<serde_json::Value>,
+    /// 取得元が分からないときの取りこぼし用。
+    pub plain_text: String,
+}
+
+/// 作品全体の見出し 1 つ。読書画面の目次が使う。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReaderOutlineEntry {
+    /// 1 起点のページ番号。
+    pub page: usize,
+    /// そのページの中で何番目の見出しか（0 起点）。
+    pub index: usize,
+    pub title: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -222,9 +222,22 @@ impl Database {
         bundles.extend(self.sweep_link_components(&by_id)?);
         bundles.extend(sweep_title_families(&works));
         bundles.extend(self.sweep_series_runs(&by_id)?);
-        let sequences = merge_overlapping(bundles);
+        let mut sequences = merge_overlapping(bundles);
 
-        let themes = self.sweep_themes(&by_id)?;
+        let mut themes = self.sweep_themes(&by_id)?;
+
+        // すでに利用者が作ったコレクションを、走査の「新しい発見」として
+        // もう一度出してはいけない。抽選したあとで落とすと、その重複が8件の
+        // 枠を一つ使い、まだ見ていない束を押し出すため、系統ごとの抽選より前に
+        // 除く。順序付きコレクションでも、ここで知りたいのは顔ぶれの一致である。
+        let existing = {
+            let conn = self.read_conn()?;
+            load_existing_collection_member_sets(&conn)?
+        };
+        sequences.retain(|bundle| !bundle_matches_existing_collection(bundle, &by_id, &existing));
+        themes
+            .bundles
+            .retain(|bundle| !bundle_matches_existing_collection(bundle, &by_id, &existing));
 
         // 続き物を先に置く。読む順のある束は、見つかったときの価値が大きい。
         // 上限は系統ごとにかける — 数の多いほうが少ないほうを押し出さないため。
@@ -712,6 +725,70 @@ impl Database {
             .map_err(|e| format!("Sweep commit failed: {e}"))?;
         Ok(saved)
     }
+}
+
+/// 既存コレクションの顔ぶれを、並び順に依存しない形で一度に読む。
+///
+/// `download_id` は作品を削除すると NULL になる一時的な解決結果なので、正本の
+/// `source + source_id` を使う。欠けた作品を含む既存コレクションは、現在の棚から
+/// 作った候補とは完全一致しないため、誤って同一視されない。
+fn load_existing_collection_member_sets(
+    conn: &Connection,
+) -> Result<HashSet<Vec<(String, String)>>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT collection_id, source, source_id
+             FROM work_collection_members
+             ORDER BY collection_id",
+        )
+        .map_err(|e| format!("Failed to prepare existing collection members: {e}"))?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(|e| format!("Failed to query existing collection members: {e}"))?;
+    let mut by_collection: HashMap<String, Vec<(String, String)>> = HashMap::new();
+    for row in rows {
+        let (collection_id, source, source_id) =
+            row.map_err(|e| format!("Failed to read existing collection members: {e}"))?;
+        by_collection
+            .entry(collection_id)
+            .or_default()
+            .push((source, source_id));
+    }
+    Ok(by_collection
+        .into_values()
+        .map(canonical_member_set)
+        .filter(|members| members.len() >= MIN_BUNDLE)
+        .collect())
+}
+
+fn bundle_matches_existing_collection(
+    bundle: &SweepBundle,
+    by_id: &HashMap<i64, SweepWork>,
+    existing: &HashSet<Vec<(String, String)>>,
+) -> bool {
+    let members = bundle
+        .ids
+        .iter()
+        .filter_map(|id| by_id.get(id))
+        .collect::<Vec<_>>();
+    let visible_members = fold_composite_volumes(members);
+    let keys = visible_members
+        .into_iter()
+        .map(|work| (work.source.clone(), work.source_id.clone()))
+        .collect();
+    existing.contains(&canonical_member_set(keys))
+}
+
+fn canonical_member_set(mut members: Vec<(String, String)>) -> Vec<(String, String)> {
+    members.sort_unstable();
+    members.dedup();
+    members
 }
 
 /// 合本を、それが含む分冊の下に畳む。

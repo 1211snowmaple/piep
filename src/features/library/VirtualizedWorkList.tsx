@@ -46,6 +46,11 @@ export function libraryColumnCount(width: number, view: WorkListView): number {
  * 幅は「この一覧の状態」ではなく「いまの画面の形」なので、部品が外れても
  * 失う理由がない。覚えておけば、付け直した一枚目から本物の行を出せる。
  * 窓の大きさが変わっていたら、直後の layout effect が測り直して直す。
+ *
+ * **試験では、これが跨いで残る。** 部品の外にある表なので、前の試験が置いた
+ * 幅を次の試験が引き継ぐ。この一覧の試験は `clientWidth` を毎回自分で決めて
+ * いるので今は困らないが、決めずに描く試験を足すと、走らせる順で結果が
+ * 変わる。足すときは幅も一緒に決めること。
  */
 const lastKnownWidth = new Map<string, number>();
 

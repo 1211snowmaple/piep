@@ -235,6 +235,7 @@ export const Icons = {
   save: Save,
   retry: RotateCw,
   undo: RotateCcw,
+  redo: RotateCw,
   pause: Pause,
   resume: Play,
   stop: Ban,

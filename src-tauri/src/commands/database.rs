@@ -5,11 +5,12 @@ use crate::database::{
     CollectionSweepResult, DashboardSummary, DbStats, DownloadEntry, EditorDocument, EntityFacet,
     EntityFacetScope, EntityProfileRepairStatus, EntitySeriesPage, EntityVersion, FacetCount,
     FilterFacets, LibraryDiagnostics, LibraryMaintenanceResult, LibraryShelfCounts, NewAsset,
-    PersonEntry, ReaderContentPage, ReaderMetadata, ReaderSearchHit, SavedSearch, SavedSearchInput,
-    SearchIndexOptimizationResult, SearchIndexStatus, SearchSuggestParams, SearchSuggestResult,
-    SearchV2Params, SearchV2Result, SeriesEntry, UpdateCredentials, UpdateTarget,
-    UpdateTargetInput, WorkBlockInput, WorkCollection, WorkCollectionInput,
-    WorkCollectionMemberInput, WorkCollectionSummary, WorkEditRevision, WorkKey,
+    PersonEntry, ReaderContentPage, ReaderMetadata, ReaderOutlineEntry, ReaderSearchHit,
+    SavedSearch, SavedSearchInput, SearchIndexOptimizationResult, SearchIndexStatus,
+    SearchSuggestParams, SearchSuggestResult, SearchV2Params, SearchV2Result, SeriesEntry,
+    UpdateCredentials, UpdateTarget, UpdateTargetInput, WorkBlockInput, WorkCollection,
+    WorkCollectionInput, WorkCollectionMemberInput, WorkCollectionSummary, WorkEditRevision,
+    WorkKey,
 };
 use crate::AppState;
 use sha2::{Digest, Sha256};
@@ -946,14 +947,8 @@ pub async fn db_name_collection_suggestion(
 
 /// 走査で出た候補を、まとめて閉じる。`track` を渡すとその系統だけ。
 #[tauri::command]
-pub async fn db_dismiss_swept_suggestions(
-    app: tauri::AppHandle,
-    track: Option<String>,
-) -> Result<usize, String> {
-    run_library_write_blocking(app, move |state| {
-        state.db.dismiss_swept_suggestions(track.as_deref())
-    })
-    .await
+pub async fn db_dismiss_swept_suggestions(app: tauri::AppHandle) -> Result<usize, String> {
+    run_library_write_blocking(app, move |state| state.db.dismiss_swept_suggestions()).await
 }
 
 /// 棚全体を走査して、束の候補を作り直す。
@@ -1673,7 +1668,29 @@ async fn download_entity_image(
     url: Option<&str>,
 ) -> Result<Option<(String, i64)>, String> {
     let Some(url) = url else { return Ok(None) };
-    if url.trim().is_empty() {
+    let url = url.trim();
+    if url.is_empty() {
+        return Ok(None);
+    }
+    // 取得先を https に限る。
+    //
+    // この一本だけ、取得元の応答に入っていた URL をそのまま `reqwest` へ
+    // 渡していた。ほかの外向きの要求は例外なく宛先を絞ってある
+    // （`allowed_next_url` / `allowed_api_url`）。ここは資格情報を付けないので
+    // 漏れる情報は無いが、`file:` や `http:` を踏みに行く筋を残す理由も無い。
+    //
+    // ホスト名までは固定しない。表紙とアイコンは取得元の CDN が配るもので、
+    // その名前は向こうの都合で変わる。固定すると、変わった日に**画像が黙って
+    // 出なくなる**。
+    //
+    // 綴りの大小は問わない。scheme は RFC 3986 で大小を区別しないので、
+    // 厳密に小文字だけを通すと、`HTTPS://` を返してきた日に**画像が黙って
+    // 出なくなる**。守りたいのは scheme の種類であって、綴りではない。
+    if !url
+        .get(..8)
+        .is_some_and(|head| head.eq_ignore_ascii_case("https://"))
+    {
+        log::warn!("Entity image skipped, not an https URL: {kind}");
         return Ok(None);
     }
     let root = if entity_type == "series" {
@@ -2127,6 +2144,92 @@ pub async fn refresh_entity_profile(
     Err("Unsupported entity type".to_string())
 }
 
+/// 取りこぼした FANBOX の添付を数えた結果。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FanboxRepairScan {
+    /// 取り直しの対象になる作品の id。そのまま更新ジョブへ渡せる。
+    pub work_ids: Vec<i64>,
+    /// 手元に無い添付の総数。
+    pub missing_files: i64,
+    /// そのうち、支援していないと取れない投稿の数。
+    pub restricted_works: i64,
+    /// 走査した FANBOX の行数。
+    pub scanned_works: i64,
+}
+
+/// 原本JSONが求める添付を、実際に持っているかどうかで数える。
+///
+/// 旧プログラムから取り込んだ投稿には、JSONに画像があるのに実ファイルが
+/// 一つも無いものがある。本文も更新日時も同じなので、従来の更新確認では
+/// 素通りしていた。しかも**これらは一件も監視対象になっていない**ので、
+/// 更新ジョブは触りに行かない。数えて、id を渡せる形にして返す。
+///
+/// 読むだけで、棚には何も書かない。
+#[tauri::command]
+pub async fn db_scan_fanbox_asset_gaps(app: tauri::AppHandle) -> Result<FanboxRepairScan, String> {
+    run_db_blocking(app, |state| {
+        let rows = state.db.fanbox_rows_with_json()?;
+        let scanned_works = rows.len() as i64;
+        let mut work_ids = Vec::new();
+        let mut missing_files = 0i64;
+        let mut restricted_works = 0i64;
+
+        for (download_id, json_path) in rows {
+            let Ok(text) = std::fs::read_to_string(&json_path) else {
+                continue;
+            };
+            let Ok(data) = serde_json::from_str::<serde_json::Value>(&text) else {
+                continue;
+            };
+            let assets = state.db.get_assets(download_id)?;
+            if crate::commands::downloader::fanbox_assets_are_complete(&data, &assets) {
+                continue;
+            }
+            let mut targets = Vec::new();
+            crate::downloader::asset_downloader::extract_download_targets(
+                &data,
+                true,
+                &mut targets,
+            );
+            let held = assets
+                .iter()
+                .filter(|asset| {
+                    std::fs::metadata(&asset.local_path)
+                        .map(|meta| meta.is_file() && meta.len() > 0)
+                        .unwrap_or(false)
+                })
+                .filter_map(|asset| asset.original_url.as_deref())
+                .collect::<std::collections::HashSet<_>>();
+            let missing = targets
+                .iter()
+                .filter(|target| !held.contains(target.url.as_str()))
+                .count();
+            if missing == 0 {
+                continue;
+            }
+            missing_files += missing as i64;
+            work_ids.push(download_id);
+            let post = crate::fanbox_api::payload::post_or_self(&data);
+            if post
+                .get("isRestricted")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                restricted_works += 1;
+            }
+        }
+
+        Ok(FanboxRepairScan {
+            work_ids,
+            missing_files,
+            restricted_works,
+            scanned_works,
+        })
+    })
+    .await
+}
+
 #[tauri::command]
 pub async fn db_get_entity_profile_repair_status(
     app: tauri::AppHandle,
@@ -2282,9 +2385,25 @@ pub async fn db_get_reader_content_page(
     download_id: i64,
     version: Option<i64>,
     page: usize,
+    include_plain_text: Option<bool>,
 ) -> Result<ReaderContentPage, String> {
+    let include_plain_text = include_plain_text.unwrap_or(false);
     run_db_blocking(app, move |state| {
-        state.db.get_reader_content_page(download_id, version, page)
+        state
+            .db
+            .get_reader_content_page(download_id, version, page, include_plain_text)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn db_get_reader_outline(
+    app: tauri::AppHandle,
+    download_id: i64,
+    version: Option<i64>,
+) -> Result<Vec<ReaderOutlineEntry>, String> {
+    run_db_blocking(app, move |state| {
+        state.db.get_reader_outline(download_id, version)
     })
     .await
 }
@@ -2319,12 +2438,16 @@ pub async fn db_save_work_draft(
     app: tauri::AppHandle,
     download_id: i64,
     base_version: i64,
+    title: Option<String>,
     blocks: Vec<WorkBlockInput>,
 ) -> Result<WorkEditRevision, String> {
     run_library_write_blocking(app, move |state| {
-        state
-            .db
-            .save_work_draft(download_id, base_version, blocks.as_slice())
+        state.db.save_work_draft(
+            download_id,
+            base_version,
+            title.as_deref(),
+            blocks.as_slice(),
+        )
     })
     .await
 }
@@ -2338,6 +2461,14 @@ pub async fn db_activate_work_edit(
         state.db.activate_work_edit(edit_revision_id)
     })
     .await
+}
+
+#[tauri::command]
+pub async fn db_deactivate_work_edit(
+    app: tauri::AppHandle,
+    download_id: i64,
+) -> Result<(), String> {
+    run_library_write_blocking(app, move |state| state.db.deactivate_work_edit(download_id)).await
 }
 
 #[tauri::command]
@@ -2570,5 +2701,34 @@ mod profile_link_tests {
         assert!(validate_path_in_storage(sibling.to_str().unwrap(), &storage).is_err());
 
         let _ = fs::remove_dir_all(root);
+    }
+}
+
+#[cfg(test)]
+mod entity_image_url_tests {
+    /// 表紙とアイコンの取得先を https に限る。
+    ///
+    /// この一本だけ、取得元の応答に入っていた URL をそのまま渡していた。
+    /// ほかの外向きの要求は例外なく宛先を絞ってある。
+    #[test]
+    fn only_https_urls_are_fetched() {
+        let allowed = |url: &str| {
+            let url = url.trim();
+            url.get(..8)
+                .is_some_and(|head| head.eq_ignore_ascii_case("https://"))
+        };
+        assert!(allowed("https://i.pximg.net/user-profile/x.jpg"));
+        assert!(allowed("  https://downloads.fanbox.cc/cover.png  "));
+
+        assert!(!allowed("http://i.pximg.net/x.jpg"));
+        assert!(!allowed("file:///C:/Windows/win.ini"));
+        assert!(!allowed("data:image/png;base64,AAAA"));
+        assert!(!allowed("//i.pximg.net/x.jpg"));
+        assert!(!allowed(""));
+        // scheme の綴りの大小は問わない。RFC 3986 で区別しないものを区別すると、
+        // 取得元が大文字で返した日に画像が黙って出なくなる。
+        assert!(allowed("HTTPS://i.pximg.net/x.jpg"));
+        // 短すぎて scheme が入りきらない文字列で落ちない。
+        assert!(!allowed("http"));
     }
 }

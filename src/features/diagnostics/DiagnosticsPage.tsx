@@ -36,8 +36,10 @@ import {
   optimizeSearchIndex,
   repairIncompleteEntityProfiles,
   scanAndReimportDownloads,
+  scanFanboxAssetGaps,
   type EntityProfileRepairProgress,
 } from "@/services/dbApi";
+import { startUpdateJobCommand } from "@/services/updateJobApi";
 import { getUpdateJobCredentials } from "@/services/updateJobApi";
 import { onTauriEvent, subscribeTauriEvent } from "@/services/eventBus";
 import { openFilesystemPath } from "@/services/openerApi";
@@ -206,6 +208,42 @@ export default function DiagnosticsPage({ embedded = false, previewData = previe
     enabled: false,
   });
   const measured = Boolean(diagnostics.data);
+  /**
+   * 取りこぼした FANBOX の添付。
+   *
+   * これらは**一件も監視対象になっていない**ので、更新確認では永久に触られない。
+   * 数えたうえで、id を名指しして取り直しの仕事を起こす。
+   */
+  const fanboxGaps = useQuery({
+    queryKey: ["fanbox-asset-gaps"],
+    queryFn: scanFanboxAssetGaps,
+    enabled: runtime,
+    staleTime: 60_000,
+  });
+  const repairFanboxAssets = useMutation({
+    mutationFn: async () => {
+      const ids = fanboxGaps.data?.workIds ?? [];
+      if (ids.length === 0) return null;
+      // 監視対象ではないので、id を名指しして始める。`save` で実際に取り直す
+      // ところまで走らせる（確認だけでは添付は埋まらない）。
+      return startUpdateJobCommand({ scope: "work", mode: "save", workIds: ids });
+    },
+    onSuccess: (snapshot) => {
+      if (!snapshot) return;
+      notifications.show({
+        color: "green",
+        title: "添付の取り直しを始めました",
+        message: "アクティビティで進み具合を確認できます",
+      });
+      void fanboxGaps.refetch();
+    },
+    onError: (error) => notifications.show({
+      color: "red",
+      title: "添付を取り直せません",
+      message: errorMessage(error),
+    }),
+  });
+
   const profileRepairStatus = useQuery({
     queryKey: ["entity-profile-repair-status"],
     queryFn: () => runtime
@@ -503,6 +541,38 @@ export default function DiagnosticsPage({ embedded = false, previewData = previe
               ? <Badge color="green" variant="light">最適です</Badge>
               : <Badge color={data.lexicalIndexSegmentCount >= 16 ? "yellow" : "blue"} variant="light">{formatNumber(data.lexicalIndexSegmentCount)}セグメント</Badge>}
           action={<Button fullWidth variant="light" color={data && data.lexicalIndexSegmentCount >= 16 ? "yellow" : "piep"} leftSection={<Icons.search size={IconSize.menu} />} loading={indexOptimization.isPending} disabled={!runtime || maintenance.isPending || !data || data.lexicalIndexSegmentCount <= 1} onClick={confirmIndexOptimization}>検索索引を最適化</Button>}
+        />
+        <MaintenanceTaskCard
+          icon={Icons.epub}
+          title="FANBOXの添付"
+          description="原本JSONが求める画像・ファイルを、実際に持っているか照らします。"
+          status={fanboxGaps.isLoading
+            ? <Badge color="gray" variant="light">数えています</Badge>
+            : fanboxGaps.error
+              ? <Badge color="red" variant="light">確認できません</Badge>
+              : !fanboxGaps.data || fanboxGaps.data.workIds.length === 0
+                ? <Badge color="green" variant="light">欠けはありません</Badge>
+                : <>
+                    <Badge color="yellow" variant="light">
+                      {formatNumber(fanboxGaps.data.workIds.length)}作品 · {formatNumber(fanboxGaps.data.missingFiles)}ファイル
+                    </Badge>
+                    <Text size="xs" c="dimmed" mt={6}>
+                      これらは監視対象ではないので、更新確認では取り直されません。
+                      {fanboxGaps.data.restrictedWorks > 0
+                        && `うち${formatNumber(fanboxGaps.data.restrictedWorks)}件は、支援中のアカウントでないと取得できません。`}
+                    </Text>
+                  </>}
+          action={<Button
+            fullWidth
+            variant="light"
+            color="yellow"
+            leftSection={<Icons.retry size={IconSize.menu} />}
+            loading={repairFanboxAssets.isPending}
+            disabled={!runtime || !fanboxGaps.data || fanboxGaps.data.workIds.length === 0}
+            onClick={() => repairFanboxAssets.mutate()}
+          >
+            欠けた添付を取り直す
+          </Button>}
         />
       </SimpleGrid>
     </Box>

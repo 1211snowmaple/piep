@@ -89,6 +89,10 @@ export interface ExportBatchResult {
   outputFiles: string[];
   invalidCount: number;
   issues: EpubValidationIssue[];
+  /** 途中で止めた。残りは手つかずなので、キューから外してはいけない。 */
+  canceled: boolean;
+  /** 止めたために一度も試していない作品。キューに残す。 */
+  skippedIds: number[];
 }
 
 export interface ExportProgress {

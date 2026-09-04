@@ -7,6 +7,7 @@ import type {
   DownloadEntry,
   ReaderMetadata,
   ReaderContentPage,
+  ReaderOutlineEntry,
   ReaderSearchHit,
   LibraryDiagnostics,
   LibraryMaintenanceResult,
@@ -84,6 +85,28 @@ export interface EntityProfileRepairResult {
   failed: number;
   canceled: boolean;
   remaining: number;
+}
+
+/** 取りこぼした FANBOX の添付を数えた結果。読むだけで、棚には何も書かない。 */
+export interface FanboxRepairScan {
+  /** 取り直しの対象になる作品の id。そのまま更新ジョブへ渡せる。 */
+  workIds: number[];
+  /** 手元に無い添付の総数。 */
+  missingFiles: number;
+  /** そのうち、支援していないと取れない投稿の数。 */
+  restrictedWorks: number;
+  /** 走査した FANBOX の行数。 */
+  scannedWorks: number;
+}
+
+/**
+ * 原本JSONが求める添付を、実際に持っているかどうかで数える。
+ *
+ * 旧プログラムから取り込んだ投稿には、JSONに画像があるのに実ファイルが一つも
+ * 無いものがある。本文も更新日時も同じなので、従来の更新確認は素通りしていた。
+ */
+export function scanFanboxAssetGaps(): Promise<FanboxRepairScan> {
+  return invoke<FanboxRepairScan>("db_scan_fanbox_asset_gaps");
 }
 
 export function getEntityProfileRepairStatus(): Promise<EntityProfileRepairStatus> {
@@ -288,8 +311,19 @@ export async function getReaderMetadata(downloadId: number): Promise<ReaderMetad
   return invoke<ReaderMetadata>("db_get_reader_metadata", { downloadId });
 }
 
-export async function getReaderContentPage(downloadId: number, version?: number | null, page = 0): Promise<ReaderContentPage> {
-  return invoke<ReaderContentPage>("db_get_reader_content_page", { downloadId, version: version ?? null, page });
+/**
+ * 本文の 1 ページ。
+ *
+ * `includePlainText` は既定で落とす。読書画面は HTML しか使わないのに、
+ * ページを繰るたび同じ本文を平文でも運んでいた。
+ */
+export async function getReaderContentPage(downloadId: number, version?: number | null, page = 0, includePlainText = false): Promise<ReaderContentPage> {
+  return invoke<ReaderContentPage>("db_get_reader_content_page", { downloadId, version: version ?? null, page, includePlainText });
+}
+
+/** 作品全体の見出しと、それが載っているページ。読書画面の目次が使う。 */
+export async function getReaderOutline(downloadId: number, version?: number | null): Promise<ReaderOutlineEntry[]> {
+  return invoke<ReaderOutlineEntry[]>("db_get_reader_outline", { downloadId, version: version ?? null });
 }
 
 export async function searchReaderContent(downloadId: number, query: string, version?: number | null, limit = 50): Promise<ReaderSearchHit[]> {
@@ -300,16 +334,28 @@ export async function getEditorDocument(downloadId: number): Promise<EditorDocum
   return invoke<EditorDocument>("db_get_editor_document", { downloadId });
 }
 
+/**
+ * 下書きを保存する。
+ *
+ * `title` は、取得元の題を書き換えたいときだけ渡す。元の題と同じものや
+ * 空文字は端末側で落とすので、上書きは残らない。
+ */
 export async function saveWorkDraft(
   downloadId: number,
   baseVersion: number,
+  title: string | null,
   blocks: WorkBlockInput[],
 ): Promise<WorkEditRevision> {
-  return invoke<WorkEditRevision>("db_save_work_draft", { downloadId, baseVersion, blocks });
+  return invoke<WorkEditRevision>("db_save_work_draft", { downloadId, baseVersion, title, blocks });
 }
 
 export async function activateWorkEdit(editRevisionId: number): Promise<WorkEditRevision> {
   return invoke<WorkEditRevision>("db_activate_work_edit", { editRevisionId });
+}
+
+/** 反映した編集を下ろし、取り込んだままの本文へ戻す。版は履歴に残る。 */
+export async function deactivateWorkEdit(downloadId: number): Promise<void> {
+  return invoke<void>("db_deactivate_work_edit", { downloadId });
 }
 
 export async function importWorkAsset(downloadId: number, sourcePath: string): Promise<AssetEntry> {

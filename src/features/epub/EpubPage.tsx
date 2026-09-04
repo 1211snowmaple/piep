@@ -37,7 +37,7 @@ import { errorMessage, formatBytes, formatNumber } from "@/lib/format";
 import { demoWorks } from "@/mocks/demoData";
 import { getDownloads, isTauriRuntime } from "@/services/dbApi";
 import { openSingleDialog } from "@/services/dialogApi";
-import { exportEpubBatch, listEpubTemplates } from "@/services/epubApi";
+import { cancelEpubExport, exportEpubBatch, listEpubTemplates } from "@/services/epubApi";
 import { subscribeTauriEvent } from "@/services/eventBus";
 import { openFilesystemPath } from "@/services/openerApi";
 import type { DownloadEntry } from "@/types/library";
@@ -145,11 +145,14 @@ export default function EpubPage() {
         detail: values.outputDir,
         total: works.length,
         onRetry: () => retryExportRef.current(values),
+        // 数百冊を並べて実行したら、終わるまで止められなかった。作りかけの
+        // 1 冊は書き切ってから止まるので、半端な EPUB は残らない。
+        onCancel: runtime ? async () => { await cancelEpubExport(); } : undefined,
       });
       setResult(null); setProgress({ phase: "started", currentTitle: "", currentIndex: 0, totalCount: works.length, message: "書き出しを準備しています" });
       if (!runtime) {
         await new Promise((resolve) => window.setTimeout(resolve, 500));
-        return { successCount: works.length, failedCount: 0, failedIds: [], invalidIds: [], outputFiles: works.map((work) => `${values.outputDir}/${work.title}.epub`), invalidCount: 0, issues: [] };
+        return { successCount: works.length, failedCount: 0, failedIds: [], invalidIds: [], outputFiles: works.map((work) => `${values.outputDir}/${work.title}.epub`), invalidCount: 0, issues: [], canceled: false, skippedIds: [] };
       }
       const c = values.compression;
       return exportEpubBatch<ExportBatchResult>({
@@ -163,14 +166,24 @@ export default function EpubPage() {
       });
     },
     onSuccess: (data) => {
-      exportOperationRef.current?.complete(`成功 ${data.successCount} · 失敗 ${data.failedCount}`);
+      if (data.canceled) exportOperationRef.current?.cancel(`成功 ${data.successCount} · 未着手 ${data.skippedIds.length}`);
+      else exportOperationRef.current?.complete(`成功 ${data.successCount} · 失敗 ${data.failedCount}`);
       exportOperationRef.current = null;
       setResult(data);
       setProgress(null);
-      const retry = new Set([...data.failedIds, ...data.invalidIds]);
-      removeFromEpubQueue(works.filter((work) => !retry.has(work.id)).map((work) => work.id));
+      // 書けなかったもの、検証を通らなかったもの、そして**一度も試して
+      // いないもの**はキューに残す。止めた結果として棚から消えたのでは、
+      // 中止が取り下げになってしまう。
+      const keep = new Set([...data.failedIds, ...data.invalidIds, ...data.skippedIds]);
+      removeFromEpubQueue(works.filter((work) => !keep.has(work.id)).map((work) => work.id));
       const needsReview = data.failedCount > 0 || data.invalidCount > 0 || data.issues.length > 0;
-      notifications.show({ color: needsReview ? "yellow" : "green", title: "EPUB書き出しが完了しました", message: `成功 ${data.successCount} · 失敗 ${data.failedCount}${data.invalidCount ? ` · 検証不合格 ${data.invalidCount}` : ""}` });
+      notifications.show({
+        color: data.canceled ? "yellow" : needsReview ? "yellow" : "green",
+        title: data.canceled ? "EPUB書き出しを中止しました" : "EPUB書き出しが完了しました",
+        message: data.canceled
+          ? `成功 ${data.successCount} · 残り${data.skippedIds.length}件はキューに残しました`
+          : `成功 ${data.successCount} · 失敗 ${data.failedCount}${data.invalidCount ? ` · 検証不合格 ${data.invalidCount}` : ""}`,
+      });
     },
     onError: (error) => { exportOperationRef.current?.fail(error); exportOperationRef.current = null; setProgress(null); notifications.show({ color: "red", title: "EPUBを書き出せません", message: errorMessage(error) }); },
   });
@@ -230,11 +243,12 @@ export default function EpubPage() {
  * or Send to Kindle silently refuses looks exactly like a successful export.
  */
 function ExportResult({ result, outputDir, runtime }: { result: ExportBatchResult; outputDir: string; runtime: boolean }) {
-  const clean = !result.failedCount && !result.invalidCount && !result.issues.length;
+  const clean = !result.canceled && !result.failedCount && !result.invalidCount && !result.issues.length;
   return (
-    <Alert color={clean ? "green" : "yellow"} icon={<Icons.confirm size={IconSize.action} />} title="書き出し完了">
+    <Alert color={clean ? "green" : "yellow"} icon={<Icons.confirm size={IconSize.action} />} title={result.canceled ? "書き出しを中止しました" : "書き出し完了"}>
       <Stack gap="xs">
-        <Text size="sm">成功 {result.successCount}件 / 失敗 {result.failedCount}件</Text>
+        <Text size="sm">成功 {result.successCount}件 / 失敗 {result.failedCount}件{result.canceled ? ` / 未着手 ${result.skippedIds.length}件` : ""}</Text>
+        {result.canceled && <Text size="xs" c="dimmed">中止した時点で作りかけだった1冊は書き切っています。残りはキューに残したので、そのまま続きから書き出せます。</Text>}
         {result.issues.length > 0 && (
           <Box>
             <Text size="sm" fw={600}>{result.invalidCount > 0 ? `${result.invalidCount}件はEPUBの検証を通過しませんでした` : "Kindle互換性について確認事項があります"}</Text>

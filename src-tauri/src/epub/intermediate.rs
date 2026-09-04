@@ -262,6 +262,10 @@ pub struct ExportBatchResult {
     /// 一時生成後の検査でエラーが見つかり、出力しなかった冊数。
     pub invalid_count: u32,
     pub issues: Vec<EpubValidationIssue>,
+    /// 途中で止めた。残りは手つかずなので、キューから外してはいけない。
+    pub canceled: bool,
+    /// 止めたために一度も試していない作品。キューに残す。
+    pub skipped_ids: Vec<i64>,
 }
 
 /// テンプレート情報

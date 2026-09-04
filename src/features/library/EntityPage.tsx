@@ -583,9 +583,17 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
                 {works.isLoading ? <LoadingState /> : works.error ? <ErrorState error={works.error} retry={() => works.refetch()} /> : workItems.length ? (
                   <>
                     <Group gap="xs" mb="sm" wrap="nowrap">
-                      <Text size="sm" c="dimmed">{formatNumber(works.data?.pages[0]?.totalEstimate ?? workItems.length)}件</Text>
-                      {/* Beside the count, which is the thing it changes. */}
+                      {/* 読み込み方は件数の**手前**に置く。
+                      //
+                      // 件数は伸び縮みする。自動で読み進めると「（20件を表示中）」の
+                      // 桁が増え、最後まで読むと括弧ごと消える。後ろに置いた押しボタンは
+                      // そのぶん横へ動く — 実測で、桁が増えるたび7〜11px、括弧が消える
+                      // 瞬間に128px。押そうとした先が指の下から逃げる。
+                      //
+                      // 幅の変わらないものを先に置けば、動くのは右側の文字だけになる。
+                      // コレクションの中身では既にそうしてある。 */}
                       <PagingModeToggle scope="entity" />
+                      <Text size="sm" c="dimmed">{formatNumber(works.data?.pages[0]?.totalEstimate ?? workItems.length)}件</Text>
                       {/* ここだけ view を "gallery" に固定していた。棚で一覧を選んでいても
                           作者を開いた瞬間にカードへ戻る、同じ作品の違う顔だった。 */}
                       <SegmentedControl

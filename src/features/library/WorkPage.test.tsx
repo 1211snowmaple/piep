@@ -37,7 +37,7 @@ function deferred<T>() {
 }
 
 function content(page: number, html: string): ReaderContentPage {
-  return { page, pageCount: 2, html, plainText: html.replace(/<[^>]+>/g, ""), totalPlainTextChars: 200 };
+  return { page, pageCount: 2, html, plainText: html.replace(/<[^>]+>/g, ""), totalPlainTextChars: 200, sourcePageStarts: [0, 1] };
 }
 
 describe("WorkPage content preview", () => {
@@ -131,8 +131,10 @@ describe("WorkPage content preview", () => {
     await waitFor(() => expect(Array.from(document.querySelectorAll('ins[data-kind="added"]')).map((node) => node.textContent).join("")).toContain("新しい"));
     expect(Array.from(document.querySelectorAll('ins[data-kind="added"]')).map((node) => node.textContent).join("")).toContain("追記");
     expect(Array.from(document.querySelectorAll('del[data-kind="removed"]')).map((node) => node.textContent).join("")).toContain("古い");
-    expect(dbApi.getReaderContentPage).toHaveBeenCalledWith(101, 2, 0);
-    expect(dbApi.getReaderContentPage).toHaveBeenCalledWith(101, 1, 0);
+    // 平文は既定では運ばれない（読書画面が使わないため）。版を比べるここだけが
+    // 明示して頼む。頼み忘れると差分が黙って空になる。
+    expect(dbApi.getReaderContentPage).toHaveBeenCalledWith(101, 2, 0, true);
+    expect(dbApi.getReaderContentPage).toHaveBeenCalledWith(101, 1, 0, true);
 
     fireEvent.click(screen.getByRole("radio", { name: "v2全文" }));
     expect(screen.getByText("冒頭。新しい文章と追記。結末。")).toBeInTheDocument();

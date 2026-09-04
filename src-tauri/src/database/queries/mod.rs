@@ -23,6 +23,7 @@ use super::schema;
 // 本文を組み立てるエスケープは、取り込み側と同じものを使う。同じ規則を二か所に
 // 書いていたので、片方だけ直すとリーダーとエディタで表示が食い違う余地があった。
 use super::parser::escape_html as escape_editor_html;
+use super::parser::expand_pixiv_inline_notation;
 use super::search::{
     extract_search_body, generate_ngrams_limited, make_match_highlights, match_fields_and_score,
     normalize_search_text, normalized_levenshtein, parse_search_query, query_ngrams,
@@ -61,6 +62,8 @@ struct ReaderCacheKey {
 #[derive(Clone)]
 struct ReaderCacheEntry {
     pages: Arc<Vec<String>>,
+    /// pixiv の原稿ページが、転送用の何ページ目から始まるか。
+    source_page_starts: Arc<Vec<usize>>,
     total_plain_text_chars: usize,
     bytes: usize,
     last_used: u64,
@@ -4873,6 +4876,61 @@ impl Database {
     }
 
     /// ダウンロードのアセット一覧取得
+    /// 添付の取り直しについて、前回どこまで試したか。
+    ///
+    /// `DownloadEntry` には載せない。画面が読む値ではなく、保存側が次に何を
+    /// するかを決めるためだけの覚え書きである。
+    pub fn asset_repair_fingerprint(&self, download_id: i64) -> Result<Option<String>, String> {
+        let conn = self.read_conn()?;
+        conn.query_row(
+            "SELECT asset_repair_fingerprint FROM downloads WHERE id = ?1",
+            params![download_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .map(Option::flatten)
+        .map_err(|e| format!("Failed to read asset repair fingerprint: {e}"))
+    }
+
+    pub fn set_asset_repair_fingerprint(
+        &self,
+        download_id: i64,
+        fingerprint: &str,
+    ) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE downloads SET asset_repair_fingerprint = ?2 WHERE id = ?1",
+            params![download_id, fingerprint],
+        )
+        .map_err(|e| format!("Failed to record asset repair fingerprint: {e}"))?;
+        Ok(())
+    }
+
+    /// FANBOX の行を、原本JSONの置き場所と一緒に並べる。
+    ///
+    /// 添付の取りこぼしを数えるのに使う。本文はJSONの中にしか無いので、
+    /// 「何を要求しているか」は行だけでは分からない。
+    pub fn fanbox_rows_with_json(&self) -> Result<Vec<(i64, String)>, String> {
+        let conn = self.read_conn()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, json_path FROM downloads
+                 WHERE source = 'fanbox' AND json_path IS NOT NULL AND json_path != ''
+                 ORDER BY id",
+            )
+            .map_err(|e| format!("Failed to prepare FANBOX row scan: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|e| format!("Failed to query FANBOX rows: {e}"))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(|e| format!("Failed to read FANBOX rows: {e}"))?);
+        }
+        Ok(out)
+    }
+
     pub fn get_assets(&self, download_id: i64) -> Result<Vec<AssetEntry>, String> {
         let conn = self.read_conn()?;
         let mut stmt = conn
@@ -11118,6 +11176,15 @@ fn fallback_sort_value(params: &SearchV2Params, item: &DownloadEntry) -> Option<
     })
 }
 
+/// 読み手に見せるタイトル。
+///
+/// 反映済みの編集がタイトルを持っていれば、それがこの作品の題になる。取得元
+/// が付けた題は `downloads.title` にそのまま残るので、編集を下ろせば戻る。
+///
+/// 一覧・並べ替え・索引の**すべて**がここを通る。片方だけを変えると、棚では
+/// 元の題なのに開くと違う題、という状態ができてしまう。
+const EFFECTIVE_TITLE_SQL: &str = "COALESCE(NULLIF(TRIM((SELECT r.title FROM work_edit_revisions r WHERE r.download_id = d.id AND r.status = 'active' LIMIT 1)), ''), d.title)";
+
 fn download_select_sql_for_projection(
     projection: Option<&str>,
     search_score_expr: &str,
@@ -11243,6 +11310,10 @@ fn download_select_sql_for_projection(
             series_title_expr,
         ),
     };
+    // 三つの射影はどれも `d.title` を 4 列目に置いている。読み手に見せる題は
+    // 反映済みの編集が持っていることがあるので、ここで一度だけ差し替える。
+    let core_columns =
+        core_columns.replace("d.title,", &format!("{EFFECTIVE_TITLE_SQL} AS title,"));
     format!(
         "SELECT {core_columns},
             {} AS person_id,
@@ -12077,8 +12148,11 @@ fn upsert_download_in_connection(conn: &Connection, dl: &NewDownload) -> Result<
 }
 
 fn sort_clause(params: &SearchV2Params) -> String {
+    // 「タイトル順」は、読み手が見ている題で並べる。表示だけを差し替えて
+    // 並べ替えを元の題のままにすると、あ行の作品が真ん中に紛れて出てくる。
+    let title_sort = format!("{EFFECTIVE_TITLE_SQL} COLLATE NOCASE");
     let sort_col = match normalized_sort_key(params) {
-        "title" => "d.title COLLATE NOCASE",
+        "title" => title_sort.as_str(),
         "author" => "d.author_name COLLATE NOCASE",
         "date" => "d.downloaded_at",
         "published" => "COALESCE(d.source_created_at, d.downloaded_at)",
@@ -12217,12 +12291,14 @@ fn normalize_block_inputs(blocks: &[WorkBlockInput]) -> Vec<WorkBlockInput> {
             }
             _ => "paragraph".to_string(),
         };
+        // 行頭の字下げは本文の一部。`trim` を掛けていたころは、全角空白で
+        // 字下げした作品が保存のたびに左へ寄っていった。落とすのは中身が
+        // 空白しかないブロックだけで、末尾の余りだけを削る。
         let text = block
             .text
             .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string);
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| value.trim_end().to_string());
         if block_type != "image"
             && text.is_none()
             && block_type != "separator"
@@ -12279,117 +12355,273 @@ fn plain_text_to_editor_blocks(text: &str) -> Vec<WorkBlock> {
         .collect()
 }
 
+/// 取り込んだ本文を「行の並び」として読み直すための 1 行分。
+enum SourceLine {
+    /// 地の文の 1 行。空文字なら空行。
+    Text(String),
+    /// 見出し・画像・区切り・改ページ・リンクカード。それぞれ 1 行を占める。
+    Token(WorkBlock),
+    /// FANBOX が段落として書いた切れ目。行は占めないが、ここで段落は変わる。
+    /// 落としていたころは、投稿者が分けて書いた段落が編集画面で 1 つの塊に
+    /// 溶けていた。
+    Boundary,
+}
+
+/// ブロックの前にあった空行の数を憶えておく鍵。
+///
+/// 段落の切れ目は取得元によって形が違う（pixiv は空行 1 つ、FANBOX は
+/// ブロックの境界そのもので空行なし）。**数として持っておけば**、書き戻す
+/// ときに元の見え方をそのまま再現できる。持たずに書き戻していたころは、
+/// 編集画面を開いて何も変えずに反映するだけで、本文全体が 1 行に潰れた。
+const BLOCK_GAP_KEY: &str = "gap";
+
+/// 画像ブロックが元の本文で名乗っていた参照。EPUB へ書き出すときに、
+/// 同じ絵をもう一度指すために使う。
+const BLOCK_SOURCE_REF_KEY: &str = "sourceRef";
+
+/// 空行の上限。壊れた値や悪意のある値で本文が縦に伸び続けないようにする。
+const MAX_BLOCK_GAP: usize = 64;
+
+fn block_attrs(block: &WorkBlock) -> Option<serde_json::Value> {
+    block
+        .attrs_json
+        .as_deref()
+        .and_then(|attrs| serde_json::from_str::<serde_json::Value>(attrs).ok())
+        .filter(serde_json::Value::is_object)
+}
+
+fn block_gap(block: &WorkBlock) -> Option<usize> {
+    block_attrs(block)
+        .and_then(|attrs| attrs.get(BLOCK_GAP_KEY).and_then(serde_json::Value::as_u64))
+        .map(|gap| (gap as usize).min(MAX_BLOCK_GAP))
+}
+
+fn block_source_ref(block: &WorkBlock) -> Option<String> {
+    block_attrs(block)
+        .and_then(|attrs| {
+            attrs
+                .get(BLOCK_SOURCE_REF_KEY)
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+        .filter(|value| !value.trim().is_empty())
+}
+
+fn attrs_with(attrs: Option<String>, key: &str, value: serde_json::Value) -> Option<String> {
+    let mut object = attrs
+        .as_deref()
+        .and_then(|attrs| serde_json::from_str::<serde_json::Value>(attrs).ok())
+        .filter(serde_json::Value::is_object)
+        .unwrap_or_else(|| serde_json::json!({}));
+    object[key] = value;
+    Some(object.to_string())
+}
+
+fn attrs_with_gap(attrs: Option<String>, gap: usize) -> Option<String> {
+    attrs_with(
+        attrs,
+        BLOCK_GAP_KEY,
+        serde_json::json!(gap.min(MAX_BLOCK_GAP)),
+    )
+}
+
+/// 取り込んだ HTML の断片を行へ割る。
+///
+/// 末尾の要素は改行で閉じられていない「続き」なので、中身があるときだけ
+/// 1 行として積む。`after_token` のときの先頭の空要素は、直前のトークンが
+/// 載っていた行の終わりであって空行ではない。ここを空行として数えていたため、
+/// 見出しのあとの本文が往復のたびに 1 行ずつ下がっていった。
+fn push_fragment_lines(fragment: &str, after_token: bool, lines: &mut Vec<SourceLine>) {
+    let text = html_fragment_to_text(&restore_inline_notation(fragment));
+    if text.is_empty() {
+        return;
+    }
+    let mut pieces: Vec<&str> = text.split('\n').collect();
+    let trailing = pieces.pop().unwrap_or("");
+    let mut complete = &pieces[..];
+    if after_token && complete.first().is_some_and(|line| line.is_empty()) {
+        complete = &complete[1..];
+    }
+    for line in complete {
+        lines.push(SourceLine::Text((*line).to_string()));
+    }
+    if !trailing.is_empty() {
+        lines.push(SourceLine::Text(trailing.to_string()));
+    }
+}
+
+fn paragraph_block(lines: &[String], gap: usize, order: usize) -> WorkBlock {
+    editor_block(
+        order,
+        "paragraph",
+        // 行頭の字下げは本文の一部。ここで trim していたころは、全角空白で
+        // 字下げした作品が編集を通すたびに左へ寄っていった。
+        Some(lines.join("\n")),
+        None,
+        attrs_with_gap(None, gap),
+    )
+}
+
+fn source_lines_to_blocks(lines: Vec<SourceLine>) -> Vec<WorkBlock> {
+    let mut blocks: Vec<WorkBlock> = Vec::new();
+    let mut paragraph: Vec<String> = Vec::new();
+    let mut paragraph_gap = 0usize;
+    let mut blank_run = 0usize;
+
+    for line in lines {
+        match line {
+            SourceLine::Text(text) if text.trim().is_empty() => {
+                if !paragraph.is_empty() {
+                    let order = blocks.len();
+                    blocks.push(paragraph_block(&paragraph, paragraph_gap, order));
+                    paragraph.clear();
+                    blank_run = 0;
+                }
+                blank_run += 1;
+            }
+            SourceLine::Text(text) => {
+                if paragraph.is_empty() {
+                    paragraph_gap = blank_run;
+                    blank_run = 0;
+                }
+                paragraph.push(text);
+            }
+            SourceLine::Boundary => {
+                if !paragraph.is_empty() {
+                    let order = blocks.len();
+                    blocks.push(paragraph_block(&paragraph, paragraph_gap, order));
+                    paragraph.clear();
+                }
+            }
+            SourceLine::Token(mut block) => {
+                if !paragraph.is_empty() {
+                    let order = blocks.len();
+                    blocks.push(paragraph_block(&paragraph, paragraph_gap, order));
+                    paragraph.clear();
+                }
+                block.order = blocks.len() as i64;
+                block.attrs_json = attrs_with_gap(block.attrs_json, blank_run);
+                blocks.push(block);
+                blank_run = 0;
+            }
+        }
+    }
+    if !paragraph.is_empty() {
+        let order = blocks.len();
+        blocks.push(paragraph_block(&paragraph, paragraph_gap, order));
+    }
+    blocks
+}
+
+static EDITOR_TOKEN_RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+    Regex::new(
+        r#"(?is)(<!--\s*newpage\s*-->|<!--\s*content-block\s*-->|<h2\b[^>]*>.*?</h2>|<img\b[^>]*>|<hr\s*/?>|<a\b[^>]*class="[^"]*novel-link-card[^"]*"[^>]*>.*?</a>)"#,
+    )
+    .expect("valid editor HTML token regex")
+});
+
+static EDITOR_ATTR_RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+    Regex::new(r#"(?i)([a-z0-9_-]+)="([^"]*)""#).expect("valid editor attribute regex")
+});
+
+fn token_attribute(token: &str, name: &str) -> Option<String> {
+    EDITOR_ATTR_RE
+        .captures_iter(token)
+        .find(|capture| {
+            capture
+                .get(1)
+                .map(|value| value.as_str().eq_ignore_ascii_case(name))
+                .unwrap_or(false)
+        })
+        .and_then(|capture| {
+            capture
+                .get(2)
+                .map(|value| decode_editor_entities(value.as_str()))
+        })
+}
+
 fn html_to_editor_blocks(html: &str, assets: &[AssetEntry]) -> Vec<WorkBlock> {
     if html.trim().is_empty() {
         return plain_text_to_editor_blocks("");
     }
-    let token_re = Regex::new(
-        r#"(?is)(<!--\s*newpage\s*-->|<h2\b[^>]*>.*?</h2>|<img\b[^>]*>|<hr\s*/?>|<a\b[^>]*class=\"[^\"]*novel-link-card[^\"]*\"[^>]*>.*?</a>)"#,
-    )
-    .expect("valid editor HTML token regex");
-    let attr_re =
-        Regex::new(r#"(?i)([a-z0-9_-]+)=\"([^\"]*)\""#).expect("valid editor attribute regex");
-    let mut blocks = Vec::new();
+    let mut lines: Vec<SourceLine> = Vec::new();
     let mut cursor = 0;
+    let mut after_token = false;
 
-    let push_text = |fragment: &str, blocks: &mut Vec<WorkBlock>| {
-        let text = html_fragment_to_text(fragment);
-        for chunk in text
-            .split("\n\n")
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
-            blocks.push(editor_block(
-                blocks.len(),
-                "paragraph",
-                Some(chunk.to_string()),
-                None,
-                None,
-            ));
-        }
-    };
-
-    for matched in token_re.find_iter(html) {
-        push_text(&html[cursor..matched.start()], &mut blocks);
+    for matched in EDITOR_TOKEN_RE.find_iter(html) {
+        push_fragment_lines(&html[cursor..matched.start()], after_token, &mut lines);
         let token = matched.as_str();
         let lower = token.to_ascii_lowercase();
-        if lower.starts_with("<!--") {
-            blocks.push(editor_block(blocks.len(), "page_break", None, None, None));
+        if lower.contains("content-block") {
+            lines.push(SourceLine::Boundary);
+            cursor = matched.end();
+            // 区切りそのものは行を占めないが、直前の行はここで閉じている。
+            after_token = true;
+            continue;
+        }
+        let block = if lower.starts_with("<!--") {
+            editor_block(0, "page_break", None, None, None)
         } else if lower.starts_with("<h2") {
-            blocks.push(editor_block(
-                blocks.len(),
+            editor_block(
+                0,
                 "heading",
-                Some(html_fragment_to_text(token).trim().to_string()),
+                // 見出しもルビを持てる。記法のまま編集画面へ渡す。
+                Some(
+                    html_fragment_to_text(&restore_inline_notation(token))
+                        .trim()
+                        .to_string(),
+                ),
                 None,
                 None,
-            ));
+            )
         } else if lower.starts_with("<img") {
-            let local_path = attr_re
-                .captures_iter(token)
-                .find(|capture| {
-                    capture
-                        .get(1)
-                        .map(|v| v.as_str().eq_ignore_ascii_case("data-local-path"))
-                        .unwrap_or(false)
-                })
-                .and_then(|capture| {
-                    capture
-                        .get(2)
-                        .map(|value| decode_editor_entities(value.as_str()))
-                });
+            let local_path = token_attribute(token, "data-local-path");
             let asset_id = local_path.as_deref().and_then(|path| {
                 assets
                     .iter()
                     .find(|asset| asset.local_path == path || asset.local_path.ends_with(path))
                     .map(|asset| asset.id)
             });
-            let alt = attr_re
-                .captures_iter(token)
-                .find(|capture| {
-                    capture
-                        .get(1)
-                        .map(|v| v.as_str().eq_ignore_ascii_case("alt"))
-                        .unwrap_or(false)
-                })
-                .and_then(|capture| {
-                    capture
-                        .get(2)
-                        .map(|value| decode_editor_entities(value.as_str()))
+            let alt = token_attribute(token, "alt");
+            // 取り込んだ本文の alt は `image_<参照>` という生成物で、読み手に
+            // 見せる説明ではない。**参照だけを控えて**、キャプション欄は空に
+            // する。控えておかないと、編集した作品を EPUB にしたときに同じ絵を
+            // 指し直せず、挿絵が丸ごと落ちる。
+            let source_ref = alt
+                .as_deref()
+                .and_then(|value| value.strip_prefix("image_"))
+                .map(str::to_string)
+                .or_else(|| {
+                    local_path.as_deref().and_then(|path| {
+                        Path::new(path)
+                            .file_stem()
+                            .and_then(|stem| stem.to_str())
+                            .map(str::to_string)
+                    })
                 });
-            blocks.push(editor_block(blocks.len(), "image", alt, asset_id, None));
+            let caption = alt.filter(|value| !value.starts_with("image_"));
+            let attrs = source_ref
+                .map(|value| attrs_with(None, BLOCK_SOURCE_REF_KEY, serde_json::json!(value)))
+                .unwrap_or(None);
+            editor_block(0, "image", caption, asset_id, attrs)
         } else if lower.starts_with("<hr") {
-            blocks.push(editor_block(blocks.len(), "separator", None, None, None));
+            editor_block(0, "separator", None, None, None)
         } else {
-            let href = attr_re
-                .captures_iter(token)
-                .find(|capture| {
-                    capture
-                        .get(1)
-                        .map(|v| v.as_str().eq_ignore_ascii_case("href"))
-                        .unwrap_or(false)
-                })
-                .and_then(|capture| {
-                    capture
-                        .get(2)
-                        .map(|value| decode_editor_entities(value.as_str()))
-                })
-                .unwrap_or_default();
+            let href = token_attribute(token, "href").unwrap_or_default();
             let label = html_fragment_to_text(token)
                 .split_whitespace()
                 .collect::<Vec<_>>()
                 .join(" ");
             let attrs = serde_json::json!({ "label": label }).to_string();
-            blocks.push(editor_block(
-                blocks.len(),
-                "link",
-                Some(href),
-                None,
-                Some(attrs),
-            ));
-        }
+            editor_block(0, "link", Some(href), None, Some(attrs))
+        };
+        lines.push(SourceLine::Token(block));
         cursor = matched.end();
+        after_token = true;
     }
-    push_text(&html[cursor..], &mut blocks);
+    push_fragment_lines(&html[cursor..], after_token, &mut lines);
+
+    let blocks = source_lines_to_blocks(lines);
     if blocks.is_empty() {
         plain_text_to_editor_blocks("")
     } else {
@@ -12415,14 +12647,76 @@ fn editor_block(
     }
 }
 
+/// 行の終わりを作るのは `<br />` **だけ**。
+///
+/// HTML では地の文に書かれた改行は畳める空白でしかなく、行を分けない。
+/// 生成時の見た目のための改行まで行の区切りとして数えていたため、1 つの
+/// 改行が 2 つに増え、行と空行の区別が最初の一往復で失われていた。
+static HTML_LINE_BREAK: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+    Regex::new(r"(?i)<br\s*/?>|</(?:p|div|h[1-6]|blockquote)>").expect("valid HTML break regex")
+});
+
+static HTML_ANY_TAG: std::sync::LazyLock<Regex> =
+    std::sync::LazyLock::new(|| Regex::new(r"(?is)<[^>]+>").expect("valid HTML tag regex"));
+
+/// 行の終わりの目印。地の文には現れない制御文字を借りて、畳める改行を
+/// 落としきってから本物の改行へ戻す。
+const LINE_BREAK_MARK: char = '\u{1}';
+
+static RUBY_HTML: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+    Regex::new(r"(?is)<ruby>(.*?)<rt>(.*?)</rt></ruby>").expect("valid ruby regex")
+});
+
+static JUMP_LINK_HTML: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+    Regex::new(
+        r#"(?is)<a\b[^>]*\bclass="[^"]*jump-link[^"]*"[^>]*\bdata-page="(\d+)"[^>]*>.*?</a>"#,
+    )
+    .expect("valid jump link regex")
+});
+
+static EXTERNAL_ANCHOR_HTML: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+    Regex::new(r#"(?is)<a\b[^>]*\bhref="(https?://[^"]*)"[^>]*>(.*?)</a>"#)
+        .expect("valid anchor regex")
+});
+
+/// 開かれた行内記法を、編集画面が扱う記法の形へ戻す。
+///
+/// タグを落とすだけだったころは、ルビが「漢字かんじ」という地の文に潰れ、
+/// 外部リンクは宛先を、ページ内移動は飛び先を失った。**編集画面を一度開く
+/// だけで**そうなるので、読み手には何が消えたのかも分からなかった。
+fn restore_inline_notation(html: &str) -> String {
+    let text = RUBY_HTML.replace_all(html, |captures: &regex::Captures| {
+        format!(
+            "[[rb:{}>{}]]",
+            HTML_ANY_TAG.replace_all(&captures[1], ""),
+            HTML_ANY_TAG.replace_all(&captures[2], "")
+        )
+    });
+    let text = JUMP_LINK_HTML.replace_all(&text, "[jump:$1]");
+    EXTERNAL_ANCHOR_HTML
+        .replace_all(&text, |captures: &regex::Captures| {
+            let label = HTML_ANY_TAG.replace_all(&captures[2], "");
+            let label = label.trim();
+            if label.is_empty() {
+                captures[1].to_string()
+            } else {
+                format!("[[jumpuri:{}>{}]]", label, &captures[1])
+            }
+        })
+        .to_string()
+}
+
 fn html_fragment_to_text(fragment: &str) -> String {
-    let breaks = Regex::new(r"(?i)<br\s*/?>|</(?:p|div|h[1-6]|blockquote)>")
-        .expect("valid HTML break regex");
-    let tags = Regex::new(r"(?is)<[^>]+>").expect("valid HTML tag regex");
-    let with_breaks = breaks.replace_all(fragment, "\n");
-    decode_editor_entities(tags.replace_all(&with_breaks, "").as_ref())
-        .replace("\r\n", "\n")
-        .replace("\n\n\n", "\n\n")
+    let with_marks = HTML_LINE_BREAK.replace_all(fragment, LINE_BREAK_MARK.to_string().as_str());
+    let without_tags = HTML_ANY_TAG.replace_all(&with_marks, "");
+    let text: String = without_tags
+        .chars()
+        .filter(|ch| *ch != '\n' && *ch != '\r')
+        .map(|ch| if ch == LINE_BREAK_MARK { '\n' } else { ch })
+        .collect();
+    // 空行の本数はそのまま残す。ここで詰めると、場面転換のための連続した
+    // 空行が編集を通すたびに 1 行へ均されていく。
+    decode_editor_entities(&text)
 }
 
 fn decode_editor_entities(value: &str) -> String {
@@ -12523,9 +12817,9 @@ fn reader_source_content(
 /// Converts source-level boundaries into reasonably sized transport pages.
 /// Boundaries always sit between complete source blocks, so a page can be
 /// sanitized independently without producing malformed markup.
-fn paginate_reader_html(html: &str, source: &str) -> Vec<String> {
+fn paginate_reader_html(html: &str, source: &str) -> (Vec<String>, Vec<usize>) {
     if html.trim().is_empty() {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     }
     let marker = if source.eq_ignore_ascii_case("pixiv") {
         "<!-- newpage -->"
@@ -12537,6 +12831,10 @@ fn paginate_reader_html(html: &str, source: &str) -> Vec<String> {
         .map(str::trim)
         .filter(|part| !part.is_empty());
     let mut pages = Vec::new();
+    // pixiv の [newpage] が作る「原稿のページ」が、転送用の何ページ目から
+    // 始まるか。長い原稿ページは転送のために割られるので、この対応表が無いと
+    // `[jump:5]` が 5 ページ目ではない場所へ飛ぶ。
+    let mut source_page_starts = Vec::new();
     let mut current = String::new();
     for block in blocks {
         // Pixiv's [newpage] is user-visible page semantics and must never be
@@ -12544,6 +12842,7 @@ fn paginate_reader_html(html: &str, source: &str) -> Vec<String> {
         // break that one transport response at generated line boundaries so a
         // single IPC message does not have to carry the entire novel.
         if source.eq_ignore_ascii_case("pixiv") {
+            source_page_starts.push(pages.len());
             let mut chunk = String::new();
             for line in block.split_inclusive("<br />\n") {
                 if !chunk.is_empty()
@@ -12574,7 +12873,11 @@ fn paginate_reader_html(html: &str, source: &str) -> Vec<String> {
     if pages.is_empty() {
         pages.push(html.to_string());
     }
-    pages
+    // 割られなかった原稿ページは、転送用のページとそのまま 1 対 1。
+    if source_page_starts.is_empty() {
+        source_page_starts = (0..pages.len()).collect();
+    }
+    (pages, source_page_starts)
 }
 
 fn plain_text_from_reader_html(html: &str) -> String {
@@ -12596,55 +12899,202 @@ fn plain_text_from_reader_html(html: &str) -> String {
         .to_string()
 }
 
+/// 編集したブロックを、読書画面が受け取る HTML へ戻す。
+///
+/// 取り込んだ本文と**同じ組み方**で書く。行の終わりごとに `<br />` を置き、
+/// 空行のぶんだけ足す。ただ連結していたころは行の区切りがどこにも残らず、
+/// 「編集画面を開いて何も変えずに反映する」だけで作品全体がひと続きの塊に
+/// なっていた。
+///
+/// ここが吐く HTML は取り込み直されない（版があるときブロックは DB から
+/// 読む）ので、`html_to_editor_blocks` が知らない `<figure>` を使ってよい。
 fn blocks_to_html(blocks: &[WorkBlock], assets: &[AssetEntry]) -> String {
-    blocks
-        .iter()
-        .map(|block| match block.block_type.as_str() {
-            "heading" => format!(
-                "<h2>{}</h2>",
-                escape_editor_html(block.text.as_deref().unwrap_or(""))
-            ),
+    let mut html = String::new();
+    for (index, block) in blocks.iter().enumerate() {
+        let gap = block_gap(block).unwrap_or(if index == 0 { 0 } else { 1 });
+        if index == 0 {
+            for _ in 0..gap {
+                html.push_str("<br />\n");
+            }
+        } else {
+            // 直前の行を閉じる 1 つと、空行の数だけの `<br />`。
+            for _ in 0..=gap {
+                html.push_str("<br />\n");
+            }
+            // FANBOX の読書画面はこの印でページを切り出す。
+            html.push_str("<!-- content-block -->\n");
+        }
+        html.push_str(&block_to_html(block, assets));
+    }
+    html
+}
+
+/// このブロックが指す絵を、取得元の本文が使っていた名前で呼ぶ。
+///
+/// 取り込んだときに控えた参照を第一に使い、編集画面から足した絵は
+/// ファイル名から引く。EPUB のビルダーはどちらの形でも実ファイルへ辿れる。
+fn block_image_reference(block: &WorkBlock, assets: &[AssetEntry]) -> Option<String> {
+    if let Some(reference) = block_source_ref(block) {
+        return Some(reference);
+    }
+    let asset = block
+        .asset_id
+        .and_then(|id| assets.iter().find(|asset| asset.id == id))?;
+    Path::new(&asset.filename)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .map(str::to_string)
+}
+
+fn block_link_label(block: &WorkBlock) -> Option<String> {
+    block_attrs(block)
+        .and_then(|attrs| {
+            attrs
+                .get("label")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+        .filter(|label| !label.trim().is_empty())
+}
+
+/// 反映済みの編集を、pixiv の本文記法へ組み直す。
+///
+/// 平文へ均していたころは、`blocks_to_plain_text` が画像・区切り・改ページを
+/// 落とし、見出しをただの行にしていた。編集した作品の EPUB には挿絵が 1 枚も
+/// 入らず、章も改ページも消えていた。
+pub(crate) fn blocks_to_pixiv_text(blocks: &[WorkBlock], assets: &[AssetEntry]) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    for (index, block) in blocks.iter().enumerate() {
+        let gap = block_gap(block).unwrap_or(if index == 0 { 0 } else { 1 });
+        for _ in 0..gap {
+            lines.push(String::new());
+        }
+        let text = block.text.as_deref().unwrap_or("");
+        match block.block_type.as_str() {
+            "heading" => lines.push(format!("[chapter:{}]", text.trim())),
+            "page_break" => lines.push("[newpage]".to_string()),
+            "separator" => lines.push(super::parser::EDITOR_SEPARATOR_NOTATION.to_string()),
             "image" => {
-                let asset = block
-                    .asset_id
-                    .and_then(|id| assets.iter().find(|asset| asset.id == id));
-                if let Some(asset) = asset {
-                    format!(
-                        r#"<img class="novel-image" data-local-path="{}" alt="{}" />"#,
-                        escape_editor_html(&asset.local_path),
-                        escape_editor_html(&asset.filename)
-                    )
-                } else {
-                    "<div class=\"missing-image-placeholder\">画像が見つかりません</div>"
-                        .to_string()
+                if let Some(reference) = block_image_reference(block, assets) {
+                    lines.push(format!("[uploadedimage:{reference}]"));
                 }
             }
-            "separator" => "<hr />".to_string(),
-            "page_break" => "<!-- newpage -->".to_string(),
-            "quote" => format!(
-                "<blockquote>{}</blockquote>",
-                escape_editor_html(block.text.as_deref().unwrap_or("")).replace('\n', "<br />\n")
-            ),
             "link" => {
-                let url = block.text.as_deref().unwrap_or("");
-                let label = block
-                    .attrs_json
-                    .as_deref()
-                    .and_then(|attrs| serde_json::from_str::<serde_json::Value>(attrs).ok())
-                    .and_then(|attrs| attrs.get("label").and_then(|value| value.as_str()).map(str::to_string))
-                    .filter(|label| !label.trim().is_empty())
-                    .unwrap_or_else(|| url.to_string());
-                format!(
-                    r#"<a href="{}" target="_blank" rel="noopener noreferrer" class="novel-link-card"><span class="link-card-icon">🔗</span><span class="link-card-info"><span class="link-card-title">{}</span><span class="link-card-host">{}</span></span></a>"#,
-                    escape_editor_html(url),
-                    escape_editor_html(&label),
-                    escape_editor_html(url)
-                )
+                let url = text.trim();
+                if !url.is_empty() {
+                    let label = block_link_label(block).unwrap_or_else(|| url.to_string());
+                    lines.push(format!("[[jumpuri:{label}>{url}]]"));
+                }
             }
-            _ => escape_editor_html(block.text.as_deref().unwrap_or("")).replace('\n', "<br />\n"),
-        })
-        .collect::<Vec<_>>()
-        .join("\n<!-- content-block -->\n")
+            _ => lines.extend(text.split('\n').map(str::to_string)),
+        }
+    }
+    lines.join("\n")
+}
+
+/// 反映済みの編集を、FANBOX の本文ブロックへ組み直す。
+pub(crate) fn blocks_to_fanbox_blocks(
+    blocks: &[WorkBlock],
+    assets: &[AssetEntry],
+) -> Vec<serde_json::Value> {
+    let blank = || serde_json::json!({ "type": "p", "text": "" });
+    let mut out = Vec::new();
+    for (index, block) in blocks.iter().enumerate() {
+        let gap = block_gap(block).unwrap_or(if index == 0 { 0 } else { 1 });
+        for _ in 0..gap {
+            out.push(blank());
+        }
+        let text = block.text.as_deref().unwrap_or("");
+        match block.block_type.as_str() {
+            "heading" => out.push(serde_json::json!({ "type": "header", "text": text.trim() })),
+            "image" => {
+                if let Some(reference) = block_image_reference(block, assets) {
+                    out.push(serde_json::json!({ "type": "image", "imageId": reference }));
+                }
+            }
+            "separator" | "page_break" => out.push(blank()),
+            "link" => {
+                let url = text.trim();
+                if !url.is_empty() {
+                    let label = block_link_label(block).unwrap_or_else(|| url.to_string());
+                    // FANBOX のリンクは本文の範囲で表す。長さは UTF-16 の単位。
+                    out.push(serde_json::json!({
+                        "type": "p",
+                        "text": label,
+                        "links": [{ "url": url, "offset": 0, "length": label.encode_utf16().count() }],
+                    }));
+                }
+            }
+            _ => out.push(serde_json::json!({ "type": "p", "text": text })),
+        }
+    }
+    out
+}
+
+fn block_to_html(block: &WorkBlock, assets: &[AssetEntry]) -> String {
+    match block.block_type.as_str() {
+        "heading" => format!(
+            "<h2>{}</h2>",
+            expand_pixiv_inline_notation(&escape_editor_html(block.text.as_deref().unwrap_or("")))
+        ),
+        "image" => {
+            let asset = block
+                .asset_id
+                .and_then(|id| assets.iter().find(|asset| asset.id == id));
+            let Some(asset) = asset else {
+                return "<div class=\"missing-image-placeholder\">画像が見つかりません</div>"
+                    .to_string();
+            };
+            let caption = block
+                .text
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty());
+            let image = format!(
+                r#"<img class="novel-image" data-local-path="{}" alt="{}" />"#,
+                escape_editor_html(&asset.local_path),
+                escape_editor_html(caption.unwrap_or(&asset.filename))
+            );
+            // 書いた説明が読書画面にも EPUB にも出ないまま捨てられていた。
+            match caption {
+                Some(caption) => format!(
+                    r#"<figure class="novel-figure">{}<figcaption>{}</figcaption></figure>"#,
+                    image,
+                    escape_editor_html(caption)
+                ),
+                None => image,
+            }
+        }
+        "separator" => "<hr />".to_string(),
+        "page_break" => "<!-- newpage -->".to_string(),
+        "quote" => format!(
+            "<blockquote>{}</blockquote>",
+            expand_pixiv_inline_notation(&escape_editor_html(block.text.as_deref().unwrap_or("")))
+                .replace('\n', "<br />\n")
+        ),
+        "link" => {
+            let url = block.text.as_deref().unwrap_or("");
+            let label = block_attrs(block)
+                .and_then(|attrs| {
+                    attrs
+                        .get("label")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string)
+                })
+                .filter(|label| !label.trim().is_empty())
+                .unwrap_or_else(|| url.to_string());
+            format!(
+                r#"<a href="{}" target="_blank" rel="noopener noreferrer" class="novel-link-card"><span class="link-card-icon">🔗</span><span class="link-card-info"><span class="link-card-title">{}</span><span class="link-card-host">{}</span></span></a>"#,
+                escape_editor_html(url),
+                escape_editor_html(&label),
+                escape_editor_html(url)
+            )
+        }
+        // 地の文。書いた記法をそのまま開く ―― 取り込みと同じ関数を通すので、
+        // 編集画面で足したルビも読書画面でルビになる。
+        _ => expand_pixiv_inline_notation(&escape_editor_html(block.text.as_deref().unwrap_or("")))
+            .replace('\n', "<br />\n"),
+    }
 }
 
 fn active_edit_plain_text_locked(
@@ -12908,7 +13358,8 @@ fn search_index_document_locked(
 ) -> Result<Option<SearchIndexBuildDocument>, String> {
     let row = conn
         .query_row(
-            "SELECT d.source, d.source_id, d.title, d.author_name, d.author_id,
+            &format!(
+            "SELECT d.source, d.source_id, {EFFECTIVE_TITLE_SQL} AS title, d.author_name, d.author_id,
                     (SELECT GROUP_CONCAT(t.name, ' ')
                      FROM download_tags dt
                      JOIN tags t ON t.id = dt.tag_id
@@ -12923,7 +13374,8 @@ fn search_index_document_locked(
                     d.text_length,
                     (SELECT GROUP_CONCAT(DISTINCT a.asset_type) FROM assets a WHERE a.download_id = d.id)
              FROM downloads d
-             WHERE d.id = ?1",
+             WHERE d.id = ?1"
+            ),
             params![download_id],
             |row| {
                 Ok((
@@ -13797,3 +14249,7 @@ mod title_order_tests;
 #[cfg(test)]
 #[path = "search_integration_tests.rs"]
 mod search_integration_tests;
+
+#[cfg(test)]
+#[path = "editor_roundtrip_tests.rs"]
+mod editor_roundtrip_tests;

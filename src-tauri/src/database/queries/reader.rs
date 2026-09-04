@@ -9,19 +9,87 @@
 //! 一度に全部は割らない。何が壊れたのかを言えなくなる。
 
 use super::{
-    active_edit_revision_locked, blocks_for_revision_locked, blocks_to_html, blocks_to_plain_text,
-    draft_edit_revision_locked, extract_search_body, get_work_edit_revision_locked, hash_blocks,
-    html_to_editor_blocks, insert_work_blocks_locked, normalize_block_inputs, paginate_reader_html,
+    active_edit_revision_locked, blocks_for_revision_locked, blocks_to_fanbox_blocks,
+    blocks_to_html, blocks_to_pixiv_text, blocks_to_plain_text, draft_edit_revision_locked,
+    extract_search_body, get_work_edit_revision_locked, hash_blocks, html_to_editor_blocks,
+    insert_work_blocks_locked, normalize_block_inputs, paginate_reader_html,
     plain_text_from_reader_html, reader_source_content, reader_version_path,
-    reindex_download_locked, Database, EditorDocument, ReaderCacheEntry, ReaderCacheKey,
-    ReaderContentPage, ReaderDocument, ReaderMetadata, ReaderSearchHit, WorkBlockInput,
-    WorkEditRevision, READER_CACHE_MAX_BYTES, READER_CACHE_MAX_DOCUMENTS, READER_CACHE_TICK,
-    READER_CONTENT_CACHE,
+    reindex_download_locked, Database, EditedSourceForm, EditorDocument, ReaderCacheEntry,
+    ReaderCacheKey, ReaderContentPage, ReaderDocument, ReaderMetadata, ReaderOutlineEntry,
+    ReaderSearchHit, WorkBlockInput, WorkEditRevision, READER_CACHE_MAX_BYTES,
+    READER_CACHE_MAX_DOCUMENTS, READER_CACHE_TICK, READER_CONTENT_CACHE,
 };
 use crate::database::parser;
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 use std::sync::atomic::Ordering as AtomicOrdering;
 use std::sync::Arc;
+use unicode_normalization::UnicodeNormalization;
+
+/// 本文内検索のための、**1 文字を 1 文字へ**畳む正規化。
+///
+/// 棚の検索は形態素解析まで通して表記ゆれを吸収するのに、本文内検索だけが
+/// `to_lowercase` の部分一致だった。同じアプリの中で探し方の水準が二段違って
+/// いたので、「カタカナ」で書かれた語を「かたかな」で探すと出てこなかった。
+///
+/// ここで畳み方を 1 対 1 に留めているのは、見つけた位置をそのまま元の本文の
+/// 文字位置として使うため。長さが変わる畳み方（半角カナの濁点など）は
+/// 扱わない ―― 位置がずれるほうが、少し見つからないことより困る。
+pub(super) fn fold_char(ch: char) -> char {
+    if ch == '\u{3000}' {
+        return ' ';
+    }
+    // 全角英数などは NFKC で半角へ。1 文字に収まるものだけを受け取る。
+    let single = ch.to_string();
+    let compat = {
+        let mut chars = single.nfkc();
+        match (chars.next(), chars.next()) {
+            (Some(only), None) => only,
+            _ => ch,
+        }
+    };
+    let lowered = {
+        let mut chars = compat.to_lowercase();
+        match (chars.next(), chars.next()) {
+            (Some(only), None) => only,
+            _ => compat,
+        }
+    };
+    // カタカナはひらがなへ寄せる。ヴ（U+30F4）までを対象にする。
+    match lowered {
+        'ァ'..='ヶ' => char::from_u32(lowered as u32 - 0x60).unwrap_or(lowered),
+        other => other,
+    }
+}
+
+static READER_HEADING: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(r"(?is)<h2\b[^>]*>(.*?)</h2>").expect("valid heading regex")
+});
+
+pub(super) fn fold_for_reader_search(query: &str) -> String {
+    query.chars().map(fold_char).collect()
+}
+
+/// 畳んだ本文の中で、畳んだ検索語が始まる文字位置をすべて返す。
+///
+/// 重なる一致は数えない。「ああ」を「あああ」から 2 件と数えると、画面側が
+/// 入れ子の印を描くことになり、一覧の件数と本文の印がずれる。
+pub(super) fn folded_match_positions(haystack: &[char], needle: &str) -> Vec<usize> {
+    let needle = needle.chars().collect::<Vec<_>>();
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return Vec::new();
+    }
+    let mut positions = Vec::new();
+    let mut start = 0;
+    while start + needle.len() <= haystack.len() {
+        if haystack[start..start + needle.len()] == needle[..] {
+            positions.push(start);
+            start += needle.len();
+        } else {
+            start += 1;
+        }
+    }
+    positions
+}
 
 impl Database {
     pub fn get_reader_metadata(&self, download_id: i64) -> Result<ReaderMetadata, String> {
@@ -38,11 +106,16 @@ impl Database {
         })
     }
 
+    /// `include_plain_text` を落とすと、本文の平文を積まずに返す。
+    ///
+    /// 読書画面は HTML しか使わないのに、ページを繰るたび同じ本文を平文でも
+    /// 運んでいた。転送量がほぼ倍になっていたぶん、ページ送りが重かった。
     pub fn get_reader_content_page(
         &self,
         download_id: i64,
         version: Option<i64>,
         page: usize,
+        include_plain_text: bool,
     ) -> Result<ReaderContentPage, String> {
         let content = self.get_cached_reader_content(download_id, version)?;
         let page_count = content.pages.len().max(1);
@@ -51,10 +124,47 @@ impl Database {
         Ok(ReaderContentPage {
             page,
             page_count,
-            plain_text: plain_text_from_reader_html(&html),
+            plain_text: if include_plain_text {
+                plain_text_from_reader_html(&html)
+            } else {
+                String::new()
+            },
             html,
             total_plain_text_chars: content.total_plain_text_chars,
+            source_page_starts: content.source_page_starts.as_ref().clone(),
         })
+    }
+
+    /// 作品全体の見出しと、それが載っているページ。
+    ///
+    /// `[chapter:]` は読書画面では見出しになるのに、章へ飛ぶ手立てが無かった。
+    /// EPUB では目次を組んでいるのに、読むときだけ目次が無い状態だった。
+    pub fn get_reader_outline(
+        &self,
+        download_id: i64,
+        version: Option<i64>,
+    ) -> Result<Vec<ReaderOutlineEntry>, String> {
+        let content = self.get_cached_reader_content(download_id, version)?;
+        let mut entries = Vec::new();
+        for (page, html) in content.pages.iter().enumerate() {
+            for (index, captures) in READER_HEADING.captures_iter(html).enumerate() {
+                let title = plain_text_from_reader_html(&captures[1]);
+                let title = title.trim();
+                if title.is_empty() {
+                    continue;
+                }
+                entries.push(ReaderOutlineEntry {
+                    page: page + 1,
+                    index,
+                    title: title.to_string(),
+                });
+                // 目次が本文より長くなっては意味がない。
+                if entries.len() >= 2_000 {
+                    return Ok(entries);
+                }
+            }
+        }
+        Ok(entries)
     }
 
     pub fn search_reader_content(
@@ -64,24 +174,25 @@ impl Database {
         query: &str,
         limit: usize,
     ) -> Result<Vec<ReaderSearchHit>, String> {
-        let query = query.trim().to_lowercase();
-        if query.is_empty() {
+        let needle = fold_for_reader_search(query.trim());
+        if needle.is_empty() {
             return Ok(Vec::new());
         }
         let content = self.get_cached_reader_content(download_id, version)?;
         let mut hits = Vec::new();
         for (page, html) in content.pages.iter().enumerate() {
             let plain = plain_text_from_reader_html(html);
-            let normalized = plain.to_lowercase();
-            let count = normalized.match_indices(&query).count();
-            if count == 0 {
+            let chars = plain.chars().collect::<Vec<_>>();
+            // 1 文字が 1 文字に対応する畳み方なので、畳んだ側で見つけた位置は
+            // そのまま元の本文の文字位置になる。
+            let folded = chars.iter().map(|ch| fold_char(*ch)).collect::<Vec<_>>();
+            let positions = folded_match_positions(&folded, &needle);
+            if positions.is_empty() {
                 continue;
             }
-            let byte_index = normalized.find(&query).unwrap_or(0);
-            let char_index = normalized[..byte_index].chars().count();
-            let chars = plain.chars().collect::<Vec<_>>();
+            let char_index = positions[0];
             let start = char_index.saturating_sub(42);
-            let end = (char_index + query.chars().count() + 70).min(chars.len());
+            let end = (char_index + needle.chars().count() + 70).min(chars.len());
             let snippet = format!(
                 "{}{}{}",
                 if start > 0 { "…" } else { "" },
@@ -91,7 +202,7 @@ impl Database {
             hits.push(ReaderSearchHit {
                 page: page + 1,
                 snippet,
-                count,
+                count: positions.len(),
             });
             if hits.len() >= limit.clamp(1, 200) {
                 break;
@@ -159,10 +270,12 @@ impl Database {
             drop(conn);
             reader_source_content(self, &download, &versions, version, &assets)?
         };
-        let pages = Arc::new(paginate_reader_html(&html, &download.source));
+        let (pages, source_page_starts) = paginate_reader_html(&html, &download.source);
+        let pages = Arc::new(pages);
         let entry = ReaderCacheEntry {
             bytes: pages.iter().map(String::len).sum::<usize>() + plain_text.len(),
             pages,
+            source_page_starts: Arc::new(source_page_starts),
             total_plain_text_chars: plain_text.chars().count(),
             last_used: tick,
         };
@@ -246,6 +359,29 @@ impl Database {
         })
     }
 
+    /// 反映済みの編集を、取得元と同じ書式へ組み直して返す。
+    ///
+    /// 何も反映されていなければ `None`。EPUB の書き出しはここを通ることで、
+    /// 挿絵・改ページ・見出し・区切りを保ったまま編集版を本にできる。
+    /// 平文だけを渡していたころは、そのすべてが落ちていた。
+    pub fn active_edit_source_form(
+        &self,
+        download_id: i64,
+    ) -> Result<Option<EditedSourceForm>, String> {
+        let assets = self.get_assets(download_id)?;
+        let conn = self.read_conn()?;
+        let Some(revision) = active_edit_revision_locked(&conn, download_id)? else {
+            return Ok(None);
+        };
+        let blocks = blocks_for_revision_locked(&conn, revision.id)?;
+        drop(conn);
+        Ok(Some(EditedSourceForm {
+            pixiv_text: blocks_to_pixiv_text(&blocks, &assets),
+            fanbox_blocks: blocks_to_fanbox_blocks(&blocks, &assets),
+            plain_text: blocks_to_plain_text(&blocks),
+        }))
+    }
+
     pub fn get_editor_document(&self, download_id: i64) -> Result<EditorDocument, String> {
         let download = self.get_download(download_id)?;
         let assets = self.get_assets(download_id)?;
@@ -305,12 +441,29 @@ impl Database {
         })
     }
 
+    /// `title` は、取得元の題を書き換えたいときだけ渡す。
+    ///
+    /// 空文字や元の題と同じものは持たない。持たせておくと、取得元が題を
+    /// 直したときに「直っていない古い題」で上書きし続けることになる。
     pub fn save_work_draft(
         &self,
         download_id: i64,
         base_version: i64,
+        title: Option<&str>,
         blocks: &[WorkBlockInput],
     ) -> Result<WorkEditRevision, String> {
+        let source_title: String = {
+            let conn = self.read_conn()?;
+            conn.query_row(
+                "SELECT title FROM downloads WHERE id = ?1",
+                params![download_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("Failed to read the source title: {e}"))?
+        };
+        let title = title
+            .map(str::trim)
+            .filter(|value| !value.is_empty() && *value != source_title.trim());
         let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
         let now = chrono::Utc::now().to_rfc3339();
         let normalized_blocks = normalize_block_inputs(blocks);
@@ -319,22 +472,58 @@ impl Database {
             .transaction()
             .map_err(|e| format!("Editor transaction begin failed: {}", e))?;
 
-        tx.execute(
-            "UPDATE work_edit_revisions
-             SET status = 'archived', updated_at = ?2
-             WHERE download_id = ?1 AND status = 'draft'",
-            params![download_id, now],
-        )
-        .map_err(|e| format!("Failed to archive previous draft: {}", e))?;
+        // 下書きは 1 本を書き換え続ける。保存のたびに版を起こして前の版を
+        // 書庫送りにしていたころは、**自動保存を入れると履歴が下書きで
+        // 埋まる**うえ、何も変えずに保存し直しただけで版が増えていた。
+        // 反映済みの版（`active`）とは別の行なので、これで失うものはない。
+        let existing_draft: Option<i64> = tx
+            .query_row(
+                "SELECT id FROM work_edit_revisions
+                 WHERE download_id = ?1 AND status = 'draft'
+                 ORDER BY updated_at DESC, id DESC
+                 LIMIT 1",
+                params![download_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| format!("Failed to read the current draft: {}", e))?;
 
-        tx.execute(
-            "INSERT INTO work_edit_revisions (
-                download_id, base_version, status, title, content_hash, created_at, updated_at
-             ) VALUES (?1, ?2, 'draft', NULL, ?3, ?4, ?4)",
-            params![download_id, base_version, content_hash, now],
-        )
-        .map_err(|e| format!("Failed to insert draft revision: {}", e))?;
-        let revision_id = tx.last_insert_rowid();
+        let revision_id = match existing_draft {
+            Some(revision_id) => {
+                // 版を起こしていたころの取りこぼしが残っていることがある。
+                // 下書きは 1 本に収束させる。
+                tx.execute(
+                    "UPDATE work_edit_revisions
+                     SET status = 'archived', updated_at = ?3
+                     WHERE download_id = ?1 AND status = 'draft' AND id <> ?2",
+                    params![download_id, revision_id, now],
+                )
+                .map_err(|e| format!("Failed to archive stale drafts: {}", e))?;
+                tx.execute(
+                    "UPDATE work_edit_revisions
+                     SET base_version = ?2, content_hash = ?3, updated_at = ?4, title = ?5
+                     WHERE id = ?1",
+                    params![revision_id, base_version, content_hash, now, title],
+                )
+                .map_err(|e| format!("Failed to update the draft revision: {}", e))?;
+                tx.execute(
+                    "DELETE FROM work_blocks WHERE edit_revision_id = ?1",
+                    params![revision_id],
+                )
+                .map_err(|e| format!("Failed to clear the draft blocks: {}", e))?;
+                revision_id
+            }
+            None => {
+                tx.execute(
+                    "INSERT INTO work_edit_revisions (
+                        download_id, base_version, status, title, content_hash, created_at, updated_at
+                     ) VALUES (?1, ?2, 'draft', ?5, ?3, ?4, ?4)",
+                    params![download_id, base_version, content_hash, now, title],
+                )
+                .map_err(|e| format!("Failed to insert draft revision: {}", e))?;
+                tx.last_insert_rowid()
+            }
+        };
 
         insert_work_blocks_locked(&tx, revision_id, &normalized_blocks)?;
         tx.commit()
@@ -374,5 +563,39 @@ impl Database {
 
         reindex_download_locked(&conn, &self.storage_dir, revision.download_id)?;
         get_work_edit_revision_locked(&conn, edit_revision_id)
+    }
+
+    /// 反映した編集を下ろし、取り込んだままの本文へ戻す。
+    ///
+    /// 版そのものは残す。もう一度反映できるし、履歴からも消えない。戻る道が
+    /// 無かったころは、一度反映してしまうと編集前の本文を読む手立てが
+    /// 「版の選択で同じ番号をもう一度選ぶ」という、誰にも分からない操作
+    /// しかなかった。
+    pub fn deactivate_work_edit(&self, download_id: i64) -> Result<(), String> {
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let now = chrono::Utc::now().to_rfc3339();
+        let tx = conn
+            .transaction()
+            .map_err(|e| format!("Editor transaction begin failed: {}", e))?;
+        let archived = tx
+            .execute(
+                "UPDATE work_edit_revisions
+                 SET status = 'archived', updated_at = ?2
+                 WHERE download_id = ?1 AND status = 'active'",
+                params![download_id, now],
+            )
+            .map_err(|e| format!("Failed to archive active revision: {}", e))?;
+        if archived == 0 {
+            return Ok(());
+        }
+        tx.execute(
+            "DELETE FROM search_index_state WHERE download_id = ?1",
+            params![download_id],
+        )
+        .map_err(|e| format!("Failed to invalidate search index: {}", e))?;
+        tx.commit()
+            .map_err(|e| format!("Editor transaction commit failed: {}", e))?;
+
+        reindex_download_locked(&conn, &self.storage_dir, download_id)
     }
 }

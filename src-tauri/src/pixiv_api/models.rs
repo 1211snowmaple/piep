@@ -664,11 +664,13 @@ pub async fn parse_response_into<T: DeserializeOwned>(
 
     match status {
         _ if status == StatusCode::TOO_MANY_REQUESTS || pixiv_body_is_rate_limited(&body) => {
-            error!("API rate limited: {body}");
+            // 本文をそのまま流していた。応答は 32MB まで受けるので、一件で
+            // ログを埋めうる。長さを切る側は既にあるので、そちらを通す。
+            crate::pixiv_api::error::log_response_body("API rate limited", &body);
             Err(PixivError::RateLimited { body })
         }
         StatusCode::NOT_FOUND => {
-            error!("API resource not found: {body}");
+            crate::pixiv_api::error::log_response_body("API resource not found", &body);
             Err(PixivError::NotFound { body })
         }
         _ => {

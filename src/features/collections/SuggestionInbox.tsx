@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { Alert, Badge, Box, Button, Card, Chip, Group, Menu, Stack, Text, Tooltip, UnstyledButton } from "@mantine/core";
+import { Alert, Badge, Box, Button, Card, Chip, Collapse, Group, Stack, Text, Tooltip, UnstyledButton } from "@mantine/core";
 import { modals } from "@mantine/modals";
 import { notifications } from "@mantine/notifications";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -11,7 +11,6 @@ import { Icons, IconSize } from "@/lib/icons";
 import {
   acceptCollectionSuggestion,
   dismissCollectionSuggestion,
-  dismissSweptSuggestions,
   listCollectionSuggestions,
   rejectCollectionSuggestion,
   suggestionNameOverride,
@@ -66,6 +65,8 @@ export function SuggestionInbox({ sweeping, savedSearchIdeas, note }: {
   const navigate = useAppNavigate();
   const queryClient = useQueryClient();
   const [track, setTrack] = useState<Track>("all");
+  // 副産物は畳んでおく。毎回同じ内容なので、開いたままにする理由がない。
+  const [savedSearchOpen, setSavedSearchOpen] = useState(false);
   const [shownCount, setShownCount] = useState(PAGE);
 
   const suggestionsQuery = useQuery({
@@ -89,74 +90,9 @@ export function SuggestionInbox({ sweeping, savedSearchIdeas, note }: {
     queryClient.invalidateQueries({ queryKey: ["work-collections"] });
   };
 
-  const dismissAll = useMutation({
-    mutationFn: (scope: Track) => dismissSweptSuggestions(scope === "all" ? undefined : scope),
-    onSuccess: (removed) => {
-      invalidate();
-      notifications.show({ message: `${formatNumber(removed)}件の候補を閉じました` });
-    },
-    onError: (error) => notifications.show({ color: "red", title: "候補を閉じられません", message: errorMessage(error) }),
-  });
-
-  const confirmDismissAll = (scope: Track) => modals.openConfirmModal({
-    title: "候補をまとめて閉じますか？",
-    children: (
-      <Text size="sm">
-        {scope === "all" ? "走査で見つかった候補すべて" : scope === "sequence" ? "続き物の候補すべて" : "テーマの候補すべて"}を
-        画面から消します。<b>「二度と出さない」とは記録しません</b>ので、もう一度走査すれば同じものが出てきます。
-        作ったコレクションはそのまま残ります。
-      </Text>
-    ),
-    labels: { confirm: "閉じる", cancel: "キャンセル" },
-    onConfirm: () => dismissAll.mutate(scope),
-  });
 
   return (
     <Stack gap="md">
-      <Group justify="space-between" align="flex-start" wrap="nowrap">
-        <Box miw={0}>
-          <Text size="sm" c="dimmed">
-            棚を一度なめて、続き物と、題材の近い束を洗い出します。確かなものから少しだけ出すので、
-            もう一度押せば別の束が上がってきます。採用するまで何も変わりません。
-          </Text>
-        </Box>
-        {counts.all > 0 && (
-          <Menu position="bottom-end">
-            <Menu.Target>
-              {/* 縮ませない。`wrap="nowrap"` の Group では、隣の長い段落が
-                  伸びるぶんだけボタンが潰れて「まと…」になっていた。 */}
-              {/* 縮ませない。`wrap="nowrap"` の Group では、隣の長い段落が
-                  伸びるぶんだけボタンが潰れて「まと…」になっていた。
-                  //
-                  // 点three つ（Ellipsis）もやめる。開く先があることを示す印の
-                  // つもりだったが、文字の隣に置くと**文が省略された印**にしか
-                  // 見えない。実際「まとめて....」と読まれた。開くものには
-                  // 下向きの山を置く。 */}
-              <Button
-                variant="default"
-                style={{ flexShrink: 0 }}
-                rightSection={<Icons.expand size={IconSize.menu} />}
-                loading={dismissAll.isPending}
-              >
-                まとめて
-              </Button>
-            </Menu.Target>
-            <Menu.Dropdown>
-              <Menu.Label>候補を閉じる</Menu.Label>
-              <Menu.Item leftSection={<Icons.hide size={IconSize.menu} />} onClick={() => confirmDismissAll("all")}>
-                すべて閉じる（{formatNumber(counts.all)}件）
-              </Menu.Item>
-              <Menu.Item disabled={counts.sequence === 0} leftSection={<Icons.hide size={IconSize.menu} />} onClick={() => confirmDismissAll("sequence")}>
-                続き物だけ閉じる（{formatNumber(counts.sequence)}件）
-              </Menu.Item>
-              <Menu.Item disabled={counts.theme === 0} leftSection={<Icons.hide size={IconSize.menu} />} onClick={() => confirmDismissAll("theme")}>
-                テーマだけ閉じる（{formatNumber(counts.theme)}件）
-              </Menu.Item>
-            </Menu.Dropdown>
-          </Menu>
-        )}
-      </Group>
-
       {sweeping && (
         <Alert icon={<Icons.collectionSuggest size={IconSize.action} />}>
           本文のリンク、題名の連番、公式シリーズの連番をたどってから、タグと本文の近さで題材の束を探しています。
@@ -182,34 +118,6 @@ export function SuggestionInbox({ sweeping, savedSearchIdeas, note }: {
         </Chip.Group>
       )}
 
-      {savedSearchIdeas.length > 0 && (
-        <Alert color="gray" icon={<Icons.savedSearch size={IconSize.action} />} title="束にしなかったもの">
-          <Stack gap={6}>
-            <Text size="sm">
-              次のタグは付いている作品が多すぎて、読む単位にはなりません。
-              まとまりではなく<b>絞り込み</b>として持つほうが扱いやすいので、保存した検索にしておけます。
-            </Text>
-            <Group gap={6} wrap="wrap">
-              {savedSearchIdeas.map((idea) => (
-                <Tooltip key={idea.tag} label={idea.reason} multiline maw={340}>
-                  <Button
-                    size="compact-xs"
-                    variant="default"
-                    leftSection={<Icons.filter size={IconSize.inline} />}
-                    onClick={() => navigate(`/library?tag=${encodeURIComponent(idea.tag)}`)}
-                  >
-                    {idea.tag} {formatNumber(idea.workCount)}
-                  </Button>
-                </Tooltip>
-              ))}
-            </Group>
-            <Text size="xs" c="dimmed">
-              押すとその絞り込みで棚を開きます。気に入ったら、そこで「検索を保存」してください。
-            </Text>
-          </Stack>
-        </Alert>
-      )}
-
       <div className="suggestion-grid">
         {shown.map((suggestion) => (
           <SuggestionBundleCard key={suggestion.id} suggestion={suggestion} onChanged={invalidate} />
@@ -222,6 +130,48 @@ export function SuggestionInbox({ sweeping, savedSearchIdeas, note }: {
             もっと見る（残り {formatNumber(filtered.length - shown.length)}件）
           </Button>
         </Group>
+      )}
+
+      {/* 束にしなかったタグは、結果の**下**へ置いて畳んでおく。
+          //
+          // これは走査の副産物であり、しかも棚の性質なので**毎回同じものが
+          // 出る**。「洗脳 1,720」は今回見つけたことではない。毎回同じ内容が
+          // 本題の上に240px居座っていたのは、順序の間違いだった。 */}
+      {savedSearchIdeas.length > 0 && (
+        <div>
+          <Button
+            variant="subtle"
+            color="gray"
+            size="compact-sm"
+            leftSection={<Icons.savedSearch size={IconSize.menu} />}
+            rightSection={<Icons.expand size={IconSize.menu} style={{ transform: savedSearchOpen ? "rotate(180deg)" : undefined }} />}
+            onClick={() => setSavedSearchOpen((open) => !open)}
+          >
+            束にしなかったタグ {formatNumber(savedSearchIdeas.length)}件
+          </Button>
+          <Collapse expanded={savedSearchOpen}>
+            <Stack gap={6} mt="xs">
+              <Text size="sm" c="dimmed">
+                付いている作品が多すぎて、読む単位になりません。まとまりではなく<b>絞り込み</b>として
+                持つほうが扱いやすいので、押すとその絞り込みで棚を開きます。
+              </Text>
+              <Group gap={6} wrap="wrap">
+                {savedSearchIdeas.map((idea) => (
+                  <Tooltip key={idea.tag} label={idea.reason} multiline maw={340}>
+                    <Button
+                      size="compact-xs"
+                      variant="default"
+                      leftSection={<Icons.filter size={IconSize.inline} />}
+                      onClick={() => navigate(`/library?tag=${encodeURIComponent(idea.tag)}`)}
+                    >
+                      {idea.tag} {formatNumber(idea.workCount)}
+                    </Button>
+                  </Tooltip>
+                ))}
+              </Group>
+            </Stack>
+          </Collapse>
+        </div>
       )}
 
       {/* オーバーレイの中なので、空でも黙って消えるわけにはいかない。
@@ -255,6 +205,7 @@ function SuggestionBundleCard({ suggestion, onChanged }: { suggestion: Collectio
   const navigate = useAppNavigate();
   const [name, setName] = useState(suggestion.proposedName);
   const [excluded, setExcluded] = useState<ReadonlySet<string>>(new Set());
+  const [namesOpen, setNamesOpen] = useState(false);
   const keys = suggestion.members
     .filter((member) => !excluded.has(memberKey(member)))
     .map((member) => ({ source: member.source, sourceId: member.sourceId }) as WorkKey);
@@ -278,6 +229,9 @@ function SuggestionBundleCard({ suggestion, onChanged }: { suggestion: Collectio
     onSuccess: () => { onChanged(); notifications.show({ message: "この組合せは今後の候補から外します" }); },
     onError: (error) => notifications.show({ color: "red", title: "外せません", message: errorMessage(error) }),
   });
+
+  // 選ばれていない案の数。0 なら開く先が無いので、畳む操作そのものを出さない。
+  const others = suggestion.nameOptions.filter((option) => option.name !== name);
 
   const { engine } = useAssist("collection_naming");
   const askModel = useMutation({
@@ -356,34 +310,52 @@ function SuggestionBundleCard({ suggestion, onChanged }: { suggestion: Collectio
           onToggle={toggle}
         />
 
-        {/* 名前の案は縦に積む。
+        {/* 名前の案は畳んでおく。
             //
-            // 横に並べた札にしていたが、名前は題名から作るのでカードの幅より
-            // 長い。札は折れないので端が切れ、**どの案を選ぼうとしているのかが
-            // 読めないまま**チェックだけ動いていた。名前を選ぶ操作で、名前が
-            // 読めないのでは何も決められない。 */}
+            // 全文を縦に並べていたので、カードの**42%**が名前の案だった。
+            // 構成作品（178px）より大きい。しかも名前は作ったあとで
+            // 「名前を付け直す」からいつでも直せるので、ここで必ず決める
+            // 必要はない。既定でよければ触らずに済むのが正しい。 */}
         <Stack gap={4}>
-          <Text size="xs" c="dimmed">名前の案</Text>
-          {suggestion.nameOptions.map((option) => (
-            <UnstyledButton
-              key={`${option.source}-${option.name}`}
-              className="collection-pick"
-              data-selected={name === option.name || undefined}
-              onClick={() => setName(option.name)}
+          {others.length > 0 && (
+            <Button
+              variant="subtle"
+              color="gray"
+              size="compact-xs"
+              px={4}
+              styles={{ root: { alignSelf: "flex-start" }, label: { fontWeight: 500 } }}
+              rightSection={<Icons.expand size={IconSize.inline} style={{ transform: namesOpen ? "rotate(180deg)" : undefined }} />}
+              onClick={() => setNamesOpen((open) => !open)}
             >
-              <span className="collection-pick__body">
-                <Text size="sm" fw={600}>{option.name}</Text>
-                <Text size="xs" c="dimmed">
-                  {option.label}
-                  {option.source === "llm" && option.modelId ? ` · ${option.modelId}` : ""}
-                  {option.source === "llm" && option.createdAt
-                    ? ` · ${new Date(option.createdAt).toLocaleDateString("ja-JP")}`
-                    : ""}
-                </Text>
-              </span>
-              {name === option.name && <Icons.confirm size={IconSize.menu} />}
-            </UnstyledButton>
-          ))}
+              他の名前の案 {formatNumber(others.length)}
+            </Button>
+          )}
+          <Collapse expanded={namesOpen}>
+            {/* 出すのは**他の**案だけ。いま選ばれている名前はカードの見出しに
+                大きく出ているので、ここへもう一度並べると数が合わなくなる
+                （「他の案 2」と書いて3行出ていた）。押せば入れ替わり、
+                入れ替わったぶんがこの一覧に戻ってくる。 */}
+            <Stack gap={4}>
+              {others.map((option) => (
+                <UnstyledButton
+                  key={`${option.source}-${option.name}`}
+                  className="collection-pick"
+                  onClick={() => setName(option.name)}
+                >
+                  <span className="collection-pick__body">
+                    <Text size="sm" fw={600}>{option.name}</Text>
+                    <Text size="xs" c="dimmed">
+                      {option.label}
+                      {option.source === "llm" && option.modelId ? ` · ${option.modelId}` : ""}
+                      {option.source === "llm" && option.createdAt
+                        ? ` · ${new Date(option.createdAt).toLocaleDateString("ja-JP")}`
+                        : ""}
+                    </Text>
+                  </span>
+                </UnstyledButton>
+              ))}
+            </Stack>
+          </Collapse>
           <AssistLauncher
             size="sm"
             label="この候補で使える手伝い"

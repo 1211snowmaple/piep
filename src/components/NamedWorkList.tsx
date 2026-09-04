@@ -22,7 +22,10 @@ export function NamedWorkList({ works }: { works: { title: string; authorName?: 
   return (
     <Stack gap={2} className="confirm-work-list">
       {shown.map((work, index) => (
-        <Text key={`${work.title}-${index}`} size="xs" className="line-clamp-1">
+        // 題名は折り返して最後まで出す。1行で切ると、同じ書き出しで始まる
+        // 作品が**まったく同じ文字列**になり、何を消すのか見分けられない。
+        // 窓が縦に伸びすぎないよう、この一覧そのものに高さの上限がある。
+        <Text key={`${work.title}-${index}`} size="xs">
           ・{work.title}
           {work.authorName ? <Text span c="dimmed">（{work.authorName}）</Text> : null}
         </Text>

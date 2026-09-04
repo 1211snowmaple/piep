@@ -256,7 +256,6 @@ function demoCollection(
       coverPath: work.coverPath,
     })),
     nameSource: "manual",
-    track: "manual",
     revision: 1,
     memberCount: members.length,
     availableCount: members.length,
@@ -271,19 +270,17 @@ function demoCollection(
 export const demoCollections: WorkCollection[] = [
   demoCollection("demo-series", "星を編む人 第十一話・第十二話", [demoWorks[5], demoWorks[2]], {
     description: "本文のリンクで2作がつながっています",
-    track: "sequence",
   }),
   // 名前が長い束。カードの行送りが崩れないかを、ここで見る。
   demoCollection(
     "demo-long",
     "同人女の感情 ハイスペイケメン女子の綾城さんにキモデブが溺愛されて界隈の姫になる話 関連作品",
     [demoWorks[0], demoWorks[4], demoWorks[1]],
-    { description: "題名が連番になっている3作です", track: "sequence" },
+    { description: "題名が連番になっている3作です" },
   ),
   demoCollection("demo-theme", "創作 / 短編 / 青春", [demoWorks[0], demoWorks[4]], {
     description: "「創作」を共有し、本文も近い2作です",
     collectionKind: "unordered",
-    track: "theme",
   }),
   // 表紙も作品も無い束。紋だけで成り立つかを見る。
   demoCollection("demo-empty", "あとで読む", [], { description: null }),

@@ -689,7 +689,7 @@ select {
   gap: 0;
   padding: 10px 13px;
 }
-.work-card__body > .work-card__open { margin-top: 1px; }
+.work-card__body > .work-card__open { margin-top: 0; }
 .work-card__body > .work-card__identity { margin-top: 5px; }
 .work-card__body > .work-card__excerpt { margin-top: 5px; }
 .work-card__body > .work-card__tagslot { margin-top: 8px; }
@@ -795,7 +795,7 @@ select {
 .work-card__identity-divider { width: 1px; height: 18px; flex: 0 0 auto; background: light-dark(#d5dae0, #38414c); }
 
 /* The series line above the title is the link to the series. */
-.work-card__series-link { display: inline-flex; width: fit-content; max-width: 100%; min-height: 26px; align-items: center; gap: 5px; padding: 3px 0; border: 0; cursor: pointer; background: none; }
+.work-card__series-link { display: inline-flex; width: fit-content; max-width: 100%; min-height: 20px; align-items: center; gap: 5px; padding: 0; border: 0; cursor: pointer; background: none; }
 .work-card__series-link:hover .work-card__series { color: var(--mantine-color-piep-7); }
 .work-card__series-link:focus-visible { outline: 2px solid var(--mantine-color-piep-5); outline-offset: 2px; border-radius: 4px; }
 .work-card__avatar { flex: 0 0 auto; }
@@ -811,8 +811,9 @@ select {
 
 .work-card__series {
   color: var(--mantine-color-dimmed);
-  font-size: 0.68rem;
+  font-size: 0.75rem;
   font-weight: 650;
+  line-height: 1.25;
   letter-spacing: 0.02em;
 }
 /* Series and title use their natural combined height. A series + one-line
@@ -820,6 +821,7 @@ select {
    series, without leaving a visibly empty reserved row between elements. */
 .work-card__title { font-size: 0.9rem; }
 .work-card__open { display: flex; width: 100%; min-width: 0; min-height: 28px; align-items: center; color: inherit; text-align: left; }
+.work-card__meta + .work-card__open { align-items: flex-start; }
 .work-card__open:focus-visible,
 .work-row__open:focus-visible { outline: 2px solid var(--mantine-color-piep-5); outline-offset: 3px; border-radius: var(--mantine-radius-sm); }
 .work-card__cover-rail { cursor: pointer; }
@@ -921,6 +923,7 @@ select {
 .work-row__series { display: block; min-width: 0; }
 .work-row__identity { margin-top: 3px; }
 .work-row__open { display: flex; width: 100%; min-width: 0; min-height: 26px; align-items: center; margin-top: 1px; color: inherit; text-align: left; }
+.work-row__main > :is(.work-card__series-link, .work-row__series) + .work-row__open { align-items: flex-start; margin-top: 0; }
 /* 幅は中身の分だけ。余りを全部受けると、短い一文でも箱が行末まで
    伸び、吹き出しが文字の上ではなく箱の中央——何も無い右方に出る。
    縮むときは作者名より先にここが譲る。 */
@@ -1430,8 +1433,9 @@ select {
 .asset-card__name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* Title and body share one left edge; Mantine indents the message by default. */
 .work-note .mantine-Alert-message { margin-left: 0; padding-left: 0; }
-.asset-preview-modal { overflow: hidden; border-radius: var(--mantine-radius-lg); }
-.asset-preview-modal .mantine-Modal-body { overflow: auto; }
+/* 本体の丸めと切り抜きは、窓ぜんぶに効く規則が引き受けるようになった。
+   ここに残すのは、この窓だけ角を一段大きく取ること。 */
+.asset-preview-modal { border-radius: var(--mantine-radius-lg); }
 .version-row { width: 100%; color: inherit; text-align: left; cursor: pointer; background: var(--mantine-color-body); }
 .version-row[data-active] { border-color: var(--mantine-color-piep-5); box-shadow: 0 0 0 1px var(--mantine-color-piep-4); }
 .version-preview { position: sticky; top: 82px; min-height: 310px; }
@@ -1708,6 +1712,91 @@ select {
 }
 
 .reader-to-top { position: fixed; right: 24px; bottom: 24px; z-index: 110; box-shadow: var(--mantine-shadow-lg); }
+
+/* 探した語の印。地の色をそのままにして、下に線だけ引く ―― 塗ると本文の
+   流れが切れて、続きが読みにくくなる。 */
+.reader-hit {
+  padding: 0;
+  color: inherit;
+  background: light-dark(rgb(255 214 92 / 45%), rgb(255 196 0 / 26%));
+  border-radius: 2px;
+}
+
+.reader-hit--current {
+  background: light-dark(rgb(255 186 20 / 78%), rgb(255 186 20 / 52%));
+  box-shadow: 0 0 0 2px light-dark(rgb(255 186 20 / 40%), rgb(255 186 20 / 30%));
+}
+
+.reader-hit-bar {
+  position: fixed;
+  z-index: 115;
+  top: 74px;
+  right: 24px;
+  padding: 5px 8px;
+  border: 1px solid light-dark(#dde2e8, #303944);
+  background: light-dark(rgb(255 255 255 / 96%), rgb(20 25 33 / 96%));
+}
+
+.reader-zoom .mantine-Modal-body { padding: 0; }
+.reader-zoom__image {
+  display: block;
+  max-width: min(92vw, 1600px);
+  max-height: 88vh;
+  cursor: zoom-out;
+  object-fit: contain;
+}
+
+/* 挿絵は押すと大きくなる。押せることが見て分かるようにしておく。 */
+.reader-content img { cursor: zoom-in; }
+
+.reader-content figure { margin: 2em 0; text-align: center; }
+.reader-content figcaption {
+  margin-top: 8px;
+  color: var(--mantine-color-dimmed);
+  font-family: "Noto Sans JP", sans-serif;
+  font-size: 0.78em;
+}
+
+/* --- 縦書き ---
+   本文は右から左へ流れる。行の長さの設定（`--reader-max-width`）は、横書きの
+   「1行の幅」から縦書きの「1行の高さ」へそのまま移る。
+
+   ScrollArea の viewport は overflow を inline で持っているので触らない。
+   代わりに高さの連鎖だけ通し、桁が窓の高さにぴたりと収まるようにする。
+   縦にあふれさせないのは、縦書きで上下にも動くと行を見失うため。 */
+.reader-page--vertical .reader-scroll [data-scrollarea-viewport] > * { height: 100%; }
+
+.reader-page--vertical .reader-stage {
+  min-height: 0;
+  height: 100%;
+  padding: clamp(20px, 2.5vw, 40px) clamp(24px, 4vw, 64px);
+}
+
+/* flex にはしない。縦書きの flex は主軸が縦になるので、`align-items` が
+   横方向へ効いてしまい、行の長さの設定が桁の「幅」に化ける。 */
+.reader-page--vertical .reader-paper {
+  width: auto;
+  height: 100%;
+  writing-mode: vertical-rl;
+  text-orientation: mixed;
+}
+
+.reader-page--vertical .reader-content {
+  max-width: none;
+  height: min(100%, var(--reader-max-width));
+  margin-inline: 0;
+}
+
+/* 扉は横組みのまま。取得元の印と操作ボタンが並ぶ帯で、縦に倒すと読みにくい。 */
+.reader-page--vertical .reader-title-page {
+  writing-mode: horizontal-tb;
+  width: min(62vw, var(--reader-max-width));
+  height: 100%;
+  padding: 0 26px;
+}
+
+.reader-page--vertical .reader-content img { max-height: 68%; }
+.reader-page--vertical .reader-finish { writing-mode: horizontal-tb; width: min(70vw, 640px); }
 /* Centred by an auto margin between both edges rather than by offsetting the
    left edge to the middle: with only `left` set, the control's available width
    was just the half of the screen to its right, so the pager wrapped onto a
@@ -1731,6 +1820,7 @@ select {
 .reader-page-controls .mantine-Pagination-control { min-width: 30px; height: 30px; border-radius: 7px; }
 
 .editor-page {
+  position: relative;
   height: 100%;
   overflow: hidden;
 }
@@ -1845,9 +1935,47 @@ select {
 }
 .editor-block[data-active] { border-color: var(--mantine-color-piep-4); box-shadow: 0 0 0 2px rgb(13 134 244 / 8%); }
 
+/* 取っ手は掴める。前は cursor だけが grab で、掴んでも何も起きなかった。 */
 .editor-block__handle {
+  display: inline-flex;
+  align-items: center;
   color: var(--mantine-color-dimmed);
   cursor: grab;
+  touch-action: none;
+}
+
+.editor-block__handle:active { cursor: grabbing; }
+
+.editor-block[data-dragging] { opacity: 0.45; }
+
+/* 落とす先を線で示す。掴んでいる間、どこへ入るのかが分からないと動かせない。 */
+.editor-block[data-drop-target] {
+  box-shadow: 0 -3px 0 0 var(--mantine-color-piep-6);
+}
+
+/* 題も直せる。誤字のある題を直す手立てが、これまでどこにも無かった。
+   見た目は見出しのまま ―― 押すと書けることは、触れば分かる。 */
+.editor-toolbar__titlebox { flex: 1 1 auto; min-width: 0; }
+.editor-toolbar__title input {
+  padding: 0;
+  height: auto;
+  min-height: 0;
+  font-size: var(--mantine-font-size-sm);
+  font-weight: 700;
+  line-height: 1.3;
+}
+.editor-toolbar__title input:hover { background: light-dark(rgb(0 0 0 / 4%), rgb(255 255 255 / 6%)); }
+.editor-toolbar__title input:focus { background: light-dark(rgb(0 0 0 / 5%), rgb(255 255 255 / 8%)); }
+
+.editor-preview-virtual-list { position: relative; width: 100%; }
+.editor-preview-virtual-row { position: absolute; top: 0; left: 0; width: 100%; }
+
+.editor-find {
+  position: absolute;
+  z-index: 40;
+  top: 74px;
+  right: 18px;
+  background: light-dark(rgb(255 255 255 / 97%), rgb(20 25 33 / 97%));
 }
 
 .editor-heading-input textarea {
@@ -2549,6 +2677,39 @@ select {
    // いても 40px に縮めれば何の話か分からない。しかも題名はツールチップの中に
    // しか無かったので、2作の束では**何を束ねようとしているのか読む方法が
    // 一つも無かった**。判断の材料は題名と作者である。 */
+/* ---- 窓（Modal） -----------------------------------------------------------
+
+   **角が丸いのに、右だけ角ばって見えていた。**
+
+   Mantine は `.mantine-Modal-content` に `border-radius: 16px` を置き、同じ箱に
+   縦スクロールも持たせる。Windows のスクロールバーは 15px の実体を持つ「classic」
+   なので、丸めたはずの右上・右下の角の**上に四角く描かれる**。左だけ丸くて右が
+   切り落とされて見えるのは、これが理由である。
+
+   丸い箱は「切り抜く側」に徹させ、スクロールは中身に持たせる。ついでに見出しが
+   上に留まるので、長い一覧を送っても題と閉じるボタンが見えたままになる。 */
+.mantine-Modal-content {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.mantine-Modal-body {
+  min-height: 0;
+  flex: 1;
+  overflow-y: auto;
+}
+
+/* 窓の操作は下に貼り付ける。中身が縦に長い窓では、下まで送らないと押せない
+   操作は「使いにくい」ではなく**無い**に等しい。 */
+.overlay-actions {
+  position: sticky;
+  z-index: 1;
+  bottom: 0;
+  padding-top: 10px;
+  border-top: 1px solid var(--mantine-color-default-border);
+  background: var(--mantine-color-body);
+}
+
 /* 確認の窓に並べる題名。長い題名で窓が横に伸びないよう、1行で止める。 */
 .confirm-work-list {
   max-height: 40vh;

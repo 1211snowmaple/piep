@@ -132,19 +132,23 @@ fn reader_transport_pages_keep_complete_source_blocks() {
     let html = format!(
         "<p>{large}</p><!-- content-block --><p>{large}</p><!-- content-block --><p>{large}</p>"
     );
-    let pages = paginate_reader_html(&html, "fanbox");
+    let (pages, _) = paginate_reader_html(&html, "fanbox");
     assert!(pages.len() >= 2);
     assert!(pages.iter().all(|page| !page.contains("content-block")));
     assert!(pages
         .iter()
         .all(|page| page.starts_with("<p>") && page.ends_with("</p>")));
 
-    let pixiv = paginate_reader_html("first<!-- newpage -->second", "pixiv");
+    let (pixiv, pixiv_starts) = paginate_reader_html("first<!-- newpage -->second", "pixiv");
     assert_eq!(pixiv, vec!["first", "second"]);
+    // 割られていないので、原稿のページと転送のページは 1 対 1。
+    assert_eq!(pixiv_starts, vec![0, 1]);
 
     // 明示的な1ページが巨大でも、1回の IPC に丸ごと載せない。
     let line = format!("{}<br />\n", "あ".repeat(READER_PAGE_TARGET_BYTES / 6));
-    let oversized_pixiv = paginate_reader_html(&line.repeat(4), "pixiv");
+    let (oversized_pixiv, oversized_starts) = paginate_reader_html(&line.repeat(4), "pixiv");
+    // 1 つの原稿ページが割られても、始まりは最初の転送ページのまま。
+    assert_eq!(oversized_starts, vec![0]);
     assert!(oversized_pixiv.len() >= 2);
     assert_eq!(oversized_pixiv.concat(), line.repeat(4).trim());
     assert!(oversized_pixiv
@@ -830,8 +834,8 @@ fn reader_cache_pages_and_full_document_search_share_one_index() {
         &[],
         "最初のページ [newpage] 次のページにNeedleとneedle",
     );
-    let first = db.get_reader_content_page(id, None, 0).unwrap();
-    let second = db.get_reader_content_page(id, None, 1).unwrap();
+    let first = db.get_reader_content_page(id, None, 0, false).unwrap();
+    let second = db.get_reader_content_page(id, None, 1, false).unwrap();
     assert_eq!(first.page_count, 2);
     assert_eq!(second.page_count, 2);
     assert!(second.html.contains("Needle"));
@@ -1626,6 +1630,90 @@ fn sweeping_the_shelf_finds_bundles_without_a_seed() {
     );
 }
 
+/// すでにコレクションにした顔ぶれを、棚の走査が新しい束として出し直さない。
+#[test]
+fn sweeping_the_shelf_skips_an_existing_collection_with_the_same_members() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    for (source_id, title) in [
+        ("existing-sweep-1", "古い時計塔から手紙が届く話 第1話"),
+        ("existing-sweep-2", "古い時計塔から手紙が届く話 第2話"),
+        ("existing-sweep-3", "古い時計塔から手紙が届く話 第3話"),
+    ] {
+        insert_download_unindexed(&db, &storage, source_id, title, "時計塔作者", &[], "本文");
+    }
+    {
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE downloads SET author_id = 'clock-writer' WHERE author_name = '時計塔作者'",
+            [],
+        )
+        .unwrap();
+    }
+
+    // まず、既存コレクションが無ければ走査対象になる束だと確かめる。
+    assert_eq!(db.sweep_collection_candidates().unwrap().bundles.len(), 1);
+    db.dismiss_swept_suggestions().unwrap();
+
+    let collection = db
+        .upsert_work_collection(&WorkCollectionInput {
+            name: "古い時計塔から手紙が届く話".to_string(),
+            collection_kind: "ordered".to_string(),
+            ..Default::default()
+        })
+        .unwrap();
+    // コレクションの並びと候補の並びが逆でも、顔ぶれが同じなら同一の束。
+    db.add_work_collection_members(
+        &collection.summary.id,
+        &[
+            WorkCollectionMemberInput {
+                source: "pixiv".to_string(),
+                source_id: "existing-sweep-3".to_string(),
+                title_snapshot: None,
+                author_snapshot: None,
+                position: None,
+                member_role: None,
+                added_by: None,
+                pinned: None,
+                note: None,
+            },
+            WorkCollectionMemberInput {
+                source: "pixiv".to_string(),
+                source_id: "existing-sweep-2".to_string(),
+                title_snapshot: None,
+                author_snapshot: None,
+                position: None,
+                member_role: None,
+                added_by: None,
+                pinned: None,
+                note: None,
+            },
+            WorkCollectionMemberInput {
+                source: "pixiv".to_string(),
+                source_id: "existing-sweep-1".to_string(),
+                title_snapshot: None,
+                author_snapshot: None,
+                position: None,
+                member_role: None,
+                added_by: None,
+                pinned: None,
+                note: None,
+            },
+        ],
+    )
+    .unwrap();
+
+    let swept = db.sweep_collection_candidates().unwrap().bundles;
+    assert!(
+        swept.is_empty(),
+        "既存コレクションと同じ束が出ている: {swept:?}"
+    );
+    assert!(db
+        .list_collection_suggestions(Some("pending"))
+        .unwrap()
+        .is_empty());
+}
+
 /// タグの出どころを混ぜない。
 ///
 /// 取得元が付けたタグとモデルが足したタグは確からしさが違う。**どちらか
@@ -1771,12 +1859,7 @@ fn swept_candidates_can_be_closed_in_one_go() {
     }
     assert_eq!(db.sweep_collection_candidates().unwrap().bundles.len(), 1);
 
-    assert_eq!(
-        db.dismiss_swept_suggestions(Some("theme")).unwrap(),
-        0,
-        "系統が違えば消えない"
-    );
-    assert_eq!(db.dismiss_swept_suggestions(None).unwrap(), 1);
+    assert_eq!(db.dismiss_swept_suggestions().unwrap(), 1);
     assert!(db
         .list_collection_suggestions(Some("pending"))
         .unwrap()
@@ -3297,7 +3380,11 @@ fn optimizing_a_multi_segment_index_still_ends_with_one() {
     let (reported_before, after) =
         super::super::tantivy_index::optimize_segments(&storage).unwrap();
 
-    assert_eq!(reported_before, before);
+    // 「統合前は何個だったか」を、別々の時点で測った二つの数の一致で確かめない。
+    // Tantivy は背後でも併合するので、`before` を測ってから `optimize_segments`
+    // が数えるまでのあいだに減りうる（実測で 9 → 2）。ここで言いたいのは
+    // 「統合すべきものが確かにあった」ことなので、そう書く。
+    assert!(reported_before > 1, "統合前が1個以下: {reported_before}");
     assert_eq!(after, 1, "統合が途中で止まっている");
     assert_eq!(
         super::super::tantivy_index::searchable_segment_count(&storage).unwrap(),
@@ -5806,6 +5893,7 @@ fn active_edit_revision_drives_reader_and_search_body() {
         .save_work_draft(
             download_id,
             1,
+            None,
             &[
                 WorkBlockInput {
                     block_type: "heading".to_string(),
@@ -5833,6 +5921,102 @@ fn active_edit_revision_drives_reader_and_search_body() {
         .search_downloads_v2(&v2_params(Some("編集固有キーワード"), 10, None))
         .unwrap();
     assert_eq!(search.items.first().map(|item| item.id), Some(download_id));
+}
+
+/// 編集画面を開いて、何も変えずに反映する ―― それだけで本文が壊れないこと。
+///
+/// 実際の道筋（保存した本文 → ブロック → 下書き → 反映 → 読書画面）を通す。
+/// 純粋な関数の試験はブロックの組み替えを見ているが、壊れていたのはこの
+/// 一連の受け渡しなので、ここでも押さえておく。
+#[test]
+fn publishing_an_untouched_work_through_the_database_keeps_its_lines() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let body = "一行目\n二行目\n\n段落が変わる";
+    let download_id = insert_download(
+        &db,
+        &storage,
+        "roundtrip-1",
+        "往復する作品",
+        "作者A",
+        &[],
+        body,
+    );
+
+    let before = db
+        .get_reader_content_page(download_id, None, 0, false)
+        .unwrap();
+
+    // 編集画面が受け取るブロックを、そのまま下書きとして戻す。
+    let editor = db.get_editor_document(download_id).unwrap();
+    let blocks = editor
+        .blocks
+        .iter()
+        .map(|block| WorkBlockInput {
+            block_type: block.block_type.clone(),
+            text: block.text.clone(),
+            asset_id: block.asset_id,
+            attrs_json: block.attrs_json.clone(),
+        })
+        .collect::<Vec<_>>();
+    let draft = db.save_work_draft(download_id, 1, None, &blocks).unwrap();
+    db.activate_work_edit(draft.id).unwrap();
+
+    let after = db
+        .get_reader_content_page(download_id, None, 0, false)
+        .unwrap();
+    // 画面に出るものだけを比べる。転送用の印と、HTML では畳まれる改行は
+    // 見え方を変えない。
+    let visible = |html: &str| {
+        html.replace("<!-- content-block -->", "")
+            .replace('\n', "")
+            .replace("<br />", "\n")
+    };
+    assert_eq!(
+        visible(&before.html),
+        visible(&after.html),
+        "何も変えずに反映しただけで本文の見え方が変わった\n元: {:?}\n後: {:?}",
+        before.html,
+        after.html
+    );
+}
+
+/// 直した題が、棚にも索引にも届くこと。
+#[test]
+fn an_edited_title_reaches_the_library_and_the_index() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let download_id = insert_download(&db, &storage, "title-1", "取得元の題", "作者A", &[], "本文");
+
+    let draft = db
+        .save_work_draft(
+            download_id,
+            1,
+            Some("読み手が直した題"),
+            &[WorkBlockInput {
+                block_type: "paragraph".to_string(),
+                text: Some("本文".to_string()),
+                asset_id: None,
+                attrs_json: None,
+            }],
+        )
+        .unwrap();
+    // 下書きのうちは、まだ棚の題は変わらない。
+    assert_eq!(db.get_download(download_id).unwrap().title, "取得元の題");
+
+    db.activate_work_edit(draft.id).unwrap();
+    assert_eq!(
+        db.get_download(download_id).unwrap().title,
+        "読み手が直した題"
+    );
+    let search = db
+        .search_downloads_v2(&v2_params(Some("読み手が直した題"), 10, None))
+        .unwrap();
+    assert_eq!(search.items.first().map(|item| item.id), Some(download_id));
+
+    // 下ろせば、取得元の題に戻る。
+    db.deactivate_work_edit(download_id).unwrap();
+    assert_eq!(db.get_download(download_id).unwrap().title, "取得元の題");
 }
 
 #[test]

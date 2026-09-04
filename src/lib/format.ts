@@ -7,7 +7,11 @@ export function formatBytes(bytes: number): string {
 }
 
 export function formatNumber(value: number | null | undefined): string {
-  return (value ?? 0).toLocaleString("ja-JP");
+  // 隣の `formatBytes` と `formatCompactCount` は有限かどうかを見るのに、
+  // ここだけ見ていなかった。割り算の結果をそのまま渡すと画面に "NaN" や
+  // "∞" が出る。件数として意味を持たない値は 0 として扱う。
+  if (value == null || !Number.isFinite(value)) return "0";
+  return value.toLocaleString("ja-JP");
 }
 
 /**

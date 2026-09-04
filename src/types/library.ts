@@ -131,8 +131,23 @@ export interface ReaderContentPage {
   page: number;
   pageCount: number;
   html: string;
+  /** `includePlainText` を頼んだときだけ中身が入る。読書画面は使わない。 */
   plainText: string;
   totalPlainTextChars: number;
+  /**
+   * pixiv の原稿ページ（`[newpage]` 区切り）が、転送用の何ページ目から
+   * 始まるか。長い原稿ページは転送のために割られるので、これが無いと
+   * `[jump:5]` が 5 ページ目とは違う場所へ飛ぶ。
+   */
+  sourcePageStarts: number[];
+}
+
+/** 作品全体の見出し 1 つ。読書画面の目次が使う。 */
+export interface ReaderOutlineEntry {
+  page: number;
+  /** そのページの中で何番目の見出しか（0 起点）。 */
+  index: number;
+  title: string;
 }
 
 export interface ReaderSearchHit {

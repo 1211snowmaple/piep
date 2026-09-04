@@ -4,6 +4,13 @@ export interface Bookmark {
   id: string;
   page: number;
   top: number;
+  /**
+   * 何行目に挟んだか。文字の大きさを変えても同じところを指し続ける。
+   * px だけで憶えていたころは、読書設定を触った瞬間に全部ずれた。
+   */
+  anchor?: number;
+  /** そこに何が書いてあったか。番号と割合だけでは、どれがどれか分からない。 */
+  excerpt?: string;
   label: string;
   createdAt: string;
 }
@@ -22,6 +29,8 @@ function isBookmark(value: unknown): value is Bookmark {
     && Number(bookmark.page) > 0
     && Number.isFinite(bookmark.top)
     && Number(bookmark.top) >= 0
+    && (bookmark.anchor === undefined || (Number.isInteger(bookmark.anchor) && Number(bookmark.anchor) >= 0))
+    && (bookmark.excerpt === undefined || typeof bookmark.excerpt === "string")
     && typeof bookmark.label === "string"
     && typeof bookmark.createdAt === "string";
 }

@@ -896,6 +896,58 @@ mod tests {
         path
     }
 
+    /// ページ内移動のリンクが、本の中で行き先を持っていること。
+    ///
+    /// 字面のまま残していたころは `[jump:5]` という壊れた文字列が本文に
+    /// 見えていた。リンクにするなら、**指した先が本当にあること**まで
+    /// 確かめないと、今度は行き止まりを配ることになる。
+    #[test]
+    fn a_page_jump_points_at_a_file_that_exists() {
+        let manifest = crate::epub::converter::convert_to_manifest(
+            &serde_json::json!({
+                "text": "最初のページ
+[jump:2]
+[newpage]
+二ページ目",
+                "detail": {
+                    "id": 1,
+                    "title": "移動のある作品",
+                    "create_date": "2026-01-01T00:00:00+09:00",
+                    "user": { "id": 1, "name": "作者" },
+                },
+            }),
+            "pixiv",
+            std::path::Path::new("/nonexistent"),
+        )
+        .expect("manifest");
+        let path = build_to_temp(manifest, TemplateSettings::default());
+        let report = crate::epub::validate::validate_epub(&path).expect("validate");
+        assert!(
+            report.valid,
+            "検証に失敗しました: {:#?}",
+            report
+                .issues
+                .iter()
+                .filter(|issue| issue.severity == "error")
+                .collect::<Vec<_>>()
+        );
+
+        let mut archive = zip::ZipArchive::new(std::fs::File::open(&path).unwrap()).unwrap();
+        let mut first = String::new();
+        std::io::Read::read_to_string(
+            &mut archive.by_name("OEBPS/text/page_001.xhtml").unwrap(),
+            &mut first,
+        )
+        .unwrap();
+        assert!(
+            first.contains("page_002.xhtml"),
+            "ページ内移動が本文から消えている: {first}"
+        );
+        // 指した先が本当にあること。検証器の局所参照の検査もここを見ている。
+        assert!(archive.by_name("OEBPS/text/page_002.xhtml").is_ok());
+        let _ = std::fs::remove_file(&path);
+    }
+
     #[test]
     fn a_work_full_of_hostile_metadata_still_produces_a_valid_epub() {
         let path = build_to_temp(hostile_manifest(), TemplateSettings::default());

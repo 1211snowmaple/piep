@@ -131,7 +131,8 @@ pub fn extract_search_body(data: &Value, source: &str) -> String {
     }
 
     if source == "fanbox" {
-        if let Some(body) = data.get("body") {
+        let post = crate::fanbox_api::payload::post_or_self(data);
+        if let Some(body) = post.get("body") {
             if let Some(blocks) = body.get("blocks").and_then(|b| b.as_array()) {
                 return blocks
                     .iter()
@@ -605,6 +606,15 @@ mod tests {
                 "fanbox"
             ),
             "見出し\n\n本文"
+        );
+        assert_eq!(
+            extract_search_body(
+                &json!({ "body": { "post": {
+                    "id": "1", "title": "投稿", "body": { "text": "包まれた本文" }
+                }}}),
+                "fanbox"
+            ),
+            "包まれた本文"
         );
     }
 

@@ -2000,27 +2000,17 @@ impl Database {
     /// まし**になってしまう。ここで消すのは下書きだけで、否定の記憶
     /// （`collection_pair_feedback`）は残さない — 規則が変われば、また出てくる。
     ///
-    /// `track` を渡すと、その系統だけを閉じる。続き物は見たいがテーマは今日は
-    /// いらない、という日がある。
-    pub fn dismiss_swept_suggestions(&self, track: Option<&str>) -> Result<usize, String> {
-        let track = match track {
-            None | Some("all") => None,
-            Some(value @ ("sequence" | "theme")) => Some(value.to_string()),
-            Some(_) => return Err("Unknown collection track".to_string()),
-        };
+    /// 系統を選んで閉じる道は無くした。畳んだメニューの中に「続き物だけ」
+    /// 「テーマだけ」を置いていたが、系統を選んで閉じたい人はいなかった。
+    /// いまは窓を閉じれば全部片付く。
+    pub fn dismiss_swept_suggestions(&self) -> Result<usize, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        let removed = match track {
-            Some(track) => conn.execute(
-                "DELETE FROM collection_suggestions
-                 WHERE origin = 'sweep' AND state = 'pending' AND track = ?1",
-                params![track],
-            ),
-            None => conn.execute(
+        let removed = conn
+            .execute(
                 "DELETE FROM collection_suggestions WHERE origin = 'sweep' AND state = 'pending'",
                 [],
-            ),
-        }
-        .map_err(|e| format!("Failed to dismiss swept suggestions: {e}"))?;
+            )
+            .map_err(|e| format!("Failed to dismiss swept suggestions: {e}"))?;
         Ok(removed)
     }
 

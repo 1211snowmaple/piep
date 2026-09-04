@@ -4501,6 +4501,15 @@ pub async fn scan_and_reimport_downloads(app: tauri::AppHandle) -> Result<Reimpo
                             std::fs::read_to_string(&json_file).map_err(|e| e.to_string())?;
                         let data: serde_json::Value =
                             serde_json::from_str(&content_str).map_err(|e| e.to_string())?;
+                        let data = if source == "fanbox" {
+                            crate::fanbox_api::payload::into_post(data).ok_or_else(|| {
+                                format!(
+                                    "Reimport FANBOX work {source_id} v{v_num} has an unrecognized post wrapper"
+                                )
+                            })?
+                        } else {
+                            data
+                        };
 
                         let (new_hash, new_text_len, new_source_updated) =
                             compute_content_details(&data, &source);
@@ -5745,7 +5754,10 @@ mod tests {
             .get_download_by_source(&source, &source_id)
             .unwrap()
             .unwrap();
-        assert_eq!(restored_dl.title, "テスト小説");
+        // 反映済みの編集が題を持っているので、棚に出るのは利用者が直した題。
+        // 取得元の題は `downloads.title` にそのまま残っていて、編集を下ろせば
+        // 戻る（この書庫にも元の題のまま入っている）。
+        assert_eq!(restored_dl.title, "利用者が直した題名");
         assert_eq!(restored_dl.author_name, "テスト著者");
         assert_eq!(
             state_new.db.archive_tags(restored_dl.id).unwrap(),

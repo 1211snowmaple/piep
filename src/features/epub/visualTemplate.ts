@@ -146,8 +146,19 @@ function managedBlock(values: VisualTemplateValues): string {
     --cover-width: var(--piep-cover-width);
 }
 
+/* 縦書きは、標準の名前だけでは多くの端末で効かない。Apple Books は
+   -epub- 付きを、古い WebKit 系は -webkit- 付きを見る。三つとも書く。 */
 html {
+    -epub-writing-mode: var(--piep-writing-mode);
+    -webkit-writing-mode: var(--piep-writing-mode);
     writing-mode: var(--piep-writing-mode);
+}
+
+/* 日本語の行分割。約物のぶら下がりまでは求めないが、行頭に句点が来るのは
+   避ける。 */
+body {
+    line-break: strict;
+    overflow-wrap: break-word;
 }
 
 body {
