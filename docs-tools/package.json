@@ -10,20 +10,20 @@
     "extract": "npm run extract:rust && npm run extract:front",
     "contract": "npm run extract && node src/render-contract.mjs --build ../.docs-build --out ../docs/reference",
     "contract:check": "npm run extract && node src/render-contract.mjs --build ../.docs-build --out ../docs/reference --check",
-    "typedoc": "typedoc",
+    "stats": "node src/sync-stats.mjs",
+    "stats:check": "node src/sync-stats.mjs --check",
+    "check:emphasis": "node src/check-japanese-emphasis.mjs ../docs/guide ../docs/policy ../docs/plan ../docs/index.md",
+    "check:screens": "node src/check-guide-screens.mjs",
     "rustdoc": "cargo doc --no-deps --document-private-items --manifest-path ../src-tauri/Cargo.toml",
-    "docs:build": "npm run contract && npm run typedoc && npm run rustdoc && npm run rustdoc:copy && npm run site:build",
-    "docs:check": "npm run check:emphasis && npm run contract:check",
     "rustdoc:copy": "node src/copy-rustdoc.mjs",
+    "assemble": "node src/assemble-site.mjs",
     "site:dev": "npm run assemble && vitepress dev site",
     "site:build": "npm run assemble && vitepress build site",
-    "docs:dev": "npm run contract && npm run site:dev",
-    "assemble": "node src/assemble-site.mjs",
-    "check:emphasis": "node src/check-japanese-emphasis.mjs ../docs/policy ../docs/index.md"
+    "docs:build": "npm run contract && npm run stats && npm run rustdoc && npm run rustdoc:copy && npm run site:build",
+    "docs:check": "npm run check:emphasis && npm run check:screens && npm run contract:check && npm run stats:check",
+    "docs:dev": "npm run contract && npm run stats && npm run site:dev"
   },
   "devDependencies": {
-    "typedoc": "^0.28.0",
-    "typedoc-plugin-markdown": "^4.4.0",
     "typescript": "~5.9.0",
     "vitepress": "^1.6.4"
   }

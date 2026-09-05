@@ -12,7 +12,15 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # フロントと Rust の食い違いを検査する。
+  # ドキュメントを検査する。四つ見ている。
+  #
+  #   1. フロントと Rust の食い違い（invoke の名前・イベント・スキーマ）
+  #   2. 散文に書いた数が古くなっていないか
+  #   3. 使い方の説明と、実際に撮っている画面のずれ
+  #   4. 日本語で閉じない強調記法
+  #
+  # 2 と 3 は、手で書いた記述がソースから離れていくのを止めるためにある。
+  # 実際、方針書のコマンド数は「140個中6個」のまま実物と離れていた。
   #
   # Linux で走らせている。ここで使うのは Node と tools/ipc-extract だけで、
   # 後者は syn と serde しか使わない移植性のあるクレートである。アプリ本体は
@@ -74,10 +82,10 @@ jobs:
             src-tauri
             tools/ipc-extract
       - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6
-      # アプリの依存も入れる。TypeDoc はアプリのソースを型検査するので、
-      # @tauri-apps/api や @mantine/core が解決できないと 966 件のエラーで
-      # 落ちる。contract ジョブは構文を読むだけなのでこれを必要としない。
-      - run: npm ci
+      # アプリの依存は要らない。ここで動かすのは抽出器（構文を読むだけ）、
+      # cargo doc、VitePress の三つで、どれも src/ の型解決を必要としない。
+      # TypeDoc を外すまでは、アプリのソースを型検査するために root の
+      # `npm ci` が要った。
       - run: npm ci
         working-directory: docs-tools
       - run: npm run docs:build

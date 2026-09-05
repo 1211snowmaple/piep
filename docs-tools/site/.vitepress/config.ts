@@ -1,8 +1,12 @@
 // piep のドキュメントサイト。
 //
-// 手書きの方針書 (policy/) と、ソースから生成したリファレンス (reference/) を
-// 一つのサイトへ束ねる。Rust の rustdoc だけは HTML なので public/backend/ に
-// 置き、VitePress からは外部リンクとして参照する。
+// 読む人で三つに分ける。使う人（guide/）、次に手を入れる人（policy/）、境界を
+// 触る人（reference/）。以前は「人が書いたもの／機械が生成したもの」で分けて
+// いたが、その分類には使う人の居場所が無く、使い方の説明がサイトの外（README）
+// へ出てしまっていた。
+//
+// Rust の rustdoc だけは HTML なので public/backend/ に置き、VitePress からは
+// 外部リンクとして参照する。TypeDoc は読む人がいなかったので外した。
 //
 // `defineConfig` を取り込んでいないのは、VitePress を docs-tools/ に隔離して
 // いるためである。この設定ファイルは docs/ にあり、Node は docs/ から上へ
@@ -23,13 +27,24 @@ export default {
   themeConfig: {
     search: { provider: "local" },
     nav: [
-      { text: "方針", link: "/policy/01-what-piep-is" },
-      { text: "リファレンス", link: "/reference/ipc" },
+      { text: "使う", link: "/guide/01-what-it-does" },
+      { text: "つくり", link: "/policy/01-what-piep-is" },
+      { text: "契約", link: "/reference/ipc" },
       { text: "リリース", link: "https://github.com/1211snowmaple/piep/releases" },
     ],
     sidebar: [
       {
-        text: "方針",
+        text: "使う",
+        items: [
+          { text: "piep でできること", link: "/guide/01-what-it-does" },
+          { text: "はじめる", link: "/guide/02-getting-started" },
+          { text: "画面ごとの説明", link: "/guide/03-screens" },
+          { text: "データの置き場所とバックアップ", link: "/guide/04-your-data" },
+        ],
+      },
+      {
+        text: "つくり（方針）",
+        collapsed: false,
         items: [
           { text: "piepとは何か", link: "/policy/01-what-piep-is" },
           { text: "設計原則", link: "/policy/02-principles" },
@@ -41,17 +56,23 @@ export default {
           { text: "EPUBの方針", link: "/policy/08-epub" },
           { text: "品質の担保", link: "/policy/09-quality" },
           { text: "ドキュメントの作り", link: "/policy/10-documentation" },
+          { text: "AI補助の方針", link: "/policy/11-assist" },
         ],
       },
       {
-        text: "リファレンス（自動生成）",
+        text: "契約（自動生成）",
         items: [
           { text: "IPC コマンド契約", link: "/reference/ipc" },
           { text: "イベント契約", link: "/reference/events" },
           { text: "スキーマ", link: "/reference/schema" },
-          { text: "フロント API", link: "/frontend/index.html", target: "_blank" },
-          { text: "Rust API", link: "/backend/piep_lib/index.html", target: "_blank" },
+          { text: "Rust API (rustdoc)", link: "/backend/piep_lib/index.html", target: "_blank" },
         ],
+      },
+      {
+        // 未実装の設計。実装したら消し、残るものは方針書へ移す。
+        text: "これから（未実装）",
+        collapsed: true,
+        items: [{ text: "まとまりの発見", link: "/plan/collection-discovery" }],
       },
     ],
     socialLinks: [{ icon: "github", link: "https://github.com/1211snowmaple/piep" }],
