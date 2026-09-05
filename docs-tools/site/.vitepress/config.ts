@@ -25,6 +25,8 @@ export default {
   ignoreDeadLinks: true,
 
   themeConfig: {
+    // アプリのヘッダーと同じ印を出す。assemble-site.mjs が public/ へ運ぶ。
+    logo: "/piep-icon.svg",
     search: { provider: "local" },
     nav: [
       { text: "使う", link: "/guide/01-what-it-does" },

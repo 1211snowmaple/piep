@@ -5,6 +5,9 @@ hero:
   name: piep
   text: 手元に残して読む
   tagline: pixiv と FANBOX の小説・記事を、自分のPCに丸ごと残して読むためのデスクトップアプリ
+  image:
+    src: /piep-icon.svg
+    alt: piep
   actions:
     - theme: brand
       text: 使いはじめる
@@ -18,14 +21,17 @@ hero:
 
 features:
   - title: 使う
+    icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 5.5A1.5 1.5 0 0 1 4.5 4H9a3 3 0 0 1 3 3v13a2.5 2.5 0 0 0-2.5-2.5H3z"/><path d="M21 5.5A1.5 1.5 0 0 0 19.5 4H15a3 3 0 0 0-3 3v13a2.5 2.5 0 0 1 2.5-2.5H21z"/></svg>'
     details: できること、インストール、画面ごとの説明、データの置き場所とバックアップ。piep を入れた人が読むところ。
     link: /guide/01-what-it-does
     linkText: 読む
   - title: つくり
+    icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3 9 5-9 5-9-5 9-5Z"/><path d="m3 12 9 5 9-5"/><path d="m3 16.5 9 5 9-5"/></svg>'
     details: なぜこの形なのかを書いた方針書。人が書き、ソースの変更と同じコミットで更新する。日付は書かない。
     link: /policy/01-what-piep-is
     linkText: 読む
   - title: 契約
+    icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13.5a4.5 4.5 0 0 0 6.8.5l2.7-2.7a4.5 4.5 0 0 0-6.4-6.3l-1.5 1.5"/><path d="M14 10.5a4.5 4.5 0 0 0-6.8-.5L4.5 12.7a4.5 4.5 0 0 0 6.4 6.3l1.5-1.5"/></svg>'
     details: フロントと Rust をつなぐコマンド、イベント、テーブル。ソースから抽出し、両側の食い違いを CI で検査している。
     link: /reference/ipc
     linkText: 見る

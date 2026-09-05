@@ -41,4 +41,9 @@ for (const item of ITEMS) {
   await cp(from, resolve(site, item), { recursive: true });
 }
 
-console.log(`組み立て先へ複製した: ${ITEMS.join(", ")} → ${site}`);
+// アプリの印。ヘッダーの記章として使う。同じ絵を README も使っているので、
+// 出どころはリポジトリ直下の一枚に保つ（複製を増やすと片方だけ古くなる）。
+await mkdir(resolve(site, "public"), { recursive: true });
+await cp(resolve(here, "..", "..", "piep_icon.svg"), resolve(site, "public", "piep-icon.svg"));
+
+console.log(`組み立て先へ複製した: ${ITEMS.join(", ")}, piep-icon.svg → ${site}`);
