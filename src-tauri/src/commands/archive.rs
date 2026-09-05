@@ -1,3 +1,16 @@
+//! ライブラリの持ち出しと取り込み。
+//!
+//! 一件ずつの書き出し、実体ごとの ZIP、ライブラリ全体のバックアップ
+//! （マニフェスト＋分割 ZIP）とその復元、そして保存フォルダーからの
+//! 再取り込み。
+//!
+//! **取り込みは一度に一つしか走らない。** `IMPORT_LOCK` とライブラリの錠が
+//! それを保証している。だから止める側は、どれを止めるか指定しなくてよい。
+//!
+//! 復元は書き換える前に中身を検査する（`inspect_backup` /
+//! `inspect_multipart_backup`）。**中止が効くのはライブラリを書き換える前まで**
+//! で、書き換えが始まったあとは途中で降りるほうが危ない。
+
 use crate::database::queries::{PortableCollectionPairFeedback, PortableTag, PortableWorkEdit};
 use crate::database::{
     Database, DownloadEntry, EntityVersion, NewAsset, NewDownload, NewVersion, SavedSearch,
@@ -1536,6 +1549,16 @@ fn add_zip_file_once(
     Ok(())
 }
 
+/// 作品を一件、フォルダーへ書き出す。返るのは作った場所。
+///
+/// `dest/作品名 [取得元-ID]/vN/` の形に並べる。版ごとに分けるので、同じ作品を
+/// 書き出し直しても前の版を潰さない。
+///
+/// **書き出すのは保存先の中にあるものだけ。** コピー元の物理パスが保存先の外を
+/// 指していたら `Err` にする（取り込んだ書庫が細工されていた場合に、保存先の外の
+/// ファイルを持ち出させないための門）。
+///
+/// ライブラリは変えない。
 #[tauri::command]
 pub async fn export_single(
     app: tauri::AppHandle,
@@ -3240,6 +3263,12 @@ async fn export_zip_with_params_locked(
     .map_err(|e| format!("Export thread panicked: {}", e))?
 }
 
+/// ライブラリ全体を、マニフェスト1つと分割 ZIP へ書き出す。
+///
+/// `manifestPath` に置くのは目録で、ZIP はその隣に分割して並ぶ。**復元には
+/// 両方が要る。** 目録だけを移しても戻せない。
+///
+/// 大きなライブラリでは長くかかる。進み具合は `archive-progress` で流れる。
 #[tauri::command]
 pub async fn export_all_multipart(
     app: tauri::AppHandle,
@@ -3249,6 +3278,12 @@ pub async fn export_all_multipart(
     export_all_multipart_internal(state, manifest_path).await
 }
 
+/// 作者かシリーズを丸ごと ZIP にする。
+///
+/// `entityType` は `person`（`author` も可）か `series` だけ。それ以外は `Err`。
+///
+/// **並び順が種類で違う。** 作者は公開の新しい順、シリーズは話数の順である。
+/// 書き出したものをそのまま読む前提なので、シリーズは読む順に並べる。
 #[tauri::command]
 pub async fn export_entity_zip(
     app: tauri::AppHandle,
@@ -3277,6 +3312,12 @@ pub async fn export_entity_zip(
     export_zip_with_params_internal(state, zip_path, params, true).await
 }
 
+/// ZIP をライブラリへ取り込む。返るのは取り込んだ件数。
+///
+/// **先に `inspect_backup` で中身を見せること。** ここから先はライブラリを
+/// 書き換える。
+///
+/// 進み具合は `archive-progress` で流れる。
 #[tauri::command]
 pub async fn import_zip(app: tauri::AppHandle, zip_path: String) -> Result<i64, String> {
     let state = app.state::<Arc<AppState>>().inner().clone();
@@ -3306,6 +3347,12 @@ fn new_archive_job_id() -> String {
     format!("archive-{}-{}", std::process::id(), rand::random::<u64>())
 }
 
+/// 分割バックアップをライブラリへ取り込む。返るのは取り込んだ件数。
+///
+/// **先に `inspect_multipart_backup` で中身を見せること。** ここから先は
+/// ライブラリを書き換える。目録の隣に ZIP が揃っている必要がある。
+///
+/// 進み具合は `archive-progress` で流れる。
 #[tauri::command]
 pub async fn import_multipart_backup(
     app: tauri::AppHandle,
@@ -3318,6 +3365,12 @@ pub async fn import_multipart_backup(
     result
 }
 
+/// ZIP の中身を、取り込む前に調べて返す。**ライブラリは一切変えない。**
+///
+/// 復元してよいかを利用者に決めさせるためにある。件数や、今のライブラリと
+/// ぶつかるものが分かる。
+///
+/// → 実際に取り込むのは `import_zip`
 #[tauri::command]
 pub async fn inspect_backup(
     app: tauri::AppHandle,
@@ -3331,6 +3384,12 @@ pub async fn inspect_backup(
         .map_err(|e| format!("Backup inspection thread panicked: {e}"))?
 }
 
+/// 分割バックアップの中身を、取り込む前に調べて返す。**ライブラリは変えない。**
+///
+/// 目録を渡すと、隣にあるはずの ZIP が揃っているかも見る。欠けていれば、
+/// 取り込む前にそれが分かる。
+///
+/// → 実際に取り込むのは `import_multipart_backup`
 #[tauri::command]
 pub async fn inspect_multipart_backup(
     app: tauri::AppHandle,
@@ -4356,6 +4415,16 @@ pub struct ReimportOutcome {
     pub skipped: Vec<String>,
 }
 
+/// 保存先のフォルダーを歩いて、ライブラリに載っていない作品を拾い直す。
+///
+/// データベースだけが失われたときや、保存先を手で移したあとに使う。返るのは
+/// 取り込んだ件数と、**飛ばしたものとその理由**である。途中で失敗しても、
+/// そこまでの結果は捨てない。
+///
+/// 保存先がリンクだったり、フォルダーでなかったりしたら `Err`。リンクをたどら
+/// せると、保存先の外を取り込ませられる。
+///
+/// 走っている間、ライブラリの書き込みを止める。
 #[tauri::command]
 pub async fn scan_and_reimport_downloads(app: tauri::AppHandle) -> Result<ReimportOutcome, String> {
     use crate::commands::downloader::{
@@ -4784,6 +4853,9 @@ pub async fn scan_and_reimport_downloads(app: tauri::AppHandle) -> Result<Reimpo
     .map_err(|e| format!("Reimport thread panicked: {}", e))?
 }
 
+/// 保存先の場所を返す。設定画面がそのまま表示する。
+///
+/// 利用者に見せる唯一の出どころ。**画面側でパスを組み立てないこと。**
 #[tauri::command]
 pub async fn get_storage_path(app: tauri::AppHandle) -> Result<String, String> {
     let state = app.state::<Arc<AppState>>();

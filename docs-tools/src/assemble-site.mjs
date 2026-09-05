@@ -16,11 +16,17 @@ const here = import.meta.dirname;
 const docs = resolve(here, "..", "..", "docs");
 const site = resolve(here, "..", "site");
 
-/** 複製するもの。`public/` は生成器が直接ここへ書くので含めない。 */
-const ITEMS = ["index.md", "policy", "reference"];
+/**
+ * 複製するもの。`public/` は生成器が直接ここへ書くので含めない。
+ *
+ * `screenshots` を運ぶのは、使い方の説明が `../screenshots/*.png` として
+ * 貼っているからである。VitePress は Markdown からの相対パスを資産として
+ * 束ねるので、同じ位置関係のまま置けばそれで解決する。
+ */
+const ITEMS = ["index.md", "guide", "policy", "plan", "reference", "screenshots"];
 
 // .vitepress と public は消さない。前者は設定そのもの、後者は
-// typedoc と rustdoc が直接書き込む先である。
+// rustdoc が直接書き込む先である。
 for (const item of ITEMS) {
   await rm(resolve(site, item), { recursive: true, force: true });
 }
@@ -35,4 +41,9 @@ for (const item of ITEMS) {
   await cp(from, resolve(site, item), { recursive: true });
 }
 
-console.log(`組み立て先へ複製した: ${ITEMS.join(", ")} → ${site}`);
+// アプリの印。ヘッダーの記章として使う。同じ絵を README も使っているので、
+// 出どころはリポジトリ直下の一枚に保つ（複製を増やすと片方だけ古くなる）。
+await mkdir(resolve(site, "public"), { recursive: true });
+await cp(resolve(here, "..", "..", "piep_icon.svg"), resolve(site, "public", "piep-icon.svg"));
+
+console.log(`組み立て先へ複製した: ${ITEMS.join(", ")}, piep-icon.svg → ${site}`);

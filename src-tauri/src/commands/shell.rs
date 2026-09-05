@@ -81,6 +81,14 @@ fn resolve_allowed_path(app: &tauri::AppHandle, path: &str) -> Result<PathBuf, S
     Ok(canonical)
 }
 
+/// 管理下のファイルかフォルダーを、OS の既定のアプリで開く。
+///
+/// **開いてよいかはアプリが決める。** 保存先とアプリデータの中にあり、かつ piep
+/// が実際に作る種類のファイルだけを通す。外を指していたり、種類が許されていな
+/// ければ `Err`。
+///
+/// 書庫を取り込めば他人の作ったファイルが保存先に置かれるので、「管理下にある」
+/// だけでは通さない。
 #[tauri::command]
 pub async fn open_managed_path(app: tauri::AppHandle, path: String) -> Result<(), String> {
     let canonical = resolve_allowed_path(&app, &path)?;
