@@ -8,7 +8,7 @@
 //! （前者はマクロのトークン列、後者は文字列リテラル）ので、そこだけ
 //! テキストとして読む。
 
-use crate::model::{Arg, Command, EventEmit, Ret};
+use crate::model::{Arg, Command, EventEmit, Module, Ret};
 use proc_macro2::Span;
 use quote::ToTokens;
 use std::path::Path;
@@ -64,6 +64,44 @@ pub fn scan_commands(commands_dir: &Path, repo_root: &Path) -> anyhow::Result<Ve
                 returns: ret_of(&f.sig.output),
             });
         }
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(out)
+}
+
+/// `commands/` の各ファイルと、その `//!` を集める。
+///
+/// 生成されるリファレンスの節の前書きになる。前書きをソースに置いておけば、
+/// コマンドを足した人がその場で書けるし、**書かれた説明が実装から離れる経路が
+/// 無くなる**。
+pub fn scan_command_modules(commands_dir: &Path, repo_root: &Path) -> anyhow::Result<Vec<Module>> {
+    let mut out = Vec::new();
+    for entry in walkdir::WalkDir::new(commands_dir)
+        .into_iter()
+        .filter_map(Result::ok)
+    {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+            continue;
+        }
+        let name = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("?")
+            .to_string();
+        if name == "mod" {
+            continue;
+        }
+        let text = std::fs::read_to_string(path)?;
+        let file =
+            syn::parse_file(&text).map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
+        // `//!` は内側の属性としてファイルに付く。`///` と同じ形なので
+        // 読み取りは `doc_of` を使い回せる。
+        out.push(Module {
+            name,
+            file: relative(path, repo_root),
+            doc: doc_of(&file.attrs),
+        });
     }
     out.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(out)

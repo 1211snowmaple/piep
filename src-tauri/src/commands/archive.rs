@@ -1,3 +1,16 @@
+//! ライブラリの持ち出しと取り込み。
+//!
+//! 一件ずつの書き出し、実体ごとの ZIP、ライブラリ全体のバックアップ
+//! （マニフェスト＋分割 ZIP）とその復元、そして保存フォルダーからの
+//! 再取り込み。
+//!
+//! **取り込みは一度に一つしか走らない。** `IMPORT_LOCK` とライブラリの錠が
+//! それを保証している。だから止める側は、どれを止めるか指定しなくてよい。
+//!
+//! 復元は書き換える前に中身を検査する（`inspect_backup` /
+//! `inspect_multipart_backup`）。**中止が効くのはライブラリを書き換える前まで**
+//! で、書き換えが始まったあとは途中で降りるほうが危ない。
+
 use crate::database::queries::{PortableCollectionPairFeedback, PortableTag, PortableWorkEdit};
 use crate::database::{
     Database, DownloadEntry, EntityVersion, NewAsset, NewDownload, NewVersion, SavedSearch,

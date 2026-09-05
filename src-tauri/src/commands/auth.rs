@@ -1,3 +1,18 @@
+//! pixiv と FANBOX への接続を作り、確かめる四つの入口。
+//!
+//! 仕事は `auth::pixiv` `auth::fanbox` `auth::webview` にある。ここは境界に
+//! 出す形だけを決める薄皮である。
+//!
+//! **piep がパスワードを受け取ることはない。** 利用者は内蔵の WebView2 で
+//! サービス自身のログイン画面に入力し、piep はその結果だけを持ち帰る。
+//!
+//! 持ち帰るものは取得元で違う。pixiv は OAuth の更新用トークンで、web の
+//! セッション Cookie は**付け足しであって接続の条件ではない**。FANBOX は
+//! セッション Cookie そのものが鍵になる。どちらも UA と対でだけ意味を持つ
+//! ので、片方だけを保存しない。
+//!
+//! → [取得の方針](https://1211snowmaple.github.io/piep/policy/07-acquisition)
+
 use crate::auth::fanbox::{check_fanbox_session, FanboxUser};
 use crate::auth::pixiv::{login_with_refresh_token, PixivUser};
 use crate::auth::webview::{open_fanbox_login, open_pixiv_login, PixivConnection};

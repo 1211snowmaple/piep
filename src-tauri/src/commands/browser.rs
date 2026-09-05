@@ -1,3 +1,15 @@
+//! 内蔵ブラウザの操作。
+//!
+//! 二種類ある。`embedded` はアプリの窓の中に重ねる子 WebView、`standalone`
+//! は別窓である。中身は `auth::webview` にあり、ここは薄皮でしかない。
+//!
+//! **子 WebView の位置と大きさはフロントが持つ。** これは HTML の上に重なる
+//! 別の面で、レイアウトの一部ではない。スクロールや折りたたみで動いたぶんを
+//! `set_embedded_browser_bounds` で渡し直さないと、画面と絵がずれる。
+//!
+//! 閉じるのに二つあるのは、隠すだけの `close_` と、面ごと捨てる `destroy_`
+//! を分けているからである。次に開くのが同じ場所なら、捨てないほうが速い。
+
 use crate::auth::webview::{
     close_child_webview, close_standalone_webview, destroy_child_webview, get_child_webview_url,
     go_back_child_webview, go_forward_child_webview, navigate_child_webview, open_child_webview,

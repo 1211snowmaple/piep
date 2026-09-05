@@ -1,3 +1,18 @@
+//! ライブラリを読み書きする入口。piep のコマンドがいちばん多く集まる場所。
+//!
+//! 数が多いのは、棚・作品・読書・編集・検索・コレクション・更新監視・診断の
+//! すべてが同じ一つのデータベースを触るからである。
+//!
+//! **ここに仕事は無い。** 実際の問い合わせは `database/queries/` にあり、この
+//! 層は引数を受けて専用スレッドへ渡すだけである。SQLite の操作は同期的で、
+//! async の中でそのまま走らせると WebView の応答が止まる。
+//!
+//! 名前の頭でだいたいの当たりが付く。`db_` は素の読み書き、`search_` は検索
+//! 索引を通るもの。接頭辞の無いものは、資産の取り込みや実体プロフィールの
+//! 修復のように、データベース以外にも触る。
+//!
+//! → [アーキテクチャ](https://1211snowmaple.github.io/piep/policy/03-architecture)
+
 use crate::database::queries::EntityProfileFreshness;
 use crate::database::{
     AcceptCollectionSuggestionInput, AssetEntry, BulkMutationResult, CollectionAdditionResult,

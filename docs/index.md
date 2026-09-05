@@ -62,12 +62,13 @@ features:
 |---|---:|
 | 画面 | <!--stat:screens.count-->9<!--/stat--> |
 | IPC コマンド | <!--stat:commands.total-->159<!--/stat--> |
-| うち説明のあるもの | <!--stat:commands.documented-->37<!--/stat--> |
+| うち説明のあるもの | <!--stat:commands.described-->61<!--/stat--> |
 | イベント | <!--stat:events.total-->13<!--/stat--> |
 | テーブル | <!--stat:tables.total-->30<!--/stat--> |
 
 この表の数は手で書いていない。抽出器が数え、`docs:check` が古くなっていないかを
-検査している。
+検査している。説明は Rust の `///`、モジュールの `//!`、呼び出す TS 関数の JSDoc
+から拾う。**頁ではなくコードに書けば、そのまま出る。**
 
 ## 生成しなおす
 

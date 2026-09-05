@@ -1,3 +1,12 @@
+//! pixiv と FANBOX から取ってくる入口。
+//!
+//! 五つしかないのは、取得の単位が作品・シリーズ・作者の投稿一覧の三つしか
+//! ないからである。取ってきたものを保存する仕事は `downloader/` にある。
+//!
+//! **同じ作品を同時に二回保存しない。** `WORK_SAVE_LOCKS` が取得元と作品 ID
+//! の組ごとに錠を持つ。同じ作品への保存が重なるのは珍しいことではなく、
+//! 一覧からの一括保存と更新監視が並んだときに普通に起きる。
+
 use crate::database::queries::EntityProfileFreshness;
 use crate::database::{Database, DownloadEntry, NewAsset, NewDownload, NewVersion};
 use crate::downloader::fanbox::get_post_detail;

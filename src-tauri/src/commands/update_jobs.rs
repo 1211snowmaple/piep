@@ -1,3 +1,17 @@
+//! 更新監視のジョブ。
+//!
+//! 監視している作品の改稿、作者の新作、シリーズの続編を一つのジョブで確かめ、
+//! 選んだものだけを保存する。ジョブは一時停止・再開・中止ができ、失敗した
+//! 項目だけを後から追える。
+//!
+//! **制限に当たった項目は、同じジョブの中で待ち直す。** pixiv の 429 は数秒で
+//! 解けないことがある。`MAX_RATE_LIMIT_RETRIES` 回まで、待ち時間を
+//! `RATE_LIMIT_BACKOFF_BASE_MS` から `MAX_RATE_LIMIT_BACKOFF_MS` へ延ばし
+//! ながら試す。短い固定回数で失敗にすると、待てば通るものを落とす。
+//!
+//! ログは1ジョブ `MAX_UPDATE_JOB_LOGS` 行で頭打ちにし、超えた分は古い方から
+//! 落とす。長いジョブのログでライブラリを太らせない。
+
 use crate::database::{
     DownloadEntry, StartUpdateJobRequest, UpdateCandidateInput, UpdateCredentials, UpdateJobItem,
     UpdateJobItemInput, UpdateJobItemState, UpdateJobSnapshot, UpdateJobSummary,

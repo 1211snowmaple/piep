@@ -109,10 +109,25 @@ function countScreens() {
  * 使える名前の一覧。ここに無い名前を文中に書いたら落とす。
  * 黙って素通りさせると、綴り違いが「更新されない数」になって残る。
  */
+/**
+ * 呼び出し側 (TS) の JSDoc がある コマンド名。
+ *
+ * 説明の置き場は二つある。Rust の `///` と、呼び出す TS 関数の JSDoc である。
+ * 生成されるリファレンスは両方から拾うので、数え方もそれに合わせる。
+ */
+const callerDocumented = new Set(
+  frontend.invocations.filter((i) => i.doc && !i.isTest).map((i) => i.name),
+);
+
 const STATS = {
   "commands.total": contract.commands.length,
   "commands.documented": contract.commands.filter((c) => c.doc).length,
   "commands.undocumented": contract.commands.filter((c) => !c.doc).length,
+  /** Rust の `///` か、呼び出し側の JSDoc か、どちらかがあるもの。 */
+  "commands.described": contract.commands.filter((c) => c.doc || callerDocumented.has(c.name))
+    .length,
+  "modules.total": (contract.modules ?? []).length,
+  "modules.documented": (contract.modules ?? []).filter((m) => m.doc).length,
   "commands.called": new Set(frontend.invocations.map((i) => i.name)).size,
   "events.total": new Set(contract.events.map((e) => e.name)).size,
   "tables.total": contract.tables.length,
