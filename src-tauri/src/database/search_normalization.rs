@@ -4,7 +4,7 @@ use std::sync::OnceLock;
 use lindera::dictionary::load_dictionary;
 use lindera::mode::Mode;
 use lindera::segmenter::Segmenter;
-use lindera::tokenizer::Tokenizer;
+use lindera_analysis::tokenizer::Tokenizer;
 use unicode_normalization::UnicodeNormalization;
 use wana_kana::{ConvertJapanese, IsJapaneseStr};
 
@@ -373,6 +373,26 @@ fn tokenizer() -> Option<&'static Tokenizer> {
     TOKENIZER
         .get_or_init(|| {
             load_dictionary("embedded://ipadic")
+                // 未知語の梯子（lindera 6 の既定）はそのまま使う。
+                //
+                // 梯子は辞書にない語へ短い候補を足す。切れ方が変わるので
+                // 3.0.7 から上げる際に実際の棚 16,165 件（題・作者・タグ）で
+                // 新旧を突き合わせた。変わったのは 1,148 件（7.1%）。その内訳は
+                // **まとまったのが 1,105 件、割れたのは 10 件**で、ほぼ一方向に
+                // 効く。単独の漢字に辞書の読みが付く回数は 4,366 → 3,240 に減る。
+                //
+                // 減ったぶんが直った不具合そのものである。「巨乳」は梯子なしだと
+                // `巨` と `乳` に割れ、読み欄に **`ちち`** が入っていた。棚にない
+                // 語を無理に辞書へ当てた結果で、`ちち` で探すと巨乳の作品が
+                // 軒並み出る。「爆乳」「淫魔」「巨根」、人名の「颯太」（`ふとし`
+                // と読まれていた）も同じ。梯子はこれらを語のまま残す。
+                //
+                // 引き換えに「非道」が `虐非`＋`道` に崩れる類の後退が 10 件ある。
+                // 数でも中身でも釣り合わない。
+                //
+                // 切れ方が変われば索引は作り直しになる。`tantivy_index` の
+                // `INDEX_VERSION_DIR` を上げてあるので、既存の棚は起動時に
+                // 作り直しへ回る。
                 .map(|dictionary| Tokenizer::new(Segmenter::new(Mode::Normal, dictionary, None)))
                 .ok()
         })

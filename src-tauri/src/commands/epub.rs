@@ -322,7 +322,7 @@ fn merge_collection_manifests(
         // 使われていたページ番号との対応表を先に作ってから、本文のリンクを
         // 引き直す。
         let base = pages.len() as u32;
-        let work_pages = manifest.content.pages.drain(..).collect::<Vec<_>>();
+        let work_pages = std::mem::take(&mut manifest.content.pages);
         let mut mapping: HashMap<u32, u32> = HashMap::new();
         for (index, page) in work_pages.iter().enumerate() {
             if page.part == 0 {
