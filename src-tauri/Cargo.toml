@@ -1,6 +1,6 @@
 [package]
 name = "piep"
-version = "0.16.1"
+version = "0.17.0"
 description = "Local creative library for Pixiv and FANBOX"
 authors = ["1211snowmaple"]
 edition = "2021"
