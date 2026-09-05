@@ -96,5 +96,14 @@ export default {
   vite: {
     // 生成物が無い状態でも起動できるようにする。
     server: { fs: { allow: [".."] } },
+    // PostCSS の設定を上へ探しに行かせない。
+    //
+    // テーマに CSS を置いた瞬間、Vite は設定ファイルを上位ディレクトリへ
+    // 探しに行き、リポジトリ直下の `postcss.config.cjs` を拾う。あれは
+    // アプリ用で `postcss-preset-mantine` を要求するが、docs-tools は
+    // アプリの依存を持たない。手元では root の node_modules があるので
+    // 通ってしまい、**綺麗な checkout でだけ落ちる**という形になる。
+    // 空の設定を渡せば探索そのものが起きない。
+    css: { postcss: {} },
   },
 };

@@ -50,6 +50,12 @@ jobs:
         working-directory: docs-tools
       - run: npm run docs:check
         working-directory: docs-tools
+      # サイトが組めることを PR の時点で確かめる。deploy は main でしか走らない
+      # ので、ここで見ないと配置の直前に初めて分かることになる。実際テーマを
+      # 足したとき、手元では通るのに綺麗な checkout でだけ落ちる壊れ方をした
+      # （Vite が上位の postcss.config.cjs を拾い、アプリ側の依存を要求した）。
+      - run: npm run contract && npm run site:build
+        working-directory: docs-tools
 
   # サイトを組んで GitHub Pages へ配置する。main だけ。
   #
