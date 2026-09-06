@@ -155,7 +155,7 @@ function CollectionDetail({ collection, readOnly, onEdit, onChanged }: { collect
   // 束は作った時点で閉じない。新作が届けば、いま入っていない作品のなかに
   // この束へ入るべきものが出てくる。
   const [additionsOpened, additionsModal] = useDisclosure(false);
-  const [view, setView] = useViewMode();
+  const [view, setView] = useViewMode("collection-members");
   const [selectionMode, setSelectionMode] = useState(false);
   const [selected, setSelected] = useState<number[]>([]);
   const selectedSet = useMemo(() => new Set(selected), [selected]);

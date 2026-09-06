@@ -137,7 +137,7 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
     setUrlParams(next, { replace: true });
   };
   const [pagingMode] = usePagingMode("entity");
-  const [view, setView] = useViewMode();
+  const [view, setView] = useViewMode("entity");
   const [pageSize] = usePageSize();
   // Relevance is walked with a score cursor and has no nth page, so numbers are
   // only offered once an ordering has been chosen.
