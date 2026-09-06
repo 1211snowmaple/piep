@@ -970,12 +970,36 @@ pub fn optimize_segments(storage_dir: &Path) -> Result<(usize, usize), String> {
             break;
         }
         let mut merged = false;
+        let mut went_stale = false;
         for chunk in ids.chunks(OPTIMIZE_MERGE_BATCH) {
             if chunk.len() < 2 {
                 continue;
             }
+            // 段の切れ目で書き手を明け渡すので、そのあいだに顔ぶれが変わりうる
+            // -- tantivy 自身の併合と、順番を待っていた保存の両方が動く。この
+            // 一覧は段に入る前に一度読んだきりなので、**二段目からは古い**。
+            //
+            // 古い ID をそのまま渡すと tantivy は「確定済みと未確定が混ざって
+            // いる」と言って断る。手元では二段目に入る前に併合が終わっていて
+            // 表に出ず、CI の遅い機械で初めて落ちた。渡す直前に、まだ在る
+            // ものだけへ絞る。
+            let live = runtime
+                .index
+                .searchable_segment_ids()
+                .map_err(|e| format!("Tantivy segment inspection failed: {e}"))?;
+            let fresh: Vec<_> = chunk
+                .iter()
+                .filter(|id| live.contains(id))
+                .cloned()
+                .collect();
+            if fresh.len() < chunk.len() {
+                went_stale = true;
+            }
+            if fresh.len() < 2 {
+                continue;
+            }
             optimizing_writer(&mut writer)?
-                .merge(chunk)
+                .merge(&fresh)
                 .wait()
                 .map_err(|e| format!("Tantivy segment merge failed: {e}"))?;
             merged = true;
@@ -983,6 +1007,10 @@ pub fn optimize_segments(storage_dir: &Path) -> Result<(usize, usize), String> {
             hold_merges(&mut writer)?;
         }
         if !merged {
+            if went_stale {
+                // 進まなかったのではなく、顔ぶれが変わっただけ。読み直せば続く。
+                continue;
+            }
             // 2つ以上あるのに1つも統合できなかった。回り続けても同じなので抜ける。
             log::warn!(
                 "Tantivy optimization made no progress at round {round} with {} segments",
