@@ -1,3 +1,12 @@
+//! pixiv と FANBOX から取ってくる入口。
+//!
+//! 五つしかないのは、取得の単位が作品・シリーズ・作者の投稿一覧の三つしか
+//! ないからである。取ってきたものを保存する仕事は `downloader/` にある。
+//!
+//! **同じ作品を同時に二回保存しない。** `WORK_SAVE_LOCKS` が取得元と作品 ID
+//! の組ごとに錠を持つ。同じ作品への保存が重なるのは珍しいことではなく、
+//! 一覧からの一括保存と更新監視が並んだときに普通に起きる。
+
 use crate::database::queries::EntityProfileFreshness;
 use crate::database::{Database, DownloadEntry, NewAsset, NewDownload, NewVersion};
 use crate::downloader::fanbox::get_post_detail;
@@ -587,6 +596,12 @@ pub async fn fetch_pixiv_novel_metadata(
         .map_err(|e| e.to_string())
 }
 
+/// FANBOX の投稿を一件、生の JSON のまま返す。
+///
+/// 型を付けずに返すのは、FANBOX の本文が投稿の種類ごとに別の形をしている
+/// ためである。解釈は保存する側で行う。
+///
+/// **Cookie と UA は対で渡す。** 片方だけでは通らない。
 #[tauri::command]
 pub async fn fetch_fanbox_post(
     post_id: String,
@@ -598,6 +613,13 @@ pub async fn fetch_fanbox_post(
         .map_err(|e| e.to_string())
 }
 
+/// クリエイターの投稿を、最初から最後まで並べて返す。
+///
+/// 返るのは一覧の情報だけで、本文は含まない。**一覧に出たことは、中身が読める
+/// ことを意味しない** - 支援していない有料の投稿は `isRestricted` が立って返り、
+/// 本文を取りに行っても読めない。`feeRequired` にいくら必要かが入る。
+///
+/// **Cookie と UA は対で渡す。**
 #[tauri::command]
 pub async fn fetch_fanbox_creator_posts(
     creator_id: String,
@@ -623,6 +645,13 @@ pub(crate) async fn fetch_fanbox_creator_posts_since(
         .map_err(|e| e.to_string())
 }
 
+/// 公式シリーズに入っている小説を、最初から最後まで並べて返す。
+///
+/// 頁をたどるので、長いシリーズでは相応に時間がかかる。**100頁で打ち切って
+/// `Err` にする**（相手の返事が終わらないときに無限に叩き続けないための歯止め
+/// であって、正常な取得では起きない）。
+///
+/// 返るのは一覧の情報だけで、本文は含まない。
 #[tauri::command]
 pub async fn fetch_pixiv_series_novels(
     series_id: String,
@@ -704,6 +733,12 @@ pub(crate) async fn fetch_pixiv_series_novels_since(
     Ok(all_novels)
 }
 
+/// 作者の小説を、最初から最後まで並べて返す。
+///
+/// `fetch_pixiv_series_novels` と同じく頁をたどり、**100頁で打ち切って `Err`**
+/// にする。作品数の多い作者では時間がかかる。
+///
+/// 返るのは一覧の情報だけで、本文は含まない。
 #[tauri::command]
 pub async fn fetch_pixiv_user_novels(
     user_id: String,
@@ -778,6 +813,15 @@ pub(crate) async fn fetch_pixiv_user_novels_since(
     Ok(all_novels)
 }
 
+/// pixiv の小説を URL 一本から取ってくる。本文と挿絵の在り処まで含む。
+///
+/// URL から作品 ID を取り出せなければ `Err`。作品頁でない URL を貼られたとき
+/// がこれに当たる。
+///
+/// 表紙は二か所（web 版と API）から来るので、**良いほうを選んで**一つにして
+/// 返す。呼び出し側で選び直さないこと。
+///
+/// **取ってくるだけで、保存はしない。** ライブラリへ入れるのは別の手順。
 #[tauri::command]
 pub async fn fetch_pixiv_novel_by_url(
     url: String,

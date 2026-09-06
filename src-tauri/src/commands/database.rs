@@ -1,3 +1,18 @@
+//! ライブラリを読み書きする入口。piep のコマンドがいちばん多く集まる場所。
+//!
+//! 数が多いのは、棚・作品・読書・編集・検索・コレクション・更新監視・診断の
+//! すべてが同じ一つのデータベースを触るからである。
+//!
+//! **ここに仕事は無い。** 実際の問い合わせは `database/queries/` にあり、この
+//! 層は引数を受けて専用スレッドへ渡すだけである。SQLite の操作は同期的で、
+//! async の中でそのまま走らせると WebView の応答が止まる。
+//!
+//! 名前の頭でだいたいの当たりが付く。`db_` は素の読み書き、`search_` は検索
+//! 索引を通るもの。接頭辞の無いものは、資産の取り込みや実体プロフィールの
+//! 修復のように、データベース以外にも触る。
+//!
+//! → [アーキテクチャ](https://1211snowmaple.github.io/piep/policy/03-architecture)
+
 use crate::database::queries::EntityProfileFreshness;
 use crate::database::{
     AcceptCollectionSuggestionInput, AssetEntry, BulkMutationResult, CollectionAdditionResult,
@@ -139,6 +154,9 @@ pub struct SearchRebuildProgress {
     error: Option<String>,
 }
 
+/// 棚を検索する。絞り込み・並べ替え・頁送りをまとめて受ける。
+///
+/// 一覧の唯一の入口である。**画面側で絞り直さないこと** - 件数と頁が合わなくなる。
 #[tauri::command]
 pub async fn search_downloads_v2(
     app: tauri::AppHandle,
@@ -147,6 +165,10 @@ pub async fn search_downloads_v2(
     run_db_blocking(app, move |state| state.db.search_downloads_v2(&params)).await
 }
 
+/// 入力中の語から、検索候補を返す。
+///
+/// 打つたびに呼ばれる前提で軽くしてある。**確定した検索には使わない**（結果を
+/// 返すのは `search_downloads_v2`）。
 #[tauri::command]
 pub async fn search_suggest(
     app: tauri::AppHandle,
@@ -155,6 +177,13 @@ pub async fn search_suggest(
     run_db_blocking(app, move |state| state.db.search_suggest(&params)).await
 }
 
+/// 検索索引を作り直す。返るのはジョブ番号。
+///
+/// **すぐには終わらない。** 背景で走るので、返ってきた番号で進み具合を追い、
+/// 止めたいときは `search_cancel_rebuild_index` に渡す。
+///
+/// `includeSemantic` を渡すと、意味索引の有効・無効もここで切り替わる。**設定を
+/// 書き換える副作用がある**ので、作り直すだけのつもりなら省くこと。
 #[tauri::command]
 pub async fn search_rebuild_index(
     app: tauri::AppHandle,
@@ -410,6 +439,10 @@ fn spawn_rebuild_job(
     Ok(job_id)
 }
 
+/// 作り直しを止めるよう頼む。
+///
+/// 知らない番号なら `Err`。**すぐには止まらない** - 印を立てるだけで、切りの
+/// 良いところで降りる。
 #[tauri::command]
 pub async fn search_cancel_rebuild_index(job_id: String) -> Result<(), String> {
     let jobs = SEARCH_REBUILD_JOBS.lock().map_err(|e| e.to_string())?;
@@ -458,6 +491,7 @@ fn emit_search_index_progress(
     );
 }
 
+/// ID を並べて渡し、作品をまとめて取る。一件ずつ呼ばないこと。
 #[tauri::command]
 pub async fn db_get_downloads(
     app: tauri::AppHandle,
@@ -466,6 +500,7 @@ pub async fn db_get_downloads(
     run_db_blocking(app, move |state| state.db.get_downloads(&ids)).await
 }
 
+/// 作品に紐づく画像などの資産を返す。本文は含まない。
 #[tauri::command]
 pub async fn db_get_assets(
     app: tauri::AppHandle,
@@ -475,11 +510,20 @@ pub async fn db_get_assets(
     state.db.get_assets(download_id)
 }
 
+/// 作品を一件消す。
+///
+/// 書き込みなので、バックアップの書き出し中は終わるまで待つ。
 #[tauri::command]
 pub async fn db_delete_download(app: tauri::AppHandle, id: i64) -> Result<(), String> {
     run_library_write_blocking(app, move |state| state.db.delete_download(id)).await
 }
 
+/// 作品をまとめて消す。
+///
+/// 返る `matchedCount` は当たった数、`changedCount` は実際に消えた数である。
+/// **二つは一致しないことがある**ので、渡した ID の数と比べないこと。
+///
+/// 書き込みなので、バックアップの書き出し中は待つ。
 #[tauri::command]
 pub async fn db_delete_downloads(
     app: tauri::AppHandle,
@@ -488,6 +532,13 @@ pub async fn db_delete_downloads(
     run_library_write_blocking(app, move |state| state.db.delete_downloads(&ids)).await
 }
 
+/// 今の絞り込みに当たる作品を、まとめて消す。
+///
+/// **画面に見えている頁だけではなく、条件に当たるすべてが対象**である。件数を
+/// 確かめてから呼ぶこと。
+///
+/// 返り方は `db_delete_downloads` と同じ。書き込みなので、バックアップの書き出し
+/// 中は待つ。
 #[tauri::command]
 pub async fn db_delete_downloads_for_search(
     app: tauri::AppHandle,
@@ -499,12 +550,17 @@ pub async fn db_delete_downloads_for_search(
     .await
 }
 
+/// ライブラリの件数と容量を返す。歩き回らないので安い。
 #[tauri::command]
 pub async fn db_get_stats(app: tauri::AppHandle) -> Result<DbStats, String> {
     let state = app.state::<Arc<AppState>>();
     state.db.get_stats()
 }
 
+/// 容量・索引の状態・孤立した資産を測る。
+///
+/// **棚全体を歩くので重い。** 画面を開くたびに呼ばないこと。進み具合は
+/// `library-diagnostics-progress` で流れるので、待たせる間はそれを見せる。
 #[tauri::command]
 pub async fn db_get_library_diagnostics(
     app: tauri::AppHandle,
@@ -525,6 +581,11 @@ pub async fn db_get_library_diagnostics(
     .await
 }
 
+/// データベースを整える。`compact` を立てると容量も詰める。
+///
+/// **詰めるほうは重く、その間ライブラリを書き換えられない。** 進み具合は
+/// `library-maintenance-progress` で流れる（`optimizing` / `compacting` /
+/// `complete` / `failed`）。
 #[tauri::command]
 pub async fn db_maintain_library(
     app: tauri::AppHandle,
@@ -548,6 +609,12 @@ pub async fn db_maintain_library(
     result
 }
 
+/// 検索索引の断片をまとめる。
+///
+/// 断片が増えると検索が遅くなる。**索引を作り直すわけではない**ので、入って
+/// いない作品が入るようにはならない（それは `search_rebuild_index`）。
+///
+/// 進み具合は `search-index-optimization-progress` で流れる。
 #[tauri::command]
 pub async fn db_optimize_search_index(
     app: tauri::AppHandle,
@@ -577,6 +644,10 @@ pub async fn db_optimize_search_index(
     result
 }
 
+/// 棚（すべて・お気に入り・読みかけ・更新監視）の件数を返す。
+///
+/// 「読みかけ」だけは**画面側が持っている**ので、その ID を `readingIds` で渡す。
+/// 渡さないとその棚は 0 になる。
 #[tauri::command]
 pub async fn db_get_library_shelf_counts(
     app: tauri::AppHandle,
@@ -589,6 +660,9 @@ pub async fn db_get_library_shelf_counts(
     .await
 }
 
+/// 作者に紐づくシリーズを返す。`limit` の既定は 60。
+///
+/// 頁送りが要るなら `db_list_entity_series_paged` を使う。
 #[tauri::command]
 pub async fn db_list_entity_series(
     app: tauri::AppHandle,
@@ -604,6 +678,10 @@ pub async fn db_list_entity_series(
     .await
 }
 
+/// 作者に紐づくシリーズを、頁で切って返す。
+///
+/// 次の頁は返ってきた `cursor` をそのまま渡す。**中身を解釈しないこと。**
+/// `query` を渡すと名前で絞る。`limit` の既定は 60。
 #[tauri::command]
 pub async fn db_list_entity_series_paged(
     app: tauri::AppHandle,
@@ -625,6 +703,9 @@ pub async fn db_list_entity_series_paged(
     .await
 }
 
+/// 作者やシリーズに付いているタグを、多い順に返す。`limit` の既定は 40。
+///
+/// 取得元が付けたタグとモデルが足したタグは**出どころが混ざらない**。
 #[tauri::command]
 pub async fn db_list_entity_tags(
     app: tauri::AppHandle,
@@ -641,11 +722,13 @@ pub async fn db_list_entity_tags(
     .await
 }
 
+/// 保存した検索の一覧を返す。
 #[tauri::command]
 pub async fn db_list_saved_searches(app: tauri::AppHandle) -> Result<Vec<SavedSearch>, String> {
     run_db_blocking(app, move |state| state.db.list_saved_searches()).await
 }
 
+/// 検索を保存する。同じ名前があれば上書きし、保存後の姿を返す。
 #[tauri::command]
 pub async fn db_upsert_saved_search(
     app: tauri::AppHandle,
@@ -654,11 +737,15 @@ pub async fn db_upsert_saved_search(
     run_library_write_blocking(app, move |state| state.db.upsert_saved_search(&input)).await
 }
 
+/// 保存した検索を消す。`false` は「その ID が無かった」を意味する。
 #[tauri::command]
 pub async fn db_delete_saved_search(app: tauri::AppHandle, id: i64) -> Result<bool, String> {
     run_library_write_blocking(app, move |state| state.db.delete_saved_search(id)).await
 }
 
+/// コレクションの一覧を、要約だけで返す。
+///
+/// 中の作品は含まない。中身は `db_get_work_collection` で取る。
 #[tauri::command]
 pub async fn db_list_work_collections(
     app: tauri::AppHandle,
@@ -666,6 +753,9 @@ pub async fn db_list_work_collections(
     run_db_blocking(app, move |state| state.db.list_work_collections()).await
 }
 
+/// コレクションを一つ、中の作品まで含めて返す。
+///
+/// **並びは読む順**で、利用者が決めたものである。画面で並べ直さないこと。
 #[tauri::command]
 pub async fn db_get_work_collection(
     app: tauri::AppHandle,
@@ -747,6 +837,11 @@ fn import_collection_cover(app_data_dir: &Path, source: &Path) -> Result<PathBuf
     publish.map(|_| destination)
 }
 
+/// コレクションを作る、または直す。
+///
+/// 表紙のパスを渡すと、その画像を**アプリの管理下へ複製する**。元のファイルを
+/// 消したり動かしたりしても表紙は残り、バックアップにも入る。渡さなければ
+/// 今の表紙のまま。
 #[tauri::command]
 pub async fn db_upsert_work_collection(
     app: tauri::AppHandle,
@@ -772,6 +867,9 @@ pub async fn db_upsert_work_collection(
     run_library_write_blocking(app, move |state| state.db.upsert_work_collection(&input)).await
 }
 
+/// コレクションを消す。**中の作品は消えない。**
+///
+/// 消えるのは束ねていたという事実だけである。
 #[tauri::command]
 pub async fn db_delete_work_collection(
     app: tauri::AppHandle,
@@ -783,6 +881,10 @@ pub async fn db_delete_work_collection(
     .await
 }
 
+/// コレクションに作品を足し、足したあとのコレクションを返す。
+///
+/// すでに入っているものを渡しても増えない。返り値の並びが**そのまま読む順**に
+/// なるので、画面はこれを反映すること。
 #[tauri::command]
 pub async fn db_add_work_collection_members(
     app: tauri::AppHandle,
@@ -989,6 +1091,9 @@ pub async fn db_sort_work_collection_members(
     .await
 }
 
+/// コレクションから作品を外し、外したあとのコレクションを返す。
+///
+/// **作品そのものは消えない。**
 #[tauri::command]
 pub async fn db_remove_work_collection_members(
     app: tauri::AppHandle,
@@ -1003,6 +1108,9 @@ pub async fn db_remove_work_collection_members(
     .await
 }
 
+/// コレクションの並びを、渡した順に置き直す。
+///
+/// この並びが**読む順**になる。EPUB に書き出したときの章の順でもある。
 #[tauri::command]
 pub async fn db_reorder_work_collection_members(
     app: tauri::AppHandle,
@@ -1017,6 +1125,7 @@ pub async fn db_reorder_work_collection_members(
     .await
 }
 
+/// その作品が入っているコレクションを返す。作品ページで使う。
 #[tauri::command]
 pub async fn db_list_collections_for_work(
     app: tauri::AppHandle,
@@ -1029,6 +1138,7 @@ pub async fn db_list_collections_for_work(
     .await
 }
 
+/// その作者の作品を含むコレクションを返す。
 #[tauri::command]
 pub async fn db_list_collections_for_person(
     app: tauri::AppHandle,
@@ -1041,6 +1151,7 @@ pub async fn db_list_collections_for_person(
     .await
 }
 
+/// そのシリーズの作品を含むコレクションを返す。
 #[tauri::command]
 pub async fn db_list_collections_for_series(
     app: tauri::AppHandle,
@@ -1053,6 +1164,12 @@ pub async fn db_list_collections_for_series(
     .await
 }
 
+/// 一つの束の候補を作る。
+///
+/// 候補は**下書きであって決定ではない**。採るまでコレクションは増えない。
+///
+/// → 採るのは `db_accept_collection_suggestion`、捨てるのは
+/// `db_dismiss_collection_suggestion`
 #[tauri::command]
 pub async fn db_generate_collection_suggestion(
     app: tauri::AppHandle,
@@ -1064,6 +1181,9 @@ pub async fn db_generate_collection_suggestion(
     .await
 }
 
+/// 束の候補を返す。`stateFilter` で状態を絞れる。
+///
+/// 並びは**確からしさの高い順**である。大きい束が先に来るわけではない。
 #[tauri::command]
 pub async fn db_list_collection_suggestions(
     app: tauri::AppHandle,
@@ -1077,6 +1197,10 @@ pub async fn db_list_collection_suggestions(
     .await
 }
 
+/// 候補を「今は要らない」と断る。
+///
+/// 断ったことは覚えるので、同じ組み合わせは次から出てこない。`false` は
+/// 「その候補が無かった」を意味する。
 #[tauri::command]
 pub async fn db_dismiss_collection_suggestion(
     app: tauri::AppHandle,
@@ -1088,6 +1212,10 @@ pub async fn db_dismiss_collection_suggestion(
     .await
 }
 
+/// 候補を採り、コレクションを作って返す。
+///
+/// **候補の段階で並べ替えはできない。** 順序を直すのは採ったあと、
+/// `db_reorder_work_collection_members` で行う。
 #[tauri::command]
 pub async fn db_accept_collection_suggestion(
     app: tauri::AppHandle,
@@ -1099,6 +1227,10 @@ pub async fn db_accept_collection_suggestion(
     .await
 }
 
+/// 候補を拒む。`memberKeys` を渡すと、その作品だけを拒む。
+///
+/// **拒んだ組み合わせは覚える**ので、次の走査で同じ提案は出てこない。全部を
+/// 拒むと候補ごと消える。`false` は「その候補が無かった」を意味する。
 #[tauri::command]
 pub async fn db_reject_collection_suggestion(
     app: tauri::AppHandle,
@@ -1113,11 +1245,16 @@ pub async fn db_reject_collection_suggestion(
     .await
 }
 
+/// ホームに出す要約（保存件数、容量、推移、索引の状態）を返す。
 #[tauri::command]
 pub async fn db_get_dashboard_summary(app: tauri::AppHandle) -> Result<DashboardSummary, String> {
     run_db_blocking(app, move |state| state.db.get_dashboard_summary()).await
 }
 
+/// 絞り込みに出す選択肢と、その件数を返す。
+///
+/// `includeEntities` を false にすると、作者やシリーズの集計を省いて軽くなる。
+/// 既定は true。**件数の要らない画面では落とすこと。**
 #[tauri::command]
 pub async fn db_get_filter_facets(
     app: tauri::AppHandle,
@@ -1130,6 +1267,10 @@ pub async fn db_get_filter_facets(
     .await
 }
 
+/// 索引に何件入っていて、全体が何件かを返す。
+///
+/// この二つの比が「索引の完成度」である。**分母は棚の全件**で、絞り込んだ数では
+/// ない。
 #[tauri::command]
 pub async fn db_get_search_index_status(
     app: tauri::AppHandle,
@@ -1138,6 +1279,10 @@ pub async fn db_get_search_index_status(
     state.db.get_search_index_status()
 }
 
+/// 作者やシリーズを、名前で探して返す。
+///
+/// `limit` の既定は 60。件数だけが要るなら `db_count_entity_facets` のほうが軽い。
+/// `filters` を渡すと、今の絞り込みの中だけを見る。
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn db_search_entity_facets(
@@ -1166,6 +1311,9 @@ pub async fn db_search_entity_facets(
     .await
 }
 
+/// 作者やシリーズなどの選択肢が、条件に対して何件あるかだけを返す。
+///
+/// 頁送りの分母に使う。中身は `db_search_entity_facets` で取る。
 #[tauri::command]
 pub async fn db_count_entity_facets(
     app: tauri::AppHandle,
@@ -1182,6 +1330,9 @@ pub async fn db_count_entity_facets(
     .await
 }
 
+/// 絞り込みの選択肢を、名前で探して返す。`limit` の既定は 30。
+///
+/// タグの一覧が長い場合に、ドロワーの中で探すためのもの。
 #[tauri::command]
 pub async fn db_search_filter_facets(
     app: tauri::AppHandle,
@@ -1212,6 +1363,10 @@ fn validate_path_in_storage(path: &str, storage_dir: &std::path::Path) -> Result
     Ok(())
 }
 
+/// 保存先の中のファイルを、文字列として読む。
+///
+/// **保存先の外を指していたら `Err`。** 取り込んだ書庫が細工されていても、外の
+/// ファイルを読み出せないようにするための門である。
 #[tauri::command]
 pub async fn read_file_content(app: tauri::AppHandle, path: String) -> Result<String, String> {
     let state = app.state::<Arc<AppState>>();
@@ -1222,6 +1377,12 @@ pub async fn read_file_content(app: tauri::AppHandle, path: String) -> Result<St
         .map_err(|e| format!("Failed to read file: {}", e))
 }
 
+/// 保存先の中のファイルを、OS の既定のアプリで開く。
+///
+/// **場所と種類の両方を見る。** 保存先の中にあるだけでは通さない - 中身は取得元と
+/// 書庫から来たものなので、piep が実際に作る種類だけを許す。
+///
+/// ファイルが無い、種類が許されていない、保存先の外を指している場合は `Err`。
 #[tauri::command]
 pub async fn open_local_asset(app: tauri::AppHandle, path: String) -> Result<(), String> {
     let state = app.state::<Arc<AppState>>();
@@ -1241,6 +1402,10 @@ pub async fn open_local_asset(app: tauri::AppHandle, path: String) -> Result<(),
         .map_err(|e| format!("Failed to open file: {}", e))
 }
 
+/// 作品ごとの更新監視を切り替える。
+///
+/// これは「これだけを見たい」と絞るための道具である。**改稿に気づくための監視は
+/// 作者・シリーズの単位**で、そちらは `db_upsert_update_target` で設定する。
 #[tauri::command]
 pub async fn db_set_watch_updates(
     app: tauri::AppHandle,
@@ -1253,6 +1418,7 @@ pub async fn db_set_watch_updates(
     .await
 }
 
+/// お気に入りを切り替える。
 #[tauri::command]
 pub async fn db_set_favorite(
     app: tauri::AppHandle,
@@ -1265,6 +1431,10 @@ pub async fn db_set_favorite(
     .await
 }
 
+/// お気に入りと更新監視を、まとめて切り替える。
+///
+/// 渡さなかったほうは触らない（`None` は「変えない」であって false ではない）。
+/// 返る `matchedCount` は当たった数、`changedCount` は実際に変わった数である。
 #[tauri::command]
 pub async fn db_set_flags_for_ids(
     app: tauri::AppHandle,
@@ -1278,6 +1448,7 @@ pub async fn db_set_flags_for_ids(
     .await
 }
 
+/// 作者・シリーズの更新監視を設定する。あれば上書きし、設定後の姿を返す。
 #[tauri::command]
 pub async fn db_upsert_update_target(
     app: tauri::AppHandle,
@@ -1286,6 +1457,7 @@ pub async fn db_upsert_update_target(
     run_library_write_blocking(app, move |state| state.db.upsert_update_target(&target)).await
 }
 
+/// 更新監視の設定を一つ引く。監視していなければ `None`。
 #[tauri::command]
 pub async fn db_get_update_target(
     app: tauri::AppHandle,
@@ -1301,6 +1473,10 @@ pub async fn db_get_update_target(
     .await
 }
 
+/// 更新監視の設定を並べる。
+///
+/// `enabledOnly` を立てると、今動いているものだけ。既定は false で、止めてある
+/// ものも返る。
 #[tauri::command]
 pub async fn db_list_update_targets(
     app: tauri::AppHandle,
@@ -1313,6 +1489,9 @@ pub async fn db_list_update_targets(
         .list_update_targets(target_type.as_deref(), enabled_only.unwrap_or(false))
 }
 
+/// 更新監視を止める／再開する。
+///
+/// **設定は消えない。** 消したいときは `db_delete_update_target`。
 #[tauri::command]
 pub async fn db_set_update_target_enabled(
     app: tauri::AppHandle,
@@ -1329,6 +1508,9 @@ pub async fn db_set_update_target_enabled(
     .await
 }
 
+/// 更新監視の対象を外す。
+///
+/// **保存済みの作品には触らない。** 監視をやめるだけである。
 #[tauri::command]
 pub async fn db_delete_update_target(
     app: tauri::AppHandle,
@@ -1344,6 +1526,7 @@ pub async fn db_delete_update_target(
     .await
 }
 
+/// 作者を一人引く。棚に無ければ `Err`。
 #[tauri::command]
 pub async fn db_get_person(
     app: tauri::AppHandle,
@@ -1354,6 +1537,7 @@ pub async fn db_get_person(
     state.db.get_person(&source, &source_key)
 }
 
+/// シリーズを一つ引く。棚に無ければ `Err`。
 #[tauri::command]
 pub async fn db_get_series(
     app: tauri::AppHandle,
@@ -1364,6 +1548,9 @@ pub async fn db_get_series(
     state.db.get_series(&source, &source_key)
 }
 
+/// 作者やシリーズを取得した履歴を、新しい順に返す。
+///
+/// 先頭が最後に取った版である。
 #[tauri::command]
 pub async fn db_list_entity_versions(
     app: tauri::AppHandle,
@@ -1377,6 +1564,10 @@ pub async fn db_list_entity_versions(
         .list_entity_versions(&entity_type, &source, &source_key)
 }
 
+/// 作者やシリーズについて、最後に取得した生の JSON を返す。
+///
+/// 一度も取っていない、または記録に本体のパスが無ければ `None`。**画面に出す用
+/// ではなく、取得元が何を返したかを確かめるためのもの**である。
 #[tauri::command]
 pub async fn db_get_latest_entity_profile_json(
     app: tauri::AppHandle,
@@ -1814,6 +2005,12 @@ async fn copy_file_atomically_bounded(
     result
 }
 
+/// 作者やシリーズの情報を取得元から取り直す。
+///
+/// **呼びすぎないよう間隔を空けてある。** 前回から間が空いていなければ待たされる。
+/// 画面を開くたびに呼ばないこと。
+///
+/// `force` を立てると、新しいと分かっていても取り直す。鍵が要る。
 #[tauri::command]
 pub async fn refresh_entity_profile(
     app: tauri::AppHandle,
@@ -2230,6 +2427,7 @@ pub async fn db_scan_fanbox_asset_gaps(app: tauri::AppHandle) -> Result<FanboxRe
     .await
 }
 
+/// 取り直しの進み具合を返す。走っていないときの姿も返る。
 #[tauri::command]
 pub async fn db_get_entity_profile_repair_status(
     app: tauri::AppHandle,
@@ -2343,6 +2541,10 @@ pub async fn repair_incomplete_entity_profiles(
     })
 }
 
+/// 走っている取り直しに、中止を頼む。
+///
+/// `false` は「走っていなかった」を意味する。**すぐには止まらない** - 印を立てる
+/// だけで、今の一件が終わったところで降りる。
 #[tauri::command]
 pub fn cancel_entity_profile_repair() -> bool {
     if !ENTITY_PROFILE_REPAIR_RUNNING.load(Ordering::Acquire) {
@@ -2361,6 +2563,9 @@ fn recently_checked(value: Option<&str>) -> bool {
         < chrono::Duration::hours(24)
 }
 
+/// 取得元と向こうの ID から作品を引く。
+///
+/// 保存済みかどうかの判定に使う。無ければ `None` で、これは誤りではない。
 #[tauri::command]
 pub async fn db_get_download_by_source(
     app: tauri::AppHandle,
@@ -2371,6 +2576,9 @@ pub async fn db_get_download_by_source(
     state.db.get_download_by_source(&source, &source_id)
 }
 
+/// リーダーが最初に要るもの（題名、版、頁数、しおりの位置）を返す。
+///
+/// 本文は含まない。本文は `db_get_reader_content_page` で頁ごとに取る。
 #[tauri::command]
 pub async fn db_get_reader_metadata(
     app: tauri::AppHandle,
@@ -2379,6 +2587,13 @@ pub async fn db_get_reader_metadata(
     run_db_blocking(app, move |state| state.db.get_reader_metadata(download_id)).await
 }
 
+/// 本文を一頁分だけ返す。
+///
+/// **丸ごとは読まない。** 長編を一度に渡すと画面が止まるので、頁で切る。
+/// `version` を省くと今使っている版になる。
+///
+/// `includePlainText` を立てると、装飾を落とした文字列も付く。本文内検索に使う
+/// もので、**表示には要らない**（重くなる）。
 #[tauri::command]
 pub async fn db_get_reader_content_page(
     app: tauri::AppHandle,
@@ -2396,6 +2611,9 @@ pub async fn db_get_reader_content_page(
     .await
 }
 
+/// 目次を返す。`version` を省くと今使っている版。
+///
+/// 見出しの無い作品では空が返る。**誤りではない。**
 #[tauri::command]
 pub async fn db_get_reader_outline(
     app: tauri::AppHandle,
@@ -2408,6 +2626,10 @@ pub async fn db_get_reader_outline(
     .await
 }
 
+/// 本文の中を検索して、見つかった位置を返す。`limit` の既定は 50。
+///
+/// かな・カナ・全角半角の違いを吸収する。**頁をまたいで探す**ので、今開いている
+/// 頁だけを見ているわけではない。
 #[tauri::command]
 pub async fn db_search_reader_content(
     app: tauri::AppHandle,
@@ -2424,6 +2646,9 @@ pub async fn db_search_reader_content(
     .await
 }
 
+/// 編集画面が使う形で本文を返す。ブロックに割ってある。
+///
+/// 下書きがあれば下書き、無ければ取り込んだままの本文が返る。
 #[tauri::command]
 pub async fn db_get_editor_document(
     app: tauri::AppHandle,
@@ -2433,6 +2658,12 @@ pub async fn db_get_editor_document(
     state.db.get_editor_document(download_id)
 }
 
+/// 編集中の本文を下書きとして保存し、その版を返す。
+///
+/// `baseVersion` は**どの版を元に編集したか**である。その間に元が変わっていれば
+/// 弾かれるので、保存のたびに返り値の版を持ち直すこと。
+///
+/// 取り込んだままの本文は変わらない。
 #[tauri::command]
 pub async fn db_save_work_draft(
     app: tauri::AppHandle,
@@ -2452,11 +2683,17 @@ pub async fn db_save_work_draft(
     .await
 }
 
+/// 編集中の下書きを捨てる。
+///
+/// **取り込んだ本文は元から変わっていない。** 捨てるのは下書きだけである。
 #[tauri::command]
 pub async fn db_discard_work_draft(app: tauri::AppHandle, download_id: i64) -> Result<(), String> {
     run_library_write_blocking(app, move |state| state.db.discard_work_draft(download_id)).await
 }
 
+/// 編集した版を、読む・書き出すときの本文として使うようにする。
+///
+/// **取り込んだ本文は残る。** いつでも `db_deactivate_work_edit` で戻せる。
 #[tauri::command]
 pub async fn db_activate_work_edit(
     app: tauri::AppHandle,
@@ -2468,6 +2705,9 @@ pub async fn db_activate_work_edit(
     .await
 }
 
+/// 編集した版を使うのをやめ、取り込んだままの本文へ戻す。
+///
+/// **編集は消えない。** また `db_activate_work_edit` で戻せる。
 #[tauri::command]
 pub async fn db_deactivate_work_edit(
     app: tauri::AppHandle,
@@ -2476,6 +2716,12 @@ pub async fn db_deactivate_work_edit(
     run_library_write_blocking(app, move |state| state.db.deactivate_work_edit(download_id)).await
 }
 
+/// 手元の画像を、作品の資産として取り込む。
+///
+/// リンクや、ファイルでないものは `Err`。取得したものと同じ**大きさの上限**が
+/// 掛かる。
+///
+/// 取り込んだファイルは管理下へ複製されるので、元を消しても残る。
 #[tauri::command]
 pub async fn import_work_asset(
     app: tauri::AppHandle,

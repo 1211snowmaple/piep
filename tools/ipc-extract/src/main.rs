@@ -36,14 +36,17 @@ fn main() -> anyhow::Result<()> {
         registered: rust_scan::scan_registered(&lib_rs)?,
         events: rust_scan::scan_events(&src_dir, &repo)?,
         tables: sql_scan::scan_tables(&schema_rs, &repo)?,
+        modules: rust_scan::scan_command_modules(&commands_dir, &repo)?,
     };
 
     eprintln!(
-        "コマンド {} / 登録 {} / イベント送出 {} 箇所 / テーブル {}",
+        "コマンド {} / 登録 {} / イベント送出 {} 箇所 / テーブル {} / モジュール {}（説明つき {}）",
         contract.commands.len(),
         contract.registered.len(),
         contract.events.len(),
         contract.tables.len(),
+        contract.modules.len(),
+        contract.modules.iter().filter(|m| m.doc.is_some()).count(),
     );
 
     let json = serde_json::to_string_pretty(&contract)?;

@@ -1,3 +1,17 @@
+//! 更新監視のジョブ。
+//!
+//! 監視している作品の改稿、作者の新作、シリーズの続編を一つのジョブで確かめ、
+//! 選んだものだけを保存する。ジョブは一時停止・再開・中止ができ、失敗した
+//! 項目だけを後から追える。
+//!
+//! **制限に当たった項目は、同じジョブの中で待ち直す。** pixiv の 429 は数秒で
+//! 解けないことがある。`MAX_RATE_LIMIT_RETRIES` 回まで、待ち時間を
+//! `RATE_LIMIT_BACKOFF_BASE_MS` から `MAX_RATE_LIMIT_BACKOFF_MS` へ延ばし
+//! ながら試す。短い固定回数で失敗にすると、待てば通るものを落とす。
+//!
+//! ログは1ジョブ `MAX_UPDATE_JOB_LOGS` 行で頭打ちにし、超えた分は古い方から
+//! 落とす。長いジョブのログでライブラリを太らせない。
+
 use crate::database::{
     DownloadEntry, StartUpdateJobRequest, UpdateCandidateInput, UpdateCredentials, UpdateJobItem,
     UpdateJobItemInput, UpdateJobItemState, UpdateJobSnapshot, UpdateJobSummary,
@@ -787,6 +801,13 @@ async fn finish_update_job_cancellation(
     Ok(())
 }
 
+/// 更新の確認を始める。返るのは開始直後の姿。
+///
+/// 監視対象が一つも無ければ `Err`。**空のジョブを作らない**のは、進みも終わりも
+/// 無いものが一覧に並ぶと、失敗したのか終わったのか見分けが付かないためである。
+///
+/// 作ったあとは背景で走る。進み具合は `update-job-progress` で流れるので、
+/// 返り値を最終結果として扱わないこと。
 #[tauri::command]
 pub async fn start_update_job(
     app: tauri::AppHandle,
@@ -906,6 +927,11 @@ fn build_save_items(works: &[SaveJobWork]) -> Vec<UpdateJobItemInput> {
     items
 }
 
+/// 走っているジョブを止める。返るのは止めたあとの姿。
+///
+/// **今の項目が終わってから止まる。** 相手への問い合わせを途中で切らない。
+///
+/// 再開には `resume_update_job` を使い、鍵をもう一度渡す。
 #[tauri::command]
 pub async fn pause_update_job(
     app: tauri::AppHandle,
@@ -923,6 +949,13 @@ pub async fn pause_update_job(
     state.db.update_job_snapshot(&job_id)
 }
 
+/// 止めたジョブを続きから走らせる。
+///
+/// **鍵をもう一度渡す。** 止めている間に繋ぎ直されていることがあるので、
+/// 止めたときのものを持ち回さない。
+///
+/// `retryFailed` を立てると、失敗した項目もやり直す。既定は false で、まだ
+/// 手を付けていないものだけを進める。
 #[tauri::command]
 pub async fn resume_update_job(
     app: tauri::AppHandle,
@@ -945,6 +978,12 @@ pub async fn resume_update_job(
     state.db.update_job_snapshot(&job_id)
 }
 
+/// ジョブを中止する。返るのは要求したあとの姿。
+///
+/// **すぐ終わるとは限らない。** 走っている最中なら `canceling` になり、今の項目
+/// が切れてから `canceled` へ移る。待っているだけの状態なら、その場で終わる。
+///
+/// すでに終わっているジョブに呼んでも、何も起きない（誤りではない）。
 #[tauri::command]
 pub async fn cancel_update_job(
     app: tauri::AppHandle,
@@ -973,6 +1012,13 @@ pub async fn cancel_update_job(
     state.db.update_job_snapshot(&job_id)
 }
 
+/// ジョブの今の姿を返す。候補とログは頁で切って返す。
+///
+/// `candidateAfterId` は**その ID より後ろ**の候補、`logBeforeId` は**その ID より
+/// 前**のログを返す。候補は増える方向、ログは遡る方向に読むので、向きが逆で
+/// ある。取り違えると、いつまでも同じ頁が返る。
+///
+/// 読むだけ。常に呼ぶ必要はなく、変化は `update-job-progress` で流れてくる。
 #[tauri::command]
 pub async fn get_update_job(
     app: tauri::AppHandle,
@@ -999,12 +1045,24 @@ pub async fn list_update_job_item_states(
     state.db.list_update_job_item_states(&job_id)
 }
 
+/// ジョブの一覧を、要約だけで返す。
+///
+/// 候補もログも含まない。中身は `get_update_job` で取る。
 #[tauri::command]
 pub async fn list_update_jobs(app: tauri::AppHandle) -> Result<Vec<UpdateJobSummary>, String> {
     let state = app.state::<Arc<AppState>>();
     state.db.list_update_jobs()
 }
 
+/// 選んだ候補を保存キューへ積み、ジョブを動かし直す。
+///
+/// **一件も増えなかったときは何も起こさない**（すでに積んである候補を選び直した
+/// 場合がこれに当たる）。増えたときだけ状態を `queued` に戻して走らせる。
+///
+/// 積む間はライブラリの書き込みを止める。候補はバックアップに載るので、書き出し
+/// の最中に書き換えると、パートごとに別の世代が写ってしまう。
+///
+/// 鍵を省くと、保存の段で足りずに失敗する。
 #[tauri::command]
 pub async fn save_update_job_candidates(
     app: tauri::AppHandle,
@@ -1051,6 +1109,10 @@ fn snapshot_credentials_missing() -> UpdateCredentials {
     }
 }
 
+/// ジョブの記録を消す。
+///
+/// **候補や取り込んだ作品は消えない。** 消えるのはジョブそのものの記録だけで、
+/// 終わった仕事を一覧から片付けるためにある。
 #[tauri::command]
 pub async fn clear_update_job(app: tauri::AppHandle, job_id: String) -> Result<(), String> {
     let state = app.state::<Arc<AppState>>();
@@ -1084,6 +1146,10 @@ pub async fn dismiss_update_candidate(
     )
 }
 
+/// 「今は要らない」と断った候補の数を返す。
+///
+/// 断ったものは次から出てこないので、**この数を見せないと、戻す入口が無いことに
+/// 利用者が気づけない**。0 のときは入口ごと隠してよい。
 #[tauri::command]
 pub async fn count_dismissed_update_candidates(app: tauri::AppHandle) -> Result<i64, String> {
     let state = app.state::<Arc<AppState>>();
@@ -1114,6 +1180,12 @@ pub struct PendingRevisionPreview {
     pub text_length: i64,
 }
 
+/// 改稿の中身を、保存する前に取ってきて見せる。
+///
+/// **相手に問い合わせる。** ライブラリは変えないが、通信は起きるので、一覧の
+/// 行ごとに先回りで呼ばないこと。
+///
+/// 鍵が要る。取得元に繋がっていなければ `Err`。
 #[tauri::command]
 pub async fn preview_pending_revision(
     app: tauri::AppHandle,

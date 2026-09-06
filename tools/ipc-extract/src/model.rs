@@ -17,6 +17,22 @@ pub struct Contract {
     pub events: Vec<EventEmit>,
     /// `schema.rs` の `CREATE TABLE` から読み取ったテーブル。
     pub tables: Vec<Table>,
+    /// `commands/` の各モジュールと、そこに書かれた `//!`。
+    pub modules: Vec<Module>,
+}
+
+/// `commands/` の下のファイルひとつ。
+///
+/// 節の前書きをソース側に置けるようにするためにある。**説明の置き場が
+/// ソースにしかなければ、説明とコードが離れようがない。**
+#[derive(Serialize)]
+pub struct Module {
+    /// 拡張子を除いたファイル名。`Command.module` と対応する。
+    pub name: String,
+    /// リポジトリ相対のパス。
+    pub file: String,
+    /// `//!` の中身。空なら `None`。
+    pub doc: Option<String>,
 }
 
 /// フロントから `invoke("名前")` で呼べる関数ひとつ。

@@ -28,6 +28,12 @@ fn epub_export_canceled() -> bool {
     EPUB_EXPORT_CANCEL.load(std::sync::atomic::Ordering::Acquire)
 }
 
+/// 走っている書き出しに、中止を頼む。
+///
+/// **すぐには止まらない。** 印を立てるだけで、今の一件が終わったところで降りる。
+/// そこまでに出来た EPUB は残り、残りはキューに残る。
+///
+/// 走っていないときに呼んでも何も起きない（誤りではない）。
 #[tauri::command]
 pub async fn cancel_epub_export() -> Result<(), String> {
     EPUB_EXPORT_CANCEL.store(true, std::sync::atomic::Ordering::Release);
@@ -1002,6 +1008,17 @@ fn export_batch_item(
     }
 }
 
+/// 選んだ作品を、一件ずつ EPUB にして書き出す。
+///
+/// **一件の失敗で全体を止めない。** 返る `ExportBatchResult` に、成功数・失敗数と
+/// その ID・作れなかった ID・出来たファイルの並び・検証で見つかった問題が入る。
+/// 呼び出し側は `successCount` だけを見ないこと。
+///
+/// `writingMode` で縦書きと横書きを選ぶ。`compressOptions` を省くと画像は
+/// そのまま入る。
+///
+/// 進み具合は `epub-export-progress` で流れる。途中で `cancel_epub_export` を
+/// 呼ばれたら、そこまでに出来たものを結果に載せて終える。
 #[tauri::command]
 pub async fn export_epub_batch(
     app: tauri::AppHandle,
@@ -1115,11 +1132,17 @@ pub async fn export_epub_batch(
 // テンプレート管理コマンド
 // ============================================================
 
+/// 使えるテンプレートの一覧を返す。
+///
+/// 同梱のものと、利用者が作ったものの両方が並ぶ。
 #[tauri::command]
 pub async fn list_epub_templates(app: tauri::AppHandle) -> Result<Vec<TemplateInfo>, String> {
     get_template_manager(&app)?.list_templates()
 }
 
+/// テンプレートを構成するファイルの一覧を返す。中身は含まない。
+///
+/// 中身は `read_template_file` で一つずつ取る。
 #[tauri::command]
 pub async fn get_template_files(
     app: tauri::AppHandle,
@@ -1128,6 +1151,10 @@ pub async fn get_template_files(
     get_template_manager(&app)?.get_template_files(&template_name)
 }
 
+/// テンプレートのファイルを一つ、文字列として読む。
+///
+/// テンプレートに属さない名前を渡したら `Err`。**呼び出し側でパスを組み立てない
+/// こと** - 渡すのは `get_template_files` が返した名前だけにする。
 #[tauri::command]
 pub async fn read_template_file(
     app: tauri::AppHandle,
@@ -1137,6 +1164,15 @@ pub async fn read_template_file(
     get_template_manager(&app)?.read_template_file(&template_name, &filename)
 }
 
+/// テンプレートのファイルを一つ書き換える。
+///
+/// **同梱のテンプレートは変えられない**（`Err`）。直したいときは
+/// `create_epub_template` で写しを作ってから、そちらを編集する。
+///
+/// 書き込む前に構文を確かめる。壊れたテンプレートをそのまま保存させると、
+/// 書き出しのときになって初めて失敗し、原因が見えなくなるためである。だから
+/// **ここでの `Err` は「保存できなかった」ではなく「直すところがある」**を意味
+/// することがある。
 #[tauri::command]
 pub async fn save_template_file(
     app: tauri::AppHandle,
@@ -1147,6 +1183,12 @@ pub async fn save_template_file(
     get_template_manager(&app)?.save_template_file(&template_name, &filename, &content)
 }
 
+/// 写しのファイルを、同梱の中身へ戻す。返るのは戻したあとの中身。
+///
+/// 利用者の書き換えは失われる。**確かめてから呼ぶこと。**
+///
+/// 同梱のテンプレートそのものには呼べない（`Err`）。あれは変えられないので、
+/// 戻す対象が無い。
 #[tauri::command]
 pub async fn reset_template_file(
     app: tauri::AppHandle,
@@ -1156,6 +1198,13 @@ pub async fn reset_template_file(
     get_template_manager(&app)?.reset_template_file(&template_name, &filename)
 }
 
+/// テンプレートを新しく作る。
+///
+/// `baseTemplate` を渡すと、そのテンプレートを写して始める。同梱のものを直したい
+/// ときは、これで写しを作る。
+///
+/// 同じ名前がすでにあれば `Err`。**同梱と同じ名前も使えない** - 使えてしまうと、
+/// どちらが出るかが名前から分からなくなる。
 #[tauri::command]
 pub async fn create_epub_template(
     app: tauri::AppHandle,
@@ -1168,6 +1217,10 @@ pub async fn create_epub_template(
     )
 }
 
+/// 写しの名前を変える。
+///
+/// 同梱のテンプレートには呼べない。新しい名前が既存とぶつかる場合と、同梱と
+/// 同じ名前の場合も `Err`。
 #[tauri::command]
 pub async fn rename_epub_template(
     app: tauri::AppHandle,
@@ -1177,6 +1230,9 @@ pub async fn rename_epub_template(
     get_template_manager(&app)?.rename_template(&template_name, &next_name)
 }
 
+/// 写しのテンプレートを消す。
+///
+/// **同梱のものは消せない**（`Err`）。
 #[tauri::command]
 pub async fn delete_epub_template(
     app: tauri::AppHandle,
@@ -1185,6 +1241,12 @@ pub async fn delete_epub_template(
     get_template_manager(&app)?.delete_template(&template_name)
 }
 
+/// テンプレートの設定を保存し、保存後の姿を返す。
+///
+/// 返り値は送った内容と同じとは限らない。**保存の前に丸められる**ので、画面には
+/// 送った値ではなく返り値のほうを反映すること。
+///
+/// 同梱のテンプレートには呼べない（`Err`）。
 #[tauri::command]
 pub async fn save_template_settings(
     app: tauri::AppHandle,
@@ -1256,6 +1318,12 @@ pub struct DataField {
     pub available: bool,
 }
 
+/// テンプレートの仕上がりを、書き出さずに見せる。
+///
+/// `downloadId` を渡すとその作品で、省くと**同梱の見本**で組む。テンプレートを
+/// 直しながら確かめる用途なので、ライブラリが空でも使える。
+///
+/// 読んでいる間、ライブラリの姿を固定する（書き換えの途中を写さない）。
 #[tauri::command]
 pub async fn preview_epub_template(
     app: tauri::AppHandle,

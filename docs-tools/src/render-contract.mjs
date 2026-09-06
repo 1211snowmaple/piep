@@ -181,32 +181,72 @@ function ratchet(contract, baselinePath) {
 
 // ---------------------------------------------------------------- 整形
 
+/**
+ * 地の文に使う。山括弧を逃がすが、バッククォートの中は触らない。
+ *
+ * VitePress はこの Markdown を Vue のテンプレートとして通すので、`Vec<T>` の
+ * ような表記が閉じタグの無い要素と見なされてビルドを落とす。ただしコード片の
+ * 中まで実体参照にすると、読む人に `&lt;` がそのまま見えてしまう。だから
+ * バッククォートで割ってから、外側だけ逃がす。
+ */
+const prose = (s) =>
+  (s ?? "")
+    .split(/(`[^`]*`)/)
+    .map((part, i) => (i % 2 ? part : part.replace(/</g, "&lt;").replace(/>/g, "&gt;")))
+    .join("");
+
 function renderIpc(contract, frontend) {
   const invokedBy = new Map();
   for (const i of frontend.invocations) {
     if (!invokedBy.has(i.name)) invokedBy.set(i.name, []);
     invokedBy.get(i.name).push(i);
   }
-  const documented = contract.commands.filter((c) => c.doc).length;
+
+  // 呼び出し側 (TS) の JSDoc。Rust に `///` が無くても、ここに説明が書かれて
+  // いることがある。**説明が二か所にあり得るなら、両方から拾う。** 拾うのは
+  // 試験からの呼び出しを除いた最初の一件。
+  const callerDoc = new Map();
+  for (const i of frontend.invocations) {
+    if (i.doc && !i.isTest && !callerDoc.has(i.name)) callerDoc.set(i.name, i.doc);
+  }
+
+  const moduleDoc = new Map((contract.modules ?? []).map((m) => [m.name, m.doc]));
+  const docOf = (c) =>
+    c.doc
+      ? { text: c.doc, from: "rust" }
+      : callerDoc.has(c.name)
+        ? { text: callerDoc.get(c.name), from: "front" }
+        : null;
+
+  const withDoc = contract.commands.filter((c) => docOf(c)).length;
+  const rustDoc = contract.commands.filter((c) => c.doc).length;
   const modules = [...new Set(contract.commands.map((c) => c.module))].sort();
 
   const out = [];
+  // 節の見出しだけを右の目次に出す。コマンドを全部並べると159行になる。
+  out.push("---");
+  out.push("outline: 2");
+  out.push("---");
+  out.push("");
   out.push("# IPC コマンド契約");
   out.push("");
   out.push("> この頁はソースから生成している。直接編集しても次の生成で消える。");
-  out.push("> 内容を変えるには、Rust 側のコマンドか、その `///` を直す。");
+  out.push("> **説明を増やすには、Rust 側のコマンドに `///` を書く。** 節の前書きは、");
+  out.push("> そのファイルの `//!` がそのまま出る。");
   out.push("");
   out.push(
-    `フロントは \`invoke("名前")\` で Rust の関数を呼ぶ。名前はただの文字列で、` +
-      `型検査は効かない。この頁はその名前の一覧であり、両側の食い違いを検査した結果でもある。`,
+    'フロントは `invoke("名前")` で Rust の関数を呼ぶ。名前はただの文字列で、' +
+      "型検査は効かない。この頁はその名前の一覧であり、両側の食い違いを検査した結果でもある。",
   );
   out.push("");
   out.push("| | 件数 |");
   out.push("| --- | ---: |");
-  out.push(`| 定義されたコマンド | ${contract.commands.length} |`);
-  out.push(`| \`generate_handler!\` に登録 | ${contract.registered.length} |`);
-  out.push(`| フロントから呼ばれている | ${invokedBy.size} |`);
-  out.push(`| 説明 (\`///\`) がある | ${documented} |`);
+  out.push("| 定義されたコマンド | " + contract.commands.length + " |");
+  out.push("| `generate_handler!` に登録 | " + contract.registered.length + " |");
+  out.push("| フロントから呼ばれている | " + invokedBy.size + " |");
+  out.push("| 説明がある | " + withDoc + " |");
+  out.push("| うち Rust の `///` | " + rustDoc + " |");
+  out.push("| うち呼び出し側の JSDoc だけ | " + (withDoc - rustDoc) + " |");
   out.push("");
   out.push("引数のうち `AppHandle` や `State` は Tauri が差し込むので、フロントからは渡さない。");
   out.push("渡す名前は Tauri 2 が camelCase へ変換したものである（`source_id` → `sourceId`）。");
@@ -214,31 +254,83 @@ function renderIpc(contract, frontend) {
 
   for (const mod of modules) {
     const cmds = contract.commands.filter((c) => c.module === mod);
-    out.push(`## ${mod}`);
+    const documented = cmds.filter((c) => docOf(c));
+    const bare = cmds.filter((c) => !docOf(c));
+
+    out.push("## " + mod);
     out.push("");
-    out.push(`\`src-tauri/src/commands/${mod}.rs\` — ${cmds.length} 件`);
+    out.push(
+      "`src-tauri/src/commands/" + mod + ".rs` — " + cmds.length + " 件のうち " +
+        documented.length + " 件に説明がある",
+    );
     out.push("");
-    out.push("| コマンド | 渡す引数 | 返り値 | 呼び出し元 | 説明 |");
-    out.push("| --- | --- | --- | --- | --- |");
-    for (const c of cmds) {
+
+    const intro = moduleDoc.get(mod);
+    if (intro) {
+      out.push(prose(intro));
+      out.push("");
+    }
+
+    for (const c of documented) {
+      const doc = docOf(c);
       const args = c.args.filter((a) => !a.injected);
-      const argText = args.length
-        ? args.map((a) => `${code(a.js_name)}: ${code(a.ty)}`).join("<br>")
-        : "—";
+      const sig = args.length
+        ? args.map((a) => code(a.js_name) + ": " + code(a.ty)).join(" ・ ")
+        : "引数なし";
       const ret = c.returns.ok ? code(c.returns.ok) : code(c.returns.raw);
       const callers = invokedBy.get(c.name) ?? [];
-      const callerText = callers.length
-        ? callers.map((s) => `${s.caller ? code(s.caller) : ""} ${src(s.file, s.line)}`).join("<br>")
-        : "**なし**";
-      out.push(
-        `| **${c.name}**<br>${src(c.file, c.line)} | ${argText} | ${ret} | ${callerText} | ${cell(c.doc) || "—"} |`,
-      );
+
+      out.push("### " + c.name);
+      out.push("");
+      out.push(prose(sig) + " → " + prose(ret));
+      out.push("");
+      out.push(prose(doc.text));
+      out.push("");
+      const where = ["定義 " + src(c.file, c.line)];
+      if (callers.length) {
+        where.push(
+          "呼び出し " +
+            callers
+              .map((s) => (s.caller ? code(s.caller) : "") + " " + src(s.file, s.line))
+              .join("、"),
+        );
+      } else {
+        where.push("**呼び出し元なし**");
+      }
+      if (doc.from === "front") {
+        where.push("_説明は呼び出し側の JSDoc から_");
+      }
+      out.push(where.join(" ・ "));
+      out.push("");
     }
-    out.push("");
+
+    if (bare.length) {
+      out.push("### 説明のまだ無いもの（" + bare.length + "）");
+      out.push("");
+      out.push("| コマンド | 渡す引数 | 返り値 | 呼び出し元 |");
+      out.push("| --- | --- | --- | --- |");
+      for (const c of bare) {
+        const args = c.args.filter((a) => !a.injected);
+        const argText = args.length
+          ? args.map((a) => code(a.js_name) + ": " + code(a.ty)).join("<br>")
+          : "—";
+        const ret = c.returns.ok ? code(c.returns.ok) : code(c.returns.raw);
+        const callers = invokedBy.get(c.name) ?? [];
+        const callerText = callers.length
+          ? callers
+              .map((s) => (s.caller ? code(s.caller) : "") + " " + src(s.file, s.line))
+              .join("<br>")
+          : "**なし**";
+        out.push(
+          "| **" + c.name + "**<br>" + src(c.file, c.line) + " | " + cell(argText) +
+            " | " + cell(ret) + " | " + callerText + " |",
+        );
+      }
+      out.push("");
+    }
   }
   return out.join("\n") + "\n";
 }
-
 function renderEvents(contract, frontend) {
   const out = [];
   out.push("# イベント契約");

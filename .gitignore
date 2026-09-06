@@ -57,8 +57,11 @@ scratch/
 
 # ドキュメント生成物。ソースから再生成できるので追跡しない。公開先は GitHub Pages。
 docs-tools/site/index.md
+docs-tools/site/guide/
 docs-tools/site/policy/
+docs-tools/site/plan/
 docs-tools/site/reference/
+docs-tools/site/screenshots/
 docs-tools/site/public/
 docs-tools/site/.vitepress/cache/
 docs-tools/site/.vitepress/dist/
