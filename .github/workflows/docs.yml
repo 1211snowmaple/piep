@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   pull_request:
   push:
-    branches: [develop, main]
+    branches: [main]
 
 # 同時に走らせない。Pages への配置は最後の1本だけが意味を持つ。
 concurrency:
