@@ -1,0 +1,55 @@
+:root {
+  --motion-duration: 180ms;
+  --motion-ease: cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* Navigation stays in place while only its associated content changes. */
+.motion-tabs { position: relative; }
+.motion-tabs[data-indicator-ready] .mantine-Tabs-tab[data-active] { border-bottom-color: transparent; }
+.motion-tabs__indicator {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 2px;
+  background: var(--tabs-color);
+  pointer-events: none;
+  /* No long tail. An underline that covers most of the distance quickly and
+     then creeps the last few pixels reads as the page correcting itself. */
+  transition: transform var(--motion-duration) var(--motion-ease), width var(--motion-duration) var(--motion-ease);
+}
+
+:root[data-content-transition] { view-transition-name: none; }
+:root[data-content-transition]::view-transition { pointer-events: none; }
+
+/* The region itself holds still; only what is inside it is replaced. Nothing
+   is scaled either - the snapshots are drawn at their own size from the top
+   left, so glyphs keep theirs. Outgoing text clears before incoming text
+   becomes readable, so the two are never legible at once. */
+:root[data-content-transition]::view-transition-group(piep-content) { animation-name: none; }
+:root[data-content-transition]::view-transition-old(piep-content),
+:root[data-content-transition]::view-transition-new(piep-content) {
+  width: 100%;
+  height: 100%;
+  object-fit: none;
+  object-position: left top;
+  mix-blend-mode: normal;
+}
+:root[data-content-transition]::view-transition-old(piep-content) { animation: content-out 80ms ease-in both; }
+:root[data-content-transition]::view-transition-new(piep-content) { animation: content-in 160ms ease-out 70ms both; }
+
+@keyframes content-out { to { opacity: 0; } }
+@keyframes content-in { from { opacity: 0; } to { opacity: 1; } }
+
+/* A completed route arrives quietly; typing and background refreshes do not
+   replay this animation. The height is held from the start, so a load that
+   answers quickly resolves without ever flashing a "loading" notice. */
+.page { animation: content-in 160ms ease-out; }
+.async-loader { animation: content-in 120ms ease-out 140ms backwards; }
+
+@media (prefers-reduced-motion: reduce) {
+  .motion-tabs__indicator { transition: none; }
+  .page, .async-loader { animation: none; }
+  :root[data-content-transition]::view-transition-group(*),
+  :root[data-content-transition]::view-transition-old(*),
+  :root[data-content-transition]::view-transition-new(*) { animation: none !important; }
+}

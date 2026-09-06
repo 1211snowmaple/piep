@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { MotionTabs as Tabs } from "@/components/MotionTabs";
 import {
   ActionIcon,
   Alert,
@@ -19,7 +20,6 @@ import {
   SimpleGrid,
   Stack,
   Switch,
-  Tabs,
   Text,
   ThemeIcon,
   Title,

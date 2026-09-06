@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { transitionContent } from "@/lib/contentTransition";
 import {
   Accordion,
   ActionIcon,
@@ -367,7 +368,9 @@ export default function OperationsPage() {
         <SegmentedControl
           aria-label="操作履歴の絞り込み"
           value={filter}
-          onChange={(value) => setFilter(value as Filter)}
+          onChange={(value) => transitionContent(() => setFilter(value as Filter), {
+            content: () => document.querySelector<HTMLElement>(".operations-results"),
+          })}
           data={[
             { value: "all", label: "すべて" },
             { value: "active", label: "実行中" },
@@ -378,7 +381,7 @@ export default function OperationsPage() {
           新しい順
         </Text>
       </Group>
-      <Stack gap="md" mt="md">
+      <Stack gap="md" mt="md" className="operations-results">
         {visibleActivities.map((activity) => {
           if (activity.type === "local") {
             return <OperationCard key={`local-${activity.job.id}`} job={activity.job} />;

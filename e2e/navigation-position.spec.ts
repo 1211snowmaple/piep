@@ -220,7 +220,12 @@ test("the toolbar controls sit on one line, not stepped", async ({ page }, testI
   // left the whole row after it sitting a few pixels high against it.
   const centres = await page.evaluate(() => {
     const row = document.querySelector(".library-toolbar .mantine-Group-root") as HTMLElement;
-    return [...row.children]
+    // タブごとに意味を持たない道具は、消さずに `display: contents` の包みへ入れて
+    // 隠す。包みは箱を持たないので、行の子をそのまま測ると中の押しボタンを丸ごと
+    // 見落とす。包みは開いてから測る。
+    const controls = [...row.children].flatMap((child) =>
+      getComputedStyle(child).display === "contents" ? [...child.children] : [child]);
+    return controls
       .map((child) => child.getBoundingClientRect())
       .filter((rect) => rect.height > 0)
       .map((rect) => Math.round(rect.top + rect.height / 2));

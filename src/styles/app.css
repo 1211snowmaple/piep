@@ -245,13 +245,12 @@ select {
 }
 
 .surface--interactive {
-  transition: transform 150ms ease, border-color 150ms ease, box-shadow 150ms ease;
+  transition: border-color 150ms ease, box-shadow 150ms ease;
 }
 
 .surface--interactive:hover {
   border-color: light-dark(#cdd8e5, #384352);
   box-shadow: 0 10px 32px rgb(28 53 82 / 9%);
-  transform: translateY(-1px);
 }
 
 /* One badge shape for every provider. pixiv used a rounded square and FANBOX a
@@ -1145,6 +1144,10 @@ select {
 }
 
 .library-page { padding-top: 14px; }
+
+.library-results { display: flow-root; }
+.library-toolbar__slot { display: contents; }
+.library-toolbar__slot[data-inactive] { visibility: hidden; pointer-events: none; }
 
 .library-grid {
   display: grid;

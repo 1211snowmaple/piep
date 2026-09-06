@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { transitionContent } from "@/lib/contentTransition";
 import { ActionIcon, Alert, Badge, Button, Checkbox, Collapse, Group, Loader, SegmentedControl, Stack, Text, TextInput, Tooltip } from "@mantine/core";
 import { modals } from "@mantine/modals";
 import { notifications } from "@mantine/notifications";
@@ -139,7 +140,7 @@ export function SuggestionInbox({ sweeping, savedSearchIdeas, note, onBusyChange
   return (
     <div className="discovery-inbox" aria-busy={sweeping || undefined}>
       <div className="discovery-filters">
-        <SegmentedControl aria-label="まとまりの種類" value={track} disabled={busy} onChange={(value) => { setTrack(value as Track); setShowDeferred(false); setMobileDetail(false); }} data={[{ value: "sequence", label: `続き物 ${formatNumber(counts.sequence)}` }, { value: "theme", label: `テーマ ${formatNumber(counts.theme)}` }]} size="sm" />
+        <SegmentedControl aria-label="まとまりの種類" value={track} disabled={busy} onChange={(value) => transitionContent(() => { setTrack(value as Track); setShowDeferred(false); setMobileDetail(false); }, { content: () => document.querySelector<HTMLElement>(".discovery-workspace, .discovery-empty") })} data={[{ value: "sequence", label: `続き物 ${formatNumber(counts.sequence)}` }, { value: "theme", label: `テーマ ${formatNumber(counts.theme)}` }]} size="sm" />
         <Text size="xs" c="dimmed">{track === "sequence" ? "シリーズの内側や、保存元をまたぐ続き物も確認できます。" : "読む順を持たない、題材の近い作品のまとまりです。"}</Text>
       </div>
       {sweeping && <div className="discovery-notice" role="status"><Loader size="xs" /><Text size="sm">棚を調べています。確認中の候補はそのまま残ります。</Text></div>}

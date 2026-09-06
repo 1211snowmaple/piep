@@ -23,7 +23,6 @@ import {
   Select,
   SimpleGrid,
   Stack,
-  Tabs,
   Text,
   TextInput,
   Tooltip,
@@ -45,6 +44,7 @@ import { demoFacets, searchDemoWorks } from "@/mocks/demoData";
 import { errorMessage, formatNumber } from "@/lib/format";
 import { scrollViewportToTop } from "@/lib/scroll";
 import { VirtualizedWorkList } from "@/features/library/VirtualizedWorkList";
+import { MotionTabs as Tabs } from "@/components/MotionTabs";
 import { parseViewMode, useViewMode } from "@/lib/viewMode";
 import { entityKey, VirtualizedEntityGrid } from "@/features/library/VirtualizedEntityGrid";
 import { exportEntityZip } from "@/services/archiveApi";
@@ -1320,13 +1320,13 @@ export default function LibraryPage() {
               pixels high against it. */}
           <Group wrap="nowrap" align="center">
             <Box className="library-toolbar__search"><LibrarySearch value={query} onChange={onQueryChange} runtime={runtime} /></Box>
-            {tab !== "collections" && (
+            <span className="library-toolbar__slot" data-inactive={tab === "collections" || undefined} inert={tab === "collections" || undefined} aria-hidden={tab === "collections" || undefined}>
               <Tooltip label="詳細フィルター">
                 <Indicator label={activeFilterCount} size={16} disabled={!activeFilterCount}>
                   <Button variant="default" leftSection={<Icons.filter size={IconSize.action} />} onClick={filterDrawer.open}>絞り込み</Button>
                 </Indicator>
               </Tooltip>
-            )}
+            </span>
             {/* 場所は変えず、中身だけ差し替える。タブを切り替えるたびに
                 ツールバーの部品が動くのが、いちばん目に障る。 */}
             <Select
@@ -1341,16 +1341,18 @@ export default function LibraryPage() {
               className="library-toolbar__sort"
               aria-label="並び順"
             />
-            {/* 表示形式と保存した検索は、作品・作者・シリーズの道具。
-                コレクションでは意味を持たないので出さない。高さは変わらない。 */}
-            {tab !== "collections" && <SegmentedControl
+            {/* 表示形式が効くのは作品の一覧だけで、作者とシリーズの一覧は押しても
+                形が変わらない。保存した検索はコレクションでは意味を持たない。
+                どちらも消さずに隠す。消すと残りの部品が横へ寄り、タブを移るたび
+                同じ押しボタンを目で探し直すことになる。 */}
+            <span className="library-toolbar__slot" data-inactive={tab !== "works" || undefined} inert={tab !== "works" || undefined} aria-hidden={tab !== "works" || undefined}><SegmentedControl
               className="view-mode-switch"
               value={view}
               onChange={(value) => setView(parseViewMode(value))}
               data={[{ value: "gallery", label: <Tooltip label="ギャラリー"><Icons.viewGrid size={IconSize.menu} aria-label="ギャラリー表示" /></Tooltip> }, { value: "compact", label: <Tooltip label="リスト"><Icons.viewList size={IconSize.menu} aria-label="リスト表示" /></Tooltip> }]}
               aria-label="表示形式"
-            />}
-            {tab !== "collections" && <Menu position="bottom-end" width={280} withinPortal>
+            /></span>
+            <span className="library-toolbar__slot" data-inactive={tab === "collections" || undefined} inert={tab === "collections" || undefined} aria-hidden={tab === "collections" || undefined}><Menu position="bottom-end" width={280} withinPortal>
               <Menu.Target><Tooltip label="保存した検索"><ActionIcon variant="default" size={36} aria-label="保存した検索"><Icons.saveSearch size={IconSize.action} /></ActionIcon></Tooltip></Menu.Target>
               <Menu.Dropdown>
                 <Menu.Item leftSection={<Icons.saveSearch size={IconSize.menu} />} onClick={saveCurrentSearch}>現在の検索条件を保存</Menu.Item>
@@ -1368,7 +1370,7 @@ export default function LibraryPage() {
                   </Menu.Item>
                 </>}
               </Menu.Dropdown>
-            </Menu>}
+            </Menu></span>
           </Group>
           {activeFilterCount > 0 && (
             <Group gap="xs">
@@ -1385,7 +1387,7 @@ export default function LibraryPage() {
         </Stack>
       </Paper>
 
-      <Tabs value={tab} onChange={(value) => setTab((value as LibraryTab) ?? "works")} mt="lg">
+      <Tabs contentSelector=".library-results" value={tab} onChange={(value) => setTab((value as LibraryTab) ?? "works")} mt="lg">
         <Tabs.List>
           <Tabs.Tab value="works" leftSection={<Icons.epubAdd size={IconSize.menu} />}>作品</Tabs.Tab>
           <Tabs.Tab value="people" leftSection={<Icons.people size={IconSize.menu} />}>作者・クリエイター</Tabs.Tab>
@@ -1394,114 +1396,116 @@ export default function LibraryPage() {
         </Tabs.List>
       </Tabs>
 
-      {/* 件数の行はタブで消さない。消えると下がもう一段跳ねる。
-          束のタブだけは例外で、同じ位置に同じ高さの行（件数・探す・作る）を
-          束の側が出す。消すのではなく差し替えるので、跳ねは起きない。 */}
-      {tab !== "collections" && <Group justify="space-between" my="md" gap="xs" wrap="nowrap">
-        <Group gap={8} wrap="nowrap" miw={0}>
-          {/* 読み込み方は件数の**手前**に置く。
-          //
-          // 件数は伸び縮みする。自動で読み進めると「（20件を表示中）」の
-          // 桁が増え、最後まで読むと括弧ごと消える。後ろに置いた押しボタンは
-          // そのぶん横へ動く — 実測で、桁が増えるたび7〜11px、括弧が消える
-          // 瞬間に128px。押そうとした先が指の下から逃げる。
-          //
-          // 幅の変わらないものを先に置けば、動くのは右側の文字だけになる。
-          // コレクションの中身では既にそうしてある。 */}
-          <PagingModeToggle scope={pagingScope} />
-          <Text size="sm" c="dimmed" style={{ whiteSpace: "nowrap" }}>{tab === "works"
-            ? `${formatNumber(totalCount ?? loadedItems.length)}件${totalCount !== null && loadedItems.length < totalCount ? `（${formatNumber(loadedItems.length)}件を表示中）` : ""}`
-            : entityTotal.data !== undefined
-              ? `${formatNumber(entityTotal.data)}件`
-              : `${formatNumber(entityItems.length)}件${entities.hasNextPage ? "以上" : ""}`}</Text>
-          {tab === "works" && searchText && searchMeta?.explanations?.length
-            ? <SearchInterpretation meta={searchMeta} />
-            : null}
-        </Group>
-        {!selectionMode && <Button size="xs" variant="subtle" color="gray" leftSection={<Icons.confirm size={IconSize.menu} />} onClick={() => setSelectionMode(true)}>複数選択</Button>}
-      </Group>}
+      <div className="library-results">
+        {/* 件数の行はタブで消さない。消えると下がもう一段跳ねる。
+            束のタブだけは例外で、同じ位置に同じ高さの行（件数・探す・作る）を
+            束の側が出す。消すのではなく差し替えるので、跳ねは起きない。 */}
+        {tab !== "collections" && <Group justify="space-between" my="md" gap="xs" wrap="nowrap">
+          <Group gap={8} wrap="nowrap" miw={0}>
+            {/* 読み込み方は件数の**手前**に置く。
+            //
+            // 件数は伸び縮みする。自動で読み進めると「（20件を表示中）」の
+            // 桁が増え、最後まで読むと括弧ごと消える。後ろに置いた押しボタンは
+            // そのぶん横へ動く — 実測で、桁が増えるたび7〜11px、括弧が消える
+            // 瞬間に128px。押そうとした先が指の下から逃げる。
+            //
+            // 幅の変わらないものを先に置けば、動くのは右側の文字だけになる。
+            // コレクションの中身では既にそうしてある。 */}
+            <PagingModeToggle scope={pagingScope} />
+            <Text size="sm" c="dimmed" style={{ whiteSpace: "nowrap" }}>{tab === "works"
+              ? `${formatNumber(totalCount ?? loadedItems.length)}件${totalCount !== null && loadedItems.length < totalCount ? `（${formatNumber(loadedItems.length)}件を表示中）` : ""}`
+              : entityTotal.data !== undefined
+                ? `${formatNumber(entityTotal.data)}件`
+                : `${formatNumber(entityItems.length)}件${entities.hasNextPage ? "以上" : ""}`}</Text>
+            {tab === "works" && searchText && searchMeta?.explanations?.length
+              ? <SearchInterpretation meta={searchMeta} />
+              : null}
+          </Group>
+          {!selectionMode && <Button size="xs" variant="subtle" color="gray" leftSection={<Icons.confirm size={IconSize.menu} />} onClick={() => setSelectionMode(true)}>複数選択</Button>}
+        </Group>}
 
-      {tab === "collections" ? <CollectionsPanel query={searchText} sortBy={collectionSortBy} /> : <>
+        {tab === "collections" ? <CollectionsPanel query={searchText} sortBy={collectionSortBy} /> : <>
 
-      {pageLimitNotice && (
-        <Alert color="yellow" title="ページ番号を調整しました" role="status" mb="md">
-          負荷を抑えるため、直接開けるのは{maxDirectPage}ページ目までです。それより先は「自動」で続きを読み込むか、検索・絞り込みで対象を狭めてください。
-        </Alert>
-      )}
-
-      {/* 「作成中」と「そもそも作っていない」を、同じ一文で済ませない。
-          待てば終わるのか、自分で始めないと何も起きないのかは、利用者が
-          次に取る行動を変える。 */}
-      {semanticIntent && searchMeta?.semanticIndexComplete === false && (
-        semanticCapability.data?.semanticEnabled === false ? (
-          <Alert color="yellow" title="作品単位の意味検索が無効です" role="status" mb="md">
-            いまは字面の一致だけで探しています。設定の「作品単位の意味検索」を有効にすると、
-            意味の近さでも探せるようになります。
+        {pageLimitNotice && (
+          <Alert color="yellow" title="ページ番号を調整しました" role="status" mb="md">
+            負荷を抑えるため、直接開けるのは{maxDirectPage}ページ目までです。それより先は「自動」で続きを読み込むか、検索・絞り込みで対象を狭めてください。
           </Alert>
-        ) : (
-          <Alert color="yellow" title="意味検索の索引を作成中です" role="status" mb="md">
-            まだ作品の一部だけが対象です。
-            {semanticCapability.data
-              ? `${formatNumber(semanticCapability.data.semanticIndexedDownloads)} / ${formatNumber(semanticCapability.data.totalDownloads)}作品まで進んでいます。`
-              : ""}
-            設定の「作品単位の意味検索」で構築状況を確認できます。
-          </Alert>
-        )
-      )}
+        )}
 
-      {tab === "works" ? (
-        works.isLoading ? <LoadingState label="ライブラリを検索しています" /> : works.error ? <ErrorState error={works.error} retry={() => works.refetch()} /> : loadedItems.length ? (
+        {/* 「作成中」と「そもそも作っていない」を、同じ一文で済ませない。
+            待てば終わるのか、自分で始めないと何も起きないのかは、利用者が
+            次に取る行動を変える。 */}
+        {semanticIntent && searchMeta?.semanticIndexComplete === false && (
+          semanticCapability.data?.semanticEnabled === false ? (
+            <Alert color="yellow" title="作品単位の意味検索が無効です" role="status" mb="md">
+              いまは字面の一致だけで探しています。設定の「作品単位の意味検索」を有効にすると、
+              意味の近さでも探せるようになります。
+            </Alert>
+          ) : (
+            <Alert color="yellow" title="意味検索の索引を作成中です" role="status" mb="md">
+              まだ作品の一部だけが対象です。
+              {semanticCapability.data
+                ? `${formatNumber(semanticCapability.data.semanticIndexedDownloads)} / ${formatNumber(semanticCapability.data.totalDownloads)}作品まで進んでいます。`
+                : ""}
+              設定の「作品単位の意味検索」で構築状況を確認できます。
+            </Alert>
+          )
+        )}
+
+        {tab === "works" ? (
+          works.isLoading ? <LoadingState label="ライブラリを検索しています" /> : works.error ? <ErrorState error={works.error} retry={() => works.refetch()} /> : loadedItems.length ? (
+            <>
+              <VirtualizedWorkList items={loadedItems} view={view} selectionMode={selectionMode} selected={selectedSet} revisedIds={pendingRevisionIds} onSelect={toggleSelected} onToggleFavorite={toggleFavorite} onToggleWatch={toggleWatch} />
+              <ListPager
+                scope={pagingScope}
+                hasNext={Boolean(works.hasNextPage) && !worksAtCacheLimit}
+                loading={works.isFetchingNextPage || works.isFetching}
+                loaded={loadedItems.length}
+                total={totalCount}
+                onLoad={() => works.fetchNextPage()}
+                endMessage={worksAtCacheLimit
+                  ? sortBy === "relevance"
+                    ? `メモリ使用量を抑えるため${formatNumber(loadedItems.length)}件で停止しました。検索条件を絞ると続きへ到達できます。`
+                    : `メモリ使用量を抑えるため${formatNumber(loadedItems.length)}件で停止しました。「ページ番号」に切り替えると続きへ移動できます。`
+                  : undefined}
+                pages={{
+                  current: pageParam,
+                  size: pageSize,
+                  onGoTo: setPage,
+                  maxDirectPage,
+                  limitNotice: pageLimitNotice,
+                  unavailableReason: sortBy === "relevance"
+                    ? "関連度順はページ番号で移動できません。並び順を選ぶとページ番号が使えます。"
+                    : null,
+                }}
+              />
+            </>
+          ) : <EmptyState icon={Icons.search} title="一致する作品がありません" description="検索語やフィルターを減らすか、新しい作品を保存してください。" action={<Button variant="light" onClick={() => { onQueryChange(""); writeUrl({ q: "", filters: initialFilters }); }}>検索をリセット</Button>} />
+        ) : entities.isLoading ? <LoadingState /> : entities.error ? <ErrorState error={entities.error} retry={() => entities.refetch()} /> : entityItems.length ? (
           <>
-            <VirtualizedWorkList items={loadedItems} view={view} selectionMode={selectionMode} selected={selectedSet} revisedIds={pendingRevisionIds} onSelect={toggleSelected} onToggleFavorite={toggleFavorite} onToggleWatch={toggleWatch} />
+            <VirtualizedEntityGrid
+              items={entityItems}
+              kind={entityKind}
+              selectionMode={selectionMode}
+              selected={selectedEntityKeys}
+              onSelect={toggleEntity}
+              watchState={entityWatchState}
+              onToggleWatch={toggleEntityWatch}
+            />
             <ListPager
               scope={pagingScope}
-              hasNext={Boolean(works.hasNextPage) && !worksAtCacheLimit}
-              loading={works.isFetchingNextPage || works.isFetching}
-              loaded={loadedItems.length}
-              total={totalCount}
-              onLoad={() => works.fetchNextPage()}
-              endMessage={worksAtCacheLimit
-                ? sortBy === "relevance"
-                  ? `メモリ使用量を抑えるため${formatNumber(loadedItems.length)}件で停止しました。検索条件を絞ると続きへ到達できます。`
-                  : `メモリ使用量を抑えるため${formatNumber(loadedItems.length)}件で停止しました。「ページ番号」に切り替えると続きへ移動できます。`
-                : undefined}
-              pages={{
-                current: pageParam,
-                size: pageSize,
-                onGoTo: setPage,
-                maxDirectPage,
-                limitNotice: pageLimitNotice,
-                unavailableReason: sortBy === "relevance"
-                  ? "関連度順はページ番号で移動できません。並び順を選ぶとページ番号が使えます。"
-                  : null,
-              }}
+              hasNext={Boolean(entities.hasNextPage) && !entitiesAtCacheLimit}
+              loading={entities.isFetchingNextPage || entities.isFetching}
+              loaded={entityItems.length}
+              total={entityTotal.data ?? null}
+              onLoad={() => entities.fetchNextPage()}
+              endMessage={entitiesAtCacheLimit ? `メモリ使用量を抑えるため${formatNumber(entityItems.length)}件で停止しました。「ページ番号」に切り替えると続きへ移動できます。` : undefined}
+              pages={{ current: pageParam, size: pageSize, onGoTo: setPage, maxDirectPage, limitNotice: pageLimitNotice }}
             />
           </>
-        ) : <EmptyState icon={Icons.search} title="一致する作品がありません" description="検索語やフィルターを減らすか、新しい作品を保存してください。" action={<Button variant="light" onClick={() => { onQueryChange(""); writeUrl({ q: "", filters: initialFilters }); }}>検索をリセット</Button>} />
-      ) : entities.isLoading ? <LoadingState /> : entities.error ? <ErrorState error={entities.error} retry={() => entities.refetch()} /> : entityItems.length ? (
-        <>
-          <VirtualizedEntityGrid
-            items={entityItems}
-            kind={entityKind}
-            selectionMode={selectionMode}
-            selected={selectedEntityKeys}
-            onSelect={toggleEntity}
-            watchState={entityWatchState}
-            onToggleWatch={toggleEntityWatch}
-          />
-          <ListPager
-            scope={pagingScope}
-            hasNext={Boolean(entities.hasNextPage) && !entitiesAtCacheLimit}
-            loading={entities.isFetchingNextPage || entities.isFetching}
-            loaded={entityItems.length}
-            total={entityTotal.data ?? null}
-            onLoad={() => entities.fetchNextPage()}
-            endMessage={entitiesAtCacheLimit ? `メモリ使用量を抑えるため${formatNumber(entityItems.length)}件で停止しました。「ページ番号」に切り替えると続きへ移動できます。` : undefined}
-            pages={{ current: pageParam, size: pageSize, onGoTo: setPage, maxDirectPage, limitNotice: pageLimitNotice }}
-          />
-        </>
-      ) : <EmptyState icon={Icons.people} title="一致する項目がありません" description="名前を変えて検索してください。" />}
-      </>}
+        ) : <EmptyState icon={Icons.people} title="一致する項目がありません" description="名前を変えて検索してください。" />}
+        </>}
+      </div>
 
       <Drawer opened={filterOpened} onClose={filterDrawer.close} title="詳細フィルター" position="right" size={420} className="filter-drawer">
         <FilterForm

@@ -1,5 +1,6 @@
 import { useCallback } from "react";
 import { useLocalStorage } from "@mantine/hooks";
+import { transitionContent } from "@/lib/contentTransition";
 
 /**
  * 作品の一覧を「どう見るか」。
@@ -86,6 +87,11 @@ export function useScopedViewPreference(
 export function useViewMode(scope: ViewScope): [ViewMode, (next: ViewMode) => void] {
   const [fallback] = useDefaultViewMode();
   const [preference, setPreference] = useScopedViewPreference(scope);
-  const setView = useCallback((next: ViewMode) => setPreference(next), [setPreference]);
+  const setView = useCallback((next: ViewMode) => {
+    transitionContent(() => setPreference(next), {
+      content: () => [...document.querySelectorAll<HTMLElement>(".library-results, .mantine-Tabs-panel, .collection-members")]
+        .find((element) => !element.hidden && element.style.display !== "none") ?? null,
+    });
+  }, [setPreference]);
   return [preference === "inherit" ? fallback : preference, setView];
 }

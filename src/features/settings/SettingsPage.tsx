@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { transitionContent } from "@/lib/contentTransition";
 import {
   ActionIcon,
   Alert,
@@ -128,7 +129,10 @@ export default function SettingsPage() {
   const setSection = (next: Section) => {
     const params = new URLSearchParams(searchParams);
     if (next === "connections") params.delete("section"); else params.set("section", next);
-    setSearchParams(params, { replace: true });
+    if (next === section) return;
+    transitionContent(() => setSearchParams(params, { replace: true }), {
+      content: () => document.querySelector<HTMLElement>(".settings-content"),
+    });
   };
   const queryClient = useQueryClient();
   // Read from the shared store rather than only tracking runs this page
@@ -350,7 +354,7 @@ export default function SettingsPage() {
       <RuntimeNotice />
       <Grid gap="xl" mt="lg" align="flex-start">
         <Grid.Col span={{ base: 12, md: 4, lg: 3 }}><Card p="xs" className="settings-nav">{nav.map((item) => { const Icon = item.icon; return <NavLink component="button" type="button" key={item.id} active={section === item.id} aria-current={section === item.id ? "page" : undefined} label={item.label} description={item.description} leftSection={<Icon size={18} />} onClick={() => setSection(item.id)} />; })}</Card></Grid.Col>
-        <Grid.Col span={{ base: 12, md: 8, lg: 9 }}>
+        <Grid.Col span={{ base: 12, md: 8, lg: 9 }} className="settings-content">
           {section === "connections" && (auth.isLoading ? <LoadingState label="接続状態を確認しています" /> : auth.error ? <ErrorState error={auth.error} retry={() => auth.refetch()} /> : <ConnectionsSection auth={auth.data ?? { pixiv: null, fanbox: null }} runtime={runtime} pixivForm={pixivForm} fanboxForm={fanboxForm} mutation={connectionMutation} disconnect={disconnect} />)}
           {section === "library" && (stats.isLoading || storagePath.isLoading ? <LoadingState label="ライブラリ情報を読み込んでいます" /> : stats.error || storagePath.error ? <ErrorState error={stats.error ?? storagePath.error} retry={() => { stats.refetch(); storagePath.refetch(); }} /> : <LibrarySection stats={stats.data} path={storagePath.data} runtime={runtime} pending={maintenanceMutation.isPending} run={(action) => maintenanceMutation.mutate(action)} />)}
           {section === "search" && (index.isLoading ? <LoadingState label="検索インデックスを確認しています" /> : index.error ? <ErrorState error={index.error} retry={() => index.refetch()} /> : <SearchSection status={index.data} rebuild={rebuild} runtime={runtime} rebuilding={rebuildMutation.isPending || rebuild?.status === "running"} start={(includeSemantic) => rebuildMutation.mutate(includeSemantic)} cancel={() => { if (rebuildOperationRef.current) { void requestOperationCancel(rebuildOperationRef.current.id); return; } if (rebuild) reportJobAction(cancelSearchRebuildIndex(rebuild.jobId), "索引の作り直しを中止できません"); }} />)}
