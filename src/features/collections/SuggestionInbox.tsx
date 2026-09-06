@@ -1,469 +1,281 @@
-import { useMemo, useState } from "react";
-import { Alert, Badge, Box, Button, Card, Chip, Collapse, Group, Stack, Text, Tooltip, UnstyledButton } from "@mantine/core";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { ActionIcon, Alert, Badge, Button, Checkbox, Collapse, Group, Loader, SegmentedControl, Stack, Text, TextInput, Tooltip } from "@mantine/core";
 import { modals } from "@mantine/modals";
 import { notifications } from "@mantine/notifications";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useAppNavigate } from "@/app/router";
 import { NamedWorkList } from "@/components/NamedWorkList";
 import { WorkCover } from "@/components/WorkCover";
+import { AssistLauncher } from "@/features/assist/AssistLauncher";
+import { useAssist } from "@/features/assist/useAssist";
 import { errorMessage, formatNumber } from "@/lib/format";
 import { Icons, IconSize } from "@/lib/icons";
-import {
-  acceptCollectionSuggestion,
-  dismissCollectionSuggestion,
-  listCollectionSuggestions,
-  rejectCollectionSuggestion,
-  suggestionNameOverride,
-} from "@/services/collectionApi";
-import { isTauriRuntime } from "@/services/dbApi";
-import { demoSuggestions } from "@/mocks/demoData";
+import { getProvider } from "@/lib/providers";
+import { demoSuggestions, getDemoReader } from "@/mocks/demoData";
 import { nameCollectionSuggestion } from "@/services/assistApi";
-import { useAssist } from "@/features/assist/useAssist";
-import { AssistLauncher } from "@/features/assist/AssistLauncher";
-import type {
-  CollectionSuggestion,
-  CollectionSuggestionMember,
-  SavedSearchSuggestion,
-  WorkKey,
-} from "@/types/collections";
+import { acceptCollectionSuggestion, listCollectionSuggestions, rejectCollectionSuggestion, suggestionNameOverride } from "@/services/collectionApi";
+import { getReaderContentPage, isTauriRuntime } from "@/services/dbApi";
+import type { CollectionSuggestion, CollectionSuggestionMember, SavedSearchSuggestion, WorkKey } from "@/types/collections";
+import "./discovery.css";
 
 const EMPTY: CollectionSuggestion[] = [];
-/** 一度に出す件数。棚の走査は300件を超えることがあり、全部出しても読まれない。 */
-const PAGE = 12;
+type Track = "sequence" | "theme";
+interface ReviewDraft { name: string; order: string[]; excluded: string[] }
 
-type Track = "all" | "sequence" | "theme";
-
-/** 取得元と作品IDを、どちらにも現れない区切りでつないだ鍵。 */
-function memberKey(member: { source: string; sourceId: string }): string {
-  return `${member.source}${member.sourceId}`;
+function memberKey(member: WorkKey): string {
+  return `${member.source}\u001f${member.sourceId}`;
 }
 
-/**
- * 見つかったまとまり。
- *
- * 空の棚に「まだコレクションはありません」と出すのをやめる。無いのではなく、
- * **まだ探していない**だけだったからである。棚を一度なめれば、前後編も
- * 連鎖ものも、作者をまたいだ題材の束も、すでにそこにある。
- *
- * ただし出す量は絞る。300件を並べて1件ずつ閉じさせるくらいなら、
- * 見つけないほうがましである。走査そのものが系統ごとに8件しか作らなく
- * なったので、ここへ届く時点ですでに少ない。
- *
- * 置き場所はオーバーレイである。棚の一覧の途中に居座ると、候補が出ている間
- * ずっとコレクションそのものが下へ押し出される。「名前を付け直す」と同じで、
- * これは**始めて、終わらせて、閉じる**たぐいの操作なので、棚の上ではなく
- * 棚の手前でやる。
- */
-export function SuggestionInbox({ sweeping, savedSearchIdeas, note }: {
-  /** 走査はオーバーレイの操作列から始める。ここは結果を出すところに徹する。 */
+function initialDraft(suggestion: CollectionSuggestion): ReviewDraft {
+  return { name: suggestion.proposedName, order: suggestion.members.map(memberKey), excluded: suggestion.members.filter((member) => member.selected === false).map(memberKey) };
+}
+
+/** 再解析で作品が増えても、確認中の選択と手で直した順序を壊さない。 */
+function orderedMembers(suggestion: CollectionSuggestion, draft: ReviewDraft): CollectionSuggestionMember[] {
+  const byKey = new Map(suggestion.members.map((member) => [memberKey(member), member]));
+  const ordered = draft.order.flatMap((key) => byKey.has(key) ? [byKey.get(key)!] : []);
+  const seen = new Set(draft.order);
+  return [...ordered, ...suggestion.members.filter((member) => !seen.has(memberKey(member)))];
+}
+
+function selectedMembers(suggestion: CollectionSuggestion, draft: ReviewDraft): CollectionSuggestionMember[] {
+  return orderedMembers(suggestion, draft).filter((member) => !draft.excluded.includes(memberKey(member)));
+}
+
+/** 候補を切り替えても下書きを残す。保留は確認の順番を変えるだけで、否定を保存しない。 */
+export function SuggestionInbox({ sweeping, savedSearchIdeas, note, onBusyChange }: {
   sweeping: boolean;
   savedSearchIdeas: SavedSearchSuggestion[];
-  /** 意味索引が読めなかったなど、探しきれなかった事情。 */
   note?: string | null;
+  onBusyChange?: (busy: boolean) => void;
 }) {
   const runtime = isTauriRuntime();
   const navigate = useAppNavigate();
   const queryClient = useQueryClient();
-  const [track, setTrack] = useState<Track>("all");
-  // 副産物は畳んでおく。毎回同じ内容なので、開いたままにする理由がない。
+  const { engine } = useAssist("collection_naming");
+  const [track, setTrack] = useState<Track>("sequence");
+  const [search, setSearch] = useState("");
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [drafts, setDrafts] = useState<Record<string, ReviewDraft>>({});
+  const [deferred, setDeferred] = useState<ReadonlySet<string>>(new Set());
+  const [resolved, setResolved] = useState<ReadonlySet<string>>(new Set());
+  const [showDeferred, setShowDeferred] = useState(false);
   const [savedSearchOpen, setSavedSearchOpen] = useState(false);
-  const [shownCount, setShownCount] = useState(PAGE);
+  const [created, setCreated] = useState<{ id: string; name: string } | null>(null);
+  const [mobileDetail, setMobileDetail] = useState(false);
+  const candidateButtons = useRef(new Map<string, HTMLButtonElement>());
 
   const suggestionsQuery = useQuery({
-    // プレビューでは見本を出す。空のままだと、カードの崩れがデスクトップ版で
-    // しか見つからない。実際、2作の束で構成作品が読めないことに気づいたのは
-    // 実機の画面を見てからだった。
     queryKey: ["collection-suggestions", "pending"],
-    queryFn: () => (runtime ? listCollectionSuggestions("pending") : Promise.resolve(demoSuggestions)),
+    queryFn: () => runtime ? listCollectionSuggestions("pending") : Promise.resolve(demoSuggestions),
   });
-  const suggestions = suggestionsQuery.data ?? EMPTY;
-  const counts = useMemo(() => ({
-    all: suggestions.length,
-    sequence: suggestions.filter((value) => value.track === "sequence").length,
-    theme: suggestions.filter((value) => value.track === "theme").length,
-  }), [suggestions]);
-  const filtered = track === "all" ? suggestions : suggestions.filter((value) => value.track === track);
-  const shown = filtered.slice(0, shownCount);
+  const suggestions = (suggestionsQuery.data ?? EMPTY).filter((suggestion) => !resolved.has(suggestion.id)).sort((a, b) =>
+    Number(b.members.some((m) => m.evidence.some((e) => e.kind === "unregistered"))) - Number(a.members.some((m) => m.evidence.some((e) => e.kind === "unregistered"))));
+  const counts = { sequence: suggestions.filter((suggestion) => suggestion.track !== "theme").length, theme: suggestions.filter((suggestion) => suggestion.track === "theme").length };
+  const inTrack = suggestions.filter((suggestion) => (suggestion.track === "theme" ? "theme" : "sequence") === track);
+  const deferredCount = inTrack.filter((suggestion) => deferred.has(suggestion.id)).length;
+  const term = search.trim().toLocaleLowerCase();
+  const filtered = inTrack.filter((suggestion) => deferred.has(suggestion.id) === showDeferred && (!term ||
+    [suggestion.proposedName, ...suggestion.members.flatMap((member) => [member.title, member.authorName, getProvider(member.source).label])].some((value) => value.toLocaleLowerCase().includes(term))));
+  const selected = filtered.find((suggestion) => suggestion.id === selectedId) ?? filtered[0];
+  const selectedIndex = selected ? filtered.findIndex((suggestion) => suggestion.id === selected.id) : -1;
+  const draft = selected ? drafts[selected.id] ?? initialDraft(selected) : null;
 
+  const updateDraft = (suggestion: CollectionSuggestion, change: (current: ReviewDraft) => ReviewDraft) => {
+    setDrafts((current) => ({ ...current, [suggestion.id]: change(current[suggestion.id] ?? initialDraft(suggestion)) }));
+  };
   const invalidate = () => {
     queryClient.invalidateQueries({ queryKey: ["collection-suggestions"] });
     queryClient.invalidateQueries({ queryKey: ["work-collections"] });
   };
-
-
-  return (
-    <Stack gap="md">
-      {sweeping && (
-        <Alert icon={<Icons.collectionSuggest size={IconSize.action} />}>
-          本文のリンク、題名の連番、公式シリーズの連番をたどってから、タグと本文の近さで題材の束を探しています。
-        </Alert>
-      )}
-
-      {/* 探しきれなかった事情は、結果の隣に出す。意味索引が読めないことと、
-          題材の束が本当に無いことを、同じ「見つかりませんでした」で
-          済ませない。 */}
-      {!sweeping && note && (
-        <Alert color="yellow" icon={<Icons.warning size={IconSize.action} />} title="一部しか探せていません">
-          {note}
-        </Alert>
-      )}
-
-      {counts.all > 0 && (
-        <Chip.Group multiple={false} value={track} onChange={(value) => { setTrack(value as Track); setShownCount(PAGE); }}>
-          <Group gap={6}>
-            <Chip value="all" size="xs" variant="light">すべて {formatNumber(counts.all)}</Chip>
-            <Chip value="sequence" size="xs" variant="light">続き物 {formatNumber(counts.sequence)}</Chip>
-            <Chip value="theme" size="xs" variant="light">テーマ {formatNumber(counts.theme)}</Chip>
-          </Group>
-        </Chip.Group>
-      )}
-
-      <div className="suggestion-grid">
-        {shown.map((suggestion) => (
-          <SuggestionBundleCard key={suggestion.id} suggestion={suggestion} onChanged={invalidate} />
-        ))}
-      </div>
-
-      {filtered.length > shown.length && (
-        <Group justify="center">
-          <Button variant="subtle" onClick={() => setShownCount((current) => current + PAGE)}>
-            もっと見る（残り {formatNumber(filtered.length - shown.length)}件）
-          </Button>
-        </Group>
-      )}
-
-      {/* 束にしなかったタグは、結果の**下**へ置いて畳んでおく。
-          //
-          // これは走査の副産物であり、しかも棚の性質なので**毎回同じものが
-          // 出る**。「洗脳 1,720」は今回見つけたことではない。毎回同じ内容が
-          // 本題の上に240px居座っていたのは、順序の間違いだった。 */}
-      {savedSearchIdeas.length > 0 && (
-        <div>
-          <Button
-            variant="subtle"
-            color="gray"
-            size="compact-sm"
-            leftSection={<Icons.savedSearch size={IconSize.menu} />}
-            rightSection={<Icons.expand size={IconSize.menu} style={{ transform: savedSearchOpen ? "rotate(180deg)" : undefined }} />}
-            onClick={() => setSavedSearchOpen((open) => !open)}
-          >
-            束にしなかったタグ {formatNumber(savedSearchIdeas.length)}件
-          </Button>
-          <Collapse expanded={savedSearchOpen}>
-            <Stack gap={6} mt="xs">
-              <Text size="sm" c="dimmed">
-                付いている作品が多すぎて、読む単位になりません。まとまりではなく<b>絞り込み</b>として
-                持つほうが扱いやすいので、押すとその絞り込みで棚を開きます。
-              </Text>
-              <Group gap={6} wrap="wrap">
-                {savedSearchIdeas.map((idea) => (
-                  <Tooltip key={idea.tag} label={idea.reason} multiline maw={340}>
-                    <Button
-                      size="compact-xs"
-                      variant="default"
-                      leftSection={<Icons.filter size={IconSize.inline} />}
-                      onClick={() => navigate(`/library?tag=${encodeURIComponent(idea.tag)}`)}
-                    >
-                      {idea.tag} {formatNumber(idea.workCount)}
-                    </Button>
-                  </Tooltip>
-                ))}
-              </Group>
-            </Stack>
-          </Collapse>
-        </div>
-      )}
-
-      {/* オーバーレイの中なので、空でも黙って消えるわけにはいかない。
-          押した人は結果を見に来ている。 */}
-      {!sweeping && suggestionsQuery.isSuccess && counts.all === 0 && (
-        <Stack align="center" gap="xs" py="lg">
-          <Icons.collectionSuggest size={IconSize.hero} />
-          <Text fw={700}>いま出せるまとまりはありません</Text>
-          <Text size="sm" c="dimmed" ta="center" maw={420}>
-            確かだと言えるものだけを出しています。作品が増えたあとや、
-            もう一度探したときに、別の束が見つかることがあります。
-          </Text>
-        </Stack>
-      )}
-      {suggestionsQuery.error && (
-        <Alert color="red" title="候補を読み込めません">
-          {errorMessage(suggestionsQuery.error)}
-        </Alert>
-      )}
-    </Stack>
-  );
-}
-
-/**
- * 束ひとつぶんの候補。
- *
- * 出す情報は三つだけ — 何が入るか、なぜ束なのか、名前をどうするか。
- * かつて出していた「確度 74%」は、この三つのどれでもなかった。
- */
-function SuggestionBundleCard({ suggestion, onChanged }: { suggestion: CollectionSuggestion; onChanged: () => void }) {
-  const navigate = useAppNavigate();
-  const [name, setName] = useState(suggestion.proposedName);
-  const [excluded, setExcluded] = useState<ReadonlySet<string>>(new Set());
-  const [namesOpen, setNamesOpen] = useState(false);
-  const keys = suggestion.members
-    .filter((member) => !excluded.has(memberKey(member)))
-    .map((member) => ({ source: member.source, sourceId: member.sourceId }) as WorkKey);
-
+  const finish = (id: string) => {
+    setResolved((current) => new Set([...current, id]));
+    invalidate();
+  };
   const accept = useMutation({
-    mutationFn: () => acceptCollectionSuggestion({
+    mutationFn: ({ suggestion, draft: review }: { suggestion: CollectionSuggestion; draft: ReviewDraft }) => acceptCollectionSuggestion({
       suggestionId: suggestion.id,
-      memberKeys: keys,
-      name: suggestionNameOverride(suggestion.proposedName, name),
+      memberKeys: selectedMembers(suggestion, review).map(({ source, sourceId }) => ({ source, sourceId })),
+      name: suggestionNameOverride(suggestion.proposedName, review.name.trim()),
     }),
-    onSuccess: (created) => { onChanged(); navigate(`/collections/${created.id}`); },
+    onSuccess: (collection, { suggestion, draft: review }) => { finish(suggestion.id); setCreated({ id: collection.id, name: review.name.trim() }); },
     onError: (error) => notifications.show({ color: "red", title: "採用できません", message: errorMessage(error) }),
   });
-  const dismiss = useMutation({
-    mutationFn: () => dismissCollectionSuggestion(suggestion.id),
-    onSuccess: () => { onChanged(); notifications.show({ message: "この候補を閉じました" }); },
-    onError: (error) => notifications.show({ color: "red", title: "閉じられません", message: errorMessage(error) }),
-  });
   const reject = useMutation({
-    mutationFn: () => rejectCollectionSuggestion(suggestion.id, keys),
-    onSuccess: () => { onChanged(); notifications.show({ message: "この組合せは今後の候補から外します" }); },
-    onError: (error) => notifications.show({ color: "red", title: "外せません", message: errorMessage(error) }),
+    mutationFn: ({ suggestion, members }: { suggestion: CollectionSuggestion; members: CollectionSuggestionMember[] }) => rejectCollectionSuggestion(suggestion.id, members.map(({ source, sourceId }) => ({ source, sourceId }))),
+    onSuccess: (_, { suggestion }) => { finish(suggestion.id); notifications.show({ message: "選んだ組合せを候補から外しました" }); },
+    onError: (error) => notifications.show({ color: "red", title: "候補から外せません", message: errorMessage(error) }),
   });
-
-  // 選ばれていない案の数。0 なら開く先が無いので、畳む操作そのものを出さない。
-  const others = suggestion.nameOptions.filter((option) => option.name !== name);
-
-  const { engine } = useAssist("collection_naming");
   const askModel = useMutation({
-    mutationFn: () => {
+    mutationFn: (suggestion: CollectionSuggestion) => {
       if (!engine) return Promise.reject(new Error("モデルの手伝いが設定されていません"));
       return nameCollectionSuggestion(suggestion.id, engine);
     },
     onSuccess: (updated) => {
+      queryClient.setQueryData<CollectionSuggestion[]>(["collection-suggestions", "pending"], (current) => current?.map((item) => item.id === updated.id ? updated : item));
       const proposed = updated.nameOptions.find((option) => option.source === "llm");
-      if (proposed) setName(proposed.name);
-      onChanged();
+      if (proposed) updateDraft(updated, (current) => ({ ...current, name: proposed.name }));
     },
-    onError: (error) => notifications.show({ color: "red", title: "モデルが名前を返しません", message: errorMessage(error) }),
+    onError: (error) => notifications.show({ color: "red", title: "名前案を作れません", message: errorMessage(error) }),
   });
-  const busy = accept.isPending || dismiss.isPending || reject.isPending || askModel.isPending;
+  const busy = sweeping || accept.isPending || reject.isPending || askModel.isPending;
+  useEffect(() => { onBusyChange?.(accept.isPending || reject.isPending || askModel.isPending); }, [accept.isPending, reject.isPending, askModel.isPending, onBusyChange]);
 
-  // これは棚に**記録を書く**操作である。同じ組合せは今後の候補に出てこない。
-  // 件数だけを見せて押させてよい操作ではないので、対象の題名をそのまま並べる。
-  const kept = suggestion.members.filter((member) => !excluded.has(memberKey(member)));
-  const confirmReject = () => modals.openConfirmModal({
-    title: "この組合せを今後の候補から外しますか？",
-    children: (
-      <Stack gap="xs">
-        <Text size="sm">
-          次の{formatNumber(kept.length)}作品を、同じ規則では再提案しません。
-          外した作品は対象になりません。規則が変われば改めて評価されます。
-        </Text>
-        <NamedWorkList works={kept} />
-      </Stack>
-    ),
-    labels: { confirm: "候補から外す", cancel: "キャンセル" },
-    confirmProps: { color: "red" },
-    onConfirm: () => reject.mutate(),
-  });
-
-  const toggle = (key: string) => setExcluded((current) => {
-    const next = new Set(current);
-    if (next.has(key)) next.delete(key); else next.add(key);
-    return next;
-  });
+  const confirmReject = (suggestion: CollectionSuggestion, review: ReviewDraft) => {
+    const members = selectedMembers(suggestion, review);
+    modals.openConfirmModal({
+      title: "この組合せを候補から外す",
+      children: <Stack gap="sm"><Text size="sm">選んだ{formatNumber(members.length)}作品の組合せを、同じ規則では再提案しません。チェックを外した作品は対象になりません。</Text><NamedWorkList works={members} /></Stack>,
+      labels: { confirm: "候補から外す", cancel: "キャンセル" },
+      confirmProps: { color: "red" },
+      onConfirm: () => reject.mutate({ suggestion, members }),
+    });
+  };
+  const defer = (suggestion: CollectionSuggestion) => {
+    setDeferred((current) => { const next = new Set(current); if (showDeferred) next.delete(suggestion.id); else next.add(suggestion.id); return next; });
+  };
+  const choose = (id: string) => { setSelectedId(id); setMobileDetail(true); };
 
   return (
-    <Card withBorder padding="md" className="suggestion-card">
-      <Stack gap="sm">
-        <Group justify="space-between" align="flex-start" wrap="nowrap">
-          <Box miw={0}>
-            {/* 採る名前そのものを2行で切っていた。押す前に読めない名前を
-                付けさせない。 */}
-            <Text fw={720}>{name}</Text>
-            <Text size="sm" c="dimmed">{suggestion.evidenceSummary}</Text>
-          </Box>
-          {/* 潰させない。名前の隣で縮んで「続..」になっていた。3文字の紋が
-              読めないなら、置いている意味がない。 */}
-          <Badge
-            variant="light"
-            style={{ flexShrink: 0 }}
-            color={suggestion.track === "theme" ? "grape" : "piep"}
-          >
-            {suggestion.track === "theme" ? "テーマ" : "続き物"}
-          </Badge>
-        </Group>
-
-        {/* 何が入るのかを、題名で読めるようにする。
-            //
-            // 表紙を5枚並べるだけだった。表紙の無い作品は真っ黒な四角で、
-            // 題名はツールチップの中にしか無く、しかも一覧を開く「＋N」は
-            // **6作以上のときしか出なかった**。2作の束では、何を束ねようと
-            // しているのかを読む方法が一つも無かったことになる。
-            //
-            // 「2作品で作る」も「二度と出さない」も、中身を見ずに押させて
-            // よい操作ではない。前者は棚に束を作り、後者はその組合せを
-            // 今後の候補から永久に外す。 */}
-        <SuggestionMemberList
-          members={suggestion.members}
-          excluded={excluded}
-          onToggle={toggle}
-        />
-
-        {/* 名前の案は畳んでおく。
-            //
-            // 全文を縦に並べていたので、カードの**42%**が名前の案だった。
-            // 構成作品（178px）より大きい。しかも名前は作ったあとで
-            // 「名前を付け直す」からいつでも直せるので、ここで必ず決める
-            // 必要はない。既定でよければ触らずに済むのが正しい。 */}
-        <Stack gap={4}>
-          {others.length > 0 && (
-            <Button
-              variant="subtle"
-              color="gray"
-              size="compact-xs"
-              px={4}
-              styles={{ root: { alignSelf: "flex-start" }, label: { fontWeight: 500 } }}
-              rightSection={<Icons.expand size={IconSize.inline} style={{ transform: namesOpen ? "rotate(180deg)" : undefined }} />}
-              onClick={() => setNamesOpen((open) => !open)}
-            >
-              他の名前の案 {formatNumber(others.length)}
-            </Button>
-          )}
-          <Collapse expanded={namesOpen}>
-            {/* 出すのは**他の**案だけ。いま選ばれている名前はカードの見出しに
-                大きく出ているので、ここへもう一度並べると数が合わなくなる
-                （「他の案 2」と書いて3行出ていた）。押せば入れ替わり、
-                入れ替わったぶんがこの一覧に戻ってくる。 */}
-            <Stack gap={4}>
-              {others.map((option) => (
-                <UnstyledButton
-                  key={`${option.source}-${option.name}`}
-                  className="collection-pick"
-                  onClick={() => setName(option.name)}
-                >
-                  <span className="collection-pick__body">
-                    <Text size="sm" fw={600}>{option.name}</Text>
-                    <Text size="xs" c="dimmed">
-                      {option.label}
-                      {option.source === "llm" && option.modelId ? ` · ${option.modelId}` : ""}
-                      {option.source === "llm" && option.createdAt
-                        ? ` · ${new Date(option.createdAt).toLocaleDateString("ja-JP")}`
-                        : ""}
-                    </Text>
-                  </span>
-                </UnstyledButton>
-              ))}
-            </Stack>
-          </Collapse>
-          <AssistLauncher
-            size="sm"
-            label="この候補で使える手伝い"
-            items={[{
-              id: "collection_naming",
-              label: suggestion.nameOptions.some((option) => option.source === "llm") ? "名前案を作り直す" : "名前案を追加する",
-              description: "候補作品の題名とタグから名前を考えます",
-              enabled: Boolean(engine) && !busy,
-              unavailableReason: engine ? "ほかの操作が終わるまで待ってください" : "設定でコレクション命名を有効にしてください",
-              onSelect: () => askModel.mutate(),
-              badge: suggestion.nameOptions.some((option) => option.source === "llm") ? "生成済み" : undefined,
-            }]}
-          />
-        </Stack>
-
-        <Group justify="space-between" wrap="nowrap">
-          <Group gap={4}>
-            <Button variant="subtle" color="gray" size="compact-xs" disabled={busy} onClick={() => dismiss.mutate()}>あとで</Button>
-            <Button variant="subtle" color="red" size="compact-xs" disabled={busy || keys.length === 0} onClick={confirmReject}>二度と出さない</Button>
-          </Group>
-          <Button
-            size="compact-sm"
-            leftSection={<Icons.confirm size={IconSize.menu} />}
-            loading={accept.isPending}
-            disabled={busy || keys.length === 0}
-            onClick={() => accept.mutate()}
-          >
-            {formatNumber(keys.length)}作品で作る
-          </Button>
-        </Group>
-      </Stack>
-
-    </Card>
+    <div className="discovery-inbox" aria-busy={sweeping || undefined}>
+      <div className="discovery-filters">
+        <SegmentedControl aria-label="まとまりの種類" value={track} disabled={busy} onChange={(value) => { setTrack(value as Track); setShowDeferred(false); setMobileDetail(false); }} data={[{ value: "sequence", label: `続き物 ${formatNumber(counts.sequence)}` }, { value: "theme", label: `テーマ ${formatNumber(counts.theme)}` }]} size="sm" />
+        <Text size="xs" c="dimmed">{track === "sequence" ? "シリーズの内側や、保存元をまたぐ続き物も確認できます。" : "読む順を持たない、題材の近い作品のまとまりです。"}</Text>
+      </div>
+      {sweeping && <div className="discovery-notice" role="status"><Loader size="xs" /><Text size="sm">棚を調べています。確認中の候補はそのまま残ります。</Text></div>}
+      {!sweeping && note && <Alert color="yellow" title="一部しか探せていません" icon={<Icons.info size={IconSize.action} />}>{note}</Alert>}
+      {created && <div className="discovery-created" role="status"><Icons.confirm size={IconSize.action} /><Text size="sm">「{created.name}」を作りました。</Text><Button variant="subtle" size="compact-xs" onClick={() => navigate(`/collections/${created.id}`)}>開く</Button></div>}
+      {suggestionsQuery.isPending ? (
+        <div className="discovery-empty" role="status"><Loader size="sm" /><Text c="dimmed">候補を読み込んでいます</Text></div>
+      ) : suggestionsQuery.error ? (
+        <Alert color="red" title="候補を読み込めません"><Stack gap="sm"><Text size="sm">{errorMessage(suggestionsQuery.error)}</Text><Button variant="light" size="compact-sm" onClick={() => suggestionsQuery.refetch()}>もう一度読み込む</Button></Stack></Alert>
+      ) : suggestions.length === 0 ? (
+        <div className="discovery-empty"><Icons.collection size={IconSize.hero} strokeWidth={1.3} /><Text fw={650}>{created ? "すべての候補を確認しました" : "読む順のあるまとまりを見つける"}</Text><Text size="sm" c="dimmed">「棚から探す」で、保存した作品から候補を探します。</Text><Text size="xs" c="dimmed">採用するまで、コレクションは作成されません。</Text></div>
+      ) : (
+        <div className="discovery-workspace" data-detail={mobileDetail || undefined}>
+          <aside className="discovery-sidebar" aria-label="まとまりの候補">
+            <div className="discovery-sidebar__tools">
+              <TextInput aria-label="候補を絞り込む" placeholder="題名・作者で絞り込む" value={search} onChange={(event) => setSearch(event.currentTarget.value)} leftSection={<Icons.search size={IconSize.menu} />} size="sm" disabled={busy} />
+              <Group justify="space-between" gap="xs"><Text size="xs" c="dimmed">{showDeferred ? "保留中" : "候補"} {formatNumber(filtered.length)}件</Text><Button variant={showDeferred ? "light" : "subtle"} color="gray" size="compact-xs" disabled={busy} onClick={() => setShowDeferred((value) => !value)}>{showDeferred ? "候補に戻る" : `保留 ${formatNumber(deferredCount)}`}</Button></Group>
+            </div>
+            <ol className="discovery-candidates">
+              {filtered.map((suggestion, index) => {
+                const authors = [...new Set(suggestion.members.map((member) => member.authorName))];
+                const sources = [...new Set(suggestion.members.map((member) => getProvider(member.source).label))];
+                const discoveryScope = suggestion.members.some((m) => m.evidence.some((e) => e.kind === "unregistered")) ? "シリーズ未登録を含む" : suggestion.members.some((m) => m.evidence.some((e) => e.kind === "series_subset")) ? "シリーズ内の続き物" : null;
+                return <li key={suggestion.id}>
+                  <button
+                    ref={(element) => { if (element) candidateButtons.current.set(suggestion.id, element); else candidateButtons.current.delete(suggestion.id); }}
+                    type="button" className="discovery-candidate" aria-current={selected?.id === suggestion.id ? "true" : undefined}
+                    aria-label={`${suggestion.proposedName}、${suggestion.members.length}作品を確認`} disabled={busy} onClick={() => choose(suggestion.id)}
+                    onKeyDown={(event) => {
+                      const next = event.key === "ArrowDown" ? index + 1 : event.key === "ArrowUp" ? index - 1 : event.key === "Home" ? 0 : event.key === "End" ? filtered.length - 1 : null;
+                      if (next === null || next < 0 || next >= filtered.length) return;
+                      event.preventDefault(); setSelectedId(filtered[next].id); candidateButtons.current.get(filtered[next].id)?.focus();
+                    }}
+                  >
+                    <span className="discovery-candidate__number">{String(index + 1).padStart(2, "0")}</span>
+                    <span className="discovery-candidate__body"><span className="discovery-candidate__title">{drafts[suggestion.id]?.name || suggestion.proposedName}</span><span className="discovery-candidate__meta">{formatNumber(suggestion.members.length)}作品 · {authors.join("、")}</span><span className="discovery-candidate__source">{sources.join(" / ")}{discoveryScope ? ` · ${discoveryScope}` : ""}</span></span>
+                    <Icons.next size={IconSize.menu} className="discovery-candidate__arrow" />
+                  </button>
+                </li>;
+              })}
+            </ol>
+            {filtered.length === 0 && <div className="discovery-sidebar__empty"><Text size="sm" c="dimmed">{term ? "一致する候補はありません。" : showDeferred ? "保留した候補はありません。" : deferredCount > 0 ? "残りの候補は保留中です。" : track === "sequence" ? "続き物の候補はありません。" : "テーマの候補はありません。"}</Text>{term && <Button variant="subtle" size="compact-sm" onClick={() => setSearch("")}>絞り込みを解除</Button>}</div>}
+          </aside>
+          <section className="discovery-detail" aria-label="選んだ候補の詳細">
+            {selected && draft ? <SuggestionReview key={selected.id} suggestion={selected} draft={draft} busy={busy} accepting={accept.isPending} runtime={runtime} deferred={showDeferred} canNext={selectedIndex + 1 < filtered.length} namingAvailable={Boolean(engine)}
+              onDraft={(change) => updateDraft(selected, change)} onAccept={() => accept.mutate({ suggestion: selected, draft })} onDefer={() => defer(selected)} onReject={() => confirmReject(selected, draft)}
+              onNext={() => { const next = filtered[selectedIndex + 1]; if (next) setSelectedId(next.id); }} onBack={() => setMobileDetail(false)} onName={() => askModel.mutate(selected)}
+            /> : <div className="discovery-empty"><Button className="discovery-mobile-back" variant="subtle" size="compact-sm" leftSection={<Icons.back size={IconSize.menu} />} onClick={() => setMobileDetail(false)}>候補の一覧へ</Button><Icons.collection size={IconSize.hero} strokeWidth={1.3} /><Text size="sm" c="dimmed">{showDeferred ? "保留した候補を、ここで引き続き確認できます。" : "候補を選ぶと、構成作品と読む順を確認できます。"}</Text></div>}
+          </section>
+        </div>
+      )}
+      {savedSearchIdeas.length > 0 && <div className="discovery-search-ideas"><Button variant="subtle" color="gray" size="compact-xs" onClick={() => setSavedSearchOpen((value) => !value)} rightSection={<Icons.expand size={IconSize.inline} />}>タグから棚を見る {formatNumber(savedSearchIdeas.length)}</Button><Collapse expanded={savedSearchOpen}><Group gap="xs" pt="xs">{savedSearchIdeas.map((idea) => <Tooltip key={idea.tag} label={idea.reason}><Button variant="default" size="compact-xs" onClick={() => navigate(`/library?tag=${encodeURIComponent(idea.tag)}`)}>{idea.tag} · {formatNumber(idea.workCount)}</Button></Tooltip>)}</Group></Collapse></div>}
+    </div>
   );
 }
 
-/** カードの中に畳まずに出しておく作品の数。 */
-const VISIBLE_MEMBERS = 4;
-
-/**
- * 束に入る作品を、題名で読めるように並べる。
- *
- * 表紙だけでは足りない。この棚の作品は表紙を持たないものが多く、持っていても
- * 縮めれば何の話か分からない。**判断の材料は題名と作者である。**
- *
- * 一行ずつが入切の切り替えになっている。以前は表紙を押すと外れたが、押せると
- * 分かる手がかりが何も無かった。チェックの印を出して、押せることと、いま
- * 入っているかどうかを同じ場所で見せる。
- */
-function SuggestionMemberList({ members, excluded, onToggle }: {
-  members: CollectionSuggestionMember[];
-  excluded: ReadonlySet<string>;
-  onToggle: (key: string) => void;
+function SuggestionReview({ suggestion, draft, busy, accepting, runtime, deferred, canNext, namingAvailable, onDraft, onAccept, onDefer, onReject, onNext, onBack, onName }: {
+  suggestion: CollectionSuggestion; draft: ReviewDraft; busy: boolean; accepting: boolean; runtime: boolean; deferred: boolean; canNext: boolean; namingAvailable: boolean;
+  onDraft: (change: (current: ReviewDraft) => ReviewDraft) => void;
+  onAccept: () => void; onDefer: () => void; onReject: () => void; onNext: () => void; onBack: () => void; onName: () => void;
 }) {
-  const [expanded, setExpanded] = useState(false);
-  // 畳むのは、長い束でカードが縦に伸びきらないようにするため。開くのは
-  // このカードの中で、別の窓を重ねない。
-  const shown = expanded ? members : members.slice(0, VISIBLE_MEMBERS);
-  const hidden = members.length - shown.length;
+  const [namesOpen, setNamesOpen] = useState(false);
+  const [preview, setPreview] = useState<CollectionSuggestionMember | null>(null);
+  const [announcement, setAnnouncement] = useState("");
+  const headingRef = useRef<HTMLHeadingElement>(null);
+  const members = useMemo(() => orderedMembers(suggestion, draft), [suggestion, draft]);
+  const chosen = members.filter((member) => !draft.excluded.includes(memberKey(member)));
+  const ordered = suggestion.collectionKind !== "unordered";
+  const authors = [...new Set(members.map((member) => member.authorName))];
+  const sources = [...new Set(members.map((member) => getProvider(member.source).label))];
+  const move = (index: number, delta: number) => {
+    const next = [...members]; const [member] = next.splice(index, 1); next.splice(index + delta, 0, member);
+    onDraft((current) => ({ ...current, order: next.map(memberKey) })); setAnnouncement(`${member.title}を${index + delta + 1}番目へ移動しました`);
+  };
+  const otherNames = suggestion.nameOptions.filter((option) => option.name !== draft.name);
+  const reviewNotes = [...new Set(members.flatMap((member) => member.evidence.filter((item) => ["series_subset", "edition_overlap", "order_conflict", "sequence_gap", "body_unconfirmed"].includes(item.kind)).map((item) => item.label)))];
+  if (preview) return <ReaderPreview member={preview} runtime={runtime} onBack={() => { setPreview(null); window.requestAnimationFrame(() => headingRef.current?.focus()); }} />;
 
-  return (
-    <div className="suggestion-members">
-      {shown.map((member) => {
-        const key = memberKey(member);
-        const dropped = excluded.has(key);
-        return (
-          <button
-            key={key}
-            type="button"
-            className="suggestion-member"
-            data-dropped={dropped || undefined}
-            aria-pressed={!dropped}
-            aria-label={dropped ? `${member.title}を束に戻す` : `${member.title}を束から外す`}
-            onClick={() => onToggle(key)}
-          >
-            <span className="suggestion-member__mark" aria-hidden="true">
-              {dropped ? <Icons.cancel size={IconSize.inline} /> : <Icons.confirm size={IconSize.inline} />}
-            </span>
-            <span className="suggestion-member__cover">
-              <WorkCover work={member} variant="compact" />
-            </span>
-            <span className="suggestion-member__body">
-              {/* 題名は最後まで出す。折らない。
-                  //
-                  // 2行で切っていたが、この棚の題名は長く、しかも**同じ書き出しで
-                  // 始まる作品が束になる**。切った結果が二作とも
-                  // 「鉄壁の聖騎士さまが催眠ねっちょりポリネシアンセックスで…」に
-                  // なり、見分けるための一文字が一つ残らず省略の向こうへ行った。
-                  // 見分けられない一覧は、無いのと同じである。 */}
-              <Text size="sm" fw={600}>{member.title}</Text>
-              <Text size="xs" c="dimmed">
-                {member.authorName}
-                {member.textLength > 0 ? ` · ${formatNumber(member.textLength)}字` : ""}
-              </Text>
-            </span>
-          </button>
-        );
-      })}
-      {hidden > 0 && (
-        <Button variant="subtle" size="compact-xs" onClick={() => setExpanded(true)}>
-          残り{formatNumber(hidden)}作品を見る
-        </Button>
-      )}
-      {expanded && members.length > VISIBLE_MEMBERS && (
-        <Button variant="subtle" size="compact-xs" color="gray" onClick={() => setExpanded(false)}>
-          畳む
-        </Button>
-      )}
+  return <>
+    <div className="discovery-review__scroll">
+      <Button className="discovery-mobile-back" variant="subtle" size="compact-sm" leftSection={<Icons.back size={IconSize.menu} />} onClick={onBack}>候補の一覧へ</Button>
+      <header className="discovery-review__heading"><Group gap="xs"><Badge variant="light" color="gray" size="sm">{suggestion.track === "theme" ? "テーマ" : "続き物"}</Badge><Text size="xs" c="dimmed">{formatNumber(members.length)}作品 · {sources.join(" / ")}</Text></Group><h2 ref={headingRef} tabIndex={-1}>{suggestion.proposedName}</h2><Text size="sm" c="dimmed">{authors.join("、")}</Text></header>
+      <div className="discovery-evidence"><Icons.link size={IconSize.action} /><div><Text size="xs" fw={650}>まとまりの手がかり</Text><Text size="sm">{suggestion.evidenceSummary || "作品の内容と並びを確認してください。"}</Text></div></div>
+      {reviewNotes.length > 0 && <div className="discovery-review-notes"><Text size="xs" fw={650}>確認しておきたいこと</Text><ul>{reviewNotes.map((note) => <li key={note}>{note}</li>)}</ul></div>}
+      <section className="discovery-members-section" aria-label="構成作品の確認">
+        <Group justify="space-between" align="baseline" gap="xs"><Text component="h3" size="sm" fw={700}>{ordered ? "読む順と構成作品" : "構成作品"}</Text><Text size="xs" c="dimmed">{formatNumber(chosen.length)} / {formatNumber(members.length)}作品を選択</Text></Group>
+        <Text size="xs" c="dimmed" mt={4}>{ordered ? "チェックで選び、矢印で読む順を調整できます。" : "コレクションに入れる作品をチェックで選びます。"}</Text>
+        <span className="visually-hidden" role="status" aria-live="polite">{announcement}</span>
+        <ol className="discovery-members">
+          {members.map((member, index) => {
+            const key = memberKey(member); const included = !draft.excluded.includes(key);
+            const evidence = [...new Set(member.evidence.filter((item) => !["series_subset", "edition_overlap", "order_conflict", "sequence_gap", "body_unconfirmed", "cross_source", "title_similarity", "content_link", "unregistered"].includes(item.kind)).map((item) => item.label).filter(Boolean))];
+            return <li key={key} className="discovery-member" data-excluded={!included || undefined}>
+              <div className="discovery-member__selection"><Checkbox checked={included} disabled={busy} aria-label={`${member.title}を含める`} onChange={() => onDraft((current) => ({ ...current, excluded: included ? [...current.excluded, key] : current.excluded.filter((value) => value !== key) }))} />{ordered && <span className="discovery-member__position" aria-label={`${index + 1}番目`}>{index + 1}</span>}</div>
+              <div className="discovery-member__cover"><WorkCover work={member} variant="compact" /></div>
+              <div className="discovery-member__body"><Text size="sm" fw={650} className="discovery-member__title">{member.title}</Text><div className="discovery-member__meta"><span>{getProvider(member.source).label}</span><span>{member.authorName}</span><span>{member.textLength > 0 ? `${formatNumber(member.textLength)}字` : "本文未取得"}</span></div>
+                {evidence.length > 0 && <ul className="discovery-member__evidence">{evidence.slice(0, 2).map((label) => <li key={label}>{label}</li>)}</ul>}
+                {evidence.length > 2 && <details className="discovery-member__more"><summary>ほかの根拠 {evidence.length - 2}件</summary><ul>{evidence.slice(2).map((label) => <li key={label}>{label}</li>)}</ul></details>}
+                <Button variant="subtle" color="gray" size="compact-xs" className="discovery-member__preview" leftSection={<Icons.read size={IconSize.inline} />} disabled={busy || member.downloadId === null} onClick={() => setPreview(member)}>本文を確認</Button>
+              </div>
+              {ordered && <div className="discovery-member__order"><Tooltip label="一つ前へ"><ActionIcon variant="subtle" color="gray" aria-label={`${member.title}を一つ前へ`} disabled={busy || index === 0} onClick={() => move(index, -1)}><Icons.up size={IconSize.menu} /></ActionIcon></Tooltip><Tooltip label="一つ後へ"><ActionIcon variant="subtle" color="gray" aria-label={`${member.title}を一つ後へ`} disabled={busy || index === members.length - 1} onClick={() => move(index, 1)}><Icons.down size={IconSize.menu} /></ActionIcon></Tooltip></div>}
+            </li>;
+          })}
+        </ol>
+      </section>
+      <section className="discovery-name" aria-label="コレクションの名前">
+        <TextInput label="コレクション名" value={draft.name} onChange={(event) => { const value = event.currentTarget.value; onDraft((current) => ({ ...current, name: value })); }} disabled={busy} />
+        <Group justify="space-between" gap="xs" mt={6}>{otherNames.length > 0 && <Button variant="subtle" color="gray" size="compact-xs" rightSection={<Icons.expand size={IconSize.inline} />} onClick={() => setNamesOpen((value) => !value)}>他の名前の案 {formatNumber(otherNames.length)}</Button>}<AssistLauncher size="sm" label="この候補で使える手伝い" items={[{ id: "collection_naming", label: suggestion.nameOptions.some((option) => option.source === "llm") ? "名前案を作り直す" : "名前案を追加する", description: "候補作品の題名とタグから名前を考えます", enabled: namingAvailable && !busy, unavailableReason: namingAvailable ? "ほかの操作が終わるまで待ってください" : "設定でコレクション命名を有効にしてください", onSelect: onName }]} /></Group>
+        <Collapse expanded={namesOpen}><div className="discovery-name-options">{otherNames.map((option) => <button type="button" key={`${option.source}-${option.name}`} disabled={busy} onClick={() => onDraft((current) => ({ ...current, name: option.name }))}><span>{option.name}</span><small>{option.label}{option.source === "llm" && option.modelId ? ` · ${option.modelId}` : ""}{option.source === "llm" && option.createdAt ? ` · ${new Date(option.createdAt).toLocaleDateString("ja-JP")}` : ""}</small></button>)}</div></Collapse>
+      </section>
+      <Button variant="subtle" color="gray" size="compact-xs" className="discovery-reject" disabled={!runtime || busy || chosen.length < 2} onClick={onReject}>この組合せを候補から外す</Button>
     </div>
-  );
+    <footer className="discovery-review__actions"><div className="discovery-review__secondary"><Button variant="default" size="sm" disabled={busy} onClick={onDefer}>{deferred ? "保留を戻す" : "保留して次へ"}</Button><Tooltip label="保存せずに次の候補を確認"><ActionIcon variant="default" size={36} aria-label="次の候補" disabled={busy || !canNext} onClick={onNext}><Icons.next size={IconSize.nav} /></ActionIcon></Tooltip></div><Tooltip label={!runtime ? "プレビューではコレクションを作成できません" : chosen.length < 2 ? "2作品以上を選んでください" : !draft.name.trim() ? "コレクション名を入力してください" : "この順序でコレクションを作成"}><Button size="sm" leftSection={<Icons.confirm size={IconSize.menu} />} loading={accepting} disabled={!runtime || busy || chosen.length < 2 || !draft.name.trim()} onClick={onAccept}>{formatNumber(chosen.length)}作品で作る</Button></Tooltip></footer>
+  </>;
+}
+
+function ReaderPreview({ member, runtime, onBack }: { member: CollectionSuggestionMember; runtime: boolean; onBack: () => void }) {
+  const [page, setPage] = useState(0);
+  const [knownPageCount, setKnownPageCount] = useState(1);
+  const contentRef = useRef<HTMLDivElement>(null);
+  const content = useQuery({
+    queryKey: ["collection-preview", member.downloadId, page],
+    queryFn: () => {
+      if (runtime) return getReaderContentPage(member.downloadId!, null, page, true);
+      const demo = getDemoReader(member.downloadId!);
+      return Promise.resolve({ page: 0, pageCount: 1, plainText: demo.plainText, html: demo.html, totalPlainTextChars: demo.plainText.length, sourcePageStarts: [0] });
+    },
+    enabled: member.downloadId !== null,
+    staleTime: 60_000,
+  });
+  useEffect(() => { if (content.data) setKnownPageCount(content.data.pageCount); }, [content.data]);
+  const pageCount = content.data?.pageCount ?? knownPageCount;
+  const changePage = (next: number) => { setPage(next); contentRef.current?.scrollTo({ top: 0 }); };
+  return <div className="discovery-preview">
+    <header className="discovery-preview__heading"><Button variant="subtle" size="compact-sm" leftSection={<Icons.back size={IconSize.menu} />} onClick={onBack}>候補の確認に戻る</Button><Text size="sm" fw={650}>{member.title}</Text><Text size="xs" c="dimmed">{getProvider(member.source).label} · {member.authorName}</Text></header>
+    <div ref={contentRef} className="discovery-preview__content" tabIndex={0} aria-label="作品の本文">{content.isPending ? <div className="discovery-empty" role="status"><Loader size="sm" /><Text size="sm" c="dimmed">本文を読み込んでいます</Text></div> : content.error ? <Alert color="red" title="本文を読み込めません"><Text size="sm">{errorMessage(content.error)}</Text><Button variant="subtle" size="compact-sm" onClick={() => content.refetch()}>もう一度読み込む</Button></Alert> : content.data?.plainText.trim() ? <div className="discovery-preview__text">{content.data.plainText}</div> : <div className="discovery-empty"><Text size="sm" c="dimmed">この作品の本文は保存されていません。</Text></div>}</div>
+    <footer className="discovery-preview__actions"><Group gap={4}><Button variant="subtle" size="compact-xs" disabled={page === 0 || content.isPending} onClick={() => changePage(0)}>冒頭</Button><Button variant="subtle" size="compact-xs" disabled={page === pageCount - 1 || content.isPending} onClick={() => changePage(pageCount - 1)}>末尾</Button></Group><Group gap="xs"><ActionIcon variant="default" aria-label="本文の前のページ" disabled={page === 0 || content.isPending} onClick={() => changePage(page - 1)}><Icons.previous size={IconSize.menu} /></ActionIcon><Text size="xs" c="dimmed" aria-live="polite">{page + 1} / {pageCount}</Text><ActionIcon variant="default" aria-label="本文の次のページ" disabled={page + 1 >= pageCount || content.isPending} onClick={() => changePage(page + 1)}><Icons.next size={IconSize.menu} /></ActionIcon></Group></footer>
+  </div>;
 }

@@ -16,6 +16,8 @@ use super::*;
 
 use crate::database::collection_rules;
 
+mod discovery;
+
 /// 題名族を束と認める最小の作品数。
 const MIN_BUNDLE: usize = 2;
 /// 一つの束に入れる上限。これを超えるものは束ではなく棚である。
@@ -49,27 +51,11 @@ const BASELINE_PAIRS: usize = 20_000;
 /// 40作の「まとまり」は、まとまりではなく棚である。読む単位として持てる
 /// 大きさに収まるまで締める。
 const THEME_MAX_MEMBERS: usize = 24;
-/// 走査でいちどに出す候補の上限。系統ごとに分けて数える。
-///
-/// 一つの上限を共有すると、数の多いほうが少ないほうを押し出す。実データでは
-/// テーマ331件が続き物を69件まで削っていた。
-///
-/// 200件だったものを8件へ落とした。**200件の候補は、候補ではなく仕事である。**
-/// 1件ずつ中身を確かめて採否を決める操作なので、一度に出す量は一画面に収まり、
-/// その場で片付く数でなければならない。取りこぼしは「もう一度探す」で拾う —
-/// 選び方に乱れを入れてあるので、二度目には別の束が上がってくる。
-const MAX_SWEEP_PER_TRACK: usize = 8;
-/// これを下回る確度の束は、そもそも出さない。
-///
-/// 上限を8件にしただけでは足りない。棚に弱い束しか無いとき、上位8件は
-/// 「いちばんマシな8件」であって「出すに値する8件」ではないからである。
+/// 候補は安定した順序で最大200件。画面では一覧から一件ずつ確認する。
+const MAX_SWEEP_PER_TRACK: usize = 200;
+/// 弱い候補で件数を埋めない。
 pub(super) const MIN_STRENGTH: f64 = 0.55;
-/// 重み付き抽出の効き具合。大きいほど確度の高い束に寄る。
-///
-/// 毎回まったく同じ8件を出すと、9番目以降は永久に日の目を見ない。かといって
-/// 一様な籤にすると、確度を測った意味が無くなる。確度の累乗を重みにして、
-/// 強い束をほぼ必ず含みつつ、下位にも席を残す。
-const SELECTION_SHARPNESS: f64 = 8.0;
+
 /// 保存した検索として勧めるタグの数。多く出しても、どれも保存されない。
 const MAX_SAVED_SEARCH_SUGGESTIONS: usize = 8;
 
@@ -95,9 +81,8 @@ impl SweepWork {
     /// 前編と FANBOX の後編を同じまとまりにする、というコレクションの一番の
     /// 目的が果たせなくなる。
     ///
-    /// だから表示名で束ねる。同姓同名の別人が同じ題名で書いている確率より、
-    /// 同じ人が二つの取得元に同じ作品を出している確率のほうがはるかに高い。
-    /// 呼び出し側は題名の一致も同時に要求するので、名前だけでは束ねない。
+    /// 表示名は候補検索の鍵であり、本人確認の証拠ではない。呼び出し側は
+    /// 題名も照合し、同じ取得元に異なる作者IDがある組合せは統合しない。
     fn author_key(&self) -> String {
         let name = self.author_name.trim();
         if name.is_empty() {
@@ -192,19 +177,12 @@ impl SweepBundle {
 }
 
 impl Database {
-    /// 棚全体を走査して、束の候補を作り直す。
-    ///
-    /// 走査で作った候補は毎回入れ替える。前回の走査で出たものが残り続けると、
-    /// 「あとで」と送ったはずのものが規則を直しても消えない。**利用者が
-    /// 「二度と出さない」と言ったものだけ**は `collection_pair_feedback` が
-    /// 覚えているので、作り直しても戻ってこない。
-    ///
-    /// 1作から広げた候補（`origin = 'seed'`）には触らない。あれは利用者が
-    /// 自分で作らせたものである。
+    /// 保存データを走査し、同じ規則・顔ぶれには同じ候補IDを割り当てる。
+    /// 採否の記録と、作品から作った候補は維持する。
     pub fn sweep_collection_candidates(&self) -> Result<CollectionSweepResult, String> {
         // 別版は代表だけを残す。残さないと「【おまけ付き】【モモ編】…」と
         // 「【モモ編】…」が別の作品として同じ束に二度並ぶ。
-        let works = keep_edition_representatives(self.load_sweep_works()?);
+        let (works, aliases) = keep_edition_representatives(self.load_sweep_works()?);
         if works.len() < MIN_BUNDLE {
             return Ok(CollectionSweepResult {
                 bundles: Vec::new(),
@@ -219,21 +197,36 @@ impl Database {
             .collect::<HashMap<_, _>>();
 
         let mut bundles = Vec::new();
-        bundles.extend(self.sweep_link_components(&by_id)?);
+        bundles.extend(self.sweep_link_components(&by_id, &aliases)?);
         bundles.extend(sweep_title_families(&works));
         bundles.extend(self.sweep_series_runs(&by_id)?);
-        let mut sequences = merge_overlapping(bundles);
+        let mut sequences = deduplicate_sequences(bundles);
+        let context = discovery::contextualize(self, &mut sequences, &by_id, &aliases)?;
 
+        sequences = deduplicate_sequences(sequences);
         let mut themes = self.sweep_themes(&by_id)?;
 
         // すでに利用者が作ったコレクションを、走査の「新しい発見」として
-        // もう一度出してはいけない。抽選したあとで落とすと、その重複が8件の
-        // 枠を一つ使い、まだ見ていない束を押し出すため、系統ごとの抽選より前に
+        // もう一度出してはいけない。選抜したあとで落とすと、その重複が
+        // 枠を一つ使い、まだ見ていない束を押し出すため、系統ごとの選抜より前に
         // 除く。順序付きコレクションでも、ここで知りたいのは顔ぶれの一致である。
-        let existing = {
+        let (existing, rejected_pairs) = {
             let conn = self.read_conn()?;
-            load_existing_collection_member_sets(&conn)?
+            (
+                load_existing_collection_member_sets(&conn)?,
+                load_rejected_pairs(&conn)?,
+            )
         };
+        let allowed = |bundle: &SweepBundle| {
+            let members = bundle
+                .ids
+                .iter()
+                .filter_map(|id| by_id.get(id))
+                .collect::<Vec<_>>();
+            !bundle_is_rejected(&rejected_pairs, &members).unwrap_or(true)
+        };
+        sequences.retain(allowed);
+        themes.bundles.retain(allowed);
         sequences.retain(|bundle| !bundle_matches_existing_collection(bundle, &by_id, &existing));
         themes
             .bundles
@@ -241,10 +234,28 @@ impl Database {
 
         // 続き物を先に置く。読む順のある束は、見つかったときの価値が大きい。
         // 上限は系統ごとにかける — 数の多いほうが少ないほうを押し出さないため。
-        let mut all = select_track(sequences);
+        // シリーズ未登録の作品を含む発見から確認できるよう、優先枠を先に取る。
+        let (unregistered, within_series): (Vec<_>, Vec<_>) =
+            sequences.into_iter().partition(|bundle| {
+                bundle.ids.iter().any(|id| {
+                    context
+                        .details
+                        .get(&(bundle.ids.clone(), *id))
+                        .is_some_and(|items| items.iter().any(|e| e.kind == "unregistered"))
+                })
+            });
+        let within_series = select_track(within_series);
+        let unregistered = select_track(unregistered);
+        let reserved = within_series.len().min(MAX_SWEEP_PER_TRACK / 4);
+        let mut all = unregistered
+            .into_iter()
+            .take(MAX_SWEEP_PER_TRACK - reserved)
+            .collect::<Vec<_>>();
+        let remaining = MAX_SWEEP_PER_TRACK.saturating_sub(all.len());
+        all.extend(within_series.into_iter().take(remaining));
         all.extend(select_track(themes.bundles));
 
-        let bundles = self.replace_swept_suggestions(&all, &by_id)?;
+        let bundles = self.replace_swept_suggestions(&all, &by_id, &context)?;
         Ok(CollectionSweepResult {
             bundles,
             saved_search_suggestions: themes.saved_searches,
@@ -302,17 +313,19 @@ impl Database {
     fn sweep_link_components(
         &self,
         by_id: &HashMap<i64, SweepWork>,
+        aliases: &HashMap<i64, i64>,
     ) -> Result<Vec<SweepBundle>, String> {
         let conn = self.read_conn()?;
         let hubs = load_link_hub_ids(&conn)?;
         let mut stmt = conn
             .prepare(
-                "SELECT from_download_id, to_download_id, confidence
+                "SELECT from_download_id, to_download_id, confidence, context_text
                  FROM work_links
                  WHERE status != 'rejected'
                    AND from_download_id IS NOT NULL
                    AND to_download_id IS NOT NULL
-                   AND confidence >= 0.6",
+                   AND confidence >= 0.6
+                   AND relation_type IN ('continues_from', 'continues_to')",
             )
             .map_err(|e| format!("Failed to prepare sweep links: {e}"))?;
         let rows = stmt
@@ -321,6 +334,7 @@ impl Database {
                     row.get::<_, i64>(0)?,
                     row.get::<_, i64>(1)?,
                     row.get::<_, f64>(2)?,
+                    row.get::<_, Option<String>>(3)?,
                 ))
             })
             .map_err(|e| format!("Failed to query sweep links: {e}"))?;
@@ -331,11 +345,22 @@ impl Database {
         // 鍵は小さいほうの id を先に置いて、向きの違いで二重に数えない。
         let mut edge_confidence: HashMap<(i64, i64), f64> = HashMap::new();
         for row in rows {
-            let (from, to, confidence) =
+            let (from, to, confidence, quote) =
                 row.map_err(|e| format!("Failed to read sweep links: {e}"))?;
+            if discovery::ambiguous_link_context(quote.as_deref().unwrap_or_default()) {
+                continue;
+            }
+            let from = aliases.get(&from).copied().unwrap_or(from);
+            let to = aliases.get(&to).copied().unwrap_or(to);
+            if from == to {
+                continue;
+            }
             // 告知として落とした作品はここに居ない。ハブは端点にはなれるが、
             // 渡って先へ行く橋にはしない。
             if !by_id.contains_key(&from) || !by_id.contains_key(&to) {
+                continue;
+            }
+            if discovery::same_episode(&by_id[&from], &by_id[&to]) {
                 continue;
             }
             if hubs.contains(&from) || hubs.contains(&to) {
@@ -601,6 +626,7 @@ impl Database {
         &self,
         bundles: &[SweepBundle],
         by_id: &HashMap<i64, SweepWork>,
+        context: &discovery::DiscoveryContext,
     ) -> Result<Vec<CollectionSuggestion>, String> {
         let now = chrono::Utc::now().to_rfc3339();
         let rule_version = COLLECTION_SUGGEST_RULE_VERSION.to_string();
@@ -620,11 +646,19 @@ impl Database {
                 if bundle_is_rejected(&rejected_pairs, &members)? {
                     continue;
                 }
-                let members = fold_composite_volumes(members);
+                let members = if bundle.track == "sequence" {
+                    members
+                } else {
+                    fold_composite_volumes(members)
+                };
                 if members.len() < MIN_BUNDLE {
                     continue;
                 }
-                let ordered = order_bundle_members(&members, bundle.track);
+                let ordered = if bundle.track == "sequence" {
+                    discovery::ordered(&members, &context.edges)
+                } else {
+                    order_bundle_members(&members, bundle.track)
+                };
                 let ids_json = serde_json::to_string(&bundle.ids)
                     .map_err(|e| format!("Failed to encode sweep seeds: {e}"))?;
                 // 根拠の文は、まとめ終わったあとの顔ぶれで数え直す。
@@ -651,7 +685,19 @@ impl Database {
                         proposed_position: position as i64,
                         score: 1.0,
                         selected: true,
-                        evidence: bundle.member_evidence.clone(),
+                        evidence: bundle
+                            .member_evidence
+                            .iter()
+                            .cloned()
+                            .chain(
+                                (bundle.track == "sequence")
+                                    .then(|| context.details.get(&(bundle.ids.clone(), work.id)))
+                                    .flatten()
+                                    .into_iter()
+                                    .flatten()
+                                    .cloned(),
+                            )
+                            .collect(),
                     })
                     .collect::<Vec<_>>();
                 prepared.push((bundle, ids_json, names, suggestion_members, evidence));
@@ -659,17 +705,67 @@ impl Database {
         }
 
         let mut saved = Vec::new();
+        let mut saved_ids = HashSet::new();
         let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
         let tx = conn
             .transaction()
             .map_err(|e| format!("Sweep transaction failed: {e}"))?;
+        let previous_names = {
+            let mut stmt=tx.prepare("SELECT id,name_options_json FROM collection_suggestions WHERE origin='sweep' AND state='pending'").map_err(|e|e.to_string())?;
+            let collected = stmt
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(|e| e.to_string())?
+                .collect::<Result<HashMap<_, _>, _>>()
+                .map_err(|e| e.to_string())?;
+            collected
+        };
         tx.execute(
             "DELETE FROM collection_suggestions WHERE origin = 'sweep' AND state = 'pending'",
             [],
         )
         .map_err(|e| format!("Failed to clear swept suggestions: {e}"))?;
-        for (bundle, ids_json, names, members, evidence) in prepared {
-            let id = new_collection_id("sweep");
+        for (bundle, ids_json, mut names, members, evidence) in prepared {
+            use sha2::{Digest, Sha256};
+            let mut stable_keys = members
+                .iter()
+                .map(|m| (&m.source, &m.source_id))
+                .collect::<Vec<_>>();
+            stable_keys.sort();
+            let identity = serde_json::to_vec(&(&rule_version, bundle.track, stable_keys))
+                .map_err(|e| e.to_string())?;
+            let digest = Sha256::digest(identity);
+            let id = format!(
+                "sweep-{}",
+                digest
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>()
+            );
+            if !saved_ids.insert(id.clone()) {
+                continue;
+            }
+            let previous_state = tx
+                .query_row(
+                    "SELECT state FROM collection_suggestions WHERE id=?1",
+                    params![id],
+                    |r| r.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(|e| e.to_string())?;
+            if previous_state.is_some_and(|state| state != "pending") {
+                continue;
+            }
+            if let Some(previous) = previous_names.get(&id) {
+                let previous: Vec<CollectionNameCandidate> =
+                    serde_json::from_str(previous).map_err(|e| e.to_string())?;
+                for option in previous.into_iter().filter(|option| option.source == "llm") {
+                    if !names.iter().any(|name| name.name == option.name) {
+                        names.push(option);
+                    }
+                }
+            }
             let proposed_name = names
                 .first()
                 .map(|value| value.name.clone())
@@ -777,7 +873,11 @@ fn bundle_matches_existing_collection(
         .iter()
         .filter_map(|id| by_id.get(id))
         .collect::<Vec<_>>();
-    let visible_members = fold_composite_volumes(members);
+    let visible_members = if bundle.track == "sequence" {
+        members
+    } else {
+        fold_composite_volumes(members)
+    };
     let keys = visible_members
         .into_iter()
         .map(|work| (work.source.clone(), work.source_id.clone()))
@@ -826,7 +926,7 @@ fn fold_composite_volumes(members: Vec<&SweepWork>) -> Vec<&SweepWork> {
 ///
 /// 代表は本文がいちばん長いもの — サンプルは導入だけのことが多い。
 /// **前編と後編は鍵が違う**ので、ここで畳まれることはない。
-fn keep_edition_representatives(works: Vec<SweepWork>) -> Vec<SweepWork> {
+fn keep_edition_representatives(works: Vec<SweepWork>) -> (Vec<SweepWork>, HashMap<i64, i64>) {
     let mut groups: HashMap<(String, String), Vec<SweepWork>> = HashMap::new();
     for work in works {
         let key = collection_rules::edition_match_key(&work.title);
@@ -836,58 +936,149 @@ fn keep_edition_representatives(works: Vec<SweepWork>) -> Vec<SweepWork> {
             .push(work);
     }
     let mut out = Vec::new();
+    let mut aliases = HashMap::new();
     for (_, mut group) in groups {
+        let mut author_ids: HashMap<&str, HashSet<&str>> = HashMap::new();
+        for work in &group {
+            author_ids
+                .entry(&work.source)
+                .or_default()
+                .insert(&work.author_id);
+        }
+        if author_ids.values().any(|ids| ids.len() > 1) {
+            for work in group {
+                aliases.insert(work.id, work.id);
+                out.push(work);
+            }
+            continue;
+        }
         group.sort_by(|left, right| {
             right
                 .text_length
                 .cmp(&left.text_length)
                 .then_with(|| left.id.cmp(&right.id))
         });
+        for work in &group {
+            aliases.insert(work.id, group[0].id);
+        }
         out.push(group.remove(0));
     }
     out.sort_by_key(|work| work.id);
-    out
+    (out, aliases)
 }
 
 /// 同一作者・共通語幹・どれかに話数の語がある題名の並び。
 fn sweep_title_families(works: &[SweepWork]) -> Vec<SweepBundle> {
+    let parsed = works
+        .iter()
+        .map(|w| (w.id, collection_rules::parse_sequence_title(&w.title)))
+        .collect::<HashMap<_, _>>();
     let mut families: HashMap<(String, String), Vec<&SweepWork>> = HashMap::new();
     for work in works {
-        let key = collection_rules::family_match_key(&work.title);
-        // 短い語幹は違う作品どうしを結びつけてしまう。
-        if key.chars().count() < 9 {
+        let title = &parsed[&work.id];
+        if title.key.chars().count() < 2 || title.is_composite {
             continue;
         }
         families
-            .entry((work.author_key(), key.chars().take(26).collect()))
+            .entry((work.author_key(), title.key.clone()))
             .or_default()
             .push(work);
     }
-    let mut out = families
-        .into_values()
-        .filter(|group| (MIN_BUNDLE..=MAX_BUNDLE).contains(&group.len()))
-        // 語幹が同じだけでは足りない。どれかに話数の語が要る。同じ書き出しの
-        // 独立した短編を、連載として束ねないため。
-        .filter(|group| {
-            group
-                .iter()
-                .any(|work| collection_rules::has_ordinal_marker(&work.title))
-        })
-        .map(|group| SweepBundle {
+    let mut result = Vec::new();
+    let mut groups = Vec::new();
+    for group in families.into_values() {
+        let mut chapters: HashMap<Vec<i64>, Vec<&SweepWork>> = HashMap::new();
+        for work in &group {
+            let path = &parsed[&work.id].order_path;
+            if path.len() > 1 {
+                chapters
+                    .entry(path[..path.len() - 1].to_vec())
+                    .or_default()
+                    .push(*work);
+            }
+        }
+        groups.extend(
+            chapters
+                .into_values()
+                .filter(|chapter| chapter.len() < group.len()),
+        );
+        groups.push(group);
+    }
+    for group in groups {
+        if !(MIN_BUNDLE..=MAX_BUNDLE).contains(&group.len()) {
+            continue;
+        }
+        // 同一サービスでIDが異なる同名作者を、表示名だけで結ばない。
+        let mut authors: HashMap<&str, HashSet<&str>> = HashMap::new();
+        for work in &group {
+            authors
+                .entry(&work.source)
+                .or_default()
+                .insert(&work.author_id);
+        }
+        if authors.values().any(|ids| ids.len() > 1) {
+            continue;
+        }
+        let numbered = group
+            .iter()
+            .filter(|w| !parsed[&w.id].order_path.is_empty())
+            .collect::<Vec<_>>();
+        if numbered.is_empty() {
+            continue;
+        }
+        let distinct = numbered
+            .iter()
+            .map(|w| parsed[&w.id].order_path.clone())
+            .collect::<HashSet<_>>();
+        if distinct.len() < 2
+            && !(numbered.len() == 1
+                && group.len() == 2
+                && parsed[&numbered[0].id]
+                    .order_path
+                    .first()
+                    .is_some_and(|n| *n == 2 || *n == 3))
+        {
+            continue;
+        }
+        // 同じ話数の別作品・別版を一つの連載へ混ぜない。本文リンク経路は別に残る。
+        if distinct.len() != numbered.len() {
+            continue;
+        }
+        let ratio = numbered.len() as f64 / group.len() as f64;
+        result.push(SweepBundle {
+            ids: group.iter().map(|w| w.id).collect(),
+            track: "sequence",
             kind: BundleKind::TitleRun,
             member_evidence: vec![CollectionSuggestionEvidence {
-                kind: "title_similarity".to_string(),
-                label: "題名の連番".to_string(),
+                kind: "title_similarity".into(),
+                label: "本題が一致し、話数・前後編が異なります".into(),
                 contribution: 0.6,
             }],
-            strength: title_family_strength(&group),
-            ids: group.iter().map(|work| work.id).collect(),
-            track: "sequence",
-        })
-        .collect::<Vec<_>>();
-    // 走査のたびに同じ順で出す。HashMap の順は実行ごとに変わる。
-    out.sort_by(|left, right| left.ids.first().cmp(&right.ids.first()));
-    out
+            strength: (0.70 + 0.20 * ratio).min(0.95),
+        });
+    }
+    result.sort_by_key(|b| b.ids[0]);
+    result
+}
+
+/// 内側の前後編を大きな連載へ吸収しない。顔ぶれが同一の経路だけ統合する。
+fn deduplicate_sequences(bundles: Vec<SweepBundle>) -> Vec<SweepBundle> {
+    let mut unique: std::collections::BTreeMap<Vec<i64>, SweepBundle> =
+        std::collections::BTreeMap::new();
+    for mut bundle in bundles {
+        bundle.ids.sort_unstable();
+        bundle.ids.dedup();
+        if let Some(existing) = unique.get_mut(&bundle.ids) {
+            if bundle.strength > existing.strength {
+                existing.strength = bundle.strength;
+                existing.kind = bundle.kind;
+            }
+            existing.member_evidence.extend(bundle.member_evidence);
+        } else {
+            unique.insert(bundle.ids.clone(), bundle);
+        }
+    }
+    unique.into_values().collect()
 }
 
 /// 本文リンクの塊の確からしさ。
@@ -912,32 +1103,6 @@ fn link_component_strength(ids: &[i64], edges: &HashMap<(i64, i64), f64>) -> f64
         return 0.6;
     }
     (total / count as f64).clamp(0.0, 1.0)
-}
-
-/// 題名族の確からしさ。
-///
-/// 二つのことを見る。
-///
-///   1. 何割に話数の語（「その3」「③」「後編」）が付いているか。1作だけに
-///      付いた族は、連載ではなく偶然かもしれない。
-///   2. 共通の語幹がどれだけ長いか。9文字でぎりぎり通した族と、26文字が
-///      丸ごと一致する族を同じ確度で扱う理由は無い。
-fn title_family_strength(group: &[&SweepWork]) -> f64 {
-    if group.is_empty() {
-        return 0.0;
-    }
-    let ordinals = group
-        .iter()
-        .filter(|work| collection_rules::has_ordinal_marker(&work.title))
-        .count();
-    let ordinal_ratio = ordinals as f64 / group.len() as f64;
-    // 族の鍵は全員で同じなので、先頭の一作から測れば足りる。
-    let stem = collection_rules::family_match_key(&group[0].title)
-        .chars()
-        .count()
-        .min(26);
-    let stem_score = ((stem.saturating_sub(9)) as f64 / 17.0).clamp(0.0, 1.0);
-    (0.50 + 0.30 * ordinal_ratio + 0.20 * stem_score).clamp(0.0, 1.0)
 }
 
 /// テーマ束の確からしさ。
@@ -1181,16 +1346,11 @@ fn order_bundle_members<'a>(members: &[&'a SweepWork], track: &str) -> Vec<&'a S
     let mut ordered = members.to_vec();
     if track == "sequence" {
         ordered.sort_by(|left, right| {
-            let a = collection_rules::episode_order(&left.title);
-            let b = collection_rules::episode_order(&right.title);
-            match (a, b) {
-                (Some(a), Some(b)) => a.cmp(&b),
-                (Some(_), None) => Ordering::Less,
-                (None, Some(_)) => Ordering::Greater,
-                (None, None) => Ordering::Equal,
-            }
-            .then_with(|| left.published_at.cmp(&right.published_at))
-            .then_with(|| left.id.cmp(&right.id))
+            let a = collection_rules::parse_sequence_title(&left.title).order_path;
+            let b = collection_rules::parse_sequence_title(&right.title).order_path;
+            a.cmp(&b)
+                .then_with(|| left.published_at.cmp(&right.published_at))
+                .then_with(|| left.id.cmp(&right.id))
         });
     } else {
         ordered.sort_by(|left, right| {
@@ -1293,6 +1453,69 @@ fn sweep_name_options(
         })
         .collect::<Vec<_>>();
     let mut options = collection_name_options(conn, &ranked, ids_json)?;
+    if anchor_tag.is_none() {
+        let titles = members
+            .iter()
+            .map(|work| collection_rules::parse_sequence_title(&work.title))
+            .collect::<Vec<_>>();
+        if let Some(first) = titles
+            .first()
+            .filter(|first| !first.key.is_empty() && titles.iter().all(|t| t.key == first.key))
+        {
+            let shared_parent = first.order_path.len() > 1
+                && titles.iter().all(|title| {
+                    title.order_path.len() == first.order_path.len()
+                        && title.order_path[..title.order_path.len() - 1]
+                            == first.order_path[..first.order_path.len() - 1]
+                });
+            let name = if shared_parent {
+                let parent = first
+                    .ordinal_label
+                    .as_deref()
+                    .unwrap_or("")
+                    .split(" · ")
+                    .take(first.order_path.len() - 1)
+                    .collect::<Vec<_>>()
+                    .join(" · ");
+                format!("{} {parent}", first.display_stem)
+            } else {
+                first.display_stem.clone()
+            };
+            let name = collection_rules::clamp_name(&name, COLLECTION_NAME_MAX_CHARS);
+            options.retain(|option| option.name != name);
+            options.insert(
+                0,
+                CollectionNameCandidate {
+                    source: "title".into(),
+                    label: "話数を除いた本題".into(),
+                    name,
+                    ..Default::default()
+                },
+            );
+        } else if options
+            .first()
+            .is_some_and(|option| option.source == "author")
+        {
+            // 作者だけの名前が並ぶと候補を見分けられない。共通題名がなくても、
+            // 読む順の先頭作品を示す仮名から確認と命名を始められるようにする。
+            if let Some(first) = members.first().filter(|work| !work.title.trim().is_empty()) {
+                let name = collection_rules::clamp_name(
+                    &format!("「{}」からの連作", first.title.trim()),
+                    COLLECTION_NAME_MAX_CHARS,
+                );
+                options.insert(
+                    0,
+                    CollectionNameCandidate {
+                        source: "title".into(),
+                        label: "先頭作品からの仮の名前".into(),
+                        name,
+                        ..Default::default()
+                    },
+                );
+            }
+        }
+    }
+
     // テーマの束は、束ねた理由がタグそのものである。共有タグを先頭に置かないと、
     // たまたま並びの先頭に来た1作の題名が束全体の名前になる。
     if anchor_tag.is_some() {
@@ -1314,73 +1537,19 @@ fn sweep_name_options(
     Ok(options)
 }
 
-/// 大きい束から順に、系統ごとの上限まで残す。
-/// 系統ひとつぶんから、出す束を選ぶ。
-///
-/// 以前はここが「大きい順に200件」だった。二つとも間違っていた。
-///
-/// **大きさで並べるのが間違い。** 大きい束ほど根拠が薄い。共有タグで24作が
-/// 集まったものより、本文リンクでつながった3作のほうが確かである。大きい順に
-/// 採ると、いちばん確かなものから順に切り捨てることになる。
-///
-/// **200件出すのが間違い。** 候補は1件ずつ中身を見て採否を決めるものなので、
-/// 200件は候補ではなく仕事である。実際、利用者は全部閉じるほうを選んだ。
-///
-/// そこで確度で並べ、下限を切り、少数だけ採る。ただし毎回まったく同じ顔ぶれに
-/// はしない — 確度の累乗を重みにした籤で引く（Efraimidis–Spirakis）。強い束は
-/// ほぼ必ず入るが、下位にも席が回るので、もう一度探せば別の束が出てくる。
+/// 確認する順序を固定する。同じ棚で再探索しても候補を抽選し直さない。
 fn select_track(bundles: Vec<SweepBundle>) -> Vec<SweepBundle> {
     let mut eligible = bundles
         .into_iter()
-        .filter(|bundle| bundle.strength >= MIN_STRENGTH)
+        .filter(|b| b.strength >= MIN_STRENGTH)
         .collect::<Vec<_>>();
-    if eligible.len() <= MAX_SWEEP_PER_TRACK {
-        // 選ぶ余地が無いなら籤も引かない。乱数を使わなければ、この場合の
-        // 結果は走査するたびに同じになる。
-        eligible.sort_by(|left, right| {
-            right
-                .strength
-                .total_cmp(&left.strength)
-                .then_with(|| left.ids.first().cmp(&right.ids.first()))
-        });
-        return eligible;
-    }
-
-    // 鍵は u^(1/w)。対数を取ると ln(u)/w で、ln(u) は負なので w が大きいほど
-    // 0 に近づく＝鍵が大きい。上位 k 件を採ると、重み w に比例した非復元抽出に
-    // なる。w = 確度^SELECTION_SHARPNESS。
-    let mut keyed = eligible
-        .into_iter()
-        .map(|bundle| {
-            let weight = bundle
-                .strength
-                .powf(SELECTION_SHARPNESS)
-                .max(f64::MIN_POSITIVE);
-            // 0 を引くと ln が -inf になる。開区間へ寄せてから取る。
-            let uniform = rand::random::<f64>().clamp(f64::MIN_POSITIVE, 1.0);
-            (uniform.ln() / weight, bundle)
-        })
-        .collect::<Vec<_>>();
-    keyed.sort_by(|left, right| {
-        right
-            .0
-            .total_cmp(&left.0)
-            .then_with(|| left.1.ids.first().cmp(&right.1.ids.first()))
+    eligible.sort_by(|a, b| {
+        b.strength
+            .total_cmp(&a.strength)
+            .then_with(|| a.ids.cmp(&b.ids))
     });
-    keyed.truncate(MAX_SWEEP_PER_TRACK);
-    let mut out = keyed
-        .into_iter()
-        .map(|(_, bundle)| bundle)
-        .collect::<Vec<_>>();
-    // 画面に出す順は籤の順ではなく確度の順。何が選ばれたかは籤で決まるが、
-    // 選ばれたものの中では確かなものを先に見せる。
-    out.sort_by(|left, right| {
-        right
-            .strength
-            .total_cmp(&left.strength)
-            .then_with(|| left.ids.first().cmp(&right.ids.first()))
-    });
-    out
+    eligible.truncate(MAX_SWEEP_PER_TRACK);
+    eligible
 }
 
 /// 無向グラフの連結成分。
@@ -1413,6 +1582,44 @@ fn connected_components(adjacency: &HashMap<i64, HashSet<i64>>) -> Vec<Vec<i64>>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn existing_collection_comparison_uses_the_members_actually_shown() {
+        let works = ["星の舟 前編", "星の舟 中編", "【前編＋中編】星の舟"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, title)| {
+                let id = index as i64;
+                (
+                    id,
+                    SweepWork {
+                        id,
+                        source: "pixiv".into(),
+                        source_id: id.to_string(),
+                        title: title.into(),
+                        author_name: "架空作者".into(),
+                        author_id: "author".into(),
+                        cover_path: None,
+                        text_length: 3000,
+                        published_at: String::new(),
+                    },
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        let existing = HashSet::from([vec![
+            ("pixiv".into(), "0".into()),
+            ("pixiv".into(), "1".into()),
+        ]]);
+        let mut candidate = bundle(0, 3, 0.9);
+        assert!(bundle_matches_existing_collection(
+            &candidate, &works, &existing
+        ));
+        // 本文検査で重複を確定できなかった続き物は、表示する3作で比較する。
+        candidate.track = "sequence";
+        assert!(!bundle_matches_existing_collection(
+            &candidate, &works, &existing
+        ));
+    }
 
     fn centroids(entries: &[(i64, &[f32])]) -> HashMap<i64, Vec<f32>> {
         entries
@@ -1454,18 +1661,18 @@ mod tests {
 
     /// 下限を下回る束は、上位に他が無くても出さない。
     ///
-    /// 「いちばんマシな8件」と「出すに値する8件」は違う。
+    /// 上限まで埋めるために、根拠の弱い候補を足さない。
     #[test]
     fn a_shelf_with_only_weak_bundles_yields_nothing() {
         let picked = select_track(vec![bundle(1, 10, 0.30), bundle(50, 6, 0.51)]);
         assert!(picked.is_empty(), "{}件出ている", picked.len());
     }
 
-    /// 上限を超えたら籤で引く。強い束はほぼ必ず残り、順序は確度の順になる。
+    /// 上限を超えたら根拠の強さで選び、同点の順序も固定する。
     #[test]
     fn selection_caps_the_count_and_orders_by_confidence() {
         let mut bundles = vec![bundle(0, 4, 0.99)];
-        for index in 1..30 {
+        for index in 1..230 {
             bundles.push(bundle(index * 10, 4, 0.60));
         }
         let picked = select_track(bundles);
@@ -1476,7 +1683,7 @@ mod tests {
         }
     }
 
-    /// 選ぶ余地が無いときは籤を引かない。同じ棚を二度走査したら同じ答えになる。
+    /// 同じ棚を二度走査したら同じ答えになる。
     #[test]
     fn a_small_pool_is_deterministic() {
         let make = || vec![bundle(1, 3, 0.9), bundle(10, 5, 0.7)];
@@ -1496,24 +1703,15 @@ mod tests {
     /// 確度が同じ束ばかりを並べて、20回引いて一度も違いが出なければ、
     /// 乱れが効いていない。
     #[test]
-    fn selection_is_not_always_the_same_faces() {
+    fn repeated_selection_keeps_all_candidates_in_stable_order() {
         let make = || {
-            (0..40)
-                .map(|index| bundle(index * 10, 4, 0.80))
+            (0..240)
+                .map(|i| bundle(i * 10, 4, 0.80))
                 .collect::<Vec<_>>()
         };
-        let first = select_track(make())
-            .iter()
-            .map(|value| value.ids[0])
-            .collect::<Vec<_>>();
-        let changed = (0..20).any(|_| {
-            select_track(make())
-                .iter()
-                .map(|value| value.ids[0])
-                .collect::<Vec<_>>()
-                != first
-        });
-        assert!(changed, "20回引いても同じ8件しか出ない");
+        let ids = |values: Vec<SweepBundle>| values.into_iter().map(|b| b.ids).collect::<Vec<_>>();
+        assert_eq!(ids(select_track(make())), ids(select_track(make())));
+        assert_eq!(select_track(make()).len(), MAX_SWEEP_PER_TRACK);
     }
 
     /// テーマ束の確度は、棚の水準からの隔たりで決まる。

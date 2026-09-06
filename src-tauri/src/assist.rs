@@ -31,8 +31,10 @@ use sha2::{Digest, Sha256};
 
 use crate::database::collection_rules;
 
-/// 名前は棚のカードに出る。行に収まらない長さは案として使えない。
-const MAX_NAME_CHARS: usize = 42;
+/// 名前の上限。頼みでは18文字と書いてあるので、ここに掛かるのは指示を
+/// 無視した応答だけ。**行に収まるかどうかで切ってはいけない** - それは
+/// 描く側の都合で、蓄える文字を捨てる理由にならない。
+const MAX_NAME_CHARS: usize = collection_rules::NAME_STORAGE_MAX_CHARS;
 /// 長編の部分抽出では、モデルの初回ロードと十分な思考時間も含めて待つ。
 /// 60秒では、GPUへ載せた直後や長いチャンクで正常な応答まで打ち切っていた。
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(180);
@@ -2317,9 +2319,16 @@ mod tests {
     fn empty_or_overlong_names_are_refused_or_trimmed() {
         assert!(parse_named_bundle("{\"name\":\"\",\"subtitle\":\"\"}").is_err());
         assert!(parse_named_bundle("名前ではない文字列").is_err());
+        // 18文字と頼んである。80文字は長いが名前として読めるので、そのまま通す
+        // ——切ってしまうと、束を見分ける語がちょうど省略の向こうへ行く。
         let long = "あ".repeat(80);
-        let parsed =
+        let kept =
             parse_named_bundle(&format!("{{\"name\":\"{long}\",\"subtitle\":\"\"}}")).unwrap();
+        assert_eq!(kept.name, long);
+        // 蓄える上限を超えたものだけを切る。生成の事故を疑う長さである。
+        let runaway = "あ".repeat(MAX_NAME_CHARS + 40);
+        let parsed =
+            parse_named_bundle(&format!("{{\"name\":\"{runaway}\",\"subtitle\":\"\"}}")).unwrap();
         assert!(parsed.name.chars().count() <= MAX_NAME_CHARS + 1);
         assert!(parsed.name.ends_with('…'));
     }

@@ -1,13 +1,14 @@
 //! 実データに対して束の走査を走らせ、何が出るかを見る。
 //!
 //! 試験用の小さな棚では、規則が効いているかどうかまでは分からない。
-//! 3,900作の棚に当てて、束の数と中身を目で確かめるための道具である。
+//! 実際の棚の写しに当てて、束の数と中身を目で確かめるための道具である。
 //!
 //! **書き込む。** 必ず本番の DB ではなく写しを渡すこと。
 //!
 //!     cargo run --example collection_sweep_probe -- <piep.db の写し> <storage_dir>
 //!
-//! `storage_dir` は `downloads` フォルダ（意味索引はその隣の `search/` を見る）。
+//! `storage_dir` も検証専用のディレクトリを渡す。起動復旧ジャーナルが空であることを確認する。
+//! 意味索引はその隣の `search/` を見るため、索引を複製しなければテーマの検証は省略される。
 
 use std::path::Path;
 
@@ -22,6 +23,13 @@ fn main() -> Result<(), String> {
 
     let started = std::time::Instant::now();
     let swept = db.sweep_collection_candidates()?;
+    if let Ok(path) = std::env::var("PROBE_JSON") {
+        std::fs::write(
+            path,
+            serde_json::to_string_pretty(&swept).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
+    }
     let bundles = swept.bundles;
     let elapsed = started.elapsed();
 
