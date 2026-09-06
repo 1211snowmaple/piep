@@ -9,6 +9,15 @@ on:
 # browser and the authentication window are WebView2, and every test that drives
 # a real window runs on Windows. Building installers for platforms nothing is
 # verified on would ship binaries no one has ever started.
+#
+# ここでは試験を走らせない。タグは main のマージコミットに打つので、同じ木は
+# quality.yml が既に通している。v0.17.0 では quality.yml が 04:49:24 に緑にな
+# り、release.yml はその13秒後に始まって、同じ試験をもう一度25分かけて走らせ
+# ていた。46分のうち25分がこれだった。
+#
+# 試験を落とした分の関門は二つ残る。tauri-action は下書きの配布として作るの
+# で、公開する手が最後に入ること。そして下の版の照合が、タグと5箇所の版が
+# 食い違ったままの配布を止めること。
 jobs:
   release:
     permissions:
@@ -18,23 +27,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - name: Install Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
-        with:
-          node-version: 24
-          cache: 'npm'
-
-      - name: Install Rust 1.98.1
-        run: |
-          rustup toolchain install 1.98.1 --profile minimal --component clippy,rustfmt
-          rustup default 1.98.1
-
-      - name: Install frontend dependencies
-        run: npm ci
-
-      - name: Install documentation tool dependencies
-        run: npm --prefix docs-tools ci
-
+      # 道具を入れる前に照合する。食い違っていれば数秒で落ちる。
       - name: Verify release tag and version files
         shell: pwsh
         run: |
@@ -52,33 +45,31 @@ jobs:
             throw "Tag $expected does not match version files: $($versions -join ', ')"
           }
 
-      - name: Frontend type and unit tests
+      - name: Install Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24
+          cache: 'npm'
+
+      # clippy と rustfmt はここでは使わない。走らせるのは quality.yml。
+      - name: Install Rust 1.98.1
         run: |
-          npm run check
-          npm test
+          rustup toolchain install 1.98.1 --profile minimal
+          rustup default 1.98.1
 
-      - name: Rust tests and lints
-        run: |
-          cargo test --manifest-path src-tauri/Cargo.toml -- --test-threads=1
-          cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
-          cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+      # 依存木に ort・DirectML・tantivy・lindera・画像コーデックが入るので、
+      # 素で組むと17分かかる。quality.yml と鍵を分けてあるのは、あちらが
+      # debug でしか組まないから。cargo は profile ごとに成果物を分けるので、
+      # debug の cache を引いてもここでは一つも再利用できない。数 GB を
+      # 落として捨てるだけになる。ここが引くのは前回のリリースが残した
+      # release の成果物で、依存が動いた回は restore-keys で近いものに落ちる。
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: src-tauri
+          key: release
 
-      - name: Frontend and Rust IPC contract
-        run: npm --prefix docs-tools run docs:check
-
-      - name: Install visual test browser
-        run: npx playwright install chromium
-
-      - name: Visual regression
-        run: |
-          npm run build
-          npm run test:visual
-
-      - name: Native window smoke test
-        shell: pwsh
-        run: |
-          npx --no-install tauri build --debug --no-bundle
-          ./e2e/native-window-smoke.ps1 -Executable ./src-tauri/target/debug/piep.exe
+      - name: Install frontend dependencies
+        run: npm ci
 
       - name: Build and Publish Release
         uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0
