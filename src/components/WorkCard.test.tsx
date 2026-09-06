@@ -7,6 +7,7 @@ import { AppRouter } from "@/app/router";
 import { WorkspaceProvider } from "@/app/WorkspaceContext";
 import { WorkCard } from "@/components/WorkCard";
 import { demoWorks } from "@/mocks/demoData";
+import { withClippedText } from "@/test/clipped";
 
 const updateJobApi = vi.hoisted(() => ({ listPendingRevisionsCommand: vi.fn() }));
 vi.mock("@/services/updateJobApi", async (importOriginal) => ({
@@ -131,25 +132,35 @@ describe("WorkCard", () => {
     expect(screen.getByRole("button", { name: "雨上がりの図書室で：更新監視をオフにする" })).toHaveAttribute("aria-pressed", "true");
   });
 
-  it("shows the full caption and series on hover in both card layouts", async () => {
+  it("offers the full text on hover only when the card had to clip it", async () => {
     const caption = demoWorks[0].excerpt as string;
     const series = demoWorks[0].seriesTitle as string;
-    const card = renderCard();
 
+    // 全部見えている文字を、その真上にもう一度出しても読む物は増えない。
+    // 増えるのは、隠れるもの - シリーズ行や、一つ上のカード - だけである。
+    const roomy = renderCard();
+    fireEvent.mouseEnter(screen.getByText(caption));
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    expect(screen.queryByRole("tooltip")).toBeNull();
+    roomy.unmount();
+
+    const card = withClippedText(() => renderCard());
     const captionElement = screen.getByText(caption);
     fireEvent.mouseEnter(captionElement);
     expect(await screen.findByRole("tooltip")).toHaveTextContent(caption);
     fireEvent.mouseLeave(captionElement);
     card.unmount();
 
-    const row = renderCard({ compact: true });
+    const row = withClippedText(() => renderCard({ compact: true }));
     fireEvent.mouseEnter(screen.getByRole("button", { name: `シリーズ「${series}」を開く` }));
     expect(await screen.findByRole("tooltip")).toHaveTextContent(series);
     row.unmount();
 
-    renderCard();
-    fireEvent.mouseEnter(screen.getByRole("button", { name: `シリーズ「${series}」を開く` }));
-    expect(await screen.findByRole("tooltip")).toHaveTextContent(series);
+    // 作者名にも同じ手立てを付けた。切られた名前ほど、誰なのかが要る。
+    const author = demoWorks[0].personName || demoWorks[0].authorName;
+    withClippedText(() => renderCard({ compact: true }));
+    fireEvent.mouseEnter(screen.getByRole("link", { name: `${author}の作品を見る` }));
+    expect(await screen.findByRole("tooltip")).toHaveTextContent(author);
   });
 
   it("only offers the version chip once a work has more than one revision", () => {

@@ -6,6 +6,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Icons, IconSize } from "@/lib/icons";
 import { useAppNavigate } from "@/app/router";
 import { useWorkspace } from "@/app/WorkspaceContext";
+import { ClippedTooltip } from "@/components/ClippedTooltip";
 import { TagRow } from "@/components/TagRow";
 import { WorkCover } from "@/components/WorkCover";
 import { ProviderMark } from "@/lib/providers";
@@ -111,39 +112,48 @@ function SeriesLink({ work, className, interactive = true }: { work: DownloadEnt
     </UnstyledButton>
   );
   return (
-    <Tooltip label={work.seriesTitle} multiline maw={480} openDelay={350} withArrow disabled={!interactive}>
+    <ClippedTooltip label={work.seriesTitle} disabled={!interactive}>
       {content}
-    </Tooltip>
+    </ClippedTooltip>
   );
 }
 
+/**
+ * 作者名は、行の中でいちばん最後に譲る。
+ *
+ * あらすじは地の文なので端が切れても読めるが、名前は人を名指す語で、
+ * 3文字に切られたら誰のことか分からない。それでも入りきらない幅では
+ * 切るしかないので、切れたぶんはホバーで読めるようにしておく。
+ */
 function AuthorLine({ work, size = 20, interactive = true }: { work: DownloadEntry; size?: number; interactive?: boolean }) {
   const navigate = useAppNavigate();
   const name = work.personName || work.authorName;
   const icon = getAssetUrl(work.personIconPath);
   const key = work.personId || work.authorId;
   return (
-    <Group
-      gap={6}
-      wrap="nowrap"
-      className="work-card__author"
-      role={key && interactive ? "link" : undefined}
-      tabIndex={key ? (interactive ? 0 : -1) : undefined}
-      aria-label={key && interactive ? `${name}の作品を見る` : undefined}
-      aria-hidden={interactive ? undefined : true}
-      onClick={(event) => { if (!key) return; event.stopPropagation(); navigate(`/people/${encodeURIComponent(work.source)}/${encodeURIComponent(key)}`); }}
-      onKeyDown={(event) => {
-        if (!key || (event.key !== "Enter" && event.key !== " ")) return;
-        event.preventDefault();
-        event.stopPropagation();
-        navigate(`/people/${encodeURIComponent(work.source)}/${encodeURIComponent(key)}`);
-      }}
-    >
-      <Avatar src={icon} size={size} radius="xl" color="gray" className="work-card__avatar" imageProps={{ loading: "lazy", decoding: "async" }}>
-        <Icons.person size={Math.round(size * 0.58)} />
-      </Avatar>
-      <Text size="xs" c="dimmed" className="line-clamp-1">{name}</Text>
-    </Group>
+    <ClippedTooltip label={name} disabled={!interactive}>
+      <Group
+        gap={6}
+        wrap="nowrap"
+        className="work-card__author"
+        role={key && interactive ? "link" : undefined}
+        tabIndex={key ? (interactive ? 0 : -1) : undefined}
+        aria-label={key && interactive ? `${name}の作品を見る` : undefined}
+        aria-hidden={interactive ? undefined : true}
+        onClick={(event) => { if (!key) return; event.stopPropagation(); navigate(`/people/${encodeURIComponent(work.source)}/${encodeURIComponent(key)}`); }}
+        onKeyDown={(event) => {
+          if (!key || (event.key !== "Enter" && event.key !== " ")) return;
+          event.preventDefault();
+          event.stopPropagation();
+          navigate(`/people/${encodeURIComponent(work.source)}/${encodeURIComponent(key)}`);
+        }}
+      >
+        <Avatar src={icon} size={size} radius="xl" color="gray" className="work-card__avatar" imageProps={{ loading: "lazy", decoding: "async" }}>
+          <Icons.person size={Math.round(size * 0.58)} />
+        </Avatar>
+        <Text size="xs" c="dimmed" className="line-clamp-1">{name}</Text>
+      </Group>
+    </ClippedTooltip>
   );
 }
 
@@ -280,11 +290,11 @@ export const WorkCard = memo(function WorkCard({
           </div>
           <div className="work-row__main" inert={selectionMode || undefined} aria-hidden={selectionMode || undefined}>
             <SeriesLink work={work} className="work-row__series" interactive={!selectionMode} />
-            <Tooltip label={work.title} multiline maw={480} openDelay={350} withArrow>
+            <ClippedTooltip label={work.title}>
               <UnstyledButton className="work-row__open" onClick={open} onKeyDown={keyboardOpen} role={selectionMode ? undefined : "link"} aria-label={selectionMode ? undefined : `${work.title}を開く`} aria-hidden={selectionMode || undefined} tabIndex={selectionMode ? -1 : undefined}>
                 <Text fw={650} size="sm" className="line-clamp-2">{work.title}</Text>
               </UnstyledButton>
-            </Tooltip>
+            </ClippedTooltip>
             <div className="work-row__identity">
               <AuthorLine work={work} size={17} interactive={!selectionMode} />
               <span className="work-card__identity-divider" aria-hidden />
@@ -294,9 +304,9 @@ export const WorkCard = memo(function WorkCard({
                   <span className="work-card__identity-divider work-row__excerpt-divider" aria-hidden />
                   {/* 題名の下に1行占めさせず、作者の横の余りを受ける。窓が狭まれば
                       行を増やさずここが先に縮む。切れた先は題名と同じくホバーで読める。 */}
-                  <Tooltip label={excerpt} multiline maw={480} openDelay={350} withArrow>
+                  <ClippedTooltip label={excerpt}>
                     <Text size="xs" c="dimmed" className="work-row__excerpt">{excerpt}</Text>
-                  </Tooltip>
+                  </ClippedTooltip>
                 </>
               )}
             </div>
@@ -342,20 +352,20 @@ export const WorkCard = memo(function WorkCard({
         </div>
         <div className="work-card__body" inert={selectionMode || undefined} aria-hidden={selectionMode || undefined}>
           {work.seriesTitle && <div className="work-card__meta"><SeriesLink work={work} interactive={!selectionMode} /></div>}
-          <Tooltip label={work.title} multiline maw={480} openDelay={350} withArrow>
+          <ClippedTooltip label={work.title}>
             <UnstyledButton className="work-card__open" onClick={open} onKeyDown={keyboardOpen} role={selectionMode ? undefined : "link"} aria-label={selectionMode ? undefined : `${work.title}を開く`} aria-hidden={selectionMode || undefined} tabIndex={selectionMode ? -1 : undefined}>
               <Text fw={720} className="work-card__title line-clamp-2" lh={1.32}>{work.title}</Text>
             </UnstyledButton>
-          </Tooltip>
+          </ClippedTooltip>
           <div className="work-card__identity">
             <AuthorLine work={work} interactive={!selectionMode} />
             <span className="work-card__identity-divider" aria-hidden />
             <ProviderMark provider={work.source} compact className="work-card__provider" />
           </div>
           {work.excerpt && (
-            <Tooltip label={excerpt} multiline maw={480} openDelay={350} withArrow disabled={selectionMode}>
+            <ClippedTooltip label={excerpt} disabled={selectionMode}>
               <Text size="xs" c="dimmed" className="line-clamp-2 work-card__excerpt">{excerpt}</Text>
-            </Tooltip>
+            </ClippedTooltip>
           )}
           <SearchMatchReason work={work} />
           {work.tags.length > 0 && <div className="work-card__tagslot"><TagRow tags={work.tags} interactive={!selectionMode} /></div>}

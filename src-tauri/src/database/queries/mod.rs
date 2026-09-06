@@ -42,6 +42,7 @@ pub use archive_state::{
 mod collection_additions;
 mod collection_sweep;
 mod collections;
+mod work_link_evidence;
 
 #[derive(Debug, Clone)]
 struct RankedSearchHit {
@@ -8835,7 +8836,7 @@ struct SuggestionWork {
     content_type: String,
 }
 
-const COLLECTION_SUGGEST_RULE_VERSION: &str = "collection-suggest-v2";
+const COLLECTION_SUGGEST_RULE_VERSION: &str = "collection-suggest-v3";
 const LINK_TRAVERSAL_MAX_DEPTH: usize = 8;
 const LINK_TRAVERSAL_MAX_WORKS: usize = 240;
 const LINK_INCOMING_SEARCH_LIMIT: usize = 40;
@@ -9765,8 +9766,9 @@ fn compare_optional_order<T: Ord>(left: Option<T>, right: Option<T>) -> Ordering
     }
 }
 
-/// 束の名前に使える長さ。棚のカードは2行までしか読めない。
-const COLLECTION_NAME_MAX_CHARS: usize = 42;
+/// 束の名前に使える長さ。棚のカードの行数とは関係が無い - 描くときに
+/// 何行で畳むかは画面が決め、切れた先はホバーで読める。
+const COLLECTION_NAME_MAX_CHARS: usize = collection_rules::NAME_STORAGE_MAX_CHARS;
 
 /// 名前の案を、確からしい順に並べて返す。
 ///
@@ -10138,75 +10140,7 @@ fn extract_work_link_evidence(
     from_source: &str,
     from_source_id: &str,
 ) -> Vec<ExtractedWorkLink> {
-    static URL_RE: OnceLock<Regex> = OnceLock::new();
-    let regex = URL_RE.get_or_init(|| {
-        Regex::new(r#"(?i)(?:https?://[^\s\"'<>\\\[\]{}]+|pixiv://novels/\d+)"#)
-            .expect("work link URL regex")
-    });
-    let mut links: HashMap<(String, String), ExtractedWorkLink> = HashMap::new();
-    for candidate in regex.find_iter(text).take(2_000) {
-        let raw = candidate
-            .as_str()
-            .replace("&amp;", "&")
-            .replace("\\u0026", "&");
-        let raw = raw.trim_end_matches([
-            '.', ',', ':', ';', '!', '?', ')', ']', '}', '。', '、', '！', '？', '）', '】', '」',
-            '』',
-        ]);
-        let Some((to_source, to_source_id)) = normalize_linked_work_url(raw) else {
-            continue;
-        };
-        if to_source == from_source && to_source_id == from_source_id {
-            continue;
-        }
-        let context = readable_link_context(text, candidate.start(), candidate.end(), 100);
-        let normalized_context = normalize_search_text(&context);
-        let (relation_type, confidence) = if ["続き", "次話", "次編", "後編", "next"]
-            .iter()
-            .any(|marker| normalized_context.contains(marker))
-        {
-            ("continues_to", 0.94)
-        } else if ["前話", "前編", "前作", "previous", "prev"]
-            .iter()
-            .any(|marker| normalized_context.contains(marker))
-        {
-            ("continues_from", 0.94)
-        } else if ["補足", "番外", "おまけ", "関連"]
-            .iter()
-            .any(|marker| normalized_context.contains(marker))
-        {
-            ("supplement", 0.86)
-        } else {
-            ("mentions", 0.72)
-        };
-        let anchor = (!context.is_empty()).then(|| truncate_chars(&context, 120));
-        let value = ExtractedWorkLink {
-            to_source: to_source.clone(),
-            to_source_id: to_source_id.clone(),
-            relation_type: relation_type.to_string(),
-            anchor_text: anchor,
-            context_text: (!context.is_empty()).then(|| truncate_chars(&context, 240)),
-            confidence,
-        };
-        links
-            .entry((to_source, to_source_id))
-            .and_modify(|current| {
-                if value.confidence > current.confidence {
-                    *current = value.clone();
-                }
-            })
-            .or_insert(value);
-    }
-    let mut links = links.into_values().collect::<Vec<_>>();
-    links.sort_by(|left, right| {
-        right
-            .confidence
-            .partial_cmp(&left.confidence)
-            .unwrap_or(Ordering::Equal)
-            .then_with(|| left.to_source.cmp(&right.to_source))
-            .then_with(|| left.to_source_id.cmp(&right.to_source_id))
-    });
-    links
+    work_link_evidence::extract(text, from_source, from_source_id)
 }
 
 fn normalize_linked_work_url(raw: &str) -> Option<(String, String)> {
@@ -10254,25 +10188,6 @@ fn normalize_linked_work_url(raw: &str) -> Option<(String, String)> {
             .then(|| ("fanbox".to_string(), id));
     }
     None
-}
-
-fn readable_link_context(text: &str, start: usize, end: usize, radius: usize) -> String {
-    static TAG_RE: OnceLock<Regex> = OnceLock::new();
-    let start_char = text[..start].chars().count();
-    let match_chars = text[start..end].chars().count();
-    let chars = text.chars().collect::<Vec<_>>();
-    let from = start_char.saturating_sub(radius);
-    let to = (start_char + match_chars + radius).min(chars.len());
-    let context = chars[from..to].iter().collect::<String>();
-    let without_tags = TAG_RE
-        .get_or_init(|| Regex::new(r"(?is)<[^>]*>").expect("HTML tag regex"))
-        .replace_all(&context, " ");
-    without_tags
-        .replace("&nbsp;", " ")
-        .replace("&amp;", "&")
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 fn truncate_chars(value: &str, max_chars: usize) -> String {

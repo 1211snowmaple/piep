@@ -797,8 +797,19 @@ select {
 .work-card__author:focus-visible { outline: 2px solid var(--mantine-color-piep-5); outline-offset: 2px; }
 .work-card__identity,
 .work-row__identity { display: flex; min-width: 0; min-height: 22px; align-items: center; gap: 8px; }
+/* 名前は、この行でいちばん最後に譲る。
+   //
+   // あらすじ側の縮み率を 100 にして「あらすじが先に譲る」つもりだったが、
+   // 実際の棚では「トライセプス」が「トライセ…」になっていた。重み付けは
+   // 基準幅との積で効くので、字数の組み合わせによっては名前の側が先に
+   // 削られる。**譲る順は、比ではなく決めごとで書く。** あらすじは地の文
+   // なので端が切れても読めるが、名前は人を名指す語で、3文字では誰のことか
+   // 分からない。
+   //
+   // 上限は置く。名前だけで行を埋めると、今度はあらすじが消えるため。
+   // そこまで長い名前が切れたときは、ホバーで全文が読める（`ClippedTooltip`）。 */
 .work-card__identity .work-card__author,
-.work-row__identity .work-card__author { flex: 0 1 auto; }
+.work-row__identity .work-card__author { flex: 0 0 auto; max-width: 55%; }
 .work-card__identity-divider { width: 1px; height: 18px; flex: 0 0 auto; background: light-dark(#d5dae0, #38414c); }
 
 /* The series line above the title is the link to the series. */
@@ -827,7 +838,11 @@ select {
    title therefore occupies the same space as a two-line title without a
    series, without leaving a visibly empty reserved row between elements. */
 .work-card__title { font-size: 0.9rem; }
-.work-card__open { display: flex; width: 100%; min-width: 0; min-height: 28px; align-items: center; color: inherit; text-align: left; }
+/* 幅は題名の分だけ。行いっぱいに広げると、押した合図の枠も、切れた題名を
+   読ませる吹き出しも、文字ではなく箱の中央——何も無い右方——に出る。
+   入りきらない題名では fit-content が行幅そのものになるので、2行に
+   折り返す側は今までと変わらない。 */
+.work-card__open { display: flex; width: fit-content; max-width: 100%; min-width: 0; min-height: 28px; align-items: center; color: inherit; text-align: left; }
 .work-card__meta + .work-card__open { align-items: flex-start; }
 .work-card__open:focus-visible,
 .work-row__open:focus-visible { outline: 2px solid var(--mantine-color-piep-5); outline-offset: 3px; border-radius: var(--mantine-radius-sm); }
@@ -845,7 +860,14 @@ select {
   overflow: hidden;
 }
 .work-card__tags [data-hidden] { display: none; }
-.work-card__tag { height: 26px; min-height: 26px; flex: 0 0 auto; max-width: 130px; text-decoration: none; cursor: pointer; }
+/* 一つ一つのタグは切らない。
+   //
+   // 130px で頭打ちにしていたので、行に余りがあっても
+   // 「やはり俺の青春ラブコメはまち…」で止まっていた。入りきらないタグを
+   // どうするかは、この行がすでに決めている - 入らないぶんは「+N」の
+   // 向こうへ回る（`TagRow`）。読めない切れ端を並べる必要は無い。
+   // 上限は「行より広くしない」だけにして、最後の1枚の逃げ道に残す。 */
+.work-card__tag { height: 26px; min-height: 26px; flex: 0 0 auto; max-width: 100%; text-decoration: none; cursor: pointer; }
 .work-card__tag .mantine-Badge-label { overflow: hidden; text-overflow: ellipsis; }
 .work-card__tag:hover { background: light-dark(var(--mantine-color-piep-0), var(--mantine-color-dark-5)); color: var(--mantine-color-piep-7); }
 /* A fixed footprint keeps the measurement in TagRow stable: if the chip grew
@@ -929,7 +951,7 @@ select {
 .work-row__main { display: flex; min-width: 0; grid-column: 2; grid-row: 1; flex-direction: column; justify-content: center; }
 .work-row__series { display: block; min-width: 0; }
 .work-row__identity { margin-top: 3px; }
-.work-row__open { display: flex; width: 100%; min-width: 0; min-height: 26px; align-items: center; margin-top: 1px; color: inherit; text-align: left; }
+.work-row__open { display: flex; width: fit-content; max-width: 100%; min-width: 0; min-height: 26px; align-items: center; margin-top: 1px; color: inherit; text-align: left; }
 .work-row__main > :is(.work-card__series-link, .work-row__series) + .work-row__open { align-items: flex-start; margin-top: 0; }
 /* 幅は中身の分だけ。余りを全部受けると、短い一文でも箱が行末まで
    伸び、吹き出しが文字の上ではなく箱の中央——何も無い右方に出る。
@@ -941,7 +963,8 @@ select {
   white-space: nowrap;
   text-overflow: ellipsis;
 }
-/* 題名も同じ理由で、幅を行全体に広げない。 */
+/* 題名の箱そのものを中身の幅にしてある（`.work-row__open`）。中の文字も
+   広げない - 行を全部受けると吹き出しと枠の位置が文字から離れる。 */
 .work-row__open > * { width: fit-content; max-width: 100%; }
 /* タグは題名と同じ左端から始める。 */
 .work-row__tags { min-width: 0; margin-top: 7px; }

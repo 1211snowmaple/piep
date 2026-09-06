@@ -128,7 +128,10 @@ describe("LibraryPage search", () => {
 
     fireEvent.click(screen.getByLabelText("リスト表示"));
 
-    await waitFor(() => expect(window.localStorage.getItem("piep.library-view")).toBe(JSON.stringify("compact")));
+    // 押した一覧の上書きとして残る。全体の既定はここでは動かさない -
+    // 棚を行で見たいことと、束の中身まで行にしたいことは別である。
+    await waitFor(() => expect(window.localStorage.getItem("piep.library-view.library-works")).toBe(JSON.stringify("compact")));
+    expect(window.localStorage.getItem("piep.library-view")).toBe(JSON.stringify("gallery"));
     const libraryQueries = client.getQueryCache().findAll({ queryKey: ["library"] });
     expect(libraryQueries).toEqual([before]);
     expect(libraryQueries[0]?.state.dataUpdatedAt).toBe(updatedAt);
@@ -298,6 +301,32 @@ describe("library entity paging", () => {
     // Small enough that the six demo authors do not fit on one page.
     window.localStorage.setItem("piep.page-size", JSON.stringify(5));
     window.location.hash = "#/library?tab=people";
+  });
+
+  // 作者とシリーズは一つの鍵を分け合っていたので、作者を名前順にすると
+  // シリーズまで名前順になった。並びを選ぶのは「何を探しているか」であって、
+  // 二つのタブで同じとは限らない。
+  it("remembers the creator and series orders apart from each other", async () => {
+    window.localStorage.setItem("piep.library-entity-sort.person", JSON.stringify("name"));
+    window.localStorage.setItem("piep.library-entity-sort.series", JSON.stringify("work_count"));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
+
+    expect(await screen.findByDisplayValue("名前順（あ→ん）")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("tab", { name: /シリーズ/ }));
+    // 住所に残った esort を連れて行かない - 覚えてある方の並びで開く。
+    expect(await screen.findByDisplayValue("作品が多い順")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("tab", { name: /作者/ }));
+    expect(await screen.findByDisplayValue("名前順（あ→ん）")).toBeInTheDocument();
+  });
+
+  // 古い鍵で選んであった並びは、そのまま引き継ぐ。黙って既定へ戻さない。
+  it("carries the order chosen before the two tabs were split", async () => {
+    window.localStorage.setItem("piep.library-entity-sort", JSON.stringify("downloaded_at"));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
+
+    expect(await screen.findByDisplayValue("保存が新しい順")).toBeInTheDocument();
   });
 
   // The drawer is on screen for every tab, so it has to mean something on

@@ -1,5 +1,6 @@
-import { Badge, Card, Group, Stack, Text, Tooltip } from "@mantine/core";
+import { Badge, Card, Group, Stack, Text } from "@mantine/core";
 import { AppLink } from "@/app/router";
+import { ClippedTooltip } from "@/components/ClippedTooltip";
 import { CollectionCover } from "@/components/CollectionCover";
 import { formatDate, formatNumber } from "@/lib/format";
 import { Icons, IconSize } from "@/lib/icons";
@@ -15,17 +16,16 @@ import type { WorkCollectionSummary } from "@/types/collections";
 export function CollectionCard({ collection }: { collection: WorkCollectionSummary }) {
   const missing = collection.memberCount - collection.availableCount;
   return (
-    <Tooltip label={collection.name} multiline maw={480} openDelay={350} withArrow>
-      <Card
-        component={AppLink}
-        to={`/collections/${collection.id}`}
-        withBorder
-        padding="md"
-        className="collection-card surface--interactive focus-card"
-      >
-        <Group wrap="nowrap" align="stretch" gap="md">
-          <CollectionCover collection={collection} variant="card" />
-          <Stack gap={6} flex={1} miw={0} justify="center">
+    <Card
+      component={AppLink}
+      to={`/collections/${collection.id}`}
+      withBorder
+      padding="md"
+      className="collection-card surface--interactive focus-card"
+    >
+      <Group wrap="nowrap" align="stretch" gap="md">
+        <CollectionCover collection={collection} variant="card" />
+        <Stack gap={6} flex={1} miw={0} justify="center">
           {/* 出自（続き物／テーマ）の紋はやめた。
               //
               // 走査は続き物を `ordered`、テーマを `unordered` で作るので、
@@ -36,9 +36,16 @@ export function CollectionCard({ collection }: { collection: WorkCollectionSumma
           <Badge size="xs" variant="light" color={collection.collectionKind === "ordered" ? "piep" : "gray"}>
             {collection.collectionKind === "ordered" ? "順序付き" : "順序なし"}
           </Badge>
-            <Text fw={720} size="md" lh={1.35} className="line-clamp-2">{collection.name}</Text>
+          {/* 吹き出しは名前に付ける。カード全体に付けると、表紙の上でも
+              日付の上でも同じ物が出るうえ、名前ではなくカードの中央——
+              一つ上のカードの上——に浮かぶ。 */}
+          <ClippedTooltip label={collection.name}>
+            <Text fw={720} size="md" lh={1.35} className="line-clamp-2 collection-card__name">{collection.name}</Text>
+          </ClippedTooltip>
           {collection.description && (
-            <Text size="xs" c="dimmed" className="line-clamp-2">{collection.description}</Text>
+            <ClippedTooltip label={collection.description}>
+              <Text size="xs" c="dimmed" className="line-clamp-2 collection-card__description">{collection.description}</Text>
+            </ClippedTooltip>
           )}
           <Group gap="sm" wrap="wrap" className="collection-card__facts">
             <Text size="xs" c="dimmed">
@@ -50,9 +57,8 @@ export function CollectionCard({ collection }: { collection: WorkCollectionSumma
             <Text size="xs" c="dimmed">{formatDate(collection.updatedAt)}</Text>
             {missing > 0 && <Badge size="xs" color="orange" variant="light">未保存 {formatNumber(missing)}</Badge>}
           </Group>
-          </Stack>
-        </Group>
-      </Card>
-    </Tooltip>
+        </Stack>
+      </Group>
+    </Card>
   );
 }

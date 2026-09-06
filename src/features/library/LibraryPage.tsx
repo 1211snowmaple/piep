@@ -538,6 +538,10 @@ export default function LibraryPage() {
     if (patch.searchMode === "semantic" && q) next.set("intent", "semantic");
     else if (patch.q !== undefined || patch.searchMode !== undefined) next.delete("intent");
     if (nextTab !== "works") next.set("tab", nextTab); else next.delete("tab");
+    // タブを移ったら、いま並んでいる方の指定は連れて行かない。作者とシリーズは
+    // 別の並びを覚えているので、住所に残った `esort` が移った先を上書きすると
+    // 覚えてある方が出てこない。
+    if (patch.tab !== undefined && patch.tab !== tab) next.delete("esort");
     if (patch.filters) writeFilters(next, normalizeFilters(patch.filters));
     if (patch.entityScope) writeEntityScope(next, patch.entityScope);
     // 一覧の並べ替えは、作品の並べ替えとは別の語彙・別の既定を持つ。
@@ -670,7 +674,16 @@ export default function LibraryPage() {
   }, [setStoredSort, writeUrl]);
   // 作者・シリーズの並び。作品とは別に覚える - 同じ人でも、作品は保存順で
   // 見たいが作者は作品数で見たい、はふつうにある。
-  const [storedEntitySort, setStoredEntitySort] = useLocalStorage<unknown>({ key: "piep.library-entity-sort", defaultValue: "work_count", getInitialValueInEffect: false });
+  //
+  // 作者とシリーズも、互いに別に覚える。一つの鍵を分け合っていたので、
+  // 作者を「名前順」にするとシリーズまで名前順になっていた。並びを選ぶのは
+  // 「何を探しているか」であって、二つのタブで同じとは限らない。
+  // 古い鍵は初期値として読む - すでに選んである並びを黙って捨てない。
+  const [legacyEntitySort] = useLocalStorage<unknown>({ key: "piep.library-entity-sort", defaultValue: null, getInitialValueInEffect: false });
+  const [storedPersonSort, setStoredPersonSort] = useLocalStorage<unknown>({ key: "piep.library-entity-sort.person", defaultValue: null, getInitialValueInEffect: false });
+  const [storedSeriesSort, setStoredSeriesSort] = useLocalStorage<unknown>({ key: "piep.library-entity-sort.series", defaultValue: null, getInitialValueInEffect: false });
+  const storedEntitySort = (tab === "series" ? storedSeriesSort : storedPersonSort) ?? legacyEntitySort;
+  const setStoredEntitySort = tab === "series" ? setStoredSeriesSort : setStoredPersonSort;
   const entitySortBy = parseEntitySortBy(urlParams.get("esort") ?? storedEntitySort);
   const setEntitySortBy = useCallback((next: EntitySortBy) => {
     setStoredEntitySort(next);
@@ -693,7 +706,7 @@ export default function LibraryPage() {
     };
     return scope.watch || scope.minWorkCount || scope.concluded !== null ? scope : null;
   }, [entityScope, tab]);
-  const [view, setView] = useViewMode();
+  const [view, setView] = useViewMode("library-works");
   // Saved searches are part of the library now, not per-install browser state,
   // so the sidebar can list them and they survive a reinstall.
   const savedSearchesQuery = useQuery({

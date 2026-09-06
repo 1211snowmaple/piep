@@ -7064,3 +7064,352 @@ fn a_current_shelf_gives_automatic_maintenance_nothing_to_do() {
         "遅れているぶんだけが対象であること: {incremental:?}"
     );
 }
+
+#[test]
+fn discovery_finds_inner_pairs_within_an_official_anthology() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    for (id, title) in [
+        ("inner-a1", "星の舟 前編"),
+        ("inner-a2", "星の舟 後編"),
+        ("inner-b1", "花の庭 前編"),
+        ("inner-b2", "花の庭 後編"),
+    ] {
+        let id = insert_download_unindexed(&db, &storage, id, title, "架空作者", &[], "本文");
+        db.conn.lock().unwrap().execute("INSERT INTO download_series(download_id,series_source,series_key,title) VALUES(?1,'pixiv','requests','リクエスト作品集')",params![id]).unwrap();
+    }
+    db.conn
+        .lock()
+        .unwrap()
+        .execute("UPDATE downloads SET author_id='same-author'", [])
+        .unwrap();
+    let result = db.sweep_collection_candidates().unwrap();
+    assert_eq!(result.bundles.len(), 2, "{:?}", result.bundles);
+    assert!(result.bundles.iter().all(|b| b.members.len() == 2
+        && b.members
+            .iter()
+            .all(|m| m.evidence.iter().any(|e| e.kind == "series_subset"))));
+    // 管理用名称に依存せず、大きな作品集の内側を探す。
+    db.conn
+        .lock()
+        .unwrap()
+        .execute("UPDATE download_series SET title='架空作者の小説集'", [])
+        .unwrap();
+    assert_eq!(db.sweep_collection_candidates().unwrap().bundles.len(), 2);
+}
+
+#[test]
+fn discovery_preserves_chapter_pairs_but_skips_a_whole_official_series() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    for (id, title) in [
+        ("chapter-11", "星の舟 第1章 前編"),
+        ("chapter-13", "星の舟 第1章 後編"),
+        ("chapter-21", "星の舟 第2章 前編"),
+        ("chapter-23", "星の舟 第2章 後編"),
+    ] {
+        let id = insert_download_unindexed(&db, &storage, id, title, "架空作者", &[], "本文");
+        db.conn.lock().unwrap().execute("INSERT INTO download_series(download_id,series_source,series_key,title) VALUES(?1,'pixiv','star','星の舟')",params![id]).unwrap();
+    }
+    db.conn
+        .lock()
+        .unwrap()
+        .execute("UPDATE downloads SET author_id='same-author'", [])
+        .unwrap();
+    let bundles = db.sweep_collection_candidates().unwrap().bundles;
+    assert_eq!(bundles.len(), 2, "{bundles:?}");
+    let pairs = bundles
+        .iter()
+        .map(|b| {
+            b.members
+                .iter()
+                .map(|m| m.source_id.as_str())
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    assert!(pairs.contains(&vec!["chapter-11", "chapter-13"]));
+    assert!(pairs.contains(&vec!["chapter-21", "chapter-23"]));
+}
+
+#[test]
+fn discovery_stable_ids_accept_user_order_and_reject_only_selected_pairs() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    for (id, title) in [
+        ("review-1", "星の舟 第1話"),
+        ("review-2", "星の舟 第2話"),
+        ("review-3", "星の舟 第3話"),
+    ] {
+        insert_download_unindexed(&db, &storage, id, title, "架空作者", &[], "本文");
+    }
+    db.conn
+        .lock()
+        .unwrap()
+        .execute("UPDATE downloads SET author_id='same-author'", [])
+        .unwrap();
+    let first = db.sweep_collection_candidates().unwrap().bundles.remove(0);
+    let mut names = first.name_options.clone();
+    names.push(CollectionNameCandidate {
+        source: "llm".into(),
+        name: "生成した名前".into(),
+        label: "モデルの案".into(),
+        ..Default::default()
+    });
+    db.conn
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE collection_suggestions SET name_options_json=?1 WHERE id=?2",
+            params![serde_json::to_string(&names).unwrap(), first.id],
+        )
+        .unwrap();
+    let again = db.sweep_collection_candidates().unwrap().bundles.remove(0);
+    assert_eq!(first.id, again.id);
+    assert!(again
+        .name_options
+        .iter()
+        .any(|option| option.source == "llm" && option.name == "生成した名前"));
+    let keys = |ids: &[&str]| {
+        ids.iter()
+            .map(|id| WorkKey {
+                source: "pixiv".into(),
+                source_id: (*id).into(),
+            })
+            .collect::<Vec<_>>()
+    };
+    assert!(db
+        .accept_collection_suggestion(&AcceptCollectionSuggestionInput {
+            suggestion_id: first.id.clone(),
+            member_keys: Some(keys(&["review-1", "foreign"])),
+            name: None,
+            collection_kind: None
+        })
+        .is_err());
+    let collection = db
+        .accept_collection_suggestion(&AcceptCollectionSuggestionInput {
+            suggestion_id: first.id.clone(),
+            member_keys: Some(keys(&["review-3", "review-1", "review-2"])),
+            name: None,
+            collection_kind: None,
+        })
+        .unwrap();
+    assert_eq!(
+        collection
+            .members
+            .iter()
+            .map(|m| m.source_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["review-3", "review-1", "review-2"]
+    );
+    // 別の候補を使って、未選択作品との否定フィードバックが増えないことを確かめる。
+    {
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE collection_suggestions SET state='pending' WHERE id=?1",
+            params![first.id],
+        )
+        .unwrap();
+        conn.execute("DELETE FROM collection_pair_feedback", [])
+            .unwrap();
+    }
+    assert!(db
+        .reject_collection_suggestion(&first.id, Some(&keys(&["review-1", "review-2"])))
+        .unwrap());
+    let pairs=db.conn.lock().unwrap().prepare("SELECT left_source_id,right_source_id FROM collection_pair_feedback WHERE decision='reject'").unwrap().query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?))).unwrap().collect::<Result<Vec<_>,_>>().unwrap();
+    assert_eq!(pairs, vec![("review-1".into(), "review-2".into())]);
+}
+
+#[test]
+fn discovery_ignores_references_and_uses_link_direction_instead_of_dates() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let a = insert_download_unindexed(
+        &db,
+        &storage,
+        "link-a",
+        "旅立ちの朝",
+        "架空作者",
+        &[],
+        "本文",
+    );
+    let b = insert_download_unindexed(
+        &db,
+        &storage,
+        "link-b",
+        "帰り道の約束",
+        "架空作者",
+        &[],
+        "本文",
+    );
+    let c = insert_download_unindexed(
+        &db,
+        &storage,
+        "link-c",
+        "参考にした手紙",
+        "架空作者",
+        &[],
+        "本文",
+    );
+    {
+        let conn = db.conn.lock().unwrap();
+        for (from, to, relation) in [(b, a, "continues_from"), (a, c, "mentions")] {
+            conn.execute("INSERT INTO work_links(from_source,from_source_id,from_download_id,to_source,to_source_id,to_download_id,relation_type,evidence_type,confidence) SELECT 'pixiv',a.source_id,a.id,'pixiv',b.source_id,b.id,?3,'test',0.94 FROM downloads a,downloads b WHERE a.id=?1 AND b.id=?2",params![from,to,relation]).unwrap();
+        }
+        conn.execute("UPDATE downloads SET source_created_at=CASE id WHEN ?1 THEN '2026-09-01' ELSE '2025-01-01' END",params![a]).unwrap();
+    }
+    let bundles = db.sweep_collection_candidates().unwrap().bundles;
+    assert_eq!(bundles.len(), 1, "{bundles:?}");
+    assert_eq!(
+        bundles[0]
+            .members
+            .iter()
+            .map(|m| m.download_id.unwrap())
+            .collect::<Vec<_>>(),
+        vec![a, b]
+    );
+    assert!(bundles[0].members[1]
+        .evidence
+        .iter()
+        .any(|e| e.kind == "sequence_link"));
+    assert_eq!(bundles[0].proposed_name, "「旅立ちの朝」からの連作");
+    assert_eq!(bundles[0].name_options[0].label, "先頭作品からの仮の名前");
+}
+
+#[test]
+fn discovery_keeps_links_attached_to_an_edition_alias() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let a = insert_download_unindexed(
+        &db,
+        &storage,
+        "alias-a",
+        "星の舟 前編",
+        "架空作者",
+        &[],
+        "短い本文",
+    );
+    let full = insert_download_unindexed(
+        &db,
+        &storage,
+        "alias-full",
+        "星の舟 前編",
+        "架空作者",
+        &[],
+        "こちらは十分長い本文の版",
+    );
+    let b = insert_download_unindexed(
+        &db,
+        &storage,
+        "alias-b",
+        "名前の違う続き",
+        "架空作者",
+        &[],
+        "別の本文",
+    );
+    {
+        let conn = db.conn.lock().unwrap();
+        conn.execute("UPDATE downloads SET author_id='same-author'", [])
+            .unwrap();
+        conn.execute(
+            "UPDATE downloads SET source='fanbox' WHERE id=?1",
+            params![full],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO work_links(from_source,from_source_id,from_download_id,to_source,to_source_id,to_download_id,relation_type,evidence_type,confidence) VALUES('pixiv','alias-a',?1,'pixiv','alias-b',?2,'continues_to','test',0.94)",params![a,b]).unwrap();
+    }
+    let bundles = db.sweep_collection_candidates().unwrap().bundles;
+    assert_eq!(bundles.len(), 1, "{bundles:?}");
+    assert_eq!(
+        bundles[0]
+            .members
+            .iter()
+            .map(|m| m.download_id.unwrap())
+            .collect::<Vec<_>>(),
+        vec![full, b]
+    );
+}
+
+#[test]
+fn discovery_separates_cross_source_continuations_from_overlapping_full_text() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let first = synthetic_body(71, 4000);
+    let last = synthetic_body(98, 4000);
+    let a = insert_download_unindexed(
+        &db,
+        &storage,
+        "overlap-1",
+        "星の舟 第1話",
+        "架空作者",
+        &[],
+        &first,
+    );
+    let b = insert_download_unindexed(
+        &db,
+        &storage,
+        "overlap-2",
+        "星の舟 第2話",
+        "架空作者",
+        &[],
+        &last,
+    );
+    let full = insert_download_unindexed(
+        &db,
+        &storage,
+        "overlap-all",
+        "星の舟",
+        "架空作者",
+        &[],
+        "版の本文",
+    );
+    {
+        let conn = db.conn.lock().unwrap();
+        conn.execute("UPDATE downloads SET author_id='same-author'", [])
+            .unwrap();
+        conn.execute(
+            "UPDATE downloads SET source='fanbox' WHERE id=?1",
+            params![full],
+        )
+        .unwrap();
+        let path: String = conn
+            .query_row(
+                "SELECT COALESCE(original_json_path,json_path) FROM downloads WHERE id=?1",
+                params![full],
+                |r| r.get(0),
+            )
+            .unwrap();
+        fs::write(
+            path,
+            serde_json::json!({"body":{"text":format!("{first}\n{last}")}}).to_string(),
+        )
+        .unwrap();
+    }
+    assert!(
+        db.get_reader_document(full, None)
+            .unwrap()
+            .plain_text
+            .chars()
+            .count()
+            >= 8000
+    );
+    let bundles = db.sweep_collection_candidates().unwrap().bundles;
+    assert_eq!(
+        bundles.len(),
+        1,
+        "本文検査後に重なる候補も一つにする: {bundles:?}"
+    );
+    assert_eq!(
+        bundles[0]
+            .members
+            .iter()
+            .map(|m| m.download_id.unwrap())
+            .collect::<Vec<_>>(),
+        vec![a, b]
+    );
+    // 同じ版を二度読む並びにならず、元の保存データは残る。
+    assert!(db.get_download(full).is_ok());
+    assert!(bundles[0]
+        .members
+        .iter()
+        .any(|m| m.evidence.iter().any(|e| e.kind == "edition_overlap")));
+}

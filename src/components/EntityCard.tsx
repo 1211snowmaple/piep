@@ -1,5 +1,6 @@
 import { ActionIcon, Avatar, Badge, Box, Card, Group, Stack, Text, Tooltip } from "@mantine/core";
 import { Icons, IconSize } from "@/lib/icons";
+import { ClippedTooltip } from "@/components/ClippedTooltip";
 import { NoImageMark } from "@/components/NoImageMark";
 import { useAppNavigate } from "@/app/router";
 import { getProvider, ProviderMark } from "@/lib/providers";
@@ -35,7 +36,14 @@ export function EntityCard({ entity, kind, selectionMode = false, selected = fal
 }) {
   const navigate = useAppNavigate();
   const route = kind === "person" ? "people" : "series";
-  const icon = getAssetUrl(entity.iconPath ?? entity.coverPath);
+  // 人物の丸に入れてよいのはプロフィール画像だけ。表紙へ落ちてはいけない。
+  //
+  // FANBOX の表紙は題字を組んだ横長の一枚で、64pxの丸に切ると題字の
+  // 真ん中の数文字だけが残る。プロフィール画像を置いていない作者ほど
+  // 表紙は凝っているので、一覧に並ぶのは読めない切れ端ばかりになっていた。
+  // 詳細画面は最初から icon だけを見ており、同じ作者が画面によって
+  // 別の顔になっていた。シリーズの枠は表紙を出す場所なので今までどおり。
+  const icon = getAssetUrl(kind === "person" ? entity.iconPath : entity.iconPath ?? entity.coverPath);
   // 保存元が画像を持ちうるのに、この人は置いていない。「まだ無い」ではなく
   // 「置いていない」なので、保存元と同じく一枚の絵で示す。
   //
@@ -50,6 +58,7 @@ export function EntityCard({ entity, kind, selectionMode = false, selected = fal
   // Selection mode is modal, as it is on works: the whole card picks instead of
   // following the link, so a press can never do the thing you did not mean.
   const activate = () => selectionMode ? onSelect?.(entity, !selected) : open();
+  const description = entity.description || entity.sampleTitle || (kind === "person" ? "保存作品の作者" : "保存作品のシリーズ");
   return (
     <Card
       p={0}
@@ -83,8 +92,14 @@ export function EntityCard({ entity, kind, selectionMode = false, selected = fal
           ? <Avatar src={icon} color="piep" size={64} radius="xl" className="entity-avatar" imageProps={{ loading: "lazy", decoding: "async" }}>{noImage ? <NoImageMark /> : <Icons.person size={IconSize.feature} />}</Avatar>
           : <Box className="entity-card__series-cover">{icon ? <img src={icon} alt="" loading="lazy" decoding="async" /> : <Icons.series size={IconSize.feature} />}</Box>}
         <Stack gap={5} flex={1} miw={0}>
-          <Text fw={700} className="line-clamp-2" lh={1.35}>{entity.displayName}</Text>
-          <Text size="sm" c="dimmed" className="line-clamp-2">{entity.description || entity.sampleTitle || (kind === "person" ? "保存作品の作者" : "保存作品のシリーズ")}</Text>
+          {/* 作品カードと同じ作法。2行で切れた名前を読む手立てが、ここにだけ
+              無かった。長い名前ほど切られ、切られた名前ほど見分けが要る。 */}
+          <ClippedTooltip label={entity.displayName}>
+            <Text fw={700} className="line-clamp-2" lh={1.35}>{entity.displayName}</Text>
+          </ClippedTooltip>
+          <ClippedTooltip label={description}>
+            <Text size="sm" c="dimmed" className="line-clamp-2">{description}</Text>
+          </ClippedTooltip>
           {/* 帯は「取得元が言っている事実」だけにする。こちらの決めごと
               （追いかけるかどうか）は帯ではなくボタンで、作品カードと同じ
               場所・同じ色・同じ作法にする。

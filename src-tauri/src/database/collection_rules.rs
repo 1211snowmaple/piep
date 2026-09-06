@@ -13,6 +13,8 @@ use std::sync::OnceLock;
 use regex::Regex;
 use unicode_normalization::UnicodeNormalization;
 
+pub use super::collection_sequence::parse_sequence_title;
+
 /// 告知・活動報告のたぐいを示す語。
 ///
 /// 作品として保存されてはいるが、読む単位ではない。束に混ざると
@@ -348,10 +350,23 @@ pub fn is_informative_tag(tag: &str) -> bool {
         && !administrative_tag_re().is_match(&width_normalized(trimmed))
 }
 
+/// 名前として蓄えてよい長さ。
+///
+/// **画面の都合ではない。** 付け直しの窓が手入力に許しているのと同じ長さで、
+/// ここを超える名前は生成の事故を疑うべき長さという意味しか持たない。
+///
+/// 以前は 42 文字だった。「棚のカードは2行までしか読めない」という理由で、
+/// つまり**描き方の都合で、蓄える文字を捨てていた**。切られた名前は
+/// 付け直しの窓にも `…` 付きで現れ、消えた文字はどこからも戻せなかった。
+/// 束の名前は、その束を一つに名指すために付いている。切ってよいのは
+/// 描くときで、切った先はホバーで読める。
+pub const NAME_STORAGE_MAX_CHARS: usize = 200;
+
 /// 名前として短すぎず長すぎないか整える。
 ///
-/// 束の名前は棚のカードに出るので、行に収まる長さで切る。切ったことが
-/// 分かるように末尾へ `…` を置く。
+/// 上限は `NAME_STORAGE_MAX_CHARS`——蓄えてよい長さ——を渡すこと。
+/// 行に収まるかどうかは描く側が決める。切ったことが分かるように末尾へ
+/// `…` を置く。
 pub fn clamp_name(name: &str, max_chars: usize) -> String {
     let trimmed = name.trim();
     if trimmed.chars().count() <= max_chars {

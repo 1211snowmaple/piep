@@ -1869,7 +1869,7 @@ impl Database {
             "SELECT id, proposed_name, collection_kind, members_json, score,
                     rule_version, state, created_at, updated_at,
                     name_options_json, track, origin, evidence_summary
-             FROM collection_suggestions ORDER BY score DESC, updated_at DESC, id DESC"
+             FROM collection_suggestions ORDER BY CASE WHEN track = 'sequence' THEN 0 ELSE 1 END, score DESC, proposed_name ASC, id ASC"
         } else {
             "SELECT id, proposed_name, collection_kind, members_json, score,
                     rule_version, state, created_at, updated_at,
@@ -1877,7 +1877,7 @@ impl Database {
              FROM collection_suggestions WHERE state = ?1
              -- 確かなものを先に。走査で作った候補は同じ時刻に一括で入るので、
              -- updated_at で並べると残りは id の順、つまり無作為だった。
-             ORDER BY score DESC, updated_at DESC, id DESC"
+             ORDER BY CASE WHEN track = 'sequence' THEN 0 ELSE 1 END, score DESC, proposed_name ASC, id ASC"
         };
         let mut stmt = conn
             .prepare(sql)
@@ -1929,7 +1929,7 @@ impl Database {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let payload = conn
             .query_row(
-                "SELECT seed_json, members_json, rule_version
+                "SELECT seed_json, members_json, rule_version, origin
                  FROM collection_suggestions WHERE id = ?1 AND state = 'pending'",
                 params![suggestion_id],
                 |row| {
@@ -1937,24 +1937,44 @@ impl Database {
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
                         row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
                     ))
                 },
             )
             .optional()
             .map_err(|e| format!("Failed to read collection suggestion: {e}"))?;
-        let Some((seed_json, members_json, rule_version)) = payload else {
+        let Some((seed_json, members_json, rule_version, origin)) = payload else {
             return Ok(false);
         };
         let seed_ids: Vec<i64> = serde_json::from_str(&seed_json)
             .map_err(|e| format!("Invalid suggestion seeds: {e}"))?;
         let members: Vec<CollectionSuggestionMember> = serde_json::from_str(&members_json)
             .map_err(|e| format!("Invalid suggestion members: {e}"))?;
+        if let Some(keys) = &rejected_keys {
+            if keys.iter().any(|(source, id)| {
+                !members
+                    .iter()
+                    .any(|m| &m.source == source && &m.source_id == id)
+            }) {
+                return Err("Selected work is not in this suggestion".into());
+            }
+            if keys.is_empty() || (origin == "sweep" && keys.len() < 2) {
+                return Err("Select at least two works for this combination".into());
+            }
+        }
         let seeds = load_suggestion_works(&conn, &seed_ids)?;
         let tx = conn
             .unchecked_transaction()
             .map_err(|e| format!("Suggestion rejection transaction failed: {e}"))?;
         let now = chrono::Utc::now().to_rfc3339();
         for seed in &seeds {
+            if origin == "sweep"
+                && rejected_keys.as_ref().is_some_and(|keys| {
+                    !keys.contains(&(seed.source.clone(), seed.source_id.clone()))
+                })
+            {
+                continue;
+            }
             for member in &members {
                 if seed.source == member.source && seed.source_id == member.source_id {
                     continue;
@@ -1991,18 +2011,8 @@ impl Database {
         Ok(true)
     }
 
-    /// ひな型を一覧から消すだけの操作。却下と違い否定フィードバックを残さない
-    /// ため、同じ組合せは次回以降も候補になりうる。「今はいらない」と
-    /// 「二度と出すな」を利用者が区別できるようにするための分岐である。
-    /// 走査で出た候補を、まとめて閉じる。
-    ///
-    /// 300件を1件ずつ閉じる人はいない。**一括で消せないなら、出さないほうが
-    /// まし**になってしまう。ここで消すのは下書きだけで、否定の記憶
-    /// （`collection_pair_feedback`）は残さない — 規則が変われば、また出てくる。
-    ///
-    /// 系統を選んで閉じる道は無くした。畳んだメニューの中に「続き物だけ」
-    /// 「テーマだけ」を置いていたが、系統を選んで閉じたい人はいなかった。
-    /// いまは窓を閉じれば全部片付く。
+    /// 走査の下書きを明示的に一括削除する互換API。否定フィードバックは残さない。
+    /// 現在の確認画面は、閉じる操作や保留からこのAPIを呼ばず、候補を保持する。
     pub fn dismiss_swept_suggestions(&self) -> Result<usize, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let removed = conn
@@ -2036,25 +2046,30 @@ impl Database {
             .into_iter()
             .find(|value| value.id == suggestion_id)
             .ok_or_else(|| "Pending collection suggestion not found".to_string())?;
-        let selected_keys = input.member_keys.as_ref().map(|keys| {
-            keys.iter()
-                .map(|key| {
-                    (
-                        key.source.trim().to_string(),
-                        key.source_id.trim().to_string(),
-                    )
-                })
-                .collect::<HashSet<_>>()
-        });
-        let selected = suggestion
-            .members
-            .iter()
-            .filter(|member| {
-                selected_keys.as_ref().map_or(member.selected, |keys| {
-                    keys.contains(&(member.source.clone(), member.source_id.clone()))
-                })
-            })
-            .collect::<Vec<_>>();
+        let selected = if let Some(keys) = &input.member_keys {
+            let mut seen = HashSet::new();
+            let mut selected = Vec::new();
+            for key in keys {
+                let source = validate_work_key_part(&key.source, "Source")?;
+                let source_id = validate_work_key_part(&key.source_id, "Source ID")?;
+                if !seen.insert((source.clone(), source_id.clone())) {
+                    return Err("The same work was selected twice".into());
+                }
+                let member = suggestion
+                    .members
+                    .iter()
+                    .find(|m| m.source == source && m.source_id == source_id)
+                    .ok_or_else(|| "Selected work is not in this suggestion".to_string())?;
+                selected.push(member);
+            }
+            selected
+        } else {
+            suggestion
+                .members
+                .iter()
+                .filter(|m| m.selected)
+                .collect::<Vec<_>>()
+        };
         if selected.is_empty() {
             return Err("Select at least one work for the collection".to_string());
         }
