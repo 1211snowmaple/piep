@@ -1,0 +1,6 @@
+[
+  {"id":"r01","category":"metadata_prefix_false_bridge","left":"【ファンボサンプル】（後編）星の舟","right":"【ファンボサンプル】（前編）花の庭","positive":false},
+  {"id":"r02","category":"metadata_prefix_true_pair","left":"【ファンボサンプル】（前編）星の舟","right":"【ファンボサンプル】（後編）星の舟","positive":true},
+  {"id":"r03","category":"stage_then_number","left":"【後編①】星の舟","right":"【後編②】星の舟","positive":true},
+  {"id":"r04","category":"poll_is_not_episode","left":"星の図書館 第三話","right":"星の図書館 第四話 投票ページ","positive":false}
+]
