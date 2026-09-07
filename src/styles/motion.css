@@ -27,11 +27,19 @@
 :root[data-content-transition] { view-transition-name: none; }
 :root[data-content-transition]::view-transition { pointer-events: none; }
 
-/* The region itself holds still; only what is inside it is replaced. Nothing
-   is scaled either - the snapshots are drawn at their own size from the top
-   left, so glyphs keep theirs. Outgoing text clears before incoming text
-   becomes readable, so the two are never legible at once. */
-:root[data-content-transition]::view-transition-group(piep-content) { animation-name: none; }
+/* 中身は入れ替わるが、拡大縮小はしない ― 古い絵も新しい絵も原寸のまま左上から
+   貼るので、字の大きさは変わらない。消えるほうが読めなくなってから現れるほうが
+   読めるようになるので、二つが同時に読める瞬間もない。
+
+   **高さだけは滑らかに変える。** 一覧ごとに高さがまるで違う（実測で作品
+   1,559px・作者 573px・シリーズ 418px・コレクション 878px）ので、箱を止めて
+   おくと切り替えの1フレーム目で 1,100px 以上が一息に詰まり、下にあるものごと
+   飛ぶ。字が消える間もなく紙面が畳まれるので、これが「しゅば」と見える。
+   動かすのは切り取り枠だけで、貼ってある絵は原寸のままである。 */
+:root[data-content-transition]::view-transition-group(piep-content) {
+  animation-duration: 240ms;
+  animation-timing-function: var(--motion-ease);
+}
 :root[data-content-transition]::view-transition-old(piep-content),
 :root[data-content-transition]::view-transition-new(piep-content) {
   width: 100%;
@@ -40,8 +48,13 @@
   object-position: left top;
   mix-blend-mode: normal;
 }
-:root[data-content-transition]::view-transition-old(piep-content) { animation: content-out 80ms ease-in both; }
-:root[data-content-transition]::view-transition-new(piep-content) { animation: content-in 160ms ease-out 70ms both; }
+/* 濃さの変化は一定の速さで、切り替えの前後を通して一つの長さに収める。
+   `ease-in` で消して `ease-out` で出すと、**変化のいちばん速いところが真ん中に
+   来る** ―― 端はゆっくり、中央で一息に入れ替わるので、これも「しゅば」と
+   読める。線形にして、消え終わったところから現れ始め、箱の高さと同じ 240ms で
+   揃える。 */
+:root[data-content-transition]::view-transition-old(piep-content) { animation: content-out 100ms linear both; }
+:root[data-content-transition]::view-transition-new(piep-content) { animation: content-in 140ms linear 100ms both; }
 
 @keyframes content-out { to { opacity: 0; } }
 @keyframes content-in { from { opacity: 0; } to { opacity: 1; } }
