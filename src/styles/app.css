@@ -44,16 +44,26 @@ pre,
 
 .mantine-Notifications-root {
   /* 固定ヘッドバー（58px）の直下に、少し呼吸できる間隔を空ける。 */
-  top: 70px !important;
+  top: var(--piep-notification-top, 70px) !important;
   right: 16px !important;
   bottom: auto !important;
   width: min(360px, calc(100vw - 32px)) !important;
   max-width: calc(100vw - 32px) !important;
-  max-height: calc(100dvh - 86px);
+  max-height: calc(100dvh - var(--piep-notification-top, 70px) - 16px);
   padding: 1px;
   overflow-x: hidden;
   overflow-y: auto;
   pointer-events: none;
+}
+
+/* 編集画面にはヘッドバーの下に68pxの操作列がある。保存通知で
+   「反映」を覆うと、ボタン上のポインターが通知の自動消去も止めてしまう。 */
+body:has(.editor-page) .mantine-Notifications-root {
+  --piep-notification-top: 138px;
+}
+/* 保存直後に読書へ戻っても、62pxの操作列に通知を重ねない。 */
+body:has(.reader-page) .mantine-Notifications-root {
+  --piep-notification-top: 132px;
 }
 .mantine-Notification-root { width: 100%; max-width: 100%; overflow: hidden; pointer-events: auto; }
 .mantine-Notification-description {
@@ -245,13 +255,12 @@ select {
 }
 
 .surface--interactive {
-  transition: transform 150ms ease, border-color 150ms ease, box-shadow 150ms ease;
+  transition: border-color 150ms ease, box-shadow 150ms ease;
 }
 
 .surface--interactive:hover {
   border-color: light-dark(#cdd8e5, #384352);
   box-shadow: 0 10px 32px rgb(28 53 82 / 9%);
-  transform: translateY(-1px);
 }
 
 /* One badge shape for every provider. pixiv used a rounded square and FANBOX a
@@ -1146,6 +1155,10 @@ select {
 
 .library-page { padding-top: 14px; }
 
+.library-results { display: flow-root; }
+.library-toolbar__slot { display: contents; }
+.library-toolbar__slot[data-inactive] { visibility: hidden; pointer-events: none; }
+
 .library-grid {
   display: grid;
   /* Must match VirtualizedWorkList's measured threshold. This also governs the
@@ -1474,6 +1487,76 @@ select {
   color: var(--mantine-color-dimmed);
   font-size: 0.82rem;
 }
+
+/* 添付ファイル。押して開く手段はまだ無いが、**在ることは見えていなければ
+   ならない。** 何も書かないでいたころは、名前と 📎 が地の文に紛れていた。 */
+.novel-file-attachment {
+  display: flex;
+  gap: 0.7em;
+  align-items: center;
+  margin: 1.25em 0;
+  padding: 0.8em 1em;
+  border: 1px solid light-dark(#dce2e8, #303944);
+  border-radius: 10px;
+  background: light-dark(#fbfcfd, #1a1f27);
+}
+.novel-file-attachment .file-icon { font-size: 1.1rem; line-height: 1; }
+.novel-file-attachment .file-info { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.novel-file-attachment .file-name { overflow-wrap: anywhere; }
+.novel-file-attachment .file-size,
+.missing-file-placeholder {
+  color: var(--mantine-color-dimmed);
+  font-size: 0.82rem;
+}
+
+/* 添付から取り込んだ本文の前に置く一行。
+   piep がやったことであって作者が書いたことではないので、本文と同じ顔にしない。
+   色は状態を示すために使うので、ここでは使わない（設計原則 6）。 */
+.attachment-notice {
+  margin: 1.25em 0;
+  padding-inline-start: 0.9em;
+  border-inline-start: 2px solid light-dark(#dce2e8, #303944);
+  color: var(--mantine-color-dimmed);
+  font-size: 0.82rem;
+}
+/* 取り込めなかった添付。色は状態を示すために使う（設計原則 6）ので、ここは
+   使ってよい ―― 「取り込めなかった」は種類ではなく状態である。 */
+.attachment-notice--failed {
+  border-inline-start-color: light-dark(#e8c4a0, #6b4a2a);
+}
+
+/* 原本へ戻る道。地の文と同じ大きさで、押せることだけが分かればよい。 */
+.attachment-original {
+  padding: 0.1em 0.6em;
+  border: 1px solid light-dark(#dce2e8, #303944);
+  border-radius: 999px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.attachment-original:hover { background: light-dark(#f1f3f5, #21262e); }
+
+/* 原本の紙面。窓の中に収め、紙は白いまま見せる。 */
+.pdf-original-frame {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 240px;
+}
+.pdf-original-page {
+  display: block;
+  max-width: 100%;
+  /* 送りの操作列と題を除いた残り。ページを送っても高さが動かない。 */
+  max-height: 72vh;
+  width: auto;
+  height: auto;
+  border: 1px solid light-dark(#dce2e8, #303944);
+  border-radius: 6px;
+  /* 紙は白い。暗い画面でも紙面の余白を紙のまま出す。 */
+  background: #fff;
+}
+.pdf-original-title { font-size: 0.9rem; font-weight: 650; }
 
 /* 手元にある作品・作者を指しているリンク。押せばアプリの中で開く。
    押してみるまで分からなかったころは、外部リンクと見分けが付かなかった。 */

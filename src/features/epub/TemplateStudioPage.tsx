@@ -20,7 +20,6 @@ import {
   Stack,
   Switch,
   Table,
-  Tabs,
   Text,
   Textarea,
   TextInput,
@@ -34,6 +33,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Icons, IconSize } from "@/lib/icons";
 import { useAppNavigate, useAppSearchParams } from "@/app/router";
 import { EmptyState, ErrorState, LoadingState } from "@/components/AsyncState";
+import { MotionTabs as Tabs } from "@/components/MotionTabs";
 import { PageHeader } from "@/components/PageHeader";
 import { ProviderMark } from "@/lib/providers";
 import { errorMessage } from "@/lib/format";

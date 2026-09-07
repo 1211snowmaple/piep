@@ -1,6 +1,6 @@
 import { StrictMode } from "react";
 import { MantineProvider } from "@mantine/core";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { theme } from "@/theme";
 import { APP_UPDATE_CHECK_KEY } from "@/features/settings/appUpdate";
@@ -47,6 +47,25 @@ describe("AppUpdateCard", () => {
     await waitFor(() => expect(downloadAndInstallAppUpdate).toHaveBeenCalledTimes(1));
     finish();
     expect(await screen.findByRole("button", { name: "いま再起動する" })).toBeInTheDocument();
+  });
+
+  it("keeps an installation and its restart action visible when checking again", async () => {
+    checkForAppUpdate.mockResolvedValue({ version: "0.8.0", date: null, body: "更新内容" });
+    let finish!: () => void;
+    downloadAndInstallAppUpdate.mockImplementation(() => new Promise<void>((resolve) => { finish = resolve; }));
+    renderCard();
+    fireEvent.click(await screen.findByRole("button", { name: "ダウンロードして更新" }));
+    await waitFor(() => expect(downloadAndInstallAppUpdate).toHaveBeenCalledOnce());
+
+    const check = screen.getByRole("button", { name: "更新を確認" });
+    expect(check).toBeDisabled();
+    fireEvent.click(check);
+    expect(checkForAppUpdate).toHaveBeenCalledOnce();
+    expect(screen.getByText("ダウンロードしています…")).toBeInTheDocument();
+
+    await act(async () => finish());
+    expect(await screen.findByRole("button", { name: "いま再起動する" })).toBeInTheDocument();
+    expect(check).toBeDisabled();
   });
 
   // 署名鍵が未設定のときは、原因の分からない失敗にしない。

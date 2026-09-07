@@ -6,26 +6,32 @@ param(
 $ErrorActionPreference = "Stop"
 $resolvedExecutable = (Resolve-Path -LiteralPath $Executable).Path
 $resolvedWorkspace = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
-if (-not $resolvedExecutable.StartsWith($resolvedWorkspace, [System.StringComparison]::OrdinalIgnoreCase)) {
+if (-not $resolvedExecutable.StartsWith($resolvedWorkspace + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase)) {
   throw "Executable must stay inside the workspace"
 }
 
 New-Item -ItemType Directory -Force -Path $ArtifactDirectory | Out-Null
 $resolvedArtifacts = (Resolve-Path -LiteralPath $ArtifactDirectory).Path
 # A smoke test must never open or migrate the developer/runner's real library.
-# Tauri derives its application directories from these Windows locations.
-$env:APPDATA = Join-Path $resolvedArtifacts "appdata"
-$env:LOCALAPPDATA = Join-Path $resolvedArtifacts "localappdata"
-New-Item -ItemType Directory -Force -Path $env:APPDATA, $env:LOCALAPPDATA | Out-Null
-$process = Start-Process -FilePath $resolvedExecutable -PassThru -WindowStyle Normal
+# Windows Known Folders ignore APPDATA/LOCALAPPDATA overrides. The app changes
+# its Tauri identifier before initializing plugins, the library, or WebView2.
+$previousRunId = $env:PIEP_SMOKE_TEST_ID
+$env:PIEP_SMOKE_TEST_ID = [guid]::NewGuid().ToString('N')
+$identifier = "com.hiron.piep.smoke.$($env:PIEP_SMOKE_TEST_ID)"
+$appData = Join-Path ([Environment]::GetFolderPath('ApplicationData')) $identifier
+$localAppData = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) $identifier
+if ((Test-Path -LiteralPath $appData) -or (Test-Path -LiteralPath $localAppData)) {
+  throw "Smoke-test directories must be new"
+}
+$process = $null
 try {
+  $process = Start-Process -FilePath $resolvedExecutable -PassThru -WindowStyle Hidden
   Add-Type @"
 using System;
 using System.Runtime.InteropServices;
 public static class PiepNativeWindow {
   [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
   [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
-  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
   public delegate bool EnumWindowProc(IntPtr hwnd, IntPtr lParam);
   [DllImport("user32.dll")] public static extern bool EnumChildWindows(IntPtr hwnd, EnumWindowProc callback, IntPtr lParam);
   [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetClassName(IntPtr hwnd, System.Text.StringBuilder text, int maxCount);
@@ -51,10 +57,15 @@ public static class PiepNativeWindow {
   if ($process.MainWindowHandle -eq 0) { throw "piep did not create a main window" }
   if ($width -lt 900 -or $height -lt 600) { throw "Initial window is smaller than 900x600: ${width}x${height}" }
 
-  [PiepNativeWindow]::SetForegroundWindow($process.MainWindowHandle) | Out-Null
-  Add-Type -AssemblyName System.Windows.Forms
-  [System.Windows.Forms.SendKeys]::SendWait("^+s")
-  Start-Sleep -Seconds 3
+  # Do not send global keystrokes: focus can belong to the user's normal app.
+  $database = Join-Path $appData 'piep.db'
+  while (-not (Test-Path -LiteralPath $database)) {
+    if ($process.HasExited -or [DateTime]::UtcNow -gt $deadline) {
+      throw "Smoke test did not initialize its isolated library"
+    }
+    Start-Sleep -Milliseconds 250
+    $process.Refresh()
+  }
 
   $classes = [System.Collections.Generic.List[string]]::new()
   $callback = [PiepNativeWindow+EnumWindowProc]{ param($hwnd, $lParam)
@@ -66,9 +77,32 @@ public static class PiepNativeWindow {
   [PiepNativeWindow]::EnumChildWindows($process.MainWindowHandle, $callback, [IntPtr]::Zero) | Out-Null
   if (-not ($classes | Where-Object { $_ -match "Chrome_WidgetWin|WebView" })) { throw "No WebView2 child surface was found" }
 
-  [pscustomobject]@{ Width = $width; Height = $height; ChildWindowClasses = $classes } |
+  [pscustomobject]@{ Width = $width; Height = $height; ChildWindowClasses = $classes; Identifier = $identifier; AppData = $appData; LocalAppData = $localAppData } |
     ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $ArtifactDirectory "native-window.json") -Encoding utf8
 }
 finally {
-  if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force }
+  if ($null -ne $process -and -not $process.HasExited) { Stop-Process -Id $process.Id -Force }
+  # The library must be released before its files can be removed.
+  if ($null -ne $process) { [void]$process.WaitForExit(10000) }
+  # Keep the log: the run's own directories are about to go, and a failure here
+  # is usually explained by what the app wrote on the way up.
+  $log = Join-Path $appData "logs"
+  if (Test-Path -LiteralPath $log) {
+    Copy-Item -LiteralPath $log -Destination (Join-Path $ArtifactDirectory "logs") -Recurse -Force -ErrorAction SilentlyContinue
+  }
+  # Each run invents a fresh identifier, so these directories belong to this run
+  # alone. Leaving them behind puts a throwaway library beside the real one in
+  # the developer's AppData, once per run.
+  # WebView2 keeps its own processes a moment longer than the host, and holds
+  # EBWebView open while they go. Retry rather than leave the directory behind.
+  foreach ($directory in @($appData, $localAppData)) {
+    for ($attempt = 0; $attempt -lt 20 -and $directory -and (Test-Path -LiteralPath $directory); $attempt++) {
+      Remove-Item -LiteralPath $directory -Recurse -Force -ErrorAction SilentlyContinue
+      if (Test-Path -LiteralPath $directory) { Start-Sleep -Milliseconds 500 }
+    }
+    if ($directory -and (Test-Path -LiteralPath $directory)) {
+      Write-Warning "Could not remove the smoke-test directory: $directory"
+    }
+  }
+  $env:PIEP_SMOKE_TEST_ID = $previousRunId
 }

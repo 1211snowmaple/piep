@@ -1,5 +1,6 @@
 import { createContext, forwardRef, startTransition, useCallback, useContext, useEffect, useMemo, useRef, useState, type AnchorHTMLAttributes, type MouseEvent, type ReactNode } from "react";
 import { hasUnsavedWork } from "@/lib/unsavedGuard";
+import { cancelContentTransition } from "@/lib/contentTransition";
 
 /**
  * How the current location was arrived at.
@@ -79,6 +80,7 @@ export function AppRouter({ children, confirmNavigation }: AppRouterProps) {
       setLocation(next);
       return;
     }
+    cancelContentTransition();
     startTransition(() => setLocation(next));
   }, []);
   const confirmationPending = useRef(false);

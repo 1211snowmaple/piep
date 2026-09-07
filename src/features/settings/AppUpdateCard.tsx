@@ -127,7 +127,7 @@ export function AppUpdateCard({ runtime }: { runtime: boolean }) {
           <Button
             variant="default"
             size="xs"
-            disabled={!runtime}
+            disabled={!runtime || phase === "downloading" || phase === "ready"}
             loading={phase === "checking"}
             leftSection={<Icons.retry size={IconSize.menu} />}
             onClick={() => void runCheck()}

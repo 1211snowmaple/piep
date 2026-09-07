@@ -35,6 +35,7 @@ import { HIT_ATTRIBUTE, highlightMatches } from "@/features/reader/readerSearch"
 import { clearReadingPosition, readReadingPosition, writeReadingPosition } from "@/features/library/readingShelf";
 import { useAppNavigate, useAppSearchParams, useReturnTo, useRouteParams } from "@/app/router";
 import { ErrorState, LoadingState } from "@/components/AsyncState";
+import { PdfOriginalViewer, type PdfOriginalTarget } from "@/components/PdfOriginalViewer";
 import { ProviderMark, sourceUrl } from "@/lib/providers";
 import { formatDate, formatNumber } from "@/lib/format";
 import { prepareDocumentHtml } from "@/lib/content";
@@ -273,6 +274,7 @@ export default function ReaderPage() {
   const [markedTerm, setMarkedTerm] = useState("");
   const [hitIndex, setHitIndex] = useState(0);
   const [zoomImage, setZoomImage] = useState<{ src: string; alt: string } | null>(null);
+  const [pdfOriginal, setPdfOriginal] = useState<PdfOriginalTarget | null>(null);
   const [progress, setProgress] = useState(0);
   const [sourcePage, setSourcePage] = useState(1);
   const [jumpPage, setJumpPage] = useState<number | string>(1);
@@ -769,6 +771,15 @@ export default function ReaderPage() {
     return start === undefined ? page : start + 1;
   };
   const handleArticleClick = async (event: React.MouseEvent<HTMLElement>) => {
+    // 取り込んだ本文の頭に置いた「原本を見る」。取り込みを疑いたいときと、
+    // 図版が紙面にしか無いときのための道。
+    const original = (event.target as HTMLElement).closest<HTMLElement>("button.attachment-original");
+    const originalPath = original?.dataset.localPath;
+    if (originalPath) {
+      event.preventDefault();
+      setPdfOriginal({ downloadId: id, localPath: originalPath, fileName: original?.dataset.fileName || "添付ファイル" });
+      return;
+    }
     const image = (event.target as HTMLElement).closest<HTMLImageElement>("img.novel-image, .reader-content img");
     if (image?.currentSrc || image?.src) {
       // 挿絵は押しても何も起こらなかった。小さいまま眺めるしかない絵を
@@ -1005,6 +1016,8 @@ export default function ReaderPage() {
           <ActionIcon variant="subtle" color="gray" size="sm" aria-label="印を消す" onClick={() => setMarkedTerm("")}><Icons.cancel size={IconSize.menu} /></ActionIcon>
         </Group>
       </Paper>}
+
+      <PdfOriginalViewer target={pdfOriginal} onClose={() => setPdfOriginal(null)} />
 
       <Modal opened={Boolean(zoomImage)} onClose={() => setZoomImage(null)} size="auto" centered withCloseButton={false} padding={0} className="reader-zoom">
         {zoomImage && <img src={zoomImage.src} alt={zoomImage.alt} className="reader-zoom__image" onClick={() => setZoomImage(null)} />}

@@ -11,15 +11,14 @@
 use super::{
     active_edit_revision_locked, blocks_for_revision_locked, blocks_to_fanbox_blocks,
     blocks_to_html, blocks_to_pixiv_text, blocks_to_plain_text, draft_edit_revision_locked,
-    extract_search_body, get_work_edit_revision_locked, hash_blocks, html_to_editor_blocks,
-    insert_work_blocks_locked, normalize_block_inputs, paginate_reader_html,
-    plain_text_from_reader_html, reader_source_content, reader_version_path,
-    reindex_download_locked, Database, EditedSourceForm, EditorDocument, ReaderCacheEntry,
-    ReaderCacheKey, ReaderContentPage, ReaderDocument, ReaderMetadata, ReaderOutlineEntry,
-    ReaderSearchHit, WorkBlockInput, WorkEditRevision, READER_CACHE_MAX_BYTES,
-    READER_CACHE_MAX_DOCUMENTS, READER_CACHE_TICK, READER_CONTENT_CACHE,
+    get_work_edit_revision_locked, hash_blocks, html_to_editor_blocks, insert_work_blocks_locked,
+    normalize_block_inputs, paginate_reader_html, plain_text_from_reader_html,
+    reader_source_content, reader_version_path, reindex_download_locked, Database,
+    EditedSourceForm, EditorDocument, ReaderCacheEntry, ReaderCacheKey, ReaderContentPage,
+    ReaderDocument, ReaderMetadata, ReaderOutlineEntry, ReaderSearchHit, WorkBlockInput,
+    WorkEditRevision, READER_CACHE_MAX_BYTES, READER_CACHE_MAX_DOCUMENTS, READER_CACHE_TICK,
+    READER_CONTENT_CACHE,
 };
-use crate::database::parser;
 use rusqlite::{params, OptionalExtension};
 use std::sync::atomic::Ordering as AtomicOrdering;
 use std::sync::Arc;
@@ -336,17 +335,8 @@ impl Database {
 
         let target_version = version.unwrap_or(download.current_version);
         let raw_json = self.read_download_json_for_version(&download, &versions, target_version)?;
-        let html = if download.source == "pixiv" {
-            parser::parse_pixiv_to_html(&raw_json, &assets)
-        } else if download.source == "fanbox" {
-            parser::parse_fanbox_to_html(&raw_json, &assets)
-        } else {
-            String::new()
-        };
-        let plain_text = serde_json::from_str::<serde_json::Value>(&raw_json)
-            .ok()
-            .map(|value| extract_search_body(&value, &download.source))
-            .unwrap_or_default();
+        let (html, plain_text) =
+            super::super::attachment::content_from_json(&raw_json, &download.source, &assets);
 
         Ok(ReaderDocument {
             download,
@@ -422,13 +412,8 @@ impl Database {
 
         let raw_json =
             self.read_download_json_for_version(&download, &versions, download.current_version)?;
-        let source_html = if download.source == "pixiv" {
-            parser::parse_pixiv_to_html(&raw_json, &assets)
-        } else if download.source == "fanbox" {
-            parser::parse_fanbox_to_html(&raw_json, &assets)
-        } else {
-            String::new()
-        };
+        let (source_html, _) =
+            super::super::attachment::content_from_json(&raw_json, &download.source, &assets);
         let blocks = html_to_editor_blocks(&source_html, &assets);
 
         Ok(EditorDocument {

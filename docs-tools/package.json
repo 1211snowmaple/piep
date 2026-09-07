@@ -20,7 +20,8 @@
     "site:dev": "npm run assemble && vitepress dev site",
     "site:build": "npm run assemble && vitepress build site",
     "docs:build": "npm run contract && npm run stats && npm run rustdoc && npm run rustdoc:copy && npm run site:build",
-    "docs:check": "npm run check:emphasis && npm run check:screens && npm run contract:check && npm run stats:check",
+    "test:scanner": "node --test src/scan-frontend.test.mjs",
+    "docs:check": "npm run test:scanner && npm run check:emphasis && npm run check:screens && npm run contract:check && npm run stats:check",
     "docs:dev": "npm run contract && npm run stats && npm run site:dev"
   },
   "devDependencies": {

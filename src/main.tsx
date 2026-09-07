@@ -12,6 +12,7 @@ import { applyStoredDensity } from "@/lib/density";
 import { queryClient } from "@/lib/queryClient";
 import { theme } from "@/theme";
 import "@/styles/app.css";
+import "@/styles/motion.css";
 
 const container = document.getElementById("root");
 

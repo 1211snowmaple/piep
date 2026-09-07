@@ -29,6 +29,7 @@ describe("CollectionSweepModal", () => {
     vi.clearAllMocks();
     api.listCollectionSuggestions.mockResolvedValue([]);
     api.sweepCollectionCandidates.mockResolvedValue({ bundles: [], savedSearchSuggestions: [], semanticUsed: true, note: null });
+    api.dismissSweptSuggestions.mockResolvedValue(0);
   });
   it("明示的に探すまでは走査しない", async () => {
     renderModal();
@@ -37,15 +38,15 @@ describe("CollectionSweepModal", () => {
     await userEvent.click(screen.getByRole("button", { name: "棚から探す" }));
     await waitFor(() => expect(api.sweepCollectionCandidates).toHaveBeenCalledOnce());
   });
-  it("閉じて開き直しても候補と選択を保つ", async () => {
+  /** 残しておくと、次に開いても同じ顔ぶれが並ぶ。走査は同じ棚を同じ規則で
+   *  見るので、貯まるのは「見送ったもの」だけだった。捨てて、開くたびに
+   *  探し直せるようにする。**否定は記録しないので、次の走査でまた出てくる。** */
+  it("閉じたら、確認しなかった候補は捨てる", async () => {
     api.listCollectionSuggestions.mockResolvedValue([discoverySuggestion()]);
     renderModal();
-    await userEvent.click(await screen.findByRole("checkbox", { name: "作品2を含める" }));
+    await screen.findByRole("checkbox", { name: "作品2を含める" });
     await userEvent.click(screen.getByRole("button", { name: "まとまりを探すを閉じる" }));
-    await userEvent.click(screen.getByRole("button", { name: "確認を再開" }));
-    expect(await screen.findByRole("checkbox", { name: "作品2を含める" })).not.toBeChecked();
-    expect(api.dismissSweptSuggestions).not.toHaveBeenCalled();
-    expect(screen.getByRole("button", { name: "棚を探し直す" })).toBeInTheDocument();
+    await waitFor(() => expect(api.dismissSweptSuggestions).toHaveBeenCalledOnce());
   });
   it("走査中でも閉じられ、再開後に結果を確認できる", async () => {
     let complete!: (value: unknown) => void;

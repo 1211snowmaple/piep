@@ -94,7 +94,14 @@ fn conformance_manifest() -> EpubManifest {
                 },
                 EpubPage {
                     title: None,
-                    html_content: "<p>題名の無いページ。</p>".into(),
+                    html_content: concat!(
+                        "<p>題名の無いページ。</p>",
+                        // 添付から取り込んだ本文の印。作り出しているのは piep
+                        // なので、EPUBCheck に見せる原稿へ入れておく。
+                        "<p class=\"attachment-notice\">添付ファイル「本文 &amp; 続き.pdf」から取り込んだ本文</p>",
+                        "<p>取り込んだ段落。</p>",
+                    )
+                    .into(),
                     order: 2,
                     chapters: Vec::new(),
                     part: 0,

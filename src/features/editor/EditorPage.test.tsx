@@ -90,4 +90,25 @@ describe("EditorPage", () => {
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ["reader-content-search", 101] });
     expect(invalidate).not.toHaveBeenCalledWith({ queryKey: ["reader-document", 101] });
   });
+
+  it.each(["下書き保存", "反映"])("keeps a newer title dirty when %s finishes", async (action) => {
+    const pending = deferred<WorkEditRevision>();
+    dbApi.saveWorkDraft.mockReturnValueOnce(pending.promise);
+    renderEditor();
+    const title = await screen.findByLabelText("この作品のタイトル");
+    fireEvent.change(title, { target: { value: "保存するタイトル" } });
+    fireEvent.click(screen.getByRole("button", { name: action }));
+    await waitFor(() => expect(dbApi.saveWorkDraft).toHaveBeenCalledOnce());
+
+    fireEvent.change(title, { target: { value: "保存開始後のタイトル" } });
+    await act(async () => pending.resolve(revision));
+    if (action === "反映") await waitFor(() => expect(dbApi.activateWorkEdit).toHaveBeenCalledOnce());
+
+    expect(title).toHaveValue("保存開始後のタイトル");
+    expect(screen.getByText("未保存")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "下書き保存" }));
+    await waitFor(() => expect(dbApi.saveWorkDraft).toHaveBeenLastCalledWith(
+      101, expect.any(Number), "保存開始後のタイトル", expect.any(Array),
+    ));
+  });
 });

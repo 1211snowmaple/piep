@@ -8,7 +8,10 @@ mod downloader;
 pub mod epub;
 pub mod fanbox_api;
 mod logging;
+/// 棚の実物で取り出しを確かめる example から触れるように公開している。
+pub mod pdf;
 pub mod pixiv_api;
+mod smoke_test;
 
 use database::Database;
 use std::path::Path;
@@ -96,6 +99,10 @@ impl AppState {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() -> tauri::Result<()> {
+    // Set the identifier before plugins and webviews resolve any application paths.
+    let mut context = tauri::generate_context!();
+    let smoke_run_id = std::env::var(smoke_test::RUN_ID_ENV).ok();
+    smoke_test::configure(context.config_mut(), smoke_run_id.as_deref())?;
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_store::Builder::new().build())
@@ -126,6 +133,24 @@ pub fn run() -> tauri::Result<()> {
             // 埋め込みモデルの置き場は、開く前に決めておく。既定は起動した場所
             // なので、決めないと起動場所ごとに 465MB を落として置き去りにする。
             database::semantic_index::set_model_cache_dir(&storage_dir);
+
+            // 添付 PDF を読むための pdfium。配布物では実行ファイルの隣に配られる
+            // （`tauri.conf.json` の `bundle.resources`）。見つからなくても起動は
+            // 止めない。**止めると、添付を持たない作品まで開けなくなる。**
+            match app
+                .path()
+                .resolve("vendor/pdfium/pdfium.dll", tauri::path::BaseDirectory::Resource)
+            {
+                // `resolve` は道を組み立てるだけで、在るかどうかは見ない。
+                // **同梱から漏れても、添付 PDF を開くまで誰も気づかない。**
+                // 起動時に一度だけ確かめて、記録に残す。
+                Ok(path) if path.is_file() => pdf::set_library_path(path),
+                Ok(path) => log::warn!(
+                    "pdfium が同梱されていない。添付 PDF の本文は取り込めない: {}",
+                    path.display()
+                ),
+                Err(error) => log::warn!("pdfium の置き場所を決められない: {error}"),
+            }
 
             // Claim the whole library before SQLite, restore recovery, search
             // sidecars, or downloaded files can be opened by this process.
@@ -350,10 +375,11 @@ pub fn run() -> tauri::Result<()> {
             commands::epub::list_template_file_kinds,
             commands::epub::preview_epub_template,
             commands::archive::get_storage_path,
+            commands::pdf::render_pdf_attachment_page,
             commands::shell::open_managed_path,
             commands::shell::reveal_managed_path,
         ])
-        .run(tauri::generate_context!())
+        .run(context)
 }
 
 #[cfg(test)]

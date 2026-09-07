@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { MotionTabs as Tabs } from "@/components/MotionTabs";
 import {
   ActionIcon,
   Alert,
@@ -19,7 +20,6 @@ import {
   SimpleGrid,
   Stack,
   Switch,
-  Tabs,
   Text,
   ThemeIcon,
   Title,
@@ -37,6 +37,7 @@ import { useWorkspace } from "@/app/WorkspaceContext";
 import { ErrorState, LoadingState } from "@/components/AsyncState";
 import { ExpandableText } from "@/components/ExpandableText";
 import { WorkCover } from "@/components/WorkCover";
+import { PdfOriginalViewer, type PdfOriginalTarget } from "@/components/PdfOriginalViewer";
 import { BoundedJsonView } from "@/components/BoundedJsonView";
 import { RevisionDiff } from "@/components/RevisionDiff";
 import { ProviderMark, sourceUrl } from "@/lib/providers";
@@ -117,6 +118,7 @@ export default function WorkPage() {
   };
   const [selectedVersion, setSelectedVersion] = useState<number | "pending" | null>(null);
   const [visibleAssetCount, setVisibleAssetCount] = useState(80);
+  const [pdfOriginal, setPdfOriginal] = useState<PdfOriginalTarget | null>(null);
   useEffect(() => setVisibleAssetCount(80), [id]);
   const documentQuery = useQuery({
     queryKey: ["reader-metadata", id],
@@ -320,6 +322,22 @@ export default function WorkPage() {
   // 投稿は続きの回や関連記事をカードで指すので、ここが分かるかどうかで
   // 「保存できている」かどうかの手応えが変わる。
   useLibraryLinkMarks(contentBodyRef, preparedHtml);
+  /**
+   * 本文の中で押されたものを引き受ける。
+   *
+   * 読書画面と同じ扱いにする。**片方でだけ動く印を本文に置くと、同じ本文が
+   * 画面によって違う振る舞いをする**（[設計原則 2](../../../docs/policy/02-principles.md)）。
+   */
+  const handleContentClick = (event: React.MouseEvent<HTMLElement>) => {
+    const original = (event.target as HTMLElement).closest<HTMLElement>("button.attachment-original");
+    const originalPath = original?.dataset.localPath;
+    if (originalPath) {
+      event.preventDefault();
+      setPdfOriginal({ downloadId: id, localPath: originalPath, fileName: original?.dataset.fileName || "添付ファイル" });
+      return;
+    }
+    void openContentLink(event);
+  };
   useEffect(() => { if (tab !== "content") setContentPage(1); }, [id, tab]);
 
   if (documentQuery.isLoading) return <div className="page"><LoadingState label="作品を開いています" /></div>;
@@ -519,7 +537,7 @@ export default function WorkPage() {
                 frame of its own instead, the way the JSON already does, so the
                 screen around it stays put while you read. */}
             <Paper className="content-frame" withBorder ref={contentFrameRef}>
-              <div ref={contentBodyRef} className="content-preview content-preview--paged" onClick={openContentLink} dangerouslySetInnerHTML={{ __html: preparedHtml }} />
+              <div ref={contentBodyRef} className="content-preview content-preview--paged" onClick={handleContentClick} dangerouslySetInnerHTML={{ __html: preparedHtml }} />
             </Paper>
             <ContentPagination current={contentPage} total={contentQuery.data?.pageCount ?? 1} onChange={goToContentPage} />
           </Stack>}
@@ -528,10 +546,17 @@ export default function WorkPage() {
           {assetsQuery.isLoading ? <LoadingState label="アセットを読み込んでいます" /> : assetsQuery.error ? <ErrorState error={assetsQuery.error} retry={() => assetsQuery.refetch()} /> : assets.length ? <Stack gap="lg"><SimpleGrid cols={{ base: 2, sm: 3, lg: 4, xl: 5 }} spacing="md">{visibleAssets.map((asset) => {
             const url = getAssetUrl(asset.localPath);
             const image = asset.mimeType?.startsWith("image/") && url;
+            // PDF は外のアプリへ渡さない方針なので、アプリの中で紙面を見せる。
+            const pdf = runtime && /\.pdf$/i.test(asset.filename);
             const original = Boolean(asset.originalUrl && (/original/i.test(asset.originalUrl) || !/\/c\//.test(asset.originalUrl)));
-            return <Card key={asset.id} p={0} className="asset-card surface--interactive" onClick={() => image && previewAsset(asset)}>
+            const openTarget = () => {
+              if (image) previewAsset(asset);
+              else if (pdf) setPdfOriginal({ downloadId: id, localPath: asset.localPath, fileName: asset.filename });
+            };
+            return <Card key={asset.id} p={0} className="asset-card surface--interactive" onClick={openTarget}>
               <Box className="asset-card__preview">
                 {image ? <Image src={url} alt={asset.filename} className="asset-card__image" loading="lazy" decoding="async" /> : <ThemeIcon size={56} variant="light" color="gray"><Icons.file size={IconSize.feature} /></ThemeIcon>}
+                {pdf && <Badge className="asset-card__badge" size="xs" color="gray" variant="filled">原本を見る</Badge>}
                 {original && <Badge className="asset-card__badge" size="xs" color="green" variant="filled">原寸</Badge>}
               </Box>
               {/* Filename first and on its own line: it is what identifies the
@@ -605,6 +630,7 @@ export default function WorkPage() {
         </Tabs.Panel>
         <Tabs.Panel value="json" pt="lg">{rawJson.isLoading ? <LoadingState /> : rawJson.error ? <ErrorState error={rawJson.error} retry={() => rawJson.refetch()} /> : <BoundedJsonView jsonText={rawJson.data ?? "{}"} description="保存元から取得したJSONを、画面負荷を抑えて表示します" actions={<Button size="xs" variant="default" disabled={!runtime} onClick={() => openLocalAsset(work.jsonPath)}>この端末のJSONを開く</Button>} />}</Tabs.Panel>
       </Tabs>
+      <PdfOriginalViewer target={pdfOriginal} onClose={() => setPdfOriginal(null)} />
     </div>
   );
 }

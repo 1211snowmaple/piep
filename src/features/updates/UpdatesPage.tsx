@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { transitionContent } from "@/lib/contentTransition";
 import {
   ActionIcon,
   Badge,
@@ -15,7 +16,6 @@ import {
   Select,
   Stack,
   Switch,
-  Tabs,
   Text,
   TextInput,
   ThemeIcon,
@@ -32,6 +32,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Icons, IconSize } from "@/lib/icons";
 import { useAppSearchParams } from "@/app/router";
 import { EmptyState, ErrorState, LoadingState } from "@/components/AsyncState";
+import { MotionTabs as Tabs } from "@/components/MotionTabs";
 import { PageHeader } from "@/components/PageHeader";
 import { UPDATE_JOB_STATUS_META, invalidateAfterUpdateJob, isUpdateJobTerminal, useUpdateJobs, type UpdateJobSnapshot, type UpdateJobSummary } from "@/features/updates/updateJobs";
 import { errorMessage, formatDate, formatNumber } from "@/lib/format";
@@ -675,7 +676,9 @@ function CandidatesPanel({ candidates, selectedIds, selectableIds, running, savi
           size="xs"
           aria-label="候補の種類"
           value={kind}
-          onChange={setKind}
+          onChange={(value) => transitionContent(() => setKind(value), {
+            content: () => document.querySelector<HTMLElement>(".update-candidates"),
+          })}
           data={CANDIDATE_KINDS.filter((item) => item.value === "all" || counts[item.value]).map((item) => ({
             value: item.value,
             label: item.value === "all" ? `${item.label} ${listed.length}` : `${item.label} ${counts[item.value] ?? 0}`,
@@ -683,7 +686,7 @@ function CandidatesPanel({ candidates, selectedIds, selectableIds, running, savi
         />
       </Box>
       <Divider />
-      <Stack gap={0}>
+      <Stack gap={0} className="update-candidates">
         {shown.map((candidate) => (
           <Paper key={candidate.id} p="md" radius={0} className="update-candidate">
             <Group wrap="nowrap" align="flex-start">

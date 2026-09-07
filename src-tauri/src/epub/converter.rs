@@ -712,6 +712,22 @@ fn convert_fanbox_body_to_pages(data: &Value) -> (Vec<EpubPage>, u64, Vec<EpubAt
                         attachments.push(file);
                     }
                 }
+                // piep が差し込んだ印。添付から取り込んだ本文の前に置く。
+                crate::database::attachment::NOTICE_BLOCK_TYPE => {
+                    pending_blank = false;
+                    // 取り込めなかったことは画面で伝える話であって、本にする
+                    // ものではない。読む人の手元へ渡る本に piep の事情を残さない。
+                    if block.get("error").is_some() {
+                        continue;
+                    }
+                    if let Some(name) = read_str(block.get("fileName")) {
+                        html.push_str(&format!(
+                            "<p class=\"attachment-notice\">添付ファイル「{}」から取り込んだ本文</p>
+",
+                            xhtml::escape_text(&name)
+                        ));
+                    }
+                }
                 "url_embed" => {
                     pending_blank = false;
                     if let Some((label, url)) =
@@ -775,7 +791,18 @@ fn convert_fanbox_body_to_pages(data: &Value) -> (Vec<EpubPage>, u64, Vec<EpubAt
     }
 
     // image 投稿と file 投稿は blocks を持たず、配列だけで本文を構成する。
-    if let Some(images) = body.get("images").and_then(|value| value.as_array()) {
+    //
+    // **添付から本文を取り込んだ投稿には、こちらで組んだ `blocks` が入っている。**
+    // そのまま配列も流すと、添付の行が二度出る。
+    let has_blocks = body
+        .get("blocks")
+        .and_then(|value| value.as_array())
+        .is_some_and(|blocks| !blocks.is_empty());
+    if let Some(images) = body
+        .get("images")
+        .and_then(|value| value.as_array())
+        .filter(|_| !has_blocks)
+    {
         for image in images {
             let Some(id) = read_str(image.get("id")) else {
                 continue;
@@ -788,7 +815,11 @@ fn convert_fanbox_body_to_pages(data: &Value) -> (Vec<EpubPage>, u64, Vec<EpubAt
             ));
         }
     }
-    if let Some(files) = body.get("files").and_then(|value| value.as_array()) {
+    if let Some(files) = body
+        .get("files")
+        .and_then(|value| value.as_array())
+        .filter(|_| !has_blocks)
+    {
         for file in files {
             let Some(attachment) = read_fanbox_file(file) else {
                 continue;
@@ -1358,6 +1389,40 @@ mod tests {
         assert!(html.contains("<a href=\"https://example.com\">example.com</a>"));
         // 埋め込みの生 HTML は iframe を含む。EPUB には持ち込まない。
         assert!(!html.contains("iframe"));
+        assert_eq!(manifest.content.attachments.len(), 1);
+    }
+
+    /// 添付から本文を取り込んだ「ファイル」形式の投稿。
+    ///
+    /// この形は本来 `blocks` を持たず、`body.files` の配列だけで本文を作る。
+    /// 取り込みは `blocks` を組み立てるので、**配列もそのまま流すと添付の行が
+    /// 二度出る。**
+    #[test]
+    fn an_imported_attachment_is_named_once_not_twice() {
+        let manifest = convert_fanbox(
+            &json!({
+                "id": "1", "title": "投稿", "creatorId": "c", "type": "file",
+                "user": {"userId": "9", "name": "作者"},
+                "body": {
+                    "text": "お納めください。",
+                    "files": [{"id": "f1", "name": "本文", "extension": "pdf", "size": 10}],
+                    "fileMap": {"f1": {"id": "f1", "name": "本文", "extension": "pdf", "size": 10}},
+                    "blocks": [
+                        {"type": "p", "text": "お納めください。"},
+                        {"type": "file", "fileId": "f1"},
+                        {"type": crate::database::attachment::NOTICE_BLOCK_TYPE,
+                         "fileName": "本文.pdf", "method": "tagged",
+                         "pageCount": 2, "charCount": 12},
+                        {"type": "p", "text": "取り込んだ段落。"},
+                    ],
+                },
+            }),
+            Path::new("/nonexistent"),
+        );
+        let html = &manifest.content.pages[0].html_content;
+        assert_eq!(html.matches("添付ファイル: 本文.pdf").count(), 1);
+        assert!(html.contains("から取り込んだ本文"));
+        assert!(html.contains("取り込んだ段落。"));
         assert_eq!(manifest.content.attachments.len(), 1);
     }
 

@@ -51,22 +51,31 @@ export async function installCloseGuard(confirmDiscard: () => Promise<boolean>) 
     const { getCurrentWindow } = await import("@tauri-apps/api/window");
     const appWindow = getCurrentWindow();
     let closing = false;
+    let confirmationPending = false;
     return await appWindow.onCloseRequested(async (event) => {
-      if (closing || !hasUnsavedWork("close")) return;
+      if (closing || (!confirmationPending && !hasUnsavedWork("close"))) return;
       event.preventDefault();
+      if (confirmationPending) return;
+      confirmationPending = true;
       let discard = false;
       try {
         discard = await confirmDiscard();
       } catch {
         discard = true;
       }
-      if (!discard) return;
+      if (!discard) {
+        confirmationPending = false;
+        return;
+      }
       closing = true;
       try {
         await appWindow.destroy();
       } catch {
-        guards.clear();
-        await appWindow.close().catch(() => undefined);
+        // `closing` lets the fallback close request through without disabling
+        // navigation guards if the native window cannot be closed at all.
+        await appWindow.close().catch(() => { closing = false; });
+      } finally {
+        confirmationPending = false;
       }
     });
   } catch {

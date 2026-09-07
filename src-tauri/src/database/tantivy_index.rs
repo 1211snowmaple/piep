@@ -14,7 +14,9 @@ use tantivy::directory::{
 use tantivy::query::QueryParser;
 use tantivy::schema::Value as _;
 use tantivy::schema::{Field, Schema, FAST, INDEXED, STORED, STRING, TEXT};
-use tantivy::tokenizer::{LowerCaser, NgramTokenizer, RemoveLongFilter, TextAnalyzer};
+use tantivy::tokenizer::{
+    LowerCaser, RemoveLongFilter, TextAnalyzer, Token, TokenStream, Tokenizer,
+};
 use tantivy::{
     Directory, Index, IndexReader, IndexSettings, IndexWriter, ReloadPolicy, TantivyDocument, Term,
 };
@@ -35,7 +37,12 @@ const INDEX_DIR_NAME: &str = "search-index";
 // の `tokenizer()` に測った結果がある）。索引は前の切り方で書かれているので、
 // ここを上げて作り直しへ回す。上げないと、既にある作品と今から入る作品で語が
 // 食い違ったまま同じ索引に同居する。
-const INDEX_VERSION_DIR: &str = "v5";
+// v6: n-gram に位置を振るようにした（`PositionedNgramTokenizer`）。位置が
+// 全部 0 だったころ、句の検索は並び順を縛れず「この n-gram が全部どこかに
+// ある」だけの条件に化けていた。索引に書かれている位置が前の意味なので、
+// ここを上げて作り直しへ回す。上げないと、古い作品と新しい作品で位置の
+// 意味が食い違ったまま同じ索引に同居する。
+const INDEX_VERSION_DIR: &str = "v6";
 const TOKENIZER_NAME: &str = "default";
 
 static RUNTIMES: OnceLock<Mutex<HashMap<PathBuf, Arc<TantivyRuntime>>>> = OnceLock::new();
@@ -1918,15 +1925,109 @@ fn schema_has_required_fields(schema: &Schema) -> bool {
 ///
 /// なお SQL 側（`search::ngram_terms`）は1文字をそのまま語として扱う。
 fn register_tokenizer(index: &Index) -> Result<(), String> {
-    let tokenizer = TextAnalyzer::builder(
-        NgramTokenizer::all_ngrams(2, 3)
-            .map_err(|e| format!("Tantivy tokenizer creation failed: {}", e))?,
-    )
-    .filter(LowerCaser)
-    .filter(RemoveLongFilter::limit(64))
-    .build();
+    let tokenizer = TextAnalyzer::builder(PositionedNgramTokenizer::new(2, 3))
+        .filter(LowerCaser)
+        .filter(RemoveLongFilter::limit(64))
+        .build();
     index.tokenizers().register(TOKENIZER_NAME, tokenizer);
     Ok(())
+}
+
+/// 位置を振る n-gram。
+///
+/// Tantivy の `NgramTokenizer` は説明のとおり **位置を常に 0 に置く**
+/// （`/// With this tokenizer, the "position" is always 0.`）。ところが
+/// `QueryParser` は、語が複数のトークンに割れる欄に対して**句**の検索を組む。
+/// 位置が全部 0 の句は並び順を縛れないので、**「この n-gram が全部どこかに
+/// ある」だけの条件に化ける。**
+///
+/// 実測では「空倉第一高校異文化交流部」という具体的な語で棚 9,370 件のうち
+/// 4,013 件（43%）が当たっていた。2〜3文字のローマ字断片（`so` `or` `ra`
+/// `a ` ` k`）は、ローマ字に開いた日本語の本文ならまず含まれるからである。
+///
+/// 出す語と順番は `NgramTokenizer::all_ngrams(2, 3)` と同じにして、位置だけを
+/// 0 から順に振る。**同じ解析器が索引側と検索側の両方を通る**ので、語の
+/// トークン列は本文のトークン列の中に連続して現れ、句が隣接を縛るようになる。
+///
+/// 文字単位で数える。日本語ではバイト単位で切ると多バイト文字の途中で割れる。
+#[derive(Clone)]
+struct PositionedNgramTokenizer {
+    min: usize,
+    max: usize,
+}
+
+impl PositionedNgramTokenizer {
+    fn new(min: usize, max: usize) -> Self {
+        PositionedNgramTokenizer { min, max }
+    }
+}
+
+struct PositionedNgramStream {
+    /// 各文字の開始バイト位置。末尾に文字列全体の長さを足してあるので、
+    /// `offsets[i + n]` がそのまま n 文字ぶん進んだ先になる。
+    offsets: Vec<usize>,
+    text: String,
+    min: usize,
+    max: usize,
+    start: usize,
+    len: usize,
+    position: usize,
+    token: Token,
+}
+
+impl Tokenizer for PositionedNgramTokenizer {
+    type TokenStream<'a> = PositionedNgramStream;
+
+    fn token_stream<'a>(&'a mut self, text: &'a str) -> Self::TokenStream<'a> {
+        let mut offsets: Vec<usize> = text.char_indices().map(|(index, _)| index).collect();
+        offsets.push(text.len());
+        PositionedNgramStream {
+            offsets,
+            text: text.to_string(),
+            min: self.min,
+            max: self.max,
+            start: 0,
+            len: self.min,
+            position: 0,
+            token: Token::default(),
+        }
+    }
+}
+
+impl TokenStream for PositionedNgramStream {
+    fn advance(&mut self) -> bool {
+        // 文字数。`offsets` は末尾に番兵を持つので1つ少ない。
+        let chars = self.offsets.len().saturating_sub(1);
+        loop {
+            if self.start >= chars {
+                return false;
+            }
+            if self.len > self.max || self.start + self.len > chars {
+                self.start += 1;
+                self.len = self.min;
+                continue;
+            }
+            let from = self.offsets[self.start];
+            let to = self.offsets[self.start + self.len];
+            self.token.text.clear();
+            self.token.text.push_str(&self.text[from..to]);
+            self.token.offset_from = from;
+            self.token.offset_to = to;
+            self.token.position = self.position;
+            self.token.position_length = 1;
+            self.position += 1;
+            self.len += 1;
+            return true;
+        }
+    }
+
+    fn token(&self) -> &Token {
+        &self.token
+    }
+
+    fn token_mut(&mut self) -> &mut Token {
+        &mut self.token
+    }
 }
 
 fn fields(schema: &Schema) -> Result<TantivyFields, String> {
@@ -2213,6 +2314,190 @@ mod index_format_migration_tests {
                 .join("index.sqlite")
                 .is_file(),
             "意味検索の置き場を巻き添えにしている"
+        );
+    }
+}
+
+#[cfg(test)]
+mod positioned_ngram_tests {
+    use super::*;
+    use tantivy::collector::Count;
+    use tantivy::schema::{Schema, TEXT};
+
+    fn tokens(text: &str) -> Vec<(String, usize)> {
+        let mut tokenizer = PositionedNgramTokenizer::new(2, 3);
+        let mut stream = tokenizer.token_stream(text);
+        let mut out = Vec::new();
+        while stream.advance() {
+            let token = stream.token();
+            out.push((token.text.clone(), token.position));
+        }
+        out
+    }
+
+    /// 出す語と順番は `NgramTokenizer::all_ngrams(2, 3)` と同じにする。
+    /// 違うのは位置だけで、**0 から順に振る**。
+    #[test]
+    fn every_gram_gets_its_own_place_in_line() {
+        assert_eq!(
+            tokens("abcd"),
+            vec![
+                ("ab".to_string(), 0),
+                ("abc".to_string(), 1),
+                ("bc".to_string(), 2),
+                ("bcd".to_string(), 3),
+                ("cd".to_string(), 4),
+            ]
+        );
+    }
+
+    /// 日本語は文字で数える。バイトで切ると多バイト文字の途中で割れる。
+    #[test]
+    fn japanese_is_counted_in_characters() {
+        let got = tokens("あいう");
+        assert_eq!(
+            got,
+            vec![
+                ("あい".to_string(), 0),
+                ("あいう".to_string(), 1),
+                ("いう".to_string(), 2),
+            ]
+        );
+        // 位置の裏に付ける区間も、文字の境目に合わせる。
+        let mut tokenizer = PositionedNgramTokenizer::new(2, 3);
+        let mut stream = tokenizer.token_stream("あいう");
+        assert!(stream.advance());
+        assert_eq!(
+            (stream.token().offset_from, stream.token().offset_to),
+            (0, 6)
+        );
+    }
+
+    #[test]
+    fn a_single_character_yields_nothing() {
+        assert!(tokens("あ").is_empty());
+    }
+
+    fn index_with(texts: &[&str]) -> (Index, Field) {
+        let mut builder = Schema::builder();
+        let body = builder.add_text_field("body", TEXT);
+        let index = Index::create_in_ram(builder.build());
+        register_tokenizer(&index).unwrap();
+        // 既定の解析器を差し替える。欄の設定は `TEXT` のままでよい。
+        let mut writer = index.writer(15_000_000).unwrap();
+        for text in texts {
+            writer
+                .add_document(tantivy::doc!(body => text.to_string()))
+                .unwrap();
+        }
+        writer.commit().unwrap();
+        (index, body)
+    }
+
+    /// **これが直したかったこと。**
+    ///
+    /// 位置が全部 0 だったころ、句の検索は並び順を縛れず「この n-gram が
+    /// 全部どこかにある」だけの条件に化けていた。同じ字を別の順で持つ本文が
+    /// 当たってしまう。
+    #[test]
+    fn a_phrase_matches_only_where_the_words_actually_sit_together() {
+        let (index, body) = index_with(&[
+            "空倉第一高校異文化交流部",
+            // 同じ字を持つが、並びが違う。位置を見ない句はこれにも当たった。
+            "文化交流のため第一高校の空き倉庫へ異動する部",
+        ]);
+        let searcher = index.reader().unwrap().searcher();
+        let query = QueryParser::for_index(&index, vec![body])
+            .parse_query("\"空倉第一高校異文化交流部\"")
+            .unwrap();
+        assert_eq!(
+            searcher.search(&query, &Count).unwrap(),
+            1,
+            "並びどおりに置いてある本文だけが当たること"
+        );
+    }
+
+    /// 部分一致は残す。途中に現れる語も当たらなければ、n-gram の意味が無い。
+    #[test]
+    fn a_phrase_still_matches_in_the_middle_of_the_text() {
+        let (index, body) = index_with(&["きのう空倉第一高校異文化交流部へ行った"]);
+        let searcher = index.reader().unwrap().searcher();
+        let query = QueryParser::for_index(&index, vec![body])
+            .parse_query("\"空倉第一高校異文化交流部\"")
+            .unwrap();
+        assert_eq!(searcher.search(&query, &Count).unwrap(), 1);
+    }
+}
+
+#[cfg(test)]
+mod ngram_position_regression {
+    use super::*;
+    use tantivy::collector::Count;
+    use tantivy::schema::{Schema, TEXT};
+    use tantivy::tokenizer::NgramTokenizer;
+
+    /// `positional` が偽なら、直す前の解析器（位置を持たない n-gram）で索引を組む。
+    fn count_with(positional: bool, texts: &[&str], phrase: &str) -> usize {
+        let mut builder = Schema::builder();
+        let body = builder.add_text_field("body", TEXT);
+        let index = Index::create_in_ram(builder.build());
+        if positional {
+            register_tokenizer(&index).unwrap();
+        } else {
+            let old = TextAnalyzer::builder(NgramTokenizer::all_ngrams(2, 3).unwrap())
+                .filter(LowerCaser)
+                .filter(RemoveLongFilter::limit(64))
+                .build();
+            index.tokenizers().register(TOKENIZER_NAME, old);
+        }
+        let mut writer = index.writer(15_000_000).unwrap();
+        for text in texts {
+            writer
+                .add_document(tantivy::doc!(body => text.to_string()))
+                .unwrap();
+        }
+        writer.commit().unwrap();
+        let searcher = index.reader().unwrap().searcher();
+        let query = QueryParser::for_index(&index, vec![body])
+            .parse_query(&format!("\"{phrase}\""))
+            .unwrap();
+        searcher.search(&query, &Count).unwrap()
+    }
+
+    /// **直したかった壊れ方を、直す前の解析器で見せる。**
+    ///
+    /// 位置が全部 0 だと句は並び順を縛れず、「この n-gram が全部どこかにある」
+    /// だけの条件に化ける。棚では、具体的な語一つで 9,370 件中 4,013 件が
+    /// 当たっていた。当たっていたのはローマ字の読みの欄で、空白区切りの音節に
+    /// なるぶん n-gram がありふれた断片になるからである。
+    #[test]
+    fn a_phrase_must_hold_its_order() {
+        let phrase = "sora kura dai ichi koukou i bunka kouryuu bu";
+        // 語の並びを回した文を並べると、前後にまたがる断片まで含めて必要な
+        // n-gram が全部そろう。違うのは並びだけである。
+        let words: Vec<&str> = phrase.split(' ').collect();
+        let mut rotated = String::new();
+        for shift in 1..words.len() {
+            let mut turn: Vec<&str> = words[shift..].to_vec();
+            turn.extend_from_slice(&words[..shift]);
+            rotated.push_str(&turn.join(" "));
+            rotated.push(' ');
+        }
+
+        assert_eq!(
+            count_with(false, &[rotated.as_str()], phrase),
+            1,
+            "位置を持たない解析器は並びを見ない"
+        );
+        assert_eq!(
+            count_with(true, &[rotated.as_str()], phrase),
+            0,
+            "位置を振れば、並びの違う本文は当たらない"
+        );
+        assert_eq!(
+            count_with(true, &[phrase], phrase),
+            1,
+            "並びどおりの本文は当たる"
         );
     }
 }

@@ -6,6 +6,11 @@ export default defineConfig({
   plugins: [react()],
   resolve: { alias: { "@": path.resolve(import.meta.dirname, "./src") } },
   test: {
+    // `npm test` は `vitest run src` で絞っているが、この位置引数は道の部分一致
+    // なので `docs-tools/src/` の試験まで拾う。あちらは node:test で書かれており、
+    // vitest から見ると「試験の無いファイル」として落ちる。走らせるのは
+    // `docs:check` のほうであって、ここではない。
+    include: ["src/**/*.{test,spec}.{ts,tsx}"],
     environment: "jsdom",
     setupFiles: ["./src/test/setup.ts"],
     environmentOptions: { jsdom: { url: "http://localhost/" } },

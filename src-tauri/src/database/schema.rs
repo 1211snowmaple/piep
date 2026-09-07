@@ -366,6 +366,13 @@ fn add_missing_columns(conn: &Connection) -> Result<(), rusqlite::Error> {
         // 試した時点の姿を残しておけば、状況が変わったときだけもう一度試せる。
         // 空なら「まだ一度も見ていない」で、既存のライブラリはそこから始まる。
         ("downloads", "asset_repair_fingerprint", "TEXT"),
+        // 索引へ入れる本文の作り方の版。
+        //
+        // 形式版（`index_version`）とは別に要る。**取得元が何も変えていなくても、
+        // piep が本文の作り方を変えれば索引の中身は古くなる。** 添付から本文を
+        // 取り込むようにしたときがそれで、`content_hash` は動かないので普通の
+        // 作り直しでは永久に拾われなかった。
+        ("search_index_meta", "body_recipe", "TEXT"),
     ] {
         if !column_exists(conn, table, column)? {
             conn.execute_batch(&format!(

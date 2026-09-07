@@ -4,7 +4,7 @@ import { Icons, IconSize, type LucideIcon } from "@/lib/icons";
 import { errorMessage } from "@/lib/format";
 
 export function LoadingState({ label = "読み込んでいます" }: { label?: string }) {
-  return <Center mih={260} role="status" aria-live="polite" aria-busy="true"><Stack align="center" gap="sm"><Loader size="sm" aria-hidden /><Text c="dimmed" size="sm">{label}</Text></Stack></Center>;
+  return <Center mih={260} role="status" aria-live="polite" aria-busy="true" className="async-loader" data-motion-pending><Stack align="center" gap="sm"><Loader size="sm" aria-hidden /><Text c="dimmed" size="sm">{label}</Text></Stack></Center>;
 }
 
 export function ErrorState({ error, retry }: { error: unknown; retry?: () => void }) {
