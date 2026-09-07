@@ -951,7 +951,10 @@ fn release_model_if_idle() {
         return;
     };
     let removed = {
-        let Ok(mut slot) = model.lock() else {
+        // **待たない。** 埋め込みの最中なら鍵は取れないが、そのときはそもそも
+        // idle ではないので解放する用も無い。ここで待つと、状態を知りたいだけの
+        // 呼び出しが1バッチぶん（実測で40秒台）止まる。
+        let Ok(mut slot) = model.try_lock() else {
             return;
         };
         let idle = slot
@@ -1023,10 +1026,16 @@ fn embed_texts(texts: Vec<String>) -> Result<Vec<Vec<f32>>, String> {
 
 #[cfg(not(test))]
 fn semantic_model_ready() -> bool {
-    MODEL
-        .get()
-        .and_then(|slot| slot.lock().ok().map(|slot| slot.runtime.is_some()))
-        .unwrap_or(false)
+    // 鍵が取れないのは、誰かが埋め込みに使っている最中である。つまり読み込み
+    // 済みなので、待たずに「使える」と答えてよい。
+    let Some(model) = MODEL.get() else {
+        return false;
+    };
+    match model.try_lock() {
+        Ok(slot) => slot.runtime.is_some(),
+        Err(std::sync::TryLockError::WouldBlock) => true,
+        Err(std::sync::TryLockError::Poisoned(_)) => false,
+    }
 }
 
 #[cfg(test)]
@@ -1036,9 +1045,11 @@ fn semantic_model_ready() -> bool {
 
 #[cfg(not(test))]
 fn embedding_provider() -> String {
+    // ここも待たない。取れなければ「読み込み済みだが今は使用中」なので、
+    // 名前が一時的に出ないだけで済ませる。
     MODEL
         .get()
-        .and_then(|slot| slot.lock().ok())
+        .and_then(|slot| slot.try_lock().ok())
         .and_then(|slot| {
             slot.runtime
                 .as_ref()
@@ -1060,9 +1071,10 @@ fn embedding_provider() -> String {
 
 #[cfg(not(test))]
 fn embedding_gpu_enabled() -> bool {
+    // 状態を読むだけの経路は、埋め込みの終わりを待たない。
     MODEL
         .get()
-        .and_then(|slot| slot.lock().ok())
+        .and_then(|slot| slot.try_lock().ok())
         .and_then(|slot| slot.runtime.as_ref().map(|runtime| runtime.gpu_enabled))
         .unwrap_or(false)
 }

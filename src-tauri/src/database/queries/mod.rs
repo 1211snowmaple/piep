@@ -2201,7 +2201,16 @@ impl Database {
         }
 
         let mut writer = super::tantivy_index::bulk_writer(&self.storage_dir)?;
-        let chunk_size = options.chunk_size.clamp(8, 512) as i64;
+        // **意味ベクトルを作るときは、ひと塊を小さくする。**
+        //
+        // 中止の合図はひと塊に一度しか見ない。埋め込みは実測 1.5 作品/秒なので、
+        // 64 件だと押してから止まるまで 40 秒以上かかる。16 件なら 10 秒ほど。
+        // 埋め込みは束ねるほど速いが、その差より「押したら止まる」を採る。
+        let chunk_size = if include_semantic {
+            options.chunk_size.clamp(8, 512).min(16) as i64
+        } else {
+            options.chunk_size.clamp(8, 512) as i64
+        };
         let mut after_id = 0i64;
         let mut processed = 0i64;
         let mut failed = 0i64;
@@ -2247,6 +2256,13 @@ impl Database {
 
             for document in prepared.documents {
                 writer.upsert(document)?;
+            }
+
+            // 埋め込みはこの繰り返しの中でいちばん長い。入る前にもう一度見る。
+            // ここを通り過ぎると、次に合図を見るのはひと塊ぶん先になる。
+            if include_semantic && should_cancel() {
+                canceled = true;
+                break;
             }
 
             if include_semantic && !prepared.semantic.is_empty() {
