@@ -286,6 +286,32 @@ export default function SettingsPage() {
         : `${errorMessage(error)}。既存ライブラリは復元ジャーナルにより元の状態へ戻されます。`,
     }),
   });
+  /**
+   * 作り直しを始める。**意味検索を切る側に倒れているときだけ、先に確認する。**
+   *
+   * この画面のスイッチは「その回だけの指定」ではなく機能そのものの入切で、
+   * 切って作り直すと**作った埋め込みを捨てる**。9千件ぶんが消えて、入れ直すには
+   * 全作品の作り直しが要る。作り直しの押しついでに起きてよい規模ではない。
+   */
+  const startRebuild = (includeSemantic: boolean) => {
+    const covered = index.data?.semanticIndexedDownloads ?? 0;
+    if (includeSemantic || !index.data?.semanticEnabled) {
+      rebuildMutation.mutate(includeSemantic);
+      return;
+    }
+    modals.openConfirmModal({
+      title: "意味検索を無効にする",
+      children: <Stack gap="sm">
+        <Text size="sm">このまま作り直すと、<b>作品単位の意味検索</b>を無効にします。</Text>
+        <Text size="sm">{covered > 0 ? `作成済みの ${formatNumber(covered)}件ぶんの意味ベクトルを削除します。` : "作成済みの意味ベクトルを削除します。"}もう一度有効にするときは、全作品ぶんを作り直すことになります。</Text>
+        <Text size="sm" c="dimmed">全文検索の索引はこの操作では消えません。</Text>
+      </Stack>,
+      labels: { confirm: "無効にして作り直す", cancel: "やめる" },
+      confirmProps: { color: "red" },
+      onConfirm: () => rebuildMutation.mutate(includeSemantic),
+    });
+  };
+
   const rebuildMutation = useMutation({
     mutationFn: async (includeSemantic: boolean) => {
       if (!runtime) throw new Error("デスクトップアプリで利用できます");
@@ -357,7 +383,7 @@ export default function SettingsPage() {
         <Grid.Col span={{ base: 12, md: 8, lg: 9 }} className="settings-content">
           {section === "connections" && (auth.isLoading ? <LoadingState label="接続状態を確認しています" /> : auth.error ? <ErrorState error={auth.error} retry={() => auth.refetch()} /> : <ConnectionsSection auth={auth.data ?? { pixiv: null, fanbox: null }} runtime={runtime} pixivForm={pixivForm} fanboxForm={fanboxForm} mutation={connectionMutation} disconnect={disconnect} />)}
           {section === "library" && (stats.isLoading || storagePath.isLoading ? <LoadingState label="ライブラリ情報を読み込んでいます" /> : stats.error || storagePath.error ? <ErrorState error={stats.error ?? storagePath.error} retry={() => { stats.refetch(); storagePath.refetch(); }} /> : <LibrarySection stats={stats.data} path={storagePath.data} runtime={runtime} pending={maintenanceMutation.isPending} run={(action) => maintenanceMutation.mutate(action)} />)}
-          {section === "search" && (index.isLoading ? <LoadingState label="検索インデックスを確認しています" /> : index.error ? <ErrorState error={index.error} retry={() => index.refetch()} /> : <SearchSection status={index.data} rebuild={rebuild} runtime={runtime} rebuilding={rebuildMutation.isPending || rebuild?.status === "running"} start={(includeSemantic) => rebuildMutation.mutate(includeSemantic)} cancel={() => { if (rebuildOperationRef.current) { void requestOperationCancel(rebuildOperationRef.current.id); return; } if (rebuild) reportJobAction(cancelSearchRebuildIndex(rebuild.jobId), "索引の作り直しを中止できません"); }} />)}
+          {section === "search" && (index.isLoading ? <LoadingState label="検索インデックスを確認しています" /> : index.error ? <ErrorState error={index.error} retry={() => index.refetch()} /> : <SearchSection status={index.data} rebuild={rebuild} runtime={runtime} rebuilding={rebuildMutation.isPending || rebuild?.status === "running"} start={(includeSemantic) => startRebuild(includeSemantic)} cancel={() => { if (rebuildOperationRef.current) { void requestOperationCancel(rebuildOperationRef.current.id); return; } if (rebuild) reportJobAction(cancelSearchRebuildIndex(rebuild.jobId), "索引の作り直しを中止できません"); }} />)}
           {section === "assist" && <AssistSection />}
           {section === "diagnostics" && <DiagnosticsPage embedded />}
           {section === "appearance" && <AppearanceSection colorScheme={colorScheme} setColorScheme={setColorScheme} />}
@@ -477,7 +503,9 @@ function SearchSection({ status, rebuild, runtime, rebuilding, start, cancel }: 
       </Box>
       <Group mt="lg" justify="space-between" align="flex-end">
         <Group>
-          <Button disabled={!runtime || rebuilding} leftSection={<Icons.retry size={IconSize.menu} />} onClick={() => start(includeSemantic)}>
+          {/* status が届くまでは押させない。届く前の `includeSemantic` は既定の
+              false なので、押せてしまうと**意味検索を切る**側に倒れる。 */}
+          <Button disabled={!runtime || rebuilding || !status} leftSection={<Icons.retry size={IconSize.menu} />} onClick={() => start(includeSemantic)}>
             {status?.isComplete ? "インデックスを再構築" : "未反映分を索引する"}
           </Button>
           {rebuilding && <Button variant="subtle" color="red" leftSection={<Icons.cancel size={IconSize.menu} />} onClick={cancel}>中止</Button>}

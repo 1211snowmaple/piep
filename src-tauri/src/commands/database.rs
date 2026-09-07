@@ -277,7 +277,21 @@ pub fn start_automatic_index_maintenance(app: tauri::AppHandle) {
             return;
         }
 
-        log::info!("Automatic index maintenance starting for {pending} works");
+        // **何を追いかけているのかを残す。** 起動のたびに重い作業が始まるのに、
+        // 記録が「N件」だけでは、字面の索引なのか意味ベクトルなのか分からない。
+        // 意味ベクトルは 465MB のモデルを起こすので、体感がまるで違う。
+        if status.semantic_enabled && status.semantic_pending_downloads > 0 {
+            log::info!(
+                "索引の自動整備を始めます: 全文 {}件 / 意味 {}件（意味検索が入なので、埋め込みモデルを読み込みます）",
+                status.pending_downloads,
+                status.semantic_pending_downloads
+            );
+        } else {
+            log::info!(
+                "索引の自動整備を始めます: 全文 {}件",
+                status.pending_downloads
+            );
+        }
         let options = crate::database::queries::SearchIndexRebuildOptions {
             include_semantic: status.semantic_enabled,
             ..Default::default()
