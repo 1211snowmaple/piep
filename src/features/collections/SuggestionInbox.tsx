@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useLocalStorage } from "@mantine/hooks";
 import { transitionContent } from "@/lib/contentTransition";
-import { ActionIcon, Alert, Badge, Button, Checkbox, Collapse, Group, Loader, SegmentedControl, Stack, Text, TextInput, Tooltip } from "@mantine/core";
+import { ActionIcon, Alert, Badge, Button, Checkbox, Collapse, Group, Loader, SegmentedControl, Select, Stack, Text, TextInput, Tooltip } from "@mantine/core";
 import { modals } from "@mantine/modals";
 import { notifications } from "@mantine/notifications";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -21,6 +22,42 @@ import "./discovery.css";
 
 const EMPTY: CollectionSuggestion[] = [];
 type Track = "sequence" | "theme";
+
+/** 一度に見せる候補の数。
+ *
+ * 走査は系統ごとに最大 200 件返す。**確度はほぼ横並びで**（実測: 続き物は
+ * 200 件すべて 0.90〜0.94、テーマは 0.57〜0.67）、上から順に出しても
+ * 「良い順」にはならない。200 件の壁を出されると選ぶ気が失せるので、
+ * 確度の高い帯から少数を引いて見せ、引き直せるようにする。
+ *
+ * 好みの分かれるところなので選べるようにした。覚える場所は端末ごとで、
+ * 棚そのものには何も残らない。 */
+const SHOWN_CHOICES = [6, 12, 24, 48] as const;
+const DEFAULT_SHOWN = 12;
+
+/** 順番を混ぜる。同じ種を渡すかぎり同じ並びになる。
+ *
+ * 引き直すまで並びが動かないので、採用や保留のたびに顔ぶれが入れ替わらない。 */
+function shuffled<T>(items: readonly T[], seed: number): T[] {
+  const out = [...items];
+  let state = seed || 1;
+  for (let index = out.length - 1; index > 0; index -= 1) {
+    state = (state * 1664525 + 1013904223) % 4294967296;
+    const pick = state % (index + 1);
+    [out[index], out[pick]] = [out[pick], out[index]];
+  }
+  return out;
+}
+
+/** 題名が、共通タグを並べただけのものか。
+ *
+ * 名前が取れなかった候補は共通タグを ` / ` で繋いだものになる。**続き物にも
+ * これが付く**（実測で 200 件中 87 件）ので、テーマの候補と見分けが付かず、
+ * 二つの系統が混ざって見えていた。タグらしさは「短い断片が3つ以上」で見る。 */
+function looksLikeTagList(name: string): boolean {
+  const parts = name.split(" / ");
+  return parts.length >= 3 && parts.every((part) => part.length > 0 && part.length <= 24);
+}
 interface ReviewDraft { name: string; order: string[]; excluded: string[] }
 
 function memberKey(member: WorkKey): string {
@@ -41,6 +78,18 @@ function orderedMembers(suggestion: CollectionSuggestion, draft: ReviewDraft): C
 
 function selectedMembers(suggestion: CollectionSuggestion, draft: ReviewDraft): CollectionSuggestionMember[] {
   return orderedMembers(suggestion, draft).filter((member) => !draft.excluded.includes(memberKey(member)));
+}
+
+/** 一覧に出す見出し。
+ *
+ * 名前が共通タグの羅列なら、**先頭の作品の題を主にする。** タグの羅列は
+ * テーマの候補と同じ顔なので、続き物の一覧がテーマ混じりに見えていた。
+ * 羅列のほうは添えるだけにして、何のまとまりかは題で分かるようにする。 */
+function candidateLabel(suggestion: CollectionSuggestion, draftName?: string): { title: string; note?: string } {
+  const name = draftName || suggestion.proposedName;
+  if (draftName || !looksLikeTagList(name)) return { title: name };
+  const lead = suggestion.members[0]?.title;
+  return lead ? { title: lead, note: name } : { title: name };
 }
 
 /** 候補を切り替えても下書きを残す。保留は確認の順番を変えるだけで、否定を保存しない。 */
@@ -64,6 +113,9 @@ export function SuggestionInbox({ sweeping, savedSearchIdeas, note, onBusyChange
   const [savedSearchOpen, setSavedSearchOpen] = useState(false);
   const [created, setCreated] = useState<{ id: string; name: string } | null>(null);
   const [mobileDetail, setMobileDetail] = useState(false);
+  /** 引き直しの種。押すたびに別の顔ぶれを見せる。 */
+  const [seed, setSeed] = useState(() => Math.floor(Math.random() * 4294967296));
+  const [shownPerTrack, setShownPerTrack] = useLocalStorage<number>({ key: "piep.discovery.shown", defaultValue: DEFAULT_SHOWN, getInitialValueInEffect: false });
   const candidateButtons = useRef(new Map<string, HTMLButtonElement>());
 
   const suggestionsQuery = useQuery({
@@ -76,7 +128,17 @@ export function SuggestionInbox({ sweeping, savedSearchIdeas, note, onBusyChange
   const inTrack = suggestions.filter((suggestion) => (suggestion.track === "theme" ? "theme" : "sequence") === track);
   const deferredCount = inTrack.filter((suggestion) => deferred.has(suggestion.id)).length;
   const term = search.trim().toLocaleLowerCase();
-  const filtered = inTrack.filter((suggestion) => deferred.has(suggestion.id) === showDeferred && (!term ||
+  // 確度の高いほうから帯を取り、その中から引く。確度が横並びなので、
+  // 上から 12 件を切ると毎回同じ顔ぶれになる。
+  const sample = useMemo(() => {
+    const ranked = [...inTrack].sort((a, b) => b.score - a.score);
+    const band = ranked.slice(0, Math.max(shownPerTrack * 4, Math.ceil(ranked.length / 2)));
+    return new Set(shuffled(band, seed + (track === "theme" ? 7919 : 0)).slice(0, shownPerTrack).map((item) => item.id));
+  }, [inTrack, seed, track, shownPerTrack]);
+  const filtered = inTrack.filter((suggestion) => deferred.has(suggestion.id) === showDeferred
+    // 絞り込みは棚ぜんぶを見る。引いた 12 件の中だけを探しても、探した気にならない。
+    && (term ? true : sample.has(suggestion.id) || deferred.has(suggestion.id))
+    && (!term ||
     [suggestion.proposedName, ...suggestion.members.flatMap((member) => [member.title, member.authorName, getProvider(member.source).label])].some((value) => value.toLocaleLowerCase().includes(term))));
   const selected = filtered.find((suggestion) => suggestion.id === selectedId) ?? filtered[0];
   const selectedIndex = selected ? filtered.findIndex((suggestion) => suggestion.id === selected.id) : -1;
@@ -142,6 +204,7 @@ export function SuggestionInbox({ sweeping, savedSearchIdeas, note, onBusyChange
       <div className="discovery-filters">
         <SegmentedControl aria-label="まとまりの種類" value={track} disabled={busy} onChange={(value) => transitionContent(() => { setTrack(value as Track); setShowDeferred(false); setMobileDetail(false); }, { content: () => document.querySelector<HTMLElement>(".discovery-workspace, .discovery-empty") })} data={[{ value: "sequence", label: `続き物 ${formatNumber(counts.sequence)}` }, { value: "theme", label: `テーマ ${formatNumber(counts.theme)}` }]} size="sm" />
         <Text size="xs" c="dimmed">{track === "sequence" ? "シリーズの内側や、保存元をまたぐ続き物も確認できます。" : "読む順を持たない、題材の近い作品のまとまりです。"}</Text>
+        <Select aria-label="一度に見せる候補の数" value={String(shownPerTrack)} onChange={(value) => setShownPerTrack(Number(value) || DEFAULT_SHOWN)} data={SHOWN_CHOICES.map((count) => ({ value: String(count), label: `${count}件ずつ` }))} size="xs" w={110} disabled={busy} comboboxProps={{ withinPortal: true }} />
       </div>
       {sweeping && <div className="discovery-notice" role="status"><Loader size="xs" /><Text size="sm">棚を調べています。確認中の候補はそのまま残ります。</Text></div>}
       {!sweeping && note && <Alert color="yellow" title="一部しか探せていません" icon={<Icons.info size={IconSize.action} />}>{note}</Alert>}
@@ -157,13 +220,14 @@ export function SuggestionInbox({ sweeping, savedSearchIdeas, note, onBusyChange
           <aside className="discovery-sidebar" aria-label="まとまりの候補">
             <div className="discovery-sidebar__tools">
               <TextInput aria-label="候補を絞り込む" placeholder="題名・作者で絞り込む" value={search} onChange={(event) => setSearch(event.currentTarget.value)} leftSection={<Icons.search size={IconSize.menu} />} size="sm" disabled={busy} />
-              <Group justify="space-between" gap="xs"><Text size="xs" c="dimmed">{showDeferred ? "保留中" : "候補"} {formatNumber(filtered.length)}件</Text><Button variant={showDeferred ? "light" : "subtle"} color="gray" size="compact-xs" disabled={busy} onClick={() => setShowDeferred((value) => !value)}>{showDeferred ? "候補に戻る" : `保留 ${formatNumber(deferredCount)}`}</Button></Group>
+              <Group justify="space-between" gap="xs"><Text size="xs" c="dimmed">{showDeferred ? "保留中" : "候補"} {formatNumber(filtered.length)}件{!showDeferred && !term && inTrack.length > filtered.length ? `（棚に ${formatNumber(inTrack.length)}件）` : ""}</Text>{!showDeferred && !term && inTrack.length > filtered.length && <Button variant="subtle" color="gray" size="compact-xs" disabled={busy} onClick={() => setSeed(Math.floor(Math.random() * 4294967296))}>別の候補を見る</Button>}<Button variant={showDeferred ? "light" : "subtle"} color="gray" size="compact-xs" disabled={busy} onClick={() => setShowDeferred((value) => !value)}>{showDeferred ? "候補に戻る" : `保留 ${formatNumber(deferredCount)}`}</Button></Group>
             </div>
             <ol className="discovery-candidates">
               {filtered.map((suggestion, index) => {
                 const authors = [...new Set(suggestion.members.map((member) => member.authorName))];
                 const sources = [...new Set(suggestion.members.map((member) => getProvider(member.source).label))];
                 const discoveryScope = suggestion.members.some((m) => m.evidence.some((e) => e.kind === "unregistered")) ? "シリーズ未登録を含む" : suggestion.members.some((m) => m.evidence.some((e) => e.kind === "series_subset")) ? "シリーズ内の続き物" : null;
+                const label = candidateLabel(suggestion, drafts[suggestion.id]?.name);
                 return <li key={suggestion.id}>
                   <button
                     ref={(element) => { if (element) candidateButtons.current.set(suggestion.id, element); else candidateButtons.current.delete(suggestion.id); }}
@@ -176,7 +240,7 @@ export function SuggestionInbox({ sweeping, savedSearchIdeas, note, onBusyChange
                     }}
                   >
                     <span className="discovery-candidate__number">{String(index + 1).padStart(2, "0")}</span>
-                    <span className="discovery-candidate__body"><span className="discovery-candidate__title">{drafts[suggestion.id]?.name || suggestion.proposedName}</span><span className="discovery-candidate__meta">{formatNumber(suggestion.members.length)}作品 · {authors.join("、")}</span><span className="discovery-candidate__source">{sources.join(" / ")}{discoveryScope ? ` · ${discoveryScope}` : ""}</span></span>
+                    <span className="discovery-candidate__body"><span className="discovery-candidate__title">{label.title}</span>{label.note && <span className="discovery-candidate__meta">{label.note}</span>}<span className="discovery-candidate__meta">{formatNumber(suggestion.members.length)}作品 · {authors.join("、")}</span><span className="discovery-candidate__source">{sources.join(" / ")}{discoveryScope ? ` · ${discoveryScope}` : ""}</span></span>
                     <Icons.next size={IconSize.menu} className="discovery-candidate__arrow" />
                   </button>
                 </li>;

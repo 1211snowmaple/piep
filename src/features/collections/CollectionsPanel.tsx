@@ -135,7 +135,9 @@ export function CollectionsPanel({ query = "", sortBy = "created_at" }: { query?
           <Button
             variant="subtle"
             leftSection={<Icons.search size={IconSize.action} />}
-            rightSection={pendingCount > 0 ? <Badge size="sm" variant="filled" circle>{formatNumber(pendingCount)}</Badge> : undefined}
+            /* `circle` は幅を字数に関わらず固定するので、3桁を入れると「4…」に
+               詰められる。件数は 3 桁まで出るから、丸ではなく字に合わせる。 */
+            rightSection={pendingCount > 0 ? <Badge size="sm" variant="filled">{pendingCount > 999 ? "999+" : formatNumber(pendingCount)}</Badge> : undefined}
             onClick={sweepModal.open}
           >
             まとまりを探す

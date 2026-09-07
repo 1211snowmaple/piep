@@ -1,4 +1,6 @@
-.discovery-modal { display: flex; flex-direction: column; overflow: hidden; height: min(900px, calc(100dvh - 40px)); max-height: calc(100dvh - 40px); }
+/* 高さは中身に合わせる。**決め打ちで 900px にしていたので、候補が数件でも
+   紙面いっぱいの窓が開き、下半分が空白のままだった。** 天井だけ決めておく。 */
+.discovery-modal { display: flex; flex-direction: column; overflow: hidden; max-height: min(720px, calc(100dvh - 48px)); }
 .discovery-modal__header { flex: 0 0 auto; padding: 18px 24px 12px; }
 .discovery-modal__body { flex: 1; min-height: 0; display: flex; flex-direction: column; padding: 0 24px; overflow: hidden; }
 .discovery-toolbar { flex: 0 0 auto; padding: 0 0 18px; }
@@ -10,7 +12,7 @@
 .discovery-notice, .discovery-created { display: flex; align-items: center; gap: 10px; padding: 9px 12px; border-radius: 8px; background: light-dark(#f0f5f5, #192629); }
 .discovery-created { color: light-dark(#345b4d, #a0c3b5); }
 .discovery-created > .mantine-Text-root { flex: 1; min-width: 0; overflow-wrap: anywhere; }
-.discovery-workspace { display: grid; flex: 1; min-height: 0; grid-template-columns: minmax(240px, 31%) minmax(0, 1fr); overflow: hidden; border: 1px solid var(--mantine-color-default-border); border-radius: 12px; }
+.discovery-workspace { display: grid; flex: 1; min-height: 320px; grid-template-columns: minmax(240px, 31%) minmax(0, 1fr); overflow: hidden; border: 1px solid var(--mantine-color-default-border); border-radius: 12px; }
 .discovery-sidebar { min-height: 0; min-width: 0; display: flex; flex-direction: column; border-right: 1px solid var(--mantine-color-default-border); background: light-dark(#f8f9fb, #14191f); }
 .discovery-sidebar__tools { padding: 14px 12px 10px; display: flex; flex-direction: column; gap: 10px; border-bottom: 1px solid var(--mantine-color-default-border); }
 .discovery-candidates { flex: 1; min-height: 0; list-style: none; margin: 0; padding: 6px; overflow: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
