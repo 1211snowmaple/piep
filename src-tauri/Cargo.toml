@@ -1,6 +1,6 @@
 [package]
 name = "piep"
-version = "0.18.0"
+version = "0.19.0"
 description = "Local creative library for Pixiv and FANBOX"
 authors = ["1211snowmaple"]
 edition = "2021"
@@ -65,7 +65,17 @@ lindera = { version = "6", features = ["embed-ipadic"] }
 lindera-analysis = "6"
 fastembed = { version = "6", features = ["directml"] }
 ort = { version = "2.0.0-rc.13", features = ["directml"] }
+# 添付テキストの文字コード。棚の実物は UTF-8 だったが、日本語の `.txt` には
+# Shift_JIS も多い。依存木にはすでに入っているので、直に使っても増えない。
+encoding_rs = "0.8"
 rayon = "1.10"
+# 添付 PDF から本文を取り出す。既定の機能には image 連携（`image_latest`）が
+# 入っていて、piep が絞り込んでいる image の機能をすべて有効にしてしまう。
+# 画は今のところ要らないので、束ねる版と直列化だけを取る。
+pdfium-render = { version = "0.9.4", default-features = false, features = [
+    "pdfium_latest",
+    "thread_safe",
+] }
 parking_lot = "0.12.5"
 tauri-plugin-notification = "2.4.0"
 # アプリ本体の更新。updater は配布物への署名が前提なので、公開鍵は

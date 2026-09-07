@@ -4395,17 +4395,20 @@ fn opens_a_real_library_without_resetting_it() {
         panic!("set PIEP_VERIFY_DB to the database to check");
     };
     let source = PathBuf::from(source);
-    let before: i64 = {
-        let conn = Connection::open_with_flags(&source, OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .expect("open source read-only");
-        conn.query_row("SELECT COUNT(*) FROM downloads", [], |row| row.get(0))
-            .unwrap()
-    };
-
-    // Never open the real file for writing: work on a copy.
     let (_temp, root, storage) = temp_paths();
     let copy = root.join("piep.db");
-    fs::copy(&source, &copy).expect("copy the library");
+    {
+        let conn = Connection::open_with_flags(&source, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .expect("open source read-only");
+        // Copy the committed SQLite snapshot, including data still in WAL.
+        // Copying piep.db alone can silently drop the most recent works.
+        conn.execute("VACUUM INTO ?1", [copy.to_string_lossy().as_ref()])
+            .expect("snapshot the library including its WAL");
+    }
+    let before: i64 = Connection::open_with_flags(&copy, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM downloads", [], |row| row.get(0))
+        .unwrap();
 
     let db = Database::open(&copy, &storage).expect("open the copied library");
     let after = db.get_search_index_status().unwrap();
@@ -5703,6 +5706,26 @@ fn lexical_snapshots_scale_with_fixed_memory_batches() {
     }
     let index_elapsed = index_started.elapsed();
 
+    if std::env::var_os("PIEP_BENCH_PROFILE").is_some() {
+        let started = Instant::now();
+        super::super::tantivy_index::visit_matching_download_ids(&storage, "snapshotterm", |_| {
+            Ok(())
+        })
+        .unwrap();
+        let ids = started.elapsed();
+        let started = Instant::now();
+        super::super::tantivy_index::visit_matching_download_scores(
+            &storage,
+            "snapshotterm",
+            |_| Ok(()),
+        )
+        .unwrap();
+        eprintln!(
+            "Tantivy collection alone: ids {ids:?}, scores {:?}",
+            started.elapsed()
+        );
+    }
+
     let mut ranked = params("snapshotterm");
     ranked.limit = Some(60);
     ranked.projection = Some("bulk".to_string());
@@ -5745,6 +5768,36 @@ fn lexical_snapshots_scale_with_fixed_memory_batches() {
     assert!(sorted_warm < Duration::from_millis(250));
 
     drop(db);
+}
+
+#[test]
+#[ignore = "measurement harness for snapshot insertion and disk accounting"]
+fn measure_snapshot_batch_costs() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let (_, path, connection) = create_search_snapshot_connection(&storage, &db.db_path).unwrap();
+    let guard = connection.lock().unwrap();
+    let conn = guard.as_ref().unwrap();
+    reset_search_match_table(conn, true).unwrap();
+    conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let mut inserting = Duration::ZERO;
+    let mut accounting = Duration::ZERO;
+    for start in (1..100_001).step_by(256) {
+        let scores: Vec<_> = (start..(start + 256).min(100_001))
+            .map(|id| (id, 1.0))
+            .collect();
+        let at = Instant::now();
+        insert_search_match_scores(conn, &scores).unwrap();
+        inserting += at.elapsed();
+        let at = Instant::now();
+        ensure_search_snapshot_budget(conn, &storage).unwrap();
+        accounting += at.elapsed();
+    }
+    conn.execute_batch("COMMIT").unwrap();
+    eprintln!("100000 snapshot rows: insert {inserting:?}, disk accounting {accounting:?}");
+    drop(guard);
+    close_snapshot_connection(&connection);
+    cleanup_search_snapshot_path(&path);
 }
 
 #[test]
@@ -7412,4 +7465,75 @@ fn discovery_separates_cross_source_continuations_from_overlapping_full_text() {
         .members
         .iter()
         .any(|m| m.evidence.iter().any(|e| e.kind == "edition_overlap")));
+}
+
+/// 本文の作り方を変えたときに、影響のある作品だけが作り直しへ回ること。
+///
+/// **取得元が何も変えていないので `content_hash` は動かない。** 添付を持つ
+/// 作品の「索引済み」を落とさないかぎり、作り直しを押しても全件が最新と
+/// 判定され、添付の中の本文は永久に索引へ入らない。実際にそうなっていた。
+#[test]
+fn changing_how_the_body_is_built_requeues_only_the_works_with_attachments() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let plain = insert_download(&db, &storage, "1", "添付なし", "作者", &[], "本文");
+    let with_pdf = insert_download(&db, &storage, "2", "添付あり", "作者", &[], "挨拶");
+    let with_audio = insert_download(&db, &storage, "3", "音源", "作者", &[], "挨拶");
+
+    {
+        let conn = db.conn.lock().unwrap();
+        for (id, name) in [(with_pdf, "本文.pdf"), (with_audio, "voice.mp3")] {
+            conn.execute(
+                "INSERT INTO assets (download_id, asset_type, filename, local_path, file_size_bytes)
+                 VALUES (?1, 'file', ?2, ?3, 9)",
+                params![id, name, format!("C:/nowhere/{name}")],
+            )
+            .unwrap();
+        }
+        // 三件とも索引済みの状態から始める。
+        for id in [plain, with_pdf, with_audio] {
+            assert_eq!(
+                conn.query_row(
+                    "SELECT COUNT(*) FROM search_index_state WHERE download_id = ?1",
+                    params![id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+                1,
+                "前提: {id} は索引済みであること"
+            );
+        }
+        // 版を戻して、作り方が変わった直後の姿を作る。
+        conn.execute("UPDATE search_index_meta SET body_recipe = NULL", [])
+            .unwrap();
+
+        super::reconcile_search_index_body_recipe(&conn).unwrap();
+
+        let indexed = |id: i64| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM search_index_state WHERE download_id = ?1",
+                params![id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(indexed(with_pdf), 0, "添付を持つ作品は作り直しへ回ること");
+        assert_eq!(indexed(plain), 1, "添付の無い作品まで巻き込まないこと");
+        assert_eq!(
+            indexed(with_audio),
+            1,
+            "取り込めない添付だけの作品は回さないこと"
+        );
+
+        // 二度目は何もしない。毎起動で作り直しが始まってはいけない。
+        conn.execute(
+            "INSERT INTO search_index_state (download_id, current_version, content_hash, indexed_at)
+             VALUES (?1, 1, 'h', '2026-01-01T00:00:00Z')",
+            params![with_pdf],
+        )
+        .unwrap();
+        super::reconcile_search_index_body_recipe(&conn).unwrap();
+        assert_eq!(indexed(with_pdf), 1, "版が揃っていれば触らないこと");
+    }
+    drop(db);
 }

@@ -372,6 +372,25 @@ export async function importWorkAsset(downloadId: number, sourcePath: string): P
   return invoke<AssetEntry>("import_work_asset", { downloadId, sourcePath });
 }
 
+export interface PdfPageImage {
+  /** `data:image/webp;base64,...`。そのまま `img` の `src` に渡せる。 */
+  image: string;
+  width: number;
+  height: number;
+  pageCount: number;
+}
+
+/**
+ * 添付 PDF の1ページを絵にして受け取る。`page` は 0 から数える。
+ *
+ * 取り込んだ本文は段落を組み直したものなので、図版のある PDF や、組み直しを
+ * 信じきれないときのために原本を見る道を用意する。控えは持たず、要求のたびに
+ * 描く（実測 1ページ 90ms 以下）。
+ */
+export async function renderPdfAttachmentPage(downloadId: number, localPath: string, page: number, width: number): Promise<PdfPageImage> {
+  return invoke<PdfPageImage>("render_pdf_attachment_page", { downloadId, localPath, page, width });
+}
+
 export function getAssetUrl(path: string | null | undefined): string | null {
   if (!path) return null;
   if (!isTauriRuntime()) {

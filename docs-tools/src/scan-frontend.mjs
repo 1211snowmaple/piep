@@ -13,8 +13,8 @@ import ts from "typescript";
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname, relative, resolve } from "node:path";
 
-/** `invoke` として扱う呼び出し名。 */
-const INVOKE_NAMES = new Set(["invoke"]);
+/** `invoke` と、生成結果の value を返す assistApi の包み。 */
+const INVOKE_NAMES = new Set(["invoke", "invokeGenerated"]);
 
 /** イベント購読として扱う呼び出し名。`eventBus.ts` の包みを含む。 */
 const LISTEN_NAMES = new Set(["listen", "onTauriEvent", "subscribeTauriEvent"]);

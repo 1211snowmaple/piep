@@ -25,9 +25,8 @@ use super::schema;
 use super::parser::escape_html as escape_editor_html;
 use super::parser::expand_pixiv_inline_notation;
 use super::search::{
-    extract_search_body, generate_ngrams_limited, make_match_highlights, match_fields_and_score,
-    normalize_search_text, normalized_levenshtein, parse_search_query, query_ngrams,
-    ParsedSearchQuery, SearchDocument,
+    generate_ngrams_limited, make_match_highlights, match_fields_and_score, normalize_search_text,
+    normalized_levenshtein, parse_search_query, query_ngrams, ParsedSearchQuery, SearchDocument,
 };
 
 mod assist_inputs;
@@ -1614,6 +1613,8 @@ impl Database {
             log::warn!("Failed to clean orphaned collection covers: {error}");
         }
         reconcile_search_index_format(&conn)?;
+        // 形式版のあと。あちらが版の行を作り、こちらがその行へ書き足す。
+        reconcile_search_index_body_recipe(&conn)?;
         let read_pool = build_read_pool(db_path)?;
         let generation_conn = Connection::open(db_path)
             .map_err(|e| format!("DB generation monitor open failed: {e}"))?;
@@ -4934,29 +4935,7 @@ impl Database {
 
     pub fn get_assets(&self, download_id: i64) -> Result<Vec<AssetEntry>, String> {
         let conn = self.read_conn()?;
-        let mut stmt = conn
-            .prepare("SELECT * FROM assets WHERE download_id = ?1")
-            .map_err(|e| format!("Query prepare failed: {}", e))?;
-        let rows = stmt
-            .query_map(params![download_id], |row| {
-                Ok(AssetEntry {
-                    id: row.get(0)?,
-                    download_id: row.get(1)?,
-                    asset_type: row.get(2)?,
-                    filename: row.get(3)?,
-                    local_path: row.get(4)?,
-                    original_url: row.get(5)?,
-                    mime_type: row.get(6)?,
-                    file_size_bytes: row.get(7)?,
-                })
-            })
-            .map_err(|e| format!("Query failed: {}", e))?;
-
-        let mut results = Vec::new();
-        for row in rows {
-            results.push(row.map_err(|e| format!("Row read failed: {}", e))?);
-        }
-        Ok(results)
+        assets_for_download_locked(&conn, download_id)
     }
 
     fn read_download_json_for_version(
@@ -12706,6 +12685,36 @@ fn reader_version_path(
     PathBuf::from(selected)
 }
 
+/// 作品のアセット一覧。接続を持っている呼び出し側から使う。
+fn assets_for_download_locked(
+    conn: &Connection,
+    download_id: i64,
+) -> Result<Vec<AssetEntry>, String> {
+    let mut stmt = conn
+        .prepare("SELECT * FROM assets WHERE download_id = ?1")
+        .map_err(|e| format!("Query prepare failed: {}", e))?;
+    let rows = stmt
+        .query_map(params![download_id], |row| {
+            Ok(AssetEntry {
+                id: row.get(0)?,
+                download_id: row.get(1)?,
+                asset_type: row.get(2)?,
+                filename: row.get(3)?,
+                local_path: row.get(4)?,
+                original_url: row.get(5)?,
+                mime_type: row.get(6)?,
+                file_size_bytes: row.get(7)?,
+            })
+        })
+        .map_err(|e| format!("Query failed: {}", e))?;
+
+    let mut results = Vec::new();
+    for row in rows {
+        results.push(row.map_err(|e| format!("Row read failed: {}", e))?);
+    }
+    Ok(results)
+}
+
 fn reader_source_content(
     db: &Database,
     download: &DownloadEntry,
@@ -12715,18 +12724,11 @@ fn reader_source_content(
 ) -> Result<(String, String), String> {
     let target_version = version.unwrap_or(download.current_version);
     let raw_json = db.read_download_json_for_version(download, versions, target_version)?;
-    let html = if download.source == "pixiv" {
-        super::parser::parse_pixiv_to_html(&raw_json, assets)
-    } else if download.source == "fanbox" {
-        super::parser::parse_fanbox_to_html(&raw_json, assets)
-    } else {
-        String::new()
-    };
-    let plain_text = serde_json::from_str::<serde_json::Value>(&raw_json)
-        .ok()
-        .map(|value| extract_search_body(&value, &download.source))
-        .unwrap_or_default();
-    Ok((html, plain_text))
+    Ok(super::attachment::content_from_json(
+        &raw_json,
+        &download.source,
+        assets,
+    ))
 }
 
 /// Converts source-level boundaries into reasonably sized transport pages.
@@ -13125,6 +13127,67 @@ fn reconcile_search_index_format(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
+/// 索引へ入れる本文の作り方の版。作り方を変えたらここを上げる。
+///
+/// `attachments-1`: 添付 PDF・`.txt` の中の本文を索引へ入れるようにした。
+const SEARCH_BODY_RECIPE: &str = "attachments-1";
+
+/// 本文の作り方が変わったときに、影響のある作品の「索引済み」を落とす。
+///
+/// **取得元が何も変えていなくても、piep が本文の作り方を変えれば索引は古くなる。**
+/// 添付から本文を取り込むようにしたときがそれだった。`content_hash` は取得元の
+/// 指紋なので動かず、作り直しを押しても「全件が最新」で 22ms で終わり、
+/// 添付を持つ作品は永久に索引へ入らなかった。
+///
+/// 形式版（`INDEX_VERSION_DIR`）を上げれば全件が作り直しになるが、変わったのは
+/// 添付を持つ作品だけである。**意味索引まで巻き込むと、9千件ぶんのベクトルを
+/// 取り直すことになる。** だから落とすのは、取り込める添付を持つ作品に限る。
+fn reconcile_search_index_body_recipe(conn: &Connection) -> Result<(), String> {
+    let stored: Option<String> = conn
+        .query_row(
+            "SELECT body_recipe FROM search_index_meta WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("Search index body recipe read failed: {e}"))?
+        .flatten();
+    if stored.as_deref() == Some(SEARCH_BODY_RECIPE) {
+        return Ok(());
+    }
+
+    // 取り込める添付を持つ作品だけ。読めるかどうかは開いてみるまで分からないが、
+    // 外れても索引を作り直すだけで、結果は変わらない。
+    const AFFECTED: &str = "SELECT DISTINCT download_id FROM assets \
+         WHERE asset_type = 'file' \
+           AND (lower(filename) LIKE '%.pdf' OR lower(filename) LIKE '%.txt')";
+    let lexical = conn
+        .execute(
+            &format!("DELETE FROM search_index_state WHERE download_id IN ({AFFECTED})"),
+            [],
+        )
+        .map_err(|e| format!("Search index body recipe reset failed: {e}"))?;
+    // 意味索引も同じ本文から作る。片方だけ作り直すと、字面では出るのに
+    // 「言葉で探す」では出てこない作品ができる。
+    let semantic = conn
+        .execute(
+            &format!("DELETE FROM semantic_index_state WHERE download_id IN ({AFFECTED})"),
+            [],
+        )
+        .map_err(|e| format!("Semantic index body recipe reset failed: {e}"))?;
+    if lexical > 0 || semantic > 0 {
+        log::info!(
+            "本文の作り方が {SEARCH_BODY_RECIPE} に変わりました。添付を持つ作品を作り直しへ回します（全文 {lexical} 件・意味 {semantic} 件）"
+        );
+    }
+    conn.execute(
+        "UPDATE search_index_meta SET body_recipe = ?1 WHERE id = 1",
+        params![SEARCH_BODY_RECIPE],
+    )
+    .map_err(|e| format!("Search index body recipe write failed: {e}"))?;
+    Ok(())
+}
+
 /// 作り直しの残り。**意味ベクトルも作るなら、その遅れも残りに数える。**
 ///
 /// 数えていなかったころ、字面の索引が最新（5,410/5,410）なら残りは 0 と
@@ -13344,10 +13407,13 @@ fn search_index_document_locked(
 
     let json_path = original_json_path.unwrap_or(json_path);
     let body = active_edit_plain_text_locked(conn, download_id)?.unwrap_or_else(|| {
+        // 添付の中の本文も索引に入れる。ここを通さないと、**読める作品が検索に
+        // 出てこない**という食い違いができる。反映済みの編集があるときは、
+        // そちらが本文なのでアセットを引きに行かない。
+        let assets = assets_for_download_locked(conn, download_id).unwrap_or_default();
         std::fs::read_to_string(&json_path)
             .ok()
-            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
-            .map(|value| extract_search_body(&value, &source))
+            .map(|raw| super::attachment::search_body_from_json(&raw, &source, &assets))
             .unwrap_or_default()
     });
 

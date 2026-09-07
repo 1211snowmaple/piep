@@ -125,6 +125,11 @@ fn load_manifest(
             "FANBOX投稿JSONの形式を解釈できないためEPUBを作成できません".to_string()
         })?;
     }
+    // 添付の中の本文を先に入れる。**編集より先でなければならない。** 編集は
+    // ブロックを丸ごと差し替えるので、あとから入れると編集済みの本文へ二重に
+    // 差し込むことになる。編集した人が見ていたのは取り込み済みの本文である。
+    let assets = state.db.get_assets(download_id).unwrap_or_default();
+    crate::database::attachment::apply_attachment_text(&mut data, &dl.source, &assets);
     apply_active_edit_to_epub_data(state, download_id, &dl.source, &mut data);
 
     let assets_dir = Path::new(&target_json_path)

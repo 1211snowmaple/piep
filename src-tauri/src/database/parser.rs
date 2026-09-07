@@ -304,11 +304,14 @@ pub(crate) fn expand_pixiv_inline_notation(escaped_html: &str) -> String {
 
 /// Pixiv小説のプレーンテキストを XHTML/HTML へと動的パースする
 pub fn parse_pixiv_to_html(raw_json: &str, assets: &[AssetEntry]) -> String {
-    let v: serde_json::Value = match serde_json::from_str(raw_json) {
-        Ok(json) => json,
-        Err(_) => return String::new(),
-    };
+    match serde_json::from_str::<serde_json::Value>(raw_json) {
+        Ok(value) => parse_pixiv_value_to_html(&value, assets),
+        Err(_) => String::new(),
+    }
+}
 
+/// 読み込み済みの値から組む。呼び出し側が値へ手を入れたあとで使う。
+pub fn parse_pixiv_value_to_html(v: &serde_json::Value, assets: &[AssetEntry]) -> String {
     // 本文テキストの抽出 (あらゆるネスト位置から発掘)
     let text = v
         .get("text")
@@ -373,15 +376,34 @@ pub fn parse_pixiv_to_html(raw_json: &str, assets: &[AssetEntry]) -> String {
     html
 }
 
+/// 添付ファイルの記述に対応するアセットを探す。
+///
+/// 名前は保存時に安全な形へ均されているので、そちらへ合わせてから比べる。
+/// **`id` が空のときに道の部分一致へ落ちてはいけない。** どんな道も空文字列を
+/// 含むので、無関係な最初の添付が拾われる。
+pub(crate) fn find_file_asset<'a>(
+    assets: &'a [AssetEntry],
+    id: &str,
+    full_name: &str,
+) -> Option<&'a AssetEntry> {
+    let sanitized = crate::downloader::asset_downloader::sanitize_filename(full_name);
+    assets.iter().find(|asset| {
+        asset.filename == sanitized || (!id.is_empty() && asset.local_path.contains(id))
+    })
+}
+
 /// FANBOXの構造化JSONブロックデータを XHTML/HTML へと動的パースする
 pub fn parse_fanbox_to_html(raw_json: &str, assets: &[AssetEntry]) -> String {
-    let v: serde_json::Value = match serde_json::from_str(raw_json) {
-        Ok(json) => json,
-        Err(_) => return String::new(),
-    };
+    match serde_json::from_str::<serde_json::Value>(raw_json) {
+        Ok(value) => parse_fanbox_value_to_html(&value, assets),
+        Err(_) => String::new(),
+    }
+}
 
+/// 読み込み済みの値から組む。呼び出し側が値へ手を入れたあとで使う。
+pub fn parse_fanbox_value_to_html(v: &serde_json::Value, assets: &[AssetEntry]) -> String {
     // 保存元やAPI世代によって異なるラッパーを共通の投稿形へ寄せる。
-    let post = crate::fanbox_api::payload::post_or_self(&v);
+    let post = crate::fanbox_api::payload::post_or_self(v);
 
     // 2. 古いプレーンテキスト形式 (PostBodyText) の場合
     //
@@ -464,11 +486,7 @@ pub fn parse_fanbox_to_html(raw_json: &str, assets: &[AssetEntry]) -> String {
                     .get("size")
                     .and_then(|value| value.as_i64())
                     .unwrap_or(0);
-                let found = assets.iter().find(|asset| {
-                    asset.filename
-                        == crate::downloader::asset_downloader::sanitize_filename(&full_name)
-                        || (!id.is_empty() && asset.local_path.contains(id))
-                });
+                let found = find_file_asset(assets, id, &full_name);
                 parts.push(match found {
                     Some(asset) => format!(
                         r##"<div class="novel-file-attachment clickable-file" data-local-path="{}">
@@ -553,12 +571,7 @@ pub fn parse_fanbox_to_html(raw_json: &str, assets: &[AssetEntry]) -> String {
                     ("添付ファイル".to_string(), 0)
                 };
 
-                // assets から対応するファイルを検索 (サニタイズされた名前が一致するか、またはパスに ID が含まれるか)
-                let found_asset = assets.iter().find(|a| {
-                    a.filename
-                        == crate::downloader::asset_downloader::sanitize_filename(&original_name)
-                        || a.local_path.contains(file_id)
-                });
+                let found_asset = find_file_asset(assets, file_id, &original_name);
 
                 if let Some(asset) = found_asset {
                     let size_kb = (file_size as f64) / 1024.0;
@@ -766,6 +779,61 @@ pub fn parse_fanbox_to_html(raw_json: &str, assets: &[AssetEntry]) -> String {
                         link_card_html(safe_url.as_deref(), "web", &label, &title, "埋め込み")
                     }
                     None => String::new(),
+                }
+            }
+            // piep が差し込んだ印。添付から取り込んだ本文の前に一行だけ置く。
+            // 取り込みは piep がやったことであって作者が書いたことではないので、
+            // どこから来た文章なのかを読み手に伝える。
+            super::attachment::NOTICE_BLOCK_TYPE => {
+                let file_name = block
+                    .get("fileName")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("添付ファイル");
+                // 取り出せなかったとき。**黙って 📎 の箱だけを残さない。**
+                // 何も書かないと、本文が入っているのに空に見える作品と、
+                // 本当に音源しか無い作品が、読み手には同じ顔になる。
+                if let Some(reason) = block.get("error").and_then(|value| value.as_str()) {
+                    format!(
+                        r#"<div class="attachment-notice attachment-notice--failed">添付ファイル「{}」から本文を取り込めませんでした。{}</div>"#,
+                        escape_html(file_name),
+                        escape_html(reason)
+                    )
+                } else {
+                    let pages = block.get("pageCount").and_then(|value| value.as_u64());
+                    let chars = block.get("charCount").and_then(|value| value.as_u64());
+                    // 紙面を持たない添付（テキストファイル）にページ数は無い。
+                    let scale = match (pages, chars) {
+                        (Some(pages), Some(chars)) if pages > 0 => {
+                            format!("（{pages}ページ・{chars}文字）")
+                        }
+                        (_, Some(chars)) => format!("（{chars}文字）"),
+                        _ => String::new(),
+                    };
+                    // 段落の区切りが推定なのは、行の形から組み直したときだけである。
+                    // 構造ツリーの切れ目も、テキストファイルの改行も、作者が書いた
+                    // ものである。同じ顔で出すと、推定を作者の意図として読ませる。
+                    let confidence = match block.get("method").and_then(|value| value.as_str()) {
+                        Some("tagged" | "text") => "",
+                        _ => "段落の区切りは行の形からの推定です。",
+                    };
+                    // 原本へ戻る道。**取り込んだ本文だけを置いて原本を隠すと、
+                    // 引き比べられない。** 図版のある PDF では、紙面にあって本文に
+                    // 出てこないものがある。
+                    let original = match block.get("localPath").and_then(|value| value.as_str()) {
+                        Some(path) if !path.is_empty() => format!(
+                            r#" <button type="button" class="attachment-original" data-local-path="{}" data-file-name="{}">原本を見る</button>"#,
+                            escape_html(path),
+                            escape_html(file_name)
+                        ),
+                        _ => String::new(),
+                    };
+                    format!(
+                        r#"<div class="attachment-notice">添付ファイル「{}」から取り込んだ本文{}{}{}</div>"#,
+                        escape_html(file_name),
+                        scale,
+                        confidence,
+                        original
+                    )
                 }
             }
             _ => {
