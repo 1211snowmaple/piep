@@ -60,7 +60,7 @@ import type { SearchIndexStatus } from "@/types/library";
 import { openSingleDialog, saveDialog } from "@/services/dialogApi";
 import { openFilesystemPath } from "@/services/openerApi";
 import { subscribeTauriEvent } from "@/services/eventBus";
-import { useSearchIndexProgress } from "@/features/search/searchIndexProgress";
+import { trackManualRebuild, useSearchIndexProgress } from "@/features/search/searchIndexProgress";
 import { invalidateWorkSetViews } from "@/features/library/workSetInvalidation";
 import DiagnosticsPage from "@/features/diagnostics/DiagnosticsPage";
 import { cancelSearchRebuildIndex, startSearchRebuildIndex, type SearchRebuildProgress } from "@/services/searchApi";
@@ -118,6 +118,27 @@ const PREVIEW_INDEX_STATUS: SearchIndexStatus = {
   throughputPerSec: null,
 };
 
+/**
+ * 手で始めた作り直しが終わったときの始末。**画面の外に置く。**
+ *
+ * 設定画面を離れていても、履歴は閉じ、結果は伝える。ここが画面の中にあった
+ * ころは、離れた瞬間に結び付けが切れて履歴が途中で固まっていた。
+ */
+function settleManualRebuild(progress: SearchRebuildProgress) {
+  if (progress.status === "failed") {
+    const message = progress.error || "検索インデックスの再構築に失敗しました";
+    notifications.show({ color: "red", title: "再構築に失敗しました", message });
+    return;
+  }
+  if (progress.status === "canceled") {
+    notifications.show({ color: "gray", message: "再構築を中止しました。次回は途中から再開します" });
+    return;
+  }
+  const failed = progress.failed ?? 0;
+  const summary = `${formatNumber(progress.processed ?? 0)}件を索引しました${failed ? `（${formatNumber(failed)}件は読み込めずスキップしました）` : ""}`;
+  notifications.show({ color: failed ? "yellow" : "green", title: "検索インデックスを再構築しました", message: summary });
+}
+
 export default function SettingsPage() {
   const runtime = isTauriRuntime();
   const [searchParams, setSearchParams] = useAppSearchParams();
@@ -140,7 +161,6 @@ export default function SettingsPage() {
   // has to show that run too.
   const rebuild = useSearchIndexProgress();
   const rebuildOperationRef = useRef<OperationController | null>(null);
-  const manualJobRef = useRef<string | null>(null);
   const [restoreReview, setRestoreReview] = useState<BackupReview | null>(null);
   const { colorScheme, setColorScheme } = useMantineColorScheme();
   const auth = useQuery({
@@ -317,14 +337,16 @@ export default function SettingsPage() {
       if (!runtime) throw new Error("デスクトップアプリで利用できます");
       const pending = index.data?.pendingDownloads ?? index.data?.totalDownloads ?? 0;
       const jobId = await startSearchRebuildIndex({ includeSemantic });
-      manualJobRef.current = jobId;
-      rebuildOperationRef.current = startOperation({
+      const operation = startOperation({
         kind: "search",
         label: includeSemantic ? "検索インデックスを再構築（意味検索を含む）" : "検索インデックスを再構築",
         total: pending,
         onCancel: () => cancelSearchRebuildIndex(jobId),
         onRetry: () => rebuildMutation.mutate(includeSemantic),
       });
+      rebuildOperationRef.current = operation;
+      // 見張りは画面の外へ預ける。ここを離れても履歴が更新され続ける。
+      trackManualRebuild({ jobId, operation, onSettled: settleManualRebuild });
       return jobId;
     },
     onError: (error) => notifications.show({ color: "red", title: "再構築を開始できません", message: errorMessage(error) }),
@@ -333,22 +355,7 @@ export default function SettingsPage() {
   // An automatic catch-up at launch is reported by the header indicator; it
   // needs no announcement and certainly no notification every time.
   useEffect(() => {
-    if (!rebuild || rebuild.jobId !== manualJobRef.current) return;
-    rebuildOperationRef.current?.progress(rebuild.processed ?? rebuild.indexedDownloads, rebuild.processedTotal ?? rebuild.totalDownloads);
-    if (rebuild.status === "running") return;
-    manualJobRef.current = null;
-    if (rebuild.status === "failed") {
-      rebuildOperationRef.current?.fail(rebuild.error || "検索インデックスの再構築に失敗しました");
-      notifications.show({ color: "red", title: "再構築に失敗しました", message: rebuild.error || "検索インデックスの再構築に失敗しました" });
-    } else if (rebuild.status === "canceled") {
-      rebuildOperationRef.current?.cancel(`${formatNumber(rebuild.processed ?? 0)}件を処理した時点で中止しました`);
-      notifications.show({ color: "gray", message: "再構築を中止しました。次回は途中から再開します" });
-    } else {
-      const failed = rebuild.failed ?? 0;
-      const summary = `${formatNumber(rebuild.processed ?? 0)}件を索引しました${failed ? `（${formatNumber(failed)}件は読み込めずスキップしました）` : ""}`;
-      rebuildOperationRef.current?.complete(summary);
-      notifications.show({ color: failed ? "yellow" : "green", title: "検索インデックスを再構築しました", message: summary });
-    }
+    if (!rebuild || rebuild.status === "running") return;
     rebuildOperationRef.current = null;
     queryClient.invalidateQueries({ queryKey: ["search-index-status"] });
     // 診断の計測は `enabled: false` なので、**古いと印を付けても取り直されない。**
