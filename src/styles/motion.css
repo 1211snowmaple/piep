@@ -13,6 +13,12 @@
   height: 2px;
   background: var(--tabs-color);
   pointer-events: none;
+  /* 下線はタブの箱の**内側**（下端の 2px）に重なる。タブ自身が
+     `position: relative; z-index: 0` で重ね合わせの文脈を作るので、下線が上に
+     出るかどうかは DOM の並び順だけで決まっていた。タブに背景が付く瞬間
+     ―― カーソルを当てたとき ―― に、その背景が下線を塗り潰しうる。
+     並び順に頼らず、明示的に上へ置く。 */
+  z-index: 1;
   /* No long tail. An underline that covers most of the distance quickly and
      then creeps the last few pixels reads as the page correcting itself. */
   transition: transform var(--motion-duration) var(--motion-ease), width var(--motion-duration) var(--motion-ease);

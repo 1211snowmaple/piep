@@ -77,9 +77,18 @@ function confirmDiscardOnNavigation(): Promise<boolean> {
 function AppContent() {
   const { pathname } = useAppRouter();
   useEffect(() => {
+    let disposed = false;
     let dispose: (() => void) | undefined;
-    installCloseGuard(confirmDiscardOnClose).then((fn) => { dispose = fn; }).catch(() => undefined);
-    return () => dispose?.();
+    // Native registration can finish after cleanup, including an effect restart.
+    // Release that late listener too, so close confirmations cannot accumulate.
+    installCloseGuard(confirmDiscardOnClose).then((fn) => {
+      if (disposed) fn();
+      else dispose = fn;
+    }).catch(() => undefined);
+    return () => {
+      disposed = true;
+      dispose?.();
+    };
   }, []);
   return (
     <WorkspaceProvider>

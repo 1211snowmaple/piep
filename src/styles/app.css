@@ -44,16 +44,26 @@ pre,
 
 .mantine-Notifications-root {
   /* 固定ヘッドバー（58px）の直下に、少し呼吸できる間隔を空ける。 */
-  top: 70px !important;
+  top: var(--piep-notification-top, 70px) !important;
   right: 16px !important;
   bottom: auto !important;
   width: min(360px, calc(100vw - 32px)) !important;
   max-width: calc(100vw - 32px) !important;
-  max-height: calc(100dvh - 86px);
+  max-height: calc(100dvh - var(--piep-notification-top, 70px) - 16px);
   padding: 1px;
   overflow-x: hidden;
   overflow-y: auto;
   pointer-events: none;
+}
+
+/* 編集画面にはヘッドバーの下に68pxの操作列がある。保存通知で
+   「反映」を覆うと、ボタン上のポインターが通知の自動消去も止めてしまう。 */
+body:has(.editor-page) .mantine-Notifications-root {
+  --piep-notification-top: 138px;
+}
+/* 保存直後に読書へ戻っても、62pxの操作列に通知を重ねない。 */
+body:has(.reader-page) .mantine-Notifications-root {
+  --piep-notification-top: 132px;
 }
 .mantine-Notification-root { width: 100%; max-width: 100%; overflow: hidden; pointer-events: auto; }
 .mantine-Notification-description {

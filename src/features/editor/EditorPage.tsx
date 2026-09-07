@@ -275,6 +275,7 @@ export default function EditorPage() {
     return saveWorkDraft(id, query.data.baseVersion, snapshot.title ?? null, snapshot.persistedBlocks);
   };
   const clearDirtyIfCurrent = (snapshot: EditorSaveSnapshot) => {
+    if (title !== snapshot.title) return;
     if (JSON.stringify(form.getValues()) !== snapshot.fingerprint) return;
     form.resetDirty(snapshot.values);
     setDirty(false);

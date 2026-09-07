@@ -47,6 +47,7 @@ import { demoTemplates } from "./templateStudioDemo";
 import { AUTO_TEMPLATE, readExportSettings, toCompressOptions, writeExportSettings, type EpubExportSettings } from "./exportSettings";
 
 type EpubValues = EpubExportSettings;
+type EpubExportRequest = EpubValues & { works: Pick<DownloadEntry, "id" | "title">[] };
 
 export default function EpubPage() {
   const navigate = useAppNavigate();
@@ -55,7 +56,7 @@ export default function EpubPage() {
   const [progress, setProgress] = useState<ExportProgress | null>(null);
   const [result, setResult] = useState<ExportBatchResult | null>(null);
   const exportOperationRef = useRef<OperationController | null>(null);
-  const retryExportRef = useRef<(values: EpubValues) => void>(() => undefined);
+  const retryExportRef = useRef<(request: EpubExportRequest) => void>(() => undefined);
   // 前に書き出したときの決めごとから始める。開くたびに初期値へ戻り、出力先
   // フォルダーまで毎回選び直しだった。
   const form = useForm<EpubValues>({ initialValues: readExportSettings(), validate: { templateName: isNotEmpty("テンプレートを選択してください"), outputDir: isNotEmpty("出力先を選択してください") }, validateInputOnBlur: true });
@@ -90,13 +91,13 @@ export default function EpubPage() {
   }, [epubQueue, queueQuery.isSuccess, removeFromEpubQueue, works]);
 
   const exportMutation = useMutation({
-    mutationFn: async (values: EpubValues): Promise<ExportBatchResult> => {
+    mutationFn: async ({ works, ...values }: EpubExportRequest): Promise<ExportBatchResult> => {
       exportOperationRef.current = startOperation({
         kind: "epub",
         label: `${works.length}冊をEPUBへ書き出し`,
         detail: values.outputDir,
         total: works.length,
-        onRetry: () => retryExportRef.current(values),
+        onRetry: () => retryExportRef.current({ ...values, works }),
         // 数百冊を並べて実行したら、終わるまで止められなかった。作りかけの
         // 1 冊は書き切ってから止まるので、半端な EPUB は残らない。
         onCancel: runtime ? async () => { await cancelEpubExport(); } : undefined,
@@ -114,7 +115,7 @@ export default function EpubPage() {
         compressOptions: toCompressOptions(values.compression),
       });
     },
-    onSuccess: (data) => {
+    onSuccess: (data, request) => {
       if (data.canceled) exportOperationRef.current?.cancel(`成功 ${data.successCount} · 未着手 ${data.skippedIds.length}`);
       else exportOperationRef.current?.complete(`成功 ${data.successCount} · 失敗 ${data.failedCount}`);
       exportOperationRef.current = null;
@@ -124,7 +125,9 @@ export default function EpubPage() {
       // いないもの**はキューに残す。止めた結果として棚から消えたのでは、
       // 中止が取り下げになってしまう。
       const keep = new Set([...data.failedIds, ...data.invalidIds, ...data.skippedIds]);
-      removeFromEpubQueue(works.filter((work) => !keep.has(work.id)).map((work) => work.id));
+      // The queue can grow while this batch runs. Only its original works
+      // were attempted; additions belong to the next export.
+      removeFromEpubQueue(request.works.filter((work) => !keep.has(work.id)).map((work) => work.id));
       const needsReview = data.failedCount > 0 || data.invalidCount > 0 || data.issues.length > 0;
       notifications.show({
         color: data.canceled ? "yellow" : needsReview ? "yellow" : "green",
@@ -155,7 +158,7 @@ export default function EpubPage() {
     <div className="page page--contained epub-page">
       <PageHeader title="EPUB書き出し" description="選んだ作品を、端末に合わせた高品質な電子書籍へ書き出します。" actions={<Button variant="default" leftSection={<Icons.epubTemplate size={IconSize.menu} />} onClick={() => navigate("/epub/templates")}>テンプレートスタジオ</Button>} />
       {!epubQueue.length ? <EmptyState icon={Icons.epub} title="EPUBキューは空です" description="ライブラリや作品詳細から、書き出したい作品をキューに追加してください。" action={<Button onClick={() => navigate("/library")}>ライブラリを開く</Button>} /> : (
-        <form onSubmit={form.onSubmit((values) => { writeExportSettings(values); exportMutation.mutate(values); })}>
+        <form onSubmit={form.onSubmit((values) => { writeExportSettings(values); exportMutation.mutate({ ...values, works: works.map(({ id, title }) => ({ id, title })) }); })}>
           <Grid gap="lg" align="flex-start">
             <Grid.Col span={{ base: 12, lg: 7 }}>
               <Stack gap="lg">
