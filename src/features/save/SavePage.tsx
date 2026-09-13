@@ -266,10 +266,9 @@ export default function SavePage() {
 
   useEffect(() => {
     let cancelled = false;
+    const requestedUrl = searchParams.get("url");
     const home =
-      searchParams.get("url") ||
-      getProvider(source).homeUrl ||
-      "https://www.pixiv.net/";
+      requestedUrl || getProvider(source).homeUrl || "https://www.pixiv.net/";
     setCurrentUrl(home);
     setAddress(home);
     setItems([]);
@@ -304,12 +303,25 @@ export default function SavePage() {
         ]);
         if (cancelled) return;
         if (standing) {
+          // 「アプリ内で開く」はこの query に行き先を載せて Save 画面へ来る。
+          // 大きいウィンドウを引き継ぐだけでは、その行き先を捨てて以前のページを
+          // 表示し続けてしまう。いま表示を担っている大きいウィンドウへ渡す。
+          let adoptedUrl = standing;
+          if (requestedUrl && requestedUrl !== standing) {
+            const userAgent =
+              source === "fanbox"
+                ? (await store.get<string>("fanbox_user_agent")) || undefined
+                : undefined;
+            await openStandaloneBrowser(requestedUrl, { source, userAgent });
+            adoptedUrl = requestedUrl;
+          }
+          if (cancelled) return;
           detachedRef.current = true;
           detachedSourceRef.current = source;
           setDetached(true);
-          setCurrentUrl(standing);
-          setAddress(standing);
-          rememberVisit(standing);
+          setCurrentUrl(adoptedUrl);
+          setAddress(adoptedUrl);
+          rememberVisit(adoptedUrl);
           // A detached page must have a single renderer. This also clears an
           // embedded view left behind by an interrupted previous mount.
           await destroyEmbeddedBrowser().catch(() => undefined);
@@ -425,22 +437,30 @@ export default function SavePage() {
         (event) => {
           if (event.payload.source !== source) return;
           if (detachedSourceRef.current !== event.payload.source) return;
-          reattachRef.current();
+          reattachRef.current(event.payload.url);
         },
       );
     // In-page navigation cannot reach us as an event: this WebView loads a
     // remote origin, so Tauri's IPC is deliberately not injected into it.
-    // While the large window has the session, that window is the one to poll.
+    // One low-rate read covers both URL sync and the missed-close fallback;
+    // a second 700ms watchdog used to duplicate native IPC while detached.
     const poll = window.setInterval(() => {
       const read = detachedRef.current
         ? getStandaloneBrowserUrl(source)
         : getEmbeddedBrowserUrl();
       read
         .then((url) => {
-          if (url) applyUrl(url);
+          if (url) {
+            applyUrl(url);
+          } else if (
+            detachedRef.current &&
+            detachedSourceRef.current === source
+          ) {
+            reattachRef.current();
+          }
         })
         .catch(() => undefined);
-    }, 2500);
+    }, 2000);
     return () => {
       cancelAnimationFrame(frame);
       observer.disconnect();
@@ -582,15 +602,12 @@ export default function SavePage() {
       setDetached(false);
       if (!runtime) return;
       appliedBoundsRef.current = "";
-      try {
-        await navigateEmbeddedBrowser(url);
-        await setEmbeddedBrowserVisible(true);
-        syncBrowserBounds();
-      } catch {
-        // The child view may have been torn down while detached; recreate it at
-        // the page the large window was showing.
-        await positionBrowser(url).catch(() => undefined);
-      }
+      // Detaching deliberately destroys the child renderer, so attempting a
+      // navigate first is a guaranteed failed IPC round-trip. Recreate it
+      // directly at the page the large window was showing.
+      await positionBrowser(url).catch(() => undefined);
+      await setEmbeddedBrowserVisible(true).catch(() => undefined);
+      syncBrowserBounds();
     },
     [positionBrowser, runtime, syncBrowserBounds],
   );
@@ -602,30 +619,10 @@ export default function SavePage() {
   };
   // The listener is installed once, so it reaches the current reattach through
   // a ref rather than re-subscribing on every URL change.
-  const reattachRef = useRef<() => void>(() => undefined);
-  reattachRef.current = () => {
-    void reattachBrowser(currentUrlRef.current);
+  const reattachRef = useRef<(url?: string | null) => void>(() => undefined);
+  reattachRef.current = (url) => {
+    void reattachBrowser(url || currentUrlRef.current);
   };
-
-  // The close event is the fast path, but the pane must come back even if it
-  // never arrives - a window manager can tear a window down without one, and a
-  // browser pane stuck behind a placeholder is unusable. Asking the backend
-  // whether the window still exists needs no event at all.
-  useEffect(() => {
-    if (!runtime || !detached) return;
-    const watchdog = window.setInterval(() => {
-      // During a provider handover the old window is intentionally closing and
-      // the new route is already mounted. It must not resurrect a child view.
-      if (detachedSourceRef.current !== source) return;
-      getStandaloneBrowserUrl(source)
-        .then((url) => {
-          if (url) return;
-          reattachRef.current();
-        })
-        .catch(() => undefined);
-    }, 700);
-    return () => window.clearInterval(watchdog);
-  }, [detached, runtime, source]);
 
   // 開いたままの大きいウィンドウを引き継ぐ判断は、**埋め込みを作る前**の
   // 初期化で行う（この上の `useEffect`）。ここにも同じ判断を置いていたころ、

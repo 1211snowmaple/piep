@@ -1,7 +1,12 @@
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use parking_lot::Mutex;
 use sha2::{Digest, Sha256};
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::LazyLock;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, WebviewBuilder, WebviewUrl, WebviewWindowBuilder};
 use tokio::sync::{oneshot, Mutex as AsyncMutex};
@@ -29,6 +34,571 @@ const MAX_WEBVIEW_COORDINATE: f64 = 1_000_000.0;
 const MAX_WEBVIEW_DIMENSION: f64 = 100_000.0;
 const DEFAULT_BROWSER_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 const BROWSER_ACCELERATOR_SCHEME: &str = "piep-browser";
+const MAX_BROWSER_HISTORY_ENTRIES: usize = 64;
+const BROWSER_HISTORY_PENDING_TIMEOUT: Duration = Duration::from_secs(3);
+
+type BrowserRendererId = u64;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BrowserHistoryDirection {
+    Back,
+    Forward,
+}
+
+impl BrowserHistoryDirection {
+    fn target(self, index: usize, len: usize) -> Option<usize> {
+        match self {
+            Self::Back => index.checked_sub(1),
+            Self::Forward => (index + 1 < len).then_some(index + 1),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BrowserHistoryDispatchKind {
+    /// The destination is already in this WebView's own session history. This
+    /// is the fast path and lets WebView2 use its back/forward cache.
+    Native,
+    /// The destination predates this renderer (small <-> large handover). It
+    /// has to be restored from the workspace history.
+    Shared,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BrowserHistoryObservation {
+    /// A settled top-level navigation. It is safe to extend this renderer's
+    /// trusted native range.
+    Finished,
+    /// A URL read by the watchdog. It may be pushState *or* replaceState, so it
+    /// is recorded for handover but is not assumed to be a native entry.
+    Snapshot,
+}
+
+#[derive(Clone, Debug)]
+struct PendingBrowserTraversal {
+    renderer_id: BrowserRendererId,
+    from_index: usize,
+    target_index: usize,
+    from_url: String,
+    expected_url: String,
+    kind: BrowserHistoryDispatchKind,
+    started_at: Instant,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct BrowserRendererHistory {
+    id: BrowserRendererId,
+    min_index: usize,
+    max_index: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum BrowserHistoryAction {
+    None,
+    Busy,
+    Native,
+    Shared(String),
+}
+
+/// The save browser changes its native WebView when it moves between the app
+/// and the large window. WebView navigation history belongs to that renderer,
+/// so keeping it there made the small -> large handover forget every page even
+/// though the reverse handover appeared to keep working. This small model is
+/// the browser workspace's history and therefore survives either renderer.
+#[derive(Default)]
+struct BrowserNavigationHistory {
+    entries: Vec<String>,
+    index: Option<usize>,
+    renderer: Option<BrowserRendererHistory>,
+    pending: Option<PendingBrowserTraversal>,
+}
+
+impl BrowserNavigationHistory {
+    fn current_url(&self) -> Option<&str> {
+        self.index
+            .and_then(|index| self.entries.get(index))
+            .map(String::as_str)
+    }
+
+    fn cancel_pending(&mut self) -> Option<PendingBrowserTraversal> {
+        let pending = self.pending.take()?;
+        self.index = Some(pending.from_index);
+        Some(pending)
+    }
+
+    fn expire_pending(&mut self, now: Instant) {
+        let expired = self.pending.as_ref().is_some_and(|pending| {
+            now.saturating_duration_since(pending.started_at) >= BROWSER_HISTORY_PENDING_TIMEOUT
+        });
+        if !expired {
+            return;
+        }
+
+        let Some(pending) = self.cancel_pending() else {
+            return;
+        };
+        if pending.kind == BrowserHistoryDispatchKind::Native {
+            // `eval()` only confirms that the JavaScript was accepted. The
+            // physical traversal can still be cancelled or be a no-op when a
+            // page used replaceState/location.replace. Do not retry that same
+            // unverified native edge forever; the next press restores it from
+            // the shared history instead.
+            if let Some(renderer) = &mut self.renderer {
+                if renderer.id == pending.renderer_id {
+                    renderer.min_index = pending.from_index;
+                    renderer.max_index = pending.from_index;
+                }
+            }
+        }
+    }
+
+    fn attach_renderer(&mut self, renderer_id: BrowserRendererId, url: &Url) {
+        // A renderer can disappear while its traversal is in flight. Commit a
+        // traversal that already reached its expected destination; roll it
+        // back only when the replacement still shows the page being left.
+        if let Some(pending) = self.pending.take() {
+            self.index = Some(if url.as_str() == pending.expected_url {
+                pending.target_index
+            } else {
+                pending.from_index
+            });
+        }
+        self.renderer = None;
+        self.record_organic(url, BrowserHistoryObservation::Snapshot);
+        if let Some(index) = self.index {
+            self.renderer = Some(BrowserRendererHistory {
+                id: renderer_id,
+                min_index: index,
+                max_index: index,
+            });
+        }
+    }
+
+    fn detach_renderer(&mut self, renderer_id: BrowserRendererId) {
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|pending| pending.renderer_id == renderer_id)
+        {
+            self.cancel_pending();
+        }
+        if self
+            .renderer
+            .is_some_and(|renderer| renderer.id == renderer_id)
+        {
+            self.renderer = None;
+        }
+    }
+
+    fn record_organic(&mut self, url: &Url, observation: BrowserHistoryObservation) {
+        if let Some(index) = self.index.filter(|index| {
+            self.entries
+                .get(*index)
+                .is_some_and(|current| current == url.as_str())
+        }) {
+            if observation == BrowserHistoryObservation::Finished {
+                // Reload and a second physical entry with the same URL are
+                // indistinguishable here. Keeping the older native range can
+                // make Back land on the same URL and leave pending forever, so
+                // retain only the point we can prove.
+                if let Some(renderer) = &mut self.renderer {
+                    renderer.min_index = index;
+                    renderer.max_index = index;
+                }
+            }
+            return;
+        }
+
+        let previous_index = self.index;
+        if let Some(index) = self.index {
+            self.entries.truncate(index + 1);
+        }
+        self.entries.push(url.to_string());
+
+        let mut next_index = self.entries.len() - 1;
+        let mut next_renderer = self.renderer.map(|renderer| {
+            let extends_trusted_native_history = observation == BrowserHistoryObservation::Finished
+                && previous_index.is_some_and(|index| {
+                    index >= renderer.min_index && index <= renderer.max_index
+                });
+            if extends_trusted_native_history {
+                BrowserRendererHistory {
+                    max_index: next_index,
+                    ..renderer
+                }
+            } else {
+                // A watchdog URL can be replaceState, for which WebView2 has no
+                // preceding native entry. Keep only the current point trusted.
+                BrowserRendererHistory {
+                    id: renderer.id,
+                    min_index: next_index,
+                    max_index: next_index,
+                }
+            }
+        });
+
+        if self.entries.len() > MAX_BROWSER_HISTORY_ENTRIES {
+            let excess = self.entries.len() - MAX_BROWSER_HISTORY_ENTRIES;
+            self.entries.drain(..excess);
+            next_index -= excess;
+            if let Some(renderer) = &mut next_renderer {
+                renderer.min_index = renderer.min_index.saturating_sub(excess);
+                renderer.max_index = renderer.max_index.saturating_sub(excess);
+            }
+        }
+        self.index = Some(next_index);
+        self.renderer = next_renderer;
+    }
+
+    fn observe(
+        &mut self,
+        renderer_id: BrowserRendererId,
+        url: &Url,
+        observation: BrowserHistoryObservation,
+    ) {
+        if !self
+            .renderer
+            .is_some_and(|renderer| renderer.id == renderer_id)
+        {
+            // A closing renderer can report its final load after the other
+            // surface has taken ownership. Never let that stale callback alter
+            // the shared cursor.
+            return;
+        }
+
+        if let Some(pending) = self.pending.as_ref() {
+            if pending.renderer_id != renderer_id {
+                return;
+            }
+
+            // A watchdog can race the dispatch and still see the page we are
+            // leaving. Likewise a late Finished event from that page must not
+            // turn the optimistic Back into a new forward entry.
+            if url.as_str() == pending.from_url && pending.expected_url != pending.from_url {
+                return;
+            }
+
+            let target_index = pending.target_index;
+            let kind = pending.kind;
+            if let Some(entry) = self.entries.get_mut(target_index) {
+                // Redirects/canonicalisation settle the traversed slot. They are
+                // not an organic visit and must not truncate or append history.
+                if entry != url.as_str() {
+                    *entry = url.to_string();
+                }
+            }
+            self.index = Some(target_index);
+            self.pending = None;
+            if kind == BrowserHistoryDispatchKind::Shared {
+                // location.replace keeps physical forward entries from the old
+                // native range. They no longer line up with the logical range,
+                // so only this point remains trustworthy.
+                self.renderer = Some(BrowserRendererHistory {
+                    id: renderer_id,
+                    min_index: target_index,
+                    max_index: target_index,
+                });
+            }
+            return;
+        }
+
+        self.record_organic(url, observation);
+    }
+
+    fn begin(
+        &mut self,
+        renderer_id: BrowserRendererId,
+        direction: BrowserHistoryDirection,
+        current_url: &Url,
+    ) -> BrowserHistoryAction {
+        self.begin_at(renderer_id, direction, current_url, Instant::now())
+    }
+
+    fn begin_at(
+        &mut self,
+        renderer_id: BrowserRendererId,
+        direction: BrowserHistoryDirection,
+        current_url: &Url,
+        now: Instant,
+    ) -> BrowserHistoryAction {
+        if !self
+            .renderer
+            .is_some_and(|renderer| renderer.id == renderer_id)
+        {
+            return BrowserHistoryAction::None;
+        }
+
+        // This read also settles a fast same-document traversal before a
+        // second keypress. If the first action has not moved yet, observe()
+        // deliberately leaves it pending and this input becomes Busy.
+        self.observe(
+            renderer_id,
+            current_url,
+            BrowserHistoryObservation::Snapshot,
+        );
+        self.expire_pending(now);
+        if self.pending.is_some() {
+            return BrowserHistoryAction::Busy;
+        }
+
+        let Some(index) = self.index else {
+            return BrowserHistoryAction::None;
+        };
+        let Some(target_index) = direction.target(index, self.entries.len()) else {
+            // A shared-history boundary is a hard boundary. Falling through to
+            // WebView2 here would revisit synthetic entries and create an
+            // endless A -> B -> A loop.
+            return BrowserHistoryAction::None;
+        };
+        let Some(target) = self.entries.get(target_index).cloned() else {
+            return BrowserHistoryAction::None;
+        };
+        let native = self.renderer.is_some_and(|renderer| {
+            renderer.id == renderer_id
+                && index >= renderer.min_index
+                && index <= renderer.max_index
+                && target_index >= renderer.min_index
+                && target_index <= renderer.max_index
+        });
+        let kind = if native {
+            BrowserHistoryDispatchKind::Native
+        } else {
+            BrowserHistoryDispatchKind::Shared
+        };
+        self.pending = Some(PendingBrowserTraversal {
+            renderer_id,
+            from_index: index,
+            target_index,
+            from_url: current_url.to_string(),
+            expected_url: target.clone(),
+            kind,
+            started_at: now,
+        });
+        // Move optimistically so every observer sees one coherent cursor. A
+        // synchronous dispatch failure restores from_index exactly.
+        self.index = Some(target_index);
+        if native {
+            BrowserHistoryAction::Native
+        } else {
+            BrowserHistoryAction::Shared(target)
+        }
+    }
+
+    fn rollback(&mut self, renderer_id: BrowserRendererId) {
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|pending| pending.renderer_id == renderer_id)
+        {
+            self.cancel_pending();
+        }
+    }
+}
+
+static NEXT_BROWSER_RENDERER_ID: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Clone)]
+struct BrowserRendererRegistration {
+    id: BrowserRendererId,
+    source: String,
+}
+
+#[derive(Default)]
+struct BrowserNavigationRegistry {
+    histories: HashMap<String, BrowserNavigationHistory>,
+    renderers: HashMap<String, BrowserRendererRegistration>,
+}
+
+static BROWSER_NAVIGATION: LazyLock<Mutex<BrowserNavigationRegistry>> =
+    LazyLock::new(|| Mutex::new(BrowserNavigationRegistry::default()));
+
+fn next_browser_renderer_id() -> BrowserRendererId {
+    NEXT_BROWSER_RENDERER_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+fn register_browser_renderer(
+    label: &str,
+    source: &str,
+    renderer_id: BrowserRendererId,
+    initial_url: &Url,
+) {
+    let mut registry = BROWSER_NAVIGATION.lock();
+    let previous = registry.renderers.insert(
+        label.to_string(),
+        BrowserRendererRegistration {
+            id: renderer_id,
+            source: source.to_string(),
+        },
+    );
+    if let Some(previous) = previous {
+        if let Some(history) = registry.histories.get_mut(&previous.source) {
+            history.detach_renderer(previous.id);
+        }
+    }
+    registry
+        .histories
+        .entry(source.to_string())
+        .or_default()
+        .attach_renderer(renderer_id, initial_url);
+}
+
+fn unregister_browser_renderer(label: &str, renderer_id: BrowserRendererId) -> bool {
+    let mut registry = BROWSER_NAVIGATION.lock();
+    let registration = if registry
+        .renderers
+        .get(label)
+        .is_some_and(|registration| registration.id == renderer_id)
+    {
+        registry.renderers.remove(label)
+    } else {
+        None
+    };
+    if let Some(registration) = registration {
+        if let Some(history) = registry.histories.get_mut(&registration.source) {
+            history.detach_renderer(renderer_id);
+        }
+        true
+    } else {
+        false
+    }
+}
+
+fn browser_renderer(label: &str) -> Option<BrowserRendererRegistration> {
+    BROWSER_NAVIGATION.lock().renderers.get(label).cloned()
+}
+
+fn browser_renderer_owns_history(
+    label: &str,
+    source: &str,
+    renderer_id: BrowserRendererId,
+) -> bool {
+    let registry = BROWSER_NAVIGATION.lock();
+    let registration_matches = registry.renderers.get(label).is_some_and(|registration| {
+        registration.id == renderer_id && registration.source == source
+    });
+    registration_matches
+        && registry
+            .histories
+            .get(source)
+            .and_then(|history| history.renderer)
+            .is_some_and(|renderer| renderer.id == renderer_id)
+}
+
+fn ensure_browser_renderer(
+    label: &str,
+    source: &str,
+    current_url: &Url,
+) -> Option<BrowserRendererRegistration> {
+    let mut registry = BROWSER_NAVIGATION.lock();
+    let registration = registry.renderers.get(label)?.clone();
+    if registration.source != source {
+        // A renderer's callbacks permanently capture its creation id/source.
+        // Minting a replacement registration for the same physical WebView
+        // would leave it with no callback capable of settling its traversals.
+        return None;
+    }
+
+    let active_renderer_id = registry
+        .histories
+        .get(source)
+        .and_then(|history| history.renderer.map(|renderer| renderer.id));
+    let active_renderer_is_registered = active_renderer_id.is_some_and(|active_id| {
+        registry
+            .renderers
+            .values()
+            .any(|candidate| candidate.id == active_id)
+    });
+    if active_renderer_id == Some(registration.id) {
+        return Some(registration);
+    }
+    if active_renderer_id.is_none() || !active_renderer_is_registered {
+        registry
+            .histories
+            .entry(source.to_string())
+            .or_default()
+            .attach_renderer(registration.id, current_url);
+        return Some(registration);
+    }
+    None
+}
+
+fn observe_browser_navigation(
+    source: &str,
+    renderer_id: BrowserRendererId,
+    url: &Url,
+    observation: BrowserHistoryObservation,
+) {
+    if !is_safe_browser_navigation(url) {
+        return;
+    }
+    if let Some(history) = BROWSER_NAVIGATION.lock().histories.get_mut(source) {
+        history.observe(renderer_id, url, observation);
+    }
+}
+
+fn rollback_browser_navigation(source: &str, renderer_id: BrowserRendererId) {
+    if let Some(history) = BROWSER_NAVIGATION.lock().histories.get_mut(source) {
+        history.rollback(renderer_id);
+    }
+}
+
+fn current_browser_history_url(source: &str) -> Option<String> {
+    BROWSER_NAVIGATION
+        .lock()
+        .histories
+        .get(source)
+        .and_then(BrowserNavigationHistory::current_url)
+        .map(str::to_string)
+}
+
+fn perform_browser_history_action(
+    webview: &tauri::Webview,
+    label: &str,
+    source: &str,
+    renderer_id: BrowserRendererId,
+    direction: BrowserHistoryDirection,
+    current_url: Option<Url>,
+) -> Result<(), String> {
+    // SPA navigation does not necessarily raise a native page-load callback.
+    // Capture the URL at the instant Back/Forward is pressed so a quick
+    // handover cannot skip the page currently on screen.
+    let current_url = current_url
+        .map(Ok)
+        .unwrap_or_else(|| webview.url().map_err(|error| error.to_string()))?;
+    let action = {
+        let mut registry = BROWSER_NAVIGATION.lock();
+        let owns_label = registry.renderers.get(label).is_some_and(|registration| {
+            registration.id == renderer_id && registration.source == source
+        });
+        if !owns_label {
+            return Ok(());
+        }
+        let Some(history) = registry.histories.get_mut(source) else {
+            return Ok(());
+        };
+        history.begin(renderer_id, direction, &current_url)
+    };
+    let dispatch = match action {
+        BrowserHistoryAction::None | BrowserHistoryAction::Busy => return Ok(()),
+        BrowserHistoryAction::Native => webview.eval(match direction {
+            BrowserHistoryDirection::Back => "history.back()",
+            BrowserHistoryDirection::Forward => "history.forward()",
+        }),
+        BrowserHistoryAction::Shared(target) => {
+            // A normal navigate() appends the Back target after the current
+            // page in WebView2's physical stack. At the shared boundary its own
+            // Back would then bounce forward forever. replace() moves the one
+            // handover slot without growing that synthetic stack.
+            let target = serde_json::to_string(&target).map_err(|error| error.to_string())?;
+            webview.eval(format!("window.location.replace({target})"))
+        }
+    };
+    if let Err(error) = dispatch {
+        rollback_browser_navigation(source, renderer_id);
+        return Err(error.to_string());
+    }
+    Ok(())
+}
 
 #[derive(Clone, Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -118,6 +688,8 @@ fn accelerator_action(url: &Url) -> Option<&str> {
         return None;
     }
     match url.path() {
+        "/back" => Some("back"),
+        "/forward" => Some("forward"),
         "/save" => Some("save"),
         "/close" => Some("close"),
         _ => None,
@@ -169,17 +741,25 @@ fn emit_browser_accelerator(
 /// typed event for the trusted main window.
 const BROWSER_ACCELERATOR_SCRIPT: &str = r#"
     (function() {
+        let lastHostAction = '';
+        let lastHostActionAt = 0;
         const requestHostAction = (action) => {
+            // Some pointing devices report more than one DOM event for a
+            // single thumb-button press. Never traverse twice for one press.
+            const now = performance.now();
+            if (action === lastHostAction && now - lastHostActionAt < 250) return;
+            lastHostAction = action;
+            lastHostActionAt = now;
             window.location.href = 'piep-browser://accelerator/' + action;
         };
         window.addEventListener('keydown', (event) => {
             const key = String(event.key || '').toLowerCase();
             const command = event.ctrlKey || event.metaKey;
-            if (event.altKey && key === 'arrowleft') {
-                event.preventDefault(); event.stopImmediatePropagation(); history.back(); return;
+            if ((event.altKey && key === 'arrowleft') || key === 'browserback') {
+                event.preventDefault(); event.stopImmediatePropagation(); requestHostAction('back'); return;
             }
-            if (event.altKey && key === 'arrowright') {
-                event.preventDefault(); event.stopImmediatePropagation(); history.forward(); return;
+            if ((event.altKey && key === 'arrowright') || key === 'browserforward') {
+                event.preventDefault(); event.stopImmediatePropagation(); requestHostAction('forward'); return;
             }
             if (key === 'f5' || (command && key === 'r')) {
                 event.preventDefault(); event.stopImmediatePropagation(); location.reload(); return;
@@ -190,6 +770,14 @@ const BROWSER_ACCELERATOR_SCRIPT: &str = r#"
             if (command && key === 'w') {
                 event.preventDefault(); event.stopImmediatePropagation(); requestHostAction('close');
             }
+        }, true);
+        // The standalone window has no browser chrome, so mouse thumb buttons
+        // are its visible/physical Back and Forward controls. Route them to
+        // the history shared with the in-app WebView.
+        window.addEventListener('mousedown', (event) => {
+            if (event.button !== 3 && event.button !== 4) return;
+            event.preventDefault(); event.stopImmediatePropagation();
+            requestHostAction(event.button === 3 ? 'back' : 'forward');
         }, true);
     })();
 "#;
@@ -207,6 +795,8 @@ fn native_browser_action(key: u32, control: bool, alt: bool) -> Option<NativeBro
     match (key, control, alt) {
         (0x25, false, true) => Some(NativeBrowserAction::Back), // VK_LEFT
         (0x27, false, true) => Some(NativeBrowserAction::Forward), // VK_RIGHT
+        (0xA6, false, false) => Some(NativeBrowserAction::Back), // VK_BROWSER_BACK
+        (0xA7, false, false) => Some(NativeBrowserAction::Forward), // VK_BROWSER_FORWARD
         (0x74, false, false) => Some(NativeBrowserAction::Reload), // VK_F5
         (0x52, true, false) => Some(NativeBrowserAction::Reload), // Ctrl+R
         (0x53, true, false) => Some(NativeBrowserAction::Save), // Ctrl+S
@@ -220,17 +810,41 @@ fn perform_native_browser_action(
     label: &str,
     browser: &str,
     source: &str,
+    renderer_id: BrowserRendererId,
     action: NativeBrowserAction,
 ) {
+    // Deferred work can outlive the WebView that scheduled it. A reused label
+    // must never let an old Back/Close action touch the replacement renderer.
+    if !browser_renderer_owns_history(label, source, renderer_id) {
+        return;
+    }
     let Some(webview) = app.get_webview(label) else {
         return;
     };
     match action {
         NativeBrowserAction::Back => {
-            let _ = webview.eval("history.back()");
+            if let Err(error) = perform_browser_history_action(
+                &webview,
+                label,
+                source,
+                renderer_id,
+                BrowserHistoryDirection::Back,
+                None,
+            ) {
+                log::warn!("Failed to move browser history back: {error}");
+            }
         }
         NativeBrowserAction::Forward => {
-            let _ = webview.eval("history.forward()");
+            if let Err(error) = perform_browser_history_action(
+                &webview,
+                label,
+                source,
+                renderer_id,
+                BrowserHistoryDirection::Forward,
+                None,
+            ) {
+                log::warn!("Failed to move browser history forward: {error}");
+            }
         }
         NativeBrowserAction::Reload => {
             let _ = webview.reload();
@@ -262,6 +876,38 @@ fn perform_native_browser_action(
     }
 }
 
+/// WebView2 blocks outgoing COM calls until an `AcceleratorKeyPressed`
+/// callback returns. Reading the URL or navigating inside that callback fails
+/// with `RPC_E_CANTCALLOUT_ININPUTSYNCCALL`, which made Back in the large
+/// window appear inert. `run_on_main_thread` is deliberately called from the
+/// blocking pool: Tauri executes it inline when its caller is already the UI
+/// thread, which would still be inside the forbidden WebView2 callback.
+fn queue_native_browser_action(
+    app: &AppHandle,
+    label: String,
+    browser: &'static str,
+    source: String,
+    renderer_id: BrowserRendererId,
+    action: NativeBrowserAction,
+) {
+    let queued_app = app.clone();
+    let _task = tauri::async_runtime::spawn_blocking(move || {
+        let action_app = queued_app.clone();
+        if let Err(error) = queued_app.run_on_main_thread(move || {
+            perform_native_browser_action(
+                &action_app,
+                &label,
+                browser,
+                &source,
+                renderer_id,
+                action,
+            );
+        }) {
+            log::error!("Failed to queue browser action: {error}");
+        }
+    });
+}
+
 #[cfg(target_os = "windows")]
 fn install_native_browser_accelerators(
     webview: &tauri::Webview,
@@ -269,6 +915,7 @@ fn install_native_browser_accelerators(
     label: String,
     browser: &'static str,
     source: String,
+    renderer_id: BrowserRendererId,
 ) -> Result<(), String> {
     use webview2_com::AcceleratorKeyPressedEventHandler;
     use webview2_com::Microsoft::Web::WebView2::Win32::{
@@ -305,11 +952,12 @@ fn install_native_browser_accelerators(
                         return Ok(());
                     };
                     unsafe { args.SetHandled(true)? };
-                    perform_native_browser_action(
+                    queue_native_browser_action(
                         &callback_app,
-                        &callback_label,
+                        callback_label.clone(),
                         browser,
-                        &callback_source,
+                        callback_source.clone(),
+                        renderer_id,
                         action,
                     );
                     Ok(())
@@ -331,6 +979,7 @@ fn install_native_browser_accelerators(
     _label: String,
     _browser: &'static str,
     _source: String,
+    _renderer_id: BrowserRendererId,
 ) -> Result<(), String> {
     Ok(())
 }
@@ -706,17 +1355,27 @@ pub fn open_child_webview(
     // `open_embedded_browser` が再度呼ばれるため、同一URLでは遷移しない。
     if let Some(existing) = app.get_webview("embedded_browser") {
         let current_url = existing.url().map_err(|e| e.to_string())?;
-        if current_url != url_parsed {
-            existing.navigate(url_parsed).map_err(|e| e.to_string())?;
+        if ensure_browser_renderer("embedded_browser", &browser_source, &current_url).is_some() {
+            if current_url != url_parsed {
+                existing.navigate(url_parsed).map_err(|e| e.to_string())?;
+            }
+            existing
+                .set_position(LogicalPosition::new(x, y))
+                .map_err(|e| e.to_string())?;
+            existing
+                .set_size(LogicalSize::new(width, height))
+                .map_err(|e| e.to_string())?;
+            existing.show().map_err(|e| e.to_string())?;
+            return Ok(());
         }
-        existing
-            .set_position(LogicalPosition::new(x, y))
-            .map_err(|e| e.to_string())?;
-        existing
-            .set_size(LogicalSize::new(width, height))
-            .map_err(|e| e.to_string())?;
-        existing.show().map_err(|e| e.to_string())?;
-        return Ok(());
+
+        // Callback closures permanently capture their renderer/source. A
+        // missing or mismatched registration cannot be repaired in place.
+        let stale_renderer = browser_renderer("embedded_browser");
+        existing.close().map_err(|e| e.to_string())?;
+        if let Some(stale_renderer) = stale_renderer {
+            unregister_browser_renderer("embedded_browser", stale_renderer.id);
+        }
     }
 
     let main_window_for_emit = app
@@ -779,7 +1438,11 @@ pub fn open_child_webview(
 
     let main_window_clone = main_window_for_emit.clone();
     let navigation_app = app.clone();
+    let navigation_source = browser_source.clone();
     let popup_app = app.clone();
+    let page_load_source = browser_source.clone();
+    let renderer_id = next_browser_renderer_id();
+    let initial_url = url_parsed.clone();
 
     let mut webview_builder =
         WebviewBuilder::new("embedded_browser", WebviewUrl::External(url_parsed))
@@ -788,19 +1451,24 @@ pub fn open_child_webview(
             .user_agent(DEFAULT_BROWSER_USER_AGENT)
             .on_navigation(move |url| {
                 if let Some(action) = accelerator_action(url) {
-                    if let Some(webview) = navigation_app.get_webview("embedded_browser") {
-                        if let Ok(current_url) = webview.url() {
-                            emit_browser_accelerator(
-                                &navigation_app,
-                                "embedded",
-                                source_for_browser_url(&current_url),
-                                action,
-                                &current_url,
-                            );
-                        }
-                        if action == "close" {
-                            let _ = webview.hide();
-                        }
+                    let native_action = match action {
+                        "back" => Some(NativeBrowserAction::Back),
+                        "forward" => Some(NativeBrowserAction::Forward),
+                        "save" => Some(NativeBrowserAction::Save),
+                        "close" => Some(NativeBrowserAction::Close),
+                        _ => None,
+                    };
+                    if let Some(native_action) = native_action {
+                        // Like the accelerator callback, this is a WebView2
+                        // callback. Let it return before touching the WebView.
+                        queue_native_browser_action(
+                            &navigation_app,
+                            "embedded_browser".to_string(),
+                            "embedded",
+                            navigation_source.clone(),
+                            renderer_id,
+                            native_action,
+                        );
                     }
                     return false;
                 }
@@ -818,8 +1486,19 @@ pub fn open_child_webview(
             .on_page_load(move |_webview, payload| {
                 // ページ読み込み開始時・完了時にURL変更イベントを発火
                 match payload.event() {
-                    tauri::webview::PageLoadEvent::Started
-                    | tauri::webview::PageLoadEvent::Finished => {
+                    tauri::webview::PageLoadEvent::Started => {
+                        let _ = main_window_clone.emit("url-changed", payload.url().to_string());
+                    }
+                    tauri::webview::PageLoadEvent::Finished => {
+                        // Redirect hops are not pages the user visited. Record
+                        // the settled destination, while still reporting both
+                        // phases to the address bar as before.
+                        observe_browser_navigation(
+                            &page_load_source,
+                            renderer_id,
+                            payload.url(),
+                            BrowserHistoryObservation::Finished,
+                        );
                         let _ = main_window_clone.emit("url-changed", payload.url().to_string());
                     }
                 }
@@ -836,12 +1515,19 @@ pub fn open_child_webview(
             LogicalSize::new(width, height),
         )
         .map_err(|e| e.to_string())?;
+    register_browser_renderer(
+        "embedded_browser",
+        &browser_source,
+        renderer_id,
+        &initial_url,
+    );
     install_native_browser_accelerators(
         &webview,
         app,
         "embedded_browser".to_string(),
         "embedded",
         browser_source,
+        renderer_id,
     )?;
 
     Ok(())
@@ -894,6 +1580,9 @@ pub fn open_standalone_webview(
 
     if let Some(existing) = app.get_webview_window(window_label) {
         let current_url = existing.url().map_err(|e| e.to_string())?;
+        if ensure_browser_renderer(window_label, &source, &current_url).is_none() {
+            return Err("Standalone browser is closing or no longer owns its history".to_string());
+        }
         if current_url != url {
             existing.navigate(url).map_err(|e| e.to_string())?;
         }
@@ -912,6 +1601,8 @@ pub fn open_standalone_webview(
     let popup_label = window_label.to_string();
     let page_load_main = app.get_webview_window("main");
     let page_load_source = source.clone();
+    let renderer_id = next_browser_renderer_id();
+    let initial_url = url.clone();
 
     let mut builder = WebviewWindowBuilder::new(&app, window_label, WebviewUrl::External(url))
         .title(window_title)
@@ -924,19 +1615,22 @@ pub fn open_standalone_webview(
         .user_agent(DEFAULT_BROWSER_USER_AGENT)
         .on_navigation(move |url| {
             if let Some(action) = accelerator_action(url) {
-                if let Some(window) = navigation_app.get_webview_window(&navigation_label) {
-                    if let Ok(current_url) = window.url() {
-                        emit_browser_accelerator(
-                            &navigation_app,
-                            "standalone",
-                            &navigation_source,
-                            action,
-                            &current_url,
-                        );
-                    }
-                    if action == "close" {
-                        let _ = window.close();
-                    }
+                let native_action = match action {
+                    "back" => Some(NativeBrowserAction::Back),
+                    "forward" => Some(NativeBrowserAction::Forward),
+                    "save" => Some(NativeBrowserAction::Save),
+                    "close" => Some(NativeBrowserAction::Close),
+                    _ => None,
+                };
+                if let Some(native_action) = native_action {
+                    queue_native_browser_action(
+                        &navigation_app,
+                        navigation_label.clone(),
+                        "standalone",
+                        navigation_source.clone(),
+                        renderer_id,
+                        native_action,
+                    );
                 }
                 return false;
             }
@@ -951,6 +1645,14 @@ pub fn open_standalone_webview(
             tauri::webview::NewWindowResponse::Deny
         })
         .on_page_load(move |_webview, payload| {
+            if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
+                observe_browser_navigation(
+                    &page_load_source,
+                    renderer_id,
+                    payload.url(),
+                    BrowserHistoryObservation::Finished,
+                );
+            }
             if let Some(main) = &page_load_main {
                 let _ = main.emit(
                     "standalone-browser-url-changed",
@@ -966,23 +1668,46 @@ pub fn open_standalone_webview(
         builder = builder.user_agent(&ua);
     }
     let window = builder.build().map_err(|e| e.to_string())?;
+    register_browser_renderer(window_label, &source, renderer_id, &initial_url);
     // The save workspace hands its browser pane over to this window while it is
     // open, so it has to be told when the window goes away or the pane would
     // stay disabled with nothing driving it.
     let closed_app = app.clone();
     let closed_source = source.clone();
+    let closed_label = window_label.to_string();
     window.on_window_event(move |event| {
-        // Both events are handled: the title-bar close button raises
-        // CloseRequested, and Destroyed covers programmatic teardown. The
-        // receiver ignores a repeat, so announcing twice is harmless.
+        // The title-bar path still has a live WebView, so capture its final SPA
+        // URL before detaching. Destroyed is a fallback for window-manager
+        // teardown; unregistering once also prevents duplicate close events.
         if matches!(
             event,
             tauri::WindowEvent::CloseRequested { .. } | tauri::WindowEvent::Destroyed
         ) {
+            let live_url = closed_app
+                .get_webview_window(&closed_label)
+                .and_then(|window| window.url().ok())
+                .filter(is_safe_browser_navigation);
+            if let Some(url) = &live_url {
+                observe_browser_navigation(
+                    &closed_source,
+                    renderer_id,
+                    url,
+                    BrowserHistoryObservation::Snapshot,
+                );
+            }
+            if !unregister_browser_renderer(&closed_label, renderer_id) {
+                return;
+            }
+            let final_url = live_url
+                .map(|url| url.to_string())
+                .or_else(|| current_browser_history_url(&closed_source));
             if let Some(main) = closed_app.get_webview_window("main") {
                 let _ = main.emit(
                     "standalone-browser-closed",
-                    serde_json::json!({ "source": closed_source }),
+                    serde_json::json!({
+                        "source": closed_source,
+                        "url": final_url,
+                    }),
                 );
             }
         }
@@ -993,6 +1718,7 @@ pub fn open_standalone_webview(
         window_label.to_string(),
         "standalone",
         source,
+        renderer_id,
     )?;
     // Centering and sizing use logical units; WebView2/Tauri translate them at
     // the target monitor's DPI. Focus after construction avoids a z-order race
@@ -1017,10 +1743,16 @@ pub fn standalone_webview_url(app: AppHandle, source: String) -> Result<Option<S
     let Some(window) = app.get_webview_window(window_label) else {
         return Ok(None);
     };
-    window
-        .url()
-        .map(|url| Some(url.to_string()))
-        .map_err(|e| e.to_string())
+    let url = window.url().map_err(|e| e.to_string())?;
+    if let Some(renderer) = ensure_browser_renderer(window_label, &source, &url) {
+        observe_browser_navigation(
+            &source,
+            renderer.id,
+            &url,
+            BrowserHistoryObservation::Snapshot,
+        );
+    }
+    Ok(Some(url.to_string()))
 }
 
 /// 子WebViewの位置とサイズだけを更新する。
@@ -1079,6 +1811,16 @@ pub fn navigate_child_webview(app: AppHandle, url: String) -> Result<(), String>
 pub fn get_child_webview_url(app: AppHandle) -> Result<String, String> {
     if let Some(webview) = app.get_webview("embedded_browser") {
         let url = webview.url().map_err(|e| e.to_string())?;
+        if let Some(renderer) = browser_renderer("embedded_browser").and_then(|renderer| {
+            ensure_browser_renderer("embedded_browser", &renderer.source, &url)
+        }) {
+            observe_browser_navigation(
+                &renderer.source,
+                renderer.id,
+                &url,
+                BrowserHistoryObservation::Snapshot,
+            );
+        }
         Ok(url.to_string())
     } else {
         Err("Embedded browser not found".into())
@@ -1096,7 +1838,11 @@ pub fn close_child_webview(app: AppHandle) -> Result<(), String> {
 /// WebViewを完全に破棄する（メモリから解放）
 pub fn destroy_child_webview(app: AppHandle) -> Result<(), String> {
     if let Some(existing) = app.get_webview("embedded_browser") {
+        let renderer = browser_renderer("embedded_browser");
         existing.close().map_err(|e| e.to_string())?;
+        if let Some(renderer) = renderer {
+            unregister_browser_renderer("embedded_browser", renderer.id);
+        }
     }
     Ok(())
 }
@@ -1104,7 +1850,20 @@ pub fn destroy_child_webview(app: AppHandle) -> Result<(), String> {
 /// WebViewで「戻る」操作を実行する
 pub fn go_back_child_webview(app: AppHandle) -> Result<(), String> {
     if let Some(webview) = app.get_webview("embedded_browser") {
-        webview.eval("history.back()").map_err(|e| e.to_string())?;
+        let url = webview.url().map_err(|error| error.to_string())?;
+        let Some(renderer) = browser_renderer("embedded_browser").and_then(|renderer| {
+            ensure_browser_renderer("embedded_browser", &renderer.source, &url)
+        }) else {
+            return Ok(());
+        };
+        perform_browser_history_action(
+            &webview,
+            "embedded_browser",
+            &renderer.source,
+            renderer.id,
+            BrowserHistoryDirection::Back,
+            Some(url),
+        )?;
     }
     Ok(())
 }
@@ -1112,9 +1871,20 @@ pub fn go_back_child_webview(app: AppHandle) -> Result<(), String> {
 /// WebViewで「進む」操作を実行する
 pub fn go_forward_child_webview(app: AppHandle) -> Result<(), String> {
     if let Some(webview) = app.get_webview("embedded_browser") {
-        webview
-            .eval("history.forward()")
-            .map_err(|e| e.to_string())?;
+        let url = webview.url().map_err(|error| error.to_string())?;
+        let Some(renderer) = browser_renderer("embedded_browser").and_then(|renderer| {
+            ensure_browser_renderer("embedded_browser", &renderer.source, &url)
+        }) else {
+            return Ok(());
+        };
+        perform_browser_history_action(
+            &webview,
+            "embedded_browser",
+            &renderer.source,
+            renderer.id,
+            BrowserHistoryDirection::Forward,
+            Some(url),
+        )?;
     }
     Ok(())
 }
@@ -1184,14 +1954,344 @@ mod tests {
 
     #[test]
     fn browser_accelerator_accepts_only_known_internal_actions() {
+        let back = Url::parse("piep-browser://accelerator/back").unwrap();
+        let forward = Url::parse("piep-browser://accelerator/forward").unwrap();
         let save = Url::parse("piep-browser://accelerator/save").unwrap();
         let close = Url::parse("piep-browser://accelerator/close").unwrap();
         let unknown = Url::parse("piep-browser://accelerator/delete-everything").unwrap();
         let remote = Url::parse("https://accelerator/save").unwrap();
+        assert_eq!(accelerator_action(&back), Some("back"));
+        assert_eq!(accelerator_action(&forward), Some("forward"));
         assert_eq!(accelerator_action(&save), Some("save"));
         assert_eq!(accelerator_action(&close), Some("close"));
         assert_eq!(accelerator_action(&unknown), None);
         assert_eq!(accelerator_action(&remote), None);
+    }
+
+    fn history_url(id: u8) -> Url {
+        Url::parse(&format!("https://www.pixiv.net/novel/show.php?id={id}")).unwrap()
+    }
+
+    fn three_page_history(renderer_id: BrowserRendererId) -> BrowserNavigationHistory {
+        let mut history = BrowserNavigationHistory::default();
+        history.attach_renderer(renderer_id, &history_url(1));
+        history.observe(
+            renderer_id,
+            &history_url(2),
+            BrowserHistoryObservation::Finished,
+        );
+        history.observe(
+            renderer_id,
+            &history_url(3),
+            BrowserHistoryObservation::Finished,
+        );
+        history
+    }
+
+    #[test]
+    fn save_browser_history_uses_native_range_then_shared_handover_range() {
+        let small_renderer = 1;
+        let large_renderer = 2;
+        let mut history = three_page_history(small_renderer);
+
+        // Pages visited by one renderer retain the fast native Back path.
+        assert_eq!(
+            history.begin(
+                small_renderer,
+                BrowserHistoryDirection::Back,
+                &history_url(3)
+            ),
+            BrowserHistoryAction::Native
+        );
+        history.observe(
+            small_renderer,
+            &history_url(2),
+            BrowserHistoryObservation::Finished,
+        );
+
+        // Return to the last page, then hand it to a brand-new renderer. The
+        // duplicate handover URL is not appended, but older entries are shared.
+        assert_eq!(
+            history.begin(
+                small_renderer,
+                BrowserHistoryDirection::Forward,
+                &history_url(2)
+            ),
+            BrowserHistoryAction::Native
+        );
+        history.observe(
+            small_renderer,
+            &history_url(3),
+            BrowserHistoryObservation::Finished,
+        );
+        history.attach_renderer(large_renderer, &history_url(3));
+        assert_eq!(history.entries.len(), 3);
+        assert_eq!(
+            history.begin(
+                large_renderer,
+                BrowserHistoryDirection::Back,
+                &history_url(3)
+            ),
+            BrowserHistoryAction::Shared(history_url(2).to_string())
+        );
+    }
+
+    #[test]
+    fn save_browser_history_has_finite_boundaries_after_handover() {
+        let mut history = three_page_history(1);
+        history.attach_renderer(2, &history_url(3));
+
+        assert!(matches!(
+            history.begin(2, BrowserHistoryDirection::Back, &history_url(3)),
+            BrowserHistoryAction::Shared(_)
+        ));
+        history.observe(2, &history_url(2), BrowserHistoryObservation::Finished);
+        assert!(matches!(
+            history.begin(2, BrowserHistoryDirection::Back, &history_url(2)),
+            BrowserHistoryAction::Shared(_)
+        ));
+        history.observe(2, &history_url(1), BrowserHistoryObservation::Finished);
+
+        // This must be a hard no-op. Falling through to native history here
+        // was the source of the endless first <-> second page loop.
+        let settled_entries = history.entries.clone();
+        for _ in 0..5 {
+            assert_eq!(
+                history.begin(2, BrowserHistoryDirection::Back, &history_url(1)),
+                BrowserHistoryAction::None
+            );
+            assert_eq!(history.current_url(), Some(history_url(1).as_str()));
+            assert_eq!(history.entries, settled_entries);
+            assert!(history.pending.is_none());
+        }
+
+        assert_eq!(
+            history.begin(2, BrowserHistoryDirection::Forward, &history_url(1)),
+            BrowserHistoryAction::Shared(history_url(2).to_string())
+        );
+    }
+
+    #[test]
+    fn save_browser_history_settles_redirect_without_appending_it() {
+        let mut history = three_page_history(1);
+        history.attach_renderer(2, &history_url(3));
+        assert!(matches!(
+            history.begin(2, BrowserHistoryDirection::Back, &history_url(3)),
+            BrowserHistoryAction::Shared(_)
+        ));
+
+        // A poll before WebView2 moves still sees the page being left. It must
+        // neither settle the traversal nor create a fresh entry.
+        history.observe(2, &history_url(3), BrowserHistoryObservation::Snapshot);
+        assert_eq!(
+            history.begin(2, BrowserHistoryDirection::Back, &history_url(3)),
+            BrowserHistoryAction::Busy
+        );
+
+        let canonical = Url::parse("https://www.pixiv.net/novel/show.php?id=2&lang=ja").unwrap();
+        history.observe(2, &canonical, BrowserHistoryObservation::Finished);
+        assert_eq!(history.entries.len(), 3);
+        assert_eq!(history.entries[1], canonical.as_str());
+        assert_eq!(history.current_url(), Some(canonical.as_str()));
+        assert_eq!(
+            history.begin(2, BrowserHistoryDirection::Back, &canonical),
+            BrowserHistoryAction::Shared(history_url(1).to_string())
+        );
+    }
+
+    #[test]
+    fn save_browser_history_serializes_rapid_input_and_rolls_back_exactly() {
+        let mut history = three_page_history(1);
+        history.attach_renderer(2, &history_url(3));
+        let before = history.entries.clone();
+
+        assert!(matches!(
+            history.begin(2, BrowserHistoryDirection::Back, &history_url(3)),
+            BrowserHistoryAction::Shared(_)
+        ));
+        assert_eq!(history.index, Some(1));
+        assert_eq!(
+            history.begin(2, BrowserHistoryDirection::Back, &history_url(3)),
+            BrowserHistoryAction::Busy
+        );
+        history.rollback(2);
+
+        assert_eq!(history.index, Some(2));
+        assert_eq!(history.current_url(), Some(history_url(3).as_str()));
+        assert_eq!(history.entries, before);
+        assert!(history.pending.is_none());
+    }
+
+    #[test]
+    fn save_browser_history_branches_like_the_active_native_renderer() {
+        let mut history = three_page_history(1);
+        assert_eq!(
+            history.begin(1, BrowserHistoryDirection::Back, &history_url(3)),
+            BrowserHistoryAction::Native
+        );
+        history.observe(1, &history_url(2), BrowserHistoryObservation::Finished);
+
+        let branch = history_url(4);
+        history.observe(1, &branch, BrowserHistoryObservation::Finished);
+        assert_eq!(
+            history.entries,
+            vec![
+                history_url(1).to_string(),
+                history_url(2).to_string(),
+                branch.to_string()
+            ]
+        );
+        assert_eq!(
+            history.begin(1, BrowserHistoryDirection::Forward, &branch),
+            BrowserHistoryAction::None
+        );
+        assert_eq!(
+            history.begin(1, BrowserHistoryDirection::Back, &branch),
+            BrowserHistoryAction::Native
+        );
+    }
+
+    #[test]
+    fn save_browser_history_does_not_trust_watchdog_only_entries() {
+        let mut history = three_page_history(1);
+        let spa_url = history_url(4);
+        history.observe(1, &spa_url, BrowserHistoryObservation::Snapshot);
+
+        // A URL discovered by polling could have come from replaceState. It is
+        // transferable, but native Back is not assumed to exist for it.
+        assert_eq!(
+            history.begin(1, BrowserHistoryDirection::Back, &spa_url),
+            BrowserHistoryAction::Shared(history_url(3).to_string())
+        );
+    }
+
+    #[test]
+    fn save_browser_history_rejects_actions_from_a_stale_renderer() {
+        let mut history = three_page_history(1);
+        history.attach_renderer(2, &history_url(3));
+
+        assert_eq!(
+            history.begin(1, BrowserHistoryDirection::Back, &history_url(3)),
+            BrowserHistoryAction::None
+        );
+        assert_eq!(history.index, Some(2));
+        assert!(history.pending.is_none());
+    }
+
+    #[test]
+    fn save_browser_history_retries_a_stuck_native_edge_as_shared() {
+        let mut history = three_page_history(1);
+        let start = Instant::now();
+
+        assert_eq!(
+            history.begin_at(1, BrowserHistoryDirection::Back, &history_url(3), start),
+            BrowserHistoryAction::Native
+        );
+        assert_eq!(
+            history.begin_at(
+                1,
+                BrowserHistoryDirection::Back,
+                &history_url(3),
+                start + BROWSER_HISTORY_PENDING_TIMEOUT,
+            ),
+            BrowserHistoryAction::Shared(history_url(2).to_string())
+        );
+        assert!(history
+            .pending
+            .as_ref()
+            .is_some_and(|pending| { pending.kind == BrowserHistoryDispatchKind::Shared }));
+    }
+
+    #[test]
+    fn save_browser_history_handover_commits_or_rolls_back_pending_from_the_url() {
+        let mut completed = three_page_history(1);
+        assert_eq!(
+            completed.begin(1, BrowserHistoryDirection::Back, &history_url(3)),
+            BrowserHistoryAction::Native
+        );
+        completed.attach_renderer(2, &history_url(2));
+        assert_eq!(completed.entries.len(), 3);
+        assert_eq!(completed.current_url(), Some(history_url(2).as_str()));
+        assert!(completed.pending.is_none());
+        assert_eq!(
+            completed.begin(2, BrowserHistoryDirection::Back, &history_url(2)),
+            BrowserHistoryAction::Shared(history_url(1).to_string())
+        );
+
+        let mut unchanged = three_page_history(3);
+        assert_eq!(
+            unchanged.begin(3, BrowserHistoryDirection::Back, &history_url(3)),
+            BrowserHistoryAction::Native
+        );
+        unchanged.attach_renderer(4, &history_url(3));
+        assert_eq!(unchanged.entries.len(), 3);
+        assert_eq!(unchanged.current_url(), Some(history_url(3).as_str()));
+        assert!(unchanged.pending.is_none());
+    }
+
+    #[test]
+    fn save_browser_history_same_url_finish_cannot_wedge_native_back() {
+        let mut history = BrowserNavigationHistory::default();
+        history.attach_renderer(1, &history_url(1));
+        history.observe(1, &history_url(2), BrowserHistoryObservation::Finished);
+        // A reload or a second physical entry can finish at the same address.
+        history.observe(1, &history_url(2), BrowserHistoryObservation::Finished);
+
+        assert_eq!(
+            history.begin(1, BrowserHistoryDirection::Back, &history_url(2)),
+            BrowserHistoryAction::Shared(history_url(1).to_string())
+        );
+    }
+
+    #[test]
+    fn browser_registry_keeps_one_owner_and_recovers_a_registered_renderer() {
+        let source = "__history_registry_recovery";
+        let old_label = "__history_registry_old";
+        let new_label = "__history_registry_new";
+        let old_id = next_browser_renderer_id();
+        let new_id = next_browser_renderer_id();
+
+        register_browser_renderer(old_label, source, old_id, &history_url(1));
+        assert!(browser_renderer_owns_history(old_label, source, old_id));
+        register_browser_renderer(new_label, source, new_id, &history_url(1));
+        assert!(!browser_renderer_owns_history(old_label, source, old_id));
+        assert!(browser_renderer_owns_history(new_label, source, new_id));
+
+        assert!(unregister_browser_renderer(new_label, new_id));
+        let recovered = ensure_browser_renderer(old_label, source, &history_url(1)).unwrap();
+        assert_eq!(recovered.id, old_id);
+        assert!(browser_renderer_owns_history(old_label, source, old_id));
+        assert!(unregister_browser_renderer(old_label, old_id));
+    }
+
+    #[test]
+    fn browser_registry_concurrent_registration_preserves_its_owner_invariant() {
+        let source = "__history_registry_concurrent";
+        let first_label = "__history_registry_concurrent_first";
+        let second_label = "__history_registry_concurrent_second";
+        let first_id = next_browser_renderer_id();
+        let second_id = next_browser_renderer_id();
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+
+        let first_barrier = barrier.clone();
+        let first = std::thread::spawn(move || {
+            first_barrier.wait();
+            register_browser_renderer(first_label, source, first_id, &history_url(1));
+        });
+        let second_barrier = barrier.clone();
+        let second = std::thread::spawn(move || {
+            second_barrier.wait();
+            register_browser_renderer(second_label, source, second_id, &history_url(1));
+        });
+        barrier.wait();
+        first.join().unwrap();
+        second.join().unwrap();
+
+        let first_owns = browser_renderer_owns_history(first_label, source, first_id);
+        let second_owns = browser_renderer_owns_history(second_label, source, second_id);
+        assert_ne!(first_owns, second_owns);
+        assert!(unregister_browser_renderer(first_label, first_id));
+        assert!(unregister_browser_renderer(second_label, second_id));
     }
 
     /// 一押しで二経路が鳴っても、渡すのは一度きり。押し直しは通す。
@@ -1233,6 +2333,14 @@ mod tests {
         assert_eq!(
             native_browser_action(0x53, true, false),
             Some(NativeBrowserAction::Save)
+        );
+        assert_eq!(
+            native_browser_action(0xA6, false, false),
+            Some(NativeBrowserAction::Back)
+        );
+        assert_eq!(
+            native_browser_action(0xA7, false, false),
+            Some(NativeBrowserAction::Forward)
         );
         assert_eq!(
             native_browser_action(0x57, true, false),

@@ -90,6 +90,8 @@ export interface StandaloneBrowserUrlEvent {
 
 export interface StandaloneBrowserClosedEvent {
   source: "pixiv" | "fanbox";
+  /** Last URL read directly from the closing renderer. */
+  url?: string | null;
 }
 
 export interface BrowserAcceleratorEvent {
