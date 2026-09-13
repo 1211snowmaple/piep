@@ -52,6 +52,8 @@ export interface FanboxPost {
   coverImageUrl?: string;
   tags?: string[];
   creatorId?: string;
+  isRestricted?: boolean;
+  feeRequired?: number;
 }
 
 export interface SidebarItem {
@@ -60,7 +62,7 @@ export interface SidebarItem {
   subtitle?: string;
   selected: boolean;
   originalData: PixivNovel | FanboxPost;
-  status?: "pending" | "downloading" | "success" | "skipped" | "failed";
+  status?: "pending" | "downloading" | "success" | "skipped" | "failed" | "held";
   error?: string;
 }
 
@@ -161,4 +163,3 @@ export function downloadTargetKey(url: string): string {
   const { kind, id } = describeDownloadTarget(url);
   return kind === "unsupported" ? "" : `${kind}:${id}`;
 }
-

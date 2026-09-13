@@ -461,6 +461,40 @@ fn series_covered_by_watched_author(
         .any(|author| watched_authors.contains(&(target.source.clone(), author.clone()))))
 }
 
+fn candidate_matches_scope(
+    candidate: &crate::database::UpdateCandidateRow,
+    works: &HashSet<(String, String)>,
+    targets: &HashSet<(String, String, String)>,
+) -> bool {
+    if candidate.kind == "revision"
+        && works.contains(&(candidate.source.clone(), candidate.source_id.clone()))
+    {
+        return true;
+    }
+    let Ok(payload) = serde_json::from_str::<Value>(&candidate.payload_json) else {
+        return false;
+    };
+    let origin = string_at(&payload, &[&["originSourceKey"]]);
+    if let (Some(kind), Some(key)) = (candidate.target_type.as_deref(), origin) {
+        if targets.contains(&(candidate.source.clone(), kind.to_string(), key)) {
+            return true;
+        }
+    }
+    // Old candidates may lack originSourceKey. Match real provider IDs, never names.
+    let author = string_at(
+        &payload,
+        &[
+            &["originalData", "creatorId"],
+            &["originalData", "creator_id"],
+            &["originalData", "user", "id"],
+        ],
+    );
+    let series = string_at(&payload, &[&["originalData", "series", "id"]]);
+    author.is_some_and(|key| targets.contains(&(candidate.source.clone(), "author".into(), key)))
+        || series
+            .is_some_and(|key| targets.contains(&(candidate.source.clone(), "series".into(), key)))
+}
+
 fn build_initial_items(
     state: &Arc<AppState>,
     request: &StartUpdateJobRequest,
@@ -479,6 +513,24 @@ fn build_initial_items(
         .target_ids
         .as_ref()
         .map(|ids| ids.iter().copied().collect::<HashSet<_>>());
+    let eligible_targets: HashSet<(String, String, String)> = state
+        .db
+        .list_update_targets(None, true)?
+        .into_iter()
+        .filter(|t| {
+            ((include_author && t.target_type == "author")
+                || (include_series && t.target_type == "series"))
+                && target_filter.as_ref().is_none_or(|ids| ids.contains(&t.id))
+        })
+        .map(|t| (t.source, t.target_type, t.source_key))
+        .chain(request.adhoc_targets.iter().flatten().map(|t| {
+            (
+                t.source.clone(),
+                t.target_type.clone(),
+                t.source_key.clone(),
+            )
+        }))
+        .collect();
 
     if include_work {
         let works = if let Some(filter) = &work_filter {
@@ -492,6 +544,14 @@ fn build_initial_items(
         };
         for dl in works {
             if dl.source != "pixiv" && dl.source != "fanbox" {
+                continue;
+            }
+            if state
+                .db
+                .update_candidate_status(&dl.source, &dl.source_id)?
+                .as_deref()
+                == Some("held")
+            {
                 continue;
             }
             included_work_keys.insert((dl.source.clone(), dl.source_id.clone()));
@@ -565,12 +625,7 @@ fn build_initial_items(
         {
             // 作品だけを確認するときは、その確認対象の改稿だけを戻す。
             // 作者・シリーズ由来の新作候補や、別の作品の改稿まで混ぜない。
-            if !include_author
-                && !include_series
-                && (candidate.kind != CandidateKind::Revision.key()
-                    || !included_work_keys
-                        .contains(&(candidate.source.clone(), candidate.source_id.clone())))
-            {
+            if !candidate_matches_scope(&candidate, &included_work_keys, &eligible_targets) {
                 continue;
             }
             // すでに手元にあるものは、改稿として見つけた場合だけ残す。
@@ -606,7 +661,12 @@ fn build_initial_items(
         // 両方を走査すると同じものを二度取りに行くので、取得先への負荷になる。
         let watched_authors: HashSet<(String, String)> = targets
             .iter()
-            .filter(|target| target.target_type == "author")
+            .filter(|target| {
+                target.target_type == "author"
+                    && target_filter
+                        .as_ref()
+                        .is_none_or(|ids| ids.contains(&target.id))
+            })
             .map(|target| (target.source.clone(), target.source_key.clone()))
             .collect();
 
@@ -715,7 +775,12 @@ fn spawn_update_job(app: tauri::AppHandle, job_id: String, credentials: UpdateCr
         let worker_app = app.clone();
         let worker_job_id = job_id.clone();
         let worker = tauri::async_runtime::spawn(async move {
-            run_update_job(worker_app, worker_job_id, credentials).await
+            crate::downloader::session::scope(run_update_job(
+                worker_app,
+                worker_job_id,
+                credentials,
+            ))
+            .await
         });
         let run_result = match worker.await {
             Ok(result) => result,
@@ -839,6 +904,16 @@ pub struct SaveJobWork {
     pub source: String,
     pub source_id: String,
     pub title: String,
+    #[serde(default)]
+    pub fanbox_access: Option<FanboxAccess>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FanboxAccess {
+    pub is_restricted: bool,
+    pub fee_required: Option<u64>,
+    pub creator_id: Option<String>,
 }
 
 /// 選んだ作品のまとめ保存を、こちら側の仕事として預かる。
@@ -920,7 +995,8 @@ fn build_save_items(works: &[SaveJobWork]) -> Vec<UpdateJobItemInput> {
             target_type: Some("work".to_string()),
             title,
             // `kind` は保存済みの扱いを分ける。`save` は監視中のものだけ取り直す。
-            payload_json: serde_json::json!({ "kind": "save" }).to_string(),
+            payload_json: serde_json::json!({ "kind": "save", "originalData": work.fanbox_access })
+                .to_string(),
             status: "queued".to_string(),
         });
     }
@@ -1139,11 +1215,252 @@ pub async fn dismiss_update_candidate(
 ) -> Result<(), String> {
     let state = app.state::<Arc<AppState>>();
     let _library_write_guard = state.library_gate.clone().write_owned().await;
+    state.db.remember_job_candidate(&source, &source_id)?;
     state.db.set_update_candidate_status(
         &source,
         &source_id,
         if dismissed { "dismissed" } else { "pending" },
     )
+}
+
+/// A separate reversible shelf. These rows never enter ordinary retry queues.
+#[tauri::command]
+pub async fn list_deferred_update_candidates(
+    app: tauri::AppHandle,
+) -> Result<Vec<crate::database::UpdateCandidateRow>, String> {
+    app.state::<Arc<AppState>>()
+        .db
+        .list_update_candidates_by_status("deferred", 2000)
+}
+
+/// Rechecks an explicit selection after permissions change, without saving or watching.
+#[tauri::command]
+pub async fn recheck_deferred_update_candidates(
+    app: tauri::AppHandle,
+    keys: Vec<String>,
+    credentials: Option<UpdateCredentials>,
+    refresh_post_access: Option<bool>,
+) -> Result<UpdateJobSnapshot, String> {
+    let state = app.state::<Arc<AppState>>().inner().clone();
+    if keys.is_empty() || keys.len() > 2000 {
+        return Err("再確認する作品を1〜2000件選んでください".into());
+    }
+    if refresh_post_access == Some(true) && keys.len() > 20 {
+        return Err(
+            "投稿側の公開条件の再確認は、取得元への負担を避けるため20件ずつ選んでください".into(),
+        );
+    }
+    let keys: HashSet<_> = keys.into_iter().collect();
+    let mut items = Vec::new();
+    for candidate in state
+        .db
+        .list_update_candidates_by_status("deferred", 2000)?
+    {
+        if !keys.contains(&format!("{}:{}", candidate.source, candidate.source_id)) {
+            continue;
+        }
+        let mut payload: Value =
+            serde_json::from_str(&candidate.payload_json).map_err(|e| e.to_string())?;
+        payload["kind"] = serde_json::json!("permission_check");
+        payload["refreshPostAccess"] = serde_json::json!(refresh_post_access.unwrap_or(false));
+        items.push(item_from_payload(
+            "candidate",
+            "queued",
+            Some(candidate.source),
+            Some(candidate.source_id),
+            candidate.target_type,
+            candidate.title,
+            payload,
+        )?);
+    }
+    if items.is_empty() {
+        return Err("対象はすでに保留一覧から移動しています".into());
+    }
+    static LAST_CHECK: OnceLock<Mutex<Option<std::time::Instant>>> = OnceLock::new();
+    {
+        let mut last = LAST_CHECK
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .map_err(|e| e.to_string())?;
+        if last.is_some_and(|time| time.elapsed() < std::time::Duration::from_secs(60)) {
+            return Err(
+                "取得元への連続問い合わせを避けるため、再確認は1分以上あけてください".into(),
+            );
+        }
+        *last = Some(std::time::Instant::now());
+    }
+    let request = StartUpdateJobRequest {
+        scope: "save".into(),
+        mode: "check_only".into(),
+        work_ids: None,
+        target_ids: None,
+        watch_saved: Some(false),
+        adhoc_targets: None,
+        credentials: credentials.clone(),
+    };
+    let job_id = make_job_id();
+    let snapshot = state.db.create_update_job(&job_id, &request, &items)?;
+    state.db.append_update_job_log(
+        &job_id,
+        "info",
+        "保留した作品の閲覧条件を再確認します。保存や監視登録は行いません",
+    )?;
+    spawn_update_job(
+        app.clone(),
+        job_id.clone(),
+        credentials.unwrap_or_else(snapshot_credentials_missing),
+    );
+    emit_snapshot(&app, &state, &job_id).await;
+    Ok(snapshot)
+}
+
+async fn hold_candidate(
+    state: &Arc<AppState>,
+    item: &UpdateJobItem,
+    post: Option<&Value>,
+    reason: &str,
+) -> Result<(), String> {
+    let _library_write_guard = state.library_gate.write().await;
+    let source = item.source.as_deref().ok_or("保留する取得元がありません")?;
+    let source_id = item
+        .source_id
+        .as_deref()
+        .ok_or("保留する作品IDがありません")?;
+    let existing = state.db.get_download_by_source(source, source_id)?;
+    let mut payload: Value =
+        serde_json::from_str(&item.payload_json).unwrap_or_else(|_| serde_json::json!({}));
+    let kind = if existing.is_some() {
+        "revision"
+    } else {
+        "new"
+    };
+    payload["kind"] = serde_json::json!(kind);
+    payload["source"] = serde_json::json!(source);
+    payload["sourceId"] = serde_json::json!(source_id);
+    payload["holdKind"] = serde_json::json!("restricted");
+    payload["holdReason"] = serde_json::json!(reason);
+    if let Some(post) = post {
+        // Store only listing/permission metadata, never a body or credentials.
+        payload["originalData"] = serde_json::json!({
+            "id": source_id, "title": item.title,
+            "creatorId": post.get("creatorId").or_else(|| post.get("creator_id")),
+            "feeRequired": post.get("feeRequired"), "isRestricted": true,
+            "user": { "name": string_at(post, &[&["user", "name"]]) }
+        });
+    }
+    if let Some(saved) = existing {
+        payload["originalData"]["creatorId"] = serde_json::json!(saved.author_id);
+    }
+    state.db.upsert_update_candidate(&UpdateCandidateInput {
+        source: source.into(),
+        source_id: source_id.into(),
+        kind: kind.into(),
+        title: item.title.clone(),
+        payload_json: payload.to_string(),
+        target_type: item.target_type.clone(),
+    })?;
+    if state
+        .db
+        .update_candidate_status(source, source_id)?
+        .as_deref()
+        != Some("dismissed")
+    {
+        state
+            .db
+            .set_update_candidate_status(source, source_id, "held")?;
+    }
+    state
+        .db
+        .set_update_job_item_payload(item.id, &payload.to_string())
+}
+
+async fn recheck_deferred_item(
+    state: &Arc<AppState>,
+    item: &UpdateJobItem,
+    credentials: &UpdateCredentials,
+    mut payload: Value,
+) -> Result<ItemOutcome, String> {
+    let source = item.source.as_deref().ok_or("取得元がありません")?;
+    let id = item.source_id.as_deref().ok_or("作品IDがありません")?;
+    if source == "fanbox" && payload.get("holdKind").and_then(Value::as_str) == Some("restricted") {
+        let Some(cookie) = fanbox_cookie(credentials) else {
+            return Ok(ItemOutcome::AuthRequired("FANBOX連携が必要です".into()));
+        };
+        let ua = fanbox_user_agent(credentials);
+        let creator = string_at(
+            &payload,
+            &[
+                &["originalData", "creatorId"],
+                &["originalData", "creator_id"],
+            ],
+        );
+        let fee = payload
+            .pointer("/originalData/feeRequired")
+            .and_then(Value::as_u64);
+        if let (Some(creator), Some(fee)) = (creator, fee) {
+            if fee > 0 && payload.get("refreshPostAccess").and_then(Value::as_bool) != Some(true) {
+                let fees =
+                    crate::downloader::session::supporting_fees(cookie.clone(), ua.clone()).await?;
+                if fees.get(&creator).copied().unwrap_or(0) < fee {
+                    return Ok(ItemOutcome::Held(format!("必要な支援額は月額{fee}円以上です。条件が変わっていないため投稿本文は再取得せず、保留を続けます")));
+                }
+            }
+        }
+        let post = super::downloader::fetch_fanbox_post(id.into(), cookie, ua).await?;
+        if post.get("isRestricted").and_then(Value::as_bool) == Some(true)
+            || !super::downloader::fetched_has_material_content(&post, "fanbox")
+        {
+            let reason = super::downloader::fanbox_missing_material_error(&post);
+            if post.get("isRestricted").and_then(Value::as_bool) == Some(true) {
+                hold_candidate(state, item, Some(&post), &reason).await?;
+                return Ok(ItemOutcome::Held(reason));
+            }
+            return Err(reason);
+        }
+    }
+    let _library_write_guard = state.library_gate.write().await;
+    let kind = if state.db.get_download_by_source(source, id)?.is_some() {
+        "revision"
+    } else {
+        "new"
+    };
+    payload["kind"] = serde_json::json!(kind);
+    if let Some(object) = payload.as_object_mut() {
+        object.remove("holdKind");
+        object.remove("holdReason");
+        object.remove("refreshPostAccess");
+    }
+    if let Some(original) = payload
+        .get_mut("originalData")
+        .and_then(Value::as_object_mut)
+    {
+        original.insert("isRestricted".into(), serde_json::json!(false));
+        if kind == "new" {
+            original.remove("localVersion");
+            original.remove("localSavedAt");
+        }
+    }
+    if kind == "new" {
+        payload["subtitle"] = serde_json::json!("未保存");
+    }
+    state.db.upsert_update_candidate(&UpdateCandidateInput {
+        source: source.into(),
+        source_id: id.into(),
+        kind: kind.into(),
+        title: item.title.clone(),
+        payload_json: payload.to_string(),
+        target_type: item.target_type.clone(),
+    })?;
+    state
+        .db
+        .set_update_candidate_status(source, id, "pending")?;
+    state
+        .db
+        .set_update_job_item_payload(item.id, &payload.to_string())?;
+    Ok(ItemOutcome::Available(format!(
+        "{}: 候補に戻しました。保存するか選んでください",
+        item.title
+    )))
 }
 
 /// 「今は要らない」と断った候補の数を返す。
@@ -1385,6 +1702,24 @@ async fn run_update_job(
                 .await;
         let restart_pending = has_pending_restart(&job_id);
         match outcome {
+            Ok(ItemOutcome::Held(message)) => {
+                state
+                    .db
+                    .complete_update_job_item(item.id, "held", Some(&message), None)?;
+                state.db.append_update_job_log(
+                    &job_id,
+                    "warn",
+                    &format!("{}: 保留 — {message}", item.title),
+                )?;
+            }
+            Ok(ItemOutcome::Available(message)) => {
+                state
+                    .db
+                    .complete_update_job_item(item.id, "candidate", None, None)?;
+                state
+                    .db
+                    .append_update_job_log(&job_id, "success", &message)?;
+            }
             Ok(ItemOutcome::Done(message)) => {
                 state
                     .db
@@ -1483,6 +1818,21 @@ async fn run_update_job(
                 // 取得制限は「相手が今は無理と言っている」だけなので、間隔を
                 // 広げて同じ項目をやり直す。何度も続くようなら諦めて次へ行く。
                 if kind == FailureKind::RateLimited {
+                    if error.to_ascii_lowercase().contains("cloudflare") {
+                        let message = "FANBOXのアクセス確認が必要なため一時停止しました。連続再試行はしません。時間をおいて公式サイトと連携状態を確認してください";
+                        state.db.complete_update_job_item(
+                            item.id,
+                            "queued",
+                            Some(message),
+                            None,
+                        )?;
+                        state
+                            .db
+                            .set_update_job_status(&job_id, "paused", Some(message))?;
+                        state.db.append_update_job_log(&job_id, "warn", message)?;
+                        emit_snapshot(&app, &state, &job_id).await;
+                        break;
+                    }
                     let attempts = rate_limit_retries.entry(item.id).or_insert(0);
                     *attempts += 1;
                     if *attempts <= MAX_RATE_LIMIT_RETRIES {
@@ -1527,12 +1877,19 @@ async fn run_update_job(
                 // 失敗の理由を項目とログの両方に残す。あとで「何を再試行すべきか」
                 // を選べるようにするための材料になる。
                 let reason = format!("[{}] {}", kind.label(), error);
-                state
-                    .db
-                    .complete_update_job_item(item.id, "failed", Some(&reason), None)?;
+                let held = kind == FailureKind::Restricted && item.item_type != "target";
+                if held {
+                    hold_candidate(&state, &item, None, &reason).await?;
+                }
+                state.db.complete_update_job_item(
+                    item.id,
+                    if held { "held" } else { "failed" },
+                    Some(&reason),
+                    None,
+                )?;
                 state.db.append_update_job_log(
                     &job_id,
-                    "error",
+                    if held { "warn" } else { "error" },
                     &format!("{}: {}", item.title, reason),
                 )?;
                 if item.item_type == "target" {
@@ -1701,6 +2058,8 @@ enum ItemOutcome {
     Saved(i64, String),
     Skipped(String),
     AuthRequired(String),
+    Held(String),
+    Available(String),
 }
 
 /// 失敗の種類。同じ「エラー1件」でも、次にすべきことが違う。
@@ -1848,6 +2207,22 @@ async fn process_update_job_item(
     credentials: &UpdateCredentials,
     web_index: &mut WebUpdateIndex,
 ) -> Result<ItemOutcome, String> {
+    let payload: Value = serde_json::from_str(&item.payload_json).map_err(|e| e.to_string())?;
+    if payload.get("kind").and_then(Value::as_str) == Some("permission_check") {
+        return recheck_deferred_item(state, item, credentials, payload).await;
+    }
+    if item.item_type != "target" {
+        if let (Some(source), Some(id)) = (&item.source, &item.source_id) {
+            if matches!(
+                state.db.update_candidate_status(source, id)?.as_deref(),
+                Some("held" | "dismissed")
+            ) {
+                return Ok(ItemOutcome::Held(
+                    "候補から外しています。保留・非表示の一覧から再確認してください".into(),
+                ));
+            }
+        }
+    }
     match item.item_type.as_str() {
         "work" => process_work_item(app, state, job_id, item, credentials, web_index).await,
         "target" => process_target_item(state, job_id, item, credentials, web_index).await,
@@ -2041,6 +2416,16 @@ async fn process_work_item(
         )
         .await?;
         let value = serde_json::to_value(&post).map_err(|e| e.to_string())?;
+        if value.get("isRestricted").and_then(Value::as_bool) == Some(true)
+            || !super::downloader::fetched_has_material_content(&value, "fanbox")
+        {
+            let reason = super::downloader::fanbox_missing_material_error(&value);
+            if value.get("isRestricted").and_then(Value::as_bool) == Some(true) {
+                hold_candidate(state, item, Some(&value), &reason).await?;
+                return Ok(ItemOutcome::Held(reason));
+            }
+            return Err(reason);
+        }
         // A previously restricted/imported post can gain a readable body without
         // updatedDatetime changing. We already fetched the full post, so compare its
         // content hash instead of trusting the timestamp and skipping the repair.
@@ -2148,7 +2533,8 @@ async fn record_work_revision_candidate(
     let item = serde_json::json!({
         "id": download.source_id,
         "title": title,
-        "user": { "name": download.author_name },
+        "user": { "name": download.author_name, "id": download.author_id },
+        "creatorId": if download.source == "fanbox" { Some(&download.author_id) } else { None },
         "localVersion": download.current_version,
         "localSavedAt": download.downloaded_at,
     });
@@ -2194,7 +2580,7 @@ fn record_candidate(
     kind: CandidateKind,
     auto_save: bool,
 ) -> Result<bool, String> {
-    let Some(payload) = candidate_payload(
+    let Some(mut payload) = candidate_payload(
         &target.target_type,
         &target.display_name,
         &target.source,
@@ -2216,6 +2602,16 @@ fn record_candidate(
     if source_id.is_empty() {
         return Ok(false);
     }
+    if matches!(
+        state
+            .db
+            .update_candidate_status(&source, &source_id)?
+            .as_deref(),
+        Some("held" | "dismissed")
+    ) {
+        return Ok(false);
+    }
+    payload["originSourceKey"] = serde_json::json!(target.source_key);
     let title = payload
         .get("title")
         .and_then(|v| v.as_str())
@@ -2229,11 +2625,36 @@ fn record_candidate(
         payload_json: serde_json::to_string(&payload).map_err(|e| e.to_string())?,
         target_type: Some(target.target_type.clone()),
     })?;
+    let restricted = source == "fanbox"
+        && source_item.get("isRestricted").and_then(Value::as_bool) == Some(true);
+    if restricted {
+        payload["holdKind"] = serde_json::json!("restricted");
+        payload["holdReason"] = serde_json::json!(
+            super::downloader::fanbox_missing_material_error(source_item)
+        );
+        state.db.upsert_update_candidate(&UpdateCandidateInput {
+            source: source.clone(),
+            source_id: source_id.clone(),
+            kind: kind.key().into(),
+            title: title.clone(),
+            payload_json: payload.to_string(),
+            target_type: Some(target.target_type.clone()),
+        })?;
+        state
+            .db
+            .set_update_candidate_status(&source, &source_id, "held")?;
+    }
     state.db.insert_update_job_candidate(
         job_id,
         &item_from_payload(
             "candidate",
-            if auto_save { "queued" } else { "candidate" },
+            if restricted {
+                "held"
+            } else if auto_save {
+                "queued"
+            } else {
+                "candidate"
+            },
             Some(source),
             Some(source_id),
             Some(target.target_type.clone()),
@@ -2580,6 +3001,16 @@ async fn process_candidate_item(
             previous_version,
         ))
     } else if source == "fanbox" {
+        if payload
+            .pointer("/originalData/isRestricted")
+            .and_then(Value::as_bool)
+            == Some(true)
+        {
+            let post = &payload["originalData"];
+            let reason = super::downloader::fanbox_missing_material_error(post);
+            hold_candidate(state, item, Some(post), &reason).await?;
+            return Ok(ItemOutcome::Held(reason));
+        }
         let Some(cookie) = fanbox_cookie(credentials) else {
             return Ok(ItemOutcome::AuthRequired(
                 "FANBOX連携が必要です".to_string(),
@@ -2593,6 +3024,11 @@ async fn process_candidate_item(
         )
         .await?;
         let value = serde_json::to_value(&post).map_err(|e| e.to_string())?;
+        if value.get("isRestricted").and_then(Value::as_bool) == Some(true) {
+            let reason = super::downloader::fanbox_missing_material_error(&value);
+            hold_candidate(state, item, Some(&value), &reason).await?;
+            return Ok(ItemOutcome::Held(reason));
+        }
         let title = string_at(&value, &[&["title"]]).unwrap_or(item.title.clone());
         let author_name = string_at(&value, &[&["user", "name"]])
             .or_else(|| string_at(&payload, &[&["originalData", "user", "name"]]))
@@ -2658,6 +3094,63 @@ mod tests {
         may_remember, rate_limit_delay_ms, FailureKind, SaveJobWork, MAX_RATE_LIMIT_BACKOFF_MS,
     };
     use std::collections::HashSet;
+
+    #[test]
+    fn durable_candidates_obey_exact_current_watch_scope() {
+        let mut candidate = crate::database::UpdateCandidateRow {
+            source: "fanbox".into(), source_id: "11".into(), kind: "new".into(), title: "作品".into(),
+            payload_json: serde_json::json!({"originSourceKey":"creator", "originalData":{"creatorId":"creator"}}).to_string(),
+            target_type: Some("author".into()), status: "pending".into(), first_seen_at: "now".into(), updated_at: "now".into(),
+        };
+        let works = HashSet::from([("fanbox".into(), "11".into())]);
+        assert!(!super::candidate_matches_scope(
+            &candidate,
+            &works,
+            &HashSet::new()
+        ));
+        assert!(!super::candidate_matches_scope(
+            &candidate,
+            &HashSet::new(),
+            &HashSet::from([("fanbox".into(), "author".into(), "other".into())])
+        ));
+        assert!(super::candidate_matches_scope(
+            &candidate,
+            &HashSet::new(),
+            &HashSet::from([("fanbox".into(), "author".into(), "creator".into())])
+        ));
+        candidate.kind = "revision".into();
+        assert!(super::candidate_matches_scope(
+            &candidate,
+            &works,
+            &HashSet::new()
+        ));
+        candidate.kind = "new".into();
+        candidate.payload_json = "{}".into();
+        candidate.target_type = None;
+        assert!(!super::candidate_matches_scope(
+            &candidate,
+            &works,
+            &HashSet::new()
+        ));
+    }
+
+    #[test]
+    fn restricted_listing_is_carried_without_a_post_body() {
+        let items = build_save_items(&[SaveJobWork {
+            source: "fanbox".into(),
+            source_id: "11".into(),
+            title: "作品".into(),
+            fanbox_access: Some(super::FanboxAccess {
+                is_restricted: true,
+                fee_required: Some(1000),
+                creator_id: Some("creator".into()),
+            }),
+        }]);
+        let payload: serde_json::Value = serde_json::from_str(&items[0].payload_json).unwrap();
+        assert_eq!(payload["originalData"]["feeRequired"], 1000);
+        assert_eq!(payload["originalData"]["isRestricted"], true);
+        assert!(payload["originalData"].get("body").is_none());
+    }
 
     /// 改稿の候補で公開日を並べても仕方がない。置き換わるもの - いま手元に
     /// ある版 - を言う。取得元が直した日は持っていないので、そこは語らない。
@@ -2810,30 +3303,35 @@ mod tests {
                 source: "pixiv".into(),
                 source_id: "1".into(),
                 title: "一つ目".into(),
+                fanbox_access: None,
             },
             // 同じ相手先。二度は預からない。
             SaveJobWork {
                 source: "pixiv".into(),
                 source_id: "1".into(),
                 title: "一つ目（重複）".into(),
+                fanbox_access: None,
             },
             // 取得元が違えば別の作品。
             SaveJobWork {
                 source: "fanbox".into(),
                 source_id: "1".into(),
                 title: "別の取得元".into(),
+                fanbox_access: None,
             },
             // 知らない取得元は預からない。
             SaveJobWork {
                 source: "unknown".into(),
                 source_id: "9".into(),
                 title: "知らない相手".into(),
+                fanbox_access: None,
             },
             // IDが無いものも預からない。
             SaveJobWork {
                 source: "pixiv".into(),
                 source_id: "   ".into(),
                 title: "IDが無い".into(),
+                fanbox_access: None,
             },
         ];
 
@@ -2862,6 +3360,7 @@ mod tests {
             source: "pixiv".into(),
             source_id: "12345".into(),
             title: "  ".into(),
+            fanbox_access: None,
         }]);
 
         assert_eq!(items.len(), 1);

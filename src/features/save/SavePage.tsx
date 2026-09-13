@@ -96,6 +96,7 @@ const SAVE_JOB_ROW_STATUS: Record<string, SidebarItem["status"]> = {
   done: "success",
   skipped: "skipped",
   failed: "failed",
+  held: "held",
 };
 
 const SAVE_JOB_STATUS_RANK: Partial<
@@ -106,6 +107,7 @@ const SAVE_JOB_STATUS_RANK: Partial<
   success: 2,
   skipped: 2,
   failed: 2,
+  held: 2,
 };
 
 export default function SavePage() {
@@ -512,7 +514,7 @@ export default function SavePage() {
   // 保存ボタンが名乗る件数は、実際に取りに行く件数と同じでなければならない。
   // 済んだものは対象から外れるので、失敗が混じったあとは選択数と食い違う。
   const isPendingSave = (item: SidebarItem) =>
-    item.selected && item.status !== "success" && item.status !== "skipped";
+    item.selected && item.status !== "success" && item.status !== "skipped" && item.status !== "held";
   const pendingCount = items.filter(isPendingSave).length;
   const retryCount = items.filter(
     (item) => isPendingSave(item) && item.status === "failed",
@@ -977,7 +979,7 @@ export default function SavePage() {
     // 保存済みでも取り直す作りなので、素通しにすると本当に再取得される。
     const selected = items.filter(
       (item) =>
-        item.selected && item.status !== "success" && item.status !== "skipped",
+        item.selected && item.status !== "success" && item.status !== "skipped" && item.status !== "held",
     );
     if (!selected.length || !downloadType || !runtime || savingRef.current)
       return;
@@ -1033,6 +1035,11 @@ export default function SavePage() {
           source: itemSource,
           sourceId: item.id,
           title: item.title,
+          ...(itemSource === "fanbox" && "isRestricted" in item.originalData ? { fanboxAccess: {
+            isRestricted: item.originalData.isRestricted === true,
+            feeRequired: item.originalData.feeRequired,
+            creatorId: item.originalData.creatorId,
+          } } : {}),
         })),
         schedule.watchSaved ?? false,
       );
@@ -1052,8 +1059,9 @@ export default function SavePage() {
       invalidateWorkSetViews(queryClient);
       const saved = final.savedCount;
       const failed = final.errorCount;
-      const skipped = Math.max(0, final.processed - saved - failed);
-      const tally = `保存 ${saved} · 保存済み ${skipped} · 失敗 ${failed}`;
+      const held = final.heldCount ?? 0;
+      const skipped = Math.max(0, final.processed - saved - failed - held);
+      const tally = `保存 ${saved} · 保存済み ${skipped} · 失敗 ${failed}${held ? ` · 保留 ${held}（更新 → 保留・非表示から再確認できます）` : ""}`;
       if (final.status === "canceled" || final.status === "canceling") {
         operation.cancel(`${tally} の時点で中止しました`);
         notifications.show({
@@ -1086,8 +1094,8 @@ export default function SavePage() {
       } else {
         operation.complete(tally);
         notifications.show({
-          color: failed ? "yellow" : "green",
-          title: "保存が完了しました",
+          color: failed || held ? "yellow" : "green",
+          title: failed ? "保存が完了しました（一部失敗）" : held ? "保存が完了しました（保留あり）" : "保存が完了しました",
           message: tally,
         });
       }
@@ -1841,6 +1849,7 @@ const CandidateRow = memo(function CandidateRow({
 });
 
 function StatusIcon({ status }: { status: SidebarItem["status"] }) {
+  if (status === "held") return <Badge color="yellow" size="xs">保留</Badge>;
   if (status === "downloading") return <Loader size="xs" />;
   if (status === "success")
     return (

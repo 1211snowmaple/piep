@@ -54,6 +54,7 @@ export interface UpdateJobSummary {
   candidateCount: number;
   savedCount: number;
   errorCount: number;
+  heldCount?: number;
   activeLabel: string | null;
   startedAt: string;
   updatedAt: string;
@@ -83,6 +84,7 @@ export interface UpdateJobCandidate {
     | "running"
     | "saved"
     | "failed"
+    | "held"
     | "skipped"
     | "done";
   /** Why this is a candidate: a work we lack, a sequel, or a rewrite of one we have. */
@@ -135,6 +137,23 @@ export interface SaveJobWork {
   source: "pixiv" | "fanbox";
   sourceId: string;
   title: string;
+  fanboxAccess?: { isRestricted: boolean; feeRequired?: number; creatorId?: string };
+}
+
+export interface DeferredUpdateCandidate {
+  source: "pixiv" | "fanbox";
+  sourceId: string;
+  title: string;
+  status: "held" | "dismissed";
+  payloadJson: string;
+}
+
+export function listDeferredUpdateCandidatesCommand(): Promise<DeferredUpdateCandidate[]> {
+  return invoke("list_deferred_update_candidates");
+}
+
+export async function recheckDeferredUpdateCandidatesCommand(keys: string[], refreshPostAccess = false): Promise<UpdateJobSnapshot> {
+  return invoke("recheck_deferred_update_candidates", { keys, refreshPostAccess, credentials: await getUpdateJobCredentials() });
 }
 
 /**

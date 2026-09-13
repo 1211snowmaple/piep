@@ -16,8 +16,6 @@ const MAX_INITIAL_RESPONSE_CAPACITY: usize = 64 * 1024;
 /// 断られ、断られた時点で一覧そのものが手に入らなくなる。更新ジョブの
 /// 800ms と揃えてある。
 const FANBOX_PAGE_DELAY: Duration = Duration::from_millis(800);
-/// 断られたときに、同じページを何回までやり直すか。
-const FANBOX_PAGE_RETRIES: u32 = 3;
 
 fn build_api_client(
     connect_timeout: Duration,
@@ -113,23 +111,7 @@ impl FanboxAPI {
     /// 諦めていたころは、一度断られただけでその creator の一覧が丸ごと
     /// 手に入らず、新作の取りこぼしになっていた。
     async fn api_get_paged<T: DeserializeOwned>(&self, url: &str) -> Result<T, FanboxError> {
-        let mut backoff = FANBOX_PAGE_DELAY;
-        for attempt in 0..=FANBOX_PAGE_RETRIES {
-            match self.api_get_once::<T>(url).await {
-                Err(FanboxError::RateLimited { body }) if attempt < FANBOX_PAGE_RETRIES => {
-                    backoff *= 2;
-                    log::warn!(
-                        "FANBOX rate limited while paging ({}); retrying in {:?}: {}",
-                        url,
-                        backoff,
-                        body
-                    );
-                    tokio::time::sleep(backoff).await;
-                }
-                other => return other,
-            }
-        }
-        unreachable!("the loop returns on its last attempt")
+        self.api_get_once(url).await
     }
 
     /// 低レベル GET リクエストの共通ハンドラ。
@@ -138,24 +120,20 @@ impl FanboxAPI {
     /// にはこれがあり、単発の投稿・クリエイター取得には無かった。断られる
     /// 理由は同じなのに、扱いが場所によって違っていた。
     async fn api_get<T: DeserializeOwned>(&self, url: &str) -> Result<T, FanboxError> {
-        let mut backoff = FANBOX_PAGE_DELAY;
-        for attempt in 0..=FANBOX_PAGE_RETRIES {
-            match self.api_get_once::<T>(url).await {
-                Err(FanboxError::RateLimited { body }) if attempt < FANBOX_PAGE_RETRIES => {
-                    backoff *= 2;
-                    log::warn!("FANBOX rate limited ({url}); retrying in {backoff:?}: {body}");
-                    tokio::time::sleep(backoff).await;
-                }
-                other => return other,
-            }
-        }
-        unreachable!("the loop returns on its last attempt")
+        // Retry ownership belongs to the job. Nested retries multiplied requests.
+        self.api_get_once(url).await
     }
 
     async fn api_get_once<T: DeserializeOwned>(&self, url: &str) -> Result<T, FanboxError> {
         let url = allowed_api_url(url)?;
         let headers = self.headers()?;
+        crate::downloader::pacing::FANBOX.wait().await;
         let res = self.client.get(url).headers(headers).send().await?;
+        if res.status() == StatusCode::TOO_MANY_REQUESTS {
+            crate::downloader::pacing::FANBOX
+                .defer(crate::downloader::pacing::retry_after(res.headers()))
+                .await;
+        }
 
         let (status, body) =
             read_response_text_limited(res, MAX_FANBOX_JSON_RESPONSE_BYTES).await?;
@@ -170,10 +148,11 @@ impl FanboxAPI {
                 Err(FanboxError::NotFound { body })
             }
             StatusCode::FORBIDDEN if is_cloudflare_challenge(&body) => {
+                crate::downloader::pacing::FANBOX
+                    .defer(Duration::from_secs(60))
+                    .await;
                 log::warn!("Fanbox API temporarily refused an automated request");
-                Err(FanboxError::RateLimited {
-                    body: "Cloudflare challenge".to_string(),
-                })
+                Err(FanboxError::ChallengeRequired)
             }
             StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
                 log::warn!("Fanbox API Authentication Required: {}", body);
@@ -201,6 +180,29 @@ impl FanboxAPI {
     }
 
     // --- エンドポイント実装 ---
+
+    /// A single lightweight permission check; never probe every inaccessible post.
+    pub async fn supporting_fees(
+        &self,
+    ) -> Result<std::collections::HashMap<String, u64>, FanboxError> {
+        let response: FanboxResponse<Vec<serde_json::Value>> = self
+            .api_get("https://api.fanbox.cc/plan.listSupporting")
+            .await?;
+        let mut fees = std::collections::HashMap::new();
+        for plan in response.body {
+            let creator = plan
+                .get("creatorId")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| FanboxError::Other("FANBOXの支援プランを解釈できません".into()))?;
+            let fee = plan
+                .get("fee")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| FanboxError::Other("FANBOXの支援額を解釈できません".into()))?;
+            let entry = fees.entry(creator.to_string()).or_insert(0);
+            *entry = (*entry).max(fee);
+        }
+        Ok(fees)
+    }
 
     /// 1. セッション（Cookie）が有効かチェック
     pub async fn check_session(&self) -> Result<(), FanboxError> {

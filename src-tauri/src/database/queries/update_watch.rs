@@ -318,19 +318,27 @@ impl Database {
         &self,
         limit: i64,
     ) -> Result<Vec<UpdateCandidateRow>, String> {
+        self.list_update_candidates_by_status("pending", limit)
+    }
+
+    pub fn list_update_candidates_by_status(
+        &self,
+        status: &str,
+        limit: i64,
+    ) -> Result<Vec<UpdateCandidateRow>, String> {
         let conn = self.read_conn()?;
         let mut stmt = conn
             .prepare(
                 "SELECT source, source_id, kind, title, payload_json, target_type, status,
                         first_seen_at, updated_at
                  FROM update_candidates
-                 WHERE status = 'pending'
+                 WHERE status = ?2 OR (?2 = 'deferred' AND status IN ('held', 'dismissed'))
                  ORDER BY updated_at DESC, rowid DESC
                  LIMIT ?1",
             )
             .map_err(|e| format!("Failed to prepare update candidates: {}", e))?;
         let rows = stmt
-            .query_map(params![limit], |row| {
+            .query_map(params![limit, status], |row| {
                 Ok(UpdateCandidateRow {
                     source: row.get(0)?,
                     source_id: row.get(1)?,
@@ -423,7 +431,7 @@ impl Database {
                 candidate.kind
             ));
         }
-        if !matches!(candidate.status.as_str(), "pending" | "dismissed") {
+        if !matches!(candidate.status.as_str(), "pending" | "dismissed" | "held") {
             return Err(format!(
                 "Backup update candidate has an unsupported status: {}",
                 candidate.status
@@ -464,6 +472,34 @@ impl Database {
         Ok(())
     }
 
+    /// Initial-save failures have no discovery row yet. A user decision must
+    /// still survive reloading the page and clearing the job history.
+    pub fn remember_job_candidate(&self, source: &str, source_id: &str) -> Result<(), String> {
+        if self.update_candidate_status(source, source_id)?.is_some() {
+            return Ok(());
+        }
+        let (title, payload_json): (String, String) = self.read_conn()?.query_row(
+            "SELECT title, payload_json FROM update_job_items WHERE source=?1 AND source_id=?2 AND item_type='candidate' ORDER BY id DESC LIMIT 1",
+            params![source, source_id], |row| Ok((row.get(0)?, row.get(1)?)),
+        ).map_err(|_| "候補が見つかりません。画面を再読み込みしてください".to_string())?;
+        let mut payload: serde_json::Value =
+            serde_json::from_str(&payload_json).map_err(|e| e.to_string())?;
+        let kind = if self.get_download_by_source(source, source_id)?.is_some() {
+            "revision"
+        } else {
+            "new"
+        };
+        payload["kind"] = serde_json::json!(kind);
+        self.upsert_update_candidate(&UpdateCandidateInput {
+            source: source.into(),
+            source_id: source_id.into(),
+            kind: kind.into(),
+            title,
+            payload_json: payload.to_string(),
+            target_type: Some("work".into()),
+        })
+    }
+
     /// この作品を今後は候補に出さない。決定は取り消せる。
     pub fn set_update_candidate_status(
         &self,
@@ -473,7 +509,8 @@ impl Database {
     ) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.execute(
-            "UPDATE update_candidates SET status = ?3, updated_at = ?4
+            "UPDATE update_candidates SET status = CASE WHEN ?3='pending' AND json_valid(payload_json)
+                  AND json_extract(payload_json, '$.holdKind')='restricted' THEN 'held' ELSE ?3 END, updated_at = ?4
              WHERE source = ?1 AND source_id = ?2",
             params![source, source_id, status, chrono::Utc::now().to_rfc3339()],
         )
@@ -522,7 +559,8 @@ impl Database {
     pub fn restore_dismissed_update_candidates(&self) -> Result<usize, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.execute(
-            "UPDATE update_candidates SET status = 'pending', updated_at = ?1
+            "UPDATE update_candidates SET status = CASE WHEN json_valid(payload_json)
+                AND json_extract(payload_json, '$.holdKind')='restricted' THEN 'held' ELSE 'pending' END, updated_at = ?1
              WHERE status = 'dismissed'",
             params![chrono::Utc::now().to_rfc3339()],
         )

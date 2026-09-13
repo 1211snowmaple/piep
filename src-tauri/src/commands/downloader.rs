@@ -11,7 +11,6 @@ use crate::database::queries::EntityProfileFreshness;
 use crate::database::{Database, DownloadEntry, NewAsset, NewDownload, NewVersion};
 use crate::downloader::fanbox::get_post_detail;
 use crate::downloader::pixiv::{get_novel_detail, PixivNovelContent};
-use crate::fanbox_api::client::FanboxAPI;
 use crate::fanbox_api::models::FanboxPost;
 use crate::pixiv_api;
 use crate::AppState;
@@ -626,7 +625,8 @@ pub async fn fetch_fanbox_creator_posts(
     cookie: String,
     user_agent: String,
 ) -> Result<Vec<FanboxPost>, String> {
-    let api = FanboxAPI::new(cookie, user_agent).map_err(|error| error.to_string())?;
+    let api = crate::downloader::session::fanbox(cookie, user_agent)
+        .map_err(|error| error.to_string())?;
     api.get_all_creator_posts(&creator_id)
         .await
         .map_err(|e| e.to_string())
@@ -638,7 +638,7 @@ pub(crate) async fn fetch_fanbox_creator_posts_since(
     user_agent: String,
     stop_source_id: Option<&str>,
 ) -> Result<Vec<FanboxPost>, String> {
-    FanboxAPI::new(cookie, user_agent)
+    crate::downloader::session::fanbox(cookie, user_agent)
         .map_err(|error| error.to_string())?
         .get_creator_posts_since(&creator_id, stop_source_id)
         .await
@@ -665,8 +665,8 @@ pub(crate) async fn fetch_pixiv_series_novels_since(
     refresh_token: String,
     stop_source_id: Option<&str>,
 ) -> Result<Vec<pixiv_api::models::NovelInfo>, String> {
-    let api = pixiv_api::aapi::AppPixivAPI::new_from_refresh_token(refresh_token)
-        .map_err(|error| error.to_string())?;
+    let api =
+        crate::downloader::session::pixiv(refresh_token).map_err(|error| error.to_string())?;
     let id_u64: u64 = series_id.parse().map_err(|_| "Invalid series ID")?;
 
     let mut last_order: Option<String> = None;
@@ -752,8 +752,8 @@ pub(crate) async fn fetch_pixiv_user_novels_since(
     refresh_token: String,
     stop_source_id: Option<&str>,
 ) -> Result<Vec<pixiv_api::models::NovelInfo>, String> {
-    let api = pixiv_api::aapi::AppPixivAPI::new_from_refresh_token(refresh_token)
-        .map_err(|error| error.to_string())?;
+    let api =
+        crate::downloader::session::pixiv(refresh_token).map_err(|error| error.to_string())?;
     let id_u64: u64 = user_id.parse().map_err(|_| "Invalid user ID")?;
 
     let mut offset: Option<String> = None;
@@ -1165,7 +1165,7 @@ fn pixiv_has_material_content(data: &serde_json::Value) -> bool {
 /// 「通信が成功した」は「作品が取れた」の保証にならない。手元にある版が
 /// 中身を持っているのに、取ってきたほうが空なら、それは更新ではなく欠落で、
 /// 版を上げれば読めていた作品が読めなくなる。
-fn fetched_has_material_content(data: &serde_json::Value, source: &str) -> bool {
+pub(crate) fn fetched_has_material_content(data: &serde_json::Value, source: &str) -> bool {
     match source {
         "fanbox" => fanbox_has_material_content(data),
         "pixiv" => pixiv_has_material_content(data),
@@ -1956,7 +1956,16 @@ pub async fn download_and_save(
     // 同じ作品を二重に保存させないのはこちらの錠。関数の最後まで持ち続ける。
     let work_lock = work_save_mutex(&source, &source_id);
     let _work_guard = work_lock.lock().await;
-    let root_item_dir = secure_download_item_dir(&storage, &source, &source_id)?;
+    // Some restricted responses include a teaser. A teaser is not a complete
+    // accessible post and must never replace the user's full saved version.
+    if source == "fanbox"
+        && data
+            .get("isRestricted")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+    {
+        return Err(fanbox_missing_material_error(&data));
+    }
 
     // 1. ハッシュ値と文字数を算出
     let (new_hash, new_text_len, new_source_updated) = compute_content_details(&data, &source);
@@ -2067,6 +2076,8 @@ pub async fn download_and_save(
         }
     }
 
+    // Rejected or unchanged payloads must not create empty work directories.
+    let root_item_dir = material_download_item_dir(&storage, &source, &source_id, &data)?;
     let mut legacy_v1_version = None;
     // Legacy files are left in place until the new version commits. Moving
     // them before the transaction made a failed update non-retryable.
@@ -2314,7 +2325,29 @@ pub async fn download_and_save(
     state.db.get_download(dl_id)
 }
 
-fn fanbox_missing_material_error(data: &serde_json::Value) -> String {
+fn material_download_item_dir(
+    storage: &Path,
+    source: &str,
+    source_id: &str,
+    data: &serde_json::Value,
+) -> Result<PathBuf, String> {
+    if (source == "fanbox"
+        && crate::fanbox_api::payload::post_or_self(data)
+            .get("isRestricted")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true))
+        || !fetched_has_material_content(data, source)
+    {
+        return Err(if source == "fanbox" {
+            fanbox_missing_material_error(data)
+        } else {
+            "保存できる本文がありません".into()
+        });
+    }
+    secure_download_item_dir(storage, source, source_id)
+}
+
+pub(crate) fn fanbox_missing_material_error(data: &serde_json::Value) -> String {
     let post = crate::fanbox_api::payload::post_or_self(data);
     if post
         .get("isRestricted")
@@ -2331,7 +2364,7 @@ fn fanbox_missing_material_error(data: &serde_json::Value) -> String {
             String::new()
         };
         return format!(
-            "現在のFANBOX連携ではこの投稿を閲覧できません{requirement}。支援中のアカウントでFANBOXをつなぎ直してください"
+            "現在のFANBOX連携ではこの投稿を閲覧できません{requirement}。通常の再試行から外して保留します。支援プランや連携アカウントの変更後に、保留一覧から再確認してください"
         );
     }
     "FANBOXから投稿本文と添付が空の応答を受け取りました。時間をおいて再取得し、続く場合は投稿の公開状態を確認してください"
@@ -2555,6 +2588,27 @@ mod path_security_tests {
         let resolved = secure_download_item_dir(&storage, "pixiv", "123_abc-9").unwrap();
         assert!(resolved.starts_with(storage.canonicalize().unwrap()));
         assert!(resolved.ends_with(Path::new("pixiv").join("123_abc-9")));
+        let _ = std::fs::remove_dir_all(storage);
+    }
+
+    #[test]
+    fn rejected_payloads_do_not_create_work_or_provider_directories() {
+        let storage = temp_storage();
+        for payload in [
+            serde_json::json!({"body":null}),
+            serde_json::json!({"isRestricted":true,"body":{"text":"teaser"}}),
+        ] {
+            assert!(material_download_item_dir(&storage, "fanbox", "11", &payload).is_err());
+            assert!(!storage.join("fanbox").exists());
+        }
+        assert!(material_download_item_dir(
+            &storage,
+            "pixiv",
+            "12",
+            &serde_json::json!({"text":""})
+        )
+        .is_err());
+        assert!(!storage.join("pixiv").exists());
         let _ = std::fs::remove_dir_all(storage);
     }
 

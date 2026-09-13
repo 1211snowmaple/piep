@@ -6555,6 +6555,102 @@ fn a_candidate_nobody_answered_survives_into_the_next_job() {
 }
 
 #[test]
+fn held_candidates_survive_backups_and_never_join_normal_retries() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let request = StartUpdateJobRequest {
+        scope: "save".into(),
+        mode: "save".into(),
+        work_ids: None,
+        target_ids: None,
+        credentials: None,
+        watch_saved: Some(false),
+        adhoc_targets: None,
+    };
+    let snapshot = db
+        .create_update_job(
+            "held-job",
+            &request,
+            &[UpdateJobItemInput {
+                item_type: "candidate".into(),
+                source: Some("fanbox".into()),
+                source_id: Some("11".into()),
+                target_type: Some("work".into()),
+                title: "作品".into(),
+                payload_json: "{}".into(),
+                status: "queued".into(),
+            }],
+        )
+        .unwrap();
+    let item_id = snapshot.candidates[0].id;
+    db.complete_update_job_item(
+        item_id,
+        "failed",
+        Some("[閲覧制限] 必要な支援額: 月額1000円以上"),
+        None,
+    )
+    .unwrap();
+    db.set_update_job_status("held-job", "failed", None)
+        .unwrap();
+    for _ in 0..2 {
+        db.conn
+            .lock()
+            .unwrap()
+            .execute_batch(include_str!("../acquisition_repair.sql"))
+            .unwrap();
+    }
+    let after = db.update_job_snapshot("held-job").unwrap();
+    assert_eq!(
+        (after.held_count, after.error_count, after.processed),
+        (1, 0, 1)
+    );
+    assert_eq!(after.status, "completed");
+    db.prepare_update_job_resume("held-job", true).unwrap();
+    assert!(db.next_update_job_item("held-job").unwrap().is_none());
+    assert!(db.list_pending_update_candidates(100).unwrap().is_empty());
+    let rows = db.list_update_candidates_after(None, 100).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].status, "held");
+    assert_eq!(rows[0].kind, "new");
+    db.restore_update_candidate(&rows[0]).unwrap();
+    db.set_update_candidate_status("fanbox", "11", "dismissed")
+        .unwrap();
+    db.restore_dismissed_update_candidates().unwrap();
+    assert_eq!(
+        db.update_candidate_status("fanbox", "11")
+            .unwrap()
+            .as_deref(),
+        Some("held")
+    );
+}
+
+#[test]
+fn deleted_revision_becomes_unsaved_without_losing_the_hold() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    db.conn.lock().unwrap().execute_batch("INSERT INTO downloads(source,source_id,title,author_name,author_id,content_type,json_path,downloaded_at)
+        VALUES ('fanbox','11','作品','作者','creator','text','unused','now');").unwrap();
+    db.upsert_update_candidate(&UpdateCandidateInput { source: "fanbox".into(), source_id: "11".into(), kind: "revision".into(),
+        title: "作品".into(), target_type: Some("work".into()), payload_json: serde_json::json!({"kind":"revision", "originalData":{"localVersion":1,"localSavedAt":"old"}, "holdKind":"restricted"}).to_string() }).unwrap();
+    db.set_update_candidate_status("fanbox", "11", "held")
+        .unwrap();
+    db.conn
+        .lock()
+        .unwrap()
+        .execute(
+            "DELETE FROM downloads WHERE source='fanbox' AND source_id='11'",
+            [],
+        )
+        .unwrap();
+    let rows = db.list_update_candidates_after(None, 100).unwrap();
+    assert_eq!(rows[0].kind, "new");
+    assert_eq!(rows[0].status, "held");
+    assert_eq!(rows[0].target_type, None);
+    assert!(!rows[0].payload_json.contains("localVersion"));
+    assert!(db.pending_revision_keys().unwrap().is_empty());
+}
+
+#[test]
 fn restored_candidates_reject_untrusted_provider_fields() {
     let (_temp, root, storage) = temp_paths();
     let db = Database::open(&root.join("piep.db"), &storage).unwrap();

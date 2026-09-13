@@ -1028,6 +1028,8 @@ pub struct UpdateJobSummary {
     pub candidate_count: i64,
     pub saved_count: i64,
     pub error_count: i64,
+    #[serde(default)]
+    pub held_count: i64,
     pub active_label: Option<String>,
     pub started_at: String,
     pub updated_at: String,
@@ -1076,6 +1078,8 @@ pub struct UpdateJobSnapshot {
     pub candidate_count: i64,
     pub saved_count: i64,
     pub error_count: i64,
+    #[serde(default)]
+    pub held_count: i64,
     pub active_label: Option<String>,
     pub logs: Vec<UpdateJobLog>,
     pub candidates: Vec<UpdateJobCandidate>,

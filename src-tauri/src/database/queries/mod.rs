@@ -5186,7 +5186,8 @@ impl Database {
         let mut stmt = conn
             .prepare(
                 "SELECT id, status, scope, mode, totals, processed, candidate_count,
-                        saved_count, error_count, active_label, started_at, updated_at, finished_at
+                        saved_count, error_count, active_label, started_at, updated_at, finished_at,
+                        (SELECT COUNT(*) FROM update_job_items i WHERE i.job_id=update_jobs.id AND i.status='held')
                  FROM update_jobs
                  ORDER BY updated_at DESC, started_at DESC
                  LIMIT 30",
@@ -5217,7 +5218,8 @@ impl Database {
         let summary = conn
             .query_row(
                 "SELECT id, status, scope, mode, totals, processed, candidate_count,
-                        saved_count, error_count, active_label, started_at, updated_at, finished_at
+                        saved_count, error_count, active_label, started_at, updated_at, finished_at,
+                        (SELECT COUNT(*) FROM update_job_items i WHERE i.job_id=update_jobs.id AND i.status='held')
                  FROM update_jobs WHERE id = ?1",
                 params![job_id],
                 update_job_summary_from_row,
@@ -5318,7 +5320,12 @@ impl Database {
                         selected: matches!(status.as_str(), "candidate" | "queued"),
                         status,
                         kind,
-                        error,
+                        error: error.or_else(|| {
+                            payload
+                                .get("holdReason")
+                                .and_then(|v| v.as_str())
+                                .map(str::to_string)
+                        }),
                     })
                 },
             )
@@ -5346,6 +5353,7 @@ impl Database {
             candidate_count: summary.candidate_count,
             saved_count: summary.saved_count,
             error_count: summary.error_count,
+            held_count: summary.held_count,
             active_label: summary.active_label,
             logs,
             candidates,
@@ -5379,6 +5387,16 @@ impl Database {
             params![status, active_label, now, terminal, job_id],
         )
         .map_err(|e| format!("Failed to update job status: {}", e))?;
+        Ok(())
+    }
+
+    pub fn set_update_job_item_payload(&self, item_id: i64, payload: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE update_job_items SET payload_json=?2 WHERE id=?1",
+            params![item_id, payload],
+        )
+        .map_err(|e| e.to_string())?;
         Ok(())
     }
 
@@ -5508,7 +5526,8 @@ impl Database {
         let summary = conn
             .query_row(
                 "SELECT id, status, scope, mode, totals, processed, candidate_count,
-                        saved_count, error_count, active_label, started_at, updated_at, finished_at
+                        saved_count, error_count, active_label, started_at, updated_at, finished_at,
+                        (SELECT COUNT(*) FROM update_job_items i WHERE i.job_id=update_jobs.id AND i.status='held')
                  FROM update_jobs WHERE id = ?1",
                 params![job_id],
                 update_job_summary_from_row,
@@ -5861,7 +5880,7 @@ impl Database {
                            WHERE job_id = ?1 AND (item_type != 'candidate' OR status != 'candidate')),
                  processed = (SELECT COUNT(*) FROM update_job_items
                               WHERE job_id = ?1 AND (item_type != 'candidate' OR status != 'candidate')
-                                AND status IN ('done', 'saved', 'skipped', 'failed')),
+                                AND status IN ('done', 'saved', 'skipped', 'failed', 'held')),
                  candidate_count = (SELECT COUNT(*) FROM update_job_items WHERE job_id = ?1 AND item_type = 'candidate'),
                  saved_count = (SELECT COUNT(*) FROM update_job_items WHERE job_id = ?1 AND status = 'saved'),
                  error_count = (SELECT COUNT(*) FROM update_job_items WHERE job_id = ?1 AND status = 'failed')
@@ -13862,7 +13881,7 @@ fn update_target_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<UpdateTar
 /// snapshot path as a repair boundary for databases written by older builds.
 fn update_job_item_counter_contribution(item_type: &str, status: &str) -> [i64; 5] {
     let counts_as_work = item_type != "candidate" || status != "candidate";
-    let terminal = matches!(status, "done" | "saved" | "skipped" | "failed");
+    let terminal = matches!(status, "done" | "saved" | "skipped" | "failed" | "held");
     [
         i64::from(counts_as_work),
         i64::from(counts_as_work && terminal),
@@ -13883,6 +13902,7 @@ fn update_job_summary_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Upda
         candidate_count: row.get(6)?,
         saved_count: row.get(7)?,
         error_count: row.get(8)?,
+        held_count: row.get(13)?,
         active_label: row.get(9)?,
         started_at: row.get(10)?,
         updated_at: row.get(11)?,

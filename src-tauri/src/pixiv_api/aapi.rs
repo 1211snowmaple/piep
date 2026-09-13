@@ -130,7 +130,13 @@ impl AppPixivAPI {
         if let Some(d) = data {
             req = req.form(&d.content);
         }
+        crate::downloader::pacing::PIXIV.wait().await;
         let res = req.send().await?;
+        if res.status() == StatusCode::TOO_MANY_REQUESTS {
+            crate::downloader::pacing::PIXIV
+                .defer(crate::downloader::pacing::retry_after(res.headers()))
+                .await;
+        }
         Ok(res)
     }
 

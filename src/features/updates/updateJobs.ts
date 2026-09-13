@@ -116,6 +116,7 @@ function mergeProgressDelta(
  */
 export function invalidateAfterUpdateJob(client: QueryClient): void {
   client.invalidateQueries({ queryKey: ["pending-revisions"] });
+  client.invalidateQueries({ queryKey: ["deferred-candidates"] });
   client.invalidateQueries({ queryKey: ["library"] });
   invalidateWorkSetViews(client);
 }
@@ -138,6 +139,16 @@ export const UPDATE_JOB_STATUS_META: Record<
   completed: { label: "完了", color: "green" },
   failed: { label: "失敗", color: "red" },
 };
+
+export function updateJobStatusMeta(job: UpdateJobSummary): { label: string; color: string } {
+  if (job.status === "failed" && job.processed > job.errorCount + (job.heldCount ?? 0)) {
+    return { label: "一部失敗", color: "orange" };
+  }
+  if (job.status === "completed" && (job.heldCount ?? 0) > 0) {
+    return { label: "完了（保留あり）", color: "yellow" };
+  }
+  return UPDATE_JOB_STATUS_META[job.status];
+}
 
 // Job summaries are application-level activity, not page-local state. Keeping
 // one store prevents the update centre, operation history and sidebar badge
