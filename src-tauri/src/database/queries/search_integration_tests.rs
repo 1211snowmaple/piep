@@ -2851,6 +2851,23 @@ fn facet_search_limits_in_sql_and_keeps_direct_rare_matches() {
         &["希少タグ"],
         "本文",
     );
+    let fanbox_id = insert_download_unindexed(
+        &db,
+        &storage,
+        "facet-3",
+        "作品3",
+        "人気作者",
+        &["FANBOXタグ"],
+        "本文",
+    );
+    db.conn
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE downloads SET source = 'fanbox' WHERE id = ?1",
+            params![fanbox_id],
+        )
+        .unwrap();
 
     assert_eq!(
         db.search_filter_facets("authors", None, 1).unwrap().len(),
@@ -2863,11 +2880,69 @@ fn facet_search_limits_in_sql_and_keeps_direct_rare_matches() {
         escaped.first().map(|facet| facet.name.as_str()),
         Some("作者%特別")
     );
+    let same_name = db
+        .search_filter_facets("authors", Some("人気作者"), 10)
+        .unwrap();
+    let same_name = same_name
+        .iter()
+        .find(|facet| facet.name == "人気作者")
+        .expect("同名作者の候補");
+    assert_eq!(same_name.count, 2);
+    assert_eq!(
+        same_name
+            .sources
+            .iter()
+            .map(String::as_str)
+            .collect::<HashSet<_>>(),
+        HashSet::from(["pixiv", "fanbox"]),
+    );
     let rare = db.search_filter_facets("tags", Some("希少"), 10).unwrap();
     assert_eq!(
         rare.first().map(|facet| facet.name.as_str()),
         Some("希少タグ")
     );
+}
+
+#[test]
+fn same_name_author_filter_composes_with_source() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    insert_download_unindexed(
+        &db,
+        &storage,
+        "same-author-pixiv",
+        "pixivの作品",
+        "同名作者",
+        &["創作"],
+        "本文",
+    );
+    let fanbox_id = insert_download_unindexed(
+        &db,
+        &storage,
+        "same-author-fanbox",
+        "FANBOXの作品",
+        "同名作者",
+        &["創作"],
+        "本文",
+    );
+    db.conn
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE downloads SET source = 'fanbox' WHERE id = ?1",
+            params![fanbox_id],
+        )
+        .unwrap();
+
+    let fanbox_only = SearchV2Params {
+        source: Some("fanbox".to_string()),
+        authors_include: Some(vec!["同名作者".to_string()]),
+        ..v2_params(None, 20, None)
+    };
+    let result = db.search_downloads_v2(&fanbox_only).unwrap();
+    assert_eq!(result.items.len(), 1);
+    assert_eq!(result.items[0].source, "fanbox");
+    assert_eq!(result.items[0].title, "FANBOXの作品");
 }
 
 #[test]

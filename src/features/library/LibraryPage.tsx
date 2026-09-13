@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   ActionIcon,
   Alert,
@@ -8,17 +8,14 @@ import {
   Checkbox,
   Combobox,
   Divider,
-  Drawer,
   Group,
   InputBase,
   Indicator,
   Menu,
+  Modal,
   NumberInput,
   Paper,
-  Pill,
-  PillsInput,
   Popover,
-  Radio,
   SegmentedControl,
   Select,
   SimpleGrid,
@@ -42,6 +39,7 @@ import { ListPager, PagingModeToggle, useBoundedNumberedPage, usePageSize, usePa
 import { ScrollToTop } from "@/components/ScrollToTop";
 import { demoFacets, searchDemoWorks } from "@/mocks/demoData";
 import { errorMessage, formatNumber } from "@/lib/format";
+import { ProviderMark } from "@/lib/providers";
 import { scrollViewportToTop } from "@/lib/scroll";
 import { VirtualizedWorkList } from "@/features/library/VirtualizedWorkList";
 import { MotionTabs as Tabs } from "@/components/MotionTabs";
@@ -88,6 +86,8 @@ interface Filters {
   contentType: string | null;
   favorite: boolean;
   watch: LibraryWatchFilter | null;
+  authorsInclude: string[];
+  authorsExclude: string[];
   tagsInclude: string[];
   tagsExclude: string[];
   tagMode: "and" | "or";
@@ -97,7 +97,8 @@ interface Filters {
 
 const initialFilters: Filters = {
   sources: [], contentType: null, favorite: false, watch: null,
-  tagsInclude: [], tagsExclude: [], tagMode: "and", minChars: "", maxChars: "",
+  authorsInclude: [], authorsExclude: [], tagsInclude: [], tagsExclude: [],
+  tagMode: "and", minChars: "", maxChars: "",
 };
 
 /**
@@ -261,6 +262,8 @@ function numericFilterOrNull(value: unknown): number | null {
 function normalizeFilters(value: unknown): Filters {
   if (!value || typeof value !== "object") return initialFilters;
   const candidate = value as Partial<Filters>;
+  const authorsInclude = stringList(candidate.authorsInclude);
+  const includedAuthors = new Set(authorsInclude);
   const tagsInclude = stringList(candidate.tagsInclude);
   const included = new Set(tagsInclude);
   return {
@@ -268,6 +271,8 @@ function normalizeFilters(value: unknown): Filters {
     contentType: typeof candidate.contentType === "string" && candidate.contentType.trim() ? candidate.contentType.trim() : null,
     favorite: candidate.favorite === true,
     watch: parseWatchFilter(candidate.watch),
+    authorsInclude,
+    authorsExclude: stringList(candidate.authorsExclude).filter((author) => !includedAuthors.has(author)),
     tagsInclude,
     tagsExclude: stringList(candidate.tagsExclude).filter((tag) => !included.has(tag)),
     tagMode: candidate.tagMode === "or" ? "or" : "and",
@@ -291,6 +296,8 @@ function readFilters(params: URLSearchParams): Filters {
     contentType: params.get("type"),
     favorite: params.get("favorite") === "1",
     watch: parseWatchFilter(params.get("watch")),
+    authorsInclude: params.getAll("author"),
+    authorsExclude: params.getAll("notauthor"),
     tagsInclude: params.getAll("tag"),
     tagsExclude: params.getAll("nottag"),
     tagMode: params.get("tagmode") === "or" ? "or" : "and",
@@ -302,6 +309,10 @@ function readFilters(params: URLSearchParams): Filters {
 function writeFilters(params: URLSearchParams, filters: Filters) {
   params.delete("source");
   filters.sources.forEach((source) => params.append("source", source));
+  params.delete("author");
+  filters.authorsInclude.forEach((author) => params.append("author", author));
+  params.delete("notauthor");
+  filters.authorsExclude.forEach((author) => params.append("notauthor", author));
   params.delete("tag");
   filters.tagsInclude.forEach((tag) => params.append("tag", tag));
   params.delete("nottag");
@@ -792,6 +803,8 @@ export default function LibraryPage() {
     source: filters.sources.length === 1 ? filters.sources[0] : null,
     contentType: filters.contentType,
     favorite: filters.favorite || null,
+    authorsInclude: filters.authorsInclude.length ? filters.authorsInclude : null,
+    authorsExclude: filters.authorsExclude.length ? filters.authorsExclude : null,
     tagsInclude: filters.tagsInclude.length ? filters.tagsInclude : null,
     tagsExclude: filters.tagsExclude.length ? filters.tagsExclude : null,
     tagFilterMode: filters.tagMode,
@@ -842,7 +855,7 @@ export default function LibraryPage() {
     && Boolean(works.hasNextPage);
   const totalCount = works.data?.pages[0]?.totalEstimate ?? null;
   const searchMeta = works.data?.pages[0]?.searchMeta;
-  const workFilterCount = filters.sources.length + Number(Boolean(filters.contentType)) + Number(filters.favorite) + Number(Boolean(filters.watch)) + filters.tagsInclude.length + filters.tagsExclude.length + Number(filters.minChars !== "") + Number(filters.maxChars !== "");
+  const workFilterCount = filters.sources.length + Number(Boolean(filters.contentType)) + Number(filters.favorite) + Number(Boolean(filters.watch)) + filters.authorsInclude.length + filters.authorsExclude.length + filters.tagsInclude.length + filters.tagsExclude.length + Number(filters.minChars !== "") + Number(filters.maxChars !== "");
   // 束ね自身の条件も「適用中」に数える。数えないと、絞られている理由が
   // どこにも出ない一覧ができる。
   const activeFilterCount = workFilterCount + (tab === "works" ? 0 : entityScopeCount(entityScope));
@@ -926,7 +939,7 @@ export default function LibraryPage() {
   });
 
   const suggestedName = () => query.trim()
-    || [filters.sources.join("・"), filters.tagsInclude.map((tag) => `#${tag}`).join(" ")].filter(Boolean).join(" / ")
+    || [filters.sources.join("・"), filters.authorsInclude.join("・"), filters.tagsInclude.map((tag) => `#${tag}`).join(" ")].filter(Boolean).join(" / ")
     || "すべての作品";
 
   const saveMutation = useMutation({
@@ -1376,6 +1389,8 @@ export default function LibraryPage() {
             <Group gap="xs">
               <Text size="xs" c="dimmed" fw={600}>適用中</Text>
               {filters.sources.map((source) => <FilterChip key={source} label={source} onRemove={() => setFilters({ ...filters, sources: filters.sources.filter((item) => item !== source) })} />)}
+              {filters.authorsInclude.map((author) => <FilterChip key={`author:+${author}`} label={`作者: ${author}`} onRemove={() => setFilters({ ...filters, authorsInclude: filters.authorsInclude.filter((item) => item !== author) })} />)}
+              {filters.authorsExclude.map((author) => <FilterChip key={`author:-${author}`} label={`除外 作者: ${author}`} color="red" onRemove={() => setFilters({ ...filters, authorsExclude: filters.authorsExclude.filter((item) => item !== author) })} />)}
               {filters.tagsInclude.map((tag) => <FilterChip key={`+${tag}`} label={`#${tag}`} onRemove={() => setFilters({ ...filters, tagsInclude: filters.tagsInclude.filter((item) => item !== tag) })} />)}
               {filters.tagsExclude.map((tag) => <FilterChip key={`-${tag}`} label={`除外 #${tag}`} color="red" onRemove={() => setFilters({ ...filters, tagsExclude: filters.tagsExclude.filter((item) => item !== tag) })} />)}
               {tab !== "works" && entityScope.watch && <FilterChip label={entityScope.watch === "watched" ? "監視中" : entityScope.watch === "paused" ? "停止中" : "未登録"} onRemove={() => setEntityScope({ ...entityScope, watch: null })} />}
@@ -1507,17 +1522,28 @@ export default function LibraryPage() {
         </>}
       </div>
 
-      <Drawer opened={filterOpened} onClose={filterDrawer.close} title="詳細フィルター" position="right" size={420} className="filter-drawer">
+      <Modal
+        opened={filterOpened}
+        onClose={filterDrawer.close}
+        title="詳細フィルター"
+        centered
+        size="min(820px, calc(100vw - 24px))"
+        xOffset={12}
+        yOffset={12}
+        closeButtonProps={{ "aria-label": "閉じる" }}
+        classNames={{ content: "filter-spotlight", body: "filter-spotlight__body", header: "filter-spotlight__header" }}
+      >
         <FilterForm
           value={filters}
           scope={entityScope}
           tab={tab}
           runtime={runtime}
+          authors={facets.data?.authors ?? []}
           tags={facets.data?.tags ?? []}
           contentTypes={facets.data?.contentTypes.map((item) => ({ value: item.name, label: `${item.name} (${item.count})` })) ?? []}
           onApply={(nextFilters, nextScope) => { writeUrl({ filters: nextFilters, entityScope: nextScope }); filterDrawer.close(); }}
         />
-      </Drawer>
+      </Modal>
 
       {/* Raised while the selection bar is up so the two never stack. */}
       <ScrollToTop offsetBottom={selectionMode ? 104 : undefined} />
@@ -1770,144 +1796,536 @@ function LibrarySearch({ value, onChange, runtime }: { value: string; onChange: 
   );
 }
 
-function FilterForm({ value, scope, tab, runtime, tags, contentTypes, onApply }: {
+const AUTHOR_SOURCE_ORDER = ["pixiv", "fanbox"];
+
+type FilterSection = "entity" | "basic" | "authors" | "tags" | "length";
+type FacetKind = "authors" | "tags";
+type FacetTarget = "include" | "exclude";
+
+interface SpotlightCondition {
+  id: string;
+  label: string;
+  detail: string;
+  keywords: string;
+  active: boolean;
+}
+
+function orderedAuthorSources(sources: string[] | undefined) {
+  return [...new Set(sources ?? [])].sort((left, right) => {
+    const leftIndex = AUTHOR_SOURCE_ORDER.indexOf(left);
+    const rightIndex = AUTHOR_SOURCE_ORDER.indexOf(right);
+    return (leftIndex < 0 ? AUTHOR_SOURCE_ORDER.length : leftIndex)
+      - (rightIndex < 0 ? AUTHOR_SOURCE_ORDER.length : rightIndex)
+      || left.localeCompare(right);
+  });
+}
+
+function facetMatches(facets: FacetCount[], query: string, limit: number) {
+  const normalized = query.trim().toLocaleLowerCase("ja-JP");
+  if (!normalized) return facets.slice(0, limit);
+  return facets
+    .map((facet, index) => {
+      const name = facet.name.toLocaleLowerCase("ja-JP");
+      const position = name.indexOf(normalized);
+      return { facet, index, position, rank: name === normalized ? 0 : position === 0 ? 1 : 2 };
+    })
+    .filter((match) => match.position >= 0)
+    .sort((left, right) => left.rank - right.rank
+      || left.position - right.position
+      || right.facet.count - left.facet.count
+      || left.index - right.index)
+    .slice(0, limit)
+    .map((match) => match.facet);
+}
+
+function contentTypeName(value: string) {
+  if (value === "novel") return "小説";
+  if (value === "article") return "記事";
+  if (value === "image") return "画像";
+  return value;
+}
+
+function FacetSelectedList({ kind, label, values, facets, onRemove }: {
+  kind: FacetKind;
+  label: string;
+  values: string[];
+  facets: FacetCount[];
+  onRemove: (value: string) => void;
+}) {
+  return (
+    <section className="filter-spotlight__selected-list" aria-label={label}>
+      <Group justify="space-between" gap="xs">
+        <Text component="h4" size="sm" fw={700}>{label}</Text>
+        <Badge size="xs" variant="light" color="gray">{formatNumber(values.length)}</Badge>
+      </Group>
+      {values.length ? (
+        <Stack gap={6} mt="xs">
+          {values.map((value) => {
+            const facet = facets.find((candidate) => candidate.name === value);
+            return (
+              <div className="filter-spotlight__selected-item" key={value}>
+                <div className="filter-spotlight__facet-identity">
+                  {kind === "authors" && (
+                    <span className="filter-spotlight__provider-marks">
+                      {orderedAuthorSources(facet?.sources).map((source) => <ProviderMark key={source} provider={source} compact />)}
+                    </span>
+                  )}
+                  <Text size="sm" className="filter-spotlight__facet-name">{value}</Text>
+                </div>
+                <ActionIcon variant="subtle" color="gray" size="sm" aria-label={`${label}から${value}を外す`} onClick={() => onRemove(value)}>
+                  <Icons.cancel size={IconSize.inline} />
+                </ActionIcon>
+              </div>
+            );
+          })}
+        </Stack>
+      ) : <Text size="sm" c="dimmed" mt="xs">未指定</Text>}
+    </section>
+  );
+}
+
+function FacetSelectionPanel({ kind, facets, include, exclude, target, headerAction, onToggle }: {
+  kind: FacetKind;
+  facets: FacetCount[];
+  include: string[];
+  exclude: string[];
+  target: FacetTarget;
+  headerAction?: ReactNode;
+  onToggle: (name: string, target: FacetTarget) => void;
+}) {
+  const noun = kind === "authors" ? "作者" : "タグ";
+  const selected = new Set([...include, ...exclude]);
+  const suggestions = facets.filter((facet) => !selected.has(facet.name)).slice(0, 4);
+  return (
+    <Stack gap="md">
+      <div className="filter-spotlight__facet-heading">
+        <div>
+          <Text component="h3" fw={700}>{noun}</Text>
+          <Text size="xs" c="dimmed">候補を押すと「{target === "exclude" ? "除外" : "含める"}」へ追加します</Text>
+        </div>
+        {headerAction}
+      </div>
+      <SimpleGrid cols={{ base: 1, xs: 2 }} spacing="sm">
+        <FacetSelectedList kind={kind} label={`含める${noun}`} values={include} facets={facets} onRemove={(name) => onToggle(name, "include")} />
+        <FacetSelectedList kind={kind} label={`除外する${noun}`} values={exclude} facets={facets} onRemove={(name) => onToggle(name, "exclude")} />
+      </SimpleGrid>
+      <div>
+        <Text size="xs" fw={700} c="dimmed" mb={6}>よく使う{noun}</Text>
+        {suggestions.length ? (
+          <div className="filter-spotlight__quick-grid">
+            {suggestions.map((facet) => (
+              <UnstyledButton
+                key={facet.name}
+                className="filter-spotlight__quick-option"
+                aria-label={`${facet.name}を${target === "exclude" ? "除外する" : "含める"}${noun}へ追加`}
+                onClick={() => onToggle(facet.name, target)}
+              >
+                <span className="filter-spotlight__facet-identity">
+                  {kind === "authors" && (
+                    <span className="filter-spotlight__provider-marks">
+                      {orderedAuthorSources(facet.sources).map((source) => <ProviderMark key={source} provider={source} compact />)}
+                    </span>
+                  )}
+                  {kind === "tags" && <Icons.tag size={IconSize.menu} aria-hidden />}
+                  <Text component="span" size="sm" className="filter-spotlight__facet-name">{facet.name}</Text>
+                </span>
+                <Badge size="xs" variant="light" color="gray">{formatNumber(facet.count)}</Badge>
+              </UnstyledButton>
+            ))}
+          </div>
+        ) : <Text size="sm" c="dimmed">追加できる候補はありません</Text>}
+      </div>
+    </Stack>
+  );
+}
+
+function FilterForm({ value, scope, tab, runtime, authors, tags, contentTypes, onApply }: {
   value: Filters;
   scope: EntityScopeFilters;
   tab: LibraryTab;
   runtime: boolean;
+  authors: FacetCount[];
   tags: FacetCount[];
   contentTypes: { value: string; label: string }[];
   onApply: (value: Filters, scope: EntityScopeFilters) => void;
 }) {
   const [draft, setDraft] = useState(() => normalizeFilters(value));
   const [scopeDraft, setScopeDraft] = useState(scope);
+  const entityTab = tab === "people" || tab === "series";
+  const entityNoun = tab === "series" ? "シリーズ" : "作者";
+  const [activeSection, setActiveSection] = useState<FilterSection>(() => entityTab ? "entity" : "authors");
+  const [facetTarget, setFacetTarget] = useState<FacetTarget>("include");
+  const [filterSearch, setFilterSearch] = useState("");
+  const [debouncedFilterSearch] = useDebouncedValue(filterSearch, 180);
+  const searchCombobox = useCombobox({
+    onDropdownClose: () => searchCombobox.resetSelectedOption(),
+  });
   // Compared by value: the applied filters are rebuilt from the address on
   // every navigation, and a fresh object each time reset the half-filled form.
   const applied = JSON.stringify(value);
   useEffect(() => setDraft(normalizeFilters(JSON.parse(applied) as Filters)), [applied]);
   const appliedScope = JSON.stringify(scope);
   useEffect(() => setScopeDraft(JSON.parse(appliedScope) as EntityScopeFilters), [appliedScope]);
-  const entityTab = tab === "people" || tab === "series";
-  const entityNoun = tab === "series" ? "シリーズ" : "作者";
+  useEffect(() => {
+    if (!entityTab && activeSection === "entity") setActiveSection("authors");
+  }, [activeSection, entityTab]);
   const min = numericFilterOrNull(draft.minChars);
   const max = numericFilterOrNull(draft.maxChars);
   const invalidRange = min !== null && max !== null && min > max;
-  // The two buttons that make any of this take effect used to be the last thing
-  // in a long scrolling form, so on an ordinary window they opened below the
-  // bottom edge - the drawer looked like it had no way to apply anything.
-  return (
-    <div className="filter-form">
-    <Stack gap="lg" className="filter-form__fields">
-      {/* At the top, and as a line rather than a boxed notice. It qualifies
-          everything below it, so it is the one thing worth reading before any
-          of this is set - and at the end of the form it was permanently half
-          cut off by the bottom edge, which reads as something being broken. */}
-      {entityTab ? (
-        <>
-          {/* 束ね自身の条件が先。いま見ている一覧そのものの話なので、
-              配下の作品の話より手前にある。 */}
-          <Box>
-            <Text fw={700} size="sm" mb={4}>この{entityNoun}たち自身の条件</Text>
-            <Text size="xs" c="dimmed" mb="xs">一覧に並ぶかどうかを、{entityNoun}の側で決めます。</Text>
-            <Stack gap="sm">
-              <Select
-                label="更新監視"
-                clearable
-                placeholder="すべて"
-                data={[
-                  { value: "watched", label: "監視中" },
-                  { value: "paused", label: "停止中" },
-                  { value: "unwatched", label: "未登録" },
-                ]}
-                value={scopeDraft.watch}
-                onChange={(watch) => setScopeDraft({ ...scopeDraft, watch: parseEntityWatch(watch) })}
-              />
-              <NumberInput
-                label="作品数の下限"
-                description="これ以上の作品を持つものだけ"
-                placeholder="指定なし"
-                hideControls
-                min={0}
-                max={Number.MAX_SAFE_INTEGER}
-                allowDecimal={false}
-                allowNegative={false}
-                value={scopeDraft.minWorkCount}
-                onChange={(minWorkCount) => setScopeDraft({ ...scopeDraft, minWorkCount: numericFilter(typeof minWorkCount === "string" ? Number.parseInt(minWorkCount, 10) : minWorkCount) })}
-              />
-              {tab === "series" && (
-                <Select
-                  label="連載の状態"
-                  clearable
-                  placeholder="すべて"
-                  description="取得元がまだ何も言っていないシリーズは、どちらにも入りません"
-                  data={[{ value: "concluded", label: "完結" }, { value: "ongoing", label: "連載中" }]}
-                  value={scopeDraft.concluded === null ? null : scopeDraft.concluded ? "concluded" : "ongoing"}
-                  onChange={(state) => setScopeDraft({ ...scopeDraft, concluded: state === "concluded" ? true : state === "ongoing" ? false : null })}
-                />
-              )}
-            </Stack>
-          </Box>
-          <Divider />
-          <Text size="xs" c="dimmed" className="filter-form__scope">ここから下は配下の作品の条件です。その作品を持つ{entityNoun}だけが残ります。</Text>
-        </>
-      ) : (
-        <Text size="xs" c="dimmed" className="filter-form__scope">これらは作品タブに適用されます。</Text>
-      )}
-      <Box><Text fw={700} size="sm" mb="xs">ソース</Text><Checkbox.Group value={draft.sources} onChange={(sources) => setDraft({ ...draft, sources })}><Group><Checkbox value="pixiv" label="pixiv" /><Checkbox value="fanbox" label="FANBOX" /></Group></Checkbox.Group></Box>
-      <Select label="コンテンツ種別" placeholder="すべて" clearable data={contentTypes} value={draft.contentType} onChange={(contentType) => setDraft({ ...draft, contentType })} />
-      <Divider />
-      <TagFilterCombobox runtime={runtime} label="含めるタグ" tags={tags} value={draft.tagsInclude} onChange={(tagsInclude) => setDraft({ ...draft, tagsInclude, tagsExclude: draft.tagsExclude.filter((tag) => !tagsInclude.includes(tag)) })} />
-      <TagFilterCombobox runtime={runtime} label="除外するタグ" tags={tags} value={draft.tagsExclude} onChange={(tagsExclude) => setDraft({ ...draft, tagsExclude, tagsInclude: draft.tagsInclude.filter((tag) => !tagsExclude.includes(tag)) })} />
-      <Radio.Group label="複数タグの条件" value={draft.tagMode} onChange={(tagMode) => setDraft({ ...draft, tagMode: tagMode === "or" ? "or" : "and" })}><Group mt="xs"><Radio value="and" label="すべて含む" /><Radio value="or" label="いずれかを含む" /></Group></Radio.Group>
-      <Divider />
-      <SimpleGrid cols={2}><NumberInput label="最小文字数" hideControls min={0} max={Number.MAX_SAFE_INTEGER} allowDecimal={false} allowNegative={false} thousandSeparator="," value={draft.minChars} onChange={(minChars) => setDraft({ ...draft, minChars })} /><NumberInput label="最大文字数" hideControls min={0} max={Number.MAX_SAFE_INTEGER} allowDecimal={false} allowNegative={false} thousandSeparator="," value={draft.maxChars} onChange={(maxChars) => setDraft({ ...draft, maxChars })} /></SimpleGrid>
-      {invalidRange && <Alert color="red">最大文字数は最小文字数以上にしてください。</Alert>}
-      {/* 同じ引き出しに「更新監視」が二つ並ぶ。上は作者・シリーズ自身の登録、
-          こちらは作品ごとの監視。名前で区別しないと、どちらを触ったのか
-          分からなくなる。 */}
-      <Select label={entityTab ? "作品の更新監視" : "更新監視"} clearable placeholder="すべて" data={[{ value: "watched", label: "監視中" }, { value: "unwatched", label: "未監視" }]} value={draft.watch} onChange={(watch) => setDraft({ ...draft, watch: parseWatchFilter(watch) })} />
-      <Checkbox label="お気に入りのみ" checked={draft.favorite} onChange={(event) => setDraft({ ...draft, favorite: event.currentTarget.checked })} />
-    </Stack>
-    <Group grow className="filter-form__actions"><Button variant="default" onClick={() => { setDraft(initialFilters); setScopeDraft(initialEntityScope); }}>リセット</Button><Button disabled={invalidRange} onClick={() => onApply(normalizeFilters(draft), scopeDraft)}>適用</Button></Group>
-    </div>
-  );
-}
-
-function TagFilterCombobox({ label, runtime, tags, value, onChange }: { label: string; runtime: boolean; tags: FacetCount[]; value: string[]; onChange: (value: string[]) => void }) {
-  const [search, setSearch] = useState("");
-  const [debouncedSearch] = useDebouncedValue(search, 180);
-  const combobox = useCombobox({ onDropdownClose: () => { combobox.resetSelectedOption(); setSearch(""); } });
-  const normalized = debouncedSearch.trim().toLocaleLowerCase("ja-JP");
-  const remoteMatches = useQuery({
-    queryKey: ["filter-facet-search", "tags", normalized],
-    queryFn: () => searchFilterFacets("tags", normalized, 80),
-    enabled: runtime && Boolean(normalized),
+  const normalizedSearch = debouncedFilterSearch.trim().toLocaleLowerCase("ja-JP");
+  const remoteAuthors = useQuery({
+    queryKey: ["filter-facet-search", "authors", normalizedSearch],
+    queryFn: () => searchFilterFacets("authors", normalizedSearch, 12),
+    enabled: runtime && Boolean(normalizedSearch),
     staleTime: 5 * 60_000,
     gcTime: 60_000,
   });
-  const localMatches = useMemo(() => tags
-    .filter((tag) => !normalized || tag.name.toLocaleLowerCase("ja-JP").includes(normalized))
-    .slice(0, 80), [normalized, tags]);
-  const visible = runtime && normalized && remoteMatches.data ? remoteMatches.data : localMatches;
-  const toggle = (name: string) => onChange(value.includes(name) ? value.filter((item) => item !== name) : [...value, name]);
-  return <Combobox store={combobox} onOptionSubmit={toggle} withinPortal>
-    <Combobox.DropdownTarget>
-      <PillsInput label={label} onClick={() => combobox.openDropdown()} rightSection={<Combobox.Chevron />}>
-        <Pill.Group>
-          {value.map((tag) => <FilterToken key={tag} label={tag} onRemove={() => onChange(value.filter((item) => item !== tag))} />)}
-          <Combobox.EventsTarget>
-            <PillsInput.Field value={search} maxLength={120} onChange={(event) => { setSearch(event.currentTarget.value); combobox.openDropdown(); combobox.updateSelectedOptionIndex(); }} onFocus={() => combobox.openDropdown()} onKeyDown={(event) => { if (event.key === "Backspace" && !search && value.length) onChange(value.slice(0, -1)); }} placeholder={value.length ? "タグを追加" : "タグを検索して選択"} />
-          </Combobox.EventsTarget>
-        </Pill.Group>
-      </PillsInput>
-    </Combobox.DropdownTarget>
-    <Combobox.Dropdown>
-      <Combobox.Options mah={300} style={{ overflowY: "auto" }}>
-        {remoteMatches.isFetching ? <Combobox.Empty>タグを検索中…</Combobox.Empty> : visible.length ? visible.map((tag) => <Combobox.Option value={tag.name} key={tag.name} active={value.includes(tag.name)}>
-          <Group justify="space-between" wrap="nowrap"><Group gap="xs" wrap="nowrap"><Icons.confirm size={IconSize.menu} opacity={value.includes(tag.name) ? 1 : 0} /><Text size="sm" className="line-clamp-1">{tag.name}</Text></Group><Badge size="xs" variant="light" color="gray">{formatNumber(tag.count)}</Badge></Group>
-        </Combobox.Option>) : <Combobox.Empty>一致するタグがありません</Combobox.Empty>}
-      </Combobox.Options>
-      {!normalized && tags.length > visible.length && <Combobox.Footer><Text size="xs" c="dimmed">上位{visible.length}件を表示 · 入力すると全タグを検索</Text></Combobox.Footer>}
-    </Combobox.Dropdown>
-  </Combobox>;
+  const remoteTags = useQuery({
+    queryKey: ["filter-facet-search", "tags", normalizedSearch],
+    queryFn: () => searchFilterFacets("tags", normalizedSearch, 12),
+    enabled: runtime && Boolean(normalizedSearch),
+    staleTime: 5 * 60_000,
+    gcTime: 60_000,
+  });
+  const authorResults = useMemo(
+    () => facetMatches(runtime && remoteAuthors.data ? remoteAuthors.data : authors, normalizedSearch, 8),
+    [authors, normalizedSearch, remoteAuthors.data, runtime],
+  );
+  const tagResults = useMemo(
+    () => facetMatches(runtime && remoteTags.data ? remoteTags.data : tags, normalizedSearch, 8),
+    [normalizedSearch, remoteTags.data, runtime, tags],
+  );
+
+  const basicCount = draft.sources.length
+    + Number(Boolean(draft.contentType))
+    + Number(draft.favorite)
+    + Number(Boolean(draft.watch));
+  const authorCount = draft.authorsInclude.length + draft.authorsExclude.length;
+  const tagCount = draft.tagsInclude.length + draft.tagsExclude.length;
+  const lengthCount = Number(draft.minChars !== "") + Number(draft.maxChars !== "");
+  const entityCount = entityScopeCount(scopeDraft);
+  const totalCount = basicCount + authorCount + tagCount + lengthCount + (entityTab ? entityCount : 0);
+  const sectionOptions: { value: FilterSection; label: string; count: number }[] = [
+    ...(entityTab ? [{ value: "entity" as const, label: `${entityNoun}一覧`, count: entityCount }] : []),
+    { value: "basic", label: entityTab ? "作品" : "基本", count: basicCount },
+    { value: "authors", label: "作者", count: authorCount },
+    { value: "tags", label: "タグ", count: tagCount },
+    { value: "length", label: "文字数", count: lengthCount },
+  ];
+
+  const conditions = useMemo<SpotlightCondition[]>(() => [
+    { id: "source:pixiv", label: "pixiv の作品", detail: "保存元", keywords: "pixiv ピクシブ 保存元 ソース", active: draft.sources.includes("pixiv") },
+    { id: "source:fanbox", label: "FANBOX の作品", detail: "保存元", keywords: "fanbox ファンボックス 保存元 ソース", active: draft.sources.includes("fanbox") },
+    { id: "favorite", label: "お気に入りのみ", detail: "基本", keywords: "お気に入り favorite 基本", active: draft.favorite },
+    { id: "watch:watched", label: "更新監視中のみ", detail: "基本", keywords: "更新 監視中 watched 基本", active: draft.watch === "watched" },
+    { id: "watch:unwatched", label: "未監視のみ", detail: "基本", keywords: "更新 未監視 unwatched 基本", active: draft.watch === "unwatched" },
+    { id: "tagmode:and", label: "タグをすべて含む", detail: "AND", keywords: "タグ すべて and 条件", active: draft.tagMode === "and" },
+    { id: "tagmode:or", label: "タグのどれかを含む", detail: "OR", keywords: "タグ どれか or 条件", active: draft.tagMode === "or" },
+    { id: "section:authors", label: "作者を設定", detail: "設定を開く", keywords: "作者 クリエイター 含める 除外", active: activeSection === "authors" },
+    { id: "section:tags", label: "タグを設定", detail: "設定を開く", keywords: "タグ 含める 除外", active: activeSection === "tags" },
+    { id: "section:length", label: "文字数を設定", detail: "設定を開く", keywords: "文字数 最小 最大 長さ", active: activeSection === "length" },
+    ...contentTypes.map((item) => ({
+      id: `content:${item.value}`,
+      label: `${contentTypeName(item.value)}のみ`,
+      detail: "コンテンツ種別",
+      keywords: `${item.value} ${contentTypeName(item.value)} コンテンツ 種別`,
+      active: draft.contentType === item.value,
+    })),
+  ], [activeSection, contentTypes, draft.contentType, draft.favorite, draft.sources, draft.tagMode, draft.watch]);
+  const conditionResults = useMemo(() => conditions.filter((condition) => (
+    `${condition.label} ${condition.detail} ${condition.keywords}`.toLocaleLowerCase("ja-JP").includes(normalizedSearch)
+  )).slice(0, 8), [conditions, normalizedSearch]);
+
+  const toggleFacet = (kind: FacetKind, name: string, target: FacetTarget) => {
+    setDraft((current) => {
+      const include = kind === "authors" ? current.authorsInclude : current.tagsInclude;
+      const exclude = kind === "authors" ? current.authorsExclude : current.tagsExclude;
+      const currentTarget = target === "include" ? include : exclude;
+      const nextTarget = currentTarget.includes(name)
+        ? currentTarget.filter((item) => item !== name)
+        : [...currentTarget, name];
+      const nextOther = (target === "include" ? exclude : include).filter((item) => item !== name);
+      if (kind === "authors") return target === "include"
+        ? { ...current, authorsInclude: nextTarget, authorsExclude: nextOther }
+        : { ...current, authorsExclude: nextTarget, authorsInclude: nextOther };
+      return target === "include"
+        ? { ...current, tagsInclude: nextTarget, tagsExclude: nextOther }
+        : { ...current, tagsExclude: nextTarget, tagsInclude: nextOther };
+    });
+  };
+
+  const applyCondition = (id: string) => {
+    if (id.startsWith("section:")) {
+      const next = id.slice("section:".length) as FilterSection;
+      setActiveSection(next);
+      setFilterSearch("");
+      searchCombobox.closeDropdown();
+      return;
+    }
+    setDraft((current) => {
+      if (id === "favorite") return { ...current, favorite: !current.favorite };
+      if (id.startsWith("source:")) {
+        const source = id.slice("source:".length);
+        return { ...current, sources: current.sources.includes(source) ? current.sources.filter((item) => item !== source) : [...current.sources, source] };
+      }
+      if (id.startsWith("watch:")) {
+        const watch = parseWatchFilter(id.slice("watch:".length));
+        return { ...current, watch: current.watch === watch ? null : watch };
+      }
+      if (id.startsWith("tagmode:")) return { ...current, tagMode: id.endsWith(":or") ? "or" : "and" };
+      if (id.startsWith("content:")) {
+        const contentType = id.slice("content:".length);
+        return { ...current, contentType: current.contentType === contentType ? null : contentType };
+      }
+      return current;
+    });
+  };
+
+  const chooseSection = (section: FilterSection) => {
+    setActiveSection(section);
+    setFilterSearch("");
+    searchCombobox.closeDropdown();
+  };
+
+  const reset = () => {
+    setDraft(initialFilters);
+    setScopeDraft(initialEntityScope);
+    setActiveSection(entityTab ? "entity" : "authors");
+    setFacetTarget("include");
+    setFilterSearch("");
+    searchCombobox.closeDropdown();
+  };
+
+  return (
+    <div className="filter-form">
+      <Combobox
+        store={searchCombobox}
+        withinPortal={false}
+        position="bottom-start"
+        onOptionSubmit={(selected) => {
+          if (selected.startsWith("condition:")) {
+            const condition = conditionResults[Number(selected.slice("condition:".length))];
+            if (condition) applyCondition(condition.id);
+            return;
+          }
+          if (selected.startsWith("author:")) {
+            const facet = authorResults[Number(selected.slice("author:".length))];
+            if (facet) toggleFacet("authors", facet.name, facetTarget);
+            searchCombobox.updateSelectedOptionIndex();
+            return;
+          }
+          if (selected.startsWith("tag:")) {
+            const facet = tagResults[Number(selected.slice("tag:".length))];
+            if (facet) toggleFacet("tags", facet.name, facetTarget);
+            searchCombobox.updateSelectedOptionIndex();
+          }
+        }}
+      >
+        <div className="filter-spotlight__search-zone">
+          <div className="filter-spotlight__search-row">
+            <Combobox.Target>
+              <TextInput
+                size="md"
+                aria-label="条件を検索"
+                placeholder="作者・タグ・条件名を検索"
+                value={filterSearch}
+                maxLength={120}
+                data-autofocus
+                leftSection={<Icons.search size={IconSize.action} />}
+                rightSection={filterSearch ? (
+                  <ActionIcon
+                    variant="subtle"
+                    color="gray"
+                    aria-label="検索をクリア"
+                    onMouseDown={(event) => event.preventDefault()}
+                    onClick={() => { setFilterSearch(""); searchCombobox.closeDropdown(); }}
+                  >
+                    <Icons.cancel size={IconSize.menu} />
+                  </ActionIcon>
+                ) : undefined}
+                rightSectionPointerEvents={filterSearch ? "all" : "none"}
+                onFocus={() => { if (filterSearch.trim()) searchCombobox.openDropdown(); }}
+                onChange={(event) => {
+                  const next = event.currentTarget.value;
+                  setFilterSearch(next);
+                  if (next.trim()) {
+                    searchCombobox.openDropdown();
+                    searchCombobox.updateSelectedOptionIndex();
+                  } else searchCombobox.closeDropdown();
+                }}
+              />
+            </Combobox.Target>
+            <SegmentedControl
+              size="sm"
+              aria-label="検索結果の追加先"
+              value={facetTarget}
+              onChange={(next) => setFacetTarget(next === "exclude" ? "exclude" : "include")}
+              data={[{ value: "include", label: "含める" }, { value: "exclude", label: "除外" }]}
+            />
+          </div>
+          <Text size="xs" c="dimmed" className="filter-spotlight__search-note">作者・タグは名前の一致で検索</Text>
+          <Combobox.Dropdown className="filter-spotlight__dropdown">
+            <Combobox.Options className="filter-spotlight__results">
+              {conditionResults.length > 0 && (
+                <Combobox.Group label="条件">
+                  {conditionResults.map((condition, index) => (
+                    <Combobox.Option value={`condition:${index}`} key={condition.id} active={condition.active}>
+                      <div className="filter-spotlight__result-row">
+                        <Icons.confirm size={IconSize.menu} opacity={condition.active ? 1 : 0} aria-hidden />
+                        <div><Text size="sm" className="filter-spotlight__facet-name">{condition.label}</Text><Text size="xs" c="dimmed">{condition.detail}</Text></div>
+                      </div>
+                    </Combobox.Option>
+                  ))}
+                </Combobox.Group>
+              )}
+              {authorResults.length > 0 && (
+                <Combobox.Group label="作者">
+                  {authorResults.map((facet, index) => {
+                    const selected = (facetTarget === "include" ? draft.authorsInclude : draft.authorsExclude).includes(facet.name);
+                    return (
+                      <Combobox.Option value={`author:${index}`} key={facet.name} active={selected}>
+                        <div className="filter-spotlight__result-row filter-spotlight__result-row--facet">
+                          <Icons.confirm size={IconSize.menu} opacity={selected ? 1 : 0} aria-hidden />
+                          <span className="filter-spotlight__provider-marks">{orderedAuthorSources(facet.sources).map((source) => <ProviderMark key={source} provider={source} compact />)}</span>
+                          <Text size="sm" className="filter-spotlight__facet-name">{facet.name}</Text>
+                          <Badge size="xs" variant="light" color="gray">{formatNumber(facet.count)}</Badge>
+                        </div>
+                      </Combobox.Option>
+                    );
+                  })}
+                </Combobox.Group>
+              )}
+              {tagResults.length > 0 && (
+                <Combobox.Group label="タグ">
+                  {tagResults.map((facet, index) => {
+                    const selected = (facetTarget === "include" ? draft.tagsInclude : draft.tagsExclude).includes(facet.name);
+                    return (
+                      <Combobox.Option value={`tag:${index}`} key={facet.name} active={selected}>
+                        <div className="filter-spotlight__result-row filter-spotlight__result-row--facet">
+                          <Icons.confirm size={IconSize.menu} opacity={selected ? 1 : 0} aria-hidden />
+                          <Icons.tag size={IconSize.menu} aria-hidden />
+                          <Text size="sm" className="filter-spotlight__facet-name">{facet.name}</Text>
+                          <Badge size="xs" variant="light" color="gray">{formatNumber(facet.count)}</Badge>
+                        </div>
+                      </Combobox.Option>
+                    );
+                  })}
+                </Combobox.Group>
+              )}
+              {!conditionResults.length && !authorResults.length && !tagResults.length && (
+                <Combobox.Empty>{remoteAuthors.isFetching || remoteTags.isFetching ? "検索中…" : "一致する候補がありません"}</Combobox.Empty>
+              )}
+            </Combobox.Options>
+          </Combobox.Dropdown>
+        </div>
+      </Combobox>
+
+      <div className="filter-form__fields">
+        <div className="filter-spotlight__section-tabs" role="tablist" aria-label="フィルターの種類">
+          {sectionOptions.map((section) => (
+            <UnstyledButton
+              type="button"
+              role="tab"
+              id={`filter-spotlight-tab-${section.value}`}
+              aria-controls={`filter-spotlight-panel-${section.value}`}
+              aria-selected={activeSection === section.value}
+              data-active={activeSection === section.value || undefined}
+              className="filter-spotlight__section-tab"
+              key={section.value}
+              onClick={() => chooseSection(section.value)}
+            >
+              <span>{section.label}</span>
+              {section.count > 0 && <b>{formatNumber(section.count)}</b>}
+            </UnstyledButton>
+          ))}
+        </div>
+
+        <section
+          className="filter-spotlight__panel"
+          id={`filter-spotlight-panel-${activeSection}`}
+          role="tabpanel"
+          aria-labelledby={`filter-spotlight-tab-${activeSection}`}
+        >
+          {activeSection === "entity" && entityTab && (
+            <Stack gap="md">
+              <div><Text component="h3" fw={700}>{entityNoun}一覧</Text><Text size="xs" c="dimmed">一覧そのものにかける条件</Text></div>
+              <SimpleGrid cols={{ base: 1, xs: tab === "series" ? 3 : 2 }} spacing="sm">
+                <Select size="sm" label="更新監視" clearable placeholder="すべて" data={[{ value: "watched", label: "監視中" }, { value: "paused", label: "停止中" }, { value: "unwatched", label: "未登録" }]} value={scopeDraft.watch} onChange={(watch) => setScopeDraft({ ...scopeDraft, watch: parseEntityWatch(watch) })} />
+                <NumberInput size="sm" label="作品数の下限" placeholder="指定なし" hideControls min={0} max={Number.MAX_SAFE_INTEGER} allowDecimal={false} allowNegative={false} value={scopeDraft.minWorkCount} onChange={(minWorkCount) => setScopeDraft({ ...scopeDraft, minWorkCount: numericFilter(typeof minWorkCount === "string" ? Number.parseInt(minWorkCount, 10) : minWorkCount) })} />
+                {tab === "series" && <Select size="sm" label="連載の状態" clearable placeholder="すべて" data={[{ value: "concluded", label: "完結" }, { value: "ongoing", label: "連載中" }]} value={scopeDraft.concluded === null ? null : scopeDraft.concluded ? "concluded" : "ongoing"} onChange={(state) => setScopeDraft({ ...scopeDraft, concluded: state === "concluded" ? true : state === "ongoing" ? false : null })} />}
+              </SimpleGrid>
+            </Stack>
+          )}
+
+          {activeSection === "basic" && (
+            <Stack gap="md">
+              <div><Text component="h3" fw={700}>{entityTab ? "作品" : "基本"}</Text><Text size="xs" c="dimmed">対象になる作品を選びます</Text></div>
+              <Group gap="lg" wrap="wrap">
+                <Checkbox.Group value={draft.sources} onChange={(sources) => setDraft({ ...draft, sources })}>
+                  <Group gap="md"><Checkbox value="pixiv" label="pixiv" /><Checkbox value="fanbox" label="FANBOX" /></Group>
+                </Checkbox.Group>
+                <Checkbox label="お気に入りのみ" checked={draft.favorite} onChange={(event) => setDraft({ ...draft, favorite: event.currentTarget.checked })} />
+              </Group>
+              <SimpleGrid cols={{ base: 1, xs: 2 }} spacing="sm">
+                <Select label="コンテンツ種別" placeholder="すべて" clearable data={contentTypes} value={draft.contentType} onChange={(contentType) => setDraft({ ...draft, contentType })} />
+                <Select label="更新監視" clearable placeholder="すべて" data={[{ value: "watched", label: "監視中" }, { value: "unwatched", label: "未監視" }]} value={draft.watch} onChange={(watch) => setDraft({ ...draft, watch: parseWatchFilter(watch) })} />
+              </SimpleGrid>
+            </Stack>
+          )}
+
+          {activeSection === "authors" && (
+            <FacetSelectionPanel
+              kind="authors"
+              facets={authors}
+              include={draft.authorsInclude}
+              exclude={draft.authorsExclude}
+              target={facetTarget}
+              onToggle={(name, target) => toggleFacet("authors", name, target)}
+            />
+          )}
+
+          {activeSection === "tags" && (
+            <FacetSelectionPanel
+              kind="tags"
+              facets={tags}
+              include={draft.tagsInclude}
+              exclude={draft.tagsExclude}
+              target={facetTarget}
+              headerAction={(
+                <div className="filter-spotlight__tag-mode">
+                  <Text size="xs" fw={700} c="dimmed">複数タグ</Text>
+                  <SegmentedControl
+                    size="xs"
+                    aria-label="複数タグの条件"
+                    value={draft.tagMode}
+                    onChange={(tagMode) => setDraft({ ...draft, tagMode: tagMode === "or" ? "or" : "and" })}
+                    data={[{ value: "and", label: "すべて含む" }, { value: "or", label: "どれか含む" }]}
+                  />
+                </div>
+              )}
+              onToggle={(name, target) => toggleFacet("tags", name, target)}
+            />
+          )}
+
+          {activeSection === "length" && (
+            <Stack gap="md">
+              <div><Text component="h3" fw={700}>文字数</Text><Text size="xs" c="dimmed">片方だけでも指定できます</Text></div>
+              <SimpleGrid cols={{ base: 1, xs: 2 }} spacing="sm">
+                <NumberInput label="最小文字数" hideControls min={0} max={Number.MAX_SAFE_INTEGER} allowDecimal={false} allowNegative={false} thousandSeparator="," value={draft.minChars} onChange={(minChars) => setDraft({ ...draft, minChars })} />
+                <NumberInput label="最大文字数" hideControls min={0} max={Number.MAX_SAFE_INTEGER} allowDecimal={false} allowNegative={false} thousandSeparator="," value={draft.maxChars} onChange={(maxChars) => setDraft({ ...draft, maxChars })} />
+              </SimpleGrid>
+              {invalidRange && <Alert color="red" py="xs">最大文字数は最小文字数以上にしてください。</Alert>}
+            </Stack>
+          )}
+        </section>
+      </div>
+      <div className="filter-form__actions">
+        <Text size="sm" c="dimmed">{totalCount ? `${formatNumber(totalCount)}件の条件` : "条件なし"}</Text>
+        <Group gap="sm">
+          <Button variant="default" onClick={reset}>リセット</Button>
+          <Button disabled={invalidRange} onClick={() => onApply(normalizeFilters(draft), scopeDraft)}>適用</Button>
+        </Group>
+      </div>
+    </div>
+  );
 }

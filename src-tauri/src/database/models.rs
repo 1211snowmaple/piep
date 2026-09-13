@@ -848,6 +848,9 @@ pub struct LibraryShelfCounts {
 pub struct FacetCount {
     pub name: String,
     pub count: i64,
+    /// 保存元ごとに同名があり得る作者候補で使う。タグなどでは空。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sources: Vec<String>,
 }
 
 /// 作者・シリーズカードで使うエンティティ候補

@@ -103,7 +103,7 @@ export const demoDashboard: DashboardSummary = {
     { name: "音楽", count: 2 },
   ],
   topAuthors: [
-    { name: "青葉しおり", count: 48 }, { name: "遠野つむぎ", count: 37 }, { name: "mizu atelier", count: 31 }, { name: "白鳥ケイ", count: 24 }, { name: "こはるデザイン室", count: 19 },
+    { name: "青葉しおり", count: 48, sources: ["pixiv", "fanbox"] }, { name: "遠野つむぎ", count: 37, sources: ["pixiv"] }, { name: "mizu atelier", count: 31, sources: ["fanbox"] }, { name: "白鳥ケイ", count: 24, sources: ["pixiv"] }, { name: "こはるデザイン室", count: 19, sources: ["fanbox"] },
   ],
   recentDownloads: demoWorks,
   sourceBreakdown: [
@@ -122,7 +122,13 @@ export const demoDashboard: DashboardSummary = {
 
 export const demoFacets: FilterFacets = {
   tags: demoDashboard.topTags,
-  authors: demoDashboard.topAuthors,
+  authors: [
+    ...demoDashboard.topAuthors.slice(0, 3),
+    // The filter search must prove that real creator names wrap instead of
+    // turning into indistinguishable ellipses beside the provider marks.
+    { name: "背徳亭無題＠ボイスドラマ発売中", count: 12, sources: ["pixiv"] },
+    ...demoDashboard.topAuthors.slice(3),
+  ],
   authorEntities: [
     { source: "pixiv", sourceKey: "8001234", displayName: "青葉しおり", count: 48, coverPath: null, description: "季節と日常を題材にした短編小説。", latestDownloadedAt: isoDaysAgo(1) },
     { source: "pixiv", sourceKey: "4419281", displayName: "遠野つむぎ", count: 37, coverPath: null, description: "空想科学と冒険譚を中心に執筆。", latestDownloadedAt: isoDaysAgo(4) },

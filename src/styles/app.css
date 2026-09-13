@@ -500,33 +500,189 @@ select {
 }
 .expandable__toggle { font-weight: 600; }
 
-/* The form scrolls; the two buttons that make it take effect do not. Below a
-   tall window they used to sit past the bottom edge, so the drawer opened with
-   no visible way to apply anything. */
-.filter-drawer .mantine-Drawer-content { display: flex; flex-direction: column; }
-.filter-drawer .mantine-Drawer-body {
+/* The detail filter is a foreground search surface. Only the result menu may
+   scroll in the ordinary desktop window; the settings beneath it stay still,
+   so opening the filter never drops the reader into the middle of a form. */
+.filter-spotlight {
   display: flex;
-  min-height: 0;
-  flex: 1 1 auto;
   flex-direction: column;
-  padding: 0;
 }
-.filter-form { display: flex; min-height: 0; flex: 1 1 auto; flex-direction: column; }
-.filter-form__fields {
-  min-height: 0;
-  flex: 1 1 auto;
-  padding: 4px var(--mantine-spacing-md) var(--mantine-spacing-md);
+.filter-spotlight__header {
+  min-height: 58px;
+  border-bottom: 1px solid var(--app-shell-border-color, light-dark(#e3e8ee, #232a35));
+}
+.filter-spotlight__body { min-height: 0; padding: 0; }
+.filter-form { display: flex; min-height: 0; flex-direction: column; }
+.filter-spotlight__search-zone {
+  position: relative;
+  z-index: 3;
+  padding: 10px var(--mantine-spacing-lg) 8px;
+  border-bottom: 1px solid var(--app-shell-border-color, light-dark(#e3e8ee, #232a35));
+  background: light-dark(var(--mantine-color-white), var(--mantine-color-dark-7));
+}
+.filter-spotlight__search-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--mantine-spacing-sm);
+  align-items: center;
+}
+.filter-spotlight__search-note { display: block; margin-top: 5px; }
+.filter-spotlight__dropdown {
+  width: min(620px, calc(100% - 2 * var(--mantine-spacing-lg))) !important;
+  box-shadow: var(--mantine-shadow-lg);
+}
+.filter-spotlight__results {
+  max-height: min(370px, calc(100dvh - 210px));
   overflow-y: auto;
   overscroll-behavior: contain;
 }
-/* Sits under the drawer's own title as a caption to it, so it reads as part of
-   the heading rather than as the first setting. */
-.filter-form__scope { margin-bottom: -6px; line-height: 1.6; }
-.filter-form__actions {
+.filter-spotlight__result-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  min-width: 0;
+}
+.filter-spotlight__result-row--facet {
+  grid-template-columns: auto auto minmax(0, 1fr) auto;
+  align-items: start;
+}
+.filter-spotlight__provider-marks {
+  display: inline-flex;
   flex: 0 0 auto;
-  padding: var(--mantine-spacing-md);
+  gap: 4px;
+  align-items: center;
+}
+.filter-spotlight__facet-name {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+.filter-form__fields { min-height: 0; flex: 1 1 auto; }
+.filter-spotlight__section-tabs {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding: 10px var(--mantine-spacing-lg);
+  border-bottom: 1px solid var(--app-shell-border-color, light-dark(#e3e8ee, #232a35));
+  background: light-dark(var(--mantine-color-gray-0), var(--mantine-color-dark-8));
+}
+.filter-spotlight__section-tab {
+  display: inline-flex;
+  min-height: 36px;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 11px;
+  border: 1px solid transparent;
+  border-radius: var(--mantine-radius-xl);
+  color: var(--mantine-color-dimmed);
+  font-size: var(--mantine-font-size-sm);
+  font-weight: 650;
+}
+.filter-spotlight__section-tab:hover { background: light-dark(var(--mantine-color-gray-1), var(--mantine-color-dark-6)); }
+.filter-spotlight__section-tab[data-active] {
+  border-color: light-dark(var(--mantine-color-piep-3), var(--mantine-color-piep-7));
+  color: light-dark(var(--mantine-color-piep-8), var(--mantine-color-piep-2));
+  background: light-dark(var(--mantine-color-piep-0), color-mix(in srgb, var(--mantine-color-piep-9) 34%, var(--mantine-color-dark-7)));
+}
+.filter-spotlight__section-tab b {
+  display: inline-grid;
+  min-width: 20px;
+  height: 20px;
+  place-items: center;
+  padding: 0 5px;
+  border-radius: var(--mantine-radius-xl);
+  background: light-dark(var(--mantine-color-gray-2), var(--mantine-color-dark-5));
+  color: inherit;
+  font-size: var(--mantine-font-size-xs);
+  font-variant-numeric: tabular-nums;
+}
+.filter-spotlight__section-tab[data-active] b { background: light-dark(var(--mantine-color-piep-1), var(--mantine-color-piep-9)); }
+.filter-spotlight__panel {
+  min-height: 258px;
+  padding: 14px var(--mantine-spacing-lg) 16px;
+}
+.filter-spotlight__selected-list {
+  min-width: 0;
+  min-height: 74px;
+  padding: 8px;
+  border: 1px solid var(--app-shell-border-color, light-dark(#e3e8ee, #232a35));
+  border-radius: var(--mantine-radius-md);
+  background: light-dark(var(--mantine-color-gray-0), var(--mantine-color-dark-8));
+}
+.filter-spotlight__selected-item,
+.filter-spotlight__quick-option {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+.filter-spotlight__selected-item {
+  padding: 7px 8px;
+  border-radius: var(--mantine-radius-sm);
+  background: light-dark(var(--mantine-color-white), var(--mantine-color-dark-7));
+}
+.filter-spotlight__facet-identity {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  gap: 7px;
+}
+.filter-spotlight__quick-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+.filter-spotlight__quick-option {
+  min-height: 42px;
+  padding: 7px 9px;
+  border: 1px solid var(--app-shell-border-color, light-dark(#e3e8ee, #232a35));
+  border-radius: var(--mantine-radius-md);
+  background: light-dark(var(--mantine-color-white), var(--mantine-color-dark-7));
+}
+.filter-spotlight__quick-option:hover {
+  border-color: light-dark(var(--mantine-color-piep-3), var(--mantine-color-piep-7));
+  background: light-dark(var(--mantine-color-piep-0), var(--mantine-color-dark-6));
+}
+.filter-spotlight__facet-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--mantine-spacing-md);
+}
+.filter-spotlight__tag-mode {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: var(--mantine-spacing-xs);
+}
+.filter-form__actions {
+  display: flex;
+  min-height: 62px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--mantine-spacing-md);
+  padding: 12px var(--mantine-spacing-md);
   border-top: 1px solid var(--app-shell-border-color, light-dark(#e3e8ee, #232a35));
   background: light-dark(var(--mantine-color-white), var(--mantine-color-dark-7));
+}
+@media (max-width: 47.99em) {
+  .filter-spotlight__search-zone { padding-inline: var(--mantine-spacing-md); }
+  .filter-spotlight__search-row { grid-template-columns: 1fr; }
+  .filter-spotlight__search-row .mantine-SegmentedControl-root { justify-self: start; }
+  .filter-spotlight__dropdown { width: calc(100% - 2 * var(--mantine-spacing-md)) !important; }
+  .filter-spotlight__section-tabs { padding-inline: var(--mantine-spacing-md); }
+  .filter-spotlight__panel { min-height: 0; padding-inline: var(--mantine-spacing-md); }
+  .filter-spotlight__quick-grid { grid-template-columns: 1fr; }
+}
+@media (max-width: 35.99em) {
+  .filter-spotlight__section-tabs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .filter-spotlight__section-tab { width: 100%; justify-content: space-between; }
+  .filter-spotlight__facet-heading { align-items: flex-start; flex-direction: column; }
+  .filter-form__actions { align-items: stretch; flex-direction: column; }
+  .filter-form__actions > .mantine-Group-root { display: grid; grid-template-columns: 1fr 1fr; }
 }
 
 .status-dot {

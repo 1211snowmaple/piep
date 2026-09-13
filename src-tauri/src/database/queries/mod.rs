@@ -2478,25 +2478,29 @@ impl Database {
         let sql = |filtered: bool| -> Result<&'static str, String> {
             match (kind, filtered) {
                 ("tags" | "tag", false) => Ok("SELECT t.name, COUNT(dt.download_id) AS count
+                           , NULL AS sources
                      FROM tags t
                      JOIN download_tags dt ON dt.tag_id = t.id
                      GROUP BY t.id, t.name
                      ORDER BY count DESC, t.name ASC
                      LIMIT ?1"),
                 ("tags" | "tag", true) => Ok("SELECT t.name, COUNT(dt.download_id) AS count
+                           , NULL AS sources
                      FROM tags t
                      JOIN download_tags dt ON dt.tag_id = t.id
                      WHERE t.name LIKE ?1 ESCAPE '\\' COLLATE NOCASE
                      GROUP BY t.id, t.name
                      ORDER BY count DESC, t.name ASC
                      LIMIT ?2"),
-                ("authors" | "author", false) => Ok("SELECT author_name, COUNT(*) AS count
+                ("authors" | "author", false) => Ok("SELECT author_name, COUNT(*) AS count,
+                            GROUP_CONCAT(DISTINCT source) AS sources
                      FROM downloads
                      WHERE author_name IS NOT NULL AND author_name != ''
                      GROUP BY author_name
                      ORDER BY count DESC, author_name ASC
                      LIMIT ?1"),
-                ("authors" | "author", true) => Ok("SELECT author_name, COUNT(*) AS count
+                ("authors" | "author", true) => Ok("SELECT author_name, COUNT(*) AS count,
+                            GROUP_CONCAT(DISTINCT source) AS sources
                      FROM downloads
                      WHERE author_name IS NOT NULL AND author_name != ''
                        AND author_name LIKE ?1 ESCAPE '\\' COLLATE NOCASE
@@ -2517,6 +2521,13 @@ impl Database {
                 Ok(FacetCount {
                     name: row.get(0)?,
                     count: row.get(1)?,
+                    sources: row
+                        .get::<_, Option<String>>(2)?
+                        .unwrap_or_default()
+                        .split(',')
+                        .filter(|source| !source.is_empty())
+                        .map(str::to_string)
+                        .collect(),
                 })
             };
             let mut facets = Vec::new();
@@ -6983,6 +6994,7 @@ impl Database {
                 Ok(FacetCount {
                     name: row.get(0)?,
                     count: row.get(1)?,
+                    sources: Vec::new(),
                 })
             })
             .map_err(|e| format!("Entity tag query failed: {e}"))?;
@@ -7239,6 +7251,7 @@ impl Database {
                     Ok(FacetCount {
                         name: row.get(0)?,
                         count: row.get(1)?,
+                        sources: Vec::new(),
                     })
                 })
                 .map_err(|e| format!("Dashboard facet query failed: {}", e))?;
@@ -7759,9 +7772,9 @@ impl Database {
 
     /// `include_entities` を落とすと、作者・シリーズの重い集計を省略する。
     ///
-    /// ライブラリの絞り込みUIはタグと種別しか使わないのに、開くたびに相関
-    /// サブクエリを含む集計が2本走っていた。大規模ライブラリでは、この2本が
-    /// 画面表示の待ち時間の大半を占める。
+    /// 絞り込みUIに要る作者名・タグ・種別は軽い集計で返しつつ、
+    /// 作者・シリーズカード用の相関サブクエリ2本だけを省く。大規模ライブラリでは
+    /// この2本が画面表示の待ち時間の大半を占める。
     pub fn get_filter_facets_with(&self, include_entities: bool) -> Result<FilterFacets, String> {
         let generation = self.library_generation()?;
         let cache_key = if include_entities { "full" } else { "light" };
@@ -7781,6 +7794,13 @@ impl Database {
                     Ok(FacetCount {
                         name: row.get(0)?,
                         count: row.get(1)?,
+                        sources: row
+                            .get::<_, Option<String>>(2)?
+                            .unwrap_or_default()
+                            .split(',')
+                            .filter(|source| !source.is_empty())
+                            .map(str::to_string)
+                            .collect(),
                     })
                 })
                 .map_err(|e| format!("Facet query failed: {}", e))?;
@@ -7827,7 +7847,7 @@ impl Database {
 
         let result = FilterFacets {
             tags: collect(
-                "SELECT t.name, COUNT(dt.download_id) AS count
+                "SELECT t.name, COUNT(dt.download_id) AS count, NULL AS sources
                  FROM tags t
                  JOIN download_tags dt ON dt.tag_id = t.id
                  GROUP BY t.id, t.name
@@ -7835,7 +7855,8 @@ impl Database {
                  LIMIT 500",
             )?,
             authors: collect(
-                "SELECT author_name, COUNT(*) AS count
+                "SELECT author_name, COUNT(*) AS count,
+                        GROUP_CONCAT(DISTINCT source) AS sources
                  FROM downloads
                  WHERE author_name IS NOT NULL AND author_name != ''
                  GROUP BY author_name
@@ -7907,14 +7928,14 @@ impl Database {
             )?
             },
             content_types: collect(
-                "SELECT content_type, COUNT(*) AS count
+                "SELECT content_type, COUNT(*) AS count, NULL AS sources
                  FROM downloads
                  WHERE content_type IS NOT NULL AND content_type != ''
                  GROUP BY content_type
                  ORDER BY count DESC, content_type ASC",
             )?,
             asset_types: collect(
-                "SELECT asset_type, COUNT(*) AS count
+                "SELECT asset_type, COUNT(*) AS count, NULL AS sources
                  FROM assets
                  WHERE asset_type IS NOT NULL AND asset_type != ''
                  GROUP BY asset_type
@@ -11325,6 +11346,7 @@ fn facet_counts_bytes(facets: &[FacetCount]) -> usize {
             facet
                 .name
                 .len()
+                .saturating_add(facet.sources.iter().map(String::len).sum::<usize>())
                 .saturating_add(std::mem::size_of::<FacetCount>())
         })
         .sum()
