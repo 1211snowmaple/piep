@@ -517,6 +517,13 @@ export default function SavePage() {
   const retryCount = items.filter(
     (item) => isPendingSave(item) && item.status === "failed",
   ).length;
+  const saveActionLabel = !pendingCount
+    ? selectedCount
+      ? "選択したものは保存済みです"
+      : "保存する項目を選択"
+    : retryCount === pendingCount
+      ? `失敗した${pendingCount}件をやり直す`
+      : `${pendingCount}件をライブラリに保存`;
   const targetKind = describeDownloadTarget(currentUrl).kind;
   // 古いのは一覧のほう。一覧が無いうちは、古くなりようがない。
   const analysisStale =
@@ -1416,19 +1423,129 @@ export default function SavePage() {
           data-collapsed={candidateCollapsed || undefined}
         >
           {candidateCollapsed ? (
-            <Tooltip label="保存候補を開く" position="left">
+            <Stack
+              className="candidate-rail"
+              align="center"
+              gap={4}
+              py="sm"
+              h="100%"
+            >
               <ActionIcon
+                className="candidate-rail__action"
                 variant="subtle"
                 color="gray"
                 size="lg"
-                mt="sm"
-                mx="auto"
                 aria-label="保存候補を開く"
                 onClick={() => setCandidateCollapsed(false)}
               >
                 <Icons.panelOpen size={IconSize.nav} />
               </ActionIcon>
-            </Tooltip>
+              <Divider w={30} />
+              <ActionIcon
+                className="candidate-rail__action"
+                variant="light"
+                color={analysisStale ? "yellow" : "piep"}
+                size="lg"
+                loading={analyzing}
+                disabled={!runtime || saving || targetKind === "unsupported"}
+                aria-label={analysisStale ? "候補を再取得" : "候補を取得"}
+                onClick={() => analyze()}
+              >
+                {analysisStale ? (
+                  <Icons.retry size={IconSize.action} />
+                ) : (
+                  <Icons.search size={IconSize.action} />
+                )}
+              </ActionIcon>
+              <div
+                className="candidate-rail__summary"
+                role="status"
+                aria-label={
+                  items.length
+                    ? `保存候補 ${items.length}件中${selectedCount}件を選択`
+                    : "保存候補はまだありません"
+                }
+              >
+                <Icons.select size={IconSize.action} />
+                <Text component="span" fz={9} fw={700}>
+                  {items.length ? `${selectedCount}/${items.length}` : "–"}
+                </Text>
+              </div>
+              <div className="candidate-rail__spacer" />
+              {saving && (
+                <div
+                  className="candidate-rail__progress"
+                  role="status"
+                  aria-label={
+                    progress
+                      ? `${canceling ? "中止しています" : progress.text} ${progress.current}/${progress.total}`
+                      : "保存の準備をしています"
+                  }
+                >
+                  {canceling ? (
+                    <Icons.pending size={IconSize.action} />
+                  ) : (
+                    <Loader size={IconSize.action} />
+                  )}
+                  <Text component="span" fz={9} fw={700}>
+                    {progress ? `${progress.current}/${progress.total}` : "…"}
+                  </Text>
+                  <Progress
+                    value={
+                      progress && progress.total > 0
+                        ? (progress.current / progress.total) * 100
+                        : 0
+                    }
+                    animated={!canceling}
+                    color={canceling ? "gray" : undefined}
+                    size={3}
+                    w={30}
+                    aria-hidden
+                  />
+                </div>
+              )}
+              {!saving && (
+                <ActionIcon
+                  className="candidate-rail__action"
+                  variant="light"
+                  color="piep"
+                  size="lg"
+                  disabled={!runtime || !pendingCount}
+                  aria-label={saveActionLabel}
+                  onClick={execute}
+                >
+                  <Icons.collect size={IconSize.action} />
+                </ActionIcon>
+              )}
+              {saving && (
+                <ActionIcon
+                  className="candidate-rail__action"
+                  variant="light"
+                  color="red"
+                  size="lg"
+                  loading={canceling}
+                  disabled={canceling}
+                  aria-label={canceling ? "中止しています" : "保存を中止"}
+                  onClick={() =>
+                    saveOperationRef.current &&
+                    requestOperationCancel(saveOperationRef.current.id)
+                  }
+                >
+                  <Icons.cancel size={IconSize.action} />
+                </ActionIcon>
+              )}
+              <Divider w={30} />
+              <ActionIcon
+                className="candidate-rail__action"
+                variant="subtle"
+                color="gray"
+                size="lg"
+                aria-label="ライブラリを開く"
+                onClick={() => navigate("/library")}
+              >
+                <Icons.library size={IconSize.action} />
+              </ActionIcon>
+            </Stack>
           ) : (
             <Stack h="100%" gap={0}>
               <Box p="md">
@@ -1630,13 +1747,7 @@ export default function SavePage() {
                     disabled={!runtime || !pendingCount}
                     onClick={execute}
                   >
-                    {!pendingCount
-                      ? selectedCount
-                        ? "選択したものは保存済みです"
-                        : "保存する項目を選択"
-                      : retryCount === pendingCount
-                        ? `失敗した${pendingCount}件をやり直す`
-                        : `${pendingCount}件をライブラリに保存`}
+                    {saveActionLabel}
                   </Button>
                 )}
                 <Button

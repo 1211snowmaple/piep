@@ -141,4 +141,30 @@ describe("SavePage の Rust 保存ジョブ", () => {
     finish(summary("canceled"));
     await waitFor(() => expect(hasUnsavedWork("close")).toBe(false));
   });
+
+  it("候補欄をたたんでも進捗・中止・ライブラリを残す", async () => {
+    let finish!: (value: ReturnType<typeof summary>) => void;
+    jobs.wait.mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+    renderSavePage();
+    await collectCandidates();
+    fireEvent.click(screen.getByRole("button", { name: "2件をライブラリに保存" }));
+    await waitFor(() => expect(jobs.start).toHaveBeenCalled());
+
+    fireEvent.click(screen.getByRole("button", { name: "保存候補をたたむ" }));
+
+    expect(screen.getByRole("button", { name: "保存候補を開く" })).toBeInTheDocument();
+    expect(screen.getByRole("status", { name: "保存候補 2件中2件を選択" })).toBeInTheDocument();
+    expect(screen.getByRole("status", { name: /保存の準備をしています 0\/2/ })).toBeInTheDocument();
+    expect(screen.getByText("0/2")).toBeInTheDocument();
+    expect(screen.queryByText("保存中")).toBeNull();
+    expect(screen.queryByText("中止")).toBeNull();
+    expect(screen.getByRole("button", { name: "ライブラリを開く" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "保存を中止" }));
+    expect(await screen.findByRole("button", { name: "中止しています" })).toBeDisabled();
+    await waitFor(() => expect(jobs.cancel).toHaveBeenCalledWith("save-1"));
+
+    finish(summary("canceled"));
+    await waitFor(() => expect(hasUnsavedWork("close")).toBe(false));
+  });
 });

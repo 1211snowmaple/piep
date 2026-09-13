@@ -2341,7 +2341,28 @@ select {
 }
 
 .candidate-pane { background: light-dark(#fbfcfd, #11161e); }
-.candidate-pane[data-collapsed] { display: flex; align-items: flex-start; }
+.candidate-pane[data-collapsed] { display: block; }
+.candidate-rail { width: 100%; min-height: 0; }
+.candidate-rail__spacer { flex: 1; min-height: 8px; }
+.candidate-rail__summary,
+.candidate-rail__progress {
+  display: grid;
+  width: 42px;
+  min-height: 42px;
+  place-items: center;
+  align-content: center;
+  gap: 2px;
+  border-radius: var(--mantine-radius-md);
+  color: light-dark(var(--mantine-color-gray-7), var(--mantine-color-gray-3));
+  background: light-dark(#f1f4f7, #1a212b);
+  font-variant-numeric: tabular-nums;
+}
+.candidate-rail__summary { min-height: 44px; }
+.candidate-rail__progress {
+  min-height: 54px;
+  color: light-dark(var(--mantine-color-piep-7), var(--mantine-color-piep-3));
+  background: light-dark(#eaf5ff, #13283a);
+}
 /* The grip is the whole column, so it centres in the gap rather than hugging
    one side of it. */
 .save-resizer { display: flex; align-items: center; justify-content: center; min-width: 0; min-height: 0; color: var(--mantine-color-dimmed); cursor: col-resize; touch-action: none; border-radius: var(--mantine-radius-sm); }
