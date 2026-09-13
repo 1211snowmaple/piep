@@ -2851,6 +2851,23 @@ fn facet_search_limits_in_sql_and_keeps_direct_rare_matches() {
         &["希少タグ"],
         "本文",
     );
+    let fanbox_id = insert_download_unindexed(
+        &db,
+        &storage,
+        "facet-3",
+        "作品3",
+        "人気作者",
+        &["FANBOXタグ"],
+        "本文",
+    );
+    db.conn
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE downloads SET source = 'fanbox' WHERE id = ?1",
+            params![fanbox_id],
+        )
+        .unwrap();
 
     assert_eq!(
         db.search_filter_facets("authors", None, 1).unwrap().len(),
@@ -2863,11 +2880,69 @@ fn facet_search_limits_in_sql_and_keeps_direct_rare_matches() {
         escaped.first().map(|facet| facet.name.as_str()),
         Some("作者%特別")
     );
+    let same_name = db
+        .search_filter_facets("authors", Some("人気作者"), 10)
+        .unwrap();
+    let same_name = same_name
+        .iter()
+        .find(|facet| facet.name == "人気作者")
+        .expect("同名作者の候補");
+    assert_eq!(same_name.count, 2);
+    assert_eq!(
+        same_name
+            .sources
+            .iter()
+            .map(String::as_str)
+            .collect::<HashSet<_>>(),
+        HashSet::from(["pixiv", "fanbox"]),
+    );
     let rare = db.search_filter_facets("tags", Some("希少"), 10).unwrap();
     assert_eq!(
         rare.first().map(|facet| facet.name.as_str()),
         Some("希少タグ")
     );
+}
+
+#[test]
+fn same_name_author_filter_composes_with_source() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    insert_download_unindexed(
+        &db,
+        &storage,
+        "same-author-pixiv",
+        "pixivの作品",
+        "同名作者",
+        &["創作"],
+        "本文",
+    );
+    let fanbox_id = insert_download_unindexed(
+        &db,
+        &storage,
+        "same-author-fanbox",
+        "FANBOXの作品",
+        "同名作者",
+        &["創作"],
+        "本文",
+    );
+    db.conn
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE downloads SET source = 'fanbox' WHERE id = ?1",
+            params![fanbox_id],
+        )
+        .unwrap();
+
+    let fanbox_only = SearchV2Params {
+        source: Some("fanbox".to_string()),
+        authors_include: Some(vec!["同名作者".to_string()]),
+        ..v2_params(None, 20, None)
+    };
+    let result = db.search_downloads_v2(&fanbox_only).unwrap();
+    assert_eq!(result.items.len(), 1);
+    assert_eq!(result.items[0].source, "fanbox");
+    assert_eq!(result.items[0].title, "FANBOXの作品");
 }
 
 #[test]
@@ -6480,6 +6555,102 @@ fn a_candidate_nobody_answered_survives_into_the_next_job() {
 }
 
 #[test]
+fn held_candidates_survive_backups_and_never_join_normal_retries() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let request = StartUpdateJobRequest {
+        scope: "save".into(),
+        mode: "save".into(),
+        work_ids: None,
+        target_ids: None,
+        credentials: None,
+        watch_saved: Some(false),
+        adhoc_targets: None,
+    };
+    let snapshot = db
+        .create_update_job(
+            "held-job",
+            &request,
+            &[UpdateJobItemInput {
+                item_type: "candidate".into(),
+                source: Some("fanbox".into()),
+                source_id: Some("11".into()),
+                target_type: Some("work".into()),
+                title: "作品".into(),
+                payload_json: "{}".into(),
+                status: "queued".into(),
+            }],
+        )
+        .unwrap();
+    let item_id = snapshot.candidates[0].id;
+    db.complete_update_job_item(
+        item_id,
+        "failed",
+        Some("[閲覧制限] 必要な支援額: 月額1000円以上"),
+        None,
+    )
+    .unwrap();
+    db.set_update_job_status("held-job", "failed", None)
+        .unwrap();
+    for _ in 0..2 {
+        db.conn
+            .lock()
+            .unwrap()
+            .execute_batch(include_str!("../acquisition_repair.sql"))
+            .unwrap();
+    }
+    let after = db.update_job_snapshot("held-job").unwrap();
+    assert_eq!(
+        (after.held_count, after.error_count, after.processed),
+        (1, 0, 1)
+    );
+    assert_eq!(after.status, "completed");
+    db.prepare_update_job_resume("held-job", true).unwrap();
+    assert!(db.next_update_job_item("held-job").unwrap().is_none());
+    assert!(db.list_pending_update_candidates(100).unwrap().is_empty());
+    let rows = db.list_update_candidates_after(None, 100).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].status, "held");
+    assert_eq!(rows[0].kind, "new");
+    db.restore_update_candidate(&rows[0]).unwrap();
+    db.set_update_candidate_status("fanbox", "11", "dismissed")
+        .unwrap();
+    db.restore_dismissed_update_candidates().unwrap();
+    assert_eq!(
+        db.update_candidate_status("fanbox", "11")
+            .unwrap()
+            .as_deref(),
+        Some("held")
+    );
+}
+
+#[test]
+fn deleted_revision_becomes_unsaved_without_losing_the_hold() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    db.conn.lock().unwrap().execute_batch("INSERT INTO downloads(source,source_id,title,author_name,author_id,content_type,json_path,downloaded_at)
+        VALUES ('fanbox','11','作品','作者','creator','text','unused','now');").unwrap();
+    db.upsert_update_candidate(&UpdateCandidateInput { source: "fanbox".into(), source_id: "11".into(), kind: "revision".into(),
+        title: "作品".into(), target_type: Some("work".into()), payload_json: serde_json::json!({"kind":"revision", "originalData":{"localVersion":1,"localSavedAt":"old"}, "holdKind":"restricted"}).to_string() }).unwrap();
+    db.set_update_candidate_status("fanbox", "11", "held")
+        .unwrap();
+    db.conn
+        .lock()
+        .unwrap()
+        .execute(
+            "DELETE FROM downloads WHERE source='fanbox' AND source_id='11'",
+            [],
+        )
+        .unwrap();
+    let rows = db.list_update_candidates_after(None, 100).unwrap();
+    assert_eq!(rows[0].kind, "new");
+    assert_eq!(rows[0].status, "held");
+    assert_eq!(rows[0].target_type, None);
+    assert!(!rows[0].payload_json.contains("localVersion"));
+    assert!(db.pending_revision_keys().unwrap().is_empty());
+}
+
+#[test]
 fn restored_candidates_reject_untrusted_provider_fields() {
     let (_temp, root, storage) = temp_paths();
     let db = Database::open(&root.join("piep.db"), &storage).unwrap();
@@ -6662,6 +6833,112 @@ fn update_job_candidates_can_be_queued_for_saving() {
     assert_eq!(changed, 1);
     let snapshot = db.update_job_snapshot("job-candidates").unwrap();
     assert_eq!(snapshot.candidates[0].status, "queued");
+}
+
+#[test]
+fn saving_candidates_after_cancel_does_not_resume_the_canceled_queue() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let request = StartUpdateJobRequest {
+        scope: "author".to_string(),
+        mode: "check_only".to_string(),
+        work_ids: None,
+        target_ids: None,
+        credentials: None,
+        watch_saved: None,
+        adhoc_targets: None,
+    };
+    db.create_update_job(
+        "job-canceled-candidates",
+        &request,
+        &[
+            UpdateJobItemInput {
+                item_type: "target".to_string(),
+                source: Some("pixiv".to_string()),
+                source_id: Some("checked".to_string()),
+                target_type: Some("author".to_string()),
+                title: "確認済み".to_string(),
+                payload_json: "{}".to_string(),
+                status: "done".to_string(),
+            },
+            UpdateJobItemInput {
+                item_type: "target".to_string(),
+                source: Some("pixiv".to_string()),
+                source_id: Some("interrupted".to_string()),
+                target_type: Some("author".to_string()),
+                title: "中止した確認".to_string(),
+                payload_json: "{}".to_string(),
+                status: "running".to_string(),
+            },
+            UpdateJobItemInput {
+                item_type: "candidate".to_string(),
+                source: Some("pixiv".to_string()),
+                source_id: Some("auto-save-interrupted".to_string()),
+                target_type: Some("author".to_string()),
+                title: "中止した自動保存".to_string(),
+                payload_json: "{}".to_string(),
+                status: "queued".to_string(),
+            },
+            UpdateJobItemInput {
+                item_type: "candidate".to_string(),
+                source: Some("pixiv".to_string()),
+                source_id: Some("selected".to_string()),
+                target_type: Some("author".to_string()),
+                title: "今回選んだ候補".to_string(),
+                payload_json: "{}".to_string(),
+                status: "candidate".to_string(),
+            },
+        ],
+    )
+    .unwrap();
+    db.prepare_update_job_resume("job-canceled-candidates", false)
+        .unwrap();
+    db.set_update_job_status("job-canceled-candidates", "canceled", None)
+        .unwrap();
+
+    let before = db.update_job_snapshot("job-canceled-candidates").unwrap();
+    assert_eq!(
+        db.queue_update_job_candidates("job-canceled-candidates", &[i64::MAX])
+            .unwrap(),
+        0
+    );
+    let untouched = db
+        .list_update_job_item_states("job-canceled-candidates")
+        .unwrap();
+    assert!(untouched.iter().any(|item| {
+        item.source_id.as_deref() == Some("interrupted") && item.status == "queued"
+    }));
+
+    let selected_id = before
+        .candidates
+        .iter()
+        .find(|candidate| candidate.source_id == "selected")
+        .unwrap()
+        .id;
+    assert_eq!(
+        db.queue_update_job_candidates("job-canceled-candidates", &[selected_id])
+            .unwrap(),
+        1
+    );
+    db.set_update_job_status("job-canceled-candidates", "queued", None)
+        .unwrap();
+
+    let next = db
+        .next_update_job_item("job-canceled-candidates")
+        .unwrap()
+        .unwrap();
+    assert_eq!(next.item_type, "candidate");
+    assert_eq!(next.source_id.as_deref(), Some("selected"));
+
+    let states = db
+        .list_update_job_item_states("job-canceled-candidates")
+        .unwrap();
+    assert!(states.iter().any(|item| {
+        item.source_id.as_deref() == Some("interrupted") && item.status == "skipped"
+    }));
+    assert!(states.iter().any(|item| {
+        item.source_id.as_deref() == Some("auto-save-interrupted") && item.status == "candidate"
+    }));
 }
 
 #[test]

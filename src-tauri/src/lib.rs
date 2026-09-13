@@ -345,6 +345,8 @@ pub fn run() -> tauri::Result<()> {
             commands::update_jobs::clear_update_job,
             commands::update_jobs::clear_finished_update_jobs,
             commands::update_jobs::dismiss_update_candidate,
+            commands::update_jobs::list_deferred_update_candidates,
+            commands::update_jobs::recheck_deferred_update_candidates,
             commands::update_jobs::count_dismissed_update_candidates,
             commands::update_jobs::list_pending_revisions,
             commands::update_jobs::preview_pending_revision,

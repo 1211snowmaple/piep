@@ -96,6 +96,7 @@ const SAVE_JOB_ROW_STATUS: Record<string, SidebarItem["status"]> = {
   done: "success",
   skipped: "skipped",
   failed: "failed",
+  held: "held",
 };
 
 const SAVE_JOB_STATUS_RANK: Partial<
@@ -106,6 +107,7 @@ const SAVE_JOB_STATUS_RANK: Partial<
   success: 2,
   skipped: 2,
   failed: 2,
+  held: 2,
 };
 
 export default function SavePage() {
@@ -266,10 +268,9 @@ export default function SavePage() {
 
   useEffect(() => {
     let cancelled = false;
+    const requestedUrl = searchParams.get("url");
     const home =
-      searchParams.get("url") ||
-      getProvider(source).homeUrl ||
-      "https://www.pixiv.net/";
+      requestedUrl || getProvider(source).homeUrl || "https://www.pixiv.net/";
     setCurrentUrl(home);
     setAddress(home);
     setItems([]);
@@ -304,12 +305,25 @@ export default function SavePage() {
         ]);
         if (cancelled) return;
         if (standing) {
+          // 「アプリ内で開く」はこの query に行き先を載せて Save 画面へ来る。
+          // 大きいウィンドウを引き継ぐだけでは、その行き先を捨てて以前のページを
+          // 表示し続けてしまう。いま表示を担っている大きいウィンドウへ渡す。
+          let adoptedUrl = standing;
+          if (requestedUrl && requestedUrl !== standing) {
+            const userAgent =
+              source === "fanbox"
+                ? (await store.get<string>("fanbox_user_agent")) || undefined
+                : undefined;
+            await openStandaloneBrowser(requestedUrl, { source, userAgent });
+            adoptedUrl = requestedUrl;
+          }
+          if (cancelled) return;
           detachedRef.current = true;
           detachedSourceRef.current = source;
           setDetached(true);
-          setCurrentUrl(standing);
-          setAddress(standing);
-          rememberVisit(standing);
+          setCurrentUrl(adoptedUrl);
+          setAddress(adoptedUrl);
+          rememberVisit(adoptedUrl);
           // A detached page must have a single renderer. This also clears an
           // embedded view left behind by an interrupted previous mount.
           await destroyEmbeddedBrowser().catch(() => undefined);
@@ -425,22 +439,30 @@ export default function SavePage() {
         (event) => {
           if (event.payload.source !== source) return;
           if (detachedSourceRef.current !== event.payload.source) return;
-          reattachRef.current();
+          reattachRef.current(event.payload.url);
         },
       );
     // In-page navigation cannot reach us as an event: this WebView loads a
     // remote origin, so Tauri's IPC is deliberately not injected into it.
-    // While the large window has the session, that window is the one to poll.
+    // One low-rate read covers both URL sync and the missed-close fallback;
+    // a second 700ms watchdog used to duplicate native IPC while detached.
     const poll = window.setInterval(() => {
       const read = detachedRef.current
         ? getStandaloneBrowserUrl(source)
         : getEmbeddedBrowserUrl();
       read
         .then((url) => {
-          if (url) applyUrl(url);
+          if (url) {
+            applyUrl(url);
+          } else if (
+            detachedRef.current &&
+            detachedSourceRef.current === source
+          ) {
+            reattachRef.current();
+          }
         })
         .catch(() => undefined);
-    }, 2500);
+    }, 2000);
     return () => {
       cancelAnimationFrame(frame);
       observer.disconnect();
@@ -492,11 +514,18 @@ export default function SavePage() {
   // 保存ボタンが名乗る件数は、実際に取りに行く件数と同じでなければならない。
   // 済んだものは対象から外れるので、失敗が混じったあとは選択数と食い違う。
   const isPendingSave = (item: SidebarItem) =>
-    item.selected && item.status !== "success" && item.status !== "skipped";
+    item.selected && item.status !== "success" && item.status !== "skipped" && item.status !== "held";
   const pendingCount = items.filter(isPendingSave).length;
   const retryCount = items.filter(
     (item) => isPendingSave(item) && item.status === "failed",
   ).length;
+  const saveActionLabel = !pendingCount
+    ? selectedCount
+      ? "選択したものは保存済みです"
+      : "保存する項目を選択"
+    : retryCount === pendingCount
+      ? `失敗した${pendingCount}件をやり直す`
+      : `${pendingCount}件をライブラリに保存`;
   const targetKind = describeDownloadTarget(currentUrl).kind;
   // 古いのは一覧のほう。一覧が無いうちは、古くなりようがない。
   const analysisStale =
@@ -582,15 +611,12 @@ export default function SavePage() {
       setDetached(false);
       if (!runtime) return;
       appliedBoundsRef.current = "";
-      try {
-        await navigateEmbeddedBrowser(url);
-        await setEmbeddedBrowserVisible(true);
-        syncBrowserBounds();
-      } catch {
-        // The child view may have been torn down while detached; recreate it at
-        // the page the large window was showing.
-        await positionBrowser(url).catch(() => undefined);
-      }
+      // Detaching deliberately destroys the child renderer, so attempting a
+      // navigate first is a guaranteed failed IPC round-trip. Recreate it
+      // directly at the page the large window was showing.
+      await positionBrowser(url).catch(() => undefined);
+      await setEmbeddedBrowserVisible(true).catch(() => undefined);
+      syncBrowserBounds();
     },
     [positionBrowser, runtime, syncBrowserBounds],
   );
@@ -602,30 +628,10 @@ export default function SavePage() {
   };
   // The listener is installed once, so it reaches the current reattach through
   // a ref rather than re-subscribing on every URL change.
-  const reattachRef = useRef<() => void>(() => undefined);
-  reattachRef.current = () => {
-    void reattachBrowser(currentUrlRef.current);
+  const reattachRef = useRef<(url?: string | null) => void>(() => undefined);
+  reattachRef.current = (url) => {
+    void reattachBrowser(url || currentUrlRef.current);
   };
-
-  // The close event is the fast path, but the pane must come back even if it
-  // never arrives - a window manager can tear a window down without one, and a
-  // browser pane stuck behind a placeholder is unusable. Asking the backend
-  // whether the window still exists needs no event at all.
-  useEffect(() => {
-    if (!runtime || !detached) return;
-    const watchdog = window.setInterval(() => {
-      // During a provider handover the old window is intentionally closing and
-      // the new route is already mounted. It must not resurrect a child view.
-      if (detachedSourceRef.current !== source) return;
-      getStandaloneBrowserUrl(source)
-        .then((url) => {
-          if (url) return;
-          reattachRef.current();
-        })
-        .catch(() => undefined);
-    }, 700);
-    return () => window.clearInterval(watchdog);
-  }, [detached, runtime, source]);
 
   // 開いたままの大きいウィンドウを引き継ぐ判断は、**埋め込みを作る前**の
   // 初期化で行う（この上の `useEffect`）。ここにも同じ判断を置いていたころ、
@@ -973,7 +979,7 @@ export default function SavePage() {
     // 保存済みでも取り直す作りなので、素通しにすると本当に再取得される。
     const selected = items.filter(
       (item) =>
-        item.selected && item.status !== "success" && item.status !== "skipped",
+        item.selected && item.status !== "success" && item.status !== "skipped" && item.status !== "held",
     );
     if (!selected.length || !downloadType || !runtime || savingRef.current)
       return;
@@ -1029,6 +1035,11 @@ export default function SavePage() {
           source: itemSource,
           sourceId: item.id,
           title: item.title,
+          ...(itemSource === "fanbox" && "isRestricted" in item.originalData ? { fanboxAccess: {
+            isRestricted: item.originalData.isRestricted === true,
+            feeRequired: item.originalData.feeRequired,
+            creatorId: item.originalData.creatorId,
+          } } : {}),
         })),
         schedule.watchSaved ?? false,
       );
@@ -1048,8 +1059,9 @@ export default function SavePage() {
       invalidateWorkSetViews(queryClient);
       const saved = final.savedCount;
       const failed = final.errorCount;
-      const skipped = Math.max(0, final.processed - saved - failed);
-      const tally = `保存 ${saved} · 保存済み ${skipped} · 失敗 ${failed}`;
+      const held = final.heldCount ?? 0;
+      const skipped = Math.max(0, final.processed - saved - failed - held);
+      const tally = `保存 ${saved} · 保存済み ${skipped} · 失敗 ${failed}${held ? ` · 保留 ${held}（更新 → 保留・非表示から再確認できます）` : ""}`;
       if (final.status === "canceled" || final.status === "canceling") {
         operation.cancel(`${tally} の時点で中止しました`);
         notifications.show({
@@ -1082,8 +1094,8 @@ export default function SavePage() {
       } else {
         operation.complete(tally);
         notifications.show({
-          color: failed ? "yellow" : "green",
-          title: "保存が完了しました",
+          color: failed || held ? "yellow" : "green",
+          title: failed ? "保存が完了しました（一部失敗）" : held ? "保存が完了しました（保留あり）" : "保存が完了しました",
           message: tally,
         });
       }
@@ -1419,19 +1431,129 @@ export default function SavePage() {
           data-collapsed={candidateCollapsed || undefined}
         >
           {candidateCollapsed ? (
-            <Tooltip label="保存候補を開く" position="left">
+            <Stack
+              className="candidate-rail"
+              align="center"
+              gap={4}
+              py="sm"
+              h="100%"
+            >
               <ActionIcon
+                className="candidate-rail__action"
                 variant="subtle"
                 color="gray"
                 size="lg"
-                mt="sm"
-                mx="auto"
                 aria-label="保存候補を開く"
                 onClick={() => setCandidateCollapsed(false)}
               >
                 <Icons.panelOpen size={IconSize.nav} />
               </ActionIcon>
-            </Tooltip>
+              <Divider w={30} />
+              <ActionIcon
+                className="candidate-rail__action"
+                variant="light"
+                color={analysisStale ? "yellow" : "piep"}
+                size="lg"
+                loading={analyzing}
+                disabled={!runtime || saving || targetKind === "unsupported"}
+                aria-label={analysisStale ? "候補を再取得" : "候補を取得"}
+                onClick={() => analyze()}
+              >
+                {analysisStale ? (
+                  <Icons.retry size={IconSize.action} />
+                ) : (
+                  <Icons.search size={IconSize.action} />
+                )}
+              </ActionIcon>
+              <div
+                className="candidate-rail__summary"
+                role="status"
+                aria-label={
+                  items.length
+                    ? `保存候補 ${items.length}件中${selectedCount}件を選択`
+                    : "保存候補はまだありません"
+                }
+              >
+                <Icons.select size={IconSize.action} />
+                <Text component="span" fz={9} fw={700}>
+                  {items.length ? `${selectedCount}/${items.length}` : "–"}
+                </Text>
+              </div>
+              <div className="candidate-rail__spacer" />
+              {saving && (
+                <div
+                  className="candidate-rail__progress"
+                  role="status"
+                  aria-label={
+                    progress
+                      ? `${canceling ? "中止しています" : progress.text} ${progress.current}/${progress.total}`
+                      : "保存の準備をしています"
+                  }
+                >
+                  {canceling ? (
+                    <Icons.pending size={IconSize.action} />
+                  ) : (
+                    <Loader size={IconSize.action} />
+                  )}
+                  <Text component="span" fz={9} fw={700}>
+                    {progress ? `${progress.current}/${progress.total}` : "…"}
+                  </Text>
+                  <Progress
+                    value={
+                      progress && progress.total > 0
+                        ? (progress.current / progress.total) * 100
+                        : 0
+                    }
+                    animated={!canceling}
+                    color={canceling ? "gray" : undefined}
+                    size={3}
+                    w={30}
+                    aria-hidden
+                  />
+                </div>
+              )}
+              {!saving && (
+                <ActionIcon
+                  className="candidate-rail__action"
+                  variant="light"
+                  color="piep"
+                  size="lg"
+                  disabled={!runtime || !pendingCount}
+                  aria-label={saveActionLabel}
+                  onClick={execute}
+                >
+                  <Icons.collect size={IconSize.action} />
+                </ActionIcon>
+              )}
+              {saving && (
+                <ActionIcon
+                  className="candidate-rail__action"
+                  variant="light"
+                  color="red"
+                  size="lg"
+                  loading={canceling}
+                  disabled={canceling}
+                  aria-label={canceling ? "中止しています" : "保存を中止"}
+                  onClick={() =>
+                    saveOperationRef.current &&
+                    requestOperationCancel(saveOperationRef.current.id)
+                  }
+                >
+                  <Icons.cancel size={IconSize.action} />
+                </ActionIcon>
+              )}
+              <Divider w={30} />
+              <ActionIcon
+                className="candidate-rail__action"
+                variant="subtle"
+                color="gray"
+                size="lg"
+                aria-label="ライブラリを開く"
+                onClick={() => navigate("/library")}
+              >
+                <Icons.library size={IconSize.action} />
+              </ActionIcon>
+            </Stack>
           ) : (
             <Stack h="100%" gap={0}>
               <Box p="md">
@@ -1633,13 +1755,7 @@ export default function SavePage() {
                     disabled={!runtime || !pendingCount}
                     onClick={execute}
                   >
-                    {!pendingCount
-                      ? selectedCount
-                        ? "選択したものは保存済みです"
-                        : "保存する項目を選択"
-                      : retryCount === pendingCount
-                        ? `失敗した${pendingCount}件をやり直す`
-                        : `${pendingCount}件をライブラリに保存`}
+                    {saveActionLabel}
                   </Button>
                 )}
                 <Button
@@ -1733,6 +1849,7 @@ const CandidateRow = memo(function CandidateRow({
 });
 
 function StatusIcon({ status }: { status: SidebarItem["status"] }) {
+  if (status === "held") return <Badge color="yellow" size="xs">保留</Badge>;
   if (status === "downloading") return <Loader size="xs" />;
   if (status === "success")
     return (

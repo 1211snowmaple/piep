@@ -145,9 +145,9 @@ export async function searchDownloadsV2(params: SearchV2Params): Promise<SearchV
 }
 
 /**
- * The author/series aggregates are expensive and only the filter drawer's tag
- * and content-type lists are needed for browsing; `searchEntityFacets` serves
- * the entity tabs instead.
+ * Author/series entity cards are expensive. The light call still returns the
+ * drawer's author names, tags, and content types, while `searchEntityFacets`
+ * serves the richer entity tabs separately.
  */
 export async function getFilterFacets(includeEntities = false): Promise<FilterFacets> {
   return invoke<FilterFacets>("db_get_filter_facets", { includeEntities });

@@ -848,6 +848,9 @@ pub struct LibraryShelfCounts {
 pub struct FacetCount {
     pub name: String,
     pub count: i64,
+    /// 保存元ごとに同名があり得る作者候補で使う。タグなどでは空。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sources: Vec<String>,
 }
 
 /// 作者・シリーズカードで使うエンティティ候補
@@ -1025,6 +1028,8 @@ pub struct UpdateJobSummary {
     pub candidate_count: i64,
     pub saved_count: i64,
     pub error_count: i64,
+    #[serde(default)]
+    pub held_count: i64,
     pub active_label: Option<String>,
     pub started_at: String,
     pub updated_at: String,
@@ -1073,6 +1078,8 @@ pub struct UpdateJobSnapshot {
     pub candidate_count: i64,
     pub saved_count: i64,
     pub error_count: i64,
+    #[serde(default)]
+    pub held_count: i64,
     pub active_label: Option<String>,
     pub logs: Vec<UpdateJobLog>,
     pub candidates: Vec<UpdateJobCandidate>,

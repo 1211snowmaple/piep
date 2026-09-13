@@ -2478,25 +2478,29 @@ impl Database {
         let sql = |filtered: bool| -> Result<&'static str, String> {
             match (kind, filtered) {
                 ("tags" | "tag", false) => Ok("SELECT t.name, COUNT(dt.download_id) AS count
+                           , NULL AS sources
                      FROM tags t
                      JOIN download_tags dt ON dt.tag_id = t.id
                      GROUP BY t.id, t.name
                      ORDER BY count DESC, t.name ASC
                      LIMIT ?1"),
                 ("tags" | "tag", true) => Ok("SELECT t.name, COUNT(dt.download_id) AS count
+                           , NULL AS sources
                      FROM tags t
                      JOIN download_tags dt ON dt.tag_id = t.id
                      WHERE t.name LIKE ?1 ESCAPE '\\' COLLATE NOCASE
                      GROUP BY t.id, t.name
                      ORDER BY count DESC, t.name ASC
                      LIMIT ?2"),
-                ("authors" | "author", false) => Ok("SELECT author_name, COUNT(*) AS count
+                ("authors" | "author", false) => Ok("SELECT author_name, COUNT(*) AS count,
+                            GROUP_CONCAT(DISTINCT source) AS sources
                      FROM downloads
                      WHERE author_name IS NOT NULL AND author_name != ''
                      GROUP BY author_name
                      ORDER BY count DESC, author_name ASC
                      LIMIT ?1"),
-                ("authors" | "author", true) => Ok("SELECT author_name, COUNT(*) AS count
+                ("authors" | "author", true) => Ok("SELECT author_name, COUNT(*) AS count,
+                            GROUP_CONCAT(DISTINCT source) AS sources
                      FROM downloads
                      WHERE author_name IS NOT NULL AND author_name != ''
                        AND author_name LIKE ?1 ESCAPE '\\' COLLATE NOCASE
@@ -2517,6 +2521,13 @@ impl Database {
                 Ok(FacetCount {
                     name: row.get(0)?,
                     count: row.get(1)?,
+                    sources: row
+                        .get::<_, Option<String>>(2)?
+                        .unwrap_or_default()
+                        .split(',')
+                        .filter(|source| !source.is_empty())
+                        .map(str::to_string)
+                        .collect(),
                 })
             };
             let mut facets = Vec::new();
@@ -5175,7 +5186,8 @@ impl Database {
         let mut stmt = conn
             .prepare(
                 "SELECT id, status, scope, mode, totals, processed, candidate_count,
-                        saved_count, error_count, active_label, started_at, updated_at, finished_at
+                        saved_count, error_count, active_label, started_at, updated_at, finished_at,
+                        (SELECT COUNT(*) FROM update_job_items i WHERE i.job_id=update_jobs.id AND i.status='held')
                  FROM update_jobs
                  ORDER BY updated_at DESC, started_at DESC
                  LIMIT 30",
@@ -5206,7 +5218,8 @@ impl Database {
         let summary = conn
             .query_row(
                 "SELECT id, status, scope, mode, totals, processed, candidate_count,
-                        saved_count, error_count, active_label, started_at, updated_at, finished_at
+                        saved_count, error_count, active_label, started_at, updated_at, finished_at,
+                        (SELECT COUNT(*) FROM update_job_items i WHERE i.job_id=update_jobs.id AND i.status='held')
                  FROM update_jobs WHERE id = ?1",
                 params![job_id],
                 update_job_summary_from_row,
@@ -5307,7 +5320,12 @@ impl Database {
                         selected: matches!(status.as_str(), "candidate" | "queued"),
                         status,
                         kind,
-                        error,
+                        error: error.or_else(|| {
+                            payload
+                                .get("holdReason")
+                                .and_then(|v| v.as_str())
+                                .map(str::to_string)
+                        }),
                     })
                 },
             )
@@ -5335,6 +5353,7 @@ impl Database {
             candidate_count: summary.candidate_count,
             saved_count: summary.saved_count,
             error_count: summary.error_count,
+            held_count: summary.held_count,
             active_label: summary.active_label,
             logs,
             candidates,
@@ -5368,6 +5387,16 @@ impl Database {
             params![status, active_label, now, terminal, job_id],
         )
         .map_err(|e| format!("Failed to update job status: {}", e))?;
+        Ok(())
+    }
+
+    pub fn set_update_job_item_payload(&self, item_id: i64, payload: &str) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE update_job_items SET payload_json=?2 WHERE id=?1",
+            params![item_id, payload],
+        )
+        .map_err(|e| e.to_string())?;
         Ok(())
     }
 
@@ -5497,7 +5526,8 @@ impl Database {
         let summary = conn
             .query_row(
                 "SELECT id, status, scope, mode, totals, processed, candidate_count,
-                        saved_count, error_count, active_label, started_at, updated_at, finished_at
+                        saved_count, error_count, active_label, started_at, updated_at, finished_at,
+                        (SELECT COUNT(*) FROM update_job_items i WHERE i.job_id=update_jobs.id AND i.status='held')
                  FROM update_jobs WHERE id = ?1",
                 params![job_id],
                 update_job_summary_from_row,
@@ -5760,10 +5790,60 @@ impl Database {
         if candidate_ids.is_empty() {
             return Ok(0);
         }
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| format!("Failed to begin update candidate queue: {e}"))?;
+        let job_status: String = tx
+            .query_row(
+                "SELECT status FROM update_jobs WHERE id = ?1",
+                params![job_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("Update job not found: {e}"))?;
+
+        // A canceled worker leaves its unfinished item queued so an explicit
+        // resume can continue where it stopped. Saving selected candidates is
+        // a different action: it must not implicitly resume that old queue.
+        // Keep unfinished candidates available for a later choice, and settle
+        // the abandoned checks so only the candidate IDs below can run now.
+        if job_status == "canceled" {
+            let mut has_selected_candidate = false;
+            for id in candidate_ids {
+                has_selected_candidate |= tx
+                    .query_row(
+                        "SELECT EXISTS(
+                            SELECT 1 FROM update_job_items
+                            WHERE id = ?1 AND job_id = ?2 AND item_type = 'candidate'
+                              AND status IN ('candidate', 'failed', 'queued', 'running')
+                         )",
+                        params![id, job_id],
+                        |row| row.get::<_, bool>(0),
+                    )
+                    .map_err(|e| format!("Failed to validate update candidate: {e}"))?;
+            }
+            // Preserve the existing no-op guarantee for stale or foreign IDs.
+            // In particular, an invalid save request must not discard the
+            // queue which an explicit resume could still continue.
+            if !has_selected_candidate {
+                tx.commit()
+                    .map_err(|e| format!("Failed to finish empty candidate queue: {e}"))?;
+                return Ok(0);
+            }
+            tx.execute(
+                "UPDATE update_job_items
+                 SET status = CASE WHEN item_type = 'candidate' THEN 'candidate' ELSE 'skipped' END,
+                     error = NULL,
+                     updated_at = CURRENT_TIMESTAMP
+                 WHERE job_id = ?1 AND status IN ('queued', 'running')",
+                params![job_id],
+            )
+            .map_err(|e| format!("Failed to abandon canceled update items: {e}"))?;
+        }
+
         let mut changed = 0i64;
         for id in candidate_ids {
-            changed += conn
+            changed += tx
                 .execute(
                     "UPDATE update_job_items
                      SET status = 'queued', error = NULL, updated_at = CURRENT_TIMESTAMP
@@ -5773,6 +5853,8 @@ impl Database {
                 .map_err(|e| format!("Failed to queue update candidate: {}", e))?
                 as i64;
         }
+        tx.commit()
+            .map_err(|e| format!("Failed to commit update candidate queue: {e}"))?;
         Ok(changed)
     }
 
@@ -5798,7 +5880,7 @@ impl Database {
                            WHERE job_id = ?1 AND (item_type != 'candidate' OR status != 'candidate')),
                  processed = (SELECT COUNT(*) FROM update_job_items
                               WHERE job_id = ?1 AND (item_type != 'candidate' OR status != 'candidate')
-                                AND status IN ('done', 'saved', 'skipped', 'failed')),
+                                AND status IN ('done', 'saved', 'skipped', 'failed', 'held')),
                  candidate_count = (SELECT COUNT(*) FROM update_job_items WHERE job_id = ?1 AND item_type = 'candidate'),
                  saved_count = (SELECT COUNT(*) FROM update_job_items WHERE job_id = ?1 AND status = 'saved'),
                  error_count = (SELECT COUNT(*) FROM update_job_items WHERE job_id = ?1 AND status = 'failed')
@@ -6931,6 +7013,7 @@ impl Database {
                 Ok(FacetCount {
                     name: row.get(0)?,
                     count: row.get(1)?,
+                    sources: Vec::new(),
                 })
             })
             .map_err(|e| format!("Entity tag query failed: {e}"))?;
@@ -7187,6 +7270,7 @@ impl Database {
                     Ok(FacetCount {
                         name: row.get(0)?,
                         count: row.get(1)?,
+                        sources: Vec::new(),
                     })
                 })
                 .map_err(|e| format!("Dashboard facet query failed: {}", e))?;
@@ -7707,9 +7791,9 @@ impl Database {
 
     /// `include_entities` を落とすと、作者・シリーズの重い集計を省略する。
     ///
-    /// ライブラリの絞り込みUIはタグと種別しか使わないのに、開くたびに相関
-    /// サブクエリを含む集計が2本走っていた。大規模ライブラリでは、この2本が
-    /// 画面表示の待ち時間の大半を占める。
+    /// 絞り込みUIに要る作者名・タグ・種別は軽い集計で返しつつ、
+    /// 作者・シリーズカード用の相関サブクエリ2本だけを省く。大規模ライブラリでは
+    /// この2本が画面表示の待ち時間の大半を占める。
     pub fn get_filter_facets_with(&self, include_entities: bool) -> Result<FilterFacets, String> {
         let generation = self.library_generation()?;
         let cache_key = if include_entities { "full" } else { "light" };
@@ -7729,6 +7813,13 @@ impl Database {
                     Ok(FacetCount {
                         name: row.get(0)?,
                         count: row.get(1)?,
+                        sources: row
+                            .get::<_, Option<String>>(2)?
+                            .unwrap_or_default()
+                            .split(',')
+                            .filter(|source| !source.is_empty())
+                            .map(str::to_string)
+                            .collect(),
                     })
                 })
                 .map_err(|e| format!("Facet query failed: {}", e))?;
@@ -7775,7 +7866,7 @@ impl Database {
 
         let result = FilterFacets {
             tags: collect(
-                "SELECT t.name, COUNT(dt.download_id) AS count
+                "SELECT t.name, COUNT(dt.download_id) AS count, NULL AS sources
                  FROM tags t
                  JOIN download_tags dt ON dt.tag_id = t.id
                  GROUP BY t.id, t.name
@@ -7783,7 +7874,8 @@ impl Database {
                  LIMIT 500",
             )?,
             authors: collect(
-                "SELECT author_name, COUNT(*) AS count
+                "SELECT author_name, COUNT(*) AS count,
+                        GROUP_CONCAT(DISTINCT source) AS sources
                  FROM downloads
                  WHERE author_name IS NOT NULL AND author_name != ''
                  GROUP BY author_name
@@ -7855,14 +7947,14 @@ impl Database {
             )?
             },
             content_types: collect(
-                "SELECT content_type, COUNT(*) AS count
+                "SELECT content_type, COUNT(*) AS count, NULL AS sources
                  FROM downloads
                  WHERE content_type IS NOT NULL AND content_type != ''
                  GROUP BY content_type
                  ORDER BY count DESC, content_type ASC",
             )?,
             asset_types: collect(
-                "SELECT asset_type, COUNT(*) AS count
+                "SELECT asset_type, COUNT(*) AS count, NULL AS sources
                  FROM assets
                  WHERE asset_type IS NOT NULL AND asset_type != ''
                  GROUP BY asset_type
@@ -11273,6 +11365,7 @@ fn facet_counts_bytes(facets: &[FacetCount]) -> usize {
             facet
                 .name
                 .len()
+                .saturating_add(facet.sources.iter().map(String::len).sum::<usize>())
                 .saturating_add(std::mem::size_of::<FacetCount>())
         })
         .sum()
@@ -13788,7 +13881,7 @@ fn update_target_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<UpdateTar
 /// snapshot path as a repair boundary for databases written by older builds.
 fn update_job_item_counter_contribution(item_type: &str, status: &str) -> [i64; 5] {
     let counts_as_work = item_type != "candidate" || status != "candidate";
-    let terminal = matches!(status, "done" | "saved" | "skipped" | "failed");
+    let terminal = matches!(status, "done" | "saved" | "skipped" | "failed" | "held");
     [
         i64::from(counts_as_work),
         i64::from(counts_as_work && terminal),
@@ -13809,6 +13902,7 @@ fn update_job_summary_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Upda
         candidate_count: row.get(6)?,
         saved_count: row.get(7)?,
         error_count: row.get(8)?,
+        held_count: row.get(13)?,
         active_label: row.get(9)?,
         started_at: row.get(10)?,
         updated_at: row.get(11)?,

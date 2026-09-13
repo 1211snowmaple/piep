@@ -142,21 +142,71 @@ describe("LibraryPage search", () => {
     render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
 
     fireEvent.click(await screen.findByRole("button", { name: "絞り込み" }));
-    fireEvent.click(await screen.findByRole("checkbox", { name: "お気に入りのみ" }));
+    fireEvent.change(await screen.findByRole("textbox", { name: "条件を検索" }), { target: { value: "お気に入り" } });
+    fireEvent.click(await screen.findByRole("option", { name: /お気に入りのみ/, hidden: true }));
     expect(window.location.hash).not.toContain("favorite=1");
     fireEvent.click(screen.getByRole("button", { name: "適用" }));
     await waitFor(() => expect(window.location.hash).toContain("favorite=1"));
   });
 
-  it("names the page and every button in the filter drawer", async () => {
+  it("filters by an author chosen in the detail spotlight", async () => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
+
+    fireEvent.click(await screen.findByRole("button", { name: "絞り込み" }));
+    const spotlight = await screen.findByRole("dialog", { name: "詳細フィルター" });
+    await waitFor(() => expect(client.getQueryData(["library-facets"])).toBeDefined());
+    fireEvent.change(within(spotlight).getByRole("textbox", { name: "条件を検索" }), { target: { value: "青葉" } });
+    // jsdom cannot position the non-portaled dropdown, so Mantine keeps its
+    // options hidden even though the same store is open in a real window.
+    const authorOptions = await screen.findAllByRole("option", { name: /青葉しおり/, hidden: true });
+    expect(within(authorOptions[0]).getByLabelText("pixiv")).toBeInTheDocument();
+    expect(within(authorOptions[0]).getByLabelText("FANBOX")).toBeInTheDocument();
+    expect(within(authorOptions[0]).getByText("青葉しおり")).toHaveClass("filter-spotlight__facet-name");
+    expect(authorOptions[0].querySelector(".line-clamp-1")).toBeNull();
+    fireEvent.click(authorOptions[0]);
+
+    fireEvent.click(within(spotlight).getByRole("button", { name: "適用" }));
+
+    await waitFor(() => {
+      const query = window.location.hash.split("?")[1] ?? "";
+      expect(new URLSearchParams(query).getAll("author")).toEqual(["青葉しおり"]);
+    });
+    expect(await screen.findByText("作者: 青葉しおり")).toBeInTheDocument();
+  });
+
+  it("names the page and every button in the filter spotlight", async () => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(<MantineProvider theme={theme}><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
 
     expect(await screen.findByRole("heading", { level: 1, name: "ライブラリ" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "絞り込み" }));
-    const drawer = await screen.findByRole("dialog", { name: "詳細フィルター" });
-    expect(within(drawer).getByRole("button", { name: "閉じる" })).toBeInTheDocument();
-    within(drawer).getAllByRole("button").forEach((button) => expect(button).toHaveAccessibleName());
+    const spotlight = await screen.findByRole("dialog", { name: "詳細フィルター" });
+    expect(within(spotlight).getByRole("button", { name: "閉じる" })).toBeInTheDocument();
+    within(spotlight).getAllByRole("button").forEach((button) => expect(button).toHaveAccessibleName());
+  });
+
+  it("keeps every filter group reachable from the spotlight summary", async () => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
+
+    fireEvent.click(await screen.findByRole("button", { name: "絞り込み" }));
+    const spotlight = await screen.findByRole("dialog", { name: "詳細フィルター" });
+    expect(within(spotlight).getByRole("textbox", { name: "条件を検索" })).toBeInTheDocument();
+    const sectionTabs = within(spotlight).getByRole("tablist", { name: "フィルターの種類" });
+    expect(within(sectionTabs).getByRole("tab", { name: /^基本/ })).toBeInTheDocument();
+    expect(within(sectionTabs).getByRole("tab", { name: /^作者/ })).toHaveAttribute("aria-selected", "true");
+    expect(within(sectionTabs).getByRole("tab", { name: /^タグ/ })).toBeInTheDocument();
+    expect(within(sectionTabs).getByRole("tab", { name: /^文字数/ })).toBeInTheDocument();
+
+    fireEvent.click(within(sectionTabs).getByRole("tab", { name: /^基本/ }));
+    expect(within(spotlight).getByRole("checkbox", { name: "pixiv" })).toBeInTheDocument();
+    fireEvent.click(within(sectionTabs).getByRole("tab", { name: /^タグ/ }));
+    expect(within(spotlight).getByRole("region", { name: "含めるタグ" })).toBeInTheDocument();
+    expect(within(spotlight).getByRole("radiogroup", { name: "複数タグの条件" })).toBeInTheDocument();
+    fireEvent.click(within(sectionTabs).getByRole("tab", { name: /^文字数/ }));
+    expect(within(spotlight).getByRole("textbox", { name: "最小文字数" })).toBeInTheDocument();
+    expect(within(spotlight).queryByText(/本文の意味が似ている/)).toBeNull();
   });
 
   it("offers the paging switch beside the count, not only past the end", async () => {
@@ -180,7 +230,10 @@ describe("LibraryPage search", () => {
     render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
 
     fireEvent.click(await screen.findByRole("button", { name: "絞り込み" }));
+    const spotlight = await screen.findByRole("dialog", { name: "詳細フィルター" });
+    fireEvent.click(within(spotlight).getByRole("tab", { name: /^基本/ }));
     fireEvent.click(await screen.findByRole("checkbox", { name: "pixiv" }));
+    fireEvent.click(within(spotlight).getByRole("tab", { name: /^文字数/ }));
     fireEvent.change(screen.getByRole("textbox", { name: "最小文字数" }), { target: { value: "5000" } });
     fireEvent.click(screen.getByRole("button", { name: "適用" }));
 
@@ -198,10 +251,13 @@ describe("LibraryPage search", () => {
     // And the drawer opens onto the conditions actually in force, rather than
     // an empty form that disagrees with the results behind it.
     fireEvent.click(screen.getByRole("button", { name: "絞り込み" }));
-    const drawer = await screen.findByRole("dialog", { name: "詳細フィルター" });
-    expect(within(drawer).getByRole("checkbox", { name: "pixiv" })).toBeChecked();
-    expect(within(drawer).getByText("創作").closest(".filter-token")).toBeInTheDocument();
-    expect(screen.getByRole("textbox", { name: "最小文字数" })).toHaveValue("5,000");
+    const spotlight = await screen.findByRole("dialog", { name: "詳細フィルター" });
+    fireEvent.click(within(spotlight).getByRole("tab", { name: /^基本/ }));
+    expect(within(spotlight).getByRole("checkbox", { name: "pixiv" })).toBeChecked();
+    fireEvent.click(within(spotlight).getByRole("tab", { name: /^タグ/ }));
+    expect(within(within(spotlight).getByRole("region", { name: "含めるタグ" })).getByText("創作")).toBeInTheDocument();
+    fireEvent.click(within(spotlight).getByRole("tab", { name: /^文字数/ }));
+    expect(within(spotlight).getByRole("textbox", { name: "最小文字数" })).toHaveValue("5,000");
   });
 
   it("clears URL-owned watch filters during history navigation", async () => {

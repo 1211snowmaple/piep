@@ -13,6 +13,9 @@ pub enum FanboxError {
     #[error("FANBOXのアクセス制限に達しました。時間をおいて再試行してください")]
     RateLimited { body: String },
 
+    #[error("FANBOXのアクセス制限（Cloudflare確認）により停止しました。公式サイトと連携状態を確認してください")]
+    ChallengeRequired,
+
     #[error("FANBOXの投稿が見つかりませんでした")]
     NotFound { body: String },
 

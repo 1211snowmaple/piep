@@ -100,6 +100,8 @@ fn stamp_schema_version(conn: &Connection) -> Result<(), rusqlite::Error> {
 fn create_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
     create_core_tables(conn)?;
     create_additional_tables(conn)?;
+    conn.execute_batch(include_str!("acquisition_repair.sql"))?;
+    conn.execute_batch(include_str!("index_cleanup.sql"))?;
     Ok(())
 }
 
@@ -868,17 +870,8 @@ fn create_core_tables(conn: &Connection) -> Result<(), rusqlite::Error> {
             DELETE FROM search_index_state WHERE download_id = old.id;
         END;
 
-        CREATE INDEX IF NOT EXISTS idx_downloads_source_type_date ON downloads(source, content_type, downloaded_at DESC);
-        CREATE INDEX IF NOT EXISTS idx_downloads_favorite_date    ON downloads(favorite, downloaded_at DESC);
         CREATE INDEX IF NOT EXISTS idx_downloads_author           ON downloads(author_name);
-        CREATE INDEX IF NOT EXISTS idx_downloads_author_nocase    ON downloads(author_name COLLATE NOCASE);
-        CREATE INDEX IF NOT EXISTS idx_downloads_text_length      ON downloads(text_length);
-        CREATE INDEX IF NOT EXISTS idx_downloads_date             ON downloads(downloaded_at DESC);
         CREATE INDEX IF NOT EXISTS idx_downloads_source_created   ON downloads(source_created_at DESC);
-        CREATE INDEX IF NOT EXISTS idx_downloads_title            ON downloads(title COLLATE NOCASE);
-        CREATE INDEX IF NOT EXISTS idx_downloads_size             ON downloads(file_size_bytes DESC);
-        CREATE INDEX IF NOT EXISTS idx_downloads_watch_date       ON downloads(watch_updates, downloaded_at DESC);
-        CREATE INDEX IF NOT EXISTS idx_downloads_source_id        ON downloads(source, source_id);
         -- Every library ordering uses id as its deterministic tie-breaker.
         -- Without the same second key SQLite materializes a temporary B-tree
         -- for ties, which becomes visible on six-figure libraries.
@@ -907,7 +900,6 @@ fn create_core_tables(conn: &Connection) -> Result<(), rusqlite::Error> {
         -- expression exactly for SQLite to use the index.
         CREATE INDEX IF NOT EXISTS idx_downloads_author_recent
             ON downloads(source, author_id, COALESCE(source_created_at, downloaded_at) DESC, id DESC);
-        CREATE INDEX IF NOT EXISTS idx_tags_name                  ON tags(name);
         CREATE INDEX IF NOT EXISTS idx_download_tags_tag          ON download_tags(tag_id);
         CREATE INDEX IF NOT EXISTS idx_download_tags_download     ON download_tags(download_id);
         CREATE INDEX IF NOT EXISTS idx_assets_download            ON assets(download_id);
@@ -919,8 +911,6 @@ fn create_core_tables(conn: &Connection) -> Result<(), rusqlite::Error> {
         CREATE INDEX IF NOT EXISTS idx_assets_type                ON assets(asset_type);
         CREATE INDEX IF NOT EXISTS idx_versions_download          ON download_versions(download_id);
 
-        CREATE INDEX IF NOT EXISTS idx_people_source_key ON people(source, source_key);
-        CREATE INDEX IF NOT EXISTS idx_series_source_key ON series(source, source_key);
         CREATE INDEX IF NOT EXISTS idx_download_people_lookup ON download_people(person_source, person_key);
         CREATE INDEX IF NOT EXISTS idx_download_people_download ON download_people(download_id);
         CREATE INDEX IF NOT EXISTS idx_download_series_lookup ON download_series(series_source, series_key);
@@ -937,8 +927,6 @@ fn create_core_tables(conn: &Connection) -> Result<(), rusqlite::Error> {
 
         CREATE INDEX IF NOT EXISTS idx_work_edit_revisions_download_status
             ON work_edit_revisions(download_id, status, updated_at DESC);
-        CREATE INDEX IF NOT EXISTS idx_work_edit_blocks_revision_order
-            ON work_edit_blocks(edit_revision_id, block_order);
         CREATE INDEX IF NOT EXISTS idx_update_job_items_job_status
             ON update_job_items(job_id, status, item_type, id);
         CREATE INDEX IF NOT EXISTS idx_update_job_items_candidate
@@ -975,6 +963,59 @@ mod tests {
         assert_eq!(marker, 1);
         assert!(!column_exists(&conn, "downloads", "tags").unwrap());
         assert!(sqlite_object_exists(&conn, "table", "saved_searches").unwrap());
+    }
+
+    #[test]
+    fn redundant_indexes_are_retired_without_losing_data_or_ordering_indexes() {
+        let conn = Connection::open_in_memory().unwrap();
+        initialize(&conn).unwrap();
+        conn.execute_batch(
+            "INSERT INTO downloads (source,source_id,title,author_name,author_id,content_type,json_path,downloaded_at)
+             VALUES ('pixiv','1','kept','author','2','novel','data.json','2026-09-12');
+             CREATE INDEX idx_downloads_date ON downloads(downloaded_at DESC);
+             CREATE INDEX idx_downloads_source_id ON downloads(source,source_id);
+             CREATE INDEX idx_tags_name ON tags(name);",
+        ).unwrap();
+        for _ in 0..2 {
+            initialize(&conn).unwrap();
+            for name in [
+                "idx_downloads_date",
+                "idx_downloads_source_id",
+                "idx_tags_name",
+            ] {
+                assert!(!sqlite_object_exists(&conn, "index", name).unwrap());
+            }
+            let title: String = conn
+                .query_row("SELECT title FROM downloads", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(title, "kept");
+            assert!(conn.execute(
+                "INSERT INTO downloads (source,source_id,title,author_name,author_id,content_type,json_path,downloaded_at)
+                 SELECT source,source_id,title,author_name,author_id,content_type,json_path,downloaded_at FROM downloads", [],
+            ).is_err(), "work uniqueness must still be enforced");
+            for order in [
+                "downloaded_at DESC,id DESC",
+                "title COLLATE NOCASE DESC,id DESC",
+                "author_name COLLATE NOCASE DESC,id DESC",
+                "text_length DESC,id DESC",
+                "file_size_bytes DESC,id DESC",
+            ] {
+                let plan: Vec<String> = conn
+                    .prepare(&format!(
+                        "EXPLAIN QUERY PLAN SELECT id FROM downloads ORDER BY {order} LIMIT 60"
+                    ))
+                    .unwrap()
+                    .query_map([], |row| row.get(3))
+                    .unwrap()
+                    .collect::<Result<_, _>>()
+                    .unwrap();
+                assert!(
+                    plan.iter().all(|line| !line.contains("TEMP B-TREE")),
+                    "{order}: {plan:?}"
+                );
+                assert!(plan.iter().any(|line| line.contains("INDEX")), "{plan:?}");
+            }
+        }
     }
 
     /// 依頼の塊をやめる移行。値は落とさずに列へ移し、塊そのものは消す。

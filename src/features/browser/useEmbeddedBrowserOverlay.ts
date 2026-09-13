@@ -4,6 +4,30 @@ import { setEmbeddedBrowserVisible } from "@/services/browserApi";
 /** Fractions of the pane that get hit-tested, including the very edges. */
 const SAMPLE_FRACTIONS = [0.02, 0.25, 0.5, 0.75, 0.98];
 
+function overlaps(a: DOMRect, b: DOMRect) {
+  return a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
+}
+
+/**
+ * Mantine puts floating surfaces under a shared portal node. Some components
+ * add zero-sized wrappers, so measure every visible descendant rather than
+ * assuming the first child is the painted surface. This catches small and
+ * pointer-events:none overlays — notably tooltips — that point sampling can
+ * never see reliably.
+ */
+function portalOverlaps(bounds: DOMRect) {
+  const surfaces = document.querySelectorAll<HTMLElement>("[data-portal] *");
+  for (const surface of surfaces) {
+    const rect = surface.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0 || !overlaps(bounds, rect)) continue;
+    // Computed style can force layout in a large menu. Only ask for it after
+    // the cheap geometry check says the node could cover the native view.
+    const style = window.getComputedStyle(surface);
+    if (style.display !== "none" && style.visibility !== "hidden") return true;
+  }
+  return false;
+}
+
 /**
  * The embedded browser is a native child WebView. On every platform it
  * composites above the main WebView, so anything the DOM draws over that
@@ -11,12 +35,11 @@ const SAMPLE_FRACTIONS = [0.02, 0.25, 0.5, 0.75, 0.98];
  * behind it and becomes both invisible and unclickable. No z-index can fix
  * that from CSS, so the child WebView is hidden while something covers it.
  *
- * Coverage is decided by hit-testing points inside the pane rather than by
- * matching overlay class names: Mantine mounts modals and drawers under a
- * zero-height wrapper and positions the visible surface on a descendant, so
- * measuring the matched root reported "no overlap" for every one of them.
- * `elementFromPoint` asks the browser what is actually on top, which needs no
- * knowledge of how any particular overlay is built.
+ * Portaled surfaces are checked by rectangle intersection, including small
+ * pointer-transparent tooltips. A point hit-test remains as a fallback for
+ * inline overlays. Mantine often mounts a zero-height portal wrapper and puts
+ * the visible rectangle on a descendant, so the geometry pass measures those
+ * descendants instead of the wrapper itself.
  */
 export function useEmbeddedBrowserOverlay(viewportRef: RefObject<HTMLElement | null>, enabled: boolean) {
   const visibleRef = useRef(true);
@@ -37,14 +60,22 @@ export function useEmbeddedBrowserOverlay(viewportRef: RefObject<HTMLElement | n
       if (!viewport) return;
       const bounds = viewport.getBoundingClientRect();
       if (bounds.width < 1 || bounds.height < 1) return;
+      // Portaled surfaces are measured exactly. This includes non-interactive
+      // visual overlays such as Tooltip, whose pointer-events:none otherwise
+      // makes it invisible to elementFromPoint even while the native WebView
+      // paints over it.
+      if (portalOverlaps(bounds)) {
+        apply(false);
+        return;
+      }
       for (const fx of SAMPLE_FRACTIONS) {
         for (const fy of SAMPLE_FRACTIONS) {
           const x = bounds.left + bounds.width * fx;
           const y = bounds.top + bounds.height * fy;
           const top = document.elementFromPoint(x, y);
           // Anything that is not the placeholder itself is drawn over the pane.
-          // Elements with pointer-events:none are skipped by elementFromPoint,
-          // which is what we want: they do not visually occlude either.
+          // Non-portaled inline overlays are still caught here. Portaled
+          // pointer-events:none surfaces were handled geometrically above.
           if (top && top !== viewport && !viewport.contains(top)) {
             apply(false);
             return;

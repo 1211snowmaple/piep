@@ -274,6 +274,8 @@ export interface DbStats {
 export interface FacetCount {
   name: string;
   count: number;
+  /** Sources that use this exact facet name. Present for author candidates. */
+  sources?: string[];
 }
 
 export interface EntityFacet {

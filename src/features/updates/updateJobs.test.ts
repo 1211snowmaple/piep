@@ -38,7 +38,15 @@ import {
   refreshUpdateJobSummaries,
   useUpdateJobSummaries,
   waitForUpdateJob,
+  updateJobStatusMeta,
 } from "./updateJobs";
+
+it("distinguishes total failure, partial failure and deferred permissions", () => {
+  expect(updateJobStatusMeta({ ...initial, status: "failed", processed: 2, errorCount: 1 }).label).toBe("一部失敗");
+  expect(updateJobStatusMeta({ ...initial, status: "failed", processed: 2, errorCount: 2 }).label).toBe("失敗");
+  expect(updateJobStatusMeta({ ...initial, status: "completed", heldCount: 1 }).label).toBe("完了（保留あり）");
+  expect(updateJobStatusMeta({ ...initial, status: "canceled", heldCount: 1 }).label).toBe("中止");
+});
 
 const initial: UpdateJobSnapshot = {
   jobId: "save-1",

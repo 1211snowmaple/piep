@@ -34,7 +34,8 @@ import { useAppSearchParams } from "@/app/router";
 import { EmptyState, ErrorState, LoadingState } from "@/components/AsyncState";
 import { MotionTabs as Tabs } from "@/components/MotionTabs";
 import { PageHeader } from "@/components/PageHeader";
-import { UPDATE_JOB_STATUS_META, invalidateAfterUpdateJob, isUpdateJobTerminal, useUpdateJobs, type UpdateJobSnapshot, type UpdateJobSummary } from "@/features/updates/updateJobs";
+import { updateJobStatusMeta, invalidateAfterUpdateJob, isUpdateJobTerminal, useUpdateJobs, type UpdateJobSnapshot, type UpdateJobSummary } from "@/features/updates/updateJobs";
+import { DeferredCandidatesPanel } from "./DeferredCandidatesPanel";
 import { errorMessage, formatDate, formatNumber } from "@/lib/format";
 import { ProviderMark } from "@/lib/providers";
 import { deleteUpdateTarget, isTauriRuntime, listUpdateTargets, searchDownloadsV2, setUpdateTargetEnabled, upsertUpdateTarget } from "@/services/dbApi";
@@ -180,7 +181,7 @@ export default function UpdatesPage() {
       invalidateAfterUpdateJob(queryClient);
       notifications.show({
         color: "gray",
-        title: "今後は表示しません",
+        title: "候補から外しました（あとで戻せます）",
         message: (
           <Group gap="sm" wrap="nowrap">
             <Text size="sm" className="line-clamp-1" style={{ flex: 1, minWidth: 0 }}>{candidate.title}</Text>
@@ -213,7 +214,7 @@ export default function UpdatesPage() {
       setDismissedIds([]);
       queryClient.invalidateQueries({ queryKey: ["dismissed-candidates"] });
       invalidateAfterUpdateJob(queryClient);
-      notifications.show({ color: "piep", title: "非表示を解除しました", message: `${restored}件が次の確認でまた候補に出ます` });
+      notifications.show({ color: "piep", title: "非表示を解除しました", message: `${restored}件を解除しました。監視対象に含まれる作品だけ次の確認に戻ります。閲覧制限は保留を続けます。` });
     },
   });
 
@@ -290,7 +291,7 @@ export default function UpdatesPage() {
   }, [activeSnapshot?.logs]);
   // 残りの数。タブの脇に出るのは、これから決めるものの件数でなければならない。
   const openCandidateCount = (activeSnapshot?.candidates ?? [])
-    .filter((candidate) => !dismissedIds.includes(candidate.id) && !isSettledCandidateStatus(candidate.status)).length;
+    .filter((candidate) => !dismissedIds.includes(candidate.id) && candidate.status !== "held" && !isSettledCandidateStatus(candidate.status)).length;
   const finishedJobCount = jobs.filter((job) => isUpdateJobTerminal(job.status)).length;
   const status = activeSnapshot?.status;
   const running = status === "queued" || status === "running" || status === "canceling";
@@ -346,9 +347,9 @@ export default function UpdatesPage() {
         <Card p="lg" className="update-progress-card" mt="lg">
           <Group justify="space-between" align="flex-start" wrap="wrap">
             <Box miw={0}>
-              <Group gap="xs"><StatusBadge status={activeSnapshot.status} /><Text size="xs" c="dimmed">{activeSnapshot.jobId}</Text></Group>
+              <Group gap="xs"><StatusBadge job={activeSnapshot} /><Text size="xs" c="dimmed">{activeSnapshot.jobId}</Text></Group>
               <Title order={2} mt="sm">{activeSnapshot.activeLabel || statusTitle(activeSnapshot.status)}</Title>
-              <Text size="sm" c="dimmed" mt={5}>{formatNumber(activeSnapshot.processed)} / {formatNumber(activeSnapshot.totals)}件を処理 · 候補 {formatNumber(activeSnapshot.candidateCount)} · エラー {formatNumber(activeSnapshot.errorCount)}</Text>
+              <Text size="sm" c="dimmed" mt={5}>{formatNumber(activeSnapshot.processed)} / {formatNumber(activeSnapshot.totals)}件を処理 · 候補 {formatNumber(activeSnapshot.candidateCount)} · エラー {formatNumber(activeSnapshot.errorCount)} · 保留 {formatNumber(activeSnapshot.heldCount ?? 0)}</Text>
             </Box>
             <Group gap="xs">
               {running && <Button variant="default" leftSection={<Icons.pause size={IconSize.menu} />} onClick={() => runtime && reportJobAction(updateJobs.pause(activeSnapshot.jobId), "一時停止できません")}>一時停止</Button>}
@@ -376,6 +377,7 @@ export default function UpdatesPage() {
         <Tabs.List>
           <Tabs.Tab value="candidates" leftSection={<Icons.select size={IconSize.menu} />}>候補 {openCandidateCount > 0 && <Badge size="xs" variant="light" ml={4}>{formatNumber(openCandidateCount)}</Badge>}</Tabs.Tab>
           <Tabs.Tab value="logs" leftSection={<Icons.pending size={IconSize.menu} />}>ログ</Tabs.Tab>
+          <Tabs.Tab value="deferred">保留・非表示</Tabs.Tab>
           <Tabs.Tab value="history" leftSection={<Icons.versionHistory size={IconSize.menu} />}>履歴 {jobs.length > 0 && <Badge size="xs" variant="light" color="gray" ml={4}>{formatNumber(jobs.length)}</Badge>}</Tabs.Tab>
           <span className="updates-tabs__divider" aria-hidden />
           <Tabs.Tab value="targets" leftSection={<Icons.updates size={IconSize.menu} />}>監視対象</Tabs.Tab>
@@ -383,9 +385,10 @@ export default function UpdatesPage() {
         </Tabs.List>
 
         <Tabs.Panel value="candidates" pt="lg">
+          {(activeSnapshot?.heldCount ?? 0) > 0 && <Group mb="md"><Text size="sm" c="dimmed">閲覧条件待ちなどの{activeSnapshot?.heldCount}件は、保存候補から外して保留しています。</Text><Button variant="subtle" size="xs" onClick={() => setTab("deferred")}>保留一覧を開く</Button></Group>}
           {activeSnapshot ? (
             <CandidatesPanel
-              candidates={activeSnapshot.candidates.filter((candidate) => !dismissedIds.includes(candidate.id))}
+              candidates={activeSnapshot.candidates.filter((candidate) => !dismissedIds.includes(candidate.id) && candidate.status !== "held")}
               selectedIds={selectedSavableIdSet}
               selectableIds={selectableCandidateIds}
               running={running}
@@ -400,6 +403,10 @@ export default function UpdatesPage() {
           ) : (
             <EmptyState icon={Icons.versionHistory} title="更新ジョブはまだありません" description="上の対象と方法を選び、「確認を開始」を押してください。" />
           )}
+        </Tabs.Panel>
+
+        <Tabs.Panel value="deferred" pt="lg">
+          <DeferredCandidatesPanel runtime={runtime} onRechecked={(jobId) => { void updateJobs.selectJob(jobId); setTab("candidates"); }} />
         </Tabs.Panel>
 
         <Tabs.Panel value="logs" pt="lg">
@@ -419,7 +426,7 @@ export default function UpdatesPage() {
               <Group justify="space-between" wrap="nowrap">
                 <Box>
                   <Text size="sm" fw={650}>非表示にした作品が{dismissedCount.data}件あります</Text>
-                  <Text size="xs" c="dimmed">解除すると、次の確認でまた候補に並びます。</Text>
+                  <Text size="xs" c="dimmed">監視対象の作品だけ次の確認へ戻します。個別に戻すときは「保留・非表示」へ。</Text>
                 </Box>
                 <Button size="xs" variant="default" loading={restoreDismissedMutation.isPending} onClick={() => restoreDismissedMutation.mutate()}>すべて解除</Button>
               </Group>
@@ -485,11 +492,11 @@ function JobHistoryPanel({ jobs, activeJobId, finishedCount, clearingAll, cleari
           <Group key={job.jobId} gap="sm" wrap="nowrap" px="md" py="sm" className="update-history__row" data-active={job.jobId === activeJobId || undefined}>
             <UnstyledButton style={{ flex: 1, minWidth: 0 }} onClick={() => onSelect(job.jobId)}>
               <Group gap="sm" wrap="nowrap">
-                <StatusBadge status={job.status} />
+                <StatusBadge job={job} />
                 <Text size="sm" fw={job.jobId === activeJobId ? 700 : 500}>{formatDate(job.startedAt, true)}</Text>
                 {/* どの回が実りある回だったかは、開かなくても分かるほうがいい。 */}
                 <Text size="xs" c="dimmed" className="line-clamp-1">
-                  {formatNumber(job.processed)}/{formatNumber(job.totals)}件 · 候補 {formatNumber(job.candidateCount)} · 保存 {formatNumber(job.savedCount)}{job.errorCount > 0 ? ` · エラー ${formatNumber(job.errorCount)}` : ""}
+                  {formatNumber(job.processed)}/{formatNumber(job.totals)}件 · 候補 {formatNumber(job.candidateCount)} · 保存 {formatNumber(job.savedCount)}{job.errorCount > 0 ? ` · エラー ${formatNumber(job.errorCount)}` : ""}{job.heldCount ? ` · 保留 ${formatNumber(job.heldCount)}` : ""}
                 </Text>
               </Group>
             </UnstyledButton>
@@ -635,7 +642,7 @@ function CandidatesPanel({ candidates, selectedIds, selectableIds, running, savi
   // 済んだものは畳む。数は残す - 「無かったこと」にはしない。
   const [showSettled, setShowSettled] = useState(false);
   if (!candidates.length) {
-    return <EmptyState icon={Icons.confirm} title="新しい候補はありません" description="監視対象はすべて最新です。" />;
+    return <EmptyState icon={Icons.confirm} title="保存できる候補はありません" description="保留した作品は「保留・非表示」から後で再確認できます。" />;
   }
   const settled = candidates.filter((candidate) => isSettledCandidateStatus(candidate.status));
   const open = candidates.filter((candidate) => !isSettledCandidateStatus(candidate.status));
@@ -708,12 +715,12 @@ function CandidatesPanel({ candidates, selectedIds, selectableIds, running, savi
                   <Text size="sm" fw={650}>{candidate.title}</Text>
                 </Group>
                 <Text size="xs" c="dimmed" className="line-clamp-1">{candidate.targetLabel} · {candidate.subtitle}</Text>
-                {candidate.error && <Text size="xs" c="red" className="line-clamp-2">{errorMessage(candidate.error)}</Text>}
+                {candidate.error && <Text size="xs" c={candidate.status === "held" ? "dimmed" : "red"}>{errorMessage(candidate.error)}</Text>}
               </Stack>
               <Badge color={candidate.status === "failed" ? "red" : candidate.status === "saved" ? "green" : "gray"} variant="light" style={{ flex: "none" }}>{candidateStatusLabel(candidate.status)}</Badge>
               {isSavableCandidate(candidate) && (
-                <Tooltip label="今後この作品を候補に出さない">
-                  <ActionIcon variant="subtle" color="gray" aria-label={`${candidate.title}を今後表示しない`} onClick={() => onDismiss(candidate)}>
+                <Tooltip label="候補から外す（保留・非表示の一覧から戻せます）">
+                  <ActionIcon variant="subtle" color="gray" aria-label={`${candidate.title}を候補から外す`} onClick={() => onDismiss(candidate)}>
                     <Icons.hide size={IconSize.action} />
                   </ActionIcon>
                 </Tooltip>
@@ -767,7 +774,7 @@ function isSavableCandidate(candidate: UpdateJobSnapshot["candidates"][number]) 
 }
 
 function candidateStatusLabel(status: UpdateJobSnapshot["candidates"][number]["status"]): string {
-  return ({ candidate: "候補", queued: "待機中", running: "保存中", saved: "保存済み", failed: "失敗", skipped: "スキップ", done: "処理済み" } as Record<string, string>)[status] ?? status;
+  return ({ candidate: "候補", queued: "待機中", running: "保存中", saved: "保存済み", failed: "失敗", held: "保留", skipped: "スキップ", done: "処理済み" } as Record<string, string>)[status] ?? status;
 }
 
 /** 自動確認の状態を一行で。設定画面を開かなくても、いまの約束が読める。 */
@@ -781,9 +788,9 @@ function describeSchedule(schedule: UpdateScheduleSettings | undefined): string 
   return `${when.join(" · ")}・${mode}`;
 }
 
-function StatusBadge({ status }: { status: string }) {
-  const item = UPDATE_JOB_STATUS_META[status as keyof typeof UPDATE_JOB_STATUS_META] ?? { color: "gray", label: status };
-  return <Badge color={item.color} variant="light" leftSection={(status === "running" || status === "queued") ? <span className="status-dot" /> : undefined}>{item.label}</Badge>;
+function StatusBadge({ job }: { job: UpdateJobSummary }) {
+  const item = updateJobStatusMeta(job);
+  return <Badge color={item.color} variant="light" leftSection={(job.status === "running" || job.status === "queued") ? <span className="status-dot" /> : undefined}>{item.label}</Badge>;
 }
 
 function statusTitle(status: string): string { return ({ queued: "開始を待っています", running: "更新を確認しています", paused: "一時停止中", auth_required: "再接続が必要です", canceling: "停止しています", canceled: "更新確認を中止しました", completed: "更新確認が完了しました", failed: "更新確認で問題が発生しました" } as Record<string, string>)[status] ?? status; }

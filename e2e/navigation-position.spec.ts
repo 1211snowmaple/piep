@@ -156,32 +156,33 @@ test("an author screen opens at its profile, not at its works", async ({ page },
   expect(await mainScrollTop(page)).toBe(0);
 });
 
-test("the filter drawer keeps its apply button on screen", async ({ page }, testInfo) => {
+test("the filter spotlight switches sections without default scrolling", async ({ page }, testInfo) => {
   onlyOnce(testInfo.project.name);
   await page.goto("/#/library");
   await expect(page.getByRole("combobox", { name: "ライブラリを検索" })).toBeVisible();
 
   await page.getByRole("button", { name: "絞り込み" }).click();
-  const apply = page.getByRole("button", { name: "適用" });
+  const spotlight = page.getByRole("dialog", { name: "詳細フィルター" });
+  const apply = spotlight.getByRole("button", { name: "適用" });
   await expect(apply).toBeVisible();
 
-  // Shortened until the form has to scroll, which is the case the two buttons
-  // used to fall out of: they were the last thing in the form, so on an
-  // ordinary window they opened below the bottom edge.
-  await page.setViewportSize({ width: 1200, height: 560 });
+  // The modal keeps one stable editing area. Changing the subject replaces
+  // that area instead of growing one long, pre-scrolled form.
+  await page.setViewportSize({ width: 900, height: 600 });
   await page.waitForTimeout(300);
-  expect(await page.evaluate(() => {
-    const fields = document.querySelector(".filter-form__fields") as HTMLElement;
-    fields.scrollTop = fields.scrollHeight;
-    const last = document.querySelector(".filter-form__fields > :last-child") as HTMLElement;
-    const button = [...document.querySelectorAll("button")].find((b) => b.textContent?.trim() === "適用")!;
-    return {
-      overflows: fields.scrollHeight > fields.clientHeight,
-      // And the end of the form is still reachable underneath them.
-      lastFieldReachable: last.getBoundingClientRect().bottom <= fields.getBoundingClientRect().bottom + 1,
-      applyOnScreen: button.getBoundingClientRect().bottom <= window.innerHeight,
-    };
-  })).toEqual({ overflows: true, lastFieldReachable: true, applyOnScreen: true });
+  for (const name of [/^基本/, /^作者/, /^タグ/, /^文字数/]) {
+    await spotlight.getByRole("tab", { name }).click();
+    await page.waitForTimeout(80);
+    expect(await spotlight.evaluate((dialog) => {
+      const panel = dialog.querySelector(".filter-spotlight__panel") as HTMLElement;
+      const button = [...dialog.querySelectorAll("button")].find((candidate) => candidate.textContent?.trim() === "適用")!;
+      return {
+        dialogOverflows: dialog.scrollHeight > dialog.clientHeight,
+        panelOverflows: panel.scrollHeight > panel.clientHeight,
+        applyOnScreen: button.getBoundingClientRect().bottom <= window.innerHeight,
+      };
+    })).toEqual({ dialogOverflows: false, panelOverflows: false, applyOnScreen: true });
+  }
 });
 
 test("the page you were on survives opening something from it", async ({ page }, testInfo) => {

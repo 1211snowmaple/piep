@@ -38,6 +38,7 @@ function describeResult(snapshot: UpdateJobSnapshot | UpdateJobSummary): string 
   if (snapshot.candidateCount) parts.push(`候補 ${snapshot.candidateCount}件`);
   if (snapshot.savedCount) parts.push(`保存 ${snapshot.savedCount}件`);
   if (snapshot.errorCount) parts.push(`エラー ${snapshot.errorCount}件`);
+  if (snapshot.heldCount) parts.push(`保留 ${snapshot.heldCount}件`);
   return parts.join(" · ");
 }
 

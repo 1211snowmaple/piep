@@ -51,6 +51,8 @@ downloads/
 
 # Temporary / Scratch
 scratch/
+__pycache__/
+*.py[cod]
 
 # EPUB テンプレートの見本（cargo run --example epub_specimen の出力）
 .epub-specimen/

@@ -133,7 +133,13 @@ impl TokenManager {
                 .content,
             )
             .header("User-Agent", AUTH_USER_AGENT);
+        crate::downloader::pacing::PIXIV.wait().await;
         let response = request.send().await?;
+        if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            crate::downloader::pacing::PIXIV
+                .defer(crate::downloader::pacing::retry_after(response.headers()))
+                .await;
+        }
         // **状態コードを捨てない。** 捨てていたころは、429（取得制限）も
         // 401（再認証が要る）も 5xx（向こうの不調）も、`access_token` が
         // 無いという理由で全部「レスポンスを解析できませんでした」になった。

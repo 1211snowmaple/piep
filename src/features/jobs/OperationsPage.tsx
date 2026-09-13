@@ -38,7 +38,7 @@ import {
   dedupeActivityOperations,
 } from "./activityAggregation";
 import {
-  UPDATE_JOB_STATUS_META,
+  updateJobStatusMeta,
   isUpdateJobTerminal,
   useUpdateJobs,
   type UpdateJobLog,
@@ -387,7 +387,7 @@ export default function OperationsPage() {
             return <OperationCard key={`local-${activity.job.id}`} job={activity.job} />;
           }
           const job = activity.job;
-          const status = UPDATE_JOB_STATUS_META[job.status];
+          const status = updateJobStatusMeta(job);
           const progress = job.totals
             ? Math.min(100, (job.processed / job.totals) * 100)
             : 0;
@@ -450,7 +450,7 @@ export default function OperationsPage() {
                       </Group>
                       <Text size="xs" c="dimmed" mt={4}>
                         {timestamp(job.updatedAt)} · 保存 {job.savedCount} ·
-                        エラー {job.errorCount}
+                        エラー {job.errorCount} · 保留 {job.heldCount ?? 0}
                       </Text>
                     </Box>
                   </Group>
