@@ -105,6 +105,93 @@ test("critical workspaces keep a stable layout", async ({ page }, testInfo) => {
   }
 });
 
+test("collapsed save rail keeps its status and primary actions visible", async ({ page }, testInfo) => {
+  test.skip(
+    testInfo.project.name !== "900x600-light-100dpi",
+    "The narrowest window is the limiting geometry for the collapsed rail",
+  );
+  await page.goto("/#/save/pixiv");
+  await expect(page.getByRole("heading", { name: "Webから保存" })).toBeVisible();
+  await page.getByRole("button", { name: "保存候補をたたむ" }).click();
+
+  const rail = page.locator(".candidate-pane");
+  await expect(page.getByRole("button", { name: "保存候補を開く" })).toBeVisible();
+  await expect(page.getByRole("status", { name: "保存候補はまだありません" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "ライブラリを開く" })).toBeVisible();
+  // The closed rail uses only icons and numbers: neither persistent captions
+  // nor left-floating tooltips can be clipped beneath the native WebView.
+  for (const caption of ["開く", "取得", "選択", "保存", "本棚"]) {
+
+    await expect(rail.getByText(caption, { exact: true })).toHaveCount(0);
+  }
+  await page.getByRole("button", { name: "保存候補を開く" }).hover();
+  await expect(page.getByRole("tooltip")).toHaveCount(0);
+  const geometry = await rail.evaluate((element) => ({
+    width: element.clientWidth,
+    scrollWidth: element.scrollWidth,
+    height: element.clientHeight,
+    scrollHeight: element.scrollHeight,
+  }));
+  expect(geometry.scrollWidth).toBeLessThanOrEqual(geometry.width);
+  expect(geometry.scrollHeight).toBeLessThanOrEqual(geometry.height);
+  await expect(rail).toHaveScreenshot("save-candidate-rail.png");
+});
+
+test("detail filters open as a search spotlight and keep author names readable", async ({ page }, testInfo) => {
+  test.skip(
+    testInfo.project.name !== "900x600-light-100dpi",
+    "The shortest desktop window is the limiting spotlight geometry",
+  );
+  await page.goto("/#/library");
+  await page.getByRole("button", { name: "絞り込み" }).click();
+  const spotlight = page.getByRole("dialog", { name: "詳細フィルター" });
+  await expect(spotlight).toBeVisible();
+  await expect(spotlight.getByRole("textbox", { name: "条件を検索" })).toBeFocused();
+  await expect(spotlight.getByRole("button", { name: "適用" })).toBeVisible();
+  await expect(spotlight.getByRole("tab", { name: /^作者/ })).toHaveAttribute("aria-selected", "true");
+  const longAuthor = spotlight.getByRole("button", { name: /背徳亭無題＠ボイスドラマ発売中を含める作者へ追加/ });
+  await expect(longAuthor).toBeVisible();
+  await expect(longAuthor.getByText("背徳亭無題＠ボイスドラマ発売中")).toBeVisible();
+
+  const defaultGeometry = await spotlight.evaluate((element) => ({
+    width: element.clientWidth,
+    scrollWidth: element.scrollWidth,
+    height: element.clientHeight,
+    scrollHeight: element.scrollHeight,
+  }));
+  expect(defaultGeometry.scrollWidth).toBeLessThanOrEqual(defaultGeometry.width);
+  expect(defaultGeometry.scrollHeight).toBeLessThanOrEqual(defaultGeometry.height);
+  await expect(spotlight).toHaveScreenshot("library-filter-spotlight.png");
+
+  await spotlight.getByRole("textbox", { name: "条件を検索" }).fill("青葉");
+  const authorOption = page.getByRole("option").filter({ hasText: "青葉しおり" }).first();
+  await expect(authorOption).toBeVisible();
+  await expect(authorOption.getByLabel("pixiv")).toBeVisible();
+  await expect(authorOption.getByLabel("FANBOX")).toBeVisible();
+  const authorNameStyle = await authorOption.getByText("青葉しおり").evaluate((element) => ({
+    whiteSpace: getComputedStyle(element).whiteSpace,
+    overflow: getComputedStyle(element).overflow,
+  }));
+  expect(authorNameStyle).toEqual({ whiteSpace: "normal", overflow: "visible" });
+
+  // Entity-specific conditions get their own first panel instead of making a
+  // longer form. Opening a series list therefore keeps the same still frame.
+  await page.keyboard.press("Escape");
+  await spotlight.getByRole("button", { name: "閉じる" }).click();
+  await expect(spotlight).toBeHidden();
+  await page.goto("/#/library?tab=series");
+  await page.getByRole("button", { name: "絞り込み" }).click();
+  const seriesSpotlight = page.getByRole("dialog", { name: "詳細フィルター" });
+  await expect(seriesSpotlight.getByRole("tab", { name: /^シリーズ一覧/ })).toHaveAttribute("aria-selected", "true");
+  await expect(seriesSpotlight.getByRole("textbox", { name: "作品数の下限" })).toBeVisible();
+  await expect(seriesSpotlight.getByRole("combobox", { name: "連載の状態" })).toBeVisible();
+  const seriesGeometry = await seriesSpotlight.evaluate((element) => ({
+    height: element.clientHeight,
+    scrollHeight: element.scrollHeight,
+  }));
+  expect(seriesGeometry.scrollHeight).toBeLessThanOrEqual(seriesGeometry.height);
+});
+
 /**
  * 本文に貼られたリンクカードと、その提供元の印。
  *
