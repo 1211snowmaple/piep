@@ -6665,6 +6665,112 @@ fn update_job_candidates_can_be_queued_for_saving() {
 }
 
 #[test]
+fn saving_candidates_after_cancel_does_not_resume_the_canceled_queue() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let request = StartUpdateJobRequest {
+        scope: "author".to_string(),
+        mode: "check_only".to_string(),
+        work_ids: None,
+        target_ids: None,
+        credentials: None,
+        watch_saved: None,
+        adhoc_targets: None,
+    };
+    db.create_update_job(
+        "job-canceled-candidates",
+        &request,
+        &[
+            UpdateJobItemInput {
+                item_type: "target".to_string(),
+                source: Some("pixiv".to_string()),
+                source_id: Some("checked".to_string()),
+                target_type: Some("author".to_string()),
+                title: "確認済み".to_string(),
+                payload_json: "{}".to_string(),
+                status: "done".to_string(),
+            },
+            UpdateJobItemInput {
+                item_type: "target".to_string(),
+                source: Some("pixiv".to_string()),
+                source_id: Some("interrupted".to_string()),
+                target_type: Some("author".to_string()),
+                title: "中止した確認".to_string(),
+                payload_json: "{}".to_string(),
+                status: "running".to_string(),
+            },
+            UpdateJobItemInput {
+                item_type: "candidate".to_string(),
+                source: Some("pixiv".to_string()),
+                source_id: Some("auto-save-interrupted".to_string()),
+                target_type: Some("author".to_string()),
+                title: "中止した自動保存".to_string(),
+                payload_json: "{}".to_string(),
+                status: "queued".to_string(),
+            },
+            UpdateJobItemInput {
+                item_type: "candidate".to_string(),
+                source: Some("pixiv".to_string()),
+                source_id: Some("selected".to_string()),
+                target_type: Some("author".to_string()),
+                title: "今回選んだ候補".to_string(),
+                payload_json: "{}".to_string(),
+                status: "candidate".to_string(),
+            },
+        ],
+    )
+    .unwrap();
+    db.prepare_update_job_resume("job-canceled-candidates", false)
+        .unwrap();
+    db.set_update_job_status("job-canceled-candidates", "canceled", None)
+        .unwrap();
+
+    let before = db.update_job_snapshot("job-canceled-candidates").unwrap();
+    assert_eq!(
+        db.queue_update_job_candidates("job-canceled-candidates", &[i64::MAX])
+            .unwrap(),
+        0
+    );
+    let untouched = db
+        .list_update_job_item_states("job-canceled-candidates")
+        .unwrap();
+    assert!(untouched.iter().any(|item| {
+        item.source_id.as_deref() == Some("interrupted") && item.status == "queued"
+    }));
+
+    let selected_id = before
+        .candidates
+        .iter()
+        .find(|candidate| candidate.source_id == "selected")
+        .unwrap()
+        .id;
+    assert_eq!(
+        db.queue_update_job_candidates("job-canceled-candidates", &[selected_id])
+            .unwrap(),
+        1
+    );
+    db.set_update_job_status("job-canceled-candidates", "queued", None)
+        .unwrap();
+
+    let next = db
+        .next_update_job_item("job-canceled-candidates")
+        .unwrap()
+        .unwrap();
+    assert_eq!(next.item_type, "candidate");
+    assert_eq!(next.source_id.as_deref(), Some("selected"));
+
+    let states = db
+        .list_update_job_item_states("job-canceled-candidates")
+        .unwrap();
+    assert!(states.iter().any(|item| {
+        item.source_id.as_deref() == Some("interrupted") && item.status == "skipped"
+    }));
+    assert!(states.iter().any(|item| {
+        item.source_id.as_deref() == Some("auto-save-interrupted") && item.status == "candidate"
+    }));
+}
+
+#[test]
 fn new_work_and_revision_enter_the_same_save_queue() {
     let (_temp, root, storage) = temp_paths();
     let db = Database::open(&root.join("piep.db"), &storage).unwrap();

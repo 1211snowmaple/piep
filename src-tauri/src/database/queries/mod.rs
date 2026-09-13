@@ -5760,10 +5760,60 @@ impl Database {
         if candidate_ids.is_empty() {
             return Ok(0);
         }
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| format!("Failed to begin update candidate queue: {e}"))?;
+        let job_status: String = tx
+            .query_row(
+                "SELECT status FROM update_jobs WHERE id = ?1",
+                params![job_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("Update job not found: {e}"))?;
+
+        // A canceled worker leaves its unfinished item queued so an explicit
+        // resume can continue where it stopped. Saving selected candidates is
+        // a different action: it must not implicitly resume that old queue.
+        // Keep unfinished candidates available for a later choice, and settle
+        // the abandoned checks so only the candidate IDs below can run now.
+        if job_status == "canceled" {
+            let mut has_selected_candidate = false;
+            for id in candidate_ids {
+                has_selected_candidate |= tx
+                    .query_row(
+                        "SELECT EXISTS(
+                            SELECT 1 FROM update_job_items
+                            WHERE id = ?1 AND job_id = ?2 AND item_type = 'candidate'
+                              AND status IN ('candidate', 'failed', 'queued', 'running')
+                         )",
+                        params![id, job_id],
+                        |row| row.get::<_, bool>(0),
+                    )
+                    .map_err(|e| format!("Failed to validate update candidate: {e}"))?;
+            }
+            // Preserve the existing no-op guarantee for stale or foreign IDs.
+            // In particular, an invalid save request must not discard the
+            // queue which an explicit resume could still continue.
+            if !has_selected_candidate {
+                tx.commit()
+                    .map_err(|e| format!("Failed to finish empty candidate queue: {e}"))?;
+                return Ok(0);
+            }
+            tx.execute(
+                "UPDATE update_job_items
+                 SET status = CASE WHEN item_type = 'candidate' THEN 'candidate' ELSE 'skipped' END,
+                     error = NULL,
+                     updated_at = CURRENT_TIMESTAMP
+                 WHERE job_id = ?1 AND status IN ('queued', 'running')",
+                params![job_id],
+            )
+            .map_err(|e| format!("Failed to abandon canceled update items: {e}"))?;
+        }
+
         let mut changed = 0i64;
         for id in candidate_ids {
-            changed += conn
+            changed += tx
                 .execute(
                     "UPDATE update_job_items
                      SET status = 'queued', error = NULL, updated_at = CURRENT_TIMESTAMP
@@ -5773,6 +5823,8 @@ impl Database {
                 .map_err(|e| format!("Failed to queue update candidate: {}", e))?
                 as i64;
         }
+        tx.commit()
+            .map_err(|e| format!("Failed to commit update candidate queue: {e}"))?;
         Ok(changed)
     }
 
