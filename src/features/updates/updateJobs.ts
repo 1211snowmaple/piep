@@ -118,6 +118,10 @@ export function invalidateAfterUpdateJob(client: QueryClient): void {
   client.invalidateQueries({ queryKey: ["pending-revisions"] });
   client.invalidateQueries({ queryKey: ["deferred-candidates"] });
   client.invalidateQueries({ queryKey: ["library"] });
+  // 監視作者の確認はプロフィール（名前・アイコン・紹介文）も更新する。
+  // 見出しだけでなく、開いている履歴・取得データも同じ版へ揃える。
+  client.invalidateQueries({ queryKey: ["entity-versions"] });
+  client.invalidateQueries({ queryKey: ["entity-json"] });
   invalidateWorkSetViews(client);
 }
 
