@@ -1922,8 +1922,26 @@ select {
   left: 0;
   height: 62px;
   border-bottom: 1px solid light-dark(#ded8ce, #2a3039);
-  background: light-dark(rgb(255 255 255 / 92%), rgb(16 20 27 / 94%));
-  backdrop-filter: blur(16px);
+  /* 本文とは重ならない帯なので、背後を毎フレームぼかす意味がない。
+     WebView ではこの blur が長い本文のスクロールごとに再合成される。 */
+  background: light-dark(rgb(255 255 255 / 98%), rgb(16 20 27 / 98%));
+}
+
+.reader-progress {
+  --reader-progress-ratio: 0;
+  height: 2px;
+  overflow: hidden;
+  background: light-dark(var(--mantine-color-gray-2), var(--mantine-color-dark-5));
+}
+
+.reader-progress__bar {
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: var(--mantine-color-piep-6);
+  transform: scaleX(var(--reader-progress-ratio));
+  transform-origin: left center;
+  will-change: transform;
 }
 
 .reader-scroll {
@@ -2049,7 +2067,17 @@ select {
   color: var(--mantine-color-dimmed);
 }
 
-.reader-to-top { position: fixed; right: 24px; bottom: 24px; z-index: 110; box-shadow: var(--mantine-shadow-lg); }
+.reader-to-top {
+  position: fixed;
+  z-index: 110;
+  right: 24px;
+  bottom: 24px;
+  visibility: hidden;
+  opacity: 0;
+  pointer-events: none;
+  box-shadow: var(--mantine-shadow-lg);
+}
+.reader-to-top[data-visible] { visibility: visible; opacity: 1; pointer-events: auto; }
 
 /* 探した語の印。地の色をそのままにして、下に線だけ引く ―― 塗ると本文の
    流れが切れて、続きが読みにくくなる。 */
@@ -2151,9 +2179,8 @@ select {
   padding: 5px 8px;
   border: 1px solid light-dark(#dde2e8, #303944);
   border-radius: 12px;
-  background: light-dark(rgb(255 255 255 / 94%), rgb(20 25 33 / 94%));
+  background: light-dark(rgb(255 255 255 / 98%), rgb(20 25 33 / 98%));
   box-shadow: var(--mantine-shadow-md);
-  backdrop-filter: blur(14px);
 }
 .reader-page-controls .mantine-Pagination-control { min-width: 30px; height: 30px; border-radius: 7px; }
 

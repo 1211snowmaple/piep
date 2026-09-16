@@ -13,7 +13,6 @@ import {
   Pagination,
   Paper,
   Popover,
-  Progress,
   Radio,
   ScrollArea,
   SegmentedControl,
@@ -275,13 +274,14 @@ export default function ReaderPage() {
   const [hitIndex, setHitIndex] = useState(0);
   const [zoomImage, setZoomImage] = useState<{ src: string; alt: string } | null>(null);
   const [pdfOriginal, setPdfOriginal] = useState<PdfOriginalTarget | null>(null);
-  const [progress, setProgress] = useState(0);
   const [sourcePage, setSourcePage] = useState(1);
   const [jumpPage, setJumpPage] = useState<number | string>(1);
   const [jumpOpened, setJumpOpened] = useState(false);
   const [fullscreen, setFullscreen] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const articleRef = useRef<HTMLElement>(null);
+  const progressRef = useRef<HTMLDivElement>(null);
+  const toTopRef = useRef<HTMLButtonElement>(null);
   const restoredKeyRef = useRef<string | null>(null);
   const pendingBookmarkRef = useRef<{ page: number; top: number; anchor?: number } | null>(null);
   // ページを跨いで検索結果へ飛ぶとき、そのページが届くまで持っておく。
@@ -696,9 +696,17 @@ export default function ReaderPage() {
     // 毎回更新し、書き込みだけを間引く。** 離れるときに必ず書き切るので、
     // 最後に読んでいた場所は失われない。
     let pendingTop: number | null = null;
+    let pendingPersist = false;
     let saveTimer: number | null = null;
+    let progressFrame: number | null = null;
     const flush = () => {
       saveTimer = null;
+      // A background window can throttle animation frames while timers still
+      // run. Do not lose the last genuine scroll merely because its paint did
+      // not receive a frame.
+      if (pendingTop === null && pendingPersist && restoredKeyRef.current === positionKey) {
+        pendingTop = flowOffset(viewport, vertical);
+      }
       if (pendingTop === null) return;
       // 行の目印は書き込むときにだけ数える。スクロールのたびに数えていては、
       // 行の多い本で指を滑らせている間じゅう本文を走査することになる。
@@ -707,6 +715,7 @@ export default function ReaderPage() {
       if (sourcePage >= pageCount && atFlowEdge(viewport, vertical, 1)) {
         clearReadingPosition(id, version);
         pendingTop = null;
+        pendingPersist = false;
         return;
       }
       const article = articleRef.current;
@@ -718,26 +727,58 @@ export default function ReaderPage() {
         ...(anchor === null ? {} : { anchor }),
       });
       pendingTop = null;
+      pendingPersist = false;
     };
-    const update = (event?: Event) => {
+    const paintProgress = (persist: boolean) => {
+      progressFrame = null;
       // 縦書きは横に流れる。始まりがどちら端かは端末の取り決め次第なので、
       // 「どれだけ動いたか」の絶対値で測る。
       const total = flowLength(viewport, vertical);
-      const next = total <= 0 ? 100 : Math.max(0, Math.min(100, flowOffset(viewport, vertical) / total * 100));
-      setProgress(hasSourcePages ? ((sourcePage - 1) + next / 100) / pageCount * 100 : next);
+      const offset = flowOffset(viewport, vertical);
+      const pageProgress = total <= 0 ? 100 : Math.max(0, Math.min(100, offset / total * 100));
+      const progress = hasSourcePages
+        ? ((sourcePage - 1) + pageProgress / 100) / pageCount * 100
+        : pageProgress;
+      const indicator = progressRef.current;
+      if (indicator) {
+        indicator.style.setProperty("--reader-progress-ratio", String(progress / 100));
+        indicator.setAttribute("aria-valuenow", String(Math.round(progress)));
+      }
+      toTopRef.current?.toggleAttribute("data-visible", progress > 8);
       // Only a genuine scroll writes the position. The priming call below runs
       // before the saved offset has been applied, so persisting there would
       // overwrite the stored place with 0 each time the reader opens.
-      if (!event || restoredKeyRef.current !== positionKey) return;
+      if (!persist || restoredKeyRef.current !== positionKey) return;
       // 縦書きの `scrollTop` は常に 0 なので、そのまま憶えると「先頭」しか
       // 記録されない。読み始めからの距離で憶える。
-      pendingTop = flowOffset(viewport, vertical);
-      if (saveTimer === null) saveTimer = window.setTimeout(flush, 400);
+      pendingTop = offset;
+      pendingPersist = false;
+    };
+    const update = (event?: Event) => {
+      if (event && restoredKeyRef.current === positionKey) {
+        pendingPersist = true;
+        if (saveTimer === null) saveTimer = window.setTimeout(flush, 400);
+      }
+      // A trackpad can emit several scroll events before the browser paints a
+      // frame. Measuring and redrawing for every event forced the entire long
+      // reader tree through React dozens of times per second. The progress bar
+      // is presentation-only, so paint it directly once per frame.
+      if (!event) {
+        paintProgress(false);
+      } else if (progressFrame === null) {
+        progressFrame = window.requestAnimationFrame(() => paintProgress(pendingPersist));
+      }
     };
     viewport.addEventListener("scroll", update, { passive: true });
     update();
     return () => {
       viewport.removeEventListener("scroll", update);
+      if (progressFrame !== null) {
+        window.cancelAnimationFrame(progressFrame);
+        if (pendingPersist && restoredKeyRef.current === positionKey) {
+          pendingTop = flowOffset(viewport, vertical);
+        }
+      }
       if (saveTimer !== null) window.clearTimeout(saveTimer);
       flush();
     };
@@ -933,7 +974,9 @@ export default function ReaderPage() {
             <Button variant="subtle" color="gray" size="xs" leftSection={<Icons.edit size={IconSize.menu} />} onClick={() => navigate(`/editor/${work.id}`)}>編集</Button>
           </Group>
         </Group>
-        <Progress value={progress} h={2} radius={0} aria-label={`読書進捗 ${Math.round(progress)}%`} />
+        <div ref={progressRef} className="reader-progress" role="progressbar" aria-label="読書進捗" aria-valuemin={0} aria-valuemax={100}>
+          <span className="reader-progress__bar" />
+        </div>
       </header>
 
       {/* 本文の器そのものに焦点を持たせる。焦点が外側の `main` に載っていた
@@ -1001,7 +1044,7 @@ export default function ReaderPage() {
           </Popover>
         </Group>
       </Paper>}
-      {progress > 8 && <Tooltip label="先頭へ戻る"><ActionIcon className="reader-to-top" size="lg" radius="xl" variant="filled" aria-label="本文の先頭へ戻る" onClick={() => scrollRef.current && scrollToStart(scrollRef.current, vertical)}><Icons.up size={IconSize.nav} /></ActionIcon></Tooltip>}
+      <Tooltip label="先頭へ戻る"><ActionIcon ref={toTopRef} className="reader-to-top" size="lg" radius="xl" variant="filled" aria-label="本文の先頭へ戻る" onClick={() => scrollRef.current && scrollToStart(scrollRef.current, vertical)}><Icons.up size={IconSize.nav} /></ActionIcon></Tooltip>
 
       {/* 探した語の間を行き来する帯。ページ番号だけ返して終わりだったころは、
           結果を押しても本文の頭へ動くだけで、どこに在ったのかは自分で

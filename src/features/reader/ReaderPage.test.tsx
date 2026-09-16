@@ -1,7 +1,7 @@
 import { MantineProvider } from "@mantine/core";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AppRouter } from "@/app/router";
 import { getDemoReader } from "@/mocks/demoData";
 import type { ReaderContentPage } from "@/types/library";
@@ -37,6 +37,8 @@ function renderReader() {
 }
 
 describe("ReaderPage position restoration", () => {
+  afterEach(() => vi.restoreAllMocks());
+
   beforeEach(() => {
     window.localStorage.clear();
     window.sessionStorage.clear();
@@ -120,6 +122,41 @@ describe("ReaderPage position restoration", () => {
     await act(async () => { pageTwo.resolve(content(1, "<p>2ページの本文</p>")); });
     await waitFor(() => expect(screen.getByText("2ページの本文")).toBeInTheDocument());
     await waitFor(() => expect(viewport!.scrollTop).toBe(240));
+  });
+
+  it("coalesces trackpad scroll events into one progress paint", async () => {
+    dbApi.getReaderContentPage.mockResolvedValue({
+      ...content(0, "<p>長い本文</p>"),
+      pageCount: 1,
+      sourcePageStarts: [0],
+    });
+    const view = renderReader();
+    expect(await screen.findByText("長い本文")).toBeInTheDocument();
+    const viewport = view.container.querySelector<HTMLElement>(".reader-scroll .mantine-ScrollArea-viewport");
+    expect(viewport).not.toBeNull();
+    Object.defineProperties(viewport!, {
+      scrollHeight: { configurable: true, value: 1_000 },
+      clientHeight: { configurable: true, value: 400 },
+    });
+    const frames: FrameRequestCallback[] = [];
+    const requestFrame = vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {
+      frames.push(callback);
+      return frames.length;
+    });
+
+    viewport!.scrollTop = 100;
+    fireEvent.scroll(viewport!);
+    viewport!.scrollTop = 200;
+    fireEvent.scroll(viewport!);
+    viewport!.scrollTop = 300;
+    fireEvent.scroll(viewport!);
+
+    expect(requestFrame).toHaveBeenCalledTimes(1);
+    act(() => frames[0](performance.now()));
+    const indicator = screen.getByRole("progressbar", { name: "読書進捗" });
+    expect(indicator).toHaveAttribute("aria-valuenow", "50");
+    expect(indicator).toHaveStyle({ "--reader-progress-ratio": "0.5" });
+    expect(screen.getByRole("button", { name: "本文の先頭へ戻る" })).toHaveAttribute("data-visible");
   });
 
   /**
