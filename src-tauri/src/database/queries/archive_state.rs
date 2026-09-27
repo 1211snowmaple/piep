@@ -60,6 +60,28 @@ fn valid_edit_status(status: &str) -> bool {
     matches!(status, "draft" | "active" | "archived")
 }
 
+fn validate_restored_work_edits(revisions: &[PortableWorkEdit]) -> Result<(), String> {
+    for revision in revisions {
+        if !valid_edit_status(&revision.status) {
+            return Err(format!(
+                "Backup contains an invalid edit status: {}",
+                revision.status
+            ));
+        }
+    }
+    for status in ["draft", "active"] {
+        if revisions
+            .iter()
+            .filter(|revision| revision.status == status)
+            .count()
+            > 1
+        {
+            return Err(format!("Backup contains more than one {status} work edit"));
+        }
+    }
+    Ok(())
+}
+
 fn valid_pair_decision(decision: &str) -> bool {
     matches!(decision, "accept" | "reject")
 }
@@ -183,15 +205,13 @@ impl Database {
         download_id: i64,
         revisions: &[PortableWorkEdit],
     ) -> Result<(), String> {
+        // Validate the complete archive before touching the connection. Even
+        // though normal restore owns an outer transaction, this function must
+        // never leave a prefix behind when called by a maintenance path.
+        validate_restored_work_edits(revisions)?;
         // This participates in archive.rs' outer atomic restore transaction.
         let conn = self.conn.lock().map_err(|error| error.to_string())?;
         for revision in revisions {
-            if !valid_edit_status(&revision.status) {
-                return Err(format!(
-                    "Backup contains an invalid edit status: {}",
-                    revision.status
-                ));
-            }
             conn.execute(
                 "INSERT INTO work_edit_revisions
                  (download_id, base_version, status, title, content_hash, created_at, updated_at)
@@ -327,7 +347,22 @@ impl Database {
 
 #[cfg(test)]
 mod tests {
-    use super::{valid_edit_status, valid_pair_decision, valid_tag_source};
+    use super::{
+        valid_edit_status, valid_pair_decision, valid_tag_source, validate_restored_work_edits,
+        PortableWorkEdit,
+    };
+
+    fn portable_edit(status: &str) -> PortableWorkEdit {
+        PortableWorkEdit {
+            base_version: 1,
+            status: status.to_string(),
+            title: None,
+            content_hash: None,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+            blocks: Vec::new(),
+        }
+    }
 
     #[test]
     fn portable_enums_reject_values_that_cannot_be_restored_safely() {
@@ -341,5 +376,22 @@ mod tests {
         assert!(!valid_tag_source("model"));
         assert!(!valid_edit_status("published"));
         assert!(!valid_pair_decision("maybe"));
+    }
+
+    #[test]
+    fn restored_edits_are_rejected_before_duplicate_live_states_can_be_inserted() {
+        assert!(validate_restored_work_edits(&[
+            portable_edit("active"),
+            portable_edit("archived"),
+        ])
+        .is_ok());
+        assert_eq!(
+            validate_restored_work_edits(&[portable_edit("draft"), portable_edit("draft")]),
+            Err("Backup contains more than one draft work edit".to_string())
+        );
+        assert_eq!(
+            validate_restored_work_edits(&[portable_edit("future")]),
+            Err("Backup contains an invalid edit status: future".to_string())
+        );
     }
 }

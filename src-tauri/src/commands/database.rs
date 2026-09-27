@@ -697,11 +697,16 @@ pub async fn db_list_entity_series(
 /// 次の頁は返ってきた `cursor` をそのまま渡す。**中身を解釈しないこと。**
 /// `query` を渡すと名前で絞る。`limit` の既定は 60。
 #[tauri::command]
+// Tauri exposes these as named IPC fields. Wrapping them in a Rust-only
+// options object would silently change the frontend command contract.
+#[allow(clippy::too_many_arguments)]
 pub async fn db_list_entity_series_paged(
     app: tauri::AppHandle,
     source: String,
     source_key: String,
     query: Option<String>,
+    sort_by: Option<String>,
+    sort_order: Option<String>,
     limit: Option<i64>,
     cursor: Option<String>,
 ) -> Result<EntitySeriesPage, String> {
@@ -710,6 +715,8 @@ pub async fn db_list_entity_series_paged(
             &source,
             &source_key,
             query.as_deref(),
+            sort_by.as_deref(),
+            sort_order.as_deref(),
             limit.unwrap_or(60),
             cursor.as_deref(),
         )

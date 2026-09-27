@@ -992,7 +992,18 @@ fn params(query: &str) -> SearchV2Params {
         authors_exclude: None,
         min_char_count: None,
         max_char_count: None,
+        min_asset_count: None,
+        max_asset_count: None,
+        min_file_size_bytes: None,
+        max_file_size_bytes: None,
         asset_filter: None,
+        series_filter: None,
+        revision_filter: None,
+        edit_filter: None,
+        cover_filter: None,
+        date_field: None,
+        date_from: None,
+        date_to: None,
         watch_filter: None,
         person_source: None,
         person_key: None,
@@ -1003,6 +1014,7 @@ fn params(query: &str) -> SearchV2Params {
         view_mode: None,
         projection: None,
         search_mode: None,
+        version_scope: None,
     }
 }
 
@@ -1024,7 +1036,18 @@ fn v2_params(query: Option<&str>, limit: i64, cursor: Option<String>) -> SearchV
         authors_exclude: None,
         min_char_count: None,
         max_char_count: None,
+        min_asset_count: None,
+        max_asset_count: None,
+        min_file_size_bytes: None,
+        max_file_size_bytes: None,
         asset_filter: None,
+        series_filter: None,
+        revision_filter: None,
+        edit_filter: None,
+        cover_filter: None,
+        date_field: None,
+        date_from: None,
+        date_to: None,
         watch_filter: None,
         person_source: None,
         person_key: None,
@@ -1035,6 +1058,7 @@ fn v2_params(query: Option<&str>, limit: i64, cursor: Option<String>) -> SearchV
         view_mode: None,
         projection: None,
         search_mode: None,
+        version_scope: None,
     }
 }
 
@@ -1209,6 +1233,282 @@ fn insert_download_with_reindex(
         db.reindex_download(id).unwrap();
     }
     id
+}
+
+#[test]
+fn historical_search_is_opt_in_and_groups_saved_revisions_by_work() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let download_id = insert_download(
+        &db,
+        &storage,
+        "history-search-1",
+        "改稿される作品",
+        "履歴作者",
+        &["改稿"],
+        "旧版限定語がここにあります。",
+    );
+
+    let v1_path = storage
+        .join("pixiv")
+        .join("history-search-1")
+        .join("v1")
+        .join("original.json");
+    let v2_dir = storage.join("pixiv").join("history-search-1").join("v2");
+    fs::create_dir_all(&v2_dir).unwrap();
+    let v2_path = v2_dir.join("original.json");
+    fs::write(
+        &v2_path,
+        serde_json::json!({ "text": "新版限定語だけが残っています。" })
+            .to_string()
+            .as_bytes(),
+    )
+    .unwrap();
+    {
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO download_versions (
+                download_id, version, content_hash, text_length, json_path,
+                original_json_path, asset_count, file_size_bytes, created_at, change_summary
+             ) VALUES (?1, 1, 'history-v1', 14, ?2, ?2, 0, 0, '2026-01-01T00:00:00Z', '初版')",
+            params![download_id, v1_path.to_string_lossy().to_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO download_versions (
+                download_id, version, content_hash, text_length, json_path,
+                original_json_path, asset_count, file_size_bytes, created_at, change_summary
+             ) VALUES (?1, 2, 'history-v2', 15, ?2, ?2, 0, 0, '2026-02-01T00:00:00Z', '改稿')",
+            params![download_id, v2_path.to_string_lossy().to_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE downloads SET
+                current_version = 2, content_hash = 'history-v2', text_length = 15,
+                json_path = ?2, original_json_path = ?2
+             WHERE id = ?1",
+            params![download_id, v2_path.to_string_lossy().to_string()],
+        )
+        .unwrap();
+    }
+    db.reindex_download(download_id).unwrap();
+
+    let current_only = db.search_downloads_v2(&params("旧版限定語")).unwrap();
+    assert!(current_only.items.is_empty());
+
+    let mut with_history = params("旧版限定語");
+    with_history.version_scope = Some("all".to_string());
+    let historical = db.search_downloads_v2(&with_history).unwrap();
+    assert_eq!(historical.items.len(), 1);
+    assert_eq!(historical.items[0].id, download_id);
+    assert_eq!(historical.items[0].matched_version, Some(1));
+    assert_eq!(historical.items[0].historical_match_count, 1);
+    assert!(historical.items[0]
+        .match_highlights
+        .iter()
+        .any(|highlight| highlight.field == "body"));
+    assert!(historical
+        .search_meta
+        .explanations
+        .iter()
+        .any(|explanation| {
+            explanation.contains("過去版") && explanation.contains("作品ごと")
+        }));
+
+    // Search target and result filters are independent: old text is searched,
+    // then the matching work is still narrowed by its current library state.
+    let mut historical_revised_only = with_history.clone();
+    historical_revised_only.revision_filter = Some("revised".to_string());
+    assert_eq!(
+        db.search_downloads_v2(&historical_revised_only)
+            .unwrap()
+            .items
+            .len(),
+        1
+    );
+    historical_revised_only.revision_filter = Some("first_version".to_string());
+    assert!(db
+        .search_downloads_v2(&historical_revised_only)
+        .unwrap()
+        .items
+        .is_empty());
+
+    // The same historical match set must survive an explicit SQL-owned sort.
+    // Otherwise choosing title/date ordering would silently lose old versions.
+    with_history.sort_by = Some("title".to_string());
+    let sorted = db.search_downloads_v2(&with_history).unwrap();
+    assert_eq!(sorted.items.len(), 1);
+    assert_eq!(sorted.items[0].matched_version, Some(1));
+
+    let mut current_match = params("新版限定語");
+    current_match.version_scope = Some("all".to_string());
+    let current = db.search_downloads_v2(&current_match).unwrap();
+    assert_eq!(current.items.len(), 1);
+    assert_eq!(current.items[0].matched_version, None);
+}
+
+#[test]
+fn legacy_root_assets_do_not_absorb_modern_version_trees() {
+    let (_temp, _root, storage) = temp_paths();
+    let work = storage.join("pixiv").join("legacy-assets");
+    let asset = |id: i64, path: PathBuf| AssetEntry {
+        id,
+        download_id: 1,
+        asset_type: "file".to_string(),
+        filename: path.file_name().unwrap().to_string_lossy().to_string(),
+        local_path: path.to_string_lossy().to_string(),
+        original_url: None,
+        mime_type: None,
+        file_size_bytes: 1,
+    };
+    let assets = vec![
+        asset(1, work.join("legacy.txt")),
+        asset(2, work.join("data_assets").join("legacy.epub")),
+        asset(3, work.join("v2").join("data_assets").join("second.txt")),
+        asset(
+            4,
+            work.join("v20").join("data_assets").join("twentieth.txt"),
+        ),
+    ];
+
+    assert_eq!(
+        assets_for_version_path(&assets, &work.join("original.json"))
+            .into_iter()
+            .map(|entry| entry.id)
+            .collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+    assert_eq!(
+        assets_for_version_path(&assets, &work.join("v2").join("original.json"))
+            .into_iter()
+            .map(|entry| entry.id)
+            .collect::<Vec<_>>(),
+        vec![3]
+    );
+}
+
+#[test]
+fn asset_kind_filter_and_index_describe_only_the_current_revision() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let download_id = insert_download_unindexed(
+        &db,
+        &storage,
+        "asset-version-filter",
+        "添付の版境界",
+        "作者",
+        &[],
+        "本文",
+    );
+    let work = storage.join("pixiv").join("asset-version-filter");
+    let v2_dir = work.join("v2");
+    fs::create_dir_all(v2_dir.join("data_assets")).unwrap();
+    let v2_json = v2_dir.join("original.json");
+    fs::write(&v2_json, r#"{"text":"現行本文"}"#).unwrap();
+    {
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE downloads SET current_version = 2, json_path = ?2,
+                    original_json_path = ?2, asset_count = 1
+             WHERE id = ?1",
+            params![download_id, v2_json.to_string_lossy().to_string()],
+        )
+        .unwrap();
+    }
+    let old_image = work.join("v1").join("data_assets").join("old.png");
+    let current_file = v2_dir.join("data_assets").join("current.txt");
+    for path in [&old_image, &current_file] {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, b"asset").unwrap();
+    }
+    db.insert_asset(&NewAsset {
+        download_id,
+        asset_type: "illustration".to_string(),
+        filename: "old.png".to_string(),
+        local_path: old_image.to_string_lossy().to_string(),
+        original_url: None,
+        mime_type: Some("image/png".to_string()),
+        file_size_bytes: 5,
+    })
+    .unwrap();
+    db.insert_asset(&NewAsset {
+        download_id,
+        asset_type: "file".to_string(),
+        filename: "current.txt".to_string(),
+        local_path: current_file.to_string_lossy().to_string(),
+        original_url: None,
+        mime_type: Some("text/plain".to_string()),
+        file_size_bytes: 5,
+    })
+    .unwrap();
+
+    let mut images = v2_params(None, 20, None);
+    images.asset_filter = Some("has_images".to_string());
+    assert!(db.search_downloads_v2(&images).unwrap().items.is_empty());
+    let mut files = v2_params(None, 20, None);
+    files.asset_filter = Some("has_files".to_string());
+    assert_eq!(
+        db.search_downloads_v2(&files).unwrap().items[0].id,
+        download_id
+    );
+
+    let conn = db.conn.lock().unwrap();
+    let document = search_index_document_locked(&conn, &storage, download_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(document.tantivy.asset_kinds, "file");
+}
+
+#[test]
+fn version_delete_refuses_current_and_legacy_root_revisions_without_mutation() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let download_id = insert_download_unindexed(
+        &db,
+        &storage,
+        "delete-version-guard",
+        "版削除ガード",
+        "作者",
+        &[],
+        "初版",
+    );
+    let work = storage.join("pixiv").join("delete-version-guard");
+    let legacy_json = work.join("original.json");
+    fs::write(&legacy_json, r#"{"text":"旧形式"}"#).unwrap();
+    let v2_dir = work.join("v2");
+    fs::create_dir_all(&v2_dir).unwrap();
+    let v2_json = v2_dir.join("original.json");
+    fs::write(&v2_json, r#"{"text":"現在版"}"#).unwrap();
+    {
+        let conn = db.conn.lock().unwrap();
+        for (version, path) in [(1, &legacy_json), (2, &v2_json)] {
+            conn.execute(
+                "INSERT INTO download_versions (
+                    download_id, version, json_path, original_json_path, created_at
+                 ) VALUES (?1, ?2, ?3, ?3, '2026-01-01T00:00:00Z')",
+                params![download_id, version, path.to_string_lossy().to_string()],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "UPDATE downloads SET current_version = 2, json_path = ?2, original_json_path = ?2
+             WHERE id = ?1",
+            params![download_id, v2_json.to_string_lossy().to_string()],
+        )
+        .unwrap();
+    }
+
+    assert!(db
+        .delete_version(download_id, 2)
+        .unwrap_err()
+        .contains("現在版"));
+    assert!(db
+        .delete_version(download_id, 1)
+        .unwrap_err()
+        .contains("旧形式"));
+    assert_eq!(db.get_versions(download_id).unwrap().len(), 2);
+    assert!(legacy_json.exists());
+    assert!(v2_json.exists());
 }
 
 /// 実ライブラリで見つかった並び順の崩れを固定する。番号のない初回が
@@ -2631,6 +2931,8 @@ fn sort_aliases_map_to_the_expected_safe_sql_columns() {
         ),
         ("text_length", "length", "d.text_length"),
         ("file_size_bytes", "size", "d.file_size_bytes"),
+        ("asset_count", "assets", "d.asset_count"),
+        ("current_version", "version", "d.current_version"),
     ];
 
     for (requested, normalized, expected_sql) in cases {
@@ -2645,6 +2947,69 @@ fn sort_aliases_map_to_the_expected_safe_sql_columns() {
     malicious.sort_by = Some("downloaded_at; DROP TABLE downloads".to_string());
     assert_eq!(effective_sort_by(&malicious).as_deref(), Some("date"));
     assert!(!sort_clause(&malicious).contains("DROP TABLE"));
+}
+
+#[test]
+fn asset_and_version_sorts_support_both_directions() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let low = insert_download(&db, &storage, "sort-low", "少", "作者", &[], "本文");
+    let middle = insert_download(&db, &storage, "sort-middle", "中", "作者", &[], "本文");
+    let high = insert_download(&db, &storage, "sort-high", "多", "作者", &[], "本文");
+    {
+        let conn = db.conn.lock().unwrap();
+        for (id, assets, version) in [(low, 1, 1), (middle, 4, 2), (high, 9, 5)] {
+            conn.execute(
+                "UPDATE downloads SET asset_count = ?1, current_version = ?2 WHERE id = ?3",
+                params![assets, version, id],
+            )
+            .unwrap();
+        }
+    }
+
+    for key in ["asset_count", "current_version"] {
+        let mut search = v2_params(None, 20, None);
+        search.sort_by = Some(key.to_string());
+        search.sort_order = Some("asc".to_string());
+        assert_eq!(
+            db.search_downloads_v2(&search)
+                .unwrap()
+                .items
+                .iter()
+                .map(|item| item.id)
+                .collect::<Vec<_>>(),
+            vec![low, middle, high],
+            "{key} asc"
+        );
+
+        search.sort_order = Some("desc".to_string());
+        assert_eq!(
+            db.search_downloads_v2(&search)
+                .unwrap()
+                .items
+                .iter()
+                .map(|item| item.id)
+                .collect::<Vec<_>>(),
+            vec![high, middle, low],
+            "{key} desc"
+        );
+
+        // The same order must survive the disk-backed text-search path rather
+        // than only working for an unsearched library listing.
+        let mut lexical = v2_params(Some("本文"), 20, None);
+        lexical.sort_by = Some(key.to_string());
+        lexical.sort_order = Some("asc".to_string());
+        assert_eq!(
+            db.search_downloads_v2(&lexical)
+                .unwrap()
+                .items
+                .iter()
+                .map(|item| item.id)
+                .collect::<Vec<_>>(),
+            vec![low, middle, high],
+            "searched {key} asc"
+        );
+    }
 }
 
 #[test]
@@ -3691,19 +4056,30 @@ fn entity_ordering_only_speaks_words_it_knows() {
     };
     assert_eq!(
         clause(None, None),
-        "ORDER BY count DESC, display_name ASC",
+        "ORDER BY count DESC, display_name ASC, 1 ASC, 2 ASC",
         "既定は作品が多い順"
     );
     assert!(clause(Some("downloaded_at"), None).starts_with("ORDER BY latest_downloaded_at DESC"));
+    assert!(clause(Some("source_created_at"), Some("asc"))
+        .starts_with("ORDER BY latest_source_created_at ASC"));
     assert!(clause(Some("source_updated_at"), None)
         .starts_with("ORDER BY latest_source_updated_at DESC"));
+    assert!(clause(Some("text_length"), None).starts_with("ORDER BY total_text_length DESC"));
+    assert!(clause(Some("file_size_bytes"), Some("asc"))
+        .starts_with("ORDER BY total_file_size_bytes ASC"));
+    assert!(clause(Some("asset_count"), None).starts_with("ORDER BY total_asset_count DESC"));
+    assert!(clause(Some("current_version"), Some("asc"))
+        .starts_with("ORDER BY total_revision_count ASC"));
     assert!(clause(Some("name"), None).starts_with("ORDER BY display_name COLLATE NOCASE ASC"));
     assert!(
         clause(Some("name"), Some("desc")).starts_with("ORDER BY display_name COLLATE NOCASE DESC")
     );
     // 知らない指定は既定へ落ちる。文字列はそのままSQLへ入らない。
     let injected = clause(Some("1; DROP TABLE downloads"), Some("desc; --"));
-    assert_eq!(injected, "ORDER BY count DESC, display_name ASC");
+    assert_eq!(
+        injected,
+        "ORDER BY count DESC, display_name ASC, 1 ASC, 2 ASC"
+    );
     assert!(!injected.contains("DROP"));
     // 同じ値が並んだときの順番まで決めておく。ページの境目が揺れる。
     assert!(clause(Some("downloaded_at"), None).contains("count DESC, display_name ASC"));
@@ -3954,7 +4330,10 @@ fn entity_facets_sort_by_the_works_underneath() {
         conn.execute(
             "UPDATE downloads SET author_id = 'author-A', author_name = '作者A',
                     downloaded_at = '2026-01-01T00:00:00Z',
-                    source_updated_at = '2026-08-01T00:00:00Z'
+                    source_created_at = '2025-01-01T00:00:00Z',
+                    source_updated_at = '2026-08-01T00:00:00Z',
+                    text_length = 100, file_size_bytes = 1000,
+                    asset_count = 1, current_version = 4
                  WHERE id IN (?1, ?2)",
             params![a1, a2],
         )
@@ -3962,31 +4341,243 @@ fn entity_facets_sort_by_the_works_underneath() {
         conn.execute(
             "UPDATE downloads SET author_id = 'author-B', author_name = '作者B',
                     downloaded_at = '2026-08-20T00:00:00Z',
-                    source_updated_at = '2026-01-05T00:00:00Z'
+                    source_created_at = '2026-08-15T00:00:00Z',
+                    source_updated_at = '2026-01-05T00:00:00Z',
+                    text_length = 900, file_size_bytes = 50,
+                    asset_count = 9, current_version = 1
                  WHERE id = ?1",
             params![b1],
         )
         .unwrap();
     }
-    let names = |by: Option<&str>| {
-        db.search_entity_facets("person", None, 60, 0, None, by, None, None)
+    let names = |by: Option<&str>, order: Option<&str>| {
+        db.search_entity_facets("person", None, 60, 0, None, by, order, None)
             .unwrap()
             .into_iter()
             .map(|facet| facet.display_name)
             .collect::<Vec<_>>()
     };
-    assert_eq!(names(None), vec!["作者A", "作者B"], "作品が多い順");
+    assert_eq!(names(None, None), vec!["作者A", "作者B"], "作品が多い順");
     assert_eq!(
-        names(Some("downloaded_at")),
+        names(Some("downloaded_at"), None),
         vec!["作者B", "作者A"],
         "保存が新しい順"
     );
     assert_eq!(
-        names(Some("source_updated_at")),
+        names(Some("source_created_at"), None),
+        vec!["作者B", "作者A"],
+        "公開が新しい順"
+    );
+    assert_eq!(
+        names(Some("source_updated_at"), None),
         vec!["作者A", "作者B"],
         "取得元での更新が新しい順"
     );
-    assert_eq!(names(Some("name")), vec!["作者A", "作者B"], "名前順");
+    assert_eq!(
+        names(Some("text_length"), None),
+        vec!["作者B", "作者A"],
+        "合計文字数が多い順"
+    );
+    assert_eq!(
+        names(Some("file_size_bytes"), None),
+        vec!["作者A", "作者B"],
+        "合計容量が大きい順"
+    );
+    assert_eq!(
+        names(Some("asset_count"), None),
+        vec!["作者B", "作者A"],
+        "合計添付数が多い順"
+    );
+    assert_eq!(
+        names(Some("current_version"), None),
+        vec!["作者A", "作者B"],
+        "改稿回数が多い順"
+    );
+    assert_eq!(
+        names(Some("current_version"), Some("asc")),
+        vec!["作者B", "作者A"],
+        "改稿回数が少ない順"
+    );
+    assert_eq!(names(Some("name"), None), vec!["作者A", "作者B"], "名前順");
+}
+
+#[test]
+fn entity_facets_do_not_split_one_identity_when_snapshot_names_differ() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let old = insert_download_unindexed(
+        &db,
+        &storage,
+        "renamed-old",
+        "旧名のころ",
+        "旧作者名",
+        &[],
+        "本文",
+    );
+    let new = insert_download_unindexed(
+        &db,
+        &storage,
+        "renamed-new",
+        "改名後",
+        "新作者名",
+        &[],
+        "本文",
+    );
+    {
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE downloads SET author_id = 'stable-author' WHERE id IN (?1, ?2)",
+            params![old, new],
+        )
+        .unwrap();
+        for (id, title) in [(old, "旧シリーズ名"), (new, "新シリーズ名")] {
+            conn.execute(
+                "INSERT INTO download_series (
+                    download_id, series_source, series_key, title, content_order
+                 ) VALUES (?1, 'pixiv', 'stable-series', ?2, 1)",
+                params![id, title],
+            )
+            .unwrap();
+        }
+    }
+
+    let people = db
+        .search_entity_facets("person", None, 60, 0, None, None, None, None)
+        .unwrap();
+    let same_person = people
+        .iter()
+        .filter(|facet| facet.source == "pixiv" && facet.source_key == "stable-author")
+        .collect::<Vec<_>>();
+    assert_eq!(same_person.len(), 1, "同じ作者IDを名前の履歴で分裂させない");
+    assert_eq!(same_person[0].count, 2);
+    assert_eq!(same_person[0].display_name, "新作者名");
+
+    let series = db
+        .search_entity_facets("series", None, 60, 0, None, None, None, None)
+        .unwrap();
+    let same_series = series
+        .iter()
+        .filter(|facet| facet.source == "pixiv" && facet.source_key == "stable-series")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        same_series.len(),
+        1,
+        "同じシリーズIDを題名の履歴で分裂させない"
+    );
+    assert_eq!(same_series[0].count, 2);
+
+    // The filter drawer uses a separate compact facet query. It must obey the
+    // same stable-identity rule as the paged author/series tabs.
+    let filter_facets = db.get_filter_facets().unwrap();
+    let filtered_people = filter_facets
+        .author_entities
+        .iter()
+        .filter(|facet| facet.source == "pixiv" && facet.source_key == "stable-author")
+        .collect::<Vec<_>>();
+    assert_eq!(filtered_people.len(), 1);
+    assert_eq!(filtered_people[0].count, 2);
+    assert_eq!(filtered_people[0].display_name, "新作者名");
+    assert_eq!(
+        filter_facets
+            .authors
+            .iter()
+            .filter(|facet| facet.name == "新作者名")
+            .map(|facet| facet.count)
+            .collect::<Vec<_>>(),
+        vec![2],
+        "作者フィルターも現在の代表名1件へ統合する"
+    );
+    assert!(filter_facets
+        .authors
+        .iter()
+        .all(|facet| facet.name != "旧作者名"));
+
+    // An old saved search still names the former snapshot. Resolve that name
+    // through the stable identity so it keeps returning all of the author's
+    // works after a rename.
+    let mut old_name_filter = v2_params(None, 20, None);
+    old_name_filter.authors_include = Some(vec!["旧作者名".to_string()]);
+    assert_eq!(
+        db.search_downloads_v2(&old_name_filter)
+            .unwrap()
+            .items
+            .len(),
+        2
+    );
+    old_name_filter.authors_include = None;
+    old_name_filter.authors_exclude = Some(vec!["旧作者名".to_string()]);
+    assert!(db
+        .search_downloads_v2(&old_name_filter)
+        .unwrap()
+        .items
+        .is_empty());
+    let filtered_series = filter_facets
+        .series
+        .iter()
+        .filter(|facet| facet.source == "pixiv" && facet.source_key == "stable-series")
+        .collect::<Vec<_>>();
+    assert_eq!(filtered_series.len(), 1);
+    assert_eq!(filtered_series[0].count, 2);
+}
+
+#[test]
+fn entity_series_aggregates_each_work_once_even_with_multiple_person_roles() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let multi_role =
+        insert_download_unindexed(&db, &storage, "role-multi", "複数役割", "作者", &[], "本文");
+    let larger = insert_download_unindexed(
+        &db,
+        &storage,
+        "role-single",
+        "単一役割",
+        "作者",
+        &[],
+        "本文",
+    );
+    for role in ["author", "illustrator"] {
+        db.upsert_download_person(multi_role, "pixiv", "role-author", role, "作者")
+            .unwrap();
+    }
+    db.upsert_download_person(larger, "pixiv", "role-author", "author", "作者")
+        .unwrap();
+    db.upsert_download_series(multi_role, "pixiv", "series-small", "小さい方", Some(1))
+        .unwrap();
+    db.upsert_download_series(larger, "pixiv", "series-large", "大きい方", Some(1))
+        .unwrap();
+    {
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE downloads SET text_length = 60 WHERE id = ?1",
+            params![multi_role],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE downloads SET text_length = 100 WHERE id = ?1",
+            params![larger],
+        )
+        .unwrap();
+    }
+
+    let page = db
+        .list_entity_series_paged(
+            "pixiv",
+            "role-author",
+            None,
+            Some("text_length"),
+            Some("desc"),
+            20,
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        page.items
+            .iter()
+            .map(|item| item.source_key.as_str())
+            .collect::<Vec<_>>(),
+        vec!["series-large", "series-small"],
+        "author+illustrator の同一作品を合計へ二重計上しない"
+    );
 }
 
 #[test]
@@ -4392,6 +4983,211 @@ fn series_token_filters_by_series_relation() {
 }
 
 #[test]
+fn structured_series_and_date_filters_are_applied_to_library_results() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+
+    let serialized = insert_download(
+        &db,
+        &storage,
+        "structured-filter-series",
+        "連載作品",
+        "作者A",
+        &["連載"],
+        "本文",
+    );
+    let standalone_in_range = insert_download(
+        &db,
+        &storage,
+        "structured-filter-standalone-new",
+        "新しい単発作品",
+        "作者B",
+        &["読切"],
+        "本文",
+    );
+    let standalone_outside_range = insert_download(
+        &db,
+        &storage,
+        "structured-filter-standalone-old",
+        "古い単発作品",
+        "作者C",
+        &["読切"],
+        "本文",
+    );
+    db.upsert_download_series(serialized, "pixiv", "filter-series", "連作", Some(1))
+        .unwrap();
+
+    {
+        let conn = db.conn.lock().unwrap();
+        for (id, created_at, updated_at) in [
+            (serialized, "2026-03-15", "2026-07-10"),
+            (standalone_in_range, "2026-06-20", "2026-08-05"),
+            (standalone_outside_range, "2025-12-31", "2026-01-01"),
+        ] {
+            conn.execute(
+                "UPDATE downloads
+                 SET source_created_at = ?1, source_updated_at = ?2
+                 WHERE id = ?3",
+                params![created_at, updated_at, id],
+            )
+            .unwrap();
+        }
+    }
+
+    let mut in_series = v2_params(None, 20, None);
+    in_series.series_filter = Some("in_series".to_string());
+    assert_eq!(
+        db.search_downloads_v2(&in_series)
+            .unwrap()
+            .items
+            .iter()
+            .map(|item| item.id)
+            .collect::<Vec<_>>(),
+        vec![serialized]
+    );
+
+    let mut standalone = v2_params(None, 20, None);
+    standalone.series_filter = Some("standalone".to_string());
+    assert_eq!(
+        db.search_downloads_v2(&standalone)
+            .unwrap()
+            .items
+            .iter()
+            .map(|item| item.id)
+            .collect::<HashSet<_>>(),
+        HashSet::from([standalone_in_range, standalone_outside_range])
+    );
+
+    let mut created_in_range = v2_params(None, 20, None);
+    created_in_range.date_field = Some("source_created_at".to_string());
+    created_in_range.date_from = Some("2026-01-01".to_string());
+    created_in_range.date_to = Some("2026-06-30".to_string());
+    assert_eq!(
+        db.search_downloads_v2(&created_in_range)
+            .unwrap()
+            .items
+            .iter()
+            .map(|item| item.id)
+            .collect::<HashSet<_>>(),
+        HashSet::from([serialized, standalone_in_range])
+    );
+
+    let mut updated_from = v2_params(None, 20, None);
+    updated_from.date_field = Some("source_updated_at".to_string());
+    updated_from.date_from = Some("2026-08-01".to_string());
+    assert_eq!(
+        db.search_downloads_v2(&updated_from)
+            .unwrap()
+            .items
+            .iter()
+            .map(|item| item.id)
+            .collect::<Vec<_>>(),
+        vec![standalone_in_range]
+    );
+}
+
+#[test]
+fn revision_edit_and_cover_filters_are_applied_to_library_results() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+
+    let revised = insert_download(
+        &db,
+        &storage,
+        "state-filter-revised",
+        "改稿済み作品",
+        "作者A",
+        &["改稿"],
+        "本文",
+    );
+    let first_version = insert_download(
+        &db,
+        &storage,
+        "state-filter-first",
+        "初版作品",
+        "作者B",
+        &["初版"],
+        "本文",
+    );
+
+    {
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE downloads
+             SET current_version = 3, cover_path = 'covers/revised.jpg',
+                 asset_count = 8, file_size_bytes = 10485760
+             WHERE id = ?1",
+            params![revised],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE downloads SET asset_count = 1, file_size_bytes = 1048576 WHERE id = ?1",
+            params![first_version],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO work_edit_revisions (download_id, base_version, status, title)
+             VALUES (?1, 3, 'active', '手元で編集した題名')",
+            params![revised],
+        )
+        .unwrap();
+    }
+
+    for (field, value, expected) in [
+        ("revision", "revised", revised),
+        ("revision", "first_version", first_version),
+        ("edit", "edited", revised),
+        ("edit", "unedited", first_version),
+        ("cover", "has_cover", revised),
+        ("cover", "no_cover", first_version),
+    ] {
+        let mut search = v2_params(None, 20, None);
+        match field {
+            "revision" => search.revision_filter = Some(value.to_string()),
+            "edit" => search.edit_filter = Some(value.to_string()),
+            "cover" => search.cover_filter = Some(value.to_string()),
+            _ => unreachable!(),
+        }
+        assert_eq!(
+            db.search_downloads_v2(&search)
+                .unwrap()
+                .items
+                .iter()
+                .map(|item| item.id)
+                .collect::<Vec<_>>(),
+            vec![expected],
+            "{field}={value}"
+        );
+    }
+
+    let mut numeric = v2_params(None, 20, None);
+    numeric.min_asset_count = Some(5);
+    numeric.max_file_size_bytes = Some(12 * 1024 * 1024);
+    assert_eq!(
+        db.search_downloads_v2(&numeric)
+            .unwrap()
+            .items
+            .iter()
+            .map(|item| item.id)
+            .collect::<Vec<_>>(),
+        vec![revised]
+    );
+
+    numeric.min_asset_count = None;
+    numeric.max_asset_count = Some(2);
+    numeric.max_file_size_bytes = Some(2 * 1024 * 1024);
+    assert_eq!(
+        db.search_downloads_v2(&numeric)
+            .unwrap()
+            .items
+            .iter()
+            .map(|item| item.id)
+            .collect::<Vec<_>>(),
+        vec![first_version]
+    );
+}
+
+#[test]
 fn japanese_reading_kana_and_romaji_match_same_work() {
     let (_temp, root, storage) = temp_paths();
     let db = Database::open(&root.join("piep.db"), &storage).unwrap();
@@ -4668,28 +5464,38 @@ fn entity_series_keyset_has_no_gaps_duplicates_or_same_name_instability() {
     let (_temp, root, storage) = temp_paths();
     let db = Database::open(&root.join("piep.db"), &storage).unwrap();
     assert!(db
-        .list_entity_series_paged("", "author", None, 20, None)
+        .list_entity_series_paged("", "author", None, None, None, 20, None)
         .is_err());
     assert!(db
-        .list_entity_series_paged(&"s".repeat(65), "author", None, 20, None)
+        .list_entity_series_paged(&"s".repeat(65), "author", None, None, None, 20, None)
         .is_err());
     assert!(db
-        .list_entity_series_paged("pixiv", &"k".repeat(1_025), None, 20, None)
+        .list_entity_series_paged("pixiv", &"k".repeat(1_025), None, None, None, 20, None)
         .is_err());
     assert!(db
-        .list_entity_series_paged("pixiv", "author", Some(&"検".repeat(201)), 20, None,)
+        .list_entity_series_paged(
+            "pixiv",
+            "author",
+            Some(&"検".repeat(201)),
+            None,
+            None,
+            20,
+            None,
+        )
         .is_err());
     assert!(db
         .list_entity_series_paged(
             "pixiv",
             "author",
             None,
+            None,
+            None,
             20,
             Some(&"c".repeat(64 * 1024 + 1)),
         )
         .is_err());
     assert!(db
-        .list_entity_series_paged("pixiv", "author", None, 20, Some("malformed"))
+        .list_entity_series_paged("pixiv", "author", None, None, None, 20, Some("malformed"))
         .is_err());
 
     let add =
@@ -4745,7 +5551,15 @@ fn entity_series_keyset_has_no_gaps_duplicates_or_same_name_instability() {
     let mut first_cursor = None;
     loop {
         let page = db
-            .list_entity_series_paged("pixiv", "paged-author", None, 2, cursor.as_deref())
+            .list_entity_series_paged(
+                "pixiv",
+                "paged-author",
+                None,
+                None,
+                None,
+                2,
+                cursor.as_deref(),
+            )
             .unwrap();
         assert_eq!(page.total, 6);
         identities.extend(
@@ -4774,8 +5588,53 @@ fn entity_series_keyset_has_no_gaps_duplicates_or_same_name_instability() {
     );
     assert_eq!(identities.iter().collect::<HashSet<_>>().len(), 6);
 
+    let fewest_first = db
+        .list_entity_series_paged(
+            "pixiv",
+            "paged-author",
+            None,
+            Some("work_count"),
+            Some("asc"),
+            20,
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        fewest_first
+            .items
+            .last()
+            .map(|item| item.source_key.as_str()),
+        Some("counted"),
+        "作者詳細でも作品数の昇順が全シリーズへ効く"
+    );
+    let ascending_cursor = db
+        .list_entity_series_paged(
+            "pixiv",
+            "paged-author",
+            None,
+            Some("work_count"),
+            Some("asc"),
+            2,
+            None,
+        )
+        .unwrap()
+        .next_cursor;
+    assert!(
+        db.list_entity_series_paged(
+            "pixiv",
+            "paged-author",
+            None,
+            Some("work_count"),
+            Some("desc"),
+            2,
+            ascending_cursor.as_deref(),
+        )
+        .is_err(),
+        "別の並び順のカーソルを混用できない"
+    );
+
     let filtered = db
-        .list_entity_series_paged("pixiv", "paged-author", Some("同名"), 2, None)
+        .list_entity_series_paged("pixiv", "paged-author", Some("同名"), None, None, 2, None)
         .unwrap();
     assert_eq!(filtered.total, 3);
     assert_eq!(filtered.items.len(), 2);
@@ -4784,6 +5643,8 @@ fn entity_series_keyset_has_no_gaps_duplicates_or_same_name_instability() {
             "pixiv",
             "paged-author",
             Some("別query"),
+            None,
+            None,
             2,
             first_cursor.as_deref(),
         )
@@ -4791,7 +5652,15 @@ fn entity_series_keyset_has_no_gaps_duplicates_or_same_name_instability() {
 
     add("mutation", "pixiv", "new", "追加", "2027-01-01T00:00:00Z");
     assert!(db
-        .list_entity_series_paged("pixiv", "paged-author", None, 2, first_cursor.as_deref(),)
+        .list_entity_series_paged(
+            "pixiv",
+            "paged-author",
+            None,
+            None,
+            None,
+            2,
+            first_cursor.as_deref(),
+        )
         .is_err());
 }
 
@@ -4854,7 +5723,7 @@ fn entity_series_paging_stays_fast_at_twenty_thousand() {
 
     let started = Instant::now();
     let first = db
-        .list_entity_series_paged("pixiv", "large-author", None, 200, None)
+        .list_entity_series_paged("pixiv", "large-author", None, None, None, 200, None)
         .unwrap();
     let first_elapsed = started.elapsed();
     assert_eq!(first.total, seeded as i64);
@@ -4866,7 +5735,15 @@ fn entity_series_paging_stays_fast_at_twenty_thousand() {
         let Some(current) = cursor else { break };
         let started = Instant::now();
         let page = db
-            .list_entity_series_paged("pixiv", "large-author", None, 200, Some(&current))
+            .list_entity_series_paged(
+                "pixiv",
+                "large-author",
+                None,
+                None,
+                None,
+                200,
+                Some(&current),
+            )
             .unwrap();
         deepest = deepest.max(started.elapsed());
         cursor = page.next_cursor;
@@ -6051,6 +6928,93 @@ fn active_edit_revision_drives_reader_and_search_body() {
     assert_eq!(search.items.first().map(|item| item.id), Some(download_id));
 }
 
+#[test]
+fn an_edit_keeps_the_assets_from_its_base_revision_after_a_provider_update() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let download_id = insert_download(
+        &db,
+        &storage,
+        "edit-base-assets",
+        "挿絵を残す編集",
+        "作者A",
+        &[],
+        "初版本文",
+    );
+    let work = storage.join("pixiv").join("edit-base-assets");
+    let v1_json = work.join("v1").join("original.json");
+    let old_image = work.join("v1").join("data_assets").join("first.png");
+    fs::create_dir_all(old_image.parent().unwrap()).unwrap();
+    fs::write(&old_image, b"old-image").unwrap();
+    let asset_id = db
+        .insert_asset(&NewAsset {
+            download_id,
+            asset_type: "illustration".to_string(),
+            filename: "first.png".to_string(),
+            local_path: old_image.to_string_lossy().to_string(),
+            original_url: None,
+            mime_type: Some("image/png".to_string()),
+            file_size_bytes: 9,
+        })
+        .unwrap();
+    let draft = db
+        .save_work_draft(
+            download_id,
+            1,
+            None,
+            &[WorkBlockInput {
+                block_type: "image".to_string(),
+                text: Some("初版の挿絵".to_string()),
+                asset_id: Some(asset_id),
+                attrs_json: None,
+            }],
+        )
+        .unwrap();
+    db.activate_work_edit(draft.id).unwrap();
+
+    let v2_dir = work.join("v2");
+    fs::create_dir_all(&v2_dir).unwrap();
+    let v2_json = v2_dir.join("original.json");
+    fs::write(&v2_json, r#"{"text":"改稿後本文"}"#).unwrap();
+    {
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO download_versions
+             (download_id, version, json_path, original_json_path, asset_count, created_at)
+             VALUES (?1, 1, ?2, ?2, 1, '2026-01-01T00:00:00Z')",
+            params![download_id, v1_json.to_string_lossy().to_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO download_versions
+             (download_id, version, json_path, original_json_path, asset_count, created_at)
+             VALUES (?1, 2, ?2, ?2, 0, '2026-02-01T00:00:00Z')",
+            params![download_id, v2_json.to_string_lossy().to_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE downloads SET current_version = 2, json_path = ?2,
+                    original_json_path = ?2, asset_count = 0
+             WHERE id = ?1",
+            params![download_id, v2_json.to_string_lossy().to_string()],
+        )
+        .unwrap();
+    }
+
+    let reader = db.get_reader_document(download_id, None).unwrap();
+    assert!(reader.is_edited);
+    assert!(reader.assets.iter().any(|asset| asset.id == asset_id));
+    assert!(reader.html.contains("first.png"));
+    assert!(!reader.html.contains("missing-image-placeholder"));
+
+    let editor = db.get_editor_document(download_id).unwrap();
+    assert_eq!(editor.base_version, 1);
+    assert!(editor.assets.iter().any(|asset| asset.id == asset_id));
+
+    let source = db.active_edit_source_form(download_id).unwrap().unwrap();
+    assert!(source.pixiv_text.contains("[uploadedimage:first]"));
+}
+
 /// 下書きは何度でも上書きできる。
 ///
 /// 自動保存は6秒ごとに同じ下書きを書き換えるので、二度目が通らなければ
@@ -6238,6 +7202,75 @@ fn an_edited_title_reaches_the_library_and_the_index() {
     // 下ろせば、取得元の題に戻る。
     db.deactivate_work_edit(download_id).unwrap();
     assert_eq!(db.get_download(download_id).unwrap().title, "取得元の題");
+}
+
+#[test]
+fn edited_titles_drive_both_ordering_and_keyset_cursors() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let edited = insert_download(&db, &storage, "title-cursor-z", "Z", "作者", &[], "本文");
+    insert_download(&db, &storage, "title-cursor-b", "B", "作者", &[], "本文");
+    insert_download(&db, &storage, "title-cursor-c", "C", "作者", &[], "本文");
+    let draft = db
+        .save_work_draft(
+            edited,
+            1,
+            Some("A"),
+            &[WorkBlockInput {
+                block_type: "paragraph".to_string(),
+                text: Some("本文".to_string()),
+                asset_id: None,
+                attrs_json: None,
+            }],
+        )
+        .unwrap();
+    db.activate_work_edit(draft.id).unwrap();
+
+    for (order, expected) in [("asc", vec!["A", "B", "C"]), ("desc", vec!["C", "B", "A"])] {
+        let mut cursor = None;
+        let mut titles = Vec::new();
+        loop {
+            let mut query = v2_params(None, 1, cursor.clone());
+            query.sort_by = Some("title".to_string());
+            query.sort_order = Some(order.to_string());
+            let page = db.search_downloads_v2(&query).unwrap();
+            titles.extend(page.items.into_iter().map(|item| item.title));
+            let Some(next) = page.next_cursor else { break };
+            cursor = Some(next);
+        }
+        assert_eq!(titles, expected);
+    }
+}
+
+#[test]
+fn sql_cursor_is_rejected_when_the_filter_scope_changes() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let favorite_a = insert_download(&db, &storage, "scope-a", "A", "作者", &[], "本文");
+    insert_download(&db, &storage, "scope-m", "M", "作者", &[], "本文");
+    let favorite_z = insert_download(&db, &storage, "scope-z", "Z", "作者", &[], "本文");
+    {
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE downloads SET favorite = 1 WHERE id IN (?1, ?2)",
+            params![favorite_a, favorite_z],
+        )
+        .unwrap();
+    }
+
+    let mut first = v2_params(None, 1, None);
+    first.sort_by = Some("title".to_string());
+    first.sort_order = Some("asc".to_string());
+    let stale_cursor = db.search_downloads_v2(&first).unwrap().next_cursor.unwrap();
+
+    let mut narrowed = first;
+    narrowed.cursor = Some(stale_cursor);
+    narrowed.favorite = Some(true);
+    let result = db.search_downloads_v2(&narrowed).unwrap();
+    assert_eq!(
+        result.items.first().map(|item| item.title.as_str()),
+        Some("A")
+    );
 }
 
 #[test]

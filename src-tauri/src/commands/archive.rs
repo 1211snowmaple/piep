@@ -235,6 +235,12 @@ struct BackupVersion {
     version: i64,
     content_hash: Option<String>,
     text_length: i64,
+    /// Number of assets belonging to this exact saved revision.
+    ///
+    /// Older archives omitted it, so restore derives it from the relative
+    /// version directory instead of treating every historical asset as current.
+    #[serde(default)]
+    asset_count: Option<i64>,
     file_size_bytes: i64,
     created_at: String,
     change_summary: Option<String>,
@@ -282,6 +288,53 @@ struct BackupEntry {
     series: Vec<BackupDownloadSeries>,
     #[serde(default)]
     work_edits: Vec<PortableWorkEdit>,
+}
+
+fn backup_version_directory(path: &Path) -> Option<&Path> {
+    path.parent()
+}
+
+fn is_backup_version_directory(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_prefix('v'))
+        .is_some_and(|digits| {
+            !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
+        })
+}
+
+fn backup_asset_belongs_to_version(asset: &BackupAsset, version: &BackupVersion) -> bool {
+    let metadata_path = version
+        .relative_original_json_path
+        .as_deref()
+        .unwrap_or(&version.relative_json_path);
+    let Some(version_dir) = backup_version_directory(Path::new(metadata_path)) else {
+        return false;
+    };
+    let asset_path = Path::new(&asset.relative_local_path);
+    if is_backup_version_directory(version_dir) {
+        return asset_path.starts_with(version_dir);
+    }
+    let Ok(relative) = asset_path.strip_prefix(version_dir) else {
+        return false;
+    };
+    !relative
+        .components()
+        .next()
+        .is_some_and(|component| is_backup_version_directory(Path::new(component.as_os_str())))
+}
+
+fn derived_backup_version_asset_count(assets: &[BackupAsset], version: &BackupVersion) -> i64 {
+    assets
+        .iter()
+        .filter(|asset| backup_asset_belongs_to_version(asset, version))
+        .count() as i64
+}
+
+fn backup_version_asset_count(entry: &BackupEntry, version: &BackupVersion) -> i64 {
+    version
+        .asset_count
+        .unwrap_or_else(|| derived_backup_version_asset_count(&entry.assets, version))
 }
 
 fn deserialize_backup_tags<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
@@ -1662,7 +1715,18 @@ fn all_backup_search_params() -> SearchV2Params {
         authors_exclude: None,
         min_char_count: None,
         max_char_count: None,
+        min_asset_count: None,
+        max_asset_count: None,
+        min_file_size_bytes: None,
+        max_file_size_bytes: None,
         asset_filter: None,
+        series_filter: None,
+        revision_filter: None,
+        edit_filter: None,
+        cover_filter: None,
+        date_field: None,
+        date_from: None,
+        date_to: None,
         watch_filter: None,
         person_source: None,
         person_key: None,
@@ -1673,6 +1737,7 @@ fn all_backup_search_params() -> SearchV2Params {
         view_mode: Some("gallery".to_string()),
         projection: Some("libraryGallery".to_string()),
         search_mode: None,
+        version_scope: None,
     }
 }
 
@@ -2737,6 +2802,7 @@ async fn export_zip_with_params_locked(
                     version: v.version,
                     content_hash: v.content_hash.clone(),
                     text_length: v.text_length,
+                    asset_count: Some(v.asset_count),
                     file_size_bytes: v.file_size_bytes,
                     created_at: v.created_at.clone(),
                     change_summary: v.change_summary.clone(),
@@ -2760,6 +2826,7 @@ async fn export_zip_with_params_locked(
                     version: dl.current_version,
                     content_hash: dl.content_hash.clone(),
                     text_length: dl.text_length,
+                    asset_count: Some(dl.asset_count),
                     file_size_bytes: dl.file_size_bytes,
                     created_at: dl.downloaded_at.clone(),
                     change_summary: Some("Recovered from current library record".to_string()),
@@ -2797,6 +2864,13 @@ async fn export_zip_with_params_locked(
                     file_size_bytes: asset.file_size_bytes,
                     relative_local_path,
                 });
+            }
+            // Recompute from paths even when an older restored database had
+            // already stored an all-history total in a version row. New
+            // archives repair that old bookkeeping instead of perpetuating it.
+            for version in &mut backup_versions {
+                version.asset_count =
+                    Some(derived_backup_version_asset_count(&backup_assets, version));
             }
 
             for revision in &mut work_edits {
@@ -3992,7 +4066,9 @@ async fn import_zip_locked(
                     cover_path: final_cover_path,
                     json_path: final_json_path,
                     original_json_path: final_original_json_path,
-                    asset_count: entry.assets.len() as i64,
+                    asset_count: latest_ver
+                        .map(|version| backup_version_asset_count(entry, version))
+                        .unwrap_or(entry.assets.len() as i64),
                     file_size_bytes: latest_ver.map(|v| v.file_size_bytes).unwrap_or(0),
                     downloaded_at: entry.downloaded_at.clone(),
                     source_created_at: entry.source_created_at.clone(),
@@ -4078,7 +4154,7 @@ async fn import_zip_locked(
                                 text_length: v.text_length,
                                 json_path: ver_json,
                                 original_json_path: ver_orig,
-                                asset_count: entry.assets.len() as i64,
+                                asset_count: backup_version_asset_count(entry, v),
                                 file_size_bytes: v.file_size_bytes,
                                 created_at: v.created_at.clone(),
                                 change_summary: v.change_summary.clone(),
@@ -4870,6 +4946,67 @@ mod tests {
     use std::fs;
     use std::sync::Arc;
 
+    #[test]
+    fn legacy_backup_asset_counts_are_derived_per_revision() {
+        let asset = |path: &str| BackupAsset {
+            asset_type: "file".to_string(),
+            filename: Path::new(path)
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .to_string(),
+            original_url: None,
+            mime_type: None,
+            file_size_bytes: 1,
+            relative_local_path: path.to_string(),
+        };
+        let version = |number: i64, path: &str| BackupVersion {
+            version: number,
+            content_hash: None,
+            text_length: 0,
+            asset_count: None,
+            file_size_bytes: 0,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            change_summary: None,
+            relative_json_path: path.to_string(),
+            relative_original_json_path: None,
+        };
+        let assets = vec![
+            asset("pixiv/work/v1/data_assets/first.png"),
+            asset("pixiv/work/v2/data_assets/second.txt"),
+            asset("pixiv/work/v20/data_assets/twentieth.txt"),
+        ];
+
+        assert_eq!(
+            derived_backup_version_asset_count(&assets, &version(1, "pixiv/work/v1/original.json")),
+            1
+        );
+        assert_eq!(
+            derived_backup_version_asset_count(&assets, &version(2, "pixiv/work/v2/original.json")),
+            1
+        );
+        assert_eq!(
+            derived_backup_version_asset_count(
+                &assets,
+                &version(20, "pixiv/work/v20/original.json")
+            ),
+            1
+        );
+
+        let legacy_assets = vec![
+            asset("pixiv/work/legacy.png"),
+            asset("pixiv/work/data_assets/legacy.epub"),
+            asset("pixiv/work/v2/data_assets/not-legacy.txt"),
+        ];
+        assert_eq!(
+            derived_backup_version_asset_count(
+                &legacy_assets,
+                &version(1, "pixiv/work/original.json")
+            ),
+            2
+        );
+    }
+
     // ヘルパー：ランダムな一時ディレクトリを作成する
     fn create_temp_dir() -> std::path::PathBuf {
         let rand_val: u32 = rand::random();
@@ -4938,6 +5075,7 @@ mod tests {
                     version: 1,
                     content_hash: Some(format!("hash-{marker}")),
                     text_length: marker.len() as i64,
+                    asset_count: Some(0),
                     file_size_bytes: marker.len() as i64,
                     created_at: "2026-08-12T00:00:00Z".to_string(),
                     change_summary: None,
