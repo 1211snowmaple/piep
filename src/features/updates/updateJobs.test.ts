@@ -35,6 +35,8 @@ vi.mock("@/services/updateJobApi", () => ({
 
 import {
   MAX_LIVE_UPDATE_LOGS,
+  mergeVisibleUpdateJobSnapshot,
+  preferredVisibleUpdateJob,
   refreshUpdateJobSummaries,
   useUpdateJobSummaries,
   waitForUpdateJob,
@@ -67,6 +69,31 @@ const initial: UpdateJobSnapshot = {
   nextCandidateCursor: null,
   previousLogCursor: null,
 };
+
+describe("visible update job", () => {
+  it("moves a canceled job out of the progress area but keeps it selectable from history", () => {
+    const canceled = { ...initial, status: "canceled" as const };
+    const completed = {
+      ...initial,
+      jobId: "older-completed",
+      status: "completed" as const,
+    };
+
+    expect(preferredVisibleUpdateJob([canceled, completed])).toBe(completed);
+    expect(preferredVisibleUpdateJob([canceled])).toBeUndefined();
+    expect(mergeVisibleUpdateJobSnapshot(initial, canceled)).toBeNull();
+  });
+
+  it("does not let another job's cancellation replace the job being viewed", () => {
+    const canceledElsewhere = {
+      ...initial,
+      jobId: "canceled-elsewhere",
+      status: "canceled" as const,
+    };
+
+    expect(mergeVisibleUpdateJobSnapshot(initial, canceledElsewhere)).toBe(initial);
+  });
+});
 
 describe("waitForUpdateJob", () => {
   beforeEach(() => {

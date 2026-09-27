@@ -129,6 +129,30 @@ export function isUpdateJobTerminal(status: UpdateJobStatus): boolean {
   return status === "completed" || status === "failed" || status === "canceled";
 }
 
+/**
+ * 画面を開いたとき、自動で表に出すジョブ。
+ *
+ * 中止した回は履歴には残すが、進捗カードへ自動で戻さない。内容を確認したい
+ * ときは履歴から明示的に選べる。実行中・停止中の回は、古い完了結果より先に出す。
+ */
+export function preferredVisibleUpdateJob(
+  jobs: UpdateJobSummary[],
+): UpdateJobSummary | undefined {
+  return (
+    jobs.find((job) => !isUpdateJobTerminal(job.status)) ??
+    jobs.find((job) => job.status !== "canceled")
+  );
+}
+
+/** 中止イベントが、いま見ている別のジョブまで追い出さないように畳む。 */
+export function mergeVisibleUpdateJobSnapshot(
+  current: UpdateJobSnapshot | null,
+  incoming: UpdateJobSnapshot,
+): UpdateJobSnapshot | null {
+  if (incoming.status !== "canceled") return mergeSnapshot(current, incoming);
+  return current?.jobId === incoming.jobId ? null : current;
+}
+
 /** One status vocabulary shared by the update centre and operation history. */
 export const UPDATE_JOB_STATUS_META: Record<
   UpdateJobStatus,
@@ -439,8 +463,7 @@ export function useUpdateJobs(
       return;
     }
     const nextJobs = await refreshUpdateJobSummaries(force);
-    const preferred =
-      nextJobs.find((job) => !isUpdateJobTerminal(job.status)) ?? nextJobs[0];
+    const preferred = preferredVisibleUpdateJob(nextJobs);
     if (preferred) {
       const snapshot = await getUpdateJobCommand(preferred.jobId);
       setActiveSnapshot(snapshot);
@@ -474,7 +497,9 @@ export function useUpdateJobs(
       "update-job-progress",
       (event) => {
         lastEventAt.current = Date.now();
-        setActiveSnapshot((current) => mergeSnapshot(current, event.payload));
+        setActiveSnapshot((current) =>
+          mergeVisibleUpdateJobSnapshot(current, event.payload),
+        );
         onSnapshot?.(event.payload);
         if (isUpdateJobTerminal(event.payload.status))
           invalidateAfterUpdateJob(queryClient);
@@ -489,7 +514,7 @@ export function useUpdateJobs(
             return current;
           const next = mergeProgressDelta(current, event.payload);
           onSnapshot?.(next);
-          return next;
+          return next.status === "canceled" ? null : next;
         });
         if (isUpdateJobTerminal(event.payload.summary.status))
           invalidateAfterUpdateJob(queryClient);
