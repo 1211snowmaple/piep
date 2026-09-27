@@ -9,20 +9,40 @@
 //! 一度に全部は割らない。何が壊れたのかを言えなくなる。
 
 use super::{
-    active_edit_revision_locked, blocks_for_revision_locked, blocks_to_fanbox_blocks,
-    blocks_to_html, blocks_to_pixiv_text, blocks_to_plain_text, draft_edit_revision_locked,
-    get_work_edit_revision_locked, hash_blocks, html_to_editor_blocks, insert_work_blocks_locked,
-    normalize_block_inputs, paginate_reader_html, plain_text_from_reader_html,
-    reader_source_content, reader_version_path, reindex_download_locked, Database,
-    EditedSourceForm, EditorDocument, ReaderCacheEntry, ReaderCacheKey, ReaderContentPage,
-    ReaderDocument, ReaderMetadata, ReaderOutlineEntry, ReaderSearchHit, WorkBlockInput,
-    WorkEditRevision, READER_CACHE_MAX_BYTES, READER_CACHE_MAX_DOCUMENTS, READER_CACHE_TICK,
-    READER_CONTENT_CACHE,
+    active_edit_revision_locked, assets_for_version_path, blocks_for_revision_locked,
+    blocks_to_fanbox_blocks, blocks_to_html, blocks_to_pixiv_text, blocks_to_plain_text,
+    draft_edit_revision_locked, get_work_edit_revision_locked, hash_blocks, html_to_editor_blocks,
+    insert_work_blocks_locked, normalize_block_inputs, paginate_reader_html,
+    plain_text_from_reader_html, reader_source_content, reader_version_path,
+    reindex_download_locked, Database, EditedSourceForm, EditorDocument, ReaderCacheEntry,
+    ReaderCacheKey, ReaderContentPage, ReaderDocument, ReaderMetadata, ReaderOutlineEntry,
+    ReaderSearchHit, WorkBlockInput, WorkEditRevision, READER_CACHE_MAX_BYTES,
+    READER_CACHE_MAX_DOCUMENTS, READER_CACHE_TICK, READER_CONTENT_CACHE,
 };
 use rusqlite::{params, OptionalExtension};
+use std::hash::{Hash, Hasher};
 use std::sync::atomic::Ordering as AtomicOrdering;
 use std::sync::Arc;
 use unicode_normalization::UnicodeNormalization;
+
+fn reader_asset_stamp(assets: &[super::AssetEntry]) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for asset in assets {
+        asset.id.hash(&mut hasher);
+        asset.local_path.hash(&mut hasher);
+        asset.file_size_bytes.hash(&mut hasher);
+        if let Ok(metadata) = std::fs::metadata(&asset.local_path) {
+            metadata.len().hash(&mut hasher);
+            metadata
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|duration| duration.as_nanos())
+                .hash(&mut hasher);
+        }
+    }
+    hasher.finish()
+}
 
 /// 本文内検索のための、**1 文字を 1 文字へ**畳む正規化。
 ///
@@ -217,20 +237,26 @@ impl Database {
     ) -> Result<ReaderCacheEntry, String> {
         let download = self.get_download(download_id)?;
         let versions = self.get_versions(download_id)?;
+        let assets = self.get_assets(download_id)?;
         let conn = self.read_conn()?;
         let active_edit = if version.is_none() {
             active_edit_revision_locked(&conn, download_id)?
         } else {
             None
         };
+        // An edit keeps the source revision it was made against. A later
+        // provider update must not make image blocks resolve against the new
+        // revision's unrelated assets.
+        let target_version = active_edit
+            .as_ref()
+            .map(|edit| edit.base_version)
+            .unwrap_or_else(|| version.unwrap_or(download.current_version));
+        let target_path = reader_version_path(&download, &versions, target_version);
+        let version_assets = assets_for_version_path(&assets, &target_path);
+        let asset_stamp = reader_asset_stamp(&version_assets);
         let stamp = if let Some(edit) = &active_edit {
-            format!(
-                "edit:{}:{}:{}",
-                edit.id, edit.updated_at, download.asset_count
-            )
+            format!("edit:{}:{}:{asset_stamp}", edit.id, edit.updated_at)
         } else {
-            let target_version = version.unwrap_or(download.current_version);
-            let target_path = reader_version_path(&download, &versions, target_version);
             let metadata = std::fs::metadata(&target_path).ok();
             let modified = metadata
                 .as_ref()
@@ -239,10 +265,9 @@ impl Database {
                 .map(|duration| duration.as_nanos())
                 .unwrap_or(0);
             format!(
-                "source:{target_version}:{}:{modified}:{}:{}",
+                "source:{target_version}:{}:{modified}:{}:{asset_stamp}",
                 metadata.as_ref().map(|meta| meta.len()).unwrap_or(0),
-                download.content_hash.as_deref().unwrap_or(""),
-                download.asset_count
+                download.content_hash.as_deref().unwrap_or("")
             )
         };
         let key = ReaderCacheKey {
@@ -258,16 +283,15 @@ impl Database {
             return Ok(entry.clone());
         }
 
-        let assets = self.get_assets(download_id)?;
         let (html, plain_text) = if let Some(edit) = active_edit {
             let blocks = blocks_for_revision_locked(&conn, edit.id)?;
             (
-                blocks_to_html(&blocks, &assets),
+                blocks_to_html(&blocks, &version_assets),
                 blocks_to_plain_text(&blocks),
             )
         } else {
             drop(conn);
-            reader_source_content(self, &download, &versions, version, &assets)?
+            reader_source_content(self, &download, &versions, version, &version_assets)?
         };
         let (pages, source_page_starts) = paginate_reader_html(&html, &download.source);
         let pages = Arc::new(pages);
@@ -319,12 +343,14 @@ impl Database {
         let active_edit = active_edit_revision_locked(&conn, download_id)?;
         if version.is_none() {
             if let Some(edit) = active_edit.clone() {
+                let edit_path = reader_version_path(&download, &versions, edit.base_version);
+                let edit_assets = assets_for_version_path(&assets, &edit_path);
                 let blocks = blocks_for_revision_locked(&conn, edit.id)?;
                 return Ok(ReaderDocument {
                     download,
-                    assets: assets.clone(),
+                    assets: edit_assets.clone(),
                     versions,
-                    html: blocks_to_html(&blocks, &assets),
+                    html: blocks_to_html(&blocks, &edit_assets),
                     plain_text: blocks_to_plain_text(&blocks),
                     is_edited: true,
                     active_edit_revision: Some(edit),
@@ -335,12 +361,17 @@ impl Database {
 
         let target_version = version.unwrap_or(download.current_version);
         let raw_json = self.read_download_json_for_version(&download, &versions, target_version)?;
-        let (html, plain_text) =
-            super::super::attachment::content_from_json(&raw_json, &download.source, &assets);
+        let version_path = reader_version_path(&download, &versions, target_version);
+        let version_assets = assets_for_version_path(&assets, &version_path);
+        let (html, plain_text) = super::super::attachment::content_from_json(
+            &raw_json,
+            &download.source,
+            &version_assets,
+        );
 
         Ok(ReaderDocument {
             download,
-            assets,
+            assets: version_assets,
             versions,
             html,
             plain_text,
@@ -358,11 +389,16 @@ impl Database {
         &self,
         download_id: i64,
     ) -> Result<Option<EditedSourceForm>, String> {
-        let assets = self.get_assets(download_id)?;
+        let download = self.get_download(download_id)?;
+        let versions = self.get_versions(download_id)?;
         let conn = self.read_conn()?;
         let Some(revision) = active_edit_revision_locked(&conn, download_id)? else {
             return Ok(None);
         };
+        let assets = assets_for_version_path(
+            &self.get_assets(download_id)?,
+            &reader_version_path(&download, &versions, revision.base_version),
+        );
         let blocks = blocks_for_revision_locked(&conn, revision.id)?;
         drop(conn);
         Ok(Some(EditedSourceForm {
@@ -374,18 +410,18 @@ impl Database {
 
     pub fn get_editor_document(&self, download_id: i64) -> Result<EditorDocument, String> {
         let download = self.get_download(download_id)?;
-        let assets = self.get_assets(download_id)?;
         let versions = self.get_versions(download_id)?;
-        let base_version = versions
-            .iter()
-            .map(|v| v.version)
-            .max()
-            .unwrap_or(download.current_version);
+        let all_assets = self.get_assets(download_id)?;
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let active_revision = active_edit_revision_locked(&conn, download_id)?;
         let draft_revision = draft_edit_revision_locked(&conn, download_id)?;
 
         if let Some(draft) = draft_revision.clone() {
+            let base_version = draft.base_version;
+            let assets = assets_for_version_path(
+                &all_assets,
+                &reader_version_path(&download, &versions, base_version),
+            );
             let blocks = blocks_for_revision_locked(&conn, draft.id)?;
             return Ok(EditorDocument {
                 download,
@@ -398,6 +434,11 @@ impl Database {
         }
 
         if let Some(active) = active_revision.clone() {
+            let base_version = active.base_version;
+            let assets = assets_for_version_path(
+                &all_assets,
+                &reader_version_path(&download, &versions, base_version),
+            );
             let blocks = blocks_for_revision_locked(&conn, active.id)?;
             return Ok(EditorDocument {
                 download,
@@ -410,6 +451,11 @@ impl Database {
         }
         drop(conn);
 
+        let base_version = download.current_version;
+        let assets = assets_for_version_path(
+            &all_assets,
+            &reader_version_path(&download, &versions, base_version),
+        );
         let raw_json =
             self.read_download_json_for_version(&download, &versions, download.current_version)?;
         let (source_html, _) =

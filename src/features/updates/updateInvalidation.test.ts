@@ -54,9 +54,15 @@ describe("更新確認のあとに古くなるもの", () => {
     expect(invalidated).toContain("library-entity-count");
   });
 
+  it("監視作者のプロフィールと版履歴にも知らせる", () => {
+    const invalidated = collectInvalidatedKeys();
+    expect(invalidated).toContain("entity-versions");
+    expect(invalidated).toContain("entity-json");
+  });
+
   // 増やすのはよいが、減らすと静かに壊れる。数も見張っておく。
   it("知らせ先を取りこぼしていない", () => {
-    expect(collectInvalidatedKeys()).toHaveLength(11);
+    expect(collectInvalidatedKeys()).toHaveLength(13);
     expect(collectInvalidatedKeys()).toContain("deferred-candidates");
   });
 });

@@ -40,6 +40,12 @@ pub struct DownloadEntry {
     pub match_highlights: Vec<SearchHighlight>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sort_key: Option<String>,
+    /// Saved revision that matched when the current revision did not.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub matched_version: Option<i64>,
+    /// Older saved revisions that also matched this query.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub historical_match_count: i64,
 }
 
 /// 作者/クリエイター統合エンティティ
@@ -1236,7 +1242,21 @@ pub struct SearchV2Params {
     pub authors_exclude: Option<Vec<String>>,
     pub min_char_count: Option<i64>,
     pub max_char_count: Option<i64>,
+    pub min_asset_count: Option<i64>,
+    pub max_asset_count: Option<i64>,
+    pub min_file_size_bytes: Option<i64>,
+    pub max_file_size_bytes: Option<i64>,
     pub asset_filter: Option<String>,
+    pub series_filter: Option<String>,
+    /// "revised" | "first_version".
+    pub revision_filter: Option<String>,
+    /// "edited" | "unedited". Refers to an active local edit revision.
+    pub edit_filter: Option<String>,
+    /// "has_cover" | "no_cover".
+    pub cover_filter: Option<String>,
+    pub date_field: Option<String>,
+    pub date_from: Option<String>,
+    pub date_to: Option<String>,
     pub watch_filter: Option<String>,
     pub person_source: Option<String>,
     pub person_key: Option<String>,
@@ -1254,6 +1274,12 @@ pub struct SearchV2Params {
     pub view_mode: Option<String>,
     pub projection: Option<String>,
     pub search_mode: Option<String>,
+    /// "current" (default) | "all". Historical revisions remain grouped by work.
+    pub version_scope: Option<String>,
+}
+
+fn is_zero(value: &i64) -> bool {
+    *value == 0
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

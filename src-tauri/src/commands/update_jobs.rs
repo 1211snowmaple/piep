@@ -232,6 +232,28 @@ fn fanbox_user_agent(credentials: &UpdateCredentials) -> String {
         .unwrap_or_else(|| "Mozilla/5.0".to_string())
 }
 
+/// 更新監視の対象を、同時に確認すべきプロフィールへ写す。
+///
+/// 作者の新作一覧と作者プロフィールは別の API なので、target 項目を処理した
+/// だけではアイコンは新しくならない。シリーズはプロフィール画像を持たないため、
+/// ここでは作者だけを対象にする。
+fn profile_refresh_params_for_target(
+    target: &crate::database::UpdateTarget,
+    credentials: &UpdateCredentials,
+) -> Option<crate::commands::database::RefreshEntityProfileParams> {
+    (target.target_type == "author").then(|| {
+        crate::commands::database::RefreshEntityProfileParams {
+            entity_type: "person".to_string(),
+            source: target.source.clone(),
+            source_key: target.source_key.clone(),
+            force: Some(false),
+            refresh_token: pixiv_token(credentials),
+            cookie: fanbox_cookie(credentials),
+            user_agent: Some(fanbox_user_agent(credentials)),
+        }
+    })
+}
+
 fn value_at<'a>(value: &'a Value, paths: &[&[&str]]) -> Option<&'a Value> {
     for path in paths {
         let mut cursor = value;
@@ -2225,7 +2247,7 @@ async fn process_update_job_item(
     }
     match item.item_type.as_str() {
         "work" => process_work_item(app, state, job_id, item, credentials, web_index).await,
-        "target" => process_target_item(state, job_id, item, credentials, web_index).await,
+        "target" => process_target_item(app, state, job_id, item, credentials, web_index).await,
         "candidate" => process_candidate_item(app, state, item, credentials).await,
         _ => Ok(ItemOutcome::Skipped(format!(
             "未対応のジョブ項目をスキップ: {}",
@@ -2766,6 +2788,7 @@ async fn scan_pixiv_revisions(
 }
 
 async fn process_target_item(
+    app: &tauri::AppHandle,
     state: &Arc<AppState>,
     job_id: &str,
     item: &UpdateJobItem,
@@ -2912,6 +2935,35 @@ async fn process_target_item(
             first_updated.as_deref(),
             found,
         )?;
+    }
+
+    // 新作一覧とプロフィールは別の取得口を持つ。作者の作品を確認しただけでは、
+    // 名前・アイコン・紹介文は更新されない。保存した直後の未完成プロフィールだけを
+    // ジョブの仕上げで補っていたため、すでに保存済みの監視作者は、取得元で
+    // アイコンを変えても手元が永久に古いままだった。
+    //
+    // 一覧の確認が成功した作者はプロフィールも確認する。24時間以内に確認済みなら
+    // `refresh_entity_profile` 自身が通信せず戻るので、定期確認のたびに同じ API を
+    // 叩くことはない。横顔だけの失敗で新作確認まで失敗扱いにはせず、ログに残して
+    // 次回また試せるようにする。
+    if let Some(params) = profile_refresh_params_for_target(&target, credentials) {
+        if let Err(error) =
+            crate::commands::database::refresh_entity_profile(app.clone(), params).await
+        {
+            log::warn!(
+                "監視作者 {}:{} のプロフィールを更新できません: {error}",
+                target.source,
+                target.source_key
+            );
+            let _ = state.db.append_update_job_log(
+                job_id,
+                "warn",
+                &format!(
+                    "{}: プロフィールを更新できません: {error}",
+                    target.display_name
+                ),
+            );
+        }
     }
 
     Ok(ItemOutcome::Done(if found > 0 {
@@ -3091,9 +3143,54 @@ async fn process_candidate_item(
 mod tests {
     use super::{
         build_save_items, canceled_status_for, classify_failure, describe_text_change, make_job_id,
-        may_remember, rate_limit_delay_ms, FailureKind, SaveJobWork, MAX_RATE_LIMIT_BACKOFF_MS,
+        may_remember, profile_refresh_params_for_target, rate_limit_delay_ms, FailureKind,
+        SaveJobWork, MAX_RATE_LIMIT_BACKOFF_MS,
     };
     use std::collections::HashSet;
+
+    fn update_target(
+        target_type: &str,
+        source: &str,
+        source_key: &str,
+    ) -> crate::database::UpdateTarget {
+        crate::database::UpdateTarget {
+            id: 1,
+            target_type: target_type.into(),
+            source: source.into(),
+            source_key: source_key.into(),
+            display_name: "作者".into(),
+            enabled: true,
+            last_checked_at: None,
+            last_seen_source_id: None,
+            last_seen_source_updated_at: None,
+            metadata_json: None,
+            created_at: "now".into(),
+            updated_at: "now".into(),
+            last_hit_at: None,
+            consecutive_errors: 0,
+        }
+    }
+
+    #[test]
+    fn a_watched_author_refreshes_the_separate_person_profile() {
+        let target = update_target("author", "pixiv", "118558135");
+        let credentials = super::snapshot_credentials_missing();
+        let params = profile_refresh_params_for_target(&target, &credentials)
+            .expect("an author has a person profile");
+
+        assert_eq!(params.entity_type, "person");
+        assert_eq!(params.source, "pixiv");
+        assert_eq!(params.source_key, "118558135");
+        assert_eq!(params.force, Some(false));
+    }
+
+    #[test]
+    fn a_series_check_does_not_invent_a_person_profile() {
+        let target = update_target("series", "pixiv", "42");
+        let credentials = super::snapshot_credentials_missing();
+
+        assert!(profile_refresh_params_for_target(&target, &credentials).is_none());
+    }
 
     #[test]
     fn durable_candidates_obey_exact_current_watch_scope() {

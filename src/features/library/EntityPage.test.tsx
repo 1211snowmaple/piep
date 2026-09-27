@@ -1,9 +1,11 @@
 import { MantineProvider } from "@mantine/core";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { AppRouter } from "@/app/router";
+import { WorkspaceProvider } from "@/app/WorkspaceContext";
 import EntityPage from "@/features/library/EntityPage";
+import { demoWorks } from "@/mocks/demoData";
 import type { EntityFacet, FacetCount } from "@/types/library";
 
 const shelfApi = vi.hoisted(() => ({
@@ -64,16 +66,21 @@ const tags: FacetCount[] = [
 function renderAuthor(hash = "#/people/pixiv/aoba") {
   window.location.hash = hash;
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  return render(
+  const rendered = render(
     <MantineProvider>
       <QueryClientProvider client={client}>
-        <AppRouter><EntityPage kind="person" /></AppRouter>
+        <AppRouter><WorkspaceProvider><div><EntityPage kind="person" /></div></WorkspaceProvider></AppRouter>
       </QueryClientProvider>
     </MantineProvider>,
   );
+  return rendered;
 }
 
 describe("author page", () => {
+  beforeAll(() => {
+    Element.prototype.scrollIntoView = () => {};
+  });
+
   beforeEach(() => {
     window.localStorage.clear();
     dbApi.getPerson.mockResolvedValue(person);
@@ -136,16 +143,57 @@ describe("author page", () => {
     ));
   });
 
+  it("uses the complete work ordering vocabulary with both directions", async () => {
+    renderAuthor();
+    const sort = await screen.findByRole("combobox", { name: "並び順" });
+    fireEvent.click(sort);
+    expect(await screen.findByRole("option", { name: "容量：小さい順", hidden: true })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "版番号：大きい順", hidden: true })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("option", { name: "版番号：小さい順", hidden: true }));
+
+    await waitFor(() => expect(window.location.hash).toContain("sort=current_version"));
+    expect(window.location.hash).toContain("order=asc");
+    await waitFor(() => expect(dbApi.searchDownloadsV2).toHaveBeenCalledWith(
+      expect.objectContaining({ sortBy: "current_version", sortOrder: "asc" }),
+    ));
+  });
+
+  it("defaults an author search to relevance just like the main library", async () => {
+    renderAuthor("#/people/pixiv/aoba?q=%E5%AD%A3%E7%AF%80");
+    expect(await screen.findByRole("combobox", { name: "並び順" })).toHaveValue("関連度：高い順");
+    await waitFor(() => expect(dbApi.searchDownloadsV2).toHaveBeenCalledWith(
+      expect.objectContaining({ text: "季節", sortBy: "relevance", sortOrder: "desc" }),
+    ));
+  });
+
   it("lists the author's series and links each one", async () => {
     renderAuthor();
     fireEvent.click(await screen.findByRole("tab", { name: /シリーズ/ }));
+    await waitFor(() => expect(window.location.hash).toContain("tab=series"));
     const link = await screen.findByText("季節の栞");
     expect(link).toBeInTheDocument();
     await waitFor(() => expect(shelfApi.listEntitySeriesPage).toHaveBeenCalledWith("pixiv", "aoba", {
       query: null,
+      sortBy: "work_count",
+      sortOrder: "desc",
       limit: 60,
       cursor: null,
     }));
+  });
+
+  it("sorts all of an author's series on the server in either direction", async () => {
+    renderAuthor("#/people/pixiv/aoba?tab=series");
+    const sort = await screen.findByRole("combobox", { name: "作者のシリーズの並び順" });
+    fireEvent.click(sort);
+    expect(await screen.findByRole("option", { name: "合計容量：大きい順", hidden: true })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("option", { name: "合計容量：小さい順", hidden: true }));
+
+    await waitFor(() => expect(window.location.hash).toContain("series_sort=file_size_bytes"));
+    expect(window.location.hash).toContain("series_order=asc");
+    await waitFor(() => expect(shelfApi.listEntitySeriesPage).toHaveBeenCalledWith("pixiv", "aoba", expect.objectContaining({
+      sortBy: "file_size_bytes",
+      sortOrder: "asc",
+    })));
   });
 
   it("continues an author's series with the opaque cursor instead of stopping at 200", async () => {
@@ -169,6 +217,8 @@ describe("author page", () => {
     expect(screen.getByText("61 / 61件を表示中")).toBeInTheDocument();
     expect(shelfApi.listEntitySeriesPage).toHaveBeenLastCalledWith("pixiv", "aoba", {
       query: null,
+      sortBy: "work_count",
+      sortOrder: "desc",
       limit: 60,
       cursor: "opaque-next",
     });
@@ -186,6 +236,8 @@ describe("author page", () => {
     await waitFor(() => expect(window.location.hash).toContain("series_q=%E7%9B%AE%E5%BD%93%E3%81%A6"), { timeout: 1500 });
     await waitFor(() => expect(shelfApi.listEntitySeriesPage).toHaveBeenCalledWith("pixiv", "aoba", {
       query: "目当て",
+      sortBy: "work_count",
+      sortOrder: "desc",
       limit: 60,
       cursor: null,
     }));
@@ -221,6 +273,37 @@ describe("author page", () => {
     await waitFor(() => expect(dbApi.searchDownloadsV2).toHaveBeenCalledWith(expect.objectContaining({ offset: 5_000 })));
     await waitFor(() => expect(window.location.hash).toContain("page=251"));
     expect(screen.getByRole("status")).toHaveTextContent("直接開けるのは251ページ目まで");
+  });
+
+  it("does not let a late page response overwrite the position restored by Back", async () => {
+    window.localStorage.setItem("piep.paging-mode", JSON.stringify("pages"));
+    let resolveSecondPage!: (value: Awaited<ReturnType<typeof dbApi.searchDownloadsV2>>) => void;
+    const secondPage = new Promise<Awaited<ReturnType<typeof dbApi.searchDownloadsV2>>>((resolve) => {
+      resolveSecondPage = resolve;
+    });
+    const emptyPage = {
+      items: [demoWorks[0]], nextCursor: null, totalEstimate: 100,
+      searchMeta: { engine: "sqlite-metadata", query: null, totalEstimate: 100, indexComplete: true, explanations: [] },
+      facetsVersion: 0,
+    };
+    dbApi.searchDownloadsV2.mockImplementation((params) => params.offset ? secondPage : Promise.resolve(emptyPage));
+    const view = renderAuthor();
+    await screen.findByRole("button", { name: "次へ" });
+    const viewport = view.container.firstElementChild as HTMLElement;
+    viewport.id = "main-content";
+    viewport.classList.add("app-main");
+    const scrollTo = vi.fn();
+    Object.defineProperty(viewport, "scrollTo", { configurable: true, value: scrollTo });
+
+    fireEvent.click(screen.getByRole("button", { name: "次へ" }));
+    await waitFor(() => expect(window.location.hash).toContain("page=2"));
+    window.history.back();
+    await waitFor(() => expect(window.location.hash).not.toContain("page=2"));
+
+    resolveSecondPage(emptyPage);
+    await waitFor(() => expect(dbApi.searchDownloadsV2).toHaveBeenCalledWith(expect.objectContaining({ offset: 20 })));
+    await new Promise((resolve) => window.setTimeout(resolve, 0));
+    expect(scrollTo).not.toHaveBeenCalled();
   });
 
   it("searches and sorts within the author", async () => {
@@ -332,6 +415,11 @@ describe("series page", () => {
     // 作者側の入口は、シリーズを開いたときには使わない。
     expect(collectionApi.listCollectionsForPerson).not.toHaveBeenCalled();
     expect(await screen.findByText("連作の棚")).toBeInTheDocument();
+    const sort = screen.getByRole("combobox", { name: "コレクションの並び順" });
+    fireEvent.click(sort);
+    fireEvent.click(await screen.findByRole("option", { name: "合計文字数：少ない順", hidden: true }));
+    await waitFor(() => expect(window.location.hash).toContain("collection_sort=text_length"));
+    expect(window.location.hash).toContain("collection_order=asc");
   });
 
   it("does not ask for author-only data", async () => {

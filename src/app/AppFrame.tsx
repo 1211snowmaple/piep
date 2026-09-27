@@ -22,7 +22,7 @@ import { Spotlight, spotlight, type SpotlightActionData } from "@mantine/spotlig
 import { Icons, IconSize } from "@/lib/icons";
 import piepIcon from "@/assets/icon.svg";
 import { PiepLockup } from "@/components/PiepLockup";
-import { useAppNavigate, useAppRouter, type NavigationType } from "@/app/router";
+import { useAppNavigate, useAppRouter, type NavigationScrollPolicy, type NavigationType } from "@/app/router";
 import { useWorkspace } from "@/app/WorkspaceContext";
 import { WorkspaceNav, WorkspaceNavFooter } from "@/app/WorkspaceNav";
 import { isTauriRuntime } from "@/services/dbApi";
@@ -32,6 +32,7 @@ import { useUpdateScheduler } from "@/features/updates/useUpdateScheduler";
 import { APP_VERSION } from "@/lib/version";
 import { PageAssistProvider, type PageAssistRegistration } from "@/app/PageAssistContext";
 import { AssistLauncher } from "@/features/assist/AssistLauncher";
+import { listenForScrollIntent } from "@/lib/scroll";
 
 const RAIL_WIDTH = 62;
 const NAVBAR_WIDTH = 194;
@@ -61,9 +62,6 @@ const RESTORE_MAX_MS = 6000;
 /** How long the offset has to survive the screen filling in to count as settled. */
 const RESTORE_STABLE_FRAMES = 5;
 
-/** Anything the reader does to the scroll position themselves. */
-const USER_SCROLL_EVENTS = ["wheel", "touchstart", "keydown", "pointerdown"] as const;
-
 /**
  * Puts each screen back where it was left.
  *
@@ -82,6 +80,8 @@ function useScrollRestoration(
   historyIndex: number,
   pathname: string,
   navigationType: NavigationType,
+  navigationScroll: NavigationScrollPolicy,
+  navigationId: number,
 ) {
   const positions = useRef(new Map<number, number>());
   const currentIndex = useRef(historyIndex);
@@ -111,17 +111,37 @@ function useScrollRestoration(
     previousPathname.current = pathname;
     currentIndex.current = historyIndex;
     const element = ref.current;
-    if (!element || navigationType === "replace") return;
+    if (!element) return;
+    // An explicit policy describes the user's operation, not merely its URL.
+    // Opening another library shelf is a same-path push but a new listing; a
+    // numbered page is also a same-path push but preserves its page context and
+    // lets the listing place the new rows itself.
+    if (navigationType !== "pop" && navigationScroll === "preserve") {
+      if (navigationType === "push") positions.current.set(historyIndex, element.scrollTop);
+      return;
+    }
+    // Query-string replacements are in-place edits to one screen. A route
+    // replacement is still a different destination and must start at its top.
+    if (navigationScroll !== "top" && navigationType === "replace" && samePathname) return;
     // A push that only rewrote the query string - the next page of a listing,
     // another tab - is still the same screen, and the screen itself knows which
     // part of it the reader just asked for. Forcing the top here scrolled past
     // the author profile they were paging through underneath.
-    if (navigationType === "push" && samePathname) return;
-    const target = navigationType === "pop" ? positions.current.get(historyIndex) ?? 0 : 0;
-    if (target === 0) {
-      element.scrollTo({ top: 0, left: 0 });
+    if (navigationScroll !== "top" && navigationType === "push" && samePathname) {
+      // The new history entry begins wherever this same screen is standing.
+      // Without seeding it, Back followed by Forward treats an untouched page
+      // or tab entry as unknown and restores it to zero.
+      positions.current.set(historyIndex, element.scrollTop);
       return;
     }
+    if (navigationType === "push" || navigationType === "replace") {
+      // Going back and then pushing discards the forward branch, but its numeric
+      // index is reused. Do not let the screen that used to occupy that slot
+      // donate its scroll position to the new destination. A pathname-changing
+      // replace has the same identity rule: the old screen no longer exists.
+      positions.current.set(historyIndex, 0);
+    }
+    const target = navigationType === "pop" ? positions.current.get(historyIndex) ?? 0 : 0;
     // The screen it is restoring into is still fetching and measuring its rows.
     // Each time it grows the offset has to be reapplied, and each time it is
     // briefly short the browser clamps the offset away and reports that as a
@@ -129,16 +149,23 @@ function useScrollRestoration(
     // first successful attempt. Stopping at the first match was enough to lose
     // the position to a virtualised list that finished measuring one frame
     // later, which is what a large library does every time.
+    //
+    // Zero needs the same treatment. A virtual list mounting for the destination
+    // reads the scroll container before its rows have settled; if the outgoing
+    // author page was at the bottom, it can reapply that old offset just after a
+    // one-shot scroll-to-top. That is how an author's bottom leaked into the
+    // library entry even though the two history indexes were different.
     restoring.current = true;
     let frame = 0;
     let held = 0;
     let height = element.scrollHeight;
     let quietSince = performance.now();
     const limit = performance.now() + RESTORE_MAX_MS;
+    let stopListening: () => void = () => undefined;
     const stop = () => {
       restoring.current = false;
       cancelAnimationFrame(frame);
-      for (const event of USER_SCROLL_EVENTS) element.removeEventListener(event, stop);
+      stopListening();
     };
     const apply = () => {
       element.scrollTo({ top: target, left: 0 });
@@ -156,13 +183,16 @@ function useScrollRestoration(
     };
     // Scrolling by hand outranks the restore: being dragged back to where you
     // were while trying to leave is worse than losing the position.
-    for (const event of USER_SCROLL_EVENTS) element.addEventListener(event, stop, { passive: true });
+    // Listen at the window, not only inside the scroller. After pressing Back,
+    // keyboard focus remains on the header button; PageDown from there still
+    // scrolls the main pane, but its keydown never bubbles through that pane.
+    stopListening = listenForScrollIntent(element, stop);
     // The first attempt is made now rather than a frame from now, so a window
     // that is not painting - minimised, in the background - still lands the
     // position it already has the height for.
     apply();
     return stop;
-  }, [historyIndex, navigationType, pathname, ref]);
+  }, [historyIndex, navigationId, navigationScroll, navigationType, pathname, ref]);
 }
 
 function Navigation({ railed, onNavigate }: { railed: boolean; onNavigate?: () => void }) {
@@ -242,6 +272,7 @@ export function AppFrame({ children }: { children: ReactNode }) {
   const colorScheme = useComputedColorScheme("light");
   const { epubQueue } = useWorkspace();
   const [pageAssist, setPageAssist] = useState<PageAssistRegistration[]>([]);
+  const [spotlightQuery, setSpotlightQuery] = useState("");
   const pageAssistItems = useMemo(() => pageAssist.flatMap((registration) => registration.items), [pageAssist]);
   const pageAssistLabel = pageAssist.length === 1
     ? pageAssist[0].label
@@ -272,25 +303,47 @@ export function AppFrame({ children }: { children: ReactNode }) {
   useUpdateScheduler();
   // こちらは piep 自身の版。見つけたら知らせるだけで、入れ替えは押させる。
   useAppUpdateNotice(() => navigate("/settings?section=about"));
-  useScrollRestoration(mainRef, location.historyIndex, location.pathname, location.navigationType);
+  useScrollRestoration(mainRef, location.historyIndex, location.pathname, location.navigationType, location.navigationScroll, location.navigationId);
   useHotkeys([
     ["mod+K", () => spotlight.open()],
     ["mod+P", () => spotlight.open()],
-    ["mod+L", () => navigate("/library")],
+    ["mod+L", () => navigate("/library", { scroll: "top" })],
     ["mod+shift+S", () => navigate("/save/pixiv")],
   ]);
 
+  const trimmedSpotlightQuery = spotlightQuery.trim().slice(0, 500);
+  const displayedSpotlightQuery = trimmedSpotlightQuery.length > 40
+    ? `${trimmedSpotlightQuery.slice(0, 40)}…`
+    : trimmedSpotlightQuery;
   const actions: SpotlightActionData[] = [
-    { id: "home", label: "ホームを開く", description: "状況と最近の保存", onClick: () => navigate("/"), leftSection: <Icons.home size={IconSize.nav} /> },
-    { id: "library", label: "ライブラリを検索", description: "保存したすべての作品", onClick: () => navigate("/library"), leftSection: <Icons.library size={IconSize.nav} /> },
-    { id: "save-pixiv", label: "pixivから保存", description: "内蔵ブラウザを開く", onClick: () => navigate("/save/pixiv"), leftSection: <Icons.collect size={IconSize.nav} /> },
-    { id: "save-fanbox", label: "FANBOXから保存", description: "内蔵ブラウザを開く", onClick: () => navigate("/save/fanbox"), leftSection: <Icons.collect size={IconSize.nav} /> },
-    { id: "epub", label: `EPUBキューを開く${epubQueue.length ? `（${epubQueue.length}件）` : ""}`, description: "書き出しを設定", onClick: () => navigate("/epub"), leftSection: <Icons.epub size={IconSize.nav} /> },
-    { id: "epub-templates", label: "テンプレートスタジオを開く", description: "EPUBの見た目と構成を編集", onClick: () => navigate("/epub/templates"), leftSection: <Icons.epubTemplate size={IconSize.nav} /> },
-    { id: "updates", label: "更新を確認", description: "変更と新着をチェック", onClick: () => navigate("/updates"), leftSection: <Icons.updates size={IconSize.nav} /> },
-    { id: "operations", label: "操作履歴を開く", description: "進行状況・再試行・ログ", onClick: () => navigate("/operations"), leftSection: <Icons.history size={IconSize.nav} /> },
-    { id: "diagnostics", label: "ライブラリを診断", description: "実データ性能・容量・索引", onClick: () => navigate("/settings?section=diagnostics"), leftSection: <Icons.diagnostics size={IconSize.nav} /> },
-    { id: "settings", label: "設定を開く", description: "接続・外観・ライブラリ", onClick: () => navigate("/settings"), leftSection: <Icons.settings size={IconSize.nav} /> },
+    { id: "home", label: "ホームを開く", description: "状況と最近の保存", group: "画面を開く", onClick: () => navigate("/"), leftSection: <Icons.home size={IconSize.nav} /> },
+    { id: "library", label: "ライブラリを開く", description: "作品・作者・シリーズ・コレクション", group: "画面を開く", onClick: () => navigate("/library", { scroll: "top" }), leftSection: <Icons.library size={IconSize.nav} /> },
+    { id: "save-pixiv", label: "pixivから保存", description: "内蔵ブラウザを開く", group: "保存と書き出し", onClick: () => navigate("/save/pixiv"), leftSection: <Icons.collect size={IconSize.nav} /> },
+    { id: "save-fanbox", label: "FANBOXから保存", description: "内蔵ブラウザを開く", group: "保存と書き出し", onClick: () => navigate("/save/fanbox"), leftSection: <Icons.collect size={IconSize.nav} /> },
+    { id: "epub", label: `EPUBキューを開く${epubQueue.length ? `（${epubQueue.length}件）` : ""}`, description: "書き出しを設定", group: "保存と書き出し", onClick: () => navigate("/epub"), leftSection: <Icons.epub size={IconSize.nav} /> },
+    { id: "epub-templates", label: "テンプレートスタジオを開く", description: "EPUBの見た目と構成を編集", group: "保存と書き出し", onClick: () => navigate("/epub/templates"), leftSection: <Icons.epubTemplate size={IconSize.nav} /> },
+    { id: "updates", label: "更新を確認", description: "変更と新着をチェック", group: "管理", onClick: () => navigate("/updates"), leftSection: <Icons.updates size={IconSize.nav} /> },
+    { id: "operations", label: "操作履歴を開く", description: "進行状況・再試行・ログ", group: "管理", onClick: () => navigate("/operations"), leftSection: <Icons.history size={IconSize.nav} /> },
+    { id: "diagnostics", label: "ライブラリを診断", description: "実データ性能・容量・索引", group: "管理", onClick: () => navigate("/settings?section=diagnostics"), leftSection: <Icons.diagnostics size={IconSize.nav} /> },
+    { id: "settings", label: "設定を開く", description: "接続・外観・ライブラリ", group: "管理", onClick: () => navigate("/settings"), leftSection: <Icons.settings size={IconSize.nav} /> },
+    ...(trimmedSpotlightQuery ? [
+      {
+        id: "search-library-current",
+        label: `「${displayedSpotlightQuery}」を現在版から検索`,
+        description: "タイトル・作者・タグ・シリーズ・本文を検索",
+        group: "ライブラリ検索",
+        onClick: () => navigate(`/library?q=${encodeURIComponent(trimmedSpotlightQuery)}`, { scroll: "top" }),
+        leftSection: <Icons.search size={IconSize.nav} />,
+      },
+      {
+        id: "search-library-history",
+        label: `「${displayedSpotlightQuery}」を過去版も含めて検索`,
+        description: "保存済みの改稿履歴を同じ作品にまとめて検索",
+        group: "ライブラリ検索",
+        onClick: () => navigate(`/library?q=${encodeURIComponent(trimmedSpotlightQuery)}&versions=all`, { scroll: "top" }),
+        leftSection: <Icons.versionHistory size={IconSize.nav} />,
+      },
+    ] satisfies SpotlightActionData[] : []),
   ];
 
   return (
@@ -386,9 +439,12 @@ export function AppFrame({ children }: { children: ReactNode }) {
       </AppShell>
       <Spotlight
         actions={actions}
-        nothingFound="一致する操作がありません"
+        query={spotlightQuery}
+        onQueryChange={setSpotlightQuery}
+        onSpotlightClose={() => setSpotlightQuery("")}
+        nothingFound="一致する作品・画面・操作がありません"
         highlightQuery
-        searchProps={{ leftSection: <Icons.search size={IconSize.nav} />, placeholder: "画面や操作を検索…", "aria-label": "画面や操作を検索" }}
+        searchProps={{ leftSection: <Icons.search size={IconSize.nav} />, placeholder: "作品、画面、操作を検索…", "aria-label": "作品、画面、操作を検索" }}
       />
       </>
     </PageAssistProvider>

@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   EntityFacet,
+  EntitySortBy,
   FacetCount,
   LibraryShelfCounts,
   SavedSearchRecord,
@@ -20,6 +21,8 @@ export interface EntitySeriesPage {
 
 export interface EntitySeriesPageParams {
   query?: string | null;
+  sortBy?: EntitySortBy | null;
+  sortOrder?: "asc" | "desc" | null;
   limit?: number | null;
   cursor?: string | null;
 }
@@ -50,6 +53,8 @@ export async function listEntitySeriesPage(
     source,
     sourceKey,
     query,
+    sortBy: params.sortBy ?? null,
+    sortOrder: params.sortOrder ?? null,
     limit,
     cursor: params.cursor ?? null,
   });

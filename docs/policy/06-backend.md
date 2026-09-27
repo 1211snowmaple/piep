@@ -73,6 +73,15 @@ let _ = app.emit("update-job-progress", snapshot);
 writer ができ、Windows では "Access is denied" でコミットが失敗する。だから
 `cargo test` は `--test-threads=1` で走らせる。
 
+既定の検索対象は現在版で、Tantivyにも現在版の題名・本文・現在版だけの添付を一作品
+一文書で入れる。`versions=all` が明示されたときだけ、保存済みJSONと版ごとのテキスト
+添付を読み、現在版の結果と作品IDで統合する。過去版だけに一致した結果は版番号を返す。
+版別の作者・タグ・シリーズ・あらすじは保存していないため、それらの条件は現在の作品
+メタデータへ適用する。
+
+SQLのページカーソルは並び順だけでなく、正規化した絞り込み全体のscopeを持つ。条件を
+変えたあとに古いカーソルを送っても境界として使わず、新しい一覧の先頭から答える。
+
 ### 意味検索
 
 `fastembed` + ONNX Runtime。Windows では DirectML で GPU 実行する。

@@ -43,6 +43,8 @@ describe("entity-series request bounds", () => {
       source: "pixiv",
       sourceKey: "author",
       query: "季節",
+      sortBy: null,
+      sortOrder: null,
       limit: ENTITY_SERIES_PAGE_SIZE,
       cursor: "opaque-cursor",
     });
@@ -52,6 +54,8 @@ describe("entity-series request bounds", () => {
     await listEntitySeriesPage("pixiv", "author", { query: "   ", limit: 50_000 });
     expect(invoke).toHaveBeenCalledWith("db_list_entity_series_paged", expect.objectContaining({
       query: null,
+      sortBy: null,
+      sortOrder: null,
       limit: ENTITY_SERIES_LIMIT,
       cursor: null,
     }));

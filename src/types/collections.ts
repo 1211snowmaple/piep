@@ -7,6 +7,16 @@ export interface WorkKey {
 
 export type CollectionKind = "ordered" | "unordered";
 
+/** Every measurable property exposed by a collection summary. */
+export type CollectionSortBy =
+  | "created_at"
+  | "updated_at"
+  | "name"
+  | "member_count"
+  | "available_count"
+  | "text_length"
+  | "revision";
+
 /** 表紙の作り方。既定はメンバーの表紙を並べる `mosaic`。 */
 export type CollectionCoverMode = "mosaic" | "spine" | "single" | "sigil" | "file";
 

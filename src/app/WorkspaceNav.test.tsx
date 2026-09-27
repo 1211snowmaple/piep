@@ -248,6 +248,22 @@ describe("library sidebar", () => {
     expect(onSelect).toHaveBeenCalledOnce();
   });
 
+  it("turns command-palette text into current or saved-revision library search", async () => {
+    const user = userEvent.setup();
+    Element.prototype.scrollIntoView = vi.fn();
+    renderApp("#/library");
+
+    await user.click(await screen.findByRole("button", { name: "検索または移動" }));
+    const search = await screen.findByRole("textbox", { name: "作品、画面、操作を検索" });
+    await user.type(search, "旧版の合言葉");
+
+    expect(await screen.findByRole("button", { name: /旧版の合言葉.*現在版から検索/ })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /旧版の合言葉.*過去版も含めて検索/ }));
+    await waitFor(() => {
+      expect(window.location.hash).toBe(`#/library?q=${encodeURIComponent("旧版の合言葉")}&versions=all`);
+    });
+  });
+
   it("fills the header star only when no page AI action is available", async () => {
     renderApp("#/library");
     const launcher = await screen.findByRole("button", { name: "この画面で使えるAIの手伝い" });

@@ -12,6 +12,15 @@ interface LegacyEntry {
   tab?: unknown;
   filters?: unknown;
   sortBy?: unknown;
+  sortOrder?: unknown;
+  entityScope?: unknown;
+  entitySortBy?: unknown;
+  entitySortOrder?: unknown;
+  collectionSortBy?: unknown;
+  collectionSortOrder?: unknown;
+  searchMode?: unknown;
+  versionScope?: unknown;
+  membershipShelf?: unknown;
 }
 
 /**
@@ -63,7 +72,20 @@ export function useSavedSearchMigration() {
           await upsertSavedSearch({
             name,
             query: typeof entry.query === "string" && entry.query ? entry.query : null,
-            paramsJson: JSON.stringify({ tab: entry.tab, filters: entry.filters, sortBy: entry.sortBy }),
+            paramsJson: JSON.stringify({
+              tab: entry.tab,
+              filters: entry.filters,
+              sortBy: entry.sortBy,
+              sortOrder: entry.sortOrder,
+              entityScope: entry.entityScope,
+              entitySortBy: entry.entitySortBy,
+              entitySortOrder: entry.entitySortOrder,
+              collectionSortBy: entry.collectionSortBy,
+              collectionSortOrder: entry.collectionSortOrder,
+              searchMode: entry.searchMode,
+              versionScope: entry.versionScope,
+              membershipShelf: entry.membershipShelf,
+            }),
           });
           moved += 1;
         } catch {

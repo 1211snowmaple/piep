@@ -281,6 +281,9 @@ fn add_missing_columns(conn: &Connection) -> Result<(), rusqlite::Error> {
         ("downloads", "meta_hash", "TEXT"),
         // 最後に本文まで突き合わせた時刻。指紋が同じでも、ここが古ければ深く見る。
         ("downloads", "last_deep_checked_at", "TEXT"),
+        // assets は全版を保持するため、現在版だけの種別件数を作品側へ持つ。
+        ("downloads", "image_asset_count", "INTEGER"),
+        ("downloads", "file_asset_count", "INTEGER"),
         // 監視対象の健康状態。最後に何か見つかったのはいつか、連続で失敗していないか。
         ("update_targets", "last_hit_at", "TEXT"),
         (
@@ -634,6 +637,8 @@ fn create_core_tables(conn: &Connection) -> Result<(), rusqlite::Error> {
             favorite            INTEGER DEFAULT 0,
             meta_hash           TEXT,
             last_deep_checked_at TEXT,
+            image_asset_count   INTEGER DEFAULT 0,
+            file_asset_count    INTEGER DEFAULT 0,
             UNIQUE(source, source_id)
         );
 
@@ -889,6 +894,10 @@ fn create_core_tables(conn: &Connection) -> Result<(), rusqlite::Error> {
             ON downloads(text_length DESC, id DESC);
         CREATE INDEX IF NOT EXISTS idx_downloads_size_id
             ON downloads(file_size_bytes DESC, id DESC);
+        CREATE INDEX IF NOT EXISTS idx_downloads_asset_count_id
+            ON downloads(asset_count DESC, id DESC);
+        CREATE INDEX IF NOT EXISTS idx_downloads_version_id
+            ON downloads(current_version DESC, id DESC);
         CREATE INDEX IF NOT EXISTS idx_downloads_watch_date_id
             ON downloads(watch_updates, downloaded_at DESC, id DESC);
         CREATE INDEX IF NOT EXISTS idx_downloads_published_id
@@ -1145,6 +1154,8 @@ mod tests {
             ("idx_downloads_author_id_sort", "author_name"),
             ("idx_downloads_text_length_id", "text_length"),
             ("idx_downloads_size_id", "file_size_bytes"),
+            ("idx_downloads_asset_count_id", "asset_count"),
+            ("idx_downloads_version_id", "current_version"),
         ] {
             let columns = conn
                 .prepare(&format!("PRAGMA index_info('{name}')"))

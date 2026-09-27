@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { MotionTabs as Tabs } from "@/components/MotionTabs";
 import {
   ActionIcon,
@@ -28,18 +28,19 @@ import {
   Tooltip,
 } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
+import { useLocalStorage } from "@mantine/hooks";
 import { keepPreviousData, useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Icons, IconSize } from "@/lib/icons";
 import { NoImageMark } from "@/components/NoImageMark";
 import { Note } from "@/components/Note";
-import { useAppNavigate, useAppSearchParams, useReturnTo, useRouteParams } from "@/app/router";
+import { useAppNavigate, useAppRouter, useAppSearchParams, useReturnTo, useRouteParams } from "@/app/router";
 import { ActionBar } from "@/components/ActionBar";
 import { EmptyState, ErrorState, LoadingState } from "@/components/AsyncState";
 import { BoundedJsonView } from "@/components/BoundedJsonView";
 import { ExpandableText } from "@/components/ExpandableText";
 import { ListPager, PagingModeToggle, useBoundedNumberedPage, usePageSize, usePagingMode } from "@/components/ListPager";
 import { ScrollToTop } from "@/components/ScrollToTop";
-import { holdRegionInPlace, scrollRegionIntoView } from "@/lib/scroll";
+import { holdRegionInPlace, listenForScrollIntent, scrollRegionIntoView } from "@/lib/scroll";
 import { VirtualizedWorkList } from "@/features/library/VirtualizedWorkList";
 import { VirtualizedEntityGrid } from "@/features/library/VirtualizedEntityGrid";
 import { parseViewMode, useViewMode } from "@/lib/viewMode";
@@ -51,6 +52,7 @@ import { demoFacets, searchDemoWorks } from "@/mocks/demoData";
 import { exportEntityZip } from "@/services/archiveApi";
 import { AuthorAssist } from "@/features/assist/AuthorAssist";
 import { CollectionCard } from "@/features/collections/CollectionCard";
+import { sortCollections } from "@/features/collections/CollectionsPanel";
 import { listCollectionsForPerson, listCollectionsForSeries } from "@/services/collectionApi";
 import type { WorkCollectionSummary } from "@/types/collections";
 import {
@@ -69,7 +71,23 @@ import { ENTITY_SERIES_PAGE_SIZE, listEntitySeriesPage, listEntityTags } from "@
 import { saveDialog } from "@/services/dialogApi";
 import { openExternalUrl } from "@/services/openerApi";
 import { store } from "@/store";
-import type { EntityFacet, EntityVersion, FacetCount, LibrarySortBy, PersonEntry, SeriesEntry, UpdateTarget } from "@/types/library";
+import {
+  defaultSortOrderFor,
+  COLLECTION_SORT_OPTIONS,
+  ENTITY_SORT_OPTIONS,
+  parseCollectionSortBy,
+  parseEntitySortBy,
+  parseSortChoice,
+  parseSortOrder,
+  RELEVANCE_SORT_OPTION,
+  SERIES_ORDER_SORT_OPTIONS,
+  sortChoice,
+  sortKeys,
+  WORK_SORT_OPTIONS,
+  type SortOption,
+} from "@/features/library/sortOptions";
+import type { CollectionSortBy } from "@/types/collections";
+import type { EntityFacet, EntitySortBy, EntityVersion, FacetCount, LibrarySortBy, LibrarySortOrder, PersonEntry, SeriesEntry, UpdateTarget } from "@/types/library";
 
 /**
  * Every option says both what it sorts by and which way round.
@@ -78,13 +96,11 @@ import type { EntityFacet, EntityVersion, FacetCount, LibrarySortBy, PersonEntry
  * does not say whether the long ones are at the top. Naming the direction in
  * the option removes the guess.
  */
-const ENTITY_SORT_OPTIONS: { value: LibrarySortBy; label: string }[] = [
-  { value: "source_created_at", label: "公開が新しい順" },
-  { value: "downloaded_at", label: "保存が新しい順" },
-  { value: "title", label: "タイトル昇順（あ→ん）" },
-  { value: "text_length", label: "文字数が多い順" },
-  { value: "series_order", label: "シリーズの話数順" },
-];
+const ENTITY_WORK_SORT_VALUES = sortKeys([
+  ...WORK_SORT_OPTIONS,
+  ...SERIES_ORDER_SORT_OPTIONS,
+  RELEVANCE_SORT_OPTION,
+]);
 
 /** Chips for the tags this author actually uses, with the rest behind a popover. */
 const VISIBLE_TAG_CHIPS = 10;
@@ -98,12 +114,43 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
   const returnTo = useReturnTo();
   const runtime = isTauriRuntime();
   const queryClient = useQueryClient();
+  const { pathname, search, navigationId } = useAppRouter();
   const [urlParams, setUrlParams] = useAppSearchParams();
   const tab = parseEntityTab(urlParams.get("tab"), kind);
   const tabsRef = useRef<HTMLDivElement>(null);
   const entityHeroRef = useRef<HTMLDivElement>(null);
   const entityMarksRef = useRef<HTMLDivElement>(null);
   const seriesCoverRef = useRef<HTMLDivElement>(null);
+  // Keep a deferred list movement owned by the exact navigation that asked for
+  // it. A request finishing after Back must never clobber the restored position
+  // of the destination history entry.
+  const pendingPageScroll = useRef<{ navigationId: number; location: string } | null>(null);
+  const stopPendingPageScrollIntent = useRef<() => void>(() => undefined);
+  const cancelPendingPageScroll = useCallback(() => {
+    pendingPageScroll.current = null;
+    stopPendingPageScrollIntent.current();
+    stopPendingPageScrollIntent.current = () => undefined;
+  }, []);
+  const armPendingPageScroll = useCallback((target: URLSearchParams) => {
+    cancelPendingPageScroll();
+    pendingPageScroll.current = {
+      navigationId: navigationId + 1,
+      location: `${pathname}${target.size ? `?${target.toString()}` : ""}`,
+    };
+    const viewport = document.getElementById("main-content");
+    stopPendingPageScrollIntent.current = viewport
+      ? listenForScrollIntent(viewport, cancelPendingPageScroll)
+      : () => undefined;
+  }, [cancelPendingPageScroll, navigationId, pathname]);
+  const currentLocation = `${pathname}${search}`;
+  useEffect(() => {
+    const pending = pendingPageScroll.current;
+    if (!pending || navigationId < pending.navigationId) return;
+    if (navigationId !== pending.navigationId || currentLocation !== pending.location) {
+      cancelPendingPageScroll();
+    }
+  }, [cancelPendingPageScroll, currentLocation, navigationId]);
+  useEffect(() => cancelPendingPageScroll, [cancelPendingPageScroll]);
   // Switching tabs does not move the page: a tab changes what is listed, not
   // where the reader is standing. Rewriting the query string cannot move it -
   // the navigation is a replace, which scroll restoration leaves alone - but the
@@ -123,17 +170,65 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
   // one entry per keystroke in the search box would bury everything else.
   const workQuery = (urlParams.get("q") ?? "").slice(0, 200);
   const activeTags = urlParams.getAll("tag").slice(0, 20);
-  const sortBy = parseEntitySort(urlParams.get("sort"));
-  const patchUrl = (patch: { q?: string; tags?: string[]; sort?: LibrarySortBy }) => {
+  const builtInWorkSort: LibrarySortBy = kind === "series" ? "series_order" : "source_created_at";
+  const [storedWorkSort, setStoredWorkSort] = useLocalStorage<unknown>({
+    key: `piep.entity-work-sort.${kind}`,
+    defaultValue: builtInWorkSort,
+    getInitialValueInEffect: false,
+  });
+  const [storedWorkSortOrder, setStoredWorkSortOrder] = useLocalStorage<unknown>({
+    key: `piep.entity-work-sort-order.${kind}`,
+    defaultValue: null,
+    getInitialValueInEffect: false,
+  });
+  const preferredWorkSort = parseEntityWorkSort(storedWorkSort, builtInWorkSort, kind, false);
+  const defaultWorkSort: LibrarySortBy = workQuery ? "relevance" : preferredWorkSort;
+  const sortBy = parseEntityWorkSort(urlParams.get("sort"), defaultWorkSort, kind, Boolean(workQuery));
+  const sortOrder = parseSortOrder(
+    urlParams.get("order"),
+    !urlParams.has("sort") && !workQuery && sortBy === preferredWorkSort
+      ? parseSortOrder(storedWorkSortOrder, defaultSortOrderFor(sortBy))
+      : defaultSortOrderFor(sortBy),
+  );
+  const workSortOptions = useMemo<SortOption[]>(() => {
+    // Inside one author every row has that author's name, so that key cannot
+    // move anything. Series can contain works from multiple authors.
+    const workOptions = kind === "person"
+      ? WORK_SORT_OPTIONS.filter((option) => !option.value.startsWith("author_name:"))
+      : WORK_SORT_OPTIONS;
+    const columnOptions = kind === "series"
+      ? [...SERIES_ORDER_SORT_OPTIONS, ...workOptions]
+      : workOptions;
+    return workQuery ? [RELEVANCE_SORT_OPTION, ...columnOptions] : columnOptions;
+  }, [kind, workQuery]);
+  const patchUrl = (patch: { q?: string; tags?: string[]; sortBy?: LibrarySortBy; sortOrder?: LibrarySortOrder }) => {
     const next = new URLSearchParams(urlParams);
-    if (patch.q !== undefined) { if (patch.q) next.set("q", patch.q); else next.delete("q"); }
+    if (patch.q !== undefined) {
+      if (patch.q) next.set("q", patch.q);
+      else {
+        next.delete("q");
+        if (next.get("sort") === "relevance") {
+          next.delete("sort");
+          next.delete("order");
+        }
+      }
+    }
     if (patch.tags !== undefined) {
       next.delete("tag");
       patch.tags.forEach((tag) => next.append("tag", tag));
     }
-    if (patch.sort !== undefined) { if (patch.sort !== "source_created_at") next.set("sort", patch.sort); else next.delete("sort"); }
+    if (patch.sortBy !== undefined) {
+      // An explicit default stays explicit, so beginning a text search does
+      // not silently replace the requested column with relevance.
+      next.set("sort", patch.sortBy);
+      const order = patch.sortOrder ?? defaultSortOrderFor(patch.sortBy);
+      if (order === defaultSortOrderFor(patch.sortBy)) next.delete("order");
+      else next.set("order", order);
+    }
     // Page 7 of one filter is not page 7 of another.
     next.delete("page");
+    if (next.toString() === urlParams.toString()) return;
+    armPendingPageScroll(next);
     setUrlParams(next, { replace: true });
   };
   const [pagingMode] = usePagingMode("entity");
@@ -141,7 +236,7 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
   const [pageSize] = usePageSize();
   // Relevance is walked with a score cursor and has no nth page, so numbers are
   // only offered once an ordering has been chosen.
-  const searchingByRelevance = Boolean(workQuery) && sortBy === "source_created_at";
+  const searchingByRelevance = Boolean(workQuery) && sortBy === "relevance";
   const numberedPages = pagingMode === "pages" && !searchingByRelevance;
   const {
     page: pageParam,
@@ -156,16 +251,16 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
   //
   // Spent once the new rows are on screen, so there is one movement rather than
   // a jump to the tabs followed by the rows changing underneath.
-  const pendingPageScroll = useRef(false);
   const setPage = (page: number) => {
     const boundedPage = Number.isFinite(page)
       ? Math.min(maxDirectPage, Math.max(1, Math.trunc(page)))
       : 1;
     const next = new URLSearchParams(urlParams);
     if (boundedPage > 1) next.set("page", String(boundedPage)); else next.delete("page");
+    if (next.toString() === urlParams.toString()) return;
+    armPendingPageScroll(next);
     setUrlParams(next, { replace: false });
     clearLimitNotice();
-    pendingPageScroll.current = true;
   };
   const toggleTag = (tag: string) => patchUrl({
     tags: activeTags.includes(tag) ? activeTags.filter((item) => item !== tag) : [...activeTags, tag],
@@ -192,7 +287,7 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
   // this pages through them instead of silently stopping at a fixed slab.
   const works = useInfiniteQuery({
     ...boundedInfiniteListOptions,
-    queryKey: ["entity-works", kind, source, key, workQuery, activeTags, sortBy, pageSize, numberedPages ? pageParam : 0],
+    queryKey: ["entity-works", kind, source, key, workQuery, activeTags, sortBy, sortOrder, pageSize, numberedPages ? pageParam : 0],
     queryFn: ({ pageParam: cursor }) => runtime
       ? searchDownloadsV2({
         ...(kind === "person" ? { personSource: source, personKey: key } : { seriesSource: source, seriesKey: key }),
@@ -201,10 +296,8 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
         limit: pageSize,
         cursor,
         offset: numberedPages ? (pageParam - 1) * pageSize : null,
-        // A text search inside an author ranks by relevance unless a column was
-        // asked for, matching how the library itself behaves.
-        sortBy: workQuery && sortBy === "source_created_at" ? "relevance" : sortBy,
-        sortOrder: sortBy === "title" ? "asc" : "desc",
+        sortBy,
+        sortOrder,
         projection: "libraryGallery",
       })
       : Promise.resolve(searchDemoWorks(workQuery, source)),
@@ -226,6 +319,33 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
   const rawSeriesQuery = urlParams.get("series_q");
   const seriesQuery = (rawSeriesQuery ?? "").trim().slice(0, 200);
   const serverSeriesQuery = seriesQuery;
+  const [storedSeriesSort, setStoredSeriesSort] = useLocalStorage<unknown>({
+    key: "piep.library-entity-sort.series",
+    defaultValue: "work_count",
+    getInitialValueInEffect: false,
+  });
+  const [storedSeriesSortOrder, setStoredSeriesSortOrder] = useLocalStorage<unknown>({
+    key: "piep.library-entity-sort-order.series",
+    defaultValue: null,
+    getInitialValueInEffect: false,
+  });
+  const seriesSortBy = parseEntitySortBy(urlParams.get("series_sort") ?? storedSeriesSort);
+  const seriesSortOrder = parseSortOrder(
+    urlParams.get("series_order"),
+    urlParams.has("series_sort")
+      ? defaultSortOrderFor(seriesSortBy)
+      : parseSortOrder(storedSeriesSortOrder, defaultSortOrderFor(seriesSortBy)),
+  );
+  const setSeriesSort = (nextSort: EntitySortBy, nextOrder: LibrarySortOrder) => {
+    setStoredSeriesSort(nextSort);
+    setStoredSeriesSortOrder(nextOrder);
+    const next = new URLSearchParams(urlParams);
+    if (nextSort === "work_count" && nextOrder === defaultSortOrderFor(nextSort)) next.delete("series_sort");
+    else next.set("series_sort", nextSort);
+    if (nextOrder === defaultSortOrderFor(nextSort)) next.delete("series_order");
+    else next.set("series_order", nextOrder);
+    setUrlParams(next, { replace: true });
+  };
   const [seriesInput, setSeriesInput] = useState(seriesQuery);
   const latestParams = useRef(urlParams);
   latestParams.current = urlParams;
@@ -306,10 +426,12 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
   // the same explicit in-memory safety stop used by other infinite listings.
   const authorSeries = useInfiniteQuery({
     ...boundedInfiniteListOptions,
-    queryKey: ["entity-series", source, key, serverSeriesQuery],
+    queryKey: ["entity-series", source, key, serverSeriesQuery, seriesSortBy, seriesSortOrder],
     queryFn: ({ pageParam: cursor }) => runtime
       ? listEntitySeriesPage(source, key, {
         query: serverSeriesQuery || null,
+        sortBy: seriesSortBy,
+        sortOrder: seriesSortOrder,
         limit: ENTITY_SERIES_PAGE_SIZE,
         cursor,
       })
@@ -340,6 +462,37 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
       : Promise.resolve([] as WorkCollectionSummary[]),
     staleTime: 60_000,
   });
+  const [storedCollectionSort, setStoredCollectionSort] = useLocalStorage<unknown>({
+    key: "piep.library-collection-sort",
+    defaultValue: "created_at",
+    getInitialValueInEffect: false,
+  });
+  const [storedCollectionSortOrder, setStoredCollectionSortOrder] = useLocalStorage<unknown>({
+    key: "piep.library-collection-sort-order",
+    defaultValue: null,
+    getInitialValueInEffect: false,
+  });
+  const collectionSortBy = parseCollectionSortBy(urlParams.get("collection_sort") ?? storedCollectionSort);
+  const collectionSortOrder = parseSortOrder(
+    urlParams.get("collection_order"),
+    urlParams.has("collection_sort")
+      ? defaultSortOrderFor(collectionSortBy)
+      : parseSortOrder(storedCollectionSortOrder, defaultSortOrderFor(collectionSortBy)),
+  );
+  const sortedEntityCollections = useMemo(
+    () => sortCollections(entityCollections.data ?? [], collectionSortBy, collectionSortOrder),
+    [collectionSortBy, collectionSortOrder, entityCollections.data],
+  );
+  const setCollectionSort = (nextSort: CollectionSortBy, nextOrder: LibrarySortOrder) => {
+    setStoredCollectionSort(nextSort);
+    setStoredCollectionSortOrder(nextOrder);
+    const next = new URLSearchParams(urlParams);
+    if (nextSort === "created_at" && nextOrder === defaultSortOrderFor(nextSort)) next.delete("collection_sort");
+    else next.set("collection_sort", nextSort);
+    if (nextOrder === defaultSortOrderFor(nextSort)) next.delete("collection_order");
+    else next.set("collection_order", nextOrder);
+    setUrlParams(next, { replace: true });
+  };
   const entityTags = useQuery({
     queryKey: ["entity-tags", kind, source, key],
     queryFn: () => runtime ? listEntityTags(kind, source, key) : Promise.resolve([] as FacetCount[]),
@@ -409,11 +562,17 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
   // `pageParam` is in the dependencies as well as the settled flag: a page that
   // is already cached settles in the same render it was asked for, so the flag
   // never changes and an effect watching only it would never run.
+  const listIdentity = `${kind}\0${source}\0${key}\0${urlParams.toString()}`;
   useLayoutEffect(() => {
-    if (!pendingPageScroll.current || !showingRequestedPage) return;
-    pendingPageScroll.current = false;
+    const pending = pendingPageScroll.current;
+    if (!pending || !showingRequestedPage) return;
+    if (pending.navigationId !== navigationId || pending.location !== currentLocation) {
+      cancelPendingPageScroll();
+      return;
+    }
+    cancelPendingPageScroll();
     scrollRegionIntoView(tabsRef.current);
-  }, [pageParam, showingRequestedPage]);
+  }, [cancelPendingPageScroll, currentLocation, listIdentity, navigationId, showingRequestedPage]);
   // 作品と同じ視線の始点にする。操作列の高さを決め打ちせず、実際の
   // 保存元表示（pixiv など）の上辺へ表紙を合わせる。
   useLayoutEffect(() => {
@@ -562,10 +721,22 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
                   />
                   <Select
                     size="sm"
-                    w={188}
-                    value={sortBy}
-                    onChange={(value) => patchUrl({ sort: parseEntitySort(value) })}
-                    data={ENTITY_SORT_OPTIONS}
+                    w={230}
+                    value={sortChoice(sortBy, sortOrder)}
+                    onChange={(value) => {
+                      const choice = parseSortChoice(value);
+                      if (!choice) return;
+                      setStoredWorkSort(choice.key);
+                      setStoredWorkSortOrder(choice.order);
+                      patchUrl({
+                        sortBy: parseEntityWorkSort(choice.key, defaultWorkSort, kind, Boolean(workQuery)),
+                        sortOrder: choice.order,
+                      });
+                    }}
+                    data={workSortOptions}
+                    searchable
+                    maxDropdownHeight={360}
+                    nothingFoundMessage="一致する並び順がありません"
                     leftSection={<Icons.sort size={IconSize.menu} />}
                     aria-label="並び順"
                     allowDeselect={false}
@@ -652,16 +823,34 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
             {kind === "person" && (
               <Tabs.Panel value="series" pt="lg" aria-busy={authorSeries.isFetching}>
                 <Stack gap="md">
-                  <TextInput
-                    value={seriesInput}
-                    onChange={(event) => onSeriesQueryChange(event.currentTarget.value)}
-                    leftSection={<Icons.search size={IconSize.menu} />}
-                    rightSection={seriesInput ? <ActionIcon variant="subtle" color="gray" size="sm" aria-label="シリーズの検索語を消す" onClick={clearSeriesQuery}><Icons.cancel size={IconSize.inline} /></ActionIcon> : null}
-                    label="この作者のシリーズを検索"
-                    description="保存済みシリーズ全体を名前・説明から検索します"
-                    placeholder="シリーズ名"
-                    maxLength={200}
-                  />
+                  <Group align="end" wrap="nowrap">
+                    <TextInput
+                      flex={1}
+                      value={seriesInput}
+                      onChange={(event) => onSeriesQueryChange(event.currentTarget.value)}
+                      leftSection={<Icons.search size={IconSize.menu} />}
+                      rightSection={seriesInput ? <ActionIcon variant="subtle" color="gray" size="sm" aria-label="シリーズの検索語を消す" onClick={clearSeriesQuery}><Icons.cancel size={IconSize.inline} /></ActionIcon> : null}
+                      label="この作者のシリーズを検索"
+                      description="保存済みシリーズ全体を名前・説明から検索します"
+                      placeholder="シリーズ名"
+                      maxLength={200}
+                    />
+                    <Select
+                      w={230}
+                      value={sortChoice(seriesSortBy, seriesSortOrder)}
+                      onChange={(value) => {
+                        const choice = parseSortChoice(value);
+                        if (choice) setSeriesSort(parseEntitySortBy(choice.key), choice.order);
+                      }}
+                      data={ENTITY_SORT_OPTIONS}
+                      searchable
+                      maxDropdownHeight={360}
+                      label="並び順"
+                      leftSection={<Icons.sort size={IconSize.menu} />}
+                      aria-label="作者のシリーズの並び順"
+                      allowDeselect={false}
+                    />
+                  </Group>
                   {authorSeries.isFetching && !authorSeries.isFetchingNextPage && !authorSeries.isLoading
                     ? <Text size="xs" c="dimmed" role="status">シリーズを検索しています</Text>
                     : null}
@@ -673,7 +862,7 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
                             <Text size="sm">ライブラリの更新でカーソルが古くなった可能性があります。表示中のシリーズはそのまま残しています。</Text>
                             <Group gap="xs">
                               <Button size="xs" variant="light" color="red" onClick={() => authorSeries.fetchNextPage()}>もう一度試す</Button>
-                              <Button size="xs" variant="default" onClick={() => queryClient.resetQueries({ queryKey: ["entity-series", source, key, serverSeriesQuery], exact: true })}>先頭から読み直す</Button>
+                              <Button size="xs" variant="default" onClick={() => queryClient.resetQueries({ queryKey: ["entity-series", source, key, serverSeriesQuery, seriesSortBy, seriesSortOrder], exact: true })}>先頭から読み直す</Button>
                             </Group>
                           </Stack>
                         </Alert>
@@ -710,10 +899,27 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
             )}
             <Tabs.Panel value="collections" pt="lg">
               <Stack gap="sm">
-                <Text size="sm" c="dimmed">{displayName}の作品を含むコレクションです。{kind === "person" ? "ほかの作者" : "ほかのシリーズ"}の作品が一緒に入っている場合もあります。</Text>
-                {entityCollections.isLoading ? <LoadingState /> : entityCollections.error ? <ErrorState error={entityCollections.error} retry={() => entityCollections.refetch()} /> : (entityCollections.data ?? []).length === 0
+                <Group justify="space-between" align="end" wrap="wrap">
+                  <Text size="sm" c="dimmed">{displayName}の作品を含むコレクションです。{kind === "person" ? "ほかの作者" : "ほかのシリーズ"}の作品が一緒に入っている場合もあります。</Text>
+                  <Select
+                    size="sm"
+                    w={230}
+                    value={sortChoice(collectionSortBy, collectionSortOrder)}
+                    onChange={(value) => {
+                      const choice = parseSortChoice(value);
+                      if (choice) setCollectionSort(parseCollectionSortBy(choice.key), choice.order);
+                    }}
+                    data={COLLECTION_SORT_OPTIONS}
+                    searchable
+                    maxDropdownHeight={360}
+                    leftSection={<Icons.sort size={IconSize.menu} />}
+                    aria-label="コレクションの並び順"
+                    allowDeselect={false}
+                  />
+                </Group>
+                {entityCollections.isLoading ? <LoadingState /> : entityCollections.error ? <ErrorState error={entityCollections.error} retry={() => entityCollections.refetch()} /> : sortedEntityCollections.length === 0
                   ? <EmptyState icon={Icons.collection} title="コレクションはありません" description={`この${kind === "person" ? "作者" : "シリーズ"}の作品は、まだどのコレクションにも入っていません。`} />
-                  : <SimpleGrid cols={{ base: 1, md: 2 }}>{(entityCollections.data ?? []).map((collection) => (
+                  : <SimpleGrid cols={{ base: 1, md: 2 }}>{sortedEntityCollections.map((collection) => (
                       <CollectionCard key={collection.id} collection={collection} />
                     ))}</SimpleGrid>}
               </Stack>
@@ -743,11 +949,17 @@ function parseEntityTab(value: string | null, kind: "person" | "series"): "works
   return "works";
 }
 
-function parseEntitySort(value: unknown): LibrarySortBy {
-  const allowed = new Set(ENTITY_SORT_OPTIONS.map((option) => option.value));
-  return typeof value === "string" && allowed.has(value as LibrarySortBy)
-    ? value as LibrarySortBy
-    : "source_created_at";
+function parseEntityWorkSort(
+  value: unknown,
+  fallback: LibrarySortBy,
+  kind: "person" | "series",
+  hasQuery: boolean,
+): LibrarySortBy {
+  if (typeof value !== "string" || !ENTITY_WORK_SORT_VALUES.has(value as LibrarySortBy)) return fallback;
+  if (value === "relevance" && !hasQuery) return fallback;
+  if (value === "series_order" && kind !== "series") return fallback;
+  if (value === "author_name" && kind === "person") return fallback;
+  return value as LibrarySortBy;
 }
 
 /**

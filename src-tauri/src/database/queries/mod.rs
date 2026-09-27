@@ -87,6 +87,13 @@ struct SearchIndexBuildDocument {
     semantic: super::semantic_index::SemanticIndexDocument,
 }
 
+#[derive(Debug)]
+struct HistoricalSearchMatch {
+    download_id: i64,
+    version: i64,
+    score: f32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct StagedDeleteEntry {
@@ -1287,7 +1294,7 @@ struct SearchCursor {
 struct EntitySeriesCursor {
     scope: String,
     library_generation: i64,
-    latest_work_at: String,
+    sort_value: String,
     count: i64,
     display_name: String,
     source: String,
@@ -1625,6 +1632,7 @@ impl Database {
         // ストレージディレクトリを作成
         std::fs::create_dir_all(storage_dir)
             .map_err(|e| format!("Storage dir creation failed: {}", e))?;
+        backfill_missing_asset_kind_counts(&conn)?;
         cleanup_stale_search_snapshots(storage_dir)?;
         recover_interrupted_download_saves(&conn, storage_dir)?;
 
@@ -2492,20 +2500,60 @@ impl Database {
                      GROUP BY t.id, t.name
                      ORDER BY count DESC, t.name ASC
                      LIMIT ?2"),
-                ("authors" | "author", false) => Ok("SELECT author_name, COUNT(*) AS count,
+                ("authors" | "author", false) => Ok("WITH identities AS (
+                         SELECT d.source, d.author_id,
+                                COALESCE(MAX(NULLIF(p.display_name, '')), (
+                                    SELECT d2.author_name FROM downloads d2
+                                    WHERE d2.source = d.source AND d2.author_id = d.author_id
+                                    ORDER BY COALESCE(d2.source_updated_at, d2.downloaded_at) DESC,
+                                             d2.id DESC LIMIT 1
+                                )) AS display_name,
+                                COUNT(*) AS work_count
+                         FROM downloads d
+                         LEFT JOIN people p ON p.source = d.source AND p.source_key = d.author_id
+                         WHERE d.author_id IS NOT NULL AND d.author_id != ''
+                         GROUP BY d.source, d.author_id
+                         UNION ALL
+                         SELECT source, '', author_name, COUNT(*)
+                         FROM downloads
+                         WHERE (author_id IS NULL OR author_id = '')
+                           AND author_name IS NOT NULL AND author_name != ''
+                         GROUP BY source, author_name
+                     )
+                     SELECT display_name, SUM(work_count) AS count,
                             GROUP_CONCAT(DISTINCT source) AS sources
-                     FROM downloads
-                     WHERE author_name IS NOT NULL AND author_name != ''
-                     GROUP BY author_name
-                     ORDER BY count DESC, author_name ASC
+                     FROM identities
+                     WHERE display_name IS NOT NULL AND display_name != ''
+                     GROUP BY display_name
+                     ORDER BY count DESC, display_name ASC
                      LIMIT ?1"),
-                ("authors" | "author", true) => Ok("SELECT author_name, COUNT(*) AS count,
+                ("authors" | "author", true) => Ok("WITH identities AS (
+                         SELECT d.source, d.author_id,
+                                COALESCE(MAX(NULLIF(p.display_name, '')), (
+                                    SELECT d2.author_name FROM downloads d2
+                                    WHERE d2.source = d.source AND d2.author_id = d.author_id
+                                    ORDER BY COALESCE(d2.source_updated_at, d2.downloaded_at) DESC,
+                                             d2.id DESC LIMIT 1
+                                )) AS display_name,
+                                COUNT(*) AS work_count
+                         FROM downloads d
+                         LEFT JOIN people p ON p.source = d.source AND p.source_key = d.author_id
+                         WHERE d.author_id IS NOT NULL AND d.author_id != ''
+                         GROUP BY d.source, d.author_id
+                         UNION ALL
+                         SELECT source, '', author_name, COUNT(*)
+                         FROM downloads
+                         WHERE (author_id IS NULL OR author_id = '')
+                           AND author_name IS NOT NULL AND author_name != ''
+                         GROUP BY source, author_name
+                     )
+                     SELECT display_name, SUM(work_count) AS count,
                             GROUP_CONCAT(DISTINCT source) AS sources
-                     FROM downloads
-                     WHERE author_name IS NOT NULL AND author_name != ''
-                       AND author_name LIKE ?1 ESCAPE '\\' COLLATE NOCASE
-                     GROUP BY author_name
-                     ORDER BY count DESC, author_name ASC
+                     FROM identities
+                     WHERE display_name IS NOT NULL AND display_name != ''
+                       AND display_name LIKE ?1 ESCAPE '\\' COLLATE NOCASE
+                     GROUP BY display_name
+                     ORDER BY count DESC, display_name ASC
                      LIMIT ?2"),
                 _ => Err(format!("Unsupported facet kind: {kind}")),
             }
@@ -2906,6 +2954,8 @@ impl Database {
             )
             .map_err(|e| format!("Download save version insert failed: {e}"))?;
         }
+
+        refresh_asset_kind_counts_locked(&tx, download_id)?;
 
         if fail_before_commit {
             return Err("Injected download save failure".to_string());
@@ -3818,7 +3868,9 @@ impl Database {
             ],
         )
         .map_err(|e| format!("Insert asset failed: {}", e))?;
-        Ok(conn.last_insert_rowid())
+        let id = conn.last_insert_rowid();
+        refresh_asset_kind_counts_locked(&conn, asset.download_id)?;
+        Ok(id)
     }
 
     /// Cursor-based library/search entrypoint backed by Tantivy for full text
@@ -3852,8 +3904,10 @@ impl Database {
         let semantic_complete = status.semantic_pending_downloads == 0;
 
         if query.is_empty() {
+            let cursor_scope = search_cursor_scope(&effective_params);
             let cursor = decode_cursor(effective_params.cursor.as_deref()).filter(|cursor| {
                 cursor.kind == "sql"
+                    && cursor.scope.as_deref() == Some(&cursor_scope)
                     && cursor.sort_by == effective_sort_by(&effective_params)
                     && cursor.sort_order == effective_sort_order(&effective_params)
             });
@@ -3901,7 +3955,13 @@ impl Database {
         // caller still submits the old semantic mode; it falls back to the
         // normal lexical search instead.
         let requested_search_mode = effective_search_mode(&effective_params);
-        let search_mode = if requested_search_mode == "semantic" && !status.semantic_enabled {
+        // The semantic index intentionally represents one current document per
+        // work. An explicit history search therefore uses the lexical path,
+        // which can merge saved revisions without pretending that the model
+        // has embedded text it has never seen.
+        let search_mode = if requested_search_mode == "semantic"
+            && (includes_historical_versions(&effective_params) || !status.semantic_enabled)
+        {
             "smart".to_string()
         } else {
             requested_search_mode
@@ -4219,6 +4279,7 @@ impl Database {
         sql.push_str(" ORDER BY sm.score DESC, sm.id ASC LIMIT ?");
         bind_values.push(Box::new(limit + 1));
         let mut page_items = query_download_entries(conn, &sql, &bind_values)?;
+        attach_historical_match_metadata(conn, &mut page_items)?;
         drop(connection);
 
         let has_more = page_items.len() as i64 > limit;
@@ -4245,14 +4306,22 @@ impl Database {
         } else {
             None
         };
+        let historical_documents = self.historical_documents_for_results(&page_items)?;
         let items = decorate_search_results(
             &self.storage_dir,
             page_items,
             parsed_query,
             &HashMap::new(),
-            &HashMap::new(),
+            &historical_documents,
         );
         let semantic_complete = status.semantic_pending_downloads == 0;
+
+        let mut explanations =
+            search_explanations(exact_entity.as_ref(), "tantivy", status.is_complete);
+        if includes_historical_versions(params) {
+            explanations
+                .push("現在版と保存済みの過去版を照合し、作品ごとにまとめています".to_string());
+        }
 
         Ok(SearchV2Result {
             items,
@@ -4267,11 +4336,7 @@ impl Database {
                 query: (!submitted_query.is_empty()).then(|| submitted_query.to_string()),
                 total_estimate,
                 index_complete: status.is_complete,
-                explanations: search_explanations(
-                    exact_entity.as_ref(),
-                    "tantivy",
-                    status.is_complete,
-                ),
+                explanations,
                 exact_entity,
                 semantic_index_complete: Some(semantic_complete),
                 semantic_model_ready: Some(status.semantic_model_ready),
@@ -4287,6 +4352,40 @@ impl Database {
         expected_id: Option<&str>,
     ) -> Result<Arc<DiskSearchSnapshot>, String> {
         self.ranked_search_snapshot_inner(params, query, expected_id, None, None)
+    }
+
+    fn historical_documents_for_results(
+        &self,
+        results: &[DownloadEntry],
+    ) -> Result<HashMap<i64, Arc<SearchDocument>>, String> {
+        if !results.iter().any(|entry| entry.matched_version.is_some()) {
+            return Ok(HashMap::new());
+        }
+        let conn = self.read_conn()?;
+        let mut documents = HashMap::new();
+        for entry in results {
+            let Some(version) = entry.matched_version else {
+                continue;
+            };
+            match historical_search_document(&conn, entry.id, version) {
+                Ok(Some(document)) => {
+                    documents.insert(entry.id, Arc::new(document));
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    // One manually removed/corrupted old JSON must not make the
+                    // whole result page unusable. Integrity diagnostics can
+                    // report the damaged revision separately.
+                    log::warn!(
+                        "Historical search document skipped for download {} v{}: {}",
+                        entry.id,
+                        version,
+                        error
+                    );
+                }
+            }
+        }
+        Ok(documents)
     }
 
     fn ranked_search_snapshot_inner(
@@ -4369,6 +4468,9 @@ impl Database {
                 let conn = guard
                     .as_ref()
                     .ok_or_else(|| "Ranked search snapshot connection was closed".to_string())?;
+                if includes_historical_versions(params) {
+                    materialize_historical_search_matches(conn, &parse_search_query(query), true)?;
+                }
                 let mut wheres = vec!["d.id = search_matches.id".to_string()];
                 let mut bind_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
                 append_library_filters(params, &mut wheres, &mut bind_values);
@@ -4466,6 +4568,10 @@ impl Database {
             "{}で並び替えています（関連度順ではありません）",
             sort_label(params)
         ));
+        if includes_historical_versions(params) {
+            explanations
+                .push("現在版と保存済みの過去版を照合し、作品ごとにまとめています".to_string());
+        }
 
         let cursor_scope = search_cursor_scope(params);
         let cursor = decode_cursor(params.cursor.as_deref()).filter(|candidate| {
@@ -4487,7 +4593,7 @@ impl Database {
         // The match set lives in its own bounded SQLite file. Later pages reuse
         // both the Tantivy scan and the disk-backed membership table, including
         // match sets well beyond one million ids.
-        let snapshot = self.sorted_search_snapshot(query, expected_snapshot)?;
+        let snapshot = self.sorted_search_snapshot(params, query, expected_snapshot)?;
         let matched_count = snapshot.row_count;
 
         if matched_count == 0 {
@@ -4542,6 +4648,7 @@ impl Database {
             bind_values.push(Box::new(offset));
         }
         let mut items = query_download_entries(conn, &sql, &bind_values)?;
+        attach_historical_match_metadata(conn, &mut items)?;
 
         let total_estimate = cursor
             .as_ref()
@@ -4577,12 +4684,13 @@ impl Database {
             None
         };
 
+        let historical_documents = self.historical_documents_for_results(&items)?;
         let items = decorate_search_results(
             &self.storage_dir,
             items,
             parsed_query,
             &HashMap::new(),
-            &HashMap::new(),
+            &historical_documents,
         );
 
         Ok(SearchV2Result {
@@ -4627,12 +4735,18 @@ impl Database {
 
     fn sorted_search_snapshot(
         &self,
+        params: &SearchV2Params,
         query: &str,
         expected_id: Option<&str>,
     ) -> Result<Arc<DiskSearchSnapshot>, String> {
         let key = format!(
-            "sorted:{}",
-            URL_SAFE_NO_PAD.encode(Sha256::digest(query.as_bytes()))
+            "sorted:{}:{}",
+            URL_SAFE_NO_PAD.encode(Sha256::digest(query.as_bytes())),
+            if includes_historical_versions(params) {
+                "all"
+            } else {
+                "current"
+            }
         );
         for _ in 0..3 {
             let library_generation = self.library_generation()?;
@@ -4684,6 +4798,15 @@ impl Database {
                 close_snapshot_connection(&connection);
                 cleanup_search_snapshot_path(&path);
                 return Err(error);
+            }
+            if includes_historical_versions(params) {
+                let guard = connection
+                    .lock()
+                    .map_err(|e| format!("Sorted search connection lock failed: {e}"))?;
+                let conn = guard
+                    .as_ref()
+                    .ok_or_else(|| "Sorted search snapshot connection was closed".to_string())?;
+                materialize_historical_search_matches(conn, &parse_search_query(query), false)?;
             }
             let (matched_count, disk_bytes) = {
                 let guard = connection
@@ -6361,7 +6484,18 @@ impl Database {
             authors_exclude: None,
             min_char_count: None,
             max_char_count: None,
+            min_asset_count: None,
+            max_asset_count: None,
+            min_file_size_bytes: None,
+            max_file_size_bytes: None,
             asset_filter: None,
+            series_filter: None,
+            revision_filter: None,
+            edit_filter: None,
+            cover_filter: None,
+            date_field: None,
+            date_from: None,
+            date_to: None,
             watch_filter: None,
             person_source: None,
             person_key: None,
@@ -6372,6 +6506,7 @@ impl Database {
             view_mode: Some("list".to_string()),
             projection: Some("libraryList".to_string()),
             search_mode: Some("lexical".to_string()),
+            version_scope: None,
         };
         report(1, "list-benchmark");
         let mut list_samples = Vec::with_capacity(7);
@@ -6694,7 +6829,7 @@ impl Database {
                             ORDER BY COALESCE(ds2.content_order, 999999), d2.id
                             LIMIT 1
                         ) AS sample_title,
-                        MAX(COALESCE(d.source_updated_at, d.source_created_at)) AS latest_source_updated_at,
+                        MAX(COALESCE(d.source_updated_at, d.source_created_at, d.downloaded_at)) AS latest_source_updated_at,
                         s.is_concluded
                  FROM download_series ds
                  JOIN downloads d ON d.id = ds.download_id
@@ -6737,11 +6872,17 @@ impl Database {
     /// The opaque cursor is scoped to the person and query and pins SQLite's
     /// data generation. Continuing after a library mutation is rejected so a
     /// UI can restart instead of silently showing a gap or duplicate.
+    // Keep the database boundary parallel to the named IPC fields above. Each
+    // argument belongs to cursor scope; hiding only some in a tuple makes a
+    // continuation easier to validate against the wrong filter.
+    #[allow(clippy::too_many_arguments)]
     pub fn list_entity_series_paged(
         &self,
         source: &str,
         person_key: &str,
         query: Option<&str>,
+        sort_by: Option<&str>,
+        sort_order: Option<&str>,
         limit: i64,
         cursor: Option<&str>,
     ) -> Result<EntitySeriesPage, String> {
@@ -6759,7 +6900,42 @@ impl Database {
         }
         let limit = limit.clamp(1, 200);
         let query = query.map(str::trim).unwrap_or("");
-        let scope = entity_series_cursor_scope(source, person_key, query);
+        let (sort_column, numeric_sort, default_ascending) =
+            match sort_by.unwrap_or("source_created_at") {
+                "work_count" => ("work_count", true, false),
+                "downloaded_at" => ("latest_downloaded_at", false, false),
+                "source_updated_at" => ("latest_source_updated_at", false, false),
+                "name" | "title" => ("display_name", false, true),
+                "text_length" => ("total_text_length", true, false),
+                "file_size_bytes" => ("total_file_size_bytes", true, false),
+                "asset_count" => ("total_asset_count", true, false),
+                "current_version" => ("total_revision_count", true, false),
+                _ => ("latest_source_created_at", false, false),
+            };
+        let ascending = match sort_order {
+            Some("asc") => true,
+            Some("desc") => false,
+            _ => default_ascending,
+        };
+        let normalized_sort = match sort_column {
+            "latest_source_created_at" => "source_created_at",
+            "latest_downloaded_at" => "downloaded_at",
+            "latest_source_updated_at" => "source_updated_at",
+            "display_name" => "name",
+            "total_text_length" => "text_length",
+            "total_file_size_bytes" => "file_size_bytes",
+            "total_asset_count" => "asset_count",
+            "total_revision_count" => "current_version",
+            _ => "work_count",
+        };
+        let normalized_order = if ascending { "asc" } else { "desc" };
+        let scope = entity_series_cursor_scope(
+            source,
+            person_key,
+            query,
+            normalized_sort,
+            normalized_order,
+        );
         let library_generation = self.library_generation()?;
         let decoded_cursor = decode_entity_series_cursor(cursor)?;
         if let Some(cursor) = decoded_cursor.as_ref() {
@@ -6788,15 +6964,23 @@ impl Database {
                        MAX(s.description) AS description,
                        MAX(s.updated_at) AS updated_at,
                        MAX(d.downloaded_at) AS latest_downloaded_at,
-                       MAX(COALESCE(d.source_updated_at, d.source_created_at)) AS latest_source_updated_at,
+                       MAX(COALESCE(d.source_created_at, d.downloaded_at)) AS latest_source_created_at,
+                       MAX(COALESCE(d.source_updated_at, d.source_created_at, d.downloaded_at)) AS latest_source_updated_at,
+                       SUM(d.text_length) AS total_text_length,
+                       SUM(d.file_size_bytes) AS total_file_size_bytes,
+                       SUM(d.asset_count) AS total_asset_count,
+                       SUM(CASE WHEN d.current_version > 1 THEN d.current_version - 1 ELSE 0 END) AS total_revision_count,
                        MAX(s.is_concluded) AS is_concluded,
                        MAX(COALESCE(d.source_created_at, d.downloaded_at)) AS latest_work_at
-                FROM download_people dp
+                FROM (
+                    SELECT DISTINCT download_id
+                    FROM download_people
+                    WHERE person_source = ? AND person_key = ?
+                ) dp
                 JOIN downloads d ON d.id = dp.download_id
                 JOIN download_series ds ON ds.download_id = d.id
                 LEFT JOIN series s
                   ON s.source = ds.series_source AND s.source_key = ds.series_key
-                WHERE dp.person_source = ? AND dp.person_key = ?
                 GROUP BY ds.series_source, ds.series_key
                 {query_having}
              )",
@@ -6842,6 +7026,11 @@ impl Database {
                 .map_err(|e| format!("Entity series count failed: {e}"))?
         };
 
+        let primary_expr = if sort_column == "display_name" {
+            "es.display_name COLLATE NOCASE".to_string()
+        } else {
+            format!("es.{sort_column}")
+        };
         let mut page_sql = format!(
             "{aggregate_sql}
              SELECT es.series_source,
@@ -6863,47 +7052,52 @@ impl Database {
                     ) AS sample_title,
                     es.latest_source_updated_at,
                     es.is_concluded,
-                    es.latest_work_at
+                    CAST(es.{sort_column} AS TEXT) AS sort_value
              FROM entity_series es"
         );
         let mut bind_values = base_bind_values();
         if let Some(cursor) = decoded_cursor.as_ref() {
-            page_sql.push_str(
-                " WHERE es.latest_work_at < ?
-                    OR (es.latest_work_at = ? AND es.work_count < ?)
-                    OR (es.latest_work_at = ? AND es.work_count = ?
-                        AND es.display_name COLLATE NOCASE > ? COLLATE NOCASE)
-                    OR (es.latest_work_at = ? AND es.work_count = ?
-                        AND es.display_name COLLATE NOCASE = ? COLLATE NOCASE
-                        AND es.series_source > ?)
-                    OR (es.latest_work_at = ? AND es.work_count = ?
-                        AND es.display_name COLLATE NOCASE = ? COLLATE NOCASE
-                        AND es.series_source = ? AND es.series_key > ?)",
-            );
-            bind_values.push(Box::new(cursor.latest_work_at.clone()));
-            bind_values.push(Box::new(cursor.latest_work_at.clone()));
+            let comparison = if ascending { ">" } else { "<" };
+            page_sql.push_str(&format!(
+                " WHERE ({primary_expr} {comparison} ?)
+                    OR ({primary_expr} = ? AND (
+                        es.work_count < ?
+                        OR (es.work_count = ? AND (
+                            es.display_name COLLATE NOCASE > ? COLLATE NOCASE
+                            OR (es.display_name COLLATE NOCASE = ? COLLATE NOCASE AND (
+                                es.series_source > ?
+                                OR (es.series_source = ? AND es.series_key > ?)
+                            ))
+                        ))
+                    ))"
+            ));
+            if numeric_sort {
+                let value = cursor.sort_value.parse::<i64>().map_err(|_| {
+                    "Invalid numeric sort value in entity series cursor".to_string()
+                })?;
+                bind_values.push(Box::new(value));
+                bind_values.push(Box::new(value));
+            } else {
+                bind_values.push(Box::new(cursor.sort_value.clone()));
+                bind_values.push(Box::new(cursor.sort_value.clone()));
+            }
             bind_values.push(Box::new(cursor.count));
-            bind_values.push(Box::new(cursor.latest_work_at.clone()));
             bind_values.push(Box::new(cursor.count));
             bind_values.push(Box::new(cursor.display_name.clone()));
-            bind_values.push(Box::new(cursor.latest_work_at.clone()));
-            bind_values.push(Box::new(cursor.count));
             bind_values.push(Box::new(cursor.display_name.clone()));
             bind_values.push(Box::new(cursor.source.clone()));
-            bind_values.push(Box::new(cursor.latest_work_at.clone()));
-            bind_values.push(Box::new(cursor.count));
-            bind_values.push(Box::new(cursor.display_name.clone()));
             bind_values.push(Box::new(cursor.source.clone()));
             bind_values.push(Box::new(cursor.source_key.clone()));
         }
-        page_sql.push_str(
-            " ORDER BY es.latest_work_at DESC,
+        let direction = if ascending { "ASC" } else { "DESC" };
+        page_sql.push_str(&format!(
+            " ORDER BY {primary_expr} {direction},
                        es.work_count DESC,
                        es.display_name COLLATE NOCASE ASC,
                        es.series_source ASC,
                        es.series_key ASC
-              LIMIT ?",
-        );
+              LIMIT ?"
+        ));
         bind_values.push(Box::new(limit + 1));
         let refs = bind_values
             .iter()
@@ -6943,11 +7137,11 @@ impl Database {
         }
         let next_cursor = if has_more {
             page.last()
-                .map(|(item, latest_work_at)| {
+                .map(|(item, sort_value)| {
                     encode_entity_series_cursor(&EntitySeriesCursor {
                         scope: scope.clone(),
                         library_generation,
-                        latest_work_at: latest_work_at.clone(),
+                        sort_value: sort_value.clone(),
                         count: item.count,
                         display_name: item.display_name.clone(),
                         source: item.source.clone(),
@@ -7374,7 +7568,18 @@ impl Database {
                 authors_exclude: None,
                 min_char_count: None,
                 max_char_count: None,
+                min_asset_count: None,
+                max_asset_count: None,
+                min_file_size_bytes: None,
+                max_file_size_bytes: None,
                 asset_filter: None,
+                series_filter: None,
+                revision_filter: None,
+                edit_filter: None,
+                cover_filter: None,
+                date_field: None,
+                date_from: None,
+                date_to: None,
                 watch_filter: None,
                 person_source: None,
                 person_key: None,
@@ -7385,6 +7590,7 @@ impl Database {
                 view_mode: Some("compact".to_string()),
                 projection: Some("libraryCompact".to_string()),
                 search_mode: None,
+                version_scope: None,
             })?
             .items;
 
@@ -7510,12 +7716,28 @@ impl Database {
         let mut having_parts: Vec<String> = Vec::new();
         if like.is_some() {
             having_parts.push(if kind_is_series {
-                "(COALESCE(s.title, ds.title) LIKE ? ESCAPE '\\'
-                       OR COALESCE(s.description, '') LIKE ? ESCAPE '\\')"
+                "(COALESCE(MAX(NULLIF(s.title, '')), (
+                           SELECT ds2.title
+                           FROM download_series ds2
+                           JOIN downloads d2 ON d2.id = ds2.download_id
+                           WHERE ds2.series_source = ds.series_source
+                             AND ds2.series_key = ds.series_key
+                           ORDER BY COALESCE(d2.source_updated_at, d2.downloaded_at) DESC,
+                                    d2.id DESC LIMIT 1
+                       ), ds.series_key)
+                       LIKE ? ESCAPE '\\'
+                       OR COALESCE(MAX(s.description), '') LIKE ? ESCAPE '\\')"
                     .to_string()
             } else {
-                "(COALESCE(p.display_name, d.author_name) LIKE ? ESCAPE '\\'
-                       OR COALESCE(p.description, '') LIKE ? ESCAPE '\\')"
+                "(COALESCE(MAX(NULLIF(p.display_name, '')), (
+                           SELECT d2.author_name
+                           FROM downloads d2
+                           WHERE d2.source = d.source AND d2.author_id = d.author_id
+                           ORDER BY COALESCE(d2.source_updated_at, d2.downloaded_at) DESC,
+                                    d2.id DESC LIMIT 1
+                       ), d.author_id)
+                       LIKE ? ESCAPE '\\'
+                       OR COALESCE(MAX(p.description), '') LIKE ? ESCAPE '\\')"
                     .to_string()
             });
         }
@@ -7542,7 +7764,7 @@ impl Database {
                  LEFT JOIN update_targets ut ON ut.target_type = 'series'
                       AND ut.source = ds.series_source AND ut.source_key = ds.series_key
                  {where_clause}
-                 GROUP BY ds.series_source, ds.series_key, COALESCE(s.title, ds.title), s.cover_path, s.description, s.updated_at, s.is_concluded
+                 GROUP BY ds.series_source, ds.series_key
                  {having}"
             )
         } else {
@@ -7552,7 +7774,7 @@ impl Database {
                  LEFT JOIN update_targets ut ON ut.target_type = 'author'
                       AND ut.source = d.source AND ut.source_key = d.author_id
                  {where_clause}
-                 GROUP BY d.source, d.author_id, COALESCE(p.display_name, d.author_name), p.icon_path, p.cover_path, p.description, p.updated_at
+                 GROUP BY d.source, d.author_id
                  {having}"
             )
         };
@@ -7627,12 +7849,27 @@ impl Database {
     ) -> String {
         let descending = !matches!(sort_order, Some("asc"));
         let dir = if descending { "DESC" } else { "ASC" };
-        match sort_by.unwrap_or("work_count") {
+        let order = match sort_by.unwrap_or("work_count") {
             "downloaded_at" => {
                 format!("ORDER BY latest_downloaded_at {dir}, count DESC, {name_column} ASC")
             }
+            "source_created_at" => {
+                format!("ORDER BY latest_source_created_at {dir}, count DESC, {name_column} ASC")
+            }
             "source_updated_at" => {
                 format!("ORDER BY latest_source_updated_at {dir}, count DESC, {name_column} ASC")
+            }
+            "text_length" => {
+                format!("ORDER BY total_text_length {dir}, count DESC, {name_column} ASC")
+            }
+            "file_size_bytes" => {
+                format!("ORDER BY total_file_size_bytes {dir}, count DESC, {name_column} ASC")
+            }
+            "asset_count" => {
+                format!("ORDER BY total_asset_count {dir}, count DESC, {name_column} ASC")
+            }
+            "current_version" => {
+                format!("ORDER BY total_revision_count {dir}, count DESC, {name_column} ASC")
             }
             // 名前だけは昇順が「正しい」と読めるので、指定が無ければ昇順。
             "name" | "title" | "author_name" => {
@@ -7644,7 +7881,11 @@ impl Database {
                 format!("ORDER BY {name_column} COLLATE NOCASE {dir}, count DESC")
             }
             _ => format!("ORDER BY count {dir}, {name_column} ASC"),
-        }
+        };
+        // OFFSET paging needs a total order. Two providers may legitimately
+        // expose the same name, count and timestamps; their stable identities
+        // are the final tie-break rather than SQLite's row accident.
+        format!("{order}, 1 ASC, 2 ASC")
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -7687,11 +7928,21 @@ impl Database {
                 "SELECT
                         d.source,
                         d.author_id,
-                        COALESCE(p.display_name, d.author_name) AS display_name,
+                        COALESCE(
+                            MAX(NULLIF(p.display_name, '')),
+                            (
+                                SELECT d2.author_name
+                                FROM downloads d2
+                                WHERE d2.source = d.source AND d2.author_id = d.author_id
+                                ORDER BY COALESCE(d2.source_updated_at, d2.downloaded_at) DESC,
+                                         d2.id DESC LIMIT 1
+                            ),
+                            d.author_id
+                        ) AS display_name,
                         COUNT(DISTINCT d.id) AS count,
-                        COALESCE(p.icon_path, p.cover_path) AS cover_path,
-                        p.description,
-                        p.updated_at,
+                        COALESCE(MAX(p.icon_path), MAX(p.cover_path)) AS cover_path,
+                        MAX(p.description) AS description,
+                        MAX(p.updated_at) AS updated_at,
                         MAX(d.downloaded_at) AS latest_downloaded_at,
                         (
                             SELECT d2.title
@@ -7700,10 +7951,15 @@ impl Database {
                             ORDER BY COALESCE(d2.source_created_at, d2.downloaded_at) DESC, d2.id DESC
                             LIMIT 1
                         ) AS sample_title,
-                        p.icon_path,
-                        p.cover_path AS banner_path,
-                        MAX(COALESCE(d.source_updated_at, d.source_created_at)) AS latest_source_updated_at,
-                        NULL AS is_concluded
+                        MAX(p.icon_path) AS icon_path,
+                        MAX(p.cover_path) AS banner_path,
+                        MAX(COALESCE(d.source_updated_at, d.source_created_at, d.downloaded_at)) AS latest_source_updated_at,
+                        NULL AS is_concluded,
+                        MAX(COALESCE(d.source_created_at, d.downloaded_at)) AS latest_source_created_at,
+                        SUM(d.text_length) AS total_text_length,
+                        SUM(d.file_size_bytes) AS total_file_size_bytes,
+                        SUM(d.asset_count) AS total_asset_count,
+                        SUM(CASE WHEN d.current_version > 1 THEN d.current_version - 1 ELSE 0 END) AS total_revision_count
                      {source}
                      {order}
                      LIMIT ? OFFSET ?",
@@ -7713,11 +7969,23 @@ impl Database {
                 "SELECT
                         ds.series_source,
                         ds.series_key,
-                        COALESCE(s.title, ds.title) AS title,
+                        COALESCE(
+                            MAX(NULLIF(s.title, '')),
+                            (
+                                SELECT ds2.title
+                                FROM download_series ds2
+                                JOIN downloads d2 ON d2.id = ds2.download_id
+                                WHERE ds2.series_source = ds.series_source
+                                  AND ds2.series_key = ds.series_key
+                                ORDER BY COALESCE(d2.source_updated_at, d2.downloaded_at) DESC,
+                                         d2.id DESC LIMIT 1
+                            ),
+                            ds.series_key
+                        ) AS title,
                         COUNT(DISTINCT ds.download_id) AS count,
-                        s.cover_path,
-                        s.description,
-                        s.updated_at,
+                        MAX(s.cover_path) AS cover_path,
+                        MAX(s.description) AS description,
+                        MAX(s.updated_at) AS updated_at,
                         MAX(d.downloaded_at) AS latest_downloaded_at,
                         (
                             SELECT d2.title
@@ -7730,9 +7998,14 @@ impl Database {
                             LIMIT 1
                         ) AS sample_title,
                         NULL AS icon_path,
-                        s.cover_path AS banner_path,
-                        MAX(COALESCE(d.source_updated_at, d.source_created_at)) AS latest_source_updated_at,
-                        s.is_concluded
+                        MAX(s.cover_path) AS banner_path,
+                        MAX(COALESCE(d.source_updated_at, d.source_created_at, d.downloaded_at)) AS latest_source_updated_at,
+                        MAX(s.is_concluded) AS is_concluded,
+                        MAX(COALESCE(d.source_created_at, d.downloaded_at)) AS latest_source_created_at,
+                        SUM(d.text_length) AS total_text_length,
+                        SUM(d.file_size_bytes) AS total_file_size_bytes,
+                        SUM(d.asset_count) AS total_asset_count,
+                        SUM(CASE WHEN d.current_version > 1 THEN d.current_version - 1 ELSE 0 END) AS total_revision_count
                      {source}
                      {order}
                      LIMIT ? OFFSET ?",
@@ -7874,26 +8147,52 @@ impl Database {
                  LIMIT 500",
             )?,
             authors: collect(
-                "SELECT author_name, COUNT(*) AS count,
+                "WITH identities AS (
+                     SELECT d.source, d.author_id,
+                            COALESCE(MAX(NULLIF(p.display_name, '')), (
+                                SELECT d2.author_name FROM downloads d2
+                                WHERE d2.source = d.source AND d2.author_id = d.author_id
+                                ORDER BY COALESCE(d2.source_updated_at, d2.downloaded_at) DESC,
+                                         d2.id DESC LIMIT 1
+                            )) AS display_name,
+                            COUNT(*) AS work_count
+                     FROM downloads d
+                     LEFT JOIN people p ON p.source = d.source AND p.source_key = d.author_id
+                     WHERE d.author_id IS NOT NULL AND d.author_id != ''
+                     GROUP BY d.source, d.author_id
+                     UNION ALL
+                     SELECT source, '', author_name, COUNT(*)
+                     FROM downloads
+                     WHERE (author_id IS NULL OR author_id = '')
+                       AND author_name IS NOT NULL AND author_name != ''
+                     GROUP BY source, author_name
+                 )
+                 SELECT display_name, SUM(work_count) AS count,
                         GROUP_CONCAT(DISTINCT source) AS sources
-                 FROM downloads
-                 WHERE author_name IS NOT NULL AND author_name != ''
-                 GROUP BY author_name
-                 ORDER BY count DESC, author_name ASC
+                 FROM identities
+                 WHERE display_name IS NOT NULL AND display_name != ''
+                 GROUP BY display_name
+                 ORDER BY count DESC, display_name ASC
                  LIMIT 500",
             )?,
             author_entities: if !include_entities {
                 Vec::new()
             } else {
                 collect_entities(
-                "SELECT
+                    "SELECT
                     d.source,
                     d.author_id,
-                    COALESCE(p.display_name, d.author_name) AS display_name,
+                    COALESCE(MAX(p.display_name), (
+                        SELECT d2.author_name
+                        FROM downloads d2
+                        WHERE d2.source = d.source AND d2.author_id = d.author_id
+                        ORDER BY d2.downloaded_at DESC, d2.id DESC
+                        LIMIT 1
+                    )) AS display_name,
                     COUNT(DISTINCT d.id) AS count,
-                    COALESCE(p.icon_path, p.cover_path) AS cover_path,
-                    p.description,
-                    p.updated_at,
+                    COALESCE(MAX(p.icon_path), MAX(p.cover_path)) AS cover_path,
+                    MAX(p.description) AS description,
+                    MAX(p.updated_at) AS updated_at,
                     MAX(d.downloaded_at) AS latest_downloaded_at,
                     (
                         SELECT d2.title
@@ -7902,16 +8201,16 @@ impl Database {
                         ORDER BY COALESCE(d2.source_created_at, d2.downloaded_at) DESC, d2.id DESC
                         LIMIT 1
                     ) AS sample_title,
-                    p.icon_path,
-                    p.cover_path AS banner_path
+                    MAX(p.icon_path) AS icon_path,
+                    MAX(p.cover_path) AS banner_path
                  FROM downloads d
                  LEFT JOIN people p ON p.source = d.source AND p.source_key = d.author_id
                  WHERE d.author_id IS NOT NULL AND d.author_id != ''
                    AND d.author_name IS NOT NULL AND d.author_name != ''
-                 GROUP BY d.source, d.author_id, COALESCE(p.display_name, d.author_name), p.icon_path, p.cover_path, p.description, p.updated_at
+                 GROUP BY d.source, d.author_id
                  ORDER BY count DESC, display_name ASC
                  LIMIT 60",
-            )?
+                )?
             },
             series: if !include_entities {
                 Vec::new()
@@ -7920,11 +8219,19 @@ impl Database {
                 "SELECT
                     ds.series_source,
                     ds.series_key,
-                    COALESCE(s.title, ds.title) AS title,
+                    COALESCE(MAX(s.title), (
+                        SELECT ds2.title
+                        FROM download_series ds2
+                        JOIN downloads d2 ON d2.id = ds2.download_id
+                        WHERE ds2.series_source = ds.series_source
+                          AND ds2.series_key = ds.series_key
+                        ORDER BY d2.downloaded_at DESC, d2.id DESC
+                        LIMIT 1
+                    )) AS title,
                     COUNT(DISTINCT ds.download_id) AS count,
-                    s.cover_path,
-                    s.description,
-                    s.updated_at,
+                    MAX(s.cover_path) AS cover_path,
+                    MAX(s.description) AS description,
+                    MAX(s.updated_at) AS updated_at,
                     MAX(d.downloaded_at) AS latest_downloaded_at,
                     (
                         SELECT d2.title
@@ -7937,11 +8244,11 @@ impl Database {
                         LIMIT 1
                     ) AS sample_title,
                     NULL AS icon_path,
-                    s.cover_path AS banner_path
+                    MAX(s.cover_path) AS banner_path
                  FROM download_series ds
                  LEFT JOIN series s ON s.source = ds.series_source AND s.source_key = ds.series_key
                  JOIN downloads d ON d.id = ds.download_id
-                 GROUP BY ds.series_source, ds.series_key, COALESCE(s.title, ds.title), s.cover_path, s.description, s.updated_at
+                 GROUP BY ds.series_source, ds.series_key
                  ORDER BY count DESC, title ASC
                  LIMIT 60",
             )?
@@ -7954,11 +8261,16 @@ impl Database {
                  ORDER BY count DESC, content_type ASC",
             )?,
             asset_types: collect(
-                "SELECT asset_type, COUNT(*) AS count, NULL AS sources
-                 FROM assets
-                 WHERE asset_type IS NOT NULL AND asset_type != ''
-                 GROUP BY asset_type
-                 ORDER BY count DESC, asset_type ASC",
+                "SELECT kind, work_count, NULL AS sources
+                 FROM (
+                     SELECT 'image' AS kind, COUNT(*) AS work_count
+                     FROM downloads WHERE COALESCE(image_asset_count, 0) > 0
+                     UNION ALL
+                     SELECT 'file' AS kind, COUNT(*) AS work_count
+                     FROM downloads WHERE COALESCE(file_asset_count, 0) > 0
+                 )
+                 WHERE work_count > 0
+                 ORDER BY work_count DESC, kind ASC",
             )?,
         };
         drop(conn);
@@ -8054,7 +8366,9 @@ impl Database {
         .map_err(|e| format!("Version not found: {}", e))
     }
 
-    /// 指定バージョンを削除する。最新バージョンを削除した場合は、直前のバージョンを現行に戻す。
+    /// 指定した過去バージョンを削除する。
+    ///
+    /// 現在版は履歴行だけでは題名・作者・タグ等を復元できないため拒否する。
     pub fn delete_version(&self, download_id: i64, version: i64) -> Result<(), String> {
         let (version_dir, source_dir_to_cleanup) = {
             let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
@@ -8084,6 +8398,15 @@ impl Database {
                 )
                 .map_err(|e| format!("Download not found: {}", e))?;
 
+            // `download_versions` stores body/file facts but not the title,
+            // author, excerpt, dates, tags or series as they were in that
+            // revision. Promoting an older row therefore cannot faithfully
+            // restore the work. Refuse the lossy operation until those
+            // metadata snapshots exist rather than producing a hybrid work.
+            if version == current_version {
+                return Err("現在版は削除できません。過去版だけを削除できます。".to_string());
+            }
+
             let target: DownloadVersion = tx
                 .query_row(
                     "SELECT * FROM download_versions WHERE download_id = ?1 AND version = ?2",
@@ -8106,99 +8429,57 @@ impl Database {
                 )
                 .map_err(|e| format!("Version not found: {}", e))?;
 
-            let replacement = if version == current_version {
-                Some(
-                    tx.query_row(
-                        "SELECT * FROM download_versions
-                         WHERE download_id = ?1 AND version != ?2
-                         ORDER BY version DESC
-                         LIMIT 1",
-                        params![download_id, version],
-                        |row| {
-                            Ok(DownloadVersion {
-                                id: row.get(0)?,
-                                download_id: row.get(1)?,
-                                version: row.get(2)?,
-                                content_hash: row.get(3)?,
-                                text_length: row.get(4)?,
-                                json_path: row.get(5)?,
-                                original_json_path: row.get(6)?,
-                                asset_count: row.get(7)?,
-                                file_size_bytes: row.get(8)?,
-                                created_at: row.get(9)?,
-                                change_summary: row.get(10)?,
-                            })
-                        },
-                    )
-                    .map_err(|e| format!("Replacement version not found: {}", e))?,
-                )
-            } else {
-                None
-            };
-
             let version_dir = Path::new(&target.json_path)
                 .parent()
                 .map(|p| p.to_path_buf())
                 .ok_or_else(|| "Version directory could not be resolved".to_string())?;
-            let deleted_prefix = format!("{}%", version_dir.to_string_lossy());
-
-            tx.execute(
-                "DELETE FROM assets WHERE download_id = ?1 AND local_path LIKE ?2",
-                params![download_id, deleted_prefix],
-            )
-            .map_err(|e| format!("Failed to delete version assets: {}", e))?;
+            // Old v1 libraries kept original.json and their assets directly in
+            // the work root. That root also contains v2, v3, ... after an
+            // update, so recursively deleting it would erase every surviving
+            // revision. Legacy-root cleanup needs a file-by-file migration and
+            // is deliberately refused by this low-level operation.
+            if !is_isolated_version_directory(&version_dir) {
+                return Err(
+                    "旧形式の版は安全に単独削除できません。作品全体の削除を使用してください。"
+                        .to_string(),
+                );
+            }
+            // Resolve and authorize the filesystem target before changing any
+            // relational state. Doing this after COMMIT used to return an
+            // access/path error with the version row already gone.
+            let canonical_storage = self
+                .storage_dir
+                .canonicalize()
+                .map_err(|e| format!("Storage path resolution failed: {e}"))?;
+            let canonical_version_dir = version_dir
+                .canonicalize()
+                .map_err(|e| format!("Version path resolution failed: {e}"))?;
+            if !canonical_version_dir.starts_with(&canonical_storage) {
+                return Err(
+                    "Access Denied: Version path is outside of storage directory".to_string(),
+                );
+            }
+            let target_json = Path::new(&target.json_path);
+            let version_asset_ids = assets_for_download_locked(&tx, download_id)?
+                .into_iter()
+                .filter(|asset| {
+                    asset_belongs_to_version_path(Path::new(&asset.local_path), target_json)
+                })
+                .map(|asset| asset.id)
+                .collect::<Vec<_>>();
+            for asset_id in version_asset_ids {
+                tx.execute(
+                    "DELETE FROM assets WHERE download_id = ?1 AND id = ?2",
+                    params![download_id, asset_id],
+                )
+                .map_err(|e| format!("Failed to delete version asset: {e}"))?;
+            }
 
             tx.execute(
                 "DELETE FROM download_versions WHERE download_id = ?1 AND version = ?2",
                 params![download_id, version],
             )
             .map_err(|e| format!("Failed to delete version: {}", e))?;
-
-            if let Some(repl) = replacement {
-                let repl_dir = Path::new(&repl.json_path)
-                    .parent()
-                    .map(|p| p.to_path_buf())
-                    .ok_or_else(|| {
-                        "Replacement version directory could not be resolved".to_string()
-                    })?;
-                let repl_prefix = format!("{}%", repl_dir.to_string_lossy());
-                let cover_path: Option<String> = tx
-                    .query_row(
-                        "SELECT local_path FROM assets
-                         WHERE download_id = ?1 AND local_path LIKE ?2 AND mime_type LIKE 'image/%'
-                         ORDER BY id ASC LIMIT 1",
-                        params![download_id, repl_prefix],
-                        |row| row.get(0),
-                    )
-                    .ok();
-
-                tx.execute(
-                    "UPDATE downloads SET
-                        json_path = ?1,
-                        original_json_path = ?2,
-                        cover_path = ?3,
-                        asset_count = ?4,
-                        file_size_bytes = ?5,
-                        downloaded_at = ?6,
-                        content_hash = ?7,
-                        text_length = ?8,
-                        current_version = ?9
-                     WHERE id = ?10",
-                    params![
-                        repl.json_path,
-                        repl.original_json_path,
-                        cover_path,
-                        repl.asset_count,
-                        repl.file_size_bytes,
-                        repl.created_at,
-                        repl.content_hash,
-                        repl.text_length,
-                        repl.version,
-                        download_id,
-                    ],
-                )
-                .map_err(|e| format!("Failed to promote replacement version: {}", e))?;
-            }
 
             tx.commit()
                 .map_err(|e| format!("Transaction commit failed: {}", e))?;
@@ -8210,27 +8491,11 @@ impl Database {
             (version_dir, source_dir_to_cleanup)
         };
 
-        if version_dir.exists() {
-            let canon_storage = self
-                .storage_dir
-                .canonicalize()
-                .map_err(|e| format!("Storage path resolution failed: {}", e))?;
-            let canon_version_dir = version_dir
-                .canonicalize()
-                .map_err(|e| format!("Version path resolution failed: {}", e))?;
-            if !canon_version_dir.starts_with(&canon_storage) {
-                return Err(
-                    "Access Denied: Version path is outside of storage directory".to_string(),
-                );
-            }
-            if let Err(e) = remove_dir_all_resilient(&canon_version_dir) {
-                log::warn!(
-                    "Failed to remove version directory {:?}: {}",
-                    canon_version_dir,
-                    e
-                );
-            }
-        }
+        let cleanup_error = if version_dir.exists() {
+            remove_dir_all_resilient(&version_dir).err()
+        } else {
+            None
+        };
 
         if let Some(source_dir) = source_dir_to_cleanup {
             let _ = remove_dir_resilient(&source_dir);
@@ -8243,6 +8508,12 @@ impl Database {
                 download_id,
                 e
             );
+        }
+
+        if let Some(error) = cleanup_error {
+            return Err(format!(
+                "版履歴は削除しましたが、版フォルダーを削除できませんでした。ライブラリ診断から再確認してください: {error}"
+            ));
         }
 
         Ok(())
@@ -10638,6 +10909,10 @@ fn query_text(params: &SearchV2Params) -> &str {
         .trim()
 }
 
+fn includes_historical_versions(params: &SearchV2Params) -> bool {
+    params.version_scope.as_deref() == Some("all")
+}
+
 fn plain_entity_query(query: &str) -> bool {
     !query.is_empty()
         && query.chars().count() <= 160
@@ -10734,11 +11009,31 @@ fn params_have_library_filters(params: &SearchV2Params) -> bool {
             .unwrap_or(false)
         || params.min_char_count.is_some()
         || params.max_char_count.is_some()
+        || params.min_asset_count.is_some()
+        || params.max_asset_count.is_some()
+        || params.min_file_size_bytes.is_some()
+        || params.max_file_size_bytes.is_some()
+        || params.revision_filter.is_some()
+        || params.edit_filter.is_some()
+        || params.cover_filter.is_some()
         || params
             .asset_filter
             .as_deref()
             .map(|value| !value.trim().is_empty() && value != "all")
             .unwrap_or(false)
+        || params
+            .series_filter
+            .as_deref()
+            .map(|value| !value.trim().is_empty() && value != "all")
+            .unwrap_or(false)
+        || params
+            .date_from
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+        || params
+            .date_to
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
         || params
             .watch_filter
             .as_deref()
@@ -10982,13 +11277,23 @@ fn decode_cursor(raw: Option<&str>) -> Option<SearchCursor> {
     serde_json::from_slice(&bytes).ok()
 }
 
-fn entity_series_cursor_scope(source: &str, person_key: &str, query: &str) -> String {
+fn entity_series_cursor_scope(
+    source: &str,
+    person_key: &str,
+    query: &str,
+    sort_by: &str,
+    sort_order: &str,
+) -> String {
     let mut hasher = Sha256::new();
     hasher.update(source.as_bytes());
     hasher.update([0x1f]);
     hasher.update(person_key.as_bytes());
     hasher.update([0x1f]);
     hasher.update(query.as_bytes());
+    hasher.update([0x1f]);
+    hasher.update(sort_by.as_bytes());
+    hasher.update([0x1f]);
+    hasher.update(sort_order.as_bytes());
     URL_SAFE_NO_PAD.encode(hasher.finalize())
 }
 
@@ -11024,6 +11329,8 @@ fn normalized_sort_key(params: &SearchV2Params) -> &'static str {
         Some("series_order") => "series_order",
         Some("size" | "file_size_bytes") => "size",
         Some("length" | "text_length") => "length",
+        Some("assets" | "asset_count") => "assets",
+        Some("version" | "current_version") => "version",
         Some("relevance" | "score") => "relevance",
         _ => "date",
     }
@@ -11039,8 +11346,20 @@ fn wants_column_sort(params: &SearchV2Params) -> bool {
 fn sort_label(params: &SearchV2Params) -> &'static str {
     let descending = effective_sort_order(params).as_deref() != Some("asc");
     match normalized_sort_key(params) {
-        "title" => "タイトル順",
-        "author" => "作者名順",
+        "title" => {
+            if descending {
+                "タイトルの降順"
+            } else {
+                "タイトルの昇順"
+            }
+        }
+        "author" => {
+            if descending {
+                "作者名の降順"
+            } else {
+                "作者名の昇順"
+            }
+        }
         "published" => {
             if descending {
                 "公開日の新しい順"
@@ -11048,7 +11367,13 @@ fn sort_label(params: &SearchV2Params) -> &'static str {
                 "公開日の古い順"
             }
         }
-        "updated" => "更新日順",
+        "updated" => {
+            if descending {
+                "更新日の新しい順"
+            } else {
+                "更新日の古い順"
+            }
+        }
         "size" => {
             if descending {
                 "容量の大きい順"
@@ -11063,7 +11388,27 @@ fn sort_label(params: &SearchV2Params) -> &'static str {
                 "文字数の少ない順"
             }
         }
-        "series_order" => "シリーズ順",
+        "assets" => {
+            if descending {
+                "添付数の多い順"
+            } else {
+                "添付数の少ない順"
+            }
+        }
+        "version" => {
+            if descending {
+                "版番号の大きい順"
+            } else {
+                "版番号の小さい順"
+            }
+        }
+        "series_order" => {
+            if descending {
+                "シリーズの末尾から"
+            } else {
+                "シリーズの先頭から"
+            }
+        }
         _ => {
             if descending {
                 "保存日の新しい順"
@@ -11091,7 +11436,7 @@ fn effective_sort_order(params: &SearchV2Params) -> Option<String> {
 fn encode_sql_cursor(params: &SearchV2Params, item: &DownloadEntry) -> Option<String> {
     encode_cursor(&SearchCursor {
         kind: "sql".to_string(),
-        scope: None,
+        scope: Some(search_cursor_scope(params)),
         sort_by: effective_sort_by(params),
         sort_order: effective_sort_order(params),
         value: item
@@ -11174,6 +11519,8 @@ fn fallback_sort_value(params: &SearchV2Params, item: &DownloadEntry) -> Option<
             .unwrap_or_else(|| item.downloaded_at.clone()),
         Some("size") => item.file_size_bytes.to_string(),
         Some("length") => item.text_length.to_string(),
+        Some("assets") => item.asset_count.to_string(),
+        Some("version") => item.current_version.to_string(),
         _ => item.downloaded_at.clone(),
     })
 }
@@ -11185,7 +11532,7 @@ fn fallback_sort_value(params: &SearchV2Params, item: &DownloadEntry) -> Option<
 ///
 /// 一覧・並べ替え・索引の**すべて**がここを通る。片方だけを変えると、棚では
 /// 元の題なのに開くと違う題、という状態ができてしまう。
-const EFFECTIVE_TITLE_SQL: &str = "COALESCE(NULLIF(TRIM((SELECT r.title FROM work_edit_revisions r WHERE r.download_id = d.id AND r.status = 'active' LIMIT 1)), ''), d.title)";
+const EFFECTIVE_TITLE_SQL: &str = "COALESCE(NULLIF(TRIM((SELECT r.title FROM work_edit_revisions r WHERE r.download_id = d.id AND r.status = 'active' ORDER BY r.updated_at DESC, r.id DESC LIMIT 1)), ''), d.title)";
 
 fn download_select_sql_for_projection(
     projection: Option<&str>,
@@ -11576,7 +11923,10 @@ fn reset_search_match_table(conn: &Connection, with_score: bool) -> Result<(), S
     conn.execute_batch(&format!(
         "DROP TABLE IF EXISTS search_matches;
          CREATE TABLE search_matches (
-            id INTEGER PRIMARY KEY{score_column}
+            id INTEGER PRIMARY KEY{score_column},
+            current_match INTEGER NOT NULL DEFAULT 0,
+            matched_version INTEGER,
+            historical_match_count INTEGER NOT NULL DEFAULT 0
          ) WITHOUT ROWID;"
     ))
     .map_err(|e| format!("Search snapshot table reset failed: {e}"))
@@ -11591,10 +11941,13 @@ fn insert_search_match_ids(conn: &Connection, ids: &[i64]) -> Result<(), String>
         // statement per batch is dramatically cheaper than one VM execution
         // per id and still uses constant memory.
         let placeholders = (1..=batch.len())
-            .map(|index| format!("(?{index})"))
+            .map(|index| format!("(?{index}, 1)"))
             .collect::<Vec<_>>()
             .join(",");
-        let sql = format!("INSERT OR IGNORE INTO search_matches (id) VALUES {placeholders}");
+        let sql = format!(
+            "INSERT INTO search_matches (id, current_match) VALUES {placeholders}
+             ON CONFLICT(id) DO UPDATE SET current_match = 1, matched_version = NULL"
+        );
         conn.execute(&sql, rusqlite::params_from_iter(batch.iter().copied()))
             .map_err(|e| format!("Sorted search id batch insert failed: {e}"))?;
     }
@@ -11609,12 +11962,15 @@ fn insert_search_match_scores(conn: &Connection, scores: &[(i64, f32)]) -> Resul
         let placeholders = batch
             .iter()
             .enumerate()
-            .map(|(index, _)| format!("(?{}, ?{})", index * 2 + 1, index * 2 + 2))
+            .map(|(index, _)| format!("(?{}, ?{}, 1)", index * 2 + 1, index * 2 + 2))
             .collect::<Vec<_>>()
             .join(",");
         let sql = format!(
-            "INSERT INTO search_matches (id, score) VALUES {placeholders}
-             ON CONFLICT(id) DO UPDATE SET score = MAX(score, excluded.score)"
+            "INSERT INTO search_matches (id, score, current_match) VALUES {placeholders}
+             ON CONFLICT(id) DO UPDATE SET
+                score = MAX(score, excluded.score),
+                current_match = 1,
+                matched_version = NULL"
         );
         let values = batch.iter().flat_map(|(id, score)| {
             [
@@ -11626,6 +11982,283 @@ fn insert_search_match_scores(conn: &Connection, scores: &[(i64, f32)]) -> Resul
             .map_err(|e| format!("Ranked search score batch insert failed: {e}"))?;
     }
     Ok(())
+}
+
+fn attach_historical_match_metadata(
+    conn: &Connection,
+    entries: &mut [DownloadEntry],
+) -> Result<(), String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT matched_version, historical_match_count
+             FROM search_matches WHERE id = ?1",
+        )
+        .map_err(|e| format!("Historical search metadata prepare failed: {e}"))?;
+    for entry in entries {
+        let metadata = stmt
+            .query_row(params![entry.id], |row| {
+                Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, i64>(1)?))
+            })
+            .optional()
+            .map_err(|e| format!("Historical search metadata query failed: {e}"))?;
+        if let Some((matched_version, historical_match_count)) = metadata {
+            entry.matched_version = matched_version;
+            entry.historical_match_count = historical_match_count;
+        }
+    }
+    Ok(())
+}
+
+fn materialize_historical_search_matches(
+    conn: &Connection,
+    parsed: &ParsedSearchQuery,
+    with_score: bool,
+) -> Result<(), String> {
+    if parsed.include.is_empty() {
+        return Ok(());
+    }
+    let mut stmt = conn
+        .prepare(
+            "SELECT v.download_id, v.version, d.source, d.title, d.author_name,
+                    (SELECT GROUP_CONCAT(t.name, ' ')
+                     FROM library.download_tags dt
+                     JOIN library.tags t ON t.id = dt.tag_id
+                     WHERE dt.download_id = d.id),
+                    (SELECT GROUP_CONCAT(ds.title, ' ')
+                     FROM library.download_series ds WHERE ds.download_id = d.id),
+                    d.excerpt,
+                    COALESCE(v.original_json_path, v.json_path)
+             FROM library.download_versions v
+             JOIN library.downloads d ON d.id = v.download_id
+             WHERE v.version <> d.current_version
+             ORDER BY v.download_id, v.version DESC",
+        )
+        .map_err(|e| format!("Historical search scan prepare failed: {e}"))?;
+    let mut rows = stmt
+        .query([])
+        .map_err(|e| format!("Historical search scan failed: {e}"))?;
+    while let Some(row) = rows
+        .next()
+        .map_err(|e| format!("Historical search scan row failed: {e}"))?
+    {
+        let download_id = row
+            .get::<_, i64>(0)
+            .map_err(|e| format!("Historical search download id failed: {e}"))?;
+        let version = row
+            .get::<_, i64>(1)
+            .map_err(|e| format!("Historical search version failed: {e}"))?;
+        let source = row
+            .get::<_, String>(2)
+            .map_err(|e| format!("Historical search source failed: {e}"))?;
+        let title = row
+            .get::<_, String>(3)
+            .map_err(|e| format!("Historical search title failed: {e}"))?;
+        let author_name = row
+            .get::<_, String>(4)
+            .map_err(|e| format!("Historical search author failed: {e}"))?;
+        let tags = row
+            .get::<_, Option<String>>(5)
+            .map_err(|e| format!("Historical search tags failed: {e}"))?
+            .unwrap_or_default();
+        let series_title = row
+            .get::<_, Option<String>>(6)
+            .map_err(|e| format!("Historical search series failed: {e}"))?
+            .unwrap_or_default();
+        let excerpt = row
+            .get::<_, Option<String>>(7)
+            .map_err(|e| format!("Historical search excerpt failed: {e}"))?
+            .unwrap_or_default();
+        let json_path = row
+            .get::<_, String>(8)
+            .map_err(|e| format!("Historical search JSON path failed: {e}"))?;
+        let version_assets = assets_for_attached_download_locked(conn, download_id)
+            .map(|assets| assets_for_version_path(&assets, Path::new(&json_path)))
+            .unwrap_or_else(|error| {
+                log::warn!(
+                    "Historical search assets skipped for download {} v{}: {}",
+                    download_id,
+                    version,
+                    error
+                );
+                Vec::new()
+            });
+        let document = match historical_search_document_from_fields(
+            &source,
+            SearchDocument {
+                title,
+                author_name,
+                tags,
+                series_title,
+                excerpt,
+                body: String::new(),
+            },
+            &json_path,
+            &version_assets,
+        ) {
+            Ok(document) => document,
+            Err(error) => {
+                log::warn!(
+                    "Historical search skipped download {} v{}: {}",
+                    download_id,
+                    version,
+                    error
+                );
+                continue;
+            }
+        };
+        if document_matches_excluded_term(&document, parsed) {
+            continue;
+        }
+        let (_, reasons, score) = match_fields_and_score(&document, parsed);
+        let matches_every_term = parsed
+            .include
+            .iter()
+            .all(|term| reasons.iter().any(|reason| reason.term == term.raw));
+        if !matches_every_term {
+            continue;
+        }
+        let matched = HistoricalSearchMatch {
+            download_id,
+            version,
+            // This score shares ordering with BM25 only approximately. Keep
+            // old-body matches modest so a current-title match remains ahead.
+            score: (score / 10.0).clamp(0.01, 8.0) as f32,
+        };
+        insert_historical_search_match(conn, &matched, with_score)?;
+    }
+    Ok(())
+}
+
+fn insert_historical_search_match(
+    conn: &Connection,
+    matched: &HistoricalSearchMatch,
+    with_score: bool,
+) -> Result<(), String> {
+    if with_score {
+        conn.execute(
+            "INSERT INTO search_matches (
+                id, score, current_match, matched_version, historical_match_count
+             ) VALUES (?1, ?2, 0, ?3, 1)
+             ON CONFLICT(id) DO UPDATE SET
+                matched_version = CASE
+                    WHEN search_matches.current_match = 1 THEN NULL
+                    WHEN excluded.score > search_matches.score THEN excluded.matched_version
+                    WHEN excluded.score = search_matches.score
+                         AND excluded.matched_version > COALESCE(search_matches.matched_version, 0)
+                    THEN excluded.matched_version
+                    ELSE search_matches.matched_version
+                END,
+                score = CASE
+                    WHEN search_matches.current_match = 1 THEN search_matches.score
+                    ELSE MAX(search_matches.score, excluded.score)
+                END,
+                historical_match_count = search_matches.historical_match_count + 1",
+            params![matched.download_id, matched.score, matched.version],
+        )
+        .map_err(|e| format!("Historical ranked match insert failed: {e}"))?;
+    } else {
+        conn.execute(
+            "INSERT INTO search_matches (
+                id, current_match, matched_version, historical_match_count
+             ) VALUES (?1, 0, ?2, 1)
+             ON CONFLICT(id) DO UPDATE SET
+                matched_version = CASE
+                    WHEN search_matches.current_match = 1 THEN NULL
+                    ELSE MAX(
+                        COALESCE(search_matches.matched_version, 0),
+                        excluded.matched_version
+                    )
+                END,
+                historical_match_count = search_matches.historical_match_count + 1",
+            params![matched.download_id, matched.version],
+        )
+        .map_err(|e| format!("Historical sorted match insert failed: {e}"))?;
+    }
+    Ok(())
+}
+
+fn historical_search_document(
+    conn: &Connection,
+    download_id: i64,
+    version: i64,
+) -> Result<Option<SearchDocument>, String> {
+    let row = conn
+        .query_row(
+            "SELECT d.source, d.title, d.author_name,
+                    (SELECT GROUP_CONCAT(t.name, ' ')
+                     FROM download_tags dt JOIN tags t ON t.id = dt.tag_id
+                     WHERE dt.download_id = d.id),
+                    (SELECT GROUP_CONCAT(ds.title, ' ')
+                     FROM download_series ds WHERE ds.download_id = d.id),
+                    d.excerpt, COALESCE(v.original_json_path, v.json_path)
+             FROM download_versions v
+             JOIN downloads d ON d.id = v.download_id
+             WHERE v.download_id = ?1 AND v.version = ?2",
+            params![download_id, version],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                    row.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                    row.get::<_, Option<String>>(5)?.unwrap_or_default(),
+                    row.get::<_, String>(6)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|e| format!("Historical search document query failed: {e}"))?;
+    let Some((source, title, author_name, tags, series_title, excerpt, json_path)) = row else {
+        return Ok(None);
+    };
+    let version_assets = assets_for_download_locked(conn, download_id)
+        .map(|assets| assets_for_version_path(&assets, Path::new(&json_path)))?;
+    historical_search_document_from_fields(
+        &source,
+        SearchDocument {
+            title,
+            author_name,
+            tags,
+            series_title,
+            excerpt,
+            body: String::new(),
+        },
+        &json_path,
+        &version_assets,
+    )
+    .map(Some)
+}
+
+fn historical_search_document_from_fields(
+    source: &str,
+    mut document: SearchDocument,
+    json_path: &str,
+    assets: &[AssetEntry],
+) -> Result<SearchDocument, String> {
+    let raw = std::fs::read_to_string(json_path)
+        .map_err(|e| format!("Could not read historical JSON {json_path}: {e}"))?;
+    document.title = historical_title_from_json(&raw, source).unwrap_or(document.title);
+    document.body = super::attachment::search_body_from_json(&raw, source, assets);
+    Ok(document)
+}
+
+fn historical_title_from_json(raw: &str, source: &str) -> Option<String> {
+    let value = serde_json::from_str::<serde_json::Value>(raw).ok()?;
+    let title = if source == "pixiv" {
+        value
+            .get("title")
+            .or_else(|| value.get("detail").and_then(|detail| detail.get("title")))
+    } else if source == "fanbox" {
+        crate::fanbox_api::payload::post_or_self(&value).get("title")
+    } else {
+        None
+    }?;
+    title
+        .as_str()
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .map(str::to_string)
 }
 
 fn insert_bulk_match_entries(conn: &Connection, entries: &[DownloadEntry]) -> Result<(), String> {
@@ -11710,7 +12343,7 @@ fn suggestion_kind_priority(kind: &str) -> u8 {
 
 fn sort_key_select_expr(params: &SearchV2Params) -> String {
     match effective_sort_by(params).as_deref() {
-        Some("title") => "CAST(d.title AS TEXT)".to_string(),
+        Some("title") => format!("CAST({EFFECTIVE_TITLE_SQL} AS TEXT)"),
         Some("author") => "CAST(d.author_name AS TEXT)".to_string(),
         Some("published") => {
             "CAST(COALESCE(d.source_created_at, d.downloaded_at) AS TEXT)".to_string()
@@ -11721,6 +12354,8 @@ fn sort_key_select_expr(params: &SearchV2Params) -> String {
         }
         Some("size") => "CAST(d.file_size_bytes AS TEXT)".to_string(),
         Some("length") => "CAST(d.text_length AS TEXT)".to_string(),
+        Some("assets") => "CAST(d.asset_count AS TEXT)".to_string(),
+        Some("version") => "CAST(d.current_version AS TEXT)".to_string(),
         Some("series_order") => format!("CAST({} AS TEXT)", series_order_sort_expr()),
         _ => "CAST(d.downloaded_at AS TEXT)".to_string(),
     }
@@ -11728,7 +12363,7 @@ fn sort_key_select_expr(params: &SearchV2Params) -> String {
 
 fn sort_compare_expr(params: &SearchV2Params) -> String {
     match effective_sort_by(params).as_deref() {
-        Some("title") => "d.title COLLATE NOCASE".to_string(),
+        Some("title") => format!("{EFFECTIVE_TITLE_SQL} COLLATE NOCASE"),
         Some("author") => "d.author_name COLLATE NOCASE".to_string(),
         Some("published") => "COALESCE(d.source_created_at, d.downloaded_at)".to_string(),
         Some("updated") => {
@@ -11736,6 +12371,8 @@ fn sort_compare_expr(params: &SearchV2Params) -> String {
         }
         Some("size") => "d.file_size_bytes".to_string(),
         Some("length") => "d.text_length".to_string(),
+        Some("assets") => "d.asset_count".to_string(),
+        Some("version") => "d.current_version".to_string(),
         Some("series_order") => series_order_sort_expr(),
         _ => "d.downloaded_at".to_string(),
     }
@@ -11761,7 +12398,7 @@ fn append_keyset_filter(
     ));
     if matches!(
         effective_sort_by(params).as_deref(),
-        Some("size" | "length")
+        Some("size" | "length" | "assets" | "version")
     ) {
         let parsed = value.parse::<i64>().unwrap_or(0);
         bind_values.push(Box::new(parsed));
@@ -11900,7 +12537,19 @@ fn append_library_filters(
         let active_authors = active_strings(authors_inc);
         if !active_authors.is_empty() {
             let placeholders = vec!["?"; active_authors.len()].join(", ");
-            wheres.push(format!("d.author_name IN ({})", placeholders));
+            wheres.push(format!(
+                "(d.author_name IN ({placeholders}) OR (
+                    d.author_id IS NOT NULL AND d.author_id != '' AND EXISTS (
+                        SELECT 1 FROM downloads author_snapshot
+                        WHERE author_snapshot.source = d.source
+                          AND author_snapshot.author_id = d.author_id
+                          AND author_snapshot.author_name IN ({placeholders})
+                    )
+                ))"
+            ));
+            for author in &active_authors {
+                bind_values.push(Box::new(author.clone()));
+            }
             for author in active_authors {
                 bind_values.push(Box::new(author));
             }
@@ -11911,7 +12560,19 @@ fn append_library_filters(
         let active_authors = active_strings(authors_exc);
         if !active_authors.is_empty() {
             let placeholders = vec!["?"; active_authors.len()].join(", ");
-            wheres.push(format!("d.author_name NOT IN ({})", placeholders));
+            wheres.push(format!(
+                "NOT (d.author_name IN ({placeholders}) OR (
+                    d.author_id IS NOT NULL AND d.author_id != '' AND EXISTS (
+                        SELECT 1 FROM downloads author_snapshot
+                        WHERE author_snapshot.source = d.source
+                          AND author_snapshot.author_id = d.author_id
+                          AND author_snapshot.author_name IN ({placeholders})
+                    )
+                ))"
+            ));
+            for author in &active_authors {
+                bind_values.push(Box::new(author.clone()));
+            }
             for author in active_authors {
                 bind_values.push(Box::new(author));
             }
@@ -11928,42 +12589,114 @@ fn append_library_filters(
         bind_values.push(Box::new(max_char));
     }
 
+    if let Some(min_assets) = params.min_asset_count {
+        wheres.push("d.asset_count >= ?".to_string());
+        bind_values.push(Box::new(min_assets));
+    }
+
+    if let Some(max_assets) = params.max_asset_count {
+        wheres.push("d.asset_count <= ?".to_string());
+        bind_values.push(Box::new(max_assets));
+    }
+
+    if let Some(min_size) = params.min_file_size_bytes {
+        wheres.push("d.file_size_bytes >= ?".to_string());
+        bind_values.push(Box::new(min_size));
+    }
+
+    if let Some(max_size) = params.max_file_size_bytes {
+        wheres.push("d.file_size_bytes <= ?".to_string());
+        bind_values.push(Box::new(max_size));
+    }
+
     if let Some(ref asset_filter) = params.asset_filter {
         match asset_filter.as_str() {
             "has_assets" => wheres.push("d.asset_count > 0".to_string()),
             "no_assets" => wheres.push("d.asset_count = 0".to_string()),
-            "has_images" => wheres.push(
-                "d.id IN (
-                    SELECT download_id FROM assets
-                    WHERE mime_type LIKE 'image/%'
-                )"
-                .to_string(),
-            ),
-            "has_files" => wheres.push(
-                "d.id IN (
-                    SELECT download_id FROM assets
-                    WHERE mime_type IS NULL OR mime_type NOT LIKE 'image/%'
-                )"
-                .to_string(),
-            ),
+            "has_images" => wheres.push("COALESCE(d.image_asset_count, 0) > 0".to_string()),
+            "has_files" => wheres.push("COALESCE(d.file_asset_count, 0) > 0".to_string()),
             "has_images_and_files" => {
-                wheres.push(
-                    "d.id IN (
-                        SELECT download_id FROM assets
-                        WHERE mime_type LIKE 'image/%'
-                    )"
-                    .to_string(),
-                );
-                wheres.push(
-                    "d.id IN (
-                        SELECT download_id FROM assets
-                        WHERE mime_type IS NULL OR mime_type NOT LIKE 'image/%'
-                    )"
-                    .to_string(),
-                );
+                wheres.push("COALESCE(d.image_asset_count, 0) > 0".to_string());
+                wheres.push("COALESCE(d.file_asset_count, 0) > 0".to_string());
             }
             _ => {}
         }
+    }
+
+    if let Some(ref series_filter) = params.series_filter {
+        match series_filter.as_str() {
+            "in_series" => wheres.push(
+                "EXISTS (SELECT 1 FROM download_series ds WHERE ds.download_id = d.id)".to_string(),
+            ),
+            "standalone" => wheres.push(
+                "NOT EXISTS (SELECT 1 FROM download_series ds WHERE ds.download_id = d.id)"
+                    .to_string(),
+            ),
+            _ => {}
+        }
+    }
+
+    if let Some(ref revision_filter) = params.revision_filter {
+        match revision_filter.as_str() {
+            // `has_history` is accepted for saved searches created by builds
+            // that briefly used that name. The condition is revision state,
+            // not a promise that every old file is still retained.
+            "revised" | "has_history" => wheres.push("d.current_version > 1".to_string()),
+            "first_version" => wheres.push("d.current_version <= 1".to_string()),
+            _ => {}
+        }
+    }
+
+    if let Some(ref edit_filter) = params.edit_filter {
+        match edit_filter.as_str() {
+            "edited" => wheres.push(
+                "EXISTS (
+                    SELECT 1 FROM work_edit_revisions wer
+                    WHERE wer.download_id = d.id AND wer.status = 'active'
+                )"
+                .to_string(),
+            ),
+            "unedited" => wheres.push(
+                "NOT EXISTS (
+                    SELECT 1 FROM work_edit_revisions wer
+                    WHERE wer.download_id = d.id AND wer.status = 'active'
+                )"
+                .to_string(),
+            ),
+            _ => {}
+        }
+    }
+
+    if let Some(ref cover_filter) = params.cover_filter {
+        match cover_filter.as_str() {
+            "has_cover" => wheres.push("NULLIF(TRIM(d.cover_path), '') IS NOT NULL".to_string()),
+            "no_cover" => wheres.push("NULLIF(TRIM(d.cover_path), '') IS NULL".to_string()),
+            _ => {}
+        }
+    }
+
+    let date_column = match params.date_field.as_deref() {
+        Some("source_created_at") => "d.source_created_at",
+        Some("source_updated_at") => "d.source_updated_at",
+        _ => "d.downloaded_at",
+    };
+    if let Some(date_from) = params
+        .date_from
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        wheres.push(format!("date({date_column}) >= date(?)"));
+        bind_values.push(Box::new(date_from.to_string()));
+    }
+    if let Some(date_to) = params
+        .date_to
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        wheres.push(format!("date({date_column}) <= date(?)"));
+        bind_values.push(Box::new(date_to.to_string()));
     }
 
     if let Some(ref watch_filter) = params.watch_filter {
@@ -12170,6 +12903,8 @@ fn sort_clause(params: &SearchV2Params) -> String {
         }
         "size" => "d.file_size_bytes",
         "length" => "d.text_length",
+        "assets" => "d.asset_count",
+        "version" => "d.current_version",
         _ => "d.downloaded_at",
     };
     let sort_order = sort_order(params);
@@ -12799,8 +13534,28 @@ fn assets_for_download_locked(
     conn: &Connection,
     download_id: i64,
 ) -> Result<Vec<AssetEntry>, String> {
+    assets_for_download_from_table(conn, download_id, "assets")
+}
+
+fn assets_for_attached_download_locked(
+    conn: &Connection,
+    download_id: i64,
+) -> Result<Vec<AssetEntry>, String> {
+    assets_for_download_from_table(conn, download_id, "library.assets")
+}
+
+fn assets_for_download_from_table(
+    conn: &Connection,
+    download_id: i64,
+    table: &str,
+) -> Result<Vec<AssetEntry>, String> {
+    // `table` is selected only by the two private wrappers above. Keeping the
+    // attached schema choice here avoids duplicating positional row decoding.
+    debug_assert!(matches!(table, "assets" | "library.assets"));
     let mut stmt = conn
-        .prepare("SELECT * FROM assets WHERE download_id = ?1")
+        .prepare(&format!(
+            "SELECT * FROM {table} WHERE download_id = ?1 ORDER BY id"
+        ))
         .map_err(|e| format!("Query prepare failed: {}", e))?;
     let rows = stmt
         .query_map(params![download_id], |row| {
@@ -12824,6 +13579,103 @@ fn assets_for_download_locked(
     Ok(results)
 }
 
+/// Keep an edition's attachments inside the same saved version tree as its
+/// JSON. `assets` intentionally retains rows for every saved revision, so
+/// handing the unfiltered list to the reader/index lets an older same-named
+/// file win merely because it has the smaller row id. Path component matching
+/// also distinguishes `v2` from `v20`, unlike a textual prefix.
+fn is_isolated_version_directory(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            let digits = name.strip_prefix('v').unwrap_or("");
+            !digits.is_empty() && digits.chars().all(|ch| ch.is_ascii_digit())
+        })
+}
+
+fn asset_belongs_to_version_path(asset_path: &Path, json_path: &Path) -> bool {
+    let Some(version_dir) = json_path.parent() else {
+        return false;
+    };
+    if is_isolated_version_directory(version_dir) {
+        return asset_path.starts_with(version_dir);
+    }
+    // Legacy v1 sits in the work root. Include its direct files and legacy
+    // subdirectories, but never descend into a modern vN tree.
+    let Ok(relative) = asset_path.strip_prefix(version_dir) else {
+        return false;
+    };
+    !relative
+        .components()
+        .next()
+        .is_some_and(|component| is_isolated_version_directory(Path::new(component.as_os_str())))
+}
+
+fn assets_for_version_path(assets: &[AssetEntry], json_path: &Path) -> Vec<AssetEntry> {
+    assets
+        .iter()
+        .filter(|asset| asset_belongs_to_version_path(Path::new(&asset.local_path), json_path))
+        .cloned()
+        .collect()
+}
+
+fn refresh_asset_kind_counts_locked(conn: &Connection, download_id: i64) -> Result<(), String> {
+    let json_path = conn
+        .query_row(
+            "SELECT COALESCE(original_json_path, json_path) FROM downloads WHERE id = ?1",
+            params![download_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|e| format!("Current asset path query failed: {e}"))?;
+    let Some(json_path) = json_path else {
+        return Ok(());
+    };
+    let current_assets = assets_for_download_locked(conn, download_id)
+        .map(|assets| assets_for_version_path(&assets, Path::new(&json_path)))?;
+    let image_count = current_assets
+        .iter()
+        .filter(|asset| {
+            asset
+                .mime_type
+                .as_deref()
+                .is_some_and(|mime| mime.starts_with("image/"))
+        })
+        .count() as i64;
+    let file_count = current_assets.len() as i64 - image_count;
+    conn.execute(
+        "UPDATE downloads SET image_asset_count = ?1, file_asset_count = ?2 WHERE id = ?3",
+        params![image_count, file_count, download_id],
+    )
+    .map_err(|e| format!("Current asset kind counts update failed: {e}"))?;
+    Ok(())
+}
+
+fn backfill_missing_asset_kind_counts(conn: &Connection) -> Result<(), String> {
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| format!("Asset kind backfill transaction failed: {e}"))?;
+    let ids = {
+        let mut stmt = tx
+            .prepare(
+                "SELECT id FROM downloads
+                 WHERE image_asset_count IS NULL OR file_asset_count IS NULL",
+            )
+            .map_err(|e| format!("Asset kind backfill prepare failed: {e}"))?;
+        let ids = stmt
+            .query_map([], |row| row.get::<_, i64>(0))
+            .map_err(|e| format!("Asset kind backfill query failed: {e}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("Asset kind backfill row failed: {e}"))?;
+        ids
+    };
+    for id in ids {
+        refresh_asset_kind_counts_locked(&tx, id)?;
+    }
+    tx.commit()
+        .map_err(|e| format!("Asset kind backfill commit failed: {e}"))
+}
+
 fn reader_source_content(
     db: &Database,
     download: &DownloadEntry,
@@ -12833,10 +13685,12 @@ fn reader_source_content(
 ) -> Result<(String, String), String> {
     let target_version = version.unwrap_or(download.current_version);
     let raw_json = db.read_download_json_for_version(download, versions, target_version)?;
+    let version_path = reader_version_path(download, versions, target_version);
+    let version_assets = assets_for_version_path(assets, &version_path);
     Ok(super::attachment::content_from_json(
         &raw_json,
         &download.source,
-        assets,
+        &version_assets,
     ))
 }
 
@@ -13458,8 +14312,7 @@ fn search_index_document_locked(
                     d.downloaded_at,
                     d.favorite,
                     d.watch_updates,
-                    d.text_length,
-                    (SELECT GROUP_CONCAT(DISTINCT a.asset_type) FROM assets a WHERE a.download_id = d.id)
+                    d.text_length
              FROM downloads d
              WHERE d.id = ?1"
             ),
@@ -13483,7 +14336,6 @@ fn search_index_document_locked(
                     row.get::<_, i64>(14)? != 0,
                     row.get::<_, i64>(15)? != 0,
                     row.get::<_, i64>(16)?,
-                    row.get::<_, Option<String>>(17)?,
                 ))
             },
         )
@@ -13508,23 +14360,31 @@ fn search_index_document_locked(
         favorite,
         watch_updates,
         text_length,
-        asset_kinds,
     )) = row
     else {
         return Ok(None);
     };
 
     let json_path = original_json_path.unwrap_or(json_path);
+    let current_assets = assets_for_download_locked(conn, download_id)
+        .map(|assets| assets_for_version_path(&assets, Path::new(&json_path)))
+        .unwrap_or_default();
     let body = active_edit_plain_text_locked(conn, download_id)?.unwrap_or_else(|| {
         // 添付の中の本文も索引に入れる。ここを通さないと、**読める作品が検索に
         // 出てこない**という食い違いができる。反映済みの編集があるときは、
         // そちらが本文なのでアセットを引きに行かない。
-        let assets = assets_for_download_locked(conn, download_id).unwrap_or_default();
         std::fs::read_to_string(&json_path)
             .ok()
-            .map(|raw| super::attachment::search_body_from_json(&raw, &source, &assets))
+            .map(|raw| super::attachment::search_body_from_json(&raw, &source, &current_assets))
             .unwrap_or_default()
     });
+    let asset_kinds = current_assets
+        .iter()
+        .map(|asset| asset.asset_type.as_str())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>()
+        .join(" ");
 
     let tags = tags_raw.unwrap_or_default();
     let series_title_raw = series_title.unwrap_or_default();
@@ -13557,7 +14417,7 @@ fn search_index_document_locked(
             downloaded_at,
             favorite,
             watch_updates,
-            asset_kinds: normalize_search_text(asset_kinds.as_deref().unwrap_or("")),
+            asset_kinds: normalize_search_text(&asset_kinds),
             text_length,
         },
         semantic: super::semantic_index::SemanticIndexDocument {
@@ -13981,6 +14841,8 @@ fn download_entry_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Download
         sort_key: row.get(30)?,
         // Appended last so the existing positional reads keep their indexes.
         person_icon_path: row.get(31)?,
+        matched_version: None,
+        historical_match_count: 0,
     })
 }
 

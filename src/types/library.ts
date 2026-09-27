@@ -33,6 +33,10 @@ export interface DownloadEntry {
   scoreReasons?: ScoreReason[];
   matchHighlights?: SearchHighlight[];
   sortKey?: string | null;
+  /** The saved revision that matched when only an older version contained the query. */
+  matchedVersion?: number | null;
+  /** Number of older saved revisions that also matched the query. */
+  historicalMatchCount?: number;
 }
 
 export interface ScoreReason {
@@ -302,7 +306,16 @@ export interface EntityFacet {
  * 作品の並べ替えとは別の語彙を持つ。束ねに文字数も容量も無く、代わりに
  * 「中にある作品を見て決まる」鍵がある。
  */
-export type EntitySortBy = "work_count" | "downloaded_at" | "source_updated_at" | "name";
+export type EntitySortBy =
+  | "work_count"
+  | "downloaded_at"
+  | "source_created_at"
+  | "source_updated_at"
+  | "name"
+  | "text_length"
+  | "file_size_bytes"
+  | "asset_count"
+  | "current_version";
 
 /**
  * 一覧そのものにかける条件。
@@ -444,6 +457,8 @@ export type LibrarySortBy =
   | "author_name"
   | "text_length"
   | "file_size_bytes"
+  | "asset_count"
+  | "current_version"
   | "series_order"
   /** Score ranking. Only meaningful together with a text query, where it is the
    *  default; any other key makes the backend order the matches by that column. */
@@ -481,6 +496,15 @@ export interface SavedSearchInput {
 export type LibraryTagFilterMode = "and" | "or";
 export type LibraryProjection = "libraryGallery" | "libraryCompact" | "bulk" | "entityFacet";
 export type LibrarySearchMode = "smart" | "exact" | "semantic";
+export type LibraryVersionScope = "current" | "all";
+export type LibraryAssetFilter = "has_assets" | "no_assets" | "has_images" | "has_files" | "has_images_and_files";
+export type LibrarySeriesFilter = "in_series" | "standalone";
+export type LibraryRevisionFilter = "revised" | "first_version";
+export type LibraryEditFilter = "edited" | "unedited";
+export type LibraryCoverFilter = "has_cover" | "no_cover";
+export type LibraryDateField = "downloaded_at" | "source_created_at" | "source_updated_at";
+
+export type LibrarySortOrder = "asc" | "desc";
 
 export interface SearchV2Params {
   text?: string | null;
@@ -488,7 +512,7 @@ export interface SearchV2Params {
   source?: string | null;
   contentType?: string | null;
   sortBy?: LibrarySortBy | null;
-  sortOrder?: "asc" | "desc" | null;
+  sortOrder?: LibrarySortOrder | null;
   limit?: number;
   cursor?: string | null;
   favorite?: boolean | null;
@@ -499,7 +523,18 @@ export interface SearchV2Params {
   authorsExclude?: string[] | null;
   minCharCount?: number | null;
   maxCharCount?: number | null;
-  assetFilter?: string | null;
+  minAssetCount?: number | null;
+  maxAssetCount?: number | null;
+  minFileSizeBytes?: number | null;
+  maxFileSizeBytes?: number | null;
+  assetFilter?: LibraryAssetFilter | null;
+  seriesFilter?: LibrarySeriesFilter | null;
+  revisionFilter?: LibraryRevisionFilter | null;
+  editFilter?: LibraryEditFilter | null;
+  coverFilter?: LibraryCoverFilter | null;
+  dateField?: LibraryDateField | null;
+  dateFrom?: string | null;
+  dateTo?: string | null;
   watchFilter?: LibraryWatchFilter | null;
   personSource?: string | null;
   personKey?: string | null;
@@ -513,6 +548,7 @@ export interface SearchV2Params {
   viewMode?: LibraryViewMode;
   projection?: LibraryProjection | null;
   searchMode?: LibrarySearchMode | null;
+  versionScope?: LibraryVersionScope | null;
 }
 
 export interface SearchV2Result {
