@@ -10,12 +10,22 @@ import { cancelContentTransition } from "@/lib/contentTransition";
  * a filter, a sort - must not move the page at all.
  */
 export type NavigationType = "push" | "replace" | "pop";
+export type NavigationScrollPolicy = "auto" | "top" | "preserve";
+
+export interface NavigationOptions {
+  replace?: boolean;
+  /** Override the destination's default scroll handling. */
+  scroll?: Exclude<NavigationScrollPolicy, "auto">;
+}
 
 interface RouterValue {
   pathname: string;
   search: string;
   searchParams: URLSearchParams;
   navigationType: NavigationType;
+  navigationScroll: NavigationScrollPolicy;
+  /** Distinguishes repeated commands that intentionally keep the same URL. */
+  navigationId: number;
   /**
    * Where this entry sits in the session's history.
    *
@@ -29,7 +39,7 @@ interface RouterValue {
   canGoForward: boolean;
   /** The address one step back, when this session is what put it there. */
   previousEntry: string | null;
-  navigate: (target: string | number, options?: { replace?: boolean }) => void;
+  navigate: (target: string | number, options?: NavigationOptions) => void;
 }
 
 const RouterContext = createContext<RouterValue | null>(null);
@@ -69,6 +79,8 @@ export function AppRouter({ children, confirmNavigation }: AppRouterProps) {
   const [location, setLocation] = useState(() => ({
     ...readLocation(),
     navigationType: "push" as NavigationType,
+    navigationScroll: "auto" as NavigationScrollPolicy,
+    navigationId: 0,
     index: readHistoryIndex() ?? 0,
   }));
   const locationRef = useRef(location);
@@ -94,20 +106,24 @@ export function AppRouter({ children, confirmNavigation }: AppRouterProps) {
     decision: boolean | null;
   } | null>(null);
   const indexRef = useRef(location.index);
+  const navigationIdRef = useRef(location.navigationId);
   /** The furthest entry reached, which is where "forward" runs out. */
   const furthestRef = useRef(location.index);
   /** What each entry is showing, so a "back to X" control can tell whether back is X. */
   const entriesRef = useRef(new Map<number, string>([[location.index, `${location.pathname}${location.search}`]]));
   // One history step can raise both hashchange and popstate. Without this the
   // second delivery re-runs the navigation and restores the wrong position.
-  const lastHandledHref = useRef<string | null>(null);
+  // A URL is not a history entry's identity. A route-changing replace can leave
+  // two adjacent entries showing the same URL, and Back still has to deliver
+  // the earlier one's index (and scroll position).
+  const lastHandledEntry = useRef<{ href: string; index: number } | null>(null);
   useEffect(() => {
     if (!window.location.hash) {
       window.history.replaceState({ [HISTORY_INDEX_KEY]: indexRef.current }, "", `${window.location.pathname}${window.location.search}#/`);
     } else if (readHistoryIndex() === null) {
       stampHistoryIndex(indexRef.current);
     }
-    lastHandledHref.current = window.location.href;
+    lastHandledEntry.current = { href: window.location.href, index: readHistoryIndex() ?? indexRef.current };
     // pushState raises neither event, so everything arriving here is the user's
     // own back or forward - or an address from outside the app, which lands
     // after the current entry and discards whatever was ahead of it.
@@ -120,7 +136,7 @@ export function AppRouter({ children, confirmNavigation }: AppRouterProps) {
       // location change as a transition so React keeps the already-painted
       // screen in place instead of replacing it with the route fallback for a
       // frame or two.
-      setNextLocation({ ...next, navigationType: "pop", index });
+      setNextLocation({ ...next, navigationType: "pop", navigationScroll: "auto", navigationId: ++navigationIdRef.current, index });
     };
     const finishPendingPop = () => {
       const pending = pendingPopRef.current;
@@ -150,7 +166,7 @@ export function AppRouter({ children, confirmNavigation }: AppRouterProps) {
           // rendering. `href` can equal lastHandledHref here, so this must run
           // before the duplicate hashchange/popstate check below.
           pending.rollbackComplete = true;
-          lastHandledHref.current = href;
+          lastHandledEntry.current = { href, index };
           finishPendingPop();
           return;
         }
@@ -159,11 +175,11 @@ export function AppRouter({ children, confirmNavigation }: AppRouterProps) {
         if (index === pending.toIndex) return;
       }
 
-      if (lastHandledHref.current === href) return;
+      if (lastHandledEntry.current?.href === href && lastHandledEntry.current.index === index) return;
 
       if (authorizedPopIndexRef.current === index) {
         authorizedPopIndexRef.current = null;
-        lastHandledHref.current = href;
+        lastHandledEntry.current = { href, index };
         applyPop(index);
         return;
       }
@@ -171,9 +187,9 @@ export function AppRouter({ children, confirmNavigation }: AppRouterProps) {
       const confirm = confirmNavigationRef.current;
       if (hasUnsavedWork("navigate") && confirm) {
         const fromIndex = indexRef.current;
-        const fromHref = lastHandledHref.current;
+        const fromEntry = lastHandledEntry.current;
         const rollback = fromIndex - index;
-        if (fromHref && rollback !== 0 && !confirmationPending.current) {
+        if (fromEntry && rollback !== 0 && !confirmationPending.current) {
           confirmationPending.current = true;
           const toIndex = index;
           // The browser has already moved. Put the current app route back
@@ -204,14 +220,14 @@ export function AppRouter({ children, confirmNavigation }: AppRouterProps) {
         }
       }
 
-      lastHandledHref.current = href;
+      lastHandledEntry.current = { href, index };
       applyPop(index);
     };
     window.addEventListener("hashchange", update);
     window.addEventListener("popstate", update);
     return () => { window.removeEventListener("hashchange", update); window.removeEventListener("popstate", update); };
   }, [setNextLocation]);
-  const commitNavigation = useCallback((target: string | number, options?: { replace?: boolean }) => {
+  const commitNavigation = useCallback((target: string | number, options?: NavigationOptions) => {
     if (typeof target === "number") {
       authorizedPopIndexRef.current = indexRef.current + target;
       window.history.go(target);
@@ -221,9 +237,9 @@ export function AppRouter({ children, confirmNavigation }: AppRouterProps) {
     const href = `${window.location.pathname}${window.location.search}#${next}`;
     if (options?.replace) {
       window.history.replaceState({ [HISTORY_INDEX_KEY]: indexRef.current }, "", href);
-      lastHandledHref.current = window.location.href;
+      lastHandledEntry.current = { href: window.location.href, index: indexRef.current };
       entriesRef.current.set(indexRef.current, next);
-      setNextLocation({ ...readLocation(), navigationType: "replace", index: indexRef.current });
+      setNextLocation({ ...readLocation(), navigationType: "replace", navigationScroll: options.scroll ?? "auto", navigationId: ++navigationIdRef.current, index: indexRef.current });
     } else if (`#${next}` !== window.location.hash) {
       // pushState rather than assigning the hash: an assigned entry carries no
       // state, so nothing distinguishes it from the one before it afterwards.
@@ -234,15 +250,24 @@ export function AppRouter({ children, confirmNavigation }: AppRouterProps) {
       furthestRef.current = index;
       for (const known of [...entriesRef.current.keys()]) if (known > index) entriesRef.current.delete(known);
       entriesRef.current.set(index, next);
-      lastHandledHref.current = window.location.href;
-      setNextLocation({ ...readLocation(), navigationType: "push", index });
+      lastHandledEntry.current = { href: window.location.href, index };
+      setNextLocation({ ...readLocation(), navigationType: "push", navigationScroll: options?.scroll ?? "auto", navigationId: ++navigationIdRef.current, index });
+    } else if (options?.scroll === "top") {
+      // Selecting the active shelf or choosing the current screen in Spotlight
+      // is still an explicit "take me to its beginning" command. Do not add a
+      // duplicate history entry, but do emit a fresh navigation operation so
+      // scroll restoration can honour repeated presses as well.
+      setNextLocation({ ...readLocation(), navigationType: "replace", navigationScroll: "top", navigationId: ++navigationIdRef.current, index: indexRef.current });
     }
   }, [setNextLocation]);
-  const navigate = useCallback((target: string | number, options?: { replace?: boolean }) => {
+  const navigate = useCallback((target: string | number, options?: NavigationOptions) => {
     if (target === 0) return;
     if (typeof target === "string") {
       const next = target.startsWith("/") ? target : `/${target}`;
-      if (`#${next}` === window.location.hash) return;
+      if (`#${next}` === window.location.hash) {
+        if (options?.scroll === "top") commitNavigation(target, options);
+        return;
+      }
     }
     if (!hasUnsavedWork("navigate") || !confirmNavigation) {
       commitNavigation(target, options);
@@ -262,6 +287,8 @@ export function AppRouter({ children, confirmNavigation }: AppRouterProps) {
     search: location.search,
     searchParams: new URLSearchParams(location.search),
     navigationType: location.navigationType,
+    navigationScroll: location.navigationScroll,
+    navigationId: location.navigationId,
     historyIndex: location.index,
     canGoBack: location.index > 0,
     canGoForward: location.index < furthestRef.current,

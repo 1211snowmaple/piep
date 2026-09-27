@@ -4,7 +4,7 @@ import { useLocalStorage } from "@mantine/hooks";
 import { useQuery } from "@tanstack/react-query";
 import { Icons, IconSize, type LucideIcon } from "@/lib/icons";
 import { ProviderGlyph } from "@/lib/providers";
-import { useAppNavigate, useAppRouter } from "@/app/router";
+import { useAppNavigate, useAppRouter, type NavigationOptions } from "@/app/router";
 import { useWorkspace } from "@/app/WorkspaceContext";
 import { useOperationJobs } from "@/features/jobs/operationJobs";
 import { countActiveActivities } from "@/features/jobs/activityAggregation";
@@ -126,8 +126,8 @@ export function WorkspaceNav({ railed, onNavigate }: { railed: boolean; onNaviga
     staleTime: 60_000,
   });
 
-  const go = (path: string) => {
-    navigate(path);
+  const go = (path: string, options?: NavigationOptions) => {
+    navigate(path, options);
     onNavigate?.();
   };
   const toggle = (id: GroupId, open: boolean) => setOpenGroups((current) => ({ ...(current ?? DEFAULT_OPEN), [id]: open }));
@@ -160,7 +160,7 @@ export function WorkspaceNav({ railed, onNavigate }: { railed: boolean; onNaviga
       active={shelf === item.value}
       railed={railed}
       count={shelfCount(item.value)}
-      onSelect={() => go(item.search ? `/library?${item.search}` : "/library")}
+      onSelect={() => go(item.search ? `/library?${item.search}` : "/library", { scroll: "top" })}
     />
   ));
   const savedRows = saved.map((item) => (
@@ -173,7 +173,7 @@ export function WorkspaceNav({ railed, onNavigate }: { railed: boolean; onNaviga
       glyph={railed ? <SavedSearchMark name={item.name} /> : undefined}
       active={activeSavedId === item.id}
       railed={railed}
-      onSelect={() => go(`/library?saved=${item.id}`)}
+      onSelect={() => go(`/library?saved=${item.id}`, { scroll: "top" })}
     />
   ));
   const collectRows = [

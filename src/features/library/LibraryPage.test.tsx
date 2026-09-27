@@ -12,6 +12,7 @@ import LibraryPage, { parseSavedParams, resolveSortBy, rollbackWorkFlag, searchS
 
 describe("LibraryPage search", () => {
   beforeAll(() => {
+    Element.prototype.scrollIntoView = () => {};
     const values = new Map<string, string>();
     Object.defineProperty(window, "localStorage", {
       configurable: true,
@@ -47,7 +48,7 @@ describe("LibraryPage search", () => {
     // results can be reordered by any library column.
     const sort = screen.getByRole("combobox", { name: "並び順" });
     expect(sort).toBeEnabled();
-    expect(sort).toHaveValue("関連度が高い順");
+    expect(sort).toHaveValue("関連度：高い順");
   });
 
   /**
@@ -84,13 +85,13 @@ describe("LibraryPage search", () => {
     render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
 
     const sort = await screen.findByRole("combobox", { name: "並び順" });
-    expect(sort).toHaveValue("タイトル昇順（あ→ん）");
+    expect(sort).toHaveValue("タイトル：昇順（あ→ん）");
 
     const input = screen.getByLabelText("ライブラリを検索");
     fireEvent.change(input, { target: { value: "" } });
     await waitFor(() => expect(window.location.hash).not.toContain("q="), { timeout: 1500 });
     // Relevance has no meaning without a query, but an explicit column sort does.
-    expect(screen.getByRole("combobox", { name: "並び順" })).toHaveValue("タイトル昇順（あ→ん）");
+    expect(screen.getByRole("combobox", { name: "並び順" })).toHaveValue("タイトル：昇順（あ→ん）");
   });
 
   it("falls back from relevance to the saved-date order when the query is cleared", async () => {
@@ -98,10 +99,227 @@ describe("LibraryPage search", () => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
 
-    expect(await screen.findByRole("combobox", { name: "並び順" })).toHaveValue("関連度が高い順");
+    expect(await screen.findByRole("combobox", { name: "並び順" })).toHaveValue("関連度：高い順");
     fireEvent.change(screen.getByLabelText("ライブラリを検索"), { target: { value: "" } });
     await waitFor(() => expect(window.location.hash).not.toContain("q="), { timeout: 1500 });
-    expect(screen.getByRole("combobox", { name: "並び順" })).toHaveValue("保存が新しい順");
+    expect(screen.getByRole("combobox", { name: "並び順" })).toHaveValue("保存日：新しい順");
+  });
+
+  it("offers every useful work sort in both directions and sends the chosen order to search", async () => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
+
+    const sort = await screen.findByRole("combobox", { name: "並び順" });
+    fireEvent.click(sort);
+    expect(await screen.findByRole("option", { name: "公開日：古い順", hidden: true })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "版番号：大きい順", hidden: true })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "容量：小さい順", hidden: true })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("option", { name: "添付数：少ない順", hidden: true }));
+
+    await waitFor(() => {
+      const query = new URLSearchParams(window.location.hash.split("?")[1] ?? "");
+      expect(query.get("sort")).toBe("asset_count");
+      expect(query.get("order")).toBe("asc");
+    });
+    await waitFor(() => {
+      const query = client.getQueryCache().findAll({ queryKey: ["library"] })
+        .find((item) => {
+          const params = item.queryKey[1] as SearchV2Params | undefined;
+          return params?.sortBy === "asset_count" && params.sortOrder === "asc";
+        });
+      expect(query).toBeDefined();
+    });
+  });
+
+  it("lets an explicit shared sort keep its natural direction over this device's preference", async () => {
+    window.localStorage.setItem("piep.library-sort", JSON.stringify("title"));
+    window.localStorage.setItem("piep.library-sort-order", JSON.stringify("desc"));
+    window.location.hash = "#/library?sort=title";
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
+
+    expect(await screen.findByRole("combobox", { name: "並び順" })).toHaveValue("タイトル：昇順（あ→ん）");
+  });
+
+  it("offers both directions for collection sorting and records the direction in the URL", async () => {
+    window.location.hash = "#/library?tab=collections";
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
+
+    const sort = await screen.findByRole("combobox", { name: "並び順" });
+    fireEvent.click(sort);
+    expect(await screen.findByRole("option", { name: "作成日：古い順", hidden: true })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "名前：降順（ん→あ）", hidden: true })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "更新回数：多い順", hidden: true })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("option", { name: "登録作品数：少ない順", hidden: true }));
+
+    await waitFor(() => {
+      const query = new URLSearchParams(window.location.hash.split("?")[1] ?? "");
+      expect(query.get("csort")).toBe("member_count");
+      expect(query.get("corder")).toBe("asc");
+    });
+    expect(screen.getByRole("button", { name: "保存した検索" })).toBeVisible();
+  });
+
+  it("restores a saved collection ordering and clears hidden sorts from other tabs", async () => {
+    window.location.hash = "#/library?tab=people&saved=41&ewatch=watched&emin=8&edone=1&esort=name&eorder=asc&csort=name&corder=asc&sort=title&order=desc";
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    client.setQueryData(["saved-searches"], [{
+      id: 41,
+      name: "更新の多いコレクション",
+      query: null,
+      paramsJson: JSON.stringify({
+        tab: "collections",
+        filters: {},
+        collectionSortBy: "revision",
+        collectionSortOrder: "asc",
+      }),
+      createdAt: "2026-01-01T00:00:00Z",
+      updatedAt: "2026-01-01T00:00:00Z",
+    }]);
+    render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
+
+    await waitFor(() => {
+      const query = new URLSearchParams(window.location.hash.split("?")[1] ?? "");
+      expect(query.get("tab")).toBe("collections");
+      expect(query.get("csort")).toBe("revision");
+      expect(query.get("corder")).toBe("asc");
+      expect(query.has("esort")).toBe(false);
+      expect(query.has("eorder")).toBe(false);
+      expect(query.has("ewatch")).toBe(false);
+      expect(query.has("emin")).toBe(false);
+      expect(query.has("edone")).toBe(false);
+      expect(query.has("sort")).toBe(false);
+      expect(query.has("order")).toBe(false);
+    });
+    expect(screen.getByRole("combobox", { name: "並び順" })).toHaveValue("更新回数：少ない順");
+  });
+
+  it("restores a saved membership shelf exactly and clears the shelf it replaces", async () => {
+    window.location.hash = "#/library?saved=43&revised=1";
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    client.setQueryData(["saved-searches"], [{
+      id: 43,
+      name: "読みかけの長編",
+      query: null,
+      paramsJson: JSON.stringify({
+        tab: "works",
+        filters: { minChars: 10_000 },
+        membershipShelf: "reading",
+      }),
+      createdAt: "2026-01-01T00:00:00Z",
+      updatedAt: "2026-01-01T00:00:00Z",
+    }]);
+    render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
+
+    await waitFor(() => {
+      const query = new URLSearchParams(window.location.hash.split("?")[1] ?? "");
+      expect(query.get("shelf")).toBe("reading");
+      expect(query.has("revised")).toBe(false);
+      expect(query.get("minchars")).toBe("10000");
+      expect(query.get("saved")).toBe("43");
+    });
+  });
+
+  it("does not advertise retained work or series-only filters on collections and people", async () => {
+    window.location.hash = "#/library?tab=collections&favorite=1&edone=1";
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const view = render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
+    await screen.findByRole("combobox", { name: "並び順" });
+    expect(screen.queryByText("適用中")).not.toBeInTheDocument();
+
+    view.unmount();
+    window.location.hash = "#/library?tab=people&edone=1";
+    render(<MantineProvider><QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
+    await screen.findByRole("combobox", { name: "並び順" });
+    expect(screen.queryByText("適用中")).not.toBeInTheDocument();
+  });
+
+  it("restores saved entity scope and ordering without carrying a collection sort", async () => {
+    window.location.hash = "#/library?tab=series&saved=42&csort=name&corder=desc&esort=name&eorder=desc&ewatch=watched&emin=9&edone=1";
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    client.setQueryData(["saved-searches"], [{
+      id: 42,
+      name: "停止中の短いシリーズ",
+      query: null,
+      paramsJson: JSON.stringify({
+        tab: "series",
+        filters: {},
+        entityScope: { watch: "paused", minWorkCount: 3, concluded: false },
+        entitySortBy: "asset_count",
+        entitySortOrder: "asc",
+      }),
+      createdAt: "2026-01-01T00:00:00Z",
+      updatedAt: "2026-01-01T00:00:00Z",
+    }]);
+    render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
+
+    await waitFor(() => {
+      const query = new URLSearchParams(window.location.hash.split("?")[1] ?? "");
+      expect(query.get("tab")).toBe("series");
+      expect(query.get("ewatch")).toBe("paused");
+      expect(query.get("emin")).toBe("3");
+      expect(query.get("edone")).toBe("0");
+      expect(query.get("esort")).toBe("asset_count");
+      expect(query.get("eorder")).toBe("asc");
+      expect(query.has("csort")).toBe(false);
+      expect(query.has("corder")).toBe(false);
+    });
+    expect(screen.getByRole("combobox", { name: "並び順" })).toHaveValue("合計添付数：少ない順");
+  });
+
+  it("does not fetch a hidden series listing while the collections tab is open", async () => {
+    window.location.hash = "#/library?tab=collections&q=%E5%A4%9C";
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
+
+    await screen.findByRole("tab", { name: "コレクション" });
+    const hiddenQueries = [
+      ...client.getQueryCache().findAll({ queryKey: ["library-entities"] }),
+      ...client.getQueryCache().findAll({ queryKey: ["library-entity-count"] }),
+      ...client.getQueryCache().findAll({ queryKey: ["update-targets", "library"] }),
+    ];
+    expect(hiddenQueries.every((query) => query.state.fetchStatus === "idle" && query.state.data === undefined)).toBe(true);
+  });
+
+  it("keeps the revised shelf in a loading state until its membership is known", async () => {
+    window.location.hash = "#/library?revised=1";
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    let finishMembership!: (value: []) => void;
+    const membership = new Promise<[]>((resolve) => { finishMembership = resolve; });
+    void client.fetchQuery({ queryKey: ["pending-revisions"], queryFn: () => membership });
+    const view = render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
+    try {
+      expect(await screen.findByText("改稿のある作品を確認しています")).toBeInTheDocument();
+      expect(screen.queryByText("一致する作品がありません")).toBeNull();
+    } finally {
+      view.unmount();
+      finishMembership([]);
+    }
+  });
+
+  it("makes saved revision search an explicit URL-owned scope", async () => {
+    window.location.hash = "#/library?q=%E6%94%B9%E7%A8%BF";
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
+
+    expect(await screen.findByRole("button", { name: "絞り込み" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "検索対象: 現在版だけ" })).toBeNull();
+    expect(screen.getByLabelText("ライブラリを検索")).toHaveAttribute("placeholder", "タイトル、作者、タグ、本文を検索");
+    fireEvent.click(screen.getByRole("button", { name: "絞り込み" }));
+    const spotlight = await screen.findByRole("dialog", { name: "詳細フィルター" });
+    fireEvent.click(within(spotlight).getByRole("tab", { name: /^状態/ }));
+    fireEvent.click(within(spotlight).getByRole("radio", { name: "過去版も含む" }));
+    fireEvent.click(within(spotlight).getByRole("button", { name: "適用" }));
+
+    await waitFor(() => expect(window.location.hash).toContain("versions=all"));
+    expect(screen.getByText("検索対象: 過去版も")).toBeInTheDocument();
+    expect(screen.getByLabelText("ライブラリを検索")).toHaveAttribute("placeholder", "現在版と過去版を検索");
+    await waitFor(() => {
+      const query = client.getQueryCache().findAll({ queryKey: ["library"] })
+        .find((item) => (item.queryKey[1] as SearchV2Params | undefined)?.versionScope === "all");
+      expect(query).toBeDefined();
+    });
   });
 
   it("normalizes unsupported URL and persisted values instead of entering an invalid view", async () => {
@@ -112,7 +330,7 @@ describe("LibraryPage search", () => {
     render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
 
     expect(await screen.findByRole("tab", { name: "作品" })).toHaveAttribute("aria-selected", "true");
-    expect(screen.getByRole("combobox", { name: "並び順" })).toHaveValue("保存が新しい順");
+    expect(screen.getByRole("combobox", { name: "並び順" })).toHaveValue("保存日：新しい順");
     expect(screen.getByRole("radiogroup", { name: "表示形式" })).toBeInTheDocument();
     expect(screen.getByLabelText("ギャラリー表示")).toBeInTheDocument();
   });
@@ -172,7 +390,7 @@ describe("LibraryPage search", () => {
       const query = window.location.hash.split("?")[1] ?? "";
       expect(new URLSearchParams(query).getAll("author")).toEqual(["青葉しおり"]);
     });
-    expect(await screen.findByText("作者: 青葉しおり")).toBeInTheDocument();
+    expect((await screen.findAllByText("作者: 青葉しおり")).length).toBeGreaterThan(0);
   });
 
   it("names the page and every button in the filter spotlight", async () => {
@@ -193,20 +411,55 @@ describe("LibraryPage search", () => {
     fireEvent.click(await screen.findByRole("button", { name: "絞り込み" }));
     const spotlight = await screen.findByRole("dialog", { name: "詳細フィルター" });
     expect(within(spotlight).getByRole("textbox", { name: "条件を検索" })).toBeInTheDocument();
+    expect(within(spotlight).queryByText("作者・タグは名前の一致で検索")).toBeNull();
+    expect(within(spotlight).queryByText(/選択済みの条件は下部に表示/)).toBeNull();
     const sectionTabs = within(spotlight).getByRole("tablist", { name: "フィルターの種類" });
     expect(within(sectionTabs).getByRole("tab", { name: /^基本/ })).toBeInTheDocument();
+    expect(within(sectionTabs).getByRole("tab", { name: /^状態/ })).toBeInTheDocument();
     expect(within(sectionTabs).getByRole("tab", { name: /^作者/ })).toHaveAttribute("aria-selected", "true");
     expect(within(sectionTabs).getByRole("tab", { name: /^タグ/ })).toBeInTheDocument();
-    expect(within(sectionTabs).getByRole("tab", { name: /^文字数/ })).toBeInTheDocument();
+    expect(within(sectionTabs).getByRole("tab", { name: /^日付/ })).toBeInTheDocument();
+    expect(within(sectionTabs).getByRole("tab", { name: /^内容・ファイル/ })).toBeInTheDocument();
 
     fireEvent.click(within(sectionTabs).getByRole("tab", { name: /^基本/ }));
     expect(within(spotlight).getByRole("checkbox", { name: "pixiv" })).toBeInTheDocument();
+    fireEvent.click(within(sectionTabs).getByRole("tab", { name: /^状態/ }));
+    expect(within(spotlight).getByRole("radiogroup", { name: "全文検索の対象" })).toBeInTheDocument();
+    expect(within(spotlight).getByRole("combobox", { name: "改稿状態" })).toBeInTheDocument();
+    expect(within(spotlight).getByRole("combobox", { name: "ローカル編集" })).toBeInTheDocument();
+    expect(within(spotlight).getByRole("combobox", { name: "表紙" })).toBeInTheDocument();
     fireEvent.click(within(sectionTabs).getByRole("tab", { name: /^タグ/ }));
-    expect(within(spotlight).getByRole("region", { name: "含めるタグ" })).toBeInTheDocument();
+    expect(within(spotlight).getAllByRole("button", { name: /を含めるタグへ追加/ }).length).toBeGreaterThan(0);
     expect(within(spotlight).getByRole("radiogroup", { name: "複数タグの条件" })).toBeInTheDocument();
-    fireEvent.click(within(sectionTabs).getByRole("tab", { name: /^文字数/ }));
+    expect(within(spotlight).queryByRole("radiogroup", { name: "検索結果の追加先" })).toBeNull();
+    fireEvent.click(within(sectionTabs).getByRole("tab", { name: /^日付/ }));
+    expect(within(spotlight).getByLabelText("開始日")).toBeInTheDocument();
+    fireEvent.click(within(sectionTabs).getByRole("tab", { name: /^内容・ファイル/ }));
     expect(within(spotlight).getByRole("textbox", { name: "最小文字数" })).toBeInTheDocument();
+    expect(within(spotlight).getByRole("combobox", { name: "添付ファイル" })).toBeInTheDocument();
+    expect(within(spotlight).getByRole("textbox", { name: "最小添付数" })).toBeInTheDocument();
+    expect(within(spotlight).getByRole("textbox", { name: "最小容量" })).toBeInTheDocument();
     expect(within(spotlight).queryByText(/本文の意味が似ている/)).toBeNull();
+  });
+
+  it("keeps included and excluded facets visible while moving between filter sections", async () => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
+
+    fireEvent.click(await screen.findByRole("button", { name: "絞り込み" }));
+    const spotlight = await screen.findByRole("dialog", { name: "詳細フィルター" });
+    fireEvent.click(await within(spotlight).findByRole("button", { name: "青葉しおりを含める作者へ追加" }));
+    fireEvent.click(within(spotlight).getByRole("button", { name: "遠野つむぎを除外する作者へ追加" }));
+    fireEvent.click(within(spotlight).getByRole("tab", { name: /^内容・ファイル/ }));
+
+    const included = within(spotlight).getByRole("region", { name: "含める条件" });
+    const excluded = within(spotlight).getByRole("region", { name: "除外する条件" });
+    expect(within(included).getByText("作者: 青葉しおり")).toBeInTheDocument();
+    expect(within(excluded).getByText("作者: 遠野つむぎ")).toBeInTheDocument();
+
+    fireEvent.click(within(included).getByRole("button", { name: "作者: 青葉しおりを解除" }));
+    expect(within(included).queryByText("作者: 青葉しおり")).toBeNull();
+    expect(within(excluded).getByText("作者: 遠野つむぎ")).toBeInTheDocument();
   });
 
   it("offers the paging switch beside the count, not only past the end", async () => {
@@ -233,7 +486,7 @@ describe("LibraryPage search", () => {
     const spotlight = await screen.findByRole("dialog", { name: "詳細フィルター" });
     fireEvent.click(within(spotlight).getByRole("tab", { name: /^基本/ }));
     fireEvent.click(await screen.findByRole("checkbox", { name: "pixiv" }));
-    fireEvent.click(within(spotlight).getByRole("tab", { name: /^文字数/ }));
+    fireEvent.click(within(spotlight).getByRole("tab", { name: /^内容・ファイル/ }));
     fireEvent.change(screen.getByRole("textbox", { name: "最小文字数" }), { target: { value: "5000" } });
     fireEvent.click(screen.getByRole("button", { name: "適用" }));
 
@@ -242,22 +495,55 @@ describe("LibraryPage search", () => {
   });
 
   it("restores the drawer's filters when history returns to them", async () => {
-    window.location.hash = "#/library?source=pixiv&tag=%E5%89%B5%E4%BD%9C&minchars=5000";
+    window.location.hash = "#/library?source=pixiv&tag=%E5%89%B5%E4%BD%9C&minchars=5000&minassets=2&maxassets=20&minsizemb=1.5&maxsizemb=50&assets=has_images&seriesmode=in_series&revision=revised&localedit=edited&cover=has_cover&versions=all&datefield=source_updated_at&datefrom=2026-01-01&dateto=2026-09-01";
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
 
     expect(await screen.findByText("適用中")).toBeInTheDocument();
     expect(screen.getByText("#創作").closest(".filter-token")).toBeInTheDocument();
+    expect(screen.getByText("検索対象: 過去版も")).toBeInTheDocument();
+    expect(screen.getByText("改稿あり")).toBeInTheDocument();
+    expect(screen.getByText("ローカル編集あり")).toBeInTheDocument();
+    expect(screen.getByText("表紙あり")).toBeInTheDocument();
+    await waitFor(() => {
+      const query = client.getQueryCache().findAll({ queryKey: ["library"] })
+        .find((item) => {
+          const params = item.queryKey[1] as SearchV2Params | undefined;
+          return params?.revisionFilter === "revised"
+            && params.editFilter === "edited"
+            && params.coverFilter === "has_cover"
+            && params.minAssetCount === 2
+            && params.maxAssetCount === 20
+            && params.minFileSizeBytes === Math.round(1.5 * 1024 * 1024)
+            && params.maxFileSizeBytes === 50 * 1024 * 1024;
+        });
+      expect(query).toBeDefined();
+    });
     // And the drawer opens onto the conditions actually in force, rather than
     // an empty form that disagrees with the results behind it.
     fireEvent.click(screen.getByRole("button", { name: "絞り込み" }));
     const spotlight = await screen.findByRole("dialog", { name: "詳細フィルター" });
     fireEvent.click(within(spotlight).getByRole("tab", { name: /^基本/ }));
     expect(within(spotlight).getByRole("checkbox", { name: "pixiv" })).toBeChecked();
+    fireEvent.click(within(spotlight).getByRole("tab", { name: /^状態/ }));
+    expect(within(spotlight).getByRole("radio", { name: "過去版も含む" })).toBeChecked();
+    expect(within(spotlight).getByRole("combobox", { name: "改稿状態" })).toHaveValue("改稿あり");
+    expect(within(spotlight).getByRole("combobox", { name: "ローカル編集" })).toHaveValue("編集あり");
+    expect(within(spotlight).getByRole("combobox", { name: "表紙" })).toHaveValue("表紙あり");
     fireEvent.click(within(spotlight).getByRole("tab", { name: /^タグ/ }));
-    expect(within(within(spotlight).getByRole("region", { name: "含めるタグ" })).getByText("創作")).toBeInTheDocument();
-    fireEvent.click(within(spotlight).getByRole("tab", { name: /^文字数/ }));
+    expect(within(within(spotlight).getByRole("region", { name: "含める条件" })).getByText("#創作")).toBeInTheDocument();
+    fireEvent.click(within(spotlight).getByRole("tab", { name: /^日付/ }));
+    expect(within(spotlight).getByRole("radio", { name: "更新日" })).toBeChecked();
+    expect(within(spotlight).getByLabelText("開始日")).toHaveValue("2026-01-01");
+    expect(within(spotlight).getByLabelText("終了日")).toHaveValue("2026-09-01");
+    fireEvent.click(within(spotlight).getByRole("tab", { name: /^内容・ファイル/ }));
     expect(within(spotlight).getByRole("textbox", { name: "最小文字数" })).toHaveValue("5,000");
+    expect(within(spotlight).getByRole("textbox", { name: "最小添付数" })).toHaveValue("2");
+    expect(within(spotlight).getByRole("textbox", { name: "最大添付数" })).toHaveValue("20");
+    expect(within(spotlight).getByRole("textbox", { name: "最小容量" })).toHaveValue("1.5 MB");
+    expect(within(spotlight).getByRole("textbox", { name: "最大容量" })).toHaveValue("50 MB");
+    expect(within(spotlight).getByRole("combobox", { name: "シリーズ" })).toHaveValue("シリーズ作品");
+    expect(within(spotlight).getByRole("combobox", { name: "添付ファイル" })).toHaveValue("画像あり");
   });
 
   it("clears URL-owned watch filters during history navigation", async () => {
@@ -368,12 +654,12 @@ describe("library entity paging", () => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
 
-    expect(await screen.findByDisplayValue("名前順（あ→ん）")).toBeInTheDocument();
+    expect(await screen.findByDisplayValue("名前：昇順（あ→ん）")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("tab", { name: /シリーズ/ }));
     // 住所に残った esort を連れて行かない - 覚えてある方の並びで開く。
-    expect(await screen.findByDisplayValue("作品が多い順")).toBeInTheDocument();
+    expect(await screen.findByDisplayValue("作品数：多い順")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("tab", { name: /作者/ }));
-    expect(await screen.findByDisplayValue("名前順（あ→ん）")).toBeInTheDocument();
+    expect(await screen.findByDisplayValue("名前：昇順（あ→ん）")).toBeInTheDocument();
   });
 
   // 古い鍵で選んであった並びは、そのまま引き継ぐ。黙って既定へ戻さない。
@@ -382,7 +668,25 @@ describe("library entity paging", () => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
 
-    expect(await screen.findByDisplayValue("保存が新しい順")).toBeInTheDocument();
+    expect(await screen.findByDisplayValue("保存日：新しい順")).toBeInTheDocument();
+  });
+
+  it("applies ascending and descending directions to grouped entity lists", async () => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
+
+    const sort = await screen.findByRole("combobox", { name: "並び順" });
+    fireEvent.click(sort);
+    expect(await screen.findByRole("option", { name: "合計文字数：多い順", hidden: true })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "改稿回数：少ない順", hidden: true })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("option", { name: "作品数：少ない順", hidden: true }));
+    await waitFor(() => {
+      const query = new URLSearchParams(window.location.hash.split("?")[1] ?? "");
+      expect(query.get("esort")).toBe("work_count");
+      expect(query.get("eorder")).toBe("asc");
+    });
+    await waitFor(() => expect(client.getQueryCache().findAll({ queryKey: ["library-entities"] })
+      .some((query) => query.queryKey.includes("asc"))).toBe(true));
   });
 
   // The drawer is on screen for every tab, so it has to mean something on
@@ -433,6 +737,76 @@ describe("saved search parameters", () => {
   it("treats an ordinary search as an ordinary search", () => {
     const saved = JSON.stringify({ tab: "works", filters: {}, sortBy: "downloaded_at" });
     expect(parseSavedParams(saved).searchMode).toBeNull();
+    expect(parseSavedParams(saved).versionScope).toBe("current");
+    expect(parseSavedParams(saved).sortOrder).toBe("desc");
+  });
+
+  it("remembers the selected sort direction", () => {
+    const saved = JSON.stringify({ tab: "works", filters: {}, sortBy: "title", sortOrder: "desc" });
+    expect(parseSavedParams(saved).sortBy).toBe("title");
+    expect(parseSavedParams(saved).sortOrder).toBe("desc");
+    expect(parseSavedParams(JSON.stringify({ sortBy: "title" })).sortOrder).toBe("asc");
+  });
+
+  it("remembers when saved revisions are part of the search", () => {
+    const saved = JSON.stringify({ tab: "works", filters: {}, sortBy: "relevance", versionScope: "all" });
+    expect(parseSavedParams(saved).versionScope).toBe("all");
+  });
+
+  it("remembers membership shelves and rejects unknown shelf values", () => {
+    expect(parseSavedParams(JSON.stringify({ membershipShelf: "reading" })).membershipShelf).toBe("reading");
+    expect(parseSavedParams(JSON.stringify({ membershipShelf: "revised" })).membershipShelf).toBe("revised");
+    expect(parseSavedParams(JSON.stringify({ membershipShelf: "watched" })).membershipShelf).toBeNull();
+    expect(parseSavedParams("{ not json").membershipShelf).toBeNull();
+  });
+
+  it("remembers entity-only filters and both halves of the entity ordering", () => {
+    const saved = JSON.stringify({
+      tab: "series",
+      filters: {},
+      entityScope: { watch: "paused", minWorkCount: 4, concluded: false },
+      entitySortBy: "asset_count",
+      entitySortOrder: "asc",
+    });
+    expect(parseSavedParams(saved)).toEqual(expect.objectContaining({
+      entityScope: { watch: "paused", minWorkCount: 4, concluded: false },
+      entitySortBy: "asset_count",
+      entitySortOrder: "asc",
+    }));
+  });
+
+  it("remembers both halves of collection ordering", () => {
+    const saved = JSON.stringify({
+      tab: "collections",
+      filters: {},
+      collectionSortBy: "available_count",
+      collectionSortOrder: "asc",
+    });
+    expect(parseSavedParams(saved)).toEqual(expect.objectContaining({
+      collectionSortBy: "available_count",
+      collectionSortOrder: "asc",
+    }));
+  });
+
+  it("gives old saved searches neutral entity conditions", () => {
+    const parsed = parseSavedParams(JSON.stringify({ tab: "people", filters: {} }));
+    expect(parsed.entityScope).toEqual({ watch: null, minWorkCount: "", concluded: null });
+    expect(parsed.entitySortBy).toBe("work_count");
+    expect(parsed.entitySortOrder).toBe("desc");
+    expect(parsed.collectionSortBy).toBe("created_at");
+    expect(parsed.collectionSortOrder).toBe("desc");
+  });
+
+  it("remembers the work-state filters", () => {
+    const saved = JSON.stringify({
+      tab: "works",
+      filters: { revisionFilter: "revised", editFilter: "edited", coverFilter: "no_cover" },
+    });
+    expect(parseSavedParams(saved).filters).toEqual(expect.objectContaining({
+      revisionFilter: "revised",
+      editFilter: "edited",
+      coverFilter: "no_cover",
+    }));
   });
 
   /** 知らない値を意味検索として扱わない。壊れた保存が検索の種類を変えない。 */

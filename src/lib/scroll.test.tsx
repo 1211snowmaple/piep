@@ -79,7 +79,7 @@ describe("moving the page in response to a press", () => {
 
   it("puts the reader back once a tab's new panel has filled out", () => {
     const { region, state, resizeTo } = mountCollapsingRegion();
-    holdRegionInPlace(region);
+    const stop = holdRegionInPlace(region);
     // The panel that was open unmounts before the one being opened has its
     // rows, so the page is briefly a quarter of its height and the browser
     // clamps the offset to fit. This is the jump to the top the reader sees.
@@ -93,12 +93,60 @@ describe("moving the page in response to a press", () => {
     resizeTo(9000);
     vi.advanceTimersByTime(32);
     expect(state.top).toBe(4000);
+    stop();
   });
 
   it("leaves a page that never collapses exactly where it was", () => {
     const { region, state } = mountCollapsingRegion();
     holdRegionInPlace(region);
     vi.advanceTimersByTime(600);
+    expect(state.top).toBe(4000);
+  });
+
+  it("does not fight keyboard scrolling while focus is outside the viewport", () => {
+    const { region, state, resizeTo } = mountCollapsingRegion();
+    holdRegionInPlace(region);
+    resizeTo(3000);
+    vi.advanceTimersByTime(16);
+    expect(state.top).toBe(2200);
+
+    // The fixed Back button is outside `.app-main`. A listener on the viewport
+    // never saw this PageDown and used to pull the reader back afterwards.
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "PageDown" }));
+    resizeTo(9000);
+    vi.advanceTimersByTime(600);
+    expect(state.top).toBe(2200);
+  });
+
+  it("keeps restoring through unrelated header and keyboard interactions", () => {
+    const { region, state, resizeTo } = mountCollapsingRegion();
+    const headerButton = document.createElement("button");
+    document.body.prepend(headerButton);
+    holdRegionInPlace(region);
+    resizeTo(3000);
+    vi.advanceTimersByTime(16);
+    expect(state.top).toBe(2200);
+
+    // Opening the mobile navigation and pressing a non-scrolling key do not
+    // express any intent to move the main pane.
+    headerButton.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+    headerButton.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    resizeTo(9000);
+    vi.advanceTimersByTime(32);
+    expect(state.top).toBe(4000);
+  });
+
+  it("does not treat page keys in an editor as page scrolling", () => {
+    const { region, state, resizeTo } = mountCollapsingRegion();
+    const input = document.createElement("input");
+    document.body.prepend(input);
+    holdRegionInPlace(region);
+    resizeTo(3000);
+    vi.advanceTimersByTime(16);
+
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "PageDown", bubbles: true }));
+    resizeTo(9000);
+    vi.advanceTimersByTime(32);
     expect(state.top).toBe(4000);
   });
 

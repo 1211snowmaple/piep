@@ -156,14 +156,18 @@ describe("AppRouter", () => {
 
 describe("navigation type", () => {
   function Probe() {
-    const { navigationType, pathname } = useAppRouter();
+    const { navigationId, navigationScroll, navigationType, pathname } = useAppRouter();
     const navigate = useAppNavigate();
     return (
       <div>
         <span data-testid="type">{navigationType}</span>
+        <span data-testid="scroll-policy">{navigationScroll}</span>
+        <span data-testid="navigation-id">{navigationId}</span>
         <span data-testid="path">{pathname}</span>
         <button type="button" onClick={() => navigate("/library")}>push</button>
         <button type="button" onClick={() => navigate("/library?tab=people", { replace: true })}>replace</button>
+        <button type="button" onClick={() => navigate("/library?favorite=1", { scroll: "top" })}>new listing</button>
+        <button type="button" onClick={() => navigate("/library", { scroll: "top" })}>active listing</button>
       </div>
     );
   }
@@ -180,24 +184,48 @@ describe("navigation type", () => {
     fireEvent.click(screen.getByRole("button", { name: "push" }));
     await waitFor(() => expect(screen.getByTestId("path")).toHaveTextContent("/library"));
     expect(screen.getByTestId("type")).toHaveTextContent("push");
+    expect(screen.getByTestId("scroll-policy")).toHaveTextContent("auto");
 
     fireEvent.click(screen.getByRole("button", { name: "replace" }));
     await waitFor(() => expect(screen.getByTestId("type")).toHaveTextContent("replace"));
+
+    fireEvent.click(screen.getByRole("button", { name: "new listing" }));
+    await waitFor(() => expect(screen.getByTestId("type")).toHaveTextContent("push"));
+    expect(screen.getByTestId("scroll-policy")).toHaveTextContent("top");
 
     // A hash change the app did not make is the user's back or forward button.
     window.location.hash = "#/";
     window.dispatchEvent(new HashChangeEvent("hashchange"));
     await waitFor(() => expect(screen.getByTestId("type")).toHaveTextContent("pop"));
+    expect(screen.getByTestId("scroll-policy")).toHaveTextContent("auto");
+  });
+
+  it("emits repeated top commands without adding a duplicate history entry", async () => {
+    window.location.hash = "#/library";
+    render(<AppRouter><Probe /></AppRouter>);
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+
+    const initialId = Number(screen.getByTestId("navigation-id").textContent);
+    fireEvent.click(screen.getByRole("button", { name: "active listing" }));
+    await waitFor(() => expect(Number(screen.getByTestId("navigation-id").textContent)).toBeGreaterThan(initialId));
+    expect(screen.getByTestId("type")).toHaveTextContent("replace");
+    expect(screen.getByTestId("scroll-policy")).toHaveTextContent("top");
+
+    const firstId = Number(screen.getByTestId("navigation-id").textContent);
+    fireEvent.click(screen.getByRole("button", { name: "active listing" }));
+    await waitFor(() => expect(Number(screen.getByTestId("navigation-id").textContent)).toBeGreaterThan(firstId));
+    expect(window.location.hash).toBe("#/library");
   });
 });
 
 describe("history position", () => {
   function Probe() {
-    const { canGoBack, canGoForward, historyIndex, previousEntry } = useAppRouter();
+    const { canGoBack, canGoForward, historyIndex, pathname, previousEntry } = useAppRouter();
     const navigate = useAppNavigate();
     return (
       <div>
         <span data-testid="index">{historyIndex}</span>
+        <span data-testid="path">{pathname}</span>
         <span data-testid="back">{String(canGoBack)}</span>
         <span data-testid="forward">{String(canGoForward)}</span>
         <span data-testid="previous">{previousEntry ?? "none"}</span>
@@ -239,4 +267,30 @@ describe("history position", () => {
     fireEvent.click(screen.getByRole("button", { name: "reader" }));
     await waitFor(() => expect(screen.getByTestId("previous")).toHaveTextContent("/works/7"));
   });
+
+  it("handles a pop between different entries that have the same address", async () => {
+    window.location.hash = "#/library";
+    window.history.replaceState({ piepHistoryIndex: 0 }, "", window.location.href);
+    render(<AppRouter><Probe /></AppRouter>);
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+
+    fireEvent.click(screen.getByRole("button", { name: "work" }));
+    await waitFor(() => expect(screen.getByTestId("index")).toHaveTextContent("1"));
+
+    // A route-changing replace can make the current entry display the same URL
+    // as the entry behind it. The two pop deliveries are distinct by index even
+    // though comparing href alone says that nothing changed.
+    act(() => {
+      window.history.replaceState({ piepHistoryIndex: 1 }, "", window.location.href.replace("#/works/7", "#/library"));
+      window.dispatchEvent(new PopStateEvent("popstate", { state: { piepHistoryIndex: 1 } }));
+    });
+    await waitFor(() => expect(screen.getByTestId("path")).toHaveTextContent("/library"));
+
+    act(() => {
+      window.history.replaceState({ piepHistoryIndex: 0 }, "", window.location.href);
+      window.dispatchEvent(new PopStateEvent("popstate", { state: { piepHistoryIndex: 0 } }));
+    });
+    await waitFor(() => expect(screen.getByTestId("index")).toHaveTextContent("0"));
+  });
+
 });

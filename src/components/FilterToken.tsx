@@ -25,7 +25,7 @@ export function FilterToken({
       data-tone={tone}
       withRemoveButton
       onRemove={onRemove}
-      removeButtonProps={{ "aria-label": `${label}を解除` }}
+      removeButtonProps={{ "aria-label": `${label}を解除`, "aria-hidden": false, tabIndex: 0 }}
     >
       {label}
     </Pill>

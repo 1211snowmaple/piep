@@ -32,7 +32,7 @@ import { modals } from "@mantine/modals";
 import { notifications } from "@mantine/notifications";
 import { keepPreviousData, useInfiniteQuery, useMutation, useQuery, useQueryClient, type InfiniteData } from "@tanstack/react-query";
 import { Icons, IconSize } from "@/lib/icons";
-import { useAppNavigate, useAppSearchParams } from "@/app/router";
+import { useAppNavigate, useAppRouter, useAppSearchParams } from "@/app/router";
 import { useWorkspace } from "@/app/WorkspaceContext";
 import { EmptyState, ErrorState, LoadingState } from "@/components/AsyncState";
 import { ListPager, PagingModeToggle, useBoundedNumberedPage, usePageSize, usePagingMode, type PagingScope } from "@/components/ListPager";
@@ -40,7 +40,7 @@ import { ScrollToTop } from "@/components/ScrollToTop";
 import { demoFacets, searchDemoWorks } from "@/mocks/demoData";
 import { errorMessage, formatNumber } from "@/lib/format";
 import { ProviderMark } from "@/lib/providers";
-import { scrollViewportToTop } from "@/lib/scroll";
+import { listenForScrollIntent, scrollViewportToTop } from "@/lib/scroll";
 import { VirtualizedWorkList } from "@/features/library/VirtualizedWorkList";
 import { MotionTabs as Tabs } from "@/components/MotionTabs";
 import { parseViewMode, useViewMode } from "@/lib/viewMode";
@@ -54,7 +54,7 @@ import { usePageAssist } from "@/app/PageAssistContext";
 import { FilterToken } from "@/components/FilterToken";
 import { AddToCollectionModal } from "@/features/collections/AddToCollectionModal";
 import { NamedWorkList } from "@/components/NamedWorkList";
-import { CollectionsPanel, type CollectionSortBy } from "@/features/collections/CollectionsPanel";
+import { CollectionsPanel } from "@/features/collections/CollectionsPanel";
 import { boundedInfiniteListOptions, INFINITE_LIST_MAX_PAGES } from "@/lib/queryLimits";
 import {
   countEntityFacets,
@@ -77,9 +77,24 @@ import { forgetReadingPositions, readingWorkIds } from "@/features/library/readi
 import { listPendingRevisionsCommand } from "@/services/updateJobApi";
 import { useSavedSearchMigration } from "@/features/library/savedSearchMigration";
 import { deleteThenCleanup } from "@/features/library/deletedWorkCleanup";
-import type { EntityFacet, EntityFacetScope, EntitySortBy, FacetCount, LibrarySortBy, LibraryWatchFilter, SavedSearchRecord, SearchSuggestion, SearchV2Params, SearchV2Result, UpdateTarget } from "@/types/library";
+import {
+  defaultSortOrderFor,
+  COLLECTION_SORT_OPTIONS,
+  ENTITY_SORT_OPTIONS,
+  parseCollectionSortBy,
+  parseEntitySortBy,
+  parseSortChoice,
+  parseSortOrder,
+  SEARCH_SORT_OPTIONS,
+  sortChoice,
+  sortKeys,
+  WORK_SORT_OPTIONS,
+} from "@/features/library/sortOptions";
+import type { CollectionSortBy } from "@/types/collections";
+import type { EntityFacet, EntityFacetScope, EntitySortBy, FacetCount, LibraryAssetFilter, LibraryCoverFilter, LibraryDateField, LibraryEditFilter, LibraryRevisionFilter, LibrarySeriesFilter, LibrarySortBy, LibrarySortOrder, LibraryVersionScope, LibraryWatchFilter, SavedSearchRecord, SearchSuggestion, SearchV2Params, SearchV2Result, UpdateTarget } from "@/types/library";
 
 type LibraryTab = "works" | "people" | "series" | "collections";
+type SavedMembershipShelf = "reading" | "revised" | null;
 
 interface Filters {
   sources: string[];
@@ -93,12 +108,26 @@ interface Filters {
   tagMode: "and" | "or";
   minChars: number | string;
   maxChars: number | string;
+  minAssets: number | string;
+  maxAssets: number | string;
+  minSizeMb: number | string;
+  maxSizeMb: number | string;
+  assetFilter: LibraryAssetFilter | null;
+  seriesFilter: LibrarySeriesFilter | null;
+  revisionFilter: LibraryRevisionFilter | null;
+  editFilter: LibraryEditFilter | null;
+  coverFilter: LibraryCoverFilter | null;
+  dateField: LibraryDateField;
+  dateFrom: string;
+  dateTo: string;
 }
 
 const initialFilters: Filters = {
   sources: [], contentType: null, favorite: false, watch: null,
   authorsInclude: [], authorsExclude: [], tagsInclude: [], tagsExclude: [],
-  tagMode: "and", minChars: "", maxChars: "",
+  tagMode: "and", minChars: "", maxChars: "", minAssets: "", maxAssets: "", minSizeMb: "", maxSizeMb: "", assetFilter: null, seriesFilter: null,
+  revisionFilter: null, editFilter: null, coverFilter: null,
+  dateField: "downloaded_at", dateFrom: "", dateTo: "",
 };
 
 /**
@@ -148,55 +177,9 @@ function entityScopeCount(scope: EntityScopeFilters): number {
 /** 一括で EPUB キューへ送るとき、1つの作者・シリーズから取る作品数の上限。 */
 const ENTITY_BULK_WORK_LIMIT = 500;
 const MAX_SEARCH_LENGTH = 512;
-/** Each option names its direction, so no ordering has to be guessed at. */
-const SORT_OPTIONS: { value: LibrarySortBy; label: string }[] = [
-  { value: "downloaded_at", label: "保存が新しい順" },
-  { value: "source_updated_at", label: "更新が新しい順" },
-  { value: "title", label: "タイトル昇順（あ→ん）" },
-  { value: "author_name", label: "作者名昇順（あ→ん）" },
-  { value: "text_length", label: "文字数が多い順" },
-  { value: "file_size_bytes", label: "容量が大きい順" },
-];
-/**
- * 作者・シリーズの並べ替え。
- *
- * 作品の鍵をそのまま出すわけにいかない。束ねに文字数も容量も関連度も無く、
- * 代わりに「中にある作品を見て決まる」鍵がある - 保存が新しいとは、その人の
- * 作品でいちばん新しく保存したもののこと。
- */
-const ENTITY_SORT_OPTIONS: { value: EntitySortBy; label: string }[] = [
-  { value: "work_count", label: "作品が多い順" },
-  { value: "downloaded_at", label: "保存が新しい順" },
-  { value: "source_updated_at", label: "更新が新しい順" },
-  { value: "name", label: "名前順（あ→ん）" },
-];
-const ENTITY_SORT_VALUES = new Set<EntitySortBy>(ENTITY_SORT_OPTIONS.map((option) => option.value));
-
-/** 手で作った束ねの鍵。作品数と名前と、作った順で足りる。 */
-const COLLECTION_SORT_OPTIONS: { value: CollectionSortBy; label: string }[] = [
-  { value: "created_at", label: "追加が新しい順" },
-  { value: "name", label: "名前順（あ→ん）" },
-  { value: "member_count", label: "作品が多い順" },
-];
-const COLLECTION_SORT_VALUES = new Set<CollectionSortBy>(COLLECTION_SORT_OPTIONS.map((option) => option.value));
-
-export function parseCollectionSortBy(value: unknown): CollectionSortBy {
-  return typeof value === "string" && COLLECTION_SORT_VALUES.has(value as CollectionSortBy)
-    ? (value as CollectionSortBy)
-    : "created_at";
-}
-
-export function parseEntitySortBy(value: unknown): EntitySortBy {
-  return typeof value === "string" && ENTITY_SORT_VALUES.has(value as EntitySortBy)
-    ? (value as EntitySortBy)
-    : "work_count";
-}
-
 /** Only offered while searching, where it is the default and the backend ranks
  *  by score instead of by a column. */
-const RELEVANCE_SORT: { value: LibrarySortBy; label: string } = { value: "relevance", label: "関連度が高い順" };
-const SEARCH_SORT_OPTIONS = [RELEVANCE_SORT, ...SORT_OPTIONS];
-const SORT_VALUES = new Set<LibrarySortBy>(SEARCH_SORT_OPTIONS.map((option) => option.value));
+const SORT_VALUES = sortKeys(SEARCH_SORT_OPTIONS);
 
 function parseLibraryTab(value: string | null): LibraryTab {
   return value === "people" || value === "series" || value === "collections" ? value : "works";
@@ -206,9 +189,53 @@ function parseWatchFilter(value: unknown): LibraryWatchFilter | null {
   return value === "watched" || value === "unwatched" ? value : null;
 }
 
+function normalizeEntityScope(value: unknown): EntityScopeFilters {
+  if (!value || typeof value !== "object") return initialEntityScope;
+  const candidate = value as Partial<EntityScopeFilters>;
+  return {
+    watch: parseEntityWatch(candidate.watch),
+    minWorkCount: numericFilter(candidate.minWorkCount),
+    concluded: typeof candidate.concluded === "boolean" ? candidate.concluded : null,
+  };
+}
+
+function parseAssetFilter(value: unknown): LibraryAssetFilter | null {
+  return value === "has_assets" || value === "no_assets" || value === "has_images" || value === "has_files" || value === "has_images_and_files" ? value : null;
+}
+
+function parseSeriesFilter(value: unknown): LibrarySeriesFilter | null {
+  return value === "in_series" || value === "standalone" ? value : null;
+}
+
+function parseRevisionFilter(value: unknown): LibraryRevisionFilter | null {
+  if (value === "has_history") return "revised";
+  return value === "revised" || value === "first_version" ? value : null;
+}
+
+function parseEditFilter(value: unknown): LibraryEditFilter | null {
+  return value === "edited" || value === "unedited" ? value : null;
+}
+
+function parseCoverFilter(value: unknown): LibraryCoverFilter | null {
+  return value === "has_cover" || value === "no_cover" ? value : null;
+}
+
+function parseDateField(value: unknown): LibraryDateField {
+  return value === "source_created_at" || value === "source_updated_at" ? value : "downloaded_at";
+}
+
+function dateFilter(value: unknown): string {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return "";
+  const [year, month, day] = value.split("-").map(Number);
+  const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const daysInMonth = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  return month >= 1 && month <= 12 && day >= 1 && day <= daysInMonth[month - 1] ? value : "";
+}
+
 function parseSortBy(value: unknown): LibrarySortBy {
   return typeof value === "string" && SORT_VALUES.has(value as LibrarySortBy) ? value as LibrarySortBy : "downloaded_at";
 }
+
 
 /**
  * Relevance is the default while searching and is not offered otherwise, so the
@@ -226,11 +253,6 @@ export function resolveSortBy(raw: string | null, hasQuery: boolean, preferred: 
   const fallback = SORT_VALUES.has(preferred) && preferred !== "relevance" ? preferred : "downloaded_at";
   if (!hasQuery) return parsed && parsed !== "relevance" ? parsed : fallback;
   return parsed ?? "relevance";
-}
-
-/** Ascending only reads as "correct" for the alphabetical keys. */
-function sortOrderFor(sortBy: LibrarySortBy): "asc" | "desc" {
-  return sortBy === "title" || sortBy === "author_name" ? "asc" : "desc";
 }
 
 function stringList(value: unknown): string[] {
@@ -259,6 +281,22 @@ function numericFilterOrNull(value: unknown): number | null {
   return normalized === "" ? null : normalized;
 }
 
+function decimalFilter(value: unknown): number | "" {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : "";
+}
+
+function decimalParam(value: string | null): number | "" {
+  if (value === null || value.trim() === "") return "";
+  return decimalFilter(Number(value));
+}
+
+function sizeMbToBytesOrNull(value: unknown): number | null {
+  const sizeMb = decimalFilter(value);
+  if (sizeMb === "") return null;
+  const bytes = Math.round(sizeMb * 1024 * 1024);
+  return Number.isSafeInteger(bytes) ? bytes : null;
+}
+
 function normalizeFilters(value: unknown): Filters {
   if (!value || typeof value !== "object") return initialFilters;
   const candidate = value as Partial<Filters>;
@@ -278,6 +316,18 @@ function normalizeFilters(value: unknown): Filters {
     tagMode: candidate.tagMode === "or" ? "or" : "and",
     minChars: numericFilter(candidate.minChars),
     maxChars: numericFilter(candidate.maxChars),
+    minAssets: numericFilter(candidate.minAssets),
+    maxAssets: numericFilter(candidate.maxAssets),
+    minSizeMb: decimalFilter(candidate.minSizeMb),
+    maxSizeMb: decimalFilter(candidate.maxSizeMb),
+    assetFilter: parseAssetFilter(candidate.assetFilter),
+    seriesFilter: parseSeriesFilter(candidate.seriesFilter),
+    revisionFilter: parseRevisionFilter(candidate.revisionFilter),
+    editFilter: parseEditFilter(candidate.editFilter),
+    coverFilter: parseCoverFilter(candidate.coverFilter),
+    dateField: parseDateField(candidate.dateField),
+    dateFrom: dateFilter(candidate.dateFrom),
+    dateTo: dateFilter(candidate.dateTo),
   };
 }
 
@@ -303,6 +353,18 @@ function readFilters(params: URLSearchParams): Filters {
     tagMode: params.get("tagmode") === "or" ? "or" : "and",
     minChars: numericParam(params.get("minchars")),
     maxChars: numericParam(params.get("maxchars")),
+    minAssets: numericParam(params.get("minassets")),
+    maxAssets: numericParam(params.get("maxassets")),
+    minSizeMb: decimalParam(params.get("minsizemb")),
+    maxSizeMb: decimalParam(params.get("maxsizemb")),
+    assetFilter: params.get("assets"),
+    seriesFilter: params.get("seriesmode"),
+    revisionFilter: params.get("revision"),
+    editFilter: params.get("localedit"),
+    coverFilter: params.get("cover"),
+    dateField: params.get("datefield"),
+    dateFrom: params.get("datefrom"),
+    dateTo: params.get("dateto"),
   });
 }
 
@@ -324,6 +386,18 @@ function writeFilters(params: URLSearchParams, filters: Filters) {
     ["tagmode", filters.tagMode === "or" ? "or" : null],
     ["minchars", filters.minChars === "" ? null : String(filters.minChars)],
     ["maxchars", filters.maxChars === "" ? null : String(filters.maxChars)],
+    ["minassets", filters.minAssets === "" ? null : String(filters.minAssets)],
+    ["maxassets", filters.maxAssets === "" ? null : String(filters.maxAssets)],
+    ["minsizemb", filters.minSizeMb === "" ? null : String(filters.minSizeMb)],
+    ["maxsizemb", filters.maxSizeMb === "" ? null : String(filters.maxSizeMb)],
+    ["assets", filters.assetFilter],
+    ["seriesmode", filters.seriesFilter],
+    ["revision", filters.revisionFilter],
+    ["localedit", filters.editFilter],
+    ["cover", filters.coverFilter],
+    ["datefield", filters.dateFrom || filters.dateTo ? filters.dateField : null],
+    ["datefrom", filters.dateFrom || null],
+    ["dateto", filters.dateTo || null],
   ];
   for (const [key, value] of single) { if (value) params.set(key, value); else params.delete(key); }
 }
@@ -333,28 +407,68 @@ export function parseSavedParams(json: string): {
   tab: LibraryTab;
   filters: Filters;
   sortBy: LibrarySortBy;
+  sortOrder: LibrarySortOrder;
+  entityScope: EntityScopeFilters;
+  entitySortBy: EntitySortBy;
+  entitySortOrder: LibrarySortOrder;
+  collectionSortBy: CollectionSortBy;
+  collectionSortOrder: LibrarySortOrder;
   searchMode: "semantic" | null;
+  versionScope: LibraryVersionScope;
+  membershipShelf: SavedMembershipShelf;
 } {
   try {
     const raw = JSON.parse(json) as {
       tab?: unknown;
       filters?: unknown;
       sortBy?: unknown;
+      sortOrder?: unknown;
+      entityScope?: unknown;
+      entitySortBy?: unknown;
+      entitySortOrder?: unknown;
+      collectionSortBy?: unknown;
+      collectionSortOrder?: unknown;
       searchMode?: unknown;
+      versionScope?: unknown;
+      membershipShelf?: unknown;
     };
+    const sortBy = parseSortBy(raw.sortBy);
+    const entitySortBy = parseEntitySortBy(raw.entitySortBy);
+    const collectionSortBy = parseCollectionSortBy(raw.collectionSortBy);
     return {
       tab: parseLibraryTab(typeof raw.tab === "string" ? raw.tab : null),
       filters: normalizeFilters(raw.filters),
-      sortBy: parseSortBy(raw.sortBy),
+      sortBy,
+      sortOrder: parseSortOrder(raw.sortOrder, defaultSortOrderFor(sortBy)),
+      entityScope: normalizeEntityScope(raw.entityScope),
+      entitySortBy,
+      entitySortOrder: parseSortOrder(raw.entitySortOrder, defaultSortOrderFor(entitySortBy)),
+      collectionSortBy,
+      collectionSortOrder: parseSortOrder(raw.collectionSortOrder, defaultSortOrderFor(collectionSortBy)),
       // 「言葉で探す」で作った検索は、意味の検索として保存されなければ
       // 意味がない。字面の検索に落として開き直すと、**モデルが言い換えた
       // 文字列で字面検索する**という、どちらとも違うものになる。
       searchMode: raw.searchMode === "semantic" ? "semantic" : null,
+      versionScope: raw.versionScope === "all" ? "all" : "current",
+      membershipShelf: raw.membershipShelf === "reading" || raw.membershipShelf === "revised" ? raw.membershipShelf : null,
     };
   } catch {
     // A saved search whose conditions cannot be read still opens the library,
     // just unfiltered - better than an error where a list of works should be.
-    return { tab: "works", filters: initialFilters, sortBy: "downloaded_at", searchMode: null };
+    return {
+      tab: "works",
+      filters: initialFilters,
+      sortBy: "downloaded_at",
+      sortOrder: "desc",
+      entityScope: initialEntityScope,
+      entitySortBy: "work_count",
+      entitySortOrder: "desc",
+      collectionSortBy: "created_at",
+      collectionSortOrder: "desc",
+      searchMode: null,
+      versionScope: "current",
+      membershipShelf: null,
+    };
   }
 }
 
@@ -514,6 +628,7 @@ export default function LibraryPage() {
   const runtime = isTauriRuntime();
   const queryClient = useQueryClient();
   useSavedSearchMigration();
+  const { pathname, search, navigationId } = useAppRouter();
   const [urlParams, setUrlParams] = useAppSearchParams();
   // Query, tab and the favourite flag live in the URL so history navigation and
   // deep links such as /library?favorite=1 actually change what is shown.
@@ -521,53 +636,133 @@ export default function LibraryPage() {
   // overwrite each other on every change.
   const searchText = (urlParams.get("q") ?? "").slice(0, MAX_SEARCH_LENGTH);
   const tab = parseLibraryTab(urlParams.get("tab"));
+  const versionScope: LibraryVersionScope = urlParams.get("versions") === "all" ? "all" : "current";
+  // A deferred movement belongs to one exact navigation. Without this owner,
+  // a slow request can settle after Back/Forward and overwrite the scroll
+  // position that the router has just restored for another history entry.
+  const pendingPageScroll = useRef<{ navigationId: number; location: string } | null>(null);
+  const stopPendingPageScrollIntent = useRef<() => void>(() => undefined);
+  const cancelPendingPageScroll = useCallback(() => {
+    pendingPageScroll.current = null;
+    stopPendingPageScrollIntent.current();
+    stopPendingPageScrollIntent.current = () => undefined;
+  }, []);
+  const armPendingPageScroll = useCallback((target: URLSearchParams) => {
+    cancelPendingPageScroll();
+    pendingPageScroll.current = {
+      navigationId: navigationId + 1,
+      location: `${pathname}${target.size ? `?${target.toString()}` : ""}`,
+    };
+    const viewport = document.getElementById("main-content");
+    stopPendingPageScrollIntent.current = viewport
+      ? listenForScrollIntent(viewport, cancelPendingPageScroll)
+      : () => undefined;
+  }, [cancelPendingPageScroll, navigationId, pathname]);
+  const currentLocation = `${pathname}${search}`;
+  useEffect(() => {
+    const pending = pendingPageScroll.current;
+    if (!pending || navigationId < pending.navigationId) return;
+    if (navigationId !== pending.navigationId || currentLocation !== pending.location) {
+      cancelPendingPageScroll();
+    }
+  }, [cancelPendingPageScroll, currentLocation, navigationId]);
+  useEffect(() => cancelPendingPageScroll, [cancelPendingPageScroll]);
   // Natural-language assist is the only library entry that asks the work
   // semantic index. Ordinary typing always stays lexical.
-  const semanticIntent = tab === "works" && urlParams.get("intent") === "semantic";
+  const semanticIntent = tab === "works" && versionScope === "current" && urlParams.get("intent") === "semantic";
   // writeUrl は URL 側の書き手。記憶した並び順は「既定はどれか」の判断にしか
   // 使わないので、参照で渡して依存関係を増やさない。
   const preferredSortRef = useRef<LibrarySortBy>("downloaded_at");
   const writeUrl = useCallback((patch: {
     q?: string;
     tab?: LibraryTab;
-    sortBy?: LibrarySortBy;
-    entitySortBy?: EntitySortBy;
-    collectionSortBy?: CollectionSortBy;
+    sortBy?: LibrarySortBy | null;
+    sortOrder?: LibrarySortOrder;
+    entitySortBy?: EntitySortBy | null;
+    entitySortOrder?: LibrarySortOrder;
+    collectionSortBy?: CollectionSortBy | null;
+    collectionSortOrder?: LibrarySortOrder;
     saved?: number | null;
     searchMode?: "semantic" | null;
+    versionScope?: LibraryVersionScope;
+    membershipShelf?: SavedMembershipShelf;
     filters?: Filters;
-    entityScope?: EntityScopeFilters;
+    entityScope?: EntityScopeFilters | null;
   }) => {
     const next = new URLSearchParams(urlParams);
     const q = patch.q ?? searchText;
     const nextTab = patch.tab ?? tab;
-    const nextSort = patch.sortBy ?? resolveSortBy(urlParams.get("sort"), Boolean(q), preferredSortRef.current);
+    const nextSort = patch.sortBy === null
+      ? resolveSortBy(null, Boolean(q), preferredSortRef.current)
+      : patch.sortBy ?? resolveSortBy(urlParams.get("sort"), Boolean(q), preferredSortRef.current);
     // Changing anything means this is no longer the saved search it started
     // from, so the marker is dropped unless the caller is the one applying it.
     if (patch.saved) next.set("saved", String(patch.saved)); else next.delete("saved");
     if (q) next.set("q", q); else next.delete("q");
     if (patch.searchMode === "semantic" && q) next.set("intent", "semantic");
     else if (patch.q !== undefined || patch.searchMode !== undefined) next.delete("intent");
+    const nextVersionScope = patch.versionScope ?? versionScope;
+    if (nextVersionScope === "all") {
+      next.set("versions", "all");
+      // Saved revisions have no semantic vectors; this scope is an explicit
+      // lexical search and the URL must say the same thing as the control.
+      next.delete("intent");
+    } else {
+      next.delete("versions");
+    }
+    if (patch.membershipShelf !== undefined) {
+      next.delete("shelf");
+      next.delete("revised");
+      if (patch.membershipShelf === "reading") next.set("shelf", "reading");
+      if (patch.membershipShelf === "revised") next.set("revised", "1");
+    }
     if (nextTab !== "works") next.set("tab", nextTab); else next.delete("tab");
     // タブを移ったら、いま並んでいる方の指定は連れて行かない。作者とシリーズは
     // 別の並びを覚えているので、住所に残った `esort` が移った先を上書きすると
     // 覚えてある方が出てこない。
-    if (patch.tab !== undefined && patch.tab !== tab) next.delete("esort");
+    if (patch.tab !== undefined && patch.tab !== tab) {
+      next.delete("esort");
+      next.delete("eorder");
+    }
     if (patch.filters) writeFilters(next, normalizeFilters(patch.filters));
-    if (patch.entityScope) writeEntityScope(next, patch.entityScope);
+    if (patch.entityScope !== undefined) writeEntityScope(next, patch.entityScope ?? initialEntityScope);
     // 一覧の並べ替えは、作品の並べ替えとは別の語彙・別の既定を持つ。
     // 同じ鍵に載せると、作者タブで「文字数が多い順」のような無効な値が残る。
-    if (patch.entitySortBy) {
-      if (patch.entitySortBy !== "work_count") next.set("esort", patch.entitySortBy);
+    if (patch.entitySortBy === null) {
+      next.delete("esort");
+      next.delete("eorder");
+    } else if (patch.entitySortBy) {
+      const order = patch.entitySortOrder ?? defaultSortOrderFor(patch.entitySortBy);
+      // A non-default direction without its key is ambiguous on a device whose
+      // remembered key differs. Keep the key whenever the direction is written.
+      if (patch.entitySortBy !== "work_count" || order !== defaultSortOrderFor(patch.entitySortBy)) next.set("esort", patch.entitySortBy);
       else next.delete("esort");
+      if (order !== defaultSortOrderFor(patch.entitySortBy)) next.set("eorder", order);
+      else next.delete("eorder");
     }
-    if (patch.collectionSortBy) {
-      if (patch.collectionSortBy !== "created_at") next.set("csort", patch.collectionSortBy);
+    if (patch.collectionSortBy === null) {
+      next.delete("csort");
+      next.delete("corder");
+    } else if (patch.collectionSortBy) {
+      const order = patch.collectionSortOrder ?? defaultSortOrderFor(patch.collectionSortBy);
+      if (patch.collectionSortBy !== "created_at" || order !== defaultSortOrderFor(patch.collectionSortBy)) next.set("csort", patch.collectionSortBy);
       else next.delete("csort");
+      if (order !== defaultSortOrderFor(patch.collectionSortBy)) next.set("corder", order);
+      else next.delete("corder");
     }
     // The default depends on whether a query is active, so the parameter is
     // only written when the choice differs from the default for this state.
-    if (nextSort !== resolveSortBy(null, Boolean(q), preferredSortRef.current)) next.set("sort", nextSort); else next.delete("sort");
+    if (patch.sortBy === null) {
+      next.delete("sort");
+      next.delete("order");
+    } else if (nextSort !== resolveSortBy(null, Boolean(q), preferredSortRef.current)) next.set("sort", nextSort); else next.delete("sort");
+    if (patch.sortBy !== null && (patch.sortBy !== undefined || patch.sortOrder !== undefined)) {
+      const order = patch.sortOrder ?? defaultSortOrderFor(nextSort);
+      if (order !== defaultSortOrderFor(nextSort)) {
+        next.set("sort", nextSort);
+        next.set("order", order);
+      } else next.delete("order");
+    }
     // Page 7 of one set of conditions is not page 7 of another.
     next.delete("page");
     if (next.toString() === urlParams.toString()) return;
@@ -588,12 +783,16 @@ export default function LibraryPage() {
       || patch.filters !== undefined
       || patch.entityScope !== undefined
       || patch.sortBy !== undefined
+      || patch.sortOrder !== undefined
       || patch.entitySortBy !== undefined
+      || patch.entitySortOrder !== undefined
       || patch.collectionSortBy !== undefined
+      || patch.collectionSortOrder !== undefined
+      || patch.membershipShelf !== undefined
       || patch.saved !== undefined;
-    if (replacesTheList) pendingPageScroll.current = true;
+    if (patch.versionScope !== undefined || replacesTheList) armPendingPageScroll(next);
     setUrlParams(next, { replace: true });
-  }, [searchText, setUrlParams, tab, urlParams]);
+  }, [armPendingPageScroll, searchText, setUrlParams, tab, urlParams, versionScope]);
   // Switching tabs does not move the page. Whatever the reader was looking at
   // stays where it is - a tab is a filter on the same screen, and having the
   // ground move under a press that was only meant to change what is listed is
@@ -642,11 +841,23 @@ export default function LibraryPage() {
   // 並び順は「この人の見かた」なので覚える。検索語・絞り込み・ページ番号は
   // 「そのときの問い」なので覚えない（保存した検索がその役目を持っている）。
   const [storedSort, setStoredSort] = useLocalStorage<unknown>({ key: "piep.library-sort", defaultValue: "downloaded_at", getInitialValueInEffect: false });
+  const [storedSortOrder, setStoredSortOrder] = useLocalStorage<unknown>({ key: "piep.library-sort-order", defaultValue: null, getInitialValueInEffect: false });
   const preferredSort = parseSortBy(storedSort);
+  const preferredSortOrder = parseSortOrder(storedSortOrder, defaultSortOrderFor(preferredSort));
   preferredSortRef.current = preferredSort;
   const urlSortBy = resolveSortBy(urlParams.get("sort"), Boolean(searchText), preferredSort);
   const [sortBy, setSortByState] = useState<LibrarySortBy>(urlSortBy);
   useEffect(() => setSortByState((current) => current === urlSortBy ? current : urlSortBy), [urlSortBy]);
+  const sortOrder = parseSortOrder(
+    urlParams.get("order"),
+    // An explicit sort key in a shared URL owns its natural direction too.
+    // Otherwise a device whose remembered preference happens to use the same
+    // key could silently reverse that URL when `order` is omitted because it
+    // is the key's default direction.
+    !urlParams.has("sort") && !searchText && sortBy === preferredSort
+      ? preferredSortOrder
+      : defaultSortOrderFor(sortBy),
+  );
   // Works ranked by relevance have only a score cursor. Entity tabs and
   // explicitly sorted works can use a bounded direct page; everything else
   // drops a stale page parameter rather than silently ignoring it.
@@ -666,23 +877,26 @@ export default function LibraryPage() {
   // held them there while the next one loaded, and swapped the rows underneath
   // them - two movements where there should be one. It also raced the browser's
   // scroll anchoring, which sometimes put the offset straight back.
-  const pendingPageScroll = useRef(false);
   const setPage = useCallback((page: number) => {
     const boundedPage = Number.isFinite(page)
       ? Math.min(maxDirectPage, Math.max(1, Math.trunc(page)))
       : 1;
     const next = new URLSearchParams(urlParams);
     if (boundedPage > 1) next.set("page", String(boundedPage)); else next.delete("page");
+    if (next.toString() === urlParams.toString()) return;
+    armPendingPageScroll(next);
     setUrlParams(next, { replace: false });
     clearLimitNotice();
-    pendingPageScroll.current = true;
-  }, [clearLimitNotice, maxDirectPage, setUrlParams, urlParams]);
-  const setSortBy = useCallback((next: LibrarySortBy) => {
+  }, [armPendingPageScroll, clearLimitNotice, maxDirectPage, setUrlParams, urlParams]);
+  const setSortBy = useCallback((next: LibrarySortBy, order: LibrarySortOrder = defaultSortOrderFor(next)) => {
     setSortByState(next);
     // 関連度は検索の中でしか意味がない。次に開いたときの既定にはしない。
-    if (next !== "relevance") setStoredSort(next);
-    writeUrl({ sortBy: next });
-  }, [setStoredSort, writeUrl]);
+    if (next !== "relevance") {
+      setStoredSort(next);
+      setStoredSortOrder(order);
+    }
+    writeUrl({ sortBy: next, sortOrder: order });
+  }, [setStoredSort, setStoredSortOrder, writeUrl]);
   // 作者・シリーズの並び。作品とは別に覚える - 同じ人でも、作品は保存順で
   // 見たいが作者は作品数で見たい、はふつうにある。
   //
@@ -693,19 +907,38 @@ export default function LibraryPage() {
   const [legacyEntitySort] = useLocalStorage<unknown>({ key: "piep.library-entity-sort", defaultValue: null, getInitialValueInEffect: false });
   const [storedPersonSort, setStoredPersonSort] = useLocalStorage<unknown>({ key: "piep.library-entity-sort.person", defaultValue: null, getInitialValueInEffect: false });
   const [storedSeriesSort, setStoredSeriesSort] = useLocalStorage<unknown>({ key: "piep.library-entity-sort.series", defaultValue: null, getInitialValueInEffect: false });
+  const [storedPersonSortOrder, setStoredPersonSortOrder] = useLocalStorage<unknown>({ key: "piep.library-entity-sort-order.person", defaultValue: null, getInitialValueInEffect: false });
+  const [storedSeriesSortOrder, setStoredSeriesSortOrder] = useLocalStorage<unknown>({ key: "piep.library-entity-sort-order.series", defaultValue: null, getInitialValueInEffect: false });
   const storedEntitySort = (tab === "series" ? storedSeriesSort : storedPersonSort) ?? legacyEntitySort;
   const setStoredEntitySort = tab === "series" ? setStoredSeriesSort : setStoredPersonSort;
+  const storedEntitySortOrder = tab === "series" ? storedSeriesSortOrder : storedPersonSortOrder;
+  const setStoredEntitySortOrder = tab === "series" ? setStoredSeriesSortOrder : setStoredPersonSortOrder;
   const entitySortBy = parseEntitySortBy(urlParams.get("esort") ?? storedEntitySort);
-  const setEntitySortBy = useCallback((next: EntitySortBy) => {
+  const entitySortOrder = parseSortOrder(
+    urlParams.get("eorder"),
+    urlParams.has("esort")
+      ? defaultSortOrderFor(entitySortBy)
+      : parseSortOrder(storedEntitySortOrder, defaultSortOrderFor(entitySortBy)),
+  );
+  const setEntitySortBy = useCallback((next: EntitySortBy, order: LibrarySortOrder = defaultSortOrderFor(next)) => {
     setStoredEntitySort(next);
-    writeUrl({ entitySortBy: next });
-  }, [setStoredEntitySort, writeUrl]);
+    setStoredEntitySortOrder(order);
+    writeUrl({ entitySortBy: next, entitySortOrder: order });
+  }, [setStoredEntitySort, setStoredEntitySortOrder, writeUrl]);
   const [storedCollectionSort, setStoredCollectionSort] = useLocalStorage<unknown>({ key: "piep.library-collection-sort", defaultValue: "created_at", getInitialValueInEffect: false });
+  const [storedCollectionSortOrder, setStoredCollectionSortOrder] = useLocalStorage<unknown>({ key: "piep.library-collection-sort-order", defaultValue: null, getInitialValueInEffect: false });
   const collectionSortBy = parseCollectionSortBy(urlParams.get("csort") ?? storedCollectionSort);
-  const setCollectionSortBy = useCallback((next: CollectionSortBy) => {
+  const collectionSortOrder = parseSortOrder(
+    urlParams.get("corder"),
+    urlParams.has("csort")
+      ? defaultSortOrderFor(collectionSortBy)
+      : parseSortOrder(storedCollectionSortOrder, defaultSortOrderFor(collectionSortBy)),
+  );
+  const setCollectionSortBy = useCallback((next: CollectionSortBy, order: LibrarySortOrder = defaultSortOrderFor(next)) => {
     setStoredCollectionSort(next);
-    writeUrl({ collectionSortBy: next });
-  }, [setStoredCollectionSort, writeUrl]);
+    setStoredCollectionSortOrder(order);
+    writeUrl({ collectionSortBy: next, collectionSortOrder: order });
+  }, [setStoredCollectionSort, setStoredCollectionSortOrder, writeUrl]);
   const entityScope = useMemo(() => readEntityScope(urlParams), [urlParams]);
   const setEntityScope = useCallback((next: EntityScopeFilters) => writeUrl({ entityScope: next }), [writeUrl]);
   const entityScopeParam = useMemo<EntityFacetScope | null>(() => {
@@ -763,7 +996,7 @@ export default function LibraryPage() {
   // the moment the reader turned the page.
   const filterKey = useMemo(() => JSON.stringify(filters), [filters]);
   const entityScopeKey = useMemo(() => JSON.stringify(entityScopeParam), [entityScopeParam]);
-  useEffect(() => { setSelected([]); setSelectedEntities([]); }, [searchText, filterKey, sortBy, tab, entitySortBy, entityScopeKey]);
+  useEffect(() => { setSelected([]); setSelectedEntities([]); }, [searchText, filterKey, sortBy, sortOrder, tab, entitySortBy, entitySortOrder, collectionSortBy, collectionSortOrder, entityScopeKey]);
 
   // The "読みかけ" shelf is a membership list rather than a filter: reading
   // positions are kept per device, so the library is told which works to show.
@@ -787,6 +1020,12 @@ export default function LibraryPage() {
     () => onRevisedShelf ? (pendingRevisions.data ?? []).map((entry) => entry.downloadId) : null,
     [onRevisedShelf, pendingRevisions.data],
   );
+  // The empty array used while this shelf is being resolved deliberately means
+  // "show no works", not "remove the filter". Do not let that internal safety
+  // value become a user-facing empty result: until the membership list exists,
+  // the shelf is loading; if it cannot be read, the shelf itself has failed.
+  const revisedShelfLoading = onRevisedShelf && pendingRevisions.isLoading;
+  const revisedShelfError = onRevisedShelf ? pendingRevisions.error : null;
   const pendingRevisionIds = useMemo(
     () => new Set((pendingRevisions.data ?? []).map((entry) => entry.downloadId)),
     [pendingRevisions.data],
@@ -810,9 +1049,21 @@ export default function LibraryPage() {
     tagFilterMode: filters.tagMode,
     minCharCount: numericFilterOrNull(filters.minChars),
     maxCharCount: numericFilterOrNull(filters.maxChars),
+    minAssetCount: numericFilterOrNull(filters.minAssets),
+    maxAssetCount: numericFilterOrNull(filters.maxAssets),
+    minFileSizeBytes: sizeMbToBytesOrNull(filters.minSizeMb),
+    maxFileSizeBytes: sizeMbToBytesOrNull(filters.maxSizeMb),
+    assetFilter: filters.assetFilter,
+    seriesFilter: filters.seriesFilter,
+    revisionFilter: filters.revisionFilter,
+    editFilter: filters.editFilter,
+    coverFilter: filters.coverFilter,
+    dateField: filters.dateFrom || filters.dateTo ? filters.dateField : null,
+    dateFrom: filters.dateFrom || null,
+    dateTo: filters.dateTo || null,
     watchFilter: filters.watch,
     sortBy,
-    sortOrder: sortOrderFor(sortBy),
+    sortOrder,
     limit: pageSize,
     // Numbered pages fetch one page outright; scrolling walks with a cursor.
     offset: numberedPages ? (pageParam - 1) * pageSize : null,
@@ -822,7 +1073,8 @@ export default function LibraryPage() {
     // query, repeat IPC, or replace the infinite-query observer.
     projection: "libraryGallery",
     searchMode: semanticIntent ? "semantic" : null,
-  }), [readingIds, revisedIds, searchText, filters, sortBy, numberedPages, pageParam, pageSize, semanticIntent]);
+    versionScope,
+  }), [readingIds, revisedIds, searchText, filters, sortBy, sortOrder, numberedPages, pageParam, pageSize, semanticIntent, versionScope]);
 
   // Keyset pagination: fetching a fixed slab and paging it in the browser
   // capped the library at that slab and reported the wrong total.
@@ -842,7 +1094,7 @@ export default function LibraryPage() {
     // the page that is already on screen keeps the geometry - and the reader's
     // place in it - still while the next one is fetched.
     placeholderData: keepPreviousData,
-    enabled: tab === "works",
+    enabled: tab === "works" && !revisedShelfLoading && !revisedShelfError,
   });
   const facets = useQuery({
     queryKey: ["library-facets"],
@@ -855,10 +1107,19 @@ export default function LibraryPage() {
     && Boolean(works.hasNextPage);
   const totalCount = works.data?.pages[0]?.totalEstimate ?? null;
   const searchMeta = works.data?.pages[0]?.searchMeta;
-  const workFilterCount = filters.sources.length + Number(Boolean(filters.contentType)) + Number(filters.favorite) + Number(Boolean(filters.watch)) + filters.authorsInclude.length + filters.authorsExclude.length + filters.tagsInclude.length + filters.tagsExclude.length + Number(filters.minChars !== "") + Number(filters.maxChars !== "");
+  const workFilterCount = filters.sources.length + Number(Boolean(filters.contentType)) + Number(filters.favorite) + Number(Boolean(filters.watch)) + filters.authorsInclude.length + filters.authorsExclude.length + filters.tagsInclude.length + filters.tagsExclude.length + Number(filters.minChars !== "") + Number(filters.maxChars !== "") + Number(filters.minAssets !== "") + Number(filters.maxAssets !== "") + Number(filters.minSizeMb !== "") + Number(filters.maxSizeMb !== "") + Number(Boolean(filters.assetFilter)) + Number(Boolean(filters.seriesFilter)) + Number(Boolean(filters.revisionFilter)) + Number(Boolean(filters.editFilter)) + Number(Boolean(filters.coverFilter)) + Number(Boolean(filters.dateFrom)) + Number(Boolean(filters.dateTo));
   // 束ね自身の条件も「適用中」に数える。数えないと、絞られている理由が
   // どこにも出ない一覧ができる。
-  const activeFilterCount = workFilterCount + (tab === "works" ? 0 : entityScopeCount(entityScope));
+  const visibleEntityScopeCount = entityScopeCount({
+    ...entityScope,
+    concluded: tab === "series" ? entityScope.concluded : null,
+  });
+  // Collection results currently own only their name search and ordering.
+  // Do not claim that retained work/entity filters affect them while keeping
+  // those conditions available when the reader returns to another tab.
+  const activeFilterCount = tab === "collections"
+    ? 0
+    : workFilterCount + (tab === "works" ? Number(versionScope === "all") : visibleEntityScopeCount);
   const loadedIds = useMemo(() => loadedItems.map((item) => item.id), [loadedItems]);
   const selectedSet = useMemo(() => new Set(selected), [selected]);
   // 選んだ作品の題名。読み込み上限で一覧から落ちたぶんは名前を出せないので、
@@ -940,7 +1201,7 @@ export default function LibraryPage() {
 
   const suggestedName = () => query.trim()
     || [filters.sources.join("・"), filters.authorsInclude.join("・"), filters.tagsInclude.map((tag) => `#${tag}`).join(" ")].filter(Boolean).join(" / ")
-    || "すべての作品";
+    || (tab === "collections" ? "すべてのコレクション" : tab === "people" ? "すべての作者・クリエイター" : tab === "series" ? "すべてのシリーズ" : "すべての作品");
 
   const saveMutation = useMutation({
     mutationFn: (name: string) => upsertSavedSearch({
@@ -949,9 +1210,17 @@ export default function LibraryPage() {
       // 検索の種類も条件のうち。保存しないと、開き直したときに別の検索になる。
       paramsJson: JSON.stringify({
         tab,
-        filters: normalizeFilters(filters),
+        filters: tab === "collections" ? initialFilters : normalizeFilters(filters),
         sortBy,
-        searchMode: semanticIntent ? "semantic" : null,
+        sortOrder,
+        entityScope: tab === "people" || tab === "series" ? entityScope : initialEntityScope,
+        entitySortBy,
+        entitySortOrder,
+        collectionSortBy,
+        collectionSortOrder,
+        searchMode: tab === "works" && semanticIntent ? "semantic" : null,
+        versionScope: tab === "works" ? versionScope : "current",
+        membershipShelf: tab === "collections" ? null : shelfParam === "reading" ? "reading" : onRevisedShelf ? "revised" : null,
       }),
     }),
     onSuccess: (record) => {
@@ -980,16 +1249,24 @@ export default function LibraryPage() {
 
   const applySavedSearch = useCallback((record: SavedSearchRecord) => {
     const parsed = parseSavedParams(record.paramsJson);
-    setSortByState(parsed.sortBy);
+    if (parsed.tab === "works") setSortByState(parsed.sortBy);
     const nextQuery = record.query ?? "";
     cancelPendingQueryWrite();
     setQuery(nextQuery);
     writeUrl({
       q: nextQuery,
       tab: parsed.tab,
-      filters: parsed.filters,
-      sortBy: parsed.sortBy,
-      searchMode: parsed.searchMode,
+      filters: parsed.tab === "collections" ? initialFilters : parsed.filters,
+      sortBy: parsed.tab === "works" ? parsed.sortBy : null,
+      sortOrder: parsed.tab === "works" ? parsed.sortOrder : undefined,
+      entityScope: parsed.tab === "people" || parsed.tab === "series" ? parsed.entityScope : null,
+      entitySortBy: parsed.tab === "people" || parsed.tab === "series" ? parsed.entitySortBy : null,
+      entitySortOrder: parsed.tab === "people" || parsed.tab === "series" ? parsed.entitySortOrder : undefined,
+      collectionSortBy: parsed.tab === "collections" ? parsed.collectionSortBy : null,
+      collectionSortOrder: parsed.tab === "collections" ? parsed.collectionSortOrder : undefined,
+      searchMode: parsed.tab === "works" ? parsed.searchMode : null,
+      versionScope: parsed.tab === "works" ? parsed.versionScope : "current",
+      membershipShelf: parsed.tab === "collections" ? null : parsed.membershipShelf,
       saved: record.id,
     });
   }, [writeUrl]);
@@ -1164,12 +1441,26 @@ export default function LibraryPage() {
       favorite: params.favorite,
       tagsInclude: params.tagsInclude,
       tagsExclude: params.tagsExclude,
+      authorsInclude: params.authorsInclude,
+      authorsExclude: params.authorsExclude,
       // Only meaningful alongside the tags it applies to, and it always has a
       // value - so carrying it unconditionally would make every listing look
       // filtered to the check below.
       tagFilterMode: params.tagsInclude ? params.tagFilterMode : null,
       minCharCount: params.minCharCount,
       maxCharCount: params.maxCharCount,
+      minAssetCount: params.minAssetCount,
+      maxAssetCount: params.maxAssetCount,
+      minFileSizeBytes: params.minFileSizeBytes,
+      maxFileSizeBytes: params.maxFileSizeBytes,
+      assetFilter: params.assetFilter,
+      seriesFilter: params.seriesFilter,
+      revisionFilter: params.revisionFilter,
+      editFilter: params.editFilter,
+      coverFilter: params.coverFilter,
+      dateField: params.dateField,
+      dateFrom: params.dateFrom,
+      dateTo: params.dateTo,
       watchFilter: params.watchFilter,
     };
     return Object.values(narrowed).some((value) => value !== null && value !== undefined) ? narrowed : null;
@@ -1188,16 +1479,16 @@ export default function LibraryPage() {
     // and page one both start at offset zero, so the two modes shared one cache
     // entry - and switching to page numbers after scrolling a long way redrew
     // every accumulated page as "page 1" instead of the first pageSize rows.
-    queryKey: ["library-entities", entityKind, searchText, pageSize, entityOffset, numberedPageEnabled, entityFilters, entitySortBy, entityScopeParam],
+    queryKey: ["library-entities", entityKind, searchText, pageSize, entityOffset, numberedPageEnabled, entityFilters, entitySortBy, entitySortOrder, entityScopeParam],
     queryFn: ({ pageParam }) => runtime
-      ? searchEntityFacets(entityKind, searchText || null, pageSize, pageParam, entityFilters, entitySortBy, null, entityScopeParam)
+      ? searchEntityFacets(entityKind, searchText || null, pageSize, pageParam, entityFilters, entitySortBy, entitySortOrder, entityScopeParam)
       : Promise.resolve(demoEntityMatches().slice(pageParam, pageParam + pageSize)),
     initialPageParam: entityOffset,
     getNextPageParam: (lastPage, _allPages, lastPageParam) => lastPage.length < pageSize
       ? undefined
       : lastPageParam + lastPage.length,
     placeholderData: keepPreviousData,
-    enabled: tab !== "works",
+    enabled: tab === "people" || tab === "series",
   });
   // One pass over the same grouping, per set of conditions rather than per page
   // turned. Without it the pager cannot name a last page, and the count beside
@@ -1205,7 +1496,7 @@ export default function LibraryPage() {
   const entityTotal = useQuery({
     queryKey: ["library-entity-count", entityKind, searchText, entityFilters, entityScopeParam],
     queryFn: () => runtime ? countEntityFacets(entityKind, searchText || null, entityFilters, entityScopeParam) : Promise.resolve(demoEntityMatches().length),
-    enabled: tab !== "works",
+    enabled: tab === "people" || tab === "series",
     staleTime: 60_000,
   });
   /**
@@ -1218,7 +1509,7 @@ export default function LibraryPage() {
   const watchTargets = useQuery({
     queryKey: ["update-targets", "library"],
     queryFn: () => runtime ? listUpdateTargets<UpdateTarget>(null, false) : Promise.resolve([] as UpdateTarget[]),
-    enabled: tab !== "works",
+    enabled: tab === "people" || tab === "series",
     staleTime: 30_000,
   });
   const watchStateByKey = useMemo(() => {
@@ -1295,15 +1586,23 @@ export default function LibraryPage() {
   // painted in, rather than a frame after them.
   const showingRequestedPage = tab === "works"
     ? !works.isPlaceholderData && !works.isFetching
-    : !entities.isPlaceholderData && !entities.isFetching;
+    : tab === "people" || tab === "series"
+      ? !entities.isPlaceholderData && !entities.isFetching
+      : true;
   // `pageParam` is in the dependencies as well as the settled flag: a page that
   // is already cached settles in the same render it was asked for, so the flag
   // never changes and an effect watching only it would never run.
+  const listIdentity = `${tab}\0${urlParams.toString()}`;
   useLayoutEffect(() => {
-    if (!pendingPageScroll.current || !showingRequestedPage) return;
-    pendingPageScroll.current = false;
+    const pending = pendingPageScroll.current;
+    if (!pending || !showingRequestedPage) return;
+    if (pending.navigationId !== navigationId || pending.location !== currentLocation) {
+      cancelPendingPageScroll();
+      return;
+    }
+    cancelPendingPageScroll();
     scrollViewportToTop(document.getElementById("main-content"));
-  }, [pageParam, showingRequestedPage]);
+  }, [cancelPendingPageScroll, currentLocation, listIdentity, navigationId, showingRequestedPage]);
 
   usePageAssist("library-search", "ライブラリで使えるAIの手伝い", tab === "works" ? [{
     id: "search_interpretation",
@@ -1332,7 +1631,7 @@ export default function LibraryPage() {
               control beside it, so aligning tops left them all sitting three
               pixels high against it. */}
           <Group wrap="nowrap" align="center">
-            <Box className="library-toolbar__search"><LibrarySearch value={query} onChange={onQueryChange} runtime={runtime} /></Box>
+            <Box className="library-toolbar__search"><LibrarySearch value={query} onChange={onQueryChange} runtime={runtime} versionScope={versionScope} /></Box>
             <span className="library-toolbar__slot" data-inactive={tab === "collections" || undefined} inert={tab === "collections" || undefined} aria-hidden={tab === "collections" || undefined}>
               <Tooltip label="詳細フィルター">
                 <Indicator label={activeFilterCount} size={16} disabled={!activeFilterCount}>
@@ -1343,21 +1642,30 @@ export default function LibraryPage() {
             {/* 場所は変えず、中身だけ差し替える。タブを切り替えるたびに
                 ツールバーの部品が動くのが、いちばん目に障る。 */}
             <Select
-              value={tab === "works" ? sortBy : tab === "collections" ? collectionSortBy : entitySortBy}
+              value={tab === "works"
+                ? sortChoice(sortBy, sortOrder)
+                : tab === "collections"
+                  ? sortChoice(collectionSortBy, collectionSortOrder)
+                  : sortChoice(entitySortBy, entitySortOrder)}
               onChange={(value) => {
-                if (tab === "works") setSortBy(parseSortBy(value));
-                else if (tab === "collections") setCollectionSortBy(parseCollectionSortBy(value));
-                else setEntitySortBy(parseEntitySortBy(value));
+                const choice = parseSortChoice(value);
+                if (!choice) return;
+                if (tab === "works") setSortBy(parseSortBy(choice.key), choice.order);
+                else if (tab === "collections") setCollectionSortBy(parseCollectionSortBy(choice.key), choice.order);
+                else setEntitySortBy(parseEntitySortBy(choice.key), choice.order);
               }}
-              data={tab === "works" ? (searchText ? SEARCH_SORT_OPTIONS : SORT_OPTIONS) : tab === "collections" ? COLLECTION_SORT_OPTIONS : ENTITY_SORT_OPTIONS}
+              data={tab === "works" ? (searchText ? SEARCH_SORT_OPTIONS : WORK_SORT_OPTIONS) : tab === "collections" ? COLLECTION_SORT_OPTIONS : ENTITY_SORT_OPTIONS}
+              searchable
+              allowDeselect={false}
+              nothingFoundMessage="一致する並び順がありません"
+              maxDropdownHeight={360}
               leftSection={<Icons.sort size={IconSize.menu} />}
               className="library-toolbar__sort"
               aria-label="並び順"
             />
             {/* 表示形式が効くのは作品の一覧だけで、作者とシリーズの一覧は押しても
-                形が変わらない。保存した検索はコレクションでは意味を持たない。
-                どちらも消さずに隠す。消すと残りの部品が横へ寄り、タブを移るたび
-                同じ押しボタンを目で探し直すことになる。 */}
+                形が変わらない。消すと残りの部品が横へ寄り、タブを移るたび同じ
+                押しボタンを目で探し直すことになるので、場所は残す。 */}
             <span className="library-toolbar__slot" data-inactive={tab !== "works" || undefined} inert={tab !== "works" || undefined} aria-hidden={tab !== "works" || undefined}><SegmentedControl
               className="view-mode-switch"
               value={view}
@@ -1365,7 +1673,7 @@ export default function LibraryPage() {
               data={[{ value: "gallery", label: <Tooltip label="ギャラリー"><Icons.viewGrid size={IconSize.menu} aria-label="ギャラリー表示" /></Tooltip> }, { value: "compact", label: <Tooltip label="リスト"><Icons.viewList size={IconSize.menu} aria-label="リスト表示" /></Tooltip> }]}
               aria-label="表示形式"
             /></span>
-            <span className="library-toolbar__slot" data-inactive={tab === "collections" || undefined} inert={tab === "collections" || undefined} aria-hidden={tab === "collections" || undefined}><Menu position="bottom-end" width={280} withinPortal>
+            <span className="library-toolbar__slot"><Menu position="bottom-end" width={280} withinPortal>
               <Menu.Target><Tooltip label="保存した検索"><ActionIcon variant="default" size={36} aria-label="保存した検索"><Icons.saveSearch size={IconSize.action} /></ActionIcon></Tooltip></Menu.Target>
               <Menu.Dropdown>
                 <Menu.Item leftSection={<Icons.saveSearch size={IconSize.menu} />} onClick={saveCurrentSearch}>現在の検索条件を保存</Menu.Item>
@@ -1385,18 +1693,34 @@ export default function LibraryPage() {
               </Menu.Dropdown>
             </Menu></span>
           </Group>
-          {activeFilterCount > 0 && (
+          {tab !== "collections" && activeFilterCount > 0 && (
             <Group gap="xs">
               <Text size="xs" c="dimmed" fw={600}>適用中</Text>
+              {tab === "works" && versionScope === "all" && <FilterChip label="検索対象: 過去版も" onRemove={() => writeUrl({ versionScope: "current" })} />}
               {filters.sources.map((source) => <FilterChip key={source} label={source} onRemove={() => setFilters({ ...filters, sources: filters.sources.filter((item) => item !== source) })} />)}
+              {filters.contentType && <FilterChip label={`種別: ${contentTypeName(filters.contentType)}`} onRemove={() => setFilters({ ...filters, contentType: null })} />}
+              {filters.favorite && <FilterChip label="お気に入り" onRemove={() => setFilters({ ...filters, favorite: false })} />}
+              {filters.watch && <FilterChip label={filters.watch === "watched" ? "更新監視中" : "未監視"} onRemove={() => setFilters({ ...filters, watch: null })} />}
               {filters.authorsInclude.map((author) => <FilterChip key={`author:+${author}`} label={`作者: ${author}`} onRemove={() => setFilters({ ...filters, authorsInclude: filters.authorsInclude.filter((item) => item !== author) })} />)}
               {filters.authorsExclude.map((author) => <FilterChip key={`author:-${author}`} label={`除外 作者: ${author}`} color="red" onRemove={() => setFilters({ ...filters, authorsExclude: filters.authorsExclude.filter((item) => item !== author) })} />)}
               {filters.tagsInclude.map((tag) => <FilterChip key={`+${tag}`} label={`#${tag}`} onRemove={() => setFilters({ ...filters, tagsInclude: filters.tagsInclude.filter((item) => item !== tag) })} />)}
               {filters.tagsExclude.map((tag) => <FilterChip key={`-${tag}`} label={`除外 #${tag}`} color="red" onRemove={() => setFilters({ ...filters, tagsExclude: filters.tagsExclude.filter((item) => item !== tag) })} />)}
+              {filters.seriesFilter && <FilterChip label={seriesFilterName(filters.seriesFilter)} onRemove={() => setFilters({ ...filters, seriesFilter: null })} />}
+              {filters.assetFilter && <FilterChip label={assetFilterName(filters.assetFilter)} onRemove={() => setFilters({ ...filters, assetFilter: null })} />}
+              {filters.revisionFilter && <FilterChip label={revisionFilterName(filters.revisionFilter)} onRemove={() => setFilters({ ...filters, revisionFilter: null })} />}
+              {filters.editFilter && <FilterChip label={editFilterName(filters.editFilter)} onRemove={() => setFilters({ ...filters, editFilter: null })} />}
+              {filters.coverFilter && <FilterChip label={coverFilterName(filters.coverFilter)} onRemove={() => setFilters({ ...filters, coverFilter: null })} />}
+              {filters.minChars !== "" && <FilterChip label={`${formatNumber(Number(filters.minChars))}文字以上`} onRemove={() => setFilters({ ...filters, minChars: "" })} />}
+              {filters.maxChars !== "" && <FilterChip label={`${formatNumber(Number(filters.maxChars))}文字以下`} onRemove={() => setFilters({ ...filters, maxChars: "" })} />}
+              {filters.minAssets !== "" && <FilterChip label={`添付${formatNumber(Number(filters.minAssets))}件以上`} onRemove={() => setFilters({ ...filters, minAssets: "" })} />}
+              {filters.maxAssets !== "" && <FilterChip label={`添付${formatNumber(Number(filters.maxAssets))}件以下`} onRemove={() => setFilters({ ...filters, maxAssets: "" })} />}
+              {filters.minSizeMb !== "" && <FilterChip label={`容量${formatNumber(Number(filters.minSizeMb))} MB以上`} onRemove={() => setFilters({ ...filters, minSizeMb: "" })} />}
+              {filters.maxSizeMb !== "" && <FilterChip label={`容量${formatNumber(Number(filters.maxSizeMb))} MB以下`} onRemove={() => setFilters({ ...filters, maxSizeMb: "" })} />}
+              {(filters.dateFrom || filters.dateTo) && <FilterChip label={`${dateFieldName(filters.dateField)}: ${filters.dateFrom || "指定なし"}〜${filters.dateTo || "指定なし"}`} onRemove={() => setFilters({ ...filters, dateFrom: "", dateTo: "" })} />}
               {tab !== "works" && entityScope.watch && <FilterChip label={entityScope.watch === "watched" ? "監視中" : entityScope.watch === "paused" ? "停止中" : "未登録"} onRemove={() => setEntityScope({ ...entityScope, watch: null })} />}
               {tab !== "works" && entityScope.minWorkCount !== "" && entityScope.minWorkCount > 1 && <FilterChip label={`${entityScope.minWorkCount}作品以上`} onRemove={() => setEntityScope({ ...entityScope, minWorkCount: "" })} />}
               {tab === "series" && entityScope.concluded !== null && <FilterChip label={entityScope.concluded ? "完結" : "連載中"} onRemove={() => setEntityScope({ ...entityScope, concluded: null })} />}
-              <Button size="compact-xs" variant="subtle" color="gray" onClick={() => writeUrl({ filters: initialFilters, entityScope: initialEntityScope })}>すべて解除</Button>
+              <Button size="compact-xs" variant="subtle" color="gray" onClick={() => writeUrl({ filters: initialFilters, entityScope: initialEntityScope, versionScope: "current" })}>すべて解除</Button>
             </Group>
           )}
         </Stack>
@@ -1439,7 +1763,7 @@ export default function LibraryPage() {
           {!selectionMode && <Button size="xs" variant="subtle" color="gray" leftSection={<Icons.confirm size={IconSize.menu} />} onClick={() => setSelectionMode(true)}>複数選択</Button>}
         </Group>}
 
-        {tab === "collections" ? <CollectionsPanel query={searchText} sortBy={collectionSortBy} /> : <>
+        {tab === "collections" ? <CollectionsPanel query={searchText} sortBy={collectionSortBy} sortOrder={collectionSortOrder} /> : <>
 
         {pageLimitNotice && (
           <Alert color="yellow" title="ページ番号を調整しました" role="status" mb="md">
@@ -1468,7 +1792,9 @@ export default function LibraryPage() {
         )}
 
         {tab === "works" ? (
-          works.isLoading ? <LoadingState label="ライブラリを検索しています" /> : works.error ? <ErrorState error={works.error} retry={() => works.refetch()} /> : loadedItems.length ? (
+          revisedShelfLoading ? <LoadingState label="改稿のある作品を確認しています" />
+            : revisedShelfError ? <ErrorState error={revisedShelfError} retry={() => pendingRevisions.refetch()} />
+              : works.isLoading ? <LoadingState label="ライブラリを検索しています" /> : works.error ? <ErrorState error={works.error} retry={() => works.refetch()} /> : loadedItems.length ? (
             <>
               <VirtualizedWorkList items={loadedItems} view={view} selectionMode={selectionMode} selected={selectedSet} revisedIds={pendingRevisionIds} onSelect={toggleSelected} onToggleFavorite={toggleFavorite} onToggleWatch={toggleWatch} />
               <ListPager
@@ -1525,7 +1851,13 @@ export default function LibraryPage() {
       <Modal
         opened={filterOpened}
         onClose={filterDrawer.close}
-        title="詳細フィルター"
+        title={(
+          <span className="filter-spotlight__title">
+            <Icons.filter size={IconSize.nav} aria-hidden />
+            <span>詳細フィルター</span>
+            <span className="filter-spotlight__title-note" aria-hidden>条件を組み合わせて作品を絞り込む</span>
+          </span>
+        )}
         centered
         size="min(820px, calc(100vw - 24px))"
         xOffset={12}
@@ -1536,12 +1868,13 @@ export default function LibraryPage() {
         <FilterForm
           value={filters}
           scope={entityScope}
+          versionScope={versionScope}
           tab={tab}
           runtime={runtime}
           authors={facets.data?.authors ?? []}
           tags={facets.data?.tags ?? []}
           contentTypes={facets.data?.contentTypes.map((item) => ({ value: item.name, label: `${item.name} (${item.count})` })) ?? []}
-          onApply={(nextFilters, nextScope) => { writeUrl({ filters: nextFilters, entityScope: nextScope }); filterDrawer.close(); }}
+          onApply={(nextFilters, nextScope, nextVersionScope) => { writeUrl({ filters: nextFilters, entityScope: nextScope, versionScope: nextVersionScope }); filterDrawer.close(); }}
         />
       </Modal>
 
@@ -1563,6 +1896,7 @@ export default function LibraryPage() {
           writeUrl({
             q: intent.query,
             searchMode: "semantic",
+            versionScope: "current",
             filters: {
               ...filters,
               tagsInclude,
@@ -1719,7 +2053,7 @@ const SUGGESTION_KIND_LABEL: Record<string, string> = {
   tag: "タグで絞る",
 };
 
-function LibrarySearch({ value, onChange, runtime }: { value: string; onChange: (value: string) => void; runtime: boolean }) {
+function LibrarySearch({ value, onChange, runtime, versionScope }: { value: string; onChange: (value: string) => void; runtime: boolean; versionScope: LibraryVersionScope }) {
   const navigate = useAppNavigate();
   const [composing, setComposing] = useState(false);
   const [debounced] = useDebouncedValue(value, 180);
@@ -1780,7 +2114,7 @@ function LibrarySearch({ value, onChange, runtime }: { value: string; onChange: 
           leftSection={<Icons.search size={IconSize.action} />}
           rightSection={value ? <Combobox.ClearButton onClear={() => onChange("")} /> : null}
           rightSectionPointerEvents={value ? "all" : "none"}
-          placeholder="タイトル、作者、タグ、本文を検索"
+          placeholder={versionScope === "all" ? "現在版と過去版を検索" : "タイトル、作者、タグ、本文を検索"}
           aria-label="ライブラリを検索"
           maxLength={MAX_SEARCH_LENGTH}
           size="md"
@@ -1798,7 +2132,7 @@ function LibrarySearch({ value, onChange, runtime }: { value: string; onChange: 
 
 const AUTHOR_SOURCE_ORDER = ["pixiv", "fanbox"];
 
-type FilterSection = "entity" | "basic" | "authors" | "tags" | "length";
+type FilterSection = "entity" | "basic" | "status" | "authors" | "tags" | "dates" | "content";
 type FacetKind = "authors" | "tags";
 type FacetTarget = "include" | "exclude";
 
@@ -1845,116 +2179,284 @@ function contentTypeName(value: string) {
   return value;
 }
 
-function FacetSelectedList({ kind, label, values, facets, onRemove }: {
-  kind: FacetKind;
-  label: string;
-  values: string[];
-  facets: FacetCount[];
-  onRemove: (value: string) => void;
-}) {
-  return (
-    <section className="filter-spotlight__selected-list" aria-label={label}>
-      <Group justify="space-between" gap="xs">
-        <Text component="h4" size="sm" fw={700}>{label}</Text>
-        <Badge size="xs" variant="light" color="gray">{formatNumber(values.length)}</Badge>
-      </Group>
-      {values.length ? (
-        <Stack gap={6} mt="xs">
-          {values.map((value) => {
-            const facet = facets.find((candidate) => candidate.name === value);
-            return (
-              <div className="filter-spotlight__selected-item" key={value}>
-                <div className="filter-spotlight__facet-identity">
-                  {kind === "authors" && (
-                    <span className="filter-spotlight__provider-marks">
-                      {orderedAuthorSources(facet?.sources).map((source) => <ProviderMark key={source} provider={source} compact />)}
-                    </span>
-                  )}
-                  <Text size="sm" className="filter-spotlight__facet-name">{value}</Text>
-                </div>
-                <ActionIcon variant="subtle" color="gray" size="sm" aria-label={`${label}から${value}を外す`} onClick={() => onRemove(value)}>
-                  <Icons.cancel size={IconSize.inline} />
-                </ActionIcon>
-              </div>
-            );
-          })}
-        </Stack>
-      ) : <Text size="sm" c="dimmed" mt="xs">未指定</Text>}
-    </section>
-  );
+function assetFilterName(value: LibraryAssetFilter) {
+  if (value === "has_assets") return "添付あり";
+  if (value === "no_assets") return "添付なし";
+  if (value === "has_images") return "画像あり";
+  if (value === "has_files") return "ファイルあり";
+  return "画像とファイルあり";
 }
 
-function FacetSelectionPanel({ kind, facets, include, exclude, target, headerAction, onToggle }: {
+function seriesFilterName(value: LibrarySeriesFilter) {
+  return value === "in_series" ? "シリーズ作品" : "単発作品";
+}
+
+function revisionFilterName(value: LibraryRevisionFilter) {
+  return value === "revised" ? "改稿あり" : "初版のまま";
+}
+
+function editFilterName(value: LibraryEditFilter) {
+  return value === "edited" ? "ローカル編集あり" : "ローカル編集なし";
+}
+
+function coverFilterName(value: LibraryCoverFilter) {
+  return value === "has_cover" ? "表紙あり" : "表紙なし";
+}
+
+function dateFieldName(value: LibraryDateField) {
+  if (value === "source_created_at") return "公開日";
+  if (value === "source_updated_at") return "更新日";
+  return "保存日";
+}
+
+function FacetSelectionPanel({ kind, facets, include, exclude, headerAction, onToggle }: {
   kind: FacetKind;
   facets: FacetCount[];
   include: string[];
   exclude: string[];
-  target: FacetTarget;
   headerAction?: ReactNode;
   onToggle: (name: string, target: FacetTarget) => void;
 }) {
   const noun = kind === "authors" ? "作者" : "タグ";
-  const selected = new Set([...include, ...exclude]);
-  const suggestions = facets.filter((facet) => !selected.has(facet.name)).slice(0, 4);
+  const included = new Set(include);
+  const excluded = new Set(exclude);
+  const suggestions = facets.slice(0, 8);
   return (
-    <Stack gap="md">
+    <Stack gap="xs">
       <div className="filter-spotlight__facet-heading">
-        <div>
-          <Text component="h3" fw={700}>{noun}</Text>
-          <Text size="xs" c="dimmed">候補を押すと「{target === "exclude" ? "除外" : "含める"}」へ追加します</Text>
-        </div>
+        <Text size="xs" fw={700} c="dimmed">候補</Text>
         {headerAction}
       </div>
-      <SimpleGrid cols={{ base: 1, xs: 2 }} spacing="sm">
-        <FacetSelectedList kind={kind} label={`含める${noun}`} values={include} facets={facets} onRemove={(name) => onToggle(name, "include")} />
-        <FacetSelectedList kind={kind} label={`除外する${noun}`} values={exclude} facets={facets} onRemove={(name) => onToggle(name, "exclude")} />
-      </SimpleGrid>
-      <div>
-        <Text size="xs" fw={700} c="dimmed" mb={6}>よく使う{noun}</Text>
-        {suggestions.length ? (
-          <div className="filter-spotlight__quick-grid">
-            {suggestions.map((facet) => (
-              <UnstyledButton
-                key={facet.name}
-                className="filter-spotlight__quick-option"
-                aria-label={`${facet.name}を${target === "exclude" ? "除外する" : "含める"}${noun}へ追加`}
-                onClick={() => onToggle(facet.name, target)}
-              >
-                <span className="filter-spotlight__facet-identity">
-                  {kind === "authors" && (
-                    <span className="filter-spotlight__provider-marks">
-                      {orderedAuthorSources(facet.sources).map((source) => <ProviderMark key={source} provider={source} compact />)}
-                    </span>
-                  )}
-                  {kind === "tags" && <Icons.tag size={IconSize.menu} aria-hidden />}
-                  <Text component="span" size="sm" className="filter-spotlight__facet-name">{facet.name}</Text>
-                </span>
+      {suggestions.length ? (
+        <div className="filter-spotlight__quick-grid">
+          {suggestions.map((facet) => (
+            <div className="filter-spotlight__quick-option" key={facet.name}>
+              <span className="filter-spotlight__facet-identity">
+                {kind === "authors" && (
+                  <span className="filter-spotlight__provider-marks">
+                    {orderedAuthorSources(facet.sources).map((source) => <ProviderMark key={source} provider={source} compact />)}
+                  </span>
+                )}
+                {kind === "tags" && <Icons.tag size={IconSize.menu} aria-hidden />}
+                <Text component="span" size="sm" className="filter-spotlight__facet-name">{facet.name}</Text>
                 <Badge size="xs" variant="light" color="gray">{formatNumber(facet.count)}</Badge>
-              </UnstyledButton>
-            ))}
-          </div>
-        ) : <Text size="sm" c="dimmed">追加できる候補はありません</Text>}
-      </div>
+              </span>
+              <span className="filter-spotlight__facet-actions">
+                <Button
+                  size="compact-xs"
+                  variant={included.has(facet.name) ? "filled" : "subtle"}
+                  aria-pressed={included.has(facet.name)}
+                  aria-label={`${facet.name}を含める${noun}へ追加`}
+                  onClick={() => onToggle(facet.name, "include")}
+                >
+                  含める
+                </Button>
+                <Button
+                  size="compact-xs"
+                  variant={excluded.has(facet.name) ? "filled" : "subtle"}
+                  color="red"
+                  aria-pressed={excluded.has(facet.name)}
+                  aria-label={`${facet.name}を除外する${noun}へ追加`}
+                  onClick={() => onToggle(facet.name, "exclude")}
+                >
+                  除外
+                </Button>
+              </span>
+            </div>
+          ))}
+        </div>
+      ) : <Text size="sm" c="dimmed">候補がありません</Text>}
     </Stack>
   );
 }
 
-function FilterForm({ value, scope, tab, runtime, authors, tags, contentTypes, onApply }: {
+function FacetSearchChoices({ kind, facets, include, exclude }: {
+  kind: FacetKind;
+  facets: FacetCount[];
+  include: string[];
+  exclude: string[];
+}) {
+  const prefix = kind === "authors" ? "author" : "tag";
+  const included = new Set(include);
+  const excluded = new Set(exclude);
+  return facets.map((facet, index) => (
+    <div className="filter-spotlight__result-choice-row" role="presentation" key={facet.name}>
+      <Combobox.Option
+        className="filter-spotlight__result-choice filter-spotlight__result-choice--include"
+        value={`${prefix}:include:${index}`}
+        active={included.has(facet.name)}
+        aria-label={`${facet.name}を含める`}
+      >
+        <span className="filter-spotlight__result-row filter-spotlight__result-row--facet">
+          <Icons.confirm size={IconSize.menu} opacity={included.has(facet.name) ? 1 : 0} aria-hidden />
+          {kind === "authors" ? (
+            <span className="filter-spotlight__provider-marks">{orderedAuthorSources(facet.sources).map((source) => <ProviderMark key={source} provider={source} compact />)}</span>
+          ) : <Icons.tag size={IconSize.menu} aria-hidden />}
+          <Text component="span" size="sm" className="filter-spotlight__facet-name">{facet.name}</Text>
+          <Badge size="xs" variant="light" color="gray">{formatNumber(facet.count)}</Badge>
+          <span className="filter-spotlight__result-action-label">含める</span>
+        </span>
+      </Combobox.Option>
+      <Combobox.Option
+        className="filter-spotlight__result-choice filter-spotlight__result-choice--exclude"
+        value={`${prefix}:exclude:${index}`}
+        active={excluded.has(facet.name)}
+        aria-label={`${facet.name}を除外`}
+        data-tone="exclude"
+      >
+        除外
+      </Combobox.Option>
+    </div>
+  ));
+}
+
+function SelectionTokenScroller({ label, itemKey, children }: {
+  label: string;
+  itemKey: string;
+  children: ReactNode;
+}) {
+  const viewportRef = useRef<HTMLDivElement>(null);
+  const [scrollState, setScrollState] = useState({ overflow: false, before: false, after: false });
+  const measure = useCallback(() => {
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    const max = Math.max(0, viewport.scrollWidth - viewport.clientWidth);
+    const availableWithoutControls = viewport.parentElement?.clientWidth ?? viewport.clientWidth;
+    const overflow = viewport.scrollWidth > availableWithoutControls + 1;
+    const next = {
+      overflow,
+      before: overflow && viewport.scrollLeft > 1,
+      after: overflow && viewport.scrollLeft < max - 1,
+    };
+    setScrollState((current) => (
+      current.overflow === next.overflow && current.before === next.before && current.after === next.after
+        ? current
+        : next
+    ));
+  }, []);
+
+  useLayoutEffect(() => {
+    measure();
+    const viewport = viewportRef.current;
+    const observer = viewport && typeof ResizeObserver !== "undefined" ? new ResizeObserver(measure) : null;
+    if (viewport) observer?.observe(viewport);
+    window.addEventListener("resize", measure);
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener("resize", measure);
+    };
+  }, [itemKey, measure]);
+
+  const move = (direction: -1 | 1) => {
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    viewport.scrollBy({ left: direction * Math.max(140, viewport.clientWidth * 0.72), behavior: "smooth" });
+  };
+
+  return (
+    <div className="filter-spotlight__selection-scroller" data-overflow={scrollState.overflow || undefined}>
+      {scrollState.overflow && (
+        <ActionIcon
+          className="filter-spotlight__selection-scroll-button"
+          size="xs"
+          variant="subtle"
+          color="gray"
+          aria-label={`${label}を前へ`}
+          disabled={!scrollState.before}
+          onClick={() => move(-1)}
+        >
+          <Icons.previous size={IconSize.menu} aria-hidden />
+        </ActionIcon>
+      )}
+      <div
+        ref={viewportRef}
+        className="filter-spotlight__selection-tokens"
+        role="group"
+        aria-label={`${label}の選択項目`}
+        tabIndex={scrollState.overflow ? 0 : undefined}
+        onScroll={measure}
+        onWheel={(event) => {
+          const viewport = viewportRef.current;
+          if (!viewport || !scrollState.overflow) return;
+          const delta = Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY;
+          if ((delta < 0 && scrollState.before) || (delta > 0 && scrollState.after)) {
+            event.preventDefault();
+            viewport.scrollLeft += delta;
+          }
+        }}
+      >
+        {children}
+      </div>
+      {scrollState.overflow && (
+        <ActionIcon
+          className="filter-spotlight__selection-scroll-button"
+          size="xs"
+          variant="subtle"
+          color="gray"
+          aria-label={`${label}を後ろへ`}
+          disabled={!scrollState.after}
+          onClick={() => move(1)}
+        >
+          <Icons.next size={IconSize.menu} aria-hidden />
+        </ActionIcon>
+      )}
+    </div>
+  );
+}
+
+function FacetSelectionSummary({ filters, onRemove }: {
+  filters: Filters;
+  onRemove: (kind: FacetKind, name: string, target: FacetTarget) => void;
+}) {
+  const includedCount = filters.authorsInclude.length + filters.tagsInclude.length;
+  const excludedCount = filters.authorsExclude.length + filters.tagsExclude.length;
+  return (
+    <div className="filter-spotlight__selection-summary" aria-label="選択中の条件">
+      <section className="filter-spotlight__selection-lane" aria-label="含める条件">
+        <span className="filter-spotlight__selection-label"><span>含める</span><b>{formatNumber(includedCount)}</b></span>
+        {includedCount ? (
+          <SelectionTokenScroller
+            label="含める条件"
+            itemKey={[...filters.authorsInclude.map((value) => `a:${value}`), ...filters.tagsInclude.map((value) => `t:${value}`)].join("\u0000")}
+          >
+            {filters.authorsInclude.map((author) => <FilterToken key={`summary:author:+${author}`} label={`作者: ${author}`} onRemove={() => onRemove("authors", author, "include")} />)}
+            {filters.tagsInclude.map((tag) => <FilterToken key={`summary:tag:+${tag}`} label={`#${tag}`} onRemove={() => onRemove("tags", tag, "include")} />)}
+          </SelectionTokenScroller>
+        ) : <span className="filter-spotlight__selection-empty">指定なし</span>}
+      </section>
+      <section className="filter-spotlight__selection-lane" aria-label="除外する条件">
+        <span className="filter-spotlight__selection-label" data-tone="exclude"><span>除外</span><b>{formatNumber(excludedCount)}</b></span>
+        {excludedCount ? (
+          <SelectionTokenScroller
+            label="除外する条件"
+            itemKey={[...filters.authorsExclude.map((value) => `a:${value}`), ...filters.tagsExclude.map((value) => `t:${value}`)].join("\u0000")}
+          >
+            {filters.authorsExclude.map((author) => <FilterToken key={`summary:author:-${author}`} label={`作者: ${author}`} tone="exclude" onRemove={() => onRemove("authors", author, "exclude")} />)}
+            {filters.tagsExclude.map((tag) => <FilterToken key={`summary:tag:-${tag}`} label={`#${tag}`} tone="exclude" onRemove={() => onRemove("tags", tag, "exclude")} />)}
+          </SelectionTokenScroller>
+        ) : <span className="filter-spotlight__selection-empty">指定なし</span>}
+      </section>
+    </div>
+  );
+}
+
+function FilterForm({ value, scope, versionScope, tab, runtime, authors, tags, contentTypes, onApply }: {
   value: Filters;
   scope: EntityScopeFilters;
+  versionScope: LibraryVersionScope;
   tab: LibraryTab;
   runtime: boolean;
   authors: FacetCount[];
   tags: FacetCount[];
   contentTypes: { value: string; label: string }[];
-  onApply: (value: Filters, scope: EntityScopeFilters) => void;
+  onApply: (value: Filters, scope: EntityScopeFilters, versionScope: LibraryVersionScope) => void;
 }) {
   const [draft, setDraft] = useState(() => normalizeFilters(value));
   const [scopeDraft, setScopeDraft] = useState(scope);
+  const [versionScopeDraft, setVersionScopeDraft] = useState(versionScope);
   const entityTab = tab === "people" || tab === "series";
   const entityNoun = tab === "series" ? "シリーズ" : "作者";
   const [activeSection, setActiveSection] = useState<FilterSection>(() => entityTab ? "entity" : "authors");
-  const [facetTarget, setFacetTarget] = useState<FacetTarget>("include");
   const [filterSearch, setFilterSearch] = useState("");
   const [debouncedFilterSearch] = useDebouncedValue(filterSearch, 180);
   const searchCombobox = useCombobox({
@@ -1966,12 +2468,20 @@ function FilterForm({ value, scope, tab, runtime, authors, tags, contentTypes, o
   useEffect(() => setDraft(normalizeFilters(JSON.parse(applied) as Filters)), [applied]);
   const appliedScope = JSON.stringify(scope);
   useEffect(() => setScopeDraft(JSON.parse(appliedScope) as EntityScopeFilters), [appliedScope]);
+  useEffect(() => setVersionScopeDraft(versionScope), [versionScope]);
   useEffect(() => {
     if (!entityTab && activeSection === "entity") setActiveSection("authors");
   }, [activeSection, entityTab]);
   const min = numericFilterOrNull(draft.minChars);
   const max = numericFilterOrNull(draft.maxChars);
   const invalidRange = min !== null && max !== null && min > max;
+  const minAssets = numericFilterOrNull(draft.minAssets);
+  const maxAssets = numericFilterOrNull(draft.maxAssets);
+  const invalidAssetRange = minAssets !== null && maxAssets !== null && minAssets > maxAssets;
+  const minSizeMb = decimalFilter(draft.minSizeMb);
+  const maxSizeMb = decimalFilter(draft.maxSizeMb);
+  const invalidSizeRange = minSizeMb !== "" && maxSizeMb !== "" && minSizeMb > maxSizeMb;
+  const invalidDateRange = Boolean(draft.dateFrom && draft.dateTo && draft.dateFrom > draft.dateTo);
   const normalizedSearch = debouncedFilterSearch.trim().toLocaleLowerCase("ja-JP");
   const remoteAuthors = useQuery({
     queryKey: ["filter-facet-search", "authors", normalizedSearch],
@@ -2002,15 +2512,25 @@ function FilterForm({ value, scope, tab, runtime, authors, tags, contentTypes, o
     + Number(Boolean(draft.watch));
   const authorCount = draft.authorsInclude.length + draft.authorsExclude.length;
   const tagCount = draft.tagsInclude.length + draft.tagsExclude.length;
-  const lengthCount = Number(draft.minChars !== "") + Number(draft.maxChars !== "");
+  const dateCount = Number(Boolean(draft.dateFrom)) + Number(Boolean(draft.dateTo));
+  const contentCount = Number(draft.minChars !== "") + Number(draft.maxChars !== "")
+    + Number(draft.minAssets !== "") + Number(draft.maxAssets !== "")
+    + Number(draft.minSizeMb !== "") + Number(draft.maxSizeMb !== "")
+    + Number(Boolean(draft.assetFilter)) + Number(Boolean(draft.seriesFilter));
+  const statusCount = Number(!entityTab && versionScopeDraft === "all")
+    + Number(Boolean(draft.revisionFilter))
+    + Number(Boolean(draft.editFilter))
+    + Number(Boolean(draft.coverFilter));
   const entityCount = entityScopeCount(scopeDraft);
-  const totalCount = basicCount + authorCount + tagCount + lengthCount + (entityTab ? entityCount : 0);
+  const totalCount = basicCount + statusCount + authorCount + tagCount + dateCount + contentCount + (entityTab ? entityCount : 0);
   const sectionOptions: { value: FilterSection; label: string; count: number }[] = [
     ...(entityTab ? [{ value: "entity" as const, label: `${entityNoun}一覧`, count: entityCount }] : []),
     { value: "basic", label: entityTab ? "作品" : "基本", count: basicCount },
+    { value: "status", label: "状態", count: statusCount },
     { value: "authors", label: "作者", count: authorCount },
     { value: "tags", label: "タグ", count: tagCount },
-    { value: "length", label: "文字数", count: lengthCount },
+    { value: "dates", label: "日付", count: dateCount },
+    { value: "content", label: "内容・ファイル", count: contentCount },
   ];
 
   const conditions = useMemo<SpotlightCondition[]>(() => [
@@ -2019,11 +2539,27 @@ function FilterForm({ value, scope, tab, runtime, authors, tags, contentTypes, o
     { id: "favorite", label: "お気に入りのみ", detail: "基本", keywords: "お気に入り favorite 基本", active: draft.favorite },
     { id: "watch:watched", label: "更新監視中のみ", detail: "基本", keywords: "更新 監視中 watched 基本", active: draft.watch === "watched" },
     { id: "watch:unwatched", label: "未監視のみ", detail: "基本", keywords: "更新 未監視 unwatched 基本", active: draft.watch === "unwatched" },
+    ...(!entityTab ? [
+      { id: "versions:current", label: "現在版だけを検索", detail: "状態", keywords: "現在版 最新版 検索対象", active: versionScopeDraft === "current" },
+      { id: "versions:all", label: "過去版も検索", detail: "状態", keywords: "過去版 履歴 改稿 検索対象", active: versionScopeDraft === "all" },
+    ] : []),
+    { id: "revision:revised", label: "改稿された作品", detail: "状態", keywords: "履歴 改稿 バージョン 版", active: draft.revisionFilter === "revised" },
+    { id: "revision:first_version", label: "初版のままの作品", detail: "状態", keywords: "初版 未改稿 バージョン", active: draft.revisionFilter === "first_version" },
+    { id: "edit:edited", label: "ローカル編集がある作品", detail: "状態", keywords: "ローカル 編集 修正", active: draft.editFilter === "edited" },
+    { id: "edit:unedited", label: "ローカル編集がない作品", detail: "状態", keywords: "未編集 オリジナル", active: draft.editFilter === "unedited" },
+    { id: "cover:has_cover", label: "表紙がある作品", detail: "状態", keywords: "表紙 カバー 画像", active: draft.coverFilter === "has_cover" },
+    { id: "cover:no_cover", label: "表紙がない作品", detail: "状態", keywords: "表紙なし カバーなし", active: draft.coverFilter === "no_cover" },
     { id: "tagmode:and", label: "タグをすべて含む", detail: "AND", keywords: "タグ すべて and 条件", active: draft.tagMode === "and" },
     { id: "tagmode:or", label: "タグのどれかを含む", detail: "OR", keywords: "タグ どれか or 条件", active: draft.tagMode === "or" },
     { id: "section:authors", label: "作者を設定", detail: "設定を開く", keywords: "作者 クリエイター 含める 除外", active: activeSection === "authors" },
+    { id: "section:status", label: "作品の状態を設定", detail: "設定を開く", keywords: "現在版 過去版 履歴 編集 表紙", active: activeSection === "status" },
     { id: "section:tags", label: "タグを設定", detail: "設定を開く", keywords: "タグ 含める 除外", active: activeSection === "tags" },
-    { id: "section:length", label: "文字数を設定", detail: "設定を開く", keywords: "文字数 最小 最大 長さ", active: activeSection === "length" },
+    { id: "section:dates", label: "日付を設定", detail: "設定を開く", keywords: "保存日 公開日 更新日 期間", active: activeSection === "dates" },
+    { id: "section:content", label: "内容・ファイルを設定", detail: "設定を開く", keywords: "文字数 シリーズ 画像 添付 ファイル 容量 件数", active: activeSection === "content" },
+    { id: "series:in_series", label: "シリーズ作品のみ", detail: "内容・ファイル", keywords: "シリーズ 連載", active: draft.seriesFilter === "in_series" },
+    { id: "series:standalone", label: "単発作品のみ", detail: "内容・ファイル", keywords: "単発 シリーズなし", active: draft.seriesFilter === "standalone" },
+    { id: "asset:has_images", label: "画像がある作品", detail: "内容・ファイル", keywords: "画像 添付", active: draft.assetFilter === "has_images" },
+    { id: "asset:no_assets", label: "添付がない作品", detail: "内容・ファイル", keywords: "添付なし 画像なし", active: draft.assetFilter === "no_assets" },
     ...contentTypes.map((item) => ({
       id: `content:${item.value}`,
       label: `${contentTypeName(item.value)}のみ`,
@@ -2031,7 +2567,7 @@ function FilterForm({ value, scope, tab, runtime, authors, tags, contentTypes, o
       keywords: `${item.value} ${contentTypeName(item.value)} コンテンツ 種別`,
       active: draft.contentType === item.value,
     })),
-  ], [activeSection, contentTypes, draft.contentType, draft.favorite, draft.sources, draft.tagMode, draft.watch]);
+  ], [activeSection, contentTypes, draft.assetFilter, draft.contentType, draft.coverFilter, draft.editFilter, draft.favorite, draft.revisionFilter, draft.seriesFilter, draft.sources, draft.tagMode, draft.watch, entityTab, versionScopeDraft]);
   const conditionResults = useMemo(() => conditions.filter((condition) => (
     `${condition.label} ${condition.detail} ${condition.keywords}`.toLocaleLowerCase("ja-JP").includes(normalizedSearch)
   )).slice(0, 8), [conditions, normalizedSearch]);
@@ -2062,6 +2598,10 @@ function FilterForm({ value, scope, tab, runtime, authors, tags, contentTypes, o
       searchCombobox.closeDropdown();
       return;
     }
+    if (id.startsWith("versions:")) {
+      setVersionScopeDraft(id.endsWith(":all") ? "all" : "current");
+      return;
+    }
     setDraft((current) => {
       if (id === "favorite") return { ...current, favorite: !current.favorite };
       if (id.startsWith("source:")) {
@@ -2073,6 +2613,26 @@ function FilterForm({ value, scope, tab, runtime, authors, tags, contentTypes, o
         return { ...current, watch: current.watch === watch ? null : watch };
       }
       if (id.startsWith("tagmode:")) return { ...current, tagMode: id.endsWith(":or") ? "or" : "and" };
+      if (id.startsWith("series:")) {
+        const seriesFilter = parseSeriesFilter(id.slice("series:".length));
+        return { ...current, seriesFilter: current.seriesFilter === seriesFilter ? null : seriesFilter };
+      }
+      if (id.startsWith("asset:")) {
+        const assetFilter = parseAssetFilter(id.slice("asset:".length));
+        return { ...current, assetFilter: current.assetFilter === assetFilter ? null : assetFilter };
+      }
+      if (id.startsWith("revision:")) {
+        const revisionFilter = parseRevisionFilter(id.slice("revision:".length));
+        return { ...current, revisionFilter: current.revisionFilter === revisionFilter ? null : revisionFilter };
+      }
+      if (id.startsWith("edit:")) {
+        const editFilter = parseEditFilter(id.slice("edit:".length));
+        return { ...current, editFilter: current.editFilter === editFilter ? null : editFilter };
+      }
+      if (id.startsWith("cover:")) {
+        const coverFilter = parseCoverFilter(id.slice("cover:".length));
+        return { ...current, coverFilter: current.coverFilter === coverFilter ? null : coverFilter };
+      }
       if (id.startsWith("content:")) {
         const contentType = id.slice("content:".length);
         return { ...current, contentType: current.contentType === contentType ? null : contentType };
@@ -2090,8 +2650,8 @@ function FilterForm({ value, scope, tab, runtime, authors, tags, contentTypes, o
   const reset = () => {
     setDraft(initialFilters);
     setScopeDraft(initialEntityScope);
+    setVersionScopeDraft("current");
     setActiveSection(entityTab ? "entity" : "authors");
-    setFacetTarget("include");
     setFilterSearch("");
     searchCombobox.closeDropdown();
   };
@@ -2108,26 +2668,21 @@ function FilterForm({ value, scope, tab, runtime, authors, tags, contentTypes, o
             if (condition) applyCondition(condition.id);
             return;
           }
-          if (selected.startsWith("author:")) {
-            const facet = authorResults[Number(selected.slice("author:".length))];
-            if (facet) toggleFacet("authors", facet.name, facetTarget);
-            searchCombobox.updateSelectedOptionIndex();
-            return;
-          }
-          if (selected.startsWith("tag:")) {
-            const facet = tagResults[Number(selected.slice("tag:".length))];
-            if (facet) toggleFacet("tags", facet.name, facetTarget);
-            searchCombobox.updateSelectedOptionIndex();
-          }
+          const facetSelection = /^(author|tag):(include|exclude):(\d+)$/.exec(selected);
+          if (!facetSelection) return;
+          const [, kind, target, rawIndex] = facetSelection;
+          const facet = (kind === "author" ? authorResults : tagResults)[Number(rawIndex)];
+          if (facet) toggleFacet(kind === "author" ? "authors" : "tags", facet.name, target as FacetTarget);
+          searchCombobox.updateSelectedOptionIndex();
         }}
       >
         <div className="filter-spotlight__search-zone">
           <div className="filter-spotlight__search-row">
             <Combobox.Target>
               <TextInput
-                size="md"
+                size="sm"
                 aria-label="条件を検索"
-                placeholder="作者・タグ・条件名を検索"
+                placeholder="作者・タグ・条件を検索"
                 value={filterSearch}
                 maxLength={120}
                 data-autofocus
@@ -2155,15 +2710,7 @@ function FilterForm({ value, scope, tab, runtime, authors, tags, contentTypes, o
                 }}
               />
             </Combobox.Target>
-            <SegmentedControl
-              size="sm"
-              aria-label="検索結果の追加先"
-              value={facetTarget}
-              onChange={(next) => setFacetTarget(next === "exclude" ? "exclude" : "include")}
-              data={[{ value: "include", label: "含める" }, { value: "exclude", label: "除外" }]}
-            />
           </div>
-          <Text size="xs" c="dimmed" className="filter-spotlight__search-note">作者・タグは名前の一致で検索</Text>
           <Combobox.Dropdown className="filter-spotlight__dropdown">
             <Combobox.Options className="filter-spotlight__results">
               {conditionResults.length > 0 && (
@@ -2180,36 +2727,12 @@ function FilterForm({ value, scope, tab, runtime, authors, tags, contentTypes, o
               )}
               {authorResults.length > 0 && (
                 <Combobox.Group label="作者">
-                  {authorResults.map((facet, index) => {
-                    const selected = (facetTarget === "include" ? draft.authorsInclude : draft.authorsExclude).includes(facet.name);
-                    return (
-                      <Combobox.Option value={`author:${index}`} key={facet.name} active={selected}>
-                        <div className="filter-spotlight__result-row filter-spotlight__result-row--facet">
-                          <Icons.confirm size={IconSize.menu} opacity={selected ? 1 : 0} aria-hidden />
-                          <span className="filter-spotlight__provider-marks">{orderedAuthorSources(facet.sources).map((source) => <ProviderMark key={source} provider={source} compact />)}</span>
-                          <Text size="sm" className="filter-spotlight__facet-name">{facet.name}</Text>
-                          <Badge size="xs" variant="light" color="gray">{formatNumber(facet.count)}</Badge>
-                        </div>
-                      </Combobox.Option>
-                    );
-                  })}
+                  <FacetSearchChoices kind="authors" facets={authorResults} include={draft.authorsInclude} exclude={draft.authorsExclude} />
                 </Combobox.Group>
               )}
               {tagResults.length > 0 && (
                 <Combobox.Group label="タグ">
-                  {tagResults.map((facet, index) => {
-                    const selected = (facetTarget === "include" ? draft.tagsInclude : draft.tagsExclude).includes(facet.name);
-                    return (
-                      <Combobox.Option value={`tag:${index}`} key={facet.name} active={selected}>
-                        <div className="filter-spotlight__result-row filter-spotlight__result-row--facet">
-                          <Icons.confirm size={IconSize.menu} opacity={selected ? 1 : 0} aria-hidden />
-                          <Icons.tag size={IconSize.menu} aria-hidden />
-                          <Text size="sm" className="filter-spotlight__facet-name">{facet.name}</Text>
-                          <Badge size="xs" variant="light" color="gray">{formatNumber(facet.count)}</Badge>
-                        </div>
-                      </Combobox.Option>
-                    );
-                  })}
+                  <FacetSearchChoices kind="tags" facets={tagResults} include={draft.tagsInclude} exclude={draft.tagsExclude} />
                 </Combobox.Group>
               )}
               {!conditionResults.length && !authorResults.length && !tagResults.length && (
@@ -2248,7 +2771,6 @@ function FilterForm({ value, scope, tab, runtime, authors, tags, contentTypes, o
         >
           {activeSection === "entity" && entityTab && (
             <Stack gap="md">
-              <div><Text component="h3" fw={700}>{entityNoun}一覧</Text><Text size="xs" c="dimmed">一覧そのものにかける条件</Text></div>
               <SimpleGrid cols={{ base: 1, xs: tab === "series" ? 3 : 2 }} spacing="sm">
                 <Select size="sm" label="更新監視" clearable placeholder="すべて" data={[{ value: "watched", label: "監視中" }, { value: "paused", label: "停止中" }, { value: "unwatched", label: "未登録" }]} value={scopeDraft.watch} onChange={(watch) => setScopeDraft({ ...scopeDraft, watch: parseEntityWatch(watch) })} />
                 <NumberInput size="sm" label="作品数の下限" placeholder="指定なし" hideControls min={0} max={Number.MAX_SAFE_INTEGER} allowDecimal={false} allowNegative={false} value={scopeDraft.minWorkCount} onChange={(minWorkCount) => setScopeDraft({ ...scopeDraft, minWorkCount: numericFilter(typeof minWorkCount === "string" ? Number.parseInt(minWorkCount, 10) : minWorkCount) })} />
@@ -2259,7 +2781,6 @@ function FilterForm({ value, scope, tab, runtime, authors, tags, contentTypes, o
 
           {activeSection === "basic" && (
             <Stack gap="md">
-              <div><Text component="h3" fw={700}>{entityTab ? "作品" : "基本"}</Text><Text size="xs" c="dimmed">対象になる作品を選びます</Text></div>
               <Group gap="lg" wrap="wrap">
                 <Checkbox.Group value={draft.sources} onChange={(sources) => setDraft({ ...draft, sources })}>
                   <Group gap="md"><Checkbox value="pixiv" label="pixiv" /><Checkbox value="fanbox" label="FANBOX" /></Group>
@@ -2267,8 +2788,59 @@ function FilterForm({ value, scope, tab, runtime, authors, tags, contentTypes, o
                 <Checkbox label="お気に入りのみ" checked={draft.favorite} onChange={(event) => setDraft({ ...draft, favorite: event.currentTarget.checked })} />
               </Group>
               <SimpleGrid cols={{ base: 1, xs: 2 }} spacing="sm">
-                <Select label="コンテンツ種別" placeholder="すべて" clearable data={contentTypes} value={draft.contentType} onChange={(contentType) => setDraft({ ...draft, contentType })} />
-                <Select label="更新監視" clearable placeholder="すべて" data={[{ value: "watched", label: "監視中" }, { value: "unwatched", label: "未監視" }]} value={draft.watch} onChange={(watch) => setDraft({ ...draft, watch: parseWatchFilter(watch) })} />
+                <Select size="sm" label="コンテンツ種別" placeholder="すべて" clearable data={contentTypes} value={draft.contentType} onChange={(contentType) => setDraft({ ...draft, contentType })} />
+                <Select size="sm" label="更新監視" clearable placeholder="すべて" data={[{ value: "watched", label: "監視中" }, { value: "unwatched", label: "未監視" }]} value={draft.watch} onChange={(watch) => setDraft({ ...draft, watch: parseWatchFilter(watch) })} />
+              </SimpleGrid>
+            </Stack>
+          )}
+
+          {activeSection === "status" && (
+            <Stack gap="md">
+              {!entityTab && (
+                <div>
+                  <Text size="xs" fw={700} c="dimmed" mb={6}>全文検索の対象</Text>
+                  <SegmentedControl
+                    size="sm"
+                    fullWidth
+                    aria-label="全文検索の対象"
+                    value={versionScopeDraft}
+                    onChange={(next) => setVersionScopeDraft(next === "all" ? "all" : "current")}
+                    data={[
+                      { value: "current", label: "現在版だけ" },
+                      { value: "all", label: "過去版も含む" },
+                    ]}
+                  />
+                  <Text size="xs" c="dimmed" mt={6}>検索語を、現在の本文だけでなく保存済みの改稿履歴にも照合します。過去版で一致しても、結果は作品ごとに1件にまとめます。</Text>
+                </div>
+              )}
+              <SimpleGrid cols={{ base: 1, xs: 3 }} spacing="sm">
+                <Select
+                  size="sm"
+                  label="改稿状態"
+                  clearable
+                  placeholder="すべて"
+                  data={[{ value: "revised", label: "改稿あり" }, { value: "first_version", label: "初版のまま" }]}
+                  value={draft.revisionFilter}
+                  onChange={(revisionFilter) => setDraft({ ...draft, revisionFilter: parseRevisionFilter(revisionFilter) })}
+                />
+                <Select
+                  size="sm"
+                  label="ローカル編集"
+                  clearable
+                  placeholder="すべて"
+                  data={[{ value: "edited", label: "編集あり" }, { value: "unedited", label: "編集なし" }]}
+                  value={draft.editFilter}
+                  onChange={(editFilter) => setDraft({ ...draft, editFilter: parseEditFilter(editFilter) })}
+                />
+                <Select
+                  size="sm"
+                  label="表紙"
+                  clearable
+                  placeholder="すべて"
+                  data={[{ value: "has_cover", label: "表紙あり" }, { value: "no_cover", label: "表紙なし" }]}
+                  value={draft.coverFilter}
+                  onChange={(coverFilter) => setDraft({ ...draft, coverFilter: parseCoverFilter(coverFilter) })}
+                />
               </SimpleGrid>
             </Stack>
           )}
@@ -2279,7 +2851,6 @@ function FilterForm({ value, scope, tab, runtime, authors, tags, contentTypes, o
               facets={authors}
               include={draft.authorsInclude}
               exclude={draft.authorsExclude}
-              target={facetTarget}
               onToggle={(name, target) => toggleFacet("authors", name, target)}
             />
           )}
@@ -2290,7 +2861,6 @@ function FilterForm({ value, scope, tab, runtime, authors, tags, contentTypes, o
               facets={tags}
               include={draft.tagsInclude}
               exclude={draft.tagsExclude}
-              target={facetTarget}
               headerAction={(
                 <div className="filter-spotlight__tag-mode">
                   <Text size="xs" fw={700} c="dimmed">複数タグ</Text>
@@ -2307,23 +2877,84 @@ function FilterForm({ value, scope, tab, runtime, authors, tags, contentTypes, o
             />
           )}
 
-          {activeSection === "length" && (
+          {activeSection === "dates" && (
             <Stack gap="md">
-              <div><Text component="h3" fw={700}>文字数</Text><Text size="xs" c="dimmed">片方だけでも指定できます</Text></div>
+              <SegmentedControl
+                size="sm"
+                fullWidth
+                aria-label="日付の種類"
+                value={draft.dateField}
+                onChange={(dateField) => setDraft({ ...draft, dateField: parseDateField(dateField) })}
+                data={[
+                  { value: "downloaded_at", label: "保存日" },
+                  { value: "source_created_at", label: "公開日" },
+                  { value: "source_updated_at", label: "更新日" },
+                ]}
+              />
               <SimpleGrid cols={{ base: 1, xs: 2 }} spacing="sm">
-                <NumberInput label="最小文字数" hideControls min={0} max={Number.MAX_SAFE_INTEGER} allowDecimal={false} allowNegative={false} thousandSeparator="," value={draft.minChars} onChange={(minChars) => setDraft({ ...draft, minChars })} />
-                <NumberInput label="最大文字数" hideControls min={0} max={Number.MAX_SAFE_INTEGER} allowDecimal={false} allowNegative={false} thousandSeparator="," value={draft.maxChars} onChange={(maxChars) => setDraft({ ...draft, maxChars })} />
+                <TextInput size="sm" type="date" label="開始日" value={draft.dateFrom} onChange={(event) => setDraft({ ...draft, dateFrom: event.currentTarget.value })} />
+                <TextInput size="sm" type="date" label="終了日" value={draft.dateTo} onChange={(event) => setDraft({ ...draft, dateTo: event.currentTarget.value })} />
+              </SimpleGrid>
+              {invalidDateRange && <Alert color="red" py="xs">終了日は開始日以降にしてください。</Alert>}
+            </Stack>
+          )}
+
+          {activeSection === "content" && (
+            <Stack gap="md">
+              <SimpleGrid cols={{ base: 1, xs: 2 }} spacing="sm">
+                <Select
+                  size="sm"
+                  label="シリーズ"
+                  clearable
+                  placeholder="すべて"
+                  data={[{ value: "in_series", label: "シリーズ作品" }, { value: "standalone", label: "単発作品" }]}
+                  value={draft.seriesFilter}
+                  onChange={(seriesFilter) => setDraft({ ...draft, seriesFilter: parseSeriesFilter(seriesFilter) })}
+                />
+                <Select
+                  size="sm"
+                  label="添付ファイル"
+                  clearable
+                  placeholder="すべて"
+                  data={[
+                    { value: "has_assets", label: "添付あり" },
+                    { value: "no_assets", label: "添付なし" },
+                    { value: "has_images", label: "画像あり" },
+                    { value: "has_files", label: "画像以外のファイルあり" },
+                    { value: "has_images_and_files", label: "画像とファイルの両方" },
+                  ]}
+                  value={draft.assetFilter}
+                  onChange={(assetFilter) => setDraft({ ...draft, assetFilter: parseAssetFilter(assetFilter) })}
+                />
+              </SimpleGrid>
+              <Divider label="文字数" labelPosition="left" />
+              <SimpleGrid cols={{ base: 1, xs: 2 }} spacing="sm">
+                <NumberInput size="sm" label="最小文字数" hideControls min={0} max={Number.MAX_SAFE_INTEGER} allowDecimal={false} allowNegative={false} thousandSeparator="," value={draft.minChars} onChange={(minChars) => setDraft({ ...draft, minChars })} />
+                <NumberInput size="sm" label="最大文字数" hideControls min={0} max={Number.MAX_SAFE_INTEGER} allowDecimal={false} allowNegative={false} thousandSeparator="," value={draft.maxChars} onChange={(maxChars) => setDraft({ ...draft, maxChars })} />
               </SimpleGrid>
               {invalidRange && <Alert color="red" py="xs">最大文字数は最小文字数以上にしてください。</Alert>}
+              <Divider label="添付数" labelPosition="left" />
+              <SimpleGrid cols={{ base: 1, xs: 2 }} spacing="sm">
+                <NumberInput size="sm" label="最小添付数" hideControls min={0} max={Number.MAX_SAFE_INTEGER} allowDecimal={false} allowNegative={false} thousandSeparator="," value={draft.minAssets} onChange={(minAssets) => setDraft({ ...draft, minAssets })} />
+                <NumberInput size="sm" label="最大添付数" hideControls min={0} max={Number.MAX_SAFE_INTEGER} allowDecimal={false} allowNegative={false} thousandSeparator="," value={draft.maxAssets} onChange={(maxAssets) => setDraft({ ...draft, maxAssets })} />
+              </SimpleGrid>
+              {invalidAssetRange && <Alert color="red" py="xs">最大添付数は最小添付数以上にしてください。</Alert>}
+              <Divider label="ローカル容量" labelPosition="left" />
+              <SimpleGrid cols={{ base: 1, xs: 2 }} spacing="sm">
+                <NumberInput size="sm" label="最小容量" suffix=" MB" hideControls min={0} max={Number.MAX_SAFE_INTEGER} decimalScale={2} allowDecimal allowNegative={false} thousandSeparator="," value={draft.minSizeMb} onChange={(minSizeMb) => setDraft({ ...draft, minSizeMb })} />
+                <NumberInput size="sm" label="最大容量" suffix=" MB" hideControls min={0} max={Number.MAX_SAFE_INTEGER} decimalScale={2} allowDecimal allowNegative={false} thousandSeparator="," value={draft.maxSizeMb} onChange={(maxSizeMb) => setDraft({ ...draft, maxSizeMb })} />
+              </SimpleGrid>
+              {invalidSizeRange && <Alert color="red" py="xs">最大容量は最小容量以上にしてください。</Alert>}
             </Stack>
           )}
         </section>
       </div>
+      <FacetSelectionSummary filters={draft} onRemove={toggleFacet} />
       <div className="filter-form__actions">
         <Text size="sm" c="dimmed">{totalCount ? `${formatNumber(totalCount)}件の条件` : "条件なし"}</Text>
-        <Group gap="sm">
+        <Group gap="sm" wrap="nowrap">
           <Button variant="default" onClick={reset}>リセット</Button>
-          <Button disabled={invalidRange} onClick={() => onApply(normalizeFilters(draft), scopeDraft)}>適用</Button>
+          <Button disabled={invalidRange || invalidAssetRange || invalidSizeRange || invalidDateRange} onClick={() => onApply(normalizeFilters(draft), scopeDraft, versionScopeDraft)}>適用</Button>
         </Group>
       </div>
     </div>

@@ -167,17 +167,39 @@ const MATCH_FIELD_LABELS: Record<string, string> = {
 };
 
 function SearchMatchReason({ work }: { work: DownloadEntry }) {
+  const navigate = useAppNavigate();
   const fields = (work.matchFields ?? []).slice(0, 3);
-  if (!fields.length) return null;
-  const details = (work.scoreReasons ?? [])
+  const historicalVersion = work.matchedVersion ?? null;
+  if (!fields.length && historicalVersion === null) return null;
+  const reasonDetails = (work.scoreReasons ?? [])
     .slice(0, 5)
     .map((reason) => `${MATCH_FIELD_LABELS[reason.field] ?? reason.field}: ${reason.term}（${reason.matchType}）`)
     .join("\n");
+  const historyDetails = historicalVersion === null
+    ? ""
+    : `現在版ではなく保存済みの v${historicalVersion} に一致しました${(work.historicalMatchCount ?? 0) > 1 ? `（一致した過去版: ${work.historicalMatchCount}版）` : ""}`;
+  const details = [historyDetails, reasonDetails].filter(Boolean).join("\n");
   return (
     <Tooltip label={details || "検索語が一致した項目です"} multiline maw={360} withArrow>
-      <Group gap={4} wrap="nowrap" className="work-card__search-reason" aria-label={`一致理由: ${fields.map((field) => MATCH_FIELD_LABELS[field] ?? field).join("、")}`}>
+      <Group gap={4} wrap="nowrap" className="work-card__search-reason" aria-label={historicalVersion === null ? `一致理由: ${fields.map((field) => MATCH_FIELD_LABELS[field] ?? field).join("、")}` : `過去版 v${historicalVersion} に一致`}>
         <Icons.searchMatch size={IconSize.inline} aria-hidden />
         <Text size="xs" c="piep" fw={650}>一致</Text>
+        {historicalVersion !== null && (
+          <Badge
+            component="button"
+            type="button"
+            size="xs"
+            variant="filled"
+            color="piep"
+            aria-label={`${work.title}の過去版 v${historicalVersion} を読む`}
+            onClick={(event) => {
+              event.stopPropagation();
+              navigate(`/reader/${work.id}?version=${historicalVersion}`);
+            }}
+          >
+            過去版 v{historicalVersion}
+          </Badge>
+        )}
         {fields.map((field) => <Badge key={field} size="xs" variant="light" color="piep">{MATCH_FIELD_LABELS[field] ?? field}</Badge>)}
       </Group>
     </Tooltip>

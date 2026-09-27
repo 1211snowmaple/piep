@@ -20,7 +20,7 @@ import { Icons, IconSize } from "@/lib/icons";
 import { generateCollectionSuggestion, listCollectionSuggestions, upsertWorkCollection } from "@/services/collectionApi";
 import { isTauriRuntime } from "@/services/dbApi";
 import { demoSuggestions } from "@/mocks/demoData";
-import type { WorkCollectionSummary } from "@/types/collections";
+import type { CollectionSortBy, WorkCollectionSummary } from "@/types/collections";
 import { invalidateCollectionViews, workCollectionsQueryOptions } from "./collectionQueries";
 import { CollectionCard } from "./CollectionCard";
 import { CollectionFormModal } from "./CollectionFormModal";
@@ -32,8 +32,6 @@ import { CollectionSweepModal } from "./CollectionSweepModal";
  * 一覧の並べ替え。コレクションは手で作った束ねなので、鍵も作品や作者とは違う。
  * 「いつ作ったか」「名前」「何作品入っているか」の三つで足りる。
  */
-export type CollectionSortBy = "created_at" | "name" | "member_count";
-
 /** 名前と説明にかかる、ただの絞り込み。件数を数える側と同じ関数を使う。 */
 export function filterCollections(items: WorkCollectionSummary[], query: string): WorkCollectionSummary[] {
   const normalized = query.trim().toLocaleLowerCase("ja-JP");
@@ -42,14 +40,19 @@ export function filterCollections(items: WorkCollectionSummary[], query: string)
     `${collection.name} ${collection.description ?? ""}`.toLocaleLowerCase("ja-JP").includes(normalized));
 }
 
-function sortCollections(items: WorkCollectionSummary[], sortBy: CollectionSortBy): WorkCollectionSummary[] {
+export function sortCollections(items: WorkCollectionSummary[], sortBy: CollectionSortBy, sortOrder: "asc" | "desc"): WorkCollectionSummary[] {
   const sorted = [...items];
-  if (sortBy === "name") return sorted.sort((a, b) => a.name.localeCompare(b.name, "ja"));
-  if (sortBy === "member_count") return sorted.sort((a, b) => b.memberCount - a.memberCount || a.name.localeCompare(b.name, "ja"));
-  return sorted.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  const direction = sortOrder === "asc" ? 1 : -1;
+  if (sortBy === "name") return sorted.sort((a, b) => direction * a.name.localeCompare(b.name, "ja") || String(a.id).localeCompare(String(b.id)));
+  if (sortBy === "member_count") return sorted.sort((a, b) => direction * (a.memberCount - b.memberCount) || a.name.localeCompare(b.name, "ja"));
+  if (sortBy === "available_count") return sorted.sort((a, b) => direction * (a.availableCount - b.availableCount) || a.name.localeCompare(b.name, "ja"));
+  if (sortBy === "text_length") return sorted.sort((a, b) => direction * (a.totalTextLength - b.totalTextLength) || a.name.localeCompare(b.name, "ja"));
+  if (sortBy === "revision") return sorted.sort((a, b) => direction * (a.revision - b.revision) || a.name.localeCompare(b.name, "ja"));
+  if (sortBy === "updated_at") return sorted.sort((a, b) => direction * a.updatedAt.localeCompare(b.updatedAt) || String(a.id).localeCompare(String(b.id)));
+  return sorted.sort((a, b) => direction * a.createdAt.localeCompare(b.createdAt) || String(a.id).localeCompare(String(b.id)));
 }
 
-export function CollectionsPanel({ query = "", sortBy = "created_at" }: { query?: string; sortBy?: CollectionSortBy } = {}) {
+export function CollectionsPanel({ query = "", sortBy = "created_at", sortOrder = "desc" }: { query?: string; sortBy?: CollectionSortBy; sortOrder?: "asc" | "desc" } = {}) {
   const runtime = isTauriRuntime();
   const navigate = useAppNavigate();
   const queryClient = useQueryClient();
@@ -86,7 +89,7 @@ export function CollectionsPanel({ query = "", sortBy = "created_at" }: { query?
   // 上のツールバーはこのタブでも出したままにする（タブを移るたびに画面が
    // 飛ばないため）。出ている以上、検索も並べ替えもここに効かせる。
   const normalizedQuery = query.trim();
-  const collections = sortCollections(filterCollections(collectionsQuery.data ?? [], query), sortBy);
+  const collections = sortCollections(filterCollections(collectionsQuery.data ?? [], query), sortBy, sortOrder);
   // 束の一覧は一度に全件を持っている。棚のようにサーバーへ問い直す必要は無い
   // ので、ページ番号は手元の配列を切るだけで足りる。
   const [pagingMode] = usePagingMode("library-collections");

@@ -174,6 +174,25 @@ describe("WorkCard", () => {
     expect(window.location.hash).toBe("#/works/101?tab=history");
   });
 
+  it("labels a history-only search hit and opens the matching saved revision", () => {
+    window.location.hash = "#/library?q=%E6%97%A7%E7%89%88&versions=all";
+    renderCard({
+      work: {
+        ...demoWorks[0],
+        currentVersion: 3,
+        matchedVersion: 1,
+        historicalMatchCount: 2,
+        matchFields: ["body"],
+        scoreReasons: [{ field: "body", matchType: "exact", term: "旧版", contribution: 10 }],
+      },
+    });
+
+    const historicalHit = screen.getByRole("button", { name: /過去版 v1 を読む/ });
+    expect(historicalHit).toHaveTextContent("過去版 v1");
+    fireEvent.click(historicalHit);
+    expect(window.location.hash).toBe("#/reader/101?version=1");
+  });
+
   it("labels and deep-links an unsaved rewrite separately from saved history", async () => {
     updateJobApi.listPendingRevisionsCommand.mockResolvedValue([{ downloadId: 101, foundAt: "2026-09-01T00:00:00Z" }]);
     renderCard({ work: { ...demoWorks[0], currentVersion: 2 } });
