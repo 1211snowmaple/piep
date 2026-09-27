@@ -17,7 +17,12 @@ function onlyOnce(name: string) {
 
 async function scrollMain(page: Page, top: number) {
   await page.evaluate(async ([selector, value]) => {
-    document.querySelector(selector as string)!.scrollTop = value as number;
+    const main = document.querySelector(selector as string)!;
+    // Programmatic restoration deliberately ignores programmatic scroll events.
+    // Signal the same intent as grabbing a scrollbar before moving it, so this
+    // helper tests a reader's movement rather than fighting an active restore.
+    main.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+    main.scrollTop = value as number;
     // The app records the position from a scroll event, and the browser only
     // dispatches those while producing frames. Waiting a fixed few milliseconds
     // is not the same thing on a loaded machine.
@@ -142,18 +147,97 @@ test("choosing a library tab does not move the page either", async ({ page }, te
   expect(await mainScrollTop(page)).toBe(Math.min(before, await maxScrollTop(page)));
 });
 
+test("opening another library shelf starts that listing at the top", async ({ page }, testInfo) => {
+  onlyOnce(testInfo.project.name);
+  await page.goto("/#/library");
+  await expect(page.getByRole("combobox", { name: "ライブラリを検索" })).toBeVisible();
+  await page.waitForTimeout(300);
+
+  await scrollMain(page, 500);
+  expect(await mainScrollTop(page)).toBe(500);
+
+  // This is a same-path push, but it is not a continuation of the current
+  // listing. Keeping 500px would either skip the first favourites or clamp the
+  // reader to the bottom when the shelf is shorter than the full library.
+  await page.getByRole("button", { name: /^お気に入り 84$/ }).click();
+  await expect(page).toHaveURL(/#\/library\?favorite=1/);
+  await expect.poll(() => mainScrollTop(page), { timeout: 8000 }).toBe(0);
+});
+
+test("reselecting the active library shelf returns it to the top", async ({ page }, testInfo) => {
+  onlyOnce(testInfo.project.name);
+  await page.goto("/#/library");
+  await expect(page.getByRole("combobox", { name: "ライブラリを検索" })).toBeVisible();
+  await page.waitForTimeout(300);
+
+  await scrollMain(page, 500);
+  expect(await mainScrollTop(page)).toBe(500);
+  await page.getByRole("button", { name: /^すべて 1,284$/ }).click();
+  await expect.poll(() => mainScrollTop(page), { timeout: 8000 }).toBe(0);
+  await expect(page).toHaveURL(/#\/library$/);
+});
+
 test("an author screen opens at its profile, not at its works", async ({ page }, testInfo) => {
   onlyOnce(testInfo.project.name);
+  await page.setViewportSize({ width: 900, height: 600 });
   await page.goto("/#/library?tab=people");
   await expect(page.getByRole("combobox", { name: "ライブラリを検索" })).toBeVisible();
   await page.waitForTimeout(300);
 
-  await page.getByRole("link", { name: /を開く$/ }).first().click();
+  // A detail route is a new place. It starts at its own top even when the
+  // virtualised list we left was scrolled, rather than inheriting that offset.
+  await scrollMain(page, 180);
+  expect(await mainScrollTop(page)).toBeGreaterThan(0);
+
+  await page.getByRole("link", { name: /を開く$/ }).first().dispatchEvent("click");
   await expect(page).toHaveURL(/#\/people\//);
   // A stored preference settling a tick after mount used to count as a page
   // change here, which scrolled straight past the profile.
   await page.waitForTimeout(900);
   expect(await mainScrollTop(page)).toBe(0);
+});
+
+test("an author cannot leak its scroll position into the library history entry", async ({ page }, testInfo) => {
+  onlyOnce(testInfo.project.name);
+  await page.goto("/#/library?tab=people");
+  await expect(page.getByRole("combobox", { name: "ライブラリを検索" })).toBeVisible();
+  await expect.poll(() => mainScrollTop(page)).toBe(0);
+
+  await page.getByRole("link", { name: /を開く$/ }).first().dispatchEvent("click");
+  await expect(page).toHaveURL(/#\/people\//);
+  await expect(page.getByRole("combobox", { name: "ライブラリを検索" })).toBeHidden();
+
+  await scrollMain(page, 1_000_000);
+  const authorBottom = await mainScrollTop(page);
+  expect(authorBottom).toBeGreaterThan(0);
+
+  await page.getByLabel("前の画面へ戻る").click();
+  await expect(page).toHaveURL(/#\/library\?tab=people/);
+  await expect(page.getByRole("combobox", { name: "ライブラリを検索" })).toBeVisible();
+  await expect.poll(() => mainScrollTop(page), { timeout: 8000 }).toBe(0);
+
+  // The two offsets remain independent in both directions. Going forward is
+  // allowed to restore the author's bottom, but must not make it the library's.
+  await page.getByLabel("次の画面へ進む").click();
+  await expect(page).toHaveURL(/#\/people\//);
+  await expect(page.getByRole("combobox", { name: "ライブラリを検索" })).toBeHidden();
+  await expect.poll(() => mainScrollTop(page), { timeout: 8000 }).toBe(authorBottom);
+
+  // Back and a new push reuse the discarded forward entry's numeric index.
+  // That slot must belong to the new author, not retain the old author's bottom.
+  const firstAuthorUrl = page.url();
+  await page.getByLabel("前の画面へ戻る").click();
+  await expect(page.getByRole("combobox", { name: "ライブラリを検索" })).toBeVisible();
+  await page.getByRole("link", { name: /を開く$/ }).nth(1).dispatchEvent("click");
+  await expect(page).toHaveURL(/#\/people\//);
+  expect(page.url()).not.toBe(firstAuthorUrl);
+  await expect.poll(() => mainScrollTop(page), { timeout: 8000 }).toBe(0);
+
+  await page.getByLabel("前の画面へ戻る").click();
+  await expect(page.getByRole("combobox", { name: "ライブラリを検索" })).toBeVisible();
+  await page.getByLabel("次の画面へ進む").click();
+  await expect(page).toHaveURL(/#\/people\//);
+  await expect.poll(() => mainScrollTop(page), { timeout: 8000 }).toBe(0);
 });
 
 test("the filter spotlight switches sections without default scrolling", async ({ page }, testInfo) => {
@@ -170,19 +254,73 @@ test("the filter spotlight switches sections without default scrolling", async (
   // that area instead of growing one long, pre-scrolled form.
   await page.setViewportSize({ width: 900, height: 600 });
   await page.waitForTimeout(300);
-  for (const name of [/^基本/, /^作者/, /^タグ/, /^文字数/]) {
+  const stableFrame = await spotlight.evaluate((dialog) => ({
+    height: dialog.clientHeight,
+    top: dialog.getBoundingClientRect().top,
+  }));
+  for (const name of [/^基本/, /^状態/, /^作者/, /^タグ/, /^日付/, /^内容・ファイル/]) {
     await spotlight.getByRole("tab", { name }).click();
     await page.waitForTimeout(80);
     expect(await spotlight.evaluate((dialog) => {
       const panel = dialog.querySelector(".filter-spotlight__panel") as HTMLElement;
       const button = [...dialog.querySelectorAll("button")].find((candidate) => candidate.textContent?.trim() === "適用")!;
       return {
+        height: dialog.clientHeight,
+        top: dialog.getBoundingClientRect().top,
         dialogOverflows: dialog.scrollHeight > dialog.clientHeight,
-        panelOverflows: panel.scrollHeight > panel.clientHeight,
+        panelStartsAtTop: panel.scrollTop === 0,
         applyOnScreen: button.getBoundingClientRect().bottom <= window.innerHeight,
       };
-    })).toEqual({ dialogOverflows: false, panelOverflows: false, applyOnScreen: true });
+    })).toEqual({ ...stableFrame, dialogOverflows: false, panelStartsAtTop: true, applyOnScreen: true });
   }
+
+  // A busy selection must not push the actions away or make the dialog itself
+  // wider. The two summary lanes scroll their own tokens when necessary.
+  await spotlight.getByRole("tab", { name: /^作者/ }).click();
+  for (const author of ["青葉しおり", "遠野つむぎ", "背徳亭無題＠ボイスドラマ発売中", "mizu atelier"]) {
+    await spotlight.getByRole("button", { name: `${author}を含める作者へ追加` }).click();
+  }
+  await spotlight.getByRole("button", { name: "白鳥ケイを除外する作者へ追加" }).click();
+  await spotlight.getByRole("tab", { name: /^タグ/ }).click();
+  const includeTagButtons = spotlight.getByRole("button", { name: /を含めるタグへ追加/ });
+  for (let index = 0; index < 4; index += 1) await includeTagButtons.nth(index).click();
+  await spotlight.getByRole("tab", { name: /^内容・ファイル/ }).click();
+  const includedLane = spotlight.getByRole("region", { name: "含める条件" });
+  const includedTokens = includedLane.getByLabel("含める条件の選択項目");
+  const nextIncluded = includedLane.getByRole("button", { name: "含める条件を後ろへ" });
+  await expect(nextIncluded).toBeVisible();
+  await expect(nextIncluded).toBeEnabled();
+  const leftBefore = await includedTokens.evaluate((element) => element.scrollLeft);
+  await nextIncluded.click();
+  await expect.poll(() => includedTokens.evaluate((element) => element.scrollLeft)).toBeGreaterThan(leftBefore);
+  await expect(includedLane.getByRole("button", { name: "含める条件を前へ" })).toBeEnabled();
+  expect(await spotlight.evaluate((dialog) => {
+    const summary = dialog.querySelector(".filter-spotlight__selection-summary") as HTMLElement;
+    const lanes = [...summary.querySelectorAll<HTMLElement>(".filter-spotlight__selection-lane")];
+    const actions = dialog.querySelector(".filter-form__actions") as HTMLElement;
+    const reset = [...actions.querySelectorAll("button")].find((candidate) => candidate.textContent?.trim() === "リセット")!;
+    const applyButton = [...actions.querySelectorAll("button")].find((candidate) => candidate.textContent?.trim() === "適用")!;
+    return {
+      height: dialog.clientHeight,
+      top: dialog.getBoundingClientRect().top,
+      dialogHasHorizontalOverflow: dialog.scrollWidth > dialog.clientWidth,
+      summaryHasHorizontalOverflow: summary.scrollWidth > summary.clientWidth,
+      summaryUsesFullWidthRows: lanes.every((lane) => lane.clientWidth >= summary.clientWidth - 32),
+      summaryRowsAreStacked: lanes[1].getBoundingClientRect().top >= lanes[0].getBoundingClientRect().bottom,
+      actionsHaveHorizontalOverflow: actions.scrollWidth > actions.clientWidth,
+      actionsShareRow: Math.abs(reset.getBoundingClientRect().top - applyButton.getBoundingClientRect().top) < 2,
+      applyOnScreen: applyButton.getBoundingClientRect().bottom <= window.innerHeight,
+    };
+  })).toEqual({
+    ...stableFrame,
+    dialogHasHorizontalOverflow: false,
+    summaryHasHorizontalOverflow: false,
+    summaryUsesFullWidthRows: true,
+    summaryRowsAreStacked: true,
+    actionsHaveHorizontalOverflow: false,
+    actionsShareRow: true,
+    applyOnScreen: true,
+  });
 });
 
 test("the page you were on survives opening something from it", async ({ page }, testInfo) => {

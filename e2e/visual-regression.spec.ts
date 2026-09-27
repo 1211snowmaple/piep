@@ -29,6 +29,51 @@ test("library shell remains stable without clipped horizontal content", async ({
   await expect(page).toHaveScreenshot("library-shell.png", { fullPage: true });
 });
 
+test("library sort menu exposes both directions without leaving the viewport", async ({ page }, testInfo) => {
+  test.skip(
+    testInfo.project.name !== "900x600-light-100dpi",
+    "The shortest desktop window is the limiting sort-menu geometry",
+  );
+  const sort = page.getByRole("combobox", { name: "並び順" });
+  await sort.click();
+  const listbox = page.getByRole("listbox");
+  await expect(listbox.getByRole("option", { name: "保存日：古い順" })).toBeVisible();
+  await expect(listbox.getByRole("option", { name: "添付数：少ない順" })).toBeAttached();
+  await expect(listbox.getByRole("option", { name: "版番号：小さい順" })).toBeAttached();
+  const geometry = await listbox.evaluate((element) => ({
+    left: element.getBoundingClientRect().left,
+    right: element.getBoundingClientRect().right,
+    viewportWidth: document.documentElement.clientWidth,
+  }));
+  expect(geometry.left).toBeGreaterThanOrEqual(0);
+  expect(geometry.right).toBeLessThanOrEqual(geometry.viewportWidth);
+  await expect(page).toHaveScreenshot("library-sort-options.png", { fullPage: true });
+});
+
+test("author and series lists expose the same complete ordering vocabulary", async ({ page }, testInfo) => {
+  test.skip(
+    testInfo.project.name !== "900x600-light-100dpi",
+    "The shortest desktop window is the limiting grouped-sort geometry",
+  );
+  await page.goto("/#/library?tab=people");
+  await expect(page.getByRole("tab", { name: /作者/ })).toHaveAttribute("aria-selected", "true");
+  const sort = page.getByRole("combobox", { name: "並び順" });
+  await sort.click();
+  const listbox = page.getByRole("listbox");
+  await expect(listbox.getByRole("option", { name: "作品数：少ない順" })).toBeVisible();
+  await expect(listbox.getByRole("option", { name: "公開日：古い順" })).toBeAttached();
+  await expect(listbox.getByRole("option", { name: "合計文字数：多い順" })).toBeAttached();
+  await expect(listbox.getByRole("option", { name: "改稿回数：少ない順" })).toBeAttached();
+  const geometry = await listbox.evaluate((element) => ({
+    left: element.getBoundingClientRect().left,
+    right: element.getBoundingClientRect().right,
+    viewportWidth: document.documentElement.clientWidth,
+  }));
+  expect(geometry.left).toBeGreaterThanOrEqual(0);
+  expect(geometry.right).toBeLessThanOrEqual(geometry.viewportWidth);
+  await expect(page).toHaveScreenshot("library-entity-sort-options.png", { fullPage: true });
+});
+
 test("phone settings navigation wraps without an inner horizontal scroller", async ({ page }, testInfo) => {
   test.skip(
     testInfo.project.name !== "900x600-light-100dpi",
@@ -151,7 +196,8 @@ test("detail filters open as a search spotlight and keep author names readable",
   await expect(spotlight.getByRole("tab", { name: /^作者/ })).toHaveAttribute("aria-selected", "true");
   const longAuthor = spotlight.getByRole("button", { name: /背徳亭無題＠ボイスドラマ発売中を含める作者へ追加/ });
   await expect(longAuthor).toBeVisible();
-  await expect(longAuthor.getByText("背徳亭無題＠ボイスドラマ発売中")).toBeVisible();
+  const longAuthorCard = spotlight.locator(".filter-spotlight__quick-option").filter({ hasText: "背徳亭無題＠ボイスドラマ発売中" });
+  await expect(longAuthorCard.getByText("背徳亭無題＠ボイスドラマ発売中")).toBeVisible();
 
   const defaultGeometry = await spotlight.evaluate((element) => ({
     width: element.clientWidth,
@@ -162,6 +208,33 @@ test("detail filters open as a search spotlight and keep author names readable",
   expect(defaultGeometry.scrollWidth).toBeLessThanOrEqual(defaultGeometry.width);
   expect(defaultGeometry.scrollHeight).toBeLessThanOrEqual(defaultGeometry.height);
   await expect(spotlight).toHaveScreenshot("library-filter-spotlight.png");
+
+  await spotlight.getByRole("tab", { name: /^状態/ }).click();
+  await expect(spotlight.getByRole("radiogroup", { name: "全文検索の対象" })).toBeVisible();
+  await expect(spotlight.getByRole("combobox", { name: "改稿状態" })).toBeVisible();
+  const statusGeometry = await spotlight.evaluate((element) => ({
+    width: element.clientWidth,
+    scrollWidth: element.scrollWidth,
+    height: element.clientHeight,
+    scrollHeight: element.scrollHeight,
+  }));
+  expect(statusGeometry.scrollWidth).toBeLessThanOrEqual(statusGeometry.width);
+  expect(statusGeometry.scrollHeight).toBeLessThanOrEqual(statusGeometry.height);
+  await expect(spotlight).toHaveScreenshot("library-filter-status.png");
+
+  await spotlight.getByRole("tab", { name: /^内容・ファイル/ }).click();
+  await expect(spotlight.getByRole("textbox", { name: "最小添付数" })).toBeVisible();
+  await expect(spotlight.getByRole("textbox", { name: "最小容量" })).toBeVisible();
+  await expect(spotlight.getByRole("button", { name: "適用" })).toBeVisible();
+  const contentGeometry = await spotlight.evaluate((element) => ({
+    width: element.clientWidth,
+    scrollWidth: element.scrollWidth,
+    height: element.clientHeight,
+    scrollHeight: element.scrollHeight,
+  }));
+  expect(contentGeometry.scrollWidth).toBeLessThanOrEqual(contentGeometry.width);
+  expect(contentGeometry.scrollHeight).toBeLessThanOrEqual(contentGeometry.height);
+  await expect(spotlight).toHaveScreenshot("library-filter-content.png");
 
   await spotlight.getByRole("textbox", { name: "条件を検索" }).fill("青葉");
   const authorOption = page.getByRole("option").filter({ hasText: "青葉しおり" }).first();

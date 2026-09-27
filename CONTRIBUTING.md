@@ -82,13 +82,15 @@ npm run build && CI=1 npx playwright test
 
 ## いつ main へ push するか
 
-`develop` で作業し、`main` は **CI が緑であることを確認した状態だけ**を指す。
+作業ブランチから Pull Request を作り、`main` は **CI が緑であることを確認した
+状態だけ**を指す。廃止済みの `develop` ブランチを中継しない。
 
-1. `develop` へ push する
-2. CI が**4ジョブとも**緑になるのを**実際に確認する**（`gh run watch`）。
+1. 作業ブランチを push して Pull Request を作る
+2. Pull Request の CI が**4ジョブとも**緑になるのを**実際に確認する**（`gh run watch`）。
    Quality の3つ（`checks` / `visual-regression` / `native-window-smoke`）に
    加えて、Docs の `contract`（境界のドリフト検査）も同じ push で走る
-3. 緑を確認してから `main` を進めて push する
+3. 緑を確認してから `main` へマージする
+4. `main` の同じ4ジョブが、そのマージコミットで緑になったことを確認する
 
 手元が緑でも CI が緑とは限らない。Node のバージョン差、並列度、ランナーの
 コア数で結果は変わる。**手元の結果だけを根拠に「CI も通る」と言わない。**
@@ -103,6 +105,8 @@ npm run build && CI=1 npx playwright test
 - タグは `vX.Y.Z` の注釈付きタグ（`git tag -a`）
 - **タグを押すとリリースのビルドが走る。** 過去の節目へ後からタグを足さない
 - タグを打つ前に、その commit の CI が緑であることを確認する
+- リリースワークフローは下書きを作る。署名済みアセットと `latest.json` を確認し、
+  同じ commit の main CI が緑であることをもう一度確認してから公開する
 - バージョンを上げるときは5ファイルすべてを揃える:
   `package.json` / `package-lock.json` / `src-tauri/Cargo.toml` /
   `src-tauri/tauri.conf.json` / `src/lib/version.ts`（`cargo check` で

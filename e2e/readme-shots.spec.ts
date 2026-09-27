@@ -11,6 +11,12 @@ import { test, type Page } from "@playwright/test";
  */
 const projects = ["1440x900-light-200dpi", "1440x900-dark-200dpi"];
 
+// One light run captures nine routes. A cold Vite start can compile enough
+// route chunks to exceed Playwright's 30-second local default even though no
+// individual screen is slow, so keep the documented regeneration command
+// usable outside CI as well.
+test.describe.configure({ timeout: 90_000 });
+
 type ShotTheme = "light" | "dark";
 
 /** Screen, route, a text that proves it rendered, and the themes it is shot in. */
