@@ -113,6 +113,39 @@ describe("書きかけを失わないこと", () => {
     await waitFor(() => expect(screen.queryByDisplayValue("段落4")).toBeNull());
     expect(screen.getByDisplayValue("段落2を書き換えた")).toBeInTheDocument();
   });
+
+  it("追加を取り消して保存済みの内容に戻すと未保存表示が消える", async () => {
+    renderEditor();
+    await screen.findByDisplayValue("段落1");
+
+    fireEvent.click(screen.getByRole("button", { name: "ブロック 4を削除" }));
+    expect(screen.getByText("未保存")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "元に戻す" }));
+    expect(await screen.findByDisplayValue("段落4")).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByText("未保存")).toBeNull());
+
+    fireEvent.click(screen.getByRole("button", { name: "やり直す" }));
+    await waitFor(() => expect(screen.getByText("未保存")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "元に戻す" }));
+    await waitFor(() => expect(screen.queryByText("未保存")).toBeNull());
+  });
+
+  it("題と本文を元に戻すと未保存表示が消える", async () => {
+    renderEditor();
+    const paragraph = await screen.findByDisplayValue("段落1");
+    const title = screen.getByRole("textbox", { name: "この作品のタイトル" }) as HTMLInputElement;
+    const originalTitle = title.value;
+
+    fireEvent.change(paragraph, { target: { value: "段落1を変更" } });
+    fireEvent.change(title, { target: { value: `${originalTitle}変更` } });
+    expect(screen.getByText("未保存")).toBeInTheDocument();
+
+    fireEvent.change(paragraph, { target: { value: "段落1" } });
+    expect(screen.getByText("未保存")).toBeInTheDocument();
+    fireEvent.change(title, { target: { value: originalTitle } });
+    await waitFor(() => expect(screen.queryByText("未保存")).toBeNull());
+  });
 });
 
 describe("書きかけの捨て方と、土台の版", () => {

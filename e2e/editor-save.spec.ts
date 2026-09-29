@@ -21,7 +21,7 @@ test("save notifications leave editor and reader actions accessible", async ({ p
   await expect(page.locator(".reader-toolbar")).toBeVisible();
   await expect(publishedNotice).toBeVisible();
   const readerToolbar = await page.locator(".reader-toolbar").boundingBox();
-  const readerNotification = await notice.boundingBox();
+  const readerNotification = await publishedNotice.boundingBox();
   expect(readerToolbar).not.toBeNull();
   expect(readerNotification).not.toBeNull();
   expect(readerNotification!.y).toBeGreaterThanOrEqual(readerToolbar!.y + readerToolbar!.height);
