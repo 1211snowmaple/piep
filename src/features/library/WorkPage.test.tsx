@@ -3,7 +3,7 @@ import { ModalsProvider } from "@mantine/modals";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { AppRouter } from "@/app/router";
+import { AppRouter, useAppRouter } from "@/app/router";
 import { WorkspaceProvider } from "@/app/WorkspaceContext";
 import { getDemoReader } from "@/mocks/demoData";
 import type { ReaderContentPage } from "@/types/library";
@@ -72,6 +72,35 @@ describe("WorkPage content preview", () => {
     await waitFor(() => expect(screen.getByText("2ページ本文")).toBeInTheDocument());
   });
 
+  it("restores the content page and its inner scroll position after navigating away and back", async () => {
+    dbApi.getReaderContentPage.mockImplementation((_id: number, _version: number | null, page: number) =>
+      Promise.resolve(content(page, `<p>${page + 1}ページ本文</p>`))
+    );
+    function Routes() {
+      const { pathname, navigate } = useAppRouter();
+      return pathname === "/outside"
+        ? <button onClick={() => navigate(-1)}>戻る</button>
+        : <><button onClick={() => navigate("/outside")}>移動</button><WorkPage /></>;
+    }
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const { container } = render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><Routes /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
+
+    expect(await screen.findByText("1ページ本文")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "2" }));
+    expect(await screen.findByText("2ページ本文")).toBeInTheDocument();
+    const frame = container.querySelector<HTMLElement>(".content-frame")!;
+    frame.scrollTop = 157;
+    fireEvent.scroll(frame);
+
+    fireEvent.click(screen.getByRole("button", { name: "移動" }));
+    expect(await screen.findByRole("button", { name: "戻る" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "戻る" }));
+
+    expect(await screen.findByText("2ページ本文")).toBeInTheDocument();
+    expect(container.querySelector<HTMLElement>(".content-frame")?.scrollTop).toBe(157);
+    expect(screen.getByRole("button", { name: "2", current: "page" })).toBeInTheDocument();
+  });
+
   it("shows the complete primary title on the detail page", async () => {
     const longTitle = "マイナーキャラ妄想短編集　陵辱物　とても長い正式な作品名";
     const demo = getDemoReader(101);
@@ -89,6 +118,28 @@ describe("WorkPage content preview", () => {
     const heading = await screen.findByRole("heading", { name: longTitle });
     expect(heading).toHaveClass("work-hero__title");
     expect(heading).not.toHaveClass("line-clamp-2");
+  });
+
+  it("distinguishes the active local edit from source metadata and source version history", async () => {
+    window.location.hash = "#/works/101?tab=overview";
+    const demo = getDemoReader(101);
+    dbApi.getReaderMetadata.mockResolvedValue({
+      download: demo.download,
+      versions: demo.versions,
+      assetCount: demo.assets.length,
+      isEdited: true,
+      activeEditRevision: demo.activeEditRevision,
+    });
+    dbApi.getReaderContentPage.mockResolvedValue(content(0, "<p>ローカル編集版</p>"));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><WorkPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
+
+    expect(await screen.findByText("取得元の文字数")).toBeInTheDocument();
+    expect(screen.getByText("取得元の容量")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("tab", { name: "履歴" }));
+    expect(await screen.findByText(/いま読める本文とEPUBにはローカル編集版を使います/)).toBeInTheDocument();
+    expect(screen.getByText("取得元の最新版")).toBeInTheDocument();
+    expect(screen.queryByText("現在")).toBeNull();
   });
 
   it("keeps an already loaded tab ready while the same work stays open", async () => {

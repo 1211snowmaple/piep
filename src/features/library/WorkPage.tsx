@@ -32,7 +32,7 @@ import { Icons, IconSize } from "@/lib/icons";
 import { ActionBar } from "@/components/ActionBar";
 import { Note } from "@/components/Note";
 import { runSingleCheck } from "@/features/updates/startSingleCheck";
-import { AppLink, useAppNavigate, useAppSearchParams, useReturnTo, useRouteParams } from "@/app/router";
+import { AppLink, useAppNavigate, useAppRouter, useAppSearchParams, useReturnTo, useRouteParams } from "@/app/router";
 import { useWorkspace } from "@/app/WorkspaceContext";
 import { ErrorState, LoadingState } from "@/components/AsyncState";
 import { ExpandableText } from "@/components/ExpandableText";
@@ -76,6 +76,18 @@ type WorkTab = "overview" | "content" | "assets" | "history" | "json";
 // cache the second mount is about to reuse.
 const activeWorkPages = new Set<number>();
 
+type ContentLocation = { workId: number; page: number; top: number };
+const contentLocations = new WeakMap<object, Map<number, ContentLocation>>();
+
+function locationsFor(client: object) {
+  let locations = contentLocations.get(client);
+  if (!locations) {
+    locations = new Map();
+    contentLocations.set(client, locations);
+  }
+  return locations;
+}
+
 function parseWorkTab(value: string | null): WorkTab {
   return value === "content" || value === "assets" || value === "history" || value === "json" ? value : "overview";
 }
@@ -91,6 +103,9 @@ export default function WorkPage() {
   const validId = Number.isSafeInteger(id) && id > 0;
   const runtime = isTauriRuntime();
   const queryClient = useQueryClient();
+  const { historyIndex, navigationType } = useAppRouter();
+  const locations = locationsFor(queryClient);
+  const rememberedLocation = navigationType === "pop" ? locations.get(historyIndex) : undefined;
   const { addToEpubQueue, removeFromEpubQueue, isQueuedForEpub } = useWorkspace();
   // Driven by the URL so the card's version chip can deep-link into the
   // history, and so going back returns to the tab you were on.
@@ -103,19 +118,34 @@ export default function WorkPage() {
     setSearchParams(params, { replace: true });
   };
   // Switching tabs does not move the page.
-  const [contentPage, setContentPage] = useState(1);
+  const [contentPage, setContentPage] = useState(() => rememberedLocation?.workId === id ? rememberedLocation.page : 1);
   // The body scrolls inside its own frame, so turning a page returns that frame
   // to its top and leaves the screen around it exactly where it was - the same
   // thing the reader does with its own pages.
   const contentFrameRef = useRef<HTMLDivElement>(null);
+  const initializedLocationRef = useRef<{ workId: number; historyIndex: number } | null>(null);
   // 本文の中のリンクに「ライブラリにあります」の印を付けるための器。
   const contentBodyRef = useRef<HTMLDivElement>(null);
   const workHeroRef = useRef<HTMLDivElement>(null);
   const workMarksRef = useRef<HTMLDivElement>(null);
   const goToContentPage = (page: number) => {
+    locations.set(historyIndex, { workId: id, page, top: 0 });
     setContentPage(page);
-    contentFrameRef.current?.scrollTo({ top: 0, behavior: "smooth" });
+    if (contentFrameRef.current) contentFrameRef.current.scrollTop = 0;
   };
+  // An entry reached with Back/Forward resumes its own place in the body.
+  // A fresh visit can reuse a numeric history slot after a forward branch was
+  // discarded, so it always starts at the beginning.
+  useEffect(() => {
+    if (initializedLocationRef.current?.workId === id && initializedLocationRef.current.historyIndex === historyIndex) return;
+    initializedLocationRef.current = { workId: id, historyIndex };
+    const saved = navigationType === "pop" ? locations.get(historyIndex) : undefined;
+    const page = saved?.workId === id ? saved.page : 1;
+    if (navigationType !== "pop" || saved?.workId !== id) {
+      locations.set(historyIndex, { workId: id, page: 1, top: 0 });
+    }
+    setContentPage(page);
+  }, [historyIndex, id, locations, navigationType]);
   const [selectedVersion, setSelectedVersion] = useState<number | "pending" | null>(null);
   const [visibleAssetCount, setVisibleAssetCount] = useState(80);
   const [pdfOriginal, setPdfOriginal] = useState<PdfOriginalTarget | null>(null);
@@ -314,6 +344,13 @@ export default function WorkPage() {
   // Defer that work until the user actually opens the content tab.
   const contentReady = !contentQuery.isPlaceholderData && contentQuery.data?.page === contentPage - 1;
   const preparedHtml = useMemo(() => tab === "content" && contentReady ? prepareDocumentHtml(contentQuery.data?.html ?? "", getAssetUrl) : "", [contentQuery.data?.html, contentReady, tab]);
+  useLayoutEffect(() => {
+    if (tab !== "content" || !contentReady || !contentFrameRef.current) return;
+    const saved = locations.get(historyIndex);
+    if (saved?.workId === id && saved.page === contentPage) {
+      contentFrameRef.current.scrollTop = saved.top;
+    }
+  }, [contentPage, contentReady, historyIndex, id, locations, preparedHtml, tab]);
   // Captions are mostly links - the series, the earlier part, the author's
   // other accounts - so they are set as text rather than as a stack of cards
   // taller than the caption itself.
@@ -338,7 +375,11 @@ export default function WorkPage() {
     }
     void openContentLink(event);
   };
-  useEffect(() => { if (tab !== "content") setContentPage(1); }, [id, tab]);
+  useEffect(() => {
+    if (tab === "content") return;
+    locations.set(historyIndex, { workId: id, page: 1, top: 0 });
+    setContentPage(1);
+  }, [historyIndex, id, locations, tab]);
 
   if (documentQuery.isLoading) return <div className="page"><LoadingState label="作品を開いています" /></div>;
   if (documentQuery.error || !documentQuery.data) return <div className="page"><ErrorState error={documentQuery.error ?? "作品が見つかりません"} retry={() => documentQuery.refetch()} /></div>;
@@ -470,7 +511,7 @@ export default function WorkPage() {
               </Stack>
               <Group gap="lg" mt="md" className="work-hero__facts">
                 <Text size="sm" c="dimmed"><Icons.publishedDate size={IconSize.menu} />公開 {formatDate(work.sourceCreatedAt)}</Text>
-                <Text size="sm" c="dimmed"><Icons.textLength size={IconSize.menu} />{formatNumber(work.textLength)}字</Text>
+                <Text size="sm" c="dimmed"><Icons.textLength size={IconSize.menu} />{doc.isEdited && "取得元 "}{formatNumber(work.textLength)}字</Text>
                 {work.assetCount > 0 && <Text size="sm" c="dimmed"><Icons.assets size={IconSize.menu} />{work.assetCount}アセット</Text>}
               </Group>
               <div className="work-hero__actionbar">
@@ -519,7 +560,7 @@ export default function WorkPage() {
               unrelated heights. */}
           <Grid gap="lg" align="stretch">
             <Grid.Col span={{ base: 12, md: 8 }}>
-              <Card p="lg" h="100%"><Title order={3} mb="md">作品情報</Title>{/* 取得元のことと手元のことを分ける。混ぜて並べると、どの日付が誰の  行いを指しているのかが読み取れない。 */}<Text size="xs" c="dimmed" fw={700} mb="sm">取得元</Text><SimpleGrid cols={{ base: 1, sm: 2 }} spacing="lg"><Info label="作者" value={work.authorName} icon={<Icons.person size={IconSize.action} />} /><Info label="公開日" value={formatDate(work.sourceCreatedAt, true)} icon={<Icons.publishedDate size={IconSize.action} />} />{sourceRevised && <Info label="最終更新" value={formatDate(work.sourceUpdatedAt, true)} icon={<Icons.updates size={IconSize.action} />} />}</SimpleGrid><Divider my="lg" /><Text size="xs" c="dimmed" fw={700} mb="sm">手元</Text><SimpleGrid cols={{ base: 1, sm: 2 }} spacing="lg"><Info label="文字数" value={`${formatNumber(work.textLength)}字`} icon={<Icons.read size={IconSize.action} />} /><Info label="ローカル容量" value={formatBytes(work.fileSizeBytes)} icon={<Icons.openFolder size={IconSize.action} />} /><Info label="バージョン" value={`v${work.currentVersion}`} icon={<Icons.versionHistory size={IconSize.action} />} /><Info label="保存日" value={formatDate(work.downloadedAt, true)} icon={<Icons.epubAdd size={IconSize.action} />} /></SimpleGrid></Card>
+              <Card p="lg" h="100%"><Title order={3} mb="md">作品情報</Title>{/* 取得元のことと手元のことを分ける。混ぜて並べると、どの日付が誰の行いを指しているのかが読み取れない。 */}<Text size="xs" c="dimmed" fw={700} mb="sm">取得元</Text><SimpleGrid cols={{ base: 1, sm: 2 }} spacing="lg"><Info label="作者" value={work.authorName} icon={<Icons.person size={IconSize.action} />} /><Info label="公開日" value={formatDate(work.sourceCreatedAt, true)} icon={<Icons.publishedDate size={IconSize.action} />} />{sourceRevised && <Info label="最終更新" value={formatDate(work.sourceUpdatedAt, true)} icon={<Icons.updates size={IconSize.action} />} />}</SimpleGrid><Divider my="lg" /><Text size="xs" c="dimmed" fw={700} mb="sm">手元</Text><SimpleGrid cols={{ base: 1, sm: 2 }} spacing="lg"><Info label={doc.isEdited ? "取得元の文字数" : "文字数"} value={`${formatNumber(work.textLength)}字`} icon={<Icons.read size={IconSize.action} />} /><Info label={doc.isEdited ? "取得元の容量" : "ローカル容量"} value={formatBytes(work.fileSizeBytes)} icon={<Icons.openFolder size={IconSize.action} />} /><Info label="バージョン" value={`v${work.currentVersion}`} icon={<Icons.versionHistory size={IconSize.action} />} /><Info label="保存日" value={formatDate(work.downloadedAt, true)} icon={<Icons.epubAdd size={IconSize.action} />} /></SimpleGrid></Card>
             </Grid.Col>
             <Grid.Col span={{ base: 12, md: 4 }}>
               {/* 両端に寄せると、外側の辺は「作品情報」と揃うかわりに真ん中が
@@ -536,7 +577,9 @@ export default function WorkPage() {
                 and everything else off the top of the window. It reads inside a
                 frame of its own instead, the way the JSON already does, so the
                 screen around it stays put while you read. */}
-            <Paper className="content-frame" withBorder ref={contentFrameRef}>
+            <Paper className="content-frame" withBorder ref={contentFrameRef} onScroll={(event) => {
+              locations.set(historyIndex, { workId: id, page: contentPage, top: event.currentTarget.scrollTop });
+            }}>
               <div ref={contentBodyRef} className="content-preview content-preview--paged" onClick={handleContentClick} dangerouslySetInnerHTML={{ __html: preparedHtml }} />
             </Paper>
             <ContentPagination current={contentPage} total={contentQuery.data?.pageCount ?? 1} onChange={goToContentPage} />
@@ -572,6 +615,7 @@ export default function WorkPage() {
           })}</SimpleGrid>{visibleAssets.length < assets.length && <Group justify="center"><Button variant="default" onClick={() => setVisibleAssetCount((count) => Math.min(assets.length, count + 80))}>さらに表示（残り{formatNumber(assets.length - visibleAssets.length)}件）</Button></Group>}</Stack> : <Alert color="gray" icon={<Icons.imageFile size={IconSize.action} />}>この作品にアセットはありません。</Alert>}
         </Tabs.Panel>
         <Tabs.Panel value="history" pt="lg">
+          {doc.isEdited && <Alert color="blue" mb="md">いま読める本文とEPUBにはローカル編集版を使います。ここには取得元から保存した版の履歴を表示しています。</Alert>}
           <Grid gap="lg">
             <Grid.Col span={{ base: 12, lg: 5 }}>
               <Stack gap="xs">
@@ -589,7 +633,7 @@ export default function WorkPage() {
                   <Group wrap="nowrap" align="flex-start">
                     <ThemeIcon variant="light" color={version.version === work.currentVersion ? "piep" : "gray"}><Icons.versionHistory size={IconSize.menu} /></ThemeIcon>
                     <Stack gap={3} flex={1} ta="left">
-                      <Group justify="space-between"><Text size="sm" fw={700}>保存済み v{version.version}</Text>{version.version === work.currentVersion && <Badge size="xs">現在</Badge>}</Group>
+                      <Group justify="space-between"><Text size="sm" fw={700}>保存済み v{version.version}</Text>{version.version === work.currentVersion && <Badge size="xs">{doc.isEdited ? "取得元の最新版" : "現在"}</Badge>}</Group>
                       <Text size="xs" c="dimmed">{version.changeSummary || "保存元から取得"}</Text>
                       <Text size="xs" c="dimmed">{formatDate(version.createdAt, true)} · {formatNumber(version.textLength)}字 · {formatBytes(version.fileSizeBytes)}</Text>
                     </Stack>
