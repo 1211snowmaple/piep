@@ -12537,13 +12537,18 @@ fn append_library_filters(
         let active_authors = active_strings(authors_inc);
         if !active_authors.is_empty() {
             let placeholders = vec!["?"; active_authors.len()].join(", ");
+            // Resolve historical author names once, then match their stable
+            // (source, author_id) identity through the existing author index.
+            // A correlated EXISTS here rescanned snapshots for every work.
             wheres.push(format!(
                 "(d.author_name IN ({placeholders}) OR (
-                    d.author_id IS NOT NULL AND d.author_id != '' AND EXISTS (
-                        SELECT 1 FROM downloads author_snapshot
-                        WHERE author_snapshot.source = d.source
-                          AND author_snapshot.author_id = d.author_id
-                          AND author_snapshot.author_name IN ({placeholders})
+                    d.author_id IS NOT NULL AND d.author_id != '' AND
+                    (d.source, d.author_id) IN (
+                        SELECT author_snapshot.source, author_snapshot.author_id
+                        FROM downloads author_snapshot
+                        WHERE author_snapshot.author_name IN ({placeholders})
+                          AND author_snapshot.author_id IS NOT NULL
+                          AND author_snapshot.author_id != ''
                     )
                 ))"
             ));
@@ -12562,11 +12567,13 @@ fn append_library_filters(
             let placeholders = vec!["?"; active_authors.len()].join(", ");
             wheres.push(format!(
                 "NOT (d.author_name IN ({placeholders}) OR (
-                    d.author_id IS NOT NULL AND d.author_id != '' AND EXISTS (
-                        SELECT 1 FROM downloads author_snapshot
-                        WHERE author_snapshot.source = d.source
-                          AND author_snapshot.author_id = d.author_id
-                          AND author_snapshot.author_name IN ({placeholders})
+                    d.author_id IS NOT NULL AND d.author_id != '' AND
+                    (d.source, d.author_id) IN (
+                        SELECT author_snapshot.source, author_snapshot.author_id
+                        FROM downloads author_snapshot
+                        WHERE author_snapshot.author_name IN ({placeholders})
+                          AND author_snapshot.author_id IS NOT NULL
+                          AND author_snapshot.author_id != ''
                     )
                 ))"
             ));
