@@ -4,8 +4,8 @@
 
   The artwork is a landscape book (about 1.59:1), so centring it untouched in a
   square left a wide empty border and made the icon read as small. It now sits
-  on a full-bleed rounded tile and is scaled to 88% of the icon width, which
-  fills the square and holds together down to 16px.
+  on a full-bleed rounded tile. The unchanged book artwork is scaled slightly
+  within the tile so the Windows taskbar silhouette remains legible at 16px.
 -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="piep">
   <title>piep</title>
@@ -17,7 +17,7 @@
   </defs>
   <rect width="512" height="512" rx="114" ry="114" fill="url(#piep-tile)" />
   <rect x="1.5" y="1.5" width="509" height="509" rx="112.5" ry="112.5" fill="none" stroke="#14283C" stroke-opacity="0.09" stroke-width="3" />
-  <g transform="matrix(1.03823, 0, 0, 1.03823, -3.56, 12.03)">
+  <g transform="matrix(1.10, 0, 0, 1.10, -19, 0)">
     <ellipse style="stroke-width: 4px; stroke: rgb(85, 89, 93); fill: rgb(85, 89, 93);" cx="250" cy="353.753" rx="24.012" ry="10.316" />
     <path style="stroke-linejoin: round; stroke-width: 13; stroke: rgb(85, 89, 93); fill: rgb(255, 255, 255);" d="M 39.829 146.265 L 39.491 349.863 C 71.374 332.017 183.168 316.04 250.191 359.333 L 249.516 155.059 C 247.002 112.951 38.896 130.644 39.829 146.265 Z" />
     <path style="stroke-linejoin: round; stroke-width: 13; stroke: rgb(85, 89, 93); fill: rgb(255, 255, 255);" d="M 250.146 341.968 L 249.808 138.37 C 281.691 156.216 393.485 172.193 460.508 128.9 L 459.833 333.174 C 457.319 375.282 249.213 357.589 250.146 341.968 Z" transform="matrix(-1, 0, 0, -1, 710.315961, 488.244635)" />
