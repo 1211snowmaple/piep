@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useRef, useState, useSyncExternalStore, type SetStateAction } from "react";
 import {
   ActionIcon,
   Alert,
@@ -36,9 +36,9 @@ import {
   type DownloadTargetKind,
   type FanboxPost,
   type PixivNovel,
-  type SidebarDownloadType,
   type SidebarItem,
 } from "@/features/browser/downloadCandidates";
+import { beginSaveDraftAnalysis, isLatestSaveDraftAnalysis, readSaveDraft, subscribeSaveDraft, updateSaveDraft, type SaveSource } from "./saveDraft";
 import { normalizeFanboxPostPayload } from "@/features/browser/downloadMetadata";
 import { errorMessage } from "@/lib/format";
 import { getProvider, ProviderMark } from "@/lib/providers";
@@ -87,8 +87,6 @@ import {
   type UpdateJobSnapshot,
 } from "@/services/updateJobApi";
 
-type SaveSource = "pixiv" | "fanbox";
-
 const SAVE_JOB_ROW_STATUS: Record<string, SidebarItem["status"]> = {
   queued: "pending",
   running: "downloading",
@@ -117,16 +115,21 @@ export default function SavePage() {
   const [searchParams] = useAppSearchParams();
   const runtime = isTauriRuntime();
   const source: SaveSource = routeSource === "fanbox" ? "fanbox" : "pixiv";
+  const draft = useSyncExternalStore(subscribeSaveDraft, () => readSaveDraft(source));
+  const { items, downloadType, lastAnalysisUrl, lastAnalysisKey } = draft;
   const initialUrl =
     searchParams.get("url") ||
+    draft.browserUrl ||
     getProvider(source).homeUrl ||
     "https://www.pixiv.net/";
   const [currentUrl, setCurrentUrl] = useState(initialUrl);
   const [address, setAddress] = useState(initialUrl);
-  const [items, setItems] = useState<SidebarItem[]>([]);
-  const [downloadType, setDownloadType] = useState<SidebarDownloadType | null>(
-    null,
-  );
+  const setItems = useCallback((value: SetStateAction<SidebarItem[]>) => {
+    updateSaveDraft(source, (current) => ({
+      ...current,
+      items: typeof value === "function" ? value(current.items) : value,
+    }));
+  }, [source]);
   const [analyzing, setAnalyzing] = useState(false);
   const [saving, setSaving] = useState(false);
   // 中止は押した瞬間に見えなければならない。取り消しが実際に効くのは次の
@@ -137,9 +140,7 @@ export default function SavePage() {
     total: number;
     text: string;
   } | null>(null);
-  const [lastAnalysisUrl, setLastAnalysisUrl] = useState<string | null>(null);
   // 一覧がどのページのものかは、URLではなく「相手」で覚える。
-  const [lastAnalysisKey, setLastAnalysisKey] = useState<string | null>(null);
   const [authConnected, setAuthConnected] = useState<boolean | null>(null);
   const [candidateWidth, setCandidateWidth] = useLocalStorage({
     key: "piep.save-candidate-width",
@@ -180,10 +181,12 @@ export default function SavePage() {
   const toggleCandidate = useCallback((id: string) => {
     setItems((rows) =>
       rows.map((row) =>
-        row.id === id ? { ...row, selected: !row.selected } : row,
+        row.id === id && row.status !== "held"
+          ? { ...row, selected: !row.selected }
+          : row,
       ),
     );
-  }, []);
+  }, [setItems]);
 
   // A page is only worth remembering once, and only the most recent handful are
   // worth offering back.
@@ -269,14 +272,10 @@ export default function SavePage() {
   useEffect(() => {
     let cancelled = false;
     const requestedUrl = searchParams.get("url");
-    const home =
-      requestedUrl || getProvider(source).homeUrl || "https://www.pixiv.net/";
+    const home = requestedUrl || readSaveDraft(source).browserUrl ||
+      getProvider(source).homeUrl || "https://www.pixiv.net/";
     setCurrentUrl(home);
     setAddress(home);
-    setItems([]);
-    setDownloadType(null);
-    setLastAnalysisUrl(null);
-    setLastAnalysisKey(null);
     if (runtime) {
       const sourceChanged = initializedSourceRef.current !== source;
       initializedSourceRef.current = source;
@@ -388,6 +387,9 @@ export default function SavePage() {
     }
     return () => {
       cancelled = true;
+      const browserUrl = currentUrlRef.current;
+      updateSaveDraft(source, (current) => current.browserUrl === browserUrl
+        ? current : { ...current, browserUrl });
     };
   }, [positionBrowser, rememberVisit, runtime, searchParams, source]);
   useEffect(() => {
@@ -510,7 +512,7 @@ export default function SavePage() {
     [],
   );
 
-  const selectedCount = items.filter((item) => item.selected).length;
+  const selectedCount = items.filter((item) => item.selected && item.status !== "held").length;
   // 保存ボタンが名乗る件数は、実際に取りに行く件数と同じでなければならない。
   // 済んだものは対象から外れるので、失敗が混じったあとは選択数と食い違う。
   const isPendingSave = (item: SidebarItem) =>
@@ -522,7 +524,10 @@ export default function SavePage() {
   const saveActionLabel = !pendingCount
     ? selectedCount
       ? "選択したものは保存済みです"
-      : "保存する項目を選択"
+      : items.some((item) => item.status === "held") &&
+          items.every((item) => ["held", "success", "skipped"].includes(item.status ?? ""))
+        ? "保留は更新画面から再確認"
+        : "保存する項目を選択"
     : retryCount === pendingCount
       ? `失敗した${pendingCount}件をやり直す`
       : `${pendingCount}件をライブラリに保存`;
@@ -717,9 +722,9 @@ export default function SavePage() {
       });
     // 同じ取得が二重に走れば、同じ知らせも二度出る。
     if (analyzingRef.current) return;
+    const analysisRevision = beginSaveDraftAnalysis(source);
     analyzingRef.current = true;
     setAnalyzing(true);
-    setItems([]);
     setProgress(null);
     try {
       const pixivToken = (await store.get<string>("pixiv_refresh_token")) || "";
@@ -794,17 +799,21 @@ export default function SavePage() {
           originalData: post,
         }));
       }
-      setItems(next);
-      setDownloadType(target);
-      setLastAnalysisUrl(analysisUrl);
-      setLastAnalysisKey(downloadTargetKey(analysisUrl));
+      if (!isLatestSaveDraftAnalysis(source, analysisRevision)) return;
+      updateSaveDraft(source, (current) => ({
+        ...current,
+        items: next,
+        downloadType: target,
+        lastAnalysisUrl: analysisUrl,
+        lastAnalysisKey: downloadTargetKey(analysisUrl),
+      }));
       notifications.show({
         color: "green",
         title: `${next.length}件の候補を取得しました`,
         message: "保存する項目を確認してください",
       });
     } catch (error) {
-      notifications.show({
+      if (isLatestSaveDraftAnalysis(source, analysisRevision)) notifications.show({
         color: "red",
         title: "候補を取得できません",
         message: errorMessage(error),
@@ -881,7 +890,7 @@ export default function SavePage() {
             if (currentRank > (SAVE_JOB_STATUS_RANK[status] ?? 0)) return row;
             if (row.status === status && (row.error ?? null) === state.error)
               return row;
-            return { ...row, status, error: state.error ?? undefined };
+            return { ...row, status, selected: status === "held" ? false : row.selected, error: state.error ?? undefined };
           }),
         );
       })();
@@ -905,7 +914,7 @@ export default function SavePage() {
           if (currentRank > (SAVE_JOB_STATUS_RANK[status] ?? 0)) return row;
           if (row.status === status && (row.error ?? null) === state.error)
             return row;
-          return { ...row, status, error: state.error ?? undefined };
+          return { ...row, status, selected: status === "held" ? false : row.selected, error: state.error ?? undefined };
         }),
       );
     };
@@ -1657,7 +1666,7 @@ export default function SavePage() {
                       size="compact-xs"
                       onClick={() =>
                         setItems((rows) =>
-                          rows.map((item) => ({ ...item, selected: true })),
+                          rows.map((item) => item.status === "held" ? item : { ...item, selected: true }),
                         )
                       }
                     >
@@ -1814,12 +1823,12 @@ const CandidateRow = memo(function CandidateRow({
     <Card
       p="sm"
       className="candidate-row"
-      data-selected={item.selected || undefined}
+      data-selected={(item.selected && status !== "held") || undefined}
     >
       <Group wrap="nowrap" align="flex-start">
         <Checkbox
-          checked={item.selected}
-          disabled={disabled || status === "success" || status === "skipped"}
+          checked={item.selected && status !== "held"}
+          disabled={disabled || status === "success" || status === "skipped" || status === "held"}
           onChange={() => onToggle(item.id)}
           aria-label={`${item.title}を保存対象にする`}
           mt={3}

@@ -4,12 +4,14 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AppRouter } from "@/app/router";
 import SavePage from "./SavePage";
+import { resetSaveDraftsForTest } from "./saveDraft";
 
 // The handover between the in-app pane and the large window needs the Tauri
 // runtime mocked for the whole module, which would change what this preview
 // mode test exercises. It lives in SavePage.handover.test.tsx instead.
 describe("SavePage browser window affordance", () => {
   beforeEach(() => {
+    resetSaveDraftsForTest();
     window.location.hash = "#/save/pixiv";
   });
 

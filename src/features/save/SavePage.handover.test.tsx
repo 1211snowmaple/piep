@@ -4,6 +4,7 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AppRouter } from "@/app/router";
 import SavePage from "./SavePage";
+import { resetSaveDraftsForTest } from "./saveDraft";
 
 const browserApi = vi.hoisted(() => ({
   openEmbeddedBrowser: vi.fn().mockResolvedValue(undefined),
@@ -64,6 +65,7 @@ function deferred<T>() {
 
 describe("SavePage handover to the large window", () => {
   beforeEach(() => {
+    resetSaveDraftsForTest();
     window.location.hash = "#/save/pixiv";
     Object.values(browserApi).forEach((mock) => mock.mockClear());
     browserApi.getStandaloneBrowserUrl.mockResolvedValue(null);
@@ -207,6 +209,7 @@ describe("SavePage handover to the large window", () => {
  */
 describe("returning to the save screen", () => {
   beforeEach(() => {
+    resetSaveDraftsForTest();
     vi.clearAllMocks();
     tauriEventHandlers.clear();
     browserApi.openStandaloneBrowser.mockResolvedValue(false);

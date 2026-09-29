@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AppRouter } from "@/app/router";
 import { hasUnsavedWork } from "@/lib/unsavedGuard";
 import SavePage from "./SavePage";
+import { resetSaveDraftsForTest } from "./saveDraft";
 
 const browserApi = vi.hoisted(() => ({
   openEmbeddedBrowser: vi.fn().mockResolvedValue(undefined),
@@ -94,6 +95,7 @@ async function collectCandidates() {
 
 describe("SavePage の Rust 保存ジョブ", () => {
   beforeEach(() => {
+    resetSaveDraftsForTest();
     window.location.hash = "#/save/pixiv";
     downloadApi.fetchPixivSeriesNovels.mockReset().mockResolvedValue([
       { id: 1, title: "第一話", user: { name: "作者" } },
@@ -123,6 +125,35 @@ describe("SavePage の Rust 保存ジョブ", () => {
       { source: "pixiv", sourceId: "2", title: "第二話" },
     ], expect.any(Boolean));
     await waitFor(() => expect(screen.getByRole("button", { name: "選択したものは保存済みです" })).toBeDisabled());
+  });
+
+  it("取得元名をパスに含む別サイトでは候補取得を有効にしない", async () => {
+    renderSavePage();
+    const address = await screen.findByLabelText("ブラウザのアドレス");
+    fireEvent.change(address, { target: { value: "https://evil.example/www.pixiv.net/novel/series/1000" } });
+    fireEvent.click(screen.getByRole("button", { name: "URLを開く" }));
+
+    expect(await screen.findByText("作品・シリーズ・作者ページを開いてください")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "候補を取得" })).toBeDisabled();
+    expect(downloadApi.fetchPixivSeriesNovels).not.toHaveBeenCalled();
+  });
+
+  it("保留された作品を選択数や再保存対象に含めない", async () => {
+    jobs.states.mockResolvedValue([
+      { source: "pixiv", sourceId: "1", status: "held", error: null },
+      { source: "pixiv", sourceId: "2", status: "saved", error: null },
+    ]);
+    renderSavePage();
+    await collectCandidates();
+    fireEvent.click(screen.getByRole("button", { name: "2件をライブラリに保存" }));
+
+    const held = await screen.findByRole("checkbox", { name: "第一話を保存対象にする" });
+    await waitFor(() => expect(held).toBeDisabled());
+    expect(held).not.toBeChecked();
+    expect(screen.getByText("1 / 2件を選択")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "すべて" }));
+    expect(held).not.toBeChecked();
+    expect(screen.getByText("1 / 2件を選択")).toBeInTheDocument();
   });
 
   it("実行中は終了を守り、中止を同じ Rust ジョブへ渡す", async () => {
