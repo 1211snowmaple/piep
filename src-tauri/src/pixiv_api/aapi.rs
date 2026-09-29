@@ -1931,7 +1931,10 @@ impl AppPixivAPI {
     /// 扱ってしまう。
     fn classify_pixiv_response(status: StatusCode, body: &str) -> Result<(), PixivError> {
         if status == StatusCode::TOO_MANY_REQUESTS || pixiv_body_is_rate_limited(body) {
-            log::error!("pixiv webview rate limited ({status}): {body}");
+            crate::pixiv_api::error::log_response_body(
+                &format!("pixiv webview rate limited ({status})"),
+                body,
+            );
             return Err(PixivError::RateLimited {
                 body: body.to_string(),
             });
