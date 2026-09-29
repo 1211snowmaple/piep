@@ -75,6 +75,27 @@ describe("AppUpdateCard", () => {
     expect(await screen.findByText(/署名鍵/)).toBeInTheDocument();
   });
 
+  it("shows a network failure as unknown and clears it after a successful retry", async () => {
+    checkForAppUpdate.mockRejectedValueOnce(new Error("error sending request for url"));
+    checkForAppUpdate.mockResolvedValueOnce(null);
+    renderCard();
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("確認できませんでした");
+    expect(screen.queryByText("最新です")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "更新を確認" }));
+    expect(await screen.findByText("最新です")).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("distinguishes an unpublished release from a successful current-version check", async () => {
+    checkForAppUpdate.mockRejectedValue(new Error("404 Not Found"));
+    renderCard();
+
+    expect(await screen.findByText(/配信された更新がまだありません/)).toBeInTheDocument();
+    expect(screen.queryByText("最新です")).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
   it("remembers that the launch check was turned off", async () => {
     checkForAppUpdate.mockResolvedValue(null);
     renderCard();
