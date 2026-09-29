@@ -9,6 +9,7 @@ use crate::AppState;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 use tauri::{Emitter, Manager};
 
@@ -21,11 +22,43 @@ const MAX_REPORTED_ISSUES: usize = 50;
 /// 確認には一時停止も中止もあるのに、こちらには何も無かった。1 冊の書き出し
 /// は中断しない ―― 半端な EPUB を残さないよう、いま作っている本は書き切って
 /// から止まる。
-static EPUB_EXPORT_CANCEL: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+const EXPORT_IDLE: u8 = 0;
+const EXPORT_RUNNING: u8 = 1;
+const EXPORT_CANCEL_REQUESTED: u8 = 2;
+static EPUB_EXPORT_STATE: AtomicU8 = AtomicU8::new(EXPORT_IDLE);
+
+#[derive(Debug)]
+struct EpubExportGuard<'a>(&'a AtomicU8);
+
+impl Drop for EpubExportGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(EXPORT_IDLE, Ordering::Release);
+    }
+}
+
+fn begin_epub_export(state: &AtomicU8) -> Result<EpubExportGuard<'_>, String> {
+    state
+        .compare_exchange(
+            EXPORT_IDLE,
+            EXPORT_RUNNING,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        )
+        .map_err(|_| "EPUBの書き出しは既に実行中です".to_string())?;
+    Ok(EpubExportGuard(state))
+}
+
+fn request_epub_export_cancel(state: &AtomicU8) {
+    let _ = state.compare_exchange(
+        EXPORT_RUNNING,
+        EXPORT_CANCEL_REQUESTED,
+        Ordering::AcqRel,
+        Ordering::Acquire,
+    );
+}
 
 fn epub_export_canceled() -> bool {
-    EPUB_EXPORT_CANCEL.load(std::sync::atomic::Ordering::Acquire)
+    EPUB_EXPORT_STATE.load(Ordering::Acquire) == EXPORT_CANCEL_REQUESTED
 }
 
 /// 走っている書き出しに、中止を頼む。
@@ -36,7 +69,7 @@ fn epub_export_canceled() -> bool {
 /// 走っていないときに呼んでも何も起きない（誤りではない）。
 #[tauri::command]
 pub async fn cancel_epub_export() -> Result<(), String> {
-    EPUB_EXPORT_CANCEL.store(true, std::sync::atomic::Ordering::Release);
+    request_epub_export_cancel(&EPUB_EXPORT_STATE);
     Ok(())
 }
 
@@ -1033,6 +1066,7 @@ pub async fn export_epub_batch(
     compress_options: Option<ImageCompressOptions>,
     writing_mode: Option<String>,
 ) -> Result<ExportBatchResult, String> {
+    let _export_guard = begin_epub_export(&EPUB_EXPORT_STATE)?;
     let state = app.state::<Arc<AppState>>().inner().clone();
     let _library_snapshot_guard = state.library_gate.clone().read_owned().await;
     let templates_dir = get_templates_dir(&app)?;
@@ -1055,12 +1089,12 @@ pub async fn export_epub_batch(
         },
     );
 
-    EPUB_EXPORT_CANCEL.store(false, std::sync::atomic::Ordering::Release);
     let mut tasks = tokio::task::JoinSet::new();
     let mut pending = download_ids.into_iter().enumerate();
     let mut completed = Vec::with_capacity(total as usize);
+    let mut worker_error = None;
     loop {
-        while tasks.len() < MAX_CONCURRENT_EPUB_BUILDS {
+        while worker_error.is_none() && tasks.len() < MAX_CONCURRENT_EPUB_BUILDS {
             // 止めると言われたら、そこから先は始めない。
             if epub_export_canceled() {
                 break;
@@ -1093,16 +1127,22 @@ pub async fn export_epub_batch(
         if tasks.is_empty() {
             break;
         }
-        let joined = tasks
-            .join_next()
-            .await
-            .ok_or_else(|| "EPUBワーカーが予期せず終了しました".to_string())?
-            .map_err(|error| format!("EPUBワーカーがパニックしました: {error}"))?;
-        completed.push(joined);
+        match tasks.join_next().await {
+            Some(Ok(joined)) => completed.push(joined),
+            Some(Err(error)) => {
+                // spawn_blocking は JoinSet を捨てても既に走る処理を止められない。
+                // 全ワーカーの終了を待ってからガードを解放する。
+                worker_error
+                    .get_or_insert_with(|| format!("EPUBワーカーがパニックしました: {error}"));
+            }
+            None => break,
+        }
+    }
+    if let Some(error) = worker_error {
+        return Err(error);
     }
 
     let canceled = epub_export_canceled();
-    EPUB_EXPORT_CANCEL.store(false, std::sync::atomic::Ordering::Release);
     let mut result = aggregate_batch_results(completed);
     result.canceled = canceled;
     // 一度も試していない作品はキューに残す。止めた結果として棚から
@@ -1755,6 +1795,26 @@ fn sample_manifest() -> EpubManifest {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn epub_export_cancellation_belongs_to_one_active_batch() {
+        let state = AtomicU8::new(EXPORT_IDLE);
+        request_epub_export_cancel(&state);
+        let first = begin_epub_export(&state).expect("idle cancellation must not persist");
+        assert!(
+            begin_epub_export(&state).is_err(),
+            "a second batch must wait"
+        );
+        request_epub_export_cancel(&state);
+        assert_eq!(state.load(Ordering::Acquire), EXPORT_CANCEL_REQUESTED);
+        assert!(
+            begin_epub_export(&state).is_err(),
+            "cancellation must not unlock the batch"
+        );
+        drop(first);
+        let _second = begin_epub_export(&state).expect("the finished batch releases its slot");
+        assert_eq!(state.load(Ordering::Acquire), EXPORT_RUNNING);
+    }
 
     /// 束ねた本の中で、ページ内移動が自分の作品を指し続けること。
     ///
