@@ -38,11 +38,11 @@ import { demoWorks } from "@/mocks/demoData";
 import { getDownloads, isTauriRuntime } from "@/services/dbApi";
 import { openSingleDialog } from "@/services/dialogApi";
 import { cancelEpubExport, exportEpubBatch, listEpubTemplates } from "@/services/epubApi";
-import { subscribeTauriEvent } from "@/services/eventBus";
+import { onTauriEvent, subscribeTauriEvent } from "@/services/eventBus";
 import { openFilesystemPath } from "@/services/openerApi";
 import type { DownloadEntry } from "@/types/library";
 import type { ExportBatchResult, ExportProgress, TemplateInfo } from "@/types/epub";
-import { startOperation, type OperationController } from "@/features/jobs/operationJobs";
+import { getOperationJobs, startOperation, type OperationController } from "@/features/jobs/operationJobs";
 import { demoTemplates } from "./templateStudioDemo";
 import { AUTO_TEMPLATE, readExportSettings, toCompressOptions, writeExportSettings, type EpubExportSettings } from "./exportSettings";
 
@@ -57,6 +57,7 @@ export default function EpubPage() {
   const [result, setResult] = useState<ExportBatchResult | null>(null);
   const exportOperationRef = useRef<OperationController | null>(null);
   const retryExportRef = useRef<(request: EpubExportRequest) => void>(() => undefined);
+  const retryWorksRef = useRef(new Map<string, EpubExportRequest["works"]>());
   // 前に書き出したときの決めごとから始める。開くたびに初期値へ戻り、出力先
   // フォルダーまで毎回選び直しだった。
   const form = useForm<EpubValues>({ initialValues: readExportSettings(), validate: { templateName: isNotEmpty("テンプレートを選択してください"), outputDir: isNotEmpty("出力先を選択してください") }, validateInputOnBlur: true });
@@ -78,7 +79,6 @@ export default function EpubPage() {
     if (!runtime) return undefined;
     return subscribeTauriEvent<ExportProgress>("epub-export-progress", (event) => {
       setProgress(event.payload);
-      exportOperationRef.current?.progress(event.payload.currentIndex, event.payload.totalCount, event.payload.message);
     });
   }, [runtime]);
   // Works deleted from the library after being queued simply do not come back
@@ -92,46 +92,74 @@ export default function EpubPage() {
 
   const exportMutation = useMutation({
     mutationFn: async ({ works, ...values }: EpubExportRequest): Promise<ExportBatchResult> => {
-      exportOperationRef.current = startOperation({
+      const retainedJobs = new Set(getOperationJobs().map((job) => job.id));
+      for (const jobId of retryWorksRef.current.keys()) {
+        if (!retainedJobs.has(jobId)) retryWorksRef.current.delete(jobId);
+      }
+      const operation = startOperation({
         kind: "epub",
         label: `${works.length}冊をEPUBへ書き出し`,
         detail: values.outputDir,
         total: works.length,
-        onRetry: () => retryExportRef.current({ ...values, works }),
+        onRetry: () => {
+          const retryWorks = retryWorksRef.current.get(operation.id) ?? works;
+          retryWorksRef.current.delete(operation.id);
+          retryExportRef.current({ ...values, works: retryWorks });
+        },
         // 数百冊を並べて実行したら、終わるまで止められなかった。作りかけの
         // 1 冊は書き切ってから止まるので、半端な EPUB は残らない。
         onCancel: runtime ? async () => { await cancelEpubExport(); } : undefined,
       });
+      exportOperationRef.current = operation;
       setResult(null); setProgress({ phase: "started", currentTitle: "", currentIndex: 0, totalCount: works.length, message: "書き出しを準備しています" });
       if (!runtime) {
         await new Promise((resolve) => window.setTimeout(resolve, 500));
         return { successCount: works.length, failedCount: 0, failedIds: [], invalidIds: [], outputFiles: works.map((work) => `${values.outputDir}/${work.title}.epub`), invalidCount: 0, issues: [], canceled: false, skippedIds: [] };
       }
-      return exportEpubBatch<ExportBatchResult>({
-        downloadIds: works.map((work) => work.id),
-        templateName: values.templateName,
-        outputDir: values.outputDir,
-        writingMode: values.writingMode,
-        compressOptions: toCompressOptions(values.compression),
-      });
+      // The page can unmount while a retry runs from Operation History. Keep
+      // the job's listener attached for its own lifetime so progress is not lost.
+      let unlisten: (() => void) | undefined;
+      try {
+        unlisten = await onTauriEvent<ExportProgress>("epub-export-progress", (event) => {
+          operation.progress(event.payload.currentIndex, event.payload.totalCount, event.payload.message);
+        });
+      } catch (error) {
+        operation.log(`EPUB進捗の購読に失敗しました: ${errorMessage(error)}`, "warn");
+      }
+      try {
+        return await exportEpubBatch<ExportBatchResult>({
+          downloadIds: works.map((work) => work.id),
+          templateName: values.templateName,
+          outputDir: values.outputDir,
+          writingMode: values.writingMode,
+          compressOptions: toCompressOptions(values.compression),
+        });
+      } finally {
+        unlisten?.();
+      }
     },
     onSuccess: (data, request) => {
-      if (data.canceled) exportOperationRef.current?.cancel(`成功 ${data.successCount} · 未着手 ${data.skippedIds.length}`);
-      else exportOperationRef.current?.complete(`成功 ${data.successCount} · 失敗 ${data.failedCount}`);
-      exportOperationRef.current = null;
-      setResult(data);
-      setProgress(null);
       // 書けなかったもの、検証を通らなかったもの、そして**一度も試して
       // いないもの**はキューに残す。止めた結果として棚から消えたのでは、
       // 中止が取り下げになってしまう。
       const keep = new Set([...data.failedIds, ...data.invalidIds, ...data.skippedIds]);
+      const failed = data.failedCount > 0 || data.invalidCount > 0;
+      if (data.canceled) exportOperationRef.current?.cancel(`成功 ${data.successCount} · 未着手 ${data.skippedIds.length}`);
+      else if (failed) {
+        const retryWorks = request.works.filter((work) => keep.has(work.id));
+        if (exportOperationRef.current && retryWorks.length > 0) retryWorksRef.current.set(exportOperationRef.current.id, retryWorks);
+        exportOperationRef.current?.fail(new Error(`成功 ${data.successCount} · 失敗 ${data.failedCount} · 検証不合格 ${data.invalidCount}`));
+      } else exportOperationRef.current?.complete(`成功 ${data.successCount} · 失敗 0`);
+      exportOperationRef.current = null;
+      setResult(data);
+      setProgress(null);
       // The queue can grow while this batch runs. Only its original works
       // were attempted; additions belong to the next export.
       removeFromEpubQueue(request.works.filter((work) => !keep.has(work.id)).map((work) => work.id));
       const needsReview = data.failedCount > 0 || data.invalidCount > 0 || data.issues.length > 0;
       notifications.show({
-        color: data.canceled ? "yellow" : needsReview ? "yellow" : "green",
-        title: data.canceled ? "EPUB書き出しを中止しました" : "EPUB書き出しが完了しました",
+        color: data.canceled ? "yellow" : failed ? "red" : needsReview ? "yellow" : "green",
+        title: data.canceled ? "EPUB書き出しを中止しました" : failed ? "EPUBを書き出せない作品がありました" : "EPUB書き出しが完了しました",
         message: data.canceled
           ? `成功 ${data.successCount} · 残り${data.skippedIds.length}件はキューに残しました`
           : `成功 ${data.successCount} · 失敗 ${data.failedCount}${data.invalidCount ? ` · 検証不合格 ${data.invalidCount}` : ""}`,
@@ -213,11 +241,13 @@ export default function EpubPage() {
  * or Send to Kindle silently refuses looks exactly like a successful export.
  */
 function ExportResult({ result, outputDir, runtime }: { result: ExportBatchResult; outputDir: string; runtime: boolean }) {
-  const clean = !result.canceled && !result.failedCount && !result.invalidCount && !result.issues.length;
+  const failed = result.failedCount > 0 || result.invalidCount > 0;
+  const clean = !result.canceled && !failed && !result.issues.length;
   return (
-    <Alert color={clean ? "green" : "yellow"} icon={<Icons.confirm size={IconSize.action} />} title={result.canceled ? "書き出しを中止しました" : "書き出し完了"}>
+    <Alert color={result.canceled ? "yellow" : failed ? "red" : clean ? "green" : "yellow"} icon={!result.canceled && failed ? <Icons.error size={IconSize.action} /> : <Icons.confirm size={IconSize.action} />} title={result.canceled ? "書き出しを中止しました" : failed ? "書き出せない作品がありました" : "書き出し完了"}>
       <Stack gap="xs">
         <Text size="sm">成功 {result.successCount}件 / 失敗 {result.failedCount}件{result.canceled ? ` / 未着手 ${result.skippedIds.length}件` : ""}</Text>
+        {failed && <Text size="xs" c="dimmed">書き出せなかった作品はキューに残っています。詳しい理由は操作履歴のログで確認してください。</Text>}
         {result.canceled && <Text size="xs" c="dimmed">中止した時点で作りかけだった1冊は書き切っています。残りはキューに残したので、そのまま続きから書き出せます。</Text>}
         {result.issues.length > 0 && (
           <Box>
@@ -228,7 +258,7 @@ function ExportResult({ result, outputDir, runtime }: { result: ExportBatchResul
             </ScrollArea.Autosize>
           </Box>
         )}
-        {outputDir && <Button size="xs" variant="light" w="fit-content" leftSection={<Icons.openFolder size={IconSize.inline} />} disabled={!runtime} onClick={() => openFilesystemPath(outputDir)}>出力先を開く</Button>}
+        {outputDir && result.successCount > 0 && <Button size="xs" variant="light" w="fit-content" leftSection={<Icons.openFolder size={IconSize.inline} />} disabled={!runtime} onClick={() => openFilesystemPath(outputDir)}>出力先を開く</Button>}
       </Stack>
     </Alert>
   );

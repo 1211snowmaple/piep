@@ -84,34 +84,51 @@ export interface SidebarAnalysisState {
 }
 
 export function normalizeContentLinkUrl(url: string): string {
-  return url
-    .replace(/pixiv:\/\/illusts?\/(\d+)/g, "https://www.pixiv.net/artworks/$1")
-    .replace(/pixiv:\/\/novels?\/(\d+)/g, "https://www.pixiv.net/novel/show.php?id=$1")
-    .replace(/pixiv:\/\/users?\/(\d+)/g, "https://www.pixiv.net/users/$1");
+  const deepLink = url.match(/^pixiv:\/\/(illusts?|novels?|users?)\/(\d+)\/?(\?[^#]*)?(#.*)?$/i);
+  if (!deepLink) return url;
+  const [, kind, id, query = "", fragment = ""] = deepLink;
+  if (/^novels?$/i.test(kind)) {
+    const extra = new URLSearchParams(query.slice(1)).toString();
+    return `https://www.pixiv.net/novel/show.php?id=${id}${extra ? `&${extra}` : ""}${fragment}`;
+  }
+  const path = /^users?$/i.test(kind) ? `users/${id}` : `artworks/${id}`;
+  return `https://www.pixiv.net/${path}${query}${fragment}`;
+}
+
+function sourceUrl(raw: string): URL | null {
+  try {
+    const parsed = new URL(normalizeContentLinkUrl(raw));
+    return parsed.protocol === "https:" || parsed.protocol === "http:" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function isSourceHost(hostname: string, domain: string): boolean {
+  return hostname === domain || hostname.endsWith(`.${domain}`);
+}
+
+function sourcePath(pathname: string): string {
+  return pathname.replace(/^\/[a-z]{2}\//i, "/");
+}
+
+function isSourceId(value: string | null | undefined): value is string {
+  return Boolean(value && /^\d+$/.test(value));
 }
 
 export function extractSavedSourceTarget(url: string): SavedSourceTarget | null {
-  const normalized = normalizeContentLinkUrl(url);
-  const pixivNovelMatch = normalized.match(/pixiv\.net\/(?:[a-z]{2}\/)?novels\/(\d+)/)
-    || normalized.match(/pixiv\.net\/(?:[a-z]{2}\/)?novel\/show\.php\?id=(\d+)/);
-  if (pixivNovelMatch?.[1]) {
-    return { source: "pixiv", sourceId: pixivNovelMatch[1] };
-  }
-
-  const fanboxPostMatch = normalized.match(/fanbox\.cc\/(?:@[^/]+\/)?posts\/(\d+)/);
-  if (fanboxPostMatch?.[1]) {
-    return { source: "fanbox", sourceId: fanboxPostMatch[1] };
-  }
-
+  const target = describeDownloadTarget(url);
+  if (target.kind === "pixiv_single") return { source: "pixiv", sourceId: target.id };
+  if (target.kind === "fanbox_single") return { source: "fanbox", sourceId: target.id };
   return null;
 }
 
 export function getFanboxCreatorId(url: string): string | null {
-  const subMatch = url.match(/https:\/\/([^.]+)\.fanbox\.cc/);
-  if (subMatch && subMatch[1] !== "www" && subMatch[1] !== "api") return subMatch[1];
-  const dirMatch = url.match(/fanbox\.cc\/@([^/?#\s]+)/);
-  if (dirMatch) return dirMatch[1];
-  return null;
+  const parsed = sourceUrl(url);
+  if (!parsed || !isSourceHost(parsed.hostname, "fanbox.cc")) return null;
+  const labels = parsed.hostname.split(".");
+  if (labels.length === 3 && labels[0] !== "www" && labels[0] !== "api") return labels[0];
+  return parsed.pathname.match(/^\/@([^/]+)(?:\/|$)/)?.[1] ?? null;
 }
 
 /** そのページが指している相手。作品ID・シリーズID・作者ID・クリエイター名。 */
@@ -129,23 +146,28 @@ export interface DownloadTarget {
  */
 export function describeDownloadTarget(url: string): DownloadTarget {
   const none: DownloadTarget = { kind: "unsupported", id: "" };
-  if (!url) return none;
-  const normalized = normalizeContentLinkUrl(url);
+  const parsed = sourceUrl(url);
+  if (!parsed) return none;
+  const path = sourcePath(parsed.pathname);
 
-  if (normalized.includes("pixiv.net")) {
-    const seriesId = normalized.match(/novel\/series\/(?:show\.php\?id=)?(\d+)/)?.[1];
-    if (seriesId) return { kind: "pixiv_series", id: seriesId };
-    const userId = normalized.match(/users\/(\d+)/)?.[1];
-    if (userId && !normalized.includes("/novels/")) return { kind: "pixiv_user", id: userId };
-    const novelId = normalized.match(/novels\/(\d+)/)?.[1] || normalized.match(/novel\/show\.php\?id=(\d+)/)?.[1];
-    if (novelId) return { kind: "pixiv_single", id: novelId };
+  if (isSourceHost(parsed.hostname, "pixiv.net")) {
+    const seriesId = path.match(/^\/novel\/series\/(\d+)\/?$/)?.[1]
+      ?? (path === "/novel/series/show.php" ? parsed.searchParams.get("id") : null);
+    if (isSourceId(seriesId)) return { kind: "pixiv_series", id: seriesId };
+    const userId = path.match(/^\/users\/(\d+)(?:\/novels)?\/?$/)?.[1];
+    if (userId) return { kind: "pixiv_user", id: userId };
+    const novelId = path.match(/^\/novels\/(\d+)\/?$/)?.[1]
+      ?? (path === "/novel/show.php" ? parsed.searchParams.get("id") : null);
+    if (isSourceId(novelId)) return { kind: "pixiv_single", id: novelId };
   }
 
-  if (normalized.includes("fanbox.cc")) {
-    const postId = normalized.match(/posts\/(\d+)/)?.[1];
+  if (isSourceHost(parsed.hostname, "fanbox.cc")) {
+    const postId = path.match(/^\/(?:@[^/]+\/)?posts\/(\d+)\/?$/)?.[1];
     if (postId) return { kind: "fanbox_single", id: postId };
-    const creatorId = getFanboxCreatorId(normalized);
-    if (creatorId) return { kind: "fanbox_creator", id: creatorId };
+    const creatorId = getFanboxCreatorId(parsed.href);
+    const creatorPage = /^\/(?:@[^/]+\/?)?$/.test(path)
+      || /^\/(?:@[^/]+\/)?(?:posts|plans|about)\/?$/.test(path);
+    if (creatorId && creatorPage) return { kind: "fanbox_creator", id: creatorId };
   }
 
   return none;

@@ -8,6 +8,7 @@ import {
   Box,
   Button,
   Card,
+  Checkbox,
   Code,
   Divider,
   Grid,
@@ -43,6 +44,7 @@ import { VIEW_SCOPES, useDefaultViewMode, useScopedViewPreference, type ViewMode
 import { errorMessage, formatBytes, formatNumber } from "@/lib/format";
 import { getProvider, providers } from "@/lib/providers";
 import {
+  backupExportRunning,
   cancelArchiveRestore,
   exportAllMultipart,
   getStoragePath,
@@ -50,6 +52,7 @@ import {
   inspectBackupFile,
   multipartManifestPath,
   type ArchiveProgress,
+  type BackupExportProgress,
   type BackupFormat,
   type BackupInspection,
 } from "@/services/archiveApi";
@@ -65,7 +68,7 @@ import { invalidateWorkSetViews } from "@/features/library/workSetInvalidation";
 import DiagnosticsPage from "@/features/diagnostics/DiagnosticsPage";
 import { cancelSearchRebuildIndex, startSearchRebuildIndex, type SearchRebuildProgress } from "@/services/searchApi";
 import { store } from "@/store";
-import { reportJobAction, requestOperationCancel, startOperation, type OperationController } from "@/features/jobs/operationJobs";
+import { reportJobAction, requestOperationCancel, startOperation, useOperationJobs, type OperationController } from "@/features/jobs/operationJobs";
 import { APP_VERSION } from "@/lib/version";
 import { AppUpdateCard } from "@/features/settings/AppUpdateCard";
 import { AssistSection } from "@/features/settings/AssistSection";
@@ -92,7 +95,7 @@ function isSection(value: string | null): value is Section {
   return value !== null && (SECTIONS as readonly string[]).includes(value);
 }
 interface ConnectionState { pixiv: PixivUser | null; fanbox: FanboxUser | null }
-export interface BackupReview { path: string; format: BackupFormat; inspection: BackupInspection }
+export interface BackupReview { path: string; format: BackupFormat; inspection: BackupInspection; replaceExisting?: boolean }
 
 /** 復元の段どりを、そのまま画面の言葉にする。 */
 const PHASE_LABEL: Record<string, string> = {
@@ -139,6 +142,14 @@ function settleManualRebuild(progress: SearchRebuildProgress) {
   notifications.show({ color: failed ? "yellow" : "green", title: "検索インデックスを再構築しました", message: summary });
 }
 
+function localBackupDate(date: Date): string {
+  return [
+    date.getFullYear(),
+    String(date.getMonth() + 1).padStart(2, "0"),
+    String(date.getDate()).padStart(2, "0"),
+  ].join("-");
+}
+
 export default function SettingsPage() {
   const runtime = isTauriRuntime();
   const [searchParams, setSearchParams] = useAppSearchParams();
@@ -156,12 +167,18 @@ export default function SettingsPage() {
     });
   };
   const queryClient = useQueryClient();
+  const operations = useOperationJobs();
+  const libraryOperationRunning = operations.some((job) =>
+    (job.kind === "backup" || job.kind === "maintenance" || job.kind === "restore") &&
+    (job.status === "queued" || job.status === "running" || job.status === "canceling"),
+  );
   // Read from the shared store rather than only tracking runs this page
   // started: the app catches the index up on its own at launch, and this screen
   // has to show that run too.
   const rebuild = useSearchIndexProgress();
   const rebuildOperationRef = useRef<OperationController | null>(null);
   const [restoreReview, setRestoreReview] = useState<BackupReview | null>(null);
+  const [inspectingBackup, setInspectingBackup] = useState(false);
   const { colorScheme, setColorScheme } = useMantineColorScheme();
   const auth = useQuery({
     queryKey: ["settings-auth"],
@@ -173,6 +190,12 @@ export default function SettingsPage() {
   });
   const stats = useQuery({ queryKey: ["stats"], queryFn: () => runtime ? getStats() : Promise.resolve({ totalDownloads: 1284, pixivCount: 936, fanboxCount: 348, totalAssets: 8241, totalSizeBytes: 14_680_000_000 }) });
   const storagePath = useQuery({ queryKey: ["storage-path"], queryFn: () => runtime ? getStoragePath() : Promise.resolve("C:\\Users\\preview\\AppData\\Roaming\\com.hiron.piep\\downloads") });
+  const nativeBackup = useQuery({
+    queryKey: ["backup-export-running"],
+    queryFn: backupExportRunning,
+    enabled: runtime && section === "library",
+    refetchInterval: runtime && section === "library" ? 2_000 : false,
+  });
   const index = useQuery({ queryKey: ["search-index-status"], queryFn: () => runtime ? getSearchIndexStatus() : Promise.resolve(PREVIEW_INDEX_STATUS) });
   const pixivForm = useForm({ initialValues: { token: "" }, validate: { token: isNotEmpty("リフレッシュトークンを入力してください") } });
   const fanboxForm = useForm({ initialValues: { session: "", userAgent: "Mozilla/5.0" }, validate: { session: isNotEmpty("FANBOXSESSIDを入力してください") } });
@@ -209,8 +232,13 @@ export default function SettingsPage() {
       if (action === "restore") {
         const path = await openSingleDialog({ title: "検査するバックアップを選択", filters: [{ name: "Piep backup", extensions: ["json", "zip"] }] });
         if (!path) return "";
-        const review = await inspectBackupFile(path);
-        setRestoreReview({ path, ...review });
+        setInspectingBackup(true);
+        try {
+          const review = await inspectBackupFile(path);
+          setRestoreReview({ path, ...review });
+        } finally {
+          setInspectingBackup(false);
+        }
         return "";
       }
       const operation = startOperation({
@@ -220,11 +248,24 @@ export default function SettingsPage() {
       });
       try {
         if (action === "backup") {
-          const selectedPath = await saveDialog({ title: "ライブラリのバックアップ", defaultPath: `piep-backup-${new Date().toISOString().slice(0, 10)}.json`, filters: [{ name: "Piep multipart backup manifest", extensions: ["json"] }] });
+          const selectedPath = await saveDialog({ title: "ライブラリのバックアップ", defaultPath: `piep-backup-${localBackupDate(new Date())}.json`, filters: [{ name: "Piep multipart backup manifest", extensions: ["json"] }] });
           if (!selectedPath) { operation.cancel("保存先の選択をキャンセルしました"); return ""; }
           const manifestPath = multipartManifestPath(selectedPath);
           operation.log(manifestPath);
-          await exportAllMultipart(manifestPath);
+          operation.progress(0, null, "作品を書き出しています");
+          const disposeProgress = subscribeTauriEvent<BackupExportProgress>("backup-export-progress", (event) => {
+            const { phase, processed, total, partCount } = event.payload;
+            if (phase === "works") {
+              operation.progress(processed, total, `作品 ${formatNumber(processed)}/${formatNumber(total)} 件を書き出しました（ZIP ${partCount} 個）`);
+            } else {
+              operation.progress(0, null, `作品の書き出し完了。付随データとマニフェストを保存中（ZIP ${partCount} 個）`);
+            }
+          });
+          try {
+            await exportAllMultipart(manifestPath);
+          } finally {
+            disposeProgress();
+          }
           operation.complete("分割バックアップを書き出しました");
           return "分割バックアップを書き出しました。マニフェストと同じフォルダーのZIPパートを一緒に保管してください";
         }
@@ -244,7 +285,15 @@ export default function SettingsPage() {
     },
     // 再取り込みは作品を丸ごと増やすので、増えたときに古くなる場所すべてに
     // 知らせる（保存フォルダーから数百件戻ることがある）。
-    onSuccess: (message) => { if (message) notifications.show({ color: "green", message }); queryClient.invalidateQueries({ queryKey: ["library"] }); queryClient.invalidateQueries({ queryKey: ["stats"] }); invalidateWorkSetViews(queryClient); },
+    onSuccess: (message, action) => {
+      if (message) notifications.show({ color: "green", message });
+      if (action === "backup") queryClient.invalidateQueries({ queryKey: ["backup-export-running"] });
+      if (action === "scan") {
+        queryClient.invalidateQueries({ queryKey: ["library"] });
+        queryClient.invalidateQueries({ queryKey: ["stats"] });
+        invalidateWorkSetViews(queryClient);
+      }
+    },
     onError: (error, action) => notifications.show({
       color: "red",
       title: action === "restore" ? "バックアップを検査できませんでした" : "操作に失敗しました",
@@ -254,7 +303,7 @@ export default function SettingsPage() {
     }),
   });
   const restoreMutation = useMutation({
-    mutationFn: async ({ path, format, inspection }: BackupReview) => {
+    mutationFn: async ({ path, format, inspection, replaceExisting }: BackupReview) => {
       const execute = async (): Promise<void> => {
         // **数時間かかりうる操作に、進捗も中止も無いままにしない。**
         // 検証済みの一行だけを出して 0% のまま待たせ、押し間違えても止められ
@@ -279,7 +328,7 @@ export default function SettingsPage() {
           operation.log(label ? `${shown}: ${label}` : shown);
         });
         try {
-          const count = await importBackupFile(path, format);
+          const count = await importBackupFile(path, format, Boolean(replaceExisting));
           operation.progress(count, inspection.workCount);
           operation.complete(`${count}件を復元しました`);
           notifications.show({ color: "green", message: `${count}件を復元しました` });
@@ -389,7 +438,7 @@ export default function SettingsPage() {
         <Grid.Col span={{ base: 12, md: 4, lg: 3 }}><Card p="xs" className="settings-nav">{nav.map((item) => { const Icon = item.icon; return <NavLink component="button" type="button" key={item.id} active={section === item.id} aria-current={section === item.id ? "page" : undefined} label={item.label} description={item.description} leftSection={<Icon size={18} />} onClick={() => setSection(item.id)} />; })}</Card></Grid.Col>
         <Grid.Col span={{ base: 12, md: 8, lg: 9 }} className="settings-content">
           {section === "connections" && (auth.isLoading ? <LoadingState label="接続状態を確認しています" /> : auth.error ? <ErrorState error={auth.error} retry={() => auth.refetch()} /> : <ConnectionsSection auth={auth.data ?? { pixiv: null, fanbox: null }} runtime={runtime} pixivForm={pixivForm} fanboxForm={fanboxForm} mutation={connectionMutation} disconnect={disconnect} />)}
-          {section === "library" && (stats.isLoading || storagePath.isLoading ? <LoadingState label="ライブラリ情報を読み込んでいます" /> : stats.error || storagePath.error ? <ErrorState error={stats.error ?? storagePath.error} retry={() => { stats.refetch(); storagePath.refetch(); }} /> : <LibrarySection stats={stats.data} path={storagePath.data} runtime={runtime} pending={maintenanceMutation.isPending} run={(action) => maintenanceMutation.mutate(action)} />)}
+          {section === "library" && (stats.isLoading || storagePath.isLoading ? <LoadingState label="ライブラリ情報を読み込んでいます" /> : stats.error || storagePath.error ? <ErrorState error={stats.error ?? storagePath.error} retry={() => { stats.refetch(); storagePath.refetch(); }} /> : <LibrarySection stats={stats.data} path={storagePath.data} runtime={runtime} pending={maintenanceMutation.isPending} busy={libraryOperationRunning || Boolean(nativeBackup.data)} inspecting={inspectingBackup} run={(action) => maintenanceMutation.mutate(action)} />)}
           {section === "search" && (index.isLoading ? <LoadingState label="検索インデックスを確認しています" /> : index.error ? <ErrorState error={index.error} retry={() => index.refetch()} /> : <SearchSection status={index.data} rebuild={rebuild} runtime={runtime} rebuilding={rebuildMutation.isPending || rebuild?.status === "running"} start={(includeSemantic) => startRebuild(includeSemantic)} cancel={() => { if (rebuildOperationRef.current) { void requestOperationCancel(rebuildOperationRef.current.id); return; } if (rebuild) reportJobAction(cancelSearchRebuildIndex(rebuild.jobId), "索引の作り直しを中止できません"); }} />)}
           {section === "assist" && <AssistSection />}
           {section === "diagnostics" && <DiagnosticsPage embedded />}
@@ -399,9 +448,10 @@ export default function SettingsPage() {
       </Grid>
       <RestoreWizard
         review={restoreReview}
+        existingWorkCount={stats.data?.totalDownloads}
         loading={restoreMutation.isPending}
         onClose={() => !restoreMutation.isPending && setRestoreReview(null)}
-        onConfirm={() => restoreReview && restoreMutation.mutate(restoreReview)}
+        onConfirm={(replaceExisting) => restoreReview && restoreMutation.mutate({ ...restoreReview, replaceExisting })}
       />
     </div>
   );
@@ -432,12 +482,14 @@ function ConnectionCard({ source, user, note, runtime, loading, onWeb, onDisconn
   const provider = getProvider(source); return <Card p="lg"><Group justify="space-between" align="flex-start"><Group><Avatar size={54} color="gray" variant="light" style={{ color: provider.color }}>{provider.icon}</Avatar><Box><Group gap="xs"><Text fw={700}>{provider.label}</Text><Badge color={user ? "green" : "gray"} variant="light">{user ? "接続済み" : "未接続"}</Badge></Group><Text size="sm" c="dimmed" mt={4}>{user?.name || provider.description}</Text>{note && <Text size="xs" c="dimmed" mt={2}>{note}</Text>}</Box></Group>{user ? <Button color="red" variant="subtle" size="xs" leftSection={<Icons.delete size={IconSize.menu} />} onClick={onDisconnect}>接続解除</Button> : <Button disabled={!runtime} loading={loading} leftSection={<Icons.credentials size={IconSize.menu} />} onClick={onWeb}>ブラウザで接続</Button>}</Group>{!user && <><Divider my="lg" label="または手動入力" labelPosition="center" />{manual}</>}</Card>;
 }
 
-function LibrarySection({ stats, path, runtime, pending, run }: { stats?: { totalDownloads: number; totalAssets: number; totalSizeBytes: number }; path?: string; runtime: boolean; pending: boolean; run: (action: "backup" | "restore" | "scan") => void }) { return <Stack gap="lg"><SectionIntro title="ローカルライブラリ" description="保存ファイルとデータベースの場所、バックアップを管理します。" /><Grid><Grid.Col span={{ base: 12, sm: 4 }}><Metric icon={Icons.read} label="作品" value={formatNumber(stats?.totalDownloads)} /></Grid.Col><Grid.Col span={{ base: 12, sm: 4 }}><Metric icon={Icons.archive} label="アセット" value={formatNumber(stats?.totalAssets)} /></Grid.Col><Grid.Col span={{ base: 12, sm: 4 }}><Metric icon={Icons.storage} label="使用容量" value={formatBytes(stats?.totalSizeBytes ?? 0)} /></Grid.Col></Grid><Card p="lg"><Text fw={700}>保存先</Text><Group mt="sm" wrap="nowrap"><Code block flex={1}>{path || "読み込み中…"}</Code><ActionIcon variant="light" aria-label="保存先を開く" disabled={!runtime || !path} onClick={() => path && openFilesystemPath(path)}><Icons.openFolder size={IconSize.action} /></ActionIcon></Group></Card><Card p="lg"><Stack gap="md"><Box><Text fw={700}>バックアップと復元</Text><Text size="sm" c="dimmed">大きなライブラリはJSONマニフェストと複数のZIPパートに分けて書き出します。復元には同じフォルダー内の一式が必要です。</Text></Box><Group><Button disabled={!runtime} loading={pending} variant="light" leftSection={<Icons.export size={IconSize.menu} />} onClick={() => run("backup")}>分割バックアップを書き出す</Button><Button disabled={!runtime} loading={pending} variant="default" leftSection={<Icons.import size={IconSize.menu} />} onClick={() => run("restore")}>バックアップを復元</Button></Group><Divider /><Box><Text fw={700} size="sm">フォルダーから再取り込み</Text><Text size="xs" c="dimmed" mt={4}>DBにない完全な保存フォルダーだけを検出し、1作品ずつ原子的にライブラリへ戻します。既存作品は手動変更で上書きしません。</Text><Button mt="sm" disabled={!runtime} loading={pending} size="xs" variant="default" leftSection={<Icons.retry size={IconSize.menu} />} onClick={() => run("scan")}>スキャンを実行</Button></Box></Stack></Card></Stack>; }
+function LibrarySection({ stats, path, runtime, pending, busy, inspecting, run }: { stats?: { totalDownloads: number; totalAssets: number; totalSizeBytes: number }; path?: string; runtime: boolean; pending: boolean; busy: boolean; inspecting: boolean; run: (action: "backup" | "restore" | "scan") => void }) { return <Stack gap="lg"><SectionIntro title="ローカルライブラリ" description="保存ファイルとデータベースの場所、バックアップを管理します。" /><Grid><Grid.Col span={{ base: 12, sm: 4 }}><Metric icon={Icons.read} label="作品" value={formatNumber(stats?.totalDownloads)} /></Grid.Col><Grid.Col span={{ base: 12, sm: 4 }}><Metric icon={Icons.archive} label="アセット" value={formatNumber(stats?.totalAssets)} /></Grid.Col><Grid.Col span={{ base: 12, sm: 4 }}><Metric icon={Icons.storage} label="使用容量" value={formatBytes(stats?.totalSizeBytes ?? 0)} /></Grid.Col></Grid><Card p="lg"><Text fw={700}>保存先</Text><Group mt="sm" wrap="nowrap"><Code block flex={1}>{path || "読み込み中…"}</Code><ActionIcon variant="light" aria-label="保存先を開く" disabled={!runtime || !path} onClick={() => path && openFilesystemPath(path)}><Icons.openFolder size={IconSize.action} /></ActionIcon></Group></Card><Card p="lg"><Stack gap="md"><Box><Text fw={700}>バックアップと復元</Text><Text size="sm" c="dimmed">大きなライブラリはJSONマニフェストと複数のZIPパートに分けて書き出します。復元には同じフォルダー内の一式が必要です。書き出し中は作品の保存や更新の反映が完了を待つ場合があります。</Text></Box>{busy && <Alert color="blue">ライブラリの操作が実行中です。操作履歴で追跡できない場合は、完了後に保存先を確認してください。</Alert>}{inspecting && <Alert color="blue">バックアップを検査しています。ZIPパートの照合には時間がかかる場合があります。</Alert>}<Group><Button disabled={!runtime || busy} loading={pending} variant="light" leftSection={<Icons.export size={IconSize.menu} />} onClick={() => run("backup")}>分割バックアップを書き出す</Button><Button disabled={!runtime || busy} loading={pending} variant="default" leftSection={<Icons.import size={IconSize.menu} />} onClick={() => run("restore")}>バックアップを復元</Button></Group><Divider /><Box><Text fw={700} size="sm">フォルダーから再取り込み</Text><Text size="xs" c="dimmed" mt={4}>DBにない完全な保存フォルダーだけを検出し、1作品ずつ原子的にライブラリへ戻します。既存作品は手動変更で上書きしません。</Text><Button mt="sm" disabled={!runtime || busy} loading={pending} size="xs" variant="default" leftSection={<Icons.retry size={IconSize.menu} />} onClick={() => run("scan")}>スキャンを実行</Button></Box></Stack></Card></Stack>; }
 
-export function RestoreWizard({ review, loading, onClose, onConfirm }: { review: BackupReview | null; loading: boolean; onClose: () => void; onConfirm: () => void }) {
+export function RestoreWizard({ review, existingWorkCount, loading, onClose, onConfirm }: { review: BackupReview | null; existingWorkCount?: number; loading: boolean; onClose: () => void; onConfirm: (replaceExisting: boolean) => void }) {
+  const [replaceExisting, setReplaceExisting] = useState(false);
+  useEffect(() => setReplaceExisting(false), [review]);
   const inspection = review?.inspection;
   const hasSpace = inspection?.availableFreeBytes == null || inspection.availableFreeBytes >= inspection.requiredFreeBytes;
-  const canRestore = Boolean(inspection?.valid && hasSpace);
+  const canRestore = Boolean(inspection?.valid && hasSpace && ((existingWorkCount ?? 0) === 0 || replaceExisting));
   const multipart = review?.format === "multipart";
   return <Modal opened={Boolean(review)} onClose={onClose} withCloseButton={!loading} closeOnClickOutside={!loading} closeOnEscape={!loading} title="バックアップ復元ウィザード" size="lg">
     {review && inspection && <Stack gap="lg">
@@ -445,6 +497,8 @@ export function RestoreWizard({ review, loading, onClose, onConfirm }: { review:
       <Box><Text id="selected-backup-label" size="sm" fw={700}>選択した{multipart ? "JSONマニフェスト" : "ZIPバックアップ"}</Text><Code block mt={6} aria-labelledby="selected-backup-label">{review.path}</Code></Box>
       {!inspection.valid && <Alert color="red" title="このバックアップは復元できません">{inspection.error || "バックアップの整合性検査に失敗しました。"}</Alert>}
       {inspection.valid && !hasSpace && <Alert color="red" title="空き容量が不足しています">復元には一時領域を含めて {formatBytes(inspection.requiredFreeBytes)} 必要ですが、利用可能なのは {formatBytes(inspection.availableFreeBytes ?? 0)} です。</Alert>}
+      {inspection.valid && (existingWorkCount ?? 0) > 0 && <Alert color="yellow" title="既存作品は置き換わる場合があります">現在のライブラリには {formatNumber(existingWorkCount)} 件あります。復元ファイルと取得元・作品IDが同じ作品は、保存済みの版やローカル編集も含めて復元内容に置き換わります。必要な変更は先にバックアップしてください。</Alert>}
+      {inspection.valid && (existingWorkCount ?? 0) > 0 && <Checkbox checked={replaceExisting} disabled={loading} onChange={(event) => setReplaceExisting(event.currentTarget.checked)} label="重複する既存作品の版とローカル編集を置き換えることを了承しました" />}
       {inspection.valid && <>
         <Grid>
           <Grid.Col span={{ base: 6, sm: 4 }}><Metric icon={Icons.read} label="作品" value={formatNumber(inspection.workCount)} /></Grid.Col>
@@ -465,7 +519,7 @@ export function RestoreWizard({ review, loading, onClose, onConfirm }: { review:
       {inspection.valid && <Note icon={Icons.secure} title={multipart ? "中断しても再開できます" : "安全な復元"}>{multipart
         ? "すべてのZIPパートを先に検査し、パートごとに安全に復元します。途中で止まった場合は、同じJSONマニフェストをもう一度選ぶと続きから再開できます。マニフェストとZIPパートは移動・改名せず一緒に保管してください。"
         : "すべてのファイルを一時領域へ展開・検証してから、データベースと保存ファイルを一括で切り替えます。途中で失敗した場合は復元ジャーナルにより元の状態へ戻します。"}</Note>}
-      <Group justify="flex-end"><Button variant="default" disabled={loading} onClick={onClose}>キャンセル</Button><Button color="red" disabled={!canRestore} loading={loading} leftSection={<Icons.import size={IconSize.menu} />} onClick={onConfirm}>検証済みバックアップを復元</Button></Group>
+      <Group justify="flex-end"><Button variant="default" disabled={loading} onClick={onClose}>キャンセル</Button><Button color="red" disabled={!canRestore} loading={loading} leftSection={<Icons.import size={IconSize.menu} />} onClick={() => onConfirm(replaceExisting)}>検証済みバックアップを復元</Button></Group>
     </Stack>}
   </Modal>;
 }

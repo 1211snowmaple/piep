@@ -15,4 +15,15 @@ describe("OperationsPage", () => {
     expect(screen.getByText("ライブラリをバックアップ")).toBeInTheDocument();
     expect(screen.getByText("1 / 2")).toBeInTheDocument();
   });
+
+  it("offers retry only after an active operation fails", async () => {
+    const operation = startOperation({ kind: "backup", label: "監査用バックアップ", onRetry: () => undefined });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<MantineProvider><QueryClientProvider client={client}><OperationsPage /></QueryClientProvider></MantineProvider>);
+
+    expect(screen.getByText("監査用バックアップ")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "監査用バックアップを再試行" })).toBeNull();
+    operation.fail(new Error("disk full"));
+    expect(await screen.findByRole("button", { name: "監査用バックアップを再試行" })).toBeInTheDocument();
+  });
 });

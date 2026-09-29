@@ -27,7 +27,7 @@ export function DeferredCandidatesPanel({ runtime, onRechecked }: { runtime: boo
       <Button variant="subtle" size="xs" disabled={!selectedKeys.length || mutation.isPending} onClick={() => setSelected(new Set())}>選択解除</Button>
       <Button disabled={!selectedKeys.length} loading={mutation.isPending} onClick={() => mutation.mutate({ keys: selectedKeys, refreshPostAccess: false })}>権限変更後に再確認（{selectedKeys.length}件）</Button>
     </Group>
-    <Group><Text size="xs" c="dimmed">無料公開への変更など、投稿側の条件が変わった場合はこちら。選んだ投稿を1件ずつ取得して確認します（20件まで）。</Text><Button variant="default" size="xs" disabled={!selectedKeys.length || selectedKeys.length > 20 || mutation.isPending} onClick={() => mutation.mutate({ keys: selectedKeys, refreshPostAccess: true })}>投稿の公開条件も再確認</Button></Group>
+    <Group><Text size="xs" c="dimmed">一覧は20件で打ち切りません。無料公開への変更など投稿側の条件を調べる操作だけ、取得元への負荷を抑えるため一度に20件まで選べます。</Text><Button variant="default" size="xs" disabled={!selectedKeys.length || selectedKeys.length > 20 || mutation.isPending} onClick={() => mutation.mutate({ keys: selectedKeys, refreshPostAccess: true })}>投稿の公開条件も再確認</Button></Group>
     {!rows.length && <Text size="sm" c="dimmed">保留・非表示の作品はありません。</Text>}
     {rows.map((row) => {
       const key = `${row.source}:${row.sourceId}`;

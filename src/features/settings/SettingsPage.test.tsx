@@ -40,6 +40,7 @@ describe("RestoreWizard", () => {
     expect(screen.getByText("単一ZIP · v3.0")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "検証済みバックアップを復元" }));
     expect(onConfirm).toHaveBeenCalledOnce();
+    expect(onConfirm).toHaveBeenCalledWith(false);
   });
 
   it("blocks an invalid or space-starved archive", () => {

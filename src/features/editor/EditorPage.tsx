@@ -136,6 +136,9 @@ export default function EditorPage() {
   const queryClient = useQueryClient();
   const query = useQuery({ queryKey: ["editor-document", id], queryFn: () => runtime ? getEditorDocument(id) : Promise.resolve(getDemoEditor(id)), enabled: Number.isFinite(id) });
   const [dirty, setDirty] = useState(false);
+  const savedFingerprintRef = useRef("");
+  const savedTitleRef = useRef("");
+  const titleRef = useRef("");
   const [blocks, setBlocks] = useState<EditorBlockValue[]>([]);
   const form = useForm<EditorValues>({
     mode: "uncontrolled",
@@ -154,7 +157,7 @@ export default function EditorPage() {
       },
     },
     validateInputOnBlur: true,
-    onValuesChange: () => setDirty(true),
+    onValuesChange: (values) => setDirty(JSON.stringify(values) !== savedFingerprintRef.current || titleRef.current !== savedTitleRef.current),
   });
   const [syncScroll, setSyncScroll] = useLocalStorage({ key: "piep.editor-scroll-sync", defaultValue: true });
   const [autoSave, setAutoSave] = useLocalStorage({ key: "piep.editor-autosave", defaultValue: true });
@@ -219,11 +222,15 @@ export default function EditorPage() {
   useEffect(() => {
     if (!query.data || form.initialized) return;
     const nextBlocks = query.data.blocks.map((block) => ({ clientId: crypto.randomUUID(), blockType: editorType(block.blockType), text: block.text, assetId: block.assetId, attrsJson: block.attrsJson }));
+    const nextTitle = query.data.draftRevision?.title ?? query.data.download.title;
+    savedFingerprintRef.current = JSON.stringify({ blocks: nextBlocks });
+    savedTitleRef.current = nextTitle;
+    titleRef.current = nextTitle;
     form.initialize({ blocks: nextBlocks });
     setBlocks(nextBlocks);
     // 下書きが題を持っていればそれ、無ければいま表示されている題。
     // `download.title` は反映済みの編集を含んだ「読み手に見えている題」。
-    setTitle(query.data.draftRevision?.title ?? query.data.download.title);
+    setTitle(nextTitle);
     setDirty(false);
   }, [form, query.data]);
   useEffect(() => {
@@ -275,10 +282,10 @@ export default function EditorPage() {
     return saveWorkDraft(id, query.data.baseVersion, snapshot.title ?? null, snapshot.persistedBlocks);
   };
   const clearDirtyIfCurrent = (snapshot: EditorSaveSnapshot) => {
-    if (title !== snapshot.title) return;
-    if (JSON.stringify(form.getValues()) !== snapshot.fingerprint) return;
+    savedFingerprintRef.current = snapshot.fingerprint;
+    savedTitleRef.current = snapshot.title ?? "";
     form.resetDirty(snapshot.values);
-    setDirty(false);
+    setDirty(titleRef.current !== savedTitleRef.current || JSON.stringify(form.getValues()) !== savedFingerprintRef.current);
   };
   const saveMutation = useMutation({
     mutationFn: persistSnapshot,
@@ -309,6 +316,9 @@ export default function EditorPage() {
       // 組み直す。id が変わると入力欄が作り直され、消したはずの書きかけが
       // 画面に残らない。
       const nextBlocks = fresh.blocks.map((block) => ({ clientId: crypto.randomUUID(), blockType: editorType(block.blockType), text: block.text, assetId: block.assetId, attrsJson: block.attrsJson }));
+      savedFingerprintRef.current = JSON.stringify({ blocks: nextBlocks });
+      savedTitleRef.current = fresh.download.title;
+      titleRef.current = fresh.download.title;
       form.setValues({ blocks: nextBlocks });
       form.resetDirty({ blocks: nextBlocks });
       setBlocks(nextBlocks);
@@ -410,7 +420,7 @@ export default function EditorPage() {
     form.setFieldValue("blocks", nextBlocks);
     setBlocks(nextBlocks);
     if (remount) setGeneration((value) => value + 1);
-    setDirty(true);
+    setDirty(JSON.stringify({ blocks: nextBlocks }) !== savedFingerprintRef.current || titleRef.current !== savedTitleRef.current);
   }, [form]);
   /** いまの中身を控える。文字の打鍵は入力欄自身の取り消しに任せ、ここでは
    *  ブロックの出入りと並べ替えだけを憶える。消えた段落が戻せればよい。 */
@@ -562,7 +572,7 @@ export default function EditorPage() {
     <div className="editor-page">
       <header className="editor-toolbar">
         <Group h="100%" px="md" justify="space-between" wrap="nowrap" className="editor-toolbar__inner">
-          <Group wrap="nowrap" miw={0} className="editor-toolbar__identity"><Tooltip label="作品詳細へ戻る"><ActionIcon variant="subtle" color="gray" aria-label="作品詳細へ戻る" onClick={goBack}><Icons.back size={IconSize.nav} /></ActionIcon></Tooltip><Divider orientation="vertical" h={24} /><Box miw={0} className="editor-toolbar__titlebox"><TextInput size="xs" variant="unstyled" className="editor-toolbar__title" aria-label="この作品のタイトル" value={title} placeholder="タイトル" onChange={(event) => { setTitle(event.currentTarget.value); setDirty(true); }} /><Group gap="xs"><Text size="xs" c="dimmed">編集とプレビュー</Text>{dirty ? <Badge size="xs" color="yellow" variant="light">未保存</Badge> : savedAt && <Text size="xs" c="dimmed">{savedAt.toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" })}に保存</Text>}{autoSaveBlocked && dirty && <Tooltip label="空のブロックがあるあいだは自動保存を止めています。文字を入れるか、そのブロックを削除してください。"><Badge size="xs" color="red" variant="light">自動保存 停止中</Badge></Tooltip>}</Group></Box></Group>
+          <Group wrap="nowrap" miw={0} className="editor-toolbar__identity"><Tooltip label="作品詳細へ戻る"><ActionIcon variant="subtle" color="gray" aria-label="作品詳細へ戻る" onClick={goBack}><Icons.back size={IconSize.nav} /></ActionIcon></Tooltip><Divider orientation="vertical" h={24} /><Box miw={0} className="editor-toolbar__titlebox"><TextInput size="xs" variant="unstyled" className="editor-toolbar__title" aria-label="この作品のタイトル" value={title} placeholder="タイトル" onChange={(event) => { const nextTitle = event.currentTarget.value; titleRef.current = nextTitle; setTitle(nextTitle); setDirty(nextTitle !== savedTitleRef.current || JSON.stringify(form.getValues()) !== savedFingerprintRef.current); }} /><Group gap="xs"><Text size="xs" c="dimmed">編集とプレビュー</Text>{dirty ? <Badge size="xs" color="yellow" variant="light">未保存</Badge> : savedAt && <Text size="xs" c="dimmed">{savedAt.toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" })}に保存</Text>}{autoSaveBlocked && dirty && <Tooltip label="空のブロックがあるあいだは自動保存を止めています。文字を入れるか、そのブロックを削除してください。"><Badge size="xs" color="red" variant="light">自動保存 停止中</Badge></Tooltip>}</Group></Box></Group>
           <Group gap="xs" wrap="nowrap" className="editor-toolbar__actions">
             <Tooltip label="元に戻す (Ctrl+Z)"><ActionIcon size="lg" variant="default" aria-label="元に戻す" disabled={historyDepth.undo === 0} onClick={undo}><Icons.undo size={IconSize.action} /></ActionIcon></Tooltip>
             <Tooltip label="やり直す (Ctrl+Shift+Z)"><ActionIcon size="lg" variant="default" aria-label="やり直す" disabled={historyDepth.redo === 0} onClick={redo}><Icons.redo size={IconSize.action} /></ActionIcon></Tooltip>

@@ -98,4 +98,16 @@ describe("AddToCollectionModal", () => {
     // 読み込みの前後で選択が動くと、開いた直後に押した人だけ違う束へ入る。
     expect(screen.getByLabelText(/^名前/)).toBeInTheDocument();
   });
+
+  it("shows listing failures and prevents creation until the list recovers", async () => {
+    api.listWorkCollections.mockRejectedValueOnce(new Error("database unavailable"));
+    renderModal();
+    expect(await screen.findByText("database unavailable")).toBeInTheDocument();
+    expect(screen.queryByText("まだコレクションはありません")).toBeNull();
+    fireEvent.change(screen.getByLabelText(/^名前/), { target: { value: "新しい束" } });
+    expect(screen.getByRole("button", { name: "コレクションを読み込めません" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "再読み込み" }));
+    expect(await screen.findByText("雨の記憶")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "3作品を入れる" })).toBeEnabled();
+  });
 });

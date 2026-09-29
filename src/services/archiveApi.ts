@@ -8,16 +8,28 @@ export function exportAllMultipart(manifestPath: string): Promise<void> {
   return invoke<void>("export_all_multipart", { manifestPath });
 }
 
+export function backupExportRunning(): Promise<boolean> {
+  return invoke<boolean>("backup_export_running");
+}
+
+/** Work ZIPs and final catalog are separate stages of a multipart export. */
+export interface BackupExportProgress {
+  phase: "works" | "finalizing";
+  processed: number;
+  total: number;
+  partCount: number;
+}
+
 export function exportEntityZip(entityType: string, source: string, sourceKey: string, zipPath: string): Promise<void> {
   return invoke<void>("export_entity_zip", { entityType, source, sourceKey, zipPath });
 }
 
-export function importZip(zipPath: string): Promise<number> {
-  return invoke<number>("import_zip", { zipPath });
+export function importZip(zipPath: string, replaceExisting = false): Promise<number> {
+  return invoke<number>("import_zip", { zipPath, replaceExisting });
 }
 
-export function importMultipartBackup(manifestPath: string): Promise<number> {
-  return invoke<number>("import_multipart_backup", { manifestPath });
+export function importMultipartBackup(manifestPath: string, replaceExisting = false): Promise<number> {
+  return invoke<number>("import_multipart_backup", { manifestPath, replaceExisting });
 }
 
 export interface BackupInspection {
@@ -77,8 +89,8 @@ export async function inspectBackupFile(path: string): Promise<{ format: BackupF
   return { format, inspection };
 }
 
-export function importBackupFile(path: string, format: BackupFormat): Promise<number> {
-  return format === "multipart" ? importMultipartBackup(path) : importZip(path);
+export function importBackupFile(path: string, format: BackupFormat, replaceExisting = false): Promise<number> {
+  return format === "multipart" ? importMultipartBackup(path, replaceExisting) : importZip(path, replaceExisting);
 }
 
 /** 復元の進み具合。`archive-progress` で届く。 */

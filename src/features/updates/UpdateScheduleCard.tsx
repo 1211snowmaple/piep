@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Box, Card, Group, NumberInput, SegmentedControl, Stack, Switch, Text, Title } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
 import { errorMessage } from "@/lib/format";
@@ -21,6 +21,8 @@ export function UpdateScheduleCard({ onChanged }: { onChanged?: () => void } = {
   const runtime = isTauriRuntime();
   const [settings, setSettings] = useState<UpdateScheduleSettings>(updateScheduleDefaults);
   const [loaded, setLoaded] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const savingRef = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -34,13 +36,22 @@ export function UpdateScheduleCard({ onChanged }: { onChanged?: () => void } = {
   }, []);
 
   const apply = (change: Partial<UpdateScheduleSettings>) => {
+    if (savingRef.current) return;
+    savingRef.current = true;
+    setSaving(true);
     const next = { ...settings, ...change };
-    setSettings(next);
-    // 一行の要約を出している側にも、変わったことを伝える。
-    onChanged?.();
-    saveSchedule(next).catch((error) => {
-      notifications.show({ color: "red", title: "設定を保存できません", message: errorMessage(error) });
-    });
+    void saveSchedule(next)
+      .then(() => {
+        setSettings(next);
+        onChanged?.();
+      })
+      .catch((error) => {
+        notifications.show({ color: "red", title: "設定を保存できません", message: errorMessage(error) });
+      })
+      .finally(() => {
+        savingRef.current = false;
+        setSaving(false);
+      });
   };
 
   return (
@@ -55,7 +66,7 @@ export function UpdateScheduleCard({ onChanged }: { onChanged?: () => void } = {
           label="起動時に確認する"
           description="間隔を過ぎていれば、アプリを開いたあと一度だけ実行します"
           checked={settings.onStartup}
-          disabled={!loaded}
+          disabled={!loaded || saving}
           onChange={(event) => apply({ onStartup: event.currentTarget.checked })}
         />
 
@@ -70,7 +81,7 @@ export function UpdateScheduleCard({ onChanged }: { onChanged?: () => void } = {
           allowNegative={false}
           clampBehavior="strict"
           value={settings.intervalHours}
-          disabled={!loaded}
+          disabled={!loaded || saving}
           onChange={(value) => apply({ intervalHours: typeof value === "number" ? value : 0 })}
         />
 
@@ -81,7 +92,7 @@ export function UpdateScheduleCard({ onChanged }: { onChanged?: () => void } = {
             aria-label="自動実行の動作"
             data={[{ value: "check_only", label: "確認のみ" }, { value: "auto_save", label: "確認して保存" }]}
             value={settings.mode}
-            disabled={!loaded}
+            disabled={!loaded || saving}
             onChange={(value) => apply({ mode: value as UpdateScheduleSettings["mode"] })}
           />
         </Box>
@@ -90,7 +101,7 @@ export function UpdateScheduleCard({ onChanged }: { onChanged?: () => void } = {
           label="保存した作品を監視に追加"
           description="更新確認で保存した作品を、そのまま追いかけます"
           checked={settings.watchSaved}
-          disabled={!loaded}
+          disabled={!loaded || saving}
           onChange={(event) => apply({ watchSaved: event.currentTarget.checked })}
         />
 
@@ -98,7 +109,7 @@ export function UpdateScheduleCard({ onChanged }: { onChanged?: () => void } = {
           label="結果を通知する"
           description={runtime ? "確認が終わったら、OSの通知でお知らせします" : "デスクトップアプリでのみ動作します"}
           checked={settings.notify}
-          disabled={!loaded || !runtime}
+          disabled={!loaded || saving || !runtime}
           onChange={(event) => apply({ notify: event.currentTarget.checked })}
         />
 

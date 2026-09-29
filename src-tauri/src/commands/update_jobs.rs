@@ -888,6 +888,27 @@ async fn finish_update_job_cancellation(
     Ok(())
 }
 
+/// A network failure may return after the user has paused or canceled the job.
+/// Preserve that control decision instead of reviving the old worker's status.
+async fn transition_running_worker_status(
+    app: &tauri::AppHandle,
+    state: &Arc<AppState>,
+    job_id: &str,
+    next_status: &str,
+    label: &str,
+) -> Result<bool, String> {
+    if state
+        .db
+        .transition_update_job_status(job_id, "running", next_status, Some(label))?
+    {
+        return Ok(true);
+    }
+    if state.db.update_job_status_value(job_id)? == "canceling" {
+        finish_update_job_cancellation(app, state, job_id).await?;
+    }
+    Ok(false)
+}
+
 /// 更新の確認を始める。返るのは開始直後の姿。
 ///
 /// 監視対象が一つも無ければ `Err`。**空のジョブを作らない**のは、進みも終わりも
@@ -906,7 +927,9 @@ pub async fn start_update_job(
         return Err("更新監視対象がありません".to_string());
     }
     let job_id = make_job_id();
-    let snapshot = state.db.create_update_job(&job_id, &request, &items)?;
+    let snapshot = state
+        .db
+        .create_update_job_if_idle(&job_id, &request, &items)?;
     spawn_update_job(
         app.clone(),
         job_id.clone(),
@@ -1064,10 +1087,7 @@ pub async fn resume_update_job(
     let state = app.state::<Arc<AppState>>().inner().clone();
     state
         .db
-        .prepare_update_job_resume(&job_id, retry_failed.unwrap_or(false))?;
-    state
-        .db
-        .set_update_job_status(&job_id, "queued", Some("再開待ち"))?;
+        .resume_update_job_if_idle(&job_id, retry_failed.unwrap_or(false))?;
     state
         .db
         .append_update_job_log(&job_id, "info", "更新ジョブを再開しました")?;
@@ -1589,7 +1609,8 @@ async fn run_update_job(
     credentials: UpdateCredentials,
 ) -> Result<(), String> {
     let state = app.state::<Arc<AppState>>().inner().clone();
-    match state.db.update_job_status_value(&job_id)?.as_str() {
+    let starting_status = state.db.update_job_status_value(&job_id)?;
+    match starting_status.as_str() {
         "canceling" => {
             finish_update_job_cancellation(&app, &state, &job_id).await?;
             return Ok(());
@@ -1598,9 +1619,17 @@ async fn run_update_job(
         // A stale scheduled task must not revive a paused or terminal job.
         _ => return Ok(()),
     }
-    state
-        .db
-        .set_update_job_status(&job_id, "running", Some("更新チェックを開始しています"))?;
+    if !state.db.transition_update_job_status(
+        &job_id,
+        &starting_status,
+        "running",
+        Some("更新チェックを開始しています"),
+    )? {
+        if state.db.update_job_status_value(&job_id)? == "canceling" {
+            finish_update_job_cancellation(&app, &state, &job_id).await?;
+        }
+        return Ok(());
+    }
     emit_snapshot(&app, &state, &job_id).await;
 
     // 保存した作品をそのまま監視に載せるかは、ジョブを始めたときの依頼が持つ。
@@ -1693,9 +1722,17 @@ async fn run_update_job(
             } else {
                 "完了しました"
             };
-            state
-                .db
-                .set_update_job_status(&job_id, final_status, Some(label))?;
+            if !state.db.transition_update_job_status(
+                &job_id,
+                "running",
+                final_status,
+                Some(label),
+            )? {
+                if state.db.update_job_status_value(&job_id)? == "canceling" {
+                    finish_update_job_cancellation(&app, &state, &job_id).await?;
+                }
+                break;
+            }
             state.db.append_update_job_log(
                 &job_id,
                 if final_status == "failed" {
@@ -1722,6 +1759,7 @@ async fn run_update_job(
         let outcome =
             process_update_job_item(&app, &state, &job_id, &item, &credentials, &mut web_index)
                 .await;
+        let local_only = matches!(&outcome, Ok(ItemOutcome::LocalSkipped(_)));
         let restart_pending = has_pending_restart(&job_id);
         match outcome {
             Ok(ItemOutcome::Held(message)) => {
@@ -1777,7 +1815,7 @@ async fn run_update_job(
                     }
                 }
             }
-            Ok(ItemOutcome::Skipped(message)) => {
+            Ok(ItemOutcome::Skipped(message) | ItemOutcome::LocalSkipped(message)) => {
                 state
                     .db
                     .complete_update_job_item(item.id, "skipped", None, None)?;
@@ -1804,14 +1842,19 @@ async fn run_update_job(
                     .complete_update_job_item(item.id, "queued", Some(&message), None)?;
                 if restart_pending {
                     break;
-                } else if state.db.update_job_status_value(&job_id)? == "canceling" {
-                    finish_update_job_cancellation(&app, &state, &job_id).await?;
-                    break;
                 } else {
+                    if !transition_running_worker_status(
+                        &app,
+                        &state,
+                        &job_id,
+                        "auth_required",
+                        &message,
+                    )
+                    .await?
+                    {
+                        break;
+                    }
                     state.db.append_update_job_log(&job_id, "warn", &message)?;
-                    state
-                        .db
-                        .set_update_job_status(&job_id, "auth_required", Some(&message))?;
                     emit_snapshot(&app, &state, &job_id).await;
                     break;
                 }
@@ -1829,10 +1872,18 @@ async fn run_update_job(
                     state
                         .db
                         .complete_update_job_item(item.id, "queued", Some(&message), None)?;
+                    if !transition_running_worker_status(
+                        &app,
+                        &state,
+                        &job_id,
+                        "auth_required",
+                        &message,
+                    )
+                    .await?
+                    {
+                        break;
+                    }
                     state.db.append_update_job_log(&job_id, "warn", &message)?;
-                    state
-                        .db
-                        .set_update_job_status(&job_id, "auth_required", Some(&message))?;
                     emit_snapshot(&app, &state, &job_id).await;
                     break;
                 }
@@ -1848,9 +1899,13 @@ async fn run_update_job(
                             Some(message),
                             None,
                         )?;
-                        state
-                            .db
-                            .set_update_job_status(&job_id, "paused", Some(message))?;
+                        if !transition_running_worker_status(
+                            &app, &state, &job_id, "paused", message,
+                        )
+                        .await?
+                        {
+                            break;
+                        }
                         state.db.append_update_job_log(&job_id, "warn", message)?;
                         emit_snapshot(&app, &state, &job_id).await;
                         break;
@@ -1870,10 +1925,14 @@ async fn run_update_job(
                             Some(&message),
                             None,
                         )?;
+                        if !transition_running_worker_status(
+                            &app, &state, &job_id, "running", &message,
+                        )
+                        .await?
+                        {
+                            break;
+                        }
                         state.db.append_update_job_log(&job_id, "warn", &message)?;
-                        state
-                            .db
-                            .set_update_job_status(&job_id, "running", Some(&message))?;
                         emit_progress_delta(&app, &state, &job_id, Some(item.id)).await;
                         wait_for_retry_or_control(&state, &job_id, delay_ms).await?;
                         continue;
@@ -1888,10 +1947,12 @@ async fn run_update_job(
                     state
                         .db
                         .complete_update_job_item(item.id, "queued", Some(&message), None)?;
+                    if !transition_running_worker_status(&app, &state, &job_id, "paused", &message)
+                        .await?
+                    {
+                        break;
+                    }
                     state.db.append_update_job_log(&job_id, "warn", &message)?;
-                    state
-                        .db
-                        .set_update_job_status(&job_id, "paused", Some(&message))?;
                     emit_snapshot(&app, &state, &job_id).await;
                     break;
                 }
@@ -1949,6 +2010,11 @@ async fn run_update_job(
         if state.db.update_job_status_value(&job_id)? == "canceling" {
             finish_update_job_cancellation(&app, &state, &job_id).await?;
             break;
+        }
+        // A cached author listing answered this item without touching the
+        // provider. Its successor need not wait for a request that never ran.
+        if local_only {
+            continue;
         }
         // 制限を受けたあとは間隔を広げたままにし、続けて通るようになったら
         // 半分ずつ元へ戻す。取得元への負荷を自分で調整する。
@@ -2029,6 +2095,19 @@ async fn refresh_profiles_for_saved_downloads(
     if targets.is_empty() {
         return;
     }
+    let total = targets.len();
+    let initial_label = format!("作者・シリーズ情報を確認しています（0/{total}件完了）");
+    match state
+        .db
+        .transition_update_job_status(job_id, "running", "running", Some(&initial_label))
+    {
+        Ok(true) => {}
+        Ok(false) => return,
+        Err(error) => {
+            log::warn!("更新ジョブ {job_id} のプロフィール進捗を記録できません: {error}");
+            return;
+        }
+    }
     if let Err(error) = state.db.append_update_job_log(
         job_id,
         "info",
@@ -2036,23 +2115,12 @@ async fn refresh_profiles_for_saved_downloads(
     ) {
         log::warn!("更新ジョブ {job_id} のプロフィール確認ログを記録できません: {error}");
     }
-    let total = targets.len();
+    emit_progress_delta(app, state, job_id, None).await;
     for (index, (entity_type, source, source_key)) in targets.into_iter().enumerate() {
         let current_status = state.db.update_job_status_value(job_id).unwrap_or_default();
         if matches!(current_status.as_str(), "canceling" | "paused") {
             break;
         }
-        let label = format!(
-            "作者・シリーズ情報を確認しています（{}/{total}）",
-            index + 1
-        );
-        if let Err(error) = state
-            .db
-            .set_update_job_status(job_id, "running", Some(&label))
-        {
-            log::warn!("更新ジョブ {job_id} のプロフィール進捗を記録できません: {error}");
-        }
-        emit_progress_delta(app, state, job_id, None).await;
         let params = crate::commands::database::RefreshEntityProfileParams {
             entity_type: entity_type.to_string(),
             source: source.clone(),
@@ -2072,6 +2140,22 @@ async fn refresh_profiles_for_saved_downloads(
                 &format!("{entity_type}:{source}:{source_key} の情報を取得できません: {error}"),
             );
         }
+        let label = format!(
+            "作者・シリーズ情報を確認しています（{}/{total}件完了）",
+            index + 1
+        );
+        match state
+            .db
+            .transition_update_job_status(job_id, "running", "running", Some(&label))
+        {
+            Ok(true) => {}
+            Ok(false) => break,
+            Err(error) => {
+                log::warn!("更新ジョブ {job_id} のプロフィール進捗を記録できません: {error}");
+                break;
+            }
+        }
+        emit_progress_delta(app, state, job_id, None).await;
     }
 }
 
@@ -2079,6 +2163,7 @@ enum ItemOutcome {
     Done(String),
     Saved(i64, String),
     Skipped(String),
+    LocalSkipped(String),
     AuthRequired(String),
     Held(String),
     Available(String),
@@ -2334,6 +2419,7 @@ async fn process_work_item(
 
         // 0段目。web の一覧は、100件まとめて `updateDate` を返す。ここで
         // 「変わっていない」と分かれば、アプリAPIを一度も叩かずに終わる。
+        let listing_was_cached = web_index.asked_authors.contains(dl.author_id.trim());
         let listed_update = match web_index.lookup(state, &dl).await {
             WebLookup::NeedsAuth(message) => return Ok(ItemOutcome::AuthRequired(message)),
             WebLookup::Found(entry) => entry.update_date.clone(),
@@ -2343,7 +2429,11 @@ async fn process_work_item(
             (listed_update.as_deref(), dl.source_updated_at.as_deref())
         {
             if listed == stored {
-                return Ok(ItemOutcome::Skipped(format!("最新: {}", dl.title)));
+                return Ok(if listing_was_cached {
+                    ItemOutcome::LocalSkipped(format!("最新: {}", dl.title))
+                } else {
+                    ItemOutcome::Skipped(format!("最新: {}", dl.title))
+                });
             }
         }
 
@@ -2797,8 +2887,7 @@ async fn process_target_item(
 ) -> Result<ItemOutcome, String> {
     let target: crate::database::UpdateTarget =
         serde_json::from_str(&item.payload_json).map_err(|e| e.to_string())?;
-    let snapshot = state.db.update_job_snapshot(job_id)?;
-    let auto_save = snapshot.mode == "auto_save";
+    let auto_save = state.db.update_job_mode_value(job_id)? == "auto_save";
 
     let items: Vec<Value> = if target.source == "pixiv" && target.target_type == "author" {
         let Some(token) = pixiv_token(credentials) else {
@@ -2899,6 +2988,11 @@ async fn process_target_item(
         };
         if recorded {
             found += 1;
+            // A long listing can yield hundreds of candidates. Publish small
+            // batches from the local DB without another provider request.
+            if found == 1 || found % 10 == 0 {
+                emit_progress_delta(app, state, job_id, None).await;
+            }
         }
     }
 

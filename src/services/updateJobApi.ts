@@ -51,6 +51,11 @@ export interface UpdateJobSummary {
   mode: UpdateJobMode;
   totals: number;
   processed: number;
+  /** Separate local job stages; older snapshots may omit these fields. */
+  checkTotal?: number;
+  checkProcessed?: number;
+  saveTotal?: number;
+  saveProcessed?: number;
   candidateCount: number;
   savedCount: number;
   errorCount: number;

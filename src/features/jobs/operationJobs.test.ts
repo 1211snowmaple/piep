@@ -85,6 +85,35 @@ describe("operation history", () => {
     expect(retry).toHaveBeenCalledOnce();
   });
 
+  it("never starts a retry while the original operation is running", async () => {
+    const api = await import("./operationJobs");
+    const retry = vi.fn();
+    const operation = api.startOperation({ kind: "backup", label: "large backup", onRetry: retry });
+
+    expect(api.getOperationJobs()[0]).toMatchObject({ status: "running", canRetry: false });
+    await api.retryOperation(operation.id);
+    expect(retry).not.toHaveBeenCalled();
+    expect(api.getOperationJobs()[0].logs).toHaveLength(1);
+
+    operation.fail(new Error("disk full"));
+    expect(api.getOperationJobs()[0]).toMatchObject({ status: "failed", canRetry: true });
+    await api.retryOperation(operation.id);
+    expect(retry).toHaveBeenCalledOnce();
+  });
+
+  it("does not claim a reloaded backup stopped or can resume from completed works", async () => {
+    const api = await import("./operationJobs");
+    api.startOperation({ kind: "backup", label: "large backup" });
+    vi.resetModules();
+
+    const reloaded = await import("./operationJobs");
+    const job = reloaded.getOperationJobs()[0];
+    const lastLog = job.logs[job.logs.length - 1];
+    expect(job).toMatchObject({ status: "interrupted", finishedAt: null, canRetry: false });
+    expect(lastLog?.message).toContain("書き出しは続いている可能性");
+    expect(lastLog?.message).not.toContain("続きから進みます");
+  });
+
   it("batches high-frequency progress persistence while keeping in-memory state immediate", async () => {
     vi.useFakeTimers();
     const writes = vi.spyOn(window.localStorage, "setItem");

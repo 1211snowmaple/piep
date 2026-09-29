@@ -18,8 +18,17 @@ $resolvedArtifacts = (Resolve-Path -LiteralPath $ArtifactDirectory).Path
 $previousRunId = $env:PIEP_SMOKE_TEST_ID
 $env:PIEP_SMOKE_TEST_ID = [guid]::NewGuid().ToString('N')
 $identifier = "com.hiron.piep.smoke.$($env:PIEP_SMOKE_TEST_ID)"
-$appData = Join-Path ([Environment]::GetFolderPath('ApplicationData')) $identifier
-$localAppData = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) $identifier
+$appDataRoot = [System.IO.Path]::GetFullPath([Environment]::GetFolderPath('ApplicationData'))
+$localAppDataRoot = [System.IO.Path]::GetFullPath([Environment]::GetFolderPath('LocalApplicationData'))
+$appData = [System.IO.Path]::GetFullPath((Join-Path $appDataRoot $identifier))
+$localAppData = [System.IO.Path]::GetFullPath((Join-Path $localAppDataRoot $identifier))
+# These exact, newly named children are the only directories the cleanup may remove.
+if (-not [System.IO.Path]::GetDirectoryName($appData).Equals($appDataRoot, [System.StringComparison]::OrdinalIgnoreCase) -or
+    -not [System.IO.Path]::GetDirectoryName($localAppData).Equals($localAppDataRoot, [System.StringComparison]::OrdinalIgnoreCase) -or
+    -not [System.IO.Path]::GetFileName($appData).Equals($identifier, [System.StringComparison]::OrdinalIgnoreCase) -or
+    -not [System.IO.Path]::GetFileName($localAppData).Equals($identifier, [System.StringComparison]::OrdinalIgnoreCase)) {
+  throw "Smoke-test cleanup paths must be direct children of their AppData roots"
+}
 if ((Test-Path -LiteralPath $appData) -or (Test-Path -LiteralPath $localAppData)) {
   throw "Smoke-test directories must be new"
 }

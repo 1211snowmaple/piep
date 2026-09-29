@@ -63,8 +63,16 @@ export async function loadSchedule(): Promise<UpdateScheduleSettings> {
 export async function saveSchedule(settings: UpdateScheduleSettings): Promise<void> {
   // ブラウザで開いたプレビューには保存先が無い。触っても何も起きないのが正しい。
   if (!isTauriRuntime()) return;
+  const previous = await store.get<unknown>(SETTINGS_KEY);
   await store.set(SETTINGS_KEY, normalizeSchedule(settings));
-  await store.save();
+  try {
+    await store.save();
+  } catch (error) {
+    // 保存に失敗した値をメモリに残すと、画面を開き直したときだけ
+    // 「保存済み」に見えて、再起動後に元へ戻ってしまう。
+    await store.set(SETTINGS_KEY, previous ?? updateScheduleDefaults).catch(() => undefined);
+    throw error;
+  }
 }
 
 export async function readLastRun(): Promise<number | null> {

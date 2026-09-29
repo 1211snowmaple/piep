@@ -58,14 +58,20 @@ function mergeSnapshot(
   const candidates = new Map(
     current.candidates.map((candidate) => [candidate.id, candidate]),
   );
-  incoming.candidates.forEach((candidate) =>
-    candidates.set(candidate.id, candidate),
-  );
+  const incomingIsNewer = incoming.updatedAt >= current.updatedAt;
+  incoming.candidates.forEach((candidate) => {
+    if (incomingIsNewer || !candidates.has(candidate.id)) candidates.set(candidate.id, candidate);
+  });
   const logs = new Map(current.logs.map((log) => [log.id, log]));
   incoming.logs.forEach((log) => logs.set(log.id, log));
+  const summary = incomingIsNewer ? incoming : current;
+  const mergedCandidates = [...candidates.values()].sort((a, b) => a.id - b.id);
   return {
-    ...incoming,
-    candidates: [...candidates.values()].sort((a, b) => a.id - b.id),
+    ...summary,
+    candidates: mergedCandidates,
+    nextCandidateCursor: summary.candidateCount > mergedCandidates.length
+      ? mergedCandidates[mergedCandidates.length - 1]?.id ?? null
+      : null,
     logs: [...logs.values()].sort((a, b) => a.id - b.id).slice(-MAX_LIVE_UPDATE_LOGS),
   };
 }
@@ -186,6 +192,7 @@ let updateJobSummaries: UpdateJobSummary[] = [];
 let updateJobSummaryRevision = 0;
 let updateJobSummaryFeedUsers = 0;
 let updateJobSummaryRefresh: Promise<UpdateJobSummary[]> | null = null;
+const updateJobSummaryEventRevisions = new Map<string, number>();
 let disposeUpdateJobSummarySnapshot: (() => void) | null = null;
 let disposeUpdateJobSummaryDelta: (() => void) | null = null;
 const updateJobSummaryListeners = new Set<() => void>();
@@ -212,6 +219,7 @@ function applyUpdateJobSummary(summary: UpdateJobSummary): void {
       b.updatedAt.localeCompare(a.updatedAt),
     ),
   );
+  updateJobSummaryEventRevisions.set(summary.jobId, updateJobSummaryRevision);
 }
 
 export function refreshUpdateJobSummaries(
@@ -239,6 +247,10 @@ export function refreshUpdateJobSummaries(
           incoming.map((job) => [job.jobId, job] as const),
         );
         updateJobSummaries.forEach((job) => {
+          // Only events delivered after this read began can add a row that the
+          // response did not see. Older local rows may have been deleted.
+          if ((updateJobSummaryEventRevisions.get(job.jobId) ?? 0) <= revisionAtStart)
+            return;
           const listed = merged.get(job.jobId);
           if (!listed || job.updatedAt >= listed.updatedAt)
             merged.set(job.jobId, job);
@@ -248,6 +260,10 @@ export function refreshUpdateJobSummaries(
             .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
             .slice(0, 30),
         );
+      }
+      const visibleIds = new Set(updateJobSummaries.map((job) => job.jobId));
+      for (const jobId of updateJobSummaryEventRevisions.keys()) {
+        if (!visibleIds.has(jobId)) updateJobSummaryEventRevisions.delete(jobId);
       }
       return updateJobSummaries;
     })
@@ -456,19 +472,55 @@ export function useUpdateJobs(
   const [activeSnapshot, setActiveSnapshot] =
     useState<UpdateJobSnapshot | null>(null);
   const lastEventAt = useRef(0);
+  const [syncingCandidatesFor, setSyncingCandidatesFor] = useState<string | null>(null);
+  const candidateSyncAttempt = useRef<string | null>(null);
+  const candidateSyncRetryTimer = useRef<number | null>(null);
+  const [candidateSyncRetry, setCandidateSyncRetry] = useState(0);
+  const activeJobId = activeSnapshot?.jobId ?? null;
+  const activeJobIdRef = useRef(activeJobId);
+  const candidateSyncMounted = useRef(false);
+  const selectionRequestId = useRef(0);
+  const manuallySelectedJobId = useRef<string | null>(null);
+
+  useEffect(() => {
+    candidateSyncMounted.current = true;
+    return () => {
+      candidateSyncMounted.current = false;
+      selectionRequestId.current += 1;
+      if (candidateSyncRetryTimer.current !== null)
+        window.clearTimeout(candidateSyncRetryTimer.current);
+    };
+  }, []);
+
+  useEffect(() => {
+    activeJobIdRef.current = activeJobId;
+    candidateSyncAttempt.current = null;
+    if (candidateSyncRetryTimer.current !== null) {
+      window.clearTimeout(candidateSyncRetryTimer.current);
+      candidateSyncRetryTimer.current = null;
+    }
+  }, [activeJobId]);
 
   const loadJobs = useCallback(async (force = true) => {
+    const requestId = ++selectionRequestId.current;
     if (!enabled) {
+      manuallySelectedJobId.current = null;
       setActiveSnapshot(null);
       return;
     }
     const nextJobs = await refreshUpdateJobSummaries(force);
+    if (!candidateSyncMounted.current || selectionRequestId.current !== requestId)
+      return;
     const preferred = preferredVisibleUpdateJob(nextJobs);
     if (preferred) {
       const snapshot = await getUpdateJobCommand(preferred.jobId);
-      setActiveSnapshot(snapshot);
+      if (!candidateSyncMounted.current || selectionRequestId.current !== requestId)
+        return;
+      manuallySelectedJobId.current = null;
+      setActiveSnapshot((current) => mergeSnapshot(current, snapshot));
       onSnapshot?.(snapshot);
     } else {
+      manuallySelectedJobId.current = null;
       setActiveSnapshot(null);
     }
   }, [enabled, onSnapshot]);
@@ -476,7 +528,11 @@ export function useUpdateJobs(
   const selectJob = useCallback(
     async (jobId: string) => {
       if (!enabled) return;
+      const requestId = ++selectionRequestId.current;
       const snapshot = await getUpdateJobCommand(jobId);
+      if (!candidateSyncMounted.current || selectionRequestId.current !== requestId)
+        return snapshot;
+      manuallySelectedJobId.current = jobId;
       setActiveSnapshot(snapshot);
       onSnapshot?.(snapshot);
       return snapshot;
@@ -497,9 +553,14 @@ export function useUpdateJobs(
       "update-job-progress",
       (event) => {
         lastEventAt.current = Date.now();
-        setActiveSnapshot((current) =>
-          mergeVisibleUpdateJobSnapshot(current, event.payload),
-        );
+        const selectedJobId = manuallySelectedJobId.current;
+        if (!selectedJobId || selectedJobId === event.payload.jobId) {
+          if (event.payload.status === "canceled" && selectedJobId)
+            manuallySelectedJobId.current = null;
+          setActiveSnapshot((current) =>
+            mergeVisibleUpdateJobSnapshot(current, event.payload),
+          );
+        }
         onSnapshot?.(event.payload);
         if (isUpdateJobTerminal(event.payload.status))
           invalidateAfterUpdateJob(queryClient);
@@ -509,6 +570,9 @@ export function useUpdateJobs(
       "update-job-progress-delta",
       (event) => {
         lastEventAt.current = Date.now();
+        if (event.payload.summary.status === "canceled" &&
+            manuallySelectedJobId.current === event.payload.summary.jobId)
+          manuallySelectedJobId.current = null;
         setActiveSnapshot((current) => {
           if (!current || current.jobId !== event.payload.summary.jobId)
             return current;
@@ -526,6 +590,50 @@ export function useUpdateJobs(
     };
   }, [enabled, onSnapshot, queryClient]);
 
+  // Progress deltas deliberately contain no candidate page. Read only the new
+  // local DB rows when a target discovers works, including rows beyond page 1.
+  // This makes discovery visible while the remote check is still running.
+  useEffect(() => {
+    if (!enabled || !activeSnapshot || syncingCandidatesFor === activeSnapshot.jobId ||
+        activeSnapshot.candidateCount <= activeSnapshot.candidates.length) return;
+    const jobId = activeSnapshot.jobId;
+    let cursor = Math.max(0, ...activeSnapshot.candidates.map((item) => item.id));
+    const attempt = `${jobId}:${activeSnapshot.candidateCount}:${cursor}`;
+    // A snapshot can report rows before a concurrent DB read sees them. Do not
+    // spin through IPC on the same count/cursor when that read is still empty.
+    if (candidateSyncAttempt.current === attempt) return;
+    candidateSyncAttempt.current = attempt;
+    if (candidateSyncRetryTimer.current !== null)
+      window.clearTimeout(candidateSyncRetryTimer.current);
+    setSyncingCandidatesFor(jobId);
+    void (async () => {
+      try {
+        while (candidateSyncMounted.current && activeJobIdRef.current === jobId) {
+          const page = await getUpdateJobCommand(jobId, cursor, null);
+          if (!candidateSyncMounted.current || activeJobIdRef.current !== jobId) break;
+          if (!page.candidates.length) break;
+          const nextCursor = page.candidates[page.candidates.length - 1].id;
+          if (nextCursor <= cursor) break;
+          cursor = nextCursor;
+          setActiveSnapshot((current) => current?.jobId === jobId ? mergeSnapshot(current, page) : current);
+          if (!page.nextCandidateCursor) break;
+        }
+      } catch (error) {
+        console.warn(`更新ジョブ ${jobId} の新しい候補を読み込めませんでした`, error);
+      } finally {
+        if (candidateSyncMounted.current)
+          setSyncingCandidatesFor((current) => current === jobId ? null : current);
+        if (candidateSyncMounted.current && activeJobIdRef.current === jobId) {
+          candidateSyncRetryTimer.current = window.setTimeout(() => {
+            candidateSyncAttempt.current = null;
+            setCandidateSyncRetry((current) => current + 1);
+            candidateSyncRetryTimer.current = null;
+          }, 5000);
+        }
+      }
+    })();
+  }, [activeSnapshot, candidateSyncRetry, enabled, syncingCandidatesFor]);
+
   // 進捗はイベントで届く。ここはその取りこぼしに備える保険なので、
   // イベントが途切れているときだけ読みに行く。止まっているジョブ
   // （一時停止・再接続待ち）は誰も進めないので、待つ相手がいない。
@@ -540,7 +648,7 @@ export function useUpdateJobs(
       if (Date.now() - lastEventAt.current < EVENT_SILENCE_MS) return;
       getUpdateJobCommand(activeSnapshot.jobId)
         .then((snapshot) => {
-          setActiveSnapshot((current) => mergeSnapshot(current, snapshot));
+          setActiveSnapshot((current) => current?.jobId === snapshot.jobId ? mergeSnapshot(current, snapshot) : current);
           onSnapshot?.(snapshot);
         })
         .catch((error) => {
@@ -554,13 +662,18 @@ export function useUpdateJobs(
   }, [activeSnapshot, enabled, onSnapshot]);
 
   const loadMoreCandidates = useCallback(async () => {
-    if (!enabled || !activeSnapshot?.nextCandidateCursor) return;
+    if (!enabled || !activeSnapshot) return;
+    const cursor = activeSnapshot.nextCandidateCursor ??
+      (activeSnapshot.candidateCount > activeSnapshot.candidates.length
+        ? Math.max(0, ...activeSnapshot.candidates.map((candidate) => candidate.id))
+        : null);
+    if (cursor === null) return;
     const snapshot = await getUpdateJobCommand(
       activeSnapshot.jobId,
-      activeSnapshot.nextCandidateCursor,
+      cursor,
       null,
     );
-    setActiveSnapshot((current) => mergeSnapshot(current, snapshot));
+    setActiveSnapshot((current) => current?.jobId === snapshot.jobId ? mergeSnapshot(current, snapshot) : current);
   }, [activeSnapshot, enabled]);
 
   const loadOlderLogs = useCallback(async () => {
@@ -570,7 +683,7 @@ export function useUpdateJobs(
       null,
       activeSnapshot.previousLogCursor,
     );
-    setActiveSnapshot((current) => mergeSnapshot(current, snapshot));
+    setActiveSnapshot((current) => current?.jobId === snapshot.jobId ? mergeSnapshot(current, snapshot) : current);
     return snapshot;
   }, [activeSnapshot, enabled]);
 

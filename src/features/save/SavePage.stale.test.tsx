@@ -1,9 +1,10 @@
 import { MantineProvider } from "@mantine/core";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AppRouter } from "@/app/router";
 import SavePage from "./SavePage";
+import { resetSaveDraftsForTest } from "./saveDraft";
 
 const browserApi = vi.hoisted(() => ({
   openEmbeddedBrowser: vi.fn().mockResolvedValue(undefined),
@@ -71,8 +72,13 @@ async function goTo(url: string) {
  */
 describe("SavePage stale candidates", () => {
   beforeEach(() => {
+    resetSaveDraftsForTest();
     window.location.hash = "#/save/pixiv";
     Object.values(browserApi).forEach((mock) => mock.mockClear());
+    pixivApi.fetchPixivSeriesNovels.mockReset().mockResolvedValue([
+      { id: 1, title: "第一話", user: { name: "作者" } },
+      { id: 2, title: "第二話", user: { name: "作者" } },
+    ]);
   });
 
   it("moves the warning onto the controls it concerns instead of a band", async () => {
@@ -130,5 +136,75 @@ describe("SavePage stale candidates", () => {
     expect(screen.queryByText("古い")).toBeNull();
     expect(document.querySelector(".candidate-list[data-stale]")).toBeNull();
     expect(screen.getByRole("button", { name: "2件をライブラリに保存" })).toBeEnabled();
+  });
+
+  it("画面を離れて戻っても候補、選択、取得元を復元する", async () => {
+    const page = renderSavePage();
+    await goTo(SERIES);
+    fireEvent.click(await screen.findByRole("button", { name: "候補を取得" }));
+    const first = await screen.findByRole("checkbox", { name: "第一話を保存対象にする" });
+    fireEvent.click(first);
+    expect(first).not.toBeChecked();
+
+    page.unmount();
+    window.location.hash = "#/library";
+    window.location.hash = "#/save/pixiv";
+    renderSavePage();
+
+    expect(await screen.findByRole("checkbox", { name: "第一話を保存対象にする" })).not.toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "第二話を保存対象にする" })).toBeChecked();
+    expect(screen.getByRole("button", { name: "1件をライブラリに保存" })).toBeEnabled();
+    await waitFor(() => expect(screen.getByLabelText("ブラウザのアドレス")).toHaveValue(SERIES));
+    expect(pixivApi.fetchPixivSeriesNovels).toHaveBeenCalledTimes(1);
+  });
+
+  it("取得に失敗しても先に選んだ候補を失わない", async () => {
+    renderSavePage();
+    await goTo(SERIES);
+    fireEvent.click(await screen.findByRole("button", { name: "候補を取得" }));
+    expect(await screen.findByText("第一話")).toBeInTheDocument();
+    pixivApi.fetchPixivSeriesNovels.mockRejectedValueOnce(new Error("network"));
+
+    fireEvent.click(screen.getByRole("button", { name: "候補を取得" }));
+    await waitFor(() => expect(pixivApi.fetchPixivSeriesNovels).toHaveBeenCalledTimes(2));
+    expect(screen.getByRole("checkbox", { name: "第一話を保存対象にする" })).toBeChecked();
+    expect(screen.getByRole("button", { name: "2件をライブラリに保存" })).toBeEnabled();
+  });
+
+  it("Pixiv と FANBOX の候補を混ぜない", async () => {
+    renderSavePage();
+    await goTo(SERIES);
+    fireEvent.click(await screen.findByRole("button", { name: "候補を取得" }));
+    expect(await screen.findByText("第一話")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("radio", { name: /FANBOX/ }));
+    await waitFor(() => expect(window.location.hash).toBe("#/save/fanbox"));
+    expect(screen.queryByText("第一話")).toBeNull();
+
+    fireEvent.click(screen.getByRole("radio", { name: /pixiv/i }));
+    await waitFor(() => expect(window.location.hash).toBe("#/save/pixiv"));
+    expect(await screen.findByText("第一話")).toBeInTheDocument();
+  });
+
+  it("古い取得が遅れて終わっても、新しい画面の候補を上書きしない", async () => {
+    let finishOld!: (value: { id: number; title: string }[]) => void;
+    pixivApi.fetchPixivSeriesNovels
+      .mockImplementationOnce(() => new Promise((resolve) => { finishOld = resolve; }))
+      .mockResolvedValueOnce([{ id: 3, title: "新しい候補" }]);
+    const page = renderSavePage();
+    await goTo(SERIES);
+    fireEvent.click(await screen.findByRole("button", { name: "候補を取得" }));
+    await waitFor(() => expect(pixivApi.fetchPixivSeriesNovels).toHaveBeenCalledTimes(1));
+
+    page.unmount();
+    window.location.hash = "#/save/pixiv";
+    renderSavePage();
+    fireEvent.click(await screen.findByRole("button", { name: "候補を取得" }));
+    expect(await screen.findByText("新しい候補")).toBeInTheDocument();
+
+    finishOld([{ id: 1, title: "古い候補" }]);
+    await waitFor(() => expect(pixivApi.fetchPixivSeriesNovels).toHaveBeenCalledTimes(2));
+    expect(screen.queryByText("古い候補")).toBeNull();
+    expect(screen.getByText("新しい候補")).toBeInTheDocument();
   });
 });

@@ -903,6 +903,13 @@ fn fold_composite_volumes(members: Vec<&SweepWork>) -> Vec<&SweepWork> {
         .filter_map(|work| {
             collection_rules::episode_order(&work.title)
                 .filter(|_| collection_rules::composite_episode_range(&work.title).is_none())
+                .map(|order| {
+                    (
+                        work.author_key(),
+                        collection_rules::family_match_key(&work.title),
+                        order,
+                    )
+                })
         })
         .collect::<HashSet<_>>();
     members
@@ -912,7 +919,9 @@ fn fold_composite_volumes(members: Vec<&SweepWork>) -> Vec<&SweepWork> {
                 return true;
             };
             // 含んでいる話がすべて別に入っているときだけ落とす。
-            !(start..=end).all(|order| singles.contains(&order))
+            let author = work.author_key();
+            let family = collection_rules::family_match_key(&work.title);
+            !(start..=end).all(|order| singles.contains(&(author.clone(), family.clone(), order)))
         })
         .collect()
 }
@@ -1582,6 +1591,31 @@ fn connected_components(adjacency: &HashMap<i64, HashSet<i64>>) -> Vec<Vec<i64>>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn composite_is_only_folded_into_singles_from_the_same_work_family() {
+        let work = |id: i64, title: &str, author: &str| SweepWork {
+            id,
+            source: "pixiv".into(),
+            source_id: id.to_string(),
+            title: title.into(),
+            author_name: author.into(),
+            author_id: author.into(),
+            cover_path: None,
+            text_length: 3000,
+            published_at: String::new(),
+        };
+        let unrelated_first = work(1, "別作品 前編", "同じ作者");
+        let unrelated_middle = work(2, "別作品 中編", "同じ作者");
+        let composite = work(3, "【前編＋中編】星の舟", "同じ作者");
+        let mixed = fold_composite_volumes(vec![&unrelated_first, &unrelated_middle, &composite]);
+        assert!(mixed.iter().any(|work| work.id == composite.id));
+
+        let matching_first = work(4, "星の舟 前編", "同じ作者");
+        let matching_middle = work(5, "星の舟 中編", "同じ作者");
+        let folded = fold_composite_volumes(vec![&matching_first, &matching_middle, &composite]);
+        assert!(!folded.iter().any(|work| work.id == composite.id));
+    }
 
     #[test]
     fn existing_collection_comparison_uses_the_members_actually_shown() {

@@ -20,7 +20,7 @@ describe("backup file routing", () => {
     await expect(inspectBackupFile("C:\\Backups\\Library.JSON")).resolves.toEqual({ format: "multipart", inspection });
     expect(invoke).toHaveBeenNthCalledWith(1, "inspect_multipart_backup", { manifestPath: "C:\\Backups\\Library.JSON" });
     await expect(importBackupFile("C:\\Backups\\Library.JSON", "multipart")).resolves.toBe(12);
-    expect(invoke).toHaveBeenNthCalledWith(2, "import_multipart_backup", { manifestPath: "C:\\Backups\\Library.JSON" });
+    expect(invoke).toHaveBeenNthCalledWith(2, "import_multipart_backup", { manifestPath: "C:\\Backups\\Library.JSON", replaceExisting: false });
   });
 
   it("keeps existing ZIP inspection and import compatible", async () => {
@@ -30,7 +30,7 @@ describe("backup file routing", () => {
     await expect(inspectBackupFile("D:\\old-backup.ZIP")).resolves.toEqual({ format: "zip", inspection });
     expect(invoke).toHaveBeenNthCalledWith(1, "inspect_backup", { zipPath: "D:\\old-backup.ZIP" });
     await expect(importBackupFile("D:\\old-backup.ZIP", "zip")).resolves.toBe(4);
-    expect(invoke).toHaveBeenNthCalledWith(2, "import_zip", { zipPath: "D:\\old-backup.ZIP" });
+    expect(invoke).toHaveBeenNthCalledWith(2, "import_zip", { zipPath: "D:\\old-backup.ZIP", replaceExisting: false });
   });
 
   it("rejects an ambiguous file before invoking native restore code", async () => {

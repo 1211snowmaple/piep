@@ -16,6 +16,7 @@ let current: SearchRebuildProgress | null = null;
 const listeners = new Set<() => void>();
 let subscribed = false;
 let clearTimer: number | undefined;
+let retryTimer: number | undefined;
 
 /** How long a finished run stays visible, so it is seen and not just guessed at. */
 const SETTLE_MS = 4_000;
@@ -45,7 +46,16 @@ function ensureSubscription() {
       clearTimer = undefined;
       if (current?.jobId === progress.jobId) set(null);
     }, SETTLE_MS);
-  }).catch(() => undefined);
+  }).catch((error) => {
+    subscribed = false;
+    console.error("検索索引の進捗イベントを購読できませんでした", error);
+    if (retryTimer === undefined && (listeners.size > 0 || tracked !== null)) {
+      retryTimer = window.setTimeout(() => {
+        retryTimer = undefined;
+        if (listeners.size > 0 || tracked !== null) ensureSubscription();
+      }, 1_000);
+    }
+  });
 }
 
 function subscribe(listener: () => void) {
@@ -91,6 +101,7 @@ let tracked: TrackedRun | null = null;
 
 export function trackManualRebuild(run: TrackedRun) {
   tracked = run;
+  ensureSubscription();
 }
 
 /** 見張っている仕事の番号。画面はこれで「自分が始めたもの」を見分ける。 */

@@ -5244,10 +5244,44 @@ impl Database {
         request: &StartUpdateJobRequest,
         items: &[UpdateJobItemInput],
     ) -> Result<UpdateJobSnapshot, String> {
+        self.create_update_job_checked(job_id, request, items, false)
+    }
+
+    /// A check started from the UI or scheduler must not race another live
+    /// job into existence. The test and insert share the same DB transaction.
+    pub fn create_update_job_if_idle(
+        &self,
+        job_id: &str,
+        request: &StartUpdateJobRequest,
+        items: &[UpdateJobItemInput],
+    ) -> Result<UpdateJobSnapshot, String> {
+        self.create_update_job_checked(job_id, request, items, true)
+    }
+
+    fn create_update_job_checked(
+        &self,
+        job_id: &str,
+        request: &StartUpdateJobRequest,
+        items: &[UpdateJobItemInput],
+        require_idle: bool,
+    ) -> Result<UpdateJobSnapshot, String> {
         let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
         let tx = conn
             .transaction()
             .map_err(|e| format!("Failed to start update job transaction: {}", e))?;
+        if require_idle {
+            let active: i64 = tx
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM update_jobs
+                     WHERE status IN ('queued', 'running', 'canceling'))",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|e| format!("Failed to check active update jobs: {e}"))?;
+            if active != 0 {
+                return Err("別の更新または保存ジョブが進行中です".to_string());
+            }
+        }
         let now = chrono::Utc::now().to_rfc3339();
         let initial_counts = items.iter().fold([0_i64; 5], |mut counts, item| {
             let contribution = update_job_item_counter_contribution(&item.item_type, &item.status);
@@ -5310,7 +5344,11 @@ impl Database {
             .prepare(
                 "SELECT id, status, scope, mode, totals, processed, candidate_count,
                         saved_count, error_count, active_label, started_at, updated_at, finished_at,
-                        (SELECT COUNT(*) FROM update_job_items i WHERE i.job_id=update_jobs.id AND i.status='held')
+                        (SELECT COUNT(*) FROM update_job_items i WHERE i.job_id=update_jobs.id AND i.status='held'),
+                        (SELECT COUNT(*) FROM update_job_items i WHERE i.job_id=update_jobs.id AND i.item_type IN ('work','target')),
+                        (SELECT COUNT(*) FROM update_job_items i WHERE i.job_id=update_jobs.id AND i.item_type IN ('work','target') AND i.status NOT IN ('queued','running')),
+                        (SELECT COUNT(*) FROM update_job_items i WHERE i.job_id=update_jobs.id AND i.item_type='candidate' AND i.status != 'candidate'),
+                        (SELECT COUNT(*) FROM update_job_items i WHERE i.job_id=update_jobs.id AND i.item_type='candidate' AND i.status NOT IN ('candidate','queued','running'))
                  FROM update_jobs
                  ORDER BY updated_at DESC, started_at DESC
                  LIMIT 30",
@@ -5342,7 +5380,11 @@ impl Database {
             .query_row(
                 "SELECT id, status, scope, mode, totals, processed, candidate_count,
                         saved_count, error_count, active_label, started_at, updated_at, finished_at,
-                        (SELECT COUNT(*) FROM update_job_items i WHERE i.job_id=update_jobs.id AND i.status='held')
+                        (SELECT COUNT(*) FROM update_job_items i WHERE i.job_id=update_jobs.id AND i.status='held'),
+                        (SELECT COUNT(*) FROM update_job_items i WHERE i.job_id=update_jobs.id AND i.item_type IN ('work','target')),
+                        (SELECT COUNT(*) FROM update_job_items i WHERE i.job_id=update_jobs.id AND i.item_type IN ('work','target') AND i.status NOT IN ('queued','running')),
+                        (SELECT COUNT(*) FROM update_job_items i WHERE i.job_id=update_jobs.id AND i.item_type='candidate' AND i.status != 'candidate'),
+                        (SELECT COUNT(*) FROM update_job_items i WHERE i.job_id=update_jobs.id AND i.item_type='candidate' AND i.status NOT IN ('candidate','queued','running'))
                  FROM update_jobs WHERE id = ?1",
                 params![job_id],
                 update_job_summary_from_row,
@@ -5473,6 +5515,10 @@ impl Database {
             mode: summary.mode,
             totals: summary.totals,
             processed: summary.processed,
+            check_total: summary.check_total,
+            check_processed: summary.check_processed,
+            save_total: summary.save_total,
+            save_processed: summary.save_processed,
             candidate_count: summary.candidate_count,
             saved_count: summary.saved_count,
             error_count: summary.error_count,
@@ -5513,6 +5559,36 @@ impl Database {
         Ok(())
     }
 
+    /// Changes a worker-owned status only while the job is still in the state
+    /// the worker observed. Pause and cancel requests must win over a late
+    /// profile response or final completion from that worker.
+    pub fn transition_update_job_status(
+        &self,
+        job_id: &str,
+        expected_status: &str,
+        status: &str,
+        active_label: Option<&str>,
+    ) -> Result<bool, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let now = chrono::Utc::now().to_rfc3339();
+        let terminal = matches!(
+            status,
+            "completed" | "failed" | "canceled" | "auth_required"
+        );
+        let changed = conn
+            .execute(
+                "UPDATE update_jobs
+                 SET status = ?1,
+                     active_label = ?2,
+                     updated_at = ?3,
+                     finished_at = CASE WHEN ?4 THEN COALESCE(finished_at, ?3) ELSE NULL END
+                 WHERE id = ?5 AND status = ?6",
+                params![status, active_label, now, terminal, job_id, expected_status],
+            )
+            .map_err(|e| format!("Failed to transition job status: {e}"))?;
+        Ok(changed > 0)
+    }
+
     pub fn set_update_job_item_payload(&self, item_id: i64, payload: &str) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.execute(
@@ -5528,8 +5604,56 @@ impl Database {
         job_id: &str,
         retry_failed: bool,
     ) -> Result<(), String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        conn.execute(
+        self.prepare_update_job_resume_checked(job_id, retry_failed, false)
+    }
+
+    /// Reserve the resumed job before another check can start. The status
+    /// transition and the active-job check must share one transaction.
+    pub fn resume_update_job_if_idle(
+        &self,
+        job_id: &str,
+        retry_failed: bool,
+    ) -> Result<(), String> {
+        self.prepare_update_job_resume_checked(job_id, retry_failed, true)
+    }
+
+    fn prepare_update_job_resume_checked(
+        &self,
+        job_id: &str,
+        retry_failed: bool,
+        activate: bool,
+    ) -> Result<(), String> {
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| format!("Failed to start update job resume transaction: {e}"))?;
+        if activate {
+            let current: String = tx
+                .query_row(
+                    "SELECT status FROM update_jobs WHERE id = ?1",
+                    params![job_id],
+                    |row| row.get(0),
+                )
+                .map_err(|e| format!("Update job not found: {e}"))?;
+            if !matches!(
+                current.as_str(),
+                "paused" | "auth_required" | "failed" | "canceled"
+            ) {
+                return Err("この更新ジョブは再開できません".to_string());
+            }
+            let other_active: i64 = tx
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM update_jobs
+                     WHERE id != ?1 AND status IN ('queued', 'running', 'canceling'))",
+                    params![job_id],
+                    |row| row.get(0),
+                )
+                .map_err(|e| format!("Failed to check active update jobs: {e}"))?;
+            if other_active != 0 {
+                return Err("別の更新または保存ジョブが進行中です".to_string());
+            }
+        }
+        tx.execute(
             "UPDATE update_job_items
              SET status = 'queued', error = NULL, updated_at = CURRENT_TIMESTAMP
              WHERE job_id = ?1 AND status = 'running'",
@@ -5537,14 +5661,38 @@ impl Database {
         )
         .map_err(|e| format!("Failed to reset running update items: {}", e))?;
         if retry_failed {
-            conn.execute(
-                "UPDATE update_job_items
+            let reset_count = tx
+                .execute(
+                    "UPDATE update_job_items
                  SET status = 'queued', error = NULL, updated_at = CURRENT_TIMESTAMP
                  WHERE job_id = ?1 AND status = 'failed'",
-                params![job_id],
-            )
-            .map_err(|e| format!("Failed to reset failed update items: {}", e))?;
+                    params![job_id],
+                )
+                .map_err(|e| format!("Failed to reset failed update items: {}", e))?;
+            if reset_count > 0 {
+                tx.execute(
+                    "UPDATE update_jobs
+                     SET processed = MAX(0, processed - ?2),
+                         error_count = MAX(0, error_count - ?2),
+                         updated_at = ?3
+                     WHERE id = ?1",
+                    params![job_id, reset_count as i64, chrono::Utc::now().to_rfc3339()],
+                )
+                .map_err(|e| format!("Failed to reset retry counters: {e}"))?;
+            }
         }
+        if activate {
+            tx.execute(
+                "UPDATE update_jobs
+                 SET status = 'queued', active_label = '再開待ち',
+                     updated_at = ?2, finished_at = NULL
+                 WHERE id = ?1",
+                params![job_id, chrono::Utc::now().to_rfc3339()],
+            )
+            .map_err(|e| format!("Failed to queue resumed update job: {e}"))?;
+        }
+        tx.commit()
+            .map_err(|e| format!("Failed to commit update job resume: {e}"))?;
         Ok(())
     }
 
@@ -5650,7 +5798,11 @@ impl Database {
             .query_row(
                 "SELECT id, status, scope, mode, totals, processed, candidate_count,
                         saved_count, error_count, active_label, started_at, updated_at, finished_at,
-                        (SELECT COUNT(*) FROM update_job_items i WHERE i.job_id=update_jobs.id AND i.status='held')
+                        (SELECT COUNT(*) FROM update_job_items i WHERE i.job_id=update_jobs.id AND i.status='held'),
+                        (SELECT COUNT(*) FROM update_job_items i WHERE i.job_id=update_jobs.id AND i.item_type IN ('work','target')),
+                        (SELECT COUNT(*) FROM update_job_items i WHERE i.job_id=update_jobs.id AND i.item_type IN ('work','target') AND i.status NOT IN ('queued','running')),
+                        (SELECT COUNT(*) FROM update_job_items i WHERE i.job_id=update_jobs.id AND i.item_type='candidate' AND i.status != 'candidate'),
+                        (SELECT COUNT(*) FROM update_job_items i WHERE i.job_id=update_jobs.id AND i.item_type='candidate' AND i.status NOT IN ('candidate','queued','running'))
                  FROM update_jobs WHERE id = ?1",
                 params![job_id],
                 update_job_summary_from_row,
@@ -12537,13 +12689,18 @@ fn append_library_filters(
         let active_authors = active_strings(authors_inc);
         if !active_authors.is_empty() {
             let placeholders = vec!["?"; active_authors.len()].join(", ");
+            // Resolve historical author names once, then match their stable
+            // (source, author_id) identity through the existing author index.
+            // A correlated EXISTS here rescanned snapshots for every work.
             wheres.push(format!(
                 "(d.author_name IN ({placeholders}) OR (
-                    d.author_id IS NOT NULL AND d.author_id != '' AND EXISTS (
-                        SELECT 1 FROM downloads author_snapshot
-                        WHERE author_snapshot.source = d.source
-                          AND author_snapshot.author_id = d.author_id
-                          AND author_snapshot.author_name IN ({placeholders})
+                    d.author_id IS NOT NULL AND d.author_id != '' AND
+                    (d.source, d.author_id) IN (
+                        SELECT author_snapshot.source, author_snapshot.author_id
+                        FROM downloads author_snapshot
+                        WHERE author_snapshot.author_name IN ({placeholders})
+                          AND author_snapshot.author_id IS NOT NULL
+                          AND author_snapshot.author_id != ''
                     )
                 ))"
             ));
@@ -12562,11 +12719,13 @@ fn append_library_filters(
             let placeholders = vec!["?"; active_authors.len()].join(", ");
             wheres.push(format!(
                 "NOT (d.author_name IN ({placeholders}) OR (
-                    d.author_id IS NOT NULL AND d.author_id != '' AND EXISTS (
-                        SELECT 1 FROM downloads author_snapshot
-                        WHERE author_snapshot.source = d.source
-                          AND author_snapshot.author_id = d.author_id
-                          AND author_snapshot.author_name IN ({placeholders})
+                    d.author_id IS NOT NULL AND d.author_id != '' AND
+                    (d.source, d.author_id) IN (
+                        SELECT author_snapshot.source, author_snapshot.author_id
+                        FROM downloads author_snapshot
+                        WHERE author_snapshot.author_name IN ({placeholders})
+                          AND author_snapshot.author_id IS NOT NULL
+                          AND author_snapshot.author_id != ''
                     )
                 ))"
             ));
@@ -14759,6 +14918,10 @@ fn update_job_summary_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Upda
         mode: row.get(3)?,
         totals: row.get(4)?,
         processed: row.get(5)?,
+        check_total: row.get(14)?,
+        check_processed: row.get(15)?,
+        save_total: row.get(16)?,
+        save_processed: row.get(17)?,
         candidate_count: row.get(6)?,
         saved_count: row.get(7)?,
         error_count: row.get(8)?,

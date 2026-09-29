@@ -87,10 +87,11 @@ export function AddToCollectionModal({
   });
 
   const blocked = useMemo(() => {
+    if (collectionsQuery.isError) return "コレクションを読み込めません";
     if (downloadIds.length === 0) return "作品が選ばれていません";
     if (target === "__new__" && !name.trim()) return "名前を入れてください";
     return null;
-  }, [downloadIds.length, name, target]);
+  }, [collectionsQuery.isError, downloadIds.length, name, target]);
 
   return (
     <Modal opened={opened} onClose={onClose} title={`${formatNumber(downloadIds.length)}作品をコレクションにまとめる`} size="lg">
@@ -108,7 +109,16 @@ export function AddToCollectionModal({
               <Text size="sm" fw={650}>新しいコレクションを作る</Text>
             </UnstyledButton>
 
-            {collectionsQuery.isLoading ? (
+            {collectionsQuery.isError ? (
+              <Alert color="red" title="コレクションを読み込めません">
+                <Stack gap="xs">
+                  <Text size="sm">{errorMessage(collectionsQuery.error)}</Text>
+                  <Button size="compact-sm" variant="light" onClick={() => void collectionsQuery.refetch()}>
+                    再読み込み
+                  </Button>
+                </Stack>
+              </Alert>
+            ) : collectionsQuery.isLoading ? (
               <Text size="sm" c="dimmed" p="sm">コレクションを読み込んでいます…</Text>
             ) : collections.length === 0 ? (
               <EmptyState
