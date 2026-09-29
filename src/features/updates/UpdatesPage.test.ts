@@ -74,4 +74,15 @@ describe("shelf-scoped update checks", () => {
     await expect(shelfWorkIds("reading")).resolves.toEqual([]);
     expect(searchMock).not.toHaveBeenCalled();
   });
+
+  it("keeps a reading-shelf check within the disclosed 500-work limit", async () => {
+    readingMock.mockReturnValueOnce(Array.from({ length: 501 }, (_, index) => index + 1));
+    searchMock.mockImplementationOnce(async (params: { idsInclude: number[] }) => ({
+      items: params.idsInclude.map((id) => ({ id })),
+    }));
+    const ids = await shelfWorkIds("reading");
+    expect(ids).toHaveLength(500);
+    expect(ids).not.toContain(501);
+    expect(searchMock).toHaveBeenCalledWith(expect.objectContaining({ limit: 500 }));
+  });
 });

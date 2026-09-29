@@ -2784,6 +2784,33 @@ select {
   background: light-dark(linear-gradient(135deg, #fff, #f1f9ff), linear-gradient(135deg, #151b23, #10273a));
 }
 
+.update-job-title-viewport {
+  width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  margin-top: 10px;
+}
+
+.update-job-title {
+  white-space: nowrap;
+  width: max-content;
+  max-width: none;
+}
+
+.update-job-title-viewport--scrolling .update-job-title {
+  animation: update-job-title-scroll var(--title-duration) ease-in-out infinite alternate;
+}
+
+@keyframes update-job-title-scroll {
+  0%, 15% { transform: translateX(0); }
+  85%, 100% { transform: translateX(calc(-1 * var(--title-overflow))); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .update-job-title-viewport { overflow-x: auto; }
+  .update-job-title-viewport--scrolling .update-job-title { animation: none; }
+}
+
 .update-candidate + .update-candidate {
   border-top: 1px solid light-dark(#e5e9ee, #272f39);
 }

@@ -7308,6 +7308,199 @@ fn update_job_schema_recovers_interrupted_jobs() {
 }
 
 #[test]
+fn late_worker_progress_cannot_resume_or_finish_a_stopped_job() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let request = StartUpdateJobRequest {
+        scope: "save".to_string(),
+        mode: "save".to_string(),
+        work_ids: None,
+        target_ids: None,
+        credentials: None,
+        watch_saved: None,
+        adhoc_targets: None,
+    };
+    db.create_update_job("job-stop-race", &request, &[])
+        .unwrap();
+    db.set_update_job_status("job-stop-race", "running", Some("取得中"))
+        .unwrap();
+
+    db.set_update_job_status("job-stop-race", "paused", Some("一時停止しました"))
+        .unwrap();
+    assert!(!db
+        .transition_update_job_status("job-stop-race", "running", "running", Some("1件完了"))
+        .unwrap());
+    assert!(!db
+        .transition_update_job_status("job-stop-race", "running", "completed", Some("完了"))
+        .unwrap());
+    let paused = db.update_job_snapshot("job-stop-race").unwrap();
+    assert_eq!(paused.status, "paused");
+    assert_eq!(paused.active_label.as_deref(), Some("一時停止しました"));
+
+    db.set_update_job_status("job-stop-race", "canceling", Some("中止中"))
+        .unwrap();
+    assert!(!db
+        .transition_update_job_status("job-stop-race", "running", "completed", Some("完了"))
+        .unwrap());
+    assert_eq!(
+        db.update_job_status_value("job-stop-race").unwrap(),
+        "canceling"
+    );
+
+    db.set_update_job_status("job-stop-race", "running", Some("再開しました"))
+        .unwrap();
+    assert!(db
+        .transition_update_job_status("job-stop-race", "running", "completed", Some("完了"))
+        .unwrap());
+    assert_eq!(
+        db.update_job_status_value("job-stop-race").unwrap(),
+        "completed"
+    );
+}
+
+#[test]
+fn retrying_failed_update_items_keeps_list_counters_consistent_before_snapshot() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let request = StartUpdateJobRequest {
+        scope: "work".to_string(),
+        mode: "check_only".to_string(),
+        work_ids: None,
+        target_ids: None,
+        credentials: None,
+        watch_saved: None,
+        adhoc_targets: None,
+    };
+    let items = ["failed", "done"].map(|source_id| UpdateJobItemInput {
+        item_type: "work".to_string(),
+        source: Some("pixiv".to_string()),
+        source_id: Some(source_id.to_string()),
+        target_type: Some("work".to_string()),
+        title: source_id.to_string(),
+        payload_json: "{}".to_string(),
+        status: "queued".to_string(),
+    });
+    db.create_update_job("job-retry-counters", &request, &items)
+        .unwrap();
+    let first = db
+        .next_update_job_item("job-retry-counters")
+        .unwrap()
+        .unwrap();
+    db.complete_update_job_item(first.id, "failed", Some("temporary"), None)
+        .unwrap();
+    let second = db
+        .next_update_job_item("job-retry-counters")
+        .unwrap()
+        .unwrap();
+    db.complete_update_job_item(second.id, "done", None, None)
+        .unwrap();
+
+    let before = db.list_update_jobs().unwrap().remove(0);
+    assert_eq!(
+        (before.totals, before.processed, before.error_count),
+        (2, 2, 1)
+    );
+
+    db.prepare_update_job_resume("job-retry-counters", true)
+        .unwrap();
+    // list_update_jobs reads the cached counters directly. No snapshot repair
+    // should be needed before the UI can report the resumed progress correctly.
+    let pending = db.list_update_jobs().unwrap().remove(0);
+    assert_eq!(
+        (pending.totals, pending.processed, pending.error_count),
+        (2, 1, 0)
+    );
+    let retry = db
+        .next_update_job_item("job-retry-counters")
+        .unwrap()
+        .unwrap();
+    assert_eq!(retry.id, first.id);
+    db.complete_update_job_item(retry.id, "done", None, None)
+        .unwrap();
+    let finished = db.list_update_jobs().unwrap().remove(0);
+    assert_eq!(
+        (finished.totals, finished.processed, finished.error_count),
+        (2, 2, 0)
+    );
+}
+
+#[test]
+fn simultaneous_checks_create_only_one_active_job() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let request = StartUpdateJobRequest {
+        scope: "all".to_string(),
+        mode: "check_only".to_string(),
+        work_ids: None,
+        target_ids: None,
+        credentials: None,
+        watch_saved: None,
+        adhoc_targets: None,
+    };
+    let items = [UpdateJobItemInput {
+        item_type: "work".to_string(),
+        source: Some("pixiv".to_string()),
+        source_id: Some("1".to_string()),
+        target_type: Some("work".to_string()),
+        title: "work".to_string(),
+        payload_json: "{}".to_string(),
+        status: "queued".to_string(),
+    }];
+    let barrier = std::sync::Barrier::new(3);
+    let results = std::thread::scope(|scope| {
+        let first = scope.spawn(|| {
+            barrier.wait();
+            db.create_update_job_if_idle("race-a", &request, &items)
+        });
+        let second = scope.spawn(|| {
+            barrier.wait();
+            db.create_update_job_if_idle("race-b", &request, &items)
+        });
+        barrier.wait();
+        [first.join().unwrap(), second.join().unwrap()]
+    });
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    assert_eq!(db.list_update_jobs().unwrap().len(), 1);
+
+    let existing_id = db.list_update_jobs().unwrap()[0].job_id.clone();
+    db.set_update_job_status(&existing_id, "paused", None)
+        .unwrap();
+    // A paused worker is not consuming source requests, so later scheduled
+    // runs remain eligible instead of being blocked forever.
+    db.create_update_job_if_idle("after-pause", &request, &items)
+        .unwrap();
+    assert_eq!(db.list_update_jobs().unwrap().len(), 2);
+}
+
+#[test]
+fn paused_job_cannot_resume_across_another_active_check() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let request = StartUpdateJobRequest {
+        scope: "all".to_string(),
+        mode: "check_only".to_string(),
+        work_ids: None,
+        target_ids: None,
+        credentials: None,
+        watch_saved: None,
+        adhoc_targets: None,
+    };
+    db.create_update_job("paused-job", &request, &[]).unwrap();
+    db.set_update_job_status("paused-job", "paused", None)
+        .unwrap();
+    db.create_update_job_if_idle("active-job", &request, &[])
+        .unwrap();
+    assert!(db.resume_update_job_if_idle("paused-job", true).is_err());
+    assert_eq!(db.update_job_status_value("paused-job").unwrap(), "paused");
+
+    db.set_update_job_status("active-job", "completed", None)
+        .unwrap();
+    db.resume_update_job_if_idle("paused-job", true).unwrap();
+    assert_eq!(db.update_job_status_value("paused-job").unwrap(), "queued");
+    assert!(db.resume_update_job_if_idle("active-job", true).is_err());
+}
+
+#[test]
 fn stopped_update_jobs_leave_their_next_item_queued() {
     let (_temp, root, storage) = temp_paths();
     let db = Database::open(&root.join("piep.db"), &storage).unwrap();
@@ -7759,6 +7952,8 @@ fn queued_candidates_count_towards_progress_but_unanswered_ones_do_not() {
     let snapshot = db.update_job_snapshot("job-progress").unwrap();
     assert_eq!(snapshot.totals, 1);
     assert_eq!(snapshot.candidate_count, 3);
+    assert_eq!((snapshot.check_total, snapshot.check_processed), (1, 0));
+    assert_eq!((snapshot.save_total, snapshot.save_processed), (0, 0));
 
     // 保存を頼んだ2件は作業に加わる。ここで進捗が 1/1 のままだと、
     // 保存の最中に「完了」と見えてしまう。
@@ -7768,6 +7963,16 @@ fn queued_candidates_count_towards_progress_but_unanswered_ones_do_not() {
     let snapshot = db.update_job_snapshot("job-progress").unwrap();
     assert_eq!(snapshot.totals, 3);
     assert_eq!(snapshot.processed, 0);
+    assert_eq!((snapshot.check_total, snapshot.check_processed), (1, 0));
+    assert_eq!((snapshot.save_total, snapshot.save_processed), (2, 0));
+    db.set_update_job_status("job-progress", "running", None)
+        .unwrap();
+    let target = db.next_update_job_item("job-progress").unwrap().unwrap();
+    db.complete_update_job_item(target.id, "done", None, None)
+        .unwrap();
+    let snapshot = db.update_job_snapshot("job-progress").unwrap();
+    assert_eq!((snapshot.check_total, snapshot.check_processed), (1, 1));
+    assert_eq!((snapshot.save_total, snapshot.save_processed), (2, 0));
 }
 
 /// 監視対象の健康状態。「確認した」と「見つかった」は別で、失敗は積み上がる。

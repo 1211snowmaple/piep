@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { transitionContent } from "@/lib/contentTransition";
 import {
   ActionIcon,
@@ -47,7 +47,7 @@ import { useUpdateJobNotifications } from "@/features/updates/useUpdateScheduler
 import type { UpdateTarget } from "@/types/library";
 
 const demoSnapshot: UpdateJobSnapshot = {
-  jobId: "preview-20260802", status: "completed", scope: "all", mode: "check_only", totals: 43, processed: 43, candidateCount: 3, savedCount: 0, errorCount: 0, activeLabel: null,
+  jobId: "preview-20260802", status: "completed", scope: "all", mode: "check_only", totals: 43, processed: 43, checkTotal: 43, checkProcessed: 43, saveTotal: 0, saveProcessed: 0, candidateCount: 3, savedCount: 0, errorCount: 0, activeLabel: null,
   startedAt: new Date(Date.now() - 90_000).toISOString(), updatedAt: new Date().toISOString(), finishedAt: new Date().toISOString(),
   logs: [
     { id: 1, logType: "info", message: "43件の更新対象を確認しました", createdAt: new Date(Date.now() - 80_000).toISOString() },
@@ -61,6 +61,10 @@ const demoSnapshot: UpdateJobSnapshot = {
   nextCandidateCursor: null,
   previousLogCursor: null,
 };
+
+// The update screen unmounts on navigation. Remember manual checks for each
+// job so a return visit does not silently select everything again.
+const candidateSelectionCache = new Map<string, { seen: Set<number>; selected: number[] }>();
 
 export function isSavableCandidateStatus(status: string): boolean {
   return status === "candidate" || status === "failed";
@@ -134,19 +138,33 @@ export default function UpdatesPage() {
   // The snapshot is polled, so re-seeding the selection from it on every
   // arrival used to re-tick boxes the user had just cleared. Seed once per job,
   // then only add candidates that appear later as the job discovers them.
-  const seenRef = useRef<{ jobId: string | null; ids: Set<number> }>({ jobId: null, ids: new Set() });
+  const visibleSelectionJob = useRef<string | null>(null);
   useEffect(() => {
     if (!activeSnapshot) return;
-    const isNewJob = seenRef.current.jobId !== activeSnapshot.jobId;
-    if (isNewJob) seenRef.current = { jobId: activeSnapshot.jobId, ids: new Set() };
+    const isNewJob = visibleSelectionJob.current !== activeSnapshot.jobId;
+    visibleSelectionJob.current = activeSnapshot.jobId;
+    let remembered = candidateSelectionCache.get(activeSnapshot.jobId);
+    if (!remembered) {
+      remembered = { seen: new Set(), selected: [] };
+      candidateSelectionCache.set(activeSnapshot.jobId, remembered);
+    }
     const eligible = new Set(activeSnapshot.candidates.filter(isSavableCandidate).map((item) => item.id));
-    const fresh = activeSnapshot.candidates.filter((item) => item.selected && eligible.has(item.id) && !seenRef.current.ids.has(item.id)).map((item) => item.id);
-    activeSnapshot.candidates.forEach((item) => seenRef.current.ids.add(item.id));
-    if (isNewJob) setSelectedCandidateIds(fresh);
-    else setSelectedCandidateIds((current) => [...new Set([...current, ...fresh])].filter((id) => eligible.has(id)));
+    const fresh = activeSnapshot.candidates.filter((item) => item.selected && eligible.has(item.id) && !remembered.seen.has(item.id)).map((item) => item.id);
+    activeSnapshot.candidates.forEach((item) => remembered.seen.add(item.id));
+    if (fresh.length) remembered.selected = [...new Set([...remembered.selected, ...fresh])];
+    if (isNewJob || fresh.length) setSelectedCandidateIds(remembered.selected);
   }, [activeSnapshot]);
 
-  const selectableCandidateIds = activeSnapshot?.candidates.filter(isSavableCandidate).map((item) => item.id) ?? [];
+  const changeCandidateSelection = (update: (current: number[]) => number[]) => {
+    const jobId = activeSnapshot?.jobId;
+    if (!jobId) return;
+    const remembered = candidateSelectionCache.get(jobId);
+    if (!remembered) return;
+    remembered.selected = update(remembered.selected);
+    setSelectedCandidateIds(remembered.selected);
+  };
+
+  const selectableCandidateIds = activeSnapshot?.candidates.filter((item) => isSavableCandidate(item) && !dismissedIds.includes(item.id)).map((item) => item.id) ?? [];
   const selectableCandidateIdSet = new Set(selectableCandidateIds);
   const selectedSavableIds = selectedCandidateIds.filter((id) => selectableCandidateIdSet.has(id));
   const selectedSavableIdSet = new Set(selectedSavableIds);
@@ -177,6 +195,7 @@ export default function UpdatesPage() {
     },
     onSuccess: (candidate) => {
       setDismissedIds((current) => [...new Set([...current, candidate.id])]);
+      changeCandidateSelection((current) => current.filter((id) => id !== candidate.id));
       queryClient.invalidateQueries({ queryKey: ["dismissed-candidates"] });
       invalidateAfterUpdateJob(queryClient);
       notifications.show({
@@ -298,7 +317,12 @@ export default function UpdatesPage() {
   // 一時停止と再接続待ちは、どちらも「止まっていて、押せば続きから動く」。
   // 再接続が要るほうにだけボタンが無いと、連携し直しても戻る道が無くなる。
   const stalled = status === "paused" || status === "auth_required";
-  const progressValue = activeSnapshot?.totals ? activeSnapshot.processed / activeSnapshot.totals * 100 : 0;
+  const checkTotal = activeSnapshot?.checkTotal ?? (activeSnapshot?.scope === "save" ? 0 : activeSnapshot?.totals ?? 0);
+  const checkProcessed = activeSnapshot?.checkProcessed ?? (activeSnapshot?.scope === "save" ? 0 : activeSnapshot?.processed ?? 0);
+  const saveTotal = activeSnapshot?.saveTotal ?? (activeSnapshot?.scope === "save" ? activeSnapshot.totals : 0);
+  const saveProcessed = activeSnapshot?.saveProcessed ?? (activeSnapshot?.scope === "save" ? activeSnapshot.processed : 0);
+  const finishingProfiles = Boolean(running && activeSnapshot?.activeLabel?.startsWith("作者・シリーズ情報を確認しています"));
+  const profileProgress = activeSnapshot?.activeLabel?.match(/（(\d+)\/(\d+)件完了）/);
 
   return (
     <div className="page page--contained updates-page">
@@ -313,7 +337,7 @@ export default function UpdatesPage() {
           <Select
             aria-label="確認する対象"
             leftSection={<Icons.select size={IconSize.menu} />}
-            data={[{ value: "all", label: "すべての監視対象" }, { value: "work", label: "監視中の作品" }, { value: "author", label: "作者・クリエイター" }, { value: "series", label: "シリーズ" }, { value: "favorite", label: "お気に入りの作品" }, { value: "reading", label: "読みかけの作品" }]}
+            data={[{ value: "all", label: "すべての監視対象" }, { value: "work", label: "監視中の作品" }, { value: "author", label: "作者・クリエイター" }, { value: "series", label: "シリーズ" }, { value: "favorite", label: `お気に入りの作品（最大${SHELF_SCOPE_LIMIT}件）` }, { value: "reading", label: `読みかけの作品（最大${SHELF_SCOPE_LIMIT}件）` }]}
             disabled={Boolean(workId)}
             w={210}
             {...form.getInputProps("scope")}
@@ -335,6 +359,11 @@ export default function UpdatesPage() {
             </Tooltip>
           </Group>
           {workId && <Badge variant="light" color="gray">作品 ID {workId} のみ</Badge>}
+          {(form.values.scope === "favorite" || form.values.scope === "reading") && (
+            <Text size="xs" c="dimmed" role="status">
+              この確認では最大{SHELF_SCOPE_LIMIT}件を対象にします。{SHELF_SCOPE_LIMIT + 1}件目以降は含まれません。
+            </Text>
+          )}
           <Box style={{ flex: 1 }} />
           <Group gap={6} wrap="nowrap">
             <Text size="xs" c="dimmed">自動確認：{scheduleSummary}</Text>
@@ -345,12 +374,8 @@ export default function UpdatesPage() {
 
       {activeSnapshot && (
         <Card p="lg" className="update-progress-card" mt="lg">
-          <Group justify="space-between" align="flex-start" wrap="wrap">
-            <Box miw={0}>
-              <Group gap="xs"><StatusBadge job={activeSnapshot} /><Text size="xs" c="dimmed">{activeSnapshot.jobId}</Text></Group>
-              <Title order={2} mt="sm">{activeSnapshot.activeLabel || statusTitle(activeSnapshot.status)}</Title>
-              <Text size="sm" c="dimmed" mt={5}>{formatNumber(activeSnapshot.processed)} / {formatNumber(activeSnapshot.totals)}件を処理 · 候補 {formatNumber(activeSnapshot.candidateCount)} · エラー {formatNumber(activeSnapshot.errorCount)} · 保留 {formatNumber(activeSnapshot.heldCount ?? 0)}</Text>
-            </Box>
+          <Group justify="space-between" align="center" wrap="wrap">
+            <Group gap="xs"><StatusBadge job={activeSnapshot} /><Text size="xs" c="dimmed">{activeSnapshot.jobId}</Text></Group>
             <Group gap="xs">
               {running && <Button variant="default" leftSection={<Icons.pause size={IconSize.menu} />} onClick={() => runtime && reportJobAction(updateJobs.pause(activeSnapshot.jobId), "一時停止できません")}>一時停止</Button>}
               {stalled && <Button leftSection={<Icons.resume size={IconSize.menu} />} onClick={() => runtime && reportJobAction(updateJobs.resume(activeSnapshot.jobId), "再開できません")}>再開</Button>}
@@ -358,6 +383,8 @@ export default function UpdatesPage() {
               {(activeSnapshot.status === "failed" || activeSnapshot.status === "canceled") && <Button leftSection={<Icons.undo size={IconSize.menu} />} onClick={() => runtime && reportJobAction(updateJobs.resume(activeSnapshot.jobId, true), "やり直せません")}>失敗分を再試行</Button>}
             </Group>
           </Group>
+          <ScrollingJobTitle label={activeSnapshot.activeLabel || statusTitle(activeSnapshot.status)} />
+          <Text size="sm" c="dimmed" mt={5}>候補 {formatNumber(activeSnapshot.candidateCount)} · 保存済み {formatNumber(activeSnapshot.savedCount)} · エラー {formatNumber(activeSnapshot.errorCount)} · 保留 {formatNumber(activeSnapshot.heldCount ?? 0)}</Text>
           {/* 間隔の説明が本当に要る瞬間はここ。「遅い」と感じたときに、
               なぜ待っているのかが同じ場所に出る。 */}
           {running && throttledMessage && (
@@ -366,7 +393,10 @@ export default function UpdatesPage() {
               <Text size="xs" c="dimmed" className="line-clamp-1">{throttledMessage}</Text>
             </Group>
           )}
-          <Progress value={progressValue} animated={running} mt="lg" size="lg" aria-label={`更新進捗 ${Math.round(progressValue)}%`} />
+          {checkTotal > 0 && <JobStageProgress label="更新を探す" processed={checkProcessed} total={checkTotal} animated={running && checkProcessed < checkTotal} />}
+          {(saveTotal > 0 || activeSnapshot.mode === "auto_save" || activeSnapshot.scope === "save") && <JobStageProgress label="見つけた作品を保存" processed={saveProcessed} total={saveTotal} animated={running && saveProcessed < saveTotal} />}
+          {finishingProfiles && profileProgress && <JobStageProgress label="作者・シリーズ情報を仕上げる" processed={Number(profileProgress[1])} total={Number(profileProgress[2])} animated={running} />}
+          {finishingProfiles && <Text size="xs" c="dimmed" mt="sm">保存後の作者・シリーズ情報を仕上げています。完了表示は、この作業が終わってからになります。</Text>}
         </Card>
       )}
 
@@ -388,14 +418,17 @@ export default function UpdatesPage() {
           {(activeSnapshot?.heldCount ?? 0) > 0 && <Group mb="md"><Text size="sm" c="dimmed">閲覧条件待ちなどの{activeSnapshot?.heldCount}件は、保存候補から外して保留しています。</Text><Button variant="subtle" size="xs" onClick={() => setTab("deferred")}>保留一覧を開く</Button></Group>}
           {activeSnapshot ? (
             <CandidatesPanel
+              key={activeSnapshot.jobId}
               candidates={activeSnapshot.candidates.filter((candidate) => !dismissedIds.includes(candidate.id) && candidate.status !== "held")}
               selectedIds={selectedSavableIdSet}
               selectableIds={selectableCandidateIds}
               running={running}
               saving={saveCandidatesMutation.isPending}
-              hasMore={Boolean(activeSnapshot.nextCandidateCursor)}
-              onToggle={(id, checked) => setSelectedCandidateIds((current) => checked ? [...new Set([...current, id])] : current.filter((item) => item !== id))}
-              onSelectMany={(ids) => setSelectedCandidateIds(ids)}
+              hasMore={Boolean(activeSnapshot.nextCandidateCursor) || activeSnapshot.candidateCount > activeSnapshot.candidates.length}
+              jobActive={running || stalled}
+              onToggle={(id, checked) => changeCandidateSelection((current) => checked ? [...new Set([...current, id])] : current.filter((item) => item !== id))}
+              onSelectMany={(ids) => changeCandidateSelection((current) => [...new Set([...current, ...ids])])}
+              onClearSelection={() => changeCandidateSelection(() => [])}
               onSave={() => saveCandidatesMutation.mutate()}
               onLoadMore={() => runtime && updateJobs.loadMoreCandidates()}
               onDismiss={(candidate) => dismissMutation.mutate(candidate)}
@@ -519,6 +552,9 @@ type TargetAction = { action: "add" | "toggle" | "delete"; target?: UpdateTarget
 
 function TargetsPanel({ targets, loading, error, retry, form, mutation }: { targets: UpdateTarget[]; loading: boolean; error: unknown; retry: () => void; form: UseFormReturnType<TargetValues, TargetValues, any>; mutation: { mutate: (input: TargetAction) => void; isPending: boolean } }) {
   const [showPaused, setShowPaused] = useState(false);
+  const [searchText, setSearchText] = useState("");
+  const [activeVisibleCount, setActiveVisibleCount] = useState(60);
+  const [pausedVisibleCount, setPausedVisibleCount] = useState(60);
   if (loading) return <LoadingState />;
   if (error) return <ErrorState error={error} retry={retry} />;
   const confirmDelete = (target: UpdateTarget) => modals.openConfirmModal({
@@ -528,8 +564,10 @@ function TargetsPanel({ targets, loading, error, retry, form, mutation }: { targ
     confirmProps: { color: "red" },
     onConfirm: () => mutation.mutate({ action: "delete", target }),
   });
-  const active = targets.filter((target) => target.enabled);
-  const paused = targets.filter((target) => !target.enabled);
+  const search = searchText.trim().normalize("NFKC").toLocaleLowerCase();
+  const matching = targets.filter((target) => !search || `${target.displayName} ${target.sourceKey} ${target.source}`.normalize("NFKC").toLocaleLowerCase().includes(search));
+  const active = matching.filter((target) => target.enabled);
+  const paused = matching.filter((target) => !target.enabled);
 
   const row = (target: UpdateTarget) => (
     <Group p="md" wrap="nowrap" key={target.id}>
@@ -578,10 +616,28 @@ function TargetsPanel({ targets, loading, error, retry, form, mutation }: { targ
         </form>
       </Card>
 
+      <Card p="md">
+        <TextInput
+          label="監視対象を探す"
+          placeholder="表示名・ID・ソース"
+          value={searchText}
+          onChange={(event) => {
+            setSearchText(event.currentTarget.value);
+            setActiveVisibleCount(60);
+            setPausedVisibleCount(60);
+            if (event.currentTarget.value.trim()) setShowPaused(true);
+          }}
+        />
+        <Text size="xs" c="dimmed" mt="xs">
+          {search ? `${formatNumber(matching.length)} / ${formatNumber(targets.length)}件が一致` : `監視中 ${formatNumber(active.length)}件 · 停止中 ${formatNumber(paused.length)}件`}
+        </Text>
+      </Card>
+
       <Card p={0}>
         {active.length
-          ? active.map((target, index) => <Box key={target.id}>{index > 0 && <Divider />}{row(target)}</Box>)
-          : <Text p="lg" c="dimmed" size="sm">確認中の対象はありません。</Text>}
+          ? active.slice(0, activeVisibleCount).map((target, index) => <Box key={target.id}>{index > 0 && <Divider />}{row(target)}</Box>)
+          : <Text p="lg" c="dimmed" size="sm">{search ? "一致する監視中の対象はありません。" : "確認中の対象はありません。"}</Text>}
+        {active.length > activeVisibleCount && <><Divider /><Button variant="subtle" fullWidth onClick={() => setActiveVisibleCount((count) => count + 60)}>さらに表示（残り{formatNumber(active.length - activeVisibleCount)}件）</Button></>}
       </Card>
 
       {/* 止めた対象はここへ畳む。トグルひとつで一覧から下がり、消したいときだけ
@@ -598,7 +654,10 @@ function TargetsPanel({ targets, loading, error, retry, form, mutation }: { targ
               <Text size="xs" c="dimmed">確認しません。再開も削除もここから</Text>
             </Group>
           </UnstyledButton>
-          {showPaused && paused.map((target) => <Box key={target.id}><Divider />{row(target)}</Box>)}
+          {showPaused && <>
+            {paused.slice(0, pausedVisibleCount).map((target) => <Box key={target.id}><Divider />{row(target)}</Box>)}
+            {paused.length > pausedVisibleCount && <><Divider /><Button variant="subtle" fullWidth onClick={() => setPausedVisibleCount((count) => count + 60)}>さらに表示（残り{formatNumber(paused.length - pausedVisibleCount)}件）</Button></>}
+          </>}
         </Card>
       )}
     </Stack>
@@ -625,15 +684,46 @@ function kindLabel(kind: string): string {
  * 「新作」「続編」「改稿」は判断の重さが違う — 改稿は手元の版を置き換えるので、
  * 新作をまとめて取り込むついでに混ぜたくない。だから既定は分けて見せる。
  */
-function CandidatesPanel({ candidates, selectedIds, selectableIds, running, saving, hasMore, onToggle, onSelectMany, onSave, onLoadMore, onDismiss }: {
+function ScrollingJobTitle({ label }: { label: string }) {
+  const viewport = useRef<HTMLDivElement>(null);
+  const content = useRef<HTMLHeadingElement>(null);
+  const [overflow, setOverflow] = useState(0);
+  useEffect(() => {
+    const measure = () => setOverflow(Math.max(0, (content.current?.scrollWidth ?? 0) - (viewport.current?.clientWidth ?? 0)));
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    if (viewport.current) observer.observe(viewport.current);
+    if (content.current) observer.observe(content.current);
+    return () => observer.disconnect();
+  }, [label]);
+  return <Box ref={viewport} className={`update-job-title-viewport${overflow > 0 ? " update-job-title-viewport--scrolling" : ""}`} title={label}>
+    <Title ref={content} order={2} className="update-job-title" style={{ "--title-overflow": `${overflow}px`, "--title-duration": `${Math.max(9, overflow / 28 + 4)}s` } as CSSProperties}>{label}</Title>
+  </Box>;
+}
+
+function JobStageProgress({ label, processed, total, animated }: { label: string; processed: number; total: number; animated: boolean }) {
+  const value = total > 0 ? Math.min(100, processed / total * 100) : 0;
+  return <Box mt="md">
+    <Group justify="space-between" gap="sm" mb={5}>
+      <Text size="sm" fw={600}>{label}</Text>
+      <Text size="sm" c="dimmed">{formatNumber(processed)} / {formatNumber(total)}件</Text>
+    </Group>
+    <Progress value={value} animated={animated} size="md" aria-label={`${label} ${Math.round(value)}%`} />
+  </Box>;
+}
+
+function CandidatesPanel({ candidates, selectedIds, selectableIds, running, saving, hasMore, jobActive, onToggle, onSelectMany, onClearSelection, onSave, onLoadMore, onDismiss }: {
   candidates: UpdateJobSnapshot["candidates"];
   selectedIds: Set<number>;
   selectableIds: number[];
   running: boolean;
   saving: boolean;
   hasMore: boolean;
+  jobActive: boolean;
   onToggle: (id: number, checked: boolean) => void;
   onSelectMany: (ids: number[]) => void;
+  onClearSelection: () => void;
   onSave: () => void;
   onLoadMore: () => void;
   onDismiss: (candidate: UpdateJobSnapshot["candidates"][number]) => void;
@@ -642,16 +732,21 @@ function CandidatesPanel({ candidates, selectedIds, selectableIds, running, savi
   // 済んだものは畳む。数は残す - 「無かったこと」にはしない。
   const [showSettled, setShowSettled] = useState(false);
   if (!candidates.length) {
-    return <EmptyState icon={Icons.confirm} title="保存できる候補はありません" description="保留した作品は「保留・非表示」から後で再確認できます。" />;
+    return jobActive
+      ? <EmptyState icon={Icons.pending} title="更新確認を続けています" description="候補が見つかると、ここに順次表示します。" />
+      : <EmptyState icon={Icons.confirm} title="保存できる候補はありません" description="保留した作品は「保留・非表示」から後で再確認できます。" />;
   }
   const settled = candidates.filter((candidate) => isSettledCandidateStatus(candidate.status));
   const open = candidates.filter((candidate) => !isSettledCandidateStatus(candidate.status));
-  if (!open.length && !showSettled) {
+  if (!open.length && !showSettled && jobActive) {
+    return <EmptyState icon={Icons.pending} title="更新確認を続けています" description="いま表示できる候補は処理済みです。確認や保存が終わるまで、新しい候補が追加されることがあります。" />;
+  }
+  if (!open.length && !showSettled && !hasMore) {
     return (
       <EmptyState
         icon={Icons.confirm}
         title="この確認の候補は、ぜんぶ片付きました"
-        description={`見つかった${settled.length}件は保存済みです。次の確認では、ここに新しいぶんだけ並びます。`}
+        description={`見つかった${settled.length}件は保存済み・処理済みです。次の確認では、ここに新しいぶんだけ並びます。`}
         action={<Button variant="default" onClick={() => setShowSettled(true)}>保存済みを表示</Button>}
       />
     );
@@ -664,18 +759,19 @@ function CandidatesPanel({ candidates, selectedIds, selectableIds, running, savi
   const shown = kind === "all" ? listed : listed.filter((candidate) => candidate.kind === kind);
   const shownSelectable = shown.filter(isSavableCandidate).map((candidate) => candidate.id);
   const selectedCount = selectableIds.filter((id) => selectedIds.has(id)).length;
+  const selectedOutsideShown = selectedCount - shownSelectable.filter((id) => selectedIds.has(id)).length;
 
   return (
     <Card p={0}>
       <Group justify="space-between" p="md" align="flex-start" wrap="wrap">
         <Box>
           <Text fw={700}>保存する候補</Text>
-          <Text size="xs" c="dimmed">新作・続編・改稿をまとめて処理 · {selectedCount}件を選択中 · 表示 {shown.length}件</Text>
+          <Text size="xs" c="dimmed">新作・続編・改稿をまとめて処理 · 全候補から{selectedCount}件を選択中 · 表示 {shown.length}件{selectedOutsideShown > 0 ? `（表示外で${selectedOutsideShown}件を選択中）` : ""}</Text>
         </Box>
         <Group gap="xs">
           <Button size="xs" variant="subtle" disabled={!shownSelectable.length} onClick={() => onSelectMany(shownSelectable)}>表示分を選択</Button>
-          <Button size="xs" variant="subtle" color="gray" disabled={!selectedCount} onClick={() => onSelectMany([])}>解除</Button>
-          <Button size="sm" leftSection={<Icons.export size={IconSize.menu} />} disabled={!selectedCount || running} loading={saving} onClick={onSave}>選択候補をまとめて保存</Button>
+          <Button size="xs" variant="subtle" color="gray" disabled={!selectedCount} onClick={onClearSelection}>選択をすべて解除</Button>
+          <Button size="sm" leftSection={<Icons.export size={IconSize.menu} />} disabled={!selectedCount || running || hasMore} loading={saving} onClick={onSave}>{hasMore ? "候補を読み込み中" : `選択候補${selectedCount}件をまとめて保存`}</Button>
         </Group>
       </Group>
       <Box px="md" pb="md">
