@@ -1,13 +1,18 @@
 import { MantineProvider } from "@mantine/core";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
+import { notifications } from "@mantine/notifications";
 import type { UpdateJobSnapshot } from "@/services/updateJobApi";
 
 const mocks = vi.hoisted(() => ({
   getJob: vi.fn(),
   selectJob: vi.fn(),
   loadJobs: vi.fn().mockResolvedValue(undefined),
+  clearFinished: vi.fn().mockResolvedValue(undefined),
+  clearCompleted: vi.fn(),
+  pause: vi.fn(),
+  jobs: null as UpdateJobSnapshot[] | null,
 }));
 
 const latest: UpdateJobSnapshot = {
@@ -43,21 +48,22 @@ vi.mock("@/services/dbApi", () => ({ isTauriRuntime: () => true }));
 vi.mock("@/features/updates/updateJobs", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/features/updates/updateJobs")>()),
   useUpdateJobs: () => ({
-    jobs: [latest],
+    jobs: mocks.jobs ?? [latest],
     activeSnapshot: null,
     loadJobs: mocks.loadJobs,
     selectJob: mocks.selectJob,
-    pause: vi.fn(),
+    pause: mocks.pause,
     resume: vi.fn(),
     cancel: vi.fn(),
   }),
 }));
 vi.mock("@/services/updateJobApi", () => ({
-  clearFinishedUpdateJobsCommand: vi.fn().mockResolvedValue(undefined),
+  clearFinishedUpdateJobsCommand: mocks.clearFinished,
   getUpdateJobCommand: mocks.getJob,
 }));
 vi.mock("./operationJobs", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./operationJobs")>()),
+  clearCompletedOperations: mocks.clearCompleted,
   useOperationJobs: () => [{
     id: "profile-repair",
     kind: "maintenance",
@@ -78,6 +84,49 @@ vi.mock("./operationJobs", async (importOriginal) => ({
 import OperationsPage from "./OperationsPage";
 
 describe("OperationsPage update-job logs", () => {
+  it("reports a failed pause command without claiming the job changed", async () => {
+    mocks.jobs = [{ ...latest, status: "running" }];
+    mocks.pause.mockRejectedValueOnce(new Error("IPC unavailable"));
+    mocks.loadJobs.mockClear();
+    const show = vi.spyOn(notifications, "show").mockImplementation(() => "notification-id");
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <MantineProvider>
+        <QueryClientProvider client={client}>
+          <OperationsPage />
+        </QueryClientProvider>
+      </MantineProvider>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "更新確認を一時停止" }));
+    await waitFor(() => expect(show).toHaveBeenCalledWith(expect.objectContaining({
+      title: "一時停止できません",
+      message: "IPC unavailable",
+    })));
+    expect(mocks.loadJobs).not.toHaveBeenCalled();
+    mocks.jobs = null;
+    show.mockRestore();
+  });
+
+  it("keeps local history when deleting persistent jobs fails", async () => {
+    mocks.clearFinished.mockRejectedValueOnce(new Error("database unavailable"));
+    mocks.clearCompleted.mockClear();
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    render(
+      <MantineProvider>
+        <QueryClientProvider client={client}>
+          <OperationsPage />
+        </QueryClientProvider>
+      </MantineProvider>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "完了履歴を消去" }));
+    await waitFor(() => expect(mocks.clearFinished).toHaveBeenCalled());
+    expect(mocks.clearCompleted).not.toHaveBeenCalled();
+  });
+
   it("shows active maintenance before older persisted save jobs", () => {
     const client = new QueryClient({
       defaultOptions: { queries: { retry: false } },

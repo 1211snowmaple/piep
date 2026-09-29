@@ -120,20 +120,17 @@ function loadJobs(): OperationJob[] {
         status: "interrupted" as const,
         canCancel: false,
         canRetry: false,
-        finishedAt: loadedAt,
+        // Losing the page does not prove the native worker stopped.
+        finishedAt: null,
         updatedAt: loadedAt,
-        // 何が起きたかだけでなく、**次に何をすればいいか**まで書く。
-        // ここに残るのは、走っている最中に画面かアプリが消えたジョブである。
-        // 保存も取り込みも、済んだものは相手先IDで見分けて飛ばすので、
-        // 同じ操作をもう一度始めれば続きから進む。それを知らないと、
-        // 800件のうち500件まで進んだ人が最初からやり直すことになる。
         logs: [
           ...(job.logs ?? []),
           {
             id: id(),
             level: "warn" as const,
-            message:
-              "処理の途中で画面が閉じられたため、状態を引き継げませんでした。同じ操作をやり直すと、済んでいるものは飛ばして続きから進みます",
+            message: job.kind === "backup"
+              ? "画面の再読込で進行状況を追跡できません。バックアップの書き出しは続いている可能性があります。保存先のJSONマニフェストとZIPパートを確認し、未完成の場合だけ新しく書き出してください"
+              : "画面の再読込で進行状況を追跡できません。処理が続いている可能性があります。結果を確認してから、必要な場合だけ操作をやり直してください",
             createdAt: loadedAt,
           },
         ],
@@ -226,7 +223,9 @@ export function startOperation(
     updatedAt: createdAt,
     finishedAt: null,
     canCancel: Boolean(options.onCancel),
-    canRetry: Boolean(options.onRetry),
+    // Keep the handler for a possible failure, but never offer a second run
+    // while the first one is still writing files.
+    canRetry: false,
     logs: [
       { id: id(), level: "info", message: "処理を開始しました", createdAt },
     ],
@@ -341,6 +340,8 @@ export async function requestOperationCancel(jobId: string): Promise<void> {
 }
 
 export async function retryOperation(jobId: string): Promise<void> {
+  const job = jobs.find((entry) => entry.id === jobId);
+  if (job?.status !== "failed" || !job.canRetry) return;
   const handler = retryHandlers.get(jobId);
   if (!handler) return;
   // A retry is a new execution with its own duration and logs. Keep the failed

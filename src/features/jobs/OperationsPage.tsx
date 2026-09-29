@@ -8,6 +8,7 @@ import {
   Button,
   Card,
   Group,
+  Loader,
   Progress,
   SegmentedControl,
   SimpleGrid,
@@ -73,7 +74,7 @@ const operationStatusMeta: Record<
   canceled: { label: "中止", color: "gray" },
   completed: { label: "完了", color: "green" },
   failed: { label: "失敗", color: "red" },
-  interrupted: { label: "中断", color: "yellow" },
+  interrupted: { label: "追跡不可", color: "yellow" },
 };
 
 function timestamp(value: string | null) {
@@ -160,12 +161,17 @@ function OperationCard({ job }: { job: OperationJob }) {
         </Group>
         {(job.total !== null || job.status === "running") && (
           <Box>
-            <Progress
-              value={progress}
-              animated={job.status === "running" && job.total === null}
-            />
+            {job.total !== null ? (
+              <Progress value={progress} />
+            ) : (
+              <Loader size="xs" aria-label="処理中" />
+            )}
             <Text size="xs" c="dimmed" mt={5}>
-              {job.total !== null ? `${job.current} / ${job.total}` : "処理中"}
+              {job.total !== null
+                ? `${job.current} / ${job.total}`
+                : job.kind === "backup"
+                  ? job.logs[job.logs.length - 1]?.message ?? "処理中"
+                  : "処理中"}
             </Text>
           </Box>
         )}
@@ -245,20 +251,37 @@ export default function OperationsPage() {
   // 「消去」を押しても更新の履歴が残り続ける。
   const clearHistory = async () => {
     setClearing(true);
+    let deleted = false;
     try {
-      clearCompletedOperations();
       if (runtime) {
         await clearFinishedUpdateJobsCommand();
+      }
+      clearCompletedOperations();
+      deleted = true;
+      if (runtime) {
         await updateJobs.loadJobs();
       }
     } catch (error) {
       notifications.show({
         color: "red",
-        title: "履歴を消去できません",
+        title: deleted ? "履歴の再読み込みに失敗しました" : "履歴を消去できません",
         message: errorMessage(error),
       });
     } finally {
       setClearing(false);
+    }
+  };
+  const runUpdateJobAction = async (action: Promise<unknown>, failureTitle: string) => {
+    try {
+      await action;
+    } catch (error) {
+      notifications.show({ color: "red", title: failureTitle, message: errorMessage(error) });
+      return;
+    }
+    try {
+      await updateJobs.loadJobs();
+    } catch (error) {
+      notifications.show({ color: "red", title: "更新履歴を再読み込みできません", message: errorMessage(error) });
     }
   };
   const localJobsForDisplay = useMemo(
@@ -460,11 +483,7 @@ export default function OperationsPage() {
                         <ActionIcon
                           variant="subtle"
                           aria-label="更新確認を一時停止"
-                          onClick={() =>
-                            updateJobs
-                              .pause(job.jobId)
-                              .then(() => updateJobs.loadJobs())
-                          }
+                          onClick={() => void runUpdateJobAction(updateJobs.pause(job.jobId), "一時停止できません")}
                         >
                           <Icons.pause size={IconSize.action} />
                         </ActionIcon>
@@ -475,11 +494,7 @@ export default function OperationsPage() {
                         <ActionIcon
                           variant="subtle"
                           aria-label="更新確認を再開"
-                          onClick={() =>
-                            updateJobs
-                              .resume(job.jobId)
-                              .then(() => updateJobs.loadJobs())
-                          }
+                          onClick={() => void runUpdateJobAction(updateJobs.resume(job.jobId), "再開できません")}
                         >
                           <Icons.resume size={IconSize.action} />
                         </ActionIcon>
@@ -490,11 +505,7 @@ export default function OperationsPage() {
                         <ActionIcon
                           variant="subtle"
                           aria-label="更新確認を再試行"
-                          onClick={() =>
-                            updateJobs
-                              .resume(job.jobId, true)
-                              .then(() => updateJobs.loadJobs())
-                          }
+                          onClick={() => void runUpdateJobAction(updateJobs.resume(job.jobId, true), "再試行できません")}
                         >
                           <Icons.retry size={IconSize.action} />
                         </ActionIcon>
@@ -506,11 +517,7 @@ export default function OperationsPage() {
                           variant="subtle"
                           color="red"
                           aria-label="更新確認をキャンセル"
-                          onClick={() =>
-                            updateJobs
-                              .cancel(job.jobId)
-                              .then(() => updateJobs.loadJobs())
-                          }
+                          onClick={() => void runUpdateJobAction(updateJobs.cancel(job.jobId), "中止できません")}
                         >
                           <Icons.stop size={IconSize.action} />
                         </ActionIcon>
