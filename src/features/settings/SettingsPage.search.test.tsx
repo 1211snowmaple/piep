@@ -30,6 +30,7 @@ vi.mock("@/services/searchApi", async (importOriginal) => ({
 }));
 vi.mock("@/services/archiveApi", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/services/archiveApi")>()),
+  backupExportRunning: vi.fn().mockResolvedValue(false),
   getStoragePath: vi.fn().mockResolvedValue("C:\\piep\\downloads"),
 }));
 vi.mock("@/store", () => ({
@@ -42,6 +43,7 @@ vi.mock("@/store", () => ({
 }));
 vi.mock("@/features/search/searchIndexProgress", () => ({ useSearchIndexProgress: () => null }));
 vi.mock("@/features/jobs/operationJobs", () => ({
+  useOperationJobs: () => [],
   startOperation: () => ({
     id: "test-operation",
     progress: vi.fn(),

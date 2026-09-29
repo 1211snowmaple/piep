@@ -32,6 +32,19 @@ use tauri::{Emitter, Manager};
 
 static IMPORT_LOCK: LazyLock<tokio::sync::Mutex<()>> =
     LazyLock::new(|| tokio::sync::Mutex::new(()));
+static EXPORT_LOCK: LazyLock<tokio::sync::Mutex<()>> =
+    LazyLock::new(|| tokio::sync::Mutex::new(()));
+
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupExportProgress {
+    pub phase: String,
+    pub processed: i64,
+    pub total: i64,
+    pub part_count: usize,
+}
+
+type BackupExportReporter = Arc<dyn Fn(BackupExportProgress) + Send + Sync>;
 
 /// 復元の進み具合。**進捗も中止も無いままでよい長さではない。**
 ///
@@ -2112,6 +2125,14 @@ pub async fn export_all_multipart_internal(
     state: Arc<AppState>,
     manifest_path: String,
 ) -> Result<(), String> {
+    export_all_multipart_with_progress(state, manifest_path, None).await
+}
+
+async fn export_all_multipart_with_progress(
+    state: Arc<AppState>,
+    manifest_path: String,
+    progress: Option<BackupExportReporter>,
+) -> Result<(), String> {
     let _library_snapshot_guard = state.library_gate.clone().read_owned().await;
     let destination = PathBuf::from(&manifest_path);
     let parent = destination
@@ -2175,6 +2196,14 @@ pub async fn export_all_multipart_internal(
                     &mut cleanup,
                 )
                 .await?;
+                if let Some(emit) = &progress {
+                    emit(BackupExportProgress {
+                        phase: "works".to_string(),
+                        processed: manifest.total_works,
+                        total: expected_total.unwrap_or(manifest.total_works),
+                        part_count: manifest.parts.len(),
+                    });
+                }
             }
         }
         let Some(cursor) = page.next_cursor else {
@@ -2194,6 +2223,23 @@ pub async fn export_all_multipart_internal(
             &mut cleanup,
         )
         .await?;
+        if let Some(emit) = &progress {
+            emit(BackupExportProgress {
+                phase: "works".to_string(),
+                processed: manifest.total_works,
+                total: expected_total.unwrap_or(manifest.total_works),
+                part_count: manifest.parts.len(),
+            });
+        }
+    }
+
+    if let Some(emit) = &progress {
+        emit(BackupExportProgress {
+            phase: "finalizing".to_string(),
+            processed: manifest.total_works,
+            total: expected_total.unwrap_or(manifest.total_works),
+            part_count: manifest.parts.len(),
+        });
     }
 
     // Profiles are library-owned records and can outlive their final work.
@@ -3342,14 +3388,27 @@ async fn export_zip_with_params_locked(
 /// `manifestPath` に置くのは目録で、ZIP はその隣に分割して並ぶ。**復元には
 /// 両方が要る。** 目録だけを移しても戻せない。
 ///
-/// 大きなライブラリでは長くかかる。進み具合は `archive-progress` で流れる。
+/// 大きなライブラリでは長くかかる。進み具合は `backup-export-progress` で流れる。
 #[tauri::command]
 pub async fn export_all_multipart(
     app: tauri::AppHandle,
     manifest_path: String,
 ) -> Result<(), String> {
+    let _export_guard = EXPORT_LOCK
+        .try_lock()
+        .map_err(|_| "ライブラリの分割バックアップは既に実行中です".to_string())?;
     let state = app.state::<Arc<AppState>>().inner().clone();
-    export_all_multipart_internal(state, manifest_path).await
+    let report: BackupExportReporter = Arc::new(move |progress| {
+        let _ = app.emit("backup-export-progress", progress);
+    });
+    export_all_multipart_with_progress(state, manifest_path, Some(report)).await
+}
+
+/// Frontend reloads can lose their local operation controller while the native
+/// export keeps running. Let the settings screen keep write operations disabled.
+#[tauri::command]
+pub fn backup_export_running() -> bool {
+    EXPORT_LOCK.try_lock().is_err()
 }
 
 /// 作者かシリーズを丸ごと ZIP にする。
@@ -3393,10 +3452,14 @@ pub async fn export_entity_zip(
 ///
 /// 進み具合は `archive-progress` で流れる。
 #[tauri::command]
-pub async fn import_zip(app: tauri::AppHandle, zip_path: String) -> Result<i64, String> {
+pub async fn import_zip(
+    app: tauri::AppHandle,
+    zip_path: String,
+    replace_existing: bool,
+) -> Result<i64, String> {
     let state = app.state::<Arc<AppState>>().inner().clone();
     let reporter = ArchiveReporter::register(app, new_archive_job_id());
-    let result = import_zip_with_reporter(state, zip_path, &reporter).await;
+    let result = import_zip_with_reporter(state, zip_path, replace_existing, &reporter).await;
     reporter.finish();
     result
 }
@@ -3431,10 +3494,12 @@ fn new_archive_job_id() -> String {
 pub async fn import_multipart_backup(
     app: tauri::AppHandle,
     manifest_path: String,
+    replace_existing: bool,
 ) -> Result<i64, String> {
     let state = app.state::<Arc<AppState>>().inner().clone();
     let reporter = ArchiveReporter::register(app, new_archive_job_id());
-    let result = import_multipart_with_reporter(state, manifest_path, &reporter).await;
+    let result =
+        import_multipart_with_reporter(state, manifest_path, replace_existing, &reporter).await;
     reporter.finish();
     result
 }
@@ -3678,11 +3743,12 @@ pub async fn import_zip_internal(state: Arc<AppState>, zip_path: String) -> Resu
 async fn import_zip_with_reporter(
     state: Arc<AppState>,
     zip_path: String,
+    replace_existing: bool,
     reporter: &ArchiveReporter,
 ) -> Result<i64, String> {
     let _import_guard = IMPORT_LOCK.lock().await;
     let _library_write_guard = state.library_gate.clone().write_owned().await;
-    import_zip_locked(state, zip_path, None, reporter).await
+    import_zip_locked(state, zip_path, None, replace_existing, reporter).await
 }
 
 async fn import_zip_internal_with_failpoint(
@@ -3692,13 +3758,21 @@ async fn import_zip_internal_with_failpoint(
 ) -> Result<i64, String> {
     let _import_guard = IMPORT_LOCK.lock().await;
     let _library_write_guard = state.library_gate.clone().write_owned().await;
-    import_zip_locked(state, zip_path, failpoint, &ArchiveReporter::detached()).await
+    import_zip_locked(
+        state,
+        zip_path,
+        failpoint,
+        true,
+        &ArchiveReporter::detached(),
+    )
+    .await
 }
 
 async fn import_zip_locked(
     state: Arc<AppState>,
     zip_path: String,
     failpoint: Option<&'static str>,
+    replace_existing: bool,
     reporter: &ArchiveReporter,
 ) -> Result<i64, String> {
     let storage = state.db.storage_dir().to_path_buf();
@@ -3824,6 +3898,24 @@ async fn import_zip_locked(
             // promotion. This also rejects a reserved-root mismatch.
             validate_backup_metadata_paths(&metadata, &storage, &app_data)
                 .map_err(|e| format!("Invalid backup metadata: {e}"))?;
+
+            // A collision destroys the existing work row, including local edit
+            // revisions. Check under the library write lock and before file
+            // promotion so a caller cannot silently discard those edits.
+            if !replace_existing {
+                for entry in &metadata.entries {
+                    if state
+                        .db
+                        .get_download_by_source(&entry.source, &entry.source_id)?
+                        .is_some()
+                    {
+                        return Err(format!(
+                            "既存作品 {} / {} と重複します。置換を明示的に選択してから復元してください。",
+                            entry.source, entry.source_id
+                        ));
+                    }
+                }
+            }
 
             // **目録が指していないものは、棚へ上げない。**
             //
@@ -3986,7 +4078,7 @@ async fn import_zip_locked(
                     reporter.report("database", position as i64, entry_total, None);
                 }
                 // 重複していたら、既存のものを完全に削除して上書きリストアする
-                if let Ok(Some(existing)) = state.db.get_download_by_source(&entry.source, &entry.source_id) {
+                if let Some(existing) = state.db.get_download_by_source(&entry.source, &entry.source_id)? {
                     stale_index_ids.push(existing.id);
                     state.db.delete_download_record_for_restore(existing.id)?;
                 }
@@ -4356,12 +4448,13 @@ pub async fn import_multipart_backup_internal(
     state: Arc<AppState>,
     manifest_path: String,
 ) -> Result<i64, String> {
-    import_multipart_with_reporter(state, manifest_path, &ArchiveReporter::detached()).await
+    import_multipart_with_reporter(state, manifest_path, true, &ArchiveReporter::detached()).await
 }
 
 async fn import_multipart_with_reporter(
     state: Arc<AppState>,
     manifest_path: String,
+    replace_existing: bool,
     reporter: &ArchiveReporter,
 ) -> Result<i64, String> {
     let storage = state.db.storage_dir().to_path_buf();
@@ -4399,6 +4492,25 @@ async fn import_multipart_with_reporter(
         );
     }
 
+    // A collision in a later part must not leave earlier parts imported when
+    // replacement was not explicitly allowed. Check every remaining part
+    // before changing any work or file in this invocation.
+    if !replace_existing {
+        for path in paths.iter().skip(completed as usize) {
+            for (source, source_id) in read_backup_work_keys(path)? {
+                if state
+                    .db
+                    .get_download_by_source(&source, &source_id)?
+                    .is_some()
+                {
+                    return Err(format!(
+                        "既存作品 {source} / {source_id} と重複します。置換を明示的に選択してから復元してください。"
+                    ));
+                }
+            }
+        }
+    }
+
     let mut imported = 0i64;
     let mut done = completed;
     for (index, path) in paths.into_iter().enumerate() {
@@ -4420,6 +4532,7 @@ async fn import_multipart_with_reporter(
             state.clone(),
             path.to_string_lossy().to_string(),
             None,
+            replace_existing,
             reporter,
         )
         .await
@@ -5367,6 +5480,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn restore_refuses_duplicate_work_before_file_promotion_without_explicit_replace() {
+        let base = create_temp_dir();
+        let (state, json_path, old_id) = restore_target(&base);
+        let zip_path = base.join("restore.zip");
+        write_restore_test_zip(&zip_path, "New restore title", "newrestoremarker");
+
+        let error = import_zip_with_reporter(
+            state.clone(),
+            zip_path.to_string_lossy().to_string(),
+            false,
+            &ArchiveReporter::detached(),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("置換を明示的に選択"), "{error}");
+        let existing = state
+            .db
+            .get_download_by_source("pixiv", "crash-restore")
+            .unwrap()
+            .unwrap();
+        assert_eq!(existing.id, old_id);
+        assert_eq!(existing.title, "Old restore title");
+        assert!(fs::read_to_string(&json_path)
+            .unwrap()
+            .contains("oldrestoremarker"));
+        assert!(state.db.pending_restore_journals().unwrap().is_empty());
+
+        let count = import_zip_with_reporter(
+            state.clone(),
+            zip_path.to_string_lossy().to_string(),
+            true,
+            &ArchiveReporter::detached(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(
+            state
+                .db
+                .get_download_by_source("pixiv", "crash-restore")
+                .unwrap()
+                .unwrap()
+                .title,
+            "New restore title"
+        );
+        drop(state);
+        remove_temp_dir(&base);
+    }
+
+    #[tokio::test]
     async fn restore_failure_before_commit_rolls_back_files_database_and_journal() {
         let base = create_temp_dir();
         let (state, json_path, old_id) = restore_target(&base);
@@ -6136,6 +6299,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn multipart_restore_rejects_later_collision_before_importing_first_part() {
+        let base = create_temp_dir();
+        let source_dir = base.join("source");
+        let target_dir = base.join("target");
+        fs::create_dir_all(&source_dir).unwrap();
+        fs::create_dir_all(&target_dir).unwrap();
+        let first = source_dir.join("backup-part-00001.zip");
+        let second = source_dir.join("backup-part-00002.zip");
+        write_restore_test_zip_for_id(&first, "First", "first-marker", "multipart-1");
+        write_restore_test_zip_for_id(&second, "Second", "second-marker", "multipart-2");
+        let manifest = MultipartBackupManifest {
+            format: "piep-multipart-1".to_string(),
+            created_at: "2026-08-12T00:00:00Z".to_string(),
+            total_works: 2,
+            parts: [&first, &second]
+                .iter()
+                .enumerate()
+                .map(|(index, path)| MultipartBackupPart {
+                    file: format!("backup-part-{:05}.zip", index + 1),
+                    work_count: 1,
+                    bytes: fs::metadata(path).unwrap().len(),
+                    sha256: sha256_file(path).unwrap(),
+                })
+                .collect(),
+        };
+        let manifest_path = source_dir.join("backup.json");
+        fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let state = Arc::new(AppState::new(
+            Database::open(&target_dir.join("piep.db"), &target_dir.join("downloads")).unwrap(),
+        ));
+        import_zip_internal(state.clone(), second.to_string_lossy().to_string())
+            .await
+            .unwrap();
+
+        let error = import_multipart_with_reporter(
+            state.clone(),
+            manifest_path.to_string_lossy().to_string(),
+            false,
+            &ArchiveReporter::detached(),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("multipart-2"), "{error}");
+        assert!(state
+            .db
+            .get_download_by_source("pixiv", "multipart-1")
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            state
+                .db
+                .get_download_by_source("pixiv", "multipart-2")
+                .unwrap()
+                .unwrap()
+                .title,
+            "Second"
+        );
+        drop(state);
+        remove_temp_dir(&base);
+    }
+
+    #[tokio::test]
     async fn multipart_restore_preflights_and_imports_every_part() {
         let base = create_temp_dir();
         let source_dir = base.join("source");
@@ -6197,6 +6422,86 @@ mod tests {
         assert!(state.db.unfinished_restore_manifests().unwrap().is_empty());
         drop(state);
         remove_temp_dir(&base);
+    }
+
+    #[tokio::test]
+    async fn multipart_export_reports_works_then_catalog_finalization() {
+        let base = create_temp_dir();
+        let source_root = base.join("source-library");
+        fs::create_dir_all(&source_root).unwrap();
+        let storage = source_root.join("downloads");
+        let state = Arc::new(AppState::new(
+            Database::open(&source_root.join("piep.db"), &storage).unwrap(),
+        ));
+        let json = storage.join("pixiv/backup-test/v1/original.json");
+        fs::create_dir_all(json.parent().unwrap()).unwrap();
+        fs::write(&json, br#"{"title":"Backup test"}"#).unwrap();
+        state
+            .db
+            .upsert_download(&NewDownload {
+                source: "pixiv".into(),
+                source_id: "backup-test".into(),
+                title: "Backup test".into(),
+                author_name: "Author".into(),
+                author_id: "author".into(),
+                content_type: "novel".into(),
+                tags: vec![],
+                excerpt: None,
+                cover_path: None,
+                json_path: json.to_string_lossy().to_string(),
+                original_json_path: Some(json.to_string_lossy().to_string()),
+                asset_count: 0,
+                file_size_bytes: fs::metadata(&json).unwrap().len() as i64,
+                downloaded_at: "2026-09-29T00:00:00Z".into(),
+                source_created_at: None,
+                content_hash: None,
+                text_length: 0,
+                source_updated_at: None,
+                watch_updates: false,
+                current_version: 1,
+                favorite: false,
+            })
+            .unwrap();
+        let received = Arc::new(std::sync::Mutex::new(Vec::<BackupExportProgress>::new()));
+        let sink = received.clone();
+        let manifest_path = base.join("backup.json");
+        export_all_multipart_with_progress(
+            state.clone(),
+            manifest_path.to_string_lossy().to_string(),
+            Some(Arc::new(move |event| sink.lock().unwrap().push(event))),
+        )
+        .await
+        .unwrap();
+
+        let events = received.lock().unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.phase.as_str())
+                .collect::<Vec<_>>(),
+            vec!["works", "finalizing"]
+        );
+        assert_eq!(
+            (events[0].processed, events[0].total, events[0].part_count),
+            (1, 1, 1)
+        );
+        assert_eq!((events[1].processed, events[1].total), (1, 1));
+        drop(events);
+        let (manifest, _) = read_and_validate_multipart_manifest(&manifest_path).unwrap();
+        assert_eq!(manifest.total_works, 1);
+        drop(state);
+        remove_temp_dir(&base);
+    }
+
+    #[test]
+    fn multipart_export_lock_prevents_parallel_runs() {
+        assert!(!backup_export_running());
+        let guard = EXPORT_LOCK.try_lock().unwrap();
+        assert!(EXPORT_LOCK.try_lock().is_err());
+        assert!(backup_export_running());
+        drop(guard);
+        assert!(EXPORT_LOCK.try_lock().is_ok());
+        assert!(!backup_export_running());
     }
 
     #[tokio::test]

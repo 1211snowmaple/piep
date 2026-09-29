@@ -354,6 +354,7 @@ pub fn run() -> tauri::Result<()> {
             // エクスポート / インポート (commands::archive)
             commands::archive::export_single,
             commands::archive::export_all_multipart,
+            commands::archive::backup_export_running,
             commands::archive::export_entity_zip,
             commands::archive::import_zip,
             commands::archive::cancel_archive_restore,
