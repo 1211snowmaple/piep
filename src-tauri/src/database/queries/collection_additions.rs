@@ -165,14 +165,14 @@ impl Database {
                 )
             }
         };
-        let semantic_used = !centroids.is_empty();
-        let baseline = semantic_used.then(|| shelf_baseline(&centroids));
+        let baseline = (!centroids.is_empty()).then(|| shelf_baseline(&centroids));
         let seed_vectors = seeds
             .iter()
             .filter_map(|work| centroids.get(&work.id))
             .collect::<Vec<_>>();
 
         let mut scored = Vec::new();
+        let mut semantic_used = false;
         for work in &works {
             if member_id_set.contains(&work.id) {
                 continue;
@@ -205,6 +205,7 @@ impl Database {
                     if compared == 0 {
                         None
                     } else {
+                        semantic_used = true;
                         let z = baseline.z(total / compared as f64);
                         (z >= THEME_MIN_Z).then(|| (theme_strength(z), z))
                     }
@@ -243,6 +244,16 @@ impl Database {
                 evidence: scored.evidence,
             })
             .collect::<Vec<_>>();
+        let semantic_note = if semantic_used {
+            None
+        } else {
+            semantic_note.or_else(|| {
+                Some(
+                    "この束と候補の本文ベクトルを比較できなかったため、規則だけで探しました。"
+                        .to_string(),
+                )
+            })
+        };
 
         Ok(CollectionAdditionResult {
             collection_id,
