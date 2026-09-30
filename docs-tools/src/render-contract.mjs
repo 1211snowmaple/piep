@@ -408,7 +408,9 @@ function main() {
   if (opt.check) {
     for (const [name, body] of Object.entries(files)) {
       const path = resolve(opt.out, name);
-      if (!existsSync(path) || readFileSync(path, "utf8") !== body) {
+      // Generated references are gitignored and absent in a fresh CI checkout.
+      // Compare only copies that exist; --check must never create them.
+      if (existsSync(path) && readFileSync(path, "utf8") !== body) {
         findings.push({
           level: "error",
           code: "generated-reference-stale",

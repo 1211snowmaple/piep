@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { test } from "node:test";
@@ -11,6 +11,9 @@ test("contract check rejects stale reference without overwriting it", () => {
   try {
     const script = resolve(import.meta.dirname, "render-contract.mjs");
     const args = [script, "--build", resolve(repo, ".docs-build"), "--out", output];
+    const absent = spawnSync(process.execPath, [...args, "--check"], { encoding: "utf8" });
+    assert.equal(absent.status, 0, absent.stderr || absent.stdout);
+    assert.equal(existsSync(resolve(output, "ipc.md")), false);
     const generated = spawnSync(process.execPath, args, { encoding: "utf8" });
     assert.equal(generated.status, 0, generated.stderr || generated.stdout);
     const stale = resolve(output, "ipc.md");
