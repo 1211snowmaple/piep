@@ -8,22 +8,21 @@ pub enum FanboxError {
     NoAuth,
 
     #[error("FANBOX APIエラー（HTTP {status}）")]
-    ApiError { status: u16, body: String },
+    ApiError { status: u16 },
 
     #[error("FANBOXのアクセス制限に達しました。時間をおいて再試行してください")]
-    RateLimited { body: String },
+    RateLimited,
 
     #[error("FANBOXのアクセス制限（Cloudflare確認）により停止しました。公式サイトと連携状態を確認してください")]
     ChallengeRequired,
 
     #[error("FANBOXの投稿が見つかりませんでした")]
-    NotFound { body: String },
+    NotFound,
 
     #[error("FANBOX応答の形式を解釈できませんでした: {error}")]
     Serde {
         #[source]
         error: serde_json::Error,
-        body: String,
     },
 
     #[error("{0}")]

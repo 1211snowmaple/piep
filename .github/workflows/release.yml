@@ -10,18 +10,15 @@ on:
 # a real window runs on Windows. Building installers for platforms nothing is
 # verified on would ship binaries no one has ever started.
 #
-# ここでは試験を走らせない。タグは main のマージコミットに打つので、同じ木は
-# quality.yml が既に通している。v0.17.0 では quality.yml が 04:49:24 に緑にな
-# り、release.yml はその13秒後に始まって、同じ試験をもう一度25分かけて走らせ
-# ていた。46分のうち25分がこれだった。
+# ここでは試験を走らせない。同じコミットの main 上の Quality 成功を
+# 下のゲートで確認し、同じ試験を二重に走らせない。
 #
-# 試験を落とした分の関門は二つ残る。tauri-action は下書きの配布として作るの
-# で、公開する手が最後に入ること。そして下の版の照合が、タグと5箇所の版が
-# 食い違ったままの配布を止めること。
+# tauri-action は下書きの配布として作る。公開は別の操作で行う。
 jobs:
   release:
     permissions:
       contents: write
+      actions: read
     runs-on: windows-latest
     steps:
       - name: Checkout repository
@@ -43,6 +40,27 @@ jobs:
           $versions = @($package, $packageLock, $tauri, $cargo, $frontend)
           if ($versions | Where-Object { $_ -ne $expected }) {
             throw "Tag $expected does not match version files: $($versions -join ', ')"
+          }
+
+      - name: Require Quality success on main for the tagged commit
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $commit = (git rev-parse HEAD).Trim()
+          $relationship = (gh api "repos/$env:GITHUB_REPOSITORY/compare/$commit...main" --jq '.status').Trim()
+          if ($relationship -notin @('ahead', 'identical')) {
+            throw "Tagged commit $commit is not on main (compare status: $relationship)"
+          }
+          for ($attempt = 0; $attempt -lt 60; $attempt++) {
+            $runs = @(gh run list --workflow quality.yml --commit $commit --branch main --limit 100 --json conclusion,createdAt,event,headSha,status | ConvertFrom-Json)
+            $latest = $runs | Where-Object { $_.headSha -eq $commit -and $_.event -eq 'push' } | Sort-Object createdAt -Descending | Select-Object -First 1
+            if ($latest.status -eq 'completed') {
+              if ($latest.conclusion -ne 'success') { throw "Quality for $commit ended with $($latest.conclusion)" }
+              break
+            }
+            if ($attempt -eq 59) { throw "Quality has not succeeded for $commit" }
+            Start-Sleep -Seconds 30
           }
 
       - name: Install Node.js
@@ -90,3 +108,29 @@ jobs:
           # アプリが読みに来る更新目録。これがリリースの資材に無いと、
           # インストール済みの piep からは新しい版が見えない。
           includeUpdaterJson: true
+          updaterJsonPreferNsis: true
+
+      - name: Verify branded Windows updater asset
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release download '${{ github.ref_name }}' --pattern latest.json --dir $env:RUNNER_TEMP
+          $manifest = Get-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'latest.json') -Raw | ConvertFrom-Json -AsHashtable
+          $platforms = $manifest['platforms']
+          if (-not $platforms -or -not $platforms.ContainsKey('windows-x86_64')) {
+            throw 'Updater manifest has no generic Windows target for existing installs'
+          }
+          foreach ($target in @('windows-x86_64', 'windows-x86_64-nsis')) {
+            if ($platforms.ContainsKey($target)) {
+              if ($platforms[$target]['url'] -notmatch '_x64-setup\.exe$') {
+                throw "$target does not point to the branded NSIS installer"
+              }
+              if (-not $platforms[$target]['signature']) {
+                throw "$target has no updater signature"
+              }
+            }
+          }
+          if ($platforms.ContainsKey('windows-x86_64-msi')) {
+            throw 'Updater manifest still exposes the unbranded MSI path'
+          }

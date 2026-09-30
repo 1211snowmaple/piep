@@ -356,7 +356,23 @@ export async function retryOperation(jobId: string): Promise<void> {
     "immediate",
   );
   retryHandlers.delete(jobId);
-  await handler();
+  try {
+    await handler();
+  } catch (error) {
+    // A rejected start did not create a usable retry. Keep the original
+    // action available and let the caller show the failure to the user.
+    retryHandlers.set(jobId, handler);
+    updateJob(
+      jobId,
+      (job) => ({
+        ...appendLog(job, error instanceof Error ? error.message : String(error), "error"),
+        canRetry: true,
+        updatedAt: now(),
+      }),
+      "immediate",
+    );
+    throw error;
+  }
 }
 
 export function clearCompletedOperations(): void {

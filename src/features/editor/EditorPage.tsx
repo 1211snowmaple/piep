@@ -535,9 +535,9 @@ export default function EditorPage() {
     if (!runtime) return notifications.show({ color: "piep", message: "画像の追加はデスクトップアプリで利用できます" });
     const doc = query.data;
     if (!doc) return;
-    const path = await openSingleDialog({ title: "画像を追加", filters: [{ name: "Image", extensions: ["png", "jpg", "jpeg", "webp", "gif", "avif"] }] });
-    if (!path) return;
     try {
+      const path = await openSingleDialog({ title: "画像を追加", filters: [{ name: "Image", extensions: ["png", "jpg", "jpeg", "webp", "gif", "avif"] }] });
+      if (!path) return;
       const asset = await importWorkAsset(id, path);
       queryClient.setQueryData(["editor-document", id], { ...doc, assets: [...doc.assets, asset] });
       // 画像は作品に属する。エディタの手元だけ増やすと、作品詳細のアセット欄と

@@ -4969,6 +4969,29 @@ impl Database {
             .map_err(|e| format!("Download not found: {}", e))
     }
 
+    /// All saved works belonging to this exact provider author, including
+    /// works whose individual update watch is off.
+    pub fn get_downloads_by_author(
+        &self,
+        source: &str,
+        author_id: &str,
+    ) -> Result<Vec<DownloadEntry>, String> {
+        let ids = {
+            let conn = self.read_conn()?;
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id FROM downloads WHERE source = ?1 AND author_id = ?2 ORDER BY id",
+                )
+                .map_err(|e| format!("Failed to prepare author works: {e}"))?;
+            let rows = stmt
+                .query_map(params![source, author_id], |row| row.get::<_, i64>(0))
+                .map_err(|e| format!("Failed to query author works: {e}"))?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(|e| format!("Failed to list author works: {e}"))?
+        };
+        self.get_downloads(&ids)
+    }
+
     /// 複数の作品をまとめて取得する。
     ///
     /// EPUBキューのように多数のIDを扱う画面で1件ずつ問い合わせると、
@@ -10454,12 +10477,21 @@ fn published_days_apart(left: &str, right: &str) -> Option<i64> {
             .ok()
             .map(|value| value.date_naive())
             .or_else(|| {
-                chrono::NaiveDate::parse_from_str(&value[..value.len().min(10)], "%Y-%m-%d").ok()
+                value
+                    .get(..10)
+                    .and_then(|date| chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").ok())
             })
     };
     let left = parse(left)?;
     let right = parse(right)?;
     Some((left - right).num_days().abs())
+}
+
+#[cfg(test)]
+#[test]
+fn published_days_apart_ignores_invalid_utf8_boundaries() {
+    assert_eq!(published_days_apart("ああああ", "2024-01-01"), None);
+    assert_eq!(published_days_apart("2024-01-11", "2024-01-01"), Some(10));
 }
 
 /// なぜこれが束なのかを、一行で書く。

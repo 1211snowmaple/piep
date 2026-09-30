@@ -1,27 +1,12 @@
 //! エラー型と共有型（pixivpy3.utils の移植版）。
 
-/// 取得元の応答を、記録にだけ残す。
-///
-/// 文面から本文を外したぶん、**どこにも残らなくなっては調べようがない。**
-/// 記録は開発者が読むものなので中身をそのまま置くが、長さは切る -
-/// 取得ページ全体が入りうるので、切らないとログが一件で埋まる。
+/// 応答本文の内容を記録せず、調査に必要な長さだけを記録する。
+/// 認証応答や作品本文が混ざるため、切り詰めた本文もログへ出さない。
 pub(crate) fn log_response_body(context: &str, body: &str) {
-    const MAX_LOGGED: usize = 2_000;
-    let trimmed = body.trim();
-    if trimmed.is_empty() {
+    if body.trim().is_empty() {
         log::warn!("{context}: 応答は空でした");
-        return;
-    }
-    let cut = trimmed
-        .char_indices()
-        .map(|(index, _)| index)
-        .take_while(|index| *index <= MAX_LOGGED)
-        .last()
-        .unwrap_or(0);
-    if cut < trimmed.len() {
-        log::warn!("{context}: {}…（以下略）", &trimmed[..cut]);
     } else {
-        log::warn!("{context}: {trimmed}");
+        log::warn!("{context}: 応答を受信しました（{} バイト）", body.len());
     }
 }
 
@@ -58,7 +43,7 @@ impl std::fmt::Display for Redacted {
 }
 
 /// PixivAPIで発生したエラー。
-#[derive(Debug, thiserror::Error)]
+#[derive(thiserror::Error)]
 #[non_exhaustive]
 pub enum PixivError {
     /// I/Oエラー。
@@ -98,7 +83,7 @@ pub enum PixivError {
     },
     /// レスポンスにエラーが含まれている場合。
     ///
-    /// 応答本文は記録には残すが、文面には混ぜない（`RateLimited` と同じ方針）。
+    /// 応答本文は画面にもログにも混ぜない（`RateLimited` と同じ方針）。
     #[error("取得元がエラーを返しました。時間をおいてからやり直してください")]
     ErrResponse {
         /// レスポンスボディ。
@@ -116,7 +101,7 @@ pub enum PixivError {
     },
     /// レートリミット（回数制限）。
     ///
-    /// 応答本文は記録には残すが、文面には混ぜない。利用者が読むのは
+    /// 応答本文は画面にもログにも混ぜない。利用者が読むのは
     /// 「どうすればいいか」であって、取得元が返した JSON ではない。
     #[error("アクセス制限（レートリミット）に達しました。時間をおいてからやり直してください")]
     RateLimited {
@@ -144,7 +129,7 @@ pub enum PixivError {
     },
     /// Serde（デシリアライズ）エラー。
     ///
-    /// 応答本文は記録には残すが、文面には混ぜない。読めなかった JSON を
+    /// 応答本文は画面にもログにも混ぜない。読めなかった JSON を
     /// 丸ごと画面に置いても、利用者にできることは増えないし、一覧に並ぶ
     /// 一件が本文まるごとの長さを抱えることになる。
     #[error("取得元の応答を読み取れませんでした: {error}")]
@@ -155,6 +140,28 @@ pub enum PixivError {
         /// レスポンスボディ。
         body: String,
     },
+}
+
+impl std::fmt::Debug for PixivError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // `body` は認証応答・作品本文を含みうる。エラー連鎖の Debug にも出さない。
+        let name = match self {
+            Self::Io(_) => "Io",
+            Self::Reqwest(_) => "Reqwest",
+            Self::ResponseTooLarge { .. } => "ResponseTooLarge",
+            Self::NoAuth => "NoAuth",
+            Self::RefreshCoolingDown => "RefreshCoolingDown",
+            Self::UntrustedNextUrl => "UntrustedNextUrl",
+            Self::BadAccessToken { .. } => "BadAccessToken",
+            Self::ErrResponse { .. } => "ErrResponse",
+            Self::UnintelligibleResponse { .. } => "UnintelligibleResponse",
+            Self::RateLimited { .. } => "RateLimited",
+            Self::NotFound { .. } => "NotFound",
+            Self::PartialListing { .. } => "PartialListing",
+            Self::Serde { .. } => "Serde",
+        };
+        f.debug_tuple("PixivError").field(&name).finish()
+    }
 }
 
 #[cfg(test)]
@@ -191,6 +198,9 @@ mod tests {
             PixivError::UnintelligibleResponse {
                 body: "invalid request".to_string(),
             },
+            PixivError::RateLimited {
+                body: "invalid request".to_string(),
+            },
         ] {
             let displayed = err.to_string();
             assert!(
@@ -198,6 +208,7 @@ mod tests {
                 "leaked: {displayed}"
             );
             assert!(!displayed.is_empty());
+            assert!(!format!("{err:?}").contains("invalid request"));
         }
     }
 

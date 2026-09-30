@@ -703,7 +703,15 @@ function DataDictionary({ fields, loading }: { fields: DataField[]; loading: boo
                       <Table.Td><Text size="xs" c="dimmed" className="line-clamp-1">{field.sample}</Text></Table.Td>
                       <Table.Td w={34}>
                         <Tooltip label="式をコピー">
-                          <ActionIcon size="sm" variant="subtle" color="gray" aria-label={`${field.path}をコピー`} onClick={() => { void navigator.clipboard?.writeText(`{{ ${field.path} }}`); notifications.show({ message: `{{ ${field.path} }} をコピーしました` }); }}>
+                          <ActionIcon size="sm" variant="subtle" color="gray" aria-label={`${field.path}をコピー`} onClick={async () => {
+                            try {
+                              if (!navigator.clipboard) throw new Error("この環境ではクリップボードを利用できません");
+                              await navigator.clipboard.writeText(`{{ ${field.path} }}`);
+                              notifications.show({ message: `{{ ${field.path} }} をコピーしました` });
+                            } catch (error) {
+                              notifications.show({ color: "red", title: "式をコピーできません", message: errorMessage(error) });
+                            }
+                          }}>
                             <Icons.epubDuplicate size={IconSize.inline} />
                           </ActionIcon>
                         </Tooltip>

@@ -5,7 +5,8 @@ import { startUpdateJobCommand } from "@/services/updateJobApi";
 import { loadSchedule } from "@/features/updates/updateSchedule";
 
 /**
- * Checks one work, author or series right now.
+ * Checks one work, author or series right now. An author check also checks
+ * every saved work by that author for revisions.
  *
  * Nothing is added to the watch list: this is a one-off look, which is what
  * "check this one thing" should mean. If the same author or series is already

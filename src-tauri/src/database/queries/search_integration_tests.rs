@@ -2438,6 +2438,55 @@ fn collection_suggestions_use_title_parts_and_learn_rejection() {
 }
 
 #[test]
+fn collection_suggestion_keeps_strong_same_author_candidate_after_1200_rows() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let seed = insert_download_unindexed(
+        &db,
+        &storage,
+        "wide-suggestion-seed",
+        "星を待つ",
+        "大量作者",
+        &[],
+        "導入",
+    );
+    for index in 0..1_200 {
+        insert_download_unindexed(
+            &db,
+            &storage,
+            &format!("wide-suggestion-noise-{index}"),
+            &format!("無関係な作品 {index}"),
+            "大量作者",
+            &[],
+            "別の内容",
+        );
+    }
+    insert_download_unindexed(
+        &db,
+        &storage,
+        "wide-suggestion-strong",
+        "星を待つ 後編",
+        "大量作者",
+        &[],
+        "結末",
+    );
+
+    let suggestion = db
+        .generate_collection_suggestion(&CollectionSuggestionRequest {
+            seed_download_ids: vec![seed],
+            limit: Some(20),
+        })
+        .unwrap();
+    assert!(suggestion.members.iter().any(|member| {
+        member.source_id == "wide-suggestion-strong"
+            && member
+                .evidence
+                .iter()
+                .any(|evidence| evidence.kind == "title_similarity")
+    }));
+}
+
+#[test]
 fn collection_suggestions_walk_the_whole_link_component_from_either_end() {
     let (_temp, root, storage) = temp_paths();
     let db = Database::open(&root.join("piep.db"), &storage).unwrap();
@@ -8414,6 +8463,92 @@ fn a_series_finds_the_collections_its_works_belong_to() {
         .list_collections_for_series("pixiv", "another")
         .unwrap()
         .is_empty());
+}
+
+#[test]
+fn collection_additions_fall_back_when_only_non_seed_works_have_vectors() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let member = insert_download_unindexed(
+        &db,
+        &storage,
+        "db02-member",
+        "種作品",
+        "作者",
+        &["催眠", "NTR", "黛冬優子"],
+        "束の種作品本文",
+    );
+    let candidate = insert_download_unindexed(
+        &db,
+        &storage,
+        "db02-candidate",
+        "題名は異なる候補",
+        "別作者",
+        &["催眠", "NTR", "黛冬優子"],
+        "規則では候補にできる本文",
+    );
+    let comparison = insert_download_unindexed(
+        &db,
+        &storage,
+        "db02-comparison",
+        "別の比較用作品",
+        "比較作者",
+        &["比較用"],
+        "意味索引の比較用本文",
+    );
+    let collection = db
+        .create_collection_from_downloads("DB-02 isolated", "unordered", &[member])
+        .unwrap();
+
+    // Candidate + comparison make a non-empty centroid set and shelf baseline,
+    // while the collection's only seed deliberately has no semantic vector.
+    crate::database::semantic_index::upsert_documents(
+        &storage,
+        &[
+            crate::database::semantic_index::SemanticIndexDocument {
+                download_id: candidate,
+                title: "題名は異なる候補".to_string(),
+                author_name: "別作者".to_string(),
+                tags: "催眠 NTR 黛冬優子".to_string(),
+                series_title: String::new(),
+                excerpt: String::new(),
+                body: "規則では候補にできる本文".to_string(),
+            },
+            crate::database::semantic_index::SemanticIndexDocument {
+                download_id: comparison,
+                title: "別の比較用作品".to_string(),
+                author_name: "比較作者".to_string(),
+                tags: "比較用".to_string(),
+                series_title: String::new(),
+                excerpt: String::new(),
+                body: "意味索引の比較用本文".to_string(),
+            },
+        ],
+    )
+    .unwrap();
+
+    let result = db
+        .suggest_collection_additions(&collection.summary.id)
+        .unwrap();
+
+    assert!(!result.semantic_used);
+    assert_eq!(
+        result.note.as_deref(),
+        Some("この束と候補の本文ベクトルを比較できなかったため、規則だけで探しました。")
+    );
+    let suggested = result
+        .candidates
+        .iter()
+        .find(|item| item.download_id == candidate)
+        .expect("the shared-tag rule should retain the candidate");
+    assert!(suggested
+        .evidence
+        .iter()
+        .any(|evidence| evidence.kind == "shared_tags"));
+    assert!(result
+        .candidates
+        .iter()
+        .all(|item| item.download_id != member));
 }
 
 /// 「保存フォルダーにある未参照ファイル」は、`assets` だけで決めてはいけない。

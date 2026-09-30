@@ -763,6 +763,10 @@ pub fn check_well_formed(xml: &str) -> Result<(), String> {
             continue;
         }
 
+        if stack.is_empty() && saw_root {
+            return Err("XML に複数のルート要素があります".to_string());
+        }
+
         // 属性
         let mut self_closing = false;
         let mut seen_attrs: HashSet<String> = HashSet::new();
@@ -1163,6 +1167,15 @@ mod tests {
         assert!(check_well_formed("<?xml version=\"1.0\"?><a><b x=\"1\" /></a>").is_ok());
         assert!(check_well_formed("<a><!-- c --><![CDATA[<raw>]]>text</a>").is_ok());
         assert!(check_well_formed("<a>&amp;&#x3042;&#12354;</a>").is_ok());
+    }
+
+    #[test]
+    fn a_document_has_only_one_root_element() {
+        assert!(check_well_formed("<a/>").is_ok());
+        assert!(check_well_formed("<!-- before --><a/><?after?>").is_ok());
+        assert!(check_well_formed("<a/><b/>").is_err());
+        assert!(check_well_formed("<a></a><b/>").is_err());
+        assert!(check_well_formed("<a><b/></a><c/>").is_err());
     }
 
     #[test]

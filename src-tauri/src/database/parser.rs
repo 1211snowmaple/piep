@@ -531,9 +531,10 @@ pub fn parse_fanbox_value_to_html(v: &serde_json::Value, assets: &[AssetEntry]) 
                     .and_then(|id| id.as_str())
                     .unwrap_or("");
                 // アセット配列から対応する画像を検索 (ファイル名やローカルパスに画像IDが含まれているか)
-                let found_asset = assets
-                    .iter()
-                    .find(|a| a.filename.contains(image_id) || a.local_path.contains(image_id));
+                let found_asset = assets.iter().find(|a| {
+                    !image_id.is_empty()
+                        && (a.filename.contains(image_id) || a.local_path.contains(image_id))
+                });
                 // `imageId` は応答の文字列そのまま。pixiv 側と違って数字とは
                 // 限らないので、他の値と同じように通してから埋める。
                 let safe_image_id = escape_html(image_id);
@@ -1110,6 +1111,26 @@ mod tests {
         }));
         assert!(!html.contains("<script>"), "生のタグが残っている: {html}");
         assert!(!html.contains("\"><"), "属性から抜け出せている: {html}");
+    }
+
+    #[test]
+    fn a_fanbox_image_without_id_never_uses_an_unrelated_asset() {
+        let post = serde_json::json!({
+            "body": { "blocks": [{ "type": "image" }] }
+        });
+        let asset = AssetEntry {
+            id: 1,
+            download_id: 1,
+            asset_type: "illustration".to_string(),
+            filename: "other-image.jpg".to_string(),
+            local_path: "C:/library/other-image.jpg".to_string(),
+            original_url: None,
+            mime_type: Some("image/jpeg".to_string()),
+            file_size_bytes: 1,
+        };
+        let html = parse_fanbox_to_html(&post.to_string(), &[asset]);
+        assert!(html.contains("missing-image-placeholder"), "{html}");
+        assert!(!html.contains("C:/library/other-image.jpg"), "{html}");
     }
 
     #[test]

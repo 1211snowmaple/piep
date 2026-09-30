@@ -1,5 +1,6 @@
 import { MantineProvider } from "@mantine/core";
 import { ModalsProvider } from "@mantine/modals";
+import { notifications } from "@mantine/notifications";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
@@ -31,6 +32,30 @@ vi.mock("@/services/epubApi", async (importOriginal) => ({
 }));
 
 describe("TemplateStudioPage unsaved guard", () => {
+  it("reports a denied clipboard write instead of claiming the expression was copied", async () => {
+    epubApi.listEpubTemplates.mockResolvedValue([demoTemplates[0]]);
+    epubApi.getTemplateFiles.mockResolvedValue(demoFiles);
+    epubApi.listTemplateFileKinds.mockResolvedValue(demoFileKinds);
+    epubApi.previewEpubTemplate.mockResolvedValue(demoPreview);
+    const oldClipboard = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+    const writeText = vi.fn().mockRejectedValue(new Error("clipboard denied"));
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    const show = vi.spyOn(notifications, "show");
+    try {
+      const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+      window.location.hash = "#/epub/templates";
+      render(<MantineProvider><ModalsProvider><QueryClientProvider client={client}><AppRouter><TemplateStudioPage /></AppRouter></QueryClientProvider></ModalsProvider></MantineProvider>);
+      fireEvent.click(await screen.findByRole("tab", { name: "差し込める項目" }));
+      fireEvent.click(await screen.findByRole("button", { name: "core.nameをコピー" }));
+      await waitFor(() => expect(show).toHaveBeenCalledWith(expect.objectContaining({ color: "red", title: "式をコピーできません", message: "clipboard denied" })));
+      expect(show).not.toHaveBeenCalledWith(expect.objectContaining({ message: "{{ core.name }} をコピーしました" }));
+    } finally {
+      show.mockRestore();
+      if (oldClipboard) Object.defineProperty(navigator, "clipboard", oldClipboard);
+      else Reflect.deleteProperty(navigator, "clipboard");
+    }
+  });
+
   it("blocks leaving after a structure edit until the user confirms", async () => {
     const template = { ...demoTemplates[0], name: "custom", isBuiltin: false };
     epubApi.listEpubTemplates.mockResolvedValue([template]);

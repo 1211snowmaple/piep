@@ -599,12 +599,10 @@ pub fn parse_into<T: DeserializeOwned, S: AsRef<str> + Into<String>>(
     match serde_json::from_str(res_body.as_ref()) {
         Ok(parsed) => Ok(parsed),
         Err(error) => {
-            // 文面から本文を外した分、記録には残す。読めなかった理由は本文の
-            // 中にしかないが、それを追うのは画面の前ではなくログの側の仕事。
-            let head: String = res_body.as_ref().chars().take(400).collect();
             error!(
-                "{} として読めませんでした: {error}, body(先頭): {head}",
-                std::any::type_name::<T>()
+                "{} として読めませんでした: {error}, 応答サイズ: {} バイト",
+                std::any::type_name::<T>(),
+                res_body.as_ref().len()
             );
             Err(PixivError::Serde {
                 error,
@@ -664,8 +662,7 @@ pub async fn parse_response_into<T: DeserializeOwned>(
 
     match status {
         _ if status == StatusCode::TOO_MANY_REQUESTS || pixiv_body_is_rate_limited(&body) => {
-            // 本文をそのまま流していた。応答は 32MB まで受けるので、一件で
-            // ログを埋めうる。長さを切る側は既にあるので、そちらを通す。
+            // 応答本文は認証情報を含みうるため、ログには長さだけを記録する。
             crate::pixiv_api::error::log_response_body("API rate limited", &body);
             Err(PixivError::RateLimited { body })
         }
@@ -701,7 +698,42 @@ pub async fn parse_response_into<T: DeserializeOwned>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, Once};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    static CAPTURED_ERROR_LOGS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    static ERROR_CAPTURE_LOGGER: ErrorCaptureLogger = ErrorCaptureLogger;
+    static ERROR_CAPTURE_LOGGER_INIT: Once = Once::new();
+
+    struct ErrorCaptureLogger;
+
+    impl log::Log for ErrorCaptureLogger {
+        fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+            metadata.level() <= log::Level::Error
+        }
+
+        fn log(&self, record: &log::Record<'_>) {
+            if self.enabled(record.metadata()) {
+                CAPTURED_ERROR_LOGS
+                    .lock()
+                    .unwrap()
+                    .push(format!("{}", record.args()));
+            }
+        }
+
+        fn flush(&self) {}
+    }
+
+    fn install_error_capture_logger() {
+        ERROR_CAPTURE_LOGGER_INIT.call_once(|| {
+            log::set_logger(&ERROR_CAPTURE_LOGGER).expect("install isolated test logger");
+            log::set_max_level(log::LevelFilter::Error);
+        });
+    }
+
+    fn captured_error_logs() -> Vec<String> {
+        std::mem::take(&mut *CAPTURED_ERROR_LOGS.lock().unwrap())
+    }
 
     async fn response_from_wire(wire_response: &'static [u8]) -> reqwest::Response {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -954,6 +986,20 @@ mod tests {
         let body = "not json";
         let err = parse_into::<serde_json::Value, _>(body.to_string()).unwrap_err();
         assert!(matches!(err, PixivError::Serde { .. }));
+    }
+
+    #[test]
+    fn malformed_response_body_is_hidden_from_logs_and_error_debug() {
+        const SECRET: &str = "pixiv-private-body-marker";
+        let body = format!(r#"{{"caption":"{SECRET}", invalid}}"#);
+
+        install_error_capture_logger();
+        let error = parse_into::<serde_json::Value, _>(body).unwrap_err();
+        let logs = captured_error_logs();
+
+        assert!(logs.iter().any(|line| line.contains("読めませんでした")));
+        assert!(logs.iter().all(|line| !line.contains(SECRET)));
+        assert!(!format!("{error:?}").contains(SECRET));
     }
 
     /// 本文以外を埋めた webview 応答。`series_navigation` の形だけを差し替える。

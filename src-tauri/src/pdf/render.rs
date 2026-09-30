@@ -39,6 +39,15 @@ impl std::fmt::Debug for RenderedPage {
 const MIN_WIDTH: u32 = 320;
 const MAX_WIDTH: u32 = 2400;
 
+/// 1 ページぶんの描画予算。Pdfium の bitmap（4 bytes/pixel）と RGB の控え
+/// （3 bytes/pixel）を同時に持つため、最大でも約 56 MB に収める。
+/// A4 を最大幅で描いた約 8.1 MP は少し縮むが、通常のページは原寸相当を保てる。
+const MAX_PIXELS: u64 = 8_000_000;
+
+/// libwebp の受け入れる辺の最大値。画素数だけでは、1 × 8,000,000 px のような
+/// 細長い画像を encoder へ渡してしまう。
+const MAX_RENDER_DIMENSION: u32 = 16_383;
+
 /// 注釈も紙面の一部として描く（`FPDF_ANNOT`）。
 ///
 /// 取り消し線や図形注釈は、作者が紙面に置いたものである。落とすと、原本を
@@ -112,10 +121,7 @@ fn render_loaded_page(
     {
         return Err("ページの大きさを読めません".to_string());
     }
-    let width = target_width.clamp(MIN_WIDTH, MAX_WIDTH);
-    let height = ((width as f32) * points_high / points_wide)
-        .round()
-        .max(1.0) as u32;
+    let (width, height) = render_dimensions(target_width, points_wide, points_high);
 
     let bitmap = unsafe { bindings.FPDFBitmap_Create(width as i32, height as i32, 0) };
     if bitmap.is_null() {
@@ -142,6 +148,34 @@ fn render_loaded_page(
         .encode(QUALITY)
         .to_vec();
     Ok((webp, width, height))
+}
+
+/// 幅を要求値に合わせつつ、縦横比を保って描画予算に収める。
+///
+/// PDF の MediaBox は極端な縦横比を取れる。高さだけをそのまま整数化すると、
+/// `FPDFBitmap_Create` と RGB コピーがページ作者の指定した高さぶん確保されるため、
+/// 両辺を同じ倍率で縮めてから整数化する。
+fn render_dimensions(target_width: u32, points_wide: f32, points_high: f32) -> (u32, u32) {
+    let requested_width = target_width.clamp(MIN_WIDTH, MAX_WIDTH) as f64;
+    let requested_height = requested_width * f64::from(points_high) / f64::from(points_wide);
+    let requested_height = requested_height.max(1.0);
+    let pixel_count = requested_width * requested_height;
+    let pixel_scale = if pixel_count > MAX_PIXELS as f64 {
+        (MAX_PIXELS as f64 / pixel_count).sqrt()
+    } else {
+        1.0
+    };
+    let dimension_scale = (MAX_RENDER_DIMENSION as f64 / requested_height).min(1.0);
+    let scale = pixel_scale.min(dimension_scale);
+
+    let width = (requested_width * scale).floor().max(1.0) as u32;
+    let mut height = (requested_height * scale).floor().max(1.0) as u32;
+    // 極端な比では f64 の丸めで積が予算をわずかに越えることがある。
+    // 整数寸法にした後にも確実に予算内へ収める。
+    if u64::from(width) * u64::from(height) > MAX_PIXELS {
+        height = (MAX_PIXELS / u64::from(width)) as u32;
+    }
+    (width, height)
 }
 
 /// WebP の品質。
@@ -183,4 +217,42 @@ unsafe fn copy_as_rgb(
         }
     }
     Ok(rgb)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn render_dimensions_keep_ordinary_page_proportions() {
+        assert_eq!(render_dimensions(600, 300.0, 200.0), (600, 400));
+        assert_eq!(render_dimensions(1, 300.0, 200.0), (320, 213));
+        assert_eq!(render_dimensions(100_000, 300.0, 200.0), (2400, 1600));
+    }
+
+    #[test]
+    fn render_dimensions_bound_pixels_for_extreme_page_ratios() {
+        let (width, height) = render_dimensions(2400, 1.0, 1_000_000_000.0);
+        assert_eq!(height, MAX_RENDER_DIMENSION);
+        assert!(width <= MAX_RENDER_DIMENSION);
+        assert!(u64::from(width) * u64::from(height) <= MAX_PIXELS);
+
+        for (points_wide, points_high) in [(1.0, 1_000_000_000.0), (f32::MIN_POSITIVE, f32::MAX)] {
+            let (width, height) = render_dimensions(2400, points_wide, points_high);
+            assert!(width > 0 && width <= MAX_WIDTH);
+            assert!(width <= MAX_RENDER_DIMENSION);
+            assert!(height > 0);
+            assert!(height <= MAX_RENDER_DIMENSION);
+            assert!(u64::from(width) * u64::from(height) <= MAX_PIXELS);
+        }
+    }
+
+    #[test]
+    fn render_dimensions_leave_room_for_typical_pages_under_the_budget() {
+        // 幅 2400 px の A4 は、予算を守るため少し縮小する。
+        let (width, height) = render_dimensions(2400, 595.0, 842.0);
+        assert!(u64::from(width) * u64::from(height) <= MAX_PIXELS);
+        assert!(width > 2300, "一般的なページでは高い解像度を保つ");
+        assert!(height > 3200, "一般的なページでは高い解像度を保つ");
+    }
 }
