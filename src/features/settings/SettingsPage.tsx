@@ -224,7 +224,23 @@ export default function SettingsPage() {
   });
   const disconnect = (source: "pixiv" | "fanbox") => modals.openConfirmModal({
     title: `${getProvider(source).label}との接続を解除しますか？`, children: <Text size="sm">保存済みの作品は削除されません。再度保存・更新するには接続が必要です。</Text>, labels: { confirm: "接続を解除", cancel: "キャンセル" }, confirmProps: { color: "red" },
-    onConfirm: async () => { if (source === "pixiv") { await store.delete("pixiv_refresh_token"); await store.delete("pixiv_user"); await store.delete("pixiv_cookie"); await store.delete("pixiv_user_agent"); } else { await store.delete("fanbox_session_id"); await store.delete("fanbox_user"); } await store.save(); queryClient.invalidateQueries({ queryKey: ["settings-auth"] }); queryClient.invalidateQueries({ queryKey: ["auth-status"] }); queryClient.invalidateQueries({ queryKey: ["pixiv-session"] }); },
+    onConfirm: async () => {
+      try {
+        if (source === "pixiv") {
+          await store.delete("pixiv_refresh_token"); await store.delete("pixiv_user");
+          await store.delete("pixiv_cookie"); await store.delete("pixiv_user_agent");
+        } else {
+          await store.delete("fanbox_session_id"); await store.delete("fanbox_user");
+          await store.delete("fanbox_user_agent");
+        }
+        await store.save();
+        queryClient.invalidateQueries({ queryKey: ["settings-auth"] });
+        queryClient.invalidateQueries({ queryKey: ["auth-status"] });
+        queryClient.invalidateQueries({ queryKey: ["pixiv-session"] });
+      } catch (error) {
+        notifications.show({ color: "red", title: "接続を解除できません", message: errorMessage(error) });
+      }
+    },
   });
   const maintenanceMutation = useMutation({
     mutationFn: async (action: "backup" | "restore" | "scan") => {

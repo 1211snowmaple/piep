@@ -405,15 +405,29 @@ function main() {
     "events.md": renderEvents(contract, frontend),
     "schema.md": renderSchema(contract),
   };
-  mkdirSync(resolve(opt.out), { recursive: true });
-  for (const [name, body] of Object.entries(files)) {
-    writeFileSync(resolve(opt.out, name), body);
+  if (opt.check) {
+    for (const [name, body] of Object.entries(files)) {
+      const path = resolve(opt.out, name);
+      if (!existsSync(path) || readFileSync(path, "utf8") !== body) {
+        findings.push({
+          level: "error",
+          code: "generated-reference-stale",
+          message: `${name} が現在のソースから生成した内容と一致しない`,
+          detail: `${path}（npm --prefix docs-tools run contract で更新）`,
+        });
+      }
+    }
+  } else {
+    mkdirSync(resolve(opt.out), { recursive: true });
+    for (const [name, body] of Object.entries(files)) {
+      writeFileSync(resolve(opt.out, name), body);
+    }
   }
 
   const errors = findings.filter((f) => f.level === "error");
   const warns = findings.filter((f) => f.level === "warn");
 
-  console.log(`生成: ${Object.keys(files).join(", ")} → ${opt.out}`);
+  console.log(`${opt.check ? "照合" : "生成"}: ${Object.keys(files).join(", ")} → ${opt.out}`);
   console.log(
     `説明のあるコマンド: ${cov.current.documented}/${cov.current.total}` +
       (cov.created

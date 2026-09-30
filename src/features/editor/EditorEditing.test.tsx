@@ -1,6 +1,6 @@
 import { MantineProvider } from "@mantine/core";
 import { ModalsProvider } from "@mantine/modals";
-import { Notifications } from "@mantine/notifications";
+import { Notifications, notifications } from "@mantine/notifications";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -14,6 +14,11 @@ const dbApi = vi.hoisted(() => ({
   saveWorkDraft: vi.fn(),
   activateWorkEdit: vi.fn(),
   discardWorkDraft: vi.fn(),
+}));
+const dialog = vi.hoisted(() => ({ openSingleDialog: vi.fn() }));
+vi.mock("@/services/dialogApi", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/services/dialogApi")>()),
+  openSingleDialog: dialog.openSingleDialog,
 }));
 
 vi.mock("@/services/dbApi", async (importOriginal) => ({
@@ -112,6 +117,20 @@ describe("書きかけを失わないこと", () => {
 
     await waitFor(() => expect(screen.queryByDisplayValue("段落4")).toBeNull());
     expect(screen.getByDisplayValue("段落2を書き換えた")).toBeInTheDocument();
+  });
+
+  it("shows an error when the image picker fails", async () => {
+    dialog.openSingleDialog.mockRejectedValueOnce(new Error("picker unavailable"));
+    const show = vi.spyOn(notifications, "show");
+    try {
+      renderEditor();
+      await screen.findByDisplayValue("段落1");
+      fireEvent.click(screen.getByRole("button", { name: "先頭にブロックを追加" }));
+      fireEvent.click(await screen.findByRole("menuitem", { name: "画像ファイルを追加" }));
+      await waitFor(() => expect(show).toHaveBeenCalledWith(expect.objectContaining({ color: "red", title: "画像を追加できません", message: "picker unavailable" })));
+    } finally {
+      show.mockRestore();
+    }
   });
 
   it("追加を取り消して保存済みの内容に戻すと未保存表示が消える", async () => {

@@ -67,7 +67,10 @@ export function EntityCard({ entity, kind, selectionMode = false, selected = fal
       data-selection-mode={selectionMode || undefined}
       data-selected={selectionMode && selected || undefined}
       onClick={activate}
-      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); activate(); } }}
+      onKeyDown={(e) => {
+        if (e.target !== e.currentTarget) return;
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); activate(); }
+      }}
       tabIndex={0}
       role={selectionMode ? "button" : "link"}
       aria-pressed={selectionMode ? selected : undefined}

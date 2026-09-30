@@ -140,12 +140,12 @@ impl FanboxAPI {
 
         match status {
             StatusCode::TOO_MANY_REQUESTS => {
-                log::error!("Fanbox API Rate Limited: {}", body);
-                Err(FanboxError::RateLimited { body })
+                log::warn!("Fanbox API rate limited ({} response bytes)", body.len());
+                Err(FanboxError::RateLimited)
             }
             StatusCode::NOT_FOUND => {
-                log::error!("Fanbox Resource Not Found: {}", body);
-                Err(FanboxError::NotFound { body })
+                log::warn!("Fanbox resource not found ({} response bytes)", body.len());
+                Err(FanboxError::NotFound)
             }
             StatusCode::FORBIDDEN if is_cloudflare_challenge(&body) => {
                 crate::downloader::pacing::FANBOX
@@ -155,25 +155,30 @@ impl FanboxAPI {
                 Err(FanboxError::ChallengeRequired)
             }
             StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
-                log::warn!("Fanbox API Authentication Required: {}", body);
+                log::warn!(
+                    "Fanbox API authentication required ({} response bytes)",
+                    body.len()
+                );
                 Err(FanboxError::NoAuth)
             }
             _ => {
                 if !status.is_success() {
                     log::warn!(
-                        "Fanbox API returned non-success status: {}, body: {}",
+                        "Fanbox API returned non-success status: {}, response bytes: {}",
                         status,
-                        body
+                        body.len()
                     );
                     return Err(FanboxError::ApiError {
                         status: status.as_u16(),
-                        body,
                     });
                 }
 
                 serde_json::from_str::<T>(&body).map_err(|e| {
-                    log::error!("Fanbox Deserialization Error: {}, body: {}", e, body);
-                    FanboxError::Serde { error: e, body }
+                    log::error!(
+                        "Fanbox deserialization error: {e}, response bytes: {}",
+                        body.len()
+                    );
+                    FanboxError::Serde { error: e }
                 })
             }
         }
@@ -349,12 +354,8 @@ fn post_list_shape(body: &serde_json::Value) -> bool {
 fn decode_post_list(
     body: serde_json::Value,
 ) -> Result<(Vec<FanboxPost>, Option<String>), FanboxError> {
-    let body_for_error = body.to_string();
     if body.is_array() {
-        let posts = serde_json::from_value(body).map_err(|error| FanboxError::Serde {
-            error,
-            body: body_for_error,
-        })?;
+        let posts = serde_json::from_value(body).map_err(|error| FanboxError::Serde { error })?;
         return Ok((posts, None));
     }
     if !post_list_shape(&body) {
@@ -363,10 +364,7 @@ fn decode_post_list(
         ));
     }
     let list: FanboxPostList =
-        serde_json::from_value(body).map_err(|error| FanboxError::Serde {
-            error,
-            body: body_for_error,
-        })?;
+        serde_json::from_value(body).map_err(|error| FanboxError::Serde { error })?;
     Ok((list.items, list.next_url))
 }
 
@@ -490,6 +488,18 @@ mod tests {
         let (posts, next) = decode_post_list(json!([listed_post("2")])).unwrap();
         assert_eq!(posts[0].id, "2");
         assert!(next.is_none());
+    }
+
+    #[test]
+    fn malformed_post_error_does_not_retain_private_response_body() {
+        let error = decode_post_list(json!([{
+            "id": 123,
+            "body": "private-post-content-marker"
+        }]))
+        .unwrap_err();
+        let debug = format!("{error:?}");
+        assert!(!debug.contains("private-post-content-marker"));
+        assert!(!error.to_string().contains("private-post-content-marker"));
     }
 
     #[test]

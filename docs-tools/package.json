@@ -9,7 +9,7 @@
     "extract:front": "node src/scan-frontend.mjs --repo .. --out ../.docs-build/frontend.json",
     "extract": "npm run extract:rust && npm run extract:front",
     "contract": "npm run extract && node src/render-contract.mjs --build ../.docs-build --out ../docs/reference",
-    "contract:check": "npm run extract && node src/render-contract.mjs --build ../.docs-build --out ../docs/reference --check",
+    "contract:check": "npm run extract && node --test src/render-contract.test.mjs && node src/render-contract.mjs --build ../.docs-build --out ../docs/reference --check",
     "stats": "node src/sync-stats.mjs",
     "stats:check": "node src/sync-stats.mjs --check",
     "check:emphasis": "node src/check-japanese-emphasis.mjs ../docs/guide ../docs/policy ../docs/plan ../docs/index.md",

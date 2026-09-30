@@ -1416,6 +1416,10 @@ impl Database {
             if seeds.len() != seed_ids.len() {
                 return Err("One or more seed works no longer exist".to_string());
             }
+            // Do not cap this query before scoring: a busy author's arbitrary
+            // row order can otherwise hide a strong title or series match.
+            // rusqlite streams rows into the deduplicating ID set, keeping the
+            // query result itself bounded to one row at a time.
             let mut stmt = conn
                 .prepare(
                     "SELECT DISTINCT candidate.id
@@ -1446,8 +1450,7 @@ impl Database {
                                 (link.from_download_id = seed.id AND link.to_download_id = candidate.id)
                                 OR (link.to_download_id = seed.id AND link.from_download_id = candidate.id)
                               )
-                        )
-                     LIMIT 1200",
+                        )",
                 )
                 .map_err(|e| format!("Failed to prepare suggestion candidates: {e}"))?;
             let ids = stmt

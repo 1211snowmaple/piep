@@ -85,6 +85,22 @@ describe("operation history", () => {
     expect(retry).toHaveBeenCalledOnce();
   });
 
+  it("keeps a failed job retryable when starting its retry rejects", async () => {
+    const api = await import("./operationJobs");
+    const retry = vi.fn().mockRejectedValueOnce(new Error("start failed")).mockResolvedValueOnce(undefined);
+    const operation = api.startOperation({ kind: "backup", label: "バックアップ", onRetry: retry });
+    operation.fail(new Error("disk full"));
+
+    await expect(api.retryOperation(operation.id)).rejects.toThrow("start failed");
+    expect(api.getOperationJobs()[0]).toMatchObject({ status: "failed", canRetry: true });
+    const logs = api.getOperationJobs()[0].logs;
+    expect(logs[logs.length - 1]?.message).toBe("start failed");
+
+    await api.retryOperation(operation.id);
+    expect(retry).toHaveBeenCalledTimes(2);
+    expect(api.getOperationJobs()[0]).toMatchObject({ status: "failed", canRetry: false });
+  });
+
   it("never starts a retry while the original operation is running", async () => {
     const api = await import("./operationJobs");
     const retry = vi.fn();

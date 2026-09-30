@@ -79,6 +79,74 @@ struct WebUpdateIndex {
     gave_up: bool,
 }
 
+#[derive(Clone)]
+struct FanboxListingEntry {
+    updated_datetime: String,
+    is_restricted: bool,
+}
+
+/// One full creator listing is shared by the saved works in a one-off author
+/// check. Missing entries are never treated as unchanged: a removed post still
+/// needs its own detail result so the local copy can be marked as preserved.
+#[derive(Default)]
+struct FanboxUpdateIndex {
+    attempted_authors: HashSet<String>,
+    entries: HashMap<String, HashMap<String, FanboxListingEntry>>,
+}
+
+impl FanboxUpdateIndex {
+    async fn lookup(
+        &mut self,
+        author_id: &str,
+        post_id: &str,
+        cookie: &str,
+        user_agent: &str,
+    ) -> Result<Option<&FanboxListingEntry>, String> {
+        if !self.attempted_authors.contains(author_id) {
+            let api =
+                crate::downloader::session::fanbox(cookie.to_string(), user_agent.to_string())
+                    .map_err(|error| error.to_string())?;
+            match api.get_all_creator_posts(author_id).await {
+                Ok(posts) => {
+                    self.entries.insert(
+                        author_id.to_string(),
+                        posts
+                            .into_iter()
+                            .map(|post| {
+                                (
+                                    post.id,
+                                    FanboxListingEntry {
+                                        updated_datetime: post.updated_datetime,
+                                        is_restricted: post.is_restricted,
+                                    },
+                                )
+                            })
+                            .collect(),
+                    );
+                }
+                Err(error) => {
+                    if matches!(
+                        error,
+                        crate::fanbox_api::error::FanboxError::NoAuth
+                            | crate::fanbox_api::error::FanboxError::RateLimited
+                            | crate::fanbox_api::error::FanboxError::ChallengeRequired
+                    ) {
+                        return Err(error.to_string());
+                    }
+                    log::warn!(
+                        "FANBOXの作者一覧を使えないため投稿ごとに確認します（作者 {author_id}）: {error}"
+                    );
+                }
+            }
+            self.attempted_authors.insert(author_id.to_string());
+        }
+        Ok(self
+            .entries
+            .get(author_id)
+            .and_then(|items| items.get(post_id)))
+    }
+}
+
 impl WebUpdateIndex {
     fn new(credentials: &UpdateCredentials) -> Self {
         // 保存済みの古い値にも同じ規則を通す。繋ぎ直していない利用者から、
@@ -535,13 +603,25 @@ fn build_initial_items(
         .target_ids
         .as_ref()
         .map(|ids| ids.iter().copied().collect::<HashSet<_>>());
+    // A one-off check from an entity page specifies its target by provider key.
+    // Its scope names the kind, not every saved watch target of that kind.
+    let include_registered_targets =
+        target_filter.is_some() || request.adhoc_targets.as_ref().is_none_or(Vec::is_empty);
+    let adhoc_author_keys: HashSet<(String, String)> = request
+        .adhoc_targets
+        .iter()
+        .flatten()
+        .filter(|target| target.target_type == "author")
+        .map(|target| (target.source.clone(), target.source_key.clone()))
+        .collect();
     let eligible_targets: HashSet<(String, String, String)> = state
         .db
         .list_update_targets(None, true)?
         .into_iter()
         .filter(|t| {
-            ((include_author && t.target_type == "author")
-                || (include_series && t.target_type == "series"))
+            include_registered_targets
+                && ((include_author && t.target_type == "author")
+                    || (include_series && t.target_type == "series"))
                 && target_filter.as_ref().is_none_or(|ids| ids.contains(&t.id))
         })
         .map(|t| (t.source, t.target_type, t.source_key))
@@ -554,8 +634,8 @@ fn build_initial_items(
         }))
         .collect();
 
-    if include_work {
-        let works = if let Some(filter) = &work_filter {
+    let mut works = if include_work {
+        if let Some(filter) = &work_filter {
             let mut entries = Vec::new();
             for id in filter {
                 entries.push(state.db.get_download(*id)?);
@@ -563,38 +643,60 @@ fn build_initial_items(
             entries
         } else {
             state.db.get_watched_downloads()?
-        };
-        for dl in works {
-            if dl.source != "pixiv" && dl.source != "fanbox" {
-                continue;
-            }
-            if state
-                .db
-                .update_candidate_status(&dl.source, &dl.source_id)?
-                .as_deref()
-                == Some("held")
-            {
-                continue;
-            }
-            included_work_keys.insert((dl.source.clone(), dl.source_id.clone()));
-            let title = dl.title.clone();
-            let payload = serde_json::to_value(dl).map_err(|e| e.to_string())?;
-            items.push(item_from_payload(
-                "work",
-                "queued",
-                payload
-                    .get("source")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string),
-                payload
-                    .get("sourceId")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string),
-                Some("work".to_string()),
-                title,
-                payload,
-            )?);
         }
+    } else {
+        Vec::new()
+    };
+    // A one-off author check also checks every saved work by that author for
+    // revisions, regardless of each work's individual watch setting.
+    if include_author {
+        for adhoc in request.adhoc_targets.iter().flatten() {
+            if adhoc.target_type == "author" {
+                works.extend(
+                    state
+                        .db
+                        .get_downloads_by_author(&adhoc.source, &adhoc.source_key)?,
+                );
+            }
+        }
+    }
+    for dl in works {
+        if dl.source != "pixiv" && dl.source != "fanbox" {
+            continue;
+        }
+        if state
+            .db
+            .update_candidate_status(&dl.source, &dl.source_id)?
+            .as_deref()
+            == Some("held")
+        {
+            continue;
+        }
+        if !included_work_keys.insert((dl.source.clone(), dl.source_id.clone())) {
+            continue;
+        }
+        let title = dl.title.clone();
+        let fast_fanbox_author_check = dl.source == "fanbox"
+            && adhoc_author_keys.contains(&(dl.source.clone(), dl.author_id.clone()));
+        let mut payload = serde_json::to_value(dl).map_err(|e| e.to_string())?;
+        if fast_fanbox_author_check {
+            payload["fanboxAuthorCheck"] = Value::Bool(true);
+        }
+        items.push(item_from_payload(
+            "work",
+            "queued",
+            payload
+                .get("source")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            payload
+                .get("sourceId")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            Some("work".to_string()),
+            title,
+            payload,
+        )?);
     }
 
     // 一回きりの確認先（作品ページや作者ページの「新作を確認」）。
@@ -677,7 +779,7 @@ fn build_initial_items(
         }
     }
 
-    if include_author || include_series {
+    if include_registered_targets && (include_author || include_series) {
         let targets = state.db.list_update_targets(None, true)?;
         // 作者を監視しているなら、その人のシリーズはその一覧に出てくる。
         // 両方を走査すると同じものを二度取りに行くので、取得先への負荷になる。
@@ -1638,6 +1740,7 @@ async fn run_update_job(
     // web の一覧はジョブの間だけ覚えておく。セッションが無ければ空のまま、
     // 何もしない置物として振る舞う。
     let mut web_index = WebUpdateIndex::new(&credentials);
+    let mut fanbox_index = FanboxUpdateIndex::default();
     // 取得が制限されたときだけ間隔を広げ、うまくいけば元へ戻す。
     let mut backoff: u32 = 1;
     let mut rate_limit_retries: HashMap<i64, u32> = HashMap::new();
@@ -1756,9 +1859,16 @@ async fn run_update_job(
         // save screen which single row became active without shipping all rows.
         emit_progress_delta(&app, &state, &job_id, Some(item.id)).await;
 
-        let outcome =
-            process_update_job_item(&app, &state, &job_id, &item, &credentials, &mut web_index)
-                .await;
+        let outcome = process_update_job_item(
+            &app,
+            &state,
+            &job_id,
+            &item,
+            &credentials,
+            &mut web_index,
+            &mut fanbox_index,
+        )
+        .await;
         let local_only = matches!(&outcome, Ok(ItemOutcome::LocalSkipped(_)));
         let restart_pending = has_pending_restart(&job_id);
         match outcome {
@@ -2313,6 +2423,7 @@ async fn process_update_job_item(
     item: &UpdateJobItem,
     credentials: &UpdateCredentials,
     web_index: &mut WebUpdateIndex,
+    fanbox_index: &mut FanboxUpdateIndex,
 ) -> Result<ItemOutcome, String> {
     let payload: Value = serde_json::from_str(&item.payload_json).map_err(|e| e.to_string())?;
     if payload.get("kind").and_then(Value::as_str) == Some("permission_check") {
@@ -2331,7 +2442,18 @@ async fn process_update_job_item(
         }
     }
     match item.item_type.as_str() {
-        "work" => process_work_item(app, state, job_id, item, credentials, web_index).await,
+        "work" => {
+            process_work_item(
+                app,
+                state,
+                job_id,
+                item,
+                credentials,
+                web_index,
+                fanbox_index,
+            )
+            .await
+        }
         "target" => process_target_item(app, state, job_id, item, credentials, web_index).await,
         "candidate" => process_candidate_item(app, state, item, credentials).await,
         _ => Ok(ItemOutcome::Skipped(format!(
@@ -2402,6 +2524,74 @@ fn remember_source_updated_at(state: &Arc<AppState>, dl: &DownloadEntry, listed:
     }
 }
 
+/// A removed or private source post does not invalidate the copy already saved
+/// in the library. Other fetch failures must keep their normal retry behavior.
+fn unavailable_saved_fanbox_post(
+    title: &str,
+    error: crate::fanbox_api::error::FanboxError,
+) -> Result<ItemOutcome, String> {
+    match error {
+        crate::fanbox_api::error::FanboxError::NotFound => Ok(ItemOutcome::Held(format!(
+            "公開元で投稿が見つからないため確認を保留しました。保存済みの「{title}」は保持しています"
+        ))),
+        other => Err(other.to_string()),
+    }
+}
+
+/// FANBOX's list timestamp is a fast negative check, but a local copy still
+/// needs a recent full verification. This catches posts whose body or access
+/// changes without a timestamp change and repairs local asset loss.
+fn fanbox_listing_confirms_recent_copy(
+    state: &Arc<AppState>,
+    dl: &DownloadEntry,
+    listed: &FanboxListingEntry,
+) -> bool {
+    if listed.is_restricted
+        || listed.updated_datetime.is_empty()
+        || dl.source_updated_at.as_deref() != Some(listed.updated_datetime.as_str())
+        || dl.content_hash.as_deref().is_none_or(str::is_empty)
+        || !std::path::Path::new(&dl.json_path).is_file()
+    {
+        return false;
+    }
+    let Ok((_, last_deep_checked_at)) = state.db.get_download_meta_state(dl.id) else {
+        return false;
+    };
+    let verified_at = last_deep_checked_at.as_deref().unwrap_or(&dl.downloaded_at);
+    let recent = chrono::DateTime::parse_from_rfc3339(verified_at)
+        .ok()
+        .map(|date| chrono::Utc::now().signed_duration_since(date.with_timezone(&chrono::Utc)))
+        .is_some_and(|age| {
+            age >= chrono::Duration::zero()
+                && age < chrono::Duration::days(DEEP_CHECK_INTERVAL_DAYS)
+        });
+    if !recent {
+        return false;
+    }
+    let Ok(assets) = state.db.get_assets(dl.id) else {
+        return false;
+    };
+    dl.asset_count >= 0
+        && assets.len() == dl.asset_count as usize
+        && assets.iter().all(|asset| {
+            std::fs::metadata(&asset.local_path).is_ok_and(|metadata| {
+                metadata.is_file()
+                    && (asset.file_size_bytes <= 0
+                        || metadata.len() == asset.file_size_bytes as u64)
+            })
+        })
+}
+
+fn remember_fanbox_deep_check(state: &Arc<AppState>, download_id: i64) {
+    if let Err(error) =
+        state
+            .db
+            .set_download_meta_state(download_id, None, &chrono::Utc::now().to_rfc3339())
+    {
+        log::warn!("FANBOX投稿 {download_id} の本文確認時刻を保存できません: {error}");
+    }
+}
+
 async fn process_work_item(
     app: &tauri::AppHandle,
     state: &Arc<AppState>,
@@ -2409,8 +2599,12 @@ async fn process_work_item(
     item: &UpdateJobItem,
     credentials: &UpdateCredentials,
     web_index: &mut WebUpdateIndex,
+    fanbox_index: &mut FanboxUpdateIndex,
 ) -> Result<ItemOutcome, String> {
-    let dl: DownloadEntry = serde_json::from_str(&item.payload_json).map_err(|e| e.to_string())?;
+    let payload: Value = serde_json::from_str(&item.payload_json).map_err(|e| e.to_string())?;
+    let fanbox_author_check =
+        payload.get("fanboxAuthorCheck").and_then(Value::as_bool) == Some(true);
+    let dl: DownloadEntry = serde_json::from_value(payload).map_err(|e| e.to_string())?;
     let auto_save = state.db.update_job_mode_value(job_id)? == "auto_save";
     if dl.source == "pixiv" {
         let Some(token) = pixiv_token(credentials) else {
@@ -2521,12 +2715,23 @@ async fn process_work_item(
             ));
         };
         let user_agent = fanbox_user_agent(credentials);
-        let post = super::downloader::fetch_fanbox_post(
-            dl.source_id.clone(),
-            cookie.clone(),
-            user_agent.clone(),
-        )
-        .await?;
+        if fanbox_author_check && !dl.author_id.trim().is_empty() {
+            if let Some(listed) = fanbox_index
+                .lookup(&dl.author_id, &dl.source_id, &cookie, &user_agent)
+                .await?
+            {
+                if fanbox_listing_confirms_recent_copy(state, &dl, listed) {
+                    return Ok(ItemOutcome::LocalSkipped(format!("最新: {}", dl.title)));
+                }
+            }
+        }
+        let post =
+            match crate::downloader::fanbox::get_post_detail(&dl.source_id, &cookie, &user_agent)
+                .await
+            {
+                Ok(post) => post,
+                Err(error) => return unavailable_saved_fanbox_post(&dl.title, error),
+            };
         let value = serde_json::to_value(&post).map_err(|e| e.to_string())?;
         if value.get("isRestricted").and_then(Value::as_bool) == Some(true)
             || !super::downloader::fetched_has_material_content(&value, "fanbox")
@@ -2557,6 +2762,7 @@ async fn process_work_item(
             || assets_need_repair;
         if !auto_save && content_changed {
             record_work_revision_candidate(state, job_id, &dl, &value, false).await?;
+            remember_fanbox_deep_check(state, dl.id);
             return Ok(ItemOutcome::Done(format!("改稿を検出: {}", dl.title)));
         }
         let title = string_at(&value, &[&["title"]]).unwrap_or(dl.title.clone());
@@ -2600,6 +2806,7 @@ async fn process_work_item(
             Some(user_agent),
         )
         .await?;
+        remember_fanbox_deep_check(state, updated.id);
         if updated.current_version > dl.current_version {
             Ok(ItemOutcome::Saved(
                 updated.id,
@@ -3236,11 +3443,206 @@ async fn process_candidate_item(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_save_items, canceled_status_for, classify_failure, describe_text_change, make_job_id,
-        may_remember, profile_refresh_params_for_target, rate_limit_delay_ms, FailureKind,
+        build_initial_items, build_save_items, canceled_status_for, classify_failure,
+        describe_text_change, fanbox_listing_confirms_recent_copy, make_job_id, may_remember,
+        profile_refresh_params_for_target, rate_limit_delay_ms, FailureKind, FanboxListingEntry,
         SaveJobWork, MAX_RATE_LIMIT_BACKOFF_MS,
     };
+    use crate::database::{
+        AdhocUpdateTarget, Database, NewDownload, StartUpdateJobRequest, UpdateTargetInput,
+    };
+    use crate::fanbox_api::error::FanboxError;
+    use crate::AppState;
     use std::collections::HashSet;
+    use std::sync::Arc;
+
+    #[test]
+    fn a_missing_saved_fanbox_post_is_held_without_hiding_other_failures() {
+        match super::unavailable_saved_fanbox_post("手元の作品", FanboxError::NotFound) {
+            Ok(super::ItemOutcome::Held(message)) => {
+                assert!(message.contains("保存済み"));
+                assert!(message.contains("保持"));
+            }
+            _ => panic!("a missing saved post should remain available locally"),
+        }
+        assert!(matches!(
+            super::unavailable_saved_fanbox_post("作品", FanboxError::RateLimited),
+            Err(message) if message.contains("アクセス制限")
+        ));
+    }
+
+    #[test]
+    fn fanbox_author_listing_skips_only_a_recent_complete_saved_copy() {
+        let root = std::env::temp_dir().join(format!("piep-fanbox-listing-{}", make_job_id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let state = Arc::new(AppState::new(
+            Database::open(&root.join("piep.db"), &root.join("downloads")).unwrap(),
+        ));
+        let json_path = root.join("saved.json");
+        std::fs::write(&json_path, "{}").unwrap();
+        let updated = "2026-09-30T00:00:00+09:00";
+        let id = state
+            .db
+            .upsert_download(&NewDownload {
+                source: "fanbox".into(),
+                source_id: "post-1".into(),
+                title: "保存済み".into(),
+                author_name: "作者".into(),
+                author_id: "creator".into(),
+                content_type: "article".into(),
+                tags: Vec::new(),
+                excerpt: None,
+                cover_path: None,
+                json_path: json_path.to_string_lossy().into(),
+                original_json_path: None,
+                asset_count: 0,
+                file_size_bytes: 0,
+                downloaded_at: chrono::Utc::now().to_rfc3339(),
+                source_created_at: None,
+                content_hash: Some("saved-body".into()),
+                text_length: 1,
+                source_updated_at: Some(updated.into()),
+                watch_updates: false,
+                current_version: 1,
+                favorite: false,
+            })
+            .unwrap();
+        let dl = state.db.get_download(id).unwrap();
+        let request = StartUpdateJobRequest {
+            scope: "author".into(),
+            mode: "check_only".into(),
+            work_ids: None,
+            target_ids: None,
+            credentials: None,
+            watch_saved: None,
+            adhoc_targets: Some(vec![AdhocUpdateTarget {
+                target_type: "author".into(),
+                source: "fanbox".into(),
+                source_key: "creator".into(),
+                display_name: "作者".into(),
+            }]),
+        };
+        let items = build_initial_items(&state, &request).unwrap();
+        let work = items.iter().find(|item| item.item_type == "work").unwrap();
+        assert_eq!(work.source_id.as_deref(), Some("post-1"));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&work.payload_json).unwrap()
+                ["fanboxAuthorCheck"],
+            serde_json::Value::Bool(true)
+        );
+        let mut listed = FanboxListingEntry {
+            updated_datetime: updated.into(),
+            is_restricted: false,
+        };
+        assert!(fanbox_listing_confirms_recent_copy(&state, &dl, &listed));
+        listed.updated_datetime = "2026-10-01T00:00:00+09:00".into();
+        assert!(!fanbox_listing_confirms_recent_copy(&state, &dl, &listed));
+        listed.updated_datetime = updated.into();
+        listed.is_restricted = true;
+        assert!(!fanbox_listing_confirms_recent_copy(&state, &dl, &listed));
+        listed.is_restricted = false;
+        state
+            .db
+            .set_download_meta_state(id, None, "2020-01-01T00:00:00Z")
+            .unwrap();
+        assert!(!fanbox_listing_confirms_recent_copy(&state, &dl, &listed));
+        state
+            .db
+            .set_download_meta_state(id, None, &chrono::Utc::now().to_rfc3339())
+            .unwrap();
+        std::fs::remove_file(json_path).unwrap();
+        assert!(!fanbox_listing_confirms_recent_copy(&state, &dl, &listed));
+        drop(state);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_one_off_author_check_does_not_enqueue_every_watched_author() {
+        let root = std::env::temp_dir().join(format!("piep-adhoc-scope-{}", make_job_id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let state = Arc::new(AppState::new(
+            Database::open(&root.join("piep.db"), &root.join("downloads")).unwrap(),
+        ));
+        for key in ["requested", "someone-else"] {
+            state
+                .db
+                .upsert_update_target(&UpdateTargetInput {
+                    target_type: "author".into(),
+                    source: "pixiv".into(),
+                    source_key: key.into(),
+                    display_name: key.into(),
+                    enabled: true,
+                    metadata_json: None,
+                })
+                .unwrap();
+        }
+        for (source, author_id, source_id) in [
+            ("pixiv", "requested", "requested-1"),
+            ("pixiv", "requested", "requested-2"),
+            ("pixiv", "someone-else", "other-author"),
+            ("fanbox", "requested", "other-provider"),
+        ] {
+            state
+                .db
+                .upsert_download(&NewDownload {
+                    source: source.into(),
+                    source_id: source_id.into(),
+                    title: source_id.into(),
+                    author_name: author_id.into(),
+                    author_id: author_id.into(),
+                    content_type: "novel".into(),
+                    tags: Vec::new(),
+                    excerpt: None,
+                    cover_path: None,
+                    json_path: root
+                        .join(format!("{source_id}.json"))
+                        .to_string_lossy()
+                        .into(),
+                    original_json_path: None,
+                    asset_count: 0,
+                    file_size_bytes: 0,
+                    downloaded_at: "2026-01-01T00:00:00Z".into(),
+                    source_created_at: None,
+                    content_hash: None,
+                    text_length: 0,
+                    source_updated_at: None,
+                    watch_updates: false,
+                    current_version: 1,
+                    favorite: false,
+                })
+                .unwrap();
+        }
+        let request = StartUpdateJobRequest {
+            scope: "author".into(),
+            mode: "check_only".into(),
+            work_ids: None,
+            target_ids: None,
+            credentials: None,
+            watch_saved: None,
+            adhoc_targets: Some(vec![AdhocUpdateTarget {
+                target_type: "author".into(),
+                source: "pixiv".into(),
+                source_key: "requested".into(),
+                display_name: "requested".into(),
+            }]),
+        };
+        let items = build_initial_items(&state, &request).unwrap();
+        let targets: Vec<_> = items
+            .iter()
+            .filter(|item| item.item_type == "target")
+            .collect();
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].source_id.as_deref(), Some("requested"));
+        let work_ids: HashSet<_> = items
+            .iter()
+            .filter(|item| item.item_type == "work")
+            .filter_map(|item| item.source_id.as_deref())
+            .collect();
+        assert_eq!(work_ids, HashSet::from(["requested-1", "requested-2"]));
+        drop(state);
+        assert!(root.starts_with(std::env::temp_dir()));
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     fn update_target(
         target_type: &str,

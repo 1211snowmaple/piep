@@ -16,6 +16,12 @@ const archive = vi.hoisted(() => ({
   inspectBackupFile: vi.fn(),
 }));
 const dialogs = vi.hoisted(() => ({ openSingleDialog: vi.fn(), saveDialog: vi.fn() }));
+const storeApi = vi.hoisted(() => ({
+  get: vi.fn().mockResolvedValue(null),
+  set: vi.fn().mockResolvedValue(undefined),
+  delete: vi.fn().mockResolvedValue(undefined),
+  save: vi.fn().mockResolvedValue(undefined),
+}));
 const operationState = vi.hoisted(() => ({ jobs: [] as Array<{ kind: string; status: string }> }));
 const operationSpies = vi.hoisted(() => ({ progress: vi.fn(), complete: vi.fn() }));
 const progressEvents = vi.hoisted(() => ({ backup: null as ((event: { payload: BackupExportProgress }) => void) | null }));
@@ -42,12 +48,7 @@ vi.mock("@/services/dbApi", async (importOriginal) => ({
   scanAndReimportDownloads: vi.fn().mockResolvedValue({ imported: 0, skipped: [] }),
 }));
 vi.mock("@/store", () => ({
-  store: {
-    get: vi.fn().mockResolvedValue(null),
-    set: vi.fn().mockResolvedValue(undefined),
-    delete: vi.fn().mockResolvedValue(undefined),
-    save: vi.fn().mockResolvedValue(undefined),
-  },
+  store: storeApi,
 }));
 vi.mock("@/features/search/searchIndexProgress", () => ({ useSearchIndexProgress: () => null }));
 vi.mock("@/features/jobs/operationJobs", () => ({
@@ -85,6 +86,18 @@ const inspection: BackupInspection = {
 
 function renderLibrarySettings() {
   window.location.hash = "#/settings?section=library";
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+  return render(
+    <MantineProvider theme={theme}>
+      <QueryClientProvider client={client}>
+        <ModalsProvider><AppRouter><SettingsPage /></AppRouter></ModalsProvider>
+      </QueryClientProvider>
+    </MantineProvider>,
+  );
+}
+
+function renderConnectionSettings() {
+  window.location.hash = "#/settings";
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   return render(
     <MantineProvider theme={theme}>
@@ -207,5 +220,28 @@ describe("SettingsPage backup flow", () => {
       message: expect.stringContaining("同じフォルダーにすべてのZIPパートが必要です"),
     })));
     notification.mockRestore();
+  });
+});
+
+describe("SettingsPage connection flow", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    storeApi.get.mockResolvedValue(null);
+  });
+
+  it("removes the FANBOX user agent when disconnecting", async () => {
+    storeApi.get.mockImplementation(async (key: string) => key === "fanbox_user"
+      ? { userId: "fanbox-1", name: "FANBOX利用者" }
+      : null);
+    renderConnectionSettings();
+
+    fireEvent.click(await screen.findByRole("button", { name: "接続解除" }));
+    expect(await screen.findByRole("dialog", { name: "FANBOXとの接続を解除しますか？" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "接続を解除" }));
+
+    await waitFor(() => expect(storeApi.save).toHaveBeenCalledOnce());
+    expect(storeApi.delete).toHaveBeenCalledWith("fanbox_session_id");
+    expect(storeApi.delete).toHaveBeenCalledWith("fanbox_user");
+    expect(storeApi.delete).toHaveBeenCalledWith("fanbox_user_agent");
   });
 });

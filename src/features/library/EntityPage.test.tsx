@@ -1,4 +1,5 @@
 import { MantineProvider } from "@mantine/core";
+import { notifications } from "@mantine/notifications";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -22,11 +23,16 @@ const collectionApi = vi.hoisted(() => ({
   listCollectionsForPerson: vi.fn(),
   listCollectionsForSeries: vi.fn(),
 }));
+const dialogs = vi.hoisted(() => ({ saveDialog: vi.fn() }));
 
 vi.mock("@/services/shelfApi", () => shelfApi);
 vi.mock("@/services/collectionApi", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/services/collectionApi")>()),
   ...collectionApi,
+}));
+vi.mock("@/services/dialogApi", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/services/dialogApi")>()),
+  saveDialog: dialogs.saveDialog,
 }));
 vi.mock("@/services/dbApi", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/services/dbApi")>()),
@@ -93,6 +99,7 @@ describe("author page", () => {
     shelfApi.listEntityTags.mockResolvedValue(tags);
     collectionApi.listCollectionsForPerson.mockResolvedValue([]);
     collectionApi.listCollectionsForSeries.mockResolvedValue([]);
+    dialogs.saveDialog.mockReset();
   });
 
   it("does not truncate the primary entity title on its own detail page", async () => {
@@ -273,6 +280,36 @@ describe("author page", () => {
     await waitFor(() => expect(dbApi.searchDownloadsV2).toHaveBeenCalledWith(expect.objectContaining({ offset: 5_000 })));
     await waitFor(() => expect(window.location.hash).toContain("page=251"));
     expect(screen.getByRole("status")).toHaveTextContent("直接開けるのは251ページ目まで");
+  });
+
+  it("keeps pending series search text when its sort changes before the debounce", async () => {
+    renderAuthor("#/people/pixiv/aoba?tab=series");
+    const search = await screen.findByRole("textbox", { name: "この作者のシリーズを検索" });
+    fireEvent.change(search, { target: { value: "目当て" } });
+    const sort = screen.getByRole("combobox", { name: "作者のシリーズの並び順" });
+    fireEvent.click(sort);
+    fireEvent.click(await screen.findByRole("option", { name: "合計容量：小さい順", hidden: true }));
+
+    expect(search).toHaveValue("目当て");
+    await waitFor(() => expect(window.location.hash).toContain("series_q=%E7%9B%AE%E5%BD%93%E3%81%A6"), { timeout: 1500 });
+    expect(window.location.hash).toContain("series_sort=file_size_bytes");
+  });
+
+  it("reports when the archive save dialog fails", async () => {
+    dialogs.saveDialog.mockRejectedValueOnce(new Error("save dialog unavailable"));
+    const show = vi.spyOn(notifications, "show");
+    try {
+      renderAuthor();
+      fireEvent.click(await screen.findByRole("button", { name: "アーカイブ" }));
+      await waitFor(() => expect(show).toHaveBeenCalledWith(expect.objectContaining({
+        color: "red",
+        title: "書き出しに失敗しました",
+        message: "save dialog unavailable",
+      })));
+      expect(dialogs.saveDialog).toHaveBeenCalledOnce();
+    } finally {
+      show.mockRestore();
+    }
   });
 
   it("does not let a late page response overwrite the position restored by Back", async () => {

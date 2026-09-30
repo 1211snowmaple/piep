@@ -409,10 +409,10 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
     // Canonicalize overlong and empty deep links without adding a history step.
     const canonical = seriesQuery || null;
     if (rawSeriesQuery === canonical) return;
-    const next = new URLSearchParams(urlParams);
+    const next = new URLSearchParams(latestParams.current);
     if (canonical) next.set("series_q", canonical); else next.delete("series_q");
     setUrlParams(next, { replace: true });
-  }, [rawSeriesQuery, seriesQuery, setUrlParams, urlParams]);
+  }, [rawSeriesQuery, seriesQuery, setUrlParams]);
   useEffect(() => () => cancelSeriesWrite(), []);
   useEffect(() => () => cancelWorkWrite(), []);
   // 戻る・保存した検索の復元など、URL が外から変わったときは手元を合わせる。
@@ -637,9 +637,12 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
   };
   const exportZip = async () => {
     if (!runtime) return notifications.show({ color: "piep", message: "書き出しはデスクトップアプリで利用できます" });
-    const path = await saveDialog({ title: "アーカイブを書き出す", defaultPath: `${displayName.replace(/[\\/:*?"<>|]/g, "_")}.zip`, filters: [{ name: "ZIP archive", extensions: ["zip"] }] });
-    if (!path) return;
-    try { await exportEntityZip(kind, source, key, path); notifications.show({ color: "green", title: "書き出しました", message: path }); }
+    try {
+      const path = await saveDialog({ title: "アーカイブを書き出す", defaultPath: `${displayName.replace(/[\\/:*?"<>|]/g, "_")}.zip`, filters: [{ name: "ZIP archive", extensions: ["zip"] }] });
+      if (!path) return;
+      await exportEntityZip(kind, source, key, path);
+      notifications.show({ color: "green", title: "書き出しました", message: path });
+    }
     catch (error) { notifications.show({ color: "red", title: "書き出しに失敗しました", message: errorMessage(error) }); }
   };
   const entityActions = [
@@ -930,7 +933,7 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
         </Grid.Col>
         <Grid.Col span={{ base: 12, lg: 3 }}>
           <Stack gap="lg">
-            <Card p="lg"><Stack gap="md"><Group justify="space-between"><Box><Text fw={700}>新着を監視</Text><Text size="xs" c="dimmed" mt={4}>{kind === "person" ? "新しい作品を検出" : "シリーズの続編を検出"}</Text></Box><Switch checked={targetMutation.isPending ? targetMutation.variables : target.data?.enabled ?? false} disabled={targetMutation.isPending || target.isLoading} onChange={(event) => targetMutation.mutate(event.currentTarget.checked)} aria-label="新着の更新監視" /></Group>{/* 監視に入れなくても、その場で一度だけ見に行ける。 */}<Button variant="light" leftSection={<Icons.updates size={IconSize.menu} />} onClick={() => runSingleCheck({ kind: kind === "person" ? "author" : "series", source, sourceKey: key, label: displayName }, () => navigate("/updates"))}>いま新作を確認</Button></Stack></Card>
+            <Card p="lg"><Stack gap="md"><Group justify="space-between"><Box><Text fw={700}>新着を監視</Text><Text size="xs" c="dimmed" mt={4}>{kind === "person" ? "新しい作品を検出" : "シリーズの続編を検出"}</Text></Box><Switch checked={targetMutation.isPending ? targetMutation.variables : target.data?.enabled ?? false} disabled={targetMutation.isPending || target.isLoading} onChange={(event) => targetMutation.mutate(event.currentTarget.checked)} aria-label="新着の更新監視" /></Group>{/* 監視に入れなくても、その場で一度だけ見に行ける。 */}<Button variant="light" leftSection={<Icons.updates size={IconSize.menu} />} onClick={() => runSingleCheck({ kind: kind === "person" ? "author" : "series", source, sourceKey: key, label: displayName }, () => navigate("/updates"))}>{kind === "person" ? "いま新作・改稿を確認" : "いま新作を確認"}</Button></Stack></Card>
             <Card p="lg"><Text fw={700} mb="md">プロフィール情報</Text><Stack gap="sm">{profileData.account && <Meta label="アカウント" value={`@${profileData.account}`} />}{profileStats && <><Meta label="小説" value={`${formatNumber(profileStats.totalNovels ?? 0)}作品`} /><Meta label="小説シリーズ" value={`${formatNumber(profileStats.totalNovelSeries ?? 0)}件`} /></>}{typeof profileData.sampleNovelCount === "number" && <Meta label="取得済み構成作品" value={`${formatNumber(profileData.sampleNovelCount)}件`} />}<Meta label="現在のバージョン" value={`v${entry.currentVersion}`} /><Meta label="最終取得" value={formatDate(entry.lastFetchedAt, true)} /><Meta label="最終確認" value={formatDate(entry.lastCheckedAt, true)} /></Stack></Card>
             {!runtime && <Note>プレビューではデモプロフィールを表示しています。</Note>}
           </Stack>

@@ -1,5 +1,6 @@
 import { MantineProvider } from "@mantine/core";
 import { ModalsProvider } from "@mantine/modals";
+import { notifications } from "@mantine/notifications";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, expect, it, vi } from "vitest";
@@ -14,6 +15,7 @@ import EpubPage from "./EpubPage";
 
 const api = vi.hoisted(() => ({ exportEpubBatch: vi.fn() }));
 const progressSubscription = vi.hoisted(() => ({ listen: vi.fn(), unlisten: vi.fn() }));
+const opener = vi.hoisted(() => ({ openFilesystemPath: vi.fn() }));
 vi.mock("@/services/dbApi", async (original) => ({
   ...(await original<typeof import("@/services/dbApi")>()),
   isTauriRuntime: () => true,
@@ -31,6 +33,7 @@ vi.mock("@/services/eventBus", () => ({
     return progressSubscription.unlisten;
   },
 }));
+vi.mock("@/services/openerApi", () => ({ openFilesystemPath: opener.openFilesystemPath }));
 
 function QueueProbe() {
   const { epubQueue, addToEpubQueue } = useWorkspace();
@@ -46,6 +49,31 @@ beforeEach(() => {
   api.exportEpubBatch.mockReset();
   progressSubscription.listen.mockReset();
   progressSubscription.unlisten.mockReset();
+  opener.openFilesystemPath.mockReset();
+});
+
+it("reports an output folder that can no longer be opened", async () => {
+  api.exportEpubBatch.mockResolvedValue({ successCount: 1, failedCount: 1, failedIds: [108], invalidIds: [], outputFiles: ["C:/exports/101.epub"], invalidCount: 0, issues: [], canceled: false, skippedIds: [] } satisfies ExportBatchResult);
+  opener.openFilesystemPath.mockRejectedValue(new Error("folder missing"));
+  const show = vi.spyOn(notifications, "show");
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(<MantineProvider><ModalsProvider><QueryClientProvider client={client}><AppRouter><WorkspaceProvider><EpubPage /></WorkspaceProvider></AppRouter></QueryClientProvider></ModalsProvider></MantineProvider>);
+
+  fireEvent.click(await screen.findByRole("button", { name: "2冊を書き出す" }));
+  fireEvent.click(await screen.findByRole("button", { name: "出力先を開く" }));
+  await waitFor(() => expect(show).toHaveBeenCalledWith(expect.objectContaining({ color: "red", title: "出力先を開けません", message: "folder missing" })));
+  expect(opener.openFilesystemPath).toHaveBeenCalledWith("C:/exports");
+  show.mockRestore();
+});
+
+it("keeps the successful export result visible after the queue empties", async () => {
+  api.exportEpubBatch.mockResolvedValue({ successCount: 2, failedCount: 0, failedIds: [], invalidIds: [], outputFiles: ["C:/exports/101.epub", "C:/exports/108.epub"], invalidCount: 0, issues: [], canceled: false, skippedIds: [] } satisfies ExportBatchResult);
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(<MantineProvider><ModalsProvider><QueryClientProvider client={client}><AppRouter><WorkspaceProvider><EpubPage /></WorkspaceProvider></AppRouter></QueryClientProvider></ModalsProvider></MantineProvider>);
+
+  fireEvent.click(await screen.findByRole("button", { name: "2冊を書き出す" }));
+  expect(await screen.findByText("EPUBキューは空です")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "出力先を開く" })).toBeInTheDocument();
 });
 
 it("marks failed EPUB batches as failed and retries only unfinished works", async () => {

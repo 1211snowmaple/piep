@@ -170,11 +170,15 @@ export default function EpubPage() {
   retryExportRef.current = (values) => exportMutation.mutate(values);
   const selectOutput = async () => {
     if (!runtime) return form.setFieldValue("outputDir", "C:/Users/preview/Documents/piep exports");
-    const path = await openSingleDialog({ directory: true, title: "EPUBの出力先" });
-    if (!path) return;
-    form.setFieldValue("outputDir", path);
-    // 選んだ先はその場で憶える。書き出す前に画面を離れても、次は選び直さずに済む。
-    writeExportSettings({ ...form.getValues(), outputDir: path });
+    try {
+      const path = await openSingleDialog({ directory: true, title: "EPUBの出力先" });
+      if (!path) return;
+      form.setFieldValue("outputDir", path);
+      // 選んだ先はその場で憶える。書き出す前に画面を離れても、次は選び直さずに済む。
+      writeExportSettings({ ...form.getValues(), outputDir: path });
+    } catch (error) {
+      notifications.show({ color: "red", title: "出力先を選択できません", message: errorMessage(error) });
+    }
   };
   const totalSize = useMemo(() => works.reduce((sum, work) => sum + work.fileSizeBytes, 0), [works]);
   const templateOptions = useMemo(() => [
@@ -185,7 +189,10 @@ export default function EpubPage() {
   return (
     <div className="page page--contained epub-page">
       <PageHeader title="EPUB書き出し" description="選んだ作品を、端末に合わせた高品質な電子書籍へ書き出します。" actions={<Button variant="default" leftSection={<Icons.epubTemplate size={IconSize.menu} />} onClick={() => navigate("/epub/templates")}>テンプレートスタジオ</Button>} />
-      {!epubQueue.length ? <EmptyState icon={Icons.epub} title="EPUBキューは空です" description="ライブラリや作品詳細から、書き出したい作品をキューに追加してください。" action={<Button onClick={() => navigate("/library")}>ライブラリを開く</Button>} /> : (
+      {!epubQueue.length ? <Stack gap="lg">
+        {result && <ExportResult result={result} outputDir={form.values.outputDir} runtime={runtime} />}
+        <EmptyState icon={Icons.epub} title="EPUBキューは空です" description="ライブラリや作品詳細から、書き出したい作品をキューに追加してください。" action={<Button onClick={() => navigate("/library")}>ライブラリを開く</Button>} />
+      </Stack> : (
         <form onSubmit={form.onSubmit((values) => { writeExportSettings(values); exportMutation.mutate({ ...values, works: works.map(({ id, title }) => ({ id, title })) }); })}>
           <Grid gap="lg" align="flex-start">
             <Grid.Col span={{ base: 12, lg: 7 }}>
@@ -243,6 +250,13 @@ export default function EpubPage() {
 function ExportResult({ result, outputDir, runtime }: { result: ExportBatchResult; outputDir: string; runtime: boolean }) {
   const failed = result.failedCount > 0 || result.invalidCount > 0;
   const clean = !result.canceled && !failed && !result.issues.length;
+  const openOutput = async () => {
+    try {
+      await openFilesystemPath(outputDir);
+    } catch (error) {
+      notifications.show({ color: "red", title: "出力先を開けません", message: errorMessage(error) });
+    }
+  };
   return (
     <Alert color={result.canceled ? "yellow" : failed ? "red" : clean ? "green" : "yellow"} icon={!result.canceled && failed ? <Icons.error size={IconSize.action} /> : <Icons.confirm size={IconSize.action} />} title={result.canceled ? "書き出しを中止しました" : failed ? "書き出せない作品がありました" : "書き出し完了"}>
       <Stack gap="xs">
@@ -258,7 +272,7 @@ function ExportResult({ result, outputDir, runtime }: { result: ExportBatchResul
             </ScrollArea.Autosize>
           </Box>
         )}
-        {outputDir && result.successCount > 0 && <Button size="xs" variant="light" w="fit-content" leftSection={<Icons.openFolder size={IconSize.inline} />} disabled={!runtime} onClick={() => openFilesystemPath(outputDir)}>出力先を開く</Button>}
+        {outputDir && result.successCount > 0 && <Button size="xs" variant="light" w="fit-content" leftSection={<Icons.openFolder size={IconSize.inline} />} disabled={!runtime} onClick={() => { void openOutput(); }}>出力先を開く</Button>}
       </Stack>
     </Alert>
   );
