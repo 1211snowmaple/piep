@@ -1838,6 +1838,7 @@ async fn save_series_snapshot_from_download(
     });
     let hash = sha256_json(&normalized)?;
     let mut pending_version = None;
+    let mut json_size = 0;
     let json_path =
         if existing.as_ref().and_then(|s| s.content_hash.as_deref()) == Some(hash.as_str()) {
             String::new()
@@ -1858,6 +1859,7 @@ async fn save_series_snapshot_from_download(
             pending_version = Some(PendingProfileVersion::create(dir.clone())?);
             let path = dir.join("original.json");
             let content = serde_json::to_string_pretty(&normalized).map_err(|e| e.to_string())?;
+            json_size = content.len() as i64;
             tokio::fs::write(&path, content)
                 .await
                 .map_err(|e| e.to_string())?;
@@ -1874,7 +1876,7 @@ async fn save_series_snapshot_from_download(
             &hash,
             &json_path,
             0,
-            0,
+            json_size,
             EntityProfileFreshness::SnapshotOnly,
             // 保存のついでに作る控えなので、取得元へ聞きには行かない。完結の
             // 有無と公開話数は「情報を更新」のときに埋まる。
@@ -3563,6 +3565,34 @@ mod profile_save_lock_tests {
 mod profile_save_failure_tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn series_snapshot_history_counts_the_saved_json() {
+        let root = std::env::temp_dir().join(format!(
+            "piep_series_snapshot_size_test_{}",
+            rand::random::<u64>()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let db = Database::open(&root.join("piep.db"), &root.join("downloads")).unwrap();
+        let state = Arc::new(AppState::new(db));
+        let data = serde_json::json!({"seriesId": "series-size", "seriesTitle": "Series"});
+        save_series_snapshot_from_download(&state, &data, "pixiv", None)
+            .await
+            .unwrap();
+        let versions = state
+            .db
+            .list_entity_versions("series", "pixiv", "series-size")
+            .unwrap();
+        assert_eq!(versions.len(), 1);
+        assert_eq!(versions[0].asset_count, 0);
+        assert_eq!(
+            versions[0].file_size_bytes,
+            std::fs::metadata(&versions[0].json_path).unwrap().len() as i64
+        );
+
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[tokio::test]
     async fn rejected_profile_versions_leave_no_database_row_or_new_files() {
