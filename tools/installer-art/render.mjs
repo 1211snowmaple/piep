@@ -42,7 +42,8 @@ function inline(svg, width) {
     .trim();
 }
 
-const FONT = `"Yu Gothic UI", "Meiryo", system-ui, sans-serif`;
+// This value is inserted into a double-quoted HTML style attribute.
+const FONT = `'Yu Gothic UI', 'Meiryo', system-ui, sans-serif`;
 
 const pages = [
   {
@@ -59,8 +60,8 @@ const pages = [
           ${inline(lockup, 124)}
         </div>
         <div style="position:absolute;left:0;right:0;bottom:20px;text-align:center;
-                    font-family:${FONT};font-size:9px;line-height:1.7;color:#C2CCD6;
-                    letter-spacing:.04em">
+                    font-family:${FONT};font-size:11px;font-weight:600;line-height:1.55;
+                    color:#F4F7FA;letter-spacing:.02em">
           自分のPCに、<br>丸ごと残して読む
         </div>
       </div>`,
@@ -118,6 +119,15 @@ for (const spec of pages) {
      ${spec.body}`,
     { waitUntil: "load" },
   );
+  if (spec.name === "nsis-sidebar") {
+    const footer = await page.locator("body > div > div:last-child").evaluate((element) => {
+      const style = getComputedStyle(element);
+      return { color: style.color, fontSize: style.fontSize };
+    });
+    if (footer.color !== "rgb(244, 247, 250)" || footer.fontSize !== "11px") {
+      throw new Error(`NSIS sidebar tagline style was not applied: ${JSON.stringify(footer)}`);
+    }
+  }
   const png = resolve(outDir, `${spec.name}.png`);
   mkdirSync(dirname(png), { recursive: true });
   await page.screenshot({ path: png, clip: { x: 0, y: 0, width: spec.width, height: spec.height } });
