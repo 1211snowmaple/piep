@@ -50,11 +50,98 @@ fn work_save_mutex(source: &str, source_id: &str) -> Arc<WorkSaveMutex> {
 /// 良い icon_path を上書きする**。
 ///
 /// 作品の鍵と同じ表を使う。前置きを付けて、作品の鍵と衝突させない。
-fn profile_save_mutex(kind: &str, source: &str, entity_id: &str) -> Arc<WorkSaveMutex> {
+pub(super) fn profile_save_mutex(
+    kind: &str,
+    source: &str,
+    entity_id: &str,
+) -> Arc<tokio::sync::Mutex<()>> {
     work_save_mutex(
         &format!("profile:{kind}"),
         &format!("{source}\0{entity_id}"),
     )
+}
+
+/// Remove only a newly created, uncommitted profile version. An older orphan
+/// may be retried, but must not be mistaken for a directory owned by this call.
+pub(super) struct PendingProfileVersion {
+    path: PathBuf,
+    owned: bool,
+    committed: bool,
+}
+
+impl PendingProfileVersion {
+    pub(super) fn create(path: PathBuf) -> Result<Self, String> {
+        let parent = path
+            .parent()
+            .ok_or_else(|| "Profile version has no parent directory".to_string())?;
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        let owned = match std::fs::create_dir(&path) {
+            Ok(()) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let metadata = std::fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
+                if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+                    return Err("Profile version path is not a regular directory".to_string());
+                }
+                false
+            }
+            Err(error) => return Err(error.to_string()),
+        };
+        Ok(Self {
+            path,
+            owned,
+            committed: false,
+        })
+    }
+
+    pub(super) fn commit(&mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for PendingProfileVersion {
+    fn drop(&mut self) {
+        if self.owned && !self.committed {
+            if let Err(error) = std::fs::remove_dir_all(&self.path) {
+                log::warn!(
+                    "Could not remove uncommitted profile version {}: {error}",
+                    self.path.display()
+                );
+            }
+        }
+    }
+}
+
+/// A repaired image is written into an already committed version. Remove it
+/// if the database update does not commit.
+pub(super) struct PendingProfileAsset {
+    path: PathBuf,
+    committed: bool,
+}
+
+impl PendingProfileAsset {
+    pub(super) fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            committed: false,
+        }
+    }
+
+    pub(super) fn commit(&mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for PendingProfileAsset {
+    fn drop(&mut self) {
+        if !self.committed {
+            if let Err(error) = std::fs::remove_file(&self.path) {
+                log::warn!(
+                    "Could not remove uncommitted profile image {}: {error}",
+                    self.path.display()
+                );
+            }
+        }
+    }
 }
 
 const VERSION_STAGE_SYNC_MAX_DEPTH: usize = 32;
@@ -1626,33 +1713,48 @@ async fn save_person_snapshot_from_download(
         .as_ref()
         .map(|person| person.current_version + 1)
         .unwrap_or(1);
-    let json_path =
-        if existing.as_ref().and_then(|p| p.content_hash.as_deref()) == Some(hash.as_str()) {
-            String::new()
-        } else {
-            let dir = state
-                .db
-                .storage_dir()
-                .parent()
-                .unwrap_or_else(|| state.db.storage_dir())
-                .join("profiles")
-                .join(safe_entity_segment(source))
-                .join(safe_entity_segment(author_id))
-                .join(format!("v{}", next_version));
-            tokio::fs::create_dir_all(&dir)
-                .await
-                .map_err(|e| e.to_string())?;
-            let path = dir.join("original.json");
-            let content = serde_json::to_string_pretty(&normalized).map_err(|e| e.to_string())?;
-            tokio::fs::write(&path, content)
-                .await
-                .map_err(|e| e.to_string())?;
-            path.to_string_lossy().to_string()
-        };
+    let changed = existing.as_ref().and_then(|p| p.content_hash.as_deref()) != Some(hash.as_str());
+    let mut pending_version = None;
+    let mut pending_icon = None;
+    let mut json_size = 0;
+    let json_path = if !changed {
+        String::new()
+    } else {
+        let dir = state
+            .db
+            .storage_dir()
+            .parent()
+            .unwrap_or_else(|| state.db.storage_dir())
+            .join("profiles")
+            .join(safe_entity_segment(source))
+            .join(safe_entity_segment(author_id))
+            .join(format!("v{}", next_version));
+        pending_version = Some(PendingProfileVersion::create(dir.clone())?);
+        let path = dir.join("original.json");
+        let content = serde_json::to_string_pretty(&normalized).map_err(|e| e.to_string())?;
+        json_size = content.len() as i64;
+        tokio::fs::write(&path, content)
+            .await
+            .map_err(|e| e.to_string())?;
+        path.to_string_lossy().to_string()
+    };
+    let icon_version = if changed {
+        next_version
+    } else {
+        existing
+            .as_ref()
+            .map(|person| person.current_version)
+            .unwrap_or(1)
+    };
     let (icon_path, icon_size) = match icon_url {
         Some(url) => {
-            match download_person_snapshot_icon(state, source, author_id, next_version, url).await {
-                Ok(value) => value.map_or((None, 0), |(path, size)| (Some(path), size)),
+            match download_person_snapshot_icon(state, source, author_id, icon_version, url).await {
+                Ok(value) => value.map_or((None, 0), |(path, size, downloaded)| {
+                    if !changed && downloaded {
+                        pending_icon = Some(PendingProfileAsset::new(PathBuf::from(&path)));
+                    }
+                    (Some(path), size)
+                }),
                 Err(error) => {
                     log::warn!(
                         "Failed to cache profile icon for {}:{}: {}",
@@ -1690,9 +1792,15 @@ async fn save_person_snapshot_from_download(
             &hash,
             &json_path,
             i64::from(icon_path.is_some()),
-            icon_size,
+            json_size + icon_size,
             EntityProfileFreshness::SnapshotOnly,
         )?;
+    }
+    if let Some(pending) = pending_version.as_mut() {
+        pending.commit();
+    }
+    if let Some(pending) = pending_icon.as_mut() {
+        pending.commit();
     }
     Ok(())
 }
@@ -1729,6 +1837,7 @@ async fn save_series_snapshot_from_download(
         "seriesNavigation": data.get("seriesNavigation").or_else(|| data.get("detail").and_then(|d| d.get("seriesNavigation"))),
     });
     let hash = sha256_json(&normalized)?;
+    let mut pending_version = None;
     let json_path =
         if existing.as_ref().and_then(|s| s.content_hash.as_deref()) == Some(hash.as_str()) {
             String::new()
@@ -1746,9 +1855,7 @@ async fn save_series_snapshot_from_download(
                 .join(safe_entity_segment(source))
                 .join(safe_entity_segment(&series_id))
                 .join(format!("v{}", next_version));
-            tokio::fs::create_dir_all(&dir)
-                .await
-                .map_err(|e| e.to_string())?;
+            pending_version = Some(PendingProfileVersion::create(dir.clone())?);
             let path = dir.join("original.json");
             let content = serde_json::to_string_pretty(&normalized).map_err(|e| e.to_string())?;
             tokio::fs::write(&path, content)
@@ -1775,6 +1882,9 @@ async fn save_series_snapshot_from_download(
             None,
         )?;
     }
+    if let Some(pending) = pending_version.as_mut() {
+        pending.commit();
+    }
     Ok(())
 }
 
@@ -1784,7 +1894,7 @@ async fn download_person_snapshot_icon(
     author_id: &str,
     version: i64,
     url: &str,
-) -> Result<Option<(String, i64)>, String> {
+) -> Result<Option<(String, i64, bool)>, String> {
     if url.trim().is_empty() {
         return Ok(None);
     }
@@ -1813,7 +1923,11 @@ async fn download_person_snapshot_icon(
             .await
             .map_err(|error| error.to_string())?
             .len();
-        return Ok(Some((path.to_string_lossy().to_string(), bytes as i64)));
+        return Ok(Some((
+            path.to_string_lossy().to_string(),
+            bytes as i64,
+            false,
+        )));
     }
     if let Ok(metadata) = tokio::fs::symlink_metadata(&path).await {
         if metadata.file_type().is_file() || metadata.file_type().is_symlink() {
@@ -1851,7 +1965,11 @@ async fn download_person_snapshot_icon(
         true,
     )
     .await?;
-    Ok(Some((path.to_string_lossy().to_string(), bytes as i64)))
+    Ok(Some((
+        path.to_string_lossy().to_string(),
+        bytes as i64,
+        true,
+    )))
 }
 
 async fn sync_download_entities(
@@ -3438,6 +3556,180 @@ mod profile_save_lock_tests {
         let work = work_save_mutex("pixiv", "1234");
         let profile = profile_save_mutex("person", "pixiv", "1234");
         assert!(!std::sync::Arc::ptr_eq(&work, &profile));
+    }
+}
+
+#[cfg(test)]
+mod profile_save_failure_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn rejected_profile_versions_leave_no_database_row_or_new_files() {
+        let root = std::env::temp_dir().join(format!(
+            "piep_profile_failure_test_{}",
+            rand::random::<u64>()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let db_path = root.join("piep.db");
+        let db = Database::open(&db_path, &root.join("downloads")).unwrap();
+        rusqlite::Connection::open(&db_path)
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER reject_profile_version BEFORE INSERT ON entity_versions
+                 WHEN NEW.entity_type IN ('person', 'series')
+                 BEGIN SELECT RAISE(ABORT, 'injected profile failure'); END;",
+            )
+            .unwrap();
+        let state = Arc::new(AppState::new(db));
+
+        let person = serde_json::json!({"detail": {"user": {"comment": "test"}}});
+        assert!(save_person_snapshot_from_download(
+            &state,
+            &person,
+            "pixiv",
+            "person-failure",
+            "Author"
+        )
+        .await
+        .is_err());
+        assert!(state.db.get_person("pixiv", "person-failure").is_err());
+        assert!(!root.join("profiles/pixiv/person-failure/v1").exists());
+
+        let series = serde_json::json!({"seriesId": "series-failure", "seriesTitle": "Series"});
+        assert!(
+            save_series_snapshot_from_download(&state, &series, "pixiv", None)
+                .await
+                .is_err()
+        );
+        assert!(state.db.get_series("pixiv", "series-failure").is_err());
+        assert!(!root.join("series/pixiv/series-failure/v1").exists());
+
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_icon_repair_removes_new_file_and_retry_updates_version_metadata() {
+        let root = std::env::temp_dir().join(format!(
+            "piep_profile_icon_repair_test_{}",
+            rand::random::<u64>()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let db_path = root.join("piep.db");
+        let db = Database::open(&db_path, &root.join("downloads")).unwrap();
+        let state = Arc::new(AppState::new(db));
+
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgb8(1, 1)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        let png = png.into_inner();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/icon.png", listener.local_addr().unwrap());
+        let served_png = png.clone();
+        let server = tokio::spawn(async move {
+            for _ in 0..2 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0u8; 1024];
+                assert!(socket.read(&mut request).await.unwrap() > 0);
+                let headers = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    served_png.len()
+                );
+                socket.write_all(headers.as_bytes()).await.unwrap();
+                socket.write_all(&served_png).await.unwrap();
+            }
+        });
+
+        let normalized = serde_json::json!({
+            "source": "pixiv",
+            "sourceKey": "person-icon-repair",
+            "displayName": "Author",
+            "iconUrl": url,
+            "coverUrl": null,
+            "description": null,
+            "links": ["https://www.pixiv.net/users/person-icon-repair"],
+        });
+        let hash = sha256_json(&normalized).unwrap();
+        let version_dir = root.join("profiles/pixiv/person-icon-repair/v1");
+        std::fs::create_dir_all(&version_dir).unwrap();
+        let json_path = version_dir.join("original.json");
+        let json = serde_json::to_string_pretty(&normalized).unwrap();
+        std::fs::write(&json_path, &json).unwrap();
+        state
+            .db
+            .upsert_person_profile(
+                "pixiv",
+                "person-icon-repair",
+                "Author",
+                None,
+                None,
+                None,
+                Some("[\"https://www.pixiv.net/users/person-icon-repair\"]"),
+                &hash,
+                &json_path.to_string_lossy(),
+                0,
+                json.len() as i64,
+                EntityProfileFreshness::SnapshotOnly,
+            )
+            .unwrap();
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TRIGGER reject_icon_update BEFORE UPDATE ON people
+             WHEN NEW.source_key = 'person-icon-repair'
+             BEGIN SELECT RAISE(ABORT, 'injected icon update failure'); END;",
+        )
+        .unwrap();
+        let download_data = serde_json::json!({"user": {"profile_image_urls": {"medium": url}}});
+        assert!(save_person_snapshot_from_download(
+            &state,
+            &download_data,
+            "pixiv",
+            "person-icon-repair",
+            "Author"
+        )
+        .await
+        .is_err());
+        let icon_path = version_dir.join("assets/icon.png");
+        assert!(!icon_path.exists());
+        assert!(json_path.exists());
+        assert!(state
+            .db
+            .get_person("pixiv", "person-icon-repair")
+            .unwrap()
+            .icon_path
+            .is_none());
+
+        conn.execute_batch("DROP TRIGGER reject_icon_update;")
+            .unwrap();
+        save_person_snapshot_from_download(
+            &state,
+            &download_data,
+            "pixiv",
+            "person-icon-repair",
+            "Author",
+        )
+        .await
+        .unwrap();
+        server.await.unwrap();
+        let person = state.db.get_person("pixiv", "person-icon-repair").unwrap();
+        assert_eq!(person.current_version, 1);
+        assert_eq!(
+            person.icon_path.as_deref().map(Path::new),
+            Some(icon_path.as_path())
+        );
+        let versions = state
+            .db
+            .list_entity_versions("person", "pixiv", "person-icon-repair")
+            .unwrap();
+        assert_eq!(versions.len(), 1);
+        assert_eq!(versions[0].asset_count, 1);
+        assert_eq!(versions[0].file_size_bytes, (json.len() + png.len()) as i64);
+
+        drop(conn);
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
 

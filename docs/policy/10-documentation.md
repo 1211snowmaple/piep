@@ -176,7 +176,7 @@ HTML コメントは GitHub でも VitePress でも描画されないので、�
 
 | | 残り |
 |---|---:|
-| Rust の `///` `//!` | <!--stat:comments.rust.english-->603<!--/stat--> 行 |
+| Rust の `///` `//!` | <!--stat:comments.rust.english-->607<!--/stat--> 行 |
 | TS の JSDoc | <!--stat:comments.ts.english-->501<!--/stat--> 行 |
 
 この数は日本語の文字を含まない説明コメントの行数で、目安である（URL だけの行や
