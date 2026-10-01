@@ -777,6 +777,244 @@ fn entity_reconstruction_preserves_fetched_profiles_and_versions() {
 }
 
 #[test]
+fn profile_upserts_roll_back_when_version_insertion_fails() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    db.upsert_person_profile(
+        "pixiv",
+        "person-rollback",
+        "Before",
+        None,
+        None,
+        None,
+        None,
+        "person-hash-1",
+        "profiles/person-rollback/v1/original.json",
+        0,
+        10,
+        EntityProfileFreshness::RemoteChecked,
+    )
+    .unwrap();
+    db.upsert_series_profile(
+        "pixiv",
+        "series-rollback",
+        "Before",
+        None,
+        None,
+        "series-hash-1",
+        "series/series-rollback/v1/original.json",
+        0,
+        10,
+        EntityProfileFreshness::RemoteChecked,
+        None,
+        None,
+    )
+    .unwrap();
+    db.conn
+        .lock()
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER reject_profile_version BEFORE INSERT ON entity_versions
+         WHEN NEW.entity_type IN ('person', 'series') AND NEW.version = 2
+         BEGIN SELECT RAISE(ABORT, 'injected version failure'); END;",
+        )
+        .unwrap();
+
+    assert!(db
+        .upsert_person_profile(
+            "pixiv",
+            "person-rollback",
+            "After",
+            None,
+            None,
+            None,
+            None,
+            "person-hash-2",
+            "profiles/person-rollback/v2/original.json",
+            0,
+            10,
+            EntityProfileFreshness::RemoteChecked,
+        )
+        .is_err());
+    assert!(db
+        .upsert_series_profile(
+            "pixiv",
+            "series-rollback",
+            "After",
+            None,
+            None,
+            "series-hash-2",
+            "series/series-rollback/v2/original.json",
+            0,
+            10,
+            EntityProfileFreshness::RemoteChecked,
+            None,
+            None,
+        )
+        .is_err());
+
+    let person = db.get_person("pixiv", "person-rollback").unwrap();
+    assert_eq!(person.display_name, "Before");
+    assert_eq!(person.content_hash.as_deref(), Some("person-hash-1"));
+    assert_eq!(person.current_version, 1);
+    assert_eq!(
+        db.list_entity_versions("person", "pixiv", "person-rollback")
+            .unwrap()
+            .len(),
+        1
+    );
+    let series = db.get_series("pixiv", "series-rollback").unwrap();
+    assert_eq!(series.title, "Before");
+    assert_eq!(series.content_hash.as_deref(), Some("series-hash-1"));
+    assert_eq!(series.current_version, 1);
+    assert_eq!(
+        db.list_entity_versions("series", "pixiv", "series-rollback")
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn repaired_profile_images_update_history_atomically() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    db.upsert_person_profile(
+        "pixiv",
+        "person-image-repair",
+        "Author",
+        None,
+        None,
+        None,
+        None,
+        "person-hash",
+        "profiles/person-image-repair/v1/original.json",
+        0,
+        10,
+        EntityProfileFreshness::SnapshotOnly,
+    )
+    .unwrap();
+    db.upsert_series_profile(
+        "pixiv",
+        "series-image-repair",
+        "Series",
+        None,
+        None,
+        "series-hash",
+        "series/series-image-repair/v1/original.json",
+        0,
+        10,
+        EntityProfileFreshness::SnapshotOnly,
+        None,
+        None,
+    )
+    .unwrap();
+    let conn = db.conn.lock().unwrap();
+    conn.execute_batch(
+        "CREATE TRIGGER reject_image_metadata BEFORE UPDATE ON entity_versions
+         WHEN NEW.source_key IN ('person-image-repair', 'series-image-repair')
+         BEGIN SELECT RAISE(ABORT, 'injected metadata failure'); END;",
+    )
+    .unwrap();
+    drop(conn);
+    assert!(db
+        .upsert_person_profile(
+            "pixiv",
+            "person-image-repair",
+            "Author",
+            Some("icon.png"),
+            None,
+            None,
+            None,
+            "person-hash",
+            "",
+            1,
+            20,
+            EntityProfileFreshness::SnapshotOnly,
+        )
+        .is_err());
+    assert!(db
+        .upsert_series_profile(
+            "pixiv",
+            "series-image-repair",
+            "Series",
+            None,
+            Some("cover.png"),
+            "series-hash",
+            "",
+            1,
+            20,
+            EntityProfileFreshness::SnapshotOnly,
+            None,
+            None,
+        )
+        .is_err());
+    assert!(db
+        .get_person("pixiv", "person-image-repair")
+        .unwrap()
+        .icon_path
+        .is_none());
+    assert!(db
+        .get_series("pixiv", "series-image-repair")
+        .unwrap()
+        .cover_path
+        .is_none());
+    for (kind, key) in [
+        ("person", "person-image-repair"),
+        ("series", "series-image-repair"),
+    ] {
+        let versions = db.list_entity_versions(kind, "pixiv", key).unwrap();
+        assert_eq!(versions.len(), 1);
+        assert_eq!(versions[0].asset_count, 0);
+        assert_eq!(versions[0].file_size_bytes, 10);
+    }
+    db.conn
+        .lock()
+        .unwrap()
+        .execute_batch("DROP TRIGGER reject_image_metadata;")
+        .unwrap();
+    db.upsert_person_profile(
+        "pixiv",
+        "person-image-repair",
+        "Author",
+        Some("icon.png"),
+        None,
+        None,
+        None,
+        "person-hash",
+        "",
+        1,
+        20,
+        EntityProfileFreshness::SnapshotOnly,
+    )
+    .unwrap();
+    db.upsert_series_profile(
+        "pixiv",
+        "series-image-repair",
+        "Series",
+        None,
+        Some("cover.png"),
+        "series-hash",
+        "",
+        1,
+        20,
+        EntityProfileFreshness::SnapshotOnly,
+        None,
+        None,
+    )
+    .unwrap();
+    for (kind, key) in [
+        ("person", "person-image-repair"),
+        ("series", "series-image-repair"),
+    ] {
+        let versions = db.list_entity_versions(kind, "pixiv", key).unwrap();
+        assert_eq!(versions.len(), 1);
+        assert_eq!(versions[0].asset_count, 1);
+        assert_eq!(versions[0].file_size_bytes, 30);
+    }
+}
+
+#[test]
 fn incomplete_entity_profiles_are_retryable_until_remote_checked() {
     let (_temp, root, storage) = temp_paths();
     let db = Database::open(&root.join("piep.db"), &storage).unwrap();

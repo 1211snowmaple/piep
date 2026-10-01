@@ -3564,18 +3564,21 @@ impl Database {
         file_size_bytes: i64,
         freshness: EntityProfileFreshness,
     ) -> Result<PersonEntry, String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        let (current_hash, current_version): (Option<String>, i64) = conn
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let (current_hash, current_version, current_icon_path): (Option<String>, i64, Option<String>) = tx
             .query_row(
-                "SELECT content_hash, current_version FROM people WHERE source = ?1 AND source_key = ?2",
+                "SELECT content_hash, current_version, icon_path FROM people WHERE source = ?1 AND source_key = ?2",
                 params![source, source_key],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
-            .unwrap_or((None, 0));
+            .optional()
+            .map_err(|e| format!("Failed to read person version: {e}"))?
+            .unwrap_or((None, 0, None));
         let now = chrono::Utc::now().to_rfc3339();
         let checked_at = freshness.checked_at(&now);
         if current_hash.as_deref() == Some(content_hash) {
-            conn.execute(
+            tx.execute(
                 "UPDATE people SET display_name = ?1, icon_path = ?2, cover_path = ?3,
                     description = ?4, links_json = ?5,
                     last_checked_at = COALESCE(?6, last_checked_at),
@@ -3593,9 +3596,18 @@ impl Database {
                 ],
             )
             .map_err(|e| format!("Failed to mark person checked: {}", e))?;
+            if current_icon_path.is_none() && icon_path.is_some() && asset_count > 0 {
+                tx.execute(
+                    "UPDATE entity_versions SET asset_count = asset_count + ?1,
+                        file_size_bytes = file_size_bytes + ?2
+                     WHERE entity_type = 'person' AND source = ?3 AND source_key = ?4 AND version = ?5",
+                    params![asset_count, file_size_bytes, source, source_key, current_version],
+                )
+                .map_err(|e| format!("Failed to update repaired person icon metadata: {e}"))?;
+            }
         } else {
             let next_version = current_version + 1;
-            conn.execute(
+            tx.execute(
                 "INSERT INTO people (
                     source, source_key, display_name, icon_path, cover_path, description, links_json,
                     content_hash, current_version, last_checked_at, last_fetched_at, created_at, updated_at
@@ -3617,8 +3629,8 @@ impl Database {
                 ],
             )
             .map_err(|e| format!("Failed to upsert person: {}", e))?;
-            conn.execute(
-                "INSERT OR IGNORE INTO entity_versions (
+            tx.execute(
+                "INSERT INTO entity_versions (
                     entity_type, source, source_key, version, content_hash, json_path,
                     asset_count, file_size_bytes, created_at, change_summary
                  ) VALUES ('person', ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
@@ -3640,8 +3652,19 @@ impl Database {
             )
             .map_err(|e| format!("Failed to insert person version: {}", e))?;
         }
-        drop(conn);
-        self.get_person(source, source_key)
+        let person = tx
+            .query_row(
+                "SELECT p.*,
+                    (SELECT COUNT(DISTINCT download_id) FROM download_people dp
+                     WHERE dp.person_source = p.source AND dp.person_key = p.source_key) AS work_count
+                 FROM people p WHERE p.source = ?1 AND p.source_key = ?2",
+                params![source, source_key],
+                person_entry_from_row,
+            )
+            .map_err(|e| format!("Failed to read saved person: {e}"))?;
+        tx.commit()
+            .map_err(|e| format!("Failed to commit person profile: {e}"))?;
+        Ok(person)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3666,18 +3689,21 @@ impl Database {
         is_concluded: Option<bool>,
         published_content_count: Option<i64>,
     ) -> Result<SeriesEntry, String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        let (current_hash, current_version): (Option<String>, i64) = conn
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let (current_hash, current_version, current_cover_path): (Option<String>, i64, Option<String>) = tx
             .query_row(
-                "SELECT content_hash, current_version FROM series WHERE source = ?1 AND source_key = ?2",
+                "SELECT content_hash, current_version, cover_path FROM series WHERE source = ?1 AND source_key = ?2",
                 params![source, source_key],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
-            .unwrap_or((None, 0));
+            .optional()
+            .map_err(|e| format!("Failed to read series version: {e}"))?
+            .unwrap_or((None, 0, None));
         let now = chrono::Utc::now().to_rfc3339();
         let checked_at = freshness.checked_at(&now);
         if current_hash.as_deref() == Some(content_hash) {
-            conn.execute(
+            tx.execute(
                 "UPDATE series SET title = ?1, description = ?2, cover_path = COALESCE(?3, cover_path),
                     last_checked_at = COALESCE(?4, last_checked_at),
                     is_concluded = COALESCE(?7, is_concluded),
@@ -3696,9 +3722,18 @@ impl Database {
                 ],
             )
             .map_err(|e| format!("Failed to mark series checked: {}", e))?;
+            if current_cover_path.is_none() && cover_path.is_some() && asset_count > 0 {
+                tx.execute(
+                    "UPDATE entity_versions SET asset_count = asset_count + ?1,
+                        file_size_bytes = file_size_bytes + ?2
+                     WHERE entity_type = 'series' AND source = ?3 AND source_key = ?4 AND version = ?5",
+                    params![asset_count, file_size_bytes, source, source_key, current_version],
+                )
+                .map_err(|e| format!("Failed to update repaired series cover metadata: {e}"))?;
+            }
         } else {
             let next_version = current_version + 1;
-            conn.execute(
+            tx.execute(
                 "INSERT INTO series (
                     source, source_key, title, description, cover_path, content_hash,
                     current_version, last_checked_at, last_fetched_at, created_at, updated_at,
@@ -3729,8 +3764,8 @@ impl Database {
                 ],
             )
             .map_err(|e| format!("Failed to upsert series: {}", e))?;
-            conn.execute(
-                "INSERT OR IGNORE INTO entity_versions (
+            tx.execute(
+                "INSERT INTO entity_versions (
                     entity_type, source, source_key, version, content_hash, json_path,
                     asset_count, file_size_bytes, created_at, change_summary
                  ) VALUES ('series', ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
@@ -3752,8 +3787,19 @@ impl Database {
             )
             .map_err(|e| format!("Failed to insert series version: {}", e))?;
         }
-        drop(conn);
-        self.get_series(source, source_key)
+        let series = tx
+            .query_row(
+                "SELECT s.*,
+                    (SELECT COUNT(DISTINCT download_id) FROM download_series ds
+                     WHERE ds.series_source = s.source AND ds.series_key = s.source_key) AS work_count
+                 FROM series s WHERE s.source = ?1 AND s.source_key = ?2",
+                params![source, source_key],
+                series_entry_from_row,
+            )
+            .map_err(|e| format!("Failed to read saved series: {e}"))?;
+        tx.commit()
+            .map_err(|e| format!("Failed to commit series profile: {e}"))?;
+        Ok(series)
     }
 
     pub fn list_download_relations(

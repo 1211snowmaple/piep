@@ -2141,6 +2141,8 @@ pub async fn refresh_entity_profile(
             return Err("Unsupported person source".to_string());
         };
 
+        let profile_lock = super::downloader::profile_save_mutex("person", &source, &source_key);
+        let _profile_guard = profile_lock.lock().await;
         let _library_write_guard = state.library_gate.clone().write_owned().await;
         let hash = hash_json(&normalized)?;
         let existing = state.db.get_person(&source, &source_key).ok();
@@ -2150,7 +2152,16 @@ pub async fn refresh_entity_profile(
             .as_ref()
             .map(|p| p.current_version + 1)
             .unwrap_or(1);
+        let mut pending_version = None;
         let (json_path, json_size, icon_path, cover_path, asset_size, asset_count) = if changed {
+            let version_dir = app_data
+                .join("profiles")
+                .join(safe_entity_segment(&source))
+                .join(safe_entity_segment(&source_key))
+                .join(format!("v{next_version}"));
+            pending_version = Some(super::downloader::PendingProfileVersion::create(
+                version_dir,
+            )?);
             let (json_path, json_size) = save_entity_json(
                 &app_data,
                 "person",
@@ -2225,6 +2236,9 @@ pub async fn refresh_entity_profile(
             json_size + asset_size,
             EntityProfileFreshness::RemoteChecked,
         )?;
+        if let Some(pending) = pending_version.as_mut() {
+            pending.commit();
+        }
         return serde_json::to_value(person).map_err(|e| e.to_string());
     }
 
@@ -2271,6 +2285,8 @@ pub async fn refresh_entity_profile(
                 "coverUrl": null,
             })
         };
+        let profile_lock = super::downloader::profile_save_mutex("series", &source, &source_key);
+        let _profile_guard = profile_lock.lock().await;
         let _library_write_guard = state.library_gate.clone().write_owned().await;
         existing = state.db.get_series(&source, &source_key).ok();
         let hash = hash_json(&normalized)?;
@@ -2280,7 +2296,16 @@ pub async fn refresh_entity_profile(
             .as_ref()
             .map(|s| s.current_version + 1)
             .unwrap_or(1);
+        let mut pending_version = None;
         let (json_path, json_size) = if changed {
+            let version_dir = app_data
+                .join("series")
+                .join(safe_entity_segment(&source))
+                .join(safe_entity_segment(&source_key))
+                .join(format!("v{next_version}"));
+            pending_version = Some(super::downloader::PendingProfileVersion::create(
+                version_dir,
+            )?);
             save_entity_json(
                 &app_data,
                 "series",
@@ -2331,6 +2356,13 @@ pub async fn refresh_entity_profile(
         } else {
             None
         };
+        let mut pending_cover = if changed {
+            None
+        } else {
+            cover
+                .as_ref()
+                .map(|(path, _)| super::downloader::PendingProfileAsset::new(PathBuf::from(path)))
+        };
         let cover_path = cover
             .as_ref()
             .map(|(path, _)| path.clone())
@@ -2355,6 +2387,12 @@ pub async fn refresh_entity_profile(
                 .get("publishedContentCount")
                 .and_then(|v| v.as_i64()),
         )?;
+        if let Some(pending) = pending_version.as_mut() {
+            pending.commit();
+        }
+        if let Some(pending) = pending_cover.as_mut() {
+            pending.commit();
+        }
         return serde_json::to_value(series).map_err(|e| e.to_string());
     }
 
