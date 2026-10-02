@@ -6,14 +6,14 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { beforeEach, expect, it, vi } from "vitest";
 import { AppRouter } from "@/app/router";
 import { useWorkspace, WorkspaceProvider } from "@/app/WorkspaceContext";
-import { clearCompletedOperations, getOperationJobs, retryOperation } from "@/features/jobs/operationJobs";
+import { clearCompletedOperations, getOperationJobs, requestOperationCancel, retryOperation } from "@/features/jobs/operationJobs";
 import { demoWorks } from "@/mocks/demoData";
 import { readExportSettings, writeExportSettings } from "./exportSettings";
 import { demoTemplates } from "./templateStudioDemo";
 import type { ExportBatchResult } from "@/types/epub";
 import EpubPage from "./EpubPage";
 
-const api = vi.hoisted(() => ({ exportEpubBatch: vi.fn() }));
+const api = vi.hoisted(() => ({ exportEpubBatch: vi.fn(), cancelEpubExport: vi.fn() }));
 const progressSubscription = vi.hoisted(() => ({ listen: vi.fn(), unlisten: vi.fn() }));
 const opener = vi.hoisted(() => ({ openFilesystemPath: vi.fn() }));
 vi.mock("@/services/dbApi", async (original) => ({
@@ -24,7 +24,7 @@ vi.mock("@/services/dbApi", async (original) => ({
 vi.mock("@/services/epubApi", () => ({
   exportEpubBatch: api.exportEpubBatch,
   listEpubTemplates: async () => demoTemplates,
-  cancelEpubExport: vi.fn(),
+  cancelEpubExport: api.cancelEpubExport,
 }));
 vi.mock("@/services/eventBus", () => ({
   subscribeTauriEvent: () => () => undefined,
@@ -47,6 +47,8 @@ beforeEach(() => {
   window.location.hash = "#/epub";
   writeExportSettings({ ...readExportSettings(), outputDir: "C:/exports" });
   api.exportEpubBatch.mockReset();
+  api.cancelEpubExport.mockReset();
+  api.cancelEpubExport.mockResolvedValue(undefined);
   progressSubscription.listen.mockReset();
   progressSubscription.unlisten.mockReset();
   opener.openFilesystemPath.mockReset();
@@ -98,6 +100,28 @@ it("marks failed EPUB batches as failed and retries only unfinished works", asyn
   expect(getOperationJobs().find((job) => job.kind === "epub" && job.label === "1冊をEPUBへ書き出し")).toMatchObject({ status: "completed" });
   expect(progressSubscription.listen).toHaveBeenCalledTimes(2);
   expect(progressSubscription.unlisten).toHaveBeenCalledTimes(2);
+});
+
+it("uses the same operation ID for EPUB start and cancel", async () => {
+  let finish!: (result: ExportBatchResult) => void;
+  api.exportEpubBatch.mockReturnValue(new Promise<ExportBatchResult>((resolve) => { finish = resolve; }));
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(<MantineProvider><ModalsProvider><QueryClientProvider client={client}><AppRouter><WorkspaceProvider><EpubPage /></WorkspaceProvider></AppRouter></QueryClientProvider></ModalsProvider></MantineProvider>);
+
+  fireEvent.click(await screen.findByRole("button", { name: "2冊を書き出す" }));
+  await waitFor(() => expect(api.exportEpubBatch).toHaveBeenCalledOnce());
+  const job = getOperationJobs().find((entry) => entry.kind === "epub" && entry.status === "running");
+  expect(job).toBeDefined();
+  expect(api.exportEpubBatch).toHaveBeenCalledWith(expect.objectContaining({ operationId: job!.id }));
+
+  await act(async () => requestOperationCancel(job!.id));
+  expect(api.cancelEpubExport).toHaveBeenCalledWith(job!.id);
+
+  await act(async () => finish({
+    successCount: 0, failedCount: 0, failedIds: [], invalidIds: [], outputFiles: [],
+    invalidCount: 0, issues: [], canceled: true, skippedIds: [101, 108],
+  }));
+  await waitFor(() => expect(getOperationJobs().find((entry) => entry.id === job!.id)?.status).toBe("canceled"));
 });
 
 it("does not suggest opening an output folder when every EPUB fails", async () => {

@@ -12,8 +12,8 @@ export function exportEpubBatch<T = void>(payload: Record<string, unknown>): Pro
 }
 
 /** 書き出しを途中でやめる。作りかけの 1 冊は書き切ってから止まる。 */
-export function cancelEpubExport(): Promise<void> {
-  return invoke<void>("cancel_epub_export");
+export function cancelEpubExport(operationId: string): Promise<void> {
+  return invoke<void>("cancel_epub_export", { operationId });
 }
 
 /** `skipMissing` lets a collection with deleted works still be exported, with

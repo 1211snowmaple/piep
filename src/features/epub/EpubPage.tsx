@@ -96,7 +96,8 @@ export default function EpubPage() {
       for (const jobId of retryWorksRef.current.keys()) {
         if (!retainedJobs.has(jobId)) retryWorksRef.current.delete(jobId);
       }
-      const operation = startOperation({
+      let operation: ReturnType<typeof startOperation>;
+      operation = startOperation({
         kind: "epub",
         label: `${works.length}冊をEPUBへ書き出し`,
         detail: values.outputDir,
@@ -108,7 +109,7 @@ export default function EpubPage() {
         },
         // 数百冊を並べて実行したら、終わるまで止められなかった。作りかけの
         // 1 冊は書き切ってから止まるので、半端な EPUB は残らない。
-        onCancel: runtime ? async () => { await cancelEpubExport(); } : undefined,
+        onCancel: runtime ? async () => { await cancelEpubExport(operation.id); } : undefined,
       });
       exportOperationRef.current = operation;
       setResult(null); setProgress({ phase: "started", currentTitle: "", currentIndex: 0, totalCount: works.length, message: "書き出しを準備しています" });
@@ -128,6 +129,7 @@ export default function EpubPage() {
       }
       try {
         return await exportEpubBatch<ExportBatchResult>({
+          operationId: operation.id,
           downloadIds: works.map((work) => work.id),
           templateName: values.templateName,
           outputDir: values.outputDir,
