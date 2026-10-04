@@ -29,6 +29,7 @@ const jobs = vi.hoisted(() => ({
   states: vi.fn(),
   cancel: vi.fn(),
   wait: vi.fn(),
+  summaries: [] as import("@/services/updateJobApi").UpdateJobSummary[],
 }));
 
 vi.mock("@/services/browserApi", () => browserApi);
@@ -51,6 +52,7 @@ vi.mock("@/services/updateJobApi", async (importOriginal) => ({
 vi.mock("@/features/updates/updateJobs", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/features/updates/updateJobs")>()),
   waitForUpdateJob: jobs.wait,
+  useUpdateJobSummaries: () => jobs.summaries,
 }));
 
 const SERIES = "https://www.pixiv.net/novel/series/1000";
@@ -107,6 +109,7 @@ describe("SavePage の Rust 保存ジョブ", () => {
       { source: "pixiv", sourceId: "2", status: "saved", error: null },
     ]);
     jobs.cancel.mockReset().mockResolvedValue(summary("canceled"));
+    jobs.summaries = [];
     jobs.wait.mockReset().mockImplementation(async (_jobId, onSnapshot) => {
       const final = summary("completed");
       onSnapshot?.(final);
@@ -125,6 +128,33 @@ describe("SavePage の Rust 保存ジョブ", () => {
       { source: "pixiv", sourceId: "2", title: "第二話" },
     ], expect.any(Boolean));
     await waitFor(() => expect(screen.getByRole("button", { name: "選択したものは保存済みです" })).toBeDisabled());
+  });
+
+  it("保存中に画面を離れて戻っても同じ候補を再送しない", async () => {
+    let finish!: (value: ReturnType<typeof summary>) => void;
+    jobs.wait.mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+    const first = renderSavePage();
+    await collectCandidates();
+    fireEvent.click(screen.getByRole("button", { name: "2件をライブラリに保存" }));
+    await waitFor(() => expect(jobs.start).toHaveBeenCalledTimes(1));
+
+    first.unmount();
+    renderSavePage();
+    const button = await screen.findByRole("button", { name: "保存・更新の処理中です" });
+    expect(button).toBeDisabled();
+    fireEvent.click(button);
+    expect(jobs.start).toHaveBeenCalledTimes(1);
+
+    finish(summary("completed"));
+    await waitFor(() => expect(hasUnsavedWork("close")).toBe(false));
+  });
+
+  it("再起動後もRustで保存中なら候補を再送しない", async () => {
+    jobs.summaries = [summary()];
+    renderSavePage();
+    await collectCandidates();
+    expect(screen.getByRole("button", { name: "保存・更新の処理中です" })).toBeDisabled();
+    expect(jobs.start).not.toHaveBeenCalled();
   });
 
   it("取得元名をパスに含む別サイトでは候補取得を有効にしない", async () => {

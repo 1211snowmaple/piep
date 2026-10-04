@@ -76,9 +76,10 @@ import { store } from "@/store";
 import {
   requestOperationCancel,
   startOperation,
+  useOperationJobs,
   type OperationController,
 } from "@/features/jobs/operationJobs";
-import { waitForUpdateJob } from "@/features/updates/updateJobs";
+import { isUpdateJobActive, useUpdateJobSummaries, waitForUpdateJob } from "@/features/updates/updateJobs";
 import {
   cancelUpdateJobCommand,
   listUpdateJobItemStatesCommand,
@@ -114,6 +115,14 @@ export default function SavePage() {
   const queryClient = useQueryClient();
   const [searchParams] = useAppSearchParams();
   const runtime = isTauriRuntime();
+  // Rust jobs keep running after this page unmounts. Read their shared state
+  // when the page returns instead of relying only on this mount's saving flag.
+  const operationJobs = useOperationJobs();
+  const updateJobs = useUpdateJobSummaries(runtime);
+  const activeLocalSave = operationJobs.some(
+    (job) => job.kind === "save" && ["queued", "running", "canceling"].includes(job.status),
+  );
+  const activeJob = activeLocalSave || updateJobs.some((job) => isUpdateJobActive(job.status));
   const source: SaveSource = routeSource === "fanbox" ? "fanbox" : "pixiv";
   const draft = useSyncExternalStore(subscribeSaveDraft, () => readSaveDraft(source));
   const { items, downloadType, lastAnalysisUrl, lastAnalysisKey } = draft;
@@ -521,7 +530,9 @@ export default function SavePage() {
   const retryCount = items.filter(
     (item) => isPendingSave(item) && item.status === "failed",
   ).length;
-  const saveActionLabel = !pendingCount
+  const saveActionLabel = activeJob && !saving
+    ? "保存・更新の処理中です"
+    : !pendingCount
     ? selectedCount
       ? "選択したものは保存済みです"
       : items.some((item) => item.status === "held") &&
@@ -990,7 +1001,7 @@ export default function SavePage() {
       (item) =>
         item.selected && item.status !== "success" && item.status !== "skipped" && item.status !== "held",
     );
-    if (!selected.length || !downloadType || !runtime || savingRef.current)
+    if (!selected.length || !downloadType || !runtime || savingRef.current || activeJob)
       return;
     const itemSource: "pixiv" | "fanbox" = downloadType.startsWith("pixiv")
       ? "pixiv"
@@ -1527,7 +1538,7 @@ export default function SavePage() {
                   variant="light"
                   color="piep"
                   size="lg"
-                  disabled={!runtime || !pendingCount}
+                  disabled={!runtime || !pendingCount || activeJob}
                   aria-label={saveActionLabel}
                   onClick={execute}
                 >
@@ -1761,7 +1772,7 @@ export default function SavePage() {
                     fullWidth
                     size="md"
                     leftSection={<Icons.collect size={IconSize.action} />}
-                    disabled={!runtime || !pendingCount}
+                    disabled={!runtime || !pendingCount || activeJob}
                     onClick={execute}
                   >
                     {saveActionLabel}
