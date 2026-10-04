@@ -7760,6 +7760,41 @@ fn simultaneous_checks_create_only_one_active_job() {
 }
 
 #[test]
+fn save_job_cannot_start_while_another_job_is_active() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let request = StartUpdateJobRequest {
+        scope: "save".to_string(),
+        mode: "save".to_string(),
+        work_ids: None,
+        target_ids: None,
+        credentials: None,
+        watch_saved: None,
+        adhoc_targets: None,
+    };
+    let items = [UpdateJobItemInput {
+        item_type: "candidate".to_string(),
+        source: Some("pixiv".to_string()),
+        source_id: Some("1".to_string()),
+        target_type: Some("work".to_string()),
+        title: "work".to_string(),
+        payload_json: r#"{"kind":"save"}"#.to_string(),
+        status: "queued".to_string(),
+    }];
+    db.create_update_job_if_idle("first-save", &request, &items)
+        .unwrap();
+    assert!(db
+        .create_update_job_if_idle("second-save", &request, &items)
+        .is_err());
+    assert_eq!(db.list_update_jobs().unwrap().len(), 1);
+
+    db.set_update_job_status("first-save", "canceled", None)
+        .unwrap();
+    db.create_update_job_if_idle("after-cancel", &request, &items)
+        .unwrap();
+}
+
+#[test]
 fn paused_job_cannot_resume_across_another_active_check() {
     let (_temp, root, storage) = temp_paths();
     let db = Database::open(&root.join("piep.db"), &storage).unwrap();

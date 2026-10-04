@@ -1096,7 +1096,12 @@ pub async fn start_save_job(
         adhoc_targets: None,
     };
     let job_id = make_job_id();
-    let snapshot = state.db.create_update_job(&job_id, &request, &items)?;
+    // Saving outlives the page that launched it. After navigating away and
+    // back, a fresh SavePage can submit the same candidates again while the
+    // first worker is still running. The check and insert must be atomic.
+    let snapshot = state
+        .db
+        .create_update_job_if_idle(&job_id, &request, &items)?;
     state.db.append_update_job_log(
         &job_id,
         "info",
