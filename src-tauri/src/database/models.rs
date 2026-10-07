@@ -1029,6 +1029,10 @@ pub struct UpdateJobSummary {
     pub status: String,
     pub scope: String,
     pub mode: String,
+    #[serde(default)]
+    pub subject_label: Option<String>,
+    #[serde(default)]
+    pub subject_source: Option<String>,
     pub totals: i64,
     pub processed: i64,
     pub check_total: i64,
@@ -1130,6 +1134,11 @@ pub struct UpdateJobItemState {
     pub source_id: Option<String>,
     pub status: String,
     pub error: Option<String>,
+    /// Present for explicit item lists; progress deltas stay small.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
 }
 
 /// A small progress notification for a running update/save job.

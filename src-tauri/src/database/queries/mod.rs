@@ -5428,7 +5428,30 @@ impl Database {
             .map_err(|e| format!("Failed to list update jobs: {}", e))?;
         let mut jobs = Vec::new();
         for row in rows {
-            jobs.push(row.map_err(|e| format!("Failed to read update job: {}", e))?);
+            let mut job = row.map_err(|e| format!("Failed to read update job: {}", e))?;
+            // History needs a subject, while live progress events must stay cheap.
+            // An ad hoc author check can contain many works but one target.
+            let subject =
+                |item_type: &str| -> Result<(Option<String>, Option<String>, i64), String> {
+                    conn.query_row(
+                        "SELECT CASE WHEN COUNT(*) = 1 THEN MIN(title) END,
+                            CASE WHEN COUNT(*) = 1 THEN MIN(source) END, COUNT(*)
+                     FROM update_job_items WHERE job_id = ?1 AND item_type = ?2",
+                        params![job.job_id, item_type],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    )
+                    .map_err(|e| format!("Failed to read update job subject: {e}"))
+                };
+            let (label, source, count) = subject("target")?;
+            let (label, source) = if count == 0 {
+                let (label, source, _) = subject("work")?;
+                (label, source)
+            } else {
+                (label, source)
+            };
+            job.subject_label = label;
+            job.subject_source = source;
+            jobs.push(job);
         }
         Ok(jobs)
     }
@@ -5829,7 +5852,7 @@ impl Database {
         let conn = self.read_conn()?;
         let mut stmt = conn
             .prepare(
-                "SELECT source, source_id, status, error
+                "SELECT source, source_id, status, error, item_type, title
                  FROM update_job_items
                  WHERE job_id = ?1
                  ORDER BY id",
@@ -5842,6 +5865,8 @@ impl Database {
                     source_id: row.get(1)?,
                     status: row.get(2)?,
                     error: row.get(3)?,
+                    item_type: row.get(4)?,
+                    title: row.get(5)?,
                 })
             })
             .map_err(|e| format!("Failed to query update job item states: {e}"))?;
@@ -5889,6 +5914,8 @@ impl Database {
                             source_id: row.get(1)?,
                             status: row.get(2)?,
                             error: row.get(3)?,
+                            item_type: None,
+                            title: None,
                         })
                     },
                 )
@@ -14994,6 +15021,8 @@ fn update_job_summary_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Upda
         status: row.get(1)?,
         scope: row.get(2)?,
         mode: row.get(3)?,
+        subject_label: None,
+        subject_source: None,
         totals: row.get(4)?,
         processed: row.get(5)?,
         check_total: row.get(14)?,
