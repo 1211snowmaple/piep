@@ -8396,6 +8396,78 @@ fn update_job_candidates_can_be_queued_for_saving() {
 }
 
 #[test]
+fn update_history_keeps_the_subject_and_exposes_job_only_holds() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let request = StartUpdateJobRequest {
+        scope: "author".into(),
+        mode: "check_only".into(),
+        work_ids: None,
+        target_ids: None,
+        credentials: None,
+        watch_saved: None,
+        adhoc_targets: None,
+    };
+    let mut items = Vec::new();
+    for index in 0..7 {
+        items.push(UpdateJobItemInput {
+            item_type: "work".into(),
+            source: Some("fanbox".into()),
+            source_id: Some(format!("repost-{index}")),
+            target_type: Some("work".into()),
+            title: format!("再掲 {index}"),
+            payload_json: "{}".into(),
+            status: "held".into(),
+        });
+    }
+    for index in 0..12 {
+        items.push(UpdateJobItemInput {
+            item_type: "work".into(),
+            source: Some("fanbox".into()),
+            source_id: Some(format!("older-{index}")),
+            target_type: Some("work".into()),
+            title: format!("旧投稿 {index}"),
+            payload_json: "{}".into(),
+            status: "skipped".into(),
+        });
+    }
+    items.push(UpdateJobItemInput {
+        item_type: "target".into(),
+        source: Some("fanbox".into()),
+        source_id: Some("creator".into()),
+        target_type: Some("author".into()),
+        title: "氷砂糖".into(),
+        payload_json: "{}".into(),
+        status: "done".into(),
+    });
+    db.create_update_job("job-history-review", &request, &items)
+        .unwrap();
+    let jobs = db.list_update_jobs().unwrap();
+    let job = jobs
+        .iter()
+        .find(|job| job.job_id == "job-history-review")
+        .unwrap();
+    assert_eq!(job.subject_label.as_deref(), Some("氷砂糖"));
+    assert_eq!(job.subject_source.as_deref(), Some("fanbox"));
+    assert_eq!(job.held_count, 7);
+
+    let states = db
+        .list_update_job_item_states("job-history-review")
+        .unwrap();
+    assert_eq!(states.len(), 20);
+    assert_eq!(
+        states.iter().filter(|item| item.status == "held").count(),
+        7
+    );
+    assert_eq!(states[0].item_type.as_deref(), Some("work"));
+    assert_eq!(states[0].title.as_deref(), Some("再掲 0"));
+    assert!(db
+        .list_update_candidates_by_status("deferred", 2000)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
 fn saving_candidates_after_cancel_does_not_resume_the_canceled_queue() {
     let (_temp, root, storage) = temp_paths();
     let db = Database::open(&root.join("piep.db"), &storage).unwrap();

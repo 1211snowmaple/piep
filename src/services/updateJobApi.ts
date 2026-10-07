@@ -49,6 +49,9 @@ export interface UpdateJobSummary {
   status: UpdateJobStatus;
   scope: UpdateJobScope;
   mode: UpdateJobMode;
+  /** Filled by the history list when one author, series, or work was checked. */
+  subjectLabel?: string | null;
+  subjectSource?: string | null;
   totals: number;
   processed: number;
   /** Separate local job stages; older snapshots may omit these fields. */
@@ -185,6 +188,9 @@ export interface UpdateJobItemState {
   sourceId: string | null;
   status: string;
   error: string | null;
+  /** Included in explicit item lists; omitted from small progress events. */
+  itemType?: string | null;
+  title?: string | null;
 }
 
 /** Small event emitted for one live job transition. Full pages stay on getUpdateJob. */

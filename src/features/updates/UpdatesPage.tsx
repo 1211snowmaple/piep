@@ -36,11 +36,12 @@ import { MotionTabs as Tabs } from "@/components/MotionTabs";
 import { PageHeader } from "@/components/PageHeader";
 import { updateJobStatusMeta, invalidateAfterUpdateJob, isUpdateJobTerminal, useUpdateJobs, type UpdateJobSnapshot, type UpdateJobSummary } from "@/features/updates/updateJobs";
 import { DeferredCandidatesPanel } from "./DeferredCandidatesPanel";
+import { heldReason, summarizeUpdateJobItems, updateJobSubject } from "./updateJobOutcome";
 import { errorMessage, formatDate, formatNumber } from "@/lib/format";
 import { ProviderMark } from "@/lib/providers";
 import { deleteUpdateTarget, isTauriRuntime, listUpdateTargets, searchDownloadsV2, setUpdateTargetEnabled, upsertUpdateTarget } from "@/services/dbApi";
 import { readingWorkIds } from "@/features/library/readingShelf";
-import { clearFinishedUpdateJobsCommand, countDismissedUpdateCandidatesCommand, dismissUpdateCandidateCommand, restoreDismissedUpdateCandidatesCommand } from "@/services/updateJobApi";
+import { clearFinishedUpdateJobsCommand, countDismissedUpdateCandidatesCommand, dismissUpdateCandidateCommand, listUpdateJobItemStatesCommand, restoreDismissedUpdateCandidatesCommand, type UpdateJobItemState } from "@/services/updateJobApi";
 import { loadSchedule, type UpdateScheduleSettings } from "@/features/updates/updateSchedule";
 import { UpdateScheduleCard } from "@/features/updates/UpdateScheduleCard";
 import { useUpdateJobNotifications } from "@/features/updates/useUpdateScheduler";
@@ -117,6 +118,13 @@ export default function UpdatesPage() {
   const [previewSnapshot, setPreviewSnapshot] = useState<UpdateJobSnapshot>(demoSnapshot);
   const activeSnapshot = runtime ? updateJobs.activeSnapshot : previewSnapshot;
   const jobs = runtime ? updateJobs.jobs : [demoSnapshot as UpdateJobSummary];
+  const jobItems = useQuery({
+    queryKey: ["update-job-items", activeSnapshot?.jobId, activeSnapshot?.finishedAt],
+    queryFn: () => listUpdateJobItemStatesCommand(activeSnapshot!.jobId),
+    enabled: runtime && Boolean(activeSnapshot && isUpdateJobTerminal(activeSnapshot.status)),
+    staleTime: Infinity,
+  });
+  const outcome = jobItems.data ? summarizeUpdateJobItems(jobItems.data) : null;
   const [selectedCandidateIds, setSelectedCandidateIds] = useState<number[]>([]);
   // 非表示にした候補は、この画面ではすぐ消す（次のジョブでは元から出てこない）。
   const [dismissedIds, setDismissedIds] = useState<number[]>([]);
@@ -385,6 +393,14 @@ export default function UpdatesPage() {
           </Group>
           <ScrollingJobTitle label={activeSnapshot.activeLabel || statusTitle(activeSnapshot.status)} />
           <Text size="sm" c="dimmed" mt={5}>候補 {formatNumber(activeSnapshot.candidateCount)} · 保存済み {formatNumber(activeSnapshot.savedCount)} · エラー {formatNumber(activeSnapshot.errorCount)} · 保留 {formatNumber(activeSnapshot.heldCount ?? 0)}</Text>
+          {outcome && activeSnapshot.mode === "check_only" && (
+            <Text size="sm" mt="xs">
+              変更なし・スキップ {formatNumber(outcome.unchanged)}件 · 公開元で見つからない {formatNumber(outcome.missing.length)}件
+              {outcome.access.length > 0 && ` · 閲覧条件待ち ${formatNumber(outcome.access.length)}件`}
+              {outcome.other.length > 0 && ` · その他の保留 ${formatNumber(outcome.other.length)}件`}
+              {outcome.checkedTargets > 0 && ` · 作者・シリーズ確認完了 ${formatNumber(outcome.checkedTargets)}件`}
+            </Text>
+          )}
           {/* 間隔の説明が本当に要る瞬間はここ。「遅い」と感じたときに、
               なぜ待っているのかが同じ場所に出る。 */}
           {running && throttledMessage && (
@@ -406,6 +422,7 @@ export default function UpdatesPage() {
             数の帯は、伝える中身があるときだけ出す - 0 は何も言っていない。 */}
         <Tabs.List>
           <Tabs.Tab value="candidates" leftSection={<Icons.select size={IconSize.menu} />}>候補 {openCandidateCount > 0 && <Badge size="xs" variant="light" ml={4}>{formatNumber(openCandidateCount)}</Badge>}</Tabs.Tab>
+          <Tabs.Tab value="results" leftSection={<Icons.confirm size={IconSize.menu} />}>結果 {(activeSnapshot?.heldCount ?? 0) > 0 && <Badge size="xs" variant="light" color="yellow" ml={4}>{formatNumber(activeSnapshot?.heldCount ?? 0)}</Badge>}</Tabs.Tab>
           <Tabs.Tab value="logs" leftSection={<Icons.pending size={IconSize.menu} />}>ログ</Tabs.Tab>
           <Tabs.Tab value="deferred">保留・非表示</Tabs.Tab>
           <Tabs.Tab value="history" leftSection={<Icons.versionHistory size={IconSize.menu} />}>履歴 {jobs.length > 0 && <Badge size="xs" variant="light" color="gray" ml={4}>{formatNumber(jobs.length)}</Badge>}</Tabs.Tab>
@@ -415,7 +432,7 @@ export default function UpdatesPage() {
         </Tabs.List>
 
         <Tabs.Panel value="candidates" pt="lg">
-          {(activeSnapshot?.heldCount ?? 0) > 0 && <Group mb="md"><Text size="sm" c="dimmed">閲覧条件待ちなどの{activeSnapshot?.heldCount}件は、保存候補から外して保留しています。</Text><Button variant="subtle" size="xs" onClick={() => setTab("deferred")}>保留一覧を開く</Button></Group>}
+          {(activeSnapshot?.heldCount ?? 0) > 0 && <Group mb="md"><Text size="sm" c="dimmed">この回で保留になった{activeSnapshot?.heldCount}件は、結果で理由を確認できます。</Text><Button variant="subtle" size="xs" onClick={() => setTab("results")}>この回の保留を見る</Button></Group>}
           {activeSnapshot ? (
             <CandidatesPanel
               key={activeSnapshot.jobId}
@@ -436,6 +453,22 @@ export default function UpdatesPage() {
           ) : (
             <EmptyState icon={Icons.versionHistory} title="更新ジョブはまだありません" description="上の対象と方法を選び、「確認を開始」を押してください。" />
           )}
+        </Tabs.Panel>
+
+        <Tabs.Panel value="results" pt="lg">
+          {activeSnapshot ? (
+            <JobResultsPanel
+              key={activeSnapshot.jobId}
+              job={activeSnapshot}
+              subject={updateJobSubject(jobs.find((job) => job.jobId === activeSnapshot.jobId) ?? activeSnapshot)}
+              items={jobItems.data ?? null}
+              loading={runtime && jobItems.isLoading}
+              error={jobItems.error}
+              onRetry={() => void jobItems.refetch()}
+              onShowLogs={() => setTab("logs")}
+              onShowDeferred={() => setTab("deferred")}
+            />
+          ) : <EmptyState icon={Icons.confirm} title="結果はまだありません" description="確認を開始すると、処理結果をここで確認できます。" />}
         </Tabs.Panel>
 
         <Tabs.Panel value="deferred" pt="lg">
@@ -475,7 +508,12 @@ export default function UpdatesPage() {
             finishedCount={finishedJobCount}
             clearingAll={clearFinishedJobsMutation.isPending}
             clearingJobId={clearJobMutation.isPending ? (clearJobMutation.variables ?? null) : null}
-            onSelect={(jobId) => runtime && updateJobs.selectJob(jobId)}
+            onSelect={(jobId) => {
+              if (!runtime) return;
+              void updateJobs.selectJob(jobId)
+                .then(() => setTab("results"))
+                .catch((error) => notifications.show({ color: "red", title: "履歴を開けません", message: errorMessage(error) }));
+            }}
             onClear={(jobId) => clearJobMutation.mutate(jobId)}
             onClearFinished={confirmClearFinishedJobs}
           />
@@ -487,6 +525,62 @@ export default function UpdatesPage() {
       </Tabs>
     </div>
   );
+}
+
+/** A selected job's outcome, including holds that exist only in its history. */
+export function JobResultsPanel({ job, subject, items, loading, error, onRetry, onShowLogs, onShowDeferred }: {
+  job: UpdateJobSnapshot;
+  subject?: string;
+  items: UpdateJobItemState[] | null;
+  loading: boolean;
+  error: unknown;
+  onRetry: () => void;
+  onShowLogs: () => void;
+  onShowDeferred: () => void;
+}) {
+  const [visibleHeldCount, setVisibleHeldCount] = useState(50);
+  if (!isUpdateJobTerminal(job.status)) {
+    return <EmptyState icon={Icons.pending} title="確認を進めています" description="完了すると、結果の内訳と保留の理由をここに表示します。" />;
+  }
+  if (loading) return <LoadingState />;
+  if (error) return <ErrorState error={error} retry={onRetry} />;
+  if (!items) return <EmptyState icon={Icons.confirm} title="結果の内訳はデスクトップアプリで確認できます" description="候補とログは各タブで確認できます。" />;
+  const result = summarizeUpdateJobItems(items);
+  return <Card p="lg"><Stack gap="md">
+    <Group justify="space-between" align="flex-start">
+      <Box><Text fw={700}>この回の結果</Text>{subject && <Text size="sm">{subject}</Text>}<Text size="xs" c="dimmed">{formatDate(job.startedAt, true)} · {formatNumber(job.processed)}/{formatNumber(job.totals)}件の処理が終了</Text></Box>
+      <Button size="xs" variant="default" onClick={onShowLogs}>すべてのログを見る</Button>
+    </Group>
+    <Text size="sm">
+      {job.mode === "save" ? `保存 ${formatNumber(job.savedCount)}件 · スキップ ${formatNumber(result.skippedCandidates)}件` : `変更なし・スキップ ${formatNumber(result.unchanged)}件`}
+      {result.missing.length > 0 && ` · 公開元で見つからない ${formatNumber(result.missing.length)}件`}
+      {result.access.length > 0 && ` · 閲覧条件待ち ${formatNumber(result.access.length)}件`}
+      {result.other.length > 0 && ` · その他の保留 ${formatNumber(result.other.length)}件`}
+      {result.checkedTargets > 0 && ` · 作者・シリーズ確認完了 ${formatNumber(result.checkedTargets)}件`}
+      {job.candidateCount > 0 && ` · 候補 ${formatNumber(job.candidateCount)}件`}
+      {job.mode !== "save" && job.savedCount > 0 && ` · 保存 ${formatNumber(job.savedCount)}件`}
+      {job.errorCount > 0 && ` · エラー ${formatNumber(job.errorCount)}件`}
+    </Text>
+    {result.missing.length > 0 && <Text size="sm" c="dimmed">公開元で見つからなかった投稿の保存済みの内容は、手元に残っています。公開状態が変わった後、作者または作品の確認から再確認できます。</Text>}
+    {result.access.length > 0 && <Group justify="space-between"><Text size="sm" c="dimmed">閲覧条件待ちの作品は、条件が変わった後に再確認できます。</Text><Button size="xs" variant="light" onClick={onShowDeferred}>保留・非表示の作品を開く</Button></Group>}
+    {result.held.length > 0 ? <Stack gap="xs">
+      <Text fw={650}>この回で保留になった作品（{formatNumber(result.held.length)}件）</Text>
+      {result.held.slice(0, visibleHeldCount).map((item, index) => {
+        const reason = heldReason(item);
+        return <Paper key={`${item.source}:${item.sourceId}:${index}`} p="sm" withBorder>
+          <Group gap="xs" align="flex-start" wrap="nowrap">
+            <Badge color="yellow" variant="light" style={{ flex: "none" }}>{reason === "missing" ? "公開元で見つからない" : reason === "access" ? "閲覧条件待ち" : "保留"}</Badge>
+            <Stack gap={3} miw={0}>
+              <Text size="sm" fw={600}>{item.title || item.sourceId || "作品"}</Text>
+              <Text size="xs" c="dimmed">{item.source} · {item.sourceId}</Text>
+              <Text size="sm" c="dimmed">{reason === "missing" ? "公開元で投稿が見つかりません。保存済みの内容は保持されています。" : item.error || "確認を保留しました。詳しくはログをご覧ください。"}</Text>
+            </Stack>
+          </Group>
+        </Paper>;
+      })}
+      {result.held.length > visibleHeldCount && <Button variant="default" onClick={() => setVisibleHeldCount((count) => count + 50)}>残り{formatNumber(result.held.length - visibleHeldCount)}件を表示</Button>}
+    </Stack> : <Text size="sm" c="dimmed">この回で保留になった作品はありません。</Text>}
+  </Stack></Card>;
 }
 
 /**
@@ -513,7 +607,7 @@ function JobHistoryPanel({ jobs, activeJobId, finishedCount, clearingAll, cleari
       <Group justify="space-between" p="md" wrap="nowrap">
         <Box>
           <Text fw={700}>走らせた記録</Text>
-          <Text size="xs" c="dimmed">選ぶと、その回の候補とログを開きます</Text>
+          <Text size="xs" c="dimmed">選ぶと、その回の結果を開きます</Text>
         </Box>
         {finishedCount > 0 && (
           <Button size="xs" variant="default" color="gray" leftSection={<Icons.delete size={IconSize.menu} />} loading={clearingAll} onClick={onClearFinished}>終わった{formatNumber(finishedCount)}件を消す</Button>
@@ -526,11 +620,12 @@ function JobHistoryPanel({ jobs, activeJobId, finishedCount, clearingAll, cleari
             <UnstyledButton style={{ flex: 1, minWidth: 0 }} onClick={() => onSelect(job.jobId)}>
               <Group gap="sm" wrap="nowrap">
                 <StatusBadge job={job} />
-                <Text size="sm" fw={job.jobId === activeJobId ? 700 : 500}>{formatDate(job.startedAt, true)}</Text>
-                {/* どの回が実りある回だったかは、開かなくても分かるほうがいい。 */}
-                <Text size="xs" c="dimmed" className="line-clamp-1">
-                  {formatNumber(job.processed)}/{formatNumber(job.totals)}件 · 候補 {formatNumber(job.candidateCount)} · 保存 {formatNumber(job.savedCount)}{job.errorCount > 0 ? ` · エラー ${formatNumber(job.errorCount)}` : ""}{job.heldCount ? ` · 保留 ${formatNumber(job.heldCount)}` : ""}
-                </Text>
+                <Stack gap={2} miw={0}>
+                  <Group gap="sm" wrap="nowrap"><Text size="sm" fw={job.jobId === activeJobId ? 700 : 500}>{formatDate(job.startedAt, true)}</Text><Text size="sm" className="line-clamp-1">{updateJobSubject(job)}</Text></Group>
+                  <Text size="xs" c="dimmed" className="line-clamp-1">
+                    {formatNumber(job.processed)}/{formatNumber(job.totals)}件 · 候補 {formatNumber(job.candidateCount)} · 保存 {formatNumber(job.savedCount)}{job.errorCount > 0 ? ` · エラー ${formatNumber(job.errorCount)}` : ""}{job.heldCount ? ` · 保留 ${formatNumber(job.heldCount)}` : ""}
+                  </Text>
+                </Stack>
               </Group>
             </UnstyledButton>
             {isUpdateJobTerminal(job.status) && (
@@ -734,7 +829,7 @@ function CandidatesPanel({ candidates, selectedIds, selectableIds, running, savi
   if (!candidates.length) {
     return jobActive
       ? <EmptyState icon={Icons.pending} title="更新確認を続けています" description="候補が見つかると、ここに順次表示します。" />
-      : <EmptyState icon={Icons.confirm} title="保存できる候補はありません" description="保留した作品は「保留・非表示」から後で再確認できます。" />;
+      : <EmptyState icon={Icons.confirm} title="保存できる候補はありません" description="この回の保留と理由は「結果」で確認できます。" />;
   }
   const settled = candidates.filter((candidate) => isSettledCandidateStatus(candidate.status));
   const open = candidates.filter((candidate) => !isSettledCandidateStatus(candidate.status));

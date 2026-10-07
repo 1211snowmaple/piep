@@ -213,9 +213,10 @@ function publishUpdateJobSummaries(next: UpdateJobSummary[]): void {
 }
 
 function applyUpdateJobSummary(summary: UpdateJobSummary): void {
+  const previous = updateJobSummaries.find((job) => job.jobId === summary.jobId);
   const rest = updateJobSummaries.filter((job) => job.jobId !== summary.jobId);
   publishUpdateJobSummaries(
-    [summary, ...rest].sort((a, b) =>
+    [{ ...summary, subjectLabel: summary.subjectLabel ?? previous?.subjectLabel, subjectSource: summary.subjectSource ?? previous?.subjectSource }, ...rest].sort((a, b) =>
       b.updatedAt.localeCompare(a.updatedAt),
     ),
   );
@@ -253,7 +254,7 @@ export function refreshUpdateJobSummaries(
             return;
           const listed = merged.get(job.jobId);
           if (!listed || job.updatedAt >= listed.updatedAt)
-            merged.set(job.jobId, job);
+            merged.set(job.jobId, { ...job, subjectLabel: job.subjectLabel ?? listed?.subjectLabel, subjectSource: job.subjectSource ?? listed?.subjectSource });
         });
         publishUpdateJobSummaries(
           [...merged.values()]
