@@ -6153,6 +6153,64 @@ impl Database {
         Ok(changed > 0)
     }
 
+    /// Record one saved work that the provider no longer exposes. If the job
+    /// already checks that work directly, its existing item will be held by the
+    /// worker instead. The local download itself is never changed here.
+    pub fn insert_update_job_unavailable_work(
+        &self,
+        job_id: &str,
+        work: &DownloadEntry,
+        reason: &str,
+    ) -> Result<bool, String> {
+        let payload_json = serde_json::to_string(work).map_err(|error| error.to_string())?;
+        let mut conn = self.conn.lock().map_err(|error| error.to_string())?;
+        let tx = conn
+            .transaction()
+            .map_err(|error| format!("Failed to begin unavailable work insert: {error}"))?;
+        let changed = tx
+            .execute(
+                "INSERT INTO update_job_items (
+                    job_id, item_type, source, source_id, target_type, title,
+                    payload_json, status, error
+                 )
+                 SELECT ?1, 'work', ?2, ?3, NULL, ?4, ?5, 'held', ?6
+                 WHERE NOT EXISTS (
+                    SELECT 1 FROM update_job_items
+                    WHERE job_id = ?1 AND item_type = 'work'
+                      AND source = ?2 AND source_id = ?3
+                 )",
+                params![
+                    job_id,
+                    work.source,
+                    work.source_id,
+                    work.title,
+                    payload_json,
+                    reason
+                ],
+            )
+            .map_err(|error| format!("Failed to record unavailable work: {error}"))?;
+        if changed > 0 {
+            let contribution = update_job_item_counter_contribution("work", "held");
+            tx.execute(
+                "UPDATE update_jobs
+                    SET totals = totals + ?1,
+                        processed = processed + ?2,
+                        updated_at = ?3
+                  WHERE id = ?4",
+                params![
+                    contribution[0],
+                    contribution[1],
+                    chrono::Utc::now().to_rfc3339(),
+                    job_id,
+                ],
+            )
+            .map_err(|error| format!("Failed to advance unavailable work counters: {error}"))?;
+        }
+        tx.commit()
+            .map_err(|error| format!("Failed to commit unavailable work: {error}"))?;
+        Ok(changed > 0)
+    }
+
     pub fn queue_update_job_candidates(
         &self,
         job_id: &str,

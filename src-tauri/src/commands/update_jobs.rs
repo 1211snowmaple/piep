@@ -56,11 +56,19 @@ static PENDING_UPDATE_RESTARTS: OnceLock<Mutex<HashMap<String, UpdateCredentials
 enum WebLookup {
     /// 一覧に載っていた。
     Found(Box<crate::pixiv_api::web::NovelListEntryWeb>),
+    /// 一覧から欠け、作品詳細も 404。保存済みの内容は残して確認を保留する。
+    Unavailable,
     /// 引けなかった。セッションが無い、伏せられている、作者が分からない、など。
     /// **失敗ではない。** 従来どおりアプリAPIで確かめればよい。
     Unknown,
     /// 一覧そのものが当てにならない。再接続が要る。
     NeedsAuth(String),
+}
+
+#[derive(Default)]
+struct CachedWebListing {
+    entries: HashMap<String, crate::pixiv_api::web::NovelListEntryWeb>,
+    unavailable_ids: HashSet<String>,
 }
 
 /// ジョブの間だけ生きる、web 一覧の覚え書き。
@@ -72,9 +80,9 @@ enum WebLookup {
 struct WebUpdateIndex {
     api: Option<crate::pixiv_api::web::WebPixivAPI>,
     asked_authors: HashSet<String>,
-    /// 作者ID → その作者の作品ID → 一覧が返したもの。
-    entries: HashMap<String, HashMap<String, crate::pixiv_api::web::NovelListEntryWeb>>,
-    /// 一度でも「数が合わない」を見たら、以降このジョブでは一覧を使わない。
+    /// 作者ID → 一覧と、個別取得でも 404 だった保存済み作品。
+    entries: HashMap<String, CachedWebListing>,
+    /// 欠けた作品の 404 を確認できず一覧が不完全なら、以降このジョブでは使わない。
     /// 一件ごとに再接続を促しても、利用者にできることは増えない。
     gave_up: bool,
 }
@@ -183,8 +191,7 @@ impl WebUpdateIndex {
         &mut self,
         state: &Arc<AppState>,
         author_id: &str,
-    ) -> Result<Option<&HashMap<String, crate::pixiv_api::web::NovelListEntryWeb>>, PixivError>
-    {
+    ) -> Result<Option<&CachedWebListing>, PixivError> {
         let author_id = author_id.trim();
         if self.api.is_none() || self.gave_up || author_id.is_empty() {
             return Ok(None);
@@ -204,14 +211,20 @@ impl WebUpdateIndex {
             match api.user_novels_by_ids(author_id, &ids).await {
                 Ok(listed) => {
                     let bucket = self.entries.entry(author_id.to_string()).or_default();
-                    for entry in listed {
-                        bucket.insert(entry.id.clone(), entry);
+                    for entry in listed.entries {
+                        bucket.entries.insert(entry.id.clone(), entry);
                     }
+                    bucket.unavailable_ids = listed.unavailable_ids.into_iter().collect();
                 }
-                // 数が合わない = R-18 が黙って落ちている = セッションが切れている。
-                // これを「更新なし」として通すと、ライブラリ全体が嘘をつく。
+                // 個別の 404 で説明できない欠落は、セッション切れなどで
+                // R-18 が黙って落ちている可能性がある。「更新なし」にはしない。
                 Err(error @ PixivError::PartialListing { .. }) => {
                     self.gave_up = true;
+                    return Err(error);
+                }
+                Err(error @ PixivError::RateLimited { .. }) => {
+                    // 同じジョブ内の再試行でも、一覧を改めて取得する。
+                    self.asked_authors.remove(author_id);
                     return Err(error);
                 }
                 Err(error) => {
@@ -229,7 +242,10 @@ impl WebUpdateIndex {
         match self.author_listing(state, &dl.author_id).await {
             Err(error) => WebLookup::NeedsAuth(format!("pixiv連携の再接続が必要です（{error}）")),
             Ok(None) => WebLookup::Unknown,
-            Ok(Some(entries)) => match entries.get(&dl.source_id) {
+            Ok(Some(listing)) if listing.unavailable_ids.contains(&dl.source_id) => {
+                WebLookup::Unavailable
+            }
+            Ok(Some(listing)) => match listing.entries.get(&dl.source_id) {
                 // 伏せられた作品はメタデータが当てにならない。判定に使わない。
                 Some(entry) if entry.is_masked => WebLookup::Unknown,
                 Some(entry) => WebLookup::Found(Box::new(entry.clone())),
@@ -2543,6 +2559,26 @@ fn unavailable_saved_fanbox_post(
     }
 }
 
+fn unavailable_saved_pixiv_work_message(title: &str, source_id: &str) -> String {
+    format!(
+        "公開元で投稿が見つからないため確認を保留しました。保存済みの「{title}」（作品ID {source_id}）は保持しています"
+    )
+}
+
+fn unavailable_saved_pixiv_work(
+    title: &str,
+    source_id: &str,
+    error: String,
+) -> Result<ItemOutcome, String> {
+    if classify_failure(&error) == FailureKind::Missing {
+        Ok(ItemOutcome::Held(unavailable_saved_pixiv_work_message(
+            title, source_id,
+        )))
+    } else {
+        Err(error)
+    }
+}
+
 /// FANBOX's list timestamp is a fast negative check, but a local copy still
 /// needs a recent full verification. This catches posts whose body or access
 /// changes without a timestamp change and repairs local asset loss.
@@ -2621,6 +2657,12 @@ async fn process_work_item(
         let listing_was_cached = web_index.asked_authors.contains(dl.author_id.trim());
         let listed_update = match web_index.lookup(state, &dl).await {
             WebLookup::NeedsAuth(message) => return Ok(ItemOutcome::AuthRequired(message)),
+            WebLookup::Unavailable => {
+                return Ok(ItemOutcome::Held(unavailable_saved_pixiv_work_message(
+                    &dl.title,
+                    &dl.source_id,
+                )))
+            }
             WebLookup::Found(entry) => entry.update_date.clone(),
             WebLookup::Unknown => None,
         };
@@ -2637,9 +2679,15 @@ async fn process_work_item(
         }
 
         // 1段目の取得は本文を含まない詳細だけ。変わっていなければここで終わる。
-        let metadata =
-            super::downloader::fetch_pixiv_novel_metadata(dl.source_id.clone(), token.clone())
-                .await?;
+        let metadata = match super::downloader::fetch_pixiv_novel_metadata(
+            dl.source_id.clone(),
+            token.clone(),
+        )
+        .await
+        {
+            Ok(metadata) => metadata,
+            Err(error) => return unavailable_saved_pixiv_work(&dl.title, &dl.source_id, error),
+        };
         if is_unchanged_pixiv_work(state, &dl, &metadata) {
             // 指紋は「変わっていない」と言い、一覧は「変わった」と言った。
             // どちらが早く気づくのかを知りたいので、食い違いは記録に残す。
@@ -3007,7 +3055,7 @@ async fn scan_pixiv_revisions(
     auto_save: bool,
     web_index: &mut WebUpdateIndex,
 ) -> Result<i64, String> {
-    let Some(entries) = web_index
+    let Some(listing) = web_index
         .author_listing(state, &target.source_key)
         .await
         .map_err(|error| error.to_string())?
@@ -3024,7 +3072,7 @@ async fn scan_pixiv_revisions(
             work.downloaded_at,
             work.current_version,
         );
-        let Some(entry) = entries.get(&source_id) else {
+        let Some(entry) = listing.entries.get(&source_id) else {
             continue;
         };
         // 伏せられた作品はメタデータが当てにならない。判定に使わない。
@@ -3084,6 +3132,24 @@ async fn scan_pixiv_revisions(
         };
         if recorded {
             found += 1;
+        }
+    }
+    let mut unavailable_ids: Vec<&String> = listing.unavailable_ids.iter().collect();
+    unavailable_ids.sort();
+    for source_id in unavailable_ids {
+        let Some(work) = state.db.get_download_by_source("pixiv", source_id)? else {
+            continue;
+        };
+        let reason = unavailable_saved_pixiv_work_message(&work.title, source_id);
+        if state
+            .db
+            .insert_update_job_unavailable_work(job_id, &work, &reason)?
+        {
+            state.db.append_update_job_log(
+                job_id,
+                "warn",
+                &format!("{}: {reason}", target.display_name),
+            )?;
         }
     }
     Ok(found)
@@ -3474,6 +3540,132 @@ mod tests {
             super::unavailable_saved_fanbox_post("作品", FanboxError::RateLimited),
             Err(message) if message.contains("アクセス制限")
         ));
+    }
+
+    #[test]
+    fn a_missing_saved_pixiv_work_is_held_but_other_failures_remain_errors() {
+        assert!(matches!(
+            super::unavailable_saved_pixiv_work(
+                "保存済み",
+                "29225697",
+                "取得元に見つかりませんでした".into(),
+            ),
+            Ok(super::ItemOutcome::Held(message))
+                if message.contains("29225697") && message.contains("保持しています")
+        ));
+        assert!(matches!(
+            super::unavailable_saved_pixiv_work(
+                "保存済み",
+                "29225697",
+                "接続がタイムアウトしました".into(),
+            ),
+            Err(message) if message.contains("タイムアウト")
+        ));
+    }
+
+    #[tokio::test]
+    async fn unavailable_pixiv_work_is_counted_once_as_held_and_kept_in_the_library() {
+        let root = std::env::temp_dir().join(format!("piep-missing-pixiv-{}", make_job_id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let state = Arc::new(AppState::new(
+            Database::open(&root.join("piep.db"), &root.join("downloads")).unwrap(),
+        ));
+        let json_path = root.join("saved.json");
+        std::fs::write(&json_path, "{}").unwrap();
+        state
+            .db
+            .upsert_download(&NewDownload {
+                source: "pixiv".into(),
+                source_id: "29225697".into(),
+                title: "保存済み".into(),
+                author_name: "作者".into(),
+                author_id: "45168334".into(),
+                content_type: "novel".into(),
+                tags: Vec::new(),
+                excerpt: None,
+                cover_path: None,
+                json_path: json_path.to_string_lossy().into(),
+                original_json_path: None,
+                asset_count: 0,
+                file_size_bytes: 2,
+                downloaded_at: "2026-10-01T00:00:00Z".into(),
+                source_created_at: None,
+                content_hash: None,
+                text_length: 0,
+                source_updated_at: None,
+                watch_updates: false,
+                current_version: 1,
+                favorite: false,
+            })
+            .unwrap();
+        let work = state
+            .db
+            .get_download_by_source("pixiv", "29225697")
+            .unwrap()
+            .unwrap();
+        let job_id = make_job_id();
+        state
+            .db
+            .create_update_job(
+                &job_id,
+                &StartUpdateJobRequest {
+                    scope: "author".into(),
+                    mode: "check_only".into(),
+                    work_ids: None,
+                    target_ids: None,
+                    credentials: None,
+                    watch_saved: None,
+                    adhoc_targets: None,
+                },
+                &[],
+            )
+            .unwrap();
+        let reason = super::unavailable_saved_pixiv_work_message(&work.title, &work.source_id);
+        let mut web_index = super::WebUpdateIndex {
+            api: Some(crate::pixiv_api::web::WebPixivAPI::new().unwrap()),
+            asked_authors: HashSet::from(["45168334".to_string()]),
+            entries: std::collections::HashMap::from([(
+                "45168334".to_string(),
+                super::CachedWebListing {
+                    entries: std::collections::HashMap::new(),
+                    unavailable_ids: HashSet::from(["29225697".to_string()]),
+                },
+            )]),
+            gave_up: false,
+        };
+        assert_eq!(
+            super::scan_pixiv_revisions(
+                &state,
+                &job_id,
+                &update_target("author", "pixiv", "45168334"),
+                false,
+                &mut web_index,
+            )
+            .await
+            .unwrap(),
+            0
+        );
+        assert!(!state
+            .db
+            .insert_update_job_unavailable_work(&job_id, &work, &reason)
+            .unwrap());
+        let snapshot = state.db.update_job_snapshot(&job_id).unwrap();
+        assert_eq!(snapshot.totals, 1);
+        assert_eq!(snapshot.processed, 1);
+        assert_eq!(snapshot.held_count, 1);
+        assert_eq!(snapshot.error_count, 0);
+        assert_eq!(
+            state.db.list_update_job_item_states(&job_id).unwrap()[0].status,
+            "held"
+        );
+        assert!(state
+            .db
+            .get_download_by_source("pixiv", "29225697")
+            .unwrap()
+            .is_some());
+        assert!(json_path.is_file());
+        drop(state);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

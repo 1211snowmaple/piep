@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { transitionContent } from "@/lib/contentTransition";
 import {
   ActionIcon,
@@ -573,7 +573,7 @@ export function JobResultsPanel({ job, subject, items, loading, error, onRetry, 
             <Stack gap={3} miw={0}>
               <Text size="sm" fw={600}>{item.title || item.sourceId || "作品"}</Text>
               <Text size="xs" c="dimmed">{item.source} · {item.sourceId}</Text>
-              <Text size="sm" c="dimmed">{reason === "missing" ? "公開元で投稿が見つかりません。保存済みの内容は保持されています。" : item.error || "確認を保留しました。詳しくはログをご覧ください。"}</Text>
+              <Text size="sm" c="dimmed">{item.error || (reason === "missing" ? "公開元で投稿が見つかりません。保存済みの内容は保持されています。" : "確認を保留しました。詳しくはログをご覧ください。")}</Text>
             </Stack>
           </Group>
         </Paper>;
@@ -779,11 +779,11 @@ function kindLabel(kind: string): string {
  * 「新作」「続編」「改稿」は判断の重さが違う — 改稿は手元の版を置き換えるので、
  * 新作をまとめて取り込むついでに混ぜたくない。だから既定は分けて見せる。
  */
-function ScrollingJobTitle({ label }: { label: string }) {
+export function ScrollingJobTitle({ label }: { label: string }) {
   const viewport = useRef<HTMLDivElement>(null);
   const content = useRef<HTMLHeadingElement>(null);
   const [overflow, setOverflow] = useState(0);
-  useEffect(() => {
+  useLayoutEffect(() => {
     const measure = () => setOverflow(Math.max(0, (content.current?.scrollWidth ?? 0) - (viewport.current?.clientWidth ?? 0)));
     measure();
     if (typeof ResizeObserver === "undefined") return;
@@ -792,8 +792,9 @@ function ScrollingJobTitle({ label }: { label: string }) {
     if (content.current) observer.observe(content.current);
     return () => observer.disconnect();
   }, [label]);
+  // 見出しを作り直すと、次のラベルは前のアニメーション位置を引き継がない。
   return <Box ref={viewport} className={`update-job-title-viewport${overflow > 0 ? " update-job-title-viewport--scrolling" : ""}`} title={label}>
-    <Title ref={content} order={2} className="update-job-title" style={{ "--title-overflow": `${overflow}px`, "--title-duration": `${Math.max(9, overflow / 28 + 4)}s` } as CSSProperties}>{label}</Title>
+    <Title key={label} ref={content} order={2} className="update-job-title" style={{ "--title-overflow": `${overflow}px`, "--title-duration": `${Math.max(9, overflow / 28 + 4)}s` } as CSSProperties}>{label}</Title>
   </Box>;
 }
 
