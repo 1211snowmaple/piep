@@ -1,0 +1,74 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+playwright-report/
+test-results/
+*.tsbuildinfo
+# vite.config.js / vite.config.d.ts はもう作られない（tsconfig.node.json の
+# outDir をリポジトリの外へ向けてある）。無視し続けると、また作られたときに
+# `git status` が黙る - Vite は .ts より .js を先に読むので、それは
+# 「手元だけ古い設定で動く」という気づきにくい食い違いになる。
+*.local
+
+# Editor directories and files
+.claude/
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Rust target
+src-tauri/target/
+target/
+
+# Local ML model caches
+src-tauri/.fastembed_cache/
+.fastembed_cache/
+*.onnx
+
+# App local download storage (Piep downloaded novels/assets/database)
+downloads/
+*.db
+*.sqlite
+
+# Environment variables
+.env
+.env*.local
+
+# Temporary / Scratch
+scratch/
+__pycache__/
+*.py[cod]
+
+# EPUB テンプレートの見本（cargo run --example epub_specimen の出力）
+.epub-specimen/
+
+# ドキュメント生成物。ソースから再生成できるので追跡しない。公開先は GitHub Pages。
+docs-tools/site/index.md
+docs-tools/site/guide/
+docs-tools/site/policy/
+docs-tools/site/plan/
+docs-tools/site/reference/
+docs-tools/site/screenshots/
+docs-tools/site/public/
+docs-tools/site/.vitepress/cache/
+docs-tools/site/.vitepress/dist/
+docs/reference/ipc.md
+docs/reference/events.md
+docs/reference/schema.md
+docs-tools/node_modules/
+.docs-build/

@@ -1,0 +1,21 @@
+{
+  // アプリの tsconfig.json を土台にし、TypeScript 5.9 が解釈できない設定だけを翻訳する。
+  //
+  // なぜ2つ必要か: アプリは TypeScript 7（ネイティブ移植版）でビルドしており、
+  // 7 の npm パッケージには従来の Compiler API が入っていない。TypeDoc は
+  // その API を必要とするため、docs-tools/ に 5.9 を隔離している。
+  // 7.0 は 5.9 の移植で新しい構文は無いので、5.9 のパーサで同じコードを読める。
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    // アプリ側は "6.0"。TypeScript 5.9 はこの値を知らず TS5103 で落ちる。
+    // ドキュメント生成では非推奨警告を抑止する必要が無いので 5.0 へ落とす。
+    "ignoreDeprecations": "5.0",
+    // paths はこの tsconfig からの相対で解決されるため、一段深いぶんを補正する。
+    "paths": { "@/*": ["../src/*"] },
+    // 生成物は型ではなくドキュメント。宣言も出力もしない。
+    "noEmit": true
+  },
+  "include": ["../src"],
+  // テストとモックは公開 API ではないので載せない。
+  "exclude": ["../src/**/*.test.ts", "../src/**/*.test.tsx", "../src/test", "../src/mocks"]
+}

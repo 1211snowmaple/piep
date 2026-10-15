@@ -1,0 +1,93 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" xml:lang="{{ settings.language }}" lang="{{ settings.language }}">
+
+<head>
+    <meta charset="utf-8" />
+    <title>{{ core.name }}</title>
+    <link rel="stylesheet" type="text/css" href="{{ css_path }}" />
+</head>
+
+<body epub:type="frontmatter" class="info-page">
+    <section class="main-content">
+        {#-
+          FANBOX の体裁。表題・クリエイター・投稿日・支援プランを
+          ひとまとまりのヘッダにし、残りは設定の順序どおり明細へ流す。
+          ヘッダに出る4項目は、設定でオフにすればその場から消える。
+        -#}
+        {%- set placed = ["title", "author", "account", "datePublished", "feeRequired", "cover", "description", "attachments"] %}
+
+        <div class="post-header">
+            {%- for field in fields %}
+            {%- if field.key == "title" %}
+            <h1 class="title">{{ core.name }}</h1>
+            {%- endif %}
+            {%- endfor %}
+            {#- 区切りの中黒は CSS が入れる。項目をオフにしても行頭に「・」が残らない -#}
+            <p class="byline">{% for field in fields %}{% if field.key == "author" %}<span>{{ core.author.name }}{% if core.author.account %} <span class="creator-id">@{{ core.author.account }}</span>{% endif %}</span>{% elif field.key == "datePublished" and formatted_date %}<span>{{ formatted_date }}</span>{% elif field.key == "feeRequired" %}<span>{% if stats.feeRequired %}<span class="badge badge--plan">{{ stats.feeRequired | format_number }}円プラン</span>{% else %}<span class="badge">無料公開</span>{% endif %}</span>{% endif %}{% endfor %}</p>
+        </div>
+
+        {%- for field in fields %}
+
+        {%- if field.key == "cover" and cover_href %}
+        <div class="cover-container"><img src="{{ cover_href }}" alt="{{ strings.COVER_TITLE }}" /></div>
+
+        {%- elif field.key == "description" and core.description %}
+        {#- description_html は整形済みの XHTML。core.description を直接書くと字面で出る #}
+        <div class="description excerpt">{{ description_html }}</div>
+
+        {%- elif field.key == "attachments" and content.attachments %}
+        <div class="attachment-notice">
+            <p class="note">この投稿には添付ファイルがあります（本書には収録されていません）</p>
+            <ul class="attachments">
+                {%- for attachment in content.attachments %}
+                <li>{{ attachment.name }}</li>
+                {%- endfor %}
+            </ul>
+        </div>
+
+        {%- endif %}
+        {%- endfor %}
+
+        <div class="details">
+            {%- for field in fields %}
+            {%- if field.key in placed %}
+            {#- ヘッダと上のブロックでもう置いた -#}
+
+            {%- elif field.key == "tags" and core.tags %}
+            <div class="row"><span class="label">{{ field.label }}</span><span class="value tags">{% for tag in core.tags %}<span class="tag">#{{ tag.name }}</span>{% if not loop.last %} {% endif %}{% endfor %}</span></div>
+
+            {%- elif field.key == "dateModified" and formatted_modified %}
+            <div class="row"><span class="label">{{ field.label }}</span><span class="value">{{ formatted_modified }}</span></div>
+
+            {%- elif field.key == "likeCount" and stats.likeCount %}
+            <div class="row"><span class="label">{{ field.label }}</span><span class="value">{{ stats.likeCount | format_number }}</span></div>
+
+            {%- elif field.key == "commentCount" and stats.commentCount %}
+            <div class="row"><span class="label">{{ field.label }}</span><span class="value">{{ stats.commentCount | format_number }}</span></div>
+
+            {%- elif field.key == "textLength" and stats.textLength %}
+            <div class="row"><span class="label">{{ field.label }}</span><span class="value">{{ stats.textLength | format_number }}</span></div>
+
+            {%- elif field.key == "pageCount" and stats.pageCount %}
+            <div class="row"><span class="label">{{ field.label }}</span><span class="value">{{ stats.pageCount }}</span></div>
+
+            {%- elif field.key == "imageCount" and stats.imageCount %}
+            <div class="row"><span class="label">{{ field.label }}</span><span class="value">{{ stats.imageCount }}</span></div>
+
+            {%- elif field.key == "adult" and stats.adult %}
+            <div class="row"><span class="label">{{ field.label }}</span><span class="value adult">R-18</span></div>
+
+            {%- elif field.key == "series" and core.isPartOf %}
+            <div class="row"><span class="label">{{ field.label }}</span><span class="value">{{ core.isPartOf.name }}</span></div>
+
+            {%- elif field.key == "source" %}
+            <div class="row"><span class="label">{{ field.label }}</span><span class="value"><a href="{{ core.mainEntityOfPage }}">{{ core.mainEntityOfPage }}</a></span></div>
+
+            {%- endif %}
+            {%- endfor %}
+        </div>
+    </section>
+</body>
+
+</html>

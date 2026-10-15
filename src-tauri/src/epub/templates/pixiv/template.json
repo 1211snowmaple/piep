@@ -1,0 +1,41 @@
+{
+  "label": "pixiv 小説",
+  "description": "シリーズ名と文字数を表紙まわりに置く、pixiv 小説向けの体裁。",
+  "appliesTo": ["pixiv"],
+  "language": "ja",
+  "pageProgression": "ltr",
+  "includeCoverPage": true,
+  "includeInfoPage": true,
+  "includeNcx": true,
+  "chapterToc": true,
+  "coverInReadingOrder": true,
+  "infoFields": [
+    { "key": "series", "label": "シリーズ", "enabled": true },
+    { "key": "title", "label": "タイトル", "enabled": true },
+    { "key": "author", "label": "作者", "enabled": true },
+    { "key": "cover", "label": "表紙", "enabled": true },
+    { "key": "textLength", "label": "文字数", "enabled": true },
+    { "key": "description", "label": "キャプション", "enabled": true },
+    { "key": "tags", "label": "タグ", "enabled": true },
+    { "key": "datePublished", "label": "公開日", "enabled": true },
+    { "key": "dateModified", "label": "更新日", "enabled": false },
+    { "key": "source", "label": "配信元URL", "enabled": true },
+    { "key": "pageCount", "label": "ページ数", "enabled": false },
+    { "key": "imageCount", "label": "画像点数", "enabled": false },
+    { "key": "likeCount", "label": "ブックマーク", "enabled": false },
+    { "key": "commentCount", "label": "コメント数", "enabled": false },
+    { "key": "feeRequired", "label": "支援プラン", "enabled": false },
+    { "key": "adult", "label": "年齢制限", "enabled": false },
+    { "key": "account", "label": "ユーザーID", "enabled": false },
+    { "key": "attachments", "label": "添付ファイル", "enabled": false }
+  ],
+  "strings": {
+    "TOC_TITLE": "目次",
+    "LANDMARKS_TITLE": "ランドマーク",
+    "COVER_TITLE": "表紙",
+    "INFO_TITLE": "作品情報",
+    "BODY_MATTER_TITLE": "本文",
+    "BODY_PAGE_TITLE": "本文",
+    "PAGE_LABEL": "ページ"
+  }
+}

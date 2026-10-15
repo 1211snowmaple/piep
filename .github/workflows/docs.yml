@@ -1,0 +1,103 @@
+name: "Docs"
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches: [main]
+
+# 同時に走らせない。Pages への配置は最後の1本だけが意味を持つ。
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ドキュメントを検査する。四つ見ている。
+  #
+  #   1. フロントと Rust の食い違い（invoke の名前・イベント・スキーマ）
+  #   2. 散文に書いた数が古くなっていないか
+  #   3. 使い方の説明と、実際に撮っている画面のずれ
+  #   4. 日本語で閉じない強調記法
+  #
+  # 2 と 3 は、手で書いた記述がソースから離れていくのを止めるためにある。
+  # 実際、方針書のコマンド数は「140個中6個」のまま実物と離れていた。
+  #
+  # Linux で走らせている。ここで使うのは Node と tools/ipc-extract だけで、
+  # 後者は syn と serde しか使わない移植性のあるクレートである。アプリ本体は
+  # ビルドしないので、Windows の重い依存（DirectML、WebView2、画像コーデック）
+  # には触れない。2分弱で終わる検査を全 PR に掛けられる。
+  contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24
+      - name: Install Rust 1.98.1
+        run: |
+          rustup toolchain install 1.98.1 --profile minimal --component clippy,rustfmt
+          rustup default 1.98.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: tools/ipc-extract
+      # 境界を守っている当のコードが、いちばん検証されていなかった。抽出器が
+      # `#[tauri::command]` を静かに取りこぼしても、教えてくれるものが何も
+      # 無い。ドリフト検査は「取りこぼしが無い」という前提の上に建っている。
+      - run: cargo test --manifest-path tools/ipc-extract/Cargo.toml
+      - run: cargo clippy --manifest-path tools/ipc-extract/Cargo.toml --all-targets -- -D warnings
+      - run: cargo fmt --manifest-path tools/ipc-extract/Cargo.toml --all -- --check
+      - run: npm ci
+        working-directory: docs-tools
+      - run: npm run docs:check
+        working-directory: docs-tools
+      # サイトが組めることを PR の時点で確かめる。deploy は main でしか走らない
+      # ので、ここで見ないと配置の直前に初めて分かることになる。実際テーマを
+      # 足したとき、手元では通るのに綺麗な checkout でだけ落ちる壊れ方をした
+      # （Vite が上位の postcss.config.cjs を拾い、アプリ側の依存を要求した）。
+      - run: npm run contract && npm run site:build
+        working-directory: docs-tools
+
+  # サイトを組んで GitHub Pages へ配置する。main だけ。
+  #
+  # Windows で走らせるのは cargo doc のためである。このクレートは DirectML 版の
+  # ort / fastembed を持ち、`cfg(windows)` の依存もある。Linux では依存の解決
+  # そのものが通らない。
+  deploy:
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: contract
+    runs-on: windows-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24
+      - name: Install Rust 1.98.1
+        run: |
+          rustup toolchain install 1.98.1 --profile minimal
+          rustup default 1.98.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: |
+            src-tauri
+            tools/ipc-extract
+      - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6
+      # アプリの依存は要らない。ここで動かすのは抽出器（構文を読むだけ）、
+      # cargo doc、VitePress の三つで、どれも src/ の型解決を必要としない。
+      # TypeDoc を外すまでは、アプリのソースを型検査するために root の
+      # `npm ci` が要った。
+      - run: npm ci
+        working-directory: docs-tools
+      - run: npm run docs:build
+        working-directory: docs-tools
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5
+        with:
+          path: docs-tools/site/.vitepress/dist
+      - id: deployment
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5

@@ -1,0 +1,64 @@
+import { Badge, Card, Group, Stack, Text } from "@mantine/core";
+import { AppLink } from "@/app/router";
+import { ClippedTooltip } from "@/components/ClippedTooltip";
+import { CollectionCover } from "@/components/CollectionCover";
+import { formatDate, formatNumber } from "@/lib/format";
+import { Icons, IconSize } from "@/lib/icons";
+import type { WorkCollectionSummary } from "@/types/collections";
+
+/**
+ * 束をひとつ、ひと目で。ライブラリのタブと作者ページが共有する。
+ *
+ * 以前は表紙を受け取っておきながら描いていなかった。同じ画面に並ぶ作者と
+ * シリーズのカードには表紙があるので、コレクションだけが文字の箱に見えていた。
+ * 一覧の中で一種類だけ見え方が違うと、それは作りかけに見える。
+ */
+export function CollectionCard({ collection }: { collection: WorkCollectionSummary }) {
+  const missing = collection.memberCount - collection.availableCount;
+  return (
+    <Card
+      component={AppLink}
+      to={`/collections/${collection.id}`}
+      withBorder
+      padding="md"
+      className="collection-card surface--interactive focus-card"
+    >
+      <Group wrap="nowrap" align="stretch" gap="md">
+        <CollectionCover collection={collection} variant="card" />
+        <Stack gap={6} flex={1} miw={0} justify="center">
+          {/* 出自（続き物／テーマ）の紋はやめた。
+              //
+              // 走査は続き物を `ordered`、テーマを `unordered` で作るので、
+              // 隣の「順序付き」とほぼ必ず一致する。二つ並べても、片方が
+              // もう片方の言い換えになっているだけだった。独自に持っていた
+              // 情報は「棚から見つけたのか、自分で作ったのか」だけで、それは
+              // 束を使うときに要らない。 */}
+          <Badge size="xs" variant="light" color={collection.collectionKind === "ordered" ? "piep" : "gray"}>
+            {collection.collectionKind === "ordered" ? "順序付き" : "順序なし"}
+          </Badge>
+          {/* 吹き出しは名前に付ける。カード全体に付けると、表紙の上でも
+              日付の上でも同じ物が出るうえ、名前ではなくカードの中央——
+              一つ上のカードの上——に浮かぶ。 */}
+          <ClippedTooltip label={collection.name}>
+            <Text fw={720} size="md" lh={1.35} className="line-clamp-2 collection-card__name">{collection.name}</Text>
+          </ClippedTooltip>
+          {collection.description && (
+            <ClippedTooltip label={collection.description}>
+              <Text size="xs" c="dimmed" className="line-clamp-2 collection-card__description">{collection.description}</Text>
+            </ClippedTooltip>
+          )}
+          <Group gap="sm" wrap="wrap" className="collection-card__facts">
+            <Text size="xs" c="dimmed">
+              <Icons.collection size={IconSize.inline} />{formatNumber(collection.memberCount)}作品
+            </Text>
+            <Text size="xs" c="dimmed">
+              <Icons.textLength size={IconSize.inline} />{formatNumber(collection.totalTextLength)}字
+            </Text>
+            <Text size="xs" c="dimmed">{formatDate(collection.updatedAt)}</Text>
+            {missing > 0 && <Badge size="xs" color="orange" variant="light">未保存 {formatNumber(missing)}</Badge>}
+          </Group>
+        </Stack>
+      </Group>
+    </Card>
+  );
+}

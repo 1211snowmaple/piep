@@ -1,0 +1,74 @@
+:root {
+  --motion-duration: 180ms;
+  --motion-ease: cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* Navigation stays in place while only its associated content changes. */
+.motion-tabs { position: relative; }
+.motion-tabs[data-indicator-ready] .mantine-Tabs-tab[data-active] { border-bottom-color: transparent; }
+.motion-tabs__indicator {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 2px;
+  background: var(--tabs-color);
+  pointer-events: none;
+  /* 下線はタブの箱の**内側**（下端の 2px）に重なる。タブ自身が
+     `position: relative; z-index: 0` で重ね合わせの文脈を作るので、下線が上に
+     出るかどうかは DOM の並び順だけで決まっていた。タブに背景が付く瞬間
+     ―― カーソルを当てたとき ―― に、その背景が下線を塗り潰しうる。
+     並び順に頼らず、明示的に上へ置く。 */
+  z-index: 1;
+  /* No long tail. An underline that covers most of the distance quickly and
+     then creeps the last few pixels reads as the page correcting itself. */
+  transition: transform var(--motion-duration) var(--motion-ease), width var(--motion-duration) var(--motion-ease);
+}
+
+:root[data-content-transition] { view-transition-name: none; }
+:root[data-content-transition]::view-transition { pointer-events: none; }
+
+/* 中身は入れ替わるが、拡大縮小はしない ― 古い絵も新しい絵も原寸のまま左上から
+   貼るので、字の大きさは変わらない。消えるほうが読めなくなってから現れるほうが
+   読めるようになるので、二つが同時に読める瞬間もない。
+
+   **高さだけは滑らかに変える。** 一覧ごとに高さがまるで違う（実測で作品
+   1,559px・作者 573px・シリーズ 418px・コレクション 878px）ので、箱を止めて
+   おくと切り替えの1フレーム目で 1,100px 以上が一息に詰まり、下にあるものごと
+   飛ぶ。字が消える間もなく紙面が畳まれるので、これが「しゅば」と見える。
+   動かすのは切り取り枠だけで、貼ってある絵は原寸のままである。 */
+:root[data-content-transition]::view-transition-group(piep-content) {
+  animation-duration: 240ms;
+  animation-timing-function: var(--motion-ease);
+}
+:root[data-content-transition]::view-transition-old(piep-content),
+:root[data-content-transition]::view-transition-new(piep-content) {
+  width: 100%;
+  height: 100%;
+  object-fit: none;
+  object-position: left top;
+  mix-blend-mode: normal;
+}
+/* 濃さの変化は一定の速さで、切り替えの前後を通して一つの長さに収める。
+   `ease-in` で消して `ease-out` で出すと、**変化のいちばん速いところが真ん中に
+   来る** ―― 端はゆっくり、中央で一息に入れ替わるので、これも「しゅば」と
+   読める。線形にして、消え終わったところから現れ始め、箱の高さと同じ 240ms で
+   揃える。 */
+:root[data-content-transition]::view-transition-old(piep-content) { animation: content-out 100ms linear both; }
+:root[data-content-transition]::view-transition-new(piep-content) { animation: content-in 140ms linear 100ms both; }
+
+@keyframes content-out { to { opacity: 0; } }
+@keyframes content-in { from { opacity: 0; } to { opacity: 1; } }
+
+/* A completed route arrives quietly; typing and background refreshes do not
+   replay this animation. The height is held from the start, so a load that
+   answers quickly resolves without ever flashing a "loading" notice. */
+.page { animation: content-in 160ms ease-out; }
+.async-loader { animation: content-in 120ms ease-out 140ms backwards; }
+
+@media (prefers-reduced-motion: reduce) {
+  .motion-tabs__indicator { transition: none; }
+  .page, .async-loader { animation: none; }
+  :root[data-content-transition]::view-transition-group(*),
+  :root[data-content-transition]::view-transition-old(*),
+  :root[data-content-transition]::view-transition-new(*) { animation: none !important; }
+}

@@ -1,0 +1,9741 @@
+use super::*;
+use std::collections::HashSet;
+use std::fs;
+use std::time::{Duration, Instant};
+
+#[test]
+fn a_work_centroid_does_not_claim_a_matching_body_passage() {
+    let hit = super::super::semantic_index::SemanticSearchHit {
+        download_id: 1,
+        chunk_id: "work".into(),
+        field: "content".into(),
+        text: "本文全体の傾向が近い候補です。個別の一致箇所は特定していません。".into(),
+        score: 0.5,
+    };
+    let highlight = semantic_chunk_highlight(&hit);
+    assert!(!highlight.segments[0].matched);
+    assert!(highlight.text.contains("個別の一致箇所は特定していません"));
+
+    let metadata = super::super::semantic_index::SemanticSearchHit {
+        field: "metadata".into(),
+        text: "題名とタグ".into(),
+        ..hit
+    };
+    let metadata_highlight = semantic_chunk_highlight(&metadata);
+    assert!(!metadata_highlight.segments[0].matched);
+}
+
+#[test]
+fn malformed_json_projection_is_reported_instead_of_becoming_empty_data() {
+    let conn = Connection::open_in_memory().unwrap();
+    let error = conn
+        .query_row("SELECT 'not-json'", [], |row| {
+            json_column_or_default::<Vec<String>>(row, 0)
+        })
+        .unwrap_err();
+
+    assert!(
+        matches!(error, rusqlite::Error::FromSqlConversionFailure(..)),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn author_facts_include_all_recent_metadata_without_reading_excerpts() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let conn = db.conn.lock().unwrap();
+    let mut target_ids = Vec::new();
+
+    for index in 0..35 {
+        // 最後の2作は同じ日時にして、IDによる安定した順序も確かめる。
+        let created_at = if index >= 33 {
+            "2026-01-01T00:00:34Z".to_string()
+        } else {
+            format!("2026-01-01T00:00:{index:02}Z")
+        };
+        conn.execute(
+            "INSERT INTO downloads (
+                source, source_id, title, author_name, author_id, content_type,
+                excerpt, json_path, downloaded_at, source_created_at
+             ) VALUES ('source-a', ?1, ?2, '対象作者', 'creator-a', 'text',
+                       '本文由来の概要', 'unused', '2026-01-02T00:00:00Z', ?3)",
+            params![
+                format!("work-{index}"),
+                format!("対象作品 {index}"),
+                created_at
+            ],
+        )
+        .unwrap();
+        target_ids.push(conn.last_insert_rowid());
+    }
+
+    // 表示名検索は取得元をまたいで拾うが、source指定検索には混ざらない。
+    conn.execute(
+        "INSERT INTO downloads (
+            source, source_id, title, author_name, author_id, content_type,
+            excerpt, json_path, downloaded_at
+         ) VALUES ('source-b', 'same-name', '別取得元作品', '対象作者', 'creator-b',
+                   'text', '概要', 'unused', '2026-01-03T00:00:00Z')",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO downloads (
+            source, source_id, title, author_name, author_id, content_type,
+            excerpt, json_path, downloaded_at
+         ) VALUES ('source-a', 'other-author', '別作者作品', '別作者', 'creator-other',
+                   'text', '概要', 'unused', '2026-01-04T00:00:00Z')",
+        [],
+    )
+    .unwrap();
+    conn.execute("INSERT INTO tags (name) VALUES ('末尾作品だけのタグ')", [])
+        .unwrap();
+    let tag_id = conn.last_insert_rowid();
+    conn.execute(
+        "INSERT INTO download_tags (download_id, tag_id) VALUES (?1, ?2)",
+        params![target_ids[0], tag_id],
+    )
+    .unwrap();
+    drop(conn);
+
+    let (_, source_scoped) = db.author_facts("source-a", "creator-a").unwrap();
+    assert_eq!(source_scoped.len(), 35, "no 30-work sample cap");
+    assert_eq!(source_scoped[0].title, "対象作品 34");
+    assert_eq!(source_scoped[1].title, "対象作品 33");
+    assert_eq!(source_scoped.last().unwrap().title, "対象作品 0");
+    assert!(source_scoped.iter().all(|work| work.excerpt.is_none()));
+    assert_eq!(
+        source_scoped.last().unwrap().tags,
+        vec!["末尾作品だけのタグ".to_string()]
+    );
+
+    let (_, name_scoped) = db.author_facts_by_name("対象作者").unwrap();
+    assert_eq!(name_scoped.len(), 36, "display-name scope spans sources");
+    assert!(name_scoped.iter().all(|work| work.excerpt.is_none()));
+    assert!(name_scoped.iter().any(|work| work.title == "別取得元作品"));
+    assert!(!name_scoped.iter().any(|work| work.title == "別作者作品"));
+}
+
+/// Builds prose whose vocabulary keeps growing, the way a real library does.
+fn synthetic_body(seed: u64, chars: usize) -> String {
+    let nouns = [
+        "教室",
+        "図書館",
+        "海岸",
+        "旋律",
+        "記憶",
+        "季節",
+        "手紙",
+        "灯台",
+        "回廊",
+        "約束",
+        "硝子",
+        "残響",
+        "標本",
+        "封筒",
+        "螺旋",
+        "夜明",
+        "輪郭",
+        "潮騒",
+        "書架",
+        "遠雷",
+    ];
+    let verbs = [
+        "見つめていた",
+        "思い出していた",
+        "書き留めた",
+        "数えていた",
+        "聞いていた",
+        "受け止めた",
+    ];
+    let adjectives = ["静かな", "薄い", "淡い", "遠い", "冷たい", "眩しい"];
+    let mut state = seed | 1;
+    let mut next = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state as usize
+    };
+    let mut text = String::with_capacity(chars * 3);
+    while text.chars().count() < chars {
+        text.push_str(adjectives[next() % adjectives.len()]);
+        text.push_str(nouns[next() % nouns.len()]);
+        text.push('と');
+        text.push_str(nouns[next() % nouns.len()]);
+        let number = next() % 100_000;
+        text.push_str(&format!("{number}番"));
+        text.push('を');
+        text.push_str(verbs[next() % verbs.len()]);
+        text.push_str("。\n");
+    }
+    text.chars().take(chars).collect()
+}
+
+#[test]
+#[ignore = "measurement harness, run with --ignored --nocapture"]
+fn measure_full_index_rebuild() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let works: usize = std::env::var("PIEP_BENCH_WORKS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(300);
+    let body_chars: usize = std::env::var("PIEP_BENCH_CHARS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(12_000);
+
+    let seeding = Instant::now();
+    for index in 0..works {
+        insert_download_unindexed(
+            &db,
+            &storage,
+            &format!("bench-{index}"),
+            &format!("計測用作品 {index}"),
+            &format!("計測作者 {}", index % 40),
+            &["計測", "長編"],
+            &synthetic_body(index as u64 + 1, body_chars),
+        );
+    }
+    println!(
+        "seeded {works} works of {body_chars} chars in {:.1} s",
+        seeding.elapsed().as_secs_f64()
+    );
+
+    let started = Instant::now();
+    let outcome = db
+        .rebuild_search_index(
+            SearchIndexRebuildOptions::default(),
+            &|| false,
+            |_progress| {},
+        )
+        .unwrap();
+    let elapsed = started.elapsed().as_secs_f64();
+    let status = db.get_search_index_status().unwrap();
+    let index_bytes = recursive_file_size(&storage.join("search-index"));
+    println!(
+            "rebuilt {} works ({} failed) in {elapsed:.2} s = {:.1} works/s | pending {} | index {:.1} MB",
+            outcome.processed,
+            outcome.failed,
+            outcome.processed as f64 / elapsed,
+            status.pending_downloads,
+            index_bytes as f64 / 1_048_576.0,
+        );
+    assert_eq!(status.pending_downloads, 0);
+}
+
+#[test]
+fn reader_transport_pages_keep_complete_source_blocks() {
+    let large = "あ".repeat(READER_PAGE_TARGET_BYTES / 3);
+    let html = format!(
+        "<p>{large}</p><!-- content-block --><p>{large}</p><!-- content-block --><p>{large}</p>"
+    );
+    let (pages, _) = paginate_reader_html(&html, "fanbox");
+    assert!(pages.len() >= 2);
+    assert!(pages.iter().all(|page| !page.contains("content-block")));
+    assert!(pages
+        .iter()
+        .all(|page| page.starts_with("<p>") && page.ends_with("</p>")));
+
+    let (pixiv, pixiv_starts) = paginate_reader_html("first<!-- newpage -->second", "pixiv");
+    assert_eq!(pixiv, vec!["first", "second"]);
+    // 割られていないので、原稿のページと転送のページは 1 対 1。
+    assert_eq!(pixiv_starts, vec![0, 1]);
+
+    // 明示的な1ページが巨大でも、1回の IPC に丸ごと載せない。
+    let line = format!("{}<br />\n", "あ".repeat(READER_PAGE_TARGET_BYTES / 6));
+    let (oversized_pixiv, oversized_starts) = paginate_reader_html(&line.repeat(4), "pixiv");
+    // 1 つの原稿ページが割られても、始まりは最初の転送ページのまま。
+    assert_eq!(oversized_starts, vec![0]);
+    assert!(oversized_pixiv.len() >= 2);
+    assert_eq!(oversized_pixiv.concat(), line.repeat(4).trim());
+    assert!(oversized_pixiv
+        .iter()
+        .all(|page| page.len() <= READER_PAGE_TARGET_BYTES));
+}
+
+#[test]
+fn diagnostic_percentiles_are_stable() {
+    let mut samples = [9.0, 1.0, 7.0, 3.0, 5.0];
+    assert_eq!(benchmark_percentiles(&mut samples), (5.0, 9.0));
+}
+
+#[test]
+fn diagnostic_scan_aggregates_each_tree_in_one_bounded_walk() {
+    let (_temp, root, storage) = temp_paths();
+    let version = storage.join("pixiv/work/v1");
+    let assets = version.join("data_assets");
+    let lexical = storage.join("search-index");
+    let semantic = root.join("search");
+    fs::create_dir_all(&assets).unwrap();
+    fs::create_dir_all(&lexical).unwrap();
+    fs::create_dir_all(&semantic).unwrap();
+    fs::write(version.join("original.json"), b"12345").unwrap();
+    let known = assets.join("known.png");
+    fs::write(&known, b"123").unwrap();
+    fs::write(assets.join("orphan.png"), b"1234").unwrap();
+    fs::write(lexical.join("segment.store"), b"123456").unwrap();
+    fs::write(lexical.join("meta.json"), b"12").unwrap();
+    fs::write(semantic.join("vectors.bin"), b"1234567").unwrap();
+    let interrupted = storage.join("pixiv/work/.v2.0123abcd.stage");
+    fs::create_dir_all(&interrupted).unwrap();
+    fs::write(interrupted.join("data.json"), b"123").unwrap();
+    let known_paths = HashSet::from([normalized_diagnostic_path(&known)]);
+    let mut is_known_asset =
+        |path: &Path| Ok(known_paths.contains(&normalized_diagnostic_path(path)));
+
+    let stats = collect_diagnostic_file_stats(&storage, &semantic, &mut is_known_asset).unwrap();
+
+    assert_eq!(stats.storage_size_bytes, 23);
+    assert_eq!(stats.lexical_index_size_bytes, 8);
+    assert_eq!(stats.lexical_index_file_count, 2);
+    assert_eq!(stats.lexical_index_segment_count, 1);
+    assert_eq!(stats.semantic_index_size_bytes, 7);
+    assert_eq!(stats.orphan_asset_files, 1);
+    assert_eq!(stats.orphan_asset_file_bytes, 4);
+    assert_eq!(stats.transient_files, 1);
+    assert_eq!(stats.transient_file_bytes, 3);
+    assert_eq!(
+        stats.visited_entries, 13,
+        "each directory entry is visited once, including disjoint semantic storage"
+    );
+}
+
+#[test]
+fn file_integrity_check_streams_and_classifies_manual_changes() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let missing_download = storage.join("pixiv/missing/v1/original.json");
+    let missing_version = storage.join("pixiv/missing/v2/original.json");
+    let asset = storage.join("pixiv/missing/v1/data_assets/image.png");
+    let empty_profile = root.join("profiles/pixiv/empty/icon.png");
+    let entity_json = root.join("series/pixiv/series-1/v1/data.json");
+    let outside_profile = root.join("outside.png");
+    fs::create_dir_all(asset.parent().unwrap()).unwrap();
+    fs::create_dir_all(empty_profile.parent().unwrap()).unwrap();
+    fs::create_dir_all(entity_json.parent().unwrap()).unwrap();
+    fs::write(&asset, b"123").unwrap();
+    fs::write(&empty_profile, b"").unwrap();
+    fs::write(&entity_json, b"{}").unwrap();
+    fs::write(&outside_profile, b"outside").unwrap();
+
+    let conn = db.conn.lock().unwrap();
+    conn.execute(
+        "INSERT INTO downloads (
+                source, source_id, title, author_name, author_id, content_type,
+                json_path, downloaded_at
+             ) VALUES ('pixiv', 'missing', '作品', '作者', 'author', 'novel', ?1, ?2)",
+        params![
+            missing_download.to_string_lossy(),
+            chrono::Utc::now().to_rfc3339()
+        ],
+    )
+    .unwrap();
+    let download_id = conn.last_insert_rowid();
+    conn.execute(
+        "INSERT INTO download_versions (
+                download_id, version, json_path, created_at
+             ) VALUES (?1, 2, ?2, ?3)",
+        params![
+            download_id,
+            missing_version.to_string_lossy(),
+            chrono::Utc::now().to_rfc3339()
+        ],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO assets (
+                download_id, asset_type, filename, local_path, file_size_bytes
+             ) VALUES (?1, 'image', 'image.png', ?2, 9)",
+        params![download_id, asset.to_string_lossy()],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO people (source, source_key, display_name, icon_path)
+             VALUES ('pixiv', 'outside', '外部', ?1)",
+        params![outside_profile.to_string_lossy()],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO series (source, source_key, title, cover_path)
+             VALUES ('pixiv', 'empty', '空', ?1)",
+        params![empty_profile.to_string_lossy()],
+    )
+    .unwrap();
+    // シリーズの表紙は、最初に保存した作品の表紙をそのまま指すことがある。
+    // downloads/ の下にあっても、これはアプリが置いたものである。
+    conn.execute(
+        "INSERT INTO series (source, source_key, title, cover_path)
+             VALUES ('pixiv', 'borrowed', '借りた表紙', ?1)",
+        params![asset.to_string_lossy()],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO entity_versions (
+                entity_type, source, source_key, version, json_path, created_at
+             ) VALUES ('series', 'pixiv', 'series-1', 1, ?1, ?2)",
+        params![
+            entity_json.to_string_lossy(),
+            chrono::Utc::now().to_rfc3339()
+        ],
+    )
+    .unwrap();
+
+    let integrity = check_library_file_integrity(&conn, &storage, &root).unwrap();
+    assert_eq!(integrity.checked_file_references, 7);
+    assert_eq!(integrity.missing_json_files, 2);
+    assert_eq!(integrity.missing_asset_files, 0);
+    assert_eq!(integrity.missing_profile_files, 0);
+    assert_eq!(
+        integrity.unsafe_referenced_files, 1,
+        "作品の表紙を借りたシリーズは、許可領域外ではない"
+    );
+    assert_eq!(integrity.unreadable_referenced_files, 0);
+    assert_eq!(integrity.empty_referenced_files, 1);
+    assert_eq!(integrity.mismatched_asset_files, 1);
+    assert_eq!(integrity.issue_samples.len(), 5);
+    assert!(integrity
+        .issue_samples
+        .iter()
+        .any(|issue| issue.issue_type == "unsafe"
+            && issue.path.ends_with("outside.png")
+            && issue.label.as_deref() == Some("外部")));
+    assert!(integrity
+        .issue_samples
+        .iter()
+        .any(|issue| issue.issue_type == "missing" && issue.label.as_deref() == Some("作品")));
+    assert!(integrity
+        .issue_samples
+        .iter()
+        .any(|issue| issue.path.ends_with("icon.png")
+            && issue.category == "profile"
+            && issue.issue_type == "empty"));
+    assert!(!integrity
+        .issue_samples
+        .iter()
+        .any(|issue| issue.path.ends_with("data.json")));
+    let lookup_plan = conn
+        .prepare("EXPLAIN QUERY PLAN SELECT 1 FROM assets WHERE local_path = ?1 LIMIT 1")
+        .unwrap()
+        .query_map(params![asset.to_string_lossy()], |row| {
+            row.get::<_, String>(3)
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
+        .join(" ");
+    assert!(
+        lookup_plan.contains("idx_assets_local_path"),
+        "{lookup_plan}"
+    );
+    drop(conn);
+    drop(db);
+}
+
+#[test]
+fn diagnostic_scan_skips_links_and_enforces_depth_and_entry_limits() {
+    let (_temp, root, storage) = temp_paths();
+    let outside = root.join("outside");
+    fs::create_dir_all(outside.join("data_assets")).unwrap();
+    fs::write(outside.join("data_assets/escape.png"), b"outside").unwrap();
+    fs::write(storage.join("inside.bin"), b"i").unwrap();
+    let link = storage.join("linked");
+    #[cfg(unix)]
+    let link_result = std::os::unix::fs::symlink(&outside, &link);
+    #[cfg(windows)]
+    let link_result = std::os::windows::fs::symlink_dir(&outside, &link);
+    #[cfg(not(any(unix, windows)))]
+    let link_result: std::io::Result<()> = Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "links unavailable",
+    ));
+    if link_result.is_ok() {
+        let mut no_known_assets = |_path: &Path| Ok(false);
+        let stats =
+            collect_diagnostic_file_stats(&storage, &root.join("search"), &mut no_known_assets)
+                .unwrap();
+        assert_eq!(stats.storage_size_bytes, 1);
+        assert_eq!(stats.orphan_asset_files, 0);
+    }
+
+    let mut no_known_assets = |_path: &Path| Ok(false);
+    fs::create_dir_all(storage.join("a/b")).unwrap();
+    let depth_error = collect_diagnostic_file_stats_with_limits(
+        &storage,
+        &root.join("search"),
+        &mut no_known_assets,
+        DiagnosticScanLimits {
+            max_depth: 0,
+            max_entries: 100,
+        },
+    )
+    .unwrap_err();
+    assert!(depth_error.contains("depth-0"));
+
+    let entry_error = collect_diagnostic_file_stats_with_limits(
+        &storage,
+        &root.join("search"),
+        &mut no_known_assets,
+        DiagnosticScanLimits {
+            max_depth: 64,
+            max_entries: 1,
+        },
+    )
+    .unwrap_err();
+    assert!(entry_error.contains("1-entry"));
+}
+
+#[test]
+fn atomic_restore_transaction_rolls_back_database_rows() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let id = insert_download_unindexed(
+        &db,
+        &storage,
+        "restore-rollback",
+        "残る作品",
+        "作者",
+        &[],
+        "本文",
+    );
+    db.begin_atomic_restore().unwrap();
+    db.delete_download_record_for_restore(id).unwrap();
+    std::thread::scope(|scope| {
+        let concurrent = scope
+            .spawn(|| db.delete_download_record_for_restore(id))
+            .join()
+            .unwrap();
+        assert!(concurrent.unwrap_err().contains("restore is in progress"));
+    });
+    db.rollback_atomic_restore();
+    assert_eq!(db.get_download(id).unwrap().title, "残る作品");
+}
+
+#[test]
+fn injected_save_failure_rolls_back_download_tags_assets_and_version() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let json_path = storage.join("pixiv/atomic-save/v1/original.json");
+    let download = NewDownload {
+        source: "pixiv".to_string(),
+        source_id: "atomic-save".to_string(),
+        title: "Atomic save".to_string(),
+        author_name: "Author".to_string(),
+        author_id: "author".to_string(),
+        content_type: "novel".to_string(),
+        tags: vec!["atomic".to_string()],
+        excerpt: None,
+        cover_path: None,
+        json_path: json_path.to_string_lossy().to_string(),
+        original_json_path: Some(json_path.to_string_lossy().to_string()),
+        asset_count: 1,
+        file_size_bytes: 10,
+        downloaded_at: "2026-08-12T00:00:00Z".to_string(),
+        source_created_at: None,
+        content_hash: Some("hash".to_string()),
+        text_length: 4,
+        source_updated_at: None,
+        watch_updates: false,
+        current_version: 1,
+        favorite: false,
+    };
+    let assets = vec![NewAsset {
+        download_id: 0,
+        asset_type: "illustration".to_string(),
+        filename: "image.png".to_string(),
+        local_path: storage
+            .join("pixiv/atomic-save/v1/data_assets/image.png")
+            .to_string_lossy()
+            .to_string(),
+        original_url: None,
+        mime_type: Some("image/png".to_string()),
+        file_size_bytes: 6,
+    }];
+    let versions = vec![NewVersion {
+        download_id: 0,
+        version: 1,
+        content_hash: Some("hash".to_string()),
+        text_length: 4,
+        json_path: download.json_path.clone(),
+        original_json_path: download.original_json_path.clone(),
+        asset_count: 1,
+        file_size_bytes: 10,
+        created_at: download.downloaded_at.clone(),
+        change_summary: None,
+    }];
+
+    assert!(db
+        .commit_download_save_with_injected_failure(&download, &assets, &versions)
+        .is_err());
+
+    let duplicate_versions = vec![versions[0].clone(), versions[0].clone()];
+    assert!(db
+        .commit_reimported_download(&download, &assets, &duplicate_versions)
+        .is_err());
+
+    assert!(db
+        .get_download_by_source("pixiv", "atomic-save")
+        .unwrap()
+        .is_none());
+    let conn = db.conn.lock().unwrap();
+    assert_eq!(
+        conn.query_row("SELECT COUNT(*) FROM download_tags", [], |row| row
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        conn.query_row("SELECT COUNT(*) FROM assets", [], |row| row
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        conn.query_row("SELECT COUNT(*) FROM download_versions", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .unwrap(),
+        0
+    );
+    drop(conn);
+}
+
+#[test]
+fn startup_removes_only_journaled_uncommitted_versions_and_reserved_stages() {
+    let (_temp, root, storage) = temp_paths();
+    let db_path = root.join("piep.db");
+    let db = Database::open(&db_path, &storage).unwrap();
+    insert_download_unindexed(
+        &db,
+        &storage,
+        "crash-recovery",
+        "Committed work",
+        "Author",
+        &[],
+        "body",
+    );
+    let work = storage.join("pixiv/crash-recovery");
+    let committed = work.join("v1");
+    let unjournaled = work.join("v2");
+    let stage = work.join(".v2.0123456789abcdef.stage");
+    let published_stage = work.join(".v3.fedcba9876543210.stage");
+    let published = work.join("v3");
+    let unrelated = work.join("notes");
+    fs::create_dir_all(&unjournaled).unwrap();
+    fs::write(unjournaled.join("original.json"), b"user data").unwrap();
+    fs::create_dir_all(&stage).unwrap();
+    fs::write(stage.join("original.json"), b"staged").unwrap();
+    fs::create_dir_all(&published_stage).unwrap();
+    fs::write(published_stage.join("original.json"), b"published").unwrap();
+    db.create_download_save_journal("pixiv", "crash-recovery", 3, &published_stage, &published)
+        .unwrap();
+    fs::rename(&published_stage, &published).unwrap();
+    fs::create_dir_all(&unrelated).unwrap();
+    drop(db);
+
+    let reopened = Database::open(&db_path, &storage).unwrap();
+
+    assert!(committed.exists());
+    assert!(
+        unjournaled.exists(),
+        "an unregistered version may be user data awaiting import"
+    );
+    assert!(!stage.exists());
+    assert!(!published.exists(), "journal proves v3 was never committed");
+    assert!(unrelated.exists(), "unknown directories are user data");
+    let conn = reopened.conn.lock().unwrap();
+    assert_eq!(
+        conn.query_row("SELECT COUNT(*) FROM download_save_journal", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .unwrap(),
+        0
+    );
+    drop(conn);
+    drop(reopened);
+}
+
+#[test]
+fn startup_preserves_a_version_committed_with_its_journal_marker() {
+    let (_temp, root, storage) = temp_paths();
+    let db_path = root.join("piep.db");
+    let db = Database::open(&db_path, &storage).unwrap();
+    let work = storage.join("pixiv/committed-journal");
+    let stage = work.join(".v1.0123456789abcdef.stage");
+    let final_path = work.join("v1");
+    fs::create_dir_all(&stage).unwrap();
+    let json_path = final_path.join("original.json");
+    fs::write(stage.join("original.json"), b"committed body").unwrap();
+    let journal_id = db
+        .create_download_save_journal("pixiv", "committed-journal", 1, &stage, &final_path)
+        .unwrap();
+    fs::rename(&stage, &final_path).unwrap();
+    let download = NewDownload {
+        source: "pixiv".to_string(),
+        source_id: "committed-journal".to_string(),
+        title: "Committed work".to_string(),
+        author_name: "Author".to_string(),
+        author_id: "author".to_string(),
+        content_type: "novel".to_string(),
+        tags: Vec::new(),
+        excerpt: None,
+        cover_path: None,
+        json_path: json_path.to_string_lossy().to_string(),
+        original_json_path: Some(json_path.to_string_lossy().to_string()),
+        asset_count: 0,
+        file_size_bytes: 14,
+        downloaded_at: "2026-08-12T00:00:00Z".to_string(),
+        source_created_at: None,
+        content_hash: Some("committed-hash".to_string()),
+        text_length: 14,
+        source_updated_at: None,
+        watch_updates: false,
+        current_version: 1,
+        favorite: false,
+    };
+    let version = NewVersion {
+        download_id: 0,
+        version: 1,
+        content_hash: download.content_hash.clone(),
+        text_length: download.text_length,
+        json_path: download.json_path.clone(),
+        original_json_path: download.original_json_path.clone(),
+        asset_count: 0,
+        file_size_bytes: download.file_size_bytes,
+        created_at: download.downloaded_at.clone(),
+        change_summary: None,
+    };
+    db.commit_download_save_with_journal(&download, &[], &[version], &journal_id)
+        .unwrap();
+    drop(db);
+
+    let reopened = Database::open(&db_path, &storage).unwrap();
+
+    assert!(final_path.join("original.json").exists());
+    assert!(reopened
+        .get_download_by_source("pixiv", "committed-journal")
+        .unwrap()
+        .is_some());
+    let conn = reopened.conn.lock().unwrap();
+    assert_eq!(
+        conn.query_row("SELECT COUNT(*) FROM download_save_journal", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .unwrap(),
+        0
+    );
+    drop(conn);
+    drop(reopened);
+}
+
+#[test]
+fn reimport_record_delete_preserves_the_scanned_work_tree() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let id = insert_download_unindexed(
+        &db,
+        &storage,
+        "reimport-preserve",
+        "再取り込み作品",
+        "作者",
+        &[],
+        "本文",
+    );
+    let json_path = PathBuf::from(db.get_download(id).unwrap().json_path);
+
+    db.delete_download_record_for_reimport(id).unwrap();
+
+    assert!(
+        json_path.exists(),
+        "the scanner still needs to read this file"
+    );
+    assert!(db
+        .get_download_by_source("pixiv", "reimport-preserve")
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn deleting_a_legacy_work_never_removes_its_source_siblings() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let insert_legacy = |source_id: &str, title: &str| {
+        let work_dir = storage.join("pixiv").join(source_id);
+        fs::create_dir_all(&work_dir).unwrap();
+        let json_path = work_dir.join("data.json");
+        fs::write(&json_path, serde_json::json!({ "text": title }).to_string()).unwrap();
+        let id = db
+            .upsert_download(&NewDownload {
+                source: "pixiv".to_string(),
+                source_id: source_id.to_string(),
+                title: title.to_string(),
+                author_name: "作者".to_string(),
+                author_id: "legacy-author".to_string(),
+                content_type: "novel".to_string(),
+                tags: Vec::new(),
+                excerpt: None,
+                cover_path: None,
+                json_path: json_path.to_string_lossy().to_string(),
+                original_json_path: None,
+                asset_count: 0,
+                file_size_bytes: 0,
+                downloaded_at: "2026-01-01T00:00:00Z".to_string(),
+                source_created_at: None,
+                content_hash: None,
+                text_length: 0,
+                source_updated_at: None,
+                watch_updates: false,
+                current_version: 1,
+                favorite: false,
+            })
+            .unwrap();
+        (id, work_dir, json_path)
+    };
+    let (deleted_id, deleted_dir, _) = insert_legacy("legacy-one", "削除対象");
+    let (_, sibling_dir, sibling_json) = insert_legacy("legacy-two", "残る作品");
+
+    db.delete_download(deleted_id).unwrap();
+
+    assert!(!deleted_dir.exists());
+    assert!(sibling_dir.exists());
+    assert!(sibling_json.exists(), "another work in pixiv must survive");
+}
+
+#[test]
+fn entity_reconstruction_preserves_fetched_profiles_and_versions() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let id = insert_download_unindexed(
+        &db,
+        &storage,
+        "profile-work",
+        "プロフィール付き作品",
+        "作者",
+        &[],
+        "本文",
+    );
+    let author_key = "author-profile-work";
+    db.upsert_download_person(id, "pixiv", author_key, "author", "作者")
+        .unwrap();
+    db.upsert_download_relation(id, "series", "pixiv", "series-1", "連作")
+        .unwrap();
+    db.upsert_download_series(id, "pixiv", "series-1", "連作", Some(1))
+        .unwrap();
+    db.upsert_person_profile(
+        "pixiv",
+        author_key,
+        "作者",
+        Some("profiles/author/icon.png"),
+        Some("profiles/author/cover.png"),
+        Some("保存済みプロフィール"),
+        Some("{\"web\":\"https://example.com\"}"),
+        "person-hash",
+        "profiles/author/v1/data.json",
+        2,
+        128,
+        EntityProfileFreshness::RemoteChecked,
+    )
+    .unwrap();
+    db.upsert_series_profile(
+        "pixiv",
+        "series-1",
+        "連作",
+        Some("保存済みシリーズ説明"),
+        Some("series/series-1/cover.png"),
+        "series-hash",
+        "series/series-1/v1/data.json",
+        1,
+        64,
+        EntityProfileFreshness::RemoteChecked,
+        None,
+        None,
+    )
+    .unwrap();
+
+    db.reconstruct_entities_after_import().unwrap();
+
+    let person = db.get_person("pixiv", author_key).unwrap();
+    assert_eq!(person.description.as_deref(), Some("保存済みプロフィール"));
+    assert_eq!(person.current_version, 1);
+    assert_eq!(
+        db.list_entity_versions("person", "pixiv", author_key)
+            .unwrap()
+            .len(),
+        1
+    );
+    let series = db.get_series("pixiv", "series-1").unwrap();
+    assert_eq!(series.description.as_deref(), Some("保存済みシリーズ説明"));
+    assert_eq!(series.current_version, 1);
+    assert_eq!(
+        db.list_entity_versions("series", "pixiv", "series-1")
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn profile_upserts_roll_back_when_version_insertion_fails() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    db.upsert_person_profile(
+        "pixiv",
+        "person-rollback",
+        "Before",
+        None,
+        None,
+        None,
+        None,
+        "person-hash-1",
+        "profiles/person-rollback/v1/original.json",
+        0,
+        10,
+        EntityProfileFreshness::RemoteChecked,
+    )
+    .unwrap();
+    db.upsert_series_profile(
+        "pixiv",
+        "series-rollback",
+        "Before",
+        None,
+        None,
+        "series-hash-1",
+        "series/series-rollback/v1/original.json",
+        0,
+        10,
+        EntityProfileFreshness::RemoteChecked,
+        None,
+        None,
+    )
+    .unwrap();
+    db.conn
+        .lock()
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER reject_profile_version BEFORE INSERT ON entity_versions
+         WHEN NEW.entity_type IN ('person', 'series') AND NEW.version = 2
+         BEGIN SELECT RAISE(ABORT, 'injected version failure'); END;",
+        )
+        .unwrap();
+
+    assert!(db
+        .upsert_person_profile(
+            "pixiv",
+            "person-rollback",
+            "After",
+            None,
+            None,
+            None,
+            None,
+            "person-hash-2",
+            "profiles/person-rollback/v2/original.json",
+            0,
+            10,
+            EntityProfileFreshness::RemoteChecked,
+        )
+        .is_err());
+    assert!(db
+        .upsert_series_profile(
+            "pixiv",
+            "series-rollback",
+            "After",
+            None,
+            None,
+            "series-hash-2",
+            "series/series-rollback/v2/original.json",
+            0,
+            10,
+            EntityProfileFreshness::RemoteChecked,
+            None,
+            None,
+        )
+        .is_err());
+
+    let person = db.get_person("pixiv", "person-rollback").unwrap();
+    assert_eq!(person.display_name, "Before");
+    assert_eq!(person.content_hash.as_deref(), Some("person-hash-1"));
+    assert_eq!(person.current_version, 1);
+    assert_eq!(
+        db.list_entity_versions("person", "pixiv", "person-rollback")
+            .unwrap()
+            .len(),
+        1
+    );
+    let series = db.get_series("pixiv", "series-rollback").unwrap();
+    assert_eq!(series.title, "Before");
+    assert_eq!(series.content_hash.as_deref(), Some("series-hash-1"));
+    assert_eq!(series.current_version, 1);
+    assert_eq!(
+        db.list_entity_versions("series", "pixiv", "series-rollback")
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn repaired_profile_images_update_history_atomically() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    db.upsert_person_profile(
+        "pixiv",
+        "person-image-repair",
+        "Author",
+        None,
+        None,
+        None,
+        None,
+        "person-hash",
+        "profiles/person-image-repair/v1/original.json",
+        0,
+        10,
+        EntityProfileFreshness::SnapshotOnly,
+    )
+    .unwrap();
+    db.upsert_series_profile(
+        "pixiv",
+        "series-image-repair",
+        "Series",
+        None,
+        None,
+        "series-hash",
+        "series/series-image-repair/v1/original.json",
+        0,
+        10,
+        EntityProfileFreshness::SnapshotOnly,
+        None,
+        None,
+    )
+    .unwrap();
+    let conn = db.conn.lock().unwrap();
+    conn.execute_batch(
+        "CREATE TRIGGER reject_image_metadata BEFORE UPDATE ON entity_versions
+         WHEN NEW.source_key IN ('person-image-repair', 'series-image-repair')
+         BEGIN SELECT RAISE(ABORT, 'injected metadata failure'); END;",
+    )
+    .unwrap();
+    drop(conn);
+    assert!(db
+        .upsert_person_profile(
+            "pixiv",
+            "person-image-repair",
+            "Author",
+            Some("icon.png"),
+            None,
+            None,
+            None,
+            "person-hash",
+            "",
+            1,
+            20,
+            EntityProfileFreshness::SnapshotOnly,
+        )
+        .is_err());
+    assert!(db
+        .upsert_series_profile(
+            "pixiv",
+            "series-image-repair",
+            "Series",
+            None,
+            Some("cover.png"),
+            "series-hash",
+            "",
+            1,
+            20,
+            EntityProfileFreshness::SnapshotOnly,
+            None,
+            None,
+        )
+        .is_err());
+    assert!(db
+        .get_person("pixiv", "person-image-repair")
+        .unwrap()
+        .icon_path
+        .is_none());
+    assert!(db
+        .get_series("pixiv", "series-image-repair")
+        .unwrap()
+        .cover_path
+        .is_none());
+    for (kind, key) in [
+        ("person", "person-image-repair"),
+        ("series", "series-image-repair"),
+    ] {
+        let versions = db.list_entity_versions(kind, "pixiv", key).unwrap();
+        assert_eq!(versions.len(), 1);
+        assert_eq!(versions[0].asset_count, 0);
+        assert_eq!(versions[0].file_size_bytes, 10);
+    }
+    db.conn
+        .lock()
+        .unwrap()
+        .execute_batch("DROP TRIGGER reject_image_metadata;")
+        .unwrap();
+    db.upsert_person_profile(
+        "pixiv",
+        "person-image-repair",
+        "Author",
+        Some("icon.png"),
+        None,
+        None,
+        None,
+        "person-hash",
+        "",
+        1,
+        20,
+        EntityProfileFreshness::SnapshotOnly,
+    )
+    .unwrap();
+    db.upsert_series_profile(
+        "pixiv",
+        "series-image-repair",
+        "Series",
+        None,
+        Some("cover.png"),
+        "series-hash",
+        "",
+        1,
+        20,
+        EntityProfileFreshness::SnapshotOnly,
+        None,
+        None,
+    )
+    .unwrap();
+    for (kind, key) in [
+        ("person", "person-image-repair"),
+        ("series", "series-image-repair"),
+    ] {
+        let versions = db.list_entity_versions(kind, "pixiv", key).unwrap();
+        assert_eq!(versions.len(), 1);
+        assert_eq!(versions[0].asset_count, 1);
+        assert_eq!(versions[0].file_size_bytes, 30);
+    }
+}
+
+#[test]
+fn incomplete_entity_profiles_are_retryable_until_remote_checked() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let id = insert_download_unindexed(
+        &db,
+        &storage,
+        "repair-profile-work",
+        "修復対象作品",
+        "途中の作者",
+        &[],
+        "本文",
+    );
+    db.upsert_download_person(id, "pixiv", "repair-person", "author", "途中の作者")
+        .unwrap();
+    db.upsert_download_series(id, "pixiv", "repair-series", "途中のシリーズ", Some(1))
+        .unwrap();
+
+    let initial = db.entity_profile_repair_status().unwrap();
+    assert_eq!(initial.person_count, 1);
+    assert_eq!(initial.series_count, 1);
+    assert_eq!(initial.total_count, 2);
+
+    db.upsert_person_profile(
+        "pixiv",
+        "repair-person",
+        "取得済み作者",
+        None,
+        None,
+        Some("完全な説明"),
+        None,
+        "person-hash",
+        "profiles/repair-person/v1/data.json",
+        0,
+        32,
+        EntityProfileFreshness::RemoteChecked,
+    )
+    .unwrap();
+
+    let remaining = db.incomplete_entity_profiles().unwrap();
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].entity_type, "series");
+    assert_eq!(remaining[0].source_key, "repair-series");
+}
+
+#[test]
+fn reader_cache_pages_and_full_document_search_share_one_index() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let id = insert_download_unindexed(
+        &db,
+        &storage,
+        "reader-search",
+        "検索できる作品",
+        "作者",
+        &[],
+        "最初のページ [newpage] 次のページにNeedleとneedle",
+    );
+    let first = db.get_reader_content_page(id, None, 0, false).unwrap();
+    let second = db.get_reader_content_page(id, None, 1, false).unwrap();
+    assert_eq!(first.page_count, 2);
+    assert_eq!(second.page_count, 2);
+    assert!(second.html.contains("Needle"));
+
+    let hits = db.search_reader_content(id, None, "needle", 20).unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].page, 2);
+    assert_eq!(hits[0].count, 2);
+    assert!(hits[0].snippet.to_lowercase().contains("needle"));
+}
+
+#[test]
+fn editor_blocks_preserve_rich_content_order() {
+    let assets = vec![AssetEntry {
+        id: 42,
+        download_id: 7,
+        asset_type: "image".to_string(),
+        filename: "scene.webp".to_string(),
+        local_path: "assets/scene.webp".to_string(),
+        original_url: None,
+        mime_type: Some("image/webp".to_string()),
+        file_size_bytes: 128,
+    }];
+    let html = concat!(
+        "<p>導入<br>二行目</p>",
+        "<!-- newpage -->",
+        "<h2>章題</h2>",
+        "<img data-local-path=\"assets/scene.webp\" alt=\"挿絵\">",
+        "<a class=\"novel-link-card\" href=\"https://example.com/story\">続きはこちら</a>",
+        "<hr>",
+        "<p>結び</p>"
+    );
+
+    let blocks = html_to_editor_blocks(html, &assets);
+
+    assert_eq!(
+        blocks
+            .iter()
+            .map(|block| block.block_type.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "paragraph",
+            "page_break",
+            "heading",
+            "image",
+            "link",
+            "separator",
+            "paragraph"
+        ]
+    );
+    assert_eq!(blocks[0].text.as_deref(), Some("導入\n二行目"));
+    assert_eq!(blocks[3].asset_id, Some(42));
+    assert_eq!(blocks[3].text.as_deref(), Some("挿絵"));
+    assert_eq!(blocks[4].text.as_deref(), Some("https://example.com/story"));
+    assert!(blocks[4]
+        .attrs_json
+        .as_deref()
+        .is_some_and(|attrs| attrs.contains("続きはこちら")));
+    assert!(blocks_to_html(&blocks, &assets).contains("<!-- newpage -->"));
+}
+
+/// 前の実行が残した一時ディレクトリを一度だけ掃除する。
+///
+/// 取りこぼしを掃除するための保険。通常の後始末は `TempRoot` が行うが、
+/// それが無かった頃の残骸が temp に積み上がっている。実行中の別プロセスを
+/// 巻き込まないよう、1 時間より古いものだけを対象にする。
+fn sweep_stale_test_dirs() {
+    static SWEEP: std::sync::Once = std::sync::Once::new();
+    SWEEP.call_once(|| {
+        let Ok(entries) = fs::read_dir(std::env::temp_dir()) else {
+            return;
+        };
+        let cutoff = std::time::SystemTime::now() - std::time::Duration::from_secs(3_600);
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            if !name.to_string_lossy().starts_with("piep_search_test_") {
+                continue;
+            }
+            let stale = entry
+                .metadata()
+                .and_then(|meta| meta.modified())
+                .is_ok_and(|modified| modified < cutoff);
+            if stale {
+                let _ = fs::remove_dir_all(entry.path());
+            }
+        }
+    });
+}
+
+/// テストの一時ツリー。テスト終了時に削除する。
+///
+/// 後始末は `Database` より後に走らなければならない。SQLite は削除を許す
+/// 共有モードでファイルを開かないので、`db` が生きている間は Windows の
+/// 削除が共有違反で失敗する。旧コードは `db` が生きたまま `remove_dir_all`
+/// を呼んでいたため、一時ディレクトリを数千個積み残していた。`Database`
+/// より前に束縛すればローカルは宣言と逆順に drop されるので、この順序が
+/// 自然に得られる。末尾の `remove_dir_all` と違って panic や早期 return
+/// でも走る。
+///
+/// それでも削除は best-effort のままにしてある。接続の後始末が drop の
+/// 直後まで尾を引くことがあり、失敗を致命扱いにすると後始末そのものが
+/// テストを落とす要因になるからである。
+struct TempRoot {
+    root: PathBuf,
+    storage: PathBuf,
+}
+
+impl Drop for TempRoot {
+    fn drop(&mut self) {
+        super::super::tantivy_index::release_runtime(&self.storage);
+        // Windows unlinks a file that still has an open handle by marking it
+        // delete-pending: the contents go, but the name survives until the
+        // last handle closes, and a directory that still holds names cannot
+        // be removed. SQLite's connections finish closing just after
+        // `Database` drops, so the first attempt clears the tree and a
+        // retry a few milliseconds later clears the directory itself.
+        for attempt in 0..5 {
+            if fs::remove_dir_all(&self.root).is_ok() || !self.root.exists() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2 << attempt));
+        }
+    }
+}
+
+fn temp_paths() -> (TempRoot, PathBuf, PathBuf) {
+    sweep_stale_test_dirs();
+    let rand_val: u32 = rand::random();
+    let root = std::env::temp_dir().join(format!("piep_search_test_{}", rand_val));
+    let storage = root.join("downloads");
+    fs::create_dir_all(&storage).unwrap();
+    let guard = TempRoot {
+        root: root.clone(),
+        storage: storage.clone(),
+    };
+    (guard, root, storage)
+}
+
+fn params(query: &str) -> SearchV2Params {
+    SearchV2Params {
+        text: None,
+        query: Some(query.to_string()),
+        source: None,
+        content_type: None,
+        sort_by: Some("relevance".to_string()),
+        sort_order: Some("desc".to_string()),
+        limit: Some(20),
+        cursor: None,
+        favorite: None,
+        tags_include: None,
+        tags_exclude: None,
+        tag_filter_mode: None,
+        authors_include: None,
+        authors_exclude: None,
+        min_char_count: None,
+        max_char_count: None,
+        min_asset_count: None,
+        max_asset_count: None,
+        min_file_size_bytes: None,
+        max_file_size_bytes: None,
+        asset_filter: None,
+        series_filter: None,
+        revision_filter: None,
+        edit_filter: None,
+        cover_filter: None,
+        date_field: None,
+        date_from: None,
+        date_to: None,
+        watch_filter: None,
+        person_source: None,
+        person_key: None,
+        series_source: None,
+        series_key: None,
+        offset: None,
+        ids_include: None,
+        view_mode: None,
+        projection: None,
+        search_mode: None,
+        version_scope: None,
+    }
+}
+
+fn v2_params(query: Option<&str>, limit: i64, cursor: Option<String>) -> SearchV2Params {
+    SearchV2Params {
+        text: None,
+        query: query.map(str::to_string),
+        source: None,
+        content_type: None,
+        sort_by: Some(if query.is_some() { "relevance" } else { "date" }.to_string()),
+        sort_order: Some("desc".to_string()),
+        limit: Some(limit),
+        cursor,
+        favorite: None,
+        tags_include: None,
+        tags_exclude: None,
+        tag_filter_mode: None,
+        authors_include: None,
+        authors_exclude: None,
+        min_char_count: None,
+        max_char_count: None,
+        min_asset_count: None,
+        max_asset_count: None,
+        min_file_size_bytes: None,
+        max_file_size_bytes: None,
+        asset_filter: None,
+        series_filter: None,
+        revision_filter: None,
+        edit_filter: None,
+        cover_filter: None,
+        date_field: None,
+        date_from: None,
+        date_to: None,
+        watch_filter: None,
+        person_source: None,
+        person_key: None,
+        series_source: None,
+        series_key: None,
+        offset: None,
+        ids_include: None,
+        view_mode: None,
+        projection: None,
+        search_mode: None,
+        version_scope: None,
+    }
+}
+
+fn insert_download(
+    db: &Database,
+    storage: &Path,
+    source_id: &str,
+    title: &str,
+    author: &str,
+    tags: &[&str],
+    body: &str,
+) -> i64 {
+    insert_download_with_reindex(
+        db,
+        storage,
+        TestDownloadInput {
+            source_id,
+            title,
+            author,
+            tags,
+            body,
+            reindex: true,
+        },
+    )
+}
+
+fn insert_download_unindexed(
+    db: &Database,
+    storage: &Path,
+    source_id: &str,
+    title: &str,
+    author: &str,
+    tags: &[&str],
+    body: &str,
+) -> i64 {
+    insert_download_with_reindex(
+        db,
+        storage,
+        TestDownloadInput {
+            source_id,
+            title,
+            author,
+            tags,
+            body,
+            reindex: false,
+        },
+    )
+}
+
+/// Seed a metadata-only browsing fixture in one transaction. Creating one
+/// directory and JSON file per work made a million-row acceptance test
+/// measure NTFS setup/cleanup for hours instead of the library queries we
+/// care about. The generated rows still exercise production indexes,
+/// author aggregation, tags, shelves, dates, and cursor tie-breaks.
+fn seed_metadata_only_library(db: &Database, works: usize) {
+    assert!((1..=1_000_000).contains(&works));
+    let mut conn = db.conn.lock().unwrap();
+    let tx = conn.transaction().unwrap();
+    tx.execute(
+        "WITH digits(d) AS (
+                 VALUES (0),(1),(2),(3),(4),(5),(6),(7),(8),(9)
+             ), numbers(n) AS (
+                 SELECT a.d + 10*b.d + 100*c.d + 1000*d.d + 10000*e.d + 100000*f.d
+                 FROM digits a
+                 CROSS JOIN digits b
+                 CROSS JOIN digits c
+                 CROSS JOIN digits d
+                 CROSS JOIN digits e
+                 CROSS JOIN digits f
+             )
+             INSERT INTO downloads (
+                 source, source_id, title, author_name, author_id, content_type,
+                 excerpt, json_path, asset_count, file_size_bytes, downloaded_at,
+                 source_created_at, content_hash, text_length, watch_updates,
+                 current_version, favorite
+             )
+             SELECT
+                 CASE WHEN n % 5 = 0 THEN 'fanbox' ELSE 'pixiv' END,
+                 printf('scale-%07d', n),
+                 printf('蔵書 %07d', n),
+                 printf('作者 %03d', n % 400),
+                 printf('author-%03d', n % 400),
+                 CASE WHEN n % 5 = 0 THEN 'article' ELSE 'novel' END,
+                 '大規模ライブラリ受入試験',
+                 printf('synthetic/scale-%07d.json', n),
+                 n % 6,
+                 4096 + (n % 1048576),
+                 printf('2026-%02d-%02dT%02d:00:00Z', 1 + n % 12, 1 + n % 27, n % 24),
+                 printf('2025-%02d-%02dT00:00:00Z', 1 + n % 12, 1 + n % 27),
+                 printf('fixture-hash-%07d', n),
+                 1000 + (n % 200000),
+                 CASE WHEN n % 13 = 0 THEN 1 ELSE 0 END,
+                 1,
+                 CASE WHEN n % 11 = 0 THEN 1 ELSE 0 END
+             FROM numbers
+             WHERE n < ?1",
+        params![works as i64],
+    )
+    .unwrap();
+    for tag in 0..30 {
+        tx.execute(
+            "INSERT INTO tags (name) VALUES (?1)",
+            params![format!("tag{tag}")],
+        )
+        .unwrap();
+    }
+    tx.execute(
+        "INSERT INTO download_tags (download_id, tag_id)
+             SELECT id, 1 + ((id - 1) % 30) FROM downloads",
+        [],
+    )
+    .unwrap();
+    tx.commit().unwrap();
+    conn.execute_batch("ANALYZE; PRAGMA optimize;").unwrap();
+}
+
+struct TestDownloadInput<'a> {
+    source_id: &'a str,
+    title: &'a str,
+    author: &'a str,
+    tags: &'a [&'a str],
+    body: &'a str,
+    reindex: bool,
+}
+
+fn insert_download_with_reindex(
+    db: &Database,
+    storage: &Path,
+    input: TestDownloadInput<'_>,
+) -> i64 {
+    let TestDownloadInput {
+        source_id,
+        title,
+        author,
+        tags,
+        body,
+        reindex,
+    } = input;
+    let dir = storage.join("pixiv").join(source_id).join("v1");
+    fs::create_dir_all(&dir).unwrap();
+    let json_path = dir.join("original.json");
+    fs::write(
+        &json_path,
+        serde_json::json!({ "text": body }).to_string().as_bytes(),
+    )
+    .unwrap();
+    let dl = NewDownload {
+        source: "pixiv".to_string(),
+        source_id: source_id.to_string(),
+        title: title.to_string(),
+        author_name: author.to_string(),
+        author_id: format!("author-{}", source_id),
+        content_type: "novel".to_string(),
+        tags: tags.iter().map(|tag| tag.to_string()).collect(),
+        excerpt: Some("短い概要".to_string()),
+        cover_path: None,
+        json_path: json_path.to_string_lossy().to_string(),
+        original_json_path: Some(json_path.to_string_lossy().to_string()),
+        asset_count: 0,
+        file_size_bytes: 0,
+        downloaded_at: "2026-01-01T00:00:00Z".to_string(),
+        source_created_at: Some("2026-01-01T00:00:00Z".to_string()),
+        content_hash: Some(format!("hash-{}", source_id)),
+        text_length: body.chars().count() as i64,
+        source_updated_at: None,
+        watch_updates: false,
+        current_version: 1,
+        favorite: false,
+    };
+    let id = db.upsert_download(&dl).unwrap();
+    if reindex {
+        db.reindex_download(id).unwrap();
+    }
+    id
+}
+
+#[test]
+fn historical_search_is_opt_in_and_groups_saved_revisions_by_work() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let download_id = insert_download(
+        &db,
+        &storage,
+        "history-search-1",
+        "改稿される作品",
+        "履歴作者",
+        &["改稿"],
+        "旧版限定語がここにあります。",
+    );
+
+    let v1_path = storage
+        .join("pixiv")
+        .join("history-search-1")
+        .join("v1")
+        .join("original.json");
+    let v2_dir = storage.join("pixiv").join("history-search-1").join("v2");
+    fs::create_dir_all(&v2_dir).unwrap();
+    let v2_path = v2_dir.join("original.json");
+    fs::write(
+        &v2_path,
+        serde_json::json!({ "text": "新版限定語だけが残っています。" })
+            .to_string()
+            .as_bytes(),
+    )
+    .unwrap();
+    {
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO download_versions (
+                download_id, version, content_hash, text_length, json_path,
+                original_json_path, asset_count, file_size_bytes, created_at, change_summary
+             ) VALUES (?1, 1, 'history-v1', 14, ?2, ?2, 0, 0, '2026-01-01T00:00:00Z', '初版')",
+            params![download_id, v1_path.to_string_lossy().to_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO download_versions (
+                download_id, version, content_hash, text_length, json_path,
+                original_json_path, asset_count, file_size_bytes, created_at, change_summary
+             ) VALUES (?1, 2, 'history-v2', 15, ?2, ?2, 0, 0, '2026-02-01T00:00:00Z', '改稿')",
+            params![download_id, v2_path.to_string_lossy().to_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE downloads SET
+                current_version = 2, content_hash = 'history-v2', text_length = 15,
+                json_path = ?2, original_json_path = ?2
+             WHERE id = ?1",
+            params![download_id, v2_path.to_string_lossy().to_string()],
+        )
+        .unwrap();
+    }
+    db.reindex_download(download_id).unwrap();
+
+    let current_only = db.search_downloads_v2(&params("旧版限定語")).unwrap();
+    assert!(current_only.items.is_empty());
+
+    let mut with_history = params("旧版限定語");
+    with_history.version_scope = Some("all".to_string());
+    let historical = db.search_downloads_v2(&with_history).unwrap();
+    assert_eq!(historical.items.len(), 1);
+    assert_eq!(historical.items[0].id, download_id);
+    assert_eq!(historical.items[0].matched_version, Some(1));
+    assert_eq!(historical.items[0].historical_match_count, 1);
+    assert!(historical.items[0]
+        .match_highlights
+        .iter()
+        .any(|highlight| highlight.field == "body"));
+    assert!(historical
+        .search_meta
+        .explanations
+        .iter()
+        .any(|explanation| {
+            explanation.contains("過去版") && explanation.contains("作品ごと")
+        }));
+
+    // Search target and result filters are independent: old text is searched,
+    // then the matching work is still narrowed by its current library state.
+    let mut historical_revised_only = with_history.clone();
+    historical_revised_only.revision_filter = Some("revised".to_string());
+    assert_eq!(
+        db.search_downloads_v2(&historical_revised_only)
+            .unwrap()
+            .items
+            .len(),
+        1
+    );
+    historical_revised_only.revision_filter = Some("first_version".to_string());
+    assert!(db
+        .search_downloads_v2(&historical_revised_only)
+        .unwrap()
+        .items
+        .is_empty());
+
+    // The same historical match set must survive an explicit SQL-owned sort.
+    // Otherwise choosing title/date ordering would silently lose old versions.
+    with_history.sort_by = Some("title".to_string());
+    let sorted = db.search_downloads_v2(&with_history).unwrap();
+    assert_eq!(sorted.items.len(), 1);
+    assert_eq!(sorted.items[0].matched_version, Some(1));
+
+    let mut current_match = params("新版限定語");
+    current_match.version_scope = Some("all".to_string());
+    let current = db.search_downloads_v2(&current_match).unwrap();
+    assert_eq!(current.items.len(), 1);
+    assert_eq!(current.items[0].matched_version, None);
+}
+
+#[test]
+fn legacy_root_assets_do_not_absorb_modern_version_trees() {
+    let (_temp, _root, storage) = temp_paths();
+    let work = storage.join("pixiv").join("legacy-assets");
+    let asset = |id: i64, path: PathBuf| AssetEntry {
+        id,
+        download_id: 1,
+        asset_type: "file".to_string(),
+        filename: path.file_name().unwrap().to_string_lossy().to_string(),
+        local_path: path.to_string_lossy().to_string(),
+        original_url: None,
+        mime_type: None,
+        file_size_bytes: 1,
+    };
+    let assets = vec![
+        asset(1, work.join("legacy.txt")),
+        asset(2, work.join("data_assets").join("legacy.epub")),
+        asset(3, work.join("v2").join("data_assets").join("second.txt")),
+        asset(
+            4,
+            work.join("v20").join("data_assets").join("twentieth.txt"),
+        ),
+    ];
+
+    assert_eq!(
+        assets_for_version_path(&assets, &work.join("original.json"))
+            .into_iter()
+            .map(|entry| entry.id)
+            .collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+    assert_eq!(
+        assets_for_version_path(&assets, &work.join("v2").join("original.json"))
+            .into_iter()
+            .map(|entry| entry.id)
+            .collect::<Vec<_>>(),
+        vec![3]
+    );
+}
+
+#[test]
+fn asset_kind_filter_and_index_describe_only_the_current_revision() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let download_id = insert_download_unindexed(
+        &db,
+        &storage,
+        "asset-version-filter",
+        "添付の版境界",
+        "作者",
+        &[],
+        "本文",
+    );
+    let work = storage.join("pixiv").join("asset-version-filter");
+    let v2_dir = work.join("v2");
+    fs::create_dir_all(v2_dir.join("data_assets")).unwrap();
+    let v2_json = v2_dir.join("original.json");
+    fs::write(&v2_json, r#"{"text":"現行本文"}"#).unwrap();
+    {
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE downloads SET current_version = 2, json_path = ?2,
+                    original_json_path = ?2, asset_count = 1
+             WHERE id = ?1",
+            params![download_id, v2_json.to_string_lossy().to_string()],
+        )
+        .unwrap();
+    }
+    let old_image = work.join("v1").join("data_assets").join("old.png");
+    let current_file = v2_dir.join("data_assets").join("current.txt");
+    for path in [&old_image, &current_file] {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, b"asset").unwrap();
+    }
+    db.insert_asset(&NewAsset {
+        download_id,
+        asset_type: "illustration".to_string(),
+        filename: "old.png".to_string(),
+        local_path: old_image.to_string_lossy().to_string(),
+        original_url: None,
+        mime_type: Some("image/png".to_string()),
+        file_size_bytes: 5,
+    })
+    .unwrap();
+    db.insert_asset(&NewAsset {
+        download_id,
+        asset_type: "file".to_string(),
+        filename: "current.txt".to_string(),
+        local_path: current_file.to_string_lossy().to_string(),
+        original_url: None,
+        mime_type: Some("text/plain".to_string()),
+        file_size_bytes: 5,
+    })
+    .unwrap();
+
+    let mut images = v2_params(None, 20, None);
+    images.asset_filter = Some("has_images".to_string());
+    assert!(db.search_downloads_v2(&images).unwrap().items.is_empty());
+    let mut files = v2_params(None, 20, None);
+    files.asset_filter = Some("has_files".to_string());
+    assert_eq!(
+        db.search_downloads_v2(&files).unwrap().items[0].id,
+        download_id
+    );
+
+    let conn = db.conn.lock().unwrap();
+    let document = search_index_document_locked(&conn, &storage, download_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(document.tantivy.asset_kinds, "file");
+}
+
+#[test]
+fn version_delete_refuses_current_and_legacy_root_revisions_without_mutation() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let download_id = insert_download_unindexed(
+        &db,
+        &storage,
+        "delete-version-guard",
+        "版削除ガード",
+        "作者",
+        &[],
+        "初版",
+    );
+    let work = storage.join("pixiv").join("delete-version-guard");
+    let legacy_json = work.join("original.json");
+    fs::write(&legacy_json, r#"{"text":"旧形式"}"#).unwrap();
+    let v2_dir = work.join("v2");
+    fs::create_dir_all(&v2_dir).unwrap();
+    let v2_json = v2_dir.join("original.json");
+    fs::write(&v2_json, r#"{"text":"現在版"}"#).unwrap();
+    {
+        let conn = db.conn.lock().unwrap();
+        for (version, path) in [(1, &legacy_json), (2, &v2_json)] {
+            conn.execute(
+                "INSERT INTO download_versions (
+                    download_id, version, json_path, original_json_path, created_at
+                 ) VALUES (?1, ?2, ?3, ?3, '2026-01-01T00:00:00Z')",
+                params![download_id, version, path.to_string_lossy().to_string()],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "UPDATE downloads SET current_version = 2, json_path = ?2, original_json_path = ?2
+             WHERE id = ?1",
+            params![download_id, v2_json.to_string_lossy().to_string()],
+        )
+        .unwrap();
+    }
+
+    assert!(db
+        .delete_version(download_id, 2)
+        .unwrap_err()
+        .contains("現在版"));
+    assert!(db
+        .delete_version(download_id, 1)
+        .unwrap_err()
+        .contains("旧形式"));
+    assert_eq!(db.get_versions(download_id).unwrap().len(), 2);
+    assert!(legacy_json.exists());
+    assert!(v2_json.exists());
+}
+
+/// 実ライブラリで見つかった並び順の崩れを固定する。番号のない初回が
+/// 末尾へ流れ、単なる言及リンクで加点された作品が話数を追い越していた。
+#[test]
+fn unnumbered_opening_leads_and_mentions_do_not_reorder_episodes() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let opening = insert_download_unindexed(
+        &db,
+        &storage,
+        "suggest-open",
+        "灯台の話",
+        "連載作者",
+        &[],
+        "初回本文",
+    );
+    let second = insert_download_unindexed(
+        &db,
+        &storage,
+        "suggest-2",
+        "灯台の話#2",
+        "連載作者",
+        &[],
+        "二話本文",
+    );
+    let third = insert_download_unindexed(
+        &db,
+        &storage,
+        "suggest-3",
+        "灯台の話#3",
+        "連載作者",
+        &[],
+        "三話本文",
+    );
+
+    // 第2話を種にしても、無印の初回が先頭に来る。
+    let suggestion = db
+        .generate_collection_suggestion(&CollectionSuggestionRequest {
+            seed_download_ids: vec![second],
+            limit: Some(20),
+        })
+        .unwrap();
+    let order = suggestion
+        .members
+        .iter()
+        .map(|member| member.title.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(order, vec!["灯台の話", "灯台の話#2", "灯台の話#3"]);
+    assert_eq!(suggestion.collection_kind, "ordered");
+    let _ = (opening, third);
+}
+
+/// 公式シリーズに同居しているだけの短編集は、束にならない。
+///
+/// 以前は「候補には出すが既定では選ばない」だった。しかしチェックの
+/// 付かない候補が並ぶことに価値は無く、151作のシリーズを種にすると
+/// 60件がそうやって画面を埋めた。**同じ棚に載っていることは、同じ束に
+/// 属する証拠ではない。**話数が隣り合っていて初めて証拠になる。
+#[test]
+fn sharing_an_anthology_shelf_yields_no_bundle() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let seed = insert_download_unindexed(
+        &db,
+        &storage,
+        "anth-seed",
+        "海の便り",
+        "短編作者",
+        &[],
+        "本文",
+    );
+    let mut others = Vec::new();
+    for index in 0..4 {
+        others.push(insert_download_unindexed(
+            &db,
+            &storage,
+            &format!("anth-{index}"),
+            &format!("まったく別の話{index}"),
+            "短編作者",
+            &[],
+            "本文",
+        ));
+    }
+    for id in std::iter::once(seed).chain(others.iter().copied()) {
+        db.upsert_download_series(id, "pixiv", "anthology", "短編集", None)
+            .unwrap();
+    }
+    let result = db.generate_collection_suggestion(&CollectionSuggestionRequest {
+        seed_download_ids: vec![seed],
+        limit: Some(20),
+    });
+    assert_eq!(
+        result.unwrap_err(),
+        "関連作品は見つかりませんでした",
+        "同じ短編集に載っているだけの作品を束にしてはいけない"
+    );
+
+    // 話数が入れば話は別。隣り合う2作だけが束になる。
+    for (id, order) in std::iter::once(seed)
+        .chain(others.iter().copied())
+        .zip([1_i64, 2, 40, 41, 42])
+    {
+        db.upsert_download_series(id, "pixiv", "anthology", "短編集", Some(order))
+            .unwrap();
+    }
+    let suggestion = db
+        .generate_collection_suggestion(&CollectionSuggestionRequest {
+            seed_download_ids: vec![seed],
+            limit: Some(20),
+        })
+        .unwrap();
+    assert_eq!(
+        suggestion.members.len(),
+        2,
+        "隣接する1作だけが加わる: {:?}",
+        suggestion
+            .members
+            .iter()
+            .map(|member| member.title.as_str())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        suggestion.members.iter().all(|member| member.selected),
+        "証拠のあるものだけが残るので、全部が既定で選ばれる"
+    );
+}
+
+#[test]
+fn work_collections_keep_order_and_reconnect_deleted_works() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let first = insert_download_unindexed(
+        &db,
+        &storage,
+        "collection-first",
+        "夜の手紙 前編",
+        "同じ作者",
+        &[],
+        "前編本文",
+    );
+    let second = insert_download_unindexed(
+        &db,
+        &storage,
+        "collection-second",
+        "夜の手紙 後編",
+        "同じ作者",
+        &[],
+        "後編本文",
+    );
+    let collection = db
+        .upsert_work_collection(&WorkCollectionInput {
+            name: "夜の手紙".to_string(),
+            description: Some("前後編".to_string()),
+            collection_kind: "ordered".to_string(),
+            cover_download_id: Some(first),
+            ..Default::default()
+        })
+        .unwrap();
+    let collection = db
+        .add_work_collection_members(
+            &collection.summary.id,
+            &[
+                WorkCollectionMemberInput {
+                    source: "pixiv".to_string(),
+                    source_id: "collection-first".to_string(),
+                    title_snapshot: None,
+                    author_snapshot: None,
+                    position: None,
+                    member_role: None,
+                    added_by: None,
+                    pinned: None,
+                    note: None,
+                },
+                WorkCollectionMemberInput {
+                    source: "pixiv".to_string(),
+                    source_id: "collection-second".to_string(),
+                    title_snapshot: None,
+                    author_snapshot: None,
+                    position: None,
+                    member_role: None,
+                    added_by: None,
+                    pinned: None,
+                    note: None,
+                },
+            ],
+        )
+        .unwrap();
+    assert_eq!(collection.summary.member_count, 2);
+    assert_eq!(collection.summary.available_count, 2);
+
+    let reordered = db
+        .reorder_work_collection_members(
+            &collection.summary.id,
+            &[
+                WorkKey {
+                    source: "pixiv".to_string(),
+                    source_id: "collection-second".to_string(),
+                },
+                WorkKey {
+                    source: "pixiv".to_string(),
+                    source_id: "collection-first".to_string(),
+                },
+            ],
+        )
+        .unwrap();
+    assert_eq!(reordered.members[0].download_id, Some(second));
+
+    db.delete_download(first).unwrap();
+    let missing = db.get_work_collection(&collection.summary.id).unwrap();
+    assert_eq!(missing.summary.member_count, 2);
+    assert_eq!(missing.summary.available_count, 1);
+    assert!(missing
+        .members
+        .iter()
+        .any(|member| member.source_id == "collection-first" && member.missing));
+
+    let restored = insert_download_unindexed(
+        &db,
+        &storage,
+        "collection-first",
+        "夜の手紙 前編・改訂",
+        "同じ作者",
+        &[],
+        "再取得本文",
+    );
+    assert_ne!(restored, first);
+    let reconnected = db.get_work_collection(&collection.summary.id).unwrap();
+    let first_member = reconnected
+        .members
+        .iter()
+        .find(|member| member.source_id == "collection-first")
+        .unwrap();
+    assert_eq!(first_member.download_id, Some(restored));
+    assert_eq!(first_member.title, "夜の手紙 前編・改訂");
+    assert!(!first_member.missing);
+}
+
+#[test]
+fn split_facts_keep_collection_positions_when_a_member_is_missing() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let mut missing_download_id = None;
+    for id in ["split-a", "split-missing", "split-b", "split-c", "split-d"] {
+        let download_id = insert_download_unindexed(&db, &storage, id, id, "作者", &[], "本文");
+        if id == "split-missing" {
+            missing_download_id = Some(download_id);
+        }
+    }
+    let collection = db
+        .upsert_work_collection(&WorkCollectionInput {
+            name: "分割確認".into(),
+            collection_kind: "ordered".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    let members = ["split-a", "split-missing", "split-b", "split-c", "split-d"]
+        .into_iter()
+        .map(|source_id| WorkCollectionMemberInput {
+            source: "pixiv".into(),
+            source_id: source_id.into(),
+            title_snapshot: Some(source_id.into()),
+            author_snapshot: Some("作者".into()),
+            position: None,
+            member_role: None,
+            added_by: None,
+            pinned: None,
+            note: None,
+        })
+        .collect::<Vec<_>>();
+    let collection = db
+        .add_work_collection_members(&collection.summary.id, &members)
+        .unwrap();
+    db.delete_download(missing_download_id.unwrap()).unwrap();
+    let collection = db.get_work_collection(&collection.summary.id).unwrap();
+    assert!(collection.members[1].missing);
+    let facts = db.collection_facts(&collection.summary.id).unwrap();
+    assert_eq!(
+        facts.iter().map(|work| work.position).collect::<Vec<_>>(),
+        vec![0, 2, 3, 4]
+    );
+    assert_eq!(facts[1].facts.title, collection.members[2].title);
+}
+
+#[test]
+fn content_links_recognize_pixiv_and_fanbox_with_direction() {
+    let links = extract_work_link_evidence(
+            "前編はこちら https://www.pixiv.net/novel/show.php?id=123 。続きは https://creator.fanbox.cc/posts/456",
+            "pixiv",
+            "999",
+        );
+    assert_eq!(links.len(), 2);
+    assert!(links
+        .iter()
+        .any(|link| link.to_source == "pixiv" && link.to_source_id == "123"));
+    assert!(links.iter().any(|link| {
+        link.to_source == "fanbox"
+            && link.to_source_id == "456"
+            && link.relation_type == "continues_to"
+    }));
+}
+
+/// 同じシリーズに同居しているだけの作品を、候補にしない。
+///
+/// 以前は公式シリーズ 0.58 と同一作者 0.12 を足して必ず 0.70 になり、
+/// 採用閾値 0.44 を越えて候補に並んでいた。既定では選ばれないので、
+/// 「チェックの付かない候補」が151作のシリーズから60件出ていた。
+#[test]
+fn sharing_a_series_shelf_is_not_evidence_of_a_bundle() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let seed = insert_download_unindexed(
+        &db,
+        &storage,
+        "shelf-seed",
+        "夜の灯",
+        "受注作者",
+        &[],
+        "本文",
+    );
+    let far = insert_download_unindexed(
+        &db,
+        &storage,
+        "shelf-far",
+        "まったく別の話",
+        "受注作者",
+        &[],
+        "本文",
+    );
+    let neighbour = insert_download_unindexed(
+        &db,
+        &storage,
+        "shelf-neighbour",
+        "続きもの その2",
+        "受注作者",
+        &[],
+        "本文",
+    );
+    {
+        let conn = db.conn.lock().unwrap();
+        for (id, order) in [(seed, 1), (far, 90), (neighbour, 2)] {
+            conn.execute(
+                "INSERT INTO download_series
+                       (download_id, series_source, series_key, title, content_order)
+                     VALUES (?1, 'pixiv', 'req-1', '有償依頼', ?2)",
+                params![id, order],
+            )
+            .unwrap();
+        }
+    }
+
+    let suggestion = db
+        .generate_collection_suggestion(&CollectionSuggestionRequest {
+            seed_download_ids: vec![seed],
+            limit: Some(20),
+        })
+        .unwrap();
+    let ids = suggestion
+        .members
+        .iter()
+        .map(|member| member.source_id.as_str())
+        .collect::<Vec<_>>();
+    // 90話離れた同居作は、もう候補に入らない。
+    assert!(
+        !ids.contains(&"shelf-far"),
+        "同じ棚に載っているだけの作品が候補に残っている: {ids:?}"
+    );
+    // 話数が隣り合っているものは束の証拠として残る。
+    assert!(
+        ids.contains(&"shelf-neighbour"),
+        "話数が隣接する作品が落ちている: {ids:?}"
+    );
+
+    // 名前が管理用ラベル「有償依頼」にならない。
+    assert_ne!(suggestion.proposed_name, "有償依頼");
+    assert!(!suggestion.name_options.is_empty());
+    // 確度%ではなく、言葉で根拠が出る。
+    assert!(!suggestion.evidence_summary.is_empty());
+}
+
+/// 棚全体の走査。1作ずつ種を選ばなくても束が出てくる。
+#[test]
+fn sweeping_the_shelf_finds_bundles_without_a_seed() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    // 語幹は9文字以上ないと束ねない。短い語幹は無関係な作品どうしを
+    // 結びつけるので、実データに近い長さで確かめる。
+    for (source_id, title) in [
+        ("sweep-1", "岬の灯台守が季節はずれの手紙を受け取る話 第1話"),
+        ("sweep-2", "岬の灯台守が季節はずれの手紙を受け取る話 第2話"),
+        ("sweep-3", "岬の灯台守が季節はずれの手紙を受け取る話 第3話"),
+    ] {
+        insert_download_unindexed(&db, &storage, source_id, title, "連載作者", &[], "本文");
+    }
+    {
+        // 試験の下ごしらえは作品ごとに違う author_id を振る。同じ作者の
+        // 連載であることを、束ねる側が見ている形にそろえる。
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE downloads SET author_id = 'writer-1' WHERE author_name = '連載作者'",
+            [],
+        )
+        .unwrap();
+    }
+    // 無関係な単発。束にはならない。
+    insert_download_unindexed(&db, &storage, "sweep-solo", "別の話", "別作者", &[], "本文");
+    // 告知は走査の対象外。
+    let notice = insert_download_unindexed(
+        &db,
+        &storage,
+        "sweep-notice",
+        "2024年1月の活動報告について",
+        "連載作者",
+        &[],
+        "本文",
+    );
+    {
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE downloads SET content_type = 'article', text_length = 800 WHERE id = ?1",
+            params![notice],
+        )
+        .unwrap();
+    }
+
+    let swept = db.sweep_collection_candidates().unwrap().bundles;
+    assert_eq!(swept.len(), 1, "束がひとつだけ出るはず: {swept:?}");
+    let bundle = &swept[0];
+    assert_eq!(bundle.origin, "sweep");
+    assert_eq!(bundle.track, "sequence");
+    assert_eq!(bundle.members.len(), 3);
+    // 話数の順に並ぶ。
+    let order = bundle
+        .members
+        .iter()
+        .map(|member| member.source_id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(order, vec!["sweep-1", "sweep-2", "sweep-3"]);
+    // 確度%ではなく、言葉で根拠が出る。
+    assert!(
+        bundle.evidence_summary.contains("連番"),
+        "{}",
+        bundle.evidence_summary
+    );
+    // 名前が検索用の正規化キーになっていない。
+    assert!(
+        bundle.proposed_name.contains("灯台守"),
+        "{}",
+        bundle.proposed_name
+    );
+    assert!(
+        !bundle.proposed_name.contains("第1話"),
+        "{}",
+        bundle.proposed_name
+    );
+
+    // 二度走らせても、同じ束が1つだけ残る。走査は積み上げない。
+    let again = db.sweep_collection_candidates().unwrap().bundles;
+    assert_eq!(again.len(), 1);
+    assert_eq!(
+        db.list_collection_suggestions(Some("pending"))
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+/// すでにコレクションにした顔ぶれを、棚の走査が新しい束として出し直さない。
+#[test]
+fn sweeping_the_shelf_skips_an_existing_collection_with_the_same_members() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    for (source_id, title) in [
+        ("existing-sweep-1", "古い時計塔から手紙が届く話 第1話"),
+        ("existing-sweep-2", "古い時計塔から手紙が届く話 第2話"),
+        ("existing-sweep-3", "古い時計塔から手紙が届く話 第3話"),
+    ] {
+        insert_download_unindexed(&db, &storage, source_id, title, "時計塔作者", &[], "本文");
+    }
+    {
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE downloads SET author_id = 'clock-writer' WHERE author_name = '時計塔作者'",
+            [],
+        )
+        .unwrap();
+    }
+
+    // まず、既存コレクションが無ければ走査対象になる束だと確かめる。
+    assert_eq!(db.sweep_collection_candidates().unwrap().bundles.len(), 1);
+    db.dismiss_swept_suggestions().unwrap();
+
+    let collection = db
+        .upsert_work_collection(&WorkCollectionInput {
+            name: "古い時計塔から手紙が届く話".to_string(),
+            collection_kind: "ordered".to_string(),
+            ..Default::default()
+        })
+        .unwrap();
+    // コレクションの並びと候補の並びが逆でも、顔ぶれが同じなら同一の束。
+    db.add_work_collection_members(
+        &collection.summary.id,
+        &[
+            WorkCollectionMemberInput {
+                source: "pixiv".to_string(),
+                source_id: "existing-sweep-3".to_string(),
+                title_snapshot: None,
+                author_snapshot: None,
+                position: None,
+                member_role: None,
+                added_by: None,
+                pinned: None,
+                note: None,
+            },
+            WorkCollectionMemberInput {
+                source: "pixiv".to_string(),
+                source_id: "existing-sweep-2".to_string(),
+                title_snapshot: None,
+                author_snapshot: None,
+                position: None,
+                member_role: None,
+                added_by: None,
+                pinned: None,
+                note: None,
+            },
+            WorkCollectionMemberInput {
+                source: "pixiv".to_string(),
+                source_id: "existing-sweep-1".to_string(),
+                title_snapshot: None,
+                author_snapshot: None,
+                position: None,
+                member_role: None,
+                added_by: None,
+                pinned: None,
+                note: None,
+            },
+        ],
+    )
+    .unwrap();
+
+    let swept = db.sweep_collection_candidates().unwrap().bundles;
+    assert!(
+        swept.is_empty(),
+        "既存コレクションと同じ束が出ている: {swept:?}"
+    );
+    assert!(db
+        .list_collection_suggestions(Some("pending"))
+        .unwrap()
+        .is_empty());
+}
+
+/// タグの出どころを混ぜない。
+///
+/// 取得元が付けたタグとモデルが足したタグは確からしさが違う。**どちらか
+/// 分からなくなった時点で、両方が信用できなくなる。** 取り直しで消えるのは
+/// 取得元のぶんだけで、利用者が採った案は残る。
+#[test]
+fn assisted_tags_stay_distinguishable_and_survive_a_refetch() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let id = insert_download_unindexed(
+        &db,
+        &storage,
+        "tagged-1",
+        "催眠アプリで人生を染められる話",
+        "作者",
+        &["催眠", "R-18"],
+        "本文",
+    );
+
+    {
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+                "INSERT INTO search_index_state (download_id, current_version, content_hash, indexed_at)
+                 SELECT id, current_version, content_hash, 'before-tag-change' FROM downloads WHERE id = ?1",
+                params![id],
+            )
+            .unwrap();
+        conn.execute(
+                "INSERT INTO semantic_index_state (download_id, current_version, content_hash, model_id, indexed_at)
+                 SELECT id, current_version, content_hash, 'test-model', 'before-tag-change' FROM downloads WHERE id = ?1",
+                params![id],
+            )
+            .unwrap();
+    }
+
+    let added = db
+        .add_assisted_tags(id, &["洗脳".to_string(), "催眠".to_string()])
+        .unwrap();
+    // すでに取得元が付けている「催眠」は触らない。
+    assert_eq!(added, vec!["洗脳".to_string()]);
+    {
+        let conn = db.conn.lock().unwrap();
+        let lexical: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM search_index_state WHERE download_id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let semantic: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM semantic_index_state WHERE download_id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!((lexical, semantic), (0, 0));
+    }
+
+    let tags = db.work_tags_with_source(id).unwrap();
+    let by_name = tags
+        .iter()
+        .map(|value| (value.name.as_str(), value.source.as_str()))
+        .collect::<HashMap<_, _>>();
+    assert_eq!(by_name.get("催眠"), Some(&"origin"));
+    assert_eq!(by_name.get("洗脳"), Some(&"llm"));
+
+    // 取り直しても、モデルの案から採ったタグは残る。
+    insert_download_unindexed(
+        &db,
+        &storage,
+        "tagged-1",
+        "催眠アプリで人生を染められる話",
+        "作者",
+        &["催眠", "R-18", "常識改変"],
+        "本文",
+    );
+    let after = db.work_tags_with_source(id).unwrap();
+    let names = after
+        .iter()
+        .map(|v| v.name.as_str())
+        .collect::<HashSet<_>>();
+    assert!(
+        names.contains("洗脳"),
+        "モデルのタグが消えている: {names:?}"
+    );
+    assert!(
+        names.contains("常識改変"),
+        "取得元の新しいタグが入っていない"
+    );
+
+    // 外せるのはモデルのぶんだけ。取得元のタグは外せない。
+    assert!(!db.remove_assisted_tag(id, "催眠").unwrap());
+    assert!(db.remove_assisted_tag(id, "洗脳").unwrap());
+    let finally = db.work_tags_with_source(id).unwrap();
+    assert!(finally.iter().all(|value| value.name != "洗脳"));
+    assert!(finally.iter().any(|value| value.name == "催眠"));
+}
+
+/// 手動追加とモデル追加を、取得元のタグから分けて扱う。
+#[test]
+fn related_tags_are_manual_atomic_and_do_not_change_origin_or_model_tags() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let id = insert_download_unindexed(
+        &db,
+        &storage,
+        "related-target",
+        "灯台の話",
+        "作者",
+        &["灯台"],
+        "本文",
+    );
+    insert_download_unindexed(
+        &db,
+        &storage,
+        "related-other",
+        "別の話",
+        "別作者",
+        &["推理"],
+        "本文",
+    );
+
+    // 有効な候補の後に未知語があっても、一部だけ保存してはならない。
+    assert!(db
+        .add_related_tags(id, &["推理".into(), "棚にない語".into()])
+        .is_err());
+    assert!(db
+        .work_tags_with_source(id)
+        .unwrap()
+        .iter()
+        .all(|tag| tag.name != "推理"));
+    let added = db
+        .add_related_tags(id, &["推理".into(), "推理".into(), "灯台".into()])
+        .unwrap();
+    assert_eq!(added, vec!["推理"]);
+    db.add_assisted_tags(id, &["幻想".into()]).unwrap();
+    let sources = db
+        .work_tags_with_source(id)
+        .unwrap()
+        .into_iter()
+        .map(|tag| (tag.name, tag.source))
+        .collect::<HashMap<_, _>>();
+    assert_eq!(sources.get("灯台").map(String::as_str), Some("origin"));
+    assert_eq!(sources.get("推理").map(String::as_str), Some("manual"));
+    assert_eq!(sources.get("幻想").map(String::as_str), Some("llm"));
+    assert!(!db.remove_assisted_tag(id, "推理").unwrap());
+    assert!(!db.remove_related_tag(id, "幻想").unwrap());
+    assert!(!db.remove_related_tag(id, "灯台").unwrap());
+
+    // 取得し直しても利用者の追加は残り、出どころ別に外せる。
+    insert_download_unindexed(
+        &db,
+        &storage,
+        "related-target",
+        "灯台の話",
+        "作者",
+        &["灯台"],
+        "本文",
+    );
+    assert!(db
+        .work_tags_with_source(id)
+        .unwrap()
+        .iter()
+        .any(|tag| tag.name == "推理" && tag.source == "manual"));
+    assert!(db.remove_related_tag(id, "推理").unwrap());
+    assert!(db
+        .work_tags_with_source(id)
+        .unwrap()
+        .iter()
+        .any(|tag| tag.name == "幻想" && tag.source == "llm"));
+}
+
+/// 覚え書きは、書いたモデルと一緒に残す。
+#[test]
+fn ai_notes_remember_which_model_wrote_them() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    assert!(db.load_ai_note("work", "1", "synopsis").unwrap().is_none());
+
+    db.save_ai_note("work", "1", "synopsis", "最初の文", "model-a")
+        .unwrap();
+    let note = db.load_ai_note("work", "1", "synopsis").unwrap().unwrap();
+    assert_eq!(note.text, "最初の文");
+    assert_eq!(note.model_id, "model-a");
+
+    // 書き直すと、モデルの名前も一緒に入れ替わる。古い文が別のモデルの
+    // ものとして残らない。
+    db.save_ai_note("work", "1", "synopsis", "書き直した文", "model-b")
+        .unwrap();
+    let note = db.load_ai_note("work", "1", "synopsis").unwrap().unwrap();
+    assert_eq!(note.text, "書き直した文");
+    assert_eq!(note.model_id, "model-b");
+
+    assert!(db.delete_ai_note("work", "1", "synopsis").unwrap());
+    assert!(db.load_ai_note("work", "1", "synopsis").unwrap().is_none());
+}
+
+/// 走査で出た候補は、まとめて閉じられる。
+///
+/// 300件を1件ずつ閉じる人はいない。**一括で消せないなら、出さないほうが
+/// まし**になってしまう。閉じるのは下書きだけで、否定は記録しない。
+#[test]
+fn swept_candidates_can_be_closed_in_one_go() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    for (source_id, title) in [
+        ("bulk-1", "岬の灯台守が季節はずれの手紙を受け取る話 第1話"),
+        ("bulk-2", "岬の灯台守が季節はずれの手紙を受け取る話 第2話"),
+    ] {
+        insert_download_unindexed(&db, &storage, source_id, title, "連載作者", &[], "本文");
+    }
+    {
+        let conn = db.conn.lock().unwrap();
+        conn.execute("UPDATE downloads SET author_id = 'writer-1'", [])
+            .unwrap();
+    }
+    assert_eq!(db.sweep_collection_candidates().unwrap().bundles.len(), 1);
+
+    assert_eq!(db.dismiss_swept_suggestions().unwrap(), 1);
+    assert!(db
+        .list_collection_suggestions(Some("pending"))
+        .unwrap()
+        .is_empty());
+
+    // 否定は記録していないので、もう一度走査すれば同じものが出てくる。
+    assert_eq!(db.sweep_collection_candidates().unwrap().bundles.len(), 1);
+}
+
+/// 合本は、分冊がそろっているときだけ畳む。
+#[test]
+fn a_combined_volume_folds_only_when_its_parts_are_there() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let base = "財閥系お嬢様に貸し切られた電車の中で搾り尽くされる話";
+    for (source_id, title) in [
+        ("omni-1", format!("【前編】{base}")),
+        ("omni-2", format!("【中編】{base}")),
+        ("omni-3", format!("【後編】{base}")),
+        ("omni-all", format!("【前編＋中編】{base}")),
+    ] {
+        insert_download_unindexed(&db, &storage, source_id, &title, "連載作者", &[], "本文");
+    }
+    {
+        let conn = db.conn.lock().unwrap();
+        conn.execute("UPDATE downloads SET author_id = 'writer-2'", [])
+            .unwrap();
+    }
+    let swept = db.sweep_collection_candidates().unwrap().bundles;
+    let ids = swept
+        .iter()
+        .flat_map(|bundle| bundle.members.iter())
+        .map(|member| member.source_id.as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        !ids.contains(&"omni-all"),
+        "分冊がそろっているのに合本が残っている: {ids:?}"
+    );
+    assert!(
+        ids.contains(&"omni-1") && ids.contains(&"omni-3"),
+        "{ids:?}"
+    );
+}
+
+/// 束にできないほど大きなタグは、黙って捨てずに絞り込みとして勧める。
+#[test]
+fn a_tag_too_large_to_bundle_is_offered_as_a_saved_search() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    for index in 0..70 {
+        insert_download_unindexed(
+            &db,
+            &storage,
+            &format!("wide-{index}"),
+            &format!("それぞれ無関係な話 {index}"),
+            &format!("作者{index}"),
+            &["催眠"],
+            "本文",
+        );
+    }
+    let swept = db.sweep_collection_candidates().unwrap();
+    let idea = swept
+        .saved_search_suggestions
+        .iter()
+        .find(|value| value.tag == "催眠")
+        .expect("大きすぎるタグが勧められていない");
+    assert_eq!(idea.work_count, 70);
+    assert!(idea.reason.contains("大きい"), "{}", idea.reason);
+    // 束としては出さない。まとまりではなく絞り込みの結果だからである。
+    assert!(swept.bundles.iter().all(|bundle| bundle.track != "theme"));
+}
+
+/// 取得元をまたいだ同じ作品を、続きとして二度並べない。
+///
+/// `author_id` は取得元ごとに違う（同じ人が pixiv では数字、FANBOX では
+/// 英字を名乗る）。ID で突き合わせていたころは、pixiv 版と FANBOX 版が
+/// 別の作品として同じ束に二度出ていた。
+#[test]
+fn the_same_work_from_two_sources_is_one_member_not_two() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let title = "星の航路 第1話";
+    let pixiv =
+        insert_download_unindexed(&db, &storage, "cross-pixiv", title, "架空作家", &[], "本文");
+    let fanbox = insert_download_unindexed(
+        &db,
+        &storage,
+        "cross-fanbox",
+        title,
+        "架空作家",
+        &[],
+        "本文がもっと長い",
+    );
+    let other = insert_download_unindexed(
+        &db,
+        &storage,
+        "cross-other",
+        "星の航路 第2話",
+        "架空作家",
+        &[],
+        "続き",
+    );
+    {
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE downloads SET source = 'fanbox', author_id = 'kimodebu-kun' WHERE id = ?1",
+            params![fanbox],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE downloads SET author_id = '8000001' WHERE id IN (?1, ?2)",
+            params![pixiv, other],
+        )
+        .unwrap();
+    }
+
+    let swept = db.sweep_collection_candidates().unwrap().bundles;
+    let bundle = swept
+        .iter()
+        .find(|value| value.members.len() >= 2)
+        .expect("題名の連番で束になるはず");
+    let sources = bundle
+        .members
+        .iter()
+        .map(|member| member.source_id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(sources.len(), 2, "同じ作品が二度並んでいる: {sources:?}");
+    // 代表は本文の長いほう。サンプルは導入だけのことが多い。
+    assert!(sources.contains(&"cross-fanbox"), "{sources:?}");
+    assert!(!sources.contains(&"cross-pixiv"), "{sources:?}");
+}
+
+/// 告知記事は束ねない。目次を渡って先へも行かない。
+#[test]
+fn notices_neither_join_a_bundle_nor_bridge_one() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let seed = insert_download_unindexed(
+        &db,
+        &storage,
+        "notice-seed",
+        "灯台 前編",
+        "作者",
+        &[],
+        "本文",
+    );
+    let sequel = insert_download_unindexed(
+        &db,
+        &storage,
+        "notice-next",
+        "灯台 後編",
+        "作者",
+        &[],
+        "本文",
+    );
+    let notice = insert_download_unindexed(
+        &db,
+        &storage,
+        "notice-post",
+        "【重要なお知らせ】星の航路 更新予定",
+        "作者",
+        &[],
+        "本文",
+    );
+    {
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE downloads SET content_type = 'article', text_length = 900 WHERE id = ?1",
+            params![notice],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO work_links
+                   (from_source, from_source_id, from_download_id,
+                    to_source, to_source_id, to_download_id,
+                    relation_type, evidence_type, confidence, status)
+                 VALUES ('pixiv', 'notice-seed', ?1, 'pixiv', 'notice-post', ?2,
+                         'mentions', 'content_link', 0.9, 'observed')",
+            params![seed, notice],
+        )
+        .unwrap();
+    }
+
+    let suggestion = db
+        .generate_collection_suggestion(&CollectionSuggestionRequest {
+            seed_download_ids: vec![seed],
+            limit: Some(20),
+        })
+        .unwrap();
+    let ids = suggestion
+        .members
+        .iter()
+        .map(|member| member.source_id.as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        !ids.contains(&"notice-post"),
+        "告知記事が束に入っている: {ids:?}"
+    );
+    assert!(ids.contains(&"notice-next"), "続きが落ちている: {ids:?}");
+    assert_eq!(sequel, sequel);
+}
+
+#[test]
+fn collection_suggestions_use_title_parts_and_learn_rejection() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let first = insert_download_unindexed(
+        &db,
+        &storage,
+        "suggest-first",
+        "星を待つ 前編",
+        "連載作者",
+        &[],
+        "導入",
+    );
+    let _second = insert_download_unindexed(
+        &db,
+        &storage,
+        "suggest-second",
+        "星を待つ 後編",
+        "連載作者",
+        &[],
+        "結末",
+    );
+    let suggestion = db
+        .generate_collection_suggestion(&CollectionSuggestionRequest {
+            seed_download_ids: vec![first],
+            limit: Some(20),
+        })
+        .unwrap();
+    assert_eq!(suggestion.members.len(), 2);
+    assert!(suggestion.members.iter().any(|member| {
+        member.source_id == "suggest-second"
+            && member
+                .evidence
+                .iter()
+                .any(|evidence| evidence.kind == "title_similarity")
+    }));
+    assert!(db
+        .reject_collection_suggestion(&suggestion.id, None)
+        .unwrap());
+
+    let after_rejection = db.generate_collection_suggestion(&CollectionSuggestionRequest {
+        seed_download_ids: vec![first],
+        limit: Some(20),
+    });
+    assert_eq!(
+        after_rejection.unwrap_err(),
+        "関連作品は見つかりませんでした"
+    );
+
+    // Feedback belongs to the rule that produced it. A future rule can
+    // evaluate the pair again instead of leaving an irreversible dead end.
+    db.conn
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE collection_pair_feedback SET rule_version = 'collection-suggest-v1'",
+            [],
+        )
+        .unwrap();
+    let reconsidered = db
+        .generate_collection_suggestion(&CollectionSuggestionRequest {
+            seed_download_ids: vec![first],
+            limit: Some(20),
+        })
+        .unwrap();
+    assert_eq!(reconsidered.members.len(), 2);
+}
+
+#[test]
+fn collection_suggestion_keeps_strong_same_author_candidate_after_1200_rows() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let seed = insert_download_unindexed(
+        &db,
+        &storage,
+        "wide-suggestion-seed",
+        "星を待つ",
+        "大量作者",
+        &[],
+        "導入",
+    );
+    for index in 0..1_200 {
+        insert_download_unindexed(
+            &db,
+            &storage,
+            &format!("wide-suggestion-noise-{index}"),
+            &format!("無関係な作品 {index}"),
+            "大量作者",
+            &[],
+            "別の内容",
+        );
+    }
+    insert_download_unindexed(
+        &db,
+        &storage,
+        "wide-suggestion-strong",
+        "星を待つ 後編",
+        "大量作者",
+        &[],
+        "結末",
+    );
+
+    let suggestion = db
+        .generate_collection_suggestion(&CollectionSuggestionRequest {
+            seed_download_ids: vec![seed],
+            limit: Some(20),
+        })
+        .unwrap();
+    assert!(suggestion.members.iter().any(|member| {
+        member.source_id == "wide-suggestion-strong"
+            && member
+                .evidence
+                .iter()
+                .any(|evidence| evidence.kind == "title_similarity")
+    }));
+}
+
+#[test]
+fn collection_suggestions_walk_the_whole_link_component_from_either_end() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let first = insert_download(
+        &db,
+        &storage,
+        "410001",
+        "架空連載 第1話 旅立ち",
+        "連載作者",
+        &[],
+        "第一作",
+    );
+    let second = insert_download(
+        &db,
+        &storage,
+        "410002",
+        "架空連載 第2話 出会い",
+        "連載作者",
+        &[],
+        "第二作",
+    );
+    let third = insert_download(
+        &db,
+        &storage,
+        "410003",
+        "架空連載 第3話 寄り道",
+        "連載作者",
+        &[],
+        "前作はこちら https://www.pixiv.net/novel/show.php?id=410002",
+    );
+    let fourth = insert_download(
+        &db,
+        &storage,
+        "410004",
+        "架空連載 第4話 帰還",
+        "連載作者",
+        &[],
+        "前作はこちら https://www.pixiv.net/novel/show.php?id=410003",
+    );
+
+    // The first edge exists only in the caption/excerpt; the others are in
+    // the body. Both surfaces must feed the same normalized link graph.
+    db.conn
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE downloads SET excerpt = ?1 WHERE id = ?2",
+            params![
+                "前作はこちら https://www.pixiv.net/novel/show.php?id=410001",
+                second
+            ],
+        )
+        .unwrap();
+    db.reindex_download(second).unwrap();
+
+    // Simulate an existing library whose full-text index predates the
+    // normalized work-link graph. Starting at the first work must discover
+    // incoming references and keep walking from every newly found work.
+    db.conn
+        .lock()
+        .unwrap()
+        .execute("DELETE FROM work_links", [])
+        .unwrap();
+    let from_first = db
+        .generate_collection_suggestion(&CollectionSuggestionRequest {
+            seed_download_ids: vec![first],
+            limit: Some(20),
+        })
+        .unwrap();
+    assert_eq!(
+        from_first
+            .members
+            .iter()
+            .map(|member| member.download_id.unwrap())
+            .collect::<Vec<_>>(),
+        vec![first, second, third, fourth]
+    );
+    assert!(from_first.members.iter().skip(1).all(|member| member
+        .evidence
+        .iter()
+        .any(|evidence| evidence.kind == "content_link")));
+    assert!(from_first.members.iter().any(|member| member
+        .evidence
+        .iter()
+        .any(|evidence| evidence.label.contains("3段追跡"))));
+
+    // The opposite endpoint works too: its outgoing "previous work" links
+    // lead back to the first chapter and are ordered by their direction.
+    db.conn
+        .lock()
+        .unwrap()
+        .execute("DELETE FROM work_links", [])
+        .unwrap();
+    let from_last = db
+        .generate_collection_suggestion(&CollectionSuggestionRequest {
+            seed_download_ids: vec![fourth],
+            limit: Some(20),
+        })
+        .unwrap();
+    assert_eq!(
+        from_last
+            .members
+            .iter()
+            .map(|member| member.download_id.unwrap())
+            .collect::<Vec<_>>(),
+        vec![first, second, third, fourth]
+    );
+}
+
+#[test]
+fn bulk_delete_clears_lexical_and_semantic_sidecars() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    db.set_semantic_index_enabled(true).unwrap();
+    let first = insert_download(
+        &db,
+        &storage,
+        "delete-index-one",
+        "quartzdeletemarker alpha",
+        "作者",
+        &[],
+        "意味検索からも消える本文 alpha",
+    );
+    let second = insert_download(
+        &db,
+        &storage,
+        "delete-index-two",
+        "quartzdeletemarker beta",
+        "作者",
+        &[],
+        "意味検索からも消える本文 beta",
+    );
+    db.save_ai_note("work", &first.to_string(), "synopsis", "要約", "model")
+        .unwrap();
+    db.save_ai_note(
+        "work",
+        &format!("{second}:{first}"),
+        "recap",
+        "前回まで",
+        "model",
+    )
+    .unwrap();
+
+    let before =
+        crate::database::tantivy_index::matching_download_ids(&storage, "quartzdeletemarker")
+            .unwrap();
+    assert!(before.contains(&first));
+    assert!(before.contains(&second));
+    assert!(crate::database::semantic_index::status(&storage).indexed_chunks > 0);
+
+    let result = db.delete_downloads(&[first, second, first]).unwrap();
+    assert_eq!(result.matched_count, 2);
+    assert_eq!(result.changed_count, 2);
+
+    let after =
+        crate::database::tantivy_index::matching_download_ids(&storage, "quartzdeletemarker")
+            .unwrap();
+    assert!(!after.contains(&first));
+    assert!(!after.contains(&second));
+    assert_eq!(
+        crate::database::semantic_index::status(&storage).indexed_chunks,
+        0
+    );
+    assert!(!storage.join("pixiv").join("delete-index-one").exists());
+    assert!(!storage.join("pixiv").join("delete-index-two").exists());
+    assert!(db
+        .load_ai_note("work", &first.to_string(), "synopsis")
+        .unwrap()
+        .is_none());
+    assert!(db
+        .load_ai_note("work", &format!("{second}:{first}"), "recap")
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn deleting_a_series_cover_selects_a_surviving_work_or_clears_it() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let first = insert_download_unindexed(
+        &db,
+        &storage,
+        "series-cover-first",
+        "連作 第一話",
+        "作者",
+        &[],
+        "第一話",
+    );
+    let second = insert_download_unindexed(
+        &db,
+        &storage,
+        "series-cover-second",
+        "連作 第二話",
+        "作者",
+        &[],
+        "第二話",
+    );
+    let first_cover = storage
+        .join("pixiv")
+        .join("series-cover-first")
+        .join("v1")
+        .join("cover.jpg");
+    let second_cover = storage
+        .join("pixiv")
+        .join("series-cover-second")
+        .join("v1")
+        .join("cover.jpg");
+    fs::write(&first_cover, b"first cover").unwrap();
+    fs::write(&second_cover, b"second cover").unwrap();
+    {
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE downloads SET cover_path = ?1 WHERE id = ?2",
+            params![first_cover.to_string_lossy(), first],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE downloads SET cover_path = ?1 WHERE id = ?2",
+            params![second_cover.to_string_lossy(), second],
+        )
+        .unwrap();
+    }
+    db.upsert_download_series(first, "pixiv", "series-cover", "連作", Some(1))
+        .unwrap();
+    db.upsert_download_series(second, "pixiv", "series-cover", "連作", Some(2))
+        .unwrap();
+    db.conn
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE series SET cover_path = ?1
+                 WHERE source = 'pixiv' AND source_key = 'series-cover'",
+            params![first_cover.to_string_lossy()],
+        )
+        .unwrap();
+
+    db.delete_downloads(&[first]).unwrap();
+    assert_eq!(
+        db.get_series("pixiv", "series-cover")
+            .unwrap()
+            .cover_path
+            .as_deref(),
+        Some(second_cover.to_string_lossy().as_ref())
+    );
+
+    db.delete_downloads(&[second]).unwrap();
+    assert!(db
+        .get_series("pixiv", "series-cover")
+        .unwrap()
+        .cover_path
+        .is_none());
+}
+
+#[test]
+fn semantic_prune_clears_orphans_when_library_is_empty() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    db.set_semantic_index_enabled(true).unwrap();
+    let id = insert_download(
+        &db,
+        &storage,
+        "last-semantic-work",
+        "最後の作品",
+        "作者",
+        &[],
+        "索引へ残してからDB行だけ消す本文",
+    );
+    assert!(crate::database::semantic_index::status(&storage).indexed_chunks > 0);
+
+    {
+        let conn = db.conn.lock().unwrap();
+        conn.execute("DELETE FROM downloads WHERE id = ?1", params![id])
+            .unwrap();
+    }
+
+    assert!(db.prune_search_indexes().unwrap() > 0);
+    assert_eq!(
+        crate::database::semantic_index::status(&storage).indexed_chunks,
+        0
+    );
+}
+
+#[test]
+fn lexical_prune_commits_orphans_and_reloads_the_reader() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let id = insert_download(
+        &db,
+        &storage,
+        "lexical-orphan",
+        "消えるべき孤立作品",
+        "作者",
+        &[],
+        "孤立確認本文",
+    );
+    assert_eq!(
+        crate::database::tantivy_index::search_with_total(&storage, "孤立作品", 10)
+            .unwrap()
+            .total_hits,
+        1
+    );
+    db.conn
+        .lock()
+        .unwrap()
+        .execute("DELETE FROM downloads WHERE id = ?1", params![id])
+        .unwrap();
+
+    assert!(db.prune_search_indexes().unwrap() > 0);
+    assert_eq!(
+        crate::database::tantivy_index::search_with_total(&storage, "孤立作品", 10)
+            .unwrap()
+            .total_hits,
+        0
+    );
+}
+
+#[test]
+fn resync_repairs_partial_semantic_coverage_not_just_an_empty_sidecar() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let first = insert_download_unindexed(
+        &db,
+        &storage,
+        "partial-semantic-1",
+        "残っている作品",
+        "作者",
+        &[],
+        "意味索引に実体がある本文",
+    );
+    let second = insert_download_unindexed(
+        &db,
+        &storage,
+        "partial-semantic-2",
+        "欠けた作品",
+        "作者",
+        &[],
+        "状態だけが残っている本文",
+    );
+    crate::database::semantic_index::upsert_documents(
+        &storage,
+        &[crate::database::semantic_index::SemanticIndexDocument {
+            download_id: first,
+            title: "残っている作品".to_string(),
+            author_name: "作者".to_string(),
+            tags: String::new(),
+            series_title: String::new(),
+            excerpt: String::new(),
+            body: "意味索引に実体がある本文".to_string(),
+        }],
+    )
+    .unwrap();
+    {
+        let conn = db.conn.lock().unwrap();
+        for id in [first, second] {
+            conn.execute(
+                "INSERT INTO semantic_index_state
+                    (download_id, current_version, content_hash, model_id, indexed_at)
+                 SELECT id, current_version, content_hash, ?2, CURRENT_TIMESTAMP
+                   FROM downloads WHERE id = ?1",
+                params![id, crate::database::semantic_index::model_id()],
+            )
+            .unwrap();
+        }
+    }
+
+    assert_eq!(db.resync_search_index_state().unwrap(), 1);
+    let conn = db.conn.lock().unwrap();
+    let remaining: Vec<i64> = conn
+        .prepare("SELECT download_id FROM semantic_index_state ORDER BY download_id")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(remaining, vec![first]);
+}
+
+#[test]
+fn opening_database_recovers_both_sides_of_an_interrupted_delete() {
+    let (_temp, root, storage) = temp_paths();
+    let db_path = root.join("piep.db");
+    let db = Database::open(&db_path, &storage).unwrap();
+    db.set_semantic_index_enabled(true).unwrap();
+    let id = insert_download(
+        &db,
+        &storage,
+        "delete-recovery",
+        "復旧対象",
+        "作者",
+        &[],
+        "削除処理の途中で停止する本文",
+    );
+    let original = storage.join("pixiv").join("delete-recovery");
+    let operation = root.join("delete-staging").join("before-commit");
+    fs::create_dir_all(&operation).unwrap();
+    let manifest = vec![StagedDeleteEntry {
+        download_id: id,
+        source: "pixiv".to_string(),
+        source_id: "delete-recovery".to_string(),
+        staged_name: "0".to_string(),
+    }];
+    fs::write(
+        operation.join("manifest.json"),
+        serde_json::to_vec(&manifest).unwrap(),
+    )
+    .unwrap();
+    fs::rename(&original, operation.join("0")).unwrap();
+    drop(db);
+
+    // SQLite still has the row, so startup rolls the file move back.
+    let db = Database::open(&db_path, &storage).unwrap();
+    assert!(original.exists());
+    assert!(db.get_download(id).is_ok());
+
+    // Simulate a crash just after SQLite committed but before staged files
+    // and sidecars were removed. Startup completes the deletion instead.
+    let operation = root.join("delete-staging").join("after-commit");
+    fs::create_dir_all(&operation).unwrap();
+    fs::write(
+        operation.join("manifest.json"),
+        serde_json::to_vec(&manifest).unwrap(),
+    )
+    .unwrap();
+    fs::rename(&original, operation.join("0")).unwrap();
+    {
+        let conn = db.conn.lock().unwrap();
+        conn.execute("DELETE FROM downloads WHERE id = ?1", params![id])
+            .unwrap();
+    }
+    drop(db);
+
+    let reopened = Database::open(&db_path, &storage).unwrap();
+    assert!(!original.exists());
+    assert!(!operation.exists());
+    assert!(reopened.get_download(id).is_err());
+    assert_eq!(
+        crate::database::semantic_index::status(&storage).indexed_chunks,
+        0
+    );
+}
+
+#[test]
+fn opening_database_prunes_only_unreferenced_managed_collection_covers() {
+    let (_temp, root, storage) = temp_paths();
+    let db_path = root.join("piep.db");
+    let cover_root = root.join("collection-covers");
+    let referenced = cover_root.join("referenced.png");
+    let orphaned = cover_root.join("orphaned.png");
+    let nested_orphan = cover_root.join("old-collection").join("cover.webp");
+
+    let db = Database::open(&db_path, &storage).unwrap();
+    db.upsert_work_collection(&WorkCollectionInput {
+        name: "表紙を残す束".to_string(),
+        collection_kind: "ordered".to_string(),
+        cover_mode: Some("file".to_string()),
+        cover_image_path: Some(referenced.to_string_lossy().to_string()),
+        ..Default::default()
+    })
+    .unwrap();
+    fs::create_dir_all(nested_orphan.parent().unwrap()).unwrap();
+    fs::write(&referenced, b"referenced").unwrap();
+    fs::write(&orphaned, b"orphaned").unwrap();
+    fs::write(&nested_orphan, b"nested orphan").unwrap();
+    drop(db);
+
+    let reopened = Database::open(&db_path, &storage).unwrap();
+    assert!(referenced.exists());
+    assert!(!orphaned.exists());
+    assert!(!nested_orphan.exists());
+    assert!(reopened.list_work_collections().unwrap()[0]
+        .cover_image_path
+        .as_deref()
+        .is_some_and(|path| path == referenced.to_string_lossy()));
+}
+
+#[test]
+fn sort_aliases_map_to_the_expected_safe_sql_columns() {
+    let cases = [
+        ("date", "date", "d.downloaded_at"),
+        ("downloaded_at", "date", "d.downloaded_at"),
+        ("author_name", "author", "d.author_name COLLATE NOCASE"),
+        (
+            "source_created_at",
+            "published",
+            "COALESCE(d.source_created_at, d.downloaded_at)",
+        ),
+        (
+            "source_updated_at",
+            "updated",
+            "COALESCE(d.source_updated_at, d.source_created_at, d.downloaded_at)",
+        ),
+        ("text_length", "length", "d.text_length"),
+        ("file_size_bytes", "size", "d.file_size_bytes"),
+        ("asset_count", "assets", "d.asset_count"),
+        ("current_version", "version", "d.current_version"),
+    ];
+
+    for (requested, normalized, expected_sql) in cases {
+        let mut search = params("");
+        search.sort_by = Some(requested.to_string());
+        assert_eq!(effective_sort_by(&search).as_deref(), Some(normalized));
+        assert!(sort_clause(&search).contains(expected_sql));
+        assert!(sort_compare_expr(&search).contains(expected_sql));
+    }
+
+    let mut malicious = params("");
+    malicious.sort_by = Some("downloaded_at; DROP TABLE downloads".to_string());
+    assert_eq!(effective_sort_by(&malicious).as_deref(), Some("date"));
+    assert!(!sort_clause(&malicious).contains("DROP TABLE"));
+}
+
+#[test]
+fn asset_and_version_sorts_support_both_directions() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let low = insert_download(&db, &storage, "sort-low", "少", "作者", &[], "本文");
+    let middle = insert_download(&db, &storage, "sort-middle", "中", "作者", &[], "本文");
+    let high = insert_download(&db, &storage, "sort-high", "多", "作者", &[], "本文");
+    {
+        let conn = db.conn.lock().unwrap();
+        for (id, assets, version) in [(low, 1, 1), (middle, 4, 2), (high, 9, 5)] {
+            conn.execute(
+                "UPDATE downloads SET asset_count = ?1, current_version = ?2 WHERE id = ?3",
+                params![assets, version, id],
+            )
+            .unwrap();
+        }
+    }
+
+    for key in ["asset_count", "current_version"] {
+        let mut search = v2_params(None, 20, None);
+        search.sort_by = Some(key.to_string());
+        search.sort_order = Some("asc".to_string());
+        assert_eq!(
+            db.search_downloads_v2(&search)
+                .unwrap()
+                .items
+                .iter()
+                .map(|item| item.id)
+                .collect::<Vec<_>>(),
+            vec![low, middle, high],
+            "{key} asc"
+        );
+
+        search.sort_order = Some("desc".to_string());
+        assert_eq!(
+            db.search_downloads_v2(&search)
+                .unwrap()
+                .items
+                .iter()
+                .map(|item| item.id)
+                .collect::<Vec<_>>(),
+            vec![high, middle, low],
+            "{key} desc"
+        );
+
+        // The same order must survive the disk-backed text-search path rather
+        // than only working for an unsearched library listing.
+        let mut lexical = v2_params(Some("本文"), 20, None);
+        lexical.sort_by = Some(key.to_string());
+        lexical.sort_order = Some("asc".to_string());
+        assert_eq!(
+            db.search_downloads_v2(&lexical)
+                .unwrap()
+                .items
+                .iter()
+                .map(|item| item.id)
+                .collect::<Vec<_>>(),
+            vec![low, middle, high],
+            "searched {key} asc"
+        );
+    }
+}
+
+#[test]
+fn optional_update_target_lookup_returns_exact_match_or_none() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    db.upsert_update_target(&UpdateTargetInput {
+        target_type: "person".to_string(),
+        source: "pixiv".to_string(),
+        source_key: "author-1".to_string(),
+        display_name: "作者1".to_string(),
+        enabled: true,
+        metadata_json: None,
+    })
+    .unwrap();
+
+    let found = db
+        .find_update_target("person", "pixiv", "author-1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(found.display_name, "作者1");
+    assert!(found.enabled);
+    assert!(db
+        .find_update_target("person", "pixiv", "missing")
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn update_target_keyset_pages_have_no_gaps_or_duplicates() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    for (target_type, source, source_key) in [
+        ("work", "pixiv", "w2"),
+        ("person", "pixiv", "p2"),
+        ("person", "fanbox", "p1"),
+        ("person", "pixiv", "p1"),
+        ("series", "pixiv", "s1"),
+    ] {
+        db.upsert_update_target(&UpdateTargetInput {
+            target_type: target_type.to_string(),
+            source: source.to_string(),
+            source_key: source_key.to_string(),
+            display_name: source_key.to_string(),
+            enabled: true,
+            metadata_json: None,
+        })
+        .unwrap();
+    }
+
+    let mut all = Vec::new();
+    let mut cursor: Option<(String, String, String)> = None;
+    loop {
+        let page = db
+            .list_update_targets_after(
+                cursor
+                    .as_ref()
+                    .map(|(kind, source, key)| (kind.as_str(), source.as_str(), key.as_str())),
+                2,
+            )
+            .unwrap();
+        if page.is_empty() {
+            break;
+        }
+        let last = page.last().unwrap();
+        cursor = Some((
+            last.target_type.clone(),
+            last.source.clone(),
+            last.source_key.clone(),
+        ));
+        all.extend(
+            page.into_iter()
+                .map(|target| (target.target_type, target.source, target.source_key)),
+        );
+    }
+    assert_eq!(all.len(), 5);
+    assert!(all.windows(2).all(|pair| pair[0] < pair[1]));
+    let unique = all.iter().collect::<HashSet<_>>();
+    assert_eq!(unique.len(), all.len());
+}
+
+#[test]
+fn bulk_search_collection_crosses_the_former_single_page_boundary() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    const SIMULATED_LEGACY_CAP: usize = 5;
+    const MATCHES: usize = SIMULATED_LEGACY_CAP * 2 + 3;
+    for index in 0..MATCHES {
+        insert_download_unindexed(
+            &db,
+            &storage,
+            &format!("bulk-page-{index:02}"),
+            &format!("一括対象 {index:02}"),
+            "作者",
+            &["一括"],
+            "本文",
+        );
+    }
+
+    let mut selection = v2_params(None, 1, None);
+    selection.offset = Some(9);
+    let snapshot = db
+        .collect_search_match_snapshot(&selection, SIMULATED_LEGACY_CAP as i64)
+        .unwrap();
+    assert_eq!(snapshot.row_count, MATCHES as i64);
+    let guard = snapshot.connection.lock().unwrap();
+    let conn = guard.as_ref().unwrap();
+    let (rows, distinct): (i64, i64) = conn
+        .query_row(
+            "SELECT COUNT(*), COUNT(DISTINCT id) FROM bulk_matches",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(rows, MATCHES as i64);
+    assert_eq!(distinct, MATCHES as i64);
+    drop(guard);
+}
+
+#[test]
+fn bulk_search_snapshot_updates_and_deletes_without_retaining_all_ids() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    const MATCHES: usize = 13;
+    for index in 0..MATCHES {
+        insert_download_unindexed(
+            &db,
+            &storage,
+            &format!("bulk-mutate-{index:02}"),
+            &format!("一括変更 {index:02}"),
+            "作者",
+            &["一括変更"],
+            "本文",
+        );
+    }
+
+    let selection = v2_params(None, 3, None);
+    let watched = db.set_watch_updates_for_search(&selection, true).unwrap();
+    assert_eq!(watched.matched_count, MATCHES as i64);
+    assert_eq!(watched.changed_count, MATCHES as i64);
+    {
+        let conn = db.conn.lock().unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM downloads WHERE watch_updates = 1",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            MATCHES as i64
+        );
+        // 作品の監視は downloads.watch_updates だけで表す。監視対象の一覧は
+        // 「自分で選んだ作者・シリーズ」のためのもので、作品名を混ぜない。
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM update_targets WHERE target_type = 'work'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            0
+        );
+    }
+
+    let deleted = db.delete_downloads_for_search(&selection).unwrap();
+    assert_eq!(deleted.matched_count, MATCHES as i64);
+    assert_eq!(deleted.changed_count, MATCHES as i64);
+    assert_eq!(
+        db.conn
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM downloads", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+        0
+    );
+    let snapshot_files = fs::read_dir(search_snapshot_dir(&storage))
+        .unwrap()
+        .filter_map(Result::ok)
+        .count();
+    assert_eq!(snapshot_files, 0, "bulk snapshot must be cleaned up");
+}
+
+#[test]
+fn facet_search_limits_in_sql_and_keeps_direct_rare_matches() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    insert_download_unindexed(
+        &db,
+        &storage,
+        "facet-1",
+        "作品1",
+        "人気作者",
+        &["人気タグ"],
+        "本文",
+    );
+    insert_download_unindexed(
+        &db,
+        &storage,
+        "facet-2",
+        "作品2",
+        "作者%特別",
+        &["希少タグ"],
+        "本文",
+    );
+    let fanbox_id = insert_download_unindexed(
+        &db,
+        &storage,
+        "facet-3",
+        "作品3",
+        "人気作者",
+        &["FANBOXタグ"],
+        "本文",
+    );
+    db.conn
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE downloads SET source = 'fanbox' WHERE id = ?1",
+            params![fanbox_id],
+        )
+        .unwrap();
+
+    assert_eq!(
+        db.search_filter_facets("authors", None, 1).unwrap().len(),
+        1
+    );
+    let escaped = db
+        .search_filter_facets("authors", Some("作者%"), 10)
+        .unwrap();
+    assert_eq!(
+        escaped.first().map(|facet| facet.name.as_str()),
+        Some("作者%特別")
+    );
+    let same_name = db
+        .search_filter_facets("authors", Some("人気作者"), 10)
+        .unwrap();
+    let same_name = same_name
+        .iter()
+        .find(|facet| facet.name == "人気作者")
+        .expect("同名作者の候補");
+    assert_eq!(same_name.count, 2);
+    assert_eq!(
+        same_name
+            .sources
+            .iter()
+            .map(String::as_str)
+            .collect::<HashSet<_>>(),
+        HashSet::from(["pixiv", "fanbox"]),
+    );
+    let rare = db.search_filter_facets("tags", Some("希少"), 10).unwrap();
+    assert_eq!(
+        rare.first().map(|facet| facet.name.as_str()),
+        Some("希少タグ")
+    );
+}
+
+#[test]
+fn same_name_author_filter_composes_with_source() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    insert_download_unindexed(
+        &db,
+        &storage,
+        "same-author-pixiv",
+        "pixivの作品",
+        "同名作者",
+        &["創作"],
+        "本文",
+    );
+    let fanbox_id = insert_download_unindexed(
+        &db,
+        &storage,
+        "same-author-fanbox",
+        "FANBOXの作品",
+        "同名作者",
+        &["創作"],
+        "本文",
+    );
+    db.conn
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE downloads SET source = 'fanbox' WHERE id = ?1",
+            params![fanbox_id],
+        )
+        .unwrap();
+
+    let fanbox_only = SearchV2Params {
+        source: Some("fanbox".to_string()),
+        authors_include: Some(vec!["同名作者".to_string()]),
+        ..v2_params(None, 20, None)
+    };
+    let result = db.search_downloads_v2(&fanbox_only).unwrap();
+    assert_eq!(result.items.len(), 1);
+    assert_eq!(result.items[0].source, "fanbox");
+    assert_eq!(result.items[0].title, "FANBOXの作品");
+}
+
+#[test]
+fn facet_and_suggestion_caches_hit_then_invalidate_on_commit() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    insert_download(
+        &db,
+        &storage,
+        "cache-generation-1",
+        "世代候補 一冊目",
+        "世代作者",
+        &["世代タグ"],
+        "本文",
+    );
+
+    let first_facets = db.search_filter_facets("tags", None, 30).unwrap();
+    assert_eq!(
+        first_facets
+            .iter()
+            .find(|facet| facet.name == "世代タグ")
+            .map(|facet| facet.count),
+        Some(1)
+    );
+    let _ = db.search_filter_facets("tags", None, 30).unwrap();
+
+    let suggest_params = SearchSuggestParams {
+        text: Some("世代候補".to_string()),
+        limit: Some(12),
+    };
+    assert_eq!(db.search_suggest(&suggest_params).unwrap().items.len(), 1);
+    let _ = db.search_suggest(&suggest_params).unwrap();
+    let (facet_before, suggest_before, _) = db.query_cache_stats();
+    assert!(facet_before.0 >= 1, "facet cache should have a hit");
+    assert!(suggest_before.0 >= 1, "suggest cache should have a hit");
+
+    let second_id = insert_download(
+        &db,
+        &storage,
+        "cache-generation-2",
+        "世代候補 二冊目",
+        "世代作者",
+        &["世代タグ"],
+        "本文",
+    );
+    let updated_facets = db.search_filter_facets("tags", None, 30).unwrap();
+    assert_eq!(
+        updated_facets
+            .iter()
+            .find(|facet| facet.name == "世代タグ")
+            .map(|facet| facet.count),
+        Some(2),
+        "a committed write must invalidate cached aggregates"
+    );
+    assert_eq!(db.search_suggest(&suggest_params).unwrap().items.len(), 2);
+    let (facet_after, suggest_after, _) = db.query_cache_stats();
+    assert!(facet_after.1 > facet_before.1);
+    assert!(suggest_after.1 > suggest_before.1);
+
+    {
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE downloads SET title = '別の候補' WHERE id = ?1",
+            params![second_id],
+        )
+        .unwrap();
+    }
+    assert_eq!(
+        db.search_suggest(&suggest_params).unwrap().items.len(),
+        1,
+        "a direct committed update must invalidate cached suggestions"
+    );
+
+    db.delete_download(second_id).unwrap();
+    let after_delete = db.search_filter_facets("tags", None, 30).unwrap();
+    assert_eq!(
+        after_delete
+            .iter()
+            .find(|facet| facet.name == "世代タグ")
+            .map(|facet| facet.count),
+        Some(1),
+        "a committed delete must invalidate cached aggregates"
+    );
+}
+
+#[test]
+fn lexical_search_reports_full_hits_beyond_the_candidate_page() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    for index in 0..3 {
+        insert_download(
+            &db,
+            &storage,
+            &format!("count-{index}"),
+            &format!("共通検索語 作品{index}"),
+            "作者",
+            &["検索"],
+            "本文",
+        );
+    }
+
+    let result = super::super::tantivy_index::search_with_total(&storage, "共通検索語", 1).unwrap();
+    assert_eq!(result.hits.len(), 1);
+    assert_eq!(result.total_hits, 3);
+
+    let mut deep = params("共通検索語");
+    deep.limit = Some(600);
+    assert!(search_candidate_limit(&deep, 600) > 1_000);
+    let mut another = params("別の検索");
+    another.limit = deep.limit;
+    assert_ne!(search_cursor_scope(&deep), search_cursor_scope(&another));
+}
+
+#[test]
+fn lexical_cursor_reaches_every_match_beyond_one_thousand_results() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    const ITEM_COUNT: usize = 1_025;
+
+    for index in 0..ITEM_COUNT {
+        insert_download_unindexed(
+            &db,
+            &storage,
+            &format!("deep-{index:04}"),
+            &format!("全件到達テスト {index:04}"),
+            "同一作者",
+            &["ページング"],
+            "全件到達テストの共通本文",
+        );
+    }
+    loop {
+        let status = db.rebuild_search_index_batch(200).unwrap();
+        if status.pending_downloads == 0 {
+            break;
+        }
+    }
+    let mut request = params("全件到達テスト");
+    request.limit = Some(137);
+    let mut seen = HashSet::new();
+    let mut checked_native_cursor = false;
+    loop {
+        let result = db.search_downloads_v2(&request).unwrap();
+        assert_eq!(result.total_estimate, Some(ITEM_COUNT as i64));
+        for item in result.items {
+            assert!(
+                seen.insert(item.id),
+                "cursor returned duplicate id {}",
+                item.id
+            );
+        }
+        match result.next_cursor {
+            Some(cursor) => {
+                if !checked_native_cursor {
+                    let decoded = decode_cursor(Some(&cursor)).unwrap();
+                    assert_eq!(decoded.kind, "ranked-search");
+                    assert!(decoded.snapshot_id.is_some());
+                    assert!(decoded.tantivy_score.is_some());
+                    checked_native_cursor = true;
+                }
+                request.cursor = Some(cursor);
+            }
+            None => break,
+        }
+    }
+
+    assert!(checked_native_cursor);
+    assert_eq!(seen.len(), ITEM_COUNT);
+}
+
+#[test]
+fn lexical_search_after_does_not_skip_filtered_hits_inside_a_batch() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    const ITEM_COUNT: usize = 450;
+    const EXPECTED: usize = 45;
+    for index in 0..ITEM_COUNT {
+        let tags: &[&str] = if index % 10 == 0 {
+            &["対象"]
+        } else {
+            &["対象外"]
+        };
+        insert_download_unindexed(
+            &db,
+            &storage,
+            &format!("filtered-cursor-{index:04}"),
+            &format!("絞り込みカーソル {index:04}"),
+            "カーソル作者",
+            tags,
+            "絞り込みカーソルの共通本文",
+        );
+    }
+    loop {
+        let status = db.rebuild_search_index_batch(200).unwrap();
+        if status.pending_downloads == 0 {
+            break;
+        }
+    }
+
+    let mut request = params("絞り込みカーソル");
+    request.limit = Some(17);
+    request.tags_include = Some(vec!["対象".to_string()]);
+    let mut seen = HashSet::new();
+    let mut checked_internal_total = false;
+    loop {
+        let result = db.search_downloads_v2(&request).unwrap();
+        for item in result.items {
+            assert!(seen.insert(item.id));
+            assert!(item.tags.iter().any(|tag| tag == "対象"));
+        }
+        match result.next_cursor {
+            Some(cursor) => {
+                if !checked_internal_total {
+                    let decoded = decode_cursor(Some(&cursor)).unwrap();
+                    assert_eq!(decoded.total_estimate, Some(EXPECTED as i64));
+                    assert_eq!(decoded.tantivy_total_hits, None);
+                    assert!(decoded.snapshot_id.is_some());
+                    checked_internal_total = true;
+                }
+                request.cursor = Some(cursor);
+            }
+            None => break,
+        }
+    }
+    assert!(checked_internal_total);
+    assert_eq!(seen.len(), EXPECTED);
+}
+
+#[test]
+fn lexical_cursor_carries_the_first_page_total() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    for index in 0..7 {
+        insert_download(
+            &db,
+            &storage,
+            &format!("count-cursor-{index}"),
+            &format!("総件数カーソル {index}"),
+            "作者",
+            &["件数"],
+            "総件数カーソル本文",
+        );
+    }
+
+    let mut request = params("総件数カーソル");
+    request.limit = Some(2);
+    let first = db.search_downloads_v2(&request).unwrap();
+    assert_eq!(first.total_estimate, Some(7));
+    let decoded = decode_cursor(first.next_cursor.as_deref()).unwrap();
+    assert_eq!(decoded.total_estimate, Some(7));
+    assert_eq!(decoded.tantivy_total_hits, None);
+    assert!(decoded.snapshot_id.is_some());
+
+    request.cursor = first.next_cursor;
+    let second = db.search_downloads_v2(&request).unwrap();
+    assert_eq!(second.total_estimate, Some(7));
+}
+
+#[test]
+fn lexical_cursor_survives_equal_score_segment_merge() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    const ITEM_COUNT: usize = 137;
+    for index in 0..ITEM_COUNT {
+        insert_download_unindexed(
+            &db,
+            &storage,
+            &format!("merge-cursor-{index:04}"),
+            &format!("同点マージ境界 {index:04}"),
+            "同一作者",
+            &["マージ"],
+            "全作品で同じ語数の同点マージ境界本文",
+        );
+    }
+    while db.get_search_index_status().unwrap().pending_downloads > 0 {
+        db.rebuild_search_index_batch(19).unwrap();
+    }
+    assert!(
+        super::super::tantivy_index::searchable_segment_count(&storage).unwrap() > 1,
+        "fixture must start with multiple segments"
+    );
+
+    let mut request = params("同点マージ境界");
+    request.limit = Some(17);
+    let first = db.search_downloads_v2(&request).unwrap();
+    let mut seen = first
+        .items
+        .iter()
+        .map(|item| item.id)
+        .collect::<HashSet<_>>();
+    request.cursor = first.next_cursor;
+
+    // DocAddress cursors become invalid here because every segment/doc id
+    // can change. The cursor's score + stable download id must not.
+    let (_, after) = super::super::tantivy_index::optimize_segments(&storage).unwrap();
+    assert_eq!(after, 1);
+    while request.cursor.is_some() {
+        let page = db.search_downloads_v2(&request).unwrap();
+        for item in &page.items {
+            assert!(seen.insert(item.id), "duplicate id {}", item.id);
+        }
+        request.cursor = page.next_cursor;
+    }
+    assert_eq!(seen.len(), ITEM_COUNT);
+}
+
+#[test]
+fn ranked_snapshot_failure_rolls_back_and_removes_partial_file() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    const MATCHES: usize = 519;
+    for index in 0..MATCHES {
+        insert_download_unindexed(
+            &db,
+            &storage,
+            &format!("snapshot-fail-{index:04}"),
+            &format!("失敗注入検索 {index:04}"),
+            "作者",
+            &["失敗注入"],
+            "失敗注入検索の本文",
+        );
+    }
+    loop {
+        let status = db.rebuild_search_index_batch(200).unwrap();
+        if status.pending_downloads == 0 {
+            break;
+        }
+    }
+
+    let request = params("失敗注入検索");
+    let error = db
+        .ranked_search_snapshot_inner(&request, "失敗注入検索", None, Some(1), None)
+        .err()
+        .expect("the second streamed score batch must fail");
+    assert!(error.contains("Injected ranked snapshot stream failure"));
+    assert_eq!(
+        fs::read_dir(search_snapshot_dir(&storage))
+            .unwrap()
+            .filter_map(Result::ok)
+            .count(),
+        0,
+        "a failed snapshot must leave neither the database nor sidecars"
+    );
+    assert!(db.search_snapshot_cache.lock().unwrap().entries.is_empty());
+
+    let quota_error = db
+        .ranked_search_snapshot_inner(&request, "失敗注入検索", None, None, Some(4 * 1024))
+        .err()
+        .expect("the injected disk quota must reject the snapshot");
+    assert!(quota_error.contains("shared 4096-byte disk budget"));
+    assert_eq!(
+        fs::read_dir(search_snapshot_dir(&storage))
+            .unwrap()
+            .filter_map(Result::ok)
+            .count(),
+        0,
+        "a quota failure must clean its partial snapshot"
+    );
+}
+
+#[test]
+fn ranked_snapshot_cursor_expires_after_library_or_index_generation_changes() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    for index in 0..5 {
+        insert_download(
+            &db,
+            &storage,
+            &format!("snapshot-generation-{index}"),
+            &format!("世代固定検索 {index}"),
+            "作者",
+            &["世代"],
+            "世代固定検索の本文",
+        );
+    }
+    let mut request = params("世代固定検索");
+    request.limit = Some(2);
+    let first = db.search_downloads_v2(&request).unwrap();
+    let cursor = first.next_cursor.expect("first page cursor");
+
+    insert_download(
+        &db,
+        &storage,
+        "snapshot-generation-new",
+        "世代固定検索 新着",
+        "作者",
+        &["世代"],
+        "世代固定検索の本文",
+    );
+    request.cursor = Some(cursor);
+    let error = db.search_downloads_v2(&request).unwrap_err();
+    assert!(
+        error.contains("expired") || error.contains("invalidated"),
+        "a cursor must never continue against a newly ranked generation: {error}"
+    );
+
+    request.cursor = None;
+    let restarted = db.search_downloads_v2(&request).unwrap();
+    assert_eq!(restarted.total_estimate, Some(6));
+}
+
+#[test]
+fn search_index_optimization_reduces_segments_without_changing_results() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    super::super::tantivy_index::disable_automatic_merges_for_test(&storage).unwrap();
+    for index in 0..24 {
+        insert_download(
+            &db,
+            &storage,
+            &format!("merge-{index:02}"),
+            &format!("索引統合検証 {index:02}"),
+            "統合テスト作者",
+            &["索引"],
+            "索引統合検証の共通本文",
+        );
+    }
+    let before_segments = super::super::tantivy_index::searchable_segment_count(&storage).unwrap();
+    assert!(
+        before_segments > 1,
+        "test setup must create fragmented segments"
+    );
+    let mut search_params = params("索引統合検証");
+    search_params.limit = Some(30);
+    let before = db.search_downloads_v2(&search_params).unwrap();
+    let before_ids = before
+        .items
+        .iter()
+        .map(|item| item.id)
+        .collect::<HashSet<_>>();
+    assert_eq!(before_ids.len(), 24);
+
+    let (reported_before, reported_after) =
+        super::super::tantivy_index::optimize_segments(&storage).unwrap();
+    assert_eq!(reported_before, before_segments);
+    assert_eq!(reported_after, 1);
+    let after = db.search_downloads_v2(&search_params).unwrap();
+    let after_ids = after
+        .items
+        .iter()
+        .map(|item| item.id)
+        .collect::<HashSet<_>>();
+    assert_eq!(after.total_estimate, before.total_estimate);
+    assert_eq!(after_ids, before_ids);
+}
+
+#[test]
+fn ordinary_tantivy_writer_is_reused_and_yields_to_bulk_writer() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    insert_download(
+        &db,
+        &storage,
+        "writer-cache-1",
+        "writer cache first",
+        "author",
+        &["writer"],
+        "body",
+    );
+    assert!(
+        super::super::tantivy_index::ordinary_writer_is_cached(&storage).unwrap(),
+        "a normal save should retain its writer arena"
+    );
+
+    let bulk = super::super::tantivy_index::bulk_writer(&storage).unwrap();
+    assert!(
+        !super::super::tantivy_index::ordinary_writer_is_cached(&storage).unwrap(),
+        "the cached writer must release Tantivy's directory lock for a rebuild"
+    );
+    drop(bulk);
+
+    insert_download(
+        &db,
+        &storage,
+        "writer-cache-2",
+        "writer cache second",
+        "author",
+        &["writer"],
+        "body",
+    );
+    assert!(super::super::tantivy_index::ordinary_writer_is_cached(&storage).unwrap());
+}
+
+/// 段に分けて統合しても、最後は1つに収まる。
+///
+/// 一度に全部を混ぜていたころは、そのあいだ保存も削除も待たされた。段に
+/// 分けたことで途中で場所を空けられるようになったが、**分けたせいで
+/// 途中で止まってはいけない**。
+///
+/// 投入前から自動統合を止め、1段の上限（16）を超える断片を確実に作る。
+/// 通常の自動統合と競合せず、段をまたぐ明示統合の経路を検証する。
+#[test]
+fn optimizing_a_multi_segment_index_still_ends_with_one() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    super::super::tantivy_index::disable_automatic_merges_for_test(&storage).unwrap();
+    // 1件ずつ確定するので、作品の数だけセグメントができる。
+    for index in 0..30 {
+        insert_download(
+            &db,
+            &storage,
+            &format!("segment-{index}"),
+            &format!("段 {index} 番目"),
+            "author",
+            &["segment"],
+            "本文",
+        );
+    }
+    let before = super::super::tantivy_index::searchable_segment_count(&storage).unwrap();
+    assert!(before > 16, "複数段の統合に必要な断片を作る: {before}");
+
+    let (reported_before, after) =
+        super::super::tantivy_index::optimize_segments(&storage).unwrap();
+
+    assert_eq!(reported_before, before);
+    assert_eq!(after, 1, "統合が途中で止まっている");
+    assert_eq!(
+        super::super::tantivy_index::searchable_segment_count(&storage).unwrap(),
+        1
+    );
+}
+
+/// 再構築の最中でも、保存や削除は待たされ続けない。
+///
+/// tantivy は 1 ディレクトリに 1 つしか書き手を許さないので、再構築が場所を
+/// 占めているあいだ、ふつうの書き手は待つしかない。譲らなかったころは、
+/// その待ちが**再構築の全期間**だった。1万件なら数分、しかも止まっている
+/// ことが画面のどこにも出ない。区切りのいいところで場所を空ければ、待ちは
+/// 一区切りぶんで済む。
+#[test]
+fn a_rebuild_hands_the_index_back_to_a_waiting_save() {
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    insert_download(
+        &db,
+        &storage,
+        "yield-1",
+        "yield first",
+        "author",
+        &["yield"],
+        "body",
+    );
+
+    let mut bulk = super::super::tantivy_index::bulk_writer(&storage).unwrap();
+    assert!(!bulk.has_waiting_writers(), "まだ誰も待っていない");
+
+    let (done_tx, done_rx) = mpsc::channel();
+    let storage_for_waiter = storage.clone();
+    let waiter = std::thread::spawn(move || {
+        let result = super::super::tantivy_index::delete_documents(&storage_for_waiter, &[9_999]);
+        let _ = done_tx.send(result);
+    });
+
+    // 待ちに入ったことを、名乗りで確かめる。名乗らない実装では、再構築は
+    // 「誰も待っていない」と判断して最後まで場所を占め続ける。
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !bulk.has_waiting_writers() {
+        assert!(Instant::now() < deadline, "削除が待ちに入らなかった");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        done_rx.recv_timeout(Duration::from_millis(100)).is_err(),
+        "場所を空ける前に通ってしまった"
+    );
+
+    bulk.yield_now().unwrap();
+
+    done_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("場所を空けたのに、待っていた削除が通らなかった")
+        .expect("削除そのものは成功する");
+    waiter.join().unwrap();
+
+    // 譲ったあとも再構築は続けられる。取り直せていなければここで落ちる。
+    assert!(!bulk.has_waiting_writers());
+    bulk.commit().unwrap();
+}
+
+#[test]
+fn entity_facets_search_and_page_beyond_the_dashboard_cap() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+
+    // get_filter_facets only ever returns the top 60 authors, so the
+    // library tab needs a query that can reach past that.
+    for index in 0..70 {
+        insert_download_unindexed(
+            &db,
+            &storage,
+            &format!("{}", 100 + index),
+            &format!("作品{}", index),
+            &format!("作者{:02}", index),
+            &["日常"],
+            "本文",
+        );
+    }
+
+    let capped = db.get_filter_facets().unwrap();
+    assert_eq!(capped.author_entities.len(), 60);
+
+    let second_page = db
+        .search_entity_facets("person", None, 60, 60, None, None, None, None)
+        .unwrap();
+    assert_eq!(second_page.len(), 10, "authors past the cap stay reachable");
+
+    let filtered = db
+        .search_entity_facets("person", Some("作者69"), 60, 0, None, None, None, None)
+        .unwrap();
+    assert_eq!(filtered.len(), 1);
+    assert_eq!(filtered[0].display_name, "作者69");
+    assert_eq!(filtered[0].count, 1);
+
+    let missing = db
+        .search_entity_facets("person", Some("存在しない"), 60, 0, None, None, None, None)
+        .unwrap();
+    assert!(missing.is_empty());
+
+    assert!(db
+        .search_entity_facets("unknown", None, 10, 0, None, None, None, None)
+        .is_err());
+
+    // The pager cannot name a last page without this, and a total that does
+    // not agree with the rows it is counting is worse than none at all.
+    assert_eq!(
+        db.count_entity_facets("person", None, None, None).unwrap(),
+        70
+    );
+    assert_eq!(
+        db.count_entity_facets("person", Some("作者69"), None, None)
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        db.count_entity_facets("person", Some("存在しない"), None, None)
+            .unwrap(),
+        0
+    );
+    assert!(db.count_entity_facets("unknown", None, None, None).is_err());
+
+    // Walked page by page, the rows add up to exactly what was counted.
+    let total = db.count_entity_facets("person", None, None, None).unwrap();
+    let mut walked = 0usize;
+    for page in 0..(total as usize).div_ceil(20) {
+        walked += db
+            .search_entity_facets(
+                "person",
+                None,
+                20,
+                (page * 20) as i64,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap()
+            .len();
+    }
+    assert_eq!(walked as i64, total);
+}
+
+/// 取得元が黙ったからといって、知っていたことを忘れない。
+///
+/// 完結の有無は web からしか来ない。保存のついでに作る控え（アプリAPI
+/// だけを見る道）が None を書き戻して消していたら、カードの印が保存の
+/// たびに消えたり点いたりする。
+#[test]
+fn a_silent_source_does_not_erase_what_a_series_already_said() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    db.upsert_series_profile(
+        "pixiv",
+        "9001",
+        "連作",
+        Some("説明"),
+        Some("series/9001/v1/assets/cover.jpg"),
+        "hash-1",
+        "series/9001/v1/original.json",
+        1,
+        64,
+        EntityProfileFreshness::RemoteChecked,
+        Some(true),
+        Some(89),
+    )
+    .unwrap();
+    let stored = db.get_series("pixiv", "9001").unwrap();
+    assert_eq!(stored.is_concluded, Some(true));
+    assert_eq!(stored.published_content_count, Some(89));
+
+    // 何も聞けなかった更新。表紙も完結も、手元の値が残る。
+    db.upsert_series_profile(
+        "pixiv",
+        "9001",
+        "連作",
+        Some("説明"),
+        None,
+        "hash-2",
+        "series/9001/v2/original.json",
+        0,
+        0,
+        EntityProfileFreshness::SnapshotOnly,
+        None,
+        None,
+    )
+    .unwrap();
+    let after = db.get_series("pixiv", "9001").unwrap();
+    assert_eq!(after.is_concluded, Some(true), "黙りは「連載中」ではない");
+    assert_eq!(after.published_content_count, Some(89));
+    assert_eq!(
+        after.cover_path.as_deref(),
+        Some("series/9001/v1/assets/cover.jpg"),
+        "表紙も同じ扱い"
+    );
+
+    // 連載が終われば、そう言われたときに変わる。
+    db.upsert_series_profile(
+        "pixiv",
+        "9001",
+        "連作",
+        Some("説明"),
+        None,
+        "hash-3",
+        "series/9001/v3/original.json",
+        0,
+        0,
+        EntityProfileFreshness::RemoteChecked,
+        Some(false),
+        Some(90),
+    )
+    .unwrap();
+    let latest = db.get_series("pixiv", "9001").unwrap();
+    assert_eq!(latest.is_concluded, Some(false));
+    assert_eq!(latest.published_content_count, Some(90));
+}
+
+/// 並べ替えの決まりそのもの。知らない指定でSQLへ文字列が漏れないことも
+/// ここで固定する。
+#[test]
+fn entity_ordering_only_speaks_words_it_knows() {
+    let clause = |by: Option<&str>, order: Option<&str>| {
+        Database::entity_facet_order_clause(by, order, "display_name")
+    };
+    assert_eq!(
+        clause(None, None),
+        "ORDER BY count DESC, display_name ASC, 1 ASC, 2 ASC",
+        "既定は作品が多い順"
+    );
+    assert!(clause(Some("downloaded_at"), None).starts_with("ORDER BY latest_downloaded_at DESC"));
+    assert!(clause(Some("source_created_at"), Some("asc"))
+        .starts_with("ORDER BY latest_source_created_at ASC"));
+    assert!(clause(Some("source_updated_at"), None)
+        .starts_with("ORDER BY latest_source_updated_at DESC"));
+    assert!(clause(Some("text_length"), None).starts_with("ORDER BY total_text_length DESC"));
+    assert!(clause(Some("file_size_bytes"), Some("asc"))
+        .starts_with("ORDER BY total_file_size_bytes ASC"));
+    assert!(clause(Some("asset_count"), None).starts_with("ORDER BY total_asset_count DESC"));
+    assert!(clause(Some("current_version"), Some("asc"))
+        .starts_with("ORDER BY total_revision_count ASC"));
+    assert!(clause(Some("name"), None).starts_with("ORDER BY display_name COLLATE NOCASE ASC"));
+    assert!(
+        clause(Some("name"), Some("desc")).starts_with("ORDER BY display_name COLLATE NOCASE DESC")
+    );
+    // 知らない指定は既定へ落ちる。文字列はそのままSQLへ入らない。
+    let injected = clause(Some("1; DROP TABLE downloads"), Some("desc; --"));
+    assert_eq!(
+        injected,
+        "ORDER BY count DESC, display_name ASC, 1 ASC, 2 ASC"
+    );
+    assert!(!injected.contains("DROP"));
+    // 同じ値が並んだときの順番まで決めておく。ページの境目が揺れる。
+    assert!(clause(Some("downloaded_at"), None).contains("count DESC, display_name ASC"));
+}
+
+/// 一覧そのものにかける条件（監視・作品数・完結）。
+///
+/// 「配下の作品の条件」と混ざっていないこと、件数（総数）も同じ条件で
+/// 数えられていることを固定する。数が合わないページ送りは、最後の
+/// ページが存在しないという嘘になる。
+#[test]
+fn entity_facets_narrow_by_what_the_listing_itself_is() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    insert_download_unindexed(&db, &storage, "sc-1", "追う人の一", "追う人", &[], "本文");
+    insert_download_unindexed(&db, &storage, "sc-2", "追う人の二", "追う人", &[], "本文");
+    insert_download_unindexed(
+        &db,
+        &storage,
+        "sc-3",
+        "止めた人の一",
+        "止めた人",
+        &[],
+        "本文",
+    );
+    insert_download_unindexed(
+        &db,
+        &storage,
+        "sc-4",
+        "未登録の人の一",
+        "未登録の人",
+        &[],
+        "本文",
+    );
+    {
+        let conn = db.conn.lock().unwrap();
+        for (id, author) in [("sc-1", "追う人"), ("sc-2", "追う人")] {
+            conn.execute(
+                "UPDATE downloads SET author_id = ?1, author_name = ?2 WHERE source_id = ?3",
+                params!["author-watched", author, id],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "UPDATE downloads SET author_id = 'author-paused' WHERE source_id = 'sc-3'",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE downloads SET author_id = 'author-none' WHERE source_id = 'sc-4'",
+            [],
+        )
+        .unwrap();
+    }
+    db.upsert_update_target(&UpdateTargetInput {
+        target_type: "author".to_string(),
+        source: "pixiv".to_string(),
+        source_key: "author-watched".to_string(),
+        display_name: "追う人".to_string(),
+        enabled: true,
+        metadata_json: None,
+    })
+    .unwrap();
+    db.upsert_update_target(&UpdateTargetInput {
+        target_type: "author".to_string(),
+        source: "pixiv".to_string(),
+        source_key: "author-paused".to_string(),
+        display_name: "止めた人".to_string(),
+        enabled: false,
+        metadata_json: None,
+    })
+    .unwrap();
+
+    let names = |scope: EntityFacetScope| {
+        let listed = db
+            .search_entity_facets("person", None, 60, 0, None, None, None, Some(&scope))
+            .unwrap()
+            .into_iter()
+            .map(|facet| facet.display_name)
+            .collect::<Vec<_>>();
+        let counted = db
+            .count_entity_facets("person", None, None, Some(&scope))
+            .unwrap();
+        assert_eq!(
+            listed.len() as i64,
+            counted,
+            "総数は、数えている行と一致していなければならない"
+        );
+        listed
+    };
+
+    assert_eq!(
+        names(EntityFacetScope {
+            watch: Some("watched".into()),
+            ..Default::default()
+        }),
+        vec!["追う人"]
+    );
+    assert_eq!(
+        names(EntityFacetScope {
+            watch: Some("paused".into()),
+            ..Default::default()
+        }),
+        vec!["止めた人"]
+    );
+    let mut unwatched = names(EntityFacetScope {
+        watch: Some("unwatched".into()),
+        ..Default::default()
+    });
+    unwatched.sort();
+    assert_eq!(unwatched, vec!["未登録の人"]);
+    // 知らない言葉は条件なしとして扱う。
+    assert_eq!(
+        names(EntityFacetScope {
+            watch: Some("いつか".into()),
+            ..Default::default()
+        })
+        .len(),
+        3
+    );
+    // 作品数の下限。1以下は条件なしと同じ。
+    assert_eq!(
+        names(EntityFacetScope {
+            min_work_count: Some(2),
+            ..Default::default()
+        }),
+        vec!["追う人"]
+    );
+    assert_eq!(
+        names(EntityFacetScope {
+            min_work_count: Some(1),
+            ..Default::default()
+        })
+        .len(),
+        3
+    );
+    // 監視と作品数は同時に効く。
+    assert_eq!(
+        names(EntityFacetScope {
+            watch: Some("unwatched".into()),
+            min_work_count: Some(2),
+            ..Default::default()
+        })
+        .len(),
+        0
+    );
+}
+
+/// 完結の有無で絞る。まだ聞いていないシリーズは、どちらにも入らない。
+#[test]
+fn series_facets_narrow_by_whether_the_source_called_it_finished() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    for (index, (source_id, series_key, title)) in [
+        ("cs-1", "done", "完結した連作"),
+        ("cs-2", "running", "続いている連作"),
+        ("cs-3", "unknown", "まだ聞いていない連作"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let id = insert_download_unindexed(
+            &db,
+            &storage,
+            source_id,
+            &format!("{title}#{index}"),
+            "連載作者",
+            &[],
+            "本文",
+        );
+        db.upsert_download_series(id, "pixiv", series_key, title, Some(1))
+            .unwrap();
+    }
+    for (key, title, concluded) in [
+        ("done", "完結した連作", Some(true)),
+        ("running", "続いている連作", Some(false)),
+        ("unknown", "まだ聞いていない連作", None),
+    ] {
+        db.upsert_series_profile(
+            "pixiv",
+            key,
+            title,
+            None,
+            None,
+            &format!("hash-{key}"),
+            &format!("series/{key}/v1/original.json"),
+            0,
+            0,
+            EntityProfileFreshness::RemoteChecked,
+            concluded,
+            None,
+        )
+        .unwrap();
+    }
+    let names = |concluded: Option<bool>| {
+        let scope = EntityFacetScope {
+            concluded,
+            ..Default::default()
+        };
+        let listed = db
+            .search_entity_facets(
+                "series",
+                None,
+                60,
+                0,
+                None,
+                Some("name"),
+                None,
+                Some(&scope),
+            )
+            .unwrap()
+            .into_iter()
+            .map(|facet| facet.display_name)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            listed.len() as i64,
+            db.count_entity_facets("series", None, None, Some(&scope))
+                .unwrap()
+        );
+        listed
+    };
+    assert_eq!(names(Some(true)), vec!["完結した連作"]);
+    assert_eq!(names(Some(false)), vec!["続いている連作"]);
+    assert_eq!(names(None).len(), 3, "指定が無ければ全部");
+
+    // 完結の印は一覧まで届く。
+    let all = db
+        .search_entity_facets("series", None, 60, 0, None, Some("name"), None, None)
+        .unwrap();
+    let finished = all.iter().find(|f| f.source_key == "done").unwrap();
+    let unknown = all.iter().find(|f| f.source_key == "unknown").unwrap();
+    assert_eq!(finished.is_concluded, Some(true));
+    assert_eq!(unknown.is_concluded, None);
+}
+
+/// 作者・シリーズの並びは、その中にある作品を見て決まる。
+#[test]
+fn entity_facets_sort_by_the_works_underneath() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let a1 = insert_download_unindexed(&db, &storage, "sort-a1", "Aの一", "作者A", &[], "本文");
+    let a2 = insert_download_unindexed(&db, &storage, "sort-a2", "Aの二", "作者A", &[], "本文");
+    let b1 = insert_download_unindexed(&db, &storage, "sort-b1", "Bの一", "作者B", &[], "本文");
+    {
+        // 作者Aは作品が多く、保存は古く、取得元での更新は新しい。
+        // 作者Bはその逆。どの鍵で並べたかが順番に出る。
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE downloads SET author_id = 'author-A', author_name = '作者A',
+                    downloaded_at = '2026-01-01T00:00:00Z',
+                    source_created_at = '2025-01-01T00:00:00Z',
+                    source_updated_at = '2026-08-01T00:00:00Z',
+                    text_length = 100, file_size_bytes = 1000,
+                    asset_count = 1, current_version = 4
+                 WHERE id IN (?1, ?2)",
+            params![a1, a2],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE downloads SET author_id = 'author-B', author_name = '作者B',
+                    downloaded_at = '2026-08-20T00:00:00Z',
+                    source_created_at = '2026-08-15T00:00:00Z',
+                    source_updated_at = '2026-01-05T00:00:00Z',
+                    text_length = 900, file_size_bytes = 50,
+                    asset_count = 9, current_version = 1
+                 WHERE id = ?1",
+            params![b1],
+        )
+        .unwrap();
+    }
+    let names = |by: Option<&str>, order: Option<&str>| {
+        db.search_entity_facets("person", None, 60, 0, None, by, order, None)
+            .unwrap()
+            .into_iter()
+            .map(|facet| facet.display_name)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(names(None, None), vec!["作者A", "作者B"], "作品が多い順");
+    assert_eq!(
+        names(Some("downloaded_at"), None),
+        vec!["作者B", "作者A"],
+        "保存が新しい順"
+    );
+    assert_eq!(
+        names(Some("source_created_at"), None),
+        vec!["作者B", "作者A"],
+        "公開が新しい順"
+    );
+    assert_eq!(
+        names(Some("source_updated_at"), None),
+        vec!["作者A", "作者B"],
+        "取得元での更新が新しい順"
+    );
+    assert_eq!(
+        names(Some("text_length"), None),
+        vec!["作者B", "作者A"],
+        "合計文字数が多い順"
+    );
+    assert_eq!(
+        names(Some("file_size_bytes"), None),
+        vec!["作者A", "作者B"],
+        "合計容量が大きい順"
+    );
+    assert_eq!(
+        names(Some("asset_count"), None),
+        vec!["作者B", "作者A"],
+        "合計添付数が多い順"
+    );
+    assert_eq!(
+        names(Some("current_version"), None),
+        vec!["作者A", "作者B"],
+        "改稿回数が多い順"
+    );
+    assert_eq!(
+        names(Some("current_version"), Some("asc")),
+        vec!["作者B", "作者A"],
+        "改稿回数が少ない順"
+    );
+    assert_eq!(names(Some("name"), None), vec!["作者A", "作者B"], "名前順");
+}
+
+#[test]
+fn entity_facets_do_not_split_one_identity_when_snapshot_names_differ() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let old = insert_download_unindexed(
+        &db,
+        &storage,
+        "renamed-old",
+        "旧名のころ",
+        "旧作者名",
+        &[],
+        "本文",
+    );
+    let new = insert_download_unindexed(
+        &db,
+        &storage,
+        "renamed-new",
+        "改名後",
+        "新作者名",
+        &[],
+        "本文",
+    );
+    {
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE downloads SET author_id = 'stable-author' WHERE id IN (?1, ?2)",
+            params![old, new],
+        )
+        .unwrap();
+        for (id, title) in [(old, "旧シリーズ名"), (new, "新シリーズ名")] {
+            conn.execute(
+                "INSERT INTO download_series (
+                    download_id, series_source, series_key, title, content_order
+                 ) VALUES (?1, 'pixiv', 'stable-series', ?2, 1)",
+                params![id, title],
+            )
+            .unwrap();
+        }
+    }
+
+    let people = db
+        .search_entity_facets("person", None, 60, 0, None, None, None, None)
+        .unwrap();
+    let same_person = people
+        .iter()
+        .filter(|facet| facet.source == "pixiv" && facet.source_key == "stable-author")
+        .collect::<Vec<_>>();
+    assert_eq!(same_person.len(), 1, "同じ作者IDを名前の履歴で分裂させない");
+    assert_eq!(same_person[0].count, 2);
+    assert_eq!(same_person[0].display_name, "新作者名");
+
+    let series = db
+        .search_entity_facets("series", None, 60, 0, None, None, None, None)
+        .unwrap();
+    let same_series = series
+        .iter()
+        .filter(|facet| facet.source == "pixiv" && facet.source_key == "stable-series")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        same_series.len(),
+        1,
+        "同じシリーズIDを題名の履歴で分裂させない"
+    );
+    assert_eq!(same_series[0].count, 2);
+
+    // The filter drawer uses a separate compact facet query. It must obey the
+    // same stable-identity rule as the paged author/series tabs.
+    let filter_facets = db.get_filter_facets().unwrap();
+    let filtered_people = filter_facets
+        .author_entities
+        .iter()
+        .filter(|facet| facet.source == "pixiv" && facet.source_key == "stable-author")
+        .collect::<Vec<_>>();
+    assert_eq!(filtered_people.len(), 1);
+    assert_eq!(filtered_people[0].count, 2);
+    assert_eq!(filtered_people[0].display_name, "新作者名");
+    assert_eq!(
+        filter_facets
+            .authors
+            .iter()
+            .filter(|facet| facet.name == "新作者名")
+            .map(|facet| facet.count)
+            .collect::<Vec<_>>(),
+        vec![2],
+        "作者フィルターも現在の代表名1件へ統合する"
+    );
+    assert!(filter_facets
+        .authors
+        .iter()
+        .all(|facet| facet.name != "旧作者名"));
+
+    // An old saved search still names the former snapshot. Resolve that name
+    // through the stable identity so it keeps returning all of the author's
+    // works after a rename.
+    let mut old_name_filter = v2_params(None, 20, None);
+    old_name_filter.authors_include = Some(vec!["旧作者名".to_string()]);
+    assert_eq!(
+        db.search_downloads_v2(&old_name_filter)
+            .unwrap()
+            .items
+            .len(),
+        2
+    );
+    old_name_filter.authors_include = None;
+    old_name_filter.authors_exclude = Some(vec!["旧作者名".to_string()]);
+    assert!(db
+        .search_downloads_v2(&old_name_filter)
+        .unwrap()
+        .items
+        .is_empty());
+    let filtered_series = filter_facets
+        .series
+        .iter()
+        .filter(|facet| facet.source == "pixiv" && facet.source_key == "stable-series")
+        .collect::<Vec<_>>();
+    assert_eq!(filtered_series.len(), 1);
+    assert_eq!(filtered_series[0].count, 2);
+}
+
+#[test]
+fn entity_series_aggregates_each_work_once_even_with_multiple_person_roles() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let multi_role =
+        insert_download_unindexed(&db, &storage, "role-multi", "複数役割", "作者", &[], "本文");
+    let larger = insert_download_unindexed(
+        &db,
+        &storage,
+        "role-single",
+        "単一役割",
+        "作者",
+        &[],
+        "本文",
+    );
+    for role in ["author", "illustrator"] {
+        db.upsert_download_person(multi_role, "pixiv", "role-author", role, "作者")
+            .unwrap();
+    }
+    db.upsert_download_person(larger, "pixiv", "role-author", "author", "作者")
+        .unwrap();
+    db.upsert_download_series(multi_role, "pixiv", "series-small", "小さい方", Some(1))
+        .unwrap();
+    db.upsert_download_series(larger, "pixiv", "series-large", "大きい方", Some(1))
+        .unwrap();
+    {
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE downloads SET text_length = 60 WHERE id = ?1",
+            params![multi_role],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE downloads SET text_length = 100 WHERE id = ?1",
+            params![larger],
+        )
+        .unwrap();
+    }
+
+    let page = db
+        .list_entity_series_paged(
+            "pixiv",
+            "role-author",
+            None,
+            Some("text_length"),
+            Some("desc"),
+            20,
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        page.items
+            .iter()
+            .map(|item| item.source_key.as_str())
+            .collect::<Vec<_>>(),
+        vec!["series-large", "series-small"],
+        "author+illustrator の同一作品を合計へ二重計上しない"
+    );
+}
+
+#[test]
+fn entity_facets_narrow_to_the_library_filters() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+
+    // 作者Aは絞り込みに合う作品と合わない作品を持ち、作者Bは合う作品を
+    // 持たない。絞り込みが効いていれば、Aだけが残り、その件数も1になる。
+    let favourite =
+        insert_download_unindexed(&db, &storage, "301", "日常の話", "作者A", &["日常"], "本文");
+    let other =
+        insert_download_unindexed(&db, &storage, "302", "冒険の話", "作者A", &["冒険"], "本文");
+    insert_download_unindexed(
+        &db,
+        &storage,
+        "303",
+        "冒険の続き",
+        "作者B",
+        &["冒険"],
+        "本文",
+    );
+    // 作品ごとに別の作者IDを振る補助関数なので、この2件を同じ人物にまとめる。
+    {
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE downloads SET author_id = 'author-A' WHERE id IN (?1, ?2)",
+            rusqlite::params![favourite, other],
+        )
+        .unwrap();
+    }
+    db.set_favorite(favourite, true).unwrap();
+
+    let unfiltered = db
+        .search_entity_facets("person", None, 60, 0, None, None, None, None)
+        .unwrap();
+    assert_eq!(unfiltered.len(), 2);
+    assert_eq!(
+        db.count_entity_facets("person", None, None, None).unwrap(),
+        2
+    );
+
+    let by_tag = SearchV2Params {
+        tags_include: Some(vec!["日常".to_string()]),
+        ..params("")
+    };
+    let tagged = db
+        .search_entity_facets("person", None, 60, 0, Some(&by_tag), None, None, None)
+        .unwrap();
+    assert_eq!(tagged.len(), 1, "作者Bはこのタグの作品を持たない");
+    assert_eq!(tagged[0].display_name, "作者A");
+    // 件数は「条件に合う作品の数」。作者Aの2件すべてではない。
+    assert_eq!(tagged[0].count, 1);
+    assert_eq!(
+        db.count_entity_facets("person", None, Some(&by_tag), None)
+            .unwrap(),
+        1,
+        "総数は数えている行と一致する"
+    );
+
+    // 名前での絞り込みと同時に効く。作者Aは条件に合うが、名前が違う。
+    let named = db
+        .search_entity_facets(
+            "person",
+            Some("作者B"),
+            60,
+            0,
+            Some(&by_tag),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+    assert!(named.is_empty());
+
+    let favourites_only = SearchV2Params {
+        favorite: Some(true),
+        ..params("")
+    };
+    let favoured = db
+        .search_entity_facets(
+            "person",
+            None,
+            60,
+            0,
+            Some(&favourites_only),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+    assert_eq!(favoured.len(), 1);
+    assert_eq!(favoured[0].display_name, "作者A");
+
+    // 同じキャッシュを別の条件で引かない。
+    let unfiltered_again = db
+        .search_entity_facets("person", None, 60, 0, None, None, None, None)
+        .unwrap();
+    assert_eq!(unfiltered_again.len(), 2);
+}
+
+#[test]
+fn entity_key_pages_include_orphans_without_gaps() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    {
+        let conn = db.conn.lock().unwrap();
+        for (source, key) in [("fanbox", "p3"), ("pixiv", "p1"), ("pixiv", "p2")] {
+            conn.execute(
+                "INSERT INTO people (source, source_key, display_name)
+                     VALUES (?1, ?2, ?2)",
+                params![source, key],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO series (source, source_key, title)
+                     VALUES (?1, ?2, ?2)",
+                params![source, key],
+            )
+            .unwrap();
+        }
+    }
+
+    let people_first = db.list_people_keys_after(None, 2).unwrap();
+    assert_eq!(
+        people_first,
+        vec![
+            ("fanbox".to_string(), "p3".to_string()),
+            ("pixiv".to_string(), "p1".to_string())
+        ]
+    );
+    let people_second = db
+        .list_people_keys_after(Some((&people_first[1].0, &people_first[1].1)), 2)
+        .unwrap();
+    assert_eq!(people_second, vec![("pixiv".to_string(), "p2".to_string())]);
+
+    let series_first = db.list_series_keys_after(None, 2).unwrap();
+    let series_second = db
+        .list_series_keys_after(Some((&series_first[1].0, &series_first[1].1)), 2)
+        .unwrap();
+    assert_eq!(series_first.len() + series_second.len(), 3);
+}
+
+#[test]
+fn smart_search_ranks_metadata_over_body_and_supports_body_search() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+
+    let body_only = insert_download(
+        &db,
+        &storage,
+        "1",
+        "静かな本文一致",
+        "作者A",
+        &["日常"],
+        "ここだけに秘密キーワードが出てくる長い本文です。",
+    );
+    let title_hit = insert_download(
+        &db,
+        &storage,
+        "2",
+        "秘密キーワードのタイトル",
+        "作者B",
+        &["冒険"],
+        "本文には別の内容を書いておく。",
+    );
+
+    let results = db
+        .search_downloads_v2(&params("秘密キーワード"))
+        .unwrap()
+        .items;
+    assert_eq!(results.first().map(|dl| dl.id), Some(title_hit));
+    assert!(results.iter().any(|dl| dl.id == body_only));
+    assert!(results
+        .iter()
+        .find(|dl| dl.id == body_only)
+        .map(|dl| !dl.match_highlights.is_empty())
+        .unwrap_or(false));
+
+    let partial = db.search_downloads_v2(&params("秘密キ")).unwrap().items;
+    assert!(partial.iter().any(|dl| dl.id == body_only));
+
+    let excluded = db
+        .search_downloads_v2(&params("秘密 -タイトル"))
+        .unwrap()
+        .items;
+    assert!(excluded.iter().any(|dl| dl.id == body_only));
+    assert!(!excluded.iter().any(|dl| dl.id == title_hit));
+}
+
+#[test]
+fn search_v2_uses_cursor_without_duplicate_pages() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+
+    let first = insert_download(&db, &storage, "1", "一番目", "作者A", &["日常"], "本文A");
+    let second = insert_download(&db, &storage, "2", "二番目", "作者B", &["日常"], "本文B");
+    let third = insert_download(&db, &storage, "3", "三番目", "作者C", &["日常"], "本文C");
+
+    let page1 = db.search_downloads_v2(&v2_params(None, 2, None)).unwrap();
+    assert_eq!(page1.items.len(), 2);
+    assert!(page1.next_cursor.is_some());
+    assert!(page1.next_cursor.as_deref().unwrap().starts_with("k:"));
+
+    let page2 = db
+        .search_downloads_v2(&v2_params(None, 2, page1.next_cursor.clone()))
+        .unwrap();
+    let mut seen = page1.items.iter().map(|dl| dl.id).collect::<Vec<_>>();
+    seen.extend(page2.items.iter().map(|dl| dl.id));
+    seen.sort_unstable();
+    seen.dedup();
+    assert_eq!(seen.len(), 3);
+    assert!(seen.contains(&first));
+    assert!(seen.contains(&second));
+    assert!(seen.contains(&third));
+    assert!(page2.next_cursor.is_none());
+
+    let query = db
+        .search_downloads_v2(&v2_params(Some("番目"), 10, None))
+        .unwrap();
+    assert_eq!(query.search_meta.engine, "tantivy-lexical");
+    assert_eq!(query.items.len(), 3);
+}
+
+#[test]
+fn search_suggest_returns_metadata_candidates() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+
+    insert_download(
+        &db,
+        &storage,
+        "suggest-1",
+        "候補タイトル",
+        "候補作者",
+        &["候補タグ"],
+        "本文",
+    );
+
+    let suggestions = db
+        .search_suggest(&SearchSuggestParams {
+            text: Some("候補".to_string()),
+            limit: Some(10),
+        })
+        .unwrap();
+    assert!(suggestions
+        .items
+        .iter()
+        .any(|item| item.kind == "tag" && item.label == "候補タグ"));
+    assert!(suggestions
+        .items
+        .iter()
+        .any(|item| item.kind == "author" && item.label == "候補作者"));
+    assert!(suggestions
+        .items
+        .iter()
+        .any(|item| item.kind == "title" && item.label == "候補タイトル"));
+
+    let exact = db
+        .search_suggest(&SearchSuggestParams {
+            text: Some("候補作者".to_string()),
+            limit: Some(2),
+        })
+        .unwrap();
+    assert!(exact.items.len() <= 2);
+    assert_eq!(
+        exact.items.first().map(|item| item.kind.as_str()),
+        Some("author")
+    );
+    assert!(exact.items.first().is_some_and(|item| item.exact_match));
+}
+
+#[test]
+fn exact_author_intent_excludes_other_authors_that_only_mention_the_name() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let first = insert_download(
+        &db,
+        &storage,
+        "exact-author-1",
+        "作者本人の一作目",
+        "明確な作者名",
+        &["創作"],
+        "本文",
+    );
+    let second = insert_download(
+        &db,
+        &storage,
+        "exact-author-2",
+        "作者本人の二作目",
+        "明確な作者名",
+        &["創作"],
+        "本文",
+    );
+    insert_download(
+        &db,
+        &storage,
+        "other-author",
+        "言及だけの作品",
+        "別の作者",
+        &["評論"],
+        "本文で明確な作者名について触れている",
+    );
+
+    let result = db.search_downloads_v2(&params("明確な作者名")).unwrap();
+    let ids = result
+        .items
+        .iter()
+        .map(|item| item.id)
+        .collect::<HashSet<_>>();
+    assert_eq!(ids, HashSet::from([first, second]));
+    assert_eq!(result.search_meta.engine, "sqlite-exact-entity");
+    let intent = result.search_meta.exact_entity.unwrap();
+    assert_eq!(intent.kind, "author");
+    assert!(intent.strict);
+    assert!(result
+        .search_meta
+        .explanations
+        .iter()
+        .any(|line| line.contains("関係する作品だけ")));
+}
+
+#[test]
+fn series_token_filters_by_series_relation() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+
+    let in_series = insert_download(
+        &db,
+        &storage,
+        "series-1",
+        "シリーズ内作品",
+        "作者A",
+        &["連載"],
+        "本文",
+    );
+    let outside = insert_download(
+        &db,
+        &storage,
+        "series-2",
+        "シリーズ外作品",
+        "作者B",
+        &["読切"],
+        "本文",
+    );
+    db.upsert_download_series(in_series, "pixiv", "s-100", "構造化シリーズ", Some(1))
+        .unwrap();
+
+    let result = db
+        .search_downloads_v2(&params("series:pixiv:s-100"))
+        .unwrap();
+    assert_eq!(
+        result.items.iter().map(|dl| dl.id).collect::<Vec<_>>(),
+        vec![in_series]
+    );
+    assert!(!result.items.iter().any(|dl| dl.id == outside));
+
+    let by_title = db
+        .search_downloads_v2(&params("series:\"構造化シリーズ\""))
+        .unwrap();
+    assert_eq!(
+        by_title.items.iter().map(|dl| dl.id).collect::<Vec<_>>(),
+        vec![in_series]
+    );
+
+    let legacy_suggestion_value = db.search_downloads_v2(&params("pixiv:s-100")).unwrap();
+    assert_eq!(
+        legacy_suggestion_value
+            .items
+            .iter()
+            .map(|dl| dl.id)
+            .collect::<Vec<_>>(),
+        vec![in_series]
+    );
+
+    let exact_title = db.search_downloads_v2(&params("構造化シリーズ")).unwrap();
+    assert_eq!(
+        exact_title.items.iter().map(|dl| dl.id).collect::<Vec<_>>(),
+        vec![in_series]
+    );
+    assert_eq!(
+        exact_title
+            .search_meta
+            .exact_entity
+            .as_ref()
+            .map(|intent| intent.kind.as_str()),
+        Some("series")
+    );
+
+    let suggestions = db
+        .search_suggest(&SearchSuggestParams {
+            text: Some("構造化".to_string()),
+            limit: Some(10),
+        })
+        .unwrap();
+    assert!(suggestions.items.iter().any(|item| {
+        item.kind == "series"
+            && item.label == "構造化シリーズ"
+            && item.value == "pixiv:s-100"
+            && item.source.as_deref() == Some("pixiv")
+            && item.source_key.as_deref() == Some("s-100")
+    }));
+}
+
+#[test]
+fn structured_series_and_date_filters_are_applied_to_library_results() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+
+    let serialized = insert_download(
+        &db,
+        &storage,
+        "structured-filter-series",
+        "連載作品",
+        "作者A",
+        &["連載"],
+        "本文",
+    );
+    let standalone_in_range = insert_download(
+        &db,
+        &storage,
+        "structured-filter-standalone-new",
+        "新しい単発作品",
+        "作者B",
+        &["読切"],
+        "本文",
+    );
+    let standalone_outside_range = insert_download(
+        &db,
+        &storage,
+        "structured-filter-standalone-old",
+        "古い単発作品",
+        "作者C",
+        &["読切"],
+        "本文",
+    );
+    db.upsert_download_series(serialized, "pixiv", "filter-series", "連作", Some(1))
+        .unwrap();
+
+    {
+        let conn = db.conn.lock().unwrap();
+        for (id, created_at, updated_at) in [
+            (serialized, "2026-03-15", "2026-07-10"),
+            (standalone_in_range, "2026-06-20", "2026-08-05"),
+            (standalone_outside_range, "2025-12-31", "2026-01-01"),
+        ] {
+            conn.execute(
+                "UPDATE downloads
+                 SET source_created_at = ?1, source_updated_at = ?2
+                 WHERE id = ?3",
+                params![created_at, updated_at, id],
+            )
+            .unwrap();
+        }
+    }
+
+    let mut in_series = v2_params(None, 20, None);
+    in_series.series_filter = Some("in_series".to_string());
+    assert_eq!(
+        db.search_downloads_v2(&in_series)
+            .unwrap()
+            .items
+            .iter()
+            .map(|item| item.id)
+            .collect::<Vec<_>>(),
+        vec![serialized]
+    );
+
+    let mut standalone = v2_params(None, 20, None);
+    standalone.series_filter = Some("standalone".to_string());
+    assert_eq!(
+        db.search_downloads_v2(&standalone)
+            .unwrap()
+            .items
+            .iter()
+            .map(|item| item.id)
+            .collect::<HashSet<_>>(),
+        HashSet::from([standalone_in_range, standalone_outside_range])
+    );
+
+    let mut created_in_range = v2_params(None, 20, None);
+    created_in_range.date_field = Some("source_created_at".to_string());
+    created_in_range.date_from = Some("2026-01-01".to_string());
+    created_in_range.date_to = Some("2026-06-30".to_string());
+    assert_eq!(
+        db.search_downloads_v2(&created_in_range)
+            .unwrap()
+            .items
+            .iter()
+            .map(|item| item.id)
+            .collect::<HashSet<_>>(),
+        HashSet::from([serialized, standalone_in_range])
+    );
+
+    let mut updated_from = v2_params(None, 20, None);
+    updated_from.date_field = Some("source_updated_at".to_string());
+    updated_from.date_from = Some("2026-08-01".to_string());
+    assert_eq!(
+        db.search_downloads_v2(&updated_from)
+            .unwrap()
+            .items
+            .iter()
+            .map(|item| item.id)
+            .collect::<Vec<_>>(),
+        vec![standalone_in_range]
+    );
+}
+
+#[test]
+fn revision_edit_and_cover_filters_are_applied_to_library_results() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+
+    let revised = insert_download(
+        &db,
+        &storage,
+        "state-filter-revised",
+        "改稿済み作品",
+        "作者A",
+        &["改稿"],
+        "本文",
+    );
+    let first_version = insert_download(
+        &db,
+        &storage,
+        "state-filter-first",
+        "初版作品",
+        "作者B",
+        &["初版"],
+        "本文",
+    );
+
+    {
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE downloads
+             SET current_version = 3, cover_path = 'covers/revised.jpg',
+                 asset_count = 8, file_size_bytes = 10485760
+             WHERE id = ?1",
+            params![revised],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE downloads SET asset_count = 1, file_size_bytes = 1048576 WHERE id = ?1",
+            params![first_version],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO work_edit_revisions (download_id, base_version, status, title)
+             VALUES (?1, 3, 'active', '手元で編集した題名')",
+            params![revised],
+        )
+        .unwrap();
+    }
+
+    for (field, value, expected) in [
+        ("revision", "revised", revised),
+        ("revision", "first_version", first_version),
+        ("edit", "edited", revised),
+        ("edit", "unedited", first_version),
+        ("cover", "has_cover", revised),
+        ("cover", "no_cover", first_version),
+    ] {
+        let mut search = v2_params(None, 20, None);
+        match field {
+            "revision" => search.revision_filter = Some(value.to_string()),
+            "edit" => search.edit_filter = Some(value.to_string()),
+            "cover" => search.cover_filter = Some(value.to_string()),
+            _ => unreachable!(),
+        }
+        assert_eq!(
+            db.search_downloads_v2(&search)
+                .unwrap()
+                .items
+                .iter()
+                .map(|item| item.id)
+                .collect::<Vec<_>>(),
+            vec![expected],
+            "{field}={value}"
+        );
+    }
+
+    let mut numeric = v2_params(None, 20, None);
+    numeric.min_asset_count = Some(5);
+    numeric.max_file_size_bytes = Some(12 * 1024 * 1024);
+    assert_eq!(
+        db.search_downloads_v2(&numeric)
+            .unwrap()
+            .items
+            .iter()
+            .map(|item| item.id)
+            .collect::<Vec<_>>(),
+        vec![revised]
+    );
+
+    numeric.min_asset_count = None;
+    numeric.max_asset_count = Some(2);
+    numeric.max_file_size_bytes = Some(2 * 1024 * 1024);
+    assert_eq!(
+        db.search_downloads_v2(&numeric)
+            .unwrap()
+            .items
+            .iter()
+            .map(|item| item.id)
+            .collect::<Vec<_>>(),
+        vec![first_version]
+    );
+}
+
+#[test]
+fn japanese_reading_kana_and_romaji_match_same_work() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+
+    let target = insert_download(
+        &db,
+        &storage,
+        "jp-reading-1",
+        "小説テスト作品",
+        "作者A",
+        &["物語"],
+        "本文にも小説という語を含みます。",
+    );
+
+    for query in ["てすと", "テスト", "tesuto", "しょうせつ", "shousetsu"] {
+        let result = db.search_downloads_v2(&params(query)).unwrap();
+        assert!(
+            result.items.iter().any(|dl| dl.id == target),
+            "query {query} should match the target"
+        );
+    }
+
+    let romaji = db.search_downloads_v2(&params("shousetsu")).unwrap();
+    let target_row = romaji.items.iter().find(|dl| dl.id == target).unwrap();
+    assert!(target_row.score_reasons.iter().any(|reason| {
+        matches!(
+            reason.match_type.as_str(),
+            "exact" | "reading" | "romaji" | "synonym"
+        )
+    }));
+    assert!(!target_row
+        .score_reasons
+        .iter()
+        .any(|reason| reason.match_type == "semantic"));
+    assert!(!target_row.match_highlights.is_empty());
+}
+
+#[test]
+fn smart_search_does_not_add_semantic_reasons() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+
+    let target = insert_download(
+        &db,
+        &storage,
+        "smart-no-semantic-1",
+        "小説テスト作品",
+        "作者A",
+        &["物語"],
+        "本文にも小説という語を含みます。",
+    );
+    let result = db.search_downloads_v2(&params("novel")).unwrap();
+    let target_row = result.items.iter().find(|dl| dl.id == target).unwrap();
+
+    assert_eq!(result.search_meta.engine, "tantivy-lexical");
+    assert!(!target_row
+        .score_reasons
+        .iter()
+        .any(|reason| reason.match_type == "semantic"));
+    assert!(!target_row
+        .match_highlights
+        .iter()
+        .any(|highlight| highlight.match_type.as_deref() == Some("semantic")));
+}
+
+/// Opens a copy of a real library and reports what survived.
+///
+/// Schema recognition decides between "migrate in place" and "archive and
+/// start empty", and the tests around it necessarily use databases this
+/// code just created. This one can be pointed at a library saved by an
+/// earlier release, which is the case that actually goes wrong.
+#[test]
+#[ignore = "set PIEP_VERIFY_DB to a real library file"]
+fn opens_a_real_library_without_resetting_it() {
+    let Ok(source) = std::env::var("PIEP_VERIFY_DB") else {
+        panic!("set PIEP_VERIFY_DB to the database to check");
+    };
+    let source = PathBuf::from(source);
+    let (_temp, root, storage) = temp_paths();
+    let copy = root.join("piep.db");
+    {
+        let conn = Connection::open_with_flags(&source, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .expect("open source read-only");
+        // Copy the committed SQLite snapshot, including data still in WAL.
+        // Copying piep.db alone can silently drop the most recent works.
+        conn.execute("VACUUM INTO ?1", [copy.to_string_lossy().as_ref()])
+            .expect("snapshot the library including its WAL");
+    }
+    let before: i64 = Connection::open_with_flags(&copy, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM downloads", [], |row| row.get(0))
+        .unwrap();
+
+    let db = Database::open(&copy, &storage).expect("open the copied library");
+    let after = db.get_search_index_status().unwrap();
+    println!(
+        "works before: {before} | after opening: {} | pending index: {}",
+        after.total_downloads, after.pending_downloads
+    );
+    assert_eq!(
+        after.total_downloads, before,
+        "opening a saved library must never discard its works"
+    );
+    assert!(before > 0, "the source library should not be empty");
+}
+
+#[test]
+fn index_status_is_cached_without_going_stale_across_changes() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    assert_eq!(db.get_search_index_status().unwrap().total_downloads, 0);
+
+    // Reading it again immediately is served from the cache, and adding a
+    // work has to drop that cache: a count the screens keep showing after
+    // the library changed is worse than measuring it again.
+    insert_download_unindexed(
+        &db,
+        &storage,
+        "cache-1",
+        "追加された作品",
+        "作者",
+        &["cache"],
+        "本文",
+    );
+    let after_insert = db.get_search_index_status().unwrap();
+    assert_eq!(after_insert.total_downloads, 1);
+    assert_eq!(after_insert.pending_downloads, 1);
+
+    db.reindex_download(
+        db.get_download_by_source("pixiv", "cache-1")
+            .unwrap()
+            .unwrap()
+            .id,
+    )
+    .unwrap();
+    let after_index = db.get_search_index_status().unwrap();
+    assert_eq!(after_index.pending_downloads, 0);
+    assert!(after_index.is_complete);
+}
+
+#[test]
+fn semantic_completion_requires_every_current_document() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    db.set_semantic_index_enabled(true).unwrap();
+    let first = insert_download_unindexed(
+        &db,
+        &storage,
+        "coverage-1",
+        "索引済み作品",
+        "作者",
+        &[],
+        "最初の本文",
+    );
+    let second = insert_download_unindexed(
+        &db,
+        &storage,
+        "coverage-2",
+        "未索引作品",
+        "作者",
+        &[],
+        "次の本文",
+    );
+
+    db.reindex_download(first).unwrap();
+    let partial = db.get_search_index_status().unwrap();
+    assert_eq!(partial.semantic_indexed_downloads, 1);
+    assert_eq!(partial.semantic_pending_downloads, 1);
+
+    db.reindex_download(second).unwrap();
+    let complete = db.get_search_index_status().unwrap();
+    assert_eq!(complete.semantic_indexed_downloads, 2);
+    assert_eq!(complete.semantic_pending_downloads, 0);
+}
+
+#[test]
+fn an_author_page_can_show_their_series_and_tags_and_drill_into_both() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+
+    let first = insert_download(
+        &db,
+        &storage,
+        "auth-1",
+        "序章",
+        "青葉しおり",
+        &["ファンタジー", "長編"],
+        "本文",
+    );
+    let second = insert_download(
+        &db,
+        &storage,
+        "auth-2",
+        "第二話",
+        "青葉しおり",
+        &["ファンタジー"],
+        "本文",
+    );
+    let standalone = insert_download(
+        &db,
+        &storage,
+        "auth-3",
+        "読み切り",
+        "青葉しおり",
+        &["短編"],
+        "本文",
+    );
+    let other = insert_download(
+        &db,
+        &storage,
+        "auth-4",
+        "別作者の話",
+        "別の人",
+        &["ファンタジー"],
+        "本文",
+    );
+    db.upsert_download_person(first, "pixiv", "aoba", "author", "青葉しおり")
+        .unwrap();
+    db.upsert_download_person(second, "pixiv", "aoba", "author", "青葉しおり")
+        .unwrap();
+    db.upsert_download_person(standalone, "pixiv", "aoba", "author", "青葉しおり")
+        .unwrap();
+    db.upsert_download_person(other, "pixiv", "hoka", "author", "別の人")
+        .unwrap();
+    db.upsert_download_series(first, "pixiv", "s1", "季節の栞", Some(1))
+        .unwrap();
+    db.upsert_download_series(second, "pixiv", "s1", "季節の栞", Some(2))
+        .unwrap();
+
+    let series = db.list_entity_series("pixiv", "aoba", 20).unwrap();
+    assert_eq!(series.len(), 1, "only the series this author appears in");
+    assert_eq!(series[0].display_name, "季節の栞");
+    assert_eq!(series[0].count, 2);
+
+    let tags = db.list_entity_tags("person", "pixiv", "aoba", 20).unwrap();
+    let named = tags
+        .iter()
+        .map(|t| (t.name.as_str(), t.count))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        named,
+        vec![("ファンタジー", 2), ("短編", 1), ("長編", 1)],
+        "the author's own tags, most used first, without the other author's"
+    );
+
+    // Drilling in: the author's works carrying one of their tags. Author and
+    // tag filters have to compose, or a tag on this page cannot be followed.
+    let mut params = v2_params(None, 20, None);
+    params.person_source = Some("pixiv".to_string());
+    params.person_key = Some("aoba".to_string());
+    params.tags_include = Some(vec!["ファンタジー".to_string()]);
+    let page = db.search_downloads_v2(&params).unwrap();
+    let ids = page.items.iter().map(|item| item.id).collect::<Vec<_>>();
+    assert_eq!(ids.len(), 2);
+    assert!(ids.contains(&first) && ids.contains(&second));
+    assert!(
+        !ids.contains(&other),
+        "another author's work with the same tag must not appear"
+    );
+
+    // An author with nothing recorded is an empty page, not an error.
+    assert!(db
+        .list_entity_series("pixiv", "unknown", 20)
+        .unwrap()
+        .is_empty());
+    assert!(db
+        .list_entity_tags("person", "pixiv", "unknown", 20)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn entity_series_keyset_has_no_gaps_duplicates_or_same_name_instability() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    assert!(db
+        .list_entity_series_paged("", "author", None, None, None, 20, None)
+        .is_err());
+    assert!(db
+        .list_entity_series_paged(&"s".repeat(65), "author", None, None, None, 20, None)
+        .is_err());
+    assert!(db
+        .list_entity_series_paged("pixiv", &"k".repeat(1_025), None, None, None, 20, None)
+        .is_err());
+    assert!(db
+        .list_entity_series_paged(
+            "pixiv",
+            "author",
+            Some(&"検".repeat(201)),
+            None,
+            None,
+            20,
+            None,
+        )
+        .is_err());
+    assert!(db
+        .list_entity_series_paged(
+            "pixiv",
+            "author",
+            None,
+            None,
+            None,
+            20,
+            Some(&"c".repeat(64 * 1024 + 1)),
+        )
+        .is_err());
+    assert!(db
+        .list_entity_series_paged("pixiv", "author", None, None, None, 20, Some("malformed"))
+        .is_err());
+
+    let add =
+        |source_id: &str, series_source: &str, series_key: &str, title: &str, created_at: &str| {
+            let id = insert_download_unindexed(
+                &db,
+                &storage,
+                source_id,
+                source_id,
+                "ページ作者",
+                &[],
+                "本文",
+            );
+            db.upsert_download_person(id, "pixiv", "paged-author", "author", "ページ作者")
+                .unwrap();
+            db.upsert_download_series(id, series_source, series_key, title, Some(1))
+                .unwrap();
+            db.conn
+                .lock()
+                .unwrap()
+                .execute(
+                    "UPDATE downloads
+                     SET downloaded_at = ?1, source_created_at = ?1
+                     WHERE id = ?2",
+                    params![created_at, id],
+                )
+                .unwrap();
+            id
+        };
+
+    add(
+        "count-a",
+        "pixiv",
+        "counted",
+        "最多",
+        "2026-05-01T00:00:00Z",
+    );
+    add(
+        "count-b",
+        "pixiv",
+        "counted",
+        "最多",
+        "2026-05-01T00:00:00Z",
+    );
+    add("alpha", "pixiv", "alpha", "Alpha", "2026-05-01T00:00:00Z");
+    add("tie-f", "fanbox", "same", "同名", "2026-05-01T00:00:00Z");
+    add("tie-p1", "pixiv", "same-1", "同名", "2026-05-01T00:00:00Z");
+    add("tie-p2", "pixiv", "same-2", "同名", "2026-05-01T00:00:00Z");
+    add("older", "pixiv", "older", "旧作", "2025-01-01T00:00:00Z");
+
+    let mut cursor = None;
+    let mut identities = Vec::new();
+    let mut first_cursor = None;
+    loop {
+        let page = db
+            .list_entity_series_paged(
+                "pixiv",
+                "paged-author",
+                None,
+                None,
+                None,
+                2,
+                cursor.as_deref(),
+            )
+            .unwrap();
+        assert_eq!(page.total, 6);
+        identities.extend(
+            page.items
+                .iter()
+                .map(|item| (item.source.clone(), item.source_key.clone())),
+        );
+        if first_cursor.is_none() {
+            first_cursor = page.next_cursor.clone();
+        }
+        cursor = page.next_cursor;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    assert_eq!(
+        identities,
+        vec![
+            ("pixiv".to_string(), "counted".to_string()),
+            ("pixiv".to_string(), "alpha".to_string()),
+            ("fanbox".to_string(), "same".to_string()),
+            ("pixiv".to_string(), "same-1".to_string()),
+            ("pixiv".to_string(), "same-2".to_string()),
+            ("pixiv".to_string(), "older".to_string()),
+        ]
+    );
+    assert_eq!(identities.iter().collect::<HashSet<_>>().len(), 6);
+
+    let fewest_first = db
+        .list_entity_series_paged(
+            "pixiv",
+            "paged-author",
+            None,
+            Some("work_count"),
+            Some("asc"),
+            20,
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        fewest_first
+            .items
+            .last()
+            .map(|item| item.source_key.as_str()),
+        Some("counted"),
+        "作者詳細でも作品数の昇順が全シリーズへ効く"
+    );
+    let ascending_cursor = db
+        .list_entity_series_paged(
+            "pixiv",
+            "paged-author",
+            None,
+            Some("work_count"),
+            Some("asc"),
+            2,
+            None,
+        )
+        .unwrap()
+        .next_cursor;
+    assert!(
+        db.list_entity_series_paged(
+            "pixiv",
+            "paged-author",
+            None,
+            Some("work_count"),
+            Some("desc"),
+            2,
+            ascending_cursor.as_deref(),
+        )
+        .is_err(),
+        "別の並び順のカーソルを混用できない"
+    );
+
+    let filtered = db
+        .list_entity_series_paged("pixiv", "paged-author", Some("同名"), None, None, 2, None)
+        .unwrap();
+    assert_eq!(filtered.total, 3);
+    assert_eq!(filtered.items.len(), 2);
+    assert!(db
+        .list_entity_series_paged(
+            "pixiv",
+            "paged-author",
+            Some("別query"),
+            None,
+            None,
+            2,
+            first_cursor.as_deref(),
+        )
+        .is_err());
+
+    add("mutation", "pixiv", "new", "追加", "2027-01-01T00:00:00Z");
+    assert!(db
+        .list_entity_series_paged(
+            "pixiv",
+            "paged-author",
+            None,
+            None,
+            None,
+            2,
+            first_cursor.as_deref(),
+        )
+        .is_err());
+}
+
+#[test]
+#[ignore = "performance smoke test for a prolific author's series"]
+fn entity_series_paging_stays_fast_at_twenty_thousand() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let seeded = std::env::var("PIEP_BENCH_ENTITY_SERIES")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(20_000);
+    {
+        let mut conn = db.conn.lock().unwrap();
+        let tx = conn.transaction().unwrap();
+        {
+            let mut download = tx
+                .prepare(
+                    "INSERT INTO downloads (
+                            source, source_id, title, author_name, author_id,
+                            content_type, json_path, downloaded_at, source_created_at
+                         ) VALUES ('pixiv', ?1, ?2, '大量作者', 'large-author',
+                                   'novel', 'unused.json', ?3, ?3)",
+                )
+                .unwrap();
+            let mut person = tx
+                .prepare(
+                    "INSERT INTO download_people (
+                            download_id, person_source, person_key, role, display_name
+                         ) VALUES (?1, 'pixiv', 'large-author', 'author', '大量作者')",
+                )
+                .unwrap();
+            let mut series = tx
+                .prepare(
+                    "INSERT INTO series (source, source_key, title)
+                         VALUES ('pixiv', ?1, ?2)",
+                )
+                .unwrap();
+            let mut relation = tx
+                .prepare(
+                    "INSERT INTO download_series (
+                            download_id, series_source, series_key, title, content_order
+                         ) VALUES (?1, 'pixiv', ?2, ?3, 1)",
+                )
+                .unwrap();
+            for index in 0..seeded {
+                let key = format!("series-{index:05}");
+                let title = format!("シリーズ {index:05}");
+                let timestamp =
+                    format!("2026-{:02}-{:02}T00:00:00Z", index % 12 + 1, index % 27 + 1);
+                download.execute(params![key, title, timestamp]).unwrap();
+                let id = tx.last_insert_rowid();
+                person.execute(params![id]).unwrap();
+                series.execute(params![key, title]).unwrap();
+                relation.execute(params![id, key, title]).unwrap();
+            }
+        }
+        tx.commit().unwrap();
+    }
+
+    let started = Instant::now();
+    let first = db
+        .list_entity_series_paged("pixiv", "large-author", None, None, None, 200, None)
+        .unwrap();
+    let first_elapsed = started.elapsed();
+    assert_eq!(first.total, seeded as i64);
+    assert_eq!(first.items.len(), seeded.min(200));
+
+    let mut cursor = first.next_cursor;
+    let mut deepest = Duration::ZERO;
+    for _ in 0..50 {
+        let Some(current) = cursor else { break };
+        let started = Instant::now();
+        let page = db
+            .list_entity_series_paged(
+                "pixiv",
+                "large-author",
+                None,
+                None,
+                None,
+                200,
+                Some(&current),
+            )
+            .unwrap();
+        deepest = deepest.max(started.elapsed());
+        cursor = page.next_cursor;
+    }
+    eprintln!(
+        "{seeded} entity series: first {:?}, deepest {:?}",
+        first_elapsed, deepest
+    );
+    assert!(first_elapsed < Duration::from_secs(1));
+    assert!(deepest < Duration::from_secs(1));
+}
+
+#[test]
+fn numbered_pages_work_for_an_ordering_and_are_refused_for_relevance() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    for index in 0..7 {
+        insert_download(
+            &db,
+            &storage,
+            &format!("page-{index}"),
+            &format!("作品{index}"),
+            "作者",
+            &["頁"],
+            "本文",
+        );
+    }
+
+    let page_of = |offset: i64| {
+        let mut params = v2_params(None, 3, None);
+        params.sort_by = Some("title".to_string());
+        params.sort_order = Some("asc".to_string());
+        params.offset = Some(offset);
+        db.search_downloads_v2(&params)
+            .unwrap()
+            .items
+            .iter()
+            .map(|item| item.title.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(page_of(0), vec!["作品0", "作品1", "作品2"]);
+    assert_eq!(
+        page_of(3),
+        vec!["作品3", "作品4", "作品5"],
+        "the third page, without walking to it"
+    );
+    assert_eq!(page_of(6), vec!["作品6"]);
+    assert!(
+        page_of(99).is_empty(),
+        "past the end is empty, not an error"
+    );
+
+    // Relevance has no nth page: results are walked with a score cursor, so
+    // an offset into them would not be the page that was asked for.
+    let mut relevance = params("作品");
+    relevance.offset = Some(3);
+    let first = relevance.clone();
+    let mut without = first.clone();
+    without.offset = None;
+    assert_eq!(
+        db.search_downloads_v2(&relevance).unwrap().items.len(),
+        db.search_downloads_v2(&without).unwrap().items.len(),
+        "an offset must be ignored rather than silently shifting a relevance page"
+    );
+}
+
+#[test]
+fn shelf_counts_ignore_reading_positions_for_works_that_no_longer_exist() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let first = insert_download(&db, &storage, "shelf-1", "一作目", "作者", &["棚"], "本文");
+    let second = insert_download(&db, &storage, "shelf-2", "二作目", "作者", &["棚"], "本文");
+    insert_download(&db, &storage, "shelf-3", "三作目", "作者", &["棚"], "本文");
+    db.set_favorite(first, true).unwrap();
+    db.set_watch_updates(second, true).unwrap();
+
+    let empty = db.get_library_shelf_counts(&[]).unwrap();
+    assert_eq!(
+        (empty.total, empty.favorite, empty.watched, empty.reading),
+        (3, 1, 1, 0)
+    );
+
+    // Reading positions are per device and nothing prunes them, so a shelf
+    // must count works that exist, not entries that were left behind.
+    let counts = db
+        .get_library_shelf_counts(&[first, second, 999_999, first])
+        .unwrap();
+    assert_eq!(
+        counts.reading, 2,
+        "a deleted work and a duplicate must not be counted"
+    );
+
+    // The same list used as a filter returns exactly those works.
+    let mut params = v2_params(None, 20, None);
+    params.ids_include = Some(vec![first, 999_999]);
+    let page = db.search_downloads_v2(&params).unwrap();
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items[0].id, first);
+
+    // An empty membership list means an empty shelf, never the whole library.
+    let mut none = v2_params(None, 20, None);
+    none.ids_include = Some(Vec::new());
+    assert_eq!(db.search_downloads_v2(&none).unwrap().items.len(), 0);
+}
+
+#[test]
+fn saved_searches_survive_reuse_of_a_name_and_reject_nonsense() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+
+    let created = db
+        .upsert_saved_search(&SavedSearchInput {
+            id: None,
+            name: "  長編ファンタジー  ".to_string(),
+            query: Some("tag:ファンタジー".to_string()),
+            params_json: "{\"tagsInclude\":[\"ファンタジー\"]}".to_string(),
+        })
+        .unwrap();
+    assert_eq!(
+        created.name, "長編ファンタジー",
+        "the name is stored trimmed"
+    );
+
+    // Saving again under the same name replaces that search. The unique
+    // constraint must not surface as an error the reader has to decode.
+    let replaced = db
+        .upsert_saved_search(&SavedSearchInput {
+            id: None,
+            name: "長編ファンタジー".to_string(),
+            query: Some("tag:ファンタジー -短編".to_string()),
+            params_json: "{\"tagsExclude\":[\"短編\"]}".to_string(),
+        })
+        .unwrap();
+    assert_eq!(replaced.id, created.id);
+    assert_eq!(db.list_saved_searches().unwrap().len(), 1);
+    assert_eq!(replaced.query.as_deref(), Some("tag:ファンタジー -短編"));
+
+    assert!(
+        db.upsert_saved_search(&SavedSearchInput {
+            id: None,
+            name: "   ".to_string(),
+            query: None,
+            params_json: "{}".to_string(),
+        })
+        .is_err(),
+        "a blank name is not a search anyone can find again"
+    );
+    assert!(
+        db.upsert_saved_search(&SavedSearchInput {
+            id: None,
+            name: "壊れた条件".to_string(),
+            query: None,
+            params_json: "{not json".to_string(),
+        })
+        .is_err(),
+        "conditions that cannot be read back must not be stored"
+    );
+    assert!(
+        db.upsert_saved_search(&SavedSearchInput {
+            id: Some(4_242),
+            name: "存在しない".to_string(),
+            query: None,
+            params_json: "{}".to_string(),
+        })
+        .is_err(),
+        "updating a search that was deleted elsewhere must say so"
+    );
+
+    assert!(db.delete_saved_search(created.id).unwrap());
+    assert!(
+        !db.delete_saved_search(created.id).unwrap(),
+        "a second delete is not an error"
+    );
+    assert!(db.list_saved_searches().unwrap().is_empty());
+}
+
+#[test]
+fn saved_searches_keep_their_order_and_stop_at_the_limit() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    for index in 0..MAX_SAVED_SEARCHES {
+        db.upsert_saved_search(&SavedSearchInput {
+            id: None,
+            name: format!("検索{index:03}"),
+            query: None,
+            params_json: "{}".to_string(),
+        })
+        .unwrap();
+    }
+    let listed = db.list_saved_searches().unwrap();
+    assert_eq!(listed.len() as i64, MAX_SAVED_SEARCHES);
+    assert_eq!(
+        listed[0].name, "検索000",
+        "the sidebar order must be stable"
+    );
+    assert_eq!(listed[listed.len() - 1].name, "検索099");
+
+    let overflow = db.upsert_saved_search(&SavedSearchInput {
+        id: None,
+        name: "一件多い".to_string(),
+        query: None,
+        params_json: "{}".to_string(),
+    });
+    assert!(
+        overflow.is_err(),
+        "the limit must be refused, not silently applied"
+    );
+    // Replacing an existing one still works when the list is full.
+    assert!(db
+        .upsert_saved_search(&SavedSearchInput {
+            id: None,
+            name: "検索000".to_string(),
+            query: Some("更新".to_string()),
+            params_json: "{}".to_string(),
+        })
+        .is_ok());
+}
+
+#[test]
+fn synonyms_do_not_match_every_work_through_its_source_url() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+
+    // Every pixiv URL is .../novel/show.php?id=N, and the synonym table
+    // expands 物語 to "novel". Neither of these works mentions 物語.
+    insert_download(
+        &db,
+        &storage,
+        "111",
+        "海辺の記録",
+        "作者A",
+        &["日常"],
+        "静かな本文です",
+    );
+    insert_download(
+        &db,
+        &storage,
+        "222",
+        "灯台の手紙",
+        "作者B",
+        &["日常"],
+        "別の本文です",
+    );
+    let about = insert_download(
+        &db,
+        &storage,
+        "333",
+        "夜明けの物語",
+        "作者C",
+        &["創作"],
+        "本文",
+    );
+
+    let hits = db.search_downloads_v2(&params("物語")).unwrap();
+    let ids = hits.items.iter().map(|item| item.id).collect::<Vec<_>>();
+    assert_eq!(
+        ids,
+        vec![about],
+        "only the work that actually says 物語 should match"
+    );
+
+    // The URL itself is still findable: pasting one has to reach its work.
+    let pasted = db
+        .search_downloads_v2(&params("https://www.pixiv.net/novel/show.php?id=111"))
+        .unwrap();
+    assert!(
+        pasted.items.iter().any(|item| item.source_id == "111"),
+        "a pasted source URL must still find its work"
+    );
+    // As must the bare id, which is what the URL actually identifies.
+    let by_id = db.search_downloads_v2(&params("222")).unwrap();
+    assert!(by_id.items.iter().any(|item| item.source_id == "222"));
+}
+
+#[test]
+fn changing_the_index_format_requeues_the_whole_library() {
+    let (_temp, root, storage) = temp_paths();
+    let db_path = root.join("piep.db");
+    let db = Database::open(&db_path, &storage).unwrap();
+    insert_download(
+        &db,
+        &storage,
+        "fmt-1",
+        "書式変更の作品",
+        "作者",
+        &["書式"],
+        "本文",
+    );
+    assert_eq!(db.get_search_index_status().unwrap().pending_downloads, 0);
+    drop(db);
+
+    // Stand in for a release that changes the on-disk index layout: the
+    // bookkeeping now describes an index the app no longer reads.
+    {
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO search_index_meta (id, index_version, updated_at)
+                 VALUES (1, 'v-previous', '2026-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+    }
+
+    let db = Database::open(&db_path, &storage).unwrap();
+    assert_eq!(
+        db.get_search_index_status().unwrap().pending_downloads,
+        1,
+        "a format change must queue the library for reindexing, not report it as complete"
+    );
+
+    // What the app does at launch: notice the backlog and clear it without
+    // being asked. Nothing here should need a person to press anything.
+    let outcome = db
+        .rebuild_search_index(SearchIndexRebuildOptions::default(), &|| false, |_| {})
+        .unwrap();
+    assert_eq!(outcome.processed, 1);
+    assert!(!outcome.canceled);
+    let status = db.get_search_index_status().unwrap();
+    assert_eq!(status.pending_downloads, 0);
+    assert!(status.is_complete);
+    // And the work is genuinely searchable again, not merely marked done.
+    let found = db.search_downloads_v2(&params("書式変更")).unwrap();
+    assert_eq!(found.items.len(), 1);
+}
+
+#[test]
+fn sorted_search_orders_matches_by_column_and_pages_without_gaps() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+
+    // Titles are deliberately out of insertion order so a title sort cannot
+    // pass by accident. The shared token avoids the synonym table, which
+    // would otherwise pull in unrelated works through their source URL.
+    for (source_id, title) in [
+        ("sorted-1", "さくら花暦"),
+        ("sorted-2", "あおぞら花暦"),
+        ("sorted-3", "なのはな花暦"),
+        ("sorted-4", "かえで花暦"),
+        ("sorted-5", "たんぽぽ花暦"),
+    ] {
+        insert_download(
+            &db,
+            &storage,
+            source_id,
+            title,
+            "並び替え作者",
+            &["並替"],
+            "共通の本文です",
+        );
+    }
+    // A work that must never appear: it does not match the query.
+    insert_download(
+        &db,
+        &storage,
+        "sorted-x",
+        "無関係な作品",
+        "別作者",
+        &["他"],
+        "別の本文",
+    );
+
+    let mut sorted = params("花暦");
+    sorted.sort_by = Some("title".to_string());
+    sorted.sort_order = Some("asc".to_string());
+    sorted.limit = Some(2);
+
+    let mut seen = Vec::new();
+    let mut cursor = None;
+    for _ in 0..5 {
+        let mut page_params = sorted.clone();
+        page_params.cursor = cursor.clone();
+        let page = db.search_downloads_v2(&page_params).unwrap();
+        assert_eq!(page.search_meta.engine, "tantivy-sorted");
+        assert_eq!(page.total_estimate, Some(5));
+        seen.extend(page.items.iter().map(|item| item.title.clone()));
+        cursor = page.next_cursor;
+        if cursor.is_none() {
+            break;
+        }
+    }
+
+    assert_eq!(
+        seen,
+        vec![
+            "あおぞら花暦",
+            "かえで花暦",
+            "さくら花暦",
+            "たんぽぽ花暦",
+            "なのはな花暦",
+        ],
+        "every match should appear exactly once, in title order"
+    );
+
+    // Without an explicit sort the same query still ranks by relevance.
+    let relevance = db.search_downloads_v2(&params("花暦")).unwrap();
+    assert_ne!(relevance.search_meta.engine, "tantivy-sorted");
+}
+
+#[test]
+fn sorted_search_respects_library_filters() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let favorite = insert_download(
+        &db,
+        &storage,
+        "filter-1",
+        "対象作品 花暦",
+        "作者",
+        &["絞込"],
+        "本文",
+    );
+    insert_download(
+        &db,
+        &storage,
+        "filter-2",
+        "対象外作品 花暦",
+        "作者",
+        &["絞込"],
+        "本文",
+    );
+    db.set_favorite(favorite, true).unwrap();
+
+    let mut sorted = params("花暦");
+    sorted.sort_by = Some("downloaded_at".to_string());
+    sorted.favorite = Some(true);
+    let page = db.search_downloads_v2(&sorted).unwrap();
+    assert_eq!(page.total_estimate, Some(1));
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items[0].id, favorite);
+}
+
+#[test]
+fn sorted_search_uses_bounded_temp_table_batches_and_carries_total() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    const MATCHES: usize = SORTED_SEARCH_ID_BATCH_SIZE * 2 + 17;
+    for index in 0..MATCHES {
+        insert_download_unindexed(
+            &db,
+            &storage,
+            &format!("streamed-{index:04}"),
+            &format!("流し込み検索 {index:04}"),
+            "作者",
+            &["一時表"],
+            "流し込み検索の本文",
+        );
+    }
+    loop {
+        let status = db.rebuild_search_index_batch(200).unwrap();
+        if status.pending_downloads == 0 {
+            break;
+        }
+    }
+    super::super::tantivy_index::optimize_segments(&storage).unwrap();
+
+    let mut request = params("流し込み検索");
+    request.sort_by = Some("title".to_string());
+    request.sort_order = Some("asc".to_string());
+    request.limit = Some(31);
+    let first = db.search_downloads_v2(&request).unwrap();
+    assert_eq!(first.total_estimate, Some(MATCHES as i64));
+    assert_eq!(first.items.len(), 31);
+    let (_, _, cache_after_first) = db.query_cache_stats();
+
+    let cursor = decode_cursor(first.next_cursor.as_deref()).unwrap();
+    assert_eq!(cursor.total_estimate, Some(MATCHES as i64));
+    request.cursor = first.next_cursor;
+    let second = db.search_downloads_v2(&request).unwrap();
+    assert_eq!(second.total_estimate, Some(MATCHES as i64));
+    assert!(first
+        .items
+        .iter()
+        .all(|left| second.items.iter().all(|right| left.id != right.id)));
+    let (_, _, cache_after_second) = db.query_cache_stats();
+    assert!(cache_after_second.0 > cache_after_first.0);
+
+    insert_download(
+        &db,
+        &storage,
+        "streamed-new",
+        "流し込み検索 新着",
+        "作者",
+        &["一時表"],
+        "流し込み検索の本文",
+    );
+    request.cursor = None;
+    let after_insert = db.search_downloads_v2(&request).unwrap();
+    assert_eq!(after_insert.total_estimate, Some(MATCHES as i64 + 1));
+    let (_, _, cache_after_insert) = db.query_cache_stats();
+    assert!(
+        cache_after_insert.1 > cache_after_second.1,
+        "library/index generation change must rebuild the snapshot"
+    );
+}
+
+#[test]
+fn multi_term_search_requires_each_term() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+
+    let target = insert_download(
+        &db,
+        &storage,
+        "multi-term-1",
+        "alpha beta target",
+        "作者A",
+        &["mixed"],
+        "本文",
+    );
+    let alpha_only = insert_download(
+        &db,
+        &storage,
+        "multi-term-2",
+        "alpha only",
+        "作者B",
+        &["mixed"],
+        "本文",
+    );
+    let beta_only = insert_download(
+        &db,
+        &storage,
+        "multi-term-3",
+        "beta only",
+        "作者C",
+        &["mixed"],
+        "本文",
+    );
+
+    let result = db.search_downloads_v2(&params("alpha beta")).unwrap();
+    assert!(result.items.iter().any(|item| item.id == target));
+    assert!(!result.items.iter().any(|item| item.id == alpha_only));
+    assert!(!result.items.iter().any(|item| item.id == beta_only));
+}
+
+#[test]
+fn semantic_mode_reports_work_level_similarity_without_a_false_body_match() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    db.set_semantic_index_enabled(true).unwrap();
+
+    let target = insert_download(
+        &db,
+        &storage,
+        "semantic-1",
+        "静かな作品",
+        "作者A",
+        &["日常"],
+        "これは長い小説本文です。読者が物語を探すときに本文チャンクで見つかります。",
+    );
+    let mut semantic_params = params("novel");
+    semantic_params.search_mode = Some("semantic".to_string());
+
+    let result = db.search_downloads_v2(&semantic_params).unwrap();
+    let target_row = result.items.iter().find(|dl| dl.id == target).unwrap();
+    assert!(target_row
+        .score_reasons
+        .iter()
+        .any(|reason| reason.match_type == "semantic"));
+    assert!(target_row.match_highlights.iter().any(|highlight| {
+        highlight.match_type.as_deref() == Some("semantic")
+            && highlight.text.contains("個別の一致箇所は特定していません")
+            && highlight.segments.iter().all(|segment| !segment.matched)
+    }));
+}
+
+#[test]
+fn ai_note_reports_when_its_work_input_has_changed() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let id = insert_download_unindexed(
+        &db,
+        &storage,
+        "note-stale-1",
+        "最初の題名",
+        "作者",
+        &["旅"],
+        "雨の駅で別れる本文",
+    );
+    let (work, body) = db.work_facts_with_body(id).unwrap();
+    let input = serde_json::json!({ "work": work, "body": body });
+    let provenance = crate::assist::AssistProvenance {
+        feature_id: crate::assist::FEATURE_WORK_SYNOPSIS.to_string(),
+        prompt_version: crate::assist::current_prompt_version(crate::assist::FEATURE_WORK_SYNOPSIS)
+            .to_string(),
+        model_id: "test-model".to_string(),
+        input_fingerprint: crate::assist::generation_input_fingerprint(
+            crate::assist::FEATURE_WORK_SYNOPSIS,
+            &input,
+        )
+        .unwrap(),
+        config_fingerprint: "test-config".to_string(),
+        created_at: chrono::Utc::now().to_rfc3339(),
+    };
+    db.save_ai_note_with_provenance("work", &id.to_string(), "synopsis", "覚え書き", &provenance)
+        .unwrap();
+    assert!(
+        !db.load_ai_note("work", &id.to_string(), "synopsis")
+            .unwrap()
+            .unwrap()
+            .input_stale
+    );
+
+    db.conn
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE downloads SET title = '変更後の題名' WHERE id = ?1",
+            params![id],
+        )
+        .unwrap();
+    assert!(
+        db.load_ai_note("work", &id.to_string(), "synopsis")
+            .unwrap()
+            .unwrap()
+            .input_stale
+    );
+}
+
+#[test]
+fn semantic_feature_switch_controls_incremental_indexing_and_removes_vectors() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    assert!(!db.get_search_index_status().unwrap().semantic_enabled);
+
+    insert_download(
+        &db,
+        &storage,
+        "semantic-disabled",
+        "無効時の作品",
+        "作者",
+        &[],
+        "無効ならモデルにも作品索引にも渡さない本文",
+    );
+    assert_eq!(
+        crate::database::semantic_index::status(&storage).indexed_works,
+        0
+    );
+
+    db.set_semantic_index_enabled(true).unwrap();
+    insert_download(
+        &db,
+        &storage,
+        "semantic-enabled",
+        "有効時の作品",
+        "作者",
+        &[],
+        "有効なら個別保存でも追随する本文",
+    );
+    assert_eq!(
+        crate::database::semantic_index::status(&storage).indexed_works,
+        1
+    );
+
+    let disabled = db.set_semantic_index_enabled(false).unwrap();
+    assert!(!disabled.semantic_enabled);
+    assert_eq!(disabled.semantic_indexed_downloads, 0);
+    assert_eq!(
+        crate::database::semantic_index::status(&storage).indexed_works,
+        0
+    );
+}
+
+#[test]
+#[ignore = "performance smoke test for large-library browsing"]
+fn library_browsing_stays_fast_on_a_large_library() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+
+    let seeded: usize = std::env::var("PIEP_BENCH_WORKS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(20_000);
+    let metadata_only =
+        seeded >= 250_000 || std::env::var("PIEP_BENCH_METADATA_ONLY").as_deref() == Ok("1");
+    let seed_started = Instant::now();
+    if metadata_only {
+        seed_metadata_only_library(&db, seeded);
+    } else {
+        for index in 0..seeded {
+            insert_download_unindexed(
+                &db,
+                &storage,
+                &format!("scale-{}", index),
+                &format!("蔵書 {:05}", index),
+                &format!("作者 {:03}", index % 400),
+                &[&format!("tag{}", index % 30)],
+                "大規模ライブラリの一覧性能を確認するための本文です。",
+            );
+        }
+    }
+    let seed_elapsed = seed_started.elapsed();
+    let database_bytes = fs::metadata(root.join("piep.db"))
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
+
+    // The library browses with an empty query, which is the keyset path.
+    let mut first = v2_params(None, 60, None);
+    first.projection = Some("libraryGallery".to_string());
+    let started = Instant::now();
+    let page1 = db.search_downloads_v2(&first).unwrap();
+    let first_elapsed = started.elapsed();
+    assert_eq!(page1.items.len(), 60);
+    assert_eq!(page1.total_estimate, Some(seeded as i64));
+    assert!(
+        page1.next_cursor.is_some(),
+        "a large library must expose more pages"
+    );
+    let started = Instant::now();
+    let warm_page1 = db.search_downloads_v2(&first).unwrap();
+    let warm_first_elapsed = started.elapsed();
+    assert_eq!(warm_page1.items.len(), page1.items.len());
+
+    // Walk deep into the list: keyset paging must not degrade with depth.
+    let mut cursor = page1.next_cursor.clone();
+    let mut deepest = Duration::ZERO;
+    for _ in 0..40 {
+        let mut page_params = v2_params(None, 60, cursor.clone());
+        page_params.projection = Some("libraryGallery".to_string());
+        let started = Instant::now();
+        let page = db.search_downloads_v2(&page_params).unwrap();
+        deepest = deepest.max(started.elapsed());
+        cursor = page.next_cursor.clone();
+        assert!(cursor.is_some(), "paging ended earlier than expected");
+    }
+
+    let started = Instant::now();
+    let authors = db
+        .search_entity_facets("person", None, 60, 300, None, None, None, None)
+        .unwrap();
+    let entity_elapsed = started.elapsed();
+    assert_eq!(authors.len(), 60);
+    let started = Instant::now();
+    let warm_authors = db
+        .search_entity_facets("person", None, 60, 300, None, None, None, None)
+        .unwrap();
+    let warm_entity_elapsed = started.elapsed();
+    assert_eq!(warm_authors.len(), authors.len());
+
+    let started = Instant::now();
+    let facets = db.get_filter_facets_with(false).unwrap();
+    let facet_elapsed = started.elapsed();
+    assert!(!facets.tags.is_empty());
+    assert!(
+        facets.author_entities.is_empty(),
+        "the light variant must skip the entity aggregates"
+    );
+
+    let started = Instant::now();
+    let cached_facets = db.get_filter_facets_with(false).unwrap();
+    let cached_facet_elapsed = started.elapsed();
+    assert_eq!(
+        cached_facets
+            .tags
+            .iter()
+            .map(|facet| (&facet.name, facet.count))
+            .collect::<Vec<_>>(),
+        facets
+            .tags
+            .iter()
+            .map(|facet| (&facet.name, facet.count))
+            .collect::<Vec<_>>()
+    );
+
+    let suggest_params = SearchSuggestParams {
+        text: Some("蔵書".to_string()),
+        limit: Some(12),
+    };
+    let started = Instant::now();
+    let suggestions = db.search_suggest(&suggest_params).unwrap();
+    let suggest_elapsed = started.elapsed();
+    assert_eq!(suggestions.items.len(), 12);
+    let started = Instant::now();
+    let cached_suggestions = db.search_suggest(&suggest_params).unwrap();
+    let cached_suggest_elapsed = started.elapsed();
+    assert_eq!(cached_suggestions.items.len(), suggestions.items.len());
+
+    eprintln!(
+            "{} works (metadata_only={}, seed {:?}, db {} MiB): first page cold {:?}/warm {:?}, deepest page {:?}, authors cold {:?}/warm {:?}, filter options cold {:?}/warm {:?}, suggestions cold {:?}/warm {:?}",
+            seeded,
+            metadata_only,
+            seed_elapsed,
+            database_bytes / (1024 * 1024),
+            first_elapsed,
+            warm_first_elapsed,
+            deepest,
+            entity_elapsed,
+            warm_entity_elapsed,
+            facet_elapsed,
+            cached_facet_elapsed,
+            suggest_elapsed,
+            cached_suggest_elapsed
+        );
+    let first_page_budget = if seeded >= 500_000 {
+        Duration::from_secs(1)
+    } else {
+        Duration::from_millis(400)
+    };
+    assert!(
+        first_elapsed < first_page_budget,
+        "first page took {:?}",
+        first_elapsed
+    );
+    assert!(
+        warm_first_elapsed < Duration::from_millis(400),
+        "warm first page took {:?}",
+        warm_first_elapsed
+    );
+    assert!(
+        deepest < Duration::from_millis(400),
+        "deep page took {:?}",
+        deepest
+    );
+    let aggregate_budget = if seeded >= 500_000 {
+        Duration::from_secs(3)
+    } else {
+        Duration::from_millis(500)
+    };
+    // Without idx_downloads_author_recent this listing takes ~1.9s here.
+    assert!(
+        entity_elapsed < aggregate_budget,
+        "author listing took {:?}",
+        entity_elapsed
+    );
+    assert!(
+        warm_entity_elapsed < Duration::from_millis(100),
+        "cached author listing took {:?}",
+        warm_entity_elapsed
+    );
+    assert!(
+        facet_elapsed < aggregate_budget,
+        "filter options took {:?}",
+        facet_elapsed
+    );
+    assert!(
+        suggest_elapsed < aggregate_budget,
+        "cold suggestions took {:?}",
+        suggest_elapsed
+    );
+    assert!(
+        cached_facet_elapsed < Duration::from_millis(50),
+        "cached filter options took {:?}",
+        cached_facet_elapsed
+    );
+    assert!(
+        cached_suggest_elapsed < Duration::from_millis(50),
+        "cached suggestions took {:?}",
+        cached_suggest_elapsed
+    );
+
+    drop(db);
+}
+
+#[test]
+#[ignore = "measurement harness for disk-backed lexical snapshots"]
+fn lexical_snapshots_scale_with_fixed_memory_batches() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let works: usize = std::env::var("PIEP_BENCH_WORKS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(100_000);
+    assert!((1_000..=1_000_000).contains(&works));
+
+    let seed_started = Instant::now();
+    seed_metadata_only_library(&db, works);
+    let seed_elapsed = seed_started.elapsed();
+    let index_started = Instant::now();
+    let mut writer = super::super::tantivy_index::bulk_writer(&storage).unwrap();
+    for index in 0..works {
+        let prepared = super::super::tantivy_index::prepare_document(
+            &storage,
+            &super::super::tantivy_index::TantivyIndexDocument {
+                download_id: index as i64 + 1,
+                source: "pixiv".to_string(),
+                source_id: format!("scale-{index:07}"),
+                source_url: format!("https://example.invalid/{index}"),
+                title: format!("snapshotterm work {index:07}"),
+                author_name: format!("author {:03}", index % 400),
+                author_id: format!("author-{:03}", index % 400),
+                tags: format!("tag{}", index % 30),
+                series_title: String::new(),
+                excerpt: "snapshotterm benchmark".to_string(),
+                body: "snapshotterm bounded disk ranking".to_string(),
+                published_at: "2026-01-01T00:00:00Z".to_string(),
+                downloaded_at: "2026-01-01T00:00:00Z".to_string(),
+                favorite: false,
+                watch_updates: false,
+                asset_kinds: String::new(),
+                text_length: 36,
+            },
+        )
+        .unwrap();
+        writer.upsert(prepared).unwrap();
+        if writer.uncommitted() >= 20_000 {
+            writer.commit().unwrap();
+        }
+    }
+    writer.commit().unwrap();
+    drop(writer);
+    {
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO search_index_state (
+                    download_id, current_version, content_hash, indexed_at
+                 )
+                 SELECT id, current_version, content_hash, CURRENT_TIMESTAMP FROM downloads",
+            [],
+        )
+        .unwrap();
+    }
+    let index_elapsed = index_started.elapsed();
+
+    if std::env::var_os("PIEP_BENCH_PROFILE").is_some() {
+        let started = Instant::now();
+        super::super::tantivy_index::visit_matching_download_ids(&storage, "snapshotterm", |_| {
+            Ok(())
+        })
+        .unwrap();
+        let ids = started.elapsed();
+        let started = Instant::now();
+        super::super::tantivy_index::visit_matching_download_scores(
+            &storage,
+            "snapshotterm",
+            |_| Ok(()),
+        )
+        .unwrap();
+        eprintln!(
+            "Tantivy collection alone: ids {ids:?}, scores {:?}",
+            started.elapsed()
+        );
+    }
+
+    let mut ranked = params("snapshotterm");
+    ranked.limit = Some(60);
+    ranked.projection = Some("bulk".to_string());
+    let started = Instant::now();
+    let first = db.search_downloads_v2(&ranked).unwrap();
+    let ranked_cold = started.elapsed();
+    assert_eq!(first.total_estimate, Some(works as i64));
+    ranked.cursor = first.next_cursor;
+    let started = Instant::now();
+    let second = db.search_downloads_v2(&ranked).unwrap();
+    let ranked_warm = started.elapsed();
+    assert_eq!(second.items.len(), 60);
+
+    let mut sorted = params("snapshotterm");
+    sorted.limit = Some(60);
+    sorted.projection = Some("bulk".to_string());
+    sorted.sort_by = Some("title".to_string());
+    sorted.sort_order = Some("asc".to_string());
+    let started = Instant::now();
+    let first_sorted = db.search_downloads_v2(&sorted).unwrap();
+    let sorted_cold = started.elapsed();
+    assert_eq!(first_sorted.total_estimate, Some(works as i64));
+    sorted.cursor = first_sorted.next_cursor;
+    let started = Instant::now();
+    let second_sorted = db.search_downloads_v2(&sorted).unwrap();
+    let sorted_warm = started.elapsed();
+    assert_eq!(second_sorted.items.len(), 60);
+
+    let cache = db.search_snapshot_cache.lock().unwrap();
+    let snapshot_bytes = cache.disk_bytes;
+    let snapshot_count = cache.entries.len();
+    drop(cache);
+    eprintln!(
+            "{works} lexical matches: seed {seed_elapsed:?}, index {index_elapsed:?}, ranked cold/warm {ranked_cold:?}/{ranked_warm:?}, sorted cold/warm {sorted_cold:?}/{sorted_warm:?}, {snapshot_count} snapshots {} MiB",
+            snapshot_bytes / (1024 * 1024)
+        );
+    assert!(snapshot_count >= 2);
+    assert!(snapshot_bytes <= super::super::resource_budget::search_snapshot_disk_bytes());
+    assert!(ranked_warm < Duration::from_millis(250));
+    assert!(sorted_warm < Duration::from_millis(250));
+
+    drop(db);
+}
+
+#[test]
+#[ignore = "measurement harness for snapshot insertion and disk accounting"]
+fn measure_snapshot_batch_costs() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let (_, path, connection) = create_search_snapshot_connection(&storage, &db.db_path).unwrap();
+    let guard = connection.lock().unwrap();
+    let conn = guard.as_ref().unwrap();
+    reset_search_match_table(conn, true).unwrap();
+    conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let mut inserting = Duration::ZERO;
+    let mut accounting = Duration::ZERO;
+    for start in (1..100_001).step_by(256) {
+        let scores: Vec<_> = (start..(start + 256).min(100_001))
+            .map(|id| (id, 1.0))
+            .collect();
+        let at = Instant::now();
+        insert_search_match_scores(conn, &scores).unwrap();
+        inserting += at.elapsed();
+        let at = Instant::now();
+        ensure_search_snapshot_budget(conn, &storage).unwrap();
+        accounting += at.elapsed();
+    }
+    conn.execute_batch("COMMIT").unwrap();
+    eprintln!("100000 snapshot rows: insert {inserting:?}, disk accounting {accounting:?}");
+    drop(guard);
+    close_snapshot_connection(&connection);
+    cleanup_search_snapshot_path(&path);
+}
+
+#[test]
+fn entity_facet_cache_is_invalidated_by_a_library_commit() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    insert_download_unindexed(
+        &db,
+        &storage,
+        "facet-cache-one",
+        "一冊目",
+        "同じ作者",
+        &[],
+        "本文",
+    );
+    db.conn
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE downloads SET author_id = 'same-author' WHERE source_id = 'facet-cache-one'",
+            [],
+        )
+        .unwrap();
+    let first = db
+        .search_entity_facets("person", None, 60, 0, None, None, None, None)
+        .unwrap();
+    assert_eq!(first[0].count, 1);
+    let cached = db
+        .search_entity_facets("person", None, 60, 0, None, None, None, None)
+        .unwrap();
+    assert_eq!(cached[0].count, 1);
+
+    insert_download_unindexed(
+        &db,
+        &storage,
+        "facet-cache-two",
+        "二冊目",
+        "同じ作者",
+        &[],
+        "本文",
+    );
+    db.conn
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE downloads SET author_id = 'same-author' WHERE source_id = 'facet-cache-two'",
+            [],
+        )
+        .unwrap();
+    let refreshed = db
+        .search_entity_facets("person", None, 60, 0, None, None, None, None)
+        .unwrap();
+    assert_eq!(refreshed[0].count, 2);
+    drop(db);
+}
+
+#[test]
+#[ignore = "performance smoke test for local search tuning"]
+fn smart_search_handles_5000_seed_items_under_target() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+
+    for index in 0..5_000 {
+        insert_download_unindexed(
+                &db,
+                &storage,
+                &format!("perf-{}", index),
+                &format!("Seed Work {:04}", index),
+                &format!("Seed Author {:02}", index % 50),
+                &[&format!("seed{}", index % 25)],
+                &format!(
+                    "検索性能検証用の本文です。番号 {}、タグ seed{}。日本語とASCII mixed text for search.",
+                    index,
+                    index % 25
+                ),
+            );
+    }
+    loop {
+        let status = db.rebuild_search_index_batch(200).unwrap();
+        if status.pending_downloads == 0 {
+            break;
+        }
+    }
+
+    let mut search_params = params("検索性能 seed7");
+    search_params.limit = Some(120);
+    let started = Instant::now();
+    let result = db.search_downloads_v2(&search_params).unwrap();
+    let elapsed = started.elapsed();
+    eprintln!("5000-item smart search: {elapsed:?}");
+
+    assert!(!result.items.is_empty());
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "smart search took {:?}",
+        elapsed
+    );
+}
+
+#[test]
+fn projection_selects_do_not_include_unneeded_subqueries() {
+    let bulk = download_select_sql_for_projection(Some("bulk"), "NULL", "NULL");
+    assert!(!bulk.contains("download_tags"));
+    assert!(!bulk.contains("download_people"));
+    assert!(!bulk.contains("download_series"));
+
+    let entity = download_select_sql_for_projection(Some("entityFacet"), "NULL", "NULL");
+    assert!(!entity.contains("download_tags"));
+    assert!(!entity.contains("download_people"));
+    assert!(!entity.contains("download_series"));
+    assert!(entity.contains("d.cover_path"));
+
+    // 一覧もタグとあらすじを出すようになったので、読むものはギャラリーと同じである。
+    // 別の射影を残しておくと、片方に列を足したときにもう片方が取り残される。
+    let compact = download_select_sql_for_projection(Some("libraryCompact"), "NULL", "NULL");
+    assert!(compact.contains("download_tags"));
+    assert!(compact.contains("download_people"));
+    assert!(compact.contains("download_series"));
+    assert!(compact.contains("d.excerpt"));
+
+    let gallery = download_select_sql_for_projection(Some("libraryGallery"), "NULL", "NULL");
+    assert!(gallery.contains("download_tags"));
+    assert!(gallery.contains("download_people"));
+    assert!(gallery.contains("download_series"));
+}
+
+#[test]
+fn active_edit_revision_drives_reader_and_search_body() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let download_id = insert_download(
+        &db,
+        &storage,
+        "edit-1",
+        "編集対象",
+        "作者A",
+        &["編集"],
+        "原本だけにある本文です。",
+    );
+
+    let initial_reader = db.get_reader_document(download_id, None).unwrap();
+    assert!(!initial_reader.is_edited);
+    assert!(initial_reader.plain_text.contains("原本だけ"));
+
+    let draft = db
+        .save_work_draft(
+            download_id,
+            1,
+            None,
+            &[
+                WorkBlockInput {
+                    block_type: "heading".to_string(),
+                    text: Some("編集版見出し".to_string()),
+                    asset_id: None,
+                    attrs_json: None,
+                },
+                WorkBlockInput {
+                    block_type: "paragraph".to_string(),
+                    text: Some("編集固有キーワードを含む本文です。".to_string()),
+                    asset_id: None,
+                    attrs_json: None,
+                },
+            ],
+        )
+        .unwrap();
+    db.activate_work_edit(draft.id).unwrap();
+
+    let edited_reader = db.get_reader_document(download_id, None).unwrap();
+    assert!(edited_reader.is_edited);
+    assert!(edited_reader.html.contains("編集版見出し"));
+    assert!(edited_reader.plain_text.contains("編集固有キーワード"));
+
+    let search = db
+        .search_downloads_v2(&v2_params(Some("編集固有キーワード"), 10, None))
+        .unwrap();
+    assert_eq!(search.items.first().map(|item| item.id), Some(download_id));
+}
+
+#[test]
+fn an_edit_keeps_the_assets_from_its_base_revision_after_a_provider_update() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let download_id = insert_download(
+        &db,
+        &storage,
+        "edit-base-assets",
+        "挿絵を残す編集",
+        "作者A",
+        &[],
+        "初版本文",
+    );
+    let work = storage.join("pixiv").join("edit-base-assets");
+    let v1_json = work.join("v1").join("original.json");
+    let old_image = work.join("v1").join("data_assets").join("first.png");
+    fs::create_dir_all(old_image.parent().unwrap()).unwrap();
+    fs::write(&old_image, b"old-image").unwrap();
+    let asset_id = db
+        .insert_asset(&NewAsset {
+            download_id,
+            asset_type: "illustration".to_string(),
+            filename: "first.png".to_string(),
+            local_path: old_image.to_string_lossy().to_string(),
+            original_url: None,
+            mime_type: Some("image/png".to_string()),
+            file_size_bytes: 9,
+        })
+        .unwrap();
+    let draft = db
+        .save_work_draft(
+            download_id,
+            1,
+            None,
+            &[WorkBlockInput {
+                block_type: "image".to_string(),
+                text: Some("初版の挿絵".to_string()),
+                asset_id: Some(asset_id),
+                attrs_json: None,
+            }],
+        )
+        .unwrap();
+    db.activate_work_edit(draft.id).unwrap();
+
+    let v2_dir = work.join("v2");
+    fs::create_dir_all(&v2_dir).unwrap();
+    let v2_json = v2_dir.join("original.json");
+    fs::write(&v2_json, r#"{"text":"改稿後本文"}"#).unwrap();
+    {
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO download_versions
+             (download_id, version, json_path, original_json_path, asset_count, created_at)
+             VALUES (?1, 1, ?2, ?2, 1, '2026-01-01T00:00:00Z')",
+            params![download_id, v1_json.to_string_lossy().to_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO download_versions
+             (download_id, version, json_path, original_json_path, asset_count, created_at)
+             VALUES (?1, 2, ?2, ?2, 0, '2026-02-01T00:00:00Z')",
+            params![download_id, v2_json.to_string_lossy().to_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE downloads SET current_version = 2, json_path = ?2,
+                    original_json_path = ?2, asset_count = 0
+             WHERE id = ?1",
+            params![download_id, v2_json.to_string_lossy().to_string()],
+        )
+        .unwrap();
+    }
+
+    let reader = db.get_reader_document(download_id, None).unwrap();
+    assert!(reader.is_edited);
+    assert!(reader.assets.iter().any(|asset| asset.id == asset_id));
+    assert!(reader.html.contains("first.png"));
+    assert!(!reader.html.contains("missing-image-placeholder"));
+
+    let editor = db.get_editor_document(download_id).unwrap();
+    assert_eq!(editor.base_version, 1);
+    assert!(editor.assets.iter().any(|asset| asset.id == asset_id));
+
+    let source = db.active_edit_source_form(download_id).unwrap().unwrap();
+    assert!(source.pixiv_text.contains("[uploadedimage:first]"));
+}
+
+/// 下書きは何度でも上書きできる。
+///
+/// 自動保存は6秒ごとに同じ下書きを書き換えるので、二度目が通らなければ
+/// **書いたものは最初の一回しか残らない**。書き換えの経路にだけ在る不具合は、
+/// 一度しか保存しない試験では見つからない。
+#[test]
+fn a_draft_can_be_saved_again_and_again() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let download_id = insert_download(
+        &db,
+        &storage,
+        "draft-rewrite",
+        "下書きを書き換える",
+        "作者A",
+        &["編集"],
+        "取り込んだままの本文。",
+    );
+
+    let block = |text: &str| WorkBlockInput {
+        block_type: "paragraph".to_string(),
+        text: Some(text.to_string()),
+        asset_id: None,
+        attrs_json: None,
+    };
+
+    let first = db
+        .save_work_draft(download_id, 1, None, &[block("一度目の下書き")])
+        .unwrap();
+    let second = db
+        .save_work_draft(download_id, 1, None, &[block("二度目の下書き")])
+        .expect("下書きの二度目の保存が通らない");
+    // 版を増やさずに同じ1本を書き換える。増やすと履歴が自動保存で埋まる。
+    assert_eq!(first.id, second.id);
+
+    let editor = db.get_editor_document(download_id).unwrap();
+    assert_eq!(editor.blocks.len(), 1);
+    assert_eq!(
+        editor.blocks[0].text.as_deref(),
+        Some("二度目の下書き"),
+        "書き換えたはずの下書きが古いままになっている"
+    );
+}
+
+/// 下書きは捨てられる。捨てたら、取り込んだままの本文が編集画面へ戻る。
+#[test]
+fn a_draft_can_be_discarded_back_to_the_imported_text() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let download_id = insert_download(
+        &db,
+        &storage,
+        "draft-discard",
+        "下書きを捨てる",
+        "作者A",
+        &["編集"],
+        "取り込んだままの本文。",
+    );
+
+    db.save_work_draft(
+        download_id,
+        1,
+        Some("差し替えた題"),
+        &[WorkBlockInput {
+            block_type: "paragraph".to_string(),
+            text: Some("書きかけの本文".to_string()),
+            asset_id: None,
+            attrs_json: None,
+        }],
+    )
+    .unwrap();
+    assert!(db
+        .get_editor_document(download_id)
+        .unwrap()
+        .draft_revision
+        .is_some());
+
+    db.discard_work_draft(download_id).unwrap();
+
+    let editor = db.get_editor_document(download_id).unwrap();
+    assert!(editor.draft_revision.is_none(), "下書きが残っている");
+    assert!(
+        editor.blocks.iter().any(|block| block
+            .text
+            .as_deref()
+            .is_some_and(|text| text.contains("取り込んだまま"))),
+        "取り込んだままの本文が戻っていない: {:?}",
+        editor.blocks
+    );
+    // 捨てるものが無くても、そのことでは失敗しない。
+    db.discard_work_draft(download_id).unwrap();
+}
+
+/// 編集画面を開いて、何も変えずに反映する ―― それだけで本文が壊れないこと。
+///
+/// 実際の道筋（保存した本文 → ブロック → 下書き → 反映 → 読書画面）を通す。
+/// 純粋な関数の試験はブロックの組み替えを見ているが、壊れていたのはこの
+/// 一連の受け渡しなので、ここでも押さえておく。
+#[test]
+fn publishing_an_untouched_work_through_the_database_keeps_its_lines() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let body = "一行目\n二行目\n\n段落が変わる";
+    let download_id = insert_download(
+        &db,
+        &storage,
+        "roundtrip-1",
+        "往復する作品",
+        "作者A",
+        &[],
+        body,
+    );
+
+    let before = db
+        .get_reader_content_page(download_id, None, 0, false)
+        .unwrap();
+
+    // 編集画面が受け取るブロックを、そのまま下書きとして戻す。
+    let editor = db.get_editor_document(download_id).unwrap();
+    let blocks = editor
+        .blocks
+        .iter()
+        .map(|block| WorkBlockInput {
+            block_type: block.block_type.clone(),
+            text: block.text.clone(),
+            asset_id: block.asset_id,
+            attrs_json: block.attrs_json.clone(),
+        })
+        .collect::<Vec<_>>();
+    let draft = db.save_work_draft(download_id, 1, None, &blocks).unwrap();
+    db.activate_work_edit(draft.id).unwrap();
+
+    let after = db
+        .get_reader_content_page(download_id, None, 0, false)
+        .unwrap();
+    // 画面に出るものだけを比べる。転送用の印と、HTML では畳まれる改行は
+    // 見え方を変えない。
+    let visible = |html: &str| {
+        html.replace("<!-- content-block -->", "")
+            .replace('\n', "")
+            .replace("<br />", "\n")
+    };
+    assert_eq!(
+        visible(&before.html),
+        visible(&after.html),
+        "何も変えずに反映しただけで本文の見え方が変わった\n元: {:?}\n後: {:?}",
+        before.html,
+        after.html
+    );
+}
+
+/// 直した題が、棚にも索引にも届くこと。
+#[test]
+fn an_edited_title_reaches_the_library_and_the_index() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let download_id = insert_download(&db, &storage, "title-1", "取得元の題", "作者A", &[], "本文");
+
+    let draft = db
+        .save_work_draft(
+            download_id,
+            1,
+            Some("読み手が直した題"),
+            &[WorkBlockInput {
+                block_type: "paragraph".to_string(),
+                text: Some("本文".to_string()),
+                asset_id: None,
+                attrs_json: None,
+            }],
+        )
+        .unwrap();
+    // 下書きのうちは、まだ棚の題は変わらない。
+    assert_eq!(db.get_download(download_id).unwrap().title, "取得元の題");
+
+    db.activate_work_edit(draft.id).unwrap();
+    assert_eq!(
+        db.get_download(download_id).unwrap().title,
+        "読み手が直した題"
+    );
+    let search = db
+        .search_downloads_v2(&v2_params(Some("読み手が直した題"), 10, None))
+        .unwrap();
+    assert_eq!(search.items.first().map(|item| item.id), Some(download_id));
+
+    // 下ろせば、取得元の題に戻る。
+    db.deactivate_work_edit(download_id).unwrap();
+    assert_eq!(db.get_download(download_id).unwrap().title, "取得元の題");
+}
+
+#[test]
+fn edited_titles_drive_both_ordering_and_keyset_cursors() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let edited = insert_download(&db, &storage, "title-cursor-z", "Z", "作者", &[], "本文");
+    insert_download(&db, &storage, "title-cursor-b", "B", "作者", &[], "本文");
+    insert_download(&db, &storage, "title-cursor-c", "C", "作者", &[], "本文");
+    let draft = db
+        .save_work_draft(
+            edited,
+            1,
+            Some("A"),
+            &[WorkBlockInput {
+                block_type: "paragraph".to_string(),
+                text: Some("本文".to_string()),
+                asset_id: None,
+                attrs_json: None,
+            }],
+        )
+        .unwrap();
+    db.activate_work_edit(draft.id).unwrap();
+
+    for (order, expected) in [("asc", vec!["A", "B", "C"]), ("desc", vec!["C", "B", "A"])] {
+        let mut cursor = None;
+        let mut titles = Vec::new();
+        loop {
+            let mut query = v2_params(None, 1, cursor.clone());
+            query.sort_by = Some("title".to_string());
+            query.sort_order = Some(order.to_string());
+            let page = db.search_downloads_v2(&query).unwrap();
+            titles.extend(page.items.into_iter().map(|item| item.title));
+            let Some(next) = page.next_cursor else { break };
+            cursor = Some(next);
+        }
+        assert_eq!(titles, expected);
+    }
+}
+
+#[test]
+fn sql_cursor_is_rejected_when_the_filter_scope_changes() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let favorite_a = insert_download(&db, &storage, "scope-a", "A", "作者", &[], "本文");
+    insert_download(&db, &storage, "scope-m", "M", "作者", &[], "本文");
+    let favorite_z = insert_download(&db, &storage, "scope-z", "Z", "作者", &[], "本文");
+    {
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE downloads SET favorite = 1 WHERE id IN (?1, ?2)",
+            params![favorite_a, favorite_z],
+        )
+        .unwrap();
+    }
+
+    let mut first = v2_params(None, 1, None);
+    first.sort_by = Some("title".to_string());
+    first.sort_order = Some("asc".to_string());
+    let stale_cursor = db.search_downloads_v2(&first).unwrap().next_cursor.unwrap();
+
+    let mut narrowed = first;
+    narrowed.cursor = Some(stale_cursor);
+    narrowed.favorite = Some(true);
+    let result = db.search_downloads_v2(&narrowed).unwrap();
+    assert_eq!(
+        result.items.first().map(|item| item.title.as_str()),
+        Some("A")
+    );
+}
+
+#[test]
+fn update_job_schema_recovers_interrupted_jobs() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let request = StartUpdateJobRequest {
+        scope: "work".to_string(),
+        mode: "auto_save".to_string(),
+        work_ids: None,
+        target_ids: None,
+        credentials: None,
+        watch_saved: None,
+        adhoc_targets: None,
+    };
+    db.create_update_job(
+        "job-test",
+        &request,
+        &[UpdateJobItemInput {
+            item_type: "work".to_string(),
+            source: Some("pixiv".to_string()),
+            source_id: Some("1".to_string()),
+            target_type: Some("work".to_string()),
+            title: "Test".to_string(),
+            payload_json: "{}".to_string(),
+            status: "queued".to_string(),
+        }],
+    )
+    .unwrap();
+    db.set_update_job_status("job-test", "running", Some("running"))
+        .unwrap();
+    db.recover_update_jobs_on_startup().unwrap();
+    let snapshot = db.update_job_snapshot("job-test").unwrap();
+    assert_eq!(snapshot.status, "paused");
+}
+
+#[test]
+fn late_worker_progress_cannot_resume_or_finish_a_stopped_job() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let request = StartUpdateJobRequest {
+        scope: "save".to_string(),
+        mode: "save".to_string(),
+        work_ids: None,
+        target_ids: None,
+        credentials: None,
+        watch_saved: None,
+        adhoc_targets: None,
+    };
+    db.create_update_job("job-stop-race", &request, &[])
+        .unwrap();
+    db.set_update_job_status("job-stop-race", "running", Some("取得中"))
+        .unwrap();
+
+    db.set_update_job_status("job-stop-race", "paused", Some("一時停止しました"))
+        .unwrap();
+    assert!(!db
+        .transition_update_job_status("job-stop-race", "running", "running", Some("1件完了"))
+        .unwrap());
+    assert!(!db
+        .transition_update_job_status("job-stop-race", "running", "completed", Some("完了"))
+        .unwrap());
+    let paused = db.update_job_snapshot("job-stop-race").unwrap();
+    assert_eq!(paused.status, "paused");
+    assert_eq!(paused.active_label.as_deref(), Some("一時停止しました"));
+
+    db.set_update_job_status("job-stop-race", "canceling", Some("中止中"))
+        .unwrap();
+    assert!(!db
+        .transition_update_job_status("job-stop-race", "running", "completed", Some("完了"))
+        .unwrap());
+    assert_eq!(
+        db.update_job_status_value("job-stop-race").unwrap(),
+        "canceling"
+    );
+
+    db.set_update_job_status("job-stop-race", "running", Some("再開しました"))
+        .unwrap();
+    assert!(db
+        .transition_update_job_status("job-stop-race", "running", "completed", Some("完了"))
+        .unwrap());
+    assert_eq!(
+        db.update_job_status_value("job-stop-race").unwrap(),
+        "completed"
+    );
+}
+
+#[test]
+fn retrying_failed_update_items_keeps_list_counters_consistent_before_snapshot() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let request = StartUpdateJobRequest {
+        scope: "work".to_string(),
+        mode: "check_only".to_string(),
+        work_ids: None,
+        target_ids: None,
+        credentials: None,
+        watch_saved: None,
+        adhoc_targets: None,
+    };
+    let items = ["failed", "done"].map(|source_id| UpdateJobItemInput {
+        item_type: "work".to_string(),
+        source: Some("pixiv".to_string()),
+        source_id: Some(source_id.to_string()),
+        target_type: Some("work".to_string()),
+        title: source_id.to_string(),
+        payload_json: "{}".to_string(),
+        status: "queued".to_string(),
+    });
+    db.create_update_job("job-retry-counters", &request, &items)
+        .unwrap();
+    let first = db
+        .next_update_job_item("job-retry-counters")
+        .unwrap()
+        .unwrap();
+    db.complete_update_job_item(first.id, "failed", Some("temporary"), None)
+        .unwrap();
+    let second = db
+        .next_update_job_item("job-retry-counters")
+        .unwrap()
+        .unwrap();
+    db.complete_update_job_item(second.id, "done", None, None)
+        .unwrap();
+
+    let before = db.list_update_jobs().unwrap().remove(0);
+    assert_eq!(
+        (before.totals, before.processed, before.error_count),
+        (2, 2, 1)
+    );
+
+    db.prepare_update_job_resume("job-retry-counters", true)
+        .unwrap();
+    // list_update_jobs reads the cached counters directly. No snapshot repair
+    // should be needed before the UI can report the resumed progress correctly.
+    let pending = db.list_update_jobs().unwrap().remove(0);
+    assert_eq!(
+        (pending.totals, pending.processed, pending.error_count),
+        (2, 1, 0)
+    );
+    let retry = db
+        .next_update_job_item("job-retry-counters")
+        .unwrap()
+        .unwrap();
+    assert_eq!(retry.id, first.id);
+    db.complete_update_job_item(retry.id, "done", None, None)
+        .unwrap();
+    let finished = db.list_update_jobs().unwrap().remove(0);
+    assert_eq!(
+        (finished.totals, finished.processed, finished.error_count),
+        (2, 2, 0)
+    );
+}
+
+#[test]
+fn simultaneous_checks_create_only_one_active_job() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let request = StartUpdateJobRequest {
+        scope: "all".to_string(),
+        mode: "check_only".to_string(),
+        work_ids: None,
+        target_ids: None,
+        credentials: None,
+        watch_saved: None,
+        adhoc_targets: None,
+    };
+    let items = [UpdateJobItemInput {
+        item_type: "work".to_string(),
+        source: Some("pixiv".to_string()),
+        source_id: Some("1".to_string()),
+        target_type: Some("work".to_string()),
+        title: "work".to_string(),
+        payload_json: "{}".to_string(),
+        status: "queued".to_string(),
+    }];
+    let barrier = std::sync::Barrier::new(3);
+    let results = std::thread::scope(|scope| {
+        let first = scope.spawn(|| {
+            barrier.wait();
+            db.create_update_job_if_idle("race-a", &request, &items)
+        });
+        let second = scope.spawn(|| {
+            barrier.wait();
+            db.create_update_job_if_idle("race-b", &request, &items)
+        });
+        barrier.wait();
+        [first.join().unwrap(), second.join().unwrap()]
+    });
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    assert_eq!(db.list_update_jobs().unwrap().len(), 1);
+
+    let existing_id = db.list_update_jobs().unwrap()[0].job_id.clone();
+    db.set_update_job_status(&existing_id, "paused", None)
+        .unwrap();
+    // A paused worker is not consuming source requests, so later scheduled
+    // runs remain eligible instead of being blocked forever.
+    db.create_update_job_if_idle("after-pause", &request, &items)
+        .unwrap();
+    assert_eq!(db.list_update_jobs().unwrap().len(), 2);
+}
+
+#[test]
+fn save_job_cannot_start_while_another_job_is_active() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let request = StartUpdateJobRequest {
+        scope: "save".to_string(),
+        mode: "save".to_string(),
+        work_ids: None,
+        target_ids: None,
+        credentials: None,
+        watch_saved: None,
+        adhoc_targets: None,
+    };
+    let items = [UpdateJobItemInput {
+        item_type: "candidate".to_string(),
+        source: Some("pixiv".to_string()),
+        source_id: Some("1".to_string()),
+        target_type: Some("work".to_string()),
+        title: "work".to_string(),
+        payload_json: r#"{"kind":"save"}"#.to_string(),
+        status: "queued".to_string(),
+    }];
+    db.create_update_job_if_idle("first-save", &request, &items)
+        .unwrap();
+    assert!(db
+        .create_update_job_if_idle("second-save", &request, &items)
+        .is_err());
+    assert_eq!(db.list_update_jobs().unwrap().len(), 1);
+
+    db.set_update_job_status("first-save", "canceled", None)
+        .unwrap();
+    db.create_update_job_if_idle("after-cancel", &request, &items)
+        .unwrap();
+}
+
+#[test]
+fn paused_job_cannot_resume_across_another_active_check() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let request = StartUpdateJobRequest {
+        scope: "all".to_string(),
+        mode: "check_only".to_string(),
+        work_ids: None,
+        target_ids: None,
+        credentials: None,
+        watch_saved: None,
+        adhoc_targets: None,
+    };
+    db.create_update_job("paused-job", &request, &[]).unwrap();
+    db.set_update_job_status("paused-job", "paused", None)
+        .unwrap();
+    db.create_update_job_if_idle("active-job", &request, &[])
+        .unwrap();
+    assert!(db.resume_update_job_if_idle("paused-job", true).is_err());
+    assert_eq!(db.update_job_status_value("paused-job").unwrap(), "paused");
+
+    db.set_update_job_status("active-job", "completed", None)
+        .unwrap();
+    db.resume_update_job_if_idle("paused-job", true).unwrap();
+    assert_eq!(db.update_job_status_value("paused-job").unwrap(), "queued");
+    assert!(db.resume_update_job_if_idle("active-job", true).is_err());
+}
+
+#[test]
+fn stopped_update_jobs_leave_their_next_item_queued() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let request = StartUpdateJobRequest {
+        scope: "work".to_string(),
+        mode: "auto_save".to_string(),
+        work_ids: None,
+        target_ids: None,
+        credentials: None,
+        watch_saved: None,
+        adhoc_targets: None,
+    };
+
+    for status in ["paused", "canceling", "canceled"] {
+        let job_id = format!("job-{status}");
+        db.create_update_job(
+            &job_id,
+            &request,
+            &[UpdateJobItemInput {
+                item_type: "work".to_string(),
+                source: Some("pixiv".to_string()),
+                source_id: Some(status.to_string()),
+                target_type: Some("work".to_string()),
+                title: format!("{status} item"),
+                payload_json: "{}".to_string(),
+                status: "queued".to_string(),
+            }],
+        )
+        .unwrap();
+        db.set_update_job_status(&job_id, status, Some(status))
+            .unwrap();
+
+        assert!(db.next_update_job_item(&job_id).unwrap().is_none());
+        let (job_status, item_status): (String, String) = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT j.status, i.status
+                     FROM update_jobs j
+                     JOIN update_job_items i ON i.job_id = j.id
+                     WHERE j.id = ?1",
+                params![job_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(job_status, status);
+        assert_eq!(item_status, "queued");
+    }
+}
+
+#[test]
+fn active_update_job_claims_its_next_item_atomically() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let request = StartUpdateJobRequest {
+        scope: "work".to_string(),
+        mode: "auto_save".to_string(),
+        work_ids: None,
+        target_ids: None,
+        credentials: None,
+        watch_saved: None,
+        adhoc_targets: None,
+    };
+    db.create_update_job(
+        "job-claim",
+        &request,
+        &[UpdateJobItemInput {
+            item_type: "work".to_string(),
+            source: Some("pixiv".to_string()),
+            source_id: Some("claim".to_string()),
+            target_type: Some("work".to_string()),
+            title: "Claim me".to_string(),
+            payload_json: "{}".to_string(),
+            status: "queued".to_string(),
+        }],
+    )
+    .unwrap();
+
+    let item = db.next_update_job_item("job-claim").unwrap().unwrap();
+    assert_eq!(item.status, "running");
+    let snapshot = db.update_job_snapshot("job-claim").unwrap();
+    assert_eq!(snapshot.status, "running");
+    assert_eq!(snapshot.active_label.as_deref(), Some("Claim me"));
+}
+
+/// 履歴は放っておくと溜まり続ける。整理は「古くて終わったもの」だけに効き、
+/// 走っているジョブと直近の履歴には触れない。
+#[test]
+fn old_finished_jobs_are_pruned_but_recent_and_live_ones_stay() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let request = StartUpdateJobRequest {
+        scope: "all".to_string(),
+        mode: "check_only".to_string(),
+        work_ids: None,
+        target_ids: None,
+        credentials: None,
+        watch_saved: None,
+        adhoc_targets: None,
+    };
+    for id in ["job-old", "job-recent", "job-live"] {
+        db.create_update_job(id, &request, &[]).unwrap();
+    }
+    let long_ago = (chrono::Utc::now() - chrono::Duration::days(90)).to_rfc3339();
+    {
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE update_jobs SET status = 'completed', finished_at = ?1, updated_at = ?1
+                 WHERE id = 'job-old'",
+            params![long_ago],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE update_jobs SET status = 'completed', finished_at = ?1, updated_at = ?1
+                 WHERE id = 'job-recent'",
+            params![chrono::Utc::now().to_rfc3339()],
+        )
+        .unwrap();
+        // job-live は running のまま。日付が古くても消してはいけない。
+        conn.execute(
+            "UPDATE update_jobs SET status = 'running', updated_at = ?1 WHERE id = 'job-live'",
+            params![long_ago],
+        )
+        .unwrap();
+    }
+
+    let removed = db.prune_update_jobs(1, 30).unwrap();
+    assert_eq!(removed, 1);
+    assert!(db.update_job_snapshot("job-old").is_err());
+    assert!(db.update_job_snapshot("job-recent").is_ok());
+    assert!(db.update_job_snapshot("job-live").is_ok());
+}
+
+#[test]
+fn job_logs_are_capped_from_the_oldest_end() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let request = StartUpdateJobRequest {
+        scope: "all".to_string(),
+        mode: "check_only".to_string(),
+        work_ids: None,
+        target_ids: None,
+        credentials: None,
+        watch_saved: None,
+        adhoc_targets: None,
+    };
+    db.create_update_job("job-logs", &request, &[]).unwrap();
+    for index in 0..20 {
+        db.append_update_job_log("job-logs", "info", &format!("行 {index}"))
+            .unwrap();
+    }
+    // ジョブ作成時にも1行積まれるので、消えた数はそれ以上になる。
+    assert!(db.trim_update_job_logs("job-logs", 5).unwrap() >= 15);
+    let snapshot = db.update_job_snapshot("job-logs").unwrap();
+    let messages: Vec<&str> = snapshot
+        .logs
+        .iter()
+        .map(|log| log.message.as_str())
+        .collect();
+    assert_eq!(messages, vec!["行 15", "行 16", "行 17", "行 18", "行 19"]);
+}
+
+/// シリーズの作者が手元のライブラリから分かること。
+///
+/// 作者を監視しているならシリーズの新作もその一覧に出るので、両方を走査
+/// しないための判断材料になる（同じものを二度取りに行かない）。
+#[test]
+fn a_series_can_name_the_author_behind_it() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let id = insert_download(
+        &db,
+        &storage,
+        "novel-1",
+        "夜明けの糸",
+        "青葉しおり",
+        &[],
+        "本文",
+    );
+    {
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE downloads SET author_id = '7' WHERE id = ?1",
+            params![id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO download_series (download_id, series_source, series_key, title)
+                 VALUES (?1, 'pixiv', '778120', '星を編む人')",
+            params![id],
+        )
+        .unwrap();
+    }
+
+    assert_eq!(
+        db.series_author_keys("pixiv", "778120").unwrap(),
+        vec!["7".to_string()]
+    );
+    // 手元に作品が無いシリーズは判断できない。そのときは走査する側に倒す。
+    assert!(db.series_author_keys("pixiv", "999999").unwrap().is_empty());
+}
+
+/// 終わったジョブは操作履歴からまとめて消せる。走っているものは残る。
+#[test]
+fn finished_jobs_can_be_cleared_from_the_history() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let request = StartUpdateJobRequest {
+        scope: "all".to_string(),
+        mode: "check_only".to_string(),
+        work_ids: None,
+        target_ids: None,
+        credentials: None,
+        watch_saved: None,
+        adhoc_targets: None,
+    };
+    db.create_update_job("job-done", &request, &[]).unwrap();
+    db.create_update_job("job-running", &request, &[]).unwrap();
+    db.set_update_job_status("job-done", "completed", None)
+        .unwrap();
+    db.set_update_job_status("job-running", "running", None)
+        .unwrap();
+
+    assert_eq!(db.clear_finished_update_jobs().unwrap(), 1);
+    assert!(db.update_job_snapshot("job-done").is_err());
+    assert!(db.update_job_snapshot("job-running").is_ok());
+}
+
+/// 見つけた候補は、ジョブが変わっても残る。
+///
+/// 取得元の一覧は「前回見た位置」から先しか返さないので、候補をジョブ限りに
+/// すると、保存しなかった作品が二度と現れない。実際にそれで作品が消えた。
+#[test]
+fn a_candidate_nobody_answered_survives_into_the_next_job() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let candidate = UpdateCandidateInput {
+        source: "pixiv".to_string(),
+        source_id: "12345".to_string(),
+        kind: "new".to_string(),
+        title: "モリゾーの最新作".to_string(),
+        payload_json: "{}".to_string(),
+        target_type: Some("author".to_string()),
+    };
+    db.upsert_update_candidate(&candidate).unwrap();
+
+    // 同じ作品を何度見つけても増えない。
+    db.upsert_update_candidate(&candidate).unwrap();
+    let pending = db.list_pending_update_candidates(100).unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].title, "モリゾーの最新作");
+
+    // 「今後は出さない」と決めたら候補から外れ、見つけ直しても戻らない。
+    db.set_update_candidate_status("pixiv", "12345", "dismissed")
+        .unwrap();
+    db.upsert_update_candidate(&candidate).unwrap();
+    assert!(db.list_pending_update_candidates(100).unwrap().is_empty());
+    assert_eq!(
+        db.update_candidate_status("pixiv", "12345")
+            .unwrap()
+            .as_deref(),
+        Some("dismissed")
+    );
+    assert_eq!(db.count_dismissed_update_candidates().unwrap(), 1);
+
+    // 決定は取り消せる。
+    assert_eq!(db.restore_dismissed_update_candidates().unwrap(), 1);
+    assert_eq!(db.list_pending_update_candidates(100).unwrap().len(), 1);
+
+    // 保存できたら、もう決めていないものではない。
+    db.clear_update_candidate("pixiv", "12345").unwrap();
+    assert!(db.list_pending_update_candidates(100).unwrap().is_empty());
+    assert!(db
+        .update_candidate_status("pixiv", "12345")
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn held_candidates_survive_backups_and_never_join_normal_retries() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let request = StartUpdateJobRequest {
+        scope: "save".into(),
+        mode: "save".into(),
+        work_ids: None,
+        target_ids: None,
+        credentials: None,
+        watch_saved: Some(false),
+        adhoc_targets: None,
+    };
+    let snapshot = db
+        .create_update_job(
+            "held-job",
+            &request,
+            &[UpdateJobItemInput {
+                item_type: "candidate".into(),
+                source: Some("fanbox".into()),
+                source_id: Some("11".into()),
+                target_type: Some("work".into()),
+                title: "作品".into(),
+                payload_json: "{}".into(),
+                status: "queued".into(),
+            }],
+        )
+        .unwrap();
+    let item_id = snapshot.candidates[0].id;
+    db.complete_update_job_item(
+        item_id,
+        "failed",
+        Some("[閲覧制限] 必要な支援額: 月額1000円以上"),
+        None,
+    )
+    .unwrap();
+    db.set_update_job_status("held-job", "failed", None)
+        .unwrap();
+    for _ in 0..2 {
+        db.conn
+            .lock()
+            .unwrap()
+            .execute_batch(include_str!("../acquisition_repair.sql"))
+            .unwrap();
+    }
+    let after = db.update_job_snapshot("held-job").unwrap();
+    assert_eq!(
+        (after.held_count, after.error_count, after.processed),
+        (1, 0, 1)
+    );
+    assert_eq!(after.status, "completed");
+    db.prepare_update_job_resume("held-job", true).unwrap();
+    assert!(db.next_update_job_item("held-job").unwrap().is_none());
+    assert!(db.list_pending_update_candidates(100).unwrap().is_empty());
+    let rows = db.list_update_candidates_after(None, 100).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].status, "held");
+    assert_eq!(rows[0].kind, "new");
+    db.restore_update_candidate(&rows[0]).unwrap();
+    db.set_update_candidate_status("fanbox", "11", "dismissed")
+        .unwrap();
+    db.restore_dismissed_update_candidates().unwrap();
+    assert_eq!(
+        db.update_candidate_status("fanbox", "11")
+            .unwrap()
+            .as_deref(),
+        Some("held")
+    );
+}
+
+#[test]
+fn deleted_revision_becomes_unsaved_without_losing_the_hold() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    db.conn.lock().unwrap().execute_batch("INSERT INTO downloads(source,source_id,title,author_name,author_id,content_type,json_path,downloaded_at)
+        VALUES ('fanbox','11','作品','作者','creator','text','unused','now');").unwrap();
+    db.upsert_update_candidate(&UpdateCandidateInput { source: "fanbox".into(), source_id: "11".into(), kind: "revision".into(),
+        title: "作品".into(), target_type: Some("work".into()), payload_json: serde_json::json!({"kind":"revision", "originalData":{"localVersion":1,"localSavedAt":"old"}, "holdKind":"restricted"}).to_string() }).unwrap();
+    db.set_update_candidate_status("fanbox", "11", "held")
+        .unwrap();
+    db.conn
+        .lock()
+        .unwrap()
+        .execute(
+            "DELETE FROM downloads WHERE source='fanbox' AND source_id='11'",
+            [],
+        )
+        .unwrap();
+    let rows = db.list_update_candidates_after(None, 100).unwrap();
+    assert_eq!(rows[0].kind, "new");
+    assert_eq!(rows[0].status, "held");
+    assert_eq!(rows[0].target_type, None);
+    assert!(!rows[0].payload_json.contains("localVersion"));
+    assert!(db.pending_revision_keys().unwrap().is_empty());
+}
+
+#[test]
+fn restored_candidates_reject_untrusted_provider_fields() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let mut row = UpdateCandidateRow {
+        source: "pixiv".to_string(),
+        source_id: "12345".to_string(),
+        kind: "new".to_string(),
+        title: "候補".to_string(),
+        payload_json: "{}".to_string(),
+        target_type: Some("author".to_string()),
+        status: "pending".to_string(),
+        first_seen_at: "2026-08-28T00:00:00Z".to_string(),
+        updated_at: "2026-08-28T00:00:00Z".to_string(),
+    };
+    db.restore_update_candidate(&row).unwrap();
+
+    row.source = "https://evil.example".to_string();
+    assert!(db.restore_update_candidate(&row).is_err());
+    row.source = "pixiv".to_string();
+    row.kind = "script".to_string();
+    assert!(db.restore_update_candidate(&row).is_err());
+    row.kind = "new".to_string();
+    row.payload_json = "not json".to_string();
+    assert!(db.restore_update_candidate(&row).is_err());
+}
+
+/// 進捗は「これから何件やるか」を表す。保存のために待機列へ入れた候補は
+/// 作業なので数え、見つけただけの候補は数えない。
+#[test]
+fn queued_candidates_count_towards_progress_but_unanswered_ones_do_not() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let request = StartUpdateJobRequest {
+        scope: "author".to_string(),
+        mode: "check_only".to_string(),
+        work_ids: None,
+        target_ids: None,
+        credentials: None,
+        watch_saved: None,
+        adhoc_targets: None,
+    };
+    db.create_update_job(
+        "job-progress",
+        &request,
+        &[UpdateJobItemInput {
+            item_type: "target".to_string(),
+            source: Some("pixiv".to_string()),
+            source_id: Some("7".to_string()),
+            target_type: Some("author".to_string()),
+            title: "作者".to_string(),
+            payload_json: "{}".to_string(),
+            status: "queued".to_string(),
+        }],
+    )
+    .unwrap();
+    for index in 0..3 {
+        db.insert_update_job_candidate(
+            "job-progress",
+            &UpdateJobItemInput {
+                item_type: "candidate".to_string(),
+                source: Some("pixiv".to_string()),
+                source_id: Some(format!("novel-{index}")),
+                target_type: Some("author".to_string()),
+                title: format!("候補 {index}"),
+                payload_json: "{}".to_string(),
+                status: "candidate".to_string(),
+            },
+        )
+        .unwrap();
+    }
+
+    // 見つけただけの段階: 作業は対象1件のみ。
+    let snapshot = db.update_job_snapshot("job-progress").unwrap();
+    assert_eq!(snapshot.totals, 1);
+    assert_eq!(snapshot.candidate_count, 3);
+    assert_eq!((snapshot.check_total, snapshot.check_processed), (1, 0));
+    assert_eq!((snapshot.save_total, snapshot.save_processed), (0, 0));
+
+    // 保存を頼んだ2件は作業に加わる。ここで進捗が 1/1 のままだと、
+    // 保存の最中に「完了」と見えてしまう。
+    let ids: Vec<i64> = snapshot.candidates.iter().take(2).map(|c| c.id).collect();
+    db.queue_update_job_candidates("job-progress", &ids)
+        .unwrap();
+    let snapshot = db.update_job_snapshot("job-progress").unwrap();
+    assert_eq!(snapshot.totals, 3);
+    assert_eq!(snapshot.processed, 0);
+    assert_eq!((snapshot.check_total, snapshot.check_processed), (1, 0));
+    assert_eq!((snapshot.save_total, snapshot.save_processed), (2, 0));
+    db.set_update_job_status("job-progress", "running", None)
+        .unwrap();
+    let target = db.next_update_job_item("job-progress").unwrap().unwrap();
+    db.complete_update_job_item(target.id, "done", None, None)
+        .unwrap();
+    let snapshot = db.update_job_snapshot("job-progress").unwrap();
+    assert_eq!((snapshot.check_total, snapshot.check_processed), (1, 1));
+    assert_eq!((snapshot.save_total, snapshot.save_processed), (2, 0));
+}
+
+/// 監視対象の健康状態。「確認した」と「見つかった」は別で、失敗は積み上がる。
+#[test]
+fn a_target_records_when_it_last_found_something_and_when_it_keeps_failing() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    db.upsert_update_target(&UpdateTargetInput {
+        target_type: "author".to_string(),
+        source: "pixiv".to_string(),
+        source_key: "7".to_string(),
+        display_name: "青葉しおり".to_string(),
+        enabled: true,
+        metadata_json: None,
+    })
+    .unwrap();
+
+    // 何も見つからなかった確認では、最後に見つけた時刻は空のまま。
+    db.mark_update_target_checked("author", "pixiv", "7", None, None, 0)
+        .unwrap();
+    let target = db.list_update_targets(None, false).unwrap().remove(0);
+    assert!(target.last_checked_at.is_some());
+    assert!(target.last_hit_at.is_none());
+    assert_eq!(target.consecutive_errors, 0);
+
+    // 失敗は積み上がる。
+    db.mark_update_target_failed("author", "pixiv", "7")
+        .unwrap();
+    db.mark_update_target_failed("author", "pixiv", "7")
+        .unwrap();
+    let target = db.list_update_targets(None, false).unwrap().remove(0);
+    assert_eq!(target.consecutive_errors, 2);
+
+    // 見つかった確認で、時刻が進み、連続失敗は 0 に戻る。
+    db.mark_update_target_checked("author", "pixiv", "7", Some("12002"), None, 3)
+        .unwrap();
+    let target = db.list_update_targets(None, false).unwrap().remove(0);
+    assert!(target.last_hit_at.is_some());
+    assert_eq!(target.consecutive_errors, 0);
+    assert_eq!(target.last_seen_source_id.as_deref(), Some("12002"));
+}
+
+#[test]
+fn update_job_candidates_can_be_queued_for_saving() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let request = StartUpdateJobRequest {
+        scope: "author".to_string(),
+        mode: "check_only".to_string(),
+        work_ids: None,
+        target_ids: None,
+        credentials: None,
+        watch_saved: None,
+        adhoc_targets: None,
+    };
+    db.create_update_job(
+        "job-candidates",
+        &request,
+        &[UpdateJobItemInput {
+            item_type: "target".to_string(),
+            source: Some("pixiv".to_string()),
+            source_id: Some("user-1".to_string()),
+            target_type: Some("author".to_string()),
+            title: "Author".to_string(),
+            payload_json: "{}".to_string(),
+            status: "done".to_string(),
+        }],
+    )
+    .unwrap();
+    let candidate = UpdateJobItemInput {
+        item_type: "candidate".to_string(),
+        source: Some("pixiv".to_string()),
+        source_id: Some("novel-1".to_string()),
+        target_type: Some("author".to_string()),
+        title: "Novel".to_string(),
+        payload_json: serde_json::json!({
+            "targetLabel": "Author",
+            "subtitle": "Author / now"
+        })
+        .to_string(),
+        status: "candidate".to_string(),
+    };
+    assert!(db
+        .insert_update_job_candidate("job-candidates", &candidate)
+        .unwrap());
+    assert!(!db
+        .insert_update_job_candidate("job-candidates", &candidate)
+        .unwrap());
+    let snapshot = db.update_job_snapshot("job-candidates").unwrap();
+    assert_eq!(snapshot.candidate_count, 1);
+    assert_eq!(snapshot.candidates.len(), 1);
+    let candidate_id = snapshot.candidates[0].id;
+    let changed = db
+        .queue_update_job_candidates("job-candidates", &[candidate_id])
+        .unwrap();
+    assert_eq!(changed, 1);
+    let snapshot = db.update_job_snapshot("job-candidates").unwrap();
+    assert_eq!(snapshot.candidates[0].status, "queued");
+}
+
+#[test]
+fn update_history_keeps_the_subject_and_exposes_job_only_holds() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let request = StartUpdateJobRequest {
+        scope: "author".into(),
+        mode: "check_only".into(),
+        work_ids: None,
+        target_ids: None,
+        credentials: None,
+        watch_saved: None,
+        adhoc_targets: None,
+    };
+    let mut items = Vec::new();
+    for index in 0..7 {
+        items.push(UpdateJobItemInput {
+            item_type: "work".into(),
+            source: Some("fanbox".into()),
+            source_id: Some(format!("repost-{index}")),
+            target_type: Some("work".into()),
+            title: format!("再掲 {index}"),
+            payload_json: "{}".into(),
+            status: "held".into(),
+        });
+    }
+    for index in 0..12 {
+        items.push(UpdateJobItemInput {
+            item_type: "work".into(),
+            source: Some("fanbox".into()),
+            source_id: Some(format!("older-{index}")),
+            target_type: Some("work".into()),
+            title: format!("旧投稿 {index}"),
+            payload_json: "{}".into(),
+            status: "skipped".into(),
+        });
+    }
+    items.push(UpdateJobItemInput {
+        item_type: "target".into(),
+        source: Some("fanbox".into()),
+        source_id: Some("creator".into()),
+        target_type: Some("author".into()),
+        title: "氷砂糖".into(),
+        payload_json: "{}".into(),
+        status: "done".into(),
+    });
+    db.create_update_job("job-history-review", &request, &items)
+        .unwrap();
+    let jobs = db.list_update_jobs().unwrap();
+    let job = jobs
+        .iter()
+        .find(|job| job.job_id == "job-history-review")
+        .unwrap();
+    assert_eq!(job.subject_label.as_deref(), Some("氷砂糖"));
+    assert_eq!(job.subject_source.as_deref(), Some("fanbox"));
+    assert_eq!(job.held_count, 7);
+
+    let states = db
+        .list_update_job_item_states("job-history-review")
+        .unwrap();
+    assert_eq!(states.len(), 20);
+    assert_eq!(
+        states.iter().filter(|item| item.status == "held").count(),
+        7
+    );
+    assert_eq!(states[0].item_type.as_deref(), Some("work"));
+    assert_eq!(states[0].title.as_deref(), Some("再掲 0"));
+    assert!(db
+        .list_update_candidates_by_status("deferred", 2000)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn saving_candidates_after_cancel_does_not_resume_the_canceled_queue() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let request = StartUpdateJobRequest {
+        scope: "author".to_string(),
+        mode: "check_only".to_string(),
+        work_ids: None,
+        target_ids: None,
+        credentials: None,
+        watch_saved: None,
+        adhoc_targets: None,
+    };
+    db.create_update_job(
+        "job-canceled-candidates",
+        &request,
+        &[
+            UpdateJobItemInput {
+                item_type: "target".to_string(),
+                source: Some("pixiv".to_string()),
+                source_id: Some("checked".to_string()),
+                target_type: Some("author".to_string()),
+                title: "確認済み".to_string(),
+                payload_json: "{}".to_string(),
+                status: "done".to_string(),
+            },
+            UpdateJobItemInput {
+                item_type: "target".to_string(),
+                source: Some("pixiv".to_string()),
+                source_id: Some("interrupted".to_string()),
+                target_type: Some("author".to_string()),
+                title: "中止した確認".to_string(),
+                payload_json: "{}".to_string(),
+                status: "running".to_string(),
+            },
+            UpdateJobItemInput {
+                item_type: "candidate".to_string(),
+                source: Some("pixiv".to_string()),
+                source_id: Some("auto-save-interrupted".to_string()),
+                target_type: Some("author".to_string()),
+                title: "中止した自動保存".to_string(),
+                payload_json: "{}".to_string(),
+                status: "queued".to_string(),
+            },
+            UpdateJobItemInput {
+                item_type: "candidate".to_string(),
+                source: Some("pixiv".to_string()),
+                source_id: Some("selected".to_string()),
+                target_type: Some("author".to_string()),
+                title: "今回選んだ候補".to_string(),
+                payload_json: "{}".to_string(),
+                status: "candidate".to_string(),
+            },
+        ],
+    )
+    .unwrap();
+    db.prepare_update_job_resume("job-canceled-candidates", false)
+        .unwrap();
+    db.set_update_job_status("job-canceled-candidates", "canceled", None)
+        .unwrap();
+
+    let before = db.update_job_snapshot("job-canceled-candidates").unwrap();
+    assert_eq!(
+        db.queue_update_job_candidates("job-canceled-candidates", &[i64::MAX])
+            .unwrap(),
+        0
+    );
+    let untouched = db
+        .list_update_job_item_states("job-canceled-candidates")
+        .unwrap();
+    assert!(untouched.iter().any(|item| {
+        item.source_id.as_deref() == Some("interrupted") && item.status == "queued"
+    }));
+
+    let selected_id = before
+        .candidates
+        .iter()
+        .find(|candidate| candidate.source_id == "selected")
+        .unwrap()
+        .id;
+    assert_eq!(
+        db.queue_update_job_candidates("job-canceled-candidates", &[selected_id])
+            .unwrap(),
+        1
+    );
+    db.set_update_job_status("job-canceled-candidates", "queued", None)
+        .unwrap();
+
+    let next = db
+        .next_update_job_item("job-canceled-candidates")
+        .unwrap()
+        .unwrap();
+    assert_eq!(next.item_type, "candidate");
+    assert_eq!(next.source_id.as_deref(), Some("selected"));
+
+    let states = db
+        .list_update_job_item_states("job-canceled-candidates")
+        .unwrap();
+    assert!(states.iter().any(|item| {
+        item.source_id.as_deref() == Some("interrupted") && item.status == "skipped"
+    }));
+    assert!(states.iter().any(|item| {
+        item.source_id.as_deref() == Some("auto-save-interrupted") && item.status == "candidate"
+    }));
+}
+
+#[test]
+fn new_work_and_revision_enter_the_same_save_queue() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let request = StartUpdateJobRequest {
+        scope: "all".to_string(),
+        mode: "check_only".to_string(),
+        work_ids: None,
+        target_ids: None,
+        credentials: None,
+        watch_saved: None,
+        adhoc_targets: None,
+    };
+    db.create_update_job("job-mixed-candidates", &request, &[])
+        .unwrap();
+
+    for (source_id, kind) in [("new-1", "new"), ("revision-1", "revision")] {
+        db.insert_update_job_candidate(
+            "job-mixed-candidates",
+            &UpdateJobItemInput {
+                item_type: "candidate".to_string(),
+                source: Some("pixiv".to_string()),
+                source_id: Some(source_id.to_string()),
+                target_type: Some("work".to_string()),
+                title: source_id.to_string(),
+                payload_json: serde_json::json!({
+                    "kind": kind,
+                    "targetLabel": "作者",
+                    "subtitle": "候補"
+                })
+                .to_string(),
+                status: "candidate".to_string(),
+            },
+        )
+        .unwrap();
+    }
+
+    let before = db.update_job_snapshot("job-mixed-candidates").unwrap();
+    assert_eq!(before.candidates.len(), 2);
+    assert!(before.candidates.iter().all(|candidate| candidate.selected));
+    let ids = before
+        .candidates
+        .iter()
+        .map(|candidate| candidate.id)
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        db.queue_update_job_candidates("job-mixed-candidates", &ids)
+            .unwrap(),
+        2
+    );
+    let after = db.update_job_snapshot("job-mixed-candidates").unwrap();
+    assert!(after
+        .candidates
+        .iter()
+        .all(|candidate| candidate.status == "queued"));
+}
+
+/// v0.11.0 のまとめ保存ジョブは target_type を NULL で記録していた。
+/// アップデート後も、そのジョブを一覧表示して再開できる。
+#[test]
+fn update_job_snapshot_reads_legacy_save_candidates_without_target_type() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let request = StartUpdateJobRequest {
+        scope: "save".to_string(),
+        mode: "save".to_string(),
+        work_ids: None,
+        target_ids: None,
+        credentials: None,
+        watch_saved: None,
+        adhoc_targets: None,
+    };
+    db.create_update_job(
+        "job-legacy-save",
+        &request,
+        &[UpdateJobItemInput {
+            item_type: "candidate".to_string(),
+            source: Some("pixiv".to_string()),
+            source_id: Some("novel-1".to_string()),
+            target_type: None,
+            title: "Legacy save".to_string(),
+            payload_json: serde_json::json!({ "kind": "save" }).to_string(),
+            status: "queued".to_string(),
+        }],
+    )
+    .unwrap();
+
+    let snapshot = db.update_job_snapshot("job-legacy-save").unwrap();
+    assert_eq!(snapshot.candidates.len(), 1);
+    assert_eq!(snapshot.candidates[0].target_type, "work");
+}
+
+#[test]
+fn update_job_snapshot_pages_candidate_payloads() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let request = StartUpdateJobRequest {
+        scope: "author".to_string(),
+        mode: "check_only".to_string(),
+        work_ids: None,
+        target_ids: None,
+        credentials: None,
+        watch_saved: None,
+        adhoc_targets: None,
+    };
+    db.create_update_job("job-paged", &request, &[]).unwrap();
+    for index in 0..205 {
+        db.insert_update_job_candidate(
+            "job-paged",
+            &UpdateJobItemInput {
+                item_type: "candidate".to_string(),
+                source: Some("pixiv".to_string()),
+                source_id: Some(format!("novel-{index}")),
+                target_type: Some("author".to_string()),
+                title: format!("Novel {index}"),
+                payload_json: "{}".to_string(),
+                status: "candidate".to_string(),
+            },
+        )
+        .unwrap();
+    }
+
+    let first = db.update_job_snapshot("job-paged").unwrap();
+    assert_eq!(first.candidates.len(), 200);
+    let cursor = first.next_candidate_cursor.expect("next page");
+    let second = db
+        .update_job_snapshot_page("job-paged", Some(cursor), None)
+        .unwrap();
+    assert_eq!(second.candidates.len(), 5);
+    assert!(second.next_candidate_cursor.is_none());
+    assert!(second.candidates[0].id > cursor);
+}
+
+#[test]
+fn saved_update_job_download_ids_survive_item_lookup_after_worker_restart() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let request = StartUpdateJobRequest {
+        scope: "save".to_string(),
+        mode: "save".to_string(),
+        work_ids: None,
+        target_ids: None,
+        credentials: None,
+        watch_saved: None,
+        adhoc_targets: None,
+    };
+    db.create_update_job(
+        "job-saved-ids",
+        &request,
+        &[UpdateJobItemInput {
+            item_type: "candidate".to_string(),
+            source: Some("pixiv".to_string()),
+            source_id: Some("novel-1".to_string()),
+            target_type: Some("work".to_string()),
+            title: "Saved".to_string(),
+            payload_json: r#"{"kind":"save"}"#.to_string(),
+            status: "queued".to_string(),
+        }],
+    )
+    .unwrap();
+    let item = db.next_update_job_item("job-saved-ids").unwrap().unwrap();
+    db.complete_update_job_item(item.id, "saved", None, Some(42))
+        .unwrap();
+    db.append_update_job_log("job-saved-ids", "success", "Saved")
+        .unwrap();
+    assert_eq!(
+        db.saved_update_job_download_ids("job-saved-ids").unwrap(),
+        vec![42]
+    );
+    let delta = db
+        .update_job_progress_delta("job-saved-ids", Some(item.id))
+        .unwrap();
+    assert_eq!(delta.summary.processed, 1);
+    assert_eq!(delta.summary.saved_count, 1);
+    assert_eq!(delta.changed_item.unwrap().status, "saved");
+    assert_eq!(delta.latest_log.unwrap().message, "Saved");
+}
+
+/// シリーズからも、その作品が入っているコレクションへ辿れる。
+///
+/// 作者にはこの入口があったのにシリーズには無く、同じ画面で作りが割れていた。
+/// **経路が `download_people` か `download_series` かの違いしかない。**
+#[test]
+fn a_series_finds_the_collections_its_works_belong_to() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let first = insert_download_unindexed(
+        &db,
+        &storage,
+        "series-collection-1",
+        "連作の一話",
+        "連載作者",
+        &[],
+        "導入",
+    );
+    let second = insert_download_unindexed(
+        &db,
+        &storage,
+        "series-collection-2",
+        "連作の二話",
+        "連載作者",
+        &[],
+        "続き",
+    );
+    let outsider = insert_download_unindexed(
+        &db,
+        &storage,
+        "series-collection-3",
+        "関係のない話",
+        "別の作者",
+        &[],
+        "単発",
+    );
+    db.upsert_download_series(first, "pixiv", "saga", "連作", Some(1))
+        .unwrap();
+    db.upsert_download_series(second, "pixiv", "saga", "連作", Some(2))
+        .unwrap();
+
+    let inside = db
+        .create_collection_from_downloads("連作の棚", "unordered", &[second])
+        .unwrap();
+    // シリーズの作品を含まない棚は出てこない。
+    db.create_collection_from_downloads("よその棚", "unordered", &[outsider])
+        .unwrap();
+
+    let found = db.list_collections_for_series("pixiv", "saga").unwrap();
+    assert_eq!(found.len(), 1, "含む棚だけが返るはず: {found:?}");
+    assert_eq!(found[0].id, inside.summary.id);
+
+    // 別のシリーズ名では引けない。鍵の取り違えに気づけるようにしておく。
+    assert!(db
+        .list_collections_for_series("pixiv", "another")
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn collection_additions_fall_back_when_only_non_seed_works_have_vectors() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let member = insert_download_unindexed(
+        &db,
+        &storage,
+        "db02-member",
+        "種作品",
+        "作者",
+        &["催眠", "NTR", "黛冬優子"],
+        "束の種作品本文",
+    );
+    let candidate = insert_download_unindexed(
+        &db,
+        &storage,
+        "db02-candidate",
+        "題名は異なる候補",
+        "別作者",
+        &["催眠", "NTR", "黛冬優子"],
+        "規則では候補にできる本文",
+    );
+    let comparison = insert_download_unindexed(
+        &db,
+        &storage,
+        "db02-comparison",
+        "別の比較用作品",
+        "比較作者",
+        &["比較用"],
+        "意味索引の比較用本文",
+    );
+    let collection = db
+        .create_collection_from_downloads("DB-02 isolated", "unordered", &[member])
+        .unwrap();
+
+    // Candidate + comparison make a non-empty centroid set and shelf baseline,
+    // while the collection's only seed deliberately has no semantic vector.
+    crate::database::semantic_index::upsert_documents(
+        &storage,
+        &[
+            crate::database::semantic_index::SemanticIndexDocument {
+                download_id: candidate,
+                title: "題名は異なる候補".to_string(),
+                author_name: "別作者".to_string(),
+                tags: "催眠 NTR 黛冬優子".to_string(),
+                series_title: String::new(),
+                excerpt: String::new(),
+                body: "規則では候補にできる本文".to_string(),
+            },
+            crate::database::semantic_index::SemanticIndexDocument {
+                download_id: comparison,
+                title: "別の比較用作品".to_string(),
+                author_name: "比較作者".to_string(),
+                tags: "比較用".to_string(),
+                series_title: String::new(),
+                excerpt: String::new(),
+                body: "意味索引の比較用本文".to_string(),
+            },
+        ],
+    )
+    .unwrap();
+
+    let result = db
+        .suggest_collection_additions(&collection.summary.id)
+        .unwrap();
+
+    assert!(!result.semantic_used);
+    assert_eq!(
+        result.note.as_deref(),
+        Some("この束と候補の本文ベクトルを比較できなかったため、規則だけで探しました。")
+    );
+    let suggested = result
+        .candidates
+        .iter()
+        .find(|item| item.download_id == candidate)
+        .expect("the shared-tag rule should retain the candidate");
+    assert!(suggested
+        .evidence
+        .iter()
+        .any(|evidence| evidence.kind == "shared_tags"));
+    assert!(result
+        .candidates
+        .iter()
+        .all(|item| item.download_id != member));
+}
+
+/// 「保存フォルダーにある未参照ファイル」は、`assets` だけで決めてはいけない。
+///
+/// 表紙は `downloads.cover_path`、本文の記録は `json_path`、古い版は
+/// `download_versions` が指している。`assets` しか見ていなかったころ、5,410
+/// 作品の棚で **3,628 件・462.9MB が「未参照」として出ていた**。実際に
+/// 指されていないのは、版が上がった作品の古い `original.json` 3 件だけだった。
+#[test]
+fn a_file_named_by_any_column_is_not_counted_as_an_orphan() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let id = insert_download_unindexed(
+        &db,
+        &storage,
+        "orphan-scan",
+        "表紙のある作品",
+        "作者",
+        &[],
+        "本文",
+    );
+
+    // 表紙は `assets` ではなく `downloads.cover_path` が指す形にする。
+    let cover = storage.join("pixiv/orphan-scan/v1/data_assets/cover/front.jpg");
+    std::fs::create_dir_all(cover.parent().unwrap()).unwrap();
+    std::fs::write(&cover, b"jpeg").unwrap();
+    {
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE downloads SET cover_path = ?1 WHERE id = ?2",
+            params![cover.to_string_lossy().as_ref(), id],
+        )
+        .unwrap();
+    }
+
+    let referenced = {
+        let conn = db.read_conn().unwrap();
+        referenced_library_paths(&conn).unwrap()
+    };
+    assert!(
+        referenced.contains(&comparable_library_path(&cover)),
+        "表紙が集合に入っていない: {referenced:?}"
+    );
+
+    // 誰も指していないファイルは、これまでどおり数える。
+    let stray = storage.join("pixiv/orphan-scan/v1/data_assets/cover/stray.jpg");
+    std::fs::write(&stray, b"jpeg").unwrap();
+    assert!(!referenced.contains(&comparable_library_path(&stray)));
+}
+
+/// 拡張長接頭辞の有無で取り違えない。DB は付けて持ち、歩いて拾う側は付けない。
+#[test]
+fn the_extended_length_prefix_does_not_split_one_file_into_two() {
+    let plain = Path::new(r"C:\lib\downloads\pixiv\1\v1\cover.jpg");
+    let extended = Path::new(r"\\?\C:\lib\downloads\pixiv\1\v1\cover.jpg");
+    assert_eq!(
+        comparable_library_path(plain),
+        comparable_library_path(extended)
+    );
+    let shouting = Path::new(r"C:\LIB\Downloads\PIXIV\1\V1\Cover.JPG");
+    assert_eq!(
+        comparable_library_path(plain),
+        comparable_library_path(shouting)
+    );
+}
+
+/// 意味ベクトルだけが遅れている作品も、作り直しの対象になる。
+///
+/// 残り件数を字面の索引の古さだけで数えていたころ、索引が最新
+/// （5,410/5,410）なら残りは 0 と出て `rebuild_search_index` はそこで戻った。
+/// **「意味検索のベクトルも同時に作成する」を入れても必ず 0 件で終わり**、
+/// 意味索引に届いていない 2,239 件は永久に追いつかなかった。
+#[test]
+fn a_work_missing_only_its_vectors_is_still_work_for_the_rebuild() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let id = insert_download_unindexed(&db, &storage, "vectors-behind", "題", "作者", &[], "本文");
+
+    // 字面の索引だけ最新にする。意味索引には何も入れない。
+    db.rebuild_search_index(
+        SearchIndexRebuildOptions {
+            include_semantic: false,
+            ..Default::default()
+        },
+        &|| false,
+        |_| {},
+    )
+    .unwrap();
+
+    let conn = db.read_conn().unwrap();
+    assert_eq!(
+        pending_search_index_count(&conn, false).unwrap(),
+        0,
+        "字面の索引は追いついているはず"
+    );
+    assert_eq!(
+        pending_search_index_count(&conn, true).unwrap(),
+        1,
+        "意味ベクトルが無いのだから、意味も作るなら残っているはず"
+    );
+    assert_eq!(
+        stale_search_index_ids_locked(&conn, 10, 0, true).unwrap(),
+        vec![id],
+        "選ぶ側と数える側は同じ条件でなければならない"
+    );
+    assert!(stale_search_index_ids_locked(&conn, 10, 0, false)
+        .unwrap()
+        .is_empty());
+}
+
+/// 意味ベクトルだけ遅れている作品で、字面の索引をやり直さない。
+///
+/// 追いつきの対象に選ばれても、字面の索引が最新なら作り直す理由が無い。
+/// やり直していたころ、2,239 件の追いつきで**形態素解析も読みの展開も全件に
+/// 走り**、新しいセグメントが増えてあとで統合の仕事まで作っていた。
+#[test]
+fn catching_up_on_vectors_does_not_redo_the_lexical_index() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let fresh = insert_download_unindexed(
+        &db,
+        &storage,
+        "lex-fresh",
+        "既に索引済み",
+        "作者",
+        &[],
+        "本文",
+    );
+    db.rebuild_search_index(SearchIndexRebuildOptions::default(), &|| false, |_| {})
+        .unwrap();
+
+    // ここで新しい作品を足す。こちらは字面も意味も遅れている。
+    let behind = insert_download_unindexed(
+        &db,
+        &storage,
+        "lex-behind",
+        "まだ索引していない",
+        "作者",
+        &[],
+        "本文",
+    );
+
+    let conn = db.read_conn().unwrap();
+    let selected = stale_search_index_ids_locked(&conn, 10, 0, true).unwrap();
+    assert!(
+        selected.contains(&fresh) && selected.contains(&behind),
+        "意味も作るなら、両方が対象になるはず: {selected:?}"
+    );
+
+    // そのうち字面をやり直すのは、本当に古いほうだけ。
+    let lexical = lexically_stale_subset(&conn, &selected).unwrap();
+    assert!(!lexical.contains(&fresh), "索引済みの作品をやり直している");
+    assert!(lexical.contains(&behind));
+
+    // 組み立ての段でも、やり直さない作品は tantivy の形を持たない。
+    drop(conn);
+    let prepared = db.prepare_search_index_chunk(&selected, &lexical).unwrap();
+    assert_eq!(prepared.documents.len(), 1, "字面へ入れるのは1件だけ");
+    assert_eq!(prepared.indexed.len(), 1);
+    assert_eq!(prepared.semantic.len(), 2, "意味ベクトルは両方に要る");
+    assert_eq!(prepared.semantic_indexed.len(), 2);
+}
+
+/// 索引が揃っている棚では、自動保守は仕事を持たない。
+///
+/// 起動 1.2 秒後の自動保守は、走るときに `library_gate` の書き込み権を
+/// **再構築が終わるまで握り続ける**。保存・削除・タグ編集はその間ずっと待つ。
+///
+/// これを許しているのは「揃っている棚では走らない」という一点である
+/// （`start_automatic_index_maintenance` は `pending <= 0` で帰る）。その前提が
+/// 崩れると、毎回の起動が黙って書き込みを止めることになるので、ここで留める。
+///
+/// あわせて、走るときも棚全体ではなく**遅れている文書だけ**が対象であることを
+/// 確かめる。全件を作り直す実装に変わると、待ち時間は棚の大きさに比例する。
+#[test]
+fn a_current_shelf_gives_automatic_maintenance_nothing_to_do() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+
+    for index in 0..5 {
+        insert_download_unindexed(
+            &db,
+            &storage,
+            &format!("gate-{index}"),
+            &format!("門の作品{index}"),
+            "作者",
+            &["タグ"],
+            "本文をいくらか置く。索引の対象になる長さがあればよい。",
+        );
+    }
+
+    // 入れたばかりは全部が遅れている。ここで自動保守は仕事を持つ。
+    let before = db.get_search_index_status().unwrap();
+    assert_eq!(before.pending_downloads, 5, "{before:?}");
+
+    db.rebuild_search_index(SearchIndexRebuildOptions::default(), &|| false, |_| {})
+        .unwrap();
+
+    // 追いついた棚では 0。自動保守はここで帰るので、門を取らない。
+    let after = db.get_search_index_status().unwrap();
+    assert_eq!(after.pending_downloads, 0, "{after:?}");
+
+    // もう一度足したぶんだけが次の対象になる。全件ではない。
+    insert_download_unindexed(
+        &db,
+        &storage,
+        "gate-new",
+        "あとから来た作品",
+        "作者",
+        &["タグ"],
+        "本文をいくらか置く。",
+    );
+    let incremental = db.get_search_index_status().unwrap();
+    assert_eq!(
+        incremental.pending_downloads, 1,
+        "遅れているぶんだけが対象であること: {incremental:?}"
+    );
+}
+
+#[test]
+fn discovery_finds_inner_pairs_within_an_official_anthology() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    for (id, title) in [
+        ("inner-a1", "星の舟 前編"),
+        ("inner-a2", "星の舟 後編"),
+        ("inner-b1", "花の庭 前編"),
+        ("inner-b2", "花の庭 後編"),
+    ] {
+        let id = insert_download_unindexed(&db, &storage, id, title, "架空作者", &[], "本文");
+        db.conn.lock().unwrap().execute("INSERT INTO download_series(download_id,series_source,series_key,title) VALUES(?1,'pixiv','requests','リクエスト作品集')",params![id]).unwrap();
+    }
+    db.conn
+        .lock()
+        .unwrap()
+        .execute("UPDATE downloads SET author_id='same-author'", [])
+        .unwrap();
+    let result = db.sweep_collection_candidates().unwrap();
+    assert_eq!(result.bundles.len(), 2, "{:?}", result.bundles);
+    assert!(result.bundles.iter().all(|b| b.members.len() == 2
+        && b.members
+            .iter()
+            .all(|m| m.evidence.iter().any(|e| e.kind == "series_subset"))));
+    // 管理用名称に依存せず、大きな作品集の内側を探す。
+    db.conn
+        .lock()
+        .unwrap()
+        .execute("UPDATE download_series SET title='架空作者の小説集'", [])
+        .unwrap();
+    assert_eq!(db.sweep_collection_candidates().unwrap().bundles.len(), 2);
+}
+
+#[test]
+fn discovery_preserves_chapter_pairs_but_skips_a_whole_official_series() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    for (id, title) in [
+        ("chapter-11", "星の舟 第1章 前編"),
+        ("chapter-13", "星の舟 第1章 後編"),
+        ("chapter-21", "星の舟 第2章 前編"),
+        ("chapter-23", "星の舟 第2章 後編"),
+    ] {
+        let id = insert_download_unindexed(&db, &storage, id, title, "架空作者", &[], "本文");
+        db.conn.lock().unwrap().execute("INSERT INTO download_series(download_id,series_source,series_key,title) VALUES(?1,'pixiv','star','星の舟')",params![id]).unwrap();
+    }
+    db.conn
+        .lock()
+        .unwrap()
+        .execute("UPDATE downloads SET author_id='same-author'", [])
+        .unwrap();
+    let bundles = db.sweep_collection_candidates().unwrap().bundles;
+    assert_eq!(bundles.len(), 2, "{bundles:?}");
+    let pairs = bundles
+        .iter()
+        .map(|b| {
+            b.members
+                .iter()
+                .map(|m| m.source_id.as_str())
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    assert!(pairs.contains(&vec!["chapter-11", "chapter-13"]));
+    assert!(pairs.contains(&vec!["chapter-21", "chapter-23"]));
+}
+
+#[test]
+fn discovery_stable_ids_accept_user_order_and_reject_only_selected_pairs() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    for (id, title) in [
+        ("review-1", "星の舟 第1話"),
+        ("review-2", "星の舟 第2話"),
+        ("review-3", "星の舟 第3話"),
+    ] {
+        insert_download_unindexed(&db, &storage, id, title, "架空作者", &[], "本文");
+    }
+    db.conn
+        .lock()
+        .unwrap()
+        .execute("UPDATE downloads SET author_id='same-author'", [])
+        .unwrap();
+    let first = db.sweep_collection_candidates().unwrap().bundles.remove(0);
+    let mut names = first.name_options.clone();
+    names.push(CollectionNameCandidate {
+        source: "llm".into(),
+        name: "生成した名前".into(),
+        label: "モデルの案".into(),
+        ..Default::default()
+    });
+    db.conn
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE collection_suggestions SET name_options_json=?1 WHERE id=?2",
+            params![serde_json::to_string(&names).unwrap(), first.id],
+        )
+        .unwrap();
+    let again = db.sweep_collection_candidates().unwrap().bundles.remove(0);
+    assert_eq!(first.id, again.id);
+    assert!(again
+        .name_options
+        .iter()
+        .any(|option| option.source == "llm" && option.name == "生成した名前"));
+    let keys = |ids: &[&str]| {
+        ids.iter()
+            .map(|id| WorkKey {
+                source: "pixiv".into(),
+                source_id: (*id).into(),
+            })
+            .collect::<Vec<_>>()
+    };
+    assert!(db
+        .accept_collection_suggestion(&AcceptCollectionSuggestionInput {
+            suggestion_id: first.id.clone(),
+            member_keys: Some(keys(&["review-1", "foreign"])),
+            name: None,
+            collection_kind: None
+        })
+        .is_err());
+    let collection = db
+        .accept_collection_suggestion(&AcceptCollectionSuggestionInput {
+            suggestion_id: first.id.clone(),
+            member_keys: Some(keys(&["review-3", "review-1", "review-2"])),
+            name: None,
+            collection_kind: None,
+        })
+        .unwrap();
+    assert_eq!(
+        collection
+            .members
+            .iter()
+            .map(|m| m.source_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["review-3", "review-1", "review-2"]
+    );
+    // 別の候補を使って、未選択作品との否定フィードバックが増えないことを確かめる。
+    {
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE collection_suggestions SET state='pending' WHERE id=?1",
+            params![first.id],
+        )
+        .unwrap();
+        conn.execute("DELETE FROM collection_pair_feedback", [])
+            .unwrap();
+    }
+    assert!(db
+        .reject_collection_suggestion(&first.id, Some(&keys(&["review-1", "review-2"])))
+        .unwrap());
+    let pairs=db.conn.lock().unwrap().prepare("SELECT left_source_id,right_source_id FROM collection_pair_feedback WHERE decision='reject'").unwrap().query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?))).unwrap().collect::<Result<Vec<_>,_>>().unwrap();
+    assert_eq!(pairs, vec![("review-1".into(), "review-2".into())]);
+}
+
+#[test]
+fn discovery_ignores_references_and_uses_link_direction_instead_of_dates() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let a = insert_download_unindexed(
+        &db,
+        &storage,
+        "link-a",
+        "旅立ちの朝",
+        "架空作者",
+        &[],
+        "本文",
+    );
+    let b = insert_download_unindexed(
+        &db,
+        &storage,
+        "link-b",
+        "帰り道の約束",
+        "架空作者",
+        &[],
+        "本文",
+    );
+    let c = insert_download_unindexed(
+        &db,
+        &storage,
+        "link-c",
+        "参考にした手紙",
+        "架空作者",
+        &[],
+        "本文",
+    );
+    {
+        let conn = db.conn.lock().unwrap();
+        for (from, to, relation) in [(b, a, "continues_from"), (a, c, "mentions")] {
+            conn.execute("INSERT INTO work_links(from_source,from_source_id,from_download_id,to_source,to_source_id,to_download_id,relation_type,evidence_type,confidence) SELECT 'pixiv',a.source_id,a.id,'pixiv',b.source_id,b.id,?3,'test',0.94 FROM downloads a,downloads b WHERE a.id=?1 AND b.id=?2",params![from,to,relation]).unwrap();
+        }
+        conn.execute("UPDATE downloads SET source_created_at=CASE id WHEN ?1 THEN '2026-09-01' ELSE '2025-01-01' END",params![a]).unwrap();
+    }
+    let bundles = db.sweep_collection_candidates().unwrap().bundles;
+    assert_eq!(bundles.len(), 1, "{bundles:?}");
+    assert_eq!(
+        bundles[0]
+            .members
+            .iter()
+            .map(|m| m.download_id.unwrap())
+            .collect::<Vec<_>>(),
+        vec![a, b]
+    );
+    assert!(bundles[0].members[1]
+        .evidence
+        .iter()
+        .any(|e| e.kind == "sequence_link"));
+    assert_eq!(bundles[0].proposed_name, "「旅立ちの朝」からの連作");
+    assert_eq!(bundles[0].name_options[0].label, "先頭作品からの仮の名前");
+}
+
+#[test]
+fn discovery_keeps_links_attached_to_an_edition_alias() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let a = insert_download_unindexed(
+        &db,
+        &storage,
+        "alias-a",
+        "星の舟 前編",
+        "架空作者",
+        &[],
+        "短い本文",
+    );
+    let full = insert_download_unindexed(
+        &db,
+        &storage,
+        "alias-full",
+        "星の舟 前編",
+        "架空作者",
+        &[],
+        "こちらは十分長い本文の版",
+    );
+    let b = insert_download_unindexed(
+        &db,
+        &storage,
+        "alias-b",
+        "名前の違う続き",
+        "架空作者",
+        &[],
+        "別の本文",
+    );
+    {
+        let conn = db.conn.lock().unwrap();
+        conn.execute("UPDATE downloads SET author_id='same-author'", [])
+            .unwrap();
+        conn.execute(
+            "UPDATE downloads SET source='fanbox' WHERE id=?1",
+            params![full],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO work_links(from_source,from_source_id,from_download_id,to_source,to_source_id,to_download_id,relation_type,evidence_type,confidence) VALUES('pixiv','alias-a',?1,'pixiv','alias-b',?2,'continues_to','test',0.94)",params![a,b]).unwrap();
+    }
+    let bundles = db.sweep_collection_candidates().unwrap().bundles;
+    assert_eq!(bundles.len(), 1, "{bundles:?}");
+    assert_eq!(
+        bundles[0]
+            .members
+            .iter()
+            .map(|m| m.download_id.unwrap())
+            .collect::<Vec<_>>(),
+        vec![full, b]
+    );
+}
+
+#[test]
+fn discovery_separates_cross_source_continuations_from_overlapping_full_text() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let first = synthetic_body(71, 4000);
+    let last = synthetic_body(98, 4000);
+    let a = insert_download_unindexed(
+        &db,
+        &storage,
+        "overlap-1",
+        "星の舟 第1話",
+        "架空作者",
+        &[],
+        &first,
+    );
+    let b = insert_download_unindexed(
+        &db,
+        &storage,
+        "overlap-2",
+        "星の舟 第2話",
+        "架空作者",
+        &[],
+        &last,
+    );
+    let full = insert_download_unindexed(
+        &db,
+        &storage,
+        "overlap-all",
+        "星の舟",
+        "架空作者",
+        &[],
+        "版の本文",
+    );
+    {
+        let conn = db.conn.lock().unwrap();
+        conn.execute("UPDATE downloads SET author_id='same-author'", [])
+            .unwrap();
+        conn.execute(
+            "UPDATE downloads SET source='fanbox' WHERE id=?1",
+            params![full],
+        )
+        .unwrap();
+        let path: String = conn
+            .query_row(
+                "SELECT COALESCE(original_json_path,json_path) FROM downloads WHERE id=?1",
+                params![full],
+                |r| r.get(0),
+            )
+            .unwrap();
+        fs::write(
+            path,
+            serde_json::json!({"body":{"text":format!("{first}\n{last}")}}).to_string(),
+        )
+        .unwrap();
+    }
+    assert!(
+        db.get_reader_document(full, None)
+            .unwrap()
+            .plain_text
+            .chars()
+            .count()
+            >= 8000
+    );
+    let bundles = db.sweep_collection_candidates().unwrap().bundles;
+    assert_eq!(
+        bundles.len(),
+        1,
+        "本文検査後に重なる候補も一つにする: {bundles:?}"
+    );
+    assert_eq!(
+        bundles[0]
+            .members
+            .iter()
+            .map(|m| m.download_id.unwrap())
+            .collect::<Vec<_>>(),
+        vec![a, b]
+    );
+    // 同じ版を二度読む並びにならず、元の保存データは残る。
+    assert!(db.get_download(full).is_ok());
+    assert!(bundles[0]
+        .members
+        .iter()
+        .any(|m| m.evidence.iter().any(|e| e.kind == "edition_overlap")));
+}
+
+/// 本文の作り方を変えたときに、影響のある作品だけが作り直しへ回ること。
+///
+/// **取得元が何も変えていないので `content_hash` は動かない。** 添付を持つ
+/// 作品の「索引済み」を落とさないかぎり、作り直しを押しても全件が最新と
+/// 判定され、添付の中の本文は永久に索引へ入らない。実際にそうなっていた。
+#[test]
+fn changing_how_the_body_is_built_requeues_only_the_works_with_attachments() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let plain = insert_download(&db, &storage, "1", "添付なし", "作者", &[], "本文");
+    let with_pdf = insert_download(&db, &storage, "2", "添付あり", "作者", &[], "挨拶");
+    let with_audio = insert_download(&db, &storage, "3", "音源", "作者", &[], "挨拶");
+
+    {
+        let conn = db.conn.lock().unwrap();
+        for (id, name) in [(with_pdf, "本文.pdf"), (with_audio, "voice.mp3")] {
+            conn.execute(
+                "INSERT INTO assets (download_id, asset_type, filename, local_path, file_size_bytes)
+                 VALUES (?1, 'file', ?2, ?3, 9)",
+                params![id, name, format!("C:/nowhere/{name}")],
+            )
+            .unwrap();
+        }
+        // 三件とも索引済みの状態から始める。
+        for id in [plain, with_pdf, with_audio] {
+            assert_eq!(
+                conn.query_row(
+                    "SELECT COUNT(*) FROM search_index_state WHERE download_id = ?1",
+                    params![id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+                1,
+                "前提: {id} は索引済みであること"
+            );
+        }
+        // 版を戻して、作り方が変わった直後の姿を作る。
+        conn.execute("UPDATE search_index_meta SET body_recipe = NULL", [])
+            .unwrap();
+
+        super::reconcile_search_index_body_recipe(&conn).unwrap();
+
+        let indexed = |id: i64| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM search_index_state WHERE download_id = ?1",
+                params![id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(indexed(with_pdf), 0, "添付を持つ作品は作り直しへ回ること");
+        assert_eq!(indexed(plain), 1, "添付の無い作品まで巻き込まないこと");
+        assert_eq!(
+            indexed(with_audio),
+            1,
+            "取り込めない添付だけの作品は回さないこと"
+        );
+
+        // 二度目は何もしない。毎起動で作り直しが始まってはいけない。
+        conn.execute(
+            "INSERT INTO search_index_state (download_id, current_version, content_hash, indexed_at)
+             VALUES (?1, 1, 'h', '2026-01-01T00:00:00Z')",
+            params![with_pdf],
+        )
+        .unwrap();
+        super::reconcile_search_index_body_recipe(&conn).unwrap();
+        assert_eq!(indexed(with_pdf), 1, "版が揃っていれば触らないこと");
+    }
+    drop(db);
+}

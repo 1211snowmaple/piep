@@ -1,0 +1,28 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["react", "typescript", "unicorn", "oxc"],
+  "env": { "browser": true, "es2024": true },
+  "rules": {
+    "react-hooks/exhaustive-deps": "error",
+    "react-hooks/rules-of-hooks": "error",
+    "typescript/no-floating-promises": "error",
+
+    "react/set-state-in-effect": "off",
+    "react/refs": "off",
+    "react/immutability": "off",
+    "react/preserve-manual-memoization": "off",
+    "react/incompatible-library": "off",
+    "react/purity": "off",
+
+    "unicorn/no-useless-spread": "off"
+  },
+  "ignorePatterns": [
+    "dist",
+    "docs",
+    "docs-tools",
+    "node_modules",
+    "src-tauri",
+    "playwright-report",
+    "test-results"
+  ]
+}

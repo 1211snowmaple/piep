@@ -1,0 +1,186 @@
+/*
+ * アプリの意匠をサイトへ写す。
+ *
+ * 色は `src/theme.ts` の piep / leaf 音階と、`src/styles/app.css` の
+ * light-dark() 指定から取っている。**ここで新しい色を作らない。** 作った
+ * 瞬間に、アプリとサイトで「同じはずの青」が二つになる。
+ *
+ * 対応表（アプリ → ここ）
+ *   piep[6] #0d86f4  明るい側の主色（Mantine の primaryShade.light)
+ *   piep[5] #279cff  暗い側の主色（primaryShade.dark)
+ *   leaf[5] #86b918  緑。状態を示すときだけ使う
+ *   #f5f7fa / #0d1117   ウィンドウの地
+ *   #e4e8ee / #252b35   境界線
+ */
+
+:root {
+  /* 書体はアプリと同じ並び。日本語が Yu Gothic UI に落ちるところまで含めて写す。 */
+  --vp-font-family-base: "Segoe UI", "Yu Gothic UI", Meiryo, "Hiragino Sans",
+    system-ui, -apple-system, sans-serif;
+  --vp-font-family-mono: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+
+  /* piep の青。1 が文字、3 が塗り。 */
+  --vp-c-brand-1: #0872d3;
+  --vp-c-brand-2: #0d86f4;
+  --vp-c-brand-3: #279cff;
+  --vp-c-brand-soft: rgb(13 134 244 / 12%);
+
+  --vp-c-bg: #ffffff;
+  --vp-c-bg-alt: #f5f7fa;
+  --vp-c-bg-soft: #fbfcfd;
+  --vp-c-bg-elv: #ffffff;
+
+  --vp-c-divider: #e4e8ee;
+  --vp-c-border: #e4e8ee;
+  --vp-c-gutter: #e4e8ee;
+
+  --vp-c-tip-1: #5e8310;
+  --vp-c-tip-2: #729f12;
+  --vp-c-tip-3: #86b918;
+  --vp-c-tip-soft: rgb(134 185 24 / 12%);
+
+  /* Mantine の defaultRadius: md と Card の radius: lg */
+  --piep-radius-md: 8px;
+  --piep-radius-lg: 16px;
+}
+
+.dark {
+  --vp-c-brand-1: #59b8ff;
+  --vp-c-brand-2: #279cff;
+  --vp-c-brand-3: #0d86f4;
+  --vp-c-brand-soft: rgb(39 156 255 / 16%);
+
+  --vp-c-bg: #0d1117;
+  --vp-c-bg-alt: #11161e;
+  --vp-c-bg-soft: #121821;
+  --vp-c-bg-elv: #161c26;
+
+  --vp-c-divider: #252b35;
+  --vp-c-border: #252b35;
+  --vp-c-gutter: #252b35;
+
+  --vp-c-tip-1: #b5dc72;
+  --vp-c-tip-2: #9dcf49;
+  --vp-c-tip-3: #86b918;
+}
+
+/* 見出しはアプリと同じ太さと大きさ。Mantine の headings をそのまま写す。 */
+.vp-doc h1,
+.vp-doc h2,
+.vp-doc h3,
+.VPHome h1,
+.VPHome h2 {
+  font-weight: 680;
+  letter-spacing: -0.005em;
+}
+.vp-doc h1 { font-size: 30px; line-height: 1.16; }
+.vp-doc h2 { font-size: 23px; line-height: 1.22; }
+.vp-doc h3 { font-size: 18px; line-height: 1.3; }
+
+/* h2 の上の罫は、アプリの区切りと同じ細さ・同じ色にする。 */
+.vp-doc h2 {
+  margin-top: 40px;
+  padding-top: 20px;
+  border-top: 1px solid var(--vp-c-divider);
+}
+
+/*
+ * 面の作り方をアプリに合わせる。カードは lg の角丸に境界線一本、
+ * ボタンと入力は md。Mantine の Card / Button の既定と同じ。
+ */
+.VPFeature,
+.vp-doc .custom-block,
+.vp-doc table,
+.vp-doc div[class*="language-"] {
+  border-radius: var(--piep-radius-lg);
+}
+.VPButton,
+.vp-doc code,
+.DocSearch-Button {
+  border-radius: var(--piep-radius-md);
+}
+
+.VPFeature {
+  border: 1px solid var(--vp-c-border);
+  background: var(--vp-c-bg);
+  transition: border-color 120ms ease, transform 120ms ease;
+}
+.VPFeature:hover {
+  border-color: var(--vp-c-brand-3);
+  transform: translateY(-1px);
+}
+
+/* アプリの見出し帯と同じ、わずかに透ける地。 */
+.VPNav .VPNavBar {
+  background: rgb(255 255 255 / 92%);
+  backdrop-filter: blur(8px);
+}
+.dark .VPNav .VPNavBar {
+  background: rgb(16 20 27 / 92%);
+}
+
+/* 表は棚の一覧と同じ密度にする。行の高さを詰めすぎない。 */
+.vp-doc table {
+  display: table;
+  width: 100%;
+  overflow-x: auto;
+  border-collapse: separate;
+  border-spacing: 0;
+  border: 1px solid var(--vp-c-border);
+}
+.vp-doc tr { background: transparent; }
+.vp-doc th {
+  font-weight: 680;
+  background: var(--vp-c-bg-alt);
+}
+.vp-doc th,
+.vp-doc td {
+  padding: 9px 14px;
+  border: none;
+  border-bottom: 1px solid var(--vp-c-divider);
+}
+.vp-doc tr:last-child td { border-bottom: none; }
+
+/* 画面の説明に貼る絵。アプリの Card と同じ角丸と境界線で出す。 */
+.vp-doc img {
+  border-radius: var(--piep-radius-lg);
+  border: 1px solid var(--vp-c-border);
+}
+
+/* 見出しの飾りに使う色帯。アプリの統計タイルと同じ考え方で、青と緑だけ。 */
+.vp-doc .custom-block.tip {
+  border-color: var(--vp-c-tip-3);
+}
+.vp-doc .custom-block.info {
+  border-color: var(--vp-c-brand-3);
+}
+
+/*
+ * 生成したリファレンスは表が長い。横に溢れる分を頁ごと動かさず、表の中で
+ * 動かす。方針書（`05-frontend.md`）で「一覧は縮めない」と決めているのと
+ * 同じ理由で、列を落として詰めることはしない。
+ */
+.vp-doc div:has(> table) {
+  overflow-x: auto;
+}
+
+/*
+ * 見出しの記号。三つとも同じ色で出す。色で「種類」を示さないのは、
+ * アプリの配色規則（05-frontend.md「色は状態を示すために使い、要素の種類を
+ * 示すためには使わない」）をサイト側でも守るためである。
+ */
+.VPFeature .icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  margin-bottom: 18px;
+  border-radius: var(--piep-radius-md);
+  background: var(--vp-c-brand-soft);
+  color: var(--vp-c-brand-1);
+}
+.VPFeature .icon svg {
+  width: 24px;
+  height: 24px;
+}

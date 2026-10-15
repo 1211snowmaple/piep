@@ -1,0 +1,3378 @@
+:root {
+  color-scheme: light dark;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  /* Overridden on the app shell to follow the rail; this is only the fallback
+     for anything rendered outside it. */
+  --piep-sidebar-width: 194px;
+}
+
+*,
+*::before,
+*::after { box-sizing: border-box; }
+
+html,
+body,
+#root {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+}
+
+body {
+  background: light-dark(#f5f7fa, #0d1117);
+  /* 日本語の折り返しを、文節の切れ目に寄せる。
+     既定の `normal` は CJK をどの文字の間でも折るので、
+     「入れられま／す。」「キモデブ／が溺愛されて」のように
+     読みの単位を割って改行していた。表紙の見出しだけは前から
+     こうしていたが、棚のカードにも説明文にも同じことが要る。 */
+  word-break: auto-phrase;
+  line-break: strict;
+}
+
+/* 折る場所の無い長い文字列 — 保存先のパス、URL、識別子 — は例外。
+   文節では折れないので、どこでも折れるようにしないと枠を突き破る。 */
+code,
+kbd,
+samp,
+pre,
+.break-anywhere {
+  word-break: normal;
+  overflow-wrap: anywhere;
+}
+
+.mantine-Notifications-root {
+  /* 固定ヘッドバー（58px）の直下に、少し呼吸できる間隔を空ける。 */
+  top: var(--piep-notification-top, 70px) !important;
+  right: 16px !important;
+  bottom: auto !important;
+  width: min(360px, calc(100vw - 32px)) !important;
+  max-width: calc(100vw - 32px) !important;
+  max-height: calc(100dvh - var(--piep-notification-top, 70px) - 16px);
+  padding: 1px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  pointer-events: none;
+}
+
+/* 編集画面にはヘッドバーの下に68pxの操作列がある。保存通知で
+   「反映」を覆うと、ボタン上のポインターが通知の自動消去も止めてしまう。 */
+body:has(.editor-page) .mantine-Notifications-root {
+  --piep-notification-top: 138px;
+}
+/* 保存直後に読書へ戻っても、62pxの操作列に通知を重ねない。 */
+body:has(.reader-page) .mantine-Notifications-root {
+  --piep-notification-top: 132px;
+}
+.mantine-Notification-root { width: 100%; max-width: 100%; overflow: hidden; pointer-events: auto; }
+.mantine-Notification-description {
+  display: -webkit-box;
+  max-height: 7.2em;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 5;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+.mantine-SegmentedControl-label { display: flex; align-items: center; justify-content: center; }
+
+/* 一行の知らせは、アイコンと同じ高さの中心に置く。
+
+   Alert の本文は縦並びの箱で、その高さは背の高い方 — たいていは 20px の
+   アイコン — が決める。中の一行は 17px 前後しかないので、上端に置かれると
+   2px ほど浮いて、アイコンより上にあるように見える。二行以上あるときは
+   本文の方が高くなるため、この指定は何もしない。 */
+.mantine-Alert-body { justify-content: center; }
+
+::selection {
+  color: var(--mantine-color-white);
+  background: var(--mantine-color-piep-6);
+}
+
+.skip-link {
+  position: fixed;
+  z-index: 5000;
+  top: 8px;
+  left: 8px;
+  padding: 8px 12px;
+  border: 0;
+  border-radius: var(--mantine-radius-md);
+  color: white;
+  background: var(--mantine-color-piep-7);
+  cursor: pointer;
+  transform: translateY(-160%);
+  transition: transform 120ms ease;
+}
+
+.skip-link:focus {
+  transform: translateY(0);
+}
+
+.app-shell {
+  --app-shell-border-color: light-dark(#e4e8ee, #252b35);
+}
+
+.app-header {
+  border-color: var(--app-shell-border-color);
+  background: light-dark(rgb(255 255 255 / 92%), rgb(16 20 27 / 92%));
+  backdrop-filter: blur(16px) saturate(140%);
+}
+
+.app-navbar {
+  border-color: var(--app-shell-border-color);
+  background: light-dark(#fbfcfd, #11161e);
+}
+
+.app-main {
+  min-width: 0;
+  height: calc(100dvh - var(--app-shell-header-height));
+  overflow: auto;
+  /* The browser's own anchoring competes with this app's: a listing that is
+     replaced wholesale has no anchor worth keeping, and its correction landed
+     after the deliberate scroll, which is what put the reader back at the
+     bottom of the page they had just left. Restoring a remembered position and
+     revealing a new page are both done explicitly here. */
+  overflow-anchor: none;
+  background:
+    radial-gradient(circle at 85% -10%, light-dark(rgb(13 134 244 / 7%), rgb(39 156 255 / 9%)), transparent 32rem),
+    light-dark(#f5f7fa, #0d1117);
+}
+
+.app-brand {
+  display: grid;
+  width: 100%;
+  padding: 4px;
+  place-items: center;
+  border-radius: var(--mantine-radius-md);
+  transition: background-color 120ms ease, transform 120ms ease;
+}
+
+/* Proportions taken from the supplied lockup: the wordmark is 0.8x the height
+   of the book, which puts the mark at about twice the type size, with a gap
+   of roughly a quarter of it. Driving all three from one variable keeps that
+   relationship at any size. */
+.piep-lockup { display: inline-flex; align-items: center; gap: calc(var(--lockup-size, 26px) * 0.27); }
+.piep-lockup__mark { display: block; width: calc(var(--lockup-size, 26px) * 1.99); height: auto; }
+.piep-lockup__word {
+  font-family: "Bauhaus 93", "Century Gothic", "Futura", "Trebuchet MS", sans-serif;
+  font-size: var(--lockup-size, 26px);
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: 0.005em;
+}
+.piep-lockup__pi { color: #0096fa; }
+.piep-lockup__ep { color: #86b918; }
+.app-brand__mark { width: 30px; height: 30px; }
+
+.app-nav__brand { padding: 12px 14px; }
+.app-nav[data-railed] .app-nav__brand { display: grid; place-items: center; padding: 12px 6px; }
+.app-nav[data-railed] .app-brand { width: auto; }
+.app-nav__link { border-radius: var(--mantine-radius-md); }
+/* In the rail the icon is the whole control, so it centres rather than sitting
+   in a left slot sized for a label that is no longer there. */
+.app-nav[data-railed] .app-nav__link {
+  display: flex;
+  justify-content: center;
+  padding: 10px 0;
+}
+.app-nav[data-railed] .app-nav__link .mantine-NavLink-body { display: none; }
+/* Mantine reserves a gap beside the icon slot for the label; with the label
+   gone that gap is what pushed the glyph off centre. */
+.app-nav[data-railed] .app-nav__link .mantine-NavLink-section { margin: 0; }
+.app-nav[data-railed] .app-nav__link > * { margin-inline: 0; }
+.app-brand:hover { background: light-dark(#eef3f7, #1a222d); }
+.app-brand:active { transform: translateY(1px); }
+.app-brand:focus-visible {
+  outline: 2px solid var(--mantine-color-piep-5);
+  outline-offset: 2px;
+}
+
+.shortcut-key {
+  padding: 2px 6px;
+  border: 1px solid light-dark(#d8dde4, #343c48);
+  border-radius: 5px;
+  color: var(--mantine-color-dimmed);
+  background: light-dark(#fff, #202630);
+  font-size: 10px;
+  line-height: 1.3;
+}
+
+.page {
+  box-sizing: border-box;
+  min-width: 0;
+  width: 100%;
+  min-height: 100%;
+  padding: clamp(16px, 2vw, 30px);
+}
+
+.page--contained {
+  max-width: 1560px;
+  margin-inline: auto;
+}
+
+/* Set from the appearance settings; see lib/density.ts. */
+:root[data-density="compact"] .page { padding: clamp(10px, 1.2vw, 18px); }
+:root[data-density="compact"] .library-grid,
+:root[data-density="compact"] .work-grid { gap: 10px; }
+:root[data-density="compact"] .work-card { min-height: 204px; }
+:root[data-density="compact"] .work-row__grid { min-height: 151px; padding-block: 6px; }
+:root[data-density="compact"] .page-header { margin-bottom: 8px; }
+
+.page-header {
+  gap: var(--mantine-spacing-md);
+  margin-bottom: 14px;
+}
+.page-header h1 { font-size: clamp(25px, 2.2vw, 31px); line-height: 1.24; letter-spacing: -0.028em; }
+.page-header__actions { flex: 0 0 auto; justify-content: flex-end; }
+.library-page .page-header { margin-bottom: 14px; }
+
+.visually-hidden {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  padding: 0 !important;
+  margin: -1px !important;
+  overflow: hidden !important;
+  clip: rect(0, 0, 0, 0) !important;
+  white-space: nowrap !important;
+  border: 0 !important;
+}
+
+.surface {
+  border: 1px solid light-dark(#e2e7ed, #252c37);
+  border-radius: var(--mantine-radius-lg);
+  background: light-dark(rgb(255 255 255 / 92%), rgb(18 23 31 / 94%));
+  box-shadow: light-dark(0 1px 2px rgb(14 29 48 / 3%), 0 1px 2px rgb(0 0 0 / 12%));
+}
+
+.surface--interactive {
+  transition: border-color 150ms ease, box-shadow 150ms ease;
+}
+
+.surface--interactive:hover {
+  border-color: light-dark(#cdd8e5, #384352);
+  box-shadow: 0 10px 32px rgb(28 53 82 / 9%);
+}
+
+/* One badge shape for every provider. pixiv used a rounded square and FANBOX a
+   circle, which read as two unrelated systems; the surrounding chip now shares
+   the same corner treatment so the pair looks fitted rather than pasted on. */
+.provider-mark {
+  display: inline-flex;
+  min-height: 24px;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px 2px 4px;
+  border: 1px solid color-mix(in srgb, var(--provider-color) 28%, transparent);
+  border-radius: 9px;
+  color: light-dark(color-mix(in srgb, var(--provider-color) 78%, black), color-mix(in srgb, var(--provider-color) 72%, white));
+  background: light-dark(var(--provider-soft), color-mix(in srgb, var(--provider-color) 14%, transparent));
+  vertical-align: middle;
+}
+/* With no label the chip is square, so it hugs the glyph instead of stretching
+   into a lozenge. */
+.provider-mark:not(:has(.mantine-Text-root)) { padding: 2px; }
+
+.provider-mark__icon {
+  display: inline-flex;
+  width: 18px;
+  height: 18px;
+  align-items: center;
+  justify-content: center;
+}
+.brand-word-glyph {
+  display: inline-grid;
+  min-width: 18px;
+  height: 18px;
+  place-items: center;
+  border: 1.5px solid currentColor;
+  border-radius: 6px;
+  font-family: Arial, sans-serif;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1;
+  white-space: nowrap;
+}
+/* 2文字の印（Sk・Pe・Ci・Yt・Mi・Bs・Pv・Od・Az）は、1文字ぶんの字の大きさの
+   まま押し込まれて枠と重なっていた。**四角は変えず、字を詰める** ―― 印の
+   大きさが字数で変わると、並んだときに背の高さが揃わない。 */
+.brand-word-glyph[data-chars="2"] { font-size: 10px; }
+.brand-word-glyph svg { display: block; width: 15px; height: 15px; fill: currentColor; }
+/* 絵で描く印は正方形のまま。 */
+.brand-word-glyph--pixiv { width: 18px; color: #0096fa; }
+.brand-word-glyph[data-wide] { color: #7a5d00; }
+.external-service-mark { display: inline-flex; align-items: center; gap: 6px; color: var(--external-brand); }
+
+.empty-state {
+  border-style: dashed;
+  background: light-dark(rgb(255 255 255 / 65%), rgb(18 23 31 / 65%));
+}
+.async-error-message { overflow-wrap: anywhere; white-space: pre-wrap; }
+
+.stat-card {
+  position: relative;
+  width: 100%;
+  overflow: hidden;
+  min-height: 82px;
+  padding: 11px 12px;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  background: var(--mantine-color-body);
+  border: 1px solid light-dark(#e2e7ed, #252c37);
+  transition: transform 140ms ease, border-color 140ms ease, box-shadow 140ms ease;
+}
+.stat-card:hover { border-color: color-mix(in srgb, var(--stat-accent) 36%, light-dark(#d8dfe7, #303944)); box-shadow: 0 8px 24px rgb(28 53 82 / 8%); transform: translateY(-1px); }
+.stat-card__value { font-variant-numeric: tabular-nums; }
+.stat-card__hint-row { position: relative; }
+.stat-card__arrow { position: absolute; right: 0; top: 50%; color: var(--stat-accent); opacity: 0; transform: translate(-4px, -50%); transition: opacity 140ms ease, transform 140ms ease; }
+.stat-card:hover .stat-card__arrow,
+.stat-card:focus-visible .stat-card__arrow { opacity: 1; transform: translate(0, -50%); }
+
+.stat-card::after {
+  position: absolute;
+  right: -24px;
+  bottom: -34px;
+  width: 88px;
+  height: 88px;
+  border-radius: 999px;
+  background: var(--stat-accent, var(--mantine-color-piep-6));
+  content: "";
+  opacity: 0.075;
+}
+.stat-card .mantine-ThemeIcon-root { width: 27px; height: 27px; min-width: 27px; min-height: 27px; }
+
+.cover-placeholder {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  color: white;
+  background:
+    radial-gradient(circle at 24% 18%, rgb(255 255 255 / 28%), transparent 26%),
+    linear-gradient(145deg, var(--cover-a, #279cff), var(--cover-b, #0869c5));
+}
+
+.cover-placeholder::after {
+  position: absolute;
+  inset: auto -18% -35% 28%;
+  height: 72%;
+  border: 1px solid rgb(255 255 255 / 20%);
+  border-radius: 50%;
+  content: "";
+}
+
+/* 表紙の形。**表紙を置く枠は、どこでもこれを使う。**
+   pixiv が返す表紙は 240x338（0.710）でほぼ揃っている（棚の 400 枚を数えたら
+   396 枚がこの寸法だった）。カードのタイルだけがそれに合わせて 112/158
+   （0.709）になっていて、他は各自ばらばらの寸法を持っていた。
+
+     作品カード       112/158  0.709  ← これだけ合っていた
+     一覧の行         92x123   0.748  表紙が縦に合わされ、左右に余白
+     シリーズのカード 72x98    0.735  しかも `object-fit: cover` で切っていた
+     シリーズの見出し 126x174  0.724  `object-fit` の指定が無く伸びていた
+     コレクション     96x128   0.750
+
+   同じ「表紙を置く枠」が5つの形を持っていたということで、どれが正しいのかは
+   どこにも書かれていなかった。形はここだけに書く。 */
+:root { --work-cover-shape: 112 / 158; }
+
+.work-cover {
+  position: relative;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  border: 1px solid light-dark(#dde1e5, #303741);
+  color: var(--mantine-color-dimmed);
+  background: light-dark(#f4f4f2, #171d24);
+}
+/* **枠にぴったり貼る。割合の高さに頼らない。**
+   `height: 100%` は grid の行が内容で決まる場面では auto に落ちる。落ちると
+   画像は幅なりの実寸に伸び、`overflow: hidden` が**下を切る**。リストの表紙で
+   実際にそうなっていた（枠 92x123 に対して絵の箱が 90x127）。`inset: 0` なら
+   箱は必ず枠と同じで、あとは `object-fit` が中身を収める。 */
+.work-cover__image {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: light-dark(#f6f6f4, #11171e);
+}
+
+/* A shelf of covers is only useful if the ones without an image are still
+   distinguishable. The mark is unique per work, its colour shared per author,
+   and the title carries the meaning at any size that can hold it. */
+.work-cover__empty {
+  --work-cover-ink: hsl(var(--work-cover-hue) 42% 30%);
+  position: relative;
+  display: flex;
+  width: 100%;
+  height: 100%;
+  align-items: stretch;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 11px 11px;
+  container-type: inline-size;
+  background: light-dark(hsl(var(--work-cover-hue) 38% 95%), hsl(var(--work-cover-hue) 22% 15%));
+}
+:root[data-mantine-color-scheme="dark"] .work-cover__empty { --work-cover-ink: hsl(var(--work-cover-hue) 45% 78%); }
+.work-cover__empty::before { position: absolute; top: 0; right: 0; left: 0; height: 3px; background: var(--work-cover-accent); content: ""; opacity: 0.72; }
+
+.work-cover__sigil {
+  display: grid;
+  width: 30cqi;
+  min-width: 26px;
+  max-width: 46px;
+  aspect-ratio: 1;
+  grid-template-columns: repeat(5, 1fr);
+  flex: none;
+}
+.work-cover__sigil i { display: block; aspect-ratio: 1; }
+.work-cover__sigil i[data-on] { background: var(--work-cover-ink); }
+
+.work-cover__caption { display: flex; min-height: 0; flex-direction: column; gap: 2px; margin-top: auto; }
+.work-cover__empty-series { color: light-dark(hsl(var(--work-cover-hue) 25% 38%), hsl(var(--work-cover-hue) 20% 65%)); font-size: 9.5px; line-height: 1.3; }
+.work-cover__empty-title {
+  overflow: hidden;
+  display: -webkit-box;
+  font-size: 12.5px;
+  font-weight: 700;
+  line-height: 1.34;
+  letter-spacing: -0.01em;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
+  word-break: auto-phrase;
+}
+.work-cover__empty-title[data-scale="lg"] { font-size: 15px; -webkit-line-clamp: 3; }
+.work-cover__empty-title[data-scale="sm"] { font-size: 11px; -webkit-line-clamp: 5; }
+
+/* At 46px nothing but the mark survives, so it fills the tile. */
+.work-cover--compact { width: 46px; height: 58px; flex: 0 0 46px; border-radius: 6px; }
+.work-cover--compact .work-cover__empty { padding: 7px 5px 5px; place-items: center; }
+.work-cover--compact .work-cover__sigil { width: 76%; min-width: 0; margin: auto; }
+.work-cover--detail .work-cover__empty { gap: 12px; padding: 18px 16px 16px; }
+.work-cover--detail .work-cover__sigil { width: 34cqi; max-width: 96px; }
+.work-cover--detail .work-cover__empty-title { font-size: 15px; -webkit-line-clamp: 4; }
+.work-cover--detail .work-cover__empty-title[data-scale="lg"] { font-size: 19px; }
+
+.focus-card {
+  position: relative;
+  cursor: pointer;
+}
+
+.focus-card:focus-visible {
+  outline: 2px solid var(--mantine-color-piep-6);
+  outline-offset: 3px;
+}
+
+.line-clamp-1,
+.line-clamp-2,
+.line-clamp-3 {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+}
+
+.line-clamp-1 { -webkit-line-clamp: 1; }
+.line-clamp-2 { -webkit-line-clamp: 2; }
+.line-clamp-3 { -webkit-line-clamp: 3; }
+
+/* Folded prose. The clamp is an attribute rather than a class so the same
+   element can carry a caption's own styling and be expanded in place, and the
+   line count is a variable because a profile and a caption want different
+   amounts of it. */
+.expandable-text[data-collapsed] {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: var(--expandable-lines, 4);
+}
+.expandable__toggle { font-weight: 600; }
+
+/* The detail filter is a foreground search surface. Its frame deliberately
+   keeps one size while sections change: only the editing canvas scrolls, so
+   the title, search, navigation and Apply button never jump under the cursor. */
+.filter-spotlight {
+  display: flex;
+  height: min(554px, calc(100dvh - 24px));
+  max-height: calc(100dvh - 24px);
+  flex-direction: column;
+  overflow: hidden;
+}
+.filter-spotlight__header {
+  min-height: 52px;
+  flex: 0 0 auto;
+  border-bottom: 1px solid var(--app-shell-border-color, light-dark(#e3e8ee, #232a35));
+}
+.filter-spotlight__title {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  font-weight: 700;
+}
+.filter-spotlight__title-note {
+  overflow: hidden;
+  color: var(--mantine-color-dimmed);
+  font-size: var(--mantine-font-size-xs);
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.filter-spotlight__body {
+  display: flex;
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  padding: 0;
+}
+.filter-form {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  overflow: hidden;
+}
+.filter-spotlight__search-zone {
+  position: relative;
+  z-index: 3;
+  padding: 8px var(--mantine-spacing-md);
+  border-bottom: 1px solid var(--app-shell-border-color, light-dark(#e3e8ee, #232a35));
+  background: light-dark(var(--mantine-color-white), var(--mantine-color-dark-7));
+}
+.filter-spotlight__search-row {
+  display: block;
+}
+.filter-spotlight__dropdown {
+  width: calc(100% - 2 * var(--mantine-spacing-md)) !important;
+  box-shadow: var(--mantine-shadow-lg);
+}
+.filter-spotlight__results {
+  max-height: min(370px, calc(100dvh - 210px));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.filter-spotlight__result-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  min-width: 0;
+}
+.filter-spotlight__result-row--facet {
+  grid-template-columns: auto auto minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 7px;
+}
+.filter-spotlight__result-choice-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 2px;
+  margin-block: 2px;
+}
+.filter-spotlight__result-choice {
+  min-width: 0;
+  border: 1px solid transparent;
+}
+.filter-spotlight__result-choice--include { border-radius: var(--mantine-radius-sm) 0 0 var(--mantine-radius-sm); }
+.filter-spotlight__result-choice--exclude {
+  display: grid;
+  min-width: 56px;
+  place-items: center;
+  border-radius: 0 var(--mantine-radius-sm) var(--mantine-radius-sm) 0;
+  color: light-dark(var(--mantine-color-red-8), var(--mantine-color-red-2));
+  font-size: var(--mantine-font-size-xs);
+  font-weight: 700;
+}
+.filter-spotlight__result-choice--exclude[data-combobox-active] {
+  border-color: light-dark(var(--mantine-color-red-3), var(--mantine-color-red-8));
+  background: light-dark(var(--mantine-color-red-0), color-mix(in srgb, var(--mantine-color-red-9) 34%, var(--mantine-color-dark-7)));
+}
+.filter-spotlight__result-action-label {
+  color: light-dark(var(--mantine-color-piep-8), var(--mantine-color-piep-2));
+  font-size: var(--mantine-font-size-xs);
+  font-weight: 700;
+}
+.filter-spotlight__provider-marks {
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: 4px;
+  align-items: center;
+}
+.filter-spotlight__facet-name {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+.filter-form__fields {
+  display: flex;
+  min-height: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  overflow: hidden;
+}
+.filter-spotlight__section-tabs {
+  display: flex;
+  min-height: 42px;
+  flex: 0 0 auto;
+  gap: 2px;
+  overflow-x: auto;
+  padding: 5px var(--mantine-spacing-md);
+  border-bottom: 1px solid var(--app-shell-border-color, light-dark(#e3e8ee, #232a35));
+  background: light-dark(var(--mantine-color-gray-0), var(--mantine-color-dark-8));
+  scrollbar-width: none;
+}
+.filter-spotlight__section-tabs::-webkit-scrollbar { display: none; }
+.filter-spotlight__section-tab {
+  display: inline-flex;
+  min-height: 30px;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 9px;
+  border: 1px solid transparent;
+  border-radius: var(--mantine-radius-xl);
+  color: var(--mantine-color-dimmed);
+  font-size: var(--mantine-font-size-xs);
+  font-weight: 650;
+}
+.filter-spotlight__section-tab:hover { background: light-dark(var(--mantine-color-gray-1), var(--mantine-color-dark-6)); }
+.filter-spotlight__section-tab:focus-visible {
+  outline: 2px solid var(--mantine-color-piep-5);
+  outline-offset: -2px;
+}
+.filter-spotlight__section-tab[data-active] {
+  border-color: light-dark(var(--mantine-color-piep-3), var(--mantine-color-piep-7));
+  color: light-dark(var(--mantine-color-piep-8), var(--mantine-color-piep-2));
+  background: light-dark(var(--mantine-color-piep-0), color-mix(in srgb, var(--mantine-color-piep-9) 34%, var(--mantine-color-dark-7)));
+}
+.filter-spotlight__section-tab b {
+  display: inline-grid;
+  min-width: 17px;
+  height: 17px;
+  place-items: center;
+  padding: 0 5px;
+  border-radius: var(--mantine-radius-xl);
+  background: light-dark(var(--mantine-color-gray-2), var(--mantine-color-dark-5));
+  color: inherit;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+.filter-spotlight__section-tab[data-active] b { background: light-dark(var(--mantine-color-piep-1), var(--mantine-color-piep-9)); }
+.filter-spotlight__panel {
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 10px var(--mantine-spacing-md) 12px;
+}
+.filter-spotlight__quick-option {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+}
+.filter-spotlight__facet-identity {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 7px;
+}
+.filter-spotlight__quick-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+.filter-spotlight__quick-option {
+  min-height: 40px;
+  padding: 5px 6px 5px 9px;
+  border: 1px solid var(--app-shell-border-color, light-dark(#e3e8ee, #232a35));
+  border-radius: var(--mantine-radius-md);
+  background: light-dark(var(--mantine-color-white), var(--mantine-color-dark-7));
+}
+.filter-spotlight__quick-option:focus-within {
+  border-color: light-dark(var(--mantine-color-piep-3), var(--mantine-color-piep-7));
+}
+.filter-spotlight__facet-actions {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 2px;
+}
+.filter-spotlight__facet-actions .mantine-Button-root {
+  min-width: 48px;
+  padding-inline: 7px;
+}
+.filter-spotlight__facet-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--mantine-spacing-md);
+}
+.filter-spotlight__tag-mode {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: var(--mantine-spacing-xs);
+}
+.filter-form__actions {
+  display: flex;
+  min-height: 54px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--mantine-spacing-md);
+  padding: 8px var(--mantine-spacing-md);
+  border-top: 1px solid var(--app-shell-border-color, light-dark(#e3e8ee, #232a35));
+  background: light-dark(var(--mantine-color-white), var(--mantine-color-dark-7));
+  box-shadow: 0 -8px 24px light-dark(rgb(15 23 42 / 3%), rgb(0 0 0 / 10%));
+}
+.filter-form__actions > .mantine-Group-root { flex: 0 0 auto; }
+.filter-spotlight__selection-summary {
+  display: grid;
+  min-width: 0;
+  min-height: 68px;
+  flex: 0 0 auto;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: center;
+  gap: 3px;
+  padding: 5px var(--mantine-spacing-md);
+  border-top: 1px solid var(--app-shell-border-color, light-dark(#e3e8ee, #232a35));
+  background: light-dark(var(--mantine-color-gray-0), var(--mantine-color-dark-8));
+}
+.filter-spotlight__selection-lane {
+  display: flex;
+  min-width: 0;
+  min-height: 28px;
+  align-items: center;
+  gap: 6px;
+}
+.filter-spotlight__selection-lane + .filter-spotlight__selection-lane {
+  padding-top: 3px;
+  border-top: 1px solid var(--app-shell-border-color, light-dark(#e3e8ee, #232a35));
+}
+.filter-spotlight__selection-label {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 4px;
+  color: light-dark(var(--mantine-color-piep-8), var(--mantine-color-piep-2));
+  font-size: var(--mantine-font-size-xs);
+  font-weight: 700;
+  white-space: nowrap;
+  width: 58px;
+}
+.filter-spotlight__selection-label[data-tone="exclude"] {
+  color: light-dark(var(--mantine-color-red-8), var(--mantine-color-red-2));
+}
+.filter-spotlight__selection-label b {
+  display: inline-grid;
+  min-width: 18px;
+  height: 18px;
+  place-items: center;
+  padding-inline: 4px;
+  border-radius: var(--mantine-radius-xl);
+  background: light-dark(var(--mantine-color-gray-1), var(--mantine-color-dark-5));
+  color: inherit;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+.filter-spotlight__selection-scroller {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 2px;
+}
+.filter-spotlight__selection-scroll-button {
+  width: 22px;
+  min-width: 22px;
+  height: 22px;
+  flex: 0 0 22px;
+  border: 1px solid light-dark(var(--mantine-color-gray-3), var(--mantine-color-dark-4));
+  border-radius: var(--mantine-radius-xl);
+  background: light-dark(var(--mantine-color-white), var(--mantine-color-dark-6));
+  box-shadow: 0 1px 3px rgb(15 23 42 / 7%);
+}
+.filter-spotlight__selection-scroll-button:disabled { opacity: 0.35; }
+.filter-spotlight__selection-tokens {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 4px;
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
+  padding-block: 2px 4px;
+  scrollbar-color: light-dark(var(--mantine-color-gray-4), var(--mantine-color-dark-3)) transparent;
+  scrollbar-width: thin;
+}
+.filter-spotlight__selection-tokens::-webkit-scrollbar { height: 4px; }
+.filter-spotlight__selection-tokens::-webkit-scrollbar-track { background: transparent; }
+.filter-spotlight__selection-tokens::-webkit-scrollbar-thumb {
+  border-radius: var(--mantine-radius-xl);
+  background: light-dark(var(--mantine-color-gray-4), var(--mantine-color-dark-3));
+}
+.filter-spotlight__selection-tokens:focus-visible {
+  border-radius: var(--mantine-radius-sm);
+  outline: 2px solid var(--mantine-color-piep-5);
+  outline-offset: 1px;
+}
+.filter-spotlight__selection-tokens .filter-token { flex: 0 0 auto; }
+.filter-spotlight__selection-empty {
+  overflow: hidden;
+  color: var(--mantine-color-dimmed);
+  font-size: var(--mantine-font-size-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+@media (max-width: 47.99em) {
+  .filter-spotlight { height: calc(100dvh - 24px); }
+  .filter-spotlight__search-zone { padding-inline: var(--mantine-spacing-md); }
+  .filter-spotlight__dropdown { width: calc(100% - 2 * var(--mantine-spacing-md)) !important; }
+  .filter-spotlight__section-tabs { padding-inline: var(--mantine-spacing-md); }
+  .filter-spotlight__panel { min-height: 0; padding-inline: var(--mantine-spacing-md); }
+  .filter-spotlight__quick-grid { grid-template-columns: 1fr; }
+}
+@media (max-width: 35.99em) {
+  .filter-spotlight__title-note { display: none; }
+  .filter-spotlight__facet-heading { align-items: flex-start; flex-direction: column; }
+  .filter-form__actions { align-items: stretch; flex-direction: column; }
+  .filter-form__actions > .mantine-Group-root { display: grid; grid-template-columns: 1fr 1fr; }
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+/* The track count comes from the data rather than being fixed at six, so a
+   short history is not stretched across empty columns. */
+.download-trend {
+  display: grid;
+  /* Capped so a library with one or two months shows bars, not slabs; the
+     whole run centres in the card whatever the count. */
+  grid-template-columns: repeat(var(--trend-columns, 6), minmax(0, 84px));
+  align-items: end;
+  justify-content: center;
+  gap: clamp(4px, 1.2cqi, 16px);
+  height: 230px;
+  padding-top: var(--mantine-spacing-sm);
+  container-type: inline-size;
+}
+.download-trend__column[data-empty] .download-trend__track { background: light-dark(var(--mantine-color-gray-0), var(--mantine-color-dark-7)); }
+.download-trend__column[data-empty] .download-trend__track::after {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  height: 2px;
+  background: light-dark(var(--mantine-color-gray-3), var(--mantine-color-dark-4));
+  content: "";
+}
+.download-trend__label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Past nine months the labels start colliding, so every other one is dropped. */
+@container (max-width: 560px) {
+  .download-trend__column:nth-child(even) .download-trend__label { visibility: hidden; }
+}
+
+/* Stacked beside the trend; once the column spans the page they sit side by
+   side rather than becoming two full-width strips. */
+/* Both cards keep their natural height and the spare room falls between them,
+   so the tag card's bottom edge still lines up with the chart beside it without
+   its rows being stretched apart to fill a height they cannot earn. */
+.dashboard-side { display: grid; height: 100%; gap: var(--mantine-spacing-lg); grid-template-rows: auto auto; align-content: space-between; }
+@media (max-width: 61.99em) {
+  .dashboard-side { grid-template-columns: 1fr 1fr; grid-template-rows: auto; }
+}
+@media (max-width: 40em) {
+  .dashboard-side { grid-template-columns: 1fr; }
+}
+
+/* The chart sits above the composition bar and the card fills the column, so
+   the trend takes the slack instead of leaving a void under the legend. */
+.dashboard-trend-card { display: flex; flex-direction: column; }
+.dashboard-trend-card .download-trend { flex: 1 1 auto; min-height: 180px; height: auto; }
+.dashboard-trend-card .source-composition { margin-top: var(--mantine-spacing-lg); }
+
+.source-composition { display: flex; overflow: hidden; height: 14px; border-radius: 999px; background: light-dark(var(--mantine-color-gray-1), var(--mantine-color-dark-6)); }
+.source-composition__segment { min-width: 3px; }
+.source-composition__dot { width: 10px; height: 10px; border-radius: 3px; }
+.source-composition__segment[data-source="pixiv"],
+.source-composition__dot[data-source="pixiv"] { background: linear-gradient(180deg, #38adff, #0087e0); }
+.source-composition__segment[data-source="fanbox"],
+.source-composition__dot[data-source="fanbox"] { background: linear-gradient(180deg, #f3cf42, #c99d00); }
+.source-composition__segment:not([data-source="pixiv"]):not([data-source="fanbox"]),
+.source-composition__dot:not([data-source="pixiv"]):not([data-source="fanbox"]) { background: light-dark(#aeb6c0, #626d79); }
+
+.download-trend__column {
+  display: grid;
+  grid-template-rows: 22px minmax(0, 1fr) 22px;
+  align-items: end;
+  gap: 5px;
+  height: 100%;
+  min-width: 0;
+  text-align: center;
+}
+
+.download-trend__track {
+  position: relative;
+  height: 100%;
+  min-height: 120px;
+  overflow: hidden;
+  border-radius: var(--mantine-radius-md);
+  background: light-dark(var(--mantine-color-gray-1), var(--mantine-color-dark-6));
+}
+
+.download-trend__stack {
+  position: absolute;
+  inset: auto 0 0;
+  display: flex;
+  overflow: hidden;
+  flex-direction: column;
+  border-radius: var(--mantine-radius-md) var(--mantine-radius-md) 4px 4px;
+  box-shadow: 0 8px 22px color-mix(in srgb, var(--mantine-color-piep-6) 24%, transparent);
+  transition: height 280ms ease;
+}
+.download-trend__segment { min-height: 2px; }
+.download-trend__segment[data-source="pixiv"] { background: linear-gradient(180deg, #38adff, #0087e0); }
+.download-trend__segment[data-source="fanbox"] { background: linear-gradient(180deg, #f3cf42, #c99d00); }
+.download-trend__segment[data-source="other"] { background: light-dark(#aeb6c0, #626d79); }
+
+/* Cards stretch to the tallest in their grid row instead of being pinned to a
+   fixed pixel height, so a narrower window (or denser mode) reflows rather
+   than clipping. */
+.work-card {
+  min-width: 0;
+  height: 100%;
+  cursor: pointer;
+  container-type: inline-size;
+}
+
+.work-card[data-selection-mode],
+.work-row[data-selection-mode] { cursor: pointer; }
+
+.work-card[data-selection-mode],
+.work-row[data-selection-mode] {
+  transition: border-color 140ms ease, background-color 140ms ease, box-shadow 140ms ease, transform 120ms ease;
+}
+.work-card[data-selection-mode]:hover,
+.work-row[data-selection-mode]:hover {
+  border-color: light-dark(var(--mantine-color-piep-3), var(--mantine-color-piep-7));
+  box-shadow: 0 8px 24px rgb(18 74 116 / 10%);
+}
+.work-card[data-selected],
+.work-row[data-selected] {
+  border-color: var(--mantine-color-piep-6);
+  background: light-dark(#f4faff, #111f2c);
+  box-shadow: 0 0 0 2px light-dark(rgb(13 134 244 / 18%), rgb(73 169 238 / 24%)), 0 10px 26px rgb(18 74 116 / 12%);
+}
+.work-card[data-selected] .work-card__cover-rail { background: transparent; }
+.work-card[data-selection-mode] .work-card__actions,
+.work-row[data-selection-mode] .work-row__actions { display: none; }
+
+.work-card__inner {
+  position: relative;
+  display: grid;
+  height: 100%;
+  min-width: 0;
+  grid-template-columns: clamp(104px, 31cqi, 132px) minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr) auto;
+}
+
+.work-card__cover-rail {
+  position: relative;
+  display: flex;
+  grid-column: 1;
+  grid-row: 1;
+  flex-direction: column;
+  justify-content: center;
+  padding: 12px;
+  cursor: pointer;
+  background: var(--mantine-color-body);
+}
+
+.work-card__cover {
+  position: relative;
+  display: grid;
+  width: 100%;
+  aspect-ratio: var(--work-cover-shape);
+  place-items: center;
+  overflow: hidden;
+  border-radius: 8px;
+}
+
+/* Spacing is set per pair rather than by one uniform gap: the series and the
+   title belong together, the facts and the actions do not. A single gap made
+   every relationship read as equally distant and padded the card out. */
+.work-card__body {
+  display: flex;
+  grid-column: 2;
+  grid-row: 1;
+  min-width: 0;
+  flex-direction: column;
+  justify-content: center;
+  gap: 0;
+  padding: 10px 13px;
+}
+.work-card__body > .work-card__open { margin-top: 0; }
+.work-card__body > .work-card__identity { margin-top: 5px; }
+.work-card__body > .work-card__excerpt { margin-top: 5px; }
+.work-card__body > .work-card__tagslot { margin-top: 8px; }
+
+.work-card__meta { display: flex; min-width: 0; align-items: center; gap: 8px; }
+.work-card__meta > .work-card__series { min-width: 0; flex: 0 1 auto; }
+.work-card__provider {
+  min-height: 22px;
+  flex: 0 0 auto;
+  padding-block: 1px;
+}
+.work-card__provider .mantine-Text-root { overflow: hidden; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+/* 選ぶ印は、カードの中央に大きく。
+   隅の小さな丸は「押せる場所」として狙う必要があり、選んだかどうかも
+   遠目に分からなかった。カード全体が選ぶ面になり、薄い膜がかかること
+   自体が「いまは選ぶモードだ」を伝える。 */
+.card-select {
+  position: absolute;
+  z-index: 3;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  border-radius: var(--mantine-radius-lg);
+  background: light-dark(rgb(255 255 255 / 52%), rgb(10 14 20 / 48%));
+  transition: background-color 120ms ease;
+}
+.card-select__ring {
+  display: grid;
+  width: 54px;
+  height: 54px;
+  place-items: center;
+  border: 2px solid light-dark(#c3ccd8, #46505d);
+  border-radius: 50%;
+  color: transparent;
+  background: light-dark(rgb(255 255 255 / 94%), rgb(24 31 41 / 94%));
+  box-shadow: 0 6px 18px rgb(20 31 43 / 18%);
+  transition: transform 110ms ease, background-color 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+.entity-card:hover .card-select__ring,
+.work-card:hover .card-select__ring { border-color: var(--mantine-color-piep-5); color: light-dark(#b6c1cd, #55606d); }
+.card-select[data-checked] { background: color-mix(in srgb, var(--mantine-color-piep-6) 16%, transparent); }
+.card-select[data-checked] .card-select__ring {
+  border-color: var(--mantine-color-piep-6);
+  color: #fff;
+  background: var(--mantine-color-piep-6);
+  transform: scale(1.04);
+}
+.entity-card[data-selection-mode],
+.work-card[data-selection-mode] { cursor: pointer; }
+@media (prefers-reduced-motion: reduce) {
+  .card-select,
+  .card-select__ring { transition: none; }
+}
+
+.work-row__select {
+  z-index: 3;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid light-dark(rgb(116 130 145 / 42%), rgb(255 255 255 / 20%));
+  color: light-dark(#3f4c59, #d7e0e8);
+  background: light-dark(rgb(255 255 255 / 96%), rgb(25 32 42 / 96%));
+  box-shadow: 0 4px 12px rgb(20 31 43 / 18%);
+  transition: color 120ms ease, background-color 120ms ease, border-color 120ms ease, box-shadow 120ms ease, transform 100ms ease;
+}
+.work-row__select:hover { border-color: var(--mantine-color-piep-5); box-shadow: 0 6px 16px rgb(20 71 110 / 22%); transform: translateY(-1px); }
+.work-row__select:active { transform: translateY(0); }
+.work-row__select:focus-visible { outline: 3px solid rgb(13 134 244 / 24%); outline-offset: 2px; }
+.work-row__select[data-checked] { border-color: var(--mantine-color-piep-6); color: white; background: var(--mantine-color-piep-6); }
+.work-selection-toggle__indicator {
+  display: grid;
+  width: 21px;
+  height: 21px;
+  flex: 0 0 21px;
+  place-items: center;
+  border: 1.5px solid currentColor;
+  border-radius: 50%;
+}
+.work-row__select[data-checked] .work-selection-toggle__indicator { border-color: rgb(255 255 255 / 78%); background: rgb(255 255 255 / 12%); }
+.work-card__footer {
+  display: flex;
+  grid-column: 1 / -1;
+  grid-row: 2;
+  min-width: 0;
+  min-height: 46px;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-top: 1px solid light-dark(#e7ebef, #29313b);
+}
+.work-card__footer > .work-card__facts { flex: 1 1 auto; }
+.work-card__actions { flex: 0 0 auto; }
+.work-card__actions .mantine-ActionIcon-root { flex: 0 0 auto; }
+/* Only as wide as the avatar and the name: stretching to the row made the
+   whole line clickable, which gave no clue where the link actually was. */
+.work-card__author { display: inline-flex; width: fit-content; max-width: 100%; min-width: 0; min-height: 28px; padding-block: 3px; cursor: pointer; border-radius: 999px; }
+.work-card__author:hover .mantine-Text-root { color: var(--mantine-color-piep-7); }
+.work-card__author:focus-visible { outline: 2px solid var(--mantine-color-piep-5); outline-offset: 2px; }
+.work-card__identity,
+.work-row__identity { display: flex; min-width: 0; min-height: 22px; align-items: center; gap: 8px; }
+/* 名前は、この行でいちばん最後に譲る。
+   //
+   // あらすじ側の縮み率を 100 にして「あらすじが先に譲る」つもりだったが、
+   // 長い架空の作者名が途中で省略されていた。重み付けは
+   // 基準幅との積で効くので、字数の組み合わせによっては名前の側が先に
+   // 削られる。**譲る順は、比ではなく決めごとで書く。** あらすじは地の文
+   // なので端が切れても読めるが、名前は人を名指す語で、3文字では誰のことか
+   // 分からない。
+   //
+   // 上限は置く。名前だけで行を埋めると、今度はあらすじが消えるため。
+   // そこまで長い名前が切れたときは、ホバーで全文が読める（`ClippedTooltip`）。 */
+.work-card__identity .work-card__author,
+.work-row__identity .work-card__author { flex: 0 0 auto; max-width: 55%; }
+.work-card__identity-divider { width: 1px; height: 18px; flex: 0 0 auto; background: light-dark(#d5dae0, #38414c); }
+
+/* The series line above the title is the link to the series. */
+.work-card__series-link { display: inline-flex; width: fit-content; max-width: 100%; min-height: 20px; align-items: center; gap: 5px; padding: 0; border: 0; cursor: pointer; background: none; }
+.work-card__series-link:hover .work-card__series { color: var(--mantine-color-piep-7); }
+.work-card__series-link:focus-visible { outline: 2px solid var(--mantine-color-piep-5); outline-offset: 2px; border-radius: 4px; }
+.work-card__avatar { flex: 0 0 auto; }
+.work-card__excerpt { margin-top: -1px; }
+.work-card__search-reason { min-width: 0; overflow: hidden; color: var(--mantine-color-teal-7); }
+.work-card__search-reason .mantine-Badge-root { flex: 0 0 auto; }
+.work-card__version { display: inline-flex; min-height: 24px; flex: 0 0 auto; align-items: center; cursor: pointer; font-variant-numeric: tabular-nums; }
+
+/* Very narrow columns drop the cover rail's chrome so the text keeps room. */
+@container (max-width: 300px) {
+  .work-card__excerpt { display: none; }
+}
+
+.work-card__series {
+  color: var(--mantine-color-dimmed);
+  font-size: 0.75rem;
+  font-weight: 650;
+  line-height: 1.25;
+  letter-spacing: 0.02em;
+}
+/* Series and title use their natural combined height. A series + one-line
+   title therefore occupies the same space as a two-line title without a
+   series, without leaving a visibly empty reserved row between elements. */
+.work-card__title { font-size: 0.9rem; }
+/* 幅は題名の分だけ。行いっぱいに広げると、押した合図の枠も、切れた題名を
+   読ませる吹き出しも、文字ではなく箱の中央——何も無い右方——に出る。
+   入りきらない題名では fit-content が行幅そのものになるので、2行に
+   折り返す側は今までと変わらない。 */
+.work-card__open { display: flex; width: fit-content; max-width: 100%; min-width: 0; min-height: 28px; align-items: center; color: inherit; text-align: left; }
+.work-card__meta + .work-card__open { align-items: flex-start; }
+.work-card__open:focus-visible,
+.work-row__open:focus-visible { outline: 2px solid var(--mantine-color-piep-5); outline-offset: 3px; border-radius: var(--mantine-radius-sm); }
+.work-card__cover-rail { cursor: pointer; }
+
+/* Measured by TagRow: every tag is rendered, and the ones that do not fit are
+   marked hidden so the "+N" chip can report an accurate remainder. */
+.work-card__tags {
+  display: flex;
+  min-width: 0;
+  min-height: 28px;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: nowrap;
+  overflow: hidden;
+}
+.work-card__tags [data-hidden] { display: none; }
+/* 一つ一つのタグは切らない。
+   //
+   // 130px で頭打ちにしていたので、行に余りがあっても
+   // 「やはり俺の青春ラブコメはまち…」で止まっていた。入りきらないタグを
+   // どうするかは、この行がすでに決めている - 入らないぶんは「+N」の
+   // 向こうへ回る（`TagRow`）。読めない切れ端を並べる必要は無い。
+   // 上限は「行より広くしない」だけにして、最後の1枚の逃げ道に残す。 */
+.work-card__tag { height: 26px; min-height: 26px; flex: 0 0 auto; max-width: 100%; text-decoration: none; cursor: pointer; }
+.work-card__tag .mantine-Badge-label { overflow: hidden; text-overflow: ellipsis; }
+.work-card__tag:hover { background: light-dark(var(--mantine-color-piep-0), var(--mantine-color-dark-5)); color: var(--mantine-color-piep-7); }
+/* A fixed footprint keeps the measurement in TagRow stable: if the chip grew
+   with its own label ("+3" then "+12") it would no longer fit the space that
+   was reserved for it and got clipped to a bare "+". */
+.work-card__tag-overflow {
+  height: 26px;
+  min-height: 26px;
+  min-width: 38px;
+  flex: 0 0 auto;
+  justify-content: center;
+  cursor: pointer;
+  font-variant-numeric: tabular-nums;
+}
+.work-card__tag-overflow:focus-visible { outline: 2px solid var(--mantine-color-piep-5); outline-offset: 2px; }
+.work-card__tag-popover { border-color: light-dark(#d5e9f8, #29485f); background: light-dark(#fbfdff, #121c25); }
+.work-card__tag-popover .mantine-Badge-root { cursor: pointer; }
+/* The facts row must never force the card wider than its grid column: extra
+   items wrap onto a hidden second line instead of clipping mid-glyph. */
+.work-card__facts {
+  min-width: 0;
+  height: 26px;
+  align-items: center;
+  overflow: hidden;
+  flex-wrap: wrap;
+  /* A large row gap parks any wrapped item well below the clip, so a second
+     line never peeks through as a sliver under the first. */
+  row-gap: 31px;
+}
+.work-card__facts > .mantine-Text-root { display: inline-flex; min-width: 0; max-width: 100%; align-items: center; gap: 4px; white-space: nowrap; }
+.library-toolbar { background: light-dark(rgb(255 255 255 / 90%), rgb(17 22 30 / 92%)); }
+/* 絵だけの切り替え。文字が無いので、Mantine が文字の行で作っていた高さが
+   絵の高さまで縮む。高さをここで決めて、絵はその中で中央に置く。
+   `height: 100%` にしてはいけない — 親の高さはこの中身で決まるので、
+   参照が循環して auto に戻り、押せる範囲も滑る印も 15px の細さになる。 */
+.view-mode-switch.mantine-SegmentedControl-root { display: inline-flex; align-items: center; height: 36px; }
+.view-mode-switch .mantine-SegmentedControl-label {
+  display: flex;
+  width: 42px;
+  height: 30px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  line-height: 1;
+}
+.view-mode-switch .mantine-SegmentedControl-innerLabel { display: flex; align-items: center; }
+.view-mode-switch .mantine-SegmentedControl-label svg { display: block; }
+/* 焦点の輪をマスの内側へ引く。Mantine は輪をマスの outline で描くが、
+   外枠は overflow: hidden の丸角なので、既定の外向きの輪は端で切られて
+   右だけ欠けて見える。 */
+.view-mode-switch .mantine-SegmentedControl-label { outline-offset: -2px; }
+
+/* 一行は上から、シリーズ、題名、作者とあらすじ、タグ、そして事実と操作。
+   右に別の列を立てず、表紙の横を一本の流れにする。右列にタグを置いていた
+   頃は、窓幅で列が消えるたびに行の中身が入れ替わっていた。 */
+.work-row {
+  min-width: 0;
+  cursor: pointer;
+  container-type: inline-size;
+}
+
+/* 高さを揃えると、シリーズの有無で一覧が波打たない。シリーズ行を
+   含む方の高さを下限にし、無い行は中央に寄せて埋める。 */
+.work-row__grid {
+  display: grid;
+  min-height: 173px;
+  align-items: center;
+  gap: 6px 16px;
+  grid-template-columns: 92px minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr) auto;
+  padding: 10px 14px;
+}
+.work-row__provider { min-height: 20px; padding-block: 0; }
+.work-row__provider .provider-mark__icon { width: 16px; height: 16px; }
+.work-row__provider .mantine-Text-root { font-size: 10px; }
+
+.work-row__cover { position: relative; grid-row: 1 / 3; cursor: pointer; }
+.work-row__cover .work-cover--compact { width: 92px; height: auto; aspect-ratio: var(--work-cover-shape); flex: none; border-radius: 8px; }
+.work-row__select { position: absolute; top: -6px; left: -6px; width: 28px; height: 28px; border-radius: 50%; }
+.work-row__select .work-selection-toggle__indicator { width: 18px; height: 18px; flex-basis: 18px; }
+.work-row__main { display: flex; min-width: 0; grid-column: 2; grid-row: 1; flex-direction: column; justify-content: center; }
+.work-row__series { display: block; min-width: 0; }
+.work-row__identity { margin-top: 3px; }
+.work-row__open { display: flex; width: fit-content; max-width: 100%; min-width: 0; min-height: 26px; align-items: center; margin-top: 1px; color: inherit; text-align: left; }
+.work-row__main > :is(.work-card__series-link, .work-row__series) + .work-row__open { align-items: flex-start; margin-top: 0; }
+/* 幅は中身の分だけ。余りを全部受けると、短い一文でも箱が行末まで
+   伸び、吹き出しが文字の上ではなく箱の中央——何も無い右方に出る。
+   縮むときは作者名より先にここが譲る。 */
+.work-row__excerpt {
+  min-width: 0;
+  flex: 0 100 auto;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+/* 題名の箱そのものを中身の幅にしてある（`.work-row__open`）。中の文字も
+   広げない - 行を全部受けると吹き出しと枠の位置が文字から離れる。 */
+.work-row__open > * { width: fit-content; max-width: 100%; }
+/* タグは題名と同じ左端から始める。 */
+.work-row__tags { min-width: 0; margin-top: 7px; }
+/* 足元はカードと同じ組み。事実が左で伸び、操作は右に固定。 */
+.work-row__footer { display: flex; min-width: 0; grid-column: 2; grid-row: 2; align-items: center; gap: 8px; }
+.work-row__facts { min-width: 0; flex: 1 1 auto; white-space: nowrap; }
+.work-row__facts > .mantine-Text-root { display: inline-flex; min-width: 0; align-items: center; gap: 4px; }
+.work-row__actions { display: flex; flex: 0 0 auto; justify-content: flex-end; }
+
+@container (max-width: 720px) {
+  .work-row__grid { grid-template-columns: 78px minmax(0, 1fr); gap: 6px 10px; }
+  .work-row__cover .work-cover--compact { width: 78px; height: auto; aspect-ratio: var(--work-cover-shape); }
+  /* あらすじを落とすなら、その前の仕切りも一緒に落とす。 */
+  .work-row__excerpt,
+  .work-row__excerpt-divider { display: none; }
+}
+
+/* A phone-sized list has no room for metadata and five actions on one line.
+   Keep the title and tags wide, place the footer on two deliberate rows, and
+   remove only the redundant "read" action (the title/card already opens it). */
+@container (max-width: 480px) {
+  .work-row__grid {
+    min-height: 184px;
+    gap: 5px 8px;
+    grid-template-columns: 64px minmax(0, 1fr);
+    padding: 8px;
+  }
+  .work-row__cover .work-cover--compact { width: 64px; height: auto; aspect-ratio: var(--work-cover-shape); }
+  .work-row__footer { align-items: stretch; flex-direction: column; gap: 1px; }
+  .work-row__facts { width: 100%; height: 24px; overflow: hidden; }
+  .work-row__actions { align-self: flex-end; }
+  .work-row__actions .work-card__actions > .mantine-Tooltip-root:first-child,
+  .work-row__actions .work-card__actions > .mantine-ActionIcon-root:first-child { display: none; }
+}
+
+.dashboard-hero {
+  overflow: hidden;
+  border-color: light-dark(#cfe5f7, #284562);
+  background:
+    linear-gradient(120deg, light-dark(rgb(255 255 255 / 98%), rgb(18 25 35 / 98%)) 15%, light-dark(rgb(237 248 255 / 94%), rgb(13 39 59 / 88%)) 100%);
+}
+
+.dashboard-quick-save__logo {
+  flex: 0 0 auto;
+  border-radius: var(--mantine-radius-lg);
+  background: light-dark(#f2f8fd, #0d2639);
+  box-shadow: inset 0 0 0 1px light-dark(#dcecf8, #24465e);
+}
+.dashboard-quick-save { padding-block: 13px; }
+.dashboard-page,
+.dashboard-page > * { min-width: 0; }
+.dashboard-page .page-header h1 { font-size: clamp(26px, 2vw, 30px); }
+/* These are filters, so they behave like buttons: a real hit area, a hover
+   that reads as clickable, and a press state. */
+/* Chips of different widths wrapped in a narrow column leave a ragged right
+   edge and, with one long tag, most of a row empty. Letting every chip grow
+   into the space left on its row fills each row exactly, so the block has a
+   straight edge instead of a series of holes. */
+/* Chips used to stretch to fill the line, so a row often held one or two and
+   the list ran long.
+ *
+ * Three is the floor rather than a consequence of a minimum track width: the
+ * card is narrow enough that any min wide enough to look right also drops the
+ * count to two. Columns are added from the card's own width, not the window's,
+ * because this card sits in a grid column and the two do not move together.
+ * Without container query support the base rule still gives the intended three. */
+.dashboard-tags-card { container-type: inline-size; container-name: dashboard-tags; --dashboard-tag-height: 30px; }
+.dashboard-tags {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  /* Four rows whatever the column count. Rows are a fixed height and the box is
+     sized to exactly four of them, so the tags that do not fit fall outside it
+     and are clipped whole - a wider card shows more tags rather than fewer
+     rows. */
+  grid-auto-rows: var(--dashboard-tag-height);
+  height: calc(4 * var(--dashboard-tag-height) + 3 * 6px);
+  overflow: hidden;
+  gap: 6px;
+}
+@container dashboard-tags (min-width: 460px) {
+  .dashboard-tags { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+}
+@container dashboard-tags (min-width: 600px) {
+  .dashboard-tags { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+}
+@container dashboard-tags (min-width: 740px) {
+  .dashboard-tags { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+}
+
+.dashboard-tag {
+  height: var(--dashboard-tag-height);
+  width: 100%;
+  min-width: 0;
+  padding-inline: 10px;
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: background-color 120ms ease, border-color 120ms ease, transform 90ms ease;
+}
+.dashboard-tag:hover {
+  border-color: light-dark(var(--mantine-color-piep-3), var(--mantine-color-piep-8));
+  background: light-dark(var(--mantine-color-piep-0), var(--mantine-color-dark-5));
+  color: var(--mantine-color-piep-7);
+}
+.dashboard-tag:active { transform: translateY(1px); }
+.dashboard-tag:focus-visible { outline: 2px solid var(--mantine-color-piep-5); outline-offset: 2px; }
+.dashboard-tag .mantine-Badge-label { display: flex; width: 100%; align-items: center; justify-content: space-between; gap: 7px; }
+/* The name gives way before the count does: a trimmed name still reads, a
+   trimmed number does not. The full name stays in the tooltip. */
+.dashboard-tag__name { overflow: hidden; min-width: 0; flex: 1 1 auto; text-overflow: ellipsis; white-space: nowrap; }
+.dashboard-tag__count { flex: 0 0 auto; display: inline-grid; min-width: 18px; height: 18px; padding-inline: 4px; place-items: center; border-radius: 999px; background: light-dark(#e4e8ec, #2b323c); color: var(--mantine-color-dimmed); font-size: 10px; font-variant-numeric: tabular-nums; }
+
+.quick-save-input {
+  width: 100%;
+  height: 36px;
+  padding: 0 12px;
+  border: 1px solid light-dark(#cfd5dc, #3b4553);
+  border-radius: var(--mantine-radius-md);
+  outline: 0;
+  color: var(--mantine-color-text);
+  background: light-dark(#fff, #171c24);
+}
+
+.quick-save-input:focus {
+  border-color: var(--mantine-color-piep-6);
+  box-shadow: 0 0 0 2px rgb(13 134 244 / 14%);
+}
+
+.quick-save-input--error { border-color: var(--mantine-color-red-6); }
+
+.hero-art {
+  position: relative;
+  min-height: 250px;
+}
+
+.hero-art__book {
+  position: absolute;
+  z-index: 2;
+  top: 50%;
+  left: 50%;
+  display: grid;
+  width: 142px;
+  height: 142px;
+  place-items: center;
+  border: 1px solid rgb(255 255 255 / 52%);
+  border-radius: 42px;
+  color: white;
+  background: linear-gradient(145deg, #289eff, #0b69c6 64%, #86b918);
+  box-shadow: 0 26px 64px rgb(8 91 164 / 28%);
+  transform: translate(-50%, -50%) rotate(-5deg);
+}
+
+.hero-art__orbit {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  border: 1px solid light-dark(rgb(13 134 244 / 20%), rgb(89 184 255 / 20%));
+  border-radius: 50%;
+  transform: translate(-50%, -50%) rotate(-16deg);
+}
+
+.hero-art__orbit--one { width: 250px; height: 132px; }
+.hero-art__orbit--two { width: 320px; height: 190px; transform: translate(-50%, -50%) rotate(26deg); }
+
+/* Fixed column counts clipped the card contents on narrow windows, so the
+   dashboard grid tracks the same intrinsic card width as the library grid. */
+.work-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 16px;
+}
+
+.library-toolbar {
+  position: sticky;
+  z-index: 20;
+  top: 10px;
+  background: light-dark(rgb(255 255 255 / 94%), rgb(18 23 31 / 94%));
+  backdrop-filter: blur(14px);
+}
+
+.library-page { padding-top: 14px; }
+
+.library-results { display: flow-root; }
+.library-toolbar__slot { display: contents; }
+.library-toolbar__slot[data-inactive] { visibility: hidden; pointer-events: none; }
+
+.library-grid {
+  display: grid;
+  /* Must match VirtualizedWorkList's measured threshold. This also governs the
+     non-virtualized first paint, so both layouts change columns at 672px. */
+  grid-template-columns: repeat(auto-fill, minmax(328px, 1fr));
+  gap: 16px;
+}
+
+.entity-card { position: relative; min-height: 138px; overflow: hidden; }
+.entity-card[data-selection-mode] { cursor: pointer; }
+.entity-card[data-selected] { outline: 2px solid var(--mantine-color-piep-6); outline-offset: -2px; }
+.entity-card__banner { position: absolute; inset: 0; overflow: hidden; background: light-dark(#e9eef3, #1c242e); }
+.entity-card__banner > *:first-child { filter: saturate(0.92); opacity: 0.34; transform: scale(1.01); }
+.entity-card__banner > img { width: 100%; height: 100%; object-fit: cover; }
+.entity-card__wash { position: absolute; inset: 0; background: linear-gradient(90deg, light-dark(rgb(255 255 255 / 96%), rgb(17 22 30 / 96%)) 25%, light-dark(rgb(255 255 255 / 84%), rgb(17 22 30 / 84%))); }
+.entity-card__content { position: relative; min-height: 138px; }
+.entity-card__series-cover { display: grid; width: 72px; aspect-ratio: var(--work-cover-shape); flex: 0 0 72px; place-items: center; overflow: hidden; border: 1px solid light-dark(rgb(255 255 255 / 72%), rgb(255 255 255 / 14%)); border-radius: 7px; color: var(--mantine-color-dimmed); background: light-dark(#f5f1ec, #202832); box-shadow: 0 8px 20px rgb(28 34 43 / 16%); }
+.entity-card__series-cover img { width: 100%; height: 100%; object-fit: contain; }
+
+/* 保存元が出す「画像なし」の一枚そのもの。枠いっぱいに敷くので、丸くするのも
+   角を落とすのも、置かれた側の器が決める。明暗のテーマで色を変えないのは、
+   保存元でもこの一枚のまま出ているからである。 */
+.no-image-mark { display: block; width: 100%; height: 100%; object-fit: cover; }
+/* Mantine の Avatar は中身を中央へ寄せるために余白を持つ。絵は器を満たす。 */
+.entity-avatar .mantine-Avatar-placeholder,
+.entity-hero__avatar .mantine-Avatar-placeholder { padding: 0; }
+
+.selection-bar {
+  position: fixed;
+  z-index: 200;
+  right: 24px;
+  bottom: 22px;
+  left: calc(var(--piep-sidebar-width) + 24px);
+  max-width: 960px;
+  margin-inline: auto;
+  border: 2px solid light-dark(var(--mantine-color-piep-5), var(--mantine-color-piep-4));
+  border-radius: 16px;
+  background: light-dark(rgb(255 255 255 / 96%), rgb(20 27 36 / 96%));
+  box-shadow: 0 0 0 3px light-dark(rgb(13 134 244 / 13%), rgb(73 169 238 / 17%)), 0 18px 44px rgb(18 47 70 / 24%);
+  backdrop-filter: blur(18px);
+}
+/* Bottom-right, out of the way of the selection bar, which centres itself
+   along the bottom edge and can reach the right margin on a narrow window. The
+   page raises this button while that bar is up rather than letting them stack. */
+.scroll-to-top {
+  position: fixed;
+  z-index: 190;
+  right: 24px;
+  bottom: 22px;
+  border: 1px solid light-dark(#d3dbe4, #2c3644);
+  background: light-dark(rgb(255 255 255 / 94%), rgb(22 29 38 / 94%));
+  box-shadow: 0 6px 20px rgb(18 47 70 / 18%);
+  backdrop-filter: blur(10px);
+  transition: bottom 160ms ease, transform 120ms ease;
+}
+
+.scroll-to-top:hover { transform: translateY(-2px); }
+
+@media (prefers-reduced-motion: reduce) {
+  .scroll-to-top { transition: none; }
+  .scroll-to-top:hover { transform: none; }
+}
+
+/* The pager is the control a hundred-page listing is driven by, so its targets
+   are sized to be hit rather than to be tidy, and the run of numbers is allowed
+   the full width of the listing above it. */
+.list-pager__pages { max-width: 100%; }
+.list-pager__page {
+  min-width: 44px;
+  height: 38px;
+  padding-inline: 6px;
+  font-variant-numeric: tabular-nums;
+}
+.list-pager__edge { height: 38px; flex: 0 0 auto; }
+
+.selection-bar__inner { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 14px; }
+.selection-bar__summary { min-width: 0; flex: 1 1 auto; }
+.selection-bar__actions { flex: 0 0 auto; }
+.selection-bar__count {
+  display: inline-flex;
+  min-width: 112px;
+  min-height: 34px;
+  align-items: center;
+  gap: 5px;
+  padding-inline: 10px;
+  border-radius: 10px;
+  color: var(--mantine-color-piep-7);
+  background: light-dark(var(--mantine-color-piep-0), rgb(26 62 88 / 64%));
+}
+.selection-bar__count[data-empty] { color: var(--mantine-color-dimmed); background: light-dark(#f2f4f6, #272e38); }
+
+.work-hero {
+  overflow: hidden;
+}
+
+.work-hero__cover-stage {
+  position: relative;
+  min-height: 320px;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  padding: 28px;
+  background: var(--mantine-color-body);
+}
+
+@media (min-width: 48em) {
+  .work-hero__cover-stage {
+    height: 100%;
+    align-items: start;
+    padding-top: var(--work-cover-mark-offset, 28px);
+  }
+}
+
+/* 表紙の形は表紙が決める。棚のタイルは揃っていないと読めないので固定の枠に
+   入れるが、作品ページには揃える相手がいない。2/3 に固定していたころ、pixiv の
+   表紙（240x338 = 0.71）は幅で合わされて上下に余白ができ、カードより小さく、
+   **下が詰まって見えた**。読み込めた表紙の比を `--work-cover-ratio` で受け取り、
+   表紙が無いときだけ 2/3 に戻す。 */
+.work-hero__cover {
+  position: relative;
+  width: min(100%, 190px);
+  aspect-ratio: var(--work-cover-ratio, 2 / 3);
+  overflow: hidden;
+  border-radius: 8px;
+}
+
+.work-breadcrumbs { display: flex; width: 100%; min-width: 0; overflow: hidden; }
+.work-breadcrumbs .mantine-Breadcrumbs-breadcrumb { min-width: 0; }
+.work-breadcrumbs .mantine-Breadcrumbs-breadcrumb:last-child { flex: 1; overflow: hidden; }
+.work-breadcrumbs .mantine-Breadcrumbs-breadcrumb:last-child .mantine-Text-root { max-width: 100%; }
+
+.work-hero__title {
+  max-width: 960px;
+  font-size: clamp(20px, 1.65vw, 26px);
+  line-height: 1.35;
+  letter-spacing: -0.025em;
+  overflow-wrap: anywhere;
+}
+
+.work-caption {
+  color: var(--mantine-color-dimmed);
+  font-size: var(--mantine-font-size-sm);
+  line-height: 1.75;
+  white-space: pre-wrap;
+}
+.work-caption br { display: block; content: ""; }
+.work-caption p { margin: 0 0 0.55em; }
+.work-caption a { color: var(--mantine-color-piep-7); text-decoration: underline; text-underline-offset: 2px; }
+
+.work-hero__series-link,
+.work-hero__author-link {
+  width: fit-content;
+  max-width: 100%;
+  border-radius: var(--mantine-radius-sm);
+  text-decoration: none;
+}
+.work-hero__series-link { padding: 3px 0; }
+.work-hero__series-link:hover,
+.work-hero__author-link:hover {
+  color: var(--mantine-color-piep-7);
+  background: transparent;
+}
+.work-hero__series-link:focus-visible,
+.work-hero__author-link:focus-visible {
+  outline: 2px solid var(--mantine-color-piep-5);
+  outline-offset: 2px;
+}
+
+.work-hero__tags { min-height: 32px; }
+.work-hero__tag {
+  height: 30px;
+  padding-inline: 11px;
+  cursor: pointer;
+  border: 1px solid transparent;
+  text-decoration: none;
+  transition: color 120ms ease, background-color 120ms ease, border-color 120ms ease, transform 90ms ease;
+}
+.work-hero__tag:hover {
+  border-color: light-dark(var(--mantine-color-piep-3), var(--mantine-color-piep-8));
+  color: var(--mantine-color-piep-7);
+  background: light-dark(var(--mantine-color-piep-0), var(--mantine-color-dark-5));
+}
+.work-hero__tag:active { transform: translateY(1px); }
+.work-hero__tag:focus-visible { outline: 2px solid var(--mantine-color-piep-5); outline-offset: 2px; }
+
+.work-hero__facts { min-width: 0; }
+.work-hero__facts > .mantine-Text-root { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+
+.work-hero__actionbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: var(--mantine-spacing-md);
+  padding-top: 12px;
+  border-top: 1px solid light-dark(#e3e7ec, #303945);
+}
+.work-hero__actions { min-width: 0; flex: 1 1 auto; }
+/* Keeps the far right even when the bar folds onto a second line, where
+   space-between would otherwise leave it at the start of the new row. */
+.work-hero__actionbar > .work-hero__favorite { margin-left: auto; }
+/* Same place and same weight as the author page's row, so the two detail
+   screens read as one design. */
+.work-hero__utility { flex: 0 0 auto; }
+/* 作品の上段は操作だけなので、題と場所を分け合う作者・シリーズより
+   境目が小さい。同じ「入らなくなったら畳む」を、それぞれの行の中身で測る。 */
+.work-hero__toprow { container-type: inline-size; container-name: heroactions; }
+
+/* 右の柱は、余った高さを2枚で分け合う。中身は上から流れるので、伸びても
+   文字の位置は動かない。 */
+.work-side-column > * { flex: 1 1 auto; }
+.work-hero__action {
+  flex: 0 0 auto;
+  min-height: 38px;
+  padding-inline: 10px;
+  box-shadow: 0 1px 2px rgb(20 32 45 / 5%);
+  transition: transform 90ms ease, border-color 120ms ease, box-shadow 120ms ease;
+}
+.work-hero__action:hover { border-color: light-dark(#bdcddd, #465567); box-shadow: 0 5px 14px rgb(20 32 45 / 9%); }
+.work-hero__action:active { transform: translateY(1px); box-shadow: none; }
+
+.content-preview {
+  max-width: 880px;
+  margin-inline: auto;
+  font-family: "Noto Serif JP", "Yu Mincho", serif;
+  font-size: 17px;
+  line-height: 2;
+  overflow-x: clip;
+  overflow-wrap: anywhere;
+}
+
+.content-preview h2,
+.content-preview h3 { margin-top: 2.2em; line-height: 1.45; }
+.content-preview p { margin-block: 0 1.2em; }
+.content-preview img { max-width: 100%; height: auto; border-radius: var(--mantine-radius-md); }
+.content-preview pre,
+.content-preview code { max-width: 100%; white-space: pre-wrap; overflow-wrap: anywhere; }
+.content-preview--paged { min-height: min(58vh, 660px); }
+
+/* The body reads inside a frame of its own rather than running down the page.
+   A forty-thousand character chapter laid out in the document pushed the tabs,
+   the pager and the rest of the screen far above the window - the same reason
+   the JSON view has been bounded all along. The pager below it therefore stays
+   on screen, and turning a page scrolls this rather than the app. */
+.content-frame {
+  max-width: 100%;
+  max-height: 72vh;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: clamp(20px, 2.4vw, 40px);
+  background: light-dark(var(--mantine-color-white), var(--mantine-color-dark-7));
+}
+.content-frame .content-preview { margin-inline: auto; }
+
+/* The same controls, at the same size, as the reader's own page bar. */
+.content-pagination .mantine-Pagination-control { min-width: 30px; height: 30px; border-radius: 7px; }
+.content-preview blockquote {
+  margin: 1.5em 0;
+  padding: 0.2em 0 0.2em 1.2em;
+  border-left: 3px solid var(--mantine-color-piep-3);
+  color: var(--mantine-color-dimmed);
+}
+.novel-inline-link { color: var(--mantine-color-piep-7); text-decoration-thickness: 1px; text-underline-offset: 3px; }
+.novel-link-card {
+  display: flex;
+  width: min(100%, 680px);
+  min-width: 0;
+  align-items: center;
+  gap: 13px;
+  box-sizing: border-box;
+  margin: 1.25em 0;
+  padding: 13px 14px;
+  overflow: hidden;
+  border: 1px solid light-dark(#dce2e8, #303944);
+  border-radius: 12px;
+  color: inherit !important;
+  background: light-dark(#fff, #171d25);
+  box-shadow: 0 5px 18px rgb(25 37 51 / 6%);
+  text-decoration: none !important;
+  font-family: "Noto Sans JP", "Yu Gothic UI", sans-serif;
+  line-height: 1.45;
+  transition: border-color 130ms ease, box-shadow 130ms ease, transform 130ms ease;
+}
+.novel-link-card:hover { border-color: light-dark(#b9c9d8, #455363); box-shadow: 0 9px 26px rgb(25 37 51 / 11%); transform: translateY(-1px); }
+.novel-link-card--fanbox { border-color: light-dark(#e6dca7, #554a20); background: light-dark(linear-gradient(120deg, #fff, #fffdf4), linear-gradient(120deg, #191d24, #29230f)); }
+/* The colour comes from the one service definition, the same one the author
+   and save screens use, so a link card and a profile link wear the same mark. */
+.link-card-brand {
+  display: inline-grid;
+  width: 38px;
+  height: 38px;
+  flex: 0 0 38px;
+  place-items: center;
+  border-radius: 50%;
+  color: var(--link-card-brand, #68707a);
+  background: color-mix(in srgb, var(--link-card-brand, #68707a) 16%, transparent);
+  font-size: 14px;
+  font-weight: 850;
+}
+
+/* 寸法は印そのものの決め（`.brand-word-glyph`）に任せる。ここで別の寸法を
+   重ねていたので、同じ印がカードの中だけ違う形になっていた。 */
+.link-card-info { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 2px; }
+.link-card-kicker { color: #8a6b00; font-size: 10px; font-weight: 800; letter-spacing: 0.04em; }
+.link-card-title { overflow: hidden; color: var(--mantine-color-text); font-size: 0.88rem; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
+.link-card-host { overflow: hidden; color: var(--mantine-color-dimmed); font-size: 0.7rem; text-overflow: ellipsis; white-space: nowrap; }
+.link-card-arrow { flex: 0 0 auto; color: var(--mantine-color-dimmed); font-family: "Noto Sans JP", sans-serif; font-size: 14px; }
+
+/* 宛先を確かめられなかった埋め込み。何が貼られていたかは残すが、押せる
+   ようには見せない ―― 押しても何も起きないカードは、壊れたリンクと同じ。 */
+.novel-link-card--plain {
+  border-style: dashed;
+  box-shadow: none;
+  cursor: default;
+}
+.novel-link-card--plain:hover { border-color: light-dark(#dce2e8, #303944); box-shadow: none; transform: none; }
+
+/* 取得元が新しい種類のブロックを増やしたとき。文字を持つものは本文として
+   出すので、ここへ落ちるのは中身の無いブロックだけ。 */
+.fallback-block {
+  margin: 1.25em 0;
+  padding: 0.9em 1em;
+  border: 1px dashed light-dark(#dce2e8, #303944);
+  border-radius: 10px;
+  color: var(--mantine-color-dimmed);
+  font-size: 0.82rem;
+}
+
+/* 添付ファイル。押して開く手段はまだ無いが、**在ることは見えていなければ
+   ならない。** 何も書かないでいたころは、名前と 📎 が地の文に紛れていた。 */
+.novel-file-attachment {
+  display: flex;
+  gap: 0.7em;
+  align-items: center;
+  margin: 1.25em 0;
+  padding: 0.8em 1em;
+  border: 1px solid light-dark(#dce2e8, #303944);
+  border-radius: 10px;
+  background: light-dark(#fbfcfd, #1a1f27);
+}
+.novel-file-attachment .file-icon { font-size: 1.1rem; line-height: 1; }
+.novel-file-attachment .file-info { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.novel-file-attachment .file-name { overflow-wrap: anywhere; }
+.novel-file-attachment .file-size,
+.missing-file-placeholder {
+  color: var(--mantine-color-dimmed);
+  font-size: 0.82rem;
+}
+
+/* 添付から取り込んだ本文の前に置く一行。
+   piep がやったことであって作者が書いたことではないので、本文と同じ顔にしない。
+   色は状態を示すために使うので、ここでは使わない（設計原則 6）。 */
+.attachment-notice {
+  margin: 1.25em 0;
+  padding-inline-start: 0.9em;
+  border-inline-start: 2px solid light-dark(#dce2e8, #303944);
+  color: var(--mantine-color-dimmed);
+  font-size: 0.82rem;
+}
+/* 取り込めなかった添付。色は状態を示すために使う（設計原則 6）ので、ここは
+   使ってよい ―― 「取り込めなかった」は種類ではなく状態である。 */
+.attachment-notice--failed {
+  border-inline-start-color: light-dark(#e8c4a0, #6b4a2a);
+}
+
+/* 原本へ戻る道。地の文と同じ大きさで、押せることだけが分かればよい。 */
+.attachment-original {
+  padding: 0.1em 0.6em;
+  border: 1px solid light-dark(#dce2e8, #303944);
+  border-radius: 999px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.attachment-original:hover { background: light-dark(#f1f3f5, #21262e); }
+
+/* 原本の紙面。窓の中に収め、紙は白いまま見せる。 */
+.pdf-original-frame {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 240px;
+}
+.pdf-original-page {
+  display: block;
+  max-width: 100%;
+  /* 送りの操作列と題を除いた残り。ページを送っても高さが動かない。 */
+  max-height: 72vh;
+  width: auto;
+  height: auto;
+  border: 1px solid light-dark(#dce2e8, #303944);
+  border-radius: 6px;
+  /* 紙は白い。暗い画面でも紙面の余白を紙のまま出す。 */
+  background: #fff;
+}
+.pdf-original-title { font-size: 0.9rem; font-weight: 650; }
+
+/* 手元にある作品・作者を指しているリンク。押せばアプリの中で開く。
+   押してみるまで分からなかったころは、外部リンクと見分けが付かなかった。 */
+.link-card-saved,
+.novel-inline-link--saved::after {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 999px;
+  color: light-dark(#1f6f43, #7fdcab);
+  background: light-dark(#e4f6ec, #17321f);
+  font-size: 10px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+.link-card-saved { align-self: flex-start; margin-top: 2px; }
+.novel-inline-link--saved::after { content: "ライブラリ"; margin-left: 4px; transform: translateY(-1px); }
+.novel-link-card[data-in-library] { border-color: light-dark(#a8d8bd, #2f6b48); }
+.content-pagination { min-height: 32px; }
+
+.asset-card { overflow: hidden; cursor: pointer; }
+.asset-card__preview { position: relative; display: grid; aspect-ratio: 4 / 3; place-items: center; overflow: hidden; padding: 8px; background: light-dark(#f1f4f7, #0f151d); }
+.asset-card__image { width: 100%; height: 100%; object-fit: contain; }
+.asset-card__badge { position: absolute; top: 7px; right: 7px; }
+.asset-card__meta { padding: 8px 10px 9px; }
+.asset-card__name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Title and body share one left edge; Mantine indents the message by default. */
+.work-note .mantine-Alert-message { margin-left: 0; padding-left: 0; }
+/* 本体の丸めと切り抜きは、窓ぜんぶに効く規則が引き受けるようになった。
+   ここに残すのは、この窓だけ角を一段大きく取ること。 */
+.asset-preview-modal { border-radius: var(--mantine-radius-lg); }
+.version-row { width: 100%; color: inherit; text-align: left; cursor: pointer; background: var(--mantine-color-body); }
+.version-row[data-active] { border-color: var(--mantine-color-piep-5); box-shadow: 0 0 0 1px var(--mantine-color-piep-4); }
+.version-preview { position: sticky; top: 82px; min-height: 310px; }
+.version-preview__text { max-height: 58vh; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-family: "Noto Serif JP", "Yu Mincho", serif; line-height: 1.9; }
+.revision-diff__content {
+  max-height: 58vh;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: "Noto Serif JP", "Yu Mincho", serif;
+  line-height: 1.9;
+}
+.revision-diff__part { border-radius: 3px; text-decoration-thickness: 1px; text-underline-offset: 3px; }
+.revision-diff__part[data-kind="added"] {
+  color: light-dark(var(--mantine-color-green-9), var(--mantine-color-green-2));
+  background: light-dark(var(--mantine-color-green-0), rgb(30 87 53 / 42%));
+  text-decoration: underline;
+}
+.revision-diff__part[data-kind="removed"] {
+  color: light-dark(var(--mantine-color-red-9), var(--mantine-color-red-2));
+  background: light-dark(var(--mantine-color-red-0), rgb(112 38 42 / 44%));
+}
+.revision-diff__omission {
+  display: block;
+  margin-block: 12px;
+  color: var(--mantine-color-dimmed);
+  font-family: var(--mantine-font-family);
+  font-size: var(--mantine-font-size-xs);
+  text-align: center;
+}
+.json-view { max-width: 100%; max-height: 68vh; overflow: auto; background: light-dark(#fafbfc, #0d1218); }
+.json-view pre { margin: 0; padding: 18px; max-width: 100%; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 0.78rem; line-height: 1.65; }
+
+.entity-hero {
+  position: relative;
+  overflow: hidden;
+  min-height: 208px;
+  background: light-dark(#fff, #141a22);
+}
+
+.entity-hero__banner {
+  height: clamp(160px, 18vw, 240px);
+  overflow: hidden;
+  background: light-dark(#edf1f4, #1b222b);
+}
+.entity-hero__banner img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.entity-description {
+  color: var(--mantine-color-dimmed);
+  font-size: var(--mantine-font-size-sm);
+  line-height: 1.7;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* 操作列が名前を畳む境目は、この箱の幅で測る。 */
+.entity-hero__body { position: relative; padding: clamp(20px, 2.5vw, 34px); container-type: inline-size; container-name: hero; }
+.entity-hero__primary { position: relative; }
+.entity-hero__avatar {
+  flex: 0 0 auto;
+  border: 4px solid light-dark(#fff, #141a22);
+  background: light-dark(#f3f5f7, #1d2630);
+  box-shadow: 0 12px 30px rgb(20 31 44 / 18%);
+}
+.entity-hero[data-kind="series"] {
+  background: light-dark(linear-gradient(135deg, #fff 45%, #f1f7fc), linear-gradient(135deg, #141a22 45%, #14293a));
+}
+.entity-hero__series-cover {
+  display: grid;
+  width: 126px;
+  aspect-ratio: var(--work-cover-shape);
+  flex: 0 0 126px;
+  place-items: center;
+  overflow: hidden;
+  border: 1px solid light-dark(#d8dde4, #323a45);
+  border-radius: 9px;
+  color: var(--mantine-color-dimmed);
+  background: light-dark(#f4f0ea, #1c242d);
+  box-shadow: 0 14px 34px rgb(25 34 44 / 18%);
+}
+.entity-hero__series-cover img { width: 100%; height: 100%; object-fit: contain; }
+
+@media (min-width: 48em) {
+  .entity-hero[data-kind="series"] .entity-hero__series-cover {
+    margin-top: var(--series-cover-mark-offset, 0px);
+  }
+}
+
+/* 一覧の監視ボタン。作品カードと同じ決まり - 消えていれば灰、点いていれば
+   その色。登録があって止めているだけの状態だけ、灰に薄い下地を敷いて分ける。 */
+/* 事実の行と同じ底辺へ。作品カードの footer と同じ構図にする。 */
+.entity-card__actions { flex: 0 0 auto; align-self: flex-end; align-items: center; }
+.entity-card__watch { flex: 0 0 auto; color: var(--flag-off); }
+.entity-card__watch[data-state="watching"] { color: var(--flag-watch); background: var(--flag-watch-bg); }
+.entity-card__watch[data-state="paused"] { color: var(--flag-off); background: light-dark(#eef1f5, #202834); }
+.entity-card__watch:hover { background: light-dark(#e9eef4, #232c37); }
+.entity-card__watch[data-state="watching"]:hover { background: var(--flag-watch-bg); }
+
+/* 詳細見出しに付随する操作列。折り返さないこと自体が決まりなので、幅が
+   足りなくなったらボタンの文字を畳んで絵にする。畳む境目は「この列が
+   置かれている箱」の幅で測る。 */
+.action-bar { flex: 0 0 auto; }
+.action-bar__item { flex: 0 0 auto; }
+@container hero (max-width: 820px) {
+  .action-bar__label { display: none; }
+  .action-bar__item { padding-inline: 10px; }
+  .action-bar__item .mantine-Button-section[data-position="left"] { margin-inline-end: 0; }
+}
+@container heroactions (max-width: 590px) {
+  .action-bar__label { display: none; }
+  .action-bar__item { padding-inline: 10px; }
+  .action-bar__item .mantine-Button-section[data-position="left"] { margin-inline-end: 0; }
+}
+/* 正式名称と操作列は別段。長いシリーズ名が四つのボタンに押されて不自然な
+   位置で改行されないよう、表紙以外の幅を名前へ丸ごと渡す。 */
+.entity-hero__identity { width: 100%; }
+.entity-hero__identity-copy { flex: 1 1 auto; width: 0; }
+.entity-hero__actions {
+  width: 100%;
+  margin-bottom: 9px;
+  container-type: inline-size;
+  container-name: heroactions;
+}
+.entity-hero[data-kind="person"] .entity-hero__actions {
+  position: absolute;
+  z-index: 4;
+  top: 0;
+  right: 0;
+  width: min(620px, calc(100% - 136px));
+  margin: 0;
+}
+.entity-hero__actions .action-bar { justify-content: flex-end; }
+.entity-hero__primary .provider-mark { width: fit-content; align-self: flex-start; }
+.profile-links { align-items: stretch; }
+.profile-link {
+  height: 38px;
+  padding-inline: 10px;
+  border-color: color-mix(in srgb, var(--profile-link-color) 30%, light-dark(#d8dde4, #333b46));
+  background: color-mix(in srgb, var(--profile-link-color) 5%, light-dark(#fff, #171d25));
+}
+.profile-link:hover { border-color: color-mix(in srgb, var(--profile-link-color) 60%, transparent); }
+.profile-link .mantine-Button-label { display: flex; gap: 9px; min-width: 0; }
+.profile-link__value { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 行き先が外（普段のブラウザ）だと分かる印。押すまで分からないのを避ける。 */
+.profile-link__out { margin-left: 2px; color: var(--mantine-color-dimmed); opacity: 0.75; }
+.entity-hero h1 { font-size: clamp(23px, 2vw, 30px); line-height: 1.3; letter-spacing: -0.025em; }
+.entity-hero__title { overflow-wrap: anywhere; }
+.entity-page .mantine-Tabs-panel { min-height: 420px; }
+
+/* 狭い幅では操作列の下に人物情報を置き、アイコンと文字のための幅を確保する。 */
+@container hero (max-width: 36rem) {
+  .entity-hero[data-kind="person"] .entity-hero__actions {
+    position: static;
+    width: 100%;
+    margin-bottom: 16px;
+  }
+}
+
+.reader-page {
+  position: relative;
+  height: 100%;
+  overflow: hidden;
+  background: #f2ede4;
+}
+
+.reader-theme--white { background: #f7f8fa; }
+.reader-theme--night { background: #0c1016; }
+
+.reader-toolbar {
+  position: absolute;
+  z-index: 30;
+  top: 0;
+  right: 0;
+  left: 0;
+  height: 62px;
+  border-bottom: 1px solid light-dark(#ded8ce, #2a3039);
+  /* 本文とは重ならない帯なので、背後を毎フレームぼかす意味がない。
+     WebView ではこの blur が長い本文のスクロールごとに再合成される。 */
+  background: light-dark(rgb(255 255 255 / 98%), rgb(16 20 27 / 98%));
+}
+
+.reader-progress {
+  --reader-progress-ratio: 0;
+  height: 2px;
+  overflow: hidden;
+  background: light-dark(var(--mantine-color-gray-2), var(--mantine-color-dark-5));
+}
+
+.reader-progress__bar {
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: var(--mantine-color-piep-6);
+  transform: scaleX(var(--reader-progress-ratio));
+  transform-origin: left center;
+  will-change: transform;
+}
+
+.reader-scroll {
+  height: 100%;
+  padding-top: 62px;
+}
+
+.reader-stage {
+  min-height: calc(100vh - 120px);
+  padding: clamp(28px, 4vw, 58px) 18px 100px;
+}
+
+.reader-paper {
+  width: min(100%, var(--reader-max-width));
+  margin-inline: auto;
+  padding: 0;
+  color: #292622;
+  background: transparent;
+}
+
+.reader-theme--white .reader-stage { background: #fff; }
+.reader-theme--paper .reader-stage { background: #fffdf8; }
+.reader-theme--night .reader-stage { color: #dce2e9; background: #151a22; }
+.reader-theme--night .reader-paper { color: #dce2e9; }
+
+/* The title page follows the reading column rather than being centred inside
+   it: the source opens the block on the left, the author closes it on the
+   right, and the title gets the full measure instead of being squeezed by
+   balanced wrapping. */
+.reader-title-page {
+  padding-block: 22px 16px;
+  text-align: left;
+}
+
+.reader-title-page h1 {
+  max-width: 100%;
+  margin: 14px 0 10px;
+  font-family: var(--reader-font-family);
+  font-size: clamp(21px, 2.1vw, 29px);
+  line-height: 1.36;
+  letter-spacing: -0.025em;
+  text-align: center;
+}
+.reader-title-page__head { min-height: 30px; }
+.reader-title-page__author,
+.reader-title-page__meta { text-align: right; }
+.reader-title-page__meta { margin-top: 3px; }
+
+/* The count is drawn inside the button so it cannot be clipped, and the button
+   itself stays the same shape as every other control in the bar. */
+.reader-bookmark { overflow: visible; }
+.reader-bookmark__count {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  display: grid;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  place-items: center;
+  border: 2px solid var(--mantine-color-body);
+  border-radius: 999px;
+  color: #fff;
+  background: var(--mantine-color-piep-6);
+  font-size: 9px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.reader-content {
+  max-width: var(--reader-max-width);
+  margin-inline: auto;
+  font-family: var(--reader-font-family);
+  font-size: var(--reader-font-size);
+  line-height: var(--reader-line-height);
+  overflow-wrap: anywhere;
+}
+
+.reader-content p { margin: 0 0 1.25em; }
+.reader-content h2,
+.reader-content h3 { margin: 2.8em 0 1.2em; font-family: var(--reader-font-family); line-height: 1.55; }
+.reader-content img { display: block; max-width: 100%; height: auto; margin: 2em auto; border-radius: 8px; }
+.reader-content a { color: var(--mantine-color-piep-7); }
+.reader-content blockquote {
+  margin: 1.8em 0;
+  padding-left: 1.2em;
+  border-left: 3px solid light-dark(#ccd8e3, #3c4a58);
+  color: var(--mantine-color-dimmed);
+}
+
+/* 転送のために割っただけの切れ目に、続きがあることを置く。何も無いと、
+   そこで作品が終わったように見える。 */
+.reader-continue {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  margin-top: 56px;
+  padding-top: 28px;
+  border-top: 1px dashed light-dark(#e5ded3, #323943);
+}
+.reader-page--vertical .reader-continue {
+  width: min(70vw, 420px);
+  height: auto;
+  align-self: center;
+  margin-top: 0;
+  margin-inline-start: 40px;
+  padding-top: 0;
+  padding-inline-start: 28px;
+  border-top: 0;
+  border-inline-start: 1px dashed light-dark(#e5ded3, #323943);
+  writing-mode: horizontal-tb;
+}
+
+.reader-finish {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  margin-top: 80px;
+  padding-top: 40px;
+  border-top: 1px solid light-dark(#e5ded3, #323943);
+  color: var(--mantine-color-dimmed);
+}
+
+.reader-to-top {
+  position: fixed;
+  z-index: 110;
+  right: 24px;
+  bottom: 24px;
+  visibility: hidden;
+  opacity: 0;
+  pointer-events: none;
+  box-shadow: var(--mantine-shadow-lg);
+}
+.reader-to-top[data-visible] { visibility: visible; opacity: 1; pointer-events: auto; }
+
+/* 探した語の印。地の色をそのままにして、下に線だけ引く ―― 塗ると本文の
+   流れが切れて、続きが読みにくくなる。 */
+.reader-hit {
+  padding: 0;
+  color: inherit;
+  background: light-dark(rgb(255 214 92 / 45%), rgb(255 196 0 / 26%));
+  border-radius: 2px;
+}
+
+.reader-hit--current {
+  background: light-dark(rgb(255 186 20 / 78%), rgb(255 186 20 / 52%));
+  box-shadow: 0 0 0 2px light-dark(rgb(255 186 20 / 40%), rgb(255 186 20 / 30%));
+}
+
+.reader-hit-bar {
+  position: fixed;
+  z-index: 115;
+  top: 74px;
+  right: 24px;
+  padding: 5px 8px;
+  border: 1px solid light-dark(#dde2e8, #303944);
+  background: light-dark(rgb(255 255 255 / 96%), rgb(20 25 33 / 96%));
+}
+
+.reader-zoom .mantine-Modal-body { padding: 0; }
+.reader-zoom__image {
+  display: block;
+  max-width: min(92vw, 1600px);
+  max-height: 88vh;
+  cursor: zoom-out;
+  object-fit: contain;
+}
+
+/* 挿絵は押すと大きくなる。押せることが見て分かるようにしておく。 */
+.reader-content img { cursor: zoom-in; }
+
+.reader-content figure { margin: 2em 0; text-align: center; }
+.reader-content figcaption {
+  margin-top: 8px;
+  color: var(--mantine-color-dimmed);
+  font-family: "Noto Sans JP", sans-serif;
+  font-size: 0.78em;
+}
+
+/* --- 縦書き ---
+   本文は右から左へ流れる。行の長さの設定（`--reader-max-width`）は、横書きの
+   「1行の幅」から縦書きの「1行の高さ」へそのまま移る。
+
+   ScrollArea の viewport は overflow を inline で持っているので触らない。
+   代わりに高さの連鎖だけ通し、桁が窓の高さにぴたりと収まるようにする。
+   縦にあふれさせないのは、縦書きで上下にも動くと行を見失うため。 */
+.reader-page--vertical .reader-scroll [data-scrollarea-viewport] > * { height: 100%; }
+
+.reader-page--vertical .reader-stage {
+  min-height: 0;
+  height: 100%;
+  padding: clamp(20px, 2.5vw, 40px) clamp(24px, 4vw, 64px);
+}
+
+/* flex にはしない。縦書きの flex は主軸が縦になるので、`align-items` が
+   横方向へ効いてしまい、行の長さの設定が桁の「幅」に化ける。 */
+.reader-page--vertical .reader-paper {
+  width: auto;
+  height: 100%;
+  writing-mode: vertical-rl;
+  text-orientation: mixed;
+}
+
+.reader-page--vertical .reader-content {
+  max-width: none;
+  height: min(100%, var(--reader-max-width));
+  margin-inline: 0;
+}
+
+/* 扉は横組みのまま。取得元の印と操作ボタンが並ぶ帯で、縦に倒すと読みにくい。 */
+.reader-page--vertical .reader-title-page {
+  writing-mode: horizontal-tb;
+  width: min(62vw, var(--reader-max-width));
+  height: 100%;
+  padding: 0 26px;
+}
+
+.reader-page--vertical .reader-content img { max-height: 68%; }
+.reader-page--vertical .reader-finish { writing-mode: horizontal-tb; width: min(70vw, 640px); }
+/* Centred by an auto margin between both edges rather than by offsetting the
+   left edge to the middle: with only `left` set, the control's available width
+   was just the half of the screen to its right, so the pager wrapped onto a
+   second line long before it needed to. */
+.reader-page-controls {
+  position: fixed;
+  z-index: 110;
+  bottom: 20px;
+  left: var(--piep-sidebar-width);
+  right: 0;
+  width: max-content;
+  max-width: calc(100vw - var(--piep-sidebar-width) - 32px);
+  margin-inline: auto;
+  padding: 5px 8px;
+  border: 1px solid light-dark(#dde2e8, #303944);
+  border-radius: 12px;
+  background: light-dark(rgb(255 255 255 / 98%), rgb(20 25 33 / 98%));
+  box-shadow: var(--mantine-shadow-md);
+}
+.reader-page-controls .mantine-Pagination-control { min-width: 30px; height: 30px; border-radius: 7px; }
+
+.editor-page {
+  position: relative;
+  height: 100%;
+  overflow: hidden;
+}
+
+.editor-toolbar {
+  height: 68px;
+  border-bottom: 1px solid light-dark(#e2e7ed, #252c37);
+  background: light-dark(rgb(255 255 255 / 95%), rgb(16 20 27 / 95%));
+  backdrop-filter: blur(14px);
+}
+.editor-toolbar__inner { min-width: 0; }
+.editor-toolbar__identity { flex: 1 1 auto; overflow: hidden; }
+.editor-toolbar__title { max-width: min(48vw, 640px); }
+.editor-toolbar__actions { flex: 0 0 auto; padding-left: 12px; }
+
+.editor-layout {
+  display: grid;
+  height: calc(100% - 68px);
+  grid-template-columns: minmax(390px, 1.08fr) minmax(360px, 0.92fr);
+}
+
+.editor-main { height: 100%; }
+
+.editor-document {
+  width: min(100% - 28px, 780px);
+  margin: 18px auto 100px;
+}
+.editor-virtual-list { position: relative; width: 100%; margin-top: 8px; }
+.editor-virtual-row { position: absolute; top: 0; left: 0; width: 100%; padding-bottom: 8px; contain: layout paint style; }
+
+.editor-preview-pane {
+  display: grid;
+  min-width: 0;
+  min-height: 0;
+  grid-template-rows: 48px minmax(0, 1fr);
+  overflow: hidden;
+  border-left: 1px solid light-dark(#e2e7ed, #252c37);
+  background: light-dark(#f7f8fa, #0e131a);
+}
+
+.editor-preview-toolbar {
+  border-bottom: 1px solid light-dark(#e2e7ed, #252c37);
+  background: light-dark(rgb(255 255 255 / 92%), rgb(17 22 30 / 92%));
+}
+.editor-preview-stats > * { white-space: nowrap; }
+
+.editor-preview-scroll { height: 100%; }
+.editor-preview-document {
+  width: min(100% - 36px, 720px);
+  min-height: calc(100% - 48px);
+  margin: 24px auto 90px;
+  padding: clamp(24px, 4vw, 52px);
+  border: 1px solid light-dark(#e1e5ea, #282f39);
+  border-radius: var(--mantine-radius-md);
+  color: light-dark(#24272b, #dde3ea);
+  background: light-dark(#fff, #151a22);
+  box-shadow: light-dark(0 16px 44px rgb(30 42 55 / 7%), 0 16px 44px rgb(0 0 0 / 20%));
+  font-family: "Noto Serif JP", "Yu Mincho", serif;
+  font-size: 16px;
+  line-height: 1.95;
+  overflow-wrap: anywhere;
+}
+.editor-preview-series { min-height: 1em; font-family: "Noto Sans JP", sans-serif; }
+.editor-preview-title { margin: 4px 0 8px; font-size: clamp(20px, 2vw, 27px); line-height: 1.4; }
+.editor-preview-document h2 { margin: 2em 0 0.8em; font-size: 1.45em; line-height: 1.5; }
+.editor-preview-document p { margin: 0 0 1.25em; white-space: pre-wrap; }
+.editor-preview-document blockquote { margin: 1.4em 0; padding-left: 1.1em; border-left: 3px solid var(--mantine-color-violet-3); color: var(--mantine-color-dimmed); white-space: pre-wrap; }
+.editor-preview-document figure { margin: 2em 0; text-align: center; }
+.editor-preview-document figure img { max-width: 100%; max-height: 65vh; border-radius: var(--mantine-radius-md); }
+.editor-preview-document figcaption { margin-top: 8px; color: var(--mantine-color-dimmed); font-family: "Noto Sans JP", sans-serif; font-size: 0.78rem; }
+.editor-preview-link { display: flex; align-items: center; gap: 12px; margin: 1.4em 0; padding: 14px; border: 1px solid light-dark(#dbe2e9, #303a46); border-radius: var(--mantine-radius-md); color: inherit; text-decoration: none; font-family: "Noto Sans JP", sans-serif; }
+.editor-preview-link span { display: flex; min-width: 0; flex-direction: column; }
+.editor-preview-link small { color: var(--mantine-color-dimmed); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.editor-preview-block {
+  position: relative;
+  border-radius: 6px;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 72px;
+  transition: background 100ms ease, box-shadow 100ms ease;
+}
+.editor-preview-block,
+.editor-block { content-visibility: auto; contain-intrinsic-block-size: auto 140px; }
+.editor-preview-block[data-active] { background: light-dark(rgb(13 134 244 / 5%), rgb(60 158 236 / 8%)); box-shadow: 0 0 0 5px light-dark(rgb(13 134 244 / 5%), rgb(60 158 236 / 8%)); }
+.editor-preview-page-break { display: flex; align-items: center; gap: 10px; margin: 2.2em 0; color: var(--mantine-color-dimmed); font-family: "Noto Sans JP", sans-serif; font-size: 0.68rem; font-weight: 700; text-transform: uppercase; }
+.editor-preview-page-break::before,
+.editor-preview-page-break::after { height: 1px; flex: 1; background: light-dark(#d9dee5, #333c48); content: ""; }
+
+.editor-insert-row {
+  min-height: 22px;
+  opacity: 0.45;
+  transition: opacity 120ms ease;
+}
+.editor-insert-row:hover,
+.editor-insert-row:focus-within { opacity: 1; }
+
+.editor-block {
+  overflow: hidden;
+  background: light-dark(#fff, #151b23);
+  transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+.editor-block[data-type="heading"] { border-left: 3px solid var(--mantine-color-blue-4); }
+.editor-block[data-type="quote"] { border-left: 3px solid var(--mantine-color-violet-4); }
+.editor-block[data-type="image"] { border-left: 3px solid var(--mantine-color-teal-4); }
+.editor-block[data-type="link"] { border-left: 3px solid var(--mantine-color-cyan-4); }
+.editor-block[data-type="pageBreak"] { border-left: 3px solid var(--mantine-color-orange-4); }
+.editor-block__bar { border-bottom: 1px solid light-dark(#eef0f3, #252c35); background: light-dark(#fafbfc, #121820); }
+.editor-block__body { min-width: 0; }
+
+.editor-block:focus-within {
+  border-color: var(--mantine-color-piep-5);
+  box-shadow: 0 0 0 2px rgb(13 134 244 / 10%);
+}
+.editor-block[data-active] { border-color: var(--mantine-color-piep-4); box-shadow: 0 0 0 2px rgb(13 134 244 / 8%); }
+
+/* 取っ手は掴める。前は cursor だけが grab で、掴んでも何も起きなかった。 */
+.editor-block__handle {
+  display: inline-flex;
+  align-items: center;
+  color: var(--mantine-color-dimmed);
+  cursor: grab;
+  touch-action: none;
+}
+
+.editor-block__handle:active { cursor: grabbing; }
+
+.editor-block[data-dragging] { opacity: 0.45; }
+
+/* 落とす先を線で示す。掴んでいる間、どこへ入るのかが分からないと動かせない。 */
+.editor-block[data-drop-target] {
+  box-shadow: 0 -3px 0 0 var(--mantine-color-piep-6);
+}
+
+/* 題も直せる。誤字のある題を直す手立てが、これまでどこにも無かった。
+   見た目は見出しのまま ―― 押すと書けることは、触れば分かる。 */
+.editor-toolbar__titlebox { flex: 1 1 auto; min-width: 0; }
+.editor-toolbar__title input {
+  padding: 0;
+  height: auto;
+  min-height: 0;
+  font-size: var(--mantine-font-size-sm);
+  font-weight: 700;
+  line-height: 1.3;
+}
+.editor-toolbar__title input:hover { background: light-dark(rgb(0 0 0 / 4%), rgb(255 255 255 / 6%)); }
+.editor-toolbar__title input:focus { background: light-dark(rgb(0 0 0 / 5%), rgb(255 255 255 / 8%)); }
+
+.editor-preview-virtual-list { position: relative; width: 100%; }
+.editor-preview-virtual-row { position: absolute; top: 0; left: 0; width: 100%; }
+
+.editor-find {
+  position: absolute;
+  z-index: 40;
+  top: 74px;
+  right: 18px;
+  background: light-dark(rgb(255 255 255 / 97%), rgb(20 25 33 / 97%));
+}
+
+/* 取り込み直した本文があるのに、編集が古い版の上に載っているとき。
+   本文の頭に置く ―― 開いた人が最初に見る場所で、かつ組みを崩さない。 */
+.editor-stale-base { margin-bottom: 14px; }
+
+/* プレビューの中の行内記法。読書画面と同じ姿にしつつ、押しても飛ばない
+   ことが見て分かるようにしておく。 */
+.editor-preview-notation-link {
+  color: var(--mantine-color-piep-7);
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+}
+.editor-preview-notation-jump {
+  padding: 0 5px;
+  border: 1px dashed light-dark(#cdd5de, #3a4450);
+  border-radius: 5px;
+  color: var(--mantine-color-dimmed);
+  font-size: 0.82em;
+}
+
+.editor-heading-input textarea {
+  font-size: 22px;
+  font-weight: 700;
+}
+.editor-quote-input { padding-left: 12px; border-left: 3px solid var(--mantine-color-violet-2); }
+.editor-page-break { min-height: 34px; border: 1px dashed light-dark(#e0b56d, #70532b); border-radius: var(--mantine-radius-sm); color: light-dark(#9a640e, #e5b35f); background: light-dark(#fffaf1, #231d14); }
+.editor-image-preview { display: grid; width: 150px; height: 112px; flex: 0 0 150px; place-items: center; overflow: hidden; border: 1px solid light-dark(#e1e5ea, #303844); border-radius: var(--mantine-radius-md); color: var(--mantine-color-dimmed); background: light-dark(#f3f5f7, #10151c); }
+
+
+.save-page {
+  display: grid;
+  height: 100%;
+  grid-template-rows: 76px minmax(0, 1fr);
+  overflow: hidden;
+}
+
+.save-page__header {
+  border-bottom: 1px solid light-dark(#e2e7ed, #252c37);
+  background: light-dark(#fff, #11161e);
+}
+
+/* The candidate column is capped as a share of this grid, not of the viewport.
+   Sizing it against 100vw ignored the sidebar and pushed the pane (and its
+   save button) outside the clipped, unscrollable page. */
+.save-layout {
+  display: grid;
+  min-width: 0;
+  min-height: 0;
+  grid-template-columns: minmax(0, 1fr) 14px minmax(0, clamp(260px, var(--piep-candidate-width, 360px), 55%));
+  gap: 6px;
+  padding: 12px;
+}
+
+.save-layout[data-candidate-collapsed] {
+  grid-template-columns: minmax(0, 1fr) 14px 54px;
+}
+
+.browser-pane,
+.candidate-pane {
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid light-dark(#dfe4ea, #28303b);
+  border-radius: var(--mantine-radius-lg);
+  background: light-dark(#fff, #121820);
+}
+
+.browser-pane {
+  display: grid;
+  grid-template-rows: 52px minmax(0, 1fr);
+}
+
+.browser-toolbar {
+  padding: 8px;
+  border-bottom: 1px solid light-dark(#e2e7ed, #252c37);
+  background: light-dark(#fafbfc, #161c24);
+}
+
+.browser-viewport {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 50% 38%, light-dark(rgb(13 134 244 / 10%), rgb(39 156 255 / 10%)), transparent 22rem),
+    light-dark(#f4f6f8, #0d1117);
+}
+
+/* Shelf counts sit at the end of their row and must not shove the label out of
+   the way, so they stay quiet and keep their digits aligned. */
+.app-nav__count {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+  font-weight: 650;
+  opacity: 0.75;
+}
+
+/* The sidebar is a fixed width and cannot grow, so a label gives up characters
+   rather than wrapping onto a second line and pushing the row's height around.
+   The full text stays available through the row's tooltip and its label. */
+.app-nav__link .mantine-NavLink-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-nav__link .mantine-NavLink-body { min-width: 0; }
+
+/* A count of two or more digits does not fit inside a circle. Mantine's circle
+   badge clips it; these stay pill-shaped and grow with their contents. */
+.app-nav__link .mantine-Badge-root,
+.app-nav__group .mantine-Badge-root {
+  min-width: 20px;
+  padding-inline: 5px;
+  border-radius: 999px;
+}
+
+/* The mode picker heads the sidebar because it decides what the rest of the
+   sidebar lists. It reads as a control rather than another destination: a
+   filled well with a chevron, not a nav row. */
+.mode-picker {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 10px;
+  border-radius: var(--mantine-radius-md);
+  border: 1px solid light-dark(#dce3ea, #29323d);
+  background: light-dark(#f1f5f9, #182029);
+  color: light-dark(#1d2530, #e4ebf3);
+  transition: background 120ms ease, border-color 120ms ease;
+}
+
+.mode-picker:hover { background: light-dark(#e7eef6, #1e2833); border-color: light-dark(#c8d4e0, #36424f); }
+.mode-picker:focus-visible { outline: 2px solid var(--mantine-color-piep-5); outline-offset: 1px; }
+.mode-picker > svg:first-child { flex: none; color: var(--mantine-color-piep-6); }
+.mode-picker__chevron { margin-left: auto; flex: none; opacity: 0.55; }
+
+.mode-picker[data-railed] { justify-content: center; padding: 8px 0; }
+
+/* In the rail every saved search would otherwise wear the same bookmark icon.
+   Its initial is the only thing at 18px that tells them apart. */
+.saved-search-mark {
+  display: inline-grid;
+  width: 18px;
+  height: 18px;
+  place-items: center;
+  border: 1.5px solid currentColor;
+  border-radius: 5px;
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 1;
+  opacity: 0.85;
+}
+
+/* Background indexing is reported in the header rather than in a dialog: it
+   needs no decision, but search is incomplete until it finishes. */
+.indexing-chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 99px;
+  border: 1px solid light-dark(#cfe3f8, #23405c);
+  background: light-dark(#eff7ff, #10202f);
+  color: light-dark(#0b5fae, #7cc0ff);
+}
+
+.indexing-chip:hover { background: light-dark(#e2f0fd, #142b3f); }
+.indexing-chip:focus-visible { outline: 2px solid var(--mantine-color-piep-5); outline-offset: 2px; }
+
+/* While the large window holds the session, the pane is a placeholder for a
+   view that is not there. Dimming it says "handed over", not "broken", and the
+   dashed edge distinguishes it from a pane that simply failed to load. */
+.browser-viewport[data-detached] {
+  background: light-dark(#eef2f6, #0b1016);
+  outline: 1px dashed light-dark(#c4ced9, #2c3644);
+  outline-offset: -6px;
+}
+
+.candidate-pane { background: light-dark(#fbfcfd, #11161e); }
+.candidate-pane[data-collapsed] { display: block; }
+.candidate-rail { width: 100%; min-height: 0; }
+.candidate-rail__spacer { flex: 1; min-height: 8px; }
+.candidate-rail__summary,
+.candidate-rail__progress {
+  display: grid;
+  width: 42px;
+  min-height: 42px;
+  place-items: center;
+  align-content: center;
+  gap: 2px;
+  border-radius: var(--mantine-radius-md);
+  color: light-dark(var(--mantine-color-gray-7), var(--mantine-color-gray-3));
+  background: light-dark(#f1f4f7, #1a212b);
+  font-variant-numeric: tabular-nums;
+}
+.candidate-rail__summary { min-height: 44px; }
+.candidate-rail__progress {
+  min-height: 54px;
+  color: light-dark(var(--mantine-color-piep-7), var(--mantine-color-piep-3));
+  background: light-dark(#eaf5ff, #13283a);
+}
+/* The grip is the whole column, so it centres in the gap rather than hugging
+   one side of it. */
+.save-resizer { display: flex; align-items: center; justify-content: center; min-width: 0; min-height: 0; color: var(--mantine-color-dimmed); cursor: col-resize; touch-action: none; border-radius: var(--mantine-radius-sm); }
+.save-resizer > svg { display: block; width: 18px; height: 18px; flex: none; }
+.save-resizer:hover { color: var(--mantine-color-piep-6); background: light-dark(#e8f3fc, #162b3d); }
+.save-resizer:focus-visible { outline: 2px solid var(--mantine-color-piep-5); outline-offset: 2px; color: var(--mantine-color-piep-6); background: light-dark(#e8f3fc, #162b3d); }
+.candidate-list { min-height: 0; }
+/* 取得したときのページから移動している一覧。消しも畳みもしないのは、選んだ
+   ものを覚えておきたいから。ただし「いま開いているページのもの」に見えては
+   困るので、一段退がらせる。 */
+.candidate-list[data-stale] { opacity: 0.55; filter: saturate(0.65); transition: opacity 120ms ease, filter 120ms ease; }
+
+.candidate-row {
+  border-color: light-dark(#e1e6ec, #28313d);
+  background: light-dark(#fff, #151b23);
+  transition: border-color 120ms ease, background 120ms ease;
+}
+
+.candidate-row[data-selected] {
+  border-color: light-dark(#9bcdf3, #306da0);
+  background: light-dark(#f4faff, #10283b);
+}
+
+.epub-export-card {
+  position: sticky;
+  top: 18px;
+  border-color: light-dark(#cfe1f0, #2c4660);
+  background: light-dark(linear-gradient(145deg, #fff, #f2f9ff), linear-gradient(145deg, #151b23, #102235));
+}
+/* --- テンプレートスタジオ --- */
+
+/* 一覧・編集・プレビューを横に並べるので、収まる幅の上限を広くとる */
+.template-studio { max-width: 1680px; }
+
+.template-studio__item { cursor: pointer; transition: border-color 120ms ease, background 120ms ease; }
+.template-studio__item:hover { border-color: light-dark(#9bcdf3, #306da0); }
+.template-studio__item[data-active] {
+  border-color: var(--mantine-color-piep-5);
+  background: light-dark(#f4faff, #10283b);
+}
+
+.template-studio__preview { position: sticky; top: 18px; }
+
+/* 端末の画面に近い見え方にしたいので、枠は白のまま固定する */
+.template-studio__frame {
+  width: 100%;
+  height: 560px;
+  border: 1px solid light-dark(#dfe5eb, #2a323c);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.template-studio__source {
+  margin: 0;
+  padding: 12px;
+  border-radius: 8px;
+  background: light-dark(#f6f8fa, #12181f);
+  font-family: var(--mantine-font-family-monospace);
+  font-size: 11px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.update-progress-card {
+  border-color: light-dark(#cde2f3, #2d4c68);
+  background: light-dark(linear-gradient(135deg, #fff, #f1f9ff), linear-gradient(135deg, #151b23, #10273a));
+}
+
+.update-job-title-viewport {
+  width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  margin-top: 10px;
+}
+
+.update-job-title {
+  white-space: nowrap;
+  width: max-content;
+  max-width: none;
+}
+
+.update-job-title-viewport--scrolling .update-job-title {
+  animation: update-job-title-scroll var(--title-duration) ease-in-out infinite alternate;
+}
+
+@keyframes update-job-title-scroll {
+  0%, 15% { transform: translateX(0); }
+  85%, 100% { transform: translateX(calc(-1 * var(--title-overflow))); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .update-job-title-viewport { overflow-x: auto; }
+  .update-job-title-viewport--scrolling .update-job-title { animation: none; }
+}
+
+.update-candidate + .update-candidate {
+  border-top: 1px solid light-dark(#e5e9ee, #272f39);
+}
+
+/* タブの境目。左は「走らせた結果」、右は「決めごと」。 */
+.updates-tabs__divider {
+  align-self: center;
+  width: 1px;
+  height: 18px;
+  margin-inline: 6px;
+  background: light-dark(#dfe5ec, #2b3541);
+}
+
+/* 毎回触るものだけを載せた一列。見出しの直下に置くので、囲いは軽く。 */
+.updates-toolbar { border-color: light-dark(#dfe5ec, #262f3a); }
+
+/* 走らせた記録。行そのものが選ぶ場所なので、居場所が分かるようにする。 */
+.update-history__row + .update-history__row { border-top: 1px solid light-dark(#e5e9ee, #272f39); }
+.update-history__row:hover { background: light-dark(#f6f8fb, #171e26); }
+.update-history__row[data-active] { background: light-dark(#eef6ff, #10273a); }
+/* 消す口は、その行に居るときだけ出す。何行ぶんもの × が常に並んでいると、
+   読みたい日付より先に目へ入る。場所は空けたままにして、出入りで行が
+   動かないようにする。キーボードでは焦点が当たった時点で見える。 */
+.update-history__delete { opacity: 0; transition: opacity 120ms ease; }
+.update-history__row:hover .update-history__delete,
+.update-history__row:focus-within .update-history__delete { opacity: 1; }
+
+/* Below the side-by-side breakpoint the section chooser becomes a compact
+   wrapping grid. A horizontally scrolling strip exposed a second scrollbar
+   inside the page at phone widths and hid the last sections off-screen. */
+@media (max-width: 61.99em) {
+  .settings-nav {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    overflow: visible;
+  }
+  .settings-nav .mantine-NavLink-root { min-width: 0; }
+  .settings-nav .mantine-NavLink-label,
+  .settings-nav .mantine-NavLink-description {
+    overflow-wrap: anywhere;
+    white-space: normal;
+  }
+}
+
+@media (max-width: 36em) {
+  .settings-nav { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (max-width: 56em) {
+  .save-layout { padding: 8px; }
+}
+
+@media (max-width: 64em) {
+  .editor-layout { grid-template-columns: minmax(360px, 1fr) minmax(330px, 0.85fr); }
+  .editor-preview-document { width: calc(100% - 20px); margin-top: 10px; padding: 22px; }
+  .editor-toolbar__actions .mantine-Button-root { padding-inline: 10px; }
+}
+
+/* The controls keep one line at every width: the search field gives up space
+   first, and the sort menu narrows with the window. Wrapping put the view
+   switches on a row of their own, which read as a second toolbar. */
+.library-toolbar__search { min-width: 0; flex: 1 1 auto; }
+.library-toolbar__sort { width: clamp(176px, 20vw, 230px); }
+
+/* A chosen tag is the same object in the drawer and in the applied-filter
+   summary. The previous grey input pill looked like inert text while the blue
+   summary badge looked clickable, even though both removed the same filter. */
+.filter-token {
+  border: 1px solid light-dark(var(--mantine-color-piep-2), var(--mantine-color-piep-8));
+  background: light-dark(var(--mantine-color-piep-1), rgb(22 66 101 / 72%));
+  color: light-dark(var(--mantine-color-piep-8), var(--mantine-color-piep-1));
+  font-weight: 650;
+}
+
+.app-header .mantine-ActionIcon-root[data-placement="header"] {
+  color: var(--mantine-color-text);
+  background: transparent;
+}
+
+.app-header .mantine-ActionIcon-root[data-placement="header"]:not([data-assist-ready]) {
+  color: light-dark(var(--mantine-color-gray-5), var(--mantine-color-dark-1));
+}
+
+.app-header .mantine-ActionIcon-root[data-placement="header"]:not([data-assist-ready]) svg {
+  fill: light-dark(var(--mantine-color-gray-2), var(--mantine-color-dark-4));
+}
+
+.app-header .mantine-ActionIcon-root[data-placement="header"][data-assist-ready]:is(:hover, :focus-visible, [aria-expanded="true"]) {
+  color: light-dark(var(--mantine-color-grape-7), var(--mantine-color-grape-3));
+  background: transparent;
+}
+
+.filter-token .mantine-Pill-remove {
+  color: inherit;
+}
+
+.filter-token[data-tone="exclude"] {
+  border-color: light-dark(var(--mantine-color-red-2), var(--mantine-color-red-8));
+  background: light-dark(var(--mantine-color-red-0), rgb(104 31 38 / 58%));
+  color: light-dark(var(--mantine-color-red-8), var(--mantine-color-red-1));
+}
+
+@media (max-width: 48em) {
+  .work-hero__cover-stage { min-height: 280px; }
+  .work-hero__cover { width: 168px; }
+  .work-hero__actionbar { align-items: stretch; flex-direction: column; }
+  .work-hero__actions { flex-wrap: wrap !important; }
+}
+
+@media (max-width: 61.99em) {
+  .selection-bar { left: 18px; right: 18px; }
+  .selection-bar__inner { align-items: stretch; flex-direction: column; }
+  .selection-bar__actions { justify-content: flex-end; }
+}
+
+@media (max-width: 58em) {
+  .hero-art { min-height: 190px; }
+}
+
+@media (max-width: 40em) {
+  .page {
+    padding: 16px;
+  }
+
+  .page-header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .page-header__actions {
+    width: 100%;
+    justify-content: flex-start;
+  }
+}
+
+@media (max-width: 61.99em) {
+  .reader-page-controls { left: 0; max-width: calc(100vw - 32px); }
+  .reader-page-controls .mantine-Pagination-control:nth-of-type(n + 6):not(:last-child) { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}
+
+/* A flag on a card is drawn in the glyph rather than behind it, so the glyph
+   has to carry the colour people recognise. Mantine picks a shade for contrast
+   against the current ground, which turns the heart maroon on white and washes
+   every flag out to near-white on black - so both ends are chosen here instead.
+   The components hand these to Mantine as `--ai-color`, which it writes inline
+   and a stylesheet therefore cannot reach.
+
+   Switched on Mantine's own scheme attribute rather than with light-dark():
+   these are read through an inline var() on a deep element, where light-dark()
+   silently resolves to its light branch. */
+:root {
+  --flag-off: #868e96;      /* gray 6 */
+  --flag-favorite: #fa5252; /* red 6 */
+  --flag-watch: #0872d3;    /* piep 7 */
+  --flag-epub: #729f12;     /* leaf 6 */
+
+  /* A glyph on its own is a thin mark against white, and a row of them is easy
+     to miss. On a light ground the flag that is on sits on a wash of its own
+     colour, which reads at a glance without going back to the solid chip that
+     made the listing shout. */
+  --flag-favorite-bg: rgb(250 82 82 / 13%);
+  --flag-watch-bg: rgb(8 114 211 / 11%);
+  --flag-epub-bg: rgb(114 159 18 / 15%);
+}
+:root[data-mantine-color-scheme="dark"] {
+  --flag-off: #8b95a1;
+  --flag-favorite: #ff8787; /* red 4 */
+  --flag-watch: #8dd1ff;    /* piep 3 */
+  --flag-epub: #9dcf49;     /* leaf 4 */
+
+  /* Nothing behind the glyph here: a bright mark on a dark ground already
+     carries, and a wash under it only muddies the row. */
+  --flag-favorite-bg: transparent;
+  --flag-watch-bg: transparent;
+  --flag-epub-bg: transparent;
+}
+
+/* Diagnostics reports numbers, and a number cut in half is worse than a number
+   that wraps: "2,23…" reads as a different figure. Values shrink to fit the
+   column instead, and the latency badges keep their own width in the table. */
+.metric-card__value { overflow-wrap: anywhere; line-height: 1.25; font-size: clamp(1.05rem, 2.1vw, 1.35rem); }
+.diagnostics-page .mantine-Table-td .mantine-Badge-root { max-width: none; }
+.diagnostics-page .mantine-Table-td .mantine-Badge-label { overflow: visible; }
+.diagnostics-page .mantine-Table-td,
+.diagnostics-page .mantine-Table-th { white-space: nowrap; }
+
+/* An explanation is not a state. These used to be Alerts, and each one picked
+   its own colour - the same kind of sentence sat on blue, on green and on grey
+   across the settings screens, which made the colour look meaningful when it
+   was not. A rule rather than a hue: no fill, one hairline, dimmed prose. */
+.note {
+  padding: 12px 14px;
+  border: 1px solid var(--app-shell-border-color, light-dark(#e3e8ee, #232a35));
+  border-radius: var(--mantine-radius-md);
+  background: light-dark(#fcfdfe, rgb(255 255 255 / 2%));
+}
+.note__icon { flex: 0 0 auto; margin-top: 2px; color: var(--mantine-color-dimmed); }
+.note__title { margin-bottom: 2px; }
+.note__body { line-height: 1.7; }
+
+/* ---- コレクションの表紙 --------------------------------------------------
+   束の表紙は、メンバーの表紙を並べて作る。焼き込まずに毎回組むので、
+   メンバーが変われば表紙も勝手に追従する。マスの中身は棚とまったく同じ
+   `.work-cover` なので、表紙の無い作品には作品と同じ紋が入り、穴が空かない。 */
+
+.collection-cover {
+  position: relative;
+  display: grid;
+  overflow: hidden;
+  flex: none;
+  border: 1px solid light-dark(#dde1e5, #303741);
+  border-radius: 8px;
+  background: light-dark(#eef1f5, #151b22);
+}
+.collection-cover__image {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  height: 100%;
+  box-sizing: border-box;
+  padding: 2px;
+  object-fit: contain;
+}
+
+.collection-cover--card { width: 96px; aspect-ratio: var(--work-cover-shape); }
+.collection-cover--detail { width: 112px; aspect-ratio: var(--work-cover-shape); border-radius: 10px; }
+
+.collection-cover__slot { position: relative; display: block; min-width: 0; min-height: 0; overflow: hidden; }
+/* 同じ絵をぼかして敷く。表紙の縦横比は取得元によってばらばらなので、
+   切り抜けば絵が欠け、そのまま置けば枠が欠けて見える。敷けばどちらも起きない。 */
+.collection-cover__backdrop {
+  position: absolute;
+  inset: -12%;
+  width: 124%;
+  height: 124%;
+  object-fit: cover;
+  filter: blur(12px) saturate(0.45);
+  opacity: 0.18;
+}
+.collection-cover__slot .work-cover--compact { position: relative; background: transparent; }
+.collection-cover__slot .work-cover__image { box-sizing: border-box; padding: 2px; background: transparent; }
+/* マスの中では、外枠の丸みと境界だけを消す。中身は棚のカードと同じもの。 */
+.collection-cover__tile.work-cover--compact {
+  width: 100%;
+  height: 100%;
+  flex: none;
+  border: 0;
+  border-radius: 0;
+}
+
+/* 4枚そろったときだけ 2×2。半端な枚数で 2×2 にすると空きマスができる。 */
+.collection-cover--mosaic { grid-template-columns: 1fr; grid-template-rows: 1fr; gap: 1px; }
+.collection-cover--mosaic[data-tiles="2"] { grid-template-columns: 1fr 1fr; }
+.collection-cover--mosaic[data-tiles="3"] { grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; }
+.collection-cover--mosaic[data-tiles="3"] .collection-cover__slot:first-child { grid-row: 1 / 3; }
+.collection-cover--mosaic[data-tiles="4"] { grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; }
+
+/* 奥へ向かって少しずつずらす。冊数が形として見える。 */
+.collection-cover--spine { display: block; }
+.collection-cover--spine .collection-cover__slot {
+  position: absolute;
+  top: calc(var(--slot-index) * 4%);
+  bottom: 0;
+  left: calc(var(--slot-index) * 15%);
+  width: 62%;
+  box-shadow: -3px 0 8px rgb(20 26 33 / 22%);
+}
+.collection-cover--spine .collection-cover__slot:nth-child(1) { z-index: 4; }
+.collection-cover--spine .collection-cover__slot:nth-child(2) { z-index: 3; }
+.collection-cover--spine .collection-cover__slot:nth-child(3) { z-index: 2; }
+.collection-cover--spine .collection-cover__slot:nth-child(4) { z-index: 1; }
+
+.collection-cover--sigil {
+  --work-cover-ink: hsl(var(--work-cover-hue) 42% 32%);
+  place-items: center;
+  background: light-dark(hsl(var(--work-cover-hue) 34% 94%), hsl(var(--work-cover-hue) 22% 16%));
+}
+:root[data-mantine-color-scheme="dark"] .collection-cover--sigil { --work-cover-ink: hsl(var(--work-cover-hue) 45% 76%); }
+.collection-cover__sigil {
+  display: grid;
+  width: 56%;
+  aspect-ratio: 1;
+  grid-template-columns: repeat(5, 1fr);
+}
+.collection-cover__sigil i { display: block; aspect-ratio: 1; }
+.collection-cover__sigil i[data-on] { background: var(--work-cover-ink); }
+
+/* コレクションのカード。作者・シリーズのカードと同じ高さ・同じ間合いにする。 */
+.collection-card { min-height: 148px; }
+.collection-card__facts { min-width: 0; align-items: center; flex-wrap: wrap; row-gap: 4px; }
+.collection-card__facts > .mantine-Text-root {
+  display: inline-flex;
+  min-width: 0;
+  max-width: 100%;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+/* 束を選ぶ行。押せる範囲を行全体にする。丸だけを狙わせない。 */
+.collection-pick {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid light-dark(#e3e7ec, #2b323b);
+  border-radius: 8px;
+  text-align: left;
+}
+.collection-pick:hover { background: light-dark(#f3f5f8, #1c222a); }
+.collection-pick[data-selected] {
+  border-color: var(--mantine-color-piep-6);
+  background: light-dark(#f2f6fd, #172130);
+}
+.collection-pick .mantine-Radio-root { pointer-events: none; }
+.collection-pick__cover { width: 40px; height: 52px; border-radius: 5px; }
+.collection-pick__body { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 1px; }
+
+/* ---- コレクション詳細 -----------------------------------------------------
+   束の中身は棚と同じカードで描く。束にしかない情報 — 何番目か、順を動かす、
+   外す — だけを、カードの外側のレールに置く。カードの中には手を入れない。 */
+
+.collection-hero { overflow: hidden; }
+.collection-hero__cover { display: flex; flex-direction: column; align-items: center; gap: 3px; }
+.collection-member-toolbar { min-height: 34px; }
+.collections-panel__intro { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.suggestion-inbox--quiet { min-height: 30px; margin-top: -4px; }
+
+.collection-members { display: flex; flex-direction: column; gap: 10px; }
+.collection-members--gallery {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+}
+
+/* EPUB キューも作品の一覧である。束と同じく、行は棚と同じカードで描き、
+   キューにしか無い情報 — 何番目か、外す — だけをカードの外側に置く。 */
+.epub-queue-item {
+  display: grid;
+  align-items: center;
+  gap: 8px;
+  grid-template-columns: auto 1fr auto;
+}
+.epub-queue-item__body { min-width: 0; }
+.epub-queue-item__index {
+  width: 1.6em;
+  color: var(--mantine-color-dimmed);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.collection-member {
+  position: relative;
+  display: grid;
+  align-items: center;
+  gap: 8px;
+  grid-template-columns: 1fr auto;
+  border-radius: 10px;
+}
+.collection-members--compact .collection-member[data-ordered],
+.collection-members[data-ordered] .collection-member { grid-template-columns: auto 1fr auto; }
+.collection-member[data-dragging] { opacity: 0.45; }
+.collection-member[data-drop-target]::before {
+  position: absolute;
+  top: -5px;
+  right: 0;
+  left: 0;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--mantine-color-piep-6);
+  content: "";
+}
+.collection-member[data-drop-target][data-drop-after]::before { top: auto; bottom: -5px; }
+.collection-member__body { min-width: 0; }
+.collection-member__rail {
+  display: flex;
+  width: 44px;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  color: var(--mantine-color-dimmed);
+}
+.collection-member__grip { display: flex; cursor: grab; line-height: 0; touch-action: none; }
+.collection-member__grip:active { cursor: grabbing; }
+.collection-member__index { font-size: 12px; font-variant-numeric: tabular-nums; }
+.collection-member__nudge { flex-direction: column; }
+.collection-member__remove { align-self: center; }
+
+.collection-member__missing { opacity: 0.85; border-style: dashed; }
+.collection-member__editions { padding: 2px 0 0 46px; }
+.collection-member__edition-list { display: flex; flex-direction: column; gap: 6px; padding: 6px 0 2px; }
+.collection-member__edition .work-cover--compact { width: 34px; height: 44px; flex: 0 0 34px; }
+
+/* ギャラリーでも番号と並べ替えをカードの横に置く。上に別行を作ると、
+   隣のカードと上端がずれ、どの操作がどのカードのものかも曖昧になる。 */
+.collection-members--gallery .collection-member { grid-template-columns: minmax(0, 1fr) auto; align-items: stretch; }
+.collection-members--gallery[data-ordered] .collection-member { grid-template-columns: 44px minmax(0, 1fr) auto; }
+.collection-members--gallery .collection-member__rail { align-self: center; }
+.collection-members--gallery .collection-member__remove { align-self: center; }
+.collection-members--gallery .collection-member__editions { padding-left: 0; }
+
+@media (max-width: 620px) {
+  .collections-panel__header { align-items: stretch; flex-direction: column; }
+  .collections-panel__intro { white-space: normal; }
+  .collection-hero > .mantine-Group-root { align-items: flex-start; flex-wrap: wrap; }
+  .collection-cover--detail { width: 88px; }
+  .collection-members--gallery { grid-template-columns: minmax(0, 1fr); }
+  .collection-members[data-ordered] .collection-member,
+  .collection-members--gallery[data-ordered] .collection-member {
+    gap: 4px;
+    grid-template-columns: 38px minmax(0, 1fr) auto;
+  }
+  .collection-member__rail { width: 38px; }
+}
+
+/* 作品を追加するモーダル。棚と同じカードを、選ぶために並べる。 */
+.collection-add__grid { display: flex; max-height: 46vh; flex-direction: column; gap: 8px; overflow-y: auto; }
+.collection-add__slot { position: relative; }
+.collection-add__slot[data-member] { opacity: 0.55; pointer-events: none; }
+.collection-add__badge { position: absolute; top: 8px; right: 8px; }
+
+/* 表紙にする1作を選ぶ。 */
+.collection-cover-pick { display: flex; flex-wrap: wrap; gap: 8px; padding: 2px; }
+.collection-cover-pick__item { border-radius: 7px; outline: 2px solid transparent; outline-offset: 2px; }
+.collection-cover-pick__item[data-selected] { outline-color: var(--mantine-color-piep-6); }
+
+/* ---- 見つかったまとまり ---------------------------------------------------
+   束の候補は、題名の行だけでは判断できない。知っている束かどうかは表紙で
+   分かるので、まず表紙を並べる。マスを押すとその作品だけ束から外れる。 */
+
+.suggestion-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+}
+/* 束へ足す候補の一行。外した作品は薄くなるが、消えはしない — 戻せることが
+   見えていなければ、外すのは取り消せない操作に見える。 */
+.addition-row {
+  display: flex;
+  align-items: flex-start;
+  padding: 4px 8px;
+  border: 1px solid var(--mantine-color-default-border);
+  border-radius: 8px;
+  gap: 8px;
+}
+.addition-row[data-dropped] { opacity: 0.55; }
+/* 押す的は行いっぱい。表紙だけだと、表紙の無い作品では的が見えない。 */
+.addition-row__pick { flex: 1; min-width: 0; }
+/* 束に入る作品は、題名で読めるように縦に積む。
+   //
+   // 表紙を横に5枚並べていた。この棚の作品は表紙を持たないものが多く、持って
+   // いても 40px に縮めれば何の話か分からない。しかも題名はツールチップの中に
+   // しか無かったので、2作の束では**何を束ねようとしているのか読む方法が
+   // 一つも無かった**。判断の材料は題名と作者である。 */
+/* ---- 窓（Modal） -----------------------------------------------------------
+
+   **角が丸いのに、右だけ角ばって見えていた。**
+
+   Mantine は `.mantine-Modal-content` に `border-radius: 16px` を置き、同じ箱に
+   縦スクロールも持たせる。Windows のスクロールバーは 15px の実体を持つ「classic」
+   なので、丸めたはずの右上・右下の角の**上に四角く描かれる**。左だけ丸くて右が
+   切り落とされて見えるのは、これが理由である。
+
+   丸い箱は「切り抜く側」に徹させ、スクロールは中身に持たせる。ついでに見出しが
+   上に留まるので、長い一覧を送っても題と閉じるボタンが見えたままになる。 */
+.mantine-Modal-content {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.mantine-Modal-body {
+  min-height: 0;
+  flex: 1;
+  overflow-y: auto;
+}
+
+/* 窓の操作は下に貼り付ける。中身が縦に長い窓では、下まで送らないと押せない
+   操作は「使いにくい」ではなく**無い**に等しい。 */
+.overlay-actions {
+  position: sticky;
+  z-index: 1;
+  bottom: 0;
+  padding-top: 10px;
+  border-top: 1px solid var(--mantine-color-default-border);
+  background: var(--mantine-color-body);
+}
+
+/* 確認の窓に並べる題名。長い題名で窓が横に伸びないよう、1行で止める。 */
+.confirm-work-list {
+  max-height: 40vh;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: light-dark(#f4f6fa, #191d24);
+  overflow-y: auto;
+}
+
+.suggestion-members { display: flex; min-width: 0; flex-direction: column; gap: 4px; }
+.suggestion-member {
+  display: flex;
+  align-items: center;
+  padding: 4px 6px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  gap: 8px;
+  background: none;
+  cursor: pointer;
+  outline-offset: 2px;
+  text-align: start;
+}
+.suggestion-member:hover { background: light-dark(#f2f5f9, #1c222a); }
+.suggestion-member:focus-visible { outline: 2px solid var(--mantine-color-piep-6); }
+/* 外した作品は消さずに薄くする。戻せることが見えていなければ、外すのは
+   取り消せない操作に見える。 */
+.suggestion-member[data-dropped] { opacity: 0.5; }
+.suggestion-member[data-dropped] .suggestion-member__body { text-decoration: line-through; }
+.suggestion-member__mark {
+  display: flex;
+  width: 18px;
+  height: 18px;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 18px;
+  border-radius: 4px;
+  color: #fff;
+  background: var(--mantine-color-piep-6);
+}
+.suggestion-member[data-dropped] .suggestion-member__mark {
+  color: var(--mantine-color-dimmed);
+  background: light-dark(#dfe4ea, #39424e);
+}
+.suggestion-member__cover { display: flex; flex: 0 0 32px; }
+.suggestion-member__cover .work-cover--compact { width: 32px; height: 42px; flex: 0 0 32px; }
+.suggestion-member[data-dropped] .suggestion-member__cover { filter: grayscale(1); }
+/* 題名は折り返して読ませる。ここが縮むと、また何も読めなくなる。 */
+.suggestion-member__body { min-width: 0; flex: 1; }
+.collection-member__note { padding: 2px 0 0 46px; }
+.collection-members--gallery .collection-member__note { padding-left: 0; }
+
+/* ---- モデルの手伝い -------------------------------------------------------
+   取得元の情報と、モデルが書いたものを、見た目で分ける。混ざると、どこまでが
+   事実でどこからが推測か分からなくなる。 */
+
+.assist-panel {
+  border-color: light-dark(#e0d7ef, #3a3050);
+  background: light-dark(#fbf9ff, #191527);
+}
+.assist-note {
+  padding: 8px 10px;
+  border-left: 3px solid var(--mantine-color-grape-5);
+  border-radius: 0 6px 6px 0;
+  background: light-dark(#f7f4fd, #1e1930);
+}

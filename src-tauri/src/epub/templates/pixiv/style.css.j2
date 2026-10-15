@@ -1,0 +1,76 @@
+{% include "_base_style.css.j2" %}
+
+/* --- pixiv 固有の変数 --- */
+:root {
+    --accent-color: #0073bb;
+    --cover-width: 62%;
+}
+
+@media (prefers-color-scheme: dark) {
+    :root {
+        --accent-color: #6fc0ff;
+    }
+}
+
+/* --- pixiv 固有のスタイル --- */
+
+/*
+  シリーズ帯。話数は表題の上の1行に収める。
+  数字だけを行の右端へ飛ばすと、連作を続けて読むときに視線が往復する。
+*/
+.series {
+    margin: 0 0 0.5em;
+    padding-left: 0.6em;
+    border-left: 3px solid var(--accent-color);
+    color: var(--muted-color);
+    font-size: 0.92em;
+}
+
+.series .order {
+    color: var(--accent-color);
+}
+
+/*
+  表紙の下に、文字数・ページ数・公開日を1行で置く。
+  中央に置くのは表紙の絵に付く説明だからで、地の文は左のまま。
+*/
+.stat-line {
+    margin: 0.5em 0 var(--space);
+    color: var(--muted-color);
+    font-size: 0.85em;
+    text-align: center;
+}
+
+.stat-line:empty {
+    display: none;
+}
+
+.stat-line span + span::before {
+    content: " ・ ";
+}
+
+/*
+  キャプションは改行主体で URL が混ざる。地の文と同じ体裁だと
+  本文の続きに見えるので、器に入れて折り返しも整える。
+*/
+.description {
+    padding-left: 0.8em;
+    border-left: 2px solid var(--rule-color);
+    font-size: 0.95em;
+}
+
+.description a {
+    color: var(--accent-color);
+    word-wrap: break-word;
+    word-break: break-all;
+}
+
+/* タグは小片にして、長いタグが混ざった行が荒れないようにする */
+.tags .tag {
+    display: inline-block;
+    margin: 0 0.3em 0.3em 0;
+    padding: 0 0.55em;
+    border: 1px solid var(--rule-color);
+    border-radius: 1em;
+    font-size: 0.9em;
+}

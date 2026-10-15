@@ -1,0 +1,92 @@
+{% include "_base_style.css.j2" %}
+
+/* --- FANBOX 固有の変数 --- */
+:root {
+    --accent-color: #d6395f;
+    --plan-color: #2a7f62;
+}
+
+@media (prefers-color-scheme: dark) {
+    :root {
+        --accent-color: #ff8fa5;
+        --plan-color: #52c39c;
+    }
+}
+
+/* --- FANBOX 固有のスタイル --- */
+
+/*
+  投稿ヘッダ。誰の・いつの・どのプランの記事かを1行にまとめ、
+  罫線で本文と切る。日付のある読み物としての作法に寄せる。
+*/
+.post-header {
+    margin-bottom: var(--space);
+    padding-bottom: calc(var(--space) * 0.6);
+    border-bottom: 1px solid var(--rule-color);
+}
+
+.post-header .title {
+    margin-bottom: 0.35em;
+}
+
+.post-header .byline {
+    margin: 0;
+    color: var(--muted-color);
+    font-size: 0.85em;
+}
+
+.post-header .byline > span + span::before {
+    content: " ・ ";
+}
+
+/* 4項目すべてを設定で外したときに、空の行と罫線だけが残らないように */
+.post-header .byline:empty {
+    display: none;
+}
+
+.post-header .creator-id {
+    color: var(--muted-color);
+}
+
+/*
+  抜粋は本文ではないが、記事の導入として読ませたい。
+  背景の塗りは端末の配色反転で消えるので、罫と字送りで示す。
+*/
+.description.excerpt {
+    padding: 0.1em 0 0.1em 0.9em;
+    border-left: 3px solid var(--accent-color);
+    font-size: 1.02em;
+    line-height: 1.75;
+}
+
+/* 支援プランは枠のバッジで。無料公開との差が一目で付く */
+.badge--plan {
+    border-color: var(--plan-color);
+    color: var(--plan-color);
+}
+
+/*
+  添付ファイルは EPUB に収録されない。箇条書きだけでは
+  「本の中にあるが開けない」のか「元記事にある」のかが伝わらない。
+*/
+.attachment-notice {
+    padding: 0.7em 0.9em;
+    border: 1px solid var(--rule-color);
+    border-radius: 6px;
+}
+
+.attachment-notice .note {
+    margin: 0 0 0.4em;
+    color: var(--muted-color);
+    font-size: 0.85em;
+}
+
+.attachment-notice .attachments {
+    margin: 0;
+    padding-left: 1.1em;
+}
+
+/* 記事は段落を空けて書かれることが多いので、間隔を少し広めにとる */
+.chapter p {
+    margin-bottom: 0.6em;
+}

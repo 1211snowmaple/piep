@@ -1,0 +1,83 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "piep",
+  "version": "0.24.0",
+  "identifier": "io.github.u1211snowmaple.piep",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "piep",
+        "width": 1200,
+        "height": 800,
+        "minWidth": 900,
+        "minHeight": 600,
+        "resizable": true,
+        "center": true,
+        "backgroundColor": "#F5F7FA"
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; base-uri 'none'; object-src 'none'; frame-src 'none'; img-src 'self' asset: http://asset.localhost data: https:; style-src 'self' 'unsafe-inline'; script-src 'self';",
+      "assetProtocol": {
+        "enable": true,
+        "scope": [
+          "$APPDATA/downloads/**/*",
+          "$APPDATA/profiles/**/*",
+          "$APPDATA/series/**/*",
+          "$APPDATA/collection-covers/**/*"
+        ]
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/1211snowmaple/piep/releases/latest/download/latest-v2.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDc3N0U3OUI0OUJBQzY1QkYKUldTL1pheWJ0SGwrZHhMa2FaNlc2KzYwZmYyK1BoU01iS2paUzBxTExmMzFDVWRQZkxSVTRuemQK",
+      "windows": {
+        "installMode": "basicUi"
+      }
+    }
+  },
+  "bundle": {
+    "active": true,
+    "resources": ["vendor/pdfium/pdfium.dll"],
+    "createUpdaterArtifacts": true,
+    "targets": "nsis",
+    "shortDescription": "pixiv と FANBOX を、自分のPCに丸ごと残して読む",
+    "longDescription": "pixiv・FANBOX の小説と記事を、本文・画像・タグごとローカルへ保存します。保存・検索・読書・EPUB への書き出しまで、ネットにつながっていなくても完結します。",
+    "publisher": "1211snowmaple",
+    "copyright": "© 1211snowmaple",
+    "category": "Productivity",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "windows": {
+      "nsis": {
+        "displayLanguageSelector": false,
+        "languages": ["Japanese"],
+        "installerIcon": "icons/icon.ico",
+        "installerHooks": "installer/hooks.nsh",
+        "headerImage": "installer/nsis-header.bmp",
+        "sidebarImage": "installer/nsis-sidebar.bmp",
+        "installMode": "currentUser"
+      },
+      "wix": {
+        "language": ["ja-JP"],
+        "bannerPath": "installer/wix-banner.bmp",
+        "dialogImagePath": "installer/wix-dialog.bmp"
+      }
+    }
+  }
+}
