@@ -1651,9 +1651,7 @@ export default function LibraryPage() {
                 else setEntitySortBy(parseEntitySortBy(choice.key), choice.order);
               }}
               data={tab === "works" ? (searchText ? SEARCH_SORT_OPTIONS : WORK_SORT_OPTIONS) : tab === "collections" ? COLLECTION_SORT_OPTIONS : ENTITY_SORT_OPTIONS}
-              searchable
               allowDeselect={false}
-              nothingFoundMessage="一致する並び順がありません"
               maxDropdownHeight={360}
               leftSection={<Icons.sort size={IconSize.menu} />}
               className="library-toolbar__sort"
