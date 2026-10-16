@@ -737,9 +737,7 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
                       });
                     }}
                     data={workSortOptions}
-                    searchable
                     maxDropdownHeight={360}
-                    nothingFoundMessage="一致する並び順がありません"
                     leftSection={<Icons.sort size={IconSize.menu} />}
                     aria-label="並び順"
                     allowDeselect={false}
@@ -846,7 +844,6 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
                         if (choice) setSeriesSort(parseEntitySortBy(choice.key), choice.order);
                       }}
                       data={ENTITY_SORT_OPTIONS}
-                      searchable
                       maxDropdownHeight={360}
                       label="並び順"
                       leftSection={<Icons.sort size={IconSize.menu} />}
@@ -913,7 +910,6 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
                       if (choice) setCollectionSort(parseCollectionSortBy(choice.key), choice.order);
                     }}
                     data={COLLECTION_SORT_OPTIONS}
-                    searchable
                     maxDropdownHeight={360}
                     leftSection={<Icons.sort size={IconSize.menu} />}
                     aria-label="コレクションの並び順"

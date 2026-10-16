@@ -110,6 +110,7 @@ describe("LibraryPage search", () => {
     render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
 
     const sort = await screen.findByRole("combobox", { name: "並び順" });
+    expect(sort).toHaveAttribute("readonly");
     fireEvent.click(sort);
     expect(await screen.findByRole("option", { name: "公開日：古い順", hidden: true })).toBeInTheDocument();
     expect(screen.getByRole("option", { name: "版番号：大きい順", hidden: true })).toBeInTheDocument();
