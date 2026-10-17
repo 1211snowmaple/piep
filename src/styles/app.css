@@ -2873,6 +2873,9 @@ select {
    first, and the sort menu narrows with the window. Wrapping put the view
    switches on a row of their own, which read as a second toolbar. */
 .library-toolbar__search { min-width: 0; flex: 1 1 auto; }
+.library-search__suggestion-label { min-width: 0; flex: 1 1 0; }
+.library-search__suggestion-meta { flex: 0 0 auto; white-space: nowrap; }
+.library-search__suggestion-meta .mantine-Badge-root { flex: 0 0 auto; max-width: none; }
 .library-toolbar__sort { width: clamp(176px, 20vw, 230px); }
 
 /* A chosen tag is the same object in the drawer and in the applied-filter
