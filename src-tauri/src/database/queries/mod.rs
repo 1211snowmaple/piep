@@ -5911,11 +5911,11 @@ impl Database {
         let mut stmt = conn
             .prepare(
                 "SELECT i.source, i.source_id, i.status, i.error, i.item_type, i.title,
-                        COALESCE(i.result_download_id, (
+                        CASE WHEN i.status = 'held' THEN COALESCE(i.result_download_id, (
                             SELECT d.id FROM downloads d
                             WHERE d.source = i.source AND d.source_id = i.source_id
                             LIMIT 1
-                        ))
+                        )) ELSE i.result_download_id END
                  FROM update_job_items i
                  WHERE job_id = ?1
                  ORDER BY id",
@@ -5957,8 +5957,8 @@ impl Database {
                 "SELECT id, status, scope, mode, totals, processed, candidate_count,
                         saved_count, error_count, active_label, started_at, updated_at, finished_at,
                         (SELECT COUNT(*) FROM update_job_items i WHERE i.job_id=update_jobs.id AND i.status='held'),
-                        (SELECT COUNT(*) FROM update_job_items i WHERE i.job_id=update_jobs.id AND i.item_type IN ('work','target')),
-                        (SELECT COUNT(*) FROM update_job_items i WHERE i.job_id=update_jobs.id AND i.item_type IN ('work','target') AND i.status NOT IN ('queued','running')),
+                        totals - (SELECT COUNT(*) FROM update_job_items i WHERE i.job_id=update_jobs.id AND i.item_type='candidate' AND i.status != 'candidate'),
+                        processed - (SELECT COUNT(*) FROM update_job_items i WHERE i.job_id=update_jobs.id AND i.item_type='candidate' AND i.status NOT IN ('candidate','queued','running')),
                         (SELECT COUNT(*) FROM update_job_items i WHERE i.job_id=update_jobs.id AND i.item_type='candidate' AND i.status != 'candidate'),
                         (SELECT COUNT(*) FROM update_job_items i WHERE i.job_id=update_jobs.id AND i.item_type='candidate' AND i.status NOT IN ('candidate','queued','running'))
                  FROM update_jobs WHERE id = ?1",
@@ -6030,7 +6030,7 @@ impl Database {
                        SELECT 1 FROM update_jobs j
                        WHERE j.id = i.job_id AND j.status IN ('queued', 'running')
                    )
-                 ORDER BY CASE i.item_type WHEN 'work' THEN 0 WHEN 'target' THEN 1 ELSE 2 END,
+                 ORDER BY CASE item_type WHEN 'work' THEN 0 WHEN 'target' THEN 1 ELSE 2 END,
                           i.id ASC
                  LIMIT 1",
                 params![job_id],

@@ -942,6 +942,15 @@ fn create_core_tables(conn: &Connection) -> Result<(), rusqlite::Error> {
             ON work_edit_revisions(download_id, status, updated_at DESC);
         CREATE INDEX IF NOT EXISTS idx_update_job_items_job_status
             ON update_job_items(job_id, status, item_type, id);
+        -- The worker claims one queued row at a time, with works before
+        -- targets and candidates. Without this order in an index SQLite sorts
+        -- every remaining row for every claim as a library grows.
+        CREATE INDEX IF NOT EXISTS idx_update_job_items_queue_order
+            ON update_job_items(
+                job_id,
+                CASE item_type WHEN 'work' THEN 0 WHEN 'target' THEN 1 ELSE 2 END,
+                id
+            ) WHERE status = 'queued';
         CREATE INDEX IF NOT EXISTS idx_update_job_items_candidate
             ON update_job_items(job_id, item_type, status);
         CREATE INDEX IF NOT EXISTS idx_update_job_logs_job_id

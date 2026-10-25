@@ -21,9 +21,11 @@ use crate::AppState;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 use tauri::{Emitter, Manager};
 
 const UPDATE_JOB_DELAY_MS: u64 = 800;
+const FAST_PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 
 /// 制限で止まった項目を、同じジョブの中でやり直す回数の上限。
 /// pixiv の 429 は数秒では解除されないことがあるため、短い固定回数で
@@ -676,16 +678,12 @@ fn build_initial_items(
             }
         }
     }
+    let held_work_keys = state.db.held_update_candidate_keys()?;
     for dl in works {
         if dl.source != "pixiv" && dl.source != "fanbox" {
             continue;
         }
-        if state
-            .db
-            .update_candidate_status(&dl.source, &dl.source_id)?
-            .as_deref()
-            == Some("held")
-        {
+        if held_work_keys.contains(&(dl.source.clone(), dl.source_id.clone())) {
             continue;
         }
         if !included_work_keys.insert((dl.source.clone(), dl.source_id.clone())) {
@@ -1766,6 +1764,10 @@ async fn run_update_job(
     let mut backoff: u32 = 1;
     let mut rate_limit_retries: HashMap<i64, u32> = HashMap::new();
     let mut processed_since_trim: u32 = 0;
+    // The save page uses each changed-item event to update its individual
+    // rows. Preserve that behavior for explicit save jobs.
+    let throttle_fast_progress = state.db.update_job_mode_value(&job_id)? != "save";
+    let mut last_progress_emit = Instant::now() - FAST_PROGRESS_INTERVAL;
     // このワーカーが保存できたもの。終わりに、作者とシリーズの横顔をまとめて
     // 取りに行くための控え。再開で別のワーカーに替わったら空から数え直す -
     // 横顔は取り逃しても次の機会に埋まるので、跨いで持ち回るほどではない。
@@ -1878,7 +1880,13 @@ async fn run_update_job(
 
         // Claiming the row already changed its state and active label. Tell the
         // save screen which single row became active without shipping all rows.
-        emit_progress_delta(&app, &state, &job_id, Some(item.id)).await;
+        // Cached author listings can settle many works without a network
+        // request. Keep the title responsive without flooding the WebView and
+        // repeating the summary query twice for every local-only item.
+        if !throttle_fast_progress || last_progress_emit.elapsed() >= FAST_PROGRESS_INTERVAL {
+            emit_progress_delta(&app, &state, &job_id, Some(item.id)).await;
+            last_progress_emit = Instant::now();
+        }
 
         let outcome = process_update_job_item(
             &app,
@@ -2137,7 +2145,10 @@ async fn run_update_job(
         if restart_pending {
             break;
         }
-        emit_progress_delta(&app, &state, &job_id, Some(item.id)).await;
+        if !throttle_fast_progress || last_progress_emit.elapsed() >= FAST_PROGRESS_INTERVAL {
+            emit_progress_delta(&app, &state, &job_id, Some(item.id)).await;
+            last_progress_emit = Instant::now();
+        }
         if state.db.update_job_status_value(&job_id)? == "canceling" {
             finish_update_job_cancellation(&app, &state, &job_id).await?;
             break;
