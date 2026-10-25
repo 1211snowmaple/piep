@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
 import { transitionContent } from "@/lib/contentTransition";
 import {
   ActionIcon,
@@ -84,6 +84,7 @@ export function isSettledCandidateStatus(status: string): boolean {
 
 /** How many works one shelf check may cover before it stops being sensible. */
 const SHELF_SCOPE_LIMIT = 500;
+const CANDIDATE_DISPLAY_PAGE_SIZE = 60;
 
 /**
  * The works behind a shelf scope, or null when the scope is not a shelf.
@@ -301,22 +302,12 @@ export default function UpdatesPage() {
     staleTime: 0,
   });
   const scheduleSummary = describeSchedule(schedule.data);
-  /**
-   * 取得制限に当たっているか。
-   *
-   * ジョブは制限を受けると「取得が制限されています。N秒あけて…」と記録する。
-   * 平常時の注意書きを畳んだぶん、実際に効いた瞬間はここが名乗る。
-   */
-  const throttledMessage = useMemo(() => {
-    const logs = activeSnapshot?.logs ?? [];
-    for (let index = logs.length - 1; index >= 0; index -= 1) {
-      const log = logs[index];
-      if (log.logType !== "warn") continue;
-      if (log.message.includes("取得が制限されています")) return log.message;
-      break;
-    }
-    return null;
-  }, [activeSnapshot?.logs]);
+  // A log records that a limit happened in the past. The active label records
+  // whether this worker is waiting for that retry right now.
+  const throttledMessage = activeSnapshot?.status === "running" &&
+    activeSnapshot.activeLabel?.startsWith("取得が制限されています")
+    ? activeSnapshot.activeLabel
+    : null;
   // 残りの数。タブの脇に出るのは、これから決めるものの件数でなければならない。
   const openCandidateCount = (activeSnapshot?.candidates ?? [])
     .filter((candidate) => !dismissedIds.includes(candidate.id) && candidate.status !== "held" && !isSettledCandidateStatus(candidate.status)).length;
@@ -392,7 +383,7 @@ export default function UpdatesPage() {
               {(activeSnapshot.status === "failed" || activeSnapshot.status === "canceled") && <Button leftSection={<Icons.undo size={IconSize.menu} />} onClick={() => runtime && reportJobAction(updateJobs.resume(activeSnapshot.jobId, true), "やり直せません")}>失敗分を再試行</Button>}
             </Group>
           </Group>
-          <ScrollingJobTitle label={activeSnapshot.activeLabel || statusTitle(activeSnapshot.status)} />
+          <ScrollingJobTitle label={throttledMessage ? statusTitle(activeSnapshot.status) : activeSnapshot.activeLabel || statusTitle(activeSnapshot.status)} />
           <Text size="sm" c="dimmed" mt={5}>候補 {formatNumber(activeSnapshot.candidateCount)} · 保存済み {formatNumber(activeSnapshot.savedCount)} · エラー {formatNumber(activeSnapshot.errorCount)} · 保留 {formatNumber(activeSnapshot.heldCount ?? 0)}</Text>
           {outcome && activeSnapshot.mode === "check_only" && (
             <Text size="sm" mt="xs">
@@ -831,6 +822,7 @@ function CandidatesPanel({ candidates, selectedIds, selectableIds, running, savi
   const [kind, setKind] = useState<string>("all");
   // 済んだものは畳む。数は残す - 「無かったこと」にはしない。
   const [showSettled, setShowSettled] = useState(false);
+  const [visibleCount, setVisibleCount] = useState(CANDIDATE_DISPLAY_PAGE_SIZE);
   if (!candidates.length) {
     return jobActive
       ? <EmptyState icon={Icons.pending} title="更新確認を続けています" description="候補が見つかると、ここに順次表示します。" />
@@ -857,19 +849,20 @@ function CandidatesPanel({ candidates, selectedIds, selectableIds, running, savi
     return totals;
   }, {});
   const shown = kind === "all" ? listed : listed.filter((candidate) => candidate.kind === kind);
+  const visible = shown.slice(0, visibleCount);
   const shownSelectable = shown.filter(isSavableCandidate).map((candidate) => candidate.id);
   const selectedCount = selectableIds.filter((id) => selectedIds.has(id)).length;
-  const selectedOutsideShown = selectedCount - shownSelectable.filter((id) => selectedIds.has(id)).length;
+  const selectedOutsideShown = selectedCount - visible.filter((candidate) => isSavableCandidate(candidate) && selectedIds.has(candidate.id)).length;
 
   return (
     <Card p={0}>
       <Group justify="space-between" p="md" align="flex-start" wrap="wrap">
         <Box>
           <Text fw={700}>保存する候補</Text>
-          <Text size="xs" c="dimmed">新作・続編・改稿をまとめて処理 · 全候補から{selectedCount}件を選択中 · 表示 {shown.length}件{selectedOutsideShown > 0 ? `（表示外で${selectedOutsideShown}件を選択中）` : ""}</Text>
+          <Text size="xs" c="dimmed">新作・続編・改稿をまとめて処理 · 全候補から{selectedCount}件を選択中 · 表示 {formatNumber(visible.length)}/{formatNumber(shown.length)}件{selectedOutsideShown > 0 ? `（表示外で${selectedOutsideShown}件を選択中）` : ""}</Text>
         </Box>
         <Group gap="xs">
-          <Button size="xs" variant="subtle" disabled={!shownSelectable.length} onClick={() => onSelectMany(shownSelectable)}>表示分を選択</Button>
+          <Button size="xs" variant="subtle" disabled={!shownSelectable.length} onClick={() => onSelectMany(shownSelectable)}>該当分を選択</Button>
           <Button size="xs" variant="subtle" color="gray" disabled={!selectedCount} onClick={onClearSelection}>選択をすべて解除</Button>
           <Button size="sm" leftSection={<Icons.export size={IconSize.menu} />} disabled={!selectedCount || running || hasMore} loading={saving} onClick={onSave}>{hasMore ? "候補を読み込み中" : `選択候補${selectedCount}件をまとめて保存`}</Button>
         </Group>
@@ -879,7 +872,7 @@ function CandidatesPanel({ candidates, selectedIds, selectableIds, running, savi
           size="xs"
           aria-label="候補の種類"
           value={kind}
-          onChange={(value) => transitionContent(() => setKind(value), {
+          onChange={(value) => transitionContent(() => { setKind(value); setVisibleCount(CANDIDATE_DISPLAY_PAGE_SIZE); }, {
             content: () => document.querySelector<HTMLElement>(".update-candidates"),
           })}
           data={CANDIDATE_KINDS.filter((item) => item.value === "all" || counts[item.value]).map((item) => ({
@@ -890,7 +883,7 @@ function CandidatesPanel({ candidates, selectedIds, selectableIds, running, savi
       </Box>
       <Divider />
       <Stack gap={0} className="update-candidates">
-        {shown.map((candidate) => (
+        {visible.map((candidate) => (
           <Paper key={candidate.id} p="md" radius={0} className="update-candidate">
             <Group wrap="nowrap" align="flex-start">
               <Checkbox
@@ -925,12 +918,13 @@ function CandidatesPanel({ candidates, selectedIds, selectableIds, running, savi
           </Paper>
         ))}
       </Stack>
+      {shown.length > visible.length && <Box p="md"><Button fullWidth variant="subtle" onClick={() => setVisibleCount((count) => count + CANDIDATE_DISPLAY_PAGE_SIZE)}>さらに表示（残り{formatNumber(shown.length - visible.length)}件）</Button></Box>}
       {settled.length > 0 && (
         <>
           <Divider />
           <Group justify="space-between" p="md" wrap="nowrap">
             <Text size="xs" c="dimmed">保存済み {settled.length}件{showSettled ? "も表示しています" : "は畳んでいます"}</Text>
-            <Button size="compact-xs" variant="subtle" color="gray" onClick={() => setShowSettled((current) => !current)}>{showSettled ? "隠す" : "表示"}</Button>
+            <Button size="compact-xs" variant="subtle" color="gray" onClick={() => { setShowSettled((current) => !current); setVisibleCount(CANDIDATE_DISPLAY_PAGE_SIZE); }}>{showSettled ? "隠す" : "表示"}</Button>
           </Group>
         </>
       )}

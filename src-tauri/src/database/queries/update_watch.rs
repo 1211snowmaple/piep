@@ -544,6 +544,22 @@ impl Database {
         .map_err(|e| format!("Failed to read update candidate status: {}", e))
     }
 
+    /// Read held keys once when preparing a large watch job. Opening a read
+    /// connection for every saved work makes job startup grow unnecessarily.
+    pub fn held_update_candidate_keys(
+        &self,
+    ) -> Result<std::collections::HashSet<(String, String)>, String> {
+        let conn = self.read_conn()?;
+        let mut stmt = conn
+            .prepare("SELECT source, source_id FROM update_candidates WHERE status = 'held'")
+            .map_err(|e| format!("Failed to prepare held update candidates: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(|e| format!("Failed to read held update candidates: {e}"))?;
+        rows.collect::<Result<_, _>>()
+            .map_err(|e| format!("Failed to collect held update candidates: {e}"))
+    }
+
     /// 無視した件数と、いちばん新しいもの。画面の「無視した作品」の表示に使う。
     pub fn count_dismissed_update_candidates(&self) -> Result<i64, String> {
         let conn = self.read_conn()?;
