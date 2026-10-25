@@ -1284,6 +1284,17 @@ pub async fn list_update_job_item_states(
     state.db.list_update_job_item_states(&job_id)
 }
 
+/// 実行中の「結果」に必要な保留項目だけを返す。
+/// 候補が何千件あっても、結果タブを開いたときの転送量を保留件数に抑える。
+#[tauri::command]
+pub async fn list_update_job_held_item_states(
+    app: tauri::AppHandle,
+    job_id: String,
+) -> Result<Vec<UpdateJobItemState>, String> {
+    let state = app.state::<Arc<AppState>>();
+    state.db.list_update_job_held_item_states(&job_id)
+}
+
 /// ジョブの一覧を、要約だけで返す。
 ///
 /// 候補もログも含まない。中身は `get_update_job` で取る。

@@ -16,7 +16,7 @@ function mountRegion() {
   Object.defineProperty(viewport, "scrollTop", {
     configurable: true,
     get: () => scrolled.length ? scrolled[scrolled.length - 1] : 4000,
-    set: (value: number) => scrolled.push(value),
+    set: (value: number) => { scrolled.push(value); },
   });
   viewport.scrollTo = ((options: ScrollToOptions) => { viewport.scrollTop = options.top ?? 0; }) as typeof viewport.scrollTo;
   viewport.getBoundingClientRect = () => ({ top: 0 }) as DOMRect;

@@ -25,7 +25,7 @@
     "docs:dev": "npm run contract && npm run stats && npm run site:dev"
   },
   "devDependencies": {
-    "typescript": "~5.9.0",
+    "typescript": "~7.0.2",
     "vitepress": "^1.6.4"
   },
   "overrides": {

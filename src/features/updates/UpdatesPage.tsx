@@ -41,7 +41,7 @@ import { errorMessage, formatDate, formatNumber } from "@/lib/format";
 import { ProviderMark } from "@/lib/providers";
 import { deleteUpdateTarget, isTauriRuntime, listUpdateTargets, searchDownloadsV2, setUpdateTargetEnabled, upsertUpdateTarget } from "@/services/dbApi";
 import { readingWorkIds } from "@/features/library/readingShelf";
-import { clearFinishedUpdateJobsCommand, countDismissedUpdateCandidatesCommand, dismissUpdateCandidateCommand, listUpdateJobItemStatesCommand, restoreDismissedUpdateCandidatesCommand, type UpdateJobItemState } from "@/services/updateJobApi";
+import { clearFinishedUpdateJobsCommand, countDismissedUpdateCandidatesCommand, dismissUpdateCandidateCommand, listUpdateJobHeldItemStatesCommand, listUpdateJobItemStatesCommand, restoreDismissedUpdateCandidatesCommand, type UpdateJobItemState } from "@/services/updateJobApi";
 import { loadSchedule, type UpdateScheduleSettings } from "@/features/updates/updateSchedule";
 import { UpdateScheduleCard } from "@/features/updates/UpdateScheduleCard";
 import { useUpdateJobNotifications } from "@/features/updates/useUpdateScheduler";
@@ -120,17 +120,27 @@ export default function UpdatesPage() {
   const [previewSnapshot, setPreviewSnapshot] = useState<UpdateJobSnapshot>(demoSnapshot);
   const activeSnapshot = runtime ? updateJobs.activeSnapshot : previewSnapshot;
   const jobs = runtime ? updateJobs.jobs : [demoSnapshot as UpdateJobSummary];
+  const [tab, setTab] = useState<string | null>("candidates");
+  const resultIsTerminal = Boolean(activeSnapshot && isUpdateJobTerminal(activeSnapshot.status));
   const jobItems = useQuery({
     queryKey: ["update-job-items", activeSnapshot?.jobId, activeSnapshot?.finishedAt],
     queryFn: () => listUpdateJobItemStatesCommand(activeSnapshot!.jobId),
-    enabled: runtime && Boolean(activeSnapshot && isUpdateJobTerminal(activeSnapshot.status)),
+    enabled: runtime && resultIsTerminal,
     staleTime: Infinity,
   });
+  const heldItems = useQuery({
+    queryKey: ["update-job-held-items", activeSnapshot?.jobId, activeSnapshot?.heldCount],
+    queryFn: () => listUpdateJobHeldItemStatesCommand(activeSnapshot!.jobId),
+    enabled: runtime && tab === "results" && !resultIsTerminal && (activeSnapshot?.heldCount ?? 0) > 0,
+    staleTime: 0,
+  });
+  const resultItems = resultIsTerminal
+    ? jobItems.data ?? null
+    : (activeSnapshot?.heldCount ?? 0) > 0 ? heldItems.data ?? null : [];
   const outcome = jobItems.data ? summarizeUpdateJobItems(jobItems.data) : null;
   const [selectedCandidateIds, setSelectedCandidateIds] = useState<number[]>([]);
   // 非表示にした候補は、この画面ではすぐ消す（次のジョブでは元から出てこない）。
   const [dismissedIds, setDismissedIds] = useState<number[]>([]);
-  const [tab, setTab] = useState<string | null>("candidates");
   const form = useForm({
     initialValues: { scope: workId ? "work" : "all", mode: "check_only" },
   });
@@ -453,10 +463,10 @@ export default function UpdatesPage() {
               key={activeSnapshot.jobId}
               job={activeSnapshot}
               subject={updateJobSubject(jobs.find((job) => job.jobId === activeSnapshot.jobId) ?? activeSnapshot)}
-              items={jobItems.data ?? null}
-              loading={runtime && jobItems.isLoading}
-              error={jobItems.error}
-              onRetry={() => void jobItems.refetch()}
+              items={resultItems}
+              loading={runtime && (resultIsTerminal ? jobItems.isLoading : heldItems.isLoading)}
+              error={resultIsTerminal ? jobItems.error : heldItems.error}
+              onRetry={() => void (resultIsTerminal ? jobItems.refetch() : heldItems.refetch())}
               onShowLogs={() => setTab("logs")}
               onShowDeferred={() => setTab("deferred")}
               onOpenWork={(id) => navigate(`/works/${id}`)}
@@ -533,31 +543,30 @@ export function JobResultsPanel({ job, subject, items, loading, error, onRetry, 
   onOpenWork?: (downloadId: number) => void;
 }) {
   const [visibleHeldCount, setVisibleHeldCount] = useState(50);
-  if (!isUpdateJobTerminal(job.status)) {
-    return <EmptyState icon={Icons.pending} title="確認を進めています" description="完了すると、結果の内訳と保留の理由をここに表示します。" />;
-  }
-  if (loading) return <LoadingState />;
-  if (error) return <ErrorState error={error} retry={onRetry} />;
-  if (!items) return <EmptyState icon={Icons.confirm} title="結果の内訳はデスクトップアプリで確認できます" description="候補とログは各タブで確認できます。" />;
-  const result = summarizeUpdateJobItems(items);
+  const terminal = isUpdateJobTerminal(job.status);
+  if (terminal && loading) return <LoadingState />;
+  if (terminal && error) return <ErrorState error={error} retry={onRetry} />;
+  if (terminal && !items) return <EmptyState icon={Icons.confirm} title="結果の内訳はデスクトップアプリで確認できます" description="候補とログは各タブで確認できます。" />;
+  const result = summarizeUpdateJobItems(items ?? []);
   return <Card p="lg"><Stack gap="md">
     <Group justify="space-between" align="flex-start">
-      <Box><Text fw={700}>この回の結果</Text>{subject && <Text size="sm">{subject}</Text>}<Text size="xs" c="dimmed">{formatDate(job.startedAt, true)} · {formatNumber(job.processed)}/{formatNumber(job.totals)}件の処理が終了</Text></Box>
+      <Box><Text fw={700}>{terminal ? "この回の結果" : "この回の途中結果"}</Text>{subject && <Text size="sm">{subject}</Text>}<Text size="xs" c="dimmed">{formatDate(job.startedAt, true)} · {formatNumber(job.processed)}/{formatNumber(job.totals)}{terminal ? "件の処理が終了" : "件を処理済み · 確認を続けています"}</Text></Box>
       <Button size="xs" variant="default" onClick={onShowLogs}>すべてのログを見る</Button>
     </Group>
     <Text size="sm">
-      {job.mode === "save" ? `保存 ${formatNumber(job.savedCount)}件 · スキップ ${formatNumber(result.skippedCandidates)}件` : `変更なし・スキップ ${formatNumber(result.unchanged)}件`}
+      {terminal && (job.mode === "save" ? `保存 ${formatNumber(job.savedCount)}件 · スキップ ${formatNumber(result.skippedCandidates)}件` : `変更なし・スキップ ${formatNumber(result.unchanged)}件`)}
+      {!terminal && `保留 ${formatNumber(job.heldCount ?? 0)}件`}
       {result.missing.length > 0 && ` · 公開元で見つからない ${formatNumber(result.missing.length)}件`}
       {result.access.length > 0 && ` · 閲覧条件待ち ${formatNumber(result.access.length)}件`}
       {result.other.length > 0 && ` · その他の保留 ${formatNumber(result.other.length)}件`}
-      {result.checkedTargets > 0 && ` · 作者・シリーズ確認完了 ${formatNumber(result.checkedTargets)}件`}
+      {terminal && result.checkedTargets > 0 && ` · 作者・シリーズ確認完了 ${formatNumber(result.checkedTargets)}件`}
       {job.candidateCount > 0 && ` · 候補 ${formatNumber(job.candidateCount)}件`}
-      {job.mode !== "save" && job.savedCount > 0 && ` · 保存 ${formatNumber(job.savedCount)}件`}
+      {(!terminal || job.mode !== "save") && job.savedCount > 0 && ` · 保存 ${formatNumber(job.savedCount)}件`}
       {job.errorCount > 0 && ` · エラー ${formatNumber(job.errorCount)}件`}
     </Text>
     {result.missing.length > 0 && <Text size="sm" c="dimmed">公開元で見つからなかった投稿の保存済みの内容は、手元に残っています。公開状態が変わった後、作者または作品の確認から再確認できます。</Text>}
     {result.access.length > 0 && <Group justify="space-between"><Text size="sm" c="dimmed">閲覧条件待ちの作品は、条件が変わった後に再確認できます。</Text><Button size="xs" variant="light" onClick={onShowDeferred}>保留・非表示の作品を開く</Button></Group>}
-    {result.held.length > 0 ? <Stack gap="xs">
+    {!terminal && loading ? <LoadingState /> : !terminal && error ? <ErrorState error={error} retry={onRetry} /> : result.held.length > 0 ? <Stack gap="xs">
       <Text fw={650}>この回で保留になった作品（{formatNumber(result.held.length)}件）</Text>
       {result.held.slice(0, visibleHeldCount).map((item, index) => {
         const reason = heldReason(item);

@@ -208,6 +208,13 @@ export async function listUpdateJobItemStatesCommand(
   return invoke<UpdateJobItemState[]>("list_update_job_item_states", { jobId });
 }
 
+/** Only held rows, for the live results panel of a large running job. */
+export async function listUpdateJobHeldItemStatesCommand(
+  jobId: string,
+): Promise<UpdateJobItemState[]> {
+  return invoke<UpdateJobItemState[]>("list_update_job_held_item_states", { jobId });
+}
+
 export async function resumeUpdateJobCommand(
   jobId: string,
   retryFailed = false,
