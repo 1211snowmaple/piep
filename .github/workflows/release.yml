@@ -71,10 +71,10 @@ jobs:
           cache: 'npm'
 
       # clippy と rustfmt はここでは使わない。走らせるのは quality.yml。
-      - name: Install Rust 1.98.1
+      - name: Install Rust 1.99.1
         run: |
-          rustup toolchain install 1.98.1 --profile minimal
-          rustup default 1.98.1
+          rustup toolchain install 1.99.1 --profile minimal
+          rustup default 1.99.1
 
       # 依存木に ort・DirectML・tantivy・lindera・画像コーデックが入るので、
       # 素で組むと17分かかる。quality.yml と鍵を分けてあるのは、あちらが

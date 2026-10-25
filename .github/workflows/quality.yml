@@ -16,10 +16,10 @@ jobs:
           node-version: 24
           check-latest: true
           cache: npm
-      - name: Install Rust 1.98.1
+      - name: Install Rust 1.99.1
         run: |
-          rustup toolchain install 1.98.1 --profile minimal --component clippy,rustfmt
-          rustup default 1.98.1
+          rustup toolchain install 1.99.1 --profile minimal --component clippy,rustfmt
+          rustup default 1.99.1
       # 依存木に ort・DirectML・tantivy・lindera・画像コーデックが入るので、
       # 素で組むと1ジョブ20分かかる。`docs.yml` は既にこれを使っている。
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
@@ -108,10 +108,10 @@ jobs:
           node-version: 24
           check-latest: true
           cache: npm
-      - name: Install Rust 1.98.1
+      - name: Install Rust 1.99.1
         run: |
-          rustup toolchain install 1.98.1 --profile minimal
-          rustup default 1.98.1
+          rustup toolchain install 1.99.1 --profile minimal
+          rustup default 1.99.1
       # 依存木に ort・DirectML・tantivy・lindera・画像コーデックが入るので、
       # 素で組むと1ジョブ20分かかる。`docs.yml` は既にこれを使っている。
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
