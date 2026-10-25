@@ -30,7 +30,7 @@ import { notifications } from "@mantine/notifications";
 import { reportJobAction } from "@/features/jobs/operationJobs";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Icons, IconSize } from "@/lib/icons";
-import { useAppSearchParams } from "@/app/router";
+import { useAppNavigate, useAppSearchParams } from "@/app/router";
 import { EmptyState, ErrorState, LoadingState } from "@/components/AsyncState";
 import { MotionTabs as Tabs } from "@/components/MotionTabs";
 import { PageHeader } from "@/components/PageHeader";
@@ -108,6 +108,7 @@ export function parseWorkId(value: string | null): number | null {
 }
 
 export default function UpdatesPage() {
+  const navigate = useAppNavigate();
   const runtime = isTauriRuntime();
   const [searchParams] = useAppSearchParams();
   const workId = parseWorkId(searchParams.get("work"));
@@ -467,6 +468,7 @@ export default function UpdatesPage() {
               onRetry={() => void jobItems.refetch()}
               onShowLogs={() => setTab("logs")}
               onShowDeferred={() => setTab("deferred")}
+              onOpenWork={(id) => navigate(`/works/${id}`)}
             />
           ) : <EmptyState icon={Icons.confirm} title="結果はまだありません" description="確認を開始すると、処理結果をここで確認できます。" />}
         </Tabs.Panel>
@@ -528,7 +530,7 @@ export default function UpdatesPage() {
 }
 
 /** A selected job's outcome, including holds that exist only in its history. */
-export function JobResultsPanel({ job, subject, items, loading, error, onRetry, onShowLogs, onShowDeferred }: {
+export function JobResultsPanel({ job, subject, items, loading, error, onRetry, onShowLogs, onShowDeferred, onOpenWork }: {
   job: UpdateJobSnapshot;
   subject?: string;
   items: UpdateJobItemState[] | null;
@@ -537,6 +539,7 @@ export function JobResultsPanel({ job, subject, items, loading, error, onRetry, 
   onRetry: () => void;
   onShowLogs: () => void;
   onShowDeferred: () => void;
+  onOpenWork?: (downloadId: number) => void;
 }) {
   const [visibleHeldCount, setVisibleHeldCount] = useState(50);
   if (!isUpdateJobTerminal(job.status)) {
@@ -568,13 +571,14 @@ export function JobResultsPanel({ job, subject, items, loading, error, onRetry, 
       {result.held.slice(0, visibleHeldCount).map((item, index) => {
         const reason = heldReason(item);
         return <Paper key={`${item.source}:${item.sourceId}:${index}`} p="sm" withBorder>
-          <Group gap="xs" align="flex-start" wrap="nowrap">
+          <Group gap="xs" align="center" wrap="nowrap">
             <Badge color="yellow" variant="light" style={{ flex: "none" }}>{reason === "missing" ? "公開元で見つからない" : reason === "access" ? "閲覧条件待ち" : "保留"}</Badge>
-            <Stack gap={3} miw={0}>
+            <Stack gap={3} miw={0} style={{ flex: 1 }}>
               <Text size="sm" fw={600}>{item.title || item.sourceId || "作品"}</Text>
               <Text size="xs" c="dimmed">{item.source} · {item.sourceId}</Text>
               <Text size="sm" c="dimmed">{item.error || (reason === "missing" ? "公開元で投稿が見つかりません。保存済みの内容は保持されています。" : "確認を保留しました。詳しくはログをご覧ください。")}</Text>
             </Stack>
+            {item.downloadId && onOpenWork && <Button variant="light" color="piep" size="xs" rightSection={<Icons.forward size={IconSize.menu} />} style={{ flex: "none" }} onClick={() => onOpenWork(item.downloadId!)}>詳細を見る</Button>}
           </Group>
         </Paper>;
       })}

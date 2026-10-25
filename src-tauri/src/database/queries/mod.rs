@@ -28,6 +28,7 @@ use super::search::{
     generate_ngrams_limited, make_match_highlights, match_fields_and_score, normalize_search_text,
     normalized_levenshtein, parse_search_query, query_ngrams, ParsedSearchQuery, SearchDocument,
 };
+use super::search_normalization::index_text;
 
 mod assist_inputs;
 /// 作品コレクションは `Database` の非公開内部へ触れるため、子モジュールに置く。
@@ -1370,6 +1371,15 @@ struct CachedQueryResult<T> {
     last_used: u64,
 }
 
+#[derive(Clone)]
+struct NormalizedSuggestionCandidate {
+    item: SearchSuggestion,
+    normalized_label: String,
+    compact_label: String,
+    reading_kana: String,
+    reading_romaji: String,
+}
+
 struct BoundedQueryCache<T> {
     entries: HashMap<String, CachedQueryResult<T>>,
     tick: u64,
@@ -1606,6 +1616,7 @@ pub struct Database {
     facet_cache: Mutex<BoundedQueryCache<Vec<FacetCount>>>,
     entity_facet_cache: Mutex<BoundedQueryCache<Vec<EntityFacet>>>,
     suggest_cache: Mutex<BoundedQueryCache<SearchSuggestResult>>,
+    normalized_suggest_cache: Mutex<BoundedQueryCache<Vec<NormalizedSuggestionCandidate>>>,
     filter_facets_cache: Mutex<BoundedQueryCache<FilterFacets>>,
     search_snapshot_cache: Mutex<SearchSnapshotCache>,
 }
@@ -1648,6 +1659,7 @@ impl Database {
             facet_cache: Mutex::new(BoundedQueryCache::new()),
             entity_facet_cache: Mutex::new(BoundedQueryCache::new()),
             suggest_cache: Mutex::new(BoundedQueryCache::new()),
+            normalized_suggest_cache: Mutex::new(BoundedQueryCache::new()),
             filter_facets_cache: Mutex::new(BoundedQueryCache::new()),
             search_snapshot_cache: Mutex::new(SearchSnapshotCache::new()),
         })
@@ -2722,7 +2734,7 @@ impl Database {
             "SELECT d.author_name, d.author_name, COUNT(*), d.source,
                     NULLIF(d.author_id, '')
              FROM downloads d
-             WHERE d.author_name LIKE ?1 ESCAPE '\\'
+             WHERE d.author_name LIKE ?1 ESCAPE '\\' COLLATE NOCASE
              GROUP BY d.author_name, d.source, NULLIF(d.author_id, '')
              ORDER BY COUNT(*) DESC, d.author_name ASC
              LIMIT ?2",
@@ -2762,16 +2774,60 @@ impl Database {
         for item in &mut items {
             item.exact_match = normalize_search_text(&item.label) == normalized_text;
         }
-        items.sort_by(|left, right| {
-            right
-                .exact_match
-                .cmp(&left.exact_match)
-                .then_with(|| {
-                    suggestion_kind_priority(&left.kind).cmp(&suggestion_kind_priority(&right.kind))
-                })
-                .then_with(|| right.count.unwrap_or(0).cmp(&left.count.unwrap_or(0)))
-                .then_with(|| left.label.cmp(&right.label))
-        });
+        sort_suggestions(&mut items);
+        let direct_items = items.clone();
+        let mut additions = Vec::new();
+        let normalized_query = normalize_search_text(text);
+        // The prefix lookup remains the fast path. Only build/read the bounded
+        // normalization pool when it can fill a slot, and keep all direct
+        // candidates ahead of additions so the new matching never removes an
+        // option users saw before. The pool is cached for this library
+        // generation, avoiding a full label scan on every debounced keystroke.
+        if items.len() < limit as usize && normalized_query.chars().count() >= 2 {
+            let cached = self
+                .normalized_suggest_cache
+                .lock()
+                .ok()
+                .and_then(|mut cache| cache.get("popular-labels-v1", generation));
+            let candidates = if let Some(cached) = cached {
+                cached
+            } else {
+                let loaded = load_normalized_suggestion_candidates(&conn)?;
+                if let Ok(mut cache) = self.normalized_suggest_cache.lock() {
+                    let bytes = loaded
+                        .iter()
+                        .map(|candidate| {
+                            candidate.item.label.len()
+                                + candidate.normalized_label.len()
+                                + candidate.reading_kana.len()
+                                + candidate.reading_romaji.len()
+                                + 128
+                        })
+                        .sum();
+                    cache.insert(
+                        "popular-labels-v1".to_string(),
+                        generation,
+                        loaded.clone(),
+                        bytes,
+                    );
+                }
+                loaded
+            };
+            let mut normalized_items = Vec::new();
+            collect_normalized_suggestion_fallbacks(
+                &candidates,
+                text,
+                limit,
+                &direct_items,
+                &mut normalized_items,
+            );
+            for item in &mut normalized_items {
+                item.exact_match = normalize_search_text(&item.label) == normalized_text;
+            }
+            sort_suggestions(&mut normalized_items);
+            additions.extend(normalized_items);
+        }
+        items.extend(additions);
         items.dedup_by(|left, right| {
             left.kind == right.kind
                 && left.source == right.source
@@ -5854,8 +5910,13 @@ impl Database {
         let conn = self.read_conn()?;
         let mut stmt = conn
             .prepare(
-                "SELECT source, source_id, status, error, item_type, title
-                 FROM update_job_items
+                "SELECT i.source, i.source_id, i.status, i.error, i.item_type, i.title,
+                        COALESCE(i.result_download_id, (
+                            SELECT d.id FROM downloads d
+                            WHERE d.source = i.source AND d.source_id = i.source_id
+                            LIMIT 1
+                        ))
+                 FROM update_job_items i
                  WHERE job_id = ?1
                  ORDER BY id",
             )
@@ -5869,6 +5930,7 @@ impl Database {
                     error: row.get(3)?,
                     item_type: row.get(4)?,
                     title: row.get(5)?,
+                    download_id: row.get(6)?,
                 })
             })
             .map_err(|e| format!("Failed to query update job item states: {e}"))?;
@@ -5918,6 +5980,7 @@ impl Database {
                             error: row.get(3)?,
                             item_type: None,
                             title: None,
+                            download_id: None,
                         })
                     },
                 )
@@ -12616,6 +12679,128 @@ fn insert_bulk_match_entries(conn: &Connection, entries: &[DownloadEntry]) -> Re
         }
     }
     Ok(())
+}
+
+fn sort_suggestions(items: &mut [SearchSuggestion]) {
+    items.sort_by(|left, right| {
+        right
+            .exact_match
+            .cmp(&left.exact_match)
+            .then_with(|| {
+                suggestion_kind_priority(&left.kind).cmp(&suggestion_kind_priority(&right.kind))
+            })
+            .then_with(|| right.count.unwrap_or(0).cmp(&left.count.unwrap_or(0)))
+            .then_with(|| left.label.cmp(&right.label))
+    });
+}
+
+fn load_normalized_suggestion_candidates(
+    conn: &Connection,
+) -> Result<Vec<NormalizedSuggestionCandidate>, String> {
+    let candidates = [
+        ("tag", "SELECT t.name, t.name, COUNT(dt.download_id), NULL, NULL FROM tags t JOIN download_tags dt ON dt.tag_id = t.id GROUP BY t.id, t.name ORDER BY COUNT(dt.download_id) DESC, t.name ASC LIMIT 400"),
+        ("author", "SELECT d.author_name, d.author_name, COUNT(*), d.source, NULLIF(d.author_id, '') FROM downloads d WHERE d.author_name IS NOT NULL AND d.author_name != '' GROUP BY d.author_name, d.source, NULLIF(d.author_id, '') ORDER BY COUNT(*) DESC, d.author_name ASC LIMIT 400"),
+        ("series", "SELECT s.title, s.source || ':' || s.source_key, COUNT(ds.download_id), s.source, s.source_key FROM series s LEFT JOIN download_series ds ON ds.series_source = s.source AND ds.series_key = s.source_key GROUP BY s.source, s.source_key, s.title ORDER BY COUNT(ds.download_id) DESC, s.title ASC LIMIT 400"),
+        ("title", "SELECT d.title, d.source_id, 1, d.source, CAST(d.id AS TEXT) FROM downloads d ORDER BY d.downloaded_at DESC LIMIT 400"),
+    ];
+    let mut out = Vec::new();
+    for (kind, sql) in candidates {
+        let mut stmt = conn
+            .prepare(sql)
+            .map_err(|e| format!("Normalized suggestion prepare failed: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| {
+                let item = SearchSuggestion {
+                    kind: kind.to_string(),
+                    label: row.get(0)?,
+                    value: row.get(1)?,
+                    count: row.get(2)?,
+                    exact_match: false,
+                    source: row.get(3)?,
+                    source_key: row.get(4)?,
+                };
+                Ok(item)
+            })
+            .map_err(|e| format!("Normalized suggestion query failed: {e}"))?;
+        for row in rows {
+            let item = row.map_err(|e| format!("Normalized suggestion row failed: {e}"))?;
+            let normalized_label = normalize_search_text(&item.label);
+            let compact_label = normalized_label
+                .chars()
+                .filter(|c| !c.is_whitespace())
+                .collect();
+            let indexed = if kind == "author" {
+                index_text(&item.label)
+            } else {
+                Default::default()
+            };
+            out.push(NormalizedSuggestionCandidate {
+                item,
+                normalized_label,
+                compact_label,
+                reading_kana: indexed
+                    .reading_kana
+                    .chars()
+                    .filter(|c| !c.is_whitespace())
+                    .collect(),
+                reading_romaji: indexed
+                    .reading_romaji
+                    .chars()
+                    .filter(|c| !c.is_whitespace())
+                    .collect(),
+            });
+        }
+    }
+    Ok(out)
+}
+
+fn collect_normalized_suggestion_fallbacks(
+    candidates: &[NormalizedSuggestionCandidate],
+    text: &str,
+    limit: i64,
+    existing: &[SearchSuggestion],
+    out: &mut Vec<SearchSuggestion>,
+) {
+    let query = normalize_search_text(text);
+    let compact_query = query
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect::<String>();
+    if compact_query.chars().count() < 2 {
+        return;
+    }
+    let allow_compact = !query.chars().any(char::is_whitespace);
+    for candidate in candidates {
+        if existing
+            .iter()
+            .filter(|item| item.kind == candidate.item.kind)
+            .count() as i64
+            >= limit
+        {
+            continue;
+        }
+        let surface_match = candidate.normalized_label.contains(&query)
+            || (allow_compact && candidate.compact_label.contains(&compact_query));
+        let reading_match = candidate.item.kind == "author"
+            && !surface_match
+            && (candidate.reading_kana.contains(&query)
+                || candidate.reading_romaji.contains(&query)
+                || (allow_compact
+                    && (candidate.reading_kana.contains(&compact_query)
+                        || candidate.reading_romaji.contains(&compact_query))));
+        if !surface_match && !reading_match {
+            continue;
+        }
+        if existing.iter().chain(out.iter()).any(|item| {
+            item.kind == candidate.item.kind
+                && item.source == candidate.item.source
+                && item.source_key == candidate.item.source_key
+                && item.value == candidate.item.value
+        }) {
+            continue;
+        }
+        out.push(candidate.item.clone());
+    }
 }
 
 fn collect_suggestions(

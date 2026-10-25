@@ -30,9 +30,27 @@ export function formatCompactCount(value: number | null | undefined): string {
   return man >= 100 ? `${Math.round(man).toLocaleString("ja-JP")}万` : `${man.toFixed(1)}万`;
 }
 
+export function parseDate(value: string): Date {
+  // Date-only values represent a calendar date, not midnight UTC.
+  const calendarDate = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (calendarDate) {
+    const [, year, month, day] = calendarDate;
+    const date = new Date(Number(year), Number(month) - 1, Number(day));
+    if (date.getFullYear() !== Number(year) || date.getMonth() !== Number(month) - 1 || date.getDate() !== Number(day)) {
+      return new Date(Number.NaN);
+    }
+    return date;
+  }
+  // SQLite CURRENT_TIMESTAMP is UTC even though it has no timezone suffix.
+  const timestamp = /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(value)
+    ? `${value.replace(" ", "T")}Z`
+    : value;
+  return new Date(timestamp);
+}
+
 export function formatDate(value: string | null | undefined, withTime = false): string {
   if (!value) return "—";
-  const date = new Date(value);
+  const date = parseDate(value);
   if (Number.isNaN(date.getTime())) return value;
   return new Intl.DateTimeFormat("ja-JP", {
     year: "numeric",
@@ -54,7 +72,7 @@ export function formatDate(value: string | null | undefined, withTime = false): 
  */
 export function formatFreshness(value: string | null | undefined, now: Date = new Date()): string {
   if (!value) return "—";
-  const date = new Date(value);
+  const date = parseDate(value);
   if (Number.isNaN(date.getTime())) return value;
   const elapsedMs = now.getTime() - date.getTime();
   // 未来の時刻は「これから」ではなく、時計のずれとして扱う。
@@ -70,7 +88,7 @@ export function formatFreshness(value: string | null | undefined, now: Date = ne
 /** Compact numeric date (2026/08/05) for dense rows where a label would not fit. */
 export function formatDateNumeric(value: string | null | undefined): string {
   if (!value) return "—";
-  const date = new Date(value);
+  const date = parseDate(value);
   if (Number.isNaN(date.getTime())) return value;
   const pad = (part: number) => String(part).padStart(2, "0");
   return `${date.getFullYear()}/${pad(date.getMonth() + 1)}/${pad(date.getDate())}`;

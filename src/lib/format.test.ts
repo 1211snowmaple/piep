@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { errorMessage, formatFreshness } from "./format";
+import { errorMessage, formatDate, formatFreshness, parseDate } from "./format";
+
+it("interprets SQLite timestamps as UTC and date-only values as local dates", () => {
+  expect(parseDate("2026-10-07 10:32:14").toISOString()).toBe("2026-10-07T10:32:14.000Z");
+  const calendarDate = parseDate("2026-10-07");
+  expect([calendarDate.getFullYear(), calendarDate.getMonth() + 1, calendarDate.getDate()]).toEqual([2026, 10, 7]);
+  expect(formatDate("2026-10-07 10:32:14", true)).toContain("2026");
+});
 
 describe("formatFreshness", () => {
   const now = new Date("2026-08-22T12:00:00+09:00");

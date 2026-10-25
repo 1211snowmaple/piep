@@ -79,6 +79,18 @@ describe("LibraryPage search", () => {
     expect(input).toHaveValue("モテモテのハーレム");
   });
 
+  it("does not leave stale suggestions selectable while the next query is debouncing", async () => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
+    const input = await screen.findByLabelText("ライブラリを検索");
+    fireEvent.change(input, { target: { value: "青葉" } });
+    await waitFor(() => expect(document.querySelector(".library-search__suggestion-label")?.textContent).toBe("青葉しおり"));
+
+    fireEvent.change(input, { target: { value: "存在しない" } });
+    expect(document.querySelector(".library-search__suggestion-label")).toBeNull();
+    expect(document.body.textContent).toContain("候補を検索中…");
+  });
+
   it("keeps a column sort selectable during a search and drops it when the query is cleared", async () => {
     window.location.hash = "#/library?q=%E6%97%A5%E6%9C%AC&sort=title";
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });

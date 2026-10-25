@@ -4049,7 +4049,6 @@ fn lexical_cursor_carries_the_first_page_total() {
             "総件数カーソル本文",
         );
     }
-
     let mut request = params("総件数カーソル");
     request.limit = Some(2);
     let first = db.search_downloads_v2(&request).unwrap();
@@ -5344,6 +5343,61 @@ fn search_suggest_returns_metadata_candidates() {
         Some("author")
     );
     assert!(exact.items.first().is_some_and(|item| item.exact_match));
+}
+
+#[test]
+fn search_suggest_matches_author_infix_width_kana_and_dictionary_reading() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    insert_download(
+        &db,
+        &storage,
+        "suggest-infix",
+        "作品",
+        "和泉たどる",
+        &[],
+        "本文",
+    );
+    insert_download(
+        &db,
+        &storage,
+        "suggest-kana",
+        "作品2",
+        "カタカナ作者",
+        &[],
+        "本文",
+    );
+    insert_download(
+        &db,
+        &storage,
+        "suggest-reading",
+        "作品3",
+        "青葉しおり",
+        &[],
+        "本文",
+    );
+
+    for (text, expected) in [
+        ("たどる", "和泉たどる"),
+        ("かたかな", "カタカナ作者"),
+        ("ｶﾀｶﾅ", "カタカナ作者"),
+        ("aoba", "青葉しおり"),
+    ] {
+        let result = db
+            .search_suggest(&SearchSuggestParams {
+                text: Some(text.to_string()),
+                limit: Some(12),
+            })
+            .unwrap();
+        assert!(
+            result
+                .items
+                .iter()
+                .any(|item| item.kind == "author" && item.label == expected),
+            "expected {expected:?} for {text:?}: {:#?}",
+            result.items
+        );
+    }
 }
 
 #[test]
@@ -7016,8 +7070,20 @@ fn library_browsing_stays_fast_on_a_large_library() {
     let cached_suggest_elapsed = started.elapsed();
     assert_eq!(cached_suggestions.items.len(), suggestions.items.len());
 
+    // A no-prefix query exercises the normalized fallback path, including its
+    // first-generation candidate-pool build. It should remain a bounded
+    // aggregate and later keystrokes reuse the pool.
+    let fallback_suggest_params = SearchSuggestParams {
+        text: Some("候補に一致するものなし".to_string()),
+        limit: Some(12),
+    };
+    let started = Instant::now();
+    let fallback_suggestions = db.search_suggest(&fallback_suggest_params).unwrap();
+    let fallback_suggest_elapsed = started.elapsed();
+    assert!(fallback_suggestions.items.is_empty());
+
     eprintln!(
-            "{} works (metadata_only={}, seed {:?}, db {} MiB): first page cold {:?}/warm {:?}, deepest page {:?}, authors cold {:?}/warm {:?}, filter options cold {:?}/warm {:?}, suggestions cold {:?}/warm {:?}",
+            "{} works (metadata_only={}, seed {:?}, db {} MiB): first page cold {:?}/warm {:?}, deepest page {:?}, authors cold {:?}/warm {:?}, filter options cold {:?}/warm {:?}, suggestions cold {:?}/warm {:?}, normalized suggestions cold {:?}",
             seeded,
             metadata_only,
             seed_elapsed,
@@ -7030,7 +7096,8 @@ fn library_browsing_stays_fast_on_a_large_library() {
             facet_elapsed,
             cached_facet_elapsed,
             suggest_elapsed,
-            cached_suggest_elapsed
+            cached_suggest_elapsed,
+            fallback_suggest_elapsed
         );
     let first_page_budget = if seeded >= 500_000 {
         Duration::from_secs(1)
@@ -7077,6 +7144,11 @@ fn library_browsing_stays_fast_on_a_large_library() {
         suggest_elapsed < aggregate_budget,
         "cold suggestions took {:?}",
         suggest_elapsed
+    );
+    assert!(
+        fallback_suggest_elapsed < aggregate_budget,
+        "cold normalized suggestions took {:?}",
+        fallback_suggest_elapsed
     );
     assert!(
         cached_facet_elapsed < Duration::from_millis(50),
@@ -8606,6 +8678,23 @@ fn update_job_candidates_can_be_queued_for_saving() {
 fn update_history_keeps_the_subject_and_exposes_job_only_holds() {
     let (_temp, root, storage) = temp_paths();
     let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let saved_repost_id = insert_download(
+        &db,
+        &storage,
+        "repost-0",
+        "保存済みの再掲 0",
+        "作者",
+        &[],
+        "本文",
+    );
+    db.conn
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE downloads SET source = 'fanbox' WHERE id = ?1",
+            params![saved_repost_id],
+        )
+        .unwrap();
     let request = StartUpdateJobRequest {
         scope: "author".into(),
         mode: "check_only".into(),
@@ -8668,6 +8757,7 @@ fn update_history_keeps_the_subject_and_exposes_job_only_holds() {
     );
     assert_eq!(states[0].item_type.as_deref(), Some("work"));
     assert_eq!(states[0].title.as_deref(), Some("再掲 0"));
+    assert_eq!(states[0].download_id, Some(saved_repost_id));
     assert!(db
         .list_update_candidates_by_status("deferred", 2000)
         .unwrap()

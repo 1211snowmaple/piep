@@ -62,7 +62,8 @@ describe("更新確認のあとに古くなるもの", () => {
 
   // 増やすのはよいが、減らすと静かに壊れる。数も見張っておく。
   it("知らせ先を取りこぼしていない", () => {
-    expect(collectInvalidatedKeys()).toHaveLength(13);
+    expect(collectInvalidatedKeys()).toHaveLength(14);
+    expect(collectInvalidatedKeys()).toContain("search-suggest");
     expect(collectInvalidatedKeys()).toContain("deferred-candidates");
   });
 });

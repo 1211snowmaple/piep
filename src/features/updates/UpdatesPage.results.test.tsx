@@ -42,6 +42,17 @@ it("shows a missing pixiv work as held with its source ID and no job error", () 
   expect(screen.queryByText(/エラー 1件/)).not.toBeInTheDocument();
 });
 
+it("opens the saved work from the result row without shifting the row content", () => {
+  const onOpenWork = vi.fn();
+  render(<MantineProvider><JobResultsPanel
+    job={{ ...job, totals: 1, processed: 1, heldCount: 1 }}
+    items={[{ source: "fanbox", sourceId: "saved-1", itemType: "work", title: "保存済み作品", status: "held", error: "閲覧条件待ち", downloadId: 42 }]}
+    loading={false} error={null} onRetry={vi.fn()} onShowLogs={vi.fn()} onShowDeferred={vi.fn()} onOpenWork={onOpenWork}
+  /></MantineProvider>);
+  fireEvent.click(screen.getByRole("button", { name: "詳細を見る" }));
+  expect(onOpenWork).toHaveBeenCalledWith(42);
+});
+
 it("offers the deferred shelf only for an access restriction", () => {
   const onShowDeferred = vi.fn();
   render(<MantineProvider><JobResultsPanel
