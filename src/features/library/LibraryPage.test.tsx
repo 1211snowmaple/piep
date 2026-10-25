@@ -48,7 +48,7 @@ describe("LibraryPage search", () => {
     // results can be reordered by any library column.
     const sort = screen.getByRole("combobox", { name: "並び順" });
     expect(sort).toBeEnabled();
-    expect(sort).toHaveValue("関連度：高い順");
+    await waitFor(() => expect(sort).toHaveValue("関連度：高い順"));
   });
 
   /**
@@ -114,7 +114,7 @@ describe("LibraryPage search", () => {
     expect(await screen.findByRole("combobox", { name: "並び順" })).toHaveValue("関連度：高い順");
     fireEvent.change(screen.getByLabelText("ライブラリを検索"), { target: { value: "" } });
     await waitFor(() => expect(window.location.hash).not.toContain("q="), { timeout: 1500 });
-    expect(screen.getByRole("combobox", { name: "並び順" })).toHaveValue("保存日：新しい順");
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "並び順" })).toHaveValue("保存日：新しい順"));
   });
 
   it("offers every useful work sort in both directions and sends the chosen order to search", async () => {

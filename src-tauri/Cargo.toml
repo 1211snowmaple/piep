@@ -84,18 +84,13 @@ tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 
 [target.'cfg(windows)'.dependencies]
-# この2つは Tauri に合わせて据え置く。新しいほうが出ていても上げない。
+# WebView2 のイベント handler は Tauri から借りる controller に渡すため、
+# この2つは Tauri が使う版と一致させる。
 #
-# tauri 2.11.5 と wry 0.55.1 が要るのは `windows ^0.61` と
-# `webview2-com ^0.38`。piep だけ 0.62／0.39 にすると、依存木に COM の
-# 束が二組できる。`auth/webview.rs` は Tauri から借りた controller に
-# こちらで作った handler を渡すので、そこで別々の束の型が出会う。
-# 実際に上げて確かめると、`add_AcceleratorKeyPressed` が
-# 「windows_core 0.61 の `Interface` が 0.62 生成の
-# `ICoreWebView2AcceleratorKeyPressedEventHandler` に実装されていない」
-# として通らない。編集器は古いと言うが、Tauri が動くまでここが上限。
-webview2-com = "0.38.2"
-windows = { version = "0.61.3", features = [
+# tauri 2.12.5 / wry 0.57.1 は `windows ^0.62` と
+# `webview2-com ^0.39` を使う。異なる版にすると COM の型が一致しない。
+webview2-com = "0.39.1"
+windows = { version = "0.62.2", features = [
     "Win32_Foundation",
     "Win32_Storage_FileSystem",
     "Win32_UI_Input_KeyboardAndMouse",

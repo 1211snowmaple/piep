@@ -339,6 +339,7 @@ pub fn run() -> tauri::Result<()> {
             commands::update_jobs::start_update_job,
             commands::update_jobs::start_save_job,
             commands::update_jobs::list_update_job_item_states,
+            commands::update_jobs::list_update_job_held_item_states,
             commands::update_jobs::pause_update_job,
             commands::update_jobs::resume_update_job,
             commands::update_jobs::cancel_update_job,

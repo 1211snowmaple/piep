@@ -5907,9 +5907,32 @@ impl Database {
         &self,
         job_id: &str,
     ) -> Result<Vec<UpdateJobItemState>, String> {
+        self.list_update_job_item_states_filtered(job_id, false)
+    }
+
+    /// Read only held rows while a job is still running. The results panel
+    /// needs their reasons, but fetching thousands of queued candidates on
+    /// every progress update would make a large job slow again.
+    pub fn list_update_job_held_item_states(
+        &self,
+        job_id: &str,
+    ) -> Result<Vec<UpdateJobItemState>, String> {
+        self.list_update_job_item_states_filtered(job_id, true)
+    }
+
+    fn list_update_job_item_states_filtered(
+        &self,
+        job_id: &str,
+        held_only: bool,
+    ) -> Result<Vec<UpdateJobItemState>, String> {
         let conn = self.read_conn()?;
+        let filter = if held_only {
+            " AND i.status = 'held'"
+        } else {
+            ""
+        };
         let mut stmt = conn
-            .prepare(
+            .prepare(&format!(
                 "SELECT i.source, i.source_id, i.status, i.error, i.item_type, i.title,
                         CASE WHEN i.status = 'held' THEN COALESCE(i.result_download_id, (
                             SELECT d.id FROM downloads d
@@ -5917,9 +5940,9 @@ impl Database {
                             LIMIT 1
                         )) ELSE i.result_download_id END
                  FROM update_job_items i
-                 WHERE job_id = ?1
-                 ORDER BY id",
-            )
+                 WHERE i.job_id = ?1{filter}
+                 ORDER BY i.id"
+            ))
             .map_err(|e| format!("Failed to prepare update job item states: {e}"))?;
         let rows = stmt
             .query_map(params![job_id], |row| {
