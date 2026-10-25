@@ -13,6 +13,10 @@ import type { QueryClient } from "@tanstack/react-query";
  * 扱いが違うものを同じ関数に入れると、呼ぶ側がどちらか分からなくなる。
  */
 export function invalidateWorkSetViews(queryClient: QueryClient): void {
+  // Suggestions contain titles, authors and tags from the current library set.
+  // Without invalidation, the five-minute suggestion cache can hide a just-saved
+  // author/work even though the library and its counts have already refreshed.
+  queryClient.invalidateQueries({ queryKey: ["search-suggest"] });
   queryClient.invalidateQueries({ queryKey: ["library-facets"] });
   queryClient.invalidateQueries({ queryKey: ["library-entities"] });
   // 一覧と件数は対で動く。件数だけ古いと、`ListPager` の最終ページが実在しない

@@ -1139,6 +1139,9 @@ pub struct UpdateJobItemState {
     pub item_type: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// Local library ID, when this job item is already saved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub download_id: Option<i64>,
 }
 
 /// A small progress notification for a running update/save job.

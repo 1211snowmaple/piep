@@ -191,6 +191,8 @@ export interface UpdateJobItemState {
   /** Included in explicit item lists; omitted from small progress events. */
   itemType?: string | null;
   title?: string | null;
+  /** Local saved work ID when this job item resolves to the library. */
+  downloadId?: number | null;
 }
 
 /** Small event emitted for one live job transition. Full pages stay on getUpdateJob. */

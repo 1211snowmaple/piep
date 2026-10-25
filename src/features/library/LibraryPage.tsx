@@ -2077,6 +2077,9 @@ function LibrarySearch({ value, onChange, runtime, versionScope }: { value: stri
   const [composing, setComposing] = useState(false);
   const [debounced] = useDebouncedValue(value, 180);
   const suggestionText = debounced.trim();
+  // Keep a slower query's suggestions from being selected during the debounce
+  // window after the text has already changed.
+  const suggestionQueryCurrent = suggestionText === value.trim();
   const combobox = useCombobox({ onDropdownClose: () => combobox.resetSelectedOption(), onDropdownOpen: () => combobox.selectFirstOption() });
   const suggestions = useQuery({
     queryKey: ["search-suggest", suggestionText],
@@ -2094,7 +2097,7 @@ function LibrarySearch({ value, onChange, runtime, versionScope }: { value: stri
     staleTime: 5 * 60_000,
     gcTime: 60_000,
   });
-  const items = suggestions.data ?? [];
+  const items = suggestionQueryCurrent ? suggestions.data ?? [] : [];
   return (
     <Combobox store={combobox} onOptionSubmit={(selected) => {
       const index = Number(selected.slice("suggestion:".length));
@@ -2141,7 +2144,7 @@ function LibrarySearch({ value, onChange, runtime, versionScope }: { value: stri
       </Combobox.Target>
       <Combobox.Dropdown hidden={!value.trim() || composing}>
         <Combobox.Options>
-          {suggestions.isLoading ? <Combobox.Empty>候補を検索中…</Combobox.Empty> : items.length ? items.map((item, index) => <Combobox.Option value={`suggestion:${index}`} key={`${item.kind}:${item.source ?? ""}:${item.sourceKey ?? item.value}`}><Group justify="space-between" wrap="nowrap"><Text size="sm" lineClamp={1} className="library-search__suggestion-label">{item.label}</Text><Group gap={5} wrap="nowrap" className="library-search__suggestion-meta">{item.exactMatch && <Badge size="xs" variant="filled" color="piep">完全一致</Badge>}<Badge size="xs" variant="light" color="piep">{SUGGESTION_KIND_LABEL[item.kind] ?? item.kind}</Badge>{typeof item.count === "number" && <Text size="xs" c="dimmed">{formatNumber(item.count)}件</Text>}</Group></Group></Combobox.Option>) : <Combobox.Empty>候補はありません。入力した言葉でそのまま探しています</Combobox.Empty>}
+          {!suggestionQueryCurrent || suggestions.isLoading ? <Combobox.Empty>候補を検索中…</Combobox.Empty> : items.length ? items.map((item, index) => <Combobox.Option value={`suggestion:${index}`} key={`${item.kind}:${item.source ?? ""}:${item.sourceKey ?? item.value}`}><Group justify="space-between" wrap="nowrap"><Text size="sm" lineClamp={1} className="library-search__suggestion-label">{item.label}</Text><Group gap={5} wrap="nowrap" className="library-search__suggestion-meta">{item.exactMatch && <Badge size="xs" variant="filled" color="piep">完全一致</Badge>}<Badge size="xs" variant="light" color="piep">{SUGGESTION_KIND_LABEL[item.kind] ?? item.kind}</Badge>{typeof item.count === "number" && <Text size="xs" c="dimmed">{formatNumber(item.count)}件</Text>}</Group></Group></Combobox.Option>) : <Combobox.Empty>候補はありません。入力した言葉でそのまま探しています</Combobox.Empty>}
         </Combobox.Options>
         <Combobox.Footer><Text size="xs" c="dimmed">例: tag:創作 -成人向け &quot;完全一致&quot;</Text></Combobox.Footer>
       </Combobox.Dropdown>
