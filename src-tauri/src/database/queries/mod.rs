@@ -6319,12 +6319,11 @@ impl Database {
             )
             .map_err(|e| format!("Update job not found: {e}"))?;
 
-        // A canceled worker leaves its unfinished item queued so an explicit
-        // resume can continue where it stopped. Saving selected candidates is
-        // a different action: it must not implicitly resume that old queue.
-        // Keep unfinished candidates available for a later choice, and settle
-        // the abandoned checks so only the candidate IDs below can run now.
-        if job_status == "canceled" {
+        // A paused or canceled worker leaves unfinished items queued so an
+        // explicit resume can continue where it stopped. Saving selected
+        // candidates instead replaces that queue with only this selection.
+        // Unselected candidates remain available for a later choice.
+        if matches!(job_status.as_str(), "paused" | "canceled") {
             let mut has_selected_candidate = false;
             for id in candidate_ids {
                 has_selected_candidate |= tx

@@ -168,9 +168,9 @@ export default function UpdatesPage() {
       remembered = { seen: new Set(), selected: [] };
       candidateSelectionCache.set(activeSnapshot.jobId, remembered);
     }
-    const eligible = new Set(activeSnapshot.candidates.filter(isSavableCandidate).map((item) => item.id));
+    const eligible = new Set(activeSnapshot.candidates.filter((item) => isSavableCandidate(item, activeSnapshot.status === "paused")).map((item) => item.id));
     const fresh = activeSnapshot.candidates.filter((item) => item.selected && eligible.has(item.id) && !remembered.seen.has(item.id)).map((item) => item.id);
-    activeSnapshot.candidates.forEach((item) => remembered.seen.add(item.id));
+    eligible.forEach((id) => remembered.seen.add(id));
     if (fresh.length) remembered.selected = [...new Set([...remembered.selected, ...fresh])];
     if (isNewJob || fresh.length) setSelectedCandidateIds(remembered.selected);
   }, [activeSnapshot]);
@@ -184,7 +184,8 @@ export default function UpdatesPage() {
     setSelectedCandidateIds(remembered.selected);
   };
 
-  const selectableCandidateIds = activeSnapshot?.candidates.filter((item) => isSavableCandidate(item) && !dismissedIds.includes(item.id)).map((item) => item.id) ?? [];
+  const allowQueuedSelection = activeSnapshot?.status === "paused";
+  const selectableCandidateIds = activeSnapshot?.candidates.filter((item) => isSavableCandidate(item, allowQueuedSelection) && !dismissedIds.includes(item.id)).map((item) => item.id) ?? [];
   const selectableCandidateIdSet = new Set(selectableCandidateIds);
   const selectedSavableIds = selectedCandidateIds.filter((id) => selectableCandidateIdSet.has(id));
   const selectedSavableIdSet = new Set(selectedSavableIds);
@@ -289,8 +290,8 @@ export default function UpdatesPage() {
   });
 
   const saveCandidatesMutation = useMutation({
-    mutationFn: async () => { if (runtime && activeSnapshot) await updateJobs.saveCandidates(activeSnapshot.jobId, selectedSavableIds); },
-    onSuccess: () => notifications.show({ color: "green", title: "保存を開始しました", message: `${selectedSavableIds.length}件を処理します` }),
+    mutationFn: async (candidateIds: number[]) => { if (runtime && activeSnapshot) await updateJobs.saveCandidates(activeSnapshot.jobId, candidateIds); },
+    onSuccess: (_result, candidateIds) => notifications.show({ color: "green", title: "保存を開始しました", message: `${candidateIds.length}件を処理します` }),
     onError: (error) => notifications.show({ color: "red", title: "候補を保存できません", message: errorMessage(error) }),
   });
   const targetMutation = useMutation({
@@ -443,12 +444,13 @@ export default function UpdatesPage() {
               selectableIds={selectableCandidateIds}
               running={running}
               saving={saveCandidatesMutation.isPending}
+              allowQueuedSelection={allowQueuedSelection}
               hasMore={Boolean(activeSnapshot.nextCandidateCursor) || activeSnapshot.candidateCount > activeSnapshot.candidates.length}
               jobActive={running || stalled}
               onToggle={(id, checked) => changeCandidateSelection((current) => checked ? [...new Set([...current, id])] : current.filter((item) => item !== id))}
               onSelectMany={(ids) => changeCandidateSelection((current) => [...new Set([...current, ...ids])])}
               onClearSelection={() => changeCandidateSelection(() => [])}
-              onSave={() => saveCandidatesMutation.mutate()}
+              onSave={() => saveCandidatesMutation.mutate(selectedSavableIds)}
               onLoadMore={() => runtime && updateJobs.loadMoreCandidates()}
               onDismiss={(candidate) => dismissMutation.mutate(candidate)}
             />
@@ -813,12 +815,13 @@ function JobStageProgress({ label, processed, total, animated }: { label: string
   </Box>;
 }
 
-function CandidatesPanel({ candidates, selectedIds, selectableIds, running, saving, hasMore, jobActive, onToggle, onSelectMany, onClearSelection, onSave, onLoadMore, onDismiss }: {
+export function CandidatesPanel({ candidates, selectedIds, selectableIds, running, saving, allowQueuedSelection, hasMore, jobActive, onToggle, onSelectMany, onClearSelection, onSave, onLoadMore, onDismiss }: {
   candidates: UpdateJobSnapshot["candidates"];
   selectedIds: Set<number>;
   selectableIds: number[];
   running: boolean;
   saving: boolean;
+  allowQueuedSelection: boolean;
   hasMore: boolean;
   jobActive: boolean;
   onToggle: (id: number, checked: boolean) => void;
@@ -859,9 +862,9 @@ function CandidatesPanel({ candidates, selectedIds, selectableIds, running, savi
   }, {});
   const shown = kind === "all" ? listed : listed.filter((candidate) => candidate.kind === kind);
   const visible = shown.slice(0, visibleCount);
-  const shownSelectable = shown.filter(isSavableCandidate).map((candidate) => candidate.id);
+  const shownSelectable = shown.filter((candidate) => isSavableCandidate(candidate, allowQueuedSelection)).map((candidate) => candidate.id);
   const selectedCount = selectableIds.filter((id) => selectedIds.has(id)).length;
-  const selectedOutsideShown = selectedCount - visible.filter((candidate) => isSavableCandidate(candidate) && selectedIds.has(candidate.id)).length;
+  const selectedOutsideShown = selectedCount - visible.filter((candidate) => isSavableCandidate(candidate, allowQueuedSelection) && selectedIds.has(candidate.id)).length;
 
   return (
     <Card p={0}>
@@ -873,7 +876,7 @@ function CandidatesPanel({ candidates, selectedIds, selectableIds, running, savi
         <Group gap="xs">
           <Button size="xs" variant="subtle" disabled={!shownSelectable.length} onClick={() => onSelectMany(shownSelectable)}>該当分を選択</Button>
           <Button size="xs" variant="subtle" color="gray" disabled={!selectedCount} onClick={onClearSelection}>選択をすべて解除</Button>
-          <Button size="sm" leftSection={<Icons.export size={IconSize.menu} />} disabled={!selectedCount || running || hasMore} loading={saving} onClick={onSave}>{hasMore ? "候補を読み込み中" : `選択候補${selectedCount}件をまとめて保存`}</Button>
+          <Button size="sm" leftSection={<Icons.export size={IconSize.menu} />} disabled={!selectedCount || running} loading={saving} onClick={onSave}>選択候補{selectedCount}件をまとめて保存</Button>
         </Group>
       </Group>
       <Box px="md" pb="md">
@@ -900,7 +903,7 @@ function CandidatesPanel({ candidates, selectedIds, selectableIds, running, savi
                 checked={selectedIds.has(candidate.id)}
                 onChange={(event) => onToggle(candidate.id, event.currentTarget.checked)}
                 aria-label={`${candidate.title}を選択`}
-                disabled={!isSavableCandidate(candidate)}
+                disabled={!isSavableCandidate(candidate, allowQueuedSelection)}
               />
               <ProviderMark provider={candidate.source} compact />
               <Stack gap={2} flex={1} miw={0}>
@@ -968,8 +971,8 @@ export function TargetHealthBadge({ target }: { target: UpdateTarget }) {
   return null;
 }
 
-function isSavableCandidate(candidate: UpdateJobSnapshot["candidates"][number]) {
-  return isSavableCandidateStatus(candidate.status);
+function isSavableCandidate(candidate: UpdateJobSnapshot["candidates"][number], allowQueued = false) {
+  return isSavableCandidateStatus(candidate.status) || (allowQueued && candidate.status === "queued");
 }
 
 function candidateStatusLabel(status: UpdateJobSnapshot["candidates"][number]["status"]): string {

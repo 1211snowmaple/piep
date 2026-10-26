@@ -8871,6 +8871,91 @@ fn saving_candidates_after_cancel_does_not_resume_the_canceled_queue() {
 }
 
 #[test]
+fn saving_selected_candidates_after_pause_replaces_the_auto_save_queue() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let request = StartUpdateJobRequest {
+        scope: "all".to_string(),
+        mode: "auto_save".to_string(),
+        work_ids: None,
+        target_ids: None,
+        credentials: None,
+        watch_saved: None,
+        adhoc_targets: None,
+    };
+    db.create_update_job(
+        "job-paused-selection",
+        &request,
+        &[
+            UpdateJobItemInput {
+                item_type: "target".to_string(),
+                source: Some("pixiv".to_string()),
+                source_id: Some("unfinished-check".to_string()),
+                target_type: Some("author".to_string()),
+                title: "未完了の確認".to_string(),
+                payload_json: "{}".to_string(),
+                status: "queued".to_string(),
+            },
+            UpdateJobItemInput {
+                item_type: "candidate".to_string(),
+                source: Some("pixiv".to_string()),
+                source_id: Some("selected".to_string()),
+                target_type: Some("author".to_string()),
+                title: "選んだ作品".to_string(),
+                payload_json: "{}".to_string(),
+                status: "queued".to_string(),
+            },
+            UpdateJobItemInput {
+                item_type: "candidate".to_string(),
+                source: Some("pixiv".to_string()),
+                source_id: Some("unselected".to_string()),
+                target_type: Some("author".to_string()),
+                title: "選ばなかった作品".to_string(),
+                payload_json: "{}".to_string(),
+                status: "queued".to_string(),
+            },
+        ],
+    )
+    .unwrap();
+    db.set_update_job_status("job-paused-selection", "paused", None)
+        .unwrap();
+    let selected_id = db
+        .update_job_snapshot("job-paused-selection")
+        .unwrap()
+        .candidates
+        .iter()
+        .find(|candidate| candidate.source_id == "selected")
+        .unwrap()
+        .id;
+
+    assert_eq!(
+        db.queue_update_job_candidates("job-paused-selection", &[i64::MAX])
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        db.queue_update_job_candidates("job-paused-selection", &[selected_id])
+            .unwrap(),
+        1
+    );
+    let snapshot = db.update_job_snapshot("job-paused-selection").unwrap();
+    assert_eq!(snapshot.save_total, 1);
+    assert_eq!(snapshot.check_processed, snapshot.check_total);
+    assert!(snapshot
+        .candidates
+        .iter()
+        .any(|candidate| candidate.source_id == "unselected" && candidate.status == "candidate"));
+
+    db.set_update_job_status("job-paused-selection", "queued", None)
+        .unwrap();
+    let next = db
+        .next_update_job_item("job-paused-selection")
+        .unwrap()
+        .unwrap();
+    assert_eq!(next.source_id.as_deref(), Some("selected"));
+}
+
+#[test]
 fn new_work_and_revision_enter_the_same_save_queue() {
     let (_temp, root, storage) = temp_paths();
     let db = Database::open(&root.join("piep.db"), &storage).unwrap();
