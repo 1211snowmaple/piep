@@ -8620,6 +8620,79 @@ fn older_partial_save_failure_becomes_a_durable_held_candidate() {
 }
 
 #[test]
+fn older_failed_candidate_is_searchable_without_undoing_a_later_retry_decision() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    db.upsert_update_candidate(&UpdateCandidateInput {
+        source: "pixiv".into(),
+        source_id: "old-error".into(),
+        kind: "new".into(),
+        title: "取得できなかった作品".into(),
+        payload_json: "{}".into(),
+        target_type: Some("work".into()),
+    })
+    .unwrap();
+    db.conn.lock().unwrap().execute(
+        "UPDATE update_candidates SET updated_at='2020-01-01T00:00:00Z' WHERE source_id='old-error'",
+        [],
+    ).unwrap();
+    let snapshot = db
+        .create_update_job(
+            "old-error-job",
+            &StartUpdateJobRequest {
+                scope: "save".into(),
+                mode: "save".into(),
+                work_ids: None,
+                target_ids: None,
+                credentials: None,
+                watch_saved: Some(false),
+                adhoc_targets: None,
+            },
+            &[UpdateJobItemInput {
+                item_type: "candidate".into(),
+                source: Some("pixiv".into()),
+                source_id: Some("old-error".into()),
+                target_type: Some("work".into()),
+                title: "取得できなかった作品".into(),
+                payload_json: "{}".into(),
+                status: "queued".into(),
+            }],
+        )
+        .unwrap();
+    db.complete_update_job_item(
+        snapshot.candidates[0].id,
+        "failed",
+        Some("[エラー] 取得先を読めません"),
+        None,
+    )
+    .unwrap();
+    db.conn
+        .lock()
+        .unwrap()
+        .execute_batch(include_str!("../acquisition_repair.sql"))
+        .unwrap();
+    let held = db.list_update_candidates_by_status("deferred", 10).unwrap();
+    assert_eq!(held.len(), 1);
+    let payload: serde_json::Value = serde_json::from_str(&held[0].payload_json).unwrap();
+    assert_eq!(payload["holdKind"], "error");
+    assert_eq!(payload["holdReason"], "[エラー] 取得先を読めません");
+
+    db.set_update_candidate_status("pixiv", "old-error", "pending")
+        .unwrap();
+    db.conn
+        .lock()
+        .unwrap()
+        .execute_batch(include_str!("../acquisition_repair.sql"))
+        .unwrap();
+    assert_eq!(
+        db.update_candidate_status("pixiv", "old-error")
+            .unwrap()
+            .as_deref(),
+        Some("pending")
+    );
+}
+
+#[test]
 fn deleted_revision_becomes_unsaved_without_losing_the_hold() {
     let (_temp, root, storage) = temp_paths();
     let db = Database::open(&root.join("piep.db"), &storage).unwrap();

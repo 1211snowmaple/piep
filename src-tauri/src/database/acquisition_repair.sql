@@ -56,6 +56,24 @@ WHERE item_type IN ('candidate', 'work') AND status='failed'
   AND (error LIKE '%本文は保存しましたが%' OR error LIKE '%[見つからない]%'
        OR error LIKE '%公開元で投稿が見つかりません%');
 
+-- Preserve other historical per-work failures in the searchable shelf when
+-- the last attempt still failed. A candidate the user moved after that failure
+-- keeps its newer decision; old job logs remain an accurate history.
+UPDATE update_candidates SET status='held',
+    payload_json=json_set(CASE WHEN json_valid(payload_json) THEN payload_json ELSE '{}' END,
+        '$.holdReason', (SELECT i.error FROM update_job_items i
+            WHERE i.source=update_candidates.source AND i.source_id=update_candidates.source_id
+              AND i.item_type IN ('candidate', 'work') ORDER BY i.id DESC LIMIT 1),
+        '$.holdKind', 'error'),
+    updated_at=CURRENT_TIMESTAMP
+WHERE status='pending' AND EXISTS (
+    SELECT 1 FROM update_job_items i
+    WHERE i.source=update_candidates.source AND i.source_id=update_candidates.source_id
+      AND i.item_type IN ('candidate', 'work') AND i.status='failed' AND i.error IS NOT NULL
+      AND i.id=(SELECT MAX(j.id) FROM update_job_items j
+          WHERE j.source=i.source AND j.source_id=i.source_id)
+      AND julianday(update_candidates.updated_at) <= julianday(i.updated_at));
+
 UPDATE update_job_items SET payload_json=json_set(json_remove(payload_json,
     '$.originalData.localVersion', '$.originalData.localSavedAt'), '$.kind', 'new', '$.subtitle', '未保存')
 WHERE status IN ('candidate', 'failed', 'held', 'queued') AND json_valid(payload_json)
