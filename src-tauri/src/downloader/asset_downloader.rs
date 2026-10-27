@@ -8,6 +8,7 @@ use tokio::task::JoinSet;
 pub(crate) const MAX_ASSET_DOWNLOAD_BYTES: u64 = 256 * 1024 * 1024;
 pub(crate) const MAX_PROFILE_IMAGE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_ASSET_IMAGE_PIXELS: u64 = 100_000_000;
+const ASSET_DOWNLOAD_CONCURRENCY: usize = 2;
 
 /// アセットダウンロード対象
 #[derive(Debug, Clone)]
@@ -862,11 +863,11 @@ pub async fn download_and_link_assets(
     let client = reqwest::Client::builder()
         .read_timeout(std::time::Duration::from_secs(30))
         .connect_timeout(std::time::Duration::from_secs(10))
-        .pool_max_idle_per_host(4)
+        .pool_max_idle_per_host(ASSET_DOWNLOAD_CONCURRENCY)
         .build()
         .map_err(|error| format!("Asset HTTP client creation failed: {error}"))?;
     let mut join_set = JoinSet::new();
-    let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(4));
+    let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(ASSET_DOWNLOAD_CONCURRENCY));
 
     for target in download_targets {
         let dest_folder = assets_dir.join(target.sub_folder);
@@ -952,8 +953,11 @@ pub async fn download_and_link_assets(
             let msg = format!("[INFO] アセットのダウンロードを開始: {} -> {}", url, filename);
             log::info!("{}", msg);
 
-            let mut attempts = 4;
-            let mut delay = tokio::time::Duration::from_millis(1500);
+            // HTTP エラーは同じ URL を即座に叩き直しても改善しにくい。
+            // 429/503 は呼び出し元のジョブが分単位で待つ。ここでは通信断だけ
+            // 一度待ち直し、複数のアセットで同時に再試行を重ねない。
+            let mut attempts = 2;
+            let delay = tokio::time::Duration::from_secs(5);
 
             loop {
                 let res = async {
@@ -1003,7 +1007,7 @@ pub async fn download_and_link_assets(
                     }
                     Err(e) => {
                         attempts -= 1;
-                        if attempts == 0 {
+                        if attempts == 0 || !retryable_asset_error(&e) {
                             let msg = format!("[ERROR] アセットのダウンロードに失敗しました: {}. エラー: {}", url, e);
                             log::error!("{}", msg);
                             return Err(e);
@@ -1016,7 +1020,6 @@ pub async fn download_and_link_assets(
                         );
                         log::warn!("{}", msg);
                         tokio::time::sleep(delay).await;
-                        delay *= 2;
                     }
                 }
             }
@@ -1073,6 +1076,10 @@ pub async fn download_and_link_assets(
     Ok(())
 }
 
+fn retryable_asset_error(error: &str) -> bool {
+    error.starts_with("Network error:")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1115,6 +1122,20 @@ mod tests {
                 .to_string_lossy()
                 .ends_with(".part")
         }));
+    }
+
+    #[test]
+    fn asset_http_errors_are_left_to_the_job_instead_of_retried_in_a_burst() {
+        assert!(!retryable_asset_error(
+            "HTTP 404 Not Found for https://example.com/a.jpg"
+        ));
+        assert!(!retryable_asset_error(
+            "HTTP 429 Too Many Requests for https://example.com/a.jpg"
+        ));
+        assert!(!retryable_asset_error(
+            "HTTP 503 Service Unavailable for https://example.com/a.jpg"
+        ));
+        assert!(retryable_asset_error("Network error: connection reset"));
     }
 
     #[test]
