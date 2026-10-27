@@ -358,11 +358,11 @@ export default function UpdatesPage() {
           {/* 平常時に読ませたいのは一行だけ。詳しい話は、知りたくなった
               ときに開く。実際に効いた瞬間は下の進捗カードが名乗る。 */}
           <Group gap={4} wrap="nowrap">
-            <Text size="xs" c="dimmed">1件ずつ間隔をあけて確認します</Text>
+            <Text size="xs" c="dimmed">1件ずつ、2秒以上あけて確認します</Text>
             <Tooltip
               multiline
               w={280}
-              label="取得元に負担をかけないよう、1件ずつ間隔をあけて確認します。制限を受けたときは自動で間隔を広げ、通るようになったら戻します。"
+              label="取得元への確認は1件ずつ2秒以上あけます。取得エラーが続くと間隔を延ばし、3件連続で一時停止します。取得制限を受けた場合は分単位で待ってから再試行します。"
             >
               <ActionIcon variant="subtle" color="gray" size="sm" aria-label="確認の進め方について">
                 <Icons.help size={IconSize.menu} />
@@ -391,7 +391,7 @@ export default function UpdatesPage() {
               {running && <Button variant="default" leftSection={<Icons.pause size={IconSize.menu} />} onClick={() => runtime && reportJobAction(updateJobs.pause(activeSnapshot.jobId), "一時停止できません")}>一時停止</Button>}
               {stalled && <Button leftSection={<Icons.resume size={IconSize.menu} />} onClick={() => runtime && reportJobAction(updateJobs.resume(activeSnapshot.jobId), "再開できません")}>再開</Button>}
               {(running || stalled) && <Button variant="subtle" color="red" leftSection={<Icons.cancel size={IconSize.menu} />} onClick={() => runtime && reportJobAction(updateJobs.cancel(activeSnapshot.jobId), "中止できません")}>中止</Button>}
-              {(activeSnapshot.status === "failed" || activeSnapshot.status === "canceled") && <Button leftSection={<Icons.undo size={IconSize.menu} />} onClick={() => runtime && reportJobAction(updateJobs.resume(activeSnapshot.jobId, true), "やり直せません")}>失敗分を再試行</Button>}
+              {((stalled && activeSnapshot.errorCount > 0) || activeSnapshot.status === "failed" || activeSnapshot.status === "canceled") && <Button leftSection={<Icons.undo size={IconSize.menu} />} onClick={() => runtime && reportJobAction(updateJobs.resume(activeSnapshot.jobId, true), "やり直せません")}>失敗分を再試行</Button>}
             </Group>
           </Group>
           <ScrollingJobTitle label={throttledMessage ? statusTitle(activeSnapshot.status) : activeSnapshot.activeLabel || statusTitle(activeSnapshot.status)} />

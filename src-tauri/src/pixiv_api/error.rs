@@ -61,6 +61,9 @@ pub enum PixivError {
     /// 認証方法が提供されていないのにトークンが必要な場合。
     #[error("認証が必要ですが、認証情報が提供されていません")]
     NoAuth,
+    /// 保存済みの pixiv Web セッションが失効している。
+    #[error("pixivのWeb連携が切れています。再接続が必要です")]
+    WebSessionExpired,
     /// 直前の接続更新に失敗したばかりで、まだやり直す時期ではない。
     ///
     /// 待っていた取得が順番に同じ失敗を踏み直すのを止めるためのもの。
@@ -150,6 +153,7 @@ impl std::fmt::Debug for PixivError {
             Self::Reqwest(_) => "Reqwest",
             Self::ResponseTooLarge { .. } => "ResponseTooLarge",
             Self::NoAuth => "NoAuth",
+            Self::WebSessionExpired => "WebSessionExpired",
             Self::RefreshCoolingDown => "RefreshCoolingDown",
             Self::UntrustedNextUrl => "UntrustedNextUrl",
             Self::BadAccessToken { .. } => "BadAccessToken",

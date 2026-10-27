@@ -500,6 +500,9 @@ impl WebPixivAPI {
                 self.host
             );
             let response = self.get(url).send().await?;
+            if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+                return Err(PixivError::WebSessionExpired);
+            }
             let payload: Value = parse_response_into(response).await?;
             let listed = match parse_user_novels(&payload, chunk.len()) {
                 Ok(listed) => listed,
@@ -886,6 +889,34 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(error, PixivError::NoAuth), "{error:?}");
+    }
+
+    #[tokio::test]
+    async fn expired_web_session_is_reported_as_authentication_failure() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let host = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 4096];
+            let _ = stream.read(&mut request).await.unwrap();
+            stream
+                .write_all(
+                    b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+        });
+        let api = WebPixivAPI::with_host(&host)
+            .unwrap()
+            .with_session(WebSession::new("PHPSESSID=expired", "piep/0.9.0").unwrap());
+        let error = api
+            .user_novels_by_ids("7", &["101".to_string()])
+            .await
+            .unwrap_err();
+        server.await.unwrap();
+        assert!(matches!(error, PixivError::WebSessionExpired));
     }
 
     #[tokio::test]

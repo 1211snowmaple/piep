@@ -24,15 +24,18 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tauri::{Emitter, Manager};
 
-const UPDATE_JOB_DELAY_MS: u64 = 800;
+const UPDATE_JOB_DELAY_MS: u64 = 2_000;
 const FAST_PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 
 /// 制限で止まった項目を、同じジョブの中でやり直す回数の上限。
 /// pixiv の 429 は数秒では解除されないことがあるため、短い固定回数で
 /// 失敗扱いにせず、十分な時間をかけて段階的に待つ。
-const MAX_RATE_LIMIT_RETRIES: u32 = 5;
-const RATE_LIMIT_BACKOFF_BASE_MS: u64 = 5_000;
+const MAX_RATE_LIMIT_RETRIES: u32 = 3;
+const RATE_LIMIT_BACKOFF_BASE_MS: u64 = 60_000;
 const MAX_RATE_LIMIT_BACKOFF_MS: u64 = 5 * 60 * 1_000;
+const MAX_CONSECUTIVE_ERRORS: u32 = 3;
+const ERROR_BACKOFF_BASE_MS: u64 = 10_000;
+const MAX_ERROR_BACKOFF_MS: u64 = 60_000;
 /// 1ジョブが持つログの上限。超えた分は古い方から落とす。
 const MAX_UPDATE_JOB_LOGS: i64 = 2_000;
 /// 何項目ごとにログの上限を確かめるか。
@@ -227,6 +230,12 @@ impl WebUpdateIndex {
                 Err(error @ PixivError::RateLimited { .. }) => {
                     // 同じジョブ内の再試行でも、一覧を改めて取得する。
                     self.asked_authors.remove(author_id);
+                    return Err(error);
+                }
+                Err(error @ PixivError::WebSessionExpired) => {
+                    // 同じ失効 Cookie で残りの作者をすべて叩かない。再開時は
+                    // 新しい資格情報から index を作り直す。
+                    self.gave_up = true;
                     return Err(error);
                 }
                 Err(error) => {
@@ -1771,8 +1780,8 @@ async fn run_update_job(
     // 何もしない置物として振る舞う。
     let mut web_index = WebUpdateIndex::new(&credentials);
     let mut fanbox_index = FanboxUpdateIndex::default();
-    // 取得が制限されたときだけ間隔を広げ、うまくいけば元へ戻す。
-    let mut backoff: u32 = 1;
+    // 通常の失敗が続く場合も、取得元を続けて叩かず停止する。
+    let mut consecutive_errors: u32 = 0;
     let mut rate_limit_retries: HashMap<i64, u32> = HashMap::new();
     let mut processed_since_trim: u32 = 0;
     // The save page uses each changed-item event to update its individual
@@ -1910,7 +1919,9 @@ async fn run_update_job(
         )
         .await;
         let local_only = matches!(&outcome, Ok(ItemOutcome::LocalSkipped(_)));
+        let failed = outcome.is_err();
         let restart_pending = has_pending_restart(&job_id);
+        let mut next_delay_ms = UPDATE_JOB_DELAY_MS;
         match outcome {
             Ok(ItemOutcome::Held(message)) => {
                 state
@@ -1939,7 +1950,6 @@ async fn run_update_job(
                     .append_update_job_log(&job_id, "success", &message)?;
             }
             Ok(ItemOutcome::Saved(download_id, message)) => {
-                backoff = 1;
                 saved_download_ids.push(download_id);
                 state
                     .db
@@ -2125,6 +2135,8 @@ async fn run_update_job(
                     if held { "warn" } else { "error" },
                     &format!("{}: {}", item.title, reason),
                 )?;
+                consecutive_errors = consecutive_errors.saturating_add(1);
+                next_delay_ms = error_delay_ms(consecutive_errors);
                 if item.item_type == "target" {
                     if let (Some(source), Some(source_key), Some(target_type)) = (
                         item.source.as_deref(),
@@ -2142,7 +2154,24 @@ async fn run_update_job(
                         }
                     }
                 }
+                if too_many_consecutive_errors(consecutive_errors) {
+                    let message = format!(
+                        "取得エラーが{consecutive_errors}件続いたため一時停止しました。エラー内容を確認してから再開してください"
+                    );
+                    if !transition_running_worker_status(&app, &state, &job_id, "paused", &message)
+                        .await?
+                    {
+                        break;
+                    }
+                    state.db.append_update_job_log(&job_id, "warn", &message)?;
+                    emit_snapshot(&app, &state, &job_id).await;
+                    break;
+                }
             }
+        }
+
+        if !local_only && !failed {
+            consecutive_errors = 0;
         }
 
         // ログは1ジョブに何万行も溜まりうる。時々古い方から落とす。
@@ -2169,13 +2198,8 @@ async fn run_update_job(
         if local_only {
             continue;
         }
-        // 制限を受けたあとは間隔を広げたままにし、続けて通るようになったら
-        // 半分ずつ元へ戻す。取得元への負荷を自分で調整する。
-        tokio::time::sleep(std::time::Duration::from_millis(
-            UPDATE_JOB_DELAY_MS * u64::from(backoff),
-        ))
-        .await;
-        backoff = (backoff / 2).max(1);
+        // 待機中も一時停止や中止をすぐに受け付ける。
+        wait_for_retry_or_control(&state, &job_id, next_delay_ms).await?;
     }
 
     Ok(())
@@ -2369,6 +2393,7 @@ fn classify_failure(error: &str) -> FailureKind {
             "認証が必要",
             "アクセストークンが不正",
             "セッションが無効",
+            "再接続が必要",
             "http 401",
             "http 403",
             "status: 401",
@@ -2434,6 +2459,18 @@ fn rate_limit_delay_ms(attempt: u32) -> u64 {
     RATE_LIMIT_BACKOFF_BASE_MS
         .saturating_mul(1u64 << shift)
         .min(MAX_RATE_LIMIT_BACKOFF_MS)
+}
+
+/// 429 以外の失敗でも次の作品へ急がない。連続失敗は停止で打ち切る。
+fn error_delay_ms(consecutive_errors: u32) -> u64 {
+    let shift = consecutive_errors.saturating_sub(1).min(6);
+    ERROR_BACKOFF_BASE_MS
+        .saturating_mul(1u64 << shift)
+        .min(MAX_ERROR_BACKOFF_MS)
+}
+
+fn too_many_consecutive_errors(consecutive_errors: u32) -> bool {
+    consecutive_errors >= MAX_CONSECUTIVE_ERRORS
 }
 
 /// Long rate-limit waits must not make pause/cancel feel ignored. Wake in short
@@ -3537,9 +3574,10 @@ async fn process_candidate_item(
 mod tests {
     use super::{
         build_initial_items, build_save_items, canceled_status_for, classify_failure,
-        describe_text_change, fanbox_listing_confirms_recent_copy, make_job_id, may_remember,
-        profile_refresh_params_for_target, rate_limit_delay_ms, FailureKind, FanboxListingEntry,
-        SaveJobWork, MAX_RATE_LIMIT_BACKOFF_MS,
+        describe_text_change, error_delay_ms, fanbox_listing_confirms_recent_copy, make_job_id,
+        may_remember, profile_refresh_params_for_target, rate_limit_delay_ms,
+        too_many_consecutive_errors, FailureKind, FanboxListingEntry, SaveJobWork,
+        MAX_ERROR_BACKOFF_MS, MAX_RATE_LIMIT_BACKOFF_MS,
     };
     use crate::database::{
         AdhocUpdateTarget, Database, NewDownload, StartUpdateJobRequest, UpdateTargetInput,
@@ -4203,6 +4241,7 @@ mod tests {
             "認証が必要ですが、認証情報が提供されていません",
             "oauth invalid_grant",
             "request failed: Unauthorized",
+            "pixivのWeb連携が切れています。再接続が必要です",
         ] {
             assert_eq!(classify_failure(error), FailureKind::Auth, "{error}");
         }
@@ -4229,6 +4268,14 @@ mod tests {
             ("request timed out", FailureKind::Network),
             ("dns error: failed to lookup address", FailureKind::Network),
             ("HTTP 500 internal server error", FailureKind::Other),
+            (
+                "作品 101 の詳細は取得できましたが、本文の取得先が両方とも 404 を返しました。pixivへの接続を確認して再試行してください",
+                FailureKind::Other,
+            ),
+            (
+                "本文は取得できましたが、参照先の挿絵 123 が 404 を返しました",
+                FailureKind::Other,
+            ),
         ] {
             assert_eq!(classify_failure(error), expected, "{error}");
         }
@@ -4260,11 +4307,19 @@ mod tests {
 
     #[test]
     fn rate_limit_retries_use_a_real_exponential_wait() {
-        assert_eq!(rate_limit_delay_ms(1), 5_000);
-        assert_eq!(rate_limit_delay_ms(2), 10_000);
-        assert_eq!(rate_limit_delay_ms(3), 20_000);
-        assert_eq!(rate_limit_delay_ms(5), 80_000);
+        assert_eq!(rate_limit_delay_ms(1), 60_000);
+        assert_eq!(rate_limit_delay_ms(2), 120_000);
+        assert_eq!(rate_limit_delay_ms(3), 240_000);
         assert!(rate_limit_delay_ms(99) <= MAX_RATE_LIMIT_BACKOFF_MS);
+    }
+
+    #[test]
+    fn ordinary_errors_back_off_and_stop_before_flooding_the_provider() {
+        assert_eq!(error_delay_ms(1), 10_000);
+        assert_eq!(error_delay_ms(2), 20_000);
+        assert!(error_delay_ms(99) <= MAX_ERROR_BACKOFF_MS);
+        assert!(!too_many_consecutive_errors(2));
+        assert!(too_many_consecutive_errors(3));
     }
 
     #[test]
