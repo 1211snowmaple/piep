@@ -358,7 +358,7 @@ export default function UpdatesPage() {
           {/* 平常時に読ませたいのは一行だけ。詳しい話は、知りたくなった
               ときに開く。実際に効いた瞬間は下の進捗カードが名乗る。 */}
           <Group gap={4} wrap="nowrap">
-            <Text size="xs" c="dimmed">1件ずつ、2秒以上あけて確認します</Text>
+            <Text size="xs" c="dimmed">1件ずつ間隔をあけて確認します</Text>
             <Tooltip
               multiline
               w={280}
