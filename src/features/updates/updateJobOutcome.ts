@@ -1,11 +1,13 @@
 import type { UpdateJobItemState, UpdateJobSummary } from "@/services/updateJobApi";
 
-export type HeldReason = "missing" | "access" | "other";
+export type HeldReason = "partial" | "missing" | "access" | "error" | "other";
 
 export function heldReason(item: UpdateJobItemState): HeldReason {
   const reason = item.error ?? "";
-  if (reason.includes("公開元で投稿が見つからない")) return "missing";
+  if (reason.includes("[一部保存]")) return "partial";
+  if (reason.includes("公開元で投稿が見つからない") || reason.includes("[見つからない]")) return "missing";
   if (reason.includes("閲覧制限") || reason.includes("閲覧条件") || reason.includes("必要な支援額")) return "access";
+  if (reason.startsWith("[通信エラー]") || reason.startsWith("[エラー]")) return "error";
   return "other";
 }
 
@@ -16,8 +18,10 @@ export function summarizeUpdateJobItems(items: UpdateJobItemState[]) {
     skippedCandidates: items.filter((item) => item.itemType === "candidate" && item.status === "skipped").length,
     checkedTargets: items.filter((item) => item.itemType === "target" && item.status === "done").length,
     held,
+    partial: held.filter((item) => heldReason(item) === "partial"),
     missing: held.filter((item) => heldReason(item) === "missing"),
     access: held.filter((item) => heldReason(item) === "access"),
+    errors: held.filter((item) => heldReason(item) === "error"),
     other: held.filter((item) => heldReason(item) === "other"),
   };
 }

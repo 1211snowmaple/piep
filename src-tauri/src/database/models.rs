@@ -1063,6 +1063,8 @@ pub struct UpdateJobLog {
 #[serde(rename_all = "camelCase")]
 pub struct UpdateJobCandidate {
     pub id: i64,
+    #[serde(default)]
+    pub download_id: Option<i64>,
     pub key: String,
     pub source: String,
     pub source_id: String,
@@ -1180,6 +1182,8 @@ pub struct UpdateCandidateRow {
     pub status: String,
     pub first_seen_at: String,
     pub updated_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub download_id: Option<i64>,
 }
 
 #[derive(Debug, Clone)]

@@ -1002,8 +1002,7 @@ export default function LibraryPage() {
   const shelfParam = urlParams.get("shelf");
   const readingIds = useMemo(() => shelfParam === "reading" ? readingWorkIds() : null, [shelfParam]);
 
-  // 「改稿あり」も同じ会員名簿方式で並べる。取り込んでいない改稿は作品の列では
-  // なく更新確認が見つけた事実なので、絞り込みではなく名簿として渡す。
+  // 取り込んでいない改稿の印は、作品列とは別にカードへ表示するため取得する。
   const pendingRevisions = useQuery({
     queryKey: ["pending-revisions"],
     queryFn: () => runtime ? listPendingRevisionsCommand() : Promise.resolve([]),
@@ -1011,19 +1010,9 @@ export default function LibraryPage() {
     // 隣の棚件数と同じ間隔にして、画面ごとに作法を変えない。
     staleTime: 30_000,
   });
-  // 読み込み中は空の名簿を渡す。空は「該当なし」であって「絞り込みなし」では
-  // ないので、一瞬でも全件が並ぶことはない。
   const onRevisedShelf = urlParams.get("revised") === "1";
-  const revisedIds = useMemo(
-    () => onRevisedShelf ? (pendingRevisions.data ?? []).map((entry) => entry.downloadId) : null,
-    [onRevisedShelf, pendingRevisions.data],
-  );
-  // The empty array used while this shelf is being resolved deliberately means
-  // "show no works", not "remove the filter". Do not let that internal safety
-  // value become a user-facing empty result: until the membership list exists,
-  // the shelf is loading; if it cannot be read, the shelf itself has failed.
-  const revisedShelfLoading = onRevisedShelf && pendingRevisions.isLoading;
-  const revisedShelfError = onRevisedShelf ? pendingRevisions.error : null;
+  // 「改稿あり」は確認待ちだけではなく、手元の版数が実際に増えた作品も含む。
+  // 作品列の revision filter は current_version > 1 を対象にする。
   const pendingRevisionIds = useMemo(
     () => new Set((pendingRevisions.data ?? []).map((entry) => entry.downloadId)),
     [pendingRevisions.data],
@@ -1033,7 +1022,7 @@ export default function LibraryPage() {
   // are only offered once an ordering has been chosen.
   const numberedPages = numberedPageEnabled && tab === "works";
   const params = useMemo<SearchV2Params>(() => ({
-    idsInclude: readingIds ?? revisedIds,
+    idsInclude: readingIds,
     text: searchText || null,
     // Selecting both providers is the same as no provider filter; the backend
     // takes a single source, and post-filtering a page would break paging.
@@ -1053,7 +1042,7 @@ export default function LibraryPage() {
     maxFileSizeBytes: sizeMbToBytesOrNull(filters.maxSizeMb),
     assetFilter: filters.assetFilter,
     seriesFilter: filters.seriesFilter,
-    revisionFilter: filters.revisionFilter,
+    revisionFilter: onRevisedShelf ? "revised" : filters.revisionFilter,
     editFilter: filters.editFilter,
     coverFilter: filters.coverFilter,
     dateField: filters.dateFrom || filters.dateTo ? filters.dateField : null,
@@ -1072,7 +1061,7 @@ export default function LibraryPage() {
     projection: "libraryGallery",
     searchMode: semanticIntent ? "semantic" : null,
     versionScope,
-  }), [readingIds, revisedIds, searchText, filters, sortBy, sortOrder, numberedPages, pageParam, pageSize, semanticIntent, versionScope]);
+  }), [readingIds, onRevisedShelf, searchText, filters, sortBy, sortOrder, numberedPages, pageParam, pageSize, semanticIntent, versionScope]);
 
   // Keyset pagination: fetching a fixed slab and paging it in the browser
   // capped the library at that slab and reported the wrong total.
@@ -1092,7 +1081,7 @@ export default function LibraryPage() {
     // the page that is already on screen keeps the geometry - and the reader's
     // place in it - still while the next one is fetched.
     placeholderData: keepPreviousData,
-    enabled: tab === "works" && !revisedShelfLoading && !revisedShelfError,
+    enabled: tab === "works",
   });
   const facets = useQuery({
     queryKey: ["library-facets"],
@@ -1793,9 +1782,7 @@ export default function LibraryPage() {
         )}
 
         {tab === "works" ? (
-          revisedShelfLoading ? <LoadingState label="改稿のある作品を確認しています" />
-            : revisedShelfError ? <ErrorState error={revisedShelfError} retry={() => pendingRevisions.refetch()} />
-              : works.isLoading ? <LoadingState label="ライブラリを検索しています" /> : works.error ? <ErrorState error={works.error} retry={() => works.refetch()} /> : loadedItems.length ? (
+          works.isLoading ? <LoadingState label="ライブラリを検索しています" /> : works.error ? <ErrorState error={works.error} retry={() => works.refetch()} /> : loadedItems.length ? (
             <>
               <VirtualizedWorkList items={loadedItems} view={view} selectionMode={selectionMode} selected={selectedSet} revisedIds={pendingRevisionIds} onSelect={toggleSelected} onToggleFavorite={toggleFavorite} onToggleWatch={toggleWatch} />
               <ListPager

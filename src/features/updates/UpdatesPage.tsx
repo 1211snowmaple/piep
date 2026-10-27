@@ -36,6 +36,7 @@ import { MotionTabs as Tabs } from "@/components/MotionTabs";
 import { PageHeader } from "@/components/PageHeader";
 import { updateJobStatusMeta, invalidateAfterUpdateJob, isUpdateJobTerminal, useUpdateJobs, type UpdateJobSnapshot, type UpdateJobSummary } from "@/features/updates/updateJobs";
 import { DeferredCandidatesPanel } from "./DeferredCandidatesPanel";
+import { UpdateWorkLinks, formatUpdateSubtitle } from "./UpdateWorkLinks";
 import { heldReason, summarizeUpdateJobItems, updateJobSubject } from "./updateJobOutcome";
 import { errorMessage, formatDate, formatNumber } from "@/lib/format";
 import { ProviderMark } from "@/lib/providers";
@@ -111,7 +112,7 @@ export function parseWorkId(value: string | null): number | null {
 export default function UpdatesPage() {
   const navigate = useAppNavigate();
   const runtime = isTauriRuntime();
-  const [searchParams] = useAppSearchParams();
+  const [searchParams, setSearchParams] = useAppSearchParams();
   const workId = parseWorkId(searchParams.get("work"));
   const queryClient = useQueryClient();
   const updateJobs = useUpdateJobs(undefined, runtime);
@@ -120,7 +121,16 @@ export default function UpdatesPage() {
   const [previewSnapshot, setPreviewSnapshot] = useState<UpdateJobSnapshot>(demoSnapshot);
   const activeSnapshot = runtime ? updateJobs.activeSnapshot : previewSnapshot;
   const jobs = runtime ? updateJobs.jobs : [demoSnapshot as UpdateJobSummary];
-  const [tab, setTab] = useState<string | null>("candidates");
+  const urlTab = searchParams.get("tab");
+  const [tab, setTab] = useState<string | null>(urlTab ?? "candidates");
+  useEffect(() => setTab(urlTab ?? "candidates"), [urlTab]);
+  const selectTab = (next: string | null) => {
+    setTab(next);
+    const params = new URLSearchParams(searchParams);
+    if (next && next !== "candidates") params.set("tab", next);
+    else params.delete("tab");
+    setSearchParams(params, { replace: true });
+  };
   const resultIsTerminal = Boolean(activeSnapshot && isUpdateJobTerminal(activeSnapshot.status));
   const jobItems = useQuery({
     queryKey: ["update-job-items", activeSnapshot?.jobId, activeSnapshot?.finishedAt],
@@ -378,7 +388,7 @@ export default function UpdatesPage() {
           <Box style={{ flex: 1 }} />
           <Group gap={6} wrap="nowrap">
             <Text size="xs" c="dimmed">自動確認：{scheduleSummary}</Text>
-            <Button size="compact-xs" variant="subtle" color="gray" onClick={() => setTab("schedule")}>変更</Button>
+            <Button size="compact-xs" variant="subtle" color="gray" onClick={() => selectTab("schedule")}>変更</Button>
           </Group>
         </Group>
       </Paper>
@@ -400,6 +410,8 @@ export default function UpdatesPage() {
             <Text size="sm" mt="xs">
               変更なし・スキップ {formatNumber(outcome.unchanged)}件 · 公開元で見つからない {formatNumber(outcome.missing.length)}件
               {outcome.access.length > 0 && ` · 閲覧条件待ち ${formatNumber(outcome.access.length)}件`}
+              {outcome.partial.length > 0 && ` · 一部保存 ${formatNumber(outcome.partial.length)}件`}
+              {outcome.errors.length > 0 && ` · 取得エラー ${formatNumber(outcome.errors.length)}件`}
               {outcome.other.length > 0 && ` · その他の保留 ${formatNumber(outcome.other.length)}件`}
               {outcome.checkedTargets > 0 && ` · 作者・シリーズ確認完了 ${formatNumber(outcome.checkedTargets)}件`}
             </Text>
@@ -419,7 +431,7 @@ export default function UpdatesPage() {
         </Card>
       )}
 
-      <Tabs value={tab} onChange={setTab} mt="lg">
+      <Tabs value={tab} onChange={selectTab} mt="lg">
         {/* 左から右へ「いま何が待っているか → どう進んだか → 前はどうだったか」、
             区切りを挟んで「何を追いかける約束か → いつ走らせる約束か」。
             数の帯は、伝える中身があるときだけ出す - 0 は何も言っていない。 */}
@@ -427,7 +439,7 @@ export default function UpdatesPage() {
           <Tabs.Tab value="candidates" leftSection={<Icons.select size={IconSize.menu} />}>候補 {openCandidateCount > 0 && <Badge size="xs" variant="light" ml={4}>{formatNumber(openCandidateCount)}</Badge>}</Tabs.Tab>
           <Tabs.Tab value="results" leftSection={<Icons.confirm size={IconSize.menu} />}>結果 {(activeSnapshot?.heldCount ?? 0) > 0 && <Badge size="xs" variant="light" color="yellow" ml={4}>{formatNumber(activeSnapshot?.heldCount ?? 0)}</Badge>}</Tabs.Tab>
           <Tabs.Tab value="logs" leftSection={<Icons.pending size={IconSize.menu} />}>ログ</Tabs.Tab>
-          <Tabs.Tab value="deferred">保留・非表示</Tabs.Tab>
+          <Tabs.Tab value="deferred">要確認</Tabs.Tab>
           <Tabs.Tab value="history" leftSection={<Icons.versionHistory size={IconSize.menu} />}>履歴 {jobs.length > 0 && <Badge size="xs" variant="light" color="gray" ml={4}>{formatNumber(jobs.length)}</Badge>}</Tabs.Tab>
           <span className="updates-tabs__divider" aria-hidden />
           <Tabs.Tab value="targets" leftSection={<Icons.updates size={IconSize.menu} />}>監視対象</Tabs.Tab>
@@ -435,7 +447,7 @@ export default function UpdatesPage() {
         </Tabs.List>
 
         <Tabs.Panel value="candidates" pt="lg">
-          {(activeSnapshot?.heldCount ?? 0) > 0 && <Group mb="md"><Text size="sm" c="dimmed">この回で保留になった{activeSnapshot?.heldCount}件は、結果で理由を確認できます。</Text><Button variant="subtle" size="xs" onClick={() => setTab("results")}>この回の保留を見る</Button></Group>}
+          {(activeSnapshot?.heldCount ?? 0) > 0 && <Group mb="md"><Text size="sm" c="dimmed">この回で保留になった{activeSnapshot?.heldCount}件は、結果で理由を確認できます。</Text><Button variant="subtle" size="xs" onClick={() => selectTab("results")}>この回の保留を見る</Button></Group>}
           {activeSnapshot ? (
             <CandidatesPanel
               key={activeSnapshot.jobId}
@@ -453,6 +465,7 @@ export default function UpdatesPage() {
               onSave={() => saveCandidatesMutation.mutate(selectedSavableIds)}
               onLoadMore={() => runtime && updateJobs.loadMoreCandidates()}
               onDismiss={(candidate) => dismissMutation.mutate(candidate)}
+              onOpenWork={(id) => navigate(`/works/${id}`)}
             />
           ) : (
             <EmptyState icon={Icons.versionHistory} title="更新ジョブはまだありません" description="上の対象と方法を選び、「確認を開始」を押してください。" />
@@ -469,15 +482,15 @@ export default function UpdatesPage() {
               loading={runtime && (resultIsTerminal ? jobItems.isLoading : heldItems.isLoading)}
               error={resultIsTerminal ? jobItems.error : heldItems.error}
               onRetry={() => void (resultIsTerminal ? jobItems.refetch() : heldItems.refetch())}
-              onShowLogs={() => setTab("logs")}
-              onShowDeferred={() => setTab("deferred")}
+              onShowLogs={() => selectTab("logs")}
+              onShowDeferred={() => selectTab("deferred")}
               onOpenWork={(id) => navigate(`/works/${id}`)}
             />
           ) : <EmptyState icon={Icons.confirm} title="結果はまだありません" description="確認を開始すると、処理結果をここで確認できます。" />}
         </Tabs.Panel>
 
         <Tabs.Panel value="deferred" pt="lg">
-          <DeferredCandidatesPanel runtime={runtime} onRechecked={(jobId) => { void updateJobs.selectJob(jobId); setTab("candidates"); }} />
+          <DeferredCandidatesPanel runtime={runtime} onOpenWork={(id) => navigate(`/works/${id}`)} onRechecked={(jobId) => { void updateJobs.selectJob(jobId); selectTab("candidates"); }} />
         </Tabs.Panel>
 
         <Tabs.Panel value="logs" pt="lg">
@@ -516,7 +529,7 @@ export default function UpdatesPage() {
             onSelect={(jobId) => {
               if (!runtime) return;
               void updateJobs.selectJob(jobId)
-                .then(() => setTab("results"))
+                .then(() => selectTab("results"))
                 .catch((error) => notifications.show({ color: "red", title: "履歴を開けません", message: errorMessage(error) }));
             }}
             onClear={(jobId) => clearJobMutation.mutate(jobId)}
@@ -560,6 +573,8 @@ export function JobResultsPanel({ job, subject, items, loading, error, onRetry, 
       {!terminal && `保留 ${formatNumber(job.heldCount ?? 0)}件`}
       {result.missing.length > 0 && ` · 公開元で見つからない ${formatNumber(result.missing.length)}件`}
       {result.access.length > 0 && ` · 閲覧条件待ち ${formatNumber(result.access.length)}件`}
+      {result.partial.length > 0 && ` · 一部保存 ${formatNumber(result.partial.length)}件`}
+      {result.errors.length > 0 && ` · 取得エラー ${formatNumber(result.errors.length)}件`}
       {result.other.length > 0 && ` · その他の保留 ${formatNumber(result.other.length)}件`}
       {terminal && result.checkedTargets > 0 && ` · 作者・シリーズ確認完了 ${formatNumber(result.checkedTargets)}件`}
       {job.candidateCount > 0 && ` · 候補 ${formatNumber(job.candidateCount)}件`}
@@ -574,13 +589,13 @@ export function JobResultsPanel({ job, subject, items, loading, error, onRetry, 
         const reason = heldReason(item);
         return <Paper key={`${item.source}:${item.sourceId}:${index}`} p="sm" withBorder>
           <Group gap="xs" align="center" wrap="nowrap">
-            <Badge color="yellow" variant="light" style={{ flex: "none" }}>{reason === "missing" ? "公開元で見つからない" : reason === "access" ? "閲覧条件待ち" : "保留"}</Badge>
+            <Badge color={reason === "error" || reason === "partial" ? "orange" : "yellow"} variant="light" style={{ flex: "none" }}>{reason === "partial" ? "一部保存" : reason === "missing" ? "公開元で見つからない" : reason === "access" ? "閲覧条件待ち" : reason === "error" ? "取得エラー" : "保留"}</Badge>
             <Stack gap={3} miw={0} style={{ flex: 1 }}>
               <Text size="sm" fw={600}>{item.title || item.sourceId || "作品"}</Text>
               <Text size="xs" c="dimmed">{item.source} · {item.sourceId}</Text>
               <Text size="sm" c="dimmed">{item.error || (reason === "missing" ? "公開元で投稿が見つかりません。保存済みの内容は保持されています。" : "確認を保留しました。詳しくはログをご覧ください。")}</Text>
             </Stack>
-            {item.downloadId && onOpenWork && <Button variant="light" color="piep" size="xs" rightSection={<Icons.forward size={IconSize.menu} />} style={{ flex: "none" }} onClick={() => onOpenWork(item.downloadId!)}>詳細を見る</Button>}
+            {item.source && item.sourceId && <UpdateWorkLinks source={item.source} sourceId={item.sourceId} downloadId={item.downloadId} title={item.title || item.sourceId} onOpenWork={onOpenWork} />}
           </Group>
         </Paper>;
       })}
@@ -815,7 +830,7 @@ function JobStageProgress({ label, processed, total, animated }: { label: string
   </Box>;
 }
 
-export function CandidatesPanel({ candidates, selectedIds, selectableIds, running, saving, allowQueuedSelection, hasMore, jobActive, onToggle, onSelectMany, onClearSelection, onSave, onLoadMore, onDismiss }: {
+export function CandidatesPanel({ candidates, selectedIds, selectableIds, running, saving, allowQueuedSelection, hasMore, jobActive, onToggle, onSelectMany, onClearSelection, onSave, onLoadMore, onDismiss, onOpenWork }: {
   candidates: UpdateJobSnapshot["candidates"];
   selectedIds: Set<number>;
   selectableIds: number[];
@@ -830,6 +845,7 @@ export function CandidatesPanel({ candidates, selectedIds, selectableIds, runnin
   onSave: () => void;
   onLoadMore: () => void;
   onDismiss: (candidate: UpdateJobSnapshot["candidates"][number]) => void;
+  onOpenWork?: (downloadId: number) => void;
 }) {
   const [kind, setKind] = useState<string>("all");
   // 済んだものは畳む。数は残す - 「無かったこと」にはしない。
@@ -915,10 +931,11 @@ export function CandidatesPanel({ candidates, selectedIds, selectableIds, runnin
                       決められない。 */}
                   <Text size="sm" fw={650}>{candidate.title}</Text>
                 </Group>
-                <Text size="xs" c="dimmed" className="line-clamp-1">{candidate.targetLabel} · {candidate.subtitle}</Text>
+                <Text size="xs" c="dimmed" className="line-clamp-1">{candidate.targetLabel} · {formatUpdateSubtitle(candidate.subtitle)}</Text>
                 {candidate.error && <Text size="xs" c={candidate.status === "held" ? "dimmed" : "red"}>{errorMessage(candidate.error)}</Text>}
               </Stack>
               <Badge color={candidate.status === "failed" ? "red" : candidate.status === "saved" ? "green" : "gray"} variant="light" style={{ flex: "none" }}>{candidateStatusLabel(candidate.status)}</Badge>
+              <UpdateWorkLinks source={candidate.source} sourceId={candidate.sourceId} downloadId={candidate.downloadId} title={candidate.title} onOpenWork={onOpenWork} />
               {isSavableCandidate(candidate) && (
                 <Tooltip label="候補から外す（保留・非表示の一覧から戻せます）">
                   <ActionIcon variant="subtle" color="gray" aria-label={`${candidate.title}を候補から外す`} onClick={() => onDismiss(candidate)}>

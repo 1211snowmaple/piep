@@ -5579,10 +5579,11 @@ impl Database {
 
         let mut candidate_stmt = conn
             .prepare(
-                "SELECT id, source, source_id, title, target_type, payload_json, status, error
-                 FROM update_job_items
-                 WHERE job_id = ?1 AND item_type = 'candidate' AND id > ?2
-                 ORDER BY id ASC
+                "SELECT i.id, i.source, i.source_id, i.title, i.target_type, i.payload_json, i.status, i.error, d.id
+                 FROM update_job_items i
+                 LEFT JOIN downloads d ON d.source = i.source AND d.source_id = i.source_id
+                 WHERE i.job_id = ?1 AND i.item_type = 'candidate' AND i.id > ?2
+                 ORDER BY i.id ASC
                  LIMIT ?3",
             )
             .map_err(|e| format!("Failed to prepare update job candidates: {}", e))?;
@@ -5625,6 +5626,7 @@ impl Database {
                         .to_string();
                     Ok(UpdateJobCandidate {
                         id,
+                        download_id: row.get(8)?,
                         key: format!("candidate:{}:{}:{}", source, source_id, id),
                         source,
                         source_id,
@@ -7170,15 +7172,16 @@ impl Database {
             .map_err(|e| format!("Reading shelf count failed: {e}"))?
         };
 
-        // 取り込んでいない改稿の件数。作品の列ではなく、更新確認が見つけた
-        // 事実から数える。改稿の候補は必ず手元にある作品を指すので、結合は当たる。
+        // 検索の「改稿あり」と同じ条件で数える。手元で版が増えた作品も、
+        // 保存前に更新確認で改稿を見つけた作品も一度だけ数える。
         let revised = conn
             .query_row(
                 "SELECT COUNT(*)
-                   FROM update_candidates c
-                   JOIN downloads d
-                     ON d.source = c.source AND d.source_id = c.source_id
-                  WHERE c.status = 'pending' AND c.kind = 'revision'",
+                   FROM downloads d
+                  WHERE d.current_version > 1 OR EXISTS (
+                    SELECT 1 FROM update_candidates c
+                     WHERE c.source = d.source AND c.source_id = d.source_id
+                       AND c.status = 'pending' AND c.kind = 'revision')",
                 [],
                 |row| row.get(0),
             )
@@ -9367,6 +9370,73 @@ impl Database {
             results.push(row.map_err(|e| format!("Row read failed: {}", e))?);
         }
         Ok(results)
+    }
+
+    /// Previously saved Pixiv age-gate icons that can be replaced by a real web cover.
+    pub fn placeholder_pixiv_covers(&self) -> Result<Vec<(i64, String, String, String)>, String> {
+        let conn = self.read_conn()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, source_id, json_path, cover_path FROM downloads
+             WHERE source = 'pixiv' AND cover_path IS NOT NULL
+               AND instr(lower(cover_path), 'limit_r18_') > 0
+             ORDER BY id",
+            )
+            .map_err(|e| format!("Failed to prepare placeholder covers: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })
+            .map_err(|e| format!("Failed to list placeholder covers: {e}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("Failed to read placeholder covers: {e}"))?;
+        Ok(rows)
+    }
+
+    /// A cover repair is derived metadata; it must not create a content version.
+    pub fn replace_placeholder_cover(
+        &self,
+        id: i64,
+        old_path: &str,
+        new_path: &str,
+        url: &str,
+        bytes: i64,
+    ) -> Result<bool, String> {
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let changed = tx
+            .execute(
+                "UPDATE downloads SET cover_path=?3 WHERE id=?1 AND cover_path=?2",
+                params![id, old_path, new_path],
+            )
+            .map_err(|e| format!("Failed to replace placeholder cover: {e}"))?;
+        if changed > 0 {
+            let filename = std::path::Path::new(new_path)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("cover.jpg");
+            let replaced_asset = tx.execute(
+                "UPDATE assets SET filename=?3, local_path=?4, original_url=?5, file_size_bytes=?6
+                 WHERE download_id=?1 AND local_path=?2",
+                params![id, old_path, filename, new_path, url, bytes],
+            ).map_err(|e| format!("Failed to replace placeholder asset: {e}"))?;
+            if replaced_asset == 0 {
+                tx.execute(
+                    "INSERT INTO assets (download_id, asset_type, filename, local_path, original_url, file_size_bytes)
+                     VALUES (?1, 'cover', ?2, ?3, ?4, ?5)
+                     ON CONFLICT(download_id, local_path) DO UPDATE SET original_url=excluded.original_url, file_size_bytes=excluded.file_size_bytes",
+                    params![id, filename, new_path, url, bytes],
+                ).map_err(|e| format!("Failed to record repaired cover: {e}"))?;
+                tx.execute(
+                    "UPDATE downloads SET asset_count=asset_count+1 WHERE id=?1",
+                    params![id],
+                )
+                .map_err(|e| format!("Failed to count repaired cover: {e}"))?;
+            }
+        }
+        tx.commit()
+            .map_err(|e| format!("Failed to commit repaired cover: {e}"))?;
+        Ok(changed > 0)
     }
 
     /// ソースとソースIDからダウンロードエントリを取得（存在しない場合はOk(None)）
@@ -13172,7 +13242,7 @@ fn append_library_filters(
             // `has_history` is accepted for saved searches created by builds
             // that briefly used that name. The condition is revision state,
             // not a promise that every old file is still retained.
-            "revised" | "has_history" => wheres.push("d.current_version > 1".to_string()),
+            "revised" | "has_history" => wheres.push("(d.current_version > 1 OR EXISTS (SELECT 1 FROM update_candidates c WHERE c.source = d.source AND c.source_id = d.source_id AND c.status = 'pending' AND c.kind = 'revision'))".to_string()),
             "first_version" => wheres.push("d.current_version <= 1".to_string()),
             _ => {}
         }

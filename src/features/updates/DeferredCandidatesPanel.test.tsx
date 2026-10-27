@@ -15,10 +15,10 @@ it("keeps held works reversible and checks only the explicit selection", async (
   const onRechecked = vi.fn();
   render(<MantineProvider><QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><DeferredCandidatesPanel runtime onRechecked={onRechecked} /></QueryClientProvider></MantineProvider>);
   await screen.findByText("支援プラン待ち");
-  expect(screen.getByRole("button", { name: "権限変更後に再確認（0件）" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "候補に戻す（0）" })).toBeDisabled();
   expect(mocks.recheck).not.toHaveBeenCalled();
   fireEvent.click(screen.getByRole("checkbox", { name: "支援プラン待ちを再確認" }));
-  fireEvent.click(screen.getByRole("button", { name: "権限変更後に再確認（1件）" }));
+  fireEvent.click(screen.getByRole("button", { name: "候補に戻す（1）" }));
   await waitFor(() => expect(mocks.recheck).toHaveBeenCalledWith(["fanbox:11"], false));
   expect(onRechecked).toHaveBeenCalledWith("permission-check");
 });

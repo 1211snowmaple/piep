@@ -1413,7 +1413,14 @@ pub async fn list_deferred_update_candidates(
 ) -> Result<Vec<crate::database::UpdateCandidateRow>, String> {
     app.state::<Arc<AppState>>()
         .db
-        .list_update_candidates_by_status("deferred", 2000)
+        .list_update_candidates_by_status("deferred", -1)
+}
+
+#[tauri::command]
+pub async fn count_deferred_update_candidates(app: tauri::AppHandle) -> Result<i64, String> {
+    app.state::<Arc<AppState>>()
+        .db
+        .count_deferred_update_candidates()
 }
 
 /// Rechecks an explicit selection after permissions change, without saving or watching.
@@ -1435,10 +1442,7 @@ pub async fn recheck_deferred_update_candidates(
     }
     let keys: HashSet<_> = keys.into_iter().collect();
     let mut items = Vec::new();
-    for candidate in state
-        .db
-        .list_update_candidates_by_status("deferred", 2000)?
-    {
+    for candidate in state.db.list_update_candidates_by_status("deferred", -1)? {
         if !keys.contains(&format!("{}:{}", candidate.source, candidate.source_id)) {
             continue;
         }
@@ -1520,19 +1524,32 @@ async fn hold_candidate(
     payload["kind"] = serde_json::json!(kind);
     payload["source"] = serde_json::json!(source);
     payload["sourceId"] = serde_json::json!(source_id);
-    payload["holdKind"] = serde_json::json!("restricted");
+    let hold_kind = if reason.starts_with("[一部保存]") {
+        "incomplete"
+    } else if reason.starts_with("[見つからない]") || reason.contains("公開元で投稿が見つからない")
+    {
+        "unavailable"
+    } else if reason.starts_with('[') && !reason.starts_with("[閲覧制限]") {
+        "error"
+    } else {
+        "restricted"
+    };
+    payload["holdKind"] = serde_json::json!(hold_kind);
     payload["holdReason"] = serde_json::json!(reason);
     if let Some(post) = post {
         // Store only listing/permission metadata, never a body or credentials.
         payload["originalData"] = serde_json::json!({
             "id": source_id, "title": item.title,
             "creatorId": post.get("creatorId").or_else(|| post.get("creator_id")),
-            "feeRequired": post.get("feeRequired"), "isRestricted": true,
+            "feeRequired": post.get("feeRequired"), "isRestricted": hold_kind == "restricted",
             "user": { "name": string_at(post, &[&["user", "name"]]) }
         });
     }
     if let Some(saved) = existing {
         payload["originalData"]["creatorId"] = serde_json::json!(saved.author_id);
+    }
+    if hold_kind != "restricted" {
+        payload["originalData"]["isRestricted"] = serde_json::json!(false);
     }
     state.db.upsert_update_candidate(&UpdateCandidateInput {
         source: source.into(),
@@ -1924,6 +1941,9 @@ async fn run_update_job(
         let mut next_delay_ms = UPDATE_JOB_DELAY_MS;
         match outcome {
             Ok(ItemOutcome::Held(message)) => {
+                if item.item_type == "work" {
+                    hold_candidate(&state, &item, None, &message).await?;
+                }
                 state
                     .db
                     .complete_update_job_item(item.id, "held", Some(&message), None)?;
@@ -1977,15 +1997,19 @@ async fn run_update_job(
             }
             Ok(ItemOutcome::PartialSaved(download_id, message)) => {
                 // The novel body is usable, but the candidate must remain
-                // retryable because its referenced illustrations are absent.
+                // discoverable because its referenced illustrations are absent.
                 saved_download_ids.push(download_id);
+                let reason = format!("[一部保存] {message}");
+                if item.item_type != "target" {
+                    hold_candidate(&state, &item, None, &reason).await?;
+                }
                 state.db.complete_update_job_item(
                     item.id,
-                    "failed",
-                    Some(&message),
+                    "held",
+                    Some(&reason),
                     Some(download_id),
                 )?;
-                state.db.append_update_job_log(&job_id, "warn", &message)?;
+                state.db.append_update_job_log(&job_id, "warn", &reason)?;
             }
             Ok(ItemOutcome::Skipped(message) | ItemOutcome::LocalSkipped(message)) => {
                 state
@@ -2132,7 +2156,7 @@ async fn run_update_job(
                 // 失敗の理由を項目とログの両方に残す。あとで「何を再試行すべきか」
                 // を選べるようにするための材料になる。
                 let reason = format!("[{}] {}", kind.label(), error);
-                let held = kind == FailureKind::Restricted && item.item_type != "target";
+                let held = item.item_type != "target";
                 if held {
                     hold_candidate(&state, &item, None, &reason).await?;
                 }
@@ -2597,6 +2621,42 @@ fn is_unchanged_pixiv_work(
         })
 }
 
+/// A matching list timestamp is only enough when the body was checked recently
+/// and the saved files are still present. Otherwise continue to metadata and,
+/// once the deep-check interval expires, the full text comparison.
+fn pixiv_listing_confirms_recent_copy(state: &Arc<AppState>, dl: &DownloadEntry) -> bool {
+    if dl.content_hash.as_deref().is_none_or(str::is_empty)
+        || !std::path::Path::new(&dl.json_path).is_file()
+    {
+        return false;
+    }
+    let Ok((_, last_deep_checked_at)) = state.db.get_download_meta_state(dl.id) else {
+        return false;
+    };
+    let recent = last_deep_checked_at
+        .and_then(|checked| chrono::DateTime::parse_from_rfc3339(&checked).ok())
+        .is_some_and(|checked| {
+            let age = chrono::Utc::now().signed_duration_since(checked.with_timezone(&chrono::Utc));
+            age >= chrono::Duration::zero()
+                && age < chrono::Duration::days(DEEP_CHECK_INTERVAL_DAYS)
+        });
+    if !recent {
+        return false;
+    }
+    let Ok(assets) = state.db.get_assets(dl.id) else {
+        return false;
+    };
+    dl.asset_count >= 0
+        && assets.len() == dl.asset_count as usize
+        && assets.iter().all(|asset| {
+            std::fs::metadata(&asset.local_path).is_ok_and(|metadata| {
+                metadata.is_file()
+                    && (asset.file_size_bytes <= 0
+                        || metadata.len() == asset.file_size_bytes as u64)
+            })
+        })
+}
+
 /// 本文を取り直さずに終えたとき、その `updateDate` を覚えてよければ覚える。
 ///
 /// 覚えてよいのは「本文まで突き合わせた時刻が、その更新より後」のときだけ
@@ -2741,7 +2801,7 @@ async fn process_work_item(
         if let (Some(listed), Some(stored)) =
             (listed_update.as_deref(), dl.source_updated_at.as_deref())
         {
-            if listed == stored {
+            if listed == stored && pixiv_listing_confirms_recent_copy(state, &dl) {
                 return Ok(if listing_was_cached {
                     ItemOutcome::LocalSkipped(format!("最新: {}", dl.title))
                 } else {
@@ -3763,6 +3823,61 @@ mod tests {
     }
 
     #[test]
+    fn pixiv_listing_does_not_hide_an_overdue_body_check() {
+        let root = std::env::temp_dir().join(format!("piep-pixiv-listing-{}", make_job_id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let state = Arc::new(AppState::new(
+            Database::open(&root.join("piep.db"), &root.join("downloads")).unwrap(),
+        ));
+        let json_path = root.join("saved.json");
+        std::fs::write(&json_path, "{}").unwrap();
+        let id = state
+            .db
+            .upsert_download(&NewDownload {
+                source: "pixiv".into(),
+                source_id: "90000009".into(),
+                title: "保存済み".into(),
+                author_name: "作者".into(),
+                author_id: "80000004".into(),
+                content_type: "novel".into(),
+                tags: Vec::new(),
+                excerpt: None,
+                cover_path: None,
+                json_path: json_path.to_string_lossy().into(),
+                original_json_path: None,
+                asset_count: 0,
+                file_size_bytes: 2,
+                downloaded_at: chrono::Utc::now().to_rfc3339(),
+                source_created_at: None,
+                content_hash: Some("saved-body".into()),
+                text_length: 2,
+                source_updated_at: Some("2026-10-01T00:00:00Z".into()),
+                watch_updates: false,
+                current_version: 1,
+                favorite: false,
+            })
+            .unwrap();
+        let dl = state
+            .db
+            .get_download_by_source("pixiv", "90000009")
+            .unwrap()
+            .unwrap();
+        assert!(!super::pixiv_listing_confirms_recent_copy(&state, &dl));
+        state
+            .db
+            .set_download_meta_state(id, None, &chrono::Utc::now().to_rfc3339())
+            .unwrap();
+        assert!(super::pixiv_listing_confirms_recent_copy(&state, &dl));
+        state
+            .db
+            .set_download_meta_state(id, None, "2020-01-01T00:00:00Z")
+            .unwrap();
+        assert!(!super::pixiv_listing_confirms_recent_copy(&state, &dl));
+        drop(state);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn fanbox_author_listing_skips_only_a_recent_complete_saved_copy() {
         let root = std::env::temp_dir().join(format!("piep-fanbox-listing-{}", make_job_id()));
         std::fs::create_dir_all(&root).unwrap();
@@ -3984,7 +4099,7 @@ mod tests {
         let mut candidate = crate::database::UpdateCandidateRow {
             source: "fanbox".into(), source_id: "11".into(), kind: "new".into(), title: "作品".into(),
             payload_json: serde_json::json!({"originSourceKey":"creator", "originalData":{"creatorId":"creator"}}).to_string(),
-            target_type: Some("author".into()), status: "pending".into(), first_seen_at: "now".into(), updated_at: "now".into(),
+            target_type: Some("author".into()), status: "pending".into(), first_seen_at: "now".into(), updated_at: "now".into(), download_id: None,
         };
         let works = HashSet::from([("fanbox".into(), "11".into())]);
         assert!(!super::candidate_matches_scope(

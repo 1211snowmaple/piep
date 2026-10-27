@@ -78,6 +78,7 @@ export interface UpdateJobLog {
 
 export interface UpdateJobCandidate {
   id: number;
+  downloadId?: number | null;
   key: string;
   source: "pixiv" | "fanbox";
   sourceId: string;
@@ -154,10 +155,15 @@ export interface DeferredUpdateCandidate {
   title: string;
   status: "held" | "dismissed";
   payloadJson: string;
+  downloadId?: number | null;
 }
 
 export function listDeferredUpdateCandidatesCommand(): Promise<DeferredUpdateCandidate[]> {
   return invoke("list_deferred_update_candidates");
+}
+
+export function countDeferredUpdateCandidatesCommand(): Promise<number> {
+  return invoke("count_deferred_update_candidates");
 }
 
 export async function recheckDeferredUpdateCandidatesCommand(keys: string[], refreshPostAccess = false): Promise<UpdateJobSnapshot> {

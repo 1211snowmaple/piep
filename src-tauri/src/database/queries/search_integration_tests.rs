@@ -6397,6 +6397,112 @@ fn shelf_counts_ignore_reading_positions_for_works_that_no_longer_exist() {
     let mut none = v2_params(None, 20, None);
     none.ids_include = Some(Vec::new());
     assert_eq!(db.search_downloads_v2(&none).unwrap().items.len(), 0);
+
+    // The revised shelf combines accepted version history and a pending
+    // provider rewrite without counting either work twice.
+    db.conn
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE downloads SET current_version=2 WHERE id=?1",
+            params![first],
+        )
+        .unwrap();
+    db.upsert_update_candidate(&UpdateCandidateInput {
+        source: "pixiv".into(),
+        source_id: "shelf-2".into(),
+        kind: "revision".into(),
+        title: "二作目".into(),
+        payload_json: "{}".into(),
+        target_type: Some("work".into()),
+    })
+    .unwrap();
+    assert_eq!(db.get_library_shelf_counts(&[]).unwrap().revised, 2);
+    let mut revised = v2_params(None, 20, None);
+    revised.revision_filter = Some("revised".into());
+    let revised_ids: HashSet<_> = db
+        .search_downloads_v2(&revised)
+        .unwrap()
+        .items
+        .into_iter()
+        .map(|item| item.id)
+        .collect();
+    assert_eq!(revised_ids, HashSet::from([first, second]));
+}
+
+#[test]
+fn placeholder_cover_repair_changes_only_the_current_cover_reference() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let id = insert_download(&db, &storage, "gated-cover", "作品", "作者", &[], "本文");
+    let old = storage
+        .join("limit_r18_100.png")
+        .to_string_lossy()
+        .to_string();
+    let new = storage.join("real-cover.jpg").to_string_lossy().to_string();
+    db.conn
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE downloads SET cover_path=?2 WHERE id=?1",
+            params![id, old],
+        )
+        .unwrap();
+    let listed = db.placeholder_pixiv_covers().unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].0, id);
+    assert!(db
+        .replace_placeholder_cover(id, &old, &new, "https://i.pximg.net/real-cover.jpg", 123)
+        .unwrap());
+    assert!(!db
+        .replace_placeholder_cover(id, &old, &new, "https://i.pximg.net/real-cover.jpg", 123)
+        .unwrap());
+    let work = db.get_download(id).unwrap();
+    assert_eq!(work.cover_path.as_deref(), Some(new.as_str()));
+    assert_eq!(work.asset_count, 1);
+    assert_eq!(db.get_assets(id).unwrap().len(), 1);
+    assert_eq!(work.current_version, 1);
+    assert!(db.placeholder_pixiv_covers().unwrap().is_empty());
+}
+
+#[test]
+fn placeholder_cover_repair_reuses_its_existing_asset_row() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let id = insert_download(
+        &db,
+        &storage,
+        "gated-cover-asset",
+        "作品",
+        "作者",
+        &[],
+        "本文",
+    );
+    let old = storage
+        .join("limit_r18_100.png")
+        .to_string_lossy()
+        .to_string();
+    let new = storage.join("real-cover.jpg").to_string_lossy().to_string();
+    db.conn
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE downloads SET cover_path=?2, asset_count=1 WHERE id=?1",
+            params![id, old],
+        )
+        .unwrap();
+    db.conn.lock().unwrap().execute(
+        "INSERT INTO assets (download_id, asset_type, filename, local_path) VALUES (?1, 'cover', 'limit_r18_100.png', ?2)",
+        params![id, old],
+    ).unwrap();
+    assert!(db
+        .replace_placeholder_cover(id, &old, &new, "https://i.pximg.net/real-cover.jpg", 123)
+        .unwrap());
+    let work = db.get_download(id).unwrap();
+    assert_eq!(work.asset_count, 1);
+    let assets = db.get_assets(id).unwrap();
+    assert_eq!(assets.len(), 1);
+    assert_eq!(assets[0].local_path, new);
 }
 
 #[test]
@@ -8452,6 +8558,68 @@ fn held_candidates_survive_backups_and_never_join_normal_retries() {
 }
 
 #[test]
+fn older_partial_save_failure_becomes_a_durable_held_candidate() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let request = StartUpdateJobRequest {
+        scope: "save".into(),
+        mode: "save".into(),
+        work_ids: None,
+        target_ids: None,
+        credentials: None,
+        watch_saved: Some(false),
+        adhoc_targets: None,
+    };
+    let snapshot = db
+        .create_update_job(
+            "partial-job",
+            &request,
+            &[UpdateJobItemInput {
+                item_type: "candidate".into(),
+                source: Some("pixiv".into()),
+                source_id: Some("partial-work".into()),
+                target_type: Some("work".into()),
+                title: "一部保存した作品".into(),
+                payload_json: "{}".into(),
+                status: "queued".into(),
+            }],
+        )
+        .unwrap();
+    db.complete_update_job_item(
+        snapshot.candidates[0].id,
+        "failed",
+        Some("本文は保存しましたが、参照先の挿絵を閲覧できません"),
+        None,
+    )
+    .unwrap();
+    db.set_update_job_status("partial-job", "failed", None)
+        .unwrap();
+    for _ in 0..2 {
+        db.conn
+            .lock()
+            .unwrap()
+            .execute_batch(include_str!("../acquisition_repair.sql"))
+            .unwrap();
+    }
+    let repaired = db.update_job_snapshot("partial-job").unwrap();
+    assert_eq!(
+        (
+            repaired.status.as_str(),
+            repaired.error_count,
+            repaired.held_count
+        ),
+        ("completed", 0, 1)
+    );
+    let rows = db.list_update_candidates_by_status("deferred", 10).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(db.count_deferred_update_candidates().unwrap(), 1);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&rows[0].payload_json).unwrap()["holdKind"],
+        "incomplete"
+    );
+}
+
+#[test]
 fn deleted_revision_becomes_unsaved_without_losing_the_hold() {
     let (_temp, root, storage) = temp_paths();
     let db = Database::open(&root.join("piep.db"), &storage).unwrap();
@@ -8491,6 +8659,7 @@ fn restored_candidates_reject_untrusted_provider_fields() {
         status: "pending".to_string(),
         first_seen_at: "2026-08-28T00:00:00Z".to_string(),
         updated_at: "2026-08-28T00:00:00Z".to_string(),
+        download_id: None,
     };
     db.restore_update_candidate(&row).unwrap();
 

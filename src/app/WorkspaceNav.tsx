@@ -9,6 +9,7 @@ import { useWorkspace } from "@/app/WorkspaceContext";
 import { useOperationJobs } from "@/features/jobs/operationJobs";
 import { countActiveActivities } from "@/features/jobs/activityAggregation";
 import { useUpdateJobSummaries } from "@/features/updates/updateJobs";
+import { countDeferredUpdateCandidatesCommand } from "@/services/updateJobApi";
 import { readingWorkIds, subscribeReadingPositions } from "@/features/library/readingShelf";
 import { formatCompactCount, formatNumber } from "@/lib/format";
 import { isTauriRuntime } from "@/services/dbApi";
@@ -120,6 +121,11 @@ export function WorkspaceNav({ railed, onNavigate }: { railed: boolean; onNaviga
     queryFn: () => runtime ? getLibraryShelfCounts(readingIds) : Promise.resolve(PREVIEW_COUNTS),
     staleTime: 30_000,
   });
+  const attentionCount = useQuery({
+    queryKey: ["deferred-candidate-count"],
+    queryFn: () => runtime ? countDeferredUpdateCandidatesCommand() : Promise.resolve(0),
+    staleTime: 30_000,
+  });
   const savedSearches = useQuery({
     queryKey: ["saved-searches"],
     queryFn: () => runtime ? listSavedSearches() : Promise.resolve([] as SavedSearchRecord[]),
@@ -137,10 +143,11 @@ export function WorkspaceNav({ railed, onNavigate }: { railed: boolean; onNaviga
   const activeSavedId = Number.parseInt(location.searchParams.get("saved") ?? "", 10);
   // Collections are a library tab now, so a collection screen keeps the
   // library section highlighted rather than needing an entry of its own.
-  const inLibrary = location.pathname === "/library"
+  const onAttention = location.pathname === "/updates" && location.searchParams.get("tab") === "deferred";
+  const inLibrary = onAttention || location.pathname === "/library"
     || location.pathname.startsWith("/works/")
     || location.pathname.startsWith("/collections");
-  const inCollect = location.pathname.startsWith("/save") || location.pathname.startsWith("/updates");
+  const inCollect = location.pathname.startsWith("/save") || (location.pathname.startsWith("/updates") && !onAttention);
   const inExport = location.pathname.startsWith("/epub");
   const saved = savedSearches.data ?? [];
   const shelfCount = (value: LibraryShelf): number | null => {
@@ -163,6 +170,7 @@ export function WorkspaceNav({ railed, onNavigate }: { railed: boolean; onNaviga
       onSelect={() => go(item.search ? `/library?${item.search}` : "/library", { scroll: "top" })}
     />
   ));
+  const attentionRow = <Row key="attention" label="要確認" icon={Icons.pending} active={onAttention} railed={railed} count={attentionCount.data ?? null} onSelect={() => go("/updates?tab=deferred", { scroll: "top" })} />;
   const savedRows = saved.map((item) => (
     <Row
       key={item.id}
@@ -179,7 +187,7 @@ export function WorkspaceNav({ railed, onNavigate }: { railed: boolean; onNaviga
   const collectRows = [
     <Row key="pixiv" label="pixivから保存" icon={Icons.collect} glyph={<ProviderGlyph provider="pixiv" />} active={location.pathname === "/save/pixiv"} railed={railed} onSelect={() => go("/save/pixiv")} />,
     <Row key="fanbox" label="FANBOXから保存" icon={Icons.collect} glyph={<ProviderGlyph provider="fanbox" />} active={location.pathname === "/save/fanbox"} railed={railed} onSelect={() => go("/save/fanbox")} />,
-    <Row key="updates" label="更新を確認" icon={Icons.updates} active={location.pathname.startsWith("/updates")} railed={railed} onSelect={() => go("/updates")} />,
+    <Row key="updates" label="更新を確認" icon={Icons.updates} active={location.pathname.startsWith("/updates") && !onAttention} railed={railed} onSelect={() => go("/updates")} />,
   ];
   const exportRows = [
     <Row key="epub" label="EPUBキュー" icon={Icons.epub} active={location.pathname === "/epub"} railed={railed} count={epubQueue.length || null} onSelect={() => go("/epub")} />,
@@ -197,6 +205,7 @@ export function WorkspaceNav({ railed, onNavigate }: { railed: boolean; onNaviga
           <>
             <Divider my={5} />
             {shelfRows}
+            {attentionRow}
             {savedRows.length > 0 && <Divider my={5} />}
             {savedRows}
             <Divider my={5} />
@@ -207,6 +216,7 @@ export function WorkspaceNav({ railed, onNavigate }: { railed: boolean; onNaviga
           <>
             <NavGroup id="library" label="ライブラリ" icon={Icons.library} open={isOpen("library")} onToggle={toggle} active={inLibrary}>
               {shelfRows}
+              {attentionRow}
             </NavGroup>
             <NavGroup id="saved" label="保存した検索" icon={Icons.savedSearch} open={isOpen("saved")} onToggle={toggle} active={Number.isSafeInteger(activeSavedId)}>
               {saved.length === 0

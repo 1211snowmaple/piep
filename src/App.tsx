@@ -6,6 +6,9 @@ import { AppFrame } from "@/app/AppFrame";
 import { AppRouter, matchPath, useAppRouter } from "@/app/router";
 import { WorkspaceProvider } from "@/app/WorkspaceContext";
 import { installCloseGuard } from "@/lib/unsavedGuard";
+import { useQueryClient } from "@tanstack/react-query";
+import { subscribeTauriEvent } from "@/services/eventBus";
+import { isTauriRuntime } from "@/services/dbApi";
 
 const DashboardPage = lazy(() => import("@/features/dashboard/DashboardPage"));
 const LibraryPage = lazy(() => import("@/features/library/LibraryPage"));
@@ -76,6 +79,17 @@ function confirmDiscardOnNavigation(): Promise<boolean> {
 
 function AppContent() {
   const { pathname } = useAppRouter();
+  const queryClient = useQueryClient();
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    return subscribeTauriEvent<number[]>("covers-repaired", ({ payload }) => {
+      queryClient.invalidateQueries({ queryKey: ["library"] });
+      queryClient.invalidateQueries({ queryKey: ["entity-works"] });
+      queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+      queryClient.invalidateQueries({ queryKey: ["epub-queue-works"] });
+      payload.forEach((id) => queryClient.invalidateQueries({ queryKey: ["reader-metadata", id] }));
+    });
+  }, [queryClient]);
   useEffect(() => {
     let disposed = false;
     let dispose: (() => void) | undefined;

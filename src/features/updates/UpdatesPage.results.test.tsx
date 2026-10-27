@@ -49,7 +49,7 @@ it("opens the saved work from the result row without shifting the row content", 
     items={[{ source: "fanbox", sourceId: "saved-1", itemType: "work", title: "保存済み作品", status: "held", error: "閲覧条件待ち", downloadId: 42 }]}
     loading={false} error={null} onRetry={vi.fn()} onShowLogs={vi.fn()} onShowDeferred={vi.fn()} onOpenWork={onOpenWork}
   /></MantineProvider>);
-  fireEvent.click(screen.getByRole("button", { name: "詳細を見る" }));
+  fireEvent.click(screen.getByRole("button", { name: "保存済み作品の保存した詳細を開く" }));
   expect(onOpenWork).toHaveBeenCalledWith(42);
 });
 

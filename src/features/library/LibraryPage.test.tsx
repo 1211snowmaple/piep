@@ -295,7 +295,7 @@ describe("LibraryPage search", () => {
     expect(hiddenQueries.every((query) => query.state.fetchStatus === "idle" && query.state.data === undefined)).toBe(true);
   });
 
-  it("keeps the revised shelf in a loading state until its membership is known", async () => {
+  it("searches revised works while pending revision badges are loading", async () => {
     window.location.hash = "#/library?revised=1";
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     let finishMembership!: (value: []) => void;
@@ -303,8 +303,11 @@ describe("LibraryPage search", () => {
     void client.fetchQuery({ queryKey: ["pending-revisions"], queryFn: () => membership });
     const view = render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
     try {
-      expect(await screen.findByText("改稿のある作品を確認しています")).toBeInTheDocument();
-      expect(screen.queryByText("一致する作品がありません")).toBeNull();
+      await waitFor(() => {
+        const library = client.getQueryCache().findAll({ queryKey: ["library"] });
+        expect(library.some((query) => (query.queryKey[1] as SearchV2Params)?.revisionFilter === "revised")).toBe(true);
+      });
+      expect(screen.queryByText("改稿のある作品を確認しています")).toBeNull();
     } finally {
       view.unmount();
       finishMembership([]);

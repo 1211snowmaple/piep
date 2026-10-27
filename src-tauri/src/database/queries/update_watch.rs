@@ -329,11 +329,12 @@ impl Database {
         let conn = self.read_conn()?;
         let mut stmt = conn
             .prepare(
-                "SELECT source, source_id, kind, title, payload_json, target_type, status,
-                        first_seen_at, updated_at
-                 FROM update_candidates
-                 WHERE status = ?2 OR (?2 = 'deferred' AND status IN ('held', 'dismissed'))
-                 ORDER BY updated_at DESC, rowid DESC
+                "SELECT c.source, c.source_id, c.kind, c.title, c.payload_json, c.target_type, c.status,
+                        c.first_seen_at, c.updated_at, d.id
+                 FROM update_candidates c
+                 LEFT JOIN downloads d ON d.source = c.source AND d.source_id = c.source_id
+                 WHERE c.status = ?2 OR (?2 = 'deferred' AND c.status IN ('held', 'dismissed'))
+                 ORDER BY c.updated_at DESC, c.rowid DESC
                  LIMIT ?1",
             )
             .map_err(|e| format!("Failed to prepare update candidates: {}", e))?;
@@ -349,6 +350,7 @@ impl Database {
                     status: row.get(6)?,
                     first_seen_at: row.get(7)?,
                     updated_at: row.get(8)?,
+                    download_id: row.get(9)?,
                 })
             })
             .map_err(|e| format!("Failed to read update candidates: {}", e))?;
@@ -357,6 +359,16 @@ impl Database {
             items.push(row.map_err(|e| format!("Failed to read update candidate: {}", e))?);
         }
         Ok(items)
+    }
+
+    pub fn count_deferred_update_candidates(&self) -> Result<i64, String> {
+        let conn = self.read_conn()?;
+        conn.query_row(
+            "SELECT COUNT(*) FROM update_candidates WHERE status IN ('held', 'dismissed')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("Failed to count deferred candidates: {e}"))
     }
 
     /// Pages every durable candidate in primary-key order for portable
@@ -411,6 +423,7 @@ impl Database {
                     status: row.get(6)?,
                     first_seen_at: row.get(7)?,
                     updated_at: row.get(8)?,
+                    download_id: None,
                 })
             })
             .map_err(|e| format!("Update candidate page query failed: {e}"))?;

@@ -95,16 +95,43 @@ fn non_empty(value: String) -> Option<String> {
 /// Prefer an original/master cover returned by the webview endpoint. If that
 /// endpoint only exposes a transformed thumbnail, use the App API `large` URL.
 pub fn best_novel_cover(webview_url: String, app_large_url: Option<&str>) -> String {
+    let webview_url = if is_placeholder_cover(&webview_url) {
+        ""
+    } else {
+        webview_url.as_str()
+    };
+    let app_large_url = app_large_url.filter(|url| !is_placeholder_cover(url));
     let webview_is_master = webview_url.contains("img-original")
         || webview_url.contains("novel-cover-original")
         || !webview_url.contains("/c/");
     if webview_is_master && !webview_url.trim().is_empty() {
-        webview_url
+        webview_url.to_string()
     } else {
         app_large_url
             .filter(|url| !url.trim().is_empty())
-            .unwrap_or(&webview_url)
+            .unwrap_or(webview_url)
             .to_string()
+    }
+}
+
+/// Pixiv returns this age-gate icon as a cover URL for some R-18 novels.
+/// It is valid image data, so asset validation alone cannot reject it.
+pub fn is_placeholder_cover(url: &str) -> bool {
+    url.contains("/common/images/limit_r18_") || url.contains("/common/images/limit_r18g_")
+}
+
+/// Fetch the real web cover only when both regular API responses were gated.
+pub async fn recover_novel_cover(novel_id: &str, selected: String) -> Option<String> {
+    if !selected.is_empty() {
+        return Some(selected);
+    }
+    let web = WebPixivAPI::new().ok()?;
+    match web.novel(novel_id).await {
+        Ok(novel) => novel.cover_url.filter(|url| !is_placeholder_cover(url)),
+        Err(error) => {
+            log::warn!("pixiv {novel_id} の実際の表紙を取得できません: {error}");
+            None
+        }
     }
 }
 
@@ -471,5 +498,18 @@ mod tests {
             Some("https://i.pximg.net/c/1200x1200/example.jpg"),
         );
         assert!(selected.contains("novel-cover-original"));
+    }
+
+    #[test]
+    fn rejects_age_gate_image_as_a_novel_cover() {
+        let gate = "https://s.pximg.net/common/images/limit_r18_100.png";
+        assert_eq!(best_novel_cover(gate.into(), Some(gate)), "");
+        assert_eq!(
+            best_novel_cover(
+                gate.into(),
+                Some("https://i.pximg.net/c/1200x1200/real.jpg")
+            ),
+            "https://i.pximg.net/c/1200x1200/real.jpg"
+        );
     }
 }

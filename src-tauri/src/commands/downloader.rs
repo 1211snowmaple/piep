@@ -659,13 +659,16 @@ pub async fn fetch_pixiv_novel(
         crate::downloader::pixiv::get_novel_text_and_assets(&novel_id, &refresh_token)
             .await
             .map_err(|e| e.to_string())?;
-    let cover_url =
-        crate::downloader::pixiv::best_novel_cover(webview_cover_url, detail.cover_url.as_deref());
+    let cover_url = crate::downloader::pixiv::recover_novel_cover(
+        &novel_id,
+        crate::downloader::pixiv::best_novel_cover(webview_cover_url, detail.cover_url.as_deref()),
+    )
+    .await;
     let missing_illustrations = crate::downloader::pixiv::missing_illustrations(&text, &illusts);
     Ok(PixivNovelContent {
         detail,
         text,
-        cover_url: Some(cover_url),
+        cover_url,
         illusts: Some(illusts),
         images: Some(images),
         missing_illustrations,
@@ -925,13 +928,16 @@ pub async fn fetch_pixiv_novel_by_url(
         crate::downloader::pixiv::get_novel_text_and_assets(&novel_id, &refresh_token)
             .await
             .map_err(|e| e.to_string())?;
-    let cover_url =
-        crate::downloader::pixiv::best_novel_cover(webview_cover_url, detail.cover_url.as_deref());
+    let cover_url = crate::downloader::pixiv::recover_novel_cover(
+        &novel_id,
+        crate::downloader::pixiv::best_novel_cover(webview_cover_url, detail.cover_url.as_deref()),
+    )
+    .await;
     let missing_illustrations = crate::downloader::pixiv::missing_illustrations(&text, &illusts);
     Ok(PixivNovelContent {
         detail,
         text,
-        cover_url: Some(cover_url),
+        cover_url,
         illusts: Some(illusts),
         images: Some(images),
         missing_illustrations,

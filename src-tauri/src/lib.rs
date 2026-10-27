@@ -206,6 +206,7 @@ pub fn run() -> tauri::Result<()> {
             // anything that left it behind is caught up in the background
             // rather than waiting for someone to notice and press a button.
             commands::database::start_automatic_index_maintenance(app.handle().clone());
+            commands::database::start_automatic_cover_repair(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -350,6 +351,7 @@ pub fn run() -> tauri::Result<()> {
             commands::update_jobs::clear_finished_update_jobs,
             commands::update_jobs::dismiss_update_candidate,
             commands::update_jobs::list_deferred_update_candidates,
+            commands::update_jobs::count_deferred_update_candidates,
             commands::update_jobs::recheck_deferred_update_candidates,
             commands::update_jobs::count_dismissed_update_candidates,
             commands::update_jobs::list_pending_revisions,

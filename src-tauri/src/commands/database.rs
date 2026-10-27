@@ -302,6 +302,110 @@ pub fn start_automatic_index_maintenance(app: tauri::AppHandle) {
     });
 }
 
+/// Replaces Pixiv's R-18 gate icon in older saved works without adding a version.
+/// The web novel endpoint exposes the real cover even when the App API returns
+/// the icon. Work is paced so a large library does not flood Pixiv at launch.
+pub fn start_automatic_cover_repair(app: tauri::AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        sleep(Duration::from_secs(5)).await;
+        let rows =
+            match run_db_blocking(app.clone(), |state| state.db.placeholder_pixiv_covers()).await {
+                Ok(rows) => rows,
+                Err(error) => {
+                    log::warn!("表紙修復の対象を確認できません: {error}");
+                    return;
+                }
+            };
+        if rows.is_empty() {
+            return;
+        }
+        log::info!("R-18代替表紙 {}件の修復を始めます", rows.len());
+        let web = match crate::pixiv_api::web::WebPixivAPI::new() {
+            Ok(web) => web,
+            Err(error) => {
+                log::warn!("表紙修復の接続を作れません: {error}");
+                return;
+            }
+        };
+        let mut changed = Vec::new();
+        let mut consecutive_connection_failures = 0usize;
+        for (id, source_id, json_path, old_cover) in rows {
+            sleep(Duration::from_millis(600)).await;
+            let result: Result<bool, String> = async {
+                let novel = match web.novel(&source_id).await {
+                    Ok(novel) => novel,
+                    Err(crate::pixiv_api::error::PixivError::NotFound { .. }) => return Ok(false),
+                    Err(error) => return Err(format!("公開元への接続: {error}")),
+                };
+                let Some(url) = novel
+                    .cover_url
+                    .filter(|url| !crate::downloader::pixiv::is_placeholder_cover(url))
+                else {
+                    return Ok(false);
+                };
+                let parent = Path::new(&json_path).parent().ok_or("保存先がありません")?;
+                let mut cover_data = serde_json::json!({ "cover_url": url });
+                crate::downloader::asset_downloader::download_and_link_assets(
+                    &app,
+                    &mut cover_data,
+                    &parent.join("data.json"),
+                    false,
+                    None,
+                    None,
+                )
+                .await?;
+                let relative = cover_data["localCoverPath"]
+                    .as_str()
+                    .ok_or("表紙を保存できませんでした")?;
+                let new_path = parent.join(relative.trim_start_matches("./"));
+                let bytes = std::fs::metadata(&new_path)
+                    .map_err(|e| e.to_string())?
+                    .len() as i64;
+                let state = app.state::<Arc<AppState>>().inner().clone();
+                let _guard = state.library_gate.write().await;
+                state.db.replace_placeholder_cover(
+                    id,
+                    &old_cover,
+                    &new_path.to_string_lossy(),
+                    &url,
+                    bytes,
+                )
+            }
+            .await;
+            match result {
+                Ok(true) => {
+                    changed.push(id);
+                    consecutive_connection_failures = 0;
+                }
+                Ok(false) => {
+                    consecutive_connection_failures = 0;
+                }
+                Err(error) => {
+                    if error.starts_with("公開元への接続:") {
+                        consecutive_connection_failures += 1;
+                    } else {
+                        consecutive_connection_failures = 0;
+                    }
+                    log::warn!("pixiv:{source_id} の表紙を修復できません: {error}");
+                }
+            }
+            if changed.len() >= 10 {
+                let _ = app.emit("covers-repaired", &changed);
+                changed.clear();
+            }
+            if consecutive_connection_failures >= 10 {
+                log::warn!(
+                    "表紙修復で公開元への接続が10件続けて失敗したため、次の起動まで中断します"
+                );
+                break;
+            }
+        }
+        if !changed.is_empty() {
+            let _ = app.emit("covers-repaired", &changed);
+        }
+    });
+}
+
 fn spawn_rebuild_job(
     app: tauri::AppHandle,
     rebuild_options: crate::database::queries::SearchIndexRebuildOptions,

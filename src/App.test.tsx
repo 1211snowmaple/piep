@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import { MantineProvider } from "@mantine/core";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, render, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import App from "@/App";
@@ -8,6 +9,7 @@ const nativeWindow = vi.hoisted(() => ({ onCloseRequested: vi.fn() }));
 
 vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow: () => nativeWindow }));
 vi.mock("@/services/dbApi", () => ({ isTauriRuntime: () => true }));
+vi.mock("@/services/eventBus", () => ({ subscribeTauriEvent: () => () => undefined }));
 vi.mock("@/app/AppFrame", () => ({ AppFrame: ({ children }: { children: ReactNode }) => children }));
 vi.mock("@/app/WorkspaceContext", () => ({ WorkspaceProvider: ({ children }: { children: ReactNode }) => children }));
 vi.mock("@/features/dashboard/DashboardPage", () => ({ default: () => null }));
@@ -16,6 +18,10 @@ function pendingRegistration() {
   let resolve!: (unlisten: () => void) => void;
   const promise = new Promise<() => void>((done) => { resolve = done; });
   return { promise, resolve };
+}
+
+function renderApp() {
+  return render(<MantineProvider><QueryClientProvider client={new QueryClient()}><App /></QueryClientProvider></MantineProvider>);
 }
 
 describe("native close guard lifecycle", () => {
@@ -28,7 +34,7 @@ describe("native close guard lifecycle", () => {
     const registration = pendingRegistration();
     const unlisten = vi.fn();
     nativeWindow.onCloseRequested.mockReturnValue(registration.promise);
-    const view = render(<MantineProvider><App /></MantineProvider>);
+    const view = renderApp();
     await waitFor(() => expect(nativeWindow.onCloseRequested).toHaveBeenCalledOnce());
 
     view.unmount();
@@ -43,10 +49,10 @@ describe("native close guard lifecycle", () => {
     const unlistenFirst = vi.fn();
     const unlistenSecond = vi.fn();
     nativeWindow.onCloseRequested.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
-    const previous = render(<MantineProvider><App /></MantineProvider>);
+    const previous = renderApp();
     await waitFor(() => expect(nativeWindow.onCloseRequested).toHaveBeenCalledOnce());
     previous.unmount();
-    const view = render(<MantineProvider><App /></MantineProvider>);
+    const view = renderApp();
     await waitFor(() => expect(nativeWindow.onCloseRequested).toHaveBeenCalledTimes(2));
 
     // The active registration may finish before the abandoned one.
