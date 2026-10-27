@@ -441,6 +441,16 @@ impl EpubBuilder {
             let matched = images
                 .iter()
                 .find(|image| image.keys.iter().any(|key| key == stem))
+                // Older webview saves name page N `ID-N_p(N-1)` while the
+                // fallback API names it `ID_p(N-1)`.
+                .or_else(|| {
+                    let (id, page) = stem.rsplit_once("_p")?;
+                    let number = page.parse::<usize>().ok()?.checked_add(1)?;
+                    let legacy = format!("{id}-{number}_p{page}");
+                    images
+                        .iter()
+                        .find(|image| image.keys.iter().any(|key| key == &legacy))
+                })
                 // 参照が「作品 ID だけ」で来ることがある。その作品の一枚目に寄せる。
                 .or_else(|| {
                     images.iter().find(|image| {
@@ -808,6 +818,30 @@ mod tests {
     fn illustration_references_resolve_through_their_bare_ids() {
         assert!(reference_keys("illust_123_p0", false).contains(&"123_p0".to_string()));
         assert!(reference_keys("ci999", true).contains(&"cover".to_string()));
+    }
+
+    #[test]
+    fn legacy_pixiv_page_name_resolves_in_epub() {
+        let builder = EpubBuilder::new(
+            hostile_manifest(),
+            default_template_contents(),
+            TemplateSettings::default(),
+            ImageCompressOptions::default(),
+        );
+        let image = PackagedImage {
+            zip_path: "OEBPS/images/123-2_p1.jpg".into(),
+            id: "img-123-2_p1".into(),
+            media_type: "image/jpeg".into(),
+            bytes: Vec::new(),
+            keys: reference_keys("123-2_p1", false),
+            is_cover: false,
+            dimensions: None,
+        };
+        let html = builder.resolve_page_images(
+            "<p><img src=\"../images/123_p1.jpg\" alt=\"page 2\" /></p>",
+            &[image],
+        );
+        assert!(html.contains("123-2_p1.jpg"), "{html}");
     }
 
     #[test]

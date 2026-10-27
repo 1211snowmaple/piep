@@ -1975,6 +1975,18 @@ async fn run_update_job(
                     }
                 }
             }
+            Ok(ItemOutcome::PartialSaved(download_id, message)) => {
+                // The novel body is usable, but the candidate must remain
+                // retryable because its referenced illustrations are absent.
+                saved_download_ids.push(download_id);
+                state.db.complete_update_job_item(
+                    item.id,
+                    "failed",
+                    Some(&message),
+                    Some(download_id),
+                )?;
+                state.db.append_update_job_log(&job_id, "warn", &message)?;
+            }
             Ok(ItemOutcome::Skipped(message) | ItemOutcome::LocalSkipped(message)) => {
                 state
                     .db
@@ -2339,6 +2351,7 @@ async fn refresh_profiles_for_saved_downloads(
 enum ItemOutcome {
     Done(String),
     Saved(i64, String),
+    PartialSaved(i64, String),
     Skipped(String),
     LocalSkipped(String),
     AuthRequired(String),
@@ -3422,6 +3435,18 @@ async fn process_candidate_item(
     // 「続きが出たら欲しい」ということなので、まとめて取り直すときに飛ばす
     // 理由が無い。画面の側でループしていたころと同じ判断である。
     let refetch_existing = kind == Some("revision")
+        || existing.as_ref().is_some_and(|download| {
+            std::fs::read_to_string(&download.json_path)
+                .ok()
+                .and_then(|body| serde_json::from_str::<Value>(&body).ok())
+                .and_then(|value| {
+                    value
+                        .get("missing_illustrations")
+                        .and_then(Value::as_array)
+                        .cloned()
+                })
+                .is_some_and(|missing| !missing.is_empty())
+        })
         || (kind == Some("save")
             && existing
                 .as_ref()
@@ -3476,6 +3501,15 @@ async fn process_candidate_item(
             None,
         )
         .await?;
+        if !data.missing_illustrations.is_empty() {
+            return Ok(ItemOutcome::PartialSaved(
+                updated.id,
+                format!(
+                    "本文は保存しましたが、参照先の挿絵を閲覧できません: {}。候補を残して再試行できます",
+                    data.missing_illustrations.join(", ")
+                ),
+            ));
+        }
         // 保存したついでにシリーズを監視へ入れることはしない。監視対象は
         // 利用者が自分で選ぶもので、勝手に増えると取得先への負荷にもなる。
         Ok(describe_candidate_save(

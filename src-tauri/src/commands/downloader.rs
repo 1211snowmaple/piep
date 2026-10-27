@@ -661,12 +661,14 @@ pub async fn fetch_pixiv_novel(
             .map_err(|e| e.to_string())?;
     let cover_url =
         crate::downloader::pixiv::best_novel_cover(webview_cover_url, detail.cover_url.as_deref());
+    let missing_illustrations = crate::downloader::pixiv::missing_illustrations(&text, &illusts);
     Ok(PixivNovelContent {
         detail,
         text,
         cover_url: Some(cover_url),
         illusts: Some(illusts),
         images: Some(images),
+        missing_illustrations,
     })
 }
 
@@ -925,12 +927,14 @@ pub async fn fetch_pixiv_novel_by_url(
             .map_err(|e| e.to_string())?;
     let cover_url =
         crate::downloader::pixiv::best_novel_cover(webview_cover_url, detail.cover_url.as_deref());
+    let missing_illustrations = crate::downloader::pixiv::missing_illustrations(&text, &illusts);
     Ok(PixivNovelContent {
         detail,
         text,
         cover_url: Some(cover_url),
         illusts: Some(illusts),
         images: Some(images),
+        missing_illustrations,
     })
 }
 
@@ -2146,6 +2150,25 @@ pub async fn download_and_save(
         }
 
         let hash_changed = dl.content_hash.as_deref() != Some(&new_hash);
+        let pixiv_illustrations_recovered = if source == "pixiv" {
+            std::fs::read_to_string(&dl.json_path)
+                .ok()
+                .and_then(|body| serde_json::from_str::<serde_json::Value>(&body).ok())
+                .map(|previous| {
+                    let old = previous
+                        .get("missing_illustrations")
+                        .and_then(serde_json::Value::as_array)
+                        .map_or(0, Vec::len);
+                    let new = data
+                        .get("missing_illustrations")
+                        .and_then(serde_json::Value::as_array)
+                        .map_or(0, Vec::len);
+                    old > new
+                })
+                .unwrap_or(false)
+        } else {
+            false
+        };
         let updated_changed = if source == "fanbox" {
             dl.source_updated_at != new_source_updated
         } else {
@@ -2170,7 +2193,7 @@ pub async fn download_and_save(
             None => false,
         };
 
-        if hash_changed || updated_changed || assets_need_repair {
+        if hash_changed || updated_changed || assets_need_repair || pixiv_illustrations_recovered {
             is_update = true;
             next_version = dl.current_version + 1;
         } else {

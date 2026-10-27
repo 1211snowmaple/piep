@@ -41,6 +41,8 @@ pub struct PixivNovelContent {
     pub cover_url: Option<String>,
     pub illusts: Option<serde_json::Value>,
     pub images: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub missing_illustrations: Vec<String>,
 }
 
 pub async fn get_novel_detail(
@@ -146,8 +148,8 @@ pub async fn get_novel_text_and_assets(
 ///
 /// 本文の中身は webview 経路と完全に一致するので、保存する原本は変わらない。
 /// web の本文だけでは `[pixivimage:]` の URL が分からないため、参照先の
-/// イラストを App API で個別取得する。参照先も読めない場合は、挿絵を欠いた
-/// 作品を完全な保存として扱わず、該当 ID を明示して失敗させる。
+/// イラストを App API で個別取得する。公開元で閲覧できない挿絵は
+/// 欠落として記録し、本文まで失わないようにする。
 async fn novel_text_after_webview_not_found(
     novel_id: &str,
     web_api: &WebPixivAPI,
@@ -190,22 +192,90 @@ async fn resolve_web_novel_illusts(
     let references = referenced_illust_pages(text)?;
     let mut illusts = serde_json::Map::new();
     for (id, required_page) in references {
-        let detail = match api.illust_detail(id.parse()?, true).await {
+        let response = api.illust_detail(id.parse()?, true).await;
+        // Space consecutive illustration requests even when one returns 404.
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        let detail = match response {
             Ok(detail) => detail,
             Err(PixivError::NotFound { .. }) => {
-                return Err(format!(
-                    "本文は取得できましたが、参照先の挿絵 {id} が 404 を返しました"
-                )
-                .into());
+                illusts.insert(id.clone(), unavailable_illust(&id, "404"));
+                continue;
             }
             Err(error) => return Err(error.into()),
         };
-        illusts.insert(
-            id.clone(),
-            illust_pages(&id, required_page, &detail.illust)?,
-        );
+        let value = if !detail.illust.visible {
+            unavailable_illust(&id, "閲覧不可")
+        } else {
+            illust_pages(&id, required_page, &detail.illust)
+                .unwrap_or_else(|_| unavailable_illust(&id, "参照ページなし"))
+        };
+        illusts.insert(id, value);
     }
     Ok(serde_json::Value::Object(illusts))
+}
+
+fn unavailable_illust(id: &str, reason: &str) -> serde_json::Value {
+    serde_json::json!({"illustId": id, "visible": false, "reason": reason, "pages": []})
+}
+
+/// The source may return a body while some illustration references are hidden.
+/// Keep the exact references so a later repair can be distinguished from a
+/// complete archive without relying on the text hash.
+pub fn missing_illustrations(text: &str, illusts: &serde_json::Value) -> Vec<String> {
+    let re = Regex::new(r"\[pixivimage:(\d+)(?:-(\d+))?\]").unwrap();
+    let mut missing = Vec::new();
+    for captures in re.captures_iter(text) {
+        let id = &captures[1];
+        let spec = captures.get(0).unwrap().as_str();
+        let page = captures
+            .get(2)
+            .and_then(|m| m.as_str().parse::<usize>().ok());
+        let unavailable = page == Some(0)
+            || [
+                captures
+                    .get(2)
+                    .map(|_| format!("{id}-{}", page.unwrap_or(0))),
+                Some(id.to_string()),
+            ]
+            .into_iter()
+            .flatten()
+            .find_map(|key| illusts.get(&key))
+            .is_none_or(|entry| !illust_entry_has_page(entry, page.unwrap_or(1)));
+        if unavailable && !missing.iter().any(|value| value == spec) {
+            missing.push(spec.to_string());
+        }
+    }
+    missing
+}
+
+fn illust_entry_has_page(entry: &serde_json::Value, page: usize) -> bool {
+    if entry.get("visible").and_then(|value| value.as_bool()) == Some(false) {
+        return false;
+    }
+    let webview_image = entry.get("illust").and_then(|illust| illust.get("images"));
+    let webview_page = entry.get("page").and_then(|value| value.as_u64());
+    if webview_page == Some(page as u64)
+        && ["original", "medium", "small"].iter().any(|size| {
+            webview_image
+                .and_then(|images| images.get(*size))
+                .and_then(|url| url.as_str())
+                .is_some_and(|url| !url.is_empty())
+        })
+    {
+        return true;
+    }
+    entry
+        .get("pages")
+        .and_then(|value| value.as_array())
+        .and_then(|pages| pages.get(page.saturating_sub(1)))
+        .and_then(|page| page.get("urls"))
+        .is_some_and(|urls| {
+            ["original", "regular"].iter().any(|size| {
+                urls.get(*size)
+                    .and_then(|url| url.as_str())
+                    .is_some_and(|url| !url.is_empty())
+            })
+        })
 }
 
 fn referenced_illust_pages(text: &str) -> Result<BTreeMap<String, usize>, Box<dyn Error>> {
@@ -219,7 +289,7 @@ fn referenced_illust_pages(text: &str) -> Result<BTreeMap<String, usize>, Box<dy
             .get(2)
             .map_or(Ok(1), |part| part.as_str().parse::<usize>())?;
         if page == 0 {
-            return Err(format!("挿絵 {id} のページ番号が不正です").into());
+            continue;
         }
         let entry = references.entry(id).or_insert(0);
         *entry = (*entry).max(page);
@@ -339,8 +409,24 @@ mod tests {
                 .unwrap();
         assert_eq!(refs.get("123"), Some(&2));
         assert_eq!(refs.get("456"), Some(&1));
-        assert!(referenced_illust_pages("[pixivimage:123-0]").is_err());
+        assert!(referenced_illust_pages("[pixivimage:123-0]")
+            .unwrap()
+            .is_empty());
         assert!(referenced_illust_pages("[pixivimage:abc]").is_err());
+    }
+
+    #[test]
+    fn inaccessible_illustrations_are_recorded_without_losing_text() {
+        let illusts = serde_json::json!({
+            "123": {"visible": false, "pages": []},
+            "456": {"illustId": "456", "pages": [{"urls": {"original": "https://example.com/0.jpg"}}]},
+            "789-2": {"visible": true, "page": 2, "illust": {"images": {"medium": "https://example.com/1.jpg"}}}
+        });
+        let missing = super::missing_illustrations(
+            "[pixivimage:123]\n[pixivimage:456]\n[pixivimage:789-2]\n[pixivimage:999-0]",
+            &illusts,
+        );
+        assert_eq!(missing, vec!["[pixivimage:123]", "[pixivimage:999-0]"]);
     }
 
     #[test]

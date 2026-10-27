@@ -21,8 +21,9 @@ static RE_NOVEL_SCHEME: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"pixiv://novels/(?P<id>\d+)").unwrap());
 static RE_ILLUST_SCHEME: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"pixiv://illusts/(?P<id>\d+)").unwrap());
-static RE_IMAGE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\[(?:uploadedimage|pixivimage):(?P<id>\d+)\]").unwrap());
+static RE_IMAGE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\[(?P<kind>uploadedimage|pixivimage):(?P<id>\d+)(?:-(?P<page>\d+))?\]").unwrap()
+});
 
 /// HTML文字を安全にエスケープするインライン軽量エスケープ
 pub(crate) fn escape_html(text: &str) -> String {
@@ -353,18 +354,52 @@ pub fn parse_pixiv_value_to_html(v: &serde_json::Value, assets: &[AssetEntry]) -
     html = RE_IMAGE
         .replace_all(&html, |caps: &regex::Captures| {
             let image_id = &caps["id"];
-            // アセット配列から対応する画像を検索 (ファイル名に ID が含まれるものを探す)
-            let found_asset = assets.iter().find(|a| a.filename.contains(image_id));
+            let reference = caps.get(0).map(|value| value.as_str()).unwrap_or(image_id);
+            let alt_id = if &caps["kind"] == "uploadedimage" {
+                image_id
+            } else {
+                reference
+            };
+            let page = caps
+                .name("page")
+                .and_then(|value| value.as_str().parse::<usize>().ok());
+            let name = if &caps["kind"] == "uploadedimage" {
+                Some(format!("inline_{image_id}"))
+            } else {
+                page.filter(|page| *page > 0)
+                    .or(Some(1))
+                    .filter(|_| page != Some(0))
+                    .map(|page| format!("{image_id}_p{}", page - 1))
+            };
+            let found_asset = name.as_deref().and_then(|name| {
+                assets.iter().find(|asset| {
+                    let stem = std::path::Path::new(&asset.filename)
+                        .file_stem()
+                        .and_then(|value| value.to_str())
+                        .unwrap_or("");
+                    stem == name
+                        || (&caps["kind"] == "uploadedimage" && stem == image_id)
+                        || stem == format!("illust_{name}")
+                        || (page.is_some()
+                            && &caps["kind"] == "pixivimage"
+                            && stem
+                                == format!(
+                                    "{image_id}-{}_p{}",
+                                    page.unwrap_or(0),
+                                    page.unwrap_or(1).saturating_sub(1)
+                                ))
+                })
+            });
             if let Some(asset) = found_asset {
                 format!(
                     r##"<img class="novel-image" data-local-path="{}" alt="image_{}" />"##,
                     escape_html(&asset.local_path),
-                    image_id
+                    escape_html(alt_id)
                 )
             } else {
                 format!(
                     r##"<div class="missing-image-placeholder">画像 {}(見つかりません)</div>"##,
-                    image_id
+                    escape_html(reference)
                 )
             }
         })
@@ -1131,6 +1166,34 @@ mod tests {
         let html = parse_fanbox_to_html(&post.to_string(), &[asset]);
         assert!(html.contains("missing-image-placeholder"), "{html}");
         assert!(!html.contains("C:/library/other-image.jpg"), "{html}");
+    }
+
+    #[test]
+    fn pixiv_page_references_select_the_exact_saved_page() {
+        let asset = |filename: &str| AssetEntry {
+            id: 1,
+            download_id: 1,
+            asset_type: "illustration".into(),
+            filename: filename.into(),
+            local_path: format!("C:/library/{filename}"),
+            original_url: None,
+            mime_type: Some("image/jpeg".into()),
+            file_size_bytes: 1,
+        };
+        let assets = [
+            asset("123_p0.jpg"),
+            asset("123-2_p1.jpg"),
+            asset("inline_456.jpg"),
+        ];
+        let content = serde_json::json!({"text": "[pixivimage:123]\n[pixivimage:123-2]\n[uploadedimage:456]\n[pixivimage:123-0]"});
+        let html = parse_pixiv_value_to_html(&content, &assets);
+        assert!(html.contains("C:/library/123_p0.jpg"), "{html}");
+        assert!(html.contains("C:/library/123-2_p1.jpg"), "{html}");
+        assert!(html.contains("C:/library/inline_456.jpg"), "{html}");
+        assert!(
+            html.contains("画像 [pixivimage:123-0](見つかりません)"),
+            "{html}"
+        );
     }
 
     #[test]

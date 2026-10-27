@@ -488,9 +488,18 @@ fn pixiv_text_to_html(text: &str, chapter_seq: &mut usize, page_count: usize) ->
         if let Some(reference) = bracketed(trimmed.trim(), "[pixivimage:") {
             // "12345-2" は作品 12345 の 2 枚目。ファイル名は 0 起点で付く。
             let (illust_id, page) = match reference.split_once('-') {
-                Some((id, page)) => (id, page.parse::<usize>().unwrap_or(1).saturating_sub(1)),
-                None => (reference, 0),
+                Some((id, page)) => (id, page.parse::<usize>().ok()),
+                None => (reference, Some(1)),
             };
+            if !illust_id.chars().all(|ch| ch.is_ascii_digit()) || page.is_none_or(|page| page == 0)
+            {
+                html.push_str(&format!(
+                    "<p>挿絵 {} は参照できません</p>\n",
+                    xhtml::escape_text(reference)
+                ));
+                continue;
+            }
+            let page = page.unwrap() - 1;
             html.push_str(&illustration_html(
                 &format!("{}_p{}", illust_id, page),
                 &format!("挿絵 {}", reference),
@@ -1301,6 +1310,14 @@ mod tests {
             .html_content
             .contains("src=\"../images/555_p1.jpg\""));
         assert_eq!(manifest.stats.page_count, 2);
+    }
+
+    #[test]
+    fn invalid_pixiv_page_does_not_point_at_the_first_image() {
+        let manifest = pixiv("[pixivimage:555-0]\n[pixivimage:id=555]");
+        let html = &manifest.content.pages[0].html_content;
+        assert!(!html.contains("../images/555_p0.jpg"), "{html}");
+        assert!(html.contains("参照できません"), "{html}");
     }
 
     #[test]
