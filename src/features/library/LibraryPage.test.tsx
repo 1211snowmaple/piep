@@ -37,7 +37,7 @@ describe("LibraryPage search", () => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
     expect(await screen.findByLabelText("ライブラリを検索")).toBeInTheDocument();
-    expect(screen.getByText("本文を一部保存")).toBeInTheDocument();
+    expect(screen.getByText("一部保存")).toBeInTheDocument();
     expect(window.location.hash).toContain("acquisition=incomplete");
   });
 

@@ -23,7 +23,7 @@ export function UpdateWorkLinks({ source, sourceId, downloadId, title, onOpenWor
     if (isTauriRuntime()) void openExternalUrl(url);
     else window.open(url, "_blank", "noopener,noreferrer");
   };
-  return <Group gap={2} wrap="nowrap" style={{ flex: "none" }}>
+  return <Group gap={2} wrap="nowrap" justify="flex-end" style={{ flex: "0 0 64px" }}>
     {downloadId && onOpenWork && <Tooltip label="保存した作品を開く"><ActionIcon variant="subtle" color="piep" aria-label={`${title}の保存した詳細を開く`} onClick={() => onOpenWork(downloadId)}><Icons.read size={IconSize.action} /></ActionIcon></Tooltip>}
     {url && <Tooltip label="取得元を開く"><ActionIcon variant="subtle" color="gray" aria-label={`${title}の取得元を開く`} onClick={openSource}><Icons.externalLink size={IconSize.action} /></ActionIcon></Tooltip>}
   </Group>;

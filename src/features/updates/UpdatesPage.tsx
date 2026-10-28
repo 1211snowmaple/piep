@@ -372,7 +372,7 @@ export default function UpdatesPage() {
             <Tooltip
               multiline
               w={280}
-              label="取得元への確認は1件ずつ2秒以上あけます。取得エラーが続くと間隔を延ばし、3件連続で一時停止します。取得制限を受けた場合は分単位で待ってから再試行します。"
+              label="取得元への確認は1件ずつ2秒以上あけます。取得エラーが続くと間隔を延ばして一時停止します。取得制限では分単位で待って再試行します。Pixiv側の表示設定で一覧から省かれた作品は個別に確認します。"
             >
               <ActionIcon variant="subtle" color="gray" size="sm" aria-label="確認の進め方について">
                 <Icons.help size={IconSize.menu} />
