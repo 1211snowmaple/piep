@@ -2,7 +2,7 @@ import { expect, test } from "@playwright/test";
 
 test("deferred shelf remains reachable without changing watch settings", async ({ page }, testInfo) => {
   await page.goto("/#/updates");
-  await page.getByRole("tab", { name: "要確認", exact: true }).click();
+  await page.getByRole("tab", { name: "保留候補", exact: true }).click();
   await expect(page.getByText("要確認（0件）")).toBeVisible();
   await expect(page.getByRole("button", { name: "候補に戻す（0）" })).toBeDisabled();
   await expect(page.getByText("取得できなかった理由を残しています。", { exact: false })).toBeVisible();

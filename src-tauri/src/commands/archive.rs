@@ -1735,6 +1735,7 @@ fn all_backup_search_params() -> SearchV2Params {
         asset_filter: None,
         series_filter: None,
         revision_filter: None,
+        acquisition_filter: None,
         edit_filter: None,
         cover_filter: None,
         date_field: None,

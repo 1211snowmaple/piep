@@ -1274,6 +1274,8 @@ pub struct SearchV2Params {
     pub series_filter: Option<String>,
     /// "revised" | "first_version".
     pub revision_filter: Option<String>,
+    /// "attention" | "incomplete". Only saved works can appear in the library.
+    pub acquisition_filter: Option<String>,
     /// "edited" | "unedited". Refers to an active local edit revision.
     pub edit_filter: Option<String>,
     /// "has_cover" | "no_cover".

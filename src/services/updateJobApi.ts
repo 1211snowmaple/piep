@@ -166,6 +166,10 @@ export function countDeferredUpdateCandidatesCommand(): Promise<number> {
   return invoke("count_deferred_update_candidates");
 }
 
+export function countSavedDeferredUpdateCandidatesCommand(): Promise<number> {
+  return invoke("count_saved_deferred_update_candidates");
+}
+
 export async function recheckDeferredUpdateCandidatesCommand(keys: string[], refreshPostAccess = false): Promise<UpdateJobSnapshot> {
   return invoke("recheck_deferred_update_candidates", { keys, refreshPostAccess, credentials: await getUpdateJobCredentials() });
 }

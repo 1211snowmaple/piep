@@ -9,7 +9,7 @@ import { useWorkspace } from "@/app/WorkspaceContext";
 import { useOperationJobs } from "@/features/jobs/operationJobs";
 import { countActiveActivities } from "@/features/jobs/activityAggregation";
 import { useUpdateJobSummaries } from "@/features/updates/updateJobs";
-import { countDeferredUpdateCandidatesCommand } from "@/services/updateJobApi";
+import { countSavedDeferredUpdateCandidatesCommand } from "@/services/updateJobApi";
 import { readingWorkIds, subscribeReadingPositions } from "@/features/library/readingShelf";
 import { formatCompactCount, formatNumber } from "@/lib/format";
 import { isTauriRuntime } from "@/services/dbApi";
@@ -123,7 +123,7 @@ export function WorkspaceNav({ railed, onNavigate }: { railed: boolean; onNaviga
   });
   const attentionCount = useQuery({
     queryKey: ["deferred-candidate-count"],
-    queryFn: () => runtime ? countDeferredUpdateCandidatesCommand() : Promise.resolve(0),
+    queryFn: () => runtime ? countSavedDeferredUpdateCandidatesCommand() : Promise.resolve(0),
     staleTime: 30_000,
   });
   const savedSearches = useQuery({
@@ -143,7 +143,7 @@ export function WorkspaceNav({ railed, onNavigate }: { railed: boolean; onNaviga
   const activeSavedId = Number.parseInt(location.searchParams.get("saved") ?? "", 10);
   // Collections are a library tab now, so a collection screen keeps the
   // library section highlighted rather than needing an entry of its own.
-  const onAttention = location.pathname === "/updates" && location.searchParams.get("tab") === "deferred";
+  const onAttention = location.pathname === "/library" && ["attention", "incomplete"].includes(location.searchParams.get("acquisition") ?? "");
   const inLibrary = onAttention || location.pathname === "/library"
     || location.pathname.startsWith("/works/")
     || location.pathname.startsWith("/collections");
@@ -164,13 +164,13 @@ export function WorkspaceNav({ railed, onNavigate }: { railed: boolean; onNaviga
       key={item.value}
       label={item.label}
       icon={SHELF_ICON[item.value]}
-      active={shelf === item.value}
+      active={!onAttention && shelf === item.value}
       railed={railed}
       count={shelfCount(item.value)}
       onSelect={() => go(item.search ? `/library?${item.search}` : "/library", { scroll: "top" })}
     />
   ));
-  const attentionRow = <Row key="attention" label="要確認" icon={Icons.pending} active={onAttention} railed={railed} count={attentionCount.data ?? null} onSelect={() => go("/updates?tab=deferred", { scroll: "top" })} />;
+  const attentionRow = <Row key="attention" label="要確認" icon={Icons.pending} active={onAttention} railed={railed} count={attentionCount.data ?? null} onSelect={() => go("/library?acquisition=attention", { scroll: "top" })} />;
   const savedRows = saved.map((item) => (
     <Row
       key={item.id}

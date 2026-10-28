@@ -1333,6 +1333,16 @@ use tauri::{LogicalPosition, LogicalSize};
 static EMBEDDED_BROWSER_OPEN_LOCK: Mutex<()> = Mutex::new(());
 static STANDALONE_BROWSER_OPEN_LOCK: Mutex<()> = Mutex::new(());
 
+// Browsing in the app has its own WebView2 profile. Login windows used to
+// obtain acquisition credentials keep the default profile, so signing in or
+// out in the reader never changes the account used by update/download jobs.
+fn browsing_data_directory(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+    app.path()
+        .app_data_dir()
+        .map(|path| path.join("browsing-profile"))
+        .map_err(|error| error.to_string())
+}
+
 /// メインウィンドウ内に子WebViewを作成・管理する
 pub fn open_child_webview(
     app: AppHandle,
@@ -1446,6 +1456,7 @@ pub fn open_child_webview(
 
     let mut webview_builder =
         WebviewBuilder::new("embedded_browser", WebviewUrl::External(url_parsed))
+            .data_directory(browsing_data_directory(&app)?)
             .initialization_script(init_script)
             .initialization_script(BROWSER_ACCELERATOR_SCRIPT)
             .user_agent(DEFAULT_BROWSER_USER_AGENT)
@@ -1605,6 +1616,7 @@ pub fn open_standalone_webview(
     let initial_url = url.clone();
 
     let mut builder = WebviewWindowBuilder::new(&app, window_label, WebviewUrl::External(url))
+        .data_directory(browsing_data_directory(&app)?)
         .title(window_title)
         .inner_size(window_width, window_height)
         .min_inner_size(800.0, 560.0)

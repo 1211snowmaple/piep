@@ -371,6 +371,16 @@ impl Database {
         .map_err(|e| format!("Failed to count deferred candidates: {e}"))
     }
 
+    pub fn count_saved_deferred_update_candidates(&self) -> Result<i64, String> {
+        let conn = self.read_conn()?;
+        conn.query_row(
+            "SELECT COUNT(*) FROM update_candidates c WHERE c.status IN ('held', 'dismissed') AND EXISTS (SELECT 1 FROM downloads d WHERE d.source=c.source AND d.source_id=c.source_id)",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("Failed to count saved deferred candidates: {e}"))
+    }
+
     /// Pages every durable candidate in primary-key order for portable
     /// backups. Dismissed rows are included because they record an explicit
     /// user decision and prevent an already-rejected work from reappearing.

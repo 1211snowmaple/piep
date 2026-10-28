@@ -72,7 +72,18 @@ WHERE status='pending' AND EXISTS (
       AND i.item_type IN ('candidate', 'work') AND i.status='failed' AND i.error IS NOT NULL
       AND i.id=(SELECT MAX(j.id) FROM update_job_items j
           WHERE j.source=i.source AND j.source_id=i.source_id)
-      AND julianday(update_candidates.updated_at) <= julianday(i.updated_at));
+      AND julianday(update_candidates.updated_at) <= julianday(i.updated_at)
+      AND i.error NOT LIKE '%接続の更新に失敗した直後%'
+      AND i.error NOT LIKE '%取得元がエラーを返しました。時間をおいて%');
+
+-- A temporary provider/refresh failure is a job-level retry, not a work that
+-- needs manual review. Earlier migrations incorrectly counted these as held.
+UPDATE update_candidates SET status='pending',
+    payload_json=json_remove(payload_json, '$.holdReason', '$.holdKind')
+WHERE status='held' AND json_valid(payload_json)
+  AND json_extract(payload_json, '$.holdKind')='error'
+  AND (json_extract(payload_json, '$.holdReason') LIKE '%接続の更新に失敗した直後%'
+       OR json_extract(payload_json, '$.holdReason') LIKE '%取得元がエラーを返しました。時間をおいて%');
 
 UPDATE update_job_items SET payload_json=json_set(json_remove(payload_json,
     '$.originalData.localVersion', '$.originalData.localSavedAt'), '$.kind', 'new', '$.subtitle', '未保存')

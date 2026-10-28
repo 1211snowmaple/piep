@@ -6886,6 +6886,7 @@ impl Database {
             asset_filter: None,
             series_filter: None,
             revision_filter: None,
+            acquisition_filter: None,
             edit_filter: None,
             cover_filter: None,
             date_field: None,
@@ -7971,6 +7972,7 @@ impl Database {
                 asset_filter: None,
                 series_filter: None,
                 revision_filter: None,
+                acquisition_filter: None,
                 edit_filter: None,
                 cover_filter: None,
                 date_field: None,
@@ -11486,6 +11488,7 @@ fn params_have_library_filters(params: &SearchV2Params) -> bool {
         || params.min_file_size_bytes.is_some()
         || params.max_file_size_bytes.is_some()
         || params.revision_filter.is_some()
+        || params.acquisition_filter.is_some()
         || params.edit_filter.is_some()
         || params.cover_filter.is_some()
         || params
@@ -13244,6 +13247,14 @@ fn append_library_filters(
             // not a promise that every old file is still retained.
             "revised" | "has_history" => wheres.push("(d.current_version > 1 OR EXISTS (SELECT 1 FROM update_candidates c WHERE c.source = d.source AND c.source_id = d.source_id AND c.status = 'pending' AND c.kind = 'revision'))".to_string()),
             "first_version" => wheres.push("d.current_version <= 1".to_string()),
+            _ => {}
+        }
+    }
+
+    if let Some(ref acquisition_filter) = params.acquisition_filter {
+        match acquisition_filter.as_str() {
+            "attention" => wheres.push("EXISTS (SELECT 1 FROM update_candidates c WHERE c.source=d.source AND c.source_id=d.source_id AND c.status IN ('held','dismissed'))".to_string()),
+            "incomplete" => wheres.push("EXISTS (SELECT 1 FROM update_candidates c WHERE c.source=d.source AND c.source_id=d.source_id AND c.status IN ('held','dismissed') AND json_valid(c.payload_json) AND json_extract(c.payload_json, '$.holdKind')='incomplete')".to_string()),
             _ => {}
         }
     }

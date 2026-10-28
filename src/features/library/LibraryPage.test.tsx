@@ -32,6 +32,15 @@ describe("LibraryPage search", () => {
     window.location.hash = "#/library";
   });
 
+  it("shows saved attention works in the ordinary library with a removable filter", async () => {
+    window.location.hash = "#/library?acquisition=incomplete";
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
+    expect(await screen.findByLabelText("ライブラリを検索")).toBeInTheDocument();
+    expect(screen.getByText("本文を一部保存")).toBeInTheDocument();
+    expect(window.location.hash).toContain("acquisition=incomplete");
+  });
+
   it("keeps the input mounted through Japanese IME composition and URL sync", async () => {
     window.location.hash = "#/library";
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -816,10 +825,11 @@ describe("saved search parameters", () => {
   it("remembers the work-state filters", () => {
     const saved = JSON.stringify({
       tab: "works",
-      filters: { revisionFilter: "revised", editFilter: "edited", coverFilter: "no_cover" },
+      filters: { revisionFilter: "revised", acquisitionFilter: "incomplete", editFilter: "edited", coverFilter: "no_cover" },
     });
     expect(parseSavedParams(saved).filters).toEqual(expect.objectContaining({
       revisionFilter: "revised",
+      acquisitionFilter: "incomplete",
       editFilter: "edited",
       coverFilter: "no_cover",
     }));

@@ -224,18 +224,13 @@ export default function SavePage() {
 
   const positionBrowser = useCallback(
     async (url: string) => {
-      const userAgent =
-        source === "fanbox"
-          ? (await store.get<string>("fanbox_user_agent")) || undefined
-          : undefined;
-      // Measured after the await: the layout can settle while the store is read.
       const bounds = readBounds();
       if (!bounds) return;
-      await openEmbeddedBrowser(url, { ...bounds, userAgent });
+      await openEmbeddedBrowser(url, bounds);
       // Let the reconciler re-apply, since creation may land after another pass.
       appliedBoundsRef.current = "";
     },
-    [readBounds, source],
+    [readBounds],
   );
 
   // Resizing must never pass a URL: the tracked URL lags behind in-page (SPA)
@@ -318,11 +313,7 @@ export default function SavePage() {
           // 表示し続けてしまう。いま表示を担っている大きいウィンドウへ渡す。
           let adoptedUrl = standing;
           if (requestedUrl && requestedUrl !== standing) {
-            const userAgent =
-              source === "fanbox"
-                ? (await store.get<string>("fanbox_user_agent")) || undefined
-                : undefined;
-            await openStandaloneBrowser(requestedUrl, { source, userAgent });
+            await openStandaloneBrowser(requestedUrl, { source });
             adoptedUrl = requestedUrl;
           }
           if (cancelled) return;
@@ -348,11 +339,7 @@ export default function SavePage() {
               ? otherSource
               : null;
         if (previousDetachedSource) {
-          const userAgent =
-            source === "fanbox"
-              ? (await store.get<string>("fanbox_user_agent")) || undefined
-              : undefined;
-          await openStandaloneBrowser(home, { source, userAgent });
+          await openStandaloneBrowser(home, { source });
           // Opening a native WebView cannot be cancelled. If another switch
           // overtook this one, remove the stale window before its successor.
           if (cancelled) {
@@ -556,11 +543,7 @@ export default function SavePage() {
     // The address bar always drives whichever browser currently holds the
     // session, so it keeps working after the handover.
     if (detachedRef.current) {
-      const userAgent =
-        source === "fanbox"
-          ? (await store.get<string>("fanbox_user_agent")) || undefined
-          : undefined;
-      await openStandaloneBrowser(normalized, { source, userAgent }).catch(
+      await openStandaloneBrowser(normalized, { source }).catch(
         (error) =>
           notifications.show({
             color: "red",
@@ -586,13 +569,8 @@ export default function SavePage() {
         window.open(currentUrl, "_blank", "noopener,noreferrer");
         return;
       }
-      const userAgent =
-        source === "fanbox"
-          ? (await store.get<string>("fanbox_user_agent")) || undefined
-          : undefined;
       const reused = await openStandaloneBrowser(currentUrl, {
         source,
-        userAgent,
       });
       // The standalone window owns the live page now. Keeping an additional
       // hidden renderer doubles the expensive part of the browser workspace.
@@ -1190,7 +1168,7 @@ export default function SavePage() {
               variant="light"
               leftSection={<span className="status-dot" />}
             >
-              {authConnected ? "接続済み" : "未接続"}
+              {authConnected ? "取得用接続済み" : "取得用未接続"}
             </Badge>
             <Button
               variant="subtle"

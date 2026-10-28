@@ -439,7 +439,7 @@ export default function UpdatesPage() {
           <Tabs.Tab value="candidates" leftSection={<Icons.select size={IconSize.menu} />}>候補 {openCandidateCount > 0 && <Badge size="xs" variant="light" ml={4}>{formatNumber(openCandidateCount)}</Badge>}</Tabs.Tab>
           <Tabs.Tab value="results" leftSection={<Icons.confirm size={IconSize.menu} />}>結果 {(activeSnapshot?.heldCount ?? 0) > 0 && <Badge size="xs" variant="light" color="yellow" ml={4}>{formatNumber(activeSnapshot?.heldCount ?? 0)}</Badge>}</Tabs.Tab>
           <Tabs.Tab value="logs" leftSection={<Icons.pending size={IconSize.menu} />}>ログ</Tabs.Tab>
-          <Tabs.Tab value="deferred">要確認</Tabs.Tab>
+          <Tabs.Tab value="deferred">保留候補</Tabs.Tab>
           <Tabs.Tab value="history" leftSection={<Icons.versionHistory size={IconSize.menu} />}>履歴 {jobs.length > 0 && <Badge size="xs" variant="light" color="gray" ml={4}>{formatNumber(jobs.length)}</Badge>}</Tabs.Tab>
           <span className="updates-tabs__divider" aria-hidden />
           <Tabs.Tab value="targets" leftSection={<Icons.updates size={IconSize.menu} />}>監視対象</Tabs.Tab>

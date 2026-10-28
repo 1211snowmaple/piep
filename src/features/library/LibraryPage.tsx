@@ -114,6 +114,7 @@ interface Filters {
   assetFilter: LibraryAssetFilter | null;
   seriesFilter: LibrarySeriesFilter | null;
   revisionFilter: LibraryRevisionFilter | null;
+  acquisitionFilter: "attention" | "incomplete" | null;
   editFilter: LibraryEditFilter | null;
   coverFilter: LibraryCoverFilter | null;
   dateField: LibraryDateField;
@@ -125,7 +126,7 @@ const initialFilters: Filters = {
   sources: [], contentType: null, favorite: false, watch: null,
   authorsInclude: [], authorsExclude: [], tagsInclude: [], tagsExclude: [],
   tagMode: "and", minChars: "", maxChars: "", minAssets: "", maxAssets: "", minSizeMb: "", maxSizeMb: "", assetFilter: null, seriesFilter: null,
-  revisionFilter: null, editFilter: null, coverFilter: null,
+  revisionFilter: null, acquisitionFilter: null, editFilter: null, coverFilter: null,
   dateField: "downloaded_at", dateFrom: "", dateTo: "",
 };
 
@@ -322,6 +323,7 @@ function normalizeFilters(value: unknown): Filters {
     assetFilter: parseAssetFilter(candidate.assetFilter),
     seriesFilter: parseSeriesFilter(candidate.seriesFilter),
     revisionFilter: parseRevisionFilter(candidate.revisionFilter),
+    acquisitionFilter: candidate.acquisitionFilter === "attention" || candidate.acquisitionFilter === "incomplete" ? candidate.acquisitionFilter : null,
     editFilter: parseEditFilter(candidate.editFilter),
     coverFilter: parseCoverFilter(candidate.coverFilter),
     dateField: parseDateField(candidate.dateField),
@@ -359,6 +361,7 @@ function readFilters(params: URLSearchParams): Filters {
     assetFilter: params.get("assets"),
     seriesFilter: params.get("seriesmode"),
     revisionFilter: params.get("revision"),
+    acquisitionFilter: params.get("acquisition"),
     editFilter: params.get("localedit"),
     coverFilter: params.get("cover"),
     dateField: params.get("datefield"),
@@ -392,6 +395,7 @@ function writeFilters(params: URLSearchParams, filters: Filters) {
     ["assets", filters.assetFilter],
     ["seriesmode", filters.seriesFilter],
     ["revision", filters.revisionFilter],
+    ["acquisition", filters.acquisitionFilter],
     ["localedit", filters.editFilter],
     ["cover", filters.coverFilter],
     ["datefield", filters.dateFrom || filters.dateTo ? filters.dateField : null],
@@ -1043,6 +1047,7 @@ export default function LibraryPage() {
     assetFilter: filters.assetFilter,
     seriesFilter: filters.seriesFilter,
     revisionFilter: onRevisedShelf ? "revised" : filters.revisionFilter,
+    acquisitionFilter: filters.acquisitionFilter,
     editFilter: filters.editFilter,
     coverFilter: filters.coverFilter,
     dateField: filters.dateFrom || filters.dateTo ? filters.dateField : null,
@@ -1094,7 +1099,7 @@ export default function LibraryPage() {
     && Boolean(works.hasNextPage);
   const totalCount = works.data?.pages[0]?.totalEstimate ?? null;
   const searchMeta = works.data?.pages[0]?.searchMeta;
-  const workFilterCount = filters.sources.length + Number(Boolean(filters.contentType)) + Number(filters.favorite) + Number(Boolean(filters.watch)) + filters.authorsInclude.length + filters.authorsExclude.length + filters.tagsInclude.length + filters.tagsExclude.length + Number(filters.minChars !== "") + Number(filters.maxChars !== "") + Number(filters.minAssets !== "") + Number(filters.maxAssets !== "") + Number(filters.minSizeMb !== "") + Number(filters.maxSizeMb !== "") + Number(Boolean(filters.assetFilter)) + Number(Boolean(filters.seriesFilter)) + Number(Boolean(filters.revisionFilter)) + Number(Boolean(filters.editFilter)) + Number(Boolean(filters.coverFilter)) + Number(Boolean(filters.dateFrom)) + Number(Boolean(filters.dateTo));
+  const workFilterCount = filters.sources.length + Number(Boolean(filters.contentType)) + Number(filters.favorite) + Number(Boolean(filters.watch)) + filters.authorsInclude.length + filters.authorsExclude.length + filters.tagsInclude.length + filters.tagsExclude.length + Number(filters.minChars !== "") + Number(filters.maxChars !== "") + Number(filters.minAssets !== "") + Number(filters.maxAssets !== "") + Number(filters.minSizeMb !== "") + Number(filters.maxSizeMb !== "") + Number(Boolean(filters.assetFilter)) + Number(Boolean(filters.seriesFilter)) + Number(Boolean(filters.revisionFilter)) + Number(Boolean(filters.acquisitionFilter)) + Number(Boolean(filters.editFilter)) + Number(Boolean(filters.coverFilter)) + Number(Boolean(filters.dateFrom)) + Number(Boolean(filters.dateTo));
   // 束ね自身の条件も「適用中」に数える。数えないと、絞られている理由が
   // どこにも出ない一覧ができる。
   const visibleEntityScopeCount = entityScopeCount({
@@ -1443,6 +1448,7 @@ export default function LibraryPage() {
       assetFilter: params.assetFilter,
       seriesFilter: params.seriesFilter,
       revisionFilter: params.revisionFilter,
+      acquisitionFilter: params.acquisitionFilter,
       editFilter: params.editFilter,
       coverFilter: params.coverFilter,
       dateField: params.dateField,
@@ -1691,6 +1697,7 @@ export default function LibraryPage() {
               {filters.seriesFilter && <FilterChip label={seriesFilterName(filters.seriesFilter)} onRemove={() => setFilters({ ...filters, seriesFilter: null })} />}
               {filters.assetFilter && <FilterChip label={assetFilterName(filters.assetFilter)} onRemove={() => setFilters({ ...filters, assetFilter: null })} />}
               {filters.revisionFilter && <FilterChip label={revisionFilterName(filters.revisionFilter)} onRemove={() => setFilters({ ...filters, revisionFilter: null })} />}
+              {filters.acquisitionFilter && <FilterChip label={filters.acquisitionFilter === "incomplete" ? "本文を一部保存" : "要確認"} onRemove={() => setFilters({ ...filters, acquisitionFilter: null })} />}
               {filters.editFilter && <FilterChip label={editFilterName(filters.editFilter)} onRemove={() => setFilters({ ...filters, editFilter: null })} />}
               {filters.coverFilter && <FilterChip label={coverFilterName(filters.coverFilter)} onRemove={() => setFilters({ ...filters, coverFilter: null })} />}
               {filters.minChars !== "" && <FilterChip label={`${formatNumber(Number(filters.minChars))}文字以上`} onRemove={() => setFilters({ ...filters, minChars: "" })} />}
@@ -2528,6 +2535,7 @@ function FilterForm({ value, scope, versionScope, tab, runtime, authors, tags, c
     + Number(Boolean(draft.assetFilter)) + Number(Boolean(draft.seriesFilter));
   const statusCount = Number(!entityTab && versionScopeDraft === "all")
     + Number(Boolean(draft.revisionFilter))
+    + Number(Boolean(draft.acquisitionFilter))
     + Number(Boolean(draft.editFilter))
     + Number(Boolean(draft.coverFilter));
   const entityCount = entityScopeCount(scopeDraft);
@@ -2554,6 +2562,8 @@ function FilterForm({ value, scope, versionScope, tab, runtime, authors, tags, c
     ] : []),
     { id: "revision:revised", label: "改稿された作品", detail: "状態", keywords: "履歴 改稿 バージョン 版", active: draft.revisionFilter === "revised" },
     { id: "revision:first_version", label: "初版のままの作品", detail: "状態", keywords: "初版 未改稿 バージョン", active: draft.revisionFilter === "first_version" },
+    { id: "acquisition:attention", label: "要確認の作品", detail: "状態", keywords: "要確認 保留 取得", active: draft.acquisitionFilter === "attention" },
+    { id: "acquisition:incomplete", label: "本文を一部保存した作品", detail: "状態", keywords: "一部保存 挿絵 欠落", active: draft.acquisitionFilter === "incomplete" },
     { id: "edit:edited", label: "ローカル編集がある作品", detail: "状態", keywords: "ローカル 編集 修正", active: draft.editFilter === "edited" },
     { id: "edit:unedited", label: "ローカル編集がない作品", detail: "状態", keywords: "未編集 オリジナル", active: draft.editFilter === "unedited" },
     { id: "cover:has_cover", label: "表紙がある作品", detail: "状態", keywords: "表紙 カバー 画像", active: draft.coverFilter === "has_cover" },
@@ -2576,7 +2586,7 @@ function FilterForm({ value, scope, versionScope, tab, runtime, authors, tags, c
       keywords: `${item.value} ${contentTypeName(item.value)} コンテンツ 種別`,
       active: draft.contentType === item.value,
     })),
-  ], [activeSection, contentTypes, draft.assetFilter, draft.contentType, draft.coverFilter, draft.editFilter, draft.favorite, draft.revisionFilter, draft.seriesFilter, draft.sources, draft.tagMode, draft.watch, entityTab, versionScopeDraft]);
+  ], [activeSection, contentTypes, draft.acquisitionFilter, draft.assetFilter, draft.contentType, draft.coverFilter, draft.editFilter, draft.favorite, draft.revisionFilter, draft.seriesFilter, draft.sources, draft.tagMode, draft.watch, entityTab, versionScopeDraft]);
   const conditionResults = useMemo(() => conditions.filter((condition) => (
     `${condition.label} ${condition.detail} ${condition.keywords}`.toLocaleLowerCase("ja-JP").includes(normalizedSearch)
   )).slice(0, 8), [conditions, normalizedSearch]);
@@ -2633,6 +2643,10 @@ function FilterForm({ value, scope, versionScope, tab, runtime, authors, tags, c
       if (id.startsWith("revision:")) {
         const revisionFilter = parseRevisionFilter(id.slice("revision:".length));
         return { ...current, revisionFilter: current.revisionFilter === revisionFilter ? null : revisionFilter };
+      }
+      if (id.startsWith("acquisition:")) {
+        const acquisitionFilter = id.endsWith(":incomplete") ? "incomplete" : "attention";
+        return { ...current, acquisitionFilter: current.acquisitionFilter === acquisitionFilter ? null : acquisitionFilter };
       }
       if (id.startsWith("edit:")) {
         const editFilter = parseEditFilter(id.slice("edit:".length));
@@ -2831,6 +2845,15 @@ function FilterForm({ value, scope, versionScope, tab, runtime, authors, tags, c
                   data={[{ value: "revised", label: "改稿あり" }, { value: "first_version", label: "初版のまま" }]}
                   value={draft.revisionFilter}
                   onChange={(revisionFilter) => setDraft({ ...draft, revisionFilter: parseRevisionFilter(revisionFilter) })}
+                />
+                <Select
+                  size="sm"
+                  label="取得状態"
+                  clearable
+                  placeholder="すべて"
+                  data={[{ value: "attention", label: "要確認" }, { value: "incomplete", label: "本文を一部保存" }]}
+                  value={draft.acquisitionFilter}
+                  onChange={(value) => setDraft({ ...draft, acquisitionFilter: value === "attention" || value === "incomplete" ? value : null })}
                 />
                 <Select
                   size="sm"

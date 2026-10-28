@@ -1423,6 +1423,13 @@ pub async fn count_deferred_update_candidates(app: tauri::AppHandle) -> Result<i
         .count_deferred_update_candidates()
 }
 
+#[tauri::command]
+pub async fn count_saved_deferred_update_candidates(app: tauri::AppHandle) -> Result<i64, String> {
+    app.state::<Arc<AppState>>()
+        .db
+        .count_saved_deferred_update_candidates()
+}
+
 /// Rechecks an explicit selection after permissions change, without saving or watching.
 #[tauri::command]
 pub async fn recheck_deferred_update_candidates(
@@ -2453,6 +2460,8 @@ fn classify_failure(error: &str) -> FailureKind {
         // 拾えないと、間を空ければ通るものを取り違える。
         "レートリミット",
         "アクセス制限",
+        "接続の更新に失敗した直後",
+        "取得元がエラーを返しました。時間をおいて",
     ]) {
         return FailureKind::RateLimited;
     }
@@ -4404,6 +4413,8 @@ mod tests {
             ("pixiv APIエラー（HTTP 429）", FailureKind::RateLimited),
             ("Too Many Requests", FailureKind::RateLimited),
             ("FANBOX APIエラー（HTTP 503）", FailureKind::RateLimited),
+            ("接続の更新に失敗した直後です。しばらく待ってからやり直してください", FailureKind::RateLimited),
+            ("取得元がエラーを返しました。時間をおいてからやり直してください", FailureKind::RateLimited),
             (
                 "現在のFANBOX連携ではこの投稿を閲覧できません（必要な支援額: 月額500円以上）",
                 FailureKind::Restricted,

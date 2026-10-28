@@ -530,6 +530,7 @@ export interface SearchV2Params {
   assetFilter?: LibraryAssetFilter | null;
   seriesFilter?: LibrarySeriesFilter | null;
   revisionFilter?: LibraryRevisionFilter | null;
+  acquisitionFilter?: "attention" | "incomplete" | null;
   editFilter?: LibraryEditFilter | null;
   coverFilter?: LibraryCoverFilter | null;
   dateField?: LibraryDateField | null;

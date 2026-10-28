@@ -18,14 +18,14 @@ const shelfApi = vi.hoisted(() => ({
 }));
 const updateJobApi = vi.hoisted(() => ({
   listUpdateJobsCommand: vi.fn(),
-  countDeferredUpdateCandidatesCommand: vi.fn(),
+  countSavedDeferredUpdateCandidatesCommand: vi.fn(),
 }));
 
 vi.mock("@/services/shelfApi", () => shelfApi);
 vi.mock("@/services/updateJobApi", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/services/updateJobApi")>()),
   listUpdateJobsCommand: updateJobApi.listUpdateJobsCommand,
-  countDeferredUpdateCandidatesCommand: updateJobApi.countDeferredUpdateCandidatesCommand,
+  countSavedDeferredUpdateCandidatesCommand: updateJobApi.countSavedDeferredUpdateCandidatesCommand,
 }));
 vi.mock("@/services/dbApi", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/services/dbApi")>()),
@@ -122,7 +122,7 @@ describe("library sidebar", () => {
     shelfApi.getLibraryShelfCounts.mockResolvedValue(counts);
     shelfApi.listSavedSearches.mockResolvedValue([saved()]);
     updateJobApi.listUpdateJobsCommand.mockResolvedValue([]);
-    updateJobApi.countDeferredUpdateCandidatesCommand.mockResolvedValue(4);
+    updateJobApi.countSavedDeferredUpdateCandidatesCommand.mockResolvedValue(4);
   });
 
   it("lists the shelves with their counts instead of a menu of screens", async () => {
@@ -311,7 +311,7 @@ describe("library sidebar", () => {
     const attention = await row("要確認");
     await waitFor(() => expect(within(attention).getByText("4")).toBeInTheDocument());
     fireEvent.click(attention);
-    await waitFor(() => expect(window.location.hash).toContain("/updates?tab=deferred"));
+    await waitFor(() => expect(window.location.hash).toContain("/library?acquisition=attention"));
   });
 
   it("opens a saved search by id rather than by copying its conditions into the link", async () => {

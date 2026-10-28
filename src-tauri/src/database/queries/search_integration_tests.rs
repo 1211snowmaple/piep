@@ -1336,6 +1336,7 @@ fn params(query: &str) -> SearchV2Params {
         asset_filter: None,
         series_filter: None,
         revision_filter: None,
+        acquisition_filter: None,
         edit_filter: None,
         cover_filter: None,
         date_field: None,
@@ -1380,6 +1381,7 @@ fn v2_params(query: Option<&str>, limit: i64, cursor: Option<String>) -> SearchV
         asset_filter: None,
         series_filter: None,
         revision_filter: None,
+        acquisition_filter: None,
         edit_filter: None,
         cover_filter: None,
         date_field: None,
@@ -6428,6 +6430,33 @@ fn shelf_counts_ignore_reading_positions_for_works_that_no_longer_exist() {
         .map(|item| item.id)
         .collect();
     assert_eq!(revised_ids, HashSet::from([first, second]));
+}
+
+#[test]
+fn library_attention_filters_only_saved_held_works() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let saved = insert_download(&db, &storage, "held-saved", "一部保存", "作者", &[], "本文");
+    for (source_id, kind) in [("held-saved", "incomplete"), ("held-unsaved", "restricted")] {
+        db.upsert_update_candidate(&UpdateCandidateInput {
+            source: "pixiv".into(),
+            source_id: source_id.into(),
+            kind: "new".into(),
+            title: source_id.into(),
+            payload_json: format!(r#"{{"holdKind":"{kind}"}}"#),
+            target_type: Some("work".into()),
+        })
+        .unwrap();
+        db.set_update_candidate_status("pixiv", source_id, "held")
+            .unwrap();
+    }
+    assert_eq!(db.count_deferred_update_candidates().unwrap(), 2);
+    assert_eq!(db.count_saved_deferred_update_candidates().unwrap(), 1);
+    let mut params = v2_params(None, 20, None);
+    params.acquisition_filter = Some("attention".into());
+    assert_eq!(db.search_downloads_v2(&params).unwrap().items[0].id, saved);
+    params.acquisition_filter = Some("incomplete".into());
+    assert_eq!(db.search_downloads_v2(&params).unwrap().items[0].id, saved);
 }
 
 #[test]
