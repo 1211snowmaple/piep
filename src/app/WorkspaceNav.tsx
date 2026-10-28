@@ -10,6 +10,7 @@ import { useOperationJobs } from "@/features/jobs/operationJobs";
 import { countActiveActivities } from "@/features/jobs/activityAggregation";
 import { useUpdateJobSummaries } from "@/features/updates/updateJobs";
 import { countSavedDeferredUpdateCandidatesCommand } from "@/services/updateJobApi";
+import { parseAcquisitionFilter } from "@/lib/acquisition";
 import { readingWorkIds, subscribeReadingPositions } from "@/features/library/readingShelf";
 import { formatCompactCount, formatNumber } from "@/lib/format";
 import { isTauriRuntime } from "@/services/dbApi";
@@ -143,7 +144,7 @@ export function WorkspaceNav({ railed, onNavigate }: { railed: boolean; onNaviga
   const activeSavedId = Number.parseInt(location.searchParams.get("saved") ?? "", 10);
   // Collections are a library tab now, so a collection screen keeps the
   // library section highlighted rather than needing an entry of its own.
-  const onAttention = location.pathname === "/library" && ["attention", "incomplete"].includes(location.searchParams.get("acquisition") ?? "");
+  const onAttention = location.pathname === "/library" && Boolean(parseAcquisitionFilter(location.searchParams.get("acquisition")));
   const inLibrary = onAttention || location.pathname === "/library"
     || location.pathname.startsWith("/works/")
     || location.pathname.startsWith("/collections");

@@ -14,6 +14,34 @@ use super::{
 use rusqlite::{params, OptionalExtension};
 
 impl Database {
+    pub fn clear_resolved_unavailable_candidates(
+        &self,
+        source: &str,
+        available_ids: &[String],
+    ) -> Result<(), String> {
+        if available_ids.is_empty() {
+            return Ok(());
+        }
+        let ids = serde_json::to_string(available_ids).map_err(|error| error.to_string())?;
+        let mut conn = self.conn.lock().map_err(|error| error.to_string())?;
+        let tx = conn.transaction().map_err(|error| error.to_string())?;
+        tx.execute(
+            "DELETE FROM update_candidates WHERE source=?1 AND status='held'
+                AND CASE WHEN json_valid(payload_json) THEN json_extract(payload_json,'$.holdKind') END='unavailable'
+                AND source_id IN (SELECT value FROM json_each(?2))",
+            params![source, ids],
+        ).map_err(|error| format!("Failed to clear resolved acquisition state: {error}"))?;
+        tx.execute(
+            "UPDATE update_job_items SET payload_json=json_set(CASE WHEN json_valid(payload_json) THEN payload_json ELSE '{}' END,'$.acquisitionResolved',json('true'))
+             WHERE source=?1 AND source_id IN (SELECT value FROM json_each(?2)) AND status='held'
+               AND (error LIKE '%[見つからない]%' OR error LIKE '%公開元で投稿が見つかりません%' OR error LIKE '%公開元で投稿が見つからない%')
+               AND COALESCE(CASE WHEN json_valid(payload_json) THEN json_extract(payload_json,'$.acquisitionResolved') END,0)=0",
+            params![source, ids],
+        ).map_err(|error| format!("Failed to retain acquisition resolution: {error}"))?;
+        tx.commit().map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
     pub fn has_active_update_job(&self) -> Result<bool, String> {
         self.read_conn()?.query_row(
             "SELECT EXISTS(SELECT 1 FROM update_jobs WHERE status IN ('queued', 'running', 'canceling'))",

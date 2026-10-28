@@ -6280,6 +6280,23 @@ impl Database {
             )
             .map_err(|error| format!("Failed to record unavailable work: {error}"))?;
         if changed > 0 {
+            let candidate_payload = serde_json::json!({
+                "source": work.source, "sourceId": work.source_id, "title": work.title,
+                "kind": "revision", "holdKind": "unavailable", "holdReason": reason,
+                "originalData": {"id": work.source_id, "title": work.title,
+                    "user": {"id": work.author_id, "name": work.author_name},
+                    "creatorId": work.author_id, "isRestricted": false,
+                    "localVersion": work.current_version, "localSavedAt": work.downloaded_at}
+            });
+            tx.execute(
+                "INSERT INTO update_candidates(source,source_id,kind,title,payload_json,target_type,status)
+                 VALUES(?1,?2,'revision',?3,?4,'work','held')
+                 ON CONFLICT(source,source_id) DO UPDATE SET kind='revision',title=excluded.title,
+                    payload_json=excluded.payload_json,target_type='work',
+                    status=CASE WHEN update_candidates.status='dismissed' THEN 'dismissed' ELSE 'held' END,
+                    updated_at=CURRENT_TIMESTAMP",
+                params![work.source,work.source_id,work.title,candidate_payload.to_string()],
+            ).map_err(|error| format!("Failed to retain unavailable work state: {error}"))?;
             let contribution = update_job_item_counter_contribution("work", "held");
             tx.execute(
                 "UPDATE update_jobs
@@ -13267,7 +13284,8 @@ fn append_library_filters(
     if let Some(ref acquisition_filter) = params.acquisition_filter {
         match acquisition_filter.as_str() {
             "attention" => wheres.push("EXISTS (SELECT 1 FROM update_candidates c WHERE c.source=d.source AND c.source_id=d.source_id AND c.status IN ('held','dismissed'))".to_string()),
-            "incomplete" => wheres.push("EXISTS (SELECT 1 FROM update_candidates c WHERE c.source=d.source AND c.source_id=d.source_id AND c.status IN ('held','dismissed') AND json_valid(c.payload_json) AND json_extract(c.payload_json, '$.holdKind')='incomplete')".to_string()),
+            kind @ ("incomplete" | "unavailable" | "restricted" | "error") => wheres.push(format!("EXISTS (SELECT 1 FROM update_candidates c WHERE c.source=d.source AND c.source_id=d.source_id AND c.status IN ('held','dismissed') AND json_valid(c.payload_json) AND json_extract(c.payload_json, '$.holdKind')='{kind}')")),
+            "dismissed" => wheres.push("EXISTS (SELECT 1 FROM update_candidates c WHERE c.source=d.source AND c.source_id=d.source_id AND c.status='dismissed')".to_string()),
             _ => {}
         }
     }

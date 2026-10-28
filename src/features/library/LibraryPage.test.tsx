@@ -32,13 +32,13 @@ describe("LibraryPage search", () => {
     window.location.hash = "#/library";
   });
 
-  it("shows saved attention works in the ordinary library with a removable filter", async () => {
-    window.location.hash = "#/library?acquisition=incomplete";
+  it.each([["incomplete", "一部保存"], ["unavailable", "見つからない"]])("shows saved %s works in the ordinary library with a removable filter", async (filter, label) => {
+    window.location.hash = `#/library?acquisition=${filter}`;
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
     expect(await screen.findByLabelText("ライブラリを検索")).toBeInTheDocument();
-    expect(screen.getByText("一部保存")).toBeInTheDocument();
-    expect(window.location.hash).toContain("acquisition=incomplete");
+    expect(screen.getByText(label)).toBeInTheDocument();
+    expect(window.location.hash).toContain(`acquisition=${filter}`);
   });
 
   it("keeps the input mounted through Japanese IME composition and URL sync", async () => {

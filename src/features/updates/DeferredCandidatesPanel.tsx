@@ -48,7 +48,7 @@ export function DeferredCandidatesPanel({ runtime, onRechecked, onOpenWork }: { 
   if (query.isLoading) return <LoadingState />;
   if (query.error) return <ErrorState error={query.error} retry={() => query.refetch()} />;
   return <Card p="lg"><Stack>
-    <Text fw={700}>要確認（{rows.length}件）</Text>
+    <Text fw={700}>保留候補（{rows.length}件）</Text>
     <Text size="sm" c="dimmed">取得できなかった理由を残しています。必要な作品を選んで再確認できます。</Text>
     <Group grow>
       <TextInput aria-label="保留作品を検索" placeholder="作品名・理由・取得元IDで検索" value={search} onChange={(event) => { setSearch(event.currentTarget.value); setPage(1); }} />
@@ -60,7 +60,7 @@ export function DeferredCandidatesPanel({ runtime, onRechecked, onOpenWork }: { 
       <Button size="xs" disabled={!selectedKeys.length} loading={mutation.isPending} onClick={() => mutation.mutate({ keys: selectedKeys, refreshPostAccess: false })}>候補に戻す（{selectedKeys.length}）</Button>
     </Group>
     <Group><Button variant="subtle" size="xs" disabled={!selectedKeys.length || selectedKeys.length > 20 || mutation.isPending} onClick={() => mutation.mutate({ keys: selectedKeys, refreshPostAccess: true })}>公開条件も確認</Button><Text size="xs" c="dimmed">公開条件の確認は20件ずつ</Text></Group>
-    {!rows.length && <Text size="sm" c="dimmed">要確認の作品はありません。</Text>}
+    {!rows.length && <Text size="sm" c="dimmed">保留候補はありません。</Text>}
     {visibleRows.map(({ row, reason, category }) => {
       const key = `${row.source}:${row.sourceId}`;
       const label = ({ dismissed: "非表示", restricted: "閲覧条件待ち", incomplete: "一部保存", unavailable: "見つからない", error: "取得エラー", held: "保留" } as Record<string, string>)[category] ?? "保留";

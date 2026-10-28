@@ -6457,6 +6457,49 @@ fn library_attention_filters_only_saved_held_works() {
     assert_eq!(db.search_downloads_v2(&params).unwrap().items[0].id, saved);
     params.acquisition_filter = Some("incomplete".into());
     assert_eq!(db.search_downloads_v2(&params).unwrap().items[0].id, saved);
+    db.set_update_candidate_status("pixiv", "held-saved", "dismissed")
+        .unwrap();
+    params.acquisition_filter = Some("dismissed".into());
+    assert_eq!(db.search_downloads_v2(&params).unwrap().items[0].id, saved);
+}
+
+#[test]
+fn historical_unavailable_work_stays_searchable_until_a_successful_recheck() {
+    let (_temp, root, storage) = temp_paths();
+    let db_path = root.join("piep.db");
+    let db = Database::open(&db_path, &storage).unwrap();
+    let id = insert_download(
+        &db,
+        &storage,
+        "unavailable-history",
+        "手元の作品",
+        "作者",
+        &[],
+        "本文",
+    );
+    {
+        let conn = db.conn.lock().unwrap();
+        conn.execute("INSERT INTO update_jobs(id,scope,mode,status,started_at,updated_at) VALUES ('missing-history','all','check_only','completed',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)", []).unwrap();
+        conn.execute("INSERT INTO update_job_items(job_id,item_type,source,source_id,title,payload_json,status,error) VALUES ('missing-history','work','pixiv','unavailable-history','手元の作品','{}','held','公開元で投稿が見つからないため確認を保留しました。保存済みの内容は保持しています')", []).unwrap();
+    }
+    drop(db);
+    let db = Database::open(&db_path, &storage).unwrap();
+    assert_eq!(db.count_saved_deferred_update_candidates().unwrap(), 1);
+    let mut params = v2_params(None, 20, None);
+    params.acquisition_filter = Some("attention".into());
+    assert_eq!(db.search_downloads_v2(&params).unwrap().items[0].id, id);
+    params.acquisition_filter = Some("unavailable".into());
+    assert_eq!(db.search_downloads_v2(&params).unwrap().items[0].id, id);
+    db.clear_resolved_unavailable_candidates("pixiv", &["unavailable-history".into()])
+        .unwrap();
+    drop(db);
+    let db = Database::open(&db_path, &storage).unwrap();
+    assert_eq!(db.count_saved_deferred_update_candidates().unwrap(), 0);
+    assert_eq!(
+        db.list_update_job_item_states("missing-history").unwrap()[0].status,
+        "held"
+    );
+    assert!(db.get_download(id).is_ok());
 }
 
 #[test]

@@ -1959,6 +1959,25 @@ async fn run_update_job(
         let failed = outcome.is_err();
         let restart_pending = has_pending_restart(&job_id);
         let mut next_delay_ms = UPDATE_JOB_DELAY_MS;
+        if item.item_type == "work"
+            && matches!(
+                &outcome,
+                Ok(ItemOutcome::LocalSkipped(_)
+                    | ItemOutcome::Skipped(_)
+                    | ItemOutcome::Done(_)
+                    | ItemOutcome::Saved(_, _))
+            )
+        {
+            if let (Some(source), Some(source_id)) =
+                (item.source.as_deref(), item.source_id.as_ref())
+            {
+                let _guard = state.library_gate.write().await;
+                state.db.clear_resolved_unavailable_candidates(
+                    source,
+                    std::slice::from_ref(source_id),
+                )?;
+            }
+        }
         match outcome {
             Ok(ItemOutcome::Held(message)) => {
                 if item.item_type == "work" {
@@ -3281,6 +3300,18 @@ async fn scan_pixiv_revisions(
     else {
         return Err("pixiv の改稿一覧を完全に確認できません".to_string());
     };
+    {
+        let available_ids: Vec<String> = listing
+            .entries
+            .values()
+            .filter(|entry| !entry.is_masked && entry.update_date.is_some())
+            .map(|entry| entry.id.clone())
+            .collect();
+        let _guard = state.library_gate.write().await;
+        state
+            .db
+            .clear_resolved_unavailable_candidates("pixiv", &available_ids)?;
+    }
     let mut found = 0i64;
     for work in saved {
         let (source_id, stored_update, downloaded_at, local_version) = (
@@ -3360,6 +3391,7 @@ async fn scan_pixiv_revisions(
             continue;
         };
         let reason = unavailable_saved_pixiv_work_message(&work.title, source_id);
+        let _guard = state.library_gate.write().await;
         if state
             .db
             .insert_update_job_unavailable_work(job_id, &work, &reason)?
@@ -3909,6 +3941,26 @@ mod tests {
             .unwrap()
             .is_some());
         assert!(json_path.is_file());
+        assert_eq!(
+            state.db.count_saved_deferred_update_candidates().unwrap(),
+            1
+        );
+        state
+            .db
+            .clear_resolved_unavailable_candidates("pixiv", &["different".into()])
+            .unwrap();
+        assert_eq!(
+            state.db.count_saved_deferred_update_candidates().unwrap(),
+            1
+        );
+        state
+            .db
+            .clear_resolved_unavailable_candidates("pixiv", std::slice::from_ref(&work.source_id))
+            .unwrap();
+        assert_eq!(
+            state.db.count_saved_deferred_update_candidates().unwrap(),
+            0
+        );
         web_index.gave_up = true;
         let error = super::scan_pixiv_revisions(
             &state,
@@ -3932,6 +3984,12 @@ mod tests {
         .await
         .is_err());
         drop(state);
+        let reopened = Database::open(&root.join("piep.db"), &root.join("downloads")).unwrap();
+        assert_eq!(
+            reopened.count_saved_deferred_update_candidates().unwrap(),
+            0
+        );
+        drop(reopened);
         let _ = std::fs::remove_dir_all(root);
     }
 
