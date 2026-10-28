@@ -9,6 +9,7 @@ import { WorkspaceProvider } from "@/app/WorkspaceContext";
 import { writeReadingPosition } from "@/features/library/readingShelf";
 import type { LibraryShelfCounts, SavedSearchRecord } from "@/types/library";
 import { usePageAssist } from "@/app/PageAssistContext";
+import { LibrarySidebarSettings } from "@/features/settings/LibrarySidebarSettings";
 
 const shelfApi = vi.hoisted(() => ({
   getLibraryShelfCounts: vi.fn(),
@@ -123,6 +124,18 @@ describe("library sidebar", () => {
     shelfApi.listSavedSearches.mockResolvedValue([saved()]);
     updateJobApi.listUpdateJobsCommand.mockResolvedValue([]);
     updateJobApi.countSavedDeferredUpdateCandidatesCommand.mockResolvedValue(4);
+  });
+
+  it("hides optional shelves immediately while keeping the current library filter and all works", async () => {
+    renderApp("#/library?acquisition=attention", <LibrarySidebarSettings />);
+    expect(await nav().findByText("要確認")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("switch", { name: "要確認" }));
+    await waitFor(() => expect(nav().queryByText("要確認")).toBeNull());
+    expect(nav().getByText("すべて")).toBeInTheDocument();
+    expect(window.location.hash).toContain("acquisition=attention");
+    expect(JSON.parse(window.localStorage.getItem("piep.library-sidebar.v1")!)).toHaveProperty("attention", false);
+    fireEvent.click(screen.getByRole("switch", { name: "要確認" }));
+    expect(await nav().findByText("要確認")).toBeInTheDocument();
   });
 
   it("lists the shelves with their counts instead of a menu of screens", async () => {

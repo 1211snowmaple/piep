@@ -375,3 +375,16 @@ test("every cover fits inside its frame instead of spilling out of it", async ({
     expect(result.spills, `${view} で表紙が枠からはみ出している`).toEqual([]);
   }
 });
+
+test("hidden library shortcuts remain available from the library", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "900x600-light-100dpi", "The complete preference flow runs once");
+  await page.goto("/#/settings?section=appearance");
+  await page.getByRole("switch", { name: "読みかけ", exact: true }).uncheck();
+  await expect(page.locator("#app-navigation").getByText("読みかけ", { exact: true })).toHaveCount(0);
+  await expect(page.locator("#app-navigation").getByText("すべて", { exact: true })).toBeVisible();
+  await page.goto("/#/library");
+  await page.getByRole("button", { name: "ライブラリの表示対象", exact: true }).click();
+  await page.getByRole("menuitem", { name: "読みかけ", exact: true }).click();
+  await expect(page).toHaveURL(/#\/library\?shelf=reading/);
+  await expect(page.locator("#app-navigation").getByText("読みかけ", { exact: true })).toHaveCount(0);
+});

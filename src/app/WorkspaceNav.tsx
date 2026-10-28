@@ -17,6 +17,7 @@ import { isTauriRuntime } from "@/services/dbApi";
 import { getLibraryShelfCounts, listSavedSearches } from "@/services/shelfApi";
 import { activeShelf, LIBRARY_SHELVES, type LibraryShelf } from "@/app/libraryShelves";
 import type { LibraryShelfCounts, SavedSearchRecord } from "@/types/library";
+import { useLibrarySidebarVisibility } from "./librarySidebarPreferences";
 
 const SHELF_ICON: Record<LibraryShelf, LucideIcon> = {
   all: Icons.library,
@@ -107,6 +108,7 @@ export function WorkspaceNav({ railed, onNavigate }: { railed: boolean; onNaviga
   const navigate = useAppNavigate();
   const location = useAppRouter();
   const runtime = isTauriRuntime();
+  const [visibleShelves] = useLibrarySidebarVisibility();
   const { epubQueue } = useWorkspace();
   const [openGroups, setOpenGroups] = useLocalStorage<Record<GroupId, boolean>>({
     key: "piep.nav-groups.v1",
@@ -126,6 +128,7 @@ export function WorkspaceNav({ railed, onNavigate }: { railed: boolean; onNaviga
     queryKey: ["deferred-candidate-count"],
     queryFn: () => runtime ? countSavedDeferredUpdateCandidatesCommand() : Promise.resolve(0),
     staleTime: 30_000,
+    enabled: visibleShelves.attention,
   });
   const savedSearches = useQuery({
     queryKey: ["saved-searches"],
@@ -160,7 +163,7 @@ export function WorkspaceNav({ railed, onNavigate }: { railed: boolean; onNaviga
     return data.revised;
   };
 
-  const shelfRows = LIBRARY_SHELVES.map((item) => (
+  const shelfRows = LIBRARY_SHELVES.filter((item) => item.value === "all" || visibleShelves[item.value]).map((item) => (
     <Row
       key={item.value}
       label={item.label}
@@ -171,7 +174,7 @@ export function WorkspaceNav({ railed, onNavigate }: { railed: boolean; onNaviga
       onSelect={() => go(item.search ? `/library?${item.search}` : "/library", { scroll: "top" })}
     />
   ));
-  const attentionRow = <Row key="attention" label="要確認" icon={Icons.pending} active={onAttention} railed={railed} count={attentionCount.data ?? null} onSelect={() => go("/library?acquisition=attention", { scroll: "top" })} />;
+  const attentionRow = visibleShelves.attention ? <Row key="attention" label="要確認" icon={Icons.pending} active={onAttention} railed={railed} count={attentionCount.data ?? null} onSelect={() => go("/library?acquisition=attention", { scroll: "top" })} /> : null;
   const savedRows = saved.map((item) => (
     <Row
       key={item.id}
