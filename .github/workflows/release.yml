@@ -11,7 +11,7 @@ on:
 # verified on would ship binaries no one has ever started.
 #
 # ここでは試験を走らせない。同じコミットの main 上の Quality 成功を
-# 下のゲートで確認し、同じ試験を二重に走らせない。
+# 下のゲートでQualityとDocsのcontract成功を確認し、同じ試験を二重に走らせない。
 #
 # tauri-action は下書きの配布として作る。公開は別の操作で行う。
 jobs:
@@ -42,7 +42,7 @@ jobs:
             throw "Tag $expected does not match version files: $($versions -join ', ')"
           }
 
-      - name: Require Quality success on main for the tagged commit
+      - name: Require Quality and contract success on main for the tagged commit
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -60,6 +60,20 @@ jobs:
               break
             }
             if ($attempt -eq 59) { throw "Quality has not succeeded for $commit" }
+            Start-Sleep -Seconds 30
+          }
+          for ($attempt = 0; $attempt -lt 60; $attempt++) {
+            $runs = @(gh run list --workflow docs.yml --commit $commit --branch main --limit 100 --json databaseId,createdAt,event,headSha | ConvertFrom-Json)
+            $latest = $runs | Where-Object { $_.headSha -eq $commit -and $_.event -eq 'push' } | Sort-Object createdAt -Descending | Select-Object -First 1
+            if ($latest) {
+              $details = gh run view $latest.databaseId --json jobs | ConvertFrom-Json
+              $contract = $details.jobs | Where-Object { $_.name -eq 'contract' } | Select-Object -First 1
+              if ($contract.status -eq 'completed') {
+                if ($contract.conclusion -ne 'success') { throw "Contract for $commit ended with $($contract.conclusion)" }
+                break
+              }
+            }
+            if ($attempt -eq 59) { throw "Contract has not succeeded for $commit" }
             Start-Sleep -Seconds 30
           }
 
