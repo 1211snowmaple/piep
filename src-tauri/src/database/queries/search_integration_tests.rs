@@ -9842,6 +9842,25 @@ fn the_extended_length_prefix_does_not_split_one_file_into_two() {
         comparable_library_path(plain),
         comparable_library_path(shouting)
     );
+    assert_eq!(
+        comparable_library_path(plain),
+        comparable_library_path(Path::new("C:/lib/downloads/pixiv/1/v1/cover.jpg"))
+    );
+}
+
+#[test]
+fn diagnostics_count_hardlinked_file_bytes_once_without_hiding_separate_paths() {
+    let (_temp, root, storage) = temp_paths();
+    let images = storage.join("pixiv/shared/v1/data_assets/illustrations");
+    fs::create_dir_all(&images).unwrap();
+    fs::write(images.join("first.jpg"), b"1234").unwrap();
+    fs::hard_link(images.join("first.jpg"), images.join("second.jpg")).unwrap();
+    let stats =
+        collect_diagnostic_file_stats(&storage, &root.join("search"), &mut |_| Ok(false)).unwrap();
+    assert_eq!(stats.storage_size_bytes, 8);
+    assert_eq!(stats.storage_unique_file_bytes, Some(4));
+    assert_eq!(stats.orphan_asset_files, 2);
+    assert_eq!(stats.unregistered_asset_samples.len(), 2);
 }
 
 #[test]

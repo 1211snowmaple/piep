@@ -378,7 +378,7 @@ fn comparable_library_path(path: &Path) -> String {
     const EXTENDED_LENGTH_PREFIX: &str = r"\\?\";
     let text = path.to_string_lossy();
     let trimmed = text.strip_prefix(EXTENDED_LENGTH_PREFIX).unwrap_or(&text);
-    trimmed.to_lowercase()
+    trimmed.replace('/', "\\").to_lowercase()
 }
 
 /// Compare every path stored in SQLite with the actual storage tree without
@@ -620,16 +620,52 @@ impl Default for DiagnosticScanLimits {
 #[derive(Debug, Default, PartialEq, Eq)]
 struct DiagnosticFileStats {
     storage_size_bytes: u64,
+    storage_unique_file_bytes: Option<u64>,
     lexical_index_size_bytes: u64,
     lexical_index_file_count: u64,
     lexical_index_segment_count: u64,
     semantic_index_size_bytes: u64,
     orphan_asset_files: u64,
     orphan_asset_file_bytes: u64,
+    unregistered_asset_samples: Vec<LibraryFileIssue>,
     transient_files: u64,
     transient_file_bytes: u64,
     transient_file_samples: Vec<LibraryFileIssue>,
     visited_entries: usize,
+}
+
+#[cfg(windows)]
+fn diagnostic_file_identity(path: &Path, _metadata: &std::fs::Metadata) -> Option<(u64, u64)> {
+    use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
+    use windows::Win32::{
+        Foundation::HANDLE,
+        Storage::FileSystem::{
+            GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_READ_ATTRIBUTES,
+        },
+    };
+    let file = std::fs::OpenOptions::new()
+        .access_mode(FILE_READ_ATTRIBUTES.0)
+        .share_mode(1 | 2 | 4)
+        .open(path)
+        .ok()?;
+    let mut info = BY_HANDLE_FILE_INFORMATION::default();
+    // The std file owns the handle for the whole query, including error paths.
+    unsafe {
+        GetFileInformationByHandle(HANDLE(file.as_raw_handle()), &mut info).ok()?;
+    }
+    let index = (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow);
+    (index != 0).then_some((u64::from(info.dwVolumeSerialNumber), index))
+}
+
+#[cfg(unix)]
+fn diagnostic_file_identity(_path: &Path, metadata: &std::fs::Metadata) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    Some((metadata.dev(), metadata.ino()))
+}
+
+#[cfg(not(any(windows, unix)))]
+fn diagnostic_file_identity(_path: &Path, _metadata: &std::fs::Metadata) -> Option<(u64, u64)> {
+    None
 }
 
 fn diagnostic_path_is_transient(path: &Path) -> bool {
@@ -676,8 +712,12 @@ fn collect_diagnostic_file_stats_with_limits(
         return Err("Diagnostic scan entry limit must be positive".to_string());
     }
     let lexical_root = storage_root.join("search-index");
-    let mut stats = DiagnosticFileStats::default();
+    let mut stats = DiagnosticFileStats {
+        storage_unique_file_bytes: Some(0),
+        ..Default::default()
+    };
     let mut visited_directories = HashSet::new();
+    let mut physical_files = HashSet::new();
 
     for root in diagnostic_scan_roots(storage_root, semantic_root) {
         let root_metadata = match std::fs::symlink_metadata(&root) {
@@ -747,6 +787,15 @@ fn collect_diagnostic_file_stats_with_limits(
                 let in_storage = path.starts_with(storage_root);
                 if in_storage {
                     stats.storage_size_bytes = stats.storage_size_bytes.saturating_add(bytes);
+                    match diagnostic_file_identity(&path, &metadata) {
+                        Some(identity) if physical_files.insert(identity) => {
+                            stats.storage_unique_file_bytes = stats
+                                .storage_unique_file_bytes
+                                .map(|total| total.saturating_add(bytes));
+                        }
+                        None => stats.storage_unique_file_bytes = None,
+                        _ => {}
+                    }
                     if diagnostic_path_is_transient(&path) {
                         stats.transient_files = stats.transient_files.saturating_add(1);
                         stats.transient_file_bytes =
@@ -789,6 +838,16 @@ fn collect_diagnostic_file_stats_with_limits(
                     stats.orphan_asset_files = stats.orphan_asset_files.saturating_add(1);
                     stats.orphan_asset_file_bytes =
                         stats.orphan_asset_file_bytes.saturating_add(bytes);
+                    if stats.unregistered_asset_samples.len() < DIAGNOSTIC_FILE_ISSUE_SAMPLE_LIMIT {
+                        stats.unregistered_asset_samples.push(LibraryFileIssue {
+                            issue_type: "unregistered".to_string(),
+                            category: "work_asset".to_string(),
+                            path: bounded_diagnostic_path(path.to_string_lossy().as_ref()),
+                            label: None,
+                            expected_size_bytes: None,
+                            actual_size_bytes: Some(bytes),
+                        });
+                    }
                 }
             }
         }
@@ -3252,7 +3311,7 @@ impl Database {
     /// `last_fetched_at = NULL` のまま残る。専用の一時キューではなく、この
     /// 永続状態を再試行リストとして使うので、再起動しても取りこぼさない。
     pub fn incomplete_entity_profiles(&self) -> Result<Vec<IncompleteEntityProfile>, String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let conn = self.read_conn()?;
         let mut statement = conn
             .prepare(
                 "SELECT entity_type, source, source_key, display_name
@@ -3293,7 +3352,7 @@ impl Database {
     }
 
     pub fn entity_profile_repair_status(&self) -> Result<EntityProfileRepairStatus, String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let conn = self.read_conn()?;
         conn.query_row(
             "SELECT
                 (SELECT COUNT(*) FROM people p
@@ -7058,6 +7117,7 @@ impl Database {
             database_size_bytes: file_size_or_zero(&self.db_path),
             wal_size_bytes: file_size_or_zero(&wal_path),
             storage_size_bytes: diagnostic_file_stats.storage_size_bytes,
+            storage_unique_file_bytes: diagnostic_file_stats.storage_unique_file_bytes,
             lexical_index_size_bytes: diagnostic_file_stats.lexical_index_size_bytes,
             lexical_index_file_count: diagnostic_file_stats.lexical_index_file_count,
             lexical_index_segment_count: diagnostic_file_stats.lexical_index_segment_count,
@@ -7071,6 +7131,7 @@ impl Database {
             orphan_asset_bytes,
             orphan_asset_files: diagnostic_file_stats.orphan_asset_files,
             orphan_asset_file_bytes: diagnostic_file_stats.orphan_asset_file_bytes,
+            unregistered_asset_samples: diagnostic_file_stats.unregistered_asset_samples,
             checked_file_references: file_integrity.checked_file_references,
             missing_json_files: file_integrity.missing_json_files,
             missing_asset_files: file_integrity.missing_asset_files,

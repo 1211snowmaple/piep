@@ -129,7 +129,7 @@ test("phone collection list keeps metadata and actions inside each row", async (
 test("critical workspaces keep a stable layout", async ({ page }, testInfo) => {
   test.skip(!testInfo.project.name.endsWith("100dpi"), "Route matrix runs once per size/theme; DPI scaling is covered by the library shell matrix");
   const routes = [
-    ["diagnostics", "/#/diagnostics", "ライブラリ診断"],
+    ["diagnostics", "/#/diagnostics", "診断とメンテナンス"],
     ["operations", "/#/operations", "操作履歴"],
     ["save", "/#/save/pixiv", "Webから保存"],
     ["reader", "/#/reader/101", "雨上がりの図書室で"],

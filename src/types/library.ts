@@ -169,6 +169,7 @@ export interface LibraryDiagnostics {
   databaseSizeBytes: number;
   walSizeBytes: number;
   storageSizeBytes: number;
+  storageUniqueFileBytes?: number | null;
   lexicalIndexSizeBytes: number;
   lexicalIndexFileCount: number;
   lexicalIndexSegmentCount: number;
@@ -182,6 +183,7 @@ export interface LibraryDiagnostics {
   orphanAssetBytes: number;
   orphanAssetFiles: number;
   orphanAssetFileBytes: number;
+  unregisteredAssetSamples?: LibraryFileIssue[];
   checkedFileReferences: number;
   missingJsonFiles: number;
   missingAssetFiles: number;

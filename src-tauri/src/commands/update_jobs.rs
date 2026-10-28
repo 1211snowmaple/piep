@@ -2467,7 +2467,7 @@ enum ItemOutcome {
 
 /// 失敗の種類。同じ「エラー1件」でも、次にすべきことが違う。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FailureKind {
+pub(super) enum FailureKind {
     /// 再接続が要る。ジョブを止めて利用者に知らせる。
     Auth,
     /// 取得が制限されている。間隔を空けて、この項目はやり直す。
@@ -2498,7 +2498,7 @@ impl FailureKind {
     }
 }
 
-fn classify_failure(error: &str) -> FailureKind {
+pub(super) fn classify_failure(error: &str) -> FailureKind {
     let normalized = error.to_ascii_lowercase();
     let has = |markers: &[&str]| markers.iter().any(|marker| normalized.contains(marker));
 
