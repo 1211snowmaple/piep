@@ -16,3 +16,9 @@ export function parseAcquisitionFilter(value: unknown): LibraryAcquisitionFilter
 export function acquisitionFilterName(value: LibraryAcquisitionFilter): string {
   return acquisitionFilters.find((filter) => filter.value === value)?.label ?? "要確認";
 }
+
+export function acquisitionStatusMeta(value: string): { label: string; color: string } {
+  const kind = parseAcquisitionFilter(value);
+  if (!kind || kind === "attention") return { label: "保留", color: "gray" };
+  return { label: acquisitionFilterName(kind), color: kind === "dismissed" ? "gray" : kind === "restricted" || kind === "unavailable" ? "yellow" : "orange" };
+}

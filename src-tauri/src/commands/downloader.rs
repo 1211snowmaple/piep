@@ -944,6 +944,48 @@ pub async fn fetch_pixiv_novel_by_url(
     })
 }
 
+fn pixiv_illustrations_were_recovered(
+    previous: &serde_json::Value,
+    next: &serde_json::Value,
+    assets: &[crate::database::AssetEntry],
+) -> bool {
+    let missing_before = crate::database::queries::saved_pixiv_missing_references(previous, assets);
+    if missing_before.is_empty() {
+        return false;
+    }
+    let mut targets = Vec::new();
+    crate::downloader::asset_downloader::extract_download_targets(next, false, &mut targets);
+    let missing_after = crate::database::queries::pixiv_missing_references_for_filenames(
+        next,
+        targets.into_iter().map(|target| target.filename),
+    );
+    missing_before
+        .iter()
+        .any(|reference| !missing_after.contains(reference))
+}
+
+#[cfg(test)]
+mod pixiv_asset_recovery_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn an_unmarked_legacy_reference_can_recover_without_a_body_change() {
+        let previous = json!({"text":"本文[pixivimage:123]"});
+        let next = json!({"text":"本文[pixivimage:123]","illusts":{"123":{"pages":[{"urls":{"original":"https://example.com/123.jpg"}}]}}});
+        assert!(pixiv_illustrations_were_recovered(&previous, &next, &[]));
+    }
+
+    #[test]
+    fn an_invalid_source_reference_does_not_keep_creating_versions() {
+        let previous =
+            json!({"text":"本文[pixivimage:id=123][pixivimage:123-0][uploadedimage:missing]"});
+        let mut next = previous.clone();
+        next["missing_illustrations"] = json!([]);
+        assert!(!pixiv_illustrations_were_recovered(&previous, &next, &[]));
+    }
+}
+
 /// 本文テキストのハッシュ値、文字数、更新時間を算出する（Pixivはメタデータを含む統合ハッシュ）
 pub(crate) fn compute_content_details(
     data: &serde_json::Value,
@@ -2156,20 +2198,17 @@ pub async fn download_and_save(
         }
 
         let hash_changed = dl.content_hash.as_deref() != Some(&new_hash);
+        let previous_pixiv_assets = if source == "pixiv" {
+            state.db.get_assets(dl.id)?
+        } else {
+            Vec::new()
+        };
         let pixiv_illustrations_recovered = if source == "pixiv" {
             std::fs::read_to_string(&dl.json_path)
                 .ok()
                 .and_then(|body| serde_json::from_str::<serde_json::Value>(&body).ok())
                 .map(|previous| {
-                    let old = previous
-                        .get("missing_illustrations")
-                        .and_then(serde_json::Value::as_array)
-                        .map_or(0, Vec::len);
-                    let new = data
-                        .get("missing_illustrations")
-                        .and_then(serde_json::Value::as_array)
-                        .map_or(0, Vec::len);
-                    old > new
+                    pixiv_illustrations_were_recovered(&previous, &data, &previous_pixiv_assets)
                 })
                 .unwrap_or(false)
         } else {

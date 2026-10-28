@@ -3684,12 +3684,16 @@ async fn process_candidate_item(
             None,
         )
         .await?;
-        if !data.missing_illustrations.is_empty() {
+        let missing = crate::database::queries::saved_pixiv_missing_references(
+            &value,
+            &state.db.get_assets(updated.id)?,
+        );
+        if !missing.is_empty() {
             return Ok(ItemOutcome::PartialSaved(
                 updated.id,
                 format!(
                     "本文は保存しましたが、参照先の挿絵を閲覧できません: {}。候補を残して再試行できます",
-                    data.missing_illustrations.join(", ")
+                    missing.join(", ")
                 ),
             ));
         }

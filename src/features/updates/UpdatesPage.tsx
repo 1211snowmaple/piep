@@ -37,7 +37,9 @@ import { PageHeader } from "@/components/PageHeader";
 import { updateJobStatusMeta, invalidateAfterUpdateJob, isUpdateJobTerminal, useUpdateJobs, type UpdateJobSnapshot, type UpdateJobSummary } from "@/features/updates/updateJobs";
 import { DeferredCandidatesPanel } from "./DeferredCandidatesPanel";
 import { UpdateWorkLinks, formatUpdateSubtitle } from "./UpdateWorkLinks";
-import { heldReason, summarizeUpdateJobItems, updateJobSubject } from "./updateJobOutcome";
+import { UpdateStatusBadge } from "./UpdateStatusBadge";
+import { heldAcquisitionKind, heldReason, summarizeUpdateJobItems, updateJobSubject } from "./updateJobOutcome";
+import { acquisitionStatusMeta } from "@/lib/acquisition";
 import { errorMessage, formatDate, formatNumber } from "@/lib/format";
 import { ProviderMark } from "@/lib/providers";
 import { deleteUpdateTarget, isTauriRuntime, listUpdateTargets, searchDownloadsV2, setUpdateTargetEnabled, upsertUpdateTarget } from "@/services/dbApi";
@@ -588,13 +590,13 @@ export function JobResultsPanel({ job, subject, items, loading, error, onRetry, 
       {result.held.slice(0, visibleHeldCount).map((item, index) => {
         const reason = heldReason(item);
         return <Paper key={`${item.source}:${item.sourceId}:${index}`} p="sm" withBorder>
-          <Group gap="xs" align="center" wrap="nowrap">
-            <Badge color={reason === "error" || reason === "partial" ? "orange" : "yellow"} variant="light" style={{ flex: "none" }}>{reason === "partial" ? "一部保存" : reason === "missing" ? "公開元で見つからない" : reason === "access" ? "閲覧条件待ち" : reason === "error" ? "取得エラー" : "保留"}</Badge>
+          <Group gap="xs" align="flex-start" wrap="nowrap">
+            {item.source && <ProviderMark provider={item.source} compact />}
             <Stack gap={3} miw={0} style={{ flex: 1 }}>
               <Text size="sm" fw={600}>{item.title || item.sourceId || "作品"}</Text>
-              <Text size="xs" c="dimmed">{item.source} · {item.sourceId}</Text>
-              <Text size="sm" c="dimmed">{item.error || (reason === "missing" ? "公開元で投稿が見つかりません。保存済みの内容は保持されています。" : "確認を保留しました。詳しくはログをご覧ください。")}</Text>
+              <Text size="xs" c="dimmed">{item.sourceId}</Text>
             </Stack>
+            <UpdateStatusBadge title={item.title || item.sourceId || "作品"} {...acquisitionStatusMeta(heldAcquisitionKind(reason))} detail={item.error || "確認を保留しました。保存済みの内容は保持されています。"} />
             {item.source && item.sourceId && <UpdateWorkLinks source={item.source} sourceId={item.sourceId} downloadId={item.downloadId} title={item.title || item.sourceId} onOpenWork={onOpenWork} />}
           </Group>
         </Paper>;
@@ -932,9 +934,8 @@ export function CandidatesPanel({ candidates, selectedIds, selectableIds, runnin
                   <Text size="sm" fw={650}>{candidate.title}</Text>
                 </Group>
                 <Text size="xs" c="dimmed" className="line-clamp-1">{candidate.targetLabel} · {formatUpdateSubtitle(candidate.subtitle)}</Text>
-                {candidate.error && <Text size="xs" c={candidate.status === "held" ? "dimmed" : "red"}>{errorMessage(candidate.error)}</Text>}
               </Stack>
-              <Badge color={candidate.status === "failed" ? "red" : candidate.status === "saved" ? "green" : "gray"} variant="light" style={{ flex: "none" }}>{candidateStatusLabel(candidate.status)}</Badge>
+              <UpdateStatusBadge title={candidate.title} {...candidateStatusMeta(candidate)} detail={candidate.error} />
               <UpdateWorkLinks source={candidate.source} sourceId={candidate.sourceId} downloadId={candidate.downloadId} title={candidate.title} onOpenWork={onOpenWork} />
               {isSavableCandidate(candidate) && (
                 <Tooltip label="候補から外す（保留・非表示の一覧から戻せます）">
@@ -994,6 +995,14 @@ function isSavableCandidate(candidate: UpdateJobSnapshot["candidates"][number], 
 
 function candidateStatusLabel(status: UpdateJobSnapshot["candidates"][number]["status"]): string {
   return ({ candidate: "候補", queued: "待機中", running: "保存中", saved: "保存済み", failed: "失敗", held: "保留", skipped: "スキップ", done: "処理済み" } as Record<string, string>)[status] ?? status;
+}
+
+function candidateStatusMeta(candidate: UpdateJobSnapshot["candidates"][number]): { label: string; color: string } {
+  if (candidate.status === "held" || candidate.status === "failed") {
+    const kind = heldAcquisitionKind(heldReason({ error: candidate.error ?? null }));
+    return acquisitionStatusMeta(kind === "held" && candidate.status === "failed" ? "error" : kind);
+  }
+  return { label: candidateStatusLabel(candidate.status), color: candidate.status === "saved" ? "green" : "gray" };
 }
 
 /** 自動確認の状態を一行で。設定画面を開かなくても、いまの約束が読める。 */

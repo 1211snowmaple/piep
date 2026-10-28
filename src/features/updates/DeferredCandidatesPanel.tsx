@@ -1,11 +1,14 @@
 import { useMemo, useState } from "react";
-import { Badge, Button, Card, Checkbox, Group, Pagination, Select, Stack, Text, TextInput } from "@mantine/core";
+import { Button, Card, Checkbox, Group, Pagination, Select, Stack, Text, TextInput } from "@mantine/core";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { notifications } from "@mantine/notifications";
 import { listDeferredUpdateCandidatesCommand, recheckDeferredUpdateCandidatesCommand, type DeferredUpdateCandidate } from "@/services/updateJobApi";
 import { errorMessage } from "@/lib/format";
 import { ErrorState, LoadingState } from "@/components/AsyncState";
 import { UpdateWorkLinks } from "./UpdateWorkLinks";
+import { UpdateStatusBadge } from "./UpdateStatusBadge";
+import { ProviderMark } from "@/lib/providers";
+import { acquisitionStatusMeta } from "@/lib/acquisition";
 
 const PAGE_SIZE = 40;
 
@@ -63,14 +66,15 @@ export function DeferredCandidatesPanel({ runtime, onRechecked, onOpenWork }: { 
     {!rows.length && <Text size="sm" c="dimmed">保留候補はありません。</Text>}
     {visibleRows.map(({ row, reason, category }) => {
       const key = `${row.source}:${row.sourceId}`;
-      const label = ({ dismissed: "非表示", restricted: "閲覧条件待ち", incomplete: "一部保存", unavailable: "見つからない", error: "取得エラー", held: "保留" } as Record<string, string>)[category] ?? "保留";
+      const status = acquisitionStatusMeta(category);
       return <Group key={key} wrap="nowrap" align="flex-start">
         <Checkbox aria-label={`${row.title}を再確認`} checked={selected.has(key)} disabled={mutation.isPending} onChange={(event) => {
           const checked = event.currentTarget.checked;
           setSelected((previous) => { const next = new Set(previous); if (checked) next.add(key); else next.delete(key); return next; });
         }} />
-        <Stack gap={3} style={{ flex: 1, minWidth: 0 }}><Text size="sm" fw={600}>{row.title}</Text><Text size="xs" c="dimmed">{row.source} · {row.sourceId} · {reason}</Text></Stack>
-        <Badge color={category === "dismissed" ? "gray" : category === "restricted" ? "yellow" : "orange"}>{label}</Badge>
+        <ProviderMark provider={row.source} compact />
+        <Stack gap={3} style={{ flex: 1, minWidth: 0 }}><Text size="sm" fw={600}>{row.title}</Text><Text size="xs" c="dimmed">{row.sourceId}</Text></Stack>
+        <UpdateStatusBadge title={row.title} {...status} detail={reason} />
         <UpdateWorkLinks source={row.source} sourceId={row.sourceId} downloadId={row.downloadId} title={row.title} onOpenWork={onOpenWork} />
       </Group>;
     })}
