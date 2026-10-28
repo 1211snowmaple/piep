@@ -2,13 +2,17 @@ import type { UpdateJobItemState, UpdateJobSummary } from "@/services/updateJobA
 
 export type HeldReason = "partial" | "missing" | "access" | "error" | "other";
 
-export function heldReason(item: UpdateJobItemState): HeldReason {
+export function heldReason(item: Pick<UpdateJobItemState, "error">): HeldReason {
   const reason = item.error ?? "";
-  if (reason.includes("[一部保存]")) return "partial";
-  if (reason.includes("公開元で投稿が見つからない") || reason.includes("[見つからない]")) return "missing";
+  if (reason.includes("[一部保存]") || reason.includes("本文は保存しましたが")) return "partial";
+  if (reason.includes("公開元で投稿が見つからない") || reason.includes("公開元で投稿が見つかりません") || reason.includes("[見つからない]")) return "missing";
   if (reason.includes("閲覧制限") || reason.includes("閲覧条件") || reason.includes("必要な支援額")) return "access";
   if (reason.startsWith("[通信エラー]") || reason.startsWith("[エラー]")) return "error";
   return "other";
+}
+
+export function heldAcquisitionKind(reason: HeldReason): string {
+  return ({ partial: "incomplete", missing: "unavailable", access: "restricted", error: "error", other: "held" })[reason];
 }
 
 export function summarizeUpdateJobItems(items: UpdateJobItemState[]) {

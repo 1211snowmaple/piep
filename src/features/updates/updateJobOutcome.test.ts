@@ -22,6 +22,8 @@ describe("update job outcome", () => {
     expect(summary.access).toHaveLength(1);
     expect(summary.other).toHaveLength(0);
     expect(heldReason(item("work", "held", "候補から外しています"))).toBe("other");
+    expect(heldReason(item("work", "held", "公開元で投稿が見つかりません"))).toBe("missing");
+    expect(heldReason(item("work", "held", "本文は保存しましたが、挿絵がありません"))).toBe("partial");
   });
 
   it("names a one-off author check in history", () => {

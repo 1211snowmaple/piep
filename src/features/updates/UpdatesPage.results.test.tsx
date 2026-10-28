@@ -10,7 +10,7 @@ const job = {
   startedAt: "2026-10-07T10:32:14Z", finishedAt: "2026-10-07T10:32:25Z",
 } as UpdateJobSnapshot;
 
-it("shows job-only missing posts in this run's results without sending users to deferred candidates", () => {
+it("shows job-only missing posts in this run's results without sending users to deferred candidates", async () => {
   const items: UpdateJobItemState[] = [
     ...Array.from({ length: 7 }, (_, index) => ({ source: "fanbox", sourceId: `repost-${index}`, itemType: "work", title: `再掲 ${index}`, status: "held", error: "公開元で投稿が見つからないため確認を保留しました" })),
     ...Array.from({ length: 12 }, (_, index) => ({ source: "fanbox", sourceId: `old-${index}`, itemType: "work", title: `旧投稿 ${index}`, status: "skipped", error: null })),
@@ -21,13 +21,15 @@ it("shows job-only missing posts in this run's results without sending users to 
   expect(screen.getByText("氷砂糖 · FANBOX · 作者 · 確認のみ")).toBeInTheDocument();
   expect(screen.getByText(/変更なし・スキップ 12件 · 公開元で見つからない 7件/)).toBeInTheDocument();
   expect(screen.getByText("この回で保留になった作品（7件）")).toBeInTheDocument();
-  expect(screen.getAllByText("公開元で投稿が見つからないため確認を保留しました")).toHaveLength(7);
+  expect(screen.queryByText("公開元で投稿が見つからないため確認を保留しました")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "再掲 0の状態の詳細" }));
+  expect(await screen.findByText("公開元で投稿が見つからないため確認を保留しました")).toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "保留・非表示の作品を開く" })).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "すべてのログを見る" }));
   expect(onShowLogs).toHaveBeenCalledOnce();
 });
 
-it("shows a missing pixiv work as held with its source ID and no job error", () => {
+it("shows a missing pixiv work as held with its source ID and no job error", async () => {
   render(<MantineProvider><JobResultsPanel
     job={{ ...job, totals: 2, processed: 2, heldCount: 1 }}
     items={[
@@ -38,7 +40,9 @@ it("shows a missing pixiv work as held with its source ID and no job error", () 
   /></MantineProvider>);
   expect(screen.getByText(/公開元で見つからない 1件/)).toBeInTheDocument();
   expect(screen.getByText("公開停止のお知らせ")).toBeInTheDocument();
-  expect(screen.getByText(/保存済みの作品ID 90000008 は保持しています/)).toBeInTheDocument();
+  expect(screen.queryByText(/保存済みの作品ID 90000008 は保持しています/)).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "公開停止のお知らせの状態の詳細" }));
+  expect(await screen.findByText(/保存済みの作品ID 90000008 は保持しています/)).toBeInTheDocument();
   expect(screen.queryByText(/エラー 1件/)).not.toBeInTheDocument();
 });
 
