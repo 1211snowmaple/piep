@@ -1,5 +1,5 @@
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use tokio::fs::{self, File};
 use tokio::io::AsyncWriteExt;
@@ -716,23 +716,78 @@ fn extract_filename(url: &str, default: &str) -> String {
     }
 }
 
-fn find_existing_asset_in_other_versions(
-    current_version_dir: &Path,
-    sub_folder: &str,
-    filename: &str,
-    url: &str,
-    is_fanbox: bool,
-) -> Option<PathBuf> {
-    let work_root = current_version_dir.parent()?;
-    let entries = std::fs::read_dir(work_root).ok()?;
-    let normalized_url = url.split('?').next().unwrap_or(url);
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct AssetReuseKey {
+    sub_folder: &'static str,
+    filename: String,
+    source_url: String,
+}
 
-    for entry in entries.flatten() {
-        let version_dir = entry.path();
-        if !version_dir.is_dir() || version_dir == current_version_dir {
-            continue;
+fn asset_reuse_key(target: &DownloadTarget) -> AssetReuseKey {
+    AssetReuseKey {
+        sub_folder: target.sub_folder,
+        filename: target.filename.clone(),
+        source_url: asset_source_identity(&target.url),
+    }
+}
+
+fn asset_source_identity(url: &str) -> String {
+    let Ok(mut parsed) = reqwest::Url::parse(url) else {
+        return url.to_string();
+    };
+    parsed.set_fragment(None);
+    let known_cdn = parsed.host_str().is_some_and(|host| {
+        host == "pximg.net" || host.ends_with(".pximg.net") || host == "downloads.fanbox.cc"
+    });
+    if known_cdn {
+        let mut pairs: Vec<_> = parsed
+            .query_pairs()
+            .filter(|(key, _)| {
+                !matches!(
+                    key.to_ascii_lowercase().as_str(),
+                    "token" | "expires" | "signature" | "policy" | "key-pair-id"
+                )
+            })
+            .map(|(key, value)| (key.into_owned(), value.into_owned()))
+            .collect();
+        pairs.sort();
+        parsed.set_query(None);
+        if !pairs.is_empty() {
+            parsed.query_pairs_mut().extend_pairs(pairs);
         }
+    }
+    parsed.to_string()
+}
 
+fn index_existing_assets_in_other_versions(
+    current_version_dir: &Path,
+    requested: &[DownloadTarget],
+    is_fanbox: bool,
+) -> HashMap<AssetReuseKey, PathBuf> {
+    let mut result = HashMap::new();
+    let Some(work_root) = current_version_dir.parent() else {
+        return result;
+    };
+    let Ok(entries) = std::fs::read_dir(work_root) else {
+        return result;
+    };
+    let requested: HashSet<_> = requested.iter().map(asset_reuse_key).collect();
+    let mut versions: Vec<_> = entries
+        .flatten()
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .map(|entry| entry.path())
+        .filter(|path| path != current_version_dir)
+        .collect();
+    versions.sort_by_key(|path| {
+        std::cmp::Reverse(
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .and_then(|name| name.strip_prefix('v'))
+                .and_then(|number| number.parse::<u64>().ok())
+                .unwrap_or(0),
+        )
+    });
+    for version_dir in versions {
         let json_path = {
             let original = version_dir.join("original.json");
             if original.is_file() {
@@ -749,25 +804,41 @@ fn find_existing_asset_in_other_versions(
         };
         let mut previous_targets = Vec::new();
         extract_download_targets(&json_data, is_fanbox, &mut previous_targets);
-        let same_source_asset = previous_targets.iter().any(|target| {
-            target.sub_folder == sub_folder
-                && target.filename == filename
-                && target.url.split('?').next().unwrap_or(&target.url) == normalized_url
-        });
-        if !same_source_asset {
-            continue;
+        for target in previous_targets {
+            let key = asset_reuse_key(&target);
+            if !requested.contains(&key) || result.contains_key(&key) {
+                continue;
+            }
+            let candidate = version_dir
+                .join("data_assets")
+                .join(target.sub_folder)
+                .join(&target.filename);
+            if validate_asset_file(&candidate, &candidate, MAX_ASSET_DOWNLOAD_BYTES, false).is_ok()
+            {
+                result.insert(key, candidate);
+            }
         }
-
-        let candidate = version_dir
-            .join("data_assets")
-            .join(sub_folder)
-            .join(filename);
-        if validate_asset_file(&candidate, &candidate, MAX_ASSET_DOWNLOAD_BYTES, false).is_ok() {
-            return Some(candidate);
+        if result.len() == requested.len() {
+            break;
         }
     }
+    result
+}
 
-    None
+async fn copy_saved_asset(source: &Path, destination: &Path) -> Result<(), String> {
+    let mut pending = create_unique_part_file(destination).await?;
+    pending.file.take();
+    fs::copy(source, &pending.path)
+        .await
+        .map_err(|error| format!("Local asset copy failed: {error}"))?;
+    if !asset_file_is_valid(&pending.path, destination, MAX_ASSET_DOWNLOAD_BYTES, false).await {
+        return Err("Local asset copy did not pass validation".to_string());
+    }
+    fs::rename(&pending.path, destination)
+        .await
+        .map_err(|error| error.to_string())?;
+    pending.published = true;
+    Ok(())
 }
 
 /// 全てのアセットを一括並行ダウンロードし、ローカルリンクをバインドする
@@ -868,11 +939,18 @@ pub async fn download_and_link_assets(
         .map_err(|error| format!("Asset HTTP client creation failed: {error}"))?;
     let mut join_set = JoinSet::new();
     let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(ASSET_DOWNLOAD_CONCURRENCY));
+    let previous_dir = parent_dir.to_path_buf();
+    let requested = download_targets.clone();
+    let reusable_assets = tokio::task::spawn_blocking(move || {
+        index_existing_assets_in_other_versions(&previous_dir, &requested, is_fanbox)
+    })
+    .await
+    .map_err(|error| format!("Saved asset inspection failed: {error}"))?;
 
     for target in download_targets {
+        let existing_path = reusable_assets.get(&asset_reuse_key(&target)).cloned();
         let dest_folder = assets_dir.join(target.sub_folder);
         let dest_path = dest_folder.join(&target.filename);
-        let current_version_dir = parent_dir.to_path_buf();
         let url = target.url.clone();
         let client_clone = client.clone();
         let referer_str = referer.to_string();
@@ -881,7 +959,6 @@ pub async fn download_and_link_assets(
         let ua_clone = user_agent.clone();
         let sem = semaphore.clone();
         let filename = target.filename.clone();
-        let sub_folder = target.sub_folder;
         let canonical_assets_dir = canonical_assets_dir.clone();
 
         join_set.spawn(async move {
@@ -917,16 +994,11 @@ pub async fn download_and_link_assets(
                 }
             }
 
-            if let Some(existing_path) =
-                find_existing_asset_in_other_versions(
-                    &current_version_dir,
-                    sub_folder,
-                    &filename,
-                    &url,
-                    is_fanbox,
-                )
-            {
-                match std::fs::hard_link(&existing_path, &dest_path) {
+            let _permit = sem.acquire_owned()
+                .await
+                .map_err(|e| format!("Failed to acquire semaphore permit: {}", e))?;
+            if let Some(existing_path) = existing_path {
+                match fs::hard_link(&existing_path, &dest_path).await {
                     Ok(_) => {
                         let msg = format!(
                             "[INFO] 過去バージョンの同一アセットを再利用しました: {}",
@@ -936,19 +1008,14 @@ pub async fn download_and_link_assets(
                         return Ok::<(), String>(());
                     }
                     Err(e) => {
-                        log::warn!(
-                            "Failed to hard-link existing asset {:?} -> {:?}: {}. Falling back to download.",
-                            existing_path,
-                            dest_path,
-                            e
-                        );
+                        log::debug!("Hard link unavailable for {filename}: {e}; trying local copy");
+                        match copy_saved_asset(&existing_path, &dest_path).await {
+                            Ok(()) => { log::info!("過去バージョンのアセットをローカルコピーしました: {filename}"); return Ok(()); }
+                            Err(error) => log::warn!("保存済みアセットを再利用できません: {filename}: {error}"),
+                        }
                     }
                 }
             }
-
-            let _permit = sem.acquire_owned()
-                .await
-                .map_err(|e| format!("Failed to acquire semaphore permit: {}", e))?;
 
             let msg = format!("[INFO] アセットのダウンロードを開始: {} -> {}", url, filename);
             log::info!("{}", msg);
@@ -1122,6 +1189,94 @@ mod tests {
                 .to_string_lossy()
                 .ends_with(".part")
         }));
+    }
+
+    #[test]
+    fn version_reuse_matches_the_source_asset_and_skips_damaged_files() {
+        let root = test_directory("version_reuse");
+        let mut paths = Vec::new();
+        for (version, url) in [
+            (1, "https://i.pximg.net/old.png?token=old"),
+            (2, "https://i.pximg.net/new.png"),
+        ] {
+            let dir = root.join(format!("v{version}"));
+            let folder = dir.join("data_assets/illustrations");
+            std::fs::create_dir_all(&folder).unwrap();
+            let path = folder.join("123_p0.png");
+            image::RgbImage::from_pixel(2, 2, image::Rgb([version as u8, 20, 30]))
+                .save(&path)
+                .unwrap();
+            std::fs::write(
+                dir.join("original.json"),
+                json!({"illusts":{"123":{"pages":[{"urls":{"original":url}}]}}}).to_string(),
+            )
+            .unwrap();
+            paths.push(path);
+        }
+        let current = root.join("v3");
+        std::fs::create_dir_all(&current).unwrap();
+        let mut request = DownloadTarget {
+            url: "https://i.pximg.net/old.png?token=renewed".into(),
+            sub_folder: "illustrations",
+            filename: "123_p0.png".into(),
+        };
+        let reused = index_existing_assets_in_other_versions(
+            &current,
+            std::slice::from_ref(&request),
+            false,
+        );
+        assert_eq!(reused.get(&asset_reuse_key(&request)), Some(&paths[0]));
+        request.url = "https://i.pximg.net/new.png".into();
+        assert_eq!(
+            index_existing_assets_in_other_versions(
+                &current,
+                std::slice::from_ref(&request),
+                false
+            )
+            .get(&asset_reuse_key(&request)),
+            Some(&paths[1])
+        );
+        std::fs::write(&paths[1], b"broken image").unwrap();
+        assert!(index_existing_assets_in_other_versions(&current, &[request], false).is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn local_copy_fallback_is_validated_and_published_atomically() {
+        let root = test_directory("local_copy");
+        let source = root.join("source.png");
+        let destination = root.join("destination.png");
+        image::RgbImage::from_pixel(2, 2, image::Rgb([10, 20, 30]))
+            .save(&source)
+            .unwrap();
+        copy_saved_asset(&source, &destination).await.unwrap();
+        assert_eq!(
+            std::fs::read(&source).unwrap(),
+            std::fs::read(&destination).unwrap()
+        );
+        let broken = root.join("broken.png");
+        let rejected = root.join("rejected.png");
+        std::fs::write(&broken, b"partial image").unwrap();
+        assert!(copy_saved_asset(&broken, &rejected).await.is_err());
+        assert!(!rejected.exists());
+        assert_no_part_files(&root);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn asset_identity_keeps_content_queries_and_only_ignores_known_cdn_auth_tokens() {
+        assert_eq!(
+            asset_source_identity("https://i.pximg.net/a.jpg?width=100&token=old"),
+            asset_source_identity("https://i.pximg.net/a.jpg?token=new&width=100")
+        );
+        assert_ne!(
+            asset_source_identity("https://i.pximg.net/a.jpg?width=100"),
+            asset_source_identity("https://i.pximg.net/a.jpg?width=200")
+        );
+        assert_ne!(
+            asset_source_identity("https://example.com/a.jpg?token=one"),
+            asset_source_identity("https://example.com/a.jpg?token=two")
+        );
     }
 
     #[test]
