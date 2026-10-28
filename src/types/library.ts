@@ -500,6 +500,7 @@ export type LibraryVersionScope = "current" | "all";
 export type LibraryAssetFilter = "has_assets" | "no_assets" | "has_images" | "has_files" | "has_images_and_files";
 export type LibrarySeriesFilter = "in_series" | "standalone";
 export type LibraryRevisionFilter = "revised" | "first_version";
+export type LibraryAcquisitionFilter = "attention" | "incomplete" | "unavailable" | "restricted" | "error" | "dismissed";
 export type LibraryEditFilter = "edited" | "unedited";
 export type LibraryCoverFilter = "has_cover" | "no_cover";
 export type LibraryDateField = "downloaded_at" | "source_created_at" | "source_updated_at";
@@ -530,7 +531,7 @@ export interface SearchV2Params {
   assetFilter?: LibraryAssetFilter | null;
   seriesFilter?: LibrarySeriesFilter | null;
   revisionFilter?: LibraryRevisionFilter | null;
-  acquisitionFilter?: "attention" | "incomplete" | null;
+  acquisitionFilter?: LibraryAcquisitionFilter | null;
   editFilter?: LibraryEditFilter | null;
   coverFilter?: LibraryCoverFilter | null;
   dateField?: LibraryDateField | null;

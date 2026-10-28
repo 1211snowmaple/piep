@@ -67,7 +67,7 @@ fn convert_pixiv(data: &Value, assets_dir: &Path) -> EpubManifest {
         .unwrap_or_else(|| raw_text.chars().count() as u64);
 
     let pages = convert_pixiv_text_to_pages(&raw_text);
-    let cover_image = find_cover_image(assets_dir);
+    let cover_image = find_cover_image(assets_dir, data);
     let illustrations = find_illustrations(assets_dir);
     let source_url = format!("https://www.pixiv.net/novel/show.php?id={}", novel_id);
 
@@ -167,7 +167,7 @@ fn convert_fanbox(data: &Value, assets_dir: &Path) -> EpubManifest {
         .unwrap_or_default();
 
     let (pages, text_length, attachments) = convert_fanbox_body_to_pages(data);
-    let cover_image = find_cover_image(assets_dir);
+    let cover_image = find_cover_image(assets_dir, data);
     let illustrations = find_illustrations(assets_dir);
     let source_url = format!("https://{}.fanbox.cc/posts/{}", creator_id, post_id);
     let post_type = read_str(data.get("type"));
@@ -1072,12 +1072,35 @@ fn read_usize(value: Option<&Value>) -> Option<usize> {
 }
 
 /// data_assets ディレクトリからカバー画像を検索
-fn find_cover_image(assets_dir: &Path) -> Option<EpubImage> {
+fn find_cover_image(assets_dir: &Path, data: &Value) -> Option<EpubImage> {
     let cover_dir = assets_dir.join("cover");
-    let entries = std::fs::read_dir(&cover_dir).ok()?;
-    for entry in entries.flatten() {
-        let path = entry.path();
+    let preferred = data
+        .get("localCoverPath")
+        .and_then(Value::as_str)
+        .map(|path| {
+            let path = Path::new(path);
+            if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                assets_dir.parent().unwrap_or(assets_dir).join(path)
+            }
+        });
+    let mut paths: Vec<_> = std::fs::read_dir(&cover_dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .collect();
+    paths.sort();
+    for path in preferred.into_iter().chain(paths) {
         if !path.is_file() {
+            continue;
+        }
+        if path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("limit_r18_") || name.starts_with("limit_r18g_"))
+        {
             continue;
         }
         let Some(mime) = image_mime(&path) else {
@@ -1166,6 +1189,29 @@ fn natural_key(value: &str) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn repaired_cover_is_used_even_when_the_old_gate_image_remains() {
+        let root =
+            std::env::temp_dir().join(format!("piep-cover-selection-{:x}", rand::random::<u64>()));
+        let assets = root.join("data_assets");
+        let covers = assets.join("cover");
+        std::fs::create_dir_all(&covers).unwrap();
+        std::fs::write(covers.join("limit_r18g_100.png"), b"gate").unwrap();
+        std::fs::write(covers.join("a-previous.jpg"), b"previous").unwrap();
+        let selected = covers.join("z-current.jpg");
+        std::fs::write(&selected, b"current").unwrap();
+        let image = find_cover_image(&assets, &json!({"localCoverPath": selected})).unwrap();
+        assert_eq!(Path::new(&image.local_path), selected);
+        std::fs::remove_file(covers.join("a-previous.jpg")).unwrap();
+        let image = find_cover_image(
+            &assets,
+            &json!({"localCoverPath":"./data_assets/cover/limit_r18g_100.png"}),
+        )
+        .unwrap();
+        assert_eq!(Path::new(&image.local_path), selected);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     fn pixiv(text: &str) -> EpubManifest {
         convert_pixiv(

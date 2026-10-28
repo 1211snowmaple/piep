@@ -22,3 +22,18 @@ it("keeps held works reversible and checks only the explicit selection", async (
   await waitFor(() => expect(mocks.recheck).toHaveBeenCalledWith(["fanbox:11"], false));
   expect(onRechecked).toHaveBeenCalledWith("permission-check");
 });
+
+it("renders one page at a time and selects only visible works", async () => {
+  mocks.list.mockResolvedValue(Array.from({ length: 41 }, (_, index) => ({
+    source: "pixiv", sourceId: String(index + 1), title: `作品${index + 1}`,
+    status: "held", payloadJson: '{}',
+  })));
+  render(<MantineProvider><QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><DeferredCandidatesPanel runtime onRechecked={vi.fn()} /></QueryClientProvider></MantineProvider>);
+  await screen.findByText("作品1");
+  expect(screen.queryByText("作品41")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "表示分を選択" }));
+  expect(screen.getByRole("button", { name: "候補に戻す（40）" })).toBeEnabled();
+  fireEvent.click(screen.getByRole("button", { name: "2" }));
+  expect(screen.getByText("作品41")).toBeInTheDocument();
+  expect(screen.queryByText("作品1")).not.toBeInTheDocument();
+});

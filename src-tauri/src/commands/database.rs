@@ -328,8 +328,20 @@ pub fn start_automatic_cover_repair(app: tauri::AppHandle) {
             }
         };
         let mut changed = Vec::new();
+        let mut repaired_total = 0usize;
         let mut consecutive_connection_failures = 0usize;
+        let state = app.state::<Arc<AppState>>().inner().clone();
         for (id, source_id, json_path, old_cover) in rows {
+            loop {
+                match state.db.has_active_update_job() {
+                    Ok(false) => break,
+                    Ok(true) => sleep(Duration::from_secs(2)).await,
+                    Err(error) => {
+                        log::warn!("保存処理の状態を確認できないため表紙修復を中断します: {error}");
+                        return;
+                    }
+                }
+            }
             sleep(Duration::from_millis(600)).await;
             let result: Result<bool, String> = async {
                 let novel = match web.novel(&source_id).await {
@@ -375,6 +387,7 @@ pub fn start_automatic_cover_repair(app: tauri::AppHandle) {
             match result {
                 Ok(true) => {
                     changed.push(id);
+                    repaired_total += 1;
                     consecutive_connection_failures = 0;
                 }
                 Ok(false) => {
@@ -403,6 +416,7 @@ pub fn start_automatic_cover_repair(app: tauri::AppHandle) {
         if !changed.is_empty() {
             let _ = app.emit("covers-repaired", &changed);
         }
+        log::info!("代替表紙の修復を終了しました: {repaired_total}件");
     });
 }
 

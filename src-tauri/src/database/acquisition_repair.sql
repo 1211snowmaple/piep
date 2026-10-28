@@ -41,8 +41,10 @@ SELECT i.source, i.source_id,
        i.target_type, 'held', i.created_at, i.updated_at
 FROM update_job_items i
 WHERE i.item_type IN ('candidate', 'work') AND i.source IS NOT NULL AND i.source_id IS NOT NULL
-  AND i.status='failed' AND (i.error LIKE '%本文は保存しましたが%'
-       OR i.error LIKE '%[見つからない]%' OR i.error LIKE '%公開元で投稿が見つかりません%')
+  AND i.status IN ('failed','held') AND (i.error LIKE '%本文は保存しましたが%'
+       OR i.error LIKE '%[見つからない]%' OR i.error LIKE '%公開元で投稿が見つかりません%'
+       OR i.error LIKE '%公開元で投稿が見つからない%')
+  AND COALESCE(CASE WHEN json_valid(i.payload_json) THEN json_extract(i.payload_json,'$.acquisitionResolved') END,0)=0
   AND i.id=(SELECT MAX(j.id) FROM update_job_items j WHERE j.source=i.source AND j.source_id=i.source_id)
 ON CONFLICT(source, source_id) DO UPDATE SET
     status=CASE WHEN update_candidates.status='dismissed' THEN 'dismissed' ELSE 'held' END,
@@ -54,7 +56,7 @@ UPDATE update_job_items SET status='held',
     error=CASE WHEN error LIKE '%本文は保存しましたが%' THEN '[一部保存] ' || error ELSE error END
 WHERE item_type IN ('candidate', 'work') AND status='failed'
   AND (error LIKE '%本文は保存しましたが%' OR error LIKE '%[見つからない]%'
-       OR error LIKE '%公開元で投稿が見つかりません%');
+       OR error LIKE '%公開元で投稿が見つかりません%' OR error LIKE '%公開元で投稿が見つからない%');
 
 -- Preserve other historical per-work failures in the searchable shelf when
 -- the last attempt still failed. A candidate the user moved after that failure

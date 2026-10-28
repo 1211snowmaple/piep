@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { acquisitionFilters, acquisitionFilterName, parseAcquisitionFilter } from "@/lib/acquisition";
+import type { LibraryAcquisitionFilter } from "@/types/library";
 import {
   ActionIcon,
   Alert,
@@ -114,7 +116,7 @@ interface Filters {
   assetFilter: LibraryAssetFilter | null;
   seriesFilter: LibrarySeriesFilter | null;
   revisionFilter: LibraryRevisionFilter | null;
-  acquisitionFilter: "attention" | "incomplete" | null;
+  acquisitionFilter: LibraryAcquisitionFilter | null;
   editFilter: LibraryEditFilter | null;
   coverFilter: LibraryCoverFilter | null;
   dateField: LibraryDateField;
@@ -323,7 +325,7 @@ function normalizeFilters(value: unknown): Filters {
     assetFilter: parseAssetFilter(candidate.assetFilter),
     seriesFilter: parseSeriesFilter(candidate.seriesFilter),
     revisionFilter: parseRevisionFilter(candidate.revisionFilter),
-    acquisitionFilter: candidate.acquisitionFilter === "attention" || candidate.acquisitionFilter === "incomplete" ? candidate.acquisitionFilter : null,
+    acquisitionFilter: parseAcquisitionFilter(candidate.acquisitionFilter),
     editFilter: parseEditFilter(candidate.editFilter),
     coverFilter: parseCoverFilter(candidate.coverFilter),
     dateField: parseDateField(candidate.dateField),
@@ -1697,7 +1699,7 @@ export default function LibraryPage() {
               {filters.seriesFilter && <FilterChip label={seriesFilterName(filters.seriesFilter)} onRemove={() => setFilters({ ...filters, seriesFilter: null })} />}
               {filters.assetFilter && <FilterChip label={assetFilterName(filters.assetFilter)} onRemove={() => setFilters({ ...filters, assetFilter: null })} />}
               {filters.revisionFilter && <FilterChip label={revisionFilterName(filters.revisionFilter)} onRemove={() => setFilters({ ...filters, revisionFilter: null })} />}
-              {filters.acquisitionFilter && <FilterChip label={filters.acquisitionFilter === "incomplete" ? "本文を一部保存" : "要確認"} onRemove={() => setFilters({ ...filters, acquisitionFilter: null })} />}
+              {filters.acquisitionFilter && <FilterChip label={acquisitionFilterName(filters.acquisitionFilter)} onRemove={() => setFilters({ ...filters, acquisitionFilter: null })} />}
               {filters.editFilter && <FilterChip label={editFilterName(filters.editFilter)} onRemove={() => setFilters({ ...filters, editFilter: null })} />}
               {filters.coverFilter && <FilterChip label={coverFilterName(filters.coverFilter)} onRemove={() => setFilters({ ...filters, coverFilter: null })} />}
               {filters.minChars !== "" && <FilterChip label={`${formatNumber(Number(filters.minChars))}文字以上`} onRemove={() => setFilters({ ...filters, minChars: "" })} />}
@@ -2562,8 +2564,7 @@ function FilterForm({ value, scope, versionScope, tab, runtime, authors, tags, c
     ] : []),
     { id: "revision:revised", label: "改稿された作品", detail: "状態", keywords: "履歴 改稿 バージョン 版", active: draft.revisionFilter === "revised" },
     { id: "revision:first_version", label: "初版のままの作品", detail: "状態", keywords: "初版 未改稿 バージョン", active: draft.revisionFilter === "first_version" },
-    { id: "acquisition:attention", label: "要確認の作品", detail: "状態", keywords: "要確認 保留 取得", active: draft.acquisitionFilter === "attention" },
-    { id: "acquisition:incomplete", label: "本文を一部保存した作品", detail: "状態", keywords: "一部保存 挿絵 欠落", active: draft.acquisitionFilter === "incomplete" },
+    ...acquisitionFilters.map(({ value, label }) => ({ id: `acquisition:${value}`, label: `${label}の作品`, detail: "状態", keywords: `取得 状態 保留 ${value === "incomplete" ? "本文保存済み 挿絵 欠落" : value === "unavailable" ? "削除 非公開" : ""}`, active: draft.acquisitionFilter === value })),
     { id: "edit:edited", label: "ローカル編集がある作品", detail: "状態", keywords: "ローカル 編集 修正", active: draft.editFilter === "edited" },
     { id: "edit:unedited", label: "ローカル編集がない作品", detail: "状態", keywords: "未編集 オリジナル", active: draft.editFilter === "unedited" },
     { id: "cover:has_cover", label: "表紙がある作品", detail: "状態", keywords: "表紙 カバー 画像", active: draft.coverFilter === "has_cover" },
@@ -2645,7 +2646,7 @@ function FilterForm({ value, scope, versionScope, tab, runtime, authors, tags, c
         return { ...current, revisionFilter: current.revisionFilter === revisionFilter ? null : revisionFilter };
       }
       if (id.startsWith("acquisition:")) {
-        const acquisitionFilter = id.endsWith(":incomplete") ? "incomplete" : "attention";
+        const acquisitionFilter = parseAcquisitionFilter(id.slice("acquisition:".length));
         return { ...current, acquisitionFilter: current.acquisitionFilter === acquisitionFilter ? null : acquisitionFilter };
       }
       if (id.startsWith("edit:")) {
@@ -2851,9 +2852,9 @@ function FilterForm({ value, scope, versionScope, tab, runtime, authors, tags, c
                   label="取得状態"
                   clearable
                   placeholder="すべて"
-                  data={[{ value: "attention", label: "要確認" }, { value: "incomplete", label: "本文を一部保存" }]}
+                  data={acquisitionFilters}
                   value={draft.acquisitionFilter}
-                  onChange={(value) => setDraft({ ...draft, acquisitionFilter: value === "attention" || value === "incomplete" ? value : null })}
+                  onChange={(value) => setDraft({ ...draft, acquisitionFilter: parseAcquisitionFilter(value) })}
                 />
                 <Select
                   size="sm"
