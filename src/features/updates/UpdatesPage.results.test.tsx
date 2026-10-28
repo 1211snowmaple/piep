@@ -1,3 +1,4 @@
+import { AppRouter } from "@/app/router";
 import { MantineProvider } from "@mantine/core";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { expect, it, vi } from "vitest";
@@ -17,7 +18,7 @@ it("shows job-only missing posts in this run's results without sending users to 
     { source: "fanbox", sourceId: "creator", itemType: "target", title: "氷砂糖", status: "done", error: null },
   ];
   const onShowLogs = vi.fn();
-  render(<MantineProvider><JobResultsPanel job={job} subject="氷砂糖 · FANBOX · 作者 · 確認のみ" items={items} loading={false} error={null} onRetry={vi.fn()} onShowLogs={onShowLogs} onShowDeferred={vi.fn()} /></MantineProvider>);
+  render(<MantineProvider><AppRouter><JobResultsPanel job={job} subject="氷砂糖 · FANBOX · 作者 · 確認のみ" items={items} loading={false} error={null} onRetry={vi.fn()} onShowLogs={onShowLogs} onShowDeferred={vi.fn()} /></AppRouter></MantineProvider>);
   expect(screen.getByText("氷砂糖 · FANBOX · 作者 · 確認のみ")).toBeInTheDocument();
   expect(screen.getByText(/変更なし・スキップ 12件 · 公開元で見つからない 7件/)).toBeInTheDocument();
   expect(screen.getByText("この回で保留になった作品（7件）")).toBeInTheDocument();
@@ -30,14 +31,14 @@ it("shows job-only missing posts in this run's results without sending users to 
 });
 
 it("shows a missing pixiv work as held with its source ID and no job error", async () => {
-  render(<MantineProvider><JobResultsPanel
+  render(<MantineProvider><AppRouter><JobResultsPanel
     job={{ ...job, totals: 2, processed: 2, heldCount: 1 }}
     items={[
       { source: "pixiv", sourceId: "90000001", itemType: "target", title: "架空作家", status: "done", error: null },
       { source: "pixiv", sourceId: "90000008", itemType: "work", title: "公開停止のお知らせ", status: "held", error: "公開元で投稿が見つからないため確認を保留しました。保存済みの作品ID 90000008 は保持しています" },
     ]}
     loading={false} error={null} onRetry={vi.fn()} onShowLogs={vi.fn()} onShowDeferred={vi.fn()}
-  /></MantineProvider>);
+  /></AppRouter></MantineProvider>);
   expect(screen.getByText(/公開元で見つからない 1件/)).toBeInTheDocument();
   expect(screen.getByText("公開停止のお知らせ")).toBeInTheDocument();
   expect(screen.queryByText(/保存済みの作品ID 90000008 は保持しています/)).not.toBeInTheDocument();
@@ -48,22 +49,22 @@ it("shows a missing pixiv work as held with its source ID and no job error", asy
 
 it("opens the saved work from the result row without shifting the row content", () => {
   const onOpenWork = vi.fn();
-  render(<MantineProvider><JobResultsPanel
+  render(<MantineProvider><AppRouter><JobResultsPanel
     job={{ ...job, totals: 1, processed: 1, heldCount: 1 }}
     items={[{ source: "fanbox", sourceId: "saved-1", itemType: "work", title: "保存済み作品", status: "held", error: "閲覧条件待ち", downloadId: 42 }]}
     loading={false} error={null} onRetry={vi.fn()} onShowLogs={vi.fn()} onShowDeferred={vi.fn()} onOpenWork={onOpenWork}
-  /></MantineProvider>);
+  /></AppRouter></MantineProvider>);
   fireEvent.click(screen.getByRole("button", { name: "保存済み作品の保存した詳細を開く" }));
   expect(onOpenWork).toHaveBeenCalledWith(42);
 });
 
 it("offers the deferred shelf only for an access restriction", () => {
   const onShowDeferred = vi.fn();
-  render(<MantineProvider><JobResultsPanel
+  render(<MantineProvider><AppRouter><JobResultsPanel
     job={{ ...job, totals: 1, processed: 1, heldCount: 1 }}
     items={[{ source: "fanbox", sourceId: "restricted", itemType: "work", title: "支援作品", status: "held", error: "[閲覧制限] 月額1000円以上" }]}
     loading={false} error={null} onRetry={vi.fn()} onShowLogs={vi.fn()} onShowDeferred={onShowDeferred}
-  /></MantineProvider>);
+  /></AppRouter></MantineProvider>);
   expect(screen.getByText(/閲覧条件待ち 1件/)).toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "保留・非表示の作品を開く" }));
   expect(onShowDeferred).toHaveBeenCalledOnce();

@@ -8982,6 +8982,7 @@ fn restored_candidates_reject_untrusted_provider_fields() {
     let (_temp, root, storage) = temp_paths();
     let db = Database::open(&root.join("piep.db"), &storage).unwrap();
     let mut row = UpdateCandidateRow {
+        metadata: Default::default(),
         source: "pixiv".to_string(),
         source_id: "12345".to_string(),
         kind: "new".to_string(),
@@ -9841,6 +9842,151 @@ fn the_extended_length_prefix_does_not_split_one_file_into_two() {
         comparable_library_path(plain),
         comparable_library_path(shouting)
     );
+    assert_eq!(
+        comparable_library_path(plain),
+        comparable_library_path(Path::new("C:/lib/downloads/pixiv/1/v1/cover.jpg"))
+    );
+}
+
+#[test]
+fn diagnostics_count_hardlinked_file_bytes_once_without_hiding_separate_paths() {
+    let (_temp, root, storage) = temp_paths();
+    let images = storage.join("pixiv/shared/v1/data_assets/illustrations");
+    fs::create_dir_all(&images).unwrap();
+    fs::write(images.join("first.jpg"), b"1234").unwrap();
+    fs::hard_link(images.join("first.jpg"), images.join("second.jpg")).unwrap();
+    let stats =
+        collect_diagnostic_file_stats(&storage, &root.join("search"), &mut |_| Ok(false)).unwrap();
+    assert_eq!(stats.storage_size_bytes, 8);
+    assert_eq!(stats.storage_unique_file_bytes, Some(4));
+    assert_eq!(stats.orphan_asset_files, 2);
+    assert_eq!(stats.unregistered_asset_samples.len(), 2);
+}
+
+#[test]
+fn deferred_summaries_do_not_transfer_bodies_or_erase_retry_payloads() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    insert_download(
+        &db,
+        &storage,
+        "summary-only",
+        "作品",
+        "保存時の作者",
+        &[],
+        "本文",
+    );
+    let payload = serde_json::json!({"holdKind":"incomplete", "holdReason":"画像を取得できません", "originalData":{"authorName":"現在の作者", "text":"保存用の長い本文".repeat(40000), "uploadDate":"2026-10-29T00:00:00Z"}}).to_string();
+    db.upsert_update_candidate(&UpdateCandidateInput {
+        source: "pixiv".to_string(),
+        source_id: "summary-only".to_string(),
+        kind: "new".to_string(),
+        title: "作品".to_string(),
+        payload_json: payload.clone(),
+        target_type: None,
+    })
+    .unwrap();
+    db.conn
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE update_candidates SET status='held' WHERE source_id='summary-only'",
+            [],
+        )
+        .unwrap();
+    let summaries = db.list_deferred_update_candidate_summaries(-1).unwrap();
+    assert!(serde_json::to_string(&summaries).unwrap().len() < 2048);
+    assert_eq!(
+        summaries[0].metadata.author_name.as_deref(),
+        Some("現在の作者")
+    );
+    assert!(summaries[0].payload_json.contains("画像を取得できません"));
+    assert_eq!(
+        db.list_update_candidates_by_status("deferred", -1).unwrap()[0].payload_json,
+        payload
+    );
+}
+
+#[test]
+fn revision_comparison_uses_the_repaired_current_cover_without_rewriting_source_json() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let id = insert_download(
+        &db,
+        &storage,
+        "cover-comparison",
+        "作品",
+        "作者",
+        &[],
+        "本文",
+    );
+    let path = PathBuf::from(db.get_download(id).unwrap().json_path);
+    let source =
+        serde_json::json!({"text":"本文", "cover_url":"https://i.pximg.net/limit_r18_100.png"})
+            .to_string();
+    fs::write(&path, &source).unwrap();
+    let cover = path.parent().unwrap().join("data_assets/cover/real.jpg");
+    fs::create_dir_all(cover.parent().unwrap()).unwrap();
+    fs::write(&cover, b"real cover bytes").unwrap();
+    db.conn
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE downloads SET cover_path=?1 WHERE id=?2",
+            params![cover.to_string_lossy(), id],
+        )
+        .unwrap();
+    let snapshot = serde_json::to_value(db.get_revision_snapshot(id, 1).unwrap()).unwrap();
+    let item = &snapshot["metadata"]["assets"][0];
+    assert_eq!(item["label"], "real.jpg");
+    assert_eq!(item["available"], true);
+    assert!(item["contentHash"].as_str().is_some());
+    assert_eq!(fs::read_to_string(path).unwrap(), source);
+}
+
+#[test]
+fn acquisition_details_find_repeated_missing_images_on_their_rendered_page() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let id = insert_download(
+        &db,
+        &storage,
+        "missing-locations",
+        "画像の欠落",
+        "作者",
+        &[],
+        "冒頭[newpage]直前[pixivimage:42-2]直後[pixivimage:42-2][pixivimage:id=7]",
+    );
+    db.conn.lock().unwrap().execute("INSERT INTO assets(download_id,asset_type,filename,local_path,file_size_bytes) VALUES(?1,'illustration','42_p1.jpg',?2,100)", params![id, storage.join("pixiv/missing-locations/v1/data_assets/illustrations/42_p1.jpg").to_string_lossy()]).unwrap();
+    db.upsert_update_candidate(&UpdateCandidateInput {
+        source: "pixiv".to_string(),
+        source_id: "missing-locations".to_string(),
+        kind: "new".to_string(),
+        title: "画像の欠落".to_string(),
+        target_type: None,
+        payload_json:
+            serde_json::json!({"holdKind":"incomplete","holdReason":"画像を取得できません"})
+                .to_string(),
+    })
+    .unwrap();
+    db.conn
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE update_candidates SET status='held' WHERE source_id='missing-locations'",
+            [],
+        )
+        .unwrap();
+    let details =
+        serde_json::to_value(db.get_work_acquisition_details(id).unwrap().unwrap()).unwrap();
+    let images = details["missingImages"].as_array().unwrap();
+    assert_eq!(images.len(), 3);
+    assert_eq!(images[0]["page"], 2);
+    assert_eq!(images[0]["occurrence"], 0);
+    assert_eq!(images[1]["occurrence"], 1);
+    assert!(images[0]["excerpt"].as_str().unwrap().contains("直前"));
+    assert_eq!(images[2]["reference"], "[pixivimage:id=7]");
+    assert!(db.get_revision_snapshot(id, 999).is_err());
 }
 
 /// 意味ベクトルだけが遅れている作品も、作り直しの対象になる。

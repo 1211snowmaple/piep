@@ -39,6 +39,8 @@ import { ExpandableText } from "@/components/ExpandableText";
 import { WorkCover } from "@/components/WorkCover";
 import { PdfOriginalViewer, type PdfOriginalTarget } from "@/components/PdfOriginalViewer";
 import { BoundedJsonView } from "@/components/BoundedJsonView";
+import { WorkAcquisitionCard } from "./WorkAcquisitionCard";
+import { getRevisionSnapshot, type MissingImageLocation, type RevisionSnapshot } from "@/services/workInspectionApi";
 import { RevisionDiff } from "@/components/RevisionDiff";
 import { ProviderMark, sourceUrl } from "@/lib/providers";
 import { contentTypeLabel, errorMessage, formatBytes, formatDate, formatFreshness, formatNumber } from "@/lib/format";
@@ -123,6 +125,9 @@ export default function WorkPage() {
   // to its top and leaves the screen around it exactly where it was - the same
   // thing the reader does with its own pages.
   const contentFrameRef = useRef<HTMLDivElement>(null);
+  const [imageTarget, setImageTarget] = useState<MissingImageLocation | null>(null);
+  const [contentSourceVersion, setContentSourceVersion] = useState<number | null>(null);
+  useEffect(() => { setImageTarget(null); setContentSourceVersion(null); }, [id]);
   const initializedLocationRef = useRef<{ workId: number; historyIndex: number } | null>(null);
   // 本文の中のリンクに「ライブラリにあります」の印を付けるための器。
   const contentBodyRef = useRef<HTMLDivElement>(null);
@@ -214,19 +219,19 @@ export default function WorkPage() {
     enabled: validId && tab === "assets",
   });
   const contentQuery = useQuery({
-    queryKey: ["reader-content-page", id, null, contentPage - 1],
-    queryFn: () => runtime ? getReaderContentPage(id, null, contentPage - 1) : Promise.resolve((() => { const demo = getDemoReader(id); return { page: 0, pageCount: 1, html: demo.html, plainText: demo.plainText, totalPlainTextChars: demo.plainText.length }; })()),
+    queryKey: ["reader-content-page", id, contentSourceVersion, contentPage - 1],
+    queryFn: () => runtime ? getReaderContentPage(id, contentSourceVersion, contentPage - 1) : Promise.resolve((() => { const demo = getDemoReader(id); return { page: 0, pageCount: 1, html: demo.html, plainText: demo.plainText, totalPlainTextChars: demo.plainText.length }; })()),
     enabled: validId && tab === "content",
     placeholderData: (previous) => previous,
   });
   useEffect(() => {
     if (contentQuery.data?.page !== contentPage - 1) return;
     queryClient.removeQueries({
-      queryKey: ["reader-content-page", id, null],
+      queryKey: ["reader-content-page", id, contentSourceVersion],
       type: "inactive",
       predicate: (query) => query.queryKey[3] !== contentPage - 1,
     });
-  }, [contentPage, contentQuery.data?.page, id, queryClient]);
+  }, [contentPage, contentSourceVersion, contentQuery.data?.page, id, queryClient]);
   const rawJson = useQuery({
     queryKey: ["work-json", id, documentQuery.data?.download.jsonPath],
     queryFn: () => runtime && documentQuery.data ? readFileContent(documentQuery.data.download.jsonPath) : Promise.resolve(JSON.stringify(documentQuery.data?.download ?? {}, null, 2)),
@@ -276,22 +281,22 @@ export default function WorkPage() {
   const selectedVersionText = useQuery({
     queryKey: ["reader-version-text", id, selectedVersion],
     queryFn: () => typeof selectedVersion !== "number"
-      ? Promise.resolve("")
-      : runtime ? getWholeVersionText(id, selectedVersion) : Promise.resolve(getDemoReader(id).plainText),
+      ? Promise.resolve<RevisionSnapshot>({ text: "" })
+      : runtime ? getRevisionSnapshot(id, selectedVersion) : Promise.resolve<RevisionSnapshot>({ text: getDemoReader(id).plainText }),
     enabled: validId && tab === "history" && typeof selectedVersion === "number",
   });
   const comparisonVersionText = useQuery({
     queryKey: ["reader-version-text", id, comparisonVersion],
     queryFn: () => comparisonVersion === null
-      ? Promise.resolve("")
-      : runtime ? getWholeVersionText(id, comparisonVersion) : Promise.resolve(getDemoReader(id).plainText),
+      ? Promise.resolve<RevisionSnapshot>({ text: "" })
+      : runtime ? getRevisionSnapshot(id, comparisonVersion) : Promise.resolve<RevisionSnapshot>({ text: getDemoReader(id).plainText }),
     enabled: validId && tab === "history" && comparisonVersion !== null,
   });
   const pendingRevisionPreview = useQuery({
     queryKey: ["pending-revision-preview", id],
     queryFn: () => runtime
       ? previewPendingRevisionCommand(id)
-      : Promise.resolve({ downloadId: id, baseVersion: documentQuery.data?.download.currentVersion ?? 1, text: getDemoReader(id).plainText, textLength: getDemoReader(id).plainText.length }),
+      : Promise.resolve<import("@/services/updateJobApi").PendingRevisionPreview>({ downloadId: id, baseVersion: documentQuery.data?.download.currentVersion ?? 1, text: getDemoReader(id).plainText, textLength: getDemoReader(id).plainText.length }),
     enabled: validId && tab === "history" && selectedVersion === "pending" && Boolean(pendingRevision),
     staleTime: 0,
   });
@@ -344,6 +349,21 @@ export default function WorkPage() {
   // Defer that work until the user actually opens the content tab.
   const contentReady = !contentQuery.isPlaceholderData && contentQuery.data?.page === contentPage - 1;
   const preparedHtml = useMemo(() => tab === "content" && contentReady ? prepareDocumentHtml(contentQuery.data?.html ?? "", getAssetUrl) : "", [contentQuery.data?.html, contentReady, tab]);
+  const preparedMarkup = useMemo(() => ({ __html: preparedHtml }), [preparedHtml]);
+  useEffect(() => {
+    if (!imageTarget || tab !== "content" || !contentReady || contentPage !== imageTarget.page) return;
+    const matches = [...(contentBodyRef.current?.querySelectorAll<HTMLElement>("[data-image-reference]") ?? [])].filter((node) => node.dataset.imageReference === imageTarget.reference);
+    const target = matches[imageTarget.occurrence];
+    if (!target || !contentFrameRef.current) return;
+    contentBodyRef.current?.querySelectorAll("[data-image-target]").forEach((node) => node.removeAttribute("data-image-target"));
+    target.setAttribute("data-image-target", "true");
+    target.tabIndex = -1;
+    target.focus({ preventScroll: true });
+    contentFrameRef.current.scrollTop += target.getBoundingClientRect().top - contentFrameRef.current.getBoundingClientRect().top - 24;
+    contentFrameRef.current.scrollIntoView({ block: "nearest" });
+    setImageTarget(null);
+  }, [contentPage, contentReady, imageTarget, preparedHtml, tab]);
+
   useLayoutEffect(() => {
     if (tab !== "content" || !contentReady || !contentFrameRef.current) return;
     const saved = locations.get(historyIndex);
@@ -543,6 +563,8 @@ export default function WorkPage() {
         </Grid>
       </Card>
 
+      <WorkAcquisitionCard id={id} source={work.source} sourceId={work.sourceId} runtime={runtime} onLocate={(location, version) => { setImageTarget(location); setContentSourceVersion(version); goToContentPage(location.page); setTab("content"); }} />
+
       <Tabs value={tab} onChange={setTab} mt="lg" keepMounted={false}>
         <Tabs.List>
           <Tabs.Tab value="overview">概要</Tabs.Tab>
@@ -577,10 +599,11 @@ export default function WorkPage() {
                 and everything else off the top of the window. It reads inside a
                 frame of its own instead, the way the JSON already does, so the
                 screen around it stays put while you read. */}
+            {contentSourceVersion !== null && <Group justify="space-between"><Text size="xs" c="dimmed">取得元の保存済み v{contentSourceVersion} · 画像の位置</Text><Button variant="subtle" size="xs" onClick={() => { setContentSourceVersion(null); setImageTarget(null); goToContentPage(1); }}>現在の本文へ</Button></Group>}
             <Paper className="content-frame" withBorder ref={contentFrameRef} onScroll={(event) => {
               locations.set(historyIndex, { workId: id, page: contentPage, top: event.currentTarget.scrollTop });
             }}>
-              <div ref={contentBodyRef} className="content-preview content-preview--paged" onClick={handleContentClick} dangerouslySetInnerHTML={{ __html: preparedHtml }} />
+              <div ref={contentBodyRef} className="content-preview content-preview--paged" onClick={handleContentClick} dangerouslySetInnerHTML={preparedMarkup} />
             </Paper>
             <ContentPagination current={contentPage} total={contentQuery.data?.pageCount ?? 1} onChange={goToContentPage} />
           </Stack>}
@@ -646,7 +669,7 @@ export default function WorkPage() {
                 {(typeof selectedVersion === "number" && selectedVersionText.isLoading)
                   || (comparisonVersion !== null && comparisonVersionText.isLoading)
                   || (selectedVersion === "pending" && pendingRevisionPreview.isLoading)
-                  ? <LoadingState label="比較する本文を読み込んでいます" />
+                  ? <LoadingState label="変更内容を読み込んでいます" />
                   : selectedVersionText.error || comparisonVersionText.error || pendingRevisionPreview.error
                     ? <ErrorState error={selectedVersionText.error ?? comparisonVersionText.error ?? pendingRevisionPreview.error} retry={() => { selectedVersionText.refetch(); comparisonVersionText.refetch(); pendingRevisionPreview.refetch(); }} />
                     : selectedVersion === "pending" && pendingRevisionPreview.data
@@ -655,7 +678,9 @@ export default function WorkPage() {
                           afterVersion={work.currentVersion + 1}
                           beforeLabel={`保存済み v${work.currentVersion}`}
                           afterLabel="取得元の改稿（未保存）"
-                          beforeText={comparisonVersionText.data ?? ""}
+                          beforeText={comparisonVersionText.data?.text ?? ""}
+                          beforeMetadata={comparisonVersionText.data?.metadata}
+                          afterMetadata={pendingRevisionPreview.data.metadata}
                           afterText={pendingRevisionPreview.data.text}
                           actions={<Button size="xs" variant="default" onClick={() => navigate("/updates")}>更新センターで保存</Button>}
                         />
@@ -663,8 +688,10 @@ export default function WorkPage() {
                       ? <RevisionDiff
                           beforeVersion={comparisonVersion}
                           afterVersion={selectedVersion}
-                          beforeText={comparisonVersion === null ? null : comparisonVersionText.data ?? ""}
-                          afterText={selectedVersionText.data}
+                          beforeText={comparisonVersion === null ? null : comparisonVersionText.data?.text ?? ""}
+                          beforeMetadata={comparisonVersionText.data?.metadata}
+                          afterMetadata={selectedVersionText.data.metadata}
+                          afterText={selectedVersionText.data.text}
                           actions={<Button size="xs" variant="light" onClick={() => navigate(`/reader/${work.id}?version=${selectedVersion}`)}>この版を読む</Button>}
                         />
                       : <Alert color="gray">左から確認するバージョンを選択してください。</Alert>}
@@ -683,20 +710,6 @@ export default function WorkPage() {
  *
  *  版どうしを比べるのはここだけなので、平文を頼むのもここだけ。読書画面は
  *  HTML しか使わないため、既定では積まずに運ぶ。 */
-async function getWholeVersionText(downloadId: number, version: number): Promise<string> {
-  const first = await getReaderContentPage(downloadId, version, 0, true);
-  if (first.pageCount <= 1) return first.plainText;
-  const pages = Array.from({ length: first.pageCount }, () => "");
-  pages[0] = first.plainText;
-  const batchSize = 4;
-  for (let start = 1; start < first.pageCount; start += batchSize) {
-    const batch = Array.from({ length: Math.min(batchSize, first.pageCount - start) }, (_, offset) => start + offset);
-    const loaded = await Promise.all(batch.map((page) => getReaderContentPage(downloadId, version, page, true)));
-    loaded.forEach((entry) => { pages[entry.page] = entry.plainText; });
-  }
-  return pages.join("\n");
-}
-
 /**
  * The same controls the reader moves between source pages with.
  *

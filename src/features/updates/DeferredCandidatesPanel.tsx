@@ -1,3 +1,4 @@
+import { UpdateWorkMetadata } from "./UpdateWorkMetadata";
 import { useMemo, useState } from "react";
 import { Button, Card, Checkbox, Group, Pagination, Select, Stack, Text, TextInput } from "@mantine/core";
 import { useMutation, useQuery } from "@tanstack/react-query";
@@ -40,7 +41,7 @@ export function DeferredCandidatesPanel({ runtime, onRechecked, onOpenWork }: { 
     if (statusFilter !== "all" && category !== statusFilter) return false;
     const needle = search.trim().toLocaleLowerCase();
     if (!needle) return true;
-    return `${row.title} ${row.source} ${row.sourceId} ${reason}`.toLocaleLowerCase().includes(needle);
+    return `${row.title} ${row.metadata?.authorName ?? ""} ${row.source} ${row.sourceId} ${reason}`.toLocaleLowerCase().includes(needle);
   }), [decoratedRows, search, statusFilter]);
   const pageCount = Math.ceil(filteredRows.length / PAGE_SIZE);
   const currentPage = Math.min(page, Math.max(1, pageCount));
@@ -73,7 +74,7 @@ export function DeferredCandidatesPanel({ runtime, onRechecked, onOpenWork }: { 
           setSelected((previous) => { const next = new Set(previous); if (checked) next.add(key); else next.delete(key); return next; });
         }} />
         <ProviderMark provider={row.source} compact />
-        <Stack gap={3} style={{ flex: 1, minWidth: 0 }}><Text size="sm" fw={600}>{row.title}</Text><Text size="xs" c="dimmed">{row.sourceId}</Text></Stack>
+        <Stack gap={3} style={{ flex: 1, minWidth: 0 }}><Text size="sm" fw={600}>{row.title}</Text><UpdateWorkMetadata metadata={row.metadata} /></Stack>
         <UpdateStatusBadge title={row.title} {...status} detail={reason} />
         <UpdateWorkLinks source={row.source} sourceId={row.sourceId} downloadId={row.downloadId} title={row.title} onOpenWork={onOpenWork} />
       </Group>;

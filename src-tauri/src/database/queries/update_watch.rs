@@ -360,11 +360,27 @@ impl Database {
         status: &str,
         limit: i64,
     ) -> Result<Vec<UpdateCandidateRow>, String> {
+        self.list_update_candidate_rows(status, limit, false)
+    }
+
+    pub fn list_deferred_update_candidate_summaries(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<UpdateCandidateRow>, String> {
+        self.list_update_candidate_rows("deferred", limit, true)
+    }
+
+    fn list_update_candidate_rows(
+        &self,
+        status: &str,
+        limit: i64,
+        for_display: bool,
+    ) -> Result<Vec<UpdateCandidateRow>, String> {
         let conn = self.read_conn()?;
         let mut stmt = conn
             .prepare(
                 "SELECT c.source, c.source_id, c.kind, c.title, c.payload_json, c.target_type, c.status,
-                        c.first_seen_at, c.updated_at, d.id
+                        c.first_seen_at, c.updated_at, d.id, d.author_name, d.source_created_at, d.source_updated_at, d.downloaded_at
                  FROM update_candidates c
                  LEFT JOIN downloads d ON d.source = c.source AND d.source_id = c.source_id
                  WHERE c.status = ?2 OR (?2 = 'deferred' AND c.status IN ('held', 'dismissed'))
@@ -374,12 +390,21 @@ impl Database {
             .map_err(|e| format!("Failed to prepare update candidates: {}", e))?;
         let rows = stmt
             .query_map(params![limit, status], |row| {
+                let payload_json: String = row.get(4)?;
+                let payload = if for_display { serde_json::from_str(&payload_json).unwrap_or_default() } else { serde_json::Value::Null };
                 Ok(UpdateCandidateRow {
+                    metadata: if for_display { super::UpdateWorkMetadata::from_row(
+                        row,
+                        10,
+                        &payload,
+                    )? } else { Default::default() },
                     source: row.get(0)?,
                     source_id: row.get(1)?,
                     kind: row.get(2)?,
                     title: row.get(3)?,
-                    payload_json: row.get(4)?,
+                    payload_json: if for_display {
+                        serde_json::json!({"holdKind":payload.get("holdKind"), "holdReason":payload.get("holdReason")}).to_string()
+                    } else { payload_json },
                     target_type: row.get(5)?,
                     status: row.get(6)?,
                     first_seen_at: row.get(7)?,
@@ -468,6 +493,7 @@ impl Database {
                     first_seen_at: row.get(7)?,
                     updated_at: row.get(8)?,
                     download_id: None,
+                    metadata: Default::default(),
                 })
             })
             .map_err(|e| format!("Update candidate page query failed: {e}"))?;

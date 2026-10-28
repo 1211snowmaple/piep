@@ -31,7 +31,7 @@ const shots: ReadonlyArray<
   ["editor", "/#/editor/101", "雨上がりの図書室で", ["light"]],
   ["updates", "/#/updates", "更新センター", ["light"]],
   ["epub", "/#/epub", "EPUB書き出し", ["light"]],
-  ["diagnostics", "/#/diagnostics", "ライブラリ診断", ["light"]],
+  ["diagnostics", "/#/diagnostics", "診断とメンテナンス", ["light"]],
 ];
 
 test("capture readme screenshots", async ({ page }, testInfo) => {

@@ -104,11 +104,32 @@ pub struct EntityProfileRepairProgress {
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EntityProfileRepairResult {
+    stopped_reason: Option<String>,
     attempted: usize,
     repaired: usize,
     failed: usize,
     canceled: bool,
     remaining: i64,
+}
+
+static ENTITY_PROFILE_REPAIR_PROGRESS: LazyLock<
+    std::sync::Mutex<Option<EntityProfileRepairProgress>>,
+> = LazyLock::new(|| std::sync::Mutex::new(None));
+
+fn emit_profile_repair_progress(app: &tauri::AppHandle, progress: EntityProfileRepairProgress) {
+    *ENTITY_PROFILE_REPAIR_PROGRESS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner()) = Some(progress.clone());
+    let _ = app.emit("entity-profile-repair-progress", progress);
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EntityProfileRepairView {
+    #[serde(flatten)]
+    status: EntityProfileRepairStatus,
+    running: bool,
+    progress: Option<EntityProfileRepairProgress>,
 }
 
 struct EntityProfileRepairRunGuard;
@@ -2661,8 +2682,16 @@ pub async fn db_scan_fanbox_asset_gaps(app: tauri::AppHandle) -> Result<FanboxRe
 #[tauri::command]
 pub async fn db_get_entity_profile_repair_status(
     app: tauri::AppHandle,
-) -> Result<EntityProfileRepairStatus, String> {
-    run_db_blocking(app, |state| state.db.entity_profile_repair_status()).await
+) -> Result<EntityProfileRepairView, String> {
+    let status = run_db_blocking(app, |state| state.db.entity_profile_repair_status()).await?;
+    Ok(EntityProfileRepairView {
+        status,
+        running: ENTITY_PROFILE_REPAIR_RUNNING.load(Ordering::Acquire),
+        progress: ENTITY_PROFILE_REPAIR_PROGRESS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone(),
+    })
 }
 
 /// 完全取得できていない作者・シリーズを、成功したものから順に埋め直す。
@@ -2686,9 +2715,11 @@ pub async fn repair_incomplete_entity_profiles(
     let mut repaired = 0usize;
     let mut failed = 0usize;
     let mut completed = 0usize;
+    let mut consecutive_errors = 0usize;
+    let mut stopped_reason = None;
 
-    let _ = app.emit(
-        "entity-profile-repair-progress",
+    emit_profile_repair_progress(
+        &app,
         EntityProfileRepairProgress {
             phase: "running".to_string(),
             completed,
@@ -2708,20 +2739,46 @@ pub async fn repair_incomplete_entity_profiles(
             entity_type: target.entity_type.clone(),
             source: target.source.clone(),
             source_key: target.source_key.clone(),
-            force: Some(false),
+            force: Some(true),
             refresh_token: credentials.pixiv_refresh_token.clone(),
             cookie: credentials.fanbox_cookie.clone(),
             user_agent: credentials.fanbox_user_agent.clone(),
         };
+        emit_profile_repair_progress(
+            &app,
+            EntityProfileRepairProgress {
+                phase: "running".to_string(),
+                completed,
+                total,
+                repaired,
+                failed,
+                active_label: Some(target.display_name.clone()),
+                error: None,
+            },
+        );
         let result = refresh_entity_profile(app.clone(), params).await;
         completed += 1;
         let error = match result {
             Ok(_) => {
                 repaired += 1;
+                consecutive_errors = 0;
                 None
             }
             Err(error) => {
                 failed += 1;
+                use super::update_jobs::{classify_failure, FailureKind};
+                let kind = classify_failure(&error);
+                consecutive_errors =
+                    if matches!(kind, FailureKind::Missing | FailureKind::Restricted) {
+                        0
+                    } else {
+                        consecutive_errors + 1
+                    };
+                if matches!(kind, FailureKind::Auth | FailureKind::RateLimited)
+                    || consecutive_errors >= 3
+                {
+                    stopped_reason = Some(format!("取得先への接続を確認するため一時停止しました。取得済みの情報は保持しています。{error}"));
+                }
                 log::warn!(
                     "{}:{}:{} のプロフィール修復に失敗しました: {}",
                     target.entity_type,
@@ -2732,10 +2789,10 @@ pub async fn repair_incomplete_entity_profiles(
                 Some(error)
             }
         };
-        let _ = app.emit(
-            "entity-profile-repair-progress",
+        emit_profile_repair_progress(
+            &app,
             EntityProfileRepairProgress {
-                phase: "running".to_string(),
+                phase: "checked".to_string(),
                 completed,
                 total,
                 repaired,
@@ -2744,25 +2801,36 @@ pub async fn repair_incomplete_entity_profiles(
                 error,
             },
         );
+        if stopped_reason.is_some() {
+            break;
+        }
     }
 
     let canceled = ENTITY_PROFILE_REPAIR_CANCEL.load(Ordering::Acquire);
     let remaining = run_db_blocking(app.clone(), |state| state.db.entity_profile_repair_status())
         .await?
         .total_count;
-    let _ = app.emit(
-        "entity-profile-repair-progress",
+    emit_profile_repair_progress(
+        &app,
         EntityProfileRepairProgress {
-            phase: if canceled { "canceled" } else { "complete" }.to_string(),
+            phase: if canceled {
+                "canceled"
+            } else if stopped_reason.is_some() {
+                "paused"
+            } else {
+                "complete"
+            }
+            .to_string(),
             completed,
             total,
             repaired,
             failed,
             active_label: None,
-            error: None,
+            error: stopped_reason.clone(),
         },
     );
     Ok(EntityProfileRepairResult {
+        stopped_reason,
         attempted: completed,
         repaired,
         failed,
@@ -3212,4 +3280,29 @@ mod entity_image_url_tests {
         // 短すぎて scheme が入りきらない文字列で落ちない。
         assert!(!allowed("http"));
     }
+}
+
+/// 選んだ保存版の本文・作品情報・アセットを比較用に読む。通信や保存は行わない。
+#[tauri::command]
+pub async fn get_revision_snapshot(
+    app: tauri::AppHandle,
+    download_id: i64,
+    version: i64,
+) -> Result<crate::database::queries::RevisionSnapshot, String> {
+    run_db_blocking(app, move |state| {
+        state.db.get_revision_snapshot(download_id, version)
+    })
+    .await
+}
+
+/// 要確認の理由と、取得できなかった挿絵の本文上の位置を読む。
+#[tauri::command]
+pub async fn get_work_acquisition_details(
+    app: tauri::AppHandle,
+    download_id: i64,
+) -> Result<Option<crate::database::queries::WorkAcquisitionDetails>, String> {
+    run_db_blocking(app, move |state| {
+        state.db.get_work_acquisition_details(download_id)
+    })
+    .await
 }

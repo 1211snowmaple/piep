@@ -121,6 +121,8 @@ function mergeProgressDelta(
  * 一覧の定義は `deletedWorkCleanup.ts` にあるので、そちらに合わせる。
  */
 export function invalidateAfterUpdateJob(client: QueryClient): void {
+  client.invalidateQueries({ queryKey: ["work-acquisition"] });
+  client.invalidateQueries({ queryKey: ["reader-version-text"] });
   client.invalidateQueries({ queryKey: ["pending-revisions"] });
   client.invalidateQueries({ queryKey: ["deferred-candidates"] });
   client.invalidateQueries({ queryKey: ["deferred-candidate-count"] });

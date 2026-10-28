@@ -335,6 +335,7 @@ pub struct LibraryDiagnostics {
     pub database_size_bytes: u64,
     pub wal_size_bytes: u64,
     pub storage_size_bytes: u64,
+    pub storage_unique_file_bytes: Option<u64>,
     pub lexical_index_size_bytes: u64,
     pub lexical_index_file_count: u64,
     pub lexical_index_segment_count: u64,
@@ -348,6 +349,7 @@ pub struct LibraryDiagnostics {
     pub orphan_asset_bytes: i64,
     pub orphan_asset_files: u64,
     pub orphan_asset_file_bytes: u64,
+    pub unregistered_asset_samples: Vec<LibraryFileIssue>,
     pub checked_file_references: u64,
     pub missing_json_files: u64,
     pub missing_asset_files: u64,
@@ -1062,6 +1064,8 @@ pub struct UpdateJobLog {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateJobCandidate {
+    #[serde(default, skip_serializing_if = "UpdateWorkMetadata::is_empty")]
+    pub metadata: UpdateWorkMetadata,
     pub id: i64,
     #[serde(default)]
     pub download_id: Option<i64>,
@@ -1132,6 +1136,8 @@ pub struct UpdateJobItem {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateJobItemState {
+    #[serde(default, skip_serializing_if = "UpdateWorkMetadata::is_empty")]
+    pub metadata: UpdateWorkMetadata,
     pub source: Option<String>,
     pub source_id: Option<String>,
     pub status: String,
@@ -1173,6 +1179,8 @@ pub struct UpdateCandidateInput {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateCandidateRow {
+    #[serde(default, skip_serializing_if = "UpdateWorkMetadata::is_empty")]
+    pub metadata: UpdateWorkMetadata,
     pub source: String,
     pub source_id: String,
     pub kind: String,
@@ -1184,6 +1192,94 @@ pub struct UpdateCandidateRow {
     pub updated_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub download_id: Option<i64>,
+}
+
+/// Display metadata comes from the saved row or the already recorded provider
+/// payload. Listing candidates must not open thousands of saved JSON files.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateWorkMetadata {
+    pub author_name: Option<String>,
+    pub published_at: Option<String>,
+    pub updated_at: Option<String>,
+    pub saved_at: Option<String>,
+}
+
+impl UpdateWorkMetadata {
+    fn is_empty(&self) -> bool {
+        self.author_name.is_none()
+            && self.published_at.is_none()
+            && self.updated_at.is_none()
+            && self.saved_at.is_none()
+    }
+    pub(super) fn from_payload(payload: &serde_json::Value) -> Self {
+        fn field(value: &serde_json::Value, paths: &[&str]) -> Option<String> {
+            paths.iter().find_map(|path| {
+                value
+                    .pointer(path)
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|s| !s.trim().is_empty())
+                    .map(str::to_string)
+            })
+        }
+        let value = payload.get("originalData").unwrap_or(payload);
+        let value = crate::fanbox_api::payload::post_or_self(value);
+        Self {
+            author_name: field(
+                value,
+                &[
+                    "/user/name",
+                    "/creator/name",
+                    "/authorName",
+                    "/userName",
+                    "/author_name",
+                    "/detail/user/name",
+                    "/detail/authorName",
+                ],
+            ),
+            published_at: field(
+                value,
+                &[
+                    "/create_date",
+                    "/createDate",
+                    "/publishedDatetime",
+                    "/cdate",
+                    "/detail/createDate",
+                    "/detail/cdate",
+                ],
+            ),
+            updated_at: field(
+                value,
+                &[
+                    "/uploadDate",
+                    "/updateDate",
+                    "/updatedDatetime",
+                    "/detail/uploadDate",
+                ],
+            ),
+            saved_at: None,
+        }
+    }
+
+    pub(super) fn from_row(
+        row: &rusqlite::Row<'_>,
+        start: usize,
+        payload: &serde_json::Value,
+    ) -> rusqlite::Result<Self> {
+        let fallback = Self::from_payload(payload);
+        Ok(Self {
+            author_name: fallback.author_name.or(row
+                .get::<_, Option<String>>(start)?
+                .filter(|s| !s.trim().is_empty())),
+            published_at: fallback
+                .published_at
+                .or(row.get::<_, Option<String>>(start + 1)?),
+            updated_at: fallback
+                .updated_at
+                .or(row.get::<_, Option<String>>(start + 2)?),
+            saved_at: row.get(start + 3)?,
+        })
+    }
 }
 
 #[derive(Debug, Clone)]

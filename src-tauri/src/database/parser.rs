@@ -22,7 +22,7 @@ static RE_NOVEL_SCHEME: LazyLock<Regex> =
 static RE_ILLUST_SCHEME: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"pixiv://illusts/(?P<id>\d+)").unwrap());
 static RE_IMAGE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\[(?P<kind>uploadedimage|pixivimage):(?P<id>\d+)(?:-(?P<page>\d+))?\]").unwrap()
+    Regex::new(r"\[(?P<kind>uploadedimage|pixivimage):(?:(?P<id>\d+)(?:-(?P<page>\d+))?|(?P<invalid>[^\]\r\n]*))\]").unwrap()
 });
 
 /// HTML文字を安全にエスケープするインライン軽量エスケープ
@@ -353,7 +353,10 @@ pub fn parse_pixiv_value_to_html(v: &serde_json::Value, assets: &[AssetEntry]) -
     // 7. 画像置換 [uploadedimage:ID] または [pixivimage:ID]
     html = RE_IMAGE
         .replace_all(&html, |caps: &regex::Captures| {
-            let image_id = &caps["id"];
+            let Some(image_id) = caps.name("id").map(|value| value.as_str()) else {
+                let reference = caps.get(0).unwrap().as_str();
+                return format!(r#"<div class="missing-image-placeholder" role="note" data-image-reference="{}" data-image-missing="true">取得できなかった画像 {}（参照形式を確認してください）</div>"#, escape_html(reference), escape_html(reference));
+            };
             let reference = caps.get(0).map(|value| value.as_str()).unwrap_or(image_id);
             let alt_id = if &caps["kind"] == "uploadedimage" {
                 image_id
@@ -363,7 +366,10 @@ pub fn parse_pixiv_value_to_html(v: &serde_json::Value, assets: &[AssetEntry]) -
             let page = caps
                 .name("page")
                 .and_then(|value| value.as_str().parse::<usize>().ok());
-            let name = if &caps["kind"] == "uploadedimage" {
+            let invalid_page = caps.name("page").is_some() && page.is_none();
+            let name = if invalid_page || (&caps["kind"] == "uploadedimage" && caps.name("page").is_some()) {
+                None
+            } else if &caps["kind"] == "uploadedimage" {
                 Some(format!("inline_{image_id}"))
             } else {
                 page.filter(|page| *page > 0)
@@ -392,13 +398,15 @@ pub fn parse_pixiv_value_to_html(v: &serde_json::Value, assets: &[AssetEntry]) -
             });
             if let Some(asset) = found_asset {
                 format!(
-                    r##"<img class="novel-image" data-local-path="{}" alt="image_{}" />"##,
+                    r##"<img class="novel-image" data-image-reference="{}" data-local-path="{}" alt="image_{}" />"##,
+                    escape_html(reference),
                     escape_html(&asset.local_path),
                     escape_html(alt_id)
                 )
             } else {
                 format!(
-                    r##"<div class="missing-image-placeholder">画像 {}(見つかりません)</div>"##,
+                    r##"<div class="missing-image-placeholder" role="note" data-image-reference="{}" data-image-missing="true">取得できなかった画像 {}（見つかりません）</div>"##,
+                    escape_html(reference),
                     escape_html(reference)
                 )
             }
@@ -476,8 +484,10 @@ pub fn parse_fanbox_value_to_html(v: &serde_json::Value, assets: &[AssetEntry]) 
                     .unwrap_or("");
                 let found = assets.iter().find(|asset| {
                     (!image_id.is_empty()
-                        && (asset.filename.contains(image_id)
-                            || asset.local_path.contains(image_id)))
+                        && (std::path::Path::new(&asset.filename)
+                            .file_stem()
+                            .and_then(|stem| stem.to_str())
+                            == Some(image_id)))
                         || image
                             .get("localPath")
                             .and_then(|value| value.as_str())
@@ -487,12 +497,14 @@ pub fn parse_fanbox_value_to_html(v: &serde_json::Value, assets: &[AssetEntry]) 
                 });
                 parts.push(match found {
                     Some(asset) => format!(
-                        r#"<img class="novel-image" data-local-path="{}" alt="image_{}" />"#,
+                        r#"<img class="novel-image" data-image-reference="{}" data-local-path="{}" alt="image_{}" />"#,
+                        escape_html(image_id),
                         escape_html(&asset.local_path),
                         escape_html(image_id)
                     ),
                     None => format!(
-                        r#"<div class="missing-image-placeholder">画像 {}(見つかりません)</div>"#,
+                        r#"<div class="missing-image-placeholder" role="note" data-image-reference="{}" data-image-missing="true">取得できなかった画像 {}（見つかりません）</div>"#,
+                        escape_html(image_id),
                         escape_html(image_id)
                     ),
                 });
@@ -568,21 +580,25 @@ pub fn parse_fanbox_value_to_html(v: &serde_json::Value, assets: &[AssetEntry]) 
                 // アセット配列から対応する画像を検索 (ファイル名やローカルパスに画像IDが含まれているか)
                 let found_asset = assets.iter().find(|a| {
                     !image_id.is_empty()
-                        && (a.filename.contains(image_id) || a.local_path.contains(image_id))
+                        && (std::path::Path::new(&a.filename)
+                            .file_stem()
+                            .and_then(|stem| stem.to_str())
+                            == Some(image_id))
                 });
                 // `imageId` は応答の文字列そのまま。pixiv 側と違って数字とは
                 // 限らないので、他の値と同じように通してから埋める。
                 let safe_image_id = escape_html(image_id);
                 if let Some(asset) = found_asset {
                     format!(
-                        r#"<img class="novel-image" data-local-path="{}" alt="image_{}" />"#,
+                        r#"<img class="novel-image" data-image-reference="{}" data-local-path="{}" alt="image_{}" />"#,
+                        safe_image_id,
                         escape_html(&asset.local_path),
                         safe_image_id
                     )
                 } else {
                     format!(
-                        r#"<div class="missing-image-placeholder">画像 {}(見つかりません)</div>"#,
-                        safe_image_id
+                        r#"<div class="missing-image-placeholder" role="note" data-image-reference="{}" data-image-missing="true">取得できなかった画像 {}（見つかりません）</div>"#,
+                        safe_image_id, safe_image_id
                     )
                 }
             }
@@ -1191,7 +1207,9 @@ mod tests {
         assert!(html.contains("C:/library/123-2_p1.jpg"), "{html}");
         assert!(html.contains("C:/library/inline_456.jpg"), "{html}");
         assert!(
-            html.contains("画像 [pixivimage:123-0](見つかりません)"),
+            html.contains(
+                "data-image-reference=\"[pixivimage:123-0]\" data-image-missing=\"true\""
+            ),
             "{html}"
         );
     }

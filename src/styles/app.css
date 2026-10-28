@@ -3379,3 +3379,9 @@ select {
   border-radius: 0 6px 6px 0;
   background: light-dark(#f7f4fd, #1e1930);
 }
+
+/* Revision information uses the same additions/removals convention as prose. */
+.revision-metadata-value { padding: 8px; border-radius: var(--mantine-radius-sm); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 280px; overflow: auto; }
+.revision-metadata-value[data-kind="added"] { background: light-dark(var(--mantine-color-green-0), var(--mantine-color-green-9)); }
+.revision-metadata-value[data-kind="removed"] { background: light-dark(var(--mantine-color-red-0), var(--mantine-color-red-9)); }
+[data-image-target="true"] { outline: 2px solid var(--mantine-color-orange-6); outline-offset: 4px; scroll-margin: 24px; }

@@ -76,7 +76,10 @@ export interface UpdateJobLog {
   createdAt: string;
 }
 
+export interface UpdateWorkMetadata { authorName?: string | null; publishedAt?: string | null; updatedAt?: string | null; savedAt?: string | null }
+
 export interface UpdateJobCandidate {
+  metadata?: UpdateWorkMetadata;
   id: number;
   downloadId?: number | null;
   key: string;
@@ -150,6 +153,7 @@ export interface SaveJobWork {
 }
 
 export interface DeferredUpdateCandidate {
+  metadata?: UpdateWorkMetadata;
   source: "pixiv" | "fanbox";
   sourceId: string;
   title: string;
@@ -190,6 +194,7 @@ export async function startSaveJobCommand(
 
 /** ジョブの項目ひとつひとつの、いまの状態。行に印を付けるために使う。 */
 export interface UpdateJobItemState {
+  metadata?: UpdateWorkMetadata;
   source: string | null;
   sourceId: string | null;
   status: string;
@@ -268,6 +273,7 @@ export interface PendingRevision {
 
 /** A provider revision fetched for comparison but not accepted into history. */
 export interface PendingRevisionPreview {
+  metadata?: import("./workInspectionApi").RevisionMetadata;
   downloadId: number;
   baseVersion: number;
   text: string;

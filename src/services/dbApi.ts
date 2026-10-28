@@ -64,13 +64,15 @@ export async function getLibraryDiagnostics(): Promise<LibraryDiagnostics> {
 }
 
 export interface EntityProfileRepairStatus {
+  running?: boolean;
+  progress?: EntityProfileRepairProgress | null;
   personCount: number;
   seriesCount: number;
   totalCount: number;
 }
 
 export interface EntityProfileRepairProgress {
-  phase: "running" | "complete" | "canceled";
+  phase: "running" | "checked" | "complete" | "canceled" | "paused";
   completed: number;
   total: number;
   repaired: number;
@@ -80,6 +82,7 @@ export interface EntityProfileRepairProgress {
 }
 
 export interface EntityProfileRepairResult {
+  stoppedReason?: string | null;
   attempted: number;
   repaired: number;
   failed: number;

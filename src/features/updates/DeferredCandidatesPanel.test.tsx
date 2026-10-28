@@ -1,3 +1,4 @@
+import { AppRouter } from "@/app/router";
 import { MantineProvider } from "@mantine/core";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
@@ -13,7 +14,7 @@ it("keeps held works reversible and checks only the explicit selection", async (
   ]);
   mocks.recheck.mockResolvedValue({ jobId: "permission-check" });
   const onRechecked = vi.fn();
-  render(<MantineProvider><QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><DeferredCandidatesPanel runtime onRechecked={onRechecked} /></QueryClientProvider></MantineProvider>);
+  render(<MantineProvider><AppRouter><QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><DeferredCandidatesPanel runtime onRechecked={onRechecked} /></QueryClientProvider></AppRouter></MantineProvider>);
   await screen.findByText("支援プラン待ち");
   expect(screen.getByRole("button", { name: "候補に戻す（0）" })).toBeDisabled();
   expect(mocks.recheck).not.toHaveBeenCalled();
@@ -28,7 +29,7 @@ it("renders one page at a time and selects only visible works", async () => {
     source: "pixiv", sourceId: String(index + 1), title: `作品${index + 1}`,
     status: "held", payloadJson: '{}',
   })));
-  render(<MantineProvider><QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><DeferredCandidatesPanel runtime onRechecked={vi.fn()} /></QueryClientProvider></MantineProvider>);
+  render(<MantineProvider><AppRouter><QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><DeferredCandidatesPanel runtime onRechecked={vi.fn()} /></QueryClientProvider></AppRouter></MantineProvider>);
   await screen.findByText("作品1");
   expect(screen.queryByText("作品41")).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "表示分を選択" }));

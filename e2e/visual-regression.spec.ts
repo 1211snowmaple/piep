@@ -129,7 +129,7 @@ test("phone collection list keeps metadata and actions inside each row", async (
 test("critical workspaces keep a stable layout", async ({ page }, testInfo) => {
   test.skip(!testInfo.project.name.endsWith("100dpi"), "Route matrix runs once per size/theme; DPI scaling is covered by the library shell matrix");
   const routes = [
-    ["diagnostics", "/#/diagnostics", "ライブラリ診断"],
+    ["diagnostics", "/#/diagnostics", "診断とメンテナンス"],
     ["operations", "/#/operations", "操作履歴"],
     ["save", "/#/save/pixiv", "Webから保存"],
     ["reader", "/#/reader/101", "雨上がりの図書室で"],
@@ -374,4 +374,27 @@ test("every cover fits inside its frame instead of spilling out of it", async ({
     expect(result.checked, `${view} に測れる表紙が無い`).toBeGreaterThan(0);
     expect(result.spills, `${view} で表紙が枠からはみ出している`).toEqual([]);
   }
+});
+
+test("hidden library shortcuts remain available from the library", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "900x600-light-100dpi", "The complete preference flow runs once");
+  await page.goto("/#/settings?section=appearance");
+  await page.getByRole("switch", { name: "読みかけ", exact: true }).uncheck();
+  await expect(page.locator("#app-navigation").getByText("読みかけ", { exact: true })).toHaveCount(0);
+  await expect(page.locator("#app-navigation").getByText("すべて", { exact: true })).toBeVisible();
+  await page.goto("/#/library");
+  await page.getByRole("button", { name: "ライブラリの表示対象", exact: true }).click();
+  await page.getByRole("menuitem", { name: "読みかけ", exact: true }).click();
+  await expect(page).toHaveURL(/#\/library\?shelf=reading/);
+  await expect(page.locator("#app-navigation").getByText("読みかけ", { exact: true })).toHaveCount(0);
+});
+
+test("update candidate source links open the in-app browser", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "900x600-light-100dpi", "The source navigation flow runs once");
+  await page.goto("/#/updates");
+  await page.getByRole("button", { name: /の取得元を開く$/ }).first().click();
+  await expect(page).toHaveURL(/#\/save\/pixiv\?url=/);
+  await expect(page.getByRole("heading", { name: "Webから保存", exact: true })).toBeVisible();
+  const source = await page.evaluate(() => new URLSearchParams(location.hash.split("?")[1]).get("url"));
+  expect(source).toBe("https://www.pixiv.net/novel/show.php?id=12001");
 });

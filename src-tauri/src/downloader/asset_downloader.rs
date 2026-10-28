@@ -731,7 +731,7 @@ fn asset_reuse_key(target: &DownloadTarget) -> AssetReuseKey {
     }
 }
 
-fn asset_source_identity(url: &str) -> String {
+pub(crate) fn asset_source_identity(url: &str) -> String {
     let Ok(mut parsed) = reqwest::Url::parse(url) else {
         return url.to_string();
     };

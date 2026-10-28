@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
+  Accordion,
   Alert,
   Badge,
   Box,
@@ -47,7 +48,7 @@ import type { LibraryDiagnostics, LibraryFileIssue } from "@/types/library";
 
 export const previewDiagnostics: LibraryDiagnostics = {
   measuredAt: "2026-08-09T12:00:00.000Z", totalDownloads: 1284, totalAssets: 8241, totalVersions: 1392, totalTextLength: 31_400_000,
-  databaseSizeBytes: 94_000_000, walSizeBytes: 1_200_000, storageSizeBytes: 14_680_000_000, lexicalIndexSizeBytes: 36_000_000, lexicalIndexFileCount: 120, lexicalIndexSegmentCount: 8, semanticIndexSizeBytes: 210_000_000,
+  databaseSizeBytes: 94_000_000, walSizeBytes: 1_200_000, storageSizeBytes: 14_680_000_000, storageUniqueFileBytes: 14_000_000_000, lexicalIndexSizeBytes: 36_000_000, lexicalIndexFileCount: 120, lexicalIndexSegmentCount: 8, semanticIndexSizeBytes: 210_000_000,
   sqlitePageCount: 22949, sqliteFreePages: 140, sqliteCacheSizeBytes: 8_000_000, liveDatabaseBytes: 93_400_000, fragmentationPercent: 0.61,
   orphanAssetRows: 0, orphanAssetBytes: 0, orphanAssetFiles: 0, orphanAssetFileBytes: 0, processMemoryBytes: 286_000_000, processPrivateMemoryBytes: 244_000_000, processCount: 7, webviewProcessCount: 6, gpuDedicatedMemoryBytes: 67_000_000, gpuSharedMemoryBytes: 9_000_000, listFirstPageMs: 8.3, listP50Ms: 8.1, listP95Ms: 10.7,
   checkedFileReferences: 9633, missingJsonFiles: 0, missingAssetFiles: 0, missingProfileFiles: 0, unsafeReferencedFiles: 0, unreadableReferencedFiles: 0, emptyReferencedFiles: 0, mismatchedAssetFiles: 0, transientFiles: 0, transientFileBytes: 0, fileIssueSamples: [],
@@ -126,6 +127,7 @@ const FILE_ISSUE_LABEL: Record<string, string> = {
   empty: "0バイトです",
   size_mismatch: "記録された容量と異なります",
   transient: "未完了の一時ファイル",
+  unregistered: "DB未登録",
 };
 
 const FILE_CATEGORY_LABEL: Record<string, string> = {
@@ -207,7 +209,6 @@ export default function DiagnosticsPage({ embedded = false, previewData = previe
     staleTime: Infinity,
     enabled: false,
   });
-  const measured = Boolean(diagnostics.data);
   /**
    * 取りこぼした FANBOX の添付。
    *
@@ -248,9 +249,18 @@ export default function DiagnosticsPage({ embedded = false, previewData = previe
     queryKey: ["entity-profile-repair-status"],
     queryFn: () => runtime
       ? getEntityProfileRepairStatus()
-      : Promise.resolve({ personCount: 0, seriesCount: 0, totalCount: 0 }),
-    staleTime: 30_000,
+      : Promise.resolve({ personCount: 0, seriesCount: 0, totalCount: 0, running: false, progress: null }),
+    staleTime: 0,
+    refetchInterval: (query) => query.state.data?.running ? 2_000 : false,
   });
+  const refetchProfileRepairStatus = profileRepairStatus.refetch;
+  useEffect(() => {
+    if (!runtime) return;
+    return subscribeTauriEvent<EntityProfileRepairProgress>("entity-profile-repair-progress", ({ payload }) => {
+      setProfileRepairProgress(payload);
+      if (payload.phase === "complete" || payload.phase === "canceled" || payload.phase === "paused") void refetchProfileRepairStatus();
+    });
+  }, [runtime, refetchProfileRepairStatus]);
   useEffect(() => {
     if (!runtime) return;
     return subscribeTauriEvent<{ phase: string; step: number; total: number }>("library-diagnostics-progress", ({ payload }) => setMeasurePhase(payload));
@@ -379,7 +389,9 @@ export default function DiagnosticsPage({ embedded = false, previewData = previe
       }
     },
     onSuccess: async (result) => {
-      if (result.canceled) {
+      if (result.stoppedReason) {
+        profileRepairOperationRef.current?.fail(result.stoppedReason);
+      } else if (result.canceled) {
         profileRepairOperationRef.current?.cancel(`${formatNumber(result.attempted)}件を確認した時点で中止しました`);
       } else {
         profileRepairOperationRef.current?.complete(
@@ -397,10 +409,10 @@ export default function DiagnosticsPage({ embedded = false, previewData = previe
       ]);
       notifications.show({
         color: result.canceled ? "gray" : result.remaining ? "yellow" : "green",
-        title: result.canceled ? "プロフィール修復を中止しました" : "プロフィール修復が完了しました",
-        message: result.remaining
+        title: result.stoppedReason ? "修復を一時停止しました" : result.canceled ? "プロフィール修復を中止しました" : "プロフィール修復が完了しました",
+        message: result.stoppedReason ?? (result.remaining
           ? `${formatNumber(result.repaired)}件を修復しました。残り${formatNumber(result.remaining)}件は、再実行すると続きから確認します。`
-          : `${formatNumber(result.repaired)}件を修復しました。`,
+          : `${formatNumber(result.repaired)}件を修復しました。`),
       });
     },
     onError: (error) => {
@@ -410,6 +422,8 @@ export default function DiagnosticsPage({ embedded = false, previewData = previe
     },
   });
   profileRepairRetryRef.current = () => profileRepair.mutate();
+  const repairProgress = profileRepairProgress ?? profileRepairStatus.data?.progress;
+  const profileRunning = profileRepair.isPending || Boolean(profileRepairStatus.data?.running);
   const data = diagnostics.data;
   const indexRatio = data?.searchIndex.totalDownloads ? data.searchIndex.indexedDownloads / data.searchIndex.totalDownloads * 100 : 100;
   const reclaimable = data ? Math.max(0, data.databaseSizeBytes - data.liveDatabaseBytes) : 0;
@@ -440,19 +454,6 @@ export default function DiagnosticsPage({ embedded = false, previewData = previe
     onConfirm: () => reimport.mutate(),
   });
 
-  const confirmProfileRepair = () => {
-    const status = profileRepairStatus.data;
-    if (!status?.totalCount) return;
-    modals.openConfirmModal({
-      title: "作者・シリーズ情報を修復しますか？",
-      children: <Stack gap="sm">
-        <Text size="sm">保存済み作品との紐付けは変えず、完全取得できていない作者{formatNumber(status.personCount)}件・シリーズ{formatNumber(status.seriesCount)}件の情報だけを取得元から埋め直します。</Text>
-        <Alert color="blue" title="途中で止めても続きから再開できます">取得元への負荷を抑えるため1件ずつ間隔を空けます。現在の件数では数分かかる場合があります。成功した対象はその都度確定し、通信失敗・中止・アプリ終了後も残件だけを再実行できます。</Alert>
-      </Stack>,
-      labels: { confirm: "修復を開始", cancel: "キャンセル" },
-      onConfirm: () => profileRepair.mutate(),
-    });
-  };
 
   const openStorageFolder = async () => {
     try {
@@ -472,26 +473,30 @@ export default function DiagnosticsPage({ embedded = false, previewData = previe
     }
   };
 
-  const showFileIssues = () => data && modals.open({
-    title: `確認が必要なファイル（最大${formatNumber(data.fileIssueSamples.length)}件）`,
+  const showFileIssues = (unregistered = false) => {
+    if (!data) return;
+    const samples = unregistered ? data.unregisteredAssetSamples ?? [] : data.fileIssueSamples;
+    const total = unregistered ? data.orphanAssetFiles : fileIntegrityIssues;
+    modals.open({
+    title: (unregistered ? "DB未登録のファイル" : "確認が必要なファイル") + "（最大" + formatNumber(samples.length) + "件）",
     size: "xl",
     children: <Stack gap="md">
       <Alert color="blue" title="表示だけでは変更しません">
-        DBやファイルを削除せず、診断で見つかった先頭{formatNumber(data.fileIssueSamples.length)}件を表示しています。全体は{formatNumber(fileIntegrityIssues)}件です。
+        DBやファイルを削除せず、診断で見つかった先頭{formatNumber(samples.length)}件を表示しています。全体は{formatNumber(total)}件です。
       </Alert>
       {/* 縦に積む箱と、縦に流れる箱は別物である。Stack のまま高さを絞ると、
           中の Card が flex で縮み、Card は自分の中身を切り落とす - 帯の文字が
           上下で切れて重なっていたのはこれだった。流すのは外の箱の仕事にする。 */}
       <Box mah="55vh" style={{ overflowY: "auto" }} pr="xs">
         <Stack gap="sm">
-          {data.fileIssueSamples.map((issue, index) => {
+          {samples.map((issue, index) => {
             const sizeDetail = issueSizeDetail(issue);
             const parent = parentDirectory(issue.path);
             return <Card key={`${issue.issueType}-${issue.path}-${index}`} withBorder p="sm">
               <Group justify="space-between" align="flex-start" wrap="nowrap">
                 <Box miw={0}>
                   <Group gap="xs">
-                    <Badge color={issue.issueType === "transient" || issue.issueType === "empty" || issue.issueType === "size_mismatch" ? "yellow" : "red"} variant="light">{FILE_ISSUE_LABEL[issue.issueType] ?? issue.issueType}</Badge>
+                    <Badge color={issue.issueType === "unregistered" || issue.issueType === "transient" || issue.issueType === "empty" || issue.issueType === "size_mismatch" ? "yellow" : "red"} variant="light">{FILE_ISSUE_LABEL[issue.issueType] ?? issue.issueType}</Badge>
                     <Badge color="gray" variant="light">{FILE_CATEGORY_LABEL[issue.category] ?? issue.category}</Badge>
                   </Group>
                   {issue.label && <Text mt="xs" size="sm" fw={650}>{issue.label}</Text>}
@@ -504,52 +509,35 @@ export default function DiagnosticsPage({ embedded = false, previewData = previe
           })}
         </Stack>
       </Box>
-      {data.fileIssueSamples.length < fileIntegrityIssues && <Text size="xs" c="dimmed">画面負荷を抑えるため先頭{formatNumber(data.fileIssueSamples.length)}件だけ表示しています。原因別の総件数は診断画面のバッジで確認できます。</Text>}
+      {samples.length < total && <Text size="xs" c="dimmed">画面負荷を抑えるため先頭{formatNumber(samples.length)}件だけ表示しています。原因別の総件数は診断画面のバッジで確認できます。</Text>}
     </Stack>,
   });
+  };
 
   return <div className={embedded ? "diagnostics-page" : "page page--contained diagnostics-page"}>
-    <PageHeader title="ライブラリ診断" description="状態を確認し、必要な保守だけを実行します。計測は自動では始まりません。" />
+    <PageHeader title="診断とメンテナンス" description="保存状態を確認し、見つかった問題に合わせて修復します。" />
     {/* Settings already carries one at the top of the screen. */}
     {!embedded && <RuntimeNotice />}
 
-    <Box mt="lg">
-      <SimpleGrid cols={{ base: 1, md: 3 }}>
-        <MaintenanceTaskCard
-          icon={Icons.diagnostics}
-          title="ライブラリを計測"
-          description="容量、ファイル整合性、検索時間を読み取ります。"
-          status={measured
-            ? <Badge color="green" variant="light">{`計測済み · ${new Date(data!.measuredAt).toLocaleString("ja-JP")}`}</Badge>
-            : <><Badge color="gray" variant="light">未計測</Badge><Text size="xs" c="dimmed" mt={6}>保存フォルダーも走査するため、作品数が多いと数十秒かかります。</Text></>}
-          action={<Button fullWidth variant={measured ? "default" : "filled"} leftSection={<Icons.retry size={IconSize.menu} />} loading={diagnostics.isFetching} onClick={() => diagnostics.refetch()}>{measured ? "再計測" : "計測する"}</Button>}
-        />
-        <MaintenanceTaskCard
-          icon={Icons.database}
-          title="データベース"
-          description="検索統計と一時ログを軽く整理します。計測なしでも実行できます。"
-          status={<Badge color="blue" variant="light">日常的な保守</Badge>}
-          action={<Button fullWidth variant="light" leftSection={<Icons.optimize size={IconSize.menu} />} loading={maintenance.isPending} disabled={!runtime || indexOptimization.isPending} onClick={() => maintenance.mutate(false)}>DBを最適化</Button>}
-        />
-        <MaintenanceTaskCard
-          icon={Icons.search}
-          title="全文検索索引"
-          description="分割された索引を統合し、検索時の負担を減らします。"
-          status={!data
-            ? <><Badge color="gray" variant="light">状態不明</Badge><Text size="xs" c="dimmed" mt={6}>計測すると最適化が必要か判断できます。</Text></>
-            : data.lexicalIndexSegmentCount <= 1
-              ? <Badge color="green" variant="light">最適です</Badge>
-              : <Badge color={data.lexicalIndexSegmentCount >= 16 ? "yellow" : "blue"} variant="light">{formatNumber(data.lexicalIndexSegmentCount)}セグメント</Badge>}
-          action={<Button fullWidth variant="light" color={data && data.lexicalIndexSegmentCount >= 16 ? "yellow" : "piep"} leftSection={<Icons.search size={IconSize.menu} />} loading={indexOptimization.isPending} disabled={!runtime || maintenance.isPending || !data || data.lexicalIndexSegmentCount <= 1} onClick={confirmIndexOptimization}>検索索引を最適化</Button>}
-        />
-        <MaintenanceTaskCard
+    <Card p="lg" mt="lg">
+      <Group justify="space-between" align="center" wrap="wrap">
+        <Group gap="sm"><ThemeIcon variant="light" size={40}><Icons.diagnostics size={IconSize.feature} /></ThemeIcon><Box>
+          <Text fw={700}>ライブラリの状態</Text>
+          <Text size="xs" c="dimmed" mt={3}>{data ? "最終確認: " + new Date(data.measuredAt).toLocaleString("ja-JP") : "まだ診断していません。保存ファイルと登録情報を照合します。"}</Text>
+        </Box></Group>
+        <Button size="sm" leftSection={<Icons.retry size={IconSize.menu} />} loading={diagnostics.isFetching} disabled={maintenance.isPending || indexOptimization.isPending} onClick={() => diagnostics.refetch()}>{data ? "再確認" : "診断する"}</Button>
+      </Group>
+      <Text size="xs" c="dimmed" mt="sm">診断は読み取りだけを行います。作品数が多い場合は時間がかかります。</Text>
+    </Card>
+
+    {Boolean(fanboxGaps.error || fanboxGaps.data?.workIds.length) && <Box mt="lg">        <MaintenanceTaskCard
           icon={Icons.epub}
           title="FANBOXの添付"
           description="原本JSONが求める画像・ファイルを、実際に持っているか照らします。"
           status={fanboxGaps.isLoading
             ? <Badge color="gray" variant="light">数えています</Badge>
             : fanboxGaps.error
-              ? <Badge color="red" variant="light">確認できません</Badge>
+              ? <Text size="sm" c="red">{errorMessage(fanboxGaps.error)}</Text>
               : !fanboxGaps.data || fanboxGaps.data.workIds.length === 0
                 ? <Badge color="green" variant="light">欠けはありません</Badge>
                 : <>
@@ -562,7 +550,7 @@ export default function DiagnosticsPage({ embedded = false, previewData = previe
                         && `うち${formatNumber(fanboxGaps.data.restrictedWorks)}件は、支援中のアカウントでないと取得できません。`}
                     </Text>
                   </>}
-          action={<Button
+          action={fanboxGaps.error ? <Button size="xs" variant="default" onClick={() => fanboxGaps.refetch()}>再確認</Button> : <Button
             fullWidth
             variant="light"
             color="yellow"
@@ -574,33 +562,33 @@ export default function DiagnosticsPage({ embedded = false, previewData = previe
             欠けた添付を取り直す
           </Button>}
         />
-      </SimpleGrid>
-    </Box>
-
+</Box>}
     {profileRepairStatus.error && <Alert mt="lg" color="red" icon={<Icons.warning size={IconSize.nav} />} title="作者・シリーズ情報の状態を確認できません">
       <Group justify="space-between"><Text size="sm">{errorMessage(profileRepairStatus.error)}</Text><Button size="xs" variant="default" onClick={() => profileRepairStatus.refetch()}>再確認</Button></Group>
     </Alert>}
-    {profileRepairStatus.data && <Card p="lg" mt="lg" className="maintenance-integrity-card">
+    {profileRepairStatus.data && (profileRepairStatus.data.totalCount > 0 || repairProgress) && <Card p="lg" mt="lg" className="maintenance-integrity-card">
       <Group justify="space-between" align="flex-start" wrap="nowrap">
         <Group align="flex-start" wrap="nowrap" miw={0}>
           <ThemeIcon variant="light" color={profileRepairStatus.data.totalCount ? "yellow" : "green"}>{profileRepairStatus.data.totalCount ? <Icons.warning size={IconSize.menu} /> : <Icons.success size={IconSize.menu} />}</ThemeIcon>
           <Box miw={0}>
             <Group gap="xs">
               <Text fw={720}>作者・シリーズ情報</Text>
-              <Badge color={profileRepairStatus.data.totalCount ? "yellow" : "green"} variant="light">{profileRepairStatus.data.totalCount ? `${formatNumber(profileRepairStatus.data.totalCount)}件 未完了` : "問題なし"}</Badge>
+              <Badge color={profileRepairStatus.data.totalCount ? "yellow" : "green"} variant="light">{profileRepairStatus.data.totalCount ? `${formatNumber(profileRunning && repairProgress ? Math.max(0, repairProgress.total - repairProgress.repaired) : profileRepairStatus.data.totalCount)}件 未取得` : "取得済み"}</Badge>
             </Group>
-            <Text size="xs" c="dimmed" mt={5}>{profileRepairStatus.data.totalCount ? "保存の中断や通信失敗で簡易情報のまま残った項目があります。作品との紐付けは保たれています。" : "保存済み作品から参照される情報はすべて取得済みです。"}</Text>
-            {profileRepairStatus.data.totalCount > 0 && <Group gap="xs" mt="xs"><Badge color="yellow" variant="light">作者 {formatNumber(profileRepairStatus.data.personCount)}</Badge><Badge color="yellow" variant="light">シリーズ {formatNumber(profileRepairStatus.data.seriesCount)}</Badge></Group>}
+            <Text size="xs" c="dimmed" mt={5}>{profileRepairStatus.data.totalCount ? "作品との紐付けは保存済みです。未取得の紹介文やシリーズ情報を接続先から取得します。" : "保存済み作品から参照される情報はすべて取得済みです。"}</Text>
+            {!profileRunning && profileRepairStatus.data.totalCount > 0 && <Text size="xs" c="dimmed" mt="xs">作者 {formatNumber(profileRepairStatus.data.personCount)} · シリーズ {formatNumber(profileRepairStatus.data.seriesCount)}</Text>}
           </Box>
         </Group>
-        {profileRepairStatus.data.totalCount > 0 && (profileRepair.isPending
+        {profileRepairStatus.data.totalCount > 0 && (profileRunning
           ? <Button color="red" variant="subtle" leftSection={<Icons.stop size={IconSize.menu} />} onClick={cancelProfileRepair}>中止</Button>
-          : <Button leftSection={<Icons.retry size={IconSize.menu} />} disabled={!runtime || maintenance.isPending || indexOptimization.isPending} onClick={confirmProfileRepair}>残件を修復</Button>)}
+          : <Button leftSection={<Icons.retry size={IconSize.menu} />} disabled={!runtime || maintenance.isPending || indexOptimization.isPending} onClick={() => profileRepair.mutate()}>残件を修復</Button>)}
       </Group>
-      {profileRepairProgress && <Box mt="md">
-        <Group justify="space-between" mb={6}><Text size="xs" c="dimmed">{profileRepairProgress.activeLabel ? `確認中: ${profileRepairProgress.activeLabel}` : "修復を準備しています"}</Text><Text size="xs" c="dimmed">{formatNumber(profileRepairProgress.completed)} / {formatNumber(profileRepairProgress.total)}</Text></Group>
-        <Progress value={profileRepairProgress.total ? profileRepairProgress.completed / profileRepairProgress.total * 100 : 0} animated />
-        <Text size="xs" c="dimmed" mt={6}>修復 {formatNumber(profileRepairProgress.repaired)}件 · 今回失敗 {formatNumber(profileRepairProgress.failed)}件</Text>
+      {repairProgress && <Box mt="md">
+        <Group justify="space-between" mb={6} wrap="nowrap"><Text size="xs" c="dimmed" className="line-clamp-1" title={repairProgress.activeLabel ?? undefined}>{repairProgress.activeLabel ? `${repairProgress.phase === "checked" ? "確認済み" : "確認中"}: ${repairProgress.activeLabel}` : profileRunning ? "修復を準備しています" : repairProgress.phase === "canceled" ? "停止しました" : repairProgress.phase === "paused" ? "一時停止しました" : "今回の修復が完了しました"}</Text><Text size="xs" c="dimmed" style={{ flexShrink: 0 }}>{formatNumber(repairProgress.completed)} / {formatNumber(repairProgress.total)}</Text></Group>
+        <Progress value={repairProgress.total ? repairProgress.completed / repairProgress.total * 100 : 0} animated={profileRunning} />
+        <Text size="xs" c="dimmed" mt={6}>取得済み {formatNumber(repairProgress.repaired)}件 · 取得できなかった項目 {formatNumber(repairProgress.failed)}件</Text>
+        {repairProgress.error && <Text size="xs" c="red" mt={6}>{repairProgress.error}</Text>}
+        {repairProgress.failed > 0 && <Button size="xs" variant="subtle" mt={6} onClick={() => navigate("/operations")}>失敗の詳細</Button>}
       </Box>}
     </Card>}
     {(diagnostics.isFetching || optimizePhase) && (
@@ -626,21 +614,7 @@ export default function DiagnosticsPage({ embedded = false, previewData = previe
         )}
       </Card>
     )}
-    {!measured && !diagnostics.isFetching && !diagnostics.error
-      ? <Text size="sm" c="dimmed" mt="lg">まだ計測していません。上の「ライブラリを計測」から開始できます。</Text>
-      : diagnostics.error ? <Box mt="lg"><ErrorState error={diagnostics.error} retry={() => diagnostics.refetch()} /></Box> : data && <Stack gap="lg" mt="xl">
-      <Box>
-        <Title order={2}>診断結果</Title>
-        <Text size="sm" c="dimmed" mt={4}>計測結果と、対応が必要な項目だけを表示します。</Text>
-      </Box>
-      <SimpleGrid cols={{ base: 1, sm: 2, xl: 4 }}>
-        <MetricCard label="作品" value={`${formatNumber(data.totalDownloads)}件`} detail={`${formatNumber(data.totalTextLength)}文字 · ${formatNumber(data.totalVersions)}版`} icon={Icons.database} />
-        <MetricCard label="保存データ" value={formatBytes(data.storageSizeBytes)} detail={`${formatNumber(data.totalAssets)}アセット`} icon={Icons.storage} color="gray" />
-        <MetricCard label="検索索引" value={`${indexRatio.toFixed(1)}%`} detail={`${formatNumber(data.searchIndex.indexedDownloads)} / ${formatNumber(data.searchIndex.totalDownloads)}作品`} icon={Icons.search} color={data.searchIndex.isComplete ? "green" : "yellow"} />
-        <MetricCard label="アプリ全体メモリ" value={data.processPrivateMemoryBytes === null ? (data.processMemoryBytes === null ? "取得不可" : formatBytes(data.processMemoryBytes)) : formatBytes(data.processPrivateMemoryBytes)} detail={`${formatNumber(data.processCount)}プロセス · WebView ${formatNumber(data.webviewProcessCount)} · WS ${data.processMemoryBytes === null ? "取得不可" : formatBytes(data.processMemoryBytes)}`} icon={Icons.activity} color="gray" />
-        <MetricCard label="GPUメモリ" value={data.gpuDedicatedMemoryBytes === null ? "取得不可" : formatBytes(data.gpuDedicatedMemoryBytes)} detail={`共有 ${data.gpuSharedMemoryBytes === null ? "取得不可" : formatBytes(data.gpuSharedMemoryBytes)}`} icon={Icons.activity} color="gray" />
-      </SimpleGrid>
-
+    {diagnostics.error ? <Box mt="lg"><ErrorState error={diagnostics.error} retry={() => diagnostics.refetch()} /></Box> : data && <Stack gap="lg" mt="xl">
       {data.fragmentationPercent >= 20 && <Alert color={data.fragmentationPercent >= 70 ? "red" : "yellow"} icon={<Icons.warning size={IconSize.nav} />} title={`DBの${data.fragmentationPercent.toFixed(2)}%が再利用待ち領域です`}>
         <Group justify="space-between" align="flex-end"><Text size="sm" maw={720}>論理使用量は約{formatBytes(data.liveDatabaseBytes)}ですが、物理ファイルは{formatBytes(data.databaseSizeBytes)}あります。検索結果の正しさには影響しませんが、バックアップ容量とディスクI/Oを増やします。</Text><Button color="yellow" loading={maintenance.isPending} disabled={!runtime} onClick={confirmCompact}>空き容量を検査して圧縮</Button></Group>
       </Alert>}
@@ -669,7 +643,7 @@ export default function DiagnosticsPage({ embedded = false, previewData = previe
                 <Text size="xs" c="dimmed" mt={2}>対象を確認してから、状態に合う安全な方法を選べます。診断画面から勝手に削除・参照解除はしません。</Text>
               </Box>
               <Group gap="xs">
-                <Button size="xs" variant="filled" leftSection={<Icons.read size={IconSize.menu} />} disabled={!data.fileIssueSamples.length} onClick={showFileIssues}>対象ファイルを確認</Button>
+                <Button size="xs" variant="filled" leftSection={<Icons.read size={IconSize.menu} />} disabled={!data.fileIssueSamples.length} onClick={() => showFileIssues()}>対象ファイルを確認</Button>
                 <Button size="xs" variant="default" leftSection={<Icons.openFolder size={IconSize.menu} />} disabled={!runtime} onClick={openStorageFolder}>保存先を開く</Button>
                 <Button size="xs" variant="default" leftSection={<Icons.retry size={IconSize.menu} />} loading={reimport.isPending} disabled={!runtime || maintenance.isPending || indexOptimization.isPending} onClick={confirmReimport}>残ったフォルダーを再取り込み</Button>
                 <Button size="xs" variant="default" leftSection={<Icons.import size={IconSize.menu} />} onClick={() => navigate("/settings?section=library")}>バックアップ復元へ</Button>
@@ -683,11 +657,42 @@ export default function DiagnosticsPage({ embedded = false, previewData = previe
         </Stack> : <Text size="sm">{formatNumber(data.checkedFileReferences)}件のDB参照を照合し、参照切れ・領域外リンク・0バイト化・既知の容量差は見つかりませんでした。</Text>}
       </Alert>
 
-      <SimpleGrid cols={{ base: 1, lg: 2 }}>
-        <Card p="lg"><Group justify="space-between"><Box><Title order={3}>実データ性能</Title><Text size="sm" c="dimmed">同じ処理を複数回測定したアプリ内部時間</Text></Box><ThemeIcon size={44} variant="light" color="green"><Icons.diagnostics size={IconSize.feature} /></ThemeIcon></Group><Table.ScrollContainer minWidth={380} type="native"><Table mt="lg" verticalSpacing="sm"><Table.Thead><Table.Tr><Table.Th>処理</Table.Th><Table.Th>初回（冷えた状態）</Table.Th><Table.Th>p50</Table.Th><Table.Th>p95</Table.Th></Table.Tr></Table.Thead><Table.Tbody><PerformanceRow name="一覧の先頭80件" cold={data.listFirstPageMs} p50={data.listP50Ms} p95={data.listP95Ms} /><PerformanceRow name="最多作者名の全文検索" cold={data.lexicalSearchMs} p50={data.lexicalSearchP50Ms} p95={data.lexicalSearchP95Ms} /><PerformanceRow name="作者の完全一致絞り込み" cold={data.exactAuthorP50Ms} p50={data.exactAuthorP50Ms} p95={data.exactAuthorP95Ms} /></Table.Tbody></Table></Table.ScrollContainer>{data.benchmarkQuery && <Text size="xs" c="dimmed" mt="md">作者名の実データを端末内だけで使用して計測しました。</Text>}</Card>
-        <Card p="lg"><Title order={3}>索引と保存領域</Title><Stack gap="md" mt="lg"><Box><Group justify="space-between"><Box><Text size="sm">全文索引</Text><Text size="xs" c="dimmed">{formatNumber(data.lexicalIndexSegmentCount)}セグメント · {formatNumber(data.lexicalIndexFileCount)}ファイル</Text></Box><Text size="sm" fw={650}>{formatBytes(data.lexicalIndexSizeBytes)}</Text></Group><Group justify="space-between" mt="sm"><Box><Text size="sm">意味検索索引</Text><Text size="xs" c="dimmed">{formatNumber(data.searchIndex.semanticIndexedDownloads)} / {formatNumber(data.searchIndex.totalDownloads)}作品{data.searchIndex.semanticPendingDownloads ? ` · ${formatNumber(data.searchIndex.semanticPendingDownloads)}件が未反映` : ""}</Text></Box><Text size="sm" fw={650}>{formatBytes(data.semanticIndexSizeBytes)}</Text></Group></Box><Divider /><Box><Group justify="space-between"><Text size="sm">索引完成度</Text><Text size="xs" c="dimmed">{data.searchIndex.pendingDownloads}件待機</Text></Group><Progress value={indexRatio} mt="xs" color={data.searchIndex.isComplete ? "green" : "yellow"} /></Box><Divider /><Group justify="space-between"><Box><Text size="sm">孤立アセットDB行</Text><Text size="xs" c="dimmed">作品との関連を失った記録</Text></Box><Badge variant="light" color={data.orphanAssetRows ? "red" : "green"}>{data.orphanAssetRows ? `${formatNumber(data.orphanAssetRows)}件 · ${formatBytes(data.orphanAssetBytes)}` : "0件"}</Badge></Group><Group justify="space-between"><Box><Text size="sm">孤立アセットファイル</Text><Text size="xs" c="dimmed">保存フォルダーにある未参照ファイル</Text></Box><Badge variant="light" color={data.orphanAssetFiles ? "yellow" : "green"}>{data.orphanAssetFiles ? `${formatNumber(data.orphanAssetFiles)}件 · ${formatBytes(data.orphanAssetFileBytes)}` : "0件"}</Badge></Group></Stack></Card>
+      <Accordion variant="separated"><Accordion.Item value="details"><Accordion.Control><Text size="sm" fw={650}>容量・検索速度・登録状況の詳細</Text></Accordion.Control><Accordion.Panel>
+      <SimpleGrid cols={{ base: 1, sm: 2, xl: 4 }}>
+        <MetricCard label="作品" value={`${formatNumber(data.totalDownloads)}件`} detail={`${formatNumber(data.totalTextLength)}文字 · ${formatNumber(data.totalVersions)}版`} icon={Icons.database} />
+        <MetricCard label="保存ファイル" value={formatBytes(data.storageUniqueFileBytes ?? data.storageSizeBytes)} detail={`${data.storageUniqueFileBytes != null ? "共有分は1回だけ集計" : "共有分を含む合計"} · 登録画像・添付 ${formatNumber(data.totalAssets)}件`} icon={Icons.storage} color="gray" />
+        <MetricCard label="検索索引" value={`${indexRatio.toFixed(1)}%`} detail={`${formatNumber(data.searchIndex.indexedDownloads)} / ${formatNumber(data.searchIndex.totalDownloads)}作品`} icon={Icons.search} color={data.searchIndex.isComplete ? "green" : "yellow"} />
+        <MetricCard label="アプリ全体メモリ" value={data.processPrivateMemoryBytes === null ? (data.processMemoryBytes === null ? "取得不可" : formatBytes(data.processMemoryBytes)) : formatBytes(data.processPrivateMemoryBytes)} detail={`${formatNumber(data.processCount)}プロセス · WebView ${formatNumber(data.webviewProcessCount)} · WS ${data.processMemoryBytes === null ? "取得不可" : formatBytes(data.processMemoryBytes)}`} icon={Icons.activity} color="gray" />
+        <MetricCard label="GPUメモリ" value={data.gpuDedicatedMemoryBytes === null ? "取得不可" : formatBytes(data.gpuDedicatedMemoryBytes)} detail={`共有 ${data.gpuSharedMemoryBytes === null ? "取得不可" : formatBytes(data.gpuSharedMemoryBytes)}`} icon={Icons.activity} color="gray" />
+      </SimpleGrid>      <SimpleGrid cols={{ base: 1, lg: 2 }}>
+        <Card p="lg"><Group justify="space-between"><Box><Title order={3}>実データ性能</Title><Text size="sm" c="dimmed">同じ処理を複数回測定したアプリ内部時間</Text></Box><ThemeIcon size={44} variant="light" color="green"><Icons.diagnostics size={IconSize.feature} /></ThemeIcon></Group><Table.ScrollContainer minWidth={380} type="native"><Table mt="lg" verticalSpacing="sm"><Table.Thead><Table.Tr><Table.Th>処理</Table.Th><Table.Th>初回</Table.Th><Table.Th>通常（中央値）</Table.Th><Table.Th>遅い時（95%点）</Table.Th></Table.Tr></Table.Thead><Table.Tbody><PerformanceRow name="一覧の先頭80件" cold={data.listFirstPageMs} p50={data.listP50Ms} p95={data.listP95Ms} /><PerformanceRow name="最多作者名の全文検索" cold={data.lexicalSearchMs} p50={data.lexicalSearchP50Ms} p95={data.lexicalSearchP95Ms} /><PerformanceRow name="作者の完全一致絞り込み" cold={null} p50={data.exactAuthorP50Ms} p95={data.exactAuthorP95Ms} /></Table.Tbody></Table></Table.ScrollContainer>{data.benchmarkQuery && <Text size="xs" c="dimmed" mt="md">作者名の実データを端末内だけで使用して計測しました。</Text>}</Card>
+        <Card p="lg"><Title order={3}>索引と保存領域</Title><Stack gap="md" mt="lg"><Box><Group justify="space-between"><Box><Text size="sm">全文索引</Text><Text size="xs" c="dimmed">{formatNumber(data.lexicalIndexSegmentCount)}セグメント · {formatNumber(data.lexicalIndexFileCount)}ファイル</Text></Box><Text size="sm" fw={650}>{formatBytes(data.lexicalIndexSizeBytes)}</Text></Group><Group justify="space-between" mt="sm"><Box><Text size="sm">意味検索索引</Text><Text size="xs" c="dimmed">{formatNumber(data.searchIndex.semanticIndexedDownloads)} / {formatNumber(data.searchIndex.totalDownloads)}作品{data.searchIndex.semanticPendingDownloads ? ` · ${formatNumber(data.searchIndex.semanticPendingDownloads)}件が未反映` : ""}</Text></Box><Text size="sm" fw={650}>{formatBytes(data.semanticIndexSizeBytes)}</Text></Group></Box><Divider /><Box><Group justify="space-between"><Text size="sm">索引完成度</Text><Text size="xs" c="dimmed">{data.searchIndex.pendingDownloads}件待機</Text></Group><Progress value={indexRatio} mt="xs" color={data.searchIndex.isComplete ? "green" : "yellow"} /></Box><Divider /><Group justify="space-between"><Box><Text size="sm">関連作品がない登録</Text><Text size="xs" c="dimmed">作品との関連を失った記録</Text></Box><Badge variant="light" color={data.orphanAssetRows ? "red" : "green"}>{data.orphanAssetRows ? `${formatNumber(data.orphanAssetRows)}件 · ${formatBytes(data.orphanAssetBytes)}` : "0件"}</Badge></Group><Group justify="space-between"><Box><Text size="sm">DB未登録の画像・添付</Text><Text size="xs" c="dimmed">DBが直接参照していないファイル。未使用・削除可能とは限りません。</Text></Box><Badge variant="light" color="gray">{data.orphanAssetFiles ? `${formatNumber(data.orphanAssetFiles)}件 · ${formatBytes(data.orphanAssetFileBytes)}` : "0件"}</Badge></Group><Text size="xs" c="dimmed">容量はファイルサイズの合計で、共有している実体も重複して数えます。削除で空く容量ではありません。</Text>{data.orphanAssetFiles > 0 && <Button size="xs" variant="subtle" disabled={!data.unregisteredAssetSamples?.length} onClick={() => showFileIssues(true)}>未登録ファイルを確認</Button>}</Stack></Card>
       </SimpleGrid>
+      </Accordion.Panel></Accordion.Item></Accordion>
       <Text size="xs" c="dimmed">最終計測: {new Date(data.measuredAt).toLocaleString("ja-JP")} · 計測値はこの端末から送信されません。</Text>
     </Stack>}
+    <Accordion variant="separated" mt="lg"><Accordion.Item value="maintenance"><Accordion.Control><Text fw={650} size="sm">最適化と復元</Text><Text size="xs" c="dimmed">DB・検索索引の整理、保存フォルダーからの復旧</Text></Accordion.Control><Accordion.Panel>
+      <SimpleGrid cols={{ base: 1, md: 2 }}>
+        <MaintenanceTaskCard
+          icon={Icons.database}
+          title="データベース"
+          description="検索統計と一時ログを軽く整理します。計測なしでも実行できます。"
+          status={<Badge color="blue" variant="light">日常的な保守</Badge>}
+          action={<Button fullWidth variant="light" leftSection={<Icons.optimize size={IconSize.menu} />} loading={maintenance.isPending} disabled={!runtime || indexOptimization.isPending || profileRunning} onClick={() => maintenance.mutate(false)}>DBを最適化</Button>}
+        />
+        <MaintenanceTaskCard
+          icon={Icons.search}
+          title="全文検索索引"
+          description="分割された索引を統合し、検索時の負担を減らします。"
+          status={!data
+            ? <><Badge color="gray" variant="light">状態不明</Badge><Text size="xs" c="dimmed" mt={6}>計測すると最適化が必要か判断できます。</Text></>
+            : data.lexicalIndexSegmentCount <= 1
+              ? <Badge color="green" variant="light">最適です</Badge>
+              : <Badge color={data.lexicalIndexSegmentCount >= 16 ? "yellow" : "blue"} variant="light">{formatNumber(data.lexicalIndexSegmentCount)}セグメント</Badge>}
+          action={<Button fullWidth variant="light" color={data && data.lexicalIndexSegmentCount >= 16 ? "yellow" : "piep"} leftSection={<Icons.search size={IconSize.menu} />} loading={indexOptimization.isPending} disabled={!runtime || maintenance.isPending || profileRunning || !data || data.lexicalIndexSegmentCount <= 1} onClick={confirmIndexOptimization}>検索索引を最適化</Button>}
+        />
+      </SimpleGrid>
+    </Accordion.Panel></Accordion.Item></Accordion>
+
   </div>;
 }
