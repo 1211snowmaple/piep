@@ -46,6 +46,8 @@ impl std::fmt::Display for Redacted {
 #[derive(thiserror::Error)]
 #[non_exhaustive]
 pub enum PixivError {
+    #[error("更新確認を中断しました")]
+    Interrupted,
     /// I/Oエラー。
     #[error("I/Oエラー: {0}")]
     Io(#[from] std::io::Error),
@@ -123,7 +125,7 @@ pub enum PixivError {
     /// `error` は false のまま、件数だけが減る。これを「変わっていない」と読むと、
     /// セッションが切れた日にライブラリ全体が「最新です」と表示される。
     /// 数が合わないことは、それ自体が失敗である。
-    #[error("一覧が {requested} 件中 {returned} 件しか返りませんでした。pixivとの接続が切れている可能性があります")]
+    #[error("一覧が {requested} 件中 {returned} 件しか確認できませんでした。閲覧設定や取得元の応答を確認してください")]
     PartialListing {
         /// 要求した件数。
         requested: usize,
@@ -149,6 +151,7 @@ impl std::fmt::Debug for PixivError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // `body` は認証応答・作品本文を含みうる。エラー連鎖の Debug にも出さない。
         let name = match self {
+            Self::Interrupted => "Interrupted",
             Self::Io(_) => "Io",
             Self::Reqwest(_) => "Reqwest",
             Self::ResponseTooLarge { .. } => "ResponseTooLarge",
@@ -239,7 +242,7 @@ mod tests {
         let shown = err.to_string();
         assert!(shown.contains("100"));
         assert!(shown.contains('7'));
-        assert!(shown.contains("接続"));
+        assert!(shown.contains("閲覧設定"));
     }
 
     #[test]

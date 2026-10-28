@@ -6465,7 +6465,7 @@ fn placeholder_cover_repair_changes_only_the_current_cover_reference() {
     let db = Database::open(&root.join("piep.db"), &storage).unwrap();
     let id = insert_download(&db, &storage, "gated-cover", "作品", "作者", &[], "本文");
     let old = storage
-        .join("limit_r18_100.png")
+        .join("limit_r18g_100.png")
         .to_string_lossy()
         .to_string();
     let new = storage.join("real-cover.jpg").to_string_lossy().to_string();
@@ -6516,12 +6516,12 @@ fn placeholder_cover_repair_reuses_its_existing_asset_row() {
         .lock()
         .unwrap()
         .execute(
-            "UPDATE downloads SET cover_path=?2, asset_count=1 WHERE id=?1",
+            "UPDATE downloads SET cover_path=?2, asset_count=1, file_size_bytes=32 WHERE id=?1",
             params![id, old],
         )
         .unwrap();
     db.conn.lock().unwrap().execute(
-        "INSERT INTO assets (download_id, asset_type, filename, local_path) VALUES (?1, 'cover', 'limit_r18_100.png', ?2)",
+        "INSERT INTO assets (download_id, asset_type, filename, local_path, file_size_bytes) VALUES (?1, 'cover', 'limit_r18_100.png', ?2, 12)",
         params![id, old],
     ).unwrap();
     assert!(db
@@ -6529,6 +6529,7 @@ fn placeholder_cover_repair_reuses_its_existing_asset_row() {
         .unwrap());
     let work = db.get_download(id).unwrap();
     assert_eq!(work.asset_count, 1);
+    assert_eq!(work.file_size_bytes, 143);
     let assets = db.get_assets(id).unwrap();
     assert_eq!(assets.len(), 1);
     assert_eq!(assets[0].local_path, new);

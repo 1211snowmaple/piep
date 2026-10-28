@@ -2176,7 +2176,10 @@ pub async fn download_and_save(
             false
         };
         let updated_changed = if source == "fanbox" {
-            dl.source_updated_at != new_source_updated
+            !crate::source_time::same_instant(
+                dl.source_updated_at.as_deref(),
+                new_source_updated.as_deref(),
+            )
         } else {
             false
         };

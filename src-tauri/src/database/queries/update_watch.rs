@@ -14,6 +14,12 @@ use super::{
 use rusqlite::{params, OptionalExtension};
 
 impl Database {
+    pub fn has_active_update_job(&self) -> Result<bool, String> {
+        self.read_conn()?.query_row(
+            "SELECT EXISTS(SELECT 1 FROM update_jobs WHERE status IN ('queued', 'running', 'canceling'))",
+            [], |row| row.get(0),
+        ).map_err(|error| format!("Failed to read active update jobs: {error}"))
+    }
     pub fn upsert_update_target(&self, target: &UpdateTargetInput) -> Result<UpdateTarget, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.execute(

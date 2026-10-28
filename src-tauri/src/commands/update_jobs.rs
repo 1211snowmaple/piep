@@ -66,8 +66,8 @@ enum WebLookup {
     /// 引けなかった。セッションが無い、伏せられている、作者が分からない、など。
     /// **失敗ではない。** 従来どおりアプリAPIで確かめればよい。
     Unknown,
-    /// 一覧そのものが当てにならない。再接続が要る。
-    NeedsAuth(String),
+    /// 一覧の確認に失敗した。理由を保ったままジョブの再試行・停止へ渡す。
+    Failed(String),
 }
 
 #[derive(Default)]
@@ -80,8 +80,8 @@ struct CachedWebListing {
 ///
 /// pixiv の web は 1 リクエストで 100 件ぶんの `updateDate` を返す。作者ごとに
 /// 一度聞いて覚えておけば、作品ごとにアプリAPIを叩かずに「変わっていない」が
-/// 分かる。**セッションが無ければ何もしない。** 無い状態は壊れた状態ではなく、
-/// 今までどおりの経路になるだけである。
+/// 分かる。セッションが無ければ作品単体は従来の経路へ進めるが、作者全体の
+/// 改稿確認を「変更なし」として完了させてはいけない。
 struct WebUpdateIndex {
     api: Option<crate::pixiv_api::web::WebPixivAPI>,
     asked_authors: HashSet<String>,
@@ -170,13 +170,17 @@ impl WebUpdateIndex {
             &cookie,
             credentials.pixiv_user_agent.as_deref().unwrap_or_default(),
         );
-        let api = session.and_then(|session| match crate::pixiv_api::web::WebPixivAPI::new() {
-            Ok(api) => Some(api.with_session(session)),
+        let api = match crate::pixiv_api::web::WebPixivAPI::new() {
+            Ok(api) => Some(if let Some(session) = session {
+                api.with_session(session)
+            } else {
+                api
+            }),
             Err(error) => {
                 log::warn!("pixiv web クライアントを作れません: {error}");
                 None
             }
-        });
+        };
         Self {
             api,
             asked_authors: HashSet::new(),
@@ -191,29 +195,40 @@ impl WebUpdateIndex {
     /// 見たいときも、同じ「その作者の保存済み作品を全部」を聞いて覚える。
     /// 用途ごとに違う範囲を聞き分けると、同じ作者を二度聞くことになる。
     ///
-    /// セッションが無ければ `None`。**失敗ではない** - 呼ぶ側は従来の経路へ進む。
+    /// セッションが無ければ `None`。作品単体は従来の経路へ進める。
+    /// 作者全体の改稿確認では、呼ぶ側が未確認として扱う。
     async fn author_listing(
         &mut self,
         state: &Arc<AppState>,
         author_id: &str,
-    ) -> Result<Option<&CachedWebListing>, PixivError> {
+        job_id: &str,
+    ) -> Result<Option<&CachedWebListing>, String> {
         let author_id = author_id.trim();
         if self.api.is_none() || self.gave_up || author_id.is_empty() {
             return Ok(None);
         }
-        if self.asked_authors.insert(author_id.to_string()) {
+        if !self.asked_authors.contains(author_id) {
             let ids: Vec<String> = state
                 .db
                 .pixiv_works_for_author(author_id)
-                .unwrap_or_default()
+                .map_err(|error| format!("保存済み作品の一覧を読めません: {error}"))?
                 .into_iter()
                 .map(|work| work.source_id)
                 .collect();
+            self.asked_authors.insert(author_id.to_string());
             if ids.is_empty() {
                 return Ok(Some(self.entries.entry(author_id.to_string()).or_default()));
             }
             let api = self.api.as_ref().expect("checked above");
-            match api.user_novels_by_ids(author_id, &ids).await {
+            match api
+                .user_novels_by_ids_with_control(author_id, &ids, || {
+                    state
+                        .db
+                        .update_job_status_value(job_id)
+                        .is_ok_and(|status| status == "running")
+                })
+                .await
+            {
                 Ok(listed) => {
                     let bucket = self.entries.entry(author_id.to_string()).or_default();
                     for entry in listed.entries {
@@ -225,23 +240,22 @@ impl WebUpdateIndex {
                 // R-18 が黙って落ちている可能性がある。「更新なし」にはしない。
                 Err(error @ PixivError::PartialListing { .. }) => {
                     self.gave_up = true;
-                    return Err(error);
+                    return Err(error.to_string());
                 }
                 Err(error @ PixivError::RateLimited { .. }) => {
                     // 同じジョブ内の再試行でも、一覧を改めて取得する。
                     self.asked_authors.remove(author_id);
-                    return Err(error);
+                    return Err(error.to_string());
                 }
                 Err(error @ PixivError::WebSessionExpired) => {
                     // 同じ失効 Cookie で残りの作者をすべて叩かない。再開時は
                     // 新しい資格情報から index を作り直す。
                     self.gave_up = true;
-                    return Err(error);
+                    return Err(format!("pixiv連携の再接続が必要です（{error}）"));
                 }
                 Err(error) => {
-                    // それ以外の失敗は、この作者を諦めるだけ。従来の経路が拾う。
-                    log::warn!("pixiv web 一覧を読めません（作者 {author_id}）: {error}");
-                    self.entries.entry(author_id.to_string()).or_default();
+                    self.asked_authors.remove(author_id);
+                    return Err(error.to_string());
                 }
             }
         }
@@ -249,9 +263,14 @@ impl WebUpdateIndex {
     }
 
     /// この作品について、取得元での最終更新を引く。
-    async fn lookup(&mut self, state: &Arc<AppState>, dl: &DownloadEntry) -> WebLookup {
-        match self.author_listing(state, &dl.author_id).await {
-            Err(error) => WebLookup::NeedsAuth(format!("pixiv連携の再接続が必要です（{error}）")),
+    async fn lookup(
+        &mut self,
+        state: &Arc<AppState>,
+        dl: &DownloadEntry,
+        job_id: &str,
+    ) -> WebLookup {
+        match self.author_listing(state, &dl.author_id, job_id).await {
+            Err(error) => WebLookup::Failed(error),
             Ok(None) => WebLookup::Unknown,
             Ok(Some(listing)) if listing.unavailable_ids.contains(&dl.source_id) => {
                 WebLookup::Unavailable
@@ -1416,13 +1435,7 @@ pub async fn list_deferred_update_candidates(
         .list_update_candidates_by_status("deferred", -1)
 }
 
-#[tauri::command]
-pub async fn count_deferred_update_candidates(app: tauri::AppHandle) -> Result<i64, String> {
-    app.state::<Arc<AppState>>()
-        .db
-        .count_deferred_update_candidates()
-}
-
+/// ライブラリに保存済みで、取得状態の確認が必要な作品数を返す。
 #[tauri::command]
 pub async fn count_saved_deferred_update_candidates(app: tauri::AppHandle) -> Result<i64, String> {
     app.state::<Arc<AppState>>()
@@ -2069,6 +2082,16 @@ async fn run_update_job(
                     // newly supplied credentials.
                     break;
                 }
+                let control_status = state.db.update_job_status_value(&job_id)?;
+                if matches!(control_status.as_str(), "paused" | "canceling") {
+                    state
+                        .db
+                        .complete_update_job_item(item.id, "queued", None, None)?;
+                    if control_status == "canceling" {
+                        finish_update_job_cancellation(&app, &state, &job_id).await?;
+                    }
+                    break;
+                }
                 let kind = classify_failure(&error);
                 if kind == FailureKind::Auth {
                     let message = format!("{}の認証を更新してください", item.title);
@@ -2091,10 +2114,26 @@ async fn run_update_job(
                     break;
                 }
 
+                if kind == FailureKind::Verification {
+                    let message = format!("{}: {error}。未確認のまま一時停止しました", item.title);
+                    state
+                        .db
+                        .complete_update_job_item(item.id, "queued", Some(&message), None)?;
+                    if transition_running_worker_status(&app, &state, &job_id, "paused", &message)
+                        .await?
+                    {
+                        state.db.append_update_job_log(&job_id, "warn", &message)?;
+                        emit_snapshot(&app, &state, &job_id).await;
+                    }
+                    break;
+                }
+
                 // 取得制限は「相手が今は無理と言っている」だけなので、間隔を
                 // 広げて同じ項目をやり直す。何度も続くようなら諦めて次へ行く。
-                if kind == FailureKind::RateLimited {
-                    if error.to_ascii_lowercase().contains("cloudflare") {
+                if matches!(kind, FailureKind::RateLimited | FailureKind::Network) {
+                    if kind == FailureKind::RateLimited
+                        && error.to_ascii_lowercase().contains("cloudflare")
+                    {
                         let message = "FANBOXのアクセス確認が必要なため一時停止しました。連続再試行はしません。時間をおいて公式サイトと連携状態を確認してください";
                         state.db.complete_update_job_item(
                             item.id,
@@ -2116,9 +2155,18 @@ async fn run_update_job(
                     let attempts = rate_limit_retries.entry(item.id).or_insert(0);
                     *attempts += 1;
                     if *attempts <= MAX_RATE_LIMIT_RETRIES {
-                        let delay_ms = rate_limit_delay_ms(*attempts);
+                        let delay_ms = if kind == FailureKind::Network {
+                            error_delay_ms(*attempts)
+                        } else {
+                            rate_limit_delay_ms(*attempts)
+                        };
                         let message = format!(
-                            "取得が制限されています。{}秒あけて「{}」をやり直します",
+                            "{}。{}秒あけて「{}」をやり直します",
+                            if kind == FailureKind::Network {
+                                "通信エラー"
+                            } else {
+                                "取得が制限されています"
+                            },
                             delay_ms / 1000,
                             item.title
                         );
@@ -2144,7 +2192,12 @@ async fn run_update_job(
                     // queued のまま一時停止し、利用者が時間を置いて再開すれば
                     // 同じ作品から続けられるようにする。
                     let message = format!(
-                        "取得制限が続いているため一時停止しました。「{}」は再開時に再試行します",
+                        "{}が続いているため一時停止しました。「{}」は再開時に再試行します",
+                        if kind == FailureKind::Network {
+                            "通信エラー"
+                        } else {
+                            "取得制限"
+                        },
                         item.title
                     );
                     state
@@ -2403,6 +2456,8 @@ enum FailureKind {
     Missing,
     /// 通信が届かなかった。次の実行で拾えることが多い。
     Network,
+    /// 一覧の完全性を確認できない。未処理のまま停止して誤判定を防ぐ。
+    Verification,
     Other,
 }
 
@@ -2415,6 +2470,7 @@ impl FailureKind {
             FailureKind::Restricted => "閲覧制限",
             FailureKind::Missing => "見つからない",
             FailureKind::Network => "通信エラー",
+            FailureKind::Verification => "確認未完了",
             FailureKind::Other => "エラー",
         }
     }
@@ -2431,6 +2487,10 @@ fn classify_failure(error: &str) -> FailureKind {
     // 直リンク制限のような配信側の都合で、ジョブ全体を止めて「再接続して
     // ください」と言う理由にはならない。取得制限・欠落・通信の判断は残す。
     let from_asset_fetch = normalized.contains("asset downloads failed");
+
+    if has(&["一覧が", "改稿一覧を完全に確認できません"]) {
+        return FailureKind::Verification;
+    }
 
     if !from_asset_fetch
         && has(&[
@@ -2491,6 +2551,13 @@ fn classify_failure(error: &str) -> FailureKind {
         "connection",
         "dns",
         "network",
+        "http 500",
+        "http 502",
+        "http 504",
+        "status: 500",
+        "status: 502",
+        "status: 504",
+        "取得元の応答を読み取れませんでした",
         "接続できません",
         "タイムアウト",
     ]) {
@@ -2730,7 +2797,10 @@ fn fanbox_listing_confirms_recent_copy(
 ) -> bool {
     if listed.is_restricted
         || listed.updated_datetime.is_empty()
-        || dl.source_updated_at.as_deref() != Some(listed.updated_datetime.as_str())
+        || !crate::source_time::same_instant(
+            dl.source_updated_at.as_deref(),
+            Some(&listed.updated_datetime),
+        )
         || dl.content_hash.as_deref().is_none_or(str::is_empty)
         || !std::path::Path::new(&dl.json_path).is_file()
     {
@@ -2796,8 +2866,8 @@ async fn process_work_item(
         // 0段目。web の一覧は、100件まとめて `updateDate` を返す。ここで
         // 「変わっていない」と分かれば、アプリAPIを一度も叩かずに終わる。
         let listing_was_cached = web_index.asked_authors.contains(dl.author_id.trim());
-        let listed_update = match web_index.lookup(state, &dl).await {
-            WebLookup::NeedsAuth(message) => return Ok(ItemOutcome::AuthRequired(message)),
+        let listed_update = match web_index.lookup(state, &dl, job_id).await {
+            WebLookup::Failed(message) => return Err(message),
             WebLookup::Unavailable => {
                 return Ok(ItemOutcome::Held(unavailable_saved_pixiv_work_message(
                     &dl.title,
@@ -2810,7 +2880,9 @@ async fn process_work_item(
         if let (Some(listed), Some(stored)) =
             (listed_update.as_deref(), dl.source_updated_at.as_deref())
         {
-            if listed == stored && pixiv_listing_confirms_recent_copy(state, &dl) {
+            if crate::source_time::same_instant(Some(listed), Some(stored))
+                && pixiv_listing_confirms_recent_copy(state, &dl)
+            {
                 return Ok(if listing_was_cached {
                     ItemOutcome::LocalSkipped(format!("最新: {}", dl.title))
                 } else {
@@ -2952,7 +3024,10 @@ async fn process_work_item(
             super::downloader::fanbox_assets_are_complete(&value, &held_assets),
         );
         let content_changed = dl.content_hash.as_deref() != Some(fetched_hash.as_str())
-            || dl.source_updated_at != fetched_updated_at
+            || !crate::source_time::same_instant(
+                dl.source_updated_at.as_deref(),
+                fetched_updated_at.as_deref(),
+            )
             || assets_need_repair;
         if !auto_save && content_changed {
             record_work_revision_candidate(state, job_id, &dl, &value, false).await?;
@@ -3196,15 +3271,16 @@ async fn scan_pixiv_revisions(
     auto_save: bool,
     web_index: &mut WebUpdateIndex,
 ) -> Result<i64, String> {
-    let Some(listing) = web_index
-        .author_listing(state, &target.source_key)
-        .await
-        .map_err(|error| error.to_string())?
-    else {
-        return Ok(0);
-    };
-
     let saved = state.db.pixiv_works_for_author(&target.source_key)?;
+    if saved.is_empty() {
+        return Ok(0);
+    }
+    let Some(listing) = web_index
+        .author_listing(state, &target.source_key, job_id)
+        .await?
+    else {
+        return Err("pixiv の改稿一覧を完全に確認できません".to_string());
+    };
     let mut found = 0i64;
     for work in saved {
         let (source_id, stored_update, downloaded_at, local_version) = (
@@ -3225,7 +3301,9 @@ async fn scan_pixiv_revisions(
         };
         match stored_update.as_deref() {
             // 覚えている値と同じなら、取得元では何も起きていない。
-            Some(stored) if stored == listed => continue,
+            Some(stored) if crate::source_time::same_instant(Some(stored), Some(listed)) => {
+                continue
+            }
             // 覚えている値と違う。改稿である。
             Some(_) => {}
             // 初めて見る作品。保存より前の更新なら、手元の本文はその版のもの。
@@ -3385,7 +3463,11 @@ async fn process_target_item(
                 let listed_updated =
                     string_at(source_item, &[&["updatedDatetime"], &["updated_datetime"]]);
                 match (listed_updated, existing.source_updated_at.as_deref()) {
-                    (Some(listed), Some(stored)) if listed != stored => CandidateKind::Revision,
+                    (Some(listed), Some(stored))
+                        if !crate::source_time::same_instant(Some(&listed), Some(stored)) =>
+                    {
+                        CandidateKind::Revision
+                    }
                     _ => continue,
                 }
             }
@@ -3827,6 +3909,28 @@ mod tests {
             .unwrap()
             .is_some());
         assert!(json_path.is_file());
+        web_index.gave_up = true;
+        let error = super::scan_pixiv_revisions(
+            &state,
+            &job_id,
+            &update_target("author", "pixiv", "80000003"),
+            false,
+            &mut web_index,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(classify_failure(&error), FailureKind::Verification);
+        web_index.gave_up = false;
+        web_index.api = None;
+        assert!(super::scan_pixiv_revisions(
+            &state,
+            &job_id,
+            &update_target("author", "pixiv", "80000003"),
+            false,
+            &mut web_index,
+        )
+        .await
+        .is_err());
         drop(state);
         let _ = std::fs::remove_dir_all(root);
     }
@@ -4427,7 +4531,10 @@ mod tests {
             ("この作品は削除されました", FailureKind::Missing),
             ("request timed out", FailureKind::Network),
             ("dns error: failed to lookup address", FailureKind::Network),
-            ("HTTP 500 internal server error", FailureKind::Other),
+            ("HTTP 500 internal server error", FailureKind::Network),
+            ("HTTP 502 Bad Gateway", FailureKind::Network),
+            ("HTTP 504 Gateway Timeout", FailureKind::Network),
+            ("取得元の応答を読み取れませんでした。取得元の作りが変わった可能性があります", FailureKind::Network),
             (
                 "作品 101 の詳細は取得できましたが、本文の取得先が両方とも 404 を返しました。pixivへの接続を確認して再試行してください",
                 FailureKind::Other,

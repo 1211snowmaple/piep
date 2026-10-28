@@ -9379,10 +9379,14 @@ impl Database {
         let conn = self.read_conn()?;
         let mut stmt = conn
             .prepare(
-                "SELECT id, source_id, json_path, cover_path FROM downloads
-             WHERE source = 'pixiv' AND cover_path IS NOT NULL
-               AND instr(lower(cover_path), 'limit_r18_') > 0
-             ORDER BY id",
+                "SELECT d.id, d.source_id, d.json_path, d.cover_path FROM downloads d
+             WHERE d.source = 'pixiv' AND d.cover_path IS NOT NULL
+               AND (instr(lower(d.cover_path), 'limit_r18_') > 0
+                 OR instr(lower(d.cover_path), 'limit_r18g_') > 0
+                 OR EXISTS (SELECT 1 FROM assets a WHERE a.download_id=d.id AND a.local_path=d.cover_path
+                    AND (instr(lower(a.original_url), '/common/images/limit_r18_') > 0
+                      OR instr(lower(a.original_url), '/common/images/limit_r18g_') > 0)))
+             ORDER BY d.id",
             )
             .map_err(|e| format!("Failed to prepare placeholder covers: {e}"))?;
         let rows = stmt
@@ -9413,6 +9417,10 @@ impl Database {
             )
             .map_err(|e| format!("Failed to replace placeholder cover: {e}"))?;
         if changed > 0 {
+            let old_bytes: i64 = tx.query_row(
+                "SELECT COALESCE(SUM(file_size_bytes),0) FROM assets WHERE download_id=?1 AND local_path=?2",
+                params![id, old_path], |row| row.get(0),
+            ).map_err(|e| format!("Failed to read previous cover size: {e}"))?;
             let filename = std::path::Path::new(new_path)
                 .file_name()
                 .and_then(|name| name.to_str())
@@ -9435,6 +9443,11 @@ impl Database {
                 )
                 .map_err(|e| format!("Failed to count repaired cover: {e}"))?;
             }
+            tx.execute(
+                "UPDATE downloads SET file_size_bytes=MAX(0,file_size_bytes+?2-?3) WHERE id=?1",
+                params![id, bytes, old_bytes],
+            )
+            .map_err(|e| format!("Failed to count repaired cover bytes: {e}"))?;
         }
         tx.commit()
             .map_err(|e| format!("Failed to commit repaired cover: {e}"))?;

@@ -202,7 +202,7 @@ fn load_manifest(
     // 添付の中の本文を先に入れる。**編集より先でなければならない。** 編集は
     // ブロックを丸ごと差し替えるので、あとから入れると編集済みの本文へ二重に
     // 差し込むことになる。編集した人が見ていたのは取り込み済みの本文である。
-    let assets = state.db.get_assets(download_id).unwrap_or_default();
+    let assets = state.db.get_assets(download_id)?;
     crate::database::attachment::apply_attachment_text(&mut data, &dl.source, &assets);
     apply_active_edit_to_epub_data(state, download_id, &dl.source, &mut data);
 
@@ -216,6 +216,13 @@ fn load_manifest(
         "data_assets",
         dl.source == "fanbox",
     );
+    if let Some(cover) = dl
+        .cover_path
+        .as_deref()
+        .filter(|path| Path::new(path).is_file())
+    {
+        data["localCoverPath"] = serde_json::Value::String(cover.to_string());
+    }
 
     let manifest = converter::convert_to_manifest(&data, &dl.source, &assets_dir)?;
     Ok((manifest, dl.source, dl.title))

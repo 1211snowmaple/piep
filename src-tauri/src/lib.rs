@@ -12,6 +12,7 @@ mod logging;
 pub mod pdf;
 pub mod pixiv_api;
 mod smoke_test;
+mod source_time;
 
 use database::Database;
 use std::path::Path;
@@ -351,7 +352,6 @@ pub fn run() -> tauri::Result<()> {
             commands::update_jobs::clear_finished_update_jobs,
             commands::update_jobs::dismiss_update_candidate,
             commands::update_jobs::list_deferred_update_candidates,
-            commands::update_jobs::count_deferred_update_candidates,
             commands::update_jobs::count_saved_deferred_update_candidates,
             commands::update_jobs::recheck_deferred_update_candidates,
             commands::update_jobs::count_dismissed_update_candidates,

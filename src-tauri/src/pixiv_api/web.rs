@@ -15,8 +15,8 @@
 //! # 認証
 //!
 //! 1件取得（[`novel_series`](WebPixivAPI::novel_series) など）はログイン不要で、
-//! R-18 でも読める。しかし **一覧系はログインしていないと R-18 を黙って落とす** ため、
-//! [`user_novels_by_ids`](WebPixivAPI::user_novels_by_ids) はセッションを要求する。
+//! R-18 でも読める。一覧は閲覧設定によって R-18 を省くことがあるため、
+//! [`user_novels_by_ids`](WebPixivAPI::user_novels_by_ids) は省かれた作品を個別確認する。
 //!
 //! 読み方（上限つきで読む・レートリミットと 404 を型で分ける）はアプリAPIと
 //! 同じ道具に揃えてあるので、呼ぶ側から見た失敗の扱いは変わらない。
@@ -42,10 +42,8 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 /// 一覧が1リクエストで受け取れる ID の数。101 件から 400 が返る。
 pub const MAX_IDS_PER_REQUEST: usize = 100;
-/// A missing listing entry is checked individually before it is called unavailable.
-/// A large gap is more likely to be a broken web session, and must not cause
-/// dozens of detail requests or be mistaken for removed works.
-const MAX_MISSING_DETAIL_PROBES: usize = 8;
+/// Stop a run of missing details before a provider failure can mark many works unavailable.
+const MAX_CONSECUTIVE_MISSING_DETAILS: usize = 8;
 
 /// web にログイン済みとして名乗るための一式。
 ///
@@ -304,6 +302,7 @@ pub fn parse_user_novels(
         .ok_or_else(|| PixivError::UnintelligibleResponse {
             body: "一覧の本体が入っていません".to_string(),
         })?;
+    let body = body.get("works").and_then(Value::as_object).unwrap_or(body);
 
     if body.len() != requested {
         return Err(PixivError::PartialListing {
@@ -382,10 +381,7 @@ impl WebPixivAPI {
 
     /// ログイン済みとして名乗る。
     ///
-    /// 一覧系は、これが無いと R-18 を落とした返事が返る。落とされたことは
-    /// 返事からは分からないので、**セッションの有無は呼ぶ側が知っていなければ
-    /// ならない**。だからこれは省略可能な設定ではなく、型で要求する
-    /// （[`user_novels_by_ids`](Self::user_novels_by_ids) を参照）。
+    /// 一覧はログイン状態と閲覧設定に従う。省かれた作品は個別詳細で確認する。
     pub fn with_session(mut self, session: WebSession) -> Self {
         self.session = Some(session);
         self
@@ -420,6 +416,36 @@ impl WebPixivAPI {
         }
     }
 
+    async fn send(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> Result<reqwest::Response, PixivError> {
+        let provider_request = self.host == PIXIV_WEB_HOST;
+        if provider_request {
+            crate::downloader::pacing::PIXIV.wait().await;
+        }
+        let response = request.send().await?;
+        if provider_request && matches!(response.status().as_u16(), 429 | 503) {
+            crate::downloader::pacing::PIXIV
+                .defer(crate::downloader::pacing::retry_after(response.headers()))
+                .await;
+        }
+        Ok(response)
+    }
+
+    async fn send_controlled(
+        &self,
+        request: reqwest::RequestBuilder,
+        should_continue: &impl Fn() -> bool,
+    ) -> Result<reqwest::Response, PixivError> {
+        tokio::select! {
+            response = self.send(request) => response,
+            _ = async {
+                while should_continue() { tokio::time::sleep(Duration::from_millis(250)).await; }
+            } => Err(PixivError::Interrupted),
+        }
+    }
+
     /// シリーズ1件を読む。
     pub async fn novel_series(&self, series_id: &str) -> Result<NovelSeriesWeb, PixivError> {
         let series_id = series_id.trim();
@@ -429,8 +455,7 @@ impl WebPixivAPI {
             });
         }
         let response = self
-            .get(format!("{}/ajax/novel/series/{series_id}", self.host))
-            .send()
+            .send(self.get(format!("{}/ajax/novel/series/{series_id}", self.host)))
             .await?;
         let payload: Value = parse_response_into(response).await?;
         parse_novel_series(&payload)
@@ -448,8 +473,7 @@ impl WebPixivAPI {
             });
         }
         let response = self
-            .get(format!("{}/ajax/novel/{novel_id}", self.host))
-            .send()
+            .send(self.get(format!("{}/ajax/novel/{novel_id}", self.host)))
             .await?;
         let payload: Value = parse_response_into(response).await?;
         parse_novel_body(&payload)
@@ -460,9 +484,8 @@ impl WebPixivAPI {
     /// 1回で最大 [`MAX_IDS_PER_REQUEST`] 件。それを超える分は切って繰り返す。
     /// 返る順序は取得元の都合で決まるので、呼ぶ側は ID で引き当てること。
     ///
-    /// **セッションが要る。** 無いまま呼ぶと R-18 が黙って落ちた返事が返り、
-    /// それを「更新なし」と読んでしまう。だから未設定は
-    /// [`PixivError::NoAuth`] で断る — 静かに間違うより、うるさく止まるほうがよい。
+    /// 一覧が閲覧設定で省いた作品は、個別詳細の `uploadDate` で補う。
+    /// 個別確認は間隔をあけ、通信失敗を「変更なし」に置き換えない。
     ///
     /// 一覧にない作品が個別取得でも 404 なら、その ID を利用不能として分ける。
     /// それ以外の件数・ID の不一致は [`PixivError::PartialListing`] とし、
@@ -472,9 +495,16 @@ impl WebPixivAPI {
         user_id: &str,
         novel_ids: &[String],
     ) -> Result<UserNovelListing, PixivError> {
-        if self.session.is_none() {
-            return Err(PixivError::NoAuth);
-        }
+        self.user_novels_by_ids_with_control(user_id, novel_ids, || true)
+            .await
+    }
+
+    pub async fn user_novels_by_ids_with_control(
+        &self,
+        user_id: &str,
+        novel_ids: &[String],
+        should_continue: impl Fn() -> bool,
+    ) -> Result<UserNovelListing, PixivError> {
         let user_id = user_id.trim();
         if !is_numeric_id(user_id) {
             return Err(PixivError::NotFound {
@@ -490,21 +520,26 @@ impl WebPixivAPI {
         let mut entries = Vec::with_capacity(novel_ids.len());
         let mut unavailable_ids = Vec::new();
         for chunk in novel_ids.chunks(MAX_IDS_PER_REQUEST) {
+            if !should_continue() {
+                return Err(PixivError::Interrupted);
+            }
             let query = chunk
                 .iter()
                 .map(|id| format!("ids%5B%5D={}", id.trim()))
                 .collect::<Vec<_>>()
                 .join("&");
             let url = format!(
-                "{}/ajax/user/{user_id}/novels?{query}&work_category=novels&is_first_page=0&lang=ja",
+                "{}/ajax/user/{user_id}/profile/novels?{query}&lang=ja",
                 self.host
             );
-            let response = self.get(url).send().await?;
+            let response = self
+                .send_controlled(self.get(url), &should_continue)
+                .await?;
             if response.status() == reqwest::StatusCode::UNAUTHORIZED {
                 return Err(PixivError::WebSessionExpired);
             }
             let payload: Value = parse_response_into(response).await?;
-            let listed = match parse_user_novels(&payload, chunk.len()) {
+            let mut listed = match parse_user_novels(&payload, chunk.len()) {
                 Ok(listed) => listed,
                 Err(PixivError::PartialListing {
                     requested,
@@ -523,32 +558,46 @@ impl WebPixivAPI {
                     returned: listed.len(),
                 });
             }
-            let missing: Vec<&String> = chunk
+            let missing: Vec<String> = chunk
                 .iter()
-                .filter(|id| !returned.contains(id.trim()))
+                .filter(|id| {
+                    !listed.iter().any(|entry| {
+                        entry.id == id.trim() && !entry.is_masked && entry.update_date.is_some()
+                    })
+                })
+                .cloned()
                 .collect();
-            if missing.len() > MAX_MISSING_DETAIL_PROBES {
-                return Err(PixivError::PartialListing {
-                    requested: chunk.len(),
-                    returned: listed.len(),
-                });
-            }
+            listed.retain(|entry| !missing.contains(&entry.id));
+            let mut consecutive_missing = 0;
             for id in missing {
-                match self.novel(id).await {
-                    Err(PixivError::NotFound { .. }) => unavailable_ids.push(id.clone()),
-                    Ok(_) => {
-                        return Err(PixivError::PartialListing {
-                            requested: chunk.len(),
-                            returned: listed.len(),
-                        })
+                for _ in 0..8 {
+                    if !should_continue() {
+                        return Err(PixivError::Interrupted);
                     }
-                    Err(error @ PixivError::RateLimited { .. }) => return Err(error),
-                    Err(_) => {
-                        return Err(PixivError::PartialListing {
-                            requested: chunk.len(),
-                            returned: listed.len(),
-                        })
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                }
+                if !should_continue() {
+                    return Err(PixivError::Interrupted);
+                }
+                match self
+                    .novel_listing_entry(user_id, &id, &should_continue)
+                    .await
+                {
+                    Err(PixivError::NotFound { .. }) => {
+                        consecutive_missing += 1;
+                        if consecutive_missing >= MAX_CONSECUTIVE_MISSING_DETAILS {
+                            return Err(PixivError::PartialListing {
+                                requested: chunk.len(),
+                                returned: listed.len(),
+                            });
+                        }
+                        unavailable_ids.push(id);
                     }
+                    Ok(entry) => {
+                        consecutive_missing = 0;
+                        listed.push(entry);
+                    }
+                    Err(error) => return Err(error),
                 }
             }
             entries.extend(listed);
@@ -556,6 +605,66 @@ impl WebPixivAPI {
         Ok(UserNovelListing {
             entries,
             unavailable_ids,
+        })
+    }
+
+    async fn novel_listing_entry(
+        &self,
+        author_id: &str,
+        novel_id: &str,
+        should_continue: &impl Fn() -> bool,
+    ) -> Result<NovelListEntryWeb, PixivError> {
+        let response = self
+            .send_controlled(
+                self.get(format!("{}/ajax/novel/{novel_id}", self.host)),
+                should_continue,
+            )
+            .await?;
+        if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(PixivError::WebSessionExpired);
+        }
+        let payload: Value = parse_response_into(response).await?;
+        let body = payload
+            .get("body")
+            .filter(|body| body.is_object())
+            .ok_or_else(|| PixivError::UnintelligibleResponse {
+                body: "作品詳細の本体がありません".into(),
+            })?;
+        let update_date = trimmed_string(body.get("uploadDate"));
+        if payload.get("error").and_then(Value::as_bool) == Some(true)
+            || trimmed_string(body.get("id")).as_deref() != Some(novel_id)
+            || trimmed_string(body.get("userId")).as_deref() != Some(author_id)
+            || update_date
+                .as_deref()
+                .and_then(|date| chrono::DateTime::parse_from_rfc3339(date).ok())
+                .is_none()
+        {
+            return Err(PixivError::PartialListing {
+                requested: 1,
+                returned: 0,
+            });
+        }
+        Ok(NovelListEntryWeb {
+            id: novel_id.to_string(),
+            update_date,
+            create_date: trimmed_string(body.get("createDate")),
+            text_count: number_at(body.get("characterCount")),
+            title: trimmed_string(body.get("title")),
+            description: trimmed_string(body.get("description")),
+            tags: body
+                .pointer("/tags/tags")
+                .and_then(Value::as_array)
+                .map(|tags| {
+                    tags.iter()
+                        .filter_map(|tag| trimmed_string(tag.get("tag")))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            x_restrict: number_at(body.get("xRestrict")),
+            series_id: None,
+            series_title: None,
+            series_content_order: None,
+            is_masked: false,
         })
     }
 }
@@ -878,17 +987,17 @@ mod tests {
         assert!(WebSession::new("PHPSESSID=x", "   ").is_none());
     }
 
-    /// セッションが無いまま一覧を呼ぶと、静かに間違った答えが返る。
-    /// 通信に出る前に断る。
     #[tokio::test]
-    async fn the_listing_refuses_to_run_without_a_session() {
-        let api = WebPixivAPI::new().unwrap();
+    async fn a_listing_without_a_session_still_verifies_omitted_works() {
+        let (mut api, server) = partial_listing_server("200 OK").await;
+        api.session = None;
         assert!(!api.has_session());
-        let error = api
-            .user_novels_by_ids("800001", &["90000007".to_string()])
+        let result = api
+            .user_novels_by_ids("7", &["101".to_string(), "202".to_string()])
             .await
-            .unwrap_err();
-        assert!(matches!(error, PixivError::NoAuth), "{error:?}");
+            .unwrap();
+        server.await.unwrap();
+        assert_eq!(result.entries.len(), 2);
     }
 
     #[tokio::test]
@@ -940,6 +1049,44 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn a_stopped_job_does_not_start_another_provider_request() {
+        let api = WebPixivAPI::with_host("http://127.0.0.1:1").unwrap();
+        assert!(matches!(
+            api.user_novels_by_ids_with_control("7", &["101".into()], || false)
+                .await,
+            Err(PixivError::Interrupted)
+        ));
+    }
+
+    #[tokio::test]
+    async fn stopping_a_job_interrupts_a_waiting_response() {
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let api =
+            WebPixivAPI::with_host(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+        let running = Arc::new(AtomicBool::new(true));
+        let stop = running.clone();
+        let server = tokio::spawn(async move {
+            let (_stream, _) = listener.accept().await.unwrap();
+            stop.store(false, Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        });
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            api.user_novels_by_ids_with_control("7", &["101".into()], || {
+                running.load(Ordering::SeqCst)
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(result, Err(PixivError::Interrupted)));
+        server.abort();
+    }
+
     async fn partial_listing_server(
         detail_status: &str,
     ) -> (WebPixivAPI, tokio::task::JoinHandle<()>) {
@@ -954,13 +1101,14 @@ mod tests {
                 let mut request = [0_u8; 4096];
                 let length = stream.read(&mut request).await.unwrap();
                 let request = String::from_utf8_lossy(&request[..length]);
-                let (status_line, body) = if request.starts_with("GET /ajax/user/7/novels?") {
-                    ("200 OK", listing(&["101"]).to_string())
+                let (status_line, body) = if request.starts_with("GET /ajax/user/7/profile/novels?")
+                {
+                    ("200 OK", serde_json::json!({"error":false,"body":{"works":listing(&["101"])["body"]}}).to_string())
                 } else {
                     assert!(request.starts_with("GET /ajax/novel/202"), "{request}");
                     (
                         status.as_str(),
-                        r#"{"error":false,"body":{"content":"本文"}}"#.to_string(),
+                        r#"{"error":false,"body":{"id":"202","userId":"7","content":"本文","title":"一覧で省かれた作品","xRestrict":1,"uploadDate":"2026-02-18T14:41:56+00:00","createDate":"2022-10-25T14:13:25+00:00","characterCount":2}}"#.to_string(),
                     )
                 };
                 let response = format!(
@@ -990,20 +1138,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_readable_work_omitted_from_the_listing_is_still_an_error() {
+    async fn a_readable_work_omitted_from_the_listing_keeps_its_revision_date() {
         let (api, server) = partial_listing_server("200 OK").await;
-        let error = api
+        let result = api
             .user_novels_by_ids("7", &["101".to_string(), "202".to_string()])
             .await
-            .unwrap_err();
+            .unwrap();
         server.await.unwrap();
-        assert!(matches!(
-            error,
-            PixivError::PartialListing {
-                requested: 2,
-                returned: 1
-            }
-        ));
+        let recovered = result
+            .entries
+            .iter()
+            .find(|entry| entry.id == "202")
+            .unwrap();
+        assert_eq!(
+            recovered.update_date.as_deref(),
+            Some("2026-02-18T14:41:56+00:00")
+        );
+        assert_eq!(recovered.x_restrict, Some(1));
+        assert!(result.unavailable_ids.is_empty());
     }
 
     #[tokio::test]

@@ -162,10 +162,6 @@ export function listDeferredUpdateCandidatesCommand(): Promise<DeferredUpdateCan
   return invoke("list_deferred_update_candidates");
 }
 
-export function countDeferredUpdateCandidatesCommand(): Promise<number> {
-  return invoke("count_deferred_update_candidates");
-}
-
 export function countSavedDeferredUpdateCandidatesCommand(): Promise<number> {
   return invoke("count_saved_deferred_update_candidates");
 }
