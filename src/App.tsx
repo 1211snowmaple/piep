@@ -82,6 +82,15 @@ function AppContent() {
   const queryClient = useQueryClient();
   useEffect(() => {
     if (!isTauriRuntime()) return;
+    return subscribeTauriEvent<number[]>("acquisition-audited", () => {
+      queryClient.invalidateQueries({ queryKey: ["library"] });
+      queryClient.invalidateQueries({ queryKey: ["library-shelf-counts"] });
+      queryClient.invalidateQueries({ queryKey: ["deferred-candidate-count"] });
+      queryClient.invalidateQueries({ queryKey: ["deferred-candidates"] });
+    });
+  }, [queryClient]);
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
     return subscribeTauriEvent<number[]>("covers-repaired", ({ payload }) => {
       queryClient.invalidateQueries({ queryKey: ["library"] });
       queryClient.invalidateQueries({ queryKey: ["entity-works"] });

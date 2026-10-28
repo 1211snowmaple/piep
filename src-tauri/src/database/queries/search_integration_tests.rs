@@ -1424,6 +1424,192 @@ fn insert_download(
     )
 }
 
+#[test]
+fn saved_asset_audit_backfills_legacy_archives_without_changing_sources_or_decisions() {
+    let (_temp, root, storage) = temp_paths();
+    let db_path = root.join("piep.db");
+    let db = Database::open(&db_path, &storage).unwrap();
+    let missing = insert_download(
+        &db,
+        &storage,
+        "legacy-missing",
+        "挿絵不足",
+        "作者",
+        &[],
+        "本文[pixivimage:123-2]",
+    );
+    let complete = insert_download(
+        &db,
+        &storage,
+        "legacy-complete",
+        "挿絵あり",
+        "作者",
+        &[],
+        "本文[pixivimage:123-2]",
+    );
+    let dismissed = insert_download(
+        &db,
+        &storage,
+        "legacy-dismissed",
+        "非表示",
+        "作者",
+        &[],
+        "本文[pixivimage:123]",
+    );
+    let pending = insert_download(
+        &db,
+        &storage,
+        "legacy-pending",
+        "改稿候補",
+        "作者",
+        &[],
+        "本文[pixivimage:123]",
+    );
+    let complete_image = storage.join("123_p1.jpg");
+    fs::write(&complete_image, b"saved image").unwrap();
+    db.conn.lock().unwrap().execute(
+        "INSERT INTO assets(download_id,asset_type,filename,local_path) VALUES(?1,'illustration','123_p1.jpg',?2)",
+        params![complete, complete_image.to_string_lossy()],
+    ).unwrap();
+    for (id, status) in [(dismissed, "dismissed"), (pending, "pending")] {
+        let work = db.get_download(id).unwrap();
+        db.upsert_update_candidate(&UpdateCandidateInput {
+            source: "pixiv".into(),
+            source_id: work.source_id.clone(),
+            kind: "revision".into(),
+            title: work.title,
+            payload_json: "{\"kind\":\"revision\"}".into(),
+            target_type: Some("work".into()),
+        })
+        .unwrap();
+        db.set_update_candidate_status("pixiv", &work.source_id, status)
+            .unwrap();
+    }
+    let work = db.get_download(missing).unwrap();
+    let original = fs::read(&work.json_path).unwrap();
+    assert_eq!(
+        db.audit_saved_pixiv_assets(0, 1).unwrap(),
+        (1, vec![missing], missing)
+    );
+    assert_eq!(
+        db.audit_saved_pixiv_assets(missing, 32).unwrap(),
+        (3, vec![], pending)
+    );
+    assert_eq!(
+        db.audit_saved_pixiv_assets(pending, 32).unwrap(),
+        (0, vec![], pending)
+    );
+    assert_eq!(fs::read(&work.json_path).unwrap(), original);
+    assert_eq!(db.get_download(missing).unwrap().current_version, 1);
+    assert_eq!(db.count_saved_deferred_update_candidates().unwrap(), 2); // missing + user's dismissal
+    assert_eq!(
+        db.update_candidate_status("pixiv", "legacy-pending")
+            .unwrap()
+            .as_deref(),
+        Some("pending")
+    );
+    assert_eq!(
+        db.update_candidate_status("pixiv", "legacy-dismissed")
+            .unwrap()
+            .as_deref(),
+        Some("dismissed")
+    );
+    assert_eq!(
+        db.update_candidate_status("pixiv", "legacy-complete")
+            .unwrap(),
+        None
+    );
+    let mut params = v2_params(None, 20, None);
+    params.acquisition_filter = Some("incomplete".into());
+    assert_eq!(
+        db.search_downloads_v2(&params)
+            .unwrap()
+            .items
+            .iter()
+            .map(|row| row.id)
+            .collect::<Vec<_>>(),
+        vec![missing]
+    );
+    drop(db);
+    let db = Database::open(&db_path, &storage).unwrap();
+    assert_eq!(db.audit_saved_pixiv_assets(0, 32).unwrap(), (0, vec![], 0));
+    assert_eq!(fs::read(&work.json_path).unwrap(), original);
+    db.delete_download(missing).unwrap();
+    let count: i64 = db
+        .conn
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM saved_asset_audits WHERE download_id=?1",
+            [missing],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 0);
+}
+
+#[test]
+#[ignore = "requires PIEP_AUDIT_SNAPSHOT pointing to a consistent SQLite snapshot; only a temporary copy is changed"]
+fn saved_asset_audit_on_a_real_library_snapshot() {
+    let snapshot = std::env::var_os("PIEP_AUDIT_SNAPSHOT").expect("set PIEP_AUDIT_SNAPSHOT");
+    let (_temp, root, storage) = temp_paths();
+    let copy = root.join("piep.db");
+    fs::copy(snapshot, &copy).unwrap();
+    let db = Database::open(&copy, &storage).unwrap();
+    let original_attention = db.count_saved_deferred_update_candidates().unwrap();
+    let before: (i64, i64) = db
+        .conn
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*),SUM(current_version) FROM downloads",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    let mut cursor = 0;
+    let mut checked = 0;
+    let mut marked = Vec::new();
+    loop {
+        let (count, ids, next) = db.audit_saved_pixiv_assets(cursor, 32).unwrap();
+        if count == 0 {
+            break;
+        }
+        cursor = next;
+        checked += count;
+        marked.extend(ids);
+    }
+    assert_eq!(db.audit_saved_pixiv_assets(0, 32).unwrap(), (0, vec![], 0));
+    let after: (i64, i64) = db
+        .conn
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*),SUM(current_version) FROM downloads",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(before, after);
+    let attention = db.count_saved_deferred_update_candidates().unwrap();
+    assert_eq!(attention, original_attention + marked.len() as i64);
+    let sources: Vec<_> = marked
+        .iter()
+        .map(|id| db.get_download(*id).unwrap().source_id)
+        .collect();
+    drop(db);
+    let db = Database::open(&copy, &storage).unwrap();
+    assert_eq!(db.audit_saved_pixiv_assets(0, 32).unwrap(), (0, vec![], 0));
+    assert_eq!(
+        db.count_saved_deferred_update_candidates().unwrap(),
+        attention
+    );
+    println!(
+        "SAVED_ASSET_AUDIT_JSON={}",
+        serde_json::json!({"checked":checked,"marked_source_ids":sources,"saved_attention":attention,"downloads":before.0,"versions_unchanged":true,"restart_stable":true})
+    );
+}
+
 fn insert_download_unindexed(
     db: &Database,
     storage: &Path,

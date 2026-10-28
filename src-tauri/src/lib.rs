@@ -208,6 +208,7 @@ pub fn run() -> tauri::Result<()> {
             // rather than waiting for someone to notice and press a button.
             commands::database::start_automatic_index_maintenance(app.handle().clone());
             commands::database::start_automatic_cover_repair(app.handle().clone());
+            commands::database::start_automatic_saved_asset_audit(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

@@ -684,6 +684,13 @@ fn create_core_tables(conn: &Connection) -> Result<(), rusqlite::Error> {
             UNIQUE(download_id, version)
         );
 
+        -- Derived inspection state. Source JSON and saved versions stay immutable.
+        CREATE TABLE IF NOT EXISTS saved_asset_audits (
+            download_id INTEGER PRIMARY KEY REFERENCES downloads(id) ON DELETE CASCADE,
+            json_path TEXT NOT NULL,
+            version INTEGER NOT NULL
+        );
+
         -- last_hit_at / consecutive_errors は add_missing_columns でも足される。
         -- 新しいライブラリはここで、既存のライブラリは起動時に追加される。
         CREATE TABLE IF NOT EXISTS update_targets (

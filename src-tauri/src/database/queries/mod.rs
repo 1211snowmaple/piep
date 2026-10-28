@@ -30,10 +30,14 @@ use super::search::{
 };
 use super::search_normalization::index_text;
 
+mod acquisition_audit;
 mod assist_inputs;
 /// 作品コレクションは `Database` の非公開内部へ触れるため、子モジュールに置く。
 mod reader;
 mod update_watch;
+pub(crate) use acquisition_audit::{
+    pixiv_missing_references_for_filenames, saved_pixiv_missing_references,
+};
 pub use assist_inputs::{AiNote, TaggedName};
 mod archive_state;
 pub use archive_state::{

@@ -1,0 +1,167 @@
+use super::{AssetEntry, Database};
+use regex::Regex;
+use rusqlite::params;
+use serde_json::Value;
+use std::collections::HashSet;
+use std::sync::LazyLock;
+
+static REFERENCES: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\[(pixivimage|uploadedimage):([^\]]+)\]").unwrap());
+static PIXIV_SPEC: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(\d+)(?:-(\d+))?$").unwrap());
+
+fn missing_saved_references(text: &str, filenames: &HashSet<String>) -> Vec<String> {
+    let mut missing = Vec::new();
+    for capture in REFERENCES.captures_iter(text) {
+        let spec = &capture[2];
+        let prefixes = if &capture[1] == "uploadedimage" {
+            vec![format!("inline_{spec}.")]
+        } else if let Some(parts) = PIXIV_SPEC.captures(spec) {
+            let page = parts
+                .get(2)
+                .map_or(Some(1), |value| value.as_str().parse::<u64>().ok());
+            match page.and_then(|page| page.checked_sub(1)) {
+                Some(index) => vec![
+                    format!("{}_p{index}.", &parts[1]),
+                    format!("{spec}_p{index}."),
+                ],
+                None => Vec::new(),
+            }
+        } else {
+            Vec::new()
+        };
+        let available = filenames.iter().any(|filename| {
+            let filename = filename.strip_prefix("illust_").unwrap_or(filename);
+            prefixes.iter().any(|prefix| filename.starts_with(prefix))
+        });
+        let reference = capture.get(0).unwrap().as_str();
+        if !available && !missing.iter().any(|existing| existing == reference) {
+            missing.push(reference.to_string());
+        }
+    }
+    missing
+}
+
+pub(crate) fn saved_pixiv_missing_references(value: &Value, assets: &[AssetEntry]) -> Vec<String> {
+    let filenames = assets
+        .iter()
+        .filter(|asset| {
+            std::fs::metadata(&asset.local_path)
+                .is_ok_and(|metadata| metadata.is_file() && metadata.len() > 0)
+        })
+        .map(|asset| asset.filename.clone())
+        .collect::<Vec<_>>();
+    pixiv_missing_references_for_filenames(value, filenames)
+}
+
+pub(crate) fn pixiv_missing_references_for_filenames(
+    value: &Value,
+    filenames: impl IntoIterator<Item = String>,
+) -> Vec<String> {
+    let text = value
+        .get("text")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    missing_saved_references(text, &filenames.into_iter().collect())
+}
+
+impl Database {
+    /// Inspect each saved version once, in small idle batches. Older archives did
+    /// not record missing_illustrations, so job history alone cannot recover them.
+    pub(crate) fn audit_saved_pixiv_assets(
+        &self,
+        after_id: i64,
+        limit: usize,
+    ) -> Result<(usize, Vec<i64>, i64), String> {
+        let rows = {
+            let conn = self.read_conn()?;
+            let mut statement = conn.prepare(
+                "SELECT d.id,d.source_id,d.title,d.json_path,d.current_version FROM downloads d
+                 LEFT JOIN saved_asset_audits a ON a.download_id=d.id
+                 WHERE d.id>?2 AND d.source='pixiv' AND d.content_type='novel'
+                   AND (a.download_id IS NULL OR a.json_path<>d.json_path OR a.version<>d.current_version)
+                 ORDER BY d.id LIMIT ?1",
+            ).map_err(|error| error.to_string())?;
+            let rows = statement
+                .query_map([limit.clamp(1, 32) as i64, after_id], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, i64>(4)?,
+                    ))
+                })
+                .map_err(|error| error.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| error.to_string())?;
+            rows
+        };
+        let mut findings = Vec::new();
+        for (id, source_id, title, path, version) in &rows {
+            let content = std::fs::read(path)
+                .map_err(|error| format!("保存済み作品 {id} を検査できません: {error}"))?;
+            let value: Value = serde_json::from_slice(&content)
+                .map_err(|error| format!("保存済み作品 {id} のJSONを検査できません: {error}"))?;
+            let text = value
+                .get("text")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let missing = if REFERENCES.is_match(text) {
+                saved_pixiv_missing_references(&value, &self.get_assets(*id)?)
+            } else {
+                Vec::new()
+            };
+            if !missing.is_empty() {
+                let payload = serde_json::json!({
+                    "kind":"revision", "source":"pixiv", "sourceId":source_id,
+                    "title":title, "subtitle":"本文保存済み", "holdKind":"incomplete",
+                    "holdReason":format!("[一部保存] 本文は保存済みですが、挿絵参照を表示できません: {}", missing.join(", ")),
+                    "missingReferences":missing, "originalData":{"localVersion":version}
+                });
+                findings.push((*id, source_id, title, payload.to_string()));
+            }
+        }
+        let mut conn = self.conn.lock().map_err(|error| error.to_string())?;
+        let tx = conn.transaction().map_err(|error| error.to_string())?;
+        let mut changed = Vec::new();
+        for (id, source_id, title, payload) in findings {
+            // A pending revision or a user's dismissal remains authoritative.
+            let inserted = tx.execute(
+                "INSERT INTO update_candidates(source,source_id,kind,title,payload_json,target_type,status,first_seen_at,updated_at)
+                 VALUES('pixiv',?1,'revision',?2,?3,'work','held',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)
+                 ON CONFLICT(source,source_id) DO NOTHING", params![source_id,title,payload],
+            ).map_err(|error| error.to_string())?;
+            if inserted > 0 {
+                changed.push(id);
+            }
+        }
+        for (id, _, _, path, version) in &rows {
+            tx.execute("INSERT INTO saved_asset_audits(download_id,json_path,version) VALUES(?1,?2,?3)
+                ON CONFLICT(download_id) DO UPDATE SET json_path=excluded.json_path,version=excluded.version",
+                params![id,path,version]).map_err(|error| error.to_string())?;
+        }
+        tx.commit().map_err(|error| error.to_string())?;
+        Ok((
+            rows.len(),
+            changed,
+            rows.last().map_or(after_id, |row| row.0),
+        ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn references_require_the_exact_page_and_real_filename() {
+        let names = HashSet::from([
+            "123_p1.jpg".into(),
+            "illust_456-3_p2.png".into(),
+            "inline_789.jpg".into(),
+        ]);
+        assert_eq!(missing_saved_references(
+            "[pixivimage:123-2][pixivimage:456-3][uploadedimage:789][pixivimage:123][pixivimage:123-0][pixivimage:id=123][pixivimage:123]", &names),
+            vec!["[pixivimage:123]", "[pixivimage:123-0]", "[pixivimage:id=123]"]);
+    }
+}

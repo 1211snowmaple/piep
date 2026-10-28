@@ -302,6 +302,60 @@ pub fn start_automatic_index_maintenance(app: tauri::AppHandle) {
     });
 }
 
+/// Backfill searchable acquisition state without delaying library navigation.
+pub fn start_automatic_saved_asset_audit(app: tauri::AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        sleep(Duration::from_secs(10)).await;
+        let state = app.state::<Arc<AppState>>().inner().clone();
+        let mut checked = 0;
+        let mut marked = 0;
+        let mut after_id = 0;
+        loop {
+            match state.db.has_active_update_job() {
+                Ok(true) => {
+                    sleep(Duration::from_secs(2)).await;
+                    continue;
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    log::warn!("保存画像の検査を開始できません: {error}");
+                    return;
+                }
+            }
+            let guard = state.library_gate.clone().write_owned().await;
+            let batch_state = state.clone();
+            let result = tauri::async_runtime::spawn_blocking(move || {
+                let _guard = guard;
+                batch_state.db.audit_saved_pixiv_assets(after_id, 32)
+            })
+            .await;
+            match result {
+                Ok(Ok((0, _, _))) => break,
+                Ok(Ok((count, ids, cursor))) => {
+                    after_id = cursor;
+                    checked += count;
+                    marked += ids.len();
+                    if !ids.is_empty() {
+                        let _ = app.emit("acquisition-audited", ids);
+                    }
+                }
+                Ok(Err(error)) => {
+                    log::warn!("保存画像の検査を中断します: {error}");
+                    return;
+                }
+                Err(error) => {
+                    log::warn!("保存画像の検査を実行できません: {error}");
+                    return;
+                }
+            }
+            sleep(Duration::from_millis(25)).await;
+        }
+        if checked > 0 {
+            log::info!("保存画像の検査を完了しました: {checked}作品、一部保存の追加{marked}件");
+        }
+    });
+}
+
 /// Replaces Pixiv's R-18 gate icon in older saved works without adding a version.
 /// The web novel endpoint exposes the real cover even when the App API returns
 /// the icon. Work is paced so a large library does not flood Pixiv at launch.
