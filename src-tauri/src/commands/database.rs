@@ -3213,3 +3213,28 @@ mod entity_image_url_tests {
         assert!(!allowed("http"));
     }
 }
+
+/// 選んだ保存版の本文・作品情報・アセットを比較用に読む。通信や保存は行わない。
+#[tauri::command]
+pub async fn get_revision_snapshot(
+    app: tauri::AppHandle,
+    download_id: i64,
+    version: i64,
+) -> Result<crate::database::queries::RevisionSnapshot, String> {
+    run_db_blocking(app, move |state| {
+        state.db.get_revision_snapshot(download_id, version)
+    })
+    .await
+}
+
+/// 要確認の理由と、取得できなかった挿絵の本文上の位置を読む。
+#[tauri::command]
+pub async fn get_work_acquisition_details(
+    app: tauri::AppHandle,
+    download_id: i64,
+) -> Result<Option<crate::database::queries::WorkAcquisitionDetails>, String> {
+    run_db_blocking(app, move |state| {
+        state.db.get_work_acquisition_details(download_id)
+    })
+    .await
+}

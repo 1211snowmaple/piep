@@ -34,6 +34,9 @@ mod acquisition_audit;
 mod assist_inputs;
 /// 作品コレクションは `Database` の非公開内部へ触れるため、子モジュールに置く。
 mod reader;
+mod work_inspection;
+pub(crate) use work_inspection::revision_metadata;
+pub use work_inspection::{RevisionMetadata, RevisionSnapshot, WorkAcquisitionDetails};
 mod update_watch;
 pub(crate) use acquisition_audit::{
     pixiv_missing_references_for_filenames, saved_pixiv_missing_references,
@@ -5583,7 +5586,7 @@ impl Database {
 
         let mut candidate_stmt = conn
             .prepare(
-                "SELECT i.id, i.source, i.source_id, i.title, i.target_type, i.payload_json, i.status, i.error, d.id
+                "SELECT i.id, i.source, i.source_id, i.title, i.target_type, i.payload_json, i.status, i.error, d.id, d.author_name, d.source_created_at, d.source_updated_at, d.downloaded_at
                  FROM update_job_items i
                  LEFT JOIN downloads d ON d.source = i.source AND d.source_id = i.source_id
                  WHERE i.job_id = ?1 AND i.item_type = 'candidate' AND i.id > ?2
@@ -5629,6 +5632,7 @@ impl Database {
                         .unwrap_or("new")
                         .to_string();
                     Ok(UpdateJobCandidate {
+                        metadata: UpdateWorkMetadata::from_row(row, 9, &payload)?,
                         id,
                         download_id: row.get(8)?,
                         key: format!("candidate:{}:{}:{}", source, source_id, id),
@@ -5944,8 +5948,11 @@ impl Database {
                             SELECT d.id FROM downloads d
                             WHERE d.source = i.source AND d.source_id = i.source_id
                             LIMIT 1
-                        )) ELSE i.result_download_id END
+                        )) ELSE i.result_download_id END,
+                        CASE WHEN d.id IS NULL AND i.status='held' AND i.item_type IN ('work','candidate') THEN i.payload_json ELSE NULL END,
+                        d.author_name, d.source_created_at, d.source_updated_at, d.downloaded_at
                  FROM update_job_items i
+                 LEFT JOIN downloads d ON d.source=i.source AND d.source_id=i.source_id
                  WHERE i.job_id = ?1{filter}
                  ORDER BY i.id"
             ))
@@ -5953,6 +5960,13 @@ impl Database {
         let rows = stmt
             .query_map(params![job_id], |row| {
                 Ok(UpdateJobItemState {
+                    metadata: UpdateWorkMetadata::from_row(
+                        row,
+                        8,
+                        &row.get::<_, Option<String>>(7)?
+                            .and_then(|payload| serde_json::from_str(&payload).ok())
+                            .unwrap_or_default(),
+                    )?,
                     source: row.get(0)?,
                     source_id: row.get(1)?,
                     status: row.get(2)?,
@@ -6003,6 +6017,7 @@ impl Database {
                     params![item_id, job_id],
                     |row| {
                         Ok(UpdateJobItemState {
+                            metadata: Default::default(),
                             source: row.get(0)?,
                             source_id: row.get(1)?,
                             status: row.get(2)?,

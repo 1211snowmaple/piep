@@ -1,3 +1,4 @@
+import { UpdateWorkMetadata } from "./UpdateWorkMetadata";
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
 import { transitionContent } from "@/lib/contentTransition";
 import {
@@ -36,7 +37,7 @@ import { MotionTabs as Tabs } from "@/components/MotionTabs";
 import { PageHeader } from "@/components/PageHeader";
 import { updateJobStatusMeta, invalidateAfterUpdateJob, isUpdateJobTerminal, useUpdateJobs, type UpdateJobSnapshot, type UpdateJobSummary } from "@/features/updates/updateJobs";
 import { DeferredCandidatesPanel } from "./DeferredCandidatesPanel";
-import { UpdateWorkLinks, formatUpdateSubtitle } from "./UpdateWorkLinks";
+import { UpdateWorkLinks } from "./UpdateWorkLinks";
 import { UpdateStatusBadge } from "./UpdateStatusBadge";
 import { heldAcquisitionKind, heldReason, summarizeUpdateJobItems, updateJobSubject } from "./updateJobOutcome";
 import { acquisitionStatusMeta } from "@/lib/acquisition";
@@ -594,7 +595,7 @@ export function JobResultsPanel({ job, subject, items, loading, error, onRetry, 
             {item.source && <ProviderMark provider={item.source} compact />}
             <Stack gap={3} miw={0} style={{ flex: 1 }}>
               <Text size="sm" fw={600}>{item.title || item.sourceId || "作品"}</Text>
-              <Text size="xs" c="dimmed">{item.sourceId}</Text>
+              <UpdateWorkMetadata metadata={item.metadata} />
             </Stack>
             <UpdateStatusBadge title={item.title || item.sourceId || "作品"} {...acquisitionStatusMeta(heldAcquisitionKind(reason))} detail={item.error || "確認を保留しました。保存済みの内容は保持されています。"} />
             {item.source && item.sourceId && <UpdateWorkLinks source={item.source} sourceId={item.sourceId} downloadId={item.downloadId} title={item.title || item.sourceId} onOpenWork={onOpenWork} />}
@@ -933,7 +934,7 @@ export function CandidatesPanel({ candidates, selectedIds, selectableIds, runnin
                       決められない。 */}
                   <Text size="sm" fw={650}>{candidate.title}</Text>
                 </Group>
-                <Text size="xs" c="dimmed" className="line-clamp-1">{candidate.targetLabel} · {formatUpdateSubtitle(candidate.subtitle)}</Text>
+                <UpdateWorkMetadata metadata={candidate.metadata} fallback={[candidate.targetLabel, candidate.subtitle].filter(Boolean).join(" · ")} />
               </Stack>
               <UpdateStatusBadge title={candidate.title} {...candidateStatusMeta(candidate)} detail={candidate.error} />
               <UpdateWorkLinks source={candidate.source} sourceId={candidate.sourceId} downloadId={candidate.downloadId} title={candidate.title} onOpenWork={onOpenWork} />

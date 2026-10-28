@@ -13,6 +13,9 @@ const dbApi = vi.hoisted(() => ({
   getReaderMetadata: vi.fn(),
   getReaderContentPage: vi.fn(),
 }));
+const inspectionApi = vi.hoisted(() => ({ getRevisionSnapshot: vi.fn(), getWorkAcquisitionDetails: vi.fn() }));
+const scrollToContent = vi.fn();
+vi.mock("@/services/workInspectionApi", () => inspectionApi);
 const updateJobApi = vi.hoisted(() => ({
   listPendingRevisionsCommand: vi.fn(),
   previewPendingRevisionCommand: vi.fn(),
@@ -42,7 +45,11 @@ function content(page: number, html: string): ReaderContentPage {
 
 describe("WorkPage content preview", () => {
   beforeEach(() => {
+    HTMLElement.prototype.scrollIntoView = scrollToContent;
+    scrollToContent.mockClear();
     window.location.hash = "#/works/101?tab=content";
+    inspectionApi.getWorkAcquisitionDetails.mockResolvedValue(null);
+    inspectionApi.getRevisionSnapshot.mockImplementation(async (id: number, version: number) => ({ text: (await dbApi.getReaderContentPage(id, version, 0, true)).plainText }));
     updateJobApi.listPendingRevisionsCommand.mockResolvedValue([]);
     const demo = getDemoReader(101);
     dbApi.getReaderMetadata.mockResolvedValue({
@@ -178,17 +185,31 @@ describe("WorkPage content preview", () => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><WorkPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
 
-    expect(await screen.findByText("v1 → v2 の本文差分")).toBeInTheDocument();
+    expect(await screen.findByText("v1 → v2 の変更")).toBeInTheDocument();
     await waitFor(() => expect(Array.from(document.querySelectorAll('ins[data-kind="added"]')).map((node) => node.textContent).join("")).toContain("新しい"));
     expect(Array.from(document.querySelectorAll('ins[data-kind="added"]')).map((node) => node.textContent).join("")).toContain("追記");
     expect(Array.from(document.querySelectorAll('del[data-kind="removed"]')).map((node) => node.textContent).join("")).toContain("古い");
     // 平文は既定では運ばれない（読書画面が使わないため）。版を比べるここだけが
     // 明示して頼む。頼み忘れると差分が黙って空になる。
-    expect(dbApi.getReaderContentPage).toHaveBeenCalledWith(101, 2, 0, true);
-    expect(dbApi.getReaderContentPage).toHaveBeenCalledWith(101, 1, 0, true);
+    expect(inspectionApi.getRevisionSnapshot).toHaveBeenCalledWith(101, 2);
+    expect(inspectionApi.getRevisionSnapshot).toHaveBeenCalledWith(101, 1);
 
     fireEvent.click(screen.getByRole("radio", { name: "v2全文" }));
     expect(screen.getByText("冒頭。新しい文章と追記。結末。")).toBeInTheDocument();
+  });
+
+  it("opens the missing-image location in the saved source", async () => {
+    window.location.hash = "#/works/101";
+    inspectionApi.getWorkAcquisitionDetails.mockResolvedValue({ kind: "incomplete", status: "held", reason: "画像が非公開です", recordedAt: "2026-10-29T00:00:00Z", version: 2, missingImages: [{ reference: "[pixivimage:42-2]", page: 2, occurrence: 0, excerpt: "前の文章 画像 後の文章" }] });
+    dbApi.getReaderContentPage.mockImplementation((_id: number, _version: number, page: number) => Promise.resolve(content(page, '<div data-image-reference="[pixivimage:42-2]" data-image-missing="true">取得できなかった画像</div>')));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><WorkPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
+    fireEvent.click(await screen.findByRole("button", { name: /理由と本文の位置/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /本文 2ページ/ }));
+    await waitFor(() => expect(dbApi.getReaderContentPage).toHaveBeenCalledWith(101, 2, 1));
+    await waitFor(() => expect(document.querySelector('[data-image-reference="[pixivimage:42-2]"]')).toHaveAttribute("data-image-target", "true"));
+    expect(scrollToContent).toHaveBeenCalledWith({ block: "nearest" });
+    expect(window.location.hash).toContain("tab=content");
   });
 
   it("fetches an unsaved provider revision and compares it with the current saved version", async () => {
@@ -220,7 +241,7 @@ describe("WorkPage content preview", () => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><WorkPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
 
-    expect(await screen.findByText("保存済み v2 → 取得元の改稿（未保存） の本文差分")).toBeInTheDocument();
+    expect(await screen.findByText("保存済み v2 → 取得元の改稿（未保存） の変更")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /取得元の改稿/ })).toHaveAttribute("data-active");
     await waitFor(() => expect(updateJobApi.previewPendingRevisionCommand).toHaveBeenCalledWith(101));
     expect(Array.from(document.querySelectorAll('ins[data-kind="added"]')).map((node) => node.textContent).join("")).toContain("取得元");

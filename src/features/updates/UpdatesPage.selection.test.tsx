@@ -56,7 +56,7 @@ it("一時停止中は保存待ちの候補を選べ、未読込の候補があ�
   let saved = false;
   render(
     <MantineProvider>
-      <CandidatesPanel
+      <AppRouter><CandidatesPanel
         candidates={[candidate]}
         selectedIds={new Set([candidate.id])}
         selectableIds={[candidate.id]}
@@ -71,7 +71,7 @@ it("一時停止中は保存待ちの候補を選べ、未読込の候補があ�
         onSave={() => { saved = true; }}
         onLoadMore={() => {}}
         onDismiss={() => {}}
-      />
+      /></AppRouter>
     </MantineProvider>,
   );
 

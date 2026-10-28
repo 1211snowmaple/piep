@@ -1425,14 +1425,15 @@ pub async fn dismiss_update_candidate(
     )
 }
 
-/// A separate reversible shelf. These rows never enter ordinary retry queues.
+/// 保留・非表示の候補の表示情報。本文は運ばず、再確認用の原データはDBに保持する。
 #[tauri::command]
 pub async fn list_deferred_update_candidates(
     app: tauri::AppHandle,
 ) -> Result<Vec<crate::database::UpdateCandidateRow>, String> {
-    app.state::<Arc<AppState>>()
-        .db
-        .list_update_candidates_by_status("deferred", -1)
+    let state = app.state::<Arc<AppState>>().inner().clone();
+    tokio::task::spawn_blocking(move || state.db.list_deferred_update_candidate_summaries(-1))
+        .await
+        .map_err(|error| format!("保留候補を読み取れません: {error}"))?
 }
 
 /// ライブラリに保存済みで、取得状態の確認が必要な作品数を返す。
@@ -1711,6 +1712,7 @@ pub async fn list_pending_revisions(
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PendingRevisionPreview {
+    pub metadata: crate::database::queries::RevisionMetadata,
     pub download_id: i64,
     pub base_version: i64,
     pub text: String,
@@ -1761,11 +1763,12 @@ pub async fn preview_pending_revision(
         _ => return Err("この取得元の改稿比較には対応していません".to_string()),
     };
     let text = super::downloader::fetched_plain_text(&value, &download.source);
-    if text.trim().is_empty() {
-        return Err("取得元から比較できる本文を取得できませんでした".to_string());
+    if !super::downloader::fetched_has_material_content(&value, &download.source) {
+        return Err("取得元から比較できる本文・画像・添付を取得できませんでした".to_string());
     }
     let text_length = text.chars().count() as i64;
     Ok(PendingRevisionPreview {
+        metadata: crate::database::queries::revision_metadata(&value, &download.source, None),
         download_id,
         base_version: download.current_version,
         text,
@@ -4272,6 +4275,7 @@ mod tests {
     #[test]
     fn durable_candidates_obey_exact_current_watch_scope() {
         let mut candidate = crate::database::UpdateCandidateRow {
+            metadata: Default::default(),
             source: "fanbox".into(), source_id: "11".into(), kind: "new".into(), title: "作品".into(),
             payload_json: serde_json::json!({"originSourceKey":"creator", "originalData":{"creatorId":"creator"}}).to_string(),
             target_type: Some("author".into()), status: "pending".into(), first_seen_at: "now".into(), updated_at: "now".into(), download_id: None,
