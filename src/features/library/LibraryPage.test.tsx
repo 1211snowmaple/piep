@@ -112,9 +112,9 @@ describe("LibraryPage search", () => {
     await user.type(series, "季節");
     await user.click(await screen.findByRole("option", { name: "季節の栞（pixiv）" }));
     await user.click(within(dialog).getByRole("button", { name: "適用" }));
-    expect(window.location.hash).toContain("serieskey=12552619");
+    expect(window.location.hash).toContain("serieskey=220041");
     expect(window.location.hash).toContain("seriessource=pixiv");
-    expect(client.getQueryCache().findAll({ queryKey: ["library"] }).some((entry) => (entry.queryKey[1] as SearchV2Params).seriesKey === "12552619")).toBe(true);
+    expect(client.getQueryCache().findAll({ queryKey: ["library"] }).some((entry) => (entry.queryKey[1] as SearchV2Params).seriesKey === "220041")).toBe(true);
   });
 
   /**
