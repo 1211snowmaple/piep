@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { Badge, Group, Popover, Text } from "@mantine/core";
+import { Badge, Group, Popover, Text, Tooltip } from "@mantine/core";
 import { useAppNavigate } from "@/app/router";
 
 const GAP = 5;
 
 function tagHref(tag: string) {
-  return `/library?q=${encodeURIComponent(`tag:${tag}`)}`;
+  return `/library?${new URLSearchParams({ tag })}`;
 }
 
 /**
@@ -18,6 +18,7 @@ export function TagRow({ tags, interactive = true }: { tags: string[]; interacti
   const navigate = useAppNavigate();
   const rowRef = useRef<HTMLDivElement>(null);
   const [hiddenTags, setHiddenTags] = useState<string[]>([]);
+  const [clippedTags, setClippedTags] = useState<string[]>([]);
 
   const measure = useCallback(() => {
     const row = rowRef.current;
@@ -67,6 +68,11 @@ export function TagRow({ tags, interactive = true }: { tags: string[]; interacti
       show(visible);
     }
 
+    const clipped = items.slice(0, visible).flatMap((item, index) => {
+      const label = item.querySelector<HTMLElement>(".mantine-Badge-label");
+      return label && label.scrollWidth > label.clientWidth + 1 ? [tags[index]] : [];
+    });
+    setClippedTags((current) => clipped.length === current.length && clipped.every((tag, i) => tag === current[i]) ? current : clipped);
     setHiddenTags((current) => {
       const next = tags.slice(visible);
       return next.length === current.length && next.every((tag, i) => tag === current[i]) ? current : next;
@@ -90,23 +96,10 @@ export function TagRow({ tags, interactive = true }: { tags: string[]; interacti
 
   return (
     <div className="work-card__tags" ref={rowRef}>
-      {tags.map((tag) => (
-        <Badge
-          key={tag}
-          data-tag
-          component="a"
-          href={`#${tagHref(tag)}`}
-          variant="light"
-          color="gray"
-          size="xs"
-          className="work-card__tag"
-          tabIndex={interactive ? undefined : -1}
-          aria-hidden={interactive ? undefined : true}
-          onClick={(event) => { event.preventDefault(); event.stopPropagation(); navigate(tagHref(tag)); }}
-        >
-          {tag}
-        </Badge>
-      ))}
+      {tags.map((tag) => {
+        const badge = <Badge key={tag} data-tag component="a" href={`#${tagHref(tag)}`} variant="light" color="gray" size="xs" className="work-card__tag" tabIndex={interactive ? undefined : -1} aria-hidden={interactive ? undefined : true} onClick={(event) => { event.preventDefault(); event.stopPropagation(); navigate(tagHref(tag)); }}>{tag}</Badge>;
+        return clippedTags.includes(tag) ? <Tooltip key={tag} label={tag} disabled={!interactive} multiline maw="min(480px, calc(100vw - 24px))" styles={{ tooltip: { overflowWrap: "anywhere" } }}>{badge}</Tooltip> : badge;
+      })}
       <TagOverflow tags={hiddenTags} interactive={interactive} />
     </div>
   );
@@ -141,9 +134,9 @@ function TagOverflow({ tags, interactive }: { tags: string[]; interactive: boole
       </Popover.Target>
       <Popover.Dropdown className="work-card__tag-popover" onClick={(event) => event.stopPropagation()}>
         <Text size="xs" c="dimmed" mb={7}>タグで絞り込む</Text>
-        <Group gap={6} maw={320}>
+        <Group gap={6} maw={320} className="tag-overflow__list">
           {tags.map((tag) => (
-            <Badge component="button" type="button" key={tag} size="sm" variant="light" color="piep" onClick={() => { setOpened(false); navigate(tagHref(tag)); }}>
+            <Badge className="tag-overflow__tag" component="button" type="button" key={tag} size="sm" variant="light" color="piep" onClick={() => { setOpened(false); navigate(tagHref(tag)); }}>
               #{tag}
             </Badge>
           ))}

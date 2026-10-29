@@ -109,7 +109,7 @@ function OperationCard({ job }: { job: OperationJob }) {
             </ThemeIcon>
             <Box miw={0}>
               <Group gap="xs">
-                <Text fw={700} className="line-clamp-1">
+                <Text fw={700} className="identity-name">
                   {job.label}
                 </Text>
                 <Badge size="sm" variant="light" color={status.color}>

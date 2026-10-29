@@ -11,7 +11,7 @@ import { test, type Page } from "@playwright/test";
  */
 const projects = ["1440x900-light-200dpi", "1440x900-dark-200dpi"];
 
-// One light run captures nine routes. A cold Vite start can compile enough
+// One light run captures ten routes. A cold Vite start can compile enough
 // route chunks to exceed Playwright's 30-second local default even though no
 // individual screen is slow, so keep the documented regeneration command
 // usable outside CI as well.
@@ -32,6 +32,7 @@ const shots: ReadonlyArray<
   ["updates", "/#/updates", "更新センター", ["light"]],
   ["epub", "/#/epub", "EPUB書き出し", ["light"]],
   ["diagnostics", "/#/diagnostics", "診断とメンテナンス", ["light"]],
+  ["settings", "/#/settings?section=appearance", "表示と操作", ["light"]],
 ];
 
 test("capture readme screenshots", async ({ page }, testInfo) => {

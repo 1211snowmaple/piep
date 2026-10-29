@@ -42,7 +42,7 @@ export function JobProgress({
   return (
     <Box role="status" aria-live="polite">
       <Group justify="space-between" wrap="nowrap" gap="xs" mb={6}>
-        <Text size="sm" fw={600} className="line-clamp-1">{phase}</Text>
+        <Text size="sm" fw={600} className="identity-name">{phase}</Text>
         {determinate && (
           <Text size="sm" c="dimmed" style={{ fontVariantNumeric: "tabular-nums" }}>
             {formatNumber(processed)} / {formatNumber(total)}{unit}（{percent.toFixed(percent < 10 ? 1 : 0)}%）

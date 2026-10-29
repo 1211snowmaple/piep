@@ -4,6 +4,97 @@ use std::fs;
 use std::time::{Duration, Instant};
 
 #[test]
+fn pasted_work_urls_find_the_work_and_keep_provider_ids_separate() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let pixiv = insert_download(&db, &storage, "123", "作品A", "作者", &[], "本文");
+    let fanbox = insert_download(&db, &storage, "other", "作品B", "作者", &[], "本文");
+    db.conn
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE downloads SET source='fanbox',source_id='123' WHERE id=?1",
+            params![fanbox],
+        )
+        .unwrap();
+    db.reindex_download(fanbox).unwrap();
+    for (url, expected) in [
+        ("https://www.pixiv.net/novel/show.php?lang=ja&id=123", pixiv),
+        ("https://creator.fanbox.cc/posts/123", fanbox),
+        ("url:https://www.fanbox.cc/@creator/posts/123", fanbox),
+    ] {
+        let result = db.search_downloads_v2(&params(url)).unwrap();
+        assert_eq!(
+            result.items.iter().map(|item| item.id).collect::<Vec<_>>(),
+            vec![expected],
+            "{url}"
+        );
+    }
+    assert!(super::work_id_from_url(
+        "https://example.com/?next=https://www.pixiv.net/novel/show.php?id=123"
+    )
+    .is_none());
+}
+
+#[test]
+fn acquisition_and_revision_filters_distinguish_available_pending_and_saved_editions() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let history = insert_download(&db, &storage, "history", "保存履歴", "作者", &[], "本文");
+    let pending = insert_download(
+        &db,
+        &storage,
+        "pending",
+        "未保存の改稿",
+        "作者",
+        &[],
+        "本文",
+    );
+    let held = insert_download(&db, &storage, "held", "一部保存", "作者", &[], "本文");
+    db.conn
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE downloads SET current_version=2,favorite=1 WHERE id=?1",
+            params![history],
+        )
+        .unwrap();
+    for (source_id, kind, payload) in [
+        ("pending", "revision", "{}"),
+        ("held", "revision", r#"{"holdKind":"incomplete"}"#),
+    ] {
+        db.upsert_update_candidate(&UpdateCandidateInput {
+            source: "pixiv".into(),
+            source_id: source_id.into(),
+            kind: kind.into(),
+            title: source_id.into(),
+            payload_json: payload.into(),
+            target_type: Some("work".into()),
+        })
+        .unwrap();
+    }
+    db.set_update_candidate_status("pixiv", "held", "held")
+        .unwrap();
+    let mut query = params("");
+    query.acquisition_filter = Some("complete".into());
+    let ids = db
+        .search_downloads_v2(&query)
+        .unwrap()
+        .items
+        .into_iter()
+        .map(|item| item.id)
+        .collect::<HashSet<_>>();
+    assert_eq!(ids, HashSet::from([history, pending]));
+    assert!(!ids.contains(&held));
+    query.revision_filter = Some("pending_revision".into());
+    assert_eq!(db.search_downloads_v2(&query).unwrap().items[0].id, pending);
+    query.revision_filter = Some("saved_revisions".into());
+    assert_eq!(db.search_downloads_v2(&query).unwrap().items[0].id, history);
+    query.favorite = Some(false);
+    assert!(db.search_downloads_v2(&query).unwrap().items.is_empty());
+}
+
+#[test]
 fn placeholder_illustrations_are_reaudited_and_locatable_without_deleting_saved_files() {
     let (_temp, root, storage) = temp_paths();
     let db = Database::open(&root.join("piep.db"), &storage).unwrap();

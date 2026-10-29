@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { transitionContent } from "@/lib/contentTransition";
 import {
   ActionIcon,
+  Accordion,
   Alert,
   Avatar,
   Badge,
@@ -14,7 +15,6 @@ import {
   Grid,
   Group,
   Modal,
-  NavLink,
   PasswordInput,
   Progress,
   SegmentedControl,
@@ -36,7 +36,7 @@ import { PiepLockup } from "@/components/PiepLockup";
 import { ErrorState, LoadingState } from "@/components/AsyncState";
 import { JobProgress } from "@/components/JobProgress";
 import { PageHeader } from "@/components/PageHeader";
-import { useAppSearchParams } from "@/app/router";
+import { useAppNavigate, useAppSearchParams } from "@/app/router";
 import { RuntimeNotice } from "@/components/RuntimeNotice";
 import { applyDensity, isDense } from "@/lib/density";
 import { PAGE_SIZE_OPTIONS, PAGING_SCOPES, useDefaultPagingMode, usePageSize, useScopedPagingPreference, type PagingMode, type PagingPreference, type PagingScope } from "@/components/ListPager";
@@ -73,6 +73,8 @@ import { APP_VERSION } from "@/lib/version";
 import { AppUpdateCard } from "@/features/settings/AppUpdateCard";
 import { AssistSection } from "@/features/settings/AssistSection";
 import { LibrarySidebarSettings } from "./LibrarySidebarSettings";
+import { SettingsNavigation } from "./SettingsNavigation";
+import { searchModes, useDefaultSearchMode } from "@/lib/searchPreferences";
 
 /**
  * 設定の区画。
@@ -153,7 +155,8 @@ function localBackupDate(date: Date): string {
 
 export default function SettingsPage() {
   const runtime = isTauriRuntime();
-  const [searchParams, setSearchParams] = useAppSearchParams();
+  const [searchParams] = useAppSearchParams();
+  const navigate = useAppNavigate();
   const requestedSection = searchParams.get("section");
   // Derived from the URL rather than mirrored into state, so "piepについて" in
   // the header switches sections even when Settings is already open, and the
@@ -163,7 +166,7 @@ export default function SettingsPage() {
     const params = new URLSearchParams(searchParams);
     if (next === "connections") params.delete("section"); else params.set("section", next);
     if (next === section) return;
-    transitionContent(() => setSearchParams(params, { replace: true }), {
+    transitionContent(() => navigate(`/settings${params.size ? `?${params}` : ""}`, { scroll: "top" }), {
       content: () => document.querySelector<HTMLElement>(".settings-content"),
     });
   };
@@ -438,13 +441,13 @@ export default function SettingsPage() {
   }, [automaticFinished, queryClient]);
 
   const nav = [
-    { id: "connections" as const, label: "サービス接続", description: "pixiv・FANBOX", icon: Icons.credentials },
-    { id: "library" as const, label: "ローカルライブラリ", description: "保存先・バックアップ", icon: Icons.database },
-    { id: "search" as const, label: "検索", description: "インデックス・意味検索", icon: Icons.search },
-    { id: "assist" as const, label: "AIの手伝い", description: "手元のモデルに案を出させる", icon: Icons.optimize },
-    { id: "diagnostics" as const, label: "診断とメンテナンス", description: "容量・性能・最適化", icon: Icons.diagnostics },
-    { id: "appearance" as const, label: "外観と操作", description: "テーマ・表示", icon: Icons.appearance },
-    { id: "about" as const, label: "piepについて", description: "バージョン・拡張", icon: Icons.info },
+    { id: "connections", label: "サービス接続", description: "保存・更新に使うアカウント", icon: Icons.credentials, group: "保存する", keywords: "pixiv FANBOX 認証 ログイン 再接続" },
+    { id: "library", label: "保存とバックアップ", description: "保存先・書き出し・復元", icon: Icons.database, group: "保存する", keywords: "ローカルライブラリ フォルダー 再取り込み" },
+    { id: "appearance", label: "表示と操作", description: "テーマ・サイドバー・一覧", icon: Icons.appearance, group: "使いやすくする", keywords: "外観 文字 色 ページ 件数 高密度 ショートカット" },
+    { id: "search", label: "検索", description: "探し方・検索データ", icon: Icons.search, group: "使いやすくする", keywords: "インデックス 索引 意味検索 GPU" },
+    { id: "assist", label: "AIの手伝い", description: "モデル・接続・利用する機能", icon: Icons.optimize, group: "使いやすくする", keywords: "推論 サーバー" },
+    { id: "diagnostics", label: "診断とメンテナンス", description: "保存状態・容量・修復", icon: Icons.diagnostics, group: "管理する", keywords: "性能 最適化 エラー 画像 重複" },
+    { id: "about", label: "piepについて", description: "バージョン・アプリの更新", icon: Icons.info, group: "管理する", keywords: "アップデート リリース 拡張" },
   ];
 
   return (
@@ -452,7 +455,7 @@ export default function SettingsPage() {
       <PageHeader title="設定" description="接続情報、ローカルデータ、検索と表示を管理します。" />
       <RuntimeNotice />
       <Grid gap="xl" mt="lg" align="flex-start">
-        <Grid.Col span={{ base: 12, md: 4, lg: 3 }}><Card p="xs" className="settings-nav">{nav.map((item) => { const Icon = item.icon; return <NavLink component="button" type="button" key={item.id} active={section === item.id} aria-current={section === item.id ? "page" : undefined} label={item.label} description={item.description} leftSection={<Icon size={18} />} onClick={() => setSection(item.id)} />; })}</Card></Grid.Col>
+        <Grid.Col span={{ base: 12, md: 4, lg: 3 }}><SettingsNavigation items={nav} active={section} onSelect={(next) => { if (isSection(next)) setSection(next); }} /></Grid.Col>
         <Grid.Col span={{ base: 12, md: 8, lg: 9 }} className="settings-content">
           {section === "connections" && (auth.isLoading ? <LoadingState label="接続状態を確認しています" /> : auth.error ? <ErrorState error={auth.error} retry={() => auth.refetch()} /> : <ConnectionsSection auth={auth.data ?? { pixiv: null, fanbox: null }} runtime={runtime} pixivForm={pixivForm} fanboxForm={fanboxForm} mutation={connectionMutation} disconnect={disconnect} />)}
           {section === "library" && (stats.isLoading || storagePath.isLoading ? <LoadingState label="ライブラリ情報を読み込んでいます" /> : stats.error || storagePath.error ? <ErrorState error={stats.error ?? storagePath.error} retry={() => { stats.refetch(); storagePath.refetch(); }} /> : <LibrarySection stats={stats.data} path={storagePath.data} runtime={runtime} pending={maintenanceMutation.isPending} busy={libraryOperationRunning || Boolean(nativeBackup.data)} inspecting={inspectingBackup} run={(action) => maintenanceMutation.mutate(action)} />)}
@@ -499,7 +502,7 @@ function ConnectionCard({ source, user, note, runtime, loading, onWeb, onDisconn
   const provider = getProvider(source); return <Card p="lg"><Group justify="space-between" align="flex-start"><Group><Avatar size={54} color="gray" variant="light" style={{ color: provider.color }}>{provider.icon}</Avatar><Box><Group gap="xs"><Text fw={700}>{provider.label}</Text><Badge color={user ? "green" : "gray"} variant="light">{user ? "取得用接続済み" : "未接続"}</Badge></Group><Text size="sm" c="dimmed" mt={4}>{user?.name || provider.description}</Text>{note && <Text size="xs" c="dimmed" mt={2}>{note}</Text>}</Box></Group>{user ? <Group gap="xs"><Button variant="light" size="xs" disabled={!runtime} loading={loading} onClick={onWeb}>再接続</Button><Button color="red" variant="subtle" size="xs" leftSection={<Icons.delete size={IconSize.menu} />} onClick={onDisconnect}>接続解除</Button></Group> : <Button disabled={!runtime} loading={loading} leftSection={<Icons.credentials size={IconSize.menu} />} onClick={onWeb}>ブラウザで接続</Button>}</Group>{!user && <><Divider my="lg" label="または手動入力" labelPosition="center" />{manual}</>}</Card>;
 }
 
-function LibrarySection({ stats, path, runtime, pending, busy, inspecting, run }: { stats?: { totalDownloads: number; totalAssets: number; totalSizeBytes: number }; path?: string; runtime: boolean; pending: boolean; busy: boolean; inspecting: boolean; run: (action: "backup" | "restore" | "scan") => void }) { return <Stack gap="lg"><SectionIntro title="ローカルライブラリ" description="保存ファイルとデータベースの場所、バックアップを管理します。" /><Grid><Grid.Col span={{ base: 12, sm: 4 }}><Metric icon={Icons.read} label="作品" value={formatNumber(stats?.totalDownloads)} /></Grid.Col><Grid.Col span={{ base: 12, sm: 4 }}><Metric icon={Icons.archive} label="画像・添付" value={formatNumber(stats?.totalAssets)} /></Grid.Col><Grid.Col span={{ base: 12, sm: 4 }}><Metric icon={Icons.storage} label="使用容量" value={formatBytes(stats?.totalSizeBytes ?? 0)} /></Grid.Col></Grid><Card p="lg"><Text fw={700}>保存先</Text><Group mt="sm" wrap="nowrap"><Code block flex={1}>{path || "読み込み中…"}</Code><ActionIcon variant="light" aria-label="保存先を開く" disabled={!runtime || !path} onClick={() => path && openFilesystemPath(path)}><Icons.openFolder size={IconSize.action} /></ActionIcon></Group></Card><Card p="lg"><Stack gap="md"><Box><Text fw={700}>バックアップと復元</Text><Text size="sm" c="dimmed">大きなライブラリは分割バックアップの管理ファイル（JSON）と複数の分割ZIPファイルに分けて書き出します。復元には同じフォルダー内の一式が必要です。書き出し中は作品の保存や更新の反映が完了を待つ場合があります。</Text></Box>{busy && <Alert color="blue">ライブラリの操作が実行中です。操作履歴で追跡できない場合は、完了後に保存先を確認してください。</Alert>}{inspecting && <Alert color="blue">バックアップを検査しています。分割ZIPファイルの照合には時間がかかる場合があります。</Alert>}<Group><Button disabled={!runtime || busy} loading={pending} variant="light" leftSection={<Icons.export size={IconSize.menu} />} onClick={() => run("backup")}>分割バックアップを書き出す</Button><Button disabled={!runtime || busy} loading={pending} variant="default" leftSection={<Icons.import size={IconSize.menu} />} onClick={() => run("restore")}>バックアップを復元</Button></Group><Divider /><Box><Text fw={700} size="sm">フォルダーから再取り込み</Text><Text size="xs" c="dimmed" mt={4}>未登録の保存フォルダーを検出し、必要なファイルが揃った作品をライブラリへ戻します。既存作品は手動変更で上書きしません。</Text><Button mt="sm" disabled={!runtime || busy} loading={pending} size="xs" variant="default" leftSection={<Icons.retry size={IconSize.menu} />} onClick={() => run("scan")}>スキャンを実行</Button></Box></Stack></Card></Stack>; }
+function LibrarySection({ stats, path, runtime, pending, busy, inspecting, run }: { stats?: { totalDownloads: number; totalAssets: number; totalSizeBytes: number }; path?: string; runtime: boolean; pending: boolean; busy: boolean; inspecting: boolean; run: (action: "backup" | "restore" | "scan") => void }) { return <Stack gap="lg"><SectionIntro title="保存とバックアップ" description="保存先の確認、バックアップの作成と復元を行います。" /><Grid><Grid.Col span={{ base: 12, sm: 4 }}><Metric icon={Icons.read} label="作品" value={formatNumber(stats?.totalDownloads)} /></Grid.Col><Grid.Col span={{ base: 12, sm: 4 }}><Metric icon={Icons.archive} label="画像・添付" value={formatNumber(stats?.totalAssets)} /></Grid.Col><Grid.Col span={{ base: 12, sm: 4 }}><Metric icon={Icons.storage} label="使用容量" value={formatBytes(stats?.totalSizeBytes ?? 0)} /></Grid.Col></Grid><Card p="lg"><Text fw={700}>保存先</Text><Group mt="sm" wrap="nowrap"><Code block flex={1}>{path || "読み込み中…"}</Code><ActionIcon variant="light" aria-label="保存先を開く" disabled={!runtime || !path} onClick={() => path && openFilesystemPath(path)}><Icons.openFolder size={IconSize.action} /></ActionIcon></Group></Card><Card p="lg"><Stack gap="md"><Box><Text fw={700}>バックアップと復元</Text><Text size="sm" c="dimmed">大きなライブラリは分割バックアップの管理ファイル（JSON）と複数の分割ZIPファイルに分けて書き出します。復元には同じフォルダー内の一式が必要です。書き出し中は作品の保存や更新の反映が完了を待つ場合があります。</Text></Box>{busy && <Alert color="blue">ライブラリの操作が実行中です。操作履歴で追跡できない場合は、完了後に保存先を確認してください。</Alert>}{inspecting && <Alert color="blue">バックアップを検査しています。分割ZIPファイルの照合には時間がかかる場合があります。</Alert>}<Group><Button disabled={!runtime || busy} loading={pending} variant="light" leftSection={<Icons.export size={IconSize.menu} />} onClick={() => run("backup")}>分割バックアップを書き出す</Button><Button disabled={!runtime || busy} loading={pending} variant="default" leftSection={<Icons.import size={IconSize.menu} />} onClick={() => run("restore")}>バックアップを復元</Button></Group><Divider /><Box><Text fw={700} size="sm">フォルダーから再取り込み</Text><Text size="xs" c="dimmed" mt={4}>未登録の保存フォルダーを検出し、必要なファイルが揃った作品をライブラリへ戻します。既存作品は手動変更で上書きしません。</Text><Button mt="sm" disabled={!runtime || busy} loading={pending} size="xs" variant="default" leftSection={<Icons.retry size={IconSize.menu} />} onClick={() => run("scan")}>スキャンを実行</Button></Box></Stack></Card></Stack>; }
 
 export function RestoreWizard({ review, existingWorkCount, loading, onClose, onConfirm }: { review: BackupReview | null; existingWorkCount?: number; loading: boolean; onClose: () => void; onConfirm: (replaceExisting: boolean) => void }) {
   const [replaceExisting, setReplaceExisting] = useState(false);
@@ -552,12 +555,15 @@ const REBUILD_PHASE_LABEL: Record<string, string> = {
 };
 
 function SearchSection({ status, rebuild, runtime, rebuilding, start, cancel }: { status?: SearchIndexStatus; rebuild: SearchRebuildProgress | null; runtime: boolean; rebuilding: boolean; start: (includeSemantic: boolean) => void; cancel: () => void }) {
+  const [defaultSearchMode, setDefaultSearchMode] = useDefaultSearchMode();
   const [includeSemantic, setIncludeSemantic] = useState(status?.semanticEnabled ?? false);
   useEffect(() => setIncludeSemantic(status?.semanticEnabled ?? false), [status?.semanticEnabled]);
   const indexedRatio = status?.totalDownloads ? status.indexedDownloads / status.totalDownloads * 100 : 100;
   const running = rebuilding && rebuild && rebuild.status === "running";
   return <Stack gap="lg">
-    <SectionIntro title="検索" description="全文検索と意味検索のインデックス状態を管理します。" />
+    <SectionIntro title="検索" description="いつもの探し方と、検索に使うデータを管理します。" />
+    <Card p="lg"><Text fw={700}>既定の検索方法</Text><Text size="sm" c="dimmed" mt={4} mb="md">ライブラリと全体検索を開いたときに使います。検索欄でも切り替えられます。</Text><SegmentedControl fullWidth aria-label="既定の検索方法" value={defaultSearchMode} onChange={(value) => setDefaultSearchMode(value === "semantic" || value === "exact" ? value : "smart")} data={searchModes.map(({value,label}) => ({value,label}))} /><Stack gap={6} mt="md">{searchModes.map((mode) => <Text key={mode.value} size="sm" c="dimmed"><b>{mode.label}</b>：{mode.description}</Text>)}</Stack>{defaultSearchMode === "semantic" && !status?.semanticEnabled && <Note mt="sm">意味検索を使うには、下の検索データの保守で意味検索を有効にしてください。</Note>}</Card>
+    <Accordion variant="separated"><Accordion.Item value="maintenance"><Accordion.Control><Text fw={700}>検索データの保守</Text><Text size="xs" c="dimmed">反映状況・索引の作り直し・意味検索モデル</Text></Accordion.Control><Accordion.Panel><Stack gap="md">
     <Card p="lg">
       <Group justify="space-between" align="flex-start">
         <Box>
@@ -579,6 +585,14 @@ function SearchSection({ status, rebuild, runtime, rebuilding, start, cancel }: 
             />
           : <Progress value={indexedRatio} color={status?.isComplete ? "green" : "yellow"} aria-label="索引の完成度" />}
       </Box>
+      <Divider my="md" />
+      <Switch
+        checked={includeSemantic}
+        disabled={rebuilding}
+        onChange={(event) => setIncludeSemantic(event.currentTarget.checked)}
+        label="作品単位の意味検索を使う"
+        description="作り直しを実行すると反映されます。オフで実行すると、確認後に意味検索のデータを削除します。"
+      />
       <Group mt="lg" justify="space-between" align="flex-end">
         <Group>
           {/* status が届くまでは押させない。届く前の `includeSemantic` は既定の
@@ -589,14 +603,6 @@ function SearchSection({ status, rebuild, runtime, rebuilding, start, cancel }: 
           {rebuilding && <Button variant="subtle" color="red" leftSection={<Icons.cancel size={IconSize.menu} />} onClick={cancel}>中止</Button>}
         </Group>
       </Group>
-      <Divider my="md" />
-      <Switch
-        checked={includeSemantic}
-        disabled={rebuilding}
-        onChange={(event) => setIncludeSemantic(event.currentTarget.checked)}
-        label="作品単位の意味検索を使う"
-        description="この設定は保存され、新規作品と自動保守にも適用されます。無効にして再構築すると意味ベクトルを削除します。"
-      />
     </Card>
     <Card p="lg">
       <Group justify="space-between">
@@ -614,10 +620,21 @@ function SearchSection({ status, rebuild, runtime, rebuilding, start, cancel }: 
       <Note mt="md">全文検索の索引づくりはCPUの処理で、GPUは使いません。GPU（DirectML）を使うのは上の「意味検索のベクトル」だけです。</Note>
     </Card>
     <Note>再構築中もライブラリの通常検索は利用できます。中止したり、アプリを終了したりした場合は、確定済みのところまでが保持され、次回は続きから再開します。</Note>
+    </Stack></Accordion.Panel></Accordion.Item></Accordion>
   </Stack>;
 }
 
-function AppearanceSection({ colorScheme, setColorScheme }: { colorScheme: string; setColorScheme: (value: "light" | "dark" | "auto") => void }) { const [dense, setDense] = useState(isDense); const [pageSize, setPageSize] = usePageSize(); return <Stack gap="lg"><SectionIntro title="外観と操作" description="デスクトップ環境に合わせて表示を調整します。" /><Card p="lg"><Box><Text fw={700}>一覧の見え方</Text><Text size="sm" c="dimmed" mb="sm">表紙を並べるか、行で並べるかを決めます。各一覧の右上でも切り替えられ、押した結果はその一覧の設定として残ります。</Text><ViewSettings /><Divider my="md" /><LibrarySidebarSettings /><Divider my="md" /><Text fw={700}>一覧の読み込み方</Text><Text size="sm" c="dimmed" mb="sm">ライブラリや作者ページで、続きをどう読み込むかを決めます。各一覧の件数表示の横でも切り替えられ、押した結果はその一覧の設定として残ります。</Text><PagingSettings /><Text size="xs" c="dimmed" mt="sm">ページ番号は並び順を選んでいるときだけ使えます。関連度順は一致度の高い順に辿る仕組みで「何ページ目」が定まらないため、自動スクロールになります。</Text><Divider my="md" /><Text fw={700}>1ページの件数</Text><Text size="sm" c="dimmed" mb="sm">ページ番号で表示する1ページ分の件数です。スクロールで読み込む1回分の件数にもなります。</Text><SegmentedControl aria-label="1ページの件数" value={String(pageSize)} onChange={(value) => setPageSize(Number(value))} data={PAGE_SIZE_OPTIONS.map((size) => ({ value: String(size), label: `${size}件` }))} /></Box></Card><Card p="lg"><Stack gap="lg"><Box><Text fw={700}>カラーテーマ</Text><Text size="sm" c="dimmed" mb="sm">システム設定に追従することもできます。</Text><SegmentedControl aria-label="カラーテーマ" value={colorScheme} onChange={(value) => setColorScheme(value as "light" | "dark" | "auto")} data={[{ value: "light", label: "ライト" }, { value: "dark", label: "ダーク" }, { value: "auto", label: "システム" }]} /></Box><Divider /><Switch label="高密度表示" description="ページ余白とカードの間隔を狭くします" checked={dense} onChange={(event) => { setDense(event.currentTarget.checked); applyDensity(event.currentTarget.checked); }} /><Group justify="space-between" wrap="nowrap"><Box miw={0}><Text size="sm" fw={500}>視覚効果を減らす</Text><Text size="xs" c="dimmed">OSのモーション設定に自動で従います</Text></Box><Badge variant="light" color="gray">システム設定</Badge></Group></Stack></Card><Card p="lg"><Text fw={700} mb="sm">キーボードショートカット</Text><Stack gap="xs"><Shortcut keys="Ctrl K" label="検索または画面移動" /><Shortcut keys="Ctrl L" label="ライブラリを開く" /><Shortcut keys="Ctrl Shift S" label="保存ワークスペース" /><Shortcut keys="Ctrl S" label="エディタで下書き保存" /></Stack></Card></Stack>; }
+function AppearanceSection({ colorScheme, setColorScheme }: { colorScheme: string; setColorScheme: (value: "light" | "dark" | "auto") => void }) {
+  const [dense, setDense] = useState(isDense);
+  const [pageSize, setPageSize] = usePageSize();
+  return <Stack gap="lg">
+    <SectionIntro title="表示と操作" description="見た目、サイドバー、一覧の使い方を調整します。" />
+    <Card p="lg"><Stack gap="md"><Text fw={700}>テーマと余白</Text><SegmentedControl aria-label="カラーテーマ" value={colorScheme} onChange={(value) => setColorScheme(value as "light" | "dark" | "auto")} data={[{ value: "light", label: "ライト" }, { value: "dark", label: "ダーク" }, { value: "auto", label: "システム" }]} /><Switch label="高密度表示" description="ページ余白とカードの間隔を狭くします" checked={dense} onChange={(event) => { setDense(event.currentTarget.checked); applyDensity(event.currentTarget.checked); }} /><Text size="xs" c="dimmed">アニメーションはOSの「視覚効果を減らす」設定に従います。</Text></Stack></Card>
+    <Card p="lg"><LibrarySidebarSettings /></Card>
+    <Card p="lg"><Stack gap="md"><Text fw={700}>一覧</Text><Text size="sm" c="dimmed">一覧の画面でも切り替えられます。画面ごとに変える場合は下の詳細を開いてください。</Text><Accordion variant="separated"><Accordion.Item value="view"><Accordion.Control>表紙・リストの表示</Accordion.Control><Accordion.Panel><ViewSettings /></Accordion.Panel></Accordion.Item><Accordion.Item value="paging"><Accordion.Control>読み込み方と画面ごとの指定</Accordion.Control><Accordion.Panel><PagingSettings /><Text size="xs" c="dimmed" mt="sm">関連度順は続きから順に読み込みます。日付や名前などの並び順ではページ番号も利用できます。</Text></Accordion.Panel></Accordion.Item></Accordion><Box><Text size="sm" fw={650} mb="sm">1回に表示する件数</Text><SegmentedControl aria-label="1ページの件数" value={String(pageSize)} onChange={(value) => setPageSize(Number(value))} data={PAGE_SIZE_OPTIONS.map((size) => ({ value: String(size), label: `${size}件` }))} /></Box></Stack></Card>
+    <Card p="lg"><Text fw={700} mb="sm">キーボードショートカット</Text><Stack gap="xs"><Shortcut keys="Ctrl K" label="ライブラリ検索・画面移動" /><Shortcut keys="F5" label="入力や処理を保って画面を更新" /><Shortcut keys="Ctrl L" label="ライブラリを開く" /><Shortcut keys="Ctrl Shift S" label="保存画面を開く" /><Shortcut keys="Ctrl S" label="エディタで下書き保存" /></Stack></Card>
+  </Stack>;
+}
 
 /**
  * 読み込み方を、まとめてと一覧ごとの二段で決める。

@@ -99,7 +99,7 @@ function SeriesLink({ work, className, interactive = true }: { work: DownloadEnt
   const navigate = useAppNavigate();
   if (!work.seriesTitle) return null;
   const key = work.seriesId;
-  const label = <Text className={["work-card__series line-clamp-1", className].filter(Boolean).join(" ")}>{work.seriesTitle}</Text>;
+  const label = <Text className={["work-card__series identity-name", className].filter(Boolean).join(" ")}>{work.seriesTitle}</Text>;
   const content = !key ? label : (
     <UnstyledButton
       className="work-card__series-link"
@@ -151,7 +151,7 @@ function AuthorLine({ work, size = 20, interactive = true }: { work: DownloadEnt
         <Avatar src={icon} size={size} radius="xl" color="gray" className="work-card__avatar" imageProps={{ loading: "lazy", decoding: "async" }}>
           <Icons.person size={Math.round(size * 0.58)} />
         </Avatar>
-        <Text size="xs" c="dimmed" className="line-clamp-1">{name}</Text>
+        <Text size="xs" c="dimmed" className="identity-name">{name}</Text>
       </Group>
     </ClippedTooltip>
   );

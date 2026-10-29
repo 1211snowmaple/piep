@@ -60,7 +60,7 @@ features:
 
 | | |
 |---|---:|
-| 画面 | <!--stat:screens.count-->9<!--/stat--> |
+| 画面 | <!--stat:screens.count-->10<!--/stat--> |
 | IPC コマンド | <!--stat:commands.total-->170<!--/stat--> |
 | うち説明のあるもの | <!--stat:commands.described-->170<!--/stat--> |
 | イベント | <!--stat:events.total-->16<!--/stat--> |

@@ -11570,7 +11570,7 @@ fn params_have_library_filters(params: &SearchV2Params) -> bool {
             .as_deref()
             .map(|value| !value.trim().is_empty())
             .unwrap_or(false)
-        || params.favorite == Some(true)
+        || params.favorite.is_some()
         || params
             .tags_include
             .as_ref()
@@ -11716,6 +11716,15 @@ fn extract_structured_search_filters(
     for raw_term in split_query_terms(query) {
         let excluded = raw_term.starts_with('-');
         let term = raw_term.trim_start_matches('-');
+        // URLs contain a colon, so resolve them before treating `field:value`
+        // as a query operator. Keep provider IDs from matching another service.
+        if !excluded {
+            if let Some((source, id)) = work_id_from_url(term) {
+                source_id_terms.push(id);
+                params.source.get_or_insert_with(|| source.to_string());
+                continue;
+            }
+        }
         let Some((field, raw_value)) = term.split_once(':') else {
             if let Some(id) = source_id_from_url(term) {
                 source_id_terms.push(id);
@@ -11777,8 +11786,9 @@ fn extract_structured_search_filters(
                 params.source = Some(value.to_ascii_lowercase());
             }
             "id" | "source_id" | "sourceid" | "url" if !excluded => {
-                if let Some(id) = source_id_from_url(value) {
+                if let Some((source, id)) = work_id_from_url(value) {
                     source_id_terms.push(id);
+                    params.source.get_or_insert_with(|| source.to_string());
                 } else {
                     source_id_terms.push(value.to_string());
                 }
@@ -11821,14 +11831,37 @@ fn split_query_terms(query: &str) -> Vec<String> {
 }
 
 fn source_id_from_url(value: &str) -> Option<String> {
-    let pixiv = regex::Regex::new(r"(?:novel/show\.php\?id=|/novels/|/artworks/)(\d+)").ok()?;
-    if let Some(caps) = pixiv.captures(value) {
-        return caps.get(1).map(|m| m.as_str().to_string());
+    work_id_from_url(value).map(|(_, id)| id)
+}
+
+fn work_id_from_url(value: &str) -> Option<(&'static str, String)> {
+    let url = reqwest::Url::parse(value).ok()?;
+    if !matches!(url.scheme(), "https" | "http") {
+        return None;
     }
-    let fanbox = regex::Regex::new(r"fanbox\.cc/(?:@[^/]+/)?posts/(\d+)").ok()?;
-    fanbox
-        .captures(value)
-        .and_then(|caps| caps.get(1).map(|m| m.as_str().to_string()))
+    let host = url.host_str()?;
+    let segments = url.path_segments()?.collect::<Vec<_>>();
+    let (source, id) = if host == "pixiv.net" || host == "www.pixiv.net" {
+        let id = if url.path().ends_with("/novel/show.php") {
+            url.query_pairs()
+                .find(|(key, _)| key == "id")?
+                .1
+                .into_owned()
+        } else {
+            let index = segments
+                .iter()
+                .position(|segment| matches!(*segment, "novels" | "artworks"))?;
+            segments.get(index + 1)?.to_string()
+        };
+        ("pixiv", id)
+    } else if host == "fanbox.cc" || host.ends_with(".fanbox.cc") {
+        let index = segments.iter().position(|segment| *segment == "posts")?;
+        ("fanbox", segments.get(index + 1)?.to_string())
+    } else {
+        return None;
+    };
+    (!id.is_empty() && id.len() <= 128 && id.chars().all(|ch| ch.is_ascii_digit()))
+        .then_some((source, id))
 }
 
 fn source_url_for_download(source: &str, source_id: &str, author_id: &str) -> String {
@@ -13171,8 +13204,9 @@ fn append_library_filters(
         }
     }
 
-    if params.favorite == Some(true) {
-        wheres.push("d.favorite = 1".to_string());
+    if let Some(favorite) = params.favorite {
+        wheres.push("d.favorite = ?".to_string());
+        bind_values.push(Box::new(i64::from(favorite)));
     }
 
     if let Some(ref ids) = params.ids_include {
@@ -13356,6 +13390,8 @@ fn append_library_filters(
             // that briefly used that name. The condition is revision state,
             // not a promise that every old file is still retained.
             "revised" | "has_history" => wheres.push("(d.current_version > 1 OR EXISTS (SELECT 1 FROM update_candidates c WHERE c.source = d.source AND c.source_id = d.source_id AND c.status = 'pending' AND c.kind = 'revision'))".to_string()),
+            "pending_revision" => wheres.push("EXISTS (SELECT 1 FROM update_candidates c WHERE c.source=d.source AND c.source_id=d.source_id AND c.status='pending' AND c.kind='revision')".to_string()),
+            "saved_revisions" => wheres.push("d.current_version > 1".to_string()),
             "first_version" => wheres.push("d.current_version <= 1".to_string()),
             _ => {}
         }
@@ -13363,6 +13399,7 @@ fn append_library_filters(
 
     if let Some(ref acquisition_filter) = params.acquisition_filter {
         match acquisition_filter.as_str() {
+            "complete" => wheres.push("NOT EXISTS (SELECT 1 FROM update_candidates c WHERE c.source=d.source AND c.source_id=d.source_id AND c.status IN ('held','dismissed'))".to_string()),
             "attention" => wheres.push("EXISTS (SELECT 1 FROM update_candidates c WHERE c.source=d.source AND c.source_id=d.source_id AND c.status IN ('held','dismissed'))".to_string()),
             kind @ ("incomplete" | "unavailable" | "restricted" | "error") => wheres.push(format!("EXISTS (SELECT 1 FROM update_candidates c WHERE c.source=d.source AND c.source_id=d.source_id AND c.status IN ('held','dismissed') AND json_valid(c.payload_json) AND json_extract(c.payload_json, '$.holdKind')='{kind}')")),
             "dismissed" => wheres.push("EXISTS (SELECT 1 FROM update_candidates c WHERE c.source=d.source AND c.source_id=d.source_id AND c.status='dismissed')".to_string()),

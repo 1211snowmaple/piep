@@ -98,7 +98,7 @@ export function EntityCard({ entity, kind, selectionMode = false, selected = fal
           {/* 作品カードと同じ作法。2行で切れた名前を読む手立てが、ここにだけ
               無かった。長い名前ほど切られ、切られた名前ほど見分けが要る。 */}
           <ClippedTooltip label={entity.displayName}>
-            <Text fw={700} className="line-clamp-2" lh={1.35}>{entity.displayName}</Text>
+            <Text fw={700} className="identity-name" lh={1.35}>{entity.displayName}</Text>
           </ClippedTooltip>
           <ClippedTooltip label={description}>
             <Text size="sm" c="dimmed" className="line-clamp-2">{description}</Text>

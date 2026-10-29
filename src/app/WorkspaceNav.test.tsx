@@ -11,6 +11,7 @@ import type { LibraryShelfCounts, SavedSearchRecord } from "@/types/library";
 import { usePageAssist } from "@/app/PageAssistContext";
 import { LibrarySidebarSettings } from "@/features/settings/LibrarySidebarSettings";
 
+const librarySearch = vi.hoisted(() => vi.fn().mockResolvedValue({ items: [] }));
 const shelfApi = vi.hoisted(() => ({
   getLibraryShelfCounts: vi.fn(),
   listSavedSearches: vi.fn(),
@@ -31,6 +32,7 @@ vi.mock("@/services/updateJobApi", async (importOriginal) => ({
 vi.mock("@/services/dbApi", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/services/dbApi")>()),
   isTauriRuntime: () => true,
+  searchDownloadsV2: librarySearch,
 }));
 vi.mock("@/features/search/searchIndexProgress", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/features/search/searchIndexProgress")>()),
@@ -270,13 +272,14 @@ describe("library sidebar", () => {
     renderApp("#/library");
 
     await user.click(await screen.findByRole("button", { name: "検索または移動" }));
-    const search = await screen.findByRole("textbox", { name: "作品、画面、操作を検索" });
+    const search = await screen.findByRole("textbox", { name: "ライブラリ全体を検索" });
     await user.type(search, "旧版の合言葉");
 
-    expect(await screen.findByRole("button", { name: /旧版の合言葉.*現在版から検索/ })).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: /旧版の合言葉.*過去版も含めて検索/ }));
+    expect(await screen.findByRole("button", { name: /検索結果をすべて表示/ })).toBeInTheDocument();
+    await user.click(screen.getByRole("checkbox", { name: "過去版も検索" }));
+    await user.click(screen.getByRole("button", { name: /検索結果をすべて表示/ }));
     await waitFor(() => {
-      expect(window.location.hash).toBe(`#/library?q=${encodeURIComponent("旧版の合言葉")}&versions=all`);
+      expect(window.location.hash).toBe(`#/library?q=${encodeURIComponent("旧版の合言葉")}&intent=smart&versions=all`);
     });
   });
 
@@ -285,6 +288,41 @@ describe("library sidebar", () => {
     const launcher = await screen.findByRole("button", { name: "この画面で使えるAIの手伝い" });
     expect(launcher).not.toHaveAttribute("data-assist-ready");
     expect(launcher.querySelector("svg")).toHaveAttribute("fill", "currentColor");
+  });
+
+  it("shows real bounded library candidates and opens the chosen work", async () => {
+    librarySearch.mockResolvedValueOnce({ items: [{ id: 123, title: "長い作品の題名", authorName: "省略しない長い作者名" }] });
+    const user = userEvent.setup();
+    renderApp("#/library");
+    await user.click(await screen.findByRole("button", { name: "検索または移動" }));
+    await user.type(await screen.findByRole("textbox", { name: "ライブラリ全体を検索" }), "題名");
+    await user.click(await screen.findByRole("button", { name: /長い作品の題名/ }));
+    expect(librarySearch).toHaveBeenCalledWith(expect.objectContaining({ text: "題名", limit: 6, versionScope: "current", projection: "libraryCompact" }));
+    await waitFor(() => expect(window.location.hash).toBe("#/works/123"));
+  });
+
+  it("keeps typed text when switching from library search to commands", async () => {
+    const user = userEvent.setup();
+    renderApp("#/library");
+    await user.click(await screen.findByRole("button", { name: "検索または移動" }));
+    await user.type(await screen.findByRole("textbox", { name: "ライブラリ全体を検索" }), "設定");
+    await user.click(screen.getByRole("radio", { name: "画面・操作" }));
+    expect(screen.getByRole("textbox", { name: "画面・操作を検索" })).toHaveValue("設定");
+    await user.click(screen.getByRole("button", { name: /^設定を開く/ }));
+    await waitFor(() => expect(window.location.hash).toBe("#/settings"));
+  });
+
+  it("does not open a work or submit a search while Japanese composition is being confirmed", async () => {
+    renderApp("#/library");
+    fireEvent.click(await screen.findByRole("button", { name: "検索または移動" }));
+    const input = await screen.findByRole("textbox", { name: "ライブラリ全体を検索" });
+    await waitFor(() => expect(input).toBeVisible());
+    fireEvent.compositionStart(input);
+    fireEvent.change(input, { target: { value: "日本語" } });
+    fireEvent.keyDown(input, { key: "Enter", code: "Enter", isComposing: true });
+    expect(window.location.hash).toBe("#/library");
+    expect(input).toBeVisible();
+    fireEvent.compositionEnd(input);
   });
 
   it("counts an automatic backend update in the activity badge", async () => {

@@ -339,7 +339,7 @@ function MissingMemberCard({ member }: { member: WorkCollectionMember }) {
           </Group>
           <Group gap="xs">
             <ProviderMark provider={member.source} compact />
-            <Text size="xs" c="dimmed" className="line-clamp-1">{member.authorName}</Text>
+            <Text size="xs" c="dimmed" className="identity-name">{member.authorName}</Text>
           </Group>
         </Box>
       </Group>

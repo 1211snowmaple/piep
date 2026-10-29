@@ -1,3 +1,4 @@
+import userEvent from "@testing-library/user-event";
 import { MantineProvider } from "@mantine/core";
 import { ModalsProvider } from "@mantine/modals";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -35,7 +36,7 @@ describe("LibraryPage search", () => {
   it.each([["incomplete", "一部保存"], ["unavailable", "見つからない"]])("shows saved %s works in the ordinary library with a removable filter", async (filter, label) => {
     window.location.hash = `#/library?acquisition=${filter}`;
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
+    render(<MantineProvider env="test"><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
     expect(await screen.findByLabelText("ライブラリを検索")).toBeInTheDocument();
     expect(screen.getByText(label)).toBeInTheDocument();
     expect(window.location.hash).toContain(`acquisition=${filter}`);
@@ -44,7 +45,7 @@ describe("LibraryPage search", () => {
   it("keeps the input mounted through Japanese IME composition and URL sync", async () => {
     window.location.hash = "#/library";
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
+    render(<MantineProvider env="test"><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
     const input = await screen.findByLabelText("ライブラリを検索");
     fireEvent.compositionStart(input);
     fireEvent.change(input, { target: { value: "にほ" } });
@@ -60,6 +61,62 @@ describe("LibraryPage search", () => {
     await waitFor(() => expect(sort).toHaveValue("関連度：高い順"));
   });
 
+  it("keeps an explicit search method through typing and lets URLs override the default", async () => {
+    localStorage.setItem("piep.default-search-mode", JSON.stringify("semantic"));
+    window.location.hash = "#/library?intent=exact&q=創作";
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<MantineProvider env="test"><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
+    const input = await screen.findByLabelText("ライブラリを検索");
+    expect(screen.getByRole("combobox", { name: "検索方法" })).toHaveValue("入力した語で");
+    fireEvent.change(input, { target: { value: "別の言葉" } });
+    await waitFor(() => expect(new URLSearchParams(window.location.hash.split("?")[1]).get("q")).toBe("別の言葉"));
+    expect(window.location.hash).toContain("intent=exact");
+    expect(client.getQueryCache().findAll({ queryKey: ["library"] }).some((entry) => (entry.queryKey[1] as SearchV2Params).searchMode === "exact")).toBe(true);
+  });
+
+  it("stages detailed acquisition and revision conditions and exposes their removal before Apply", async () => {
+    const user = userEvent.setup();
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<MantineProvider env="test"><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
+    await user.click(await screen.findByRole("button", { name: "絞り込み" }));
+    const dialog = await screen.findByRole("dialog", { name: "詳細フィルター" });
+    expect(within(dialog).getByRole("tab", { name: /^保存状態/ })).toHaveAttribute("aria-selected", "true");
+    await user.click(within(dialog).getByRole("combobox", { name: "取得状態" }));
+    await user.click(await screen.findByRole("option", { name: "一部保存" }));
+    await user.click(within(dialog).getByRole("combobox", { name: "改稿状態" }));
+    await user.click(await screen.findByRole("option", { name: "未保存の改稿あり" }));
+    expect(window.location.hash).not.toContain("acquisition=");
+    const summary = within(dialog).getByLabelText("適用する条件");
+    expect(within(summary).getByRole("button", { name: "一部保存の作品を解除" })).toBeVisible();
+    await user.click(within(summary).getByRole("button", { name: "一部保存の作品を解除" }));
+    expect(within(dialog).getByRole("combobox", { name: "取得状態" })).toHaveValue("");
+    await user.click(within(dialog).getByRole("tab", { name: /^基本/ }));
+    await user.click(within(dialog).getByRole("combobox", { name: "お気に入り" }));
+    await user.click(await screen.findByRole("option", { name: "お気に入り以外" }));
+    await user.click(within(dialog).getByRole("button", { name: "適用" }));
+    expect(window.location.hash).toContain("revision=pending_revision");
+    expect(window.location.hash).toContain("favorite=0");
+    expect(client.getQueryCache().findAll({ queryKey: ["library"] }).some((entry) => (entry.queryKey[1] as SearchV2Params).favorite === false)).toBe(true);
+    expect(window.location.hash).not.toContain("acquisition=");
+  });
+
+  it("selects a named series and keeps its provider key in the applied query", async () => {
+    const user = userEvent.setup();
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<MantineProvider env="test"><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
+    await user.click(await screen.findByRole("button", { name: "絞り込み" }));
+    const dialog = await screen.findByRole("dialog", { name: "詳細フィルター" });
+    await user.click(within(dialog).getByRole("tab", { name: /^内容・ファイル/ }));
+    const series = within(dialog).getByRole("combobox", { name: "シリーズを指定" });
+    await user.click(series);
+    await user.type(series, "季節");
+    await user.click(await screen.findByRole("option", { name: "季節の栞（pixiv）" }));
+    await user.click(within(dialog).getByRole("button", { name: "適用" }));
+    expect(window.location.hash).toContain("serieskey=12552619");
+    expect(window.location.hash).toContain("seriessource=pixiv");
+    expect(client.getQueryCache().findAll({ queryKey: ["library"] }).some((entry) => (entry.queryKey[1] as SearchV2Params).seriesKey === "12552619")).toBe(true);
+  });
+
   /**
    * 検索欄の Enter が無反応だった。候補が無いときの案内は「Enterで全文検索」と
    * 言っていたのに、**受ける処理が一行も無かった**。しかも押さなくても既に
@@ -71,7 +128,7 @@ describe("LibraryPage search", () => {
   it("answers Enter by closing the suggestions instead of doing nothing", async () => {
     window.location.hash = "#/library";
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
+    render(<MantineProvider env="test"><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
     const input = await screen.findByLabelText("ライブラリを検索");
     fireEvent.focus(input);
     fireEvent.change(input, { target: { value: "モテモテのハーレム" } });
@@ -90,7 +147,7 @@ describe("LibraryPage search", () => {
 
   it("does not leave stale suggestions selectable while the next query is debouncing", async () => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
+    render(<MantineProvider env="test"><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
     const input = await screen.findByLabelText("ライブラリを検索");
     fireEvent.change(input, { target: { value: "青葉" } });
     await waitFor(() => expect(document.querySelector(".library-search__suggestion-label")?.textContent).toBe("青葉しおり"));
@@ -103,7 +160,7 @@ describe("LibraryPage search", () => {
   it("keeps a column sort selectable during a search and drops it when the query is cleared", async () => {
     window.location.hash = "#/library?q=%E6%97%A5%E6%9C%AC&sort=title";
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
+    render(<MantineProvider env="test"><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
 
     const sort = await screen.findByRole("combobox", { name: "並び順" });
     expect(sort).toHaveValue("タイトル：昇順（あ→ん）");
@@ -118,7 +175,7 @@ describe("LibraryPage search", () => {
   it("falls back from relevance to the saved-date order when the query is cleared", async () => {
     window.location.hash = "#/library?q=%E6%97%A5%E6%9C%AC";
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
+    render(<MantineProvider env="test"><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
 
     expect(await screen.findByRole("combobox", { name: "並び順" })).toHaveValue("関連度：高い順");
     fireEvent.change(screen.getByLabelText("ライブラリを検索"), { target: { value: "" } });
@@ -128,7 +185,7 @@ describe("LibraryPage search", () => {
 
   it("offers every useful work sort in both directions and sends the chosen order to search", async () => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
+    render(<MantineProvider env="test"><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
 
     const sort = await screen.findByRole("combobox", { name: "並び順" });
     expect(sort).toHaveAttribute("readonly");
@@ -158,7 +215,7 @@ describe("LibraryPage search", () => {
     window.localStorage.setItem("piep.library-sort-order", JSON.stringify("desc"));
     window.location.hash = "#/library?sort=title";
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
+    render(<MantineProvider env="test"><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
 
     expect(await screen.findByRole("combobox", { name: "並び順" })).toHaveValue("タイトル：昇順（あ→ん）");
   });
@@ -166,7 +223,7 @@ describe("LibraryPage search", () => {
   it("offers both directions for collection sorting and records the direction in the URL", async () => {
     window.location.hash = "#/library?tab=collections";
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
+    render(<MantineProvider env="test"><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
 
     const sort = await screen.findByRole("combobox", { name: "並び順" });
     fireEvent.click(sort);
@@ -199,7 +256,7 @@ describe("LibraryPage search", () => {
       createdAt: "2026-01-01T00:00:00Z",
       updatedAt: "2026-01-01T00:00:00Z",
     }]);
-    render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
+    render(<MantineProvider env="test"><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
 
     await waitFor(() => {
       const query = new URLSearchParams(window.location.hash.split("?")[1] ?? "");
@@ -232,7 +289,7 @@ describe("LibraryPage search", () => {
       createdAt: "2026-01-01T00:00:00Z",
       updatedAt: "2026-01-01T00:00:00Z",
     }]);
-    render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
+    render(<MantineProvider env="test"><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
 
     await waitFor(() => {
       const query = new URLSearchParams(window.location.hash.split("?")[1] ?? "");
@@ -246,13 +303,13 @@ describe("LibraryPage search", () => {
   it("does not advertise retained work or series-only filters on collections and people", async () => {
     window.location.hash = "#/library?tab=collections&favorite=1&edone=1";
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    const view = render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
+    const view = render(<MantineProvider env="test"><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
     await screen.findByRole("combobox", { name: "並び順" });
     expect(screen.queryByText("適用中")).not.toBeInTheDocument();
 
     view.unmount();
     window.location.hash = "#/library?tab=people&edone=1";
-    render(<MantineProvider><QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
+    render(<MantineProvider env="test"><QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
     await screen.findByRole("combobox", { name: "並び順" });
     expect(screen.queryByText("適用中")).not.toBeInTheDocument();
   });
@@ -274,7 +331,7 @@ describe("LibraryPage search", () => {
       createdAt: "2026-01-01T00:00:00Z",
       updatedAt: "2026-01-01T00:00:00Z",
     }]);
-    render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
+    render(<MantineProvider env="test"><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
 
     await waitFor(() => {
       const query = new URLSearchParams(window.location.hash.split("?")[1] ?? "");
@@ -293,7 +350,7 @@ describe("LibraryPage search", () => {
   it("does not fetch a hidden series listing while the collections tab is open", async () => {
     window.location.hash = "#/library?tab=collections&q=%E5%A4%9C";
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
+    render(<MantineProvider env="test"><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
 
     await screen.findByRole("tab", { name: "コレクション" });
     const hiddenQueries = [
@@ -310,7 +367,7 @@ describe("LibraryPage search", () => {
     let finishMembership!: (value: []) => void;
     const membership = new Promise<[]>((resolve) => { finishMembership = resolve; });
     void client.fetchQuery({ queryKey: ["pending-revisions"], queryFn: () => membership });
-    const view = render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
+    const view = render(<MantineProvider env="test"><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
     try {
       await waitFor(() => {
         const library = client.getQueryCache().findAll({ queryKey: ["library"] });
@@ -326,14 +383,14 @@ describe("LibraryPage search", () => {
   it("makes saved revision search an explicit URL-owned scope", async () => {
     window.location.hash = "#/library?q=%E6%94%B9%E7%A8%BF";
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
+    render(<MantineProvider env="test"><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
 
     expect(await screen.findByRole("button", { name: "絞り込み" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "検索対象: 現在版だけ" })).toBeNull();
     expect(screen.getByLabelText("ライブラリを検索")).toHaveAttribute("placeholder", "タイトル、作者、タグ、本文を検索");
     fireEvent.click(screen.getByRole("button", { name: "絞り込み" }));
     const spotlight = await screen.findByRole("dialog", { name: "詳細フィルター" });
-    fireEvent.click(within(spotlight).getByRole("tab", { name: /^状態/ }));
+    fireEvent.click(within(spotlight).getByRole("tab", { name: /^保存状態/ }));
     fireEvent.click(within(spotlight).getByRole("radio", { name: "過去版も含む" }));
     fireEvent.click(within(spotlight).getByRole("button", { name: "適用" }));
 
@@ -352,7 +409,7 @@ describe("LibraryPage search", () => {
     window.localStorage.setItem("piep.saved-searches.v2", JSON.stringify({ malformed: true }));
     window.location.hash = "#/library?tab=unknown&watch=yes&sort=not-a-sort";
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
+    render(<MantineProvider env="test"><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
 
     expect(await screen.findByRole("tab", { name: "作品" })).toHaveAttribute("aria-selected", "true");
     expect(screen.getByRole("combobox", { name: "並び順" })).toHaveValue("保存日：新しい順");
@@ -362,7 +419,7 @@ describe("LibraryPage search", () => {
 
   it("does not create a second library query when only the presentation changes", async () => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
+    render(<MantineProvider env="test"><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
 
     await screen.findAllByText("雨上がりの図書室で");
     const before = client.getQueryCache().findAll({ queryKey: ["library"] })[0];
@@ -382,7 +439,7 @@ describe("LibraryPage search", () => {
 
   it("stages expensive filters until Apply and validates the URL-owned flags once", async () => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
+    render(<MantineProvider env="test"><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
 
     fireEvent.click(await screen.findByRole("button", { name: "絞り込み" }));
     fireEvent.change(await screen.findByRole("textbox", { name: "条件を検索" }), { target: { value: "お気に入り" } });
@@ -394,7 +451,7 @@ describe("LibraryPage search", () => {
 
   it("filters by an author chosen in the detail spotlight", async () => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
+    render(<MantineProvider env="test"><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
 
     fireEvent.click(await screen.findByRole("button", { name: "絞り込み" }));
     const spotlight = await screen.findByRole("dialog", { name: "詳細フィルター" });
@@ -420,7 +477,7 @@ describe("LibraryPage search", () => {
 
   it("names the page and every button in the filter spotlight", async () => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    render(<MantineProvider theme={theme}><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
+    render(<MantineProvider env="test" theme={theme}><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
 
     expect(await screen.findByRole("heading", { level: 1, name: "ライブラリ" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "絞り込み" }));
@@ -431,7 +488,7 @@ describe("LibraryPage search", () => {
 
   it("keeps every filter group reachable from the spotlight summary", async () => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
+    render(<MantineProvider env="test"><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
 
     fireEvent.click(await screen.findByRole("button", { name: "絞り込み" }));
     const spotlight = await screen.findByRole("dialog", { name: "詳細フィルター" });
@@ -440,21 +497,21 @@ describe("LibraryPage search", () => {
     expect(within(spotlight).queryByText(/選択済みの条件は下部に表示/)).toBeNull();
     const sectionTabs = within(spotlight).getByRole("tablist", { name: "フィルターの種類" });
     expect(within(sectionTabs).getByRole("tab", { name: /^基本/ })).toBeInTheDocument();
-    expect(within(sectionTabs).getByRole("tab", { name: /^状態/ })).toBeInTheDocument();
-    expect(within(sectionTabs).getByRole("tab", { name: /^作者/ })).toHaveAttribute("aria-selected", "true");
+    expect(within(sectionTabs).getByRole("tab", { name: /^保存状態/ })).toBeInTheDocument();
+    expect(within(sectionTabs).getByRole("tab", { name: /^保存状態/ })).toHaveAttribute("aria-selected", "true");
     expect(within(sectionTabs).getByRole("tab", { name: /^タグ/ })).toBeInTheDocument();
     expect(within(sectionTabs).getByRole("tab", { name: /^日付/ })).toBeInTheDocument();
     expect(within(sectionTabs).getByRole("tab", { name: /^内容・ファイル/ })).toBeInTheDocument();
 
     fireEvent.click(within(sectionTabs).getByRole("tab", { name: /^基本/ }));
     expect(within(spotlight).getByRole("checkbox", { name: "pixiv" })).toBeInTheDocument();
-    fireEvent.click(within(sectionTabs).getByRole("tab", { name: /^状態/ }));
-    expect(within(spotlight).getByRole("radiogroup", { name: "全文検索の対象" })).toBeInTheDocument();
+    fireEvent.click(within(sectionTabs).getByRole("tab", { name: /^保存状態/ }));
+    expect(within(spotlight).getByRole("radiogroup", { name: "検索する版" })).toBeInTheDocument();
     expect(within(spotlight).getByRole("combobox", { name: "改稿状態" })).toBeInTheDocument();
     expect(within(spotlight).getByRole("combobox", { name: "ローカル編集" })).toBeInTheDocument();
     expect(within(spotlight).getByRole("combobox", { name: "表紙" })).toBeInTheDocument();
     fireEvent.click(within(sectionTabs).getByRole("tab", { name: /^タグ/ }));
-    expect(within(spotlight).getAllByRole("button", { name: /を含めるタグへ追加/ }).length).toBeGreaterThan(0);
+    expect((await within(spotlight).findAllByRole("button", { name: /を含めるタグへ追加/ })).length).toBeGreaterThan(0);
     expect(within(spotlight).getByRole("radiogroup", { name: "複数タグの条件" })).toBeInTheDocument();
     expect(within(spotlight).queryByRole("radiogroup", { name: "検索結果の追加先" })).toBeNull();
     fireEvent.click(within(sectionTabs).getByRole("tab", { name: /^日付/ }));
@@ -469,10 +526,11 @@ describe("LibraryPage search", () => {
 
   it("keeps included and excluded facets visible while moving between filter sections", async () => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
+    render(<MantineProvider env="test"><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
 
     fireEvent.click(await screen.findByRole("button", { name: "絞り込み" }));
     const spotlight = await screen.findByRole("dialog", { name: "詳細フィルター" });
+    fireEvent.click(within(spotlight).getByRole("tab", { name: /^作者/ }));
     fireEvent.click(await within(spotlight).findByRole("button", { name: "青葉しおりを含める作者へ追加" }));
     fireEvent.click(within(spotlight).getByRole("button", { name: "遠野つむぎを除外する作者へ追加" }));
     fireEvent.click(within(spotlight).getByRole("tab", { name: /^内容・ファイル/ }));
@@ -491,7 +549,7 @@ describe("LibraryPage search", () => {
     // With scrolling turned on and a few thousand works there is no end of the
     // list to reach, so controls that live only under it cannot be got back to.
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
+    render(<MantineProvider env="test"><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
 
     // Both states are visible at once and the one in force is marked, so the
     // way back out of a mode never depends on reaching the end of the list.
@@ -505,7 +563,7 @@ describe("LibraryPage search", () => {
     // component state was gone by the time the back button brought it back,
     // which read as the app having silently dropped the narrowing.
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
+    render(<MantineProvider env="test"><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
 
     fireEvent.click(await screen.findByRole("button", { name: "絞り込み" }));
     const spotlight = await screen.findByRole("dialog", { name: "詳細フィルター" });
@@ -522,7 +580,7 @@ describe("LibraryPage search", () => {
   it("restores the drawer's filters when history returns to them", async () => {
     window.location.hash = "#/library?source=pixiv&tag=%E5%89%B5%E4%BD%9C&minchars=5000&minassets=2&maxassets=20&minsizemb=1.5&maxsizemb=50&assets=has_images&seriesmode=in_series&revision=revised&localedit=edited&cover=has_cover&versions=all&datefield=source_updated_at&datefrom=2026-01-01&dateto=2026-09-01";
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
+    render(<MantineProvider env="test"><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
 
     expect(await screen.findByText("適用中")).toBeInTheDocument();
     expect(screen.getByText("#創作").closest(".filter-token")).toBeInTheDocument();
@@ -550,7 +608,7 @@ describe("LibraryPage search", () => {
     const spotlight = await screen.findByRole("dialog", { name: "詳細フィルター" });
     fireEvent.click(within(spotlight).getByRole("tab", { name: /^基本/ }));
     expect(within(spotlight).getByRole("checkbox", { name: "pixiv" })).toBeChecked();
-    fireEvent.click(within(spotlight).getByRole("tab", { name: /^状態/ }));
+    fireEvent.click(within(spotlight).getByRole("tab", { name: /^保存状態/ }));
     expect(within(spotlight).getByRole("radio", { name: "過去版も含む" })).toBeChecked();
     expect(within(spotlight).getByRole("combobox", { name: "改稿状態" })).toHaveValue("改稿あり");
     expect(within(spotlight).getByRole("combobox", { name: "ローカル編集" })).toHaveValue("編集あり");
@@ -574,7 +632,7 @@ describe("LibraryPage search", () => {
   it("clears URL-owned watch filters during history navigation", async () => {
     window.location.hash = "#/library?watch=watched";
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
+    render(<MantineProvider env="test"><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
     expect(await screen.findByText("適用中")).toBeInTheDocument();
 
     window.location.hash = "#/library";
@@ -624,7 +682,7 @@ describe("library optimistic flag rollback", () => {
     window.localStorage.setItem("piep.paging-mode", JSON.stringify("pages"));
     window.location.hash = "#/library?page=999999";
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
+    render(<MantineProvider env="test"><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
 
     await waitFor(() => expect(window.location.hash).toContain("page=251"));
     const notice = await screen.findByRole("status");
@@ -677,7 +735,7 @@ describe("library entity paging", () => {
     window.localStorage.setItem("piep.library-entity-sort.person", JSON.stringify("name"));
     window.localStorage.setItem("piep.library-entity-sort.series", JSON.stringify("work_count"));
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
+    render(<MantineProvider env="test"><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
 
     expect(await screen.findByDisplayValue("名前：昇順（あ→ん）")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("tab", { name: /シリーズ/ }));
@@ -691,14 +749,14 @@ describe("library entity paging", () => {
   it("carries the order chosen before the two tabs were split", async () => {
     window.localStorage.setItem("piep.library-entity-sort", JSON.stringify("downloaded_at"));
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
+    render(<MantineProvider env="test"><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
 
     expect(await screen.findByDisplayValue("保存日：新しい順")).toBeInTheDocument();
   });
 
   it("applies ascending and descending directions to grouped entity lists", async () => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
+    render(<MantineProvider env="test"><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
 
     const sort = await screen.findByRole("combobox", { name: "並び順" });
     fireEvent.click(sort);
@@ -719,7 +777,7 @@ describe("library entity paging", () => {
   it("narrows the creator tab by the library filter", async () => {
     window.location.hash = "#/library?tab=people&source=fanbox";
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
+    render(<MantineProvider env="test"><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
 
     expect(await screen.findByLabelText("mizu atelierを開く")).toBeInTheDocument();
     expect(screen.getByLabelText("こはるデザイン室を開く")).toBeInTheDocument();
@@ -731,7 +789,7 @@ describe("library entity paging", () => {
   // row that had been loaded and called it page one.
   it("starts numbered paging at the first page rather than keeping the scrolled rows", async () => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
+    render(<MantineProvider env="test"><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
 
     expect(await screen.findByLabelText("青葉しおりを開く")).toBeInTheDocument();
     expect(screen.queryByLabelText("七瀬あかりを開く")).not.toBeInTheDocument();

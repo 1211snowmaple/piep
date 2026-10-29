@@ -119,7 +119,15 @@ describe("WorkCard", () => {
     expect(screen.getByText("図書室")).toBeInTheDocument();
     window.location.hash = "#/library";
     fireEvent.click(screen.getByText("雨"));
-    expect(window.location.hash).toBe(`#/library?q=${encodeURIComponent("tag:雨")}`);
+    expect(window.location.hash).toBe(`#/library?tag=${encodeURIComponent("雨")}`);
+  });
+
+  it.each(["Fate/Grand Order", '表示に "引用" があるタグ'])("keeps the complete tag %s as a filter rather than splitting it into search words", (tag) => {
+    renderCard({ work: { ...demoWorks[0], tags: [tag] } });
+    fireEvent.click(screen.getByText(tag));
+    const params = new URLSearchParams(window.location.hash.split("?")[1]);
+    expect(params.getAll("tag")).toEqual([tag]);
+    expect(params.has("q")).toBe(false);
   });
 
   it("keeps frequent actions directly available on the card", () => {

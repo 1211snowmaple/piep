@@ -102,7 +102,8 @@ describe("SettingsPage navigation", () => {
     render(<MantineProvider theme={theme}><QueryClientProvider client={client}><ModalsProvider><AppRouter><SettingsPage /></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
 
     const nav = await screen.findByRole("button", { name: /サービス接続/ });
-    const sidebar = nav.parentElement!;
+    expect(nav).toHaveAttribute("aria-current", "page");
+    const sidebar = screen.getByRole("navigation", { name: "設定の項目" });
     const items = [...sidebar.querySelectorAll<HTMLButtonElement>("button")];
     expect(items.length).toBeGreaterThan(4);
 

@@ -15,5 +15,5 @@ export function updateWorkMetadataText(metadata?: Metadata, fallback?: string) {
 
 export function UpdateWorkMetadata({ metadata, fallback }: { metadata?: Metadata; fallback?: string }) {
   const label = updateWorkMetadataText(metadata, fallback);
-  return <Text size="xs" c="dimmed" className="line-clamp-1" title={label}>{label}</Text>;
+  return <Text size="xs" c="dimmed" className="identity-name" title={label}>{label}</Text>;
 }

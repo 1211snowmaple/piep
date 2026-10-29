@@ -142,7 +142,10 @@ test("choosing a library tab does not move the page either", async ({ page }, te
 
   await scrollMain(page, 400);
   const before = await mainScrollTop(page);
-  await page.getByRole("tab", { name: "作者・クリエイター" }).click();
+  expect(before).toBeGreaterThan(0);
+  // A normal automation click scrolls this offscreen tab into view first,
+  // changing the very offset we mean to test before the app sees the press.
+  await page.getByRole("tab", { name: "作者・クリエイター" }).dispatchEvent("click");
   await page.waitForTimeout(600);
   expect(await mainScrollTop(page)).toBe(Math.min(before, await maxScrollTop(page)));
 });
@@ -258,7 +261,7 @@ test("the filter spotlight switches sections without default scrolling", async (
     height: dialog.clientHeight,
     top: dialog.getBoundingClientRect().top,
   }));
-  for (const name of [/^基本/, /^状態/, /^作者/, /^タグ/, /^日付/, /^内容・ファイル/]) {
+  for (const name of [/^基本/, /^保存状態/, /^作者/, /^タグ/, /^日付/, /^内容・ファイル/]) {
     await spotlight.getByRole("tab", { name }).click();
     await page.waitForTimeout(80);
     expect(await spotlight.evaluate((dialog) => {
@@ -350,7 +353,7 @@ test("the page you were on survives opening something from it", async ({ page },
   await expect(page).toHaveURL(/page=2/);
 });
 
-test("the toolbar controls sit on one line, not stepped", async ({ page }, testInfo) => {
+test("search options sit on one line beneath the search field", async ({ page }, testInfo) => {
   onlyOnce(testInfo.project.name);
   await page.goto("/#/library");
   await expect(page.getByRole("combobox", { name: "ライブラリを検索" })).toBeVisible();
@@ -358,7 +361,7 @@ test("the toolbar controls sit on one line, not stepped", async ({ page }, testI
   // The search field is taller than every control beside it, so aligning tops
   // left the whole row after it sitting a few pixels high against it.
   const centres = await page.evaluate(() => {
-    const row = document.querySelector(".library-toolbar .mantine-Group-root") as HTMLElement;
+    const row = document.querySelector(".library-toolbar__options") as HTMLElement;
     // タブごとに意味を持たない道具は、消さずに `display: contents` の包みへ入れて
     // 隠す。包みは箱を持たないので、行の子をそのまま測ると中の押しボタンを丸ごと
     // 見落とす。包みは開いてから測る。

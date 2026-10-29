@@ -94,5 +94,5 @@ piep は、自分が閲覧できる作品を自分用に手元へ残すための
 ## 次に読む
 
 - [はじめる](02-getting-started.md) — インストールから最初の保存まで
-- [画面ごとの説明](03-screens.md) — <!--stat:screens.count-->9<!--/stat--> つの画面が何をするか
+- [画面ごとの説明](03-screens.md) — <!--stat:screens.count-->10<!--/stat--> つの画面が何をするか
 - [データの置き場所とバックアップ](04-your-data.md) — 保存先と、守り方

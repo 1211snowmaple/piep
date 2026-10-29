@@ -81,7 +81,7 @@ test("phone settings navigation wraps without an inner horizontal scroller", asy
   );
   await page.setViewportSize({ width: 360, height: 800 });
   await page.goto("/#/settings?section=library");
-  await expect(page.getByRole("heading", { name: "ローカルライブラリ" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "保存とバックアップ" })).toBeVisible();
   const geometry = await page.evaluate(() => {
     const navigation = document.querySelector<HTMLElement>(".settings-nav");
     const main = document.querySelector<HTMLElement>(".app-main");
@@ -135,7 +135,7 @@ test("critical workspaces keep a stable layout", async ({ page }, testInfo) => {
     ["reader", "/#/reader/101", "雨上がりの図書室で"],
     ["library-collections", "/#/library?tab=collections", "新しいコレクション"],
     ["collection", "/#/collections/demo-long", "星の航路と秘密の図書室をめぐる長い連載の関連作品"],
-    ["settings-library", "/#/settings?section=library", "ローカルライブラリ"],
+    ["settings-library", "/#/settings?section=library", "保存とバックアップ"],
     ["settings-assist", "/#/settings?section=assist", "AIの手伝い"],
     ["updates", "/#/updates", "更新センター"],
     ["epub", "/#/epub", "EPUB書き出し"],
@@ -211,7 +211,8 @@ test("detail filters open as a search spotlight and keep author names readable",
   await expect(spotlight).toBeVisible();
   await expect(spotlight.getByRole("textbox", { name: "条件を検索" })).toBeFocused();
   await expect(spotlight.getByRole("button", { name: "適用" })).toBeVisible();
-  await expect(spotlight.getByRole("tab", { name: /^作者/ })).toHaveAttribute("aria-selected", "true");
+  await expect(spotlight.getByRole("tab", { name: /^保存状態/ })).toHaveAttribute("aria-selected", "true");
+  await spotlight.getByRole("tab", { name: /^作者/ }).click();
   const longAuthor = spotlight.getByRole("button", { name: /架空の創作者＠制作中を含める作者へ追加/ });
   await expect(longAuthor).toBeVisible();
   const longAuthorCard = spotlight.locator(".filter-spotlight__quick-option").filter({ hasText: "架空の創作者＠制作中" });
@@ -227,8 +228,8 @@ test("detail filters open as a search spotlight and keep author names readable",
   expect(defaultGeometry.scrollHeight).toBeLessThanOrEqual(defaultGeometry.height);
   await expect(spotlight).toHaveScreenshot("library-filter-spotlight.png");
 
-  await spotlight.getByRole("tab", { name: /^状態/ }).click();
-  await expect(spotlight.getByRole("radiogroup", { name: "全文検索の対象" })).toBeVisible();
+  await spotlight.getByRole("tab", { name: /^保存状態/ }).click();
+  await expect(spotlight.getByRole("radiogroup", { name: "検索する版" })).toBeVisible();
   await expect(spotlight.getByRole("combobox", { name: "改稿状態" })).toBeVisible();
   const statusGeometry = await spotlight.evaluate((element) => ({
     width: element.clientWidth,

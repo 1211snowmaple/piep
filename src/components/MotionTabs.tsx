@@ -1,6 +1,7 @@
-import { useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Tabs, type TabsProps } from "@mantine/core";
 import { transitionContent } from "@/lib/contentTransition";
+import { holdRegionInPlace } from "@/lib/scroll";
 
 interface MotionTabsProps extends TabsProps {
   /** Library results live below the tabs; ordinary tabs own their panels. */
@@ -9,6 +10,8 @@ interface MotionTabsProps extends TabsProps {
 
 function MotionTabsRoot({ value, onChange, children, className, contentSelector, ...props }: MotionTabsProps) {
   const root = useRef<HTMLDivElement>(null);
+  const stopHolding = useRef<() => void>(() => undefined);
+  useEffect(() => () => stopHolding.current(), []);
   const [indicator, setIndicator] = useState<{ x: number; y: number; width: number } | null>(null);
 
   useLayoutEffect(() => {
@@ -33,7 +36,13 @@ function MotionTabsRoot({ value, onChange, children, className, contentSelector,
 
   const change = (next: string | null) => {
     if (next === value) return;
-    transitionContent(() => onChange?.(next), {
+    transitionContent(() => {
+      // Incoming rows can briefly collapse the page before they are measured.
+      // Keep the tabs in place, yielding as soon as the reader scrolls again.
+      stopHolding.current();
+      stopHolding.current = holdRegionInPlace(root.current);
+      onChange?.(next);
+    }, {
       content: () => contentSelector
         ? document.querySelector<HTMLElement>(contentSelector)
         : [...(root.current?.querySelectorAll<HTMLElement>("[role=tabpanel]") ?? [])]

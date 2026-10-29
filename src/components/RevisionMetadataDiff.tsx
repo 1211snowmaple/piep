@@ -7,15 +7,17 @@ import { getAssetUrl } from "@/services/dbApi";
 import type { RevisionMetadata } from "@/services/workInspectionApi";
 
 function MetadataField({ field }: { field: MetadataChange }) {
-  const parts = useMemo(() => createTextDiff(field.before, field.after).parts, [field.before, field.after]);
+  const before = field.label.endsWith("日時") ? formatDate(field.before, true) : field.before;
+  const after = field.label.endsWith("日時") ? formatDate(field.after, true) : field.after;
+  const parts = useMemo(() => createTextDiff(before, after).parts, [before, after]);
   return <Box>
     <Text size="sm" fw={650} mb={4}>{field.label}</Text>
     <SimpleGrid cols={2} spacing="sm">
-      {[field.before, field.after].map((value, index) => <Text key={index} size="sm" className="revision-metadata-value" data-kind={index ? "added" : "removed"}>
-        {!value ? "（なし）" : field.label.endsWith("日時") ? formatDate(value, true) : parts
+      {[before, after].map((value, index) => <Text key={index} size="sm" className="revision-metadata-value">
+        {!value ? "（なし）" : parts
           .filter((part) => part.kind !== (index ? "removed" : "added"))
-          .map((part, partIndex) => part.kind === "added" ? <ins key={partIndex}>{part.value}</ins>
-            : part.kind === "removed" ? <del key={partIndex}>{part.value}</del>
+          .map((part, partIndex) => part.kind === "added" ? <ins className="revision-diff__part" data-kind="added" key={partIndex}>{part.value}</ins>
+            : part.kind === "removed" ? <del className="revision-diff__part" data-kind="removed" key={partIndex}>{part.value}</del>
               : <span key={partIndex}>{part.value}</span>)}
       </Text>)}
     </SimpleGrid>

@@ -18,7 +18,7 @@ import {
   useMantineColorScheme,
 } from "@mantine/core";
 import { useDisclosure, useHotkeys, useLocalStorage, useMediaQuery } from "@mantine/hooks";
-import { Spotlight, spotlight, type SpotlightActionData } from "@mantine/spotlight";
+import { spotlight, type SpotlightActionData } from "@mantine/spotlight";
 import { Icons, IconSize } from "@/lib/icons";
 import piepIcon from "@/assets/icon.svg";
 import { PiepLockup } from "@/components/PiepLockup";
@@ -34,6 +34,7 @@ import { PageAssistProvider, type PageAssistRegistration } from "@/app/PageAssis
 import { AssistLauncher } from "@/features/assist/AssistLauncher";
 import { listenForScrollIntent } from "@/lib/scroll";
 import { PageRefreshControl } from "@/app/PageRefreshControl";
+import { LibrarySpotlight } from "@/app/LibrarySpotlight";
 
 const RAIL_WIDTH = 62;
 const NAVBAR_WIDTH = 194;
@@ -273,7 +274,6 @@ export function AppFrame({ children }: { children: ReactNode }) {
   const colorScheme = useComputedColorScheme("light");
   const { epubQueue } = useWorkspace();
   const [pageAssist, setPageAssist] = useState<PageAssistRegistration[]>([]);
-  const [spotlightQuery, setSpotlightQuery] = useState("");
   const pageAssistItems = useMemo(() => pageAssist.flatMap((registration) => registration.items), [pageAssist]);
   const pageAssistLabel = pageAssist.length === 1
     ? pageAssist[0].label
@@ -312,10 +312,6 @@ export function AppFrame({ children }: { children: ReactNode }) {
     ["mod+shift+S", () => navigate("/save/pixiv")],
   ]);
 
-  const trimmedSpotlightQuery = spotlightQuery.trim().slice(0, 500);
-  const displayedSpotlightQuery = trimmedSpotlightQuery.length > 40
-    ? `${trimmedSpotlightQuery.slice(0, 40)}…`
-    : trimmedSpotlightQuery;
   const actions: SpotlightActionData[] = [
     { id: "home", label: "ホームを開く", description: "状況と最近の保存", group: "画面を開く", onClick: () => navigate("/"), leftSection: <Icons.home size={IconSize.nav} /> },
     { id: "library", label: "ライブラリを開く", description: "作品・作者・シリーズ・コレクション", group: "画面を開く", onClick: () => navigate("/library", { scroll: "top" }), leftSection: <Icons.library size={IconSize.nav} /> },
@@ -327,24 +323,7 @@ export function AppFrame({ children }: { children: ReactNode }) {
     { id: "operations", label: "操作履歴を開く", description: "進行状況・再試行・ログ", group: "管理", onClick: () => navigate("/operations"), leftSection: <Icons.history size={IconSize.nav} /> },
     { id: "diagnostics", label: "ライブラリを診断", description: "実データ性能・容量・索引", group: "管理", onClick: () => navigate("/settings?section=diagnostics"), leftSection: <Icons.diagnostics size={IconSize.nav} /> },
     { id: "settings", label: "設定を開く", description: "接続・外観・ライブラリ", group: "管理", onClick: () => navigate("/settings"), leftSection: <Icons.settings size={IconSize.nav} /> },
-    ...(trimmedSpotlightQuery ? [
-      {
-        id: "search-library-current",
-        label: `「${displayedSpotlightQuery}」を現在版から検索`,
-        description: "タイトル・作者・タグ・シリーズ・本文を検索",
-        group: "ライブラリ検索",
-        onClick: () => navigate(`/library?q=${encodeURIComponent(trimmedSpotlightQuery)}`, { scroll: "top" }),
-        leftSection: <Icons.search size={IconSize.nav} />,
-      },
-      {
-        id: "search-library-history",
-        label: `「${displayedSpotlightQuery}」を過去版も含めて検索`,
-        description: "保存済みの改稿履歴を同じ作品にまとめて検索",
-        group: "ライブラリ検索",
-        onClick: () => navigate(`/library?q=${encodeURIComponent(trimmedSpotlightQuery)}&versions=all`, { scroll: "top" }),
-        leftSection: <Icons.versionHistory size={IconSize.nav} />,
-      },
-    ] satisfies SpotlightActionData[] : []),
+
   ];
 
   return (
@@ -393,9 +372,11 @@ export function AppFrame({ children }: { children: ReactNode }) {
                   dimmed at the ends of the history: a lit control that does
                   nothing when pressed reads as the app having hung. */}
               <Group gap={4} wrap="nowrap">
+                <Group gap={6} wrap="nowrap" className="app-history-controls">
                 <Tooltip label="戻る"><ActionIcon variant="subtle" color="gray" aria-label="前の画面へ戻る" disabled={!location.canGoBack} onClick={() => navigate(-1)}><Icons.back size={IconSize.nav} /></ActionIcon></Tooltip>
                 <Tooltip label="進む"><ActionIcon variant="subtle" color="gray" aria-label="次の画面へ進む" disabled={!location.canGoForward} onClick={() => navigate(1)}><Icons.forward size={IconSize.nav} /></ActionIcon></Tooltip>
                 <PageRefreshControl />
+                </Group>
                 <Divider orientation="vertical" h={20} mx={6} visibleFrom="md" />
                 <Text size="sm" fw={680} visibleFrom="md">{pageTitle}</Text>
               </Group>
@@ -439,15 +420,7 @@ export function AppFrame({ children }: { children: ReactNode }) {
           {children}
         </AppShell.Main>
       </AppShell>
-      <Spotlight
-        actions={actions}
-        query={spotlightQuery}
-        onQueryChange={setSpotlightQuery}
-        onSpotlightClose={() => setSpotlightQuery("")}
-        nothingFound="一致する作品・画面・操作がありません"
-        highlightQuery
-        searchProps={{ leftSection: <Icons.search size={IconSize.nav} />, placeholder: "作品、画面、操作を検索…", "aria-label": "作品、画面、操作を検索" }}
-      />
+      <LibrarySpotlight actions={actions} />
       </>
     </PageAssistProvider>
   );

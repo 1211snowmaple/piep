@@ -56,7 +56,8 @@ export function ClippedTooltip({ label, children, disabled, ...props }: ClippedT
     <Tooltip
       label={label}
       multiline
-      maw={480}
+      maw="min(480px, calc(100vw - 24px))"
+      styles={{ tooltip: { overflowWrap: "anywhere" } }}
       openDelay={350}
       withArrow
       disabled={disabled || !clipped}

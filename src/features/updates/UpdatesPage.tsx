@@ -694,7 +694,7 @@ function TargetsPanel({ targets, loading, error, retry, form, mutation }: { targ
       <ThemeIcon variant="light" color="gray" aria-hidden>{target.targetType === "series" ? "S" : "A"}</ThemeIcon>
       <Stack gap={3} flex={1} miw={0}>
         <Group gap={6} wrap="nowrap">
-          <Text size="sm" fw={650} className="line-clamp-1">{target.displayName}</Text>
+          <Text size="sm" fw={650} className="identity-name">{target.displayName}</Text>
           <TargetHealthBadge target={target} />
         </Group>
         <Text size="xs" c="dimmed" className="line-clamp-1">

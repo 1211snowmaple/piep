@@ -98,6 +98,7 @@ describe("SettingsPage の検索", () => {
   it("意味検索を切る作り直しは、捨てる件数を見せて確認を取る", async () => {
     db.getSearchIndexStatus.mockResolvedValue(status());
     renderSearchSettings();
+    await userEvent.click(await screen.findByRole("button", { name: /検索データの保守/ }));
 
     await userEvent.click(await screen.findByRole("switch", { name: /意味検索を使う/ }));
     await userEvent.click(screen.getByRole("button", { name: /インデックスを再構築/ }));
@@ -113,6 +114,7 @@ describe("SettingsPage の検索", () => {
   it("やめれば、意味ベクトルは消えない", async () => {
     db.getSearchIndexStatus.mockResolvedValue(status());
     renderSearchSettings();
+    await userEvent.click(await screen.findByRole("button", { name: /検索データの保守/ }));
 
     await userEvent.click(await screen.findByRole("switch", { name: /意味検索を使う/ }));
     await userEvent.click(screen.getByRole("button", { name: /インデックスを再構築/ }));
@@ -124,6 +126,7 @@ describe("SettingsPage の検索", () => {
   it("入れたままの作り直しは、確認を挟まない", async () => {
     db.getSearchIndexStatus.mockResolvedValue(status());
     renderSearchSettings();
+    await userEvent.click(await screen.findByRole("button", { name: /検索データの保守/ }));
 
     await userEvent.click(await screen.findByRole("button", { name: /インデックスを再構築/ }));
     await waitFor(() => expect(db.startSearchRebuildIndex).toHaveBeenCalledWith({ includeSemantic: true }));
@@ -144,6 +147,7 @@ describe("SettingsPage の検索", () => {
     expect(screen.queryByRole("switch", { name: /意味検索を使う/ })).toBeNull();
 
     settle(status());
+    await userEvent.click(await screen.findByRole("button", { name: /検索データの保守/ }));
     await waitFor(() => expect(screen.getByRole("button", { name: /インデックスを再構築/ })).toBeEnabled());
   });
 });
