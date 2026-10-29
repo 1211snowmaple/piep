@@ -14326,7 +14326,10 @@ fn asset_belongs_to_version_path(asset_path: &Path, json_path: &Path) -> bool {
     // Legacy v1 sits in the work root. Include its direct files and legacy
     // subdirectories, but never descend into a modern vN tree.
     let Ok(relative) = asset_path.strip_prefix(version_dir) else {
-        return false;
+        // Pre-version archives also stored images in a shared flat folder.
+        // The query already restricts rows to this work; outside that legacy
+        // directory is not evidence that its registered image is unavailable.
+        return true;
     };
     !relative
         .components()

@@ -122,7 +122,7 @@ test("choosing a tab does not move the page", async ({ page }, testInfo) => {
 test("the reader returns to the detail screen instead of opening a second one", async ({ page }, testInfo) => {
   onlyOnce(testInfo.project.name);
   await page.goto("/#/works/101?tab=assets");
-  await expect(page.getByRole("tab", { name: /アセット/ })).toBeVisible();
+  await expect(page.getByRole("tab", { name: /画像・添付/ })).toBeVisible();
 
   await page.getByRole("button", { name: "読む" }).click();
   await expect(page).toHaveURL(/#\/reader\/101/);

@@ -68,7 +68,7 @@ export function JobProgress({
         <Text size="xs" c="dimmed">
           {etaSeconds !== null && etaSeconds !== undefined && etaSeconds > 0
             ? `残り約 ${formatDuration(etaSeconds)}`
-            : elapsedSeconds
+            : rate && elapsedSeconds
               ? `経過 ${formatDuration(elapsedSeconds)}`
               : ""}
         </Text>

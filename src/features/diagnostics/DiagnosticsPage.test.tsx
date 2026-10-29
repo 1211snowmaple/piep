@@ -31,8 +31,8 @@ describe("DiagnosticsPage", () => {
     fireEvent.click(await screen.findByRole("button", { name: "容量・検索速度・登録状況の詳細" }));
     expect(await screen.findByText("実データ性能")).toBeInTheDocument();
     expect(screen.getByText("索引と保存領域")).toBeInTheDocument();
-    expect(screen.getByText("DB参照と保存ファイルは一致しています")).toBeInTheDocument();
-    expect(screen.getByText(/9,633件のDB参照を照合/)).toBeInTheDocument();
+    expect(screen.getByText("登録情報と保存ファイルは一致しています")).toBeInTheDocument();
+    expect(screen.getByText(/9,633件の登録情報を照合/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /最適化と復元/ }));
     expect(await screen.findByRole("button", { name: "DBを最適化" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "検索索引を最適化" })).toBeDisabled();
@@ -42,10 +42,10 @@ describe("DiagnosticsPage", () => {
     renderPage({ ...previewDiagnostics, orphanAssetFiles: 1904, orphanAssetFileBytes: 6590280,
       unregisteredAssetSamples: [{ issueType: "unregistered", category: "work_asset", path: "C:\\library\\downloads\\pixiv\\42\\v1\\data_assets\\cover\\limit_r18_100.png", label: null, expectedSizeBytes: null, actualSizeBytes: 3460 }] });
     fireEvent.click(await screen.findByRole("button", { name: "診断する" }));
-    expect(await screen.findByText("DB参照と保存ファイルは一致しています")).toBeInTheDocument();
+    expect(await screen.findByText("登録情報と保存ファイルは一致しています")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "容量・検索速度・登録状況の詳細" }));
     fireEvent.click(await screen.findByRole("button", { name: "未登録ファイルを確認" }));
-    expect(await screen.findByRole("dialog", { name: "DB未登録のファイル（最大1件）" })).toBeInTheDocument();
+    expect(await screen.findByRole("dialog", { name: "未登録のファイル（最大1件）" })).toBeInTheDocument();
     expect(screen.getByText(/limit_r18_100.png/)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /削除/ })).not.toBeInTheDocument();
   });

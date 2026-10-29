@@ -1319,7 +1319,7 @@ export default function LibraryPage() {
     children: (
       <Stack gap="xs">
         <Text size="sm">
-          次の{formatNumber(selected.length)}件の作品とローカルアセットを削除します。この操作は元に戻せません。
+          次の{formatNumber(selected.length)}件の作品と保存済みの画像・添付を削除します。この操作は元に戻せません。
         </Text>
         <NamedWorkList works={selectedWorks} />
         {selectedWorks.length < selected.length && (

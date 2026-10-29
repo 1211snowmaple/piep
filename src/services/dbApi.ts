@@ -226,8 +226,8 @@ export async function getDownloadBySource<T = DownloadEntry>(source: string, sou
   return invoke<T | null>("db_get_download_by_source", { source, sourceId });
 }
 
-export async function getAssets<T = AssetEntry[]>(downloadId: number): Promise<T> {
-  return invoke<T>("db_get_assets", { downloadId });
+export async function getAssets<T = AssetEntry[]>(downloadId: number, version?: number): Promise<T> {
+  return invoke<T>("db_get_assets", { downloadId, ...(version === undefined ? {} : { version }) });
 }
 
 export async function deleteDownload(id: number): Promise<void> {

@@ -10,8 +10,39 @@ use crate::{
 #[derive(Default)]
 struct Clients {
     pixiv: Option<(String, Arc<AppPixivAPI>)>,
+    pixiv_web: Option<Arc<crate::pixiv_api::web::WebPixivAPI>>,
     fanbox: Option<(String, String, Arc<FanboxAPI>)>,
     fees: Option<Result<std::collections::HashMap<String, u64>, String>>,
+}
+
+pub fn set_pixiv_web_session(
+    cookie: Option<&str>,
+    user_agent: Option<&str>,
+) -> Result<(), PixivError> {
+    let session = cookie
+        .zip(user_agent)
+        .and_then(|(cookie, ua)| crate::pixiv_api::web::WebSession::new(cookie, ua));
+    let api = crate::pixiv_api::web::WebPixivAPI::new()?;
+    let api = Arc::new(match session {
+        Some(session) => api.with_session(session),
+        None => api,
+    });
+    let _ = CLIENTS.try_with(|slot| slot.borrow_mut().pixiv_web = Some(api));
+    Ok(())
+}
+
+pub fn pixiv_web() -> Result<Arc<crate::pixiv_api::web::WebPixivAPI>, PixivError> {
+    CLIENTS
+        .try_with(|slot| {
+            let mut clients = slot.borrow_mut();
+            if let Some(api) = &clients.pixiv_web {
+                return Ok(api.clone());
+            }
+            let api = Arc::new(crate::pixiv_api::web::WebPixivAPI::new()?);
+            clients.pixiv_web = Some(api.clone());
+            Ok(api)
+        })
+        .unwrap_or_else(|_| crate::pixiv_api::web::WebPixivAPI::new().map(Arc::new))
 }
 
 tokio::task_local! {
@@ -77,6 +108,20 @@ pub async fn supporting_fees(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn download_web_credentials_never_leak_into_another_worker() {
+        scope(async {
+            set_pixiv_web_session(Some("session=a"), Some("ua-a")).unwrap();
+            assert!(pixiv_web().unwrap().has_session());
+        })
+        .await;
+        scope(async {
+            assert!(!pixiv_web().unwrap().has_session());
+        })
+        .await;
+        assert!(!pixiv_web().unwrap().has_session());
+    }
 
     #[tokio::test]
     async fn clients_are_reused_only_within_the_same_job_and_credentials() {

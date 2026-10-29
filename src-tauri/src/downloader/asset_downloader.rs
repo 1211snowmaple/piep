@@ -719,14 +719,12 @@ fn extract_filename(url: &str, default: &str) -> String {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct AssetReuseKey {
     sub_folder: &'static str,
-    filename: String,
     source_url: String,
 }
 
 fn asset_reuse_key(target: &DownloadTarget) -> AssetReuseKey {
     AssetReuseKey {
         sub_folder: target.sub_folder,
-        filename: target.filename.clone(),
         source_url: asset_source_identity(&target.url),
     }
 }
@@ -1226,6 +1224,16 @@ mod tests {
             false,
         );
         assert_eq!(reused.get(&asset_reuse_key(&request)), Some(&paths[0]));
+        request.filename = "renamed-cover.png".into();
+        assert_eq!(
+            index_existing_assets_in_other_versions(
+                &current,
+                std::slice::from_ref(&request),
+                false
+            )
+            .get(&asset_reuse_key(&request)),
+            Some(&paths[0])
+        );
         request.url = "https://i.pximg.net/new.png".into();
         assert_eq!(
             index_existing_assets_in_other_versions(

@@ -451,7 +451,7 @@ function WorkActions({ work, queued, onQueue, onToggleFavorite, onToggleWatch }:
   };
   const confirmDelete = () => modals.openConfirmModal({
     title: "この作品を削除しますか？",
-    children: <Text size="sm">「{work.title}」と保存済みアセットをライブラリから削除します。この操作は元に戻せません。</Text>,
+    children: <Text size="sm">「{work.title}」と保存済みの画像・添付をライブラリから削除します。この操作は元に戻せません。</Text>,
     labels: { confirm: "削除する", cancel: "キャンセル" },
     confirmProps: { color: "red" },
     onConfirm: async () => {

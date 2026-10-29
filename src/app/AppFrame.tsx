@@ -33,6 +33,7 @@ import { APP_VERSION } from "@/lib/version";
 import { PageAssistProvider, type PageAssistRegistration } from "@/app/PageAssistContext";
 import { AssistLauncher } from "@/features/assist/AssistLauncher";
 import { listenForScrollIntent } from "@/lib/scroll";
+import { PageRefreshControl } from "@/app/PageRefreshControl";
 
 const RAIL_WIDTH = 62;
 const NAVBAR_WIDTH = 194;
@@ -394,6 +395,7 @@ export function AppFrame({ children }: { children: ReactNode }) {
               <Group gap={4} wrap="nowrap">
                 <Tooltip label="戻る"><ActionIcon variant="subtle" color="gray" aria-label="前の画面へ戻る" disabled={!location.canGoBack} onClick={() => navigate(-1)}><Icons.back size={IconSize.nav} /></ActionIcon></Tooltip>
                 <Tooltip label="進む"><ActionIcon variant="subtle" color="gray" aria-label="次の画面へ進む" disabled={!location.canGoForward} onClick={() => navigate(1)}><Icons.forward size={IconSize.nav} /></ActionIcon></Tooltip>
+                <PageRefreshControl />
                 <Divider orientation="vertical" h={20} mx={6} visibleFrom="md" />
                 <Text size="sm" fw={680} visibleFrom="md">{pageTitle}</Text>
               </Group>

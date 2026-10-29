@@ -12,6 +12,7 @@ import WorkPage from "./WorkPage";
 const dbApi = vi.hoisted(() => ({
   getReaderMetadata: vi.fn(),
   getReaderContentPage: vi.fn(),
+  getAssets: vi.fn(),
 }));
 const inspectionApi = vi.hoisted(() => ({ getRevisionSnapshot: vi.fn(), getWorkAcquisitionDetails: vi.fn() }));
 const scrollToContent = vi.fn();
@@ -26,6 +27,8 @@ vi.mock("@/services/dbApi", async (importOriginal) => ({
   isTauriRuntime: () => true,
   getReaderMetadata: dbApi.getReaderMetadata,
   getReaderContentPage: dbApi.getReaderContentPage,
+  getAssets: dbApi.getAssets,
+  getAssetUrl: (path: string | null) => path,
 }));
 vi.mock("@/services/updateJobApi", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/services/updateJobApi")>()),
@@ -52,6 +55,7 @@ describe("WorkPage content preview", () => {
     inspectionApi.getRevisionSnapshot.mockImplementation(async (id: number, version: number) => ({ text: (await dbApi.getReaderContentPage(id, version, 0, true)).plainText }));
     updateJobApi.listPendingRevisionsCommand.mockResolvedValue([]);
     const demo = getDemoReader(101);
+    dbApi.getAssets.mockResolvedValue(demo.assets);
     dbApi.getReaderMetadata.mockResolvedValue({
       download: demo.download,
       versions: demo.versions,
@@ -59,6 +63,19 @@ describe("WorkPage content preview", () => {
       isEdited: demo.isEdited,
       activeEditRevision: demo.activeEditRevision,
     });
+  });
+
+  it("opens the current version's images and names the image action correctly", async () => {
+    window.location.hash = "#/works/101?tab=assets";
+    const demo = getDemoReader(101);
+    dbApi.getAssets.mockResolvedValue([{ id: 91, downloadId: 101, assetType: "cover", filename: "cover.jpg", localPath: "C:/library/v2/cover.jpg", originalUrl: null, mimeType: "image/jpeg", fileSizeBytes: 100, downloadedAt: "2026-10-01" }]);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><WorkPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
+    expect(await screen.findByText("cover.jpg")).toBeInTheDocument();
+    expect(dbApi.getAssets).toHaveBeenCalledWith(101, demo.download.currentVersion);
+    fireEvent.click(screen.getByAltText("cover.jpg"));
+    expect(await screen.findByRole("button", { name: "画像を開く" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /JSONを開く/ })).not.toBeInTheDocument();
   });
 
   it("does not display or operate the previous page while the requested page loads", async () => {

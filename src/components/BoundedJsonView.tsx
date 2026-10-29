@@ -10,7 +10,7 @@ export function stringifyJson(value: unknown): string {
   try {
     return JSON.stringify(value ?? {}, null, 2) ?? "{}";
   } catch (error) {
-    return `JSONを表示できません: ${error instanceof Error ? error.message : String(error)}`;
+    return `保存データを表示できません: ${error instanceof Error ? error.message : String(error)}`;
   }
 }
 
@@ -22,7 +22,7 @@ export function stringifyJson(value: unknown): string {
 export function BoundedJsonView({
   value,
   jsonText,
-  description = "取得したプロフィール情報を折り返して表示します",
+  description = "保存されている情報を表示します（JSON形式）",
   actions,
 }: {
   value?: unknown;

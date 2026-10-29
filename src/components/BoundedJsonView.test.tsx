@@ -20,7 +20,7 @@ describe("BoundedJsonView", () => {
     const cyclic: Record<string, unknown> = {};
     cyclic.self = cyclic;
     render(<MantineProvider><BoundedJsonView value={cyclic} /></MantineProvider>);
-    expect(screen.getByText(/JSONを表示できません/)).toBeInTheDocument();
+    expect(screen.getByText(/保存データを表示できません/)).toBeInTheDocument();
   });
 
   it("renders already serialized JSON without serializing it again", () => {

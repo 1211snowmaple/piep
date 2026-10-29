@@ -13,6 +13,8 @@ export interface DownloadEntry {
   excerpt: string | null;
   coverPath: string | null;
   jsonPath: string;
+  /** Immutable source file, which can differ from the active edited document. */
+  originalJsonPath?: string | null;
   assetCount: number;
   fileSizeBytes: number;
   downloadedAt: string;

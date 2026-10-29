@@ -4,6 +4,133 @@ use std::fs;
 use std::time::{Duration, Instant};
 
 #[test]
+fn placeholder_illustrations_are_reaudited_and_locatable_without_deleting_saved_files() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let id = insert_download(
+        &db,
+        &storage,
+        "placeholder-image",
+        "作品",
+        "作者",
+        &[],
+        "本文",
+    );
+    let download = db.get_download(id).unwrap();
+    let source = r#"{"text":"本文[pixivimage:123]"}"#;
+    fs::write(&download.json_path, source).unwrap();
+    if let Some(path) = &download.original_json_path {
+        fs::write(path, source).unwrap();
+    }
+    let path = Path::new(&download.json_path)
+        .parent()
+        .unwrap()
+        .join("data_assets/illustrations/123_p0.png");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, b"placeholder").unwrap();
+    {
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE downloads SET source='pixiv',content_type='novel' WHERE id=?1",
+            params![id],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO assets(download_id,asset_type,filename,local_path,original_url,file_size_bytes) VALUES (?1,'illustration','123_p0.png',?2,'https://s.pximg.net/common/images/limit_unknown_360.png',11)",params![id,path.to_string_lossy()]).unwrap();
+        conn.execute(
+            "INSERT INTO saved_asset_audits(download_id,json_path,version) VALUES (?1,?2,?3)",
+            params![id, download.json_path, download.current_version],
+        )
+        .unwrap();
+    }
+    assert_eq!(db.audit_saved_pixiv_assets(0, 32).unwrap().0, 0);
+    assert_eq!(db.requeue_placeholder_illustrations().unwrap(), 1);
+    assert_eq!(db.audit_saved_pixiv_assets(0, 32).unwrap().1, vec![id]);
+    assert!(db
+        .has_incomplete_save_candidate("pixiv", "placeholder-image")
+        .unwrap());
+    db.set_update_candidate_status("pixiv", "placeholder-image", "dismissed")
+        .unwrap();
+    assert!(!db
+        .has_incomplete_save_candidate("pixiv", "placeholder-image")
+        .unwrap());
+    db.set_update_candidate_status("pixiv", "placeholder-image", "held")
+        .unwrap();
+    let content = db.get_reader_document(id, None).unwrap();
+    assert!(content.html.contains("data-image-missing=\"true\""));
+    let acquisition =
+        serde_json::to_value(db.get_work_acquisition_details(id).unwrap().unwrap()).unwrap();
+    assert_eq!(acquisition["missingImages"].as_array().unwrap().len(), 1);
+    assert_eq!(fs::read_to_string(&download.json_path).unwrap(), source);
+    assert!(path.exists());
+    let newer = Path::new(&download.json_path)
+        .parent()
+        .unwrap()
+        .join("v2/original.json");
+    db.conn
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE downloads SET current_version=2,json_path=?2 WHERE id=?1",
+            params![id, newer.to_string_lossy()],
+        )
+        .unwrap();
+    assert_eq!(db.requeue_placeholder_illustrations().unwrap(), 0);
+}
+
+#[test]
+fn version_asset_lists_separate_identical_filenames_and_preserve_history() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let id = insert_download(&db, &storage, "version-images", "作品", "作者", &[], "本文");
+    let mut download = db.get_download(id).unwrap();
+    for version in [1, 2] {
+        let json_path = storage.join(format!("pixiv/version-images/v{version}/original.json"));
+        let asset_path = json_path.parent().unwrap().join("data_assets/image.png");
+        db.insert_version(&NewVersion {
+            download_id: id,
+            version,
+            content_hash: Some("legacy-hash".into()),
+            text_length: 2,
+            json_path: json_path.to_string_lossy().into(),
+            original_json_path: None,
+            asset_count: 1,
+            file_size_bytes: 1,
+            created_at: download.downloaded_at.clone(),
+            change_summary: None,
+        })
+        .unwrap();
+        db.conn.lock().unwrap().execute("INSERT INTO assets(download_id,asset_type,filename,local_path,file_size_bytes) VALUES (?1,'illustration','image.png',?2,1)", params![id,asset_path.to_string_lossy()]).unwrap();
+        if version == 2 {
+            download.json_path = json_path.to_string_lossy().into();
+        }
+    }
+    db.conn.lock().unwrap().execute("UPDATE downloads SET source='pixiv',current_version=2,json_path=?2,original_json_path=?2,content_hash='legacy-hash' WHERE id=?1",params![id,download.json_path]).unwrap();
+    assert_eq!(db.get_assets(id).unwrap().len(), 2);
+    for version in [1, 2] {
+        let assets = db.get_version_assets(id, version).unwrap();
+        assert_eq!(assets.len(), 1);
+        assert!(assets[0].local_path.contains(&format!("v{version}")));
+    }
+    assert!(db.get_version_assets(id, 99).is_err());
+    // A pre-fix content hash does not by itself manufacture a new revision.
+    fs::create_dir_all(Path::new(&download.json_path).parent().unwrap()).unwrap();
+    fs::write(
+        &download.json_path,
+        r#"{"detail":{"tags":[{"name":"タグ"}]},"text":"本文"}"#,
+    )
+    .unwrap();
+    let stored = db.get_download(id).unwrap();
+    let canonical = crate::commands::downloader::saved_content_hash(&stored).unwrap();
+    assert_ne!(canonical, "legacy-hash");
+    let source: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&download.json_path).unwrap()).unwrap();
+    assert_eq!(
+        canonical,
+        crate::commands::downloader::compute_content_details(&source, "pixiv").0
+    );
+}
+
+#[test]
 fn a_work_centroid_does_not_claim_a_matching_body_passage() {
     let hit = super::super::semantic_index::SemanticSearchHit {
         download_id: 1,
@@ -1465,6 +1592,19 @@ fn saved_asset_audit_backfills_legacy_archives_without_changing_sources_or_decis
         &[],
         "本文[pixivimage:123]",
     );
+    // This fixture represents the pre-version layout: JSON in the work root,
+    // with its registered image in a shared flat folder.
+    let complete_download = db.get_download(complete).unwrap();
+    let legacy_json = storage.join("pixiv/legacy-complete/original.json");
+    fs::rename(&complete_download.json_path, &legacy_json).unwrap();
+    db.conn
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE downloads SET json_path=?2,original_json_path=?2 WHERE id=?1",
+            params![complete, legacy_json.to_string_lossy()],
+        )
+        .unwrap();
     let complete_image = storage.join("123_p1.jpg");
     fs::write(&complete_image, b"saved image").unwrap();
     db.conn.lock().unwrap().execute(

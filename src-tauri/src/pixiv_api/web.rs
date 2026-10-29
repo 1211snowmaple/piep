@@ -180,6 +180,8 @@ pub struct NovelBodyWeb {
     pub cover_url: Option<String>,
     /// 本文に貼られた投稿画像。webview の `images` と同じ形。
     pub images: Value,
+    /// Details returned alongside the body, excluding the body and image map.
+    pub metadata: Value,
 }
 
 impl NovelBodyWeb {
@@ -191,6 +193,51 @@ impl NovelBodyWeb {
     pub fn references_unresolved_illusts(&self) -> bool {
         self.text.contains("[pixivimage:")
     }
+}
+
+/// Web pages use the same `pages[].urls.original` representation as saved novels.
+pub fn parse_illustration_pages(payload: &Value) -> Result<Option<Value>, PixivError> {
+    if payload.get("error").and_then(Value::as_bool) == Some(true) {
+        return Ok(None);
+    }
+    let pages = payload
+        .get("body")
+        .and_then(Value::as_array)
+        .ok_or_else(|| PixivError::UnintelligibleResponse {
+            body: "挿絵のページ一覧がありません".into(),
+        })?;
+    let pages = pages
+        .iter()
+        .cloned()
+        .map(|mut page| {
+            for size in ["original", "regular"] {
+                if page
+                    .get("urls")
+                    .and_then(|urls| urls.get(size))
+                    .and_then(Value::as_str)
+                    .is_none_or(|url| {
+                        url.is_empty() || crate::source_assets::is_pixiv_placeholder_image(url)
+                    })
+                {
+                    if let Some(urls) = page.get_mut("urls").and_then(Value::as_object_mut) {
+                        urls.remove(size);
+                    }
+                }
+            }
+            page
+        })
+        .collect::<Vec<_>>();
+    if !pages.iter().any(|page| {
+        ["original", "regular"].iter().any(|size| {
+            page.get("urls")
+                .and_then(|urls| urls.get(size))
+                .and_then(Value::as_str)
+                .is_some()
+        })
+    }) {
+        return Ok(None);
+    }
+    Ok(Some(serde_json::json!({"pages":pages,"webChecked":true})))
 }
 
 /// `/ajax/novel/{id}` の返事から、本文まわりだけを読む。
@@ -219,6 +266,11 @@ pub fn parse_novel_body(payload: &Value) -> Result<NovelBodyWeb, PixivError> {
             body: "本文が入っていません".to_string(),
         })?
         .to_string();
+    let mut metadata = body.clone();
+    if let Some(fields) = metadata.as_object_mut() {
+        fields.remove("content");
+        fields.remove("textEmbeddedImages");
+    }
     Ok(NovelBodyWeb {
         text,
         cover_url: trimmed_string(body.get("coverUrl")),
@@ -227,6 +279,7 @@ pub fn parse_novel_body(payload: &Value) -> Result<NovelBodyWeb, PixivError> {
             .filter(|images| images.is_object())
             .cloned()
             .unwrap_or_else(|| Value::Object(serde_json::Map::new())),
+        metadata,
     })
 }
 
@@ -356,6 +409,21 @@ pub struct WebPixivAPI {
 }
 
 impl WebPixivAPI {
+    pub async fn illustration_pages(&self, id: &str) -> Result<Option<Value>, PixivError> {
+        if !is_numeric_id(id) {
+            return Err(PixivError::NotFound {
+                body: "挿絵IDが不正です".into(),
+            });
+        }
+        let response = self
+            .send(self.get(format!("{}/ajax/illust/{id}/pages", self.host)))
+            .await?;
+        if self.has_session() && response.status() == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(PixivError::WebSessionExpired);
+        }
+        let payload: Value = parse_response_into(response).await?;
+        parse_illustration_pages(&payload)
+    }
     pub fn new() -> Result<Self, PixivError> {
         Self::with_host(PIXIV_WEB_HOST)
     }

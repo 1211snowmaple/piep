@@ -275,7 +275,7 @@ export default function SettingsPage() {
             if (phase === "works") {
               operation.progress(processed, total, `作品 ${formatNumber(processed)}/${formatNumber(total)} 件を書き出しました（ZIP ${partCount} 個）`);
             } else {
-              operation.progress(0, null, `作品の書き出し完了。付随データとマニフェストを保存中（ZIP ${partCount} 個）`);
+              operation.progress(0, null, `作品の書き出し完了。付随データと管理ファイルを保存中（ZIP ${partCount} 個）`);
             }
           });
           try {
@@ -284,7 +284,7 @@ export default function SettingsPage() {
             disposeProgress();
           }
           operation.complete("分割バックアップを書き出しました");
-          return "分割バックアップを書き出しました。マニフェストと同じフォルダーのZIPパートを一緒に保管してください";
+          return "分割バックアップを書き出しました。管理ファイルと同じフォルダーの分割ZIPファイルを一緒に保管してください";
         }
         const outcome = await scanAndReimportDownloads();
         // 飛ばしたものがあることを黙っていると、件数が合わない理由が誰にも
@@ -315,7 +315,7 @@ export default function SettingsPage() {
       color: "red",
       title: action === "restore" ? "バックアップを検査できませんでした" : "操作に失敗しました",
       message: action === "restore"
-        ? `${errorMessage(error)}。JSONマニフェストを選ぶ場合は、同じフォルダーにすべてのZIPパートが必要です。`
+        ? `${errorMessage(error)}。分割バックアップの管理ファイル（JSON）を選ぶ場合は、同じフォルダーにすべての分割ZIPファイルが必要です。`
         : errorMessage(error),
     }),
   });
@@ -337,7 +337,7 @@ export default function SettingsPage() {
           // あちらの catch が拾って記録し、状態を running へ戻す。
           onCancel: async () => { await cancelArchiveRestore(); },
         });
-        operation.log(`${inspection.workCount}作品・${inspection.assetCount}アセットを検証済み`);
+        operation.log(`${inspection.workCount}作品・${inspection.assetCount}画像・添付を検証済み`);
         const disposeProgress = subscribeTauriEvent<ArchiveProgress>("archive-progress", (event) => {
           const { phase, processed, total, label } = event.payload;
           const shown = PHASE_LABEL[phase] ?? phase;
@@ -368,8 +368,8 @@ export default function SettingsPage() {
       color: "red",
       title: "復元を完了できませんでした",
       message: review.format === "multipart"
-        ? `${errorMessage(error)}。同じJSONマニフェストをもう一度選ぶと、完了済みパートを保ったまま安全に再開できます。`
-        : `${errorMessage(error)}。既存ライブラリは復元ジャーナルにより元の状態へ戻されます。`,
+        ? `${errorMessage(error)}。同じ分割バックアップの管理ファイル（JSON）をもう一度選ぶと、復元が完了した分を保ったまま安全に再開できます。`
+        : `${errorMessage(error)}。既存ライブラリは操作前の状態へ戻されます。`,
     }),
   });
   /**
@@ -499,7 +499,7 @@ function ConnectionCard({ source, user, note, runtime, loading, onWeb, onDisconn
   const provider = getProvider(source); return <Card p="lg"><Group justify="space-between" align="flex-start"><Group><Avatar size={54} color="gray" variant="light" style={{ color: provider.color }}>{provider.icon}</Avatar><Box><Group gap="xs"><Text fw={700}>{provider.label}</Text><Badge color={user ? "green" : "gray"} variant="light">{user ? "取得用接続済み" : "未接続"}</Badge></Group><Text size="sm" c="dimmed" mt={4}>{user?.name || provider.description}</Text>{note && <Text size="xs" c="dimmed" mt={2}>{note}</Text>}</Box></Group>{user ? <Group gap="xs"><Button variant="light" size="xs" disabled={!runtime} loading={loading} onClick={onWeb}>再接続</Button><Button color="red" variant="subtle" size="xs" leftSection={<Icons.delete size={IconSize.menu} />} onClick={onDisconnect}>接続解除</Button></Group> : <Button disabled={!runtime} loading={loading} leftSection={<Icons.credentials size={IconSize.menu} />} onClick={onWeb}>ブラウザで接続</Button>}</Group>{!user && <><Divider my="lg" label="または手動入力" labelPosition="center" />{manual}</>}</Card>;
 }
 
-function LibrarySection({ stats, path, runtime, pending, busy, inspecting, run }: { stats?: { totalDownloads: number; totalAssets: number; totalSizeBytes: number }; path?: string; runtime: boolean; pending: boolean; busy: boolean; inspecting: boolean; run: (action: "backup" | "restore" | "scan") => void }) { return <Stack gap="lg"><SectionIntro title="ローカルライブラリ" description="保存ファイルとデータベースの場所、バックアップを管理します。" /><Grid><Grid.Col span={{ base: 12, sm: 4 }}><Metric icon={Icons.read} label="作品" value={formatNumber(stats?.totalDownloads)} /></Grid.Col><Grid.Col span={{ base: 12, sm: 4 }}><Metric icon={Icons.archive} label="アセット" value={formatNumber(stats?.totalAssets)} /></Grid.Col><Grid.Col span={{ base: 12, sm: 4 }}><Metric icon={Icons.storage} label="使用容量" value={formatBytes(stats?.totalSizeBytes ?? 0)} /></Grid.Col></Grid><Card p="lg"><Text fw={700}>保存先</Text><Group mt="sm" wrap="nowrap"><Code block flex={1}>{path || "読み込み中…"}</Code><ActionIcon variant="light" aria-label="保存先を開く" disabled={!runtime || !path} onClick={() => path && openFilesystemPath(path)}><Icons.openFolder size={IconSize.action} /></ActionIcon></Group></Card><Card p="lg"><Stack gap="md"><Box><Text fw={700}>バックアップと復元</Text><Text size="sm" c="dimmed">大きなライブラリはJSONマニフェストと複数のZIPパートに分けて書き出します。復元には同じフォルダー内の一式が必要です。書き出し中は作品の保存や更新の反映が完了を待つ場合があります。</Text></Box>{busy && <Alert color="blue">ライブラリの操作が実行中です。操作履歴で追跡できない場合は、完了後に保存先を確認してください。</Alert>}{inspecting && <Alert color="blue">バックアップを検査しています。ZIPパートの照合には時間がかかる場合があります。</Alert>}<Group><Button disabled={!runtime || busy} loading={pending} variant="light" leftSection={<Icons.export size={IconSize.menu} />} onClick={() => run("backup")}>分割バックアップを書き出す</Button><Button disabled={!runtime || busy} loading={pending} variant="default" leftSection={<Icons.import size={IconSize.menu} />} onClick={() => run("restore")}>バックアップを復元</Button></Group><Divider /><Box><Text fw={700} size="sm">フォルダーから再取り込み</Text><Text size="xs" c="dimmed" mt={4}>DBにない完全な保存フォルダーだけを検出し、1作品ずつ原子的にライブラリへ戻します。既存作品は手動変更で上書きしません。</Text><Button mt="sm" disabled={!runtime || busy} loading={pending} size="xs" variant="default" leftSection={<Icons.retry size={IconSize.menu} />} onClick={() => run("scan")}>スキャンを実行</Button></Box></Stack></Card></Stack>; }
+function LibrarySection({ stats, path, runtime, pending, busy, inspecting, run }: { stats?: { totalDownloads: number; totalAssets: number; totalSizeBytes: number }; path?: string; runtime: boolean; pending: boolean; busy: boolean; inspecting: boolean; run: (action: "backup" | "restore" | "scan") => void }) { return <Stack gap="lg"><SectionIntro title="ローカルライブラリ" description="保存ファイルとデータベースの場所、バックアップを管理します。" /><Grid><Grid.Col span={{ base: 12, sm: 4 }}><Metric icon={Icons.read} label="作品" value={formatNumber(stats?.totalDownloads)} /></Grid.Col><Grid.Col span={{ base: 12, sm: 4 }}><Metric icon={Icons.archive} label="画像・添付" value={formatNumber(stats?.totalAssets)} /></Grid.Col><Grid.Col span={{ base: 12, sm: 4 }}><Metric icon={Icons.storage} label="使用容量" value={formatBytes(stats?.totalSizeBytes ?? 0)} /></Grid.Col></Grid><Card p="lg"><Text fw={700}>保存先</Text><Group mt="sm" wrap="nowrap"><Code block flex={1}>{path || "読み込み中…"}</Code><ActionIcon variant="light" aria-label="保存先を開く" disabled={!runtime || !path} onClick={() => path && openFilesystemPath(path)}><Icons.openFolder size={IconSize.action} /></ActionIcon></Group></Card><Card p="lg"><Stack gap="md"><Box><Text fw={700}>バックアップと復元</Text><Text size="sm" c="dimmed">大きなライブラリは分割バックアップの管理ファイル（JSON）と複数の分割ZIPファイルに分けて書き出します。復元には同じフォルダー内の一式が必要です。書き出し中は作品の保存や更新の反映が完了を待つ場合があります。</Text></Box>{busy && <Alert color="blue">ライブラリの操作が実行中です。操作履歴で追跡できない場合は、完了後に保存先を確認してください。</Alert>}{inspecting && <Alert color="blue">バックアップを検査しています。分割ZIPファイルの照合には時間がかかる場合があります。</Alert>}<Group><Button disabled={!runtime || busy} loading={pending} variant="light" leftSection={<Icons.export size={IconSize.menu} />} onClick={() => run("backup")}>分割バックアップを書き出す</Button><Button disabled={!runtime || busy} loading={pending} variant="default" leftSection={<Icons.import size={IconSize.menu} />} onClick={() => run("restore")}>バックアップを復元</Button></Group><Divider /><Box><Text fw={700} size="sm">フォルダーから再取り込み</Text><Text size="xs" c="dimmed" mt={4}>未登録の保存フォルダーを検出し、必要なファイルが揃った作品をライブラリへ戻します。既存作品は手動変更で上書きしません。</Text><Button mt="sm" disabled={!runtime || busy} loading={pending} size="xs" variant="default" leftSection={<Icons.retry size={IconSize.menu} />} onClick={() => run("scan")}>スキャンを実行</Button></Box></Stack></Card></Stack>; }
 
 export function RestoreWizard({ review, existingWorkCount, loading, onClose, onConfirm }: { review: BackupReview | null; existingWorkCount?: number; loading: boolean; onClose: () => void; onConfirm: (replaceExisting: boolean) => void }) {
   const [replaceExisting, setReplaceExisting] = useState(false);
@@ -510,8 +510,8 @@ export function RestoreWizard({ review, existingWorkCount, loading, onClose, onC
   const multipart = review?.format === "multipart";
   return <Modal opened={Boolean(review)} onClose={onClose} withCloseButton={!loading} closeOnClickOutside={!loading} closeOnEscape={!loading} title="バックアップ復元ウィザード" size="lg">
     {review && inspection && <Stack gap="lg">
-      <Group gap="xs" role="list" aria-label="復元手順"><Badge component="span" role="listitem" variant="filled">1. 検査済み</Badge><Text c="dimmed" aria-hidden>→</Text><Badge component="span" role="listitem" variant="light" color={canRestore ? "piep" : "gray"}>2. 内容確認</Badge><Text c="dimmed" aria-hidden>→</Text><Badge component="span" role="listitem" variant="light" color="gray">3. {multipart ? "再開可能な復元" : "アトミック復元"}</Badge></Group>
-      <Box><Text id="selected-backup-label" size="sm" fw={700}>選択した{multipart ? "JSONマニフェスト" : "ZIPバックアップ"}</Text><Code block mt={6} aria-labelledby="selected-backup-label">{review.path}</Code></Box>
+      <Group gap="xs" role="list" aria-label="復元手順"><Badge component="span" role="listitem" variant="filled">1. 検査済み</Badge><Text c="dimmed" aria-hidden>→</Text><Badge component="span" role="listitem" variant="light" color={canRestore ? "piep" : "gray"}>2. 内容確認</Badge><Text c="dimmed" aria-hidden>→</Text><Badge component="span" role="listitem" variant="light" color="gray">3. {multipart ? "再開可能な復元" : "一括で復元"}</Badge></Group>
+      <Box><Text id="selected-backup-label" size="sm" fw={700}>選択した{multipart ? "分割バックアップの管理ファイル（JSON）" : "ZIPバックアップ"}</Text><Code block mt={6} aria-labelledby="selected-backup-label">{review.path}</Code></Box>
       {!inspection.valid && <Alert color="red" title="このバックアップは復元できません">{inspection.error || "バックアップの整合性検査に失敗しました。"}</Alert>}
       {inspection.valid && !hasSpace && <Alert color="red" title="空き容量が不足しています">復元には一時領域を含めて {formatBytes(inspection.requiredFreeBytes)} 必要ですが、利用可能なのは {formatBytes(inspection.availableFreeBytes ?? 0)} です。</Alert>}
       {inspection.valid && (existingWorkCount ?? 0) > 0 && <Alert color="yellow" title="既存作品は置き換わる場合があります">現在のライブラリには {formatNumber(existingWorkCount)} 件あります。復元ファイルと取得元・作品IDが同じ作品は、保存済みの版やローカル編集も含めて復元内容に置き換わります。必要な変更は先にバックアップしてください。</Alert>}
@@ -522,11 +522,11 @@ export function RestoreWizard({ review, existingWorkCount, loading, onClose, onC
           <Grid.Col span={{ base: 6, sm: 4 }}><Metric icon={Icons.person} label="作者" value={formatNumber(inspection.personCount)} /></Grid.Col>
           <Grid.Col span={{ base: 6, sm: 4 }}><Metric icon={Icons.archive} label="シリーズ" value={formatNumber(inspection.seriesCount)} /></Grid.Col>
           <Grid.Col span={{ base: 6, sm: 4 }}><Metric icon={Icons.retry} label="履歴・版" value={formatNumber(inspection.versionCount)} /></Grid.Col>
-          <Grid.Col span={{ base: 6, sm: 4 }}><Metric icon={Icons.storage} label="アセット" value={formatNumber(inspection.assetCount)} /></Grid.Col>
+          <Grid.Col span={{ base: 6, sm: 4 }}><Metric icon={Icons.storage} label="画像・添付" value={formatNumber(inspection.assetCount)} /></Grid.Col>
           <Grid.Col span={{ base: 6, sm: 4 }}><Metric icon={Icons.database} label="展開後" value={formatBytes(inspection.expandedBytes)} /></Grid.Col>
         </Grid>
         <Card p="md" withBorder>
-          <Group justify="space-between"><Text size="sm">{multipart ? "ZIPパート合計" : "ZIPサイズ"}</Text><Text size="sm" fw={700}>{formatBytes(inspection.compressedBytes)}</Text></Group>
+          <Group justify="space-between"><Text size="sm">{multipart ? "分割ZIPファイル合計" : "ZIPサイズ"}</Text><Text size="sm" fw={700}>{formatBytes(inspection.compressedBytes)}</Text></Group>
           <Group justify="space-between" mt="xs"><Text size="sm">一時領域を含む必要容量</Text><Text size="sm" fw={700}>{formatBytes(inspection.requiredFreeBytes)}</Text></Group>
           <Group justify="space-between" mt="xs"><Text size="sm">利用可能容量</Text><Text size="sm" fw={700}>{inspection.availableFreeBytes == null ? "取得できません" : formatBytes(inspection.availableFreeBytes)}</Text></Group>
           <Group justify="space-between" mt="xs"><Text size="sm">バックアップ形式</Text><Text size="sm" fw={700}>{multipart ? "分割" : "単一ZIP"} · v{inspection.backupVersion ?? "不明"}</Text></Group>
@@ -534,8 +534,8 @@ export function RestoreWizard({ review, existingWorkCount, loading, onClose, onC
       </>}
       {inspection.warnings.map((warning) => <Alert key={warning} color="yellow">{warning}</Alert>)}
       {inspection.valid && <Note icon={Icons.secure} title={multipart ? "中断しても再開できます" : "安全な復元"}>{multipart
-        ? "すべてのZIPパートを先に検査し、パートごとに安全に復元します。途中で止まった場合は、同じJSONマニフェストをもう一度選ぶと続きから再開できます。マニフェストとZIPパートは移動・改名せず一緒に保管してください。"
-        : "すべてのファイルを一時領域へ展開・検証してから、データベースと保存ファイルを一括で切り替えます。途中で失敗した場合は復元ジャーナルにより元の状態へ戻します。"}</Note>}
+        ? "すべての分割ZIPファイルを先に検査し、パートごとに安全に復元します。途中で止まった場合は、同じ分割バックアップの管理ファイル（JSON）をもう一度選ぶと続きから再開できます。管理ファイルと分割ZIPファイルは移動・改名せず一緒に保管してください。"
+        : "すべてのファイルを一時領域へ展開・検証してから、データベースと保存ファイルを一括で切り替えます。途中で失敗した場合は元の状態へ戻します。"}</Note>}
       <Group justify="flex-end"><Button variant="default" disabled={loading} onClick={onClose}>キャンセル</Button><Button color="red" disabled={!canRestore} loading={loading} leftSection={<Icons.import size={IconSize.menu} />} onClick={() => onConfirm(replaceExisting)}>検証済みバックアップを復元</Button></Group>
     </Stack>}
   </Modal>;

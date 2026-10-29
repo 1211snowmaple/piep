@@ -1816,6 +1816,11 @@ async fn run_update_job(
     // 保存した作品をそのまま監視に載せるかは、ジョブを始めたときの依頼が持つ。
     // 再開したワーカーも同じ設定で動く。
     let watch_saved = state.db.update_job_watch_saved(&job_id).unwrap_or(false);
+    crate::downloader::session::set_pixiv_web_session(
+        credentials.pixiv_cookie.as_deref(),
+        credentials.pixiv_user_agent.as_deref(),
+    )
+    .map_err(|error| error.to_string())?;
     // web の一覧はジョブの間だけ覚えておく。セッションが無ければ空のまま、
     // 何もしない置物として振る舞う。
     let mut web_index = WebUpdateIndex::new(&credentials);
@@ -2741,7 +2746,7 @@ fn pixiv_listing_confirms_recent_copy(state: &Arc<AppState>, dl: &DownloadEntry)
     if !recent {
         return false;
     }
-    let Ok(assets) = state.db.get_assets(dl.id) else {
+    let Ok(assets) = state.db.get_current_assets(dl) else {
         return false;
     };
     dl.asset_count >= 0
@@ -2842,7 +2847,7 @@ fn fanbox_listing_confirms_recent_copy(
     if !recent {
         return false;
     }
-    let Ok(assets) = state.db.get_assets(dl.id) else {
+    let Ok(assets) = state.db.get_current_assets(dl) else {
         return false;
     };
     dl.asset_count >= 0
@@ -2939,7 +2944,9 @@ async fn process_work_item(
         let data = super::downloader::fetch_pixiv_novel(dl.source_id.clone(), token).await?;
         let value = serde_json::to_value(&data).map_err(|e| e.to_string())?;
         let (fetched_hash, _, _) = super::downloader::compute_content_details(&value, "pixiv");
-        if !auto_save && dl.content_hash.as_deref() != Some(fetched_hash.as_str()) {
+        if !auto_save
+            && super::downloader::saved_content_hash(&dl).as_deref() != Some(fetched_hash.as_str())
+        {
             record_work_revision_candidate(state, job_id, &dl, &value, false).await?;
             return Ok(ItemOutcome::Done(format!("改稿を検出: {}", dl.title)));
         }
@@ -3038,7 +3045,7 @@ async fn process_work_item(
             super::downloader::compute_content_details(&value, "fanbox");
         // 添付の取り直しは、保存側とまったく同じ物差しで測る。等値比較にすると、
         // 失効したURLを持つ投稿が更新確認のたびに改稿候補へ挙がり続ける。
-        let held_assets = state.db.get_assets(dl.id)?;
+        let held_assets = state.db.get_current_assets(&dl)?;
         let asset_state = super::downloader::fanbox_asset_state_fingerprint(&value, &held_assets);
         let assets_need_repair = super::downloader::fanbox_asset_repair_needed(
             state.db.asset_repair_fingerprint(dl.id)?.as_deref(),
@@ -3634,9 +3641,10 @@ async fn process_candidate_item(
                 .is_some_and(|missing| !missing.is_empty())
         })
         || (kind == Some("save")
-            && existing
+            && (existing
                 .as_ref()
-                .is_some_and(|download| download.watch_updates));
+                .is_some_and(|download| download.watch_updates)
+                || state.db.has_incomplete_save_candidate(source, source_id)?));
     if existing.is_some() && !refetch_existing {
         return Ok(ItemOutcome::Skipped(format!(
             "保存済みのためスキップ: {}",
@@ -3689,7 +3697,7 @@ async fn process_candidate_item(
         .await?;
         let missing = crate::database::queries::saved_pixiv_missing_references(
             &value,
-            &state.db.get_assets(updated.id)?,
+            &state.db.get_current_assets(&updated)?,
         );
         if !missing.is_empty() {
             return Ok(ItemOutcome::PartialSaved(

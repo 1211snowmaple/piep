@@ -45,8 +45,12 @@ pub(crate) fn saved_pixiv_missing_references(value: &Value, assets: &[AssetEntry
     let filenames = assets
         .iter()
         .filter(|asset| {
-            std::fs::metadata(&asset.local_path)
-                .is_ok_and(|metadata| metadata.is_file() && metadata.len() > 0)
+            !asset
+                .original_url
+                .as_deref()
+                .is_some_and(crate::source_assets::is_pixiv_placeholder_image)
+                && std::fs::metadata(&asset.local_path)
+                    .is_ok_and(|metadata| metadata.is_file() && metadata.len() > 0)
         })
         .map(|asset| asset.filename.clone())
         .collect::<Vec<_>>();
@@ -65,6 +69,48 @@ pub(crate) fn pixiv_missing_references_for_filenames(
 }
 
 impl Database {
+    /// Revisit only current versions containing provider gate icons. Historical
+    /// placeholder files remain intact and do not restart audits on every launch.
+    pub(crate) fn requeue_placeholder_illustrations(&self) -> Result<usize, String> {
+        let rows = {
+            let conn = self.read_conn()?;
+            let mut statement = conn.prepare("SELECT d.id,d.json_path,a.local_path FROM downloads d JOIN assets a ON a.download_id=d.id WHERE d.source='pixiv' AND a.asset_type<>'cover' AND a.original_url LIKE '%/common/images/limit_%'").map_err(|error|error.to_string())?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })
+                .map_err(|error| error.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| error.to_string())?;
+            rows
+        };
+        let ids = rows
+            .into_iter()
+            .filter(|(_, json, asset)| {
+                super::asset_belongs_to_version_path(
+                    std::path::Path::new(asset),
+                    std::path::Path::new(json),
+                )
+            })
+            .map(|(id, _, _)| id)
+            .collect::<HashSet<_>>();
+        let conn = self.conn.lock().map_err(|error| error.to_string())?;
+        let mut count = 0;
+        for id in ids {
+            count += conn
+                .execute(
+                    "DELETE FROM saved_asset_audits WHERE download_id=?1",
+                    params![id],
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(count)
+    }
+
     /// Inspect each saved version once, in small idle batches. Older archives did
     /// not record missing_illustrations, so job history alone cannot recover them.
     pub(crate) fn audit_saved_pixiv_assets(
@@ -107,7 +153,10 @@ impl Database {
                 .and_then(Value::as_str)
                 .unwrap_or_default();
             let missing = if REFERENCES.is_match(text) {
-                saved_pixiv_missing_references(&value, &self.get_assets(*id)?)
+                saved_pixiv_missing_references(
+                    &value,
+                    &self.get_current_assets(&self.get_download(*id)?)?,
+                )
             } else {
                 Vec::new()
             };

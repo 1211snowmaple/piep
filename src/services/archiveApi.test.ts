@@ -36,7 +36,7 @@ describe("backup file routing", () => {
   it("rejects an ambiguous file before invoking native restore code", async () => {
     expect(backupFormatFromPath("backup.json.zip")).toBe("zip");
     expect(backupFormatFromPath("backup.txt")).toBeNull();
-    await expect(inspectBackupFile("backup.txt")).rejects.toThrow("JSONマニフェストまたはZIPバックアップ");
+    await expect(inspectBackupFile("backup.txt")).rejects.toThrow("分割バックアップの管理ファイル（JSON）またはZIPバックアップ");
     expect(invoke).not.toHaveBeenCalled();
   });
 

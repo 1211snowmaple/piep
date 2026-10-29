@@ -627,6 +627,23 @@ impl Database {
         .map_err(|e| format!("Failed to read update candidate status: {}", e))
     }
 
+    /// A saved partial work must remain repairable even without an update watch.
+    pub(crate) fn has_incomplete_save_candidate(
+        &self,
+        source: &str,
+        source_id: &str,
+    ) -> Result<bool, String> {
+        let conn = self.read_conn()?;
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM update_candidates WHERE source=?1 AND source_id=?2
+             AND status='held' AND CASE WHEN json_valid(payload_json)
+             THEN json_extract(payload_json,'$.holdKind')='incomplete' ELSE 0 END)",
+            params![source, source_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())
+    }
+
     /// Read held keys once when preparing a large watch job. Opening a read
     /// connection for every saved work makes job startup grow unnecessarily.
     pub fn held_update_candidate_keys(

@@ -17,6 +17,7 @@ import {
   Menu,
   Pagination,
   Paper,
+  Select,
   SimpleGrid,
   Stack,
   Switch,
@@ -153,6 +154,8 @@ export default function WorkPage() {
   }, [historyIndex, id, locations, navigationType]);
   const [selectedVersion, setSelectedVersion] = useState<number | "pending" | null>(null);
   const [visibleAssetCount, setVisibleAssetCount] = useState(80);
+  const [assetVersion, setAssetVersion] = useState<number | null>(null);
+  useEffect(() => { setAssetVersion(null); setVisibleAssetCount(80); }, [id]);
   const [pdfOriginal, setPdfOriginal] = useState<PdfOriginalTarget | null>(null);
   useEffect(() => setVisibleAssetCount(80), [id]);
   const documentQuery = useQuery({
@@ -214,9 +217,9 @@ export default function WorkPage() {
     });
   }, [documentQuery.data, historyVersions, pendingRevision, pendingRevisions.isLoading, searchParams, tab]);
   const assetsQuery = useQuery({
-    queryKey: ["work-assets", id],
-    queryFn: () => runtime ? getAssets(id) : Promise.resolve(getDemoReader(id).assets),
-    enabled: validId && tab === "assets",
+    queryKey: ["work-assets", id, assetVersion ?? documentQuery.data?.download.currentVersion],
+    queryFn: () => runtime ? getAssets(id, assetVersion ?? documentQuery.data!.download.currentVersion) : Promise.resolve(getDemoReader(id).assets),
+    enabled: validId && tab === "assets" && Boolean(documentQuery.data),
   });
   const contentQuery = useQuery({
     queryKey: ["reader-content-page", id, contentSourceVersion, contentPage - 1],
@@ -416,7 +419,7 @@ export default function WorkPage() {
 
   const deleteWork = () => modals.openConfirmModal({
     title: "この作品を削除しますか？",
-    children: <Text size="sm">「{work.title}」と保存済みアセットをローカルライブラリから削除します。この操作は元に戻せません。</Text>,
+    children: <Text size="sm">「{work.title}」と保存済みの画像・添付をローカルライブラリから削除します。この操作は元に戻せません。</Text>,
     labels: { confirm: "削除する", cancel: "キャンセル" }, confirmProps: { color: "red" },
     onConfirm: async () => {
       try {
@@ -463,7 +466,7 @@ export default function WorkPage() {
       // radius on the body and clipping it keeps all four corners round.
       radius: "lg",
       classNames: { content: "asset-preview-modal" },
-      children: <Stack><Image src={url} alt={asset.filename} mah="76vh" fit="contain" /><Group justify="space-between"><Text size="xs" c="dimmed">{formatBytes(asset.fileSizeBytes)} · {asset.mimeType}</Text><Button size="xs" variant="light" onClick={() => runtime && openLocalAsset(asset.localPath)}>この端末のJSONを開く</Button></Group></Stack>,
+      children: <Stack><Image src={url} alt={asset.filename} mah="76vh" fit="contain" /><Group justify="space-between"><Text size="xs" c="dimmed">{formatBytes(asset.fileSizeBytes)} · {asset.mimeType}</Text><Button size="xs" variant="light" onClick={() => runtime && openLocalAsset(asset.localPath)}>画像を開く</Button></Group></Stack>,
     });
   };
 
@@ -494,7 +497,7 @@ export default function WorkPage() {
                         { key: "in-app", label: "アプリ内で開く", icon: Icons.inAppBrowser, onClick: openSourceInApp },
                         { key: "browser", label: "ブラウザで開く", icon: Icons.externalLink, onClick: openSource },
                         { key: "archive", label: "アーカイブ", icon: Icons.archive, onClick: exportArchive },
-                        { key: "refresh", label: "情報を更新", icon: Icons.watch, primary: true, onClick: () => runSingleCheck({ kind: "work", workId: work.id, label: work.title }, () => navigate("/updates")) },
+                        { key: "refresh", label: "更新を確認", icon: Icons.watch, primary: true, onClick: () => runSingleCheck({ kind: "work", workId: work.id, label: work.title }, () => navigate("/updates")) },
                       ]}
                     >
                       <Menu position="bottom-end"><Menu.Target><Tooltip label="その他"><ActionIcon variant="subtle" color="gray" size="lg" aria-label="作品のその他の操作"><Icons.more size={IconSize.action} /></ActionIcon></Tooltip></Menu.Target><Menu.Dropdown><Menu.Item leftSection={<Icons.openFolder size={IconSize.menu} />} onClick={openSavedFolder}>保存フォルダーを開く</Menu.Item><Menu.Divider /><Menu.Item color="red" leftSection={<Icons.delete size={IconSize.menu} />} onClick={deleteWork}>作品を削除</Menu.Item></Menu.Dropdown></Menu>
@@ -532,7 +535,7 @@ export default function WorkPage() {
               <Group gap="lg" mt="md" className="work-hero__facts">
                 <Text size="sm" c="dimmed"><Icons.publishedDate size={IconSize.menu} />公開 {formatDate(work.sourceCreatedAt)}</Text>
                 <Text size="sm" c="dimmed"><Icons.textLength size={IconSize.menu} />{doc.isEdited && "取得元 "}{formatNumber(work.textLength)}字</Text>
-                {work.assetCount > 0 && <Text size="sm" c="dimmed"><Icons.assets size={IconSize.menu} />{work.assetCount}アセット</Text>}
+                {work.assetCount > 0 && <Text size="sm" c="dimmed"><Icons.assets size={IconSize.menu} />画像・添付 {work.assetCount}件</Text>}
               </Group>
               <div className="work-hero__actionbar">
                 <Group gap={6} wrap="wrap" className="work-hero__actions">
@@ -569,9 +572,9 @@ export default function WorkPage() {
         <Tabs.List>
           <Tabs.Tab value="overview">概要</Tabs.Tab>
           <Tabs.Tab value="content">本文</Tabs.Tab>
-          <Tabs.Tab value="assets">アセット <Badge size="xs" variant="light" ml={4}>{doc.assetCount}</Badge></Tabs.Tab>
+          <Tabs.Tab value="assets">画像・添付 <Badge size="xs" variant="light" ml={4}>{doc.assetCount}</Badge></Tabs.Tab>
           <Tabs.Tab value="history">履歴</Tabs.Tab>
-          <Tabs.Tab value="json">JSON</Tabs.Tab>
+          <Tabs.Tab value="json">保存データ</Tabs.Tab>
         </Tabs.List>
         <Tabs.Panel value="overview" pt="lg">
           {/* モデルの手伝い。設定していなければ何も出ない。 */}
@@ -609,7 +612,8 @@ export default function WorkPage() {
           </Stack>}
         </Tabs.Panel>
         <Tabs.Panel value="assets" pt="lg">
-          {assetsQuery.isLoading ? <LoadingState label="アセットを読み込んでいます" /> : assetsQuery.error ? <ErrorState error={assetsQuery.error} retry={() => assetsQuery.refetch()} /> : assets.length ? <Stack gap="lg"><SimpleGrid cols={{ base: 2, sm: 3, lg: 4, xl: 5 }} spacing="md">{visibleAssets.map((asset) => {
+          <Group justify="space-between" mb="md"><Text size="xs" c="dimmed">選んだ保存版の画像・添付を表示します。</Text><Select size="xs" w={160} aria-label="画像・添付の保存版" value={assetVersion === null ? "current" : String(assetVersion)} onChange={(value) => { setAssetVersion(value && value !== "current" ? Number(value) : null); setVisibleAssetCount(80); }} allowDeselect={false} data={[{ value: "current", label: `現在（v${work.currentVersion}）` }, ...historyVersions.filter((version) => version.version !== work.currentVersion).map((version) => ({ value: String(version.version), label: `保存済み v${version.version}` }))]} /></Group>
+          {assetsQuery.isLoading ? <LoadingState label="画像・添付を読み込んでいます" /> : assetsQuery.error ? <ErrorState error={assetsQuery.error} retry={() => assetsQuery.refetch()} /> : assets.length ? <Stack gap="lg"><SimpleGrid cols={{ base: 2, sm: 3, lg: 4, xl: 5 }} spacing="md">{visibleAssets.map((asset) => {
             const url = getAssetUrl(asset.localPath);
             const image = asset.mimeType?.startsWith("image/") && url;
             // PDF は外のアプリへ渡さない方針なので、アプリの中で紙面を見せる。
@@ -635,7 +639,7 @@ export default function WorkPage() {
                 </Group>
               </Stack>
             </Card>;
-          })}</SimpleGrid>{visibleAssets.length < assets.length && <Group justify="center"><Button variant="default" onClick={() => setVisibleAssetCount((count) => Math.min(assets.length, count + 80))}>さらに表示（残り{formatNumber(assets.length - visibleAssets.length)}件）</Button></Group>}</Stack> : <Alert color="gray" icon={<Icons.imageFile size={IconSize.action} />}>この作品にアセットはありません。</Alert>}
+          })}</SimpleGrid>{visibleAssets.length < assets.length && <Group justify="center"><Button variant="default" onClick={() => setVisibleAssetCount((count) => Math.min(assets.length, count + 80))}>さらに表示（残り{formatNumber(assets.length - visibleAssets.length)}件）</Button></Group>}</Stack> : <Alert color="gray" icon={<Icons.imageFile size={IconSize.action} />}>この版に画像・添付はありません。</Alert>}
         </Tabs.Panel>
         <Tabs.Panel value="history" pt="lg">
           {doc.isEdited && <Alert color="blue" mb="md">いま読める本文とEPUBにはローカル編集版を使います。ここには取得元から保存した版の履歴を表示しています。</Alert>}
@@ -699,7 +703,7 @@ export default function WorkPage() {
             </Grid.Col>
           </Grid>
         </Tabs.Panel>
-        <Tabs.Panel value="json" pt="lg">{rawJson.isLoading ? <LoadingState /> : rawJson.error ? <ErrorState error={rawJson.error} retry={() => rawJson.refetch()} /> : <BoundedJsonView jsonText={rawJson.data ?? "{}"} description="保存元から取得したJSONを、画面負荷を抑えて表示します" actions={<Button size="xs" variant="default" disabled={!runtime} onClick={() => openLocalAsset(work.jsonPath)}>この端末のJSONを開く</Button>} />}</Tabs.Panel>
+        <Tabs.Panel value="json" pt="lg">{rawJson.isLoading ? <LoadingState /> : rawJson.error ? <ErrorState error={rawJson.error} retry={() => rawJson.refetch()} /> : <BoundedJsonView jsonText={rawJson.data ?? "{}"} description="取得元から保存したデータを表示します（JSON形式）" actions={<Button size="xs" variant="default" disabled={!runtime} onClick={() => openLocalAsset(work.jsonPath)}>保存データを開く</Button>} />}</Tabs.Panel>
       </Tabs>
       <PdfOriginalViewer target={pdfOriginal} onClose={() => setPdfOriginal(null)} />
     </div>

@@ -111,6 +111,41 @@ pub(super) fn folded_match_positions(haystack: &[char], needle: &str) -> Vec<usi
 }
 
 impl Database {
+    pub fn get_current_assets(
+        &self,
+        download: &super::DownloadEntry,
+    ) -> Result<Vec<super::AssetEntry>, String> {
+        let path = std::path::Path::new(
+            download
+                .original_json_path
+                .as_deref()
+                .unwrap_or(&download.json_path),
+        );
+        Ok(assets_for_version_path(
+            &self.get_assets(download.id)?,
+            path,
+        ))
+    }
+
+    pub fn get_version_assets(
+        &self,
+        download_id: i64,
+        version: i64,
+    ) -> Result<Vec<super::AssetEntry>, String> {
+        let download = self.get_download(download_id)?;
+        let versions = self.get_versions(download_id)?;
+        if version != download.current_version
+            && !versions.iter().any(|entry| entry.version == version)
+        {
+            return Err("指定された保存版がありません".into());
+        }
+        let path = reader_version_path(&download, &versions, version);
+        Ok(assets_for_version_path(
+            &self.get_assets(download_id)?,
+            &path,
+        ))
+    }
+
     pub fn get_reader_metadata(&self, download_id: i64) -> Result<ReaderMetadata, String> {
         let download = self.get_download(download_id)?;
         let versions = self.get_versions(download_id)?;

@@ -652,27 +652,9 @@ pub async fn fetch_pixiv_novel(
     novel_id: String,
     refresh_token: String,
 ) -> Result<PixivNovelContent, String> {
-    let detail = get_novel_detail(&novel_id, &refresh_token)
+    crate::downloader::pixiv::get_novel_content(&novel_id, &refresh_token)
         .await
-        .map_err(|e| e.to_string())?;
-    let (text, webview_cover_url, illusts, images) =
-        crate::downloader::pixiv::get_novel_text_and_assets(&novel_id, &refresh_token)
-            .await
-            .map_err(|e| e.to_string())?;
-    let cover_url = crate::downloader::pixiv::recover_novel_cover(
-        &novel_id,
-        crate::downloader::pixiv::best_novel_cover(webview_cover_url, detail.cover_url.as_deref()),
-    )
-    .await;
-    let missing_illustrations = crate::downloader::pixiv::missing_illustrations(&text, &illusts);
-    Ok(PixivNovelContent {
-        detail,
-        text,
-        cover_url,
-        illusts: Some(illusts),
-        images: Some(images),
-        missing_illustrations,
-    })
+        .map_err(|e| e.to_string())
 }
 
 /// 本文を伴わない作品詳細。改稿の有無を指紋で見るときに使う。
@@ -918,30 +900,22 @@ pub(crate) async fn fetch_pixiv_user_novels_since(
 pub async fn fetch_pixiv_novel_by_url(
     url: String,
     refresh_token: String,
+    pixiv_cookie: Option<String>,
+    pixiv_user_agent: Option<String>,
 ) -> Result<PixivNovelContent, String> {
     let novel_id =
         crate::downloader::pixiv::extract_novel_id(&url).ok_or("Invalid Pixiv Novel URL")?;
-    let detail = get_novel_detail(&novel_id, &refresh_token)
-        .await
-        .map_err(|e| e.to_string())?;
-    let (text, webview_cover_url, illusts, images) =
-        crate::downloader::pixiv::get_novel_text_and_assets(&novel_id, &refresh_token)
+    crate::downloader::session::scope(async move {
+        crate::downloader::session::set_pixiv_web_session(
+            pixiv_cookie.as_deref(),
+            pixiv_user_agent.as_deref(),
+        )
+        .map_err(|error| error.to_string())?;
+        crate::downloader::pixiv::get_novel_content(&novel_id, &refresh_token)
             .await
-            .map_err(|e| e.to_string())?;
-    let cover_url = crate::downloader::pixiv::recover_novel_cover(
-        &novel_id,
-        crate::downloader::pixiv::best_novel_cover(webview_cover_url, detail.cover_url.as_deref()),
-    )
-    .await;
-    let missing_illustrations = crate::downloader::pixiv::missing_illustrations(&text, &illusts);
-    Ok(PixivNovelContent {
-        detail,
-        text,
-        cover_url,
-        illusts: Some(illusts),
-        images: Some(images),
-        missing_illustrations,
+            .map_err(|error| error.to_string())
     })
+    .await
 }
 
 fn pixiv_illustrations_were_recovered(
@@ -970,6 +944,28 @@ mod pixiv_asset_recovery_tests {
     use serde_json::json;
 
     #[test]
+    fn pixiv_saved_metadata_changes_are_detected_even_when_the_body_and_tag_count_match() {
+        let previous = json!({"detail":{"title":"題名","caption":"説明","tags":[{"name":"前のタグ"}],"series_id":"1"},"text":"同じ本文","cover_url":"https://example.com/cover-a.jpg"});
+        let hash = compute_content_details(&previous, "pixiv").0;
+        for (pointer, replacement) in [
+            ("/detail/tags/0/name", json!("新しいタグ")),
+            ("/detail/series_id", json!("2")),
+            ("/cover_url", json!("https://example.com/cover-b.jpg")),
+        ] {
+            let mut changed = previous.clone();
+            *changed.pointer_mut(pointer).unwrap() = replacement;
+            assert_ne!(
+                hash,
+                compute_content_details(&changed, "pixiv").0,
+                "{pointer}"
+            );
+        }
+        let mut same = previous.clone();
+        same["web_detail"] = json!({"viewCount":123,"likeCount":45});
+        assert_eq!(hash, compute_content_details(&same, "pixiv").0);
+    }
+
+    #[test]
     fn an_unmarked_legacy_reference_can_recover_without_a_body_change() {
         let previous = json!({"text":"本文[pixivimage:123]"});
         let next = json!({"text":"本文[pixivimage:123]","illusts":{"123":{"pages":[{"urls":{"original":"https://example.com/123.jpg"}}]}}});
@@ -984,6 +980,22 @@ mod pixiv_asset_recovery_tests {
         next["missing_illustrations"] = json!([]);
         assert!(!pixiv_illustrations_were_recovered(&previous, &next, &[]));
     }
+}
+
+/// Recompute Pixiv's comparison baseline from the immutable source, so adding
+/// previously omitted metadata fields does not manufacture revisions of old saves.
+pub(crate) fn saved_content_hash(download: &crate::database::DownloadEntry) -> Option<String> {
+    if download.source != "pixiv" {
+        return download.content_hash.clone();
+    }
+    let path = download
+        .original_json_path
+        .as_deref()
+        .unwrap_or(&download.json_path);
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|body| serde_json::from_str::<serde_json::Value>(&body).ok())
+        .map(|value| compute_content_details(&value, "pixiv").0)
 }
 
 /// 本文テキストのハッシュ値、文字数、更新時間を算出する（Pixivはメタデータを含む統合ハッシュ）
@@ -1019,8 +1031,10 @@ pub(crate) fn compute_content_details(
             .unwrap_or("");
 
         let cover_url = data
-            .get("coverUrl")
-            .or_else(|| data.get("detail").and_then(|d| d.get("coverUrl")))
+            .get("cover_url")
+            .or_else(|| data.get("coverUrl"))
+            .or_else(|| data.pointer("/detail/cover_url"))
+            .or_else(|| data.pointer("/detail/coverUrl"))
             .and_then(|v| v.as_str())
             .unwrap_or("");
 
@@ -1030,7 +1044,11 @@ pub(crate) fn compute_content_details(
             .map(|t| {
                 if let Some(arr) = t.as_array() {
                     arr.iter()
-                        .map(|v| v.as_str().unwrap_or(""))
+                        .filter_map(|v| {
+                            v.as_str()
+                                .or_else(|| v.get("name").and_then(|name| name.as_str()))
+                                .or_else(|| v.get("tag").and_then(|name| name.as_str()))
+                        })
                         .collect::<Vec<&str>>()
                         .join(",")
                 } else {
@@ -1040,8 +1058,10 @@ pub(crate) fn compute_content_details(
             .unwrap_or_default();
 
         let series_id = data
-            .get("seriesId")
-            .or_else(|| data.get("detail").and_then(|d| d.get("seriesId")))
+            .get("series_id")
+            .or_else(|| data.get("seriesId"))
+            .or_else(|| data.pointer("/detail/series_id"))
+            .or_else(|| data.pointer("/detail/seriesId"))
             .map(|v| {
                 if v.is_number() {
                     v.as_i64().map(|n| n.to_string()).unwrap_or_default()
@@ -2197,9 +2217,9 @@ pub async fn download_and_save(
             });
         }
 
-        let hash_changed = dl.content_hash.as_deref() != Some(&new_hash);
+        let hash_changed = saved_content_hash(dl).as_deref() != Some(new_hash.as_str());
         let previous_pixiv_assets = if source == "pixiv" {
-            state.db.get_assets(dl.id)?
+            state.db.get_current_assets(dl)?
         } else {
             Vec::new()
         };
@@ -2227,7 +2247,7 @@ pub async fn download_and_save(
         let asset_fingerprint = if source == "fanbox" {
             Some(fanbox_asset_state_fingerprint(
                 &data,
-                &state.db.get_assets(dl.id)?,
+                &state.db.get_current_assets(dl)?,
             ))
         } else {
             None
@@ -2236,7 +2256,7 @@ pub async fn download_and_save(
             Some(current) => fanbox_asset_repair_needed(
                 state.db.asset_repair_fingerprint(dl.id)?.as_deref(),
                 current,
-                fanbox_assets_are_complete(&data, &state.db.get_assets(dl.id)?),
+                fanbox_assets_are_complete(&data, &state.db.get_current_assets(dl)?),
             ),
             None => false,
         };
@@ -2421,7 +2441,7 @@ pub async fn download_and_save(
         file_size_bytes: new_dl.file_size_bytes,
         created_at: new_dl.downloaded_at.clone(),
         change_summary: Some(if is_update {
-            format!("本文・コンテンツの更新 (v{})", next_version)
+            format!("保存内容を更新 (v{})", next_version)
         } else {
             format!("新規ダウンロード (v{})", next_version)
         }),

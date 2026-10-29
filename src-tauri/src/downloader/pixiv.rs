@@ -1,6 +1,6 @@
 use crate::pixiv_api::aapi::AppPixivAPI;
 use crate::pixiv_api::error::PixivError;
-use crate::pixiv_api::web::WebPixivAPI;
+use crate::pixiv_api::web::{NovelBodyWeb, WebPixivAPI};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -43,12 +43,21 @@ pub struct PixivNovelContent {
     pub images: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub missing_illustrations: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_detail: Option<serde_json::Value>,
 }
 
 pub async fn get_novel_detail(
     novel_id: &str,
     refresh_token: &str,
 ) -> Result<PixivNovelDetail, Box<dyn Error>> {
+    Ok(get_novel_detail_with_web(novel_id, refresh_token).await?.0)
+}
+
+async fn get_novel_detail_with_web(
+    novel_id: &str,
+    refresh_token: &str,
+) -> Result<(PixivNovelDetail, Option<NovelBodyWeb>), Box<dyn Error>> {
     let api = super::session::pixiv(refresh_token.to_string())?;
     let id_u64: u64 = novel_id.parse()?;
 
@@ -65,7 +74,7 @@ pub async fn get_novel_detail(
         crate::pixiv_api::models::SeriesOrEmpty::Empty(_) => (None, None),
     };
 
-    Ok(PixivNovelDetail {
+    let mut detail = PixivNovelDetail {
         id: novel_info.id,
         title: novel_info.title,
         user: PixivNovelUser {
@@ -85,7 +94,210 @@ pub async fn get_novel_detail(
         series_id,
         series_title,
         cover_url,
+    };
+    // The App API can return a readable novel with its caption/tags masked.
+    // An inaccessible illustration says nothing about these independent fields.
+    let web = if detail.caption.trim().is_empty() || detail.tags.is_empty() {
+        match super::session::pixiv_web()?.novel(novel_id).await {
+            Ok(body) => {
+                supplement_novel_detail(&mut detail, &body.metadata);
+                Some(body)
+            }
+            Err(error @ PixivError::RateLimited { .. }) => return Err(error.into()),
+            Err(error) => {
+                // Optional public details must not block a body that the
+                // authenticated App API is allowed to read.
+                log::warn!("pixiv {novel_id} の補足情報を確認できません: {error}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    Ok((detail, web))
+}
+
+fn supplement_novel_detail(detail: &mut PixivNovelDetail, web: &serde_json::Value) {
+    if detail.caption.trim().is_empty() {
+        if let Some(caption) = web.get("description").and_then(serde_json::Value::as_str) {
+            detail.caption = caption.to_string();
+        }
+    }
+    if detail.tags.is_empty() {
+        if let Some(tags) = web
+            .pointer("/tags/tags")
+            .and_then(serde_json::Value::as_array)
+        {
+            detail.tags = tags
+                .iter()
+                .filter_map(|tag| {
+                    tag.get("tag")
+                        .and_then(serde_json::Value::as_str)
+                        .filter(|tag| !tag.trim().is_empty())
+                        .map(|name| PixivNovelTag {
+                            name: name.to_string(),
+                        })
+                })
+                .collect();
+        }
+    }
+    if detail.series_id.is_none() {
+        if let Some(id) = web
+            .pointer("/seriesNavData/seriesId")
+            .filter(|id| id.is_number() || id.is_string())
+        {
+            detail.series_id = Some(
+                id.as_str()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| id.to_string()),
+            );
+            detail.series_title = web
+                .pointer("/seriesNavData/title")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string);
+        }
+    }
+}
+
+pub async fn get_novel_content(
+    novel_id: &str,
+    refresh_token: &str,
+) -> Result<PixivNovelContent, Box<dyn Error>> {
+    let (detail, web) = get_novel_detail_with_web(novel_id, refresh_token).await?;
+    let web_detail = web.as_ref().map(|body| body.metadata.clone());
+    let (text, webview_cover, mut illusts, images) =
+        get_novel_text_and_assets(novel_id, refresh_token, web).await?;
+    strip_placeholder_illustration_urls(&mut illusts);
+    // A successful webview can still omit individual references. Fill only
+    // unresolved IDs, without repeating an authenticated Web attempt.
+    let unresolved = missing_illustrations(&text, &illusts)
+        .into_iter()
+        .filter(|reference| {
+            let id = reference
+                .trim_start_matches("[pixivimage:")
+                .trim_end_matches(']')
+                .split('-')
+                .next()
+                .unwrap_or("");
+            illusts
+                .get(id)
+                .and_then(|item| item.get("webChecked"))
+                .and_then(serde_json::Value::as_bool)
+                != Some(true)
+        })
+        .collect::<Vec<_>>();
+    if !unresolved.is_empty() {
+        let api = super::session::pixiv(refresh_token.to_string())?;
+        let recovered = resolve_web_novel_illusts(&unresolved.join(""), &api).await?;
+        merge_recovered_illustrations(&mut illusts, &recovered);
+    }
+    let cover_url = recover_novel_cover(
+        novel_id,
+        best_novel_cover(webview_cover, detail.cover_url.as_deref()),
+    )
+    .await;
+    let missing_illustrations = missing_illustrations(&text, &illusts);
+    Ok(PixivNovelContent {
+        detail,
+        text,
+        cover_url,
+        illusts: Some(illusts),
+        images: Some(images),
+        missing_illustrations,
+        web_detail,
     })
+}
+
+fn merge_recovered_illustrations(existing: &mut serde_json::Value, recovered: &serde_json::Value) {
+    if !existing.is_object() {
+        *existing = serde_json::json!({});
+    }
+    let map = existing.as_object_mut().unwrap();
+    let Some(recovered) = recovered.as_object() else {
+        return;
+    };
+    for (id, value) in recovered {
+        let mut value = value.clone();
+        if let Some(old) = map.get(id).cloned() {
+            if value.get("visible").and_then(serde_json::Value::as_bool) == Some(false) {
+                let known_page = old
+                    .get("page")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(1) as usize;
+                let has_saved_image = illust_entry_has_page(&old, known_page)
+                    || old
+                        .get("pages")
+                        .and_then(serde_json::Value::as_array)
+                        .is_some_and(|pages| {
+                            (1..=pages.len()).any(|page| illust_entry_has_page(&old, page))
+                        });
+                if has_saved_image {
+                    value = old;
+                    value["webChecked"] = serde_json::Value::Bool(true);
+                }
+            } else if let Some(page) = old.get("page").and_then(serde_json::Value::as_u64) {
+                if illust_entry_has_page(&old, page as usize)
+                    && !illust_entry_has_page(&value, page as usize)
+                {
+                    map.insert(format!("{id}-{page}"), old);
+                }
+            } else if let (Some(old_pages), Some(new_pages)) = (
+                old.get("pages").and_then(serde_json::Value::as_array),
+                value
+                    .get_mut("pages")
+                    .and_then(serde_json::Value::as_array_mut),
+            ) {
+                for (index, old_page) in old_pages.iter().enumerate() {
+                    let available = |page: &serde_json::Value| {
+                        ["original", "regular"].iter().any(|key| {
+                            page.get("urls")
+                                .and_then(|urls| urls.get(key))
+                                .and_then(serde_json::Value::as_str)
+                                .is_some_and(|url| !url.is_empty())
+                        })
+                    };
+                    if available(old_page)
+                        && new_pages.get(index).is_none_or(|page| !available(page))
+                    {
+                        new_pages.resize(new_pages.len().max(index + 1), serde_json::json!({}));
+                        new_pages[index] = old_page.clone();
+                    }
+                }
+            }
+        }
+        map.retain(|key, _| {
+            let page = key
+                .strip_prefix(&format!("{id}-"))
+                .and_then(|page| page.parse::<usize>().ok());
+            page.is_none_or(|page| !illust_entry_has_page(&value, page))
+        });
+        map.insert(id.clone(), value);
+    }
+}
+
+fn strip_placeholder_illustration_urls(illusts: &mut serde_json::Value) {
+    fn strip(urls: Option<&mut serde_json::Value>) {
+        if let Some(urls) = urls.and_then(serde_json::Value::as_object_mut) {
+            urls.retain(|_, url| !url.as_str().is_some_and(is_placeholder_cover));
+        }
+    }
+    if let Some(entries) = illusts.as_object_mut() {
+        for entry in entries.values_mut() {
+            strip(
+                entry
+                    .get_mut("illust")
+                    .and_then(|illust| illust.get_mut("images")),
+            );
+            if let Some(pages) = entry
+                .get_mut("pages")
+                .and_then(serde_json::Value::as_array_mut)
+            {
+                for page in pages {
+                    strip(page.get_mut("urls"));
+                }
+            }
+        }
+    }
 }
 
 fn non_empty(value: String) -> Option<String> {
@@ -117,7 +329,7 @@ pub fn best_novel_cover(webview_url: String, app_large_url: Option<&str>) -> Str
 /// Pixiv returns this age-gate icon as a cover URL for some R-18 novels.
 /// It is valid image data, so asset validation alone cannot reject it.
 pub fn is_placeholder_cover(url: &str) -> bool {
-    url.contains("/common/images/limit_r18_") || url.contains("/common/images/limit_r18g_")
+    crate::source_assets::is_pixiv_placeholder_image(url)
 }
 
 /// Fetch the real web cover only when both regular API responses were gated.
@@ -125,7 +337,7 @@ pub async fn recover_novel_cover(novel_id: &str, selected: String) -> Option<Str
     if !selected.is_empty() {
         return Some(selected);
     }
-    let web = WebPixivAPI::new().ok()?;
+    let web = super::session::pixiv_web().ok()?;
     match web.novel(novel_id).await {
         Ok(novel) => novel.cover_url.filter(|url| !is_placeholder_cover(url)),
         Err(error) => {
@@ -139,6 +351,7 @@ pub async fn recover_novel_cover(novel_id: &str, selected: String) -> Option<Str
 pub async fn get_novel_text_and_assets(
     novel_id: &str,
     refresh_token: &str,
+    cached_web: Option<NovelBodyWeb>,
 ) -> Result<(String, String, serde_json::Value, serde_json::Value), Box<dyn Error>> {
     let api = super::session::pixiv(refresh_token.to_string())?;
     let id_u64: u64 = novel_id.parse()?;
@@ -158,14 +371,26 @@ pub async fn get_novel_text_and_assets(
         // 降りない - 待つべき相手を二度叩くことになる。
         Err(PixivError::UnintelligibleResponse { .. }) => {
             log::warn!("pixiv webview から本文を切り出せません（{novel_id}）。web の口を試します");
-            novel_text_from_web(novel_id, &WebPixivAPI::new()?, Some(&api)).await
+            match cached_web {
+                Some(body) => novel_text_from_web_body(body, Some(&api)).await,
+                None => {
+                    let web = super::session::pixiv_web()?;
+                    novel_text_from_web(novel_id, &web, Some(&api)).await
+                }
+            }
         }
         // 詳細 API で作品を確認した後なので、この 404 は作品の消失を
         // 意味しない。実際に R-18 の本文だけ webview が 404 を返し、
         // /ajax/novel/{id} は本文を返すことがある。
         Err(PixivError::NotFound { .. }) => {
             log::warn!("pixiv webview の本文取得が 404 でした（{novel_id}）。web の口を試します");
-            novel_text_after_webview_not_found(novel_id, &WebPixivAPI::new()?, Some(&api)).await
+            match cached_web {
+                Some(body) => novel_text_from_web_body(body, Some(&api)).await,
+                None => {
+                    let web = super::session::pixiv_web()?;
+                    novel_text_after_webview_not_found(novel_id, &web, Some(&api)).await
+                }
+            }
         }
         Err(error) => Err(error.into()),
     }
@@ -198,6 +423,13 @@ async fn novel_text_from_web(
     app_api: Option<&AppPixivAPI>,
 ) -> Result<(String, String, serde_json::Value, serde_json::Value), Box<dyn Error>> {
     let body = web_api.novel(novel_id).await?;
+    novel_text_from_web_body(body, app_api).await
+}
+
+async fn novel_text_from_web_body(
+    body: NovelBodyWeb,
+    app_api: Option<&AppPixivAPI>,
+) -> Result<(String, String, serde_json::Value, serde_json::Value), Box<dyn Error>> {
     let illusts = if body.references_unresolved_illusts() {
         let api = app_api.ok_or("挿絵を取得するためのpixiv接続がありません")?;
         resolve_web_novel_illusts(&body.text, api).await?
@@ -222,23 +454,38 @@ async fn resolve_web_novel_illusts(
         let response = api.illust_detail(id.parse()?, true).await;
         // Space consecutive illustration requests even when one returns 404.
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-        let detail = match response {
-            Ok(detail) => detail,
-            Err(PixivError::NotFound { .. }) => {
-                illusts.insert(id.clone(), unavailable_illust(&id, "404"));
-                continue;
-            }
+        let value = match response {
+            Ok(detail) if detail.illust.visible => illust_pages(&id, required_page, &detail.illust)
+                .ok()
+                .filter(|value| illust_entry_has_page(value, required_page)),
+            Ok(_) | Err(PixivError::NotFound { .. }) => None,
             Err(error) => return Err(error.into()),
         };
-        let value = if !detail.illust.visible {
-            unavailable_illust(&id, "閲覧不可")
-        } else {
-            illust_pages(&id, required_page, &detail.illust)
-                .unwrap_or_else(|_| unavailable_illust(&id, "参照ページなし"))
+        let value = match value {
+            Some(value) => value,
+            None => {
+                let web = super::session::pixiv_web()?;
+                recover_illustration_from_web(&id, &web).await?
+            }
         };
         illusts.insert(id, value);
     }
     Ok(serde_json::Value::Object(illusts))
+}
+
+async fn recover_illustration_from_web(
+    id: &str,
+    web: &WebPixivAPI,
+) -> Result<serde_json::Value, Box<dyn Error>> {
+    Ok(match web.illustration_pages(id).await {
+        Ok(Some(value)) => value,
+        Ok(None) | Err(PixivError::NotFound { .. }) => {
+            let mut unavailable = unavailable_illust(id, "取得用の接続でも閲覧できません");
+            unavailable["webChecked"] = serde_json::Value::Bool(true);
+            unavailable
+        }
+        Err(error) => return Err(error.into()),
+    })
 }
 
 fn unavailable_illust(id: &str, reason: &str) -> serde_json::Value {
@@ -249,25 +496,29 @@ fn unavailable_illust(id: &str, reason: &str) -> serde_json::Value {
 /// Keep the exact references so a later repair can be distinguished from a
 /// complete archive without relying on the text hash.
 pub fn missing_illustrations(text: &str, illusts: &serde_json::Value) -> Vec<String> {
-    let re = Regex::new(r"\[pixivimage:(\d+)(?:-(\d+))?\]").unwrap();
+    let re = Regex::new(r"\[pixivimage:([^\]\r\n]*)\]").unwrap();
+    let numeric = Regex::new(r"^(\d+)(?:-(\d+))?$").unwrap();
     let mut missing = Vec::new();
     for captures in re.captures_iter(text) {
-        let id = &captures[1];
         let spec = captures.get(0).unwrap().as_str();
-        let page = captures
-            .get(2)
-            .and_then(|m| m.as_str().parse::<usize>().ok());
+        let Some(parts) = numeric.captures(&captures[1]) else {
+            if !missing.iter().any(|value| value == spec) {
+                missing.push(spec.to_string());
+            }
+            continue;
+        };
+        let id = &parts[1];
+        let page = parts.get(2).and_then(|m| m.as_str().parse::<usize>().ok());
         let unavailable = page == Some(0)
+            || (parts.get(2).is_some() && page.is_none())
             || [
-                captures
-                    .get(2)
-                    .map(|_| format!("{id}-{}", page.unwrap_or(0))),
+                parts.get(2).map(|_| format!("{id}-{}", page.unwrap_or(0))),
                 Some(id.to_string()),
             ]
             .into_iter()
             .flatten()
-            .find_map(|key| illusts.get(&key))
-            .is_none_or(|entry| !illust_entry_has_page(entry, page.unwrap_or(1)));
+            .filter_map(|key| illusts.get(&key))
+            .all(|entry| !illust_entry_has_page(entry, page.unwrap_or(1)));
         if unavailable && !missing.iter().any(|value| value == spec) {
             missing.push(spec.to_string());
         }
@@ -286,7 +537,7 @@ fn illust_entry_has_page(entry: &serde_json::Value, page: usize) -> bool {
             webview_image
                 .and_then(|images| images.get(*size))
                 .and_then(|url| url.as_str())
-                .is_some_and(|url| !url.is_empty())
+                .is_some_and(|url| !url.is_empty() && !is_placeholder_cover(url))
         })
     {
         return true;
@@ -300,7 +551,7 @@ fn illust_entry_has_page(entry: &serde_json::Value, page: usize) -> bool {
             ["original", "regular"].iter().any(|size| {
                 urls.get(*size)
                     .and_then(|url| url.as_str())
-                    .is_some_and(|url| !url.is_empty())
+                    .is_some_and(|url| !url.is_empty() && !is_placeholder_cover(url))
             })
         })
 }
@@ -308,21 +559,23 @@ fn illust_entry_has_page(entry: &serde_json::Value, page: usize) -> bool {
 fn referenced_illust_pages(text: &str) -> Result<BTreeMap<String, usize>, Box<dyn Error>> {
     let re = Regex::new(r"\[pixivimage:(\d+)(?:-(\d+))?\]")?;
     let mut references = BTreeMap::new();
-    let mut parsed = 0;
     for captures in re.captures_iter(text) {
-        parsed += 1;
         let id = captures[1].to_string();
-        let page = captures
+        if id.parse::<u64>().is_err() {
+            continue;
+        }
+        let page = match captures
             .get(2)
-            .map_or(Ok(1), |part| part.as_str().parse::<usize>())?;
+            .map_or(Ok(1), |part| part.as_str().parse::<usize>())
+        {
+            Ok(page) => page,
+            Err(_) => continue,
+        };
         if page == 0 {
             continue;
         }
         let entry = references.entry(id).or_insert(0);
         *entry = (*entry).max(page);
-    }
-    if parsed != text.matches("[pixivimage:").count() {
-        return Err("本文に解釈できない挿絵参照があります".into());
     }
     Ok(references)
 }
@@ -380,6 +633,150 @@ mod tests {
         referenced_illust_pages,
     };
     use crate::pixiv_api::web::WebPixivAPI;
+
+    #[test]
+    fn recovered_pages_replace_page_aliases_without_duplicating_or_losing_images() {
+        use serde_json::json;
+        let mut old = json!({"123-1":{"page":1,"illust":{"images":{"original":"https://example.com/1.jpg"}}},"123-2":{"page":2,"visible":false}});
+        let recovered = json!({"123":{"pages":[{"urls":{"original":"https://example.com/1.jpg"}},{"urls":{"original":"https://example.com/2.jpg"}}],"webChecked":true}});
+        super::merge_recovered_illustrations(&mut old, &recovered);
+        assert_eq!(old.as_object().unwrap().len(), 1);
+        assert!(
+            super::missing_illustrations("[pixivimage:123-1][pixivimage:123-2]", &old).is_empty()
+        );
+        let mut targets = Vec::new();
+        super::super::asset_downloader::extract_download_targets(
+            &json!({"illusts":old}),
+            false,
+            &mut targets,
+        );
+        assert_eq!(targets.len(), 2);
+        assert_eq!(targets[0].filename, "123_p0.jpg");
+        let mut existing =
+            json!({"123":{"pages":[{"urls":{"original":"https://example.com/1.jpg"}}]}});
+        super::merge_recovered_illustrations(
+            &mut existing,
+            &json!({"123":{"pages":[{}, {"urls":{"original":"https://example.com/2.jpg"}}]}}),
+        );
+        assert!(
+            super::missing_illustrations("[pixivimage:123-1][pixivimage:123-2]", &existing)
+                .is_empty()
+        );
+        let mut masked = json!({"123":{"page":1,"illust":{"images":{"medium":"https://s.pximg.net/common/images/limit_unknown_360.png"}}}});
+        super::strip_placeholder_illustration_urls(&mut masked);
+        super::merge_recovered_illustrations(
+            &mut masked,
+            &json!({"123":{"visible":false,"webChecked":true,"pages":[]}}),
+        );
+        let mut targets = Vec::new();
+        super::super::asset_downloader::extract_download_targets(
+            &json!({"illusts":masked}),
+            false,
+            &mut targets,
+        );
+        assert!(targets.is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_app_hidden_illustration_can_recover_via_the_connected_web_session() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let host = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            let count = stream.read(&mut request).await.unwrap();
+            let request = String::from_utf8_lossy(&request[..count]).to_lowercase();
+            assert!(request.starts_with("get /ajax/illust/101/pages"));
+            assert!(request.contains("cookie: session=test"));
+            assert!(request.contains("user-agent: saved-download-ua"));
+            let body = r#"{"error":false,"body":[{"urls":{"original":"https://example.com/101_p0.jpg"}},{"urls":{"original":"https://example.com/101_p1.jpg"}}]}"#;
+            stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).as_bytes()).await.unwrap();
+        });
+        let api = WebPixivAPI::with_host(&host).unwrap().with_session(
+            crate::pixiv_api::web::WebSession::new("session=test", "saved-download-ua").unwrap(),
+        );
+        let value = super::recover_illustration_from_web("101", &api)
+            .await
+            .unwrap();
+        let illusts = serde_json::json!({"101":value});
+        assert!(
+            super::missing_illustrations("[pixivimage:101-1][pixivimage:101-2]", &illusts)
+                .is_empty()
+        );
+        assert_eq!(illusts["101"]["pages"].as_array().unwrap().len(), 2);
+        server.await.unwrap();
+    }
+
+    #[test]
+    fn masked_web_illustrations_are_not_treated_as_saved_images() {
+        let placeholder = serde_json::json!({"101":{"page":1,"illust":{"images":{"medium":"https://s.pximg.net/common/images/limit_unknown_360.png"}}}});
+        assert_eq!(
+            super::missing_illustrations("[pixivimage:101]", &placeholder),
+            vec!["[pixivimage:101]"]
+        );
+        let hidden = serde_json::json!({"error":false,"body":[{"urls":{"regular":"https://s.pximg.net/common/images/limit_unknown_360.png"}}]});
+        assert!(crate::pixiv_api::web::parse_illustration_pages(&hidden)
+            .unwrap()
+            .is_none());
+        assert!(crate::pixiv_api::web::parse_illustration_pages(
+            &serde_json::json!({"error":true,"body":null})
+        )
+        .unwrap()
+        .is_none());
+        assert!(crate::pixiv_api::web::parse_illustration_pages(
+            &serde_json::json!({"error":false,"body":"unexpected"})
+        )
+        .is_err());
+        let mixed = serde_json::json!({"body":[{"urls":{"original":"https://example.com/1.jpg"}},{"urls":{}},{"urls":{"original":"https://example.com/3.jpg"}}]});
+        let pages = crate::pixiv_api::web::parse_illustration_pages(&mixed)
+            .unwrap()
+            .unwrap();
+        let missing = super::missing_illustrations(
+            "[pixivimage:101-1][pixivimage:101-2][pixivimage:101-3]",
+            &serde_json::json!({"101":pages}),
+        );
+        assert_eq!(missing, vec!["[pixivimage:101-2]"]);
+    }
+
+    #[test]
+    fn web_details_fill_masked_caption_tags_and_series_without_losing_body_or_images() {
+        use serde_json::json;
+        let mut detail: super::PixivNovelDetail = serde_json::from_value(json!({
+            "id":101,"title":"作品","user":{"id":1,"name":"作者","account":"author"},
+            "tags":[],"caption":"","create_date":"2026-10-01","text_length":12,
+            "series_id":null,"series_title":null,"cover_url":null
+        }))
+        .unwrap();
+        let body = crate::pixiv_api::web::parse_novel_body(&json!({"body":{
+            "content":"本文[pixivimage:42]","description":"<p>作品の説明</p>",
+            "tags":{"tags":[{"tag":"タグ一"},{"tag":"タグ二"}]},
+            "seriesNavData":{"seriesId":123,"title":"シリーズ"},
+            "textEmbeddedImages":{"image":{"urls":{"original":"https://example.com/image.jpg"}}}
+        }}))
+        .unwrap();
+        super::supplement_novel_detail(&mut detail, &body.metadata);
+        assert_eq!(detail.caption, "<p>作品の説明</p>");
+        assert_eq!(
+            detail
+                .tags
+                .iter()
+                .map(|tag| tag.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["タグ一", "タグ二"]
+        );
+        assert_eq!(detail.series_id.as_deref(), Some("123"));
+        assert_eq!(body.text, "本文[pixivimage:42]");
+        assert!(body.images.get("image").is_some());
+        assert!(body.metadata.get("content").is_none());
+        assert!(body.metadata.get("textEmbeddedImages").is_none());
+        super::supplement_novel_detail(
+            &mut detail,
+            &json!({"description":"別の説明","tags":{"tags":[]}}),
+        );
+        assert_eq!(detail.caption, "<p>作品の説明</p>");
+        assert_eq!(detail.tags.len(), 2);
+    }
 
     async fn one_novel_response(
         status: &'static str,
@@ -439,7 +836,16 @@ mod tests {
         assert!(referenced_illust_pages("[pixivimage:123-0]")
             .unwrap()
             .is_empty());
-        assert!(referenced_illust_pages("[pixivimage:abc]").is_err());
+        assert!(referenced_illust_pages("[pixivimage:abc]")
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            super::missing_illustrations(
+                "[pixivimage:abc][pixivimage:123-0]",
+                &serde_json::json!({})
+            ),
+            vec!["[pixivimage:abc]", "[pixivimage:123-0]"]
+        );
     }
 
     #[test]

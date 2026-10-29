@@ -127,7 +127,7 @@ describe("SettingsPage backup flow", () => {
     fireEvent.click(await screen.findByRole("button", { name: "バックアップを復元" }));
     expect(await screen.findByRole("dialog", { name: "バックアップ復元ウィザード" })).toBeInTheDocument();
     expect(archive.inspectBackupFile).toHaveBeenCalledWith("C:\\Backups\\library.json");
-    expect(screen.getByText("選択したJSONマニフェスト")).toBeInTheDocument();
+    expect(screen.getByText("選択した分割バックアップの管理ファイル（JSON）")).toBeInTheDocument();
     expect(screen.getByText("既存作品は置き換わる場合があります")).toBeInTheDocument();
     expect(screen.getByText(/保存済みの版やローカル編集も含めて復元内容に置き換わります/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "検証済みバックアップを復元" })).toBeDisabled();
@@ -179,7 +179,7 @@ describe("SettingsPage backup flow", () => {
     act(() => progressEvents.backup?.({ payload: { phase: "works", processed: 2_000, total: 14_240, partCount: 1 } }));
     expect(operationSpies.progress).toHaveBeenCalledWith(2_000, 14_240, expect.stringContaining("2,000/14,240"));
     act(() => progressEvents.backup?.({ payload: { phase: "finalizing", processed: 14_240, total: 14_240, partCount: 8 } }));
-    expect(operationSpies.progress).toHaveBeenCalledWith(0, null, expect.stringContaining("付随データとマニフェスト"));
+    expect(operationSpies.progress).toHaveBeenCalledWith(0, null, expect.stringContaining("付随データと管理ファイル"));
 
     await act(async () => finishExport());
     await waitFor(() => expect(operationSpies.complete).toHaveBeenCalled());
@@ -202,9 +202,9 @@ describe("SettingsPage backup flow", () => {
     await waitFor(() => expect(archive.importBackupFile).toHaveBeenCalledWith("D:\\Archives\\piep-old.zip", "zip", true));
     await waitFor(() => expect(notification).toHaveBeenCalledWith(expect.objectContaining({
       title: "復元を完了できませんでした",
-      message: expect.stringContaining("復元ジャーナルにより元の状態へ戻されます"),
+      message: expect.stringContaining("操作前の状態へ戻されます"),
     })));
-    expect(notification).not.toHaveBeenCalledWith(expect.objectContaining({ message: expect.stringContaining("JSONマニフェスト") }));
+    expect(notification).not.toHaveBeenCalledWith(expect.objectContaining({ message: expect.stringContaining("分割バックアップの管理ファイル（JSON）") }));
     notification.mockRestore();
   });
 
@@ -217,7 +217,7 @@ describe("SettingsPage backup flow", () => {
     fireEvent.click(await screen.findByRole("button", { name: "バックアップを復元" }));
     await waitFor(() => expect(notification).toHaveBeenCalledWith(expect.objectContaining({
       title: "バックアップを検査できませんでした",
-      message: expect.stringContaining("同じフォルダーにすべてのZIPパートが必要です"),
+      message: expect.stringContaining("同じフォルダーにすべての分割ZIPファイルが必要です"),
     })));
     notification.mockRestore();
   });

@@ -54,10 +54,10 @@ describe("RestoreWizard", () => {
     const onConfirm = renderWizard(validInspection, vi.fn(), "multipart");
     const dialog = screen.getByRole("dialog", { name: "バックアップ復元ウィザード" });
 
-    expect(screen.getByText("選択したJSONマニフェスト")).toBeInTheDocument();
-    expect(screen.getByText("ZIPパート合計")).toBeInTheDocument();
+    expect(screen.getByText("選択した分割バックアップの管理ファイル（JSON）")).toBeInTheDocument();
+    expect(screen.getByText("分割ZIPファイル合計")).toBeInTheDocument();
     expect(screen.getByText("分割 · v3.0")).toBeInTheDocument();
-    expect(screen.getByText(/同じJSONマニフェストをもう一度選ぶと続きから再開/)).toBeInTheDocument();
+    expect(screen.getByText(/同じ分割バックアップの管理ファイル（JSON）をもう一度選ぶと続きから再開/)).toBeInTheDocument();
     expect(screen.getByRole("list", { name: "復元手順" })).toBeInTheDocument();
 
     const confirm = screen.getByRole("button", { name: "検証済みバックアップを復元" });

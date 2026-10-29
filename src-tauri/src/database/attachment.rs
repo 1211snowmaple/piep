@@ -80,6 +80,19 @@ pub(crate) fn content_from_json(
     source: &str,
     assets: &[AssetEntry],
 ) -> (String, String) {
+    let valid_pixiv_assets = (source == "pixiv").then(|| {
+        assets
+            .iter()
+            .filter(|asset| {
+                !asset
+                    .original_url
+                    .as_deref()
+                    .is_some_and(crate::source_assets::is_pixiv_placeholder_image)
+            })
+            .cloned()
+            .collect::<Vec<_>>()
+    });
+    let assets = valid_pixiv_assets.as_deref().unwrap_or(assets);
     let value = materialize(raw_json, source, assets);
     if value.is_null() {
         return (String::new(), String::new());

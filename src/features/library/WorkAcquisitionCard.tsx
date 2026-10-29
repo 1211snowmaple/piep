@@ -24,7 +24,7 @@ export function WorkAcquisitionCard({ id, source, sourceId, runtime, onLocate }:
   return <Alert color={status.color} title={<Group gap="xs"><Text fw={700} size="sm">取得状態</Text><Badge size="xs" color={status.color}>{status.label}</Badge></Group>}>
     <Stack gap="xs">
       <Group justify="space-between" align="flex-start" wrap="nowrap">
-        <Text size="sm">{details.kind === "incomplete" ? "本文は保存済みです。取得できなかった画像があります。" : details.reason}</Text>
+        <Text size="sm">{details.kind === "incomplete" ? "作品は保存済みです。一部の挿絵を取得できませんでした。" : details.reason}</Text>
         <Button size="xs" variant="subtle" loading={recheck.isPending} onClick={() => recheck.mutate()}>再確認</Button>
       </Group>
       <Accordion variant="default" chevronSize={14}>

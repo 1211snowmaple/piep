@@ -9,6 +9,7 @@ import { installCloseGuard } from "@/lib/unsavedGuard";
 import { useQueryClient } from "@tanstack/react-query";
 import { subscribeTauriEvent } from "@/services/eventBus";
 import { isTauriRuntime } from "@/services/dbApi";
+import { useIncompleteSaveRepair } from "@/features/updates/repairIncompleteSaves";
 
 const DashboardPage = lazy(() => import("@/features/dashboard/DashboardPage"));
 const LibraryPage = lazy(() => import("@/features/library/LibraryPage"));
@@ -78,6 +79,7 @@ function confirmDiscardOnNavigation(): Promise<boolean> {
 }
 
 function AppContent() {
+  useIncompleteSaveRepair();
   const { pathname } = useAppRouter();
   const queryClient = useQueryClient();
   useEffect(() => {

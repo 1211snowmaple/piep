@@ -69,7 +69,7 @@ export function multipartManifestPath(path: string): string {
   // Native save dialogs normally add the selected extension. Keep manually
   // entered extensionless names equally predictable.
   if (extensionAt <= 0) return `${path}.json`;
-  throw new Error("分割バックアップのマニフェストは .json で保存してください");
+  throw new Error("分割バックアップの管理ファイルは .json で保存してください");
 }
 
 export function inspectBackup(zipPath: string): Promise<BackupInspection> {
@@ -82,7 +82,7 @@ export function inspectMultipartBackup(manifestPath: string): Promise<BackupInsp
 
 export async function inspectBackupFile(path: string): Promise<{ format: BackupFormat; inspection: BackupInspection }> {
   const format = backupFormatFromPath(path);
-  if (!format) throw new Error("JSONマニフェストまたはZIPバックアップを選択してください");
+  if (!format) throw new Error("分割バックアップの管理ファイル（JSON）またはZIPバックアップを選択してください");
   const inspection = format === "multipart"
     ? await inspectMultipartBackup(path)
     : await inspectBackup(path);

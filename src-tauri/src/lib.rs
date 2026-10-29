@@ -12,6 +12,7 @@ mod logging;
 pub mod pdf;
 pub mod pixiv_api;
 mod smoke_test;
+mod source_assets;
 mod source_time;
 
 use database::Database;

@@ -702,7 +702,7 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
               {kind === "person" && <Tabs.Tab value="series" leftSection={<Icons.series size={IconSize.inline} />} rightSection={authorSeriesTotal !== null ? <Badge size="xs" variant="light">{formatNumber(authorSeriesTotal)}</Badge> : undefined}>シリーズ</Tabs.Tab>}
               {entityCollections.data && entityCollections.data.length > 0 && <Tabs.Tab value="collections" leftSection={<Icons.collection size={IconSize.inline} />} rightSection={<Badge size="xs" variant="light">{formatNumber(entityCollections.data.length)}</Badge>}>コレクション</Tabs.Tab>}
               <Tabs.Tab value="history">プロフィール履歴</Tabs.Tab>
-              <Tabs.Tab value="json">JSON</Tabs.Tab>
+              <Tabs.Tab value="json">保存データ</Tabs.Tab>
             </Tabs.List>
             <Tabs.Panel value="works" pt="lg">
               <Stack gap="sm">

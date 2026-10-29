@@ -326,8 +326,16 @@ pub fn start_automatic_index_maintenance(app: tauri::AppHandle) {
 /// Backfill searchable acquisition state without delaying library navigation.
 pub fn start_automatic_saved_asset_audit(app: tauri::AppHandle) {
     tauri::async_runtime::spawn(async move {
-        sleep(Duration::from_secs(10)).await;
+        sleep(Duration::from_secs(2)).await;
         let state = app.state::<Arc<AppState>>().inner().clone();
+        if let Err(error) = run_library_write_blocking(app.clone(), |state| {
+            state.db.requeue_placeholder_illustrations()
+        })
+        .await
+        {
+            log::warn!("代替画像の再検査を準備できません: {error}");
+            return;
+        }
         let mut checked = 0;
         let mut marked = 0;
         let mut after_id = 0;
@@ -712,9 +720,13 @@ pub async fn db_get_downloads(
 pub async fn db_get_assets(
     app: tauri::AppHandle,
     download_id: i64,
+    version: Option<i64>,
 ) -> Result<Vec<AssetEntry>, String> {
     let state = app.state::<Arc<AppState>>();
-    state.db.get_assets(download_id)
+    match version {
+        Some(version) => state.db.get_version_assets(download_id, version),
+        None => state.db.get_assets(download_id),
+    }
 }
 
 /// 作品を一件消す。
