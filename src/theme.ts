@@ -53,6 +53,8 @@ export const theme = createTheme({
     Accordion: { defaultProps: { radius: "lg" } },
     Paper: { defaultProps: { radius: "lg" } },
     Modal: { defaultProps: { radius: "lg", centered: true, padding: 24, closeButtonProps: { size: 32, "aria-label": "閉じる" } }, styles: { header: { padding: 24, minHeight: 80, gap: 16, flexShrink: 0 }, title: { minWidth: 0, overflowWrap: "anywhere" }, close: { flexShrink: 0 } } },
+    // Keep the size when a screen overrides only closeButtonProps' accessible label.
+    ModalCloseButton: { defaultProps: { size: 32 } },
     Drawer: { defaultProps: { overlayProps: { backgroundOpacity: 0.42, blur: 4 }, closeButtonProps: { "aria-label": "閉じる" } } },
     Tooltip: { defaultProps: { openDelay: 420, withArrow: true } },
   },
