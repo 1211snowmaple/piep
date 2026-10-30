@@ -1762,7 +1762,7 @@ select {
   background: light-dark(#fff, #171d25);
   box-shadow: 0 5px 18px rgb(25 37 51 / 6%);
   text-decoration: none !important;
-  font-family: "Noto Sans JP", "Yu Gothic UI", sans-serif;
+  font-family: var(--mantine-font-family);
   line-height: 1.45;
   transition: border-color 130ms ease, box-shadow 130ms ease, transform 130ms ease;
 }
@@ -1789,7 +1789,7 @@ select {
 .link-card-kicker { color: #8a6b00; font-size: 10px; font-weight: 800; letter-spacing: 0.04em; }
 .link-card-title { overflow: hidden; color: var(--mantine-color-text); font-size: 0.88rem; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
 .link-card-host { overflow: hidden; color: var(--mantine-color-dimmed); font-size: 0.7rem; text-overflow: ellipsis; white-space: nowrap; }
-.link-card-arrow { flex: 0 0 auto; color: var(--mantine-color-dimmed); font-family: "Noto Sans JP", sans-serif; font-size: 14px; }
+.link-card-arrow { flex: 0 0 auto; color: var(--mantine-color-dimmed); font-family: inherit; font-size: 14px; }
 
 /* 宛先を確かめられなかった埋め込み。何が貼られていたかは残すが、押せる
    ようには見せない ―― 押しても何も起きないカードは、壊れたリンクと同じ。 */

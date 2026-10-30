@@ -301,6 +301,8 @@ test("link cards in the body keep their service marks inside the frame", async (
     viewport.scrollTop = viewport.scrollHeight;
   });
   await expect(cards).toHaveCount(2);
+  await expect(cards.first()).toHaveCSS("font-family",await page.locator("body").evaluate(node=>getComputedStyle(node).fontFamily));
+  await expect(cards.first().locator(".link-card-arrow")).toHaveCSS("font-family",await cards.first().evaluate(node=>getComputedStyle(node).fontFamily));
   await expect(page.locator(".reader-content")).toHaveScreenshot("reader-link-cards.png");
 });
 
