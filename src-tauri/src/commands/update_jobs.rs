@@ -2651,10 +2651,12 @@ async fn process_update_job_item(
     }
     if item.item_type != "target" {
         if let (Some(source), Some(id)) = (&item.source, &item.source_id) {
-            if matches!(
-                state.db.update_candidate_status(source, id)?.as_deref(),
-                Some("held" | "dismissed")
-            ) {
+            let repair_save = item.item_type == "candidate"
+                && payload.get("kind").and_then(Value::as_str) == Some("save");
+            if state
+                .db
+                .candidate_acquisition_blocked(source, id, repair_save)?
+            {
                 return Ok(ItemOutcome::Held(
                     "候補から外しています。保留・非表示の一覧から再確認してください".into(),
                 ));

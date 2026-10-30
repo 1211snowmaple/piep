@@ -462,11 +462,12 @@ export default function WorkPage() {
     modals.open({
       title: asset.filename,
       size: "min(92vw, 1100px)",
+      yOffset: 24,
       // The scroll area squared off the right edge of the dialog; keeping the
       // radius on the body and clipping it keeps all four corners round.
       radius: "lg",
       classNames: { content: "asset-preview-modal" },
-      children: <Stack><Image src={url} alt={asset.filename} mah="76vh" fit="contain" /><Group justify="space-between"><Text size="xs" c="dimmed">{formatBytes(asset.fileSizeBytes)} · {asset.mimeType}</Text><Button size="xs" variant="light" onClick={() => runtime && openLocalAsset(asset.localPath)}>画像を開く</Button></Group></Stack>,
+      children: <div className="asset-preview"><div className="asset-preview__canvas"><Image src={url} alt={asset.filename} fit="contain" /></div><Group className="asset-preview__footer" justify="space-between"><Text size="sm" c="dimmed">{formatBytes(asset.fileSizeBytes)} · {asset.mimeType?.replace("image/", "").toUpperCase()}</Text><Button size="sm" variant="light" leftSection={<Icons.externalLink size={IconSize.menu} />} onClick={() => runtime && openLocalAsset(asset.localPath)}>画像を開く</Button></Group></div>,
     });
   };
 
@@ -660,7 +661,7 @@ export default function WorkPage() {
                   <Group wrap="nowrap" align="flex-start">
                     <ThemeIcon variant="light" color={version.version === work.currentVersion ? "piep" : "gray"}><Icons.versionHistory size={IconSize.menu} /></ThemeIcon>
                     <Stack gap={3} flex={1} ta="left">
-                      <Group justify="space-between"><Text size="sm" fw={700}>保存済み v{version.version}</Text>{version.version === work.currentVersion && <Badge size="xs">{doc.isEdited ? "取得元の最新版" : "現在"}</Badge>}</Group>
+                        <Group justify="space-between"><Text size="sm" fw={700}>保存済み v{version.version}</Text><Group gap={6}>{version.version === work.currentVersion && <Badge size="xs">{doc.isEdited ? "取得元の最新版" : "現在"}</Badge>}</Group></Group>
                       <Text size="xs" c="dimmed">{version.changeSummary || "保存元から取得"}</Text>
                       <Text size="xs" c="dimmed">{formatDate(version.createdAt, true)} · {formatNumber(version.textLength)}字 · {formatBytes(version.fileSizeBytes)}</Text>
                     </Stack>

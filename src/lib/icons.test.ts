@@ -57,6 +57,8 @@ describe("icon registry", () => {
       ["pagingContinuous", "pagingNumbered"],
       ["pagingContinuous", "viewList"],
       ["pagingNumbered", "viewGrid"],
+      ["appMenu", "sidebarOpen"],
+      ["appMenu", "sidebarClose"],
     ];
     for (const [left, right] of distinct) {
       expect(Icons[left], `${left} vs ${right}`).not.toBe(Icons[right]);

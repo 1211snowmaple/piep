@@ -85,6 +85,7 @@ export interface DownloadVersion {
   fileSizeBytes: number;
   createdAt: string;
   changeSummary: string | null;
+  changeKind?: "source" | "repair";
 }
 
 export interface WorkEditRevision {

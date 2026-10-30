@@ -4,6 +4,88 @@ use std::fs;
 use std::time::{Duration, Instant};
 
 #[test]
+fn held_partial_save_repair_bypasses_the_gate_only_for_saved_incomplete_works() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    insert_download(&db, &storage, "saved-partial", "作品", "作者", &[], "本文");
+    for id in ["saved-partial", "unsaved-partial"] {
+        db.upsert_update_candidate(&UpdateCandidateInput {
+            source: "pixiv".into(),
+            source_id: id.into(),
+            kind: "revision".into(),
+            title: "作品".into(),
+            payload_json: r#"{"holdKind":"incomplete"}"#.into(),
+            target_type: Some("work".into()),
+        })
+        .unwrap();
+        db.set_update_candidate_status("pixiv", id, "held").unwrap();
+    }
+    assert!(!db
+        .candidate_acquisition_blocked("pixiv", "saved-partial", true)
+        .unwrap());
+    assert!(db
+        .candidate_acquisition_blocked("pixiv", "saved-partial", false)
+        .unwrap());
+    assert!(db
+        .candidate_acquisition_blocked("pixiv", "unsaved-partial", true)
+        .unwrap());
+    db.set_update_candidate_status("pixiv", "saved-partial", "dismissed")
+        .unwrap();
+    assert!(db
+        .candidate_acquisition_blocked("pixiv", "saved-partial", true)
+        .unwrap());
+}
+
+#[test]
+fn repair_history_stays_readable_without_counting_as_an_author_revision() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let id = insert_download(&db, &storage, "repair", "補完済み", "作者", &[], "本文");
+    for version in [1, 2] {
+        db.insert_version(&NewVersion {
+            download_id: id,
+            version,
+            content_hash: Some("same-body".into()),
+            text_length: 2,
+            json_path: storage
+                .join(format!("v{version}/original.json"))
+                .to_string_lossy()
+                .into(),
+            original_json_path: None,
+            asset_count: version,
+            file_size_bytes: 10,
+            created_at: "2026-10-30T00:00:00Z".into(),
+            change_summary: None,
+        })
+        .unwrap();
+    }
+    db.conn
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE downloads SET current_version=2 WHERE id=?1",
+            params![id],
+        )
+        .unwrap();
+    db.set_version_change_kind(id, 2, "repair").unwrap();
+    let mut query = params("");
+    query.revision_filter = Some("saved_revisions".into());
+    assert!(db.search_downloads_v2(&query).unwrap().items.is_empty());
+    query.revision_filter = Some("revised".into());
+    assert!(db.search_downloads_v2(&query).unwrap().items.is_empty());
+    query.revision_filter = Some("first_version".into());
+    assert_eq!(db.search_downloads_v2(&query).unwrap().items[0].id, id);
+    let versions = db.get_versions(id).unwrap();
+    assert_eq!(db.get_library_shelf_counts(&[]).unwrap().revised, 0);
+    assert_eq!(versions.len(), 2);
+    assert_eq!(versions[0].change_kind, "repair");
+    db.set_version_change_kind(id, 2, "source").unwrap();
+    assert_eq!(db.get_library_shelf_counts(&[]).unwrap().revised, 1);
+    query.revision_filter = Some("saved_revisions".into());
+    assert_eq!(db.search_downloads_v2(&query).unwrap().items[0].id, id);
+}
+
+#[test]
 fn pasted_work_urls_find_the_work_and_keep_provider_ids_separate() {
     let (_temp, root, storage) = temp_paths();
     let db = Database::open(&root.join("piep.db"), &storage).unwrap();

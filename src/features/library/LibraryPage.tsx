@@ -1,5 +1,7 @@
 import { SeriesFilterSelect } from "./SeriesFilterSelect";
-import { parseSearchMode, searchModes, useDefaultSearchMode } from "@/lib/searchPreferences";
+import { parseSearchMode, useDefaultSearchMode } from "@/lib/searchPreferences";
+import { SearchMethodMenu } from "@/components/SearchMethodMenu";
+import { FilterChoiceGroup } from "@/components/FilterChoiceGroup";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { acquisitionFilters, acquisitionFilterName, parseAcquisitionFilter } from "@/lib/acquisition";
 import type { LibraryAcquisitionFilter } from "@/types/library";
@@ -380,7 +382,7 @@ function readFilters(params: URLSearchParams): Filters {
     seriesKey: params.get("serieskey"),
     seriesSource: params.get("seriessource"),
     seriesLabel: params.get("seriesname"),
-    revisionFilter: params.get("revision"),
+    revisionFilter: params.get("revision") ?? (params.get("revised") === "1" ? "revised" : null),
     acquisitionFilter: params.get("acquisition"),
     editFilter: params.get("localedit"),
     coverFilter: params.get("cover"),
@@ -391,6 +393,7 @@ function readFilters(params: URLSearchParams): Filters {
 }
 
 function writeFilters(params: URLSearchParams, filters: Filters) {
+  params.delete("revised");
   if (filters.readingOnly) params.set("shelf", "reading"); else if (params.get("shelf") === "reading") params.delete("shelf");
   params.delete("source");
   filters.sources.forEach((source) => params.append("source", source));
@@ -464,7 +467,7 @@ export function parseSavedParams(json: string): {
     const collectionSortBy = parseCollectionSortBy(raw.collectionSortBy);
     return {
       tab: parseLibraryTab(typeof raw.tab === "string" ? raw.tab : null),
-      filters: normalizeFilters({ ...(raw.filters && typeof raw.filters === "object" ? raw.filters : {}), readingOnly: raw.membershipShelf === "reading" || (raw.filters as Partial<Filters> | undefined)?.readingOnly === true }),
+      filters: normalizeFilters({ ...(raw.filters && typeof raw.filters === "object" ? raw.filters : {}), readingOnly: raw.membershipShelf === "reading" || (raw.filters as Partial<Filters> | undefined)?.readingOnly === true, revisionFilter: raw.membershipShelf === "revised" ? "revised" : (raw.filters as Partial<Filters> | undefined)?.revisionFilter }),
       sortBy,
       sortOrder: parseSortOrder(raw.sortOrder, defaultSortOrderFor(sortBy)),
       entityScope: normalizeEntityScope(raw.entityScope),
@@ -1040,9 +1043,9 @@ export default function LibraryPage() {
     // 隣の棚件数と同じ間隔にして、画面ごとに作法を変えない。
     staleTime: 30_000,
   });
-  const onRevisedShelf = urlParams.get("revised") === "1";
+  const onRevisedShelf = filters.revisionFilter === "revised";
   // 「改稿あり」は確認待ちだけではなく、手元の版数が実際に増えた作品も含む。
-  // 作品列の revision filter は current_version > 1 を対象にする。
+  // 補完だけの保存コピーは取得元の改稿に数えず、DB側で同じ定義を使う。
   const pendingRevisionIds = useMemo(
     () => new Set((pendingRevisions.data ?? []).map((entry) => entry.downloadId)),
     [pendingRevisions.data],
@@ -1074,7 +1077,7 @@ export default function LibraryPage() {
     seriesFilter: filters.seriesFilter,
     seriesKey: filters.seriesKey,
     seriesSource: filters.seriesSource,
-    revisionFilter: onRevisedShelf ? "revised" : filters.revisionFilter,
+    revisionFilter: filters.revisionFilter,
     acquisitionFilter: filters.acquisitionFilter,
     editFilter: filters.editFilter,
     coverFilter: filters.coverFilter,
@@ -1094,7 +1097,7 @@ export default function LibraryPage() {
     projection: "libraryGallery",
     searchMode: resolvedSearchMode,
     versionScope,
-  }), [readingIds, onRevisedShelf, searchText, filters, sortBy, sortOrder, numberedPages, pageParam, pageSize, resolvedSearchMode, versionScope]);
+  }), [readingIds, searchText, filters, sortBy, sortOrder, numberedPages, pageParam, pageSize, resolvedSearchMode, versionScope]);
 
   // Keyset pagination: fetching a fixed slab and paging it in the browser
   // capped the library at that slab and reported the wrong total.
@@ -1651,10 +1654,9 @@ export default function LibraryPage() {
           {/* Centred, not top-aligned: the search field is taller than every
               control beside it, so aligning tops left them all sitting three
               pixels high against it. */}
-          <Group wrap="nowrap" align="center">
+          <Group wrap="nowrap" align="center" gap="sm" className="library-toolbar__row">
             <LibraryShelfMenu />
-            <Box className="library-toolbar__search"><LibrarySearch value={query} onChange={onQueryChange} runtime={runtime} versionScope={versionScope} /></Box></Group><Group wrap="wrap" align="center" gap="sm" className="library-toolbar__options">
-            {tab === "works" && <Select size="sm" w={140} aria-label="検索方法" value={resolvedSearchMode} allowDeselect={false} onChange={(mode) => writeUrl({ searchMode: parseSearchMode(mode) })} data={searchModes.map(({value,label}) => ({value,label,disabled:value === "semantic" && versionScope === "all"}))} />}
+            <Box className="library-toolbar__search"><LibrarySearch value={query} onChange={onQueryChange} runtime={runtime} versionScope={versionScope} method={tab === "works" ? resolvedSearchMode : undefined} onMethodChange={(mode) => writeUrl({ searchMode: mode })} /></Box><Group wrap="nowrap" align="center" gap="xs" className="library-toolbar__options">
             <span className="library-toolbar__slot" data-inactive={tab === "collections" || undefined} inert={tab === "collections" || undefined} aria-hidden={tab === "collections" || undefined}>
               <Tooltip label="詳細フィルター">
                 <Indicator label={activeFilterCount} size={16} disabled={!activeFilterCount}>
@@ -1713,7 +1715,7 @@ export default function LibraryPage() {
                 </>}
               </Menu.Dropdown>
             </Menu></span>
-          </Group>
+          </Group></Group>
           {tab !== "collections" && activeFilterCount > 0 && (
             <Group gap="xs">
               <Text size="xs" c="dimmed" fw={600}>適用中</Text>
@@ -1889,7 +1891,7 @@ export default function LibraryPage() {
           </span>
         )}
         centered
-        size="min(820px, calc(100vw - 24px))"
+        size="min(960px, calc(100vw - 32px))"
         xOffset={12}
         yOffset={12}
         closeButtonProps={{ "aria-label": "閉じる" }}
@@ -2101,7 +2103,7 @@ const SUGGESTION_KIND_LABEL: Record<string, string> = {
   tag: "タグで絞る",
 };
 
-function LibrarySearch({ value, onChange, runtime, versionScope }: { value: string; onChange: (value: string) => void; runtime: boolean; versionScope: LibraryVersionScope }) {
+function LibrarySearch({ value, onChange, runtime, versionScope, method, onMethodChange }: { value: string; onChange: (value: string) => void; runtime: boolean; versionScope: LibraryVersionScope; method?: import("@/types/library").LibrarySearchMode; onMethodChange: (mode: import("@/types/library").LibrarySearchMode) => void }) {
   const navigate = useAppNavigate();
   const [composing, setComposing] = useState(false);
   const [debounced] = useDebouncedValue(value, 180);
@@ -2162,10 +2164,12 @@ function LibrarySearch({ value, onChange, runtime, versionScope }: { value: stri
             event.preventDefault();
             combobox.closeDropdown();
           }}
-          leftSection={<Icons.search size={IconSize.action} />}
+          leftSection={method ? <SearchMethodMenu value={method} onChange={onMethodChange} includeHistory={versionScope === "all"} /> : <Icons.search size={IconSize.action} />}
+          leftSectionWidth={method ? 46 : undefined}
+          leftSectionPointerEvents={method ? "all" : "none"}
           rightSection={value ? <Combobox.ClearButton onClear={() => onChange("")} /> : null}
           rightSectionPointerEvents={value ? "all" : "none"}
-          placeholder={versionScope === "all" ? "現在版と過去版を検索" : "タイトル、作者、タグ、本文を検索"}
+          placeholder={method === "semantic" ? "内容の近い作品を検索" : versionScope === "all" ? "現在版と過去版を検索" : "タイトル、作者、タグ、本文を検索"}
           aria-label="ライブラリを検索"
           maxLength={MAX_SEARCH_LENGTH}
           size="md"
@@ -2243,7 +2247,7 @@ function seriesFilterName(value: LibrarySeriesFilter) {
 }
 
 function revisionFilterName(value: LibraryRevisionFilter) {
-  return ({ revised: "改稿あり", first_version: "初版のみ保存", pending_revision: "未保存の改稿あり", saved_revisions: "複数の版を保存済み" })[value];
+  return ({ revised: "改稿あり", first_version: "改稿の保存なし", pending_revision: "未保存の改稿あり", saved_revisions: "保存済みの改稿あり" })[value];
 }
 
 function editFilterName(value: LibraryEditFilter) {
@@ -2600,8 +2604,8 @@ function FilterForm({ value, scope, versionScope, tab, runtime, authors, tags, c
     ] : []),
     { id: "revision:revised", label: "改稿された作品", detail: "状態", keywords: "履歴 改稿 バージョン 版", active: draft.revisionFilter === "revised" },
     { id: "revision:pending_revision", label: "未保存の改稿あり", detail: "保存状態", keywords: "更新 改稿 未保存 差分", active: draft.revisionFilter === "pending_revision" },
-    { id: "revision:saved_revisions", label: "複数の版を保存済み", detail: "保存状態", keywords: "過去版 履歴 保存済み", active: draft.revisionFilter === "saved_revisions" },
-    { id: "revision:first_version", label: "初版のままの作品", detail: "状態", keywords: "初版 未改稿 バージョン", active: draft.revisionFilter === "first_version" },
+    { id: "revision:saved_revisions", label: "保存済みの改稿あり", detail: "保存状態", keywords: "過去版 履歴 保存済み", active: draft.revisionFilter === "saved_revisions" },
+    { id: "revision:first_version", label: "改稿を保存していない作品", detail: "状態", keywords: "初版 未改稿 バージョン", active: draft.revisionFilter === "first_version" },
     ...acquisitionFilters.map(({ value, label }) => ({ id: `acquisition:${value}`, label: `${label}の作品`, detail: "状態", keywords: `取得 状態 保留 ${value === "incomplete" ? "本文保存済み 挿絵 欠落" : value === "unavailable" ? "削除 非公開" : ""}`, active: draft.acquisitionFilter === value })),
     { id: "edit:edited", label: "ローカル編集がある作品", detail: "状態", keywords: "ローカル 編集 修正", active: draft.editFilter === "edited" },
     { id: "edit:unedited", label: "ローカル編集がない作品", detail: "状態", keywords: "未編集 オリジナル", active: draft.editFilter === "unedited" },
@@ -2710,6 +2714,7 @@ function FilterForm({ value, scope, versionScope, tab, runtime, authors, tags, c
 
   const chooseSection = (section: FilterSection) => {
     setActiveSection(section);
+    document.querySelector(".filter-spotlight__panel")?.scrollTo?.({ top: 0 });
     setFilterSearch("");
     searchCombobox.closeDropdown();
   };
@@ -2811,7 +2816,7 @@ function FilterForm({ value, scope, versionScope, tab, runtime, authors, tags, c
       </Combobox>
 
       <div className="filter-form__fields">
-        <div className="filter-spotlight__section-tabs" role="tablist" aria-label="フィルターの種類">
+        <div className="filter-spotlight__section-tabs" role="tablist" aria-orientation="vertical" aria-label="フィルターの種類">
           {sectionOptions.map((section) => (
             <UnstyledButton
               type="button"
@@ -2823,6 +2828,13 @@ function FilterForm({ value, scope, versionScope, tab, runtime, authors, tags, c
               className="filter-spotlight__section-tab"
               key={section.value}
               onClick={() => chooseSection(section.value)}
+              onKeyDown={(event) => {
+                if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+                event.preventDefault();
+                const next = sectionOptions[(sectionOptions.indexOf(section) + (event.key === "ArrowDown" ? 1 : -1) + sectionOptions.length) % sectionOptions.length];
+                chooseSection(next.value);
+                document.getElementById(`filter-spotlight-tab-${next.value}`)?.focus();
+              }}
             >
               <span>{section.label}</span>
               {section.count > 0 && <b>{formatNumber(section.count)}</b>}
@@ -2862,44 +2874,12 @@ function FilterForm({ value, scope, versionScope, tab, runtime, authors, tags, c
           )}
 
           {activeSection === "status" && (
-            <Stack gap="md">
+            <Stack gap="sm">
+              <FilterChoiceGroup label="取得状態" value={draft.acquisitionFilter} options={acquisitionFilters} onChange={(acquisitionFilter) => setDraft({ ...draft, acquisitionFilter })} />
+              <FilterChoiceGroup label="改稿状態" value={draft.revisionFilter} options={[{ value: "revised", label: "改稿あり" }, { value: "pending_revision", label: "未保存の改稿あり" }, { value: "saved_revisions", label: "保存済みの改稿あり" }, { value: "first_version", label: "改稿の保存なし" }]} onChange={(revisionFilter) => setDraft({ ...draft, revisionFilter })} />
               <SimpleGrid cols={{ base: 1, xs: 2 }} spacing="sm">
-                <Select
-                  size="sm"
-                  label="取得状態"
-                  clearable
-                  placeholder="すべて"
-                  data={acquisitionFilters}
-                  value={draft.acquisitionFilter}
-                  onChange={(value) => setDraft({ ...draft, acquisitionFilter: parseAcquisitionFilter(value) })}
-                />
-                <Select
-                  size="sm"
-                  label="改稿状態"
-                  clearable
-                  placeholder="すべて"
-                  data={[{ value: "revised", label: "改稿あり" }, { value: "pending_revision", label: "未保存の改稿あり" }, { value: "saved_revisions", label: "複数の版を保存済み" }, { value: "first_version", label: "初版のみ保存" }]}
-                  value={draft.revisionFilter}
-                  onChange={(revisionFilter) => setDraft({ ...draft, revisionFilter: parseRevisionFilter(revisionFilter) })}
-                />
-                <Select
-                  size="sm"
-                  label="ローカル編集"
-                  clearable
-                  placeholder="すべて"
-                  data={[{ value: "edited", label: "編集あり" }, { value: "unedited", label: "編集なし" }]}
-                  value={draft.editFilter}
-                  onChange={(editFilter) => setDraft({ ...draft, editFilter: parseEditFilter(editFilter) })}
-                />
-                <Select
-                  size="sm"
-                  label="表紙"
-                  clearable
-                  placeholder="すべて"
-                  data={[{ value: "has_cover", label: "表紙あり" }, { value: "no_cover", label: "表紙なし" }]}
-                  value={draft.coverFilter}
-                  onChange={(coverFilter) => setDraft({ ...draft, coverFilter: parseCoverFilter(coverFilter) })}
-                />
+                <FilterChoiceGroup label="ローカル編集" value={draft.editFilter} options={[{ value: "edited", label: "編集あり" }, { value: "unedited", label: "編集なし" }]} onChange={(editFilter) => setDraft({ ...draft, editFilter })} />
+                <FilterChoiceGroup label="表紙" value={draft.coverFilter} options={[{ value: "has_cover", label: "表紙あり" }, { value: "no_cover", label: "表紙なし" }]} onChange={(coverFilter) => setDraft({ ...draft, coverFilter })} />
               </SimpleGrid>
               <Checkbox label="読みかけのみ" checked={draft.readingOnly} onChange={(event) => setDraft({ ...draft, readingOnly: event.currentTarget.checked })} />
               {!entityTab && (
@@ -3036,7 +3016,7 @@ function FilterForm({ value, scope, versionScope, tab, runtime, authors, tags, c
       </Group>}
       <FacetSelectionSummary filters={draft} onRemove={toggleFacet} />
       <div className="filter-form__actions">
-        <Text size="sm" c="dimmed">{totalCount ? `${formatNumber(totalCount)}件の条件` : "条件なし"}</Text>
+        <Text size="sm" c="dimmed">{totalCount ? `${formatNumber(totalCount)}項目で絞り込み` : "すべての作品を表示"}</Text>
         <Group gap="sm" wrap="nowrap">
           <Button variant="default" onClick={reset}>リセット</Button>
           <Button disabled={invalidRange || invalidAssetRange || invalidSizeRange || invalidDateRange} onClick={() => onApply(normalizeFilters(draft), scopeDraft, versionScopeDraft)}>適用</Button>

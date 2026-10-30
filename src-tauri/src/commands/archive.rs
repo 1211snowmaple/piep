@@ -257,6 +257,8 @@ struct BackupVersion {
     file_size_bytes: i64,
     created_at: String,
     change_summary: Option<String>,
+    #[serde(default)]
+    change_kind: Option<String>,
     relative_json_path: String,
     relative_original_json_path: Option<String>,
 }
@@ -2853,6 +2855,7 @@ async fn export_zip_with_params_locked(
                     file_size_bytes: v.file_size_bytes,
                     created_at: v.created_at.clone(),
                     change_summary: v.change_summary.clone(),
+                    change_kind: Some(v.change_kind.clone()),
                     relative_json_path: if is_current {
                         current_relative_json_path.clone()
                     } else {
@@ -2877,6 +2880,7 @@ async fn export_zip_with_params_locked(
                     file_size_bytes: dl.file_size_bytes,
                     created_at: dl.downloaded_at.clone(),
                     change_summary: Some("Recovered from current library record".to_string()),
+                    change_kind: None,
                     relative_json_path: current_relative_json_path,
                     relative_original_json_path: current_relative_original_json_path,
                 });
@@ -4254,6 +4258,9 @@ async fn import_zip_locked(
                             };
 
                             state.db.insert_version(&new_ver)?;
+                            if let Some(kind) = &v.change_kind {
+                                state.db.set_version_change_kind(dl_id, v.version, kind)?;
+                            }
                         }
 
                         // アセット情報の復元
@@ -5082,6 +5089,7 @@ mod tests {
             file_size_bytes: 0,
             created_at: "2026-01-01T00:00:00Z".to_string(),
             change_summary: None,
+            change_kind: None,
             relative_json_path: path.to_string(),
             relative_original_json_path: None,
         };
@@ -5193,6 +5201,7 @@ mod tests {
                     file_size_bytes: marker.len() as i64,
                     created_at: "2026-08-12T00:00:00Z".to_string(),
                     change_summary: None,
+                    change_kind: None,
                     relative_json_path: relative_json_path.clone(),
                     relative_original_json_path: None,
                 }],
@@ -5960,6 +5969,10 @@ mod tests {
             change_summary: Some("誤字修正".to_string()),
         };
         state.db.insert_version(&v2_history).unwrap();
+        state
+            .db
+            .set_version_change_kind(dl_id, 2, "repair")
+            .unwrap();
 
         // アセット情報をDB登録
         let new_asset = NewAsset {
@@ -6189,6 +6202,7 @@ mod tests {
         );
 
         let v2_restored = restored_versions.iter().find(|v| v.version == 2).unwrap();
+        assert_eq!(v2_restored.change_kind, "repair");
         assert_eq!(v2_restored.content_hash, Some("v2hash".to_string()));
         assert_eq!(v2_restored.change_summary, Some("誤字修正".to_string()));
         assert!(

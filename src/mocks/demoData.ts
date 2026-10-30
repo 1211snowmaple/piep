@@ -202,7 +202,7 @@ export function getDemoReader(id: number): ReaderDocument {
   const download = getDemoWork(id);
   return {
     download,
-    assets: [],
+    assets: id === 108 ? [{ id:10801,downloadId:108,assetType:"illustration",filename:"preview-sample.svg",localPath:`data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1800"><rect width="1200" height="1800" fill="#d8efff"/><circle cx="600" cy="800" r="350" fill="#279cff"/><path d="M0 1300 600 900 1200 1300V1800H0Z" fill="#729f12"/></svg>')}`,originalUrl:null,mimeType:"image/svg+xml",fileSizeBytes:250 }] : [],
     versions: [{ id: 1, downloadId: download.id, version: download.currentVersion, contentHash: null, textLength: download.textLength, jsonPath: download.jsonPath, originalJsonPath: null, assetCount: download.assetCount, fileSizeBytes: download.fileSizeBytes, createdAt: download.downloadedAt, changeSummary: "初回保存" }],
     html: demoHtml,
     plainText: demoHtml.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim(),

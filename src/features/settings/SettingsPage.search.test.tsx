@@ -95,6 +95,16 @@ describe("SettingsPage の検索", () => {
     db.startSearchRebuildIndex.mockResolvedValue("job-1");
   });
 
+  it("distinguishes stored search data from a model which has not started",async()=>{
+    db.getSearchIndexStatus.mockResolvedValue(status({semanticModelReady:false,embeddingProvider:"fastembed/directml-pending",gpuEnabled:false}));
+    renderSearchSettings();
+    await userEvent.click(await screen.findByRole("button",{name:/検索データの保守/}));
+    expect(await screen.findByText("初回の意味検索で読み込みます")).toBeInTheDocument();
+    expect(screen.queryByText("準備中")).toBeNull();
+    expect(screen.queryByText("fastembed/directml-pending")).toBeNull();
+    expect(db.startSearchRebuildIndex).not.toHaveBeenCalled();
+  });
+
   it("意味検索を切る作り直しは、捨てる件数を見せて確認を取る", async () => {
     db.getSearchIndexStatus.mockResolvedValue(status());
     renderSearchSettings();

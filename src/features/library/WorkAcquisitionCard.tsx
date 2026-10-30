@@ -1,4 +1,4 @@
-import { Accordion, Alert, Anchor, Badge, Button, Group, Stack, Text } from "@mantine/core";
+import { Accordion, ActionIcon, Alert, Anchor, Badge, Button, Group, Stack, Text, Tooltip } from "@mantine/core";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { notifications } from "@mantine/notifications";
 import { ErrorState } from "@/components/AsyncState";
@@ -6,11 +6,15 @@ import { acquisitionStatusMeta } from "@/lib/acquisition";
 import { errorMessage, formatDate } from "@/lib/format";
 import { getWorkAcquisitionDetails, type MissingImageLocation } from "@/services/workInspectionApi";
 import { recheckDeferredUpdateCandidatesCommand } from "@/services/updateJobApi";
+import { useAppNavigate } from "@/app/router";
+import { Icons,IconSize } from "@/lib/icons";
+import { imageReferenceInfo } from "@/lib/imageReference";
 
 export function WorkAcquisitionCard({ id, source, sourceId, runtime, onLocate }: {
   id: number; source: string; sourceId: string; runtime: boolean;
   onLocate: (location: MissingImageLocation, version: number) => void;
 }) {
+  const navigate=useAppNavigate();
   const query = useQuery({ queryKey: ["work-acquisition", id], queryFn: () => getWorkAcquisitionDetails(id), enabled: runtime });
   const recheck = useMutation({
     mutationFn: () => recheckDeferredUpdateCandidatesCommand([`${source}:${sourceId}`], false),
@@ -33,10 +37,11 @@ export function WorkAcquisitionCard({ id, source, sourceId, runtime, onLocate }:
             <Text size="sm" style={{ overflowWrap: "anywhere" }}>{details.reason}</Text>
             <Text size="xs" c="dimmed">状態の記録: {formatDate(details.recordedAt, true)}</Text>
             {details.locationError && <Text size="xs" c="red">本文の位置を読み取れません: {details.locationError}</Text>}
-            {details.missingImages.map((image, index) => <Stack gap={2} key={`${image.page}:${image.reference}:${image.occurrence}`}>
-              <Anchor component="button" type="button" ta="left" size="sm" onClick={() => onLocate(image, details.version)}>本文 {image.page}ページ · {image.reference}</Anchor>
+            {details.missingImages.map((image, index) => { const reference=source === "pixiv" ? imageReferenceInfo(image.reference) : {}; return <Stack gap={2} key={`${image.page}:${image.reference}:${image.occurrence}`}>
+              <Group justify="space-between" wrap="nowrap"><Anchor component="button" type="button" ta="left" size="sm" onClick={() => onLocate(image, details.version)}>本文 {image.page}ページ · {image.reference}</Anchor>{reference.url && <Tooltip label="参照先の画像をアプリ内で開く"><ActionIcon variant="subtle" aria-label={`参照先の画像を開く：${image.reference}`} onClick={()=>navigate(`/save/pixiv?url=${encodeURIComponent(reference.url!)}`)}><Icons.inAppBrowser size={IconSize.action}/></ActionIcon></Tooltip>}</Group>
+              {reference.issue && <Text size="sm">{reference.issue}</Text>}
               <Text size="xs" c="dimmed" lineClamp={2}>{image.excerpt || `画像 ${index + 1}`}</Text>
-            </Stack>)}
+            </Stack>; })}
           </Stack>
         </Accordion.Panel></Accordion.Item>
       </Accordion>

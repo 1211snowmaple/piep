@@ -9,6 +9,7 @@ describe("active shelf detection", () => {
     expect(shelf("favorite=1")).toBe("favorite");
     expect(shelf("shelf=reading")).toBe("reading");
     expect(shelf("revised=1")).toBe("revised");
+    expect(shelf("revision=revised")).toBe("revised");
   });
 
   it("claims no shelf once the view has been narrowed further", () => {
@@ -24,6 +25,9 @@ describe("active shelf detection", () => {
     // 更新監視は棚を降りて絞り込みになった。絞り込まれた一覧はどの棚でもない。
     expect(shelf("watch=watched")).toBeNull();
     expect(shelf("tab=people")).toBeNull();
+    expect(shelf("revised=1&source=pixiv")).toBeNull();
+    expect(shelf("revision=pending_revision")).toBeNull();
+    expect(shelf("favorite=0")).toBeNull();
   });
 
   it("ignores parameters that do not change which works are listed", () => {

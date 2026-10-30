@@ -278,6 +278,11 @@ fn create_additional_tables(conn: &Connection) -> Result<(), rusqlite::Error> {
 /// （その場合は本文まで取りに行く従来どおりの確認になる）。
 fn add_missing_columns(conn: &Connection) -> Result<(), rusqlite::Error> {
     for (table, column, definition) in [
+        (
+            "download_versions",
+            "change_kind",
+            "TEXT NOT NULL DEFAULT 'source'",
+        ),
         // 本文以外のメタデータの指紋。取得元の軽い応答だけで変化を判定する。
         ("downloads", "meta_hash", "TEXT"),
         // 最後に本文まで突き合わせた時刻。指紋が同じでも、ここが古ければ深く見る。
@@ -681,6 +686,7 @@ fn create_core_tables(conn: &Connection) -> Result<(), rusqlite::Error> {
             file_size_bytes     INTEGER DEFAULT 0,
             created_at          TEXT NOT NULL,
             change_summary      TEXT,
+            change_kind         TEXT NOT NULL DEFAULT 'source',
             UNIQUE(download_id, version)
         );
 

@@ -230,7 +230,7 @@ test("detail filters open as a search spotlight and keep author names readable",
 
   await spotlight.getByRole("tab", { name: /^保存状態/ }).click();
   await expect(spotlight.getByRole("radiogroup", { name: "検索する版" })).toBeVisible();
-  await expect(spotlight.getByRole("combobox", { name: "改稿状態" })).toBeVisible();
+  await expect(spotlight.getByRole("group", { name: "改稿状態" })).toBeVisible();
   const statusGeometry = await spotlight.evaluate((element) => ({
     width: element.clientWidth,
     scrollWidth: element.scrollWidth,
@@ -301,6 +301,8 @@ test("link cards in the body keep their service marks inside the frame", async (
     viewport.scrollTop = viewport.scrollHeight;
   });
   await expect(cards).toHaveCount(2);
+  await expect(cards.first()).toHaveCSS("font-family",await page.locator("body").evaluate(node=>getComputedStyle(node).fontFamily));
+  await expect(cards.first().locator(".link-card-arrow")).toHaveCSS("font-family",await cards.first().evaluate(node=>getComputedStyle(node).fontFamily));
   await expect(page.locator(".reader-content")).toHaveScreenshot("reader-link-cards.png");
 });
 

@@ -10,6 +10,7 @@ import { writeReadingPosition } from "@/features/library/readingShelf";
 import type { LibraryShelfCounts, SavedSearchRecord } from "@/types/library";
 import { usePageAssist } from "@/app/PageAssistContext";
 import { LibrarySidebarSettings } from "@/features/settings/LibrarySidebarSettings";
+import { theme } from "@/theme";
 
 const librarySearch = vi.hoisted(() => vi.fn().mockResolvedValue({ items: [] }));
 const shelfApi = vi.hoisted(() => ({
@@ -74,7 +75,7 @@ function renderApp(hash: string, child = <div />) {
   window.location.hash = hash;
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
-    <MantineProvider>
+    <MantineProvider theme={theme} env="test">
       <QueryClientProvider client={client}>
         <AppRouter><WorkspaceProvider><AppFrame>{child}</AppFrame></WorkspaceProvider></AppRouter>
       </QueryClientProvider>
@@ -276,7 +277,9 @@ describe("library sidebar", () => {
     await user.type(search, "旧版の合言葉");
 
     expect(await screen.findByRole("button", { name: /検索結果をすべて表示/ })).toBeInTheDocument();
-    await user.click(screen.getByRole("checkbox", { name: "過去版も検索" }));
+    await user.click(screen.getByRole("button",{name:"検索方法：標準検索"}));
+    await user.click(await screen.findByRole("menuitem",{name:"過去版も含める"}));
+    await user.keyboard("{Escape}");
     await user.click(screen.getByRole("button", { name: /検索結果をすべて表示/ }));
     await waitFor(() => {
       expect(window.location.hash).toBe(`#/library?q=${encodeURIComponent("旧版の合言葉")}&intent=smart&versions=all`);
@@ -291,7 +294,7 @@ describe("library sidebar", () => {
   });
 
   it("shows real bounded library candidates and opens the chosen work", async () => {
-    librarySearch.mockResolvedValueOnce({ items: [{ id: 123, title: "長い作品の題名", authorName: "省略しない長い作者名" }] });
+    librarySearch.mockResolvedValueOnce({ items: [{ id: 123, source:"pixiv",title: "長い作品の題名", authorName: "省略しない長い作者名",downloadedAt:"2026-10-30T00:00:00Z",textLength:1234,currentVersion:1 }] });
     const user = userEvent.setup();
     renderApp("#/library");
     await user.click(await screen.findByRole("button", { name: "検索または移動" }));

@@ -2,9 +2,9 @@ import { useLocalStorage } from "@mantine/hooks";
 import type { LibrarySearchMode } from "@/types/library";
 
 export const searchModes = [
-  { value: "smart", label: "標準", description: "表記ゆれも含めて、タイトル・作者・タグ・本文を探します。" },
-  { value: "exact", label: "入力した語で", description: "言葉を広げず、入力した語を使って探します。" },
-  { value: "semantic", label: "意味で", description: "入力した文章に内容が近い作品を探します。現在版が対象です。" },
+  { value: "smart", label: "標準検索", description: "表記の違いを補い、タイトル・作者・タグ・本文から検索します。" },
+  { value: "exact", label: "キーワード検索", description: "関連語へ展開せず、入力した語を検索します。" },
+  { value: "semantic", label: "意味検索", description: "文章の内容が近い作品を検索します。現在の保存版が対象です。" },
 ] as const;
 
 export function parseSearchMode(value: unknown): LibrarySearchMode {
