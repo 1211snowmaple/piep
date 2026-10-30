@@ -82,6 +82,16 @@ test("acquisition conditions remain staged and can be removed before applying", 
   await page.goto("/#/library");
   await page.getByRole("button", { name: "絞り込み", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "詳細フィルター" });
+  await expect(dialog).toHaveCSS("opacity","1");
+  const close=dialog.getByRole("button",{name:"閉じる",exact:true});
+  await expect(close).toHaveCSS("width","32px");
+  await expect(close).toHaveCSS("height","32px");
+  expect(await dialog.evaluate(n=>{
+    const edge=n.getBoundingClientRect();
+    const closeBox=n.querySelector(".mantine-Modal-close")!.getBoundingClientRect();
+    const action=[...n.querySelectorAll("button")].find(b=>b.textContent==="適用")!.getBoundingClientRect();
+    return {top:closeBox.top-edge.top,right:closeBox.right-action.right,bottom:edge.bottom-action.bottom};
+  })).toEqual({top:24,right:0,bottom:24});
   await expect(dialog.getByRole("tab", { name: /^保存状態/ })).toHaveAttribute("aria-selected", "true");
   await dialog.getByRole("group", { name: "取得状態", exact:true }).getByRole("button", { name: "一部保存", exact: true }).click();
   await expect(dialog.getByLabel("適用する条件").getByRole("button", { name: "一部保存の作品を解除" })).toBeVisible();
