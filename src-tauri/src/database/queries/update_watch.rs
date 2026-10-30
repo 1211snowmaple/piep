@@ -627,6 +627,21 @@ impl Database {
         .map_err(|e| format!("Failed to read update candidate status: {}", e))
     }
 
+    /// A held partial save may be repaired, but dismissed or unsaved candidates
+    /// still require the user's explicit recheck action.
+    pub(crate) fn candidate_acquisition_blocked(
+        &self,
+        source: &str,
+        source_id: &str,
+        repair_save: bool,
+    ) -> Result<bool, String> {
+        let status = self.update_candidate_status(source, source_id)?;
+        Ok(matches!(status.as_deref(), Some("held" | "dismissed"))
+            && !(repair_save
+                && status.as_deref() == Some("held")
+                && self.has_incomplete_save_candidate(source, source_id)?))
+    }
+
     /// A saved partial work must remain repairable even without an update watch.
     pub(crate) fn has_incomplete_save_candidate(
         &self,
@@ -636,7 +651,9 @@ impl Database {
         let conn = self.read_conn()?;
         conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM update_candidates WHERE source=?1 AND source_id=?2
-             AND status='held' AND CASE WHEN json_valid(payload_json)
+             AND status='held'
+             AND EXISTS(SELECT 1 FROM downloads d WHERE d.source=update_candidates.source AND d.source_id=update_candidates.source_id)
+             AND CASE WHEN json_valid(payload_json)
              THEN json_extract(payload_json,'$.holdKind')='incomplete' ELSE 0 END)",
             params![source, source_id],
             |row| row.get(0),

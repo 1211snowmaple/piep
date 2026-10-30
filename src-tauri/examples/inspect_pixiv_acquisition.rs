@@ -18,7 +18,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .timeout(std::time::Duration::from_secs(30))
         .build()?;
     let mut results = Vec::new();
-    for id in &args[2..] {
+    for (index, id) in args[2..].iter().enumerate() {
+        if index > 0 {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
         if !id.chars().all(|ch| ch.is_ascii_digit()) {
             return Err("invalid novel ID".into());
         }

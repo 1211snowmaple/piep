@@ -222,6 +222,7 @@ describe("WorkPage content preview", () => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(<MantineProvider><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><WorkPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
     fireEvent.click(await screen.findByRole("button", { name: /理由と本文の位置/ }));
+    expect(await screen.findByRole("button",{name:"参照先の画像を開く：[pixivimage:42-2]"})).toBeInTheDocument();
     fireEvent.click(await screen.findByRole("button", { name: /本文 2ページ/ }));
     await waitFor(() => expect(dbApi.getReaderContentPage).toHaveBeenCalledWith(101, 2, 1));
     await waitFor(() => expect(document.querySelector('[data-image-reference="[pixivimage:42-2]"]')).toHaveAttribute("data-image-target", "true"));

@@ -83,6 +83,10 @@ const READER_CACHE_MAX_DOCUMENTS: usize = 8;
 const READER_CACHE_MAX_BYTES: usize = 64 * 1024 * 1024;
 const UPDATE_SNAPSHOT_CANDIDATE_PAGE_SIZE: i64 = 200;
 const UPDATE_SNAPSHOT_LOG_PAGE_SIZE: i64 = 300;
+// Physical save copies made while repairing acquisition are retained in history,
+// but do not count as an author revision. Legacy rows without history retain
+// their established version count until their files are reimported.
+const SOURCE_REVISION_EXISTS: &str = "(d.current_version > 1 AND (NOT EXISTS (SELECT 1 FROM download_versions v WHERE v.download_id=d.id AND v.version>1) OR EXISTS (SELECT 1 FROM download_versions v WHERE v.download_id=d.id AND v.version>1 AND v.change_kind<>'repair')))";
 static READER_CONTENT_CACHE: OnceLock<
     parking_lot::Mutex<HashMap<ReaderCacheKey, ReaderCacheEntry>>,
 > = OnceLock::new();
@@ -3000,6 +3004,7 @@ impl Database {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn commit_download_save_with_journal(
         &self,
         dl: &NewDownload,
@@ -3007,7 +3012,18 @@ impl Database {
         versions: &[NewVersion],
         journal_id: &str,
     ) -> Result<i64, String> {
-        self.commit_download_save_impl(dl, assets, versions, Some(journal_id), false)
+        self.commit_download_save_impl(dl, assets, versions, Some(journal_id), false, false)
+    }
+
+    pub(crate) fn commit_download_save_with_kind(
+        &self,
+        dl: &NewDownload,
+        assets: &[NewAsset],
+        versions: &[NewVersion],
+        journal_id: &str,
+        repair: bool,
+    ) -> Result<i64, String> {
+        self.commit_download_save_impl(dl, assets, versions, Some(journal_id), false, repair)
     }
 
     /// Rebuild a DB record from version directories that already exist on
@@ -3021,7 +3037,7 @@ impl Database {
         assets: &[NewAsset],
         versions: &[NewVersion],
     ) -> Result<i64, String> {
-        self.commit_download_save_impl(dl, assets, versions, None, false)
+        self.commit_download_save_impl(dl, assets, versions, None, false, false)
     }
 
     fn commit_download_save_impl(
@@ -3031,6 +3047,7 @@ impl Database {
         versions: &[NewVersion],
         journal_id: Option<&str>,
         fail_before_commit: bool,
+        repair: bool,
     ) -> Result<i64, String> {
         let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
         let tx = conn
@@ -3061,8 +3078,8 @@ impl Database {
             tx.execute(
                 "INSERT INTO download_versions (
                     download_id, version, content_hash, text_length, json_path,
-                    original_json_path, asset_count, file_size_bytes, created_at, change_summary
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                    original_json_path, asset_count, file_size_bytes, created_at, change_summary, change_kind
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 params![
                     download_id,
                     version.version,
@@ -3074,6 +3091,7 @@ impl Database {
                     version.file_size_bytes,
                     version.created_at,
                     version.change_summary,
+                    if repair && version.version == dl.current_version { "repair" } else { "source" },
                 ],
             )
             .map_err(|e| format!("Download save version insert failed: {e}"))?;
@@ -3109,7 +3127,7 @@ impl Database {
         assets: &[NewAsset],
         versions: &[NewVersion],
     ) -> Result<i64, String> {
-        self.commit_download_save_impl(dl, assets, versions, None, true)
+        self.commit_download_save_impl(dl, assets, versions, None, true, false)
     }
 
     pub fn upsert_download_relation(
@@ -7274,12 +7292,14 @@ impl Database {
         // 保存前に更新確認で改稿を見つけた作品も一度だけ数える。
         let revised = conn
             .query_row(
-                "SELECT COUNT(*)
+                &format!(
+                    "SELECT COUNT(*)
                    FROM downloads d
-                  WHERE d.current_version > 1 OR EXISTS (
+                  WHERE {SOURCE_REVISION_EXISTS} OR EXISTS (
                     SELECT 1 FROM update_candidates c
                      WHERE c.source = d.source AND c.source_id = d.source_id
-                       AND c.status = 'pending' AND c.kind = 'revision')",
+                       AND c.status = 'pending' AND c.kind = 'revision')"
+                ),
                 [],
                 |row| row.get(0),
             )
@@ -7463,7 +7483,7 @@ impl Database {
                        SUM(d.text_length) AS total_text_length,
                        SUM(d.file_size_bytes) AS total_file_size_bytes,
                        SUM(d.asset_count) AS total_asset_count,
-                       SUM(CASE WHEN d.current_version > 1 THEN d.current_version - 1 ELSE 0 END) AS total_revision_count,
+                       SUM(CASE WHEN EXISTS(SELECT 1 FROM download_versions v WHERE v.download_id=d.id AND v.version>1) THEN (SELECT COUNT(*) FROM download_versions v WHERE v.download_id=d.id AND v.version>1 AND v.change_kind<>'repair') ELSE MAX(d.current_version-1,0) END) AS total_revision_count,
                        MAX(s.is_concluded) AS is_concluded,
                        MAX(COALESCE(d.source_created_at, d.downloaded_at)) AS latest_work_at
                 FROM (
@@ -8454,7 +8474,7 @@ impl Database {
                         SUM(d.text_length) AS total_text_length,
                         SUM(d.file_size_bytes) AS total_file_size_bytes,
                         SUM(d.asset_count) AS total_asset_count,
-                        SUM(CASE WHEN d.current_version > 1 THEN d.current_version - 1 ELSE 0 END) AS total_revision_count
+                        SUM(CASE WHEN EXISTS(SELECT 1 FROM download_versions v WHERE v.download_id=d.id AND v.version>1) THEN (SELECT COUNT(*) FROM download_versions v WHERE v.download_id=d.id AND v.version>1 AND v.change_kind<>'repair') ELSE MAX(d.current_version-1,0) END) AS total_revision_count
                      {source}
                      {order}
                      LIMIT ? OFFSET ?",
@@ -8500,7 +8520,7 @@ impl Database {
                         SUM(d.text_length) AS total_text_length,
                         SUM(d.file_size_bytes) AS total_file_size_bytes,
                         SUM(d.asset_count) AS total_asset_count,
-                        SUM(CASE WHEN d.current_version > 1 THEN d.current_version - 1 ELSE 0 END) AS total_revision_count
+                        SUM(CASE WHEN EXISTS(SELECT 1 FROM download_versions v WHERE v.download_id=d.id AND v.version>1) THEN (SELECT COUNT(*) FROM download_versions v WHERE v.download_id=d.id AND v.version>1 AND v.change_kind<>'repair') ELSE MAX(d.current_version-1,0) END) AS total_revision_count
                      {source}
                      {order}
                      LIMIT ? OFFSET ?",
@@ -8806,6 +8826,28 @@ impl Database {
     }
 
     /// ダウンロードの全バージョン履歴取得
+    pub(crate) fn set_version_change_kind(
+        &self,
+        download_id: i64,
+        version: i64,
+        kind: &str,
+    ) -> Result<(), String> {
+        if !matches!(kind, "source" | "repair") {
+            return Err("Unknown save history kind".into());
+        }
+        self.conn
+            .lock()
+            .map_err(|error| error.to_string())?
+            .execute(
+                "UPDATE download_versions SET change_kind=?1 WHERE download_id=?2 AND version=?3",
+                params![kind, download_id, version],
+            )
+            .map_err(|error| error.to_string())?;
+        self.invalidate_index_status();
+        Ok(())
+    }
+
+    /// ダウンロードの全バージョン履歴取得
     pub fn get_versions(&self, download_id: i64) -> Result<Vec<DownloadVersion>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
@@ -8825,6 +8867,7 @@ impl Database {
                     file_size_bytes: row.get(8)?,
                     created_at: row.get(9)?,
                     change_summary: row.get(10)?,
+                    change_kind: row.get("change_kind")?,
                 })
             })
             .map_err(|e| format!("Query failed: {}", e))?;
@@ -8855,6 +8898,7 @@ impl Database {
                     file_size_bytes: row.get(8)?,
                     created_at: row.get(9)?,
                     change_summary: row.get(10)?,
+                    change_kind: row.get("change_kind")?,
                 })
             },
         )
@@ -8919,6 +8963,7 @@ impl Database {
                             file_size_bytes: row.get(8)?,
                             created_at: row.get(9)?,
                             change_summary: row.get(10)?,
+                            change_kind: row.get("change_kind")?,
                         })
                     },
                 )
@@ -13389,10 +13434,10 @@ fn append_library_filters(
             // `has_history` is accepted for saved searches created by builds
             // that briefly used that name. The condition is revision state,
             // not a promise that every old file is still retained.
-            "revised" | "has_history" => wheres.push("(d.current_version > 1 OR EXISTS (SELECT 1 FROM update_candidates c WHERE c.source = d.source AND c.source_id = d.source_id AND c.status = 'pending' AND c.kind = 'revision'))".to_string()),
+            "revised" | "has_history" => wheres.push(format!("({SOURCE_REVISION_EXISTS} OR EXISTS (SELECT 1 FROM update_candidates c WHERE c.source = d.source AND c.source_id = d.source_id AND c.status = 'pending' AND c.kind = 'revision'))")),
             "pending_revision" => wheres.push("EXISTS (SELECT 1 FROM update_candidates c WHERE c.source=d.source AND c.source_id=d.source_id AND c.status='pending' AND c.kind='revision')".to_string()),
-            "saved_revisions" => wheres.push("d.current_version > 1".to_string()),
-            "first_version" => wheres.push("d.current_version <= 1".to_string()),
+            "saved_revisions" => wheres.push(SOURCE_REVISION_EXISTS.to_string()),
+            "first_version" => wheres.push(format!("NOT {SOURCE_REVISION_EXISTS}")),
             _ => {}
         }
     }

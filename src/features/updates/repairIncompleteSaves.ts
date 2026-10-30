@@ -6,7 +6,9 @@ import { getUpdateJobCommand, getUpdateJobCredentials, listDeferredUpdateCandida
 import { invalidateAfterUpdateJob, isUpdateJobActive } from "./updateJobs";
 import { subscribeTauriEvent } from "@/services/eventBus";
 
-const ATTEMPTS_KEY = "piep.incomplete-save-repair.v1";
+// v1 jobs were stopped by the generic held-candidate gate before fetching.
+// Retry that generation once after repairing the native dispatch path.
+const ATTEMPTS_KEY = "piep.incomplete-save-repair.v2";
 type RepairResult = { waiting: boolean; job?: UpdateJobSnapshot };
 let starting: Promise<RepairResult> | null = null;
 

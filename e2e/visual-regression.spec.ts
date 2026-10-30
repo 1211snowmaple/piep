@@ -230,7 +230,7 @@ test("detail filters open as a search spotlight and keep author names readable",
 
   await spotlight.getByRole("tab", { name: /^保存状態/ }).click();
   await expect(spotlight.getByRole("radiogroup", { name: "検索する版" })).toBeVisible();
-  await expect(spotlight.getByRole("combobox", { name: "改稿状態" })).toBeVisible();
+  await expect(spotlight.getByRole("group", { name: "改稿状態" })).toBeVisible();
   const statusGeometry = await spotlight.evaluate((element) => ({
     width: element.clientWidth,
     scrollWidth: element.scrollWidth,

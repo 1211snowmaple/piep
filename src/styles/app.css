@@ -5,6 +5,8 @@
   /* Overridden on the app shell to follow the rail; this is only the fallback
      for anything rendered outside it. */
   --piep-sidebar-width: 194px;
+  --piep-header-height: 48px;
+  --piep-dialog-gutter: 24px;
 }
 
 *,
@@ -43,8 +45,8 @@ pre,
 }
 
 .mantine-Notifications-root {
-  /* 固定ヘッドバー（58px）の直下に、少し呼吸できる間隔を空ける。 */
-  top: var(--piep-notification-top, 70px) !important;
+  /* 固定ヘッドバー（48px）の直下に、少し呼吸できる間隔を空ける。 */
+  top: var(--piep-notification-top, calc(var(--piep-header-height) + 12px)) !important;
   right: 16px !important;
   bottom: auto !important;
   width: min(360px, calc(100vw - 32px)) !important;
@@ -505,8 +507,8 @@ select {
    the title, search, navigation and Apply button never jump under the cursor. */
 .filter-spotlight {
   display: flex;
-  height: min(554px, calc(100dvh - 24px));
-  max-height: calc(100dvh - 24px);
+  height: min(660px, calc(100dvh - 32px));
+  max-height: calc(100dvh - 32px);
   flex-direction: column;
   overflow: hidden;
 }
@@ -548,7 +550,7 @@ select {
 .filter-spotlight__search-zone {
   position: relative;
   z-index: 3;
-  padding: 8px var(--mantine-spacing-md);
+  padding: 16px var(--piep-dialog-gutter);
   border-bottom: 1px solid var(--app-shell-border-color, light-dark(#e3e8ee, #232a35));
   background: light-dark(var(--mantine-color-white), var(--mantine-color-dark-7));
 }
@@ -556,7 +558,7 @@ select {
   display: block;
 }
 .filter-spotlight__dropdown {
-  width: calc(100% - 2 * var(--mantine-spacing-md)) !important;
+  width: calc(100% - 2 * var(--piep-dialog-gutter)) !important;
   box-shadow: var(--mantine-shadow-lg);
 }
 .filter-spotlight__results {
@@ -617,35 +619,36 @@ select {
   white-space: normal;
 }
 .filter-form__fields {
-  display: flex;
+  display: grid;
+  grid-template-columns: 148px minmax(0, 1fr);
   min-height: 0;
   flex: 1 1 auto;
-  flex-direction: column;
   overflow: hidden;
 }
 .filter-spotlight__section-tabs {
   display: flex;
-  min-height: 42px;
+  min-height: 0;
+  flex-direction: column;
   flex: 0 0 auto;
   gap: 2px;
-  overflow-x: auto;
-  padding: 5px var(--mantine-spacing-md);
-  border-bottom: 1px solid var(--app-shell-border-color, light-dark(#e3e8ee, #232a35));
+  overflow-y: auto;
+  padding: 12px 8px;
+  border-right: 1px solid var(--app-shell-border-color, light-dark(#e3e8ee, #232a35));
   background: light-dark(var(--mantine-color-gray-0), var(--mantine-color-dark-8));
   scrollbar-width: none;
 }
 .filter-spotlight__section-tabs::-webkit-scrollbar { display: none; }
 .filter-spotlight__section-tab {
   display: inline-flex;
-  min-height: 30px;
+  min-height: 40px;
   flex: 0 0 auto;
   align-items: center;
   gap: 5px;
-  padding: 4px 9px;
+  padding: 8px 10px;
   border: 1px solid transparent;
-  border-radius: var(--mantine-radius-xl);
+  border-radius: var(--mantine-radius-md);
   color: var(--mantine-color-dimmed);
-  font-size: var(--mantine-font-size-xs);
+  font-size: var(--mantine-font-size-sm);
   font-weight: 650;
 }
 .filter-spotlight__section-tab:hover { background: light-dark(var(--mantine-color-gray-1), var(--mantine-color-dark-6)); }
@@ -669,6 +672,7 @@ select {
   color: inherit;
   font-size: 10px;
   font-variant-numeric: tabular-nums;
+  margin-left: auto;
 }
 .filter-spotlight__section-tab[data-active] b { background: light-dark(var(--mantine-color-piep-1), var(--mantine-color-piep-9)); }
 .filter-spotlight__panel {
@@ -676,7 +680,7 @@ select {
   flex: 1 1 auto;
   overflow-y: auto;
   overscroll-behavior: contain;
-  padding: 10px var(--mantine-spacing-md) 12px;
+  padding: 16px 20px;
 }
 .filter-spotlight__quick-option {
   display: grid;
@@ -735,7 +739,7 @@ select {
   align-items: center;
   justify-content: space-between;
   gap: var(--mantine-spacing-md);
-  padding: 8px var(--mantine-spacing-md);
+  padding: var(--piep-dialog-gutter);
   border-top: 1px solid var(--app-shell-border-color, light-dark(#e3e8ee, #232a35));
   background: light-dark(var(--mantine-color-white), var(--mantine-color-dark-7));
   box-shadow: 0 -8px 24px light-dark(rgb(15 23 42 / 3%), rgb(0 0 0 / 10%));
@@ -1130,14 +1134,14 @@ select {
 .work-card__author:hover .mantine-Text-root { color: var(--mantine-color-piep-7); }
 .work-card__author:focus-visible { outline: 2px solid var(--mantine-color-piep-5); outline-offset: 2px; }
 .work-card__identity,
-.work-row__identity { display: flex; min-width: 0; min-height: 22px; align-items: center; gap: 8px; flex-wrap: wrap; }
+.work-row__identity { display: flex; min-width: 0; min-height: 22px; align-items: center; gap: 8px; flex-wrap: nowrap; }
 /* Names use the actual available width and wrap beside the provider mark. */
 .work-card__identity .work-card__author,
 .work-row__identity .work-card__author { flex: 0 1 auto; max-width: 100%; }
 .identity-name { min-width: 0; white-space: normal; overflow-wrap: anywhere; }
 .work-card__author .identity-name { flex: 1 1 auto; }
 .work-card__identity .work-card__provider,
-.work-row__identity .work-card__provider { flex: 0 0 auto; margin-left: auto; }
+.work-row__identity .work-card__provider { flex: 0 0 auto; }
 .work-card__identity-divider { width: 1px; height: 18px; flex: 0 0 auto; background: light-dark(#d5dae0, #38414c); }
 
 /* The series line above the title is the link to the series. */
@@ -3260,7 +3264,8 @@ select {
 
    丸い箱は「切り抜く側」に徹させ、スクロールは中身に持たせる。ついでに見出しが
    上に留まるので、長い一覧を送っても題と閉じるボタンが見えたままになる。 */
-.mantine-Modal-content {
+.mantine-Modal-content,
+.mantine-Spotlight-content {
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -3354,12 +3359,13 @@ select {
 .revision-metadata-value[data-kind="removed"] { background: light-dark(var(--mantine-color-red-0), var(--mantine-color-red-9)); }
 [data-image-target="true"] { outline: 2px solid var(--mantine-color-orange-6); outline-offset: 4px; scroll-margin: 24px; }
 
-/* Names identify a person; the available column determines wrapping, not a percentage cap. */
-.work-card__identity { display: grid; grid-template-columns: minmax(0, 1fr) auto; }
-.work-card__identity > .work-card__identity-divider { display: none; }
-.work-card__identity > .work-card__provider { grid-column: 2; }
-.app-history-controls { padding: 3px 7px; border-radius: 999px; background: light-dark(#f3f4fa, #272b35); }
-.app-history-controls .mantine-ActionIcon-root { width: 34px; height: 34px; border-radius: 50%; }
+/* Header actions keep their background transparent in every interaction state. */
+.app-history-controls { padding: 0; background: transparent; }
+.app-history-controls .mantine-ActionIcon-root { width: 32px; height: 32px; background: transparent !important; border-color: transparent; }
+.app-history-controls .mantine-ActionIcon-root:disabled { color: light-dark(#aeb7c0, #626c78); }
+.app-history-controls [data-refreshing] svg { animation: header-refresh 1.2s linear infinite; }
+@keyframes header-refresh { to { transform: rotate(360deg); } }
+.search-method-control { width: 38px; display: inline-flex; gap: 2px; }
 .settings-nav { position: sticky; top: 0; display: block; }
 .settings-nav__group + .settings-nav__group { margin-top: 12px; }
 .settings-nav .mantine-NavLink-label,
@@ -3378,10 +3384,44 @@ select {
   .settings-nav__group > .mantine-Text-root { grid-column: 1 / -1; }
 }
 
-.work-card__identity > .work-card__provider { align-self: start; margin-top: 3px; }
+.mantine-Spotlight-content { height: auto; max-height: calc(100dvh - 40px); }
+.mantine-Spotlight-body { height: auto; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+.mantine-Spotlight-actionsList { min-height: 0; }
+.global-search__work { height: 56px; min-height: 56px; gap: 12px; padding-block: 7px; }
+.global-search__work-body { flex: 1; min-width: 0; }
+.global-search__work-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--mantine-font-size-sm); line-height: 20px; font-weight: 600; }
+.global-search__work-title mark { background: transparent; color: inherit; font-weight: 800; }
+.global-search__work-meta { display: grid; grid-template-columns: minmax(0, 1fr) 8.2em 7.2em 3em; align-items: center; gap: 12px; font-variant-numeric: tabular-nums; height: 19px; color: var(--action-description-color, var(--mantine-color-dimmed)); font-size: var(--mantine-font-size-xs); }
+.global-search__work-meta > span { display: inline-flex; align-items: center; gap: 4px; flex: 0 0 auto; white-space: nowrap; }
+.global-search__work-meta > .global-search__work-author { display: block; flex: 1 1 auto; min-width: 32px; overflow: hidden; text-overflow: ellipsis; }
+.global-search__work-version { color: inherit; justify-content: flex-end; }
+.global-search__work-length > span { margin-left: auto; }
+.global-search__work-date > span { margin-left: 0; }
+.mantine-Accordion-item { overflow: hidden; }
+.mantine-Accordion-control { border-radius: inherit; outline-offset: -2px; }
+.asset-preview-modal { height: min(820px, calc(100dvh - 48px)); }
+.asset-preview-modal .mantine-Modal-body { display: flex; overflow: hidden; }
+.asset-preview { display: grid; grid-template-rows: minmax(0, 1fr) auto; gap: var(--piep-dialog-gutter); min-height: 0; flex: 1; }
+.asset-preview__canvas { display: flex; align-items: center; justify-content: center; min-height: 0; overflow: hidden; }
+.asset-preview__canvas img { width: 100%; height: 100%; object-fit: contain; }
+.asset-preview__footer { flex: 0 0 auto; min-height: 36px; }
+.asset-preview__footer .mantine-Button-root { min-width: 112px; min-height: 36px; font-size: var(--mantine-font-size-sm); }
 
 .settings-nav .mantine-NavLink-root { border-radius: var(--mantine-radius-md); }
 
 .tag-overflow__list { max-height: min(320px, 50vh); overflow: auto; }
 .tag-overflow__tag { height: auto; min-height: 26px; max-width: 100%; padding-block: 4px; }
 .tag-overflow__tag .mantine-Badge-label { white-space: normal; overflow-wrap: anywhere; }
+
+.filter-choice-group { padding: 8px 10px; border: 1px solid var(--mantine-color-default-border); border-radius: 12px; }
+.filter-choice-group__label { margin-bottom: 6px; font-size: var(--mantine-font-size-sm); line-height: 18px; font-weight: 650; }
+.filter-choice-group__options { display: flex; flex-wrap: wrap; gap: 6px; }
+.filter-choice { display: inline-flex; align-items: center; justify-content: center; gap: 4px; min-height: 30px; padding: 4px 9px; border: 1px solid transparent; border-radius: 7px; font-size: 13px; line-height: 18px; color: light-dark(#49535f, #d7dce3); background: light-dark(#f4f6f8, #252d38); }
+.filter-choice:hover { color: var(--mantine-color-text); }
+.filter-choice[data-selected] { color: light-dark(var(--mantine-color-piep-8), var(--mantine-color-piep-1)); background: light-dark(var(--mantine-color-piep-0), #203d59); border-color: light-dark(var(--mantine-color-piep-2), var(--mantine-color-piep-8)); }
+.filter-choice:focus-visible { outline: 2px solid var(--mantine-color-piep-5); outline-offset: 1px; }
+.filter-form > [aria-label="適用する条件"] { max-height: 76px; overflow: auto; flex: 0 0 auto; }
+.library-toolbar__options { flex: 0 0 auto; }
+.library-toolbar__row { min-width: 0; }
+.library-toolbar .mantine-Input-input { min-height: 36px; height: 36px; font-size: var(--mantine-font-size-sm); }
+.library-toolbar__search .mantine-Input-input { min-height: 40px; height: 40px; }

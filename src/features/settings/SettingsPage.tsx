@@ -441,8 +441,8 @@ export default function SettingsPage() {
   }, [automaticFinished, queryClient]);
 
   const nav = [
-    { id: "connections", label: "サービス接続", description: "保存・更新に使うアカウント", icon: Icons.credentials, group: "保存する", keywords: "pixiv FANBOX 認証 ログイン 再接続" },
-    { id: "library", label: "保存とバックアップ", description: "保存先・書き出し・復元", icon: Icons.database, group: "保存する", keywords: "ローカルライブラリ フォルダー 再取り込み" },
+    { id: "connections", label: "サービス接続", description: "保存・更新に使うアカウント", icon: Icons.credentials, group: "接続とデータ", keywords: "pixiv FANBOX 認証 ログイン 再接続" },
+    { id: "library", label: "保存とバックアップ", description: "保存先・書き出し・復元", icon: Icons.database, group: "接続とデータ", keywords: "ローカルライブラリ フォルダー 再取り込み" },
     { id: "appearance", label: "表示と操作", description: "テーマ・サイドバー・一覧", icon: Icons.appearance, group: "使いやすくする", keywords: "外観 文字 色 ページ 件数 高密度 ショートカット" },
     { id: "search", label: "検索", description: "探し方・検索データ", icon: Icons.search, group: "使いやすくする", keywords: "インデックス 索引 意味検索 GPU" },
     { id: "assist", label: "AIの手伝い", description: "モデル・接続・利用する機能", icon: Icons.optimize, group: "使いやすくする", keywords: "推論 サーバー" },
@@ -606,18 +606,18 @@ function SearchSection({ status, rebuild, runtime, rebuilding, start, cancel }: 
     </Card>
     <Card p="lg">
       <Group justify="space-between">
-        <Box><Text fw={700}>意味検索モデル</Text><Text size="sm" c="dimmed" mt={5}>{status?.embeddingProvider || "未初期化"}</Text></Box>
-        <Badge color={status?.semanticModelReady ? "green" : "gray"} variant="light">{status?.semanticModelReady ? "利用可能" : "準備中"}</Badge>
+        <Box><Text fw={700}>意味検索モデル</Text><Text size="sm" c="dimmed" mt={5}>{status?.semanticModelReady ? status.embeddingProvider : "初回の意味検索で読み込みます"}</Text></Box>
+        <Badge color={status?.semanticModelReady ? "green" : "gray"} variant="light">{!status?.semanticEnabled ? "未使用" : status.semanticModelReady ? "利用可能" : "未起動"}</Badge>
       </Group>
       <Divider my="md" />
       {/* 断片の数だけでは、棚のどこまで届いているのかが分からない。作品数で言う。 */}
       <Group gap="xl">
-        <Text size="sm">覆えている作品 <b>{formatNumber(status?.semanticIndexedDownloads)}</b> / {formatNumber(status?.totalDownloads)}</Text>
+        <Text size="sm">検索データを保存済みの作品 <b>{formatNumber(status?.semanticIndexedDownloads)}</b> / {formatNumber(status?.totalDownloads)}</Text>
         <Text size="sm">作品ベクトル <b>{formatNumber(status?.semanticIndexedChunks)}</b></Text>
-        <Text size="sm">GPU <b>{status?.gpuEnabled ? "有効" : "無効"}</b></Text>
+        <Text size="sm">GPU <b>{!status?.semanticModelReady ? "未起動" : status.gpuEnabled ? "有効" : "未使用"}</b></Text>
       </Group>
       {status?.semanticEnabled && Boolean(status?.semanticPendingDownloads) && <Note mt="md">{formatNumber(status?.semanticPendingDownloads)}件は意味検索の対象になっていません。上の「作品単位の意味検索」を有効にして再構築すると追いつきます。</Note>}
-      <Note mt="md">全文検索の索引づくりはCPUの処理で、GPUは使いません。GPU（DirectML）を使うのは上の「意味検索のベクトル」だけです。</Note>
+      <Note mt="md">全文検索の索引作成はCPUで行います。意味検索は初回利用時にモデルを読み込み、利用可能な環境ではGPU（DirectML）を使います。保存済みの検索データを作り直す必要はありません。</Note>
     </Card>
     <Note>再構築中もライブラリの通常検索は利用できます。中止したり、アプリを終了したりした場合は、確定済みのところまでが保持され、次回は続きから再開します。</Note>
     </Stack></Accordion.Panel></Accordion.Item></Accordion>

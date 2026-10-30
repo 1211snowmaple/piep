@@ -25,5 +25,5 @@ export function PageRefreshControl() {
     }
   }, [client]);
   useHotkeys([["F5", () => void refresh()], ["mod+R", () => void refresh()]], [], true);
-  return <Tooltip label="画面を更新（F5）"><ActionIcon variant="subtle" color="gray" aria-label="画面を更新" loading={refreshing} onClick={() => void refresh()}><Icons.retry size={IconSize.nav} /></ActionIcon></Tooltip>;
+  return <Tooltip label="画面を更新（F5）"><ActionIcon variant="subtle" color="gray" aria-label="画面を更新" aria-busy={refreshing} disabled={refreshing} data-refreshing={refreshing || undefined} onClick={() => void refresh()}><Icons.retry size={IconSize.nav} /></ActionIcon></Tooltip>;
 }

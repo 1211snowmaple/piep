@@ -31,10 +31,15 @@ export function activeShelf(pathname: string, params: URLSearchParams): LibraryS
   if (params.get("saved")) return null;
   if (params.get("q")) return null;
   if (params.get("tab") && params.get("tab") !== "works") return null;
+  const shelfParams = new Set(["tab", "favorite", "shelf", "revised", "revision", "sort", "order", "page", "view", "intent"]);
+  if ([...params.keys()].some((key) => !shelfParams.has(key))) return null;
+  if (params.has("revision") && params.get("revision") !== "revised") return null;
+  if (params.has("favorite") && params.get("favorite") !== "1") return null;
+  if (params.has("shelf") && params.get("shelf") !== "reading") return null;
   const favorite = params.get("favorite") === "1";
   const watch = params.get("watch");
   const shelf = params.get("shelf");
-  const revised = params.get("revised") === "1";
+  const revised = params.get("revised") === "1" || params.get("revision") === "revised";
   if (shelf === "reading") return favorite || watch || revised ? null : "reading";
   if (revised) return favorite || watch ? null : "revised";
   if (favorite) return watch ? null : "favorite";

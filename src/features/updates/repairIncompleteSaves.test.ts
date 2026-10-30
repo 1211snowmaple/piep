@@ -26,6 +26,13 @@ it("queues missing details through the normal save job and does not repeat accep
   expect(api.start).toHaveBeenCalledOnce();
 });
 
+it("retries the generation which was blocked before native acquisition", async () => {
+  localStorage.setItem("piep.incomplete-save-repair.v1", JSON.stringify(["pixiv:1"]));
+  expect((await startIncompleteSaveRepair()).job?.jobId).toBe("repair-job");
+  expect(await startIncompleteSaveRepair()).toEqual({waiting:false});
+  expect(api.start).toHaveBeenCalledOnce();
+});
+
 it("repairs missing illustrations even when the caption and tags are already saved", async () => {
   api.read.mockResolvedValue('{"detail":{"caption":"","tags":[{"name":"tag"}]}}');
   expect((await startIncompleteSaveRepair()).job?.jobId).toBe("repair-job");

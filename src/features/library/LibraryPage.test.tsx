@@ -33,6 +33,15 @@ describe("LibraryPage search", () => {
     window.location.hash = "#/library";
   });
 
+  it("shows and clears the revision shelf through the common active filter",async()=>{
+    window.location.hash="#/library?revised=1";
+    const client = new QueryClient({defaultOptions:{queries:{retry:false}}});
+    render(<MantineProvider env="test"><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
+    const remove=await screen.findByRole("button",{name:"改稿ありを解除"});
+    fireEvent.click(remove);
+    await waitFor(()=>expect(window.location.hash).not.toMatch(/revised=|revision=/));
+  });
+
   it.each([["incomplete", "一部保存"], ["unavailable", "見つからない"]])("shows saved %s works in the ordinary library with a removable filter", async (filter, label) => {
     window.location.hash = `#/library?acquisition=${filter}`;
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -67,7 +76,7 @@ describe("LibraryPage search", () => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(<MantineProvider env="test"><QueryClientProvider client={client}><ModalsProvider><AppRouter><WorkspaceProvider><LibraryPage /></WorkspaceProvider></AppRouter></ModalsProvider></QueryClientProvider></MantineProvider>);
     const input = await screen.findByLabelText("ライブラリを検索");
-    expect(screen.getByRole("combobox", { name: "検索方法" })).toHaveValue("入力した語で");
+    expect(screen.getByRole("button", { name: "検索方法：キーワード検索" })).toBeInTheDocument();
     fireEvent.change(input, { target: { value: "別の言葉" } });
     await waitFor(() => expect(new URLSearchParams(window.location.hash.split("?")[1]).get("q")).toBe("別の言葉"));
     expect(window.location.hash).toContain("intent=exact");
@@ -81,15 +90,13 @@ describe("LibraryPage search", () => {
     await user.click(await screen.findByRole("button", { name: "絞り込み" }));
     const dialog = await screen.findByRole("dialog", { name: "詳細フィルター" });
     expect(within(dialog).getByRole("tab", { name: /^保存状態/ })).toHaveAttribute("aria-selected", "true");
-    await user.click(within(dialog).getByRole("combobox", { name: "取得状態" }));
-    await user.click(await screen.findByRole("option", { name: "一部保存" }));
-    await user.click(within(dialog).getByRole("combobox", { name: "改稿状態" }));
-    await user.click(await screen.findByRole("option", { name: "未保存の改稿あり" }));
+    await user.click(within(within(dialog).getByRole("group", { name: "取得状態" })).getByRole("button", { name: "一部保存" }));
+    await user.click(within(within(dialog).getByRole("group", { name: "改稿状態" })).getByRole("button", { name: "未保存の改稿あり" }));
     expect(window.location.hash).not.toContain("acquisition=");
     const summary = within(dialog).getByLabelText("適用する条件");
     expect(within(summary).getByRole("button", { name: "一部保存の作品を解除" })).toBeVisible();
     await user.click(within(summary).getByRole("button", { name: "一部保存の作品を解除" }));
-    expect(within(dialog).getByRole("combobox", { name: "取得状態" })).toHaveValue("");
+    expect(within(within(dialog).getByRole("group", { name: "取得状態" })).getByRole("button",{name:"すべて"})).toHaveAttribute("aria-pressed","true");
     await user.click(within(dialog).getByRole("tab", { name: /^基本/ }));
     await user.click(within(dialog).getByRole("combobox", { name: "お気に入り" }));
     await user.click(await screen.findByRole("option", { name: "お気に入り以外" }));
@@ -507,9 +514,9 @@ describe("LibraryPage search", () => {
     expect(within(spotlight).getByRole("checkbox", { name: "pixiv" })).toBeInTheDocument();
     fireEvent.click(within(sectionTabs).getByRole("tab", { name: /^保存状態/ }));
     expect(within(spotlight).getByRole("radiogroup", { name: "検索する版" })).toBeInTheDocument();
-    expect(within(spotlight).getByRole("combobox", { name: "改稿状態" })).toBeInTheDocument();
-    expect(within(spotlight).getByRole("combobox", { name: "ローカル編集" })).toBeInTheDocument();
-    expect(within(spotlight).getByRole("combobox", { name: "表紙" })).toBeInTheDocument();
+    expect(within(spotlight).getByRole("group", { name: "改稿状態" })).toBeInTheDocument();
+    expect(within(spotlight).getByRole("group", { name: "ローカル編集" })).toBeInTheDocument();
+    expect(within(spotlight).getByRole("group", { name: "表紙" })).toBeInTheDocument();
     fireEvent.click(within(sectionTabs).getByRole("tab", { name: /^タグ/ }));
     expect((await within(spotlight).findAllByRole("button", { name: /を含めるタグへ追加/ })).length).toBeGreaterThan(0);
     expect(within(spotlight).getByRole("radiogroup", { name: "複数タグの条件" })).toBeInTheDocument();
@@ -610,9 +617,9 @@ describe("LibraryPage search", () => {
     expect(within(spotlight).getByRole("checkbox", { name: "pixiv" })).toBeChecked();
     fireEvent.click(within(spotlight).getByRole("tab", { name: /^保存状態/ }));
     expect(within(spotlight).getByRole("radio", { name: "過去版も含む" })).toBeChecked();
-    expect(within(spotlight).getByRole("combobox", { name: "改稿状態" })).toHaveValue("改稿あり");
-    expect(within(spotlight).getByRole("combobox", { name: "ローカル編集" })).toHaveValue("編集あり");
-    expect(within(spotlight).getByRole("combobox", { name: "表紙" })).toHaveValue("表紙あり");
+    expect(within(within(spotlight).getByRole("group",{name:"改稿状態"})).getByRole("button",{name:"改稿あり"})).toHaveAttribute("aria-pressed","true");
+    expect(within(within(spotlight).getByRole("group",{name:"ローカル編集"})).getByRole("button",{name:"編集あり"})).toHaveAttribute("aria-pressed","true");
+    expect(within(within(spotlight).getByRole("group",{name:"表紙"})).getByRole("button",{name:"表紙あり"})).toHaveAttribute("aria-pressed","true");
     fireEvent.click(within(spotlight).getByRole("tab", { name: /^タグ/ }));
     expect(within(within(spotlight).getByRole("region", { name: "含める条件" })).getByText("#創作")).toBeInTheDocument();
     fireEvent.click(within(spotlight).getByRole("tab", { name: /^日付/ }));

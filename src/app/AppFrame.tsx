@@ -3,7 +3,6 @@ import {
   ActionIcon,
   AppShell,
   Box,
-  Burger,
   Divider,
   Group,
   Image,
@@ -332,7 +331,7 @@ export function AppFrame({ children }: { children: ReactNode }) {
       {/* A normal #main-content link would replace this app's hash route. */}
       <button type="button" className="skip-link" onClick={() => mainRef.current?.focus()}>本文へ移動</button>
       <AppShell
-        header={{ height: 58 }}
+        header={{ height: 48 }}
         navbar={{ width: navbarWidth, breakpoint: "md", collapsed: { mobile: !mobileOpened } }}
         padding={0}
         className="app-shell"
@@ -343,14 +342,15 @@ export function AppFrame({ children }: { children: ReactNode }) {
         <AppShell.Header className="app-header">
           <Group h="100%" px={{ base: "sm", md: "md" }} justify="space-between" wrap="nowrap">
             <Group gap="sm" wrap="nowrap">
-              <Burger
-                opened={mobileOpened}
+              <ActionIcon
                 onClick={mobile.toggle}
                 hiddenFrom="md"
-                size="sm"
+                variant="subtle"
+                color="gray"
                 aria-label={mobileOpened ? "ナビゲーションを閉じる" : "ナビゲーションを開く"}
                 aria-controls="app-navigation"
-              />
+                aria-expanded={mobileOpened}
+              >{mobileOpened ? <Icons.sidebarClose size={IconSize.nav} /> : <Icons.sidebarOpen size={IconSize.nav} />}</ActionIcon>
               {/* Sits exactly where the burger appears on a narrow window, so
                   the control for the sidebar is always in the same place. A
                   panel glyph rather than another set of bars, which would read

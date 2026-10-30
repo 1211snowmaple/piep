@@ -1552,6 +1552,12 @@ pub struct DownloadVersion {
     pub file_size_bytes: i64,
     pub created_at: String,
     pub change_summary: Option<String>,
+    #[serde(default = "source_version_change_kind")]
+    pub change_kind: String,
+}
+
+fn source_version_change_kind() -> String {
+    "source".to_string()
 }
 
 /// 新規バージョン履歴挿入用

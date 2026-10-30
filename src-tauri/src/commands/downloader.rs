@@ -938,10 +938,66 @@ fn pixiv_illustrations_were_recovered(
         .any(|reference| !missing_after.contains(reference))
 }
 
+/// Filling a previously incomplete save does not constitute an author revision.
+/// Existing, nonempty source metadata must still match; a real text edit wins.
+fn pixiv_update_is_repair(
+    previous: &serde_json::Value,
+    next: &serde_json::Value,
+    assets: &[crate::database::AssetEntry],
+) -> bool {
+    use serde_json::Value;
+    if crate::database::queries::saved_pixiv_missing_references(previous, assets).is_empty()
+        || previous.get("text").and_then(Value::as_str).is_none()
+        || previous.get("text") != next.get("text")
+    {
+        return false;
+    }
+    let blank = |value: &Value| {
+        value.is_null()
+            || value.as_str().is_some_and(str::is_empty)
+            || value.as_array().is_some_and(Vec::is_empty)
+    };
+    for key in ["title", "caption", "tags", "series_id", "series_title"] {
+        let before = &previous["detail"][key];
+        let after = &next["detail"][key];
+        if before != after && !blank(before) {
+            return false;
+        }
+    }
+    let before_cover = previous["cover_url"].as_str().unwrap_or_default();
+    let after_cover = next["cover_url"].as_str().unwrap_or_default();
+    before_cover == after_cover
+        || before_cover.is_empty()
+        || before_cover.contains("/common/images/")
+}
+
 #[cfg(test)]
 mod pixiv_asset_recovery_tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn repairs_fill_missing_details_but_never_hide_author_edits() {
+        let previous = json!({"detail":{"title":"題名","caption":"","tags":[]},"text":"本文[pixivimage:123]","missing_illustrations":["[pixivimage:123]"],"cover_url":"https://s.pximg.net/common/images/novel.png"});
+        let mut repaired = previous.clone();
+        repaired["detail"]["caption"] = json!("取得できた説明");
+        repaired["detail"]["tags"] = json!([{"name":"タグ"}]);
+        repaired["cover_url"] = json!("https://i.pximg.net/cover.jpg");
+        assert!(pixiv_update_is_repair(&previous, &repaired, &[]));
+        for (pointer, value) in [
+            ("/text", json!("変更された本文")),
+            ("/detail/title", json!("変更された題名")),
+        ] {
+            let mut changed = repaired.clone();
+            *changed.pointer_mut(pointer).unwrap() = value;
+            assert!(!pixiv_update_is_repair(&previous, &changed, &[]));
+        }
+        let mut caption_edit = repaired.clone();
+        caption_edit["detail"]["caption"] = json!("作者が変更した説明");
+        assert!(!pixiv_update_is_repair(&repaired, &caption_edit, &[]));
+        let complete = json!({"detail":{"title":"題名"},"text":"本文"});
+        assert!(!pixiv_update_is_repair(&complete, &complete, &[]));
+    }
 
     #[test]
     fn pixiv_saved_metadata_changes_are_detected_even_when_the_body_and_tag_count_match() {
@@ -2170,6 +2226,7 @@ pub async fn download_and_save(
     let existing_dl = state.db.get_download_by_source(&source, &source_id)?;
     let mut next_version = 1i64;
     let mut is_update = false;
+    let mut is_repair = false;
 
     // 初めて保存するものが空なら、そもそもライブラリに入れない。
     //
@@ -2223,17 +2280,16 @@ pub async fn download_and_save(
         } else {
             Vec::new()
         };
-        let pixiv_illustrations_recovered = if source == "pixiv" {
+        let previous_pixiv = if source == "pixiv" {
             std::fs::read_to_string(&dl.json_path)
                 .ok()
                 .and_then(|body| serde_json::from_str::<serde_json::Value>(&body).ok())
-                .map(|previous| {
-                    pixiv_illustrations_were_recovered(&previous, &data, &previous_pixiv_assets)
-                })
-                .unwrap_or(false)
         } else {
-            false
+            None
         };
+        let pixiv_illustrations_recovered = previous_pixiv.as_ref().is_some_and(|previous| {
+            pixiv_illustrations_were_recovered(previous, &data, &previous_pixiv_assets)
+        });
         let updated_changed = if source == "fanbox" {
             !crate::source_time::same_instant(
                 dl.source_updated_at.as_deref(),
@@ -2263,6 +2319,12 @@ pub async fn download_and_save(
 
         if hash_changed || updated_changed || assets_need_repair || pixiv_illustrations_recovered {
             is_update = true;
+            is_repair = previous_pixiv.as_ref().is_some_and(|previous| {
+                pixiv_update_is_repair(previous, &data, &previous_pixiv_assets)
+            }) || (source == "fanbox"
+                && assets_need_repair
+                && !hash_changed
+                && !updated_changed);
             next_version = dl.current_version + 1;
         } else {
             drop(_library_write_guard);
@@ -2440,7 +2502,9 @@ pub async fn download_and_save(
         asset_count: new_dl.asset_count,
         file_size_bytes: new_dl.file_size_bytes,
         created_at: new_dl.downloaded_at.clone(),
-        change_summary: Some(if is_update {
+        change_summary: Some(if is_repair {
+            format!("不足していた保存内容を補完 (v{})", next_version)
+        } else if is_update {
             format!("保存内容を更新 (v{})", next_version)
         } else {
             format!("新規ダウンロード (v{})", next_version)
@@ -2473,11 +2537,12 @@ pub async fn download_and_save(
         next_version,
         version_stage,
         |journal_id| {
-            state.db.commit_download_save_with_journal(
+            state.db.commit_download_save_with_kind(
                 &new_dl,
                 &asset_entries,
                 &versions_to_insert,
                 journal_id,
+                is_repair,
             )
         },
     )
