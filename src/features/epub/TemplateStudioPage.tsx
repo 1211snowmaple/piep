@@ -433,8 +433,9 @@ function StructureEditor({ template, readOnly, onSaved }: { template: TemplateIn
                 <Checkbox aria-label={`${field.label}を表示`} disabled={readOnly} checked={field.enabled} onChange={(event) => updateField(index, { enabled: event.currentTarget.checked })} />
                 <TextInput size="xs" flex={1} aria-label={`${field.key}の見出し`} value={field.label} disabled={readOnly || !field.enabled} onChange={(event) => updateField(index, { label: event.currentTarget.value })} />
                 <Text size="xs" c="dimmed" w={110} className="line-clamp-1">{field.key}</Text>
-                <ActionIcon size="sm" variant="subtle" color="gray" aria-label={`${field.label}を上へ`} disabled={readOnly || index === 0} onClick={() => move(index, -1)}><Icons.up size={IconSize.menu} /></ActionIcon>
-                <ActionIcon size="sm" variant="subtle" color="gray" aria-label={`${field.label}を下へ`} disabled={readOnly || index === settings.infoFields.length - 1} onClick={() => move(index, 1)}><Icons.down size={IconSize.menu} /></ActionIcon>
+                {/* 並べ替えは左の入力欄と同じ高さ。小さな矢印は押し外しやすかった。 */}
+                <ActionIcon size={30} variant="subtle" color="gray" aria-label={`${field.label}を上へ`} disabled={readOnly || index === 0} onClick={() => move(index, -1)}><Icons.up size={IconSize.menu} /></ActionIcon>
+                <ActionIcon size={30} variant="subtle" color="gray" aria-label={`${field.label}を下へ`} disabled={readOnly || index === settings.infoFields.length - 1} onClick={() => move(index, 1)}><Icons.down size={IconSize.menu} /></ActionIcon>
               </Group>
             </Paper>
           ))}

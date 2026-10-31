@@ -173,6 +173,15 @@ export function countSavedDeferredUpdateCandidatesCommand(): Promise<number> {
   return invoke("count_saved_deferred_update_candidates");
 }
 
+/** 一部保存のうち、今の版でまだ取り直していない作品。保存ジョブへそのまま渡せる。 */
+export function listIncompleteSaveRepairWorksCommand(limit: number): Promise<SaveJobWork[]> {
+  return invoke("list_incomplete_save_repair_works", { limit });
+}
+
+export function recordIncompleteSaveRepairAttemptsCommand(sourceIds: string[]): Promise<void> {
+  return invoke("record_incomplete_save_repair_attempts", { sourceIds });
+}
+
 export async function recheckDeferredUpdateCandidatesCommand(keys: string[], refreshPostAccess = false): Promise<UpdateJobSnapshot> {
   return invoke("recheck_deferred_update_candidates", { keys, refreshPostAccess, credentials: await getUpdateJobCredentials() });
 }

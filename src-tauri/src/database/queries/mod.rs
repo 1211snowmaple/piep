@@ -13480,9 +13480,11 @@ fn append_library_filters(
 
     if let Some(ref acquisition_filter) = params.acquisition_filter {
         match acquisition_filter.as_str() {
+            // 要確認なし・要確認・非表示は重ならない三つ。非表示は利用者が見たうえで
+            // 外した作品なので要確認には数えず、何も無い作品（要確認なし）とも分ける。
             "complete" => wheres.push("NOT EXISTS (SELECT 1 FROM update_candidates c WHERE c.source=d.source AND c.source_id=d.source_id AND c.status IN ('held','dismissed'))".to_string()),
-            "attention" => wheres.push("EXISTS (SELECT 1 FROM update_candidates c WHERE c.source=d.source AND c.source_id=d.source_id AND c.status IN ('held','dismissed'))".to_string()),
-            kind @ ("incomplete" | "unavailable" | "restricted" | "error") => wheres.push(format!("EXISTS (SELECT 1 FROM update_candidates c WHERE c.source=d.source AND c.source_id=d.source_id AND c.status IN ('held','dismissed') AND json_valid(c.payload_json) AND json_extract(c.payload_json, '$.holdKind')='{kind}')")),
+            "attention" => wheres.push("EXISTS (SELECT 1 FROM update_candidates c WHERE c.source=d.source AND c.source_id=d.source_id AND c.status='held')".to_string()),
+            kind @ ("incomplete" | "unavailable" | "restricted" | "error") => wheres.push(format!("EXISTS (SELECT 1 FROM update_candidates c WHERE c.source=d.source AND c.source_id=d.source_id AND c.status='held' AND json_valid(c.payload_json) AND json_extract(c.payload_json, '$.holdKind')='{kind}')")),
             "dismissed" => wheres.push("EXISTS (SELECT 1 FROM update_candidates c WHERE c.source=d.source AND c.source_id=d.source_id AND c.status='dismissed')".to_string()),
             _ => {}
         }

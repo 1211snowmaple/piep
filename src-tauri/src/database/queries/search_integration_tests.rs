@@ -1819,7 +1819,8 @@ fn saved_asset_audit_backfills_legacy_archives_without_changing_sources_or_decis
     );
     assert_eq!(fs::read(&work.json_path).unwrap(), original);
     assert_eq!(db.get_download(missing).unwrap().current_version, 1);
-    assert_eq!(db.count_saved_deferred_update_candidates().unwrap(), 2); // missing + user's dismissal
+    // 欠けた作品だけ。利用者が非表示にした作品は要確認に数えない。
+    assert_eq!(db.count_saved_deferred_update_candidates().unwrap(), 1);
     assert_eq!(
         db.update_candidate_status("pixiv", "legacy-pending")
             .unwrap()
@@ -7139,6 +7140,102 @@ fn library_attention_filters_only_saved_held_works() {
         .unwrap();
     params.acquisition_filter = Some("dismissed".into());
     assert_eq!(db.search_downloads_v2(&params).unwrap().items[0].id, saved);
+    // 非表示にしたら要確認から抜ける。一覧に残り続けて件数が減らないと、外した
+    // 意味がない。何も無い作品（要確認なし）とも混ぜない。
+    assert_eq!(db.count_saved_deferred_update_candidates().unwrap(), 0);
+    for filter in ["attention", "incomplete", "complete"] {
+        params.acquisition_filter = Some(filter.into());
+        assert!(
+            db.search_downloads_v2(&params).unwrap().items.is_empty(),
+            "{filter}"
+        );
+    }
+}
+
+#[test]
+fn held_candidates_are_ordered_by_time_whichever_way_the_time_was_written() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    for (source_id, updated_at) in [
+        ("rust-earlier", "2026-10-31T03:00:00.123456700+00:00"),
+        ("sql-later", "2026-10-31 05:00:00"),
+    ] {
+        db.upsert_update_candidate(&UpdateCandidateInput {
+            source: "pixiv".into(),
+            source_id: source_id.into(),
+            kind: "new".into(),
+            title: source_id.into(),
+            payload_json: r#"{"holdKind":"restricted"}"#.into(),
+            target_type: Some("work".into()),
+        })
+        .unwrap();
+        db.set_update_candidate_status("pixiv", source_id, "held")
+            .unwrap();
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE update_candidates SET updated_at=?2 WHERE source_id=?1",
+                params![source_id, updated_at],
+            )
+            .unwrap();
+    }
+    let order: Vec<_> = db
+        .list_deferred_update_candidate_summaries(-1)
+        .unwrap()
+        .into_iter()
+        .map(|row| row.source_id)
+        .collect();
+    assert_eq!(order, ["sql-later", "rust-earlier"]);
+}
+
+#[test]
+fn an_incomplete_save_is_repaired_once_per_saved_version() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let id = insert_download(
+        &db,
+        &storage,
+        "repair-me",
+        "挿絵が欠けた",
+        "作者",
+        &[],
+        "本文",
+    );
+    db.upsert_update_candidate(&UpdateCandidateInput {
+        source: "pixiv".into(),
+        source_id: "repair-me".into(),
+        kind: "revision".into(),
+        title: "挿絵が欠けた".into(),
+        payload_json: r#"{"holdKind":"incomplete"}"#.into(),
+        target_type: Some("work".into()),
+    })
+    .unwrap();
+    db.set_update_candidate_status("pixiv", "repair-me", "held")
+        .unwrap();
+    let pending = || db.list_incomplete_save_repair_works(50).unwrap();
+    assert_eq!(
+        pending(),
+        vec![("repair-me".to_string(), "挿絵が欠けた".to_string())]
+    );
+    // 試したら、結果が一部保存のままでも同じ版では繰り返さない。
+    db.record_incomplete_save_repair_attempts(&["repair-me".into()])
+        .unwrap();
+    assert!(pending().is_empty());
+    // 取得元が変わって版が進めば、もう一度だけ試す。
+    db.conn
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE downloads SET current_version=2 WHERE id=?1",
+            params![id],
+        )
+        .unwrap();
+    assert_eq!(pending().len(), 1);
+    // 利用者が非表示にした作品は、取り直しにも出さない。
+    db.set_update_candidate_status("pixiv", "repair-me", "dismissed")
+        .unwrap();
+    assert!(pending().is_empty());
 }
 
 #[test]

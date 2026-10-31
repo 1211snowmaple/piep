@@ -157,6 +157,54 @@ impl Database {
         Ok(count)
     }
 
+    /// 取得元から取り直して補える見込みのある一部保存の pixiv 作品を、`(作品ID, 題名)` で返す。
+    /// 今の版でまだ取り直していないものだけ。
+    pub fn list_incomplete_save_repair_works(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<(String, String)>, String> {
+        let conn = self.read_conn()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT d.source_id, d.title FROM update_candidates c
+                   JOIN downloads d ON d.source=c.source AND d.source_id=c.source_id
+                   LEFT JOIN incomplete_save_repairs r ON r.download_id=d.id
+                  WHERE c.source='pixiv' AND c.status='held'
+                    AND CASE WHEN json_valid(c.payload_json) THEN json_extract(c.payload_json,'$.holdKind') END='incomplete'
+                    AND (r.version IS NULL OR r.version < d.current_version)
+                  ORDER BY d.id
+                  LIMIT ?1",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = stmt
+            .query_map(params![limit.clamp(1, 500)], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .map_err(|error| error.to_string())?;
+        rows.collect::<Result<_, _>>()
+            .map_err(|error| error.to_string())
+    }
+
+    /// 取り直しを今の版で試したと記録する。結果がどうであれ、同じ版では繰り返さない。
+    pub fn record_incomplete_save_repair_attempts(
+        &self,
+        source_ids: &[String],
+    ) -> Result<(), String> {
+        let mut conn = self.conn.lock().map_err(|error| error.to_string())?;
+        let tx = conn.transaction().map_err(|error| error.to_string())?;
+        let now = chrono::Utc::now().to_rfc3339();
+        for source_id in source_ids {
+            tx.execute(
+                "INSERT INTO incomplete_save_repairs(download_id, version, attempted_at)
+                 SELECT id, current_version, ?2 FROM downloads WHERE source='pixiv' AND source_id=?1
+                 ON CONFLICT(download_id) DO UPDATE SET version=excluded.version, attempted_at=excluded.attempted_at",
+                params![source_id, now],
+            )
+            .map_err(|error| error.to_string())?;
+        }
+        tx.commit().map_err(|error| error.to_string())
+    }
+
     /// 欠けた参照のうち、`version` に対する反映中の編集でもまだ欠けて見えるものだけを残す。
     ///
     /// 利用者が自分の絵に差し替えた参照や、消した参照は片付いている。読む画面にも

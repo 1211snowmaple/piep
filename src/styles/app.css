@@ -2544,14 +2544,21 @@ select {
 .editor-block[data-active] { border-color: var(--mantine-color-piep-4); box-shadow: 0 0 0 2px rgb(13 134 244 / 8%); }
 
 /* 取っ手は掴める。前は cursor だけが grab で、掴んでも何も起きなかった。 */
+/* 掴める範囲は右の押しボタンと同じ 26px 四方。絵柄の 15px だけだと狙いにくかった。 */
 .editor-block__handle {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  margin-inline: -4px -2px;
+  border-radius: var(--mantine-radius-sm);
   color: var(--mantine-color-dimmed);
   cursor: grab;
   touch-action: none;
 }
 
+.editor-block__handle:hover { background: var(--mantine-color-default-hover); }
 .editor-block__handle:active { cursor: grabbing; }
 
 .editor-block[data-dragging] { opacity: 0.45; }
@@ -3436,8 +3443,15 @@ select {
 
 /* Header actions keep their background transparent in every interaction state. */
 .app-history-controls { padding: 0; background: transparent; }
-.app-history-controls .mantine-ActionIcon-root { width: 32px; height: 32px; background: transparent !important; border-color: transparent; }
+.app-history-controls .mantine-ActionIcon-root { background: transparent !important; border-color: transparent; }
+/* 窓の上端の押しボタンは、左の戻る・進むも右の検索やメニューも同じ大きさにする。
+   戻る・進むだけ 32px で、隣のサイドバーと右側は 28px、AIだけ 34px だった。 */
+.app-header .mantine-ActionIcon-root { --ai-size: 32px; width: 32px; height: 32px; min-width: 32px; min-height: 32px; }
 .app-history-controls .mantine-ActionIcon-root:disabled { color: light-dark(#aeb7c0, #626c78); }
+/* 地のない押しボタンは、押せないときも地を出さない。Mantine は灰色の地を敷くので、
+   並びの中でそれだけが「押されている」ように見えていた（先頭ブロックの「上へ」など）。 */
+.mantine-ActionIcon-root[data-variant="subtle"]:disabled,
+.mantine-ActionIcon-root[data-variant="subtle"][data-disabled] { background: transparent; }
 .app-history-controls [data-refreshing] svg { animation: header-refresh 1.2s linear infinite; }
 @keyframes header-refresh { to { transform: rotate(360deg); } }
 .search-method-control { width: 38px; display: inline-flex; gap: 2px; }
@@ -3491,6 +3505,9 @@ select {
 .filter-choice-group { padding: 8px 10px; border: 1px solid var(--mantine-color-default-border); border-radius: 12px; }
 .filter-choice-group__label { margin-bottom: 6px; font-size: var(--mantine-font-size-sm); line-height: 18px; font-weight: 650; }
 .filter-choice-group__options { display: flex; flex-wrap: wrap; gap: 6px; }
+.filter-choice__slot { display: inline-flex; }
+/* まとまりの切れ目。「要確認」とその内訳、「非表示」を一列のまま見分けられるように。 */
+.filter-choice__slot[data-starts-group] { padding-left: 7px; margin-left: 1px; border-left: 1px solid var(--mantine-color-default-border); }
 .filter-choice { display: inline-flex; align-items: center; justify-content: center; gap: 4px; min-height: 30px; padding: 4px 9px; border: 1px solid transparent; border-radius: 7px; font-size: 13px; line-height: 18px; color: light-dark(#49535f, #d7dce3); background: light-dark(#f4f6f8, #252d38); }
 .filter-choice:hover { color: var(--mantine-color-text); }
 .filter-choice[data-selected] { color: light-dark(var(--mantine-color-piep-8), var(--mantine-color-piep-1)); background: light-dark(var(--mantine-color-piep-0), #203d59); border-color: light-dark(var(--mantine-color-piep-2), var(--mantine-color-piep-8)); }

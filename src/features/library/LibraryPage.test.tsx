@@ -98,8 +98,7 @@ describe("LibraryPage search", () => {
     await user.click(within(summary).getByRole("button", { name: "一部保存の作品を解除" }));
     expect(within(within(dialog).getByRole("group", { name: "取得状態" })).getByRole("button",{name:"すべて"})).toHaveAttribute("aria-pressed","true");
     await user.click(within(dialog).getByRole("tab", { name: /^基本/ }));
-    await user.click(within(dialog).getByRole("combobox", { name: "お気に入り" }));
-    await user.click(await screen.findByRole("option", { name: "お気に入り以外" }));
+    await user.click(within(within(dialog).getByRole("group", { name: "お気に入り" })).getByRole("button", { name: "お気に入り以外" }));
     await user.click(within(dialog).getByRole("button", { name: "適用" }));
     expect(window.location.hash).toContain("revision=pending_revision");
     expect(window.location.hash).toContain("favorite=0");
@@ -398,7 +397,7 @@ describe("LibraryPage search", () => {
     fireEvent.click(screen.getByRole("button", { name: "絞り込み" }));
     const spotlight = await screen.findByRole("dialog", { name: "詳細フィルター" });
     fireEvent.click(within(spotlight).getByRole("tab", { name: /^保存状態/ }));
-    fireEvent.click(within(spotlight).getByRole("radio", { name: "過去版も含む" }));
+    fireEvent.click(within(within(spotlight).getByRole("group", { name: "検索する版" })).getByRole("button", { name: "過去版も含む" }));
     fireEvent.click(within(spotlight).getByRole("button", { name: "適用" }));
 
     await waitFor(() => expect(window.location.hash).toContain("versions=all"));
@@ -511,9 +510,9 @@ describe("LibraryPage search", () => {
     expect(within(sectionTabs).getByRole("tab", { name: /^内容・ファイル/ })).toBeInTheDocument();
 
     fireEvent.click(within(sectionTabs).getByRole("tab", { name: /^基本/ }));
-    expect(within(spotlight).getByRole("checkbox", { name: "pixiv" })).toBeInTheDocument();
+    expect(within(within(spotlight).getByRole("group", { name: "保存元" })).getByRole("button", { name: "pixiv" })).toBeInTheDocument();
     fireEvent.click(within(sectionTabs).getByRole("tab", { name: /^保存状態/ }));
-    expect(within(spotlight).getByRole("radiogroup", { name: "検索する版" })).toBeInTheDocument();
+    expect(within(within(spotlight).getByRole("group", { name: "検索する版" })).getByRole("button", { name: "現在版だけ" })).toHaveAttribute("aria-pressed", "true");
     expect(within(spotlight).getByRole("group", { name: "改稿状態" })).toBeInTheDocument();
     expect(within(spotlight).getByRole("group", { name: "ローカル編集" })).toBeInTheDocument();
     expect(within(spotlight).getByRole("group", { name: "表紙" })).toBeInTheDocument();
@@ -575,7 +574,7 @@ describe("LibraryPage search", () => {
     fireEvent.click(await screen.findByRole("button", { name: "絞り込み" }));
     const spotlight = await screen.findByRole("dialog", { name: "詳細フィルター" });
     fireEvent.click(within(spotlight).getByRole("tab", { name: /^基本/ }));
-    fireEvent.click(await screen.findByRole("checkbox", { name: "pixiv" }));
+    fireEvent.click(within(await within(spotlight).findByRole("group", { name: "保存元" })).getByRole("button", { name: "pixiv" }));
     fireEvent.click(within(spotlight).getByRole("tab", { name: /^内容・ファイル/ }));
     fireEvent.change(screen.getByRole("textbox", { name: "最小文字数" }), { target: { value: "5000" } });
     fireEvent.click(screen.getByRole("button", { name: "適用" }));
@@ -614,16 +613,16 @@ describe("LibraryPage search", () => {
     fireEvent.click(screen.getByRole("button", { name: "絞り込み" }));
     const spotlight = await screen.findByRole("dialog", { name: "詳細フィルター" });
     fireEvent.click(within(spotlight).getByRole("tab", { name: /^基本/ }));
-    expect(within(spotlight).getByRole("checkbox", { name: "pixiv" })).toBeChecked();
+    expect(within(within(spotlight).getByRole("group", { name: "保存元" })).getByRole("button", { name: "pixiv" })).toHaveAttribute("aria-pressed", "true");
     fireEvent.click(within(spotlight).getByRole("tab", { name: /^保存状態/ }));
-    expect(within(spotlight).getByRole("radio", { name: "過去版も含む" })).toBeChecked();
+    expect(within(within(spotlight).getByRole("group", { name: "検索する版" })).getByRole("button", { name: "過去版も含む" })).toHaveAttribute("aria-pressed", "true");
     expect(within(within(spotlight).getByRole("group",{name:"改稿状態"})).getByRole("button",{name:"改稿あり"})).toHaveAttribute("aria-pressed","true");
     expect(within(within(spotlight).getByRole("group",{name:"ローカル編集"})).getByRole("button",{name:"編集あり"})).toHaveAttribute("aria-pressed","true");
     expect(within(within(spotlight).getByRole("group",{name:"表紙"})).getByRole("button",{name:"表紙あり"})).toHaveAttribute("aria-pressed","true");
     fireEvent.click(within(spotlight).getByRole("tab", { name: /^タグ/ }));
     expect(within(within(spotlight).getByRole("region", { name: "含める条件" })).getByText("#創作")).toBeInTheDocument();
     fireEvent.click(within(spotlight).getByRole("tab", { name: /^日付/ }));
-    expect(within(spotlight).getByRole("radio", { name: "更新日" })).toBeChecked();
+    expect(within(within(spotlight).getByRole("group", { name: "日付の種類" })).getByRole("button", { name: "更新日" })).toHaveAttribute("aria-pressed", "true");
     expect(within(spotlight).getByLabelText("開始日")).toHaveValue("2026-01-01");
     expect(within(spotlight).getByLabelText("終了日")).toHaveValue("2026-09-01");
     fireEvent.click(within(spotlight).getByRole("tab", { name: /^内容・ファイル/ }));

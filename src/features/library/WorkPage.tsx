@@ -503,7 +503,9 @@ export default function WorkPage() {
                         { key: "in-app", label: "アプリ内で開く", icon: Icons.inAppBrowser, onClick: openSourceInApp },
                         { key: "browser", label: "ブラウザで開く", icon: Icons.externalLink, onClick: openSource },
                         { key: "folder", label: "保存フォルダー", icon: Icons.openFolder, onClick: openSavedFolder },
-                        { key: "refresh", label: "更新を確認", icon: Icons.watch, primary: true, onClick: () => runSingleCheck({ kind: "work", workId: work.id, label: work.title }, () => navigate("/updates")) },
+                        // 塗るのは下の「読む」だけ。上下の両方が塗ってあると、どちらが
+                        // この画面の主な操作なのか読み取れない。
+                        { key: "refresh", label: "更新を確認", icon: Icons.watch, onClick: () => runSingleCheck({ kind: "work", workId: work.id, label: work.title }, () => navigate("/updates")) },
                       ]}
                     >
                       <Menu position="bottom-end"><Menu.Target><Tooltip label="その他"><ActionIcon variant="subtle" color="gray" size="lg" aria-label="作品のその他の操作"><Icons.more size={IconSize.action} /></ActionIcon></Tooltip></Menu.Target><Menu.Dropdown><Menu.Item color="red" leftSection={<Icons.delete size={IconSize.menu} />} onClick={deleteWork}>作品を削除</Menu.Item></Menu.Dropdown></Menu>
@@ -564,7 +566,7 @@ export default function WorkPage() {
                   <Button className="work-hero__action" variant={queued ? "filled" : "default"} color="leaf" leftSection={<Icons.epubAdd size={IconSize.action} />} onClick={() => queued ? removeFromEpubQueue(work.id) : addToEpubQueue(work.id)}>{queued ? "EPUB追加済み" : "EPUB"}</Button>
                   {/* Last in the row, beside EPUB: it belongs with the
                       actions for this work, not off at the bar edge. */}
-                  <Tooltip label={work.favorite ? "お気に入りを解除" : "お気に入りに追加"}><ActionIcon className="work-hero__favorite" size="lg" variant="subtle" color={work.favorite ? "red" : "gray"} style={{ "--ai-color": work.favorite ? "var(--flag-favorite)" : "var(--flag-off)", "--ai-bg": "transparent" }} aria-label={work.favorite ? "お気に入りを解除" : "お気に入りに追加"} aria-pressed={work.favorite} disabled={mutate.isPending} onClick={() => mutate.mutate({ favorite: !work.favorite })}><Icons.favorite size={IconSize.nav} fill={work.favorite ? "currentColor" : "none"} /></ActionIcon></Tooltip>
+                  <Tooltip label={work.favorite ? "お気に入りを解除" : "お気に入りに追加"}><ActionIcon className="work-hero__favorite" size={38} variant="subtle" color={work.favorite ? "red" : "gray"} style={{ "--ai-color": work.favorite ? "var(--flag-favorite)" : "var(--flag-off)", "--ai-bg": "transparent" }} aria-label={work.favorite ? "お気に入りを解除" : "お気に入りに追加"} aria-pressed={work.favorite} disabled={mutate.isPending} onClick={() => mutate.mutate({ favorite: !work.favorite })}><Icons.favorite size={IconSize.nav} fill={work.favorite ? "currentColor" : "none"} /></ActionIcon></Tooltip>
                 </Group>
               </div>
             </Stack>

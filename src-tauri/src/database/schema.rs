@@ -265,6 +265,15 @@ fn create_additional_tables(conn: &Connection) -> Result<(), rusqlite::Error> {
             rule_version  TEXT NOT NULL,
             updated_at    TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY(left_source, left_source_id, right_source, right_source_id)
+         );
+
+         -- 一部保存の作品を取得元から取り直した記録。同じ版では一度しか試さない。
+         -- 版が進めば取得元の中身が変わったので、もう一度だけ試す価値がある。
+         -- 画面側の保存領域に置いていたので、入れ直すと全件を取り直していた。
+         CREATE TABLE IF NOT EXISTS incomplete_save_repairs (
+            download_id  INTEGER PRIMARY KEY REFERENCES downloads(id) ON DELETE CASCADE,
+            version      INTEGER NOT NULL,
+            attempted_at TEXT NOT NULL
          );",
     )?;
     add_missing_columns(conn)?;

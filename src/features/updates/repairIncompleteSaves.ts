@@ -1,14 +1,15 @@
 import { useEffect } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { notifications } from "@mantine/notifications";
-import { getDownloads, isTauriRuntime } from "@/services/dbApi";
-import { getUpdateJobCommand, getUpdateJobCredentials, listDeferredUpdateCandidatesCommand, listUpdateJobsCommand, startSaveJobCommand, type SaveJobWork, type UpdateJobSnapshot } from "@/services/updateJobApi";
+import { isTauriRuntime } from "@/services/dbApi";
+import { getUpdateJobCommand, getUpdateJobCredentials, listIncompleteSaveRepairWorksCommand, listUpdateJobsCommand, recordIncompleteSaveRepairAttemptsCommand, startSaveJobCommand, type UpdateJobSnapshot } from "@/services/updateJobApi";
 import { invalidateAfterUpdateJob, isUpdateJobActive } from "./updateJobs";
 import { subscribeTauriEvent } from "@/services/eventBus";
 
-// v1 jobs were stopped by the generic held-candidate gate before fetching.
-// Retry that generation once after repairing the native dispatch path.
-const ATTEMPTS_KEY = "piep.incomplete-save-repair.v2";
+// 以前は試した作品をここ（画面側の保存領域）に控えていた。入れ直すと消えて
+// 全件を取り直し、版が進んでも二度と試さなかった。いまはDBが版ごとに覚える。
+// 残っている控えは一度だけDBへ移して消す。
+const LEGACY_ATTEMPTS_KEY = "piep.incomplete-save-repair.v2";
 // A backlog (e.g. R-18 details masked by older builds) becomes a series of
 // short jobs. Each waits for the user's own jobs, so none monopolises the
 // connection for hours.
@@ -16,41 +17,30 @@ export const REPAIR_BATCH_SIZE = 50;
 type RepairResult = { waiting: boolean; job?: UpdateJobSnapshot };
 let starting: Promise<RepairResult> | null = null;
 
-function readAttempts(): Set<string> {
+async function moveLegacyAttempts(): Promise<void> {
+  let keys: string[] = [];
   try {
-    const parsed: unknown = JSON.parse(localStorage.getItem(ATTEMPTS_KEY) ?? "[]");
-    return new Set(Array.isArray(parsed) ? parsed.filter((key): key is string => typeof key === "string") : []);
-  } catch { return new Set(); }
+    const parsed: unknown = JSON.parse(localStorage.getItem(LEGACY_ATTEMPTS_KEY) ?? "[]");
+    if (Array.isArray(parsed)) keys = parsed.filter((key): key is string => typeof key === "string");
+  } catch { return; }
+  const sourceIds = keys.filter((key) => key.startsWith("pixiv:")).map((key) => key.slice("pixiv:".length));
+  if (sourceIds.length) await recordIncompleteSaveRepairAttemptsCommand(sourceIds);
+  try { localStorage.removeItem(LEGACY_ATTEMPTS_KEY); } catch { /* 次の起動で移し直しても、記録が重なるだけ。 */ }
 }
 
 async function startRepair(shouldContinue: () => boolean): Promise<RepairResult> {
   if ((await listUpdateJobsCommand()).some((job) => (isUpdateJobActive(job.status) || job.status === "auth_required"))) return { waiting: true };
   const credentials = await getUpdateJobCredentials();
   if (!credentials.pixivRefreshToken || !credentials.pixivCookie || !credentials.pixivUserAgent) return { waiting: true };
-  const candidates = (await listDeferredUpdateCandidatesCommand()).filter((entry) => {
-    if (entry.source !== "pixiv" || entry.status !== "held" || !entry.downloadId) return false;
-    try { return JSON.parse(entry.payloadJson).holdKind === "incomplete"; } catch { return false; }
-  });
-  if (!candidates.length) return { waiting: false };
-  const works = await getDownloads(candidates.map((entry) => entry.downloadId!));
-  const attempted = readAttempts();
-  const repairWorks: SaveJobWork[] = [];
-  const keys: string[] = [];
-  for (const work of works) {
-    if (repairWorks.length >= REPAIR_BATCH_SIZE) break;
-    const key = `pixiv:${work.sourceId}`;
-    if (attempted.has(key)) continue;
-    repairWorks.push({ source: "pixiv", sourceId: work.sourceId, title: work.title });
-    keys.push(key);
-  }
+  await moveLegacyAttempts();
+  const repairWorks = await listIncompleteSaveRepairWorksCommand(REPAIR_BATCH_SIZE);
   if (!repairWorks.length || !shouldContinue()) return { waiting: false };
   const job = await startSaveJobCommand(repairWorks, false, credentials);
-  keys.forEach((key) => attempted.add(key));
-  try { localStorage.setItem(ATTEMPTS_KEY, JSON.stringify([...attempted])); } catch { /* The durable native job still owns the accepted work. */ }
+  await recordIncompleteSaveRepairAttemptsCommand(repairWorks.map((work) => work.sourceId));
   return { waiting: false, job };
 }
 
-/** Repair known partial saves once per work, through the normal journaled save job. */
+/** 一部保存の作品を、版ごとに一度だけ、通常の保存ジョブで取り直す。 */
 export function startIncompleteSaveRepair(shouldContinue: () => boolean = () => true): Promise<RepairResult> {
   starting ??= startRepair(shouldContinue).finally(() => { starting = null; });
   return starting;

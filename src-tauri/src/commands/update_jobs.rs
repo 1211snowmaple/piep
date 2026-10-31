@@ -1444,6 +1444,51 @@ pub async fn count_saved_deferred_update_candidates(app: tauri::AppHandle) -> Re
         .count_saved_deferred_update_candidates()
 }
 
+/// 一部保存の補完で取り直す作品。保存ジョブへそのまま渡せる形。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IncompleteSaveRepairWork {
+    pub source: &'static str,
+    pub source_id: String,
+    pub title: String,
+}
+
+/// 一部保存の pixiv 作品のうち、今の版でまだ取り直していないものを `limit` 件まで返す。
+#[tauri::command]
+pub async fn list_incomplete_save_repair_works(
+    app: tauri::AppHandle,
+    limit: i64,
+) -> Result<Vec<IncompleteSaveRepairWork>, String> {
+    let state = app.state::<Arc<AppState>>().inner().clone();
+    tokio::task::spawn_blocking(move || state.db.list_incomplete_save_repair_works(limit))
+        .await
+        .map_err(|error| format!("補完する作品を読み取れません: {error}"))?
+        .map(|works| {
+            works
+                .into_iter()
+                .map(|(source_id, title)| IncompleteSaveRepairWork {
+                    source: "pixiv",
+                    source_id,
+                    title,
+                })
+                .collect()
+        })
+}
+
+/// 補完の保存ジョブへ渡した作品を、今の版で試したと記録する。
+#[tauri::command]
+pub async fn record_incomplete_save_repair_attempts(
+    app: tauri::AppHandle,
+    source_ids: Vec<String>,
+) -> Result<(), String> {
+    let state = app.state::<Arc<AppState>>().inner().clone();
+    tokio::task::spawn_blocking(move || {
+        state.db.record_incomplete_save_repair_attempts(&source_ids)
+    })
+    .await
+    .map_err(|error| format!("補完の記録を書けません: {error}"))?
+}
+
 /// Rechecks an explicit selection after permissions change, without saving or watching.
 #[tauri::command]
 pub async fn recheck_deferred_update_candidates(

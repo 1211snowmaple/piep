@@ -377,7 +377,7 @@ export default function UpdatesPage() {
               w={280}
               label="取得元への確認は1件ずつ2秒以上あけます。取得エラーが続くと間隔を延ばして一時停止します。取得制限では分単位で待って再試行します。Pixiv側の表示設定で一覧から省かれた作品は個別に確認します。"
             >
-              <ActionIcon variant="subtle" color="gray" size="sm" aria-label="確認の進め方について">
+              <ActionIcon variant="subtle" color="gray" size="md" aria-label="確認の進め方について">
                 <Icons.help size={IconSize.menu} />
               </ActionIcon>
             </Tooltip>
@@ -391,7 +391,7 @@ export default function UpdatesPage() {
           <Box style={{ flex: 1 }} />
           <Group gap={6} wrap="nowrap">
             <Text size="xs" c="dimmed">自動確認：{scheduleSummary}</Text>
-            <Button size="compact-xs" variant="subtle" color="gray" onClick={() => selectTab("schedule")}>変更</Button>
+            <Button size="xs" variant="subtle" color="gray" onClick={() => selectTab("schedule")}>変更</Button>
           </Group>
         </Group>
       </Paper>
@@ -893,8 +893,9 @@ export function CandidatesPanel({ candidates, selectedIds, selectableIds, runnin
           <Text size="xs" c="dimmed">新作・続編・改稿をまとめて処理 · 全候補から{selectedCount}件を選択中 · 表示 {formatNumber(visible.length)}/{formatNumber(shown.length)}件{selectedOutsideShown > 0 ? `（表示外で${selectedOutsideShown}件を選択中）` : ""}</Text>
         </Box>
         <Group gap="xs">
-          <Button size="xs" variant="subtle" disabled={!shownSelectable.length} onClick={() => onSelectMany(shownSelectable)}>該当分を選択</Button>
-          <Button size="xs" variant="subtle" color="gray" disabled={!selectedCount} onClick={onClearSelection}>選択をすべて解除</Button>
+          {/* 右の保存と同じ高さ。低い押しボタンが並ぶと、行の下端がそろわない。 */}
+          <Button size="sm" variant="subtle" disabled={!shownSelectable.length} onClick={() => onSelectMany(shownSelectable)}>該当分を選択</Button>
+          <Button size="sm" variant="subtle" color="gray" disabled={!selectedCount} onClick={onClearSelection}>選択をすべて解除</Button>
           <Button size="sm" leftSection={<Icons.export size={IconSize.menu} />} disabled={!selectedCount || running} loading={saving} onClick={onSave}>選択候補{selectedCount}件をまとめて保存</Button>
         </Group>
       </Group>

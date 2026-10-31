@@ -384,7 +384,9 @@ impl Database {
                  FROM update_candidates c
                  LEFT JOIN downloads d ON d.source = c.source AND d.source_id = c.source_id
                  WHERE c.status = ?2 OR (?2 = 'deferred' AND c.status IN ('held', 'dismissed'))
-                 ORDER BY c.updated_at DESC, c.rowid DESC
+                 -- 時刻は SQL の CURRENT_TIMESTAMP（空白区切り）と Rust の RFC 3339（T 区切り）が
+                 -- 混ざる。文字のまま並べると同じ日の中で T の側が必ず新しく見えるので、時刻として比べる。
+                 ORDER BY julianday(c.updated_at) DESC, c.rowid DESC
                  LIMIT ?1",
             )
             .map_err(|e| format!("Failed to prepare update candidates: {}", e))?;
@@ -430,10 +432,12 @@ impl Database {
         .map_err(|e| format!("Failed to count deferred candidates: {e}"))
     }
 
+    /// サイドバーの「要確認」に出す件数。保存済みで保留中の作品だけを数える。
+    /// 利用者が「非表示」にした作品は、見たうえで外したものなので数えない。
     pub fn count_saved_deferred_update_candidates(&self) -> Result<i64, String> {
         let conn = self.read_conn()?;
         conn.query_row(
-            "SELECT COUNT(*) FROM update_candidates c WHERE c.status IN ('held', 'dismissed') AND EXISTS (SELECT 1 FROM downloads d WHERE d.source=c.source AND d.source_id=c.source_id)",
+            "SELECT COUNT(*) FROM update_candidates c WHERE c.status = 'held' AND EXISTS (SELECT 1 FROM downloads d WHERE d.source=c.source AND d.source_id=c.source_id)",
             [],
             |row| row.get(0),
         )

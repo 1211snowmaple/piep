@@ -71,7 +71,7 @@ npm --prefix docs-tools run docs:build
 だから数の置き場を一つにする。文の中では次のように書く。
 
 ```markdown
-コマンドは <!--stat:commands.total-->170<!--/stat--> 個ある
+コマンドは <!--stat:commands.total-->172<!--/stat--> 個ある
 ```
 
 HTML コメントは GitHub でも VitePress でも描画されないので、読む人には数字しか
@@ -208,8 +208,8 @@ HTML コメントは GitHub でも VitePress でも描画されないので、�
 
 | | |
 |---|---:|
-| コマンド | <!--stat:commands.total-->170<!--/stat--> |
-| `///` があるもの | <!--stat:commands.documented-->170<!--/stat--> |
+| コマンド | <!--stat:commands.total-->172<!--/stat--> |
+| `///` があるもの | <!--stat:commands.documented-->172<!--/stat--> |
 | 節の前書き（`//!`）があるモジュール | <!--stat:modules.documented-->10<!--/stat--> / <!--stat:modules.total-->10<!--/stat--> |
 
 **全部埋まっている。** ラチェット検査（[品質](09-quality.md#境界のドリフト検査)）は
