@@ -49,10 +49,8 @@ import { hasSourceRevision } from "@/lib/workFreshness";
 import { listPendingRevisionsCommand, previewPendingRevisionCommand } from "@/services/updateJobApi";
 import { prepareDocumentHtml } from "@/lib/content";
 import { useContentLinkNavigation, useLibraryLinkMarks } from "@/lib/contentLinks";
-import { exportSingle } from "@/services/archiveApi";
 import { WorkAssist } from "@/features/assist/WorkAssist";
 import { addWorkCollectionMembers, listCollectionsForWork, listWorkCollections } from "@/services/collectionApi";
-import { openSingleDialog } from "@/services/dialogApi";
 import {
   deactivateWorkEdit,
   deleteDownload,
@@ -447,13 +445,6 @@ export default function WorkPage() {
       catch (error) { notifications.show({ color: "red", title: "削除できません", message: errorMessage(error) }); }
     },
   });
-  const exportArchive = async () => {
-    if (!runtime) return notifications.show({ color: "piep", message: "アーカイブ出力はデスクトップアプリで利用できます" });
-    const dir = await openSingleDialog({ directory: true, title: "アーカイブの出力先" });
-    if (!dir) return;
-    try { const path = await exportSingle(work.id, dir); notifications.show({ color: "green", title: "アーカイブを書き出しました", message: path }); }
-    catch (error) { notifications.show({ color: "red", title: "書き出しに失敗しました", message: errorMessage(error) }); }
-  };
   const openSavedFolder = async () => {
     if (!runtime) return notifications.show({ color: "piep", message: "保存フォルダーはデスクトップアプリで開けます" });
     try { await revealPathInFileManager(work.jsonPath); }
@@ -511,11 +502,11 @@ export default function WorkPage() {
                       items={[
                         { key: "in-app", label: "アプリ内で開く", icon: Icons.inAppBrowser, onClick: openSourceInApp },
                         { key: "browser", label: "ブラウザで開く", icon: Icons.externalLink, onClick: openSource },
-                        { key: "archive", label: "アーカイブ", icon: Icons.archive, onClick: exportArchive },
+                        { key: "folder", label: "保存フォルダー", icon: Icons.openFolder, onClick: openSavedFolder },
                         { key: "refresh", label: "更新を確認", icon: Icons.watch, primary: true, onClick: () => runSingleCheck({ kind: "work", workId: work.id, label: work.title }, () => navigate("/updates")) },
                       ]}
                     >
-                      <Menu position="bottom-end"><Menu.Target><Tooltip label="その他"><ActionIcon variant="subtle" color="gray" size="lg" aria-label="作品のその他の操作"><Icons.more size={IconSize.action} /></ActionIcon></Tooltip></Menu.Target><Menu.Dropdown><Menu.Item leftSection={<Icons.openFolder size={IconSize.menu} />} onClick={openSavedFolder}>保存フォルダーを開く</Menu.Item><Menu.Divider /><Menu.Item color="red" leftSection={<Icons.delete size={IconSize.menu} />} onClick={deleteWork}>作品を削除</Menu.Item></Menu.Dropdown></Menu>
+                      <Menu position="bottom-end"><Menu.Target><Tooltip label="その他"><ActionIcon variant="subtle" color="gray" size="lg" aria-label="作品のその他の操作"><Icons.more size={IconSize.action} /></ActionIcon></Tooltip></Menu.Target><Menu.Dropdown><Menu.Item color="red" leftSection={<Icons.delete size={IconSize.menu} />} onClick={deleteWork}>作品を削除</Menu.Item></Menu.Dropdown></Menu>
                     </ActionBar>
                   </Box>
                 </Group>

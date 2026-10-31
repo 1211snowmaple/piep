@@ -364,7 +364,6 @@ pub fn run() -> tauri::Result<()> {
             commands::update_jobs::preview_pending_revision,
             commands::update_jobs::restore_dismissed_update_candidates,
             // エクスポート / インポート (commands::archive)
-            commands::archive::export_single,
             commands::archive::export_all_multipart,
             commands::archive::backup_export_running,
             commands::archive::export_entity_zip,

@@ -2321,8 +2321,12 @@ async fn run_update_job(
                         &format!("{}: {}", item.title, reason),
                     )?;
                 }
-                consecutive_errors = consecutive_errors.saturating_add(1);
-                next_delay_ms = error_delay_ms(consecutive_errors);
+                // 消えた・閲覧できない投稿は取得元が答えを返している。続いても
+                // 通信の不調ではないので、間隔を空けたり止めたりしない。
+                if kind.counts_toward_pause() {
+                    consecutive_errors = consecutive_errors.saturating_add(1);
+                    next_delay_ms = error_delay_ms(consecutive_errors);
+                }
                 if item.item_type == "target" {
                     if let (Some(source), Some(source_key), Some(target_type)) = (
                         item.source.as_deref(),
@@ -2552,6 +2556,12 @@ pub(super) enum FailureKind {
 }
 
 impl FailureKind {
+    /// 連続失敗として数え、間隔を広げて一時停止に近づける失敗か。
+    /// 消えた・閲覧制限は取得元の答えなので、何件続いても止める理由にならない。
+    fn counts_toward_pause(self) -> bool {
+        !matches!(self, FailureKind::Missing | FailureKind::Restricted)
+    }
+
     /// 候補一覧とログに出す短い理由。
     fn label(self) -> &'static str {
         match self {
@@ -4830,6 +4840,16 @@ mod tests {
         assert!(error_delay_ms(99) <= MAX_ERROR_BACKOFF_MS);
         assert!(!too_many_consecutive_errors(2));
         assert!(too_many_consecutive_errors(3));
+    }
+
+    #[test]
+    fn deleted_or_restricted_posts_never_pause_the_job() {
+        // 作者が投稿をまとめて消すと、消えた作品が何件も続く。取得元は答えて
+        // いるので、それで確認全体が止まってはいけない。
+        assert!(!FailureKind::Missing.counts_toward_pause());
+        assert!(!FailureKind::Restricted.counts_toward_pause());
+        assert!(FailureKind::Network.counts_toward_pause());
+        assert!(FailureKind::Other.counts_toward_pause());
     }
 
     #[test]

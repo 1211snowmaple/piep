@@ -225,23 +225,6 @@ fn restore_failpoint(configured: Option<&str>, name: &'static str) -> Result<(),
     Ok(())
 }
 
-/// パスがストレージ内にあるか検証するヘルパー (Zip Slip や Directory Traversal を防止)
-fn validate_path_in_storage(path: &str, storage_dir: &std::path::Path) -> Result<(), String> {
-    let p = std::path::Path::new(path);
-    // 物理絶対パスに解決（..の除去と正規化）
-    let canon_p = p
-        .canonicalize()
-        .map_err(|e| format!("Invalid path or file not found: {}", e))?;
-    let canon_storage = storage_dir
-        .canonicalize()
-        .map_err(|e| format!("Storage path resolution failed: {}", e))?;
-
-    if !canon_p.starts_with(&canon_storage) {
-        return Err("Access Denied: Path is outside of storage directory".to_string());
-    }
-    Ok(())
-}
-
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 struct BackupVersion {
@@ -1615,83 +1598,6 @@ fn add_zip_file_once(
         )
     })?;
     Ok(())
-}
-
-/// 作品を一件、フォルダーへ書き出す。返るのは作った場所。
-///
-/// `dest/作品名 [取得元-ID]/vN/` の形に並べる。版ごとに分けるので、同じ作品を
-/// 書き出し直しても前の版を潰さない。
-///
-/// **書き出すのは保存先の中にあるものだけ。** コピー元の物理パスが保存先の外を
-/// 指していたら `Err` にする（取り込んだ書庫が細工されていた場合に、保存先の外の
-/// ファイルを持ち出させないための門）。
-///
-/// ライブラリは変えない。
-#[tauri::command]
-pub async fn export_single(
-    app: tauri::AppHandle,
-    download_id: i64,
-    dest_dir: String,
-) -> Result<String, String> {
-    let state = app.state::<Arc<AppState>>();
-    let storage = state.db.storage_dir();
-    let dl = state.db.get_download(download_id)?;
-    let assets = state.db.get_assets(download_id)?;
-
-    // コピー元JSONファイルの物理パス境界検証 (セキュリティ防壁)
-    validate_path_in_storage(&dl.json_path, storage)?;
-    if let Some(ref ojp) = dl.original_json_path {
-        validate_path_in_storage(ojp, storage)?;
-    }
-
-    // エクスポート先に作品名ディレクトリとバージョンディレクトリを作成
-    let base_dest = std::path::Path::new(&dest_dir);
-    let work_name = safe_export_name(&format!("{} [{}-{}]", dl.title, dl.source, dl.source_id));
-    let work_dest = base_dest.join(work_name);
-    let ver_dest = work_dest.join(format!("v{}", dl.current_version));
-    tokio::fs::create_dir_all(&ver_dest)
-        .await
-        .map_err(|e| e.to_string())?;
-
-    let json_name = safe_export_name(&dl.title);
-
-    // JSONコピー (バージョンフォルダ配下に、作品名ベースで)
-    if std::path::Path::new(&dl.json_path).exists() {
-        tokio::fs::copy(&dl.json_path, ver_dest.join(format!("{}.json", json_name)))
-            .await
-            .map_err(|e| e.to_string())?;
-    }
-    if let Some(ref ojp) = dl.original_json_path {
-        if std::path::Path::new(ojp).exists() && ojp != &dl.json_path {
-            tokio::fs::copy(ojp, ver_dest.join(format!("{}_original.json", json_name)))
-                .await
-                .map_err(|e| e.to_string())?;
-        }
-    }
-
-    // アセットコピー
-    let assets_dest = ver_dest.join("data_assets");
-    for asset in &assets {
-        // コピー元アセットの物理パス境界検証 (セキュリティ防壁)
-        validate_path_in_storage(&asset.local_path, storage)?;
-
-        let src = std::path::Path::new(&asset.local_path);
-        if src.exists() {
-            // 古い書庫から復元した棚には、清められる前の名前が残っている。
-            // 書き出す側でも通す - DB の中身を無条件に信じてパスを組み立てない。
-            let asset_type_dest = assets_dest.join(
-                crate::downloader::asset_downloader::sanitize_filename(&asset.asset_type),
-            );
-            tokio::fs::create_dir_all(&asset_type_dest)
-                .await
-                .map_err(|e| e.to_string())?;
-            let filename = crate::downloader::asset_downloader::sanitize_filename(&asset.filename);
-            tokio::fs::copy(src, asset_type_dest.join(filename))
-                .await
-                .map_err(|e| e.to_string())?;
-        }
-    }
-    Ok(work_dest.to_string_lossy().to_string())
 }
 
 fn safe_export_name(name: &str) -> String {

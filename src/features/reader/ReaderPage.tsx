@@ -36,12 +36,12 @@ import { useAppNavigate, useAppSearchParams, useReturnTo, useRouteParams } from 
 import { ErrorState, LoadingState } from "@/components/AsyncState";
 import { PdfOriginalViewer, type PdfOriginalTarget } from "@/components/PdfOriginalViewer";
 import { ProviderMark, sourceUrl } from "@/lib/providers";
-import { formatDate, formatNumber } from "@/lib/format";
+import { errorMessage, formatDate, formatNumber } from "@/lib/format";
 import { prepareDocumentHtml } from "@/lib/content";
 import { useContentLinkNavigation, useLibraryLinkMarks } from "@/lib/contentLinks";
 import { getWorkCollection, listCollectionsForWork } from "@/services/collectionApi";
-import { getAssetUrl, getReaderContentPage, getReaderMetadata, getReaderOutline, isTauriRuntime, openLocalAsset, searchDownloadsV2, searchReaderContent } from "@/services/dbApi";
-import { openExternalUrl } from "@/services/openerApi";
+import { getAssetUrl, getReaderContentPage, getReaderMetadata, getReaderOutline, isTauriRuntime, searchDownloadsV2, searchReaderContent } from "@/services/dbApi";
+import { openExternalUrl, revealPathInFileManager } from "@/services/openerApi";
 import { getDemoReader } from "@/mocks/demoData";
 import { RecapPanel } from "@/features/assist/RecapPanel";
 import type { WorkCollection } from "@/types/collections";
@@ -801,6 +801,13 @@ export default function ReaderPage() {
     if (!url) return;
     if (runtime) await openExternalUrl(url); else window.open(url, "_blank", "noopener,noreferrer");
   };
+  // 保存した JSON を既定のアプリで開いていたので、名前と違ってフォルダーが出なかった。
+  // 作品ページと同じく、保存フォルダーで JSON を選んだ状態にする。
+  const openSavedFolder = async () => {
+    if (!runtime) return;
+    try { await revealPathInFileManager(work.jsonPath); }
+    catch (error) { notifications.show({ color: "red", title: "保存フォルダーを開けません", message: errorMessage(error) }); }
+  };
   /** pixiv の原稿ページ番号を、実際に運ばれてくるページ番号へ直す。
    *
    *  長い原稿ページは転送のために割られる。対応表を見ずに番号をそのまま
@@ -1008,7 +1015,7 @@ export default function ReaderPage() {
                 <ProviderMark provider={work.source} />
                 <Group gap={2} wrap="nowrap">
                   <Button variant="subtle" color="gray" size="compact-sm" rightSection={<Icons.externalLink size={IconSize.inline} />} onClick={openSource}>元ページをブラウザで</Button>
-                  <Button variant="subtle" color="gray" size="compact-sm" rightSection={<Icons.openFolder size={IconSize.inline} />} disabled={!runtime} onClick={() => runtime && openLocalAsset(work.jsonPath)}>保存フォルダー</Button>
+                  <Button variant="subtle" color="gray" size="compact-sm" rightSection={<Icons.openFolder size={IconSize.inline} />} disabled={!runtime} onClick={openSavedFolder}>保存フォルダー</Button>
                 </Group>
               </Group>
               <Title order={1} className="reader-title-page__title">{work.title}</Title>
