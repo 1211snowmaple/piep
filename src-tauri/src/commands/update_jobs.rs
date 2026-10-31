@@ -638,9 +638,11 @@ fn build_initial_items(
     let mut items = Vec::new();
     let mut included_work_keys = HashSet::new();
     let scope = request.scope.as_str();
+    // "targets" は監視グループの確認。`target_ids` に挙げた作者・シリーズだけを
+    // 見て、作品ごとの監視は混ぜない。
     let include_work = matches!(scope, "all" | "work");
-    let include_author = matches!(scope, "all" | "author");
-    let include_series = matches!(scope, "all" | "series");
+    let include_author = matches!(scope, "all" | "author" | "targets");
+    let include_series = matches!(scope, "all" | "series" | "targets");
     let work_filter = request
         .work_ids
         .as_ref()
@@ -767,6 +769,8 @@ fn build_initial_items(
             updated_at: chrono::Utc::now().to_rfc3339(),
             last_hit_at: None,
             consecutive_errors: 0,
+            watch_groups: Vec::new(),
+            icon_path: None,
         });
         let title = target.display_name.clone();
         let payload = serde_json::to_value(&target).map_err(|e| e.to_string())?;
@@ -3288,6 +3292,8 @@ async fn record_work_revision_candidate(
         updated_at: download.downloaded_at.clone(),
         last_hit_at: None,
         consecutive_errors: 0,
+        watch_groups: Vec::new(),
+        icon_path: None,
     };
     let _library_write_guard = state.library_gate.clone().write_owned().await;
     record_candidate(
@@ -4288,6 +4294,82 @@ mod tests {
     }
 
     #[test]
+    fn a_watch_group_check_covers_only_its_targets() {
+        let root = std::env::temp_dir().join(format!("piep-watch-group-{}", make_job_id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let state = Arc::new(AppState::new(
+            Database::open(&root.join("piep.db"), &root.join("downloads")).unwrap(),
+        ));
+        for (target_type, key) in [("author", "in-group"), ("series", "outside")] {
+            state
+                .db
+                .upsert_update_target(&crate::database::UpdateTargetInput {
+                    target_type: target_type.into(),
+                    source: "pixiv".into(),
+                    source_key: key.into(),
+                    display_name: key.into(),
+                    enabled: true,
+                    metadata_json: None,
+                })
+                .unwrap();
+        }
+        // 作品ごとの監視はグループの確認に混ぜない。
+        let json_path = root.join("watched.json");
+        std::fs::write(&json_path, "{}").unwrap();
+        state
+            .db
+            .upsert_download(&NewDownload {
+                source: "pixiv".into(),
+                source_id: "watched-elsewhere".into(),
+                title: "別の作品".into(),
+                author_name: "別の作者".into(),
+                author_id: "someone-else".into(),
+                content_type: "novel".into(),
+                tags: Vec::new(),
+                excerpt: None,
+                cover_path: None,
+                json_path: json_path.to_string_lossy().into(),
+                original_json_path: None,
+                asset_count: 0,
+                file_size_bytes: 0,
+                downloaded_at: "2026-01-01T00:00:00Z".into(),
+                source_created_at: None,
+                content_hash: None,
+                text_length: 0,
+                source_updated_at: None,
+                watch_updates: true,
+                current_version: 1,
+                favorite: false,
+            })
+            .unwrap();
+        let member = state
+            .db
+            .list_update_targets(None, false)
+            .unwrap()
+            .into_iter()
+            .find(|target| target.source_key == "in-group")
+            .unwrap()
+            .id;
+        let request = StartUpdateJobRequest {
+            scope: "targets".into(),
+            mode: "check_only".into(),
+            work_ids: None,
+            target_ids: Some(vec![member]),
+            credentials: None,
+            watch_saved: None,
+            adhoc_targets: None,
+        };
+        let items = build_initial_items(&state, &request).unwrap();
+        let keys: Vec<_> = items
+            .iter()
+            .map(|item| (item.item_type.as_str(), item.source_id.as_deref()))
+            .collect();
+        assert_eq!(keys, [("target", Some("in-group"))]);
+        drop(state);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn fanbox_author_listing_skips_only_a_recent_complete_saved_copy() {
         let root = std::env::temp_dir().join(format!("piep-fanbox-listing-{}", make_job_id()));
         std::fs::create_dir_all(&root).unwrap();
@@ -4480,6 +4562,8 @@ mod tests {
             updated_at: "now".into(),
             last_hit_at: None,
             consecutive_errors: 0,
+            watch_groups: Vec::new(),
+            icon_path: None,
         }
     }
 

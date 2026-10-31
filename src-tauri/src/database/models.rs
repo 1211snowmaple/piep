@@ -929,6 +929,26 @@ pub struct UpdateTarget {
     /// 連続で失敗している回数。0 に戻るのは成功したとき。
     #[serde(default)]
     pub consecutive_errors: i64,
+    /// 入っている監視グループの名前。バックアップはこれで所属を持ち運ぶ
+    /// （グループの ID はライブラリごとに違うので、名前で結び直す）。
+    #[serde(default)]
+    pub watch_groups: Vec<String>,
+    /// 一覧に出す顔。作者はプロフィール画像、シリーズは表紙。保存していなければ空。
+    #[serde(default)]
+    pub icon_path: Option<String>,
+}
+
+/// 利用者が作った監視グループ。監視対象を束ねて、まとめて確認する。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WatchGroup {
+    pub id: i64,
+    pub name: String,
+    pub sort_order: i64,
+    pub created_at: String,
+    pub updated_at: String,
+    /// 中の監視対象（`update_targets.id`）。
+    pub target_ids: Vec<i64>,
 }
 
 /// 更新チェック対象の作成・更新入力

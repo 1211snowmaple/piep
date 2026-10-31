@@ -270,6 +270,24 @@ fn create_additional_tables(conn: &Connection) -> Result<(), rusqlite::Error> {
          -- 一部保存の作品を取得元から取り直した記録。同じ版では一度しか試さない。
          -- 版が進めば取得元の中身が変わったので、もう一度だけ試す価値がある。
          -- 画面側の保存領域に置いていたので、入れ直すと全件を取り直していた。
+         -- 利用者が作る監視グループ。監視対象（作者・シリーズ）を束ね、その束だけを
+         -- 確認したり自動確認の範囲にしたりする。一つの対象がいくつのグループに
+         -- 入ってもよい。グループを消しても監視対象は消えない。
+         CREATE TABLE IF NOT EXISTS watch_groups (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            name       TEXT NOT NULL UNIQUE,
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS watch_group_members (
+            group_id  INTEGER NOT NULL REFERENCES watch_groups(id) ON DELETE CASCADE,
+            target_id INTEGER NOT NULL REFERENCES update_targets(id) ON DELETE CASCADE,
+            PRIMARY KEY (group_id, target_id)
+         );
+         CREATE INDEX IF NOT EXISTS idx_watch_group_members_target
+            ON watch_group_members(target_id);
+
          CREATE TABLE IF NOT EXISTS incomplete_save_repairs (
             download_id  INTEGER PRIMARY KEY REFERENCES downloads(id) ON DELETE CASCADE,
             version      INTEGER NOT NULL,

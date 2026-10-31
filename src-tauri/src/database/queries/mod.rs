@@ -38,6 +38,7 @@ mod work_inspection;
 pub(crate) use work_inspection::revision_metadata;
 pub use work_inspection::{RevisionMetadata, RevisionSnapshot, WorkAcquisitionDetails};
 mod update_watch;
+mod watch_groups;
 pub(crate) use acquisition_audit::{
     masked_metadata_label, masked_pixiv_metadata, pixiv_missing_references_for_filenames,
     saved_pixiv_missing_references,
@@ -15608,6 +15609,14 @@ fn update_target_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<UpdateTar
         // NULL / 0 のままになる。
         last_hit_at: row.get(12)?,
         consecutive_errors: row.get(13)?,
+        // 一覧の問い合わせだけが足す列。無い問い合わせでは空のまま。
+        watch_groups: row
+            .get::<_, Option<String>>("watch_groups_json")
+            .ok()
+            .flatten()
+            .and_then(|json| serde_json::from_str(&json).ok())
+            .unwrap_or_default(),
+        icon_path: row.get::<_, Option<String>>("icon_path").ok().flatten(),
     })
 }
 

@@ -29,7 +29,8 @@ export function FilterChoiceGroup<T extends string>({ label, value, options, onC
   return <div className="filter-choice-group" role="group" aria-label={label}>
     <div className="filter-choice-group__label">{label}</div>
     <div className="filter-choice-group__options">
-      {choices.map((option) => <span key={option.value ?? "all"} className="filter-choice__slot" data-starts-group={option.startsGroup || undefined}>
+      {/* 「指定しない」の鍵は値と重ならない形にする。値そのものが "all" の項目がある（検索する版）。 */}
+      {choices.map((option) => <span key={option.value === null ? "unset:" : `value:${option.value}`} className="filter-choice__slot" data-starts-group={option.startsGroup || undefined}>
         <UnstyledButton className="filter-choice" data-selected={value === option.value || undefined} aria-pressed={value === option.value} onClick={() => choose(option.value)}>{value === option.value && <Icons.confirm size={IconSize.inline} aria-hidden />}{option.label}</UnstyledButton>
       </span>)}
     </div>

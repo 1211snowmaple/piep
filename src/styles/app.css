@@ -2913,6 +2913,28 @@ select {
 .update-history__row:hover .update-history__delete,
 .update-history__row:focus-within .update-history__delete { opacity: 1; }
 
+/* 監視対象の束。選んでいる束は、履歴で選んでいる回と同じ色で示す。 */
+.watch-nav__item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  padding: 6px 10px;
+  border-radius: var(--mantine-radius-sm);
+}
+.watch-nav__item:hover { background: light-dark(#f6f8fb, #171e26); }
+.watch-nav__item[data-active] { background: light-dark(#eef6ff, #10273a); }
+.watch-target[data-selected] { background: light-dark(#f4f9ff, #122130); }
+.watch-target__face { flex: none; }
+.watch-target__groups { overflow: hidden; }
+.watch-list__head { min-height: 36px; }
+@media (max-width: 62em) {
+  /* 狭い画面では束を横に並べる。縦に積むと、一覧が画面の下へ押し出される。 */
+  .watch-nav nav > .mantine-Stack-root { flex-direction: row; flex-wrap: wrap; }
+  .watch-nav__item { flex: none; }
+  .watch-nav nav > .mantine-Stack-root > :is(.mantine-Group-root, .mantine-Text-root) { flex-basis: 100%; }
+}
+
 @media (max-width: 56em) {
   .save-layout { padding: 8px; }
 }

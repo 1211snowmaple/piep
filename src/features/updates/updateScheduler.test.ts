@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { renderHook } from "@testing-library/react";
 
 const listUpdateTargets = vi.fn();
+const listWatchGroups = vi.fn();
 const searchDownloadsV2 = vi.fn();
 const listUpdateJobsCommand = vi.fn();
 const startUpdateJobCommand = vi.fn();
@@ -15,6 +16,7 @@ vi.mock("@tauri-apps/plugin-notification", () => ({
 vi.mock("@/services/dbApi", () => ({
   isTauriRuntime: () => true,
   listUpdateTargets: (...args: unknown[]) => listUpdateTargets(...args),
+  listWatchGroups: () => listWatchGroups(),
   searchDownloadsV2: (...args: unknown[]) => searchDownloadsV2(...args),
 }));
 vi.mock("@/services/updateJobApi", () => ({
@@ -48,6 +50,7 @@ beforeEach(() => {
   storeValues.clear();
   storeValues.set("update_schedule", { onStartup: true, intervalHours: 0, mode: "check_only", watchSaved: false, notify: false });
   listUpdateTargets.mockReset().mockResolvedValue([]);
+  listWatchGroups.mockReset().mockResolvedValue([]);
   searchDownloadsV2.mockReset().mockResolvedValue({ items: [] });
   listUpdateJobsCommand.mockReset().mockResolvedValue([]);
   startUpdateJobCommand.mockReset().mockResolvedValue({ totals: 1 });
@@ -81,6 +84,25 @@ describe("automatic update checks", () => {
     listUpdateJobsCommand.mockResolvedValue([{ jobId: "job-1", status }]);
     await runStartupTick();
     expect(startUpdateJobCommand).toHaveBeenCalledTimes(1);
+  });
+
+  // 範囲をグループにしたら、その中の止めていない対象だけを見る。
+  it("checks only the enabled members of the chosen group", async () => {
+    storeValues.set("update_schedule", { onStartup: true, intervalHours: 0, mode: "check_only", groupId: 7 });
+    listWatchGroups.mockResolvedValue([{ id: 7, name: "毎日", targetIds: [1, 2, 3] }]);
+    listUpdateTargets.mockResolvedValue([{ id: 1 }, { id: 3 }, { id: 9 }]);
+    await runStartupTick();
+    expect(startUpdateJobCommand).toHaveBeenCalledWith(expect.objectContaining({ scope: "targets", targetIds: [1, 3] }));
+  });
+
+  // 消えたグループを「すべて」へ広げると、絞った意味が無くなる。
+  it("does not widen to everything when the chosen group is gone", async () => {
+    storeValues.set("update_schedule", { onStartup: true, intervalHours: 0, mode: "check_only", groupId: 7 });
+    listUpdateTargets.mockResolvedValue([{ id: 1 }]);
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await runStartupTick();
+    error.mockRestore();
+    expect(startUpdateJobCommand).not.toHaveBeenCalled();
   });
 
   it.each(["queued", "running", "canceling"])("leaves a %s job to its worker", async (status) => {

@@ -1752,6 +1752,53 @@ pub async fn db_delete_update_target(
     .await
 }
 
+/// 利用者が作った監視グループを並び順で返す。中の監視対象の ID も添える。
+#[tauri::command]
+pub async fn db_list_watch_groups(
+    app: tauri::AppHandle,
+) -> Result<Vec<crate::database::WatchGroup>, String> {
+    app.state::<Arc<AppState>>().db.list_watch_groups()
+}
+
+/// 監視グループを一番下に作り、その ID を返す。同じ名前があれば `Err`。
+#[tauri::command]
+pub async fn db_create_watch_group(app: tauri::AppHandle, name: String) -> Result<i64, String> {
+    run_library_write_blocking(app, move |state| state.db.create_watch_group(&name)).await
+}
+
+/// 監視グループの名前を変える。
+#[tauri::command]
+pub async fn db_rename_watch_group(
+    app: tauri::AppHandle,
+    group_id: i64,
+    name: String,
+) -> Result<(), String> {
+    run_library_write_blocking(app, move |state| {
+        state.db.rename_watch_group(group_id, &name)
+    })
+    .await
+}
+
+/// 監視グループを消す。**中の監視対象は消えない。**
+#[tauri::command]
+pub async fn db_delete_watch_group(app: tauri::AppHandle, group_id: i64) -> Result<(), String> {
+    run_library_write_blocking(app, move |state| state.db.delete_watch_group(group_id)).await
+}
+
+/// 監視対象を監視グループに入れる（`add`）か、外す。変わった件数を返す。
+#[tauri::command]
+pub async fn db_set_watch_group_members(
+    app: tauri::AppHandle,
+    group_id: i64,
+    target_ids: Vec<i64>,
+    add: bool,
+) -> Result<usize, String> {
+    run_library_write_blocking(app, move |state| {
+        state.db.set_watch_group_members(group_id, &target_ids, add)
+    })
+    .await
+}
+
 /// 作者を一人引く。棚に無ければ `Err`。
 #[tauri::command]
 pub async fn db_get_person(

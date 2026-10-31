@@ -13,6 +13,16 @@ use super::{
 };
 use rusqlite::{params, OptionalExtension};
 
+/// 監視対象の一覧で返す列。表の列（位置で読む）の後ろに、入っているグループの
+/// 名前と一覧に出す顔を足す。足した二つは `update_target_from_row` が名前で読む。
+const UPDATE_TARGET_LIST_COLUMNS: &str = "t.*,
+    (SELECT json_group_array(g.name) FROM watch_group_members m
+       JOIN watch_groups g ON g.id = m.group_id WHERE m.target_id = t.id) AS watch_groups_json,
+    CASE t.target_type
+      WHEN 'author' THEN (SELECT p.icon_path FROM people p WHERE p.source = t.source AND p.source_key = t.source_key)
+      WHEN 'series' THEN (SELECT s.cover_path FROM series s WHERE s.source = t.source AND s.source_key = t.source_key)
+    END AS icon_path";
+
 impl Database {
     pub fn clear_resolved_unavailable_candidates(
         &self,
@@ -107,7 +117,7 @@ impl Database {
         enabled_only: bool,
     ) -> Result<Vec<UpdateTarget>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        let mut sql = String::from("SELECT * FROM update_targets");
+        let mut sql = format!("SELECT {UPDATE_TARGET_LIST_COLUMNS} FROM update_targets t");
         let mut bind_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
         let mut wheres = Vec::new();
         if let Some(t) = target_type {
@@ -148,14 +158,16 @@ impl Database {
     ) -> Result<Vec<UpdateTarget>, String> {
         let conn = self.read_conn()?;
         let limit = limit.clamp(1, 5_000);
-        let (sql, bind_values): (&str, Vec<Box<dyn rusqlite::types::ToSql>>) = match cursor {
+        let (sql, bind_values): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = match cursor {
             Some((target_type, source, source_key)) => (
-                "SELECT * FROM update_targets
+                format!(
+                    "SELECT {UPDATE_TARGET_LIST_COLUMNS} FROM update_targets t
                  WHERE target_type > ?1
                     OR (target_type = ?1 AND source > ?2)
                     OR (target_type = ?1 AND source = ?2 AND source_key > ?3)
                  ORDER BY target_type ASC, source ASC, source_key ASC
-                 LIMIT ?4",
+                 LIMIT ?4"
+                ),
                 vec![
                     Box::new(target_type.to_string()),
                     Box::new(source.to_string()),
@@ -164,9 +176,11 @@ impl Database {
                 ],
             ),
             None => (
-                "SELECT * FROM update_targets
+                format!(
+                    "SELECT {UPDATE_TARGET_LIST_COLUMNS} FROM update_targets t
                  ORDER BY target_type ASC, source ASC, source_key ASC
-                 LIMIT ?1",
+                 LIMIT ?1"
+                ),
                 vec![Box::new(limit)],
             ),
         };
@@ -175,7 +189,7 @@ impl Database {
             .map(|value| value.as_ref())
             .collect::<Vec<_>>();
         let mut statement = conn
-            .prepare(sql)
+            .prepare(&sql)
             .map_err(|e| format!("Update target page prepare failed: {e}"))?;
         let targets = statement
             .query_map(refs.as_slice(), update_target_from_row)

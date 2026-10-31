@@ -3975,6 +3975,12 @@ async fn import_zip_locked(
 
             for target in &metadata.update_targets {
                 state.db.restore_update_target(target)?;
+                state.db.restore_watch_group_memberships(
+                    &target.target_type,
+                    &target.source,
+                    &target.source_key,
+                    &target.watch_groups,
+                )?;
             }
             for candidate in &metadata.update_candidates {
                 state.db.restore_update_candidate(candidate)?;
@@ -6446,6 +6452,18 @@ mod tests {
                 metadata_json: Some(r#"{"reason":"followed"}"#.to_string()),
             })
             .unwrap();
+        // 監視グループへの所属も持ち運ぶ。
+        let group = source_state.db.create_watch_group("毎日見る").unwrap();
+        let author_id = source_state
+            .db
+            .find_update_target("author", "pixiv", "empty-library-author")
+            .unwrap()
+            .unwrap()
+            .id;
+        source_state
+            .db
+            .set_watch_group_members(group, &[author_id], true)
+            .unwrap();
         source_state
             .db
             .mark_update_target_checked(
@@ -6502,6 +6520,10 @@ mod tests {
             restored.last_seen_source_id.as_deref(),
             Some("unhandled-work-42")
         );
+        let groups = target_state.db.list_watch_groups().unwrap();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].name, "毎日見る");
+        assert_eq!(groups[0].target_ids, vec![restored.id]);
         assert_eq!(
             restored.metadata_json.as_deref(),
             Some(r#"{"reason":"followed"}"#)

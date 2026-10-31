@@ -414,6 +414,21 @@ export interface UpdateTarget {
   lastHitAt?: string | null;
   /** Failures in a row. Reset to zero by any successful check. */
   consecutiveErrors?: number;
+  /** 入っている監視グループの名前。一覧の問い合わせだけが埋める。 */
+  watchGroups?: string[];
+  /** 一覧に出す顔。作者はプロフィール画像、シリーズは表紙。保存していなければ空。 */
+  iconPath?: string | null;
+}
+
+/** 利用者が作った監視グループ。監視対象を束ねて、その束だけを確認する。 */
+export interface WatchGroup {
+  id: number;
+  name: string;
+  sortOrder: number;
+  createdAt: string;
+  updatedAt: string;
+  /** 中の監視対象（UpdateTarget.id）。 */
+  targetIds: number[];
 }
 
 export interface DashboardTrendPoint {

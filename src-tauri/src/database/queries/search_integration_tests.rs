@@ -7153,6 +7153,120 @@ fn library_attention_filters_only_saved_held_works() {
 }
 
 #[test]
+fn watch_groups_bundle_targets_without_owning_them() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    for (target_type, key, name) in [("author", "a1", "作者一"), ("series", "s1", "連載一")] {
+        db.upsert_update_target(&UpdateTargetInput {
+            target_type: target_type.into(),
+            source: "pixiv".into(),
+            source_key: key.into(),
+            display_name: name.into(),
+            enabled: true,
+            metadata_json: None,
+        })
+        .unwrap();
+    }
+    db.conn
+        .lock()
+        .unwrap()
+        .execute(
+            "INSERT INTO people(source, source_key, display_name, icon_path) VALUES ('pixiv','a1','作者一','C:/icons/a1.png')",
+            [],
+        )
+        .unwrap();
+    let targets = db.list_update_targets(None, false).unwrap();
+    let id_of = |key: &str| targets.iter().find(|t| t.source_key == key).unwrap().id;
+    let (author, series) = (id_of("a1"), id_of("s1"));
+    // 一覧には作者の顔が付く。保存していないシリーズの表紙は空のまま。
+    assert_eq!(
+        targets
+            .iter()
+            .find(|t| t.id == author)
+            .unwrap()
+            .icon_path
+            .as_deref(),
+        Some("C:/icons/a1.png")
+    );
+    assert!(targets
+        .iter()
+        .find(|t| t.id == series)
+        .unwrap()
+        .icon_path
+        .is_none());
+
+    let daily = db.create_watch_group("  毎日見る ").unwrap();
+    let weekly = db.create_watch_group("週末").unwrap();
+    assert!(db
+        .create_watch_group("毎日見る")
+        .unwrap_err()
+        .contains("もうあります"));
+    assert!(db.create_watch_group("   ").is_err());
+    assert_eq!(
+        db.set_watch_group_members(daily, &[author, series], true)
+            .unwrap(),
+        2
+    );
+    // 入っているものを入れ直しても数えない。一つの対象は複数のグループに入れる。
+    assert_eq!(
+        db.set_watch_group_members(daily, &[author], true).unwrap(),
+        0
+    );
+    assert_eq!(
+        db.set_watch_group_members(weekly, &[author], true).unwrap(),
+        1
+    );
+    let groups = db.list_watch_groups().unwrap();
+    assert_eq!(
+        groups
+            .iter()
+            .map(|g| (g.name.as_str(), g.target_ids.len()))
+            .collect::<Vec<_>>(),
+        [("毎日見る", 2), ("週末", 1)]
+    );
+    let mut names = db
+        .list_update_targets(None, false)
+        .unwrap()
+        .into_iter()
+        .find(|t| t.id == author)
+        .unwrap()
+        .watch_groups;
+    names.sort();
+    assert_eq!(names, ["毎日見る", "週末"]);
+
+    db.rename_watch_group(weekly, "週末に見る").unwrap();
+    assert!(db.rename_watch_group(weekly, "毎日見る").is_err());
+    assert_eq!(
+        db.set_watch_group_members(daily, &[series], false).unwrap(),
+        1
+    );
+    // グループを消しても監視対象は残る。
+    db.delete_watch_group(daily).unwrap();
+    assert_eq!(db.list_update_targets(None, false).unwrap().len(), 2);
+    assert_eq!(db.list_watch_groups().unwrap().len(), 1);
+    // 監視対象を消せば、グループからも抜ける。
+    db.delete_update_target("author", "pixiv", "a1").unwrap();
+    assert!(db.list_watch_groups().unwrap()[0].target_ids.is_empty());
+
+    // バックアップからは名前で結び直す。無いグループは作る。
+    db.restore_watch_group_memberships(
+        "series",
+        "pixiv",
+        "s1",
+        &["戻した束".into(), "週末に見る".into()],
+    )
+    .unwrap();
+    let restored = db.list_watch_groups().unwrap();
+    assert_eq!(
+        restored
+            .iter()
+            .map(|g| (g.name.as_str(), g.target_ids.clone()))
+            .collect::<Vec<_>>(),
+        [("週末に見る", vec![series]), ("戻した束", vec![series])]
+    );
+}
+
+#[test]
 fn held_candidates_are_ordered_by_time_whichever_way_the_time_was_written() {
     let (_temp, root, storage) = temp_paths();
     let db = Database::open(&root.join("piep.db"), &storage).unwrap();
