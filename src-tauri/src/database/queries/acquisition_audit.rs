@@ -9,6 +9,49 @@ static REFERENCES: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\[(pixivimage|uploadedimage):([^\]]+)\]").unwrap());
 static PIXIV_SPEC: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(\d+)(?:-(\d+))?$").unwrap());
 
+/// Bump when the audit learns to find a new kind of loss, so versions checked
+/// under an older rule are inspected once more instead of on every launch.
+/// 2: masked Pixiv title/caption/tags behind an R-18 cover placeholder.
+pub(crate) const SAVED_AUDIT_RULE: i64 = 2;
+
+/// Fields the App API blanked when it gated an R-18 novel. The age-gate cover
+/// is the evidence: an empty caption on its own is an ordinary author choice.
+/// Once the web detail has been consulted, a blank field is what the source
+/// really holds and is no longer reported.
+pub(crate) fn masked_pixiv_metadata(value: &Value) -> Vec<&'static str> {
+    let gated = [value.get("cover_url"), value.pointer("/detail/cover_url")]
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .any(crate::source_assets::is_pixiv_placeholder_image);
+    if !gated || value.get("web_detail").is_some_and(Value::is_object) {
+        return Vec::new();
+    }
+    let detail = value.get("detail").unwrap_or(&Value::Null);
+    ["title", "caption", "tags"]
+        .into_iter()
+        .filter(|key| {
+            detail.get(*key).is_none_or(|field| {
+                field.is_null()
+                    || field.as_str().is_some_and(|text| text.trim().is_empty())
+                    || field.as_array().is_some_and(Vec::is_empty)
+            })
+        })
+        .collect()
+}
+
+pub(crate) fn masked_metadata_label(fields: &[&str]) -> String {
+    fields
+        .iter()
+        .map(|field| match *field {
+            "title" => "題名",
+            "caption" => "説明",
+            _ => "タグ",
+        })
+        .collect::<Vec<_>>()
+        .join("・")
+}
+
 fn missing_saved_references(text: &str, filenames: &HashSet<String>) -> Vec<String> {
     let mut missing = Vec::new();
     for capture in REFERENCES.captures_iter(text) {
@@ -111,8 +154,9 @@ impl Database {
         Ok(count)
     }
 
-    /// Inspect each saved version once, in small idle batches. Older archives did
-    /// not record missing_illustrations, so job history alone cannot recover them.
+    /// Inspect each saved version once per audit rule, in small idle batches.
+    /// Older archives did not record missing_illustrations or masked details,
+    /// so job history alone cannot recover them.
     pub(crate) fn audit_saved_pixiv_assets(
         &self,
         after_id: i64,
@@ -124,19 +168,23 @@ impl Database {
                 "SELECT d.id,d.source_id,d.title,d.json_path,d.current_version FROM downloads d
                  LEFT JOIN saved_asset_audits a ON a.download_id=d.id
                  WHERE d.id>?2 AND d.source='pixiv' AND d.content_type='novel'
-                   AND (a.download_id IS NULL OR a.json_path<>d.json_path OR a.version<>d.current_version)
+                   AND (a.download_id IS NULL OR a.json_path<>d.json_path OR a.version<>d.current_version
+                        OR a.rule_version<?3)
                  ORDER BY d.id LIMIT ?1",
             ).map_err(|error| error.to_string())?;
             let rows = statement
-                .query_map([limit.clamp(1, 32) as i64, after_id], |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, String>(3)?,
-                        row.get::<_, i64>(4)?,
-                    ))
-                })
+                .query_map(
+                    [limit.clamp(1, 32) as i64, after_id, SAVED_AUDIT_RULE],
+                    |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, i64>(4)?,
+                        ))
+                    },
+                )
                 .map_err(|error| error.to_string())?
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|error| error.to_string())?;
@@ -160,12 +208,24 @@ impl Database {
             } else {
                 Vec::new()
             };
-            if !missing.is_empty() {
+            let masked = masked_pixiv_metadata(&value);
+            if !missing.is_empty() || !masked.is_empty() {
+                let mut losses = Vec::new();
+                if !missing.is_empty() {
+                    losses.push(format!("挿絵参照を表示できません: {}", missing.join(", ")));
+                }
+                if !masked.is_empty() {
+                    losses.push(format!(
+                        "作品情報（{}）が取得元で伏せられた状態です",
+                        masked_metadata_label(&masked)
+                    ));
+                }
                 let payload = serde_json::json!({
                     "kind":"revision", "source":"pixiv", "sourceId":source_id,
                     "title":title, "subtitle":"本文保存済み", "holdKind":"incomplete",
-                    "holdReason":format!("[一部保存] 本文は保存済みですが、挿絵参照を表示できません: {}", missing.join(", ")),
-                    "missingReferences":missing, "originalData":{"localVersion":version}
+                    "holdReason":format!("[一部保存] 本文は保存済みですが、{}", losses.join("。")),
+                    "missingReferences":missing, "missingMetadata":masked,
+                    "originalData":{"localVersion":version}
                 });
                 findings.push((*id, source_id, title, payload.to_string()));
             }
@@ -185,9 +245,10 @@ impl Database {
             }
         }
         for (id, _, _, path, version) in &rows {
-            tx.execute("INSERT INTO saved_asset_audits(download_id,json_path,version) VALUES(?1,?2,?3)
-                ON CONFLICT(download_id) DO UPDATE SET json_path=excluded.json_path,version=excluded.version",
-                params![id,path,version]).map_err(|error| error.to_string())?;
+            tx.execute("INSERT INTO saved_asset_audits(download_id,json_path,version,rule_version) VALUES(?1,?2,?3,?4)
+                ON CONFLICT(download_id) DO UPDATE SET json_path=excluded.json_path,version=excluded.version,
+                    rule_version=excluded.rule_version",
+                params![id,path,version,SAVED_AUDIT_RULE]).map_err(|error| error.to_string())?;
         }
         tx.commit().map_err(|error| error.to_string())?;
         Ok((
@@ -212,5 +273,25 @@ mod tests {
         assert_eq!(missing_saved_references(
             "[pixivimage:123-2][pixivimage:456-3][uploadedimage:789][pixivimage:123][pixivimage:123-0][pixivimage:id=123][pixivimage:123]", &names),
             vec!["[pixivimage:123]", "[pixivimage:123-0]", "[pixivimage:id=123]"]);
+    }
+
+    #[test]
+    fn masked_details_need_the_age_gate_and_an_unconsulted_web_detail() {
+        let gate = "https://s.pximg.net/common/images/limit_r18g_100.png";
+        let masked = serde_json::json!({"detail":{"title":"","caption":" ","cover_url":gate}});
+        assert_eq!(
+            masked_pixiv_metadata(&masked),
+            vec!["title", "caption", "tags"]
+        );
+        assert_eq!(
+            masked_metadata_label(&masked_pixiv_metadata(&masked)),
+            "題名・説明・タグ"
+        );
+        let filled = serde_json::json!({"cover_url":gate,"detail":{"title":"題","caption":"説明","tags":[{"name":"R-18"}]}});
+        assert!(masked_pixiv_metadata(&filled).is_empty());
+        let ungated = serde_json::json!({"cover_url":"https://i.pximg.net/a.jpg","detail":{"title":"題","caption":"","tags":[]}});
+        assert!(masked_pixiv_metadata(&ungated).is_empty());
+        let consulted = serde_json::json!({"cover_url":gate,"web_detail":{},"detail":{"title":"題","caption":"","tags":[]}});
+        assert!(masked_pixiv_metadata(&consulted).is_empty());
     }
 }

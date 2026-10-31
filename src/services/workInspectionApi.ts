@@ -29,6 +29,8 @@ export interface WorkAcquisitionDetails {
   recordedAt: string;
   version: number;
   missingImages: MissingImageLocation[];
+  /** Pixiv detail fields the source masked when the work was saved. */
+  missingMetadata?: Array<"title" | "caption" | "tags">;
   locationError?: string | null;
 }
 export const getRevisionSnapshot = (downloadId: number, version: number) => invoke<RevisionSnapshot>("get_revision_snapshot", { downloadId, version });

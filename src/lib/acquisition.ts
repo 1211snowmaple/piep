@@ -23,3 +23,13 @@ export function acquisitionStatusMeta(value: string): { label: string; color: st
   if (!kind || kind === "attention") return { label: "保留", color: "gray" };
   return { label: acquisitionFilterName(kind), color: kind === "complete" ? "green" : kind === "dismissed" ? "gray" : kind === "restricted" || kind === "unavailable" ? "yellow" : "orange" };
 }
+
+const metadataLabels = { title: "題名", caption: "説明", tags: "タグ" } as const;
+
+/** One sentence for a partial save: what is missing, without the raw hold reason. */
+export function incompleteSummary(missingImages: boolean, missingMetadata: readonly (keyof typeof metadataLabels)[]): string {
+  const details = missingMetadata.length ? `作品情報（${missingMetadata.map((field) => metadataLabels[field]).join("・")}）` : "";
+  if (missingImages && details) return `作品は保存済みです。一部の挿絵と${details}を取得できませんでした。`;
+  if (details) return `作品は保存済みです。${details}が取得元で伏せられた状態で保存されています。再確認すると補完します。`;
+  return missingImages ? "作品は保存済みです。一部の挿絵を取得できませんでした。" : "作品は保存済みです。一部の内容を取得できませんでした。";
+}

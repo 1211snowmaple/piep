@@ -331,6 +331,8 @@ pub struct WorkAcquisitionDetails {
     recorded_at: String,
     pub version: i64,
     missing_images: Vec<MissingImageLocation>,
+    /// Pixiv detail fields saved while the source masked them.
+    missing_metadata: Vec<&'static str>,
     location_error: Option<String>,
 }
 
@@ -459,6 +461,17 @@ impl Database {
                 *occurrence += 1;
             }
         }
+        // Read the saved copy rather than the hold reason: a later save may
+        // already have filled what the recorded reason still mentions.
+        let missing_metadata = if download.source == "pixiv" {
+            std::fs::read_to_string(&download.json_path)
+                .ok()
+                .and_then(|body| serde_json::from_str::<Value>(&body).ok())
+                .map(|value| super::masked_pixiv_metadata(&value))
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         Ok(Some(WorkAcquisitionDetails {
             kind: payload
                 .get("holdKind")
@@ -474,6 +487,7 @@ impl Database {
             recorded_at,
             version: download.current_version,
             missing_images,
+            missing_metadata,
             location_error,
         }))
     }
