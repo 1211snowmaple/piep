@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import {
   Alert,
   Badge,
@@ -150,7 +150,10 @@ export default function DashboardPage() {
           <StatCard icon={Icons.database} label="保存作品" value={formatNumber(data.stats.totalDownloads)} hint={`pixiv ${formatNumber(data.stats.pixivCount)} · FANBOX ${formatNumber(data.stats.fanboxCount)}`} color="#0d86f4" onClick={() => navigate("/library")} />
           <StatCard icon={Icons.storage} label="使用容量" value={formatBytes(data.stats.totalSizeBytes)} hint={`${formatNumber(data.stats.totalAssets)}件の画像・添付`} color="#31b497" onClick={() => navigate("/library?sort=file_size_bytes")} />
           <StatCard icon={Icons.favorite} label="お気に入り" value={formatNumber(data.favoriteCount)} hint="すぐ読み返せる作品" color="#ef5b78" onClick={() => navigate("/library?favorite=1")} />
-          <StatCard icon={Icons.updates} label="更新監視" value={formatNumber(data.watchedCount)} hint={`${formatNumber(data.updateTargetCount)} 作者・シリーズ`} color="#86b918" onClick={() => navigate("/library?watch=watched")} />
+          {/* Watching is done per author and series, not per work, so the
+              per-work flag this tile used to count is almost always 0 (the
+              library shelf was dropped for the same reason). */}
+          <StatCard icon={Icons.updates} label="更新監視" value={formatNumber(data.updateTargetCount)} hint="作者・シリーズを監視中" color="#86b918" onClick={() => navigate("/updates")} />
         </SimpleGrid>
 
         {/* Two columns from the medium breakpoint rather than the large one:
@@ -166,8 +169,7 @@ export default function DashboardPage() {
                 </Box>
                 <Group gap="md"><TrendLegend color="#0096fa" label="pixiv" /><TrendLegend color="#d1a900" label="FANBOX" /></Group>
               </Group>
-              <DownloadTrend data={chartData} />
-              <SourceComposition breakdown={data.sourceBreakdown} total={data.stats.totalDownloads} />
+              <SourceTrend months={chartData} breakdown={data.sourceBreakdown} total={data.stats.totalDownloads} />
             </Card>
           </Grid.Col>
           <Grid.Col span={{ base: 12, md: 6, lg: 5 }}>
@@ -247,13 +249,78 @@ function buildTrend(points: { bucket: string; count: number; pixivCount: number;
   return months;
 }
 
-function DownloadTrend({ data }: { data: TrendMonth[] }) {
-  const maximum = Math.max(1, ...data.map((item) => item.total));
-  const label = data.map((item) => `${item.label} ${item.total}件`).join("、");
+/** A month's saves in the same shape as the whole library's breakdown. pixiv and
+ *  FANBOX stay listed at zero so the row below doesn't jump while the pointer
+ *  moves across the bars. */
+function monthBreakdown(month: TrendMonth): { source: string; count: number }[] {
+  return [
+    { source: "pixiv", count: month.pixiv },
+    { source: "fanbox", count: month.fanbox },
+    ...(month.other > 0 ? [{ source: "その他", count: month.other }] : []),
+  ];
+}
+
+/**
+ * The bars show the shape of the months; the exact pixiv and FANBOX counts for
+ * one of them come up in the composition row underneath, which otherwise shows
+ * the whole library. Twelve columns leave no room to print both numbers on
+ * every bar, so the detail goes where there is already room for it.
+ */
+function SourceTrend({ months, breakdown, total }: { months: TrendMonth[]; breakdown: { source: string; count: number }[]; total: number }) {
+  const [hovered, setHovered] = useState<string | null>(null);
+  const [pinned, setPinned] = useState<string | null>(null);
+  const active = months.find((month) => month.key === (hovered ?? pinned));
   return (
-    <Box className="download-trend" style={{ "--trend-columns": data.length } as React.CSSProperties} role="img" aria-label={`月別の保存数。${label}`}>
+    <>
+      <DownloadTrend
+        data={months}
+        activeKey={active?.key ?? null}
+        pinnedKey={pinned}
+        onHover={setHovered}
+        onPin={(key) => setPinned((current) => current === key ? null : key)}
+      />
+      <SourceComposition
+        month={active ? `${active.label}の内訳 · ${formatNumber(active.total)}件` : null}
+        breakdown={active ? monthBreakdown(active) : breakdown}
+        total={active ? active.total : total}
+      />
+    </>
+  );
+}
+
+function DownloadTrend({ data, activeKey, pinnedKey, onHover, onPin }: {
+  data: TrendMonth[];
+  activeKey: string | null;
+  pinnedKey: string | null;
+  onHover: (key: string | null) => void;
+  onPin: (key: string) => void;
+}) {
+  const maximum = Math.max(1, ...data.map((item) => item.total));
+  return (
+    <Box
+      className="download-trend"
+      style={{ "--trend-columns": data.length } as React.CSSProperties}
+      data-dense={data.length > 6 || undefined}
+      data-active={activeKey !== null || undefined}
+      role="group"
+      aria-label="月別の保存数"
+      onMouseLeave={() => onHover(null)}
+    >
       {data.map((item) => (
-        <Box className="download-trend__column" key={item.key} data-empty={item.total === 0 || undefined}>
+        <Box
+          component="button"
+          type="button"
+          className="download-trend__column"
+          key={item.key}
+          data-empty={item.total === 0 || undefined}
+          data-active={item.key === activeKey || undefined}
+          aria-pressed={item.key === pinnedKey}
+          aria-label={`${item.label} ${formatNumber(item.total)}件（pixiv ${formatNumber(item.pixiv)}件、FANBOX ${formatNumber(item.fanbox)}件）`}
+          onMouseEnter={() => onHover(item.key)}
+          onFocus={() => onHover(item.key)}
+          onBlur={() => onHover(null)}
+          onClick={() => onPin(item.key)}
+        >
           <Text size="xs" fw={700} c="dimmed">{item.total ? formatNumber(item.total) : ""}</Text>
           <Box className="download-trend__track" aria-hidden>
             {item.total > 0 && (
@@ -276,13 +343,18 @@ function DownloadTrend({ data }: { data: TrendMonth[] }) {
  * shows what the library is actually made of instead of a single bar sitting
  * in an otherwise empty axis.
  */
-function SourceComposition({ breakdown, total }: { breakdown: { source: string; count: number }[]; total: number }) {
-  const items = breakdown.filter((item) => item.count > 0);
+function SourceComposition({ month, breakdown, total }: { month: string | null; breakdown: { source: string; count: number }[]; total: number }) {
+  // A selected month keeps its zero rows; the library as a whole lists only
+  // the sources it actually has.
+  const items = month ? breakdown : breakdown.filter((item) => item.count > 0);
   if (!items.length) return <Alert color="gray">まだ保存された作品がありません。</Alert>;
   return (
-    <Stack gap="sm">
+    <Stack gap="sm" className="source-summary">
+      {/* Always present, on its own line, so switching between the whole
+          library and one month never changes the card's height. */}
+      <Text size="xs" c="dimmed" ta="center" aria-live="polite">{month ?? "全期間の内訳"}</Text>
       <Box className="source-composition" role="img" aria-label={items.map((item) => `${item.source} ${item.count}件`).join("、")}>
-        {items.map((item) => (
+        {items.filter((item) => item.count > 0).map((item) => (
           <Box key={item.source} className="source-composition__segment" data-source={item.source} style={{ flexGrow: item.count }} />
         ))}
       </Box>
