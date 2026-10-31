@@ -400,6 +400,7 @@ impl Database {
             &crate::assist::AssistNote {
                 text: text.to_string(),
                 source_tail: None,
+                claims: None,
             },
             provenance,
         )
@@ -414,12 +415,19 @@ impl Database {
         note: &crate::assist::AssistNote,
         provenance: &crate::assist::AssistProvenance,
     ) -> Result<(), String> {
+        let claims_json = note
+            .claims
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|e| format!("Failed to encode note evidence: {e}"))?;
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.execute(
             "INSERT INTO ai_notes (
                 subject_type, subject_key, note_kind, text, model_id, feature_id,
-                prompt_version, input_fingerprint, config_fingerprint, created_at, source_tail
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                prompt_version, input_fingerprint, config_fingerprint, created_at, source_tail,
+                claims_json
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
              ON CONFLICT(subject_type, subject_key, note_kind)
              DO UPDATE SET text = excluded.text, model_id = excluded.model_id,
                            feature_id = excluded.feature_id,
@@ -427,7 +435,8 @@ impl Database {
                            input_fingerprint = excluded.input_fingerprint,
                            config_fingerprint = excluded.config_fingerprint,
                            created_at = excluded.created_at,
-                           source_tail = excluded.source_tail",
+                           source_tail = excluded.source_tail,
+                           claims_json = excluded.claims_json",
             params![
                 subject_type,
                 subject_key,
@@ -440,6 +449,7 @@ impl Database {
                 provenance.config_fingerprint,
                 provenance.created_at,
                 note.source_tail,
+                claims_json,
             ],
         )
         .map_err(|e| format!("Failed to save note: {e}"))?;
@@ -471,6 +481,25 @@ impl Database {
         )
     }
 
+    /// ある話を読む前に作った「前回のあらすじ」の本文。次の話の前回の
+    /// あらすじを作るとき、それより前の流れの参考に渡す（シリーズの記憶）。
+    ///
+    /// 前回のあらすじは `読む話:前の話` に保存しているので、`前の話:*` が
+    /// 「前の話を読む前に見たメモ」である。新しいものを一つだけ使う。
+    pub fn recap_memory_before(&self, chapter_download_id: i64) -> Result<Option<String>, String> {
+        let conn = self.read_conn()?;
+        conn.query_row(
+            "SELECT text FROM ai_notes
+             WHERE subject_type = 'work' AND note_kind = 'recap'
+               AND subject_key LIKE ?1 || ':%'
+             ORDER BY created_at DESC LIMIT 1",
+            params![chapter_download_id.to_string()],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|e| format!("Failed to read series memory: {e}"))
+    }
+
     /// 保存してある覚え書きを読む。無ければ `None`。
     pub fn load_ai_note(
         &self,
@@ -482,7 +511,7 @@ impl Database {
         let note = conn
             .query_row(
                 "SELECT text, model_id, feature_id, prompt_version, input_fingerprint,
-                    config_fingerprint, created_at, source_tail FROM ai_notes
+                    config_fingerprint, created_at, source_tail, claims_json FROM ai_notes
              WHERE subject_type = ?1 AND subject_key = ?2 AND note_kind = ?3",
                 params![subject_type, subject_key, note_kind],
                 |row| {
@@ -495,6 +524,10 @@ impl Database {
                         config_fingerprint: row.get(5)?,
                         created_at: row.get(6)?,
                         source_tail: row.get(7)?,
+                        // 読めない根拠は無かったことにせず、旧メモと同じく本文だけ見せる。
+                        claims: row
+                            .get::<_, Option<String>>(8)?
+                            .and_then(|json| serde_json::from_str(&json).ok()),
                         prompt_stale: false,
                         input_stale: false,
                         config_stale: None,
@@ -581,6 +614,151 @@ impl Database {
             .map_err(|e| format!("Failed to delete note: {e}"))?;
         Ok(removed > 0)
     }
+
+    /// 棚のタグを部分一致で引く。候補一覧に入りきらない語や表記揺れを、
+    /// モデルが自分で確かめるための道具。作品数の多い順。
+    pub fn shelf_tags_containing(
+        &self,
+        needle: &str,
+        limit: usize,
+    ) -> Result<Vec<crate::assist::ShelfTagCount>, String> {
+        let needle = needle.trim();
+        if needle.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = self.read_conn()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT t.name, COUNT(DISTINCT dt.download_id) AS works FROM tags t
+                 JOIN download_tags dt ON dt.tag_id = t.id
+                 WHERE instr(lower(t.name), lower(?1)) > 0
+                 GROUP BY t.id
+                 ORDER BY works DESC, t.name COLLATE NOCASE ASC
+                 LIMIT ?2",
+            )
+            .map_err(|e| format!("Failed to prepare tag lookup: {e}"))?;
+        let rows = stmt
+            // 言い表せない語を除いたあとでも上限まで返せるよう、多めに引く。
+            .query_map(params![needle, (limit * 2) as i64], |row| {
+                Ok(crate::assist::ShelfTagCount {
+                    name: row.get(0)?,
+                    works: row.get(1)?,
+                })
+            })
+            .map_err(|e| format!("Failed to query tag lookup: {e}"))?;
+        let mut out = Vec::new();
+        for row in rows {
+            let tag = row.map_err(|e| format!("Failed to read tag lookup: {e}"))?;
+            if collection_rules::is_informative_tag(&tag.name) && out.len() < limit {
+                out.push(tag);
+            }
+        }
+        Ok(out)
+    }
+
+    /// 棚に実在するタグ名だけを返す。表記は完全一致で比べる。
+    pub fn existing_tag_names(&self, names: &[String]) -> Result<Vec<String>, String> {
+        let conn = self.read_conn()?;
+        let mut stmt = conn
+            .prepare("SELECT name FROM tags WHERE name = ?1")
+            .map_err(|e| format!("Failed to prepare tag check: {e}"))?;
+        let mut out = Vec::new();
+        for name in names {
+            if let Some(found) = stmt
+                .query_row(params![name], |row| row.get::<_, String>(0))
+                .optional()
+                .map_err(|e| format!("Failed to check tag: {e}"))?
+            {
+                out.push(found);
+            }
+        }
+        Ok(out)
+    }
+
+    /// タグ条件だけで絞ったときに、ライブラリの一覧に出る作品数。
+    ///
+    /// 一覧と同じ絞り込みを通すので、ここで 0 なら画面でも 0 になる。
+    pub fn count_works_with_tags(
+        &self,
+        include: &[String],
+        or_mode: bool,
+        exclude: &[String],
+    ) -> Result<i64, String> {
+        let params = SearchV2Params {
+            tags_include: (!include.is_empty()).then(|| include.to_vec()),
+            tags_exclude: (!exclude.is_empty()).then(|| exclude.to_vec()),
+            tag_filter_mode: Some(if or_mode { "or" } else { "and" }.to_string()),
+            ..SearchV2Params::default()
+        };
+        self.count_sql_matches(&normalize_search_params(&params))
+    }
+
+    /// 一つのタグが棚でどう使われているか。一緒に付くタグと作品の題名。
+    pub fn shelf_tag_profile(
+        &self,
+        name: &str,
+    ) -> Result<Option<crate::assist::ShelfTagProfile>, String> {
+        let conn = self.read_conn()?;
+        let Some((tag_id, works)) = conn
+            .query_row(
+                "SELECT t.id, COUNT(DISTINCT dt.download_id) FROM tags t
+                 JOIN download_tags dt ON dt.tag_id = t.id
+                 WHERE t.name = ?1 GROUP BY t.id",
+                params![name],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .optional()
+            .map_err(|e| format!("Failed to read tag: {e}"))?
+        else {
+            return Ok(None);
+        };
+        let mut related_stmt = conn
+            .prepare(
+                "SELECT t.name, COUNT(DISTINCT other.download_id) AS works
+                 FROM download_tags mine
+                 JOIN download_tags other ON other.download_id = mine.download_id
+                 JOIN tags t ON t.id = other.tag_id
+                 WHERE mine.tag_id = ?1 AND other.tag_id != ?1
+                 GROUP BY t.id
+                 ORDER BY works DESC, t.name COLLATE NOCASE ASC
+                 LIMIT 30",
+            )
+            .map_err(|e| format!("Failed to prepare related tags: {e}"))?;
+        let related = related_stmt
+            .query_map(params![tag_id], |row| {
+                Ok(crate::assist::ShelfTagCount {
+                    name: row.get(0)?,
+                    works: row.get(1)?,
+                })
+            })
+            .map_err(|e| format!("Failed to query related tags: {e}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("Failed to read related tags: {e}"))?
+            .into_iter()
+            .filter(|tag| collection_rules::is_informative_tag(&tag.name))
+            .take(12)
+            .collect();
+        let mut title_stmt = conn
+            .prepare(
+                "SELECT d.title FROM download_tags dt
+                 JOIN downloads d ON d.id = dt.download_id
+                 WHERE dt.tag_id = ?1
+                 ORDER BY d.downloaded_at DESC, d.id DESC
+                 LIMIT 8",
+            )
+            .map_err(|e| format!("Failed to prepare tagged titles: {e}"))?;
+        let titles = title_stmt
+            .query_map(params![tag_id], |row| row.get::<_, String>(0))
+            .map_err(|e| format!("Failed to query tagged titles: {e}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("Failed to read tagged titles: {e}"))?;
+        Ok(Some(crate::assist::ShelfTagProfile {
+            name: name.to_string(),
+            works,
+            related,
+            titles,
+        }))
+    }
 }
 
 /// 出どころの付いたタグ。
@@ -599,6 +777,8 @@ pub struct AiNote {
     pub text: String,
     #[serde(default)]
     pub source_tail: Option<String>,
+    #[serde(default)]
+    pub claims: Option<Vec<crate::assist::GroundedClaim>>,
     /// どのモデルが書いたか。モデルを替えたときに古い文が混ざるのを防ぐ。
     pub model_id: String,
     pub feature_id: String,
@@ -623,6 +803,78 @@ mod tests {
         generation_provenance, AssistEngine, AssistNote, FEATURE_READER_RECAP,
         FEATURE_WORK_SYNOPSIS,
     };
+
+    #[test]
+    fn grounded_claims_round_trip_and_feed_the_next_recap() {
+        let root = std::env::temp_dir().join(format!(
+            "piep-assist-claims-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let db = Database::open(&root.join("piep.db"), &root.join("storage")).unwrap();
+        let body_path = root.join("original.json");
+        std::fs::write(
+            &body_path,
+            serde_json::json!({"text":"彼は沖の船を見つけた。"}).to_string(),
+        )
+        .unwrap();
+        for id in [2, 3] {
+            db.conn.lock().unwrap().execute(
+                "INSERT INTO downloads(id,source,source_id,title,author_name,author_id,content_type,json_path,downloaded_at)
+                 VALUES(?1,'pixiv',?2,'合成記録','作者','synthetic-author','novel',?3,'2026-01-01')",
+                rusqlite::params![id, format!("synthetic-claims-{id}"), body_path.to_str().unwrap()],
+            ).unwrap();
+        }
+        let claim = crate::assist::GroundedClaim {
+            text: "灯台守が船を見つける。".into(),
+            sources: vec![3],
+            evidence: vec!["彼は沖の船を見つけた。".into()],
+            verdict: crate::assist::ClaimVerdict::Partial,
+            concern: Some("灯台守とは書かれていない".into()),
+        };
+        let provenance = crate::assist::AssistProvenance {
+            feature_id: FEATURE_READER_RECAP.into(),
+            prompt_version: "reader_recap/v12".into(),
+            model_id: "m".into(),
+            input_fingerprint: String::new(),
+            config_fingerprint: String::new(),
+            created_at: "2026-11-01T00:00:00Z".into(),
+        };
+        let note = AssistNote {
+            text: claim.text.clone(),
+            source_tail: None,
+            claims: Some(vec![claim.clone()]),
+        };
+        // 3話目を読む前に作った、2話目の前回のあらすじ。
+        db.save_ai_note_content_with_provenance("work", "3:2", "recap", &note, &provenance)
+            .unwrap();
+        let loaded = db.load_ai_note("work", "3:2", "recap").unwrap().unwrap();
+        assert_eq!(loaded.claims, Some(vec![claim]));
+        // 4話目の前回（3話目）のあらすじには、3話目を読む前のメモが参考になる。
+        assert_eq!(
+            db.recap_memory_before(3).unwrap().as_deref(),
+            Some("灯台守が船を見つける。")
+        );
+        assert_eq!(db.recap_memory_before(2).unwrap(), None);
+        // 根拠の無いメモで上書きしたら、古い根拠を残さない。
+        let plain = AssistNote {
+            text: "抜粋".into(),
+            source_tail: None,
+            claims: None,
+        };
+        db.save_ai_note_content_with_provenance("work", "3:2", "recap", &plain, &provenance)
+            .unwrap();
+        assert_eq!(
+            db.load_ai_note("work", "3:2", "recap")
+                .unwrap()
+                .unwrap()
+                .claims,
+            None
+        );
+        drop(db);
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     #[test]
     fn source_context_round_trips_reopens_and_clears_on_replacement() {
@@ -678,6 +930,7 @@ mod tests {
                 "「最後の行動。」\n\n［本文の末尾・確認用の原文］\n\nここにも原文の欄名。 \t"
                     .into(),
             ),
+            claims: None,
         };
         let subjects = [
             (
@@ -730,6 +983,95 @@ mod tests {
                     .prompt_stale
             );
         }
+    }
+
+    #[test]
+    fn shelf_lookups_count_what_the_library_lists() {
+        let root = std::env::temp_dir().join(format!(
+            "piep-assist-shelf-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let db = Database::open(&root.join("piep.db"), &root.join("storage")).unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            for (id, title) in [(1, "灯台の夜"), (2, "港の朝"), (3, "雨の駅")] {
+                conn.execute(
+                    "INSERT INTO downloads(id,source,source_id,title,author_name,author_id,content_type,json_path,downloaded_at)
+                     VALUES(?1,'pixiv',?2,?3,'作者','synthetic-author','novel','',?4)",
+                    rusqlite::params![id, format!("synthetic-shelf-{id}"), title, format!("2026-01-0{id}")],
+                )
+                .unwrap();
+            }
+            for (id, name) in [(1, "催眠"), (2, "催眠術"), (3, "純愛"), (4, "R-18")] {
+                conn.execute(
+                    "INSERT INTO tags(id,name) VALUES(?1,?2)",
+                    rusqlite::params![id, name],
+                )
+                .unwrap();
+            }
+            for (download, tag) in [(1, 1), (2, 1), (2, 3), (3, 2), (3, 3), (1, 4), (2, 4)] {
+                conn.execute(
+                    "INSERT INTO download_tags(download_id,tag_id) VALUES(?1,?2)",
+                    rusqlite::params![download, tag],
+                )
+                .unwrap();
+            }
+        }
+        let found = db.shelf_tags_containing("催眠", 10).unwrap();
+        assert_eq!(
+            found
+                .iter()
+                .map(|tag| (tag.name.as_str(), tag.works))
+                .collect::<Vec<_>>(),
+            vec![("催眠", 2), ("催眠術", 1)]
+        );
+        assert!(db.shelf_tags_containing("  ", 10).unwrap().is_empty());
+        assert_eq!(
+            db.existing_tag_names(&["催眠".into(), "さいみん".into()])
+                .unwrap(),
+            vec!["催眠".to_string()]
+        );
+        let tags = |names: &[&str]| {
+            names
+                .iter()
+                .map(|name| name.to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            db.count_works_with_tags(&tags(&["催眠", "純愛"]), false, &[])
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            db.count_works_with_tags(&tags(&["催眠", "催眠術"]), true, &[])
+                .unwrap(),
+            3
+        );
+        assert_eq!(
+            db.count_works_with_tags(&tags(&["純愛"]), false, &tags(&["催眠"]))
+                .unwrap(),
+            1
+        );
+        let profile = db.shelf_tag_profile("純愛").unwrap().unwrap();
+        assert_eq!(profile.works, 2);
+        // 何も言い表さないタグは、一緒に付くタグとして見せない。
+        assert_eq!(
+            profile
+                .related
+                .iter()
+                .map(|tag| tag.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["催眠", "催眠術"]
+        );
+        assert_eq!(
+            profile.titles,
+            vec!["雨の駅".to_string(), "港の朝".to_string()]
+        );
+        assert!(db.shelf_tag_profile("無い").unwrap().is_none());
+        drop(db);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

@@ -2,7 +2,7 @@ import type { ReactNode } from "react";
 import { Alert, Button, Card, Group, Loader, Stack, Text } from "@mantine/core";
 import { Icons, IconSize } from "@/lib/icons";
 import { AssistLauncher } from "@/features/assist/AssistLauncher";
-import type { AssistFeatureId } from "@/services/assistApi";
+import type { AssistFeatureId, GroundedClaim } from "@/services/assistApi";
 import { usePageAssist } from "@/app/PageAssistContext";
 
 /**
@@ -126,6 +126,7 @@ export function AssistPanel({
 export function AssistNoteBody({
   text,
   sourceTail,
+  claims,
   modelId,
   createdAt,
   promptVersion,
@@ -136,6 +137,7 @@ export function AssistNoteBody({
 }: {
   text: string;
   sourceTail?: string | null;
+  claims?: GroundedClaim[] | null;
   modelId?: string;
   createdAt?: string;
   promptVersion?: string;
@@ -148,8 +150,8 @@ export function AssistNoteBody({
   const sourceExtract = ["work_synopsis/v9", "reader_recap/v9", "work_synopsis/v10", "reader_recap/v10", "work_synopsis/v11", "reader_recap/v11"].includes(promptVersion ?? "");
   return (
     <Stack gap={4} className="assist-note">
-      <Text size="sm" style={{ whiteSpace: "pre-wrap" }}>{text}</Text>
-      {sourceExtract && (
+      {claims && claims.length > 0 ? <GroundedClaims claims={claims} /> : <Text size="sm" style={{ whiteSpace: "pre-wrap" }}>{text}</Text>}
+      {sourceExtract && !claims && (
         <Text size="xs" c="dimmed">
           原文から選んだ抜粋です。省略箇所の前後がつながるとは限らず、要点や結末を網羅していません。
         </Text>
@@ -175,6 +177,66 @@ export function AssistNoteBody({
           <Button size="compact-xs" variant="subtle" color="gray" onClick={onDiscard}>消す</Button>
         )}
       </Group>
+    </Stack>
+  );
+}
+
+const verdictLabel: Record<GroundedClaim["verdict"], string> = {
+  supported: "原文で確認",
+  partial: "一部だけ確認",
+  unsupported: "確認できず",
+};
+
+/**
+ * 書き下ろしのあらすじ。文ごとに根拠の原文を開いて確かめられる。
+ *
+ * 照合で支持されなかった文は本文から外すが、消さずに別枠で残す。黙って消すと
+ * モデルが何を言ったのかを利用者が確かめられなくなる。
+ */
+function GroundedClaims({ claims }: { claims: GroundedClaim[] }) {
+  const shown = claims.filter((claim) => claim.verdict !== "unsupported");
+  const doubtful = claims.filter((claim) => claim.verdict === "unsupported");
+  const partial = shown.filter((claim) => claim.verdict === "partial").length;
+  return (
+    <Stack gap={4}>
+      <Text size="sm">
+        {shown.map((claim, index) => (
+          <span key={index} className={claim.verdict === "partial" ? "assist-claim-partial" : undefined} title={claim.verdict === "partial" ? claim.concern ?? verdictLabel.partial : undefined}>
+            {claim.text}
+            {claim.verdict === "partial" && <Text component="sup" size="xs" c="dimmed">※</Text>}
+          </span>
+        ))}
+      </Text>
+      <Text size="xs" c="dimmed">
+        AIが自分の言葉でまとめたあらすじです。文ごとに原文の根拠と照らしています
+        {partial > 0 ? `（※の${partial}文は一部だけ確認）` : ""}。照合もAIの判断です。
+      </Text>
+      <details>
+        <Text component="summary" size="xs" c="dimmed" style={{ cursor: "pointer" }}>根拠の原文を見る</Text>
+        <Stack gap={6} mt={4}>
+          {shown.map((claim, index) => <ClaimEvidence key={index} claim={claim} />)}
+        </Stack>
+      </details>
+      {doubtful.length > 0 && (
+        <details>
+          <Text component="summary" size="xs" c="dimmed" style={{ cursor: "pointer" }}>原文で確かめられなかった文（{doubtful.length}）</Text>
+          <Stack gap={6} mt={4}>
+            {doubtful.map((claim, index) => <ClaimEvidence key={index} claim={claim} />)}
+          </Stack>
+        </details>
+      )}
+    </Stack>
+  );
+}
+
+function ClaimEvidence({ claim }: { claim: GroundedClaim }) {
+  return (
+    <Stack gap={2}>
+      <Text size="sm">{claim.text}<Text component="span" size="xs" c="dimmed">　{verdictLabel[claim.verdict]}</Text></Text>
+      {claim.concern && <Text size="xs" c="dimmed">指摘: {claim.concern}</Text>}
+      {claim.evidence.map((line, index) => (
+        <Text key={index} size="xs" c="dimmed" className="assist-claim-evidence" style={{ whiteSpace: "pre-wrap" }}>{line}</Text>
+      ))}
     </Stack>
   );
 }

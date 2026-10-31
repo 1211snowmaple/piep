@@ -40,7 +40,7 @@ async fn main() -> Result<(), String> {
     let work = db.work_facts(target)?;
     println!("\n--- タグの補完\n  対象: {}", trim(&work.title, 50));
     println!("  いまのタグ: {:?}", work.tags);
-    match assist::suggest_tags(&engine, &work, &vocabulary).await {
+    match assist::suggest_tags(&engine, &work, &vocabulary, None).await {
         Ok(found) => {
             for value in found {
                 println!("    + {} — {}", value.tag, value.reason);
@@ -53,7 +53,7 @@ async fn main() -> Result<(), String> {
     println!("\n--- 言葉で探す");
     let phrase = "旅先で出会った二人が、少しずつ仲良くなる話";
     println!("  入力: {phrase}");
-    match assist::interpret_search(&engine, phrase, &vocabulary).await {
+    match assist::interpret_search(&engine, phrase, &vocabulary, None).await {
         Ok(intent) => {
             println!("    読み: {}", intent.reading);
             println!("    含める: {:?}", intent.include_tags);
@@ -117,7 +117,7 @@ async fn main() -> Result<(), String> {
         match db.work_facts_with_body(previous) {
             Ok((facts, body)) => {
                 println!("    前の話: {}", trim(&facts.title, 46));
-                match assist::recap_previous(&engine, &facts.title, &body).await {
+                match assist::recap_previous(&engine, &facts.title, &body, None).await {
                     Ok(note) => println!("    {}", note.text),
                     Err(error) => println!("    失敗: {error}"),
                 }

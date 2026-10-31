@@ -184,6 +184,7 @@ function WorkAssistForWork({ downloadId }: { downloadId: number }) {
         <AssistNoteBody
           text={note.data.text}
           sourceTail={note.data.sourceTail}
+          claims={note.data.claims}
           modelId={note.data.modelId}
           createdAt={note.data.createdAt}
           promptVersion={note.data.promptVersion}
@@ -217,8 +218,8 @@ function WorkAssistForWork({ downloadId }: { downloadId: number }) {
       <Modal opened={active !== null} onClose={() => setActive(null)} title={active === "tags" ? "タグの補完" : active === "related-tags" ? "棚の併用候補" : "あらすじ"} size="lg">
         {active === "synopsis" ? (
           <Stack>
-            <Text size="sm" c="dimmed">本文の文を選び、通常300文字以内の覚え書きを作ります。長い一文は途中で切らず最大600文字まで残します。本文末尾の原文も確認できます。</Text>
-            {note.data && <AssistNoteBody text={note.data.text} sourceTail={note.data.sourceTail} modelId={note.data.modelId} createdAt={note.data.createdAt} promptVersion={note.data.promptVersion} promptStale={note.data.promptStale} inputStale={note.data.inputStale} configStale={note.data.configStale} />}
+            <Text size="sm" c="dimmed">本文を読んで、結末までのあらすじを400字以内で書きます。文ごとに原文の根拠を付け、別の確認で原文と照らします。文脈の小さいモデルでは、本文の文を選ぶ抜粋になります。</Text>
+            {note.data && <AssistNoteBody text={note.data.text} sourceTail={note.data.sourceTail} claims={note.data.claims} modelId={note.data.modelId} createdAt={note.data.createdAt} promptVersion={note.data.promptVersion} promptStale={note.data.promptStale} inputStale={note.data.inputStale} configStale={note.data.configStale} />}
             <Group justify="flex-end"><Button loading={summarize.isPending} disabled={!synopsisReady} onClick={() => summarize.mutate()}>{note.data ? "作り直す" : "あらすじを作る"}</Button></Group>
           </Stack>
         ) : active === "tags" ? (
