@@ -1912,16 +1912,45 @@ select {
 .asset-preview-modal { border-radius: var(--mantine-radius-lg); }
 .version-row { width: 100%; color: inherit; text-align: left; cursor: pointer; background: var(--mantine-color-body); }
 .version-row[data-active] { border-color: var(--mantine-color-piep-5); box-shadow: 0 0 0 1px var(--mantine-color-piep-4); }
+.history-layout { display: grid; grid-template-columns: 200px minmax(0, 1fr); gap: var(--mantine-spacing-lg); align-items: start; }
+.history-layout__versions { display: flex; flex-direction: column; gap: 6px; }
+@media (max-width: 62em) {
+  .history-layout { grid-template-columns: minmax(0, 1fr); }
+  .history-layout__versions { flex-direction: row; overflow-x: auto; padding-bottom: 4px; }
+  .history-layout__versions .version-row { flex: 0 0 176px; }
+}
 .version-preview { position: sticky; top: 82px; min-height: 310px; }
-.version-preview__text { max-height: 58vh; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-family: "Noto Serif JP", "Yu Mincho", serif; line-height: 1.9; }
+.version-preview__text { max-height: max(320px, calc(100vh - 280px)); overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-family: "Noto Serif JP", "Yu Mincho", serif; line-height: 1.9; }
 .revision-diff__content {
-  max-height: 58vh;
+  max-height: max(320px, calc(100vh - 280px));
   overflow: auto;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   font-family: "Noto Serif JP", "Yu Mincho", serif;
   line-height: 1.9;
 }
+.revision-diff__frame[data-overview] { display: grid; grid-template-columns: minmax(0, 1fr) 12px; gap: 6px; }
+/* Removed edits on the left lane, added on the right, like an editor's overview ruler. */
+.revision-diff__overview {
+  position: relative;
+  border-radius: 4px;
+  background: light-dark(var(--mantine-color-gray-1), var(--mantine-color-dark-6));
+  cursor: pointer;
+}
+.revision-diff__overview-mark { position: absolute; width: 50%; min-height: 2px; border-radius: 1px; }
+.revision-diff__overview-mark[data-kind="removed"] { left: 0; background: light-dark(var(--mantine-color-red-6), var(--mantine-color-red-5)); }
+.revision-diff__overview-mark[data-kind="added"] { right: 0; background: light-dark(var(--mantine-color-green-6), var(--mantine-color-green-5)); }
+.revision-diff__overview-viewport {
+  position: absolute;
+  inset-inline: -2px;
+  min-height: 6px;
+  border: 1px solid light-dark(var(--mantine-color-gray-6), var(--mantine-color-gray-4));
+  border-radius: 3px;
+  background: light-dark(rgb(0 0 0 / 6%), rgb(255 255 255 / 8%));
+  pointer-events: none;
+}
+.revision-diff__content:focus-visible { outline: 2px solid var(--mantine-color-piep-5); outline-offset: 4px; border-radius: 4px; }
+.revision-diff__part[data-current] { outline: 2px solid var(--mantine-color-piep-5); outline-offset: 1px; }
 .revision-diff__part { border-radius: 3px; text-decoration-thickness: 1px; text-underline-offset: 3px; }
 .revision-diff__part[data-kind="added"] {
   color: light-dark(var(--mantine-color-green-9), var(--mantine-color-green-2));
