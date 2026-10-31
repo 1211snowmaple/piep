@@ -64,9 +64,8 @@ export function RevisionDiff({ beforeMetadata, afterMetadata, beforeVersion, aft
 }
 
 /**
- * The scrolling diff, with a ruler beside it that shows where every change
- * sits (like an editor's overview ruler) and controls that step through the
- * changes one by one.
+ * 差分の本文。横に、どこが変わったかを示す帯（エディタの概観ルーラーにあたる）と、
+ * 変更を一つずつ前後へ辿る操作を添える。
  */
 function DiffContent({ parts, label }: { parts: DisplayDiffPart[]; label: string }) {
   const contentRef = useRef<HTMLDivElement>(null);
@@ -140,7 +139,7 @@ function DiffContent({ parts, label }: { parts: DisplayDiffPart[]; label: string
     };
   }, [updateViewport]);
 
-  /** Step from the current change while it is on screen, otherwise from wherever the reader has scrolled to. */
+  /** いま選んでいる変更が画面に見えていればそこから、見えていなければ読者がスクロールした位置から辿る。 */
   const go = (direction: 1 | -1) => {
     const element = contentRef.current;
     const tops = hunkTops.current;
