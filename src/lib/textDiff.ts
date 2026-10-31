@@ -16,23 +16,63 @@ export interface TextDiffResult {
 export type DisplayDiffPart = TextDiffPart | { kind: "omitted"; value: string; characters: number };
 
 const MAX_EDIT_DISTANCE = 2_048;
+const MAX_LINE_EDIT_DISTANCE = 1_024;
 
 /**
  * Compare Japanese prose without assuming that spaces separate words.
  * `Intl.Segmenter` keeps punctuation and whitespace, so concatenating the
- * result always reconstructs the source exactly. Myers handles ordinary small
- * revisions efficiently; an intentionally bounded range fallback prevents a
- * wholly replaced long work from freezing the detail page.
+ * result always reconstructs the source exactly. Myers over the whole text
+ * gives the smallest diff for ordinary revisions. An author's sweep across the
+ * whole work (every "……" rewritten, say) exceeds that edit budget, so lines
+ * are then aligned first and each run of changed lines is compared on its own.
+ * A run that is still too different is shown as a bounded range replacement,
+ * which keeps a wholly rewritten long work from freezing the detail page.
  */
 export function createTextDiff(beforeText: string, afterText: string): TextDiffResult {
   const before = normalizeNewlines(beforeText);
   const after = normalizeNewlines(afterText);
   if (before === after) return result([{ kind: "equal", value: before }], "word");
 
-  const beforeTokens = segment(before);
-  const afterTokens = segment(after);
-  const parts = myers(beforeTokens, afterTokens, MAX_EDIT_DISTANCE);
-  return parts ? result(coalesce(parts), "word") : result(rangeFallback(before, after), "range");
+  const whole = myers(segment(before), segment(after), MAX_EDIT_DISTANCE);
+  if (whole) return result(coalesce(whole), "word");
+
+  const lineParts = diffLines(splitLines(before), splitLines(after));
+  const parts: TextDiffPart[] = [];
+  let granularity: TextDiffResult["granularity"] = "word";
+  let removed: string[] = [];
+  let added: string[] = [];
+  const refine = (oldText: string, newText: string) => {
+    const refined = !oldText || !newText ? null : myers(segment(oldText), segment(newText), MAX_EDIT_DISTANCE);
+    if (refined) return parts.push(...refined);
+    if (oldText && newText) granularity = "range";
+    parts.push(...rangeFallback(oldText, newText));
+  };
+  const flush = () => {
+    if (!removed.length && !added.length) return;
+    const oldText = removed.join("");
+    const newText = added.join("");
+    const whole = !oldText || !newText ? null : myers(segment(oldText), segment(newText), MAX_EDIT_DISTANCE);
+    if (whole) parts.push(...whole);
+    // Too many edits for one block, but as many lines on each side: every
+    // paragraph was edited in place, so compare them one by one.
+    else if (removed.length > 1 && removed.length === added.length) removed.forEach((line, index) => refine(line, added[index]));
+    else refine(oldText, newText);
+    removed = [];
+    added = [];
+  };
+  for (const part of lineParts) {
+    // A removed line after added ones starts the next edit, so lines paired
+    // one by one are refined pair by pair rather than as one oversized block.
+    if (part.kind === "removed" && added.length) flush();
+    if (part.kind === "removed") removed.push(part.value);
+    else if (part.kind === "added") added.push(part.value);
+    else {
+      flush();
+      parts.push(part);
+    }
+  }
+  flush();
+  return result(coalesce(parts), granularity);
 }
 
 /** Keep enough unchanged prose to understand each edit without showing the entire work. */
@@ -75,6 +115,103 @@ function segment(value: string): string[] {
     return Array.from(segmenter.segment(value), (entry) => entry.segment);
   }
   return Array.from(value);
+}
+
+/** Lines keep their trailing "\n" so joining them reconstructs the text. */
+function splitLines(value: string): string[] {
+  return value.match(/[^\n]*\n|[^\n]+$/g) ?? [];
+}
+
+/**
+ * Patience diff: lines that occur exactly once on both sides anchor the
+ * alignment, and the gaps between anchors are compared recursively. Prose
+ * paragraphs are nearly always unique, so this stays fast however many of
+ * them changed; a gap without anchors falls back to a bounded line Myers.
+ */
+function diffLines(before: string[], after: string[]): TextDiffPart[] {
+  const output: TextDiffPart[] = [];
+  const visit = (beforeStart: number, beforeEnd: number, afterStart: number, afterEnd: number) => {
+    let prefixEnd = beforeStart;
+    while (prefixEnd < beforeEnd && afterStart + prefixEnd - beforeStart < afterEnd && before[prefixEnd] === after[afterStart + prefixEnd - beforeStart]) prefixEnd += 1;
+    for (let index = beforeStart; index < prefixEnd; index += 1) output.push({ kind: "equal", value: before[index] });
+    afterStart += prefixEnd - beforeStart;
+    beforeStart = prefixEnd;
+    let suffix = 0;
+    while (beforeEnd - suffix > beforeStart && afterEnd - suffix > afterStart && before[beforeEnd - suffix - 1] === after[afterEnd - suffix - 1]) suffix += 1;
+    beforeEnd -= suffix;
+    afterEnd -= suffix;
+
+    const anchors = uniqueCommonLines(before, beforeStart, beforeEnd, after, afterStart, afterEnd);
+    if (anchors.length) {
+      let nextBefore = beforeStart;
+      let nextAfter = afterStart;
+      for (const [beforeIndex, afterIndex] of anchors) {
+        visit(nextBefore, beforeIndex, nextAfter, afterIndex);
+        output.push({ kind: "equal", value: before[beforeIndex] });
+        nextBefore = beforeIndex + 1;
+        nextAfter = afterIndex + 1;
+      }
+      visit(nextBefore, beforeEnd, nextAfter, afterEnd);
+    } else if (beforeStart < beforeEnd || afterStart < afterEnd) {
+      const oldLines = before.slice(beforeStart, beforeEnd);
+      const newLines = after.slice(afterStart, afterEnd);
+      const parts = oldLines.length && newLines.length ? myers(oldLines, newLines, MAX_LINE_EDIT_DISTANCE) : null;
+      if (parts) output.push(...parts);
+      else if (oldLines.length === newLines.length) {
+        // Every paragraph edited in place (an indent added throughout, say)
+        // leaves only repeated blank lines to anchor on; pair lines by position.
+        oldLines.forEach((value, index) => {
+          if (value === newLines[index]) output.push({ kind: "equal", value });
+          else output.push({ kind: "removed", value }, { kind: "added", value: newLines[index] });
+        });
+      } else {
+        output.push(...oldLines.map((value) => ({ kind: "removed" as const, value })));
+        output.push(...newLines.map((value) => ({ kind: "added" as const, value })));
+      }
+    }
+
+    for (let index = beforeEnd; index < beforeEnd + suffix; index += 1) output.push({ kind: "equal", value: before[index] });
+  };
+  visit(0, before.length, 0, after.length);
+  return output;
+}
+
+/** The longest in-order chain of lines that appear once on each side. */
+function uniqueCommonLines(before: string[], beforeStart: number, beforeEnd: number, after: string[], afterStart: number, afterEnd: number): [number, number][] {
+  const counts = new Map<string, { before: number; beforeIndex: number; after: number; afterIndex: number }>();
+  for (let index = beforeStart; index < beforeEnd; index += 1) {
+    const entry = counts.get(before[index]) ?? { before: 0, beforeIndex: index, after: 0, afterIndex: -1 };
+    entry.before += 1;
+    counts.set(before[index], entry);
+  }
+  for (let index = afterStart; index < afterEnd; index += 1) {
+    const entry = counts.get(after[index]);
+    if (!entry) continue;
+    entry.after += 1;
+    entry.afterIndex = index;
+  }
+  const pairs = Array.from(counts.values())
+    .filter((entry) => entry.before === 1 && entry.after === 1)
+    .map((entry): [number, number] => [entry.beforeIndex, entry.afterIndex])
+    .sort((left, right) => left[0] - right[0]);
+
+  // Patience sorting finds the longest increasing run of after-indices.
+  const tails: number[] = [];
+  const previous = Array.from({ length: pairs.length }, () => -1);
+  pairs.forEach(([, afterIndex], index) => {
+    let low = 0;
+    let high = tails.length;
+    while (low < high) {
+      const middle = (low + high) >> 1;
+      if (pairs[tails[middle]][1] < afterIndex) low = middle + 1;
+      else high = middle;
+    }
+    if (low > 0) previous[index] = tails[low - 1];
+    tails[low] = index;
+  });
+  const chain: [number, number][] = [];
+  for (let index = tails.length ? tails[tails.length - 1] : -1; index !== -1; index = previous[index]) chain.push(pairs[index]);
+  return chain.reverse();
 }
 
 function myers(before: string[], after: string[], limit: number): TextDiffPart[] | null {
