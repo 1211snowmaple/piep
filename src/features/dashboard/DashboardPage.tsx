@@ -249,9 +249,11 @@ function buildTrend(points: { bucket: string; count: number; pixivCount: number;
   return months;
 }
 
-/** A month's saves in the same shape as the whole library's breakdown. pixiv and
- *  FANBOX stay listed at zero so the row below doesn't jump while the pointer
- *  moves across the bars. */
+/**
+ * ひと月の保存数を、全期間の内訳と同じ形にする。
+ *
+ * pixiv と FANBOX は 0 件でも残す。棒の上を動くあいだに下の行が跳ねないように。
+ */
 function monthBreakdown(month: TrendMonth): { source: string; count: number }[] {
   return [
     { source: "pixiv", count: month.pixiv },
@@ -261,10 +263,10 @@ function monthBreakdown(month: TrendMonth): { source: string; count: number }[] 
 }
 
 /**
- * The bars show the shape of the months; the exact pixiv and FANBOX counts for
- * one of them come up in the composition row underneath, which otherwise shows
- * the whole library. Twelve columns leave no room to print both numbers on
- * every bar, so the detail goes where there is already room for it.
+ * 棒は月ごとの形を見せ、ひと月の pixiv と FANBOX の正確な数は下の内訳の行に出す。
+ *
+ * 内訳の行は、どの月も選んでいなければ全期間を示す。12本の棒それぞれに二つの数を
+ * 書く幅は無いので、詳しい数はもともと場所のあるところへ置く。
  */
 function SourceTrend({ months, breakdown, total }: { months: TrendMonth[]; breakdown: { source: string; count: number }[]; total: number }) {
   const [hovered, setHovered] = useState<string | null>(null);
