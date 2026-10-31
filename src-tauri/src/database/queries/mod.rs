@@ -14427,6 +14427,26 @@ fn assets_for_version_path(assets: &[AssetEntry], json_path: &Path) -> Vec<Asset
         .collect()
 }
 
+/// 編集画面の「画像を追加」で取り込んだ絵の種別。
+pub(crate) const EDITOR_IMAGE_ASSET_TYPE: &str = "editor_image";
+
+/// 編集のブロックが指せる絵。元にした版の絵に、編集画面で足した絵を加える。
+///
+/// 足した絵は版の置き場ではなく `editor-assets/` に入る。版の絵だけを渡して
+/// いたころは、**足した絵がどの作品でも「画像が見つかりません」になっていた** ――
+/// 版を `vN/` に分けて持つ作品では、置き場の外にあるものは数えないからである。
+/// 版の資産一覧（取得状態や版の比較）は取得元の写しなので、こちらは使わない。
+fn assets_for_edit(assets: &[AssetEntry], json_path: &Path) -> Vec<AssetEntry> {
+    assets
+        .iter()
+        .filter(|asset| {
+            asset.asset_type == EDITOR_IMAGE_ASSET_TYPE
+                || asset_belongs_to_version_path(Path::new(&asset.local_path), json_path)
+        })
+        .cloned()
+        .collect()
+}
+
 fn refresh_asset_kind_counts_locked(conn: &Connection, download_id: i64) -> Result<(), String> {
     let json_path = conn
         .query_row(

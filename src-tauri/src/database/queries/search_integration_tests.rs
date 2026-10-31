@@ -8259,6 +8259,84 @@ fn an_edit_keeps_the_assets_from_its_base_revision_after_a_provider_update() {
     assert!(source.pixiv_text.contains("[uploadedimage:first]"));
 }
 
+/// 編集画面で足した絵は、版の置き場ではなく `editor-assets/` に入る。
+///
+/// 読書画面と編集画面には版の置き場にある絵しか渡していなかったので、
+/// **足した絵はどの作品でも「画像が見つかりません」になっていた**。
+#[test]
+fn an_image_added_in_the_editor_reaches_the_reader() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let download_id = insert_download(
+        &db,
+        &storage,
+        "edit-added-image",
+        "絵を足す編集",
+        "作者A",
+        &[],
+        "初版本文",
+    );
+    let added = storage
+        .join("editor-assets")
+        .join(download_id.to_string())
+        .join("added.png");
+    fs::create_dir_all(added.parent().unwrap()).unwrap();
+    fs::write(&added, b"added-image").unwrap();
+    let asset_id = db
+        .insert_asset(&NewAsset {
+            download_id,
+            asset_type: super::EDITOR_IMAGE_ASSET_TYPE.to_string(),
+            filename: "added.png".to_string(),
+            local_path: added.to_string_lossy().to_string(),
+            original_url: None,
+            mime_type: Some("image/png".to_string()),
+            file_size_bytes: 11,
+        })
+        .unwrap();
+    let draft = db
+        .save_work_draft(
+            download_id,
+            1,
+            None,
+            &[
+                WorkBlockInput {
+                    block_type: "paragraph".to_string(),
+                    text: Some("初版本文".to_string()),
+                    asset_id: None,
+                    attrs_json: None,
+                },
+                WorkBlockInput {
+                    block_type: "image".to_string(),
+                    text: None,
+                    asset_id: Some(asset_id),
+                    attrs_json: None,
+                },
+            ],
+        )
+        .unwrap();
+
+    let editor = db.get_editor_document(download_id).unwrap();
+    assert!(
+        editor.assets.iter().any(|asset| asset.id == asset_id),
+        "下書きを開き直すと、足した絵が編集画面から消える"
+    );
+
+    db.activate_work_edit(draft.id).unwrap();
+    let reader = db.get_reader_document(download_id, None).unwrap();
+    assert!(reader.html.contains("added.png"));
+    assert!(!reader.html.contains("missing-image-placeholder"));
+    let source = db.active_edit_source_form(download_id).unwrap().unwrap();
+    assert!(source.pixiv_text.contains("[uploadedimage:added]"));
+
+    // 取得元の版の写しには混ぜない。取得状態や版の比較が、利用者の足した絵を
+    // 取得元の絵として数えてしまう。
+    assert!(!db
+        .get_version_assets(download_id, 1)
+        .unwrap()
+        .iter()
+        .any(|asset| asset.id == asset_id));
+}
+
 /// 下書きは何度でも上書きできる。
 ///
 /// 自動保存は6秒ごとに同じ下書きを書き換えるので、二度目が通らなければ
