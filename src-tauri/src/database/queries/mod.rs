@@ -14684,7 +14684,15 @@ pub(crate) fn blocks_to_pixiv_text(blocks: &[WorkBlock], assets: &[AssetEntry]) 
             "separator" => lines.push(super::parser::EDITOR_SEPARATOR_NOTATION.to_string()),
             "image" => {
                 if let Some(reference) = block_image_reference(block, assets) {
-                    lines.push(format!("[uploadedimage:{reference}]"));
+                    // 取り込んだ挿絵は、元の記法（`[pixivimage:…]`）ごと控えてある。
+                    // それをさらに包んでいたので、`[uploadedimage:[pixivimage:…]]`
+                    // という誰も読めない参照になり、**編集した作品の EPUB からは
+                    // 挿絵が 1 枚残らず消えていた**。
+                    lines.push(if reference.starts_with('[') {
+                        reference
+                    } else {
+                        format!("[uploadedimage:{reference}]")
+                    });
                 }
             }
             "link" => {

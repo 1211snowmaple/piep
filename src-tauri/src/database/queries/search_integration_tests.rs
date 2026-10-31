@@ -8337,6 +8337,107 @@ fn an_image_added_in_the_editor_reaches_the_reader() {
         .any(|asset| asset.id == asset_id));
 }
 
+/// 編集した作品の EPUB に、取り込んだ挿絵も編集画面で足した絵も入る。
+///
+/// 取り込んだ挿絵は `[uploadedimage:[pixivimage:…]]` と二重に包まれ、足した絵は
+/// 書き出しの拾う置き場の外にあった。どちらも EPUB 検査は通るので、**挿絵の
+/// 枠だけが空のまま本が「成功」していた**。
+#[test]
+fn an_edited_work_keeps_its_illustrations_in_the_epub() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let download_id = insert_download(
+        &db,
+        &storage,
+        "edit-epub-images",
+        "挿絵のある編集",
+        "作者A",
+        &[],
+        "前
+[pixivimage:555-1]
+後",
+    );
+    let illustration = storage
+        .join("pixiv")
+        .join("edit-epub-images")
+        .join("v1")
+        .join("data_assets")
+        .join("illustrations")
+        .join("555-1_p0.jpg");
+    fs::create_dir_all(illustration.parent().unwrap()).unwrap();
+    fs::write(&illustration, b"source-image").unwrap();
+    db.insert_asset(&NewAsset {
+        download_id,
+        asset_type: "illustration".to_string(),
+        filename: "555-1_p0.jpg".to_string(),
+        local_path: illustration.to_string_lossy().to_string(),
+        original_url: None,
+        mime_type: Some("image/jpeg".to_string()),
+        file_size_bytes: 12,
+    })
+    .unwrap();
+    let added = storage
+        .join("editor-assets")
+        .join(download_id.to_string())
+        .join("added.png");
+    fs::create_dir_all(added.parent().unwrap()).unwrap();
+    fs::write(&added, b"added-image").unwrap();
+    let added_id = db
+        .insert_asset(&NewAsset {
+            download_id,
+            asset_type: super::EDITOR_IMAGE_ASSET_TYPE.to_string(),
+            filename: "added.png".to_string(),
+            local_path: added.to_string_lossy().to_string(),
+            original_url: None,
+            mime_type: Some("image/png".to_string()),
+            file_size_bytes: 11,
+        })
+        .unwrap();
+
+    let mut blocks: Vec<WorkBlockInput> = db
+        .get_editor_document(download_id)
+        .unwrap()
+        .blocks
+        .into_iter()
+        .map(|block| WorkBlockInput {
+            block_type: block.block_type,
+            text: block.text,
+            asset_id: block.asset_id,
+            attrs_json: block.attrs_json,
+        })
+        .collect();
+    blocks.push(WorkBlockInput {
+        block_type: "image".to_string(),
+        text: None,
+        asset_id: Some(added_id),
+        attrs_json: None,
+    });
+    let draft = db.save_work_draft(download_id, 1, None, &blocks).unwrap();
+    db.activate_work_edit(draft.id).unwrap();
+
+    let source = db.active_edit_source_form(download_id).unwrap().unwrap();
+    assert!(source.pixiv_text.contains("[pixivimage:555-1]"));
+    assert!(!source.pixiv_text.contains("[uploadedimage:["));
+
+    let (manifest, _, _) = crate::commands::epub::load_manifest(&db, download_id).unwrap();
+    let html: String = manifest
+        .content
+        .pages
+        .iter()
+        .map(|page| page.html_content.as_str())
+        .collect();
+    assert!(html.contains("images/555_p0.jpg"), "{html}");
+    assert!(html.contains("images/added.jpg"), "{html}");
+    let ids: Vec<&str> = manifest
+        .content
+        .illustrations
+        .iter()
+        .map(|image| image.id.as_str())
+        .collect();
+    assert!(ids.contains(&"img-555-1_p0"), "{ids:?}");
+    assert!(ids.contains(&"img-added"), "{ids:?}");
+}
+
 /// 下書きは何度でも上書きできる。
 ///
 /// 自動保存は6秒ごとに同じ下書きを書き換えるので、二度目が通らなければ

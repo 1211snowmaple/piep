@@ -285,6 +285,9 @@ pub struct EditedSourceForm {
     pub fanbox_blocks: Vec<serde_json::Value>,
     /// 取得元が分からないときの取りこぼし用。
     pub plain_text: String,
+    /// 編集画面で足した絵。版の置き場の外（`editor-assets/`）にあるので、
+    /// 本文が指していても書き出す側からは見えない。書き出す側が本へ加える。
+    pub added_images: Vec<AssetEntry>,
 }
 
 /// 作品全体の見出し 1 つ。読書画面の目次が使う。
