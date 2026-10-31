@@ -1522,6 +1522,65 @@ pub async fn recheck_deferred_update_candidates(
     Ok(snapshot)
 }
 
+/// 保留の理由から、保留の種類を決める。
+fn hold_kind_for(reason: &str) -> &'static str {
+    if reason.starts_with("[一部保存]") {
+        "incomplete"
+    } else if reason.starts_with("[見つからない]") || reason.contains("公開元で投稿が見つからない")
+    {
+        "unavailable"
+    } else if reason.starts_with('[') && !reason.starts_with("[閲覧制限]") {
+        "error"
+    } else {
+        "restricted"
+    }
+}
+
+/// 保留中・非表示の候補は取りに行かない。その知らせ。
+const BLOCKED_CANDIDATE_MESSAGE: &str =
+    "候補から外しています。保留・非表示の一覧から再確認してください";
+
+/// 前の回から同じ種類の理由で保留のままの作品か。保留を書き直す前に聞く。
+///
+/// 確認のたびに同じ作品を「保留」と数えていたので、何も変わっていないのに
+/// 毎回「完了（保留あり）」と通知が出ていた。確認そのものは続け、新しく保留に
+/// なったものと、保留の種類が変わったものだけを知らせる。
+fn is_known_hold(state: &AppState, item: &UpdateJobItem, reason: &str) -> Result<bool, String> {
+    let (Some(source), Some(source_id)) = (item.source.as_deref(), item.source_id.as_deref())
+    else {
+        return Ok(false);
+    };
+    Ok(match state.db.update_candidate_hold(source, source_id)? {
+        Some((status, kind)) if status == "held" || status == "dismissed" => {
+            reason == BLOCKED_CANDIDATE_MESSAGE || kind.as_deref() == Some(hold_kind_for(reason))
+        }
+        _ => false,
+    })
+}
+
+/// 保留を項目に書き、ログに残す。前の回と変わらない保留は数えず、警告にもしない。
+fn complete_held_item(
+    state: &AppState,
+    job_id: &str,
+    item: &UpdateJobItem,
+    known: bool,
+    reason: &str,
+    result_download_id: Option<i64>,
+    log: &str,
+) -> Result<(), String> {
+    state
+        .db
+        .complete_update_job_item(item.id, "held", Some(reason), result_download_id)?;
+    if known {
+        state.db.mark_update_job_item_known_hold(item.id)?;
+        state
+            .db
+            .append_update_job_log(job_id, "info", &format!("{log}（前回から変わらない保留）"))
+    } else {
+        state.db.append_update_job_log(job_id, "warn", log)
+    }
+}
+
 async fn hold_candidate(
     state: &Arc<AppState>,
     item: &UpdateJobItem,
@@ -1545,16 +1604,7 @@ async fn hold_candidate(
     payload["kind"] = serde_json::json!(kind);
     payload["source"] = serde_json::json!(source);
     payload["sourceId"] = serde_json::json!(source_id);
-    let hold_kind = if reason.starts_with("[一部保存]") {
-        "incomplete"
-    } else if reason.starts_with("[見つからない]") || reason.contains("公開元で投稿が見つからない")
-    {
-        "unavailable"
-    } else if reason.starts_with('[') && !reason.starts_with("[閲覧制限]") {
-        "error"
-    } else {
-        "restricted"
-    };
+    let hold_kind = hold_kind_for(reason);
     payload["holdKind"] = serde_json::json!(hold_kind);
     payload["holdReason"] = serde_json::json!(reason);
     if let Some(post) = post {
@@ -1988,15 +2038,17 @@ async fn run_update_job(
         }
         match outcome {
             Ok(ItemOutcome::Held(message)) => {
+                let known = is_known_hold(&state, &item, &message)?;
                 if item.item_type == "work" {
                     hold_candidate(&state, &item, None, &message).await?;
                 }
-                state
-                    .db
-                    .complete_update_job_item(item.id, "held", Some(&message), None)?;
-                state.db.append_update_job_log(
+                complete_held_item(
+                    &state,
                     &job_id,
-                    "warn",
+                    &item,
+                    known,
+                    &message,
+                    None,
                     &format!("{}: 保留 — {message}", item.title),
                 )?;
             }
@@ -2047,16 +2099,19 @@ async fn run_update_job(
                 // discoverable because its referenced illustrations are absent.
                 saved_download_ids.push(download_id);
                 let reason = format!("[一部保存] {message}");
+                let known = is_known_hold(&state, &item, &reason)?;
                 if item.item_type != "target" {
                     hold_candidate(&state, &item, None, &reason).await?;
                 }
-                state.db.complete_update_job_item(
-                    item.id,
-                    "held",
-                    Some(&reason),
+                complete_held_item(
+                    &state,
+                    &job_id,
+                    &item,
+                    known,
+                    &reason,
                     Some(download_id),
+                    &reason,
                 )?;
-                state.db.append_update_job_log(&job_id, "warn", &reason)?;
             }
             Ok(ItemOutcome::Skipped(message) | ItemOutcome::LocalSkipped(message)) => {
                 state
@@ -2245,19 +2300,27 @@ async fn run_update_job(
                 let reason = format!("[{}] {}", kind.label(), error);
                 let held = item.item_type != "target";
                 if held {
+                    let known = is_known_hold(&state, &item, &reason)?;
                     hold_candidate(&state, &item, None, &reason).await?;
+                    complete_held_item(
+                        &state,
+                        &job_id,
+                        &item,
+                        known,
+                        &reason,
+                        None,
+                        &format!("{}: {}", item.title, reason),
+                    )?;
+                } else {
+                    state
+                        .db
+                        .complete_update_job_item(item.id, "failed", Some(&reason), None)?;
+                    state.db.append_update_job_log(
+                        &job_id,
+                        "error",
+                        &format!("{}: {}", item.title, reason),
+                    )?;
                 }
-                state.db.complete_update_job_item(
-                    item.id,
-                    if held { "held" } else { "failed" },
-                    Some(&reason),
-                    None,
-                )?;
-                state.db.append_update_job_log(
-                    &job_id,
-                    if held { "warn" } else { "error" },
-                    &format!("{}: {}", item.title, reason),
-                )?;
                 consecutive_errors = consecutive_errors.saturating_add(1);
                 next_delay_ms = error_delay_ms(consecutive_errors);
                 if item.item_type == "target" {
@@ -2657,9 +2720,7 @@ async fn process_update_job_item(
                 .db
                 .candidate_acquisition_blocked(source, id, repair_save)?
             {
-                return Ok(ItemOutcome::Held(
-                    "候補から外しています。保留・非表示の一覧から再確認してください".into(),
-                ));
+                return Ok(ItemOutcome::Held(BLOCKED_CANDIDATE_MESSAGE.into()));
             }
         }
     }
@@ -3701,6 +3762,12 @@ async fn process_candidate_item(
             &value,
             &state.db.get_current_assets(&updated)?,
         );
+        // この版を利用者が編集して、もう埋めてあるかもしれない。
+        let missing = state.db.references_left_by_active_edit(
+            updated.id,
+            updated.current_version,
+            missing,
+        )?;
         // A gate that still hides the details must not settle as complete:
         // clearing the candidate here would lose the work from the audit,
         // because an unchanged body creates no new version to inspect.
@@ -3874,6 +3941,52 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn only_a_new_or_changed_hold_is_reported_again() {
+        let root = std::env::temp_dir().join(format!("piep-known-hold-{}", make_job_id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let state =
+            AppState::new(Database::open(&root.join("piep.db"), &root.join("downloads")).unwrap());
+        let item = crate::database::UpdateJobItem {
+            id: 1,
+            job_id: "job".into(),
+            item_type: "work".into(),
+            source: Some("pixiv".into()),
+            source_id: Some("42".into()),
+            target_type: None,
+            title: "作品".into(),
+            payload_json: "{}".into(),
+            status: "running".into(),
+            error: None,
+            result_download_id: None,
+        };
+        let gone = super::unavailable_saved_pixiv_work_message("作品", "42");
+        let partial = "[一部保存] 本文は保存しましたが、参照先の挿絵を閲覧できません";
+        // 初めての保留は知らせる。
+        assert!(!super::is_known_hold(&state, &item, &gone).unwrap());
+        state
+            .db
+            .upsert_update_candidate(&crate::database::UpdateCandidateInput {
+                source: "pixiv".into(),
+                source_id: "42".into(),
+                kind: "revision".into(),
+                title: "作品".into(),
+                payload_json: serde_json::json!({"holdKind": "unavailable"}).to_string(),
+                target_type: Some("work".into()),
+            })
+            .unwrap();
+        // 候補があっても、保留でなければ前回の保留ではない。
+        assert!(!super::is_known_hold(&state, &item, &gone).unwrap());
+        state
+            .db
+            .set_update_candidate_status("pixiv", "42", "held")
+            .unwrap();
+        assert!(super::is_known_hold(&state, &item, &gone).unwrap());
+        assert!(super::is_known_hold(&state, &item, super::BLOCKED_CANDIDATE_MESSAGE).unwrap());
+        // 保留の種類が変わったら、それは新しい知らせ。
+        assert!(!super::is_known_hold(&state, &item, partial).unwrap());
+    }
+
     #[tokio::test]
     async fn unavailable_pixiv_work_is_counted_once_as_held_and_kept_in_the_library() {
         let root = std::env::temp_dir().join(format!("piep-missing-pixiv-{}", make_job_id()));
@@ -3975,6 +4088,43 @@ mod tests {
             .unwrap()
             .is_some());
         assert!(json_path.is_file());
+        assert_eq!(
+            state.db.count_saved_deferred_update_candidates().unwrap(),
+            1
+        );
+        // 次の確認でもまだ見つからない。確かめはするが、何も変わっていないので
+        // 「保留あり」とは言わない。保留は要確認に残る。
+        let next_job = make_job_id();
+        state
+            .db
+            .create_update_job(
+                &next_job,
+                &StartUpdateJobRequest {
+                    scope: "author".into(),
+                    mode: "check_only".into(),
+                    work_ids: None,
+                    target_ids: None,
+                    credentials: None,
+                    watch_saved: None,
+                    adhoc_targets: None,
+                },
+                &[],
+            )
+            .unwrap();
+        state
+            .db
+            .insert_update_job_unavailable_work(&next_job, &work, &reason)
+            .unwrap();
+        let again = state.db.update_job_snapshot(&next_job).unwrap();
+        assert_eq!(
+            (again.processed, again.held_count, again.known_held_count),
+            (1, 0, 1)
+        );
+        assert!(state
+            .db
+            .list_update_job_held_item_states(&next_job)
+            .unwrap()
+            .is_empty());
         assert_eq!(
             state.db.count_saved_deferred_update_candidates().unwrap(),
             1

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from "react";
-import { ActionIcon, Alert, Badge, Box, Group, SegmentedControl, Stack, Text, Tooltip } from "@mantine/core";
+import { Alert, Badge, Box, Button, Group, SegmentedControl, Stack, Text, Tooltip } from "@mantine/core";
 import { RevisionMetadataDiff } from "./RevisionMetadataDiff";
 import { LoadingState } from "./AsyncState";
 import type { RevisionMetadata } from "@/services/workInspectionApi";
@@ -175,13 +175,15 @@ function DiffContent({ parts, label }: { parts: DisplayDiffPart[]; label: string
   return <Stack gap={6} onKeyDown={onKeyDown}>
     <Group justify="space-between" gap="xs">
       <Text size="xs" c="dimmed">N・P キーでも移動できます</Text>
-      <Group gap={4}>
-        <Tooltip label="前の変更（P）"><ActionIcon variant="default" size="sm" aria-label="前の変更" disabled={current === 0} onClick={() => go(-1)}><Icons.up size={IconSize.action} /></ActionIcon></Tooltip>
-        <Text size="xs" miw={64} ta="center" aria-live="polite" aria-label={current < 0 ? `変更${total}か所` : `${total}か所中${current + 1}か所目の変更`}>
+      {/* 小さな矢印の四角が数字の両脇に浮いていて、押しにくく、部品の残骸に
+          見えた。言葉の付いたボタンを一つにつないで、押す場所を広くする。 */}
+      <Button.Group className="revision-diff__stepper">
+        <Tooltip label="P キー"><Button variant="default" size="sm" leftSection={<Icons.up size={IconSize.action} />} aria-label="前の変更" disabled={current === 0} onClick={() => go(-1)}>前へ</Button></Tooltip>
+        <Button.GroupSection variant="default" size="sm" className="revision-diff__position" aria-live="polite" aria-label={current < 0 ? `変更${total}か所` : `${total}か所中${current + 1}か所目の変更`}>
           {current < 0 ? "–" : (current + 1).toLocaleString("ja-JP")} / {total.toLocaleString("ja-JP")}
-        </Text>
-        <Tooltip label="次の変更（N）"><ActionIcon variant="default" size="sm" aria-label="次の変更" disabled={current === total - 1} onClick={() => go(1)}><Icons.down size={IconSize.action} /></ActionIcon></Tooltip>
-      </Group>
+        </Button.GroupSection>
+        <Tooltip label="N キー"><Button variant="default" size="sm" rightSection={<Icons.down size={IconSize.action} />} aria-label="次の変更" disabled={current === total - 1} onClick={() => go(1)}>次へ</Button></Tooltip>
+      </Button.Group>
     </Group>
     <div className="revision-diff__frame" data-overview={viewport ? "" : undefined}>
       <div ref={contentRef} className="revision-diff__content" role="region" tabIndex={0} aria-label={label}>

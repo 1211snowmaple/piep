@@ -41,7 +41,7 @@ import { WorkCover } from "@/components/WorkCover";
 import { PdfOriginalViewer, type PdfOriginalTarget } from "@/components/PdfOriginalViewer";
 import { BoundedJsonView } from "@/components/BoundedJsonView";
 import { WorkAcquisitionCard } from "./WorkAcquisitionCard";
-import { getRevisionSnapshot, type MissingImageLocation, type RevisionSnapshot } from "@/services/workInspectionApi";
+import { getActiveEditSnapshot, getRevisionSnapshot, type MissingImageLocation, type RevisionSnapshot } from "@/services/workInspectionApi";
 import { RevisionDiff } from "@/components/RevisionDiff";
 import { ProviderMark, sourceUrl } from "@/lib/providers";
 import { contentTypeLabel, errorMessage, formatBytes, formatDate, formatFreshness, formatNumber } from "@/lib/format";
@@ -152,7 +152,7 @@ export default function WorkPage() {
     }
     setContentPage(page);
   }, [historyIndex, id, locations, navigationType]);
-  const [selectedVersion, setSelectedVersion] = useState<number | "pending" | null>(null);
+  const [selectedVersion, setSelectedVersion] = useState<number | "pending" | "edit" | null>(null);
   const [visibleAssetCount, setVisibleAssetCount] = useState(80);
   const [assetVersion, setAssetVersion] = useState<number | null>(null);
   useEffect(() => { setAssetVersion(null); setVisibleAssetCount(80); }, [id]);
@@ -170,8 +170,9 @@ export default function WorkPage() {
   const comparisonVersion = useMemo(() => {
     if (selectedVersion === null) return null;
     if (selectedVersion === "pending") return documentQuery.data?.download.currentVersion ?? null;
+    if (selectedVersion === "edit") return documentQuery.data?.activeEditRevision?.baseVersion ?? null;
     return historyVersions.find((version) => version.version < selectedVersion)?.version ?? null;
-  }, [documentQuery.data?.download.currentVersion, historyVersions, selectedVersion]);
+  }, [documentQuery.data?.activeEditRevision?.baseVersion, documentQuery.data?.download.currentVersion, historyVersions, selectedVersion]);
   useEffect(() => setSelectedVersion(null), [id]);
   const allCollectionsQuery = useQuery({
     queryKey: ["work-collections"],
@@ -211,11 +212,23 @@ export default function WorkPage() {
     if (tab !== "history" || !documentQuery.data || pendingRevisions.isLoading) return;
     setSelectedVersion((current) => {
       if (current === "pending" && pendingRevision) return current;
+      if (current === "edit" && documentQuery.data.activeEditRevision) return current;
       if (typeof current === "number" && historyVersions.some((version) => version.version === current)) return current;
       if (pendingRevision && searchParams.get("compare") === "pending") return "pending";
-      return pendingRevision ? "pending" : documentQuery.data.download.currentVersion;
+      // 編集した作品では、いま読んでいるのは編集版なので、まずそれと元の版の差を見せる。
+      if (pendingRevision) return "pending";
+      return documentQuery.data.activeEditRevision ? "edit" : documentQuery.data.download.currentVersion;
     });
   }, [documentQuery.data, historyVersions, pendingRevision, pendingRevisions.isLoading, searchParams, tab]);
+  // 編集は取得元の版を増やさない。版の上に重ねた層なので、履歴にも画像・添付にも
+  // 版とは別の一行として出す。出さずにいたら、編集したのに履歴は v1 だけ、
+  // 足した絵は件数にも入らない、という見え方になっていた。
+  const editSnapshot = useQuery({
+    queryKey: ["active-edit-snapshot", id, documentQuery.data?.activeEditRevision?.id],
+    queryFn: () => getActiveEditSnapshot(id),
+    enabled: runtime && validId && Boolean(documentQuery.data?.activeEditRevision),
+  });
+  const addedImages = editSnapshot.data?.addedImages ?? [];
   const assetsQuery = useQuery({
     queryKey: ["work-assets", id, assetVersion ?? documentQuery.data?.download.currentVersion],
     queryFn: () => runtime ? getAssets(id, assetVersion ?? documentQuery.data!.download.currentVersion) : Promise.resolve(getDemoReader(id).assets),
@@ -413,7 +426,8 @@ export default function WorkPage() {
   const sourceRevised = hasSourceRevision(work);
   // 改稿を見つけたとき基準値はわざと書き換えない（取り直して初めて追いつく）ので、
   // 作品の行だけを見ると照合済みに見える。候補のほうが答えである。
-  const assets = assetsQuery.data ?? [];
+  // 足した絵はどの保存版にも属さないので、いま読む本文（現在の版）の欄にだけ並べる。
+  const assets = [...(assetsQuery.data ?? []), ...(assetVersion === null ? addedImages : [])];
   const visibleAssets = assets.slice(0, visibleAssetCount);
   const queued = isQueuedForEpub(work.id);
 
@@ -536,7 +550,7 @@ export default function WorkPage() {
               <Group gap="lg" mt="md" className="work-hero__facts">
                 <Text size="sm" c="dimmed"><Icons.publishedDate size={IconSize.menu} />公開 {formatDate(work.sourceCreatedAt)}</Text>
                 <Text size="sm" c="dimmed"><Icons.textLength size={IconSize.menu} />{doc.isEdited && "取得元 "}{formatNumber(work.textLength)}字</Text>
-                {work.assetCount > 0 && <Text size="sm" c="dimmed"><Icons.assets size={IconSize.menu} />画像・添付 {work.assetCount}件</Text>}
+                {(work.assetCount > 0 || addedImages.length > 0) && <Text size="sm" c="dimmed"><Icons.assets size={IconSize.menu} />画像・添付 {work.assetCount}件{addedImages.length > 0 && `・編集で追加 ${addedImages.length}件`}</Text>}
               </Group>
               <div className="work-hero__actionbar">
                 <Group gap={6} wrap="wrap" className="work-hero__actions">
@@ -573,7 +587,7 @@ export default function WorkPage() {
         <Tabs.List>
           <Tabs.Tab value="overview">概要</Tabs.Tab>
           <Tabs.Tab value="content">本文</Tabs.Tab>
-          <Tabs.Tab value="assets">画像・添付 <Badge size="xs" variant="light" ml={4}>{doc.assetCount}</Badge></Tabs.Tab>
+          <Tabs.Tab value="assets">画像・添付 <Badge size="xs" variant="light" ml={4}>{doc.assetCount + addedImages.length}</Badge></Tabs.Tab>
           <Tabs.Tab value="history">履歴</Tabs.Tab>
           <Tabs.Tab value="json">保存データ</Tabs.Tab>
         </Tabs.List>
@@ -613,7 +627,7 @@ export default function WorkPage() {
           </Stack>}
         </Tabs.Panel>
         <Tabs.Panel value="assets" pt="lg">
-          <Group justify="space-between" mb="md"><Text size="xs" c="dimmed">選んだ保存版の画像・添付を表示します。</Text><Select size="xs" w={160} aria-label="画像・添付の保存版" value={assetVersion === null ? "current" : String(assetVersion)} onChange={(value) => { setAssetVersion(value && value !== "current" ? Number(value) : null); setVisibleAssetCount(80); }} allowDeselect={false} data={[{ value: "current", label: `現在（v${work.currentVersion}）` }, ...historyVersions.filter((version) => version.version !== work.currentVersion).map((version) => ({ value: String(version.version), label: `保存済み v${version.version}` }))]} /></Group>
+          <Group justify="space-between" mb="md"><Text size="xs" c="dimmed">選んだ保存版の画像・添付を表示します。{addedImages.length > 0 && assetVersion === null && "編集で追加した画像も並べています。"}</Text><Select size="xs" w={160} aria-label="画像・添付の保存版" value={assetVersion === null ? "current" : String(assetVersion)} onChange={(value) => { setAssetVersion(value && value !== "current" ? Number(value) : null); setVisibleAssetCount(80); }} allowDeselect={false} data={[{ value: "current", label: `現在（v${work.currentVersion}）` }, ...historyVersions.filter((version) => version.version !== work.currentVersion).map((version) => ({ value: String(version.version), label: `保存済み v${version.version}` }))]} /></Group>
           {assetsQuery.isLoading ? <LoadingState label="画像・添付を読み込んでいます" /> : assetsQuery.error ? <ErrorState error={assetsQuery.error} retry={() => assetsQuery.refetch()} /> : assets.length ? <Stack gap="lg"><SimpleGrid cols={{ base: 2, sm: 3, lg: 4, xl: 5 }} spacing="md">{visibleAssets.map((asset) => {
             const url = getAssetUrl(asset.localPath);
             const image = asset.mimeType?.startsWith("image/") && url;
@@ -629,6 +643,7 @@ export default function WorkPage() {
                 {image ? <Image src={url} alt={asset.filename} className="asset-card__image" loading="lazy" decoding="async" /> : <ThemeIcon size={56} variant="light" color="gray"><Icons.file size={IconSize.feature} /></ThemeIcon>}
                 {pdf && <Badge className="asset-card__badge" size="xs" color="gray" variant="filled">原本を見る</Badge>}
                 {original && <Badge className="asset-card__badge" size="xs" color="green" variant="filled">原寸</Badge>}
+                {asset.assetType === "editor_image" && <Badge className="asset-card__badge" size="xs" color="blue" variant="filled">編集で追加</Badge>}
               </Box>
               {/* Filename first and on its own line: it is what identifies the
                   file, and crushing it beside a badge only truncated it. */}
@@ -643,7 +658,7 @@ export default function WorkPage() {
           })}</SimpleGrid>{visibleAssets.length < assets.length && <Group justify="center"><Button variant="default" onClick={() => setVisibleAssetCount((count) => Math.min(assets.length, count + 80))}>さらに表示（残り{formatNumber(assets.length - visibleAssets.length)}件）</Button></Group>}</Stack> : <Alert color="gray" icon={<Icons.imageFile size={IconSize.action} />}>この版に画像・添付はありません。</Alert>}
         </Tabs.Panel>
         <Tabs.Panel value="history" pt="lg">
-          {doc.isEdited && <Alert color="blue" mb="md">いま読める本文とEPUBにはローカル編集版を使います。ここには取得元から保存した版の履歴を表示しています。</Alert>}
+          {doc.isEdited && <Alert color="blue" mb="md">編集しても取得元の版は増えません。編集版は v{doc.activeEditRevision?.baseVersion ?? work.currentVersion} の上に重ねて保存してあり、いま読む本文と EPUB に使います。取得元が改稿すれば、これまでどおり新しい版として届きます。</Alert>}
           {/* The version list only has to tell versions apart, so it stays a
               narrow column (a scrolling strip on small screens) and the diff
               gets the rest of the width. */}
@@ -652,6 +667,11 @@ export default function WorkPage() {
                 {pendingRevision && <Paper component="button" type="button" p="xs" withBorder className="version-row" data-source-newer data-active={selectedVersion === "pending" || undefined} onClick={() => setSelectedVersion("pending")} title={`保存済み v${work.currentVersion} と比較できます。開くだけでは保存されません`}>
                   <Group justify="space-between" wrap="nowrap" gap={6}><Text size="sm" fw={700}>取得元の改稿</Text><Badge size="xs" color="yellow">未保存</Badge></Group>
                   <Text size="xs" c="dimmed">{formatFreshness(pendingRevision.foundAt)}に検出</Text>
+                </Paper>}
+                {doc.activeEditRevision && <Paper component="button" type="button" p="xs" withBorder className="version-row" data-active={selectedVersion === "edit" || undefined} onClick={() => setSelectedVersion("edit")} title={`保存済み v${doc.activeEditRevision.baseVersion} と比較できます`}>
+                  <Group justify="space-between" wrap="nowrap" gap={6}><Text size="sm" fw={700}>編集版</Text><Badge size="xs" color="blue">現在</Badge></Group>
+                  <Text size="xs" c="dimmed">v{doc.activeEditRevision.baseVersion} をもとに</Text>
+                  <Text size="xs" c="dimmed">{formatDate(doc.activeEditRevision.updatedAt, true)}</Text>
                 </Paper>}
                 {historyVersions.map((version) => <Paper component="button" type="button" key={version.id} p="xs" withBorder className="version-row" data-active={selectedVersion === version.version || undefined} onClick={() => setSelectedVersion(version.version)} title={version.changeSummary || "保存元から取得"}>
                   <Group justify="space-between" wrap="nowrap" gap={6}><Text size="sm" fw={700}>v{version.version}</Text>{version.version === work.currentVersion && <Badge size="xs">{doc.isEdited ? "取得元の最新版" : "現在"}</Badge>}</Group>
@@ -663,9 +683,22 @@ export default function WorkPage() {
                 {(typeof selectedVersion === "number" && selectedVersionText.isLoading)
                   || (comparisonVersion !== null && comparisonVersionText.isLoading)
                   || (selectedVersion === "pending" && pendingRevisionPreview.isLoading)
+                  || (selectedVersion === "edit" && editSnapshot.isLoading)
                   ? <LoadingState label="変更内容を読み込んでいます" />
-                  : selectedVersionText.error || comparisonVersionText.error || pendingRevisionPreview.error
-                    ? <ErrorState error={selectedVersionText.error ?? comparisonVersionText.error ?? pendingRevisionPreview.error} retry={() => { selectedVersionText.refetch(); comparisonVersionText.refetch(); pendingRevisionPreview.refetch(); }} />
+                  : selectedVersionText.error || comparisonVersionText.error || pendingRevisionPreview.error || (selectedVersion === "edit" && editSnapshot.error)
+                    ? <ErrorState error={selectedVersionText.error ?? comparisonVersionText.error ?? pendingRevisionPreview.error ?? editSnapshot.error} retry={() => { selectedVersionText.refetch(); comparisonVersionText.refetch(); pendingRevisionPreview.refetch(); editSnapshot.refetch(); }} />
+                    : selectedVersion === "edit" && editSnapshot.data && doc.activeEditRevision
+                      ? <RevisionDiff
+                          beforeVersion={doc.activeEditRevision.baseVersion}
+                          afterVersion={doc.activeEditRevision.baseVersion}
+                          beforeLabel={`保存済み v${doc.activeEditRevision.baseVersion}`}
+                          afterLabel="編集版"
+                          beforeText={comparisonVersionText.data?.text ?? ""}
+                          beforeMetadata={comparisonVersionText.data?.metadata}
+                          afterMetadata={editSnapshot.data.metadata}
+                          afterText={editSnapshot.data.text}
+                          actions={<Button size="xs" variant="default" leftSection={<Icons.edit size={IconSize.menu} />} onClick={() => navigate(`/editor/${work.id}`)}>編集する</Button>}
+                        />
                     : selectedVersion === "pending" && pendingRevisionPreview.data
                       ? <RevisionDiff
                           beforeVersion={work.currentVersion}

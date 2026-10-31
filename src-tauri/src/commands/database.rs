@@ -380,7 +380,7 @@ pub fn start_automatic_saved_asset_audit(app: tauri::AppHandle) {
             sleep(Duration::from_millis(25)).await;
         }
         if checked > 0 {
-            log::info!("保存画像の検査を完了しました: {checked}作品、一部保存の追加{marked}件");
+            log::info!("保存画像の検査を完了しました: {checked}作品、一部保存の変更{marked}件");
         }
     });
 }
@@ -3009,10 +3009,28 @@ pub async fn db_activate_work_edit(
     app: tauri::AppHandle,
     edit_revision_id: i64,
 ) -> Result<WorkEditRevision, String> {
-    run_library_write_blocking(app, move |state| {
+    let revision = run_library_write_blocking(app.clone(), move |state| {
         state.db.activate_work_edit(edit_revision_id)
     })
+    .await?;
+    reaudit_edited_work(&app, revision.download_id).await;
+    Ok(revision)
+}
+
+/// 編集が保存版の欠けた挿絵を埋めたかどうかで、要確認に残すかが決まる。
+/// だから反映・取り消しのたびに、その場で見直す。
+async fn reaudit_edited_work(app: &tauri::AppHandle, download_id: i64) {
+    match run_library_write_blocking(app.clone(), move |state| {
+        state.db.audit_saved_pixiv_work(download_id)
+    })
     .await
+    {
+        Ok(ids) if !ids.is_empty() => {
+            let _ = app.emit("acquisition-audited", ids);
+        }
+        Ok(_) => {}
+        Err(error) => log::warn!("編集した作品の取得状態を見直せません: {error}"),
+    }
 }
 
 /// 編集した版を使うのをやめ、取り込んだままの本文へ戻す。
@@ -3023,7 +3041,12 @@ pub async fn db_deactivate_work_edit(
     app: tauri::AppHandle,
     download_id: i64,
 ) -> Result<(), String> {
-    run_library_write_blocking(app, move |state| state.db.deactivate_work_edit(download_id)).await
+    run_library_write_blocking(app.clone(), move |state| {
+        state.db.deactivate_work_edit(download_id)
+    })
+    .await?;
+    reaudit_edited_work(&app, download_id).await;
+    Ok(())
 }
 
 /// 手元の画像を、作品の資産として取り込む。
@@ -3303,6 +3326,18 @@ pub async fn get_revision_snapshot(
 ) -> Result<crate::database::queries::RevisionSnapshot, String> {
     run_db_blocking(app, move |state| {
         state.db.get_revision_snapshot(download_id, version)
+    })
+    .await
+}
+
+/// 反映中の編集を、もとにした保存版と比べられる形で読む。編集が無ければ `None`。
+#[tauri::command]
+pub async fn get_active_edit_snapshot(
+    app: tauri::AppHandle,
+    download_id: i64,
+) -> Result<Option<crate::database::queries::RevisionSnapshot>, String> {
+    run_db_blocking(app, move |state| {
+        state.db.get_active_edit_snapshot(download_id)
     })
     .await
 }

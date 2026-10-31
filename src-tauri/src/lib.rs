@@ -331,6 +331,7 @@ pub fn run() -> tauri::Result<()> {
             commands::database::db_get_download_by_source,
             commands::database::db_get_reader_metadata,
             commands::database::get_revision_snapshot,
+            commands::database::get_active_edit_snapshot,
             commands::database::get_work_acquisition_details,
             commands::database::db_get_reader_content_page,
             commands::database::db_search_reader_content,

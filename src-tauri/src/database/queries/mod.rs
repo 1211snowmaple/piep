@@ -5556,11 +5556,12 @@ impl Database {
             .prepare(
                 "SELECT id, status, scope, mode, totals, processed, candidate_count,
                         saved_count, error_count, active_label, started_at, updated_at, finished_at,
-                        (SELECT COUNT(*) FROM update_job_items i WHERE i.job_id=update_jobs.id AND i.status='held'),
+                        (SELECT COUNT(*) FROM update_job_items i WHERE i.job_id=update_jobs.id AND i.status='held' AND COALESCE(CASE WHEN json_valid(i.payload_json) THEN json_extract(i.payload_json,'$.knownHold') END,0)=0),
                         (SELECT COUNT(*) FROM update_job_items i WHERE i.job_id=update_jobs.id AND i.item_type IN ('work','target')),
                         (SELECT COUNT(*) FROM update_job_items i WHERE i.job_id=update_jobs.id AND i.item_type IN ('work','target') AND i.status NOT IN ('queued','running')),
                         (SELECT COUNT(*) FROM update_job_items i WHERE i.job_id=update_jobs.id AND i.item_type='candidate' AND i.status != 'candidate'),
-                        (SELECT COUNT(*) FROM update_job_items i WHERE i.job_id=update_jobs.id AND i.item_type='candidate' AND i.status NOT IN ('candidate','queued','running'))
+                        (SELECT COUNT(*) FROM update_job_items i WHERE i.job_id=update_jobs.id AND i.item_type='candidate' AND i.status NOT IN ('candidate','queued','running')),
+                        (SELECT COUNT(*) FROM update_job_items i WHERE i.job_id=update_jobs.id AND i.status='held' AND COALESCE(CASE WHEN json_valid(i.payload_json) THEN json_extract(i.payload_json,'$.knownHold') END,0)=1)
                  FROM update_jobs
                  ORDER BY updated_at DESC, started_at DESC
                  LIMIT 30",
@@ -5615,11 +5616,12 @@ impl Database {
             .query_row(
                 "SELECT id, status, scope, mode, totals, processed, candidate_count,
                         saved_count, error_count, active_label, started_at, updated_at, finished_at,
-                        (SELECT COUNT(*) FROM update_job_items i WHERE i.job_id=update_jobs.id AND i.status='held'),
+                        (SELECT COUNT(*) FROM update_job_items i WHERE i.job_id=update_jobs.id AND i.status='held' AND COALESCE(CASE WHEN json_valid(i.payload_json) THEN json_extract(i.payload_json,'$.knownHold') END,0)=0),
                         (SELECT COUNT(*) FROM update_job_items i WHERE i.job_id=update_jobs.id AND i.item_type IN ('work','target')),
                         (SELECT COUNT(*) FROM update_job_items i WHERE i.job_id=update_jobs.id AND i.item_type IN ('work','target') AND i.status NOT IN ('queued','running')),
                         (SELECT COUNT(*) FROM update_job_items i WHERE i.job_id=update_jobs.id AND i.item_type='candidate' AND i.status != 'candidate'),
-                        (SELECT COUNT(*) FROM update_job_items i WHERE i.job_id=update_jobs.id AND i.item_type='candidate' AND i.status NOT IN ('candidate','queued','running'))
+                        (SELECT COUNT(*) FROM update_job_items i WHERE i.job_id=update_jobs.id AND i.item_type='candidate' AND i.status NOT IN ('candidate','queued','running')),
+                        (SELECT COUNT(*) FROM update_job_items i WHERE i.job_id=update_jobs.id AND i.status='held' AND COALESCE(CASE WHEN json_valid(i.payload_json) THEN json_extract(i.payload_json,'$.knownHold') END,0)=1)
                  FROM update_jobs WHERE id = ?1",
                 params![job_id],
                 update_job_summary_from_row,
@@ -5761,6 +5763,7 @@ impl Database {
             saved_count: summary.saved_count,
             error_count: summary.error_count,
             held_count: summary.held_count,
+            known_held_count: summary.known_held_count,
             active_label: summary.active_label,
             logs,
             candidates,
@@ -5825,6 +5828,19 @@ impl Database {
             )
             .map_err(|e| format!("Failed to transition job status: {e}"))?;
         Ok(changed > 0)
+    }
+
+    /// この回の保留が、前の回から変わらないものだと印を付ける。数えないための印で、
+    /// 保留そのものは要確認に残る。
+    pub fn mark_update_job_item_known_hold(&self, item_id: i64) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE update_job_items SET payload_json=json_set(CASE WHEN json_valid(payload_json) THEN payload_json ELSE '{}' END,'$.knownHold',json('true'))
+             WHERE id=?1",
+            params![item_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
     }
 
     pub fn set_update_job_item_payload(&self, item_id: i64, payload: &str) -> Result<(), String> {
@@ -6014,8 +6030,10 @@ impl Database {
         held_only: bool,
     ) -> Result<Vec<UpdateJobItemState>, String> {
         let conn = self.read_conn()?;
+        // 前の回から同じ理由で保留のままのものは、この回の結果に並べない。
+        // 要確認の一覧にはそのまま残っている。
         let filter = if held_only {
-            " AND i.status = 'held'"
+            " AND i.status = 'held' AND COALESCE(CASE WHEN json_valid(i.payload_json) THEN json_extract(i.payload_json,'$.knownHold') END,0)=0"
         } else {
             ""
         };
@@ -6077,11 +6095,12 @@ impl Database {
             .query_row(
                 "SELECT id, status, scope, mode, totals, processed, candidate_count,
                         saved_count, error_count, active_label, started_at, updated_at, finished_at,
-                        (SELECT COUNT(*) FROM update_job_items i WHERE i.job_id=update_jobs.id AND i.status='held'),
+                        (SELECT COUNT(*) FROM update_job_items i WHERE i.job_id=update_jobs.id AND i.status='held' AND COALESCE(CASE WHEN json_valid(i.payload_json) THEN json_extract(i.payload_json,'$.knownHold') END,0)=0),
                         totals - (SELECT COUNT(*) FROM update_job_items i WHERE i.job_id=update_jobs.id AND i.item_type='candidate' AND i.status != 'candidate'),
                         processed - (SELECT COUNT(*) FROM update_job_items i WHERE i.job_id=update_jobs.id AND i.item_type='candidate' AND i.status NOT IN ('candidate','queued','running')),
                         (SELECT COUNT(*) FROM update_job_items i WHERE i.job_id=update_jobs.id AND i.item_type='candidate' AND i.status != 'candidate'),
-                        (SELECT COUNT(*) FROM update_job_items i WHERE i.job_id=update_jobs.id AND i.item_type='candidate' AND i.status NOT IN ('candidate','queued','running'))
+                        (SELECT COUNT(*) FROM update_job_items i WHERE i.job_id=update_jobs.id AND i.item_type='candidate' AND i.status NOT IN ('candidate','queued','running')),
+                        (SELECT COUNT(*) FROM update_job_items i WHERE i.job_id=update_jobs.id AND i.status='held' AND COALESCE(CASE WHEN json_valid(i.payload_json) THEN json_extract(i.payload_json,'$.knownHold') END,0)=1)
                  FROM update_jobs WHERE id = ?1",
                 params![job_id],
                 update_job_summary_from_row,
@@ -6349,11 +6368,27 @@ impl Database {
         work: &DownloadEntry,
         reason: &str,
     ) -> Result<bool, String> {
-        let payload_json = serde_json::to_string(work).map_err(|error| error.to_string())?;
         let mut conn = self.conn.lock().map_err(|error| error.to_string())?;
         let tx = conn
             .transaction()
             .map_err(|error| format!("Failed to begin unavailable work insert: {error}"))?;
+        // 前の回から見つからないままなら、確認はしても新しい保留としては数えない。
+        let known: bool = tx
+            .query_row(
+                "SELECT status IN ('held','dismissed')
+                        AND CASE WHEN json_valid(payload_json) THEN json_extract(payload_json,'$.holdKind') END='unavailable'
+                 FROM update_candidates WHERE source=?1 AND source_id=?2",
+                params![work.source, work.source_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| format!("Failed to read unavailable work state: {error}"))?
+            .unwrap_or(false);
+        let mut payload = serde_json::to_value(work).map_err(|error| error.to_string())?;
+        if known {
+            payload["knownHold"] = serde_json::json!(true);
+        }
+        let payload_json = payload.to_string();
         let changed = tx
             .execute(
                 "INSERT INTO update_job_items (
@@ -15608,6 +15643,7 @@ fn update_job_summary_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Upda
         saved_count: row.get(7)?,
         error_count: row.get(8)?,
         held_count: row.get(13)?,
+        known_held_count: row.get(18)?,
         active_label: row.get(9)?,
         started_at: row.get(10)?,
         updated_at: row.get(11)?,

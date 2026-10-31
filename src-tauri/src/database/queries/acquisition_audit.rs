@@ -1,4 +1,6 @@
-use super::{AssetEntry, Database};
+use super::{
+    active_edit_revision_locked, block_source_ref, blocks_for_revision_locked, AssetEntry, Database,
+};
 use regex::Regex;
 use rusqlite::params;
 use serde_json::Value;
@@ -12,7 +14,8 @@ static PIXIV_SPEC: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(\d+)(?:-(\d
 /// Bump when the audit learns to find a new kind of loss, so versions checked
 /// under an older rule are inspected once more instead of on every launch.
 /// 2: masked Pixiv title/caption/tags behind an R-18 cover placeholder.
-pub(crate) const SAVED_AUDIT_RULE: i64 = 2;
+/// 3: 反映中の編集で差し替えた壊れた参照は、欠けとして数えない。
+pub(crate) const SAVED_AUDIT_RULE: i64 = 3;
 
 /// Fields the App API blanked when it gated an R-18 novel. The age-gate cover
 /// is the evidence: an empty caption on its own is an ordinary author choice.
@@ -154,6 +157,42 @@ impl Database {
         Ok(count)
     }
 
+    /// 欠けた参照のうち、`version` に対する反映中の編集でもまだ欠けて見えるものだけを残す。
+    ///
+    /// 利用者が自分の絵に差し替えた参照や、消した参照は片付いている。読む画面にも
+    /// EPUB にも、もう穴は出ない。別の版に対する編集は、この版の欠けを埋めない。
+    pub(crate) fn references_left_by_active_edit(
+        &self,
+        download_id: i64,
+        version: i64,
+        missing: Vec<String>,
+    ) -> Result<Vec<String>, String> {
+        if missing.is_empty() {
+            return Ok(missing);
+        }
+        let conn = self.read_conn()?;
+        let Some(revision) = active_edit_revision_locked(&conn, download_id)? else {
+            return Ok(missing);
+        };
+        if revision.base_version != version {
+            return Ok(missing);
+        }
+        let shown = blocks_for_revision_locked(&conn, revision.id)?
+            .iter()
+            .filter_map(|block| match block.block_type.as_str() {
+                // 絵の付いた画像ブロックは、元の参照を名乗っていても埋まっている。
+                "image" if block.asset_id.is_some() => None,
+                "image" => block_source_ref(block),
+                _ => block.text.clone(),
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        Ok(missing
+            .into_iter()
+            .filter(|reference| shown.contains(reference.as_str()))
+            .collect())
+    }
+
     /// Inspect each saved version once per audit rule, in small idle batches.
     /// Older archives did not record missing_illustrations or masked details,
     /// so job history alone cannot recover them.
@@ -162,6 +201,20 @@ impl Database {
         after_id: i64,
         limit: usize,
     ) -> Result<(usize, Vec<i64>, i64), String> {
+        self.audit_saved_pixiv(after_id, limit, None)
+    }
+
+    /// 編集を反映した・下ろしたその場で、1作品だけ検査し直す。次の起動を待たない。
+    pub(crate) fn audit_saved_pixiv_work(&self, download_id: i64) -> Result<Vec<i64>, String> {
+        Ok(self.audit_saved_pixiv(0, 1, Some(download_id))?.1)
+    }
+
+    fn audit_saved_pixiv(
+        &self,
+        after_id: i64,
+        limit: usize,
+        only: Option<i64>,
+    ) -> Result<(usize, Vec<i64>, i64), String> {
         let rows = {
             let conn = self.read_conn()?;
             let mut statement = conn.prepare(
@@ -169,12 +222,13 @@ impl Database {
                  LEFT JOIN saved_asset_audits a ON a.download_id=d.id
                  WHERE d.id>?2 AND d.source='pixiv' AND d.content_type='novel'
                    AND (a.download_id IS NULL OR a.json_path<>d.json_path OR a.version<>d.current_version
-                        OR a.rule_version<?3)
+                        OR a.rule_version<?3 OR d.id=?4)
+                   AND (?4 IS NULL OR d.id=?4)
                  ORDER BY d.id LIMIT ?1",
             ).map_err(|error| error.to_string())?;
             let rows = statement
                 .query_map(
-                    [limit.clamp(1, 32) as i64, after_id, SAVED_AUDIT_RULE],
+                    params![limit.clamp(1, 32) as i64, after_id, SAVED_AUDIT_RULE, only],
                     |row| {
                         Ok((
                             row.get::<_, i64>(0)?,
@@ -191,6 +245,7 @@ impl Database {
             rows
         };
         let mut findings = Vec::new();
+        let mut settled = Vec::new();
         for (id, source_id, title, path, version) in &rows {
             let content = std::fs::read(path)
                 .map_err(|error| format!("保存済み作品 {id} を検査できません: {error}"))?;
@@ -200,7 +255,7 @@ impl Database {
                 .get("text")
                 .and_then(Value::as_str)
                 .unwrap_or_default();
-            let missing = if REFERENCES.is_match(text) {
+            let broken = if REFERENCES.is_match(text) {
                 saved_pixiv_missing_references(
                     &value,
                     &self.get_current_assets(&self.get_download(*id)?)?,
@@ -208,7 +263,12 @@ impl Database {
             } else {
                 Vec::new()
             };
+            let had_broken = !broken.is_empty();
+            let missing = self.references_left_by_active_edit(*id, *version, broken)?;
             let masked = masked_pixiv_metadata(&value);
+            if had_broken && missing.is_empty() && masked.is_empty() {
+                settled.push((*id, source_id));
+            }
             if !missing.is_empty() || !masked.is_empty() {
                 let mut losses = Vec::new();
                 if !missing.is_empty() {
@@ -241,6 +301,18 @@ impl Database {
                  ON CONFLICT(source,source_id) DO NOTHING", params![source_id,title,payload],
             ).map_err(|error| error.to_string())?;
             if inserted > 0 {
+                changed.push(id);
+            }
+        }
+        for (id, source_id) in settled {
+            // 片付けるのはこの検査の出した保留だけ。未保存の改稿、利用者の
+            // 「今後出さない」、ほかの種類の保留は、編集が決めることではない。
+            let cleared = tx.execute(
+                "DELETE FROM update_candidates WHERE source='pixiv' AND source_id=?1 AND status='held'
+                   AND CASE WHEN json_valid(payload_json) THEN json_extract(payload_json,'$.holdKind') END='incomplete'",
+                params![source_id],
+            ).map_err(|error| error.to_string())?;
+            if cleared > 0 {
                 changed.push(id);
             }
         }

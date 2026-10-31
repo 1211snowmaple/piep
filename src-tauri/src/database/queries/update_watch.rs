@@ -627,6 +627,23 @@ impl Database {
         .map_err(|e| format!("Failed to read update candidate status: {}", e))
     }
 
+    /// 候補の状態と保留の種類（`holdKind`）。候補が無ければ `None`。
+    pub fn update_candidate_hold(
+        &self,
+        source: &str,
+        source_id: &str,
+    ) -> Result<Option<(String, Option<String>)>, String> {
+        let conn = self.read_conn()?;
+        conn.query_row(
+            "SELECT status, CASE WHEN json_valid(payload_json) THEN json_extract(payload_json,'$.holdKind') END
+             FROM update_candidates WHERE source = ?1 AND source_id = ?2",
+            params![source, source_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(|e| format!("Failed to read update candidate hold: {}", e))
+    }
+
     /// A held partial save may be repaired, but dismissed or unsaved candidates
     /// still require the user's explicit recheck action.
     pub(crate) fn candidate_acquisition_blocked(

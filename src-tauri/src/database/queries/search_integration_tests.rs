@@ -1913,6 +1913,125 @@ fn saved_asset_audit_rechecks_old_rule_versions_once_for_masked_pixiv_details() 
     assert!(db.get_work_acquisition_details(ids[1]).unwrap().is_none());
 }
 
+/// 取得元で消えた挿絵を、利用者が編集で自分の絵に差し替えた作品は、もう
+/// 要確認に出さない。読む画面にも EPUB にも欠けはないのに、検査が元の本文
+/// だけを見て「一部保存」と言い続けていた。編集を下ろせば欠けは戻る。
+#[test]
+fn an_edit_that_replaces_a_lost_illustration_settles_the_incomplete_save() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let mut ids = Vec::new();
+    for source_id in ["replaced-by-edit", "edit-keeps-the-gap"] {
+        let id = insert_download(&db, &storage, source_id, "題名", "作者", &[], "前\n後");
+        let work = db.get_download(id).unwrap();
+        fs::write(
+            &work.json_path,
+            serde_json::json!({"text":"前\n[pixivimage:42]\n後"}).to_string(),
+        )
+        .unwrap();
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE downloads SET source='pixiv',content_type='novel' WHERE id=?1",
+                params![id],
+            )
+            .unwrap();
+        ids.push(id);
+    }
+    let (_, marked, _) = db.audit_saved_pixiv_assets(0, 32).unwrap();
+    assert_eq!(marked, ids);
+
+    let image = storage
+        .join("editor-assets")
+        .join(ids[0].to_string())
+        .join("42_p0.png");
+    fs::create_dir_all(image.parent().unwrap()).unwrap();
+    fs::write(&image, b"drawn").unwrap();
+    let asset_id = db
+        .insert_asset(&NewAsset {
+            download_id: ids[0],
+            asset_type: super::EDITOR_IMAGE_ASSET_TYPE.to_string(),
+            filename: "42_p0.png".to_string(),
+            local_path: image.to_string_lossy().to_string(),
+            original_url: None,
+            mime_type: Some("image/png".to_string()),
+            file_size_bytes: 5,
+        })
+        .unwrap();
+    let paragraph = |text: &str| WorkBlockInput {
+        block_type: "paragraph".to_string(),
+        text: Some(text.to_string()),
+        asset_id: None,
+        attrs_json: None,
+    };
+    let replaced = db
+        .save_work_draft(
+            ids[0],
+            1,
+            None,
+            &[
+                paragraph("前"),
+                WorkBlockInput {
+                    block_type: "image".to_string(),
+                    text: None,
+                    asset_id: Some(asset_id),
+                    attrs_json: None,
+                },
+                paragraph("後"),
+            ],
+        )
+        .unwrap();
+    // 誤字だけ直した編集は、消えた挿絵を埋めていない。
+    let typo_fix = db
+        .save_work_draft(
+            ids[1],
+            1,
+            None,
+            &[
+                paragraph("前。"),
+                paragraph("[pixivimage:42]"),
+                paragraph("後"),
+            ],
+        )
+        .unwrap();
+    assert!(db.get_active_edit_snapshot(ids[0]).unwrap().is_none());
+    db.activate_work_edit(replaced.id).unwrap();
+    db.activate_work_edit(typo_fix.id).unwrap();
+
+    // 履歴では、編集を v1 と並べて比べられる。消えた参照の代わりに足した絵が並ぶ。
+    let base = serde_json::to_value(db.get_revision_snapshot(ids[0], 1).unwrap()).unwrap();
+    let edited =
+        serde_json::to_value(db.get_active_edit_snapshot(ids[0]).unwrap().unwrap()).unwrap();
+    let keys = |snapshot: &serde_json::Value| -> Vec<String> {
+        snapshot["metadata"]["assets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["key"].as_str().unwrap().to_string())
+            .collect()
+    };
+    assert!(keys(&base).iter().any(|key| key.contains("42")));
+    assert_eq!(keys(&edited), vec!["edit:42_p0.png"]);
+    assert!(!edited["text"].as_str().unwrap().contains("[pixivimage:42]"));
+    assert!(edited["text"].as_str().unwrap().contains("前"));
+
+    assert_eq!(db.audit_saved_pixiv_work(ids[0]).unwrap(), vec![ids[0]]);
+    assert!(db.audit_saved_pixiv_work(ids[1]).unwrap().is_empty());
+    assert!(db.get_work_acquisition_details(ids[0]).unwrap().is_none());
+    assert!(db
+        .has_incomplete_save_candidate("pixiv", "edit-keeps-the-gap")
+        .unwrap());
+    // 毎回の起動で見直し直さない。
+    assert_eq!(db.audit_saved_pixiv_assets(0, 32).unwrap().0, 0);
+
+    db.deactivate_work_edit(ids[0]).unwrap();
+    assert_eq!(db.audit_saved_pixiv_work(ids[0]).unwrap(), vec![ids[0]]);
+    assert!(db
+        .has_incomplete_save_candidate("pixiv", "replaced-by-edit")
+        .unwrap());
+}
+
 #[test]
 #[ignore = "requires PIEP_AUDIT_SNAPSHOT pointing to a consistent SQLite snapshot; only a temporary copy is changed"]
 fn saved_asset_audit_on_a_real_library_snapshot() {
@@ -1957,11 +2076,19 @@ fn saved_asset_audit_on_a_real_library_snapshot() {
         .unwrap();
     assert_eq!(before, after);
     let attention = db.count_saved_deferred_update_candidates().unwrap();
-    assert_eq!(attention, original_attention + marked.len() as i64);
+    // 変化した作品は、新しく保留になったか、編集で埋まって保留が外れたかのどちらか。
     let sources: Vec<_> = marked
         .iter()
         .map(|id| db.get_download(*id).unwrap().source_id)
         .collect();
+    let (added, settled): (Vec<_>, Vec<_>) = sources.iter().cloned().partition(|source_id| {
+        db.has_incomplete_save_candidate("pixiv", source_id)
+            .unwrap()
+    });
+    assert_eq!(
+        attention,
+        original_attention + added.len() as i64 - settled.len() as i64
+    );
     drop(db);
     let db = Database::open(&copy, &storage).unwrap();
     assert_eq!(db.audit_saved_pixiv_assets(0, 32).unwrap(), (0, vec![], 0));
@@ -1971,7 +2098,7 @@ fn saved_asset_audit_on_a_real_library_snapshot() {
     );
     println!(
         "SAVED_ASSET_AUDIT_JSON={}",
-        serde_json::json!({"checked":checked,"marked_source_ids":sources,"saved_attention":attention,"downloads":before.0,"versions_unchanged":true,"restart_stable":true})
+        serde_json::json!({"checked":checked,"added_source_ids":added,"settled_source_ids":settled,"saved_attention_before":original_attention,"saved_attention":attention,"downloads":before.0,"versions_unchanged":true,"restart_stable":true})
     );
 }
 

@@ -62,7 +62,10 @@ export interface UpdateJobSummary {
   candidateCount: number;
   savedCount: number;
   errorCount: number;
+  /** この回で新しく保留になった、または保留の種類が変わった件数。 */
   heldCount?: number;
+  /** 前の回から同じ理由で保留のままの件数。確かめたが、知らせることはない。 */
+  knownHeldCount?: number;
   activeLabel: string | null;
   startedAt: string;
   updatedAt: string;

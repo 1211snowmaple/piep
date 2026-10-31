@@ -14,7 +14,7 @@ const dbApi = vi.hoisted(() => ({
   getReaderContentPage: vi.fn(),
   getAssets: vi.fn(),
 }));
-const inspectionApi = vi.hoisted(() => ({ getRevisionSnapshot: vi.fn(), getWorkAcquisitionDetails: vi.fn() }));
+const inspectionApi = vi.hoisted(() => ({ getRevisionSnapshot: vi.fn(), getActiveEditSnapshot: vi.fn(), getWorkAcquisitionDetails: vi.fn() }));
 const scrollToContent = vi.fn();
 vi.mock("@/services/workInspectionApi", () => inspectionApi);
 const updateJobApi = vi.hoisted(() => ({
@@ -147,12 +147,18 @@ describe("WorkPage content preview", () => {
   it("distinguishes the active local edit from source metadata and source version history", async () => {
     window.location.hash = "#/works/101?tab=overview";
     const demo = getDemoReader(101);
+    const baseVersion = demo.download.currentVersion;
     dbApi.getReaderMetadata.mockResolvedValue({
       download: demo.download,
       versions: demo.versions,
       assetCount: demo.assets.length,
       isEdited: true,
-      activeEditRevision: demo.activeEditRevision,
+      activeEditRevision: { id: 7, downloadId: 101, baseVersion, status: "active", title: null, contentHash: null, createdAt: "2026-10-31T06:00:00Z", updatedAt: "2026-10-31T06:28:00Z" },
+    });
+    inspectionApi.getRevisionSnapshot.mockResolvedValue({ text: "前\n[pixivimage:42]\n後" });
+    inspectionApi.getActiveEditSnapshot.mockResolvedValue({
+      text: "前\n後",
+      addedImages: [{ id: 900, downloadId: 101, assetType: "editor_image", filename: "42_p0.png", localPath: "C:/edit/42_p0.png", originalUrl: null, mimeType: "image/png", fileSizeBytes: 5, createdAt: "2026-10-31T06:00:00Z" }],
     });
     dbApi.getReaderContentPage.mockResolvedValue(content(0, "<p>ローカル編集版</p>"));
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -160,10 +166,14 @@ describe("WorkPage content preview", () => {
 
     expect(await screen.findByText("取得元の文字数")).toBeInTheDocument();
     expect(screen.getByText("取得元の容量")).toBeInTheDocument();
+    // 足した絵はどの保存版にも属さないが、作品の画像・添付としては数える。
+    expect(await screen.findByText(/編集で追加 1件/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("tab", { name: "履歴" }));
-    expect(await screen.findByText(/いま読める本文とEPUBにはローカル編集版を使います/)).toBeInTheDocument();
+    expect(await screen.findByText(/編集しても取得元の版は増えません/)).toBeInTheDocument();
     expect(screen.getByText("取得元の最新版")).toBeInTheDocument();
-    expect(screen.queryByText("現在")).toBeNull();
+    // 編集は版の一覧に並び、開くとまず元の版との差が出る。
+    expect(screen.getByRole("button", { name: /編集版/ })).toHaveAttribute("data-active");
+    expect(await screen.findByText(`保存済み v${baseVersion} → 編集版 の変更`)).toBeInTheDocument();
   });
 
   it("keeps an already loaded tab ready while the same work stays open", async () => {

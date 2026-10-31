@@ -1049,6 +1049,9 @@ pub struct UpdateJobSummary {
     pub error_count: i64,
     #[serde(default)]
     pub held_count: i64,
+    /// 前の回から同じ理由で保留のままの件数。`held_count` には入らない。
+    #[serde(default)]
+    pub known_held_count: i64,
     pub active_label: Option<String>,
     pub started_at: String,
     pub updated_at: String,
@@ -1107,6 +1110,9 @@ pub struct UpdateJobSnapshot {
     pub error_count: i64,
     #[serde(default)]
     pub held_count: i64,
+    /// 前の回から同じ理由で保留のままの件数。`held_count` には入らない。
+    #[serde(default)]
+    pub known_held_count: i64,
     pub active_label: Option<String>,
     pub logs: Vec<UpdateJobLog>,
     pub candidates: Vec<UpdateJobCandidate>,

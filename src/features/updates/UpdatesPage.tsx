@@ -408,7 +408,7 @@ export default function UpdatesPage() {
             </Group>
           </Group>
           <ScrollingJobTitle label={throttledMessage ? statusTitle(activeSnapshot.status) : activeSnapshot.activeLabel || statusTitle(activeSnapshot.status)} />
-          <Text size="sm" c="dimmed" mt={5}>候補 {formatNumber(activeSnapshot.candidateCount)} · 保存済み {formatNumber(activeSnapshot.savedCount)} · エラー {formatNumber(activeSnapshot.errorCount)} · 保留 {formatNumber(activeSnapshot.heldCount ?? 0)}</Text>
+          <Text size="sm" c="dimmed" mt={5}>候補 {formatNumber(activeSnapshot.candidateCount)} · 保存済み {formatNumber(activeSnapshot.savedCount)} · エラー {formatNumber(activeSnapshot.errorCount)} · 保留 {formatNumber(activeSnapshot.heldCount ?? 0)}{(activeSnapshot.knownHeldCount ?? 0) > 0 && `（ほかに前回から変わらない保留 ${formatNumber(activeSnapshot.knownHeldCount ?? 0)}件）`}</Text>
           {outcome && activeSnapshot.mode === "check_only" && (
             <Text size="sm" mt="xs">
               変更なし・スキップ {formatNumber(outcome.unchanged)}件 · 公開元で見つからない {formatNumber(outcome.missing.length)}件
@@ -647,7 +647,7 @@ function JobHistoryPanel({ jobs, activeJobId, finishedCount, clearingAll, cleari
                 <Stack gap={2} miw={0}>
                   <Group gap="sm" wrap="nowrap"><Text size="sm" fw={job.jobId === activeJobId ? 700 : 500}>{formatDate(job.startedAt, true)}</Text><Text size="sm" className="line-clamp-1">{updateJobSubject(job)}</Text></Group>
                   <Text size="xs" c="dimmed" className="line-clamp-1">
-                    {formatNumber(job.processed)}/{formatNumber(job.totals)}件 · 候補 {formatNumber(job.candidateCount)} · 保存 {formatNumber(job.savedCount)}{job.errorCount > 0 ? ` · エラー ${formatNumber(job.errorCount)}` : ""}{job.heldCount ? ` · 保留 ${formatNumber(job.heldCount)}` : ""}
+                    {formatNumber(job.processed)}/{formatNumber(job.totals)}件 · 候補 {formatNumber(job.candidateCount)} · 保存 {formatNumber(job.savedCount)}{job.errorCount > 0 ? ` · エラー ${formatNumber(job.errorCount)}` : ""}{job.heldCount ? ` · 保留 ${formatNumber(job.heldCount)}` : ""}{job.knownHeldCount ? ` · 変わらない保留 ${formatNumber(job.knownHeldCount)}` : ""}
                   </Text>
                 </Stack>
               </Group>

@@ -1943,6 +1943,7 @@ select {
   font-family: "Noto Serif JP", "Yu Mincho", serif;
   line-height: 1.9;
 }
+.revision-diff__position { min-width: 88px; justify-content: center; font-variant-numeric: tabular-nums; color: var(--mantine-color-dimmed); cursor: default; }
 .revision-diff__frame[data-overview] { display: grid; grid-template-columns: minmax(0, 1fr) 12px; gap: 6px; }
 /* Removed edits on the left lane, added on the right, like an editor's overview ruler. */
 .revision-diff__overview {
