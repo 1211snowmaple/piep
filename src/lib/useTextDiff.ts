@@ -1,13 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
 import { createTextDiff, type TextDiffResult } from "./textDiff";
 
-/** Below this many characters a diff finishes within a frame, so a worker would only add a flash of loading. */
+/** これより短ければ差分は1フレームのうちに終わる。worker を使っても読み込み中の表示がちらつくだけになる。 */
 const WORKER_THRESHOLD = 20_000;
 
 /**
- * Diff two versions without freezing the page. A long work that was revised
- * throughout takes a few hundred milliseconds, so it runs in a worker; each
- * comparison gets its own worker so switching versions cancels the old one.
+ * 二つの版の差分を、ページを固めずに取る。
+ *
+ * 全体に手が入った長い作品では数百ミリ秒かかるので worker で動かす。比べるたびに
+ * 別の worker を立てるので、版を切り替えれば古い比較は打ち切られる。
  */
 export function useTextDiff(before: string | null, after: string): { diff: TextDiffResult | null; pending: boolean } {
   const inline = before === null || typeof Worker === "undefined" || before.length + after.length < WORKER_THRESHOLD;

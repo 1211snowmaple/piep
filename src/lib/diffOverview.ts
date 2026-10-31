@@ -2,22 +2,23 @@ export type OverviewKind = "added" | "removed";
 
 export interface OverviewSpan {
   kind: OverviewKind;
-  /** Offsets within the scrolled content, in pixels. */
+  /** スクロールする本文の中での位置。単位はピクセル。 */
   top: number;
   bottom: number;
 }
 
 export interface OverviewMark {
   kind: OverviewKind;
-  /** Fractions of the whole scroll height, so CSS can place them with %. */
+  /** スクロール全体の高さに対する割合。CSS で % として置けるように。 */
   top: number;
   height: number;
 }
 
 /**
- * Map changed spans onto a ruler as tall as the scroll track. Thousands of
- * scattered edits merge into a few marks once they share a pixel, and every
- * edit stays at least `minPixels` tall so a one-character change is visible.
+ * 変更箇所を、スクロールの溝と同じ高さの帯へ写す。
+ *
+ * 何千もの散らばった変更も、同じ画素に重なれば数本の印にまとまる。一字だけの
+ * 変更でも見えるよう、どの印も少なくとも `minPixels` の高さを持たせる。
  */
 export function overviewMarks(spans: OverviewSpan[], contentHeight: number, rulerHeight: number, minPixels = 2): OverviewMark[] {
   if (contentHeight <= 0 || rulerHeight <= 0) return [];

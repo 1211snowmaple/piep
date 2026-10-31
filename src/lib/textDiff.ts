@@ -19,14 +19,14 @@ const MAX_EDIT_DISTANCE = 2_048;
 const MAX_LINE_EDIT_DISTANCE = 1_024;
 
 /**
- * Compare Japanese prose without assuming that spaces separate words.
- * `Intl.Segmenter` keeps punctuation and whitespace, so concatenating the
- * result always reconstructs the source exactly. Myers over the whole text
- * gives the smallest diff for ordinary revisions. An author's sweep across the
- * whole work (every "……" rewritten, say) exceeds that edit budget, so lines
- * are then aligned first and each run of changed lines is compared on its own.
- * A run that is still too different is shown as a bounded range replacement,
- * which keeps a wholly rewritten long work from freezing the detail page.
+ * 空白で語が区切られると仮定せずに、日本語の文章を比べる。
+ *
+ * `Intl.Segmenter` は句読点も空白も残すので、結果をつなげれば必ず元の文に戻る。
+ * ふつうの改稿なら、全文に Myers を掛けるのが最小の差分になる。作者が作品全体に
+ * 手を入れた（「……」を全部書き換えた、など）ときはその手数の上限を超えるので、
+ * 先に行をそろえ、変わった行のまとまりを一つずつ比べる。それでも違いすぎる
+ * まとまりは、上限のある範囲の置き換えとして見せる。丸ごと書き直された長い作品で
+ * 詳細ページが固まらないように。
  */
 export function createTextDiff(beforeText: string, afterText: string): TextDiffResult {
   const before = normalizeNewlines(beforeText);
@@ -117,16 +117,17 @@ function segment(value: string): string[] {
   return Array.from(value);
 }
 
-/** Lines keep their trailing "\n" so joining them reconstructs the text. */
+/** 行末の "\n" は残す。つなげれば元の文に戻るように。 */
 function splitLines(value: string): string[] {
   return value.match(/[^\n]*\n|[^\n]+$/g) ?? [];
 }
 
 /**
- * Patience diff: lines that occur exactly once on both sides anchor the
- * alignment, and the gaps between anchors are compared recursively. Prose
- * paragraphs are nearly always unique, so this stays fast however many of
- * them changed; a gap without anchors falls back to a bounded line Myers.
+ * Patience diff。両側にちょうど一度ずつ現れる行を錨にしてそろえ、錨のあいだを
+ * 再帰的に比べる。
+ *
+ * 文章の段落はほとんどが一つきりなので、いくつ変わっても速いままである。錨の
+ * 無い隙間は、上限のある行単位の Myers に任せる。
  */
 function diffLines(before: string[], after: string[]): TextDiffPart[] {
   const output: TextDiffPart[] = [];
@@ -176,7 +177,7 @@ function diffLines(before: string[], after: string[]): TextDiffPart[] {
   return output;
 }
 
-/** The longest in-order chain of lines that appear once on each side. */
+/** 両側に一度ずつ現れる行のうち、順序を保って並ぶ最長の列。 */
 function uniqueCommonLines(before: string[], beforeStart: number, beforeEnd: number, after: string[], afterStart: number, afterEnd: number): [number, number][] {
   const counts = new Map<string, { before: number; beforeIndex: number; after: number; afterIndex: number }>();
   for (let index = beforeStart; index < beforeEnd; index += 1) {
