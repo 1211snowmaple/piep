@@ -3120,7 +3120,7 @@ pub async fn import_work_asset(
     let local_path = target_path.to_string_lossy().to_string();
     let asset = NewAsset {
         download_id,
-        asset_type: "editor_image".to_string(),
+        asset_type: crate::database::queries::EDITOR_IMAGE_ASSET_TYPE.to_string(),
         filename: target_path
             .file_name()
             .and_then(|value| value.to_str())

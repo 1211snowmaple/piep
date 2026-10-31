@@ -139,18 +139,21 @@ fn emit_progress(app: &tauri::AppHandle, progress: &ExportProgress) {
 /// 取得元が書いていたのと**同じ形**で渡す。平文へ均して渡していたころは、
 /// 挿絵・改ページ・見出し・区切りがまとめて落ち、編集した作品の EPUB には
 /// 絵が 1 枚も入らないまま「成功」と表示されていた。
+///
+/// 返すのは編集画面で足した絵。本へ加えるのは呼び出し側の仕事。
 fn apply_active_edit_to_epub_data(
-    state: &Arc<AppState>,
+    db: &crate::database::Database,
     download_id: i64,
     source: &str,
     data: &mut serde_json::Value,
-) {
-    let Ok(Some(edit)) = state.db.active_edit_source_form(download_id) else {
-        return;
+) -> Vec<crate::database::models::AssetEntry> {
+    let Ok(Some(edit)) = db.active_edit_source_form(download_id) else {
+        return Vec::new();
     };
     if edit.plain_text.trim().is_empty() {
-        return;
+        return Vec::new();
     }
+    let added_images = edit.added_images;
 
     if source == "pixiv" {
         data["text"] = serde_json::Value::String(edit.pixiv_text.clone());
@@ -176,14 +179,45 @@ fn apply_active_edit_to_epub_data(
             );
         }
     }
+    added_images
+}
+
+/// 編集画面で足した絵を、本文が指している名前（ファイル名の幹）で本へ加える。
+///
+/// 書き出しが拾う挿絵は版の置き場（`data_assets/illustrations/`）にあるものだけ
+/// なので、足した絵は本文から指されていても本に入らず、空の枠だけが残っていた。
+fn add_edited_images(manifest: &mut EpubManifest, added: &[crate::database::models::AssetEntry]) {
+    for asset in added {
+        let path = Path::new(&asset.local_path);
+        let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+            continue;
+        };
+        let id = format!("img-{stem}");
+        let illustrations = &mut manifest.content.illustrations;
+        if illustrations.iter().any(|image| image.id == id) {
+            continue;
+        }
+        illustrations.push(EpubImage {
+            id,
+            local_path: asset.local_path.clone(),
+            mime_type: asset
+                .mime_type
+                .clone()
+                .unwrap_or_else(|| "image/jpeg".to_string()),
+            alt_text: Some(format!("挿絵 {stem}")),
+            caption: None,
+            width: None,
+            height: None,
+        });
+    }
 }
 
 /// 保存済みの JSON を読んで中間形式に変換する。書き出しとプレビューの共通経路。
-fn load_manifest(
-    state: &Arc<AppState>,
+pub fn load_manifest(
+    db: &crate::database::Database,
     download_id: i64,
 ) -> Result<(EpubManifest, String, String), String> {
-    let dl = state.db.get_download(download_id)?;
+    let dl = db.get_download(download_id)?;
     let target_json_path = dl
         .original_json_path
         .clone()
@@ -202,9 +236,9 @@ fn load_manifest(
     // 添付の中の本文を先に入れる。**編集より先でなければならない。** 編集は
     // ブロックを丸ごと差し替えるので、あとから入れると編集済みの本文へ二重に
     // 差し込むことになる。編集した人が見ていたのは取り込み済みの本文である。
-    let assets = state.db.get_assets(download_id)?;
+    let assets = db.get_assets(download_id)?;
     crate::database::attachment::apply_attachment_text(&mut data, &dl.source, &assets);
-    apply_active_edit_to_epub_data(state, download_id, &dl.source, &mut data);
+    let added_images = apply_active_edit_to_epub_data(db, download_id, &dl.source, &mut data);
 
     let assets_dir = Path::new(&target_json_path)
         .parent()
@@ -224,7 +258,8 @@ fn load_manifest(
         data["localCoverPath"] = serde_json::Value::String(cover.to_string());
     }
 
-    let manifest = converter::convert_to_manifest(&data, &dl.source, &assets_dir)?;
+    let mut manifest = converter::convert_to_manifest(&data, &dl.source, &assets_dir)?;
+    add_edited_images(&mut manifest, &added_images);
     Ok((manifest, dl.source, dl.title))
 }
 
@@ -851,9 +886,10 @@ pub async fn export_collection_epub(
             },
         );
         let load_state = state.clone();
-        let loaded = tokio::task::spawn_blocking(move || load_manifest(&load_state, download_id))
-            .await
-            .map_err(|error| format!("EPUB変換ワーカーが予期せず終了しました: {error}"))?;
+        let loaded =
+            tokio::task::spawn_blocking(move || load_manifest(&load_state.db, download_id))
+                .await
+                .map_err(|error| format!("EPUB変換ワーカーが予期せず終了しました: {error}"))?;
         let (manifest, _, _) =
             loaded.map_err(|error| format!("「{}」を変換できません: {error}", member.title))?;
         manifests.push((download_id, manifest));
@@ -1023,7 +1059,7 @@ fn export_batch_item(
 
     let mut issues = Vec::new();
     let result = (|| {
-        let (manifest, source, loaded_title) = load_manifest(&state, download_id)?;
+        let (manifest, source, loaded_title) = load_manifest(&state.db, download_id)?;
         let manager = TemplateManager::new(templates_dir);
         let resolved = resolve_template(&manager, &template_name, &source);
         let contents = manager.load_template_contents(&resolved)?;
@@ -1434,7 +1470,7 @@ pub async fn preview_epub_template(
         Some(id) => {
             let load_state = state.clone();
             let (manifest, source, title) =
-                tokio::task::spawn_blocking(move || load_manifest(&load_state, id))
+                tokio::task::spawn_blocking(move || load_manifest(&load_state.db, id))
                     .await
                     .map_err(|error| {
                         format!("EPUBプレビューワーカーが予期せず終了しました: {error}")

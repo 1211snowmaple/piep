@@ -9,10 +9,10 @@
 //! 一度に全部は割らない。何が壊れたのかを言えなくなる。
 
 use super::{
-    active_edit_revision_locked, assets_for_version_path, blocks_for_revision_locked,
-    blocks_to_fanbox_blocks, blocks_to_html, blocks_to_pixiv_text, blocks_to_plain_text,
-    draft_edit_revision_locked, get_work_edit_revision_locked, hash_blocks, html_to_editor_blocks,
-    insert_work_blocks_locked, normalize_block_inputs, paginate_reader_html,
+    active_edit_revision_locked, assets_for_edit, assets_for_version_path,
+    blocks_for_revision_locked, blocks_to_fanbox_blocks, blocks_to_html, blocks_to_pixiv_text,
+    blocks_to_plain_text, draft_edit_revision_locked, get_work_edit_revision_locked, hash_blocks,
+    html_to_editor_blocks, insert_work_blocks_locked, normalize_block_inputs, paginate_reader_html,
     plain_text_from_reader_html, reader_source_content, reader_version_path,
     reindex_download_locked, Database, EditedSourceForm, EditorDocument, ReaderCacheEntry,
     ReaderCacheKey, ReaderContentPage, ReaderDocument, ReaderMetadata, ReaderOutlineEntry,
@@ -384,7 +384,7 @@ impl Database {
         if version.is_none() {
             if let Some(edit) = active_edit.clone() {
                 let edit_path = reader_version_path(&download, &versions, edit.base_version);
-                let edit_assets = assets_for_version_path(&assets, &edit_path);
+                let edit_assets = assets_for_edit(&assets, &edit_path);
                 let blocks = blocks_for_revision_locked(&conn, edit.id)?;
                 return Ok(ReaderDocument {
                     download,
@@ -435,16 +435,27 @@ impl Database {
         let Some(revision) = active_edit_revision_locked(&conn, download_id)? else {
             return Ok(None);
         };
-        let assets = assets_for_version_path(
+        let assets = assets_for_edit(
             &self.get_assets(download_id)?,
             &reader_version_path(&download, &versions, revision.base_version),
         );
         let blocks = blocks_for_revision_locked(&conn, revision.id)?;
         drop(conn);
+        let mut added_images: Vec<super::AssetEntry> = Vec::new();
+        for asset_id in blocks.iter().filter_map(|block| block.asset_id) {
+            if let Some(asset) = assets.iter().find(|asset| {
+                asset.id == asset_id && asset.asset_type == super::EDITOR_IMAGE_ASSET_TYPE
+            }) {
+                if !added_images.iter().any(|added| added.id == asset.id) {
+                    added_images.push(asset.clone());
+                }
+            }
+        }
         Ok(Some(EditedSourceForm {
             pixiv_text: blocks_to_pixiv_text(&blocks, &assets),
             fanbox_blocks: blocks_to_fanbox_blocks(&blocks, &assets),
             plain_text: blocks_to_plain_text(&blocks),
+            added_images,
         }))
     }
 
@@ -458,7 +469,7 @@ impl Database {
 
         if let Some(draft) = draft_revision.clone() {
             let base_version = draft.base_version;
-            let assets = assets_for_version_path(
+            let assets = assets_for_edit(
                 &all_assets,
                 &reader_version_path(&download, &versions, base_version),
             );
@@ -475,7 +486,7 @@ impl Database {
 
         if let Some(active) = active_revision.clone() {
             let base_version = active.base_version;
-            let assets = assets_for_version_path(
+            let assets = assets_for_edit(
                 &all_assets,
                 &reader_version_path(&download, &versions, base_version),
             );
@@ -492,7 +503,7 @@ impl Database {
         drop(conn);
 
         let base_version = download.current_version;
-        let assets = assets_for_version_path(
+        let assets = assets_for_edit(
             &all_assets,
             &reader_version_path(&download, &versions, base_version),
         );
