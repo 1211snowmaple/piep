@@ -890,9 +890,10 @@ select {
   content: "";
 }
 .download-trend__label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* Past nine months the labels start colliding, so every other one is dropped. */
+/* With many months on a narrow card the labels collide, so every other one is
+   dropped. A short run has room for all of them whatever the width. */
 @container (max-width: 560px) {
-  .download-trend__column:nth-child(even) .download-trend__label { visibility: hidden; }
+  .download-trend[data-dense] .download-trend__column:nth-child(even) .download-trend__label { visibility: hidden; }
 }
 
 /* Stacked beside the trend; once the column spans the page they sit side by
@@ -912,7 +913,7 @@ select {
    the trend takes the slack instead of leaving a void under the legend. */
 .dashboard-trend-card { display: flex; flex-direction: column; }
 .dashboard-trend-card .download-trend { flex: 1 1 auto; min-height: 180px; height: auto; }
-.dashboard-trend-card .source-composition { margin-top: var(--mantine-spacing-lg); }
+.dashboard-trend-card .source-summary { margin-top: var(--mantine-spacing-md); }
 
 .source-composition { display: flex; overflow: hidden; height: 14px; border-radius: 999px; background: light-dark(var(--mantine-color-gray-1), var(--mantine-color-dark-6)); }
 .source-composition__segment { min-width: 3px; }
@@ -931,8 +932,21 @@ select {
   gap: 5px;
   height: 100%;
   min-width: 0;
+  padding: 0;
+  border: 0;
+  border-radius: var(--mantine-radius-md);
+  background: none;
+  color: inherit;
+  font: inherit;
   text-align: center;
+  cursor: pointer;
+  transition: opacity 160ms ease;
 }
+.download-trend__column:focus-visible { outline: 2px solid var(--mantine-color-piep-6); outline-offset: 3px; }
+/* The month whose breakdown is shown below stays full strength; the rest
+   step back so it is clear which one the numbers belong to. */
+.download-trend[data-active] .download-trend__column:not([data-active]) { opacity: 0.45; }
+.download-trend__column[aria-pressed="true"] .download-trend__label { color: var(--mantine-color-text); font-weight: 700; }
 
 .download-trend__track {
   position: relative;
