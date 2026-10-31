@@ -9,6 +9,10 @@ import { subscribeTauriEvent } from "@/services/eventBus";
 // v1 jobs were stopped by the generic held-candidate gate before fetching.
 // Retry that generation once after repairing the native dispatch path.
 const ATTEMPTS_KEY = "piep.incomplete-save-repair.v2";
+// A backlog (e.g. R-18 details masked by older builds) becomes a series of
+// short jobs. Each waits for the user's own jobs, so none monopolises the
+// connection for hours.
+export const REPAIR_BATCH_SIZE = 50;
 type RepairResult = { waiting: boolean; job?: UpdateJobSnapshot };
 let starting: Promise<RepairResult> | null = null;
 
@@ -33,6 +37,7 @@ async function startRepair(shouldContinue: () => boolean): Promise<RepairResult>
   const repairWorks: SaveJobWork[] = [];
   const keys: string[] = [];
   for (const work of works) {
+    if (repairWorks.length >= REPAIR_BATCH_SIZE) break;
     const key = `pixiv:${work.sourceId}`;
     if (attempted.has(key)) continue;
     repairWorks.push({ source: "pixiv", sourceId: work.sourceId, title: work.title });
@@ -60,21 +65,25 @@ export function useIncompleteSaveRepair() {
     let finished = false;
     let jobId: string | undefined;
     let discovered = false;
+    let announced = false;
     let timer: number;
     const tick = async () => {
       if (disposed || running || finished) return;
       running = true;
       try {
         if (jobId) {
+          // A finished batch may leave more of the backlog; the next tick
+          // decides, after the ordinary pause between batches.
           const job = await getUpdateJobCommand(jobId);
-          if (!isUpdateJobActive(job.status)) { invalidateAfterUpdateJob(client); jobId = undefined; finished = !discovered; }
+          if (!isUpdateJobActive(job.status)) { invalidateAfterUpdateJob(client); jobId = undefined; }
           return;
         }
         discovered = false;
         const result = await startIncompleteSaveRepair(() => !disposed);
         if (result.job) {
           jobId = result.job.jobId;
-          notifications.show({ color: "blue", title: "保存済み作品を補完しています", message: "不足していた挿絵や作品情報を再確認します。進捗は操作履歴で確認できます。" });
+          if (!announced) notifications.show({ color: "blue", title: "保存済み作品を補完しています", message: "不足していた挿絵や作品情報を少しずつ再確認します。進捗は操作履歴で確認できます。" });
+          announced = true;
         } else if (!result.waiting && !discovered) finished = true;
       } catch (error) { console.error("保存済み作品の補完を開始できませんでした", error); }
       finally {

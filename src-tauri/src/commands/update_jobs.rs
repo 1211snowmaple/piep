@@ -3701,12 +3701,29 @@ async fn process_candidate_item(
             &value,
             &state.db.get_current_assets(&updated)?,
         );
-        if !missing.is_empty() {
+        // A gate that still hides the details must not settle as complete:
+        // clearing the candidate here would lose the work from the audit,
+        // because an unchanged body creates no new version to inspect.
+        let masked = crate::database::queries::masked_pixiv_metadata(&value);
+        if !missing.is_empty() || !masked.is_empty() {
+            let mut losses = Vec::new();
+            if !missing.is_empty() {
+                losses.push(format!(
+                    "参照先の挿絵を閲覧できません: {}",
+                    missing.join(", ")
+                ));
+            }
+            if !masked.is_empty() {
+                losses.push(format!(
+                    "作品情報（{}）が取得元で伏せられています",
+                    crate::database::queries::masked_metadata_label(&masked)
+                ));
+            }
             return Ok(ItemOutcome::PartialSaved(
                 updated.id,
                 format!(
-                    "本文は保存しましたが、参照先の挿絵を閲覧できません: {}。候補を残して再試行できます",
-                    missing.join(", ")
+                    "本文は保存しましたが、{}。候補を残して再試行できます",
+                    losses.join("。")
                 ),
             ));
         }

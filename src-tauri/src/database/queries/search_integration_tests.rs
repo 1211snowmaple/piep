@@ -210,8 +210,13 @@ fn placeholder_illustrations_are_reaudited_and_locatable_without_deleting_saved_
         .unwrap();
         conn.execute("INSERT INTO assets(download_id,asset_type,filename,local_path,original_url,file_size_bytes) VALUES (?1,'illustration','123_p0.png',?2,'https://s.pximg.net/common/images/limit_unknown_360.png',11)",params![id,path.to_string_lossy()]).unwrap();
         conn.execute(
-            "INSERT INTO saved_asset_audits(download_id,json_path,version) VALUES (?1,?2,?3)",
-            params![id, download.json_path, download.current_version],
+            "INSERT INTO saved_asset_audits(download_id,json_path,version,rule_version) VALUES (?1,?2,?3,?4)",
+            params![
+                id,
+                download.json_path,
+                download.current_version,
+                super::acquisition_audit::SAVED_AUDIT_RULE
+            ],
         )
         .unwrap();
     }
@@ -1859,6 +1864,53 @@ fn saved_asset_audit_backfills_legacy_archives_without_changing_sources_or_decis
         )
         .unwrap();
     assert_eq!(count, 0);
+}
+
+#[test]
+fn saved_asset_audit_rechecks_old_rule_versions_once_for_masked_pixiv_details() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let gate = "https://s.pximg.net/common/images/limit_r18_100.png";
+    let mut ids = Vec::new();
+    for (source_id, web_detail) in [
+        ("masked-r18", None),
+        (
+            "blank-by-author",
+            Some(serde_json::json!({"description":""})),
+        ),
+    ] {
+        let id = insert_download(&db, &storage, source_id, "題名", "作者", &[], "本文");
+        let work = db.get_download(id).unwrap();
+        let mut value = serde_json::json!({"text":"本文","cover_url":gate,
+            "detail":{"title":"題名","caption":"","tags":[],"cover_url":gate}});
+        if let Some(web_detail) = web_detail {
+            value["web_detail"] = web_detail;
+        }
+        fs::write(&work.json_path, value.to_string()).unwrap();
+        // Audited by a build that only knew about missing illustrations.
+        db.conn.lock().unwrap().execute(
+            "INSERT INTO saved_asset_audits(download_id,json_path,version,rule_version) VALUES(?1,?2,?3,1)",
+            params![id, work.json_path, work.current_version],
+        ).unwrap();
+        ids.push(id);
+    }
+    let (checked, marked, _) = db.audit_saved_pixiv_assets(0, 32).unwrap();
+    assert_eq!((checked, marked), (2, vec![ids[0]]));
+    assert_eq!(db.audit_saved_pixiv_assets(0, 32).unwrap().0, 0);
+    assert!(db
+        .has_incomplete_save_candidate("pixiv", "masked-r18")
+        .unwrap());
+    let details =
+        serde_json::to_value(db.get_work_acquisition_details(ids[0]).unwrap().unwrap()).unwrap();
+    assert_eq!(
+        details["missingMetadata"],
+        serde_json::json!(["caption", "tags"])
+    );
+    assert!(details["reason"]
+        .as_str()
+        .unwrap()
+        .contains("作品情報（説明・タグ）"));
+    assert!(db.get_work_acquisition_details(ids[1]).unwrap().is_none());
 }
 
 #[test]

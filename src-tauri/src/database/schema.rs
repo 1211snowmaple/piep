@@ -283,6 +283,12 @@ fn add_missing_columns(conn: &Connection) -> Result<(), rusqlite::Error> {
             "change_kind",
             "TEXT NOT NULL DEFAULT 'source'",
         ),
+        // 保存済み作品の検査をどの規則で済ませたか。規則が増えたら一度だけ見直す。
+        (
+            "saved_asset_audits",
+            "rule_version",
+            "INTEGER NOT NULL DEFAULT 1",
+        ),
         // 本文以外のメタデータの指紋。取得元の軽い応答だけで変化を判定する。
         ("downloads", "meta_hash", "TEXT"),
         // 最後に本文まで突き合わせた時刻。指紋が同じでも、ここが古ければ深く見る。
@@ -694,7 +700,8 @@ fn create_core_tables(conn: &Connection) -> Result<(), rusqlite::Error> {
         CREATE TABLE IF NOT EXISTS saved_asset_audits (
             download_id INTEGER PRIMARY KEY REFERENCES downloads(id) ON DELETE CASCADE,
             json_path TEXT NOT NULL,
-            version INTEGER NOT NULL
+            version INTEGER NOT NULL,
+            rule_version INTEGER NOT NULL DEFAULT 1
         );
 
         -- last_hit_at / consecutive_errors は add_missing_columns でも足される。

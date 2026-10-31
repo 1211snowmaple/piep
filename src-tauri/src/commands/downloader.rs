@@ -939,14 +939,19 @@ fn pixiv_illustrations_were_recovered(
 }
 
 /// Filling a previously incomplete save does not constitute an author revision.
-/// Existing, nonempty source metadata must still match; a real text edit wins.
+/// The save is incomplete when illustrations were missing or the App API
+/// masked its details behind an R-18 gate. Existing, nonempty source metadata
+/// must still match; a real text edit wins.
 fn pixiv_update_is_repair(
     previous: &serde_json::Value,
     next: &serde_json::Value,
     assets: &[crate::database::AssetEntry],
 ) -> bool {
     use serde_json::Value;
-    if crate::database::queries::saved_pixiv_missing_references(previous, assets).is_empty()
+    let incomplete = !crate::database::queries::saved_pixiv_missing_references(previous, assets)
+        .is_empty()
+        || !crate::database::queries::masked_pixiv_metadata(previous).is_empty();
+    if !incomplete
         || previous.get("text").and_then(Value::as_str).is_none()
         || previous.get("text") != next.get("text")
     {
@@ -997,6 +1002,26 @@ mod pixiv_asset_recovery_tests {
         assert!(!pixiv_update_is_repair(&repaired, &caption_edit, &[]));
         let complete = json!({"detail":{"title":"題名"},"text":"本文"});
         assert!(!pixiv_update_is_repair(&complete, &complete, &[]));
+    }
+
+    #[test]
+    fn filling_details_masked_behind_an_r18_gate_is_a_repair_not_a_revision() {
+        let gate = "https://s.pximg.net/common/images/limit_r18_100.png";
+        let masked = json!({"detail":{"title":"題名","caption":"","tags":[],"cover_url":gate},"text":"本文","cover_url":gate});
+        let mut filled = masked.clone();
+        filled["detail"]["caption"] = json!("説明");
+        filled["detail"]["tags"] = json!([{"name":"R-18"}]);
+        filled["cover_url"] = json!("https://i.pximg.net/c/240x480_80/novel-cover-master/a.jpg");
+        assert!(pixiv_update_is_repair(&masked, &filled, &[]));
+        let mut edited = filled.clone();
+        edited["text"] = json!("改稿した本文");
+        assert!(!pixiv_update_is_repair(&masked, &edited, &[]));
+        // An author's empty caption is not a gate: without the placeholder,
+        // a later caption is an ordinary revision.
+        let mut plain = masked.clone();
+        plain["cover_url"] = json!("https://i.pximg.net/a.jpg");
+        plain["detail"]["cover_url"] = json!("https://i.pximg.net/a.jpg");
+        assert!(!pixiv_update_is_repair(&plain, &filled, &[]));
     }
 
     #[test]

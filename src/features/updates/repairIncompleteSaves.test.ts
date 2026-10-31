@@ -6,7 +6,7 @@ const api = vi.hoisted(() => ({ jobs:vi.fn(),credentials:vi.fn(),candidates:vi.f
 vi.mock("@/services/dbApi", () => ({ getDownloads:api.works,readFileContent:api.read,isTauriRuntime:()=>true }));
 vi.mock("@/services/updateJobApi", () => ({ listUpdateJobsCommand:api.jobs,getUpdateJobCredentials:api.credentials,listDeferredUpdateCandidatesCommand:api.candidates,startSaveJobCommand:api.start,getUpdateJobCommand:api.getJob }));
 vi.mock("@/services/eventBus",()=>({subscribeTauriEvent:api.listen}));
-import { startIncompleteSaveRepair, useIncompleteSaveRepair } from "./repairIncompleteSaves";
+import { REPAIR_BATCH_SIZE, startIncompleteSaveRepair, useIncompleteSaveRepair } from "./repairIncompleteSaves";
 
 beforeEach(() => {
   localStorage.clear();
@@ -63,6 +63,28 @@ it("coalesces concurrent startup requests into one durable job", async () => {
   const [a,b]=await Promise.all([startIncompleteSaveRepair(),startIncompleteSaveRepair()]);
   expect(a.job?.jobId).toBe(b.job?.jobId);
   expect(api.start).toHaveBeenCalledOnce();
+});
+
+it("works through a large backlog in short jobs with a pause between them",async()=>{
+  vi.useFakeTimers();
+  api.listen.mockImplementation(()=>()=>undefined);
+  const count=REPAIR_BATCH_SIZE+3;
+  api.candidates.mockResolvedValue(Array.from({length:count},(_,index)=>({source:"pixiv",sourceId:String(index),downloadId:index,status:"held",payloadJson:'{"holdKind":"incomplete"}'})));
+  api.works.mockResolvedValue(Array.from({length:count},(_,index)=>({id:index,sourceId:String(index),title:`作品${index}`})));
+  api.getJob.mockResolvedValue({jobId:"repair-job",status:"completed"});
+  const client=new QueryClient();
+  const hook=renderHook(()=>useIncompleteSaveRepair(),{wrapper:({children})=>createElement(QueryClientProvider,{client},children)});
+  try {
+    await act(()=>vi.advanceTimersByTimeAsync(5_000));
+    expect(api.start).toHaveBeenCalledOnce();
+    expect(api.start.mock.calls[0][0]).toHaveLength(REPAIR_BATCH_SIZE);
+    await act(()=>vi.advanceTimersByTimeAsync(2_000));
+    await act(()=>vi.advanceTimersByTimeAsync(59_000));
+    expect(api.start).toHaveBeenCalledOnce();
+    await act(()=>vi.advanceTimersByTimeAsync(1_000));
+    expect(api.start).toHaveBeenCalledTimes(2);
+    expect(api.start.mock.calls[1][0]).toHaveLength(3);
+  } finally { hook.unmount();vi.useRealTimers(); }
 });
 
 it("picks up newly audited placeholders after the initial startup check finished",async()=>{

@@ -39,7 +39,8 @@ pub(crate) use work_inspection::revision_metadata;
 pub use work_inspection::{RevisionMetadata, RevisionSnapshot, WorkAcquisitionDetails};
 mod update_watch;
 pub(crate) use acquisition_audit::{
-    pixiv_missing_references_for_filenames, saved_pixiv_missing_references,
+    masked_metadata_label, masked_pixiv_metadata, pixiv_missing_references_for_filenames,
+    saved_pixiv_missing_references,
 };
 pub use assist_inputs::{AiNote, TaggedName};
 mod archive_state;
