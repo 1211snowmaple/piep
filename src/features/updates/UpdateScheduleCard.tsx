@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Box, Card, Group, NumberInput, SegmentedControl, Stack, Switch, Text, Title } from "@mantine/core";
+import { Box, Card, Group, NumberInput, SegmentedControl, Select, Stack, Switch, Text, Title } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
 import { errorMessage } from "@/lib/format";
 import { isTauriRuntime } from "@/services/dbApi";
@@ -10,14 +10,17 @@ import {
   updateScheduleDefaults,
   type UpdateScheduleSettings,
 } from "@/features/updates/updateSchedule";
+import type { WatchGroup } from "@/types/library";
 
 /**
  * When the check runs by itself, and what it does with what it finds.
  *
  * Every switch here writes straight through: there is no Save button because
  * there is nothing to lose by applying a preference the moment it is set.
+ *
+ * `groups` は範囲に選べる監視グループ。読み込み中は undefined。
  */
-export function UpdateScheduleCard({ onChanged }: { onChanged?: () => void } = {}) {
+export function UpdateScheduleCard({ onChanged, groups }: { onChanged?: () => void; groups?: WatchGroup[] } = {}) {
   const runtime = isTauriRuntime();
   const [settings, setSettings] = useState<UpdateScheduleSettings>(updateScheduleDefaults);
   const [loaded, setLoaded] = useState(false);
@@ -54,12 +57,22 @@ export function UpdateScheduleCard({ onChanged }: { onChanged?: () => void } = {
       });
   };
 
+  const scopeGroup = settings.groupId === null ? null : groups?.find((group) => group.id === settings.groupId) ?? null;
+  // グループが読めるまでは、範囲の名前を決められない。
+  const summaryReady = loaded && (settings.groupId === null || groups !== undefined);
+  const scopeOptions = [
+    { value: "all", label: "すべての監視対象（作品の監視も含む）" },
+    ...(groups ?? []).map((group) => ({ value: String(group.id), label: `${group.name}（${group.targetIds.length}件）` })),
+    // 消えたグループを黙って「すべて」に見せない。選び直すまで、そうと名乗る。
+    ...(settings.groupId !== null && groups && !scopeGroup ? [{ value: String(settings.groupId), label: "見つからないグループ" }] : []),
+  ];
+
   return (
     <Card p="lg">
       <Stack gap="md">
         <Box>
           <Title order={3}>自動確認</Title>
-          <Text size="sm" c="dimmed">{loaded ? describeSchedule(settings) : "読み込んでいます…"}</Text>
+          <Text size="sm" c={summaryReady && settings.groupId !== null && !scopeGroup ? "red" : "dimmed"}>{summaryReady ? describeSchedule(settings, scopeGroup?.name ?? null) : "読み込んでいます…"}</Text>
         </Box>
 
         <Switch
@@ -83,6 +96,16 @@ export function UpdateScheduleCard({ onChanged }: { onChanged?: () => void } = {
           value={settings.intervalHours}
           disabled={!loaded || saving}
           onChange={(value) => apply({ intervalHours: typeof value === "number" ? value : 0 })}
+        />
+
+        <Select
+          label="確認する範囲"
+          description="監視グループを選ぶと、その中の作者・シリーズだけを確認します"
+          data={scopeOptions}
+          value={settings.groupId === null ? "all" : String(settings.groupId)}
+          allowDeselect={false}
+          disabled={!loaded || saving}
+          onChange={(value) => apply({ groupId: !value || value === "all" ? null : Number(value) })}
         />
 
         <Box>

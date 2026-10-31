@@ -770,7 +770,8 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
                       //
                       // 幅の変わらないものを先に置けば、動くのは右側の文字だけになる。
                       // コレクションの中身では既にそうしてある。 */}
-                      <PagingModeToggle scope="entity" />
+                      {/* 右端の表示形式と同じ高さにそろえる。同じ行で大きさが違っていた。 */}
+                      <PagingModeToggle scope="entity" size="sm" />
                       <Text size="sm" c="dimmed">{formatNumber(works.data?.pages[0]?.totalEstimate ?? workItems.length)}件</Text>
                       {/* ここだけ view を "gallery" に固定していた。棚で一覧を選んでいても
                           作者を開いた瞬間にカードへ戻る、同じ作品の違う顔だった。 */}

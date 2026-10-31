@@ -1,7 +1,7 @@
 import { useEffect, useRef } from "react";
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
-import { isTauriRuntime, listUpdateTargets, searchDownloadsV2 } from "@/services/dbApi";
-import { listUpdateJobsCommand, startUpdateJobCommand } from "@/services/updateJobApi";
+import { isTauriRuntime, listUpdateTargets, listWatchGroups, searchDownloadsV2 } from "@/services/dbApi";
+import { listUpdateJobsCommand, startUpdateJobCommand, type StartUpdateJobRequest } from "@/services/updateJobApi";
 import { isUpdateJobActive, isUpdateJobTerminal, type UpdateJobSnapshot, type UpdateJobSummary } from "@/features/updates/updateJobs";
 import { isRunDue, loadSchedule, readLastRun, writeLastRun } from "@/features/updates/updateSchedule";
 
@@ -71,19 +71,35 @@ export function useUpdateScheduler(enabled = isTauriRuntime()) {
         const jobs = await listUpdateJobsCommand();
         if (jobs.some((job) => isUpdateJobActive(job.status))) return;
 
-        // 監視対象も監視作品も無いなら、確認する意味がない。作品の監視は
-        // downloads 側の旗なので、update_targets を見るだけでは数え落とす。
-        const [targets, watchedWorks] = await Promise.all([
-          listUpdateTargets<{ id: number }>(null, true),
-          searchDownloadsV2({ watchFilter: "watched", limit: 1, projection: "bulk" }),
-        ]);
-        if (!targets.length && !watchedWorks.items.length) return;
+        let request: StartUpdateJobRequest;
+        if (settings.groupId !== null) {
+          // 範囲がグループなら、その中の止めていない対象だけ。グループが
+          // 消えていたら走らせない - すべてへ広げると、絞った意味が無くなる。
+          const [groups, targets] = await Promise.all([
+            listWatchGroups(),
+            listUpdateTargets<{ id: number }>(null, true),
+          ]);
+          const group = groups.find((item) => item.id === settings.groupId);
+          if (!group) {
+            console.error("自動確認の範囲にした監視グループが見つかりません", settings.groupId);
+            return;
+          }
+          const members = new Set(group.targetIds);
+          const targetIds = targets.filter((target) => members.has(target.id)).map((target) => target.id);
+          if (!targetIds.length) return;
+          request = { scope: "targets", mode: settings.mode, targetIds, watchSaved: settings.watchSaved };
+        } else {
+          // 監視対象も監視作品も無いなら、確認する意味がない。作品の監視は
+          // downloads 側の旗なので、update_targets を見るだけでは数え落とす。
+          const [targets, watchedWorks] = await Promise.all([
+            listUpdateTargets<{ id: number }>(null, true),
+            searchDownloadsV2({ watchFilter: "watched", limit: 1, projection: "bulk" }),
+          ]);
+          if (!targets.length && !watchedWorks.items.length) return;
+          request = { scope: "all", mode: settings.mode, watchSaved: settings.watchSaved };
+        }
 
-        const snapshot = await startUpdateJobCommand({
-          scope: "all",
-          mode: settings.mode,
-          watchSaved: settings.watchSaved,
-        });
+        const snapshot = await startUpdateJobCommand(request);
         // ジョブを作れた時刻だけを記録する。開始前に保存すると、一時的な
         // IPC/DB失敗でも次の間隔まで確認を丸ごと飛ばしてしまう。
         await writeLastRun(Date.now());

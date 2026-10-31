@@ -86,6 +86,7 @@ function AppContent() {
     if (!isTauriRuntime()) return;
     return subscribeTauriEvent<number[]>("acquisition-audited", () => {
       queryClient.invalidateQueries({ queryKey: ["library"] });
+      queryClient.invalidateQueries({ queryKey: ["work-acquisition"] });
       queryClient.invalidateQueries({ queryKey: ["library-shelf-counts"] });
       queryClient.invalidateQueries({ queryKey: ["deferred-candidate-count"] });
       queryClient.invalidateQueries({ queryKey: ["deferred-candidates"] });

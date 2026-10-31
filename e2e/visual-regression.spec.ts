@@ -229,7 +229,7 @@ test("detail filters open as a search spotlight and keep author names readable",
   await expect(spotlight).toHaveScreenshot("library-filter-spotlight.png");
 
   await spotlight.getByRole("tab", { name: /^保存状態/ }).click();
-  await expect(spotlight.getByRole("radiogroup", { name: "検索する版" })).toBeVisible();
+  await expect(spotlight.getByRole("group", { name: "検索する版" })).toBeVisible();
   await expect(spotlight.getByRole("group", { name: "改稿状態" })).toBeVisible();
   const statusGeometry = await spotlight.evaluate((element) => ({
     width: element.clientWidth,
@@ -276,7 +276,7 @@ test("detail filters open as a search spotlight and keep author names readable",
   const seriesSpotlight = page.getByRole("dialog", { name: "詳細フィルター" });
   await expect(seriesSpotlight.getByRole("tab", { name: /^シリーズ一覧/ })).toHaveAttribute("aria-selected", "true");
   await expect(seriesSpotlight.getByRole("textbox", { name: "作品数の下限" })).toBeVisible();
-  await expect(seriesSpotlight.getByRole("combobox", { name: "連載の状態" })).toBeVisible();
+  await expect(seriesSpotlight.getByRole("group", { name: "連載の状態" })).toBeVisible();
   const seriesGeometry = await seriesSpotlight.evaluate((element) => ({
     height: element.clientHeight,
     scrollHeight: element.scrollHeight,

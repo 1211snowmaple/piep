@@ -879,7 +879,9 @@ select {
   padding-top: var(--mantine-spacing-sm);
   container-type: inline-size;
 }
-.download-trend__column[data-empty] .download-trend__track { background: light-dark(var(--mantine-color-gray-0), var(--mantine-color-dark-7)); }
+/* 空の月は、どちらの配色でもデータのある月の下地より控えめにする。暗い配色で
+   dark-7 を使っていたときは、空の月だけが背の高い濃い棒に見えていた。 */
+.download-trend__column[data-empty] .download-trend__track { background: light-dark(var(--mantine-color-gray-0), rgb(255 255 255 / 2.5%)); }
 .download-trend__column[data-empty] .download-trend__track::after {
   position: absolute;
   right: 0;
@@ -954,7 +956,8 @@ select {
   min-height: 120px;
   overflow: hidden;
   border-radius: var(--mantine-radius-md);
-  background: light-dark(var(--mantine-color-gray-1), var(--mantine-color-dark-6));
+  /* 暗い配色のカードは dark-6 なので、同じ色では下地が消える。 */
+  background: light-dark(var(--mantine-color-gray-1), rgb(255 255 255 / 6%));
 }
 
 .download-trend__stack {
@@ -1943,6 +1946,7 @@ select {
   font-family: "Noto Serif JP", "Yu Mincho", serif;
   line-height: 1.9;
 }
+.revision-diff__position { min-width: 88px; justify-content: center; font-variant-numeric: tabular-nums; color: var(--mantine-color-dimmed); cursor: default; }
 .revision-diff__frame[data-overview] { display: grid; grid-template-columns: minmax(0, 1fr) 12px; gap: 6px; }
 /* Removed edits on the left lane, added on the right, like an editor's overview ruler. */
 .revision-diff__overview {
@@ -2177,6 +2181,34 @@ select {
 .reader-theme--paper .reader-stage { background: #fffdf8; }
 .reader-theme--night .reader-stage { color: #dce2e9; background: #151a22; }
 .reader-theme--night .reader-paper { color: #dce2e9; }
+
+/* 紙面の色は読書設定で決まり、アプリの明暗とは別に動く。紙面の上の部品
+   （題名ページの「元ページをブラウザで」、薄い文字など）は、アプリの明暗の色を
+   引き継いでいたので、暗いアプリで白い紙面だと白地に白い文字になっていた。
+   紙面の中だけ、紙面の明暗に合った値に置き換える。 */
+.reader-theme--white .reader-stage,
+.reader-theme--paper .reader-stage {
+  --mantine-color-text: #292622;
+  --mantine-color-dimmed: #6f6a63;
+  --mantine-color-gray-light-color: #3f3b36;
+  --mantine-color-gray-light-hover: rgb(41 38 34 / 7%);
+  --mantine-color-disabled: #f1f0ee;
+  --mantine-color-disabled-color: #a9a49d;
+  --mantine-color-disabled-border: #dedbd6;
+}
+.reader-theme--night .reader-stage {
+  --mantine-color-text: #dce2e9;
+  --mantine-color-dimmed: #8d97a3;
+  --mantine-color-gray-light-color: #c9d1da;
+  --mantine-color-gray-light-hover: rgb(220 226 233 / 8%);
+  --mantine-color-disabled: #1f252e;
+  --mantine-color-disabled-color: #5d6773;
+  --mantine-color-disabled-border: #2d3540;
+}
+/* 区切り線は Mantine が要素そのものに色を置くので、上の置き換えが届かない。 */
+.reader-theme--white .reader-stage .mantine-Divider-root,
+.reader-theme--paper .reader-stage .mantine-Divider-root { --divider-color: #dedbd6; }
+.reader-theme--night .reader-stage .mantine-Divider-root { --divider-color: #2d3540; }
 
 /* The title page follows the reading column rather than being centred inside
    it: the source opens the block on the left, the author closes it on the
@@ -2512,14 +2544,21 @@ select {
 .editor-block[data-active] { border-color: var(--mantine-color-piep-4); box-shadow: 0 0 0 2px rgb(13 134 244 / 8%); }
 
 /* 取っ手は掴める。前は cursor だけが grab で、掴んでも何も起きなかった。 */
+/* 掴める範囲は右の押しボタンと同じ 26px 四方。絵柄の 15px だけだと狙いにくかった。 */
 .editor-block__handle {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  margin-inline: -4px -2px;
+  border-radius: var(--mantine-radius-sm);
   color: var(--mantine-color-dimmed);
   cursor: grab;
   touch-action: none;
 }
 
+.editor-block__handle:hover { background: var(--mantine-color-default-hover); }
 .editor-block__handle:active { cursor: grabbing; }
 
 .editor-block[data-dragging] { opacity: 0.45; }
@@ -2873,6 +2912,28 @@ select {
 .update-history__delete { opacity: 0; transition: opacity 120ms ease; }
 .update-history__row:hover .update-history__delete,
 .update-history__row:focus-within .update-history__delete { opacity: 1; }
+
+/* 監視対象の束。選んでいる束は、履歴で選んでいる回と同じ色で示す。 */
+.watch-nav__item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  padding: 6px 10px;
+  border-radius: var(--mantine-radius-sm);
+}
+.watch-nav__item:hover { background: light-dark(#f6f8fb, #171e26); }
+.watch-nav__item[data-active] { background: light-dark(#eef6ff, #10273a); }
+.watch-target[data-selected] { background: light-dark(#f4f9ff, #122130); }
+.watch-target__face { flex: none; }
+.watch-target__groups { overflow: hidden; }
+.watch-list__head { min-height: 36px; }
+@media (max-width: 62em) {
+  /* 狭い画面では束を横に並べる。縦に積むと、一覧が画面の下へ押し出される。 */
+  .watch-nav nav > .mantine-Stack-root { flex-direction: row; flex-wrap: wrap; }
+  .watch-nav__item { flex: none; }
+  .watch-nav nav > .mantine-Stack-root > :is(.mantine-Group-root, .mantine-Text-root) { flex-basis: 100%; }
+}
 
 @media (max-width: 56em) {
   .save-layout { padding: 8px; }
@@ -3404,8 +3465,15 @@ select {
 
 /* Header actions keep their background transparent in every interaction state. */
 .app-history-controls { padding: 0; background: transparent; }
-.app-history-controls .mantine-ActionIcon-root { width: 32px; height: 32px; background: transparent !important; border-color: transparent; }
+.app-history-controls .mantine-ActionIcon-root { background: transparent !important; border-color: transparent; }
+/* 窓の上端の押しボタンは、左の戻る・進むも右の検索やメニューも同じ大きさにする。
+   戻る・進むだけ 32px で、隣のサイドバーと右側は 28px、AIだけ 34px だった。 */
+.app-header .mantine-ActionIcon-root { --ai-size: 32px; width: 32px; height: 32px; min-width: 32px; min-height: 32px; }
 .app-history-controls .mantine-ActionIcon-root:disabled { color: light-dark(#aeb7c0, #626c78); }
+/* 地のない押しボタンは、押せないときも地を出さない。Mantine は灰色の地を敷くので、
+   並びの中でそれだけが「押されている」ように見えていた（先頭ブロックの「上へ」など）。 */
+.mantine-ActionIcon-root[data-variant="subtle"]:disabled,
+.mantine-ActionIcon-root[data-variant="subtle"][data-disabled] { background: transparent; }
 .app-history-controls [data-refreshing] svg { animation: header-refresh 1.2s linear infinite; }
 @keyframes header-refresh { to { transform: rotate(360deg); } }
 .search-method-control { width: 38px; display: inline-flex; gap: 2px; }
@@ -3459,6 +3527,9 @@ select {
 .filter-choice-group { padding: 8px 10px; border: 1px solid var(--mantine-color-default-border); border-radius: 12px; }
 .filter-choice-group__label { margin-bottom: 6px; font-size: var(--mantine-font-size-sm); line-height: 18px; font-weight: 650; }
 .filter-choice-group__options { display: flex; flex-wrap: wrap; gap: 6px; }
+.filter-choice__slot { display: inline-flex; }
+/* まとまりの切れ目。「要確認」とその内訳、「非表示」を一列のまま見分けられるように。 */
+.filter-choice__slot[data-starts-group] { padding-left: 7px; margin-left: 1px; border-left: 1px solid var(--mantine-color-default-border); }
 .filter-choice { display: inline-flex; align-items: center; justify-content: center; gap: 4px; min-height: 30px; padding: 4px 9px; border: 1px solid transparent; border-radius: 7px; font-size: 13px; line-height: 18px; color: light-dark(#49535f, #d7dce3); background: light-dark(#f4f6f8, #252d38); }
 .filter-choice:hover { color: var(--mantine-color-text); }
 .filter-choice[data-selected] { color: light-dark(var(--mantine-color-piep-8), var(--mantine-color-piep-1)); background: light-dark(var(--mantine-color-piep-0), #203d59); border-color: light-dark(var(--mantine-color-piep-2), var(--mantine-color-piep-8)); }

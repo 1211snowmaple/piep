@@ -23,6 +23,7 @@ import type {
   FilterFacets,
   FacetCount,
   UpdateTarget,
+  WatchGroup,
   SearchIndexStatus,
 } from "@/types/library";
 import type { UpdateJobCredentials } from "@/services/updateJobApi";
@@ -303,6 +304,29 @@ export async function deleteUpdateTarget(targetType: string, source: string, sou
 
 export async function listUpdateTargets<T>(targetType: string | null = null, enabledOnly = false): Promise<T[]> {
   return invoke<T[]>("db_list_update_targets", { targetType, enabledOnly });
+}
+
+export async function listWatchGroups(): Promise<WatchGroup[]> {
+  return invoke<WatchGroup[]>("db_list_watch_groups");
+}
+
+/** 新しい監視グループを作り、その ID を返す。同じ名前があれば失敗する。 */
+export async function createWatchGroup(name: string): Promise<number> {
+  return invoke<number>("db_create_watch_group", { name });
+}
+
+export async function renameWatchGroup(groupId: number, name: string): Promise<void> {
+  return invoke<void>("db_rename_watch_group", { groupId, name });
+}
+
+/** グループだけを消す。中の監視対象は残る。 */
+export async function deleteWatchGroup(groupId: number): Promise<void> {
+  return invoke<void>("db_delete_watch_group", { groupId });
+}
+
+/** 監視対象をグループに入れる（add）か外す。変わった件数を返す。 */
+export async function setWatchGroupMembers(groupId: number, targetIds: number[], add: boolean): Promise<number> {
+  return invoke<number>("db_set_watch_group_members", { groupId, targetIds, add });
 }
 
 /** Fetch one target without transferring every watched entity over IPC. */

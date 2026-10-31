@@ -1,9 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
 
-export function exportSingle(downloadId: number, destDir: string): Promise<string> {
-  return invoke<string>("export_single", { downloadId, destDir });
-}
-
 export function exportAllMultipart(manifestPath: string): Promise<void> {
   return invoke<void>("export_all_multipart", { manifestPath });
 }

@@ -1819,7 +1819,8 @@ fn saved_asset_audit_backfills_legacy_archives_without_changing_sources_or_decis
     );
     assert_eq!(fs::read(&work.json_path).unwrap(), original);
     assert_eq!(db.get_download(missing).unwrap().current_version, 1);
-    assert_eq!(db.count_saved_deferred_update_candidates().unwrap(), 2); // missing + user's dismissal
+    // 欠けた作品だけ。利用者が非表示にした作品は要確認に数えない。
+    assert_eq!(db.count_saved_deferred_update_candidates().unwrap(), 1);
     assert_eq!(
         db.update_candidate_status("pixiv", "legacy-pending")
             .unwrap()
@@ -1913,6 +1914,125 @@ fn saved_asset_audit_rechecks_old_rule_versions_once_for_masked_pixiv_details() 
     assert!(db.get_work_acquisition_details(ids[1]).unwrap().is_none());
 }
 
+/// 取得元で消えた挿絵を、利用者が編集で自分の絵に差し替えた作品は、もう
+/// 要確認に出さない。読む画面にも EPUB にも欠けはないのに、検査が元の本文
+/// だけを見て「一部保存」と言い続けていた。編集を下ろせば欠けは戻る。
+#[test]
+fn an_edit_that_replaces_a_lost_illustration_settles_the_incomplete_save() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let mut ids = Vec::new();
+    for source_id in ["replaced-by-edit", "edit-keeps-the-gap"] {
+        let id = insert_download(&db, &storage, source_id, "題名", "作者", &[], "前\n後");
+        let work = db.get_download(id).unwrap();
+        fs::write(
+            &work.json_path,
+            serde_json::json!({"text":"前\n[pixivimage:42]\n後"}).to_string(),
+        )
+        .unwrap();
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE downloads SET source='pixiv',content_type='novel' WHERE id=?1",
+                params![id],
+            )
+            .unwrap();
+        ids.push(id);
+    }
+    let (_, marked, _) = db.audit_saved_pixiv_assets(0, 32).unwrap();
+    assert_eq!(marked, ids);
+
+    let image = storage
+        .join("editor-assets")
+        .join(ids[0].to_string())
+        .join("42_p0.png");
+    fs::create_dir_all(image.parent().unwrap()).unwrap();
+    fs::write(&image, b"drawn").unwrap();
+    let asset_id = db
+        .insert_asset(&NewAsset {
+            download_id: ids[0],
+            asset_type: super::EDITOR_IMAGE_ASSET_TYPE.to_string(),
+            filename: "42_p0.png".to_string(),
+            local_path: image.to_string_lossy().to_string(),
+            original_url: None,
+            mime_type: Some("image/png".to_string()),
+            file_size_bytes: 5,
+        })
+        .unwrap();
+    let paragraph = |text: &str| WorkBlockInput {
+        block_type: "paragraph".to_string(),
+        text: Some(text.to_string()),
+        asset_id: None,
+        attrs_json: None,
+    };
+    let replaced = db
+        .save_work_draft(
+            ids[0],
+            1,
+            None,
+            &[
+                paragraph("前"),
+                WorkBlockInput {
+                    block_type: "image".to_string(),
+                    text: None,
+                    asset_id: Some(asset_id),
+                    attrs_json: None,
+                },
+                paragraph("後"),
+            ],
+        )
+        .unwrap();
+    // 誤字だけ直した編集は、消えた挿絵を埋めていない。
+    let typo_fix = db
+        .save_work_draft(
+            ids[1],
+            1,
+            None,
+            &[
+                paragraph("前。"),
+                paragraph("[pixivimage:42]"),
+                paragraph("後"),
+            ],
+        )
+        .unwrap();
+    assert!(db.get_active_edit_snapshot(ids[0]).unwrap().is_none());
+    db.activate_work_edit(replaced.id).unwrap();
+    db.activate_work_edit(typo_fix.id).unwrap();
+
+    // 履歴では、編集を v1 と並べて比べられる。消えた参照の代わりに足した絵が並ぶ。
+    let base = serde_json::to_value(db.get_revision_snapshot(ids[0], 1).unwrap()).unwrap();
+    let edited =
+        serde_json::to_value(db.get_active_edit_snapshot(ids[0]).unwrap().unwrap()).unwrap();
+    let keys = |snapshot: &serde_json::Value| -> Vec<String> {
+        snapshot["metadata"]["assets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["key"].as_str().unwrap().to_string())
+            .collect()
+    };
+    assert!(keys(&base).iter().any(|key| key.contains("42")));
+    assert_eq!(keys(&edited), vec!["edit:42_p0.png"]);
+    assert!(!edited["text"].as_str().unwrap().contains("[pixivimage:42]"));
+    assert!(edited["text"].as_str().unwrap().contains("前"));
+
+    assert_eq!(db.audit_saved_pixiv_work(ids[0]).unwrap(), vec![ids[0]]);
+    assert!(db.audit_saved_pixiv_work(ids[1]).unwrap().is_empty());
+    assert!(db.get_work_acquisition_details(ids[0]).unwrap().is_none());
+    assert!(db
+        .has_incomplete_save_candidate("pixiv", "edit-keeps-the-gap")
+        .unwrap());
+    // 毎回の起動で見直し直さない。
+    assert_eq!(db.audit_saved_pixiv_assets(0, 32).unwrap().0, 0);
+
+    db.deactivate_work_edit(ids[0]).unwrap();
+    assert_eq!(db.audit_saved_pixiv_work(ids[0]).unwrap(), vec![ids[0]]);
+    assert!(db
+        .has_incomplete_save_candidate("pixiv", "replaced-by-edit")
+        .unwrap());
+}
+
 #[test]
 #[ignore = "requires PIEP_AUDIT_SNAPSHOT pointing to a consistent SQLite snapshot; only a temporary copy is changed"]
 fn saved_asset_audit_on_a_real_library_snapshot() {
@@ -1957,11 +2077,19 @@ fn saved_asset_audit_on_a_real_library_snapshot() {
         .unwrap();
     assert_eq!(before, after);
     let attention = db.count_saved_deferred_update_candidates().unwrap();
-    assert_eq!(attention, original_attention + marked.len() as i64);
+    // 変化した作品は、新しく保留になったか、編集で埋まって保留が外れたかのどちらか。
     let sources: Vec<_> = marked
         .iter()
         .map(|id| db.get_download(*id).unwrap().source_id)
         .collect();
+    let (added, settled): (Vec<_>, Vec<_>) = sources.iter().cloned().partition(|source_id| {
+        db.has_incomplete_save_candidate("pixiv", source_id)
+            .unwrap()
+    });
+    assert_eq!(
+        attention,
+        original_attention + added.len() as i64 - settled.len() as i64
+    );
     drop(db);
     let db = Database::open(&copy, &storage).unwrap();
     assert_eq!(db.audit_saved_pixiv_assets(0, 32).unwrap(), (0, vec![], 0));
@@ -1971,7 +2099,7 @@ fn saved_asset_audit_on_a_real_library_snapshot() {
     );
     println!(
         "SAVED_ASSET_AUDIT_JSON={}",
-        serde_json::json!({"checked":checked,"marked_source_ids":sources,"saved_attention":attention,"downloads":before.0,"versions_unchanged":true,"restart_stable":true})
+        serde_json::json!({"checked":checked,"added_source_ids":added,"settled_source_ids":settled,"saved_attention_before":original_attention,"saved_attention":attention,"downloads":before.0,"versions_unchanged":true,"restart_stable":true})
     );
 }
 
@@ -7012,6 +7140,216 @@ fn library_attention_filters_only_saved_held_works() {
         .unwrap();
     params.acquisition_filter = Some("dismissed".into());
     assert_eq!(db.search_downloads_v2(&params).unwrap().items[0].id, saved);
+    // 非表示にしたら要確認から抜ける。一覧に残り続けて件数が減らないと、外した
+    // 意味がない。何も無い作品（要確認なし）とも混ぜない。
+    assert_eq!(db.count_saved_deferred_update_candidates().unwrap(), 0);
+    for filter in ["attention", "incomplete", "complete"] {
+        params.acquisition_filter = Some(filter.into());
+        assert!(
+            db.search_downloads_v2(&params).unwrap().items.is_empty(),
+            "{filter}"
+        );
+    }
+}
+
+#[test]
+fn watch_groups_bundle_targets_without_owning_them() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    for (target_type, key, name) in [("author", "a1", "作者一"), ("series", "s1", "連載一")] {
+        db.upsert_update_target(&UpdateTargetInput {
+            target_type: target_type.into(),
+            source: "pixiv".into(),
+            source_key: key.into(),
+            display_name: name.into(),
+            enabled: true,
+            metadata_json: None,
+        })
+        .unwrap();
+    }
+    db.conn
+        .lock()
+        .unwrap()
+        .execute(
+            "INSERT INTO people(source, source_key, display_name, icon_path) VALUES ('pixiv','a1','作者一','C:/icons/a1.png')",
+            [],
+        )
+        .unwrap();
+    let targets = db.list_update_targets(None, false).unwrap();
+    let id_of = |key: &str| targets.iter().find(|t| t.source_key == key).unwrap().id;
+    let (author, series) = (id_of("a1"), id_of("s1"));
+    // 一覧には作者の顔が付く。保存していないシリーズの表紙は空のまま。
+    assert_eq!(
+        targets
+            .iter()
+            .find(|t| t.id == author)
+            .unwrap()
+            .icon_path
+            .as_deref(),
+        Some("C:/icons/a1.png")
+    );
+    assert!(targets
+        .iter()
+        .find(|t| t.id == series)
+        .unwrap()
+        .icon_path
+        .is_none());
+
+    let daily = db.create_watch_group("  毎日見る ").unwrap();
+    let weekly = db.create_watch_group("週末").unwrap();
+    assert!(db
+        .create_watch_group("毎日見る")
+        .unwrap_err()
+        .contains("もうあります"));
+    assert!(db.create_watch_group("   ").is_err());
+    assert_eq!(
+        db.set_watch_group_members(daily, &[author, series], true)
+            .unwrap(),
+        2
+    );
+    // 入っているものを入れ直しても数えない。一つの対象は複数のグループに入れる。
+    assert_eq!(
+        db.set_watch_group_members(daily, &[author], true).unwrap(),
+        0
+    );
+    assert_eq!(
+        db.set_watch_group_members(weekly, &[author], true).unwrap(),
+        1
+    );
+    let groups = db.list_watch_groups().unwrap();
+    assert_eq!(
+        groups
+            .iter()
+            .map(|g| (g.name.as_str(), g.target_ids.len()))
+            .collect::<Vec<_>>(),
+        [("毎日見る", 2), ("週末", 1)]
+    );
+    let mut names = db
+        .list_update_targets(None, false)
+        .unwrap()
+        .into_iter()
+        .find(|t| t.id == author)
+        .unwrap()
+        .watch_groups;
+    names.sort();
+    assert_eq!(names, ["毎日見る", "週末"]);
+
+    db.rename_watch_group(weekly, "週末に見る").unwrap();
+    assert!(db.rename_watch_group(weekly, "毎日見る").is_err());
+    assert_eq!(
+        db.set_watch_group_members(daily, &[series], false).unwrap(),
+        1
+    );
+    // グループを消しても監視対象は残る。
+    db.delete_watch_group(daily).unwrap();
+    assert_eq!(db.list_update_targets(None, false).unwrap().len(), 2);
+    assert_eq!(db.list_watch_groups().unwrap().len(), 1);
+    // 監視対象を消せば、グループからも抜ける。
+    db.delete_update_target("author", "pixiv", "a1").unwrap();
+    assert!(db.list_watch_groups().unwrap()[0].target_ids.is_empty());
+
+    // バックアップからは名前で結び直す。無いグループは作る。
+    db.restore_watch_group_memberships(
+        "series",
+        "pixiv",
+        "s1",
+        &["戻した束".into(), "週末に見る".into()],
+    )
+    .unwrap();
+    let restored = db.list_watch_groups().unwrap();
+    assert_eq!(
+        restored
+            .iter()
+            .map(|g| (g.name.as_str(), g.target_ids.clone()))
+            .collect::<Vec<_>>(),
+        [("週末に見る", vec![series]), ("戻した束", vec![series])]
+    );
+}
+
+#[test]
+fn held_candidates_are_ordered_by_time_whichever_way_the_time_was_written() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    for (source_id, updated_at) in [
+        ("rust-earlier", "2026-10-31T03:00:00.123456700+00:00"),
+        ("sql-later", "2026-10-31 05:00:00"),
+    ] {
+        db.upsert_update_candidate(&UpdateCandidateInput {
+            source: "pixiv".into(),
+            source_id: source_id.into(),
+            kind: "new".into(),
+            title: source_id.into(),
+            payload_json: r#"{"holdKind":"restricted"}"#.into(),
+            target_type: Some("work".into()),
+        })
+        .unwrap();
+        db.set_update_candidate_status("pixiv", source_id, "held")
+            .unwrap();
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE update_candidates SET updated_at=?2 WHERE source_id=?1",
+                params![source_id, updated_at],
+            )
+            .unwrap();
+    }
+    let order: Vec<_> = db
+        .list_deferred_update_candidate_summaries(-1)
+        .unwrap()
+        .into_iter()
+        .map(|row| row.source_id)
+        .collect();
+    assert_eq!(order, ["sql-later", "rust-earlier"]);
+}
+
+#[test]
+fn an_incomplete_save_is_repaired_once_per_saved_version() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let id = insert_download(
+        &db,
+        &storage,
+        "repair-me",
+        "挿絵が欠けた",
+        "作者",
+        &[],
+        "本文",
+    );
+    db.upsert_update_candidate(&UpdateCandidateInput {
+        source: "pixiv".into(),
+        source_id: "repair-me".into(),
+        kind: "revision".into(),
+        title: "挿絵が欠けた".into(),
+        payload_json: r#"{"holdKind":"incomplete"}"#.into(),
+        target_type: Some("work".into()),
+    })
+    .unwrap();
+    db.set_update_candidate_status("pixiv", "repair-me", "held")
+        .unwrap();
+    let pending = || db.list_incomplete_save_repair_works(50).unwrap();
+    assert_eq!(
+        pending(),
+        vec![("repair-me".to_string(), "挿絵が欠けた".to_string())]
+    );
+    // 試したら、結果が一部保存のままでも同じ版では繰り返さない。
+    db.record_incomplete_save_repair_attempts(&["repair-me".into()])
+        .unwrap();
+    assert!(pending().is_empty());
+    // 取得元が変わって版が進めば、もう一度だけ試す。
+    db.conn
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE downloads SET current_version=2 WHERE id=?1",
+            params![id],
+        )
+        .unwrap();
+    assert_eq!(pending().len(), 1);
+    // 利用者が非表示にした作品は、取り直しにも出さない。
+    db.set_update_candidate_status("pixiv", "repair-me", "dismissed")
+        .unwrap();
+    assert!(pending().is_empty());
 }
 
 #[test]

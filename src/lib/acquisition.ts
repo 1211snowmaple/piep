@@ -1,13 +1,15 @@
 import type { LibraryAcquisitionFilter } from "@/types/library";
 
-export const acquisitionFilters: { value: LibraryAcquisitionFilter; label: string }[] = [
-  { value: "attention", label: "要確認（すべて）" },
+// 並びは「要確認かどうか」→「要確認の内訳」→「非表示」。三つのまとまりは重ならない。
+// 非表示は見たうえで外した作品なので、要確認にもその内訳にも、要確認なしにも入らない。
+export const acquisitionFilters: { value: LibraryAcquisitionFilter; label: string; startsGroup?: boolean }[] = [
   { value: "complete", label: "要確認なし" },
-  { value: "incomplete", label: "一部保存" },
+  { value: "attention", label: "要確認" },
+  { value: "incomplete", label: "一部保存", startsGroup: true },
   { value: "unavailable", label: "見つからない" },
   { value: "restricted", label: "閲覧条件待ち" },
   { value: "error", label: "取得エラー" },
-  { value: "dismissed", label: "非表示" },
+  { value: "dismissed", label: "非表示", startsGroup: true },
 ];
 
 export function parseAcquisitionFilter(value: unknown): LibraryAcquisitionFilter | null {

@@ -389,9 +389,10 @@ export function AppFrame({ children }: { children: ReactNode }) {
                   page-scoped AI tool sits beside it in the same fixed header;
                   a disabled grey state explains configuration instead of
                   vanishing. */}
+              {/* 並びの他の押しボタンと同じ大きさ。ここだけ一回り大きかった。 */}
               <AssistLauncher
                 placement="header"
-                size="lg"
+                size="md"
                 label={pageAssistLabel}
                 items={pageAssistItems}
               />
