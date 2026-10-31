@@ -4062,7 +4062,7 @@ mod tests {
 
     /// 棚の写しの作品で、棚を探す道具あり・なしのタグ補完を比べる。
     ///
-    /// PIEP_LIVE_LLM / PIEP_LIVE_DB / PIEP_LIVE_IDS=1,2,3 / PIEP_LIVE_OUT
+    /// 環境変数: PIEP_LIVE_LLM / PIEP_LIVE_DB / PIEP_LIVE_IDS=1,2,3 / PIEP_LIVE_OUT
     #[tokio::test]
     #[ignore]
     async fn live_tag_suggestion_against_a_local_server() {
