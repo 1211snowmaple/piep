@@ -21,6 +21,11 @@ export interface UpdateScheduleSettings {
   watchSaved: boolean;
   /** Announce the result through the operating system. */
   notify: boolean;
+  /**
+   * 確認する範囲。null はすべての監視対象（作品の監視も含む）。数は監視
+   * グループの ID で、そのグループの作者・シリーズだけを確認する。
+   */
+  groupId: number | null;
 }
 
 export const updateScheduleDefaults: UpdateScheduleSettings = {
@@ -29,6 +34,7 @@ export const updateScheduleDefaults: UpdateScheduleSettings = {
   mode: "check_only",
   watchSaved: false,
   notify: true,
+  groupId: null,
 };
 
 const SETTINGS_KEY = "update_schedule";
@@ -49,6 +55,7 @@ export function normalizeSchedule(raw: unknown): UpdateScheduleSettings {
     mode: value.mode === "auto_save" ? "auto_save" : "check_only",
     watchSaved: value.watchSaved === true,
     notify: value.notify !== false,
+    groupId: typeof value.groupId === "number" && Number.isSafeInteger(value.groupId) && value.groupId > 0 ? value.groupId : null,
   };
 }
 
@@ -113,12 +120,18 @@ export function isRunDue(
   return now - lastRun >= settings.intervalHours * 3_600_000;
 }
 
-/** Human summary for the settings screen. */
-export function describeSchedule(settings: UpdateScheduleSettings): string {
+/**
+ * Human summary for the settings screen.
+ *
+ * `groupName` は範囲にしたグループの名前。範囲がグループなのに名前が無いのは、
+ * そのグループが消えたとき - 黙って広げも狭めもせず、止まっていると名乗る。
+ */
+export function describeSchedule(settings: UpdateScheduleSettings, groupName?: string | null): string {
   const what = settings.mode === "auto_save" ? "確認して保存" : "確認のみ";
   if (!settings.onStartup && !settings.intervalHours) return "自動では実行しません";
+  if (settings.groupId !== null && !groupName) return "範囲にしたグループが見つからないため、実行しません";
   const parts = [];
   if (settings.onStartup) parts.push("起動時");
   if (settings.intervalHours) parts.push(`${settings.intervalHours}時間ごと`);
-  return `${parts.join(" と ")}に${what}`;
+  return `${parts.join(" と ")}に${what}${groupName ? `（「${groupName}」だけ）` : ""}`;
 }

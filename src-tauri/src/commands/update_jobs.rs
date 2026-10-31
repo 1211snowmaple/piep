@@ -638,9 +638,11 @@ fn build_initial_items(
     let mut items = Vec::new();
     let mut included_work_keys = HashSet::new();
     let scope = request.scope.as_str();
+    // "targets" は監視グループの確認。`target_ids` に挙げた作者・シリーズだけを
+    // 見て、作品ごとの監視は混ぜない。
     let include_work = matches!(scope, "all" | "work");
-    let include_author = matches!(scope, "all" | "author");
-    let include_series = matches!(scope, "all" | "series");
+    let include_author = matches!(scope, "all" | "author" | "targets");
+    let include_series = matches!(scope, "all" | "series" | "targets");
     let work_filter = request
         .work_ids
         .as_ref()
@@ -767,6 +769,8 @@ fn build_initial_items(
             updated_at: chrono::Utc::now().to_rfc3339(),
             last_hit_at: None,
             consecutive_errors: 0,
+            watch_groups: Vec::new(),
+            icon_path: None,
         });
         let title = target.display_name.clone();
         let payload = serde_json::to_value(&target).map_err(|e| e.to_string())?;
@@ -1444,6 +1448,51 @@ pub async fn count_saved_deferred_update_candidates(app: tauri::AppHandle) -> Re
         .count_saved_deferred_update_candidates()
 }
 
+/// 一部保存の補完で取り直す作品。保存ジョブへそのまま渡せる形。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IncompleteSaveRepairWork {
+    pub source: &'static str,
+    pub source_id: String,
+    pub title: String,
+}
+
+/// 一部保存の pixiv 作品のうち、今の版でまだ取り直していないものを `limit` 件まで返す。
+#[tauri::command]
+pub async fn list_incomplete_save_repair_works(
+    app: tauri::AppHandle,
+    limit: i64,
+) -> Result<Vec<IncompleteSaveRepairWork>, String> {
+    let state = app.state::<Arc<AppState>>().inner().clone();
+    tokio::task::spawn_blocking(move || state.db.list_incomplete_save_repair_works(limit))
+        .await
+        .map_err(|error| format!("補完する作品を読み取れません: {error}"))?
+        .map(|works| {
+            works
+                .into_iter()
+                .map(|(source_id, title)| IncompleteSaveRepairWork {
+                    source: "pixiv",
+                    source_id,
+                    title,
+                })
+                .collect()
+        })
+}
+
+/// 補完の保存ジョブへ渡した作品を、今の版で試したと記録する。
+#[tauri::command]
+pub async fn record_incomplete_save_repair_attempts(
+    app: tauri::AppHandle,
+    source_ids: Vec<String>,
+) -> Result<(), String> {
+    let state = app.state::<Arc<AppState>>().inner().clone();
+    tokio::task::spawn_blocking(move || {
+        state.db.record_incomplete_save_repair_attempts(&source_ids)
+    })
+    .await
+    .map_err(|error| format!("補完の記録を書けません: {error}"))?
+}
+
 /// Rechecks an explicit selection after permissions change, without saving or watching.
 #[tauri::command]
 pub async fn recheck_deferred_update_candidates(
@@ -1522,6 +1571,65 @@ pub async fn recheck_deferred_update_candidates(
     Ok(snapshot)
 }
 
+/// 保留の理由から、保留の種類を決める。
+fn hold_kind_for(reason: &str) -> &'static str {
+    if reason.starts_with("[一部保存]") {
+        "incomplete"
+    } else if reason.starts_with("[見つからない]") || reason.contains("公開元で投稿が見つからない")
+    {
+        "unavailable"
+    } else if reason.starts_with('[') && !reason.starts_with("[閲覧制限]") {
+        "error"
+    } else {
+        "restricted"
+    }
+}
+
+/// 保留中・非表示の候補は取りに行かない。その知らせ。
+const BLOCKED_CANDIDATE_MESSAGE: &str =
+    "候補から外しています。保留・非表示の一覧から再確認してください";
+
+/// 前の回から同じ種類の理由で保留のままの作品か。保留を書き直す前に聞く。
+///
+/// 確認のたびに同じ作品を「保留」と数えていたので、何も変わっていないのに
+/// 毎回「完了（保留あり）」と通知が出ていた。確認そのものは続け、新しく保留に
+/// なったものと、保留の種類が変わったものだけを知らせる。
+fn is_known_hold(state: &AppState, item: &UpdateJobItem, reason: &str) -> Result<bool, String> {
+    let (Some(source), Some(source_id)) = (item.source.as_deref(), item.source_id.as_deref())
+    else {
+        return Ok(false);
+    };
+    Ok(match state.db.update_candidate_hold(source, source_id)? {
+        Some((status, kind)) if status == "held" || status == "dismissed" => {
+            reason == BLOCKED_CANDIDATE_MESSAGE || kind.as_deref() == Some(hold_kind_for(reason))
+        }
+        _ => false,
+    })
+}
+
+/// 保留を項目に書き、ログに残す。前の回と変わらない保留は数えず、警告にもしない。
+fn complete_held_item(
+    state: &AppState,
+    job_id: &str,
+    item: &UpdateJobItem,
+    known: bool,
+    reason: &str,
+    result_download_id: Option<i64>,
+    log: &str,
+) -> Result<(), String> {
+    state
+        .db
+        .complete_update_job_item(item.id, "held", Some(reason), result_download_id)?;
+    if known {
+        state.db.mark_update_job_item_known_hold(item.id)?;
+        state
+            .db
+            .append_update_job_log(job_id, "info", &format!("{log}（前回から変わらない保留）"))
+    } else {
+        state.db.append_update_job_log(job_id, "warn", log)
+    }
+}
+
 async fn hold_candidate(
     state: &Arc<AppState>,
     item: &UpdateJobItem,
@@ -1545,16 +1653,7 @@ async fn hold_candidate(
     payload["kind"] = serde_json::json!(kind);
     payload["source"] = serde_json::json!(source);
     payload["sourceId"] = serde_json::json!(source_id);
-    let hold_kind = if reason.starts_with("[一部保存]") {
-        "incomplete"
-    } else if reason.starts_with("[見つからない]") || reason.contains("公開元で投稿が見つからない")
-    {
-        "unavailable"
-    } else if reason.starts_with('[') && !reason.starts_with("[閲覧制限]") {
-        "error"
-    } else {
-        "restricted"
-    };
+    let hold_kind = hold_kind_for(reason);
     payload["holdKind"] = serde_json::json!(hold_kind);
     payload["holdReason"] = serde_json::json!(reason);
     if let Some(post) = post {
@@ -1988,15 +2087,17 @@ async fn run_update_job(
         }
         match outcome {
             Ok(ItemOutcome::Held(message)) => {
+                let known = is_known_hold(&state, &item, &message)?;
                 if item.item_type == "work" {
                     hold_candidate(&state, &item, None, &message).await?;
                 }
-                state
-                    .db
-                    .complete_update_job_item(item.id, "held", Some(&message), None)?;
-                state.db.append_update_job_log(
+                complete_held_item(
+                    &state,
                     &job_id,
-                    "warn",
+                    &item,
+                    known,
+                    &message,
+                    None,
                     &format!("{}: 保留 — {message}", item.title),
                 )?;
             }
@@ -2047,16 +2148,19 @@ async fn run_update_job(
                 // discoverable because its referenced illustrations are absent.
                 saved_download_ids.push(download_id);
                 let reason = format!("[一部保存] {message}");
+                let known = is_known_hold(&state, &item, &reason)?;
                 if item.item_type != "target" {
                     hold_candidate(&state, &item, None, &reason).await?;
                 }
-                state.db.complete_update_job_item(
-                    item.id,
-                    "held",
-                    Some(&reason),
+                complete_held_item(
+                    &state,
+                    &job_id,
+                    &item,
+                    known,
+                    &reason,
                     Some(download_id),
+                    &reason,
                 )?;
-                state.db.append_update_job_log(&job_id, "warn", &reason)?;
             }
             Ok(ItemOutcome::Skipped(message) | ItemOutcome::LocalSkipped(message)) => {
                 state
@@ -2245,21 +2349,33 @@ async fn run_update_job(
                 let reason = format!("[{}] {}", kind.label(), error);
                 let held = item.item_type != "target";
                 if held {
+                    let known = is_known_hold(&state, &item, &reason)?;
                     hold_candidate(&state, &item, None, &reason).await?;
+                    complete_held_item(
+                        &state,
+                        &job_id,
+                        &item,
+                        known,
+                        &reason,
+                        None,
+                        &format!("{}: {}", item.title, reason),
+                    )?;
+                } else {
+                    state
+                        .db
+                        .complete_update_job_item(item.id, "failed", Some(&reason), None)?;
+                    state.db.append_update_job_log(
+                        &job_id,
+                        "error",
+                        &format!("{}: {}", item.title, reason),
+                    )?;
                 }
-                state.db.complete_update_job_item(
-                    item.id,
-                    if held { "held" } else { "failed" },
-                    Some(&reason),
-                    None,
-                )?;
-                state.db.append_update_job_log(
-                    &job_id,
-                    if held { "warn" } else { "error" },
-                    &format!("{}: {}", item.title, reason),
-                )?;
-                consecutive_errors = consecutive_errors.saturating_add(1);
-                next_delay_ms = error_delay_ms(consecutive_errors);
+                // 消えた・閲覧できない投稿は取得元が答えを返している。続いても
+                // 通信の不調ではないので、間隔を空けたり止めたりしない。
+                if kind.counts_toward_pause() {
+                    consecutive_errors = consecutive_errors.saturating_add(1);
+                    next_delay_ms = error_delay_ms(consecutive_errors);
+                }
                 if item.item_type == "target" {
                     if let (Some(source), Some(source_key), Some(target_type)) = (
                         item.source.as_deref(),
@@ -2489,6 +2605,12 @@ pub(super) enum FailureKind {
 }
 
 impl FailureKind {
+    /// 連続失敗として数え、間隔を広げて一時停止に近づける失敗か。
+    /// 消えた・閲覧制限は取得元の答えなので、何件続いても止める理由にならない。
+    fn counts_toward_pause(self) -> bool {
+        !matches!(self, FailureKind::Missing | FailureKind::Restricted)
+    }
+
     /// 候補一覧とログに出す短い理由。
     fn label(self) -> &'static str {
         match self {
@@ -2657,9 +2779,7 @@ async fn process_update_job_item(
                 .db
                 .candidate_acquisition_blocked(source, id, repair_save)?
             {
-                return Ok(ItemOutcome::Held(
-                    "候補から外しています。保留・非表示の一覧から再確認してください".into(),
-                ));
+                return Ok(ItemOutcome::Held(BLOCKED_CANDIDATE_MESSAGE.into()));
             }
         }
     }
@@ -3172,6 +3292,8 @@ async fn record_work_revision_candidate(
         updated_at: download.downloaded_at.clone(),
         last_hit_at: None,
         consecutive_errors: 0,
+        watch_groups: Vec::new(),
+        icon_path: None,
     };
     let _library_write_guard = state.library_gate.clone().write_owned().await;
     record_candidate(
@@ -3701,6 +3823,12 @@ async fn process_candidate_item(
             &value,
             &state.db.get_current_assets(&updated)?,
         );
+        // この版を利用者が編集して、もう埋めてあるかもしれない。
+        let missing = state.db.references_left_by_active_edit(
+            updated.id,
+            updated.current_version,
+            missing,
+        )?;
         // A gate that still hides the details must not settle as complete:
         // clearing the candidate here would lose the work from the audit,
         // because an unchanged body creates no new version to inspect.
@@ -3874,6 +4002,52 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn only_a_new_or_changed_hold_is_reported_again() {
+        let root = std::env::temp_dir().join(format!("piep-known-hold-{}", make_job_id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let state =
+            AppState::new(Database::open(&root.join("piep.db"), &root.join("downloads")).unwrap());
+        let item = crate::database::UpdateJobItem {
+            id: 1,
+            job_id: "job".into(),
+            item_type: "work".into(),
+            source: Some("pixiv".into()),
+            source_id: Some("42".into()),
+            target_type: None,
+            title: "作品".into(),
+            payload_json: "{}".into(),
+            status: "running".into(),
+            error: None,
+            result_download_id: None,
+        };
+        let gone = super::unavailable_saved_pixiv_work_message("作品", "42");
+        let partial = "[一部保存] 本文は保存しましたが、参照先の挿絵を閲覧できません";
+        // 初めての保留は知らせる。
+        assert!(!super::is_known_hold(&state, &item, &gone).unwrap());
+        state
+            .db
+            .upsert_update_candidate(&crate::database::UpdateCandidateInput {
+                source: "pixiv".into(),
+                source_id: "42".into(),
+                kind: "revision".into(),
+                title: "作品".into(),
+                payload_json: serde_json::json!({"holdKind": "unavailable"}).to_string(),
+                target_type: Some("work".into()),
+            })
+            .unwrap();
+        // 候補があっても、保留でなければ前回の保留ではない。
+        assert!(!super::is_known_hold(&state, &item, &gone).unwrap());
+        state
+            .db
+            .set_update_candidate_status("pixiv", "42", "held")
+            .unwrap();
+        assert!(super::is_known_hold(&state, &item, &gone).unwrap());
+        assert!(super::is_known_hold(&state, &item, super::BLOCKED_CANDIDATE_MESSAGE).unwrap());
+        // 保留の種類が変わったら、それは新しい知らせ。
+        assert!(!super::is_known_hold(&state, &item, partial).unwrap());
+    }
+
     #[tokio::test]
     async fn unavailable_pixiv_work_is_counted_once_as_held_and_kept_in_the_library() {
         let root = std::env::temp_dir().join(format!("piep-missing-pixiv-{}", make_job_id()));
@@ -3979,6 +4153,43 @@ mod tests {
             state.db.count_saved_deferred_update_candidates().unwrap(),
             1
         );
+        // 次の確認でもまだ見つからない。確かめはするが、何も変わっていないので
+        // 「保留あり」とは言わない。保留は要確認に残る。
+        let next_job = make_job_id();
+        state
+            .db
+            .create_update_job(
+                &next_job,
+                &StartUpdateJobRequest {
+                    scope: "author".into(),
+                    mode: "check_only".into(),
+                    work_ids: None,
+                    target_ids: None,
+                    credentials: None,
+                    watch_saved: None,
+                    adhoc_targets: None,
+                },
+                &[],
+            )
+            .unwrap();
+        state
+            .db
+            .insert_update_job_unavailable_work(&next_job, &work, &reason)
+            .unwrap();
+        let again = state.db.update_job_snapshot(&next_job).unwrap();
+        assert_eq!(
+            (again.processed, again.held_count, again.known_held_count),
+            (1, 0, 1)
+        );
+        assert!(state
+            .db
+            .list_update_job_held_item_states(&next_job)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            state.db.count_saved_deferred_update_candidates().unwrap(),
+            1
+        );
         state
             .db
             .clear_resolved_unavailable_candidates("pixiv", &["different".into()])
@@ -4078,6 +4289,82 @@ mod tests {
             .set_download_meta_state(id, None, "2020-01-01T00:00:00Z")
             .unwrap();
         assert!(!super::pixiv_listing_confirms_recent_copy(&state, &dl));
+        drop(state);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_watch_group_check_covers_only_its_targets() {
+        let root = std::env::temp_dir().join(format!("piep-watch-group-{}", make_job_id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let state = Arc::new(AppState::new(
+            Database::open(&root.join("piep.db"), &root.join("downloads")).unwrap(),
+        ));
+        for (target_type, key) in [("author", "in-group"), ("series", "outside")] {
+            state
+                .db
+                .upsert_update_target(&crate::database::UpdateTargetInput {
+                    target_type: target_type.into(),
+                    source: "pixiv".into(),
+                    source_key: key.into(),
+                    display_name: key.into(),
+                    enabled: true,
+                    metadata_json: None,
+                })
+                .unwrap();
+        }
+        // 作品ごとの監視はグループの確認に混ぜない。
+        let json_path = root.join("watched.json");
+        std::fs::write(&json_path, "{}").unwrap();
+        state
+            .db
+            .upsert_download(&NewDownload {
+                source: "pixiv".into(),
+                source_id: "watched-elsewhere".into(),
+                title: "別の作品".into(),
+                author_name: "別の作者".into(),
+                author_id: "someone-else".into(),
+                content_type: "novel".into(),
+                tags: Vec::new(),
+                excerpt: None,
+                cover_path: None,
+                json_path: json_path.to_string_lossy().into(),
+                original_json_path: None,
+                asset_count: 0,
+                file_size_bytes: 0,
+                downloaded_at: "2026-01-01T00:00:00Z".into(),
+                source_created_at: None,
+                content_hash: None,
+                text_length: 0,
+                source_updated_at: None,
+                watch_updates: true,
+                current_version: 1,
+                favorite: false,
+            })
+            .unwrap();
+        let member = state
+            .db
+            .list_update_targets(None, false)
+            .unwrap()
+            .into_iter()
+            .find(|target| target.source_key == "in-group")
+            .unwrap()
+            .id;
+        let request = StartUpdateJobRequest {
+            scope: "targets".into(),
+            mode: "check_only".into(),
+            work_ids: None,
+            target_ids: Some(vec![member]),
+            credentials: None,
+            watch_saved: None,
+            adhoc_targets: None,
+        };
+        let items = build_initial_items(&state, &request).unwrap();
+        let keys: Vec<_> = items
+            .iter()
+            .map(|item| (item.item_type.as_str(), item.source_id.as_deref()))
+            .collect();
+        assert_eq!(keys, [("target", Some("in-group"))]);
         drop(state);
         let _ = std::fs::remove_dir_all(root);
     }
@@ -4275,6 +4562,8 @@ mod tests {
             updated_at: "now".into(),
             last_hit_at: None,
             consecutive_errors: 0,
+            watch_groups: Vec::new(),
+            icon_path: None,
         }
     }
 
@@ -4680,6 +4969,16 @@ mod tests {
         assert!(error_delay_ms(99) <= MAX_ERROR_BACKOFF_MS);
         assert!(!too_many_consecutive_errors(2));
         assert!(too_many_consecutive_errors(3));
+    }
+
+    #[test]
+    fn deleted_or_restricted_posts_never_pause_the_job() {
+        // 作者が投稿をまとめて消すと、消えた作品が何件も続く。取得元は答えて
+        // いるので、それで確認全体が止まってはいけない。
+        assert!(!FailureKind::Missing.counts_toward_pause());
+        assert!(!FailureKind::Restricted.counts_toward_pause());
+        assert!(FailureKind::Network.counts_toward_pause());
+        assert!(FailureKind::Other.counts_toward_pause());
     }
 
     #[test]

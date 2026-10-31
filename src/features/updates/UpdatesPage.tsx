@@ -9,23 +9,20 @@ import {
   Card,
   Checkbox,
   Divider,
-  Grid,
   Group,
   Paper,
   Progress,
   SegmentedControl,
   Select,
   Stack,
-  Switch,
   Text,
-  TextInput,
   ThemeIcon,
   Timeline,
   Title,
   Tooltip,
   UnstyledButton,
 } from "@mantine/core";
-import { useForm, isNotEmpty, type UseFormReturnType } from "@mantine/form";
+import { useForm, isNotEmpty } from "@mantine/form";
 import { modals } from "@mantine/modals";
 import { notifications } from "@mantine/notifications";
 import { reportJobAction } from "@/features/jobs/operationJobs";
@@ -43,13 +40,16 @@ import { heldAcquisitionKind, heldReason, summarizeUpdateJobItems, updateJobSubj
 import { acquisitionStatusMeta } from "@/lib/acquisition";
 import { errorMessage, formatDate, formatNumber } from "@/lib/format";
 import { ProviderMark } from "@/lib/providers";
-import { deleteUpdateTarget, isTauriRuntime, listUpdateTargets, searchDownloadsV2, setUpdateTargetEnabled, upsertUpdateTarget } from "@/services/dbApi";
+import { createWatchGroup, deleteUpdateTarget, deleteWatchGroup, isTauriRuntime, listUpdateTargets, listWatchGroups, renameWatchGroup, searchDownloadsV2, setUpdateTargetEnabled, setWatchGroupMembers, upsertUpdateTarget } from "@/services/dbApi";
 import { readingWorkIds } from "@/features/library/readingShelf";
 import { clearFinishedUpdateJobsCommand, countDismissedUpdateCandidatesCommand, dismissUpdateCandidateCommand, listUpdateJobHeldItemStatesCommand, listUpdateJobItemStatesCommand, restoreDismissedUpdateCandidatesCommand, type UpdateJobItemState } from "@/services/updateJobApi";
-import { loadSchedule, type UpdateScheduleSettings } from "@/features/updates/updateSchedule";
+import { loadSchedule, saveSchedule, type UpdateScheduleSettings } from "@/features/updates/updateSchedule";
 import { UpdateScheduleCard } from "@/features/updates/UpdateScheduleCard";
 import { useUpdateJobNotifications } from "@/features/updates/useUpdateScheduler";
-import type { UpdateTarget } from "@/types/library";
+import { TargetsPanel, type GroupAction, type TargetAction } from "./WatchTargetsPanel";
+import type { UpdateTarget, WatchGroup } from "@/types/library";
+
+export { TargetHealthBadge } from "./WatchTargetsPanel";
 
 const demoSnapshot: UpdateJobSnapshot = {
   jobId: "preview-20260802", status: "completed", scope: "all", mode: "check_only", totals: 43, processed: 43, checkTotal: 43, checkProcessed: 43, saveTotal: 0, saveProcessed: 0, candidateCount: 3, savedCount: 0, errorCount: 0, activeLabel: null,
@@ -135,6 +135,10 @@ export default function UpdatesPage() {
     setSearchParams(params, { replace: true });
   };
   const resultIsTerminal = Boolean(activeSnapshot && isUpdateJobTerminal(activeSnapshot.status));
+  // 終わった回の進捗は一行に畳む。走り終えた二本の進捗棒が、毎回その下の
+  // 候補を画面の半分まで押し下げていた。開けば元の詳しさで読める。
+  const [progressOpen, setProgressOpen] = useState(false);
+  useEffect(() => setProgressOpen(false), [activeSnapshot?.jobId]);
   const jobItems = useQuery({
     queryKey: ["update-job-items", activeSnapshot?.jobId, activeSnapshot?.finishedAt],
     queryFn: () => listUpdateJobItemStatesCommand(activeSnapshot!.jobId),
@@ -164,10 +168,20 @@ export default function UpdatesPage() {
   // 一覧に出すのは「自分で選んだ作者・シリーズ」だけ。作品の監視は
   // 作品カードのトグルが持っていて、ここに混ぜると名前が並んで分かりにくい。
   const targets = useQuery({ queryKey: ["update-targets"], queryFn: async () => runtime ? (await listUpdateTargets<UpdateTarget>(null, false)).filter((target) => target.targetType === "author" || target.targetType === "series") : ([
-    { id: 1, targetType: "author", source: "pixiv", sourceKey: "8001234", displayName: "青葉しおり", enabled: true, lastCheckedAt: new Date().toISOString(), lastSeenSourceId: "12002", lastSeenSourceUpdatedAt: null, metadataJson: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
-    { id: 2, targetType: "series", source: "pixiv", sourceKey: "778120", displayName: "星を編む人", enabled: true, lastCheckedAt: new Date().toISOString(), lastSeenSourceId: "12001", lastSeenSourceUpdatedAt: null, metadataJson: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
+    { id: 1, targetType: "author", source: "pixiv", sourceKey: "8001234", displayName: "青葉しおり", enabled: true, lastCheckedAt: new Date().toISOString(), lastSeenSourceId: "12002", lastSeenSourceUpdatedAt: null, metadataJson: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), watchGroups: ["毎日見る"] },
+    { id: 2, targetType: "series", source: "pixiv", sourceKey: "778120", displayName: "星を編む人", enabled: true, lastCheckedAt: new Date().toISOString(), lastSeenSourceId: "12001", lastSeenSourceUpdatedAt: null, metadataJson: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), watchGroups: ["毎日見る"] },
     { id: 3, targetType: "author", source: "fanbox", sourceKey: "mizu-atelier", displayName: "mizu atelier", enabled: false, lastCheckedAt: new Date(Date.now() - 86_400_000).toISOString(), lastSeenSourceId: null, lastSeenSourceUpdatedAt: null, metadataJson: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
   ] as UpdateTarget[]) });
+  // 利用者が作った監視グループ。確認する範囲にも、自動確認の範囲にも出る。
+  const groups = useQuery({ queryKey: ["watch-groups"], queryFn: async (): Promise<WatchGroup[]> => runtime ? listWatchGroups() : [
+    { id: 1, name: "毎日見る", sortOrder: 0, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), targetIds: [1, 2] },
+  ] });
+  const groupList = groups.data ?? [];
+  /** グループの中で、止めていない対象。確認に送るのはこれだけ。 */
+  const enabledMembers = (group: WatchGroup) => {
+    const enabled = new Set((targets.data ?? []).filter((target) => target.enabled).map((target) => target.id));
+    return group.targetIds.filter((id) => enabled.has(id));
+  };
   // The snapshot is polled, so re-seeding the selection from it on every
   // arrival used to re-tick boxes the user had just cleared. Seed once per job,
   // then only add candidates that appear later as the job discovers them.
@@ -204,17 +218,23 @@ export default function UpdatesPage() {
   const selectedSavableIdSet = new Set(selectedSavableIds);
 
   const startMutation = useMutation({
-    mutationFn: async (values: typeof form.values) => {
+    // `targetIds` は監視対象の一覧やグループから来た確認。その作者・シリーズだけを見る。
+    mutationFn: async (values: { scope: string; mode: string; targetIds?: number[] }) => {
       if (!runtime) { await new Promise((resolve) => setTimeout(resolve, 400)); setPreviewSnapshot({ ...demoSnapshot, jobId: `preview-${Date.now()}`, startedAt: new Date().toISOString(), updatedAt: new Date().toISOString() }); return; }
+      const group = values.scope.startsWith("group:") ? groupList.find((item) => `group:${item.id}` === values.scope) : null;
+      if (values.scope.startsWith("group:") && !group) throw new Error("選んだ監視グループが見つかりません");
+      const targetIds = values.targetIds ?? (group ? enabledMembers(group) : null);
+      if (targetIds && !targetIds.length) throw new Error(group ? `「${group.name}」に確認できる監視対象がありません（止めている対象は確認しません）` : "確認できる監視対象がありません");
       // 棚を選んだときは、その棚の作品IDを集めて「作品」の確認として投げる。
       // 監視のオン・オフに関わらず、いま棚にあるものを見に行ける。
-      const shelfIds = await shelfWorkIds(values.scope);
+      const shelfIds = targetIds ? null : await shelfWorkIds(values.scope);
       if (shelfIds && !shelfIds.length) throw new Error("この棚には作品がありません");
       const schedule = await loadSchedule();
       await updateJobs.start({
-        scope: (shelfIds ? "work" : values.scope) as "all" | "work" | "author" | "series",
+        scope: (targetIds ? "targets" : shelfIds ? "work" : values.scope) as "all" | "work" | "author" | "series" | "targets",
         mode: values.mode as "check_only" | "auto_save",
-        workIds: shelfIds ?? (workId ? [workId] : null),
+        workIds: shelfIds ?? (workId && !targetIds ? [workId] : null),
+        targetIds,
         watchSaved: schedule.watchSaved,
       });
       await updateJobs.loadJobs();
@@ -308,15 +328,85 @@ export default function UpdatesPage() {
     onError: (error) => notifications.show({ color: "red", title: "候補を保存できません", message: errorMessage(error) }),
   });
   const targetMutation = useMutation({
-    mutationFn: async (input: { action: "add" | "toggle" | "delete"; target?: UpdateTarget; enabled?: boolean; values?: typeof targetForm.values }) => {
+    mutationFn: async (input: TargetAction) => {
       if (!runtime) return;
-      if (input.action === "add" && input.values) await upsertUpdateTarget({ ...input.values, enabled: true, metadataJson: null });
+      if (input.action === "add" && input.values) {
+        await upsertUpdateTarget({ ...input.values, enabled: true, metadataJson: null });
+        // グループを開いたまま足したなら、そのグループにも入れる。
+        if (input.groupId !== undefined) {
+          const added = (await listUpdateTargets<UpdateTarget>(input.values.targetType, false))
+            .find((target) => target.source === input.values?.source && target.sourceKey === input.values?.sourceKey.trim());
+          if (added) await setWatchGroupMembers(input.groupId, [added.id], true);
+        }
+      }
       if (input.action === "toggle" && input.target) await setUpdateTargetEnabled(input.target.targetType, input.target.source, input.target.sourceKey, Boolean(input.enabled));
       if (input.action === "delete" && input.target) await deleteUpdateTarget(input.target.targetType, input.target.source, input.target.sourceKey);
     },
-    onSuccess: () => { targetForm.reset(); queryClient.invalidateQueries({ queryKey: ["update-targets"] }); },
+    onSuccess: () => {
+      targetForm.reset();
+      queryClient.invalidateQueries({ queryKey: ["update-targets"] });
+      queryClient.invalidateQueries({ queryKey: ["watch-groups"] });
+    },
     onError: (error) => notifications.show({ color: "red", title: "更新対象を変更できません", message: errorMessage(error) }),
   });
+  const bulkEnableMutation = useMutation({
+    mutationFn: async ({ targets: chosen, enabled }: { targets: UpdateTarget[]; enabled: boolean }) => {
+      if (!runtime) return chosen.length;
+      for (const target of chosen) await setUpdateTargetEnabled(target.targetType, target.source, target.sourceKey, enabled);
+      return chosen.length;
+    },
+    onSuccess: (count, { enabled }) => notifications.show({ color: "gray", message: `${formatNumber(count)}件の確認を${enabled ? "再開しました" : "止めました"}` }),
+    onError: (error) => notifications.show({ color: "red", title: "更新対象を変更できません", message: errorMessage(error) }),
+    onSettled: () => queryClient.invalidateQueries({ queryKey: ["update-targets"] }),
+  });
+  const groupMutation = useMutation({
+    mutationFn: async (input: GroupAction): Promise<number | null> => {
+      if (!runtime) return null;
+      if (input.action === "create") {
+        const id = await createWatchGroup(input.name);
+        if (input.addTargetIds?.length) await setWatchGroupMembers(id, input.addTargetIds, true);
+        return id;
+      }
+      if (input.action === "rename") await renameWatchGroup(input.group.id, input.name);
+      if (input.action === "delete") {
+        await deleteWatchGroup(input.group.id);
+        // 自動確認の範囲だったなら、すべてへ戻す。消えたグループを指したままだと、
+        // 自動確認が黙って止まる。
+        const current = await loadSchedule();
+        if (current.groupId === input.group.id) {
+          await saveSchedule({ ...current, groupId: null });
+          setScheduleRevision((value) => value + 1);
+        }
+        if (form.values.scope === `group:${input.group.id}`) form.setFieldValue("scope", "all");
+      }
+      if (input.action === "members") return setWatchGroupMembers(input.group.id, input.targetIds, input.add);
+      return null;
+    },
+    onSuccess: (result, input) => {
+      queryClient.invalidateQueries({ queryKey: ["watch-groups"] });
+      queryClient.invalidateQueries({ queryKey: ["update-targets"] });
+      if (input.action === "members") {
+        const changed = result ?? 0;
+        const skipped = input.targetIds.length - changed;
+        notifications.show({
+          color: "gray",
+          message: input.add
+            ? `「${input.group.name}」に${formatNumber(changed)}件を入れました${skipped > 0 ? `（${formatNumber(skipped)}件は入っていました）` : ""}`
+            : `「${input.group.name}」から${formatNumber(changed)}件を外しました`,
+        });
+      }
+      if (input.action === "create" && input.addTargetIds?.length) notifications.show({ color: "gray", message: `「${input.name.trim()}」を作り、${formatNumber(input.addTargetIds.length)}件を入れました` });
+    },
+    onError: (error, input) => {
+      // 名前の入力欄から来たものは、その欄が理由を出す。
+      if (input.action === "create" || input.action === "rename") return;
+      notifications.show({ color: "red", title: "監視グループを変更できません", message: errorMessage(error) });
+    },
+  });
+  const checkTargets = (targetIds: number[], label: string) => startMutation.mutate(
+    { scope: "targets", mode: form.values.mode, targetIds },
+    { onSuccess: () => notifications.show({ color: "piep", title: "確認を開始しました", message: `${label}の${formatNumber(targetIds.length)}件を確認します` }) },
+  );
   // 自動確認は「いまどうなっているか」だけを一行で名乗る。設定そのものは
   // タブの中にあり、変えたらこの一行も追いつく。
   const [scheduleRevision, setScheduleRevision] = useState(0);
@@ -325,7 +415,7 @@ export default function UpdatesPage() {
     queryFn: () => loadSchedule(),
     staleTime: 0,
   });
-  const scheduleSummary = describeSchedule(schedule.data);
+  const scheduleSummary = describeSchedule(schedule.data, groups.data);
   // A log records that a limit happened in the past. The active label records
   // whether this worker is waiting for that retry right now.
   const throttledMessage = activeSnapshot?.status === "running" &&
@@ -361,7 +451,12 @@ export default function UpdatesPage() {
           <Select
             aria-label="確認する対象"
             leftSection={<Icons.select size={IconSize.menu} />}
-            data={[{ value: "all", label: "すべての監視対象" }, { value: "work", label: "監視中の作品" }, { value: "author", label: "作者・クリエイター" }, { value: "series", label: "シリーズ" }, { value: "favorite", label: `お気に入りの作品（最大${SHELF_SCOPE_LIMIT}件）` }, { value: "reading", label: `読みかけの作品（最大${SHELF_SCOPE_LIMIT}件）` }]}
+            data={[
+              { value: "all", label: "すべての監視対象" }, { value: "work", label: "監視中の作品" }, { value: "author", label: "作者・クリエイター" }, { value: "series", label: "シリーズ" },
+              { value: "favorite", label: `お気に入りの作品（最大${SHELF_SCOPE_LIMIT}件）` }, { value: "reading", label: `読みかけの作品（最大${SHELF_SCOPE_LIMIT}件）` },
+              ...(groupList.length ? [{ group: "監視グループ", items: groupList.map((group) => ({ value: `group:${group.id}`, label: `${group.name}（${formatNumber(enabledMembers(group).length)}件）` })) }] : []),
+            ]}
+            allowDeselect={false}
             disabled={Boolean(workId)}
             w={210}
             {...form.getInputProps("scope")}
@@ -377,7 +472,7 @@ export default function UpdatesPage() {
               w={280}
               label="取得元への確認は1件ずつ2秒以上あけます。取得エラーが続くと間隔を延ばして一時停止します。取得制限では分単位で待って再試行します。Pixiv側の表示設定で一覧から省かれた作品は個別に確認します。"
             >
-              <ActionIcon variant="subtle" color="gray" size="sm" aria-label="確認の進め方について">
+              <ActionIcon variant="subtle" color="gray" size="md" aria-label="確認の進め方について">
                 <Icons.help size={IconSize.menu} />
               </ActionIcon>
             </Tooltip>
@@ -391,16 +486,31 @@ export default function UpdatesPage() {
           <Box style={{ flex: 1 }} />
           <Group gap={6} wrap="nowrap">
             <Text size="xs" c="dimmed">自動確認：{scheduleSummary}</Text>
-            <Button size="compact-xs" variant="subtle" color="gray" onClick={() => selectTab("schedule")}>変更</Button>
+            <Button size="xs" variant="subtle" color="gray" onClick={() => selectTab("schedule")}>変更</Button>
           </Group>
         </Group>
       </Paper>
 
-      {activeSnapshot && (
+      {activeSnapshot && resultIsTerminal && !progressOpen && (
+        <Card px="md" py="sm" className="update-progress-card update-progress-card--compact" mt="lg">
+          <Group gap="sm" wrap="nowrap">
+            <StatusBadge job={activeSnapshot} />
+            <Text size="sm" fw={650} style={{ flex: "none" }}>{statusTitle(activeSnapshot.status)}</Text>
+            <Text size="xs" c="dimmed" className="line-clamp-1" style={{ flex: 1, minWidth: 0 }}>
+              {formatDate(activeSnapshot.finishedAt ?? activeSnapshot.updatedAt, true)} · 候補 {formatNumber(activeSnapshot.candidateCount)} · 保存済み {formatNumber(activeSnapshot.savedCount)} · エラー {formatNumber(activeSnapshot.errorCount)} · 保留 {formatNumber(activeSnapshot.heldCount ?? 0)}
+            </Text>
+            {(activeSnapshot.status === "failed" || activeSnapshot.status === "canceled") && <Button size="xs" leftSection={<Icons.undo size={IconSize.inline} />} onClick={() => runtime && reportJobAction(updateJobs.resume(activeSnapshot.jobId, true), "やり直せません")}>失敗分を再試行</Button>}
+            <Button size="xs" variant="subtle" color="gray" rightSection={<Icons.expand size={IconSize.inline} />} aria-expanded={false} onClick={() => setProgressOpen(true)}>詳しく</Button>
+          </Group>
+        </Card>
+      )}
+
+      {activeSnapshot && (!resultIsTerminal || progressOpen) && (
         <Card p="lg" className="update-progress-card" mt="lg">
           <Group justify="space-between" align="center" wrap="wrap">
             <Group gap="xs"><StatusBadge job={activeSnapshot} /><Text size="xs" c="dimmed">{activeSnapshot.jobId}</Text></Group>
             <Group gap="xs">
+              {resultIsTerminal && <Button variant="subtle" color="gray" rightSection={<Icons.expand size={IconSize.inline} style={{ transform: "rotate(180deg)" }} />} aria-expanded onClick={() => setProgressOpen(false)}>畳む</Button>}
               {running && <Button variant="default" leftSection={<Icons.pause size={IconSize.menu} />} onClick={() => runtime && reportJobAction(updateJobs.pause(activeSnapshot.jobId), "一時停止できません")}>一時停止</Button>}
               {stalled && <Button leftSection={<Icons.resume size={IconSize.menu} />} onClick={() => runtime && reportJobAction(updateJobs.resume(activeSnapshot.jobId), "再開できません")}>再開</Button>}
               {(running || stalled) && <Button variant="subtle" color="red" leftSection={<Icons.cancel size={IconSize.menu} />} onClick={() => runtime && reportJobAction(updateJobs.cancel(activeSnapshot.jobId), "中止できません")}>中止</Button>}
@@ -408,7 +518,7 @@ export default function UpdatesPage() {
             </Group>
           </Group>
           <ScrollingJobTitle label={throttledMessage ? statusTitle(activeSnapshot.status) : activeSnapshot.activeLabel || statusTitle(activeSnapshot.status)} />
-          <Text size="sm" c="dimmed" mt={5}>候補 {formatNumber(activeSnapshot.candidateCount)} · 保存済み {formatNumber(activeSnapshot.savedCount)} · エラー {formatNumber(activeSnapshot.errorCount)} · 保留 {formatNumber(activeSnapshot.heldCount ?? 0)}</Text>
+          <Text size="sm" c="dimmed" mt={5}>候補 {formatNumber(activeSnapshot.candidateCount)} · 保存済み {formatNumber(activeSnapshot.savedCount)} · エラー {formatNumber(activeSnapshot.errorCount)} · 保留 {formatNumber(activeSnapshot.heldCount ?? 0)}{(activeSnapshot.knownHeldCount ?? 0) > 0 && `（ほかに前回から変わらない保留 ${formatNumber(activeSnapshot.knownHeldCount ?? 0)}件）`}</Text>
           {outcome && activeSnapshot.mode === "check_only" && (
             <Text size="sm" mt="xs">
               変更なし・スキップ {formatNumber(outcome.unchanged)}件 · 公開元で見つからない {formatNumber(outcome.missing.length)}件
@@ -435,14 +545,16 @@ export default function UpdatesPage() {
       )}
 
       <Tabs value={tab} onChange={selectTab} mt="lg">
-        {/* 左から右へ「いま何が待っているか → どう進んだか → 前はどうだったか」、
-            区切りを挟んで「何を追いかける約束か → いつ走らせる約束か」。
-            数の帯は、伝える中身があるときだけ出す - 0 は何も言っていない。 */}
+        {/* 三つの束に分ける。「この回」（候補 → 結果 → ログ）、「回をまたいで
+            残るもの」（保留候補 → 履歴）、「約束」（何を追いかけるか → いつ
+            走らせるか）。数の帯は、伝える中身があるときだけ出す - 0 は何も
+            言っていない。 */}
         <Tabs.List>
           <Tabs.Tab value="candidates" leftSection={<Icons.select size={IconSize.menu} />}>候補 {openCandidateCount > 0 && <Badge size="xs" variant="light" ml={4}>{formatNumber(openCandidateCount)}</Badge>}</Tabs.Tab>
           <Tabs.Tab value="results" leftSection={<Icons.confirm size={IconSize.menu} />}>結果 {(activeSnapshot?.heldCount ?? 0) > 0 && <Badge size="xs" variant="light" color="yellow" ml={4}>{formatNumber(activeSnapshot?.heldCount ?? 0)}</Badge>}</Tabs.Tab>
           <Tabs.Tab value="logs" leftSection={<Icons.pending size={IconSize.menu} />}>ログ</Tabs.Tab>
-          <Tabs.Tab value="deferred">保留候補</Tabs.Tab>
+          <span className="updates-tabs__divider" aria-hidden />
+          <Tabs.Tab value="deferred" leftSection={<Icons.empty size={IconSize.menu} />}>保留候補</Tabs.Tab>
           <Tabs.Tab value="history" leftSection={<Icons.versionHistory size={IconSize.menu} />}>履歴 {jobs.length > 0 && <Badge size="xs" variant="light" color="gray" ml={4}>{formatNumber(jobs.length)}</Badge>}</Tabs.Tab>
           <span className="updates-tabs__divider" aria-hidden />
           <Tabs.Tab value="targets" leftSection={<Icons.updates size={IconSize.menu} />}>監視対象</Tabs.Tab>
@@ -519,7 +631,19 @@ export default function UpdatesPage() {
               </Group>
             </Card>
           )}
-          <TargetsPanel targets={targets.data ?? []} loading={targets.isLoading} error={targets.error} retry={() => targets.refetch()} form={targetForm} mutation={targetMutation} />
+          <TargetsPanel
+            targets={targets.data ?? []}
+            groups={groupList}
+            loading={targets.isLoading}
+            error={targets.error}
+            retry={() => targets.refetch()}
+            form={targetForm}
+            mutation={targetMutation}
+            groupMutation={groupMutation}
+            onSetEnabled={(chosen, enabled) => bulkEnableMutation.mutate({ targets: chosen, enabled })}
+            onCheck={checkTargets}
+            checkDisabled={running || startMutation.isPending || Boolean(workId)}
+          />
         </Tabs.Panel>
 
         <Tabs.Panel value="history" pt="lg">
@@ -541,7 +665,7 @@ export default function UpdatesPage() {
         </Tabs.Panel>
 
         <Tabs.Panel value="schedule" pt="lg">
-          <UpdateScheduleCard onChanged={() => setScheduleRevision((value) => value + 1)} />
+          <UpdateScheduleCard groups={groups.data} onChanged={() => setScheduleRevision((value) => value + 1)} />
         </Tabs.Panel>
       </Tabs>
     </div>
@@ -647,7 +771,7 @@ function JobHistoryPanel({ jobs, activeJobId, finishedCount, clearingAll, cleari
                 <Stack gap={2} miw={0}>
                   <Group gap="sm" wrap="nowrap"><Text size="sm" fw={job.jobId === activeJobId ? 700 : 500}>{formatDate(job.startedAt, true)}</Text><Text size="sm" className="line-clamp-1">{updateJobSubject(job)}</Text></Group>
                   <Text size="xs" c="dimmed" className="line-clamp-1">
-                    {formatNumber(job.processed)}/{formatNumber(job.totals)}件 · 候補 {formatNumber(job.candidateCount)} · 保存 {formatNumber(job.savedCount)}{job.errorCount > 0 ? ` · エラー ${formatNumber(job.errorCount)}` : ""}{job.heldCount ? ` · 保留 ${formatNumber(job.heldCount)}` : ""}
+                    {formatNumber(job.processed)}/{formatNumber(job.totals)}件 · 候補 {formatNumber(job.candidateCount)} · 保存 {formatNumber(job.savedCount)}{job.errorCount > 0 ? ` · エラー ${formatNumber(job.errorCount)}` : ""}{job.heldCount ? ` · 保留 ${formatNumber(job.heldCount)}` : ""}{job.knownHeldCount ? ` · 変わらない保留 ${formatNumber(job.knownHeldCount)}` : ""}
                   </Text>
                 </Stack>
               </Group>
@@ -663,123 +787,6 @@ function JobHistoryPanel({ jobs, activeJobId, finishedCount, clearingAll, cleari
         ))}
       </Stack>
     </Card>
-  );
-}
-
-type TargetValues = { targetType: string; source: string; sourceKey: string; displayName: string };
-type TargetAction = { action: "add" | "toggle" | "delete"; target?: UpdateTarget; enabled?: boolean; values?: TargetValues };
-
-function TargetsPanel({ targets, loading, error, retry, form, mutation }: { targets: UpdateTarget[]; loading: boolean; error: unknown; retry: () => void; form: UseFormReturnType<TargetValues, TargetValues, any>; mutation: { mutate: (input: TargetAction) => void; isPending: boolean } }) {
-  const [showPaused, setShowPaused] = useState(false);
-  const [searchText, setSearchText] = useState("");
-  const [activeVisibleCount, setActiveVisibleCount] = useState(60);
-  const [pausedVisibleCount, setPausedVisibleCount] = useState(60);
-  if (loading) return <LoadingState />;
-  if (error) return <ErrorState error={error} retry={retry} />;
-  const confirmDelete = (target: UpdateTarget) => modals.openConfirmModal({
-    title: "監視対象を削除しますか？",
-    children: <Text size="sm">「{target.displayName}」を更新監視から削除します。保存済みの作品は削除されません。</Text>,
-    labels: { confirm: "削除する", cancel: "キャンセル" },
-    confirmProps: { color: "red" },
-    onConfirm: () => mutation.mutate({ action: "delete", target }),
-  });
-  const search = searchText.trim().normalize("NFKC").toLocaleLowerCase();
-  const matching = targets.filter((target) => !search || `${target.displayName} ${target.sourceKey} ${target.source}`.normalize("NFKC").toLocaleLowerCase().includes(search));
-  const active = matching.filter((target) => target.enabled);
-  const paused = matching.filter((target) => !target.enabled);
-
-  const row = (target: UpdateTarget) => (
-    <Group p="md" wrap="nowrap" key={target.id}>
-      <ProviderMark provider={target.source} compact />
-      <ThemeIcon variant="light" color="gray" aria-hidden>{target.targetType === "series" ? "S" : "A"}</ThemeIcon>
-      <Stack gap={3} flex={1} miw={0}>
-        <Group gap={6} wrap="nowrap">
-          <Text size="sm" fw={650} className="identity-name">{target.displayName}</Text>
-          <TargetHealthBadge target={target} />
-        </Group>
-        <Text size="xs" c="dimmed" className="line-clamp-1">
-          {target.targetType === "series" ? "シリーズ" : "作者"} · {target.sourceKey} · 最終確認 {formatDate(target.lastCheckedAt, true)} · 最後のヒット {target.lastHitAt ? formatDate(target.lastHitAt, true) : "なし"}
-        </Text>
-      </Stack>
-      <Tooltip label={target.enabled ? "確認を止める（一覧では下に畳まれます）" : "確認を再開する"}>
-        <Switch
-          checked={target.enabled}
-          disabled={mutation.isPending}
-          onChange={(event) => mutation.mutate({ action: "toggle", target, enabled: event.currentTarget.checked })}
-          aria-label={`${target.displayName}の監視`}
-        />
-      </Tooltip>
-      <Tooltip label="削除">
-        <ActionIcon variant="subtle" color="red" disabled={mutation.isPending} aria-label={`${target.displayName}を削除`} onClick={() => confirmDelete(target)}>
-          <Icons.delete size={IconSize.menu} />
-        </ActionIcon>
-      </Tooltip>
-    </Group>
-  );
-
-  return (
-    <Stack gap="lg">
-      <Card p="lg">
-        <form onSubmit={form.onSubmit((values) => mutation.mutate({ action: "add", values }))}>
-          <Stack>
-            <Title order={3}>監視対象を追加</Title>
-            <Text size="sm" c="dimmed" mt={-8}>ここに入るのは、自分で追加した作者とシリーズだけです。保存や更新確認で勝手に増えることはありません。</Text>
-            <Grid>
-              <Grid.Col span={{ base: 12, sm: 3 }}><Select label="種類" data={[{ value: "author", label: "作者" }, { value: "series", label: "シリーズ" }]} {...form.getInputProps("targetType")} /></Grid.Col>
-              <Grid.Col span={{ base: 12, sm: 3 }}><Select label="ソース" data={[{ value: "pixiv", label: "pixiv" }, { value: "fanbox", label: "FANBOX" }]} {...form.getInputProps("source")} /></Grid.Col>
-              <Grid.Col span={{ base: 12, sm: 3 }}><TextInput label="ID" {...form.getInputProps("sourceKey")} /></Grid.Col>
-              <Grid.Col span={{ base: 12, sm: 3 }}><TextInput label="表示名" {...form.getInputProps("displayName")} /></Grid.Col>
-            </Grid>
-            <Button type="submit" w="fit-content" leftSection={<Icons.add size={IconSize.menu} />} loading={mutation.isPending}>追加</Button>
-          </Stack>
-        </form>
-      </Card>
-
-      <Card p="md">
-        <TextInput
-          label="監視対象を探す"
-          placeholder="表示名・ID・ソース"
-          value={searchText}
-          onChange={(event) => {
-            setSearchText(event.currentTarget.value);
-            setActiveVisibleCount(60);
-            setPausedVisibleCount(60);
-            if (event.currentTarget.value.trim()) setShowPaused(true);
-          }}
-        />
-        <Text size="xs" c="dimmed" mt="xs">
-          {search ? `${formatNumber(matching.length)} / ${formatNumber(targets.length)}件が一致` : `監視中 ${formatNumber(active.length)}件 · 停止中 ${formatNumber(paused.length)}件`}
-        </Text>
-      </Card>
-
-      <Card p={0}>
-        {active.length
-          ? active.slice(0, activeVisibleCount).map((target, index) => <Box key={target.id}>{index > 0 && <Divider />}{row(target)}</Box>)
-          : <Text p="lg" c="dimmed" size="sm">{search ? "一致する監視中の対象はありません。" : "確認中の対象はありません。"}</Text>}
-        {active.length > activeVisibleCount && <><Divider /><Button variant="subtle" fullWidth onClick={() => setActiveVisibleCount((count) => count + 60)}>さらに表示（残り{formatNumber(active.length - activeVisibleCount)}件）</Button></>}
-      </Card>
-
-      {/* 止めた対象はここへ畳む。トグルひとつで一覧から下がり、消したいときだけ
-          削除すればいい。切り替えた瞬間に消えるより戻しやすい。 */}
-      {paused.length > 0 && (
-        <Card p={0}>
-          <UnstyledButton className="update-paused__head" onClick={() => setShowPaused((open) => !open)} aria-expanded={showPaused}>
-            <Group p="md" justify="space-between" wrap="nowrap">
-              <Group gap="xs" wrap="nowrap">
-                <Icons.next size={IconSize.menu} style={{ transform: showPaused ? "rotate(90deg)" : undefined }} aria-hidden />
-                <Text size="sm" fw={650}>停止中</Text>
-                <Badge size="sm" variant="light" color="gray">{paused.length}</Badge>
-              </Group>
-              <Text size="xs" c="dimmed">確認しません。再開も削除もここから</Text>
-            </Group>
-          </UnstyledButton>
-          {showPaused && <>
-            {paused.slice(0, pausedVisibleCount).map((target) => <Box key={target.id}><Divider />{row(target)}</Box>)}
-            {paused.length > pausedVisibleCount && <><Divider /><Button variant="subtle" fullWidth onClick={() => setPausedVisibleCount((count) => count + 60)}>さらに表示（残り{formatNumber(paused.length - pausedVisibleCount)}件）</Button></>}
-          </>}
-        </Card>
-      )}
-    </Stack>
   );
 }
 
@@ -893,8 +900,9 @@ export function CandidatesPanel({ candidates, selectedIds, selectableIds, runnin
           <Text size="xs" c="dimmed">新作・続編・改稿をまとめて処理 · 全候補から{selectedCount}件を選択中 · 表示 {formatNumber(visible.length)}/{formatNumber(shown.length)}件{selectedOutsideShown > 0 ? `（表示外で${selectedOutsideShown}件を選択中）` : ""}</Text>
         </Box>
         <Group gap="xs">
-          <Button size="xs" variant="subtle" disabled={!shownSelectable.length} onClick={() => onSelectMany(shownSelectable)}>該当分を選択</Button>
-          <Button size="xs" variant="subtle" color="gray" disabled={!selectedCount} onClick={onClearSelection}>選択をすべて解除</Button>
+          {/* 右の保存と同じ高さ。低い押しボタンが並ぶと、行の下端がそろわない。 */}
+          <Button size="sm" variant="subtle" disabled={!shownSelectable.length} onClick={() => onSelectMany(shownSelectable)}>該当分を選択</Button>
+          <Button size="sm" variant="subtle" color="gray" disabled={!selectedCount} onClick={onClearSelection}>選択をすべて解除</Button>
           <Button size="sm" leftSection={<Icons.export size={IconSize.menu} />} disabled={!selectedCount || running} loading={saving} onClick={onSave}>選択候補{selectedCount}件をまとめて保存</Button>
         </Group>
       </Group>
@@ -964,32 +972,6 @@ export function CandidatesPanel({ candidates, selectedIds, selectableIds, runnin
   );
 }
 
-/** 対象が何日ヒットしなければ「休眠」と見なすか。 */
-const DORMANT_DAYS = 180;
-/** 何回続けて失敗したら知らせるか。 */
-const FAILING_STREAK = 3;
-
-/**
- * 対象の様子を一目で。
- *
- * 監視対象は増える一方で、放っておくと「もう更新の来ない作者」と「ずっと
- * 失敗している対象」が同じ顔で並ぶ。どちらも確認のたびに時間を使うので、
- * 畳むか外すかを決められるようにする。
- */
-export function TargetHealthBadge({ target }: { target: UpdateTarget }) {
-  const errors = target.consecutiveErrors ?? 0;
-  if (errors >= FAILING_STREAK) {
-    return <Tooltip label={`${errors}回続けて確認に失敗しています`}><Badge size="xs" color="red" variant="light" style={{ flex: "none" }}>確認できていません</Badge></Tooltip>;
-  }
-  if (!target.enabled) return <Badge size="xs" color="gray" variant="light" style={{ flex: "none" }}>停止中</Badge>;
-  const reference = target.lastHitAt ?? target.createdAt;
-  const days = (Date.now() - new Date(reference).getTime()) / 86_400_000;
-  if (Number.isFinite(days) && days >= DORMANT_DAYS) {
-    return <Tooltip label={`${Math.round(days)}日、新しいものが見つかっていません`}><Badge size="xs" color="gray" variant="light" style={{ flex: "none" }}>休眠</Badge></Tooltip>;
-  }
-  return null;
-}
-
 function isSavableCandidate(candidate: UpdateJobSnapshot["candidates"][number], allowQueued = false) {
   return isSavableCandidateStatus(candidate.status) || (allowQueued && candidate.status === "queued");
 }
@@ -1007,14 +989,17 @@ function candidateStatusMeta(candidate: UpdateJobSnapshot["candidates"][number])
 }
 
 /** 自動確認の状態を一行で。設定画面を開かなくても、いまの約束が読める。 */
-function describeSchedule(schedule: UpdateScheduleSettings | undefined): string {
+function describeSchedule(schedule: UpdateScheduleSettings | undefined, groups: WatchGroup[] | undefined): string {
   if (!schedule) return "…";
   const mode = schedule.mode === "auto_save" ? "確認して保存" : "確認のみ";
   const when: string[] = [];
   if (schedule.onStartup) when.push("起動時");
   if (schedule.intervalHours > 0) when.push(`${schedule.intervalHours}時間ごと`);
   if (!when.length) return "オフ";
-  return `${when.join(" · ")}・${mode}`;
+  if (schedule.groupId === null) return `${when.join(" · ")}・${mode}`;
+  if (!groups) return "…";
+  const group = groups.find((item) => item.id === schedule.groupId);
+  return group ? `${when.join(" · ")}・「${group.name}」を${mode}` : "グループが見つからず停止中";
 }
 
 function StatusBadge({ job }: { job: UpdateJobSummary }) {

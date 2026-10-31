@@ -1,7 +1,7 @@
 import { SeriesFilterSelect } from "./SeriesFilterSelect";
 import { parseSearchMode, useDefaultSearchMode } from "@/lib/searchPreferences";
 import { SearchMethodMenu } from "@/components/SearchMethodMenu";
-import { FilterChoiceGroup } from "@/components/FilterChoiceGroup";
+import { FilterChoiceGroup, FilterMultiChoiceGroup } from "@/components/FilterChoiceGroup";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { acquisitionFilters, acquisitionFilterName, parseAcquisitionFilter } from "@/lib/acquisition";
 import type { LibraryAcquisitionFilter } from "@/types/library";
@@ -11,7 +11,6 @@ import {
   Badge,
   Box,
   Button,
-  Checkbox,
   Combobox,
   Divider,
   Group,
@@ -1905,7 +1904,7 @@ export default function LibraryPage() {
           runtime={runtime}
           authors={facets.data?.authors ?? []}
           tags={facets.data?.tags ?? []}
-          contentTypes={facets.data?.contentTypes.map((item) => ({ value: item.name, label: `${item.name} (${item.count})` })) ?? []}
+          contentTypes={facets.data?.contentTypes.map((item) => ({ value: item.name, label: `${contentTypeName(item.name)} (${formatNumber(item.count)})` })) ?? []}
           onApply={(nextFilters, nextScope, nextVersionScope) => { writeUrl({ filters: nextFilters, entityScope: nextScope, versionScope: nextVersionScope }); filterDrawer.close(); }}
         />
       </Modal>
@@ -2496,6 +2495,26 @@ function FacetSelectionSummary({ filters, onRemove }: {
   );
 }
 
+const RECENT_DATE_PRESETS = [
+  { value: "7", label: "直近7日" },
+  { value: "30", label: "直近30日" },
+  { value: "365", label: "直近1年" },
+] as const;
+type RecentDatePreset = (typeof RECENT_DATE_PRESETS)[number]["value"];
+
+/** 今日から `days` 日さかのぼった日付（その日を含む）。入力欄と同じ YYYY-MM-DD。 */
+function recentDateFrom(days: RecentDatePreset, today = new Date()): string {
+  const from = new Date(today.getFullYear(), today.getMonth(), today.getDate() - Number(days) + 1);
+  const pad = (part: number) => String(part).padStart(2, "0");
+  return `${from.getFullYear()}-${pad(from.getMonth() + 1)}-${pad(from.getDate())}`;
+}
+
+/** いまの開始日・終了日が、どの「直近」と同じか。手で入れた期間なら null。 */
+function recentDatePreset(dateFrom: string, dateTo: string): RecentDatePreset | null {
+  if (!dateFrom || dateTo) return null;
+  return RECENT_DATE_PRESETS.find((preset) => recentDateFrom(preset.value) === dateFrom)?.value ?? null;
+}
+
 function FilterForm({ value, scope, versionScope, tab, runtime, authors, tags, contentTypes, onApply }: {
   value: Filters;
   scope: EntityScopeFilters;
@@ -2849,26 +2868,29 @@ function FilterForm({ value, scope, versionScope, tab, runtime, authors, tags, c
           aria-labelledby={`filter-spotlight-tab-${activeSection}`}
         >
           {activeSection === "entity" && entityTab && (
-            <Stack gap="md">
-              <SimpleGrid cols={{ base: 1, xs: tab === "series" ? 3 : 2 }} spacing="sm">
-                <Select size="sm" label="更新監視" clearable placeholder="すべて" data={[{ value: "watched", label: "監視中" }, { value: "paused", label: "停止中" }, { value: "unwatched", label: "未登録" }]} value={scopeDraft.watch} onChange={(watch) => setScopeDraft({ ...scopeDraft, watch: parseEntityWatch(watch) })} />
-                <NumberInput size="sm" label="作品数の下限" placeholder="指定なし" hideControls min={0} max={Number.MAX_SAFE_INTEGER} allowDecimal={false} allowNegative={false} value={scopeDraft.minWorkCount} onChange={(minWorkCount) => setScopeDraft({ ...scopeDraft, minWorkCount: numericFilter(typeof minWorkCount === "string" ? Number.parseInt(minWorkCount, 10) : minWorkCount) })} />
-                {tab === "series" && <Select size="sm" label="連載の状態" clearable placeholder="すべて" data={[{ value: "concluded", label: "完結" }, { value: "ongoing", label: "連載中" }]} value={scopeDraft.concluded === null ? null : scopeDraft.concluded ? "concluded" : "ongoing"} onChange={(state) => setScopeDraft({ ...scopeDraft, concluded: state === "concluded" ? true : state === "ongoing" ? false : null })} />}
+            <Stack gap="sm">
+              <SimpleGrid cols={{ base: 1, xs: 2 }} spacing="sm">
+                <FilterChoiceGroup label="更新監視" value={scopeDraft.watch} options={[{ value: "watched", label: "監視中" }, { value: "paused", label: "停止中" }, { value: "unwatched", label: "未登録" }]} onChange={(watch) => setScopeDraft({ ...scopeDraft, watch })} />
+                {tab === "series" && <FilterChoiceGroup label="連載の状態" value={scopeDraft.concluded === null ? null : scopeDraft.concluded ? "concluded" : "ongoing"} options={[{ value: "concluded", label: "完結" }, { value: "ongoing", label: "連載中" }]} onChange={(state) => setScopeDraft({ ...scopeDraft, concluded: state === "concluded" ? true : state === "ongoing" ? false : null })} />}
               </SimpleGrid>
+              <Box maw={240}>
+                <NumberInput size="sm" label="作品数の下限" placeholder="指定なし" hideControls min={0} max={Number.MAX_SAFE_INTEGER} allowDecimal={false} allowNegative={false} value={scopeDraft.minWorkCount} onChange={(minWorkCount) => setScopeDraft({ ...scopeDraft, minWorkCount: numericFilter(typeof minWorkCount === "string" ? Number.parseInt(minWorkCount, 10) : minWorkCount) })} />
+              </Box>
             </Stack>
           )}
 
           {activeSection === "basic" && (
-            <Stack gap="md">
-              <Group gap="lg" wrap="wrap">
-                <Checkbox.Group value={draft.sources} onChange={(sources) => setDraft({ ...draft, sources })}>
-                  <Group gap="md"><Checkbox value="pixiv" label="pixiv" /><Checkbox value="fanbox" label="FANBOX" /></Group>
-                </Checkbox.Group>
-                <Select size="sm" w={200} aria-label="お気に入り" label="お気に入り" placeholder="すべて" clearable value={draft.favorite ? "only" : draft.excludeFavorite ? "exclude" : null} onChange={(value) => setDraft({ ...draft, favorite: value === "only", excludeFavorite: value === "exclude" })} data={[{ value: "only", label: "お気に入りのみ" }, { value: "exclude", label: "お気に入り以外" }]} />
-              </Group>
+            // どの項目も「押して選ぶ」にそろえる。保存元だけチェックボックス、ほかは
+            // 開いて選ぶ一覧で、同じ択一なのに操作がばらばらだった。
+            <Stack gap="sm">
               <SimpleGrid cols={{ base: 1, xs: 2 }} spacing="sm">
-                <Select size="sm" label="コンテンツ種別" placeholder="すべて" clearable data={contentTypes} value={draft.contentType} onChange={(contentType) => setDraft({ ...draft, contentType })} />
-                <Select size="sm" label="更新監視" clearable placeholder="すべて" data={[{ value: "watched", label: "監視中" }, { value: "unwatched", label: "未監視" }]} value={draft.watch} onChange={(watch) => setDraft({ ...draft, watch: parseWatchFilter(watch) })} />
+                <FilterMultiChoiceGroup label="保存元" values={draft.sources} options={[{ value: "pixiv", label: "pixiv" }, { value: "fanbox", label: "FANBOX" }]} onChange={(sources) => setDraft({ ...draft, sources })} />
+                <FilterChoiceGroup label="お気に入り" value={draft.favorite ? "only" : draft.excludeFavorite ? "exclude" : null} options={[{ value: "only", label: "お気に入りのみ" }, { value: "exclude", label: "お気に入り以外" }]} onChange={(value) => setDraft({ ...draft, favorite: value === "only", excludeFavorite: value === "exclude" })} />
+                <FilterChoiceGroup label="更新監視" value={draft.watch} options={[{ value: "watched", label: "監視中" }, { value: "unwatched", label: "未監視" }]} onChange={(watch) => setDraft({ ...draft, watch })} />
+                {/* 種別は保存してあるものから作る。数が多いときだけ一覧から選ぶ。 */}
+                {contentTypes.length <= 8
+                  ? <FilterChoiceGroup label="コンテンツ種別" value={draft.contentType} options={contentTypes} onChange={(contentType) => setDraft({ ...draft, contentType })} />
+                  : <Select size="sm" label="コンテンツ種別" placeholder="すべて" clearable data={contentTypes} value={draft.contentType} onChange={(contentType) => setDraft({ ...draft, contentType })} />}
               </SimpleGrid>
             </Stack>
           )}
@@ -2876,30 +2898,20 @@ function FilterForm({ value, scope, versionScope, tab, runtime, authors, tags, c
           {activeSection === "status" && (
             <Stack gap="sm">
               <FilterChoiceGroup label="取得状態" value={draft.acquisitionFilter} options={acquisitionFilters} onChange={(acquisitionFilter) => setDraft({ ...draft, acquisitionFilter })} />
-              <FilterChoiceGroup label="改稿状態" value={draft.revisionFilter} options={[{ value: "revised", label: "改稿あり" }, { value: "pending_revision", label: "未保存の改稿あり" }, { value: "saved_revisions", label: "保存済みの改稿あり" }, { value: "first_version", label: "改稿の保存なし" }]} onChange={(revisionFilter) => setDraft({ ...draft, revisionFilter })} />
+              <FilterChoiceGroup label="改稿状態" value={draft.revisionFilter} options={[{ value: "revised", label: "改稿あり" }, { value: "pending_revision", label: "未保存の改稿あり", startsGroup: true }, { value: "saved_revisions", label: "保存済みの改稿あり" }, { value: "first_version", label: "保存済みの改稿なし" }]} onChange={(revisionFilter) => setDraft({ ...draft, revisionFilter })} />
               <SimpleGrid cols={{ base: 1, xs: 2 }} spacing="sm">
                 <FilterChoiceGroup label="ローカル編集" value={draft.editFilter} options={[{ value: "edited", label: "編集あり" }, { value: "unedited", label: "編集なし" }]} onChange={(editFilter) => setDraft({ ...draft, editFilter })} />
                 <FilterChoiceGroup label="表紙" value={draft.coverFilter} options={[{ value: "has_cover", label: "表紙あり" }, { value: "no_cover", label: "表紙なし" }]} onChange={(coverFilter) => setDraft({ ...draft, coverFilter })} />
+                {/* 読みかけと検索する版も、上と同じ枠と押し方にする。枠の外に
+                    チェックボックスと横いっぱいの切り替えが浮いていた。 */}
+                <FilterChoiceGroup label="読書" value={draft.readingOnly ? "reading" : null} options={[{ value: "reading", label: "読みかけ" }]} onChange={(value) => setDraft({ ...draft, readingOnly: value === "reading" })} />
+                {!entityTab && (
+                  <div>
+                    <FilterChoiceGroup label="検索する版" allLabel="現在版だけ" value={versionScopeDraft === "all" ? "all" : null} options={[{ value: "all", label: "過去版も含む" }]} onChange={(next) => setVersionScopeDraft(next === "all" ? "all" : "current")} />
+                    {versionScopeDraft === "all" && <Text size="xs" c="dimmed" mt={6}>過去版で一致した結果も、作品ごとにまとめて表示します。</Text>}
+                  </div>
+                )}
               </SimpleGrid>
-              <Checkbox label="読みかけのみ" checked={draft.readingOnly} onChange={(event) => setDraft({ ...draft, readingOnly: event.currentTarget.checked })} />
-              {!entityTab && (
-                <div>
-                  <Text size="xs" fw={700} c="dimmed" mb={6}>検索する版</Text>
-                  <SegmentedControl
-                    size="sm"
-                    fullWidth
-                    aria-label="検索する版"
-                    value={versionScopeDraft}
-                    onChange={(next) => setVersionScopeDraft(next === "all" ? "all" : "current")}
-                    data={[
-                      { value: "current", label: "現在版だけ" },
-                      { value: "all", label: "過去版も含む" },
-                    ]}
-                  />
-                  {versionScopeDraft === "all" && <Text size="xs" c="dimmed" mt={6}>過去版で一致した結果も、作品ごとにまとめて表示します。</Text>}
-                </div>
-              )}
-
             </Stack>
           )}
 
@@ -2936,19 +2948,10 @@ function FilterForm({ value, scope, versionScope, tab, runtime, authors, tags, c
           )}
 
           {activeSection === "dates" && (
-            <Stack gap="md">
-              <SegmentedControl
-                size="sm"
-                fullWidth
-                aria-label="日付の種類"
-                value={draft.dateField}
-                onChange={(dateField) => setDraft({ ...draft, dateField: parseDateField(dateField) })}
-                data={[
-                  { value: "downloaded_at", label: "保存日" },
-                  { value: "source_created_at", label: "公開日" },
-                  { value: "source_updated_at", label: "更新日" },
-                ]}
-              />
+            <Stack gap="sm">
+              <FilterChoiceGroup label="日付の種類" allLabel={null} value={draft.dateField} options={[{ value: "downloaded_at", label: "保存日" }, { value: "source_created_at", label: "公開日" }, { value: "source_updated_at", label: "更新日" }]} onChange={(dateField) => setDraft({ ...draft, dateField: parseDateField(dateField) })} />
+              {/* よく使う幅はひと押しで。日付を二つ入れるのは、決まった期間を見たいときだけ。 */}
+              <FilterChoiceGroup label="期間" allLabel="指定なし" value={recentDatePreset(draft.dateFrom, draft.dateTo)} options={RECENT_DATE_PRESETS} onChange={(preset) => setDraft({ ...draft, dateFrom: preset ? recentDateFrom(preset) : "", dateTo: "" })} />
               <SimpleGrid cols={{ base: 1, xs: 2 }} spacing="sm">
                 <TextInput size="sm" type="date" label="開始日" value={draft.dateFrom} onChange={(event) => setDraft({ ...draft, dateFrom: event.currentTarget.value })} />
                 <TextInput size="sm" type="date" label="終了日" value={draft.dateTo} onChange={(event) => setDraft({ ...draft, dateTo: event.currentTarget.value })} />

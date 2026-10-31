@@ -1,5 +1,5 @@
 //! On-demand inspection of one work; list screens never read its JSON or image bytes.
-use super::{assets_for_version_path, reader_version_path, Database};
+use super::{active_edit_revision_locked, assets_for_version_path, reader_version_path, Database};
 use crate::database::AssetEntry;
 use crate::downloader::asset_downloader::{asset_source_identity, extract_download_targets};
 use regex::Regex;
@@ -40,6 +40,9 @@ pub struct RevisionMetadata {
 pub struct RevisionSnapshot {
     pub text: String,
     pub metadata: RevisionMetadata,
+    /// 編集画面で足した絵。どの保存版にも属さないので、編集版にしか無い。
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub added_images: Vec<AssetEntry>,
 }
 
 fn text_at(value: &Value, paths: &[&str]) -> Option<String> {
@@ -337,6 +340,78 @@ pub struct WorkAcquisitionDetails {
 }
 
 impl Database {
+    /// 反映中の編集を、保存版と同じ形で読む。履歴で、もとにした版と比べるため。
+    ///
+    /// 編集は取得元の版を増やさない。版の上に重ねた層である。それを履歴から
+    /// 外したままにすると、編集したのに版が一つしか無いように見える。
+    pub fn get_active_edit_snapshot(
+        &self,
+        download_id: i64,
+    ) -> Result<Option<RevisionSnapshot>, String> {
+        let conn = self.read_conn()?;
+        let revision = active_edit_revision_locked(&conn, download_id)?;
+        drop(conn);
+        let Some(revision) = revision else {
+            return Ok(None);
+        };
+        let Some(edit) = self.active_edit_source_form(download_id)? else {
+            return Ok(None);
+        };
+        let download = self.get_download(download_id)?;
+        let versions = self.get_versions(download_id)?;
+        let mut snapshot = self.get_revision_snapshot(download_id, revision.base_version)?;
+        let raw =
+            self.read_download_json_for_version(&download, &versions, revision.base_version)?;
+        let mut value: Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+        // 保存版と同じ道筋で平文にする。差分に出るのは利用者が変えたところだけで、
+        // 組み方の違いは出ない。
+        if download.source == "fanbox" {
+            let pointer = if value.get("body").is_some() {
+                "/body"
+            } else {
+                "/post/body"
+            };
+            if let Some(body) = value.pointer_mut(pointer).and_then(Value::as_object_mut) {
+                body.insert("blocks".into(), Value::Array(edit.fanbox_blocks));
+                body.insert("text".into(), Value::String(edit.plain_text.clone()));
+            }
+        } else {
+            value["text"] = Value::String(edit.pixiv_text.clone());
+            if let Some(detail) = value.get_mut("detail").filter(|detail| detail.is_object()) {
+                detail["text"] = Value::String(edit.pixiv_text.clone());
+            }
+        }
+        snapshot.text = crate::commands::downloader::fetched_plain_text(&value, &download.source);
+        if let Some(title) = revision.title.filter(|title| !title.trim().is_empty()) {
+            snapshot.metadata.title = Some(title);
+        }
+        // 編集で消えた参照は、もう読む本文に無い。欠けた挿絵として並べない。
+        let body = if download.source == "fanbox" {
+            edit.plain_text
+        } else {
+            edit.pixiv_text
+        };
+        snapshot
+            .metadata
+            .assets
+            .retain(|item| !item.label.starts_with('[') || body.contains(item.label.as_str()));
+        for image in &edit.added_images {
+            let available = std::fs::metadata(&image.local_path)
+                .is_ok_and(|metadata| metadata.is_file() && metadata.len() > 0);
+            snapshot.metadata.assets.push(RevisionAsset {
+                key: format!("edit:{}", image.filename),
+                kind: "illustrations".to_string(),
+                label: image.filename.clone(),
+                source: "編集で追加".to_string(),
+                content_hash: available.then(|| file_digest(&image.local_path)).flatten(),
+                local_path: available.then(|| image.local_path.clone()),
+                available: Some(available),
+            });
+        }
+        snapshot.added_images = edit.added_images;
+        Ok(Some(snapshot))
+    }
+
     pub fn get_revision_snapshot(
         &self,
         download_id: i64,
@@ -392,6 +467,7 @@ impl Database {
         Ok(RevisionSnapshot {
             text: crate::commands::downloader::fetched_plain_text(&value, &download.source),
             metadata,
+            added_images: Vec::new(),
         })
     }
 

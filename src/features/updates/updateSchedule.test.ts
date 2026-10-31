@@ -48,5 +48,9 @@ describe("update schedule", () => {
     expect(describeSchedule(normalizeSchedule({}))).toBe("自動では実行しません");
     expect(describeSchedule(normalizeSchedule({ onStartup: true, intervalHours: 12, mode: "auto_save" })))
       .toBe("起動時 と 12時間ごとに確認して保存");
+    const grouped = normalizeSchedule({ intervalHours: 6, groupId: 3 });
+    expect(describeSchedule(grouped, "毎日見る")).toBe("6時間ごとに確認のみ（「毎日見る」だけ）");
+    expect(describeSchedule(grouped, null)).toBe("範囲にしたグループが見つからないため、実行しません");
+    expect(normalizeSchedule({ groupId: -1 }).groupId).toBeNull();
   });
 });

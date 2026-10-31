@@ -9,6 +9,7 @@ vi.mock("@/services/dbApi", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/services/dbApi")>()),
   isTauriRuntime: () => true,
   listUpdateTargets: async () => [],
+  listWatchGroups: async () => [],
 }));
 vi.mock("@/services/updateJobApi", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/services/updateJobApi")>()),

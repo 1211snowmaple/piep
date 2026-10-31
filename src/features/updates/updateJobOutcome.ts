@@ -31,7 +31,7 @@ export function summarizeUpdateJobItems(items: UpdateJobItemState[]) {
 }
 
 export function updateJobSubject(job: UpdateJobSummary): string {
-  const scope = ({ all: "すべての監視対象", work: "作品", author: "作者", series: "シリーズ", save: "候補" } as Record<string, string>)[job.scope] ?? job.scope;
+  const scope = ({ all: "すべての監視対象", work: "作品", author: "作者", series: "シリーズ", targets: "監視グループ", save: "候補" } as Record<string, string>)[job.scope] ?? job.scope;
   const mode = ({ check_only: "確認のみ", auto_save: "確認と自動保存", save: "保存" } as Record<string, string>)[job.mode] ?? job.mode;
   if (!job.subjectLabel) return `${scope} · ${mode}`;
   const provider = job.subjectSource === "fanbox" ? "FANBOX" : job.subjectSource === "pixiv" ? "pixiv" : job.subjectSource;

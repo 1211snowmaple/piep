@@ -12,7 +12,8 @@ export type UpdateJobStatus =
   | "failed";
 
 /** `save` は「選んだ作品をまとめて保存する」ジョブ。監視対象は見に行かない。 */
-export type UpdateJobScope = "all" | "work" | "author" | "series" | "save";
+/** `targets` は監視グループの確認。`targetIds` に挙げた作者・シリーズだけを見る。 */
+export type UpdateJobScope = "all" | "work" | "author" | "series" | "targets" | "save";
 export type UpdateJobMode = "check_only" | "auto_save" | "save";
 
 export interface UpdateJobCredentials {
@@ -62,7 +63,10 @@ export interface UpdateJobSummary {
   candidateCount: number;
   savedCount: number;
   errorCount: number;
+  /** この回で新しく保留になった、または保留の種類が変わった件数。 */
   heldCount?: number;
+  /** 前の回から同じ理由で保留のままの件数。確かめたが、知らせることはない。 */
+  knownHeldCount?: number;
   activeLabel: string | null;
   startedAt: string;
   updatedAt: string;
@@ -168,6 +172,15 @@ export function listDeferredUpdateCandidatesCommand(): Promise<DeferredUpdateCan
 
 export function countSavedDeferredUpdateCandidatesCommand(): Promise<number> {
   return invoke("count_saved_deferred_update_candidates");
+}
+
+/** 一部保存のうち、今の版でまだ取り直していない作品。保存ジョブへそのまま渡せる。 */
+export function listIncompleteSaveRepairWorksCommand(limit: number): Promise<SaveJobWork[]> {
+  return invoke("list_incomplete_save_repair_works", { limit });
+}
+
+export function recordIncompleteSaveRepairAttemptsCommand(sourceIds: string[]): Promise<void> {
+  return invoke("record_incomplete_save_repair_attempts", { sourceIds });
 }
 
 export async function recheckDeferredUpdateCandidatesCommand(keys: string[], refreshPostAccess = false): Promise<UpdateJobSnapshot> {

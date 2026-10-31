@@ -165,7 +165,8 @@ export default function DashboardPage() {
               <Group justify="space-between" mb="md">
                 <Box>
                   <Text fw={700}>保存の推移</Text>
-                  <Text size="xs" c="dimmed" mt={3}>直近{chartData.length}か月 · {formatNumber(data.stats.totalDownloads)}件</Text>
+                  {/* 件数は棒に並んだ月の合計。棚全体の数は下の「全期間の内訳」にある。 */}
+                  <Text size="xs" c="dimmed" mt={3}>直近{chartData.length}か月 · {formatNumber(chartData.reduce((sum, month) => sum + month.total, 0))}件</Text>
                 </Box>
                 <Group gap="md"><TrendLegend color="#0096fa" label="pixiv" /><TrendLegend color="#d1a900" label="FANBOX" /></Group>
               </Group>

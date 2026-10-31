@@ -1,8 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
 import { createTextDiff, type TextDiffResult } from "./textDiff";
 
-/** これより短ければ差分は1フレームのうちに終わる。worker を使っても読み込み中の表示がちらつくだけになる。 */
-const WORKER_THRESHOLD = 20_000;
+/**
+ * これより短ければ、全体を書き換えた版どうしでも差分は1フレームのうちに終わる。
+ *
+ * 重さを決めるのは長さより違いの多さで、まったく違う本文どうしだと合わせて
+ * 4,000字で約200ms、20,000字で約700msかかる。以前は20,000字まで画面の側で
+ * 計算していたので、書き換えの多い版を開くと画面が止まっていた。
+ */
+const WORKER_THRESHOLD = 1_000;
 
 /**
  * 二つの版の差分を、ページを固めずに取る。

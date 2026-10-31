@@ -688,9 +688,9 @@ const EditorBlock = memo(function EditorBlock({ index, block, assets, total, for
         </Group>
         <Group gap={2} wrap="nowrap">
           <BlockMenuTarget allowPageBreak={allowPageBreak} onInsert={(type) => onInsert(type, index + 1)} onImage={() => onImage(index + 1)} />
-          <Tooltip label="上へ"><ActionIcon size="sm" variant="subtle" color="gray" disabled={index === 0} aria-label={`ブロック ${index + 1}を上へ`} onClick={() => onMove(index, -1)}><Icons.up size={IconSize.menu} /></ActionIcon></Tooltip>
-          <Tooltip label="下へ"><ActionIcon size="sm" variant="subtle" color="gray" disabled={index === total - 1} aria-label={`ブロック ${index + 1}を下へ`} onClick={() => onMove(index, 1)}><Icons.down size={IconSize.menu} /></ActionIcon></Tooltip>
-          <Tooltip label="削除"><ActionIcon size="sm" variant="subtle" color="red" aria-label={`ブロック ${index + 1}を削除`} onClick={() => onRemove(index)}><Icons.delete size={IconSize.menu} /></ActionIcon></Tooltip>
+          <Tooltip label="上へ"><ActionIcon size={26} variant="subtle" color="gray" disabled={index === 0} aria-label={`ブロック ${index + 1}を上へ`} onClick={() => onMove(index, -1)}><Icons.up size={IconSize.menu} /></ActionIcon></Tooltip>
+          <Tooltip label="下へ"><ActionIcon size={26} variant="subtle" color="gray" disabled={index === total - 1} aria-label={`ブロック ${index + 1}を下へ`} onClick={() => onMove(index, 1)}><Icons.down size={IconSize.menu} /></ActionIcon></Tooltip>
+          <Tooltip label="削除"><ActionIcon size={26} variant="subtle" color="red" aria-label={`ブロック ${index + 1}を削除`} onClick={() => onRemove(index)}><Icons.delete size={IconSize.menu} /></ActionIcon></Tooltip>
         </Group>
       </Group>
       <Box className="editor-block__body" p="sm">
@@ -711,7 +711,7 @@ function BlockInsertMenu({ label, allowPageBreak, onInsert, onImage }: { label: 
 }
 
 function BlockMenuTarget({ allowPageBreak, onInsert, onImage }: { allowPageBreak: boolean; onInsert: (type: EditorBlockType) => void; onImage: () => void }) {
-  return <Menu position="bottom-end"><Menu.Target><Tooltip label="この下に追加"><ActionIcon size="sm" variant="subtle" color="gray" aria-label="このブロックの下に追加"><Icons.add size={IconSize.menu} /></ActionIcon></Tooltip></Menu.Target><BlockMenuDropdown allowPageBreak={allowPageBreak} onInsert={onInsert} onImage={onImage} /></Menu>;
+  return <Menu position="bottom-end"><Menu.Target><Tooltip label="この下に追加"><ActionIcon size={26} variant="subtle" color="gray" aria-label="このブロックの下に追加"><Icons.add size={IconSize.menu} /></ActionIcon></Tooltip></Menu.Target><BlockMenuDropdown allowPageBreak={allowPageBreak} onInsert={onInsert} onImage={onImage} /></Menu>;
 }
 
 function BlockMenuDropdown({ allowPageBreak, onInsert, onImage }: { allowPageBreak: boolean; onInsert: (type: EditorBlockType) => void; onImage: () => void }) {
