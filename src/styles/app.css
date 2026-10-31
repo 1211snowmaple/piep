@@ -3450,6 +3450,17 @@ select {
   border-color: light-dark(#e0d7ef, #3a3050);
   background: light-dark(#fbf9ff, #191527);
 }
+/* 照合で一部だけ確かめられた文。断定に見せないよう下線で区別する。 */
+.assist-claim-partial {
+  text-decoration: underline dotted var(--mantine-color-dimmed);
+  text-underline-offset: 3px;
+}
+
+.assist-claim-evidence {
+  border-left: 2px solid var(--mantine-color-default-border);
+  padding-left: 8px;
+}
+
 .assist-note {
   padding: 8px 10px;
   border-left: 3px solid var(--mantine-color-grape-5);

@@ -43,6 +43,28 @@ describe("source extract notes", () => {
     expect(screen.getByText("原文")).toBeVisible();
   });
 
+  it("shows written synopses with their evidence and keeps unchecked sentences apart", () => {
+    const claims = [
+      { text: "灯台守が船を見つける。", sources: [3], evidence: ["彼は沖の船を見つけた。"], verdict: "supported" as const },
+      { text: "船長は旧友だった。", sources: [9], evidence: ["「久しぶりだな」"], verdict: "partial" as const, concern: "旧友とは書かれていない" },
+      { text: "二人は結婚する。", sources: [12], evidence: ["灯りが消えた。"], verdict: "unsupported" as const, concern: "結婚の記述が無い" },
+    ];
+    render(<MantineProvider><AssistNoteBody text="灯台守が船を見つける。船長は旧友だった。" claims={claims} promptVersion="work_synopsis/v12" /></MantineProvider>);
+    expect(screen.getAllByText("灯台守が船を見つける。")[0]).toBeVisible();
+    expect(screen.getByText(/※の1文は一部だけ確認/)).toBeInTheDocument();
+    expect(screen.queryByText(/原文から選んだ抜粋です/)).not.toBeInTheDocument();
+    const evidence = screen.getByText("彼は沖の船を見つけた。");
+    expect(evidence).not.toBeVisible();
+    evidence.closest("details")?.setAttribute("open", "");
+    expect(evidence).toBeVisible();
+    expect(screen.getByText("指摘: 旧友とは書かれていない")).toBeInTheDocument();
+    const doubtful = screen.getByText("原文で確かめられなかった文（1）").closest("details");
+    expect(doubtful).not.toHaveAttribute("open");
+    // 確かめられなかった文は本文に混ぜず、別枠にだけ残す。
+    expect(screen.getAllByText("二人は結婚する。")).toHaveLength(1);
+    expect(screen.getAllByText("二人は結婚する。")[0].closest("details")).toBe(doubtful);
+  });
+
   it("does not label older free text or tag statistics as source excerpts", () => {
     const { rerender } = render(<MantineProvider><AssistNoteBody text="以前のメモ" promptVersion="work_synopsis/v1" /></MantineProvider>);
     expect(screen.queryByText(/原文から選んだ抜粋です/)).not.toBeInTheDocument();

@@ -5,7 +5,7 @@ import { useMutation } from "@tanstack/react-query";
 import { errorMessage } from "@/lib/format";
 import { Icons, IconSize } from "@/lib/icons";
 import { useAssist } from "@/features/assist/useAssist";
-import { interpretSearch, type SearchIntent } from "@/services/assistApi";
+import { interpretSearch, type SearchIntent, type ToolTrace } from "@/services/assistApi";
 
 /**
  * 「こういうのが読みたい」を意味検索に渡す。モデルが使える場合は
@@ -118,6 +118,9 @@ export function SearchAssistModal({
                 <Badge variant="outline">{intent.query}</Badge>
               </Group>
             )}
+            {intent.consulted && intent.consulted.length > 0 && (
+              <Text size="xs" c="dimmed">棚で調べたこと: {intent.consulted.map(describeLookup).join(" · ")}</Text>
+            )}
             {empty && (
               <Text size="sm" c="dimmed">棚の言葉には言い換えられませんでした。別の言い方で試してみてください。</Text>
             )}
@@ -136,4 +139,30 @@ export function SearchAssistModal({
       </Stack>
     </Modal>
   );
+}
+
+/** モデルの道具の呼び出しを、何を調べたかの短い言葉にする。 */
+export function describeLookup(trace: ToolTrace): string {
+  let args: Record<string, unknown> = {};
+  try {
+    const parsed: unknown = JSON.parse(trace.arguments);
+    if (parsed && typeof parsed === "object") args = parsed as Record<string, unknown>;
+  } catch {
+    // 切り詰められた引数は読めない。何を調べたかだけを示す。
+  }
+  const tags = (key: string) => (Array.isArray(args[key]) ? (args[key] as unknown[]).map(String) : []);
+  const failed = trace.ok ? "" : "（失敗）";
+  switch (trace.name) {
+    case "find_tags":
+      return `「${String(args.text ?? "")}」を含むタグ${failed}`;
+    case "describe_tag":
+      return `タグ「${String(args.tag ?? "")}」の使われ方${failed}`;
+    case "count_works": {
+      const joined = tags("includeTags").join(args.mode === "or" ? "／" : "＋");
+      const excluded = tags("excludeTags");
+      return `${joined || "条件なし"}${excluded.length ? `（${excluded.join("・")}を除く）` : ""}の件数${failed}`;
+    }
+    default:
+      return `${trace.name}${failed}`;
+  }
 }

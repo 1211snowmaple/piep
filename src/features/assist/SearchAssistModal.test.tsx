@@ -2,7 +2,7 @@ import { MantineProvider } from "@mantine/core";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
-import { SearchAssistModal } from "@/features/assist/SearchAssistModal";
+import { describeLookup, SearchAssistModal } from "@/features/assist/SearchAssistModal";
 
 const interpretSearch = vi.hoisted(() => vi.fn());
 const assist = vi.hoisted(() => ({ engine: null as object | null }));
@@ -79,4 +79,28 @@ it("ignores a reply after closing and reopening the modal", async () => {
   await act(async () => { resolve({ includeTags: ["海"], excludeTags: [], query: "", reading: "前の応答" }); });
   await waitFor(() => expect(screen.queryByText("前の応答")).toBeNull());
   expect(screen.getByRole("button", { name: "この条件で棚を絞る" })).toBeDisabled();
+});
+
+it("shows what the model looked up on the shelf in plain words", async () => {
+  assist.engine = { model: "test" };
+  interpretSearch.mockResolvedValueOnce({
+    includeTags: ["催眠術"], excludeTags: [], query: "催眠で壊れる話", reading: "催眠もの",
+    consulted: [
+      { name: "find_tags", arguments: '{"text":"催眠"}', ok: true },
+      { name: "count_works", arguments: '{"includeTags":["催眠術","洗脳"],"mode":"or","excludeTags":["NTR"]}', ok: true },
+    ],
+  });
+  render(
+    <MantineProvider><QueryClientProvider client={new QueryClient()}>
+      <SearchAssistModal opened onClose={vi.fn()} onApply={vi.fn()} />
+    </QueryClientProvider></MantineProvider>,
+  );
+  fireEvent.change(screen.getByRole("textbox", { name: "どんなものが読みたいか" }), { target: { value: "催眠で壊れる話" } });
+  fireEvent.click(screen.getByRole("button", { name: "AIで条件に言い換える" }));
+  expect(await screen.findByText("棚で調べたこと: 「催眠」を含むタグ · 催眠術／洗脳（NTRを除く）の件数")).toBeInTheDocument();
+});
+
+it("names a failed or truncated lookup without guessing its arguments", () => {
+  expect(describeLookup({ name: "describe_tag", arguments: '{"tag":"純愛"}', ok: false })).toBe("タグ「純愛」の使われ方（失敗）");
+  expect(describeLookup({ name: "count_works", arguments: '{"includeTags":["a"…（以下省略）', ok: true })).toBe("条件なしの件数");
 });
