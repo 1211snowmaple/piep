@@ -365,6 +365,15 @@ export interface SearchIntent {
   query: string;
   /** どう読んだかの一行。外れていたら利用者が気づける。 */
   reading: string;
+  /** 答える前にモデルが棚で調べたこと。道具を使わなかったときは無い。 */
+  consulted?: ToolTrace[];
+}
+
+/** モデルが呼んだ読み取り専用の道具。arguments はモデルが渡した JSON 文字列。 */
+export interface ToolTrace {
+  name: string;
+  arguments: string;
+  ok: boolean;
 }
 
 /** 「こういうのが読みたい」を、棚のタグと検索語に翻訳する。検索はしない。 */
@@ -374,16 +383,31 @@ export function interpretSearch(engine: AssistEngine, phrase: string): Promise<S
 
 // ---- 覚え書き -------------------------------------------------------------
 
+/** 書き下ろしのあらすじの一文と、アプリが番号から引いた原文の根拠。 */
+export interface GroundedClaim {
+  text: string;
+  /** 原文の文番号（0始まり）。 */
+  sources: number[];
+  /** 番号の原文。モデルが書き写したものではない。 */
+  evidence: string[];
+  /** 本文を見せない照合役が、根拠の文とその前後だけで判定した結果。 */
+  verdict: "supported" | "partial" | "unsupported";
+  concern?: string | null;
+}
+
 export interface AssistNote {
   text: string;
   /** Original source suffix supplied by the app, independently of the note text. */
   sourceTail?: string | null;
+  /** 書き下ろし方式（v12〜）のときだけある。 */
+  claims?: GroundedClaim[] | null;
 }
 
 /** 保存してある覚え書き。どのモデルが書いたかも残る。 */
 export interface StoredNote {
   text: string;
   sourceTail?: string | null;
+  claims?: GroundedClaim[] | null;
   modelId: string;
   createdAt: string;
   featureId: AssistFeatureId;

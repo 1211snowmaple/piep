@@ -376,6 +376,9 @@ fn add_missing_columns(conn: &Connection) -> Result<(), rusqlite::Error> {
         // App source context must not be inferred from labels in stored prose.
         // Legacy notes remain unchanged and have no separate context field.
         ("ai_notes", "source_tail", "TEXT"),
+        // 書き下ろしのあらすじの、文ごとの根拠番号・根拠の原文・照合結果（JSON）。
+        // 抽出方式の旧メモには無い。本文から推測して埋め直さない。
+        ("ai_notes", "claims_json", "TEXT"),
         // 添付の取り直しを、一度で終わらせるための覚え書き。
         //
         // 「JSONが要求する添付」と「実際に持っている添付」を突き合わせるだけ

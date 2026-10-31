@@ -79,6 +79,7 @@ function RecapForPair({
         <AssistNoteBody
           text={note.data.text}
           sourceTail={note.data.sourceTail}
+          claims={note.data.claims}
           modelId={note.data.modelId}
           createdAt={note.data.createdAt}
           promptVersion={note.data.promptVersion}

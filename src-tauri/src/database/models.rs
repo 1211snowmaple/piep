@@ -1346,7 +1346,7 @@ pub struct EntityFacetScope {
     pub concluded: Option<bool>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchV2Params {
     pub text: Option<String>,

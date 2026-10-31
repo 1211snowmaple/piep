@@ -153,7 +153,9 @@ pub async fn assist_suggest_tags(
         FEATURE_TAG_SUGGESTION,
         &serde_json::json!({ "work": &work, "vocabulary": &vocabulary }),
     )?;
-    let value = assist::suggest_tags(&engine, &work, &vocabulary).await?;
+    let state = app.state::<Arc<AppState>>().inner().clone();
+    let shelf: Arc<dyn assist::ShelfLookup> = Arc::new(LibraryShelf(state));
+    let value = assist::suggest_tags(&engine, &work, &vocabulary, Some(shelf)).await?;
     Ok(GeneratedAssist { value, provenance })
 }
 
@@ -217,8 +219,40 @@ pub async fn assist_interpret_search(
         FEATURE_NATURAL_LANGUAGE_SEARCH,
         &serde_json::json!({ "phrase": &phrase, "vocabulary": &vocabulary }),
     )?;
-    let value = assist::interpret_search(&engine, &phrase, &vocabulary).await?;
+    let state = app.state::<Arc<AppState>>().inner().clone();
+    let shelf: Arc<dyn assist::ShelfLookup> = Arc::new(LibraryShelf(state));
+    let value = assist::interpret_search(&engine, &phrase, &vocabulary, Some(shelf)).await?;
     Ok(GeneratedAssist { value, provenance })
+}
+
+/// モデルの道具が読む棚。読み取りの接続だけを使い、書き換えはしない。
+struct LibraryShelf(Arc<AppState>);
+
+impl assist::ShelfLookup for LibraryShelf {
+    fn tags_containing(
+        &self,
+        text: &str,
+        limit: usize,
+    ) -> Result<Vec<assist::ShelfTagCount>, String> {
+        self.0.db.shelf_tags_containing(text, limit)
+    }
+
+    fn existing_tags(&self, names: &[String]) -> Result<Vec<String>, String> {
+        self.0.db.existing_tag_names(names)
+    }
+
+    fn count_works(
+        &self,
+        include: &[String],
+        or_mode: bool,
+        exclude: &[String],
+    ) -> Result<i64, String> {
+        self.0.db.count_works_with_tags(include, or_mode, exclude)
+    }
+
+    fn tag_profile(&self, name: &str) -> Result<Option<assist::ShelfTagProfile>, String> {
+        self.0.db.shelf_tag_profile(name)
+    }
 }
 
 // ---- 作風のメモ -----------------------------------------------------------
@@ -286,12 +320,14 @@ pub async fn assist_summarize_work(
         state.db.work_facts_with_body(download_id)
     })
     .await?;
-    let provenance = assist::generation_provenance(
+    let mut provenance = assist::generation_provenance(
         &engine,
         FEATURE_WORK_SYNOPSIS,
         &serde_json::json!({ "work": &work, "body": &body }),
     )?;
     let value = assist::summarize_work(&engine, &work, &body).await?;
+    provenance.prompt_version =
+        assist::prompt_version_for_note(FEATURE_WORK_SYNOPSIS, &value).to_string();
     let saved_provenance = provenance.clone();
     let note = value.clone();
     write_blocking(&app, move |state| {
@@ -316,21 +352,26 @@ pub async fn assist_recap_previous(
     current_download_id: i64,
 ) -> Result<GeneratedAssist<AssistNote>, String> {
     assist::ensure_body_allowed(&engine)?;
-    let (work, body) = read_blocking(&app, move |state| {
-        state.db.work_facts_with_body(previous_download_id)
+    let (work, body, memory) = read_blocking(&app, move |state| {
+        let (work, body) = state.db.work_facts_with_body(previous_download_id)?;
+        let memory = state.db.recap_memory_before(previous_download_id)?;
+        Ok((work, body, memory))
     })
     .await?;
-    let provenance = assist::generation_provenance(
+    let mut provenance = assist::generation_provenance(
         &engine,
         FEATURE_READER_RECAP,
         &serde_json::json!({
             "previousDownloadId": previous_download_id,
             "currentDownloadId": current_download_id,
             "work": &work,
-            "body": &body
+            "body": &body,
+            "memory": &memory
         }),
     )?;
-    let value = assist::recap_previous(&engine, &work.title, &body).await?;
+    let value = assist::recap_previous(&engine, &work.title, &body, memory.as_deref()).await?;
+    provenance.prompt_version =
+        assist::prompt_version_for_note(FEATURE_READER_RECAP, &value).to_string();
     // 覚え書きは**読もうとしている話**にぶら下げる。同じ前の話でも、
     // どの続きを読む前かで欲しいものが変わることがある。
     let key = recap_note_key(current_download_id, previous_download_id);
@@ -449,6 +490,7 @@ mod tests {
         let mut note = AiNote {
             text: "memo".into(),
             source_tail: None,
+            claims: None,
             model_id: "model-a".into(),
             feature_id: FEATURE_WORK_SYNOPSIS.into(),
             prompt_version: "work_synopsis/v2".into(),
