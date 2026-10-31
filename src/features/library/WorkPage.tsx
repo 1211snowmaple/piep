@@ -644,32 +644,21 @@ export default function WorkPage() {
         </Tabs.Panel>
         <Tabs.Panel value="history" pt="lg">
           {doc.isEdited && <Alert color="blue" mb="md">いま読める本文とEPUBにはローカル編集版を使います。ここには取得元から保存した版の履歴を表示しています。</Alert>}
-          <Grid gap="lg">
-            <Grid.Col span={{ base: 12, lg: 5 }}>
-              <Stack gap="xs">
-                {pendingRevision && <Paper component="button" type="button" p="md" withBorder className="version-row" data-source-newer data-active={selectedVersion === "pending" || undefined} onClick={() => setSelectedVersion("pending")}>
-                  <Group wrap="nowrap" align="flex-start">
-                    <ThemeIcon variant="light" color="yellow"><Icons.updates size={IconSize.menu} /></ThemeIcon>
-                    <Stack gap={3} flex={1} ta="left">
-                      <Group justify="space-between"><Text size="sm" fw={700}>取得元の改稿</Text><Badge size="xs" color="yellow">未保存</Badge></Group>
-                      <Text size="xs" c="dimmed">保存済み v{work.currentVersion} と比較できます。開くだけでは保存されません</Text>
-                      <Text size="xs" c="dimmed">{formatFreshness(pendingRevision.foundAt)}に更新確認が見つけました</Text>
-                    </Stack>
-                  </Group>
+          {/* The version list only has to tell versions apart, so it stays a
+              narrow column (a scrolling strip on small screens) and the diff
+              gets the rest of the width. */}
+          <div className="history-layout">
+              <nav className="history-layout__versions" aria-label="保存した版">
+                {pendingRevision && <Paper component="button" type="button" p="xs" withBorder className="version-row" data-source-newer data-active={selectedVersion === "pending" || undefined} onClick={() => setSelectedVersion("pending")} title={`保存済み v${work.currentVersion} と比較できます。開くだけでは保存されません`}>
+                  <Group justify="space-between" wrap="nowrap" gap={6}><Text size="sm" fw={700}>取得元の改稿</Text><Badge size="xs" color="yellow">未保存</Badge></Group>
+                  <Text size="xs" c="dimmed">{formatFreshness(pendingRevision.foundAt)}に検出</Text>
                 </Paper>}
-                {historyVersions.map((version) => <Paper component="button" type="button" key={version.id} p="md" withBorder className="version-row" data-active={selectedVersion === version.version || undefined} onClick={() => setSelectedVersion(version.version)}>
-                  <Group wrap="nowrap" align="flex-start">
-                    <ThemeIcon variant="light" color={version.version === work.currentVersion ? "piep" : "gray"}><Icons.versionHistory size={IconSize.menu} /></ThemeIcon>
-                    <Stack gap={3} flex={1} ta="left">
-                        <Group justify="space-between"><Text size="sm" fw={700}>保存済み v{version.version}</Text><Group gap={6}>{version.version === work.currentVersion && <Badge size="xs">{doc.isEdited ? "取得元の最新版" : "現在"}</Badge>}</Group></Group>
-                      <Text size="xs" c="dimmed">{version.changeSummary || "保存元から取得"}</Text>
-                      <Text size="xs" c="dimmed">{formatDate(version.createdAt, true)} · {formatNumber(version.textLength)}字 · {formatBytes(version.fileSizeBytes)}</Text>
-                    </Stack>
-                  </Group>
+                {historyVersions.map((version) => <Paper component="button" type="button" key={version.id} p="xs" withBorder className="version-row" data-active={selectedVersion === version.version || undefined} onClick={() => setSelectedVersion(version.version)} title={version.changeSummary || "保存元から取得"}>
+                  <Group justify="space-between" wrap="nowrap" gap={6}><Text size="sm" fw={700}>v{version.version}</Text>{version.version === work.currentVersion && <Badge size="xs">{doc.isEdited ? "取得元の最新版" : "現在"}</Badge>}</Group>
+                  <Text size="xs" c="dimmed">{formatDate(version.createdAt, true)}</Text>
+                  <Text size="xs" c="dimmed">{formatNumber(version.textLength)}字 · {formatBytes(version.fileSizeBytes)}</Text>
                 </Paper>)}
-              </Stack>
-            </Grid.Col>
-            <Grid.Col span={{ base: 12, lg: 7 }}>
+              </nav>
               <Card p="lg" className="version-preview">
                 {(typeof selectedVersion === "number" && selectedVersionText.isLoading)
                   || (comparisonVersion !== null && comparisonVersionText.isLoading)
@@ -699,10 +688,9 @@ export default function WorkPage() {
                           afterText={selectedVersionText.data.text}
                           actions={<Button size="xs" variant="light" onClick={() => navigate(`/reader/${work.id}?version=${selectedVersion}`)}>この版を読む</Button>}
                         />
-                      : <Alert color="gray">左から確認するバージョンを選択してください。</Alert>}
+                      : <Alert color="gray">確認する版を選択してください。</Alert>}
               </Card>
-            </Grid.Col>
-          </Grid>
+          </div>
         </Tabs.Panel>
         <Tabs.Panel value="json" pt="lg">{rawJson.isLoading ? <LoadingState /> : rawJson.error ? <ErrorState error={rawJson.error} retry={() => rawJson.refetch()} /> : <BoundedJsonView jsonText={rawJson.data ?? "{}"} description="取得元から保存したデータを表示します（JSON形式）" actions={<Button size="xs" variant="default" disabled={!runtime} onClick={() => openLocalAsset(work.jsonPath)}>保存データを開く</Button>} />}</Tabs.Panel>
       </Tabs>
