@@ -159,8 +159,8 @@ pub const FEATURE_READER_RECAP: &str = "reader_recap";
 pub fn current_prompt_version(feature_id: &str) -> &'static str {
     match feature_id {
         FEATURE_COLLECTION_NAMING => "collection_naming/v5",
-        FEATURE_TAG_SUGGESTION => "work_tagging/v8",
-        FEATURE_NATURAL_LANGUAGE_SEARCH => "search_interpretation/v7",
+        FEATURE_TAG_SUGGESTION => "work_tagging/v9",
+        FEATURE_NATURAL_LANGUAGE_SEARCH => "search_interpretation/v8",
         FEATURE_AUTHOR_STYLE => "author_style/v6",
         FEATURE_COLLECTION_SPLIT => "collection_split/v5",
         FEATURE_WORK_SYNOPSIS => "work_synopsis/v12",
@@ -1490,6 +1490,9 @@ pub struct TagProposal {
     pub tag: String,
     /// なぜそのタグなのか。題名や概要のどこを見たか。
     pub reason: String,
+    /// 根拠に選ばれた文の番号。
+    #[serde(skip)]
+    evidence_id: usize,
 }
 
 #[derive(Deserialize)]
@@ -1621,7 +1624,7 @@ evidence_idにはタグを肯定する根拠文の番号を入れます。根拠
         system.push_str("\n語の完全一致だけでなく、行為の意味が題材を直接示す場合も支持です。一般的な行動だけから広いジャンルを推測しません。");
         // 文脈の大きいモデルには、よく使われる語の外も棚で探させる。探した語は
         // この作品のために選ばれているので先に並べ、同じ判定に通す。
-        let discovered = match shelf {
+        let discovered = match shelf.clone() {
             Some(shelf)
                 if grounded_context(engine, FEATURE_TAG_SUGGESTION)
                     .await
@@ -1649,12 +1652,16 @@ evidence_idにはタグを肯定する根拠文の番号を入れます。根拠
     } else {
         candidates
     };
-    let mut evidence = vec![work.title.clone()];
-    evidence.extend(source_sentences(
-        work.excerpt.as_deref().unwrap_or_default(),
-    ));
-    evidence.extend(work.tags);
-    evidence.retain(|text| !text.trim().is_empty());
+    // 根拠文ごとに、既存タグそのものかどうかを覚えておく。
+    let mut evidence = vec![(work.title.clone(), false)];
+    evidence.extend(
+        source_sentences(work.excerpt.as_deref().unwrap_or_default())
+            .into_iter()
+            .map(|sentence| (sentence, false)),
+    );
+    evidence.extend(work.tags.into_iter().map(|tag| (tag, true)));
+    evidence.retain(|(text, _)| !text.trim().is_empty());
+    let (evidence, cites_tag): (Vec<String>, Vec<bool>) = evidence.into_iter().unzip();
     if candidates.is_empty() || evidence.is_empty() {
         return Ok(Vec::new());
     }
@@ -1685,8 +1692,7 @@ evidence_idにはタグを肯定する根拠文の番号を入れます。根拠
                 }],
             )?);
         }
-        proposals.truncate(5);
-        return Ok(proposals);
+        return Ok(finish_tag_proposals(proposals, &cites_tag, &existing, shelf).await);
     }
     // 条件を明示した判定は一候補ずつ、それ以外も小さい組にして混同を減らす。
     // 根拠の文字列は生成させず、検証済みの文番号からアプリが引用する。
@@ -1748,8 +1754,7 @@ evidence_idにはタグを肯定する根拠文の番号を入れます。根拠
         proposals.extend(validated_tag_decisions(batch, &evidence, decisions)?);
     }
     // 棚で探した語が先、続いて語彙の棚での使用頻度順。支持された候補をその順で最大5件返す。
-    proposals.truncate(5);
-    Ok(proposals)
+    Ok(finish_tag_proposals(proposals, &cites_tag, &existing, shelf).await)
 }
 
 fn checked_source_ids(unit_count: usize, ids: Vec<usize>) -> Result<Vec<usize>, String> {
@@ -1979,15 +1984,16 @@ fn validated_tag_decisions(
             .remove(tag)
             .ok_or("タグ判定に欠落があります。もう一度提案を実行してください")?;
         if value.decision == "支持" {
-            let quote = usize::try_from(value.evidence_id)
+            let (evidence_id, quote) = usize::try_from(value.evidence_id)
                 .ok()
-                .and_then(|id| evidence.get(id))
+                .and_then(|id| evidence.get(id).map(|quote| (id, quote)))
                 .ok_or("モデルが存在しない根拠文を選びました。もう一度提案を実行してください")?;
             result.push(TagProposal {
                 tag: tag.clone(),
                 // Keep the entire selected source sentence. Truncating here
                 // can hide a final negation or the scope needed for review.
                 reason: format!("根拠: {quote}"),
+                evidence_id,
             });
         }
     }
@@ -2188,9 +2194,11 @@ async fn interpret_search_with_tools(
             .iter()
             .cloned(),
     );
-    // 棚で0作になる条件は一度だけ差し戻す。二度目は利用者の言葉どおりの
-    // 条件として受け取る（0作という結果自体は画面で分かる）。
-    let sent_back_empty = std::sync::atomic::AtomicBool::new(false);
+    // 棚で0作になる条件と、タグを重ねて数作まで絞る条件は一度だけ差し戻す。
+    // タグは一覧の絞り込みになり、その中を利用者の言葉で意味の近い順に並べるので、
+    // 重ねたタグは読みたい作品まで落とす。二度目は利用者の言葉どおりの
+    // 条件として受け取る（件数は画面で分かる）。
+    let sent_back = std::sync::atomic::AtomicBool::new(false);
     let mut intent = harness::structured(
         engine,
         &conversation,
@@ -2198,7 +2206,9 @@ async fn interpret_search_with_tools(
         harness::CallOptions::for_effort(harness::Effort::Off, 600).greedy(),
         |value| {
             let intent = checked_search_intent(value, phrase, &allowed)?;
-            if intent.include_tags.is_empty() || sent_back_empty.load(std::sync::atomic::Ordering::Relaxed) {
+            if intent.include_tags.is_empty()
+                || sent_back.load(std::sync::atomic::Ordering::Relaxed)
+            {
                 return Ok(intent);
             }
             // 一覧と同じ数え方の、索引を使う短い数え上げ。
@@ -2207,10 +2217,9 @@ async fn interpret_search_with_tools(
                 intent.include_tag_mode == SearchTagMode::Or,
                 &intent.exclude_tags,
             )?;
-            if works == 0 {
-                sent_back_empty.store(true, std::sync::atomic::Ordering::Relaxed);
-                return Err("このタグ条件に当てはまる作品は棚に0作です。細かいタグを外して query に残してください。別々の題材を or でつながないでください"
-                    .to_string());
+            if let Some(message) = narrowing_feedback(&intent, works) {
+                sent_back.store(true, std::sync::atomic::Ordering::Relaxed);
+                return Err(message);
             }
             Ok(intent)
         },
@@ -2218,6 +2227,27 @@ async fn interpret_search_with_tools(
     .await?;
     intent.consulted = consulted;
     Ok(Some(intent))
+}
+
+/// タグを重ねたとき、これより少ない作品しか残らなければ絞りすぎとみなす。
+///
+/// 棚の写しでは「異世界転生＋チート」「人外娘＋ラブラブ」が1作まで絞っていた。
+const NARROW_TAG_WORKS: i64 = 5;
+
+/// 棚の件数から見て、答え直してもらうべき検索条件なら、その理由を返す。
+fn narrowing_feedback(intent: &SearchIntent, works: i64) -> Option<String> {
+    if works == 0 {
+        return Some("このタグ条件に当てはまる作品は棚に0作です。細かいタグを外して query に残してください。別々の題材を or でつながないでください".into());
+    }
+    (intent.include_tag_mode == SearchTagMode::And
+        && intent.include_tags.len() >= 2
+        && works < NARROW_TAG_WORKS)
+        .then(|| {
+            format!(
+                "このタグを全部重ねると、棚に残るのは{works}作だけです。タグは題材の中心になる一つだけにし、\
+                 ほかの条件は query に任せてください。query はタグで絞った中を意味の近い順に並べます"
+            )
+        })
 }
 
 /// モデルの答えを、棚にある語と元の説明の範囲に収める。
@@ -2346,6 +2376,83 @@ pub trait ShelfLookup: Send + Sync {
         exclude: &[String],
     ) -> Result<i64, String>;
     fn tag_profile(&self, name: &str) -> Result<Option<ShelfTagProfile>, String>;
+    fn tag_pairs(&self, name: &str, others: &[String]) -> Result<Option<ShelfTagPairs>, String>;
+}
+
+/// 一つのタグと、ほかのタグとの棚での重なり。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShelfTagPairs {
+    /// タグの付いた作品の総数。
+    pub total: i64,
+    /// このタグの付いた作品数。
+    pub works: i64,
+    pub others: Vec<ShelfTagPair>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShelfTagPair {
+    pub name: String,
+    /// このタグの付いた作品数。
+    pub works: i64,
+    /// 両方の付いた作品数。
+    pub together: i64,
+}
+
+/// 独立に付くなら、この数以上の作品で重なるはずの組だけを見る。
+const CONFLICT_MIN_EXPECTED: f64 = 3.0;
+/// 実際の重なりが、独立に付く場合の期待値のこの割合以下なら食い違いとみなす。
+const CONFLICT_MAX_RATIO: f64 = 0.05;
+
+/// 棚で、このタグとまず一緒に付かない既存タグ。
+///
+/// 別々のシリーズの作品名タグのように、どちらも珍しくないのに重ならない組を拾う。
+fn shelf_conflict(pairs: &ShelfTagPairs) -> Option<&ShelfTagPair> {
+    if pairs.total <= 0 {
+        return None;
+    }
+    pairs.others.iter().find(|other| {
+        let expected = pairs.works as f64 * other.works as f64 / pairs.total as f64;
+        collection_rules::is_informative_tag(&other.name)
+            && expected >= CONFLICT_MIN_EXPECTED
+            && other.together as f64 <= expected * CONFLICT_MAX_RATIO
+    })
+}
+
+/// 既存タグを根拠にした案のうち、棚の付け方と食い違うものを外し、上位5件にする。
+///
+/// タグからタグを推すのは付け方の慣習についての判断で、慣習は棚が知っている。
+/// 棚の写し（27,635件）では、軌跡のアリサやシャニマスから
+/// 「アイドルマスターシンデレラガールズ」を推した案が外れ、既存タグを一つ伏せて
+/// 戻す試験で本物のタグを外したのは 2,602 件中 2 件だった。題名や概要の文を
+/// 根拠にした案は作品そのものについての判断なので、ここでは外さない。
+async fn finish_tag_proposals(
+    mut proposals: Vec<TagProposal>,
+    cites_tag: &[bool],
+    existing: &std::collections::HashSet<String>,
+    shelf: Option<Arc<dyn ShelfLookup>>,
+) -> Vec<TagProposal> {
+    let cited = proposals
+        .iter()
+        .filter(|proposal| cites_tag.get(proposal.evidence_id) == Some(&true))
+        .map(|proposal| proposal.tag.clone())
+        .collect::<Vec<_>>();
+    if let (Some(shelf), false) = (shelf, cited.is_empty()) {
+        let others = existing.iter().cloned().collect::<Vec<_>>();
+        // 棚を読めないときは外さない。判定に通った案をそのまま出す。
+        let conflicting = tokio::task::spawn_blocking(move || {
+            cited
+                .into_iter()
+                .filter(|tag| {
+                    matches!(shelf.tag_pairs(tag, &others), Ok(Some(pairs)) if shelf_conflict(&pairs).is_some())
+                })
+                .collect::<std::collections::HashSet<_>>()
+        })
+        .await
+        .unwrap_or_default();
+        proposals.retain(|proposal| !conflicting.contains(&proposal.tag));
+    }
+    proposals.truncate(5);
+    proposals
 }
 
 /// 道具の呼び出しを棚の読み取りにつなぎ、確かめたタグ名を覚えておく。
@@ -3919,6 +4026,114 @@ mod tests {
                 titles: vec!["雨の駅".into()],
             }))
         }
+        fn tag_pairs(
+            &self,
+            name: &str,
+            others: &[String],
+        ) -> Result<Option<ShelfTagPairs>, String> {
+            // 千作の棚。別シリーズの作品名タグ同士は重ならない。
+            let works = |tag: &str| match tag {
+                "シンデレラ" | "ミリオン" | "シャニマス" => Some(100),
+                "水着" => Some(50),
+                _ => None,
+            };
+            let together = |a: &str, b: &str| match (a, b) {
+                ("水着", "シャニマス") | ("シャニマス", "水着") => 5,
+                _ => 0,
+            };
+            Ok(works(name).map(|count| ShelfTagPairs {
+                total: 1000,
+                works: count,
+                others: others
+                    .iter()
+                    .filter_map(|other| {
+                        works(other).map(|count| ShelfTagPair {
+                            name: other.clone(),
+                            works: count,
+                            together: together(name, other),
+                        })
+                    })
+                    .collect(),
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn tag_proposals_inferred_from_a_tag_must_fit_how_the_shelf_tags() {
+        let proposal = |tag: &str, evidence_id: usize| TagProposal {
+            tag: tag.into(),
+            reason: String::new(),
+            evidence_id,
+        };
+        // 根拠文 0 は題名、1 は既存タグ「シャニマス」。
+        let cites_tag = [false, true];
+        let existing = ["シャニマス".to_string()].into_iter().collect();
+        let shelf: Arc<dyn ShelfLookup> = Arc::new(FakeShelf);
+        let kept = finish_tag_proposals(
+            vec![
+                proposal("シンデレラ", 1),
+                proposal("水着", 1),
+                // 題名に書いてあれば、棚の慣習と違っても作品についての判断として残す。
+                proposal("ミリオン", 0),
+            ],
+            &cites_tag,
+            &existing,
+            Some(shelf),
+        )
+        .await;
+        assert_eq!(
+            kept.iter().map(|p| p.tag.as_str()).collect::<Vec<_>>(),
+            ["水着", "ミリオン"]
+        );
+        let unchecked =
+            finish_tag_proposals(vec![proposal("シンデレラ", 1)], &cites_tag, &existing, None)
+                .await;
+        assert_eq!(unchecked.len(), 1);
+    }
+
+    #[test]
+    fn search_answers_that_stack_tags_down_to_a_few_works_are_sent_back() {
+        let intent = |tags: &[&str], mode: SearchTagMode| SearchIntent {
+            include_tags: tags.iter().map(|tag| tag.to_string()).collect(),
+            include_tag_mode: mode,
+            exclude_tags: Vec::new(),
+            query: "異世界に転生してチートで無双".into(),
+            reading: String::new(),
+            consulted: Vec::new(),
+        };
+        let stacked = intent(&["異世界転生", "チート"], SearchTagMode::And);
+        assert!(narrowing_feedback(&stacked, 1).unwrap().contains("1作"));
+        assert!(narrowing_feedback(&stacked, NARROW_TAG_WORKS).is_none());
+        // タグ一つなら、少なくてもそれが棚の実際。0作だけ差し戻す。
+        let single = intent(&["悪役令嬢"], SearchTagMode::And);
+        assert!(narrowing_feedback(&single, 1).is_none());
+        assert!(narrowing_feedback(&single, 0).unwrap().contains("0作"));
+        // 言い換えを or でつないだ条件は重ねていない。
+        let synonyms = intent(&["吸血鬼", "ヴァンパイア"], SearchTagMode::Or);
+        assert!(narrowing_feedback(&synonyms, 2).is_none());
+    }
+
+    #[test]
+    fn shelf_conflicts_need_enough_works_to_expect_an_overlap() {
+        let pairs = |works: i64, other: i64, together: i64| ShelfTagPairs {
+            total: 10_000,
+            works,
+            others: vec![ShelfTagPair {
+                name: "シャニマス".into(),
+                works: other,
+                together,
+            }],
+        };
+        // 期待 10 作に対して 0 作。
+        assert!(shelf_conflict(&pairs(100, 1000, 0)).is_some());
+        // 期待 10 作に対して 1 作は、まだ偶然の範囲として残す。
+        assert!(shelf_conflict(&pairs(100, 1000, 1)).is_none());
+        // 期待 2 作では、重ならなくても判断しない。
+        assert!(shelf_conflict(&pairs(20, 1000, 0)).is_none());
+        // 何も言い表さないタグとの重なりは見ない。
+        let mut admin = pairs(100, 1000, 0);
+        admin.others[0].name = "R-18".into();
+        assert!(shelf_conflict(&admin).is_none());
     }
 
     #[test]
@@ -4000,6 +4215,13 @@ mod tests {
         fn tag_profile(&self, name: &str) -> Result<Option<ShelfTagProfile>, String> {
             self.0.shelf_tag_profile(name)
         }
+        fn tag_pairs(
+            &self,
+            name: &str,
+            others: &[String],
+        ) -> Result<Option<ShelfTagPairs>, String> {
+            self.0.shelf_tag_pairs(name, others)
+        }
     }
 
     /// 棚の写しと手元のサーバーで、道具あり・なしの検索解釈を比べる。
@@ -4052,12 +4274,13 @@ mod tests {
                 row[format!("{label}Seconds")] = started.elapsed().as_secs_f32().into();
             }
             results.push(row);
+            // サーバーが途中で止まっても、そこまでの結果は残す。
+            std::fs::write(
+                std::env::var("PIEP_LIVE_OUT").expect("PIEP_LIVE_OUT"),
+                serde_json::to_string_pretty(&results).unwrap(),
+            )
+            .unwrap();
         }
-        std::fs::write(
-            std::env::var("PIEP_LIVE_OUT").expect("PIEP_LIVE_OUT"),
-            serde_json::to_string_pretty(&results).unwrap(),
-        )
-        .unwrap();
     }
 
     /// 棚の写しの作品で、棚を探す道具あり・なしのタグ補完を比べる。
@@ -4101,12 +4324,13 @@ mod tests {
                 row[format!("{label}Seconds")] = started.elapsed().as_secs_f32().into();
             }
             results.push(row);
+            // サーバーが途中で止まっても、そこまでの結果は残す。
+            std::fs::write(
+                std::env::var("PIEP_LIVE_OUT").expect("PIEP_LIVE_OUT"),
+                serde_json::to_string_pretty(&results).unwrap(),
+            )
+            .unwrap();
         }
-        std::fs::write(
-            std::env::var("PIEP_LIVE_OUT").expect("PIEP_LIVE_OUT"),
-            serde_json::to_string_pretty(&results).unwrap(),
-        )
-        .unwrap();
     }
 
     #[test]

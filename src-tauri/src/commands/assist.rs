@@ -253,6 +253,14 @@ impl assist::ShelfLookup for LibraryShelf {
     fn tag_profile(&self, name: &str) -> Result<Option<assist::ShelfTagProfile>, String> {
         self.0.db.shelf_tag_profile(name)
     }
+
+    fn tag_pairs(
+        &self,
+        name: &str,
+        others: &[String],
+    ) -> Result<Option<assist::ShelfTagPairs>, String> {
+        self.0.db.shelf_tag_pairs(name, others)
+    }
 }
 
 // ---- 作風のメモ -----------------------------------------------------------
