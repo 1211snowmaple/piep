@@ -347,6 +347,7 @@ pub fn run() -> tauri::Result<()> {
             commands::database::db_discard_work_draft,
             commands::database::db_activate_work_edit,
             commands::database::db_deactivate_work_edit,
+            commands::database::db_delete_archived_work_edits,
             commands::database::import_work_asset,
             // 更新ジョブ (commands::update_jobs)
             commands::update_jobs::start_update_job,

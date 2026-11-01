@@ -55,6 +55,7 @@ import { addWorkCollectionMembers, listCollectionsForWork, listWorkCollections }
 import {
   activateWorkEdit,
   deactivateWorkEdit,
+  deleteArchivedWorkEdits,
   deleteDownload,
   getAssetUrl,
   getAssets,
@@ -341,6 +342,22 @@ export default function WorkPage() {
       for (const key of [["reader-metadata", id], ["reader-content-page", id], ["reader-content-search", id], ["editor-document", id], ["library"], ["entity-works"]]) queryClient.invalidateQueries({ queryKey: key });
     },
     onError: (error) => notifications.show({ color: "red", title: "編集版を反映できません", message: errorMessage(error) }),
+  });
+  // 反映するたびに以前の版が積もるので、要らなくなったものを消せるようにする。
+  const deleteEdits = useMutation({
+    mutationFn: (revisionId: number | null) => runtime ? deleteArchivedWorkEdits(id, revisionId ?? undefined) : Promise.resolve(0),
+    onSuccess: (count) => {
+      notifications.show({ color: "green", message: `以前の編集版を${formatNumber(count)}件消しました` });
+      queryClient.invalidateQueries({ queryKey: ["reader-metadata", id] });
+    },
+    onError: (error) => notifications.show({ color: "red", title: "以前の編集版を消せません", message: errorMessage(error) }),
+  });
+  const confirmDeleteEdits = (revision: { id: number; updatedAt: string } | null, count: number) => modals.openConfirmModal({
+    title: revision ? "この編集版を消しますか？" : `以前の編集版を${formatNumber(count)}件すべて消しますか？`,
+    children: <Text size="sm">{revision ? `${formatDate(revision.updatedAt, true)}の編集版を消します。` : ""}消した編集版は戻せません。取り込んだ本文と、いま反映している編集版・下書きは残ります。</Text>,
+    labels: { confirm: "消す", cancel: "やめる" },
+    confirmProps: { color: "red" },
+    onConfirm: () => deleteEdits.mutate(revision?.id ?? null),
   });
   const mutate = useMutation({
     mutationFn: async (input: { favorite?: boolean; watch?: boolean }) => {
@@ -684,6 +701,10 @@ export default function WorkPage() {
                   <Text size="xs" c="dimmed">{formatDate(doc.draftEditRevision.updatedAt, true)}</Text>
                   <Button mt={6} size="compact-xs" variant="default" fullWidth onClick={() => navigate(`/editor/${work.id}`)}>編集画面で開く</Button>
                 </Paper>}
+                {(doc.archivedEditRevisions?.length ?? 0) >= 2 && <Group justify="space-between" wrap="nowrap" gap={6} px={4}>
+                  <Text size="xs" c="dimmed">以前の編集版 {formatNumber(doc.archivedEditRevisions?.length ?? 0)}件</Text>
+                  <Button size="compact-xs" variant="subtle" color="red" loading={deleteEdits.isPending && deleteEdits.variables === null} onClick={() => confirmDeleteEdits(null, doc.archivedEditRevisions?.length ?? 0)}>すべて消す</Button>
+                </Group>}
                 {(doc.archivedEditRevisions ?? []).map((revision) => <Paper key={`edit-${revision.id}`} p="xs" withBorder className="version-row version-row--static">
                   <Group justify="space-between" wrap="nowrap" gap={6}><Text size="sm" fw={700}>以前の編集版</Text><Badge size="xs" color="gray" variant="light">未使用</Badge></Group>
                   <Text size="xs" c="dimmed">v{revision.baseVersion} をもとに</Text>
@@ -694,6 +715,7 @@ export default function WorkPage() {
                     labels: { confirm: "反映する", cancel: "やめる" },
                     onConfirm: () => reapplyEdit.mutate(revision.id),
                   })}>もう一度反映</Button>
+                  <Button mt={4} size="compact-xs" variant="subtle" color="red" fullWidth loading={deleteEdits.isPending && deleteEdits.variables === revision.id} onClick={() => confirmDeleteEdits(revision, 1)}>消す</Button>
                 </Paper>)}
                 {historyVersions.map((version) => <Paper component="button" type="button" key={version.id} p="xs" withBorder className="version-row" data-active={selectedVersion === version.version || undefined} onClick={() => setSelectedVersion(version.version)} title={version.changeSummary || "保存元から取得"}>
                   <Group justify="space-between" wrap="nowrap" gap={6}><Text size="sm" fw={700}>v{version.version}</Text>{version.version === work.currentVersion && <Badge size="xs">{doc.isEdited ? "取得元の最新版" : "現在"}</Badge>}</Group>

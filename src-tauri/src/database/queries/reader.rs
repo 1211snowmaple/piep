@@ -680,7 +680,55 @@ impl Database {
             .map_err(|e| format!("Editor transaction commit failed: {}", e))?;
 
         reindex_download_locked(&conn, &self.storage_dir, revision.download_id)?;
+        // 反映するたびに、それまでの版が「以前の編集版」として積もる。中身が
+        // まったく同じもの（何も変えずに反映し直した版）は残しても選ぶ意味が
+        // 無く、履歴が見分けの付かない行で埋まるだけなので、ここで片付ける。
+        conn.execute(
+            "DELETE FROM work_edit_revisions
+             WHERE download_id = ?1 AND status = 'archived' AND id <> ?2
+               AND content_hash IS (SELECT content_hash FROM work_edit_revisions WHERE id = ?2)
+               AND title IS (SELECT title FROM work_edit_revisions WHERE id = ?2)",
+            params![revision.download_id, edit_revision_id],
+        )
+        .map_err(|e| format!("Failed to drop duplicate edit revisions: {}", e))?;
         get_work_edit_revision_locked(&conn, edit_revision_id)
+    }
+
+    /// 以前の編集版を消す。`revision_id` が無ければ、その作品の以前の版をすべて消す。
+    ///
+    /// 消せるのは下ろした版（`archived`）だけ。いま反映している版と下書き、
+    /// 取り込んだ本文には触れない。消した数を返す。
+    pub fn delete_archived_work_edits(
+        &self,
+        download_id: i64,
+        revision_id: Option<i64>,
+    ) -> Result<usize, String> {
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| format!("Editor transaction begin failed: {}", e))?;
+        tx.execute(
+            "DELETE FROM work_edit_blocks
+             WHERE edit_revision_id IN (
+                 SELECT id FROM work_edit_revisions
+                 WHERE download_id = ?1 AND status = 'archived' AND (?2 IS NULL OR id = ?2)
+             )",
+            params![download_id, revision_id],
+        )
+        .map_err(|e| format!("Failed to delete edit blocks: {}", e))?;
+        let deleted = tx
+            .execute(
+                "DELETE FROM work_edit_revisions
+                 WHERE download_id = ?1 AND status = 'archived' AND (?2 IS NULL OR id = ?2)",
+                params![download_id, revision_id],
+            )
+            .map_err(|e| format!("Failed to delete edit revisions: {}", e))?;
+        if revision_id.is_some() && deleted == 0 {
+            return Err("消せるのは、以前の編集版だけです".to_string());
+        }
+        tx.commit()
+            .map_err(|e| format!("Editor transaction commit failed: {}", e))?;
+        Ok(deleted)
     }
 
     /// 反映した編集を下ろし、取り込んだままの本文へ戻す。

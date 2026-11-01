@@ -8563,6 +8563,66 @@ fn active_edit_revision_drives_reader_and_search_body() {
 }
 
 #[test]
+fn previous_edits_can_be_deleted_and_identical_ones_do_not_pile_up() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let download_id = insert_download(&db, &storage, "edit-tidy", "片付け", "作者A", &[], "原本");
+    let publish = |text: &str| {
+        let draft = db
+            .save_work_draft(
+                download_id,
+                1,
+                None,
+                &[WorkBlockInput {
+                    block_type: "paragraph".to_string(),
+                    text: Some(text.to_string()),
+                    asset_id: None,
+                    attrs_json: None,
+                }],
+            )
+            .unwrap();
+        db.activate_work_edit(draft.id).unwrap();
+    };
+    let archived = |db: &Database| {
+        db.get_reader_metadata(download_id)
+            .unwrap()
+            .archived_edit_revisions
+    };
+
+    publish("一回目");
+    publish("一回目");
+    publish("一回目");
+    // 同じ中身を反映し直しても、以前の版は積もらない。
+    assert!(archived(&db).is_empty());
+
+    publish("二回目");
+    publish("三回目");
+    let previous = archived(&db);
+    assert_eq!(previous.len(), 2);
+
+    // 一つだけ消す。いま反映している版は消せない。
+    assert_eq!(
+        db.delete_archived_work_edits(download_id, Some(previous[0].id))
+            .unwrap(),
+        1
+    );
+    let active = db
+        .get_reader_metadata(download_id)
+        .unwrap()
+        .active_edit_revision
+        .unwrap();
+    assert!(db
+        .delete_archived_work_edits(download_id, Some(active.id))
+        .is_err());
+
+    publish("四回目");
+    assert_eq!(db.delete_archived_work_edits(download_id, None).unwrap(), 2);
+    assert!(archived(&db).is_empty());
+    let reader = db.get_reader_document(download_id, None).unwrap();
+    assert!(reader.plain_text.contains("四回目"));
+}
+
+#[test]
 fn an_edit_keeps_the_assets_from_its_base_revision_after_a_provider_update() {
     let (_temp, root, storage) = temp_paths();
     let db = Database::open(&root.join("piep.db"), &storage).unwrap();
