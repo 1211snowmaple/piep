@@ -267,9 +267,6 @@ fn create_additional_tables(conn: &Connection) -> Result<(), rusqlite::Error> {
             PRIMARY KEY(left_source, left_source_id, right_source, right_source_id)
          );
 
-         -- 一部保存の作品を取得元から取り直した記録。同じ版では一度しか試さない。
-         -- 版が進めば取得元の中身が変わったので、もう一度だけ試す価値がある。
-         -- 画面側の保存領域に置いていたので、入れ直すと全件を取り直していた。
          -- 利用者が作る監視グループ。監視対象（作者・シリーズ）を束ね、その束だけを
          -- 確認したり自動確認の範囲にしたりする。一つの対象がいくつのグループに
          -- 入ってもよい。グループを消しても監視対象は消えない。
@@ -288,6 +285,9 @@ fn create_additional_tables(conn: &Connection) -> Result<(), rusqlite::Error> {
          CREATE INDEX IF NOT EXISTS idx_watch_group_members_target
             ON watch_group_members(target_id);
 
+         -- 一部保存の作品を取得元から取り直した記録。同じ版では一度しか試さない。
+         -- 版が進めば取得元の中身が変わったので、もう一度だけ試す価値がある。
+         -- 画面側の保存領域に置いていたので、入れ直すと全件を取り直していた。
          CREATE TABLE IF NOT EXISTS incomplete_save_repairs (
             download_id  INTEGER PRIMARY KEY REFERENCES downloads(id) ON DELETE CASCADE,
             version      INTEGER NOT NULL,
