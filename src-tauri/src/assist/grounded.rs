@@ -462,11 +462,14 @@ pub(super) fn fits_whole(units: &[SummaryUnit], context_tokens: usize) -> bool {
     estimated + WHOLE_DOCUMENT_RESERVE_TOKENS <= context_tokens
 }
 
-/// system、題名、書かせる・照らす・直す指示と、思考を含む出力の分。
-const WHOLE_DOCUMENT_RESERVE_TOKENS: usize = 12_000;
+/// system、題名、書かせる・照らす・直す指示と、出力の分。考えさせないので
+/// 思考の分は取らない（取っていたころは 12,000 で、長編が早く区切られていた）。
+const WHOLE_DOCUMENT_RESERVE_TOKENS: usize = 6_000;
 
-const DRAFT_OUTPUT_TOKENS: u32 = 6_000;
-const VERIFY_OUTPUT_TOKENS: u32 = 6_000;
+/// 答えは400字・8文までの JSON で、実測 300〜350 トークン。暴走しても
+/// ここで止まるよう、余裕を持たせつつ抑える。
+const DRAFT_OUTPUT_TOKENS: u32 = 1_500;
+const VERIFY_OUTPUT_TOKENS: u32 = 1_500;
 
 /// 長編を区切りごとに読むときの、区切りのメモ。最終のまとめの材料になる。
 const SECTION_TASK: GroundedTask = GroundedTask {
@@ -519,7 +522,7 @@ pub(super) async fn grounded_note(
             &draft_schema(&SECTION_TASK),
             drafting_options(),
             |value| checked_draft(value, &SECTION_TASK, &units, None),
-            || step.retry(),
+            |_| step.retry(),
         )
         .await?;
         memos.push(claims);
@@ -587,6 +590,7 @@ impl<'a> Step<'a> {
 ///
 /// 下書きと直しは本文を先頭に固定した同じ会話で行い、二度目は本文を読み
 /// 直さない。照合は本文を見せない別の会話で行う（`VERIFY_SYSTEM`）。
+#[allow(clippy::too_many_arguments)]
 async fn write_and_check(
     engine: &AssistEngine,
     work: &WorkFacts,
@@ -609,7 +613,7 @@ async fn write_and_check(
         &schema,
         draft_options,
         |value| checked_draft(value, task, units, allowed),
-        || step.retry(),
+        |_| step.retry(),
     )
     .await?;
     verify(
@@ -633,7 +637,7 @@ async fn write_and_check(
             &schema,
             draft_options,
             |value| checked_draft(value, task, units, allowed),
-            || revise.retry(),
+            |_| revise.retry(),
         )
         .await?;
         let recheck = step.with_stage(AssistStage::Rechecking);
@@ -659,21 +663,22 @@ fn needs_revision(claims: &[GroundedClaim]) -> bool {
             .any(|claim| claim.verdict == ClaimVerdict::Unsupported)
 }
 
-/// 下書き・区切りのメモ。考えさせるが、上限を置く（実測: 上限なしで一回
-/// 約4,400トークン・90秒、1,536 で約40秒。文の質は棚の実作品で落ちなかった）。
+/// 下書き・区切りのメモ・直し。**考えさせない。**
+///
+/// 以前は思考に上限 1,536 トークンを置いて考えさせていた。2026-11-01 に棚の
+/// 3作（4千・1万2千・2万5千字、Strata の Qwen3.6-35B）で測ると、考えさせると
+/// 159・86・209 秒、考えさせないと 16・24・78 秒。後者でも結末まで具体的に
+/// 書け、照合で根拠ありと判定された文の割合は落ちなかった。思考は毎回ほぼ
+/// 上限まで使われ（約50秒）、時間の大半を占めていた。
 fn drafting_options() -> CallOptions {
-    CallOptions::for_effort(Effort::Low, DRAFT_OUTPUT_TOKENS)
-        .greedy()
-        .thinking_budget(THINKING_BUDGET_TOKENS)
+    CallOptions::for_effort(Effort::Off, DRAFT_OUTPUT_TOKENS).greedy()
 }
 
+/// 照合も考えさせない。根拠の原文と文を並べて照らすだけの仕事で、
+/// 同じ測定で判定の厳しさは変わらなかった。
 fn verifying_options() -> CallOptions {
-    CallOptions::for_effort(Effort::Medium, VERIFY_OUTPUT_TOKENS)
-        .greedy()
-        .thinking_budget(THINKING_BUDGET_TOKENS)
+    CallOptions::for_effort(Effort::Off, VERIFY_OUTPUT_TOKENS).greedy()
 }
-
-const THINKING_BUDGET_TOKENS: u32 = 1_536;
 
 /// 一つの台詞を途中で切らずに、文脈に収まる区切りへ分ける。
 fn sections_for(
@@ -760,7 +765,7 @@ async fn verify(
         &verify_schema(),
         verifying_options(),
         |value| checked_verdicts(value, count),
-        || step.retry(),
+        |_| step.retry(),
     )
     .await?;
     apply_verdicts(claims, checks);

@@ -24,18 +24,26 @@ use super::{
 /// 全文を一度に読ませる要求の上限。ローカルの推論サーバーは文脈長で
 /// 自分から断るので、こちらは誤設定で無制限に膨らまない程度に抑える。
 pub(super) const LOCAL_LONG_REQUEST_BYTES: usize = 4 * 1024 * 1024;
-/// 全文の読み込み（prefill）と思考を含めて待つ。6万字・6万トークン級の
-/// 本文を読み、さらに考えさせると180秒では足りないことがある。
-pub(super) const LONG_REQUEST_TIMEOUT: Duration = Duration::from_secs(900);
+/// 全文の読み込み（prefill）を含めて待つ上限。
+///
+/// 6万トークンの本文でも、読み込み（約1,100 トークン/秒）と答え（約300
+/// トークン）で1分少々。以前は思考を含めて900秒待っていたが、GPU のメモリが
+/// 溢れた推論サーバーは数十トークン/秒まで落ちて止まり、利用者は15分待った
+/// あげくに失敗を見ることになった（2026-11-01、Strata の issue #481）。
+pub(super) const LONG_REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// どれだけ考えさせるか。
 ///
-/// 判定（根拠の照合・タグの採否）は考えさせ、整形や番号の選択は考えさせない。
-/// 一律に考えさせると遅く、一律に止めると判断を誤る。
+/// いまはどの仕事も考えさせない（`Off`）。2026-11-01 に、最後まで考えさせて
+/// いたあらすじの下書きと照合も止めた。思考は毎回ほぼ上限まで使われて時間の
+/// 大半を占め、止めても棚の実作品で答えの質が落ちなかったため（grounded.rs）。
+/// 考えさせないと誤る仕事が見つかったときのために、段階は残しておく。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Effort {
     Off,
+    #[allow(dead_code)]
     Low,
+    #[allow(dead_code)]
     Medium,
 }
 
@@ -107,6 +115,7 @@ impl CallOptions {
         self
     }
 
+    #[allow(dead_code)]
     pub fn thinking_budget(mut self, tokens: u32) -> Self {
         self.reasoning_budget = Some(tokens);
         self
@@ -322,7 +331,8 @@ async fn post(
         .map_err(|error| {
             if error.is_timeout() {
                 format!(
-                    "モデルが{}秒以内に答えませんでした。長い本文では文脈長と速度を確認してください",
+                    "モデルが{}秒たっても答えませんでした。推論サーバーが止まっているか、とても遅くなっています。\
+                     GPU のメモリが足りないと大きく遅くなるので、ほかのアプリを閉じるか、推論サーバーを起動し直してから試してください",
                     options.timeout.as_secs()
                 )
             } else {
@@ -382,7 +392,7 @@ pub(super) async fn structured<T>(
     options: CallOptions,
     check: impl Fn(serde_json::Value) -> Result<T, String>,
 ) -> Result<T, String> {
-    structured_noting(engine, messages, schema, options, check, || {}).await
+    structured_noting(engine, messages, schema, options, check, |_| {}).await
 }
 
 /// `structured` と同じ。頼み直す直前に `on_retry` を呼ぶ。
@@ -395,13 +405,15 @@ pub(super) async fn structured_noting<T>(
     schema: &serde_json::Value,
     options: CallOptions,
     check: impl Fn(serde_json::Value) -> Result<T, String>,
-    on_retry: impl Fn(),
+    on_retry: impl Fn(&str),
 ) -> Result<T, String> {
     let mut conversation = messages.to_vec();
     let mut last_error = String::new();
     for attempt in 0..2 {
         if attempt > 0 {
-            on_retry();
+            // 頼み直すたびに本文を読み直すので、理由は残しておく。
+            log::warn!("モデルの答えを頼み直します: {last_error}");
+            on_retry(&last_error);
         }
         let answer = match complete(engine, &conversation, Some(schema), None, None, options).await
         {
