@@ -3537,7 +3537,16 @@ select {
 .app-history-controls [data-refreshing] svg { animation: header-refresh 1.2s linear infinite; }
 @keyframes header-refresh { to { transform: rotate(360deg); } }
 .search-method-control { width: 38px; display: inline-flex; gap: 2px; }
-.settings-nav { position: sticky; top: 0; display: block; }
+.settings-nav { display: block; }
+/* 一覧を持ち上げるのは列の側。列が一覧と同じ高さだと、一覧には動ける余地がない。
+   窓が低いときは、一覧の中だけをスクロールさせて下の項目にも届くようにする。 */
+.settings-nav-column {
+  position: sticky;
+  top: 16px;
+  align-self: flex-start;
+  max-height: calc(100dvh - var(--app-shell-header-height) - 32px);
+  overflow-y: auto;
+}
 .settings-nav__group + .settings-nav__group { margin-top: 12px; }
 .settings-nav .mantine-NavLink-label,
 .settings-nav .mantine-NavLink-description { white-space: normal; overflow-wrap: anywhere; }
@@ -3545,7 +3554,7 @@ select {
 .mantine-Spotlight-actionDescription { white-space: normal; overflow-wrap: anywhere; }
 .library-toolbar__options { align-items: center; }
 @media (max-width: 61.99em) {
-  .settings-nav { display: block; position: static; }
+  .settings-nav-column { position: static; max-height: none; overflow: visible; }
   .settings-nav__groups { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
   .settings-nav__group + .settings-nav__group { margin-top: 0; }
 }
