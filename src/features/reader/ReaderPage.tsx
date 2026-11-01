@@ -17,6 +17,7 @@ import {
   ScrollArea,
   SegmentedControl,
   Select,
+  SimpleGrid,
   Slider,
   Stack,
   Text,
@@ -40,12 +41,13 @@ import { errorMessage, formatDate, formatNumber } from "@/lib/format";
 import { prepareDocumentHtml } from "@/lib/content";
 import { useContentLinkNavigation, useLibraryLinkMarks } from "@/lib/contentLinks";
 import { getWorkCollection, listCollectionsForWork } from "@/services/collectionApi";
-import { getAssetUrl, getReaderContentPage, getReaderMetadata, getReaderOutline, isTauriRuntime, searchDownloadsV2, searchReaderContent } from "@/services/dbApi";
+import { getAssetUrl, getDownloads, getReaderContentPage, getReaderMetadata, getReaderOutline, isTauriRuntime, searchDownloadsV2, searchReaderContent } from "@/services/dbApi";
 import { openExternalUrl, revealPathInFileManager } from "@/services/openerApi";
 import { getDemoReader } from "@/mocks/demoData";
 import { RecapPanel } from "@/features/assist/RecapPanel";
+import { NeighborPlaceholder, NeighborTile, formatReadingTime } from "@/features/reader/ReaderNextUp";
 import type { WorkCollection } from "@/types/collections";
-import type { ReaderMetadata, SearchV2Params, SearchV2Result } from "@/types/library";
+import type { DownloadEntry, ReaderMetadata, SearchV2Params, SearchV2Result } from "@/types/library";
 
 interface ReadingContextRow {
   key: string;
@@ -116,13 +118,18 @@ async function loadReaderSequence(params: SearchV2Params, currentId: number): Pr
  *  — an unordered collection, an author's posting history — offers the same
  *  neighbours but never calls them the continuation, because presenting a
  *  themed set as a serial is exactly the misreading the arrangement invites. */
-function ReadingContextCard({ context, onOpen }: {
+function ReadingContextCard({ context, neighbors, onOpen }: {
   context: ReadingContextRow;
+  /** 隣の作品の詳しい情報。届くまでは題だけで描く。 */
+  neighbors: ReadonlyMap<number, DownloadEntry>;
   onOpen: (path: string) => void;
 }) {
   const href = (id: number) => `/reader/${id}${context.collectionId ? `?collection=${encodeURIComponent(context.collectionId)}` : ""}`;
   const previousLabel = context.sequential ? "前の作品はありません" : "ほかの作品はありません";
   const nextLabel = context.sequential ? "次の作品はありません" : "ほかの作品はありません";
+  // 順序のない並びは「前・次」と呼ばない。並べてあるだけで、読む順ではない。
+  const previousName = context.sequential ? "前の作品" : "並びの前";
+  const nextName = context.sequential ? "次の作品" : "並びの次";
   return (
     <Paper withBorder p="sm" radius="md">
       <Stack gap="xs">
@@ -139,14 +146,16 @@ function ReadingContextCard({ context, onOpen }: {
         {context.sequential && context.previous && (
           <RecapPanel currentId={context.currentId} previous={context.previous} />
         )}
-        <Group grow>
+        {/* 題だけのボタンだったころは、どれが何の話か、どれだけの長さか、
+            読みかけたものかが、押してみるまで分からなかった。 */}
+        <SimpleGrid cols={{ base: 1, xs: 2 }} spacing="xs">
           {context.previous
-            ? <Button variant="default" leftSection={context.sequential ? <Icons.previous size={IconSize.menu} /> : undefined} onClick={() => onOpen(href(context.previous!.id))}>{context.previous.title}</Button>
-            : <Button variant="default" disabled>{previousLabel}</Button>}
+            ? <NeighborTile role="previous" ordered={context.sequential} label={previousName} title={context.previous.title} work={neighbors.get(context.previous.id)} emphasized={false} onOpen={() => onOpen(href(context.previous!.id))} />
+            : <NeighborPlaceholder label={previousLabel} />}
           {context.next
-            ? <Button variant={context.sequential ? "filled" : "default"} rightSection={context.sequential ? <Icons.next size={IconSize.menu} /> : undefined} onClick={() => onOpen(href(context.next!.id))}>{context.next.title}</Button>
-            : <Button variant="default" disabled>{nextLabel}</Button>}
-        </Group>
+            ? <NeighborTile role="next" ordered={context.sequential} label={nextName} title={context.next.title} work={neighbors.get(context.next.id)} emphasized={context.sequential} onOpen={() => onOpen(href(context.next!.id))} />
+            : <NeighborPlaceholder label={nextLabel} />}
+        </SimpleGrid>
       </Stack>
     </Paper>
   );
@@ -230,7 +239,7 @@ interface ReaderSettings {
   fontSize: number;
   lineHeight: number;
   maxWidth: number;
-  font: "serif" | "sans";
+  font: ReaderFont;
   theme: "paper" | "white" | "night";
   /**
    * 縦書き。EPUB には最初からある設定なのに、読む画面にだけ無かった。
@@ -238,6 +247,22 @@ interface ReaderSettings {
    */
   writing: "horizontal" | "vertical";
 }
+
+type ReaderFont = "serif" | "sans" | "ud-serif" | "ud-sans";
+
+/**
+ * 書体の選択肢。明朝とゴシックの二つだけでは、長く読むと目が疲れる人や、
+ * 細い横線が見えにくい人に応えられなかった。BIZ UD は Windows に最初から
+ * 入っている読みやすさ重視の書体で、等幅（UDP でない方）を選ぶのは、
+ * 小説の地の文、とくに縦書きで字の並びが揃って見えるため。入っていない
+ * 環境では、いつもの明朝・ゴシックに落ちる。
+ */
+const READER_FONTS: Record<ReaderFont, { label: string; family: string }> = {
+  serif: { label: "明朝", family: '"Noto Serif JP", "Yu Mincho", serif' },
+  sans: { label: "ゴシック", family: '"Noto Sans JP", "Yu Gothic UI", sans-serif' },
+  "ud-serif": { label: "UD明朝", family: '"BIZ UDMincho", "Noto Serif JP", "Yu Mincho", serif' },
+  "ud-sans": { label: "UDゴシック", family: '"BIZ UDGothic", "Noto Sans JP", "Yu Gothic UI", sans-serif' },
+};
 
 const defaults: ReaderSettings = { fontSize: 18, lineHeight: 1.72, maxWidth: 680, font: "serif", theme: "white", writing: "horizontal" };
 
@@ -281,6 +306,7 @@ export default function ReaderPage() {
   const scrollRef = useRef<HTMLDivElement>(null);
   const articleRef = useRef<HTMLElement>(null);
   const progressRef = useRef<HTMLDivElement>(null);
+  const progressTextRef = useRef<HTMLSpanElement>(null);
   const toTopRef = useRef<HTMLButtonElement>(null);
   const restoredKeyRef = useRef<string | null>(null);
   const pendingBookmarkRef = useRef<{ page: number; top: number; anchor?: number } | null>(null);
@@ -421,6 +447,16 @@ export default function ReaderPage() {
     }
     return rows;
   }, [authorWorksQuery.data, explicitCollectionQuery.data, memberCollectionsQuery.data, metadataQuery.data?.download, officialSeriesQuery.data]);
+  // 読了の札に表紙・作者・分量を出すため、隣の作品だけ詳しく読む。並びは
+  // 軽い形（題と番号だけ）で引いているので、そこには表紙が無い。
+  const neighborIds = useMemo(() => [...new Set(readingContexts.flatMap((context) => [context.previous?.id, context.next?.id]).filter((value): value is number => typeof value === "number"))].sort((a, b) => a - b), [readingContexts]);
+  const neighborsQuery = useQuery({
+    queryKey: ["reader-neighbors", neighborIds],
+    queryFn: () => getDownloads(neighborIds),
+    enabled: runtime && neighborIds.length > 0,
+    staleTime: 60_000,
+  });
+  const neighbors = useMemo(() => new Map((neighborsQuery.data ?? []).map((entry) => [entry.id, entry])), [neighborsQuery.data]);
   // Only while reading: an address you cannot follow is noise here, whereas the
   // detail screen deliberately shows the work as its author wrote it.
   const contentReady = !contentQuery.isPlaceholderData && contentQuery.data?.page === sourcePage - 1;
@@ -435,6 +471,8 @@ export default function ReaderPage() {
   const hasSourcePages = pageCount > 1;
   const vertical = settings.writing === "vertical";
   const positionKey = `piep.reader-position.${id}.${version ?? "current"}`;
+  // 残り時間の目安に使う全体の字数。編集版なら編集版の字数になる。
+  const totalChars = contentQuery.data?.totalPlainTextChars || metadataQuery.data?.download.textLength || 0;
   const sequenceContextLimited = Boolean(officialSeriesQuery.data?.truncated || authorWorksQuery.data?.truncated);
 
   useEffect(() => { setVersion(normalizedRequestedVersion); }, [normalizedRequestedVersion]);
@@ -744,6 +782,13 @@ export default function ReaderPage() {
         indicator.style.setProperty("--reader-progress-ratio", String(progress / 100));
         indicator.setAttribute("aria-valuenow", String(Math.round(progress)));
       }
+      // 帯だけでは「あとどれくらいか」が読めない。数と残り時間の目安を添える。
+      // 描き直しを起こさないよう、文字は直接書き換える。
+      const label = progressTextRef.current;
+      if (label) {
+        const remaining = Math.max(0, totalChars * (1 - progress / 100));
+        label.textContent = progress >= 99.5 ? "読了" : `${Math.round(progress)}% · 残り${formatReadingTime(remaining)}`;
+      }
       toTopRef.current?.toggleAttribute("data-visible", progress > 8);
       // Only a genuine scroll writes the position. The priming call below runs
       // before the saved offset has been applied, so persisting there would
@@ -782,7 +827,7 @@ export default function ReaderPage() {
       if (saveTimer !== null) window.clearTimeout(saveTimer);
       flush();
     };
-  }, [contentReady, hasSourcePages, id, positionKey, sourcePage, pageCount, version, vertical]);
+  }, [contentReady, hasSourcePages, id, positionKey, sourcePage, pageCount, totalChars, version, vertical]);
   // 手元にある作品・作者を指すリンクに印を付ける。押す前に、それがこの道具の
   // 中の場所だと分かる。
   useLibraryLinkMarks(articleRef, preparedHtml);
@@ -944,6 +989,7 @@ export default function ReaderPage() {
             {/* Title only: the provider and author already head the document
                 itself, and repeating them here just crowded the bar. */}
             <Text size="sm" fw={700} className="line-clamp-1">{work.title}</Text>
+            <Text component="span" ref={progressTextRef} size="xs" c="dimmed" className="reader-progress-text" aria-live="off" />
           </Group>
           <Group gap="xs" wrap="nowrap">
             {/* 編集版が古い版の上に載っているときは、そう名乗る。取り込み直した
@@ -1009,7 +1055,7 @@ export default function ReaderPage() {
               "--reader-font-size": `${settings.fontSize}px`,
               "--reader-line-height": settings.lineHeight,
               "--reader-max-width": `${settings.maxWidth}px`,
-              "--reader-font-family": settings.font === "serif" ? '"Noto Serif JP", "Yu Mincho", serif' : '"Noto Sans JP", "Yu Gothic UI", sans-serif',
+              "--reader-font-family": (READER_FONTS[settings.font] ?? READER_FONTS.serif).family,
             }}
           >
             {!contentReady ? <LoadingState label="読書位置のページを読み込んでいます" /> : <>
@@ -1036,7 +1082,7 @@ export default function ReaderPage() {
                 <Text size="sm" c="dimmed">{sourcePage} / {pageCount} ページ</Text>
                 <Button variant="light" rightSection={<Icons.next size={IconSize.menu} />} onClick={() => goToSourcePage(sourcePage + 1)}>次のページを読む</Button>
               </Box>}
-              {sourcePage === pageCount && <Box className="reader-finish"><Icons.read size={IconSize.hero} /><Text fw={700}>読了</Text>{sequenceContextLimited && <Alert color="yellow" mt="md" maw={620}>作品数が非常に多いため、前後の作品を特定できない並びがあります。作品詳細からシリーズまたは作者一覧を開いてください。</Alert>}{readingContexts.length > 0 && <Stack gap="sm" w="100%" maw={620} mt="md">{readingContexts.map((context) => <ReadingContextCard key={context.key} context={context} onOpen={navigate} />)}</Stack>}<Button variant="light" mt="md" onClick={() => returnTo(`/works/${work.id}`)}>作品詳細へ戻る</Button></Box>}
+              {sourcePage === pageCount && <Box className="reader-finish"><Icons.read size={IconSize.hero} /><Text fw={700}>読了</Text>{sequenceContextLimited && <Alert color="yellow" mt="md" maw={620}>作品数が非常に多いため、前後の作品を特定できない並びがあります。作品詳細からシリーズまたは作者一覧を開いてください。</Alert>}{readingContexts.length > 0 && <Stack gap="sm" w="100%" maw={620} mt="md">{readingContexts.map((context) => <ReadingContextCard key={context.key} context={context} neighbors={neighbors} onOpen={navigate} />)}</Stack>}<Button variant="light" mt="md" onClick={() => returnTo(`/works/${work.id}`)}>作品詳細へ戻る</Button></Box>}
             </>}
           </Box>
         </Box>
@@ -1094,7 +1140,7 @@ export default function ReaderPage() {
           <Box><Group justify="space-between" mb="sm"><Text size="sm" fw={700}>文字サイズ</Text><Text size="xs" c="dimmed">{settings.fontSize}px</Text></Group><Slider aria-label="文字サイズ" min={14} max={28} step={1} value={settings.fontSize} onChange={(fontSize) => setSettings({ ...settings, fontSize })} marks={[{ value: 14, label: "小" }, { value: 21, label: "標準" }, { value: 28, label: "大" }]} /></Box>
           <Box><Group justify="space-between" mb="sm"><Text size="sm" fw={700}>行間</Text><Text size="xs" c="dimmed">{settings.lineHeight.toFixed(2)}</Text></Group><Slider aria-label="行間" min={1.4} max={2.4} step={0.05} value={settings.lineHeight} onChange={(lineHeight) => setSettings({ ...settings, lineHeight })} /></Box>
           <Box><Group justify="space-between" mb="sm"><Text size="sm" fw={700}>本文幅</Text><Text size="xs" c="dimmed">{settings.maxWidth}px</Text></Group><Slider aria-label="本文幅" min={520} max={900} step={20} value={settings.maxWidth} onChange={(maxWidth) => setSettings({ ...settings, maxWidth })} /></Box>
-          <Box><Text size="sm" fw={700} mb="sm">書体</Text><SegmentedControl aria-label="書体" fullWidth value={settings.font} onChange={(font) => setSettings({ ...settings, font: font as ReaderSettings["font"] })} data={[{ value: "serif", label: "明朝" }, { value: "sans", label: "ゴシック" }]} /></Box>
+          <Box><Text size="sm" fw={700} mb="sm">書体</Text><SegmentedControl aria-label="書体" fullWidth value={settings.font} onChange={(font) => setSettings({ ...settings, font: font as ReaderSettings["font"] })} data={(Object.keys(READER_FONTS) as ReaderFont[]).map((value) => ({ value, label: READER_FONTS[value].label }))} /><Text size="xs" c="dimmed" mt={6}>UD は字の形を見分けやすくした書体です。</Text></Box>
           {/* EPUB には最初からあった設定が、読む画面にだけ無かった。 */}
           <Box><Text size="sm" fw={700} mb="sm">組み方</Text><SegmentedControl aria-label="組み方" fullWidth value={settings.writing === "vertical" ? "vertical" : "horizontal"} onChange={(writing) => setSettings({ ...settings, writing: writing as ReaderSettings["writing"] })} data={[{ value: "horizontal", label: "横書き" }, { value: "vertical", label: "縦書き" }]} /><Text size="xs" c="dimmed" mt={6}>縦書きは右から左へ進みます。矢印キーの向きも入れ替わります。</Text></Box>
           <Box><Text size="sm" fw={700} mb="sm">背景</Text><Radio.Group value={settings.theme} onChange={(theme) => setSettings({ ...settings, theme: theme as ReaderSettings["theme"] })}><Stack gap="xs"><Radio value="paper" label="紙の色" /><Radio value="white" label="白" /><Radio value="night" label="ナイト" /></Stack></Radio.Group></Box>

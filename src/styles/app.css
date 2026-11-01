@@ -2300,6 +2300,35 @@ select {
   writing-mode: horizontal-tb;
 }
 
+/* 読んだ割合と残り時間。題の横に小さく。狭い窓では題を優先して隠す。 */
+.reader-progress-text { flex: none; white-space: nowrap; font-variant-numeric: tabular-nums; }
+@media (max-width: 560px) { .reader-progress-text { display: none; } }
+
+/* 読了の札の、隣の作品。表紙・題・作者と分量を一枚に。 */
+.reader-neighbor {
+  display: flex;
+  min-width: 0;
+  gap: 12px;
+  align-items: flex-start;
+  padding: 10px;
+  border: 1px solid light-dark(#e1e5ea, #2c3440);
+  border-radius: var(--mantine-radius-md);
+  background: var(--mantine-color-body);
+  color: inherit;
+  text-align: left;
+  transition: border-color 120ms ease, box-shadow 120ms ease, transform 120ms ease;
+}
+.reader-neighbor:hover { border-color: var(--mantine-color-piep-4); box-shadow: 0 6px 18px light-dark(rgb(30 42 55 / 8%), rgb(0 0 0 / 28%)); }
+.reader-neighbor:focus-visible { outline: 2px solid var(--mantine-color-piep-5); outline-offset: 2px; }
+.reader-neighbor[data-emphasized] { border-color: var(--mantine-color-piep-4); background: light-dark(var(--mantine-color-piep-0), rgb(60 158 236 / 8%)); }
+.reader-neighbor__cover .work-cover--compact { width: 64px; height: auto; aspect-ratio: var(--work-cover-shape); flex: none; border-radius: 6px; }
+.reader-neighbor__body { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 3px; }
+.reader-neighbor__label { display: inline-flex; align-items: center; gap: 3px; }
+.reader-neighbor__title { line-height: 1.45; }
+.reader-neighbor__excerpt { line-height: 1.55; }
+.reader-neighbor__badge { align-self: flex-start; margin-top: 2px; }
+.reader-neighbor--empty { display: grid; min-height: 84px; place-items: center; border-style: dashed; background: transparent; }
+
 .reader-finish {
   display: flex;
   flex-direction: column;
