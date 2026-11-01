@@ -945,21 +945,26 @@ pub async fn runtime_profile(engine: &AssistEngine) -> Result<AssistRuntimeProfi
     })
 }
 
-/// 設定したエンジンを、実際の仕事で試す。
+/// 設定したエンジンを、実際の仕事（コレクションの命名）で試す。
 ///
-/// 「つながる」ことと「使える」ことは別である。安全調整の強いモデルは、
-/// 接続はできても題材を婉曲に言い換えた見出しを返す。**保存する前に、
-/// 何が返るのかを見せる。**
+/// 「つながる」ことと「使える」ことは別である。モデルには名前を書かせず、
+/// 作品の題名・シリーズ・タグから作った候補の中から選ばせる。だから確かめられる
+/// のは、決めた形（JSON）で答えを返せるか、どれくらいかかるか、選んだ候補が
+/// 送った作品に合っているか。**何を送り、何から選ばせたのかも一緒に見せる。**
+/// 見せないと、返ってきた名前だけでは良し悪しを判断できない。
 pub async fn try_engine(
     engine: &AssistEngine,
     works: &[NamingWork],
 ) -> Result<TrialResult, String> {
+    let (payload, candidates) = naming_request(engine, works)?;
     let started = std::time::Instant::now();
-    let named = name_bundle(engine, works).await?;
+    let named = ask_naming(engine, &payload, &candidates).await?;
     Ok(TrialResult {
         name: named.name,
         subtitle: named.subtitle,
         elapsed_ms: started.elapsed().as_millis() as i64,
+        sent_titles: payload.into_iter().map(|work| work.title).collect(),
+        candidates,
     })
 }
 
@@ -970,6 +975,10 @@ pub struct TrialResult {
     pub name: String,
     pub subtitle: String,
     pub elapsed_ms: i64,
+    /// 送った作品の題名。題名を送らない設定なら空の文字列になる。
+    pub sent_titles: Vec<String>,
+    /// モデルに選ばせた名前の候補。`name` はこの中の一つ。
+    pub candidates: Vec<NamedBundle>,
 }
 
 /// スキーマを指定して、JSON をひとつ返してもらう。
@@ -1369,6 +1378,15 @@ pub async fn name_bundle(
     engine: &AssistEngine,
     works: &[NamingWork],
 ) -> Result<NamedBundle, String> {
+    let (payload, candidates) = naming_request(engine, works)?;
+    ask_naming(engine, &payload, &candidates).await
+}
+
+/// 送る作品と、選ばせる名前の候補を作る。試し書きは、これを画面にも見せる。
+fn naming_request(
+    engine: &AssistEngine,
+    works: &[NamingWork],
+) -> Result<(Vec<NamingWork>, Vec<NamedBundle>), String> {
     validate_engine(engine)?;
     let policy = input_policy(engine, FEATURE_COLLECTION_NAMING)?;
     if works.is_empty() {
@@ -1423,6 +1441,14 @@ pub async fn name_bundle(
         );
     }
     let candidates = naming_candidates(&payload);
+    Ok((payload, candidates))
+}
+
+async fn ask_naming(
+    engine: &AssistEngine,
+    payload: &[NamingWork],
+    candidates: &[NamedBundle],
+) -> Result<NamedBundle, String> {
     let user = encode(&serde_json::json!({
         "作品": payload,
         "候補": candidates.iter().enumerate().map(|(id, candidate)| (id.to_string(), candidate)).collect::<std::collections::BTreeMap<_, _>>()
@@ -1434,7 +1460,7 @@ pub async fn name_bundle(
         vec!["candidate_id"],
     );
     let content = ask_json(engine, &system, &user, schema, 160).await?;
-    select_named_bundle(&content, &candidates)
+    select_named_bundle(&content, candidates)
 }
 
 fn naming_candidates(works: &[NamingWork]) -> Vec<NamedBundle> {
@@ -3012,6 +3038,52 @@ fn validated_split_groups(
     Ok(groups)
 }
 
+/// 長くかかる手伝い（あらすじ・前回のあらすじ）の、いまの段階。
+///
+/// 長い本文では、一作に数分かかる。読み込み中の印だけでは、止まったのか
+/// 進んでいるのか分からないので、段階を画面へ知らせる。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AssistStage {
+    /// 長編の区切りを、一つずつ読んでいる。
+    Reading,
+    /// 区切りのメモから、全体をまとめている。
+    Combining,
+    /// 本文から下書きを作っている。
+    Drafting,
+    /// 下書きの各文が、根拠の原文に合っているかを照らしている。
+    Checking,
+    /// 照合で合わなかった文を直している。
+    Revising,
+    /// 直したものを、もう一度照らしている。
+    Rechecking,
+    /// 根拠を付けない作り方（文脈の小さいモデル）で作っている。
+    Writing,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssistProgress {
+    pub stage: AssistStage,
+    /// 長編を区切って読むときの、何番目の区切りか（1から）。
+    pub section: Option<usize>,
+    pub sections: Option<usize>,
+    /// 答えの形が崩れて、同じ段階を頼み直しているところか。
+    pub retry: bool,
+}
+
+/// 進み具合の受け口。tauri のコマンドから呼ぶので、待つあいだも送れる形にする。
+pub type Progress<'a> = &'a (dyn Fn(AssistProgress) + Send + Sync);
+
+fn report_writing(progress: Progress<'_>) {
+    progress(AssistProgress {
+        stage: AssistStage::Writing,
+        section: None,
+        sections: None,
+        retry: false,
+    });
+}
+
 /// 本文から、短いあらすじを作ってもらう。
 ///
 /// **本文を送るので、利用者の許可が要る。** 取得元の紹介文は宣伝であって
@@ -3021,6 +3093,7 @@ pub async fn summarize_work(
     engine: &AssistEngine,
     work: &WorkFacts,
     body: &str,
+    progress: Progress<'_>,
 ) -> Result<AssistNote, String> {
     require_body_consent(engine)?;
     if body.trim().is_empty() {
@@ -3060,9 +3133,11 @@ pub async fn summarize_work(
             &grounded::SYNOPSIS_TASK,
             None,
             context,
+            progress,
         )
         .await;
     }
+    report_writing(progress);
     hierarchical_body_summary(
         engine,
         FEATURE_WORK_SYNOPSIS,
@@ -3083,6 +3158,7 @@ pub async fn recap_previous(
     previous_title: &str,
     body: &str,
     memory: Option<&str>,
+    progress: Progress<'_>,
 ) -> Result<AssistNote, String> {
     require_body_consent(engine)?;
     if body.trim().is_empty() {
@@ -3107,9 +3183,11 @@ pub async fn recap_previous(
             &grounded::RECAP_TASK,
             memory,
             tokens,
+            progress,
         )
         .await;
     }
+    report_writing(progress);
     hierarchical_body_summary(
         engine,
         FEATURE_READER_RECAP,

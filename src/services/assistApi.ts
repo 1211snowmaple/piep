@@ -264,6 +264,10 @@ export interface TrialResult {
   name: string;
   subtitle: string;
   elapsedMs: number;
+  /** 送った作品の題名。題名を送らない設定なら空の文字列。 */
+  sentTitles: string[];
+  /** モデルに選ばせた名前の候補。`name` はこの中の一つ。 */
+  candidates: { name: string; subtitle: string }[];
 }
 
 /** ホストとロード済みモデルから安全側に決めた実行プロファイル。 */
@@ -488,6 +492,18 @@ export function describeAuthor(engine: AssistEngine, source: string, personKey: 
 /** 本文から、あとで思い出すためのあらすじを作ってもらう。**本文を送る。** */
 export function summarizeWork(engine: AssistEngine, downloadId: number): Promise<AssistNote> {
   return invokeGenerated<AssistNote>("assist_summarize_work", { engine, downloadId });
+}
+
+/** あらすじ・前回のあらすじを作っているあいだの段階（`assist-progress` イベント）。 */
+export interface AssistProgressEvent {
+  feature: AssistFeatureId;
+  downloadId: number;
+  stage: "reading" | "combining" | "drafting" | "checking" | "revising" | "rechecking" | "writing";
+  /** 長編を区切って読むときの、何番目の区切りか（1から）。 */
+  section: number | null;
+  sections: number | null;
+  /** 答えの形が崩れて、同じ段階を頼み直しているところか。 */
+  retry: boolean;
 }
 
 /** 直前の話の要点を出す。**本文を送る。** */

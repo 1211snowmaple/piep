@@ -3082,6 +3082,23 @@ async fn reaudit_edited_work(app: &tauri::AppHandle, download_id: i64) {
     }
 }
 
+/// 以前の編集版を消す。`edit_revision_id` を省くと、その作品の以前の版をすべて消す。
+///
+/// いま反映している版・下書き・取り込んだ本文は残る。消した版は戻せない。
+#[tauri::command]
+pub async fn db_delete_archived_work_edits(
+    app: tauri::AppHandle,
+    download_id: i64,
+    edit_revision_id: Option<i64>,
+) -> Result<usize, String> {
+    run_library_write_blocking(app, move |state| {
+        state
+            .db
+            .delete_archived_work_edits(download_id, edit_revision_id)
+    })
+    .await
+}
+
 /// 編集した版を使うのをやめ、取り込んだままの本文へ戻す。
 ///
 /// **編集は消えない。** また `db_activate_work_edit` で戻せる。

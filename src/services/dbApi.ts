@@ -390,6 +390,14 @@ export async function activateWorkEdit(editRevisionId: number): Promise<WorkEdit
   return invoke<WorkEditRevision>("db_activate_work_edit", { editRevisionId });
 }
 
+/**
+ * 以前の編集版を消す。`editRevisionId` を省くと、その作品の以前の版をすべて消す。
+ * いま反映している版・下書き・取り込んだ本文は残る。消した数を返す。
+ */
+export async function deleteArchivedWorkEdits(downloadId: number, editRevisionId?: number): Promise<number> {
+  return invoke<number>("db_delete_archived_work_edits", { downloadId, editRevisionId: editRevisionId ?? null });
+}
+
 /** 反映した編集を下ろし、取り込んだままの本文へ戻す。版は履歴に残る。 */
 export async function deactivateWorkEdit(downloadId: number): Promise<void> {
   return invoke<void>("db_deactivate_work_edit", { downloadId });

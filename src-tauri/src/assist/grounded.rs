@@ -15,7 +15,10 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 
 use super::harness::{self, CallOptions, Effort};
-use super::{summary_source_units, AssistEngine, AssistNote, SummaryUnit, WorkFacts};
+use super::{
+    summary_source_units, AssistEngine, AssistNote, AssistProgress, AssistStage, Progress,
+    SummaryUnit, WorkFacts,
+};
 
 /// 根拠の照合結果。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -459,11 +462,14 @@ pub(super) fn fits_whole(units: &[SummaryUnit], context_tokens: usize) -> bool {
     estimated + WHOLE_DOCUMENT_RESERVE_TOKENS <= context_tokens
 }
 
-/// system、題名、書かせる・照らす・直す指示と、思考を含む出力の分。
-const WHOLE_DOCUMENT_RESERVE_TOKENS: usize = 12_000;
+/// system、題名、書かせる・照らす・直す指示と、出力の分。考えさせないので
+/// 思考の分は取らない（取っていたころは 12,000 で、長編が早く区切られていた）。
+const WHOLE_DOCUMENT_RESERVE_TOKENS: usize = 6_000;
 
-const DRAFT_OUTPUT_TOKENS: u32 = 6_000;
-const VERIFY_OUTPUT_TOKENS: u32 = 6_000;
+/// 答えは400字・8文までの JSON で、実測 300〜350 トークン。暴走しても
+/// ここで止まるよう、余裕を持たせつつ抑える。
+const DRAFT_OUTPUT_TOKENS: u32 = 1_500;
+const VERIFY_OUTPUT_TOKENS: u32 = 1_500;
 
 /// 長編を区切りごとに読むときの、区切りのメモ。最終のまとめの材料になる。
 const SECTION_TASK: GroundedTask = GroundedTask {
@@ -487,6 +493,7 @@ pub(super) async fn grounded_note(
     task: &GroundedTask,
     memory: Option<&str>,
     context_tokens: usize,
+    progress: Progress<'_>,
 ) -> Result<AssistNote, String> {
     let units = summary_source_units(body);
     if units.iter().all(|unit| unit.text.trim().is_empty()) {
@@ -494,7 +501,8 @@ pub(super) async fn grounded_note(
     }
     if fits_whole(&units, context_tokens) {
         let prefix = document_prefix(work, &units, None);
-        return write_and_check(engine, work, &prefix, &units, None, task, memory).await;
+        let drafting = Step::new(progress, AssistStage::Drafting, None);
+        return write_and_check(engine, work, &prefix, &units, None, task, memory, drafting).await;
     }
     let sections = sections_for(&units, context_tokens)?;
     let section_count = sections.len();
@@ -502,12 +510,19 @@ pub(super) async fn grounded_note(
     for (index, section) in sections.iter().enumerate() {
         let mut asking = document_prefix(work, section, Some((index + 1, section_count)));
         asking.push(harness::user(&draft_request(&SECTION_TASK, None)));
-        let claims = harness::structured(
+        let step = Step::new(
+            progress,
+            AssistStage::Reading,
+            Some((index + 1, section_count)),
+        );
+        step.start();
+        let claims = harness::structured_noting(
             engine,
             &asking,
             &draft_schema(&SECTION_TASK),
             drafting_options(),
             |value| checked_draft(value, &SECTION_TASK, &units, None),
+            |_| step.retry(),
         )
         .await?;
         memos.push(claims);
@@ -518,13 +533,64 @@ pub(super) async fn grounded_note(
         .flat_map(|claim| claim.sources.iter().copied())
         .collect::<BTreeSet<_>>();
     let prefix = memo_prefix(work, &memos, &units, &pool);
-    write_and_check(engine, work, &prefix, &units, Some(&pool), task, memory).await
+    let combining = Step::new(progress, AssistStage::Combining, None);
+    write_and_check(
+        engine,
+        work,
+        &prefix,
+        &units,
+        Some(&pool),
+        task,
+        memory,
+        combining,
+    )
+    .await
+}
+
+/// 進み具合の一段。始まりと、頼み直しを知らせる。
+#[derive(Clone, Copy)]
+struct Step<'a> {
+    progress: Progress<'a>,
+    stage: AssistStage,
+    section: Option<(usize, usize)>,
+}
+
+impl<'a> Step<'a> {
+    fn new(progress: Progress<'a>, stage: AssistStage, section: Option<(usize, usize)>) -> Self {
+        Self {
+            progress,
+            stage,
+            section,
+        }
+    }
+
+    fn with_stage(self, stage: AssistStage) -> Self {
+        Self { stage, ..self }
+    }
+
+    fn report(&self, retry: bool) {
+        (self.progress)(AssistProgress {
+            stage: self.stage,
+            section: self.section.map(|(index, _)| index),
+            sections: self.section.map(|(_, count)| count),
+            retry,
+        });
+    }
+
+    fn start(&self) {
+        self.report(false);
+    }
+
+    fn retry(&self) {
+        self.report(true);
+    }
 }
 
 /// 下書き → 照合 →（必要なら）直し → 照合。
 ///
 /// 下書きと直しは本文を先頭に固定した同じ会話で行い、二度目は本文を読み
 /// 直さない。照合は本文を見せない別の会話で行う（`VERIFY_SYSTEM`）。
+#[allow(clippy::too_many_arguments)]
 async fn write_and_check(
     engine: &AssistEngine,
     work: &WorkFacts,
@@ -533,27 +599,49 @@ async fn write_and_check(
     allowed: Option<&BTreeSet<usize>>,
     task: &GroundedTask,
     memory: Option<&str>,
+    step: Step<'_>,
 ) -> Result<AssistNote, String> {
     let draft_options = drafting_options().sharing_first(prefix.len());
     let schema = draft_schema(task);
 
     let mut drafting = prefix.to_vec();
     drafting.push(harness::user(&draft_request(task, memory)));
-    let mut claims = harness::structured(engine, &drafting, &schema, draft_options, |value| {
-        checked_draft(value, task, units, allowed)
-    })
+    step.start();
+    let mut claims = harness::structured_noting(
+        engine,
+        &drafting,
+        &schema,
+        draft_options,
+        |value| checked_draft(value, task, units, allowed),
+        |_| step.retry(),
+    )
     .await?;
-    verify(engine, work, units, &mut claims).await?;
+    verify(
+        engine,
+        work,
+        units,
+        &mut claims,
+        step.with_stage(AssistStage::Checking),
+    )
+    .await?;
 
     if needs_revision(&claims) {
         let mut revising = drafting.clone();
         revising.push(harness::assistant(&encode_claims(&claims)));
         revising.push(harness::user(&revise_request(task, &claims)));
-        let mut revised = harness::structured(engine, &revising, &schema, draft_options, |value| {
-            checked_draft(value, task, units, allowed)
-        })
+        let revise = step.with_stage(AssistStage::Revising);
+        revise.start();
+        let mut revised = harness::structured_noting(
+            engine,
+            &revising,
+            &schema,
+            draft_options,
+            |value| checked_draft(value, task, units, allowed),
+            |_| revise.retry(),
+        )
         .await?;
-        verify(engine, work, units, &mut revised).await?;
+        let recheck = step.with_stage(AssistStage::Rechecking);
+        verify(engine, work, units, &mut revised, recheck).await?;
         // 直した結果のほうが悪くなることもある。支持されない文が少ない方を採る。
         if unsupported_weight(&revised) <= unsupported_weight(&claims) {
             claims = revised;
@@ -575,21 +663,22 @@ fn needs_revision(claims: &[GroundedClaim]) -> bool {
             .any(|claim| claim.verdict == ClaimVerdict::Unsupported)
 }
 
-/// 下書き・区切りのメモ。考えさせるが、上限を置く（実測: 上限なしで一回
-/// 約4,400トークン・90秒、1,536 で約40秒。文の質は棚の実作品で落ちなかった）。
+/// 下書き・区切りのメモ・直し。**考えさせない。**
+///
+/// 以前は思考に上限 1,536 トークンを置いて考えさせていた。2026-11-01 に棚の
+/// 3作（4千・1万2千・2万5千字、Strata の Qwen3.6-35B）で測ると、考えさせると
+/// 159・86・209 秒、考えさせないと 16・24・78 秒。後者でも結末まで具体的に
+/// 書け、照合で根拠ありと判定された文の割合は落ちなかった。思考は毎回ほぼ
+/// 上限まで使われ（約50秒）、時間の大半を占めていた。
 fn drafting_options() -> CallOptions {
-    CallOptions::for_effort(Effort::Low, DRAFT_OUTPUT_TOKENS)
-        .greedy()
-        .thinking_budget(THINKING_BUDGET_TOKENS)
+    CallOptions::for_effort(Effort::Off, DRAFT_OUTPUT_TOKENS).greedy()
 }
 
+/// 照合も考えさせない。根拠の原文と文を並べて照らすだけの仕事で、
+/// 同じ測定で判定の厳しさは変わらなかった。
 fn verifying_options() -> CallOptions {
-    CallOptions::for_effort(Effort::Medium, VERIFY_OUTPUT_TOKENS)
-        .greedy()
-        .thinking_budget(THINKING_BUDGET_TOKENS)
+    CallOptions::for_effort(Effort::Off, VERIFY_OUTPUT_TOKENS).greedy()
 }
-
-const THINKING_BUDGET_TOKENS: u32 = 1_536;
 
 /// 一つの台詞を途中で切らずに、文脈に収まる区切りへ分ける。
 fn sections_for(
@@ -664,16 +753,19 @@ async fn verify(
     work: &WorkFacts,
     units: &[SummaryUnit],
     claims: &mut [GroundedClaim],
+    step: Step<'_>,
 ) -> Result<(), String> {
     let mut checking = verify_prefix(work);
     checking.push(harness::user(&verify_request(claims, units)));
     let count = claims.len();
-    let checks = harness::structured(
+    step.start();
+    let checks = harness::structured_noting(
         engine,
         &checking,
         &verify_schema(),
         verifying_options(),
         |value| checked_verdicts(value, count),
+        |_| step.retry(),
     )
     .await?;
     apply_verdicts(claims, checks);
@@ -909,9 +1001,17 @@ mod tests {
             .and_then(|value| value.parse().ok())
             .unwrap_or(65_536);
         let started = std::time::Instant::now();
-        let note = grounded_note(&engine, &work, &body, &SYNOPSIS_TASK, None, context)
-            .await
-            .unwrap();
+        let note = grounded_note(
+            &engine,
+            &work,
+            &body,
+            &SYNOPSIS_TASK,
+            None,
+            context,
+            &|_| {},
+        )
+        .await
+        .unwrap();
         let out = serde_json::json!({
             "seconds": started.elapsed().as_secs(),
             "note": note.text,

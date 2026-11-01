@@ -27,6 +27,7 @@ export function AssistPanel({
   needsBody = false,
   bodyAllowed = false,
   busy,
+  busyDetail,
   actionLabel,
   onRun,
   disabled,
@@ -45,6 +46,8 @@ export function AssistPanel({
   needsBody?: boolean;
   bodyAllowed?: boolean;
   busy: boolean;
+  /** 動いているあいだに出すもの。渡さなければ「考えてもらっています…」だけを出す。 */
+  busyDetail?: ReactNode;
   actionLabel: string;
   onRun: () => void;
   disabled?: boolean;
@@ -105,7 +108,8 @@ export function AssistPanel({
           </Alert>
         )}
 
-        {busy && (
+        {busy && busyDetail}
+        {busy && !busyDetail && (
           <Group gap={6}>
             <Loader size="xs" />
             <Text size="xs" c="dimmed">{native ? "集計しています…" : "考えてもらっています…"}</Text>

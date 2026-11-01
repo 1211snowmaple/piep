@@ -103,7 +103,7 @@ async fn main() -> Result<(), String> {
     match db.work_facts_with_body(target) {
         Ok((facts, body)) => {
             println!("    本文 {}字", body.chars().count());
-            match assist::summarize_work(&engine, &facts, &body).await {
+            match assist::summarize_work(&engine, &facts, &body, &|_| {}).await {
                 Ok(note) => println!("    {}", note.text),
                 Err(error) => println!("    失敗: {error}"),
             }
@@ -117,7 +117,7 @@ async fn main() -> Result<(), String> {
         match db.work_facts_with_body(previous) {
             Ok((facts, body)) => {
                 println!("    前の話: {}", trim(&facts.title, 46));
-                match assist::recap_previous(&engine, &facts.title, &body, None).await {
+                match assist::recap_previous(&engine, &facts.title, &body, None, &|_| {}).await {
                     Ok(note) => println!("    {}", note.text),
                     Err(error) => println!("    失敗: {error}"),
                 }
