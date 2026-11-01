@@ -693,6 +693,64 @@ impl Database {
         self.count_sql_matches(&normalize_search_params(&params))
     }
 
+    /// 一つのタグと、ほかのタグそれぞれが棚でどれだけ同じ作品に付いているか。
+    ///
+    /// 棚にないタグは None。others のうち棚にないものは結果に入れない。
+    pub fn shelf_tag_pairs(
+        &self,
+        name: &str,
+        others: &[String],
+    ) -> Result<Option<crate::assist::ShelfTagPairs>, String> {
+        let conn = self.read_conn()?;
+        let works_of = |tag: &str| {
+            conn.query_row(
+                "SELECT t.id, COUNT(DISTINCT dt.download_id) FROM tags t
+                 JOIN download_tags dt ON dt.tag_id = t.id
+                 WHERE t.name = ?1 GROUP BY t.id",
+                params![tag],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .optional()
+            .map_err(|e| format!("Failed to read tag: {e}"))
+        };
+        let Some((tag_id, works)) = works_of(name)? else {
+            return Ok(None);
+        };
+        let total = conn
+            .query_row(
+                "SELECT COUNT(DISTINCT download_id) FROM download_tags",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(|e| format!("Failed to count tagged works: {e}"))?;
+        let mut together_stmt = conn
+            .prepare(
+                "SELECT COUNT(DISTINCT mine.download_id) FROM download_tags mine
+                 JOIN download_tags other ON other.download_id = mine.download_id
+                 WHERE mine.tag_id = ?1 AND other.tag_id = ?2",
+            )
+            .map_err(|e| format!("Failed to prepare tag pair count: {e}"))?;
+        let mut pairs = Vec::new();
+        for other in others.iter().filter(|other| other.as_str() != name) {
+            let Some((other_id, other_works)) = works_of(other)? else {
+                continue;
+            };
+            let together = together_stmt
+                .query_row(params![tag_id, other_id], |row| row.get::<_, i64>(0))
+                .map_err(|e| format!("Failed to count tag pair: {e}"))?;
+            pairs.push(crate::assist::ShelfTagPair {
+                name: other.clone(),
+                works: other_works,
+                together,
+            });
+        }
+        Ok(Some(crate::assist::ShelfTagPairs {
+            total,
+            works,
+            others: pairs,
+        }))
+    }
+
     /// 一つのタグが棚でどう使われているか。一緒に付くタグと作品の題名。
     pub fn shelf_tag_profile(
         &self,
@@ -1070,6 +1128,20 @@ mod tests {
             vec!["雨の駅".to_string(), "港の朝".to_string()]
         );
         assert!(db.shelf_tag_profile("無い").unwrap().is_none());
+        let pairs = db
+            .shelf_tag_pairs("純愛", &tags(&["催眠", "催眠術", "純愛", "無い"]))
+            .unwrap()
+            .unwrap();
+        assert_eq!((pairs.total, pairs.works), (3, 2));
+        assert_eq!(
+            pairs
+                .others
+                .iter()
+                .map(|pair| (pair.name.as_str(), pair.works, pair.together))
+                .collect::<Vec<_>>(),
+            vec![("催眠", 2, 1), ("催眠術", 1, 1)]
+        );
+        assert!(db.shelf_tag_pairs("無い", &tags(&["催眠"])).unwrap().is_none());
         drop(db);
         let _ = std::fs::remove_dir_all(root);
     }
