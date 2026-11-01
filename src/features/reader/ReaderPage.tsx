@@ -45,7 +45,7 @@ import { openExternalUrl, revealPathInFileManager } from "@/services/openerApi";
 import { getDemoReader } from "@/mocks/demoData";
 import { RecapPanel } from "@/features/assist/RecapPanel";
 import type { WorkCollection } from "@/types/collections";
-import type { SearchV2Params, SearchV2Result } from "@/types/library";
+import type { ReaderMetadata, SearchV2Params, SearchV2Result } from "@/types/library";
 
 interface ReadingContextRow {
   key: string;
@@ -293,7 +293,7 @@ export default function ReaderPage() {
   const { bookmarks, add: addBookmark, remove: removeBookmark } = useBookmarks(id, version);
   const metadataQuery = useQuery({
     queryKey: ["reader-metadata", id],
-    queryFn: () => runtime ? getReaderMetadata(id) : Promise.resolve((() => { const demo = getDemoReader(id); return { download: demo.download, versions: demo.versions, assetCount: demo.assets.length, isEdited: demo.isEdited, activeEditRevision: demo.activeEditRevision }; })()),
+    queryFn: () => runtime ? getReaderMetadata(id) : Promise.resolve((() => { const demo = getDemoReader(id); return { download: demo.download, versions: demo.versions, assetCount: demo.assets.length, isEdited: demo.isEdited, activeEditRevision: demo.activeEditRevision, draftEditRevision: null } satisfies ReaderMetadata; })()),
     enabled: Number.isFinite(id),
   });
   const contentQuery = useQuery({
@@ -948,11 +948,17 @@ export default function ReaderPage() {
           <Group gap="xs" wrap="nowrap">
             {/* 編集版が古い版の上に載っているときは、そう名乗る。取り込み直した
                 本文があるのに、読み手にはそれが見えないままだった。 */}
-            {doc.isEdited && (staleEditBase === null
-              ? <Badge color="gray" variant="light" visibleFrom="sm">ローカル編集</Badge>
+            {/* 狭い窓でも隠さない。隠していたころは、版の選択のいちばん上の
+                「編集版」だけが手がかりだった。取り込んだ版を選んで読んで
+                いるあいだは、編集版ではないので名乗らない。 */}
+            {doc.isEdited && version === null && (staleEditBase === null
+              ? <Tooltip label="ローカルで編集し、反映した本文を表示しています。取り込んだ本文は版の選択から読めます。"><Badge color="blue" variant="light">編集版</Badge></Tooltip>
               : <Tooltip label={`この編集版は v${staleEditBase} の本文をもとにしています。取り込み済みの v${work.currentVersion} は表示されていません。`}>
-                  <Badge color="yellow" variant="light" visibleFrom="sm">ローカル編集（v{staleEditBase}基準）</Badge>
+                  <Badge color="yellow" variant="light">編集版（v{staleEditBase}基準）</Badge>
                 </Tooltip>)}
+            {/* 自動保存の下書きは、反映するまでここには出ない。直したのに
+                変わらない、と思わせないよう、残っていることだけ告げる。 */}
+            {doc.draftEditRevision && <Tooltip label="編集画面に反映していない下書きがあります。読書画面には反映した本文（無ければ取り込んだ本文）が出ています。"><Badge color="yellow" variant="light">未反映の下書き</Badge></Tooltip>}
             <BookmarkControls
               bookmarks={bookmarks}
               addDisabled={!contentReady}

@@ -31,6 +31,11 @@ import { ErrorState, LoadingState } from "@/components/AsyncState";
 import { errorMessage } from "@/lib/format";
 import { registerUnsavedGuard } from "@/lib/unsavedGuard";
 import { renderNotation, renderNotationLines } from "@/features/editor/notation";
+import { ProofreadPanel, buildProofreadBatches, replaceOnce, useProofread, type ProofreadItem } from "@/features/editor/ProofreadPanel";
+import { AssistLauncher, type AssistLauncherItem } from "@/features/assist/AssistLauncher";
+import { useAssist } from "@/features/assist/useAssist";
+import { usePageAssist } from "@/app/PageAssistContext";
+import { PROOFREAD_BATCH_CHARS } from "@/services/assistApi";
 import { getDemoEditor } from "@/mocks/demoData";
 import { activateWorkEdit, discardWorkDraft, getAssetUrl, getEditorDocument, importWorkAsset, isTauriRuntime, saveWorkDraft } from "@/services/dbApi";
 import { openSingleDialog } from "@/services/dialogApi";
@@ -99,8 +104,32 @@ export const isSafeDocumentLink = (value: unknown): boolean => {
     return false;
   }
 };
-const estimatePreviewBlockSize = (type?: EditorBlockType) => {
-  if (type === "image") return 300;
+/**
+ * 読み込んだ画像の縦横。src ごとに一度だけ測る。
+ *
+ * 画像の行は、読み込むまで高さが 0 で、読み込んだ瞬間に数百px伸びる。
+ * 仮想化された一覧ではその伸びがスクロールの途中に起き、下の行が一斉に
+ * ずれて引っ掛かって見えた。縦横が分かっていれば、読み込む前から枠を取れる。
+ */
+const imageSizes = new Map<string, { width: number; height: number }>();
+/** プレビューの本文幅。`.editor-preview-document` の幅と余白から出す概算。 */
+const previewContentWidth = (viewportWidth: number) => {
+  const page = Math.min(viewportWidth - 36, 720);
+  const padding = Math.min(52, Math.max(24, window.innerWidth * 0.04));
+  return Math.max(120, page - padding * 2 - 2);
+};
+/** 縦横が分かっている画像を、CSS と同じ規則で収めた高さ（幅は本文幅まで、高さは画面の65%まで）。 */
+const fittedImageHeight = (size: { width: number; height: number }, contentWidth: number) => {
+  const ratio = size.width / size.height;
+  const width = Math.min(contentWidth, size.width, window.innerHeight * 0.65 * ratio);
+  return width / ratio;
+};
+const estimatePreviewBlockSize = (type?: EditorBlockType, imageSrc?: string | null, contentWidth = 560) => {
+  if (type === "image") {
+    const size = imageSrc ? imageSizes.get(imageSrc) : undefined;
+    // 図の上下の余白（2em ずつ）を足す。
+    return size ? Math.round(fittedImageHeight(size, contentWidth) + 64) : 300;
+  }
   if (type === "link") return 96;
   if (type === "separator" || type === "pageBreak") return 60;
   if (type === "heading") return 78;
@@ -172,6 +201,9 @@ export default function EditorPage() {
   const [dragFrom, setDragFrom] = useState<number | null>(null);
   const [dragOver, setDragOver] = useState<number | null>(null);
   const [savedAt, setSavedAt] = useState<Date | null>(null);
+  // 保存した下書きがまだ反映されていないこと。読み直した文書にも出るが、
+  // 届くまでの間（とブラウザのデモ）に「反映」が押せなくならないよう手元でも持つ。
+  const [draftSavedHere, setDraftSavedHere] = useState(false);
   /** 自動保存が、整っていない書きかけのために止まっている。 */
   const [autoSaveBlocked, setAutoSaveBlocked] = useState(false);
   const [findOpened, findPanel] = useDisclosure(false);
@@ -183,8 +215,10 @@ export default function EditorPage() {
   const editorScrollRef = useRef<HTMLDivElement>(null);
   const previewScrollRef = useRef<HTMLDivElement>(null);
   const previewRef = useRef<PreviewHandle>(null);
-  const syncLockRef = useRef<"editor" | "preview" | null>(null);
-  const syncTimerRef = useRef<number | null>(null);
+  // 位置を合わせにいくのは、利用者がいま触っている側だけ。両側が互いを
+  // 動かしていたころは、相手の欄が画像の高さを測り直して動いたぶんが
+  // 跳ね返り、スクロール中の欄が引き戻されていた。
+  const syncLeaderRef = useRef<"editor" | "preview" | null>(null);
   const editorVirtualizer = useVirtualizer({
     count: blocks.length,
     getScrollElement: () => editorScrollRef.current,
@@ -213,10 +247,8 @@ export default function EditorPage() {
   const activateBlock = useCallback((clientId: string, origin: "editor" | "preview") => {
     setActiveBlock(clientId);
     if (!syncScroll) return;
-    syncLockRef.current = origin;
+    syncLeaderRef.current = origin;
     alignMatchingBlock(origin === "editor" ? "preview" : "editor", clientId);
-    if (syncTimerRef.current) window.clearTimeout(syncTimerRef.current);
-    syncTimerRef.current = window.setTimeout(() => { syncLockRef.current = null; }, 120);
   }, [alignMatchingBlock, syncScroll]);
 
   useEffect(() => {
@@ -250,31 +282,49 @@ export default function EditorPage() {
     if (!editorViewport || !previewViewport) return;
     let frame = 0;
     const observe = (origin: "editor" | "preview") => {
-      if (syncLockRef.current && syncLockRef.current !== origin) return;
+      // 相手に動かされて起きたスクロールでは、相手を動かし返さない。
+      if (syncLeaderRef.current !== origin) return;
       cancelAnimationFrame(frame);
       frame = requestAnimationFrame(() => {
         const viewport = origin === "editor" ? editorViewport : previewViewport;
         const attribute = origin === "editor" ? "data-editor-block-id" : "data-preview-block-id";
         const rect = viewport.getBoundingClientRect();
-        const point = document.elementFromPoint(rect.left + Math.min(40, rect.width / 2), rect.top + Math.min(42, rect.height / 2));
-        const current = point?.closest<HTMLElement>(`[${attribute}]`);
+        // 横は欄の中央で拾う。左端から 40px の位置は、プレビューでは紙面の
+        // 外側の余白に当たり、狭い窓ではどのブロックも拾えず同期が止まっていた。
+        const point = document.elementFromPoint(rect.left + rect.width / 2, rect.top + Math.min(42, rect.height / 2));
+        // 段落の下の余白は行（仮想化の枠）に属し、ブロックの外になる。そこに
+        // 当たったときは、その行のブロックを採る。
+        const current = point?.closest<HTMLElement>(`[${attribute}]`)
+          ?? point?.closest<HTMLElement>("[data-index]")?.querySelector<HTMLElement>(`[${attribute}]`);
         const clientId = current?.getAttribute(attribute);
         if (current && clientId && viewport.contains(current)) activateBlock(clientId, origin);
       });
     };
     const onEditorScroll = () => observe("editor");
     const onPreviewScroll = () => observe("preview");
+    // 操作の手がかり。スクロールバーは viewport の外（ScrollArea の根）にある
+    // ので、根で受ける。
+    const leadEditor = () => { syncLeaderRef.current = "editor"; };
+    const leadPreview = () => { syncLeaderRef.current = "preview"; };
+    const editorRoot = editorViewport.parentElement ?? editorViewport;
+    const previewRoot = previewViewport.parentElement ?? previewViewport;
+    const intents = ["wheel", "pointerdown", "touchstart", "keydown"] as const;
+    for (const type of intents) {
+      editorRoot.addEventListener(type, leadEditor, { passive: true, capture: true });
+      previewRoot.addEventListener(type, leadPreview, { passive: true, capture: true });
+    }
     editorViewport.addEventListener("scroll", onEditorScroll, { passive: true });
     previewViewport.addEventListener("scroll", onPreviewScroll, { passive: true });
     return () => {
       cancelAnimationFrame(frame);
+      for (const type of intents) {
+        editorRoot.removeEventListener(type, leadEditor, { capture: true });
+        previewRoot.removeEventListener(type, leadPreview, { capture: true });
+      }
       editorViewport.removeEventListener("scroll", onEditorScroll);
       previewViewport.removeEventListener("scroll", onPreviewScroll);
     };
   }, [activateBlock, blocks.length, syncScroll]);
-  useEffect(() => () => {
-    if (syncTimerRef.current) window.clearTimeout(syncTimerRef.current);
-  }, []);
 
   const persistSnapshot = async (snapshot: EditorSaveSnapshot) => {
     if (!query.data) throw new Error("編集データがありません");
@@ -292,10 +342,12 @@ export default function EditorPage() {
     onSuccess: (_revision, snapshot) => {
       clearDirtyIfCurrent(snapshot);
       setSavedAt(new Date());
+      setDraftSavedHere(true);
       // 自動保存は黙って済ませる。押していない保存をそのつど知らせても、
       // 目と手が止まるだけで、伝わるものが増えるわけではない。
       if (!snapshot.silent) notifications.show({ color: "green", icon: <Icons.confirm size={IconSize.menu} />, title: "下書きを保存しました", message: "公開中の本文はまだ変わりません" });
       queryClient.invalidateQueries({ queryKey: ["editor-document", id] });
+      queryClient.invalidateQueries({ queryKey: ["reader-metadata", id] });
     },
     onError: (error) => notifications.show({ color: "red", title: "下書きを保存できません", message: errorMessage(error) }),
   });
@@ -328,8 +380,10 @@ export default function EditorPage() {
       futureRef.current = [];
       setHistoryDepth({ undo: 0, redo: 0 });
       setAutoSaveBlocked(false);
+      setDraftSavedHere(false);
       queryClient.setQueryData(["editor-document", id], fresh);
-      notifications.show({ color: "green", title: "下書きを破棄しました", message: "取り込んだままの本文に戻しました" });
+      queryClient.invalidateQueries({ queryKey: ["reader-metadata", id] });
+      notifications.show({ color: "green", title: "下書きを破棄しました", message: fresh.activeRevision ? "反映済みの編集版に戻しました" : "取り込んだままの本文に戻しました" });
     },
     onError: (error) => notifications.show({ color: "red", title: "下書きを破棄できません", message: errorMessage(error) }),
   });
@@ -340,7 +394,7 @@ export default function EditorPage() {
     },
     // 反映は本文を差し替えるので、カードが出している字数と版の印も変わる。
     // それらは棚と作者ページの一覧から引いているため、そこも古くしておく。
-    onSuccess: (_revision, snapshot) => { clearDirtyIfCurrent(snapshot); notifications.show({ color: "green", title: "編集版を反映しました", message: "リーダーとEPUBに編集内容が使われます" }); queryClient.invalidateQueries({ queryKey: ["reader-metadata", id] }); queryClient.invalidateQueries({ queryKey: ["reader-content-page", id] }); queryClient.invalidateQueries({ queryKey: ["reader-content-search", id] }); queryClient.invalidateQueries({ queryKey: ["editor-document", id] }); queryClient.invalidateQueries({ queryKey: ["library"] }); queryClient.invalidateQueries({ queryKey: ["entity-works"] }); },
+    onSuccess: (_revision, snapshot) => { clearDirtyIfCurrent(snapshot); setDraftSavedHere(false); notifications.show({ color: "green", title: "編集版を反映しました", message: "リーダーとEPUBに編集内容が使われます" }); queryClient.invalidateQueries({ queryKey: ["reader-metadata", id] }); queryClient.invalidateQueries({ queryKey: ["reader-content-page", id] }); queryClient.invalidateQueries({ queryKey: ["reader-content-search", id] }); queryClient.invalidateQueries({ queryKey: ["editor-document", id] }); queryClient.invalidateQueries({ queryKey: ["library"] }); queryClient.invalidateQueries({ queryKey: ["entity-works"] }); },
     onError: (error) => notifications.show({ color: "red", title: "編集版を反映できません", message: errorMessage(error) }),
   });
   /**
@@ -360,6 +414,7 @@ export default function EditorPage() {
       message: Number.isSafeInteger(index) ? `${index + 1}番目のブロック：${detail}` : String(detail),
     });
     if (!Number.isSafeInteger(index)) return;
+    syncLeaderRef.current = "editor";
     editorVirtualizer.scrollToIndex(index, { align: "center" });
     const block = form.getValues().blocks[index];
     if (block) setActiveBlock(block.clientId);
@@ -467,6 +522,7 @@ export default function EditorPage() {
     if (!findTerm) return;
     const index = form.getValues().blocks.findIndex((block) => ["paragraph", "heading", "quote"].includes(block.blockType) && String(block.text ?? "").includes(findTerm));
     if (index < 0) return;
+    syncLeaderRef.current = "editor";
     editorVirtualizer.scrollToIndex(index, { align: "center" });
     const block = form.getValues().blocks[index];
     if (block) setActiveBlock(block.clientId);
@@ -505,6 +561,76 @@ export default function EditorPage() {
     applyBlocks(mergeLiveText(next), true);
     setHistoryDepth({ undo: historyRef.current.length, redo: futureRef.current.length });
   }, [applyBlocks, mergeLiveText, snapshotBlocks]);
+  /**
+   * AI の校正。候補を挙げてもらうだけで、本文は押したものだけ変わる。
+   *
+   * 当てるときは、そのときの本文で場所を一つに決め直す。候補が出たあとに
+   * 書き換えた箇所や、同じ文字列が二度出るようになった箇所は当てない。
+   */
+  const proofreadAssist = useAssist("editor_proofread");
+  const { items: proofreadItems, progress: proofreadProgress, running: proofreadRunning, error: proofreadError, start: startProofreadRun, cancel: cancelProofread, mark: markProofread } = useProofread();
+  const [proofreadOpened, proofreadPanel] = useDisclosure(false);
+  const startProofread = useCallback((scope: "active" | "all") => {
+    const engine = proofreadAssist.engine;
+    if (!engine) return;
+    const current = form.getValues().blocks;
+    const batches = buildProofreadBatches(scope === "active" ? current.filter((block) => block.clientId === activeBlock) : current);
+    if (!batches.length) {
+      notifications.show({ color: "piep", message: "校正できる文章がありません" });
+      return;
+    }
+    proofreadPanel.open();
+    void startProofreadRun(engine, batches);
+  }, [activeBlock, form, proofreadAssist.engine, proofreadPanel, startProofreadRun]);
+  const applyProofread = useCallback((items: ProofreadItem[]) => {
+    const wanted = new Map<string, ProofreadItem[]>();
+    for (const item of items) wanted.set(item.segmentId, [...(wanted.get(item.segmentId) ?? []), item]);
+    const applied = new Set<string>();
+    const stale = new Set<string>();
+    const current = form.getValues().blocks;
+    const nextBlocks = current.map((block) => {
+      const fixes = wanted.get(block.clientId);
+      if (!fixes) return block;
+      let text = String(block.text ?? "");
+      for (const fix of fixes) {
+        const next = replaceOnce(text, fix.before, fix.after);
+        if (next === null) stale.add(fix.key);
+        else { text = next; applied.add(fix.key); }
+      }
+      return text === block.text ? block : { ...block, text };
+    });
+    // 消えたブロックへの候補も、当てられないものとして印を付ける。
+    for (const item of items) if (!applied.has(item.key) && !current.some((block) => block.clientId === item.segmentId)) stale.add(item.key);
+    if (applied.size) replaceBlocks(nextBlocks, true);
+    markProofread(applied, "applied");
+    markProofread(stale, "stale");
+    if (stale.size) notifications.show({ color: "yellow", message: `${stale.size}件は本文が変わっていたため当てませんでした` });
+  }, [form, markProofread, replaceBlocks]);
+  const jumpToBlock = useCallback((clientId: string) => {
+    const index = form.getValues().blocks.findIndex((block) => block.clientId === clientId);
+    if (index < 0) return;
+    syncLeaderRef.current = "editor";
+    editorVirtualizer.scrollToIndex(index, { align: "center" });
+    setActiveBlock(clientId);
+  }, [editorVirtualizer, form]);
+  const proofreadBlockNumber = useCallback((clientId: string) => {
+    const index = form.getValues().blocks.findIndex((block) => block.clientId === clientId);
+    return index < 0 ? null : index + 1;
+  }, [form]);
+  const proofreadUnavailable = !proofreadAssist.engine
+    ? "設定の「AIの手伝い」で接続先を設定し、「本文の校正」を有効にしてください"
+    : !proofreadAssist.body ? "本文を送る許可が要ります（設定の「AIの手伝い」）" : undefined;
+  const activeTextBlock = blocks.find((block) => block.clientId === activeBlock && ["paragraph", "heading", "quote"].includes(block.blockType));
+  const proofreadChars = blocks.reduce((sum, block) => ["paragraph", "heading", "quote"].includes(block.blockType) ? sum + String(block.text ?? "").length : sum, 0);
+  const openProofreadItems = proofreadItems.filter((item) => item.status === "open").length;
+  const assistItems: AssistLauncherItem[] = [
+    { id: "proofread-active", label: "選んでいるブロックを校正", description: "このブロックの誤字・脱字の候補を挙げます", enabled: !proofreadUnavailable && Boolean(activeTextBlock) && !proofreadRunning, unavailableReason: proofreadUnavailable ?? (proofreadRunning ? "校正の途中です" : "文章・見出し・引用のブロックを選んでください"), onSelect: () => startProofread("active") },
+    { id: "proofread-all", label: "本文全体を校正", description: `${proofreadChars.toLocaleString("ja-JP")}字を約${Math.max(1, Math.ceil(proofreadChars / PROOFREAD_BATCH_CHARS))}回に分けて読みます。先に出た候補から直せます`, enabled: !proofreadUnavailable && proofreadChars > 0 && !proofreadRunning, unavailableReason: proofreadUnavailable ?? (proofreadRunning ? "校正の途中です" : "校正できる文章がありません"), onSelect: () => startProofread("all") },
+    ...(proofreadItems.length || proofreadRunning ? [{ id: "proofread-show", label: "校正の結果を開く", description: proofreadRunning ? "読んでいる途中の結果も見られます" : "直していない候補が残っています", enabled: true, badge: `${openProofreadItems}件`, onSelect: proofreadPanel.open }] : []),
+  ];
+  // 画面に一つの作品なので、入口はアプリのヘッダーの星に束ねる（AI 補助の方針）。
+  const assistInHeader = usePageAssist(`editor-assist-${id}`, "編集で使えるAIの手伝い", assistItems, runtime);
+
   const insertBlock = useCallback((blockType: EditorBlockType, index = blocks.length) => {
     const nextBlocks = [...form.getValues().blocks];
     nextBlocks.splice(index, 0, makeBlock(blockType));
@@ -568,12 +694,14 @@ export default function EditorPage() {
   // 未保存の登録（177行）は既定スコープで navigate も見ているため、この一行で
   // 確認は変わらず出る。テンプレート編集の画面も同じ作りになっている。
   const goBack = () => returnTo(`/works/${id}`);
+  const hasDraft = Boolean(doc.draftRevision) || draftSavedHere;
   return (
     <div className="editor-page">
       <header className="editor-toolbar">
         <Group h="100%" px="md" justify="space-between" wrap="nowrap" className="editor-toolbar__inner">
-          <Group wrap="nowrap" miw={0} className="editor-toolbar__identity"><Tooltip label="作品詳細へ戻る"><ActionIcon variant="subtle" color="gray" aria-label="作品詳細へ戻る" onClick={goBack}><Icons.back size={IconSize.nav} /></ActionIcon></Tooltip><Divider orientation="vertical" h={24} /><Box miw={0} className="editor-toolbar__titlebox"><TextInput size="xs" variant="unstyled" className="editor-toolbar__title" aria-label="この作品のタイトル" value={title} placeholder="タイトル" onChange={(event) => { const nextTitle = event.currentTarget.value; titleRef.current = nextTitle; setTitle(nextTitle); setDirty(nextTitle !== savedTitleRef.current || JSON.stringify(form.getValues()) !== savedFingerprintRef.current); }} /><Group gap="xs"><Text size="xs" c="dimmed">編集とプレビュー</Text>{dirty ? <Badge size="xs" color="yellow" variant="light">未保存</Badge> : savedAt && <Text size="xs" c="dimmed">{savedAt.toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" })}に保存</Text>}{autoSaveBlocked && dirty && <Tooltip label="空のブロックがあるあいだは自動保存を止めています。文字を入れるか、そのブロックを削除してください。"><Badge size="xs" color="red" variant="light">自動保存 停止中</Badge></Tooltip>}</Group></Box></Group>
+          <Group wrap="nowrap" miw={0} className="editor-toolbar__identity"><Tooltip label="作品詳細へ戻る"><ActionIcon variant="subtle" color="gray" aria-label="作品詳細へ戻る" onClick={goBack}><Icons.back size={IconSize.nav} /></ActionIcon></Tooltip><Divider orientation="vertical" h={24} /><Box miw={0} className="editor-toolbar__titlebox"><TextInput size="xs" variant="unstyled" className="editor-toolbar__title" aria-label="この作品のタイトル" value={title} placeholder="タイトル" onChange={(event) => { const nextTitle = event.currentTarget.value; titleRef.current = nextTitle; setTitle(nextTitle); setDirty(nextTitle !== savedTitleRef.current || JSON.stringify(form.getValues()) !== savedFingerprintRef.current); }} /><Group gap="xs"><EditStateBadge draft={hasDraft} active={Boolean(doc.activeRevision)} />{dirty ? <Badge size="xs" color="yellow" variant="light">未保存</Badge> : savedAt && <Text size="xs" c="dimmed">{savedAt.toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" })}に保存</Text>}{autoSaveBlocked && dirty && <Tooltip label="空のブロックがあるあいだは自動保存を止めています。文字を入れるか、そのブロックを削除してください。"><Badge size="xs" color="red" variant="light">自動保存 停止中</Badge></Tooltip>}</Group></Box></Group>
           <Group gap="xs" wrap="nowrap" className="editor-toolbar__actions">
+            {!assistInHeader && <AssistLauncher label="編集で使えるAIの手伝い" size="lg" items={assistItems} />}
             <Tooltip label="元に戻す (Ctrl+Z)"><ActionIcon size="lg" variant="default" aria-label="元に戻す" disabled={historyDepth.undo === 0} onClick={undo}><Icons.undo size={IconSize.action} /></ActionIcon></Tooltip>
             <Tooltip label="やり直す (Ctrl+Shift+Z)"><ActionIcon size="lg" variant="default" aria-label="やり直す" disabled={historyDepth.redo === 0} onClick={redo}><Icons.redo size={IconSize.action} /></ActionIcon></Tooltip>
             <Tooltip label="本文を検索・置換 (Ctrl+F)"><ActionIcon size="lg" variant={findOpened ? "light" : "default"} color="piep" aria-label="本文を検索・置換" aria-pressed={findOpened} onClick={findPanel.toggle}><Icons.search size={IconSize.action} /></ActionIcon></Tooltip>
@@ -586,8 +714,12 @@ export default function EditorPage() {
               labels: { confirm: "破棄する", cancel: "やめる" },
               onConfirm: () => discardMutation.mutate(),
             })}>下書きを破棄</Button></Tooltip>}
-            <Button size="sm" variant="light" leftSection={<Icons.save size={IconSize.menu} />} loading={saveMutation.isPending} disabled={publishMutation.isPending || (!dirty && Boolean(doc.draftRevision))} onClick={submitDraft}>下書き保存</Button>
-            <Tooltip label="保存して、リーダーとEPUBで使う本文を更新"><Button size="sm" leftSection={<Icons.confirm size={IconSize.menu} />} loading={publishMutation.isPending} disabled={saveMutation.isPending} onClick={submitPublish}>反映</Button></Tooltip>
+            {/* 二つのボタンの違いが画面のどこにも書かれておらず、下書きを保存した
+                のに読書画面が変わらない、が起きても理由が分からなかった。 */}
+            <Tooltip label="編集画面の中にだけ残します。読書画面とEPUBは変わりません (Ctrl+S)"><Button size="sm" variant="light" leftSection={<Icons.save size={IconSize.menu} />} loading={saveMutation.isPending} disabled={publishMutation.isPending || (!dirty && Boolean(doc.draftRevision))} onClick={submitDraft}>下書き保存</Button></Tooltip>
+            {/* 何も変えていないのに反映すると、取り込んだ本文と同じ中身の
+                「編集版」ができ、作品にローカル編集の印だけが付いていた。 */}
+            <Tooltip label={!dirty && !hasDraft ? "反映する変更がありません" : "保存して、読書画面とEPUBで使う本文をこの内容に切り替えます"}><Box component="span"><Button size="sm" leftSection={<Icons.confirm size={IconSize.menu} />} loading={publishMutation.isPending} disabled={saveMutation.isPending || (!dirty && !hasDraft)} onClick={submitPublish}>反映</Button></Box></Tooltip>
           </Group>
         </Group>
       </header>
@@ -629,10 +761,23 @@ export default function EditorPage() {
           </form>
         </ScrollArea>
 
+        <ProofreadPanel opened={proofreadOpened} onClose={proofreadPanel.close} items={proofreadItems} progress={proofreadProgress} running={proofreadRunning} error={proofreadError} blockNumber={proofreadBlockNumber} onApply={applyProofread} onDismiss={(item) => markProofread(new Set([item.key]), "dismissed")} onJump={jumpToBlock} onCancel={cancelProofread} />
         <EditorPreviewPane ref={previewRef} viewportRef={previewScrollRef} blocks={blocks} assets={assets} activeBlock={activeBlock} allowPageBreak={allowPageBreak} seriesTitle={doc.download.seriesTitle} title={doc.download.title} authorName={doc.download.authorName} onActivate={activateBlock} />
       </div>
     </div>
   );
+}
+
+/**
+ * 読書画面とEPUBに、いまどの本文が出ているか。
+ *
+ * 「下書き保存」と「反映」の違いが画面のどこにも書かれておらず、保存した
+ * のに読書画面が変わらない、が起きても理由が分からなかった。
+ */
+function EditStateBadge({ draft, active }: { draft: boolean; active: boolean }) {
+  if (draft) return <Tooltip multiline w={280} label={`下書きは編集画面の中だけのものです。「反映」を押すと、読書画面とEPUBがこの内容になります。${active ? "いまは前に反映した編集版が出ています。" : "いまは取り込んだままの本文が出ています。"}`}><Badge size="xs" color="yellow" variant="light">下書き・未反映</Badge></Tooltip>;
+  if (active) return <Tooltip multiline w={280} label="読書画面とEPUBには、反映した編集版が出ています。取り込んだ本文は作品ページの履歴から比べられます。"><Badge size="xs" color="blue" variant="light">反映済みの編集版</Badge></Tooltip>;
+  return <Tooltip multiline w={280} label="まだ反映していません。読書画面とEPUBには取り込んだままの本文が出ています。"><Badge size="xs" color="gray" variant="light">取り込んだ本文</Badge></Tooltip>;
 }
 
 const EditorBlock = memo(function EditorBlock({ index, block, assets, total, form, active, allowPageBreak, dragging, dropTarget, onActivate, onInsert, onImage, onMove, onRemove, onUpdate, onDragBegin, onDragEnter, onDragFinish }: { index: number; block: EditorBlockValue; assets: AssetEntry[]; total: number; form: UseFormReturnType<EditorValues, EditorValues, any>; active: boolean; allowPageBreak: boolean; dragging: boolean; dropTarget: boolean; onActivate: (clientId: string, origin: "editor" | "preview") => void; onInsert: (type: EditorBlockType, index: number) => void; onImage: (index: number) => void; onMove: (index: number, direction: -1 | 1) => void; onRemove: (index: number) => void; onUpdate: (index: number, patch: Partial<EditorBlockValue>) => void; onDragBegin: (index: number) => void; onDragEnter: (index: number) => void; onDragFinish: () => void }) {
@@ -699,7 +844,14 @@ const EditorBlock = memo(function EditorBlock({ index, block, assets, total, for
         {block.blockType === "quote" && <Textarea autosize minRows={2} maxRows={16} placeholder="引用文" variant="unstyled" className="editor-quote-input" key={form.key(`blocks.${index}.text`)} {...textInputProps} onChange={onTextChange} aria-label={`引用 ${index + 1}`} />}
         {block.blockType === "separator" && <Divider my="md" label="区切り" labelPosition="center" />}
         {block.blockType === "pageBreak" && <Group className="editor-page-break" justify="center" gap="xs"><Icons.separator size={IconSize.menu} /><Text size="xs" fw={700}>ここから次のpixiv原稿ページ</Text></Group>}
-        {block.blockType === "image" && <ImageBlock asset={asset} assets={assets} value={liveBlock.assetId} caption={liveBlock.text} onChange={(assetId) => { form.setFieldValue(`blocks.${index}.assetId`, assetId); onUpdate(index, { assetId }); }} onCaptionChange={(text) => { form.setFieldValue(`blocks.${index}.text`, text); onUpdate(index, { text }); }} />}
+        {block.blockType === "image" && <ImageBlock asset={asset} assets={assets} value={liveBlock.assetId} caption={liveBlock.text} missingRef={missingImageRef(liveBlock.attrsJson)} onChange={(assetId) => {
+          form.setFieldValue(`blocks.${index}.assetId`, assetId);
+          // 取得できなかった絵の代わりを選んだら、その印と古い参照は外す。
+          // 残すと、書き出しが選んだ絵ではなく元の壊れた参照を指す。
+          const attrsJson = assetId && missingImageRef(liveBlock.attrsJson) !== null ? withoutMissingImage(liveBlock.attrsJson) : liveBlock.attrsJson;
+          if (attrsJson !== liveBlock.attrsJson) form.setFieldValue(`blocks.${index}.attrsJson`, attrsJson);
+          onUpdate(index, { assetId, attrsJson });
+        }} onCaptionChange={(text) => { form.setFieldValue(`blocks.${index}.text`, text); onUpdate(index, { text }); }} />}
         {block.blockType === "link" && <LinkBlock url={liveBlock.text ?? ""} label={linkLabel(liveBlock.attrsJson)} onUrlChange={(text) => { form.setFieldValue(`blocks.${index}.text`, text); onUpdate(index, { text }); }} onLabelChange={(label) => { const attrsJson = JSON.stringify({ label }); form.setFieldValue(`blocks.${index}.attrsJson`, attrsJson); onUpdate(index, { attrsJson }); }} error={form.errors[`blocks.${index}.text`]} />}
       </Box>
     </Paper>
@@ -718,11 +870,11 @@ function BlockMenuDropdown({ allowPageBreak, onInsert, onImage }: { allowPageBre
   return <Menu.Dropdown><Menu.Label>ブロックを追加</Menu.Label><Menu.Item leftSection={<Icons.paragraph size={IconSize.menu} />} onClick={() => onInsert("paragraph")}>文章</Menu.Item><Menu.Item leftSection={<Icons.heading size={IconSize.menu} />} onClick={() => onInsert("heading")}>見出し</Menu.Item><Menu.Item leftSection={<Icons.quote size={IconSize.menu} />} onClick={() => onInsert("quote")}>引用</Menu.Item><Menu.Item leftSection={<Icons.link size={IconSize.menu} />} onClick={() => onInsert("link")}>URLカード</Menu.Item><Menu.Item leftSection={<Icons.remove size={IconSize.menu} />} onClick={() => onInsert("separator")}>区切り線</Menu.Item>{allowPageBreak && <Menu.Item leftSection={<Icons.separator size={IconSize.menu} />} onClick={() => onInsert("pageBreak")}>pixiv改ページ</Menu.Item>}<Menu.Divider /><Menu.Item leftSection={<Icons.insertImage size={IconSize.menu} />} onClick={onImage}>画像ファイルを追加</Menu.Item></Menu.Dropdown>;
 }
 
-function ImageBlock({ asset, assets, value, caption, onChange, onCaptionChange }: { asset?: AssetEntry; assets: AssetEntry[]; value: number | null | undefined; caption: string | null | undefined; onChange: (value: number | null) => void; onCaptionChange: (value: string) => void }) {
+function ImageBlock({ asset, assets, value, caption, missingRef, onChange, onCaptionChange }: { asset?: AssetEntry; assets: AssetEntry[]; value: number | null | undefined; caption: string | null | undefined; missingRef: string | null; onChange: (value: number | null) => void; onCaptionChange: (value: string) => void }) {
   const [assetId, setAssetId] = useState(value ?? null);
   const [captionValue, setCaptionValue] = useState(caption ?? "");
   const selectedAsset = assets.find((item) => item.id === assetId) ?? asset;
-  return <Group wrap="nowrap" align="flex-start"><Box className="editor-image-preview">{selectedAsset ? <Image src={getAssetUrl(selectedAsset.localPath)} alt="" w="100%" h="100%" fit="contain" /> : <Icons.imageFile size={IconSize.hero} />}</Box><Stack flex={1} gap="xs"><Select label="画像" placeholder="選択してください" searchable data={assets.filter((item) => item.mimeType?.startsWith("image/")).map((item) => ({ value: String(item.id), label: item.filename }))} value={assetId ? String(assetId) : null} onChange={(next) => { const nextId = next ? Number(next) : null; setAssetId(nextId); onChange(nextId); }} clearable /><TextInput label="キャプション（任意）" value={captionValue} onChange={(event) => { setCaptionValue(event.currentTarget.value); onCaptionChange(event.currentTarget.value); }} /></Stack></Group>;
+  return <Stack gap="xs">{missingRef !== null && !assetId && <Alert color="yellow" variant="light" p="xs" icon={<Icons.warning size={IconSize.menu} />}><Text size="xs">取得元の画像{missingRef ? ` ${missingRef}` : ""}は取り込めませんでした。手元の画像を選ぶか、このブロックを削除してください。このままなら、読書画面には「取得できなかった画像」の札が出ます。</Text></Alert>}<Group wrap="nowrap" align="flex-start"><Box className="editor-image-preview">{selectedAsset ? <Image src={getAssetUrl(selectedAsset.localPath)} alt="" w="100%" h="100%" fit="contain" /> : <Icons.imageFile size={IconSize.hero} />}</Box><Stack flex={1} gap="xs"><Select label="画像" placeholder="選択してください" searchable data={assets.filter((item) => item.mimeType?.startsWith("image/")).map((item) => ({ value: String(item.id), label: item.filename }))} value={assetId ? String(assetId) : null} onChange={(next) => { const nextId = next ? Number(next) : null; setAssetId(nextId); onChange(nextId); }} clearable /><TextInput label="キャプション（任意）" value={captionValue} onChange={(event) => { setCaptionValue(event.currentTarget.value); onCaptionChange(event.currentTarget.value); }} /></Stack></Group></Stack>;
 }
 
 function LinkBlock({ url, label, onUrlChange, onLabelChange, error }: { url: string; label: string; onUrlChange: (value: string) => void; onLabelChange: (value: string) => void; error?: React.ReactNode }) {
@@ -771,6 +923,42 @@ const EditorPreviewPane = forwardRef<PreviewHandle, {
     pages: previewBlocks.filter((block) => block.blockType === "pageBreak").length + 1,
   }), [previewBlocks]);
   const assetMap = useMemo(() => new Map(assets.map((asset) => [asset.id, asset])), [assets]);
+  // 本文に置いた画像の縦横を、開いたときに先に測っておく。スクロールして
+  // 初めて読み込むと、その場で行が伸びて一覧が跳ねる。
+  const [, setMeasuredImages] = useState(0);
+  const imageSources = useMemo(() => [...new Set(previewBlocks.flatMap((block) => {
+    if (block.blockType !== "image" || !block.assetId) return [];
+    const asset = assetMap.get(block.assetId);
+    const src = asset ? getAssetUrl(asset.localPath) : null;
+    return src ? [src] : [];
+  }))], [assetMap, previewBlocks]);
+  useEffect(() => {
+    const pending = imageSources.filter((src) => !imageSizes.has(src));
+    if (!pending.length) return undefined;
+    let alive = true;
+    const loaders = pending.map((src) => {
+      // `Image` は Mantine の部品と名前がぶつかるので、窓のものを明示して使う。
+      const image = new window.Image();
+      image.decoding = "async";
+      image.onload = () => {
+        if (!image.naturalWidth || !image.naturalHeight) return;
+        imageSizes.set(src, { width: image.naturalWidth, height: image.naturalHeight });
+        if (alive) setMeasuredImages((value) => value + 1);
+      };
+      image.src = src;
+      return image;
+    });
+    return () => {
+      alive = false;
+      for (const image of loaders) image.onload = null;
+    };
+  }, [imageSources]);
+  const imageSrcAt = (index: number) => {
+    const block = previewBlocks[index];
+    const asset = block?.blockType === "image" && block.assetId ? assetMap.get(block.assetId) : undefined;
+    return asset ? getAssetUrl(asset.localPath) : null;
+  };
+  const contentWidth = previewContentWidth(viewportRef.current?.clientWidth ?? 620);
   // 改ページは前から数えないと番号が出せない。仮想化すると前のブロックは
   // 描かれていないので、番号だけ先に通しで用意しておく。
   const pageNumbers = useMemo(() => {
@@ -786,15 +974,15 @@ const EditorPreviewPane = forwardRef<PreviewHandle, {
     count: previewBlocks.length,
     getScrollElement: () => viewportRef.current,
     getItemKey: (index) => previewBlocks[index]?.clientId ?? index,
-    estimateSize: (index) => estimatePreviewBlockSize(previewBlocks[index]?.blockType),
+    estimateSize: (index) => estimatePreviewBlockSize(previewBlocks[index]?.blockType, imageSrcAt(index), contentWidth),
     initialRect: { width: 620, height: 800 },
     overscan: 8,
   });
   const previewItems = previewVirtualizer.getVirtualItems();
   const renderedPreviewItems = previewItems.length
     ? previewItems
-    : previewBlocks.slice(0, 12).map((block, index) => ({ index, key: block.clientId, start: previewBlocks.slice(0, index).reduce((sum, item) => sum + estimatePreviewBlockSize(item.blockType), 0) }));
-  const previewHeight = previewVirtualizer.getTotalSize() || previewBlocks.reduce((sum, block) => sum + estimatePreviewBlockSize(block.blockType), 0);
+    : previewBlocks.slice(0, 12).map((block, index) => ({ index, key: block.clientId, start: previewBlocks.slice(0, index).reduce((sum, item, itemIndex) => sum + estimatePreviewBlockSize(item.blockType, imageSrcAt(itemIndex), contentWidth), 0) }));
+  const previewHeight = previewVirtualizer.getTotalSize() || previewBlocks.reduce((sum, block, index) => sum + estimatePreviewBlockSize(block.blockType, imageSrcAt(index), contentWidth), 0);
 
   return <section className="editor-preview-pane" aria-label="本文プレビュー">
     <Group className="editor-preview-toolbar" px="md" justify="space-between" wrap="nowrap">
@@ -828,11 +1016,45 @@ const PreviewBlock = memo(function PreviewBlock({ block, asset, pageNumber, acti
   else if (block.blockType === "quote") content = <blockquote>{renderNotationLines(block.text)}</blockquote>;
   else if (block.blockType === "separator") content = <hr />;
   else if (block.blockType === "pageBreak") content = <div className="editor-preview-page-break"><span>pixiv page {pageNumber}</span></div>;
-  else if (block.blockType === "image") content = <figure>{asset ? <img src={getAssetUrl(asset.localPath) ?? undefined} alt={block.text || asset.filename} loading="lazy" decoding="async" /> : <Text c="dimmed">画像を選択してください</Text>}{block.text && <figcaption>{block.text}</figcaption>}</figure>;
+  else if (block.blockType === "image") content = <figure>{asset ? <PreviewImage src={getAssetUrl(asset.localPath)} alt={block.text || asset.filename} /> : <Text c="dimmed">{missingImageRef(block.attrsJson) !== null ? "取得できなかった画像（手元の画像を選んでください）" : "画像を選択してください"}</Text>}{block.text && <figcaption>{block.text}</figcaption>}</figure>;
   else if (block.blockType === "link") content = <a className="editor-preview-link" href={block.text || undefined} onClick={(event) => event.preventDefault()}><Icons.link size={IconSize.nav} /><span><strong>{linkLabel(block.attrsJson) || block.text || "URLを入力"}</strong><small>{block.text}</small></span></a>;
   else content = <p>{renderNotationLines(block.text)}</p>;
   return <div className="editor-preview-block" data-active={active || undefined} data-preview-block-id={block.clientId} onClick={() => onActivate(block.clientId, "preview")}>{content}</div>;
 });
+
+/**
+ * 読み込む前から、収まる大きさの枠を取っておく画像。
+ *
+ * `loading="lazy"` は外した。仮想化で窓の分しか描いていないので遅らせる
+ * 意味が無く、窓の手前で用意した行が高さ 0 のまま測られる原因になっていた。
+ */
+function PreviewImage({ src, alt }: { src: string | null; alt: string }) {
+  const size = src ? imageSizes.get(src) : undefined;
+  const style = size ? {
+    width: `min(100%, ${size.width}px, calc(65vh * ${size.width / size.height}))`,
+    height: "auto",
+    aspectRatio: `${size.width} / ${size.height}`,
+  } : undefined;
+  return <img src={src ?? undefined} alt={alt} decoding="async" style={style} onLoad={(event) => {
+    const image = event.currentTarget;
+    if (src && image.naturalWidth && image.naturalHeight && !imageSizes.has(src)) imageSizes.set(src, { width: image.naturalWidth, height: image.naturalHeight });
+  }} />;
+}
+
+/** 取り込んだときに絵が見つからなかった画像ブロックなら、元の参照（無ければ空文字）。 */
+export function missingImageRef(attrsJson: string | null | undefined): string | null {
+  try {
+    const value = JSON.parse(attrsJson || "{}");
+    if (value?.missing !== true) return null;
+    return typeof value.sourceRef === "string" ? value.sourceRef : "";
+  } catch { return null; }
+}
+function withoutMissingImage(attrsJson: string | null | undefined): string | null {
+  try {
+    const { missing: _missing, sourceRef: _sourceRef, ...rest } = JSON.parse(attrsJson || "{}");
+    return Object.keys(rest).length ? JSON.stringify(rest) : null;
+  } catch { return attrsJson ?? null; }
+}
 
 function linkLabel(attrsJson: string | null | undefined): string {
   try { const value = JSON.parse(attrsJson || "{}"); return typeof value.label === "string" ? value.label : ""; } catch { return ""; }

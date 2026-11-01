@@ -31,9 +31,11 @@ use crate::database::collection_rules;
 
 mod grounded;
 mod harness;
+mod proofread;
 
 pub use grounded::{ClaimVerdict, GroundedClaim};
 pub use harness::ToolTrace;
+pub use proofread::{proofread, ProofreadSegment, ProofreadSuggestion};
 
 /// 長編の部分抽出では、モデルの初回ロードと十分な思考時間も含めて待つ。
 /// 60秒では、GPUへ載せた直後や長いチャンクで正常な応答まで打ち切っていた。
@@ -155,6 +157,7 @@ pub const FEATURE_AUTHOR_STYLE: &str = "author_style";
 pub const FEATURE_COLLECTION_SPLIT: &str = "collection_split";
 pub const FEATURE_WORK_SYNOPSIS: &str = "work_synopsis";
 pub const FEATURE_READER_RECAP: &str = "reader_recap";
+pub const FEATURE_EDITOR_PROOFREAD: &str = "editor_proofread";
 
 pub fn current_prompt_version(feature_id: &str) -> &'static str {
     match feature_id {
@@ -165,6 +168,7 @@ pub fn current_prompt_version(feature_id: &str) -> &'static str {
         FEATURE_COLLECTION_SPLIT => "collection_split/v5",
         FEATURE_WORK_SYNOPSIS => "work_synopsis/v12",
         FEATURE_READER_RECAP => "reader_recap/v12",
+        FEATURE_EDITOR_PROOFREAD => "editor_proofread/v1",
         _ => "unknown/v1",
     }
 }

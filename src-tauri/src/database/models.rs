@@ -257,6 +257,15 @@ pub struct ReaderMetadata {
     pub asset_count: i64,
     pub is_edited: bool,
     pub active_edit_revision: Option<WorkEditRevision>,
+    /// まだ反映していない書きかけ。自動保存が作るので、利用者は押した覚えが
+    /// 無くても持っていることがある。読書画面と EPUB はこれを使わないので、
+    /// 「直したのに変わらない」の正体として作品ページで名乗らせる。
+    #[serde(default)]
+    pub draft_edit_revision: Option<WorkEditRevision>,
+    /// 下ろした編集版（新しい順に数件）。「取り込んだ本文に戻す」は版を
+    /// 消さないと約束しているので、選び直す口として作品ページの履歴に並べる。
+    #[serde(default)]
+    pub archived_edit_revisions: Vec<WorkEditRevision>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -170,6 +170,69 @@ fn an_image_keeps_the_reference_the_source_used() {
 }
 
 #[test]
+fn a_missing_picture_opens_as_an_empty_image_block_not_as_body_text() {
+    let html = pixiv_html("前の行\n[pixivimage:id=63497824]\n後の行");
+    assert!(html.contains("missing-image-placeholder"), "{html}");
+    let blocks = html_to_editor_blocks(&html, &no_assets());
+    assert!(
+        blocks.iter().all(|block| !block
+            .text
+            .as_deref()
+            .unwrap_or("")
+            .contains("取得できなかった画像")),
+        "札の文言が地の文に混ざると、反映しただけで本文へ書き込まれる: {blocks:?}"
+    );
+    let image = blocks
+        .iter()
+        .find(|block| block.block_type == "image")
+        .expect("画像ブロックが無い");
+    assert_eq!(image.asset_id, None);
+    assert_eq!(
+        block_source_ref(image).as_deref(),
+        Some("[pixivimage:id=63497824]")
+    );
+    // 何も変えずに書き戻すと、元の記法に戻る。
+    let text = blocks_to_pixiv_text(&blocks, &no_assets());
+    assert!(text.contains("[pixivimage:id=63497824]"), "{text}");
+    assert!(!text.contains("取得できなかった画像"), "{text}");
+    // 読書画面には、どの絵だったかを添えた札が出る。
+    let rendered = blocks_to_html(&blocks, &no_assets());
+    assert!(
+        rendered.contains("取得できなかった画像 [pixivimage:id=63497824]"),
+        "{rendered}"
+    );
+}
+
+#[test]
+fn a_picture_chosen_in_the_editor_wins_over_the_old_reference() {
+    let added = AssetEntry {
+        id: 40,
+        download_id: 1,
+        asset_type: EDITOR_IMAGE_ASSET_TYPE.to_string(),
+        filename: "added-1.png".to_string(),
+        local_path: "data_assets/added-1.png".to_string(),
+        original_url: None,
+        mime_type: Some("image/png".to_string()),
+        file_size_bytes: 10,
+    };
+    let block = editor_block(
+        0,
+        "image",
+        None,
+        Some(40),
+        Some(
+            serde_json::json!({ "sourceRef": "[pixivimage:id=63497824]", "missing": true })
+                .to_string(),
+        ),
+    );
+    assert_eq!(
+        block_image_reference(&block, std::slice::from_ref(&added)).as_deref(),
+        Some("added-1"),
+        "選び直した画像ではなく、取得できなかった元の参照を書き出していた"
+    );
+}
+
+#[test]
 fn a_caption_written_in_the_editor_reaches_the_page() {
     let assets = vec![AssetEntry {
         id: 3,

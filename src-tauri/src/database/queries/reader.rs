@@ -9,15 +9,16 @@
 //! 一度に全部は割らない。何が壊れたのかを言えなくなる。
 
 use super::{
-    active_edit_revision_locked, assets_for_edit, assets_for_version_path,
-    blocks_for_revision_locked, blocks_to_fanbox_blocks, blocks_to_html, blocks_to_pixiv_text,
-    blocks_to_plain_text, draft_edit_revision_locked, get_work_edit_revision_locked, hash_blocks,
-    html_to_editor_blocks, insert_work_blocks_locked, normalize_block_inputs, paginate_reader_html,
-    plain_text_from_reader_html, reader_source_content, reader_version_path,
-    reindex_download_locked, Database, EditedSourceForm, EditorDocument, ReaderCacheEntry,
-    ReaderCacheKey, ReaderContentPage, ReaderDocument, ReaderMetadata, ReaderOutlineEntry,
-    ReaderSearchHit, WorkBlockInput, WorkEditRevision, READER_CACHE_MAX_BYTES,
-    READER_CACHE_MAX_DOCUMENTS, READER_CACHE_TICK, READER_CONTENT_CACHE,
+    active_edit_revision_locked, archived_edit_revisions_locked, assets_for_edit,
+    assets_for_version_path, blocks_for_revision_locked, blocks_to_fanbox_blocks, blocks_to_html,
+    blocks_to_pixiv_text, blocks_to_plain_text, draft_edit_revision_locked,
+    get_work_edit_revision_locked, hash_blocks, html_to_editor_blocks, insert_work_blocks_locked,
+    normalize_block_inputs, paginate_reader_html, plain_text_from_reader_html,
+    reader_source_content, reader_version_path, reindex_download_locked, Database,
+    EditedSourceForm, EditorDocument, ReaderCacheEntry, ReaderCacheKey, ReaderContentPage,
+    ReaderDocument, ReaderMetadata, ReaderOutlineEntry, ReaderSearchHit, WorkBlockInput,
+    WorkEditRevision, READER_CACHE_MAX_BYTES, READER_CACHE_MAX_DOCUMENTS, READER_CACHE_TICK,
+    READER_CONTENT_CACHE,
 };
 use rusqlite::{params, OptionalExtension};
 use std::hash::{Hash, Hasher};
@@ -151,12 +152,16 @@ impl Database {
         let versions = self.get_versions(download_id)?;
         let conn = self.read_conn()?;
         let active_edit_revision = active_edit_revision_locked(&conn, download_id)?;
+        let draft_edit_revision = draft_edit_revision_locked(&conn, download_id)?;
+        let archived_edit_revisions = archived_edit_revisions_locked(&conn, download_id, 10)?;
         Ok(ReaderMetadata {
             asset_count: download.asset_count,
             download,
             versions,
             is_edited: active_edit_revision.is_some(),
             active_edit_revision,
+            draft_edit_revision,
+            archived_edit_revisions,
         })
     }
 

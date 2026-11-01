@@ -13818,6 +13818,28 @@ fn draft_edit_revision_locked(
     .map_err(|e| format!("Failed to load draft edit revision: {}", e))
 }
 
+/// 下ろした編集版を新しい順に。履歴の欄が伸び続けないよう、件数は絞る。
+fn archived_edit_revisions_locked(
+    conn: &Connection,
+    download_id: i64,
+    limit: i64,
+) -> Result<Vec<WorkEditRevision>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, download_id, base_version, status, title, content_hash, created_at, updated_at
+             FROM work_edit_revisions
+             WHERE download_id = ?1 AND status = 'archived'
+             ORDER BY updated_at DESC, id DESC
+             LIMIT ?2",
+        )
+        .map_err(|e| format!("Failed to prepare archived edit revisions: {}", e))?;
+    let rows = stmt
+        .query_map(params![download_id, limit], work_edit_revision_from_row)
+        .map_err(|e| format!("Failed to load archived edit revisions: {}", e))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("Failed to read archived edit revisions: {}", e))
+}
+
 fn blocks_for_revision_locked(
     conn: &Connection,
     revision_id: i64,
@@ -13961,6 +13983,10 @@ const BLOCK_GAP_KEY: &str = "gap";
 /// 同じ絵をもう一度指すために使う。
 const BLOCK_SOURCE_REF_KEY: &str = "sourceRef";
 
+/// 取り込んだときに絵が見つからなかった画像ブロックの印。編集画面がそれと
+/// 名乗り、手元の画像で埋めるよう促すのに使う。
+const BLOCK_MISSING_KEY: &str = "missing";
+
 /// 空行の上限。壊れた値や悪意のある値で本文が縦に伸び続けないようにする。
 const MAX_BLOCK_GAP: usize = 64;
 
@@ -14097,7 +14123,7 @@ fn source_lines_to_blocks(lines: Vec<SourceLine>) -> Vec<WorkBlock> {
 
 static EDITOR_TOKEN_RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
     Regex::new(
-        r#"(?is)(<!--\s*newpage\s*-->|<!--\s*content-block\s*-->|<h2\b[^>]*>.*?</h2>|<img\b[^>]*>|<hr\s*/?>|<a\b[^>]*class="[^"]*novel-link-card[^"]*"[^>]*>.*?</a>)"#,
+        r#"(?is)(<!--\s*newpage\s*-->|<!--\s*content-block\s*-->|<h2\b[^>]*>.*?</h2>|<img\b[^>]*>|<hr\s*/?>|<a\b[^>]*class="[^"]*novel-link-card[^"]*"[^>]*>.*?</a>|<div\b[^>]*class="[^"]*missing-image-placeholder[^"]*"[^>]*>.*?</div>)"#,
     )
     .expect("valid editor HTML token regex")
 });
@@ -14188,6 +14214,16 @@ fn html_to_editor_blocks(html: &str, assets: &[AssetEntry]) -> Vec<WorkBlock> {
             editor_block(0, "image", caption, asset_id, attrs)
         } else if lower.starts_with("<hr") {
             editor_block(0, "separator", None, None, None)
+        } else if lower.starts_with("<div") {
+            // 取得できなかった挿絵の札。地の文として渡すと、札の文言
+            // （「取得できなかった画像 …」）が本文の一部になり、何も触らずに
+            // 反映しただけで本文へ書き込まれていた。絵の無い画像ブロックとして
+            // 渡し、元の参照を控えておく ―― 書き戻すと元の記法に戻る。
+            let attrs = token_attribute(token, "data-image-reference")
+                .filter(|value| !value.trim().is_empty())
+                .and_then(|value| attrs_with(None, BLOCK_SOURCE_REF_KEY, serde_json::json!(value)));
+            let attrs = attrs_with(attrs, BLOCK_MISSING_KEY, serde_json::json!(true));
+            editor_block(0, "image", None, None, attrs)
         } else {
             let href = token_attribute(token, "href").unwrap_or_default();
             let label = html_fragment_to_text(token)
@@ -14681,12 +14717,19 @@ fn blocks_to_html(blocks: &[WorkBlock], assets: &[AssetEntry]) -> String {
 /// 取り込んだときに控えた参照を第一に使い、編集画面から足した絵は
 /// ファイル名から引く。EPUB のビルダーはどちらの形でも実ファイルへ辿れる。
 fn block_image_reference(block: &WorkBlock, assets: &[AssetEntry]) -> Option<String> {
-    if let Some(reference) = block_source_ref(block) {
-        return Some(reference);
-    }
     let asset = block
         .asset_id
-        .and_then(|id| assets.iter().find(|asset| asset.id == id))?;
+        .and_then(|id| assets.iter().find(|asset| asset.id == id));
+    // 編集で足した画像を選んだブロックは、その画像を指す。元の参照は
+    // 選び直す前の絵（取得できなかった絵を含む）を名乗っているので、
+    // 優先すると EPUB に古い絵が出るか、何も出なかった。
+    let added = asset.is_some_and(|asset| asset.asset_type == EDITOR_IMAGE_ASSET_TYPE);
+    if !added {
+        if let Some(reference) = block_source_ref(block) {
+            return Some(reference);
+        }
+    }
+    let asset = asset?;
     Path::new(&asset.filename)
         .file_stem()
         .and_then(|stem| stem.to_str())
@@ -14797,8 +14840,16 @@ fn block_to_html(block: &WorkBlock, assets: &[AssetEntry]) -> String {
                 .asset_id
                 .and_then(|id| assets.iter().find(|asset| asset.id == id));
             let Some(asset) = asset else {
-                return "<div class=\"missing-image-placeholder\">画像が見つかりません</div>"
-                    .to_string();
+                // 取り込んだときから絵が無かったものは、どの絵だったかを残す。
+                return match block_source_ref(block) {
+                    Some(reference) => format!(
+                        r#"<div class="missing-image-placeholder" role="note" data-image-reference="{}" data-image-missing="true">取得できなかった画像 {}</div>"#,
+                        escape_editor_html(&reference),
+                        escape_editor_html(&reference)
+                    ),
+                    None => "<div class=\"missing-image-placeholder\">画像が見つかりません</div>"
+                        .to_string(),
+                };
             };
             let caption = block
                 .text
