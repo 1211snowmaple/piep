@@ -2206,7 +2206,9 @@ async fn interpret_search_with_tools(
         harness::CallOptions::for_effort(harness::Effort::Off, 600).greedy(),
         |value| {
             let intent = checked_search_intent(value, phrase, &allowed)?;
-            if intent.include_tags.is_empty() || sent_back.load(std::sync::atomic::Ordering::Relaxed) {
+            if intent.include_tags.is_empty()
+                || sent_back.load(std::sync::atomic::Ordering::Relaxed)
+            {
                 return Ok(intent);
             }
             // 一覧と同じ数え方の、索引を使う短い数え上げ。

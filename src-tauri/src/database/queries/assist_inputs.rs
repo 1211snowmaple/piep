@@ -1141,7 +1141,10 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![("催眠", 2, 1), ("催眠術", 1, 1)]
         );
-        assert!(db.shelf_tag_pairs("無い", &tags(&["催眠"])).unwrap().is_none());
+        assert!(db
+            .shelf_tag_pairs("無い", &tags(&["催眠"]))
+            .unwrap()
+            .is_none());
         drop(db);
         let _ = std::fs::remove_dir_all(root);
     }
