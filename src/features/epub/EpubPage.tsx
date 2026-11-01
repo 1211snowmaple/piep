@@ -125,7 +125,7 @@ export default function EpubPage() {
           operation.progress(event.payload.currentIndex, event.payload.totalCount, event.payload.message);
         });
       } catch (error) {
-        operation.log(`EPUB進捗の購読に失敗しました: ${errorMessage(error)}`, "warn");
+        operation.log(`EPUBの進み具合を受け取れません: ${errorMessage(error)}`, "warn");
       }
       try {
         return await exportEpubBatch<ExportBatchResult>({
@@ -150,7 +150,7 @@ export default function EpubPage() {
       else if (failed) {
         const retryWorks = request.works.filter((work) => keep.has(work.id));
         if (exportOperationRef.current && retryWorks.length > 0) retryWorksRef.current.set(exportOperationRef.current.id, retryWorks);
-        exportOperationRef.current?.fail(new Error(`成功 ${data.successCount} · 失敗 ${data.failedCount} · 検証不合格 ${data.invalidCount}`));
+        exportOperationRef.current?.fail(new Error(`成功 ${data.successCount} · 失敗 ${data.failedCount} · 検査で不合格 ${data.invalidCount}`));
       } else exportOperationRef.current?.complete(`成功 ${data.successCount} · 失敗 0`);
       exportOperationRef.current = null;
       setResult(data);
@@ -164,7 +164,7 @@ export default function EpubPage() {
         title: data.canceled ? "EPUB書き出しを中止しました" : failed ? "EPUBを書き出せない作品がありました" : "EPUB書き出しが完了しました",
         message: data.canceled
           ? `成功 ${data.successCount} · 残り${data.skippedIds.length}件はキューに残しました`
-          : `成功 ${data.successCount} · 失敗 ${data.failedCount}${data.invalidCount ? ` · 検証不合格 ${data.invalidCount}` : ""}`,
+          : `成功 ${data.successCount} · 失敗 ${data.failedCount}${data.invalidCount ? ` · 検査で不合格 ${data.invalidCount}` : ""}`,
       });
     },
     onError: (error) => { exportOperationRef.current?.fail(error); exportOperationRef.current = null; setProgress(null); notifications.show({ color: "red", title: "EPUBを書き出せません", message: errorMessage(error) }); },
@@ -267,7 +267,7 @@ function ExportResult({ result, outputDir, runtime }: { result: ExportBatchResul
         {result.canceled && <Text size="xs" c="dimmed">中止した時点で作りかけだった1冊は書き切っています。残りはキューに残したので、そのまま続きから書き出せます。</Text>}
         {result.issues.length > 0 && (
           <Box>
-            <Text size="sm" fw={600}>{result.invalidCount > 0 ? `${result.invalidCount}件はEPUBの検証を通過しませんでした` : "Kindle互換性について確認事項があります"}</Text>
+            <Text size="sm" fw={600}>{result.invalidCount > 0 ? `${result.invalidCount}件はEPUBの検査に通りませんでした` : "Kindle互換性について確認事項があります"}</Text>
             <Text size="xs" c="dimmed">エラーの作品はキューに残ります。警告は書き出せますが、品質を確認してください。</Text>
             <ScrollArea.Autosize mah={140} mt={6}>
               <Stack gap={2}>{result.issues.slice(0, 20).map((issue, index) => <Text key={index} size="xs" c="dimmed">{issue.location}：{issue.message}</Text>)}</Stack>

@@ -190,7 +190,7 @@ export function CollectionMemberList({
           {ordered && (
             <div className="collection-member__rail">
               {draggable && (
-                <Tooltip label="掴んで並べ替え">
+                <Tooltip label="ドラッグで並べ替え">
                   <ActionIcon
                     className="collection-member__grip"
                     variant="subtle"

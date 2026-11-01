@@ -95,7 +95,7 @@ export function SearchAssistModal({
             AIで条件に言い換える
           </Button>
         </Group>
-        {!engine && <Text size="xs" c="dimmed">AIによる言い換えは設定済みの言語モデルがある場合に使えます。</Text>}
+        {!engine && <Text size="xs" c="dimmed">AIでの言い換えは、設定の「AIの手伝い」でモデルを設定すると使えます。</Text>}
 
         {intent && (
           <Stack gap={8}>

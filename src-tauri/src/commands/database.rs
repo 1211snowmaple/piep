@@ -2326,7 +2326,8 @@ pub async fn refresh_entity_profile(
         }
 
         let normalized = if source == "pixiv" {
-            let token = refresh_token.ok_or("Pixivプロフィール更新にはrefreshTokenが必要です")?;
+            let token = refresh_token
+                .ok_or("pixivのプロフィールを更新するには、設定でpixivに接続してください")?;
             let user_id: u64 = source_key.parse().map_err(|_| "Invalid Pixiv user ID")?;
             let api =
                 crate::downloader::session::pixiv(token).map_err(|error| error.to_string())?;
@@ -2366,7 +2367,8 @@ pub async fn refresh_entity_profile(
                 },
             })
         } else if source == "fanbox" {
-            let cookie = cookie.ok_or("FANBOXプロフィール更新にはcookieが必要です")?;
+            let cookie = cookie
+                .ok_or("FANBOXのプロフィールを更新するには、設定でFANBOXに接続してください")?;
             let user_agent = user_agent.unwrap_or_else(|| "Mozilla/5.0".to_string());
             let api = crate::downloader::session::fanbox(cookie, user_agent)
                 .map_err(|error| error.to_string())?;
@@ -2523,7 +2525,7 @@ pub async fn refresh_entity_profile(
                 // not a completed remote refresh and must stay retryable.
                 Ok(None) => {
                     return Err(format!(
-                        "Pixivシリーズ情報を取得できませんでした ({source_key})"
+                        "pixivのシリーズ情報を取得できませんでした ({source_key})"
                     ))
                 }
                 Err(error) => return Err(error),

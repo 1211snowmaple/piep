@@ -320,7 +320,7 @@ export function AppFrame({ children }: { children: ReactNode }) {
     { id: "epub-templates", label: "テンプレートスタジオを開く", description: "EPUBの見た目と構成を編集", group: "保存と書き出し", onClick: () => navigate("/epub/templates"), leftSection: <Icons.epubTemplate size={IconSize.nav} /> },
     { id: "updates", label: "更新を確認", description: "変更と新着をチェック", group: "管理", onClick: () => navigate("/updates"), leftSection: <Icons.updates size={IconSize.nav} /> },
     { id: "operations", label: "操作履歴を開く", description: "進行状況・再試行・ログ", group: "管理", onClick: () => navigate("/operations"), leftSection: <Icons.history size={IconSize.nav} /> },
-    { id: "diagnostics", label: "ライブラリを診断", description: "実データ性能・容量・索引", group: "管理", onClick: () => navigate("/settings?section=diagnostics"), leftSection: <Icons.diagnostics size={IconSize.nav} /> },
+    { id: "diagnostics", label: "ライブラリを診断", description: "保存状態・容量・検索の速さを調べる", group: "管理", onClick: () => navigate("/settings?section=diagnostics"), leftSection: <Icons.diagnostics size={IconSize.nav} /> },
     { id: "settings", label: "設定を開く", description: "接続・外観・ライブラリ", group: "管理", onClick: () => navigate("/settings"), leftSection: <Icons.settings size={IconSize.nav} /> },
 
   ];

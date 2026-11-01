@@ -345,7 +345,7 @@ export default function EditorPage() {
       setDraftSavedHere(true);
       // 自動保存は黙って済ませる。押していない保存をそのつど知らせても、
       // 目と手が止まるだけで、伝わるものが増えるわけではない。
-      if (!snapshot.silent) notifications.show({ color: "green", icon: <Icons.confirm size={IconSize.menu} />, title: "下書きを保存しました", message: "公開中の本文はまだ変わりません" });
+      if (!snapshot.silent) notifications.show({ color: "green", icon: <Icons.confirm size={IconSize.menu} />, title: "下書きを保存しました", message: "読書画面とEPUBの本文はまだ変わりません" });
       queryClient.invalidateQueries({ queryKey: ["editor-document", id] });
       queryClient.invalidateQueries({ queryKey: ["reader-metadata", id] });
     },
@@ -394,7 +394,7 @@ export default function EditorPage() {
     },
     // 反映は本文を差し替えるので、カードが出している字数と版の印も変わる。
     // それらは棚と作者ページの一覧から引いているため、そこも古くしておく。
-    onSuccess: (_revision, snapshot) => { clearDirtyIfCurrent(snapshot); setDraftSavedHere(false); notifications.show({ color: "green", title: "編集版を反映しました", message: "リーダーとEPUBに編集内容が使われます" }); queryClient.invalidateQueries({ queryKey: ["reader-metadata", id] }); queryClient.invalidateQueries({ queryKey: ["reader-content-page", id] }); queryClient.invalidateQueries({ queryKey: ["reader-content-search", id] }); queryClient.invalidateQueries({ queryKey: ["editor-document", id] }); queryClient.invalidateQueries({ queryKey: ["library"] }); queryClient.invalidateQueries({ queryKey: ["entity-works"] }); },
+    onSuccess: (_revision, snapshot) => { clearDirtyIfCurrent(snapshot); setDraftSavedHere(false); notifications.show({ color: "green", title: "編集版を反映しました", message: "読書画面とEPUBが、この内容になります" }); queryClient.invalidateQueries({ queryKey: ["reader-metadata", id] }); queryClient.invalidateQueries({ queryKey: ["reader-content-page", id] }); queryClient.invalidateQueries({ queryKey: ["reader-content-search", id] }); queryClient.invalidateQueries({ queryKey: ["editor-document", id] }); queryClient.invalidateQueries({ queryKey: ["library"] }); queryClient.invalidateQueries({ queryKey: ["entity-works"] }); },
     onError: (error) => notifications.show({ color: "red", title: "編集版を反映できません", message: errorMessage(error) }),
   });
   /**
@@ -823,7 +823,7 @@ const EditorBlock = memo(function EditorBlock({ index, block, assets, total, for
             draggable
             role="button"
             tabIndex={-1}
-            aria-label={`ブロック ${index + 1}を掴んで並べ替え`}
+            aria-label={`ブロック ${index + 1}をドラッグで並べ替え`}
             onDragStart={(event) => { event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", String(index)); onDragBegin(index); }}
             onDragEnd={onDragFinish}
           >
@@ -843,7 +843,7 @@ const EditorBlock = memo(function EditorBlock({ index, block, assets, total, for
         {block.blockType === "heading" && <Textarea autosize minRows={1} maxRows={4} placeholder="見出し" variant="unstyled" className="editor-heading-input" key={form.key(`blocks.${index}.text`)} {...textInputProps} onChange={onTextChange} aria-label={`見出し ${index + 1}`} />}
         {block.blockType === "quote" && <Textarea autosize minRows={2} maxRows={16} placeholder="引用文" variant="unstyled" className="editor-quote-input" key={form.key(`blocks.${index}.text`)} {...textInputProps} onChange={onTextChange} aria-label={`引用 ${index + 1}`} />}
         {block.blockType === "separator" && <Divider my="md" label="区切り" labelPosition="center" />}
-        {block.blockType === "pageBreak" && <Group className="editor-page-break" justify="center" gap="xs"><Icons.separator size={IconSize.menu} /><Text size="xs" fw={700}>ここから次のpixiv原稿ページ</Text></Group>}
+        {block.blockType === "pageBreak" && <Group className="editor-page-break" justify="center" gap="xs"><Icons.separator size={IconSize.menu} /><Text size="xs" fw={700}>ここからpixivの次のページ</Text></Group>}
         {block.blockType === "image" && <ImageBlock asset={asset} assets={assets} value={liveBlock.assetId} caption={liveBlock.text} missingRef={missingImageRef(liveBlock.attrsJson)} onChange={(assetId) => {
           form.setFieldValue(`blocks.${index}.assetId`, assetId);
           // 取得できなかった絵の代わりを選んだら、その印と古い参照は外す。

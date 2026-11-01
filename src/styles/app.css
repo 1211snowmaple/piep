@@ -2300,6 +2300,18 @@ select {
   writing-mode: horizontal-tb;
 }
 
+/* AIの手伝いの保存の帯。下の方の設定を直したあとも、戻らずに押せる。 */
+.assist-save-bar {
+  position: sticky;
+  bottom: 0;
+  z-index: 3;
+  padding: 10px 14px;
+  border: 1px solid var(--mantine-color-default-border);
+  border-radius: var(--mantine-radius-md);
+  background: var(--mantine-color-body);
+  box-shadow: 0 -6px 18px light-dark(rgb(30 42 55 / 6%), rgb(0 0 0 / 30%));
+}
+
 /* 読んだ割合と残り時間。題の横に小さく。狭い窓では題を優先して隠す。 */
 .reader-progress-text { flex: none; white-space: nowrap; font-variant-numeric: tabular-nums; }
 @media (max-width: 560px) { .reader-progress-text { display: none; } }

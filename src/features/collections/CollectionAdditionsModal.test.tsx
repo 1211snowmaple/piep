@@ -6,7 +6,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { CollectionAdditionResult, WorkCollection } from "@/types/collections";
 
 /**
- * 「この束に合う作品を探す」。
+ * 「このコレクションに合う作品を探す」。
  *
  * 守るのは、押した通りの顔ぶれが束へ送られるかどうかだけにする。見た目では
  * なく、DB へ渡す中身が要点である。外した作品がそのまま入ってしまう壊れ方は、

@@ -311,12 +311,12 @@ export default function UpdatesPage() {
       await updateJobs.loadJobs();
       return removed;
     },
-    onSuccess: (removed) => notifications.show({ color: "gray", title: "履歴を消しました", message: `${formatNumber(removed ?? 0)}件を消しました。走っているジョブはそのままです` }),
+    onSuccess: (removed) => notifications.show({ color: "gray", title: "履歴を消しました", message: `${formatNumber(removed ?? 0)}件を消しました。実行中のジョブはそのままです` }),
     onError: (error) => notifications.show({ color: "red", title: "履歴を消せません", message: errorMessage(error) }),
   });
   const confirmClearFinishedJobs = () => modals.openConfirmModal({
     title: "終わった履歴をまとめて消しますか？",
-    children: <Text size="sm">終わったジョブの記録・ログ・候補の一覧を消します。保存した作品には触れません。走っているジョブは残ります。</Text>,
+    children: <Text size="sm">終わったジョブの記録・ログ・候補の一覧を消します。保存した作品には触れません。実行中のジョブは残ります。</Text>,
     labels: { confirm: "消す", cancel: "やめる" },
     confirmProps: { color: "red" },
     onConfirm: () => clearFinishedJobsMutation.mutate(),
@@ -470,7 +470,7 @@ export default function UpdatesPage() {
             <Tooltip
               multiline
               w={280}
-              label="取得元への確認は1件ずつ2秒以上あけます。取得エラーが続くと間隔を延ばして一時停止します。取得制限では分単位で待って再試行します。Pixiv側の表示設定で一覧から省かれた作品は個別に確認します。"
+              label="取得元への確認は1件ずつ2秒以上あけます。取得エラーが続くと間隔を延ばして一時停止します。取得制限では分単位で待って再試行します。pixiv 側の表示設定で一覧から省かれた作品は個別に確認します。"
             >
               <ActionIcon variant="subtle" color="gray" size="md" aria-label="確認の進め方について">
                 <Icons.help size={IconSize.menu} />
@@ -732,7 +732,7 @@ export function JobResultsPanel({ job, subject, items, loading, error, onRetry, 
 }
 
 /**
- * 走らせた記録。
+ * 実行した記録。
  *
  * 残すためのものだが、消せないままでは溜まる一方になる。走っているものには
  * 消す口を出さない - 消せば、進んでいるものの行き先が画面から無くなる。
@@ -748,13 +748,13 @@ function JobHistoryPanel({ jobs, activeJobId, finishedCount, clearingAll, cleari
   onClearFinished: () => void;
 }) {
   if (!jobs.length) {
-    return <EmptyState icon={Icons.versionHistory} title="履歴はまだありません" description="確認を開始すると、走らせた記録がここに残ります。" />;
+    return <EmptyState icon={Icons.versionHistory} title="履歴はまだありません" description="確認を開始すると、実行した記録がここに残ります。" />;
   }
   return (
     <Card p={0}>
       <Group justify="space-between" p="md" wrap="nowrap">
         <Box>
-          <Text fw={700}>走らせた記録</Text>
+          <Text fw={700}>実行した記録</Text>
           <Text size="xs" c="dimmed">選ぶと、その回の結果を開きます</Text>
         </Box>
         {finishedCount > 0 && (
@@ -771,7 +771,7 @@ function JobHistoryPanel({ jobs, activeJobId, finishedCount, clearingAll, cleari
                 <Stack gap={2} miw={0}>
                   <Group gap="sm" wrap="nowrap"><Text size="sm" fw={job.jobId === activeJobId ? 700 : 500}>{formatDate(job.startedAt, true)}</Text><Text size="sm" className="line-clamp-1">{updateJobSubject(job)}</Text></Group>
                   <Text size="xs" c="dimmed" className="line-clamp-1">
-                    {formatNumber(job.processed)}/{formatNumber(job.totals)}件 · 候補 {formatNumber(job.candidateCount)} · 保存 {formatNumber(job.savedCount)}{job.errorCount > 0 ? ` · エラー ${formatNumber(job.errorCount)}` : ""}{job.heldCount ? ` · 保留 ${formatNumber(job.heldCount)}` : ""}{job.knownHeldCount ? ` · 変わらない保留 ${formatNumber(job.knownHeldCount)}` : ""}
+                    {formatNumber(job.processed)}/{formatNumber(job.totals)}件 · 候補 {formatNumber(job.candidateCount)} · 保存 {formatNumber(job.savedCount)}{job.errorCount > 0 ? ` · エラー ${formatNumber(job.errorCount)}` : ""}{job.heldCount ? ` · 保留 ${formatNumber(job.heldCount)}` : ""}{job.knownHeldCount ? ` · 前回から変わらない保留 ${formatNumber(job.knownHeldCount)}` : ""}
                   </Text>
                 </Stack>
               </Group>

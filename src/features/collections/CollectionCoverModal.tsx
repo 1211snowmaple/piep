@@ -10,11 +10,11 @@ import type { CollectionCoverMode, WorkCollection, WorkCollectionInput } from "@
 
 /** 作り方と、それが何をするか。順番は「自動で足りる」から「自分で決める」へ。 */
 const MODES: { value: CollectionCoverMode; label: string; hint: string }[] = [
-  { value: "mosaic", label: "モザイク", hint: "先頭4作の表紙を並べる。メンバーが変われば追従する" },
-  { value: "spine", label: "背表紙", hint: "少しずつ重ねて並べる。冊数が形として見える" },
-  { value: "single", label: "1作を選ぶ", hint: "看板になる1作の表紙を使う" },
-  { value: "sigil", label: "紋", hint: "束の名前から色と形を決める。表紙が無くても成り立つ" },
-  { value: "file", label: "画像を選ぶ", hint: "手元の画像ファイルを使う" },
+  { value: "mosaic", label: "モザイク", hint: "先頭の4作の表紙を並べます。中身が変わると表紙も変わります" },
+  { value: "spine", label: "背表紙", hint: "表紙を少しずつ重ねて並べます。作品の数が厚みで分かります" },
+  { value: "single", label: "1作を選ぶ", hint: "代表の1作の表紙を使います" },
+  { value: "sigil", label: "紋", hint: "コレクションの名前から色と形を決めます。表紙が無くても使えます" },
+  { value: "file", label: "画像を選ぶ", hint: "手元の画像ファイルを使います" },
 ];
 
 /**

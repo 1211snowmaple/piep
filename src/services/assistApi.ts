@@ -72,14 +72,14 @@ export const ASSIST_FEATURES: ReadonlyArray<{
   description: string;
   needsBody: boolean;
 }> = [
-  { id: "search_interpretation", label: "言葉で探す", description: "読みたい内容を棚の条件へ翻訳", needsBody: false },
-  { id: "work_synopsis", label: "作品のあらすじ", description: "本文から再読用の短い覚え書きを作成", needsBody: true },
-  { id: "work_tagging", label: "タグの補完", description: "棚にあるタグだけを候補として提案", needsBody: false },
+  { id: "search_interpretation", label: "言葉で探す", description: "読みたい内容を、棚の検索条件に言い換える", needsBody: false },
+  { id: "work_synopsis", label: "作品のあらすじ", description: "本文から、読み返すためのあらすじを作る", needsBody: true },
+  { id: "work_tagging", label: "タグの補完", description: "棚にあるタグから、足りないものを提案する", needsBody: false },
   { id: "author_style", label: "作者の題材メモ", description: "モデルや通信を使わず、手元の作品タグを集計します", needsBody: false },
-  { id: "reader_recap", label: "前回のあらすじ", description: "前の作品の本文から要点を作成", needsBody: true },
-  { id: "collection_split", label: "コレクションの分割案", description: "題名とタグから分け方を提案", needsBody: false },
-  { id: "collection_naming", label: "コレクションの命名", description: "内容に沿う名前と説明を提案", needsBody: false },
-  { id: "editor_proofread", label: "本文の校正", description: "編集中の本文から誤字・脱字の候補を挙げる（直すかは一件ずつ選ぶ）", needsBody: true },
+  { id: "reader_recap", label: "前回のあらすじ", description: "前の話の本文から要点をまとめる", needsBody: true },
+  { id: "collection_split", label: "コレクションの分割案", description: "題名とタグから分け方を提案する", needsBody: false },
+  { id: "collection_naming", label: "コレクションの命名", description: "内容に合う名前と説明を提案する", needsBody: false },
+  { id: "editor_proofread", label: "本文の校正", description: "編集中の本文から誤字・脱字の候補を挙げる（直すかは一件ずつ選べる）", needsBody: true },
 ] as const;
 
 function defaultProfiles(): Record<AssistFeatureId, AssistFeatureProfile> {
@@ -199,7 +199,7 @@ export function validateAssistSettings(settings: AssistSettings): string | null 
   if (!isLocalAssistUrl(base)) {
     if (!base.startsWith("https://")) return "外部のつなぎ先には HTTPS が必要です";
     if (normalizeAssistBaseUrl(settings.remoteConsentUrl ?? "") !== base) {
-      return "現在の外部宛先へ送ることを明示的に許可してください";
+      return "外部の宛先へ送ることを許可してください";
     }
   }
   if (settings.verifiedTarget !== assistTarget(settings)) {
@@ -213,7 +213,7 @@ export function validateAssistSettings(settings: AssistSettings): string | null 
     }
     const override = profile.model.trim();
     if (feature.id !== "author_style" && profile.enabled && override && profile.verifiedTarget !== assistTarget({ baseUrl: settings.baseUrl, model: override })) {
-      return `「${feature.label}」の機能別モデルを試してから保存してください`;
+      return `「${feature.label}」だけで使うモデルを、試してから保存してください`;
     }
   }
   return null;
@@ -253,8 +253,10 @@ export function assistFeatureReady(settings: AssistSettings | undefined, feature
 
 export interface DiscoveredEngine {
   baseUrl: string;
-  /** 「LM Studio」など、そこで動いていそうなものの名前。 */
+  /** 「LM Studio」など、そこで動いているものの名前。 */
   label: string;
+  /** 名前をサーバーの応答で確かめたか。false ならポート番号からの推測。 */
+  identified: boolean;
   models: string[];
 }
 

@@ -251,7 +251,7 @@ impl WebUpdateIndex {
                     // 同じ失効 Cookie で残りの作者をすべて叩かない。再開時は
                     // 新しい資格情報から index を作り直す。
                     self.gave_up = true;
-                    return Err(format!("pixiv連携の再接続が必要です（{error}）"));
+                    return Err(format!("pixivへの再接続が必要です（{error}）"));
                 }
                 Err(error) => {
                     self.asked_authors.remove(author_id);
@@ -954,7 +954,7 @@ fn spawn_update_job(app: tauri::AppHandle, job_id: String, credentials: UpdateCr
         });
         let run_result = match worker.await {
             Ok(result) => result,
-            Err(error) => Err(format!("更新ジョブworkerが異常終了しました: {error}")),
+            Err(error) => Err(format!("更新ジョブの処理が異常終了しました: {error}")),
         };
         if let Err(error) = run_result {
             let state = app.state::<Arc<AppState>>().inner().clone();
@@ -1151,7 +1151,7 @@ pub async fn start_save_job(
     state.db.append_update_job_log(
         &job_id,
         "info",
-        &format!("{}件の保存を預かりました", items.len()),
+        &format!("{}件の保存を受け付けました", items.len()),
     )?;
     spawn_update_job(
         app.clone(),
@@ -1704,7 +1704,9 @@ async fn recheck_deferred_item(
     let id = item.source_id.as_deref().ok_or("作品IDがありません")?;
     if source == "fanbox" && payload.get("holdKind").and_then(Value::as_str) == Some("restricted") {
         let Some(cookie) = fanbox_cookie(credentials) else {
-            return Ok(ItemOutcome::AuthRequired("FANBOX連携が必要です".into()));
+            return Ok(ItemOutcome::AuthRequired(
+                "設定でFANBOXに接続してください".into(),
+            ));
         };
         let ua = fanbox_user_agent(credentials);
         let creator = string_at(
@@ -1844,14 +1846,14 @@ pub async fn preview_pending_revision(
     let value = match download.source.as_str() {
         "pixiv" => {
             let token = pixiv_token(&credentials)
-                .ok_or_else(|| "差分の取得にはPixiv連携が必要です".to_string())?;
+                .ok_or_else(|| "差分を取るには、設定でpixivに接続してください".to_string())?;
             let novel =
                 super::downloader::fetch_pixiv_novel(download.source_id.clone(), token).await?;
             serde_json::to_value(novel).map_err(|error| error.to_string())?
         }
         "fanbox" => {
             let cookie = fanbox_cookie(&credentials)
-                .ok_or_else(|| "差分の取得にはFANBOX連携が必要です".to_string())?;
+                .ok_or_else(|| "差分を取るには、設定でFANBOXに接続してください".to_string())?;
             super::downloader::fetch_fanbox_post(
                 download.source_id.clone(),
                 cookie,
@@ -2008,7 +2010,7 @@ async fn run_update_job(
                 "completed"
             };
             let label = if final_status == "failed" {
-                "エラーありで終了しました"
+                "エラーが出たまま終了しました"
             } else {
                 "完了しました"
             };
@@ -3009,7 +3011,9 @@ async fn process_work_item(
     let auto_save = state.db.update_job_mode_value(job_id)? == "auto_save";
     if dl.source == "pixiv" {
         let Some(token) = pixiv_token(credentials) else {
-            return Ok(ItemOutcome::AuthRequired("Pixiv連携が必要です".to_string()));
+            return Ok(ItemOutcome::AuthRequired(
+                "設定でpixivに接続してください".to_string(),
+            ));
         };
 
         // 0段目。web の一覧は、100件まとめて `updateDate` を返す。ここで
@@ -3128,7 +3132,7 @@ async fn process_work_item(
     } else if dl.source == "fanbox" {
         let Some(cookie) = fanbox_cookie(credentials) else {
             return Ok(ItemOutcome::AuthRequired(
-                "FANBOX連携が必要です".to_string(),
+                "設定でFANBOXに接続してください".to_string(),
             ));
         };
         let user_agent = fanbox_user_agent(credentials);
@@ -3554,7 +3558,9 @@ async fn process_target_item(
 
     let items: Vec<Value> = if target.source == "pixiv" && target.target_type == "author" {
         let Some(token) = pixiv_token(credentials) else {
-            return Ok(ItemOutcome::AuthRequired("Pixiv連携が必要です".to_string()));
+            return Ok(ItemOutcome::AuthRequired(
+                "設定でpixivに接続してください".to_string(),
+            ));
         };
         super::downloader::fetch_pixiv_user_novels_since(
             target.source_key.clone(),
@@ -3567,7 +3573,9 @@ async fn process_target_item(
         .collect::<Result<Vec<_>, _>>()?
     } else if target.source == "pixiv" && target.target_type == "series" {
         let Some(token) = pixiv_token(credentials) else {
-            return Ok(ItemOutcome::AuthRequired("Pixiv連携が必要です".to_string()));
+            return Ok(ItemOutcome::AuthRequired(
+                "設定でpixivに接続してください".to_string(),
+            ));
         };
         super::downloader::fetch_pixiv_series_novels_since(
             target.source_key.clone(),
@@ -3581,7 +3589,7 @@ async fn process_target_item(
     } else if target.source == "fanbox" && target.target_type == "author" {
         let Some(cookie) = fanbox_cookie(credentials) else {
             return Ok(ItemOutcome::AuthRequired(
-                "FANBOX連携が必要です".to_string(),
+                "設定でFANBOXに接続してください".to_string(),
             ));
         };
         let user_agent = fanbox_user_agent(credentials);
@@ -3780,7 +3788,9 @@ async fn process_candidate_item(
 
     if source == "pixiv" {
         let Some(token) = pixiv_token(credentials) else {
-            return Ok(ItemOutcome::AuthRequired("Pixiv連携が必要です".to_string()));
+            return Ok(ItemOutcome::AuthRequired(
+                "設定でpixivに接続してください".to_string(),
+            ));
         };
         let data = super::downloader::fetch_pixiv_novel(source_id.to_string(), token).await?;
         let value = serde_json::to_value(&data).map_err(|e| e.to_string())?;
@@ -3875,7 +3885,7 @@ async fn process_candidate_item(
         }
         let Some(cookie) = fanbox_cookie(credentials) else {
             return Ok(ItemOutcome::AuthRequired(
-                "FANBOX連携が必要です".to_string(),
+                "設定でFANBOXに接続してください".to_string(),
             ));
         };
         let user_agent = fanbox_user_agent(credentials);

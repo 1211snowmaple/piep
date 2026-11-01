@@ -1542,7 +1542,7 @@ impl Database {
                     )
                 } else {
                     (
-                        format!("本文リンクを{}段追跡して接続", path.depth),
+                        format!("本文のリンクを{}回たどってつながる", path.depth),
                         path.confidence,
                     )
                 };
@@ -1617,7 +1617,7 @@ impl Database {
                         &mut evidence,
                         &mut context,
                         "official_series",
-                        &format!("公式シリーズ「{title}」に同居"),
+                        &format!("公式シリーズ「{title}」に一緒に入っている"),
                         0.10,
                     );
                 }
@@ -1641,9 +1641,9 @@ impl Database {
                         .iter()
                         .any(|seed| seed.source != candidate.source)
                     {
-                        "同一作者名（取得元を横断）"
+                        "同じ作者名（取得元をまたぐ）"
                     } else {
-                        "同一作者"
+                        "同じ作者"
                     },
                     0.08,
                 );

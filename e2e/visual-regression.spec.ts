@@ -156,7 +156,7 @@ test("AI beta disclosure stays visible in settings and the launcher", async ({ p
   const beta = page.locator(".settings-content").getByText("β", { exact: true });
   await expect(beta).toBeVisible();
   await expect(beta).toHaveCSS("text-transform", "none");
-  await expect(page.getByText("AI補助・意味検索はβ版です", { exact: true })).toBeVisible();
+  await expect(page.getByText("AIの手伝いと意味検索はβ版です", { exact: true })).toBeVisible();
   await page.addStyleTag({ content: "*,*::before,*::after{animation:none!important;transition:none!important;caret-color:transparent!important}" });
   await page.evaluate(async () => { await document.fonts.ready; });
   await expect(page).toHaveScreenshot("settings-assist.png", { fullPage: true });

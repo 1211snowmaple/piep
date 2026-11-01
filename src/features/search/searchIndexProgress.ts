@@ -48,7 +48,7 @@ function ensureSubscription() {
     }, SETTLE_MS);
   }).catch((error) => {
     subscribed = false;
-    console.error("検索索引の進捗イベントを購読できませんでした", error);
+    console.error("検索索引の進み具合を受け取れませんでした", error);
     if (retryTimer === undefined && (listeners.size > 0 || tracked !== null)) {
       retryTimer = window.setTimeout(() => {
         retryTimer = undefined;

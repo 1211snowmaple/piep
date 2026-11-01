@@ -524,7 +524,7 @@ export default function SavePage() {
       ? "選択したものは保存済みです"
       : items.some((item) => item.status === "held") &&
           items.every((item) => ["held", "success", "skipped"].includes(item.status ?? ""))
-        ? "保留は更新画面から再確認"
+        ? "保留は「更新」の画面で確かめ直せます"
         : "保存する項目を選択"
     : retryCount === pendingCount
       ? `失敗した${pendingCount}件をやり直す`
@@ -694,7 +694,7 @@ export default function SavePage() {
     if (!runtime)
       return notifications.show({
         color: "piep",
-        message: "候補取得はデスクトップアプリで利用できます",
+        message: "候補の取得はデスクトップアプリで使えます",
       });
     if (!authConnected)
       return notifications.show({
@@ -1239,18 +1239,18 @@ export default function SavePage() {
               {history.length > 1 && (
                 <Menu position="bottom-start" width={420} withinPortal>
                   <Menu.Target>
-                    <Tooltip label="このセッションで開いたページ">
+                    <Tooltip label="今回開いたページ">
                       <ActionIcon
                         variant="subtle"
                         color="gray"
-                        aria-label="このセッションで開いたページ"
+                        aria-label="今回開いたページ"
                       >
                         <Icons.versionHistory size={IconSize.action} />
                       </ActionIcon>
                     </Tooltip>
                   </Menu.Target>
                   <Menu.Dropdown>
-                    <Menu.Label>このセッションで開いたページ</Menu.Label>
+                    <Menu.Label>今回開いたページ</Menu.Label>
                     {history.map((url) => (
                       <Menu.Item key={url} onClick={() => navigateBrowser(url)}>
                         <Text size="xs" className="line-clamp-1">

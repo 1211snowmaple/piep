@@ -62,7 +62,7 @@ export function CollectionAdditionsModal({ opened, onClose, collection, busy, on
     <Modal
       opened={opened}
       onClose={onClose}
-      title="この束に合う作品を探す"
+      title="このコレクションに合う作品を探す"
       size="xl"
       closeOnClickOutside={!busy}
       closeOnEscape={!busy}

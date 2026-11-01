@@ -409,7 +409,7 @@ function CollectionDetail({ collection, readOnly, onEdit, onChanged }: { collect
       label: "名前を考えてもらう",
       description: "題名とタグを見て名前と説明を提案します",
       enabled: !readOnly && Boolean(namingEngine),
-      unavailableReason: readOnly ? "このコレクションは編集できません" : "命名機能を設定すると使えます",
+      unavailableReason: readOnly ? "このコレクションは編集できません" : "設定で「コレクションの命名」を有効にすると使えます",
       onSelect: () => onEdit(true),
     },
     {
@@ -417,7 +417,7 @@ function CollectionDetail({ collection, readOnly, onEdit, onChanged }: { collect
       label: "分け方を考えてもらう",
       description: "内容のまとまりから分割案を作ります",
       enabled: !readOnly && collection.availableCount >= 4 && Boolean(splitEngine),
-      unavailableReason: collection.availableCount < 4 ? "4作品以上で利用できます" : "分割提案機能を設定すると使えます",
+      unavailableReason: collection.availableCount < 4 ? "4作品以上で利用できます" : "設定で「コレクションの分割案」を有効にすると使えます",
       onSelect: splitModal.open,
     },
   ];
@@ -507,7 +507,7 @@ function CollectionDetail({ collection, readOnly, onEdit, onChanged }: { collect
             <Stack align="center" gap="sm">
               <Icons.collection size={IconSize.hero} />
               <Text fw={700}>まだ作品が入っていません</Text>
-              <Text size="sm" c="dimmed" ta="center">作品を追加すると、ここから順番に読み進めたり一冊のEPUBにできます。</Text>
+              <Text size="sm" c="dimmed" ta="center">作品を追加すると、ここから順番に読み進めたり、一冊のEPUBにしたりできます。</Text>
               <Button disabled={readOnly} onClick={addModal.open}>作品を追加</Button>
             </Stack>
           </Paper>

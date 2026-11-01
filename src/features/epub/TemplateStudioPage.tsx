@@ -414,7 +414,7 @@ function StructureEditor({ template, readOnly, onSaved }: { template: TemplateIn
           <Switch label="表紙を読み進む順に含める" description="外すと本文から始まり、表紙は目次からだけ開けます" disabled={readOnly || !settings.includeCoverPage} checked={settings.coverInReadingOrder} onChange={(event) => update({ coverInReadingOrder: event.currentTarget.checked })} />
           <Switch label="作品情報のページを作る" disabled={readOnly} checked={settings.includeInfoPage} onChange={(event) => update({ includeInfoPage: event.currentTarget.checked })} />
           <Switch label="章を目次に並べる" disabled={readOnly} checked={settings.chapterToc} onChange={(event) => update({ chapterToc: event.currentTarget.checked })} />
-          <Switch label="EPUB 2 互換の目次も入れる" description="Send to Kindle など、古い経路の取り込みはこちらを読みます。外す理由がなければ入れたままに" disabled={readOnly} checked={settings.includeNcx} onChange={(event) => update({ includeNcx: event.currentTarget.checked })} />
+          <Switch label="EPUB 2 互換の目次も入れる" description="Send to Kindle など、古い経路の取り込みはこちらを読みます。外す理由がなければ、入れたままにしてください" disabled={readOnly} checked={settings.includeNcx} onChange={(event) => update({ includeNcx: event.currentTarget.checked })} />
         </Stack>
       </Box>
 
@@ -762,7 +762,7 @@ function PreviewPanel({ preview, loading, error, target, onTarget, sampleId, onS
       <Stack gap="sm">
         <Group justify="space-between">
           <Box><Text fw={700}>プレビュー</Text><Text size="xs" c="dimmed" className="line-clamp-1">{preview?.sampleTitle ?? "—"}</Text></Box>
-          <Tooltip label="描き直す"><ActionIcon variant="subtle" color="gray" aria-label="プレビューを描き直す" loading={loading} onClick={onRefresh}><Icons.retry size={IconSize.action} /></ActionIcon></Tooltip>
+          <Tooltip label="プレビューを更新"><ActionIcon variant="subtle" color="gray" aria-label="プレビューを更新" loading={loading} onClick={onRefresh}><Icons.retry size={IconSize.action} /></ActionIcon></Tooltip>
         </Group>
 
         <SamplePicker sampleId={sampleId} onChange={onSampleChange} runtime={runtime} />

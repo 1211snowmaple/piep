@@ -125,7 +125,7 @@ fn render_loaded_page(
 
     let bitmap = unsafe { bindings.FPDFBitmap_Create(width as i32, height as i32, 0) };
     if bitmap.is_null() {
-        return Err("ページを描く場所を用意できません".to_string());
+        return Err("ページを表示する領域を用意できません".to_string());
     }
     let pixels = unsafe {
         bindings.FPDFBitmap_FillRect(bitmap, 0, 0, width as i32, height as i32, PAPER);
@@ -202,11 +202,11 @@ unsafe fn copy_as_rgb(
     let stride = unsafe { bindings.FPDFBitmap_GetStride(bitmap) };
     let buffer = unsafe { bindings.FPDFBitmap_GetBuffer(bitmap) } as *const u8;
     if buffer.is_null() || stride <= 0 {
-        return Err("描いたページを読み出せません".to_string());
+        return Err("表示用の画像を読み出せません".to_string());
     }
     let stride = stride as usize;
     if stride < width as usize * 4 {
-        return Err("描いたページの並びが読めません".to_string());
+        return Err("表示用の画像の並びが読めません".to_string());
     }
     let mut rgb = Vec::with_capacity(width as usize * height as usize * 3);
     for row in 0..height as usize {

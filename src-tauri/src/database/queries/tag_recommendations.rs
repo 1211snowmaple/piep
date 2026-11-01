@@ -182,7 +182,7 @@ impl Database {
                     RelatedTagCandidate {
                         tag: pair.candidate_name.clone(),
                         reason: format!(
-                            "共通タグを持つ{}作品中{}作品で併用",
+                            "同じタグを持つ{}作品のうち{}作品に一緒に付いています",
                             pair.matching_work_count, pair.co_work_count
                         ),
                         matching_work_count: pair.matching_work_count,
@@ -404,7 +404,10 @@ mod tests {
         let common = result.iter().find(|entry| entry.tag == "common").unwrap();
         assert_eq!(common.matching_work_count, 5);
         assert_eq!(common.cooccurring_work_count, 3);
-        assert_eq!(common.reason, "共通タグを持つ5作品中3作品で併用");
+        assert_eq!(
+            common.reason,
+            "同じタグを持つ5作品のうち3作品に一緒に付いています"
+        );
         assert!(!result.iter().any(|entry| entry.tag == "already"));
         assert!(!result.iter().any(|entry| entry.tag == "author-leak"));
         assert!(!result.iter().any(|entry| entry.tag == "manual-only"));

@@ -63,5 +63,5 @@ pub async fn render_pdf_attachment_page(
         })
     })
     .await
-    .map_err(|error| format!("ページを描けませんでした: {error}"))?
+    .map_err(|error| format!("ページを表示できませんでした: {error}"))?
 }

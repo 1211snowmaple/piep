@@ -3702,7 +3702,7 @@ fn collection_suggestions_walk_the_whole_link_component_from_either_end() {
     assert!(from_first.members.iter().any(|member| member
         .evidence
         .iter()
-        .any(|evidence| evidence.label.contains("3段追跡"))));
+        .any(|evidence| evidence.label.contains("3回たどって"))));
 
     // The opposite endpoint works too: its outgoing "previous work" links
     // lead back to the first chapter and are ordered by their direction.
@@ -10645,7 +10645,7 @@ fn collection_additions_fall_back_when_only_non_seed_works_have_vectors() {
     assert!(!result.semantic_used);
     assert_eq!(
         result.note.as_deref(),
-        Some("この束と候補の本文ベクトルを比較できなかったため、規則だけで探しました。")
+        Some("このコレクションと候補の本文の近さを比べられなかったので、題名・作者・タグ・リンクだけで探しました。")
     );
     let suggested = result
         .candidates

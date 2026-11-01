@@ -131,7 +131,7 @@ impl Database {
             .collect::<Vec<_>>();
         if members.is_empty() {
             return Ok(empty(
-                "この束の作品が棚に見つかりません。保存し直すと候補を探せます。",
+                "このコレクションの作品が棚に見つかりません。保存し直すと候補を探せます。",
             ));
         }
 
@@ -150,7 +150,7 @@ impl Database {
             Ok(_) => (
                 HashMap::new(),
                 Some(
-                    "本文ベクトルがまだ足りないので、題名・作者・タグ・リンクだけで探しました。"
+                    "本文の意味の索引がまだ足りないので、題名・作者・タグ・リンクだけで探しました。"
                         .to_string(),
                 ),
             ),
@@ -249,7 +249,7 @@ impl Database {
         } else {
             semantic_note.or_else(|| {
                 Some(
-                    "この束と候補の本文ベクトルを比較できなかったため、規則だけで探しました。"
+                    "このコレクションと候補の本文の近さを比べられなかったので、題名・作者・タグ・リンクだけで探しました。"
                         .to_string(),
                 )
             })
@@ -657,7 +657,7 @@ fn rule_confidence(
     if let Some(confidence) = profile.linked.get(&work.id) {
         found.push((
             confidence.clamp(0.0, 1.0),
-            "この束の作品から、本文・キャプションでリンクされています".to_string(),
+            "このコレクションの作品から、本文やキャプションでリンクされています".to_string(),
             CollectionSuggestionEvidence {
                 kind: "content_link".to_string(),
                 label: "本文・キャプションのリンク".to_string(),
@@ -668,7 +668,7 @@ fn rule_confidence(
     if profile.shares_series(work) {
         found.push((
             0.95,
-            "この束と同じ公式シリーズの作品です".to_string(),
+            "このコレクションと同じ公式シリーズの作品です".to_string(),
             CollectionSuggestionEvidence {
                 kind: "series_run".to_string(),
                 label: "同じ公式シリーズ".to_string(),
@@ -690,10 +690,10 @@ fn rule_confidence(
     if same_author && profile.shares_family(work) {
         found.push((
             0.88,
-            "同じ作者の、題名が同じ族の作品です".to_string(),
+            "同じ作者の、題名の付け方が同じ作品です".to_string(),
             CollectionSuggestionEvidence {
                 kind: "title_similarity".to_string(),
-                label: "同じ作者・同じ題名族".to_string(),
+                label: "同じ作者・題名の付け方が同じ".to_string(),
                 contribution: 0.6,
             },
         ));
@@ -701,7 +701,7 @@ fn rule_confidence(
     if same_author && shared >= 2 {
         found.push((
             0.72,
-            format!("同じ作者で、この束のタグを{shared}つ共有しています"),
+            format!("同じ作者で、このコレクションのタグを{shared}つ共有しています"),
             CollectionSuggestionEvidence {
                 kind: "shared_tags".to_string(),
                 label: "同じ作者・共有タグ".to_string(),
@@ -711,7 +711,7 @@ fn rule_confidence(
     } else if shared >= 3 {
         found.push((
             0.64,
-            format!("この束のタグを{shared}つ共有しています"),
+            format!("このコレクションのタグを{shared}つ共有しています"),
             CollectionSuggestionEvidence {
                 kind: "shared_tags".to_string(),
                 label: "共有タグ".to_string(),
@@ -768,7 +768,7 @@ fn combine(
         (None, Some((confidence, z))) => Some((
             confidence,
             format!(
-                "本文の内容が、この束の作品に近いです（棚のふつうより{:.1}倍ぶん近い）",
+                "本文の内容が、このコレクションの作品に近いです（棚の平均の{:.1}倍近い）",
                 z
             ),
             vec![semantic_evidence()],

@@ -171,7 +171,7 @@ export function AssistNoteBody({
           {promptStale ? (nativeStatistics ? " · 集計条件が更新されています" : " · 指示が更新されています") : ""}
           {inputStale ? " · 元の作品情報が変わっています" : ""}
           {configStale === true ? (nativeStatistics ? " · 集計条件が変わっています" : " · モデル設定が変わっています") : ""}
-          {configStale === null ? (nativeStatistics ? " · 集計条件の鮮度は未確認" : " · モデル設定の鮮度は未確認") : ""}
+          {configStale === null ? (nativeStatistics ? " · 集計条件がいまと同じかは不明" : " · モデル設定がいまと同じかは不明") : ""}
         </Text>
         {onDiscard && (
           <Button size="compact-xs" variant="subtle" color="gray" onClick={onDiscard}>消す</Button>

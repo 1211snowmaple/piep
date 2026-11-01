@@ -819,7 +819,7 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
                     description="検索語やタグを減らしてください。"
                     action={<Button variant="light" onClick={() => patchUrl({ q: "", tags: [] })}>絞り込みを解除</Button>}
                   />
-                ) : <EmptyState icon={Icons.read} title="保存作品がありません" description="このページを保存ワークスペースで開き、作品を取り込んでください。" action={<Button onClick={() => navigate(`/save/${source}`)}>保存ワークスペースを開く</Button>} />}
+                ) : <EmptyState icon={Icons.read} title="保存作品がありません" description="「保存」の画面でこのページを開き、作品を取り込んでください。" action={<Button onClick={() => navigate(`/save/${source}`)}>「保存」の画面を開く</Button>} />}
               </Box>
             </Tabs.Panel>
             {kind === "person" && (
@@ -860,7 +860,7 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
                       {authorSeries.isFetchNextPageError && (
                         <Alert color="red" title="シリーズの続きを読み込めません" role="alert">
                           <Stack gap="xs">
-                            <Text size="sm">ライブラリの更新でカーソルが古くなった可能性があります。表示中のシリーズはそのまま残しています。</Text>
+                            <Text size="sm">ライブラリが更新され、続きの位置が分からなくなったようです。表示中のシリーズはそのまま残しています。</Text>
                             <Group gap="xs">
                               <Button size="xs" variant="light" color="red" onClick={() => authorSeries.fetchNextPage()}>もう一度試す</Button>
                               <Button size="xs" variant="default" onClick={() => queryClient.resetQueries({ queryKey: ["entity-series", source, key, serverSeriesQuery, seriesSortBy, seriesSortOrder], exact: true })}>先頭から読み直す</Button>
@@ -888,7 +888,7 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
                           current: 1,
                           size: ENTITY_SERIES_PAGE_SIZE,
                           onGoTo: () => undefined,
-                          unavailableReason: "作者シリーズはカーソルで順に読み込みます。ページ番号への直接移動は利用できません。",
+                          unavailableReason: "作者のシリーズは先頭から順に読み込みます。ページ番号では移動できません。",
                         }}
                       />
                     </>

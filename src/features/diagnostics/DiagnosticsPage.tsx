@@ -122,7 +122,7 @@ const OPTIMIZE_PHASE_LABEL: Record<string, string> = {
 
 const FILE_ISSUE_LABEL: Record<string, string> = {
   missing: "参照先がありません",
-  unsafe: "許可領域外またはリンク",
+  unsafe: "保存フォルダーの外、またはリンク",
   unreadable: "読み取れません",
   empty: "0バイトです",
   size_mismatch: "記録された容量と異なります",
@@ -262,7 +262,7 @@ export default function DiagnosticsPage({ embedded = false, previewData = previe
   const optimizeElapsed = useElapsedSeconds(Boolean(optimizePhase) && optimizePhase?.phase !== "complete" && optimizePhase?.phase !== "failed");
   const maintenance = useMutation({
     mutationFn: async (compact: boolean) => {
-      operationRef.current = startOperation({ kind: "maintenance", label: compact ? "データベースを圧縮" : "ライブラリを最適化", detail: compact ? "空きページを回収して物理サイズを縮小します" : "データベースの統計と一時ログを整理します", onRetry: () => retryRef.current(compact) });
+      operationRef.current = startOperation({ kind: "maintenance", label: compact ? "データベースを圧縮" : "ライブラリを最適化", detail: compact ? "使われていない領域を片付けて、ファイルを小さくします" : "データベースの統計と一時ログを整理します", onRetry: () => retryRef.current(compact) });
       let dispose: (() => void) | undefined;
       if (runtime) dispose = await onTauriEvent<{ phase: string; error?: string | null }>("library-maintenance-progress", ({ payload }) => operationRef.current?.log(payload.error || `フェーズ: ${payload.phase}`, payload.error ? "error" : "info"));
       try { return await maintainLibrary(compact); }
@@ -310,7 +310,7 @@ export default function DiagnosticsPage({ embedded = false, previewData = previe
       const operation = startOperation({
         kind: "maintenance",
         label: "保存フォルダーから再取り込み",
-        detail: "DBにない完全な作品だけを検査します",
+        detail: "データベースから消えていて、保存フォルダーが欠けずに残っている作品だけを調べます",
         onRetry: () => reimportRetryRef.current(),
       });
       try {
@@ -341,7 +341,7 @@ export default function DiagnosticsPage({ embedded = false, previewData = previe
         message: [
           outcome.imported > 0
             ? `${formatNumber(outcome.imported)}件をライブラリへ戻しました。診断結果も更新しました。`
-            : "DBに登録済みの作品は上書きしません。参照切れはバックアップ復元または元サービスからの再保存を使用してください。",
+            : "データベースにある作品は上書きしません。ファイルが見つからない作品は、バックアップから戻すか、取得元から保存し直してください。",
           skippedNote,
         ].filter(Boolean).join(" "),
       });
@@ -354,7 +354,7 @@ export default function DiagnosticsPage({ embedded = false, previewData = previe
       profileRepairOperationRef.current = startOperation({
         kind: "maintenance",
         label: "作者・シリーズ情報を修復",
-        detail: "完全取得できていないプロフィールを残件から再取得します",
+        detail: "取得しきれていないプロフィールを、残りの分から取り直します",
         total: profileRepairStatus.data?.totalCount ?? null,
         onCancel: async () => { await cancelEntityProfileRepair(); },
         onRetry: () => profileRepairRetryRef.current(),
@@ -607,8 +607,8 @@ export default function DiagnosticsPage({ embedded = false, previewData = previe
       </Card>
     )}
     {diagnostics.error ? <Box mt="lg"><ErrorState error={diagnostics.error} retry={() => diagnostics.refetch()} /></Box> : data && <Stack gap="lg" mt="xl">
-      {data.fragmentationPercent >= 20 && <Alert color={data.fragmentationPercent >= 70 ? "red" : "yellow"} icon={<Icons.warning size={IconSize.nav} />} title={`DBの${data.fragmentationPercent.toFixed(2)}%が再利用待ち領域です`}>
-        <Group justify="space-between" align="flex-end"><Text size="sm" maw={720}>論理使用量は約{formatBytes(data.liveDatabaseBytes)}ですが、物理ファイルは{formatBytes(data.databaseSizeBytes)}あります。検索結果の正しさには影響しませんが、バックアップ容量とディスクI/Oを増やします。</Text><Button color="yellow" loading={maintenance.isPending} disabled={!runtime} onClick={confirmCompact}>空き容量を検査して圧縮</Button></Group>
+      {data.fragmentationPercent >= 20 && <Alert color={data.fragmentationPercent >= 70 ? "red" : "yellow"} icon={<Icons.warning size={IconSize.nav} />} title={`DBの${data.fragmentationPercent.toFixed(2)}%が使われていない領域です`}>
+        <Group justify="space-between" align="flex-end"><Text size="sm" maw={720}>中身は約{formatBytes(data.liveDatabaseBytes)}ですが、ファイルは{formatBytes(data.databaseSizeBytes)}あります。検索結果には影響しませんが、バックアップの容量と読み書きが増えます。</Text><Button color="yellow" loading={maintenance.isPending} disabled={!runtime} onClick={confirmCompact}>空き容量を検査して圧縮</Button></Group>
       </Alert>}
 
       <Alert
@@ -617,7 +617,7 @@ export default function DiagnosticsPage({ embedded = false, previewData = previe
         title={fileIntegrityIssues ? `保存ファイルに${formatNumber(fileIntegrityIssues)}件の確認事項があります` : "登録情報と保存ファイルは一致しています"}
       >
         {fileIntegrityIssues ? <Stack gap="xs">
-          <Text size="sm">手動で移動・削除・置換された可能性があるファイルを検出しました。診断は原本を自動削除・上書きしません。参照切れはバックアップからの復元または元サービスからの再保存、一時ファイルはアプリ再起動後の再計測を優先してください。</Text>
+          <Text size="sm">手動で移動・削除・置換された可能性があるファイルを検出しました。診断は原本を自動削除・上書きしません。参照切れはバックアップからの復元または元サービスからの再保存、一時ファイルは、アプリを再起動してから診断し直してください。</Text>
           <Group gap="xs">
             {data.missingJsonFiles > 0 && <Badge color="red" variant="light">保存データの参照切れ {formatNumber(data.missingJsonFiles)}</Badge>}
             {data.missingAssetFiles > 0 && <Badge color="red" variant="light">画像・添付の参照切れ {formatNumber(data.missingAssetFiles)}</Badge>}
@@ -632,7 +632,7 @@ export default function DiagnosticsPage({ embedded = false, previewData = previe
             <Stack gap="sm">
               <Box>
                 <Text fw={700} size="sm">次に行うこと</Text>
-                <Text size="xs" c="dimmed" mt={2}>対象を確認してから、状態に合う安全な方法を選べます。診断画面から勝手に削除・参照解除はしません。</Text>
+                <Text size="xs" c="dimmed" mt={2}>対象を確認してから、状態に合う安全な方法を選べます。診断の画面が勝手に削除したり、参照を外したりはしません。</Text>
               </Box>
               <Group gap="xs">
                 <Button size="xs" variant="filled" leftSection={<Icons.read size={IconSize.menu} />} disabled={!data.fileIssueSamples.length} onClick={() => showFileIssues()}>対象ファイルを確認</Button>
@@ -657,8 +657,8 @@ export default function DiagnosticsPage({ embedded = false, previewData = previe
         <MetricCard label="アプリ全体メモリ" value={data.processPrivateMemoryBytes === null ? (data.processMemoryBytes === null ? "取得不可" : formatBytes(data.processMemoryBytes)) : formatBytes(data.processPrivateMemoryBytes)} detail={`${formatNumber(data.processCount)}プロセス · WebView ${formatNumber(data.webviewProcessCount)} · WS ${data.processMemoryBytes === null ? "取得不可" : formatBytes(data.processMemoryBytes)}`} icon={Icons.activity} color="gray" />
         <MetricCard label="GPUメモリ" value={data.gpuDedicatedMemoryBytes === null ? "取得不可" : formatBytes(data.gpuDedicatedMemoryBytes)} detail={`共有 ${data.gpuSharedMemoryBytes === null ? "取得不可" : formatBytes(data.gpuSharedMemoryBytes)}`} icon={Icons.activity} color="gray" />
       </SimpleGrid>      <SimpleGrid cols={{ base: 1, lg: 2 }}>
-        <Card p="lg"><Group justify="space-between"><Box><Title order={3}>実データ性能</Title><Text size="sm" c="dimmed">同じ処理を複数回測定したアプリ内部時間</Text></Box><ThemeIcon size={44} variant="light" color="green"><Icons.diagnostics size={IconSize.feature} /></ThemeIcon></Group><Table.ScrollContainer minWidth={380} type="native"><Table mt="lg" verticalSpacing="sm"><Table.Thead><Table.Tr><Table.Th>処理</Table.Th><Table.Th>初回</Table.Th><Table.Th>通常（中央値）</Table.Th><Table.Th>遅い時（95%点）</Table.Th></Table.Tr></Table.Thead><Table.Tbody><PerformanceRow name="一覧の先頭80件" cold={data.listFirstPageMs} p50={data.listP50Ms} p95={data.listP95Ms} /><PerformanceRow name="最多作者名の全文検索" cold={data.lexicalSearchMs} p50={data.lexicalSearchP50Ms} p95={data.lexicalSearchP95Ms} /><PerformanceRow name="作者の完全一致絞り込み" cold={null} p50={data.exactAuthorP50Ms} p95={data.exactAuthorP95Ms} /></Table.Tbody></Table></Table.ScrollContainer>{data.benchmarkQuery && <Text size="xs" c="dimmed" mt="md">作者名の実データを端末内だけで使用して計測しました。</Text>}</Card>
-        <Card p="lg"><Title order={3}>索引と保存領域</Title><Stack gap="md" mt="lg"><Box><Group justify="space-between"><Box><Text size="sm">全文索引</Text><Text size="xs" c="dimmed">{formatNumber(data.lexicalIndexSegmentCount)}セグメント · {formatNumber(data.lexicalIndexFileCount)}ファイル</Text></Box><Text size="sm" fw={650}>{formatBytes(data.lexicalIndexSizeBytes)}</Text></Group><Group justify="space-between" mt="sm"><Box><Text size="sm">意味検索索引</Text><Text size="xs" c="dimmed">{formatNumber(data.searchIndex.semanticIndexedDownloads)} / {formatNumber(data.searchIndex.totalDownloads)}作品{data.searchIndex.semanticPendingDownloads ? ` · ${formatNumber(data.searchIndex.semanticPendingDownloads)}件が未反映` : ""}</Text></Box><Text size="sm" fw={650}>{formatBytes(data.semanticIndexSizeBytes)}</Text></Group></Box><Divider /><Box><Group justify="space-between"><Text size="sm">索引完成度</Text><Text size="xs" c="dimmed">{data.searchIndex.pendingDownloads}件待機</Text></Group><Progress value={indexRatio} mt="xs" color={data.searchIndex.isComplete ? "green" : "yellow"} /></Box><Divider /><Group justify="space-between"><Box><Text size="sm">関連作品がない登録</Text><Text size="xs" c="dimmed">作品との関連を失った記録</Text></Box><Badge variant="light" color={data.orphanAssetRows ? "red" : "green"}>{data.orphanAssetRows ? `${formatNumber(data.orphanAssetRows)}件 · ${formatBytes(data.orphanAssetBytes)}` : "0件"}</Badge></Group><Group justify="space-between"><Box><Text size="sm">未登録の画像・添付</Text><Text size="xs" c="dimmed">登録情報から直接参照されていないファイル。未使用・削除可能とは限りません。</Text></Box><Badge variant="light" color="gray">{data.orphanAssetFiles ? `${formatNumber(data.orphanAssetFiles)}件 · ${formatBytes(data.orphanAssetFileBytes)}` : "0件"}</Badge></Group><Text size="xs" c="dimmed">容量はファイルサイズの合計で、共有している実体も重複して数えます。削除で空く容量ではありません。</Text>{data.orphanAssetFiles > 0 && <Button size="xs" variant="subtle" disabled={!data.unregisteredAssetSamples?.length} onClick={() => showFileIssues(true)}>未登録ファイルを確認</Button>}</Stack></Card>
+        <Card p="lg"><Group justify="space-between"><Box><Title order={3}>実データ性能</Title><Text size="sm" c="dimmed">同じ処理を何度か測った、アプリの中での所要時間</Text></Box><ThemeIcon size={44} variant="light" color="green"><Icons.diagnostics size={IconSize.feature} /></ThemeIcon></Group><Table.ScrollContainer minWidth={380} type="native"><Table mt="lg" verticalSpacing="sm"><Table.Thead><Table.Tr><Table.Th>処理</Table.Th><Table.Th>初回</Table.Th><Table.Th>通常（中央値）</Table.Th><Table.Th>遅い時（95%点）</Table.Th></Table.Tr></Table.Thead><Table.Tbody><PerformanceRow name="一覧の先頭80件" cold={data.listFirstPageMs} p50={data.listP50Ms} p95={data.listP95Ms} /><PerformanceRow name="作品のいちばん多い作者名で全文検索" cold={data.lexicalSearchMs} p50={data.lexicalSearchP50Ms} p95={data.lexicalSearchP95Ms} /><PerformanceRow name="作者の完全一致絞り込み" cold={null} p50={data.exactAuthorP50Ms} p95={data.exactAuthorP95Ms} /></Table.Tbody></Table></Table.ScrollContainer>{data.benchmarkQuery && <Text size="xs" c="dimmed" mt="md">作者名の実データを端末内だけで使用して計測しました。</Text>}</Card>
+        <Card p="lg"><Title order={3}>索引と保存領域</Title><Stack gap="md" mt="lg"><Box><Group justify="space-between"><Box><Text size="sm">全文索引</Text><Text size="xs" c="dimmed">{formatNumber(data.lexicalIndexSegmentCount)}セグメント · {formatNumber(data.lexicalIndexFileCount)}ファイル</Text></Box><Text size="sm" fw={650}>{formatBytes(data.lexicalIndexSizeBytes)}</Text></Group><Group justify="space-between" mt="sm"><Box><Text size="sm">意味検索索引</Text><Text size="xs" c="dimmed">{formatNumber(data.searchIndex.semanticIndexedDownloads)} / {formatNumber(data.searchIndex.totalDownloads)}作品{data.searchIndex.semanticPendingDownloads ? ` · ${formatNumber(data.searchIndex.semanticPendingDownloads)}件が未反映` : ""}</Text></Box><Text size="sm" fw={650}>{formatBytes(data.semanticIndexSizeBytes)}</Text></Group></Box><Divider /><Box><Group justify="space-between"><Text size="sm">索引の進み具合</Text><Text size="xs" c="dimmed">{data.searchIndex.pendingDownloads}件待機</Text></Group><Progress value={indexRatio} mt="xs" color={data.searchIndex.isComplete ? "green" : "yellow"} /></Box><Divider /><Group justify="space-between"><Box><Text size="sm">作品のない記録</Text><Text size="xs" c="dimmed">どの作品にも結び付いていない記録</Text></Box><Badge variant="light" color={data.orphanAssetRows ? "red" : "green"}>{data.orphanAssetRows ? `${formatNumber(data.orphanAssetRows)}件 · ${formatBytes(data.orphanAssetBytes)}` : "0件"}</Badge></Group><Group justify="space-between"><Box><Text size="sm">未登録の画像・添付</Text><Text size="xs" c="dimmed">登録情報から直接参照されていないファイル。未使用・削除可能とは限りません。</Text></Box><Badge variant="light" color="gray">{data.orphanAssetFiles ? `${formatNumber(data.orphanAssetFiles)}件 · ${formatBytes(data.orphanAssetFileBytes)}` : "0件"}</Badge></Group><Text size="xs" c="dimmed">容量はファイルサイズの合計で、共有している実体も重複して数えます。削除で空く容量ではありません。</Text>{data.orphanAssetFiles > 0 && <Button size="xs" variant="subtle" disabled={!data.unregisteredAssetSamples?.length} onClick={() => showFileIssues(true)}>未登録ファイルを確認</Button>}</Stack></Card>
       </SimpleGrid>
       </Accordion.Panel></Accordion.Item></Accordion>
       <Text size="xs" c="dimmed">最終計測: {new Date(data.measuredAt).toLocaleString("ja-JP")} · 計測値はこの端末から送信されません。</Text>
@@ -677,7 +677,7 @@ export default function DiagnosticsPage({ embedded = false, previewData = previe
           title="全文検索索引"
           description="分割された索引を統合し、検索時の負担を減らします。"
           status={!data
-            ? <><Badge color="gray" variant="light">状態不明</Badge><Text size="xs" c="dimmed" mt={6}>計測すると最適化が必要か判断できます。</Text></>
+            ? <><Badge color="gray" variant="light">状態不明</Badge><Text size="xs" c="dimmed" mt={6}>診断すると、最適化が要るかどうか分かります。</Text></>
             : data.lexicalIndexSegmentCount <= 1
               ? <Badge color="green" variant="light">最適です</Badge>
               : <Badge color={data.lexicalIndexSegmentCount >= 16 ? "yellow" : "blue"} variant="light">{formatNumber(data.lexicalIndexSegmentCount)}セグメント</Badge>}
