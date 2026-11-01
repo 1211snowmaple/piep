@@ -455,7 +455,7 @@ export default function SettingsPage() {
       <PageHeader title="設定" description="接続情報、ローカルデータ、検索と表示を管理します。" />
       <RuntimeNotice />
       <Grid gap="xl" mt="lg" align="flex-start">
-        <Grid.Col span={{ base: 12, md: 4, lg: 3 }}><SettingsNavigation items={nav} active={section} onSelect={(next) => { if (isSection(next)) setSection(next); }} /></Grid.Col>
+        <Grid.Col span={{ base: 12, md: 4, lg: 3 }} className="settings-nav-column"><SettingsNavigation items={nav} active={section} onSelect={(next) => { if (isSection(next)) setSection(next); }} /></Grid.Col>
         <Grid.Col span={{ base: 12, md: 8, lg: 9 }} className="settings-content">
           {section === "connections" && (auth.isLoading ? <LoadingState label="接続状態を確認しています" /> : auth.error ? <ErrorState error={auth.error} retry={() => auth.refetch()} /> : <ConnectionsSection auth={auth.data ?? { pixiv: null, fanbox: null }} runtime={runtime} pixivForm={pixivForm} fanboxForm={fanboxForm} mutation={connectionMutation} disconnect={disconnect} />)}
           {section === "library" && (stats.isLoading || storagePath.isLoading ? <LoadingState label="ライブラリ情報を読み込んでいます" /> : stats.error || storagePath.error ? <ErrorState error={stats.error ?? storagePath.error} retry={() => { stats.refetch(); storagePath.refetch(); }} /> : <LibrarySection stats={stats.data} path={storagePath.data} runtime={runtime} pending={maintenanceMutation.isPending} busy={libraryOperationRunning || Boolean(nativeBackup.data)} inspecting={inspectingBackup} run={(action) => maintenanceMutation.mutate(action)} />)}
