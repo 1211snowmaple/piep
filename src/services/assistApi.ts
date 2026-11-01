@@ -264,6 +264,10 @@ export interface TrialResult {
   name: string;
   subtitle: string;
   elapsedMs: number;
+  /** 送った作品の題名。題名を送らない設定なら空の文字列。 */
+  sentTitles: string[];
+  /** モデルに選ばせた名前の候補。`name` はこの中の一つ。 */
+  candidates: { name: string; subtitle: string }[];
 }
 
 /** ホストとロード済みモデルから安全側に決めた実行プロファイル。 */

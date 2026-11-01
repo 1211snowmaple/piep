@@ -22,7 +22,7 @@ import {
 import { useDisclosure } from "@mantine/hooks";
 import { notifications } from "@mantine/notifications";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { errorMessage, formatBytes, formatNumber } from "@/lib/format";
+import { errorMessage, formatBytes, formatDuration, formatNumber } from "@/lib/format";
 import { Icons, IconSize } from "@/lib/icons";
 import {
   DEFAULT_ASSIST_SETTINGS,
@@ -212,7 +212,7 @@ export function AssistSection() {
       }));
       notifications.show({
         color: "green",
-        message: `命名の試し書きが通りました（${formatNumber(result.elapsedMs)}ミリ秒）。${ASSIST_FEATURES.find((feature) => feature.id === featureId)?.label ?? featureId}での答えは、まだ確かめていません。`,
+        message: `命名の試し書きが通りました（${formatDuration(Math.max(1, result.elapsedMs / 1000))}）。${ASSIST_FEATURES.find((feature) => feature.id === featureId)?.label ?? featureId}での答えは、まだ確かめていません。`,
       });
     },
     onError: (error) => notifications.show({ color: "red", title: "このモデルを試せません", message: errorMessage(error) }),
@@ -446,8 +446,9 @@ export function AssistSection() {
             <div>
               <Text fw={650}>2. 使えるかどうか試す</Text>
               <Text size="sm" c="dimmed">
-                つながることと、使えることは別です。棚の作品を数作渡してコレクションの名前を考えてもらい、
-                返ってきた名前を見て決めてください。ここで確かめられるのは命名だけです。
+                つながることと、使えることは別です。棚から同じタグの作品を数作送り、
+                それをまとめるコレクションの名前を、候補の中から選んでもらいます。
+                答えが返ってくるか、どれくらいかかるかを確かめられます。
               </Text>
             </div>
             <Button
@@ -496,21 +497,48 @@ export function AssistSection() {
             <Group gap="xs">
               <Loader size="xs" />
               <Text size="sm" c="dimmed">
-                棚から数作を渡して、名前を考えてもらっています…
+                棚から数作を送って、名前を選んでもらっています…
                 （初回はモデルの読み込みで十数秒かかることがあります）
               </Text>
             </Group>
           )}
 
           {trial && (
-            <Alert color="green" icon={<Icons.confirm size={IconSize.action} />} title="返ってきた名前">
-              <Stack gap={4}>
-                <Text fw={700}>{trial.name}</Text>
-                <Text size="sm" c="dimmed">{trial.subtitle}</Text>
-                <Text size="xs" c="dimmed">{formatNumber(trial.elapsedMs)}ミリ秒</Text>
-                <Text size="sm" mt={6}>
-                  名前が中身に合っていれば、このモデルで大丈夫です。
-                  <b>題材がぼかされた名前や、言い換えられた名前が返るなら、モデルを替えてください。</b>
+            <Alert
+              color="green"
+              icon={<Icons.confirm size={IconSize.action} />}
+              title={`答えが返ってきました（${formatDuration(Math.max(1, trial.elapsedMs / 1000))}）`}
+            >
+              {/* 名前だけ見せても良し悪しは決められない。何を送り、何から選ばせた
+                  のかを並べて、選ばれた名前が送った作品に合うかを見てもらう。 */}
+              <Stack gap="sm">
+                <div>
+                  <Text size="sm" fw={600}>送った作品（{formatNumber(trial.sentTitles.length)}作）</Text>
+                  {trial.sentTitles.some((title) => title.trim()) ? (
+                    <Text size="sm" c="dimmed">{trial.sentTitles.filter((title) => title.trim()).join("／")}</Text>
+                  ) : (
+                    <Text size="sm" c="dimmed">題名は送らない設定なので、タグだけを送りました。</Text>
+                  )}
+                </div>
+                <div>
+                  <Text size="sm" fw={600}>選んでもらった名前の候補</Text>
+                  <Stack gap={2} mt={2}>
+                    {trial.candidates.map((candidate) => {
+                      const chosen = candidate.name === trial.name;
+                      return (
+                        <Group key={candidate.name} gap={6} wrap="nowrap">
+                          {chosen ? <Icons.confirm size={IconSize.inline} /> : <span style={{ width: IconSize.inline }} />}
+                          <Text size="sm" fw={chosen ? 700 : 400}>{candidate.name}</Text>
+                          <Text size="xs" c="dimmed">{candidate.subtitle}</Text>
+                        </Group>
+                      );
+                    })}
+                  </Stack>
+                </div>
+                <Text size="sm">
+                  モデルが選んだのは<b>「{trial.name}」</b>です。候補は作品の題名・シリーズ・タグから作るので、
+                  モデルが名前を書き換えることはありません。答えが返ってくれば、このモデルは使えます。
+                  選んだ名前が送った作品に合わないことが続くなら、別のモデルも試してください。
                 </Text>
               </Stack>
             </Alert>
@@ -691,7 +719,13 @@ export function AssistSection() {
         <Group gap={6} miw={0}>
           <Badge variant="light" color={local ? "green" : "orange"}>{local ? "この端末の中" : "外部の宛先"}</Badge>
           {draft.model && <Badge variant="light" color="gray" tt="none" maw={260}>{draft.model}</Badge>}
-          {dirty && <Text size="xs" c="orange" fw={600}>保存していない変更があります</Text>}
+          {/* 押せない保存ボタンの横に「変更があります」だけを出すと、なぜ押せないのかが
+              分からない。押せないときは、その理由を代わりに出す。 */}
+          {dirty && (
+            <Text size="xs" c="orange" fw={600}>
+              {saveProblem ?? "保存していない変更があります"}
+            </Text>
+          )}
         </Group>
         <Button
           loading={save.isPending}
