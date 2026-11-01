@@ -1928,7 +1928,7 @@ export default function LibraryPage() {
             notifications.show({
               color: "red",
               title: "検索条件を適用できません",
-              message: "既存タグ条件とOR条件を安全にまとめられません。既存タグ条件を外してからお試しください。",
+              message: "いま指定しているタグの条件と「どれかを含む」の条件は、一緒には使えません。先にいまのタグの条件を外してください。",
             });
             return false;
           }
@@ -1980,7 +1980,7 @@ export default function LibraryPage() {
                       「入れたい作品の題名を思い出す」を要求しない。 */}
                   <Button size="sm" variant="light" leftSection={<Icons.collection size={IconSize.menu} />} disabled={!selected.length} onClick={collectModal.open}>コレクション</Button>
                   <Button size="sm" variant="light" leftSection={<Icons.epubAdd size={IconSize.menu} />} disabled={!selected.length} onClick={() => { addToEpubQueue(selected); notifications.show({ color: "green", message: `${selected.length}件をEPUBキューに追加しました` }); }}>EPUB</Button>
-                  <Menu position="top-end"><Menu.Target><Button size="sm" variant="default" rightSection={<Icons.more size={IconSize.menu} />} disabled={!selected.length}>その他</Button></Menu.Target><Menu.Dropdown><Menu.Item leftSection={<Icons.favorite size={IconSize.menu} />} onClick={() => selectionMutation.mutate({ action: "favorite" })}>お気に入りに追加</Menu.Item><Menu.Item leftSection={<Icons.watch size={IconSize.menu} />} onClick={() => selectionMutation.mutate({ action: "watch" })}>更新監視を有効化</Menu.Item>{/* 追加できて解除できないのは片手落ちだった。 */}<Menu.Item leftSection={<Icons.pause size={IconSize.menu} />} onClick={() => selectionMutation.mutate({ action: "unwatch" })}>更新監視を止める</Menu.Item>{/* 読みかけの棚から降ろす口が、作品を消すことしか無かった。
+                  <Menu position="top-end"><Menu.Target><Button size="sm" variant="default" rightSection={<Icons.more size={IconSize.menu} />} disabled={!selected.length}>その他</Button></Menu.Target><Menu.Dropdown><Menu.Item leftSection={<Icons.favorite size={IconSize.menu} />} onClick={() => selectionMutation.mutate({ action: "favorite" })}>お気に入りに追加</Menu.Item><Menu.Item leftSection={<Icons.watch size={IconSize.menu} />} onClick={() => selectionMutation.mutate({ action: "watch" })}>更新監視をオンにする</Menu.Item>{/* 追加できて解除できないのは片手落ちだった。 */}<Menu.Item leftSection={<Icons.pause size={IconSize.menu} />} onClick={() => selectionMutation.mutate({ action: "unwatch" })}>更新監視を止める</Menu.Item>{/* 読みかけの棚から降ろす口が、作品を消すことしか無かった。
                       途中でやめた作品が、いつまでも棚に積まれ続けていた。 */}
                   {shelfParam === "reading" && <Menu.Item leftSection={<Icons.read size={IconSize.menu} />} onClick={() => { selected.forEach((id) => forgetReadingPositions(id)); notifications.show({ color: "piep", message: `${selected.length}件を読みかけから外しました` }); setSelected([]); setSelectionMode(false); }}>読みかけから外す</Menu.Item>}<Menu.Divider /><Menu.Item color="red" leftSection={<Icons.delete size={IconSize.menu} />} onClick={confirmDelete}>削除</Menu.Item></Menu.Dropdown></Menu>
                 </>

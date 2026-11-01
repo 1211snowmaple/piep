@@ -76,6 +76,23 @@ describe("EditorPage", () => {
     expect(heading).toHaveValue("保存開始後の見出し");
   });
 
+  it("反映 waits for a change, so an untouched work does not become an identical edit", async () => {
+    renderEditor();
+    const heading = await screen.findByLabelText("見出し 1");
+    expect(screen.getByRole("button", { name: "反映" })).toBeDisabled();
+    expect(screen.getByText("取り込んだ本文")).toBeInTheDocument();
+    fireEvent.change(heading, { target: { value: "直した見出し" } });
+    expect(screen.getByRole("button", { name: "反映" })).toBeEnabled();
+  });
+
+  it("names an unpublished draft so a saved draft is not mistaken for the reading text", async () => {
+    dbApi.getEditorDocument.mockResolvedValue({ ...getDemoEditor(101), draftRevision: revision });
+    renderEditor();
+    expect(await screen.findByText("下書き・未反映")).toBeInTheDocument();
+    // 下書きがあれば、変更なしでもそれを反映できる。
+    expect(screen.getByRole("button", { name: "反映" })).toBeEnabled();
+  });
+
   it("clears an unchanged published snapshot and invalidates the reader's real query keys", async () => {
     const client = renderEditor();
     const invalidate = vi.spyOn(client, "invalidateQueries");

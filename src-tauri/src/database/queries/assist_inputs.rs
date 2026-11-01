@@ -269,7 +269,7 @@ impl Database {
                     .map_err(|e| format!("Failed to validate existing tag: {e}"))?
                     .is_some();
                 if !exists {
-                    return Err("棚に存在しないタグは併用候補から追加できません".into());
+                    return Err("棚に無いタグは、一緒に付くタグの候補から追加できません".into());
                 }
             } else {
                 tx.execute(

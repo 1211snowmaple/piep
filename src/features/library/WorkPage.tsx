@@ -41,6 +41,7 @@ import { WorkCover } from "@/components/WorkCover";
 import { PdfOriginalViewer, type PdfOriginalTarget } from "@/components/PdfOriginalViewer";
 import { BoundedJsonView } from "@/components/BoundedJsonView";
 import { WorkAcquisitionCard } from "./WorkAcquisitionCard";
+import { EditStatusStrip } from "./EditStatusStrip";
 import { getActiveEditSnapshot, getRevisionSnapshot, type MissingImageLocation, type RevisionSnapshot } from "@/services/workInspectionApi";
 import { RevisionDiff } from "@/components/RevisionDiff";
 import { ProviderMark, sourceUrl } from "@/lib/providers";
@@ -52,6 +53,7 @@ import { useContentLinkNavigation, useLibraryLinkMarks } from "@/lib/contentLink
 import { WorkAssist } from "@/features/assist/WorkAssist";
 import { addWorkCollectionMembers, listCollectionsForWork, listWorkCollections } from "@/services/collectionApi";
 import {
+  activateWorkEdit,
   deactivateWorkEdit,
   deleteDownload,
   getAssetUrl,
@@ -158,7 +160,7 @@ export default function WorkPage() {
   useEffect(() => setVisibleAssetCount(80), [id]);
   const documentQuery = useQuery({
     queryKey: ["reader-metadata", id],
-    queryFn: () => runtime ? getReaderMetadata(id) : Promise.resolve((() => { const demo = getDemoReader(id); return { download: demo.download, versions: demo.versions, assetCount: demo.assets.length, isEdited: demo.isEdited, activeEditRevision: demo.activeEditRevision }; })()),
+    queryFn: () => runtime ? getReaderMetadata(id) : Promise.resolve((() => { const demo = getDemoReader(id); return { download: demo.download, versions: demo.versions, assetCount: demo.assets.length, isEdited: demo.isEdited, activeEditRevision: demo.activeEditRevision, draftEditRevision: null }; })()),
     enabled: validId,
   });
   const historyVersions = useMemo(
@@ -329,6 +331,16 @@ export default function WorkPage() {
       queryClient.invalidateQueries({ queryKey: ["entity-works"] });
     },
     onError: (error) => notifications.show({ color: "red", title: "元の本文に戻せません", message: errorMessage(error) }),
+  });
+  // 下ろした編集版をもう一度使う。「戻しても選び直せる」と書いてあったのに、
+  // 選び直す口がどこにも無かった。
+  const reapplyEdit = useMutation({
+    mutationFn: (revisionId: number) => runtime ? activateWorkEdit(revisionId) : Promise.resolve(null),
+    onSuccess: () => {
+      notifications.show({ color: "green", title: "編集版を反映しました", message: "読書画面とEPUBに、この編集版が使われます" });
+      for (const key of [["reader-metadata", id], ["reader-content-page", id], ["reader-content-search", id], ["editor-document", id], ["library"], ["entity-works"]]) queryClient.invalidateQueries({ queryKey: key });
+    },
+    onError: (error) => notifications.show({ color: "red", title: "編集版を反映できません", message: errorMessage(error) }),
   });
   const mutate = useMutation({
     mutationFn: async (input: { favorite?: boolean; watch?: boolean }) => {
@@ -513,7 +525,7 @@ export default function WorkPage() {
                   </Box>
                 </Group>
                 <Box>
-                  <Group ref={workMarksRef} gap="xs" wrap="wrap" mb={8}><ProviderMark provider={work.source} /><Badge variant="light" color="gray">{contentTypeLabel(work.contentType)}</Badge>{doc.isEdited && <Badge color="gray" variant="light">ローカル編集</Badge>}</Group>
+                  <Group ref={workMarksRef} gap="xs" wrap="wrap" mb={8}><ProviderMark provider={work.source} /><Badge variant="light" color="gray">{contentTypeLabel(work.contentType)}</Badge>{doc.isEdited && <Badge color="gray" variant="light">ローカル編集</Badge>}{doc.draftEditRevision && <Tooltip label="編集画面で「反映」を押すまで、読書画面とEPUBには使われません"><Badge color="yellow" variant="light">未反映の下書き</Badge></Tooltip>}</Group>
                   {/* The series line is itself the link, so it is not repeated
                       as a separate button beside the author below. */}
                   {work.seriesTitle && (work.seriesId
@@ -600,7 +612,7 @@ export default function WorkPage() {
                   空く。2枚が余りを半分ずつ引き受ければ、辺は揃ったまま隙間だけ
                   消える。 */}
               <Stack gap="lg" h="100%" className="work-side-column"><Card p="lg"><Group justify="space-between"><Box><Text fw={700}>更新監視</Text><Text size="xs" c="dimmed" mt={3}>保存元の変更をチェック</Text></Box><Switch checked={work.watchUpdates} disabled={mutate.isPending} onChange={(event) => mutate.mutate({ watch: event.currentTarget.checked })} aria-label="更新監視" /></Group>{/* 「今すぐ確認」は上段の「情報を更新」と同じ動作だった。同じことを
-                  する口が2つあると、どちらが効いたのか分からなくなる。 */}</Card>{doc.isEdited ? <Card p="lg"><Group justify="space-between" wrap="nowrap" mb="xs"><Box><Text fw={700}>ローカル編集</Text><Text size="xs" c="dimmed" mt={3}>いま読める本文は編集版です</Text></Box><Badge color="gray" variant="light">反映中</Badge></Group><Text size="xs" c="dimmed" mb="sm">取り込んだ本文はそのまま残っています。戻しても、編集した版は履歴から選び直せます。</Text><Button variant="default" size="xs" leftSection={<Icons.undo size={IconSize.menu} />} loading={revertEdit.isPending} onClick={() => modals.openConfirmModal({ title: "取り込んだ本文に戻しますか？", children: <Text size="sm">リーダーとEPUBは取り込んだままの本文を使うようになります。編集した版は履歴に残ります。</Text>, labels: { confirm: "元に戻す", cancel: "キャンセル" }, onConfirm: () => revertEdit.mutate() })}>取り込んだ本文に戻す</Button></Card> : <Note title="編集について">ローカル編集は元データを残したまま別リビジョンとして保存されます。</Note>}</Stack>
+                  する口が2つあると、どちらが効いたのか分からなくなる。 */}</Card>{doc.isEdited ? <Card p="lg"><Group justify="space-between" wrap="nowrap" mb="xs"><Box><Text fw={700}>ローカル編集</Text><Text size="xs" c="dimmed" mt={3}>いま読める本文は編集版です</Text></Box><Badge color="gray" variant="light">反映中</Badge></Group><Text size="xs" c="dimmed" mb="sm">取り込んだ本文はそのまま残っています。戻しても、編集した版は履歴から選び直せます。</Text>{doc.draftEditRevision && <Text size="xs" c="yellow.8" mb="sm">このほかに、反映していない下書きがあります（{formatDate(doc.draftEditRevision.updatedAt, true)}保存）。</Text>}<Button variant="default" size="xs" leftSection={<Icons.undo size={IconSize.menu} />} loading={revertEdit.isPending} onClick={() => modals.openConfirmModal({ title: "取り込んだ本文に戻しますか？", children: <Text size="sm">リーダーとEPUBは取り込んだままの本文を使うようになります。編集した版は履歴に残ります。</Text>, labels: { confirm: "元に戻す", cancel: "キャンセル" }, onConfirm: () => revertEdit.mutate() })}>取り込んだ本文に戻す</Button></Card> : doc.draftEditRevision ? <Card p="lg"><Group justify="space-between" wrap="nowrap" mb="xs"><Box><Text fw={700}>ローカル編集</Text><Text size="xs" c="dimmed" mt={3}>いま読める本文は取り込んだままです</Text></Box><Badge color="yellow" variant="light">下書きのみ</Badge></Group><Text size="xs" c="dimmed" mb="sm">{formatDate(doc.draftEditRevision.updatedAt, true)}に保存した下書きは、編集画面で「反映」を押すまで読書画面とEPUBに使われません。</Text><Button variant="default" size="xs" leftSection={<Icons.edit size={IconSize.menu} />} onClick={() => navigate(`/editor/${work.id}`)}>編集画面で開く</Button></Card> : <Note title="編集について">ローカルで編集しても、取り込んだ本文はそのまま残ります。編集は別の版として保存します。{doc.archivedEditRevisions?.length ? "以前に反映した編集版は、履歴タブからもう一度反映できます。" : ""}</Note>}</Stack>
             </Grid.Col>
           </Grid>
         </Tabs.Panel>
@@ -610,6 +622,7 @@ export default function WorkPage() {
                 and everything else off the top of the window. It reads inside a
                 frame of its own instead, the way the JSON already does, so the
                 screen around it stays put while you read. */}
+            {contentSourceVersion === null && <EditStatusStrip activeRevision={doc.activeEditRevision} draftRevision={doc.draftEditRevision} onEdit={() => navigate(`/editor/${work.id}`)} onCompare={() => setTab("history")} />}
             {contentSourceVersion !== null && <Group justify="space-between"><Text size="xs" c="dimmed">取得元の保存済み v{contentSourceVersion} · 画像の位置</Text><Button variant="subtle" size="xs" onClick={() => { setContentSourceVersion(null); setImageTarget(null); goToContentPage(1); }}>現在の本文へ</Button></Group>}
             <Paper className="content-frame" withBorder ref={contentFrameRef} onScroll={(event) => {
               locations.set(historyIndex, { workId: id, page: contentPage, top: event.currentTarget.scrollTop });
@@ -666,6 +679,22 @@ export default function WorkPage() {
                   <Text size="xs" c="dimmed">v{doc.activeEditRevision.baseVersion} をもとに</Text>
                   <Text size="xs" c="dimmed">{formatDate(doc.activeEditRevision.updatedAt, true)}</Text>
                 </Paper>}
+                {doc.draftEditRevision && <Paper p="xs" withBorder className="version-row version-row--static">
+                  <Group justify="space-between" wrap="nowrap" gap={6}><Text size="sm" fw={700}>下書き</Text><Badge size="xs" color="yellow" variant="light">未反映</Badge></Group>
+                  <Text size="xs" c="dimmed">{formatDate(doc.draftEditRevision.updatedAt, true)}</Text>
+                  <Button mt={6} size="compact-xs" variant="default" fullWidth onClick={() => navigate(`/editor/${work.id}`)}>編集画面で開く</Button>
+                </Paper>}
+                {(doc.archivedEditRevisions ?? []).map((revision) => <Paper key={`edit-${revision.id}`} p="xs" withBorder className="version-row version-row--static">
+                  <Group justify="space-between" wrap="nowrap" gap={6}><Text size="sm" fw={700}>以前の編集版</Text><Badge size="xs" color="gray" variant="light">未使用</Badge></Group>
+                  <Text size="xs" c="dimmed">v{revision.baseVersion} をもとに</Text>
+                  <Text size="xs" c="dimmed">{formatDate(revision.updatedAt, true)}</Text>
+                  <Button mt={6} size="compact-xs" variant="default" fullWidth loading={reapplyEdit.isPending && reapplyEdit.variables === revision.id} onClick={() => modals.openConfirmModal({
+                    title: "この編集版をもう一度反映しますか？",
+                    children: <Text size="sm">読書画面とEPUBは、{formatDate(revision.updatedAt, true)}の編集版を使うようになります。{doc.activeEditRevision ? "いま反映している編集版は、ここに残ります。" : ""}</Text>,
+                    labels: { confirm: "反映する", cancel: "やめる" },
+                    onConfirm: () => reapplyEdit.mutate(revision.id),
+                  })}>もう一度反映</Button>
+                </Paper>)}
                 {historyVersions.map((version) => <Paper component="button" type="button" key={version.id} p="xs" withBorder className="version-row" data-active={selectedVersion === version.version || undefined} onClick={() => setSelectedVersion(version.version)} title={version.changeSummary || "保存元から取得"}>
                   <Group justify="space-between" wrap="nowrap" gap={6}><Text size="sm" fw={700}>v{version.version}</Text>{version.version === work.currentVersion && <Badge size="xs">{doc.isEdited ? "取得元の最新版" : "現在"}</Badge>}</Group>
                   <Text size="xs" c="dimmed">{formatDate(version.createdAt, true)}</Text>

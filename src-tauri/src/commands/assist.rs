@@ -12,7 +12,8 @@ use tauri::Manager;
 
 use crate::assist::{
     self, AssistEngine, AssistNote, AssistRuntimeProfile, BundleSplit, DiscoveredEngine,
-    GeneratedAssist, SearchIntent, TagProposal, FEATURE_AUTHOR_STYLE, FEATURE_COLLECTION_SPLIT,
+    GeneratedAssist, ProofreadSegment, ProofreadSuggestion, SearchIntent, TagProposal,
+    FEATURE_AUTHOR_STYLE, FEATURE_COLLECTION_SPLIT, FEATURE_EDITOR_PROOFREAD,
     FEATURE_NATURAL_LANGUAGE_SEARCH, FEATURE_READER_RECAP, FEATURE_TAG_SUGGESTION,
     FEATURE_WORK_SYNOPSIS,
 };
@@ -309,6 +310,23 @@ pub async fn assist_propose_splits(
     let works = read_blocking(&app, move |state| state.db.collection_facts(&collection_id)).await?;
     let provenance = assist::generation_provenance(&engine, FEATURE_COLLECTION_SPLIT, &works)?;
     let value = assist::propose_splits(&engine, &works).await?;
+    Ok(GeneratedAssist { value, provenance })
+}
+
+// ---- 校正 -----------------------------------------------------------------
+
+/// 編集中の本文から、誤字・脱字の候補を挙げてもらう。直しはしない。
+///
+/// 材料は保存した本文ではなく、編集画面がいま持っている文字。保存前の
+/// 書きかけも校正できるようにするため。**本文を送るので、許可が要る。**
+#[tauri::command]
+pub async fn assist_proofread(
+    engine: AssistEngine,
+    segments: Vec<ProofreadSegment>,
+) -> Result<GeneratedAssist<Vec<ProofreadSuggestion>>, String> {
+    assist::ensure_body_allowed(&engine)?;
+    let provenance = assist::generation_provenance(&engine, FEATURE_EDITOR_PROOFREAD, &segments)?;
+    let value = assist::proofread(&engine, &segments).await?;
     Ok(GeneratedAssist { value, provenance })
 }
 

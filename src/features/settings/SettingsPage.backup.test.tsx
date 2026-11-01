@@ -165,7 +165,7 @@ describe("SettingsPage backup flow", () => {
     await waitFor(() => expect(archive.backupExportRunning).toHaveBeenCalled());
     expect(await screen.findByRole("button", { name: "分割バックアップを書き出す" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "バックアップを復元" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "スキャンを実行" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "保存フォルダーを調べる" })).toBeDisabled();
   });
 
   it("reports completed work ZIPs and the separate catalog stage", async () => {

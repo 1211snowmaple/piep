@@ -136,7 +136,7 @@ export function CollectionSplitAssist({
               </Paper>
             ))}
             <Text size="xs" c="dimmed">
-              新しい束を作っても、<b>元の束はそのまま残ります。</b>要らなくなったら手で外してください。
+              新しい束を作っても、<b>元のコレクションはそのまま残ります。</b>要らなくなったら手で外してください。
             </Text>
           </Stack>
         )}

@@ -109,9 +109,9 @@ function WorkAssistForWork({ downloadId }: { downloadId: number }) {
     mutationFn: () => relatedTagCandidates(downloadId),
     onMutate: () => setRelatedPicked(new Set()),
     onSuccess: (found) => {
-      if (found.length === 0) notifications.show({ message: "棚の併用統計から候補は見つかりませんでした" });
+      if (found.length === 0) notifications.show({ message: "一緒に付いているタグからは、候補が見つかりませんでした" });
     },
-    onError: (error) => notifications.show({ color: "red", title: "併用候補を読み込めません", message: errorMessage(error) }),
+    onError: (error) => notifications.show({ color: "red", title: "一緒に付くタグの候補を読み込めません", message: errorMessage(error) }),
   });
   const newRelatedCandidates = related.data?.filter((candidate) => !existingTagNames.has(candidate.tag));
   const visibleRelatedTags = new Set(newRelatedCandidates?.map((candidate) => candidate.tag) ?? []);
@@ -143,7 +143,7 @@ function WorkAssistForWork({ downloadId }: { downloadId: number }) {
     {
       id: "work_synopsis",
       label: note.data ? "あらすじを確認・作り直す" : "あらすじを作る",
-      description: "本文の文を選び、再読用の短い覚え書きを作ります",
+      description: "本文から、読み返すためのあらすじを作ります",
       enabled: synopsisReady,
       unavailableReason: synopsis.engine ? "設定で本文の送信を許可してください" : "設定で「あらすじ」を有効にしてください",
       onSelect: () => setActive("synopsis" as const),
@@ -152,7 +152,7 @@ function WorkAssistForWork({ downloadId }: { downloadId: number }) {
     {
       id: "work_tagging",
       label: "タグを補完する",
-      description: "棚にあるタグだけから不足候補を挙げます",
+      description: "棚にあるタグから、足りなそうなものを挙げます",
       enabled: Boolean(tagging.engine),
       unavailableReason: "設定で「タグの補完」を有効にしてください",
       onSelect: () => setActive("tags" as const),
@@ -160,11 +160,11 @@ function WorkAssistForWork({ downloadId }: { downloadId: number }) {
     },
     {
       id: "related_tags",
-      label: "棚の併用候補",
-      description: "他作品のタグ併用件数から候補を確認します。モデル不要",
+      label: "一緒に付くタグ",
+      description: "ほかの作品で一緒に付いているタグから候補を出します。モデルは使いません",
       enabled: true,
       onSelect: () => setActive("related-tags"),
-      badge: manuallyAdded.length ? `${manuallyAdded.length}件手動` : undefined,
+      badge: manuallyAdded.length ? `手動で${manuallyAdded.length}件` : undefined,
     },
   ];
   const headerHosted = usePageAssist(
@@ -198,8 +198,8 @@ function WorkAssistForWork({ downloadId }: { downloadId: number }) {
         <Group gap={6} wrap="wrap">
           <Text size="xs" c="dimmed">モデルの案から採ったタグ</Text>
           {assisted.map((tag) => (
-            <Tooltip key={tag.name} label="モデル採用タグを外す">
-              <Badge component="button" type="button" aria-label={`モデル採用タグ「${tag.name}」を外す`} variant="light" color="grape" style={{ cursor: "pointer" }} onClick={() => remove.mutate(tag.name)}>{tag.name}</Badge>
+            <Tooltip key={tag.name} label="モデルの案から付けたタグを外す">
+              <Badge component="button" type="button" aria-label={`モデルの案から付けたタグ「${tag.name}」を外す`} variant="light" color="grape" style={{ cursor: "pointer" }} onClick={() => remove.mutate(tag.name)}>{tag.name}</Badge>
             </Tooltip>
           ))}
         </Group>
@@ -215,7 +215,7 @@ function WorkAssistForWork({ downloadId }: { downloadId: number }) {
         </Group>
       )}
 
-      <Modal opened={active !== null} onClose={() => setActive(null)} title={active === "tags" ? "タグの補完" : active === "related-tags" ? "棚の併用候補" : "あらすじ"} size="lg">
+      <Modal opened={active !== null} onClose={() => setActive(null)} title={active === "tags" ? "タグの補完" : active === "related-tags" ? "一緒に付くタグ" : "あらすじ"} size="lg">
         {active === "synopsis" ? (
           <Stack>
             <Text size="sm" c="dimmed">本文を読んで、結末までのあらすじを400字以内で書きます。文ごとに原文の根拠を付け、別の確認で原文と照らします。文脈の小さいモデルでは、本文の文を選ぶ抜粋になります。</Text>
@@ -226,7 +226,7 @@ function WorkAssistForWork({ downloadId }: { downloadId: number }) {
           <Stack>
             <Text size="sm" c="dimmed">新しい語は作らず、棚にすでにあるタグだけを候補にします。採用するまでは作品を変更しません。</Text>
             {tagging.settings?.featureProfiles.work_tagging.inputPolicy.includeExcerpt === false && (
-              <Text size="sm" c="dimmed">現在、概要の送信はオフです。送信を許可した題名や既存タグの範囲で候補を探します。作品内容も使いたい場合は、AI設定の送信項目を確認してください。</Text>
+              <Text size="sm" c="dimmed">いまは概要を送らない設定なので、題名と付いているタグだけで候補を探します。作品の内容も使いたいときは、設定の「AIの手伝い」で「タグの補完」の送る項目に概要を入れてください。</Text>
             )}
             <Group justify="flex-end"><Button loading={propose.isPending} onClick={() => propose.mutate()}>タグを提案してもらう</Button></Group>
             {proposals && proposals.length > 0 && <Divider />}
@@ -246,9 +246,9 @@ function WorkAssistForWork({ downloadId }: { downloadId: number }) {
           </Stack>
         ) : active === "related-tags" ? (
           <Stack>
-            <Text size="sm" c="dimmed">候補は他作品の取得元タグの併用統計から作ります。候補作成時はこの作品の本文や概要を読みません。外部へ通信せず、候補が内容に合う保証もありません。選んで採用するまでタグは変わりません。</Text>
+            <Text size="sm" c="dimmed">候補は、ほかの作品で取得元のタグが一緒に付いている数から作ります。候補作成時はこの作品の本文や概要を読みません。外部へ通信せず、候補が内容に合う保証もありません。選んで採用するまでタグは変わりません。</Text>
             <Group justify="flex-end">
-              <Button loading={related.isPending} onClick={() => related.mutate()}>{related.data ? "候補を再読み込み" : "併用候補を読み込む"}</Button>
+              <Button loading={related.isPending} onClick={() => related.mutate()}>{related.data ? "候補を再読み込み" : "候補を読み込む"}</Button>
             </Group>
             {related.isError && <Text role="alert" size="sm" c="red">{errorMessage(related.error)}。再試行できます。</Text>}
             {related.data && newRelatedCandidates?.length === 0 && !related.isPending && !related.isError && <Text size="sm" c="dimmed">新しく追加できる候補はありません。再読み込みできます。</Text>}

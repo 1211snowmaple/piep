@@ -149,7 +149,7 @@ export function CollectionsPanel({ query = "", sortBy = "created_at", sortOrder 
         </Group>
       </Group>
       {!runtime && <Alert color="gray">プレビューではコレクションの変更は保存されません。</Alert>}
-      {suggestionMutation.isPending && <Alert icon={<Icons.collectionSuggest size={IconSize.action} />}>本文・キャプションのリンクを双方向へたどり、その後にシリーズ、作者、タイトル、意味的な近さを補助根拠として調べています。</Alert>}
+      {suggestionMutation.isPending && <Alert icon={<Icons.collectionSuggest size={IconSize.action} />}>本文とキャプションのリンクを前後どちらにもたどり、シリーズ・作者・題名・内容の近さも手がかりにして調べています。</Alert>}
       {collectionsQuery.isLoading ? <LoadingState label="コレクションを読み込んでいます" /> : collectionsQuery.error ? <ErrorState error={collectionsQuery.error} retry={() => collectionsQuery.refetch()} /> : collections.length === 0 ? (normalizedQuery
         ? <Paper withBorder p="xl"><Stack align="center"><Icons.search size={IconSize.hero} /><Text fw={700}>一致するコレクションがありません</Text><Text size="sm" c="dimmed" ta="center">「{query.trim()}」に当てはまるものは見つかりませんでした。</Text></Stack></Paper>
         : <Paper withBorder p="xl"><Stack align="center"><Icons.collection size={IconSize.hero} /><Text fw={700}>まだコレクションはありません</Text><Text size="sm" c="dimmed" ta="center">前後編、非公式の連載、pixivとFANBOXに分かれた作品などをまとめられます。</Text><Button onClick={form.open} disabled={!runtime}>最初のコレクションを作成</Button></Stack></Paper>) : <SimpleGrid cols={{ base: 1, sm: 2, xl: 3 }}>{visibleCollections.map((collection) => <CollectionCard key={collection.id} collection={collection} />)}</SimpleGrid>}

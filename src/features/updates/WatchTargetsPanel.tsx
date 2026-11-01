@@ -196,7 +196,7 @@ export function TargetsPanel({ targets, groups, loading, error, retry, form, mut
     <Grid gap="lg" align="flex-start">
       <Grid.Col span={{ base: 12, md: 3 }}>
         <Card p="xs" className="watch-nav">
-          <nav aria-label="監視対象の束">
+          <nav aria-label="監視グループ">
             <Stack gap={2}>
               {navItems.map((item) => <WatchNavItem key={item.view} label={item.label} count={item.count} active={currentView === item.view} onClick={() => changeView(item.view)} />)}
               <Group justify="space-between" wrap="nowrap" px="xs" pt="sm" pb={4}>
@@ -209,7 +209,7 @@ export function TargetsPanel({ targets, groups, loading, error, retry, form, mut
               </Group>
               {groups.length
                 ? groups.map((group) => <WatchNavItem key={group.id} label={group.name} count={group.targetIds.length} active={currentView === `group:${group.id}`} onClick={() => changeView(`group:${group.id}`)} />)
-                : <Text size="xs" c="dimmed" px="xs" pb="xs">よく見る作者などを束ねておくと、その束だけを確認できます。</Text>}
+                : <Text size="xs" c="dimmed" px="xs" pb="xs">よく見る作者などをグループにまとめておくと、そのグループだけを確認できます。</Text>}
             </Stack>
           </nav>
         </Card>
@@ -357,7 +357,7 @@ export function TargetsPanel({ targets, groups, loading, error, retry, form, mut
                         })}
                         aria-label="表示している対象をすべて選択"
                       />
-                      <Text size="xs" c="dimmed">確認しません。再開も削除もここから</Text>
+                      <Text size="xs" c="dimmed">確認しない対象です。再開も削除もここからできます</Text>
                     </Group>
                   ) : (
                     <UnstyledButton className="update-paused__head" onClick={() => setShowPaused((open) => !open)} aria-expanded={showPaused}>
@@ -367,7 +367,7 @@ export function TargetsPanel({ targets, groups, loading, error, retry, form, mut
                           <Text size="sm" fw={650}>停止中</Text>
                           <Badge size="sm" variant="light" color="gray">{paused.length}</Badge>
                         </Group>
-                        <Text size="xs" c="dimmed">確認しません。再開も削除もここから</Text>
+                        <Text size="xs" c="dimmed">確認しない対象です。再開も削除もここからできます</Text>
                       </Group>
                     </UnstyledButton>
                   )}

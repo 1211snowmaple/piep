@@ -132,6 +132,10 @@ export interface ReaderMetadata {
   assetCount: number;
   isEdited: boolean;
   activeEditRevision: WorkEditRevision | null;
+  /** まだ反映していない書きかけ。読書画面と EPUB には使われない。 */
+  draftEditRevision?: WorkEditRevision | null;
+  /** 下ろした編集版（新しい順に数件）。もう一度反映できる。 */
+  archivedEditRevisions?: WorkEditRevision[];
 }
 
 export interface ReaderContentPage {

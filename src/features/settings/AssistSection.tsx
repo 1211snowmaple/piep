@@ -46,7 +46,24 @@ import { getSearchIndexStatus, isTauriRuntime } from "@/services/dbApi";
 import { setSemanticSearchEnabled, startSearchRebuildIndex } from "@/services/searchApi";
 
 /**
- * コレクションの名前を、手元の言語モデルにも考えてもらうための設定。
+ * 機能ごとに、実際に何を送るか。設定画面の「送る項目」はこの表から出す。
+ *
+ * 以前は機能の名前から大まかに決めており、あらすじ・前回のあらすじ・校正
+ * にも、効かない「題名」「タグ」のスイッチが出ていた。
+ */
+const FEATURE_SENDS: Record<AssistFeatureId, { summary: string; title: boolean; author: boolean; tags: boolean; excerpt: boolean }> = {
+  search_interpretation: { summary: "入力した検索文と、棚のタグの候補", title: false, author: false, tags: false, excerpt: false },
+  work_synopsis: { summary: "本文（許可したときだけ）と、下で選んだ項目", title: true, author: true, tags: true, excerpt: false },
+  work_tagging: { summary: "下で選んだ項目と、棚のタグの候補", title: true, author: true, tags: true, excerpt: true },
+  author_style: { summary: "手元の作品の題名とタグ（通信はしません）", title: true, author: false, tags: true, excerpt: false },
+  reader_recap: { summary: "前の話の本文（許可したときだけ）と、その題名", title: true, author: false, tags: false, excerpt: false },
+  collection_split: { summary: "下で選んだ項目", title: true, author: true, tags: true, excerpt: false },
+  collection_naming: { summary: "下で選んだ項目", title: true, author: true, tags: true, excerpt: false },
+  editor_proofread: { summary: "編集中の本文だけ（許可したときだけ。約3,000字ずつ）", title: false, author: false, tags: false, excerpt: false },
+};
+
+/**
+ * 手元の言語モデルに手伝ってもらうための設定。
  *
  * piep はモデルを同梱しない。**すでに動いているものを、こちらから探しに行く。**
  * 「OpenAI 互換のエンドポイント」を打たせない — 番号を覚えているのは piep の
@@ -195,7 +212,7 @@ export function AssistSection() {
       }));
       notifications.show({
         color: "green",
-        message: `命名の試し書きが通りました（${formatNumber(result.elapsedMs)}ミリ秒）。${ASSIST_FEATURES.find((feature) => feature.id === featureId)?.label ?? featureId}での出力は未検証です。`,
+        message: `命名の試し書きが通りました（${formatNumber(result.elapsedMs)}ミリ秒）。${ASSIST_FEATURES.find((feature) => feature.id === featureId)?.label ?? featureId}での答えは、まだ確かめていません。`,
       });
     },
     onError: (error) => notifications.show({ color: "red", title: "このモデルを試せません", message: errorMessage(error) }),
@@ -220,6 +237,13 @@ export function AssistSection() {
     }));
   };
 
+  // 保存していない変更があるか。機能ごとの設定は保存ボタンから離れた下の方に
+  // あるので、直したまま画面を離れても気づけるよう、保存の帯で知らせる。
+  const dirty = Boolean(settingsQuery.data)
+    && (JSON.stringify(settingsQuery.data) !== JSON.stringify(draft)
+      || (semanticStatusQuery.data ? semanticEnabled !== semanticStatusQuery.data.semanticEnabled : false));
+  const enableBlocked = !draft.enabled && (!ready || !verified);
+
   return (
     <Stack gap="lg">
       <div>
@@ -229,31 +253,31 @@ export function AssistSection() {
         </Group>
         <Text size="sm" c="dimmed">
           <b>保存・検索・読書は、AIを設定しなくても使えます。</b>
-          命名、タグの補完、あらすじ、検索文の言い換えにモデルを使いたいときだけ設定してください。
-          作者の題材メモは例外で、モデルを設定しなくても手元のタグを集計できます。
-          <b>AIの提案やあらすじは、押したときだけ作ります。</b>
-          意味検索を有効にすると、作品の追加・更新時に端末内で検索索引を更新します。
+          言葉での検索、タグの補完、あらすじ、前回のあらすじ、コレクションの命名と分割、本文の校正に、
+          手元で動かしているモデルを使いたいときだけ設定してください。
+          <b>AIの案やあらすじは、ボタンを押したときにだけ作ります。</b>
         </Text>
       </div>
 
-      <Alert color="yellow" title="AI補助・意味検索はβ版です">
+      <Alert color="yellow" title="AIの手伝いと意味検索はβ版です">
         <Text size="sm">
-          モデルや作品によって結果が変わります。あらすじには要点や結末の抜け、タグ提案には誤りがあり得ます。
-          提案を採用する前に、原文や根拠を確認してください。
+          結果はモデルや作品によって変わります。あらすじには要点や結末の抜けが、タグの案や校正の候補には誤りがあり得ます。
+          採る前に、原文や根拠を確かめてください。
         </Text>
       </Alert>
 
-      {/* ---- 1. 探す ---------------------------------------------------- */}
+      {/* ---- 1. 選ぶ ---------------------------------------------------- */}
       <Card withBorder p="lg">
         <Stack gap="md">
           <Group justify="space-between" align="flex-start" wrap="nowrap">
             <div>
               <Text fw={650}>1. この端末で動いているモデルを探す</Text>
               <Text size="sm" c="dimmed">
-                LM Studio・Ollama・llama.cpp などが動いていれば、そのまま見つかります。
+                LM Studio・Ollama・llama.cpp・Strata などが動いていれば見つかります。
               </Text>
             </div>
             <Button
+              flex="none"
               leftSection={<Icons.search size={IconSize.action} />}
               loading={discover.isPending}
               disabled={!runtime}
@@ -267,27 +291,27 @@ export function AssistSection() {
             <Alert color="yellow" icon={<Icons.notice size={IconSize.action} />} title="見つかりませんでした">
               <Stack gap="xs">
                 <Text size="sm">
-                  推論サーバーが動いていないようです。piep はモデルを持っていないので、
-                  <b>別のアプリで動かしたものを借りて使います。</b>
+                  推論サーバーが動いていないようです。piep はモデルを同梱していないので、
+                  <b>別のアプリで動かしているモデルを使います。</b>
                 </Text>
                 <UnstyledButton onClick={help.toggle}>
                   <Group gap={4}>
                     <Icons.expand size={IconSize.inline} style={{ transform: helpOpened ? "rotate(180deg)" : undefined }} />
-                    <Text size="sm" fw={650}>どうやって用意するか</Text>
+                    <Text size="sm" fw={650}>用意のしかた</Text>
                   </Group>
                 </UnstyledButton>
                 <Collapse expanded={helpOpened}>
                   <List size="sm" spacing={6} pt={6}>
                     <List.Item>
                       <b>LM Studio</b> — モデルを選んで「Local Server」を開始します。
-                      いちばん手数が少ないので、初めてならこれをおすすめします。
+                      手順がいちばん少ないので、初めてならこれがおすすめです。
                     </List.Item>
                     <List.Item>
                       <b>Ollama</b> — 入れると常駐します。<Code>ollama pull &lt;モデル名&gt;</Code> で
-                      モデルを取ってくれば、そのまま見つかります。
+                      モデルを取ってくれば見つかります。
                     </List.Item>
                     <List.Item>
-                      どちらも起動したら、この画面で<b>もう一度「探す」</b>を押してください。
+                      起動したら、この画面で<b>もう一度「探す」</b>を押してください。
                     </List.Item>
                   </List>
                 </Collapse>
@@ -303,6 +327,7 @@ export function AssistSection() {
                   key={engine.baseUrl}
                   className="collection-pick"
                   data-selected={draft.baseUrl === engine.baseUrl || undefined}
+                  aria-pressed={draft.baseUrl === engine.baseUrl}
                   onClick={() => {
                     setDraft({
                       ...draft,
@@ -318,9 +343,16 @@ export function AssistSection() {
                     <Icons.desktopApp size={IconSize.inline} />
                   </ThemeIcon>
                   <span className="collection-pick__body">
-                    <Text size="sm" fw={650}>{engine.label} のあたり</Text>
-                    <Text size="xs" c="dimmed">
-                      モデル {formatNumber(engine.models.length)}件 · {engine.baseUrl}
+                    {/* サーバーが名乗ったときだけ言い切る。名乗らなければ、
+                        番号から推した名前だとそのまま書く。 */}
+                    <Text size="sm" fw={650}>
+                      {engine.label}
+                      {!engine.identified && <Text span size="xs" c="dimmed" fw={400}>（ポート番号からの推測）</Text>}
+                    </Text>
+                    <Text size="xs" c="dimmed" className="line-clamp-1">
+                      {engine.models.slice(0, 2).join("、")}
+                      {engine.models.length > 2 && ` ほか${formatNumber(engine.models.length - 2)}件`}
+                      {" · "}{engine.baseUrl}
                     </Text>
                   </span>
                   {draft.baseUrl === engine.baseUrl && <Icons.confirm size={IconSize.menu} />}
@@ -329,16 +361,44 @@ export function AssistSection() {
             </Stack>
           )}
 
+          {manualOpened ? (
+            <TextInput
+              label="使うモデルのID"
+              description="一覧（/models）を公開していないサーバーでは、APIで使うモデルIDを直接入れます。"
+              placeholder="model-id"
+              value={draft.model}
+              onChange={(event) => {
+                setDraft({ ...draft, model: event.currentTarget.value, verifiedTarget: null });
+                setTrial(null);
+              }}
+              disabled={!runtime}
+            />
+          ) : (
+            <Select
+              label="使うモデル"
+              placeholder={models.length > 0 ? "モデルを選ぶ" : "先に「探す」を押してください"}
+              data={models}
+              value={draft.model || null}
+              searchable
+              allowDeselect={false}
+              onChange={(value) => {
+                setDraft({ ...draft, model: value ?? "", verifiedTarget: null });
+                setTrial(null);
+              }}
+              disabled={!runtime || models.length === 0}
+            />
+          )}
+
           <UnstyledButton onClick={manual.toggle}>
             <Group gap={4}>
               <Icons.expand size={IconSize.inline} style={{ transform: manualOpened ? "rotate(180deg)" : undefined }} />
-              <Text size="xs" c="dimmed">つなぎ先を自分で入れる</Text>
+              <Text size="xs" c="dimmed">つなぎ先とモデルを自分で入れる</Text>
             </Group>
           </UnstyledButton>
           <Collapse expanded={manualOpened}>
             <TextInput
               label="つなぎ先"
-              description="OpenAI 互換の base URL。既定の場所以外で動かしている場合だけ使います。"
+              description="OpenAI 互換の API の base URL（…/v1）。「探す」で見つからない場所で動かしているときに入れます。上の一覧で選ぶと、ここも書き換わります。"
               value={draft.baseUrl}
               onChange={(event) => {
                 setDraft({
@@ -356,138 +416,12 @@ export function AssistSection() {
         </Stack>
       </Card>
 
-      <Card withBorder p="lg">
-        <Stack gap="md">
-          <div>
-            <Text fw={650}>機能ごとの設定</Text>
-            <Text size="sm" c="dimmed">
-              使う機能だけを有効にし、モデル・追加指示・送る情報の上限を個別に決めます。
-              追加指示は piep の出力契約の後ろに足され、形式や安全条件は変更できません。
-            </Text>
-          </div>
-          {ASSIST_FEATURES.map((feature) => {
-            const profile = draft.featureProfiles[feature.id];
-            const limitsWorks = ["author_style", "collection_split", "collection_naming"].includes(feature.id);
-            const limitsTags = ["work_tagging", "author_style", "collection_split", "collection_naming"].includes(feature.id);
-            const sendsTitle = feature.id !== "search_interpretation";
-            const sendsAuthor = ["work_tagging", "collection_split", "collection_naming"].includes(feature.id);
-            const sendsTags = feature.id !== "search_interpretation";
-            const sendsExcerpt = feature.id === "work_tagging";
-            const nativeAuthorStats = feature.id === "author_style";
-            return (
-              <Card key={feature.id} withBorder padding="sm" bg="var(--mantine-color-default-hover)">
-                <Stack gap="sm">
-                  <Group justify="space-between" align="flex-start" wrap="nowrap">
-                    <div>
-                      <Text size="sm" fw={650}>{feature.label}</Text>
-                      <Text size="xs" c="dimmed">{feature.description}</Text>
-                    </div>
-                    <Switch
-                      aria-label={`${feature.label}を使う`}
-                      checked={profile.enabled}
-                      onChange={(event) => updateFeature(feature.id, { enabled: event.currentTarget.checked })}
-                    />
-                  </Group>
-                  {profile.enabled && (
-                    <>
-                      {!nativeAuthorStats && <>
-                        <TextInput
-                          label="この機能だけで使うモデル"
-                          description="空なら上で選んだ共通モデルを使います"
-                          placeholder={draft.model || "共通モデル"}
-                          value={profile.model}
-                          onChange={(event) => updateFeature(feature.id, { model: event.currentTarget.value, verifiedTarget: null })}
-                        />
-                        {profile.model.trim() && (
-                          <Group justify="space-between" gap="sm">
-                            <Text size="xs" c={profile.verifiedTarget === assistTarget({ baseUrl: draft.baseUrl, model: profile.model }) ? "green" : "dimmed"}>
-                              {profile.verifiedTarget === assistTarget({ baseUrl: draft.baseUrl, model: profile.model })
-                                ? "命名の試し書きは確認済みです。この機能での出力は未検証です"
-                                : "機能別モデルは一度試してから使えます"}
-                            </Text>
-                            <Button
-                              size="compact-xs"
-                              variant="light"
-                              loading={verifyFeatureModel.isPending && verifyFeatureModel.variables === feature.id}
-                              disabled={!runtime || !normalizeAssistBaseUrl(draft.baseUrl)}
-                              onClick={() => verifyFeatureModel.mutate(feature.id)}
-                            >
-                              このモデルを試す
-                            </Button>
-                          </Group>
-                        )}
-                        <Textarea
-                          label="追加の指示"
-                          description="文体や重視する観点だけを書きます。秘密情報は入力しないでください。"
-                          value={profile.additionalInstructions}
-                          onChange={(event) => updateFeature(feature.id, { additionalInstructions: event.currentTarget.value })}
-                          autosize
-                          minRows={2}
-                          maxRows={5}
-                          maxLength={2_000}
-                        />
-                      </>}
-                      {feature.id === "work_tagging" && <Textarea
-                        label="タグの判定条件"
-                        description="タグ名：条件を一行ずつ。似たタグの違いや、「なし」を付ける範囲を指定できます。空欄ならタグ名から判断します。"
-                        placeholder="園芸：植物を育てたり手入れしたりする描写がある"
-                        value={profile.tagCriteria}
-                        onChange={(event) => updateFeature(feature.id, { tagCriteria: event.currentTarget.value })}
-                        autosize minRows={2} maxRows={8} maxLength={12_000}
-                      />}
-                      {(limitsWorks || limitsTags) && <Group grow align="flex-end">
-                        {limitsWorks && <NumberInput
-                          label={nativeAuthorStats ? "集計する作品数の上限" : "送る作品数の上限"}
-                          min={1}
-                          max={1_000}
-                          value={profile.inputPolicy.maxItems ?? 200}
-                          onChange={(value) => updateFeature(feature.id, { inputPolicy: { ...profile.inputPolicy, maxItems: Number(value) || 1 } })}
-                        />}
-                        {limitsTags && <NumberInput
-                          label={nativeAuthorStats ? "1作品あたりの集計タグ数の上限" : "1作品あたりのタグ上限"}
-                          min={1}
-                          max={100}
-                          value={profile.inputPolicy.maxTagsPerItem ?? 30}
-                          onChange={(value) => updateFeature(feature.id, { inputPolicy: { ...profile.inputPolicy, maxTagsPerItem: Number(value) || 1 } })}
-                        />}
-                      </Group>}
-                      {(sendsTitle || sendsAuthor || sendsTags || sendsExcerpt) && (
-                        <Stack gap={6}>
-                          {nativeAuthorStats && <Text size="xs" fw={600}>集計に使う項目</Text>}
-                          <Group gap="lg">
-                            {sendsTitle && <Switch size="sm" label="題名" checked={profile.inputPolicy.includeTitle ?? true} onChange={(event) => updateFeature(feature.id, { inputPolicy: { ...profile.inputPolicy, includeTitle: event.currentTarget.checked } })} />}
-                          {sendsAuthor && <Switch size="sm" label="作者名" checked={profile.inputPolicy.includeAuthor ?? true} onChange={(event) => updateFeature(feature.id, { inputPolicy: { ...profile.inputPolicy, includeAuthor: event.currentTarget.checked } })} />}
-                          {sendsTags && <Switch size="sm" label="タグ" checked={profile.inputPolicy.includeTags ?? true} onChange={(event) => updateFeature(feature.id, { inputPolicy: { ...profile.inputPolicy, includeTags: event.currentTarget.checked } })} />}
-                          {sendsExcerpt && <Switch size="sm" label="概要" checked={profile.inputPolicy.includeExcerpt ?? false} onChange={(event) => updateFeature(feature.id, { inputPolicy: { ...profile.inputPolicy, includeExcerpt: event.currentTarget.checked } })} />}
-                          </Group>
-                        </Stack>
-                      )}
-                    </>
-                  )}
-                </Stack>
-              </Card>
-            );
-          })}
-        </Stack>
-      </Card>
-
-      <Card withBorder p="lg">
-        <Stack gap="sm">
-          <Switch
-            label="作品単位の意味検索を使う"
-            description="言葉で探すとき、作品ごとに一つのベクトルで候補を探します。通常の検索は従来どおり字面検索です。"
-            checked={semanticEnabled}
-            onChange={(event) => setSemanticEnabled(event.currentTarget.checked)}
-          />
-        </Stack>
-      </Card>
-
       {!local && (
         <Alert color="orange" icon={<Icons.warning size={IconSize.action} />} title="この端末の外を指しています">
           <Stack gap="xs">
             <Text size="sm">
-              題名・作者名・タグ・公式シリーズ名に加え、タグ提案では作品の紹介文、言葉での検索では入力した検索文が、このURLへ送られます。
-              {draft.allowBody && <b> あらすじを作るときは、分割した本文全体も送られます。</b>}
+              題名・作者名・タグ・公式シリーズ名がこのURLへ送られます。タグの補完では作品の概要も、言葉での検索では入力した検索文も送られます。
+              {draft.allowBody && <b> あらすじ・前回のあらすじ・本文の校正では、本文も送られます。</b>}
             </Text>
             {!externalSecure && (
               <Text size="sm" c="red"><b>外部の宛先には HTTPS が必要です。</b></Text>
@@ -508,45 +442,16 @@ export function AssistSection() {
       {/* ---- 2. 試す ---------------------------------------------------- */}
       <Card withBorder p="lg">
         <Stack gap="md">
-          <div>
-            <Text fw={650}>2. 使えるかどうか試す</Text>
-            <Text size="sm" c="dimmed">
-              つながることと、使えることは別です。あなたの棚の作品を実際に渡して、
-              どんな名前が返ってくるかを見てから決めてください。この試験で確認できるのは命名だけです。
-            </Text>
-          </div>
-
-          <Group align="flex-end" gap="sm">
-            {manualOpened ? (
-              <TextInput
-                flex={1}
-                label="モデル名"
-                description="つなぎ先が /models を公開していない場合も、APIで使うモデルIDを直接入力できます。"
-                placeholder="model-id"
-                value={draft.model}
-                onChange={(event) => {
-                  setDraft({ ...draft, model: event.currentTarget.value, verifiedTarget: null });
-                  setTrial(null);
-                }}
-                disabled={!runtime}
-              />
-            ) : (
-              <Select
-                flex={1}
-                label="モデル"
-                placeholder={models.length > 0 ? "モデルを選ぶ" : "先に「探す」を押してください"}
-                data={models}
-                value={draft.model || null}
-                searchable
-                allowDeselect={false}
-                onChange={(value) => {
-                  setDraft({ ...draft, model: value ?? "", verifiedTarget: null });
-                  setTrial(null);
-                }}
-                disabled={!runtime || models.length === 0}
-              />
-            )}
+          <Group justify="space-between" align="flex-start" wrap="nowrap">
+            <div>
+              <Text fw={650}>2. 使えるかどうか試す</Text>
+              <Text size="sm" c="dimmed">
+                つながることと、使えることは別です。棚の作品を数作渡してコレクションの名前を考えてもらい、
+                返ってきた名前を見て決めてください。ここで確かめられるのは命名だけです。
+              </Text>
+            </div>
             <Button
+              flex="none"
               variant="default"
               leftSection={<Icons.optimize size={IconSize.action} />}
               loading={runTrial.isPending}
@@ -558,30 +463,30 @@ export function AssistSection() {
           </Group>
 
           {profileQuery.data && (
-            <Alert color={profileQuery.data.summaryChunkChars > 0 ? "blue" : "orange"} icon={<Icons.optimize size={IconSize.action} />} title="検出できた能力から安全枠を計算">
+            <Alert color={profileQuery.data.summaryChunkChars > 0 ? "blue" : "orange"} icon={<Icons.optimize size={IconSize.action} />} title="読み取れた性能から、一度に送る量を決めました">
               <Group gap={6} wrap="wrap">
                 <Badge variant="light" color="gray">論理CPU {formatNumber(profileQuery.data.logicalCpuCores)}</Badge>
                 {profileQuery.data.availableMemoryBytes !== null && (
                   <Badge variant="light" color="gray">空きメモリ {formatBytes(profileQuery.data.availableMemoryBytes)}</Badge>
                 )}
                 {profileQuery.data.contextLength !== null && (
-                  <Badge variant="light" color="gray">文脈 {formatNumber(profileQuery.data.contextLength)} token</Badge>
+                  <Badge variant="light" color="gray">文脈長 {formatNumber(profileQuery.data.contextLength)} トークン</Badge>
                 )}
                 {profileQuery.data.evalBatchSize !== null && (
                   <Badge variant="light" color="gray">batch {formatNumber(profileQuery.data.evalBatchSize)}</Badge>
                 )}
                 {profileQuery.data.flashAttention && <Badge variant="light" color="green">Flash Attention</Badge>}
-                {profileQuery.data.kvCacheOnGpu && <Badge variant="light" color="green">KV cache GPU</Badge>}
+                {profileQuery.data.kvCacheOnGpu && <Badge variant="light" color="green">KV キャッシュは GPU</Badge>}
               </Group>
               {profileQuery.data.summaryChunkChars > 0 ? (
                 <Text size="sm" mt={6}>
-                  長文は最大約{formatNumber(profileQuery.data.summaryChunkChars)}文字ずつ、
-                  この推論先へはアプリ全体で最大{formatNumber(profileQuery.data.concurrentRequests)}件まで同時に処理します。
-                  サーバーが公開したロード設定と空きメモリを上限として使い、ロード設定そのものは変更しません。
+                  長い本文は約{formatNumber(profileQuery.data.summaryChunkChars)}字ずつ送り、
+                  このサーバーへの依頼はアプリ全体で同時に{formatNumber(profileQuery.data.concurrentRequests)}件までにします。
+                  サーバーが公開している読み込み設定と空きメモリを上限にするだけで、読み込み設定そのものは変えません。
                 </Text>
               ) : (
                 <Text size="sm" mt={6}>
-                  現在の文脈長では本文要約の入力と出力を安全に収められません。8K以上の文脈長でモデルを読み直してください。
+                  いまの文脈長では、本文の要約を送って答えを受け取る余地がありません。文脈長を8K以上にしてモデルを読み込み直してください。
                 </Text>
               )}
             </Alert>
@@ -598,14 +503,14 @@ export function AssistSection() {
           )}
 
           {trial && (
-            <Alert color="green" icon={<Icons.confirm size={IconSize.action} />} title="返ってきました">
+            <Alert color="green" icon={<Icons.confirm size={IconSize.action} />} title="返ってきた名前">
               <Stack gap={4}>
                 <Text fw={700}>{trial.name}</Text>
                 <Text size="sm" c="dimmed">{trial.subtitle}</Text>
                 <Text size="xs" c="dimmed">{formatNumber(trial.elapsedMs)}ミリ秒</Text>
                 <Text size="sm" mt={6}>
-                  この名前が中身と噛み合っていれば、そのモデルで大丈夫です。
-                  <b>言い換えられた・ぼやけた名前が返る場合は、モデルを替えてください。</b>
+                  名前が中身に合っていれば、このモデルで大丈夫です。
+                  <b>題材がぼかされた名前や、言い換えられた名前が返るなら、モデルを替えてください。</b>
                 </Text>
               </Stack>
             </Alert>
@@ -620,53 +525,183 @@ export function AssistSection() {
             checked={draft.enabled}
             onChange={(event) => setDraft({ ...draft, enabled: event.currentTarget.checked })}
             label="3. モデルに手伝ってもらう"
-            description="切っていても piep は完結します。手伝いのボタンが画面に出るようになるだけです。"
-            disabled={!runtime || (!draft.enabled && (!ready || !verified))}
+            description={enableBlocked
+              ? "先に 1 でモデルを選び、2 の「試し書き」を通してください。"
+              : "切っていても piep はすべて使えます。入れると、各画面に手伝いのボタンが出ます。"}
+            disabled={!runtime || enableBlocked}
           />
 
           <Switch
             checked={draft.allowBody}
             onChange={(event) => setDraft({ ...draft, allowBody: event.currentTarget.checked })}
             label="本文を送ることも許可する"
-            description="あらすじと「前回のあらすじ」だけが本文を使います。名前・タグ・検索の言い換えは題名とタグだけで足ります。"
+            description="本文を使うのは、あらすじ・前回のあらすじ・本文の校正だけです。ほかの機能は題名やタグなどで足ります。"
             disabled={!runtime || !draft.enabled}
           />
-
-          <Group justify="space-between">
-            <Group gap={6}>
-              <Badge variant="light" color={local ? "green" : "orange"}>{local ? "この端末の中" : "外部の宛先"}</Badge>
-              {draft.model && <Badge variant="light" color="gray">{draft.model}</Badge>}
-            </Group>
-            <Button
-              loading={save.isPending}
-              disabled={!runtime || Boolean(saveProblem)}
-              title={saveProblem ?? undefined}
-              onClick={() => save.mutate(draft)}
-            >
-              保存
-            </Button>
-          </Group>
         </Stack>
+      </Card>
+
+      {/* ---- 細かい設定 ------------------------------------------------- */}
+      {/* 以前は 1 と 2 のあいだにあり、「探す → 試す → 使う」の流れを途中で
+          断ち切っていた。どれも決めなくても使えるので、流れの後ろに置く。 */}
+      <Card withBorder p="lg">
+        <Stack gap="md">
+          <div>
+            <Text fw={650}>機能ごとの設定（任意）</Text>
+            <Text size="sm" c="dimmed">
+              使わない機能は切っておけます。機能ごとに、モデル、追加の指示、送る項目と量を変えられます。
+              追加の指示は piep の決まった指示の後ろに足されるだけで、答えの形や安全のための条件は変わりません。
+            </Text>
+          </div>
+          {ASSIST_FEATURES.map((feature) => {
+            const profile = draft.featureProfiles[feature.id];
+            const sends = FEATURE_SENDS[feature.id];
+            const limitsWorks = ["author_style", "collection_split", "collection_naming"].includes(feature.id);
+            const limitsTags = sends.tags;
+            const nativeAuthorStats = feature.id === "author_style";
+            return (
+              <Card key={feature.id} withBorder padding="sm" bg="var(--mantine-color-default-hover)">
+                <Stack gap="sm">
+                  <Group justify="space-between" align="flex-start" wrap="nowrap">
+                    <div>
+                      <Text size="sm" fw={650}>{feature.label}</Text>
+                      <Text size="xs" c="dimmed">{feature.description}</Text>
+                      <Text size="xs" c="dimmed">{nativeAuthorStats ? "集計に使うもの" : "送るもの"}：{sends.summary}</Text>
+                    </div>
+                    <Switch
+                      aria-label={`${feature.label}を使う`}
+                      checked={profile.enabled}
+                      onChange={(event) => updateFeature(feature.id, { enabled: event.currentTarget.checked })}
+                    />
+                  </Group>
+                  {profile.enabled && (
+                    <>
+                      {!nativeAuthorStats && <>
+                        <TextInput
+                          label="この機能だけで使うモデル"
+                          description="空欄なら、1 で選んだモデルを使います"
+                          placeholder={draft.model || "1 で選んだモデル"}
+                          value={profile.model}
+                          onChange={(event) => updateFeature(feature.id, { model: event.currentTarget.value, verifiedTarget: null })}
+                        />
+                        {profile.model.trim() && (
+                          <Group justify="space-between" gap="sm">
+                            <Text size="xs" c={profile.verifiedTarget === assistTarget({ baseUrl: draft.baseUrl, model: profile.model }) ? "green" : "dimmed"}>
+                              {profile.verifiedTarget === assistTarget({ baseUrl: draft.baseUrl, model: profile.model })
+                                ? "命名の試し書きは通りました。この機能での答えはまだ確かめていません"
+                                : "この機能だけのモデルは、一度試し書きを通すと使えます"}
+                            </Text>
+                            <Button
+                              size="compact-xs"
+                              variant="light"
+                              loading={verifyFeatureModel.isPending && verifyFeatureModel.variables === feature.id}
+                              disabled={!runtime || !normalizeAssistBaseUrl(draft.baseUrl)}
+                              onClick={() => verifyFeatureModel.mutate(feature.id)}
+                            >
+                              このモデルを試す
+                            </Button>
+                          </Group>
+                        )}
+                        <Textarea
+                          label="追加の指示"
+                          description="文体や、重く見てほしい点だけを書きます。秘密の情報は書かないでください。"
+                          value={profile.additionalInstructions}
+                          onChange={(event) => updateFeature(feature.id, { additionalInstructions: event.currentTarget.value })}
+                          autosize
+                          minRows={2}
+                          maxRows={5}
+                          maxLength={2_000}
+                        />
+                      </>}
+                      {feature.id === "work_tagging" && <Textarea
+                        label="タグの判定条件"
+                        description="「タグ名：条件」を一行に一つ。似たタグの違いや、付けない場合を決めておけます。空欄ならタグ名から判断します。"
+                        placeholder="園芸：植物を育てたり手入れしたりする描写がある"
+                        value={profile.tagCriteria}
+                        onChange={(event) => updateFeature(feature.id, { tagCriteria: event.currentTarget.value })}
+                        autosize minRows={2} maxRows={8} maxLength={12_000}
+                      />}
+                      {(limitsWorks || limitsTags) && <Group grow align="flex-end">
+                        {limitsWorks && <NumberInput
+                          label={nativeAuthorStats ? "集計する作品数の上限" : "送る作品数の上限"}
+                          min={1}
+                          max={1_000}
+                          value={profile.inputPolicy.maxItems ?? 200}
+                          onChange={(value) => updateFeature(feature.id, { inputPolicy: { ...profile.inputPolicy, maxItems: Number(value) || 1 } })}
+                        />}
+                        {limitsTags && <NumberInput
+                          label={nativeAuthorStats ? "1作品あたりに集計するタグ数の上限" : "1作品あたりに送るタグ数の上限"}
+                          min={1}
+                          max={100}
+                          value={profile.inputPolicy.maxTagsPerItem ?? 30}
+                          onChange={(value) => updateFeature(feature.id, { inputPolicy: { ...profile.inputPolicy, maxTagsPerItem: Number(value) || 1 } })}
+                        />}
+                      </Group>}
+                      {(sends.title || sends.author || sends.tags || sends.excerpt) && (
+                        <Stack gap={6}>
+                          <Text size="xs" fw={600}>{nativeAuthorStats ? "集計に使う項目" : "送る項目"}</Text>
+                          <Group gap="lg">
+                            {sends.title && <Switch size="sm" label="題名" checked={profile.inputPolicy.includeTitle ?? true} onChange={(event) => updateFeature(feature.id, { inputPolicy: { ...profile.inputPolicy, includeTitle: event.currentTarget.checked } })} />}
+                            {sends.author && <Switch size="sm" label="作者名" checked={profile.inputPolicy.includeAuthor ?? true} onChange={(event) => updateFeature(feature.id, { inputPolicy: { ...profile.inputPolicy, includeAuthor: event.currentTarget.checked } })} />}
+                            {sends.tags && <Switch size="sm" label="タグ" checked={profile.inputPolicy.includeTags ?? true} onChange={(event) => updateFeature(feature.id, { inputPolicy: { ...profile.inputPolicy, includeTags: event.currentTarget.checked } })} />}
+                            {sends.excerpt && <Switch size="sm" label="概要" checked={profile.inputPolicy.includeExcerpt ?? false} onChange={(event) => updateFeature(feature.id, { inputPolicy: { ...profile.inputPolicy, includeExcerpt: event.currentTarget.checked } })} />}
+                          </Group>
+                        </Stack>
+                      )}
+                    </>
+                  )}
+                </Stack>
+              </Card>
+            );
+          })}
+        </Stack>
+      </Card>
+
+      <Card withBorder p="lg">
+        <Switch
+          label="作品単位の意味検索を使う"
+          description="言葉で探すとき、作品ごとの意味の近さでも候補を探します。ふだんの検索は、これまでどおり文字の一致で探します。"
+          checked={semanticEnabled}
+          onChange={(event) => setSemanticEnabled(event.currentTarget.checked)}
+        />
       </Card>
 
       <Alert icon={<Icons.secure size={IconSize.action} />} title="送るもの・送らないもの">
         <Stack gap={6}>
           <Text size="sm">
-            <b>題名・作者名・タグ・公式シリーズ名</b> — 名前、タグの補完、作風のまとめ、束の分割に使用します。
-            タグの補完には作品の紹介文も使い、言葉での検索には入力した検索文とタグ候補を送ります。これらは保存本文を使いません。
-            作者の題材メモだけはモデルや通信を使わず、手元の作品タグを集計します。
+            <b>題名・作者名・タグ・公式シリーズ名</b> — タグの補完、コレクションの命名と分割に使います。
+            タグの補完では作品の概要も送り、言葉での検索では入力した検索文とタグの候補を送ります。どれも本文は使いません。
+            作者の題材メモはモデルも通信も使わず、手元の作品のタグを集計するだけです。
           </Text>
           <Text size="sm">
-            <b>本文</b> — あらすじと「前回のあらすじ」だけ。上で明示的に許可したときに限り、
-            本文全体を、モデルが公開した文脈長に収まる大きさ（不明時は約2,800字）で隙間なく送り、
-            部分ごとの記録を段階的に統合します。画像は送りません。
+            <b>本文</b> — あらすじ、前回のあらすじ、本文の校正だけが使い、上で許可したときに限って送ります。
+            あらすじは、モデルが公開している文脈長に収まる大きさ（分からなければ約2,800字）に区切って本文全体を送り、
+            区切りごとの覚え書きを順にまとめます。校正は、選んだブロックか編集中の本文を約3,000字ずつ送ります。画像は送りません。
           </Text>
           <Text size="sm">
-            返ってきたものはすべて<b>案</b>です。採るかどうかは利用者が決めます。
-            モデルが付けたタグは <b>取得元のタグと区別して保存</b>され、あとから外せます。
+            返ってきたものはすべて<b>案</b>で、採るかどうかはあなたが決めます。
+            モデルの案から付けたタグは<b>取得元のタグと分けて保存</b>するので、あとから外せます。
           </Text>
         </Stack>
       </Alert>
+
+      {/* 保存は最後の帯にまとめる。機能ごとの設定を直したあとも、ここまで
+          戻らずに押せるよう、画面の下に貼り付けておく。 */}
+      <Group className="assist-save-bar" justify="space-between" wrap="nowrap">
+        <Group gap={6} miw={0}>
+          <Badge variant="light" color={local ? "green" : "orange"}>{local ? "この端末の中" : "外部の宛先"}</Badge>
+          {draft.model && <Badge variant="light" color="gray" tt="none" maw={260}>{draft.model}</Badge>}
+          {dirty && <Text size="xs" c="orange" fw={600}>保存していない変更があります</Text>}
+        </Group>
+        <Button
+          loading={save.isPending}
+          disabled={!runtime || Boolean(saveProblem)}
+          title={saveProblem ?? undefined}
+          onClick={() => save.mutate(draft)}
+        >
+          保存
+        </Button>
+      </Group>
     </Stack>
   );
 }

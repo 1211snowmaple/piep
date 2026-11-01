@@ -474,7 +474,7 @@ export default function OperationsPage() {
                       <Text size="xs" c="dimmed" mt={4}>
                         {timestamp(job.updatedAt)} · 保存 {job.savedCount} ·
                         エラー {job.errorCount} · 保留 {job.heldCount ?? 0}
-                        {(job.knownHeldCount ?? 0) > 0 && ` · 変わらない保留 ${job.knownHeldCount}`}
+                        {(job.knownHeldCount ?? 0) > 0 && ` · 前回から変わらない保留 ${job.knownHeldCount}`}
                       </Text>
                     </Box>
                   </Group>

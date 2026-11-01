@@ -13,6 +13,7 @@ const dbApi = vi.hoisted(() => ({
   getReaderContentPage: vi.fn(),
   searchReaderContent: vi.fn(),
   searchDownloadsV2: vi.fn(),
+  getDownloads: vi.fn(),
 }));
 const collectionApi = vi.hoisted(() => ({
   listCollectionsForWork: vi.fn(),
@@ -26,6 +27,7 @@ vi.mock("@/services/dbApi", async (importOriginal) => ({
   getReaderContentPage: dbApi.getReaderContentPage,
   searchReaderContent: dbApi.searchReaderContent,
   searchDownloadsV2: dbApi.searchDownloadsV2,
+  getDownloads: dbApi.getDownloads,
 }));
 
 vi.mock("@/services/collectionApi", () => ({
@@ -104,6 +106,9 @@ describe("ReaderPage collection continuation", () => {
     dbApi.searchDownloadsV2.mockResolvedValue({ items: [], nextCursor: null, total: 0 });
     dbApi.getReaderContentPage.mockResolvedValue(onlyPage("<p>本文</p>"));
     collectionApi.listCollectionsForWork.mockResolvedValue([{ id: "collection-1" }]);
+    dbApi.getDownloads.mockImplementation((ids: number[]) => Promise.resolve(ids.map((id) => ({
+      ...demo.download, id, title: `作品${id}`, authorName: "隣の作者", textLength: 11000, excerpt: "雨の夜に始まる話。",
+    }))));
   });
 
   it("offers the next work only when the collection actually has a reading order", async () => {
@@ -114,8 +119,12 @@ describe("ReaderPage collection continuation", () => {
     // 順序付きなので現在位置と「読む順あり」を示し、次の作品へ進める。
     expect(screen.getByText(/1 \/ 2/)).toBeInTheDocument();
     expect(screen.getByText(/読む順あり/)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "となりの話" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "次の作品：となりの話" })).toBeInTheDocument();
     expect(screen.queryByText("読む順は決まっていません。同じまとまりの作品です。")).toBeNull();
+    // 題だけでは何の話か分からなかった。作者・分量・書き出しを札に載せる。
+    expect(await screen.findByText("隣の作者 · 11,000字 · 約20分")).toBeInTheDocument();
+    expect(screen.getByText("雨の夜に始まる話。")).toBeInTheDocument();
+    expect(dbApi.getDownloads).toHaveBeenCalledWith([102]);
   });
 
   it("never presents an unordered collection as a serial", async () => {
@@ -130,7 +139,7 @@ describe("ReaderPage collection continuation", () => {
     expect(screen.queryByText(/前の作品/)).toBeNull();
     expect(screen.queryByText(/\d+ \/ \d+/)).toBeNull();
     // 隣の作品自体は開ける。順序を主張しないだけである。
-    expect(screen.getByRole("button", { name: "となりの話" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "並びの次：となりの話" })).toBeInTheDocument();
   });
 
   it("follows the series cursor when the current work is the last item of a page", async () => {
@@ -150,7 +159,7 @@ describe("ReaderPage collection continuation", () => {
     renderReader();
 
     expect(await screen.findByText("公式シリーズ「長い連載」")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "二百一話" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "次の作品：二百一話" })).toBeInTheDocument();
     expect(dbApi.searchDownloadsV2).toHaveBeenCalledWith(expect.objectContaining({ cursor: "page-2" }));
   });
 });

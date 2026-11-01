@@ -288,6 +288,7 @@ pub fn run() -> tauri::Result<()> {
             commands::assist::assist_describe_author,
             commands::assist::assist_propose_splits,
             commands::assist::assist_summarize_work,
+            commands::assist::assist_proofread,
             commands::assist::assist_recap_previous,
             commands::assist::assist_load_note,
             commands::assist::assist_delete_note,

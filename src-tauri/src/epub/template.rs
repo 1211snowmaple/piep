@@ -269,7 +269,7 @@ impl TemplateManager {
         validate_template_name(template_name)?;
         validate_template_filename(filename)?;
         if is_builtin_template(template_name) {
-            return Err("ビルトインテンプレートは変更できません".to_string());
+            return Err("標準テンプレートは変更できません".to_string());
         }
         // 書き込む前に構文を確かめる。壊れたテンプレートを保存させると、
         // 書き出しのときになって初めて失敗し、原因が見えなくなる。
@@ -286,7 +286,7 @@ impl TemplateManager {
     ) -> Result<String, String> {
         validate_template_filename(filename)?;
         if is_builtin_template(template_name) {
-            return Err("ビルトインテンプレートは変更できません".to_string());
+            return Err("標準テンプレートは変更できません".to_string());
         }
         let content = builtin_file_content(template_name, filename)
             .ok_or_else(|| format!("'{}' に既定の内容がありません", filename))?;
@@ -316,7 +316,7 @@ impl TemplateManager {
         settings: TemplateSettings,
     ) -> Result<TemplateSettings, String> {
         if is_builtin_template(template_name) {
-            return Err("ビルトインテンプレートは変更できません".to_string());
+            return Err("標準テンプレートは変更できません".to_string());
         }
         let dir = self.existing_template_dir(template_name)?;
         let settings = settings.normalized();
@@ -331,7 +331,7 @@ impl TemplateManager {
     pub fn create_template(&self, template_name: &str, base: &str) -> Result<(), String> {
         validate_template_name(template_name)?;
         if is_builtin_template(template_name) {
-            return Err("ビルトイン名は新規テンプレートに使用できません".to_string());
+            return Err("標準テンプレートと同じ名前は使えません".to_string());
         }
         let dest = self.templates_dir.join(template_name);
         if dest.exists() {
@@ -358,10 +358,10 @@ impl TemplateManager {
     pub fn rename_template(&self, template_name: &str, next_name: &str) -> Result<(), String> {
         validate_template_name(next_name)?;
         if is_builtin_template(template_name) {
-            return Err("ビルトインテンプレートは変更できません".into());
+            return Err("標準テンプレートは変更できません".into());
         }
         if is_builtin_template(next_name) {
-            return Err("ビルトイン名は使用できません".into());
+            return Err("標準テンプレートと同じ名前は使えません".into());
         }
         let dir = self.existing_template_dir(template_name)?;
         let dest = self.templates_dir.join(next_name);
@@ -374,7 +374,7 @@ impl TemplateManager {
     pub fn delete_template(&self, template_name: &str) -> Result<(), String> {
         validate_template_name(template_name)?;
         if is_builtin_template(template_name) {
-            return Err("ビルトインテンプレートは削除できません".into());
+            return Err("標準テンプレートは削除できません".into());
         }
         let dir = self.existing_template_dir(template_name)?;
         std::fs::remove_dir_all(&dir).map_err(|e| format!("削除に失敗: {}", e))

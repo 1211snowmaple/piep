@@ -96,7 +96,7 @@ export function PdfOriginalViewer({ target, onClose }: { target: PdfOriginalTarg
       <Stack gap="sm">
         <div className="pdf-original-frame" ref={frameRef}>
           {pageQuery.error ? (
-            <Alert color="red" title="このページを描けません">{errorMessage(pageQuery.error)}</Alert>
+            <Alert color="red" title="このページを表示できません">{errorMessage(pageQuery.error)}</Alert>
           ) : shown ? (
             <img
               className="pdf-original-page"
@@ -113,7 +113,7 @@ export function PdfOriginalViewer({ target, onClose }: { target: PdfOriginalTarg
           <Button variant="default" size="xs" disabled={!canGoBack} onClick={() => setPage((value) => Math.max(0, value - 1))} leftSection={<Icons.previous size={IconSize.inline} />}>前のページ</Button>
           <Text size="xs" c="dimmed">
             {pageCount > 0 ? `${page + 1} / ${pageCount} ページ` : "読み込んでいます"}
-            {pageQuery.isFetching && pageCount > 0 ? "・描いています" : ""}
+            {pageQuery.isFetching && pageCount > 0 ? "・表示しています" : ""}
           </Text>
           <Button variant="default" size="xs" disabled={!canGoOn} onClick={() => setPage((value) => value + 1)} rightSection={<Icons.next size={IconSize.inline} />}>次のページ</Button>
         </Group>

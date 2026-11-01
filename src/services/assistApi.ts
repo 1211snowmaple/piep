@@ -43,7 +43,8 @@ export type AssistFeatureId =
   | "author_style"
   | "reader_recap"
   | "collection_split"
-  | "collection_naming";
+  | "collection_naming"
+  | "editor_proofread";
 
 export interface AssistFeatureProfile {
   enabled: boolean;
@@ -71,13 +72,14 @@ export const ASSIST_FEATURES: ReadonlyArray<{
   description: string;
   needsBody: boolean;
 }> = [
-  { id: "search_interpretation", label: "言葉で探す", description: "読みたい内容を棚の条件へ翻訳", needsBody: false },
-  { id: "work_synopsis", label: "作品のあらすじ", description: "本文から再読用の短い覚え書きを作成", needsBody: true },
-  { id: "work_tagging", label: "タグの補完", description: "棚にあるタグだけを候補として提案", needsBody: false },
+  { id: "search_interpretation", label: "言葉で探す", description: "読みたい内容を、棚の検索条件に言い換える", needsBody: false },
+  { id: "work_synopsis", label: "作品のあらすじ", description: "本文から、読み返すためのあらすじを作る", needsBody: true },
+  { id: "work_tagging", label: "タグの補完", description: "棚にあるタグから、足りないものを提案する", needsBody: false },
   { id: "author_style", label: "作者の題材メモ", description: "モデルや通信を使わず、手元の作品タグを集計します", needsBody: false },
-  { id: "reader_recap", label: "前回のあらすじ", description: "前の作品の本文から要点を作成", needsBody: true },
-  { id: "collection_split", label: "コレクションの分割案", description: "題名とタグから分け方を提案", needsBody: false },
-  { id: "collection_naming", label: "コレクションの命名", description: "内容に沿う名前と説明を提案", needsBody: false },
+  { id: "reader_recap", label: "前回のあらすじ", description: "前の話の本文から要点をまとめる", needsBody: true },
+  { id: "collection_split", label: "コレクションの分割案", description: "題名とタグから分け方を提案する", needsBody: false },
+  { id: "collection_naming", label: "コレクションの命名", description: "内容に合う名前と説明を提案する", needsBody: false },
+  { id: "editor_proofread", label: "本文の校正", description: "編集中の本文から誤字・脱字の候補を挙げる（直すかは一件ずつ選べる）", needsBody: true },
 ] as const;
 
 function defaultProfiles(): Record<AssistFeatureId, AssistFeatureProfile> {
@@ -197,7 +199,7 @@ export function validateAssistSettings(settings: AssistSettings): string | null 
   if (!isLocalAssistUrl(base)) {
     if (!base.startsWith("https://")) return "外部のつなぎ先には HTTPS が必要です";
     if (normalizeAssistBaseUrl(settings.remoteConsentUrl ?? "") !== base) {
-      return "現在の外部宛先へ送ることを明示的に許可してください";
+      return "外部の宛先へ送ることを許可してください";
     }
   }
   if (settings.verifiedTarget !== assistTarget(settings)) {
@@ -211,7 +213,7 @@ export function validateAssistSettings(settings: AssistSettings): string | null 
     }
     const override = profile.model.trim();
     if (feature.id !== "author_style" && profile.enabled && override && profile.verifiedTarget !== assistTarget({ baseUrl: settings.baseUrl, model: override })) {
-      return `「${feature.label}」の機能別モデルを試してから保存してください`;
+      return `「${feature.label}」だけで使うモデルを、試してから保存してください`;
     }
   }
   return null;
@@ -251,8 +253,10 @@ export function assistFeatureReady(settings: AssistSettings | undefined, feature
 
 export interface DiscoveredEngine {
   baseUrl: string;
-  /** 「LM Studio」など、そこで動いていそうなものの名前。 */
+  /** 「LM Studio」など、そこで動いているものの名前。 */
   label: string;
+  /** 名前をサーバーの応答で確かめたか。false ならポート番号からの推測。 */
+  identified: boolean;
   models: string[];
 }
 
@@ -439,6 +443,32 @@ async function invokeGenerated<T>(command: string, args: Record<string, unknown>
 }
 
 export type NoteSubject = "work" | "person" | "collection";
+
+// ---- 校正 -----------------------------------------------------------------
+
+/** 校正してほしい本文のひとまとまり。`id` は編集画面のブロックの身元。 */
+export interface ProofreadSegment {
+  id: string;
+  text: string;
+}
+
+/** 直す候補。`before` はその段落にそのまま一度だけ現れる文字列。 */
+export interface ProofreadSuggestion {
+  segmentId: string;
+  before: string;
+  after: string;
+  kind: "誤字" | "脱字" | "衍字" | "変換ミス" | "表記ゆれ" | "記号" | string;
+  reason: string;
+}
+
+/** 一回に送れる量。Rust 側の上限（6,000字・60段落）より少し控えめにまとめる。 */
+export const PROOFREAD_BATCH_CHARS = 3_000;
+export const PROOFREAD_BATCH_SEGMENTS = 40;
+
+/** 編集中の本文から誤字・脱字の候補を挙げてもらう。**直しはしない。** */
+export function proofreadSegments(engine: AssistEngine, segments: ProofreadSegment[]): Promise<ProofreadSuggestion[]> {
+  return invokeGenerated<ProofreadSuggestion[]>("assist_proofread", { engine, segments });
+}
 
 /** 保存してある覚え書きを読む。**モデルを呼ばない。** */
 export function loadNote(subjectType: NoteSubject, subjectKey: string, noteKind: string, engine?: AssistEngine | null): Promise<StoredNote | null> {

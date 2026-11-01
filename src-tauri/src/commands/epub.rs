@@ -227,7 +227,7 @@ pub fn load_manifest(
     let json_content = std::fs::read_to_string(&target_json_path)
         .map_err(|e| format!("JSONの読み込みに失敗: {}", e))?;
     let mut data: serde_json::Value =
-        serde_json::from_str(&json_content).map_err(|e| format!("JSON パースエラー: {}", e))?;
+        serde_json::from_str(&json_content).map_err(|e| format!("JSONを読み取れません: {}", e))?;
     if dl.source == "fanbox" {
         data = crate::fanbox_api::payload::into_post(data).ok_or_else(|| {
             "FANBOX投稿JSONの形式を解釈できないためEPUBを作成できません".to_string()
@@ -762,7 +762,7 @@ fn atomic_replace_file(source: &Path, destination: &Path) -> Result<(), String> 
     };
     result.map_err(|error| {
         format!(
-            "EPUBを原子的に置き換えられません ({}): {error}",
+            "EPUBを置き換えられません ({}): {error}",
             destination.display()
         )
     })
@@ -772,7 +772,7 @@ fn atomic_replace_file(source: &Path, destination: &Path) -> Result<(), String> 
 fn atomic_replace_file(source: &Path, destination: &Path) -> Result<(), String> {
     std::fs::rename(source, destination).map_err(|error| {
         format!(
-            "EPUBを原子的に置き換えられません ({}): {error}",
+            "EPUBを置き換えられません ({}): {error}",
             destination.display()
         )
     })
@@ -825,7 +825,7 @@ pub async fn export_collection_epub(
         collection_state.db.get_work_collection(&collection_id)
     })
     .await
-    .map_err(|error| format!("コレクション読み込みワーカーが予期せず終了しました: {error}"))??;
+    .map_err(|error| format!("コレクションの読み込みが途中で止まりました: {error}"))??;
     if collection.members.is_empty() {
         return Err("コレクションに作品がありません".to_string());
     }
@@ -889,7 +889,7 @@ pub async fn export_collection_epub(
         let loaded =
             tokio::task::spawn_blocking(move || load_manifest(&load_state.db, download_id))
                 .await
-                .map_err(|error| format!("EPUB変換ワーカーが予期せず終了しました: {error}"))?;
+                .map_err(|error| format!("EPUBの変換が途中で止まりました: {error}"))?;
         let (manifest, _, _) =
             loaded.map_err(|error| format!("「{}」を変換できません: {error}", member.title))?;
         manifests.push((download_id, manifest));
@@ -940,7 +940,7 @@ pub async fn export_collection_epub(
         }
     })
     .await
-    .map_err(|error| format!("EPUBワーカーがパニックしました: {error}"))??;
+    .map_err(|error| format!("EPUBの書き出しが異常終了しました: {error}"))??;
     emit_progress(
         &app_clone,
         &ExportProgress {
@@ -1170,7 +1170,7 @@ pub async fn export_epub_batch(
             current_title: String::new(),
             current_index: 0,
             total_count: total,
-            message: format!("{}件のEPUBエクスポートを開始", total),
+            message: format!("{}件のEPUB書き出しを開始", total),
         },
     );
 
@@ -1218,7 +1218,7 @@ pub async fn export_epub_batch(
                 // spawn_blocking は JoinSet を捨てても既に走る処理を止められない。
                 // 全ワーカーの終了を待ってからガードを解放する。
                 worker_error
-                    .get_or_insert_with(|| format!("EPUBワーカーがパニックしました: {error}"));
+                    .get_or_insert_with(|| format!("EPUBの書き出しが異常終了しました: {error}"));
             }
             None => break,
         }
@@ -1472,9 +1472,7 @@ pub async fn preview_epub_template(
             let (manifest, source, title) =
                 tokio::task::spawn_blocking(move || load_manifest(&load_state.db, id))
                     .await
-                    .map_err(|error| {
-                        format!("EPUBプレビューワーカーが予期せず終了しました: {error}")
-                    })??;
+                    .map_err(|error| format!("EPUBのプレビューが途中で止まりました: {error}"))??;
             (manifest, source, title, Some(id))
         }
         None => {

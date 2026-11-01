@@ -1928,6 +1928,7 @@ select {
    ここに残すのは、この窓だけ角を一段大きく取ること。 */
 .asset-preview-modal { border-radius: var(--mantine-radius-lg); }
 .version-row { width: 100%; color: inherit; text-align: left; cursor: pointer; background: var(--mantine-color-body); }
+.version-row--static { cursor: default; }
 .version-row[data-active] { border-color: var(--mantine-color-piep-5); box-shadow: 0 0 0 1px var(--mantine-color-piep-4); }
 .history-layout { display: grid; grid-template-columns: 200px minmax(0, 1fr); gap: var(--mantine-spacing-lg); align-items: start; }
 .history-layout__versions { display: flex; flex-direction: column; gap: 6px; }
@@ -2299,6 +2300,47 @@ select {
   writing-mode: horizontal-tb;
 }
 
+/* AIの手伝いの保存の帯。下の方の設定を直したあとも、戻らずに押せる。 */
+.assist-save-bar {
+  position: sticky;
+  bottom: 0;
+  z-index: 3;
+  padding: 10px 14px;
+  border: 1px solid var(--mantine-color-default-border);
+  border-radius: var(--mantine-radius-md);
+  background: var(--mantine-color-body);
+  box-shadow: 0 -6px 18px light-dark(rgb(30 42 55 / 6%), rgb(0 0 0 / 30%));
+}
+
+/* 読んだ割合と残り時間。題の横に小さく。狭い窓では題を優先して隠す。 */
+.reader-progress-text { flex: none; white-space: nowrap; font-variant-numeric: tabular-nums; }
+@media (max-width: 560px) { .reader-progress-text { display: none; } }
+
+/* 読了の札の、隣の作品。表紙・題・作者と分量を一枚に。 */
+.reader-neighbor {
+  display: flex;
+  min-width: 0;
+  gap: 12px;
+  align-items: flex-start;
+  padding: 10px;
+  border: 1px solid light-dark(#e1e5ea, #2c3440);
+  border-radius: var(--mantine-radius-md);
+  background: var(--mantine-color-body);
+  color: inherit;
+  text-align: left;
+  transition: border-color 120ms ease, box-shadow 120ms ease, transform 120ms ease;
+}
+.reader-neighbor:hover { border-color: var(--mantine-color-piep-4); box-shadow: 0 6px 18px light-dark(rgb(30 42 55 / 8%), rgb(0 0 0 / 28%)); }
+.reader-neighbor:focus-visible { outline: 2px solid var(--mantine-color-piep-5); outline-offset: 2px; }
+.reader-neighbor[data-emphasized] { border-color: var(--mantine-color-piep-4); background: light-dark(var(--mantine-color-piep-0), rgb(60 158 236 / 8%)); }
+.reader-neighbor__cover .work-cover--compact { width: 64px; height: auto; aspect-ratio: var(--work-cover-shape); flex: none; border-radius: 6px; }
+.reader-neighbor__body { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 3px; }
+.reader-neighbor__label { display: inline-flex; align-items: center; gap: 3px; }
+.reader-neighbor__title { line-height: 1.45; }
+.reader-neighbor__excerpt { line-height: 1.55; }
+.reader-neighbor__badge { align-self: flex-start; margin-top: 2px; }
+.reader-neighbor--empty { display: grid; min-height: 84px; place-items: center; border-style: dashed; background: transparent; }
+
 .reader-finish {
   display: flex;
   flex-direction: column;
@@ -2497,20 +2539,20 @@ select {
 .editor-preview-document p { margin: 0 0 1.25em; white-space: pre-wrap; }
 .editor-preview-document blockquote { margin: 1.4em 0; padding-left: 1.1em; border-left: 3px solid var(--mantine-color-violet-3); color: var(--mantine-color-dimmed); white-space: pre-wrap; }
 .editor-preview-document figure { margin: 2em 0; text-align: center; }
-.editor-preview-document figure img { max-width: 100%; max-height: 65vh; border-radius: var(--mantine-radius-md); }
+.editor-preview-document figure img { max-width: 100%; max-height: 65vh; border-radius: var(--mantine-radius-md); object-fit: contain; }
 .editor-preview-document figcaption { margin-top: 8px; color: var(--mantine-color-dimmed); font-family: "Noto Sans JP", sans-serif; font-size: 0.78rem; }
 .editor-preview-link { display: flex; align-items: center; gap: 12px; margin: 1.4em 0; padding: 14px; border: 1px solid light-dark(#dbe2e9, #303a46); border-radius: var(--mantine-radius-md); color: inherit; text-decoration: none; font-family: "Noto Sans JP", sans-serif; }
 .editor-preview-link span { display: flex; min-width: 0; flex-direction: column; }
 .editor-preview-link small { color: var(--mantine-color-dimmed); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* どちらの欄も仮想化で窓の分だけ描いている。ここへ content-visibility を
+   重ねると、窓の手前に用意した行が仮の高さで測られ、画面に入った瞬間に
+   本当の高さへ伸びる。画像の行はその差が数百pxあり、スクロールの途中で
+   一覧ごと跳ねていた。 */
 .editor-preview-block {
   position: relative;
   border-radius: 6px;
-  content-visibility: auto;
-  contain-intrinsic-size: auto 72px;
   transition: background 100ms ease, box-shadow 100ms ease;
 }
-.editor-preview-block,
-.editor-block { content-visibility: auto; contain-intrinsic-block-size: auto 140px; }
 .editor-preview-block[data-active] { background: light-dark(rgb(13 134 244 / 5%), rgb(60 158 236 / 8%)); box-shadow: 0 0 0 5px light-dark(rgb(13 134 244 / 5%), rgb(60 158 236 / 8%)); }
 .editor-preview-page-break { display: flex; align-items: center; gap: 10px; margin: 2.2em 0; color: var(--mantine-color-dimmed); font-family: "Noto Sans JP", sans-serif; font-size: 0.68rem; font-weight: 700; text-transform: uppercase; }
 .editor-preview-page-break::before,
@@ -2618,6 +2660,13 @@ select {
 }
 .editor-quote-input { padding-left: 12px; border-left: 3px solid var(--mantine-color-violet-2); }
 .editor-page-break { min-height: 34px; border: 1px dashed light-dark(#e0b56d, #70532b); border-radius: var(--mantine-radius-sm); color: light-dark(#9a640e, #e5b35f); background: light-dark(#fffaf1, #231d14); }
+/* 校正の候補。変わる字だけを強め、前後は普通の字で残す。 */
+.proofread-diff { line-height: 1.8; overflow-wrap: anywhere; }
+.proofread-diff del { color: var(--mantine-color-red-7); background: light-dark(var(--mantine-color-red-0), rgb(250 82 82 / 14%)); text-decoration-thickness: 1.5px; }
+.proofread-diff ins { color: var(--mantine-color-teal-8); background: light-dark(var(--mantine-color-teal-0), rgb(18 184 134 / 16%)); text-decoration: none; font-weight: 700; }
+.proofread-item[data-status="applied"],
+.proofread-item[data-status="dismissed"] { opacity: 0.55; }
+.proofread-item[data-status="stale"] { border-color: var(--mantine-color-yellow-5); }
 .editor-image-preview { display: grid; width: 150px; height: 112px; flex: 0 0 150px; place-items: center; overflow: hidden; border: 1px solid light-dark(#e1e5ea, #303844); border-radius: var(--mantine-radius-md); color: var(--mantine-color-dimmed); background: light-dark(#f3f5f7, #10151c); }
 
 

@@ -31,9 +31,11 @@ use crate::database::collection_rules;
 
 mod grounded;
 mod harness;
+mod proofread;
 
 pub use grounded::{ClaimVerdict, GroundedClaim};
 pub use harness::ToolTrace;
+pub use proofread::{proofread, ProofreadSegment, ProofreadSuggestion};
 
 /// 長編の部分抽出では、モデルの初回ロードと十分な思考時間も含めて待つ。
 /// 60秒では、GPUへ載せた直後や長いチャンクで正常な応答まで打ち切っていた。
@@ -155,6 +157,7 @@ pub const FEATURE_AUTHOR_STYLE: &str = "author_style";
 pub const FEATURE_COLLECTION_SPLIT: &str = "collection_split";
 pub const FEATURE_WORK_SYNOPSIS: &str = "work_synopsis";
 pub const FEATURE_READER_RECAP: &str = "reader_recap";
+pub const FEATURE_EDITOR_PROOFREAD: &str = "editor_proofread";
 
 pub fn current_prompt_version(feature_id: &str) -> &'static str {
     match feature_id {
@@ -165,6 +168,7 @@ pub fn current_prompt_version(feature_id: &str) -> &'static str {
         FEATURE_COLLECTION_SPLIT => "collection_split/v5",
         FEATURE_WORK_SYNOPSIS => "work_synopsis/v12",
         FEATURE_READER_RECAP => "reader_recap/v12",
+        FEATURE_EDITOR_PROOFREAD => "editor_proofread/v1",
         _ => "unknown/v1",
     }
 }
@@ -414,6 +418,10 @@ struct ModelListing {
 #[derive(Deserialize)]
 struct ModelEntry {
     id: String,
+    /// 配っているサーバーの癖が出る。LM Studio は `organization_owner`、
+    /// llama.cpp は `llamacpp`、Ollama は `library` を名乗る。
+    #[serde(default)]
+    owned_by: Option<String>,
     /// llama.cpp 系（Strata を含む）は、読み込んだ文脈長を `meta.n_ctx` で名乗る。
     #[serde(default)]
     meta: Option<ModelEntryMeta>,
@@ -546,20 +554,19 @@ fn require_body_consent(engine: &AssistEngine) -> Result<(), String> {
 
 fn validate_engine(engine: &AssistEngine) -> Result<(), String> {
     if engine.base_url.trim().is_empty() {
-        return Err("命名エンジンのURLが設定されていません".to_string());
+        return Err("推論サーバーのURLが設定されていません".to_string());
     }
     if engine.model.trim().is_empty() {
-        return Err("命名エンジンのモデル名が設定されていません".to_string());
+        return Err("使うモデルが設定されていません".to_string());
     }
     let base_url = normalized_base_url(&engine.base_url)?;
     if !is_local(&base_url) {
         if !base_url.starts_with("https://") {
             return Err("この端末の外へ送る宛先には HTTPS が必要です".to_string());
         }
-        let consent = engine
-            .remote_consent_url
-            .as_deref()
-            .ok_or_else(|| "この端末の外へ送る宛先を設定で明示的に許可してください".to_string())?;
+        let consent = engine.remote_consent_url.as_deref().ok_or_else(|| {
+            "この端末の外へ送るには、設定でその宛先を許可してください".to_string()
+        })?;
         if normalized_base_url(consent)? != base_url {
             return Err(
                 "現在の外部宛先はまだ許可されていません。設定で宛先を確認してください".to_string(),
@@ -576,7 +583,7 @@ static ASSIST_CLIENT: LazyLock<Result<reqwest::Client, String>> = LazyLock::new(
         // そのまま転送される。最終宛先を曖昧にしないため redirect は受けない。
         .redirect(reqwest::redirect::Policy::none())
         .build()
-        .map_err(|error| format!("命名エンジンに接続できません: {error}"))
+        .map_err(|error| format!("推論サーバーに接続できません: {error}"))
 });
 
 static LOCAL_ASSIST_CLIENT: LazyLock<Result<reqwest::Client, String>> = LazyLock::new(|| {
@@ -585,7 +592,7 @@ static LOCAL_ASSIST_CLIENT: LazyLock<Result<reqwest::Client, String>> = LazyLock
         .redirect(reqwest::redirect::Policy::none())
         .no_proxy()
         .build()
-        .map_err(|error| format!("命名エンジンに接続できません: {error}"))
+        .map_err(|error| format!("推論サーバーに接続できません: {error}"))
 });
 
 #[derive(Clone)]
@@ -662,10 +669,39 @@ const DISCOVER_TIMEOUT: Duration = Duration::from_millis(1_500);
 #[serde(rename_all = "camelCase")]
 pub struct DiscoveredEngine {
     pub base_url: String,
-    /// 「LM Studio」など、そこで動いていそうなものの名前。当てずっぽうを
-    /// 断定しないよう、画面では「〜のあたり」と添えて出す。
+    /// 「LM Studio」など、そこで動いているものの名前。
     pub label: String,
+    /// `label` をサーバー自身の応答で確かめたか。確かめられなかったときは、
+    /// ポート番号からの推測なので、画面でそう断る。
+    ///
+    /// 以前は番号だけで名前を決め、全部に「〜のあたり」と添えていた。8080 で
+    /// 動いている Strata が「llama.cpp / LocalAI のあたり」と出ていた。
+    pub identified: bool,
     pub models: Vec<String>,
+}
+
+/// `/health` の応答。Strata は `service: "strata"` を名乗る。
+#[derive(Deserialize)]
+struct HealthReply {
+    #[serde(default)]
+    service: Option<String>,
+}
+
+/// 応答から、動いているサーバーを名指しする。分からなければ `None`。
+fn identify_engine(service: Option<&str>, listing: &ModelListing) -> Option<&'static str> {
+    if service.is_some_and(|service| service.eq_ignore_ascii_case("strata")) {
+        return Some("Strata");
+    }
+    let owner = listing
+        .data
+        .iter()
+        .find_map(|entry| entry.owned_by.as_deref())?;
+    match owner {
+        "organization_owner" => Some("LM Studio"),
+        "llamacpp" => Some("llama.cpp"),
+        "library" => Some("Ollama"),
+        _ => None,
+    }
 }
 
 /// この端末で動いている推論サーバーを探す。
@@ -693,9 +729,22 @@ pub async fn discover_engines() -> Vec<DiscoveredEngine> {
                 return None;
             }
             let listing: ModelListing = response.json().await.ok()?;
+            // `/health` は `/v1` の外にある。名乗らないサーバーも多いので、
+            // 失敗しても見つかったこと自体は変わらない。
+            let root = base_url.trim_end_matches("/v1");
+            let service = match client.get(format!("{root}/health")).send().await {
+                Ok(reply) if reply.status().is_success() => reply
+                    .json::<HealthReply>()
+                    .await
+                    .ok()
+                    .and_then(|health| health.service),
+                _ => None,
+            };
+            let named = identify_engine(service.as_deref(), &listing);
             Some(DiscoveredEngine {
                 base_url: (*base_url).to_string(),
-                label: (*label).to_string(),
+                label: named.unwrap_or(label).to_string(),
+                identified: named.is_some(),
                 models: listing.data.into_iter().map(|entry| entry.id).collect(),
             })
         }
@@ -1369,7 +1418,9 @@ pub async fn name_bundle(
         .iter()
         .all(|work| work.title.trim().is_empty() && work.tags.is_empty())
     {
-        return Err("送信を許可した命名の材料がありません".into());
+        return Err(
+            "送ってよい命名の材料がありません。設定の「送る項目」を確かめてください".into(),
+        );
     }
     let candidates = naming_candidates(&payload);
     let user = encode(&serde_json::json!({
@@ -1442,11 +1493,11 @@ fn select_named_bundle(content: &str, candidates: &[NamedBundle]) -> Result<Name
         candidate_id: usize,
     }
     let raw: Raw = serde_json::from_str(extract_json(content)?)
-        .map_err(|error| format!("命名エンジンの応答を読めません: {error}"))?;
+        .map_err(|error| format!("モデルの答えを読めません: {error}"))?;
     candidates
         .get(raw.candidate_id)
         .cloned()
-        .ok_or_else(|| "命名エンジンが存在しない候補番号を返しました".into())
+        .ok_or_else(|| "モデルが存在しない候補番号を返しました".into())
 }
 
 // ============================================================================
@@ -2975,6 +3026,32 @@ pub async fn summarize_work(
     if body.trim().is_empty() {
         return Err("本文がありません".to_string());
     }
+    // 設定画面の「題名・作者名・タグを送る」は、以前はここで効いていなかった。
+    // 切っても本文の頭に題名・作者・タグが付いて送られていた。
+    let policy = input_policy(engine, FEATURE_WORK_SYNOPSIS)?;
+    let limited = WorkFacts {
+        title: if policy.include_title {
+            work.title.clone()
+        } else {
+            String::new()
+        },
+        author_name: if policy.include_author {
+            work.author_name.clone()
+        } else {
+            String::new()
+        },
+        tags: if policy.include_tags {
+            work.tags
+                .iter()
+                .take(policy.max_tags_per_item.unwrap_or(usize::MAX))
+                .cloned()
+                .collect()
+        } else {
+            Vec::new()
+        },
+        excerpt: work.excerpt.clone(),
+    };
+    let work = &limited;
     if let Some(context) = grounded_context(engine, FEATURE_WORK_SYNOPSIS).await? {
         return grounded::grounded_note(
             engine,
@@ -3012,7 +3089,12 @@ pub async fn recap_previous(
         return Err("前の話の本文がありません".to_string());
     }
     let context = WorkFacts {
-        title: previous_title.to_string(),
+        // 「題名を送る」を切ったら、前の話の題名も送らない。
+        title: if input_policy(engine, FEATURE_READER_RECAP)?.include_title {
+            previous_title.to_string()
+        } else {
+            String::new()
+        },
         author_name: String::new(),
         tags: Vec::new(),
         excerpt: None,
@@ -4356,6 +4438,23 @@ mod tests {
         .unwrap();
         assert_eq!(served_context_from_listing(&two, "c"), None);
         assert_eq!(served_context_from_listing(&two, "b"), Some(8192));
+    }
+
+    #[test]
+    fn found_servers_are_named_from_their_own_replies_not_from_the_port() {
+        let listing = |json: &str| serde_json::from_str::<ModelListing>(json).unwrap();
+        // Strata は 8080 で動くが llama.cpp ではない。/health で名乗る。
+        let strata = listing(r#"{"data":[{"id":"qwen3.6","meta":{"n_ctx":65536}}]}"#);
+        assert_eq!(identify_engine(Some("strata"), &strata), Some("Strata"));
+        assert_eq!(identify_engine(None, &strata), None);
+        let lm = listing(r#"{"data":[{"id":"a","owned_by":"organization_owner"}]}"#);
+        assert_eq!(identify_engine(None, &lm), Some("LM Studio"));
+        let llama = listing(r#"{"data":[{"id":"a","owned_by":"llamacpp"}]}"#);
+        assert_eq!(identify_engine(None, &llama), Some("llama.cpp"));
+        let ollama = listing(r#"{"data":[{"id":"a","owned_by":"library"}]}"#);
+        assert_eq!(identify_engine(None, &ollama), Some("Ollama"));
+        let unknown = listing(r#"{"data":[{"id":"a","owned_by":"someone"}]}"#);
+        assert_eq!(identify_engine(None, &unknown), None);
     }
 
     #[test]
