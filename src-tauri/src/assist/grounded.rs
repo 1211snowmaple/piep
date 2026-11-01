@@ -15,7 +15,10 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 
 use super::harness::{self, CallOptions, Effort};
-use super::{summary_source_units, AssistEngine, AssistNote, SummaryUnit, WorkFacts};
+use super::{
+    summary_source_units, AssistEngine, AssistNote, AssistProgress, AssistStage, Progress,
+    SummaryUnit, WorkFacts,
+};
 
 /// 根拠の照合結果。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -487,6 +490,7 @@ pub(super) async fn grounded_note(
     task: &GroundedTask,
     memory: Option<&str>,
     context_tokens: usize,
+    progress: Progress<'_>,
 ) -> Result<AssistNote, String> {
     let units = summary_source_units(body);
     if units.iter().all(|unit| unit.text.trim().is_empty()) {
@@ -494,7 +498,8 @@ pub(super) async fn grounded_note(
     }
     if fits_whole(&units, context_tokens) {
         let prefix = document_prefix(work, &units, None);
-        return write_and_check(engine, work, &prefix, &units, None, task, memory).await;
+        let drafting = Step::new(progress, AssistStage::Drafting, None);
+        return write_and_check(engine, work, &prefix, &units, None, task, memory, drafting).await;
     }
     let sections = sections_for(&units, context_tokens)?;
     let section_count = sections.len();
@@ -502,12 +507,19 @@ pub(super) async fn grounded_note(
     for (index, section) in sections.iter().enumerate() {
         let mut asking = document_prefix(work, section, Some((index + 1, section_count)));
         asking.push(harness::user(&draft_request(&SECTION_TASK, None)));
-        let claims = harness::structured(
+        let step = Step::new(
+            progress,
+            AssistStage::Reading,
+            Some((index + 1, section_count)),
+        );
+        step.start();
+        let claims = harness::structured_noting(
             engine,
             &asking,
             &draft_schema(&SECTION_TASK),
             drafting_options(),
             |value| checked_draft(value, &SECTION_TASK, &units, None),
+            || step.retry(),
         )
         .await?;
         memos.push(claims);
@@ -518,7 +530,57 @@ pub(super) async fn grounded_note(
         .flat_map(|claim| claim.sources.iter().copied())
         .collect::<BTreeSet<_>>();
     let prefix = memo_prefix(work, &memos, &units, &pool);
-    write_and_check(engine, work, &prefix, &units, Some(&pool), task, memory).await
+    let combining = Step::new(progress, AssistStage::Combining, None);
+    write_and_check(
+        engine,
+        work,
+        &prefix,
+        &units,
+        Some(&pool),
+        task,
+        memory,
+        combining,
+    )
+    .await
+}
+
+/// 進み具合の一段。始まりと、頼み直しを知らせる。
+#[derive(Clone, Copy)]
+struct Step<'a> {
+    progress: Progress<'a>,
+    stage: AssistStage,
+    section: Option<(usize, usize)>,
+}
+
+impl<'a> Step<'a> {
+    fn new(progress: Progress<'a>, stage: AssistStage, section: Option<(usize, usize)>) -> Self {
+        Self {
+            progress,
+            stage,
+            section,
+        }
+    }
+
+    fn with_stage(self, stage: AssistStage) -> Self {
+        Self { stage, ..self }
+    }
+
+    fn report(&self, retry: bool) {
+        (self.progress)(AssistProgress {
+            stage: self.stage,
+            section: self.section.map(|(index, _)| index),
+            sections: self.section.map(|(_, count)| count),
+            retry,
+        });
+    }
+
+    fn start(&self) {
+        self.report(false);
+    }
+
+    fn retry(&self) {
+        self.report(true);
+    }
 }
 
 /// 下書き → 照合 →（必要なら）直し → 照合。
@@ -533,27 +595,49 @@ async fn write_and_check(
     allowed: Option<&BTreeSet<usize>>,
     task: &GroundedTask,
     memory: Option<&str>,
+    step: Step<'_>,
 ) -> Result<AssistNote, String> {
     let draft_options = drafting_options().sharing_first(prefix.len());
     let schema = draft_schema(task);
 
     let mut drafting = prefix.to_vec();
     drafting.push(harness::user(&draft_request(task, memory)));
-    let mut claims = harness::structured(engine, &drafting, &schema, draft_options, |value| {
-        checked_draft(value, task, units, allowed)
-    })
+    step.start();
+    let mut claims = harness::structured_noting(
+        engine,
+        &drafting,
+        &schema,
+        draft_options,
+        |value| checked_draft(value, task, units, allowed),
+        || step.retry(),
+    )
     .await?;
-    verify(engine, work, units, &mut claims).await?;
+    verify(
+        engine,
+        work,
+        units,
+        &mut claims,
+        step.with_stage(AssistStage::Checking),
+    )
+    .await?;
 
     if needs_revision(&claims) {
         let mut revising = drafting.clone();
         revising.push(harness::assistant(&encode_claims(&claims)));
         revising.push(harness::user(&revise_request(task, &claims)));
-        let mut revised = harness::structured(engine, &revising, &schema, draft_options, |value| {
-            checked_draft(value, task, units, allowed)
-        })
+        let revise = step.with_stage(AssistStage::Revising);
+        revise.start();
+        let mut revised = harness::structured_noting(
+            engine,
+            &revising,
+            &schema,
+            draft_options,
+            |value| checked_draft(value, task, units, allowed),
+            || revise.retry(),
+        )
         .await?;
-        verify(engine, work, units, &mut revised).await?;
+        let recheck = step.with_stage(AssistStage::Rechecking);
+        verify(engine, work, units, &mut revised, recheck).await?;
         // 直した結果のほうが悪くなることもある。支持されない文が少ない方を採る。
         if unsupported_weight(&revised) <= unsupported_weight(&claims) {
             claims = revised;
@@ -664,16 +748,19 @@ async fn verify(
     work: &WorkFacts,
     units: &[SummaryUnit],
     claims: &mut [GroundedClaim],
+    step: Step<'_>,
 ) -> Result<(), String> {
     let mut checking = verify_prefix(work);
     checking.push(harness::user(&verify_request(claims, units)));
     let count = claims.len();
-    let checks = harness::structured(
+    step.start();
+    let checks = harness::structured_noting(
         engine,
         &checking,
         &verify_schema(),
         verifying_options(),
         |value| checked_verdicts(value, count),
+        || step.retry(),
     )
     .await?;
     apply_verdicts(claims, checks);
@@ -909,9 +996,17 @@ mod tests {
             .and_then(|value| value.parse().ok())
             .unwrap_or(65_536);
         let started = std::time::Instant::now();
-        let note = grounded_note(&engine, &work, &body, &SYNOPSIS_TASK, None, context)
-            .await
-            .unwrap();
+        let note = grounded_note(
+            &engine,
+            &work,
+            &body,
+            &SYNOPSIS_TASK,
+            None,
+            context,
+            &|_| {},
+        )
+        .await
+        .unwrap();
         let out = serde_json::json!({
             "seconds": started.elapsed().as_secs(),
             "note": note.text,

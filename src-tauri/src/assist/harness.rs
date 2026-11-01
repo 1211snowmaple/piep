@@ -382,9 +382,27 @@ pub(super) async fn structured<T>(
     options: CallOptions,
     check: impl Fn(serde_json::Value) -> Result<T, String>,
 ) -> Result<T, String> {
+    structured_noting(engine, messages, schema, options, check, || {}).await
+}
+
+/// `structured` と同じ。頼み直す直前に `on_retry` を呼ぶ。
+///
+/// 長い本文では頼み直しが一回で2分近くかかる。黙って待たせると、画面からは
+/// 止まったのか進んでいるのか分からない。
+pub(super) async fn structured_noting<T>(
+    engine: &AssistEngine,
+    messages: &[serde_json::Value],
+    schema: &serde_json::Value,
+    options: CallOptions,
+    check: impl Fn(serde_json::Value) -> Result<T, String>,
+    on_retry: impl Fn(),
+) -> Result<T, String> {
     let mut conversation = messages.to_vec();
     let mut last_error = String::new();
     for attempt in 0..2 {
+        if attempt > 0 {
+            on_retry();
+        }
         let answer = match complete(engine, &conversation, Some(schema), None, None, options).await
         {
             Ok(answer) => answer,

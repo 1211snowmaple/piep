@@ -494,6 +494,18 @@ export function summarizeWork(engine: AssistEngine, downloadId: number): Promise
   return invokeGenerated<AssistNote>("assist_summarize_work", { engine, downloadId });
 }
 
+/** あらすじ・前回のあらすじを作っているあいだの段階（`assist-progress` イベント）。 */
+export interface AssistProgressEvent {
+  feature: AssistFeatureId;
+  downloadId: number;
+  stage: "reading" | "combining" | "drafting" | "checking" | "revising" | "rechecking" | "writing";
+  /** 長編を区切って読むときの、何番目の区切りか（1から）。 */
+  section: number | null;
+  sections: number | null;
+  /** 答えの形が崩れて、同じ段階を頼み直しているところか。 */
+  retry: boolean;
+}
+
 /** 直前の話の要点を出す。**本文を送る。** */
 export function recapPrevious(
   engine: AssistEngine,

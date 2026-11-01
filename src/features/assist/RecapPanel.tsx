@@ -3,6 +3,7 @@ import { Alert } from "@mantine/core";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { errorMessage } from "@/lib/format";
 import { AssistNoteBody, AssistPanel } from "@/features/assist/AssistPanel";
+import { AssistProgressLine } from "@/features/assist/AssistProgress";
 import { useAssist } from "@/features/assist/useAssist";
 import { deleteNote, loadNote, recapPrevious, toEngine } from "@/services/assistApi";
 import { isTauriRuntime } from "@/services/dbApi";
@@ -60,11 +61,12 @@ function RecapForPair({
     <AssistPanel
       featureId="reader_recap"
       title="前回のあらすじ"
-      hint={`「${previous.title}」の本文から要点の文を選びます。間を空けて続きを読むときに。`}
+      hint={`「${previous.title}」の本文から要点をまとめます。間を空けて続きを読むときに。`}
       engineReady={Boolean(engine)}
       needsBody
       bodyAllowed={body}
       busy={run.isPending}
+      busyDetail={<AssistProgressLine feature="reader_recap" downloadId={currentId} active={run.isPending} />}
       actionLabel={note.data ? "作り直す" : "前の話を思い出す"}
       onRun={() => run.mutate()}
     >

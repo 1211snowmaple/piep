@@ -3038,6 +3038,52 @@ fn validated_split_groups(
     Ok(groups)
 }
 
+/// 長くかかる手伝い（あらすじ・前回のあらすじ）の、いまの段階。
+///
+/// 長い本文では、一作に数分かかる。読み込み中の印だけでは、止まったのか
+/// 進んでいるのか分からないので、段階を画面へ知らせる。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AssistStage {
+    /// 長編の区切りを、一つずつ読んでいる。
+    Reading,
+    /// 区切りのメモから、全体をまとめている。
+    Combining,
+    /// 本文から下書きを作っている。
+    Drafting,
+    /// 下書きの各文が、根拠の原文に合っているかを照らしている。
+    Checking,
+    /// 照合で合わなかった文を直している。
+    Revising,
+    /// 直したものを、もう一度照らしている。
+    Rechecking,
+    /// 根拠を付けない作り方（文脈の小さいモデル）で作っている。
+    Writing,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssistProgress {
+    pub stage: AssistStage,
+    /// 長編を区切って読むときの、何番目の区切りか（1から）。
+    pub section: Option<usize>,
+    pub sections: Option<usize>,
+    /// 答えの形が崩れて、同じ段階を頼み直しているところか。
+    pub retry: bool,
+}
+
+/// 進み具合の受け口。tauri のコマンドから呼ぶので、待つあいだも送れる形にする。
+pub type Progress<'a> = &'a (dyn Fn(AssistProgress) + Send + Sync);
+
+fn report_writing(progress: Progress<'_>) {
+    progress(AssistProgress {
+        stage: AssistStage::Writing,
+        section: None,
+        sections: None,
+        retry: false,
+    });
+}
+
 /// 本文から、短いあらすじを作ってもらう。
 ///
 /// **本文を送るので、利用者の許可が要る。** 取得元の紹介文は宣伝であって
@@ -3047,6 +3093,7 @@ pub async fn summarize_work(
     engine: &AssistEngine,
     work: &WorkFacts,
     body: &str,
+    progress: Progress<'_>,
 ) -> Result<AssistNote, String> {
     require_body_consent(engine)?;
     if body.trim().is_empty() {
@@ -3086,9 +3133,11 @@ pub async fn summarize_work(
             &grounded::SYNOPSIS_TASK,
             None,
             context,
+            progress,
         )
         .await;
     }
+    report_writing(progress);
     hierarchical_body_summary(
         engine,
         FEATURE_WORK_SYNOPSIS,
@@ -3109,6 +3158,7 @@ pub async fn recap_previous(
     previous_title: &str,
     body: &str,
     memory: Option<&str>,
+    progress: Progress<'_>,
 ) -> Result<AssistNote, String> {
     require_body_consent(engine)?;
     if body.trim().is_empty() {
@@ -3133,9 +3183,11 @@ pub async fn recap_previous(
             &grounded::RECAP_TASK,
             memory,
             tokens,
+            progress,
         )
         .await;
     }
+    report_writing(progress);
     hierarchical_body_summary(
         engine,
         FEATURE_READER_RECAP,

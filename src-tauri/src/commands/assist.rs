@@ -8,7 +8,8 @@
 
 use std::sync::Arc;
 
-use tauri::Manager;
+use serde::Serialize;
+use tauri::{Emitter, Manager};
 
 use crate::assist::{
     self, AssistEngine, AssistNote, AssistRuntimeProfile, BundleSplit, DiscoveredEngine,
@@ -332,6 +333,34 @@ pub async fn assist_proofread(
 
 // ---- あらすじ -------------------------------------------------------------
 
+/// 進み具合のイベント。どの作品の、どの機能の話かを添えて送る。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AssistProgressEvent {
+    feature: &'static str,
+    download_id: i64,
+    #[serde(flatten)]
+    progress: assist::AssistProgress,
+}
+
+fn progress_sink(
+    app: &tauri::AppHandle,
+    feature: &'static str,
+    download_id: i64,
+) -> impl Fn(assist::AssistProgress) + Send + Sync {
+    let app = app.clone();
+    move |progress| {
+        let _ = app.emit(
+            "assist-progress",
+            AssistProgressEvent {
+                feature,
+                download_id,
+                progress,
+            },
+        );
+    }
+}
+
 /// 本文から、あとで思い出すためのあらすじを作ってもらう。
 ///
 /// **本文を送るので、許可が要る。** 材料を読む前に確かめる。
@@ -351,7 +380,8 @@ pub async fn assist_summarize_work(
         FEATURE_WORK_SYNOPSIS,
         &serde_json::json!({ "work": &work, "body": &body }),
     )?;
-    let value = assist::summarize_work(&engine, &work, &body).await?;
+    let progress = progress_sink(&app, FEATURE_WORK_SYNOPSIS, download_id);
+    let value = assist::summarize_work(&engine, &work, &body, &progress).await?;
     provenance.prompt_version =
         assist::prompt_version_for_note(FEATURE_WORK_SYNOPSIS, &value).to_string();
     let saved_provenance = provenance.clone();
@@ -395,7 +425,9 @@ pub async fn assist_recap_previous(
             "memory": &memory
         }),
     )?;
-    let value = assist::recap_previous(&engine, &work.title, &body, memory.as_deref()).await?;
+    let progress = progress_sink(&app, FEATURE_READER_RECAP, current_download_id);
+    let value =
+        assist::recap_previous(&engine, &work.title, &body, memory.as_deref(), &progress).await?;
     provenance.prompt_version =
         assist::prompt_version_for_note(FEATURE_READER_RECAP, &value).to_string();
     // 覚え書きは**読もうとしている話**にぶら下げる。同じ前の話でも、

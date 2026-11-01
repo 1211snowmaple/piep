@@ -4,6 +4,7 @@ import { notifications } from "@mantine/notifications";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AssistLauncher } from "@/features/assist/AssistLauncher";
 import { AssistNoteBody } from "@/features/assist/AssistPanel";
+import { AssistProgressLine } from "@/features/assist/AssistProgress";
 import { useAssist } from "@/features/assist/useAssist";
 import { errorMessage } from "@/lib/format";
 import {
@@ -220,6 +221,7 @@ function WorkAssistForWork({ downloadId }: { downloadId: number }) {
           <Stack>
             <Text size="sm" c="dimmed">本文を読んで、結末までのあらすじを400字以内で書きます。文ごとに原文の根拠を付け、別の確認で原文と照らします。文脈の小さいモデルでは、本文の文を選ぶ抜粋になります。</Text>
             {note.data && <AssistNoteBody text={note.data.text} sourceTail={note.data.sourceTail} claims={note.data.claims} modelId={note.data.modelId} createdAt={note.data.createdAt} promptVersion={note.data.promptVersion} promptStale={note.data.promptStale} inputStale={note.data.inputStale} configStale={note.data.configStale} />}
+            <AssistProgressLine feature="work_synopsis" downloadId={downloadId} active={summarize.isPending} />
             <Group justify="flex-end"><Button loading={summarize.isPending} disabled={!synopsisReady} onClick={() => summarize.mutate()}>{note.data ? "作り直す" : "あらすじを作る"}</Button></Group>
           </Stack>
         ) : active === "tags" ? (
