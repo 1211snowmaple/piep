@@ -1,3 +1,4 @@
+mod app_update;
 mod pc_client;
 
 use tauri::Manager;
@@ -7,6 +8,8 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
+            #[cfg(mobile)]
+            app.handle().plugin(tauri_plugin_barcode_scanner::init())?;
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
             app.manage(pc_client::PcClientState::new(
@@ -21,6 +24,9 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            app_update::app_update_check,
+            app_update::app_update_download,
+            app_update::app_update_installed_version,
             pc_client::pc_pair,
             pc_client::pc_connection_status,
             pc_client::pc_disconnect,

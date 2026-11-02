@@ -6,6 +6,7 @@ import "./App.desktop.css";
 import { PiepLockup } from "./PiepLockup";
 import { PcLibrary } from "./PcLibrary";
 import { PcConnectionSettings } from "./PcConnectionSettings";
+import { AppUpdateNotice, AppUpdateSettings, useAppUpdate } from "./appUpdate";
 import { sendReading } from "./readingSync";
 import { OnlineReader } from "./OnlineReader";
 import { OfflineLibrary } from "./OfflineLibrary";
@@ -101,6 +102,7 @@ function App() {
   const [onlineWork, setOnlineWork] = useState<PcWork | null>(null);
   const [offlineWork, setOfflineWork] = useState<OfflineWork | null>(null);
   const [pcConnection, setPcConnection] = useState<PcConnectionStatus | null>(null);
+  const [appUpdate, setAppUpdate] = useAppUpdate();
   const [pcSearch, setPcSearch] = useState<PcSearchCriteria>(defaultPcSearch);
   const [pcNavigationKey, setPcNavigationKey] = useState(0);
   const [sidebarSearch, setSidebarSearch] = useState<PcSearchCriteria>(defaultPcSearch);
@@ -149,6 +151,7 @@ function App() {
   useEffect(() => {
     const backWindow = window as Window & { piepAndroidBack?: () => boolean; piepAndroidReaderLayerBack?: () => boolean };
     backWindow.piepAndroidBack = () => {
+      if (window.piepAndroidScannerBack?.()) return true;
       if (readerOpen) {
         if (backWindow.piepAndroidReaderLayerBack?.()) return true;
         setOnlineWork(null);
@@ -517,6 +520,7 @@ function App() {
         <header className="mobile-header"><button ref={sidebarToggleRef} className="sidebar-toggle" type="button" onClick={() => setSidebarOpen((open) => !open)} aria-label={sidebarOpen ? "サイドバーを閉じる" : "サイドバーを開く"} aria-expanded={sidebarOpen} aria-controls="app-navigation"><Icon name="menu" /></button><PiepLockup size={22} /><span className="mobile-section-title">{sections.find((item) => item.id === section)?.label}</span></header>
         {sidebarOpen && <button className="mobile-sidebar-scrim" type="button" onClick={() => setSidebarOpen(false)} aria-label="サイドバーを閉じる" />}
         <main className="main-content">
+          {section === "pc" && <AppUpdateNotice info={appUpdate} onOpenSettings={() => showSection("settings")} />}
           {section === "pc" && <PcLibrary criteria={pcSearch} onCriteriaChange={setPcSearch} onOpenWork={openOnlineWork} onOpenDetail={openOnlineDetail} onStatusChange={setPcConnection} onGoToSettings={() => showSection("settings")} navigationKey={pcNavigationKey} savedRevision={savedRevision} pagingMode={pagingMode} />}
           {section === "offline" && <OfflineLibrary onOpenWork={openOfflineWork} onOpenDetail={openOfflineDetail} onShowPc={() => showSection("pc")} savedRevision={savedRevision} pagingMode={pagingMode} />}
           {section === "settings" && <>
@@ -525,6 +529,7 @@ function App() {
             <section className="settings-card"><div className="setting-title"><div><h2>一覧の読み込み方</h2><p>サーバーと端末内の作品一覧で、続きをどう表示するか選べます。</p></div></div><div className="setting-choice"><span>作品一覧</span><div role="group" aria-label="一覧の読み込み方"><button className={pagingMode === "auto" ? "selected" : ""} onClick={() => setPagingMode("auto")}>スクロールで自動</button><button className={pagingMode === "pages" ? "selected" : ""} onClick={() => setPagingMode("pages")}>ページ番号</button></div></div><p className="settings-help">関連度順の検索は自動読み込みになります。サーバーの一覧のページ番号は先頭 251 ページまで選べます。全作品をたどるときは自動読み込みを使ってください。</p></section>
             <section className="settings-card"><div className="setting-title"><div><h2>カラーテーマ</h2><p>デスクトップ版と同じく、初期状態はシステム設定に従います。</p></div></div><div className="setting-choice"><span>アプリの表示</span><div role="group" aria-label="アプリのカラーテーマ"><button className={appearance === "auto" ? "selected" : ""} onClick={() => setAppearance("auto")}>システム</button><button className={appearance === "light" ? "selected" : ""} onClick={() => setAppearance("light")}>ライト</button><button className={appearance === "dark" ? "selected" : ""} onClick={() => setAppearance("dark")}>ダーク</button></div></div></section>
             <PcConnectionSettings status={pcConnection} onStatusChange={setPcConnection} />
+            <AppUpdateSettings info={appUpdate} onInfo={setAppUpdate} />
           </>}
         </main>
         <nav className="bottom-nav" aria-label="下部ナビゲーション">{sections.map((item) => <button key={item.id} className={section === item.id ? "bottom-item active" : "bottom-item"} onClick={() => showSection(item.id)} aria-current={section === item.id ? "page" : undefined}><Icon name={item.icon} /><span>{item.label}</span></button>)}</nav>
