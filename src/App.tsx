@@ -6,6 +6,7 @@ import "./App.desktop.css";
 import { PiepLockup } from "./PiepLockup";
 import { PcLibrary } from "./PcLibrary";
 import { PcConnectionSettings } from "./PcConnectionSettings";
+import { sendReading } from "./readingSync";
 import { OnlineReader } from "./OnlineReader";
 import { OfflineLibrary } from "./OfflineLibrary";
 import { WorkDetail, type SelectedWork } from "./WorkDetail";
@@ -404,6 +405,14 @@ function App() {
     setReading(false);
   };
 
+  // 圏外で読んだ位置を、アプリへ戻るたびに届ける。
+  useEffect(() => {
+    if (!isTauri()) return;
+    const deliver = () => { if (document.visibilityState === "visible") void sendReading(); };
+    deliver();
+    document.addEventListener("visibilitychange", deliver);
+    return () => document.removeEventListener("visibilitychange", deliver);
+  }, []);
   useEffect(() => { try { window.localStorage.setItem(positionKey, String(page)); } catch { /* storage unavailable */ } }, [page]);
   useEffect(() => { try { window.localStorage.setItem(fontKey, String(fontSize)); } catch { /* storage unavailable */ } }, [fontSize]);
   useEffect(() => { try { window.localStorage.setItem(pagingModeKey, pagingMode); } catch { /* storage unavailable */ } }, [pagingMode]);
@@ -467,7 +476,7 @@ function App() {
         <div className="brand"><PiepLockup size={24} /></div>
         <nav className="side-nav" aria-label="画面の移動">{sections.map((item) => <button key={item.id} type="button" ref={item.id === "pc" ? sidebarFirstControlRef : undefined} className={section === item.id ? "nav-item active" : "nav-item"} onClick={() => showSection(item.id)} aria-current={section === item.id ? "page" : undefined}><Icon name={item.icon} /><span>{item.label}</span></button>)}</nav>
         <div className="sidebar-search">
-          <span className="sidebar-group-label">PC の本棚</span>
+          <span className="sidebar-group-label">サーバーの本棚</span>
           <div className="sidebar-shelves"><button type="button" className={isOnlyShelf(pcSearch, false) ? "shelf-choice active" : "shelf-choice"} onClick={() => showPcShelf(false)}>すべて</button><button type="button" className={isOnlyShelf(pcSearch, true) ? "shelf-choice active" : "shelf-choice"} onClick={() => showPcShelf(true)}>お気に入り</button></div>
           <form className="sidebar-filter-form" onSubmit={(event) => { event.preventDefault(); applySidebarSearch(); }}>
             <label>取得元<select value={sidebarSearch.source} onChange={(event) => setSidebarSearch((old) => ({ ...old, source: event.target.value as PcSearchCriteria["source"] }))}><option value="">すべて</option><option value="pixiv">pixiv</option><option value="fanbox">FANBOX</option></select></label>
@@ -494,7 +503,7 @@ function App() {
             <div className="sidebar-filter-actions"><button type="submit">絞り込む</button><button type="button" onClick={() => { setSidebarSearch(defaultPcSearch); setPcSearch(defaultPcSearch); setPcNavigationKey((key) => key + 1); showSection("pc"); }}>解除</button></div>
           </form>
         </div>
-        <div className={pcConnection?.reachable ? "sidebar-bottom connected" : "sidebar-bottom"}><span className="status-dot" /> PC {pcConnection?.reachable ? "接続中" : "未接続"}</div>
+        <div className={pcConnection?.reachable ? "sidebar-bottom connected" : "sidebar-bottom"}><span className="status-dot" /> サーバー {pcConnection?.reachable ? "接続中" : "未接続"}</div>
       </aside>
       <div className="main-column">
         <header className="mobile-header"><button ref={sidebarToggleRef} className="sidebar-toggle" type="button" onClick={() => setSidebarOpen((open) => !open)} aria-label={sidebarOpen ? "サイドバーを閉じる" : "サイドバーを開く"} aria-expanded={sidebarOpen} aria-controls="app-navigation"><Icon name="menu" /></button><PiepLockup size={22} /><span className="mobile-section-title">{sections.find((item) => item.id === section)?.label}</span></header>
@@ -505,7 +514,7 @@ function App() {
           {section === "settings" && <>
             <div className="page-heading"><div><p className="eyebrow">PREFERENCES</p><h1>設定</h1><p>この端末での読み方を整えます。</p></div></div>
             <section className="settings-card"><div className="setting-title"><div><h2>読書の表示</h2><p>初期値はデスクトップ版と同じです。変更はこの端末の読書画面に反映されます。</p></div><span className="setting-icon">あ</span></div><label className="slider-row"><span>文字サイズ <strong>{fontSize}px</strong></span><input type="range" min="14" max="28" step="1" value={fontSize} onChange={(event) => setFontSize(Number(event.target.value))} /></label><label className="slider-row"><span>行間 <strong>{lineHeight.toFixed(2)}</strong></span><input type="range" min="1.4" max="2.4" step="0.01" value={lineHeight} onChange={(event) => setLineHeight(Number(event.target.value))} /></label><label className="slider-row"><span>本文幅 <strong>{readerWidth}px</strong></span><input type="range" min="520" max="900" step="20" value={readerWidth} onChange={(event) => setReaderWidth(Number(event.target.value))} /></label><p className="settings-help reader-width-help">広い画面では本文の左右余白を調整します。</p><div className="setting-choice"><span>書体</span><div role="group" aria-label="書体"><button className={fontFamily === "serif" ? "selected" : ""} onClick={() => setFontFamily("serif")}>明朝</button><button className={fontFamily === "sans" ? "selected" : ""} onClick={() => setFontFamily("sans")}>ゴシック</button></div></div><div className="setting-choice"><span>読書背景</span><div role="group" aria-label="読書背景"><button className={readerTheme === "white" ? "selected" : ""} onClick={() => setReaderTheme("white")}>白</button><button className={readerTheme === "paper" ? "selected" : ""} onClick={() => setReaderTheme("paper")}>紙の色</button><button className={readerTheme === "night" ? "selected" : ""} onClick={() => setReaderTheme("night")}>ナイト</button></div></div><button className="secondary-button reset-reading" onClick={() => { setFontSize(18); setLineHeight(1.72); setReaderWidth(680); setFontFamily("serif"); setReaderTheme("white"); }}>読書設定を初期値に戻す</button><button className="secondary-button preview-setting-button" onClick={showPreview}>表示サンプルで試す</button></section>
-            <section className="settings-card"><div className="setting-title"><div><h2>一覧の読み込み方</h2><p>PC と端末内の作品一覧で、続きをどう表示するか選べます。</p></div></div><div className="setting-choice"><span>作品一覧</span><div role="group" aria-label="一覧の読み込み方"><button className={pagingMode === "auto" ? "selected" : ""} onClick={() => setPagingMode("auto")}>スクロールで自動</button><button className={pagingMode === "pages" ? "selected" : ""} onClick={() => setPagingMode("pages")}>ページ番号</button></div></div><p className="settings-help">関連度順の検索は自動読み込みになります。PC のページ番号は先頭 251 ページまで選べます。全作品をたどるときは自動読み込みを使ってください。</p></section>
+            <section className="settings-card"><div className="setting-title"><div><h2>一覧の読み込み方</h2><p>サーバーと端末内の作品一覧で、続きをどう表示するか選べます。</p></div></div><div className="setting-choice"><span>作品一覧</span><div role="group" aria-label="一覧の読み込み方"><button className={pagingMode === "auto" ? "selected" : ""} onClick={() => setPagingMode("auto")}>スクロールで自動</button><button className={pagingMode === "pages" ? "selected" : ""} onClick={() => setPagingMode("pages")}>ページ番号</button></div></div><p className="settings-help">関連度順の検索は自動読み込みになります。サーバーの一覧のページ番号は先頭 251 ページまで選べます。全作品をたどるときは自動読み込みを使ってください。</p></section>
             <section className="settings-card"><div className="setting-title"><div><h2>カラーテーマ</h2><p>デスクトップ版と同じく、初期状態はシステム設定に従います。</p></div></div><div className="setting-choice"><span>アプリの表示</span><div role="group" aria-label="アプリのカラーテーマ"><button className={appearance === "auto" ? "selected" : ""} onClick={() => setAppearance("auto")}>システム</button><button className={appearance === "light" ? "selected" : ""} onClick={() => setAppearance("light")}>ライト</button><button className={appearance === "dark" ? "selected" : ""} onClick={() => setAppearance("dark")}>ダーク</button></div></div></section>
             <PcConnectionSettings status={pcConnection} onStatusChange={setPcConnection} />
           </>}

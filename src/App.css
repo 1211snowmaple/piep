@@ -139,6 +139,9 @@ button:focus-visible, input:focus-visible { outline: 3px solid #75bcff; outline-
 .reader-save-button { color: #1687d2; }
 .reader-mode { color: #53856e; font-weight: 700; }
 .reader-notice { padding: 9px 20px; background: #eaf7ee; color: #37644c; font-size: 12px; text-align: center; }
+.connection-sync { display: flex; align-items: center; gap: 8px; margin-top: 14px; font-size: 14px; }
+.reader-sync-offer { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 4px 12px; }
+.reader-sync-offer button { padding: 4px 8px; border: 0; background: none; color: inherit; font: inherit; font-weight: 700; text-decoration: underline; }
 .offline-list { display: grid; gap: 11px; }
 .offline-row { display: flex; gap: 8px; align-items: stretch; }
 .offline-row .work-row { flex: 1; }

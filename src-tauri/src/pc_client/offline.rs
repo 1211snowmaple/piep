@@ -305,7 +305,7 @@ async fn get_pc_with_timeout(
         .timeout(timeout)
         .send()
         .await
-        .map_err(|_| ClientError::offline())?;
+        .map_err(|error| ClientError::from_send(&error, saved.pinned()))?;
     check_response(response)
 }
 
@@ -481,17 +481,14 @@ pub async fn offline_save_work(
     let _save_guard = state.save_lock.lock().await;
     state.work_dir(work_id)?;
     let saved = pc.load()?.ok_or_else(ClientError::invalid_pairing)?;
-    let certificate = URL_SAFE_NO_PAD
-        .decode(&saved.certificate_der)
-        .map_err(|_| storage())?;
-    let client = pinned_client(&certificate)?;
+    let client = pc.client(&saved)?;
     let metadata: MobileMetadata = get_pc(&client, &saved, &format!("/api/v1/works/{work_id}"))
         .await?
         .bounded_json().await?;
     if metadata.work.id != work_id {
         return Err(ClientError::protocol());
     }
-    // DB の数値 ID は PC ごとに異なる。別の PC へ登録し直しても、同じ ID の
+    // DB の数値 ID はサーバーごとに異なる。別のサーバーへ登録し直しても、同じ ID の
     // 別作品で持ち歩き中の作品を置き換えない。
     if let Ok((existing, _)) = read_manifest(&state, work_id) {
         if existing.summary.work.source != metadata.work.source
@@ -499,7 +496,7 @@ pub async fn offline_save_work(
         {
             return Err(ClientError {
                 code: "offline_work_conflict",
-                message: "別の PC から保存した作品と番号が重なっています。保存済み作品を確認してください",
+                message: "別のサーバーから保存した作品と番号が重なっています。保存済み作品を確認してください",
             });
         }
     }
@@ -721,7 +718,7 @@ async fn save_into(
         .collect::<BTreeMap<_, _>>();
     let collection_covers = save_collection_covers(client, saved, &collections, staging, &mut total_bytes).await?;
     let collection_cover_ids = collection_covers.iter().map(|record| record.collection_id.clone()).collect();
-    // 読み込み中に PC 側が更新された場合、混在した版を保存しない。
+    // 読み込み中にサーバー側が更新された場合、混在した版を保存しない。
     let latest: MobileMetadata = get_pc(client, saved, &format!("/api/v1/works/{work_id}"))
         .await?
         .bounded_json().await?;
@@ -965,8 +962,8 @@ mod tests {
                         stream.write_all(&body).unwrap();
                     }
                 });
-                let saved = SavedConnection { url: format!("http://{address}"), fingerprint: String::new(),
-                    certificate_der: String::new(), token: "test-token".into(), device_id: "test".into(), device_name: "test".into() };
+                let saved = SavedConnection { url: format!("http://{address}"), fingerprint: None,
+                    certificate_der: None, token: "test-token".into(), device_id: "test".into(), device_name: "test".into(), capabilities: Vec::new() };
                 let client = reqwest::Client::builder().no_proxy().timeout(Duration::from_secs(3)).build().unwrap();
                 let error = save_snapshot(&state, &client, &saved, &metadata).await.unwrap_err();
                 assert_eq!(error.code, expected);

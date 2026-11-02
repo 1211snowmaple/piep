@@ -141,7 +141,7 @@ export function CollectionBrowser({ query, onSelectionChange, onOpenWork, onOpen
     <button className="group-back" onClick={() => { setSelected(null); onSelectionChange(false); document.querySelector<HTMLElement>(".main-content")?.scrollTo({ top: 0, behavior: "instant" }); }}>← コレクション一覧</button>
     <div className="section-heading group-heading"><h2>{selected.name}</h2><span>{selected.memberCount} 作品</span></div>
     {selected.description && <p className="group-description">{selected.description}</p>}
-    {visibleMembers.length ? <VirtualWorkList items={visibleMembers} itemKey={(member) => `${member.position}:${member.work?.id ?? member.title}`} renderItem={(member) => member.work ? <WorkCard work={member.work} onRead={() => onOpenWork(member.work!)} onDetail={() => onOpenDetail(member.work!)} prefix={selected.collectionKind === "ordered" ? `${member.position + 1} 番目` : undefined} /> : <div className="group-missing"><strong>{member.title}</strong><span>{member.authorName} · PC に作品データがありません</span></div>} /> : <section className="empty-card"><h2>作品が見つかりません</h2><p>このコレクション内の検索語を変えてください。</p></section>}
+    {visibleMembers.length ? <VirtualWorkList items={visibleMembers} itemKey={(member) => `${member.position}:${member.work?.id ?? member.title}`} renderItem={(member) => member.work ? <WorkCard work={member.work} onRead={() => onOpenWork(member.work!)} onDetail={() => onOpenDetail(member.work!)} prefix={selected.collectionKind === "ordered" ? `${member.position + 1} 番目` : undefined} /> : <div className="group-missing"><strong>{member.title}</strong><span>{member.authorName} · サーバーに作品データがありません</span></div>} /> : <section className="empty-card"><h2>作品が見つかりません</h2><p>このコレクション内の検索語を変えてください。</p></section>}
   </section>;
 
   const visible = items.filter((item) => `${item.name} ${item.description ?? ""}`.toLocaleLowerCase().includes(query.toLocaleLowerCase()));
@@ -152,6 +152,6 @@ export function CollectionBrowser({ query, onSelectionChange, onOpenWork, onOpen
       <CollectionArtwork collection={item} />
       <span className="group-card-text"><strong>{item.name}</strong><small>{item.memberCount.toLocaleString("ja-JP")} 作品 · {item.collectionKind === "ordered" ? "順序あり" : "順序なし"}</small>{item.description && <span>{item.description}</span>}</span>
       <span className="work-arrow" aria-hidden="true">›</span>
-    </button>)}</div> : !busy && <section className="empty-card"><h2>{query ? "該当するコレクションがありません" : "コレクションがありません"}</h2><p>{query ? "検索語を変えて試してください。" : "PC 版で作成したコレクションがここに表示されます。"}</p></section>}
+    </button>)}</div> : !busy && <section className="empty-card"><h2>{query ? "該当するコレクションがありません" : "コレクションがありません"}</h2><p>{query ? "検索語を変えて試してください。" : "デスクトップ版で作成したコレクションがここに表示されます。"}</p></section>}
   </section>;
 }

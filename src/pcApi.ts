@@ -5,16 +5,27 @@ export interface PcConnectionStatus {
   reachable: boolean;
   url: string | null;
   deviceName: string | null;
-  issue: "offline" | "certificate_changed" | "protocol_mismatch" | "revoked" | "remote_error" | null;
+  issue: "offline" | "certificate_changed" | "certificate_untrusted" | "protocol_mismatch" | "revoked" | "not_ready" | "remote_error" | null;
+  capabilities: string[];
+  selfSigned: boolean;
 }
 
 export const pcConnectionIssueText: Record<NonNullable<PcConnectionStatus["issue"]>, string> = {
-  offline: "PC が見つかりません。piep の共有、同じ Wi-Fi、PC の起動状態を確認してください。",
-  certificate_changed: "PC の証明書が登録時と違います。接続先を確認して登録し直してください。",
-  protocol_mismatch: "PC 版との接続形式が合いません。両方のアプリを更新してください。",
-  revoked: "PC の共有が再起動されたか、端末の登録が解除されました。PC 側で登録文字列を出し直して再登録してください。",
-  remote_error: "PC の共有は応答していますが、作品を読み込めません。PC 側の状態を確認してください。",
+  offline: "サーバーに接続できません。通信状態とサーバーの URL を確認してください。",
+  certificate_changed: "サーバーの証明書が登録時と違います。接続先を確認して登録し直してください。",
+  certificate_untrusted: "サーバーの証明書を確認できません。URL が正しいか確かめてください。",
+  protocol_mismatch: "サーバーとの接続形式が合いません。両方のアプリを更新してください。",
+  revoked: "端末の登録が解除されました。デスクトップ版の「携帯を追加」で登録文字列を出し直して再登録してください。",
+  not_ready: "サーバーは本棚の準備中です。しばらくしてからもう一度試してください。",
+  remote_error: "サーバーは応答していますが、作品を読み込めません。サーバーの状態を確認してください。",
 };
+
+export function pcConnectionIssue(status: PcConnectionStatus): string | null {
+  if (!status.issue) return null;
+  // 自己署名の接続先は家の中の機械なので、Wi-Fi の案内が役に立つ。
+  if (status.issue === "offline" && status.selfSigned) return "サーバーに接続できません。サーバーと同じ Wi-Fi にいるか、サーバーが動いているか確認してください。";
+  return pcConnectionIssueText[status.issue];
+}
 
 export interface PcWork {
   id: number;
@@ -218,5 +229,5 @@ export const deleteOfflineIssue = (workId: number) => invoke<void>("offline_dele
 
 export function pcErrorMessage(error: unknown): string {
   if (typeof error === "object" && error && "message" in error && typeof error.message === "string") return error.message;
-  return typeof error === "string" ? error : "PC との通信に失敗しました";
+  return typeof error === "string" ? error : "サーバーとの通信に失敗しました";
 }
