@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { Button, Group, Modal, Radio, Stack, Textarea, TextInput } from "@mantine/core";
+import { Button, Modal, Radio, Stack, Textarea, TextInput } from "@mantine/core";
+import { ActionRow } from "@/components/ActionRow";
 import type { CollectionKind, WorkCollectionInput } from "@/types/collections";
 
 /**
@@ -38,7 +39,7 @@ export function CollectionFormModal({ opened, onClose, onSave }: {
             <Radio value="unordered" label="順序なし — テーマや任意のまとまり" />
           </Stack>
         </Radio.Group>
-        <Group justify="flex-end">
+        <ActionRow>
           <Button variant="default" onClick={onClose}>キャンセル</Button>
           <Button
             disabled={!name.trim()}
@@ -46,7 +47,7 @@ export function CollectionFormModal({ opened, onClose, onSave }: {
           >
             保存
           </Button>
-        </Group>
+        </ActionRow>
       </Stack>
     </Modal>
   );

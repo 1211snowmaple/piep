@@ -13,6 +13,7 @@ import {
 } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { ActionRow } from "@/components/ActionRow";
 import { useAppNavigate } from "@/app/router";
 import { EmptyState } from "@/components/AsyncState";
 import { CollectionCover } from "@/components/CollectionCover";
@@ -177,7 +178,7 @@ export function AddToCollectionModal({
           </Stack>
         )}
 
-        <Group justify="flex-end">
+        <ActionRow>
           <Button variant="default" onClick={onClose}>キャンセル</Button>
           <Button
             disabled={Boolean(blocked) || !runtime}
@@ -186,7 +187,7 @@ export function AddToCollectionModal({
           >
             {blocked ?? `${formatNumber(downloadIds.length)}作品を入れる`}
           </Button>
-        </Group>
+        </ActionRow>
       </Stack>
     </Modal>
   );

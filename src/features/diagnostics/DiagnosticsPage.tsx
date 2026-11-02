@@ -19,6 +19,7 @@ import {
 import { modals } from "@mantine/modals";
 import { notifications } from "@mantine/notifications";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { ActionRow } from "@/components/ActionRow";
 import { Icons, IconSize, type LucideIcon } from "@/lib/icons";
 import { ErrorState } from "@/components/AsyncState";
 import { JobProgress } from "@/components/JobProgress";
@@ -83,7 +84,7 @@ function MaintenanceTaskCard({ icon: Icon, title, description, status, action }:
         </Box>
       </Group>
       <Box>{status}</Box>
-      <Box mt="auto">{action}</Box>
+      <Box mt="auto"><ActionRow>{action}</ActionRow></Box>
     </Stack>
   </Card>;
 }
@@ -543,7 +544,6 @@ export default function DiagnosticsPage({ embedded = false, previewData = previe
                     </Text>
                   </>}
           action={fanboxGaps.error ? <Button size="xs" variant="default" onClick={() => fanboxGaps.refetch()}>再確認</Button> : <Button
-            fullWidth
             variant="light"
             color="yellow"
             leftSection={<Icons.retry size={IconSize.menu} />}
@@ -634,13 +634,13 @@ export default function DiagnosticsPage({ embedded = false, previewData = previe
                 <Text fw={700} size="sm">次に行うこと</Text>
                 <Text size="xs" c="dimmed" mt={2}>対象を確認してから、状態に合う安全な方法を選べます。診断の画面が勝手に削除したり、参照を外したりはしません。</Text>
               </Box>
-              <Group gap="xs">
-                <Button size="xs" variant="filled" leftSection={<Icons.read size={IconSize.menu} />} disabled={!data.fileIssueSamples.length} onClick={() => showFileIssues()}>対象ファイルを確認</Button>
-                <Button size="xs" variant="default" leftSection={<Icons.openFolder size={IconSize.menu} />} disabled={!runtime} onClick={openStorageFolder}>保存先を開く</Button>
-                <Button size="xs" variant="default" leftSection={<Icons.retry size={IconSize.menu} />} loading={reimport.isPending} disabled={!runtime || maintenance.isPending || indexOptimization.isPending} onClick={confirmReimport}>残ったフォルダーを再取り込み</Button>
-                <Button size="xs" variant="default" leftSection={<Icons.import size={IconSize.menu} />} onClick={() => navigate("/settings?section=library")}>バックアップ復元へ</Button>
+              <ActionRow>
                 <Button size="xs" variant="default" leftSection={<Icons.save size={IconSize.menu} />} onClick={() => navigate("/save")}>元サービスから再保存</Button>
-              </Group>
+                <Button size="xs" variant="default" leftSection={<Icons.import size={IconSize.menu} />} onClick={() => navigate("/settings?section=library")}>バックアップ復元へ</Button>
+                <Button size="xs" variant="default" leftSection={<Icons.retry size={IconSize.menu} />} loading={reimport.isPending} disabled={!runtime || maintenance.isPending || indexOptimization.isPending} onClick={confirmReimport}>残ったフォルダーを再取り込み</Button>
+                <Button size="xs" variant="default" leftSection={<Icons.openFolder size={IconSize.menu} />} disabled={!runtime} onClick={openStorageFolder}>保存先を開く</Button>
+                <Button size="xs" variant="filled" leftSection={<Icons.read size={IconSize.menu} />} disabled={!data.fileIssueSamples.length} onClick={() => showFileIssues()}>対象ファイルを確認</Button>
+              </ActionRow>
               <Text size="xs" c="dimmed">
                 保存データ・画像の参照切れ／0バイト／容量差は「バックアップ復元」または「元サービスから再保存」。登録情報だけ消えた作品は「残ったフォルダーを再取り込み」。領域外・リンクは対象一覧で場所を確認し、管理フォルダー内の実ファイルとして再保存してください。一時ファイルはアプリ再起動後に再計測します。
               </Text>
@@ -670,7 +670,7 @@ export default function DiagnosticsPage({ embedded = false, previewData = previe
           title="データベース"
           description="検索統計と一時ログを軽く整理します。計測なしでも実行できます。"
           status={<Badge color="blue" variant="light">日常的な保守</Badge>}
-          action={<Button fullWidth variant="light" leftSection={<Icons.optimize size={IconSize.menu} />} loading={maintenance.isPending} disabled={!runtime || indexOptimization.isPending || profileRunning} onClick={() => maintenance.mutate(false)}>DBを最適化</Button>}
+          action={<Button variant="light" leftSection={<Icons.optimize size={IconSize.menu} />} loading={maintenance.isPending} disabled={!runtime || indexOptimization.isPending || profileRunning} onClick={() => maintenance.mutate(false)}>DBを最適化</Button>}
         />
         <MaintenanceTaskCard
           icon={Icons.search}
@@ -681,7 +681,7 @@ export default function DiagnosticsPage({ embedded = false, previewData = previe
             : data.lexicalIndexSegmentCount <= 1
               ? <Badge color="green" variant="light">最適です</Badge>
               : <Badge color={data.lexicalIndexSegmentCount >= 16 ? "yellow" : "blue"} variant="light">{formatNumber(data.lexicalIndexSegmentCount)}セグメント</Badge>}
-          action={<Button fullWidth variant="light" color={data && data.lexicalIndexSegmentCount >= 16 ? "yellow" : "piep"} leftSection={<Icons.search size={IconSize.menu} />} loading={indexOptimization.isPending} disabled={!runtime || maintenance.isPending || profileRunning || !data || data.lexicalIndexSegmentCount <= 1} onClick={confirmIndexOptimization}>検索索引を最適化</Button>}
+          action={<Button variant="light" color={data && data.lexicalIndexSegmentCount >= 16 ? "yellow" : "piep"} leftSection={<Icons.search size={IconSize.menu} />} loading={indexOptimization.isPending} disabled={!runtime || maintenance.isPending || profileRunning || !data || data.lexicalIndexSegmentCount <= 1} onClick={confirmIndexOptimization}>検索索引を最適化</Button>}
         />
       </SimpleGrid>
     </Accordion.Panel></Accordion.Item></Accordion>

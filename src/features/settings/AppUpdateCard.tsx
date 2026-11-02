@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Alert, Badge, Box, Button, Card, Divider, Group, Progress, Stack, Switch, Text } from "@mantine/core";
+import { ActionRow } from "@/components/ActionRow";
 import { Icons, IconSize } from "@/lib/icons";
 import { APP_VERSION } from "@/lib/version";
 import { errorMessage } from "@/lib/format";
@@ -161,13 +162,12 @@ export function AppUpdateCard({ runtime }: { runtime: boolean }) {
               )}
               {phase === "ready"
                 ? (
-                  <Group>
-                    <Text size="sm">入れ替えの準備ができました。再起動すると新しい版で開きます。</Text>
+                  <ActionRow start={<Text size="sm">入れ替えの準備ができました。再起動すると新しい版で開きます。</Text>}>
                     <Button size="xs" leftSection={<Icons.retry size={IconSize.menu} />} onClick={() => void restart()}>いま再起動する</Button>
-                  </Group>
+                  </ActionRow>
                 )
                 : (
-                  <Group>
+                  <ActionRow start={<Text size="xs" c="dimmed">終わるまで piep はそのまま使えます。再起動は別に確認します。</Text>}>
                     <Button
                       size="xs"
                       disabled={phase === "downloading"}
@@ -177,8 +177,7 @@ export function AppUpdateCard({ runtime }: { runtime: boolean }) {
                     >
                       ダウンロードして更新
                     </Button>
-                    <Text size="xs" c="dimmed">終わるまで piep はそのまま使えます。再起動は別に確認します。</Text>
-                  </Group>
+                  </ActionRow>
                 )}
             </Stack>
           </Card>

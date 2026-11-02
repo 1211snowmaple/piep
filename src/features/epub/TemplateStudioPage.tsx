@@ -30,6 +30,7 @@ import { useDisclosure } from "@mantine/hooks";
 import { modals } from "@mantine/modals";
 import { notifications } from "@mantine/notifications";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { ActionRow } from "@/components/ActionRow";
 import { Icons, IconSize } from "@/lib/icons";
 import { useAppNavigate, useAppSearchParams } from "@/app/router";
 import { EmptyState, ErrorState, LoadingState } from "@/components/AsyncState";
@@ -261,7 +262,7 @@ function RenameForm({ current, onSubmit }: { current: string; onSubmit: (next: s
   const form = useForm({ initialValues: { name: current }, validate: { name: (value) => (/^[a-zA-Z0-9_-]+$/.test(value) ? null : "英数字、_、-だけを使用してください") } });
   return (
     <form onSubmit={form.onSubmit(({ name }) => onSubmit(name))}>
-      <Stack><TextInput label="テンプレート名" {...form.getInputProps("name")} /><Button type="submit">変更する</Button></Stack>
+      <Stack><TextInput label="テンプレート名" {...form.getInputProps("name")} /><ActionRow><Button variant="default" onClick={() => modals.closeAll()}>キャンセル</Button><Button type="submit">変更する</Button></ActionRow></Stack>
     </form>
   );
 }
@@ -283,7 +284,7 @@ function NewTemplateModal({ opened, onClose, templates, pending, onCreate }: {
         <Stack>
           <TextInput label="テンプレート名" description="ファイル名に使われます" placeholder="my-template" {...form.getInputProps("name")} />
           <Select label="複製元" description="選んだテンプレートの見た目と構成をそのまま引き継ぎます" data={templates.map((template) => ({ value: template.name, label: `${template.settings.label || template.name}${template.isBuiltin ? "（標準）" : ""}` }))} {...form.getInputProps("base")} />
-          <Button type="submit" loading={pending}>作成</Button>
+          <ActionRow><Button variant="default" disabled={pending} onClick={onClose}>キャンセル</Button><Button type="submit" loading={pending}>作成</Button></ActionRow>
         </Stack>
       </form>
     </Modal>
@@ -451,7 +452,7 @@ function StructureEditor({ template, readOnly, onSaved }: { template: TemplateIn
         </Group>
       </Box>
 
-      <Button w="fit-content" leftSection={<Icons.save size={IconSize.action} />} disabled={readOnly || !dirty} loading={save.isPending} onClick={() => save.mutate()}>構成を保存</Button>
+      <ActionRow><Button leftSection={<Icons.save size={IconSize.action} />} disabled={readOnly || !dirty} loading={save.isPending} onClick={() => save.mutate()}>構成を保存</Button></ActionRow>
     </Stack>
   );
 }
@@ -557,11 +558,10 @@ function VisualEditor({ template, readOnly, onSaved }: { template: TemplateInfo;
         <LabeledSlider label="挿絵の横幅 (%)" value={values.illustrationWidth} min={30} max={100} disabled={readOnly} onChange={(value) => set("illustrationWidth", value)} />
       </Section>
 
-      <Group>
-        <Button leftSection={<Icons.save size={IconSize.action} />} disabled={readOnly || !dirty} loading={save.isPending} onClick={() => save.mutate()}>見た目を保存</Button>
+      <ActionRow start={<Text size="xs" c="dimmed">ここでの設定は {STYLE_FILE} の末尾にまとめて書き込まれます。それ以外の行には触れません。</Text>}>
         <Button variant="subtle" color="gray" leftSection={<Icons.undo size={IconSize.action} />} disabled={readOnly || !dirty} onClick={() => { setValues(readVisualSettings(source)); setDirty(false); }}>変更を捨てる</Button>
-      </Group>
-      <Text size="xs" c="dimmed">ここでの設定は {STYLE_FILE} の末尾にまとめて書き込まれます。それ以外の行には触れません。</Text>
+        <Button leftSection={<Icons.save size={IconSize.action} />} disabled={readOnly || !dirty} loading={save.isPending} onClick={() => save.mutate()}>見た目を保存</Button>
+      </ActionRow>
     </Stack>
   );
 }
@@ -657,10 +657,10 @@ function CodeEditor({ template, readOnly, onSaved }: { template: TemplateInfo; r
         <Stack gap="xs">
           {purpose && <Text size="xs" c="dimmed">{purpose}</Text>}
           <Textarea autosize minRows={18} maxRows={34} value={content} disabled={readOnly} aria-label={`${active ?? ""}の内容`} onChange={(event) => { setContent(event.currentTarget.value); setDirty(true); }} styles={{ input: { fontFamily: "var(--mantine-font-family-monospace)", fontSize: 12 } }} />
-          <Group>
-            <Button size="xs" leftSection={<Icons.save size={IconSize.inline} />} disabled={readOnly || !dirty} loading={save.isPending} onClick={() => save.mutate()}>保存</Button>
+          <ActionRow>
             <Button size="xs" variant="default" leftSection={<Icons.undo size={IconSize.inline} />} disabled={readOnly} loading={reset.isPending} onClick={() => reset.mutate()}>既定に戻す</Button>
-          </Group>
+            <Button size="xs" leftSection={<Icons.save size={IconSize.inline} />} disabled={readOnly || !dirty} loading={save.isPending} onClick={() => save.mutate()}>保存</Button>
+          </ActionRow>
         </Stack>
       </Grid.Col>
     </Grid>

@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { ActionRow } from "@/components/ActionRow";
 import { MotionTabs as Tabs } from "@/components/MotionTabs";
 import {
   ActionIcon,
@@ -569,16 +570,17 @@ export default function WorkPage() {
                 </Group>
                 <Group gap={8} className="work-hero__tags">{work.tags.map((tag) => <Badge key={tag} size="md" variant="light" color="gray" component={AppLink} className="work-hero__tag" to={`/library?q=${encodeURIComponent(`tag:${tag}`)}`}>#{tag}</Badge>)}</Group>
               </Stack>
-              <Group gap="lg" mt="md" className="work-hero__facts">
-                <Text size="sm" c="dimmed"><Icons.publishedDate size={IconSize.menu} />公開 {formatDate(work.sourceCreatedAt)}</Text>
-                <Text size="sm" c="dimmed"><Icons.textLength size={IconSize.menu} />{doc.isEdited && "取得元 "}{formatNumber(work.textLength)}字</Text>
-                {(work.assetCount > 0 || addedImages.length > 0) && <Text size="sm" c="dimmed"><Icons.assets size={IconSize.menu} />画像・添付 {work.assetCount}件{addedImages.length > 0 && `・編集で追加 ${addedImages.length}件`}</Text>}
-              </Group>
+              {/* 情報は左、操作は右。主操作の「読む」は列の右端に置く（docs/policy/05-frontend.md）。 */}
               <div className="work-hero__actionbar">
-                <Group gap={6} wrap="wrap" className="work-hero__actions">
-                  <Button className="work-hero__action" leftSection={<Icons.read size={IconSize.action} />} onClick={() => navigate(`/reader/${work.id}`)}>読む</Button>
-                  <Button className="work-hero__action" variant="default" leftSection={<Icons.edit size={IconSize.action} />} onClick={() => navigate(`/editor/${work.id}`)}>編集</Button>
-                  <Menu position="bottom-start" width={280}>
+                <Group gap="md" style={{ rowGap: 2 }} className="work-hero__facts">
+                  <Text size="sm" c="dimmed"><Icons.publishedDate size={IconSize.menu} />公開 {formatDate(work.sourceCreatedAt)}</Text>
+                  <Text size="sm" c="dimmed"><Icons.textLength size={IconSize.menu} />{doc.isEdited && "取得元 "}{formatNumber(work.textLength)}字</Text>
+                  {(work.assetCount > 0 || addedImages.length > 0) && <Text size="sm" c="dimmed"><Icons.assets size={IconSize.menu} />画像・添付 {work.assetCount}件{addedImages.length > 0 && `・編集で追加 ${addedImages.length}件`}</Text>}
+                </Group>
+                <Group gap={6} wrap="wrap" justify="flex-end" className="work-hero__actions">
+                  {/* 列の先頭。読むや編集のように別の画面へ進まず、ここで印が変わるだけ。 */}
+                  <Tooltip label={work.favorite ? "お気に入りを解除" : "お気に入りに追加"}><ActionIcon className="work-hero__favorite" size={38} variant="subtle" color={work.favorite ? "red" : "gray"} style={{ "--ai-color": work.favorite ? "var(--flag-favorite)" : "var(--flag-off)", "--ai-bg": "transparent" }} aria-label={work.favorite ? "お気に入りを解除" : "お気に入りに追加"} aria-pressed={work.favorite} disabled={mutate.isPending} onClick={() => mutate.mutate({ favorite: !work.favorite })}><Icons.favorite size={IconSize.nav} fill={work.favorite ? "currentColor" : "none"} /></ActionIcon></Tooltip>
+                  <Menu position="bottom-end" width={280}>
                     <Menu.Target><Button className="work-hero__action" variant="default" leftSection={<Icons.collection size={IconSize.action} />}>コレクション{workCollectionsQuery.data?.length ? ` ${workCollectionsQuery.data.length}` : ""}</Button></Menu.Target>
                     <Menu.Dropdown>
                       <Menu.Label>コレクションに追加</Menu.Label>
@@ -593,9 +595,8 @@ export default function WorkPage() {
                   </Menu>
                   {/* One glyph in both states, as on the cards: the label already says which way the press goes. */}
                   <Button className="work-hero__action" variant={queued ? "filled" : "default"} color="leaf" leftSection={<Icons.epubAdd size={IconSize.action} />} onClick={() => queued ? removeFromEpubQueue(work.id) : addToEpubQueue(work.id)}>{queued ? "EPUB追加済み" : "EPUB"}</Button>
-                  {/* Last in the row, beside EPUB: it belongs with the
-                      actions for this work, not off at the bar edge. */}
-                  <Tooltip label={work.favorite ? "お気に入りを解除" : "お気に入りに追加"}><ActionIcon className="work-hero__favorite" size={38} variant="subtle" color={work.favorite ? "red" : "gray"} style={{ "--ai-color": work.favorite ? "var(--flag-favorite)" : "var(--flag-off)", "--ai-bg": "transparent" }} aria-label={work.favorite ? "お気に入りを解除" : "お気に入りに追加"} aria-pressed={work.favorite} disabled={mutate.isPending} onClick={() => mutate.mutate({ favorite: !work.favorite })}><Icons.favorite size={IconSize.nav} fill={work.favorite ? "currentColor" : "none"} /></ActionIcon></Tooltip>
+                  <Button className="work-hero__action" variant="default" leftSection={<Icons.edit size={IconSize.action} />} onClick={() => navigate(`/editor/${work.id}`)}>編集</Button>
+                  <Button className="work-hero__action" leftSection={<Icons.read size={IconSize.action} />} onClick={() => navigate(`/reader/${work.id}`)}>読む</Button>
                 </Group>
               </div>
             </Stack>
@@ -629,7 +630,7 @@ export default function WorkPage() {
                   空く。2枚が余りを半分ずつ引き受ければ、辺は揃ったまま隙間だけ
                   消える。 */}
               <Stack gap="lg" h="100%" className="work-side-column"><Card p="lg"><Group justify="space-between"><Box><Text fw={700}>更新監視</Text><Text size="xs" c="dimmed" mt={3}>保存元の変更をチェック</Text></Box><Switch checked={work.watchUpdates} disabled={mutate.isPending} onChange={(event) => mutate.mutate({ watch: event.currentTarget.checked })} aria-label="更新監視" /></Group>{/* 「今すぐ確認」は上段の「情報を更新」と同じ動作だった。同じことを
-                  する口が2つあると、どちらが効いたのか分からなくなる。 */}</Card>{doc.isEdited ? <Card p="lg"><Group justify="space-between" wrap="nowrap" mb="xs"><Box><Text fw={700}>ローカル編集</Text><Text size="xs" c="dimmed" mt={3}>いま読める本文は編集版です</Text></Box><Badge color="gray" variant="light">反映中</Badge></Group><Text size="xs" c="dimmed" mb="sm">取り込んだ本文はそのまま残っています。戻しても、編集した版は履歴から選び直せます。</Text>{doc.draftEditRevision && <Text size="xs" c="yellow.8" mb="sm">このほかに、反映していない下書きがあります（{formatDate(doc.draftEditRevision.updatedAt, true)}保存）。</Text>}<Button variant="default" size="xs" leftSection={<Icons.undo size={IconSize.menu} />} loading={revertEdit.isPending} onClick={() => modals.openConfirmModal({ title: "取り込んだ本文に戻しますか？", children: <Text size="sm">リーダーとEPUBは取り込んだままの本文を使うようになります。編集した版は履歴に残ります。</Text>, labels: { confirm: "元に戻す", cancel: "キャンセル" }, onConfirm: () => revertEdit.mutate() })}>取り込んだ本文に戻す</Button></Card> : doc.draftEditRevision ? <Card p="lg"><Group justify="space-between" wrap="nowrap" mb="xs"><Box><Text fw={700}>ローカル編集</Text><Text size="xs" c="dimmed" mt={3}>いま読める本文は取り込んだままです</Text></Box><Badge color="yellow" variant="light">下書きのみ</Badge></Group><Text size="xs" c="dimmed" mb="sm">{formatDate(doc.draftEditRevision.updatedAt, true)}に保存した下書きは、編集画面で「反映」を押すまで読書画面とEPUBに使われません。</Text><Button variant="default" size="xs" leftSection={<Icons.edit size={IconSize.menu} />} onClick={() => navigate(`/editor/${work.id}`)}>編集画面で開く</Button></Card> : <Note title="編集について">ローカルで編集しても、取り込んだ本文はそのまま残ります。編集は別の版として保存します。{doc.archivedEditRevisions?.length ? "以前に反映した編集版は、履歴タブからもう一度反映できます。" : ""}</Note>}</Stack>
+                  する口が2つあると、どちらが効いたのか分からなくなる。 */}</Card>{doc.isEdited ? <Card p="lg"><Group justify="space-between" wrap="nowrap" mb="xs"><Box><Text fw={700}>ローカル編集</Text><Text size="xs" c="dimmed" mt={3}>いま読める本文は編集版です</Text></Box><Badge color="gray" variant="light">反映中</Badge></Group><Text size="xs" c="dimmed" mb="sm">取り込んだ本文はそのまま残っています。戻しても、編集した版は履歴から選び直せます。</Text>{doc.draftEditRevision && <Text size="xs" c="yellow.8" mb="sm">このほかに、反映していない下書きがあります（{formatDate(doc.draftEditRevision.updatedAt, true)}保存）。</Text>}<ActionRow><Button variant="default" size="xs" leftSection={<Icons.undo size={IconSize.menu} />} loading={revertEdit.isPending} onClick={() => modals.openConfirmModal({ title: "取り込んだ本文に戻しますか？", children: <Text size="sm">リーダーとEPUBは取り込んだままの本文を使うようになります。編集した版は履歴に残ります。</Text>, labels: { confirm: "元に戻す", cancel: "キャンセル" }, onConfirm: () => revertEdit.mutate() })}>取り込んだ本文に戻す</Button></ActionRow></Card> : doc.draftEditRevision ? <Card p="lg"><Group justify="space-between" wrap="nowrap" mb="xs"><Box><Text fw={700}>ローカル編集</Text><Text size="xs" c="dimmed" mt={3}>いま読める本文は取り込んだままです</Text></Box><Badge color="yellow" variant="light">下書きのみ</Badge></Group><Text size="xs" c="dimmed" mb="sm">{formatDate(doc.draftEditRevision.updatedAt, true)}に保存した下書きは、編集画面で「反映」を押すまで読書画面とEPUBに使われません。</Text><ActionRow><Button variant="default" size="xs" leftSection={<Icons.edit size={IconSize.menu} />} onClick={() => navigate(`/editor/${work.id}`)}>編集画面で開く</Button></ActionRow></Card> : <Note title="編集について">ローカルで編集しても、取り込んだ本文はそのまま残ります。編集は別の版として保存します。{doc.archivedEditRevisions?.length ? "以前に反映した編集版は、履歴タブからもう一度反映できます。" : ""}</Note>}</Stack>
             </Grid.Col>
           </Grid>
         </Tabs.Panel>

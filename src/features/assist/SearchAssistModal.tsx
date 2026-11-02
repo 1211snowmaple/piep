@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Badge, Button, Group, Modal, Stack, Text, Textarea } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
 import { useMutation } from "@tanstack/react-query";
+import { ActionRow } from "@/components/ActionRow";
 import { errorMessage } from "@/lib/format";
 import { Icons, IconSize } from "@/lib/icons";
 import { useAssist } from "@/features/assist/useAssist";
@@ -127,7 +128,7 @@ export function SearchAssistModal({
           </Stack>
         )}
 
-        <Group justify="flex-end">
+        <ActionRow>
           <Button variant="default" onClick={close}>キャンセル</Button>
           <Button
             disabled={!intent || Boolean(empty)}
@@ -135,7 +136,7 @@ export function SearchAssistModal({
           >
             この条件で棚を絞る
           </Button>
-        </Group>
+        </ActionRow>
       </Stack>
     </Modal>
   );

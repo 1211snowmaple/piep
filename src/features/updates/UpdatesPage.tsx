@@ -465,7 +465,6 @@ export default function UpdatesPage() {
             {...form.getInputProps("scope")}
           />
           <SegmentedControl aria-label="更新時の処理方法" data={[{ value: "check_only", label: "確認のみ" }, { value: "auto_save", label: "自動保存" }]} {...form.getInputProps("mode")} />
-          <Button leftSection={<Icons.updates size={IconSize.menu} />} disabled={running} loading={startMutation.isPending} onClick={() => form.onSubmit((values) => startMutation.mutate(values))()}>確認を開始</Button>
           {/* 平常時に読ませたいのは一行だけ。詳しい話は、知りたくなった
               ときに開く。実際に効いた瞬間は下の進捗カードが名乗る。 */}
           <Group gap={4} wrap="nowrap">
@@ -486,10 +485,13 @@ export default function UpdatesPage() {
               この確認では最大{SHELF_SCOPE_LIMIT}件を対象にします。{SHELF_SCOPE_LIMIT + 1}件目以降は含まれません。
             </Text>
           )}
-          <Box style={{ flex: 1 }} />
-          <Group gap={6} wrap="nowrap">
-            <Text size="xs" c="dimmed">自動確認：{scheduleSummary}</Text>
-            <Button size="xs" variant="subtle" color="gray" onClick={() => selectTab("schedule")}>変更</Button>
+          {/* 範囲と方法を左で決めて、右端で始める。折り返しても右に残るよう余白で寄せる。 */}
+          <Group gap="sm" wrap="nowrap" ml="auto">
+            <Group gap={6} wrap="nowrap">
+              <Text size="xs" c="dimmed">自動確認：{scheduleSummary}</Text>
+              <Button size="xs" variant="subtle" color="gray" onClick={() => selectTab("schedule")}>変更</Button>
+            </Group>
+            <Button leftSection={<Icons.updates size={IconSize.menu} />} disabled={running} loading={startMutation.isPending} onClick={() => form.onSubmit((values) => startMutation.mutate(values))()}>確認を開始</Button>
           </Group>
         </Group>
       </Paper>
@@ -565,7 +567,7 @@ export default function UpdatesPage() {
         </Tabs.List>
 
         <Tabs.Panel value="candidates" pt="lg">
-          {(activeSnapshot?.heldCount ?? 0) > 0 && <Group mb="md"><Text size="sm" c="dimmed">この回で保留になった{activeSnapshot?.heldCount}件は、結果で理由を確認できます。</Text><Button variant="subtle" size="xs" onClick={() => selectTab("results")}>この回の保留を見る</Button></Group>}
+          {(activeSnapshot?.heldCount ?? 0) > 0 && <Group mb="md" justify="space-between"><Text size="sm" c="dimmed">この回で保留になった{activeSnapshot?.heldCount}件は、結果で理由を確認できます。</Text><Button variant="subtle" size="xs" onClick={() => selectTab("results")}>この回の保留を見る</Button></Group>}
           {activeSnapshot ? (
             <CandidatesPanel
               key={activeSnapshot.jobId}
@@ -894,7 +896,8 @@ export function CandidatesPanel({ candidates, selectedIds, selectableIds, runnin
           <Text fw={700}>保存する候補</Text>
           <Text size="xs" c="dimmed">新作・続編・改稿をまとめて処理 · 全候補から{selectedCount}件を選択中 · 表示 {formatNumber(visible.length)}/{formatNumber(shown.length)}件{selectedOutsideShown > 0 ? `（表示外で${selectedOutsideShown}件を選択中）` : ""}</Text>
         </Box>
-        <Group gap="xs">
+        {/* 折り返しても右に残す。両端揃えのままだと、新しい行の左端へ落ちる。 */}
+        <Group gap="xs" ml="auto" justify="flex-end">
           {/* 右の保存と同じ高さ。低い押しボタンが並ぶと、行の下端がそろわない。 */}
           <Button size="sm" variant="subtle" disabled={!shownSelectable.length} onClick={() => onSelectMany(shownSelectable)}>該当分を選択</Button>
           <Button size="sm" variant="subtle" color="gray" disabled={!selectedCount} onClick={onClearSelection}>選択をすべて解除</Button>

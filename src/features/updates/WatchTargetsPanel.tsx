@@ -23,6 +23,7 @@ import {
 } from "@mantine/core";
 import { useForm, type UseFormReturnType } from "@mantine/form";
 import { modals } from "@mantine/modals";
+import { ActionRow } from "@/components/ActionRow";
 import { Icons, IconSize } from "@/lib/icons";
 import { EmptyState, ErrorState, LoadingState } from "@/components/AsyncState";
 import { errorMessage, formatDate, formatNumber } from "@/lib/format";
@@ -227,6 +228,7 @@ export function TargetsPanel({ targets, groups, loading, error, retry, form, mut
                   </Text>
                 </Box>
                 <Group gap="xs" wrap="nowrap">
+                  <Button size="sm" variant="default" leftSection={<Icons.add size={IconSize.menu} />} aria-expanded={showAdd} onClick={() => setShowAdd((open) => !open)}>IDで追加</Button>
                   {currentView !== "paused" && (
                     <Button
                       size="sm"
@@ -238,7 +240,6 @@ export function TargetsPanel({ targets, groups, loading, error, retry, form, mut
                       {formatNumber(checkableIds.length)}件を確認
                     </Button>
                   )}
-                  <Button size="sm" variant="default" leftSection={<Icons.add size={IconSize.menu} />} aria-expanded={showAdd} onClick={() => setShowAdd((open) => !open)}>IDで追加</Button>
                   {viewGroup && (
                     <Menu position="bottom-end" withinPortal>
                       <Menu.Target>
@@ -288,9 +289,16 @@ export function TargetsPanel({ targets, groups, loading, error, retry, form, mut
           {/* 選んだときだけ出る。いつも並べておくと、押せない操作が一覧の上を塞ぐ。 */}
           {selected.size > 0 && (
             <Paper withBorder p="xs" radius="md" className="watch-bulk" role="toolbar" aria-label="選んだ監視対象の操作">
-              <Group gap="xs" wrap="wrap">
-                <Text size="sm" fw={650} px={6}>{formatNumber(selected.size)}件を選択中</Text>
-                <Menu position="bottom-start" withinPortal>
+              <ActionRow
+                start={<>
+                  <Text size="sm" fw={650} px={6}>{formatNumber(selected.size)}件を選択中</Text>
+                  <Button size="xs" variant="subtle" color="gray" onClick={() => setSelected(new Set())}>選択を解除</Button>
+                </>}
+              >
+                {viewGroup && <Button size="xs" variant="default" onClick={() => setMembers(viewGroup, false)}>このグループから外す</Button>}
+                {selectedTargets.some((target) => target.enabled) && <Button size="xs" variant="default" leftSection={<Icons.pause size={IconSize.inline} />} onClick={() => { onSetEnabled(selectedTargets.filter((target) => target.enabled), false); setSelected(new Set()); }}>止める</Button>}
+                {selectedTargets.some((target) => !target.enabled) && <Button size="xs" variant="default" leftSection={<Icons.resume size={IconSize.inline} />} onClick={() => { onSetEnabled(selectedTargets.filter((target) => !target.enabled), true); setSelected(new Set()); }}>再開する</Button>}
+                <Menu position="bottom-end" withinPortal>
                   <Menu.Target>
                     <Button size="xs" variant="light" rightSection={<Icons.expand size={IconSize.inline} />} loading={groupMutation.isPending}>グループに入れる</Button>
                   </Menu.Target>
@@ -300,12 +308,7 @@ export function TargetsPanel({ targets, groups, loading, error, retry, form, mut
                     <Menu.Item leftSection={<Icons.add size={IconSize.menu} />} onClick={() => createGroup([...selected])}>新しいグループを作って入れる…</Menu.Item>
                   </Menu.Dropdown>
                 </Menu>
-                {viewGroup && <Button size="xs" variant="default" onClick={() => setMembers(viewGroup, false)}>このグループから外す</Button>}
-                {selectedTargets.some((target) => target.enabled) && <Button size="xs" variant="default" leftSection={<Icons.pause size={IconSize.inline} />} onClick={() => { onSetEnabled(selectedTargets.filter((target) => target.enabled), false); setSelected(new Set()); }}>止める</Button>}
-                {selectedTargets.some((target) => !target.enabled) && <Button size="xs" variant="default" leftSection={<Icons.resume size={IconSize.inline} />} onClick={() => { onSetEnabled(selectedTargets.filter((target) => !target.enabled), true); setSelected(new Set()); }}>再開する</Button>}
-                <Box style={{ flex: 1 }} />
-                <Button size="xs" variant="subtle" color="gray" onClick={() => setSelected(new Set())}>選択を解除</Button>
-              </Group>
+              </ActionRow>
             </Paper>
           )}
 
@@ -432,7 +435,10 @@ function GroupNameForm({ current, onSubmit }: { current: string; onSubmit: (name
     })}>
       <Stack>
         <TextInput label="グループ名" placeholder="毎日見る作者" data-autofocus {...form.getInputProps("name")} />
-        <Button type="submit" loading={pending}>{current ? "変更する" : "作る"}</Button>
+        <ActionRow>
+          <Button variant="default" disabled={pending} onClick={() => modals.closeAll()}>キャンセル</Button>
+          <Button type="submit" loading={pending}>{current ? "変更する" : "作る"}</Button>
+        </ActionRow>
       </Stack>
     </form>
   );

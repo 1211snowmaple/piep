@@ -1,5 +1,6 @@
 import { useCallback, useRef, useState } from "react";
 import { Alert, Badge, Button, Drawer, Group, Loader, Paper, Progress, Stack, Text } from "@mantine/core";
+import { ActionRow } from "@/components/ActionRow";
 import { Icons, IconSize } from "@/lib/icons";
 import { errorMessage } from "@/lib/format";
 import {
@@ -206,7 +207,7 @@ export function ProofreadPanel({
           </Stack>
         )}
         {error && <Alert color="red" variant="light" p="xs" title="校正を続けられません"><Text size="xs">{error}</Text></Alert>}
-        {open.length > 1 && <Group justify="flex-end"><Button size="xs" variant="light" leftSection={<Icons.confirm size={IconSize.menu} />} onClick={() => onApply(open)}>残り{open.length}件をすべて直す</Button></Group>}
+        {open.length > 1 && <ActionRow><Button size="xs" variant="light" leftSection={<Icons.confirm size={IconSize.menu} />} onClick={() => onApply(open)}>残り{open.length}件をすべて直す</Button></ActionRow>}
         {finished && !items.length && !error && <Text size="sm" c="dimmed" ta="center" py="md">直す候補は見つかりませんでした。</Text>}
         {items.map((item) => {
           const number = blockNumber(item.segmentId);
