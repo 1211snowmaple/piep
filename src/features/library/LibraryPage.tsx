@@ -1,4 +1,5 @@
 import { SeriesFilterSelect } from "./SeriesFilterSelect";
+import { ActionRow } from "@/components/ActionRow";
 import { parseSearchMode, useDefaultSearchMode } from "@/lib/searchPreferences";
 import { SearchMethodMenu } from "@/components/SearchMethodMenu";
 import { FilterChoiceGroup, FilterMultiChoiceGroup } from "@/components/FilterChoiceGroup";
@@ -517,10 +518,10 @@ function SaveSearchForm({ defaultName, onConfirm }: { defaultName: string; onCon
         onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); submit(); } }}
       />
       <Text size="xs" c="dimmed">同じ名前で保存すると、その検索を置き換えます。</Text>
-      <Group justify="flex-end">
+      <ActionRow>
         <Button variant="default" onClick={() => modals.close(SAVE_SEARCH_MODAL)}>キャンセル</Button>
         <Button disabled={!trimmed} onClick={submit}>保存</Button>
-      </Group>
+      </ActionRow>
     </Stack>
   );
 }
@@ -562,9 +563,9 @@ function openManageSavedSearches(saved: SavedSearchRecord[], onDelete: (id: numb
               </Button>
             </Group>
           ))}
-        <Group justify="flex-end" mt="sm">
+        <ActionRow mt="sm">
           <Button variant="default" onClick={() => modals.close(MANAGE_SEARCH_MODAL)}>閉じる</Button>
-        </Group>
+        </ActionRow>
       </Stack>
     ),
   });

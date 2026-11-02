@@ -3,6 +3,7 @@ import { useMemo, useState } from "react";
 import { Button, Card, Checkbox, Group, Pagination, Select, Stack, Text, TextInput } from "@mantine/core";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { notifications } from "@mantine/notifications";
+import { ActionRow } from "@/components/ActionRow";
 import { listDeferredUpdateCandidatesCommand, recheckDeferredUpdateCandidatesCommand, type DeferredUpdateCandidate } from "@/services/updateJobApi";
 import { errorMessage } from "@/lib/format";
 import { ErrorState, LoadingState } from "@/components/AsyncState";
@@ -58,12 +59,17 @@ export function DeferredCandidatesPanel({ runtime, onRechecked, onOpenWork }: { 
       <TextInput aria-label="保留作品を検索" placeholder="作品名・理由・取得元IDで検索" value={search} onChange={(event) => { setSearch(event.currentTarget.value); setPage(1); }} />
       <Select aria-label="状態で絞り込み" value={statusFilter} onChange={(value) => { setStatusFilter(value); setPage(1); }} data={[{ value: "all", label: "すべて" }, { value: "incomplete", label: "一部保存" }, { value: "unavailable", label: "見つからない" }, { value: "restricted", label: "閲覧条件待ち" }, { value: "error", label: "取得エラー" }, { value: "dismissed", label: "非表示" }, { value: "held", label: "その他の保留" }]} />
     </Group>
-    <Group>
-      <Button variant="subtle" size="xs" disabled={!visibleKeys.length || mutation.isPending} onClick={() => setSelected((previous) => new Set([...previous, ...visibleKeys]))}>表示分を選択</Button>
-      <Button variant="subtle" size="xs" disabled={!selectedKeys.length || mutation.isPending} onClick={() => setSelected(new Set())}>選択解除</Button>
+    {/* 選ぶ道具は左、選んだものへの決定は右。 */}
+    <ActionRow
+      start={<>
+        <Button variant="subtle" size="xs" disabled={!visibleKeys.length || mutation.isPending} onClick={() => setSelected((previous) => new Set([...previous, ...visibleKeys]))}>表示分を選択</Button>
+        <Button variant="subtle" size="xs" disabled={!selectedKeys.length || mutation.isPending} onClick={() => setSelected(new Set())}>選択解除</Button>
+      </>}
+    >
+      <Text size="xs" c="dimmed">公開条件の確認は20件ずつ</Text>
+      <Button variant="default" size="xs" disabled={!selectedKeys.length || selectedKeys.length > 20 || mutation.isPending} onClick={() => mutation.mutate({ keys: selectedKeys, refreshPostAccess: true })}>公開条件も確認</Button>
       <Button size="xs" disabled={!selectedKeys.length} loading={mutation.isPending} onClick={() => mutation.mutate({ keys: selectedKeys, refreshPostAccess: false })}>候補に戻す（{selectedKeys.length}）</Button>
-    </Group>
-    <Group><Button variant="subtle" size="xs" disabled={!selectedKeys.length || selectedKeys.length > 20 || mutation.isPending} onClick={() => mutation.mutate({ keys: selectedKeys, refreshPostAccess: true })}>公開条件も確認</Button><Text size="xs" c="dimmed">公開条件の確認は20件ずつ</Text></Group>
+    </ActionRow>
     {!rows.length && <Text size="sm" c="dimmed">保留候補はありません。</Text>}
     {visibleRows.map(({ row, reason, category }) => {
       const key = `${row.source}:${row.sourceId}`;

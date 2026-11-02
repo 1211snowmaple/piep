@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Badge, Button, Checkbox, Divider, Group, Modal, Stack, Text, Tooltip } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { ActionRow } from "@/components/ActionRow";
 import { AssistLauncher } from "@/features/assist/AssistLauncher";
 import { AssistNoteBody } from "@/features/assist/AssistPanel";
 import { AssistProgressLine } from "@/features/assist/AssistProgress";
@@ -179,7 +180,7 @@ function WorkAssistForWork({ downloadId }: { downloadId: number }) {
 
   return (
     <Stack gap="sm">
-      {!headerHosted && <Group justify="flex-end"><AssistLauncher label="この作品で使える手伝い" items={launcherItems} /></Group>}
+      {!headerHosted && <ActionRow><AssistLauncher label="この作品で使える手伝い" items={launcherItems} /></ActionRow>}
 
       {note.data && (
         <AssistNoteBody
@@ -222,7 +223,7 @@ function WorkAssistForWork({ downloadId }: { downloadId: number }) {
             <Text size="sm" c="dimmed">本文を読んで、結末までのあらすじを400字以内で書きます。文ごとに原文の根拠を付け、別の確認で原文と照らします。文脈の小さいモデルでは、本文の文を選ぶ抜粋になります。</Text>
             {note.data && <AssistNoteBody text={note.data.text} sourceTail={note.data.sourceTail} claims={note.data.claims} modelId={note.data.modelId} createdAt={note.data.createdAt} promptVersion={note.data.promptVersion} promptStale={note.data.promptStale} inputStale={note.data.inputStale} configStale={note.data.configStale} />}
             <AssistProgressLine feature="work_synopsis" downloadId={downloadId} active={summarize.isPending} />
-            <Group justify="flex-end"><Button loading={summarize.isPending} disabled={!synopsisReady} onClick={() => summarize.mutate()}>{note.data ? "作り直す" : "あらすじを作る"}</Button></Group>
+            <ActionRow><Button loading={summarize.isPending} disabled={!synopsisReady} onClick={() => summarize.mutate()}>{note.data ? "作り直す" : "あらすじを作る"}</Button></ActionRow>
           </Stack>
         ) : active === "tags" ? (
           <Stack>
@@ -230,7 +231,7 @@ function WorkAssistForWork({ downloadId }: { downloadId: number }) {
             {tagging.settings?.featureProfiles.work_tagging.inputPolicy.includeExcerpt === false && (
               <Text size="sm" c="dimmed">いまは概要を送らない設定なので、題名と付いているタグだけで候補を探します。作品の内容も使いたいときは、設定の「AIの手伝い」で「タグの補完」の送る項目に概要を入れてください。</Text>
             )}
-            <Group justify="flex-end"><Button loading={propose.isPending} onClick={() => propose.mutate()}>タグを提案してもらう</Button></Group>
+            <ActionRow><Button loading={propose.isPending} onClick={() => propose.mutate()}>タグを提案してもらう</Button></ActionRow>
             {proposals && proposals.length > 0 && <Divider />}
             {proposals?.map((proposal) => (
               <Checkbox
@@ -244,14 +245,14 @@ function WorkAssistForWork({ downloadId }: { downloadId: number }) {
                 label={<span><Text component="span" size="sm" fw={650}>{proposal.tag}</Text><Text size="xs" c="dimmed">{proposal.reason}</Text></span>}
               />
             ))}
-            {proposals && proposals.length > 0 && <Group justify="flex-end"><Button disabled={!picked.size} loading={accept.isPending} onClick={() => accept.mutate()}>選んだ{picked.size}件を付ける</Button></Group>}
+            {proposals && proposals.length > 0 && <ActionRow><Button disabled={!picked.size} loading={accept.isPending} onClick={() => accept.mutate()}>選んだ{picked.size}件を付ける</Button></ActionRow>}
           </Stack>
         ) : active === "related-tags" ? (
           <Stack>
             <Text size="sm" c="dimmed">候補は、ほかの作品で取得元のタグが一緒に付いている数から作ります。候補作成時はこの作品の本文や概要を読みません。外部へ通信せず、候補が内容に合う保証もありません。選んで採用するまでタグは変わりません。</Text>
-            <Group justify="flex-end">
+            <ActionRow>
               <Button loading={related.isPending} onClick={() => related.mutate()}>{related.data ? "候補を再読み込み" : "候補を読み込む"}</Button>
-            </Group>
+            </ActionRow>
             {related.isError && <Text role="alert" size="sm" c="red">{errorMessage(related.error)}。再試行できます。</Text>}
             {related.data && newRelatedCandidates?.length === 0 && !related.isPending && !related.isError && <Text size="sm" c="dimmed">新しく追加できる候補はありません。再読み込みできます。</Text>}
             {newRelatedCandidates && newRelatedCandidates.length > 0 && <Divider />}
@@ -268,7 +269,7 @@ function WorkAssistForWork({ downloadId }: { downloadId: number }) {
                 label={<span><Text component="span" size="sm" fw={650}>{candidate.tag}</Text><Text size="xs" c="dimmed">{candidate.reason}</Text></span>}
               />
             ))}
-            {newRelatedCandidates && newRelatedCandidates.length > 0 && <Group justify="flex-end"><Button disabled={!validRelatedPicked.length || related.isPending || related.isError} loading={acceptRelated.isPending} onClick={() => acceptRelated.mutate()}>選んだ{validRelatedPicked.length}件を手動で付ける</Button></Group>}
+            {newRelatedCandidates && newRelatedCandidates.length > 0 && <ActionRow><Button disabled={!validRelatedPicked.length || related.isPending || related.isError} loading={acceptRelated.isPending} onClick={() => acceptRelated.mutate()}>選んだ{validRelatedPicked.length}件を手動で付ける</Button></ActionRow>}
           </Stack>
         ) : null}
       </Modal>

@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import { Alert, Button, Card, Group, Loader, Stack, Text } from "@mantine/core";
+import { ActionRow } from "@/components/ActionRow";
 import { Icons, IconSize } from "@/lib/icons";
 import { AssistLauncher } from "@/features/assist/AssistLauncher";
 import type { AssistFeatureId, GroundedClaim } from "@/services/assistApi";
@@ -83,7 +84,7 @@ export function AssistPanel({
 
   // Before a result exists, the feature occupies one icon only. Availability,
   // the explanation, and the settings link all live in its menu.
-  if (!children && !busy) return headerHosted && placement === "header" ? null : <Group justify="flex-end">{launcher}</Group>;
+  if (!children && !busy) return headerHosted && placement === "header" ? null : <ActionRow>{launcher}</ActionRow>;
 
   return (
     <Card withBorder padding="md" className="assist-panel">

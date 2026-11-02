@@ -450,12 +450,12 @@ function CollectionDetail({ collection, readOnly, onEdit, onChanged }: { collect
                 <Text size="sm" c="dimmed">{formatNumber(collection.memberCount)}作品 · {formatNumber(collection.totalTextLength)}字</Text>
                 {missingCount > 0 && <Badge color="orange" variant="light">収録できない {formatNumber(missingCount)}作品</Badge>}
               </Group>
-              <Group gap="xs" mt={4} wrap="wrap">
-                <Button leftSection={<Icons.add size={IconSize.action} />} disabled={readOnly} onClick={addModal.open}>作品を追加</Button>
-                <Button variant="default" leftSection={<Icons.epub size={IconSize.action} />} loading={epubMutation.isPending} disabled={readOnly || exportableCount <= 0} onClick={startEpubExport}>一冊のEPUB</Button>
+              {/* 主操作の「作品を追加」は右端。「合う作品を探す」はその隣に置く。
+                  どちらも束へ作品を入れる操作で、違うのは**誰が探すか**だけである。 */}
+              <Group gap="xs" mt={4} wrap="wrap" justify="flex-end">
                 <Button variant="default" disabled={readOnly} onClick={() => onEdit(false)}>名前を付け直す</Button>
-                {/* 「作品を追加」の隣に置く。どちらも束へ作品を入れる操作で、
-                    違うのは**誰が探すか**だけである。 */}
+                <Button variant="default" leftSection={<Icons.epub size={IconSize.action} />} loading={epubMutation.isPending} disabled={readOnly || exportableCount <= 0} onClick={startEpubExport}>一冊のEPUB</Button>
+                {!headerHosted && <AssistLauncher items={assistItems} />}
                 <Button
                   variant="default"
                   leftSection={<Icons.collectionSuggest size={IconSize.action} />}
@@ -464,7 +464,7 @@ function CollectionDetail({ collection, readOnly, onEdit, onChanged }: { collect
                 >
                   合う作品を探す
                 </Button>
-                {!headerHosted && <AssistLauncher items={assistItems} />}
+                <Button leftSection={<Icons.add size={IconSize.action} />} disabled={readOnly} onClick={addModal.open}>作品を追加</Button>
                 <Menu position="bottom-end">
                   <Menu.Target>
                     <ActionIcon variant="default" size="lg" aria-label="このコレクションのその他の操作"><Icons.more size={IconSize.nav} /></ActionIcon>

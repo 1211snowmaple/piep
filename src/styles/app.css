@@ -1684,7 +1684,9 @@ select {
 .work-hero__tag:active { transform: translateY(1px); }
 .work-hero__tag:focus-visible { outline: 2px solid var(--mantine-color-piep-5); outline-offset: 2px; }
 
-.work-hero__facts { min-width: 0; }
+/* 操作と同じ行の左に置く。入りきらなければ先に事実の側を折り、それでも
+   足りなくなったら操作を次の行の右端へ送る。 */
+.work-hero__facts { flex: 1 1 240px; min-width: 0; }
 .work-hero__facts > .mantine-Text-root { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
 
 .work-hero__actionbar {
@@ -1697,10 +1699,7 @@ select {
   padding-top: 12px;
   border-top: 1px solid light-dark(#e3e7ec, #303945);
 }
-.work-hero__actions { min-width: 0; flex: 1 1 auto; }
-/* Keeps the far right even when the bar folds onto a second line, where
-   space-between would otherwise leave it at the start of the new row. */
-.work-hero__actionbar > .work-hero__favorite { margin-left: auto; }
+.work-hero__actions { min-width: 0; flex: 0 1 auto; margin-left: auto; }
 /* Same place and same weight as the author page's row, so the two detail
    screens read as one design. */
 .work-hero__utility { flex: 0 0 auto; }
@@ -2062,6 +2061,10 @@ select {
 /* 詳細見出しに付随する操作列。折り返さないこと自体が決まりなので、幅が
    足りなくなったらボタンの文字を畳んで絵にする。畳む境目は「この列が
    置かれている箱」の幅で測る。 */
+.action-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px 16px; }
+.action-row__start { flex: 1 1 240px; min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.action-row__end { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; margin-left: auto; min-width: 0; }
+
 .action-bar { flex: 0 0 auto; }
 .action-bar__item { flex: 0 0 auto; }
 @container hero (max-width: 820px) {
@@ -3025,6 +3028,7 @@ select {
   .work-hero__cover-stage { min-height: 280px; }
   .work-hero__cover { width: 168px; }
   .work-hero__actionbar { align-items: stretch; flex-direction: column; }
+  .work-hero__facts { flex: 0 0 auto; }
   .work-hero__actions { flex-wrap: wrap !important; }
 }
 
@@ -3050,7 +3054,7 @@ select {
 
   .page-header__actions {
     width: 100%;
-    justify-content: flex-start;
+    justify-content: flex-end;
   }
 }
 

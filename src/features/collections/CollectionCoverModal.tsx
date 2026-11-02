@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Button, Group, Modal, ScrollArea, Stack, Text, UnstyledButton } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
+import { ActionRow } from "@/components/ActionRow";
 import { CollectionCover } from "@/components/CollectionCover";
 import { WorkCover } from "@/components/WorkCover";
 import { errorMessage } from "@/lib/format";
@@ -119,7 +120,7 @@ export function CollectionCoverModal({
           </Group>
         )}
 
-        <Group justify="flex-end">
+        <ActionRow>
           <Button variant="default" onClick={onClose}>キャンセル</Button>
           <Button
             loading={busy}
@@ -138,7 +139,7 @@ export function CollectionCoverModal({
           >
             この表紙にする
           </Button>
-        </Group>
+        </ActionRow>
       </Stack>
     </Modal>
   );
