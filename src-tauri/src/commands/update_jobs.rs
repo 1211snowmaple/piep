@@ -16,6 +16,7 @@ use crate::database::{
     DownloadEntry, StartUpdateJobRequest, UpdateCandidateInput, UpdateCredentials, UpdateJobItem,
     UpdateJobItemInput, UpdateJobItemState, UpdateJobSnapshot, UpdateJobSummary,
 };
+use crate::fanbox_api::models::FanboxPost;
 use crate::pixiv_api::error::PixivError;
 use crate::AppState;
 use serde_json::Value;
@@ -105,9 +106,29 @@ struct FanboxListingEntry {
 struct FanboxUpdateIndex {
     attempted_authors: HashSet<String>,
     entries: HashMap<String, HashMap<String, FanboxListingEntry>>,
+    /// 新作の確認でも同じ一覧を使う。同じ作者の全ページを、1回のジョブで二度たどらない。
+    posts: HashMap<String, Vec<FanboxPost>>,
 }
 
 impl FanboxUpdateIndex {
+    /// このジョブで読んだ一覧のうち、`stop_source_id` より新しい投稿。読んでいなければ `None`。
+    ///
+    /// 一覧は新しい順なので、`get_creator_posts_since` と同じところで止まる。
+    fn posts_since(
+        &self,
+        author_id: &str,
+        stop_source_id: Option<&str>,
+    ) -> Option<Vec<FanboxPost>> {
+        let posts = self.posts.get(author_id)?;
+        Some(
+            posts
+                .iter()
+                .take_while(|post| stop_source_id != Some(post.id.as_str()))
+                .cloned()
+                .collect(),
+        )
+    }
+
     async fn lookup(
         &mut self,
         author_id: &str,
@@ -121,6 +142,7 @@ impl FanboxUpdateIndex {
                     .map_err(|error| error.to_string())?;
             match api.get_all_creator_posts(author_id).await {
                 Ok(posts) => {
+                    self.posts.insert(author_id.to_string(), posts.clone());
                     self.entries.insert(
                         author_id.to_string(),
                         posts
@@ -442,6 +464,21 @@ fn describe_text_change(before: i64, after: i64) -> String {
     }
 }
 
+/// 版が増えた理由の一言。題名だけが直された更新は、文字数だけでは何が変わったのか分からない。
+fn describe_source_change(
+    before_title: &str,
+    after_title: &str,
+    before_length: i64,
+    after_length: i64,
+) -> String {
+    let text = describe_text_change(before_length, after_length);
+    if before_title == after_title {
+        text
+    } else {
+        format!("題名を変更, {text}")
+    }
+}
+
 fn format_thousands(value: i64) -> String {
     let digits = value.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
@@ -461,6 +498,7 @@ fn format_thousands(value: i64) -> String {
 /// （配信元が更新時刻だけ動かした場合）も、そうと分かるようにする。
 fn describe_candidate_save(
     updated: &DownloadEntry,
+    previous_title: Option<&str>,
     previous_length: Option<i64>,
     previous_version: Option<i64>,
 ) -> ItemOutcome {
@@ -470,7 +508,12 @@ fn describe_candidate_save(
             format!(
                 "改稿を保存: {}（{}, v{}）",
                 updated.title,
-                describe_text_change(before, updated.text_length),
+                describe_source_change(
+                    previous_title.unwrap_or(&updated.title),
+                    &updated.title,
+                    before,
+                    updated.text_length
+                ),
                 updated.current_version
             ),
         ),
@@ -543,7 +586,15 @@ fn candidate_payload(
                 item.get("localVersion").and_then(Value::as_i64),
                 string_at(item, &[&["localSavedAt"]]),
             ) {
-                (Some(version), Some(saved)) => format!("手元は v{version}（{}に保存）", saved.chars().take(10).collect::<String>()),
+                (Some(version), Some(saved)) => {
+                    let title_changed = string_at(item, &[&["localTitle"]])
+                        .is_some_and(|local| string_at(item, &[&["title"]]).is_some_and(|title| title != local));
+                    format!(
+                        "手元は v{version}（{}に保存）{}",
+                        saved.chars().take(10).collect::<String>(),
+                        if title_changed { "・題名が変わっています" } else { "" }
+                    )
+                }
                 _ => date.clone(),
             },
             _ if author == target_label => date.clone(),
@@ -922,6 +973,24 @@ async fn emit_progress_delta(
             log::error!("更新ジョブ {job_id} の差分進捗をDBから読めません: {error}");
         }
     }
+}
+
+/// 作者の投稿一覧を読み始めたことを画面へ知らせる。
+///
+/// 一覧を読むあいだ（長い作者で 30 秒ほど）、件数は動かない。先頭の作品の題名を
+/// 出したままだと、その作品で止まったように見える。
+async fn announce_author_listing(
+    app: &tauri::AppHandle,
+    state: &Arc<AppState>,
+    job_id: &str,
+    author_name: &str,
+) -> Result<(), String> {
+    let label = format!("{author_name}の投稿一覧を読んでいます");
+    state
+        .db
+        .transition_update_job_status(job_id, "running", "running", Some(&label))?;
+    emit_progress_delta(app, state, job_id, None).await;
+    Ok(())
 }
 
 fn spawn_update_job(app: tauri::AppHandle, job_id: String, credentials: UpdateCredentials) {
@@ -2798,7 +2867,18 @@ async fn process_update_job_item(
             )
             .await
         }
-        "target" => process_target_item(app, state, job_id, item, credentials, web_index).await,
+        "target" => {
+            process_target_item(
+                app,
+                state,
+                job_id,
+                item,
+                credentials,
+                web_index,
+                fanbox_index,
+            )
+            .await
+        }
         "candidate" => process_candidate_item(app, state, item, credentials).await,
         _ => Ok(ItemOutcome::Skipped(format!(
             "未対応のジョブ項目をスキップ: {}",
@@ -3019,6 +3099,9 @@ async fn process_work_item(
         // 0段目。web の一覧は、100件まとめて `updateDate` を返す。ここで
         // 「変わっていない」と分かれば、アプリAPIを一度も叩かずに終わる。
         let listing_was_cached = web_index.asked_authors.contains(dl.author_id.trim());
+        if !listing_was_cached && web_index.api.is_some() && !web_index.gave_up {
+            announce_author_listing(app, state, job_id, &dl.author_name).await?;
+        }
         let listed_update = match web_index.lookup(state, &dl, job_id).await {
             WebLookup::Failed(message) => return Err(message),
             WebLookup::Unavailable => {
@@ -3122,7 +3205,12 @@ async fn process_work_item(
                 format!(
                     "更新を保存: {}（{}, v{}）",
                     updated.title,
-                    describe_text_change(dl.text_length, updated.text_length),
+                    describe_source_change(
+                        &dl.title,
+                        &updated.title,
+                        dl.text_length,
+                        updated.text_length
+                    ),
                     updated.current_version
                 ),
             ))
@@ -3137,6 +3225,9 @@ async fn process_work_item(
         };
         let user_agent = fanbox_user_agent(credentials);
         if fanbox_author_check && !dl.author_id.trim().is_empty() {
+            if !fanbox_index.attempted_authors.contains(&dl.author_id) {
+                announce_author_listing(app, state, job_id, &dl.author_name).await?;
+            }
             if let Some(listed) = fanbox_index
                 .lookup(&dl.author_id, &dl.source_id, &cookie, &user_agent)
                 .await?
@@ -3237,7 +3328,12 @@ async fn process_work_item(
                 format!(
                     "更新を保存: {}（{}, v{}）",
                     updated.title,
-                    describe_text_change(dl.text_length, updated.text_length),
+                    describe_source_change(
+                        &dl.title,
+                        &updated.title,
+                        dl.text_length,
+                        updated.text_length
+                    ),
                     updated.current_version
                 ),
             ))
@@ -3278,6 +3374,7 @@ async fn record_work_revision_candidate(
         "title": title,
         "user": { "name": download.author_name, "id": download.author_id },
         "creatorId": if download.source == "fanbox" { Some(&download.author_id) } else { None },
+        "localTitle": download.title,
         "localVersion": download.current_version,
         "localSavedAt": download.downloaded_at,
     });
@@ -3551,6 +3648,7 @@ async fn process_target_item(
     item: &UpdateJobItem,
     credentials: &UpdateCredentials,
     web_index: &mut WebUpdateIndex,
+    fanbox_index: &FanboxUpdateIndex,
 ) -> Result<ItemOutcome, String> {
     let target: crate::database::UpdateTarget =
         serde_json::from_str(&item.payload_json).map_err(|e| e.to_string())?;
@@ -3593,16 +3691,24 @@ async fn process_target_item(
             ));
         };
         let user_agent = fanbox_user_agent(credentials);
-        super::downloader::fetch_fanbox_creator_posts_since(
-            target.source_key.clone(),
-            cookie,
-            user_agent,
-            target.last_seen_source_id.as_deref(),
-        )
-        .await?
-        .into_iter()
-        .map(|item| serde_json::to_value(item).map_err(|e| e.to_string()))
-        .collect::<Result<Vec<_>, _>>()?
+        let posts = match fanbox_index
+            .posts_since(&target.source_key, target.last_seen_source_id.as_deref())
+        {
+            Some(posts) => posts,
+            None => {
+                super::downloader::fetch_fanbox_creator_posts_since(
+                    target.source_key.clone(),
+                    cookie,
+                    user_agent,
+                    target.last_seen_source_id.as_deref(),
+                )
+                .await?
+            }
+        };
+        posts
+            .into_iter()
+            .map(|item| serde_json::to_value(item).map_err(|e| e.to_string()))
+            .collect::<Result<Vec<_>, _>>()?
     } else {
         Vec::new()
     };
@@ -3783,6 +3889,7 @@ async fn process_candidate_item(
             item.title
         )));
     }
+    let previous_title = existing.as_ref().map(|download| download.title.clone());
     let previous_length = existing.as_ref().map(|download| download.text_length);
     let previous_version = existing.as_ref().map(|download| download.current_version);
 
@@ -3869,6 +3976,7 @@ async fn process_candidate_item(
         // 利用者が自分で選ぶもので、勝手に増えると取得先への負荷にもなる。
         Ok(describe_candidate_save(
             &updated,
+            previous_title.as_deref(),
             previous_length,
             previous_version,
         ))
@@ -3948,6 +4056,7 @@ async fn process_candidate_item(
         .await?;
         Ok(describe_candidate_save(
             &updated,
+            previous_title.as_deref(),
             previous_length,
             previous_version,
         ))
@@ -3963,10 +4072,11 @@ async fn process_candidate_item(
 mod tests {
     use super::{
         build_initial_items, build_save_items, canceled_status_for, classify_failure,
-        describe_text_change, error_delay_ms, fanbox_listing_confirms_recent_copy, make_job_id,
-        may_remember, profile_refresh_params_for_target, rate_limit_delay_ms,
-        too_many_consecutive_errors, FailureKind, FanboxListingEntry, SaveJobWork,
-        MAX_ERROR_BACKOFF_MS, MAX_RATE_LIMIT_BACKOFF_MS,
+        describe_source_change, describe_text_change, error_delay_ms,
+        fanbox_listing_confirms_recent_copy, make_job_id, may_remember,
+        profile_refresh_params_for_target, rate_limit_delay_ms, too_many_consecutive_errors,
+        FailureKind, FanboxListingEntry, FanboxUpdateIndex, SaveJobWork, MAX_ERROR_BACKOFF_MS,
+        MAX_RATE_LIMIT_BACKOFF_MS,
     };
     use crate::database::{
         AdhocUpdateTarget, Database, NewDownload, StartUpdateJobRequest, UpdateTargetInput,
@@ -4678,6 +4788,70 @@ mod tests {
         .unwrap();
         let subtitle = payload.get("subtitle").and_then(|v| v.as_str()).unwrap();
         assert_eq!(subtitle, "手元は v1（2026-08-19に保存）");
+    }
+
+    /// 本文が同じで題名だけ直された更新がある。保存する前に、そうと分かるようにする。
+    #[test]
+    fn a_revision_says_when_the_title_changed() {
+        let item = serde_json::json!({
+            "id": "90000007",
+            "title": "直した題名",
+            "user": { "name": "作者" },
+            "localTitle": "元の題名",
+            "localVersion": 1,
+            "localSavedAt": "2026-08-19T14:19:33.782735500+00:00",
+        });
+        let payload = super::candidate_payload(
+            "author",
+            "作者",
+            "pixiv",
+            &item,
+            super::CandidateKind::Revision,
+        )
+        .unwrap();
+        assert_eq!(
+            payload.get("subtitle").and_then(|v| v.as_str()).unwrap(),
+            "手元は v1（2026-08-19に保存）・題名が変わっています"
+        );
+        assert_eq!(
+            describe_source_change("元の題名", "直した題名", 980, 980),
+            "題名を変更, 文字数は変わらず"
+        );
+        assert_eq!(describe_source_change("題名", "題名", 980, 990), "+10字");
+    }
+
+    /// 保存済み作品の確認で読んだ一覧を、新作の確認でも使う。前回見た投稿より
+    /// 古いものは、取得元へ聞いたときと同じく候補に混ぜない。
+    #[test]
+    fn a_listing_read_for_saved_works_also_answers_the_new_work_check() {
+        let post = |id: &str| {
+            serde_json::from_value(serde_json::json!({
+                "id": id,
+                "title": id,
+                "creatorId": "creator",
+                "publishedDatetime": "2026-11-02T00:00:00+09:00",
+                "updatedDatetime": "2026-11-02T00:00:00+09:00",
+            }))
+            .unwrap()
+        };
+        let mut index = FanboxUpdateIndex::default();
+        assert!(index.posts_since("creator", None).is_none());
+        index
+            .posts
+            .insert("creator".to_string(), vec![post("3"), post("2"), post("1")]);
+
+        let ids = |stop| -> Vec<String> {
+            index
+                .posts_since("creator", stop)
+                .unwrap()
+                .into_iter()
+                .map(|post| post.id)
+                .collect()
+        };
+        assert_eq!(ids(None), ["3", "2", "1"]);
+        assert_eq!(ids(Some("2")), ["3"]);
+        assert_eq!(ids(Some("3")), Vec::<String>::new());
+        assert!(index.posts_since("someone-else", None).is_none());
     }
 
     /// 手元の版が分からなければ、作り話をせず従来どおりの副題に戻す。

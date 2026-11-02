@@ -1,5 +1,5 @@
 import { UpdateWorkMetadata } from "./UpdateWorkMetadata";
-import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
+import { useEffect, useRef, useState } from "react";
 import { transitionContent } from "@/lib/contentTransition";
 import {
   ActionIcon,
@@ -447,6 +447,9 @@ export default function UpdatesPage() {
           触る頻度が3桁違うものを同じ重さで並べていたころは、左の柱が画面
           より長くなっていた。 */}
       <Paper className="updates-toolbar" p="sm" withBorder mt="md">
+        {/* 作者のページから始めた確認でも、ここには次回の設定が出ている。
+            動いている確認の対象と読み違えないよう、動いているあいだは名乗る。 */}
+        {(running || stalled) && <Text size="xs" c="dimmed" mb={6}>次に始める確認の設定</Text>}
         <Group gap="sm" wrap="wrap">
           <Select
             aria-label="確認する対象"
@@ -508,7 +511,7 @@ export default function UpdatesPage() {
       {activeSnapshot && (!resultIsTerminal || progressOpen) && (
         <Card p="lg" className="update-progress-card" mt="lg">
           <Group justify="space-between" align="center" wrap="wrap">
-            <Group gap="xs"><StatusBadge job={activeSnapshot} /><Text size="xs" c="dimmed">{activeSnapshot.jobId}</Text></Group>
+            <Group gap="xs"><StatusBadge job={activeSnapshot} /><Text size="sm" fw={600} title={activeSnapshot.jobId}>{updateJobSubject(jobs.find((job) => job.jobId === activeSnapshot.jobId) ?? activeSnapshot)}</Text></Group>
             <Group gap="xs">
               {resultIsTerminal && <Button variant="subtle" color="gray" rightSection={<Icons.expand size={IconSize.inline} style={{ transform: "rotate(180deg)" }} />} aria-expanded onClick={() => setProgressOpen(false)}>畳む</Button>}
               {running && <Button variant="default" leftSection={<Icons.pause size={IconSize.menu} />} onClick={() => runtime && reportJobAction(updateJobs.pause(activeSnapshot.jobId), "一時停止できません")}>一時停止</Button>}
@@ -517,7 +520,7 @@ export default function UpdatesPage() {
               {((stalled && activeSnapshot.errorCount > 0) || activeSnapshot.status === "failed" || activeSnapshot.status === "canceled") && <Button leftSection={<Icons.undo size={IconSize.menu} />} onClick={() => runtime && reportJobAction(updateJobs.resume(activeSnapshot.jobId, true), "やり直せません")}>失敗分を再試行</Button>}
             </Group>
           </Group>
-          <ScrollingJobTitle label={throttledMessage ? statusTitle(activeSnapshot.status) : activeSnapshot.activeLabel || statusTitle(activeSnapshot.status)} />
+          <JobActivityTitle label={throttledMessage ? statusTitle(activeSnapshot.status) : activeSnapshot.activeLabel || statusTitle(activeSnapshot.status)} reserveLines={running} />
           <Text size="sm" c="dimmed" mt={5}>候補 {formatNumber(activeSnapshot.candidateCount)} · 保存済み {formatNumber(activeSnapshot.savedCount)} · エラー {formatNumber(activeSnapshot.errorCount)} · 保留 {formatNumber(activeSnapshot.heldCount ?? 0)}{(activeSnapshot.knownHeldCount ?? 0) > 0 && `（ほかに前回から変わらない保留 ${formatNumber(activeSnapshot.knownHeldCount ?? 0)}件）`}</Text>
           {outcome && activeSnapshot.mode === "check_only" && (
             <Text size="sm" mt="xs">
@@ -810,23 +813,15 @@ function kindLabel(kind: string): string {
  * 「新作」「続編」「改稿」は判断の重さが違う — 改稿は手元の版を置き換えるので、
  * 新作をまとめて取り込むついでに混ぜたくない。だから既定は分けて見せる。
  */
-export function ScrollingJobTitle({ label }: { label: string }) {
-  const viewport = useRef<HTMLDivElement>(null);
-  const content = useRef<HTMLHeadingElement>(null);
-  const [overflow, setOverflow] = useState(0);
-  useLayoutEffect(() => {
-    const measure = () => setOverflow(Math.max(0, (content.current?.scrollWidth ?? 0) - (viewport.current?.clientWidth ?? 0)));
-    measure();
-    if (typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver(measure);
-    if (viewport.current) observer.observe(viewport.current);
-    if (content.current) observer.observe(content.current);
-    return () => observer.disconnect();
-  }, [label]);
-  // 見出しを作り直すと、次のラベルは前のアニメーション位置を引き継がない。
-  return <Box ref={viewport} className={`update-job-title-viewport${overflow > 0 ? " update-job-title-viewport--scrolling" : ""}`} title={label}>
-    <Title key={label} ref={content} order={2} className="update-job-title" style={{ "--title-overflow": `${overflow}px`, "--title-duration": `${Math.max(9, overflow / 28 + 4)}s` } as CSSProperties}>{label}</Title>
-  </Box>;
+/**
+ * いま扱っている作品の題名。
+ *
+ * 動かさずに折り返す。題名は約 2.5 秒で入れ替わるので、流して見せても後ろまで
+ * 読む前に先頭へ戻ってしまう。動いているあいだは2行ぶんの高さを取り、題名の
+ * 長さで下の進み具合が上下しないようにする。
+ */
+export function JobActivityTitle({ label, reserveLines }: { label: string; reserveLines: boolean }) {
+  return <Title order={2} size="h4" className={`update-job-title line-clamp-2${reserveLines ? " update-job-title--reserved" : ""}`} title={label}>{label}</Title>;
 }
 
 function JobStageProgress({ label, processed, total, animated }: { label: string; processed: number; total: number; animated: boolean }) {
