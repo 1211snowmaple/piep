@@ -509,7 +509,7 @@ function WorkActions({ work, queued, onQueue, onToggleFavorite, onToggleWatch }:
         <Menu.Target><Tooltip label="その他"><ActionIcon variant="subtle" color="gray" style={{ "--ai-color": "var(--flag-off)" }} size="md" aria-label={`${work.title}：その他`}><Icons.more size={IconSize.nav} /></ActionIcon></Tooltip></Menu.Target>
         <Menu.Dropdown>
           <Menu.Item leftSection={<Icons.workDetail size={IconSize.menu} />} onClick={() => navigate(`/works/${work.id}`)}>詳細</Menu.Item>
-          <Menu.Item leftSection={<Icons.watch size={IconSize.menu} />} onClick={() => navigate(`/updates?work=${work.id}`)}>更新センターで確認</Menu.Item>
+          <Menu.Item leftSection={<Icons.watch size={IconSize.menu} />} onClick={() => navigate(`/updates?work=${work.id}`)}>新着の画面で確認</Menu.Item>
           <Menu.Divider />
           <Menu.Item color="red" leftSection={<Icons.delete size={IconSize.menu} />} onClick={confirmDelete}>ライブラリから削除</Menu.Item>
         </Menu.Dropdown>

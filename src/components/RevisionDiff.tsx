@@ -1,13 +1,18 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from "react";
 import { Alert, Badge, Box, Button, Group, SegmentedControl, Stack, Text, Tooltip } from "@mantine/core";
-import { useDebouncedValue } from "@mantine/hooks";
+import { useDebouncedValue, useElementSize, useLocalStorage } from "@mantine/hooks";
 import { RevisionMetadataDiff } from "./RevisionMetadataDiff";
 import { LoadingState } from "./AsyncState";
 import type { RevisionMetadata } from "@/services/workInspectionApi";
-import { compactTextDiff, type DisplayDiffPart } from "@/lib/textDiff";
+import { compactTextDiff, sideBySideRows, type DisplayDiffPart, type SideBySideCell } from "@/lib/textDiff";
 import { useTextDiff } from "@/lib/useTextDiff";
 import { overviewMarks, type OverviewKind, type OverviewMark } from "@/lib/diffOverview";
 import { Icons, IconSize } from "@/lib/icons";
+
+/** これより狭いと、左右に並べても1行が短くなりすぎて読めない。 */
+const SIDE_BY_SIDE_MIN_WIDTH = 640;
+
+type DiffLayout = "side" | "inline";
 
 interface RevisionDiffProps {
   beforeMetadata?: RevisionMetadata;
@@ -23,6 +28,12 @@ interface RevisionDiffProps {
 
 export function RevisionDiff({ beforeMetadata, afterMetadata, beforeVersion, afterVersion, beforeText, afterText, beforeLabel, afterLabel, actions }: RevisionDiffProps) {
   const [view, setView] = useState<"changes" | "text">("changes");
+  // 読み比べ方は版ごとに変わるものではないので、次に開いたときも同じにする。
+  const [layout, setLayout] = useLocalStorage<DiffLayout>({ key: "piep.revision-diff-layout", defaultValue: "side", getInitialValueInEffect: false });
+  const { ref: sizeRef, width } = useElementSize();
+  // 幅を測る前の1回目は、並べて描いてから畳むとちらつくので並べないでおく。
+  const roomy = width >= SIDE_BY_SIDE_MIN_WIDTH;
+  const effectiveLayout: DiffLayout = roomy ? layout : "inline";
   const { diff, pending } = useTextDiff(beforeText, afterText);
   // 大半の比較はすぐ終わる。そのたびに「計算しています」が一瞬出るとちらつくので、
   // 待ちが長引いたときだけ出す。
@@ -33,7 +44,7 @@ export function RevisionDiff({ beforeMetadata, afterMetadata, beforeVersion, aft
 
   useEffect(() => setView("changes"), [afterVersion, beforeVersion, resolvedAfterLabel, resolvedBeforeLabel]);
 
-  return <Stack gap="md">
+  return <Stack gap="md" ref={sizeRef}>
     <Group justify="space-between" align="flex-start" gap="sm">
       <Box>
         <Text fw={700}>{resolvedBeforeLabel === null ? `${resolvedAfterLabel}の本文` : `${resolvedBeforeLabel} → ${resolvedAfterLabel} の変更`}</Text>
@@ -47,9 +58,17 @@ export function RevisionDiff({ beforeMetadata, afterMetadata, beforeVersion, aft
         {beforeVersion !== null && <SegmentedControl
           size="xs"
           aria-label="履歴の表示方法"
-          value={view}
-          onChange={(value) => setView(value as "changes" | "text")}
-          data={[{ value: "changes", label: "差分" }, { value: "text", label: `${resolvedAfterLabel}全文` }]}
+          value={view === "text" ? "text" : effectiveLayout}
+          onChange={(value) => {
+            if (value === "text") return setView("text");
+            setView("changes");
+            setLayout(value as DiffLayout);
+          }}
+          data={[
+            ...(roomy ? [{ value: "side", label: "並べて" }] : []),
+            { value: "inline", label: roomy ? "1列" : "差分" },
+            { value: "text", label: `${resolvedAfterLabel}全文` },
+          ]}
         />}
         {actions}
       </Group>
@@ -63,7 +82,7 @@ export function RevisionDiff({ beforeMetadata, afterMetadata, beforeVersion, aft
         ? slow ? <LoadingState label="本文の差分を計算しています" /> : <Box mih={160} aria-busy="true" />
         : !diff?.changed
           ? <Alert color="gray">本文の変更はありません。</Alert>
-          : <DiffContent parts={displayParts} label={`${resolvedBeforeLabel}から${resolvedAfterLabel}への本文差分`} />}
+          : <DiffContent parts={displayParts} layout={effectiveLayout} beforeLabel={resolvedBeforeLabel ?? ""} afterLabel={resolvedAfterLabel} label={`${resolvedBeforeLabel}から${resolvedAfterLabel}への本文差分`} />}
   </Stack>;
 }
 
@@ -71,7 +90,7 @@ export function RevisionDiff({ beforeMetadata, afterMetadata, beforeVersion, aft
  * 差分の本文。横に、どこが変わったかを示す帯（エディタの概観ルーラーにあたる）と、
  * 変更を一つずつ前後へ辿る操作を添える。
  */
-function DiffContent({ parts, label }: { parts: DisplayDiffPart[]; label: string }) {
+function DiffContent({ parts, layout, beforeLabel, afterLabel, label }: { parts: DisplayDiffPart[]; layout: DiffLayout; beforeLabel: string; afterLabel: string; label: string }) {
   const contentRef = useRef<HTMLDivElement>(null);
   const hunkTops = useRef<number[]>([]);
   const [marks, setMarks] = useState<OverviewMark[]>([]);
@@ -97,7 +116,17 @@ function DiffContent({ parts, label }: { parts: DisplayDiffPart[]; label: string
     return { hunkOf, total: count };
   }, [parts]);
 
+  const rows = useMemo(() => layout === "side" ? sideBySideRows(parts) : null, [layout, parts]);
+
   useEffect(() => setCurrent(-1), [parts, setCurrent]);
+
+  const renderCell = (cell: SideBySideCell) => {
+    const hunk = hunkOf[cell.index];
+    const currentHunk = hunk === current || undefined;
+    if (cell.kind === "added") return <ins key={cell.index} className="revision-diff__part" data-kind="added" data-hunk={hunk} data-current={currentHunk}>{cell.value}</ins>;
+    if (cell.kind === "removed") return <del key={cell.index} className="revision-diff__part" data-kind="removed" data-hunk={hunk} data-current={currentHunk}>{cell.value}</del>;
+    return <span key={cell.index}>{cell.value}</span>;
+  };
 
   const updateViewport = useCallback(() => {
     const element = contentRef.current;
@@ -126,7 +155,7 @@ function DiffContent({ parts, label }: { parts: DisplayDiffPart[]; label: string
     const observer = new ResizeObserver(measure);
     observer.observe(element);
     return () => observer.disconnect();
-  }, [parts, updateViewport]);
+  }, [parts, layout, updateViewport]);
 
   useEffect(() => {
     const element = contentRef.current;
@@ -190,8 +219,16 @@ function DiffContent({ parts, label }: { parts: DisplayDiffPart[]; label: string
       </Button.Group>
     </Group>
     <div className="revision-diff__frame" data-overview={viewport ? "" : undefined}>
-      <div ref={contentRef} className="revision-diff__content" role="region" tabIndex={0} aria-label={label}>
-        {parts.map((part, index) => {
+      <div ref={contentRef} className="revision-diff__content" data-layout={layout} role="region" tabIndex={0} aria-label={label}>
+        {rows ? <>
+          <div className="revision-diff__side-head" aria-hidden="true"><span>{beforeLabel}</span><span>{afterLabel}</span></div>
+          {rows.map((row, index) => row.kind === "omitted"
+            ? <span key={index} className="revision-diff__omission">{row.value}</span>
+            : <div key={index} className="revision-diff__row">
+                <div>{row.before.map(renderCell)}</div>
+                <div>{row.after.map(renderCell)}</div>
+              </div>)}
+        </> : parts.map((part, index) => {
           const hunk = hunkOf[index];
           const currentHunk = hunk === current || undefined;
           if (part.kind === "added") return <ins key={index} className="revision-diff__part" data-kind="added" data-hunk={hunk} data-current={currentHunk}>{part.value}</ins>;

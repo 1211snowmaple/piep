@@ -159,7 +159,7 @@ export default function UpdatesPage() {
   // 非表示にした候補は、この画面ではすぐ消す（次のジョブでは元から出てこない）。
   const [dismissedIds, setDismissedIds] = useState<number[]>([]);
   const form = useForm({
-    initialValues: { scope: workId ? "work" : "all", mode: "check_only" },
+    initialValues: { scope: workId ? "work" : "all", mode: "check_only", depth: "new" },
   });
   const targetForm = useForm({
     initialValues: { targetType: "author", source: "pixiv", sourceKey: "", displayName: "" },
@@ -219,7 +219,7 @@ export default function UpdatesPage() {
 
   const startMutation = useMutation({
     // `targetIds` は監視対象の一覧やグループから来た確認。その作者・シリーズだけを見る。
-    mutationFn: async (values: { scope: string; mode: string; targetIds?: number[] }) => {
+    mutationFn: async (values: { scope: string; mode: string; depth: string; targetIds?: number[] }) => {
       if (!runtime) { await new Promise((resolve) => setTimeout(resolve, 400)); setPreviewSnapshot({ ...demoSnapshot, jobId: `preview-${Date.now()}`, startedAt: new Date().toISOString(), updatedAt: new Date().toISOString() }); return; }
       const group = values.scope.startsWith("group:") ? groupList.find((item) => `group:${item.id}` === values.scope) : null;
       if (values.scope.startsWith("group:") && !group) throw new Error("選んだ監視グループが見つかりません");
@@ -236,6 +236,7 @@ export default function UpdatesPage() {
         workIds: shelfIds ?? (workId && !targetIds ? [workId] : null),
         targetIds,
         watchSaved: schedule.watchSaved,
+        newWorksOnly: values.depth === "new" && !shelfIds && !workId,
       });
       await updateJobs.loadJobs();
     },
@@ -404,7 +405,7 @@ export default function UpdatesPage() {
     },
   });
   const checkTargets = (targetIds: number[], label: string) => startMutation.mutate(
-    { scope: "targets", mode: form.values.mode, targetIds },
+    { scope: "targets", mode: form.values.mode, depth: form.values.depth, targetIds },
     { onSuccess: () => notifications.show({ color: "piep", title: "確認を開始しました", message: `${label}の${formatNumber(targetIds.length)}件を確認します` }) },
   );
   // 自動確認は「いまどうなっているか」だけを一行で名乗る。設定そのものは
@@ -416,6 +417,8 @@ export default function UpdatesPage() {
     staleTime: 0,
   });
   const scheduleSummary = describeSchedule(schedule.data, groups.data);
+  const worksOnlyScope = Boolean(workId) || ["work", "favorite", "reading"].includes(form.values.scope);
+  const newWorksDepth = !worksOnlyScope && form.values.depth === "new";
   // A log records that a limit happened in the past. The active label records
   // whether this worker is waiting for that retry right now.
   const throttledMessage = activeSnapshot?.status === "running" &&
@@ -440,7 +443,7 @@ export default function UpdatesPage() {
 
   return (
     <div className="page page--contained updates-page">
-      <PageHeader title="更新センター" description="作品の変更、作者の新作、シリーズの続編を一つのジョブとして安全に確認・保存します。" />
+      <PageHeader title="新着" description="作者の新作、シリーズの続編、作品の改稿を確認して保存します。" />
 
       {/* 毎回触るものだけを一列に置く。自動確認は数か月に一度しか触らない
           設定なので、いまどうなっているかだけ名乗って、変更は開いたときに。
@@ -464,15 +467,19 @@ export default function UpdatesPage() {
             w={210}
             {...form.getInputProps("scope")}
           />
+          {/* 作品が対象のときは、その作品の改稿を見るほかにすることがない。 */}
+          <SegmentedControl aria-label="確認する内容" data={[{ value: "new", label: "新作だけ" }, { value: "full", label: "改稿も" }]} disabled={worksOnlyScope} value={worksOnlyScope ? "full" : form.values.depth} onChange={(value) => form.setFieldValue("depth", value)} />
           <SegmentedControl aria-label="更新時の処理方法" data={[{ value: "check_only", label: "確認のみ" }, { value: "auto_save", label: "自動保存" }]} {...form.getInputProps("mode")} />
           {/* 平常時に読ませたいのは一行だけ。詳しい話は、知りたくなった
               ときに開く。実際に効いた瞬間は下の進捗カードが名乗る。 */}
           <Group gap={4} wrap="nowrap">
-            <Text size="xs" c="dimmed">1件ずつ間隔をあけて確認します</Text>
+            <Text size="xs" c="dimmed">{newWorksDepth ? "作者とシリーズの一覧だけを見ます" : "1件ずつ間隔をあけて確認します"}</Text>
             <Tooltip
               multiline
               w={280}
-              label="取得元への確認は1件ずつ2秒以上あけます。取得エラーが続くと間隔を延ばして一時停止します。取得制限では分単位で待って再試行します。pixiv 側の表示設定で一覧から省かれた作品は個別に確認します。"
+              label={newWorksDepth
+                ? "作者とシリーズごとに一覧を1回見て、新しい作品だけを探します。改稿と、作品ごとの監視は確認しません。取得元への確認は1.5秒以上あけます。取得エラーが続くと間隔を延ばして一時停止します。"
+                : "取得元への確認は1件ずつ2秒以上あけます。取得エラーが続くと間隔を延ばして一時停止します。取得制限では分単位で待って再試行します。pixiv 側の表示設定で一覧から省かれた作品は個別に確認します。"}
             >
               <ActionIcon variant="subtle" color="gray" size="md" aria-label="確認の進め方について">
                 <Icons.help size={IconSize.menu} />
@@ -500,7 +507,7 @@ export default function UpdatesPage() {
         <Card px="md" py="sm" className="update-progress-card update-progress-card--compact" mt="lg">
           <Group gap="sm" wrap="nowrap">
             <StatusBadge job={activeSnapshot} />
-            <Text size="sm" fw={650} style={{ flex: "none" }}>{statusTitle(activeSnapshot.status)}</Text>
+            <Text size="sm" fw={650} style={{ flex: "none" }}>{statusTitle(activeSnapshot.status, activeSnapshot.newWorksOnly)}</Text>
             <Text size="xs" c="dimmed" className="line-clamp-1" style={{ flex: 1, minWidth: 0 }}>
               {formatDate(activeSnapshot.finishedAt ?? activeSnapshot.updatedAt, true)} · 候補 {formatNumber(activeSnapshot.candidateCount)} · 保存済み {formatNumber(activeSnapshot.savedCount)} · エラー {formatNumber(activeSnapshot.errorCount)} · 保留 {formatNumber(activeSnapshot.heldCount ?? 0)}
             </Text>
@@ -522,7 +529,7 @@ export default function UpdatesPage() {
               {((stalled && activeSnapshot.errorCount > 0) || activeSnapshot.status === "failed" || activeSnapshot.status === "canceled") && <Button leftSection={<Icons.undo size={IconSize.menu} />} onClick={() => runtime && reportJobAction(updateJobs.resume(activeSnapshot.jobId, true), "やり直せません")}>失敗分を再試行</Button>}
             </Group>
           </Group>
-          <JobActivityTitle label={throttledMessage ? statusTitle(activeSnapshot.status) : activeSnapshot.activeLabel || statusTitle(activeSnapshot.status)} reserveLines={running} />
+          <JobActivityTitle label={throttledMessage ? statusTitle(activeSnapshot.status, activeSnapshot.newWorksOnly) : activeSnapshot.activeLabel || statusTitle(activeSnapshot.status, activeSnapshot.newWorksOnly)} reserveLines={running} />
           <Text size="sm" c="dimmed" mt={5}>候補 {formatNumber(activeSnapshot.candidateCount)} · 保存済み {formatNumber(activeSnapshot.savedCount)} · エラー {formatNumber(activeSnapshot.errorCount)} · 保留 {formatNumber(activeSnapshot.heldCount ?? 0)}{(activeSnapshot.knownHeldCount ?? 0) > 0 && `（ほかに前回から変わらない保留 ${formatNumber(activeSnapshot.knownHeldCount ?? 0)}件）`}</Text>
           {outcome && activeSnapshot.mode === "check_only" && (
             <Text size="sm" mt="xs">
@@ -989,7 +996,7 @@ function candidateStatusMeta(candidate: UpdateJobSnapshot["candidates"][number])
 /** 自動確認の状態を一行で。設定画面を開かなくても、いまの約束が読める。 */
 function describeSchedule(schedule: UpdateScheduleSettings | undefined, groups: WatchGroup[] | undefined): string {
   if (!schedule) return "…";
-  const mode = schedule.mode === "auto_save" ? "確認して保存" : "確認のみ";
+  const mode = `${schedule.newWorksOnly ? "新作だけ" : ""}${schedule.mode === "auto_save" ? "確認して保存" : schedule.newWorksOnly ? "を確認" : "確認のみ"}`;
   const when: string[] = [];
   if (schedule.onStartup) when.push("起動時");
   if (schedule.intervalHours > 0) when.push(`${schedule.intervalHours}時間ごと`);
@@ -1005,4 +1012,4 @@ function StatusBadge({ job }: { job: UpdateJobSummary }) {
   return <Badge color={item.color} variant="light" leftSection={(job.status === "running" || job.status === "queued") ? <span className="status-dot" /> : undefined}>{item.label}</Badge>;
 }
 
-function statusTitle(status: string): string { return ({ queued: "開始を待っています", running: "更新を確認しています", paused: "一時停止中", auth_required: "再接続が必要です", canceling: "停止しています", canceled: "更新確認を中止しました", completed: "更新確認が完了しました", failed: "更新確認で問題が発生しました" } as Record<string, string>)[status] ?? status; }
+function statusTitle(status: string, newWorksOnly = false): string { return ({ queued: "開始を待っています", running: newWorksOnly ? "新作を確認しています" : "更新を確認しています", paused: "一時停止中", auth_required: "再接続が必要です", canceling: "停止しています", canceled: "更新確認を中止しました", completed: newWorksOnly ? "新作の確認が完了しました" : "更新確認が完了しました", failed: "更新確認で問題が発生しました" } as Record<string, string>)[status] ?? status; }

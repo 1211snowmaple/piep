@@ -5398,6 +5398,18 @@ impl Database {
         .map_err(|e| format!("Update job not found: {}", e))
     }
 
+    /// 新作だけを見る軽い確認か。再開したワーカーも同じ深さで動く。
+    pub fn update_job_new_works_only(&self, job_id: &str) -> Result<bool, String> {
+        let conn = self.read_conn()?;
+        conn.query_row(
+            "SELECT new_works_only FROM update_jobs WHERE id = ?1",
+            params![job_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|value| value != 0)
+        .map_err(|e| format!("Update job not found: {}", e))
+    }
+
     /// 終わったジョブの履歴を整理する。
     ///
     /// 起動時に一度だけ呼ぶ。新しい方から `keep_count` 件は日数に関わらず残し、
@@ -5503,15 +5515,15 @@ impl Database {
             }
             counts
         });
-        // 依頼そのものは持ち越さない。走行中に読むのは watch_saved だけで、
+        // 依頼そのものは持ち越さない。走行中に読むのは watch_saved と new_works_only だけで、
         // 残りは items と scope/mode の列にもう写っている。認証情報を
         // 抱え込まずに済むのも、必要な分だけを取り出す形の利点。
         tx.execute(
             "INSERT INTO update_jobs (
                 id, scope, mode, status, watch_saved, totals, processed,
                 candidate_count, saved_count, error_count, active_label,
-                started_at, updated_at, finished_at
-             ) VALUES (?1, ?2, ?3, 'queued', ?4, ?5, ?6, ?7, ?8, ?9, NULL, ?10, ?10, NULL)",
+                started_at, updated_at, finished_at, new_works_only
+             ) VALUES (?1, ?2, ?3, 'queued', ?4, ?5, ?6, ?7, ?8, ?9, NULL, ?10, ?10, NULL, ?11)",
             params![
                 job_id,
                 request.scope,
@@ -5523,6 +5535,7 @@ impl Database {
                 initial_counts[3],
                 initial_counts[4],
                 now,
+                request.new_works_only.unwrap_or(false),
             ],
         )
         .map_err(|e| format!("Failed to insert update job: {}", e))?;
@@ -5562,7 +5575,8 @@ impl Database {
                         (SELECT COUNT(*) FROM update_job_items i WHERE i.job_id=update_jobs.id AND i.item_type IN ('work','target') AND i.status NOT IN ('queued','running')),
                         (SELECT COUNT(*) FROM update_job_items i WHERE i.job_id=update_jobs.id AND i.item_type='candidate' AND i.status != 'candidate'),
                         (SELECT COUNT(*) FROM update_job_items i WHERE i.job_id=update_jobs.id AND i.item_type='candidate' AND i.status NOT IN ('candidate','queued','running')),
-                        (SELECT COUNT(*) FROM update_job_items i WHERE i.job_id=update_jobs.id AND i.status='held' AND COALESCE(CASE WHEN json_valid(i.payload_json) THEN json_extract(i.payload_json,'$.knownHold') END,0)=1)
+                        (SELECT COUNT(*) FROM update_job_items i WHERE i.job_id=update_jobs.id AND i.status='held' AND COALESCE(CASE WHEN json_valid(i.payload_json) THEN json_extract(i.payload_json,'$.knownHold') END,0)=1),
+                        new_works_only
                  FROM update_jobs
                  ORDER BY updated_at DESC, started_at DESC
                  LIMIT 30",
@@ -5622,7 +5636,8 @@ impl Database {
                         (SELECT COUNT(*) FROM update_job_items i WHERE i.job_id=update_jobs.id AND i.item_type IN ('work','target') AND i.status NOT IN ('queued','running')),
                         (SELECT COUNT(*) FROM update_job_items i WHERE i.job_id=update_jobs.id AND i.item_type='candidate' AND i.status != 'candidate'),
                         (SELECT COUNT(*) FROM update_job_items i WHERE i.job_id=update_jobs.id AND i.item_type='candidate' AND i.status NOT IN ('candidate','queued','running')),
-                        (SELECT COUNT(*) FROM update_job_items i WHERE i.job_id=update_jobs.id AND i.status='held' AND COALESCE(CASE WHEN json_valid(i.payload_json) THEN json_extract(i.payload_json,'$.knownHold') END,0)=1)
+                        (SELECT COUNT(*) FROM update_job_items i WHERE i.job_id=update_jobs.id AND i.status='held' AND COALESCE(CASE WHEN json_valid(i.payload_json) THEN json_extract(i.payload_json,'$.knownHold') END,0)=1),
+                        new_works_only
                  FROM update_jobs WHERE id = ?1",
                 params![job_id],
                 update_job_summary_from_row,
@@ -5765,6 +5780,7 @@ impl Database {
             error_count: summary.error_count,
             held_count: summary.held_count,
             known_held_count: summary.known_held_count,
+            new_works_only: summary.new_works_only,
             active_label: summary.active_label,
             logs,
             candidates,
@@ -6101,7 +6117,8 @@ impl Database {
                         processed - (SELECT COUNT(*) FROM update_job_items i WHERE i.job_id=update_jobs.id AND i.item_type='candidate' AND i.status NOT IN ('candidate','queued','running')),
                         (SELECT COUNT(*) FROM update_job_items i WHERE i.job_id=update_jobs.id AND i.item_type='candidate' AND i.status != 'candidate'),
                         (SELECT COUNT(*) FROM update_job_items i WHERE i.job_id=update_jobs.id AND i.item_type='candidate' AND i.status NOT IN ('candidate','queued','running')),
-                        (SELECT COUNT(*) FROM update_job_items i WHERE i.job_id=update_jobs.id AND i.status='held' AND COALESCE(CASE WHEN json_valid(i.payload_json) THEN json_extract(i.payload_json,'$.knownHold') END,0)=1)
+                        (SELECT COUNT(*) FROM update_job_items i WHERE i.job_id=update_jobs.id AND i.status='held' AND COALESCE(CASE WHEN json_valid(i.payload_json) THEN json_extract(i.payload_json,'$.knownHold') END,0)=1),
+                        new_works_only
                  FROM update_jobs WHERE id = ?1",
                 params![job_id],
                 update_job_summary_from_row,
@@ -15693,6 +15710,7 @@ fn update_job_summary_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Upda
         status: row.get(1)?,
         scope: row.get(2)?,
         mode: row.get(3)?,
+        new_works_only: row.get::<_, i64>(19)? != 0,
         subject_label: None,
         subject_source: None,
         totals: row.get(4)?,

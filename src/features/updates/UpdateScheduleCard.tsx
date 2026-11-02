@@ -109,6 +109,19 @@ export function UpdateScheduleCard({ onChanged, groups }: { onChanged?: () => vo
         />
 
         <Box>
+          <Text size="sm" fw={500} mb={6}>確認する内容</Text>
+          <SegmentedControl
+            fullWidth
+            aria-label="確認する内容"
+            data={[{ value: "new", label: "新作だけ" }, { value: "full", label: "改稿も" }]}
+            value={settings.newWorksOnly ? "new" : "full"}
+            disabled={!loaded || saving}
+            onChange={(value) => apply({ newWorksOnly: value === "new" })}
+          />
+          <Text size="xs" c="dimmed" mt={6}>新作だけなら通信が少なく、早く終わります。作品ごとの監視は確認しません。</Text>
+        </Box>
+
+        <Box>
           <Text size="sm" fw={500} mb={6}>自動実行の動作</Text>
           <SegmentedControl
             fullWidth

@@ -102,6 +102,64 @@ export function compactTextDiff(parts: TextDiffPart[], contextCharacters = 180):
   return output;
 }
 
+export interface SideBySideCell {
+  kind: TextDiffKind;
+  value: string;
+  /** 元の `parts` での位置。変更を前後へ辿るときの目印になる。 */
+  index: number;
+}
+
+export type SideBySideRow =
+  | { kind: "text"; before: SideBySideCell[]; after: SideBySideCell[] }
+  | { kind: "omitted"; value: string };
+
+/**
+ * 差分を、変更前と変更後の2列に割り振る。
+ *
+ * 行の切れ目は、両方の版に共通する改行だけ。ここで切れば、左右の段落の先頭が
+ * 必ず同じ高さに揃う。追加や削除の中の改行は、その列のセルの中で折り返す。
+ */
+export function sideBySideRows(parts: DisplayDiffPart[]): SideBySideRow[] {
+  const rows: SideBySideRow[] = [];
+  let before: SideBySideCell[] = [];
+  let after: SideBySideCell[] = [];
+  const flush = () => {
+    rows.push({ kind: "text", before, after });
+    before = [];
+    after = [];
+  };
+  parts.forEach((part, index) => {
+    if (part.kind === "omitted") {
+      if (before.length || after.length) flush();
+      rows.push({ kind: "omitted", value: part.value });
+    } else if (part.kind === "removed" || part.kind === "added") {
+      const side = part.kind === "removed" ? "before" : "after";
+      let value = part.value;
+      // 行の先頭に来た改行は、片側だけの空行として先に出す。セルの中に入れると、
+      // 同じ行の共通の本文が片側だけ下へ押されて、段落の先頭が揃わなくなる。
+      if (!before.length && !after.length) {
+        const blank = value.length - value.replace(/^\n+/, "").length;
+        for (let line = 0; line < blank; line += 1) {
+          const cell: SideBySideCell = { kind: part.kind, value: "", index };
+          rows.push({ kind: "text", before: side === "before" ? [cell] : [], after: side === "after" ? [cell] : [] });
+        }
+        value = value.slice(blank);
+        if (!value) return;
+      }
+      (side === "before" ? before : after).push({ kind: part.kind, value, index });
+    } else {
+      part.value.split("\n").forEach((line, lineIndex) => {
+        if (lineIndex > 0) flush();
+        if (!line) return;
+        before.push({ kind: "equal", value: line, index });
+        after.push({ kind: "equal", value: line, index });
+      });
+    }
+  });
+  if (before.length || after.length) flush();
+  return rows;
+}
+
 function normalizeNewlines(value: string): string {
   return value.replace(/\r\n?/g, "\n");
 }

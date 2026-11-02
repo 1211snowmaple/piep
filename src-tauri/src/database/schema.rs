@@ -332,6 +332,12 @@ fn add_missing_columns(conn: &Connection) -> Result<(), rusqlite::Error> {
         ),
         // 依頼の塊をやめて、走行中に要る1つだけを列にした。
         ("update_jobs", "watch_saved", "INTEGER NOT NULL DEFAULT 0"),
+        // 新作だけを見る軽い確認か。再開しても同じ深さで続ける。
+        (
+            "update_jobs",
+            "new_works_only",
+            "INTEGER NOT NULL DEFAULT 0",
+        ),
         // 完結しているか。NULL は「まだ聞いていない」で、連載中（0）とは別。
         // 取得元が言っていないことを、こちらで言い切らないための区別。
         ("series", "is_concluded", "INTEGER"),
@@ -885,6 +891,7 @@ fn create_core_tables(conn: &Connection) -> Result<(), rusqlite::Error> {
             -- 要求をまるごと漬けていたころは、使われなくなった項目が
             -- そのまま残り続け、どれが今も効いているのか読めなくなった。
             watch_saved         INTEGER NOT NULL DEFAULT 0,
+            new_works_only      INTEGER NOT NULL DEFAULT 0,
             totals              INTEGER NOT NULL DEFAULT 0,
             processed           INTEGER NOT NULL DEFAULT 0,
             candidate_count     INTEGER NOT NULL DEFAULT 0,

@@ -9157,6 +9157,7 @@ fn update_job_schema_recovers_interrupted_jobs() {
         target_ids: None,
         credentials: None,
         watch_saved: None,
+        new_works_only: None,
         adhoc_targets: None,
     };
     db.create_update_job(
@@ -9191,6 +9192,7 @@ fn late_worker_progress_cannot_resume_or_finish_a_stopped_job() {
         target_ids: None,
         credentials: None,
         watch_saved: None,
+        new_works_only: None,
         adhoc_targets: None,
     };
     db.create_update_job("job-stop-race", &request, &[])
@@ -9242,6 +9244,7 @@ fn retrying_failed_update_items_keeps_list_counters_consistent_before_snapshot()
         target_ids: None,
         credentials: None,
         watch_saved: None,
+        new_works_only: None,
         adhoc_targets: None,
     };
     let items = ["failed", "done"].map(|source_id| UpdateJobItemInput {
@@ -9308,6 +9311,7 @@ fn simultaneous_checks_create_only_one_active_job() {
         target_ids: None,
         credentials: None,
         watch_saved: None,
+        new_works_only: None,
         adhoc_targets: None,
     };
     let items = [UpdateJobItemInput {
@@ -9356,6 +9360,7 @@ fn save_job_cannot_start_while_another_job_is_active() {
         target_ids: None,
         credentials: None,
         watch_saved: None,
+        new_works_only: None,
         adhoc_targets: None,
     };
     let items = [UpdateJobItemInput {
@@ -9391,6 +9396,7 @@ fn paused_job_cannot_resume_across_another_active_check() {
         target_ids: None,
         credentials: None,
         watch_saved: None,
+        new_works_only: None,
         adhoc_targets: None,
     };
     db.create_update_job("paused-job", &request, &[]).unwrap();
@@ -9419,6 +9425,7 @@ fn stopped_update_jobs_leave_their_next_item_queued() {
         target_ids: None,
         credentials: None,
         watch_saved: None,
+        new_works_only: None,
         adhoc_targets: None,
     };
 
@@ -9471,6 +9478,7 @@ fn active_update_job_claims_its_next_item_atomically() {
         target_ids: None,
         credentials: None,
         watch_saved: None,
+        new_works_only: None,
         adhoc_targets: None,
     };
     db.create_update_job(
@@ -9508,6 +9516,7 @@ fn old_finished_jobs_are_pruned_but_recent_and_live_ones_stay() {
         target_ids: None,
         credentials: None,
         watch_saved: None,
+        new_works_only: None,
         adhoc_targets: None,
     };
     for id in ["job-old", "job-recent", "job-live"] {
@@ -9554,6 +9563,7 @@ fn job_logs_are_capped_from_the_oldest_end() {
         target_ids: None,
         credentials: None,
         watch_saved: None,
+        new_works_only: None,
         adhoc_targets: None,
     };
     db.create_update_job("job-logs", &request, &[]).unwrap();
@@ -9624,6 +9634,7 @@ fn finished_jobs_can_be_cleared_from_the_history() {
         target_ids: None,
         credentials: None,
         watch_saved: None,
+        new_works_only: None,
         adhoc_targets: None,
     };
     db.create_update_job("job-done", &request, &[]).unwrap();
@@ -9699,6 +9710,7 @@ fn held_candidates_survive_backups_and_never_join_normal_retries() {
         target_ids: None,
         credentials: None,
         watch_saved: Some(false),
+        new_works_only: None,
         adhoc_targets: None,
     };
     let snapshot = db
@@ -9769,6 +9781,7 @@ fn older_partial_save_failure_becomes_a_durable_held_candidate() {
         target_ids: None,
         credentials: None,
         watch_saved: Some(false),
+        new_works_only: None,
         adhoc_targets: None,
     };
     let snapshot = db
@@ -9847,6 +9860,7 @@ fn older_failed_candidate_is_searchable_without_undoing_a_later_retry_decision()
                 target_ids: None,
                 credentials: None,
                 watch_saved: Some(false),
+                new_works_only: None,
                 adhoc_targets: None,
             },
             &[UpdateJobItemInput {
@@ -9961,6 +9975,7 @@ fn queued_candidates_count_towards_progress_but_unanswered_ones_do_not() {
         target_ids: None,
         credentials: None,
         watch_saved: None,
+        new_works_only: None,
         adhoc_targets: None,
     };
     db.create_update_job(
@@ -10071,6 +10086,7 @@ fn update_job_candidates_can_be_queued_for_saving() {
         target_ids: None,
         credentials: None,
         watch_saved: None,
+        new_works_only: None,
         adhoc_targets: None,
     };
     db.create_update_job(
@@ -10146,6 +10162,7 @@ fn update_history_keeps_the_subject_and_exposes_job_only_holds() {
         target_ids: None,
         credentials: None,
         watch_saved: None,
+        new_works_only: None,
         adhoc_targets: None,
     };
     let mut items = Vec::new();
@@ -10219,6 +10236,7 @@ fn saving_candidates_after_cancel_does_not_resume_the_canceled_queue() {
         target_ids: None,
         credentials: None,
         watch_saved: None,
+        new_works_only: None,
         adhoc_targets: None,
     };
     db.create_update_job(
@@ -10325,6 +10343,7 @@ fn saving_selected_candidates_after_pause_replaces_the_auto_save_queue() {
         target_ids: None,
         credentials: None,
         watch_saved: None,
+        new_works_only: None,
         adhoc_targets: None,
     };
     db.create_update_job(
@@ -10410,6 +10429,7 @@ fn new_work_and_revision_enter_the_same_save_queue() {
         target_ids: None,
         credentials: None,
         watch_saved: None,
+        new_works_only: None,
         adhoc_targets: None,
     };
     db.create_update_job("job-mixed-candidates", &request, &[])
@@ -10470,6 +10490,7 @@ fn update_job_snapshot_reads_legacy_save_candidates_without_target_type() {
         target_ids: None,
         credentials: None,
         watch_saved: None,
+        new_works_only: None,
         adhoc_targets: None,
     };
     db.create_update_job(
@@ -10503,6 +10524,7 @@ fn update_job_snapshot_pages_candidate_payloads() {
         target_ids: None,
         credentials: None,
         watch_saved: None,
+        new_works_only: None,
         adhoc_targets: None,
     };
     db.create_update_job("job-paged", &request, &[]).unwrap();
@@ -10544,6 +10566,7 @@ fn saved_update_job_download_ids_survive_item_lookup_after_worker_restart() {
         target_ids: None,
         credentials: None,
         watch_saved: None,
+        new_works_only: None,
         adhoc_targets: None,
     };
     db.create_update_job(

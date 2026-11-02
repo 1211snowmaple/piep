@@ -41,7 +41,7 @@ export async function runSingleCheck(
 ): Promise<void> {
   try {
     await startSingleCheck(target);
-    notifications.show({ color: "piep", title: "更新を確認しています", message: `「${target.label}」の結果は更新センターに出ます` });
+    notifications.show({ color: "piep", title: "更新を確認しています", message: `「${target.label}」の結果は新着の画面に出ます` });
     onStarted?.();
   } catch (error) {
     notifications.show({ color: "red", title: "更新確認を開始できません", message: errorMessage(error) });

@@ -20,7 +20,7 @@ test("updates includes the reversible hold shelf in its layout", async ({ page }
   await page.goto("/#/library");
   await expect(page.getByRole("combobox", { name: "ライブラリを検索" })).toBeVisible();
   await page.goto("/#/updates");
-  await expect(page.getByRole("heading", { name: "更新センター" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "新着" })).toBeVisible();
   await page.addStyleTag({ content: "*,*::before,*::after{animation:none!important;transition:none!important;caret-color:transparent!important}" });
   await expect(page).toHaveScreenshot("updates.png", { fullPage: true });
 });
