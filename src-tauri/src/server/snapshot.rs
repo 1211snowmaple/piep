@@ -98,6 +98,22 @@ pub fn to_portable(path: &str, app_data: &str) -> Option<String> {
     Some(format!("{PORTABLE_PREFIX}{}", tail.replace('\\', "/")))
 }
 
+/// アプリデータの呼び方を全部挙げる。
+///
+/// 保存時のパスの多くは `canonicalize` を通っているので、ジャンクションや 8.3 形式の名前で
+/// 渡されたアプリデータとは文字列が一致しない。実体の名前でも照らさないと、本棚の中のパスを
+/// 外のものとして消してしまう。
+fn library_roots(app_data: &Path) -> Vec<String> {
+    let mut roots = vec![app_data.to_string_lossy().into_owned()];
+    if let Ok(real) = app_data.canonicalize() {
+        let real = real.to_string_lossy().into_owned();
+        if !normalize(&real).eq_ignore_ascii_case(&normalize(&roots[0])) {
+            roots.push(real);
+        }
+    }
+    roots
+}
+
 /// 相対パスを検査する。`..`、ドライブ、送ってよい場所の外を断る。
 pub fn validate_relative(relative: &str) -> Result<(), String> {
     if relative.is_empty()
@@ -227,7 +243,7 @@ where
 
 /// デスクトップ版の側で、`VACUUM INTO` した写しを送る形に直す。
 pub fn prepare_for_send(copy: &Path, app_data: &Path) -> Result<PortableReport, String> {
-    let app_data = app_data.to_string_lossy().into_owned();
+    let roots = library_roots(app_data);
     let mut conn = Connection::open(copy).map_err(sql_error)?;
     conn.pragma_update(None, "foreign_keys", true)
         .map_err(sql_error)?;
@@ -246,7 +262,7 @@ pub fn prepare_for_send(copy: &Path, app_data: &Path) -> Result<PortableReport, 
             continue;
         }
         let (converted, outside) = rewrite_column(&tx, table, column, |value| {
-            Ok(to_portable(value, &app_data))
+            Ok(roots.iter().find_map(|root| to_portable(value, root)))
         })?;
         report.converted += converted;
         report.outside += outside;
@@ -416,6 +432,43 @@ mod tests {
                 "{input}"
             );
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_library_reached_through_a_junction_keeps_its_real_paths() {
+        let base = std::env::temp_dir().join(format!(
+            "piep_roots_{}",
+            super::super::store::random_token(9)
+        ));
+        let real = base.join("real");
+        let junction = base.join("junction");
+        std::fs::create_dir_all(&real).unwrap();
+        let made = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&junction)
+            .arg(&real)
+            .output()
+            .unwrap();
+        assert!(made.status.success(), "ジャンクションを作れません");
+
+        let roots = library_roots(&junction);
+        assert_eq!(roots.len(), 2, "実体の名前も挙げる");
+        let stored = real
+            .canonicalize()
+            .unwrap()
+            .join("downloads")
+            .join("cover.png");
+        let portable = roots
+            .iter()
+            .find_map(|root| to_portable(&stored.to_string_lossy(), root));
+        assert_eq!(
+            portable.as_deref(),
+            Some("piep-library:/downloads/cover.png")
+        );
+
+        std::fs::remove_dir(&junction).unwrap();
+        std::fs::remove_dir_all(&base).unwrap();
     }
 
     #[test]
