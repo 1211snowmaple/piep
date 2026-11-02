@@ -34,6 +34,7 @@ pub fn run() {
             pc_client::pc_get_collection_cover,
             pc_client::pc_get_entity_cover,
             pc_client::offline::offline_list_works,
+            pc_client::offline::offline_list_issues,
             pc_client::offline::offline_save_work,
             pc_client::offline::offline_get_page,
             pc_client::offline::offline_get_outline,
@@ -42,6 +43,7 @@ pub fn run() {
             pc_client::offline::offline_get_collection_cover,
             pc_client::offline::offline_get_entity_cover,
             pc_client::offline::offline_delete_work,
+            pc_client::offline::offline_delete_corrupt_work,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

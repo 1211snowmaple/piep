@@ -145,6 +145,10 @@ export interface PcPage {
   sourcePageStarts: number[];
 }
 
+export interface OfflinePage extends PcPage {
+  generation: string;
+}
+
 export interface PcOutlineEntry {
   page: number;
   index: number;
@@ -174,6 +178,11 @@ export interface OfflineWork {
   seriesCoverEntity?: { source: string; key: string } | null;
 }
 
+export interface OfflineIssue {
+  workId: number;
+  issue: "offline_storage";
+}
+
 export const getPcStatus = () => invoke<PcConnectionStatus>("pc_connection_status");
 export const pairPc = (payload: string, deviceName: string) => invoke<PcConnectionStatus>("pc_pair", { payload, deviceName });
 export const disconnectPc = () => invoke<PcConnectionStatus>("pc_disconnect");
@@ -197,13 +206,15 @@ export const getPcCollectionCover = (collectionId: string, slot: "file" | `tile-
 export const getPcEntityCover = (kind: "people" | "series", source: string, key: string) => invoke<PcAsset>("pc_get_entity_cover", { kind, source, key });
 export const listOfflineWorks = () => invoke<OfflineWork[]>("offline_list_works");
 export const saveOfflineWork = (workId: number) => invoke<OfflineWork>("offline_save_work", { workId });
-export const getOfflinePage = (workId: number, page: number) => invoke<PcPage>("offline_get_page", { workId, page });
-export const getOfflineOutline = (workId: number) => invoke<PcOutlineEntry[]>("offline_get_outline", { workId });
-export const getOfflineAsset = (workId: number, assetId: number) => invoke<PcAsset>("offline_get_asset", { workId, assetId });
+export const getOfflinePage = (workId: number, page: number) => invoke<OfflinePage>("offline_get_page", { workId, page });
+export const getOfflineOutline = (workId: number, generation: string) => invoke<PcOutlineEntry[]>("offline_get_outline", { workId, generation });
+export const getOfflineAsset = (workId: number, assetId: number, generation: string) => invoke<PcAsset>("offline_get_asset", { workId, assetId, generation });
 export const getOfflineCover = (workId: number) => invoke<PcAsset>("offline_get_cover", { workId });
 export const getOfflineCollectionCover = (workId: number, collectionId: string) => invoke<PcAsset>("offline_get_collection_cover", { workId, collectionId });
 export const getOfflineEntityCover = (workId: number, kind: "people" | "series") => invoke<PcAsset>("offline_get_entity_cover", { workId, kind });
 export const deleteOfflineWork = (workId: number) => invoke<void>("offline_delete_work", { workId });
+export const listOfflineIssues = () => invoke<OfflineIssue[]>("offline_list_issues");
+export const deleteOfflineIssue = (workId: number) => invoke<void>("offline_delete_corrupt_work", { workId });
 
 export function pcErrorMessage(error: unknown): string {
   if (typeof error === "object" && error && "message" in error && typeof error.message === "string") return error.message;

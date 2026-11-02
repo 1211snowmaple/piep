@@ -15,6 +15,7 @@ dist-ssr
 # Local verification output and emulator screenshots.
 /probe-data/
 /probe-search-data/
+/.playwright-mcp/
 /*.png
 /SETUP.private.md
 /PLAN.private.md

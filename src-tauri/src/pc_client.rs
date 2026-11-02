@@ -15,11 +15,13 @@ use tauri::State;
 use url::{Host, Url};
 
 pub(crate) mod offline;
+mod image_validation;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(12);
 const ASSET_TIMEOUT: Duration = Duration::from_secs(60);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_ASSET_BYTES: usize = 25 * 1024 * 1024;
+const MAX_JSON_BYTES: usize = 16 * 1024 * 1024;
 const MAX_NUMBERED_OFFSET: i64 = 5_000;
 const API_VERSION: u32 = 2;
 
@@ -316,7 +318,7 @@ pub async fn pc_pair(
     if fingerprint(&certificate) != pairing.fingerprint.to_ascii_lowercase() {
         return Err(ClientError::certificate_changed());
     }
-    let hello: Hello = response.json().await.map_err(|_| ClientError::protocol())?;
+    let hello: Hello = response.bounded_json().await?;
     if hello.api_version != API_VERSION || hello.server_name != "piep" {
         return Err(ClientError::protocol());
     }
@@ -333,7 +335,7 @@ pub async fn pc_pair(
     if !response.status().is_success() {
         return Err(ClientError::remote());
     }
-    let result: PairResult = response.json().await.map_err(|_| ClientError::protocol())?;
+    let result: PairResult = response.bounded_json().await?;
     if result.api_version != API_VERSION
         || URL_SAFE_NO_PAD
             .decode(&result.token)
@@ -368,7 +370,7 @@ pub async fn pc_connection_status(
     let pinned = pinned_client(&certificate)?;
     match hello(&pinned, &saved.url).await {
         Ok(response) => {
-            let hello: Hello = response.json().await.map_err(|_| ClientError::protocol())?;
+            let hello: Hello = response.bounded_json().await?;
             if hello.api_version != API_VERSION || hello.server_name != "piep" {
                 Ok(ConnectionStatus::from_saved(
                     &saved,
@@ -704,9 +706,7 @@ pub async fn pc_search_works(
         .await
         .map_err(|_| ClientError::offline())?;
     check_response(response)?
-        .json()
-        .await
-        .map_err(|_| ClientError::protocol())
+        .bounded_json().await
 }
 
 fn validate_numbered_offset(offset: Option<i64>, cursor: Option<&str>) -> Result<(), ClientError> {
@@ -762,9 +762,7 @@ pub async fn pc_list_entities(
     let endpoint = format!("/api/v1/entities/{kind}?{query_string}");
     authenticated_get(&state, &endpoint)
         .await?
-        .json()
-        .await
-        .map_err(|_| ClientError::protocol())
+        .bounded_json().await
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -824,9 +822,7 @@ pub async fn pc_list_collections(
 ) -> Result<Vec<MobileCollection>, ClientError> {
     authenticated_get(&state, "/api/v1/collections")
         .await?
-        .json()
-        .await
-        .map_err(|_| ClientError::protocol())
+        .bounded_json().await
 }
 
 #[tauri::command]
@@ -839,9 +835,7 @@ pub async fn pc_get_work_collections(
     }
     authenticated_get(&state, &format!("/api/v1/works/{work_id}/collections"))
         .await?
-        .json()
-        .await
-        .map_err(|_| ClientError::protocol())
+        .bounded_json().await
 }
 
 #[tauri::command]
@@ -859,9 +853,7 @@ pub async fn pc_get_collection(
     }
     authenticated_get(&state, &format!("/api/v1/collections/{collection_id}"))
         .await?
-        .json()
-        .await
-        .map_err(|_| ClientError::protocol())
+        .bounded_json().await
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -916,9 +908,7 @@ pub async fn pc_get_metadata(
     }
     authenticated_get(&state, &format!("/api/v1/works/{work_id}"))
         .await?
-        .json()
-        .await
-        .map_err(|_| ClientError::protocol())
+        .bounded_json().await
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -949,9 +939,7 @@ pub async fn pc_get_outline(
     }
     authenticated_get(&state, &format!("/api/v1/works/{work_id}/outline"))
         .await?
-        .json()
-        .await
-        .map_err(|_| ClientError::protocol())
+        .bounded_json().await
 }
 
 #[tauri::command]
@@ -972,9 +960,7 @@ pub async fn pc_get_page(
         &format!("/api/v1/works/{work_id}/pages/{page}{version_query}"),
     )
     .await?
-    .json()
-    .await
-    .map_err(|_| ClientError::protocol())
+    .bounded_json().await
 }
 
 #[derive(Debug, Serialize)]
@@ -982,6 +968,42 @@ pub async fn pc_get_page(
 pub struct MobileAssetData {
     mime_type: String,
     base64: String,
+}
+
+// 上限は受信後ではなく受信中に適用する。Content-Length がない応答にも適用する。
+async fn bounded_response_bytes(
+    mut response: reqwest::Response,
+    maximum: usize,
+) -> Result<Vec<u8>, ClientError> {
+    if response.content_length().is_some_and(|length| length > maximum as u64) {
+        return Err(ClientError::remote());
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|_| ClientError::offline())? {
+        if chunk.len() > maximum.saturating_sub(bytes.len()) {
+            return Err(ClientError::remote());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
+}
+
+trait BoundedJson {
+    async fn bounded_json<T: serde::de::DeserializeOwned>(self) -> Result<T, ClientError>;
+}
+
+impl BoundedJson for reqwest::Response {
+    async fn bounded_json<T: serde::de::DeserializeOwned>(self) -> Result<T, ClientError> {
+        bounded_json_response(self, MAX_JSON_BYTES).await
+    }
+}
+
+async fn bounded_json_response<T: serde::de::DeserializeOwned>(
+    response: reqwest::Response,
+    maximum: usize,
+) -> Result<T, ClientError> {
+    let bytes = bounded_response_bytes(response, maximum).await?;
+    serde_json::from_slice(&bytes).map_err(|_| ClientError::protocol())
 }
 
 async fn image_response(response: reqwest::Response) -> Result<MobileAssetData, ClientError> {
@@ -997,10 +1019,7 @@ async fn image_response(response: reqwest::Response) -> Result<MobileAssetData, 
     ) {
         return Err(ClientError::protocol());
     }
-    let bytes = response.bytes().await.map_err(|_| ClientError::offline())?;
-    if bytes.len() > MAX_ASSET_BYTES {
-        return Err(ClientError::remote());
-    }
+    let bytes = bounded_response_bytes(response, MAX_ASSET_BYTES).await?;
     Ok(MobileAssetData {
         mime_type,
         base64: STANDARD.encode(bytes),
@@ -1091,6 +1110,48 @@ pub async fn pc_get_asset(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn local_response(wire_response: &'static str) -> reqwest::Response {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            let mut request = [0; 4096];
+            let _ = stream.read(&mut request);
+            let _ = stream.write_all(wire_response.as_bytes());
+        });
+        reqwest::Client::builder().no_proxy().timeout(Duration::from_secs(3))
+            .build().unwrap().get(format!("http://{address}/"))
+            .send().await.unwrap()
+    }
+
+    #[test]
+    fn bounds_response_body_with_and_without_content_length() {
+        tauri::async_runtime::block_on(async {
+            let response = local_response("HTTP/1.1 200 OK\r\nContent-Length: 999999999\r\n\r\n").await;
+            assert_eq!(bounded_response_bytes(response, 4).await.unwrap_err().code, "remote_error");
+            let response = local_response("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n3\r\ndef\r\n0\r\n\r\n").await;
+            assert_eq!(bounded_response_bytes(response, 4).await.unwrap_err().code, "remote_error");
+            let response = local_response("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nab\r\n2\r\ncd\r\n0\r\n\r\n").await;
+            assert_eq!(bounded_response_bytes(response, 4).await.unwrap(), b"abcd");
+        });
+    }
+
+    #[test]
+    fn json_decoder_bounds_http_bodies_and_reports_invalid_json() {
+        tauri::async_runtime::block_on(async {
+            let response = local_response("HTTP/1.1 200 OK\r\nContent-Length: 999999999\r\n\r\n").await;
+            assert_eq!(response.bounded_json::<serde_json::Value>().await.unwrap_err().code, "remote_error");
+            let response = local_response("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\n[1,2\r\n5\r\n,3,4]\r\n0\r\n\r\n").await;
+            assert_eq!(bounded_json_response::<serde_json::Value>(response, 8).await.unwrap_err().code, "remote_error");
+            let response = local_response("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\n{\"v\"\r\n3\r\n:1}\r\n0\r\n\r\n").await;
+            assert_eq!(bounded_json_response::<serde_json::Value>(response, 7).await.unwrap(), serde_json::json!({"v": 1}));
+            let response = local_response("HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nbad").await;
+            assert_eq!(response.bounded_json::<serde_json::Value>().await.unwrap_err().code, "protocol_mismatch");
+        });
+    }
 
     fn search_criteria(mut changes: serde_json::Value) -> PcSearchCriteria {
         let mut value = serde_json::json!({
