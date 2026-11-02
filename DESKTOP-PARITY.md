@@ -18,9 +18,9 @@ Android 版はデスクトップ版 piep の閲覧用付属アプリ。デザイ
 | 表紙の枠 | 作品カードは `112 / 158`、画像は枠を切らずに収め、詳細は画像本来の比率を使う | 同じ比率と配置。表紙のない作品もデスクトップ版と同じ作者色・作品紋を使う |
 | コレクション表紙 | カスタム画像・単一作品・モザイク・背表紙・紋を `CollectionCover` で選ぶ | 同じモードと先頭4タイルを使う。小型タイルは題名を載せず、画像のないタイルにも各作品の紋を示す |
 
-アイコンと画面内マークの SVG は、それぞれデスクトップ版の原本と SHA-256 が一致する。Android のホーム画面は端末のランチャーがアイコンを円形などに切り抜く。そこで原本から生成した画像を Android の adaptive icon の内側に収め、角丸タイル全体が見えるようにした。ランチャーの外形は OS 側の仕様に従う。
+アイコンと画面内マークの SVG は、それぞれデスクトップ版の原本と SHA-256 が一致する。Android のホーム画面は端末のランチャーがアイコンを円形などに切り抜く。角丸タイルごと収めると円で本が欠けるので、adaptive icon の層を分けた。背景はタイルと同じ階調、前景は本だけ（`src-tauri/icons/android-launcher-foreground.svg`）で、本は 108 の画布の安全域（直径 66 の円）に収まる。外形を四角に固定することはできない。
 
-アイコンを更新する際はデスクトップ版の SVG をコピーし直し、`npx tauri icon public/desktop-icon.svg` を実行する。その後、`src-tauri/icons/icon.png` を `src-tauri/gen/android/app/src/main/res/drawable-nodpi/piep_desktop_icon.png` にコピーし、`mipmap-anydpi-v26/ic_launcher.xml` の foreground が `@drawable/piep_launcher_foreground` を参照することを確認する。`npx tauri icon` がこの参照を再生成する場合があるため、Android の再ビルド後にホーム画面を確認する。
+アイコンを更新する際はデスクトップ版の SVG をコピーし直し、`npx tauri icon public/desktop-icon.svg` を実行する。本の絵が変わったら `android-launcher-foreground.svg` も作り直し、432×432 の透過 PNG にして `src-tauri/gen/android/app/src/main/res/drawable-nodpi/piep_launcher_book.png` に置く。`mipmap-anydpi-v26/ic_launcher.xml` は foreground が `@drawable/piep_launcher_foreground`、background が `@drawable/piep_launcher_background` を参照する。`npx tauri icon` がこの参照を再生成する場合があるため、Android の再ビルド後にホーム画面を確認する。
 
 2026-10-11 に x86_64 APK をビルドし、スマホ・タブレットのエミュレーターで接続本棚、スマホで読書画面、設定初期値とダーク表示、ホーム画面のアイコンを確認した。実機配置はまだ行っていない。
 

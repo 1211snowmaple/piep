@@ -7,14 +7,13 @@ export interface PcConnectionStatus {
   deviceName: string | null;
   issue: "offline" | "certificate_changed" | "certificate_untrusted" | "protocol_mismatch" | "revoked" | "not_ready" | "remote_error" | null;
   capabilities: string[];
-  selfSigned: boolean;
 }
 
 export const pcConnectionIssueText: Record<NonNullable<PcConnectionStatus["issue"]>, string> = {
-  offline: "サーバーに接続できません。通信状態とサーバーの URL を確認してください。",
+  offline: "サーバーに接続できません。通信状態と、サーバーが動いているかを確認してください。",
   certificate_changed: "サーバーの証明書が登録時と違います。接続先を確認して登録し直してください。",
   certificate_untrusted: "サーバーの証明書を確認できません。URL が正しいか確かめてください。",
-  protocol_mismatch: "サーバーとの接続形式が合いません。両方のアプリを更新してください。",
+  protocol_mismatch: "サーバーとの接続形式が合いません。アプリとサーバーを、どちらも新しい版にしてください。",
   revoked: "端末の登録が解除されました。デスクトップ版の「携帯を追加」で登録文字列を出し直して再登録してください。",
   not_ready: "サーバーは本棚の準備中です。しばらくしてからもう一度試してください。",
   remote_error: "サーバーは応答していますが、作品を読み込めません。サーバーの状態を確認してください。",
@@ -22,8 +21,6 @@ export const pcConnectionIssueText: Record<NonNullable<PcConnectionStatus["issue
 
 export function pcConnectionIssue(status: PcConnectionStatus): string | null {
   if (!status.issue) return null;
-  // 自己署名の接続先は家の中の機械なので、Wi-Fi の案内が役に立つ。
-  if (status.issue === "offline" && status.selfSigned) return "サーバーに接続できません。サーバーと同じ Wi-Fi にいるか、サーバーが動いているか確認してください。";
   return pcConnectionIssueText[status.issue];
 }
 

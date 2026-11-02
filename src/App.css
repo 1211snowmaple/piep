@@ -115,6 +115,13 @@ button:focus-visible, input:focus-visible { outline: 3px solid #75bcff; outline-
 .connection-settings { display: grid; gap: 18px; }
 .connection-issue { margin: 0; color: var(--piep-muted); font-size: 13px; line-height: 1.7; }
 .connection-actions { display: flex; gap: 10px; }
+.app-update-notice { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; padding: 8px 12px; border: 1px solid var(--piep-line); border-radius: 10px; background: var(--piep-surface); font-size: 0.875rem; }
+.app-update-settings .connection-actions { margin-top: 12px; }
+html.qr-scanning, html.qr-scanning body { background: transparent !important; }
+html.qr-scanning #root { visibility: hidden; }
+.qr-scanner { position: fixed; inset: 0; z-index: 1000; display: flex; flex-direction: column; align-items: center; justify-content: space-between; gap: 24px; padding: calc(var(--piep-safe-top) + 32px) 24px calc(var(--piep-safe-bottom) + 32px); color: #fff; text-align: center; }
+.qr-scanner p { margin: 0; padding: 8px 14px; border-radius: 10px; background: rgb(0 0 0 / 60%); font-size: 15px; }
+.qr-scanner-frame { width: min(72vw, 320px); aspect-ratio: 1; border: 3px solid #fff; border-radius: 16px; box-shadow: 0 0 0 100vmax rgb(0 0 0 / 35%); }
 .connection-registration { display: grid; gap: 14px; max-width: 640px; }
 .connection-registration p { margin: 0; color: var(--piep-muted); font-size: 13px; line-height: 1.7; }
 .connection-registration label { display: grid; gap: 7px; color: var(--piep-muted); font-size: 12px; font-weight: 700; }
