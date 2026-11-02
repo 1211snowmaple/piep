@@ -151,10 +151,10 @@ impl ClientError {
             message: "サーバーに接続できません。通信状態とサーバーの URL を確認してください",
         }
     }
-    fn offline_same_network() -> Self {
+    fn offline_direct() -> Self {
         Self {
             code: "offline",
-            message: "サーバーに接続できません。サーバーと同じ Wi-Fi にいるか確認してください",
+            message: "サーバーに接続できません。サーバーが動いているか確認してください。この接続先には、同じ Wi-Fi や Tailscale の中からつなぎます。どこからでも使うには、公開 URL のサーバーを登録してください",
         }
     }
     fn certificate_changed() -> Self {
@@ -198,8 +198,8 @@ impl ClientError {
         if !pinned && rejected_certificate(error) {
             Self::certificate_untrusted()
         } else if pinned {
-            // 自己署名の接続先は家の中の機械なので、Wi-Fi の案内が役に立つ。
-            Self::offline_same_network()
+            // 自己署名の接続先は公開 URL ではないことが多いので、つなぎ方まで案内する。
+            Self::offline_direct()
         } else {
             Self::offline()
         }

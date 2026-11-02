@@ -22,8 +22,8 @@ export const pcConnectionIssueText: Record<NonNullable<PcConnectionStatus["issue
 
 export function pcConnectionIssue(status: PcConnectionStatus): string | null {
   if (!status.issue) return null;
-  // 自己署名の接続先は家の中の機械なので、Wi-Fi の案内が役に立つ。
-  if (status.issue === "offline" && status.selfSigned) return "サーバーに接続できません。サーバーと同じ Wi-Fi にいるか、サーバーが動いているか確認してください。";
+  // 自己署名の接続先は公開 URL ではないことが多いので、つなぎ方まで案内する。
+  if (status.issue === "offline" && status.selfSigned) return "サーバーに接続できません。サーバーが動いているか確認してください。この接続先には、同じ Wi-Fi や Tailscale の中からつなぎます。どこからでも使うには、公開 URL のサーバーを登録してください。";
   return pcConnectionIssueText[status.issue];
 }
 
