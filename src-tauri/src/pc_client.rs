@@ -148,13 +148,7 @@ impl ClientError {
     fn offline() -> Self {
         Self {
             code: "offline",
-            message: "サーバーに接続できません。通信状態とサーバーの URL を確認してください",
-        }
-    }
-    fn offline_direct() -> Self {
-        Self {
-            code: "offline",
-            message: "サーバーに接続できません。サーバーが動いているか確認してください。この接続先には、同じ Wi-Fi や Tailscale の中からつなぎます。どこからでも使うには、公開 URL のサーバーを登録してください",
+            message: "サーバーに接続できません。通信状態と、サーバーが動いているかを確認してください",
         }
     }
     fn certificate_changed() -> Self {
@@ -197,9 +191,6 @@ impl ClientError {
     fn from_send(error: &reqwest::Error, pinned: bool) -> Self {
         if !pinned && rejected_certificate(error) {
             Self::certificate_untrusted()
-        } else if pinned {
-            // 自己署名の接続先は公開 URL ではないことが多いので、つなぎ方まで案内する。
-            Self::offline_direct()
         } else {
             Self::offline()
         }
@@ -253,7 +244,6 @@ pub struct ConnectionStatus {
     device_name: Option<String>,
     issue: Option<&'static str>,
     capabilities: Vec<String>,
-    self_signed: bool,
 }
 
 impl ConnectionStatus {
@@ -265,7 +255,6 @@ impl ConnectionStatus {
             device_name: None,
             issue: None,
             capabilities: Vec::new(),
-            self_signed: false,
         }
     }
     fn from_saved(saved: &SavedConnection, reachable: bool, issue: Option<&'static str>) -> Self {
@@ -276,7 +265,6 @@ impl ConnectionStatus {
             device_name: Some(saved.device_name.clone()),
             issue,
             capabilities: saved.capabilities.clone(),
-            self_signed: saved.pinned(),
         }
     }
 }
