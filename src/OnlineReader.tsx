@@ -16,27 +16,12 @@ function readingKey(work: PcWork, editHash: string | null): string {
   return `piep.android.pc.${work.id}.${work.currentVersion}.${work.contentHash ?? ""}.${editHash ?? "original"}`;
 }
 
-function legacyReadingKeys(work: PcWork, editHash: string | null): string[] {
-  // 古いキーには編集版の識別子がない。元本文と確認できるときだけ引き継ぐ。
-  if (editHash !== null) return [];
-  const keys = [`piep.android.pc.${work.id}.${work.currentVersion}.${work.contentHash ?? ""}`];
-  // 最初期の ID だけのキーには版情報がない。更新済み作品には流用しない。
-  if (work.currentVersion === 1) keys.push(`piep.android.pc.${work.id}`);
-  return keys;
-}
-
 function savedPage(work: PcWork, editHash: string | null): number {
   try {
-    const key = `${readingKey(work, editHash)}.page`;
-    for (const candidate of [readingKey(work, editHash), ...legacyReadingKeys(work, editHash)]) {
-      const raw = window.localStorage.getItem(`${candidate}.page`);
-      if (raw === null) continue;
-      const value = Number(raw);
-      if (!Number.isSafeInteger(value) || value < 0 || value > 1_000_000) continue;
-      if (`${candidate}.page` !== key) window.localStorage.setItem(key, String(value));
-      return value;
-    }
-    return 0;
+    const raw = window.localStorage.getItem(`${readingKey(work, editHash)}.page`);
+    if (raw === null) return 0;
+    const value = Number(raw);
+    return Number.isSafeInteger(value) && value >= 0 && value <= 1_000_000 ? value : 0;
   } catch { return 0; }
 }
 
@@ -63,18 +48,12 @@ type SavedPosition = { page: number; top: number; ratio: number; fontSize: numbe
 
 function readSavedPosition(work: PcWork, editHash: string | null): SavedPosition | null {
   try {
-    const key = `${readingKey(work, editHash)}.position`;
-    for (const candidate of [readingKey(work, editHash), ...legacyReadingKeys(work, editHash)]) {
-      const raw = window.localStorage.getItem(`${candidate}.position`);
-      if (raw === null) continue;
-      let value: Partial<SavedPosition> | null;
-      try { value = JSON.parse(raw) as Partial<SavedPosition> | null; } catch { continue; }
-      if (!value || !Number.isSafeInteger(value.page) || !Number.isFinite(value.top) || !Number.isFinite(value.ratio)) continue;
-      if (value.page! < 0 || value.top! < 0 || value.ratio! < 0 || value.ratio! > 1) continue;
-      if (`${candidate}.position` !== key) window.localStorage.setItem(key, raw);
-      return value as SavedPosition;
-    }
-    return null;
+    const raw = window.localStorage.getItem(`${readingKey(work, editHash)}.position`);
+    if (raw === null) return null;
+    const value = JSON.parse(raw) as Partial<SavedPosition> | null;
+    if (!value || !Number.isSafeInteger(value.page) || !Number.isFinite(value.top) || !Number.isFinite(value.ratio)) return null;
+    if (value.page! < 0 || value.top! < 0 || value.ratio! < 0 || value.ratio! > 1) return null;
+    return value as SavedPosition;
   } catch { return null; }
 }
 
