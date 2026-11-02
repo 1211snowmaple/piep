@@ -42,6 +42,7 @@ export default {
           { text: "はじめる", link: "/guide/02-getting-started" },
           { text: "画面ごとの説明", link: "/guide/03-screens" },
           { text: "データの置き場所とバックアップ", link: "/guide/04-your-data" },
+          { text: "サーバー（β）", link: "/guide/05-server" },
         ],
       },
       {

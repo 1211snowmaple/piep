@@ -51,6 +51,7 @@ pub use archive_state::{
 mod collection_additions;
 mod collection_sweep;
 mod collections;
+mod server_support;
 mod tag_recommendations;
 mod work_link_evidence;
 pub use tag_recommendations::RelatedTagCandidate;
@@ -2015,7 +2016,7 @@ impl Database {
             .map_err(|e| format!("DB read pool checkout failed: {}", e))
     }
 
-    fn library_generation(&self) -> Result<i64, String> {
+    pub fn library_generation(&self) -> Result<i64, String> {
         self.generation_conn
             .lock()
             .map_err(|e| e.to_string())?
@@ -7224,7 +7225,7 @@ impl Database {
     ///
     /// 実在する id の**全体**を渡す必要があるので、ここで読んでから渡す。
     /// 部分集合を渡すと、渡さなかった分が全部消える。
-    fn prune_search_indexes(&self) -> Result<usize, String> {
+    pub fn prune_search_indexes(&self) -> Result<usize, String> {
         let conn = self.read_conn()?;
         let mut stmt = conn
             .prepare("SELECT id FROM downloads")

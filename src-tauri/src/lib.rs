@@ -11,6 +11,8 @@ mod logging;
 /// 棚の実物で取り出しを確かめる example から触れるように公開している。
 pub mod pdf;
 pub mod pixiv_api;
+/// 単独サーバー `piep-server` からも使うので公開している。
+pub mod server;
 mod smoke_test;
 mod source_assets;
 mod source_time;
@@ -202,6 +204,15 @@ pub fn run() -> tauri::Result<()> {
                 log::warn!("デフォルトテンプレートの初期化に失敗: {}", e);
             }
 
+            // サーバーの機能が使えなくても、手元の本棚は開ける。
+            match server::desktop::DesktopServer::new(&app_data) {
+                Ok(desktop_server) => {
+                    let desktop_server = Arc::new(desktop_server);
+                    desktop_server.start_background(Arc::clone(&state));
+                    app.manage(desktop_server);
+                }
+                Err(e) => log::error!("サーバーの機能を初期化できません: {e}"),
+            }
             app.manage(state);
             log::info!("Database initialized at {:?}", db_path);
             // The search index is derived data and has to look after itself:
@@ -213,6 +224,21 @@ pub fn run() -> tauri::Result<()> {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            // サーバーモード (commands::server)
+            commands::server::server_status,
+            commands::server::server_embedded_start,
+            commands::server::server_embedded_stop,
+            commands::server::server_create_reader_pairing,
+            commands::server::server_revoke_device,
+            commands::server::server_list_remote_devices,
+            commands::server::server_remote_status,
+            commands::server::server_update_remote,
+            commands::server::server_connect_remote,
+            commands::server::server_disconnect_remote,
+            commands::server::server_set_auto_send,
+            commands::server::server_send_now,
+            commands::server::server_send_stop,
+            commands::server::server_list_interfaces,
             // 認証 (commands::auth)
             commands::auth::verify_pixiv_token,
             commands::auth::verify_fanbox_session,
