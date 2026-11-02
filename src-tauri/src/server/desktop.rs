@@ -439,6 +439,31 @@ impl DesktopServer {
         admin_get(&remote, &token, "status").await
     }
 
+    /// デスクトップ版の方が新しければ、サーバーにも更新を頼む。
+    async fn update_remote_if_behind(&self) {
+        let Ok(status) = self.remote_status().await else {
+            return;
+        };
+        let behind = status["version"]
+            .as_str()
+            .is_some_and(|version| super::update::is_newer(env!("CARGO_PKG_VERSION"), version));
+        if behind && status["update"].is_object() {
+            if let Err(error) = self.update_remote().await {
+                log::warn!("サーバーの更新を頼めません: {error}");
+            }
+        }
+    }
+
+    pub async fn update_remote(&self) -> Result<(), String> {
+        let remote = self
+            .settings()
+            .remote
+            .ok_or("単独サーバーにつないでいません")?;
+        let token = credential::load()?.ok_or("サーバーの鍵がありません。登録し直してください")?;
+        admin_post(&remote, &token, "update", &serde_json::json!({})).await?;
+        Ok(())
+    }
+
     pub async fn revoke_device(&self, device_id: &str) -> Result<(), String> {
         if let Some(remote) = self.settings().remote {
             let token =
@@ -564,6 +589,9 @@ impl DesktopServer {
         }
         let failed = record.error.clone();
         self.change_settings(|settings| settings.last_send = record)?;
+        if phase == "done" {
+            self.update_remote_if_behind().await;
+        }
         match failed {
             Some(error) if error != CANCELED => Err(error),
             _ => Ok(()),

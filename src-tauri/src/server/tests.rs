@@ -20,11 +20,17 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-struct TestRoot(PathBuf);
+pub(super) struct TestRoot(pub(super) PathBuf);
 
 impl TestRoot {
-    fn new(label: &str) -> Self {
+    pub(super) fn new(label: &str) -> Self {
         Self(std::env::temp_dir().join(format!("piep_server_{label}_{}", random_token(9))))
+    }
+
+    pub(super) fn created(label: &str) -> Self {
+        let root = Self::new(label);
+        fs::create_dir_all(&root.0).expect("test root");
+        root
     }
 }
 
@@ -834,6 +840,20 @@ async fn the_public_side_refuses_what_it_should() {
             .await
             .unwrap();
         assert_eq!(wrong.status(), StatusCode::UNAUTHORIZED, "{path}");
+
+        // 更新を頼めるのは管理者だけ。手で置いたサーバーは自分では更新できない。
+        let update_url = format!("{url}/api/v1/admin/update");
+        assert_eq!(
+            client.post(&update_url).send().await.unwrap().status(),
+            StatusCode::UNAUTHORIZED
+        );
+        let refused = client
+            .post(&update_url)
+            .bearer_auth(&token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(refused.status(), StatusCode::CONFLICT);
     }
     assert_eq!(
         client

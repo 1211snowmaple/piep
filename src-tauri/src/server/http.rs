@@ -11,6 +11,7 @@ use super::dto::{
 use super::library::Library;
 use super::store::{AuthorizedDevice, PairError, ReadingUpdate, Role, ServerStore};
 use super::sync_receive::{BindEntry, CommitRequest, ManifestEntry, SyncError, SyncReceiver};
+use super::update::{UpdateController, UpdateStatus};
 use super::{pairing_payload, API_VERSION};
 use crate::database::Database;
 use axum::body::{Body, Bytes};
@@ -27,7 +28,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 const MAX_ASSET_BYTES: u64 = 25 * 1024 * 1024;
@@ -54,6 +55,8 @@ pub struct ServerContext {
     pub public_url: Option<String>,
     /// 自己署名で待ち受けているときの証明書の指紋。
     pub fingerprint: Option<String>,
+    /// 自己更新の係。`install` で置いた単独サーバーにだけある。
+    update: OnceLock<Arc<UpdateController>>,
     pair_attempts: Mutex<VecDeque<Instant>>,
 }
 
@@ -73,8 +76,13 @@ impl ServerContext {
             receiver,
             public_url,
             fingerprint,
+            update: OnceLock::new(),
             pair_attempts: Mutex::new(VecDeque::new()),
         })
+    }
+
+    pub fn set_update(&self, controller: Arc<UpdateController>) {
+        let _ = self.update.set(controller);
     }
 
     fn pair_attempt_allowed(&self) -> bool {
@@ -270,6 +278,7 @@ fn read_routes(ctx: Ctx) -> Router {
 fn admin_routes(ctx: Ctx) -> Router {
     Router::new()
         .route("/api/v1/admin/status", get(admin_status))
+        .route("/api/v1/admin/update", post(admin_update))
         .route("/api/v1/admin/pairings", post(admin_pairing))
         .route("/api/v1/admin/devices", get(admin_devices))
         .route("/api/v1/admin/devices/{id}", delete(admin_revoke))
@@ -843,6 +852,7 @@ struct AdminStatus {
     devices: Vec<super::store::DeviceSummary>,
     sync: Option<super::sync_receive::ReceiverStatus>,
     public_url: Option<String>,
+    update: Option<UpdateStatus>,
 }
 
 async fn admin_status(
@@ -860,13 +870,29 @@ async fn admin_status(
     };
     let devices = ctx.store.list_devices().map_err(|_| ApiError::internal())?;
     Ok(Json(AdminStatus {
-        version: env!("CARGO_PKG_VERSION"),
+        version: super::update::VERSION,
         api_version: API_VERSION,
         works,
         devices,
         sync: ctx.receiver.as_ref().map(|receiver| receiver.status()),
         public_url: ctx.public_url.clone(),
+        update: ctx.update.get().map(|controller| controller.status()),
     }))
+}
+
+/// 新しい版を確かめて当てるよう頼む。頼めるのはこれだけで、ファイルや URL は渡せない。
+async fn admin_update(
+    State(ctx): State<Ctx>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    require_admin(&ctx, &headers)?;
+    let controller = ctx.update.get().ok_or(ApiError(
+        StatusCode::CONFLICT,
+        "not_managed",
+        "このサーバーは自分では更新できません。piep-server install で置いてください",
+    ))?;
+    controller.request_now();
+    Ok(Json(serde_json::json!({ "accepted": true })))
 }
 
 #[derive(Debug, Deserialize)]

@@ -4744,6 +4744,7 @@ dependencies = [
  "local-ip-address",
  "log",
  "minijinja",
+ "minisign-verify",
  "ort",
  "oxipng",
  "parking_lot",
