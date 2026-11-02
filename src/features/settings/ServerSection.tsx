@@ -13,16 +13,19 @@ import {
   serverInterfaces,
   serverRemoteDevices,
   serverRemoteStatus,
+  serverUpdateRemote,
   serverRevokeDevice,
   serverSendNow,
   serverSendStop,
   serverSetAutoSend,
   serverStatus,
   type DesktopServerStatus,
+  type RemoteServerUpdate,
   type ServerDevice,
   type ServerPairing,
 } from "@/services/serverApi";
 
+const ANDROID_APP_URL = "https://github.com/1211snowmaple/piep-android/releases/latest";
 const STATUS_KEY = ["server-status"];
 
 /** 送信の段どりを、そのまま画面の言葉にする。 */
@@ -101,6 +104,28 @@ interface CardProps {
   perform: (action: () => Promise<DesktopServerStatus | void>) => Promise<void>;
 }
 
+function updateMessage(update: RemoteServerUpdate): string {
+  const version = update.phase.version;
+  switch (update.phase.state) {
+    case "checking": return "新しい版を確かめています";
+    case "waiting": return update.auto ? `版 ${version} を夜の時間帯に当てます` : `版 ${version} を当てられます`;
+    case "applying": return `版 ${version} へ更新しています。数十秒止まります`;
+    default: return update.auto ? "新しい版は自動で当てます" : "新しい版は、頼んだときに当てます";
+  }
+}
+
+function RemoteUpdate({ update, pending, perform }: { update: RemoteServerUpdate } & Pick<CardProps, "pending" | "perform">) {
+  return (
+    <Stack gap={6}>
+      <Group justify="space-between" wrap="wrap">
+        <Text size="sm" c="dimmed">{updateMessage(update)}</Text>
+        <Button size="xs" variant="light" loading={pending} disabled={update.phase.state === "applying"} onClick={() => void perform(serverUpdateRemote)}>サーバーを今すぐ更新</Button>
+      </Group>
+      {update.lastError && <Alert color="yellow" title="サーバーの更新">{update.lastError}</Alert>}
+    </Stack>
+  );
+}
+
 function RemoteCard({ status, pending, perform }: CardProps) {
   const [text, setText] = useState("");
   const remote = status.remote;
@@ -145,6 +170,7 @@ function RemoteCard({ status, pending, perform }: CardProps) {
           </Text>
         )}
         {sync?.indexError && <Alert color="yellow" title="サーバーの索引を更新できません">{sync.indexError}</Alert>}
+        {details.data?.update && <RemoteUpdate update={details.data.update} perform={perform} pending={pending} />}
         {send.running ? (
           <Stack gap={6}>
             <Text size="sm">{SEND_PHASE[send.phase] ?? "送っています"}</Text>
@@ -309,6 +335,8 @@ function DevicesCard({ status, pending, pairing, setPairing, perform, onCopyFail
               onClick={() => void navigator.clipboard.writeText(pairing.payload).then(() => setCopied(true)).catch(onCopyFailed)}
             >{copied ? "コピーしました" : "登録文字列をコピー"}</Button>
             <Text size="xs" c="dimmed">この文字列には登録鍵が含まれます。人に見せないでください。</Text>
+            <Text size="sm" c="dimmed">アプリがまだ無ければ、先にこの QR から入れてください。</Text>
+            <div style={{ alignSelf: "flex-start", padding: 12, background: "#fff", borderRadius: 8 }}><QRCodeSVG value={ANDROID_APP_URL} size={132} level="M" aria-label="Android 版の入手先" /></div>
           </Stack>
         )}
         {remoteDevices.error && <Text size="sm" c="red">{errorMessage(remoteDevices.error)}</Text>}

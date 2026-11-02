@@ -7,6 +7,7 @@
 pub mod desktop;
 pub mod dto;
 pub mod http;
+pub mod install;
 pub mod library;
 pub mod snapshot;
 pub mod standalone;
@@ -16,6 +17,8 @@ pub mod sync_send;
 #[cfg(test)]
 mod tests;
 pub mod tls;
+pub mod update;
+pub mod watchdog;
 
 /// 携帯端末との契約の版。壊す変更のときだけ上げる。
 pub const API_VERSION: u32 = 2;

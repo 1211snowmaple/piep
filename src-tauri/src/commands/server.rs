@@ -77,6 +77,12 @@ pub async fn server_remote_status(app: tauri::AppHandle) -> Result<serde_json::V
     controller(&app)?.remote_status().await
 }
 
+/// 単独サーバーに、新しい版を確かめて当てるよう頼む。
+#[tauri::command]
+pub async fn server_update_remote(app: tauri::AppHandle) -> Result<(), String> {
+    controller(&app)?.update_remote().await
+}
+
 /// 管理者用の登録文字列で単独サーバーにつなぐ。鍵は資格情報マネージャーに置く。
 #[tauri::command]
 pub async fn server_connect_remote(

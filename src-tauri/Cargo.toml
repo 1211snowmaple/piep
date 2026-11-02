@@ -93,6 +93,8 @@ rustls-pemfile = "2.2"
 rustls = { version = "0.23", features = ["ring"] }
 subtle = "2.6"
 toml = "1"
+# 単独サーバーの自己更新の署名を確かめる。デスクトップ版の updater と同じ検証。
+minisign-verify = "0.3"
 local-ip-address = "0.6"
 
 [target.'cfg(windows)'.dependencies]
@@ -106,6 +108,8 @@ windows = { version = "0.62.2", features = [
     "Win32_Foundation",
     "Win32_Security_Credentials",
     "Win32_Storage_FileSystem",
+    "Win32_System_JobObjects",
+    "Win32_UI_Shell",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
 ] }

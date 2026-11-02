@@ -62,6 +62,17 @@ export interface RemoteServerStatus {
   works: number | null;
   publicUrl: string | null;
   sync: { generation: number; committedAt: string | null; indexPending: number | null; indexError: string | null } | null;
+  /** 自分で更新できるサーバーにだけある。 */
+  update: RemoteServerUpdate | null;
+}
+
+export interface RemoteServerUpdate {
+  auto: boolean;
+  phase: { state: "idle" | "checking" | "waiting" | "applying"; version?: string };
+  latest: string | null;
+  lastCheckedAt: string | null;
+  lastError: string | null;
+  lastAppliedAt: string | null;
 }
 
 export interface ServerPairing {
@@ -84,6 +95,7 @@ export const serverRevokeDevice = (deviceId: string) =>
   invoke<DesktopServerStatus>("server_revoke_device", { deviceId });
 export const serverRemoteDevices = () => invoke<ServerDevice[]>("server_list_remote_devices");
 export const serverRemoteStatus = () => invoke<RemoteServerStatus>("server_remote_status");
+export const serverUpdateRemote = () => invoke<void>("server_update_remote");
 export const serverConnectRemote = (pairing: string) =>
   invoke<DesktopServerStatus>("server_connect_remote", { pairing });
 export const serverDisconnectRemote = () => invoke<DesktopServerStatus>("server_disconnect_remote");

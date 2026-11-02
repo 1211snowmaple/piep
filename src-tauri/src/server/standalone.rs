@@ -1,10 +1,13 @@
 //! 単独サーバー（`piep-server`）の本体。設定、置き場、待ち受け、コマンド。
 
 use super::http::{combined_router, reader_router, ServerContext};
+use super::install::{self, InstallOptions};
 use super::library::{Library, SwappableDb};
 use super::store::{Role, ServerStore};
 use super::sync_receive::SyncReceiver;
 use super::tls::{self, TlsMaterial};
+use super::update::{self, UpdateController, UpdateSource, UpdateWindow, EXIT_APPLY_UPDATE};
+use super::watchdog;
 use super::{pairing_payload, DEFAULT_PORT};
 use axum::Router;
 use hyper_util::rt::TokioTimer;
@@ -38,6 +41,27 @@ pub struct ServerConfig {
     #[serde(default)]
     pub public_url: String,
     pub tls: Option<TlsSetting>,
+    #[serde(default)]
+    pub update: UpdateConfig,
+}
+
+/// 自己更新。`install` で置いたときだけ動く。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct UpdateConfig {
+    /// false なら、デスクトップ版から頼んだときだけ当てる。
+    pub auto: bool,
+    /// 自動で当てる時間帯（この機械の時刻）。
+    pub window: String,
+}
+
+impl Default for UpdateConfig {
+    fn default() -> Self {
+        Self {
+            auto: true,
+            window: "03:00-06:00".into(),
+        }
+    }
 }
 
 fn default_listen() -> SocketAddr {
@@ -63,6 +87,7 @@ impl ServerConfig {
                 }
             }
         }
+        UpdateWindow::parse(&self.update.window)?;
         if !self.public_url.is_empty() && !self.public_url.starts_with("https://") {
             return Err(format!(
                 "{CONFIG_FILE} の public_url は https:// で始めてください"
@@ -115,6 +140,36 @@ impl ServerPaths {
     pub fn lock(&self) -> PathBuf {
         self.state().join("server.lock")
     }
+    pub fn versions(&self) -> PathBuf {
+        self.root.join("versions")
+    }
+    pub fn version_dir(&self, version: &str) -> PathBuf {
+        self.versions().join(version)
+    }
+    pub fn current_version(&self) -> PathBuf {
+        self.state().join("current-version")
+    }
+    pub fn previous_version(&self) -> PathBuf {
+        self.state().join("previous-version")
+    }
+    pub fn pending_version(&self) -> PathBuf {
+        self.state().join("pending-version")
+    }
+    pub fn update_record(&self) -> PathBuf {
+        self.state().join("update.json")
+    }
+    pub fn update_backup(&self) -> PathBuf {
+        self.state().join("update-backup")
+    }
+    pub fn ready_mark(&self) -> PathBuf {
+        self.state().join("ready.json")
+    }
+    pub fn watchdog_log(&self) -> PathBuf {
+        self.state().join("watchdog.log")
+    }
+    pub fn watchdog_lock(&self) -> PathBuf {
+        self.state().join("watchdog.lock")
+    }
 }
 
 pub fn load_config(paths: &ServerPaths) -> Result<ServerConfig, String> {
@@ -136,6 +191,10 @@ listen = "127.0.0.1:38777"   # 読み手（携帯）。これ以外のアドレ�
 # admin_listen = "127.0.0.1:38778"   # 管理者を別の口に分ける。外へ公開するなら分ける
 public_url = ""              # 携帯の登録文字列に載せる https の URL。空なら管理者が登録した URL
 # tls = "self-signed"        # または { cert = "...", key = "..." }
+
+# [update]                   # install で置いたときの自己更新
+# auto = true                # false ならデスクトップ版から頼んだときだけ当てる
+# window = "03:00-06:00"     # 自動で当てる時間帯
 "#;
 
 /// 登録文字列を作って返す。
@@ -187,9 +246,10 @@ pub async fn command_admin_pair(data: &Path, url: Option<String>) -> Result<Stri
     let paths = ServerPaths::new(data)?;
     let config = load_config(&paths)?;
     let store = ServerStore::open(&paths.store())?;
-    let url = url.or_else(|| default_admin_url(&config)).ok_or(
-        "このサーバーへデスクトップ版から届く URL を --url で指定してください（例: --url https://example.ts.net/）",
-    )?;
+    let url = url
+        .or_else(|| config.public_url())
+        .or_else(|| default_admin_url(&config))
+        .ok_or("このサーバーへデスクトップ版から届く URL を --url で指定してください")?;
     let material = tls_material(&paths, &config).await?;
     let fingerprint = material
         .as_ref()
@@ -203,7 +263,7 @@ pub fn command_status(data: &Path) -> Result<String, String> {
     let store = ServerStore::open(&paths.store())?;
     let devices = store.list_devices()?;
     let mut lines = vec![
-        format!("版: {}", env!("CARGO_PKG_VERSION")),
+        format!("版: {}", update::VERSION),
         format!("読み手の口: {}", config.listen),
         format!(
             "管理の口: {}",
@@ -224,6 +284,22 @@ pub fn command_status(data: &Path) -> Result<String, String> {
         ),
         format!("端末: {} 台", devices.len()),
     ];
+    if update::is_managed(&paths) {
+        let record = update::UpdateRecord::load(&paths);
+        lines.push(format!(
+            "更新: {} 最後の確認 {} 最新 {}",
+            if config.update.auto {
+                "自動"
+            } else {
+                "頼まれたときだけ"
+            },
+            record.last_checked_at.as_deref().unwrap_or("-"),
+            record.latest.as_deref().unwrap_or("-"),
+        ));
+        if let Some(error) = record.last_error {
+            lines.push(format!("更新の問題: {error}"));
+        }
+    }
     for device in devices {
         lines.push(format!(
             "  {} {} 最後の接続 {}",
@@ -317,7 +393,72 @@ pub async fn run_listener(
     served.map_err(|error| format!("{address} の待ち受けが止まりました: {error}"))
 }
 
-pub async fn command_serve(data: &Path) -> Result<(), String> {
+/// 自分の口に `hello` を通し、DB を検査してから、準備できた印を書く。
+/// 見張り役はこの印を見て、更新が定着したと判断する。
+async fn report_ready(paths: ServerPaths, config: ServerConfig) -> Result<(), String> {
+    let address = config.admin_listen.unwrap_or(config.listen);
+    let host = match address.ip() {
+        std::net::IpAddr::V4(ip) if ip.is_unspecified() => "127.0.0.1".to_string(),
+        std::net::IpAddr::V6(ip) if ip.is_unspecified() => "[::1]".to_string(),
+        std::net::IpAddr::V6(ip) => format!("[{ip}]"),
+        std::net::IpAddr::V4(ip) => ip.to_string(),
+    };
+    let scheme = if config.tls.is_some() {
+        "https"
+    } else {
+        "http"
+    };
+    let url = format!("{scheme}://{host}:{}/api/v1/hello", address.port());
+    // 自分自身への問い合わせなので、証明書は問わない。
+    let client = reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .no_proxy()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .map_err(|error| format!("自己確認の準備ができません: {error}"))?;
+    let started = std::time::Instant::now();
+    loop {
+        let answered = match client.get(&url).send().await {
+            Ok(response) if response.status().is_success() => response
+                .json::<serde_json::Value>()
+                .await
+                .is_ok_and(|hello| hello.get("apiVersion").is_some()),
+            _ => false,
+        };
+        if answered {
+            break;
+        }
+        if started.elapsed() > Duration::from_secs(50) {
+            return Err(format!("{url} が応答しません"));
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    let database = paths.database();
+    tokio::task::spawn_blocking(move || check_database(&database))
+        .await
+        .map_err(|error| format!("DB の検査が異常終了しました: {error}"))??;
+    watchdog::write_ready_mark(&paths)
+}
+
+fn check_database(path: &Path) -> Result<(), String> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let connection =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|error| format!("DB を開けません: {error}"))?;
+    let result: String = connection
+        .query_row("PRAGMA quick_check(1)", [], |row| row.get(0))
+        .map_err(|error| format!("DB を検査できません: {error}"))?;
+    if result == "ok" {
+        Ok(())
+    } else {
+        Err(format!("DB が壊れています: {result}"))
+    }
+}
+
+/// 本体。終了コードを返す。`EXIT_APPLY_UPDATE` なら、見張り役が新しい版へ切り替える。
+pub async fn command_run(data: &Path) -> Result<i32, String> {
     let paths = ServerPaths::new(data)?;
     let config = load_config(&paths)?;
     fs::create_dir_all(paths.state()).map_err(|error| format!("置き場を作れません: {error}"))?;
@@ -364,6 +505,27 @@ pub async fn command_serve(data: &Path) -> Result<(), String> {
             log::info!("待ち受け: {}", config.listen);
         }
     }
+    let updates = if update::is_managed(&paths) {
+        let stop_handle = handle.clone();
+        let controller = UpdateController::new(
+            paths.clone(),
+            UpdateSource::fixed(),
+            config.update.clone(),
+            Box::new(move || stop_handle.graceful_shutdown(Some(Duration::from_secs(5)))),
+        )?;
+        parts.context.set_update(Arc::clone(&controller));
+        tokio::spawn(Arc::clone(&controller).run(Some(Arc::clone(&parts.receiver))));
+        Some(controller)
+    } else {
+        None
+    };
+    let ready_paths = paths.clone();
+    let ready_config = config.clone();
+    tokio::spawn(async move {
+        if let Err(error) = report_ready(ready_paths, ready_config).await {
+            log::error!("起動の確認に失敗しました: {error}");
+        }
+    });
     let stop_handle = handle.clone();
     tokio::spawn(async move {
         if tokio::signal::ctrl_c().await.is_ok() {
@@ -385,43 +547,72 @@ pub async fn command_serve(data: &Path) -> Result<(), String> {
         }
     }
     parts.receiver.stop_index_catch_up();
+    result?;
+    let Some(version) = updates.and_then(|controller| controller.take_apply()) else {
+        drop(lock);
+        return Ok(0);
+    };
+    // 口を閉じたあとなので、もう誰も書かない。
+    update::back_up_databases(&paths)?;
+    update::write_atomic(&paths.pending_version(), version.as_bytes())?;
+    log::info!("版 {version} へ切り替えるので止まります");
     drop(lock);
-    result
+    Ok(EXIT_APPLY_UPDATE)
 }
 
-const USAGE: &str = "piep-server <command> --data <dir>
+const USAGE: &str = "piep-server <command>
 
-  init --data <dir> [--url <url>]        置き場と設定を作り、管理者用の登録文字列を出す
-  serve --data <dir>                     サーバーを動かす
+  install [--data <dir>] [--expose proxy|direct] [--url <url>] [--no-task]
+                                         置き場所と出し方を尋ね、起動時に動くよう登録して動かす
+                                         （引数なしで開いたときもこれ）
+  uninstall                              起動時の登録を消して止める。置き場所は消さない
+  init --data <dir> [--url <url>]        置き場と設定だけを作り、管理者用の登録文字列を出す
+  serve --data <dir>                     サーバーを動かす（落ちたら立ち上げ直す）
   admin-pair --data <dir> [--url <url>]  管理者用の登録文字列を出し直す
   status --data <dir>                    状態を出す
+  --version                              版を出す
 
 --url はデスクトップ版からこのサーバーへ届く URL。127.0.0.1 だけで待ち受けていて、
-別の機械からつなぐなら、トンネルやリバースプロキシの URL を指定する。";
+別の機械からつなぐなら、トンネルやリバースプロキシの URL を指定する。
+--no-task は起動の仕組みを自分で用意するときに指定する。";
 
+#[derive(Default)]
 struct Arguments {
     command: String,
-    data: PathBuf,
+    data: Option<PathBuf>,
     url: Option<String>,
+    expose: Option<install::Exposure>,
+    no_task: bool,
+    pause: bool,
 }
 
 fn parse_arguments(args: &[String]) -> Result<Arguments, String> {
     let mut iter = args.iter();
-    let command = iter.next().ok_or(USAGE)?.clone();
-    let mut data = None;
-    let mut url = None;
+    // 引数なしはエクスプローラーから開いたとき。
+    let mut parsed = Arguments {
+        command: iter.next().cloned().unwrap_or_else(|| "install".into()),
+        pause: args.is_empty(),
+        ..Arguments::default()
+    };
     while let Some(argument) = iter.next() {
         match argument.as_str() {
-            "--data" => data = iter.next().cloned().map(PathBuf::from),
-            "--url" => url = iter.next().cloned(),
+            "--data" => parsed.data = iter.next().cloned().map(PathBuf::from),
+            "--url" => parsed.url = iter.next().cloned(),
+            "--expose" => {
+                parsed.expose = Some(install::parse_exposure(
+                    iter.next().map_or("", String::as_str),
+                )?);
+            }
+            "--no-task" => parsed.no_task = true,
+            "--pause" => parsed.pause = true,
             _ => return Err(USAGE.to_string()),
         }
     }
-    Ok(Arguments {
-        command,
-        data: data.ok_or(USAGE)?,
-        url,
-    })
+    Ok(parsed)
+}
+
+fn required_data(parsed: &Arguments) -> Result<&Path, String> {
+    parsed.data.as_deref().ok_or_else(|| USAGE.to_string())
 }
 
 /// 登録文字列は、この画面にだけ出す。記録には残さない。
@@ -436,35 +627,105 @@ fn print_pairing(payload: &str) {
 
 /// `piep-server` の入口。プロセスの終了コードを返す。
 pub async fn main_from_args(args: Vec<String>) -> i32 {
+    match args.first().map(String::as_str) {
+        Some("--version") => {
+            println!("{}", update::VERSION);
+            return 0;
+        }
+        Some("--help") => {
+            println!("{USAGE}");
+            return 0;
+        }
+        // CI が、できた配布物を組み込みの鍵で確かめる。
+        Some("verify-package") => {
+            let verified = match (args.get(1), args.get(2)) {
+                (Some(package), Some(signature)) => {
+                    update::verify_package_file(Path::new(package), Path::new(signature))
+                }
+                _ => Err(USAGE.to_string()),
+            };
+            return match verified {
+                Ok(()) => 0,
+                Err(error) => {
+                    eprintln!("{error}");
+                    1
+                }
+            };
+        }
+        _ => {}
+    }
     let run = async {
         let parsed = parse_arguments(&args)?;
         match parsed.command.as_str() {
+            "install" => {
+                let pause = parsed.pause;
+                // 管理者権限で開き直した窓は、終わると閉じる。結果を読めるよう止める。
+                let mut again = args.clone();
+                if !again.iter().any(|argument| argument == "install") {
+                    again.insert(0, "install".into());
+                }
+                if !again.iter().any(|argument| argument == "--pause") {
+                    again.push("--pause".into());
+                }
+                let options = InstallOptions {
+                    data: parsed.data,
+                    url: parsed.url,
+                    expose: parsed.expose,
+                    no_task: parsed.no_task,
+                };
+                if let Some(payload) = install::command_install(options, &again, pause).await? {
+                    print_pairing(&payload);
+                    install::finish_install(pause);
+                }
+                Ok(0)
+            }
+            "uninstall" => {
+                let again = vec!["uninstall".to_string(), "--pause".to_string()];
+                if install::command_uninstall(&again)? {
+                    install::finish_install(parsed.pause);
+                }
+                Ok(0)
+            }
             "init" => {
-                let payload = command_init(&parsed.data, parsed.url).await?;
+                let payload = command_init(required_data(&parsed)?, parsed.url.clone()).await?;
                 print_pairing(&payload);
-                Ok(())
+                Ok(0)
             }
             "admin-pair" => {
-                let payload = command_admin_pair(&parsed.data, parsed.url).await?;
+                let payload =
+                    command_admin_pair(required_data(&parsed)?, parsed.url.clone()).await?;
                 print_pairing(&payload);
-                Ok(())
+                Ok(0)
             }
             "status" => {
-                println!("{}", command_status(&parsed.data)?);
-                Ok(())
+                println!("{}", command_status(required_data(&parsed)?)?);
+                Ok(0)
             }
             "serve" => {
-                let paths = ServerPaths::new(&parsed.data)?;
+                let paths = ServerPaths::new(required_data(&parsed)?)?;
+                fs::create_dir_all(paths.state())
+                    .map_err(|error| format!("置き場を作れません: {error}"))?;
+                if update::is_managed(&paths) {
+                    return tokio::task::spawn_blocking(move || watchdog::run(&paths))
+                        .await
+                        .map_err(|error| format!("見張り役が異常終了しました: {error}"))?;
+                }
+                crate::logging::install(&paths.state());
+                command_run(&paths.root).await
+            }
+            "run" => {
+                let paths = ServerPaths::new(required_data(&parsed)?)?;
                 fs::create_dir_all(paths.state())
                     .map_err(|error| format!("置き場を作れません: {error}"))?;
                 crate::logging::install(&paths.state());
-                command_serve(&parsed.data).await
+                command_run(&paths.root).await
             }
             _ => Err(USAGE.to_string()),
         }
     };
-    match run.await {
-        Ok(()) => 0,
+    let result: Result<i32, String> = run.await;
+    match result {
+        Ok(code) => code,
         Err(error) => {
             eprintln!("{error}");
             1

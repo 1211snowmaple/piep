@@ -232,6 +232,7 @@ pub fn run() -> tauri::Result<()> {
             commands::server::server_revoke_device,
             commands::server::server_list_remote_devices,
             commands::server::server_remote_status,
+            commands::server::server_update_remote,
             commands::server::server_connect_remote,
             commands::server::server_disconnect_remote,
             commands::server::server_set_auto_send,
