@@ -963,7 +963,17 @@ pub fn optimize_segments(storage_dir: &Path) -> Result<(usize, usize), String> {
         .searchable_segment_ids()
         .map_err(|e| format!("Tantivy segment inspection failed: {e}"))?
         .len();
-    let mut writer = Some(exclusive_writer(&runtime, || optimize_writer(&runtime))?);
+    let writer = exclusive_writer(&runtime, || optimize_writer(&runtime))?;
+    merge_down(&runtime, writer, before)
+}
+
+/// 取った書き手で、セグメントを1つになるまで統合する。
+fn merge_down(
+    runtime: &Arc<TantivyRuntime>,
+    writer: ExclusiveWriter,
+    before: usize,
+) -> Result<(usize, usize), String> {
+    let mut writer = Some(writer);
     hold_merges(&mut writer)?;
     if before <= 1 {
         // A prior merge can leave obsolete files temporarily undeletable on
@@ -1017,12 +1027,26 @@ pub fn optimize_segments(storage_dir: &Path) -> Result<(usize, usize), String> {
             if fresh.len() < 2 {
                 continue;
             }
-            optimizing_writer(&mut writer)?
-                .merge(&fresh)
-                .wait()
-                .map_err(|e| format!("Tantivy segment merge failed: {e}"))?;
+            match optimizing_writer(&mut writer)?.merge(&fresh).wait() {
+                Ok(_) => {}
+                // 上の絞り込みは消えた ID しか落とせない。手放した書き手の後始末が
+                // この書き手を作ったあとで `meta.json` に届くと、書き手の知らない
+                // セグメントが一覧に載る。書き手は作られたときの一覧しか持たないので、
+                // 読み直すだけでは断られ続ける。作り直して、いまの一覧から始める。
+                Err(tantivy::TantivyError::InvalidArgument(error)) => {
+                    log::warn!(
+                        "Tantivy segment merge refused; retrying with a new writer: {error}"
+                    );
+                    writer.take();
+                    writer = Some(exclusive_writer(runtime, || optimize_writer(runtime))?);
+                    hold_merges(&mut writer)?;
+                    went_stale = true;
+                    break;
+                }
+                Err(error) => return Err(format!("Tantivy segment merge failed: {error}")),
+            }
             merged = true;
-            hand_over_exclusive_writer(&runtime, &mut writer, || optimize_writer(&runtime))?;
+            hand_over_exclusive_writer(runtime, &mut writer, || optimize_writer(runtime))?;
             hold_merges(&mut writer)?;
         }
         if !merged {
@@ -2264,6 +2288,87 @@ mod query_escaping_tests {
         assert_eq!(query_literal(""), "");
         assert_eq!(query_literal("   "), "");
         assert_eq!(escape_query("   "), "");
+    }
+}
+
+#[cfg(test)]
+mod optimize_stale_writer_tests {
+    use super::*;
+
+    struct TempRoot(PathBuf);
+
+    impl Drop for TempRoot {
+        fn drop(&mut self) {
+            release_runtime(&self.0.join("downloads"));
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn document(download_id: i64) -> TantivyIndexDocument {
+        TantivyIndexDocument {
+            download_id,
+            source: "pixiv".to_string(),
+            source_id: download_id.to_string(),
+            source_url: String::new(),
+            title: format!("統合 {download_id}"),
+            author_name: "作者".to_string(),
+            author_id: "1".to_string(),
+            tags: String::new(),
+            series_title: String::new(),
+            excerpt: String::new(),
+            body: "本文".to_string(),
+            published_at: String::new(),
+            downloaded_at: String::new(),
+            favorite: false,
+            watch_updates: false,
+            asset_kinds: String::new(),
+            text_length: 2,
+        }
+    }
+
+    /// 手放した書き手の後始末は、次の書き手ができたあとで `meta.json` に届くことが
+    /// ある。すると一覧には、いまの書き手の知らないセグメントが載る。CI で
+    /// 「確定済みと未確定が混ざっている」と断られて落ちたのは、この形だった。
+    #[test]
+    fn optimization_survives_a_writer_older_than_the_segment_list() {
+        let rand_val: u32 = rand::random();
+        let root = std::env::temp_dir().join(format!("piep_optimize_stale_{rand_val}"));
+        let storage = root.join("downloads");
+        std::fs::create_dir_all(&storage).unwrap();
+        let _guard = TempRoot(root);
+
+        let runtime = runtime(&storage).unwrap();
+        disable_automatic_merges_for_test(&storage).unwrap();
+        for download_id in 1..=4 {
+            upsert_documents(&storage, &[document(download_id)]).unwrap();
+        }
+        let ids = runtime.index.searchable_segment_ids().unwrap();
+        assert_eq!(ids.len(), 4);
+
+        // 先の書き手が2つを統合し、いまの一覧を残す。
+        let mut earlier = exclusive_writer(&runtime, || optimize_writer(&runtime)).unwrap();
+        let merged = earlier.merge(&ids[..2]).wait().unwrap().unwrap().id();
+        drop(earlier);
+        let meta_path = storage
+            .join(INDEX_DIR_NAME)
+            .join(INDEX_VERSION_DIR)
+            .join("meta.json");
+        let latest = std::fs::read_to_string(&meta_path).unwrap();
+
+        // 統合してできたセグメントを知らない書き手を作り、一覧だけを先へ進める。
+        let merged = serde_json::to_value(merged).unwrap();
+        let mut older: serde_json::Value = serde_json::from_str(&latest).unwrap();
+        older["segments"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|segment| segment["segment_id"] != merged);
+        std::fs::write(&meta_path, older.to_string()).unwrap();
+        let behind = exclusive_writer(&runtime, || optimize_writer(&runtime)).unwrap();
+        std::fs::write(&meta_path, &latest).unwrap();
+
+        assert_eq!(merge_down(&runtime, behind, 3).unwrap(), (3, 1));
+        runtime.reader.reload().unwrap();
+        assert_eq!(runtime.reader.searcher().num_docs(), 4);
     }
 }
 
