@@ -51,7 +51,7 @@ pub(super) fn validate_saved_image(bytes: &[u8], mime: &str) -> Result<(), Clien
     if mime == "image/avif" {
         return Err(ClientError {
             code: "unsupported_offline_image",
-            message: "AVIF は保存前の画像検証に対応していません。PC 側で PNG・WebP 等に変換してください。保存済みの版はそのまま保持しました",
+            message: "AVIF は保存前の画像検証に対応していません。デスクトップ版で PNG・WebP 等に変換してください。保存済みの版はそのまま保持しました",
         });
     }
     let expected = match mime {

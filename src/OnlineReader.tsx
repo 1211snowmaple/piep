@@ -5,6 +5,7 @@ import { ProviderMark } from "./ProviderMark";
 import { WorkThumbnail } from "./WorkThumbnail";
 import { AuthorAvatar } from "./WorkCard";
 import { handleReaderKeyboard } from "./readerKeyboard";
+import { readRemotePosition, recordReading, refreshReading, refreshReadingWithin, remoteStart, sendReading, type ReadingWrite, type RemoteStart } from "./readingSync";
 import { getOfflineAsset, getOfflineOutline, getOfflinePage, getPcAsset, getPcMetadata, getPcOutline, getPcPage, getPcWorkCollections, pcErrorMessage, saveOfflineWork, type PcCollection, type PcMetadata, type PcOutlineEntry, type PcPage, type PcWork } from "./pcApi";
 
 function offlineSnapshotChanged(error: unknown): boolean {
@@ -39,6 +40,25 @@ function savedPage(work: PcWork, editHash: string | null): number {
   } catch { return 0; }
 }
 
+// サーバーの位置を待つのは開くときの一瞬だけ。遅ければ手元の位置で開き、あとで案内する。
+const SYNC_WAIT_MS = 1500;
+const WRITE_DELAY_MS = 3000;
+
+function localReadingTime(work: PcWork, editHash: string | null): number {
+  try {
+    const value = Number(window.localStorage.getItem(`${readingKey(work, editHash)}.at`));
+    return Number.isSafeInteger(value) && value > 0 ? value : 0;
+  } catch { return 0; }
+}
+
+function markLocalReading(key: string, time: number): void {
+  try { window.localStorage.setItem(`${key}.at`, String(time)); } catch { /* storage unavailable */ }
+}
+
+async function remoteStartFor(work: PcWork, editHash: string | null): Promise<RemoteStart | null> {
+  return remoteStart(await readRemotePosition(work.source, work.sourceId), localReadingTime(work, editHash), work.currentVersion, editHash);
+}
+
 type SavedPosition = { page: number; top: number; ratio: number; fontSize: number; lineHeight: number; readerWidth: number; fontFamily: "serif" | "sans" };
 
 function readSavedPosition(work: PcWork, editHash: string | null): SavedPosition | null {
@@ -56,6 +76,11 @@ function readSavedPosition(work: PcWork, editHash: string | null): SavedPosition
     }
     return null;
   } catch { return null; }
+}
+
+function positionFromRemote(start: RemoteStart, fontFamily: "serif" | "sans"): SavedPosition {
+  // 別の端末とは文字の大きさが違うので、割合で戻す。先頭から順に画像が埋まるのを待つよう top は末尾にする。
+  return { page: start.page, top: Number.MAX_SAFE_INTEGER, ratio: start.ratio, fontSize: 0, lineHeight: 0, readerWidth: 0, fontFamily };
 }
 
 function sameRevision(metadata: PcMetadata, work: PcWork, editHash: string | null): boolean {
@@ -136,6 +161,15 @@ export function OnlineReader({ work, fontSize, lineHeight, readerWidth, fontFami
   const sidebarTitleRef = useRef<HTMLElement>(null);
   const pendingRestore = useRef<SavedPosition | null>(offline ? readSavedPosition(work, offlineEditHash) : null);
   const pendingOutline = useRef<{ page: number; index: number } | null>(null);
+  const [remoteOffer, setRemoteOffer] = useState<RemoteStart | null>(null);
+  // 最初に開いたページは読み進めた印ではないので、送らない。
+  const syncedPage = useRef<number | null>(null);
+  const guidedPage = useRef(false);
+  const queuedWrite = useRef<ReadingWrite | null>(null);
+  const writeTimer = useRef<number | null>(null);
+  const dismissedRemote = useRef(0);
+  const currentPage = useRef(pageIndex);
+  currentPage.current = pageIndex;
   const readingWork = detailWork ?? work;
   const positionKey = activeEditHash === undefined ? null : readingKey(readingWork, activeEditHash);
 
@@ -154,6 +188,7 @@ export function OnlineReader({ work, fontSize, lineHeight, readerWidth, fontFami
     // A different edit or source version must never inherit the prior page or outline.
     pendingRestore.current = readSavedPosition(metadata.work, metadata.activeEditHash);
     pendingOutline.current = null;
+    syncedPage.current = null;
     setOutline([]);
     setDetailWork(metadata.work);
     setIsEdited(metadata.isEdited);
@@ -166,12 +201,20 @@ export function OnlineReader({ work, fontSize, lineHeight, readerWidth, fontFami
   useEffect(() => {
     if (offline) return;
     let alive = true;
-    void getPcMetadata(work.id).then((metadata) => {
+    void Promise.all([getPcMetadata(work.id), refreshReadingWithin(SYNC_WAIT_MS)]).then(async ([metadata]) => {
+      const start = await remoteStartFor(metadata.work, metadata.activeEditHash);
       if (!alive) return;
       setDetailWork(metadata.work);
       setIsEdited(metadata.isEdited);
-      pendingRestore.current = readSavedPosition(metadata.work, metadata.activeEditHash);
-      setPageIndex(savedPage(metadata.work, metadata.activeEditHash));
+      if (start) {
+        markLocalReading(readingKey(metadata.work, metadata.activeEditHash), start.deviceTime);
+        guidedPage.current = start.guide;
+        pendingRestore.current = start.guide ? null : positionFromRemote(start, fontFamily);
+        setPageIndex(start.page);
+      } else {
+        pendingRestore.current = readSavedPosition(metadata.work, metadata.activeEditHash);
+        setPageIndex(savedPage(metadata.work, metadata.activeEditHash));
+      }
       setActiveEditHash(metadata.activeEditHash);
     }).catch(() => {
       if (!alive) return;
@@ -195,6 +238,74 @@ export function OnlineReader({ work, fontSize, lineHeight, readerWidth, fontFami
       fontFamily,
     };
   };
+
+  const sendQueuedWrite = () => {
+    if (writeTimer.current !== null) window.clearTimeout(writeTimer.current);
+    writeTimer.current = null;
+    const write = queuedWrite.current;
+    queuedWrite.current = null;
+    if (write) void recordReading(write).then(() => sendReading());
+  };
+
+  const queueReadingWrite = (pageNumber: number, ratio: number, pageCount: number) => {
+    if (!positionKey || activeEditHash === undefined || activeEditHash === "unknown") return;
+    const time = Date.now();
+    markLocalReading(positionKey, time);
+    setRemoteOffer(null);
+    queuedWrite.current = {
+      source: readingWork.source,
+      sourceId: readingWork.sourceId,
+      version: readingWork.currentVersion,
+      editHash: activeEditHash,
+      page: pageNumber,
+      position: Math.min(1, Math.max(0, ratio)),
+      finished: pageNumber === pageCount - 1 && ratio >= 0.98,
+      deviceTime: time,
+    };
+    if (writeTimer.current === null) writeTimer.current = window.setTimeout(sendQueuedWrite, WRITE_DELAY_MS);
+  };
+
+  const acceptRemote = () => {
+    if (!remoteOffer || !positionKey) return;
+    markLocalReading(positionKey, remoteOffer.deviceTime);
+    syncedPage.current = remoteOffer.page;
+    guidedPage.current = remoteOffer.guide;
+    pendingRestore.current = remoteOffer.guide ? null : positionFromRemote(remoteOffer, fontFamily);
+    if (remoteOffer.page === pageIndex) setRetry((current) => current + 1);
+    else setPageIndex(remoteOffer.page);
+    setRemoteOffer(null);
+  };
+
+  const dismissRemote = () => {
+    if (remoteOffer) dismissedRemote.current = remoteOffer.deviceTime;
+    setRemoteOffer(null);
+  };
+
+  useEffect(() => {
+    if (!positionKey || activeEditHash === undefined || activeEditHash === "unknown") return;
+    let alive = true;
+    const check = () => {
+      void refreshReading().then(() => remoteStartFor(readingWork, activeEditHash)).then((start) => {
+        if (!alive || !start || start.deviceTime <= dismissedRemote.current) return;
+        const viewport = scrollRef.current;
+        const length = viewport ? Math.max(0, viewport.scrollHeight - viewport.clientHeight) : 0;
+        const ratio = viewport && length > 0 ? viewport.scrollTop / length : 0;
+        if (start.page === currentPage.current && Math.abs(start.ratio - ratio) < 0.02) return;
+        // 読んでいる最中に画面を動かさない。移動するかは読者に任せる。
+        setRemoteOffer(start);
+      });
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") check();
+      else sendQueuedWrite();
+    };
+    check();
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      alive = false;
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [positionKey]);
 
   useEffect(() => {
     if (!imageResolutionDone || loading || problem) return;
@@ -293,6 +404,13 @@ export function OnlineReader({ work, fontSize, lineHeight, readerWidth, fontFami
     let timer: number | null = null;
     let frame = 0;
     const saved = pendingRestore.current?.page === pageIndex ? pendingRestore.current : null;
+    const pageCount = page.pageCount;
+    let restoredTop: number | null = null;
+    if (syncedPage.current === null) syncedPage.current = pageIndex;
+    else if (syncedPage.current !== pageIndex) {
+      syncedPage.current = pageIndex;
+      queueReadingWrite(pageIndex, saved?.ratio ?? 0, pageCount);
+    }
     const flush = () => {
       if (!changed || !restored) return;
       changed = false;
@@ -307,6 +425,8 @@ export function OnlineReader({ work, fontSize, lineHeight, readerWidth, fontFami
         fontFamily,
       };
       try { window.localStorage.setItem(`${positionKey}.position`, JSON.stringify(position)); } catch { /* storage unavailable */ }
+      // 位置を戻しただけのスクロールは、読み進めた印ではない。
+      if (restoredTop === null || Math.abs(viewport.scrollTop - restoredTop) > 2) queueReadingWrite(pageIndex, position.ratio, pageCount);
     };
     const onScroll = () => {
       if (!restored) return;
@@ -331,6 +451,7 @@ export function OnlineReader({ work, fontSize, lineHeight, readerWidth, fontFami
         viewport.scrollTop = target;
         if (Math.abs(viewport.scrollTop - target) < 2 || performance.now() >= deadline) {
           restored = true;
+          restoredTop = viewport.scrollTop;
           pendingRestore.current = null;
         } else frame = requestAnimationFrame(restore);
       };
@@ -349,6 +470,9 @@ export function OnlineReader({ work, fontSize, lineHeight, readerWidth, fontFami
       flush();
     };
   }, [positionKey, pageIndex, page, html, loading, problem, assetsReady, fontSize, lineHeight, readerWidth, fontFamily]);
+
+  // 上の片付けが最後の位置を積むので、この片付けはその後に走らせる。
+  useEffect(() => () => sendQueuedWrite(), []);
 
   useEffect(() => {
     const target = pendingOutline.current;
@@ -412,6 +536,14 @@ export function OnlineReader({ work, fontSize, lineHeight, readerWidth, fontFami
         }
         const next = await (offline ? getOfflinePage(work.id, pageIndex) : getPcPage(work.id, pageIndex));
         if (cancelled) return;
+        if (guidedPage.current) {
+          guidedPage.current = false;
+          if (pageIndex !== 0 && (pageIndex >= next.pageCount || next.page !== pageIndex)) {
+            syncedPage.current = null;
+            setPageIndex(0);
+            return;
+          }
+        }
         const pageGeneration = "generation" in next && typeof next.generation === "string" ? next.generation : null;
         if (offline) {
           if (!pageGeneration) throw new Error("保存済み作品の版を確認できませんでした。もう一度読み込んでください");
@@ -473,7 +605,7 @@ export function OnlineReader({ work, fontSize, lineHeight, readerWidth, fontFami
             viewport?.dispatchEvent(new Event("piep-asset-change"));
           }
         };
-        // Fill each illustration as it arrives while four requests share the LAN.
+        // Fill each illustration as it arrives while four requests share the connection.
         await Promise.all(Array.from({ length: Math.min(4, uniqueIds.length) }, fetchAsset));
         if (cancelled) return;
         if (snapshotChanged) {
@@ -491,7 +623,16 @@ export function OnlineReader({ work, fontSize, lineHeight, readerWidth, fontFami
           if (cancelled || adoptRevision(afterAssets)) return;
         }
       } catch (error) {
-        if (!cancelled) { setProblem(pcErrorMessage(error)); setLoading(false); }
+        if (cancelled) return;
+        if (guidedPage.current && pageIndex !== 0) {
+          // 目安のページが今の版に無い。最初から読む。
+          guidedPage.current = false;
+          syncedPage.current = null;
+          setPageIndex(0);
+          return;
+        }
+        setProblem(pcErrorMessage(error));
+        setLoading(false);
       }
     })();
     return () => { cancelled = true; };
@@ -554,6 +695,7 @@ export function OnlineReader({ work, fontSize, lineHeight, readerWidth, fontFami
   return <div className={`reader-screen reader-theme--${readerTheme}`}>
     <header className="reader-toolbar"><button className="text-button back-button" onClick={onBack} aria-label={backLabel}>← <span>戻る</span></button><span className="reader-toolbar-title">{work.title}</span><div className="reader-toolbar-actions"><button ref={outlineTriggerRef} className="text-button" onClick={() => setOutlineOpen(true)}>{outline.length > 0 ? "目次・情報" : "作品情報"}</button><button ref={typeTriggerRef} className="text-button reader-type-button" onClick={() => setTypeOpen(true)} aria-label="文字の表示設定">文字</button></div></header>
     {saveMessage && <div className="reader-notice" role="status">{saveMessage}</div>}
+    {remoteOffer && <div className="reader-notice reader-sync-offer" role="status"><span>{remoteOffer.guide ? "別の版を" : "別の端末で"} {remoteOffer.page + 1} ページまで読んでいます</span><button onClick={acceptRemote}>そこへ移動</button><button onClick={dismissRemote}>閉じる</button></div>}
     {typeOpen && <div className="reader-type-layer">
       <button className="reader-type-scrim" onClick={() => setTypeOpen(false)} aria-label="表示設定を閉じる" />
       <div className="reader-type-panel" role="dialog" aria-modal="true" aria-label="文字の表示設定" onClickCapture={(event) => { if ((event.target as Element).closest(".reader-type-row button")) capturePosition(); }}>
