@@ -1,7 +1,7 @@
 {
   "name": "piep-android",
   "private": true,
-  "version": "0.2.0",
+  "version": "0.3.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -12,6 +12,7 @@
   "dependencies": {
     "@tanstack/react-virtual": "^3.14.18",
     "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-barcode-scanner": "^2.5.3",
     "@tauri-apps/plugin-opener": "^2",
     "dompurify": "^3.4.16",
     "lucide-react": "^1.41.0",

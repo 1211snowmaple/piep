@@ -166,7 +166,7 @@ impl ClientError {
     fn protocol() -> Self {
         Self {
             code: "protocol_mismatch",
-            message: "サーバーの接続 API と互換性がありません。両方のアプリを更新してください",
+            message: "サーバーの接続 API と互換性がありません。アプリとサーバーを、どちらも新しい版にしてください",
         }
     }
     fn revoked() -> Self {
@@ -405,6 +405,28 @@ fn trusted_client() -> Result<reqwest::Client, ClientError> {
         .timeout(REQUEST_TIMEOUT)
         .build()
         .map_err(|_| ClientError::offline())
+}
+
+/// アプリ内更新の取得に使う。配布先は別のホストへ転送し、大きいファイルも取るので、
+/// サーバーとの通信とは別に作る。
+pub(crate) fn update_client(allow_plain_http: bool) -> Result<reqwest::Client, String> {
+    initialize_crypto();
+    let unavailable = |_| "更新を確かめられません".to_string();
+    let builder = reqwest::Client::builder().tls_backend_rustls();
+    #[cfg(target_os = "android")]
+    let builder = builder.tls_certs_only(
+        android_system_certificates()
+            .map_err(|_| "更新を確かめられません".to_string())?
+            .iter()
+            .cloned(),
+    );
+    builder
+        .https_only(!allow_plain_http)
+        .redirect(reqwest::redirect::Policy::limited(5))
+        .no_proxy()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .build()
+        .map_err(unavailable)
 }
 
 /// Android の信頼する CA を読む。

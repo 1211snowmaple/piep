@@ -187,6 +187,6 @@ export function PcLibrary({ criteria, onCriteriaChange, onOpenWork, onOpenDetail
       {!numbered && results?.nextCursor && <div className="load-more" ref={loadMoreRef}><button className="secondary-button" disabled={busy} onClick={() => void runSearch(criteria, results.nextCursor)}>{busy ? "読み込み中…" : "さらに表示"}</button></div>}
       {pagingMode === "pages" && !numbered && <p className="paging-relevance-hint">関連度順の検索は自動読み込みです。ページ番号を使うには並び順を選んでください。</p>}
       </>}
-    </> : <section className="empty-card pc-connection-empty"><h2>{status?.paired ? "サーバーの本棚を開けません" : "サーバーの本棚をつなぐ"}</h2><p>{status?.issue ? pcConnectionIssue(status) : "設定でサーバーとの接続を登録すると、作品がここに並びます。"}</p><button className="primary-button" onClick={onGoToSettings}>設定で接続を確認</button></section>}
+    </> : <section className="empty-card pc-connection-empty"><h2>{status?.paired ? "サーバーの本棚を開けません" : "サーバーの本棚をつなぐ"}</h2><p>{status?.issue ? pcConnectionIssue(status) : "設定でサーバーとの接続を登録すると、作品がここに並びます。"}</p><button className="primary-button" onClick={onGoToSettings}>{status?.issue === "protocol_mismatch" ? "設定で更新を確かめる" : "設定で接続を確認"}</button></section>}
   </>;
 }
