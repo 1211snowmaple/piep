@@ -1,13 +1,19 @@
 package io.github.u1211snowmaple.piep.android
 
+import android.content.Intent
+import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import android.webkit.WebView
 import android.webkit.JavascriptInterface
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.enableEdgeToEdge
+import androidx.core.content.FileProvider
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import java.io.File
 
 class MainActivity : TauriActivity() {
   override val handleBackNavigation: Boolean = false
@@ -37,6 +43,25 @@ class MainActivity : TauriActivity() {
       @JavascriptInterface
       fun systemBottomInsetPx(): Int = systemBottomInsetPx
     }, "piepAndroidAppearance")
+    // 開けるのは、検証を通ってキャッシュに置かれた APK だけ。OS が毎回確認し、署名を検査する。
+    webView.addJavascriptInterface(object {
+      @JavascriptInterface
+      fun installDownloadedUpdate(): String {
+        val apk = File(cacheDir, "updates/update.apk")
+        if (!apk.isFile) return "missing"
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !packageManager.canRequestPackageInstalls()) {
+          startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName")))
+          return "needs_permission"
+        }
+        val uri = FileProvider.getUriForFile(this@MainActivity, "$packageName.fileprovider", apk)
+        startActivity(
+          Intent(Intent.ACTION_VIEW)
+            .setDataAndType(uri, "application/vnd.android.package-archive")
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        )
+        return "started"
+      }
+    }, "piepAndroidUpdate")
     // WebView M138 以下では IME が visualViewport に反映されないため、
     // Android の inset を CSS へ補助的に伝える。insets は消費せず WebView にも渡す。
     ViewCompat.setOnApplyWindowInsetsListener(webView) { _, insets ->
