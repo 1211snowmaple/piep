@@ -397,7 +397,7 @@ const USAGE: &str = "piep-server <command> --data <dir>
   status --data <dir>                    状態を出す
 
 --url はデスクトップ版からこのサーバーへ届く URL。127.0.0.1 だけで待ち受けていて、
-別の機械からつなぐなら、Funnel やリバースプロキシの URL を指定する。";
+別の機械からつなぐなら、トンネルやリバースプロキシの URL を指定する。";
 
 struct Arguments {
     command: String,

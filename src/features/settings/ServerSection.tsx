@@ -227,7 +227,7 @@ function EmbeddedCard({ status, pending, perform }: CardProps) {
               label="出す先"
               data={[
                 { value: "lan", label: "同じネットワークの携帯へ（自己署名の証明書）" },
-                { value: "proxy", label: "リバースプロキシの裏（Tailscale Funnel など）" },
+                { value: "proxy", label: "トンネルやリバースプロキシの裏" },
               ]}
               value={mode}
               allowDeselect={false}
