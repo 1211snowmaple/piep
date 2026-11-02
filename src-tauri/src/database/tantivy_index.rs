@@ -435,7 +435,8 @@ fn start_writer_reaper() {}
 /// This does not affect whether the directory can be deleted - `remove_dir_all`
 /// gets through the mmaps. What blocks deletion is SQLite, which is why the
 /// tests drop their `Database` first.
-#[cfg(test)]
+///
+/// 単独サーバーは本棚の DB を入れ替えるときにも、ここで書き手を手放す。
 pub(crate) fn release_runtime(storage_dir: &Path) {
     let key = storage_dir.join(INDEX_DIR_NAME).join(INDEX_VERSION_DIR);
     let Some(runtimes) = RUNTIMES.get() else {

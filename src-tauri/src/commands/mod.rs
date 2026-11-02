@@ -6,5 +6,6 @@ pub mod database;
 pub mod downloader;
 pub mod epub;
 pub mod pdf;
+pub mod server;
 pub mod shell;
 pub mod update_jobs;
