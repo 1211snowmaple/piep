@@ -163,6 +163,14 @@ function App() {
     return () => { delete backWindow.piepAndroidBack; };
   }, [readerOpen, detailOpen, sidebarOpen]);
 
+  // 回転してサイドバーが常設になったら、開いたままの状態を残さない。
+  useEffect(() => {
+    const drawer = window.matchMedia("(max-width: 599px), (max-width: 900px) and (orientation: portrait)");
+    const closeOnChange = () => setSidebarOpen(false);
+    drawer.addEventListener("change", closeOnChange);
+    return () => drawer.removeEventListener("change", closeOnChange);
+  }, []);
+
   useEffect(() => {
     const wasOpen = sidebarWasOpenRef.current;
     sidebarWasOpenRef.current = sidebarOpen;
