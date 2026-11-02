@@ -1,4 +1,4 @@
-//! PC 版 piep への通信を Android の Rust 側に閉じ込める。
+//! piep サーバーへの通信を Android の Rust 側に閉じ込める。
 //! 認証鍵は WebView の JavaScript に返さない。
 
 use base64::{
@@ -10,26 +10,65 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Mutex;
 use std::time::Duration;
 use tauri::State;
-use url::{Host, Url};
+use url::Url;
 
 pub(crate) mod offline;
+pub(crate) mod reading_sync;
+mod image_validation;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(12);
 const ASSET_TIMEOUT: Duration = Duration::from_secs(60);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
+// 回線が切り替わると、使い回す接続は黙って死ぬ。長く持ち越さない。
+const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_ASSET_BYTES: usize = 25 * 1024 * 1024;
+const MAX_JSON_BYTES: usize = 16 * 1024 * 1024;
 const MAX_NUMBERED_OFFSET: i64 = 5_000;
 const API_VERSION: u32 = 2;
+const PAIRING_VERSION: u32 = 2;
+const CAPABILITY_READING_SYNC: &str = "reading-sync";
 
 pub struct PcClientState {
     file: PathBuf,
+    // 要求ごとに TLS を張り直すと、外からの接続では 1 枚の画像ごとに往復が増える。
+    client: Mutex<Option<(String, reqwest::Client)>>,
 }
 
 impl PcClientState {
     pub fn new(file: PathBuf) -> Self {
-        Self { file }
+        Self {
+            file,
+            client: Mutex::new(None),
+        }
+    }
+
+    /// 接続先に合う検証方法のクライアントを返す。同じ接続先のあいだは使い回す。
+    fn client(&self, saved: &SavedConnection) -> Result<reqwest::Client, ClientError> {
+        let key = format!(
+            "{}|{}",
+            saved.url,
+            saved.fingerprint.as_deref().unwrap_or("")
+        );
+        let mut cache = self.client.lock().map_err(|_| ClientError::storage())?;
+        if let Some((cached, client)) = cache.as_ref() {
+            if *cached == key {
+                return Ok(client.clone());
+            }
+        }
+        let client = match &saved.certificate_der {
+            Some(certificate) => pinned_client(
+                &URL_SAFE_NO_PAD
+                    .decode(certificate)
+                    .map_err(|_| ClientError::storage())?,
+            )?,
+            None => trusted_client()?,
+        };
+        *cache = Some((key, client.clone()));
+        Ok(client)
     }
 
     fn load(&self) -> Result<Option<SavedConnection>, ClientError> {
@@ -41,14 +80,18 @@ impl PcClientState {
         let saved: SavedConnection =
             serde_json::from_slice(&bytes).map_err(|_| ClientError::storage())?;
         validate_url(&saved.url)?;
-        validate_fingerprint(&saved.fingerprint)?;
-        if fingerprint(
-            &URL_SAFE_NO_PAD
-                .decode(&saved.certificate_der)
-                .map_err(|_| ClientError::storage())?,
-        ) != saved.fingerprint
-        {
-            return Err(ClientError::storage());
+        match (&saved.fingerprint, &saved.certificate_der) {
+            (Some(expected), Some(certificate)) => {
+                validate_fingerprint(expected)?;
+                let certificate = URL_SAFE_NO_PAD
+                    .decode(certificate)
+                    .map_err(|_| ClientError::storage())?;
+                if fingerprint(&certificate) != *expected {
+                    return Err(ClientError::storage());
+                }
+            }
+            (None, None) => {}
+            _ => return Err(ClientError::storage()),
         }
         if URL_SAFE_NO_PAD
             .decode(&saved.token)
@@ -96,34 +139,69 @@ impl ClientError {
             message: "保存した作品を読み書きできません。空き容量と保存状態を確認してください",
         }
     }
+    fn admin_pairing() -> Self {
+        Self {
+            code: "invalid_pairing",
+            message: "これは管理者用の登録文字列です。デスクトップ版の「携帯を追加」で出した文字列を使ってください",
+        }
+    }
     fn offline() -> Self {
         Self {
             code: "offline",
-            message: "PC に接続できません。同じ Wi-Fi と PC の共有状態を確認してください",
+            message: "サーバーに接続できません。通信状態とサーバーの URL を確認してください",
+        }
+    }
+    fn offline_same_network() -> Self {
+        Self {
+            code: "offline",
+            message: "サーバーに接続できません。サーバーと同じ Wi-Fi にいるか確認してください",
         }
     }
     fn certificate_changed() -> Self {
         Self {
             code: "certificate_changed",
-            message: "PC の証明書が登録時と異なります",
+            message: "サーバーの証明書が登録時と異なります",
+        }
+    }
+    fn certificate_untrusted() -> Self {
+        Self {
+            code: "certificate_untrusted",
+            message: "サーバーの証明書を確認できません。URL が正しいか確かめてください",
         }
     }
     fn protocol() -> Self {
         Self {
             code: "protocol_mismatch",
-            message: "PC 版の接続 API と互換性がありません",
+            message: "サーバーの接続 API と互換性がありません。両方のアプリを更新してください",
         }
     }
     fn revoked() -> Self {
         Self {
             code: "revoked",
-            message: "この端末の登録が PC 側で解除されています",
+            message: "この端末の登録がサーバー側で解除されています",
+        }
+    }
+    fn not_ready() -> Self {
+        Self {
+            code: "not_ready",
+            message: "サーバーは本棚の準備中です。しばらくしてからもう一度試してください",
         }
     }
     fn remote() -> Self {
         Self {
             code: "remote_error",
-            message: "PC の作品を読み込めません",
+            message: "サーバーの作品を読み込めません",
+        }
+    }
+    /// 通信の失敗を、利用者が次に何をすべきかで分ける。
+    fn from_send(error: &reqwest::Error, pinned: bool) -> Self {
+        if !pinned && rejected_certificate(error) {
+            Self::certificate_untrusted()
+        } else if pinned {
+            // 自己署名の接続先は家の中の機械なので、Wi-Fi の案内が役に立つ。
+            Self::offline_same_network()
+        } else {
+            Self::offline()
         }
     }
 }
@@ -132,20 +210,38 @@ impl ClientError {
 #[serde(deny_unknown_fields)]
 struct PairingPayload {
     version: u32,
+    role: String,
     url: String,
-    fingerprint: String,
     secret: String,
+    #[serde(default)]
+    fingerprint: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SavedConnection {
     url: String,
-    fingerprint: String,
-    certificate_der: String,
+    /// 自己署名の接続先だけが持つ。無ければ OS が信頼する CA で検証する。
+    #[serde(default)]
+    fingerprint: Option<String>,
+    #[serde(default)]
+    certificate_der: Option<String>,
     token: String,
     device_id: String,
     device_name: String,
+    #[serde(default)]
+    capabilities: Vec<String>,
+}
+
+impl SavedConnection {
+    fn pinned(&self) -> bool {
+        self.fingerprint.is_some()
+    }
+    fn can_sync_reading(&self) -> bool {
+        self.capabilities
+            .iter()
+            .any(|capability| capability == CAPABILITY_READING_SYNC)
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -156,6 +252,8 @@ pub struct ConnectionStatus {
     url: Option<String>,
     device_name: Option<String>,
     issue: Option<&'static str>,
+    capabilities: Vec<String>,
+    self_signed: bool,
 }
 
 impl ConnectionStatus {
@@ -166,6 +264,8 @@ impl ConnectionStatus {
             url: None,
             device_name: None,
             issue: None,
+            capabilities: Vec::new(),
+            self_signed: false,
         }
     }
     fn from_saved(saved: &SavedConnection, reachable: bool, issue: Option<&'static str>) -> Self {
@@ -175,6 +275,8 @@ impl ConnectionStatus {
             url: Some(saved.url.clone()),
             device_name: Some(saved.device_name.clone()),
             issue,
+            capabilities: saved.capabilities.clone(),
+            self_signed: saved.pinned(),
         }
     }
 }
@@ -184,6 +286,8 @@ impl ConnectionStatus {
 struct Hello {
     api_version: u32,
     server_name: String,
+    #[serde(default)]
+    capabilities: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -196,22 +300,51 @@ struct PairResult {
 
 fn validate_url(value: &str) -> Result<Url, ClientError> {
     let url = Url::parse(value).map_err(|_| ClientError::invalid_pairing())?;
-    let allowed_ip = match url.host() {
-        Some(Host::Ipv4(ip)) => ip.is_private() || ip.is_loopback(),
-        _ => false,
-    };
     if url.scheme() != "https"
-        || !allowed_ip
-        || url.port().is_none()
+        || url.host().is_none()
         || !url.username().is_empty()
         || url.password().is_some()
-        || url.path() != "/"
         || url.query().is_some()
         || url.fragment().is_some()
     {
         return Err(ClientError::invalid_pairing());
     }
     Ok(url)
+}
+
+/// 登録文字列を読む。通信の前に確かめられることをここで全部確かめる。
+fn parse_pairing(payload: &str, device_name: &str) -> Result<PairingPayload, ClientError> {
+    let mut pairing: PairingPayload =
+        serde_json::from_str(payload).map_err(|_| ClientError::invalid_pairing())?;
+    if pairing.version != PAIRING_VERSION
+        || device_name.trim().is_empty()
+        || device_name.chars().count() > 64
+    {
+        return Err(ClientError::invalid_pairing());
+    }
+    match pairing.role.as_str() {
+        "reader" => {}
+        "admin" => return Err(ClientError::admin_pairing()),
+        _ => return Err(ClientError::invalid_pairing()),
+    }
+    // 端点は `{url}/api/v1/...` で組み立てるので、末尾の / を落として持つ。
+    pairing.url = validate_url(&pairing.url)?
+        .as_str()
+        .trim_end_matches('/')
+        .to_string();
+    if let Some(expected) = &pairing.fingerprint {
+        validate_fingerprint(expected)?;
+        pairing.fingerprint = Some(expected.to_ascii_lowercase());
+    }
+    if URL_SAFE_NO_PAD
+        .decode(&pairing.secret)
+        .map_err(|_| ClientError::invalid_pairing())?
+        .len()
+        != 32
+    {
+        return Err(ClientError::invalid_pairing());
+    }
+    Ok(pairing)
 }
 
 fn validate_fingerprint(value: &str) -> Result<(), ClientError> {
@@ -262,17 +395,88 @@ fn pinned_client(certificate: &[u8]) -> Result<reqwest::Client, ClientError> {
         .https_only(true)
         .redirect(reqwest::redirect::Policy::none())
         .no_proxy()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .pool_idle_timeout(POOL_IDLE_TIMEOUT)
         .timeout(REQUEST_TIMEOUT)
         .build()
         .map_err(|_| ClientError::certificate_changed())
 }
 
-async fn hello(client: &reqwest::Client, base: &str) -> Result<reqwest::Response, ClientError> {
+/// 指紋の無い接続先用。OS が信頼する CA と host 名で検証する。
+fn trusted_client() -> Result<reqwest::Client, ClientError> {
+    initialize_crypto();
+    let builder = reqwest::Client::builder().tls_backend_rustls();
+    #[cfg(target_os = "android")]
+    let builder = builder.tls_certs_only(android_system_certificates()?.iter().cloned());
+    builder
+        .https_only(true)
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .pool_idle_timeout(POOL_IDLE_TIMEOUT)
+        .timeout(REQUEST_TIMEOUT)
+        .build()
+        .map_err(|_| ClientError::offline())
+}
+
+/// Android の信頼する CA を読む。
+///
+/// reqwest の既定の検証器は Android では JNI の初期化と Kotlin 側の部品を要求する。
+/// 同じ情報は端末のファイルにあり、アプリが読める。利用者が足した CA は、Android の
+/// 既定どおりアプリでは信頼しない。
+#[cfg(target_os = "android")]
+fn android_system_certificates() -> Result<&'static Vec<reqwest::Certificate>, ClientError> {
+    static CERTIFICATES: std::sync::OnceLock<Vec<reqwest::Certificate>> = std::sync::OnceLock::new();
+    let certificates = CERTIFICATES.get_or_init(|| {
+        // Android 14 以降は更新可能な apex 側が本物で、system 側は古いまま残る。
+        for directory in ["/apex/com.android.conscrypt/cacerts", "/system/etc/security/cacerts"] {
+            let Ok(entries) = fs::read_dir(directory) else {
+                continue;
+            };
+            let certificates: Vec<_> = entries
+                .flatten()
+                .filter_map(|entry| fs::read(entry.path()).ok())
+                .filter_map(|pem| reqwest::Certificate::from_pem(&pem).ok())
+                .collect();
+            if !certificates.is_empty() {
+                return certificates;
+            }
+        }
+        Vec::new()
+    });
+    if certificates.is_empty() {
+        return Err(ClientError::certificate_untrusted());
+    }
+    Ok(certificates)
+}
+
+/// TLS の証明書で断られたかどうかを、エラーの連なりから見分ける。
+fn rejected_certificate(error: &(dyn std::error::Error + 'static)) -> bool {
+    let mut current = Some(error);
+    while let Some(cause) = current {
+        // io::Error は二重に包まれて届き、source() は包んだ中身を飛ばす。直接ほどく。
+        let mut inner: &(dyn std::error::Error + 'static) = cause;
+        while let Some(wrapped) = inner.downcast_ref::<std::io::Error>().and_then(|io| io.get_ref()) {
+            inner = wrapped;
+        }
+        if matches!(inner.downcast_ref::<rustls::Error>(), Some(rustls::Error::InvalidCertificate(_))) {
+            return true;
+        }
+        current = cause.source();
+    }
+    false
+}
+
+async fn hello(
+    client: &reqwest::Client,
+    base: &str,
+    pinned: bool,
+) -> Result<reqwest::Response, ClientError> {
     let response = client
         .get(format!("{base}/api/v1/hello"))
         .send()
         .await
-        .map_err(|_| ClientError::offline())?;
+        .map_err(|error| ClientError::from_send(&error, pinned))?;
     if !response.status().is_success() {
         return Err(ClientError::protocol());
     }
@@ -294,46 +498,41 @@ pub async fn pc_pair(
     payload: String,
     device_name: String,
 ) -> Result<ConnectionStatus, ClientError> {
-    let pairing: PairingPayload =
-        serde_json::from_str(&payload).map_err(|_| ClientError::invalid_pairing())?;
-    if pairing.version != 1 || device_name.trim().is_empty() || device_name.chars().count() > 64 {
-        return Err(ClientError::invalid_pairing());
-    }
-    validate_url(&pairing.url)?;
-    validate_fingerprint(&pairing.fingerprint)?;
-    if URL_SAFE_NO_PAD
-        .decode(&pairing.secret)
-        .map_err(|_| ClientError::invalid_pairing())?
-        .len()
-        != 32
-    {
-        return Err(ClientError::invalid_pairing());
-    }
-    let probe = probe_client()?;
-    // 無認証の接続確認だけを先に行い、登録鍵を送る前に証明書を照合する。
-    let response = hello(&probe, &pairing.url).await?;
-    let certificate = certificate_from_response(&response)?;
-    if fingerprint(&certificate) != pairing.fingerprint.to_ascii_lowercase() {
-        return Err(ClientError::certificate_changed());
-    }
-    let hello: Hello = response.json().await.map_err(|_| ClientError::protocol())?;
+    let pairing = parse_pairing(&payload, &device_name)?;
+    let pinned = pairing.fingerprint.is_some();
+    let (client, certificate, response) = match &pairing.fingerprint {
+        Some(expected) => {
+            // 無認証の接続確認だけを先に行い、登録鍵を送る前に証明書を照合する。
+            let response = hello(&probe_client()?, &pairing.url, true).await?;
+            let certificate = certificate_from_response(&response)?;
+            if fingerprint(&certificate) != *expected {
+                return Err(ClientError::certificate_changed());
+            }
+            (pinned_client(&certificate)?, Some(certificate), response)
+        }
+        None => {
+            let client = trusted_client()?;
+            let response = hello(&client, &pairing.url, false).await?;
+            (client, None, response)
+        }
+    };
+    let hello: Hello = response.bounded_json().await?;
     if hello.api_version != API_VERSION || hello.server_name != "piep" {
         return Err(ClientError::protocol());
     }
-    let pinned = pinned_client(&certificate)?;
-    let response = pinned
+    let response = client
         .post(format!("{}/api/v1/pair", pairing.url))
         .json(&serde_json::json!({"secret": pairing.secret, "deviceName": device_name.trim()}))
         .send()
         .await
-        .map_err(|_| ClientError::offline())?;
+        .map_err(|error| ClientError::from_send(&error, pinned))?;
     if response.status() == reqwest::StatusCode::UNAUTHORIZED {
         return Err(ClientError::invalid_pairing());
     }
     if !response.status().is_success() {
         return Err(ClientError::remote());
     }
-    let result: PairResult = response.json().await.map_err(|_| ClientError::protocol())?;
+    let result: PairResult = response.bounded_json().await?;
     if result.api_version != API_VERSION
         || URL_SAFE_NO_PAD
             .decode(&result.token)
@@ -345,11 +544,12 @@ pub async fn pc_pair(
     }
     let saved = SavedConnection {
         url: pairing.url,
-        fingerprint: pairing.fingerprint.to_ascii_lowercase(),
-        certificate_der: URL_SAFE_NO_PAD.encode(certificate),
+        fingerprint: pairing.fingerprint,
+        certificate_der: certificate.map(|certificate| URL_SAFE_NO_PAD.encode(certificate)),
         token: result.token,
         device_id: result.device_id,
         device_name: device_name.trim().to_string(),
+        capabilities: hello.capabilities,
     };
     state.save(&saved)?;
     Ok(ConnectionStatus::from_saved(&saved, true, None))
@@ -359,16 +559,13 @@ pub async fn pc_pair(
 pub async fn pc_connection_status(
     state: State<'_, PcClientState>,
 ) -> Result<ConnectionStatus, ClientError> {
-    let Some(saved) = state.load()? else {
+    let Some(mut saved) = state.load()? else {
         return Ok(ConnectionStatus::empty());
     };
-    let certificate = URL_SAFE_NO_PAD
-        .decode(&saved.certificate_der)
-        .map_err(|_| ClientError::storage())?;
-    let pinned = pinned_client(&certificate)?;
-    match hello(&pinned, &saved.url).await {
+    let client = state.client(&saved)?;
+    match hello(&client, &saved.url, saved.pinned()).await {
         Ok(response) => {
-            let hello: Hello = response.json().await.map_err(|_| ClientError::protocol())?;
+            let hello: Hello = response.bounded_json().await?;
             if hello.api_version != API_VERSION || hello.server_name != "piep" {
                 Ok(ConnectionStatus::from_saved(
                     &saved,
@@ -376,8 +573,13 @@ pub async fn pc_connection_status(
                     Some("protocol_mismatch"),
                 ))
             } else {
+                // サーバーの更新で機能が増減したら、次の読書から従う。
+                if hello.capabilities != saved.capabilities {
+                    saved.capabilities = hello.capabilities;
+                    state.save(&saved)?;
+                }
                 // /hello は無認証。登録解除された端末を「接続中」と表示しない。
-                let authorized = pinned
+                let authorized = client
                     .get(format!("{}/api/v1/collections", saved.url))
                     .bearer_auth(&saved.token)
                     .timeout(PROBE_TIMEOUT)
@@ -388,25 +590,31 @@ pub async fn pc_connection_status(
                     Ok(response) if response.status() == reqwest::StatusCode::UNAUTHORIZED => {
                         Some("revoked")
                     }
+                    Ok(response) if response.status() == reqwest::StatusCode::SERVICE_UNAVAILABLE => {
+                        Some("not_ready")
+                    }
                     Ok(_) => Some("remote_error"),
                     Err(_) => Some("offline"),
                 };
                 Ok(ConnectionStatus::from_saved(&saved, issue.is_none(), issue))
             }
         }
+        Err(error) if error.code == "certificate_untrusted" => Ok(ConnectionStatus::from_saved(
+            &saved,
+            false,
+            Some("certificate_untrusted"),
+        )),
         Err(_) => {
-            // 証明書が変わった場合と、PC が停止している場合を区別する。
-            let issue = match probe_client() {
-                Ok(probe) => match hello(&probe, &saved.url).await {
+            // 証明書が変わった場合と、サーバーが停止している場合を区別する。
+            let issue = match (&saved.fingerprint, probe_client()) {
+                (Some(expected), Ok(probe)) => match hello(&probe, &saved.url, true).await {
                     Ok(response) => match certificate_from_response(&response) {
-                        Ok(current) if fingerprint(&current) != saved.fingerprint => {
-                            "certificate_changed"
-                        }
+                        Ok(current) if fingerprint(&current) != *expected => "certificate_changed",
                         _ => "offline",
                     },
                     Err(_) => "offline",
                 },
-                Err(_) => "offline",
+                _ => "offline",
             };
             Ok(ConnectionStatus::from_saved(&saved, false, Some(issue)))
         }
@@ -435,23 +643,21 @@ async fn authenticated_get_with_timeout(
     timeout: Duration,
 ) -> Result<reqwest::Response, ClientError> {
     let saved = state.load()?.ok_or_else(ClientError::invalid_pairing)?;
-    let certificate = URL_SAFE_NO_PAD
-        .decode(&saved.certificate_der)
-        .map_err(|_| ClientError::storage())?;
-    let client = pinned_client(&certificate)?;
+    let client = state.client(&saved)?;
     let response = client
         .get(format!("{}{}", saved.url, endpoint))
-        .bearer_auth(saved.token)
+        .bearer_auth(&saved.token)
         .timeout(timeout)
         .send()
         .await
-        .map_err(|_| ClientError::offline())?;
+        .map_err(|error| ClientError::from_send(&error, saved.pinned()))?;
     check_response(response)
 }
 
 fn check_response(response: reqwest::Response) -> Result<reqwest::Response, ClientError> {
     match response.status() {
         reqwest::StatusCode::UNAUTHORIZED => Err(ClientError::revoked()),
+        reqwest::StatusCode::SERVICE_UNAVAILABLE => Err(ClientError::not_ready()),
         status if !status.is_success() => Err(ClientError::remote()),
         _ => Ok(response),
     }
@@ -692,21 +898,16 @@ pub async fn pc_search_works(
 ) -> Result<SearchPage, ClientError> {
     let payload = search_payload(&criteria, cursor, offset, scope)?;
     let saved = state.load()?.ok_or_else(ClientError::invalid_pairing)?;
-    let certificate = URL_SAFE_NO_PAD
-        .decode(&saved.certificate_der)
-        .map_err(|_| ClientError::storage())?;
-    let client = pinned_client(&certificate)?;
+    let client = state.client(&saved)?;
     let response = client
         .post(format!("{}/api/v1/works/search", saved.url))
-        .bearer_auth(saved.token)
+        .bearer_auth(&saved.token)
         .json(&payload)
         .send()
         .await
-        .map_err(|_| ClientError::offline())?;
+        .map_err(|error| ClientError::from_send(&error, saved.pinned()))?;
     check_response(response)?
-        .json()
-        .await
-        .map_err(|_| ClientError::protocol())
+        .bounded_json().await
 }
 
 fn validate_numbered_offset(offset: Option<i64>, cursor: Option<&str>) -> Result<(), ClientError> {
@@ -762,9 +963,7 @@ pub async fn pc_list_entities(
     let endpoint = format!("/api/v1/entities/{kind}?{query_string}");
     authenticated_get(&state, &endpoint)
         .await?
-        .json()
-        .await
-        .map_err(|_| ClientError::protocol())
+        .bounded_json().await
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -824,9 +1023,7 @@ pub async fn pc_list_collections(
 ) -> Result<Vec<MobileCollection>, ClientError> {
     authenticated_get(&state, "/api/v1/collections")
         .await?
-        .json()
-        .await
-        .map_err(|_| ClientError::protocol())
+        .bounded_json().await
 }
 
 #[tauri::command]
@@ -839,9 +1036,7 @@ pub async fn pc_get_work_collections(
     }
     authenticated_get(&state, &format!("/api/v1/works/{work_id}/collections"))
         .await?
-        .json()
-        .await
-        .map_err(|_| ClientError::protocol())
+        .bounded_json().await
 }
 
 #[tauri::command]
@@ -859,9 +1054,7 @@ pub async fn pc_get_collection(
     }
     authenticated_get(&state, &format!("/api/v1/collections/{collection_id}"))
         .await?
-        .json()
-        .await
-        .map_err(|_| ClientError::protocol())
+        .bounded_json().await
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -916,9 +1109,7 @@ pub async fn pc_get_metadata(
     }
     authenticated_get(&state, &format!("/api/v1/works/{work_id}"))
         .await?
-        .json()
-        .await
-        .map_err(|_| ClientError::protocol())
+        .bounded_json().await
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -949,9 +1140,7 @@ pub async fn pc_get_outline(
     }
     authenticated_get(&state, &format!("/api/v1/works/{work_id}/outline"))
         .await?
-        .json()
-        .await
-        .map_err(|_| ClientError::protocol())
+        .bounded_json().await
 }
 
 #[tauri::command]
@@ -972,9 +1161,7 @@ pub async fn pc_get_page(
         &format!("/api/v1/works/{work_id}/pages/{page}{version_query}"),
     )
     .await?
-    .json()
-    .await
-    .map_err(|_| ClientError::protocol())
+    .bounded_json().await
 }
 
 #[derive(Debug, Serialize)]
@@ -982,6 +1169,42 @@ pub async fn pc_get_page(
 pub struct MobileAssetData {
     mime_type: String,
     base64: String,
+}
+
+// 上限は受信後ではなく受信中に適用する。Content-Length がない応答にも適用する。
+async fn bounded_response_bytes(
+    mut response: reqwest::Response,
+    maximum: usize,
+) -> Result<Vec<u8>, ClientError> {
+    if response.content_length().is_some_and(|length| length > maximum as u64) {
+        return Err(ClientError::remote());
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|_| ClientError::offline())? {
+        if chunk.len() > maximum.saturating_sub(bytes.len()) {
+            return Err(ClientError::remote());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
+}
+
+trait BoundedJson {
+    async fn bounded_json<T: serde::de::DeserializeOwned>(self) -> Result<T, ClientError>;
+}
+
+impl BoundedJson for reqwest::Response {
+    async fn bounded_json<T: serde::de::DeserializeOwned>(self) -> Result<T, ClientError> {
+        bounded_json_response(self, MAX_JSON_BYTES).await
+    }
+}
+
+async fn bounded_json_response<T: serde::de::DeserializeOwned>(
+    response: reqwest::Response,
+    maximum: usize,
+) -> Result<T, ClientError> {
+    let bytes = bounded_response_bytes(response, maximum).await?;
+    serde_json::from_slice(&bytes).map_err(|_| ClientError::protocol())
 }
 
 async fn image_response(response: reqwest::Response) -> Result<MobileAssetData, ClientError> {
@@ -997,10 +1220,7 @@ async fn image_response(response: reqwest::Response) -> Result<MobileAssetData, 
     ) {
         return Err(ClientError::protocol());
     }
-    let bytes = response.bytes().await.map_err(|_| ClientError::offline())?;
-    if bytes.len() > MAX_ASSET_BYTES {
-        return Err(ClientError::remote());
-    }
+    let bytes = bounded_response_bytes(response, MAX_ASSET_BYTES).await?;
     Ok(MobileAssetData {
         mime_type,
         base64: STANDARD.encode(bytes),
@@ -1092,6 +1312,48 @@ pub async fn pc_get_asset(
 mod tests {
     use super::*;
 
+    async fn local_response(wire_response: &'static str) -> reqwest::Response {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            let mut request = [0; 4096];
+            let _ = stream.read(&mut request);
+            let _ = stream.write_all(wire_response.as_bytes());
+        });
+        reqwest::Client::builder().no_proxy().timeout(Duration::from_secs(3))
+            .build().unwrap().get(format!("http://{address}/"))
+            .send().await.unwrap()
+    }
+
+    #[test]
+    fn bounds_response_body_with_and_without_content_length() {
+        tauri::async_runtime::block_on(async {
+            let response = local_response("HTTP/1.1 200 OK\r\nContent-Length: 999999999\r\n\r\n").await;
+            assert_eq!(bounded_response_bytes(response, 4).await.unwrap_err().code, "remote_error");
+            let response = local_response("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n3\r\ndef\r\n0\r\n\r\n").await;
+            assert_eq!(bounded_response_bytes(response, 4).await.unwrap_err().code, "remote_error");
+            let response = local_response("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nab\r\n2\r\ncd\r\n0\r\n\r\n").await;
+            assert_eq!(bounded_response_bytes(response, 4).await.unwrap(), b"abcd");
+        });
+    }
+
+    #[test]
+    fn json_decoder_bounds_http_bodies_and_reports_invalid_json() {
+        tauri::async_runtime::block_on(async {
+            let response = local_response("HTTP/1.1 200 OK\r\nContent-Length: 999999999\r\n\r\n").await;
+            assert_eq!(response.bounded_json::<serde_json::Value>().await.unwrap_err().code, "remote_error");
+            let response = local_response("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\n[1,2\r\n5\r\n,3,4]\r\n0\r\n\r\n").await;
+            assert_eq!(bounded_json_response::<serde_json::Value>(response, 8).await.unwrap_err().code, "remote_error");
+            let response = local_response("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\n{\"v\"\r\n3\r\n:1}\r\n0\r\n\r\n").await;
+            assert_eq!(bounded_json_response::<serde_json::Value>(response, 7).await.unwrap(), serde_json::json!({"v": 1}));
+            let response = local_response("HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nbad").await;
+            assert_eq!(response.bounded_json::<serde_json::Value>().await.unwrap_err().code, "protocol_mismatch");
+        });
+    }
+
     fn search_criteria(mut changes: serde_json::Value) -> PcSearchCriteria {
         let mut value = serde_json::json!({
             "text": "", "source": "", "contentType": "", "author": "",
@@ -1105,18 +1367,144 @@ mod tests {
     }
 
     #[test]
-    fn rejects_non_private_or_non_https_pairing_targets() {
+    fn recognizes_a_rejected_certificate_inside_nested_io_errors() {
+        use std::io::{Error, ErrorKind};
+        let rejected = rustls::Error::InvalidCertificate(rustls::CertificateError::NotValidForName);
+        let nested = Error::new(ErrorKind::Other, Error::new(ErrorKind::InvalidData, rejected));
+        assert!(rejected_certificate(&nested));
+        let refused = Error::new(ErrorKind::ConnectionRefused, "refused");
+        assert!(!rejected_certificate(&refused));
+    }
+
+    #[test]
+    fn accepts_any_https_host_and_rejects_everything_else() {
         for address in [
             "http://192.168.1.2:38777",
-            "https://example.com:38777",
-            "https://8.8.8.8:38777",
-            "https://127.0.0.1:38777/path",
-            "https://127.0.0.1:38777/?x=1",
+            "http://example.com/",
+            "https://user@example.com/",
+            "https://user:secret@example.com/",
+            "https://example.com/?x=1",
+            "https://example.com/#x",
+            "not a url",
         ] {
             assert!(validate_url(address).is_err(), "{address}");
         }
-        assert!(validate_url("https://192.168.1.2:38777").is_ok());
-        assert!(validate_url("https://127.0.0.1:38777").is_ok());
+        for address in [
+            "https://192.168.1.2:38777",
+            "https://127.0.0.1:38777/",
+            "https://8.8.8.8:8443/",
+            "https://example.com/",
+            "https://example.com:8443/",
+            "https://example.com/piep/",
+        ] {
+            assert!(validate_url(address).is_ok(), "{address}");
+        }
+    }
+
+    fn pairing(changes: serde_json::Value) -> String {
+        let mut value = serde_json::json!({
+            "version": 2,
+            "role": "reader",
+            "url": "https://example.com/piep/",
+            "secret": URL_SAFE_NO_PAD.encode([7_u8; 32]),
+            "fingerprint": null,
+        });
+        for (key, field) in changes.as_object().expect("changes object") {
+            value[key] = field.clone();
+        }
+        value.to_string()
+    }
+
+    #[test]
+    fn pairing_reads_version_2_and_normalizes_the_address() {
+        let parsed = parse_pairing(&pairing(serde_json::json!({})), "phone").expect("pairing");
+        assert_eq!(parsed.url, "https://example.com/piep");
+        assert_eq!(parsed.fingerprint, None);
+
+        let upper = "A".repeat(64);
+        let parsed = parse_pairing(&pairing(serde_json::json!({ "fingerprint": upper })), "phone")
+            .expect("pinned pairing");
+        assert_eq!(parsed.fingerprint, Some("a".repeat(64)));
+    }
+
+    #[test]
+    fn pairing_refuses_old_strings_admin_strings_and_bad_values() {
+        let old = serde_json::json!({
+            "version": 1,
+            "url": "https://192.168.1.2:38777",
+            "fingerprint": "a".repeat(64),
+            "secret": URL_SAFE_NO_PAD.encode([7_u8; 32]),
+        });
+        assert_eq!(parse_pairing(&old.to_string(), "phone").unwrap_err().code, "invalid_pairing");
+
+        let admin = parse_pairing(&pairing(serde_json::json!({ "role": "admin" })), "phone").unwrap_err();
+        assert!(admin.message.contains("管理者用"), "{}", admin.message);
+
+        for changes in [
+            serde_json::json!({ "version": 1 }),
+            serde_json::json!({ "role": "owner" }),
+            serde_json::json!({ "url": "http://example.com/" }),
+            serde_json::json!({ "fingerprint": "short" }),
+            serde_json::json!({ "secret": "short" }),
+            serde_json::json!({ "extra": true }),
+        ] {
+            assert!(parse_pairing(&pairing(changes.clone()), "phone").is_err(), "{changes}");
+        }
+        assert!(parse_pairing(&pairing(serde_json::json!({})), "  ").is_err());
+        assert!(parse_pairing(&pairing(serde_json::json!({})), &"x".repeat(65)).is_err());
+    }
+
+    fn saved(changes: serde_json::Value) -> serde_json::Value {
+        let mut value = serde_json::json!({
+            "url": "https://example.com",
+            "token": URL_SAFE_NO_PAD.encode([9_u8; 32]),
+            "deviceId": "device",
+            "deviceName": "phone",
+        });
+        for (key, field) in changes.as_object().expect("changes object") {
+            value[key] = field.clone();
+        }
+        value
+    }
+
+    fn load_saved(name: &str, value: serde_json::Value) -> Result<Option<SavedConnection>, ClientError> {
+        let directory = std::env::temp_dir().join(format!("piep-android-{name}-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&directory).expect("directory");
+        let file = directory.join("connection.json");
+        fs::write(&file, value.to_string()).expect("write");
+        let loaded = PcClientState::new(file).load();
+        fs::remove_dir_all(&directory).expect("cleanup");
+        loaded
+    }
+
+    #[test]
+    fn saved_connection_keeps_loading_the_old_pinned_form() {
+        let certificate = b"certificate";
+        let old = saved(serde_json::json!({
+            "url": "https://192.168.1.2:38777",
+            "fingerprint": fingerprint(certificate),
+            "certificateDer": URL_SAFE_NO_PAD.encode(certificate),
+        }));
+        let loaded = load_saved("old", old).expect("load").expect("saved");
+        assert!(loaded.pinned());
+        assert!(!loaded.can_sync_reading());
+    }
+
+    #[test]
+    fn saved_connection_without_a_pin_loads_and_half_a_pin_does_not() {
+        let loaded = load_saved("ca", saved(serde_json::json!({ "capabilities": ["read", "reading-sync"] })))
+            .expect("load")
+            .expect("saved");
+        assert!(!loaded.pinned());
+        assert!(loaded.can_sync_reading());
+        // 指紋だけ残っていて証明書が無い形を、CA 検証へ格下げしない。
+        let half = saved(serde_json::json!({ "fingerprint": "a".repeat(64) }));
+        assert_eq!(load_saved("half", half).unwrap_err().code, "storage");
+        let mismatch = saved(serde_json::json!({
+            "fingerprint": "a".repeat(64),
+            "certificateDer": URL_SAFE_NO_PAD.encode(b"certificate"),
+        }));
+        assert_eq!(load_saved("mismatch", mismatch).unwrap_err().code, "storage");
     }
 
     #[test]

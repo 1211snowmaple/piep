@@ -15,6 +15,9 @@ pub fn run() {
             app.manage(pc_client::offline::OfflineState::new(
                 data_dir.join("offline"),
             ));
+            app.manage(pc_client::reading_sync::ReadingSyncState::new(
+                data_dir.join("reading-sync.json"),
+            ));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -33,7 +36,11 @@ pub fn run() {
             pc_client::pc_get_cover,
             pc_client::pc_get_collection_cover,
             pc_client::pc_get_entity_cover,
+            pc_client::reading_sync::reading_record,
+            pc_client::reading_sync::reading_sync,
+            pc_client::reading_sync::reading_get,
             pc_client::offline::offline_list_works,
+            pc_client::offline::offline_list_issues,
             pc_client::offline::offline_save_work,
             pc_client::offline::offline_get_page,
             pc_client::offline::offline_get_outline,
@@ -42,6 +49,7 @@ pub fn run() {
             pc_client::offline::offline_get_collection_cover,
             pc_client::offline::offline_get_entity_cover,
             pc_client::offline::offline_delete_work,
+            pc_client::offline::offline_delete_corrupt_work,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

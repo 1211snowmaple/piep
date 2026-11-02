@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { isTauri } from "@tauri-apps/api/core";
-import { BookOpen, CalendarDays, FileText, Images, UserRound } from "lucide-react";
+import { CalendarDays, FileText, Images, MoreHorizontal, UserRound } from "lucide-react";
 import { getOfflineEntityCover, getPcEntityCover, type PcWork } from "./pcApi";
 import { enqueueCoverRequest, WorkThumbnail } from "./WorkThumbnail";
 import { ProviderMark } from "./ProviderMark";
@@ -109,38 +109,23 @@ export function WorkCard({ work, onRead, onDetail, offline = false, offlineAutho
   savedState?: { label: string; changed: boolean } | null;
   prefix?: string;
 }) {
-  const pressTimer = useRef<number | null>(null);
-  const pressStart = useRef<{ x: number; y: number } | null>(null);
-  const longPressed = useRef(false);
-  const cancelPress = () => { if (pressTimer.current !== null) window.clearTimeout(pressTimer.current); pressTimer.current = null; pressStart.current = null; };
-  useEffect(() => cancelPress, []);
   const date = displayDate(work.sourceCreatedAt ?? work.downloadedAt);
-  return <button className="work-row rich-work-card" aria-label={`${work.title}を読む。長押しで作品詳細`} onPointerDown={(event) => {
-    if (event.button !== 0) return;
-    cancelPress();
-    longPressed.current = false;
-    pressStart.current = { x: event.clientX, y: event.clientY };
-    pressTimer.current = window.setTimeout(() => { pressTimer.current = null; longPressed.current = true; onDetail(); }, 550);
-  }} onPointerMove={(event) => {
-    const start = pressStart.current;
-    if (start && (Math.abs(event.clientX - start.x) > 12 || Math.abs(event.clientY - start.y) > 12)) cancelPress();
-  }} onPointerUp={cancelPress} onPointerCancel={cancelPress} onPointerLeave={cancelPress} onClick={(event) => {
-    if (longPressed.current) { longPressed.current = false; event.preventDefault(); return; }
-    onRead();
-  }} onContextMenu={(event) => { event.preventDefault(); cancelPress(); if (!longPressed.current) { longPressed.current = true; onDetail(); } }} onKeyDown={(event) => { if (event.shiftKey && event.key === "F10") { event.preventDefault(); onDetail(); } }}>
-    <span className="work-card-main"><WorkThumbnail work={work} offline={offline} snapshotGeneration={snapshotGeneration} /><span className="work-details">
+  return <article className="work-row rich-work-card">
+    <button className="work-card-open" type="button" aria-label={`${work.title}を読む`} onClick={onRead}>
+      <span className="work-card-main"><WorkThumbnail work={work} offline={offline} snapshotGeneration={snapshotGeneration} /><span className="work-details">
       {work.seriesTitle && <span className="work-series">{work.seriesTitle}</span>}
       <strong>{work.title}</strong>
       <span className="work-author"><AuthorAvatar work={work} offline={offline} offlineAuthorCover={offlineAuthorCover} snapshotGeneration={snapshotGeneration} /><span>{work.authorName}</span><ProviderMark source={work.source} compact /></span>
       <MobileTagRow tags={work.tags ?? []} />
     </span></span>
-    <span className="work-card-footer">
+    </button>
+    <div className="work-card-footer">
       {prefix && <span>{prefix}</span>}
       {date && <span className="work-meta"><CalendarDays aria-hidden="true" />{date}</span>}
       <span className="work-meta"><FileText aria-hidden="true" />{work.textLength.toLocaleString("ja-JP")} 字</span>
       {work.assetCount > 0 && <span className="work-meta"><Images aria-hidden="true" />{work.assetCount}</span>}
       {savedState && <span className={savedState.changed ? "saved-state changed" : "saved-state"}>{savedState.label}</span>}
-      <span className="work-card-read" aria-hidden="true"><BookOpen /></span>
-    </span>
-  </button>;
+      <button className="work-card-detail" type="button" onClick={onDetail} aria-label={`${work.title}の詳細`}><MoreHorizontal aria-hidden="true" /><span>詳細</span></button>
+    </div>
+  </article>;
 }

@@ -4,7 +4,13 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { ProviderMark } from "./ProviderMark";
 import { WorkThumbnail } from "./WorkThumbnail";
 import { AuthorAvatar } from "./WorkCard";
+import { handleReaderKeyboard } from "./readerKeyboard";
+import { readRemotePosition, recordReading, refreshReading, refreshReadingWithin, remoteStart, sendReading, type ReadingWrite, type RemoteStart } from "./readingSync";
 import { getOfflineAsset, getOfflineOutline, getOfflinePage, getPcAsset, getPcMetadata, getPcOutline, getPcPage, getPcWorkCollections, pcErrorMessage, saveOfflineWork, type PcCollection, type PcMetadata, type PcOutlineEntry, type PcPage, type PcWork } from "./pcApi";
+
+function offlineSnapshotChanged(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "code" in error && error.code === "offline_snapshot_changed";
+}
 
 function readingKey(work: PcWork, editHash: string | null): string {
   return `piep.android.pc.${work.id}.${work.currentVersion}.${work.contentHash ?? ""}.${editHash ?? "original"}`;
@@ -34,7 +40,26 @@ function savedPage(work: PcWork, editHash: string | null): number {
   } catch { return 0; }
 }
 
-type SavedPosition = { page: number; top: number; ratio: number; fontSize: number; lineHeight: number; fontFamily: "serif" | "sans" };
+// サーバーの位置を待つのは開くときの一瞬だけ。遅ければ手元の位置で開き、あとで案内する。
+const SYNC_WAIT_MS = 1500;
+const WRITE_DELAY_MS = 3000;
+
+function localReadingTime(work: PcWork, editHash: string | null): number {
+  try {
+    const value = Number(window.localStorage.getItem(`${readingKey(work, editHash)}.at`));
+    return Number.isSafeInteger(value) && value > 0 ? value : 0;
+  } catch { return 0; }
+}
+
+function markLocalReading(key: string, time: number): void {
+  try { window.localStorage.setItem(`${key}.at`, String(time)); } catch { /* storage unavailable */ }
+}
+
+async function remoteStartFor(work: PcWork, editHash: string | null): Promise<RemoteStart | null> {
+  return remoteStart(await readRemotePosition(work.source, work.sourceId), localReadingTime(work, editHash), work.currentVersion, editHash);
+}
+
+type SavedPosition = { page: number; top: number; ratio: number; fontSize: number; lineHeight: number; readerWidth: number; fontFamily: "serif" | "sans" };
 
 function readSavedPosition(work: PcWork, editHash: string | null): SavedPosition | null {
   try {
@@ -51,6 +76,11 @@ function readSavedPosition(work: PcWork, editHash: string | null): SavedPosition
     }
     return null;
   } catch { return null; }
+}
+
+function positionFromRemote(start: RemoteStart, fontFamily: "serif" | "sans"): SavedPosition {
+  // 別の端末とは文字の大きさが違うので、割合で戻す。先頭から順に画像が埋まるのを待つよう top は末尾にする。
+  return { page: start.page, top: Number.MAX_SAFE_INTEGER, ratio: start.ratio, fontSize: 0, lineHeight: 0, readerWidth: 0, fontFamily };
 }
 
 function sameRevision(metadata: PcMetadata, work: PcWork, editHash: string | null): boolean {
@@ -96,7 +126,7 @@ function safePageHtml(source: string): string {
   return holder.innerHTML;
 }
 
-export function OnlineReader({ work, fontSize, lineHeight, fontFamily, readerTheme, onBack, onFontSizeChange, onLineHeightChange, backLabel = "作品一覧に戻る", onSaved, offline = false, offlineCollections, offlineAuthorCover = false, offlineEditHash = null, snapshotGeneration }: { work: PcWork; fontSize: number; lineHeight: number; fontFamily: "serif" | "sans"; readerTheme: "white" | "paper" | "night"; onBack: () => void; onFontSizeChange: (value: number) => void; onLineHeightChange: (value: number) => void; backLabel?: string; onSaved?: () => void; offline?: boolean; offlineCollections?: PcCollection[]; offlineAuthorCover?: boolean; offlineEditHash?: string | null; snapshotGeneration?: number }) {
+export function OnlineReader({ work, fontSize, lineHeight, readerWidth, fontFamily, readerTheme, onBack, onFontSizeChange, onLineHeightChange, onReaderWidthChange, onFontFamilyChange, onReaderThemeChange, backLabel = "作品一覧に戻る", onSaved, offline = false, offlineCollections, offlineAuthorCover = false, offlineEditHash = null, snapshotGeneration }: { work: PcWork; fontSize: number; lineHeight: number; readerWidth: number; fontFamily: "serif" | "sans"; readerTheme: "white" | "paper" | "night"; onBack: () => void; onFontSizeChange: (value: number) => void; onLineHeightChange: (value: number) => void; onReaderWidthChange: (value: number) => void; onFontFamilyChange: (value: "serif" | "sans") => void; onReaderThemeChange: (value: "white" | "paper" | "night") => void; backLabel?: string; onSaved?: () => void; offline?: boolean; offlineCollections?: PcCollection[]; offlineAuthorCover?: boolean; offlineEditHash?: string | null; snapshotGeneration?: number }) {
   const [activeEditHash, setActiveEditHash] = useState<string | null | undefined>(offline ? offlineEditHash : undefined);
   const [pageIndex, setPageIndex] = useState(() => offline ? savedPage(work, offlineEditHash) : 0);
   const [page, setPage] = useState<PcPage | null>(null);
@@ -109,6 +139,7 @@ export function OnlineReader({ work, fontSize, lineHeight, fontFamily, readerThe
   const [saving, setSaving] = useState(false);
   const [saveMessage, setSaveMessage] = useState<string | null>(null);
   const [outline, setOutline] = useState<PcOutlineEntry[]>([]);
+  const [offlineGeneration, setOfflineGeneration] = useState<string | null>(null);
   const [outlineOpen, setOutlineOpen] = useState(false);
   const [typeOpen, setTypeOpen] = useState(false);
   const [readerTitleExpanded, setReaderTitleExpanded] = useState(false);
@@ -121,12 +152,32 @@ export function OnlineReader({ work, fontSize, lineHeight, fontFamily, readerThe
   const [jumpPage, setJumpPage] = useState(1);
   const touchStart = useRef<{ x: number; y: number } | null>(null);
   const scrollRef = useRef<HTMLElement>(null);
+  const keyboardPageChange = useRef(false);
+  const outlineTriggerRef = useRef<HTMLButtonElement>(null);
+  const typeTriggerRef = useRef<HTMLButtonElement>(null);
+  const outlineWasOpen = useRef(false);
+  const typeWasOpen = useRef(false);
   const readerTitleRef = useRef<HTMLHeadingElement>(null);
   const sidebarTitleRef = useRef<HTMLElement>(null);
   const pendingRestore = useRef<SavedPosition | null>(offline ? readSavedPosition(work, offlineEditHash) : null);
   const pendingOutline = useRef<{ page: number; index: number } | null>(null);
+  const [remoteOffer, setRemoteOffer] = useState<RemoteStart | null>(null);
+  // 最初に開いたページは読み進めた印ではないので、送らない。
+  const syncedPage = useRef<number | null>(null);
+  const guidedPage = useRef(false);
+  const queuedWrite = useRef<ReadingWrite | null>(null);
+  const writeTimer = useRef<number | null>(null);
+  const dismissedRemote = useRef(0);
+  const currentPage = useRef(pageIndex);
+  currentPage.current = pageIndex;
   const readingWork = detailWork ?? work;
   const positionKey = activeEditHash === undefined ? null : readingKey(readingWork, activeEditHash);
+
+  useLayoutEffect(() => {
+    if (!keyboardPageChange.current) return;
+    keyboardPageChange.current = false;
+    scrollRef.current?.focus();
+  }, [pageIndex]);
 
   const adoptRevision = (metadata: PcMetadata): boolean => {
     if (activeEditHash !== undefined && sameRevision(metadata, readingWork, activeEditHash)) {
@@ -137,6 +188,7 @@ export function OnlineReader({ work, fontSize, lineHeight, fontFamily, readerThe
     // A different edit or source version must never inherit the prior page or outline.
     pendingRestore.current = readSavedPosition(metadata.work, metadata.activeEditHash);
     pendingOutline.current = null;
+    syncedPage.current = null;
     setOutline([]);
     setDetailWork(metadata.work);
     setIsEdited(metadata.isEdited);
@@ -149,12 +201,20 @@ export function OnlineReader({ work, fontSize, lineHeight, fontFamily, readerThe
   useEffect(() => {
     if (offline) return;
     let alive = true;
-    void getPcMetadata(work.id).then((metadata) => {
+    void Promise.all([getPcMetadata(work.id), refreshReadingWithin(SYNC_WAIT_MS)]).then(async ([metadata]) => {
+      const start = await remoteStartFor(metadata.work, metadata.activeEditHash);
       if (!alive) return;
       setDetailWork(metadata.work);
       setIsEdited(metadata.isEdited);
-      pendingRestore.current = readSavedPosition(metadata.work, metadata.activeEditHash);
-      setPageIndex(savedPage(metadata.work, metadata.activeEditHash));
+      if (start) {
+        markLocalReading(readingKey(metadata.work, metadata.activeEditHash), start.deviceTime);
+        guidedPage.current = start.guide;
+        pendingRestore.current = start.guide ? null : positionFromRemote(start, fontFamily);
+        setPageIndex(start.page);
+      } else {
+        pendingRestore.current = readSavedPosition(metadata.work, metadata.activeEditHash);
+        setPageIndex(savedPage(metadata.work, metadata.activeEditHash));
+      }
       setActiveEditHash(metadata.activeEditHash);
     }).catch(() => {
       if (!alive) return;
@@ -174,9 +234,78 @@ export function OnlineReader({ work, fontSize, lineHeight, fontFamily, readerThe
       ratio: length > 0 ? viewport.scrollTop / length : 0,
       fontSize,
       lineHeight,
+      readerWidth,
       fontFamily,
     };
   };
+
+  const sendQueuedWrite = () => {
+    if (writeTimer.current !== null) window.clearTimeout(writeTimer.current);
+    writeTimer.current = null;
+    const write = queuedWrite.current;
+    queuedWrite.current = null;
+    if (write) void recordReading(write).then(() => sendReading());
+  };
+
+  const queueReadingWrite = (pageNumber: number, ratio: number, pageCount: number) => {
+    if (!positionKey || activeEditHash === undefined || activeEditHash === "unknown") return;
+    const time = Date.now();
+    markLocalReading(positionKey, time);
+    setRemoteOffer(null);
+    queuedWrite.current = {
+      source: readingWork.source,
+      sourceId: readingWork.sourceId,
+      version: readingWork.currentVersion,
+      editHash: activeEditHash,
+      page: pageNumber,
+      position: Math.min(1, Math.max(0, ratio)),
+      finished: pageNumber === pageCount - 1 && ratio >= 0.98,
+      deviceTime: time,
+    };
+    if (writeTimer.current === null) writeTimer.current = window.setTimeout(sendQueuedWrite, WRITE_DELAY_MS);
+  };
+
+  const acceptRemote = () => {
+    if (!remoteOffer || !positionKey) return;
+    markLocalReading(positionKey, remoteOffer.deviceTime);
+    syncedPage.current = remoteOffer.page;
+    guidedPage.current = remoteOffer.guide;
+    pendingRestore.current = remoteOffer.guide ? null : positionFromRemote(remoteOffer, fontFamily);
+    if (remoteOffer.page === pageIndex) setRetry((current) => current + 1);
+    else setPageIndex(remoteOffer.page);
+    setRemoteOffer(null);
+  };
+
+  const dismissRemote = () => {
+    if (remoteOffer) dismissedRemote.current = remoteOffer.deviceTime;
+    setRemoteOffer(null);
+  };
+
+  useEffect(() => {
+    if (!positionKey || activeEditHash === undefined || activeEditHash === "unknown") return;
+    let alive = true;
+    const check = () => {
+      void refreshReading().then(() => remoteStartFor(readingWork, activeEditHash)).then((start) => {
+        if (!alive || !start || start.deviceTime <= dismissedRemote.current) return;
+        const viewport = scrollRef.current;
+        const length = viewport ? Math.max(0, viewport.scrollHeight - viewport.clientHeight) : 0;
+        const ratio = viewport && length > 0 ? viewport.scrollTop / length : 0;
+        if (start.page === currentPage.current && Math.abs(start.ratio - ratio) < 0.02) return;
+        // 読んでいる最中に画面を動かさない。移動するかは読者に任せる。
+        setRemoteOffer(start);
+      });
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") check();
+      else sendQueuedWrite();
+    };
+    check();
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      alive = false;
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [positionKey]);
 
   useEffect(() => {
     if (!imageResolutionDone || loading || problem) return;
@@ -234,6 +363,26 @@ export function OnlineReader({ work, fontSize, lineHeight, fontFamily, readerThe
     return () => { delete backWindow.piepAndroidReaderLayerBack; };
   }, [outlineOpen, typeOpen]);
 
+  useEffect(() => {
+    if (outlineOpen) {
+      outlineWasOpen.current = true;
+      document.querySelector<HTMLElement>(".reader-outline[role='dialog'] button")?.focus();
+    } else if (outlineWasOpen.current) {
+      outlineWasOpen.current = false;
+      outlineTriggerRef.current?.focus();
+    }
+  }, [outlineOpen]);
+
+  useEffect(() => {
+    if (typeOpen) {
+      typeWasOpen.current = true;
+      document.querySelector<HTMLElement>(".reader-type-panel[role='dialog'] button")?.focus();
+    } else if (typeWasOpen.current) {
+      typeWasOpen.current = false;
+      typeTriggerRef.current?.focus();
+    }
+  }, [typeOpen]);
+
   const save = async () => {
     setSaving(true);
     setSaveMessage(null);
@@ -255,6 +404,13 @@ export function OnlineReader({ work, fontSize, lineHeight, fontFamily, readerThe
     let timer: number | null = null;
     let frame = 0;
     const saved = pendingRestore.current?.page === pageIndex ? pendingRestore.current : null;
+    const pageCount = page.pageCount;
+    let restoredTop: number | null = null;
+    if (syncedPage.current === null) syncedPage.current = pageIndex;
+    else if (syncedPage.current !== pageIndex) {
+      syncedPage.current = pageIndex;
+      queueReadingWrite(pageIndex, saved?.ratio ?? 0, pageCount);
+    }
     const flush = () => {
       if (!changed || !restored) return;
       changed = false;
@@ -265,9 +421,12 @@ export function OnlineReader({ work, fontSize, lineHeight, fontFamily, readerThe
         ratio: length > 0 ? viewport.scrollTop / length : 0,
         fontSize,
         lineHeight,
+        readerWidth,
         fontFamily,
       };
       try { window.localStorage.setItem(`${positionKey}.position`, JSON.stringify(position)); } catch { /* storage unavailable */ }
+      // 位置を戻しただけのスクロールは、読み進めた印ではない。
+      if (restoredTop === null || Math.abs(viewport.scrollTop - restoredTop) > 2) queueReadingWrite(pageIndex, position.ratio, pageCount);
     };
     const onScroll = () => {
       if (!restored) return;
@@ -284,7 +443,7 @@ export function OnlineReader({ work, fontSize, lineHeight, fontFamily, readerThe
     viewport.addEventListener("wheel", onUserInput, { passive: true });
     viewport.addEventListener("pointerdown", onUserInput, { passive: true });
     if (saved) {
-      const sameType = saved.fontSize === fontSize && saved.lineHeight === lineHeight && saved.fontFamily === fontFamily;
+      const sameType = saved.fontSize === fontSize && saved.lineHeight === lineHeight && saved.readerWidth === readerWidth && saved.fontFamily === fontFamily;
       const deadline = performance.now() + 2000;
       const restore = () => {
         const length = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
@@ -292,6 +451,7 @@ export function OnlineReader({ work, fontSize, lineHeight, fontFamily, readerThe
         viewport.scrollTop = target;
         if (Math.abs(viewport.scrollTop - target) < 2 || performance.now() >= deadline) {
           restored = true;
+          restoredTop = viewport.scrollTop;
           pendingRestore.current = null;
         } else frame = requestAnimationFrame(restore);
       };
@@ -309,7 +469,10 @@ export function OnlineReader({ work, fontSize, lineHeight, fontFamily, readerThe
       if (timer !== null) window.clearTimeout(timer);
       flush();
     };
-  }, [positionKey, pageIndex, page, html, loading, problem, assetsReady, fontSize, lineHeight, fontFamily]);
+  }, [positionKey, pageIndex, page, html, loading, problem, assetsReady, fontSize, lineHeight, readerWidth, fontFamily]);
+
+  // 上の片付けが最後の位置を積むので、この片付けはその後に走らせる。
+  useEffect(() => () => sendQueuedWrite(), []);
 
   useEffect(() => {
     const target = pendingOutline.current;
@@ -324,6 +487,7 @@ export function OnlineReader({ work, fontSize, lineHeight, fontFamily, readerThe
 
   useEffect(() => {
     if (!offline && activeEditHash === undefined) return;
+    if (offline && !offlineGeneration) return;
     let alive = true;
     void (async () => {
       try {
@@ -331,17 +495,21 @@ export function OnlineReader({ work, fontSize, lineHeight, fontFamily, readerThe
           const before = await getPcMetadata(work.id);
           if (!alive || adoptRevision(before)) return;
         }
-        const entries = await (offline ? getOfflineOutline(work.id) : getPcOutline(work.id));
+        const entries = await (offline ? getOfflineOutline(work.id, offlineGeneration!) : getPcOutline(work.id));
         if (!alive) return;
         if (!offline) {
           const after = await getPcMetadata(work.id);
           if (!alive || adoptRevision(after)) return;
         }
         setOutline(entries);
-      } catch { if (alive) setOutline([]); }
+      } catch (error) {
+        if (!alive) return;
+        setOutline([]);
+        if (offline && offlineSnapshotChanged(error)) setRetry((current) => current + 1);
+      }
     })();
     return () => { alive = false; };
-  }, [offline, work.id, positionKey, outlineOpen]);
+  }, [offline, work.id, positionKey, outlineOpen, offlineGeneration]);
 
   useEffect(() => {
     if (!outlineOpen || offline) return;
@@ -357,6 +525,7 @@ export function OnlineReader({ work, fontSize, lineHeight, fontFamily, readerThe
     setProblem(null);
     setPage(null);
     setHtml("");
+    if (offline) { setOfflineGeneration(null); setOutline([]); }
     setImageResolutionDone(false);
     setAssetsReady(false);
     void (async () => {
@@ -367,6 +536,19 @@ export function OnlineReader({ work, fontSize, lineHeight, fontFamily, readerThe
         }
         const next = await (offline ? getOfflinePage(work.id, pageIndex) : getPcPage(work.id, pageIndex));
         if (cancelled) return;
+        if (guidedPage.current) {
+          guidedPage.current = false;
+          if (pageIndex !== 0 && (pageIndex >= next.pageCount || next.page !== pageIndex)) {
+            syncedPage.current = null;
+            setPageIndex(0);
+            return;
+          }
+        }
+        const pageGeneration = "generation" in next && typeof next.generation === "string" ? next.generation : null;
+        if (offline) {
+          if (!pageGeneration) throw new Error("保存済み作品の版を確認できませんでした。もう一度読み込んでください");
+          setOfflineGeneration(pageGeneration);
+        }
         if (!offline) {
           const after = await getPcMetadata(work.id);
           if (cancelled || adoptRevision(after)) return;
@@ -395,15 +577,19 @@ export function OnlineReader({ work, fontSize, lineHeight, fontFamily, readerThe
           image.replaceWith(message);
         }
         let nextAsset = 0;
+        let snapshotChanged = false;
         const fetchAsset = async () => {
-          while (!cancelled && nextAsset < uniqueIds.length) {
+          while (!cancelled && !snapshotChanged && nextAsset < uniqueIds.length) {
             const assetId = uniqueIds[nextAsset++];
             let source: string | null = null;
             try {
-              const asset = await (offline ? getOfflineAsset(work.id, assetId) : getPcAsset(work.id, assetId));
+              const asset = await (offline ? getOfflineAsset(work.id, assetId, pageGeneration!) : getPcAsset(work.id, assetId));
               source = `data:${asset.mimeType};base64,${asset.base64}`;
-            } catch { /* Show this image's failure without delaying other images. */ }
-            if (cancelled) return;
+            } catch (error) {
+              if (offline && offlineSnapshotChanged(error)) { snapshotChanged = true; return; }
+              // Other image failures leave a visible placeholder.
+            }
+            if (cancelled || snapshotChanged) return;
             for (const image of viewport?.querySelectorAll<HTMLImageElement>(`.online-document img[data-asset-id="${assetId}"]`) ?? []) {
               if (source) {
                 image.src = source;
@@ -419,15 +605,34 @@ export function OnlineReader({ work, fontSize, lineHeight, fontFamily, readerThe
             viewport?.dispatchEvent(new Event("piep-asset-change"));
           }
         };
-        // Fill each illustration as it arrives while four requests share the LAN.
+        // Fill each illustration as it arrives while four requests share the connection.
         await Promise.all(Array.from({ length: Math.min(4, uniqueIds.length) }, fetchAsset));
         if (cancelled) return;
+        if (snapshotChanged) {
+          setPage(null);
+          setHtml("");
+          setOfflineGeneration(null);
+          setImageResolutionDone(false);
+          setAssetsReady(false);
+          setLoading(true);
+          setRetry((current) => current + 1);
+          return;
+        }
         if (!cancelled && !offline) {
           const afterAssets = await getPcMetadata(work.id);
           if (cancelled || adoptRevision(afterAssets)) return;
         }
       } catch (error) {
-        if (!cancelled) { setProblem(pcErrorMessage(error)); setLoading(false); }
+        if (cancelled) return;
+        if (guidedPage.current && pageIndex !== 0) {
+          // 目安のページが今の版に無い。最初から読む。
+          guidedPage.current = false;
+          syncedPage.current = null;
+          setPageIndex(0);
+          return;
+        }
+        setProblem(pcErrorMessage(error));
+        setLoading(false);
       }
     })();
     return () => { cancelled = true; };
@@ -488,17 +693,51 @@ export function OnlineReader({ work, fontSize, lineHeight, fontFamily, readerThe
   };
 
   return <div className={`reader-screen reader-theme--${readerTheme}`}>
-    <header className="reader-toolbar"><button className="text-button back-button" onClick={onBack} aria-label={backLabel}>← <span>戻る</span></button><span className="reader-toolbar-title">{work.title}</span><div className="reader-toolbar-actions"><button className="text-button" onClick={() => setOutlineOpen(true)}>{outline.length > 0 ? "目次・情報" : "作品情報"}</button><button className="text-button reader-type-button" onClick={() => setTypeOpen(true)} aria-label="文字の表示設定">文字</button></div></header>
+    <header className="reader-toolbar"><button className="text-button back-button" onClick={onBack} aria-label={backLabel}>← <span>戻る</span></button><span className="reader-toolbar-title">{work.title}</span><div className="reader-toolbar-actions"><button ref={outlineTriggerRef} className="text-button" onClick={() => setOutlineOpen(true)}>{outline.length > 0 ? "目次・情報" : "作品情報"}</button><button ref={typeTriggerRef} className="text-button reader-type-button" onClick={() => setTypeOpen(true)} aria-label="文字の表示設定">文字</button></div></header>
     {saveMessage && <div className="reader-notice" role="status">{saveMessage}</div>}
-    {typeOpen && <div className="reader-type-layer"><button className="reader-type-scrim" onClick={() => setTypeOpen(false)} aria-label="表示設定を閉じる" /><div className="reader-type-panel" role="dialog" aria-label="文字の表示設定" onClickCapture={(event) => { if ((event.target as Element).closest(".reader-type-row button")) capturePosition(); }}><div className="reader-type-heading"><strong>文字の表示</strong><button onClick={() => setTypeOpen(false)} aria-label="閉じる">×</button></div><div className="reader-type-row"><span>文字サイズ</span><div><button disabled={fontSize <= 14} onClick={() => onFontSizeChange(fontSize - 1)} aria-label="文字を小さくする">−</button><strong>{fontSize}px</strong><button disabled={fontSize >= 28} onClick={() => onFontSizeChange(fontSize + 1)} aria-label="文字を大きくする">＋</button></div></div><div className="reader-type-row"><span>行間</span><div><button disabled={lineHeight <= 1.4} onClick={() => onLineHeightChange(Math.max(1.4, Math.round((lineHeight - .1) * 100) / 100))} aria-label="行間を狭くする">−</button><strong>{lineHeight.toFixed(2)}</strong><button disabled={lineHeight >= 2.4} onClick={() => onLineHeightChange(Math.min(2.4, Math.round((lineHeight + .1) * 100) / 100))} aria-label="行間を広くする">＋</button></div></div></div></div>}
-    <main className="reader-scroll" ref={scrollRef} key={pageIndex} onTouchStart={(event) => { if (event.touches.length === 1) touchStart.current = { x: event.touches[0].clientX, y: event.touches[0].clientY }; }} onTouchEnd={finishHorizontalSwipe}><article className={`reading-paper online-paper reader-font--${fontFamily}`} style={{ fontSize: `${fontSize}px`, lineHeight }}>
+    {remoteOffer && <div className="reader-notice reader-sync-offer" role="status"><span>{remoteOffer.guide ? "別の版を" : "別の端末で"} {remoteOffer.page + 1} ページまで読んでいます</span><button onClick={acceptRemote}>そこへ移動</button><button onClick={dismissRemote}>閉じる</button></div>}
+    {typeOpen && <div className="reader-type-layer">
+      <button className="reader-type-scrim" onClick={() => setTypeOpen(false)} aria-label="表示設定を閉じる" />
+      <div className="reader-type-panel" role="dialog" aria-modal="true" aria-label="文字の表示設定" onClickCapture={(event) => { if ((event.target as Element).closest(".reader-type-row button")) capturePosition(); }}>
+        <div className="reader-type-heading"><strong>文字の表示</strong><button onClick={() => setTypeOpen(false)} aria-label="閉じる">×</button></div>
+        <div className="reader-type-row"><span>文字サイズ</span><div><button disabled={fontSize <= 14} onClick={() => onFontSizeChange(fontSize - 1)} aria-label="文字を小さくする">−</button><strong>{fontSize}px</strong><button disabled={fontSize >= 28} onClick={() => onFontSizeChange(fontSize + 1)} aria-label="文字を大きくする">＋</button></div></div>
+        <div className="reader-type-row"><span>行間</span><div><button disabled={lineHeight <= 1.4} onClick={() => onLineHeightChange(Math.max(1.4, Math.round((lineHeight - .1) * 100) / 100))} aria-label="行間を狭くする">−</button><strong>{lineHeight.toFixed(2)}</strong><button disabled={lineHeight >= 2.4} onClick={() => onLineHeightChange(Math.min(2.4, Math.round((lineHeight + .1) * 100) / 100))} aria-label="行間を広くする">＋</button></div></div>
+        <div className="reader-type-row"><span>本文幅</span><div><button disabled={readerWidth <= 520} onClick={() => onReaderWidthChange(Math.max(520, readerWidth - 20))} aria-label="本文幅を狭くする">−</button><strong>{readerWidth}px</strong><button disabled={readerWidth >= 900} onClick={() => onReaderWidthChange(Math.min(900, readerWidth + 20))} aria-label="本文幅を広くする">＋</button></div></div>
+        <p className="reader-type-help">広い画面では本文の左右余白を調整します。</p>
+        <div className="reader-type-row reader-type-choice-row"><span>書体</span><div role="group" aria-label="書体">
+          <button type="button" aria-pressed={fontFamily === "serif"} onClick={() => onFontFamilyChange("serif")}>明朝</button>
+          <button type="button" aria-pressed={fontFamily === "sans"} onClick={() => onFontFamilyChange("sans")}>ゴシック</button>
+        </div></div>
+        <div className="reader-type-row reader-type-choice-row"><span>読書背景</span><div role="group" aria-label="読書背景">
+          <button type="button" aria-pressed={readerTheme === "white"} onClick={() => onReaderThemeChange("white")}>白</button>
+          <button type="button" aria-pressed={readerTheme === "paper"} onClick={() => onReaderThemeChange("paper")}>紙の色</button>
+          <button type="button" aria-pressed={readerTheme === "night"} onClick={() => onReaderThemeChange("night")}>ナイト</button>
+        </div></div>
+      </div>
+    </div>}
+    <main className="reader-scroll" ref={scrollRef} key={pageIndex} tabIndex={0} aria-label="本文。Page Up、Page Down、左右矢印、Spaceで移動" onKeyDown={(event) => {
+      if (loading || problem || outlineOpen || typeOpen || !page) return;
+      handleReaderKeyboard(event, pageIndex, page.pageCount, (next, edge) => {
+        keyboardPageChange.current = true;
+        if (edge === "end") pendingRestore.current = {
+          page: next,
+          top: Number.MAX_SAFE_INTEGER,
+          ratio: 1,
+          fontSize,
+          lineHeight,
+          readerWidth,
+          fontFamily,
+        };
+        setPageIndex(next);
+      });
+    }} onTouchStart={(event) => { if (event.touches.length === 1) touchStart.current = { x: event.touches[0].clientX, y: event.touches[0].clientY }; }} onTouchEnd={finishHorizontalSwipe}><article className={`reading-paper online-paper reader-font--${fontFamily}`} style={{ maxWidth: `${readerWidth}px`, fontSize: `${fontSize}px`, lineHeight }}>
       {pageIndex === 0 && <><h1 ref={readerTitleRef} className={readerTitleExpanded ? "reader-work-title expanded" : "reader-work-title"}>{work.title}</h1>{readerTitleOverflow && <button className="reader-title-toggle" onClick={() => setReaderTitleExpanded((expanded) => !expanded)} aria-expanded={readerTitleExpanded}>{readerTitleExpanded ? "タイトルを短く表示" : "タイトルをすべて表示"}</button>}<div className="reader-rule" /></>}
       {loading ? <p>本文を読み込んでいます…</p> : problem ? <div className="reader-error" role="alert"><p>{problem}</p><button onClick={() => setRetry((current) => current + 1)}>もう一度読み込む</button></div> : <div className="online-document" onClick={openContentLink} dangerouslySetInnerHTML={{ __html: html }} />}
     </article></main>
     {page && page.pageCount > 1 && <footer className="reader-footer"><button onClick={() => setPageIndex((current) => Math.max(0, current - 1))} disabled={loading || pageIndex === 0}>前のページ</button><span aria-live="polite">{`${page.page + 1} / ${page.pageCount}`}</span><button onClick={() => setPageIndex((current) => current + 1)} disabled={loading || pageIndex >= page.pageCount - 1}>次のページ</button></footer>}
     {outlineOpen && <div className="reader-outline-layer">
       <button className="reader-outline-scrim" onClick={() => setOutlineOpen(false)} aria-label="目次と情報を閉じる" />
-      <aside className="reader-outline" aria-label="目次と作品情報">
+      <aside className="reader-outline" role="dialog" aria-modal="true" aria-label="目次と作品情報">
         <div className="reader-outline-heading"><h2>{outline.length > 0 ? "目次・作品情報" : "作品情報"}</h2><button onClick={() => setOutlineOpen(false)} aria-label="閉じる">×</button></div>
         <div className="reader-outline-work"><span className="reader-outline-cover"><WorkThumbnail work={sidebarWork} offline={offline} snapshotGeneration={snapshotGeneration} /></span><div className="reader-outline-work-text"><div className="reader-outline-labels"><ProviderMark source={sidebarWork.source} compact /><span>{sidebarWork.contentType === "novel" ? "小説" : "作品"}</span>{isEdited && <span>編集版</span>}</div><strong ref={sidebarTitleRef} className={sidebarTitleExpanded ? "expanded" : ""}>{sidebarWork.title}</strong>{sidebarTitleOverflow && <button className="reader-outline-title-toggle" onClick={() => setSidebarTitleExpanded((expanded) => !expanded)} aria-expanded={sidebarTitleExpanded}>{sidebarTitleExpanded ? "タイトルを短く表示" : "タイトルをすべて表示"}</button>}<span className="reader-outline-author"><AuthorAvatar work={sidebarWork} offline={offline} offlineAuthorCover={offlineAuthorCover} snapshotGeneration={snapshotGeneration} />{sidebarWork.authorName}</span>{sidebarWork.seriesTitle && <small>{sidebarWork.seriesTitle}</small>}</div></div>
         {!offline && <button className="reader-outline-save" disabled={saving} onClick={() => void save()}>{saving ? "保存中…" : "端末に保存"}</button>}

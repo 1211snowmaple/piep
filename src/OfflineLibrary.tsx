@@ -7,7 +7,7 @@ import { VirtualWorkList } from "./VirtualWorkList";
 import { ProviderMark } from "./ProviderMark";
 import { CollectionArtwork } from "./CollectionArtwork";
 import { DataUrlCache } from "./DataUrlCache";
-import { getOfflineEntityCover, listOfflineWorks, pcErrorMessage, type OfflineWork, type PcCollection } from "./pcApi";
+import { deleteOfflineIssue, getOfflineEntityCover, listOfflineIssues, listOfflineWorks, type OfflineIssue, type OfflineWork, type PcCollection } from "./pcApi";
 
 type OfflineTab = "works" | "people" | "series" | "collections";
 type SavedGroup = { id: string; name: string; works: OfflineWork[]; cover: OfflineWork; coverWorkId?: number | null; collection?: PcCollection };
@@ -131,8 +131,12 @@ export function OfflineLibrary({ onOpenWork, onOpenDetail, onShowPc, savedRevisi
   pagingMode: "auto" | "pages";
 }) {
   const [works, setWorks] = useState<OfflineWork[]>([]);
+  const [issues, setIssues] = useState<OfflineIssue[]>([]);
   const [loading, setLoading] = useState(true);
   const [problem, setProblem] = useState<string | null>(null);
+  const [issuesProblem, setIssuesProblem] = useState<string | null>(null);
+  const [loadRevision, setLoadRevision] = useState(0);
+  const [deletingIssueId, setDeletingIssueId] = useState<number | null>(null);
   const [tab, setTab] = useState<OfflineTab>("works");
   const [selectedGroup, setSelectedGroup] = useState<string | null>(null);
   const [searchInputs, setSearchInputs] = useState<Record<OfflineTab, string>>(emptySearches);
@@ -144,12 +148,40 @@ export function OfflineLibrary({ onOpenWork, onOpenDetail, onShowPc, savedRevisi
   useEffect(() => {
     if (!isTauri()) { setLoading(false); return; }
     let alive = true;
-    void listOfflineWorks()
-      .then((items) => { if (alive) setWorks(items); })
-      .catch((error) => { if (alive) setProblem(pcErrorMessage(error)); })
+    setLoading(true);
+    setProblem(null);
+    setIssuesProblem(null);
+    void Promise.allSettled([listOfflineWorks(), listOfflineIssues()])
+      .then(([worksResult, issuesResult]) => {
+        if (!alive) return;
+        if (worksResult.status === "fulfilled") setWorks(worksResult.value);
+        else setProblem("保存した作品一覧を読み込めませんでした。保存状態を確認して、もう一度お試しください。");
+        if (issuesResult.status === "fulfilled") setIssues(issuesResult.value);
+        else setIssuesProblem("読み込めない保存データを確認できませんでした。もう一度確認してください。");
+      })
       .finally(() => { if (alive) setLoading(false); });
     return () => { alive = false; };
-  }, [savedRevision]);
+  }, [savedRevision, loadRevision]);
+
+  const removeUnreadableWork = async (workId: number) => {
+    setDeletingIssueId(workId);
+    setIssuesProblem(null);
+    try {
+      await deleteOfflineIssue(workId);
+      setIssues((current) => current.filter((issue) => issue.workId !== workId));
+      setLoadRevision((revision) => revision + 1);
+    } catch (error) {
+      const code = typeof error === "object" && error && "code" in error ? error.code : null;
+      if (code === "offline_work_recovered") {
+        setIssuesProblem("作品は保存し直されています。一覧を更新しました。");
+        setLoadRevision((revision) => revision + 1);
+      } else {
+        setIssuesProblem("保存データを削除できませんでした。もう一度お試しください。");
+      }
+    } finally {
+      setDeletingIssueId(null);
+    }
+  };
 
   const groups = tab === "works" ? [] : savedGroups(works, tab);
   const selected = groups.find((group) => group.id === selectedGroup);
@@ -179,8 +211,16 @@ export function OfflineLibrary({ onOpenWork, onOpenDetail, onShowPc, savedRevisi
 
   return <>
     <form className="pc-search-form pc-library-search" onSubmit={(event) => { event.preventDefault(); submitSearch(); }}><input type="search" aria-label={`${searchTarget}を検索`} value={searchInput} onChange={(event) => { const next = event.target.value; if (selected) setGroupSearchInput(next); else setSearchInputs((previous) => ({ ...previous, [tab]: next })); }} placeholder={`${searchTarget}を検索`} /><button className="primary-button" type="submit">検索</button></form>
-    <div className="offline-library-heading"><strong>保存した作品</strong><span>{works.length} 作品</span></div>
+    <div className="offline-library-heading"><strong>保存した作品</strong><span>{loading ? "確認中…" : problem || issuesProblem ? "保存一覧を確認できません" : issues.length ? "読み込めない保存データがあります" : `${works.length} 作品`}</span></div>
     {problem && <div className="inline-alert" role="alert">{problem}</div>}
+    {problem && <button className="secondary-button offline-retry" type="button" onClick={() => setLoadRevision((revision) => revision + 1)} disabled={loading}>{loading ? "確認中…" : "もう一度確認"}</button>}
+    {(issues.length > 0 || issuesProblem) && <section className="offline-issues" aria-labelledby="offline-issues-title">
+      <h2 id="offline-issues-title">読み込めない保存データ</h2>
+      <p>本文を読み込めない保存データがあります。不要なものは端末から削除できます。</p>
+      {issuesProblem && <p className="offline-issues-error" role="alert">{issuesProblem}</p>}
+      {issues.map((issue) => <div className="offline-issue-row" key={issue.workId}><span>作品番号 {issue.workId} の保存データを読み込めません</span><button className="secondary-button" type="button" disabled={deletingIssueId === issue.workId} onClick={() => void removeUnreadableWork(issue.workId)}>{deletingIssueId === issue.workId ? "削除中…" : "このデータを削除"}</button></div>)}
+      {issuesProblem && <button className="secondary-button offline-retry" type="button" onClick={() => setLoadRevision((revision) => revision + 1)} disabled={loading}>{loading ? "確認中…" : "一覧を再確認"}</button>}
+    </section>}
     <nav className="library-tabs" aria-label="端末内のライブラリの種類">{(["works", "people", "series", "collections"] as const).map((id) => <button key={id} type="button" className={tab === id ? "active" : ""} aria-current={tab === id ? "page" : undefined} onClick={() => { setTab(id); setSelectedGroup(null); document.querySelector<HTMLElement>(".main-content")?.scrollTo({ top: 0, behavior: "instant" }); }}>{tabLabel[id]}</button>)}</nav>
     {loading ? <section className="empty-card"><p>保存した作品を確認しています…</p></section> : <>
       {selected && <div className="group-context"><button className="group-back" onClick={() => { setSelectedGroup(null); document.querySelector<HTMLElement>(".main-content")?.scrollTo({ top: 0, behavior: "instant" }); }}>← {tabLabel[tab]}一覧</button><strong>{selected.name}</strong><span>端末に保存した {selected.works.length} 作品</span></div>}
@@ -192,8 +232,8 @@ export function OfflineLibrary({ onOpenWork, onOpenDetail, onShowPc, savedRevisi
         <WorkCard work={item.work} offline offlineAuthorCover={item.hasAuthorCover} snapshotGeneration={item.savedAtMs} onRead={() => onOpenWork(item)} onDetail={() => onOpenDetail(item)} prefix={`${item.pageCount} ページ`} />
       </div>} />}
       {pagingMode === "pages" && (tab === "works" || selected) && visibleWorks.length > 20 && <nav className="numbered-pager" aria-label="端末内作品のページ"><button type="button" disabled={currentPage <= 1} onClick={() => setCurrentPage((page) => page - 1)}>前へ</button><select aria-label="端末内のページ番号" value={currentPage} onChange={(event) => setCurrentPage(Number(event.target.value))}>{Array.from({ length: pageCount }, (_, index) => <option key={index + 1} value={index + 1}>{index + 1} / {pageCount} ページ</option>)}</select><button type="button" disabled={currentPage >= pageCount} onClick={() => setCurrentPage((page) => page + 1)}>次へ</button></nav>}
-      {!works.length && <section className="empty-card"><h2>保存した作品はまだありません</h2><p>PC の本棚で作品を開き、「端末に保存」を押すと、ここでオフラインでも読めます。</p><button className="primary-button" onClick={onShowPc}>PC の本棚を見る</button></section>}
-      {works.length > 0 && tab !== "works" && !selected && !matchingGroups.length && <section className="empty-card"><h2>{query ? "該当する項目はありません" : `${tabLabel[tab]}はまだありません`}</h2><p>{query ? "検索語を変えて試してください。" : "対応する作品を保存すると、ここにまとまって表示されます。以前に保存した作品のコレクションは、PC に接続して保存し直すと反映されます。"}</p></section>}
+      {!works.length && !issues.length && !problem && !issuesProblem && <section className="empty-card"><h2>保存した作品はまだありません</h2><p>サーバーの本棚で作品を開き、「端末に保存」を押すと、ここでオフラインでも読めます。</p><button className="primary-button" onClick={onShowPc}>サーバーの本棚を見る</button></section>}
+      {works.length > 0 && tab !== "works" && !selected && !matchingGroups.length && <section className="empty-card"><h2>{query ? "該当する項目はありません" : `${tabLabel[tab]}はまだありません`}</h2><p>{query ? "検索語を変えて試してください。" : "対応する作品を保存すると、ここにまとまって表示されます。以前に保存した作品のコレクションは、サーバーに接続して保存し直すと反映されます。"}</p></section>}
       {works.length > 0 && (tab === "works" || selected) && !visibleWorks.length && <section className="empty-card"><h2>作品が見つかりません</h2><p>検索語を変えて試してください。</p></section>}
     </>}
   </>;

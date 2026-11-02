@@ -5,16 +5,27 @@ export interface PcConnectionStatus {
   reachable: boolean;
   url: string | null;
   deviceName: string | null;
-  issue: "offline" | "certificate_changed" | "protocol_mismatch" | "revoked" | "remote_error" | null;
+  issue: "offline" | "certificate_changed" | "certificate_untrusted" | "protocol_mismatch" | "revoked" | "not_ready" | "remote_error" | null;
+  capabilities: string[];
+  selfSigned: boolean;
 }
 
 export const pcConnectionIssueText: Record<NonNullable<PcConnectionStatus["issue"]>, string> = {
-  offline: "PC が見つかりません。piep の共有、同じ Wi-Fi、PC の起動状態を確認してください。",
-  certificate_changed: "PC の証明書が登録時と違います。接続先を確認して登録し直してください。",
-  protocol_mismatch: "PC 版との接続形式が合いません。両方のアプリを更新してください。",
-  revoked: "PC の共有が再起動されたか、端末の登録が解除されました。PC 側で登録文字列を出し直して再登録してください。",
-  remote_error: "PC の共有は応答していますが、作品を読み込めません。PC 側の状態を確認してください。",
+  offline: "サーバーに接続できません。通信状態とサーバーの URL を確認してください。",
+  certificate_changed: "サーバーの証明書が登録時と違います。接続先を確認して登録し直してください。",
+  certificate_untrusted: "サーバーの証明書を確認できません。URL が正しいか確かめてください。",
+  protocol_mismatch: "サーバーとの接続形式が合いません。両方のアプリを更新してください。",
+  revoked: "端末の登録が解除されました。デスクトップ版の「携帯を追加」で登録文字列を出し直して再登録してください。",
+  not_ready: "サーバーは本棚の準備中です。しばらくしてからもう一度試してください。",
+  remote_error: "サーバーは応答していますが、作品を読み込めません。サーバーの状態を確認してください。",
 };
+
+export function pcConnectionIssue(status: PcConnectionStatus): string | null {
+  if (!status.issue) return null;
+  // 自己署名の接続先は家の中の機械なので、Wi-Fi の案内が役に立つ。
+  if (status.issue === "offline" && status.selfSigned) return "サーバーに接続できません。サーバーと同じ Wi-Fi にいるか、サーバーが動いているか確認してください。";
+  return pcConnectionIssueText[status.issue];
+}
 
 export interface PcWork {
   id: number;
@@ -145,6 +156,10 @@ export interface PcPage {
   sourcePageStarts: number[];
 }
 
+export interface OfflinePage extends PcPage {
+  generation: string;
+}
+
 export interface PcOutlineEntry {
   page: number;
   index: number;
@@ -174,6 +189,11 @@ export interface OfflineWork {
   seriesCoverEntity?: { source: string; key: string } | null;
 }
 
+export interface OfflineIssue {
+  workId: number;
+  issue: "offline_storage";
+}
+
 export const getPcStatus = () => invoke<PcConnectionStatus>("pc_connection_status");
 export const pairPc = (payload: string, deviceName: string) => invoke<PcConnectionStatus>("pc_pair", { payload, deviceName });
 export const disconnectPc = () => invoke<PcConnectionStatus>("pc_disconnect");
@@ -197,15 +217,17 @@ export const getPcCollectionCover = (collectionId: string, slot: "file" | `tile-
 export const getPcEntityCover = (kind: "people" | "series", source: string, key: string) => invoke<PcAsset>("pc_get_entity_cover", { kind, source, key });
 export const listOfflineWorks = () => invoke<OfflineWork[]>("offline_list_works");
 export const saveOfflineWork = (workId: number) => invoke<OfflineWork>("offline_save_work", { workId });
-export const getOfflinePage = (workId: number, page: number) => invoke<PcPage>("offline_get_page", { workId, page });
-export const getOfflineOutline = (workId: number) => invoke<PcOutlineEntry[]>("offline_get_outline", { workId });
-export const getOfflineAsset = (workId: number, assetId: number) => invoke<PcAsset>("offline_get_asset", { workId, assetId });
+export const getOfflinePage = (workId: number, page: number) => invoke<OfflinePage>("offline_get_page", { workId, page });
+export const getOfflineOutline = (workId: number, generation: string) => invoke<PcOutlineEntry[]>("offline_get_outline", { workId, generation });
+export const getOfflineAsset = (workId: number, assetId: number, generation: string) => invoke<PcAsset>("offline_get_asset", { workId, assetId, generation });
 export const getOfflineCover = (workId: number) => invoke<PcAsset>("offline_get_cover", { workId });
 export const getOfflineCollectionCover = (workId: number, collectionId: string) => invoke<PcAsset>("offline_get_collection_cover", { workId, collectionId });
 export const getOfflineEntityCover = (workId: number, kind: "people" | "series") => invoke<PcAsset>("offline_get_entity_cover", { workId, kind });
 export const deleteOfflineWork = (workId: number) => invoke<void>("offline_delete_work", { workId });
+export const listOfflineIssues = () => invoke<OfflineIssue[]>("offline_list_issues");
+export const deleteOfflineIssue = (workId: number) => invoke<void>("offline_delete_corrupt_work", { workId });
 
 export function pcErrorMessage(error: unknown): string {
   if (typeof error === "object" && error && "message" in error && typeof error.message === "string") return error.message;
-  return typeof error === "string" ? error : "PC との通信に失敗しました";
+  return typeof error === "string" ? error : "サーバーとの通信に失敗しました";
 }
