@@ -73,6 +73,7 @@ import { reportJobAction, requestOperationCancel, startOperation, useOperationJo
 import { APP_VERSION } from "@/lib/version";
 import { AppUpdateCard } from "@/features/settings/AppUpdateCard";
 import { AssistSection } from "@/features/settings/AssistSection";
+import { ServerSection } from "@/features/settings/ServerSection";
 import { LibrarySidebarSettings } from "./LibrarySidebarSettings";
 import { SettingsNavigation } from "./SettingsNavigation";
 import { searchModes, useDefaultSearchMode } from "@/lib/searchPreferences";
@@ -88,6 +89,7 @@ import { searchModes, useDefaultSearchMode } from "@/lib/searchPreferences";
 const SECTIONS = [
   "connections",
   "library",
+  "server",
   "search",
   "assist",
   "diagnostics",
@@ -444,6 +446,7 @@ export default function SettingsPage() {
   const nav = [
     { id: "connections", label: "サービス接続", description: "保存・更新に使うアカウント", icon: Icons.credentials, group: "接続とデータ", keywords: "pixiv FANBOX 認証 ログイン 再接続" },
     { id: "library", label: "保存とバックアップ", description: "保存先・書き出し・復元", icon: Icons.database, group: "接続とデータ", keywords: "ローカルライブラリ フォルダー 再取り込み" },
+    { id: "server", label: "サーバー（β）", description: "携帯で読む・本棚を送る", icon: Icons.server, group: "接続とデータ", keywords: "Android モバイル スマホ 外出先 Funnel 同期 piep-server" },
     { id: "appearance", label: "表示と操作", description: "テーマ・サイドバー・一覧", icon: Icons.appearance, group: "使いやすくする", keywords: "外観 文字 色 ページ 件数 高密度 ショートカット" },
     { id: "search", label: "検索", description: "探し方・検索データ", icon: Icons.search, group: "使いやすくする", keywords: "インデックス 索引 意味検索 GPU" },
     { id: "assist", label: "AIの手伝い", description: "モデル・接続・利用する機能", icon: Icons.optimize, group: "使いやすくする", keywords: "推論 サーバー" },
@@ -460,6 +463,7 @@ export default function SettingsPage() {
         <Grid.Col span={{ base: 12, md: 8, lg: 9 }} className="settings-content">
           {section === "connections" && (auth.isLoading ? <LoadingState label="接続状態を確認しています" /> : auth.error ? <ErrorState error={auth.error} retry={() => auth.refetch()} /> : <ConnectionsSection auth={auth.data ?? { pixiv: null, fanbox: null }} runtime={runtime} pixivForm={pixivForm} fanboxForm={fanboxForm} mutation={connectionMutation} disconnect={disconnect} />)}
           {section === "library" && (stats.isLoading || storagePath.isLoading ? <LoadingState label="ライブラリ情報を読み込んでいます" /> : stats.error || storagePath.error ? <ErrorState error={stats.error ?? storagePath.error} retry={() => { stats.refetch(); storagePath.refetch(); }} /> : <LibrarySection stats={stats.data} path={storagePath.data} runtime={runtime} pending={maintenanceMutation.isPending} busy={libraryOperationRunning || Boolean(nativeBackup.data)} inspecting={inspectingBackup} run={(action) => maintenanceMutation.mutate(action)} />)}
+          {section === "server" && <ServerSection runtime={runtime} />}
           {section === "search" && (index.isLoading ? <LoadingState label="検索インデックスを確認しています" /> : index.error ? <ErrorState error={index.error} retry={() => index.refetch()} /> : <SearchSection status={index.data} rebuild={rebuild} runtime={runtime} rebuilding={rebuildMutation.isPending || rebuild?.status === "running"} start={(includeSemantic) => startRebuild(includeSemantic)} cancel={() => { if (rebuildOperationRef.current) { void requestOperationCancel(rebuildOperationRef.current.id); return; } if (rebuild) reportJobAction(cancelSearchRebuildIndex(rebuild.jobId), "索引の作り直しを中止できません"); }} />)}
           {section === "assist" && <AssistSection />}
           {section === "diagnostics" && <DiagnosticsPage embedded />}

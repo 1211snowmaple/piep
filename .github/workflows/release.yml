@@ -152,3 +152,33 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Could not upload the new updater manifest' }
           gh release delete-asset '${{ github.ref_name }}' latest.json --yes
           if ($LASTEXITCODE -ne 0) { throw 'Could not remove the old updater manifest' }
+
+      # 単独サーバーは Tauri の成果物ではないので別に組む。デスクトップ版の
+      # 自動更新と同じ鍵で署名し、組み込みの公開鍵で検証できることまで確かめる。
+      - name: Build, check and attach the standalone server
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          $version = '${{ github.ref_name }}'.Substring(1)
+          $tag = '${{ github.ref_name }}'
+          cargo build --release --locked --manifest-path src-tauri/Cargo.toml --example piep-server
+          if ($LASTEXITCODE -ne 0) { throw 'Could not build piep-server' }
+          $output = Join-Path $env:RUNNER_TEMP 'server'
+          $zip = ./tools/package-server.ps1 -Version $version -OutputDir $output | Select-Object -Last 1
+          npx tauri signer sign $zip
+          if ($LASTEXITCODE -ne 0) { throw 'Could not sign the server package' }
+          $signature = "$zip.sig"
+          & src-tauri/target/release/examples/piep-server.exe verify-package $zip $signature
+          if ($LASTEXITCODE -ne 0) { throw 'The server package does not verify with the embedded key' }
+          $name = Split-Path $zip -Leaf
+          $manifest = Join-Path $output 'latest-server.json'
+          @{
+            version = $version
+            url = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$tag/$name"
+            signature = (Get-Content -LiteralPath $signature -Raw).Trim()
+          } | ConvertTo-Json | Set-Content -LiteralPath $manifest -Encoding utf8NoBOM
+          gh release upload $tag $zip $signature $manifest --clobber
+          if ($LASTEXITCODE -ne 0) { throw 'Could not upload the server package' }

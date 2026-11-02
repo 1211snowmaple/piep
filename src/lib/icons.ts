@@ -86,6 +86,7 @@ import {
   Plus,
   Quote,
   CloudDownload,
+  Server,
   RefreshCw,
   RotateCcw,
   RotateCw,
@@ -196,6 +197,7 @@ export const Icons = {
   updates: RefreshCw,
   /** A new version of piep itself. Not the works: this one replaces the app. */
   appUpdate: CloudDownload,
+  server: Server,
   /** Running and finished background work. */
   activity: Activity,
   /** The operation history listing. */
