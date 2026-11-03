@@ -21,6 +21,7 @@ const browserApi = vi.hoisted(() => ({
   openStandaloneBrowser: vi.fn().mockResolvedValue(false),
   closeStandaloneBrowser: vi.fn().mockResolvedValue(true),
   getStandaloneBrowserUrl: vi.fn().mockResolvedValue(null),
+  readBrowserPageWorkCandidates: vi.fn(),
 }));
 
 const downloadApi = vi.hoisted(() => ({ fetchPixivSeriesNovels: vi.fn() }));
@@ -163,9 +164,52 @@ describe("SavePage の Rust 保存ジョブ", () => {
     fireEvent.change(address, { target: { value: "https://evil.example/www.pixiv.net/novel/series/1000" } });
     fireEvent.click(screen.getByRole("button", { name: "URLを開く" }));
 
-    expect(await screen.findByText("作品・シリーズ・作者ページを開いてください")).toBeInTheDocument();
+    expect(await screen.findByText("作品・シリーズ・作者・一覧のページを開いてください")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "候補を取得" })).toBeDisabled();
     expect(downloadApi.fetchPixivSeriesNovels).not.toHaveBeenCalled();
+  });
+
+  it("一覧のページは表示中の文書から読み取り、棚にある作品を預けない", async () => {
+    const page = "https://www.pixiv.net/novel/bookmark_new.php";
+    browserApi.readBrowserPageWorkCandidates.mockReset().mockResolvedValue({
+      url: page,
+      truncated: false,
+      works: [
+        { sourceId: "1", title: "第一話", author: "作者", saved: false },
+        { sourceId: "2", title: "第二話", author: "作者", saved: true },
+      ],
+    });
+    renderSavePage();
+    const address = await screen.findByLabelText("ブラウザのアドレス");
+    fireEvent.change(address, { target: { value: page } });
+    fireEvent.click(screen.getByRole("button", { name: "URLを開く" }));
+
+    fireEvent.click(await screen.findByRole("button", { name: "このページから読み取る" }));
+
+    expect(await screen.findByText("第一話")).toBeInTheDocument();
+    expect(browserApi.readBrowserPageWorkCandidates).toHaveBeenCalledWith("embedded", "pixiv");
+    expect(downloadApi.fetchPixivSeriesNovels).not.toHaveBeenCalled();
+    expect(screen.getByText("保存済み")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "1件をライブラリに保存" }));
+
+    await waitFor(() => expect(jobs.start).toHaveBeenCalledTimes(1));
+    expect(jobs.start).toHaveBeenCalledWith([{ source: "pixiv", sourceId: "1", title: "第一話" }], false);
+  });
+
+  it("読み取れる作品が無いページでは候補を置き換えない", async () => {
+    const page = "https://www.pixiv.net/novel/bookmark_new.php";
+    browserApi.readBrowserPageWorkCandidates.mockReset().mockResolvedValue({ url: page, truncated: false, works: [] });
+    renderSavePage();
+    await collectCandidates();
+    const address = screen.getByLabelText("ブラウザのアドレス");
+    fireEvent.change(address, { target: { value: page } });
+    fireEvent.click(screen.getByRole("button", { name: "URLを開く" }));
+
+    fireEvent.click(await screen.findByRole("button", { name: "このページから読み取る" }));
+
+    await waitFor(() => expect(browserApi.readBrowserPageWorkCandidates).toHaveBeenCalled());
+    expect(screen.getByText("第一話")).toBeInTheDocument();
   });
 
   it("保留された作品を選択数や再保存対象に含めない", async () => {

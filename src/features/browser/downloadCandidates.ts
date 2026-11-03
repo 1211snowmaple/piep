@@ -71,7 +71,9 @@ export type SidebarDownloadType =
   | "pixiv_series"
   | "pixiv_user"
   | "fanbox_single"
-  | "fanbox_creator";
+  | "fanbox_creator"
+  | "pixiv_page"
+  | "fanbox_page";
 export type SidebarMode = "empty" | "loading" | "analysis" | "downloadProgress" | "downloadDone";
 export type DownloadTargetKind = SidebarDownloadType | "unsupported";
 
@@ -173,6 +175,46 @@ export function describeDownloadTarget(url: string): DownloadTarget {
   return none;
 }
 
+/**
+ * URL だけでは中身が分からない、取得元の一覧ページの取得元。
+ *
+ * 検索結果、ランキング、ブックマーク、フォロー新着など。作品・シリーズ・作者の
+ * ページは API で全件を取れるので、ここには入れない。
+ */
+export function pageListSource(url: string): "pixiv" | "fanbox" | null {
+  if (describeDownloadTarget(url).kind !== "unsupported") return null;
+  const parsed = sourceUrl(url);
+  if (parsed?.protocol !== "https:") return null;
+  if (isSourceHost(parsed.hostname, "pixiv.net")) return "pixiv";
+  if (isSourceHost(parsed.hostname, "fanbox.cc")) return "fanbox";
+  return null;
+}
+
+/** 一覧から読み取った作品ひとつ。 */
+export interface PageWorkCandidate {
+  sourceId: string;
+  title: string;
+  author: string;
+  saved: boolean;
+}
+
+/** 読み取った作品を候補の行にする。棚にあるものは選ばず、保存済みと出す。 */
+export function pageWorkItems(source: "pixiv" | "fanbox", works: PageWorkCandidate[]): SidebarItem[] {
+  return works.map((work) => {
+    const title = work.title || `作品 ${work.sourceId}`;
+    return {
+      id: work.sourceId,
+      title,
+      subtitle: work.author || undefined,
+      selected: !work.saved,
+      ...(work.saved ? { status: "skipped" as const } : {}),
+      originalData: source === "pixiv"
+        ? { id: work.sourceId, title, characterCount: 0, createDate: "", user: { id: "", name: work.author } }
+        : { id: work.sourceId, title, type: "", publishedDatetime: "", user: { userId: "", name: work.author } },
+    };
+  });
+}
+
 export function detectDownloadTarget(url: string): DownloadTargetKind {
   return describeDownloadTarget(url).kind;
 }
@@ -183,5 +225,8 @@ export function detectDownloadTarget(url: string): DownloadTargetKind {
  */
 export function downloadTargetKey(url: string): string {
   const { kind, id } = describeDownloadTarget(url);
-  return kind === "unsupported" ? "" : `${kind}:${id}`;
+  if (kind !== "unsupported") return `${kind}:${id}`;
+  if (!pageListSource(url)) return "";
+  const parsed = new URL(normalizeContentLinkUrl(url));
+  return `page:${parsed.hostname}${sourcePath(parsed.pathname)}${parsed.search}`;
 }

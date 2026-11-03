@@ -1911,9 +1911,337 @@ pub fn reload_child_webview(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// 一覧から読み取る作品の上限。無限スクロールで長く読み込まれたページでも、
+/// 一度に候補へ出すのはこの件数までにする。
+const MAX_PAGE_WORKS: usize = 300;
+/// スクリプトの戻り値の上限。作品の行だけなら、ここまで大きくならない。
+const MAX_PAGE_WORKS_RESULT_BYTES: usize = 2 * 1024 * 1024;
+const MAX_PAGE_WORK_LABEL_CHARS: usize = 200;
+const PAGE_WORKS_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// 表示中のページから作品のリンクを集める。ページには何も書き込まない。
+///
+/// 題名と作者はリンクの文字から取る。カードの枠を外へたどり、別の作品のリンク
+/// が混ざったところで止めるので、隣の作品の作者を拾わない。戻った値は
+/// [`parse_page_works`] が検査する。
+const PAGE_WORKS_SCRIPT: &str = r#"
+    (function() {
+        const idOf = (href) => {
+            const match = href.match(/\/novel\/show\.php\?(?:[^#]*&)?id=(\d+)|\/novels\/(\d+)|\/posts\/(\d+)/);
+            return match ? (match[1] || match[2] || match[3]) : null;
+        };
+        const text = (element) => (element.textContent || '').trim();
+        const rows = new Map();
+        for (const link of document.querySelectorAll('a[href]')) {
+            const id = idOf(link.href);
+            if (!id) continue;
+            const row = rows.get(id) || { href: link.href, title: '', author: '' };
+            if (text(link).length > row.title.length) row.title = text(link);
+            let box = link.parentElement;
+            for (let depth = 0; box && depth < 8 && !row.author; depth += 1, box = box.parentElement) {
+                const ids = new Set([...box.querySelectorAll('a[href]')].map((other) => idOf(other.href)).filter(Boolean));
+                if (ids.size > 1) break;
+                const author = [...box.querySelectorAll('a[href*="/users/"], a[href*="/@"]')].find(text);
+                if (author) row.author = text(author);
+            }
+            rows.set(id, row);
+            if (rows.size >= 1000) break;
+        }
+        return [...rows.values()];
+    })()
+"#;
+
+/// 内蔵ブラウザの一覧から読み取った作品ひとつ。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserPageWork {
+    pub source_id: String,
+    pub title: String,
+    pub author: String,
+}
+
+#[derive(serde::Deserialize)]
+struct RawPageWork {
+    href: String,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    author: String,
+}
+
+/// 読み取った作品の一覧。`truncated` は上限で打ち切ったときに立つ。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrowserPageWorks {
+    pub url: String,
+    pub works: Vec<BrowserPageWork>,
+    pub truncated: bool,
+}
+
+fn is_source_host(host: &str, domain: &str) -> bool {
+    host == domain || host.ends_with(&format!(".{domain}"))
+}
+
+fn is_page_work_source(url: &Url, source: &str) -> bool {
+    let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
+    url.scheme() == "https"
+        && match source {
+            "pixiv" => is_source_host(&host, "pixiv.net"),
+            "fanbox" => is_source_host(&host, "fanbox.cc"),
+            _ => false,
+        }
+}
+
+/// リンクが指す作品の ID。許可した取得元の作品リンクでなければ `None`。
+fn page_work_id(source: &str, href: &str) -> Option<String> {
+    let url = Url::parse(href).ok()?;
+    if !is_page_work_source(&url, source) {
+        return None;
+    }
+    let segments: Vec<&str> = url.path_segments()?.filter(|s| !s.is_empty()).collect();
+    let is_language =
+        |segment: &str| segment.len() == 2 && segment.chars().all(|c| c.is_ascii_lowercase());
+    let path = match segments.split_first() {
+        Some((first, rest)) if is_language(first) => rest,
+        _ => segments.as_slice(),
+    };
+    let id = match (source, path) {
+        ("pixiv", ["novel", "show.php"]) => query_value(&url, "id")?,
+        ("pixiv", ["novels", id]) => (*id).to_string(),
+        ("fanbox", ["posts", id]) => (*id).to_string(),
+        ("fanbox", [creator, "posts", id]) if creator.starts_with('@') => (*id).to_string(),
+        _ => return None,
+    };
+    (id.len() <= 20 && !id.is_empty() && id.chars().all(|c| c.is_ascii_digit())).then_some(id)
+}
+
+/// 画面に出す文字へ整える。改行と制御文字を畳み、長すぎる分を切る。
+fn clean_page_label(raw: &str) -> String {
+    raw.split(|c: char| c.is_whitespace() || c.is_control())
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(MAX_PAGE_WORK_LABEL_CHARS)
+        .collect()
+}
+
+/// ページから戻った値を検査する。ページの中身は信用しない。
+///
+/// スクリプトはページと同じ世界で動くので、ページが関数を差し替えれば好きな値を
+/// 返せる。通すのは許可した取得元の作品リンクの数字の ID だけで、この値から
+/// 使うのは保存の依頼に渡す ID と、文字として表示する題名と作者だけである。
+fn parse_page_works(source: &str, raw: &str) -> Result<(Vec<BrowserPageWork>, bool), String> {
+    if raw.len() > MAX_PAGE_WORKS_RESULT_BYTES {
+        return Err("ページの内容が大きすぎて読み取れません".to_string());
+    }
+    let rows: Vec<RawPageWork> = serde_json::from_str(raw)
+        .map_err(|error| format!("ページの内容を読み取れません: {error}"))?;
+    let mut seen = std::collections::HashSet::new();
+    let mut works = Vec::new();
+    let mut truncated = false;
+    for row in rows {
+        let Some(source_id) = page_work_id(source, &row.href) else {
+            continue;
+        };
+        if !seen.insert(source_id.clone()) {
+            continue;
+        }
+        if works.len() == MAX_PAGE_WORKS {
+            truncated = true;
+            break;
+        }
+        works.push(BrowserPageWork {
+            source_id,
+            title: clean_page_label(&row.title),
+            author: clean_page_label(&row.author),
+        });
+    }
+    Ok((works, truncated))
+}
+
+#[cfg(target_os = "windows")]
+fn run_page_script(
+    webview: &tauri::Webview,
+    script: &'static str,
+) -> Result<oneshot::Receiver<Result<String, String>>, String> {
+    use webview2_com::ExecuteScriptCompletedHandler;
+    use windows::core::HSTRING;
+
+    let (sender, receiver) = oneshot::channel();
+    webview
+        .with_webview(move |platform_webview| {
+            let sender = std::sync::Arc::new(Mutex::new(Some(sender)));
+            let finish = move |result: Result<String, String>| {
+                if let Some(sender) = sender.lock().take() {
+                    let _ = sender.send(result);
+                }
+            };
+            let on_complete = finish.clone();
+            let handler = ExecuteScriptCompletedHandler::create(Box::new(move |status, value| {
+                on_complete(status.map(|_| value).map_err(|error| error.to_string()));
+                Ok(())
+            }));
+            let started = unsafe {
+                platform_webview
+                    .controller()
+                    .CoreWebView2()
+                    .and_then(|core| core.ExecuteScript(&HSTRING::from(script), &handler))
+            };
+            if let Err(error) = started {
+                finish(Err(error.to_string()));
+            }
+        })
+        .map_err(|error| error.to_string())?;
+    Ok(receiver)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn run_page_script(
+    _webview: &tauri::Webview,
+    _script: &'static str,
+) -> Result<oneshot::Receiver<Result<String, String>>, String> {
+    Err("ページからの読み取りは Windows 版で使えます".to_string())
+}
+
+/// 内蔵ブラウザで表示中のページから、作品のリンクを読み取る。
+///
+/// `browser` は `embedded` か `standalone`。取得元の外のページでは走らせない。
+pub async fn read_browser_page_works(
+    app: AppHandle,
+    browser: String,
+    source: String,
+) -> Result<BrowserPageWorks, String> {
+    let (url, receiver) = match browser.as_str() {
+        "embedded" => {
+            let webview = app
+                .get_webview("embedded_browser")
+                .ok_or_else(|| "内蔵ブラウザが開いていません".to_string())?;
+            let url = webview.url().map_err(|error| error.to_string())?;
+            if !is_page_work_source(&url, &source) {
+                return Err("このページからは読み取れません".to_string());
+            }
+            (url, run_page_script(&webview, PAGE_WORKS_SCRIPT)?)
+        }
+        "standalone" => {
+            let (label, _) = standalone_window_details(&source)?;
+            let window = app
+                .get_webview_window(label)
+                .ok_or_else(|| "内蔵ブラウザが開いていません".to_string())?;
+            let url = window.url().map_err(|error| error.to_string())?;
+            if !is_page_work_source(&url, &source) {
+                return Err("このページからは読み取れません".to_string());
+            }
+            (url, run_page_script(window.as_ref(), PAGE_WORKS_SCRIPT)?)
+        }
+        _ => return Err("Unsupported browser".to_string()),
+    };
+    let raw = tokio::time::timeout(PAGE_WORKS_TIMEOUT, receiver)
+        .await
+        .map_err(|_| "ページの読み取りが時間内に終わりませんでした".to_string())?
+        .map_err(|_| "ページの読み取りが途中で止まりました".to_string())??;
+    let (works, truncated) = parse_page_works(&source, &raw)?;
+    Ok(BrowserPageWorks {
+        url: url.to_string(),
+        works,
+        truncated,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn page_work_id_accepts_only_source_work_links() {
+        assert_eq!(
+            page_work_id("pixiv", "https://www.pixiv.net/novel/show.php?id=123"),
+            Some("123".to_string())
+        );
+        assert_eq!(
+            page_work_id(
+                "pixiv",
+                "https://www.pixiv.net/novel/show.php?mode=x&id=9&p=2"
+            ),
+            Some("9".to_string())
+        );
+        assert_eq!(
+            page_work_id("pixiv", "https://www.pixiv.net/en/novels/55"),
+            Some("55".to_string())
+        );
+        assert_eq!(
+            page_work_id("fanbox", "https://creator.fanbox.cc/posts/77"),
+            Some("77".to_string())
+        );
+        assert_eq!(
+            page_work_id("fanbox", "https://www.fanbox.cc/@creator/posts/78"),
+            Some("78".to_string())
+        );
+
+        for rejected in [
+            "https://evil.example/novel/show.php?id=1",
+            "https://pixiv.net.evil.example/novel/show.php?id=1",
+            "http://www.pixiv.net/novel/show.php?id=1",
+            "https://www.pixiv.net/novel/show.php?id=1x",
+            "https://www.pixiv.net/novel/show.php",
+            "https://www.pixiv.net/novel/series/1",
+            "https://www.pixiv.net/artworks/1",
+            "https://creator.fanbox.cc/posts/1",
+            "not a url",
+        ] {
+            assert_eq!(page_work_id("pixiv", rejected), None, "{rejected}");
+        }
+        assert_eq!(
+            page_work_id("fanbox", "https://www.pixiv.net/novels/1"),
+            None
+        );
+    }
+
+    #[test]
+    fn page_works_drop_foreign_rows_and_merge_repeats() {
+        let raw = r#"[
+            {"href": "https://www.pixiv.net/novel/show.php?id=1", "title": " 題名\n  その一\u0007 ", "author": "作者"},
+            {"href": "https://evil.example/novel/show.php?id=2", "title": "外", "author": ""},
+            {"href": "https://www.pixiv.net/novels/1", "title": "重複", "author": ""},
+            {"href": "https://www.pixiv.net/novels/3"}
+        ]"#;
+        let (works, truncated) = parse_page_works("pixiv", raw).unwrap();
+        assert!(!truncated);
+        assert_eq!(
+            works,
+            vec![
+                BrowserPageWork {
+                    source_id: "1".into(),
+                    title: "題名 その一".into(),
+                    author: "作者".into(),
+                },
+                BrowserPageWork {
+                    source_id: "3".into(),
+                    title: String::new(),
+                    author: String::new(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn page_works_are_bounded_and_reject_malformed_results() {
+        let rows: Vec<serde_json::Value> = (0..MAX_PAGE_WORKS + 1)
+            .map(|id| serde_json::json!({ "href": format!("https://www.pixiv.net/novels/{id}") }))
+            .collect();
+        let (works, truncated) =
+            parse_page_works("pixiv", &serde_json::to_string(&rows).unwrap()).unwrap();
+        assert_eq!(works.len(), MAX_PAGE_WORKS);
+        assert!(truncated);
+
+        assert!(parse_page_works("pixiv", "null").is_err());
+        assert!(parse_page_works("pixiv", "{\"href\":\"x\"}").is_err());
+        let long = format!("\"{}\"", "x".repeat(MAX_PAGE_WORKS_RESULT_BYTES));
+        assert!(parse_page_works("pixiv", &long).is_err());
+
+        let long_title = serde_json::json!([{ "href": "https://www.pixiv.net/novels/1", "title": "あ".repeat(500) }]);
+        let (works, _) = parse_page_works("pixiv", &long_title.to_string()).unwrap();
+        assert_eq!(works[0].title.chars().count(), MAX_PAGE_WORK_LABEL_CHARS);
+    }
 
     #[test]
     fn pixiv_callback_accepts_only_expected_callback_origins() {

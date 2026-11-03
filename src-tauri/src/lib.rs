@@ -250,6 +250,7 @@ pub fn run() -> tauri::Result<()> {
             commands::browser::set_embedded_browser_visible,
             commands::browser::navigate_embedded_browser,
             commands::browser::get_embedded_browser_url,
+            commands::browser::read_browser_page_work_candidates,
             commands::browser::close_embedded_browser,
             commands::browser::destroy_embedded_browser,
             commands::browser::go_back_embedded_browser,
