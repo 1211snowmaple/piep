@@ -19,6 +19,7 @@ import {
   ThemeIcon,
   UnstyledButton,
 } from "@mantine/core";
+import { SectionIntro } from "./SectionIntro";
 import { useDisclosure } from "@mantine/hooks";
 import { notifications } from "@mantine/notifications";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -246,18 +247,16 @@ export function AssistSection() {
 
   return (
     <Stack gap="lg">
-      <div>
-        <Group gap="xs">
-          <Text fw={700} size="lg">AIの手伝い</Text>
-          <Badge size="sm" variant="light" color="yellow" tt="none">β</Badge>
-        </Group>
-        <Text size="sm" c="dimmed">
+      <SectionIntro
+        beta
+        title="AIの手伝い"
+        description={<>
           <b>保存・検索・読書は、AIを設定しなくても使えます。</b>
           言葉での検索、タグの補完、あらすじ、前回のあらすじ、コレクションの命名と分割、本文の校正に、
           手元で動かしているモデルを使いたいときだけ設定してください。
           <b>AIの案やあらすじは、ボタンを押したときにだけ作ります。</b>
-        </Text>
-      </div>
+        </>}
+      />
 
       <Alert color="yellow" title="AIの手伝いと意味検索はβ版です">
         <Text size="sm">
