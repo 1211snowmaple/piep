@@ -10,12 +10,67 @@
 //! 閉じるのに二つあるのは、隠すだけの `close_` と、面ごと捨てる `destroy_`
 //! を分けているからである。次に開くのが同じ場所なら、捨てないほうが速い。
 
+use std::sync::Arc;
+
+use tauri::Manager;
+
 use crate::auth::webview::{
     close_child_webview, close_standalone_webview, destroy_child_webview, get_child_webview_url,
     go_back_child_webview, go_forward_child_webview, navigate_child_webview, open_child_webview,
-    open_standalone_webview, reload_child_webview, set_child_webview_bounds,
-    set_child_webview_visible, standalone_webview_url,
+    open_standalone_webview, read_browser_page_works, reload_child_webview,
+    set_child_webview_bounds, set_child_webview_visible, standalone_webview_url, BrowserPageWork,
 };
+use crate::AppState;
+
+/// 表示中の一覧から読み取った作品ひとつ。`saved` は棚にすでにあるかどうか。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PageWorkCandidate {
+    #[serde(flatten)]
+    pub work: BrowserPageWork,
+    pub saved: bool,
+}
+
+/// 読み取りの結果。`url` は読み取ったページ、`truncated` は上限で打ち切ったとき。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PageWorkCandidates {
+    pub url: String,
+    pub works: Vec<PageWorkCandidate>,
+    pub truncated: bool,
+}
+
+/// 内蔵ブラウザに表示中のページから、作品のリンクを読み取る。
+///
+/// 検索結果やランキングのような、URL だけでは中身が分からない一覧に使う。
+/// 開いているページの文書を読むだけで、取得元への通信は増えない。読めるのは
+/// **そのとき読み込まれている分だけ**である。`browser` は `embedded` か
+/// `standalone`、`source` は `pixiv` か `fanbox`。取得元の外のページでは走らせない。
+#[tauri::command]
+pub async fn read_browser_page_work_candidates(
+    app: tauri::AppHandle,
+    browser: String,
+    source: String,
+) -> Result<PageWorkCandidates, String> {
+    let page = read_browser_page_works(app.clone(), browser, source.clone()).await?;
+    let state = app.state::<Arc<AppState>>();
+    let works = page
+        .works
+        .into_iter()
+        .map(|work| {
+            let saved = state
+                .db
+                .get_download_by_source(&source, &work.source_id)?
+                .is_some();
+            Ok(PageWorkCandidate { work, saved })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok(PageWorkCandidates {
+        url: page.url,
+        works,
+        truncated: page.truncated,
+    })
+}
 
 /// アプリの窓の中に子 WebView を開く。
 ///

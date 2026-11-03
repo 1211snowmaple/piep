@@ -33,6 +33,8 @@ import {
 import {
   describeDownloadTarget,
   downloadTargetKey,
+  pageListSource,
+  pageWorkItems,
   type DownloadTargetKind,
   type FanboxPost,
   type PixivNovel,
@@ -48,6 +50,7 @@ import {
   closeStandaloneBrowser,
   destroyEmbeddedBrowser,
   getEmbeddedBrowserUrl,
+  readBrowserPageWorkCandidates,
   getStandaloneBrowserUrl,
   goBackEmbeddedBrowser,
   goForwardEmbeddedBrowser,
@@ -530,7 +533,11 @@ export default function SavePage() {
       ? `失敗した${pendingCount}件をやり直す`
       : `${pendingCount}件をライブラリに保存`;
   const targetKind = describeDownloadTarget(currentUrl).kind;
+  // 検索結果やブックマークは URL から全件を取れない。開いている画面から読む。
+  const canReadPage = pageListSource(currentUrl) === source;
+  const canAnalyze = targetKind !== "unsupported" || canReadPage;
   // 古いのは一覧のほう。一覧が無いうちは、古くなりようがない。
+  const analyzeLabel = canReadPage ? "このページから読み取る" : lastAnalysisKey && lastAnalysisKey !== downloadTargetKey(currentUrl) ? "候補を再取得" : "候補を取得";
   const analysisStale =
     items.length > 0 &&
     Boolean(lastAnalysisKey) &&
@@ -696,18 +703,20 @@ export default function SavePage() {
         color: "piep",
         message: "候補の取得はデスクトップアプリで使えます",
       });
-    if (!authConnected)
+    const { kind: target, id: targetId } = describeDownloadTarget(analysisUrl);
+    const readsPage = target === "unsupported" && pageListSource(analysisUrl) === source;
+    // 一覧の読み取りは開いている画面を読むだけなので、取得用の接続を使わない。
+    if (!authConnected && !readsPage)
       return notifications.show({
         color: "yellow",
         title: `${getProvider(source).label}に接続してください`,
         message: "設定画面からログインすると候補を取得できます",
       });
-    const { kind: target, id: targetId } = describeDownloadTarget(analysisUrl);
-    if (target === "unsupported")
+    if (target === "unsupported" && !readsPage)
       return notifications.show({
         color: "yellow",
         title: "対応ページではありません",
-        message: "作品、シリーズ、作者・クリエイターページを開いてください",
+        message: "作品、シリーズ、作者、一覧のページを開いてください",
       });
     // 同じ取得が二重に走れば、同じ知らせも二度出る。
     if (analyzingRef.current) return;
@@ -716,6 +725,33 @@ export default function SavePage() {
     setAnalyzing(true);
     setProgress(null);
     try {
+      if (readsPage) {
+        const page = await readBrowserPageWorkCandidates(detachedRef.current ? "standalone" : "embedded", source);
+        if (!isLatestSaveDraftAnalysis(source, analysisRevision)) return;
+        if (!page.works.length) {
+          notifications.show({
+            color: "yellow",
+            title: "作品が見つかりません",
+            message: "一覧が表示されてから、もう一度読み取ってください",
+          });
+          return;
+        }
+        updateSaveDraft(source, (current) => ({
+          ...current,
+          items: pageWorkItems(source, page.works),
+          downloadType: source === "pixiv" ? "pixiv_page" : "fanbox_page",
+          lastAnalysisUrl: page.url,
+          lastAnalysisKey: downloadTargetKey(page.url),
+        }));
+        const saved = page.works.filter((work) => work.saved).length;
+        notifications.show({
+          color: "green",
+          title: `このページから${page.works.length}件を読み取りました`,
+          message: `${saved ? `${saved}件は保存済みです。` : ""}${page.truncated ? "件数の上限で打ち切りました。" : "表示されている分だけです。"}`,
+        });
+        return;
+      }
+      if (target === "unsupported") return;
       const pixivToken = (await store.get<string>("pixiv_refresh_token")) || "";
       const fanboxCookie = (await store.get<string>("fanbox_session_id")) || "";
       const fanboxUserAgent =
@@ -981,6 +1017,12 @@ export default function SavePage() {
     );
     if (!selected.length || !downloadType || !runtime || savingRef.current || activeJob)
       return;
+    if (!authConnected)
+      return notifications.show({
+        color: "yellow",
+        title: `${getProvider(source).label}に接続してください`,
+        message: "保存には、設定の「サービス接続」で取得用の接続が必要です",
+      });
     const itemSource: "pixiv" | "fanbox" = downloadType.startsWith("pixiv")
       ? "pixiv"
       : "fanbox";
@@ -1453,8 +1495,8 @@ export default function SavePage() {
                 color={analysisStale ? "yellow" : "piep"}
                 size="lg"
                 loading={analyzing}
-                disabled={!runtime || saving || targetKind === "unsupported"}
-                aria-label={analysisStale ? "候補を再取得" : "候補を取得"}
+                disabled={!runtime || saving || !canAnalyze}
+                aria-label={analyzeLabel}
                 onClick={() => analyze()}
               >
                 {analysisStale ? (
@@ -1579,10 +1621,10 @@ export default function SavePage() {
                   </Group>
                 </Group>
                 <Alert
-                  color={targetKind === "unsupported" ? "gray" : "piep"}
+                  color={canAnalyze ? "piep" : "gray"}
                   variant="light"
                   icon={
-                    targetKind === "unsupported" ? (
+                    !canAnalyze ? (
                       <Icons.link size={IconSize.action} />
                     ) : (
                       <Icons.confirm size={IconSize.action} />
@@ -1590,7 +1632,7 @@ export default function SavePage() {
                   }
                   py="xs"
                 >
-                  <Text size="xs">{targetLabel(targetKind)}</Text>
+                  <Text size="xs">{canReadPage ? "表示中の一覧から作品を読み取れます。読み込まれている分だけです" : targetLabel(targetKind)}</Text>
                 </Alert>
                 {/* 帯を割り込ませない。取り直しを頼む相手は、取り直すボタンである。
                   独立した警告として一段挟むと、押す場所と読む場所が離れるうえ、
@@ -1607,10 +1649,10 @@ export default function SavePage() {
                     )
                   }
                   loading={analyzing}
-                  disabled={!runtime || saving || targetKind === "unsupported"}
+                  disabled={!runtime || saving || !canAnalyze}
                   onClick={() => analyze()}
                 >
-                  {analysisStale ? "候補を再取得" : "候補を取得"}
+                  {analyzeLabel}
                 </Button>
               </Box>
               <Divider />
@@ -1782,7 +1824,7 @@ function targetLabel(kind: DownloadTargetKind): string {
     pixiv_user: "作者の小説を選択できます",
     fanbox_single: "FANBOX投稿を保存できます",
     fanbox_creator: "クリエイターの投稿を選択できます",
-    unsupported: "作品・シリーズ・作者ページを開いてください",
+    unsupported: "作品・シリーズ・作者・一覧のページを開いてください",
   };
   return labels[kind];
 }
@@ -1881,8 +1923,8 @@ function EmptyCandidates({ source }: { source: SaveSource }) {
       </Text>
       <Text size="xs" c="dimmed">
         {source === "pixiv"
-          ? "小説、シリーズ、作者ページ"
-          : "投稿またはクリエイターページ"}
+          ? "小説、シリーズ、作者、一覧のページ"
+          : "投稿、クリエイター、一覧のページ"}
         に対応しています。
       </Text>
     </Stack>

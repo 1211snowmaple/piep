@@ -82,7 +82,7 @@ describe("SavePage handover to the large window", () => {
     await waitFor(() => expect(browserApi.destroyEmbeddedBrowser).toHaveBeenCalled());
     expect(await screen.findByText("大きいウィンドウで表示中")).toBeInTheDocument();
     // The candidate sidebar is the whole point of the handover, so it stays.
-    expect(screen.getByRole("button", { name: "候補を取得" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "このページから読み取る" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "大きいウィンドウで開く" })).toBeNull();
   });
 
