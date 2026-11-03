@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { PageWorkCandidate } from "@/features/browser/downloadCandidates";
 
 export interface EmbeddedBrowserBounds {
   x: number;
@@ -31,6 +32,17 @@ export function navigateEmbeddedBrowser(url: string): Promise<void> {
 
 export function getEmbeddedBrowserUrl(): Promise<string> {
   return invoke<string>("get_embedded_browser_url");
+}
+
+export interface BrowserPageWorks {
+  url: string;
+  works: PageWorkCandidate[];
+  truncated: boolean;
+}
+
+/** 表示中のページから、読み込まれている分の作品を読み取る。通信は増えない。 */
+export function readBrowserPageWorkCandidates(browser: "embedded" | "standalone", source: "pixiv" | "fanbox"): Promise<BrowserPageWorks> {
+  return invoke<BrowserPageWorks>("read_browser_page_work_candidates", { browser, source });
 }
 
 export function closeEmbeddedBrowser(): Promise<void> {
