@@ -618,7 +618,7 @@ fn required_data(parsed: &Arguments) -> Result<&Path, String> {
 /// 登録文字列は、この画面にだけ出す。記録には残さない。
 fn print_pairing(payload: &str) {
     println!(
-        "デスクトップ版の「設定 → サーバー（β）→ 別の PC のサーバーに接続」に貼り付けてください。"
+        "デスクトップ版の「設定 → サーバー → 別の PC のサーバーに接続」に貼り付けてください。"
     );
     println!("30 分有効で、一度だけ使えます。人に見せないでください。");
     println!();

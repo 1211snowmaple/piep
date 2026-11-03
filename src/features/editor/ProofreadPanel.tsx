@@ -1,5 +1,6 @@
 import { useCallback, useRef, useState } from "react";
 import { Alert, Badge, Button, Drawer, Group, Loader, Paper, Progress, Stack, Text } from "@mantine/core";
+import { BetaBadge } from "@/components/BetaBadge";
 import { ActionRow } from "@/components/ActionRow";
 import { Icons, IconSize } from "@/lib/icons";
 import { errorMessage } from "@/lib/format";
@@ -193,7 +194,7 @@ export function ProofreadPanel({
       withOverlay={false}
       lockScroll={false}
       trapFocus={false}
-      title={<Group gap="xs"><Icons.optimize size={IconSize.action} /><Text fw={750}>本文の校正</Text><Badge size="xs" variant="light" color="yellow" tt="none">β</Badge></Group>}
+      title={<Group gap="xs"><Icons.optimize size={IconSize.action} /><Text fw={750}>本文の校正</Text><BetaBadge /></Group>}
     >
       <Stack gap="sm">
         <Text size="xs" c="dimmed">誤字・脱字・変換ミスの候補です。本文は、押したものだけが変わります。直したあとも「元に戻す」で取り消せます。</Text>
