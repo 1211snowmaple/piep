@@ -26,6 +26,12 @@ use std::time::{Duration, Instant};
 use tauri::{Emitter, Manager};
 
 const UPDATE_JOB_DELAY_MS: u64 = 2_000;
+/// 新作だけの確認で、作者の間にあける時間。
+///
+/// 1人あたりの通信が一覧の1回だけになるので、この間隔で毎秒の通信量が通常の
+/// 確認と同じ（実測で約 0.6 回/秒）になる。縮めると取得元への圧が増えるだけで、
+/// 通信の総数が減るわけではない。
+const NEW_WORKS_DELAY_MS: u64 = 1_500;
 const FAST_PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 
 /// 制限で止まった項目を、同じジョブの中でやり直す回数の上限。
@@ -691,7 +697,9 @@ fn build_initial_items(
     let scope = request.scope.as_str();
     // "targets" は監視グループの確認。`target_ids` に挙げた作者・シリーズだけを
     // 見て、作品ごとの監視は混ぜない。
-    let include_work = matches!(scope, "all" | "work");
+    // 新作だけの確認は作者とシリーズの一覧だけを見る。
+    let new_works_only = request.new_works_only.unwrap_or(false);
+    let include_work = !new_works_only && matches!(scope, "all" | "work");
     let include_author = matches!(scope, "all" | "author" | "targets");
     let include_series = matches!(scope, "all" | "series" | "targets");
     let work_filter = request
@@ -1209,6 +1217,7 @@ pub async fn start_save_job(
         credentials: credentials.clone(),
         watch_saved,
         adhoc_targets: None,
+        new_works_only: None,
     };
     let job_id = make_job_id();
     // Saving outlives the page that launched it. After navigating away and
@@ -1621,6 +1630,7 @@ pub async fn recheck_deferred_update_candidates(
         work_ids: None,
         target_ids: None,
         watch_saved: Some(false),
+        new_works_only: None,
         adhoc_targets: None,
         credentials: credentials.clone(),
     };
@@ -1986,6 +1996,7 @@ async fn run_update_job(
     // 保存した作品をそのまま監視に載せるかは、ジョブを始めたときの依頼が持つ。
     // 再開したワーカーも同じ設定で動く。
     let watch_saved = state.db.update_job_watch_saved(&job_id).unwrap_or(false);
+    let new_works_only = state.db.update_job_new_works_only(&job_id).unwrap_or(false);
     crate::downloader::session::set_pixiv_web_session(
         credentials.pixiv_cookie.as_deref(),
         credentials.pixiv_user_agent.as_deref(),
@@ -2136,7 +2147,11 @@ async fn run_update_job(
         let local_only = matches!(&outcome, Ok(ItemOutcome::LocalSkipped(_)));
         let failed = outcome.is_err();
         let restart_pending = has_pending_restart(&job_id);
-        let mut next_delay_ms = UPDATE_JOB_DELAY_MS;
+        let mut next_delay_ms = if new_works_only && item.item_type == "target" {
+            NEW_WORKS_DELAY_MS
+        } else {
+            UPDATE_JOB_DELAY_MS
+        };
         if item.item_type == "work"
             && matches!(
                 &outcome,
@@ -3653,6 +3668,7 @@ async fn process_target_item(
     let target: crate::database::UpdateTarget =
         serde_json::from_str(&item.payload_json).map_err(|e| e.to_string())?;
     let auto_save = state.db.update_job_mode_value(job_id)? == "auto_save";
+    let new_works_only = state.db.update_job_new_works_only(job_id)?;
 
     let items: Vec<Value> = if target.source == "pixiv" && target.target_type == "author" {
         let Some(token) = pixiv_token(credentials) else {
@@ -3735,6 +3751,7 @@ async fn process_target_item(
             .get_download_by_source(&target.source, &listed_id)?
         {
             None => default_kind,
+            Some(_) if new_works_only => continue,
             Some(existing) => {
                 // すでに持っている作品。一覧が更新時刻を持っていて、それが
                 // 保存済みのものと違うときだけ「改稿」として拾う。
@@ -3781,7 +3798,7 @@ async fn process_target_item(
     // FANBOX は取得元の一覧が更新時刻を持つのでずっとそうなっていた。pixiv
     // だけができなかったのは、アプリAPIの一覧に更新時刻が無いからで、
     // web の一覧を通せばこの非対称は消える。
-    if target.source == "pixiv" && target.target_type == "author" {
+    if target.source == "pixiv" && target.target_type == "author" && !new_works_only {
         found += scan_pixiv_revisions(state, job_id, &target, auto_save, web_index).await?;
     }
 
@@ -3821,7 +3838,10 @@ async fn process_target_item(
     // `refresh_entity_profile` 自身が通信せず戻るので、定期確認のたびに同じ API を
     // 叩くことはない。横顔だけの失敗で新作確認まで失敗扱いにはせず、ログに残して
     // 次回また試せるようにする。
-    if let Some(params) = profile_refresh_params_for_target(&target, credentials) {
+    let profile_params = (!new_works_only)
+        .then(|| profile_refresh_params_for_target(&target, credentials))
+        .flatten();
+    if let Some(params) = profile_params {
         if let Err(error) =
             crate::commands::database::refresh_entity_profile(app.clone(), params).await
         {
@@ -4220,6 +4240,7 @@ mod tests {
                     target_ids: None,
                     credentials: None,
                     watch_saved: None,
+                    new_works_only: None,
                     adhoc_targets: None,
                 },
                 &[],
@@ -4287,6 +4308,7 @@ mod tests {
                     target_ids: None,
                     credentials: None,
                     watch_saved: None,
+                    new_works_only: None,
                     adhoc_targets: None,
                 },
                 &[],
@@ -4477,6 +4499,7 @@ mod tests {
             target_ids: Some(vec![member]),
             credentials: None,
             watch_saved: None,
+            new_works_only: None,
             adhoc_targets: None,
         };
         let items = build_initial_items(&state, &request).unwrap();
@@ -4485,6 +4508,80 @@ mod tests {
             .map(|item| (item.item_type.as_str(), item.source_id.as_deref()))
             .collect();
         assert_eq!(keys, [("target", Some("in-group"))]);
+        drop(state);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn new_works_only_skips_watched_works_and_keeps_authors() {
+        let root = std::env::temp_dir().join(format!("piep-watch-group-{}", make_job_id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let state = Arc::new(AppState::new(
+            Database::open(&root.join("piep.db"), &root.join("downloads")).unwrap(),
+        ));
+        for (target_type, key) in [("author", "in-group"), ("series", "outside")] {
+            state
+                .db
+                .upsert_update_target(&crate::database::UpdateTargetInput {
+                    target_type: target_type.into(),
+                    source: "pixiv".into(),
+                    source_key: key.into(),
+                    display_name: key.into(),
+                    enabled: true,
+                    metadata_json: None,
+                })
+                .unwrap();
+        }
+        // 作品ごとの監視はグループの確認に混ぜない。
+        let json_path = root.join("watched.json");
+        std::fs::write(&json_path, "{}").unwrap();
+        state
+            .db
+            .upsert_download(&NewDownload {
+                source: "pixiv".into(),
+                source_id: "watched-elsewhere".into(),
+                title: "別の作品".into(),
+                author_name: "別の作者".into(),
+                author_id: "someone-else".into(),
+                content_type: "novel".into(),
+                tags: Vec::new(),
+                excerpt: None,
+                cover_path: None,
+                json_path: json_path.to_string_lossy().into(),
+                original_json_path: None,
+                asset_count: 0,
+                file_size_bytes: 0,
+                downloaded_at: "2026-01-01T00:00:00Z".into(),
+                source_created_at: None,
+                content_hash: None,
+                text_length: 0,
+                source_updated_at: None,
+                watch_updates: true,
+                current_version: 1,
+                favorite: false,
+            })
+            .unwrap();
+        let request = StartUpdateJobRequest {
+            scope: "all".into(),
+            mode: "check_only".into(),
+            work_ids: None,
+            target_ids: None,
+            credentials: None,
+            watch_saved: None,
+            new_works_only: Some(true),
+            adhoc_targets: None,
+        };
+        let items = build_initial_items(&state, &request).unwrap();
+        let keys: Vec<_> = items
+            .iter()
+            .map(|item| (item.item_type.as_str(), item.source_id.as_deref()))
+            .collect();
+        assert!(
+            keys.iter().all(|(item_type, _)| *item_type == "target"),
+            "作品ごとの確認を混ぜない: {keys:?}"
+        );
+        assert!(keys.contains(&("target", Some("in-group"))));
+        assert!(!keys.iter().any(|(_, id)| *id == Some("watched-elsewhere")));
         drop(state);
         let _ = std::fs::remove_dir_all(root);
     }
@@ -4533,6 +4630,7 @@ mod tests {
             target_ids: None,
             credentials: None,
             watch_saved: None,
+            new_works_only: None,
             adhoc_targets: Some(vec![AdhocUpdateTarget {
                 target_type: "author".into(),
                 source: "fanbox".into(),
@@ -4637,6 +4735,7 @@ mod tests {
             target_ids: None,
             credentials: None,
             watch_saved: None,
+            new_works_only: None,
             adhoc_targets: Some(vec![AdhocUpdateTarget {
                 target_type: "author".into(),
                 source: "pixiv".into(),

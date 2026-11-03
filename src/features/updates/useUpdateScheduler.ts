@@ -87,7 +87,7 @@ export function useUpdateScheduler(enabled = isTauriRuntime()) {
           const members = new Set(group.targetIds);
           const targetIds = targets.filter((target) => members.has(target.id)).map((target) => target.id);
           if (!targetIds.length) return;
-          request = { scope: "targets", mode: settings.mode, targetIds, watchSaved: settings.watchSaved };
+          request = { scope: "targets", mode: settings.mode, targetIds, watchSaved: settings.watchSaved, newWorksOnly: settings.newWorksOnly };
         } else {
           // 監視対象も監視作品も無いなら、確認する意味がない。作品の監視は
           // downloads 側の旗なので、update_targets を見るだけでは数え落とす。
@@ -95,8 +95,8 @@ export function useUpdateScheduler(enabled = isTauriRuntime()) {
             listUpdateTargets<{ id: number }>(null, true),
             searchDownloadsV2({ watchFilter: "watched", limit: 1, projection: "bulk" }),
           ]);
-          if (!targets.length && !watchedWorks.items.length) return;
-          request = { scope: "all", mode: settings.mode, watchSaved: settings.watchSaved };
+          if (!targets.length && (settings.newWorksOnly || !watchedWorks.items.length)) return;
+          request = { scope: "all", mode: settings.mode, watchSaved: settings.watchSaved, newWorksOnly: settings.newWorksOnly };
         }
 
         const snapshot = await startUpdateJobCommand(request);

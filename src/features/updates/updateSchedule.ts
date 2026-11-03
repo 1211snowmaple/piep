@@ -15,6 +15,8 @@ export interface UpdateScheduleSettings {
   onStartup: boolean;
   /** Hours between runs. 0 turns the interval off; startup can still fire. */
   intervalHours: number;
+  /** 新作だけを見る軽い確認にする。改稿は手動の確認に任せる。 */
+  newWorksOnly: boolean;
   /** What an automatic run does: list candidates, or save them too. */
   mode: "check_only" | "auto_save";
   /** Put every work the check saves under update watching. */
@@ -31,6 +33,7 @@ export interface UpdateScheduleSettings {
 export const updateScheduleDefaults: UpdateScheduleSettings = {
   onStartup: false,
   intervalHours: 0,
+  newWorksOnly: false,
   mode: "check_only",
   watchSaved: false,
   notify: true,
@@ -52,6 +55,7 @@ export function normalizeSchedule(raw: unknown): UpdateScheduleSettings {
     intervalHours: !Number.isFinite(hours) || hours <= 0
       ? 0
       : Math.min(MAX_INTERVAL_HOURS, Math.max(MIN_INTERVAL_HOURS, Math.round(hours))),
+    newWorksOnly: value.newWorksOnly === true,
     mode: value.mode === "auto_save" ? "auto_save" : "check_only",
     watchSaved: value.watchSaved === true,
     notify: value.notify !== false,
@@ -127,7 +131,7 @@ export function isRunDue(
  * そのグループが消えたとき - 黙って広げも狭めもせず、止まっていると名乗る。
  */
 export function describeSchedule(settings: UpdateScheduleSettings, groupName?: string | null): string {
-  const what = settings.mode === "auto_save" ? "確認して保存" : "確認のみ";
+  const what = `${settings.newWorksOnly ? "新作だけ" : ""}${settings.mode === "auto_save" ? "確認して保存" : settings.newWorksOnly ? "を確認" : "確認のみ"}`;
   if (!settings.onStartup && !settings.intervalHours) return "自動では実行しません";
   if (settings.groupId !== null && !groupName) return "範囲にしたグループが見つからないため、実行しません";
   const parts = [];

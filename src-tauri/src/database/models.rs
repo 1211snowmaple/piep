@@ -1038,6 +1038,11 @@ pub struct StartUpdateJobRequest {
     /// 設定の「保存した作品を自動で監視する」から渡ってくる。
     #[serde(default)]
     pub watch_saved: Option<bool>,
+    /// 作者とシリーズの新作だけを見る軽い確認にするか。
+    ///
+    /// 作品ごとの確認と改稿の確認、プロフィールの更新をしない。
+    #[serde(default)]
+    pub new_works_only: Option<bool>,
     /// 監視対象に登録せず、この一回だけ確認する作者・シリーズ。
     ///
     /// 作品ページや作者ページの「新作を確認」から渡ってくる。登録済みの対象と
@@ -1063,6 +1068,8 @@ pub struct UpdateJobSummary {
     pub status: String,
     pub scope: String,
     pub mode: String,
+    #[serde(default)]
+    pub new_works_only: bool,
     #[serde(default)]
     pub subject_label: Option<String>,
     #[serde(default)]
@@ -1128,6 +1135,8 @@ pub struct UpdateJobSnapshot {
     pub status: String,
     pub scope: String,
     pub mode: String,
+    #[serde(default)]
+    pub new_works_only: bool,
     pub totals: i64,
     pub processed: i64,
     pub check_total: i64,
@@ -1628,6 +1637,7 @@ mod start_request_shape_tests {
         assert!(request.target_ids.is_none());
         assert!(request.credentials.is_none());
         assert!(request.watch_saved.is_none());
+        assert!(request.new_works_only.is_none());
         assert!(request.adhoc_targets.is_none());
     }
 

@@ -33,6 +33,8 @@ export interface StartUpdateJobRequest {
   targetIds?: number[] | null;
   /** Put every work this job saves under update watching. */
   watchSaved?: boolean | null;
+  /** 作者とシリーズの新作だけを見る軽い確認にする。改稿は見ない。 */
+  newWorksOnly?: boolean | null;
   /** Authors or series to check once, without adding them to the watch list. */
   adhocTargets?:
     | {
@@ -50,6 +52,7 @@ export interface UpdateJobSummary {
   status: UpdateJobStatus;
   scope: UpdateJobScope;
   mode: UpdateJobMode;
+  newWorksOnly?: boolean;
   /** Filled by the history list when one author, series, or work was checked. */
   subjectLabel?: string | null;
   subjectSource?: string | null;

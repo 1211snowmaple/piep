@@ -291,7 +291,7 @@ export function AppFrame({ children }: { children: ReactNode }) {
     if (location.pathname.startsWith("/collections")) return "コレクション";
     if (location.pathname.startsWith("/epub/templates")) return "テンプレートスタジオ";
     if (location.pathname.startsWith("/epub")) return "EPUB";
-    if (location.pathname.startsWith("/updates")) return "更新";
+    if (location.pathname.startsWith("/updates")) return "新着";
     if (location.pathname.startsWith("/operations")) return "操作履歴";
     if (location.pathname.startsWith("/diagnostics")) return "診断とメンテナンス";
     if (location.pathname.startsWith("/settings")) return "設定";
@@ -318,7 +318,7 @@ export function AppFrame({ children }: { children: ReactNode }) {
     { id: "save-fanbox", label: "FANBOXから保存", description: "内蔵ブラウザを開く", group: "保存と書き出し", onClick: () => navigate("/save/fanbox"), leftSection: <Icons.collect size={IconSize.nav} /> },
     { id: "epub", label: `EPUBキューを開く${epubQueue.length ? `（${epubQueue.length}件）` : ""}`, description: "書き出しを設定", group: "保存と書き出し", onClick: () => navigate("/epub"), leftSection: <Icons.epub size={IconSize.nav} /> },
     { id: "epub-templates", label: "テンプレートスタジオを開く", description: "EPUBの見た目と構成を編集", group: "保存と書き出し", onClick: () => navigate("/epub/templates"), leftSection: <Icons.epubTemplate size={IconSize.nav} /> },
-    { id: "updates", label: "更新を確認", description: "変更と新着をチェック", group: "管理", onClick: () => navigate("/updates"), leftSection: <Icons.updates size={IconSize.nav} /> },
+    { id: "updates", label: "新着を開く", description: "新作と改稿を確認", group: "管理", onClick: () => navigate("/updates"), leftSection: <Icons.updates size={IconSize.nav} /> },
     { id: "operations", label: "操作履歴を開く", description: "進行状況・再試行・ログ", group: "管理", onClick: () => navigate("/operations"), leftSection: <Icons.history size={IconSize.nav} /> },
     { id: "diagnostics", label: "ライブラリを診断", description: "保存状態・容量・検索の速さを調べる", group: "管理", onClick: () => navigate("/settings?section=diagnostics"), leftSection: <Icons.diagnostics size={IconSize.nav} /> },
     { id: "settings", label: "設定を開く", description: "接続・外観・ライブラリ", group: "管理", onClick: () => navigate("/settings"), leftSection: <Icons.settings size={IconSize.nav} /> },

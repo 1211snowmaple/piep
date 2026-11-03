@@ -1946,6 +1946,22 @@ select {
   font-family: "Noto Serif JP", "Yu Mincho", serif;
   line-height: 1.9;
 }
+/* 左右は同じ行の中で揃える。段落の先頭が同じ高さにあると、どこが違うのかを
+   目で往復せずに読める。 */
+.revision-diff__row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; min-height: 1.9em; }
+.revision-diff__side-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 16px;
+  padding-block: 2px 6px;
+  background: var(--mantine-color-body);
+  color: var(--mantine-color-dimmed);
+  font-family: var(--mantine-font-family);
+  font-size: var(--mantine-font-size-xs);
+}
 .revision-diff__position { min-width: 88px; justify-content: center; font-variant-numeric: tabular-nums; color: var(--mantine-color-dimmed); cursor: default; }
 .revision-diff__frame[data-overview] { display: grid; grid-template-columns: minmax(0, 1fr) 12px; gap: 6px; }
 /* Removed edits on the left lane, added on the right, like an editor's overview ruler. */

@@ -23,7 +23,7 @@ const SHELF_ICON: Record<LibraryShelf, LucideIcon> = {
   all: Icons.library,
   favorite: Icons.favorite,
   reading: Icons.read,
-  // 更新センターと同じ記号にする。「取得元が直した」と「それを見つける場所」が
+  // 新着の画面と同じ記号にする。「取得元が直した」と「それを見つける場所」が
   // 別の絵だと、同じ話をしていることが伝わらない。
   revised: Icons.updates,
 };
@@ -191,7 +191,7 @@ export function WorkspaceNav({ railed, onNavigate }: { railed: boolean; onNaviga
   const collectRows = [
     <Row key="pixiv" label="pixivから保存" icon={Icons.collect} glyph={<ProviderGlyph provider="pixiv" />} active={location.pathname === "/save/pixiv"} railed={railed} onSelect={() => go("/save/pixiv")} />,
     <Row key="fanbox" label="FANBOXから保存" icon={Icons.collect} glyph={<ProviderGlyph provider="fanbox" />} active={location.pathname === "/save/fanbox"} railed={railed} onSelect={() => go("/save/fanbox")} />,
-    <Row key="updates" label="更新を確認" icon={Icons.updates} active={location.pathname.startsWith("/updates") && !onAttention} railed={railed} onSelect={() => go("/updates")} />,
+    <Row key="updates" label="新着" icon={Icons.updates} active={location.pathname.startsWith("/updates") && !onAttention} railed={railed} onSelect={() => go("/updates")} />,
   ];
   const exportRows = [
     <Row key="epub" label="EPUBキュー" icon={Icons.epub} active={location.pathname === "/epub"} railed={railed} count={epubQueue.length || null} onSelect={() => go("/epub")} />,

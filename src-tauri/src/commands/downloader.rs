@@ -821,6 +821,17 @@ pub async fn fetch_pixiv_user_novels(
     fetch_pixiv_user_novels_since(user_id, refresh_token, None).await
 }
 
+/// 作者の一覧を遡るのを、ここで止めてよいか。
+///
+/// 一覧は新しい順で、ID は投稿の順に増える。ID が同じときだけでなく、前回の位置
+/// より古くなった時点でも止める。前回の作品が取得元で消えていても、全ページを
+/// 読みに行かないで済む。
+fn reached_last_seen(novel_id: u64, stop_source_id: Option<&str>) -> bool {
+    stop_source_id
+        .and_then(|stop| stop.parse::<u64>().ok())
+        .is_some_and(|stop| novel_id <= stop)
+}
+
 pub(crate) async fn fetch_pixiv_user_novels_since(
     user_id: String,
     refresh_token: String,
@@ -849,8 +860,7 @@ pub(crate) async fn fetch_pixiv_user_novels_since(
 
         let mut reached_stop = false;
         for novel in res.novels {
-            let id = novel.id.to_string();
-            if stop_source_id.is_some_and(|stop| stop == id) {
+            if reached_last_seen(novel.id, stop_source_id) {
                 reached_stop = true;
                 break;
             }
