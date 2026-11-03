@@ -1,4 +1,5 @@
 import { ActionIcon, Badge, Group, Menu, Text, Tooltip } from "@mantine/core";
+import { BetaBadge } from "@/components/BetaBadge";
 import { useAppNavigate } from "@/app/router";
 import { Icons, IconSize } from "@/lib/icons";
 
@@ -55,7 +56,7 @@ export function AssistLauncher({
         <Menu.Label>
           <Group gap="xs" wrap="nowrap">
             <Text inherit>{label}</Text>
-            <Badge size="xs" variant="light" color="yellow" tt="none">β</Badge>
+            <BetaBadge />
           </Group>
         </Menu.Label>
         {items.length === 0 && (

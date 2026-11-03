@@ -75,6 +75,7 @@ import { AppUpdateCard } from "@/features/settings/AppUpdateCard";
 import { AssistSection } from "@/features/settings/AssistSection";
 import { ServerSection } from "@/features/settings/ServerSection";
 import { LibrarySidebarSettings } from "./LibrarySidebarSettings";
+import { SectionIntro } from "./SectionIntro";
 import { SettingsNavigation } from "./SettingsNavigation";
 import { searchModes, useDefaultSearchMode } from "@/lib/searchPreferences";
 
@@ -446,10 +447,10 @@ export default function SettingsPage() {
   const nav = [
     { id: "connections", label: "サービス接続", description: "保存・更新に使うアカウント", icon: Icons.credentials, group: "接続とデータ", keywords: "pixiv FANBOX 認証 ログイン 再接続" },
     { id: "library", label: "保存とバックアップ", description: "保存先・書き出し・復元", icon: Icons.database, group: "接続とデータ", keywords: "ローカルライブラリ フォルダー 再取り込み" },
-    { id: "server", label: "サーバー（β）", description: "携帯で読む・本棚を送る", icon: Icons.server, group: "接続とデータ", keywords: "Android モバイル スマホ 外出先 Funnel 同期 piep-server" },
+    { id: "server", label: "サーバー", beta: true, description: "携帯で読む・本棚を送る", icon: Icons.server, group: "接続とデータ", keywords: "Android モバイル スマホ 外出先 Funnel 同期 piep-server" },
     { id: "appearance", label: "表示と操作", description: "テーマ・サイドバー・一覧", icon: Icons.appearance, group: "使いやすくする", keywords: "外観 文字 色 ページ 件数 高密度 ショートカット" },
     { id: "search", label: "検索", description: "探し方・検索データ", icon: Icons.search, group: "使いやすくする", keywords: "インデックス 索引 意味検索 GPU" },
-    { id: "assist", label: "AIの手伝い", description: "モデル・接続・利用する機能", icon: Icons.optimize, group: "使いやすくする", keywords: "推論 サーバー" },
+    { id: "assist", label: "AIの手伝い", beta: true, description: "モデル・接続・利用する機能", icon: Icons.optimize, group: "使いやすくする", keywords: "推論 サーバー" },
     { id: "diagnostics", label: "診断とメンテナンス", description: "保存状態・容量・修復", icon: Icons.diagnostics, group: "管理する", keywords: "性能 最適化 エラー 画像 重複" },
     { id: "about", label: "piepについて", description: "バージョン・アプリの更新", icon: Icons.info, group: "管理する", keywords: "アップデート リリース 拡張" },
   ];
@@ -481,8 +482,6 @@ export default function SettingsPage() {
     </div>
   );
 }
-
-function SectionIntro({ title, description }: { title: string; description: string }) { return <Box mb="lg"><Title order={2}>{title}</Title><Text c="dimmed" size="sm" mt={5}>{description}</Text></Box>; }
 
 type ConnectionInput = { source: "pixiv" | "fanbox"; mode: "web" | "manual"; values?: Record<string, string> };
 

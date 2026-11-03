@@ -157,6 +157,7 @@ test("AI beta disclosure stays visible in settings and the launcher", async ({ p
   await expect(beta).toBeVisible();
   await expect(beta).toHaveCSS("text-transform", "none");
   await expect(page.getByText("AIの手伝いと意味検索はβ版です", { exact: true })).toBeVisible();
+  await expect(page.locator(".settings-nav").getByText("β", { exact: true })).toHaveCount(2);
   await page.addStyleTag({ content: "*,*::before,*::after{animation:none!important;transition:none!important;caret-color:transparent!important}" });
   await page.evaluate(async () => { await document.fonts.ready; });
   await expect(page).toHaveScreenshot("settings-assist.png", { fullPage: true });
@@ -166,6 +167,10 @@ test("AI beta disclosure stays visible in settings and the launcher", async ({ p
   await expect(menu.getByText("β", { exact: true })).toHaveCSS("text-transform", "none");
   await menu.getByRole("menuitem", { name: "AIと意味検索の設定（β）" }).click();
   await expect(beta).toBeVisible();
+
+  await page.goto("/#/settings?section=server");
+  await expect(page.getByText("サーバーはβ版です", { exact: true })).toBeVisible();
+  await expect(beta).toHaveCSS("text-transform", "none");
 });
 
 test("collapsed save rail keeps its status and primary actions visible", async ({ page }, testInfo) => {

@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
-import { Alert, Badge, Box, Button, Card, Code, Group, Progress, Select, Stack, Switch, Text, TextInput, Textarea, Title } from "@mantine/core";
+import { Alert, Badge, Button, Card, Code, Group, Progress, Select, Stack, Switch, Text, TextInput, Textarea } from "@mantine/core";
 import { modals } from "@mantine/modals";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { QRCodeSVG } from "qrcode.react";
 import { errorMessage, formatBytes, formatNumber } from "@/lib/format";
+import { SectionIntro } from "./SectionIntro";
 import {
   serverConnectRemote,
   serverCreateReaderPairing,
@@ -71,10 +72,10 @@ export function ServerSection({ runtime }: { runtime: boolean }) {
   const remote = data?.remote ?? null;
   return (
     <Stack gap="lg">
-      <Box>
-        <Group gap="xs"><Title order={2}>サーバー</Title><Badge variant="light">β</Badge></Group>
-        <Text c="dimmed" size="sm" mt={5}>携帯から、家の外でも本棚を読めるようにします。常時動いている機械に単独サーバーを置くか、この PC をサーバーにします。</Text>
-      </Box>
+      <SectionIntro beta title="サーバー" description="携帯から、家の外でも本棚を読めるようにします。常時動いている機械に単独サーバーを置くか、この PC をサーバーにします。" />
+      <Alert color="yellow" title="サーバーはβ版です">
+        <Text size="sm">携帯との通信の決まりや保存の形式は、予告して変えることがあります。</Text>
+      </Alert>
       {!runtime && <Alert color="blue">サーバーの操作はデスクトップアプリで利用できます。</Alert>}
       {problem && <Alert color="red" title="操作できませんでした">{problem}</Alert>}
       {status.error && <Alert color="red" title="サーバーの状態を確認できません">{errorMessage(status.error)}</Alert>}
