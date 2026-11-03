@@ -207,26 +207,7 @@ fn require_device(ctx: &ServerContext, headers: &HeaderMap) -> Result<Authorized
     let device = bearer(headers)
         .and_then(|token| ctx.store.authorize(token))
         .ok_or_else(ApiError::unauthorized)?;
-    if let Some(user) = tailnet_user(headers) {
-        if let Err(error) = ctx.store.note_user(&device.id, user) {
-            log::warn!("利用者を記録できません: {error}");
-        }
-    }
     Ok(device)
-}
-
-/// Tailscale の識別ヘッダー。tailnet の中から来たときだけ付く。
-///
-/// 記録に使うだけで、認証には使わない。Tailscale を通らない要求なら自由に書けるからである。
-fn tailnet_user(headers: &HeaderMap) -> Option<&str> {
-    headers
-        .get("Tailscale-User-Login")
-        .and_then(|value| value.to_str().ok())
-        .filter(|user| {
-            !user.is_empty()
-                && user.len() <= 256
-                && user.bytes().all(|byte| byte.is_ascii_graphic())
-        })
 }
 
 fn require_admin(ctx: &ServerContext, headers: &HeaderMap) -> Result<AuthorizedDevice, ApiError> {

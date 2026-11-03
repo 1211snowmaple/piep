@@ -13,9 +13,10 @@ use std::time::{Duration, Instant};
 
 const TASK_NAME: &str = "piep-server";
 const DEFAULT_PORT_TEXT: &str = "38777";
-const COMPANION_FILES: [&str; 4] = [
+const COMPANION_FILES: [&str; 5] = [
     "msvcp140.dll",
     "msvcp140_1.dll",
+    "pdfium.dll",
     "vcruntime140.dll",
     "vcruntime140_1.dll",
 ];
@@ -198,11 +199,11 @@ fn complete_options(
         Some(exposure) => exposure,
         None => {
             println!();
-            println!("外からどう届かせますか。");
+            println!("携帯からの接続方法を選んでください。");
             println!(
-                "  1. トンネルやリバースプロキシの裏に置く（公開 URL で、どこからでも使えます）"
+                "  1. トンネルやリバースプロキシを経由する（公開 URL で、どこからでも使えます）"
             );
-            println!("  2. この機械の接続口で直接待ち受ける（届く範囲は、この機械のネットワーク次第です）");
+            println!("  2. この PC で直接待ち受ける（接続できる範囲は、この PC のネットワークによります）");
             match ask("番号", Some("1"))?.as_str() {
                 "1" => Exposure::Proxy,
                 "2" => Exposure::Direct,
@@ -215,7 +216,7 @@ fn complete_options(
         None => match exposure {
             Exposure::Proxy => ask("公開 URL（https://...）", None)?,
             Exposure::Direct => ask(
-                "この機械へ届く URL",
+                "この PC に接続する URL",
                 Some(&format!("https://{}:{DEFAULT_PORT_TEXT}/", host_name())),
             )?,
         },
@@ -432,7 +433,7 @@ async fn install_inner(options: InstallOptions) -> Result<String, String> {
         register_task(&paths)?;
         wait_for_ready(&paths).await?;
         println!();
-        println!("動き始めました。この機械を起動すると、自動で動きます。");
+        println!("動き始めました。この PC を起動すると、自動で動きます。");
     }
     command_admin_pair(&paths.root, url).await
 }

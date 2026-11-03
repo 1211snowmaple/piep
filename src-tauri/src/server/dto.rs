@@ -528,16 +528,22 @@ static LOCAL_PATH_ATTRIBUTE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"(?i)\bdata-local-path\s*=\s*"([^"]*)""#).expect("valid attribute regex")
 });
 
+static ATTACHMENT_ORIGINAL_BUTTON: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?is)\s*<button\b[^>]*\battachment-original\b[^>]*>.*?</button>"#)
+        .expect("valid button regex")
+});
+
 /// PC 版が付けたファイルパスを、当該作品の画像 ID に置き換える。
-/// 未知の参照はそのまま返さない。
+/// 未知の参照はそのまま返さない。添付の「原本を見る」は携帯では開けないので外す。
 pub fn mobile_page(page: ReaderContentPage, assets: &[AssetEntry]) -> Result<MobilePage, String> {
     let asset_ids: HashMap<String, i64> = assets
         .iter()
         .map(|asset| (escape_html_attribute(&asset.local_path), asset.id))
         .collect();
     let mut missing = false;
+    let readable = ATTACHMENT_ORIGINAL_BUTTON.replace_all(&page.html, "");
     let html = LOCAL_PATH_ATTRIBUTE
-        .replace_all(&page.html, |captures: &regex::Captures<'_>| {
+        .replace_all(&readable, |captures: &regex::Captures<'_>| {
             if let Some(id) = asset_ids.get(&captures[1]) {
                 format!(r#"data-asset-id="{id}""#)
             } else {
@@ -599,6 +605,23 @@ mod tests {
         assert!(!safe.html.contains("C:\\Users"));
         assert!(!safe.html.contains("data-local-path"));
         assert!(mobile_page(page, &[]).is_err());
+    }
+
+    #[test]
+    fn page_drops_the_attachment_original_button() {
+        let page = ReaderContentPage {
+            page: 0,
+            page_count: 1,
+            html: r#"<div class="attachment-notice">添付ファイル「a.pdf」から取り込んだ本文 <button type="button" class="attachment-original" data-local-path="C:\library\a.pdf" data-file-name="a.pdf">原本を見る</button></div><p>本文</p>"#.into(),
+            plain_text: "本文".into(),
+            total_plain_text_chars: 2,
+            source_page_starts: vec![0],
+        };
+        let safe = mobile_page(page, &[]).expect("button removed");
+        assert_eq!(
+            safe.html,
+            r#"<div class="attachment-notice">添付ファイル「a.pdf」から取り込んだ本文</div><p>本文</p>"#
+        );
     }
 
     #[test]

@@ -31,6 +31,8 @@ Copy-Item $Executable (Join-Path $stage 'piep-server.exe')
 foreach ($name in $companions) {
     Copy-Item (Join-Path $env:SystemRoot "System32/$name") (Join-Path $stage $name)
 }
+# 添付 PDF の本文を読むのに要る。読み込みは実行時なので、上の DLL の検査では気づけない。
+Copy-Item 'src-tauri/vendor/pdfium/pdfium.dll' (Join-Path $stage 'pdfium.dll')
 $zip = Join-Path $OutputDir "piep-server-$Version-windows-x64.zip"
 Remove-Item -Force $zip -ErrorAction SilentlyContinue
 Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip

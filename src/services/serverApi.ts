@@ -6,7 +6,6 @@ export interface ServerDevice {
   role: "reader" | "admin";
   createdAt: string;
   lastSeenAt: string | null;
-  lastUser: string | null;
 }
 
 export interface EmbeddedServerSettings {

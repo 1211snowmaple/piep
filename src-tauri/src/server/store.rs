@@ -55,8 +55,6 @@ pub struct DeviceSummary {
     pub role: Role,
     pub created_at: String,
     pub last_seen_at: Option<String>,
-    /// 最後に tailnet の中から使った利用者。認証には使わない。
-    pub last_user: Option<String>,
 }
 
 #[derive(Debug)]
@@ -140,8 +138,7 @@ impl ServerStore {
                  role TEXT NOT NULL,
                  token_hash BLOB NOT NULL,
                  created_at TEXT NOT NULL,
-                 last_seen_at TEXT,
-                 last_user TEXT
+                 last_seen_at TEXT
              );
              CREATE TABLE IF NOT EXISTS pairings (
                  secret_hash BLOB PRIMARY KEY,
@@ -182,6 +179,19 @@ impl ServerStore {
              CREATE INDEX IF NOT EXISTS idx_reading_cursor ON reading(cursor);",
         )
         .map_err(db_error)?;
+        // 0.33.0 が記録したメールアドレスを残さない。
+        let has_last_user = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('devices') WHERE name = 'last_user'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(db_error)?
+            > 0;
+        if has_last_user {
+            conn.execute_batch("ALTER TABLE devices DROP COLUMN last_user;")
+                .map_err(db_error)?;
+        }
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -326,7 +336,7 @@ impl ServerStore {
         let conn = self.connection()?;
         let mut stmt = conn
             .prepare(
-                "SELECT id, name, role, created_at, last_seen_at, last_user FROM devices ORDER BY created_at",
+                "SELECT id, name, role, created_at, last_seen_at FROM devices ORDER BY created_at",
             )
             .map_err(db_error)?;
         let rows = stmt
@@ -337,22 +347,10 @@ impl ServerStore {
                     role: Role::parse(&row.get::<_, String>(2)?).unwrap_or(Role::Reader),
                     created_at: row.get(3)?,
                     last_seen_at: row.get(4)?,
-                    last_user: row.get(5)?,
                 })
             })
             .map_err(db_error)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(db_error)
-    }
-
-    /// 端末を使った利用者を記録する。変わったときだけ書く。
-    pub fn note_user(&self, device_id: &str, user: &str) -> Result<(), String> {
-        self.connection()?
-            .execute(
-                "UPDATE devices SET last_user = ?1 WHERE id = ?2 AND last_user IS NOT ?1",
-                params![user, device_id],
-            )
-            .map_err(db_error)?;
-        Ok(())
     }
 
     pub fn revoke_device(&self, device_id: &str) -> Result<bool, String> {

@@ -74,7 +74,7 @@ fn note(paths: &ServerPaths, message: &str) {
 /// 待機中の版へ切り替える。切り替えた版を返す。
 fn switch_to_pending(paths: &ServerPaths) -> Result<String, String> {
     let pending =
-        read_version_file(&paths.pending_version()).ok_or("当てる版が書かれていません")?;
+        read_version_file(&paths.pending_version()).ok_or("更新先の版が書かれていません")?;
     if !paths.version_dir(&pending).join("piep-server.exe").exists() {
         return Err(format!("版 {pending} の実行ファイルがありません"));
     }
@@ -97,7 +97,7 @@ fn roll_back(paths: &ServerPaths, failed: &str, reason: &str) -> Result<(), Stri
         record.skipped.push(failed.to_string());
     }
     record.last_error = Some(format!(
-        "版 {failed} を当てられず、{previous} へ戻しました: {reason}"
+        "版 {failed} に更新できなかったので、{previous} に戻しました: {reason}"
     ));
     record.save(paths);
     Ok(())
@@ -214,7 +214,7 @@ pub fn run(paths: &ServerPaths) -> Result<i32, String> {
         match switch_to_pending(paths) {
             Ok(version) => Some(version),
             Err(error) => {
-                note(paths, &format!("更新を当てられません: {error}"));
+                note(paths, &format!("更新できません: {error}"));
                 let _ = fs::remove_file(paths.pending_version());
                 None
             }
@@ -266,7 +266,7 @@ pub fn run(paths: &ServerPaths) -> Result<i32, String> {
                     applying = Some(next);
                     backoff = Backoff::default();
                 }
-                Err(error) => note(paths, &format!("更新を当てられません: {error}")),
+                Err(error) => note(paths, &format!("更新できません: {error}")),
             },
             code => {
                 let wait = backoff.after_exit(started.elapsed());
