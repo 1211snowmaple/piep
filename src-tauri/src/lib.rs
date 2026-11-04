@@ -23,6 +23,9 @@ use std::sync::Arc;
 use tauri::Manager;
 
 const LIBRARY_LOCK_FILENAME: &str = ".piep-library.lock";
+/// 移行や後始末を走らせるスレッドの余裕。既定の 2MB では、メインスレッドで
+/// 動いていた頃より狭くなる。
+const STARTUP_THREAD_STACK_BYTES: usize = 8 * 1024 * 1024;
 
 /// Process-wide ownership of one library directory.
 ///
@@ -97,6 +100,102 @@ impl AppState {
     }
 }
 
+/// 棚を開いて、コマンドが使う状態を登録する。メインスレッドの外で走る。
+///
+/// 終わるまで画面は他のコマンドを呼ばない（`startup_wait_for_library`）。
+fn prepare_library(
+    app: &tauri::AppHandle,
+    app_data: &Path,
+    library_process_lock: LibraryProcessLock,
+) -> Result<(), String> {
+    let db_path = app_data.join("piep.db");
+    let storage_dir = app_data.join("downloads");
+
+    // 埋め込みモデルの置き場は、開く前に決めておく。既定は起動した場所
+    // なので、決めないと起動場所ごとに 465MB を落として置き去りにする。
+    database::semantic_index::set_model_cache_dir(&storage_dir);
+
+    // 添付 PDF を読むための pdfium。配布物では実行ファイルの隣に配られる
+    // （`tauri.conf.json` の `bundle.resources`）。見つからなくても起動は
+    // 止めない。**止めると、添付を持たない作品まで開けなくなる。**
+    match app.path().resolve(
+        "vendor/pdfium/pdfium.dll",
+        tauri::path::BaseDirectory::Resource,
+    ) {
+        // `resolve` は道を組み立てるだけで、在るかどうかは見ない。
+        // **同梱から漏れても、添付 PDF を開くまで誰も気づかない。**
+        // 起動時に一度だけ確かめて、記録に残す。
+        Ok(path) if path.is_file() => pdf::set_library_path(path),
+        Ok(path) => log::warn!(
+            "pdfium が同梱されていない。添付 PDF の本文は取り込めない: {}",
+            path.display()
+        ),
+        Err(error) => log::warn!("pdfium の置き場所を決められない: {error}"),
+    }
+
+    let db = Database::open(&db_path, &storage_dir)
+        .map_err(|e| format!("Failed to open database: {e}"))?;
+    let state = Arc::new(AppState::new_with_library_lock(db, library_process_lock));
+    // 中断した復元の後始末は、起動の条件にしない。片付かなかった分は
+    // 控えを残したまま次の起動でもう一度試せる。ここで止めると、読める
+    // 棚を持っている人が窓を開けられなくなる。
+    for unresolved in commands::archive::recover_interrupted_restores(&state) {
+        log::error!("前回の復元を回復できていません: {unresolved}");
+    }
+    // 分割復元はパートをまたぐと原子的にならない。途中で終わっていれば
+    // 棚は「書庫由来」と「元のまま」が混ざった状態なので、黙っていない。
+    match state.db.unfinished_restore_manifests() {
+        Ok(unfinished) => {
+            for (path, done, total) in unfinished {
+                log::warn!(
+                    "分割バックアップの復元が途中で終わっています（{done}/{total} パート）。同じマニフェストをもう一度開くと続きから再開します: {path}"
+                );
+            }
+        }
+        Err(error) => log::warn!("分割復元の記録を読めません: {error}"),
+    }
+    if let Err(e) = state.db.recover_update_jobs_on_startup() {
+        log::warn!("Failed to recover update jobs: {}", e);
+    }
+    // 終わったジョブは放っておくと溜まり続ける。起動時に一度だけ整理する。
+    match state.db.prune_update_jobs(
+        commands::update_jobs::KEEP_UPDATE_JOBS,
+        commands::update_jobs::KEEP_UPDATE_JOB_DAYS,
+    ) {
+        Ok(removed) if removed > 0 => log::info!("古い更新ジョブを{removed}件整理しました"),
+        Ok(_) => {}
+        Err(e) => log::warn!("Failed to prune update jobs: {}", e),
+    }
+
+    // デフォルトEPUBテンプレートの初期化
+    let templates_dir = app_data.join("templates");
+    std::fs::create_dir_all(&templates_dir)
+        .map_err(|e| format!("Failed to create templates dir: {e}"))?;
+    let tm = epub::template::TemplateManager::new(templates_dir);
+    if let Err(e) = tm.initialize_defaults() {
+        log::warn!("デフォルトテンプレートの初期化に失敗: {}", e);
+    }
+
+    // サーバーの機能が使えなくても、手元の本棚は開ける。
+    match server::desktop::DesktopServer::new(app_data) {
+        Ok(desktop_server) => {
+            let desktop_server = Arc::new(desktop_server);
+            desktop_server.start_background(Arc::clone(&state));
+            app.manage(desktop_server);
+        }
+        Err(e) => log::error!("サーバーの機能を初期化できません: {e}"),
+    }
+    app.manage(state);
+    log::info!("Database initialized at {:?}", db_path);
+    // The search index is derived data and has to look after itself:
+    // anything that left it behind is caught up in the background
+    // rather than waiting for someone to notice and press a button.
+    commands::database::start_automatic_index_maintenance(app.clone());
+    commands::database::start_automatic_cover_repair(app.clone());
+    commands::database::start_automatic_saved_asset_audit(app.clone());
+    Ok(())
+}
+
 // ============================================================
 // アプリ起動
 // ============================================================
@@ -117,14 +216,13 @@ pub fn run() -> tauri::Result<()> {
         // 上げる。入れ替えたあと再起動するために process も要る。
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .manage(commands::startup::StartupGate::default())
+        .manage(commands::startup::WindowSchemeFile::default())
         .setup(|app| {
-            // DB / ストレージの初期化
             let app_data = app
                 .path()
                 .app_data_dir()
                 .map_err(|e| std::io::Error::other(format!("Failed to get app data dir: {e}")))?;
-            let db_path = app_data.join("piep.db");
-            let storage_dir = app_data.join("downloads");
 
             std::fs::create_dir_all(&app_data).map_err(|e| {
                 std::io::Error::other(format!("Failed to create app data dir: {e}"))
@@ -134,96 +232,50 @@ pub fn run() -> tauri::Result<()> {
             // どれも失敗しうるのに、失敗したことがどこにも残らなかった。
             logging::install(&app_data);
 
-            // 埋め込みモデルの置き場は、開く前に決めておく。既定は起動した場所
-            // なので、決めないと起動場所ごとに 465MB を落として置き去りにする。
-            database::semantic_index::set_model_cache_dir(&storage_dir);
-
-            // 添付 PDF を読むための pdfium。配布物では実行ファイルの隣に配られる
-            // （`tauri.conf.json` の `bundle.resources`）。見つからなくても起動は
-            // 止めない。**止めると、添付を持たない作品まで開けなくなる。**
-            match app
-                .path()
-                .resolve("vendor/pdfium/pdfium.dll", tauri::path::BaseDirectory::Resource)
-            {
-                // `resolve` は道を組み立てるだけで、在るかどうかは見ない。
-                // **同梱から漏れても、添付 PDF を開くまで誰も気づかない。**
-                // 起動時に一度だけ確かめて、記録に残す。
-                Ok(path) if path.is_file() => pdf::set_library_path(path),
-                Ok(path) => log::warn!(
-                    "pdfium が同梱されていない。添付 PDF の本文は取り込めない: {}",
-                    path.display()
-                ),
-                Err(error) => log::warn!("pdfium の置き場所を決められない: {error}"),
-            }
-
             // Claim the whole library before SQLite, restore recovery, search
             // sidecars, or downloaded files can be opened by this process.
             let library_process_lock = LibraryProcessLock::acquire(&app_data)
                 .map_err(|e| std::io::Error::other(e.to_string()))?;
-            let db = Database::open(&db_path, &storage_dir)
-                .map_err(|e| std::io::Error::other(format!("Failed to open database: {e}")))?;
-            let state = Arc::new(AppState::new_with_library_lock(db, library_process_lock));
-            // 中断した復元の後始末は、起動の条件にしない。片付かなかった分は
-            // 控えを残したまま次の起動でもう一度試せる。ここで止めると、読める
-            // 棚を持っている人が窓を開けられなくなる。
-            for unresolved in commands::archive::recover_interrupted_restores(&state) {
-                log::error!("前回の復元を回復できていません: {unresolved}");
-            }
-            // 分割復元はパートをまたぐと原子的にならない。途中で終わっていれば
-            // 棚は「書庫由来」と「元のまま」が混ざった状態なので、黙っていない。
-            match state.db.unfinished_restore_manifests() {
-                Ok(unfinished) => {
-                    for (path, done, total) in unfinished {
-                        log::warn!(
-                            "分割バックアップの復元が途中で終わっています（{done}/{total} パート）。同じマニフェストをもう一度開くと続きから再開します: {path}"
-                        );
+
+            // 窓は設定から自動で作らせない（`create: false`）。作られた時点で色が
+            // 決まるので、前回の配色を読んでから自分で作る。
+            let window_config = app
+                .config()
+                .app
+                .windows
+                .first()
+                .cloned()
+                .ok_or_else(|| std::io::Error::other("Main window is not configured"))?;
+            tauri::WebviewWindowBuilder::from_config(app.handle(), &window_config)?
+                .background_color(commands::startup::window_background(&app_data))
+                .build()?;
+
+            // ここから先は棚の規模に比例して時間がかかる。`setup` はメインスレッド
+            // なので、ここで待つと窓が固まり、Windows が「応答なし」を付ける。
+            let handle = app.handle().clone();
+            std::thread::Builder::new()
+                .name("piep-startup".into())
+                .stack_size(STARTUP_THREAD_STACK_BYTES)
+                .spawn(move || {
+                    let started = std::time::Instant::now();
+                    let result = prepare_library(&handle, &app_data, library_process_lock);
+                    match &result {
+                        Ok(()) => log::info!(
+                            "棚の準備が終わりました: {} ms",
+                            started.elapsed().as_millis()
+                        ),
+                        Err(error) => log::error!("棚を開けません: {error}"),
                     }
-                }
-                Err(error) => log::warn!("分割復元の記録を読めません: {error}"),
-            }
-            if let Err(e) = state.db.recover_update_jobs_on_startup() {
-                log::warn!("Failed to recover update jobs: {}", e);
-            }
-            // 終わったジョブは放っておくと溜まり続ける。起動時に一度だけ整理する。
-            match state.db.prune_update_jobs(
-                commands::update_jobs::KEEP_UPDATE_JOBS,
-                commands::update_jobs::KEEP_UPDATE_JOB_DAYS,
-            ) {
-                Ok(removed) if removed > 0 => log::info!("古い更新ジョブを{removed}件整理しました"),
-                Ok(_) => {}
-                Err(e) => log::warn!("Failed to prune update jobs: {}", e),
-            }
-
-            // デフォルトEPUBテンプレートの初期化
-            let templates_dir = app_data.join("templates");
-            std::fs::create_dir_all(&templates_dir).map_err(|e| {
-                std::io::Error::other(format!("Failed to create templates dir: {e}"))
-            })?;
-            let tm = epub::template::TemplateManager::new(templates_dir);
-            if let Err(e) = tm.initialize_defaults() {
-                log::warn!("デフォルトテンプレートの初期化に失敗: {}", e);
-            }
-
-            // サーバーの機能が使えなくても、手元の本棚は開ける。
-            match server::desktop::DesktopServer::new(&app_data) {
-                Ok(desktop_server) => {
-                    let desktop_server = Arc::new(desktop_server);
-                    desktop_server.start_background(Arc::clone(&state));
-                    app.manage(desktop_server);
-                }
-                Err(e) => log::error!("サーバーの機能を初期化できません: {e}"),
-            }
-            app.manage(state);
-            log::info!("Database initialized at {:?}", db_path);
-            // The search index is derived data and has to look after itself:
-            // anything that left it behind is caught up in the background
-            // rather than waiting for someone to notice and press a button.
-            commands::database::start_automatic_index_maintenance(app.handle().clone());
-            commands::database::start_automatic_cover_repair(app.handle().clone());
-            commands::database::start_automatic_saved_asset_audit(app.handle().clone());
+                    handle
+                        .state::<commands::startup::StartupGate>()
+                        .finish(result);
+                })?;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            // 起動 (commands::startup)
+            commands::startup::startup_wait_for_library,
+            commands::startup::startup_remember_color_scheme,
             // サーバーモード (commands::server)
             commands::server::server_status,
             commands::server::server_embedded_start,
