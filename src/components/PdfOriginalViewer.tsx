@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Alert, Button, Group, Loader, Modal, Stack, Text } from "@mantine/core";
-import { keepPreviousData, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Icons, IconSize } from "@/lib/icons";
 import { renderPdfAttachmentPage, type PdfPageImage } from "@/services/dbApi";
 import { errorMessage } from "@/lib/format";
@@ -37,13 +37,23 @@ function pageKey(target: PdfOriginalTarget | null, page: number, width: number) 
  * **原本と引き比べられなければ、取り込みが正しいかを利用者が確かめられない。**
  */
 export function PdfOriginalViewer({ target, onClose }: { target: PdfOriginalTarget | null; onClose: () => void }) {
-  const [page, setPage] = useState(0);
+  const identity = target ? JSON.stringify([target.downloadId, target.localPath]) : null;
+  const [position, setPosition] = useState({ identity, page: 0 });
+  // 添付が変わった最初の描画から0ページ目を使う。effect で戻すと、それより
+  // 先に前のページ番号で描画・先読みを依頼してしまう。
+  const page = position.identity === identity ? position.page : 0;
+  const setPage = useCallback((change: (current: number) => number) => setPosition((current) => ({
+    identity,
+    page: change(current.identity === identity ? current.page : 0),
+  })), [identity]);
   const [width, setWidth] = useState(1200);
   const frameRef = useRef<HTMLDivElement | null>(null);
   const queryClient = useQueryClient();
 
-  // 別の添付を開いたら最初のページへ戻る。前の作品の続きから始まらないように。
-  useEffect(() => setPage(0), [target?.localPath]);
+  // 閉じたあと同じ添付を開き直した場合も、前のページへ戻らない。
+  useEffect(() => {
+    setPosition((current) => current.identity === identity ? current : { identity, page: 0 });
+  }, [identity]);
 
   useEffect(() => {
     const frame = frameRef.current;
@@ -61,7 +71,7 @@ export function PdfOriginalViewer({ target, onClose }: { target: PdfOriginalTarg
     queryFn: () => renderPdfAttachmentPage(target!.downloadId, target!.localPath, page, width),
     enabled: Boolean(target),
     // 送るたびに真っ白へ落とすと、紙面の位置を見失う。前のページを出したまま差し替える。
-    placeholderData: keepPreviousData,
+    placeholderData: (previous, query) => target && query?.queryKey[1] === target.downloadId && query.queryKey[2] === target.localPath ? previous : undefined,
     staleTime: PAGE_CACHE_MS,
   });
 
@@ -83,12 +93,19 @@ export function PdfOriginalViewer({ target, onClose }: { target: PdfOriginalTarg
   useEffect(() => {
     if (!target) return;
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === "ArrowRight" && canGoOn) setPage((value) => value + 1);
-      if (event.key === "ArrowLeft" && canGoBack) setPage((value) => Math.max(0, value - 1));
+      if (event.defaultPrevented || event.ctrlKey || event.metaKey || event.altKey) return;
+      if (event.key === "ArrowRight" && canGoOn) {
+        event.preventDefault();
+        setPage((value) => Math.min(pageCount - 1, value + 1));
+      }
+      if (event.key === "ArrowLeft" && canGoBack) {
+        event.preventDefault();
+        setPage((value) => Math.max(0, value - 1));
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [target, canGoBack, canGoOn]);
+  }, [target, canGoBack, canGoOn, pageCount, setPage]);
 
   const shown: PdfPageImage | undefined = pageQuery.data;
   return (
@@ -115,7 +132,7 @@ export function PdfOriginalViewer({ target, onClose }: { target: PdfOriginalTarg
             {pageCount > 0 ? `${page + 1} / ${pageCount} ページ` : "読み込んでいます"}
             {pageQuery.isFetching && pageCount > 0 ? "・表示しています" : ""}
           </Text>
-          <Button variant="default" size="xs" disabled={!canGoOn} onClick={() => setPage((value) => value + 1)} rightSection={<Icons.next size={IconSize.inline} />}>次のページ</Button>
+          <Button variant="default" size="xs" disabled={!canGoOn} onClick={() => setPage((value) => Math.min(pageCount - 1, value + 1))} rightSection={<Icons.next size={IconSize.inline} />}>次のページ</Button>
         </Group>
       </Stack>
     </Modal>

@@ -1,6 +1,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MantineProvider } from "@mantine/core";
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -29,13 +29,15 @@ function page(index: number) {
 
 function renderViewer() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  render(
+  const viewer = (current: typeof target | null) => (
     <MantineProvider>
       <QueryClientProvider client={client}>
-        <PdfOriginalViewer target={target} onClose={vi.fn()} />
+        <PdfOriginalViewer target={current} onClose={vi.fn()} />
       </QueryClientProvider>
-    </MantineProvider>,
+    </MantineProvider>
   );
+  const view = render(viewer(target));
+  return { ...view, show: (current: typeof target | null) => view.rerender(viewer(current)) };
 }
 
 describe("PdfOriginalViewer", () => {
@@ -77,6 +79,48 @@ describe("PdfOriginalViewer", () => {
     await screen.findByRole("img", { name: "本文.pdf の 3 ページ目" });
 
     expect(screen.getByRole("button", { name: /次のページ/ })).toBeDisabled();
+  });
+
+  it("閉じた添付を開き直すと、最初のページから表示する", async () => {
+    const view = renderViewer();
+    await screen.findByText("1 / 3 ページ");
+    await userEvent.click(screen.getByRole("button", { name: /次のページ/ }));
+    await screen.findByText("2 / 3 ページ");
+    view.show(null);
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    view.show(target);
+    expect(await screen.findByText("1 / 3 ページ")).toBeInTheDocument();
+  });
+
+  it.each([false, true])("別の添付には前の紙面とページ番号を引き継がない（同じパス: %s）", async (samePath) => {
+    let finish!: (value: ReturnType<typeof page>) => void;
+    dbApi.renderPdfAttachmentPage.mockImplementation((id: number, _path: string, index: number) => id === 7
+      ? Promise.resolve(page(index))
+      : new Promise<ReturnType<typeof page>>((resolve) => { finish = resolve; }));
+    const view = renderViewer();
+    await screen.findByRole("img", { name: "本文.pdf の 1 ページ目" });
+    await userEvent.click(screen.getByRole("button", { name: /次のページ/ }));
+    await screen.findByText("2 / 3 ページ");
+    const next = { downloadId: 8, localPath: samePath ? target.localPath : "C:/library/other.pdf", fileName: "別の添付.pdf" };
+    view.show(next);
+    expect(screen.queryByRole("img")).not.toBeInTheDocument();
+    await waitFor(() => expect(dbApi.renderPdfAttachmentPage).toHaveBeenCalledWith(8, next.localPath, 0, expect.any(Number)));
+    expect(dbApi.renderPdfAttachmentPage.mock.calls.filter(([id, , index]) => id === 8 && index !== 0)).toEqual([]);
+    await act(async () => { finish({ ...page(0), pageCount: 1, image: "data:image/webp;base64,other" }); });
+    expect(await screen.findByText("1 / 1 ページ")).toBeInTheDocument();
+  });
+
+  it("素早く複数のキーが届いても、総ページ数を越えない", async () => {
+    renderViewer();
+    await screen.findByRole("img", { name: "本文.pdf の 1 ページ目" });
+    await userEvent.click(screen.getByRole("button", { name: /次のページ/ }));
+    await screen.findByText("2 / 3 ページ");
+    act(() => {
+      fireEvent.keyDown(window, { key: "ArrowRight" });
+      fireEvent.keyDown(window, { key: "ArrowRight" });
+    });
+    await waitFor(() => expect(screen.getByText("3 / 3 ページ")).toBeInTheDocument());
+    expect(dbApi.renderPdfAttachmentPage.mock.calls.some(([, , index]) => index >= 3)).toBe(false);
   });
 
   it("says so when a page cannot be drawn, instead of showing an empty sheet", async () => {
