@@ -2,7 +2,9 @@
 
 use super::desktop::{DesktopServer, EmbeddedSettings};
 use super::http::{combined_router, reader_router};
-use super::standalone::{assemble, ServerPaths, StandaloneParts};
+use super::standalone::{
+    assemble, command_admin_pair, command_init, ServerPaths, StandaloneParts,
+};
 use super::store::{random_token, Role, ServerStore};
 use super::sync_receive::{BindEntry, CommitRequest, ManifestEntry, SyncError};
 use super::sync_send::{
@@ -554,6 +556,31 @@ fn standalone(root: &Path) -> (StandaloneParts, ServerPaths) {
     let paths = ServerPaths::new(&root.join("server")).expect("paths");
     fs::create_dir_all(paths.state()).expect("state");
     (assemble(&paths, None, None).expect("assemble"), paths)
+}
+
+#[tokio::test]
+async fn an_existing_admin_is_not_replaced_without_asking() {
+    let root = TestRoot::created("admin-guard");
+    let url = Some("https://server.example/".to_string());
+    let first: serde_json::Value =
+        serde_json::from_str(&command_init(&root.0, url.clone()).await.expect("init"))
+            .expect("payload");
+    let paths = ServerPaths::new(&root.0).expect("paths");
+    let store = ServerStore::open(&paths.store()).expect("store");
+    let admin = store
+        .consume_pairing(first["secret"].as_str().expect("secret"), "今の管理者")
+        .expect("pair");
+
+    let refused = command_admin_pair(&root.0, url.clone(), false).await;
+    assert!(refused.expect_err("refused").contains("--replace"));
+    assert!(command_init(&root.0, url.clone()).await.is_err());
+
+    let replacing = command_admin_pair(&root.0, url, true).await.expect("replace");
+    assert!(replacing.contains("secret"));
+    assert!(
+        store.authorize(&admin.token).is_some(),
+        "発行しただけでは締め出さない"
+    );
 }
 
 fn admin_secret(paths: &ServerPaths) -> String {

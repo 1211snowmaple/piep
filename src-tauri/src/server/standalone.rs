@@ -239,13 +239,22 @@ pub async fn command_init(data: &Path, url: Option<String>) -> Result<String, St
         fs::write(paths.config(), CONFIG_TEMPLATE)
             .map_err(|error| format!("設定を書けません: {error}"))?;
     }
-    command_admin_pair(data, url).await
+    command_admin_pair(data, url, false).await
 }
 
-pub async fn command_admin_pair(data: &Path, url: Option<String>) -> Result<String, String> {
+/// 管理者は 1 台だけで、登録すると前の管理者が接続できなくなる。動いている本拠を
+/// 誤って締め出さないよう、すでに管理者がいれば `replace` を求める。
+pub async fn command_admin_pair(
+    data: &Path,
+    url: Option<String>,
+    replace: bool,
+) -> Result<String, String> {
     let paths = ServerPaths::new(data)?;
     let config = load_config(&paths)?;
     let store = ServerStore::open(&paths.store())?;
+    if !replace && store.has_admin()? {
+        return Err(ADMIN_EXISTS.to_string());
+    }
     let url = url
         .or_else(|| config.public_url())
         .or_else(|| default_admin_url(&config))
@@ -560,6 +569,8 @@ pub async fn command_run(data: &Path) -> Result<i32, String> {
     Ok(EXIT_APPLY_UPDATE)
 }
 
+const ADMIN_EXISTS: &str = "管理者はすでに登録されています。新しく登録すると、今の管理者は接続できなくなります。管理者の PC を入れ替えるとき、または今の PC の接続を解除したあとだけ、--replace を付けて実行してください。";
+
 const USAGE: &str = "piep-server <command>
 
   install [--data <dir>] [--expose proxy|direct] [--url <url>] [--no-task]
@@ -568,7 +579,9 @@ const USAGE: &str = "piep-server <command>
   uninstall                              起動時の登録を消して止める。置き場所は消さない
   init --data <dir> [--url <url>]        置き場と設定だけを作り、管理者用の登録文字列を出す
   serve --data <dir>                     サーバーを動かす（落ちたら立ち上げ直す）
-  admin-pair --data <dir> [--url <url>]  管理者用の登録文字列を出し直す
+  admin-pair --data <dir> [--url <url>] [--replace]
+                                         管理者用の登録文字列を出し直す。管理者がいるときは
+                                         --replace が要る。使うと今の管理者は接続できなくなる
   status --data <dir>                    状態を出す
   --version                              版を出す
 
@@ -584,6 +597,7 @@ struct Arguments {
     expose: Option<install::Exposure>,
     no_task: bool,
     pause: bool,
+    replace: bool,
 }
 
 fn parse_arguments(args: &[String]) -> Result<Arguments, String> {
@@ -605,6 +619,7 @@ fn parse_arguments(args: &[String]) -> Result<Arguments, String> {
             }
             "--no-task" => parsed.no_task = true,
             "--pause" => parsed.pause = true,
+            "--replace" => parsed.replace = true,
             _ => return Err(USAGE.to_string()),
         }
     }
@@ -692,8 +707,15 @@ pub async fn main_from_args(args: Vec<String>) -> i32 {
                 Ok(0)
             }
             "admin-pair" => {
-                let payload =
-                    command_admin_pair(required_data(&parsed)?, parsed.url.clone()).await?;
+                let payload = command_admin_pair(
+                    required_data(&parsed)?,
+                    parsed.url.clone(),
+                    parsed.replace,
+                )
+                .await?;
+                if parsed.replace {
+                    println!("この文字列で登録すると、今の管理者は接続できなくなります。");
+                }
                 print_pairing(&payload);
                 Ok(0)
             }

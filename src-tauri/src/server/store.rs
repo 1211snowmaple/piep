@@ -332,6 +332,16 @@ impl ServerStore {
         Some(device)
     }
 
+    pub fn has_admin(&self) -> Result<bool, String> {
+        let conn = self.connection()?;
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM devices WHERE role = 'admin')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(db_error)
+    }
+
     pub fn list_devices(&self) -> Result<Vec<DeviceSummary>, String> {
         let conn = self.connection()?;
         let mut stmt = conn
