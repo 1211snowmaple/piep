@@ -192,7 +192,7 @@ function BookmarkControls({ bookmarks, addDisabled, onAdd, onOpen, onRemove }: {
             <Stack gap={4}>
               {bookmarks.map((bookmark) => (
                 <Group key={bookmark.id} gap={4} wrap="nowrap" align="flex-start">
-                  <Button variant="subtle" color="gray" size="compact-xs" h="auto" py={5} justify="flex-start" flex={1} miw={0} onClick={() => { setOpened(false); onOpen(bookmark); }}>
+                  <Button className="button-plain" variant="subtle" color="gray" size="compact-xs" h="auto" py={5} justify="flex-start" flex={1} miw={0} onClick={() => { setOpened(false); onOpen(bookmark); }}>
                     {/* 番号と割合だけでは、どれがどれだか分からなかった。 */}
                     <Stack gap={1} align="flex-start" miw={0} w="100%">
                       <Text size="xs" fw={700}>{bookmark.label}</Text>

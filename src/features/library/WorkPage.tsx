@@ -26,12 +26,14 @@ import {
   ThemeIcon,
   Title,
   Tooltip,
+  Indicator,
 } from "@mantine/core";
 import { modals } from "@mantine/modals";
 import { notifications } from "@mantine/notifications";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Icons, IconSize } from "@/lib/icons";
 import { ActionBar } from "@/components/ActionBar";
+import { EpubQueueGlyph } from "@/components/EpubQueueGlyph";
 import { Note } from "@/components/Note";
 import { runSingleCheck } from "@/features/updates/startSingleCheck";
 import { AppLink, useAppNavigate, useAppRouter, useAppSearchParams, useReturnTo, useRouteParams } from "@/app/router";
@@ -458,6 +460,10 @@ export default function WorkPage() {
   const assets = [...(assetsQuery.data ?? []), ...(assetVersion === null ? addedImages : [])];
   const visibleAssets = assets.slice(0, visibleAssetCount);
   const queued = isQueuedForEpub(work.id);
+  const favoriteLabel = work.favorite ? "お気に入りを解除" : "お気に入りに追加";
+  const queueLabel = queued ? "EPUBキューから外す" : "EPUBキューに追加";
+  const collectionCount = workCollectionsQuery.data?.length ?? 0;
+  const collectionLabel = collectionCount ? `コレクション（${collectionCount}件に追加済み）` : "コレクションに追加";
 
   const deleteWork = () => modals.openConfirmModal({
     title: "この作品を削除しますか？",
@@ -528,18 +534,14 @@ export default function WorkPage() {
                 <Group justify="flex-end" align="flex-start" wrap="nowrap" className="work-hero__toprow">
                   <Box className="work-hero__utility">
                     <ActionBar
-                      label="作品の操作"
+                      label="作品の外へ"
                       items={[
                         { key: "in-app", label: "アプリ内で開く", icon: Icons.inAppBrowser, onClick: openSourceInApp },
                         { key: "browser", label: "ブラウザで開く", icon: Icons.externalLink, onClick: openSource },
                         { key: "folder", label: "保存フォルダー", icon: Icons.openFolder, onClick: openSavedFolder },
-                        // 塗るのは下の「読む」だけ。上下の両方が塗ってあると、どちらが
-                        // この画面の主な操作なのか読み取れない。
                         { key: "refresh", label: "更新を確認", icon: Icons.watch, onClick: () => runSingleCheck({ kind: "work", workId: work.id, label: work.title }, () => navigate("/updates")) },
                       ]}
-                    >
-                      <Menu position="bottom-end"><Menu.Target><Tooltip label="その他"><ActionIcon variant="subtle" color="gray" size="lg" aria-label="作品のその他の操作"><Icons.more size={IconSize.action} /></ActionIcon></Tooltip></Menu.Target><Menu.Dropdown><Menu.Item color="red" leftSection={<Icons.delete size={IconSize.menu} />} onClick={deleteWork}>作品を削除</Menu.Item></Menu.Dropdown></Menu>
-                    </ActionBar>
+                    />
                   </Box>
                 </Group>
                 <Box>
@@ -561,7 +563,7 @@ export default function WorkPage() {
                     variant="subtle"
                     color="gray"
                     px={0}
-                    className="work-hero__author-link"
+                    className="work-hero__author-link button-plain"
                     leftSection={<Avatar src={getAssetUrl(work.personIconPath)} size={22} radius="xl" color="gray"><Icons.person size={IconSize.inline} /></Avatar>}
                     onClick={() => navigate(`/people/${encodeURIComponent(work.source)}/${encodeURIComponent(work.personId || work.authorId)}`)}
                   >
@@ -570,33 +572,38 @@ export default function WorkPage() {
                 </Group>
                 <Group gap={8} className="work-hero__tags">{work.tags.map((tag) => <Badge key={tag} size="md" variant="light" color="gray" component={AppLink} className="work-hero__tag" to={`/library?q=${encodeURIComponent(`tag:${tag}`)}`}>#{tag}</Badge>)}</Group>
               </Stack>
-              {/* 情報は左、操作は右。主操作の「読む」は列の右端に置く（docs/policy/05-frontend.md）。 */}
+              {/* 情報は左、操作は右。列の中は読むが先頭で、カードと同じ（docs/policy/05-frontend.md）。 */}
               <div className="work-hero__actionbar">
                 <Group gap="md" style={{ rowGap: 2 }} className="work-hero__facts">
                   <Text size="sm" c="dimmed"><Icons.publishedDate size={IconSize.menu} />公開 {formatDate(work.sourceCreatedAt)}</Text>
                   <Text size="sm" c="dimmed"><Icons.textLength size={IconSize.menu} />{doc.isEdited && "取得元 "}{formatNumber(work.textLength)}字</Text>
                   {(work.assetCount > 0 || addedImages.length > 0) && <Text size="sm" c="dimmed"><Icons.assets size={IconSize.menu} />画像・添付 {work.assetCount}件{addedImages.length > 0 && `・編集で追加 ${addedImages.length}件`}</Text>}
                 </Group>
-                <Group gap={6} wrap="wrap" justify="flex-end" className="work-hero__actions">
-                  {/* 列の先頭。読むや編集のように別の画面へ進まず、ここで印が変わるだけ。 */}
-                  <Tooltip label={work.favorite ? "お気に入りを解除" : "お気に入りに追加"}><ActionIcon className="work-hero__favorite" size={38} variant="subtle" color={work.favorite ? "red" : "gray"} style={{ "--ai-color": work.favorite ? "var(--flag-favorite)" : "var(--flag-off)", "--ai-bg": "transparent" }} aria-label={work.favorite ? "お気に入りを解除" : "お気に入りに追加"} aria-pressed={work.favorite} disabled={mutate.isPending} onClick={() => mutate.mutate({ favorite: !work.favorite })}><Icons.favorite size={IconSize.nav} fill={work.favorite ? "currentColor" : "none"} /></ActionIcon></Tooltip>
-                  <Menu position="bottom-end" width={280}>
-                    <Menu.Target><Button className="work-hero__action" variant="default" leftSection={<Icons.collection size={IconSize.action} />}>コレクション{workCollectionsQuery.data?.length ? ` ${workCollectionsQuery.data.length}` : ""}</Button></Menu.Target>
-                    <Menu.Dropdown>
-                      <Menu.Label>コレクションに追加</Menu.Label>
-                      {(allCollectionsQuery.data ?? []).length === 0 ? <Menu.Item disabled>コレクションがありません</Menu.Item> : (allCollectionsQuery.data ?? []).map((collection) => {
-                        const included = workCollectionsQuery.data?.some((value) => value.id === collection.id) ?? false;
-                        return <Menu.Item key={collection.id} disabled={included || addToCollectionMutation.isPending} leftSection={included ? <Icons.confirm size={IconSize.menu} /> : <Icons.collection size={IconSize.menu} />} onClick={() => addToCollectionMutation.mutate(collection.id)}>{collection.name}{included ? "（追加済み）" : ""}</Menu.Item>;
-                      })}
-                      <Menu.Divider />
-                      <Menu.Item leftSection={<Icons.collectionSuggest size={IconSize.menu} />} onClick={() => navigate(`/library?tab=collections&suggest=${work.id}`)}>関連作品からひな型を作る</Menu.Item>
-                      <Menu.Item leftSection={<Icons.add size={IconSize.menu} />} onClick={() => navigate("/library?tab=collections")}>新しいコレクションを作る</Menu.Item>
-                    </Menu.Dropdown>
-                  </Menu>
-                  {/* One glyph in both states, as on the cards: the label already says which way the press goes. */}
-                  <Button className="work-hero__action" variant={queued ? "filled" : "default"} color="leaf" leftSection={<Icons.epubAdd size={IconSize.action} />} onClick={() => queued ? removeFromEpubQueue(work.id) : addToEpubQueue(work.id)}>{queued ? "EPUB追加済み" : "EPUB"}</Button>
-                  <Button className="work-hero__action" variant="default" leftSection={<Icons.edit size={IconSize.action} />} onClick={() => navigate(`/editor/${work.id}`)}>編集</Button>
-                  <Button className="work-hero__action" leftSection={<Icons.read size={IconSize.action} />} onClick={() => navigate(`/reader/${work.id}`)}>読む</Button>
+                <Group gap="md" wrap="wrap" justify="flex-end" className="work-hero__actions">
+                  {/* カードと同じく読むが先頭。近いものを寄せ、読むを一番横長にする。 */}
+                  <Group gap={6} wrap="nowrap" role="group" aria-label="中身へ進む">
+                    <Button className="work-hero__action work-hero__read" leftSection={<Icons.read size={IconSize.action} />} onClick={() => navigate(`/reader/${work.id}`)}>読む</Button>
+                    <Tooltip label="編集"><ActionIcon className="work-hero__action" variant="default" size={38} aria-label="編集" onClick={() => navigate(`/editor/${work.id}`)}><Icons.edit size={IconSize.action} /></ActionIcon></Tooltip>
+                  </Group>
+                  <Group gap={6} wrap="nowrap" role="group" aria-label="手元の印と置き場">
+                    {/* 色の付け方はカードと同じ。入っているときだけ、形を塗り、同じ色の淡い地を敷く。 */}
+                    <Tooltip label={favoriteLabel}><ActionIcon className="work-hero__action" size={38} variant="default" style={work.favorite ? { "--ai-color": "var(--flag-favorite)", "--ai-bg": "var(--flag-favorite-bg)" } : undefined} aria-label={favoriteLabel} aria-pressed={work.favorite} disabled={mutate.isPending} onClick={() => mutate.mutate({ favorite: !work.favorite })}><Icons.favorite size={IconSize.action} fill={work.favorite ? "currentColor" : "none"} /></ActionIcon></Tooltip>
+                    <Tooltip label={queueLabel}><ActionIcon className="work-hero__action" size={38} variant="default" style={queued ? { "--ai-color": "var(--flag-epub)", "--ai-bg": "var(--flag-epub-bg)" } : undefined} aria-label={queueLabel} aria-pressed={queued} onClick={() => queued ? removeFromEpubQueue(work.id) : addToEpubQueue(work.id)}><EpubQueueGlyph queued={queued} /></ActionIcon></Tooltip>
+                    <Menu position="bottom-end" width={280}>
+                      <Menu.Target><Tooltip label={collectionLabel}><Indicator disabled={!collectionCount} label={collectionCount} size={16} offset={3} color="gray"><ActionIcon className="work-hero__action" variant="default" size={38} aria-label={collectionLabel}><Icons.collection size={IconSize.action} /></ActionIcon></Indicator></Tooltip></Menu.Target>
+                      <Menu.Dropdown>
+                        <Menu.Label>コレクションに追加</Menu.Label>
+                        {(allCollectionsQuery.data ?? []).length === 0 ? <Menu.Item disabled>コレクションがありません</Menu.Item> : (allCollectionsQuery.data ?? []).map((collection) => {
+                          const included = workCollectionsQuery.data?.some((value) => value.id === collection.id) ?? false;
+                          return <Menu.Item key={collection.id} disabled={included || addToCollectionMutation.isPending} leftSection={included ? <Icons.confirm size={IconSize.menu} /> : <Icons.collection size={IconSize.menu} />} onClick={() => addToCollectionMutation.mutate(collection.id)}>{collection.name}{included ? "（追加済み）" : ""}</Menu.Item>;
+                        })}
+                        <Menu.Divider />
+                        <Menu.Item leftSection={<Icons.collectionSuggest size={IconSize.menu} />} onClick={() => navigate(`/library?tab=collections&suggest=${work.id}`)}>関連作品からひな型を作る</Menu.Item>
+                        <Menu.Item leftSection={<Icons.add size={IconSize.menu} />} onClick={() => navigate("/library?tab=collections")}>新しいコレクションを作る</Menu.Item>
+                      </Menu.Dropdown>
+                    </Menu>
+                  </Group>
+                  <Menu position="bottom-end"><Menu.Target><Tooltip label="その他"><ActionIcon variant="subtle" color="gray" size={38} aria-label="作品のその他の操作"><Icons.more size={IconSize.action} /></ActionIcon></Tooltip></Menu.Target><Menu.Dropdown><Menu.Item color="red" leftSection={<Icons.delete size={IconSize.menu} />} onClick={deleteWork}>作品を削除</Menu.Item></Menu.Dropdown></Menu>
                 </Group>
               </div>
             </Stack>
