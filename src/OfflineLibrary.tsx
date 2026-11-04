@@ -1,19 +1,21 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { isTauri } from "@tauri-apps/api/core";
-import { BookOpen, UserRound } from "lucide-react";
-import { enqueueCoverRequest, WorkThumbnail } from "./WorkThumbnail";
+import { WorkThumbnail } from "./WorkThumbnail";
 import { WorkCard } from "./WorkCard";
 import { VirtualWorkList } from "./VirtualWorkList";
 import { ProviderMark } from "./ProviderMark";
 import { CollectionArtwork } from "./CollectionArtwork";
-import { DataUrlCache } from "./DataUrlCache";
-import { deleteOfflineIssue, getOfflineEntityCover, listOfflineIssues, listOfflineWorks, type OfflineIssue, type OfflineWork, type PcCollection } from "./pcApi";
+import { GroupArtwork } from "./LibraryGroups";
+import { savedEntityCoverUrl } from "./images";
+import { useAppNavigation, type OfflinePageState, type OfflineTab } from "./appHistory";
+import { SortMenu } from "./SortMenu";
+import { sortOfflineWorks, type FixedSort } from "./librarySort";
+import { deleteOfflineIssue, listOfflineIssues, listOfflineWorks, type OfflineIssue, type OfflineWork, type PcCollection } from "./pcApi";
 
-type OfflineTab = "works" | "people" | "series" | "collections";
 type SavedGroup = { id: string; name: string; works: OfflineWork[]; cover: OfflineWork; coverWorkId?: number | null; collection?: PcCollection };
 const emptySearches: Record<OfflineTab, string> = { works: "", people: "", series: "", collections: "" };
-const savedGroupCoverCache = new DataUrlCache(8 * 1024 * 1024);
-const invalidSavedGroupCovers = new Set<string>();
+// 戻ったときに「確認しています」を挟まない。中身は裏で確かめ直す。
+let lastWorks: OfflineWork[] | null = null;
 
 function hasRepresentativeCover(item: OfflineWork, kind: "people" | "series", groupId: string): boolean {
   const work = item.work;
@@ -86,59 +88,29 @@ function savedGroups(items: OfflineWork[], kind: Exclude<OfflineTab, "works">): 
 }
 
 function SavedGroupArtwork({ group, kind }: { group: SavedGroup; kind: "people" | "series" }) {
-  const workId = group.cover.work.id;
   const hasImage = hasRepresentativeCover(group.cover, kind, group.id);
-  const cacheKey = `${kind}:${group.id}:${workId}:${group.cover.savedAtMs}`;
-  const node = useRef<HTMLSpanElement>(null);
-  const [image, setImage] = useState<string | null>(null);
-  useEffect(() => {
-    setImage(null);
-    if (!hasImage || !isTauri() || !node.current || invalidSavedGroupCovers.has(cacheKey)) return;
-    let alive = true;
-    let visible = false;
-    let pending = false;
-    const show = () => {
-      const cached = savedGroupCoverCache.get(cacheKey);
-      if (cached) { setImage(cached); return; }
-      if (pending) return;
-      pending = true;
-      void enqueueCoverRequest(() => getOfflineEntityCover(workId, kind))
-        .then((asset) => {
-          const url = `data:${asset.mimeType};base64,${asset.base64}`;
-          savedGroupCoverCache.set(cacheKey, url);
-          if (alive && visible) setImage(url);
-        })
-        .catch(() => { if (alive) setImage(null); })
-        .finally(() => { pending = false; });
-    };
-    if (typeof IntersectionObserver === "undefined") { visible = true; show(); return () => { alive = false; }; }
-    const observer = new IntersectionObserver((entries) => {
-      visible = entries.some((entry) => entry.isIntersecting);
-      if (visible) show();
-      else setImage(null);
-    }, { rootMargin: "180px" });
-    observer.observe(node.current);
-    return () => { alive = false; observer.disconnect(); };
-  }, [cacheKey, workId, kind, hasImage]);
-  return <span className={`group-card-art group-card-art--${kind}`} ref={node} aria-hidden="true">{image ? <img src={image} alt="" loading="lazy" decoding="async" onError={() => { invalidSavedGroupCovers.add(cacheKey); savedGroupCoverCache.delete(cacheKey); setImage(null); }} /> : kind === "people" ? <UserRound /> : <BookOpen />}</span>;
+  return <GroupArtwork kind={kind} src={hasImage ? savedEntityCoverUrl(group.cover.work.id, kind, group.cover.savedAtMs) : null} />;
 }
 
-export function OfflineLibrary({ onOpenWork, onOpenDetail, onShowPc, savedRevision, pagingMode }: {
+export function OfflineLibrary({ page, onOpenWork, onOpenDetail, onShowPc, savedRevision, pagingMode, rememberedSort, onRememberedSortChange }: {
+  page: OfflinePageState;
   onOpenWork: (work: OfflineWork) => void;
   onOpenDetail: (work: OfflineWork) => void;
   onShowPc: () => void;
   savedRevision: number;
   pagingMode: "auto" | "pages";
+  rememberedSort: FixedSort;
+  onRememberedSortChange: (sort: FixedSort) => void;
 }) {
-  const [works, setWorks] = useState<OfflineWork[]>([]);
+  const navigation = useAppNavigation();
+  const { tab, groupId: selectedGroup } = page;
+  const [works, setWorks] = useState<OfflineWork[]>(lastWorks ?? []);
   const [issues, setIssues] = useState<OfflineIssue[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(lastWorks === null);
   const [problem, setProblem] = useState<string | null>(null);
   const [issuesProblem, setIssuesProblem] = useState<string | null>(null);
   const [loadRevision, setLoadRevision] = useState(0);
   const [deletingIssueId, setDeletingIssueId] = useState<number | null>(null);
-  const [tab, setTab] = useState<OfflineTab>("works");
-  const [selectedGroup, setSelectedGroup] = useState<string | null>(null);
   const [searchInputs, setSearchInputs] = useState<Record<OfflineTab, string>>(emptySearches);
   const [queries, setQueries] = useState<Record<OfflineTab, string>>(emptySearches);
   const [groupSearchInput, setGroupSearchInput] = useState("");
@@ -148,13 +120,13 @@ export function OfflineLibrary({ onOpenWork, onOpenDetail, onShowPc, savedRevisi
   useEffect(() => {
     if (!isTauri()) { setLoading(false); return; }
     let alive = true;
-    setLoading(true);
+    setLoading(lastWorks === null);
     setProblem(null);
     setIssuesProblem(null);
     void Promise.allSettled([listOfflineWorks(), listOfflineIssues()])
       .then(([worksResult, issuesResult]) => {
         if (!alive) return;
-        if (worksResult.status === "fulfilled") setWorks(worksResult.value);
+        if (worksResult.status === "fulfilled") { lastWorks = worksResult.value; setWorks(worksResult.value); }
         else setProblem("保存した作品一覧を読み込めませんでした。保存状態を確認して、もう一度お試しください。");
         if (issuesResult.status === "fulfilled") setIssues(issuesResult.value);
         else setIssuesProblem("読み込めない保存データを確認できませんでした。もう一度確認してください。");
@@ -189,7 +161,8 @@ export function OfflineLibrary({ onOpenWork, onOpenDetail, onShowPc, savedRevisi
   const query = selected ? groupQuery : queries[tab];
   const needle = query.toLocaleLowerCase();
   const matchingGroups = needle ? groups.filter((group) => group.name.toLocaleLowerCase().includes(needle)) : groups;
-  const allVisibleWorks = tab === "works" ? works : selected?.works ?? [];
+  // シリーズやコレクションの中は、そのグループ自身の順を保つ。
+  const allVisibleWorks = tab === "works" ? sortOfflineWorks(works, rememberedSort) : selected?.works ?? [];
   const visibleWorks = needle ? allVisibleWorks.filter((item) => `${item.work.title} ${item.work.authorName} ${item.work.seriesTitle ?? ""} ${item.work.tags.join(" ")}`.toLocaleLowerCase().includes(needle)) : allVisibleWorks;
   const pageCount = Math.max(1, Math.ceil(visibleWorks.length / 20));
   const pagedWorks = pagingMode === "pages" ? visibleWorks.slice((currentPage - 1) * 20, currentPage * 20) : visibleWorks;
@@ -210,7 +183,7 @@ export function OfflineLibrary({ onOpenWork, onOpenDetail, onShowPc, savedRevisi
   useEffect(() => { setCurrentPage(1); }, [query, tab, selectedGroup, pagingMode]);
 
   return <>
-    <form className="pc-search-form pc-library-search" onSubmit={(event) => { event.preventDefault(); submitSearch(); }}><input type="search" aria-label={`${searchTarget}を検索`} value={searchInput} onChange={(event) => { const next = event.target.value; if (selected) setGroupSearchInput(next); else setSearchInputs((previous) => ({ ...previous, [tab]: next })); }} placeholder={`${searchTarget}を検索`} /><button className="primary-button" type="submit">検索</button></form>
+    <form className="pc-search-form pc-library-search" onSubmit={(event) => { event.preventDefault(); submitSearch(); }}><input type="search" aria-label={`${searchTarget}を検索`} value={searchInput} onChange={(event) => { const next = event.target.value; if (selected) setGroupSearchInput(next); else setSearchInputs((previous) => ({ ...previous, [tab]: next })); }} placeholder={`${searchTarget}を検索`} />{tab === "works" && <SortMenu current={rememberedSort} onSelect={(sort) => { if (sort !== "standard") onRememberedSortChange(sort); }} />}<button className="primary-button" type="submit">検索</button></form>
     <div className="offline-library-heading"><strong>保存した作品</strong><span>{loading ? "確認中…" : problem || issuesProblem ? "保存一覧を確認できません" : issues.length ? "読み込めない保存データがあります" : `${works.length} 作品`}</span></div>
     {problem && <div className="inline-alert" role="alert">{problem}</div>}
     {problem && <button className="secondary-button offline-retry" type="button" onClick={() => setLoadRevision((revision) => revision + 1)} disabled={loading}>{loading ? "確認中…" : "もう一度確認"}</button>}
@@ -221,14 +194,14 @@ export function OfflineLibrary({ onOpenWork, onOpenDetail, onShowPc, savedRevisi
       {issues.map((issue) => <div className="offline-issue-row" key={issue.workId}><span>作品番号 {issue.workId} の保存データを読み込めません</span><button className="secondary-button" type="button" disabled={deletingIssueId === issue.workId} onClick={() => void removeUnreadableWork(issue.workId)}>{deletingIssueId === issue.workId ? "削除中…" : "このデータを削除"}</button></div>)}
       {issuesProblem && <button className="secondary-button offline-retry" type="button" onClick={() => setLoadRevision((revision) => revision + 1)} disabled={loading}>{loading ? "確認中…" : "一覧を再確認"}</button>}
     </section>}
-    <nav className="library-tabs" aria-label="端末内のライブラリの種類">{(["works", "people", "series", "collections"] as const).map((id) => <button key={id} type="button" className={tab === id ? "active" : ""} aria-current={tab === id ? "page" : undefined} onClick={() => { setTab(id); setSelectedGroup(null); document.querySelector<HTMLElement>(".main-content")?.scrollTo({ top: 0, behavior: "instant" }); }}>{tabLabel[id]}</button>)}</nav>
+    <nav className="library-tabs" aria-label="端末内のライブラリの種類">{(["works", "people", "series", "collections"] as const).map((id) => <button key={id} type="button" className={tab === id ? "active" : ""} aria-current={tab === id ? "page" : undefined} onClick={() => navigation.push({ page: { name: "offline", tab: id, groupId: null } })}>{tabLabel[id]}</button>)}</nav>
     {loading ? <section className="empty-card"><p>保存した作品を確認しています…</p></section> : <>
-      {selected && <div className="group-context"><button className="group-back" onClick={() => { setSelectedGroup(null); document.querySelector<HTMLElement>(".main-content")?.scrollTo({ top: 0, behavior: "instant" }); }}>← {tabLabel[tab]}一覧</button><strong>{selected.name}</strong><span>端末に保存した {selected.works.length} 作品</span></div>}
-      {tab !== "works" && !selected && <div className="group-grid offline-group-grid">{matchingGroups.map((group) => <button className="group-card" key={group.id} onClick={() => { setSelectedGroup(group.id); setGroupSearchInput(""); setGroupQuery(""); document.querySelector<HTMLElement>(".main-content")?.scrollTo({ top: 0, behavior: "instant" }); }}>
+      {selected && <div className="group-context"><button className="group-back" onClick={navigation.back}>← 戻る</button><strong>{selected.name}</strong><span>端末に保存した {selected.works.length} 作品</span></div>}
+      {tab !== "works" && !selected && <div className="group-grid offline-group-grid">{matchingGroups.map((group) => <button className="group-card" key={group.id} onClick={() => { setGroupSearchInput(""); setGroupQuery(""); navigation.push({ page: { name: "offline", tab, groupId: group.id } }); }}>
         {tab === "collections" ? <span className="offline-group-art">{group.collection?.coverMode ? <CollectionArtwork collection={group.collection} offlineWorks={group.works} /> : <WorkThumbnail work={group.cover.work} offline snapshotGeneration={group.cover.savedAtMs} />}</span> : <SavedGroupArtwork group={group} kind={tab} />}
         <span className="group-card-text"><strong>{group.name}</strong><small className="group-card-meta">{tab !== "collections" && <ProviderMark source={group.cover.work.source} compact />}<span>端末に保存した {group.works.length} 作品</span></small></span><span className="work-arrow" aria-hidden="true">›</span>
       </button>)}</div>}
-      {(tab === "works" || selected) && visibleWorks.length > 0 && <VirtualWorkList items={pagedWorks} itemKey={(item) => item.work.id} renderItem={(item) => <div className="offline-row">
+      {(tab === "works" || selected) && visibleWorks.length > 0 && <VirtualWorkList listKey={`offline:${tab}:${selectedGroup ?? ""}:${query}:${rememberedSort}:${currentPage}`} items={pagedWorks} itemKey={(item) => item.work.id} renderItem={(item) => <div className="offline-row">
         <WorkCard work={item.work} offline offlineAuthorCover={item.hasAuthorCover} snapshotGeneration={item.savedAtMs} onRead={() => onOpenWork(item)} onDetail={() => onOpenDetail(item)} prefix={`${item.pageCount} ページ`} />
       </div>} />}
       {pagingMode === "pages" && (tab === "works" || selected) && visibleWorks.length > 20 && <nav className="numbered-pager" aria-label="端末内作品のページ"><button type="button" disabled={currentPage <= 1} onClick={() => setCurrentPage((page) => page - 1)}>前へ</button><select aria-label="端末内のページ番号" value={currentPage} onChange={(event) => setCurrentPage(Number(event.target.value))}>{Array.from({ length: pageCount }, (_, index) => <option key={index + 1} value={index + 1}>{index + 1} / {pageCount} ページ</option>)}</select><button type="button" disabled={currentPage >= pageCount} onClick={() => setCurrentPage((page) => page + 1)}>次へ</button></nav>}

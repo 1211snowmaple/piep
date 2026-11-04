@@ -30,8 +30,11 @@
 | 登録 | `POST /pair` | 一回限りの登録鍵から端末用認証鍵を発行 |
 | 検索 | `POST /works/search` | 件数上限付きの作品要約と `nextCursor`。PC 版 `search_downloads_v2` を使用 |
 | 作品情報 | `GET /works/{id}` | タイトル、作者、タグ、版、編集済み状態、画像数など |
-| 作者・シリーズ | `GET /entities/{people|series}` | 件数付き一覧と検索結果。PC 版の作者・シリーズ索引を使用 |
-| 作者・シリーズ画像 | `GET /entities/{people|series}/cover?source=...&key=...` | 対応する作者アイコン・シリーズ表紙の画像 |
+| 作者・シリーズ | `GET /entities/{people|series}?text=&offset=&limit=&sort=&order=` | 件数付き一覧と検索結果。PC 版の作者・シリーズ索引を使用 |
+| 作者・シリーズ画像 | `GET /entities/{people|series}/cover?source=...&key=...&variant=banner` | 対応する作者アイコン・シリーズ表紙の画像。`variant=banner` は作者の横長画像 |
+| 作者・シリーズの詳細 | `GET /entities/{people|series}/detail?source=...&key=...` | 紹介文、リンク、話数、タグの集計、シリーズ数、所属コレクション |
+| 作者のシリーズ | `GET /entities/people/series?source=...&key=...&text=&sort=&order=&cursor=&limit=` | その作者のシリーズと `nextCursor` |
+| 表紙 | `GET /works/{id}/cover?size=large` | 一覧用の縮小画像。`size=large` は詳細画面用に大きく縮小した画像 |
 | コレクション | `GET /collections`、`GET /collections/{id}` | 一覧、順序、所属作品 |
 | 作品の所属先 | `GET /works/{id}/collections` | 端末への選択保存時に記録するコレクション |
 | 本文 | `GET /works/{id}/pages/{page}?version=...` | ページ数、HTML、原稿ページ境界。PC 版 `get_reader_content_page` を使用 |

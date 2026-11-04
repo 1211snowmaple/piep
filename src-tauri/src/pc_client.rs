@@ -17,6 +17,7 @@ use url::Url;
 
 pub(crate) mod offline;
 pub(crate) mod reading_sync;
+pub mod cover_protocol;
 mod image_validation;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(12);
@@ -825,6 +826,8 @@ fn search_payload(
         "assetsAsc" => (Some("assets"), Some("asc")),
         "versionDesc" => (Some("version"), Some("desc")),
         "versionAsc" => (Some("version"), Some("asc")),
+        "seriesAsc" => (Some("series_order"), Some("asc")),
+        "seriesDesc" => (Some("series_order"), Some("desc")),
         _ => return Err(ClientError::remote()),
     };
     let min_chars = parse_search_count(&criteria.min_chars)?;
@@ -950,16 +953,40 @@ pub struct MobileEntityPage {
     total: i64,
 }
 
+fn valid_entity_identity(source: &str, key: &str) -> bool {
+    matches!(source, "pixiv" | "fanbox") && !key.is_empty() && key.chars().count() <= 200
+}
+
+fn valid_entity_sort(sort: Option<&str>, order: Option<&str>) -> bool {
+    sort.is_none_or(|value| {
+        matches!(
+            value,
+            "work_count"
+                | "downloaded_at"
+                | "source_created_at"
+                | "source_updated_at"
+                | "name"
+                | "text_length"
+                | "file_size_bytes"
+                | "asset_count"
+                | "current_version"
+        )
+    }) && order.is_none_or(|value| matches!(value, "asc" | "desc"))
+}
+
 #[tauri::command]
 pub async fn pc_list_entities(
     state: State<'_, PcClientState>,
     kind: String,
     text: String,
     offset: i64,
+    sort: Option<String>,
+    order: Option<String>,
 ) -> Result<MobileEntityPage, ClientError> {
     if !matches!(kind.as_str(), "people" | "series")
         || text.chars().count() > 200
         || !(0..=1_000_000).contains(&offset)
+        || !valid_entity_sort(sort.as_deref(), order.as_deref())
     {
         return Err(ClientError::remote());
     }
@@ -968,10 +995,109 @@ pub async fn pc_list_entities(
         query.append_pair("text", text.trim());
         query.append_pair("offset", &offset.to_string());
         query.append_pair("limit", "30");
+        if let Some(sort) = sort.as_deref() {
+            query.append_pair("sort", sort);
+        }
+        if let Some(order) = order.as_deref() {
+            query.append_pair("order", order);
+        }
         query.finish()
     };
     let endpoint = format!("/api/v1/entities/{kind}?{query_string}");
     authenticated_get(&state, &endpoint)
+        .await?
+        .bounded_json().await
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MobileFacet {
+    name: String,
+    count: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MobileEntityDetail {
+    source: String,
+    source_key: String,
+    display_name: String,
+    description: Option<String>,
+    work_count: i64,
+    has_cover: bool,
+    has_banner: bool,
+    is_concluded: Option<bool>,
+    published_count: Option<i64>,
+    links: Vec<String>,
+    tags: Vec<MobileFacet>,
+    series_count: Option<i64>,
+    collections: Vec<MobileCollection>,
+}
+
+#[tauri::command]
+pub async fn pc_get_entity_detail(
+    state: State<'_, PcClientState>,
+    kind: String,
+    source: String,
+    key: String,
+) -> Result<MobileEntityDetail, ClientError> {
+    if !matches!(kind.as_str(), "people" | "series") || !valid_entity_identity(&source, &key) {
+        return Err(ClientError::remote());
+    }
+    let query_string = {
+        let mut query = url::form_urlencoded::Serializer::new(String::new());
+        query.append_pair("source", &source);
+        query.append_pair("key", &key);
+        query.finish()
+    };
+    authenticated_get(&state, &format!("/api/v1/entities/{kind}/detail?{query_string}"))
+        .await?
+        .bounded_json().await
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MobileEntitySeriesPage {
+    items: Vec<MobileEntity>,
+    next_cursor: Option<String>,
+    total: i64,
+}
+
+#[tauri::command]
+pub async fn pc_list_entity_series(
+    state: State<'_, PcClientState>,
+    source: String,
+    key: String,
+    text: String,
+    cursor: Option<String>,
+    sort: Option<String>,
+    order: Option<String>,
+) -> Result<MobileEntitySeriesPage, ClientError> {
+    if !valid_entity_identity(&source, &key)
+        || text.chars().count() > 200
+        || cursor.as_ref().is_some_and(|cursor| cursor.len() > 4096)
+        || !valid_entity_sort(sort.as_deref(), order.as_deref())
+    {
+        return Err(ClientError::remote());
+    }
+    let query_string = {
+        let mut query = url::form_urlencoded::Serializer::new(String::new());
+        query.append_pair("source", &source);
+        query.append_pair("key", &key);
+        query.append_pair("text", text.trim());
+        query.append_pair("limit", "30");
+        if let Some(cursor) = cursor.as_deref() {
+            query.append_pair("cursor", cursor);
+        }
+        if let Some(sort) = sort.as_deref() {
+            query.append_pair("sort", sort);
+        }
+        if let Some(order) = order.as_deref() {
+            query.append_pair("order", order);
+        }
+        query.finish()
+    };
+    authenticated_get(&state, &format!("/api/v1/entities/people/series?{query_string}"))
         .await?
         .bounded_json().await
 }
@@ -1235,69 +1361,6 @@ async fn image_response(response: reqwest::Response) -> Result<MobileAssetData, 
         mime_type,
         base64: STANDARD.encode(bytes),
     })
-}
-
-#[tauri::command]
-pub async fn pc_get_cover(
-    state: State<'_, PcClientState>,
-    work_id: i64,
-) -> Result<MobileAssetData, ClientError> {
-    if work_id <= 0 {
-        return Err(ClientError::remote());
-    }
-    let response = authenticated_get_with_timeout(
-        &state,
-        &format!("/api/v1/works/{work_id}/cover"),
-        ASSET_TIMEOUT,
-    )
-    .await?;
-    image_response(response).await
-}
-
-#[tauri::command]
-pub async fn pc_get_collection_cover(
-    state: State<'_, PcClientState>,
-    collection_id: String,
-    slot: String,
-) -> Result<MobileAssetData, ClientError> {
-    if collection_id.is_empty()
-        || collection_id.len() > 128
-        || !collection_id.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-        || !(slot == "file" || matches!(slot.as_str(), "tile-0" | "tile-1" | "tile-2" | "tile-3"))
-    {
-        return Err(ClientError::remote());
-    }
-    let response = authenticated_get_with_timeout(
-        &state,
-        &format!("/api/v1/collections/{collection_id}/cover/{slot}"),
-        ASSET_TIMEOUT,
-    ).await?;
-    image_response(response).await
-}
-
-#[tauri::command]
-pub async fn pc_get_entity_cover(
-    state: State<'_, PcClientState>,
-    kind: String,
-    source: String,
-    key: String,
-) -> Result<MobileAssetData, ClientError> {
-    if !matches!(kind.as_str(), "people" | "series")
-        || !matches!(source.as_str(), "pixiv" | "fanbox")
-        || key.is_empty()
-        || key.chars().count() > 200
-    {
-        return Err(ClientError::remote());
-    }
-    let query_string = {
-        let mut query = url::form_urlencoded::Serializer::new(String::new());
-        query.append_pair("source", &source);
-        query.append_pair("key", &key);
-        query.finish()
-    };
-    let endpoint = format!("/api/v1/entities/{kind}/cover?{query_string}");
-    let response = authenticated_get_with_timeout(&state, &endpoint, ASSET_TIMEOUT).await?;
-    image_response(response).await
 }
 
 #[tauri::command]
