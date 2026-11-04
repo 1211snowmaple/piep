@@ -707,12 +707,9 @@ pub async fn main_from_args(args: Vec<String>) -> i32 {
                 Ok(0)
             }
             "admin-pair" => {
-                let payload = command_admin_pair(
-                    required_data(&parsed)?,
-                    parsed.url.clone(),
-                    parsed.replace,
-                )
-                .await?;
+                let payload =
+                    command_admin_pair(required_data(&parsed)?, parsed.url.clone(), parsed.replace)
+                        .await?;
                 if parsed.replace {
                     println!("この文字列で登録すると、今の管理者は接続できなくなります。");
                 }
