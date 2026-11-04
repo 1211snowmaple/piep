@@ -10,6 +10,7 @@ import "@mantine/spotlight/styles.css";
 import App from "@/App";
 import { applyStoredDensity } from "@/lib/density";
 import { queryClient } from "@/lib/queryClient";
+import { showStartupFailure, waitForLibrary } from "@/services/startupApi";
 import { theme } from "@/theme";
 import "@/styles/app.css";
 import "@/styles/motion.css";
@@ -20,15 +21,19 @@ if (!container) throw new Error("#root element was not found");
 
 applyStoredDensity();
 
-createRoot(container).render(
-  <React.StrictMode>
-    <MantineProvider theme={theme} defaultColorScheme="auto">
-      <QueryClientProvider client={queryClient}>
-        <ModalsProvider labels={{ confirm: "実行", cancel: "キャンセル" }}>
-          <App />
-          <Notifications position="top-right" containerWidth={360} notificationMaxHeight="min(220px, calc(100dvh - 32px))" limit={3} zIndex={3000} />
-        </ModalsProvider>
-      </QueryClientProvider>
-    </MantineProvider>
-  </React.StrictMode>,
-);
+// The app's first queries need the library, so the startup screen in index.html
+// stays until it has opened. Rendering replaces that screen.
+waitForLibrary().then(() => {
+  createRoot(container).render(
+    <React.StrictMode>
+      <MantineProvider theme={theme} defaultColorScheme="auto">
+        <QueryClientProvider client={queryClient}>
+          <ModalsProvider labels={{ confirm: "実行", cancel: "キャンセル" }}>
+            <App />
+            <Notifications position="top-right" containerWidth={360} notificationMaxHeight="min(220px, calc(100dvh - 32px))" limit={3} zIndex={3000} />
+          </ModalsProvider>
+        </QueryClientProvider>
+      </MantineProvider>
+    </React.StrictMode>,
+  );
+}, showStartupFailure);
