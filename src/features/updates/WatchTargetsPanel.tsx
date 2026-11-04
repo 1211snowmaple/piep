@@ -315,7 +315,7 @@ export function TargetsPanel({ targets, groups, loading, error, retry, form, mut
           {!scoped.length ? (
             viewGroup
               ? <EmptyState icon={Icons.people} title="このグループは空です" description="「すべて」などで監視対象を選び、「グループに入れる」から加えてください。" />
-              : <EmptyState icon={Icons.people} title={currentView === "paused" ? "止めている対象はありません" : "監視対象はまだありません"} description={currentView === "paused" ? "確認を止めた対象は、ここに集まります。" : "作者やシリーズの画面で「新着を監視」を入れるか、「IDで追加」から加えてください。"} />
+              : <EmptyState icon={Icons.people} title={currentView === "paused" ? "止めている対象はありません" : "監視対象はまだありません"} description={currentView === "paused" ? "確認を止めた対象は、ここに集まります。" : "作者やシリーズの画面で「新作・改稿を監視」を入れるか、「IDで追加」から加えてください。"} />
           ) : (
             <>
               {currentView !== "paused" && (

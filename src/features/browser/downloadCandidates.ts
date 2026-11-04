@@ -190,6 +190,39 @@ export function pageListSource(url: string): "pixiv" | "fanbox" | null {
   return null;
 }
 
+/** ページ番号（`?p=`）で続きを開ける pixiv の一覧。分からないページは送らない。 */
+const PAGED_PIXIV_LISTS = [
+  /^\/tags\/[^/]+\/novels\/?$/,
+  /^\/users\/\d+\/bookmarks\/novels(?:\/[^/]+)?\/?$/,
+  /^\/novel\/bookmark\.php$/,
+  /^\/(?:novel\/)?bookmark_new(?:_r18)?\.php$/,
+  /^\/novel\/ranking\.php$/,
+  /^\/users\/\d+\/following\/?$/,
+];
+
+/** pixiv のフォロー一覧か。ここからは作品でなく作者を読む。 */
+export function isFollowingListUrl(url: string): boolean {
+  const parsed = sourceUrl(url);
+  return pageListSource(url) === "pixiv" && /^\/users\/\d+\/following\/?$/.test(sourcePath(parsed?.pathname ?? ""));
+}
+
+/** 一覧の何ページ目か。URL に無ければ 1 ページ目である。 */
+export function listPageNumber(url: string): number {
+  const value = sourceUrl(url)?.searchParams.get("p") ?? "";
+  const page = /^\d{1,6}$/.test(value) ? Number(value) : 1;
+  return page >= 1 ? page : 1;
+}
+
+/** 一覧の次のページの URL。続きの開き方が分かっている一覧でなければ null。 */
+export function nextPagedListUrl(url: string): string | null {
+  if (pageListSource(url) !== "pixiv") return null;
+  const parsed = new URL(normalizeContentLinkUrl(url));
+  const path = sourcePath(parsed.pathname);
+  if (!PAGED_PIXIV_LISTS.some((pattern) => pattern.test(path))) return null;
+  parsed.searchParams.set("p", String(listPageNumber(url) + 1));
+  return parsed.href;
+}
+
 /** 一覧から読み取った作品ひとつ。 */
 export interface PageWorkCandidate {
   sourceId: string;
@@ -215,18 +248,26 @@ export function pageWorkItems(source: "pixiv" | "fanbox", works: PageWorkCandida
   });
 }
 
+/** 同じ一覧の続きを足す。行の状態と選択は、すでにある行のものを残す。 */
+export function mergePageWorkItems(current: SidebarItem[], incoming: SidebarItem[]): SidebarItem[] {
+  const known = new Set(current.map((item) => item.id));
+  return [...current, ...incoming.filter((item) => !known.has(item.id))];
+}
+
 export function detectDownloadTarget(url: string): DownloadTargetKind {
   return describeDownloadTarget(url).kind;
 }
 
 /**
  * 取得した一覧が「どのページのものか」を表す合言葉。対応していないページは
- * 空文字。同じ合言葉のあいだは、取り直す必要がない。
+ * 空文字。同じ合言葉のあいだは、取り直す必要がない。一覧のページ番号は合言葉に
+ * 入れない。続きのページは同じ一覧で、読むと候補に足していく。
  */
 export function downloadTargetKey(url: string): string {
   const { kind, id } = describeDownloadTarget(url);
   if (kind !== "unsupported") return `${kind}:${id}`;
   if (!pageListSource(url)) return "";
   const parsed = new URL(normalizeContentLinkUrl(url));
+  parsed.searchParams.delete("p");
   return `page:${parsed.hostname}${sourcePath(parsed.pathname)}${parsed.search}`;
 }

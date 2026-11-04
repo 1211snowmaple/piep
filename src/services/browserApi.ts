@@ -45,6 +45,23 @@ export function readBrowserPageWorkCandidates(browser: "embedded" | "standalone"
   return invoke<BrowserPageWorks>("read_browser_page_work_candidates", { browser, source });
 }
 
+export interface PageUserCandidate {
+  userId: string;
+  name: string;
+  watched: boolean;
+}
+
+export interface BrowserPageUsers {
+  url: string;
+  users: PageUserCandidate[];
+  truncated: boolean;
+}
+
+/** 表示中のフォロー一覧から、読み込まれている分の作者を読み取る。通信は増えない。 */
+export function readBrowserPageUserCandidates(browser: "embedded" | "standalone"): Promise<BrowserPageUsers> {
+  return invoke<BrowserPageUsers>("read_browser_page_user_candidates", { browser });
+}
+
 export function closeEmbeddedBrowser(): Promise<void> {
   return invoke<void>("close_embedded_browser");
 }

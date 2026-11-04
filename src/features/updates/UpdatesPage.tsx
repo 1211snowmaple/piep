@@ -28,6 +28,7 @@ import { notifications } from "@mantine/notifications";
 import { reportJobAction } from "@/features/jobs/operationJobs";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Icons, IconSize } from "@/lib/icons";
+import { BrowserListShortcuts } from "./BrowserListShortcuts";
 import { useAppNavigate, useAppSearchParams } from "@/app/router";
 import { EmptyState, ErrorState, LoadingState } from "@/components/AsyncState";
 import { MotionTabs as Tabs } from "@/components/MotionTabs";
@@ -443,7 +444,8 @@ export default function UpdatesPage() {
 
   return (
     <div className="page page--contained updates-page">
-      <PageHeader title="新着" description="作者の新作、シリーズの続編、作品の改稿を確認して保存します。" />
+      <PageHeader title="新作・改稿" description="作者の新作、シリーズの続編、作品の改稿を確認して保存します。" />
+      {runtime && <BrowserListShortcuts />}
 
       {/* 毎回触るものだけを一列に置く。自動確認は数か月に一度しか触らない
           設定なので、いまどうなっているかだけ名乗って、変更は開いたときに。

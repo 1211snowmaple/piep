@@ -754,7 +754,7 @@ export default function WorkPage() {
                           beforeMetadata={comparisonVersionText.data?.metadata}
                           afterMetadata={pendingRevisionPreview.data.metadata}
                           afterText={pendingRevisionPreview.data.text}
-                          actions={<Button size="xs" variant="default" onClick={() => navigate("/updates")}>新着の画面で保存</Button>}
+                          actions={<Button size="xs" variant="default" onClick={() => navigate("/updates")}>新作・改稿の画面で保存</Button>}
                         />
                     : typeof selectedVersion === "number" && selectedVersionText.data !== undefined
                       ? <RevisionDiff

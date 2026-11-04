@@ -1951,6 +1951,21 @@ const PAGE_WORKS_SCRIPT: &str = r#"
     })()
 "#;
 
+/// 表示中の文書から、作者のリンクと名前を集める。文書には何も書き込まない。
+const PAGE_USERS_SCRIPT: &str = r#"
+    (function() {
+        const rows = new Map();
+        for (const link of document.querySelectorAll('a[href*="/users/"]')) {
+            const name = (link.textContent || '').trim();
+            const row = rows.get(link.href) || { href: link.href, name: '' };
+            if (name.length > row.name.length) row.name = name;
+            rows.set(link.href, row);
+            if (rows.size >= 2000) break;
+        }
+        return [...rows.values()];
+    })()
+"#;
+
 /// 内蔵ブラウザの一覧から読み取った作品ひとつ。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1977,6 +1992,29 @@ pub struct BrowserPageWorks {
     pub truncated: bool,
 }
 
+/// 内蔵ブラウザの一覧から読み取った作者ひとり。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserPageUser {
+    pub user_id: String,
+    pub name: String,
+}
+
+#[derive(serde::Deserialize)]
+struct RawPageUser {
+    href: String,
+    #[serde(default)]
+    name: String,
+}
+
+/// 読み取った作者の一覧。`truncated` は上限で打ち切ったときに立つ。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrowserPageUsers {
+    pub url: String,
+    pub users: Vec<BrowserPageUser>,
+    pub truncated: bool,
+}
+
 fn is_source_host(host: &str, domain: &str) -> bool {
     host == domain || host.ends_with(&format!(".{domain}"))
 }
@@ -1991,19 +2029,52 @@ fn is_page_work_source(url: &Url, source: &str) -> bool {
         }
 }
 
+/// 言語の接頭辞（`/en/`）を除いた URL のパス。
+fn page_path_segments(url: &Url) -> Option<Vec<&str>> {
+    let segments: Vec<&str> = url.path_segments()?.filter(|s| !s.is_empty()).collect();
+    let is_language =
+        |segment: &str| segment.len() == 2 && segment.chars().all(|c| c.is_ascii_lowercase());
+    Some(match segments.split_first() {
+        Some((first, rest)) if is_language(first) => rest.to_vec(),
+        _ => segments,
+    })
+}
+
+fn is_page_source_id(id: &str) -> bool {
+    id.len() <= 20 && !id.is_empty() && id.chars().all(|c| c.is_ascii_digit())
+}
+
+/// リンクが指す作者の ID。pixiv の作者のページそのものでなければ `None`。
+fn page_user_id(href: &str) -> Option<String> {
+    let url = Url::parse(href).ok()?;
+    if !is_page_work_source(&url, "pixiv") {
+        return None;
+    }
+    match page_path_segments(&url)?.as_slice() {
+        ["users", id] if is_page_source_id(id) => Some((*id).to_string()),
+        _ => None,
+    }
+}
+
+/// 開いているのが `/users/{id}/following` なら、その `id`。
+fn page_following_owner(url: &Url) -> Option<String> {
+    if !is_page_work_source(url, "pixiv") {
+        return None;
+    }
+    match page_path_segments(url)?.as_slice() {
+        ["users", id, "following"] if is_page_source_id(id) => Some((*id).to_string()),
+        _ => None,
+    }
+}
+
 /// リンクが指す作品の ID。許可した取得元の作品リンクでなければ `None`。
 fn page_work_id(source: &str, href: &str) -> Option<String> {
     let url = Url::parse(href).ok()?;
     if !is_page_work_source(&url, source) {
         return None;
     }
-    let segments: Vec<&str> = url.path_segments()?.filter(|s| !s.is_empty()).collect();
-    let is_language =
-        |segment: &str| segment.len() == 2 && segment.chars().all(|c| c.is_ascii_lowercase());
-    let path = match segments.split_first() {
-        Some((first, rest)) if is_language(first) => rest,
-        _ => segments.as_slice(),
-    };
+    let segments = page_path_segments(&url)?;
+    let path = segments.as_slice();
     let id = match (source, path) {
         ("pixiv", ["novel", "show.php"]) => query_value(&url, "id")?,
         ("pixiv", ["novels", id]) => (*id).to_string(),
@@ -2011,7 +2082,7 @@ fn page_work_id(source: &str, href: &str) -> Option<String> {
         ("fanbox", [creator, "posts", id]) if creator.starts_with('@') => (*id).to_string(),
         _ => return None,
     };
-    (id.len() <= 20 && !id.is_empty() && id.chars().all(|c| c.is_ascii_digit())).then_some(id)
+    is_page_source_id(&id).then_some(id)
 }
 
 /// 画面に出す文字へ整える。改行と制御文字を畳み、長すぎる分を切る。
@@ -2057,6 +2128,36 @@ fn parse_page_works(source: &str, raw: &str) -> Result<(Vec<BrowserPageWork>, bo
         });
     }
     Ok((works, truncated))
+}
+
+/// ページから戻った値を作者の一覧にする。作品と同じくページの中身は信用しない。
+///
+/// 通すのは pixiv の作者リンクの数字の ID だけである。名前の無いリンクは、顔の
+/// 画像や案内の飾りなので落とす。一覧の持ち主は自分のフォローに入らない。
+fn parse_page_users(owner: &str, raw: &str) -> Result<(Vec<BrowserPageUser>, bool), String> {
+    if raw.len() > MAX_PAGE_WORKS_RESULT_BYTES {
+        return Err("ページの内容が大きすぎて読み取れません".to_string());
+    }
+    let rows: Vec<RawPageUser> = serde_json::from_str(raw)
+        .map_err(|error| format!("ページの内容を読み取れません: {error}"))?;
+    let mut seen = std::collections::HashSet::new();
+    let mut users = Vec::new();
+    let mut truncated = false;
+    for row in rows {
+        let Some(user_id) = page_user_id(&row.href) else {
+            continue;
+        };
+        let name = clean_page_label(&row.name);
+        if name.is_empty() || user_id == owner || !seen.insert(user_id.clone()) {
+            continue;
+        }
+        if users.len() == MAX_PAGE_WORKS {
+            truncated = true;
+            break;
+        }
+        users.push(BrowserPageUser { user_id, name });
+    }
+    Ok((users, truncated))
 }
 
 #[cfg(target_os = "windows")]
@@ -2111,27 +2212,61 @@ pub async fn read_browser_page_works(
     browser: String,
     source: String,
 ) -> Result<BrowserPageWorks, String> {
-    let (url, receiver) = match browser.as_str() {
+    let (url, raw) = read_page_document(&app, &browser, &source, PAGE_WORKS_SCRIPT).await?;
+    let (works, truncated) = parse_page_works(&source, &raw)?;
+    Ok(BrowserPageWorks {
+        url: url.to_string(),
+        works,
+        truncated,
+    })
+}
+
+/// 内蔵ブラウザで表示中のフォロー一覧から、作者を読み取る。
+///
+/// pixiv の `/users/{id}/following` でだけ走らせる。作品と同じく、読み込み済みの
+/// 文書を読むだけで、取得元への通信は増えない。
+pub async fn read_browser_page_users(
+    app: AppHandle,
+    browser: String,
+) -> Result<BrowserPageUsers, String> {
+    let (url, raw) = read_page_document(&app, &browser, "pixiv", PAGE_USERS_SCRIPT).await?;
+    let owner =
+        page_following_owner(&url).ok_or_else(|| "フォロー一覧を開いてください".to_string())?;
+    let (users, truncated) = parse_page_users(&owner, &raw)?;
+    Ok(BrowserPageUsers {
+        url: url.to_string(),
+        users,
+        truncated,
+    })
+}
+
+async fn read_page_document(
+    app: &AppHandle,
+    browser: &str,
+    source: &str,
+    script: &'static str,
+) -> Result<(Url, String), String> {
+    let (url, receiver) = match browser {
         "embedded" => {
             let webview = app
                 .get_webview("embedded_browser")
                 .ok_or_else(|| "内蔵ブラウザが開いていません".to_string())?;
             let url = webview.url().map_err(|error| error.to_string())?;
-            if !is_page_work_source(&url, &source) {
+            if !is_page_work_source(&url, source) {
                 return Err("このページからは読み取れません".to_string());
             }
-            (url, run_page_script(&webview, PAGE_WORKS_SCRIPT)?)
+            (url, run_page_script(&webview, script)?)
         }
         "standalone" => {
-            let (label, _) = standalone_window_details(&source)?;
+            let (label, _) = standalone_window_details(source)?;
             let window = app
                 .get_webview_window(label)
                 .ok_or_else(|| "内蔵ブラウザが開いていません".to_string())?;
             let url = window.url().map_err(|error| error.to_string())?;
-            if !is_page_work_source(&url, &source) {
+            if !is_page_work_source(&url, source) {
                 return Err("このページからは読み取れません".to_string());
             }
-            (url, run_page_script(window.as_ref(), PAGE_WORKS_SCRIPT)?)
+            (url, run_page_script(window.as_ref(), script)?)
         }
         _ => return Err("Unsupported browser".to_string()),
     };
@@ -2139,12 +2274,7 @@ pub async fn read_browser_page_works(
         .await
         .map_err(|_| "ページの読み取りが時間内に終わりませんでした".to_string())?
         .map_err(|_| "ページの読み取りが途中で止まりました".to_string())??;
-    let (works, truncated) = parse_page_works(&source, &raw)?;
-    Ok(BrowserPageWorks {
-        url: url.to_string(),
-        works,
-        truncated,
-    })
+    Ok((url, raw))
 }
 
 #[cfg(test)]
@@ -2221,6 +2351,65 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn page_user_id_accepts_only_author_pages() {
+        for href in [
+            "https://www.pixiv.net/users/12",
+            "https://www.pixiv.net/en/users/12",
+            "https://www.pixiv.net/users/12/",
+        ] {
+            assert_eq!(page_user_id(href).as_deref(), Some("12"), "{href}");
+        }
+        for href in [
+            "https://www.pixiv.net/users/12/following",
+            "https://www.pixiv.net/users/12/novels",
+            "https://www.pixiv.net/users/abc",
+            "http://www.pixiv.net/users/12",
+            "https://evil.example/users/12",
+            "https://www.fanbox.cc/users/12",
+            "javascript:alert(1)",
+        ] {
+            assert_eq!(page_user_id(href), None, "{href}");
+        }
+    }
+
+    #[test]
+    fn page_following_owner_needs_a_following_page() {
+        let owner = |raw: &str| page_following_owner(&Url::parse(raw).unwrap());
+        assert_eq!(
+            owner("https://www.pixiv.net/users/7/following?p=2").as_deref(),
+            Some("7")
+        );
+        assert_eq!(
+            owner("https://www.pixiv.net/en/users/7/following").as_deref(),
+            Some("7")
+        );
+        assert_eq!(owner("https://www.pixiv.net/users/7"), None);
+        assert_eq!(owner("https://evil.example/users/7/following"), None);
+    }
+
+    #[test]
+    fn page_users_drop_the_owner_foreign_rows_and_nameless_links() {
+        let raw = r#"[
+            {"href":"https://www.pixiv.net/users/7","name":"持ち主"},
+            {"href":"https://www.pixiv.net/users/1","name":""},
+            {"href":"https://www.pixiv.net/users/2","name":" 作者\n二 "},
+            {"href":"https://www.pixiv.net/en/users/2","name":"重複"},
+            {"href":"https://evil.example/users/3","name":"外"},
+            {"href":"https://www.pixiv.net/users/4/following","name":"案内"}
+        ]"#;
+        let (users, truncated) = parse_page_users("7", raw).unwrap();
+        assert!(!truncated);
+        assert_eq!(
+            users,
+            vec![BrowserPageUser {
+                user_id: "2".to_string(),
+                name: "作者 二".to_string(),
+            }]
+        );
+        assert!(parse_page_users("7", "null").is_err());
     }
 
     #[test]
