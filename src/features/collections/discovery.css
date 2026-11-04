@@ -3,6 +3,7 @@
 .discovery-modal { display: flex; flex-direction: column; overflow: hidden; max-height: min(720px, calc(100dvh - 48px)); }
 .discovery-modal__header { flex: 0 0 auto; padding: 18px 24px 12px; }
 .discovery-modal__body { flex: 1; min-height: 0; display: flex; flex-direction: column; padding: 0 24px; overflow: hidden; }
+.mantine-Modal-body.discovery-modal__body { scrollbar-gutter: auto; padding-inline-end: 24px; }
 .discovery-toolbar { flex: 0 0 auto; padding: 0 0 18px; }
 .discovery-toolbar > .mantine-Text-root { flex: 1; min-width: 200px; }
 .discovery-modal__footnote { display: flex; flex: 0 0 auto; justify-content: space-between; align-items: center; gap: 12px; padding: 10px 0; }
@@ -30,7 +31,7 @@
 .discovery-candidate__arrow { flex: 0 0 auto; margin-top: 3px; color: var(--mantine-color-dimmed); }
 .discovery-sidebar__empty { padding: 24px 16px; }
 .discovery-detail { display: flex; flex-direction: column; min-height: 0; min-width: 0; background: var(--mantine-color-body); }
-.discovery-review__scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 24px; overscroll-behavior: contain; scrollbar-gutter: stable; }
+.discovery-review__scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 24px; padding-inline-end: calc(24px - var(--piep-scrollbar-size)); overscroll-behavior: contain; scrollbar-gutter: stable; }
 .discovery-review__heading h2 { margin: 10px 0 8px; font-size: clamp(16px, 1.6vw, 21px); font-weight: 700; line-height: 1.6; overflow-wrap: anywhere; }
 .discovery-review__heading h2:focus { outline: none; }
 .discovery-evidence { display: flex; align-items: flex-start; gap: 10px; margin: 20px 0 24px; padding: 12px 14px; border-left: 2px solid light-dark(#8ca7ac, #567d88); border-radius: 0 6px 6px 0; background: light-dark(#f2f5f6, #1b242b); }
@@ -75,6 +76,7 @@
 @media (max-width: 760px) {
   .discovery-modal__header { flex: 0 0 auto; padding: 14px 16px 10px; }
   .discovery-modal__body { padding: 0 16px; }
+  .mantine-Modal-body.discovery-modal__body { padding-inline-end: 16px; }
   .discovery-toolbar { padding-bottom: 12px; }
   .discovery-toolbar > .mantine-Text-root { font-size: 12px; min-width: 160px; }
   .discovery-filters { gap: 8px; }

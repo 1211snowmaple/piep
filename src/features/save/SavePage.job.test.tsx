@@ -22,8 +22,10 @@ const browserApi = vi.hoisted(() => ({
   closeStandaloneBrowser: vi.fn().mockResolvedValue(true),
   getStandaloneBrowserUrl: vi.fn().mockResolvedValue(null),
   readBrowserPageWorkCandidates: vi.fn(),
+  readBrowserPageUserCandidates: vi.fn(),
 }));
 
+const upsertTarget = vi.hoisted(() => vi.fn());
 const downloadApi = vi.hoisted(() => ({ fetchPixivSeriesNovels: vi.fn() }));
 const jobs = vi.hoisted(() => ({
   start: vi.fn(),
@@ -43,6 +45,7 @@ vi.mock("@/services/downloadApi", async (importOriginal) => ({
 vi.mock("@/services/dbApi", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/services/dbApi")>()),
   isTauriRuntime: () => true,
+  upsertUpdateTarget: upsertTarget,
 }));
 vi.mock("@/services/updateJobApi", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/services/updateJobApi")>()),
@@ -195,6 +198,76 @@ describe("SavePage の Rust 保存ジョブ", () => {
 
     await waitFor(() => expect(jobs.start).toHaveBeenCalledTimes(1));
     expect(jobs.start).toHaveBeenCalledWith([{ source: "pixiv", sourceId: "1", title: "第一話" }], false);
+  });
+
+  it("手で続きのページへ進んで読むと候補に足し、選び直した行を残す", async () => {
+    const first = "https://www.pixiv.net/tags/x/novels";
+    const second = `${first}?p=2`;
+    browserApi.readBrowserPageWorkCandidates.mockReset()
+      .mockResolvedValueOnce({ url: first, truncated: false, works: [{ sourceId: "1", title: "第一話", author: "", saved: false }] })
+      .mockResolvedValueOnce({ url: second, truncated: false, works: [{ sourceId: "2", title: "第二話", author: "", saved: false }] });
+    renderSavePage();
+    const address = await screen.findByLabelText("ブラウザのアドレス");
+    fireEvent.change(address, { target: { value: first } });
+    fireEvent.click(screen.getByRole("button", { name: "URLを開く" }));
+    fireEvent.click(await screen.findByRole("button", { name: "このページから読み取る" }));
+    fireEvent.click(await screen.findByRole("checkbox", { name: "第一話を保存対象にする" }));
+
+    fireEvent.change(address, { target: { value: second } });
+    fireEvent.click(screen.getByRole("button", { name: "URLを開く" }));
+    fireEvent.click(await screen.findByRole("button", { name: "このページから読み取る" }));
+
+    expect(await screen.findByText("第二話")).toBeInTheDocument();
+    expect(screen.getByRole("checkbox", { name: "第一話を保存対象にする" })).not.toBeChecked();
+    expect(screen.getByText("1 / 2件を選択")).toBeInTheDocument();
+    expect(browserApi.navigateEmbeddedBrowser).not.toHaveBeenCalledWith(`${first}?p=3`);
+  });
+
+  it("続きを開ける一覧でだけ、読み方を指定できる", async () => {
+    renderSavePage();
+    const address = await screen.findByLabelText("ブラウザのアドレス");
+    fireEvent.change(address, { target: { value: "https://www.pixiv.net/" } });
+    fireEvent.click(screen.getByRole("button", { name: "URLを開く" }));
+    await screen.findByRole("button", { name: "このページから読み取る" });
+    expect(screen.queryByRole("button", { name: "読み方" })).not.toBeInTheDocument();
+
+    fireEvent.change(address, { target: { value: "https://www.pixiv.net/novel/bookmark_new.php" } });
+    fireEvent.click(screen.getByRole("button", { name: "URLを開く" }));
+    fireEvent.click(await screen.findByRole("button", { name: "読み方" }));
+    fireEvent.change(await screen.findByLabelText("ページ数"), { target: { value: "5" } });
+
+    expect(await screen.findByRole("button", { name: "5ページ読み取る" })).toBeInTheDocument();
+    expect(screen.getByText(/5ページ · 5秒ごと/)).toBeInTheDocument();
+    expect(screen.getByText(/その分の通信が増えます/)).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("ページ数"), { target: { value: "1" } });
+  });
+
+  it("フォロー一覧から作者を読み、選んだ人だけ監視に足す", async () => {
+    const page = "https://www.pixiv.net/users/7/following";
+    upsertTarget.mockReset().mockResolvedValue(undefined);
+    browserApi.readBrowserPageUserCandidates.mockReset().mockResolvedValue({
+      url: page,
+      truncated: false,
+      users: [
+        { userId: "1", name: "作者一", watched: false },
+        { userId: "2", name: "作者二", watched: true },
+        { userId: "3", name: "作者三", watched: false },
+      ],
+    });
+    renderSavePage();
+    const address = await screen.findByLabelText("ブラウザのアドレス");
+    fireEvent.change(address, { target: { value: page } });
+    fireEvent.click(screen.getByRole("button", { name: "URLを開く" }));
+    fireEvent.click(await screen.findByRole("button", { name: "フォローユーザーを読み取る" }));
+
+    expect(await screen.findByRole("checkbox", { name: "作者二を監視に追加する" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("checkbox", { name: "作者三を監視に追加する" }));
+    fireEvent.click(screen.getByRole("button", { name: "1人を監視に追加" }));
+
+    await waitFor(() => expect(upsertTarget).toHaveBeenCalledTimes(1));
+    expect(upsertTarget).toHaveBeenCalledWith({ targetType: "author", source: "pixiv", sourceKey: "1", displayName: "作者一", enabled: true, metadataJson: null });
+    expect(browserApi.readBrowserPageWorkCandidates).not.toHaveBeenCalled();
+    expect(await screen.findByRole("checkbox", { name: "作者一を監視に追加する" })).toBeDisabled();
   });
 
   it("読み取れる作品が無いページでは候補を置き換えない", async () => {

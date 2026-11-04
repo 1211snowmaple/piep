@@ -1,7 +1,6 @@
 import { memo, useCallback, useEffect, useRef, useState, useSyncExternalStore, type SetStateAction } from "react";
 import {
   ActionIcon,
-  Alert,
   Badge,
   Box,
   Button,
@@ -11,10 +10,12 @@ import {
   Group,
   Loader,
   Menu,
+  NumberInput,
   Progress,
   ScrollArea,
   SegmentedControl,
   Stack,
+  Switch,
   Text,
   TextInput,
   ThemeIcon,
@@ -33,6 +34,9 @@ import {
 import {
   describeDownloadTarget,
   downloadTargetKey,
+  isFollowingListUrl,
+  mergePageWorkItems,
+  nextPagedListUrl,
   pageListSource,
   pageWorkItems,
   type DownloadTargetKind,
@@ -40,7 +44,9 @@ import {
   type PixivNovel,
   type SidebarItem,
 } from "@/features/browser/downloadCandidates";
-import { beginSaveDraftAnalysis, isLatestSaveDraftAnalysis, readSaveDraft, subscribeSaveDraft, updateSaveDraft, type SaveSource } from "./saveDraft";
+import { FollowedUsersList, mergeFollowedUsers, type FollowedUserRow } from "./FollowedUsersList";
+import { DEFAULT_LIST_READ_OPTIONS, MAX_LIST_INTERVAL_SECONDS, MAX_LIST_PAGES, MIN_LIST_INTERVAL_SECONDS, normalizeListReadOptions, readListPages, type ListReadStop } from "./pageListReader";
+import { beginSaveDraftAnalysis, consumeListRead, isLatestSaveDraftAnalysis, readSaveDraft, subscribeSaveDraft, updateSaveDraft, type SaveSource } from "./saveDraft";
 import { normalizeFanboxPostPayload } from "@/features/browser/downloadMetadata";
 import { errorMessage } from "@/lib/format";
 import { getProvider, ProviderMark } from "@/lib/providers";
@@ -50,6 +56,7 @@ import {
   closeStandaloneBrowser,
   destroyEmbeddedBrowser,
   getEmbeddedBrowserUrl,
+  readBrowserPageUserCandidates,
   readBrowserPageWorkCandidates,
   getStandaloneBrowserUrl,
   goBackEmbeddedBrowser,
@@ -64,7 +71,7 @@ import {
   type StandaloneBrowserClosedEvent,
   type StandaloneBrowserUrlEvent,
 } from "@/services/browserApi";
-import { isTauriRuntime } from "@/services/dbApi";
+import { isTauriRuntime, upsertUpdateTarget } from "@/services/dbApi";
 import { loadSchedule } from "@/features/updates/updateSchedule";
 import { invalidateWorkSetViews } from "@/features/library/workSetInvalidation";
 import {
@@ -111,6 +118,15 @@ const SAVE_JOB_STATUS_RANK: Partial<
   failed: 2,
   held: 2,
 };
+
+function listReadStopMessage(stop: ListReadStop, pages: number, truncated: boolean, users: boolean): string {
+  if (truncated) return "件数の上限で打ち切ったページがあります。";
+  if (stop === "saved") return `${users ? "登録済み" : "保存済み"}だけのページに着いたので止めました。`;
+  if (stop === "end") return `新しい${users ? "作者" : "作品"}が無くなったので止めました。`;
+  if (stop === "moved") return "別のページへ移ったので止めました。";
+  if (stop === "cancelled") return "途中で止めました。";
+  return pages > 1 ? "指定のページ数を読みました。" : "表示されている分だけです。";
+}
 
 export default function SavePage() {
   const { source: routeSource } = useRouteParams("/save/:source?");
@@ -159,6 +175,20 @@ export default function SavePage() {
     defaultValue: 360,
   });
   const [candidateCollapsed, setCandidateCollapsed] = useState(false);
+  const [listReadSettings, setListReadSettings] = useLocalStorage({
+    key: "piep.save-list-read",
+    defaultValue: DEFAULT_LIST_READ_OPTIONS,
+  });
+  const [listProgress, setListProgress] = useState<{ page: number; pages: number; works: number } | null>(null);
+  const listReadStopRef = useRef(false);
+  const [followedUsers, setFollowedUsers] = useState<{ key: string; rows: FollowedUserRow[] }>({ key: "", rows: [] });
+  const [addingToWatch, setAddingToWatch] = useState(false);
+  // 画面を離れたあとで、裏のページを送り続けない。
+  useEffect(() => {
+    listReadStopRef.current = false;
+    return () => { listReadStopRef.current = true; };
+  }, [source]);
+  const [listOptionsOpen, setListOptionsOpen] = useState(false);
   // While the large window is open the in-app pane hands its job over to it:
   // two live sessions on the same provider would fight over the login state,
   // and the native child WebView would still paint over the app.
@@ -527,7 +557,7 @@ export default function SavePage() {
       ? "選択したものは保存済みです"
       : items.some((item) => item.status === "held") &&
           items.every((item) => ["held", "success", "skipped"].includes(item.status ?? ""))
-        ? "保留は「更新」の画面で確かめ直せます"
+        ? "保留は「新作・改稿」の画面で確かめ直せます"
         : "保存する項目を選択"
     : retryCount === pendingCount
       ? `失敗した${pendingCount}件をやり直す`
@@ -536,8 +566,12 @@ export default function SavePage() {
   // 検索結果やブックマークは URL から全件を取れない。開いている画面から読む。
   const canReadPage = pageListSource(currentUrl) === source;
   const canAnalyze = targetKind !== "unsupported" || canReadPage;
+  const canReadNextPages = canReadPage && nextPagedListUrl(currentUrl) !== null;
+  const readsFollowing = canReadPage && isFollowingListUrl(currentUrl);
+  const followedRows = readsFollowing && followedUsers.key === downloadTargetKey(currentUrl) ? followedUsers.rows : [];
+  const listRead = normalizeListReadOptions(listReadSettings);
   // 古いのは一覧のほう。一覧が無いうちは、古くなりようがない。
-  const analyzeLabel = canReadPage ? "このページから読み取る" : lastAnalysisKey && lastAnalysisKey !== downloadTargetKey(currentUrl) ? "候補を再取得" : "候補を取得";
+  const analyzeLabel = readsFollowing ? (listRead.pages > 1 ? `${listRead.pages}ページのフォローユーザーを読み取る` : "フォローユーザーを読み取る") : canReadNextPages && listRead.pages > 1 ? `${listRead.pages}ページ読み取る` : canReadPage ? "このページから読み取る" : lastAnalysisKey && lastAnalysisKey !== downloadTargetKey(currentUrl) ? "候補を再取得" : "候補を取得";
   const analysisStale =
     items.length > 0 &&
     Boolean(lastAnalysisKey) &&
@@ -564,6 +598,30 @@ export default function SavePage() {
       await navigateEmbeddedBrowser(normalized);
     } catch {
       await positionBrowser(normalized);
+    }
+  };
+  // 新作・改稿の画面から一覧を頼まれて来たときは、開いた一覧をそのまま読む。
+  useEffect(() => {
+    if (runtime && consumeListRead(source)) void analyze(searchParams.get("url") ?? currentUrl, true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [source]);
+  const addFollowedUsersToWatch = async () => {
+    const rows = followedUsers.rows.filter((row) => row.selected && !row.watched);
+    if (!rows.length || addingToWatch) return;
+    setAddingToWatch(true);
+    const added = new Set<string>();
+    try {
+      for (const row of rows) {
+        await upsertUpdateTarget({ targetType: "author", source: "pixiv", sourceKey: row.userId, displayName: row.name, enabled: true, metadataJson: null });
+        added.add(row.userId);
+      }
+      notifications.show({ color: "green", title: `${added.size}人を監視に追加しました`, message: "「新作・改稿」の確認に入ります" });
+    } catch (error) {
+      notifications.show({ color: "red", title: `${added.size} / ${rows.length}人まで追加しました`, message: errorMessage(error) });
+    } finally {
+      setFollowedUsers((current) => ({ ...current, rows: current.rows.map((row) => added.has(row.userId) ? { ...row, watched: true, selected: false } : row) }));
+      queryClient.invalidateQueries({ queryKey: ["update-targets"] });
+      setAddingToWatch(false);
     }
   };
   const switchSource = async (next: string) => {
@@ -697,7 +755,7 @@ export default function SavePage() {
     event.preventDefault();
     setCandidateWidth(Math.round(Math.max(260, Math.min(maxWidth, next))));
   };
-  const analyze = async (analysisUrl = currentUrl) => {
+  const analyze = async (analysisUrl = currentUrl, opened = false) => {
     if (!runtime)
       return notifications.show({
         color: "piep",
@@ -726,28 +784,65 @@ export default function SavePage() {
     setProgress(null);
     try {
       if (readsPage) {
-        const page = await readBrowserPageWorkCandidates(detachedRef.current ? "standalone" : "embedded", source);
-        if (!isLatestSaveDraftAnalysis(source, analysisRevision)) return;
-        if (!page.works.length) {
+        const pageType = source === "pixiv" ? "pixiv_page" : "fanbox_page";
+        const browser = detachedRef.current ? "standalone" : "embedded";
+        const options = nextPagedListUrl(analysisUrl) ? listRead : { ...listRead, pages: 1 };
+        const isCurrent = () => isLatestSaveDraftAnalysis(source, analysisRevision);
+        const readsUsers = isFollowingListUrl(analysisUrl);
+        listReadStopRef.current = false;
+        const result = await readListPages(options, {
+          read: readsUsers
+            ? async () => {
+                const page = await readBrowserPageUserCandidates(browser);
+                return { url: page.url, truncated: page.truncated, works: page.users.map((user) => ({ sourceId: user.userId, title: user.name, author: "", saved: user.watched })) };
+              }
+            : () => readBrowserPageWorkCandidates(browser, source),
+          currentUrl: async () => (await (browser === "standalone" ? getStandaloneBrowserUrl(source) : getEmbeddedBrowserUrl())) ?? "",
+          navigate: navigateBrowser,
+          wait: (milliseconds) => new Promise((resolve) => window.setTimeout(resolve, milliseconds)),
+          cancelled: () => listReadStopRef.current || !isCurrent(),
+          onPage: (page, pagesRead, total) => {
+            if (!isCurrent()) return;
+            const key = downloadTargetKey(page.url);
+            if (options.pages > 1) setListProgress({ page: pagesRead, pages: options.pages, works: total });
+            // 同じ一覧の続きなら足す。手で次のページへ進んで読んだときも同じである。
+            if (readsUsers) {
+              const incoming = page.works.map((work) => ({ userId: work.sourceId, name: work.title, watched: work.saved, selected: !work.saved }));
+              setFollowedUsers((current) => ({ key, rows: current.key === key ? mergeFollowedUsers(current.rows, incoming) : incoming }));
+              return;
+            }
+            const incoming = pageWorkItems(source, page.works);
+            updateSaveDraft(source, (current) => ({
+              ...current,
+              items: current.downloadType === pageType && current.lastAnalysisKey === key ? mergePageWorkItems(current.items, incoming) : incoming,
+              downloadType: pageType,
+              lastAnalysisUrl: page.url,
+              lastAnalysisKey: key,
+            }));
+          },
+        }, opened);
+        if (!isCurrent()) return;
+        if (!result.pagesRead && result.stop === "moved") {
           notifications.show({
             color: "yellow",
-            title: "作品が見つかりません",
+            title: "一覧を開けませんでした",
+            message: "内蔵ブラウザでログインしているか確かめてください",
+          });
+          return;
+        }
+        if (!result.pagesRead) {
+          notifications.show({
+            color: "yellow",
+            title: readsUsers ? "作者が見つかりません" : "作品が見つかりません",
             message: "一覧が表示されてから、もう一度読み取ってください",
           });
           return;
         }
-        updateSaveDraft(source, (current) => ({
-          ...current,
-          items: pageWorkItems(source, page.works),
-          downloadType: source === "pixiv" ? "pixiv_page" : "fanbox_page",
-          lastAnalysisUrl: page.url,
-          lastAnalysisKey: downloadTargetKey(page.url),
-        }));
-        const saved = page.works.filter((work) => work.saved).length;
+        const unit = readsUsers ? "人" : "件";
         notifications.show({
           color: "green",
-          title: `このページから${page.works.length}件を読み取りました`,
-          message: `${saved ? `${saved}件は保存済みです。` : ""}${page.truncated ? "件数の上限で打ち切りました。" : "表示されている分だけです。"}`,
+          title: `${result.pagesRead > 1 ? `${result.pagesRead}ページ` : "このページ"}から${result.total}${unit}を読み取りました`,
+          message: `${result.saved ? `${result.saved}${unit}は${readsUsers ? "監視に登録済み" : "保存済み"}です。` : ""}${listReadStopMessage(result.stop, options.pages, result.truncated, readsUsers)}`,
         });
         return;
       }
@@ -846,6 +941,7 @@ export default function SavePage() {
     } finally {
       analyzingRef.current = false;
       setAnalyzing(false);
+      setListProgress(null);
     }
   };
   acceleratorHandlerRef.current = (payload) => {
@@ -1015,7 +1111,7 @@ export default function SavePage() {
       (item) =>
         item.selected && item.status !== "success" && item.status !== "skipped" && item.status !== "held",
     );
-    if (!selected.length || !downloadType || !runtime || savingRef.current || activeJob)
+    if (!selected.length || !downloadType || !runtime || savingRef.current || activeJob || analyzingRef.current)
       return;
     if (!authConnected)
       return notifications.show({
@@ -1120,7 +1216,7 @@ export default function SavePage() {
         notifications.show({
           color: "yellow",
           title: "保存を中断しました",
-          message: `${tally} · 更新の画面から再開できます`,
+          message: `${tally} · 新作・改稿の画面から再開できます`,
         });
       } else if (saved === 0 && failed > 0) {
         operation.fail(
@@ -1558,7 +1654,7 @@ export default function SavePage() {
                   variant="light"
                   color="piep"
                   size="lg"
-                  disabled={!runtime || !pendingCount || activeJob}
+                  disabled={!runtime || !pendingCount || activeJob || analyzing}
                   aria-label={saveActionLabel}
                   onClick={execute}
                 >
@@ -1597,11 +1693,11 @@ export default function SavePage() {
           ) : (
             <Stack h="100%" gap={0}>
               <Box p="md">
-                <Group justify="space-between" mb="xs">
-                  <Box>
+                <Group justify="space-between" mb="xs" wrap="nowrap" align="flex-start">
+                  <Box miw={0}>
                     <Text fw={750}>保存候補</Text>
                     <Text size="xs" c="dimmed">
-                      開いているページから自動判定
+                      {readsFollowing ? "フォロー一覧から作者を読み取れます" : canReadPage ? "表示中の一覧から作品を読み取れます" : targetLabel(targetKind)}
                     </Text>
                   </Box>
                   <Group gap={4}>
@@ -1620,26 +1716,11 @@ export default function SavePage() {
                     </Tooltip>
                   </Group>
                 </Group>
-                <Alert
-                  color={canAnalyze ? "piep" : "gray"}
-                  variant="light"
-                  icon={
-                    !canAnalyze ? (
-                      <Icons.link size={IconSize.action} />
-                    ) : (
-                      <Icons.confirm size={IconSize.action} />
-                    )
-                  }
-                  py="xs"
-                >
-                  <Text size="xs">{canReadPage ? "表示中の一覧から作品を読み取れます。読み込まれている分だけです" : targetLabel(targetKind)}</Text>
-                </Alert>
                 {/* 帯を割り込ませない。取り直しを頼む相手は、取り直すボタンである。
                   独立した警告として一段挟むと、押す場所と読む場所が離れるうえ、
                   ページを移るたびにパネル全体が上下に飛ぶ。 */}
                 <Button
                   fullWidth
-                  mt="sm"
                   color={analysisStale ? "yellow" : undefined}
                   leftSection={
                     analyzing ? undefined : analysisStale ? (
@@ -1654,6 +1735,64 @@ export default function SavePage() {
                 >
                   {analyzeLabel}
                 </Button>
+                {listProgress ? (
+                  <Group justify="space-between" gap="xs" mt={6} wrap="nowrap">
+                    <Text size="xs" c="dimmed" role="status">{listProgress.page} / {listProgress.pages}ページ目まで（{listProgress.works}{readsFollowing ? "人" : "件"}）</Text>
+                    <Button variant="light" color="gray" size="compact-xs" style={{ flexShrink: 0 }} onClick={() => { listReadStopRef.current = true; }}>止める</Button>
+                  </Group>
+                ) : canReadNextPages && (
+                  <Group justify="space-between" gap="xs" mt={4} wrap="nowrap">
+                    <Text size="xs" c="dimmed" truncate="end">
+                      {listRead.pages > 1 ? `${listRead.pages}ページ · ${listRead.intervalSeconds}秒ごと${listRead.stopAtSaved ? (readsFollowing ? " · 登録済みで止める" : " · 保存済みで止める") : ""}` : "表示中のページだけ"}
+                    </Text>
+                    <Button
+                      variant="subtle"
+                      size="compact-xs"
+                      style={{ flexShrink: 0 }}
+                      aria-expanded={listOptionsOpen}
+                      onClick={() => setListOptionsOpen((open) => !open)}
+                    >
+                      {listOptionsOpen ? "閉じる" : "読み方"}
+                    </Button>
+                  </Group>
+                )}
+                {canReadNextPages && listOptionsOpen && !listProgress && (
+                  <Stack gap={6} mt={6}>
+                    <Group gap="xs" grow align="flex-start">
+                      <NumberInput
+                        size="xs"
+                        label="ページ数"
+                        min={1}
+                        max={MAX_LIST_PAGES}
+                        allowDecimal={false}
+                        clampBehavior="blur"
+                        value={listReadSettings.pages}
+                        onChange={(value) => setListReadSettings((current) => ({ ...current, pages: Number(value) }))}
+                      />
+                      <NumberInput
+                        size="xs"
+                        label="間隔（秒）"
+                        min={MIN_LIST_INTERVAL_SECONDS}
+                        max={MAX_LIST_INTERVAL_SECONDS}
+                        allowDecimal={false}
+                        clampBehavior="blur"
+                        value={listReadSettings.intervalSeconds}
+                        onChange={(value) => setListReadSettings((current) => ({ ...current, intervalSeconds: Number(value) }))}
+                      />
+                    </Group>
+                    <Switch
+                      size="xs"
+                      label={readsFollowing ? "登録済みだけのページで止める" : "保存済みだけのページで止める"}
+                      checked={listRead.stopAtSaved}
+                      onChange={(event) => { const stopAtSaved = event.currentTarget.checked; setListReadSettings((current) => ({ ...current, stopAtSaved })); }}
+                    />
+                    <Text size="xs" c="dimmed">
+                      {listRead.pages > 1
+                        ? "ブラウザでログイン中のアカウントで次のページを開くので、その分の通信が増えます。保存は取得用の接続で行います。"
+                        : "手で次のページへ進んで読んでも、候補に足していきます。"}
+                    </Text>
+                  </Stack>
+                )}
               </Box>
               <Divider />
               <Group
@@ -1725,19 +1864,28 @@ export default function SavePage() {
                 className="candidate-list"
                 data-stale={(analysisStale && items.length > 0) || undefined}
               >
-                <Stack gap="xs" pb="md">
-                  {!items.length && !analyzing && (
-                    <EmptyCandidates source={source} />
-                  )}
-                  {items.map((item) => (
-                    <CandidateRow
-                      key={item.id}
-                      item={item}
-                      disabled={saving}
-                      onToggle={toggleCandidate}
-                    />
-                  ))}
-                </Stack>
+                {followedRows.length > 0 ? (
+                  <FollowedUsersList
+                    rows={followedRows}
+                    adding={addingToWatch}
+                    onToggle={(userId, selected) => setFollowedUsers((current) => ({ ...current, rows: current.rows.map((row) => row.userId === userId ? { ...row, selected } : row) }))}
+                    onAdd={addFollowedUsersToWatch}
+                  />
+                ) : (
+                  <Stack gap="xs" pb="md">
+                    {!items.length && !analyzing && (
+                      <EmptyCandidates source={source} />
+                    )}
+                    {items.map((item) => (
+                      <CandidateRow
+                        key={item.id}
+                        item={item}
+                        disabled={saving}
+                        onToggle={toggleCandidate}
+                      />
+                    ))}
+                  </Stack>
+                )}
               </ScrollArea>
               <Divider />
               <Box p="md">
@@ -1792,7 +1940,7 @@ export default function SavePage() {
                     fullWidth
                     size="md"
                     leftSection={<Icons.collect size={IconSize.action} />}
-                    disabled={!runtime || !pendingCount || activeJob}
+                    disabled={!runtime || !pendingCount || activeJob || analyzing}
                     onClick={execute}
                   >
                     {saveActionLabel}

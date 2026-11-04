@@ -137,7 +137,7 @@ test("critical workspaces keep a stable layout", async ({ page }, testInfo) => {
     ["collection", "/#/collections/demo-long", "星の航路と秘密の図書室をめぐる長い連載の関連作品"],
     ["settings-library", "/#/settings?section=library", "保存とバックアップ"],
     ["settings-assist", "/#/settings?section=assist", "AIの手伝い"],
-    ["updates", "/#/updates", "新着"],
+    ["updates", "/#/updates", "新作・改稿"],
     ["epub", "/#/epub", "EPUB書き出し"],
     ["epub-templates", "/#/epub/templates", "テンプレートスタジオ"],
     ["work", "/#/works/101", "雨上がりの図書室で"],
@@ -395,6 +395,42 @@ test("hidden library shortcuts remain available from the library", async ({ page
   await page.getByRole("menuitem", { name: "読みかけ", exact: true }).click();
   await expect(page).toHaveURL(/#\/library\?shelf=reading/);
   await expect(page.locator("#app-navigation").getByText("読みかけ", { exact: true })).toHaveCount(0);
+});
+
+test("update toolbar stays on one row at every window size", async ({ page }) => {
+  await page.goto("/#/updates");
+  const row = page.locator(".updates-toolbar__row");
+  await expect(row).toBeVisible();
+  const box = await row.boundingBox();
+  expect(box?.height).toBeLessThanOrEqual(40);
+  const overflow = await row.evaluate((element) => element.scrollWidth - element.clientWidth);
+  expect(overflow).toBeLessThanOrEqual(0);
+});
+
+test("every scroller keeps its width when a scrollbar appears", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "1200x800-light-100dpi", "Layout rule, checked once");
+  for (const route of ["/#/updates", "/#/library", "/#/settings", "/#/operations", "/#/"]) {
+    await page.goto(route);
+    await expect(page.locator(".page").first()).toBeVisible();
+    const report = await page.evaluate(async () => {
+      const main = document.querySelector<HTMLElement>(".app-main")!;
+      const content = main.querySelector<HTMLElement>(".page")!;
+      const before = content.getBoundingClientRect().width;
+      const spacer = document.createElement("div");
+      spacer.style.height = "4000px";
+      main.append(spacer);
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+      const after = content.getBoundingClientRect().width;
+      spacer.remove();
+      const unstable = [...document.querySelectorAll<HTMLElement>("*")].filter((element) => {
+        const style = getComputedStyle(element);
+        return /auto|scroll/.test(style.overflowY) && style.scrollbarWidth !== "none" && !style.scrollbarGutter.includes("stable");
+      }).map((element) => element.className || element.tagName);
+      return { before, after, unstable };
+    });
+    expect(report.after, route).toBe(report.before);
+    expect(report.unstable, route).toEqual([]);
+  }
 });
 
 test("update candidate source links open the in-app browser", async ({ page }, testInfo) => {
