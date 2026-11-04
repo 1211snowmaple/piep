@@ -37,10 +37,11 @@ const TEST_SOURCE: Option<&str> = option_env!("PIEP_SERVER_TEST_SOURCE");
 
 const EXECUTABLE: &str = "piep-server.exe";
 /// zip の中で受け入れるファイル。これ以外があれば、その配布物は使わない。
-const PACKAGE_FILES: [&str; 5] = [
+const PACKAGE_FILES: [&str; 6] = [
     EXECUTABLE,
     "msvcp140.dll",
     "msvcp140_1.dll",
+    "pdfium.dll",
     "vcruntime140.dll",
     "vcruntime140_1.dll",
 ];

@@ -193,8 +193,8 @@ public_url = ""              # 携帯の登録文字列に載せる https の UR
 # tls = "self-signed"        # または { cert = "...", key = "..." }
 
 # [update]                   # install で置いたときの自己更新
-# auto = true                # false ならデスクトップ版から頼んだときだけ当てる
-# window = "03:00-06:00"     # 自動で当てる時間帯
+# auto = true                # false ならデスクトップ版から操作したときだけ更新する
+# window = "03:00-06:00"     # 自動で更新する時間帯
 "#;
 
 /// 登録文字列を作って返す。
@@ -618,7 +618,7 @@ fn required_data(parsed: &Arguments) -> Result<&Path, String> {
 /// 登録文字列は、この画面にだけ出す。記録には残さない。
 fn print_pairing(payload: &str) {
     println!(
-        "デスクトップ版の「設定 → サーバー（β）→ 別の機械のサーバーにつなぐ」に貼ってください。"
+        "デスクトップ版の「設定 → サーバー → 別の PC のサーバーに接続」に貼り付けてください。"
     );
     println!("30 分有効で、一度だけ使えます。人に見せないでください。");
     println!();

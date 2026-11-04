@@ -896,7 +896,7 @@ async fn the_public_side_refuses_what_it_should() {
         .unwrap();
     assert_eq!(search.status(), StatusCode::PAYLOAD_TOO_LARGE);
 
-    // Tailscale の識別ヘッダーは端末一覧に記録するだけで、認証の代わりにはならない。
+    // 経路が付けた利用者名は、認証にも記録にも使わない。
     let forged = client
         .get(format!("{url}/api/v1/collections"))
         .header("Tailscale-User-Login", "someone@example.test")
@@ -904,15 +904,17 @@ async fn the_public_side_refuses_what_it_should() {
         .await
         .unwrap();
     assert_eq!(forged.status(), StatusCode::UNAUTHORIZED);
-    let noted = client
+    let listed = client
         .get(format!("{url}/api/v1/admin/devices"))
         .bearer_auth(&token)
         .header("Tailscale-User-Login", "someone@example.test")
         .send()
         .await
+        .unwrap()
+        .text()
+        .await
         .unwrap();
-    let noted: serde_json::Value = noted.json().await.unwrap();
-    assert_eq!(noted[0]["lastUser"], "someone@example.test");
+    assert!(!listed.contains("someone@example.test"));
 
     // 読み手の鍵では、送信も端末の管理もできない。
     let secret = ServerStore::open(&paths.store())
@@ -1115,4 +1117,34 @@ fn an_interrupted_send_can_resume_and_a_bad_one_changes_nothing() {
         receiver.blob_state(&resumed.session_id, &"0".repeat(64)),
         Err(SyncError::NotFound)
     ));
+}
+
+#[test]
+fn opening_the_store_removes_the_recorded_login_name() {
+    let root = TestRoot::created("last_user");
+    let path = root.0.join("state.db");
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE devices (
+                 id TEXT PRIMARY KEY, name TEXT NOT NULL, role TEXT NOT NULL,
+                 token_hash BLOB NOT NULL, created_at TEXT NOT NULL,
+                 last_seen_at TEXT, last_user TEXT
+             );
+             INSERT INTO devices VALUES ('a', 'PC', 'admin', x'00', '2026-11-04T00:00:00Z', NULL, 'someone@example.test');",
+        )
+        .unwrap();
+    }
+    let store = ServerStore::open(&path).unwrap();
+    assert_eq!(store.list_devices().unwrap()[0].name, "PC");
+    drop(store);
+    let columns: i64 = rusqlite::Connection::open(&path)
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('devices') WHERE name = 'last_user'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(columns, 0);
 }

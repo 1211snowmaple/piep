@@ -73,7 +73,7 @@ describe("ServerSection", () => {
     renderSection();
     const input = await screen.findByLabelText("管理者用の登録文字列");
     fireEvent.change(input, { target: { value: "  {\"version\":2}  " } });
-    fireEvent.click(screen.getByRole("button", { name: "つなぐ" }));
+    fireEvent.click(screen.getByRole("button", { name: "接続" }));
     await waitFor(() => expect(api.serverConnectRemote).toHaveBeenCalledWith("  {\"version\":2}  "));
     await waitFor(() => expect((input as HTMLTextAreaElement).value).toBe(""));
   });
@@ -82,7 +82,7 @@ describe("ServerSection", () => {
     api.serverStatus.mockResolvedValue(status());
     api.serverEmbeddedStart.mockResolvedValue(status({ embeddedRunning: true, embeddedUrl: "https://192.168.1.10:38777/" }));
     renderSection();
-    const start = await screen.findByRole("button", { name: "始める" });
+    const start = await screen.findByRole("button", { name: "開始" });
     await waitFor(() => expect((start as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(start);
     await waitFor(() => expect(api.serverEmbeddedStart).toHaveBeenCalledWith({ enabled: true, ip: "192.168.1.10", behindProxy: false, publicUrl: null }));
@@ -95,25 +95,55 @@ describe("ServerSection", () => {
     }));
     api.serverSendStop.mockResolvedValue(status());
     renderSection();
-    expect(await screen.findByText("ファイルを送っています")).toBeTruthy();
+    expect(await screen.findByText("ファイルを送信しています")).toBeTruthy();
     expect(await screen.findByText(/12 作品/)).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "止める" }));
+    fireEvent.click(screen.getByRole("button", { name: "中止" }));
     await waitFor(() => expect(api.serverSendStop).toHaveBeenCalled());
   });
 
   it("offers a QR for a phone and does not offer to revoke the admin", async () => {
     api.serverStatus.mockResolvedValue(status({ remote: { url: "https://server.example/", fingerprint: null } }));
     api.serverRemoteDevices.mockResolvedValue([
-      { id: "a", name: "PC", role: "admin", createdAt: "2026-11-01T00:00:00Z", lastSeenAt: null, lastUser: null },
-      { id: "b", name: "Pixel", role: "reader", createdAt: "2026-11-01T00:00:00Z", lastSeenAt: null, lastUser: null },
+      { id: "a", name: "PC", role: "admin", createdAt: "2026-11-01T00:00:00Z", lastSeenAt: null },
+      { id: "b", name: "Pixel", role: "reader", createdAt: "2026-11-01T00:00:00Z", lastSeenAt: null },
     ]);
     api.serverCreateReaderPairing.mockResolvedValue({ payload: "{\"version\":2}", expiresInSeconds: 600 });
     renderSection();
     expect(await screen.findByText("Pixel")).toBeTruthy();
     expect(screen.getAllByRole("button", { name: "登録を解除" })).toHaveLength(1);
+    expect(screen.getByText("管理者")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "携帯を追加" }));
-    expect(await screen.findByRole("button", { name: "登録文字列をコピー" })).toBeTruthy();
-    expect(screen.getByText(/10 分だけ有効/)).toBeTruthy();
+
+    // アプリの QR だけが出ていて、次へ進むまで登録の鍵を発行しない。
+    expect(await screen.findByRole("img", { name: "Android 版の配布ページ" })).toBeTruthy();
+    expect(document.querySelectorAll("svg[aria-label]")).toHaveLength(1);
+    expect(api.serverCreateReaderPairing).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "次へ" }));
+    expect(await screen.findByRole("img", { name: "登録用の QR" })).toBeTruthy();
+    expect(document.querySelectorAll("svg[aria-label]")).toHaveLength(1);
+    expect(screen.getByRole("button", { name: "登録文字列をコピー" })).toBeTruthy();
+    expect(screen.getByText(/10 分間有効/)).toBeTruthy();
+
+    // 戻って進んでも、鍵を発行し直さない。
+    fireEvent.click(screen.getByRole("button", { name: "戻る" }));
+    fireEvent.click(await screen.findByRole("button", { name: "次へ" }));
+    expect(await screen.findByRole("img", { name: "登録用の QR" })).toBeTruthy();
+    expect(api.serverCreateReaderPairing).toHaveBeenCalledTimes(1);
+  });
+
+  it("says so when the phone has been registered", async () => {
+    const admin = { id: "a", name: "PC", role: "admin", createdAt: "2026-11-01T00:00:00Z", lastSeenAt: null };
+    api.serverStatus.mockResolvedValue(status({ remote: { url: "https://server.example/", fingerprint: null } }));
+    api.serverRemoteDevices.mockResolvedValue([admin]);
+    api.serverCreateReaderPairing.mockResolvedValue({ payload: "{\"version\":2}", expiresInSeconds: 600 });
+    renderSection();
+    fireEvent.click(await screen.findByRole("button", { name: "携帯を追加" }));
+    fireEvent.click(await screen.findByRole("button", { name: "次へ" }));
+    expect(await screen.findByRole("img", { name: "登録用の QR" })).toBeTruthy();
+    api.serverRemoteDevices.mockResolvedValue([admin, { id: "b", name: "Pixel", role: "reader", createdAt: "2026-11-01T00:00:00Z", lastSeenAt: null }]);
+    expect(await screen.findByText("「Pixel」を登録しました。", undefined, { timeout: 5_000 })).toBeTruthy();
+    expect(screen.queryByRole("img", { name: "登録用の QR" })).toBeNull();
   });
 
   it("reports a failed action", async () => {
