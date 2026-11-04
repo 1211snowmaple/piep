@@ -10,6 +10,7 @@ use crate::database::queries::SearchIndexRebuildOptions;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::cell::{Cell, RefCell};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -117,6 +118,71 @@ pub struct ReceiverStatus {
 struct IndexWorker {
     cancel: Arc<AtomicBool>,
     handle: Option<std::thread::JoinHandle<()>>,
+}
+
+/// 置いたファイル1つ分の、元へ戻すための控え。
+struct PlacedFile {
+    target: PathBuf,
+    /// どけておいた前の中身。
+    previous: Option<PathBuf>,
+    /// ここから動かしてきたかたまり。写して置いたものは消すだけで戻る。
+    blob: Option<PathBuf>,
+}
+
+/// 公開中のファイルの控え。DB を開き直すまで、前の中身を戻せるようにする。
+#[derive(Default)]
+struct FilePublication {
+    files: Vec<PlacedFile>,
+}
+
+struct RestartIndex<'a>(&'a SyncReceiver);
+
+impl Drop for RestartIndex<'_> {
+    fn drop(&mut self) {
+        self.0.start_index_catch_up();
+    }
+}
+
+impl FilePublication {
+    fn rollback(&mut self) -> Result<(), String> {
+        while let Some(file) = self.files.last() {
+            // 途中で失敗したら、もう一度ここから呼ばれる。済んだ手順は飛ばせる形にする。
+            let cleared = match &file.blob {
+                Some(blob) => fs::rename(&file.target, blob),
+                None => fs::remove_file(&file.target),
+            };
+            let result = match cleared {
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+                result => result,
+            }
+            .and_then(|()| match &file.previous {
+                Some(previous) => fs::rename(previous, &file.target),
+                None => Ok(()),
+            });
+            result
+                .map_err(|error| format!("{} を元に戻せません: {error}", file.target.display()))?;
+            self.files.pop();
+        }
+        Ok(())
+    }
+
+    fn accept(mut self) {
+        for file in self.files.drain(..) {
+            if let Some(previous) = file.previous {
+                if let Err(error) = fs::remove_file(&previous) {
+                    log::warn!("確定済みファイルの控えを片付けられません: {error}");
+                }
+            }
+        }
+    }
+}
+
+impl Drop for FilePublication {
+    fn drop(&mut self) {
+        if let Err(error) = self.rollback() {
+            log::error!("送信の巻き戻しに失敗しました: {error}");
+        }
+    }
 }
 
 pub struct SyncReceiver {
@@ -229,7 +295,11 @@ impl SyncReceiver {
             .write_lock
             .lock()
             .map_err(|_| SyncError::Conflict("確定の途中です"))?;
-        let database_sha256 = self.store.meta(META_DATABASE_SHA)?;
+        let database_sha256 = if self.db.current().is_some() {
+            self.store.meta(META_DATABASE_SHA)?
+        } else {
+            None
+        };
         if let Some(existing) = self.store.meta(META_SESSION)? {
             let fresh = self
                 .store
@@ -297,6 +367,10 @@ impl SyncReceiver {
         session_id: &str,
         files: &[ManifestEntry],
     ) -> Result<Vec<String>, SyncError> {
+        let _guard = self
+            .write_lock
+            .lock()
+            .map_err(|_| SyncError::Conflict("送信の状態を確保できません"))?;
         self.require_session(session_id)?;
         for entry in files {
             validate_relative(&entry.path)
@@ -354,6 +428,10 @@ impl SyncReceiver {
     }
 
     pub fn blob_state(&self, session_id: &str, sha: &str) -> Result<BlobState, SyncError> {
+        let _guard = self
+            .write_lock
+            .lock()
+            .map_err(|_| SyncError::Conflict("送信の状態を確保できません"))?;
         self.require_session(session_id)?;
         if !valid_sha(sha) {
             return Err(SyncError::Invalid("ハッシュの形が正しくありません"));
@@ -384,6 +462,10 @@ impl SyncReceiver {
         total: u64,
         bytes: &[u8],
     ) -> Result<BlobState, SyncError> {
+        let _guard = self
+            .write_lock
+            .lock()
+            .map_err(|_| SyncError::Conflict("送信の状態を確保できません"))?;
         self.require_session(session_id)?;
         if !valid_sha(sha) {
             return Err(SyncError::Invalid("ハッシュの形が正しくありません"));
@@ -437,6 +519,10 @@ impl SyncReceiver {
 
     /// どのパスがどの中身かを結びつける。
     pub fn bind_files(&self, session_id: &str, files: &[BindEntry]) -> Result<(), SyncError> {
+        let _guard = self
+            .write_lock
+            .lock()
+            .map_err(|_| SyncError::Conflict("送信の状態を確保できません"))?;
         self.require_session(session_id)?;
         let mut conn = self.store.connection()?;
         let tx = conn.transaction()?;
@@ -507,8 +593,9 @@ impl SyncReceiver {
             }
         }
         let (incoming_db, _) = self.blob_paths(session_id, &request.database_sha256);
-        let database_changed = self.store.meta(META_DATABASE_SHA)?.as_deref()
-            != Some(request.database_sha256.as_str());
+        let database_changed = self.db.current().is_none()
+            || self.store.meta(META_DATABASE_SHA)?.as_deref()
+                != Some(request.database_sha256.as_str());
         if database_changed && !incoming_db.exists() {
             return Err(SyncError::Conflict("DB の写しが上がっていません"));
         }
@@ -532,26 +619,57 @@ impl SyncReceiver {
             });
         }
 
-        self.set_phase("placing_files");
-        self.place_files(session_id, &needed)?;
-
-        if database_changed {
-            self.set_phase("swapping");
-            // 索引の作業は本棚を掴んでいるので、先に止める。
-            self.stop_index_catch_up();
-            let live = self.db.db_path().to_path_buf();
+        let live = self.db.db_path().to_path_buf();
+        let restoring = if database_changed {
             // SQLite は 260 文字を超えるパスを開けない。かたまりの置き場はハッシュの分だけ長いので、
-            // 短い名前へ移してから開く。失敗すれば捨てる。送り手が上げ直せばよい。
+            // 短い名前へ写してから開く。検証が済むまでは、いま読めるファイルも
+            // 受信済みのかたまりも変えない。断ったあとでも再試行できる。
             let restoring = self.incoming_root.join("restoring.db");
-            fs::rename(&incoming_db, &restoring)?;
+            fs::copy(&incoming_db, &restoring)?;
             if let Err(error) = restore_on_server(&restoring, &self.library_root, Some(&live)) {
                 let _ = fs::remove_file(&restoring);
                 return Err(error.into());
             }
-            let install_target = live.clone();
-            let install_source = restoring.clone();
-            self.db
-                .replace_with(move || install_database(&install_source, &install_target))?;
+            Some(restoring)
+        } else {
+            None
+        };
+
+        // ファイルも本棚を読む要求が終わってから切り替える。途中の失敗では、
+        // ファイルを戻してから旧DBを開き直す。
+        self.stop_index_catch_up();
+        let _restart_index = RestartIndex(self);
+        let publication = RefCell::new(None::<FilePublication>);
+        let database_moved = Cell::new(false);
+        let had_database = live.exists();
+        let result = self.db.replace_with(
+            || {
+                self.set_phase("placing_files");
+                *publication.borrow_mut() = Some(
+                    self.place_files(session_id, &needed)
+                        .map_err(|error| format!("ファイルを配置できません: {error:?}"))?,
+                );
+                if let Some(restoring) = &restoring {
+                    self.set_phase("swapping");
+                    install_database(restoring, &live, &database_moved)?;
+                }
+                Ok(())
+            },
+            || {
+                if let Some(files) = publication.borrow_mut().as_mut() {
+                    files.rollback()?;
+                }
+                if database_moved.get() {
+                    restore_previous_database(&live, had_database)?;
+                }
+                Ok(())
+            },
+        );
+        if let Err(error) = result {
+            return Err(error.into());
+        }
+        if let Some(files) = publication.into_inner() {
+            files.accept();
         }
 
         self.set_phase("removing_stale");
@@ -559,14 +677,25 @@ impl SyncReceiver {
         self.purge_trash();
 
         let generation = self.generation() + 1;
-        self.store
-            .set_meta(META_GENERATION, &generation.to_string())?;
-        self.store
-            .set_meta(META_DATABASE_SHA, &request.database_sha256)?;
-        self.store
-            .set_meta(META_COMMITTED_AT, &chrono::Utc::now().to_rfc3339())?;
+        {
+            let mut conn = self.store.connection()?;
+            let tx = conn.transaction()?;
+            tx.execute(
+                "INSERT INTO files (path, size, mtime_ms)
+                 SELECT path, size, mtime_ms FROM session_files WHERE session_id = ?1
+                 ON CONFLICT(path) DO UPDATE SET size = excluded.size, mtime_ms = excluded.mtime_ms",
+                [session_id],
+            )?;
+            for (key, value) in [
+                (META_GENERATION, generation.to_string()),
+                (META_DATABASE_SHA, request.database_sha256.clone()),
+                (META_COMMITTED_AT, chrono::Utc::now().to_rfc3339()),
+            ] {
+                tx.execute("INSERT INTO meta(key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value", params![key, value])?;
+            }
+            tx.commit()?;
+        }
         self.discard_session(session_id)?;
-        self.start_index_catch_up();
         Ok(CommitOutcome {
             generation,
             works: self.work_count(),
@@ -581,44 +710,68 @@ impl SyncReceiver {
         &self,
         session_id: &str,
         needed: &[(String, i64, i64, Option<String>)],
-    ) -> Result<(), SyncError> {
-        for (index, (path, size, mtime_ms, sha)) in needed.iter().enumerate() {
-            let Some(sha) = sha.as_deref() else {
-                return Err(SyncError::Conflict("上がっていないファイルがあります"));
-            };
-            let (blob, _) = self.blob_paths(session_id, sha);
-            let target = self.library_path(path);
-            if let Some(parent) = target.parent() {
-                fs::create_dir_all(parent)?;
+    ) -> Result<FilePublication, SyncError> {
+        let mut publication = FilePublication::default();
+        let rollback_dir = self.session_dir(session_id).join("rollback");
+        let result = (|| -> Result<(), SyncError> {
+            for (index, (path, _, _, sha)) in needed.iter().enumerate() {
+                let Some(sha) = sha.as_deref() else {
+                    return Err(SyncError::Conflict("上がっていないファイルがあります"));
+                };
+                let (blob, _) = self.blob_paths(session_id, sha);
+                let target = self.library_path(path);
+                if let Some(parent) = target.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                // 動かして置き、失敗したら動かして戻す。本棚を閉じている間なので、写すと
+                // 止まる時間も要る空き容量も本棚の大きさに比例してしまう。写すのは、同じ中身が
+                // まだ後に続くときだけ（同じ中身は sha の順に並んでいる）。
+                let temporary = needed
+                    .get(index + 1)
+                    .is_some_and(|next| next.3.as_deref() == Some(sha))
+                    .then(|| target.with_extension(format!("piep-incoming-{}", random_token(6))));
+                if let Some(temporary) = &temporary {
+                    if let Err(error) = fs::copy(&blob, temporary) {
+                        let _ = fs::remove_file(temporary);
+                        return Err(error.into());
+                    }
+                }
+                let placed = (|| -> Result<(), SyncError> {
+                    let previous = if target.exists() {
+                        if !target.is_file() {
+                            return Err(SyncError::Conflict(
+                                "ファイルの置き場にフォルダーがあります",
+                            ));
+                        }
+                        fs::create_dir_all(&rollback_dir)?;
+                        let previous = rollback_dir.join(random_token(12));
+                        fs::rename(&target, &previous)?;
+                        Some(previous)
+                    } else {
+                        None
+                    };
+                    publication.files.push(PlacedFile {
+                        target: target.clone(),
+                        previous,
+                        blob: temporary.is_none().then(|| blob.clone()),
+                    });
+                    fs::rename(temporary.as_ref().unwrap_or(&blob), &target)?;
+                    Ok(())
+                })();
+                if let Some(temporary) = &temporary {
+                    let _ = fs::remove_file(temporary);
+                }
+                placed?;
             }
-            // 同じ中身のファイルは sha の順に並んでいる。最後の 1 つだけ動かせばよい。
-            let used_again = needed
-                .get(index + 1)
-                .is_some_and(|next| next.3.as_deref() == Some(sha));
-            let temporary = target.with_extension(format!("piep-incoming-{}", random_token(6)));
-            if used_again {
-                fs::copy(&blob, &temporary)?;
-            } else {
-                fs::rename(&blob, &temporary)?;
-            }
-            if let Err(error) = fs::rename(&temporary, &target) {
-                let _ = fs::remove_file(&temporary);
-                return Err(error.into());
-            }
-            self.store.connection()?.execute(
-                "INSERT INTO files (path, size, mtime_ms) VALUES (?1, ?2, ?3)
-                 ON CONFLICT(path) DO UPDATE SET size = excluded.size, mtime_ms = excluded.mtime_ms",
-                params![path, size, mtime_ms],
-            )?;
+            Ok(())
+        })();
+        if let Err(error) = result {
+            publication
+                .rollback()
+                .map_err(|recovery| SyncError::Internal(format!("{error:?}。{recovery}")))?;
+            return Err(error);
         }
-        // 変わっていないファイルも、次の比較のために記録を揃える。
-        self.store.connection()?.execute(
-            "INSERT INTO files (path, size, mtime_ms)
-             SELECT path, size, mtime_ms FROM session_files WHERE session_id = ?1 AND needed = 0
-             ON CONFLICT(path) DO UPDATE SET size = excluded.size, mtime_ms = excluded.mtime_ms",
-            [session_id],
-        )?;
-        Ok(())
+        Ok(publication)
     }
 
     /// 一覧から消えたファイルを `library-trash` へ移す。入れ替えのあとなので、読んでいる世代は困らない。
@@ -760,7 +913,7 @@ impl SyncReceiver {
 }
 
 /// 受け取った DB を本棚の DB に置き換える。直前の DB を 1 つ残す。
-fn install_database(incoming: &Path, live: &Path) -> Result<(), String> {
+fn install_database(incoming: &Path, live: &Path, moved: &Cell<bool>) -> Result<(), String> {
     let error = |detail: io::Error| format!("DB を入れ替えられません: {detail}");
     let previous = live.with_extension("db.previous");
     for suffix in ["-wal", "-shm"] {
@@ -774,12 +927,26 @@ fn install_database(incoming: &Path, live: &Path) -> Result<(), String> {
             fs::remove_file(&previous).map_err(error)?;
         }
         fs::rename(live, &previous).map_err(error)?;
+        moved.set(true);
     }
-    if let Err(detail) = fs::rename(incoming, live) {
-        if previous.exists() {
-            let _ = fs::rename(&previous, live);
-        }
-        return Err(error(detail));
-    }
+    fs::rename(incoming, live).map_err(error)?;
+    moved.set(true);
     Ok(())
+}
+
+fn restore_previous_database(live: &Path, had_database: bool) -> Result<(), String> {
+    for suffix in ["-wal", "-shm"] {
+        let sidecar = PathBuf::from(format!("{}{suffix}", live.display()));
+        match fs::remove_file(sidecar) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("DB の作業ファイルを戻せません: {error}")),
+        }
+    }
+    if had_database {
+        fs::rename(live.with_extension("db.previous"), live)
+            .map_err(|error| format!("前の DB を戻せません: {error}"))
+    } else {
+        fs::remove_file(live).map_err(|error| format!("未確定の DB を消せません: {error}"))
+    }
 }
