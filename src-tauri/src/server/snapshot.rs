@@ -357,12 +357,14 @@ pub fn restore_on_server(
     if check != "ok" {
         return Err("受け取った DB が壊れています".into());
     }
-    if !table_exists(&conn, "downloads")? {
+    if !table_exists(&conn, "downloads")?
+        || !crate::database::schema::is_known_library(&conn).map_err(sql_error)?
+    {
         return Err("受け取ったファイルは piep の本棚ではありません".into());
     }
     {
         // 送られてきた DB が持つトリガーをサーバーの中で動かさない。必要なものは
-        // 開くときの schema::initialize が作り直す。
+        // 下の schema::initialize が作り直す。
         let triggers: Vec<String> = {
             let mut stmt = conn
                 .prepare("SELECT name FROM sqlite_master WHERE type = 'trigger'")
@@ -377,6 +379,11 @@ pub fn restore_on_server(
             )
             .map_err(sql_error)?;
         }
+        // 実際に本棚として開けるかも、公開する前に確かめる。SQLite の検査と
+        // downloads の存在だけでは、不適合な表や旧形式を通してしまう。
+        // 識別済みの本棚だけを初期化するので、foreign DB のリセットは起きない。
+        crate::database::schema::initialize(&conn).map_err(sql_error)?;
+        crate::database::schema::validate_columns(&conn).map_err(sql_error)?;
         let tx = conn.transaction().map_err(sql_error)?;
         clear_tables(&tx)?;
         for (table, column) in PATH_COLUMNS {
@@ -405,6 +412,25 @@ mod tests {
     use super::*;
 
     const APP: &str = r"C:\Users\reader\AppData\Roaming\piep";
+
+    #[test]
+    fn received_databases_must_be_readable_without_resetting_the_library() {
+        for damage in [
+            "ALTER TABLE downloads ADD COLUMN tags TEXT",
+            "DROP TABLE work_edit_blocks; CREATE TABLE work_edit_blocks (wrong_column TEXT)",
+        ] {
+            let dir = crate::server::tests::TestRoot::created("snapshot_schema");
+            let incoming = dir.0.join("incoming.db");
+            let conn = Connection::open(&incoming).unwrap();
+            crate::database::schema::initialize(&conn).unwrap();
+            conn.execute_batch(damage).unwrap();
+            drop(conn);
+            assert!(
+                restore_on_server(&incoming, &dir.0.join("library"), None).is_err(),
+                "本棚として開けない写しは確定前に断る: {damage}"
+            );
+        }
+    }
 
     #[test]
     fn every_shape_found_in_a_real_library_is_converted() {

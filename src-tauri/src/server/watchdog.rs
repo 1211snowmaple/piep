@@ -79,11 +79,13 @@ fn switch_to_pending(paths: &ServerPaths) -> Result<String, String> {
         return Err(format!("版 {pending} の実行ファイルがありません"));
     }
     if let Some(current) = current_version(paths) {
-        write_atomic(&paths.previous_version(), current.as_bytes())?;
+        // current を書いた直後に中断しても、戻す先を新しい版で上書きしない。
+        if current != pending {
+            write_atomic(&paths.previous_version(), current.as_bytes())?;
+        }
     }
     write_atomic(&paths.current_version(), pending.as_bytes())?;
-    fs::remove_file(paths.pending_version())
-        .map_err(|error| format!("待機中の印を消せません: {error}"))?;
+    // 起動確認が済むまで残す。見張り役が止まっても、次の起動で確認と戻しを続ける。
     Ok(pending)
 }
 
@@ -100,11 +102,23 @@ fn roll_back(paths: &ServerPaths, failed: &str, reason: &str) -> Result<(), Stri
         "版 {failed} に更新できなかったので、{previous} に戻しました: {reason}"
     ));
     record.save(paths);
+    clear_pending(paths)?;
     Ok(())
+}
+
+fn clear_pending(paths: &ServerPaths) -> Result<(), String> {
+    match fs::remove_file(paths.pending_version()) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("待機中の印を消せません: {error}")),
+    }
 }
 
 /// 更新が定着したあとの片付け。直前の版だけ残し、見張り役を次の起動で新しくする。
 fn settle(paths: &ServerPaths, version: &str) {
+    if let Err(error) = clear_pending(paths) {
+        note(paths, &error);
+    }
     let previous = read_version_file(&paths.previous_version());
     if let Ok(entries) = fs::read_dir(paths.versions()) {
         for entry in entries.flatten() {
@@ -405,9 +419,10 @@ mod tests {
         write_atomic(&paths.pending_version(), b"1.1.0").expect("pending");
         assert_eq!(switch_to_pending(&paths).expect("switch"), "1.1.0");
         assert_eq!(current_version(&paths).as_deref(), Some("1.1.0"));
-        assert!(!paths.pending_version().exists());
+        assert!(paths.pending_version().exists());
 
         roll_back(&paths, "1.1.0", "起動しない").expect("roll back");
+        assert!(!paths.pending_version().exists());
         assert_eq!(current_version(&paths).as_deref(), Some("1.0.0"));
         let record = UpdateRecord::load(&paths);
         assert_eq!(record.skipped, vec!["1.1.0".to_string()]);
@@ -428,12 +443,51 @@ mod tests {
     }
 
     #[test]
+    fn an_interrupted_switch_keeps_the_update_pending_until_ready() {
+        let (_dir, paths) = laid_out();
+        write_atomic(&paths.pending_version(), b"1.1.0").unwrap();
+        switch_to_pending(&paths).unwrap();
+        assert!(
+            paths.pending_version().exists(),
+            "起動確認前に更新の印を消さない"
+        );
+        // ここで見張り役が止まって、同じ切り替えをやり直す。
+        switch_to_pending(&paths).unwrap();
+        assert_eq!(
+            read_version_file(&paths.previous_version()).as_deref(),
+            Some("1.0.0")
+        );
+        roll_back(&paths, "1.1.0", "起動に失敗").unwrap();
+        assert_eq!(current_version(&paths).as_deref(), Some("1.0.0"));
+        assert!(!paths.pending_version().exists());
+    }
+
+    #[test]
+    fn resuming_after_the_current_pointer_was_written_keeps_the_previous_version() {
+        let (_dir, paths) = laid_out();
+        write_atomic(&paths.pending_version(), b"1.1.0").unwrap();
+        write_atomic(&paths.previous_version(), b"1.0.0").unwrap();
+        write_atomic(&paths.current_version(), b"1.1.0").unwrap();
+        switch_to_pending(&paths).unwrap();
+        assert_eq!(
+            read_version_file(&paths.previous_version()).as_deref(),
+            Some("1.0.0")
+        );
+        roll_back(&paths, "1.1.0", "起動に失敗").unwrap();
+        assert_eq!(current_version(&paths).as_deref(), Some("1.0.0"));
+    }
+
+    #[test]
     fn settling_keeps_only_the_current_and_previous_versions() {
         let (_dir, paths) = laid_out();
         fs::create_dir_all(paths.version_dir("0.9.0")).expect("older");
         fs::create_dir_all(paths.versions().join(".incoming")).expect("incoming");
         write_atomic(&paths.previous_version(), b"1.0.0").expect("previous");
+        write_atomic(&paths.current_version(), b"1.1.0").expect("current");
+        write_atomic(&paths.pending_version(), b"1.1.0").expect("pending");
         settle(&paths, "1.1.0");
+        assert!(!paths.pending_version().exists());
+        assert_eq!(current_version(&paths).as_deref(), Some("1.1.0"));
         assert!(paths.version_dir("1.1.0").exists());
         assert!(paths.version_dir("1.0.0").exists());
         assert!(!paths.version_dir("0.9.0").exists());

@@ -8,4 +8,5 @@ pub mod epub;
 pub mod pdf;
 pub mod server;
 pub mod shell;
+pub mod startup;
 pub mod update_jobs;

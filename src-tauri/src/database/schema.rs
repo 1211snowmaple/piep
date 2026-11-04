@@ -57,7 +57,7 @@ pub fn initialize(conn: &Connection) -> Result<(), rusqlite::Error> {
 /// A valid `downloads` fingerprint or one of our schema markers is enough.
 /// Missing auxiliary tables are created by `create_schema`; requiring every
 /// table here would turn a recoverable partial database into an empty one.
-fn is_known_library(conn: &Connection) -> Result<bool, rusqlite::Error> {
+pub(crate) fn is_known_library(conn: &Connection) -> Result<bool, rusqlite::Error> {
     let has_marker = sqlite_object_exists(conn, "table", "schema_marker")?
         || sqlite_object_exists(conn, "table", "schema_v1_marker")?
         || sqlite_object_exists(conn, "table", "schema_v2_marker")?;
@@ -75,6 +75,37 @@ fn is_known_library(conn: &Connection) -> Result<bool, rusqlite::Error> {
         }
     }
     Ok(true)
+}
+
+/// 移行後の本棚に、現在の問い合わせで使う列がすべてあるか確かめる。
+/// CREATE TABLE IF NOT EXISTS は、同名で形の違う表を直せない。
+pub(crate) fn validate_columns(conn: &Connection) -> Result<(), rusqlite::Error> {
+    let reference = Connection::open_in_memory()?;
+    create_schema(&reference)?;
+    let tables = reference
+        .prepare(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+        )?
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    for table in tables {
+        let expected = reference
+            .prepare("SELECT name FROM pragma_table_info(?1)")?
+            .query_map([&table], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        let actual = conn
+            .prepare("SELECT name FROM pragma_table_info(?1)")?
+            .query_map([&table], |row| row.get::<_, String>(0))?
+            .collect::<Result<std::collections::HashSet<_>, _>>()?;
+        for column in expected {
+            if !actual.contains(&column) {
+                return Err(rusqlite::Error::InvalidColumnName(format!(
+                    "{table}.{column}"
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Records the current version and clears the superseded markers, so a library

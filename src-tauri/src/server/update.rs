@@ -269,13 +269,32 @@ pub async fn prepare_latest(
     paths: &ServerPaths,
     current: &str,
 ) -> Result<Option<String>, String> {
+    prepare_latest_with_timeouts(
+        source,
+        paths,
+        current,
+        Duration::from_secs(30),
+        Duration::from_secs(30 * 60),
+    )
+    .await
+}
+
+async fn prepare_latest_with_timeouts(
+    source: &UpdateSource,
+    paths: &ServerPaths,
+    current: &str,
+    manifest_timeout: Duration,
+    package_timeout: Duration,
+) -> Result<Option<String>, String> {
     let client = reqwest::Client::builder()
         .user_agent(concat!("piep-server/", env!("CARGO_PKG_VERSION")))
         .connect_timeout(Duration::from_secs(30))
+        .timeout(package_timeout)
         .build()
         .map_err(|error| format!("更新を確かめられません: {error}"))?;
     let manifest: Manifest = client
         .get(&source.manifest_url)
+        .timeout(manifest_timeout)
         .send()
         .await
         .and_then(reqwest::Response::error_for_status)
@@ -606,6 +625,76 @@ fn database_pairs(paths: &ServerPaths) -> [(PathBuf, &'static str); 2] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn stalled_update_requests_end_and_can_be_retried() {
+        use axum::{body::Body, response::Response, routing::get, Json, Router};
+
+        for phase in ["headers", "manifest", "package"] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base = format!("http://{}", listener.local_addr().unwrap());
+            let package_url = format!("{base}/package");
+            let app = Router::new()
+                .route(
+                    "/manifest",
+                    get(move || {
+                        let package_url = package_url.clone();
+                        async move {
+                            if phase == "headers" {
+                                return std::future::pending::<Response>().await;
+                            }
+                            if phase == "manifest" {
+                                return Response::new(Body::from_stream(
+                                    futures_util::stream::pending::<
+                                        Result<axum::body::Bytes, std::io::Error>,
+                                    >(),
+                                ));
+                            }
+                            axum::response::IntoResponse::into_response(Json(serde_json::json!({
+                                "version": "1.0.1", "url": package_url, "signature": "unused"
+                            })))
+                        }
+                    }),
+                )
+                .route(
+                    "/package",
+                    get(|| async {
+                        Response::new(Body::from_stream(futures_util::stream::pending::<
+                            Result<axum::body::Bytes, std::io::Error>,
+                        >()))
+                    }),
+                );
+            let server = tokio::spawn(async move { axum::serve(listener, app).await });
+            let dir = crate::server::tests::TestRoot::created("update_timeout");
+            let paths = ServerPaths::new(&dir.0).unwrap();
+            fs::create_dir_all(paths.state()).unwrap();
+            let source = UpdateSource {
+                manifest_url: format!("{base}/manifest"),
+                download_prefix: base,
+                public_key: PUBLIC_KEY.into(),
+            };
+            for _ in 0..2 {
+                let result = tokio::time::timeout(
+                    Duration::from_secs(3),
+                    prepare_latest_with_timeouts(
+                        &source,
+                        &paths,
+                        "1.0.0",
+                        Duration::from_millis(100),
+                        Duration::from_millis(100),
+                    ),
+                )
+                .await;
+                assert!(result.is_ok(), "更新が止まったままにならない: {phase}");
+                assert!(
+                    result.unwrap().is_err(),
+                    "通信が止まった理由を返す: {phase}"
+                );
+                assert!(!paths.versions().join(".incoming").exists());
+            }
+            server.abort();
+        }
+    }
 
     #[test]
     fn versions_compare_as_numbers() {

@@ -4,9 +4,9 @@
 //! `pair` だけで、応答にパスや内部の誤り文を出さない。
 
 use super::dto::{
-    mobile_page, MobileCollection, MobileCollectionDetail, MobileEntity, MobileEntityPage,
-    MobileMetadata, MobilePage, MobilePerson, MobileSearchPage, MobileSearchRequest,
-    MobileSeriesMembership,
+    mobile_page, MobileCollection, MobileCollectionDetail, MobileEntity, MobileEntityDetail,
+    MobileEntityPage, MobileEntitySeriesPage, MobileFacet, MobileMetadata, MobilePage,
+    MobilePerson, MobileSearchPage, MobileSearchRequest, MobileSeriesMembership,
 };
 use super::library::Library;
 use super::store::{AuthorizedDevice, PairError, ReadingUpdate, Role, ServerStore};
@@ -42,8 +42,22 @@ const READER_PAIRING_LIFETIME: Duration = Duration::from_secs(10 * 60);
 const PAIR_ATTEMPTS_PER_MINUTE: usize = 10;
 
 /// `hello` で知らせる機能の一覧。
-const CAPABILITIES_EMBEDDED: &[&str] = &["read", "reading-sync"];
-const CAPABILITIES_STANDALONE: &[&str] = &["read", "reading-sync", "admin-sync"];
+const CAPABILITIES_EMBEDDED: &[&str] = &["read", "reading-sync", "entity-detail"];
+const CAPABILITIES_STANDALONE: &[&str] = &["read", "reading-sync", "entity-detail", "admin-sync"];
+/// デスクトップ版の作者・シリーズの並び順と同じ語彙。
+const ENTITY_SORTS: &[&str] = &[
+    "work_count",
+    "downloaded_at",
+    "source_created_at",
+    "source_updated_at",
+    "name",
+    "text_length",
+    "file_size_bytes",
+    "asset_count",
+    "current_version",
+];
+/// 縮小した表紙を覚えておく上限。一覧の数百枚ぶんが収まる。
+const COVER_CACHE_BYTES: usize = 64 * 1024 * 1024;
 
 pub struct ServerContext {
     pub library: Library,
@@ -58,6 +72,64 @@ pub struct ServerContext {
     /// 自己更新の係。`install` で置いた単独サーバーにだけある。
     update: OnceLock<Arc<UpdateController>>,
     pair_attempts: Mutex<VecDeque<Instant>>,
+    covers: Mutex<CoverCache>,
+}
+
+/// 表紙の用途ごとの大きさ。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum CoverSize {
+    Card,
+    Large,
+    Banner,
+}
+
+impl CoverSize {
+    fn bounds(self) -> (u32, u32) {
+        match self {
+            Self::Card => (320, 480),
+            Self::Large => (640, 960),
+            Self::Banner => (1280, 480),
+        }
+    }
+}
+
+type CoverKey = (PathBuf, std::time::SystemTime, u64, CoverSize);
+
+/// 縮小した表紙を置いておく。変換は重いので、同じ表紙を要求のたびに作り直さない。
+/// 元のファイルが変われば更新時刻が変わるので、古いものは返らない。
+#[derive(Default)]
+struct CoverCache {
+    entries: HashMap<CoverKey, (Bytes, String)>,
+    order: VecDeque<CoverKey>,
+    bytes: usize,
+}
+
+impl CoverCache {
+    fn get(&mut self, key: &CoverKey) -> Option<(Bytes, String)> {
+        let found = self.entries.get(key).cloned()?;
+        if let Some(position) = self.order.iter().position(|item| item == key) {
+            self.order.remove(position);
+        }
+        self.order.push_back(key.clone());
+        Some(found)
+    }
+
+    fn put(&mut self, key: CoverKey, value: (Bytes, String)) {
+        if value.0.len() > COVER_CACHE_BYTES || self.entries.contains_key(&key) {
+            return;
+        }
+        self.bytes += value.0.len();
+        self.order.push_back(key.clone());
+        self.entries.insert(key, value);
+        while self.bytes > COVER_CACHE_BYTES {
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            if let Some((bytes, _)) = self.entries.remove(&oldest) {
+                self.bytes -= bytes.len();
+            }
+        }
+    }
 }
 
 impl ServerContext {
@@ -78,6 +150,7 @@ impl ServerContext {
             fingerprint,
             update: OnceLock::new(),
             pair_attempts: Mutex::new(VecDeque::new()),
+            covers: Mutex::new(CoverCache::default()),
         })
     }
 
@@ -243,6 +316,8 @@ fn read_routes(ctx: Ctx) -> Router {
         .route("/api/v1/works/{id}/collections", get(work_collections))
         .route("/api/v1/entities/{kind}", get(entities))
         .route("/api/v1/entities/{kind}/cover", get(entity_cover))
+        .route("/api/v1/entities/{kind}/detail", get(entity_detail))
+        .route("/api/v1/entities/{kind}/series", get(entity_series))
         .route("/api/v1/collections", get(collections))
         .route("/api/v1/collections/{id}", get(collection))
         .route(
@@ -419,6 +494,13 @@ struct EntityListQuery {
     text: Option<String>,
     offset: Option<i64>,
     limit: Option<i64>,
+    sort: Option<String>,
+    order: Option<String>,
+}
+
+fn valid_entity_sort(sort: Option<&str>, order: Option<&str>) -> bool {
+    sort.is_none_or(|value| ENTITY_SORTS.contains(&value))
+        && order.is_none_or(|value| matches!(value, "asc" | "desc"))
 }
 
 async fn entities(
@@ -438,6 +520,7 @@ async fn entities(
         .as_ref()
         .is_some_and(|text| text.chars().count() > 200)
         || !(0..=1_000_000).contains(&query.offset.unwrap_or(0))
+        || !valid_entity_sort(query.sort.as_deref(), query.order.as_deref())
     {
         return Err(ApiError::invalid("一覧条件が正しくありません"));
     }
@@ -454,8 +537,8 @@ async fn entities(
                 limit,
                 offset,
                 None,
-                Some("work_count"),
-                Some("desc"),
+                Some(query.sort.as_deref().unwrap_or("work_count")),
+                Some(query.order.as_deref().unwrap_or("desc")),
                 None,
             )
             .map_err(|_| ApiError::internal())?;
@@ -475,6 +558,167 @@ async fn entities(
 struct EntityCoverQuery {
     source: String,
     key: String,
+    #[serde(default)]
+    variant: Option<String>,
+}
+
+fn valid_entity_key(source: &str, key: &str) -> bool {
+    matches!(source, "pixiv" | "fanbox") && !key.is_empty() && key.chars().count() <= 200
+}
+
+/// プロフィールのリンク。外へ開くものだけを渡す。
+fn profile_links(links_json: Option<&str>) -> Vec<String> {
+    links_json
+        .and_then(|json| serde_json::from_str::<Vec<String>>(json).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|link| link.starts_with("https://") || link.starts_with("http://"))
+        .take(20)
+        .collect()
+}
+
+async fn entity_detail(
+    State(ctx): State<Ctx>,
+    headers: HeaderMap,
+    UrlPath(kind): UrlPath<String>,
+    Query(query): Query<EntityCoverQuery>,
+) -> Result<Json<MobileEntityDetail>, ApiError> {
+    require_device(&ctx, &headers)?;
+    if !valid_entity_key(&query.source, &query.key) {
+        return Err(ApiError::not_found());
+    }
+    let detail = with_db(&ctx, move |db| {
+        let (source, key) = (query.source, query.key);
+        let internal = |_| ApiError::internal();
+        match kind.as_str() {
+            "people" => {
+                let person = db
+                    .get_person(&source, &key)
+                    .map_err(|_| ApiError::not_found())?;
+                let tags = db
+                    .list_entity_tags("person", &source, &key, 60)
+                    .map_err(internal)?;
+                let series = db
+                    .list_entity_series_paged(&source, &key, None, None, None, 1, None)
+                    .map_err(internal)?;
+                let collections = db
+                    .list_collections_for_person(&source, &key)
+                    .map_err(internal)?;
+                Ok(MobileEntityDetail {
+                    has_cover: person.icon_path.is_some() || person.cover_path.is_some(),
+                    has_banner: person.icon_path.is_some() && person.cover_path.is_some(),
+                    links: profile_links(person.links_json.as_deref()),
+                    display_name: person.display_name,
+                    description: person.description,
+                    work_count: person.work_count.unwrap_or(0),
+                    is_concluded: None,
+                    published_count: None,
+                    series_count: Some(series.total),
+                    tags: tags
+                        .into_iter()
+                        .map(|tag| MobileFacet {
+                            name: tag.name,
+                            count: tag.count,
+                        })
+                        .collect(),
+                    collections: collections
+                        .into_iter()
+                        .map(MobileCollection::from)
+                        .collect(),
+                    source,
+                    source_key: key,
+                })
+            }
+            "series" => {
+                let series = db
+                    .get_series(&source, &key)
+                    .map_err(|_| ApiError::not_found())?;
+                let tags = db
+                    .list_entity_tags("series", &source, &key, 60)
+                    .map_err(internal)?;
+                let collections = db
+                    .list_collections_for_series(&source, &key)
+                    .map_err(internal)?;
+                Ok(MobileEntityDetail {
+                    has_cover: series.cover_path.is_some(),
+                    has_banner: false,
+                    links: Vec::new(),
+                    display_name: series.title,
+                    description: series.description,
+                    work_count: series.work_count.unwrap_or(0),
+                    is_concluded: series.is_concluded,
+                    published_count: series.published_content_count,
+                    series_count: None,
+                    tags: tags
+                        .into_iter()
+                        .map(|tag| MobileFacet {
+                            name: tag.name,
+                            count: tag.count,
+                        })
+                        .collect(),
+                    collections: collections
+                        .into_iter()
+                        .map(MobileCollection::from)
+                        .collect(),
+                    source,
+                    source_key: key,
+                })
+            }
+            _ => Err(ApiError::not_found()),
+        }
+    })
+    .await?;
+    Ok(Json(detail))
+}
+
+#[derive(Debug, Deserialize)]
+struct EntitySeriesQuery {
+    source: String,
+    key: String,
+    text: Option<String>,
+    sort: Option<String>,
+    order: Option<String>,
+    cursor: Option<String>,
+    limit: Option<i64>,
+}
+
+async fn entity_series(
+    State(ctx): State<Ctx>,
+    headers: HeaderMap,
+    UrlPath(kind): UrlPath<String>,
+    Query(query): Query<EntitySeriesQuery>,
+) -> Result<Json<MobileEntitySeriesPage>, ApiError> {
+    require_device(&ctx, &headers)?;
+    if kind != "people" || !valid_entity_key(&query.source, &query.key) {
+        return Err(ApiError::not_found());
+    }
+    if query
+        .text
+        .as_ref()
+        .is_some_and(|text| text.chars().count() > 200)
+        || !valid_entity_sort(query.sort.as_deref(), query.order.as_deref())
+    {
+        return Err(ApiError::invalid("一覧条件が正しくありません"));
+    }
+    let limit = query.limit.unwrap_or(30).clamp(1, 50);
+    let page = with_db(&ctx, move |db| {
+        db.list_entity_series_paged(
+            &query.source,
+            &query.key,
+            query.text.as_deref().filter(|text| !text.trim().is_empty()),
+            query.sort.as_deref(),
+            query.order.as_deref(),
+            limit,
+            query.cursor.as_deref(),
+        )
+        .map_err(|_| ApiError::invalid("一覧条件が正しくありません"))
+    })
+    .await?;
+    Ok(Json(MobileEntitySeriesPage {
+        items: page.items.into_iter().map(MobileEntity::from).collect(),
+        next_cursor: page.next_cursor,
+        total: page.total,
+    }))
 }
 
 async fn entity_cover(
@@ -484,20 +728,23 @@ async fn entity_cover(
     Query(query): Query<EntityCoverQuery>,
 ) -> Result<Response, ApiError> {
     require_device(&ctx, &headers)?;
-    if !matches!(query.source.as_str(), "pixiv" | "fanbox")
-        || query.key.is_empty()
-        || query.key.chars().count() > 200
-    {
+    if !valid_entity_key(&query.source, &query.key) {
         return Err(ApiError::not_found());
     }
     let root = ctx.root.clone();
-    let (bytes, mime) = with_db(&ctx, move |db| {
+    let banner = query.variant.as_deref() == Some("banner");
+    let path = with_db(&ctx, move |db| {
         let (path, area) = match kind.as_str() {
             "people" => {
                 let person = db
                     .get_person(&query.source, &query.key)
                     .map_err(|_| ApiError::not_found())?;
-                (person.icon_path.or(person.cover_path), "profiles")
+                let path = if banner {
+                    person.cover_path
+                } else {
+                    person.icon_path.or(person.cover_path)
+                };
+                (path, "profiles")
             }
             "series" => (
                 db.get_series(&query.source, &query.key)
@@ -508,11 +755,15 @@ async fn entity_cover(
             _ => return Err(ApiError::not_found()),
         };
         let path = path.ok_or_else(ApiError::not_found)?;
-        let path = inside_roots(&path, &[root.join(area), root.join("downloads")])?;
-        cover_bytes(&path)
+        inside_roots(&path, &[root.join(area), root.join("downloads")])
     })
     .await?;
-    image_response(bytes, &mime)
+    let size = if banner {
+        CoverSize::Banner
+    } else {
+        CoverSize::Card
+    };
+    cover_response(&ctx, path, size).await
 }
 
 async fn collections(
@@ -600,7 +851,7 @@ async fn collection_cover(
         Some(index)
     };
     let root = ctx.root.clone();
-    let (bytes, mime) = with_db(&ctx, move |db| {
+    let path = with_db(&ctx, move |db| {
         let collection = db
             .get_work_collection(&id)
             .map_err(|_| ApiError::not_found())?;
@@ -627,11 +878,10 @@ async fn collection_cover(
                 "downloads",
             ),
         };
-        let path = inside_roots(&path, &[root.join(area)])?;
-        cover_bytes(&path)
+        inside_roots(&path, &[root.join(area)])
     })
     .await?;
-    image_response(bytes, &mime)
+    cover_response(&ctx, path, CoverSize::Card).await
 }
 
 async fn metadata(
@@ -747,24 +997,35 @@ async fn asset(
     image_response(bytes, &mime)
 }
 
+#[derive(Debug, Deserialize)]
+struct WorkCoverQuery {
+    #[serde(default)]
+    size: Option<String>,
+}
+
 async fn cover(
     State(ctx): State<Ctx>,
     headers: HeaderMap,
     UrlPath(id): UrlPath<i64>,
+    Query(query): Query<WorkCoverQuery>,
 ) -> Result<Response, ApiError> {
     require_device(&ctx, &headers)?;
     if id <= 0 {
         return Err(ApiError::not_found());
     }
     let root = ctx.root.clone();
-    let (bytes, mime) = with_db(&ctx, move |db| {
+    let path = with_db(&ctx, move |db| {
         let work = db.get_download(id).map_err(|_| ApiError::not_found())?;
         let path = work.cover_path.ok_or_else(ApiError::not_found)?;
-        let path = inside_roots(&path, &[root.join("downloads")])?;
-        cover_bytes(&path)
+        inside_roots(&path, &[root.join("downloads")])
     })
     .await?;
-    image_response(bytes, &mime)
+    let size = if query.size.as_deref() == Some("large") {
+        CoverSize::Large
+    } else {
+        CoverSize::Card
+    };
+    cover_response(&ctx, path, size).await
 }
 
 #[derive(Debug, Deserialize)]
@@ -1077,8 +1338,8 @@ fn inside_roots(path: &str, roots: &[PathBuf]) -> Result<PathBuf, ApiError> {
     }
 }
 
-fn image_response(bytes: Vec<u8>, mime: &str) -> Result<Response, ApiError> {
-    let mut response = Response::new(Body::from(bytes));
+fn image_response(bytes: impl Into<Body>, mime: &str) -> Result<Response, ApiError> {
+    let mut response = Response::new(bytes.into());
     response.headers_mut().insert(
         header::CONTENT_TYPE,
         HeaderValue::from_str(mime).map_err(|_| ApiError::internal())?,
@@ -1086,7 +1347,35 @@ fn image_response(bytes: Vec<u8>, mime: &str) -> Result<Response, ApiError> {
     Ok(response)
 }
 
-fn cover_bytes(path: &Path) -> Result<(Vec<u8>, String), ApiError> {
+/// 表紙を返す。本棚の接続を握ったまま変換すると、ほかの要求まで待たされるので、
+/// パスが分かって接続を返してから変換する。
+async fn cover_response(ctx: &Ctx, path: PathBuf, size: CoverSize) -> Result<Response, ApiError> {
+    let ctx = ctx.clone();
+    let (bytes, mime) = tokio::task::spawn_blocking(move || {
+        let metadata = fs::metadata(&path).map_err(|_| ApiError::not_found())?;
+        let modified = metadata.modified().map_err(|_| ApiError::not_found())?;
+        let key = (path.clone(), modified, metadata.len(), size);
+        if let Some(found) = ctx
+            .covers
+            .lock()
+            .ok()
+            .and_then(|mut covers| covers.get(&key))
+        {
+            return Ok(found);
+        }
+        let (bytes, mime) = cover_bytes(&path, size)?;
+        let made = (Bytes::from(bytes), mime);
+        if let Ok(mut covers) = ctx.covers.lock() {
+            covers.put(key, made.clone());
+        }
+        Ok::<_, ApiError>(made)
+    })
+    .await
+    .map_err(|_| ApiError::internal())??;
+    image_response(bytes, &mime)
+}
+
+fn cover_bytes(path: &Path, cover_size: CoverSize) -> Result<(Vec<u8>, String), ApiError> {
     let size = fs::metadata(path).map_err(|_| ApiError::not_found())?.len();
     if size > MAX_TRANSCODE_SOURCE_BYTES {
         return Err(ApiError::asset_too_large());
@@ -1097,8 +1386,8 @@ fn cover_bytes(path: &Path) -> Result<(Vec<u8>, String), ApiError> {
     }
     let options = crate::epub::intermediate::ImageCompressOptions {
         enabled: true,
-        max_width: Some(320),
-        max_height: Some(480),
+        max_width: Some(cover_size.bounds().0),
+        max_height: Some(cover_size.bounds().1),
         output_format: Some("webp".into()),
         webp_quality: 78,
         webp_method: 0,

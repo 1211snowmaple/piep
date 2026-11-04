@@ -71,7 +71,7 @@ npm --prefix docs-tools run docs:build
 だから数の置き場を一つにする。文の中では次のように書く。
 
 ```markdown
-コマンドは <!--stat:commands.total-->194<!--/stat--> 個ある
+コマンドは <!--stat:commands.total-->196<!--/stat--> 個ある
 ```
 
 HTML コメントは GitHub でも VitePress でも描画されないので、読む人には数字しか
@@ -177,7 +177,7 @@ HTML コメントは GitHub でも VitePress でも描画されないので、�
 | | 残り |
 |---|---:|
 | Rust の `///` `//!` | <!--stat:comments.rust.english-->692<!--/stat--> 行 |
-| TS の JSDoc | <!--stat:comments.ts.english-->497<!--/stat--> 行 |
+| TS の JSDoc | <!--stat:comments.ts.english-->499<!--/stat--> 行 |
 
 この数は日本語の文字を含まない説明コメントの行数で、目安である（URL だけの行や
 `# Errors` のような見出しも混ざる）。厳密ではないが、**手で書いた見積もりが古く
@@ -208,9 +208,9 @@ HTML コメントは GitHub でも VitePress でも描画されないので、�
 
 | | |
 |---|---:|
-| コマンド | <!--stat:commands.total-->194<!--/stat--> |
-| `///` があるもの | <!--stat:commands.documented-->194<!--/stat--> |
-| 節の前書き（`//!`）があるモジュール | <!--stat:modules.documented-->11<!--/stat--> / <!--stat:modules.total-->11<!--/stat--> |
+| コマンド | <!--stat:commands.total-->196<!--/stat--> |
+| `///` があるもの | <!--stat:commands.documented-->196<!--/stat--> |
+| 節の前書き（`//!`）があるモジュール | <!--stat:modules.documented-->12<!--/stat--> / <!--stat:modules.total-->12<!--/stat--> |
 
 **全部埋まっている。** ラチェット検査（[品質](09-quality.md#境界のドリフト検査)）は
 この数字を守るので、`///` の無いコマンドを足すと CI が落ちる。数を戻すのではなく、

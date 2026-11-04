@@ -6,10 +6,21 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="description" content="piep - Pixiv & FANBOX 小説ダウンローダー" />
     <title>piep</title>
+    <script src="/startup.js"></script>
+    <link rel="stylesheet" href="/startup.css" />
   </head>
 
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <!-- React replaces this when the app is ready to draw. -->
+      <div class="startup-splash" role="status" aria-live="polite">
+        <img class="startup-splash__mark" src="/piep.svg" alt="" />
+        <div class="startup-splash__status">
+          <div class="startup-splash__ring" aria-hidden="true"></div>
+          <p class="startup-splash__message">ライブラリを準備しています</p>
+        </div>
+      </div>
+    </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
