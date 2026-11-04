@@ -149,6 +149,10 @@ select {
     light-dark(#f5f7fa, #0d1117);
 }
 
+/* スクロールバーの出入りで中身の幅が動かないよう、場所を先に取っておく。
+   高さに収める保存、読書、編集の画面は、空いた帯が見えるので取らない。 */
+.app-main:has(.page) { scrollbar-gutter: stable; }
+
 .app-brand {
   display: grid;
   width: 100%;
@@ -2922,10 +2926,7 @@ select {
   word-break: break-all;
 }
 
-.update-progress-card {
-  border-color: light-dark(#cde2f3, #2d4c68);
-  background: light-dark(linear-gradient(135deg, #fff, #f1f9ff), linear-gradient(135deg, #151b23, #10273a));
-}
+.update-progress-card { border-color: light-dark(#dfe5ec, #262f3a); }
 
 .update-job-title {
   margin-top: 10px;
@@ -2948,7 +2949,24 @@ select {
 }
 
 /* 毎回触るものだけを載せた一列。見出しの直下に置くので、囲いは軽く。 */
-.updates-toolbar { border-color: light-dark(#dfe5ec, #262f3a); }
+.updates-toolbar {
+  container-type: inline-size;
+  border-color: light-dark(#dfe5ec, #262f3a);
+}
+.updates-toolbar__scope { flex: 1 1 210px; min-width: 120px; max-width: 260px; }
+.updates-toolbar__schedule-label {
+  display: inline-block;
+  max-width: 13em;
+  overflow: hidden;
+  vertical-align: bottom;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 狭いときは、自動確認の言葉から畳む。行き先の記号と、読み上げの名前は残す。 */
+@container (max-width: 800px) {
+  .updates-toolbar__schedule-label { display: none; }
+  .updates-toolbar__schedule .mantine-Button-section { margin-inline-end: 0; }
+}
 
 /* 走らせた記録。行そのものが選ぶ場所なので、居場所が分かるようにする。 */
 .update-history__row + .update-history__row { border-top: 1px solid light-dark(#e5e9ee, #272f39); }

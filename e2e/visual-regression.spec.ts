@@ -397,6 +397,16 @@ test("hidden library shortcuts remain available from the library", async ({ page
   await expect(page.locator("#app-navigation").getByText("読みかけ", { exact: true })).toHaveCount(0);
 });
 
+test("update toolbar stays on one row at every window size", async ({ page }) => {
+  await page.goto("/#/updates");
+  const row = page.locator(".updates-toolbar__row");
+  await expect(row).toBeVisible();
+  const box = await row.boundingBox();
+  expect(box?.height).toBeLessThanOrEqual(40);
+  const overflow = await row.evaluate((element) => element.scrollWidth - element.clientWidth);
+  expect(overflow).toBeLessThanOrEqual(0);
+});
+
 test("update candidate source links open the in-app browser", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== "900x600-light-100dpi", "The source navigation flow runs once");
   await page.goto("/#/updates");
