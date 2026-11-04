@@ -79,13 +79,15 @@ impl SwappableDb {
         Ok(true)
     }
 
-    /// 本棚を閉じて `install` を呼び、開き直す。`install` が失敗したら元の本棚を開き直す。
+    /// 本棚を閉じて `install` を呼び、開き直す。配置か読み直しに失敗したら
+    /// `rollback` でファイルを戻してから、元の本棚を開き直す。
     ///
     /// Windows では開いているファイルを置き換えられないので、読んでいる要求が
     /// 終わるのを待ってから閉じる。その間の新しい要求は 503 になる。
-    pub fn replace_with<F>(&self, install: F) -> Result<(), String>
+    pub fn replace_with<F, R>(&self, install: F, rollback: R) -> Result<(), String>
     where
         F: FnOnce() -> Result<(), String>,
+        R: FnOnce() -> Result<(), String>,
     {
         let previous = self
             .slot
@@ -104,11 +106,45 @@ impl SwappableDb {
             drop(previous);
         }
         crate::database::tantivy_index::release_runtime(&self.storage_dir);
-        let installed = install();
-        let opened = self.open_existing();
-        match (installed, opened) {
-            (Ok(()), Ok(_)) => Ok(()),
-            (Err(error), _) | (Ok(()), Err(error)) => Err(error),
+        let result = install().and_then(|()| self.open_existing().map(|_| ()));
+        if let Err(error) = result {
+            crate::database::tantivy_index::release_runtime(&self.storage_dir);
+            rollback()
+                .and_then(|()| self.open_existing().map(|_| ()))
+                .map_err(|recovery| format!("{error}。元の本棚にも戻せません: {recovery}"))?;
+            return Err(error);
         }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_replacement_that_cannot_be_opened_returns_to_the_previous_database() {
+        let root = crate::server::tests::TestRoot::created("reopen_failure");
+        let live = root.0.join("piep.db");
+        let previous = root.0.join("previous.db");
+        let storage = root.0.join("downloads");
+        drop(Database::open(&live, &storage).unwrap());
+        let slot = SwappableDb::new(live.clone(), storage);
+        slot.open_existing().unwrap();
+        let result = slot.replace_with(
+            || {
+                std::fs::rename(&live, &previous).map_err(|error| error.to_string())?;
+                std::fs::write(&live, b"not a database").map_err(|error| error.to_string())
+            },
+            || std::fs::rename(&previous, &live).map_err(|error| error.to_string()),
+        );
+        assert!(result.is_err());
+        assert_eq!(
+            slot.current().unwrap().get_stats().unwrap().total_downloads,
+            0
+        );
+        assert!(std::fs::read(&live)
+            .unwrap()
+            .starts_with(b"SQLite format 3"));
     }
 }

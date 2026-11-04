@@ -1194,6 +1194,405 @@ fn an_interrupted_send_can_resume_and_a_bad_one_changes_nothing() {
 }
 
 #[test]
+fn an_uploaded_invalid_database_does_not_overwrite_live_files() {
+    let root = TestRoot::new("invalid_snapshot");
+    let (parts, paths) = standalone(&root.0);
+    let receiver = &parts.receiver;
+    let relative = "downloads/pixiv/1/original.json";
+    let live = paths.library().join(relative);
+    fs::create_dir_all(live.parent().unwrap()).unwrap();
+    fs::write(&live, b"previous content").unwrap();
+    let content = b"replacement content";
+    let invalid_database = b"not a SQLite database";
+    let hash = |bytes: &[u8]| {
+        Sha256::digest(bytes)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    };
+    let sha = hash(content);
+    let database_sha = hash(invalid_database);
+    let opened = receiver.open_session().unwrap();
+    let session = &opened.session_id;
+    receiver
+        .add_manifest(
+            session,
+            &[ManifestEntry {
+                path: relative.into(),
+                size: content.len() as u64,
+                mtime_ms: 1,
+            }],
+        )
+        .unwrap();
+    for (sha, bytes) in [
+        (&sha, content.as_slice()),
+        (&database_sha, invalid_database.as_slice()),
+    ] {
+        receiver
+            .write_blob(session, sha, 0, bytes.len() as u64, bytes)
+            .unwrap();
+    }
+    receiver
+        .bind_files(
+            session,
+            &[BindEntry {
+                path: relative.into(),
+                sha256: sha.clone(),
+            }],
+        )
+        .unwrap();
+    let request = CommitRequest {
+        database_sha256: database_sha.clone(),
+    };
+    assert!(matches!(
+        receiver.commit(session, &request),
+        Err(SyncError::Internal(_))
+    ));
+    assert_eq!(fs::read(&live).unwrap(), b"previous content");
+    assert_eq!(receiver.status().generation, 0);
+    assert!(receiver.blob_state(session, &sha).unwrap().complete);
+    assert!(
+        receiver
+            .blob_state(session, &database_sha)
+            .unwrap()
+            .complete
+    );
+    // 再試行でも、検証を通らない写しが本棚へ触ることはない。
+    assert!(matches!(
+        receiver.commit(session, &request),
+        Err(SyncError::Internal(_))
+    ));
+    assert_eq!(fs::read(&live).unwrap(), b"previous content");
+}
+
+#[test]
+#[cfg(windows)]
+fn a_database_install_failure_restores_files_and_keeps_uploaded_blobs() {
+    use std::os::windows::fs::OpenOptionsExt;
+    for failure in ["database", "file"] {
+        let root = TestRoot::new("failed_commit");
+        let (parts, paths) = standalone(&root.0);
+        let db = Database::open(&paths.database(), &paths.storage()).unwrap();
+        let (_, original) = add_work(&db, &paths.storage(), "rollback", "元の作品", "元の本文");
+        let old_content = fs::read(&original).unwrap();
+        let incoming = root.0.join("snapshot.db");
+        db.write_vacuumed_copy(&incoming).unwrap();
+        super::snapshot::prepare_for_send(&incoming, &paths.library()).unwrap();
+        drop(db);
+        parts.db.open_existing().unwrap();
+        let receiver = &parts.receiver;
+        let session = receiver.open_session().unwrap().session_id;
+        let relative = original
+            .strip_prefix(paths.library())
+            .unwrap()
+            .to_string_lossy()
+            .replace('\\', "/");
+        let content = r#"{"text":"新しい本文"}"#.as_bytes();
+        let database = fs::read(&incoming).unwrap();
+        let hash = |bytes: &[u8]| {
+            Sha256::digest(bytes)
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        };
+        let sha = hash(content);
+        let database_sha = hash(&database);
+        receiver
+            .add_manifest(
+                &session,
+                &[ManifestEntry {
+                    path: relative.clone(),
+                    size: content.len() as u64,
+                    mtime_ms: 1,
+                }],
+            )
+            .unwrap();
+        for (sha, bytes) in [(&sha, content), (&database_sha, database.as_slice())] {
+            receiver
+                .write_blob(&session, sha, 0, bytes.len() as u64, bytes)
+                .unwrap();
+        }
+        receiver
+            .bind_files(
+                &session,
+                &[BindEntry {
+                    path: relative,
+                    sha256: sha.clone(),
+                }],
+            )
+            .unwrap();
+        // DB の控えを作れない状態にする。実データを触らず、入れ替え時のI/O失敗を再現する。
+        let blocker = paths.database().with_extension("db.previous");
+        let file_lock = if failure == "file" {
+            Some(
+                fs::OpenOptions::new()
+                    .read(true)
+                    .share_mode(0)
+                    .open(&original)
+                    .unwrap(),
+            )
+        } else {
+            fs::create_dir(&blocker).unwrap();
+            None
+        };
+        let request = CommitRequest {
+            database_sha256: database_sha,
+        };
+        assert!(receiver.commit(&session, &request).is_err());
+        drop(file_lock);
+        assert_eq!(fs::read(&original).unwrap(), old_content);
+        assert_eq!(receiver.status().generation, 0);
+        assert_eq!(
+            parts
+                .db
+                .current()
+                .unwrap()
+                .get_stats()
+                .unwrap()
+                .total_downloads,
+            1
+        );
+        assert!(receiver.blob_state(&session, &sha).unwrap().complete);
+        if failure == "database" {
+            fs::remove_dir(blocker).unwrap();
+        }
+        let result = receiver.commit(&session, &request).unwrap();
+        assert_eq!(result.generation, 1);
+        assert_eq!(fs::read(&original).unwrap(), content);
+        receiver.stop_index_catch_up();
+    }
+}
+
+/// 動かしたかたまりは失敗すると元へ戻り、確定は写さずに済ませる。写すと、本棚を
+/// 閉じている間の時間と要る空き容量が、本棚の大きさに比例する。
+#[test]
+#[cfg(windows)]
+fn committing_moves_blobs_into_place_and_a_failure_moves_them_back() {
+    use std::os::windows::fs::FileTimesExt;
+    use std::time::SystemTime;
+
+    let hash = |bytes: &[u8]| {
+        Sha256::digest(bytes)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    };
+    let unique = b"one path holds this".as_slice();
+    let shared = b"two paths hold this".as_slice();
+    let files = [
+        ("downloads/pixiv/9/unique.bin", unique),
+        ("downloads/pixiv/9/shared-a.bin", shared),
+        ("downloads/pixiv/9/shared-b.bin", shared),
+    ];
+    for fail_first in [true, false] {
+        let root = TestRoot::new("moved_blobs");
+        let (parts, paths) = standalone(&root.0);
+        let db = Database::open(&paths.database(), &paths.storage()).unwrap();
+        let incoming = root.0.join("snapshot.db");
+        db.write_vacuumed_copy(&incoming).unwrap();
+        super::snapshot::prepare_for_send(&incoming, &paths.library()).unwrap();
+        drop(db);
+        parts.db.open_existing().unwrap();
+        let receiver = &parts.receiver;
+        let session = receiver.open_session().unwrap().session_id;
+        let database = fs::read(&incoming).unwrap();
+        let manifest = files.map(|(path, bytes)| ManifestEntry {
+            path: path.into(),
+            size: bytes.len() as u64,
+            mtime_ms: 1,
+        });
+        receiver.add_manifest(&session, &manifest).unwrap();
+        for bytes in [unique, shared, database.as_slice()] {
+            receiver
+                .write_blob(&session, &hash(bytes), 0, bytes.len() as u64, bytes)
+                .unwrap();
+        }
+        let binds = files.map(|(path, bytes)| BindEntry {
+            path: path.into(),
+            sha256: hash(bytes),
+        });
+        receiver.bind_files(&session, &binds).unwrap();
+        let request = CommitRequest {
+            database_sha256: hash(&database),
+        };
+        let library = paths.library();
+
+        if fail_first {
+            // DB の控えを作れない状態で確定する。ファイルを置いたあとで失敗する。
+            let blocker = paths.database().with_extension("db.previous");
+            fs::create_dir(&blocker).unwrap();
+            assert!(receiver.commit(&session, &request).is_err());
+            for (path, _) in files {
+                assert!(!library.join(path).exists(), "置いたものを残さない: {path}");
+            }
+            for bytes in [unique, shared] {
+                assert!(
+                    receiver
+                        .blob_state(&session, &hash(bytes))
+                        .unwrap()
+                        .complete
+                );
+            }
+            fs::remove_dir(blocker).unwrap();
+            assert_eq!(receiver.commit(&session, &request).unwrap().generation, 1);
+        } else {
+            // 作成日時は移動では変わらず、写すと変わる。かたまりの日時を古くしておく。
+            // 失敗の回では測らない。同じ名前を置き直すと NTFS が前の日時を引き継ぐ。
+            let long_ago = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
+            fs::OpenOptions::new()
+                .write(true)
+                .open(walk_for(&root.0, &hash(unique)))
+                .unwrap()
+                .set_times(fs::FileTimes::new().set_created(long_ago))
+                .unwrap();
+            assert_eq!(receiver.commit(&session, &request).unwrap().generation, 1);
+            let created = fs::metadata(library.join(files[0].0))
+                .unwrap()
+                .created()
+                .unwrap();
+            assert_eq!(created, long_ago, "かたまりを写さず動かす");
+        }
+        for (path, bytes) in files {
+            assert_eq!(fs::read(library.join(path)).unwrap(), bytes);
+        }
+        receiver.stop_index_catch_up();
+    }
+}
+
+fn walk_for(directory: &Path, name: &str) -> PathBuf {
+    let mut pending = vec![directory.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(directory).unwrap().flatten() {
+            if entry.file_type().unwrap().is_dir() {
+                pending.push(entry.path());
+            } else if entry.file_name().to_string_lossy() == name {
+                return entry.path();
+            }
+        }
+    }
+    panic!("{name} が見つからない");
+}
+
+#[test]
+fn requests_for_an_old_session_cannot_cross_the_commit_boundary() {
+    let root = TestRoot::new("commit_race");
+    let (parts, paths) = standalone(&root.0);
+    drop(Database::open(&paths.database(), &paths.storage()).unwrap());
+    parts.db.open_existing().unwrap();
+    // 読んでいる要求を持ち、確定を「読み終わるのを待つ」ところで止める。
+    let reader = parts.db.current().unwrap();
+    let incoming = root.0.join("snapshot.db");
+    reader.write_vacuumed_copy(&incoming).unwrap();
+    super::snapshot::prepare_for_send(&incoming, &paths.library()).unwrap();
+    let bytes = fs::read(incoming).unwrap();
+    let sha = Sha256::digest(&bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let session = parts.receiver.open_session().unwrap().session_id;
+    parts
+        .receiver
+        .write_blob(&session, &sha, 0, bytes.len() as u64, &bytes)
+        .unwrap();
+    let receiver = Arc::clone(&parts.receiver);
+    let commit_session = session.clone();
+    let commit_sha = sha.clone();
+    let commit = std::thread::spawn(move || {
+        receiver.commit(
+            &commit_session,
+            &CommitRequest {
+                database_sha256: commit_sha,
+            },
+        )
+    });
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    while parts.db.current().is_some() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let draining = parts.db.current().is_none();
+    let barrier = Arc::new(std::sync::Barrier::new(5));
+    let (sent, received) = std::sync::mpsc::channel();
+    let writers: Vec<_> = (0..4)
+        .map(|operation| {
+            let receiver = Arc::clone(&parts.receiver);
+            let barrier = Arc::clone(&barrier);
+            let sent = sent.clone();
+            let session = session.clone();
+            let sha = sha.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                let result = match operation {
+                    0 => receiver.add_manifest(&session, &[]).map(|_| ()),
+                    1 => receiver.blob_state(&session, &sha).map(|_| ()),
+                    2 => receiver.write_blob(&session, &sha, 0, 0, &[]).map(|_| ()),
+                    _ => receiver.bind_files(&session, &[]),
+                };
+                sent.send(()).unwrap();
+                matches!(result, Err(SyncError::NotFound))
+            })
+        })
+        .collect();
+    barrier.wait();
+    let premature = received.recv_timeout(Duration::from_millis(100)).is_ok();
+    drop(reader);
+    let committed = commit.join().unwrap();
+    let refused: Vec<_> = writers
+        .into_iter()
+        .map(|writer| writer.join().unwrap())
+        .collect();
+    parts.receiver.stop_index_catch_up();
+    assert!(draining, "読み手を待つところまで確定が進んだ");
+    assert!(!premature, "確定の途中に古い送信を変更しない");
+    committed.unwrap();
+    assert!(
+        refused.into_iter().all(|refused| refused),
+        "確定後の古い送信は拒否する"
+    );
+}
+
+#[test]
+fn a_missing_library_database_is_requested_again() {
+    let root = TestRoot::new("missing_database");
+    let (parts, _paths) = standalone(&root.0);
+    let incoming = root.0.join("snapshot.db");
+    let conn = rusqlite::Connection::open(&incoming).unwrap();
+    crate::database::schema::initialize(&conn).unwrap();
+    drop(conn);
+    let bytes = fs::read(&incoming).unwrap();
+    let sha = Sha256::digest(&bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    // 本棚だけが失われ、前回の受信記録が残っている状態。
+    parts
+        .context
+        .store
+        .set_meta("database_sha256", &sha)
+        .unwrap();
+    let session = parts.receiver.open_session().unwrap();
+    assert!(
+        session.database_sha256.is_none(),
+        "存在しないDBを受信済みと答えない"
+    );
+    parts
+        .receiver
+        .write_blob(&session.session_id, &sha, 0, bytes.len() as u64, &bytes)
+        .unwrap();
+    let result = parts
+        .receiver
+        .commit(
+            &session.session_id,
+            &CommitRequest {
+                database_sha256: sha,
+            },
+        )
+        .unwrap();
+    assert!(!result.unchanged);
+    assert!(parts.db.current().is_some());
+    parts.receiver.stop_index_catch_up();
+}
+
+#[test]
 fn opening_the_store_removes_the_recorded_login_name() {
     let root = TestRoot::created("last_user");
     let path = root.0.join("state.db");
