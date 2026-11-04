@@ -2,13 +2,13 @@ import { MantineProvider } from "@mantine/core";
 import { ModalsProvider } from "@mantine/modals";
 import { Notifications } from "@mantine/notifications";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, renderHook, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AppRouter } from "@/app/router";
 import { getDemoEditor } from "@/mocks/demoData";
 import type { EditorDocument, WorkBlock } from "@/types/library";
 import EditorPage from "./EditorPage";
-import { buildProofreadBatches, replaceOnce } from "./ProofreadPanel";
+import { buildProofreadBatches, replaceOnce, useProofread } from "./ProofreadPanel";
 
 const dbApi = vi.hoisted(() => ({
   getEditorDocument: vi.fn(),
@@ -86,6 +86,21 @@ describe("校正に送る単位", () => {
     expect(segments.every((segment) => segment.id === "long")).toBe(true);
     expect(segments.map((segment) => segment.text).join("\n")).toBe(text);
   });
+
+  it("上限を超える一行でも、末尾まで校正に回す", () => {
+    const text = "あ".repeat(210) + "最後の誤字";
+    const segments = buildProofreadBatches([{ clientId: "long", blockType: "paragraph", text }], 100).flat();
+    expect(segments.map((segment) => segment.text).join("")).toBe(text);
+    expect(segments.every((segment) => Array.from(segment.text).length <= 100)).toBe(true);
+    expect(segments.every((segment) => segment.id === "long")).toBe(true);
+  });
+
+  it("長い行を分けても、絵文字のサロゲートペアを壊さない", () => {
+    const text = "あ".repeat(99) + "😀" + "末尾";
+    const segments = buildProofreadBatches([{ clientId: "unicode", blockType: "paragraph", text }], 100).flat();
+    expect(segments.map((segment) => segment.text).join("")).toBe(text);
+    expect(segments[0].text).toBe("あ".repeat(99) + "😀");
+  });
 });
 
 describe("候補を当てる", () => {
@@ -94,6 +109,25 @@ describe("候補を当てる", () => {
     expect(replaceOnce("あいう。あいう。", "あいう", "あいえ")).toBeNull();
     expect(replaceOnce("部屋は暗かった。", "暗らかった", "暗かった")).toBeNull();
   });
+});
+
+it("編集画面を離れたら、校正の次の本文を送らない", async () => {
+  let finish!: (value: []) => void;
+  assist.proofreadSegments.mockReset();
+  assist.proofreadSegments.mockImplementationOnce(() => new Promise<[]>((resolve) => { finish = resolve; }));
+  assist.proofreadSegments.mockResolvedValue([]);
+  const { result, unmount } = renderHook(() => useProofread());
+  let run!: Promise<void>;
+  act(() => {
+    run = result.current.start({ baseUrl: "http://127.0.0.1:8080/v1", model: "m", remoteConsentUrl: null, allowBody: true }, [
+      [{ id: "a", text: "最初の本文" }],
+      [{ id: "b", text: "次の本文" }],
+    ]);
+  });
+  expect(assist.proofreadSegments).toHaveBeenCalledTimes(1);
+  unmount();
+  await act(async () => { finish([]); await run; });
+  expect(assist.proofreadSegments).toHaveBeenCalledTimes(1);
 });
 
 describe("編集画面の校正", () => {
