@@ -466,6 +466,8 @@ struct BackupMetadata {
     people: Vec<BackupPerson>,
     series: Vec<BackupSeries>,
     update_targets: Vec<UpdateTarget>,
+    #[serde(default)]
+    watch_groups: Vec<BackupWatchGroup>,
     /// Durable pending discoveries and dismissed decisions. Without these,
     /// restoring the target cursor can skip a work that the old library had
     /// already discovered but had not saved yet.
@@ -477,6 +479,15 @@ struct BackupMetadata {
     saved_searches: Vec<SavedSearch>,
     #[serde(default)]
     collection_pair_feedback: Vec<PortableCollectionPairFeedback>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+struct BackupWatchGroup {
+    name: String,
+    sort_order: i64,
+    created_at: String,
+    updated_at: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -3248,6 +3259,19 @@ async fn export_zip_with_params_locked(
         }
 
         let saved_searches = state.db.list_saved_searches()?;
+        // 所属する対象の名前だけでは、空のグループと並び順が失われる。
+        // 分割書庫のどの巻から戻してもよいよう、名前で統合できる形で各巻に残す。
+        let watch_groups = state
+            .db
+            .list_watch_groups()?
+            .into_iter()
+            .map(|group| BackupWatchGroup {
+                name: group.name,
+                sort_order: group.sort_order,
+                created_at: group.created_at,
+                updated_at: group.updated_at,
+            })
+            .collect();
         // Pair feedback is keyed by stable provider ids and can span multipart boundaries.
         // Repeating this small idempotent set in each part is safer than silently losing every
         // decision whose two works happened to land in different parts.
@@ -3260,6 +3284,7 @@ async fn export_zip_with_params_locked(
             people: backup_people,
             series: backup_series,
             update_targets,
+            watch_groups,
             update_candidates,
             collections: backup_collections,
             saved_searches,
@@ -3973,6 +3998,9 @@ async fn import_zip_locked(
                 }
             }
 
+            for group in &metadata.watch_groups {
+                state.db.restore_watch_group(&group.name, group.sort_order, &group.created_at, &group.updated_at)?;
+            }
             for target in &metadata.update_targets {
                 state.db.restore_update_target(target)?;
                 state.db.restore_watch_group_memberships(
@@ -5126,6 +5154,7 @@ mod tests {
             people: Vec::new(),
             series: Vec::new(),
             update_targets: Vec::new(),
+            watch_groups: Vec::new(),
             update_candidates: Vec::new(),
             collections: vec![BackupWorkCollection {
                 id: format!("collection-{source_id}"),
@@ -5677,6 +5706,7 @@ mod tests {
             }],
             series: vec![],
             update_targets: vec![],
+            watch_groups: vec![],
             update_candidates: vec![],
             collections: vec![],
             saved_searches: vec![],
@@ -6453,6 +6483,10 @@ mod tests {
             })
             .unwrap();
         // 監視グループへの所属も持ち運ぶ。
+        source_state
+            .db
+            .create_watch_group("あとで登録する")
+            .unwrap();
         let group = source_state.db.create_watch_group("毎日見る").unwrap();
         let author_id = source_state
             .db
@@ -6521,9 +6555,16 @@ mod tests {
             Some("unhandled-work-42")
         );
         let groups = target_state.db.list_watch_groups().unwrap();
-        assert_eq!(groups.len(), 1);
-        assert_eq!(groups[0].name, "毎日見る");
-        assert_eq!(groups[0].target_ids, vec![restored.id]);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].name, "あとで登録する");
+        assert!(groups[0].target_ids.is_empty());
+        assert_eq!(groups[1].name, "毎日見る");
+        assert_eq!(groups[1].target_ids, vec![restored.id]);
+        let original_groups = source_state.db.list_watch_groups().unwrap();
+        for (restored, original) in groups.iter().zip(&original_groups) {
+            assert_eq!(restored.sort_order, original.sort_order);
+            assert_eq!(restored.created_at, original.created_at);
+        }
         assert_eq!(
             restored.metadata_json.as_deref(),
             Some(r#"{"reason":"followed"}"#)

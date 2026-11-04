@@ -152,6 +152,25 @@ impl Database {
         Ok(changed)
     }
 
+    /// バックアップのグループを名前で統合する。既存の同名グループは変更しない。
+    pub(crate) fn restore_watch_group(
+        &self,
+        name: &str,
+        sort_order: i64,
+        created_at: &str,
+        updated_at: &str,
+    ) -> Result<(), String> {
+        let name = normalize_group_name(name)?;
+        let conn = self.conn.lock().map_err(|error| error.to_string())?;
+        conn.execute(
+            "INSERT INTO watch_groups(name, sort_order, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4) ON CONFLICT(name) DO NOTHING",
+            params![name, sort_order, created_at, updated_at],
+        )
+        .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
     /// バックアップから戻した監視対象を、名前で覚えていたグループへ入れ直す。
     /// 同じ名前のグループが無ければ作る。
     ///
