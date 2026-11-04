@@ -5,7 +5,7 @@ export interface PcConnectionStatus {
   reachable: boolean;
   url: string | null;
   deviceName: string | null;
-  issue: "offline" | "certificate_changed" | "certificate_untrusted" | "protocol_mismatch" | "revoked" | "not_ready" | "remote_error" | null;
+  issue: "offline" | "certificate_changed" | "certificate_untrusted" | "secret_lost" | "protocol_mismatch" | "revoked" | "not_ready" | "remote_error" | null;
   capabilities: string[];
 }
 
@@ -13,6 +13,7 @@ export const pcConnectionIssueText: Record<NonNullable<PcConnectionStatus["issue
   offline: "サーバーに接続できません。通信状態と、サーバーが動いているかを確認してください。",
   certificate_changed: "サーバーの証明書が登録時と違います。接続先を確認して登録し直してください。",
   certificate_untrusted: "サーバーの証明書を確認できません。URL が正しいか確かめてください。",
+  secret_lost: "この端末に保存した登録を読めません。登録し直してください。",
   protocol_mismatch: "サーバーとの接続形式が合いません。アプリとサーバーを、どちらも新しい版にしてください。",
   revoked: "端末の登録が解除されました。デスクトップ版の「携帯を追加」で登録文字列を出し直して再登録してください。",
   not_ready: "サーバーは本棚の準備中です。しばらくしてからもう一度試してください。",

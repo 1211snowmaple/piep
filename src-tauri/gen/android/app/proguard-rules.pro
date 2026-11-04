@@ -23,3 +23,6 @@
 -keep class com.google.mlkit.** { *; }
 -keep class com.google.android.gms.internal.mlkit_** { *; }
 -keep class com.google.android.gms.tasks.** { *; }
+# 認証鍵の封。Tauri が名前で読み込み、引数を実行時に組み立てる。
+-keep class io.github.u1211snowmaple.piep.android.SecretCipherPlugin { *; }
+-keep class io.github.u1211snowmaple.piep.android.SecretCipherArgs { *; }
