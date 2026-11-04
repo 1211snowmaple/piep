@@ -1,105 +1,33 @@
-import { useEffect, useRef, useState } from "react";
-import { isTauri } from "@tauri-apps/api/core";
-import { CalendarDays, FileText, Images, MoreHorizontal, UserRound } from "lucide-react";
-import { getOfflineEntityCover, getPcEntityCover, type PcWork } from "./pcApi";
-import { enqueueCoverRequest, WorkThumbnail } from "./WorkThumbnail";
+import { useEffect, useMemo, useState, type MouseEvent } from "react";
+import { CalendarDays, Clock3, Download, FileText, History, Images, Layers, MoreHorizontal, UserRound } from "lucide-react";
+import type { PcWork } from "./pcApi";
+import { WorkThumbnail } from "./WorkThumbnail";
 import { ProviderMark } from "./ProviderMark";
 import { MobileTagRow } from "./MobileTagRow";
-
-const avatars = new Map<string, string>();
-const pendingAvatars = new Map<string, Promise<string | null>>();
-const oversizedAvatars = new Set<string>();
-const maxAvatarCacheChars = 4 * 1024 * 1024;
-let avatarCacheChars = 0;
-
-function cachedAvatar(key: string): string | null {
-  const value = avatars.get(key);
-  if (!value) return null;
-  avatars.delete(key);
-  avatars.set(key, value);
-  return value;
-}
-
-function cacheAvatar(key: string, value: string): boolean {
-  const previous = avatars.get(key);
-  if (previous) {
-    avatars.delete(key);
-    avatarCacheChars -= previous.length;
-  }
-  // data URL は文字列として WebView に残るため、画像の件数だけでなく総量も制限する。
-  if (value.length > maxAvatarCacheChars) {
-    oversizedAvatars.add(key);
-    if (oversizedAvatars.size > 200) oversizedAvatars.delete(oversizedAvatars.values().next().value!);
-    return false;
-  }
-  while (avatarCacheChars + value.length > maxAvatarCacheChars) {
-    const oldest = avatars.keys().next().value;
-    if (oldest === undefined) break;
-    avatarCacheChars -= avatars.get(oldest)!.length;
-    avatars.delete(oldest);
-  }
-  avatars.set(key, value);
-  avatarCacheChars += value.length;
-  return true;
-}
-
-function discardAvatar(key: string) {
-  const cached = avatars.get(key);
-  if (cached) {
-    avatarCacheChars -= cached.length;
-    avatars.delete(key);
-  }
-  oversizedAvatars.add(key);
-  if (oversizedAvatars.size > 200) oversizedAvatars.delete(oversizedAvatars.values().next().value!);
-}
+import { entityCoverUrl, imageRecentlyFailed, savedEntityCoverUrl, SmoothImage } from "./images";
+import { useAppNavigation } from "./appHistory";
+import { displayDate, plainText, readingMinutes } from "./workText";
 
 export function AuthorAvatar({ work, offline, offlineAuthorCover, snapshotGeneration }: { work: PcWork; offline: boolean; offlineAuthorCover: boolean; snapshotGeneration?: number }) {
-  const key = offline ? `saved:${work.id}:${snapshotGeneration ?? 0}` : `${work.source}:${work.authorId}`;
-  const node = useRef<HTMLSpanElement>(null);
-  const [image, setImage] = useState<string | null>(null);
-  useEffect(() => {
-    setImage(null);
-    if ((offline ? !offlineAuthorCover : !work.authorId) || !isTauri()) return;
-    const target = node.current;
-    if (!target) return;
-    let alive = true;
-    let visible = false;
-    const load = () => {
-      const cached = cachedAvatar(key);
-      if (cached) { setImage(cached); return; }
-      if (oversizedAvatars.has(key)) return;
-      let request = pendingAvatars.get(key);
-      if (!request) {
-        request = enqueueCoverRequest(() => offline ? getOfflineEntityCover(work.id, "people") : getPcEntityCover("people", work.source, work.authorId))
-          .then((asset) => `data:${asset.mimeType};base64,${asset.base64}`)
-          .catch(() => null)
-          .then((value) => { const accepted = value ? cacheAvatar(key, value) : false; pendingAvatars.delete(key); return accepted ? value : null; });
-        pendingAvatars.set(key, request);
-      }
-      void request.then((value) => { if (alive && visible) setImage(value); });
-    };
-    if (typeof IntersectionObserver === "undefined") { visible = true; load(); }
-    else {
-      const observer = new IntersectionObserver((entries) => {
-        visible = entries.some((entry) => entry.isIntersecting);
-        if (visible) load();
-        else setImage(null);
-      }, { rootMargin: "180px" });
-      observer.observe(target);
-      return () => { alive = false; observer.disconnect(); };
-    }
-    return () => { alive = false; };
-  }, [key, offline, offlineAuthorCover, work.authorId, work.id, work.source]);
-  return <span className="work-author-avatar" ref={node} aria-hidden="true">{image ? <img src={image} alt="" onError={() => { discardAvatar(key); setImage(null); }} /> : <UserRound />}</span>;
+  const src = offline
+    ? offlineAuthorCover ? savedEntityCoverUrl(work.id, "people", snapshotGeneration ?? 0) : null
+    : work.authorId ? entityCoverUrl("people", work.source, work.authorId) : null;
+  const [failed, setFailed] = useState(() => imageRecentlyFailed(src));
+  useEffect(() => { setFailed(imageRecentlyFailed(src)); }, [src]);
+  return <span className="work-author-avatar" aria-hidden="true"><UserRound />{src && !failed && <SmoothImage src={src} alt="" onFailed={() => setFailed(true)} />}</span>;
 }
 
-function displayDate(value: string | null | undefined): string | null {
-  if (!value) return null;
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? null : date.toLocaleDateString("ja-JP");
+/** カードの余白を押したら読む。作者やタグなど中の操作はそれぞれの行き先を優先する。 */
+function isCardControl(target: EventTarget): boolean {
+  return target instanceof Element && target.closest("button, a, input, select, summary") !== null;
 }
 
-export function WorkCard({ work, onRead, onDetail, offline = false, offlineAuthorCover = false, snapshotGeneration, savedState, prefix }: {
+/**
+ * 情報の量はカード自身の幅で決める。画面の幅で決めると、タブレットの 2 列と携帯の 1 列で
+ * 同じ幅でも見え方が変わってしまう。優先度の順に並べ、入らない項目は末尾から落ちる。
+ * （段落ちの仕組みはデスクトップ版の .work-card__facts と同じ。CSS を参照）
+ */
+export function WorkCard({ work, onRead, onDetail, offline = false, offlineAuthorCover = false, snapshotGeneration, savedState, prefix, omit }: {
   work: PcWork;
   onRead: () => void;
   onDetail: () => void;
@@ -108,24 +36,56 @@ export function WorkCard({ work, onRead, onDetail, offline = false, offlineAutho
   snapshotGeneration?: number;
   savedState?: { label: string; changed: boolean } | null;
   prefix?: string;
+  /** 作者やシリーズの画面では、その名前を全カードで繰り返さない。 */
+  omit?: "author" | "series";
 }) {
-  const date = displayDate(work.sourceCreatedAt ?? work.downloadedAt);
-  return <article className="work-row rich-work-card">
-    <button className="work-card-open" type="button" aria-label={`${work.title}を読む`} onClick={onRead}>
-      <span className="work-card-main"><WorkThumbnail work={work} offline={offline} snapshotGeneration={snapshotGeneration} /><span className="work-details">
-      {work.seriesTitle && <span className="work-series">{work.seriesTitle}</span>}
-      <strong>{work.title}</strong>
-      <span className="work-author"><AuthorAvatar work={work} offline={offline} offlineAuthorCover={offlineAuthorCover} snapshotGeneration={snapshotGeneration} /><span>{work.authorName}</span><ProviderMark source={work.source} compact /></span>
-      <MobileTagRow tags={work.tags ?? []} />
-    </span></span>
-    </button>
-    <div className="work-card-footer">
-      {prefix && <span>{prefix}</span>}
-      {date && <span className="work-meta"><CalendarDays aria-hidden="true" />{date}</span>}
-      <span className="work-meta"><FileText aria-hidden="true" />{work.textLength.toLocaleString("ja-JP")} 字</span>
-      {work.assetCount > 0 && <span className="work-meta"><Images aria-hidden="true" />{work.assetCount}</span>}
-      {savedState && <span className={savedState.changed ? "saved-state changed" : "saved-state"}>{savedState.label}</span>}
-      <button className="work-card-detail" type="button" onClick={onDetail} aria-label={`${work.title}の詳細`}><MoreHorizontal aria-hidden="true" /><span>詳細</span></button>
+  const navigation = useAppNavigation();
+  const browsable = navigation.canBrowseServer;
+  const date = displayDate(work.sourceCreatedAt);
+  const savedDate = displayDate(work.downloadedAt);
+  const minutes = readingMinutes(work.textLength);
+  const excerpt = useMemo(() => plainText(work.excerpt).replace(/\s+/g, " "), [work.excerpt]);
+  const authorInner = <><AuthorAvatar work={work} offline={offline} offlineAuthorCover={offlineAuthorCover} snapshotGeneration={snapshotGeneration} /><span>{work.authorName}</span></>;
+
+  return <article className="work-card" onClick={(event: MouseEvent) => { if (!isCardControl(event.target)) onRead(); }}>
+    <div className="work-card-inner">
+      <button className="work-card-cover" type="button" tabIndex={-1} aria-label={`${work.title}を読む`} onClick={onRead}><WorkThumbnail work={work} offline={offline} snapshotGeneration={snapshotGeneration} /></button>
+      <div className="work-card-body">
+        {omit !== "series" && work.seriesTitle && (browsable && work.seriesId
+          ? <button className="work-card-series" type="button" aria-label={`シリーズ ${work.seriesTitle} を開く`} onClick={() => navigation.openEntity("series", work.source, work.seriesId!, work.seriesTitle!)}><Layers aria-hidden="true" /><span>{work.seriesTitle}</span></button>
+          : <span className="work-card-series"><Layers aria-hidden="true" /><span>{work.seriesTitle}</span></span>)}
+        <button className="work-card-title" type="button" onClick={onRead} aria-label={`${work.title}を読む`}>{work.title}</button>
+        {omit !== "author" && <div className="work-card-identity">
+          {browsable && work.authorId
+            ? <button className="work-card-author" type="button" aria-label={`作者 ${work.authorName} を開く`} onClick={() => navigation.openEntity("person", work.source, work.authorId, work.authorName)}>{authorInner}</button>
+            : <span className="work-card-author">{authorInner}</span>}
+          <span className="work-card-provider"><ProviderMark source={work.source} compact /></span>
+          <span className="work-card-provider-wide"><ProviderMark source={work.source} /></span>
+        </div>}
+        {excerpt && <p className="work-card-excerpt">{excerpt}</p>}
+        <MobileTagRow tags={work.tags ?? []} onTag={browsable ? navigation.openTag : undefined} />
+      </div>
+      <footer className="work-card-footer">
+        <div className="work-card-facts">
+          {prefix && <span className="work-meta">{prefix}</span>}
+          {date && <span className="work-meta" title="公開日"><CalendarDays aria-hidden="true" />{date}</span>}
+          <span className="work-meta" title="文字数"><FileText aria-hidden="true" />{work.textLength.toLocaleString("ja-JP")} 字</span>
+          {work.assetCount > 0 && <span className="work-meta" title="画像"><Images aria-hidden="true" />{work.assetCount.toLocaleString("ja-JP")}</span>}
+          {minutes && <span className="work-meta work-meta--wide" title="読む時間の目安"><Clock3 aria-hidden="true" />{minutes}</span>}
+          {savedDate && <span className="work-meta work-meta--wide" title="保存日"><Download aria-hidden="true" />{savedDate}</span>}
+          {work.currentVersion > 1 && <span className="work-meta work-meta--wide" title="版"><History aria-hidden="true" />{work.currentVersion} 版</span>}
+        </div>
+        {savedState && <span className={savedState.changed ? "saved-state changed" : "saved-state"}>{savedState.label}</span>}
+        <button className="work-card-detail" type="button" onClick={onDetail} aria-label={`${work.title}の詳細`}><MoreHorizontal aria-hidden="true" /><span>詳細</span></button>
+      </footer>
     </div>
   </article>;
+}
+
+export function WorkCardSkeleton() {
+  return <div className="work-card work-card--skeleton" aria-hidden="true"><div className="work-card-inner">
+    <span className="work-card-cover"><span className="skeleton-block skeleton-cover" /></span>
+    <div className="work-card-body"><span className="skeleton-block skeleton-line skeleton-line--title" /><span className="skeleton-block skeleton-line skeleton-line--short" /><span className="skeleton-block skeleton-line" /><span className="skeleton-block skeleton-line skeleton-line--tags" /></div>
+    <div className="work-card-footer"><span className="skeleton-block skeleton-line skeleton-line--short" /></div>
+  </div></div>;
 }

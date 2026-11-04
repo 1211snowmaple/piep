@@ -1,5 +1,16 @@
 import type { KeyboardEvent } from "react";
 
+/** ページを送るキーなら向きを返す。送らないキーは 0。 */
+export function readerKeyDirection(event: KeyboardEvent<HTMLElement>): -1 | 0 | 1 {
+  if (event.defaultPrevented || event.target !== event.currentTarget || event.nativeEvent.isComposing
+    || event.altKey || event.ctrlKey || event.metaKey || (event.shiftKey && event.key !== " ")) return 0;
+  return event.key === "PageDown" || event.key === "ArrowRight" || (event.key === " " && !event.shiftKey)
+    ? 1
+    : event.key === "PageUp" || event.key === "ArrowLeft" || (event.key === " " && event.shiftKey)
+      ? -1
+      : 0;
+}
+
 /** Move within a long transfer page before turning to the next one. */
 export function handleReaderKeyboard(
   event: KeyboardEvent<HTMLElement>,
@@ -7,14 +18,7 @@ export function handleReaderKeyboard(
   pageCount: number,
   changePage: (page: number, edge: "start" | "end") => void,
 ): void {
-  if (event.defaultPrevented || event.target !== event.currentTarget || event.nativeEvent.isComposing
-    || event.altKey || event.ctrlKey || event.metaKey || (event.shiftKey && event.key !== " ")
-    || pageCount < 1) return;
-  const direction = event.key === "PageDown" || event.key === "ArrowRight" || (event.key === " " && !event.shiftKey)
-    ? 1
-    : event.key === "PageUp" || event.key === "ArrowLeft" || (event.key === " " && event.shiftKey)
-      ? -1
-      : 0;
+  const direction = pageCount < 1 ? 0 : readerKeyDirection(event);
   if (!direction) return;
 
   const viewport = event.currentTarget;

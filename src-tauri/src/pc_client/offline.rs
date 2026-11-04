@@ -787,62 +787,48 @@ pub async fn offline_get_outline(
     serde_json::from_slice(&bytes).map_err(|_| storage())
 }
 
-#[tauri::command]
-pub async fn offline_get_cover(
-    state: State<'_, OfflineState>,
-    work_id: i64,
-) -> Result<MobileAssetData, ClientError> {
-    let _guard = state.lock.lock().await;
-    let (manifest, snapshot) = read_manifest(&state, work_id)?;
-    let record = manifest.cover.ok_or_else(ClientError::remote)?;
-    let bytes = fs::read(snapshot.join("cover.bin")).map_err(|_| storage())?;
-    if bytes.len() > MAX_ASSET_BYTES || digest(&bytes) != record.sha256 {
+fn verified_cover(path: PathBuf, sha256: &str, mime_type: &str) -> Result<(String, Vec<u8>), ClientError> {
+    let bytes = fs::read(path).map_err(|_| storage())?;
+    if bytes.len() > MAX_ASSET_BYTES || digest(&bytes) != sha256 {
         return Err(storage());
     }
-    Ok(MobileAssetData {
-        mime_type: record.mime_type,
-        base64: STANDARD.encode(bytes),
-    })
+    Ok((mime_type.to_string(), bytes))
 }
 
-#[tauri::command]
-pub async fn offline_get_collection_cover(
-    state: State<'_, OfflineState>,
-    work_id: i64,
-    collection_id: String,
-) -> Result<MobileAssetData, ClientError> {
+pub async fn saved_cover(state: &OfflineState, work_id: i64) -> Result<(String, Vec<u8>), ClientError> {
     let _guard = state.lock.lock().await;
-    let (manifest, snapshot) = read_manifest(&state, work_id)?;
+    let (manifest, snapshot) = read_manifest(state, work_id)?;
+    let record = manifest.cover.ok_or_else(ClientError::remote)?;
+    verified_cover(snapshot.join("cover.bin"), &record.sha256, &record.mime_type)
+}
+
+pub async fn saved_collection_cover(
+    state: &OfflineState,
+    work_id: i64,
+    collection_id: &str,
+) -> Result<(String, Vec<u8>), ClientError> {
+    let _guard = state.lock.lock().await;
+    let (manifest, snapshot) = read_manifest(state, work_id)?;
     let record = manifest.collection_covers.iter()
         .find(|record| record.collection_id == collection_id)
         .ok_or_else(ClientError::remote)?;
-    let bytes = fs::read(snapshot.join(format!("collection-cover-{}.bin", record.file_number))).map_err(|_| storage())?;
-    if bytes.len() > MAX_ASSET_BYTES || digest(&bytes) != record.sha256 { return Err(storage()); }
-    Ok(MobileAssetData { mime_type: record.mime_type.clone(), base64: STANDARD.encode(bytes) })
+    verified_cover(snapshot.join(format!("collection-cover-{}.bin", record.file_number)), &record.sha256, &record.mime_type)
 }
 
-#[tauri::command]
-pub async fn offline_get_entity_cover(
-    state: State<'_, OfflineState>,
+pub async fn saved_entity_cover(
+    state: &OfflineState,
     work_id: i64,
-    kind: String,
-) -> Result<MobileAssetData, ClientError> {
+    kind: &str,
+) -> Result<(String, Vec<u8>), ClientError> {
     let _guard = state.lock.lock().await;
-    let (manifest, snapshot) = read_manifest(&state, work_id)?;
-    let (record, filename) = match kind.as_str() {
+    let (manifest, snapshot) = read_manifest(state, work_id)?;
+    let (record, filename) = match kind {
         "people" => (manifest.author_cover.as_ref(), "people-cover.bin"),
         "series" => (manifest.series_cover.as_ref(), "series-cover.bin"),
         _ => return Err(ClientError::remote()),
     };
     let record = record.ok_or_else(ClientError::remote)?;
-    let bytes = fs::read(snapshot.join(filename)).map_err(|_| storage())?;
-    if bytes.len() > MAX_ASSET_BYTES || digest(&bytes) != record.sha256 {
-        return Err(storage());
-    }
-    Ok(MobileAssetData {
-        mime_type: record.mime_type.clone(),
-        base64: STANDARD.encode(bytes),
-    })
+    verified_cover(snapshot.join(filename), &record.sha256, &record.mime_type)
 }
 
 #[tauri::command]
