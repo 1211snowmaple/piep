@@ -1,0 +1,88 @@
+/* The first thing the webview paints, before the app's own styles and script.
+   Colours follow `body` in src/styles/app.css and the window colour in
+   src-tauri/src/commands/startup.rs, so nothing shifts between the three.
+
+   This is a file rather than a <style> in index.html on purpose: Tauri adds a
+   nonce to style-src when the page has a <style>, which would turn off the
+   'unsafe-inline' that Mantine's runtime styles rely on. */
+html {
+  --startup-background: #f5f7fa;
+  --startup-text: #4a5462;
+  --startup-ring: #d8e0e8;
+  --startup-ring-active: #0d86f4;
+  background: var(--startup-background);
+}
+
+html[data-mantine-color-scheme="dark"] {
+  --startup-background: #0d1117;
+  --startup-text: #aeb6c2;
+  --startup-ring: #2a323d;
+  --startup-ring-active: #279cff;
+}
+
+.startup-splash {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 28px;
+  padding: 24px;
+  background: var(--startup-background);
+  color: var(--startup-text);
+  font: 400 15px/1.6 "Segoe UI", "Yu Gothic UI", Meiryo, "Hiragino Sans", system-ui, sans-serif;
+  text-align: center;
+  /* A quick start should go straight to the app, without a flash of this. */
+  animation: startup-appear 160ms ease-out 180ms both;
+}
+
+/* The artwork fills only the middle half of its square, so crop the empty bands
+   instead of letting them push the status away. This shows it 132px wide. */
+.startup-splash__mark {
+  width: 160px;
+  height: 88px;
+  object-fit: cover;
+}
+
+.startup-splash__status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.startup-splash__ring {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  border: 2px solid var(--startup-ring);
+  border-top-color: var(--startup-ring-active);
+  border-radius: 50%;
+  animation: startup-turn 900ms linear infinite;
+}
+
+.startup-splash__message { margin: 0; }
+
+.startup-splash__detail {
+  max-width: min(640px, 100%);
+  margin: 0;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.startup-splash[data-failed] .startup-splash__ring { display: none; }
+
+@keyframes startup-appear {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes startup-turn {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .startup-splash { animation: none; }
+  .startup-splash__ring { animation: none; }
+}

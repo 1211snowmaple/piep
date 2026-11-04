@@ -1,5 +1,5 @@
 import { Suspense, lazy, useEffect } from "react";
-import { Center, Loader, Text } from "@mantine/core";
+import { Center, Loader, Text, useMantineColorScheme } from "@mantine/core";
 import { modals } from "@mantine/modals";
 import { AppErrorBoundary } from "@/app/AppErrorBoundary";
 import { AppFrame } from "@/app/AppFrame";
@@ -9,6 +9,7 @@ import { installCloseGuard } from "@/lib/unsavedGuard";
 import { useQueryClient } from "@tanstack/react-query";
 import { subscribeTauriEvent } from "@/services/eventBus";
 import { isTauriRuntime } from "@/services/dbApi";
+import { rememberWindowColorScheme } from "@/services/startupApi";
 import { useIncompleteSaveRepair } from "@/features/updates/repairIncompleteSaves";
 
 const DashboardPage = lazy(() => import("@/features/dashboard/DashboardPage"));
@@ -82,6 +83,12 @@ function AppContent() {
   useIncompleteSaveRepair();
   const { pathname } = useAppRouter();
   const queryClient = useQueryClient();
+  const { colorScheme } = useMantineColorScheme();
+  useEffect(() => {
+    // Only the next launch's window colour depends on this; failing to write it
+    // changes nothing on screen now.
+    rememberWindowColorScheme(colorScheme).catch(() => undefined);
+  }, [colorScheme]);
   useEffect(() => {
     if (!isTauriRuntime()) return;
     return subscribeTauriEvent<number[]>("acquisition-audited", () => {
