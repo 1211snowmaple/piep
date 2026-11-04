@@ -891,7 +891,7 @@ fn preflight_backup_archive(archive: &mut zip::ZipArchive<std::fs::File>) -> Res
     let mut names = HashSet::new();
     for index in 0..archive.len() {
         let file = archive.by_index(index).map_err(|e| e.to_string())?;
-        let name = file.name().to_string();
+        let name = file.name().map_err(|e| e.to_string())?.into_owned();
         validated_backup_relative_path(&name)
             .map_err(|e| format!("Security Exception for zip entry {name}: {e}"))?;
         if !names.insert(name.clone()) {
@@ -1454,7 +1454,12 @@ fn validate_finished_export(path: &Path, storage: &Path, app_data: &Path) -> Res
     for index in 0..archive.len() {
         let entry = archive.by_index(index).map_err(|error| error.to_string())?;
         if !entry.is_dir() {
-            archive_names.insert(entry.name().to_string());
+            archive_names.insert(
+                entry
+                    .name()
+                    .map_err(|error| error.to_string())?
+                    .into_owned(),
+            );
         }
     }
     let mut metadata_text = String::new();
@@ -3491,7 +3496,7 @@ fn inspect_backup_internal(
     for index in 0..archive.len() {
         let file = archive.by_index(index).map_err(|e| e.to_string())?;
         if !file.is_dir() {
-            archive_names.insert(file.name().to_string());
+            archive_names.insert(file.name().map_err(|e| e.to_string())?.into_owned());
         }
     }
     let mut metadata_text = String::new();
@@ -3747,7 +3752,7 @@ async fn import_zip_locked(
                 continue;
             }
 
-            let entry_name = file.name().to_string();
+            let entry_name = file.name().map_err(|e| e.to_string())?.into_owned();
             // 数万ファイルでは1件ごとに送ると多すぎる。区切って知らせる。
             if i % 64 == 0 {
                 reporter.report("extract", i as i64, entry_total, Some(entry_name.clone()));

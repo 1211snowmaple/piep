@@ -203,7 +203,10 @@ pub fn extract_package(package: &Path, destination: &Path) -> Result<(), String>
         let mut entry = archive
             .by_index(index)
             .map_err(|error| format!("配布物を読み取れません: {error}"))?;
-        let name = entry.name().to_string();
+        let name = entry
+            .name()
+            .map_err(|error| format!("配布物を読み取れません: {error}"))?
+            .into_owned();
         if !PACKAGE_FILES
             .iter()
             .any(|allowed| allowed.eq_ignore_ascii_case(&name))

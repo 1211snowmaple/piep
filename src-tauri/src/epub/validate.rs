@@ -47,7 +47,10 @@ pub fn validate_epub(path: &Path) -> Result<EpubValidationReport, String> {
         if entry.is_dir() {
             continue;
         }
-        let name = entry.name().to_string();
+        let name = entry
+            .name()
+            .map_err(|e| format!("ZIP項目の名前を読めません: {}", e))?
+            .into_owned();
         let entry_bytes = entry.size();
         if entry_bytes > MAX_EPUB_ENTRY_BYTES {
             return Err(format!(
