@@ -228,6 +228,7 @@ impl MobileSearchRequest {
                     "length",
                     "assets",
                     "version",
+                    "series_order",
                 ],
             )
             || !allowed(self.sort_order.as_deref(), &["asc", "desc"])
@@ -327,6 +328,41 @@ pub struct MobileEntityPage {
     pub items: Vec<MobileEntity>,
     pub next_offset: Option<i64>,
     pub total: i64,
+}
+
+/// 作者の中のシリーズ一覧。続きは不透明なカーソルで辿る。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MobileEntitySeriesPage {
+    pub items: Vec<MobileEntity>,
+    pub next_cursor: Option<String>,
+    pub total: i64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MobileFacet {
+    pub name: String,
+    pub count: i64,
+}
+
+/// 作者・シリーズの画面を一度で描くための情報。保存先のパスは含めない。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MobileEntityDetail {
+    pub source: String,
+    pub source_key: String,
+    pub display_name: String,
+    pub description: Option<String>,
+    pub work_count: i64,
+    pub has_cover: bool,
+    pub has_banner: bool,
+    pub is_concluded: Option<bool>,
+    pub published_count: Option<i64>,
+    pub links: Vec<String>,
+    pub tags: Vec<MobileFacet>,
+    pub series_count: Option<i64>,
+    pub collections: Vec<MobileCollection>,
 }
 
 #[derive(Debug, Serialize)]

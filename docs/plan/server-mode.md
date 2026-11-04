@@ -93,10 +93,12 @@ API と保存形式は、β の間は予告して変えてよい。
 | 本文 | `GET /works/{id}/pages/{page}?version=` | 0 起点。`html` の画像は `data-asset-id` |
 | 目次 | `GET /works/{id}/outline` | `page` は 1 起点 |
 | 本文画像 | `GET /works/{id}/assets/{assetId}` | 画像のバイト列。25 MiB を超えるものは長辺 3072px の WebP にして返す |
-| 表紙 | `GET /works/{id}/cover` | 320×480 に収めた WebP |
+| 表紙 | `GET /works/{id}/cover` | 320×480 に収めた WebP。`?size=large` で詳細画面向けの大きさ |
 | 所属コレクション | `GET /works/{id}/collections` | 一覧と、その作品の並び位置 |
-| 作者・シリーズ | `GET /entities/{people\|series}?text=&offset=&limit=` | `{items, nextOffset, total}` |
-| 作者アイコン・シリーズ表紙 | `GET /entities/{kind}/cover?source=&key=` | WebP |
+| 作者・シリーズ | `GET /entities/{people\|series}?text=&offset=&limit=&sort=&order=` | `{items, nextOffset, total}` |
+| 作者アイコン・シリーズ表紙 | `GET /entities/{kind}/cover?source=&key=&variant=banner` | WebP |
+| 作者・シリーズの詳細 | `GET /entities/{kind}/detail?source=&key=` | 紹介文、リンク、話数、タグ集計、シリーズ数、所属コレクション |
+| 作者のシリーズ | `GET /entities/people/series?source=&key=&text=&sort=&order=&cursor=&limit=` | `{items, nextCursor, total}` |
 | コレクション | `GET /collections`、`GET /collections/{id}` | 要約と所属作品 |
 | コレクション表紙 | `GET /collections/{id}/cover/{file\|tile-0..3}` | WebP |
 
