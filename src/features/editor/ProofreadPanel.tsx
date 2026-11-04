@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Alert, Badge, Button, Drawer, Group, Loader, Paper, Progress, Stack, Text } from "@mantine/core";
 import { BetaBadge } from "@/components/BetaBadge";
 import { ActionRow } from "@/components/ActionRow";
@@ -25,7 +25,7 @@ export interface ProofreadSource {
 /**
  * 送る単位に切り分ける。
  *
- * 一つのブロックが上限より長いときは、行の切れ目で分けて送る。どれも
+ * 一つのブロックが上限より長いときは、行の切れ目を優先して分けて送る。どれも
  * 同じブロックの身元を名乗るので、当てるときはブロックの本文全体の中で
  * 場所を一つに決め直す。
  */
@@ -36,13 +36,24 @@ export function buildProofreadBatches(blocks: ProofreadSource[], limit = PROOFRE
     const text = String(block.text ?? "");
     if (!text.trim()) continue;
     let piece = "";
+    let pieceSize = 0;
     for (const line of text.split("\n")) {
-      // 一行だけで上限を超えるものは、そのまま一つの単位にする（切ると語が割れる）。
-      if (piece && piece.length + line.length + 1 > limit) {
+      // Rust 側と同じく Unicode の文字数で数える。UTF-16 の途中では切らない。
+      const chars = Array.from(line);
+      if (piece && pieceSize + chars.length + 1 > limit) {
         segments.push({ id: block.clientId, text: piece });
         piece = "";
+        pieceSize = 0;
       }
-      piece = piece ? `${piece}\n${line}` : line;
+      // 改行の無い長い段落も、末尾まで送る。
+      let offset = 0;
+      while (chars.length - offset > limit) {
+        segments.push({ id: block.clientId, text: chars.slice(offset, offset + limit).join("") });
+        offset += limit;
+      }
+      const rest = chars.slice(offset).join("");
+      pieceSize += chars.length - offset + (piece ? 1 : 0);
+      piece = piece ? `${piece}\n${rest}` : rest;
     }
     if (piece.trim()) segments.push({ id: block.clientId, text: piece });
   }
@@ -50,13 +61,13 @@ export function buildProofreadBatches(blocks: ProofreadSource[], limit = PROOFRE
   let batch: ProofreadSegment[] = [];
   let size = 0;
   for (const segment of segments) {
-    const length = Math.min(segment.text.length, limit);
+    const length = Array.from(segment.text).length;
     if (batch.length && (size + length > limit || batch.length >= PROOFREAD_BATCH_SEGMENTS)) {
       batches.push(batch);
       batch = [];
       size = 0;
     }
-    batch.push({ ...segment, text: segment.text.slice(0, limit) });
+    batch.push(segment);
     size += length;
   }
   if (batch.length) batches.push(batch);
@@ -88,6 +99,8 @@ export function useProofread() {
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const runRef = useRef(0);
+  // 離れた画面から、次の段落の本文を送り続けない。
+  useEffect(() => () => { runRef.current += 1; }, []);
 
   const start = useCallback(async (engine: AssistEngine, batches: ProofreadSegment[][]) => {
     const run = ++runRef.current;

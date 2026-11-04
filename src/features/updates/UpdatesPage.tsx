@@ -28,6 +28,7 @@ import { notifications } from "@mantine/notifications";
 import { reportJobAction } from "@/features/jobs/operationJobs";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Icons, IconSize } from "@/lib/icons";
+import { BrowserListShortcuts } from "./BrowserListShortcuts";
 import { useAppNavigate, useAppSearchParams } from "@/app/router";
 import { EmptyState, ErrorState, LoadingState } from "@/components/AsyncState";
 import { MotionTabs as Tabs } from "@/components/MotionTabs";
@@ -236,7 +237,7 @@ export default function UpdatesPage() {
         workIds: shelfIds ?? (workId && !targetIds ? [workId] : null),
         targetIds,
         watchSaved: schedule.watchSaved,
-        newWorksOnly: values.depth === "new" && !shelfIds && !workId,
+        newWorksOnly: values.depth === "new" && values.scope !== "work" && !shelfIds && !workId,
       });
       await updateJobs.loadJobs();
     },
@@ -443,7 +444,8 @@ export default function UpdatesPage() {
 
   return (
     <div className="page page--contained updates-page">
-      <PageHeader title="新着" description="作者の新作、シリーズの続編、作品の改稿を確認して保存します。" />
+      <PageHeader title="新作・改稿" description="作者の新作、シリーズの続編、作品の改稿を確認して保存します。" />
+      {runtime && <BrowserListShortcuts />}
 
       {/* 毎回触るものだけを一列に置く。自動確認は数か月に一度しか触らない
           設定なので、いまどうなっているかだけ名乗って、変更は開いたときに。
@@ -453,8 +455,12 @@ export default function UpdatesPage() {
         {/* 作者のページから始めた確認でも、ここには次回の設定が出ている。
             動いている確認の対象と読み違えないよう、動いているあいだは名乗る。 */}
         {(running || stalled) && <Text size="xs" c="dimmed" mb={6}>次に始める確認の設定</Text>}
-        <Group gap="sm" wrap="wrap">
+        {/* 毎回触るものを一列に収める。折り返すと、右端の開始ボタンの居場所が幅で変わる。
+            説明は常に出さず、知りたくなったときに ? で開く。実際に効いた瞬間は下の
+            進捗カードが名乗る。 */}
+        <Group className="updates-toolbar__row" gap="sm" wrap="nowrap">
           <Select
+            className="updates-toolbar__scope"
             aria-label="確認する対象"
             leftSection={<Icons.select size={IconSize.menu} />}
             data={[
@@ -464,43 +470,42 @@ export default function UpdatesPage() {
             ]}
             allowDeselect={false}
             disabled={Boolean(workId)}
-            w={210}
             {...form.getInputProps("scope")}
           />
           {/* 作品が対象のときは、その作品の改稿を見るほかにすることがない。 */}
-          <SegmentedControl aria-label="確認する内容" data={[{ value: "new", label: "新作だけ" }, { value: "full", label: "改稿も" }]} disabled={worksOnlyScope} value={worksOnlyScope ? "full" : form.values.depth} onChange={(value) => form.setFieldValue("depth", value)} />
-          <SegmentedControl aria-label="更新時の処理方法" data={[{ value: "check_only", label: "確認のみ" }, { value: "auto_save", label: "自動保存" }]} {...form.getInputProps("mode")} />
-          {/* 平常時に読ませたいのは一行だけ。詳しい話は、知りたくなった
-              ときに開く。実際に効いた瞬間は下の進捗カードが名乗る。 */}
-          <Group gap={4} wrap="nowrap">
-            <Text size="xs" c="dimmed">{newWorksDepth ? "作者とシリーズの一覧だけを見ます" : "1件ずつ間隔をあけて確認します"}</Text>
-            <Tooltip
-              multiline
-              w={280}
-              label={newWorksDepth
-                ? "作者とシリーズごとに一覧を1回見て、新しい作品だけを探します。改稿と、作品ごとの監視は確認しません。取得元への確認は1.5秒以上あけます。取得エラーが続くと間隔を延ばして一時停止します。"
-                : "取得元への確認は1件ずつ2秒以上あけます。取得エラーが続くと間隔を延ばして一時停止します。取得制限では分単位で待って再試行します。pixiv 側の表示設定で一覧から省かれた作品は個別に確認します。"}
-            >
-              <ActionIcon variant="subtle" color="gray" size="md" aria-label="確認の進め方について">
-                <Icons.help size={IconSize.menu} />
-              </ActionIcon>
+          <SegmentedControl style={{ flexShrink: 0 }} aria-label="確認する内容" data={[{ value: "new", label: "新作だけ" }, { value: "full", label: "改稿も" }]} disabled={worksOnlyScope} value={worksOnlyScope ? "full" : form.values.depth} onChange={(value) => form.setFieldValue("depth", value)} />
+          <SegmentedControl style={{ flexShrink: 0 }} aria-label="更新時の処理方法" data={[{ value: "check_only", label: "確認のみ" }, { value: "auto_save", label: "自動保存" }]} {...form.getInputProps("mode")} />
+          <Tooltip
+            multiline
+            w={280}
+            label={newWorksDepth
+              ? "作者とシリーズごとに一覧を1回見て、新しい作品だけを探します。改稿と、作品ごとの監視は確認しません。取得元への確認は1.5秒以上あけます。取得エラーが続くと間隔を延ばして一時停止します。"
+              : "取得元への確認は1件ずつ2秒以上あけます。取得エラーが続くと間隔を延ばして一時停止します。取得制限では分単位で待って再試行します。pixiv 側の表示設定で一覧から省かれた作品は個別に確認します。"}
+          >
+            <ActionIcon variant="subtle" color="gray" size="md" aria-label="確認の進め方について">
+              <Icons.help size={IconSize.menu} />
+            </ActionIcon>
+          </Tooltip>
+          <Group gap="xs" wrap="nowrap" ml="auto" style={{ flexShrink: 0 }}>
+            <Tooltip label={`自動確認：${scheduleSummary}。押すと変更できます`}>
+              <Button className="updates-toolbar__schedule" variant="subtle" color="gray" leftSection={<Icons.publishedDate size={IconSize.menu} />} aria-label={`自動確認：${scheduleSummary}を変更`} onClick={() => selectTab("schedule")}>
+                <span className="updates-toolbar__schedule-label">自動確認：{scheduleSummary}</span>
+              </Button>
             </Tooltip>
-          </Group>
-          {workId && <Badge variant="light" color="gray">作品 ID {workId} のみ</Badge>}
-          {(form.values.scope === "favorite" || form.values.scope === "reading") && (
-            <Text size="xs" c="dimmed" role="status">
-              この確認では最大{SHELF_SCOPE_LIMIT}件を対象にします。{SHELF_SCOPE_LIMIT + 1}件目以降は含まれません。
-            </Text>
-          )}
-          {/* 範囲と方法を左で決めて、右端で始める。折り返しても右に残るよう余白で寄せる。 */}
-          <Group gap="sm" wrap="nowrap" ml="auto">
-            <Group gap={6} wrap="nowrap">
-              <Text size="xs" c="dimmed">自動確認：{scheduleSummary}</Text>
-              <Button size="xs" variant="subtle" color="gray" onClick={() => selectTab("schedule")}>変更</Button>
-            </Group>
             <Button leftSection={<Icons.updates size={IconSize.menu} />} disabled={running} loading={startMutation.isPending} onClick={() => form.onSubmit((values) => startMutation.mutate(values))()}>確認を開始</Button>
           </Group>
         </Group>
+        {/* 選んだときだけ必要な注意は、列を崩さず下に出す。 */}
+        {(workId || form.values.scope === "favorite" || form.values.scope === "reading") && (
+          <Group gap="xs" mt={6} wrap="wrap">
+            {workId && <Badge variant="light" color="gray">作品 ID {workId} のみ</Badge>}
+            {(form.values.scope === "favorite" || form.values.scope === "reading") && (
+              <Text size="xs" c="dimmed" role="status">
+                この確認では最大{SHELF_SCOPE_LIMIT}件を対象にします。{SHELF_SCOPE_LIMIT + 1}件目以降は含まれません。
+              </Text>
+            )}
+          </Group>
+        )}
       </Paper>
 
       {activeSnapshot && resultIsTerminal && !progressOpen && (

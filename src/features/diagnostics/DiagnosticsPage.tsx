@@ -480,7 +480,7 @@ export default function DiagnosticsPage({ embedded = false, previewData = previe
       {/* 縦に積む箱と、縦に流れる箱は別物である。Stack のまま高さを絞ると、
           中の Card が flex で縮み、Card は自分の中身を切り落とす - 帯の文字が
           上下で切れて重なっていたのはこれだった。流すのは外の箱の仕事にする。 */}
-      <Box mah="55vh" style={{ overflowY: "auto" }} pr="xs">
+      <Box mah="55vh" className="piep-scroll-y">
         <Stack gap="sm">
           {samples.map((issue, index) => {
             const sizeDetail = issueSizeDetail(issue);

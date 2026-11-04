@@ -54,7 +54,19 @@ export function isLatestSaveDraftAnalysis(source: SaveSource, revision: number):
   return analysisRevision[source] === revision;
 }
 
+/** 別の画面から「開いたら一覧を読む」と頼まれた取得元。読むのは一度だけ。 */
+const listReadRequests = new Set<SaveSource>();
+
+export function requestListRead(source: SaveSource): void {
+  listReadRequests.add(source);
+}
+
+export function consumeListRead(source: SaveSource): boolean {
+  return listReadRequests.delete(source);
+}
+
 export function resetSaveDraftsForTest(): void {
+  listReadRequests.clear();
   drafts.pixiv = emptyDraft();
   drafts.fanbox = emptyDraft();
   analysisRevision.pixiv = 0;

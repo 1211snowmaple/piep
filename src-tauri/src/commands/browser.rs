@@ -17,8 +17,9 @@ use tauri::Manager;
 use crate::auth::webview::{
     close_child_webview, close_standalone_webview, destroy_child_webview, get_child_webview_url,
     go_back_child_webview, go_forward_child_webview, navigate_child_webview, open_child_webview,
-    open_standalone_webview, read_browser_page_works, reload_child_webview,
-    set_child_webview_bounds, set_child_webview_visible, standalone_webview_url, BrowserPageWork,
+    open_standalone_webview, read_browser_page_users, read_browser_page_works,
+    reload_child_webview, set_child_webview_bounds, set_child_webview_visible,
+    standalone_webview_url, BrowserPageUser, BrowserPageWork,
 };
 use crate::AppState;
 
@@ -68,6 +69,53 @@ pub async fn read_browser_page_work_candidates(
     Ok(PageWorkCandidates {
         url: page.url,
         works,
+        truncated: page.truncated,
+    })
+}
+
+/// フォロー一覧から読み取った作者ひとり。`watched` は監視に登録済みかどうか。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PageUserCandidate {
+    #[serde(flatten)]
+    pub user: BrowserPageUser,
+    pub watched: bool,
+}
+
+/// フォロー一覧の読み取りの結果。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PageUserCandidates {
+    pub url: String,
+    pub users: Vec<PageUserCandidate>,
+    pub truncated: bool,
+}
+
+/// 内蔵ブラウザに表示中のフォロー一覧から、作者を読み取る。
+///
+/// 開いているページの文書を読むだけで、取得元への通信は増えない。アカウントの
+/// フォローは変えず、監視に足すかどうかは利用者が選ぶ。
+#[tauri::command]
+pub async fn read_browser_page_user_candidates(
+    app: tauri::AppHandle,
+    browser: String,
+) -> Result<PageUserCandidates, String> {
+    let page = read_browser_page_users(app.clone(), browser).await?;
+    let state = app.state::<Arc<AppState>>();
+    let users = page
+        .users
+        .into_iter()
+        .map(|user| {
+            let watched = state
+                .db
+                .find_update_target("author", "pixiv", &user.user_id)?
+                .is_some();
+            Ok(PageUserCandidate { user, watched })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok(PageUserCandidates {
+        url: page.url,
+        users,
         truncated: page.truncated,
     })
 }
