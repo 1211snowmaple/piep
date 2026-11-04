@@ -236,7 +236,7 @@ export default function UpdatesPage() {
         workIds: shelfIds ?? (workId && !targetIds ? [workId] : null),
         targetIds,
         watchSaved: schedule.watchSaved,
-        newWorksOnly: values.depth === "new" && !shelfIds && !workId,
+        newWorksOnly: values.depth === "new" && values.scope !== "work" && !shelfIds && !workId,
       });
       await updateJobs.loadJobs();
     },

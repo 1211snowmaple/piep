@@ -756,7 +756,7 @@ fn build_initial_items(
     };
     // A one-off author check also checks every saved work by that author for
     // revisions, regardless of each work's individual watch setting.
-    if include_author {
+    if include_author && !new_works_only {
         for adhoc in request.adhoc_targets.iter().flatten() {
             if adhoc.target_type == "author" {
                 works.extend(
@@ -4582,6 +4582,19 @@ mod tests {
         );
         assert!(keys.contains(&("target", Some("in-group"))));
         assert!(!keys.iter().any(|(_, id)| *id == Some("watched-elsewhere")));
+        let adhoc_request = StartUpdateJobRequest {
+            scope: "author".into(),
+            adhoc_targets: Some(vec![crate::database::AdhocUpdateTarget {
+                target_type: "author".into(),
+                source: "pixiv".into(),
+                source_key: "someone-else".into(),
+                display_name: "別の作者".into(),
+            }]),
+            ..request
+        };
+        let adhoc_items = build_initial_items(&state, &adhoc_request).unwrap();
+        assert_eq!(adhoc_items.len(), 1);
+        assert_eq!(adhoc_items[0].item_type, "target");
         drop(state);
         let _ = std::fs::remove_dir_all(root);
     }
