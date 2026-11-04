@@ -46,7 +46,7 @@ tauri-plugin-dialog = "2.7.3"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 r2d2 = "0.8"
 r2d2_sqlite = { version = "0.35.0", features = ["bundled"] }
-zip = "8.6.0"
+zip = "9.3.0"
 minijinja = "2"
 image = { version = "0.25", default-features = false, features = [
     "jpeg",
