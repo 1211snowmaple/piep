@@ -70,6 +70,7 @@
         "languages": ["Japanese"],
         "installerIcon": "icons/icon.ico",
         "installerHooks": "installer/hooks.nsh",
+        "template": "installer/installer.nsi",
         "headerImage": "installer/nsis-header.bmp",
         "sidebarImage": "installer/nsis-sidebar.bmp",
         "installMode": "currentUser"
