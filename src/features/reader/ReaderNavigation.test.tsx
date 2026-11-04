@@ -115,6 +115,33 @@ describe("読み進む操作", () => {
     await waitFor(() => expect(dbApi.getReaderContentPage).toHaveBeenCalledWith(101, null, 1));
   });
 
+  it("長編でも、最後のページを読み切るまでは進捗を読了と表示しない", async () => {
+    dbApi.getReaderContentPage.mockImplementation((_id: number, _version: number | null, index: number) => Promise.resolve({
+      ...page(index, `<p>${index + 1}ページの本文</p>`),
+      pageCount: 201,
+      totalPlainTextChars: 201_000,
+      sourcePageStarts: Array.from({ length: 201 }, (_, item) => item),
+    }));
+    window.localStorage.setItem("piep.reader-position.101.current", JSON.stringify({ page: 200, top: 0 }));
+    const view = renderReader();
+    await screen.findByText("200ページの本文");
+    const viewport = stubViewport(view.container);
+    const label = view.container.querySelector(".reader-progress-text")!;
+    viewport.scrollTop = 2_600;
+    fireEvent.scroll(viewport);
+    await waitFor(() => expect(label).toHaveTextContent("残り"));
+    expect(label).not.toHaveTextContent("読了");
+
+    fireEvent.keyDown(window, { key: "ArrowRight" });
+    await screen.findByText("201ページの本文");
+    viewport.scrollTop = 0;
+    fireEvent.scroll(viewport);
+    await waitFor(() => expect(label).toHaveTextContent("残り"));
+    viewport.scrollTop = 2_600;
+    fireEvent.scroll(viewport);
+    await waitFor(() => expect(label).toHaveTextContent("読了"));
+  });
+
   /**
    * 同じページに載っている見出しが、どれもページの先頭へ着いていた。
    * 転送ページは長いので、目次が目次として働いていなかった。
