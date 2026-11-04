@@ -246,7 +246,79 @@ async fn assert_read_api(
     assert_eq!(authors["items"][0]["hasCover"], true);
     assert!(!authors.to_string().contains(&private_root));
 
+    let sorted: serde_json::Value = client
+        .get(format!("{url}/api/v1/entities/people?sort=name&order=asc"))
+        .bearer_auth(token)
+        .send()
+        .await
+        .expect("sorted authors")
+        .json()
+        .await
+        .expect("sorted authors JSON");
+    assert!(sorted["total"].as_i64().unwrap() >= 1);
+    let bad_sort = client
+        .get(format!("{url}/api/v1/entities/people?sort=json_path"))
+        .bearer_auth(token)
+        .send()
+        .await
+        .expect("bad sort");
+    assert_eq!(bad_sort.status(), StatusCode::BAD_REQUEST);
+
+    let person: serde_json::Value = client
+        .get(format!(
+            "{url}/api/v1/entities/people/detail?source=pixiv&key=test-author"
+        ))
+        .bearer_auth(token)
+        .send()
+        .await
+        .expect("person detail")
+        .json()
+        .await
+        .expect("person detail JSON");
+    assert_eq!(person["sourceKey"], "test-author");
+    assert_eq!(person["tags"][0]["name"], "試験");
+    assert!(person["seriesCount"].is_number());
+    assert!(!person.to_string().contains(&private_root));
+
+    let series_page: serde_json::Value = client
+        .get(format!(
+            "{url}/api/v1/entities/people/series?source=pixiv&key=test-author&sort=name&order=asc"
+        ))
+        .bearer_auth(token)
+        .send()
+        .await
+        .expect("person series")
+        .json()
+        .await
+        .expect("person series JSON");
+    assert!(series_page["items"].is_array());
+    assert!(!series_page.to_string().contains(&private_root));
+    let series_of_series = client
+        .get(format!(
+            "{url}/api/v1/entities/series/series?source=pixiv&key=test-series"
+        ))
+        .bearer_auth(token)
+        .send()
+        .await
+        .expect("series of series");
+    assert_eq!(series_of_series.status(), StatusCode::NOT_FOUND);
+
+    let series_detail: serde_json::Value = client
+        .get(format!(
+            "{url}/api/v1/entities/series/detail?source=pixiv&key=test-series"
+        ))
+        .bearer_auth(token)
+        .send()
+        .await
+        .expect("series detail")
+        .json()
+        .await
+        .expect("series detail JSON");
+    assert_eq!(series_detail["sourceKey"], "test-series");
+    assert!(!series_detail.to_string().contains(&private_root));
+
     for path in [
+        format!("works/{work_id}/cover?size=large"),
         "entities/people/cover?source=pixiv&key=test-author".to_string(),
         "entities/series/cover?source=pixiv&key=test-series".to_string(),
         format!("works/{work_id}/cover"),
@@ -820,6 +892,8 @@ async fn the_public_side_refuses_what_it_should() {
         "works/1/collections",
         "entities/people",
         "entities/people/cover?source=pixiv&key=a",
+        "entities/people/detail?source=pixiv&key=a",
+        "entities/people/series?source=pixiv&key=a",
         "collections",
         "collections/a",
         "collections/a/cover/file",
