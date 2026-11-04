@@ -55,6 +55,7 @@ pre,
   padding: 1px;
   overflow-x: hidden;
   overflow-y: auto;
+  scrollbar-width: none;
   pointer-events: none;
 }
 
@@ -149,9 +150,44 @@ select {
     light-dark(#f5f7fa, #0d1117);
 }
 
-/* スクロールバーの出入りで中身の幅が動かないよう、場所を先に取っておく。
-   高さに収める保存、読書、編集の画面は、空いた帯が見えるので取らない。 */
-.app-main:has(.page) { scrollbar-gutter: stable; }
+/* スクロールバーはアプリ全体で一つに決める。
+   OS 任せだと幅が環境で変わり、出入りのたびに中身が動く。幅を決めて地を透かすと、
+   場所を先に取っても帯に見えず、取った分を余白から正確に引ける。
+   新しくスクロール領域を作ったら下の一覧に足す。src/styles/scrollbars.test.ts が見張る。
+   Mantine の ScrollArea は中身に重なるので、幅を奪わない。 */
+:root { --piep-scrollbar-size: 10px; }
+::-webkit-scrollbar { width: var(--piep-scrollbar-size); height: var(--piep-scrollbar-size); }
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-corner { background: transparent; }
+::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background-color: light-dark(rgb(26 36 50 / 26%), rgb(255 255 255 / 22%));
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover { background-color: light-dark(rgb(26 36 50 / 44%), rgb(255 255 255 / 38%)); }
+
+.app-main,
+.piep-scroll-y,
+.filter-spotlight__results,
+.filter-spotlight__panel,
+.content-frame,
+.version-preview__text,
+.revision-diff__content,
+.json-view,
+.collection-add__grid,
+.mantine-Modal-body,
+.confirm-work-list,
+.revision-metadata-value,
+.settings-nav-column,
+.tag-overflow__list,
+.filter-form > [aria-label="適用する条件"],
+textarea { scrollbar-gutter: stable; }
+
+.piep-scroll-y { overflow-y: auto; }
+
+/* 高さに収める画面は、そもそも本体が伸びない。場所を取ると端が空く。 */
+.app-main:has(.save-page, .reader-page, .editor-page) { scrollbar-gutter: auto; }
 
 .app-brand {
   display: grid;
@@ -217,7 +253,9 @@ select {
   min-width: 0;
   width: 100%;
   min-height: 100%;
-  padding: clamp(16px, 2vw, 30px);
+  --page-padding: clamp(16px, 2vw, 30px);
+  padding: var(--page-padding);
+  padding-inline-end: calc(var(--page-padding) - var(--piep-scrollbar-size));
 }
 
 .page--contained {
@@ -226,7 +264,7 @@ select {
 }
 
 /* Set from the appearance settings; see lib/density.ts. */
-:root[data-density="compact"] .page { padding: clamp(10px, 1.2vw, 18px); }
+:root[data-density="compact"] .page { --page-padding: clamp(12px, 1.2vw, 18px); }
 :root[data-density="compact"] .library-grid,
 :root[data-density="compact"] .work-grid { gap: 10px; }
 :root[data-density="compact"] .work-card { min-height: 204px; }
@@ -684,7 +722,7 @@ select {
   flex: 1 1 auto;
   overflow-y: auto;
   overscroll-behavior: contain;
-  padding: 16px 20px;
+  padding: 16px calc(20px - var(--piep-scrollbar-size)) 16px 20px;
 }
 .filter-spotlight__quick-option {
   display: grid;
@@ -822,11 +860,9 @@ select {
   flex: 1 1 auto;
   align-items: center;
   gap: 4px;
-  overflow-x: auto;
+  overflow-x: scroll;
   overscroll-behavior-inline: contain;
   padding-block: 2px 4px;
-  scrollbar-color: light-dark(var(--mantine-color-gray-4), var(--mantine-color-dark-3)) transparent;
-  scrollbar-width: thin;
 }
 .filter-spotlight__selection-tokens::-webkit-scrollbar { height: 4px; }
 .filter-spotlight__selection-tokens::-webkit-scrollbar-track { background: transparent; }
@@ -1748,11 +1784,13 @@ select {
    the JSON view has been bounded all along. The pager below it therefore stays
    on screen, and turning a page scrolls this rather than the app. */
 .content-frame {
+  --frame-padding: clamp(20px, 2.4vw, 40px);
   max-width: 100%;
   max-height: 72vh;
   overflow: auto;
   overscroll-behavior: contain;
-  padding: clamp(20px, 2.4vw, 40px);
+  padding: var(--frame-padding);
+  padding-inline-end: calc(var(--frame-padding) - var(--piep-scrollbar-size));
   background: light-dark(var(--mantine-color-white), var(--mantine-color-dark-7));
 }
 .content-frame .content-preview { margin-inline: auto; }
@@ -1937,7 +1975,7 @@ select {
 .history-layout__versions { display: flex; flex-direction: column; gap: 6px; }
 @media (max-width: 62em) {
   .history-layout { grid-template-columns: minmax(0, 1fr); }
-  .history-layout__versions { flex-direction: row; overflow-x: auto; padding-bottom: 4px; }
+  .history-layout__versions { flex-direction: row; overflow-x: scroll; }
   .history-layout__versions .version-row { flex: 0 0 176px; }
 }
 .version-preview { position: sticky; top: 82px; min-height: 310px; }
@@ -3078,7 +3116,7 @@ select {
 
 @media (max-width: 40em) {
   .page {
-    padding: 16px;
+    --page-padding: 16px;
   }
 
   .page-header {
@@ -3445,6 +3483,7 @@ select {
   min-height: 0;
   flex: 1;
   overflow-y: auto;
+  padding-inline-end: max(0px, calc(var(--mb-padding, var(--mantine-spacing-md)) - var(--piep-scrollbar-size)));
 }
 
 /* 窓の操作は下に貼り付ける。中身が縦に長い窓では、下まで送らないと押せない
@@ -3461,7 +3500,7 @@ select {
 /* 確認の窓に並べる題名。長い題名で窓が横に伸びないよう、1行で止める。 */
 .confirm-work-list {
   max-height: 40vh;
-  padding: 8px 10px;
+  padding: 8px 0 8px 10px;
   border-radius: 8px;
   background: light-dark(#f4f6fa, #191d24);
   overflow-y: auto;

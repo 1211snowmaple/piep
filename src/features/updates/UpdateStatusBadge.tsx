@@ -10,6 +10,6 @@ export function UpdateStatusBadge({ label, color, detail, title }: {
   if (!detail) return badge;
   return <Popover width={360} position="bottom-end" withArrow shadow="md" trapFocus returnFocus>
     <Popover.Target><UnstyledButton aria-label={`${title}の状態の詳細`} style={{ flex: "none" }}>{badge}</UnstyledButton></Popover.Target>
-    <Popover.Dropdown maw="calc(100vw - 32px)" style={{ maxHeight: "min(50vh, 320px)", overflowY: "auto" }}><Text size="sm" style={{ overflowWrap: "anywhere" }}>{errorMessage(detail)}</Text></Popover.Dropdown>
+    <Popover.Dropdown className="piep-scroll-y" maw="calc(100vw - 32px)" style={{ maxHeight: "min(50vh, 320px)" }}><Text size="sm" style={{ overflowWrap: "anywhere" }}>{errorMessage(detail)}</Text></Popover.Dropdown>
   </Popover>;
 }

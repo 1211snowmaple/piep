@@ -407,6 +407,32 @@ test("update toolbar stays on one row at every window size", async ({ page }) =>
   expect(overflow).toBeLessThanOrEqual(0);
 });
 
+test("every scroller keeps its width when a scrollbar appears", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "1200x800-light-100dpi", "Layout rule, checked once");
+  for (const route of ["/#/updates", "/#/library", "/#/settings", "/#/operations", "/#/"]) {
+    await page.goto(route);
+    await expect(page.locator(".page").first()).toBeVisible();
+    const report = await page.evaluate(async () => {
+      const main = document.querySelector<HTMLElement>(".app-main")!;
+      const content = main.querySelector<HTMLElement>(".page")!;
+      const before = content.getBoundingClientRect().width;
+      const spacer = document.createElement("div");
+      spacer.style.height = "4000px";
+      main.append(spacer);
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+      const after = content.getBoundingClientRect().width;
+      spacer.remove();
+      const unstable = [...document.querySelectorAll<HTMLElement>("*")].filter((element) => {
+        const style = getComputedStyle(element);
+        return /auto|scroll/.test(style.overflowY) && style.scrollbarWidth !== "none" && !style.scrollbarGutter.includes("stable");
+      }).map((element) => element.className || element.tagName);
+      return { before, after, unstable };
+    });
+    expect(report.after, route).toBe(report.before);
+    expect(report.unstable, route).toEqual([]);
+  }
+});
+
 test("update candidate source links open the in-app browser", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== "900x600-light-100dpi", "The source navigation flow runs once");
   await page.goto("/#/updates");
