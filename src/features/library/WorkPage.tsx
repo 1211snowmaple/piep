@@ -264,7 +264,7 @@ export default function WorkPage() {
     const marks = workMarksRef.current;
     if (!hero || !marks || !documentQuery.data) return;
     const align = () => {
-      const offset = Math.max(28, marks.getBoundingClientRect().top - hero.getBoundingClientRect().top);
+      const offset = Math.max(16, marks.getBoundingClientRect().top - hero.getBoundingClientRect().top);
       const value = `${Math.round(offset)}px`;
       if (hero.style.getPropertyValue("--work-cover-mark-offset") !== value) {
         hero.style.setProperty("--work-cover-mark-offset", value);
@@ -526,26 +526,26 @@ export default function WorkPage() {
           </Grid.Col>
           <Grid.Col span={{ base: 12, sm: 8, lg: 9 }}>
             <Stack p={{ base: "lg", lg: "xl" }} h="100%" gap={0}>
-              <Stack gap="md">
-                {/* 作者・シリーズと同じ並び、同じ順番。3つの詳細画面で
-                    「元ページを開く・書き出す・取り直す」の位置が変わらない。
-                    印（保存元・種類）は題のほうへ寄せた - 操作の列と場所を
-                    取り合うと、名前を畳まないと1行に収まらなくなる。 */}
-                <Group justify="flex-end" align="flex-start" wrap="nowrap" className="work-hero__toprow">
-                  <Box className="work-hero__utility">
-                    <ActionBar
-                      label="作品の外へ"
-                      items={[
-                        { key: "in-app", label: "アプリ内で開く", icon: Icons.inAppBrowser, onClick: openSourceInApp },
-                        { key: "browser", label: "ブラウザで開く", icon: Icons.externalLink, onClick: openSource },
-                        { key: "folder", label: "保存フォルダー", icon: Icons.openFolder, onClick: openSavedFolder },
-                        { key: "refresh", label: "更新を確認", icon: Icons.watch, onClick: () => runSingleCheck({ kind: "work", workId: work.id, label: work.title }, () => navigate("/updates")) },
-                      ]}
-                    />
-                  </Box>
-                </Group>
+              <Stack gap="md" mb="md">
                 <Box>
-                  <Group ref={workMarksRef} gap="xs" wrap="wrap" mb={8}><ProviderMark provider={work.source} /><Badge variant="light" color="gray">{contentTypeLabel(work.contentType)}</Badge>{doc.isEdited && <Badge color="gray" variant="light">ローカル編集</Badge>}{doc.draftEditRevision && <Tooltip label="編集画面で「反映」を押すまで、読書画面とEPUBには使われません"><Badge color="yellow" variant="light">未反映の下書き</Badge></Tooltip>}</Group>
+                  {/* 印（保存元・種類）と作品の外への操作は同じ段に置く。操作だけの
+                      段を別に立てると、左が丸ごと空いて、題が下へ押される。補助の
+                      操作はアイコンだけなので、印と場所を取り合わない。右上の位置は
+                      作者・シリーズの画面と同じ。 */}
+                  <div className="work-hero__toprow">
+                    <Group ref={workMarksRef} gap="xs" wrap="wrap" className="work-hero__marks"><ProviderMark provider={work.source} /><Badge variant="light" color="gray">{contentTypeLabel(work.contentType)}</Badge>{doc.isEdited && <Badge color="gray" variant="light">ローカル編集</Badge>}{doc.draftEditRevision && <Tooltip label="編集画面で「反映」を押すまで、読書画面とEPUBには使われません"><Badge color="yellow" variant="light">未反映の下書き</Badge></Tooltip>}</Group>
+                    <Box className="work-hero__utility">
+                      <ActionBar
+                        label="作品の外へ"
+                        items={[
+                          { key: "in-app", label: "アプリ内で開く", icon: Icons.inAppBrowser, onClick: openSourceInApp },
+                          { key: "browser", label: "ブラウザで開く", icon: Icons.externalLink, onClick: openSource },
+                          { key: "folder", label: "保存フォルダー", icon: Icons.openFolder, onClick: openSavedFolder },
+                          { key: "refresh", label: "更新を確認", icon: Icons.watch, onClick: () => runSingleCheck({ kind: "work", workId: work.id, label: work.title }, () => navigate("/updates")) },
+                        ]}
+                      />
+                    </Box>
+                  </div>
                   {/* The series line is itself the link, so it is not repeated
                       as a separate button beside the author below. */}
                   {work.seriesTitle && (work.seriesId
