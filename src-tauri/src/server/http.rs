@@ -6,14 +6,14 @@
 use super::dto::{
     mobile_page, MobileCollection, MobileCollectionDetail, MobileEntity, MobileEntityDetail,
     MobileEntityPage, MobileEntitySeriesPage, MobileFacet, MobileMetadata, MobilePage,
-    MobilePerson, MobileSearchPage, MobileSearchRequest, MobileSeriesMembership,
+    MobilePerson, MobileRevision, MobileSearchPage, MobileSearchRequest, MobileSeriesMembership,
 };
 use super::library::Library;
 use super::store::{AuthorizedDevice, PairError, ReadingUpdate, Role, ServerStore};
 use super::sync_receive::{BindEntry, CommitRequest, ManifestEntry, SyncError, SyncReceiver};
 use super::update::{UpdateController, UpdateStatus};
 use super::{pairing_payload, API_VERSION};
-use crate::database::Database;
+use crate::database::{AssetEntry, Database};
 use axum::body::{Body, Bytes};
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{
@@ -30,6 +30,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
+use tower_http::compression::CompressionLayer;
+use tower_http::CompressionLevel;
 
 const MAX_ASSET_BYTES: u64 = 25 * 1024 * 1024;
 const MAX_TRANSCODE_SOURCE_BYTES: u64 = 64 * 1024 * 1024;
@@ -63,6 +65,14 @@ const ENTITY_SORTS: &[&str] = &[
 ];
 /// 縮小した表紙を覚えておく上限。一覧の数百枚ぶんが収まる。
 const COVER_CACHE_BYTES: usize = 64 * 1024 * 1024;
+/// 端末が指定できる挿絵の幅。細かい幅ごとに変換すると結果を使い回せないので段に丸める。
+const ILLUSTRATION_WIDTHS: [u32; 4] = [720, 1080, 1600, 2160];
+/// これより小さく、幅も収まっている挿絵は変換せずそのまま渡す。
+const ILLUSTRATION_PASS_BYTES: u64 = 512 * 1024;
+/// 同時に変換する枚数。本文の要求に計算機を残す。
+const ILLUSTRATION_WORKERS: usize = 3;
+/// 覚えておく挿絵の縦横の数。本文のページを返すたびにファイルを開かないため。
+const DIMENSION_CACHE_ENTRIES: usize = 8192;
 
 pub struct ServerContext {
     pub library: Library,
@@ -78,7 +88,13 @@ pub struct ServerContext {
     update: OnceLock<Arc<UpdateController>>,
     pair_attempts: Mutex<VecDeque<Instant>>,
     covers: Mutex<CoverCache>,
+    illustrations: Mutex<CoverCache>,
+    illustration_workers: tokio::sync::Semaphore,
+    dimensions: Mutex<HashMap<IllustrationKey, (u32, u32)>>,
 }
+
+/// 挿絵の寸法を覚える鍵。ファイルが置き換わったら別のものとして測り直す。
+type IllustrationKey = (PathBuf, std::time::SystemTime, u64);
 
 /// 表紙の用途ごとの大きさ。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -86,6 +102,8 @@ enum CoverSize {
     Card,
     Large,
     Banner,
+    /// 本文の挿絵。幅だけを揃え、縦長の絵は縦長のまま残す。
+    Illustration(u32),
 }
 
 impl CoverSize {
@@ -94,6 +112,12 @@ impl CoverSize {
             Self::Card => (320, 480),
             Self::Large => (640, 960),
             Self::Banner => (1280, 480),
+            // 縦長の絵も、端末がそのまま受け取れる一辺と画素数に収める。
+            Self::Illustration(width) => {
+                let height = (MAX_RAW_ASSET_PIXELS / u64::from(width.max(1)))
+                    .min(u64::from(MAX_RAW_ASSET_EDGE));
+                (width, u32::try_from(height).unwrap_or(MAX_RAW_ASSET_EDGE))
+            }
         }
     }
 }
@@ -156,6 +180,9 @@ impl ServerContext {
             update: OnceLock::new(),
             pair_attempts: Mutex::new(VecDeque::new()),
             covers: Mutex::new(CoverCache::default()),
+            illustrations: Mutex::new(CoverCache::default()),
+            illustration_workers: tokio::sync::Semaphore::new(ILLUSTRATION_WORKERS),
+            dimensions: Mutex::new(HashMap::new()),
         })
     }
 
@@ -374,6 +401,9 @@ pub fn combined_router(ctx: Ctx) -> Router {
 fn finish(router: Router) -> Router {
     router
         .fallback(|| async { ApiError::not_found() })
+        // 本文と一覧の JSON は大きく縮む。既定の判定は画像を素通りさせる。
+        // 頼まれたときだけ圧縮するので、古い端末の受け取り方は変わらない。
+        .layer(CompressionLayer::new().quality(CompressionLevel::Fastest))
         .layer(middleware::from_fn(observe))
 }
 
@@ -935,19 +965,59 @@ async fn page(
     if id <= 0 || page > 1_000_000 {
         return Err(ApiError::not_found());
     }
+    let sizes = ctx.clone();
     let result = with_db(&ctx, move |db| {
-        let render = || -> Result<MobilePage, String> {
+        let revision = || -> Result<MobileRevision, String> {
+            Ok(MobileRevision::from(&MobileMetadata::from(
+                db.get_reader_metadata(id)?,
+            )))
+        };
+        // 本文を組むあいだに版が変わると、古い本文に新しい版の印を付けてしまう。
+        // 前後で同じだったときだけ、その版の本文として返す。
+        let attempt = || -> Result<Option<MobilePage>, String> {
+            let before = revision()?;
             let assets = db.get_assets(id)?;
             let content = db.get_reader_content_page(id, query.version, page, false)?;
-            mobile_page(content, &assets)
+            let rendered = mobile_page(content, &assets, before.clone(), |asset| {
+                illustration_size(&sizes, asset)
+            })?;
+            Ok((revision()? == before).then_some(rendered))
         };
-        render().map_err(|error| {
-            log::warn!("本文を渡せません: {error}");
-            ApiError::internal()
-        })
+        for _ in 0..2 {
+            match attempt() {
+                Ok(Some(rendered)) => return Ok(rendered),
+                Ok(None) => {}
+                Err(error) => {
+                    log::warn!("本文を渡せません: {error}");
+                    return Err(ApiError::internal());
+                }
+            }
+        }
+        // 書き込みが続いている。少し置いて読み直してもらう。
+        Err(ApiError::not_ready())
     })
     .await?;
     Ok(Json(result))
+}
+
+/// 挿絵の縦横。ファイルの頭だけを読み、ファイルが変わるまで覚えておく。
+fn illustration_size(ctx: &ServerContext, asset: &AssetEntry) -> Option<(u32, u32)> {
+    if !asset.mime_type.as_deref()?.starts_with("image/") {
+        return None;
+    }
+    let path = PathBuf::from(&asset.local_path);
+    let metadata = fs::metadata(&path).ok()?;
+    let key = (path, metadata.modified().ok()?, metadata.len());
+    if let Some(found) = ctx.dimensions.lock().ok()?.get(&key) {
+        return Some(*found);
+    }
+    let size = image::image_dimensions(&key.0).ok()?;
+    let mut known = ctx.dimensions.lock().ok()?;
+    if known.len() >= DIMENSION_CACHE_ENTRIES {
+        known.clear();
+    }
+    known.insert(key, size);
+    Some(size)
 }
 
 async fn outline(
@@ -968,17 +1038,25 @@ async fn outline(
     Ok(Json(result))
 }
 
+#[derive(Debug, Deserialize)]
+struct AssetQuery {
+    #[serde(default)]
+    width: Option<u32>,
+}
+
 async fn asset(
     State(ctx): State<Ctx>,
     headers: HeaderMap,
     UrlPath((id, asset_id)): UrlPath<(i64, i64)>,
+    Query(query): Query<AssetQuery>,
 ) -> Result<Response, ApiError> {
     require_device(&ctx, &headers)?;
     if id <= 0 || asset_id <= 0 {
         return Err(ApiError::not_found());
     }
     let root = ctx.root.clone();
-    let (bytes, mime) = with_db(&ctx, move |db| {
+    let wanted = query.width.and_then(illustration_width);
+    let (path, mime) = with_db(&ctx, move |db| {
         let asset = db
             .get_assets(id)
             .map_err(|_| ApiError::not_found())?
@@ -993,13 +1071,127 @@ async fn asset(
             return Err(ApiError::not_found());
         }
         let path = inside_roots(&asset.local_path, &[root.join("downloads")])?;
-        let size = fs::metadata(&path)
-            .map_err(|_| ApiError::not_found())?
-            .len();
-        asset_bytes(&path, mime, size)
+        Ok((path, mime.to_string()))
     })
     .await?;
+    let (bytes, mime) = match wanted {
+        Some(width) => illustration_bytes_for(&ctx, path, mime, width).await?,
+        // 接続を握ったまま大きなファイルを読まない。
+        None => tokio::task::spawn_blocking(move || {
+            let size = fs::metadata(&path)
+                .map_err(|_| ApiError::not_found())?
+                .len();
+            asset_bytes(&path, &mime, size).map(|(bytes, mime)| (Bytes::from(bytes), mime))
+        })
+        .await
+        .map_err(|_| ApiError::internal())??,
+    };
     image_response(bytes, &mime)
+}
+
+/// 頼まれた幅を、収まる段へ切り上げる。大きすぎる指定は最大の段に収める。
+fn illustration_width(width: u32) -> Option<u32> {
+    (width > 0).then(|| {
+        ILLUSTRATION_WIDTHS
+            .iter()
+            .copied()
+            .find(|step| *step >= width)
+            .unwrap_or(ILLUSTRATION_WIDTHS[ILLUSTRATION_WIDTHS.len() - 1])
+    })
+}
+
+/// 動く画像は縮めると止まってしまう。読めないものも触らない。
+fn is_animated(path: &Path, mime: &str) -> bool {
+    use std::io::Read;
+    let marker: &[u8] = match mime {
+        "image/png" => b"acTL",
+        "image/webp" => b"ANIM",
+        "image/jpeg" => return false,
+        _ => return true,
+    };
+    let mut head = Vec::with_capacity(64 * 1024);
+    let read = fs::File::open(path).and_then(|file| file.take(64 * 1024).read_to_end(&mut head));
+    read.is_err() || head.windows(marker.len()).any(|window| window == marker)
+}
+
+/// 挿絵を端末の幅に合わせて返す。縮められないときは、今までどおり原本を渡す。
+///
+/// 原本は 1 枚で数 MB あり、画面の幅に要るのはその一部である。縮めた結果は覚えておく。
+async fn illustration_bytes_for(
+    ctx: &Ctx,
+    path: PathBuf,
+    mime: String,
+    width: u32,
+) -> Result<(Bytes, String), ApiError> {
+    let _slot = ctx
+        .illustration_workers
+        .acquire()
+        .await
+        .map_err(|_| ApiError::internal())?;
+    let ctx = ctx.clone();
+    tokio::task::spawn_blocking(move || {
+        let metadata = fs::metadata(&path).map_err(|_| ApiError::not_found())?;
+        let modified = metadata.modified().map_err(|_| ApiError::not_found())?;
+        let size = metadata.len();
+        let original =
+            || asset_bytes(&path, &mime, size).map(|(bytes, mime)| (Bytes::from(bytes), mime));
+        let fits = || {
+            size <= ILLUSTRATION_PASS_BYTES
+                && image::image_dimensions(&path).is_ok_and(|(actual, _)| actual <= width)
+        };
+        if is_animated(&path, &mime) || fits() {
+            return original();
+        }
+        let key = (path.clone(), modified, size, CoverSize::Illustration(width));
+        if let Some(found) = ctx
+            .illustrations
+            .lock()
+            .ok()
+            .and_then(|mut made| made.get(&key))
+        {
+            return Ok(found);
+        }
+        match illustration_bytes(&path, size, width) {
+            // 縮めたほうが大きくなる絵もある。そのときは原本のままがよい。
+            Ok((bytes, made_mime)) if (bytes.len() as u64) < size => {
+                let made = (Bytes::from(bytes), made_mime);
+                if let Ok(mut cache) = ctx.illustrations.lock() {
+                    cache.put(key, made.clone());
+                }
+                Ok(made)
+            }
+            _ => original(),
+        }
+    })
+    .await
+    .map_err(|_| ApiError::internal())?
+}
+
+fn illustration_bytes(path: &Path, size: u64, width: u32) -> Result<(Vec<u8>, String), ApiError> {
+    if size > MAX_TRANSCODE_SOURCE_BYTES {
+        return Err(ApiError::asset_too_large());
+    }
+    let (actual_width, actual_height) =
+        image::image_dimensions(path).map_err(|_| ApiError::not_found())?;
+    if u64::from(actual_width) * u64::from(actual_height) > MAX_TRANSCODE_PIXELS {
+        return Err(ApiError::asset_too_large());
+    }
+    let (max_width, max_height) = CoverSize::Illustration(width).bounds();
+    let options = crate::epub::intermediate::ImageCompressOptions {
+        enabled: true,
+        max_width: Some(max_width),
+        max_height: Some(max_height),
+        output_format: Some("webp".into()),
+        webp_quality: 82,
+        webp_method: 0,
+        ..Default::default()
+    };
+    let (bytes, mime) = crate::epub::image_processor::process_image(path, &options)
+        .map_err(|_| ApiError::internal())?;
+    if bytes.len() as u64 > MAX_ASSET_BYTES {
+        return Err(ApiError::asset_too_large());
+    }
+    Ok((bytes, mime))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1587,5 +1779,66 @@ mod asset_tests {
 
     fn random_name() -> String {
         super::super::store::random_token(6)
+    }
+}
+
+#[cfg(test)]
+mod illustration_tests {
+    use super::*;
+
+    #[test]
+    fn widths_round_up_to_a_shared_step() {
+        assert_eq!(illustration_width(0), None);
+        assert_eq!(illustration_width(1), Some(720));
+        assert_eq!(illustration_width(1080), Some(1080));
+        assert_eq!(illustration_width(1081), Some(1600));
+        assert_eq!(illustration_width(100_000), Some(2160));
+    }
+
+    #[test]
+    fn a_large_picture_shrinks_to_the_width_and_keeps_its_shape() {
+        let dir = crate::server::tests::TestRoot::created("illustration");
+        let path = dir.0.join("large.png");
+        image::RgbImage::from_pixel(2400, 1200, image::Rgb([200, 100, 50]))
+            .save(&path)
+            .expect("save");
+        let size = fs::metadata(&path).expect("metadata").len();
+        let (bytes, mime) = illustration_bytes(&path, size, 1080).expect("shrunk");
+        assert_eq!(mime, "image/webp");
+        let made = image::load_from_memory(&bytes).expect("decode");
+        assert_eq!((made.width(), made.height()), (1080, 540));
+    }
+
+    #[test]
+    fn moving_pictures_are_left_alone() {
+        let dir = crate::server::tests::TestRoot::created("illustration");
+        let still = dir.0.join("still.png");
+        let moving = dir.0.join("moving.png");
+        fs::write(&still, b"\x89PNG\r\n\x1a\nIHDR....IDAT").expect("write");
+        fs::write(&moving, b"\x89PNG\r\n\x1a\nIHDR....acTL....IDAT").expect("write");
+        assert!(!is_animated(&still, "image/png"));
+        assert!(is_animated(&moving, "image/png"));
+        assert!(!is_animated(&still, "image/jpeg"));
+        assert!(is_animated(&still, "image/gif"));
+    }
+
+    #[test]
+    fn a_tall_strip_shrinks_within_what_the_phone_accepts() {
+        let dir = crate::server::tests::TestRoot::created("illustration");
+        let path = dir.0.join("tall.png");
+        image::GrayImage::new(2400, 12_000)
+            .save(&path)
+            .expect("save");
+        let size = fs::metadata(&path).expect("metadata").len();
+        for width in ILLUSTRATION_WIDTHS {
+            let (bytes, _) = illustration_bytes(&path, size, width).expect("shrunk");
+            let made = image::load_from_memory(&bytes).expect("decode");
+            assert!(made.width() <= width, "{width}");
+            assert!(made.height() <= MAX_RAW_ASSET_EDGE, "{width}");
+            assert!(
+                u64::from(made.width()) * u64::from(made.height()) <= MAX_RAW_ASSET_PIXELS,
+                "{width}"
+            );
+        }
     }
 }
