@@ -3,7 +3,7 @@ import { ActionIcon, Button, Group, Menu, Skeleton, Stack, Switch, Text, TextInp
 import { modals } from "@mantine/modals";
 import { notifications } from "@mantine/notifications";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Icons } from "@/lib/icons";
+import { Icons, IconSize } from "@/lib/icons";
 import { DANGER_CONFIRM } from "@/components/DangerButton";
 import { adminApi, type UpdateHistoryEntry } from "../api";
 import { dayTime, isNewer, relativeTime, windowLabel } from "../format";
@@ -136,7 +136,7 @@ export function UpdatesPage() {
                 {fresh && <Button size="xs" onClick={() => void apply()} disabled={update.phase.state === "applying"}>今すぐ更新</Button>}
                 <Button size="xs" variant="default" loading={checking} onClick={() => void check()}>更新を確認</Button>
                 <Menu position="bottom-end" width={220}>
-                  <Menu.Target><ActionIcon size={30} variant="default" aria-label="その他"><Icons.more size={16} /></ActionIcon></Menu.Target>
+                  <Menu.Target><ActionIcon size={30} variant="default" aria-label="その他"><Icons.more size={IconSize.menu} /></ActionIcon></Menu.Target>
                   <Menu.Dropdown>
                     <Menu.Item color="red" disabled={!update.previous} onClick={rollback}>前のバージョンへ戻す</Menu.Item>
                   </Menu.Dropdown>

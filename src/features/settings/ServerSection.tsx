@@ -5,7 +5,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { QRCodeSVG } from "qrcode.react";
 import { DANGER_CONFIRM, DangerButton } from "@/components/DangerButton";
 import { errorMessage, formatNumber } from "@/lib/format";
-import { Icons, type LucideIcon } from "@/lib/icons";
+import { Icons, IconSize, type LucideIcon } from "@/lib/icons";
 import { isNewer, relativeTime, windowLabel } from "@/lib/serverFormat";
 import { APP_VERSION } from "@/lib/version";
 import { openExternalUrl } from "@/services/openerApi";
@@ -143,7 +143,7 @@ function CopyValue({ value, label, children }: { value: string; label: string; c
           aria-label={label}
           onClick={() => void navigator.clipboard.writeText(value).then(() => setCopied(true)).catch(() => undefined)}
         >
-          <Icons.copy size={14} />
+          <Icons.copy size={IconSize.menu} />
         </ActionIcon>
       </Tooltip>
     </Group>
@@ -373,7 +373,7 @@ function ConnectedRemote(props: CardProps) {
       <div className="sv-tiles">
         {send.running ? (
           <div className="sv-card sv-tile">
-            <span className="sv-icon"><Icons.send size={18} strokeWidth={1.9} aria-hidden /></span>
+            <span className="sv-icon"><Icons.send size={IconSize.nav} strokeWidth={1.9} aria-hidden /></span>
             <span className="sv-tile-body">
               <span className="sv-title">{sendTitle}</span>
               <span className="sv-tile-progress">
@@ -408,9 +408,9 @@ function ConnectedRemote(props: CardProps) {
           onChange={(event) => { const enabled = event.currentTarget.checked; void perform(() => serverSetAutoSend(enabled)); }}
         />
         <Group gap={8} wrap="nowrap" style={{ flex: "none" }}>
-          <Button size="xs" variant="default" disabled={pending || offline || !data?.adminWeb} loading={active === "admin"} rightSection={<Icons.externalLink size={14} />} onClick={openAdmin}>管理画面を開く</Button>
+          <Button size="xs" variant="default" disabled={pending || offline || !data?.adminWeb} loading={active === "admin"} rightSection={<Icons.externalLink size={IconSize.menu} />} onClick={openAdmin}>管理画面を開く</Button>
           <Menu position="bottom-end" width={240}>
-            <Menu.Target><ActionIcon size={30} variant="default" aria-label="その他"><Icons.more size={16} /></ActionIcon></Menu.Target>
+            <Menu.Target><ActionIcon size={30} variant="default" aria-label="その他"><Icons.more size={IconSize.menu} /></ActionIcon></Menu.Target>
             <Menu.Dropdown>
               <Menu.Item color="red" disabled={pending} onClick={confirmDisconnect}>この PC との接続を解除</Menu.Item>
             </Menu.Dropdown>
@@ -572,7 +572,7 @@ function EmbeddedRunning({ status, pending, perform }: CardProps) {
             <Text size="sm" c="dimmed" mt={6}>この PC が起動している間だけ、携帯から読めます。</Text>
           </div>
           <Menu position="bottom-end" width={200}>
-            <Menu.Target><ActionIcon size={30} variant="default" aria-label="その他" style={{ flex: "none" }}><Icons.more size={16} /></ActionIcon></Menu.Target>
+            <Menu.Target><ActionIcon size={30} variant="default" aria-label="その他" style={{ flex: "none" }}><Icons.more size={IconSize.menu} /></ActionIcon></Menu.Target>
             <Menu.Dropdown>
               <Menu.Item color="red" disabled={pending} onClick={() => void perform(serverEmbeddedStop, "stop")}>サーバーを停止</Menu.Item>
             </Menu.Dropdown>
@@ -587,7 +587,7 @@ function EmbeddedRunning({ status, pending, perform }: CardProps) {
       <section className="sv-card sv-status" aria-label="登録している端末">
         <div className="sv-top" style={{ alignItems: "center" }}>
           <Text fw={650}>登録している携帯</Text>
-          <Button size="xs" variant="default" leftSection={<Icons.add size={14} />} style={{ flex: "none" }} onClick={() => setAdding(true)}>携帯を追加</Button>
+          <Button size="xs" variant="default" leftSection={<Icons.add size={IconSize.menu} />} style={{ flex: "none" }} onClick={() => setAdding(true)}>携帯を追加</Button>
         </div>
         {phones.length === 0 && <Text size="sm" c="dimmed" mt="sm">まだありません。</Text>}
         {phones.map((device) => (
@@ -597,7 +597,7 @@ function EmbeddedRunning({ status, pending, perform }: CardProps) {
               <Text size="xs" c="dimmed">最後の接続 {relativeTime(device.lastSeenAt)}・登録 {relativeTime(device.createdAt)}</Text>
             </div>
             <Menu position="bottom-end" width={200}>
-              <Menu.Target><ActionIcon size={28} variant="subtle" color="gray" aria-label={`${device.name || "Android 端末"}の操作`} style={{ flex: "none" }}><Icons.more size={16} /></ActionIcon></Menu.Target>
+              <Menu.Target><ActionIcon size={28} variant="subtle" color="gray" aria-label={`${device.name || "Android 端末"}の操作`} style={{ flex: "none" }}><Icons.more size={IconSize.menu} /></ActionIcon></Menu.Target>
               <Menu.Dropdown>
                 <Menu.Item
                   color="red"

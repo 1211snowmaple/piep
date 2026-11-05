@@ -88,7 +88,7 @@ function Workspace({ onLoggedOut }: { onLoggedOut: () => void }) {
           ))}
         </div>
         <div className="adm-foot">
-          <Button size="compact-sm" variant="subtle" color="gray" leftSection={<Icons.logout size={14} />} onClick={() => void logout()}>ログアウト</Button>
+          <Button size="compact-sm" variant="subtle" color="gray" leftSection={<Icons.logout size={IconSize.menu} />} onClick={() => void logout()}>ログアウト</Button>
           <ThemeButton />
         </div>
       </nav>

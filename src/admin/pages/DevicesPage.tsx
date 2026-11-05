@@ -3,7 +3,7 @@ import { ActionIcon, Alert, Button, Group, Menu, Modal, Skeleton, Stack, Text } 
 import { modals } from "@mantine/modals";
 import { notifications } from "@mantine/notifications";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Icons } from "@/lib/icons";
+import { Icons, IconSize } from "@/lib/icons";
 import { QRCodeSVG } from "qrcode.react";
 import { DANGER_CONFIRM } from "@/components/DangerButton";
 import { adminApi, failureMessage, type AdminSession, type Device, type Pairing } from "../api";
@@ -29,7 +29,7 @@ function PairingDialog({ title, note, pairing, qr, onClose }: { title: string; n
             <Button
               size="xs"
               variant="default"
-              leftSection={<Icons.copy size={14} />}
+              leftSection={<Icons.copy size={IconSize.menu} />}
               onClick={() => {
                 void navigator.clipboard.writeText(pairing.payload).then(
                   () => notifications.show({ message: "コピーしました" }),
@@ -56,7 +56,7 @@ function DeviceRow({ device, onReplace, onRevoke }: { device: Device; onReplace:
       <div className="adm-row-side">
         <span>{device.lastSeenAt ? `最後の接続 ${relativeTime(device.lastSeenAt)}` : "まだ接続していません"}</span>
         <Menu position="bottom-end" width={220}>
-          <Menu.Target><ActionIcon size={28} variant="subtle" color="gray" aria-label={`${device.name}の操作`}><Icons.more size={16} /></ActionIcon></Menu.Target>
+          <Menu.Target><ActionIcon size={28} variant="subtle" color="gray" aria-label={`${device.name}の操作`}><Icons.more size={IconSize.menu} /></ActionIcon></Menu.Target>
           <Menu.Dropdown>
             {admin
               ? <Menu.Item onClick={onReplace}>別の PC へ入れ替える</Menu.Item>
@@ -131,7 +131,7 @@ export function DevicesPage() {
   return (
     <div className="adm-section">
       <PageHead title="端末">
-        <Button size="xs" variant="default" leftSection={<Icons.add size={14} />} loading={adding} onClick={() => void addReader()}>携帯を追加</Button>
+        <Button size="xs" variant="default" leftSection={<Icons.add size={IconSize.menu} />} loading={adding} onClick={() => void addReader()}>携帯を追加</Button>
       </PageHead>
       {problem && <Alert color="red" variant="light" withCloseButton onClose={() => setProblem(null)}>{problem}</Alert>}
       <Card title="登録している端末">
