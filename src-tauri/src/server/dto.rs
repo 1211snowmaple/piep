@@ -558,6 +558,27 @@ pub struct MobilePage {
     pub html: String,
     pub total_plain_text_chars: usize,
     pub source_page_starts: Vec<usize>,
+    /// この本文がどの版のものか。端末が本文の前後でメタデータを取り直さずに済む。
+    pub revision: MobileRevision,
+}
+
+/// 本文の版を見分ける三つ組み。`MobileMetadata` の同じ値と一致する。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MobileRevision {
+    pub current_version: i64,
+    pub content_hash: Option<String>,
+    pub active_edit_hash: Option<String>,
+}
+
+impl From<&MobileMetadata> for MobileRevision {
+    fn from(metadata: &MobileMetadata) -> Self {
+        Self {
+            current_version: metadata.work.current_version,
+            content_hash: metadata.work.content_hash.clone(),
+            active_edit_hash: metadata.active_edit_hash.clone(),
+        }
+    }
 }
 
 static LOCAL_PATH_ATTRIBUTE: LazyLock<Regex> = LazyLock::new(|| {
@@ -571,17 +592,31 @@ static ATTACHMENT_ORIGINAL_BUTTON: LazyLock<Regex> = LazyLock::new(|| {
 
 /// PC 版が付けたファイルパスを、当該作品の画像 ID に置き換える。
 /// 未知の参照はそのまま返さない。添付の「原本を見る」は携帯では開けないので外す。
-pub fn mobile_page(page: ReaderContentPage, assets: &[AssetEntry]) -> Result<MobilePage, String> {
-    let asset_ids: HashMap<String, i64> = assets
+/// 端末へ渡す本文を作る。`dimensions` は挿絵の縦横を返す。
+///
+/// 縦横が分かれば、画像が届く前から枠の高さが決まる。本文を先に出しても位置がずれない。
+pub fn mobile_page(
+    page: ReaderContentPage,
+    assets: &[AssetEntry],
+    revision: MobileRevision,
+    dimensions: impl Fn(&AssetEntry) -> Option<(u32, u32)>,
+) -> Result<MobilePage, String> {
+    let asset_ids: HashMap<String, &AssetEntry> = assets
         .iter()
-        .map(|asset| (escape_html_attribute(&asset.local_path), asset.id))
+        .map(|asset| (escape_html_attribute(&asset.local_path), asset))
         .collect();
     let mut missing = false;
     let readable = ATTACHMENT_ORIGINAL_BUTTON.replace_all(&page.html, "");
     let html = LOCAL_PATH_ATTRIBUTE
         .replace_all(&readable, |captures: &regex::Captures<'_>| {
-            if let Some(id) = asset_ids.get(&captures[1]) {
-                format!(r#"data-asset-id="{id}""#)
+            if let Some(asset) = asset_ids.get(&captures[1]) {
+                match dimensions(asset) {
+                    Some((width, height)) => format!(
+                        r#"data-asset-id="{}" width="{width}" height="{height}""#,
+                        asset.id
+                    ),
+                    None => format!(r#"data-asset-id="{}""#, asset.id),
+                }
             } else {
                 missing = true;
                 String::new()
@@ -597,6 +632,7 @@ pub fn mobile_page(page: ReaderContentPage, assets: &[AssetEntry]) -> Result<Mob
         html,
         total_plain_text_chars: page.total_plain_text_chars,
         source_page_starts: page.source_page_starts,
+        revision,
     })
 }
 
@@ -636,11 +672,26 @@ mod tests {
             total_plain_text_chars: 2,
             source_page_starts: vec![0],
         };
-        let safe = mobile_page(page.clone(), &assets).expect("known asset");
+        let revision = MobileRevision {
+            current_version: 3,
+            content_hash: Some("abc".into()),
+            active_edit_hash: None,
+        };
+        let safe =
+            mobile_page(page.clone(), &assets, revision.clone(), |_| None).expect("known asset");
         assert!(safe.html.contains("data-asset-id=\"42\""));
+        assert!(!safe.html.contains("width="));
         assert!(!safe.html.contains("C:\\Users"));
         assert!(!safe.html.contains("data-local-path"));
-        assert!(mobile_page(page, &[]).is_err());
+        assert_eq!(safe.revision, revision);
+        let sized = mobile_page(page.clone(), &assets, revision.clone(), |_| {
+            Some((1200, 1697))
+        })
+        .expect("known asset");
+        assert!(sized
+            .html
+            .contains(r#"data-asset-id="42" width="1200" height="1697""#));
+        assert!(mobile_page(page, &[], revision, |_| None).is_err());
     }
 
     #[test]
@@ -653,7 +704,12 @@ mod tests {
             total_plain_text_chars: 2,
             source_page_starts: vec![0],
         };
-        let safe = mobile_page(page, &[]).expect("button removed");
+        let revision = MobileRevision {
+            current_version: 1,
+            content_hash: None,
+            active_edit_hash: None,
+        };
+        let safe = mobile_page(page, &[], revision, |_| None).expect("button removed");
         assert_eq!(
             safe.html,
             r#"<div class="attachment-notice">添付ファイル「a.pdf」から取り込んだ本文</div><p>本文</p>"#
