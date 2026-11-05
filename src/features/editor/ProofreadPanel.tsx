@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Alert, Badge, Button, Drawer, Group, Loader, Paper, Progress, Stack, Text } from "@mantine/core";
 import { BetaBadge } from "@/components/BetaBadge";
+import { DangerButton } from "@/components/DangerButton";
 import { ActionRow } from "@/components/ActionRow";
 import { Icons, IconSize } from "@/lib/icons";
 import { errorMessage } from "@/lib/format";
@@ -215,7 +216,7 @@ export function ProofreadPanel({
           <Stack gap={4}>
             <Group justify="space-between">
               <Group gap={6}>{running && <Loader size={12} />}<Text size="xs" c="dimmed">{running ? `読んでいます（${progress.done}/${progress.total}）` : finished ? `読み終えました（${progress.total}回）` : `途中で止めました（${progress.done}/${progress.total}）`}</Text></Group>
-              {running && <Button size="compact-xs" variant="subtle" color="gray" onClick={onCancel}>止める</Button>}
+              {running && <DangerButton size="compact-xs" onClick={onCancel}>止める</DangerButton>}
             </Group>
             <Progress size="xs" value={progress.total ? (progress.done / progress.total) * 100 : 0} animated={running} />
           </Stack>

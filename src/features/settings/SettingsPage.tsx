@@ -599,7 +599,7 @@ function SearchSection({ status, rebuild, runtime, rebuilding, start, cancel }: 
         description="作り直しを実行すると反映されます。オフで実行すると、確認後に意味検索のデータを削除します。"
       />
       <ActionRow mt="lg">
-        {rebuilding && <Button variant="default" leftSection={<Icons.cancel size={IconSize.menu} />} onClick={cancel}>中止</Button>}
+        {rebuilding && <DangerButton leftSection={<Icons.cancel size={IconSize.menu} />} onClick={cancel}>中止</DangerButton>}
         {/* status が届くまでは押させない。届く前の `includeSemantic` は既定の
             false なので、押せてしまうと**意味検索を切る**側に倒れる。 */}
         <Button disabled={!runtime || rebuilding || !status} leftSection={<Icons.retry size={IconSize.menu} />} onClick={() => start(includeSemantic)}>

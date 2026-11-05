@@ -311,7 +311,7 @@ function SendCard({ status, pending, active, perform, connectionError }: CardPro
             {send.phase === "upload" && <Text size="xs" c="dimmed">{formatNumber(send.filesDone)} / {formatNumber(send.filesTotal)} 件・{formatBytes(send.bytesDone)} / {formatBytes(send.bytesTotal)}</Text>}
             <Group justify="space-between" wrap="nowrap" align="center">
               <Text size="xs" c="dimmed">中止しても、送信済みのファイルはサーバーに残ります。次回はその続きから送ります。</Text>
-              <Button size="xs" variant="default" style={{ flexShrink: 0 }} onClick={() => void perform(serverSendStop)}>中止</Button>
+              <DangerButton size="xs" style={{ flexShrink: 0 }} onClick={() => void perform(serverSendStop)}>中止</DangerButton>
             </Group>
           </Stack>
         )}
@@ -366,7 +366,7 @@ function EmbeddedCard({ status, pending, active, perform }: CardProps) {
             {status.embeddedFingerprint && <Text size="xs" c="dimmed" style={{ overflowWrap: "anywhere" }}>証明書のフィンガープリント: <Code>{status.embeddedFingerprint}</Code></Text>}
             <Group justify="space-between" wrap="nowrap">
               <Text size="sm" c="dimmed">この PC が起動している間だけ、携帯から読めます。</Text>
-              <Button variant="default" size="xs" style={{ flexShrink: 0 }} disabled={pending} loading={active === "stop"} onClick={() => void perform(serverEmbeddedStop, "stop")}>停止</Button>
+              <DangerButton size="xs" style={{ flexShrink: 0 }} disabled={pending} loading={active === "stop"} onClick={() => void perform(serverEmbeddedStop, "stop")}>停止</DangerButton>
             </Group>
           </>
         ) : (

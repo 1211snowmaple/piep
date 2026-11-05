@@ -49,7 +49,7 @@ import { UpdateScheduleCard } from "@/features/updates/UpdateScheduleCard";
 import { useUpdateJobNotifications } from "@/features/updates/useUpdateScheduler";
 import { TargetsPanel, type GroupAction, type TargetAction } from "./WatchTargetsPanel";
 import type { UpdateTarget, WatchGroup } from "@/types/library";
-import { DANGER_CONFIRM } from "@/components/DangerButton";
+import { DANGER_CONFIRM, DangerButton } from "@/components/DangerButton";
 
 export { TargetHealthBadge } from "./WatchTargetsPanel";
 
@@ -531,7 +531,7 @@ export default function UpdatesPage() {
               {resultIsTerminal && <Button variant="subtle" color="gray" rightSection={<Icons.expand size={IconSize.inline} style={{ transform: "rotate(180deg)" }} />} aria-expanded onClick={() => setProgressOpen(false)}>畳む</Button>}
               {running && <Button variant="default" leftSection={<Icons.pause size={IconSize.menu} />} onClick={() => runtime && reportJobAction(updateJobs.pause(activeSnapshot.jobId), "一時停止できません")}>一時停止</Button>}
               {stalled && <Button leftSection={<Icons.resume size={IconSize.menu} />} onClick={() => runtime && reportJobAction(updateJobs.resume(activeSnapshot.jobId), "再開できません")}>再開</Button>}
-              {(running || stalled) && <Button variant="default" leftSection={<Icons.cancel size={IconSize.menu} />} onClick={() => runtime && reportJobAction(updateJobs.cancel(activeSnapshot.jobId), "中止できません")}>中止</Button>}
+              {(running || stalled) && <DangerButton leftSection={<Icons.cancel size={IconSize.menu} />} onClick={() => runtime && reportJobAction(updateJobs.cancel(activeSnapshot.jobId), "中止できません")}>中止</DangerButton>}
               {((stalled && activeSnapshot.errorCount > 0) || activeSnapshot.status === "failed" || activeSnapshot.status === "canceled") && <Button leftSection={<Icons.undo size={IconSize.menu} />} onClick={() => runtime && reportJobAction(updateJobs.resume(activeSnapshot.jobId, true), "やり直せません")}>失敗分を再試行</Button>}
             </Group>
           </Group>

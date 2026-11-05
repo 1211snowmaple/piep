@@ -26,6 +26,7 @@ import { notifications } from "@mantine/notifications";
 import { useLocalStorage } from "@mantine/hooks";
 import { useQueryClient } from "@tanstack/react-query";
 import { Icons, IconSize } from "@/lib/icons";
+import { DangerButton } from "@/components/DangerButton";
 import {
   useAppNavigate,
   useAppSearchParams,
@@ -1664,7 +1665,8 @@ export default function SavePage() {
               {saving && (
                 <ActionIcon
                   className="candidate-rail__action"
-                  variant="default"
+                  variant="outline"
+                  color="red"
                   size="lg"
                   loading={canceling}
                   disabled={canceling}
@@ -1737,7 +1739,7 @@ export default function SavePage() {
                 {listProgress ? (
                   <Group justify="space-between" gap="xs" mt={6} wrap="nowrap">
                     <Text size="xs" c="dimmed" role="status">{listProgress.page} / {listProgress.pages}ページ目まで（{listProgress.works}{readsFollowing ? "人" : "件"}）</Text>
-                    <Button variant="light" color="gray" size="compact-xs" style={{ flexShrink: 0 }} onClick={() => { listReadStopRef.current = true; }}>止める</Button>
+                    <DangerButton size="compact-xs" style={{ flexShrink: 0 }} onClick={() => { listReadStopRef.current = true; }}>止める</DangerButton>
                   </Group>
                 ) : canReadNextPages && (
                   <Group justify="space-between" gap="xs" mt={4} wrap="nowrap">
@@ -1919,9 +1921,8 @@ export default function SavePage() {
                     </Button>
                     {/* 押したことが返らないボタンは、押せなかったのと同じ。
                         実際に止まるのは次の切れ目でも、返事はその場で返す。 */}
-                    <Button
+                    <DangerButton
                       size="md"
-                      variant="default"
                       leftSection={<Icons.cancel size={IconSize.action} />}
                       loading={canceling}
                       disabled={canceling}
@@ -1931,7 +1932,7 @@ export default function SavePage() {
                       }
                     >
                       {canceling ? "中止しています" : "中止"}
-                    </Button>
+                    </DangerButton>
                   </Group>
                 ) : (
                   <Button
