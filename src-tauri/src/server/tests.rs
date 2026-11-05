@@ -1648,3 +1648,31 @@ fn opening_the_store_removes_the_recorded_login_name() {
         .unwrap();
     assert_eq!(columns, 0);
 }
+
+#[tokio::test]
+async fn text_is_compressed_only_for_a_client_that_asks() {
+    let root = TestRoot::new("compression");
+    let (parts, _paths) = standalone(&root.0);
+    let url = spawn_plain(combined_router(Arc::clone(&parts.context)));
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("client");
+    let plain = client
+        .get(format!("{url}/api/v1/hello"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(plain.status(), StatusCode::OK);
+    assert!(plain.headers().get("content-encoding").is_none());
+    let packed = client
+        .get(format!("{url}/api/v1/hello"))
+        .header("accept-encoding", "gzip")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(packed.status(), StatusCode::OK);
+    assert_eq!(packed.headers()["content-encoding"], "gzip");
+    // 圧縮しても、本文を保存させない指示は変わらない。
+    assert_eq!(packed.headers()["cache-control"], "private, no-store");
+}
