@@ -1697,13 +1697,28 @@ export default function SavePage() {
                   <Box miw={0}>
                     <Text fw={750}>保存候補</Text>
                     <Text size="xs" c="dimmed">
-                      {readsFollowing ? "フォロー一覧から作者を読み取れます" : canReadPage ? "表示中の一覧から作品を読み取れます" : targetLabel(targetKind)}
+                      {/* 複数ページの指定は、常にある説明の段に出す。専用の段を立てると、
+                        一覧とそれ以外のページを行き来するたびにパネルが上下に動く。 */}
+                      {canReadNextPages && listRead.pages > 1
+                        ? `${listRead.pages}ページ · ${listRead.intervalSeconds}秒ごと${listRead.stopAtSaved ? (readsFollowing ? " · 登録済みで止める" : " · 保存済みで止める") : ""}`
+                        : readsFollowing ? "フォロー一覧から作者を読み取れます" : canReadPage ? "表示中の一覧から作品を読み取れます" : targetLabel(targetKind)}
                     </Text>
                   </Box>
-                  <Group gap={4}>
-                    <ThemeIcon variant="light">
-                      <Icons.select size={IconSize.action} />
-                    </ThemeIcon>
+                  <Group gap={4} wrap="nowrap" style={{ flexShrink: 0 }}>
+                    {canReadNextPages && (
+                      <Tooltip label="読み取りの設定">
+                        <ActionIcon
+                          variant={listOptionsOpen ? "light" : "subtle"}
+                          color="gray"
+                          aria-label="読み取りの設定"
+                          aria-expanded={listOptionsOpen}
+                          disabled={Boolean(listProgress)}
+                          onClick={() => setListOptionsOpen((open) => !open)}
+                        >
+                          <Icons.settings size={IconSize.action} />
+                        </ActionIcon>
+                      </Tooltip>
+                    )}
                     <Tooltip label="保存候補をたたむ">
                       <ActionIcon
                         variant="subtle"
@@ -1735,25 +1750,10 @@ export default function SavePage() {
                 >
                   {analyzeLabel}
                 </Button>
-                {listProgress ? (
+                {listProgress && (
                   <Group justify="space-between" gap="xs" mt={6} wrap="nowrap">
                     <Text size="xs" c="dimmed" role="status">{listProgress.page} / {listProgress.pages}ページ目まで（{listProgress.works}{readsFollowing ? "人" : "件"}）</Text>
                     <Button variant="light" color="gray" size="compact-xs" style={{ flexShrink: 0 }} onClick={() => { listReadStopRef.current = true; }}>止める</Button>
-                  </Group>
-                ) : canReadNextPages && (
-                  <Group justify="space-between" gap="xs" mt={4} wrap="nowrap">
-                    <Text size="xs" c="dimmed" truncate="end">
-                      {listRead.pages > 1 ? `${listRead.pages}ページ · ${listRead.intervalSeconds}秒ごと${listRead.stopAtSaved ? (readsFollowing ? " · 登録済みで止める" : " · 保存済みで止める") : ""}` : "表示中のページだけ"}
-                    </Text>
-                    <Button
-                      variant="subtle"
-                      size="compact-xs"
-                      style={{ flexShrink: 0 }}
-                      aria-expanded={listOptionsOpen}
-                      onClick={() => setListOptionsOpen((open) => !open)}
-                    >
-                      {listOptionsOpen ? "閉じる" : "読み方"}
-                    </Button>
                   </Group>
                 )}
                 {canReadNextPages && listOptionsOpen && !listProgress && (
