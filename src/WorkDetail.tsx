@@ -5,7 +5,7 @@ import { AuthorAvatar } from "./WorkCard";
 import { ProviderMark } from "./ProviderMark";
 import { WorkThumbnail } from "./WorkThumbnail";
 import { WorkFacts, workFacts } from "./WorkFacts";
-import { defaultPcSearch, deleteOfflineWork, getPcMetadata, getPcWorkCollections, listOfflineWorks, pcErrorMessage, saveOfflineWork, type OfflineWork, type PcCollection, type PcWork } from "./pcApi";
+import { defaultPcSearch, deleteOfflineWork, getPcMetadata, getPcWorkCollections, listOfflineWorks, pcErrorMessage, sameWork, saveOfflineWork, type OfflineWork, type PcCollection, type PcWork } from "./pcApi";
 import { homePage, useAppNavigation } from "./appHistory";
 import { hasReadingPosition } from "./OnlineReader";
 import { plainText } from "./workText";
@@ -37,7 +37,7 @@ export function WorkDetail({ selected, onBack, onRead, onSaved, onRemoved, saved
   const work = metadata?.work ?? selected.work;
   const collections: PcCollection[] = selected.offline ? selected.snapshot.collections ?? [] : collectionsQuery.data ?? [];
   const [justSaved, setJustSaved] = useState<OfflineWork | null>(null);
-  const saved = selected.offline ? selected.snapshot : justSaved ?? savedQuery.data?.find((item) => item.work.id === selected.work.id) ?? null;
+  const saved = selected.offline ? selected.snapshot : justSaved ?? savedQuery.data?.find((item) => sameWork(item.work, selected.work)) ?? null;
   const [saving, setSaving] = useState(false);
   const [removing, setRemoving] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
@@ -76,7 +76,7 @@ export function WorkDetail({ selected, onBack, onRead, onSaved, onRemoved, saved
     setRemoving(true);
     setProblem(null);
     try {
-      await deleteOfflineWork(work.id);
+      await deleteOfflineWork(saved.work);
       setJustSaved(null);
       onRemoved();
     } catch (error) { setProblem(pcErrorMessage(error)); }

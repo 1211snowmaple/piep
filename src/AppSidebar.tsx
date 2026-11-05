@@ -22,10 +22,14 @@ function currentShelf(page: AppPage): Shelf | null {
   return null;
 }
 
+/** サイドバーが引き出しになる幅。App.desktop.css と同じ条件。 */
+const drawerLayout = "(max-width: 599px), (max-width: 900px) and (orientation: portrait)";
+
 function useShelfCount(shelf: Exclude<Shelf, "reading">, enabled: boolean): number | null {
   return useQuery({
     queryKey: ["shelf-count", shelf],
-    queryFn: () => searchPcWorks({ ...defaultPcSearch, ...shelfCriteria[shelf], sort: "dateDesc" }),
+    // 欲しいのは件数だけ。一覧の中身を運ばない。
+    queryFn: () => searchPcWorks({ ...defaultPcSearch, ...shelfCriteria[shelf], sort: "dateDesc" }, null, null, null, 1),
     enabled,
     staleTime: 60_000,
     select: (page) => page.totalEstimate ?? null,
@@ -58,9 +62,11 @@ export function AppSidebar({ open, section, page, status, savedConditions, first
   const reachable = Boolean(status?.reachable);
   const active = currentShelf(page);
   const reading = useReadingShelf();
-  const all = useShelfCount("all", reachable);
-  const favorite = useShelfCount("favorite", reachable);
-  const revised = useShelfCount("revised", reachable);
+  // 閉じている引き出しの数字のために、起動時の通信を増やさない。
+  const visible = open || !window.matchMedia(drawerLayout).matches;
+  const all = useShelfCount("all", reachable && visible);
+  const favorite = useShelfCount("favorite", reachable && visible);
+  const revised = useShelfCount("revised", reachable && visible);
 
   const destination = (id: Section, label: string, icon: ReactNode) => <button type="button" className={section === id ? "nav-item active" : "nav-item"} aria-current={section === id ? "page" : undefined} onClick={() => onSection(id)}>{icon}<span>{label}</span></button>;
 

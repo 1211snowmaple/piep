@@ -182,6 +182,14 @@ export interface PcPage {
   html: string;
   totalPlainTextChars: number;
   sourcePageStarts: number[];
+  /** この本文の版。古いサーバーは返さない。 */
+  revision?: PcRevision;
+}
+
+export interface PcRevision {
+  currentVersion: number;
+  contentHash: string | null;
+  activeEditHash: string | null;
 }
 
 export interface OfflinePage extends PcPage {
@@ -225,10 +233,11 @@ export interface OfflineIssue {
 export const getPcStatus = () => invoke<PcConnectionStatus>("pc_connection_status");
 export const pairPc = (payload: string, deviceName: string) => invoke<PcConnectionStatus>("pc_pair", { payload, deviceName });
 export const disconnectPc = () => invoke<PcConnectionStatus>("pc_disconnect");
-export const searchPcWorks = (criteria: PcWorkSearch, cursor: string | null = null, scope: PcWorkScope | null = null, offset: number | null = null) => invoke<PcSearchPage>("pc_search_works", {
+export const searchPcWorks = (criteria: PcWorkSearch, cursor: string | null = null, scope: PcWorkScope | null = null, offset: number | null = null, limit: number | null = null) => invoke<PcSearchPage>("pc_search_works", {
   criteria,
   cursor,
   offset,
+  limit,
   // 画面表示用の名前などを Rust コマンドへ渡さない。入力は三つの識別子だけ。
   scope: scope ? { kind: scope.kind, source: scope.source, key: scope.key } : null,
 });
@@ -241,13 +250,14 @@ export const getPcCollection = (collectionId: string) => invoke<PcCollectionDeta
 export const getPcMetadata = (workId: number) => invoke<PcMetadata>("pc_get_metadata", { workId });
 export const getPcPage = (workId: number, page: number, version: number | null = null) => invoke<PcPage>("pc_get_page", { workId, page, version });
 export const getPcOutline = (workId: number) => invoke<PcOutlineEntry[]>("pc_get_outline", { workId });
-export const getPcAsset = (workId: number, assetId: number) => invoke<PcAsset>("pc_get_asset", { workId, assetId });
 export const listOfflineWorks = () => invoke<OfflineWork[]>("offline_list_works");
 export const saveOfflineWork = (workId: number) => invoke<OfflineWork>("offline_save_work", { workId });
 export const getOfflinePage = (workId: number, page: number) => invoke<OfflinePage>("offline_get_page", { workId, page });
 export const getOfflineOutline = (workId: number, generation: string) => invoke<PcOutlineEntry[]>("offline_get_outline", { workId, generation });
 export const getOfflineAsset = (workId: number, assetId: number, generation: string) => invoke<PcAsset>("offline_get_asset", { workId, assetId, generation });
-export const deleteOfflineWork = (workId: number) => invoke<void>("offline_delete_work", { workId });
+export const deleteOfflineWork = (work: Pick<PcWork, "id" | "source" | "sourceId">) => invoke<void>("offline_delete_work", { workId: work.id, source: work.source, sourceId: work.sourceId });
+/** 数値 ID はサーバーごとに振られる。同じ作品かは取得元の識別子まで見て決める。 */
+export const sameWork = (left: Pick<PcWork, "id" | "source" | "sourceId">, right: Pick<PcWork, "id" | "source" | "sourceId">) => left.id === right.id && left.source === right.source && left.sourceId === right.sourceId;
 export const listOfflineIssues = () => invoke<OfflineIssue[]>("offline_list_issues");
 export const deleteOfflineIssue = (workId: number) => invoke<void>("offline_delete_corrupt_work", { workId });
 

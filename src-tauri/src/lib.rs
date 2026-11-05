@@ -63,7 +63,6 @@ pub fn run() {
             pc_client::pc_get_metadata,
             pc_client::pc_get_page,
             pc_client::pc_get_outline,
-            pc_client::pc_get_asset,
             pc_client::reading_sync::reading_record,
             pc_client::reading_sync::reading_sync,
             pc_client::reading_sync::reading_get,

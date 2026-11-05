@@ -105,6 +105,17 @@ export function useAppHistory(scroller: RefObject<HTMLElement | null>) {
     setStack(kept);
   }, []);
 
+  /** 接続先が変わったとき。前のサーバーの作品を指す履歴を残さない。設定と端末内の画面はそのまま。 */
+  const restart = useCallback(() => {
+    stopRestore.current();
+    positions.current.clear();
+    const { page } = stackRef.current[stackRef.current.length - 1];
+    const home: AppEntry = { id: nextId.current++, page: homePage, detail: null, reader: null };
+    const kept = page.name === "settings" || page.name === "offline" ? [home, { id: nextId.current++, page, detail: null, reader: null }] : [home];
+    stackRef.current = kept;
+    setStack(kept);
+  }, []);
+
   const back = useCallback(() => {
     const list = stackRef.current;
     if (list.length < 2) return false;
@@ -171,7 +182,7 @@ export function useAppHistory(scroller: RefObject<HTMLElement | null>) {
     return () => element.removeEventListener("scroll", onScroll);
   }, [remember, scroller]);
 
-  return { entry: current, depth: stack.length, push, replace, back };
+  return { restart, entry: current, depth: stack.length, push, replace, back };
 }
 
 export type AppNavigation = {

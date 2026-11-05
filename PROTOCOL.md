@@ -37,13 +37,24 @@
 | 表紙 | `GET /works/{id}/cover?size=large` | 一覧用の縮小画像。`size=large` は詳細画面用に大きく縮小した画像 |
 | コレクション | `GET /collections`、`GET /collections/{id}` | 一覧、順序、所属作品 |
 | 作品の所属先 | `GET /works/{id}/collections` | 端末への選択保存時に記録するコレクション |
-| 本文 | `GET /works/{id}/pages/{page}?version=...` | ページ数、HTML、原稿ページ境界。PC 版 `get_reader_content_page` を使用 |
+| 本文 | `GET /works/{id}/pages/{page}?version=...` | ページ数、HTML、原稿ページ境界、`revision`（`currentVersion`、`contentHash`、`activeEditHash`）。HTML の挿絵には分かる限り `width` と `height` を付ける。PC 版 `get_reader_content_page` を使用 |
 | 目次 | `GET /works/{id}/outline?version=...` | 見出しとページ位置 |
-| 画像 | `GET /works/{id}/assets/{assetId}` | その作品に属する画像のバイト列と MIME 型 |
+| 画像 | `GET /works/{id}/assets/{assetId}?width=` | その作品に属する画像のバイト列と MIME 型。`width` があれば 720・1080・1600・2160 のいずれかへ切り上げ、WebP へ縮小して返す。動く画像、十分小さい画像、縮めても小さくならない画像は原本のまま。オフライン保存は `width` を付けず原本を受け取る |
 | 読書位置を読む | `GET /reading?since=<cursor>&limit=` | `cursor` より後に変わった位置と、次の `cursor` |
 | 読書位置を書く | `PUT /reading/{source}/{sourceId}` | 保存された位置。古い `deviceTime` は書かれず、今の値が返る |
 
 検索対象は全作品で、Android へ保存した作品に限定しない。API は全文、作者、タグ、作品種別、並び順、カーソルを受け付け、1 回の件数は最大 50。Android の現在の画面はキーワード検索と追加読み込みを使用する。PC の `libraryCompact` 射影で作者・タグ・概要も受け取る。
+
+## 読み込みの方針
+
+- **本文を先に出す。** 挿絵を待たない。挿絵は `width` と `height` で枠だけ先に取り、画面に近づいてから取りに行く。縦横の無い古いサーバーでは位置が決まらないので順に取りに行く。
+- **版の確認で往復しない。** 本文に添えられた `revision` を手元の版と比べる。違うときだけ `GET /works/{id}` を尋ねる。`revision` の無い古いサーバーでは本文の後に一度尋ねる。
+- **挿絵は `pcimg` で受け取る。** Rust 側が認証と検査（一辺 8192・1600 万画素・展開 64MiB。保存と同じ上限）を済ませ、JavaScript へ base64 で渡さない。アプリのキャッシュ領域に残るが、作品の保存とは別で、OS と起動時の整理で消える。
+- **本文の控えはメモリだけ。** 16 ページまで、10 分まで。次のページを先に受け取る。端末へ残すのは利用者が保存した作品だけ。
+- **通信。** HTTP/2 で一本の接続に載せ、待ち時間 120 秒まで接続を保つ。応答は gzip を頼む（サーバーは JSON だけ圧縮し、画像はそのまま）。読書位置の同期は開くときに最大 0.6 秒だけ待つ。
+- **接続先が変わったら** 一覧・カーソル・詳細・本文の控えと履歴を捨てる。「続きを読む」は接続先ごとに分ける。作品の番号はサーバーごとに振られるので、保存版との照合と削除は `source` と `sourceId` まで確かめる。
+
+いずれも追加の項目で、新しいアプリと古いサーバー、古いアプリと新しいサーバーの組み合わせでも読める。
 
 ## 読書位置の同期
 

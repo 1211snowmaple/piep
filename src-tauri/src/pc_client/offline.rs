@@ -856,10 +856,28 @@ pub async fn offline_get_asset(
 pub async fn offline_delete_work(
     state: State<'_, OfflineState>,
     work_id: i64,
+    source: String,
+    source_id: String,
 ) -> Result<(), ClientError> {
     let _save_guard = state.save_lock.lock().await;
     let _guard = state.lock.lock().await;
+    delete_saved_work(&state, work_id, &source, &source_id)
+}
+
+/// 数値 ID はサーバーごとに振られる。別のサーバーの同じ番号の作品を消さないよう、
+/// 消す直前に保存版の出どころを確かめる。読めない保存版は `offline_delete_corrupt_work` で消す。
+fn delete_saved_work(state: &OfflineState, work_id: i64, source: &str, source_id: &str) -> Result<(), ClientError> {
     let dir = state.work_dir(work_id)?;
+    if !dir.exists() {
+        return Ok(());
+    }
+    let (existing, _) = read_manifest(state, work_id)?;
+    if existing.summary.work.source != source || existing.summary.work.source_id != source_id {
+        return Err(ClientError {
+            code: "offline_work_conflict",
+            message: "保存済みの作品とは別の作品です。端末内の保存は消していません。",
+        });
+    }
     match fs::remove_dir_all(dir) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -1000,6 +1018,15 @@ mod tests {
         assert!(unknown.exists(), "only known generated names may be removed");
         let (_, issues) = scan_works(&state).unwrap();
         assert!(issues.iter().any(|issue| issue.work_id == 5));
+        // 別のサーバーの同じ番号の作品を消そうとしても、保存版は残る。
+        let refused = delete_saved_work(&state, 3, "pixiv", "other").unwrap_err();
+        assert_eq!(refused.code, "offline_work_conflict");
+        assert!(read_manifest(&state, 3).is_ok());
+        assert!(delete_saved_work(&state, 3, "fanbox", "3").is_err());
+        assert!(read_manifest(&state, 3).is_ok());
+        delete_saved_work(&state, 3, "pixiv", "3").unwrap();
+        assert!(!state.work_dir(3).unwrap().exists());
+        delete_saved_work(&state, 3, "pixiv", "3").unwrap();
         fs::remove_dir_all(root).unwrap();
     }
 

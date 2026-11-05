@@ -1,6 +1,6 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import { fillDocumentImages } from "./readerDocument";
-import type { PcAsset, PcPage } from "./pcApi";
+import type { PcPage } from "./pcApi";
 
 export type ContinuousTarget = {
   page: number;
@@ -35,10 +35,10 @@ const SectionBody = memo(function SectionBody({ html, onClick }: { html: string;
  * 読み込み、遠くなった区切りは捨てる。読書位置は区切りごとの割合で表すので、
  * ページごとの読み方と同じ形でサーバーへ送れる。
  */
-export function ContinuousDocument({ viewportRef, load, loadAsset, isSnapshotChange, onSnapshotChanged, start, target, typeKey, header, onInfo, onPosition, onCommit, onLink, onStartRejected, flushRef }: {
+export function ContinuousDocument({ viewportRef, load, imageSource, isSnapshotChange, onSnapshotChanged, start, target, typeKey, header, onInfo, onPosition, onCommit, onLink, onStartRejected, flushRef }: {
   viewportRef: RefObject<HTMLElement | null>;
   load: (page: number) => Promise<LoadedSection | null>;
-  loadAsset: (assetId: number, generation: string | null) => Promise<PcAsset>;
+  imageSource: (assetId: number, width: number, generation: string | null) => string | Promise<string>;
   isSnapshotChange: (error: unknown) => boolean;
   onSnapshotChanged: () => void;
   start: () => ContinuousTarget;
@@ -76,8 +76,8 @@ export function ContinuousDocument({ viewportRef, load, loadAsset, isSnapshotCha
   const frame = useRef(0);
   const startRef = useRef(start);
   startRef.current = start;
-  const callbacks = useRef({ load, loadAsset, isSnapshotChange, onSnapshotChanged, onInfo, onPosition, onCommit, onStartRejected });
-  callbacks.current = { load, loadAsset, isSnapshotChange, onSnapshotChanged, onInfo, onPosition, onCommit, onStartRejected };
+  const callbacks = useRef({ load, imageSource, isSnapshotChange, onSnapshotChanged, onInfo, onPosition, onCommit, onStartRejected });
+  callbacks.current = { load, imageSource, isSnapshotChange, onSnapshotChanged, onInfo, onPosition, onCommit, onStartRejected };
 
   const flush = useCallback(() => {
     if (commitTimer.current !== null) { window.clearTimeout(commitTimer.current); commitTimer.current = null; }
@@ -269,14 +269,13 @@ export function ContinuousDocument({ viewportRef, load, loadAsset, isSnapshotCha
       };
       void fillDocumentImages({
         root: node,
-        loadAsset: (assetId) => callbacks.current.loadAsset(assetId, section.generation),
+        scroller: viewportRef.current,
+        source: (assetId, width) => callbacks.current.imageSource(assetId, width, section.generation),
         isCancelled: () => seedRef.current !== currentSeed || !node.isConnected,
         isSnapshotChange: (error) => callbacks.current.isSnapshotChange(error),
+        onSnapshotChanged: () => callbacks.current.onSnapshotChanged(),
         onChange: settle,
-      }).then((result) => {
-        if (result === "snapshot_changed") { callbacks.current.onSnapshotChanged(); return; }
-        settle();
-      });
+      }).then(settle);
     }
     extend();
   }, [applyTarget, extend, sections]);

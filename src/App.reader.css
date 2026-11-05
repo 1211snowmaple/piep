@@ -104,6 +104,8 @@
 .online-paper .reader-rule { margin: 13px 0 22px; }
 .online-paper .online-document p { margin-bottom: 1.25em; letter-spacing: .01em; }
 .online-document img { display: block; max-width: 100%; height: auto; margin: 1.5em auto; }
+/* 届くまでは枠だけを見せる。代わりの文字を枠の中に出さない。 */
+.online-document img.reader-image-waiting { color: transparent; background: color-mix(in srgb, currentColor 6%, transparent); }
 .online-document figure { margin: 1.7em 0; text-align: center; }
 .online-document figcaption { margin-top: .5em; color: var(--reader-muted); font-size: .75em; }
 .online-document blockquote { margin: 1.4em 0; padding-left: 1.1em; border-left: 3px solid var(--reader-line); color: var(--reader-muted); }
