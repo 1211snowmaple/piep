@@ -1,6 +1,6 @@
 /* サーバーの画面。デスクトップ版の「サーバー」と管理画面で同じ形を使う。
    色を付けるのは状況の点と、次にすべき操作のアイコンだけにする。 */
-.sv { container-type: inline-size; --line: var(--mantine-color-default-border); --tile: light-dark(var(--mantine-color-gray-1), var(--mantine-color-dark-5)); }
+.sv { container-type: inline-size; --line: var(--mantine-color-default-border);  --tile: light-dark(var(--mantine-color-gray-1), var(--mantine-color-dark-5)); }
 .sv-stack { display: flex; flex-direction: column; gap: 12px; max-width: 820px; }
 .sv-card { border: 1px solid var(--line); border-radius: var(--mantine-radius-lg); background: var(--mantine-color-body); }
 .sv-status { padding: 24px; }
@@ -27,6 +27,9 @@ button.sv-tile:focus-visible { outline: 2px solid var(--mantine-primary-color-fi
 .sv-desc { display: block; font-size: 12px; line-height: 1.45; color: var(--mantine-color-dimmed); margin-top: 2px; }
 .sv-tile-body { width: 100%; }
 .sv-tile-progress { display: flex; align-items: center; gap: 8px; width: 100%; margin-top: 6px; }
+.sv-step { display: flex; gap: 14px; align-items: flex-start; }
+.sv-step-number { width: 26px; height: 26px; flex: none; display: grid; place-items: center; border-radius: 50%; background: var(--tile); font-size: 13px; font-weight: 650; }
+.sv-step-body { flex: 1; min-width: 0; }
 .sv-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 16px; }
 @container (max-width: 620px) {
   .sv-tiles { grid-template-columns: minmax(0, 1fr); }

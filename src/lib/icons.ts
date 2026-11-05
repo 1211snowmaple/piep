@@ -1,5 +1,6 @@
 import {
   Activity,
+  Send,
   LogOut,
   Smartphone,
   AlertTriangle,
@@ -188,6 +189,7 @@ export const Icons = {
 
   // ---- Navigation --------------------------------------------------------
   home: Home,
+  send: Send,
   copy: CopyIcon,
   phone: Smartphone,
   logout: LogOut,

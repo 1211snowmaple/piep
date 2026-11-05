@@ -1262,7 +1262,7 @@ async fn admin_pairing(
         .clone()
         .or(request.url)
         .filter(|url| url.len() <= 512 && url.starts_with("https://"))
-        .ok_or_else(|| ApiError::invalid("携帯が接続する https の URL が決まっていません"))?;
+        .ok_or_else(|| ApiError::invalid("携帯が接続する https の URL が決まっていません。server.toml の public_url に書いてください"))?;
     let secret = ctx
         .store
         .issue_pairing(Role::Reader, READER_PAIRING_LIFETIME)

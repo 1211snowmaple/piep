@@ -1,13 +1,14 @@
 import { useState } from "react";
 import { ActionIcon, Alert, Button, Group, Menu, Modal, Skeleton, Stack, Text } from "@mantine/core";
 import { modals } from "@mantine/modals";
+import { notifications } from "@mantine/notifications";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Icons } from "@/lib/icons";
 import { QRCodeSVG } from "qrcode.react";
 import { DANGER_CONFIRM } from "@/components/DangerButton";
 import { adminApi, failureMessage, type AdminSession, type Device, type Pairing } from "../api";
 import { dayTime, relativeTime } from "../format";
-import { Card, CopyButton, PageHead, showFailure, useReauth, useStatus } from "../shared";
+import { Card, PageHead, showFailure, useReauth, useStatus } from "../shared";
 
 /** ブラウザの名前を読める形にする。正確さより見分けやすさを優先する。 */
 export function browserLabel(agent: string | null): string {
@@ -24,9 +25,18 @@ function PairingDialog({ title, note, pairing, qr, onClose }: { title: string; n
         <Stack gap="md">
           <Text size="sm">{note}</Text>
           {qr && <div className="adm-qr"><QRCodeSVG value={pairing.payload} size={240} level="M" aria-label="登録の QR コード" /></div>}
-          <Group gap={6} wrap="nowrap" align="flex-start">
-            <Text className="adm-code" style={{ flex: 1, minWidth: 0 }}>{pairing.payload}</Text>
-            <CopyButton value={pairing.payload} label="登録文字列をコピー" />
+          <Group justify="center">
+            <Button
+              size="xs"
+              variant="default"
+              leftSection={<Icons.copy size={14} />}
+              onClick={() => {
+                void navigator.clipboard.writeText(pairing.payload).then(
+                  () => notifications.show({ message: "コピーしました" }),
+                  () => notifications.show({ color: "red", message: "コピーできませんでした" }),
+                );
+              }}
+            >登録文字列をコピー</Button>
           </Group>
           <Text size="xs" c="dimmed">{Math.round(pairing.expiresInSeconds / 60)} 分有効で、一度だけ使えます。人に見せないでください。</Text>
         </Stack>

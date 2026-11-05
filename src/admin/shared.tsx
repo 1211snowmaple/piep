@@ -1,8 +1,7 @@
 import { createContext, useCallback, useContext, useRef, useState, type ReactNode } from "react";
-import { ActionIcon, Button, Group, Modal, PasswordInput, Stack, Text, Title, Tooltip } from "@mantine/core";
+import { Button, Group, Modal, PasswordInput, Stack, Text, Title } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
 import { useQuery } from "@tanstack/react-query";
-import { Icons } from "@/lib/icons";
 import { adminApi, ApiFailure, failureMessage, type AdminStatus } from "./api";
 import { notifyIfExpired } from "./queryClient";
 
@@ -34,27 +33,6 @@ export function Facts({ items }: { items: Array<[string, ReactNode]> }) {
         </div>
       ))}
     </dl>
-  );
-}
-
-export function CopyButton({ value, label }: { value: string; label: string }) {
-  return (
-    <Tooltip label={label}>
-      <ActionIcon
-        variant="subtle"
-        color="gray"
-        size="sm"
-        aria-label={label}
-        onClick={() => {
-          void navigator.clipboard.writeText(value).then(
-            () => notifications.show({ message: "コピーしました" }),
-            () => notifications.show({ color: "red", message: "コピーできませんでした" }),
-          );
-        }}
-      >
-        <Icons.copy size={14} />
-      </ActionIcon>
-    </Tooltip>
   );
 }
 

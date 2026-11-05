@@ -302,7 +302,7 @@ fn host_allowed(ctx: &ServerContext, host: &str) -> bool {
     if name == "localhost" || name.parse::<IpAddr>().is_ok() {
         return true;
     }
-    if ctx.store.admin_hosts().iter().any(|known| *known == name) {
+    if ctx.store.admin_hosts().contains(&name) {
         return true;
     }
     ctx.public_url
@@ -867,8 +867,14 @@ async fn issue_ticket(
         .store
         .issue_admin_ticket(kind, lifetime)
         .map_err(storage_error)?;
-    ctx.store
-        .audit("login", "ログイン用リンクの発行", actor(&headers), ip.get(), true, None);
+    ctx.store.audit(
+        "login",
+        "ログイン用リンクの発行",
+        actor(&headers),
+        ip.get(),
+        true,
+        None,
+    );
     Ok(Json(serde_json::json!({
         "path": format!("/admin/#ticket={ticket}"),
         "kind": kind,
@@ -1343,7 +1349,14 @@ pub fn command_ticket(
         }
     }
     let ticket = store.issue_admin_ticket(kind, SETUP_TICKET)?;
-    store.audit("login", "ログイン用リンクの発行", "サーバーのコマンド", None, true, None);
+    store.audit(
+        "login",
+        "ログイン用リンクの発行",
+        "サーバーのコマンド",
+        None,
+        true,
+        None,
+    );
     Ok(ticket)
 }
 

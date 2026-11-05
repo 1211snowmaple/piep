@@ -169,7 +169,7 @@ test("AI beta disclosure stays visible in settings and the launcher", async ({ p
   await expect(beta).toBeVisible();
 
   await page.goto("/#/settings?section=server");
-  await expect(page.getByText("サーバーはβ版です", { exact: true })).toBeVisible();
+  await expect(page.getByText("外出先の携帯から、ライブラリを検索して読めるようにします。", { exact: true })).toBeVisible();
   await expect(beta).toHaveCSS("text-transform", "none");
 });
 

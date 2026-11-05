@@ -362,12 +362,13 @@ async fn download(client: &reqwest::Client, url: &str, destination: &Path) -> Re
         .await
         .and_then(reqwest::Response::error_for_status)
         .map_err(|error| format!("新しいバージョンを取ってこられません: {error}"))?;
-    let mut output =
-        File::create(destination).map_err(|error| format!("新しいバージョンを保存できません: {error}"))?;
+    let mut output = File::create(destination)
+        .map_err(|error| format!("新しいバージョンを保存できません: {error}"))?;
     let mut stream = response.bytes_stream();
     let mut total = 0_u64;
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|error| format!("新しいバージョンを取ってこられません: {error}"))?;
+        let chunk =
+            chunk.map_err(|error| format!("新しいバージョンを取ってこられません: {error}"))?;
         total += chunk.len() as u64;
         if total > MAX_PACKAGE_BYTES {
             return Err("新しいバージョンが大きすぎます".into());
@@ -469,7 +470,8 @@ async fn prepare_latest_with_timeouts(
     if incoming.exists() {
         fs::remove_dir_all(&incoming).map_err(|error| format!("前の取得を消せません: {error}"))?;
     }
-    fs::create_dir_all(&incoming).map_err(|error| format!("新しいバージョンを保存できません: {error}"))?;
+    fs::create_dir_all(&incoming)
+        .map_err(|error| format!("新しいバージョンを保存できません: {error}"))?;
     let package = incoming.join("package.zip");
     let result = async {
         download(&client, &manifest.url, &package).await?;

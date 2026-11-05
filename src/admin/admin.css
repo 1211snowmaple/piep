@@ -50,4 +50,6 @@ html { overflow-y: scroll; scrollbar-gutter: stable; }
   .adm-nav { display: none; }
   .adm-select { display: flex; align-items: center; gap: 8px; margin-bottom: 16px; }
   .adm-main { padding: 16px 16px 40px; }
+  /* 手元の画面の QR は、その携帯では読めない。コピーで渡す。 */
+  .adm-qr { display: none; }
 }

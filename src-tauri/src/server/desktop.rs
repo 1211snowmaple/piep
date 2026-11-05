@@ -455,6 +455,30 @@ impl DesktopServer {
         }
     }
 
+    /// 新しいバージョンがあるかだけを確かめてもらう。当てはしない。
+    pub async fn check_remote_update(&self) -> Result<serde_json::Value, String> {
+        let remote = self
+            .settings()
+            .remote
+            .ok_or("単独サーバーにつないでいません")?;
+        let token = credential::load()?.ok_or("サーバーの鍵がありません。登録し直してください")?;
+        admin_post(&remote, &token, "update/check", &serde_json::json!({})).await
+    }
+
+    /// 管理画面へ入る、一度きりのリンクを作る。接続先の URL で開くので、その名前が覚えられる。
+    pub async fn admin_link(&self) -> Result<String, String> {
+        let remote = self
+            .settings()
+            .remote
+            .ok_or("単独サーバーにつないでいません")?;
+        let token = credential::load()?.ok_or("サーバーの鍵がありません。登録し直してください")?;
+        let ticket = admin_post(&remote, &token, "tickets", &serde_json::json!({})).await?;
+        let path = ticket["path"]
+            .as_str()
+            .ok_or("サーバーの応答を読めません")?;
+        Ok(format!("{}{path}", remote.url.trim_end_matches('/')))
+    }
+
     pub async fn update_remote(&self) -> Result<(), String> {
         let remote = self
             .settings()
@@ -613,6 +637,10 @@ impl DesktopServer {
                 }
             }
             tokio::time::sleep(AUTO_SEND_STARTUP_DELAY).await;
+            // 送るものがなくても、デスクトップ版が新しくなったらサーバーを追いつかせる。
+            if server.settings().remote.is_some() {
+                server.update_remote_if_behind().await;
+            }
             // 起動して落ち着いたあとに一度送る。変わっていなければ問い合わせだけで終わる。
             let mut sent_generation = None;
             let mut seen = None;
