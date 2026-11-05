@@ -1,4 +1,4 @@
-import { createTheme, rem } from "@mantine/core";
+import { Button, createTheme, rem } from "@mantine/core";
 
 const piep = [
   "#edf8ff",
@@ -47,7 +47,21 @@ export const theme = createTheme({
   cursorType: "pointer",
   focusRing: "auto",
   components: {
-    Button: { defaultProps: { radius: "md" } },
+    Button: Button.extend({
+      defaultProps: { radius: "md" },
+      // 地の薄いボタンは、色を指定しなければ灰色にする。app.css が Mantine の
+      // ホバー色を常時の地に使うので、既定の青のままだと濃い文字に強い青の地が
+      // 付き、light より目立って主操作と競う。赤などは color で渡せば残る。
+      vars: (_theme, props) => ({
+        root: props.variant === "subtle" && !props.color
+          ? {
+              "--button-color": "var(--mantine-color-gray-light-color)",
+              "--button-hover": "var(--mantine-color-gray-light-hover)",
+              "--button-hover-color": "var(--mantine-color-gray-light-color)",
+            }
+          : {},
+      }),
+    }),
     ActionIcon: { defaultProps: { radius: "md" } },
     Card: { defaultProps: { radius: "lg", withBorder: true } },
     Accordion: { defaultProps: { radius: "lg" } },

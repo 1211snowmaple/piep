@@ -223,17 +223,17 @@ describe("SavePage の Rust 保存ジョブ", () => {
     expect(browserApi.navigateEmbeddedBrowser).not.toHaveBeenCalledWith(`${first}?p=3`);
   });
 
-  it("続きを開ける一覧でだけ、読み方を指定できる", async () => {
+  it("続きを開ける一覧でだけ、読み取りの設定を開ける", async () => {
     renderSavePage();
     const address = await screen.findByLabelText("ブラウザのアドレス");
     fireEvent.change(address, { target: { value: "https://www.pixiv.net/" } });
     fireEvent.click(screen.getByRole("button", { name: "URLを開く" }));
     await screen.findByRole("button", { name: "このページから読み取る" });
-    expect(screen.queryByRole("button", { name: "読み方" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "読み取りの設定" })).not.toBeInTheDocument();
 
     fireEvent.change(address, { target: { value: "https://www.pixiv.net/novel/bookmark_new.php" } });
     fireEvent.click(screen.getByRole("button", { name: "URLを開く" }));
-    fireEvent.click(await screen.findByRole("button", { name: "読み方" }));
+    fireEvent.click(await screen.findByRole("button", { name: "読み取りの設定" }));
     fireEvent.change(await screen.findByLabelText("ページ数"), { target: { value: "5" } });
 
     expect(await screen.findByRole("button", { name: "5ページ読み取る" })).toBeInTheDocument();
