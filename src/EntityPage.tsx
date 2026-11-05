@@ -92,13 +92,14 @@ function TagFilter({ detail, selected, onToggle }: { detail: PcEntityDetail | un
   </div>;
 }
 
-export function EntityPage({ page, status, savedRevision, pagingMode, onOpenWork, onOpenDetail }: {
+export function EntityPage({ page, status, savedRevision, pagingMode, onOpenWork, onOpenDetail, onSaved }: {
   page: EntityPageState;
   status: PcConnectionStatus | null;
   savedRevision: number;
   pagingMode: "auto" | "pages";
   onOpenWork: (work: PcWork) => void;
   onOpenDetail: (work: PcWork) => void;
+  onSaved: () => void;
 }) {
   const navigation = useAppNavigation();
   const reachable = Boolean(status?.reachable);
@@ -163,7 +164,7 @@ export function EntityPage({ page, status, savedRevision, pagingMode, onOpenWork
     ...(isPerson && seriesCount > 0 ? [{ id: "series" as const, label: "シリーズ", count: seriesCount }] : []),
     ...(collections.length > 0 ? [{ id: "collections" as const, label: "コレクション", count: collections.length }] : []),
   ];
-  const openCollection = (collection: PcCollection) => navigation.push({ page: { name: "library", tab: "collections", collectionId: collection.id, criteria: defaultPcSearch, queries: { people: "", series: "", collections: "", members: "" }, listPage: 1 } });
+  const openCollection = (collection: PcCollection) => navigation.push({ page: { name: "library", tab: "collections", collectionId: collection.id, criteria: defaultPcSearch, queries: { people: "", series: "", collections: "", members: "" }, listPage: 1, shelf: null } });
 
   const workLabel = sentSort === "standard" ? relevanceLabel : entityWorkSortLabel(sentSort);
   const workGroups = entityWorkSortGroups(page.kind, Boolean(page.query));
@@ -186,7 +187,7 @@ export function EntityPage({ page, status, savedRevision, pagingMode, onOpenWork
         </LiveSearch>
         <TagFilter detail={detail} selected={page.tags} onToggle={(tag) => update({ tags: page.tags.includes(tag) ? page.tags.filter((item) => item !== tag) : [...page.tags, tag], listPage: 1 })} />
         {(page.query || page.tags.length > 0) && <div className="entity-filter-summary"><span>{list.total != null ? `約 ${list.total.toLocaleString("ja-JP")} 件` : list.loading ? "" : `${list.items.length} 件`}</span><button type="button" onClick={() => update({ query: "", tags: [], listPage: 1 })}>絞り込みを解除</button></div>}
-        <WorkResults omit={isPerson ? "author" : "series"} list={list} savedRevision={savedRevision} reachable={reachable} onOpenWork={onOpenWork} onOpenDetail={onOpenDetail} onPage={(next) => navigation.push({ page: { ...page, listPage: next } })} emptyTitle="作品が見つかりません" emptyHint={page.query || page.tags.length ? "検索語やタグを変えて試してください。" : "この一覧に表示できる作品はありません。"} />
+        <WorkResults omit={isPerson ? "author" : "series"} list={list} savedRevision={savedRevision} reachable={reachable} onOpenWork={onOpenWork} onOpenDetail={onOpenDetail} onSaved={onSaved} onPage={(next) => navigation.push({ page: { ...page, listPage: next } })} emptyTitle="作品が見つかりません" emptyHint={page.query || page.tags.length ? "検索語やタグを変えて試してください。" : "この一覧に表示できる作品はありません。"} />
       </section>}
 
       {page.tab === "series" && isPerson && <section className="entity-section" data-stale={series.isPlaceholderData || undefined}>

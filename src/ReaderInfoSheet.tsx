@@ -2,10 +2,11 @@ import { useLayoutEffect, useRef, useState } from "react";
 import { Check, Download, X } from "lucide-react";
 import { ProviderMark } from "./ProviderMark";
 import { WorkThumbnail } from "./WorkThumbnail";
+import { WorkFacts, workFacts } from "./WorkFacts";
 import { AuthorAvatar } from "./WorkCard";
 import type { PcCollection, PcOutlineEntry, PcWork } from "./pcApi";
 import { useAppNavigation } from "./appHistory";
-import { displayDate, plainText, readingMinutes } from "./workText";
+import { plainText, progressLabel, readingFinished, readingMinutes } from "./workText";
 
 export type InfoTab = "outline" | "info";
 
@@ -36,9 +37,8 @@ export function ReaderInfoSheet({ tab, onTabChange, onClose, work, isEdited, off
   const titleRef = useRef<HTMLHeadingElement>(null);
   const description = plainText(work.excerpt);
   const navigation = useAppNavigation();
-  const date = displayDate(work.sourceCreatedAt ?? work.downloadedAt);
   const percent = Math.round(progress * 100);
-  const total = readingMinutes(work.textLength);
+  const finished = readingFinished(progress, pageCount);
   const remaining = readingMinutes(Math.round(work.textLength * (1 - progress)));
   const hasOutline = outline.length > 0;
   const activeTab = hasOutline ? tab : "info";
@@ -84,23 +84,17 @@ export function ReaderInfoSheet({ tab, onTabChange, onClose, work, isEdited, off
             </div>
           </div>
           <div className="reader-info-progress">
-            <div><strong>{percent}%</strong><span>{pageCount > 1 ? `${currentPage + 1} / ${pageCount} ページ` : "読んだところ"}</span>{remaining && percent < 100 && <span className="reader-info-remaining">残り{remaining}</span>}</div>
+            <div><strong>{progressLabel(progress, pageCount)}</strong>{pageCount > 1 && <span>{currentPage + 1} / {pageCount} ページ</span>}{remaining && !finished && <span className="reader-info-remaining">残り{remaining}</span>}</div>
             <span className="reader-progress-track" aria-hidden="true"><span style={{ width: `${percent}%` }} /></span>
           </div>
-          {!offline && <button type="button" className="reader-info-save" disabled={saving} onClick={onSave}>{saveMessage === "端末に保存しました" ? <Check aria-hidden="true" /> : <Download aria-hidden="true" />}{saving ? "保存中…" : "端末に保存"}</button>}
+          <WorkFacts items={workFacts(work)} />
+          {!offline && <div className="reader-info-actions"><button type="button" className="reader-info-save" disabled={saving} onClick={onSave}>{saveMessage === "端末に保存しました" ? <Check aria-hidden="true" /> : <Download aria-hidden="true" />}{saving ? "保存中…" : "端末に保存"}</button></div>}
           {saveMessage && <p className="reader-info-status" role="status">{saveMessage}</p>}
-          <dl className="reader-info-facts">
-            <div><dt>文字数</dt><dd>{work.textLength.toLocaleString("ja-JP")} 字</dd></div>
-            {total && <div><dt>読む時間の目安</dt><dd>{total}</dd></div>}
-            <div><dt>画像</dt><dd>{work.assetCount.toLocaleString("ja-JP")} 枚</dd></div>
-            {date && <div><dt>公開日</dt><dd>{date}</dd></div>}
-          </dl>
           {description && <section className="reader-info-section" aria-label="概要">
-            <h3>概要</h3>
             <p ref={descriptionRef} className={descriptionOpen ? "reader-info-description expanded" : "reader-info-description"}>{description}</p>
             {(descriptionLong || descriptionOpen) && <button type="button" className="reader-more" onClick={() => setDescriptionOpen((open) => !open)} aria-expanded={descriptionOpen}>{descriptionOpen ? "短く表示" : "続きを読む"}</button>}
           </section>}
-          {work.tags.length > 0 && <section className="reader-info-section" aria-label="タグ"><h3>タグ</h3><div className="reader-info-tags">{work.tags.map((tag, index) => navigation.canBrowseServer ? <button type="button" key={`${tag}:${index}`} onClick={() => navigation.openTag(tag)}>#{tag}</button> : <span key={`${tag}:${index}`}>#{tag}</span>)}</div></section>}
+          {work.tags.length > 0 && <section className="reader-info-section" aria-label="タグ"><div className="reader-info-tags">{work.tags.map((tag, index) => navigation.canBrowseServer ? <button type="button" key={`${tag}:${index}`} onClick={() => navigation.openTag(tag)}>#{tag}</button> : <span key={`${tag}:${index}`}>#{tag}</span>)}</div></section>}
           {collections && collections.length > 0 && <section className="reader-info-section"><h3>コレクション</h3><div className="reader-info-collections">{collections.map((collection) => <span key={collection.id}>{collection.name}</span>)}</div></section>}
         </>}
       </div>

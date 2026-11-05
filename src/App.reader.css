@@ -121,6 +121,8 @@
 .reader-enter--prev { animation: reader-enter-prev .16s ease-out; }
 
 /* 下の面。進み具合は常に小さく出し、操作部はメニューと一緒に出す。 */
+/* 小説の本文は行末をそろえたいので、文節で折らない。 */
+.reader-scroll, .reading-paper { word-break: normal; }
 .reader-bottom { position: relative; flex: none; z-index: 20; }
 .reader-status { position: relative; z-index: 1; display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: calc(26px + var(--piep-safe-bottom)); padding: 0 16px var(--piep-safe-bottom); background: var(--reader-bg); color: var(--reader-muted); font-size: 12px; font-variant-numeric: tabular-nums; }
 /* メニューの進捗と同じ数字を二か所に出さない。 */
@@ -128,7 +130,7 @@
 .reader-panel { position: absolute; right: 0; bottom: 100%; left: 0; display: grid; gap: 2px; padding: 4px 6px; border-top: 1px solid var(--reader-line); background: var(--reader-chrome); transition: transform .18s ease, visibility .18s; }
 .reader-screen[data-bars="hidden"] .reader-panel { visibility: hidden; transform: translateY(calc(100% + 80px)); }
 .reader-bars--pinned .reader-panel { position: static; }
-.reader-pagebar { position: relative; z-index: 1; padding: 3px 6px 0; border-top: 1px solid var(--reader-line); background: var(--reader-bg); }
+.reader-pagebar { position: relative; z-index: 1; padding: 3px 6px 0; background: var(--reader-bg); }
 .reader-progress-row { display: flex; align-items: center; gap: 6px; min-width: 0; max-width: 760px; width: 100%; margin: 0 auto; }
 .reader-progress-slider { flex: 1; min-width: 0; height: 32px; accent-color: var(--reader-accent); }
 .reader-progress-label { flex: none; min-width: 46px; padding-right: 8px; color: var(--reader-control-ink); font-size: 13px; font-weight: 650; font-variant-numeric: tabular-nums; text-align: right; }
@@ -212,26 +214,23 @@
 .reader-info-author > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .reader-info-author .work-author-avatar { width: 26px; height: 26px; }
 .reader-more { min-height: 36px; border: 0; padding: 4px 0; background: transparent; color: var(--reader-accent); font-size: 13px; font-weight: 650; }
-.reader-info-progress { display: grid; gap: 8px; margin-top: 18px; padding: 14px; border-radius: 14px; background: var(--reader-control); }
+.reader-info-progress { display: grid; gap: 6px; margin-top: 16px; }
 .reader-info-progress > div { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; color: var(--reader-muted); font-size: 13px; font-variant-numeric: tabular-nums; }
-.reader-info-progress strong { color: var(--reader-control-ink); font-size: 22px; font-weight: 750; }
+.reader-info-progress strong { color: var(--reader-control-ink); font-size: 16px; font-weight: 700; }
 .reader-info-remaining { margin-left: auto; }
-.reader-info-progress .reader-progress-track { background: var(--reader-line); }
-.reader-info-save { display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; min-height: 48px; margin-top: 12px; border: 0; border-radius: 12px; background: var(--reader-accent); color: var(--reader-accent-ink); font-size: 14px; font-weight: 700; }
+.reader-info-progress .reader-progress-track { height: 3px; background: var(--reader-line); }
+.reader-info-sheet .work-facts { margin-top: 14px; color: var(--reader-muted); font-size: var(--fs-small); }
+.reader-info-actions { display: flex; justify-content: flex-end; margin-top: 12px; }
+.reader-info-save { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 42px; padding: 7px 14px; border: 1px solid var(--reader-line); border-radius: 9px; background: transparent; color: var(--reader-control-ink); font-size: var(--fs-control); font-weight: 600; }
 .reader-info-save:disabled { opacity: .6; }
-.reader-info-save svg { width: 19px; height: 19px; }
+.reader-info-save svg { width: 17px; height: 17px; }
 .reader-info-status { margin: 8px 0 0; color: var(--reader-muted); font-size: 13px; }
-.reader-info-facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px; margin: 18px 0 0; overflow: hidden; border: 1px solid var(--reader-line); border-radius: 14px; background: var(--reader-line); }
-.reader-info-facts > div { padding: 11px 13px; background: var(--reader-surface); }
-.reader-info-facts > div:last-child:nth-child(odd) { grid-column: 1 / -1; }
-.reader-info-facts dt { color: var(--reader-muted); font-size: 12px; }
-.reader-info-facts dd { margin: 3px 0 0; font-size: 15px; font-weight: 650; font-variant-numeric: tabular-nums; }
 .reader-info-section { margin-top: 20px; }
 .reader-info-section h3 { margin: 0 0 8px; font-size: 14px; font-weight: 700; }
 .reader-info-description { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 4; overflow: hidden; margin: 0; font-size: 14px; line-height: 1.75; white-space: pre-wrap; overflow-wrap: anywhere; }
 .reader-info-description.expanded { display: block; }
 .reader-info-tags, .reader-info-collections { display: flex; flex-wrap: wrap; gap: 6px; }
-.reader-info-tags span { padding: 5px 10px; border-radius: 999px; background: var(--reader-control); color: var(--reader-control-ink); font-size: 13px; overflow-wrap: anywhere; }
+.reader-info-tags span { padding: 5px 11px; border-radius: 999px; background: var(--reader-control); color: var(--reader-control-ink); font-size: var(--fs-small); overflow-wrap: anywhere; }
 .reader-info-collections span { padding: 6px 10px; border: 1px solid var(--reader-line); border-radius: 9px; font-size: 13px; }
 .reader-toc { display: grid; gap: 1px; margin: -8px -8px 0; padding: 0; list-style: none; }
 .reader-toc button { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 50px; border: 0; border-radius: 10px; padding: 8px 10px; background: transparent; color: var(--reader-control-ink); font-size: 15px; text-align: left; }
@@ -264,7 +263,6 @@
   .reader-control-heading, .reader-toggle, .reader-segmented button, .reader-sheet-tabs button { font-size: 15px; }
   .reader-control-help, .reader-toggle-text small { font-size: 14px; }
   .reader-info-description, .reader-toc button { font-size: 16px; }
-  .reader-info-facts dd { font-size: 16px; }
 }
 
 /* 携帯では本文幅が画面幅を超えるので、設定しても変わらない。 */

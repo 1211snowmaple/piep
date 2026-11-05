@@ -64,8 +64,6 @@ button:focus-visible, input:focus-visible { outline: 3px solid #75bcff; outline-
 .pair-card textarea { resize: vertical; font-family: ui-monospace, monospace; font-size: 11px; overflow-wrap: anywhere; }
 .pc-search-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 15px; }
 .pc-search-heading p { margin-bottom: 0; }
-.pc-search-form { display: flex; gap: 10px; margin-top: 18px; }
-.pc-search-form input { margin: 0; flex: 1; }
 .pc-results-heading { display: flex; align-items: center; justify-content: space-between; }
 .pc-results-heading span { color: #8795a3; font-size: 12px; }
 .work-list { display: grid; gap: 11px; }

@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 import { isTauri } from "@tauri-apps/api/core";
+import { ChevronLeft } from "lucide-react";
+import { SearchField } from "./SearchField";
 import { WorkThumbnail } from "./WorkThumbnail";
 import { WorkCard } from "./WorkCard";
 import { VirtualWorkList } from "./VirtualWorkList";
@@ -174,8 +176,7 @@ export function OfflineLibrary({ page, onOpenWork, onOpenDetail, onShowPc, saved
     collections: "保存したコレクション",
   }[tab];
 
-  const submitSearch = () => {
-    const next = searchInput.trim();
+  const submitSearch = (next: string) => {
     if (selected) setGroupQuery(next);
     else setQueries((previous) => ({ ...previous, [tab]: next }));
   };
@@ -183,7 +184,7 @@ export function OfflineLibrary({ page, onOpenWork, onOpenDetail, onShowPc, saved
   useEffect(() => { setCurrentPage(1); }, [query, tab, selectedGroup, pagingMode]);
 
   return <>
-    <form className="pc-search-form pc-library-search" onSubmit={(event) => { event.preventDefault(); submitSearch(); }}><input type="search" aria-label={`${searchTarget}を検索`} value={searchInput} onChange={(event) => { const next = event.target.value; if (selected) setGroupSearchInput(next); else setSearchInputs((previous) => ({ ...previous, [tab]: next })); }} placeholder={`${searchTarget}を検索`} />{tab === "works" && <SortMenu current={rememberedSort} onSelect={(sort) => { if (sort !== "standard") onRememberedSortChange(sort); }} />}<button className="primary-button" type="submit">検索</button></form>
+    <SearchField value={searchInput} label={`${searchTarget}を検索`} placeholder={`${searchTarget}を検索`} onChange={(next) => { if (selected) setGroupSearchInput(next); else setSearchInputs((previous) => ({ ...previous, [tab]: next })); }} onSubmit={submitSearch}>{tab === "works" && <SortMenu current={rememberedSort} onSelect={(sort) => { if (sort !== "standard") onRememberedSortChange(sort); }} />}</SearchField>
     <div className="offline-library-heading"><strong>保存した作品</strong><span>{loading ? "確認中…" : problem || issuesProblem ? "保存一覧を確認できません" : issues.length ? "読み込めない保存データがあります" : `${works.length} 作品`}</span></div>
     {problem && <div className="inline-alert" role="alert">{problem}</div>}
     {problem && <button className="secondary-button offline-retry" type="button" onClick={() => setLoadRevision((revision) => revision + 1)} disabled={loading}>{loading ? "確認中…" : "もう一度確認"}</button>}
@@ -196,10 +197,10 @@ export function OfflineLibrary({ page, onOpenWork, onOpenDetail, onShowPc, saved
     </section>}
     <nav className="library-tabs" aria-label="端末内のライブラリの種類">{(["works", "people", "series", "collections"] as const).map((id) => <button key={id} type="button" className={tab === id ? "active" : ""} aria-current={tab === id ? "page" : undefined} onClick={() => navigation.push({ page: { name: "offline", tab: id, groupId: null } })}>{tabLabel[id]}</button>)}</nav>
     {loading ? <section className="empty-card"><p>保存した作品を確認しています…</p></section> : <>
-      {selected && <div className="group-context"><button className="group-back" onClick={navigation.back}>← 戻る</button><strong>{selected.name}</strong><span>端末に保存した {selected.works.length} 作品</span></div>}
+      {selected && <div className="group-context"><button className="page-back" type="button" onClick={navigation.back}><ChevronLeft aria-hidden="true" />戻る</button><strong>{selected.name}</strong><span>端末に保存した {selected.works.length} 作品</span></div>}
       {tab !== "works" && !selected && <div className="group-grid offline-group-grid">{matchingGroups.map((group) => <button className="group-card" key={group.id} onClick={() => { setGroupSearchInput(""); setGroupQuery(""); navigation.push({ page: { name: "offline", tab, groupId: group.id } }); }}>
         {tab === "collections" ? <span className="offline-group-art">{group.collection?.coverMode ? <CollectionArtwork collection={group.collection} offlineWorks={group.works} /> : <WorkThumbnail work={group.cover.work} offline snapshotGeneration={group.cover.savedAtMs} />}</span> : <SavedGroupArtwork group={group} kind={tab} />}
-        <span className="group-card-text"><strong>{group.name}</strong><small className="group-card-meta">{tab !== "collections" && <ProviderMark source={group.cover.work.source} compact />}<span>端末に保存した {group.works.length} 作品</span></small></span><span className="work-arrow" aria-hidden="true">›</span>
+        <span className="group-card-text"><strong>{group.name}</strong><small className="group-card-meta">{tab !== "collections" && <ProviderMark source={group.cover.work.source} compact />}<span>端末に保存した {group.works.length} 作品</span></small></span>
       </button>)}</div>}
       {(tab === "works" || selected) && visibleWorks.length > 0 && <VirtualWorkList listKey={`offline:${tab}:${selectedGroup ?? ""}:${query}:${rememberedSort}:${currentPage}`} items={pagedWorks} itemKey={(item) => item.work.id} renderItem={(item) => <div className="offline-row">
         <WorkCard work={item.work} offline offlineAuthorCover={item.hasAuthorCover} snapshotGeneration={item.savedAtMs} onRead={() => onOpenWork(item)} onDetail={() => onOpenDetail(item)} prefix={`${item.pageCount} ページ`} />

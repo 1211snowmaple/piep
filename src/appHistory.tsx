@@ -14,6 +14,8 @@ export type LibraryPage = {
   queries: { people: string; series: string; collections: string; members: string };
   listPage: number;
   collectionId: string | null;
+  /** 読みかけは検索条件ではなく、この端末の読書記録から並べる。 */
+  shelf: "reading" | null;
 };
 
 export type EntityPageState = {
@@ -36,7 +38,7 @@ export type ReaderOverlay = { kind: "online"; work: PcWork } | { kind: "offline"
 export type AppEntry = { id: number; page: AppPage; detail: SelectedWork | null; reader: ReaderOverlay | null };
 export type EntryPatch = Partial<Omit<AppEntry, "id">>;
 
-export const homePage: LibraryPage = { name: "library", tab: "works", criteria: defaultPcSearch, queries: { people: "", series: "", collections: "", members: "" }, listPage: 1, collectionId: null };
+export const homePage: LibraryPage = { name: "library", tab: "works", criteria: defaultPcSearch, queries: { people: "", series: "", collections: "", members: "" }, listPage: 1, collectionId: null, shelf: null };
 
 export function entityPage(kind: EntityKind, source: string, key: string, displayName: string): EntityPageState {
   return { name: "entity", kind, source, key, displayName, tab: "works", query: "", tags: [], seriesQuery: "", listPage: 1 };
@@ -44,7 +46,7 @@ export function entityPage(kind: EntityKind, source: string, key: string, displa
 
 /** 別の場所かどうか。同じ場所の絞り込みや上に重ねた面では、スクロール位置を動かさない。 */
 function placeOf(page: AppPage): string {
-  if (page.name === "library") return `library:${page.tab}:${page.collectionId ?? ""}:${page.listPage}:${JSON.stringify(page.criteria)}:${JSON.stringify(page.queries)}`;
+  if (page.name === "library") return `library:${page.shelf ?? ""}:${page.tab}:${page.collectionId ?? ""}:${page.listPage}:${JSON.stringify(page.criteria)}:${JSON.stringify(page.queries)}`;
   if (page.name === "offline") return `offline:${page.tab}:${page.groupId ?? ""}`;
   if (page.name === "entity") return `entity:${page.kind}:${page.source}:${page.key}:${page.tab}:${page.listPage}`;
   return page.name;
