@@ -47,6 +47,46 @@ fn check_frames(frames: image::Frames<'_>) -> Result<(), ClientError> {
     Ok(())
 }
 
+/// 画面へ出す前の検査。保存と同じ上限を見るが、画像は WebView がどのみち展開するので
+/// 一枚ごとに全画素を展開はしない。枚数の多い動く画像だけは中身を数える。
+pub(super) fn validate_display_image(bytes: &[u8], mime: &str) -> Result<(), ClientError> {
+    let expected = match mime {
+        "image/jpeg" => ImageFormat::Jpeg,
+        "image/png" => ImageFormat::Png,
+        "image/gif" => ImageFormat::Gif,
+        "image/webp" => ImageFormat::WebP,
+        // 大きさを確かめる手段がない形式は、保存と同じく通さない。
+        _ => return Err(invalid_image()),
+    };
+    if image::guess_format(bytes).map_err(|_| invalid_image())? != expected {
+        return Err(invalid_image());
+    }
+    let cursor = Cursor::new(bytes);
+    match expected {
+        ImageFormat::Gif => {
+            let mut decoder = image::codecs::gif::GifDecoder::new(cursor).map_err(|_| invalid_image())?;
+            check_decoder(&mut decoder)?;
+            check_frames(decoder.into_frames())
+        }
+        ImageFormat::WebP => {
+            let mut decoder = image::codecs::webp::WebPDecoder::new(cursor).map_err(|_| invalid_image())?;
+            check_decoder(&mut decoder)?;
+            if decoder.has_animation() {
+                return check_frames(decoder.into_frames());
+            }
+            Ok(())
+        }
+        ImageFormat::Png => {
+            let mut decoder = image::codecs::png::PngDecoder::with_limits(cursor, limits()).map_err(|_| invalid_image())?;
+            check_decoder(&mut decoder)
+        }
+        _ => {
+            let mut decoder = image::codecs::jpeg::JpegDecoder::new(cursor).map_err(|_| invalid_image())?;
+            check_decoder(&mut decoder)
+        }
+    }
+}
+
 pub(super) fn validate_saved_image(bytes: &[u8], mime: &str) -> Result<(), ClientError> {
     if mime == "image/avif" {
         return Err(ClientError {

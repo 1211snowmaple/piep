@@ -10,7 +10,9 @@ import { ReaderBehaviorControls, ReaderTypeControls } from "./ReaderSettings";
 import { fillDocumentImages, safePageHtml } from "./readerDocument";
 import { readerKeyDirection } from "./readerKeyboard";
 import { readRemotePosition, recordReading, refreshReading, refreshReadingWithin, remoteStart, sendReading, type ReadingWrite, type RemoteStart } from "./readingSync";
-import { getOfflineAsset, getOfflineOutline, getOfflinePage, getPcAsset, getPcMetadata, getPcOutline, getPcPage, getPcWorkCollections, pcErrorMessage, saveOfflineWork, type PcCollection, type PcMetadata, type PcOutlineEntry, type PcPage, type PcWork } from "./pcApi";
+import { forgetWorkPages, fetchPage, prefetchPage } from "./pageCache";
+import { illustrationUrl } from "./images";
+import { getOfflineAsset, getOfflineOutline, getOfflinePage, getPcMetadata, getPcOutline, getPcWorkCollections, pcErrorMessage, saveOfflineWork, type PcCollection, type PcMetadata, type PcOutlineEntry, type PcPage, type PcWork } from "./pcApi";
 import type { ReaderBehavior, ReaderFont, ReaderLayout, ReaderType } from "./readerPrefs";
 
 function offlineSnapshotChanged(error: unknown): boolean {
@@ -31,7 +33,10 @@ function savedPage(work: PcWork, editHash: string | null): number {
 }
 
 // サーバーの位置を待つのは開くときの一瞬だけ。遅ければ手元の位置で開き、あとで案内する。
-const SYNC_WAIT_MS = 1500;
+// 同期を待つのは短く。間に合わなければ手元の位置で開き、本文を先に出す。
+const SYNC_WAIT_MS = 600;
+// 今のページを描き終えてから、次のページを受け取り始める。
+const PREFETCH_DELAY_MS = 300;
 const WRITE_DELAY_MS = 3000;
 
 function localReadingTime(work: PcWork, editHash: string | null): number {
@@ -169,6 +174,7 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
     pendingRestore.current = readSavedPosition(metadata.work, metadata.activeEditHash);
     pendingOutline.current = null;
     syncedPage.current = null;
+    forgetWorkPages(work.id);
     setOutline([]);
     setDetailWork(metadata.work);
     setIsEdited(metadata.isEdited);
@@ -178,9 +184,40 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
     return true;
   };
 
+  /**
+   * 本文を受け取り、今の版のものか確かめる。別の版だったら null を返す（読み直しは adoptRevision が始める）。
+   * サーバーが版を本文に添えるので、確かめるための往復は増えない。添えない古いサーバーにだけ一度尋ねる。
+   */
+  const readPage = async (target: number): Promise<PcPage | null> => {
+    const next = await fetchPage(work.id, target);
+    const revision = next.revision;
+    if (revision && revision.currentVersion === readingWork.currentVersion && revision.contentHash === readingWork.contentHash && revision.activeEditHash === activeEditHash) return next;
+    const metadata = await getPcMetadata(work.id);
+    if (adoptRevision(metadata)) return null;
+    if (!revision) return next;
+    // 版は変わっていない。覚えていた本文のほうが古かった。
+    forgetWorkPages(work.id);
+    return fetchPage(work.id, target);
+  };
+
+  /** 次に読まれるページを先に受け取る。今のページの描画が済んでから。 */
+  const prefetchNext = (shown: PcPage) => {
+    if (offline || shown.page + 1 >= shown.pageCount) return;
+    window.setTimeout(() => prefetchPage(work.id, shown.page + 1), PREFETCH_DELAY_MS);
+  };
+
+  const imageSource = (assetId: number, width: number, generation: string | null): string | Promise<string> => {
+    if (offline) return getOfflineAsset(work.id, assetId, generation!).then((asset) => `data:${asset.mimeType};base64,${asset.base64}`);
+    const url = illustrationUrl(work.id, assetId, width, readingWork.currentVersion, readingWork.contentHash);
+    if (!url) throw new Error("画像を読み込めません");
+    return url;
+  };
+
   useEffect(() => {
     if (offline) return;
     let alive = true;
+    // 版と同期の確認を待つあいだに本文も受け取っておく。位置が同じなら待ち時間がなくなる。
+    prefetchPage(work.id, savedPage(work, null));
     void Promise.all([getPcMetadata(work.id), refreshReadingWithin(SYNC_WAIT_MS)]).then(async ([metadata]) => {
       const start = await remoteStartFor(metadata.work, metadata.activeEditHash);
       if (!alive) return;
@@ -325,8 +362,9 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
     const saved = pendingRestore.current?.page === pageIndex ? pendingRestore.current : null;
     const threshold = (saved?.top ?? 0) + viewport.clientHeight;
     // Only images before the restored reading position (or outline heading)
-    // need to settle. Later illustrations may continue loading while reading.
-    const critical = images.filter((image) => outlineTarget
+    // need to settle, and only when their height is unknown. The server sends
+    // width and height, so sized images already hold their final space.
+    const critical = images.filter((image) => !image.hasAttribute("width")).filter((image) => outlineTarget
       ? Boolean(image.compareDocumentPosition(outlineTarget) & Node.DOCUMENT_POSITION_FOLLOWING)
       : image.getBoundingClientRect().top - viewport.getBoundingClientRect().top + viewport.scrollTop <= threshold);
     let frame = 0;
@@ -518,10 +556,6 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
     let alive = true;
     void (async () => {
       try {
-        if (!offline) {
-          const before = await getPcMetadata(work.id);
-          if (!alive || adoptRevision(before)) return;
-        }
         const entries = await (offline ? getOfflineOutline(work.id, offlineGeneration!) : getPcOutline(work.id));
         if (!alive) return;
         if (!offline) {
@@ -557,12 +591,8 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
     setAssetsReady(false);
     void (async () => {
       try {
-        if (!offline) {
-          const before = await getPcMetadata(work.id);
-          if (cancelled || adoptRevision(before)) return;
-        }
-        const next = await (offline ? getOfflinePage(work.id, pageIndex) : getPcPage(work.id, pageIndex));
-        if (cancelled) return;
+        const next = await (offline ? getOfflinePage(work.id, pageIndex) : readPage(pageIndex));
+        if (cancelled || !next) return;
         if (guidedPage.current) {
           guidedPage.current = false;
           if (pageIndex !== 0 && (pageIndex >= next.pageCount || next.page !== pageIndex)) {
@@ -576,44 +606,35 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
           if (!pageGeneration) throw new Error("保存済み作品の版を確認できませんでした。もう一度読み込んでください");
           setOfflineGeneration(pageGeneration);
         }
-        if (!offline) {
-          const after = await getPcMetadata(work.id);
-          if (cancelled || adoptRevision(after)) return;
-        }
         setPage(next);
         if (next.page !== pageIndex) setPageIndex(next.page);
         const clean = safePageHtml(next.html);
         setHtml(clean);
         setLoading(false);
+        prefetchNext(next);
         // Let React mount the sanitized document before filling its images.
         await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
         if (cancelled) return;
         const viewport = scrollRef.current;
         setImageResolutionDone(true);
         if (!viewport) return;
-        const result = await fillDocumentImages({
+        await fillDocumentImages({
           root: viewport,
-          loadAsset: (assetId) => offline ? getOfflineAsset(work.id, assetId, pageGeneration!) : getPcAsset(work.id, assetId),
+          scroller: viewport,
+          source: (assetId, width) => imageSource(assetId, width, pageGeneration),
           isCancelled: () => cancelled,
           isSnapshotChange: (error) => offline && offlineSnapshotChanged(error),
+          onSnapshotChanged: () => {
+            setPage(null);
+            setHtml("");
+            setOfflineGeneration(null);
+            setImageResolutionDone(false);
+            setAssetsReady(false);
+            setLoading(true);
+            setRetry((current) => current + 1);
+          },
           onChange: () => viewport.dispatchEvent(new Event("piep-asset-change")),
         });
-        const snapshotChanged = result === "snapshot_changed";
-        if (cancelled) return;
-        if (snapshotChanged) {
-          setPage(null);
-          setHtml("");
-          setOfflineGeneration(null);
-          setImageResolutionDone(false);
-          setAssetsReady(false);
-          setLoading(true);
-          setRetry((current) => current + 1);
-          return;
-        }
-        if (!cancelled && !offline) {
-          const afterAssets = await getPcMetadata(work.id);
-          if (cancelled || adoptRevision(afterAssets)) return;
-        }
       } catch (error) {
         if (cancelled) return;
         if (guidedPage.current && pageIndex !== 0) {
@@ -809,17 +830,11 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
   };
 
   const loadSection = async (target: number): Promise<LoadedSection | null> => {
-    if (!offline) {
-      const before = await getPcMetadata(work.id);
-      if (adoptRevision(before)) return null;
-    }
-    const next = await (offline ? getOfflinePage(work.id, target) : getPcPage(work.id, target));
+    const next = await (offline ? getOfflinePage(work.id, target) : readPage(target));
+    if (!next) return null;
     const generation = "generation" in next && typeof next.generation === "string" ? next.generation : null;
     if (offline && !generation) throw new Error("保存済み作品の版を確認できませんでした。もう一度読み込んでください");
-    if (!offline) {
-      const after = await getPcMetadata(work.id);
-      if (adoptRevision(after)) return null;
-    }
+    prefetchNext(next);
     return { page: next, html: safePageHtml(next.html), generation };
   };
 
@@ -904,7 +919,7 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
       if (event.touches.length === 1) touchStart.current = { x: event.touches[0].clientX, y: event.touches[0].clientY };
     }} onTouchMove={() => { if (behavior.bars === "auto" && barsShown) setBarsShown(false); }} onTouchEnd={finishHorizontalSwipe}><article className={`reading-paper online-paper reader-font--${fontFamily}${!continuous && enterDirection ? ` reader-enter--${enterDirection}` : ""}`} style={{ maxWidth: `${readerWidth}px`, fontSize: `${fontSize}px`, lineHeight }}>
       {continuous
-        ? activeEditHash !== undefined && <ContinuousDocument key={`${positionKey}:${retry}`} viewportRef={scrollRef} load={loadSection} loadAsset={(assetId, generation) => offline ? getOfflineAsset(work.id, assetId, generation!) : getPcAsset(work.id, assetId)} isSnapshotChange={(error) => offline && offlineSnapshotChanged(error)} onSnapshotChanged={() => setRetry((current) => current + 1)} start={continuousStart} target={continuousTarget} typeKey={`${fontSize}:${lineHeight}:${readerWidth}:${fontFamily}`} header={titleBlock} onInfo={continuousInfo} onPosition={continuousPosition} onCommit={continuousCommit} onLink={openContentLink} onStartRejected={rejectContinuousStart} flushRef={flushContinuous} />
+        ? activeEditHash !== undefined && <ContinuousDocument key={`${positionKey}:${retry}`} viewportRef={scrollRef} load={loadSection} imageSource={imageSource} isSnapshotChange={(error) => offline && offlineSnapshotChanged(error)} onSnapshotChanged={() => setRetry((current) => current + 1)} start={continuousStart} target={continuousTarget} typeKey={`${fontSize}:${lineHeight}:${readerWidth}:${fontFamily}`} header={titleBlock} onInfo={continuousInfo} onPosition={continuousPosition} onCommit={continuousCommit} onLink={openContentLink} onStartRejected={rejectContinuousStart} flushRef={flushContinuous} />
         : <>
           {pageIndex === 0 && titleBlock}
           {loading ? <p>本文を読み込んでいます…</p> : problem ? <div className="reader-error" role="alert"><p>{problem}</p><button onClick={() => setRetry((current) => current + 1)}>もう一度読み込む</button></div> : <div className="online-document" onClick={openContentLink} dangerouslySetInnerHTML={{ __html: html }} />}

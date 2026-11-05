@@ -4,6 +4,7 @@
 //! 小さな上限しか持てず、スクロールで戻るたびに取り直していた。ここではバイト列のまま
 //! WebView へ返し、取得したものは端末に残す。次からはサーバーへ行かずに出せる。
 
+use super::image_validation::validate_display_image;
 use super::{authenticated_get_with_timeout, bounded_response_bytes, PcClientState, ASSET_TIMEOUT, MAX_ASSET_BYTES};
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -16,7 +17,7 @@ use tokio::sync::oneshot;
 
 pub const SCHEME: &str = "pcimg";
 const MAX_REMOTE_REQUESTS: usize = 6;
-/// 表紙は 1 枚 20KB 前後。一万枚強ぶん残せる。
+/// 表紙は 1 枚 20KB 前後。挿絵は端末の幅に縮めて数百 KB。合わせて読み返しの分を残せる。
 const MAX_CACHE_BYTES: u64 = 300 * 1024 * 1024;
 const TRIMMED_CACHE_BYTES: u64 = 240 * 1024 * 1024;
 /// 版を持たない作者・シリーズの画像は、古くなったら裏で取り直す。
@@ -145,6 +146,11 @@ fn parse_route(path: &str) -> Option<Route> {
     let parts: Vec<&str> = decoded.split('/').collect();
     match parts.as_slice() {
         ["work", id, _version, _hash] => Some(Route::Remote { endpoint: format!("/api/v1/works/{}/cover", positive(id)?), refreshes: false }),
+        // 本文の挿絵。端末の幅を添える。版と内容の印は、改稿後に古い絵を出さないためのキャッシュ鍵。
+        ["asset", id, asset, width, _version, _hash] => {
+            let width: u32 = width.parse().ok().filter(|width| (1..=4096).contains(width))?;
+            Some(Route::Remote { endpoint: format!("/api/v1/works/{}/assets/{}?width={width}", positive(id)?, positive(asset)?), refreshes: false })
+        }
         ["work", id, _version, _hash, "large"] => Some(Route::Remote { endpoint: format!("/api/v1/works/{}/cover?size=large", positive(id)?), refreshes: false }),
         ["entity", kind @ ("people" | "series"), source @ ("pixiv" | "fanbox"), key, rest @ ..] if rest.is_empty() || rest == ["banner"] => {
             let key = percent_decode(key)?;
@@ -227,6 +233,8 @@ async fn fetch<R: Runtime>(app: &AppHandle<R>, endpoint: &str) -> Result<(String
         .ok_or(StatusCode::BAD_GATEWAY)?
         .to_string();
     let bytes = bounded_response_bytes(response, MAX_ASSET_BYTES).await.map_err(|_| StatusCode::BAD_GATEWAY)?;
+    // 圧縮後は小さくても、展開すると端末のメモリを食い尽くす画像がある。
+    validate_display_image(&bytes, &mime).map_err(|_| StatusCode::BAD_GATEWAY)?;
     Ok((mime, bytes))
 }
 
@@ -301,6 +309,9 @@ mod tests {
         assert_eq!(parse_route("/entity%2Fpeople%2Fpixiv%2Fa%252Fb"), Some(Route::Remote { endpoint: "/api/v1/entities/people/cover?source=pixiv&key=a%2Fb".into(), refreshes: true }));
         assert_eq!(parse_route("/entity%2Fpeople%2Fpixiv%2Fa%2Fbanner"), Some(Route::Remote { endpoint: "/api/v1/entities/people/cover?source=pixiv&key=a&variant=banner".into(), refreshes: true }));
         assert_eq!(parse_route("/collection%2Fabc-1%2Ftile-2%2F4"), Some(Route::Remote { endpoint: "/api/v1/collections/abc-1/cover/tile-2".into(), refreshes: false }));
+        assert_eq!(parse_route("/asset%2F12%2F5%2F1080%2F3%2Fabc"), Some(Route::Remote { endpoint: "/api/v1/works/12/assets/5?width=1080".into(), refreshes: false }));
+        assert_eq!(parse_route("/asset%2F12%2F5%2F99999%2F3%2Fabc"), None);
+        assert_eq!(parse_route("/asset%2F12%2F-5%2F1080%2F3%2Fabc"), None);
         assert_eq!(parse_route("/saved%2F7%2F99"), Some(Route::SavedCover { work_id: 7 }));
         for bad in ["/work%2F0%2F1%2Fa", "/work%2F-1%2F1%2Fa", "/entity%2Fpeople%2Fother%2Fa", "/entity%2Fother%2Fpixiv%2Fa", "/collection%2F..%2Ffile%2F1", "/collection%2Fa%2Ftile-4%2F1", "/etc%2Fpasswd", "/%zz"] {
             assert_eq!(parse_route(bad), None, "{bad}");

@@ -27,7 +27,11 @@ const ASSET_TIMEOUT: Duration = Duration::from_secs(60);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
 // 回線が切り替わると、使い回す接続は黙って死ぬ。長く持ち越さない。
-const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(20);
+// 読んでいるあいだは数十秒おきにしか要求しない。そのたびに接続し直すと、ページ送りごとに TLS の往復が増える。
+const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
+// HTTP/2 は一本の接続に要求を載せる。切れた接続に気づかないと全部が待たされるので、確かめ続ける。
+const HTTP2_PING_INTERVAL: Duration = Duration::from_secs(15);
+const HTTP2_PING_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_ASSET_BYTES: usize = 25 * 1024 * 1024;
 const MAX_JSON_BYTES: usize = 16 * 1024 * 1024;
 const MAX_NUMBERED_OFFSET: i64 = 5_000;
@@ -456,6 +460,9 @@ fn pinned_client(certificate: &[u8]) -> Result<reqwest::Client, ClientError> {
         .no_proxy()
         .connect_timeout(CONNECT_TIMEOUT)
         .pool_idle_timeout(POOL_IDLE_TIMEOUT)
+        .http2_keep_alive_interval(HTTP2_PING_INTERVAL)
+        .http2_keep_alive_timeout(HTTP2_PING_TIMEOUT)
+        .http2_keep_alive_while_idle(true)
         .timeout(REQUEST_TIMEOUT)
         .build()
         .map_err(|_| ClientError::certificate_changed())
@@ -473,6 +480,9 @@ fn trusted_client() -> Result<reqwest::Client, ClientError> {
         .no_proxy()
         .connect_timeout(CONNECT_TIMEOUT)
         .pool_idle_timeout(POOL_IDLE_TIMEOUT)
+        .http2_keep_alive_interval(HTTP2_PING_INTERVAL)
+        .http2_keep_alive_timeout(HTTP2_PING_TIMEOUT)
+        .http2_keep_alive_while_idle(true)
         .timeout(REQUEST_TIMEOUT)
         .build()
         .map_err(|_| ClientError::offline())
@@ -984,8 +994,15 @@ pub async fn pc_search_works(
     cursor: Option<String>,
     offset: Option<i64>,
     scope: Option<PcWorkScope>,
+    limit: Option<i64>,
 ) -> Result<SearchPage, ClientError> {
-    let payload = search_payload(&criteria, cursor, offset, scope)?;
+    if limit.is_some_and(|value| !(1..=50).contains(&value)) {
+        return Err(ClientError::remote());
+    }
+    let mut payload = search_payload(&criteria, cursor, offset, scope)?;
+    if let Some(limit) = limit {
+        payload["limit"] = serde_json::json!(limit);
+    }
     let saved = state.load()?.ok_or_else(ClientError::invalid_pairing)?;
     let client = state.client(&saved)?;
     let response = client
@@ -1332,6 +1349,17 @@ pub struct MobilePage {
     html: String,
     total_plain_text_chars: usize,
     source_page_starts: Vec<usize>,
+    /// この本文の版。古いサーバーは返さない。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    revision: Option<MobileRevision>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MobileRevision {
+    current_version: i64,
+    content_hash: Option<String>,
+    active_edit_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1437,24 +1465,6 @@ async fn image_response(response: reqwest::Response) -> Result<MobileAssetData, 
         mime_type,
         base64: STANDARD.encode(bytes),
     })
-}
-
-#[tauri::command]
-pub async fn pc_get_asset(
-    state: State<'_, PcClientState>,
-    work_id: i64,
-    asset_id: i64,
-) -> Result<MobileAssetData, ClientError> {
-    if work_id <= 0 || asset_id <= 0 {
-        return Err(ClientError::remote());
-    }
-    let response = authenticated_get_with_timeout(
-        &state,
-        &format!("/api/v1/works/{work_id}/assets/{asset_id}"),
-        ASSET_TIMEOUT,
-    )
-    .await?;
-    image_response(response).await
 }
 
 #[cfg(test)]

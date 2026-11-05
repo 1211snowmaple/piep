@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef } from "react";
-import { keepPreviousData, useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
+import { keepPreviousData, useInfiniteQuery, useQuery, useQueryClient, useQueries } from "@tanstack/react-query";
 import { WorkCard, WorkCardSkeleton, type SavedState } from "./WorkCard";
 import { VirtualWorkList } from "./VirtualWorkList";
-import { getPcMetadata, listOfflineWorks, pcErrorMessage, searchPcWorks, type PcSearchPage, type PcWork, type PcWorkScope, type PcWorkSearch } from "./pcApi";
+import { getPcMetadata, sameWork, listOfflineWorks, pcErrorMessage, searchPcWorks, type PcSearchPage, type PcWork, type PcWorkScope, type PcWorkSearch } from "./pcApi";
 
 export const statusQueryKey = ["pc-status"] as const;
 const pageSize = 20;
@@ -126,24 +126,55 @@ export function useSavedWorks(savedRevision: number) {
   return useQuery({ queryKey: ["offline-works", savedRevision], queryFn: listOfflineWorks, placeholderData: keepPreviousData, staleTime: Infinity }).data ?? [];
 }
 
-/** 一覧の作品それぞれの保存状態。端末に保存した作品だけ、編集版が変わっていないかを問い合わせる。 */
+// 保存状態の確認で本文の要求を押しのけない。
+const maxSavedChecks = 4;
+let runningSavedChecks = 0;
+const waitingSavedChecks: (() => void)[] = [];
+
+async function oneAtATurn<T>(work: () => Promise<T>): Promise<T> {
+  if (runningSavedChecks >= maxSavedChecks) await new Promise<void>((resolve) => waitingSavedChecks.push(resolve));
+  else runningSavedChecks += 1;
+  try { return await work(); }
+  finally {
+    const next = waitingSavedChecks.shift();
+    if (next) next(); else runningSavedChecks -= 1;
+  }
+}
+
+/**
+ * 一覧の作品それぞれの保存状態。版が同じに見える保存済みの作品だけ、編集版が変わっていないかを問い合わせる。
+ * 結果は作品と版ごとに覚えるので、一覧を読み足しても確かめ済みの作品を尋ね直さない。
+ */
 export function useSavedStates(items: PcWork[], savedRevision: number, reachable: boolean) {
   const savedWorks = useSavedWorks(savedRevision);
   const savedById = useMemo(() => new Map(savedWorks.map((item) => [item.work.id, item])), [savedWorks]);
-  const savedVisible = useMemo(() => items.filter((work) => savedById.has(work.id)).map((work) => work.id), [items, savedById]);
-  const editHashes = useQuery({
-    queryKey: ["saved-edit-hashes", savedVisible],
-    enabled: reachable && savedVisible.length > 0,
-    placeholderData: keepPreviousData,
-    queryFn: async () => {
-      const responses = await Promise.allSettled(savedVisible.map(async (id) => [id, (await getPcMetadata(id)).activeEditHash] as const));
-      return Object.fromEntries(responses.flatMap((response) => response.status === "fulfilled" ? [response.value] : [])) as Record<number, string | null>;
-    },
-  }).data ?? {};
-  return (work: PcWork): SavedState | null => {
+  const savedFor = (work: PcWork) => {
     const saved = savedById.get(work.id);
+    return saved && sameWork(saved.work, work) ? saved : null;
+  };
+  const sameVersion = (work: PcWork, saved: { savedVersion: number; savedContentHash: string | null }) => work.currentVersion === saved.savedVersion && work.contentHash === saved.savedContentHash;
+  const toCheck = items.filter((work) => {
+    const saved = savedFor(work);
+    return saved ? sameVersion(work, saved) : false;
+  });
+  const editHashes = useQueries({
+    queries: toCheck.map((work) => ({
+      queryKey: ["saved-edit-hash", work.id, work.currentVersion, work.contentHash],
+      queryFn: () => oneAtATurn(() => getPcMetadata(work.id)).then((metadata) => metadata.activeEditHash),
+      enabled: reachable,
+      staleTime: 5 * 60_000,
+    })),
+    combine: (results) => {
+      const known = new Map<number, string | null>();
+      results.forEach((result, index) => { if (result.data !== undefined) known.set(toCheck[index].id, result.data); });
+      return known;
+    },
+  });
+  return (work: PcWork): SavedState | null => {
+    const saved = savedFor(work);
     if (!saved) return null;
-    return { changed: work.currentVersion !== saved.savedVersion || work.contentHash !== saved.savedContentHash || (Object.prototype.hasOwnProperty.call(editHashes, work.id) && editHashes[work.id] !== saved.savedEditHash) };
+    const known = editHashes.get(work.id);
+    return { changed: !sameVersion(work, saved) || (known !== undefined && known !== saved.savedEditHash) };
   };
 }
 

@@ -7,6 +7,8 @@ function imageUrl(path: string): string | null {
 }
 
 export const workCoverUrl = (work: PcWork, large = false) => imageUrl(`work/${work.id}/${work.currentVersion}/${work.contentHash ?? ""}${large ? "/large" : ""}`);
+/** 本文の挿絵。認証は Rust 側で済ませ、JavaScript には鍵も画像の中身も渡らない。 */
+export const illustrationUrl = (workId: number, assetId: number, width: number, version: number, contentHash: string | null) => imageUrl(`asset/${workId}/${assetId}/${width}/${version}/${contentHash ?? ""}`);
 export const workCoverUrlById = (workId: number, revision: number) => imageUrl(`work/${workId}/c${revision}/`);
 export const entityCoverUrl = (kind: "people" | "series", source: string, key: string, banner = false) => imageUrl(`entity/${kind}/${source}/${encodeURIComponent(key)}${banner ? "/banner" : ""}`);
 export const collectionCoverUrl = (collectionId: string, slot: string, revision: number) => imageUrl(`collection/${collectionId}/${slot}/${revision}`);

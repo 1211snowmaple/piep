@@ -17,6 +17,8 @@ import { OfflineLibrary } from "./OfflineLibrary";
 import { WorkDetail } from "./WorkDetail";
 import { EntityPage } from "./EntityPage";
 import { homePage, NavigationProvider, useAppHistory, type LibraryPage } from "./appHistory";
+import { forgetAllPages } from "./pageCache";
+import { setReadingServer } from "./recentReading";
 import { statusQueryKey } from "./workList";
 import { defaultPcSearch, getPcStatus, type OfflineWork, type PcConnectionStatus, type PcSearchCriteria, type PcWork } from "./pcApi";
 import { handleReaderKeyboard } from "./readerKeyboard";
@@ -92,7 +94,7 @@ const sections: { id: Section; label: string; icon: IconName }[] = [
 
 function App() {
   const mainRef = useRef<HTMLElement>(null);
-  const { entry, depth, push, replace, back } = useAppHistory(mainRef);
+  const { entry, depth, push, replace, back, restart } = useAppHistory(mainRef);
   const currentPage = entry.page;
   const section: Section = currentPage.name === "offline" ? "offline" : currentPage.name === "settings" ? "settings" : "pc";
   // 本棚を離れても、戻ったときの条件は保つ。
@@ -131,6 +133,20 @@ function App() {
   const setPcConnection = useCallback((next: PcConnectionStatus | null | ((old: PcConnectionStatus | null) => PcConnectionStatus | null)) => {
     queryClient.setQueryData<PcConnectionStatus | null>(statusQueryKey, (old) => typeof next === "function" ? next(old ?? null) : next);
   }, [queryClient]);
+  // 接続先が変わったら、前のサーバーの一覧・カーソル・詳細・本文を引きずらない。
+  const serverUrl = statusQuery.data === undefined ? undefined : statusQuery.data?.url ?? null;
+  const shownServer = useRef(serverUrl);
+  useEffect(() => {
+    if (serverUrl === undefined) return;
+    setReadingServer(serverUrl);
+    const previous = shownServer.current;
+    shownServer.current = serverUrl;
+    if (previous === undefined || previous === serverUrl) return;
+    forgetAllPages();
+    restart();
+    const fromServer = (query: { queryKey: readonly unknown[] }) => query.queryKey[0] !== statusQueryKey[0] && query.queryKey[0] !== "offline-works";
+    void queryClient.cancelQueries({ predicate: fromServer }).then(() => queryClient.resetQueries({ predicate: fromServer }));
+  }, [serverUrl, queryClient, restart]);
   const [appUpdate, setAppUpdate] = useAppUpdate();
   const [page, setPage] = useState(() => storedNumber(positionKey, 0, 0, preview.pages.length - 1));
   // 選んだときだけ保存する。保存しておかなければ、既定を変えたときにそのまま効く。

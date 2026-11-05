@@ -7,6 +7,8 @@ export interface RecentWork {
   /** 0 から 1。 */
   progress: number;
   finished: boolean;
+  /** 読んだときの接続先。作品の番号はサーバーごとに振られるので、別のサーバーの棚に混ぜない。 */
+  server?: string;
 }
 
 const storageKey = "piep.android.reading.recent.v1";
@@ -22,14 +24,29 @@ function read(): RecentWork[] {
   } catch { return []; }
 }
 
+// まだ接続先が分からないあいだは棚を出さない。
+let currentServer: string | null = null;
+
+/** 接続先が変わったら呼ぶ。接続先を記録していない古い履歴は、最初に分かった接続先のものとして扱う。 */
+export function setReadingServer(server: string | null): void {
+  if (server === currentServer) return;
+  currentServer = server;
+  lastWrite = { id: 0, at: 0 };
+  window.clearTimeout(trailing);
+  window.dispatchEvent(new CustomEvent(changedEvent));
+}
+
+const fromThisServer = (entry: RecentWork) => currentServer !== null && (entry.server === undefined || entry.server === currentServer);
+
 let lastWrite = { id: 0, at: 0 };
 let trailing: number | undefined;
 
 function write(work: PcWork, progress: number, finished: boolean, now: number): void {
   const entries = read();
-  if (!entries.some((entry) => entry.work.id === work.id) && !finished && progress <= 0.002) return;
+  const same = (entry: RecentWork) => fromThisServer(entry) && entry.work.id === work.id;
+  if (!entries.some(same) && !finished && progress <= 0.002) return;
   lastWrite = { id: work.id, at: now };
-  const next = [{ work, at: now, progress, finished }, ...entries.filter((entry) => entry.work.id !== work.id)].slice(0, maxEntries);
+  const next = [{ work, at: now, progress, finished, server: currentServer ?? undefined }, ...entries.filter((entry) => !same(entry))].slice(0, maxEntries);
   try { window.localStorage.setItem(storageKey, JSON.stringify(next)); } catch { return; }
   window.dispatchEvent(new CustomEvent(changedEvent));
 }
@@ -49,9 +66,10 @@ export function rememberReading(work: PcWork, progress: number, finished: boolea
 
 /** 読み終えたものは棚から外す。新しく読んだ順。 */
 export function useReadingShelf(): RecentWork[] {
-  const [items, setItems] = useState(() => read().filter((entry) => !entry.finished));
+  const shelf = () => read().filter((entry) => !entry.finished && fromThisServer(entry));
+  const [items, setItems] = useState(shelf);
   useEffect(() => {
-    const update = () => setItems(read().filter((entry) => !entry.finished));
+    const update = () => setItems(shelf());
     window.addEventListener(changedEvent, update);
     return () => window.removeEventListener(changedEvent, update);
   }, []);
