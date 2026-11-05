@@ -82,6 +82,7 @@ describe("ServerSection", () => {
     api.serverStatus.mockResolvedValue(status());
     api.serverEmbeddedStart.mockResolvedValue(status({ embeddedRunning: true, embeddedUrl: "https://192.168.1.10:38777/" }));
     renderSection();
+    fireEvent.click(await screen.findByRole("radio", { name: "この PC" }));
     const start = await screen.findByRole("button", { name: "開始" });
     await waitFor(() => expect((start as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(start);

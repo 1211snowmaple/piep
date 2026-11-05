@@ -3,6 +3,7 @@ import { ActionIcon, Avatar, Badge, Card, Group, Menu, Text, Tooltip, UnstyledBu
 import { modals } from "@mantine/modals";
 import { notifications } from "@mantine/notifications";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { EpubQueueGlyph } from "@/components/EpubQueueGlyph";
 import { Icons, IconSize } from "@/lib/icons";
 import { useAppNavigate } from "@/app/router";
 import { useWorkspace } from "@/app/WorkspaceContext";
@@ -502,7 +503,7 @@ function WorkActions({ work, queued, onQueue, onToggleFavorite, onToggleWatch }:
           naming what the button does. Green is the "ep" half of the wordmark. */}
       <Tooltip label={queueLabel}>
         <ActionIcon variant="subtle" color={queued ? "leaf" : "gray"} style={{ "--ai-color": queued ? "var(--flag-epub)" : "var(--flag-off)", "--ai-bg": queued ? "var(--flag-epub-bg)" : "transparent" }} size="md" aria-label={`${work.title}：${queueLabel}`} aria-pressed={queued} onClick={onQueue}>
-          <Icons.epubAdd size={IconSize.action} />
+          <EpubQueueGlyph queued={queued} />
         </ActionIcon>
       </Tooltip>
       <Menu position="bottom-end" withinPortal>

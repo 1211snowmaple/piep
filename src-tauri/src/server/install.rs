@@ -3,6 +3,7 @@
 //! 外へどう出すかは利用者が決める。特定の製品を検出も実行もしない。
 
 use super::standalone::{command_admin_pair, ServerPaths};
+use super::store::ServerStore;
 use super::update::{current_version, write_atomic, VERSION};
 use super::watchdog::ReadyMark;
 use std::fs;
@@ -407,7 +408,8 @@ pub fn lay_out(
 
 /// `piep-server install` の本体。登録文字列を返す。
 #[cfg(windows)]
-async fn install_inner(options: InstallOptions) -> Result<String, String> {
+/// 入れ直しで管理者がすでにいれば、登録文字列は出さない。
+async fn install_inner(options: InstallOptions) -> Result<Option<String>, String> {
     let no_task = options.no_task;
     let (root, exposure, url) = complete_options(options)?;
     let fresh = !root.exists();
@@ -435,7 +437,10 @@ async fn install_inner(options: InstallOptions) -> Result<String, String> {
         println!();
         println!("動き始めました。この PC を起動すると、自動で動きます。");
     }
-    command_admin_pair(&paths.root, url).await
+    if ServerStore::open(&paths.store())?.has_admin()? {
+        return Ok(None);
+    }
+    command_admin_pair(&paths.root, url, false).await.map(Some)
 }
 
 /// 引数なしで開いたときも、ここへ来る。
@@ -451,7 +456,12 @@ pub async fn command_install(
     }
     println!("piep-server {VERSION} を入れます。");
     match install_inner(options).await {
-        Ok(payload) => Ok(Some(payload)),
+        Ok(Some(payload)) => Ok(Some(payload)),
+        Ok(None) => {
+            println!("管理者は登録済みなので、そのまま使えます。");
+            pause_if_own_window(interactive);
+            Ok(None)
+        }
         Err(error) => {
             eprintln!("{error}");
             pause_if_own_window(interactive);

@@ -221,7 +221,8 @@ DB の形は、表と列を足す形で進めてきた（`schema.rs` の `ADD CO
 
 1. サーバーで `piep-server init --data <データの置き場>` を実行する。設定ファイルを作り、**管理者用の
    登録文字列**をその場の画面にだけ出す。有効期限は 30 分で、一度だけ使える。出し直すときは
-   `piep-server admin-pair` を使う。段階 2 までは、前の管理者の鍵はそこで失効する。段階 3 からは追加になり、
+   `piep-server admin-pair` を使う。段階 2 までは、前の管理者の鍵は新しい登録の時点で失効するので、
+   すでに管理者がいるときは `--replace` を求める。段階 3 からは追加になり、
    2 台目以降の PC はデスクトップ版の画面からも追加できる。
 2. デスクトップ版の「設定 → サーバー（β）」の「別の機械のサーバーにつなぐ」に貼る。
 3. 以後、携帯の登録と解除はデスクトップ版から行う。「携帯を追加」を押すと、サーバーが 10 分だけ有効な
@@ -308,7 +309,7 @@ WebView を持たない常駐プログラム。本体は `piep_lib::server::stan
 | `piep-server init --data <dir>` | 置き場と設定を作り、管理者用の登録文字列を出す |
 | `piep-server serve --data <dir>` | 見張り役として本体を起動し、落ちたら立ち上げ直し、更新を当てる（`install` を通していなければ本体を直接動かす） |
 | `piep-server run --data <dir>` | 本体。API を出し、バックアップと定期更新の予定を回す |
-| `piep-server admin-pair --data <dir>` | 管理者用の登録文字列を出し直す |
+| `piep-server admin-pair --data <dir> [--replace]` | 管理者用の登録文字列を出し直す。管理者がいるときは `--replace` が要る |
 | `piep-server status --data <dir>` | 状態（「状態を見る」の節）を出す |
 | `piep-server backup --data <dir>` | スナップショットを今すぐ作る（段階 2） |
 | `piep-server restore --data <dir> <snapshot>` | スナップショットから本棚を戻す（段階 2。`serve` を止めてから） |
