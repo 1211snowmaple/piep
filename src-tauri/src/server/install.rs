@@ -273,35 +273,6 @@ fn run_quiet(program: &str, args: &[&str]) -> Result<(), String> {
     }
 }
 
-/// 中には取得元の鍵と本棚が入る。この機械の他の利用者から読めないようにする。
-#[cfg(windows)]
-fn restrict_access(root: &Path) -> Result<(), String> {
-    let output = Command::new("whoami")
-        .args(["/user", "/fo", "csv", "/nh"])
-        .output()
-        .map_err(|error| format!("利用者を確かめられません: {error}"))?;
-    let text = String::from_utf8_lossy(&output.stdout);
-    let sid = text
-        .trim()
-        .rsplit(',')
-        .next()
-        .map(|field| field.trim_matches('"').to_string())
-        .filter(|field| field.starts_with("S-1-"))
-        .ok_or("利用者を確かめられません")?;
-    let path = root.display().to_string();
-    run_quiet(
-        "icacls",
-        &[
-            &path,
-            "/inheritance:r",
-            "/grant:r",
-            "*S-1-5-18:(OI)(CI)F",
-            "*S-1-5-32-544:(OI)(CI)F",
-            &format!("*{sid}:(OI)(CI)F"),
-        ],
-    )
-}
-
 #[cfg(windows)]
 fn is_elevated() -> bool {
     // SAFETY: 引数を取らず、自分のプロセスのトークンを見るだけである。
@@ -412,16 +383,14 @@ pub fn lay_out(
 async fn install_inner(options: InstallOptions) -> Result<Option<String>, String> {
     let no_task = options.no_task;
     let (root, exposure, url) = complete_options(options)?;
-    let fresh = !root.exists();
     if !no_task {
+        // 断るなら、動いているサーバーを止める前に断る。
+        super::install_acl::secure_install_root(&root)?;
         stop_task();
         // 止まって実行ファイルが解放されるのを少し待つ。
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
     let paths = lay_out(&root, exposure, url.as_deref())?;
-    if fresh && !no_task {
-        restrict_access(&paths.root)?;
-    }
     if no_task {
         println!();
         println!("置きました。次のコマンドを、お使いの仕組みで起動時に動かしてください。");
@@ -430,6 +399,7 @@ async fn install_inner(options: InstallOptions) -> Result<Option<String>, String
             paths.root.join("piep-server.exe").display(),
             paths.root.display()
         );
+        println!("SYSTEM など管理者の権限で動かすときは、このフォルダーを管理者だけが書き換えられるようにしてください。");
     } else {
         let _ = fs::remove_file(paths.ready_mark());
         register_task(&paths)?;
