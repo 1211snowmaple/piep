@@ -1,13 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { BookOpen, CalendarDays, Check, ChevronLeft, ChevronRight, Clock3, Download, FileText, History, Images, Layers, MoreHorizontal, RefreshCw, Trash2 } from "lucide-react";
+import { BookOpen, Check, ChevronLeft, ChevronRight, Download, Heart, Layers, LoaderCircle, MoreHorizontal, RefreshCw, SquarePen, Trash2 } from "lucide-react";
 import { AuthorAvatar } from "./WorkCard";
 import { ProviderMark } from "./ProviderMark";
 import { WorkThumbnail } from "./WorkThumbnail";
+import { WorkFacts, workFacts } from "./WorkFacts";
 import { defaultPcSearch, deleteOfflineWork, getPcMetadata, getPcWorkCollections, listOfflineWorks, pcErrorMessage, saveOfflineWork, type OfflineWork, type PcCollection, type PcWork } from "./pcApi";
 import { homePage, useAppNavigation } from "./appHistory";
 import { hasReadingPosition } from "./OnlineReader";
-import { displayDate, plainText, readingMinutes } from "./workText";
+import { plainText } from "./workText";
 
 export type SelectedWork = { work: PcWork; offline: false } | { work: PcWork; offline: true; snapshot: OfflineWork };
 
@@ -15,8 +16,8 @@ const typeLabels: Record<string, string> = { novel: "小説", article: "記事",
 
 /**
  * 作品の詳細。ここへ来るのは「読む前に確かめたい」か「作者やシリーズへ移りたい」とき。
- * 携帯は片手で届くよう、読むボタンを画面の下に固定し、表紙と題名を中央に置く。
- * 広い画面は左に表紙、右に情報の 2 列にして、操作はデスクトップ版と同じく右下にまとめる。
+ * デスクトップ版と同じく左に表紙、右に見出しを置き、事実は升目にせず一行に流す。
+ * 操作は読むを先頭にして一列に並べ、携帯では片手で届くよう画面の下に固定する。
  */
 export function WorkDetail({ selected, onBack, onRead, onSaved, onRemoved, savedRevision }: {
   selected: SelectedWork;
@@ -50,9 +51,6 @@ export function WorkDetail({ selected, onBack, onRead, onSaved, onRemoved, saved
   const authors = people?.length ? people : work.authorId ? [{ source: work.source, key: work.authorId, role: "", displayName: work.authorName }] : [];
   const series = seriesList?.length ? seriesList : work.seriesTitle ? [{ source: work.source, key: work.seriesId ?? "", title: work.seriesTitle, contentOrder: null }] : [];
   const description = useMemo(() => plainText(work.excerpt), [work.excerpt]);
-  const date = displayDate(work.sourceCreatedAt);
-  const savedDate = displayDate(work.downloadedAt);
-  const minutes = readingMinutes(work.textLength);
   const tags = work.tags ?? [];
   const resume = hasReadingPosition(work, selected.offline ? selected.snapshot.savedEditHash : metadata?.activeEditHash ?? null);
   const outdated = Boolean(online && saved && (work.currentVersion !== saved.savedVersion || work.contentHash !== saved.savedContentHash || (metadata && metadata.activeEditHash !== saved.savedEditHash)));
@@ -95,10 +93,16 @@ export function WorkDetail({ selected, onBack, onRead, onSaved, onRemoved, saved
     </header>
     <main className="detail-scroll">
       <div className="detail-layout">
-        <div className="detail-rail"><div className="detail-cover"><WorkThumbnail work={work} offline={selected.offline} snapshotGeneration={selected.offline ? selected.snapshot.savedAtMs : undefined} variant="detail" /></div></div>
-        <div className="detail-content">
+        <div className="detail-hero">
+          <div className="detail-cover"><WorkThumbnail work={work} offline={selected.offline} snapshotGeneration={selected.offline ? selected.snapshot.savedAtMs : undefined} variant="detail" /></div>
           <div className="detail-heading">
-            <div className="detail-labels"><ProviderMark source={work.source} /><span>{typeLabels[work.contentType] ?? "作品"}</span>{work.favorite && <span>お気に入り</span>}{metadata?.isEdited && <span>編集版</span>}</div>
+            <div className="detail-labels"><ProviderMark source={work.source} /><span>{typeLabels[work.contentType] ?? "作品"}</span>{work.favorite && <span className="detail-label--favorite"><Heart aria-hidden="true" />お気に入り</span>}{metadata?.isEdited && <span><SquarePen aria-hidden="true" />編集版</span>}</div>
+            {series.map((entry) => {
+              const inner = <><Layers aria-hidden="true" /><span>{entry.title}</span>{entry.contentOrder != null && <small>第 {entry.contentOrder} 話</small>}</>;
+              return browsable && entry.key
+                ? <button key={`${entry.source}:${entry.key}`} type="button" className="detail-series" onClick={() => navigation.openEntity("series", entry.source, entry.key, entry.title)}>{inner}</button>
+                : <span key={`${entry.source}:${entry.key || entry.title}`} className="detail-series">{inner}</span>;
+            })}
             <h1>{work.title}</h1>
             <div className="detail-people">
               {authors.map((person) => {
@@ -108,33 +112,23 @@ export function WorkDetail({ selected, onBack, onRead, onSaved, onRemoved, saved
                   : <span key={`${person.source}:${person.key}`} className="detail-person">{inner}</span>;
               })}
             </div>
-            {series.map((entry) => {
-              const inner = <><Layers aria-hidden="true" /><span>{entry.title}</span>{entry.contentOrder != null && <small>第 {entry.contentOrder} 話</small>}</>;
-              return browsable && entry.key
-                ? <button key={`${entry.source}:${entry.key}`} type="button" className="detail-series" onClick={() => navigation.openEntity("series", entry.source, entry.key, entry.title)}>{inner}<ChevronRight aria-hidden="true" /></button>
-                : <span key={`${entry.source}:${entry.key || entry.title}`} className="detail-series">{inner}</span>;
-            })}
           </div>
-          <dl className="detail-stats">
-            <div><dt><FileText aria-hidden="true" />文字数</dt><dd>{work.textLength.toLocaleString("ja-JP")} 字</dd></div>
-            {minutes && <div><dt><Clock3 aria-hidden="true" />読む時間</dt><dd>{minutes}</dd></div>}
-            {work.assetCount > 0 && <div><dt><Images aria-hidden="true" />画像</dt><dd>{work.assetCount.toLocaleString("ja-JP")} 枚</dd></div>}
-            {date && <div><dt><CalendarDays aria-hidden="true" />公開日</dt><dd>{date}</dd></div>}
-            {savedDate && <div><dt><Download aria-hidden="true" />保存日</dt><dd>{savedDate}</dd></div>}
-            {work.currentVersion > 1 && <div><dt><History aria-hidden="true" />版</dt><dd>{work.currentVersion} 版</dd></div>}
-            {selected.offline && <div><dt><BookOpen aria-hidden="true" />ページ</dt><dd>{selected.snapshot.pageCount}</dd></div>}
-          </dl>
+        </div>
+        <div className="detail-content">
+          <WorkFacts items={workFacts(work, selected.offline ? selected.snapshot.pageCount : undefined)} />
           {description && <section className="detail-section" aria-label="概要"><p ref={descriptionRef} className="detail-description" data-expanded={expanded || undefined}>{description}</p>{(clamped || expanded) && <button type="button" className="detail-more" aria-expanded={expanded} onClick={() => setExpanded((open) => !open)}>{expanded ? "閉じる" : "続きを読む"}</button>}</section>}
-          {tags.length > 0 && <section className="detail-section"><h2>タグ</h2><div className="detail-tags">{tags.map((tag, index) => browsable ? <button key={`${tag}:${index}`} type="button" onClick={() => navigation.openTag(tag)}>#{tag}</button> : <span key={`${tag}:${index}`}>#{tag}</span>)}</div></section>}
+          {tags.length > 0 && <div className="detail-tags" aria-label="タグ">{tags.map((tag, index) => browsable ? <button key={`${tag}:${index}`} type="button" onClick={() => navigation.openTag(tag)}>#{tag}</button> : <span key={`${tag}:${index}`}>#{tag}</span>)}</div>}
           {collections.length > 0 && <section className="detail-section"><h2>コレクション</h2><div className="detail-collections">{collections.map((collection) => browsable ? <button key={collection.id} type="button" onClick={() => navigation.push({ page: { ...homePage, criteria: defaultPcSearch, tab: "collections", collectionId: collection.id }, detail: null, reader: null })}>{collection.name}<ChevronRight aria-hidden="true" /></button> : <span key={collection.id}>{collection.name}</span>)}</div></section>}
           {problem && <p className="inline-alert" role="alert">{problem}</p>}
         </div>
       </div>
     </main>
     <footer className="detail-actions">
-      <span className="detail-actions-note">{selected.offline ? "サーバーにつながらなくても読めます" : outdated ? "端末の保存より新しい版があります" : saved ? "端末にも保存済みです" : ""}</span>
-      {online && <button className="secondary-button" type="button" disabled={saving} onClick={() => void save()}>{saving ? "保存中…" : saved ? outdated ? <><RefreshCw aria-hidden="true" />端末を更新</> : <><Check aria-hidden="true" />保存済み</> : <><Download aria-hidden="true" />端末に保存</>}</button>}
-      <button className="primary-button" type="button" onClick={onRead}><BookOpen aria-hidden="true" />{readLabel}</button>
+      <button className="primary-button detail-read" type="button" onClick={onRead}><BookOpen aria-hidden="true" />{readLabel}</button>
+      {online && (saved && !outdated && !saving
+        ? <span className="card-saved card-saved--large" role="img" aria-label="端末に保存済み" title="端末に保存済み"><Check aria-hidden="true" /></span>
+        : <button className="icon-button icon-button--large" type="button" data-tone={outdated ? "warn" : undefined} data-busy={saving || undefined} disabled={saving} aria-label={saving ? "保存しています" : outdated ? "端末の保存を更新" : "端末に保存"} title={outdated ? "端末の保存を更新" : "端末に保存"} onClick={() => void save()}>{saving ? <LoaderCircle aria-hidden="true" /> : outdated ? <RefreshCw aria-hidden="true" /> : <Download aria-hidden="true" />}</button>)}
+      <span className="detail-actions-note">{selected.offline ? "サーバーにつながらなくても読めます" : outdated ? "端末の保存より新しい版があります" : saved ? "端末に保存済みです" : ""}</span>
     </footer>
   </div>;
 }

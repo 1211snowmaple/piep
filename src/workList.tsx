@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef } from "react";
 import { keepPreviousData, useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
-import { WorkCard, WorkCardSkeleton } from "./WorkCard";
+import { WorkCard, WorkCardSkeleton, type SavedState } from "./WorkCard";
 import { VirtualWorkList } from "./VirtualWorkList";
 import { getPcMetadata, listOfflineWorks, pcErrorMessage, searchPcWorks, type PcSearchPage, type PcWork, type PcWorkScope, type PcWorkSearch } from "./pcApi";
 
@@ -126,22 +126,11 @@ export function useSavedWorks(savedRevision: number) {
   return useQuery({ queryKey: ["offline-works", savedRevision], queryFn: listOfflineWorks, placeholderData: keepPreviousData, staleTime: Infinity }).data ?? [];
 }
 
-/** 作品の一覧。読み込み中も枠の形を保ち、前の結果を消さない。 */
-export function WorkResults({ list, savedRevision, reachable, onOpenWork, onOpenDetail, onPage, emptyTitle, emptyHint, omit }: {
-  list: WorkList;
-  savedRevision: number;
-  reachable: boolean;
-  onOpenWork: (work: PcWork) => void;
-  onOpenDetail: (work: PcWork) => void;
-  onPage: (page: number) => void;
-  emptyTitle: string;
-  emptyHint: string;
-  omit?: "author" | "series";
-}) {
+/** 一覧の作品それぞれの保存状態。端末に保存した作品だけ、編集版が変わっていないかを問い合わせる。 */
+export function useSavedStates(items: PcWork[], savedRevision: number, reachable: boolean) {
   const savedWorks = useSavedWorks(savedRevision);
   const savedById = useMemo(() => new Map(savedWorks.map((item) => [item.work.id, item])), [savedWorks]);
-  const savedVisible = useMemo(() => list.items.filter((work) => savedById.has(work.id)).map((work) => work.id), [list.items, savedById]);
-  // 端末に保存した作品だけ、編集版が変わっていないかを問い合わせる。
+  const savedVisible = useMemo(() => items.filter((work) => savedById.has(work.id)).map((work) => work.id), [items, savedById]);
   const editHashes = useQuery({
     queryKey: ["saved-edit-hashes", savedVisible],
     enabled: reachable && savedVisible.length > 0,
@@ -151,17 +140,34 @@ export function WorkResults({ list, savedRevision, reachable, onOpenWork, onOpen
       return Object.fromEntries(responses.flatMap((response) => response.status === "fulfilled" ? [response.value] : [])) as Record<number, string | null>;
     },
   }).data ?? {};
+  return (work: PcWork): SavedState | null => {
+    const saved = savedById.get(work.id);
+    if (!saved) return null;
+    return { changed: work.currentVersion !== saved.savedVersion || work.contentHash !== saved.savedContentHash || (Object.prototype.hasOwnProperty.call(editHashes, work.id) && editHashes[work.id] !== saved.savedEditHash) };
+  };
+}
+
+/** 作品の一覧。読み込み中も枠の形を保ち、前の結果を消さない。 */
+export function WorkResults({ list, savedRevision, reachable, onOpenWork, onOpenDetail, onSaved, onPage, emptyTitle, emptyHint, omit }: {
+  list: WorkList;
+  savedRevision: number;
+  reachable: boolean;
+  onOpenWork: (work: PcWork) => void;
+  onOpenDetail: (work: PcWork) => void;
+  onSaved: () => void;
+  onPage: (page: number) => void;
+  emptyTitle: string;
+  emptyHint: string;
+  omit?: "author" | "series";
+}) {
+  const savedState = useSavedStates(list.items, savedRevision, reachable);
   const loadMore = useAutoLoad(list.hasMore && !list.fetchingMore && !list.stale, list.items.length, list.fetchMore);
 
   if (list.loading) return <WorkListSkeleton />;
   if (list.error && !list.items.length) return <section className="empty-card"><h2>一覧を読み込めません</h2><p>{pcErrorMessage(list.error)}</p></section>;
   return <div className="work-results" data-stale={list.stale || undefined}>
     {list.error ? <div className="inline-alert" role="alert">{pcErrorMessage(list.error)}</div> : null}
-    {list.items.length ? <VirtualWorkList listKey={list.listKey} items={list.items} itemKey={(work) => work.id} renderItem={(work) => {
-      const saved = savedById.get(work.id);
-      const changed = saved && (work.currentVersion !== saved.savedVersion || work.contentHash !== saved.savedContentHash || (Object.prototype.hasOwnProperty.call(editHashes, work.id) && editHashes[work.id] !== saved.savedEditHash));
-      return <WorkCard key={work.id} work={work} onRead={() => onOpenWork(work)} onDetail={() => onOpenDetail(work)} omit={omit} savedState={saved ? { label: changed ? "更新あり" : "保存済み", changed: Boolean(changed) } : null} />;
-    }} /> : <section className="empty-card"><h2>{emptyTitle}</h2><p>{emptyHint}</p></section>}
+    {list.items.length ? <VirtualWorkList listKey={list.listKey} items={list.items} itemKey={(work) => work.id} renderItem={(work) => <WorkCard key={work.id} work={work} onRead={() => onOpenWork(work)} onDetail={() => onOpenDetail(work)} omit={omit} savedState={savedState(work)} onSaved={reachable ? onSaved : undefined} />} /> : <section className="empty-card"><h2>{emptyTitle}</h2><p>{emptyHint}</p></section>}
     {list.numbered && list.items.length > 0 && <NumberedPager page={list.page} pageCount={list.pageCount} canGoNext={list.items.length >= pageSize} onPage={onPage} limitHint={list.reachedDirectLimit} />}
     {!list.numbered && list.hasMore && <div className="load-more" ref={loadMore}>{list.fetchingMore ? <span className="load-more-status" role="status">続きを読み込んでいます…</span> : <button className="secondary-button" type="button" onClick={list.fetchMore}>さらに表示</button>}</div>}
   </div>;

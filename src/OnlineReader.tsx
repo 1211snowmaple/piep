@@ -1,3 +1,5 @@
+import { rememberReading } from "./recentReading";
+import { progressLabel } from "./workText";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { ALargeSmall, ChevronLeft, Info, Pause, Play, TableOfContents, X } from "lucide-react";
@@ -263,6 +265,7 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
       deviceTime: time,
     };
     if (writeTimer.current === null) writeTimer.current = window.setTimeout(sendQueuedWrite, WRITE_DELAY_MS);
+    rememberReading(readingWork, pageCount > 0 ? (pageNumber + Math.min(1, Math.max(0, ratio))) / pageCount : 0, pageNumber === pageCount - 1 && ratio >= 0.98);
   };
 
   const acceptRemote = () => {
@@ -864,9 +867,9 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
   const multiPage = pageCount > 1;
   const showPager = !continuous && multiPage;
   const shownProgress = dragPosition ?? progress;
-  const percentLabel = `${Math.round(shownProgress * 100)}%`;
+  const percentLabel = progressLabel(shownProgress, pageCount);
   const dragPage = Math.min(pageCount - 1, Math.floor(Math.min(0.9999, shownProgress) * pageCount));
-  const statusLabel = !continuous && multiPage ? `${(dragPosition === null ? pageIndex : dragPage) + 1} / ${pageCount}` : null;
+  const statusLabel = !continuous && multiPage && !(showPager && behavior.pageButtons === "always") ? `${(dragPosition === null ? pageIndex : dragPage) + 1} / ${pageCount}` : null;
   const titleBlock = <><h1 ref={readerTitleRef} className={readerTitleExpanded ? "reader-work-title expanded" : "reader-work-title"}>{work.title}</h1>{readerTitleOverflow && <button className="reader-title-toggle" onClick={() => setReaderTitleExpanded((expanded) => !expanded)} aria-expanded={readerTitleExpanded}>{readerTitleExpanded ? "タイトルを短く表示" : "タイトルをすべて表示"}</button>}<div className="reader-rule" /></>;
   const commitDrag = () => {
     if (dragPosition === null) return;

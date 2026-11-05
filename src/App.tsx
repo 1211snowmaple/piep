@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { isTauri } from "@tauri-apps/api/core";
-import { ArrowUp, BookOpen, ChevronLeft, LibraryBig, Menu, Plus, Settings, X } from "lucide-react";
+import { ArrowUp, BookOpen, ChevronLeft, LibraryBig, Menu, Plus, Settings } from "lucide-react";
 import "./App.css";
 import "./App.desktop.css";
 import "./App.reader.css";
 import "./App.library.css";
 import { PiepLockup } from "./PiepLockup";
+import { AppSidebar, type Section, type Shelf } from "./AppSidebar";
 import { PcLibrary } from "./PcLibrary";
 import { PcConnectionSettings } from "./PcConnectionSettings";
 import { AppUpdateNotice, AppUpdateSettings, useAppUpdate } from "./appUpdate";
@@ -21,9 +22,8 @@ import { defaultPcSearch, getPcStatus, type OfflineWork, type PcConnectionStatus
 import { handleReaderKeyboard } from "./readerKeyboard";
 import { ReaderBehaviorControls, ReaderTypeControls } from "./ReaderSettings";
 import { defaultReaderBehavior, defaultReaderType, loadReaderBehavior, saveReaderBehavior, typeLimits, type ReaderBehavior, type ReaderFont, type ReaderTheme, type ReaderType } from "./readerPrefs";
-import { describeCondition, hasConditionToSave, loadRememberedSort, loadSavedConditions, saveRememberedSort, saveSavedConditions, sortGroups, sortLabels, type FixedSort, type SavedCondition } from "./librarySort";
+import { loadRememberedSort, loadSavedConditions, saveRememberedSort, saveSavedConditions, type FixedSort, type SavedCondition } from "./librarySort";
 
-type Section = "pc" | "offline" | "settings";
 type IconName = "computer" | "book" | "settings" | "menu";
 
 const preview = {
@@ -90,11 +90,6 @@ const sections: { id: Section; label: string; icon: IconName }[] = [
   { id: "settings", label: "設定", icon: "settings" },
 ];
 
-function isOnlyShelf(search: PcSearchCriteria, favorite: boolean) {
-  return search.favorite === favorite && Object.entries(defaultPcSearch).every(([key, value]) =>
-    ["favorite", "sort", "tagMode", "dateField"].includes(key) || search[key as keyof PcSearchCriteria] === value);
-}
-
 function App() {
   const mainRef = useRef<HTMLElement>(null);
   const { entry, depth, push, replace, back } = useAppHistory(mainRef);
@@ -103,7 +98,6 @@ function App() {
   // 本棚を離れても、戻ったときの条件は保つ。
   const lastLibrary = useRef<LibraryPage>(homePage);
   if (currentPage.name === "library") lastLibrary.current = currentPage;
-  const pcSearch = lastLibrary.current.criteria;
   const selectedWork = entry.detail;
   const onlineWork = entry.reader?.kind === "online" ? entry.reader.work : null;
   const offlineWork = entry.reader?.kind === "offline" ? entry.reader.work : null;
@@ -138,8 +132,6 @@ function App() {
     queryClient.setQueryData<PcConnectionStatus | null>(statusQueryKey, (old) => typeof next === "function" ? next(old ?? null) : next);
   }, [queryClient]);
   const [appUpdate, setAppUpdate] = useAppUpdate();
-  const [sidebarSearch, setSidebarSearch] = useState<PcSearchCriteria>(defaultPcSearch);
-  const [sidebarSearchError, setSidebarSearchError] = useState<string | null>(null);
   const [page, setPage] = useState(() => storedNumber(positionKey, 0, 0, preview.pages.length - 1));
   // 選んだときだけ保存する。保存しておかなければ、既定を変えたときにそのまま効く。
   const [readerType, setReaderType] = useState<ReaderType>(() => {
@@ -155,7 +147,6 @@ function App() {
   const [readerBehavior, setReaderBehavior] = useState<ReaderBehavior>(loadReaderBehavior);
   const [rememberedSort, setRememberedSort] = useState<FixedSort>(loadRememberedSort);
   const [savedConditions, setSavedConditions] = useState<SavedCondition[]>(loadSavedConditions);
-  const [conditionName, setConditionName] = useState("");
   const { fontSize, lineHeight, readerWidth, fontFamily, readerTheme } = readerType;
   const [appearance, setAppearance] = useState<Appearance>(() => storedChoice(appearanceKey, "auto", ["auto", "light", "dark"]));
   const [pagingMode, setPagingMode] = useState<PagingMode>(() => storedChoice(pagingModeKey, "auto", ["auto", "pages"]));
@@ -286,46 +277,29 @@ function App() {
   }, [sidebarOpen, section]);
 
   useEffect(() => {
-    const sidebar = document.getElementById("app-navigation");
     const viewport = window.visualViewport;
-    if (!sidebar) return;
     const androidWindow = window as Window & {
       piepAndroidAppearance?: { imeInsetPx?: () => number };
       piepAndroidImeInset?: (insetPx: number) => void;
     };
 
     const root = document.documentElement;
-    let frame = 0;
-    const revealFocusedField = () => {
-      const active = document.activeElement;
-      if (!(active instanceof HTMLInputElement || active instanceof HTMLSelectElement || active instanceof HTMLTextAreaElement)
-        || !sidebar.contains(active)) return;
-      window.cancelAnimationFrame(frame);
-      frame = window.requestAnimationFrame(() => {
-        frame = 0;
-        active.scrollIntoView({ block: "nearest", inline: "nearest" });
-      });
-    };
     const updateKeyboardInset = () => {
       const viewportInset = viewport ? Math.max(0, window.innerHeight - viewport.offsetTop - viewport.height) : 0;
       const nativeInsetPx = androidWindow.piepAndroidAppearance?.imeInsetPx?.() ?? 0;
       const nativeInset = Number.isFinite(nativeInsetPx) ? Math.max(0, nativeInsetPx / window.devicePixelRatio) : 0;
       const obscuredBottom = Math.max(viewportInset, nativeInset);
       root.style.setProperty("--piep-visual-viewport-bottom-inset", `${obscuredBottom}px`);
-      if (obscuredBottom > 80) revealFocusedField();
     };
 
-    sidebar.addEventListener("focusin", revealFocusedField);
     androidWindow.piepAndroidImeInset = updateKeyboardInset;
     viewport?.addEventListener("resize", updateKeyboardInset);
     viewport?.addEventListener("scroll", updateKeyboardInset);
     updateKeyboardInset();
     return () => {
-      sidebar.removeEventListener("focusin", revealFocusedField);
       viewport?.removeEventListener("resize", updateKeyboardInset);
       viewport?.removeEventListener("scroll", updateKeyboardInset);
       delete androidWindow.piepAndroidImeInset;
-      window.cancelAnimationFrame(frame);
       root.style.removeProperty("--piep-visual-viewport-bottom-inset");
     };
   }, []);
@@ -410,31 +384,6 @@ function App() {
     push({ page: next === "offline" ? { name: "offline", tab: "works", groupId: null } : { name: "settings" }, detail: null, reader: null });
   };
 
-  useEffect(() => { setSidebarSearch(pcSearch); }, [pcSearch]);
-
-  const applySidebarSearch = () => {
-    if (sidebarSearch.minChars && sidebarSearch.maxChars && Number(sidebarSearch.minChars) > Number(sidebarSearch.maxChars)) {
-      setSidebarSearchError("文字数の下限は上限以下にしてください。");
-      return;
-    }
-    if (sidebarSearch.minAssets && sidebarSearch.maxAssets && Number(sidebarSearch.minAssets) > Number(sidebarSearch.maxAssets)) {
-      setSidebarSearchError("画像数の下限は上限以下にしてください。");
-      return;
-    }
-    if (sidebarSearch.dateFrom && sidebarSearch.dateTo && sidebarSearch.dateFrom > sidebarSearch.dateTo) {
-      setSidebarSearchError("日付の開始日は終了日以前にしてください。");
-      return;
-    }
-    for (const value of [sidebarSearch.author, sidebarSearch.authorExclude, sidebarSearch.tag, sidebarSearch.tagExclude]) {
-      if (value.split(/[\n,、]+/).filter((part) => part.trim()).length > 10) {
-        setSidebarSearchError("作者とタグはそれぞれ 10 件まで指定できます。");
-        return;
-      }
-    }
-    setSidebarSearchError(null);
-    showLibrary({ ...homePage, criteria: { ...sidebarSearch, text: sidebarSearch.text.trim(), author: sidebarSearch.author.trim(), authorExclude: sidebarSearch.authorExclude.trim(), tag: sidebarSearch.tag.trim(), tagExclude: sidebarSearch.tagExclude.trim(), minChars: sidebarSearch.minChars.trim(), maxChars: sidebarSearch.maxChars.trim(), minAssets: sidebarSearch.minAssets.trim(), maxAssets: sidebarSearch.maxAssets.trim() } });
-  };
-
   const changeReaderType = (patch: Partial<ReaderType>) => {
     setReaderType((old) => ({ ...old, ...patch }));
     if (patch.fontSize !== undefined) storeSetting(fontKey, String(patch.fontSize));
@@ -472,22 +421,15 @@ function App() {
     saveSavedConditions(next);
   };
 
-  const saveCondition = () => {
-    if (!hasConditionToSave(sidebarSearch)) return;
-    const name = conditionName.trim() || describeCondition(sidebarSearch);
+  const saveCondition = (name: string, criteria: PcSearchCriteria) => {
     const existing = savedConditions.find((item) => item.name === name);
-    const entry: SavedCondition = { id: existing?.id ?? `${Date.now()}`, name, criteria: sidebarSearch };
+    const entry: SavedCondition = { id: existing?.id ?? `${Date.now()}`, name, criteria };
     changeSavedConditions(existing ? savedConditions.map((item) => item === existing ? entry : item) : [...savedConditions, entry]);
-    setConditionName("");
   };
 
-  const applySavedCondition = (condition: SavedCondition) => {
-    setSidebarSearchError(null);
-    showLibrary({ ...homePage, criteria: condition.criteria });
-  };
-
-  const showPcShelf = (favorite: boolean) => {
-    showLibrary({ ...homePage, criteria: { ...defaultPcSearch, favorite } });
+  const showShelf = (shelf: Shelf) => {
+    if (shelf === "reading") { showLibrary({ ...homePage, shelf: "reading" }); return; }
+    showLibrary({ ...homePage, criteria: { ...defaultPcSearch, favorite: shelf === "favorite", revision: shelf === "revised" ? "revised" : "" } });
   };
 
   const showPreview = () => {
@@ -593,60 +535,28 @@ function App() {
   return (
     <NavigationProvider value={navigation}>
     <div className={`app-shell app-shell--${section}`} aria-hidden={readerOpen || detailOpen} inert={readerOpen || detailOpen}>
-      <aside className={sidebarOpen ? "sidebar mobile-open" : "sidebar"} id="app-navigation" aria-label="サイドバー">
-        <div className="brand"><PiepLockup size={24} /></div>
-        <nav className="side-nav" aria-label="画面の移動">{sections.map((item) => <button key={item.id} type="button" ref={item.id === "pc" ? sidebarFirstControlRef : undefined} className={section === item.id ? "nav-item active" : "nav-item"} onClick={() => showSection(item.id)} aria-current={section === item.id ? "page" : undefined}><Icon name={item.icon} /><span>{item.label}</span></button>)}</nav>
-        <div className="sidebar-search">
-          <span className="sidebar-group-label">サーバーの本棚</span>
-          <div className="sidebar-shelves"><button type="button" className={isOnlyShelf(pcSearch, false) ? "shelf-choice active" : "shelf-choice"} onClick={() => showPcShelf(false)}>すべて</button><button type="button" className={isOnlyShelf(pcSearch, true) ? "shelf-choice active" : "shelf-choice"} onClick={() => showPcShelf(true)}>お気に入り</button></div>
-          <form className="sidebar-filter-form" onSubmit={(event) => { event.preventDefault(); applySidebarSearch(); }}>
-            <label>取得元<select value={sidebarSearch.source} onChange={(event) => setSidebarSearch((old) => ({ ...old, source: event.target.value as PcSearchCriteria["source"] }))}><option value="">すべて</option><option value="pixiv">pixiv</option><option value="fanbox">FANBOX</option></select></label>
-            <label>種類<select value={sidebarSearch.contentType} onChange={(event) => setSidebarSearch((old) => ({ ...old, contentType: event.target.value as PcSearchCriteria["contentType"] }))}><option value="">すべて</option><option value="novel">小説</option><option value="article">記事</option><option value="text">テキスト</option><option value="image">画像</option><option value="file">ファイル</option></select></label>
-            <label>作者名<input value={sidebarSearch.author} maxLength={1000} onChange={(event) => setSidebarSearch((old) => ({ ...old, author: event.target.value }))} placeholder="読点区切り" /></label>
-            <label>タグ<input value={sidebarSearch.tag} maxLength={1000} onChange={(event) => setSidebarSearch((old) => ({ ...old, tag: event.target.value }))} placeholder="読点区切り" /></label>
-            <details className="sidebar-advanced"><summary>詳細条件</summary><div className="sidebar-advanced-fields">
-              <label>タグの組み合わせ<select value={sidebarSearch.tagMode} onChange={(event) => setSidebarSearch((old) => ({ ...old, tagMode: event.target.value as PcSearchCriteria["tagMode"] }))}><option value="and">すべて含む</option><option value="or">いずれかを含む</option></select></label>
-              <label>除外する作者<input value={sidebarSearch.authorExclude} maxLength={1000} onChange={(event) => setSidebarSearch((old) => ({ ...old, authorExclude: event.target.value }))} placeholder="読点区切り" /></label>
-              <label>除外するタグ<input value={sidebarSearch.tagExclude} maxLength={1000} onChange={(event) => setSidebarSearch((old) => ({ ...old, tagExclude: event.target.value }))} placeholder="読点区切り" /></label>
-              <div className="sidebar-number-range"><label>文字数の下限<input type="number" inputMode="numeric" min="0" max="1000000000" value={sidebarSearch.minChars} onChange={(event) => setSidebarSearch((old) => ({ ...old, minChars: event.target.value }))} placeholder="指定なし" /></label><label>上限<input type="number" inputMode="numeric" min="0" max="1000000000" value={sidebarSearch.maxChars} onChange={(event) => setSidebarSearch((old) => ({ ...old, maxChars: event.target.value }))} placeholder="指定なし" /></label></div>
-              <div className="sidebar-number-range"><label>画像数の下限<input type="number" inputMode="numeric" min="0" max="1000000" value={sidebarSearch.minAssets} onChange={(event) => setSidebarSearch((old) => ({ ...old, minAssets: event.target.value }))} placeholder="指定なし" /></label><label>上限<input type="number" inputMode="numeric" min="0" max="1000000" value={sidebarSearch.maxAssets} onChange={(event) => setSidebarSearch((old) => ({ ...old, maxAssets: event.target.value }))} placeholder="指定なし" /></label></div>
-              <label>改稿<select value={sidebarSearch.revision} onChange={(event) => setSidebarSearch((old) => ({ ...old, revision: event.target.value as PcSearchCriteria["revision"] }))}><option value="">すべて</option><option value="revised">改稿あり</option><option value="first_version">初版のみ</option></select></label>
-              <label>ローカル編集<select value={sidebarSearch.edit} onChange={(event) => setSidebarSearch((old) => ({ ...old, edit: event.target.value as PcSearchCriteria["edit"] }))}><option value="">すべて</option><option value="edited">編集あり</option><option value="unedited">編集なし</option></select></label>
-              <label>表紙<select value={sidebarSearch.cover} onChange={(event) => setSidebarSearch((old) => ({ ...old, cover: event.target.value as PcSearchCriteria["cover"] }))}><option value="">すべて</option><option value="has_cover">表紙あり</option><option value="no_cover">表紙なし</option></select></label>
-              <label>日付の種類<select value={sidebarSearch.dateField} onChange={(event) => setSidebarSearch((old) => ({ ...old, dateField: event.target.value as PcSearchCriteria["dateField"] }))}><option value="downloaded_at">保存日</option><option value="source_created_at">公開日</option><option value="source_updated_at">更新日</option></select></label>
-              <div className="sidebar-number-range"><label>開始日<input type="date" value={sidebarSearch.dateFrom} onChange={(event) => setSidebarSearch((old) => ({ ...old, dateFrom: event.target.value }))} /></label><label>終了日<input type="date" value={sidebarSearch.dateTo} onChange={(event) => setSidebarSearch((old) => ({ ...old, dateTo: event.target.value }))} /></label></div>
-              <p>作者・タグは読点、コンマ、改行で最大10件。検索語には「語句」や -語句も使えます。</p>
-            </div></details>
-            {sidebarSearchError && <p className="sidebar-filter-error" role="alert">{sidebarSearchError}</p>}
-            <label>この条件の並び順<select value={sidebarSearch.sort} onChange={(event) => setSidebarSearch((old) => ({ ...old, sort: event.target.value as PcSearchCriteria["sort"] }))}><option value="remembered">いつもの順</option>{sidebarSearch.text.trim() && <option value="standard">関連度順</option>}{sortGroups.map((group) => <optgroup key={group.label} label={group.label}>{group.items.map((sort) => <option key={sort} value={sort}>{sortLabels[sort]}</option>)}</optgroup>)}</select></label>
-            <p className="sidebar-sort-hint">いつもの順は検索ボタンの横で選びます。ここで指定すると、この条件を使う間だけそちらを優先します。</p>
-            <label className="sidebar-check"><input type="checkbox" checked={sidebarSearch.favorite} onChange={(event) => setSidebarSearch((old) => ({ ...old, favorite: event.target.checked }))} />この条件でお気に入りのみ</label>
-            <div className="sidebar-filter-actions"><button type="submit">絞り込む</button><button type="button" onClick={() => { setSidebarSearch(defaultPcSearch); showLibrary(homePage); }}>解除</button></div>
-            <div className="sidebar-saved">
-              <span className="sidebar-group-label">保存した条件</span>
-              {savedConditions.length > 0 ? <ul>{savedConditions.map((condition) => <li key={condition.id}><button type="button" className="sidebar-saved-apply" onClick={() => applySavedCondition(condition)}>{condition.name}</button><button type="button" className="sidebar-saved-remove" onClick={() => changeSavedConditions(savedConditions.filter((item) => item !== condition))} aria-label={`${condition.name}を削除`}><X aria-hidden="true" /></button></li>)}</ul> : <p className="sidebar-sort-hint">上の条件を並び順ごと保存すると、ここから呼び出せます。</p>}
-              <div className="sidebar-saved-new"><input aria-label="保存する条件の名前" value={conditionName} maxLength={60} placeholder={hasConditionToSave(sidebarSearch) ? describeCondition(sidebarSearch) : "条件の名前"} onChange={(event) => setConditionName(event.target.value)} /><button type="button" disabled={!hasConditionToSave(sidebarSearch)} onClick={saveCondition}>保存</button></div>
-            </div>
-          </form>
-        </div>
-        <div className={pcConnection?.reachable ? "sidebar-bottom connected" : "sidebar-bottom"}><span className="status-dot" /> サーバー {pcConnection?.reachable ? "接続中" : "未接続"}</div>
-      </aside>
+      <AppSidebar open={sidebarOpen} section={section} page={currentPage} status={pcConnection} savedConditions={savedConditions} firstControlRef={sidebarFirstControlRef} onSection={showSection} onShelf={showShelf} onCondition={(condition) => showLibrary({ ...homePage, criteria: condition.criteria })} onRemoveCondition={(condition) => changeSavedConditions(savedConditions.filter((item) => item !== condition))} />
       <div className="main-column">
-        <header className="mobile-header"><button ref={sidebarToggleRef} className="sidebar-toggle" type="button" onClick={() => setSidebarOpen((open) => !open)} aria-label={sidebarOpen ? "サイドバーを閉じる" : "サイドバーを開く"} aria-expanded={sidebarOpen} aria-controls="app-navigation"><Icon name="menu" /></button><PiepLockup size={22} /><span className="mobile-section-title">{sections.find((item) => item.id === section)?.label}</span></header>
+        <header className="mobile-header"><button ref={sidebarToggleRef} className="sidebar-toggle" type="button" onClick={() => setSidebarOpen((open) => !open)} aria-label={sidebarOpen ? "サイドバーを閉じる" : "サイドバーを開く"} aria-expanded={sidebarOpen} aria-controls="app-navigation"><Icon name="menu" /></button><PiepLockup size={22} /></header>
         {sidebarOpen && <button className="mobile-sidebar-scrim" type="button" onClick={() => setSidebarOpen(false)} aria-label="サイドバーを閉じる" />}
         <main className="main-content" ref={mainRef}>
           {currentPage.name === "library" && <AppUpdateNotice info={appUpdate} onOpenSettings={() => showSection("settings")} />}
-          {currentPage.name === "library" && <PcLibrary page={currentPage} status={pcConnection} statusLoading={isTauri() && statusQuery.isPending} onOpenWork={openOnlineWork} onOpenDetail={openOnlineDetail} onGoToSettings={() => showSection("settings")} savedRevision={savedRevision} pagingMode={pagingMode} rememberedSort={rememberedSort} onRememberedSortChange={changeRememberedSort} />}
-          {currentPage.name === "entity" && <EntityPage key={`${currentPage.kind}:${currentPage.source}:${currentPage.key}`} page={currentPage} status={pcConnection} savedRevision={savedRevision} pagingMode={pagingMode} onOpenWork={openOnlineWork} onOpenDetail={openOnlineDetail} />}
+          {currentPage.name === "library" && <PcLibrary page={currentPage} status={pcConnection} statusLoading={isTauri() && statusQuery.isPending} onOpenWork={openOnlineWork} onOpenDetail={openOnlineDetail} onGoToSettings={() => showSection("settings")} onSaved={savedWorkChanged} onSaveCondition={saveCondition} savedRevision={savedRevision} pagingMode={pagingMode} rememberedSort={rememberedSort} onRememberedSortChange={changeRememberedSort} />}
+          {currentPage.name === "entity" && <EntityPage key={`${currentPage.kind}:${currentPage.source}:${currentPage.key}`} page={currentPage} status={pcConnection} savedRevision={savedRevision} pagingMode={pagingMode} onOpenWork={openOnlineWork} onOpenDetail={openOnlineDetail} onSaved={savedWorkChanged} />}
           {currentPage.name === "offline" && <OfflineLibrary page={currentPage} onOpenWork={openOfflineWork} onOpenDetail={openOfflineDetail} onShowPc={() => showSection("pc")} savedRevision={savedRevision} pagingMode={pagingMode} rememberedSort={rememberedSort} onRememberedSortChange={changeRememberedSort} />}
           {currentPage.name === "settings" && <>
-            <div className="page-heading"><div><p className="eyebrow">PREFERENCES</p><h1>設定</h1><p>この端末での読み方を整えます。</p></div></div>
-            <section className="settings-card"><div className="setting-title"><div><h2>読書の表示</h2><p>変更はこの端末の読書画面に反映されます。読書中も右上のボタンから変えられます。</p></div></div><ReaderTypeControls value={readerType} onChange={changeReaderType} /><button className="secondary-button reset-reading" onClick={resetReaderSettings}>読書の設定を初期値に戻す</button><button className="secondary-button preview-setting-button" onClick={showPreview}>表示サンプルで試す</button></section>
-            <section className="settings-card"><div className="setting-title"><div><h2>読み方とページ送り</h2><p>つなげて読むかどうかと、タップ、スワイプ、音量キーでの送り方を選べます。</p></div></div><ReaderBehaviorControls value={readerBehavior} onChange={changeReaderBehavior} /></section>
-            <section className="settings-card"><div className="setting-title"><div><h2>一覧の読み込み方</h2><p>サーバーと端末内の作品一覧で、続きをどう表示するか選べます。</p></div></div><div className="setting-choice"><span>作品一覧</span><div role="group" aria-label="一覧の読み込み方"><button className={pagingMode === "auto" ? "selected" : ""} onClick={() => setPagingMode("auto")}>スクロールで自動</button><button className={pagingMode === "pages" ? "selected" : ""} onClick={() => setPagingMode("pages")}>ページ番号</button></div></div><p className="settings-help">関連度順の検索は自動読み込みになります。サーバーの一覧のページ番号は先頭 251 ページまで選べます。全作品をたどるときは自動読み込みを使ってください。</p></section>
-            <section className="settings-card"><div className="setting-title"><div><h2>カラーテーマ</h2><p>デスクトップ版と同じく、初期状態はシステム設定に従います。</p></div></div><div className="setting-choice"><span>アプリの表示</span><div role="group" aria-label="アプリのカラーテーマ"><button className={appearance === "auto" ? "selected" : ""} onClick={() => setAppearance("auto")}>システム</button><button className={appearance === "light" ? "selected" : ""} onClick={() => setAppearance("light")}>ライト</button><button className={appearance === "dark" ? "selected" : ""} onClick={() => setAppearance("dark")}>ダーク</button></div></div></section>
-            <PcConnectionSettings status={pcConnection} onStatusChange={setPcConnection} />
-            <AppUpdateSettings info={appUpdate} onInfo={setAppUpdate} />
+            <div className="settings-page">
+              <h1 className="settings-title">設定</h1>
+              <h2 className="settings-group">接続</h2>
+              <PcConnectionSettings status={pcConnection} onStatusChange={setPcConnection} />
+              <h2 className="settings-group">読書</h2>
+              <section className="settings-card"><div className="setting-title"><div><h2>読書の表示</h2><p>読書中も右上のボタンから変えられます。</p></div></div><ReaderTypeControls value={readerType} onChange={changeReaderType} /><div className="settings-actions"><button className="secondary-button" onClick={resetReaderSettings}>初期値に戻す</button><button className="secondary-button" onClick={showPreview}>表示サンプルで試す</button></div></section>
+              <section className="settings-card"><div className="setting-title"><div><h2>読み方とページ送り</h2><p>つなげて読むかどうかと、タップ、スワイプ、音量キーでの送り方を選べます。</p></div></div><ReaderBehaviorControls value={readerBehavior} onChange={changeReaderBehavior} /></section>
+              <h2 className="settings-group">表示</h2>
+              <section className="settings-card"><div className="setting-choice"><span>カラーテーマ</span><div role="group" aria-label="アプリのカラーテーマ"><button className={appearance === "auto" ? "selected" : ""} onClick={() => setAppearance("auto")}>システム</button><button className={appearance === "light" ? "selected" : ""} onClick={() => setAppearance("light")}>ライト</button><button className={appearance === "dark" ? "selected" : ""} onClick={() => setAppearance("dark")}>ダーク</button></div></div><div className="setting-choice"><span>作品一覧の続き</span><div role="group" aria-label="一覧の読み込み方"><button className={pagingMode === "auto" ? "selected" : ""} onClick={() => setPagingMode("auto")}>スクロールで自動</button><button className={pagingMode === "pages" ? "selected" : ""} onClick={() => setPagingMode("pages")}>ページ番号</button></div></div><p className="settings-help">関連度順の検索は自動読み込みになります。ページ番号は先頭 251 ページまで選べます。</p></section>
+              <h2 className="settings-group">管理</h2>
+              <AppUpdateSettings info={appUpdate} onInfo={setAppUpdate} />
+            </div>
           </>}
         </main>
         {scrolledFar && <button className="scroll-top" type="button" aria-label="一番上へ" onClick={() => mainRef.current?.scrollTo({ top: 0, behavior: "smooth" })}><ArrowUp aria-hidden="true" /></button>}
