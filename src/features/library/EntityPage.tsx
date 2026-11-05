@@ -670,8 +670,11 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
                 ? <Avatar className="entity-hero__avatar" src={getAssetUrl(avatarPath)} size={112} radius="xl" color="piep">{noImage ? <NoImageMark /> : <Icons.person size={IconSize.avatar} />}</Avatar>
                 : <Box ref={seriesCoverRef} className="entity-hero__series-cover">{avatarPath ? <Image src={getAssetUrl(avatarPath)} alt={`${displayName}の表紙`} fit="contain" /> : <Icons.series size={IconSize.avatar} />}</Box>}
               <Stack gap={7} mb={5} miw={0} align="flex-start" className="entity-hero__identity-copy">
-                {kind === "series" && <Box className="entity-hero__actions"><ActionBar label={`${displayName}の操作`} items={entityActions} /></Box>}
-                <Box ref={entityMarksRef}><ProviderMark provider={source} /></Box>
+                {/* 作品と同じく、印と操作を同じ段に置く。操作だけの段を立てると左が空く。 */}
+                <div className="entity-hero__toprow">
+                  <Box ref={entityMarksRef}><ProviderMark provider={source} /></Box>
+                  {kind === "series" && <Box className="entity-hero__actions"><ActionBar label={`${displayName}の操作`} items={entityActions} /></Box>}
+                </div>
                 <Title order={1} className="entity-hero__title">{displayName}</Title>{/* かつてここには「更新 …」と出ていたが、指していたのは取得元での更新では
                     なく piep の行が書き換わった日だった。読む側には区別がつかない。
                     取得元の話をしないなら、手元の言葉で言う。確認していなければ何も出さない。 */}

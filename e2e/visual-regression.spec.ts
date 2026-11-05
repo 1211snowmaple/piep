@@ -442,3 +442,58 @@ test("update candidate source links open the in-app browser", async ({ page }, t
   const source = await page.evaluate(() => new URLSearchParams(location.hash.split("?")[1]).get("url"));
   expect(source).toBe("https://www.pixiv.net/novel/show.php?id=12001");
 });
+
+test("detail headers keep long names and many marks clear of their actions", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "900x600-light-100dpi", "Layout rule, checked once at the narrowest window");
+  const longJapanese = "季節の栞 〜 四季をめぐる連作短編集・完全版（書き下ろし番外編と作者によるあとがき、未収録の掌編をすべて収録した決定版シリーズ）とその後の物語".repeat(2);
+  const longLatin = "AnUnbrokenSeriesNameWithNoSpacesAnywhereInItBecauseSomeAuthorsReallyWriteThingsLikeThisInTheirTitleFieldOnPixivOrFanbox";
+
+  await page.goto("/#/works/101");
+  await expect(page.locator(".work-hero__title")).toBeVisible();
+  const work = await page.evaluate(([title, series]) => {
+    const box = (selector: string) => document.querySelector(selector)!.getBoundingClientRect();
+    const utilityTop = box(".work-hero__utility").top;
+    document.querySelector(".work-hero__title")!.textContent = title;
+    const link = document.querySelector<HTMLElement>(".work-hero__series-link")!;
+    link.textContent = series;
+    const marks = document.querySelector(".work-hero__marks")!;
+    for (const text of ["ローカル編集", "未反映の下書き", "もう一つの長めの印"]) {
+      const copy = marks.lastElementChild!.cloneNode(true) as HTMLElement;
+      (copy.querySelector(".mantine-Badge-label") ?? copy).textContent = text;
+      marks.appendChild(copy);
+    }
+    return {
+      marksRight: box(".work-hero__marks").right,
+      utilityLeft: box(".work-hero__utility").left,
+      utilityMoved: Math.abs(box(".work-hero__utility").top - utilityTop),
+      marksBottom: box(".work-hero__marks").bottom,
+      seriesTop: box(".work-hero__series-link").top,
+      seriesOverflow: link.scrollWidth - link.clientWidth,
+      pageOverflow: document.documentElement.scrollWidth - innerWidth,
+    };
+  }, [longJapanese, longLatin]);
+  expect(work.marksRight).toBeLessThanOrEqual(work.utilityLeft);
+  expect(work.utilityMoved).toBeLessThanOrEqual(1);
+  expect(work.seriesTop).toBeGreaterThanOrEqual(work.marksBottom);
+  expect(work.seriesOverflow).toBeLessThanOrEqual(0);
+  expect(work.pageOverflow).toBeLessThanOrEqual(0);
+
+  for (const route of ["/#/series/pixiv/220041", "/#/people/pixiv/8001234"]) {
+    await page.goto(route);
+    await expect(page.locator(".entity-hero__title")).toBeVisible();
+    const entity = await page.evaluate((title) => {
+      const box = (selector: string) => document.querySelector(selector)!.getBoundingClientRect();
+      document.querySelector(".entity-hero__title")!.textContent = title;
+      return {
+        markRight: box(".entity-hero .provider-mark").right,
+        barLeft: [...document.querySelectorAll(".entity-hero .action-bar__item")].reduce((left, item) => Math.min(left, item.getBoundingClientRect().left), Infinity),
+        barBottom: box(".entity-hero .action-bar").bottom,
+        titleTop: box(".entity-hero__title").top,
+        pageOverflow: document.documentElement.scrollWidth - innerWidth,
+      };
+    }, longJapanese);
+    expect(entity.markRight).toBeLessThanOrEqual(entity.barLeft);
+    expect(entity.titleTop).toBeGreaterThanOrEqual(entity.barBottom);
+    expect(entity.pageOverflow).toBeLessThanOrEqual(0);
+  }
+});

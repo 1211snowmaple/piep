@@ -1703,7 +1703,8 @@ textarea { scrollbar-gutter: stable; }
   border-radius: var(--mantine-radius-sm);
   text-decoration: none;
 }
-.work-hero__series-link { padding: 3px 0; }
+/* 空白のない長い名前（英数字だけのシリーズ名など）も、はみ出さずに折り返す。 */
+.work-hero__series-link { padding: 3px 0; overflow-wrap: anywhere; }
 .work-hero__series-link:hover,
 .work-hero__author-link:hover {
   color: var(--mantine-color-piep-7);
@@ -1743,7 +1744,8 @@ textarea { scrollbar-gutter: stable; }
   justify-content: space-between;
   flex-wrap: wrap;
   gap: 12px;
-  margin-top: var(--mantine-spacing-md);
+  /* 説明やタグが無くて表紙より短い作品でも、操作の列は表紙の下端の近くに置く。 */
+  margin-top: auto;
   padding-top: 12px;
   border-top: 1px solid light-dark(#e3e7ec, #303945);
 }
@@ -1751,9 +1753,16 @@ textarea { scrollbar-gutter: stable; }
 /* Same place and same weight as the author page's row, so the two detail
    screens read as one design. */
 .work-hero__utility { flex: 0 0 auto; }
-/* 作品の上段は操作だけなので、題と場所を分け合う作者・シリーズより
-   境目が小さい。同じ「入らなくなったら畳む」を、それぞれの行の中身で測る。 */
-.work-hero__toprow { container-type: inline-size; container-name: heroactions; }
+/* 印と操作の段。印は左から流れ、増えたら印の中で折り返す。操作は右上から動かない。
+   1行のときは操作の高さの中で中央に置き、2行になったら下へ伸びる。 */
+.work-hero__toprow {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+.work-hero__marks { flex: 1 1 0; min-width: 0; min-height: 38px; align-content: center; }
 
 /* 右の柱は、余った高さを2枚で分け合う。中身は上から流れるので、伸びても
    文字の位置は動かない。 */
@@ -2152,6 +2161,20 @@ textarea { scrollbar-gutter: stable; }
    位置で改行されないよう、表紙以外の幅を名前へ丸ごと渡す。 */
 .entity-hero__identity { width: 100%; }
 .entity-hero__identity-copy { flex: 1 1 auto; width: 0; }
+/* シリーズは印と操作を同じ段に置く。文字の畳みは .entity-hero__actions の幅で測る。 */
+.entity-hero__toprow {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-height: 38px;
+  gap: 12px;
+}
+.entity-hero[data-kind="series"] .entity-hero__actions {
+  flex: 1 1 0;
+  width: auto;
+  min-width: 0;
+  margin-bottom: 0;
+}
 .entity-hero__actions {
   width: 100%;
   margin-bottom: 9px;
@@ -2192,6 +2215,14 @@ textarea { scrollbar-gutter: stable; }
     width: 100%;
     margin-bottom: 16px;
   }
+  /* シリーズは表紙の横に列を置くので、同じ段には入らない。操作を上の段へ戻す。 */
+  .entity-hero[data-kind="series"] .entity-hero__toprow {
+    flex-direction: column-reverse;
+    align-items: flex-start;
+    gap: 9px;
+  }
+  .entity-hero[data-kind="series"] .entity-hero__actions { flex: none; width: 100%; }
+  .entity-hero__toprow { min-height: 0; }
 }
 
 .reader-page {
