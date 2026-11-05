@@ -5,6 +5,8 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
+import android.view.KeyEvent
+import android.view.WindowManager
 import android.webkit.WebView
 import android.webkit.JavascriptInterface
 import androidx.activity.OnBackPressedCallback
@@ -20,6 +22,8 @@ class MainActivity : TauriActivity() {
   @Volatile private var imeBottomInsetPx = 0
   @Volatile private var systemTopInsetPx = 0
   @Volatile private var systemBottomInsetPx = 0
+  @Volatile private var volumeKeysTurnPages = false
+  private var readerWebView: WebView? = null
 
   override fun onCreate(savedInstanceState: Bundle?) {
     enableEdgeToEdge()
@@ -62,6 +66,21 @@ class MainActivity : TauriActivity() {
         return "started"
       }
     }, "piepAndroidUpdate")
+    // 読書画面だけが使う。音量キーのページ送りと、自動スクロール中に画面を消さない指定。
+    readerWebView = webView
+    webView.addJavascriptInterface(object {
+      @JavascriptInterface
+      fun setVolumeKeys(enabled: Boolean) {
+        volumeKeysTurnPages = enabled
+      }
+      @JavascriptInterface
+      fun setKeepScreenOn(enabled: Boolean) {
+        runOnUiThread {
+          if (enabled) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+          else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+      }
+    }, "piepAndroidReader")
     // WebView M138 以下では IME が visualViewport に反映されないため、
     // Android の inset を CSS へ補助的に伝える。insets は消費せず WebView にも渡す。
     ViewCompat.setOnApplyWindowInsetsListener(webView) { _, insets ->
@@ -90,5 +109,19 @@ class MainActivity : TauriActivity() {
         }
       }
     })
+  }
+
+  override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+    val direction = when (event.keyCode) {
+      KeyEvent.KEYCODE_VOLUME_DOWN -> 1
+      KeyEvent.KEYCODE_VOLUME_UP -> -1
+      else -> 0
+    }
+    if (direction == 0 || !volumeKeysTurnPages) return super.dispatchKeyEvent(event)
+    // 押し続けても一度だけ送る。離したときも消費しないと音量の表示が出る。
+    if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
+      readerWebView?.evaluateJavascript("window.piepAndroidVolumeKey?.($direction)", null)
+    }
+    return true
   }
 }

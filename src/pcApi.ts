@@ -64,6 +64,28 @@ export interface PcEntityPage {
   total: number;
 }
 
+export interface PcEntitySeriesPage {
+  items: PcEntity[];
+  nextCursor: string | null;
+  total: number;
+}
+
+export interface PcEntityDetail {
+  source: string;
+  sourceKey: string;
+  displayName: string;
+  description: string | null;
+  workCount: number;
+  hasCover: boolean;
+  hasBanner: boolean;
+  isConcluded: boolean | null;
+  publishedCount: number | null;
+  links: string[];
+  tags: { name: string; count: number }[];
+  seriesCount: number | null;
+  collections: PcCollection[];
+}
+
 export interface PcCollection {
   id: string;
   name: string;
@@ -117,10 +139,18 @@ export interface PcSearchCriteria {
   dateField: "downloaded_at" | "source_created_at" | "source_updated_at";
   dateFrom: string;
   dateTo: string;
-  sort: "standard" | "dateDesc" | "dateAsc" | "publishedDesc" | "publishedAsc" | "titleAsc" | "titleDesc" | "authorAsc" | "authorDesc" | "lengthDesc" | "lengthAsc" | "assetsDesc" | "assetsAsc" | "versionDesc" | "versionAsc";
+  // remembered は画面だけの値で「検索ボタン横のいつもの順に従う」。送る前に実際の順へ直す。
+  sort: PcSort | "remembered";
 }
 
-export const defaultPcSearch: PcSearchCriteria = { text: "", source: "", contentType: "", author: "", authorExclude: "", favorite: false, tag: "", tagExclude: "", tagMode: "and", minChars: "", maxChars: "", minAssets: "", maxAssets: "", revision: "", edit: "", cover: "", dateField: "downloaded_at", dateFrom: "", dateTo: "", sort: "standard" };
+// standard はサーバーの標準の順。検索語があれば関連度、シリーズの中ならシリーズの順になる。
+export type PcSort = "standard" | "dateDesc" | "dateAsc" | "publishedDesc" | "publishedAsc" | "titleAsc" | "titleDesc" | "authorAsc" | "authorDesc" | "lengthDesc" | "lengthAsc" | "assetsDesc" | "assetsAsc" | "versionDesc" | "versionAsc";
+
+/** 作者やシリーズの中だけで使える順を足したもの。 */
+export type PcWorkSort = PcSort | "seriesAsc" | "seriesDesc";
+export type PcWorkSearch = Omit<PcSearchCriteria, "sort"> & { sort: PcWorkSort };
+
+export const defaultPcSearch: PcSearchCriteria = { text: "", source: "", contentType: "", author: "", authorExclude: "", favorite: false, tag: "", tagExclude: "", tagMode: "and", minChars: "", maxChars: "", minAssets: "", maxAssets: "", revision: "", edit: "", cover: "", dateField: "downloaded_at", dateFrom: "", dateTo: "", sort: "remembered" };
 
 export interface PcMetadata {
   work: PcWork;
@@ -195,14 +225,16 @@ export interface OfflineIssue {
 export const getPcStatus = () => invoke<PcConnectionStatus>("pc_connection_status");
 export const pairPc = (payload: string, deviceName: string) => invoke<PcConnectionStatus>("pc_pair", { payload, deviceName });
 export const disconnectPc = () => invoke<PcConnectionStatus>("pc_disconnect");
-export const searchPcWorks = (criteria: PcSearchCriteria, cursor: string | null = null, scope: PcWorkScope | null = null, offset: number | null = null) => invoke<PcSearchPage>("pc_search_works", {
+export const searchPcWorks = (criteria: PcWorkSearch, cursor: string | null = null, scope: PcWorkScope | null = null, offset: number | null = null) => invoke<PcSearchPage>("pc_search_works", {
   criteria,
   cursor,
   offset,
   // 画面表示用の名前などを Rust コマンドへ渡さない。入力は三つの識別子だけ。
   scope: scope ? { kind: scope.kind, source: scope.source, key: scope.key } : null,
 });
-export const listPcEntities = (kind: "people" | "series", text = "", offset = 0) => invoke<PcEntityPage>("pc_list_entities", { kind, text, offset });
+export const listPcEntities = (kind: "people" | "series", text = "", offset = 0, sort?: { sort: string; order: string }) => invoke<PcEntityPage>("pc_list_entities", { kind, text, offset, sort: sort?.sort ?? null, order: sort?.order ?? null });
+export const getPcEntityDetail = (kind: "people" | "series", source: string, key: string) => invoke<PcEntityDetail>("pc_get_entity_detail", { kind, source, key });
+export const listPcEntitySeries = (source: string, key: string, text: string, cursor: string | null, sort?: { sort: string; order: string }) => invoke<PcEntitySeriesPage>("pc_list_entity_series", { source, key, text, cursor, sort: sort?.sort ?? null, order: sort?.order ?? null });
 export const listPcCollections = () => invoke<PcCollection[]>("pc_list_collections");
 export const getPcWorkCollections = (workId: number) => invoke<PcCollection[]>("pc_get_work_collections", { workId });
 export const getPcCollection = (collectionId: string) => invoke<PcCollectionDetail>("pc_get_collection", { collectionId });
@@ -210,17 +242,11 @@ export const getPcMetadata = (workId: number) => invoke<PcMetadata>("pc_get_meta
 export const getPcPage = (workId: number, page: number, version: number | null = null) => invoke<PcPage>("pc_get_page", { workId, page, version });
 export const getPcOutline = (workId: number) => invoke<PcOutlineEntry[]>("pc_get_outline", { workId });
 export const getPcAsset = (workId: number, assetId: number) => invoke<PcAsset>("pc_get_asset", { workId, assetId });
-export const getPcCover = (workId: number) => invoke<PcAsset>("pc_get_cover", { workId });
-export const getPcCollectionCover = (collectionId: string, slot: "file" | `tile-${0 | 1 | 2 | 3}`) => invoke<PcAsset>("pc_get_collection_cover", { collectionId, slot });
-export const getPcEntityCover = (kind: "people" | "series", source: string, key: string) => invoke<PcAsset>("pc_get_entity_cover", { kind, source, key });
 export const listOfflineWorks = () => invoke<OfflineWork[]>("offline_list_works");
 export const saveOfflineWork = (workId: number) => invoke<OfflineWork>("offline_save_work", { workId });
 export const getOfflinePage = (workId: number, page: number) => invoke<OfflinePage>("offline_get_page", { workId, page });
 export const getOfflineOutline = (workId: number, generation: string) => invoke<PcOutlineEntry[]>("offline_get_outline", { workId, generation });
 export const getOfflineAsset = (workId: number, assetId: number, generation: string) => invoke<PcAsset>("offline_get_asset", { workId, assetId, generation });
-export const getOfflineCover = (workId: number) => invoke<PcAsset>("offline_get_cover", { workId });
-export const getOfflineCollectionCover = (workId: number, collectionId: string) => invoke<PcAsset>("offline_get_collection_cover", { workId, collectionId });
-export const getOfflineEntityCover = (workId: number, kind: "people" | "series") => invoke<PcAsset>("offline_get_entity_cover", { workId, kind });
 export const deleteOfflineWork = (workId: number) => invoke<void>("offline_delete_work", { workId });
 export const listOfflineIssues = () => invoke<OfflineIssue[]>("offline_list_issues");
 export const deleteOfflineIssue = (workId: number) => invoke<void>("offline_delete_corrupt_work", { workId });

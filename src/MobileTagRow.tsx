@@ -3,7 +3,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 const gap = 4;
 
 // デスクトップ版 TagRow と同じく、固定件数ではなく実際の横幅で表示数を決める。
-export function MobileTagRow({ tags }: { tags: string[] }) {
+export function MobileTagRow({ tags, onTag }: { tags: string[]; onTag?: (tag: string) => void }) {
   const rowRef = useRef<HTMLSpanElement>(null);
   const [visibleCount, setVisibleCount] = useState(tags.length);
 
@@ -62,7 +62,9 @@ export function MobileTagRow({ tags }: { tags: string[] }) {
 
   if (!tags.length) return null;
   return <span className="work-tags" ref={rowRef} data-overflow={visibleCount < tags.length || undefined}>
-    {tags.map((tag, index) => <span className="work-tag" data-tag data-hidden={index >= visibleCount || undefined} key={`${tag}:${index}`}>#{tag}</span>)}
+    {tags.map((tag, index) => onTag
+      ? <button type="button" className="work-tag" data-tag data-hidden={index >= visibleCount || undefined} key={`${tag}:${index}`} onClick={() => onTag(tag)}>#{tag}</button>
+      : <span className="work-tag" data-tag data-hidden={index >= visibleCount || undefined} key={`${tag}:${index}`}>#{tag}</span>)}
     {tags.length > 1 && <span className="work-tag-overflow" data-tag-overflow data-hidden={visibleCount >= tags.length || undefined}>+{tags.length - visibleCount}</span>}
   </span>;
 }

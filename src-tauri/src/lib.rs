@@ -8,6 +8,10 @@ use tauri::Manager;
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .register_asynchronous_uri_scheme_protocol(
+            pc_client::cover_protocol::SCHEME,
+            pc_client::cover_protocol::handle,
+        )
         .setup(|app| {
             #[cfg(mobile)]
             app.handle().plugin(tauri_plugin_barcode_scanner::init())?;
@@ -35,6 +39,11 @@ pub fn run() {
             app.manage(pc_client::reading_sync::ReadingSyncState::new(
                 data_dir.join("reading-sync.json"),
             ));
+            let covers = pc_client::cover_protocol::CoverCacheState::new(
+                app.path().app_cache_dir()?.join("covers"),
+            );
+            covers.trim();
+            app.manage(covers);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -46,6 +55,8 @@ pub fn run() {
             pc_client::pc_disconnect,
             pc_client::pc_search_works,
             pc_client::pc_list_entities,
+            pc_client::pc_get_entity_detail,
+            pc_client::pc_list_entity_series,
             pc_client::pc_list_collections,
             pc_client::pc_get_work_collections,
             pc_client::pc_get_collection,
@@ -53,9 +64,6 @@ pub fn run() {
             pc_client::pc_get_page,
             pc_client::pc_get_outline,
             pc_client::pc_get_asset,
-            pc_client::pc_get_cover,
-            pc_client::pc_get_collection_cover,
-            pc_client::pc_get_entity_cover,
             pc_client::reading_sync::reading_record,
             pc_client::reading_sync::reading_sync,
             pc_client::reading_sync::reading_get,
@@ -65,9 +73,6 @@ pub fn run() {
             pc_client::offline::offline_get_page,
             pc_client::offline::offline_get_outline,
             pc_client::offline::offline_get_asset,
-            pc_client::offline::offline_get_cover,
-            pc_client::offline::offline_get_collection_cover,
-            pc_client::offline::offline_get_entity_cover,
             pc_client::offline::offline_delete_work,
             pc_client::offline::offline_delete_corrupt_work,
         ])

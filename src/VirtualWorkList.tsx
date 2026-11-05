@@ -1,19 +1,27 @@
-import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
-import { useVirtualizer } from "@tanstack/react-virtual";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { useVirtualizer, type VirtualItem } from "@tanstack/react-virtual";
 
-/** Keep only the card rows near the main scroll viewport mounted. */
-export function VirtualWorkList<T>({ items, itemKey, renderItem }: {
+// 測った行の高さを一覧ごとに覚える。戻ったときに同じ高さで並び直し、位置がずれないようにする。
+const measured = new Map<string, VirtualItem[]>();
+const maxRememberedLists = 30;
+
+/** 画面の近くにある行だけを置く。列数は一覧自身の幅で決める。 */
+export function VirtualWorkList<T>({ items, itemKey, renderItem, listKey, minColumn = 360, estimatedHeight = 190 }: {
   items: T[];
   itemKey: (item: T) => string | number;
   renderItem: (item: T) => ReactNode;
+  /** 同じ一覧を指す名前。戻ったときの高さの復元に使う。 */
+  listKey?: string;
+  minColumn?: number;
+  estimatedHeight?: number;
 }) {
   const listRef = useRef<HTMLDivElement>(null);
   const [scroller, setScroller] = useState<HTMLElement | null>(() => document.querySelector<HTMLElement>(".main-content"));
   const [width, setWidth] = useState(0);
   const [scrollMargin, setScrollMargin] = useState(0);
-  const mobile = typeof window !== "undefined" && window.matchMedia("(max-width: 720px)").matches;
-  const gap = mobile ? 10 : 14;
-  const columns = mobile ? 1 : Math.max(1, Math.floor((width + gap) / (275 + gap)));
+  const gap = width > 0 && width < 600 ? 10 : 14;
+  const columns = Math.max(1, Math.floor((width + gap) / (minColumn + gap)));
+  const memoryKey = listKey ? `${listKey}:${columns}` : null;
 
   useLayoutEffect(() => {
     const node = listRef.current;
@@ -39,17 +47,27 @@ export function VirtualWorkList<T>({ items, itemKey, renderItem }: {
     getScrollElement: () => scroller,
     enabled: Boolean(scroller),
     initialOffset: () => scroller?.scrollTop ?? 0,
-    estimateSize: () => mobile ? 170 : 220,
+    initialMeasurementsCache: memoryKey ? measured.get(memoryKey) : undefined,
+    estimateSize: () => estimatedHeight,
     getItemKey: (index) => `${columns}:${items[index * columns] ? itemKey(items[index * columns]) : index}`,
     gap,
-    overscan: mobile ? 6 : 3,
+    overscan: 3,
     scrollMargin,
   });
 
-  // The layout width is unknown for one paint on first mount. A bounded grid
-  // gives the user immediate content without mounting an unbounded library.
+  const latest = useRef({ memoryKey, virtualizer });
+  latest.current = { memoryKey, virtualizer };
+  useEffect(() => () => {
+    const { memoryKey: key, virtualizer: list } = latest.current;
+    if (!key) return;
+    measured.delete(key);
+    measured.set(key, list.measurementsCache);
+    if (measured.size > maxRememberedLists) measured.delete(measured.keys().next().value!);
+  }, []);
+
+  // 幅は最初の 1 回の描画まで分からない。件数を抑えて先に見せる。
   if (!scroller || width <= 0) {
-    return <div className="work-list" ref={listRef}>{items.slice(0, 20).map((item) => <div key={itemKey(item)}>{renderItem(item)}</div>)}</div>;
+    return <div className="work-list" ref={listRef}>{items.slice(0, 12).map((item) => <div key={itemKey(item)}>{renderItem(item)}</div>)}</div>;
   }
 
   return <div ref={listRef} className="virtual-work-list" style={{ height: virtualizer.getTotalSize() }}>
@@ -58,7 +76,7 @@ export function VirtualWorkList<T>({ items, itemKey, renderItem }: {
       key={row.key}
       ref={virtualizer.measureElement}
       data-index={row.index}
-      style={{ gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))`, transform: `translateY(${row.start - scrollMargin}px)` }}
+      style={{ gap, gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))`, transform: `translateY(${row.start - scrollMargin}px)` }}
     >{items.slice(row.index * columns, (row.index + 1) * columns).map((item) => <div className="virtual-work-cell" key={itemKey(item)}>{renderItem(item)}</div>)}</div>)}
   </div>;
 }
