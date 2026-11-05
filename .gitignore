@@ -72,3 +72,6 @@ docs/reference/events.md
 docs/reference/schema.md
 docs-tools/node_modules/
 .docs-build/
+
+# 管理画面のビルド。piep-server に埋め込む。
+src-tauri/admin-dist/

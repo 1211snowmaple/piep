@@ -6,7 +6,7 @@
 
 use super::standalone::{ServerPaths, UpdateConfig};
 use super::sync_receive::SyncReceiver;
-use chrono::{Local, NaiveTime, Utc};
+use chrono::{DateTime, Local, NaiveTime, Utc};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
@@ -162,6 +162,119 @@ impl UpdateRecord {
     }
 }
 
+/// 更新の履歴の 1 行。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateHistoryEntry {
+    pub at: String,
+    pub from: Option<String>,
+    pub to: String,
+    /// `applied`（更新した）、`failed`（起動せず戻った）、`rolled_back`（手で戻した）。
+    pub result: String,
+    /// 止めてから、次の版が動き出すまで。
+    pub downtime_seconds: Option<i64>,
+    pub reason: Option<String>,
+}
+
+const HISTORY_LIMIT: usize = 50;
+
+/// 更新の履歴。書くのは本体だけにする。
+///
+/// 見張り役は更新のあとも次の起動まで古いまま動き続けるので、`UpdateRecord` に載せると
+/// 古い見張り役が知らない項目を落としてしまう。起動のたびに前回との違いから 1 行を足す。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct UpdateHistory {
+    /// 前回動いていた版。
+    pub last_version: Option<String>,
+    /// 当てるために止めた時刻と、当てる先。
+    pub stopping_at: Option<String>,
+    pub stopping_to: Option<String>,
+    /// 手で戻すところなら true。
+    pub stopping_rollback: bool,
+    pub entries: Vec<UpdateHistoryEntry>,
+}
+
+impl UpdateHistory {
+    pub fn load(paths: &ServerPaths) -> Self {
+        fs::read(paths.update_history())
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn save(&self, paths: &ServerPaths) {
+        let result = serde_json::to_vec_pretty(self)
+            .map_err(|error| error.to_string())
+            .and_then(|bytes| write_atomic(&paths.update_history(), &bytes));
+        if let Err(error) = result {
+            log::warn!("更新の履歴を書けません: {error}");
+        }
+    }
+
+    fn push(&mut self, entry: UpdateHistoryEntry) {
+        self.entries.insert(0, entry);
+        self.entries.truncate(HISTORY_LIMIT);
+    }
+
+    /// 止める前に、当てる先を書いておく。
+    pub fn note_stopping(paths: &ServerPaths, to: &str, rollback: bool) {
+        let mut history = Self::load(paths);
+        history.stopping_at = Some(Utc::now().to_rfc3339());
+        history.stopping_to = Some(to.to_string());
+        history.stopping_rollback = rollback;
+        history.save(paths);
+    }
+
+    /// 本体が動き出したら呼ぶ。前回と比べて、起きたことを履歴に足す。
+    pub fn reconcile(paths: &ServerPaths, version: &str, now: DateTime<Utc>) {
+        let mut history = Self::load(paths);
+        let record = UpdateRecord::load(paths);
+        let downtime = history
+            .stopping_at
+            .as_deref()
+            .and_then(|at| DateTime::parse_from_rfc3339(at).ok())
+            .map(|at| (now - at.with_timezone(&Utc)).num_seconds().max(0));
+        let from = history.last_version.clone();
+        let target = history.stopping_to.take();
+        let rollback = std::mem::take(&mut history.stopping_rollback);
+        history.stopping_at = None;
+        match target {
+            Some(target) if target == version => history.push(UpdateHistoryEntry {
+                at: now.to_rfc3339(),
+                from,
+                to: target,
+                result: if rollback { "rolled_back" } else { "applied" }.into(),
+                downtime_seconds: downtime,
+                reason: None,
+            }),
+            // 当てようとした版とは別の版で動き出した。見張り役が戻した。
+            Some(target) => history.push(UpdateHistoryEntry {
+                at: now.to_rfc3339(),
+                from,
+                to: target,
+                result: "failed".into(),
+                downtime_seconds: downtime,
+                reason: record.last_error.clone(),
+            }),
+            // 更新の外で版が変わった。入れ直したときなど。
+            None if from.as_deref().is_some_and(|from| from != version) => {
+                history.push(UpdateHistoryEntry {
+                    at: now.to_rfc3339(),
+                    from,
+                    to: version.to_string(),
+                    result: "applied".into(),
+                    downtime_seconds: None,
+                    reason: None,
+                });
+            }
+            None => {}
+        }
+        history.last_version = Some(version.to_string());
+        history.save(paths);
+    }
+}
+
 /// 署名を検証する。Tauri の署名は minisign の文字列を base64 にしたもの。
 pub fn verify_signature(public_key: &str, signature: &str, data: &[u8]) -> Result<(), String> {
     let decode = |text: &str| -> Result<String, String> {
@@ -266,6 +379,40 @@ async fn download(client: &reqwest::Client, url: &str, destination: &Path) -> Re
     Ok(())
 }
 
+/// 公開されている最新の版を確かめて記録する。取ってはこない。
+pub async fn check_latest(source: &UpdateSource, paths: &ServerPaths) -> Result<String, String> {
+    let client = reqwest::Client::builder()
+        .user_agent(concat!("piep-server/", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(Duration::from_secs(15))
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|error| format!("更新を確かめられません: {error}"))?;
+    let manifest = fetch_manifest(&client, source, Duration::from_secs(30)).await?;
+    let mut record = UpdateRecord::load(paths);
+    record.last_checked_at = Some(Utc::now().to_rfc3339());
+    record.latest = Some(manifest.version.clone());
+    record.last_error = None;
+    record.save(paths);
+    Ok(manifest.version)
+}
+
+async fn fetch_manifest(
+    client: &reqwest::Client,
+    source: &UpdateSource,
+    timeout: Duration,
+) -> Result<Manifest, String> {
+    client
+        .get(&source.manifest_url)
+        .timeout(timeout)
+        .send()
+        .await
+        .and_then(reqwest::Response::error_for_status)
+        .map_err(|error| format!("更新を確かめられません: {error}"))?
+        .json()
+        .await
+        .map_err(|error| format!("更新の案内を読み取れません: {error}"))
+}
+
 /// 新しい版があれば取ってきて検証し、`versions\<版>\` に置く。置いた版を返す。
 pub async fn prepare_latest(
     source: &UpdateSource,
@@ -295,16 +442,7 @@ async fn prepare_latest_with_timeouts(
         .timeout(package_timeout)
         .build()
         .map_err(|error| format!("更新を確かめられません: {error}"))?;
-    let manifest: Manifest = client
-        .get(&source.manifest_url)
-        .timeout(manifest_timeout)
-        .send()
-        .await
-        .and_then(reqwest::Response::error_for_status)
-        .map_err(|error| format!("更新を確かめられません: {error}"))?
-        .json()
-        .await
-        .map_err(|error| format!("更新の案内を読み取れません: {error}"))?;
+    let manifest = fetch_manifest(&client, source, manifest_timeout).await?;
 
     let mut record = UpdateRecord::load(paths);
     record.last_checked_at = Some(Utc::now().to_rfc3339());
@@ -402,22 +540,44 @@ pub enum UpdatePhase {
 #[serde(rename_all = "camelCase")]
 pub struct UpdateStatus {
     pub auto: bool,
+    /// 自動で当てる時間帯。`03:00-06:00`
+    pub window: String,
     pub phase: UpdatePhase,
     pub latest: Option<String>,
     pub last_checked_at: Option<String>,
     pub last_error: Option<String>,
     pub last_applied_at: Option<String>,
+    /// 起動せずに戻ったなどで、飛ばしている版。
+    pub skipped: Vec<String>,
+    /// 戻せる版。無ければ戻せない。
+    pub previous: Option<String>,
+}
+
+/// 動いている間に変えられる設定。
+#[derive(Debug, Clone)]
+struct LiveSettings {
+    auto: bool,
+    window_text: String,
+    window: UpdateWindow,
+}
+
+/// 口を閉じたあとに行うこと。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AfterStop {
+    Apply(String),
+    RollBack(String),
 }
 
 /// 本体の中で動く更新の係。頼めるのは「確かめて当てる」だけで、ファイルや URL は渡せない。
 pub struct UpdateController {
     paths: ServerPaths,
     source: UpdateSource,
-    config: UpdateConfig,
-    window: UpdateWindow,
+    settings: Mutex<LiveSettings>,
     phase: Mutex<UpdatePhase>,
     requested: Notify,
-    apply: Mutex<Option<String>>,
+    /// 設定が変わったら、待っている係を起こす。
+    changed: Notify,
+    apply: Mutex<Option<AfterStop>>,
     stop: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
@@ -432,19 +592,32 @@ impl UpdateController {
         Ok(Arc::new(Self {
             paths,
             source,
-            config,
-            window,
+            settings: Mutex::new(LiveSettings {
+                auto: config.auto,
+                window_text: config.window,
+                window,
+            }),
             phase: Mutex::new(UpdatePhase::Idle),
             requested: Notify::new(),
+            changed: Notify::new(),
             apply: Mutex::new(None),
             stop: Mutex::new(Some(stop)),
         }))
     }
 
+    fn live(&self) -> LiveSettings {
+        self.settings
+            .lock()
+            .map(|settings| settings.clone())
+            .unwrap_or_else(|poisoned| poisoned.into_inner().clone())
+    }
+
     pub fn status(&self) -> UpdateStatus {
         let record = UpdateRecord::load(&self.paths);
+        let settings = self.live();
         UpdateStatus {
-            auto: self.config.auto,
+            auto: settings.auto,
+            window: settings.window_text,
             phase: self
                 .phase
                 .lock()
@@ -454,7 +627,13 @@ impl UpdateController {
             last_checked_at: record.last_checked_at,
             last_error: record.last_error,
             last_applied_at: record.last_applied_at,
+            skipped: record.skipped,
+            previous: self.rollback_target(),
         }
+    }
+
+    pub fn history(&self) -> Vec<UpdateHistoryEntry> {
+        UpdateHistory::load(&self.paths).entries
     }
 
     /// 今すぐ確かめて当てる。時間帯を待たない。
@@ -462,9 +641,97 @@ impl UpdateController {
         self.requested.notify_one();
     }
 
-    /// 本体が止まったあとに当てる版。
-    pub fn take_apply(&self) -> Option<String> {
+    /// 確かめるだけ。取ってこないので、結果はすぐ返る。
+    pub async fn check_now(&self) -> Result<String, String> {
+        match check_latest(&self.source, &self.paths).await {
+            Ok(version) => Ok(version),
+            Err(error) => {
+                self.record_error(&error);
+                Err(error)
+            }
+        }
+    }
+
+    /// 自動更新と時間帯を変える。`server.toml` に書き戻し、再起動せずに効かせる。
+    pub fn set_settings(&self, auto: bool, window_text: &str) -> Result<(), String> {
+        let window = UpdateWindow::parse(window_text)?;
+        write_update_settings(&self.paths.config(), auto, window_text)?;
+        let mut settings = self
+            .settings
+            .lock()
+            .map_err(|_| "設定を変えられません".to_string())?;
+        *settings = LiveSettings {
+            auto,
+            window_text: window_text.to_string(),
+            window,
+        };
+        drop(settings);
+        self.changed.notify_waiters();
+        Ok(())
+    }
+
+    /// 飛ばしている版をもう一度試す。
+    pub fn retry_skipped(&self) {
+        let mut record = UpdateRecord::load(&self.paths);
+        record.skipped.clear();
+        record.save(&self.paths);
+        self.request_now();
+    }
+
+    /// 戻せる版。版の置き場と DB の写しの両方があるときだけ。
+    fn rollback_target(&self) -> Option<String> {
+        let previous = read_version_file(&self.paths.previous_version())?;
+        (is_newer(VERSION, &previous)
+            && self.paths.version_dir(&previous).join(EXECUTABLE).exists()
+            && self.paths.update_backup().exists())
+        .then_some(previous)
+    }
+
+    /// 前の版へ戻す。戻した版は飛ばすので、自動で当て直さない。
+    pub fn roll_back(&self) -> Result<String, String> {
+        let previous = self
+            .rollback_target()
+            .ok_or("戻せる版がありません".to_string())?;
+        let idle = self
+            .phase
+            .lock()
+            .map(|phase| matches!(*phase, UpdatePhase::Idle))
+            .unwrap_or(false);
+        if !idle {
+            return Err("更新の処理が終わってからにしてください".into());
+        }
+        let mut record = UpdateRecord::load(&self.paths);
+        if !record.skipped.iter().any(|version| version == VERSION) {
+            record.skipped.push(VERSION.to_string());
+        }
+        record.save(&self.paths);
+        self.stop_for(AfterStop::RollBack(previous.clone()));
+        Ok(previous)
+    }
+
+    /// 本体が止まったあとに行うこと。
+    pub fn take_after_stop(&self) -> Option<AfterStop> {
         self.apply.lock().ok().and_then(|mut apply| apply.take())
+    }
+
+    fn stop_for(&self, after: AfterStop) {
+        match &after {
+            AfterStop::Apply(version) => {
+                UpdateHistory::note_stopping(&self.paths, version, false);
+                self.set_phase(UpdatePhase::Applying(version.clone()));
+            }
+            AfterStop::RollBack(version) => {
+                UpdateHistory::note_stopping(&self.paths, version, true);
+                self.set_phase(UpdatePhase::Applying(version.clone()));
+            }
+        }
+        if let Ok(mut apply) = self.apply.lock() {
+            *apply = Some(after);
+        }
+        let stop = self.stop.lock().ok().and_then(|mut stop| stop.take());
+        if let Some(stop) = stop {
+            stop();
+        }
     }
 
     fn set_phase(&self, phase: UpdatePhase) {
@@ -495,22 +762,35 @@ impl UpdateController {
         true
     }
 
-    /// 時間帯に入るか、今すぐと頼まれるまで待つ。頼まれたら true。
+    /// 時間帯に入るか、今すぐと頼まれるまで待つ。自動を切られたら false。
     async fn wait_for_window(&self) -> bool {
         loop {
-            if self.window.contains(Local::now().time()) {
+            let settings = self.live();
+            if !settings.auto {
                 return false;
+            }
+            if settings.window.contains(Local::now().time()) {
+                return true;
             }
             tokio::select! {
                 _ = self.requested.notified() => return true,
+                _ = self.changed.notified() => {}
                 _ = tokio::time::sleep(WINDOW_POLL) => {}
             }
         }
     }
 
     /// 1 回分。当てることになったら true を返し、本体を止める。
-    async fn run_once(&self, mut now: bool, receiver: Option<&SyncReceiver>) -> bool {
+    async fn run_once(&self, now: bool, receiver: Option<&SyncReceiver>) -> bool {
         self.set_phase(UpdatePhase::Checking);
+        if !now && !self.live().auto {
+            // 自動を切っていても、新しい版があることは知らせる。取ってはこない。
+            if let Err(error) = check_latest(&self.source, &self.paths).await {
+                self.record_error(&error);
+            }
+            self.set_phase(UpdatePhase::Idle);
+            return false;
+        }
         let prepared = prepare_latest(&self.source, &self.paths, VERSION).await;
         let version = match prepared {
             Ok(Some(version)) => version,
@@ -528,42 +808,26 @@ impl UpdateController {
             }
         };
         self.set_phase(UpdatePhase::Waiting(version.clone()));
-        if !now && !self.config.auto {
-            // 自動にしていなければ、頼まれるまで当てない。
-            self.requested.notified().await;
-            now = true;
-        }
-        if !now {
-            self.wait_for_window().await;
+        if !now && !self.wait_for_window().await {
+            self.set_phase(UpdatePhase::Idle);
+            return false;
         }
         if !self.wait_until_quiet(receiver).await {
             self.record_error("送信が終わらないので、更新を次に延ばします");
             self.set_phase(UpdatePhase::Idle);
             return false;
         }
-        self.set_phase(UpdatePhase::Applying(version.clone()));
-        if let Ok(mut apply) = self.apply.lock() {
-            *apply = Some(version);
-        }
-        let stop = self.stop.lock().ok().and_then(|mut stop| stop.take());
-        if let Some(stop) = stop {
-            stop();
-        }
+        self.stop_for(AfterStop::Apply(version));
         true
     }
 
-    /// 本体が動いている間、回り続ける。
+    /// 本体が動いている間、回り続ける。自動を切っていても、確認だけは続ける。
     pub async fn run(self: Arc<Self>, receiver: Option<Arc<SyncReceiver>>) {
         let mut delay = FIRST_CHECK_DELAY;
         loop {
-            let now = if self.config.auto {
-                tokio::select! {
-                    _ = self.requested.notified() => true,
-                    _ = tokio::time::sleep(delay) => false,
-                }
-            } else {
-                self.requested.notified().await;
-                true
+            let now = tokio::select! {
+                _ = self.requested.notified() => true,
+                _ = tokio::time::sleep(delay) => false,
             };
             if self.run_once(now, receiver.as_deref()).await {
                 return;
@@ -571,6 +835,27 @@ impl UpdateController {
             delay = CHECK_INTERVAL;
         }
     }
+}
+
+/// `[update]` の値だけを書き換える。コメントと他の設定はそのまま残す。
+pub fn write_update_settings(config: &Path, auto: bool, window: &str) -> Result<(), String> {
+    let text = match fs::read_to_string(config) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(format!("設定を読めません: {error}")),
+    };
+    let mut document: toml_edit::DocumentMut = text
+        .parse()
+        .map_err(|error| format!("設定を読み取れません: {error}"))?;
+    let update = document
+        .entry("update")
+        .or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()));
+    let update = update
+        .as_table_mut()
+        .ok_or("設定の update が表ではありません".to_string())?;
+    update["auto"] = toml_edit::value(auto);
+    update["window"] = toml_edit::value(window);
+    write_atomic(config, document.to_string().as_bytes())
 }
 
 /// 当てる前に DB を整合した形で写す。戻すときに使う。
@@ -628,6 +913,74 @@ fn database_pairs(paths: &ServerPaths) -> [(PathBuf, &'static str); 2] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn history_paths() -> (crate::server::tests::TestRoot, ServerPaths) {
+        let root = crate::server::tests::TestRoot::created("history");
+        let paths = ServerPaths::new(&root.0).unwrap();
+        fs::create_dir_all(paths.state()).unwrap();
+        (root, paths)
+    }
+
+    #[test]
+    fn starting_records_what_happened_since_the_last_start() {
+        let (_root, paths) = history_paths();
+        let now = Utc::now();
+        // 初めて動いたときと、同じ版で動き直したときは何も足さない。
+        UpdateHistory::reconcile(&paths, "0.36.0", now);
+        UpdateHistory::reconcile(&paths, "0.36.0", now);
+        assert!(UpdateHistory::load(&paths).entries.is_empty());
+
+        // 当てて、その版で動き出した。
+        UpdateHistory::note_stopping(&paths, "0.37.0", false);
+        UpdateHistory::reconcile(&paths, "0.37.0", now + chrono::Duration::seconds(30));
+        let entry = UpdateHistory::load(&paths).entries[0].clone();
+        assert_eq!(entry.result, "applied");
+        assert_eq!(entry.from.as_deref(), Some("0.36.0"));
+        assert_eq!(entry.to, "0.37.0");
+        assert!(entry.downtime_seconds.is_some());
+
+        // 当てたが、見張り役が戻した。
+        UpdateHistory::note_stopping(&paths, "0.38.0", false);
+        let mut record = UpdateRecord::load(&paths);
+        record.last_error = Some("起動しませんでした".into());
+        record.save(&paths);
+        UpdateHistory::reconcile(&paths, "0.37.0", now);
+        let entry = UpdateHistory::load(&paths).entries[0].clone();
+        assert_eq!(entry.result, "failed");
+        assert_eq!(entry.to, "0.38.0");
+        assert_eq!(entry.reason.as_deref(), Some("起動しませんでした"));
+
+        // 手で戻した。
+        UpdateHistory::note_stopping(&paths, "0.36.0", true);
+        UpdateHistory::reconcile(&paths, "0.36.0", now);
+        assert_eq!(UpdateHistory::load(&paths).entries[0].result, "rolled_back");
+        assert_eq!(UpdateHistory::load(&paths).entries.len(), 3);
+    }
+
+    #[test]
+    fn changing_the_settings_keeps_the_comments_and_other_values() {
+        let (_root, paths) = history_paths();
+        let text = "# 上のコメント\nlisten = \"127.0.0.1:1234\"\n\n[update]\n# 時間帯の説明\nauto = true\nwindow = \"03:00-06:00\"\n";
+        fs::write(paths.config(), text).unwrap();
+        write_update_settings(&paths.config(), false, "01:30-02:30").unwrap();
+        let written = fs::read_to_string(paths.config()).unwrap();
+        assert!(written.contains("# 上のコメント"));
+        assert!(written.contains("# 時間帯の説明"));
+        assert!(written.contains("listen = \"127.0.0.1:1234\""));
+        let config: crate::server::standalone::ServerConfig = toml::from_str(&written).unwrap();
+        assert!(!config.update.auto);
+        assert_eq!(config.update.window, "01:30-02:30");
+    }
+
+    #[test]
+    fn settings_can_be_written_when_the_section_is_missing() {
+        let (_root, paths) = history_paths();
+        fs::write(paths.config(), "listen = \"127.0.0.1:1234\"\n").unwrap();
+        write_update_settings(&paths.config(), true, "02:00-04:00").unwrap();
+        let written = fs::read_to_string(paths.config()).unwrap();
+        let config: crate::server::standalone::ServerConfig = toml::from_str(&written).unwrap();
+        assert_eq!(config.update.window, "02:00-04:00");
+    }
 
     #[tokio::test]
     async fn stalled_update_requests_end_and_can_be_retried() {

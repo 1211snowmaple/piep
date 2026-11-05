@@ -4,6 +4,8 @@
 //! `piep-server` は、ここの同じ部品で動く。違うのは「本棚をどこから借りるか」と
 //! 「状態をどこに置くか」だけである。
 
+pub mod admin_assets;
+pub mod admin_store;
 pub mod desktop;
 pub mod dto;
 pub mod http;

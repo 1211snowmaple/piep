@@ -447,7 +447,8 @@ impl DesktopServer {
         let behind = status["version"]
             .as_str()
             .is_some_and(|version| super::update::is_newer(env!("CARGO_PKG_VERSION"), version));
-        if behind && status["update"].is_object() {
+        // 自動更新を切っているサーバーは、押されるまで変えない。
+        if behind && status["update"]["auto"].as_bool() == Some(true) {
             if let Err(error) = self.update_remote().await {
                 log::warn!("サーバーの更新を頼めません: {error}");
             }
