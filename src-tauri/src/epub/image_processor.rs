@@ -248,6 +248,21 @@ fn encode_webp(
     img: &DynamicImage,
     options: &ImageCompressOptions,
 ) -> Result<(Vec<u8>, String), String> {
+    // 符号器が受けるのは 8 ビットの RGB と RGBA だけなので、白黒や 16 ビットは先に直す。
+    let converted;
+    let img = if matches!(
+        img,
+        DynamicImage::ImageRgb8(_) | DynamicImage::ImageRgba8(_)
+    ) {
+        img
+    } else {
+        converted = if img.color().has_alpha() {
+            DynamicImage::ImageRgba8(img.to_rgba8())
+        } else {
+            DynamicImage::ImageRgb8(img.to_rgb8())
+        };
+        &converted
+    };
     let encoder =
         webp::Encoder::from_image(img).map_err(|e| format!("WebPエンコーダ作成エラー: {:?}", e))?;
 
