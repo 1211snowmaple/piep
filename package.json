@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "build:admin": "vite build --config vite.admin.config.ts",
     "check": "tsc --noEmit && tsc --noEmit -p tsconfig.e2e.json",
     "lint": "oxlint --deny-warnings src e2e",
     "test": "vitest run src",

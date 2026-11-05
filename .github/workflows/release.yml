@@ -164,6 +164,10 @@ jobs:
         run: |
           $version = '${{ github.ref_name }}'.Substring(1)
           $tag = '${{ github.ref_name }}'
+          npm run build:admin
+          if ($LASTEXITCODE -ne 0) { throw 'Could not build the admin screen' }
+          # 管理画面が空のまま配らない。
+          $env:PIEP_REQUIRE_ADMIN_UI = '1'
           cargo build --release --locked --manifest-path src-tauri/Cargo.toml --example piep-server
           if ($LASTEXITCODE -ne 0) { throw 'Could not build piep-server' }
           $output = Join-Path $env:RUNNER_TEMP 'server'

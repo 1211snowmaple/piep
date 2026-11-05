@@ -1,6 +1,6 @@
 //! 単独サーバーの自己更新。
 //!
-//! 本体が新しい版を取ってきて検証し、静かなときに終了コードで見張り役へ頼む。
+//! 本体が新しいバージョンを取ってきて検証し、静かなときに終了コードで見張り役へ頼む。
 //! 版の切り替えと戻しは見張り役（`watchdog.rs`）が行う。動いている実行ファイルは
 //! 自分では置き換えられないからである。
 
@@ -348,9 +348,9 @@ fn reported_version(executable: &Path) -> Result<String, String> {
     let output = Command::new(executable)
         .arg("--version")
         .output()
-        .map_err(|error| format!("新しい版を動かせません: {error}"))?;
+        .map_err(|error| format!("新しいバージョンを動かせません: {error}"))?;
     if !output.status.success() {
-        return Err("新しい版が版を答えません".into());
+        return Err("新しいバージョンが自分のバージョンを答えません".into());
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
@@ -361,20 +361,20 @@ async fn download(client: &reqwest::Client, url: &str, destination: &Path) -> Re
         .send()
         .await
         .and_then(reqwest::Response::error_for_status)
-        .map_err(|error| format!("新しい版を取ってこられません: {error}"))?;
+        .map_err(|error| format!("新しいバージョンを取ってこられません: {error}"))?;
     let mut output =
-        File::create(destination).map_err(|error| format!("新しい版を保存できません: {error}"))?;
+        File::create(destination).map_err(|error| format!("新しいバージョンを保存できません: {error}"))?;
     let mut stream = response.bytes_stream();
     let mut total = 0_u64;
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|error| format!("新しい版を取ってこられません: {error}"))?;
+        let chunk = chunk.map_err(|error| format!("新しいバージョンを取ってこられません: {error}"))?;
         total += chunk.len() as u64;
         if total > MAX_PACKAGE_BYTES {
-            return Err("新しい版が大きすぎます".into());
+            return Err("新しいバージョンが大きすぎます".into());
         }
         output
             .write_all(&chunk)
-            .map_err(|error| format!("新しい版を保存できません: {error}"))?;
+            .map_err(|error| format!("新しいバージョンを保存できません: {error}"))?;
     }
     Ok(())
 }
@@ -413,7 +413,7 @@ async fn fetch_manifest(
         .map_err(|error| format!("更新の案内を読み取れません: {error}"))
 }
 
-/// 新しい版があれば取ってきて検証し、`versions\<版>\` に置く。置いた版を返す。
+/// 新しいバージョンがあれば取ってきて検証し、`versions\<版>\` に置く。置いた版を返す。
 pub async fn prepare_latest(
     source: &UpdateSource,
     paths: &ServerPaths,
@@ -469,7 +469,7 @@ async fn prepare_latest_with_timeouts(
     if incoming.exists() {
         fs::remove_dir_all(&incoming).map_err(|error| format!("前の取得を消せません: {error}"))?;
     }
-    fs::create_dir_all(&incoming).map_err(|error| format!("新しい版を保存できません: {error}"))?;
+    fs::create_dir_all(&incoming).map_err(|error| format!("新しいバージョンを保存できません: {error}"))?;
     let package = incoming.join("package.zip");
     let result = async {
         download(&client, &manifest.url, &package).await?;
@@ -480,7 +480,7 @@ async fn prepare_latest_with_timeouts(
         let reported = reported_version(&extracted.join(EXECUTABLE))?;
         if reported != manifest.version {
             return Err(format!(
-                "案内の版 {} と中身の版 {reported} が違います",
+                "案内のバージョン {} と中身のバージョン {reported} が違います",
                 manifest.version
             ));
         }
@@ -489,7 +489,7 @@ async fn prepare_latest_with_timeouts(
                 .map_err(|error| format!("前の展開を消せません: {error}"))?;
         }
         fs::rename(&extracted, &installed)
-            .map_err(|error| format!("新しい版を置けません: {error}"))?;
+            .map_err(|error| format!("新しいバージョンを置けません: {error}"))?;
         Ok::<(), String>(())
     }
     .await;
@@ -691,7 +691,7 @@ impl UpdateController {
     pub fn roll_back(&self) -> Result<String, String> {
         let previous = self
             .rollback_target()
-            .ok_or("戻せる版がありません".to_string())?;
+            .ok_or("戻せるバージョンがありません".to_string())?;
         let idle = self
             .phase
             .lock()
@@ -784,7 +784,7 @@ impl UpdateController {
     async fn run_once(&self, now: bool, receiver: Option<&SyncReceiver>) -> bool {
         self.set_phase(UpdatePhase::Checking);
         if !now && !self.live().auto {
-            // 自動を切っていても、新しい版があることは知らせる。取ってはこない。
+            // 自動を切っていても、新しいバージョンがあることは知らせる。取ってはこない。
             if let Err(error) = check_latest(&self.source, &self.paths).await {
                 self.record_error(&error);
             }

@@ -1,7 +1,7 @@
 //! 管理画面。ログイン、別のサイトからの要求の守り、画面のファイル、管理の設定の API。
 //!
 //! 出すのは `standalone` が `AdminWeb` を渡したときだけで、読み手の口と内蔵サーバーには載らない。
-//! 設計の理由は `docs/policy/10-security.md` に書いてある。
+//! 設計の理由は `docs/policy/06-backend.md` に書いてある。
 
 use super::super::admin_store::{TicketKind, RECENT_AUTH};
 use super::super::standalone::ServerPaths;
@@ -609,7 +609,7 @@ async fn web_ticket(
     if kind != Some(TicketKind::Login) {
         ctx.store.audit(
             "login",
-            "券でログイン",
+            "リンクでログイン",
             "ログイン画面",
             ip.get(),
             false,
@@ -624,7 +624,7 @@ async fn web_ticket(
         .map_err(storage_error)?;
     ctx.store.audit(
         "login",
-        "券でログイン",
+        "リンクでログイン",
         "ログイン画面",
         ip.get(),
         true,
@@ -868,7 +868,7 @@ async fn issue_ticket(
         .issue_admin_ticket(kind, lifetime)
         .map_err(storage_error)?;
     ctx.store
-        .audit("login", "券の発行", actor(&headers), ip.get(), true, None);
+        .audit("login", "ログイン用リンクの発行", actor(&headers), ip.get(), true, None);
     Ok(Json(serde_json::json!({
         "path": format!("/admin/#ticket={ticket}"),
         "kind": kind,
@@ -1075,7 +1075,7 @@ async fn update_retry(
     controller(&ctx)?.retry_skipped();
     ctx.store.audit(
         "update",
-        "飛ばした版をもう一度試す",
+        "飛ばしたバージョンをもう一度試す",
         actor(&headers),
         ip.get(),
         true,
@@ -1095,12 +1095,12 @@ async fn update_rollback(
         ApiError(
             StatusCode::CONFLICT,
             "rollback_unavailable",
-            "今は前の版へ戻せません",
+            "今は前のバージョンへ戻せません",
         )
     })?;
     ctx.store.audit(
         "update",
-        "前の版へ戻す",
+        "前のバージョンへ戻す",
         actor(&headers),
         ip.get(),
         true,
@@ -1343,7 +1343,7 @@ pub fn command_ticket(
         }
     }
     let ticket = store.issue_admin_ticket(kind, SETUP_TICKET)?;
-    store.audit("login", "券の発行", "サーバーのコマンド", None, true, None);
+    store.audit("login", "ログイン用リンクの発行", "サーバーのコマンド", None, true, None);
     Ok(ticket)
 }
 
