@@ -10,10 +10,12 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::State;
 use url::Url;
+
+use crate::secret_cipher::SecretCipher;
 
 pub(crate) mod offline;
 pub(crate) mod reading_sync;
@@ -35,14 +37,18 @@ const CAPABILITY_READING_SYNC: &str = "reading-sync";
 
 pub struct PcClientState {
     file: PathBuf,
+    cipher: Arc<dyn SecretCipher>,
+    saved: Mutex<Option<SavedConnection>>,
     // 要求ごとに TLS を張り直すと、外からの接続では 1 枚の画像ごとに往復が増える。
     client: Mutex<Option<(String, reqwest::Client)>>,
 }
 
 impl PcClientState {
-    pub fn new(file: PathBuf) -> Self {
+    pub fn new(file: PathBuf, cipher: Arc<dyn SecretCipher>) -> Self {
         Self {
             file,
+            cipher,
+            saved: Mutex::new(None),
             client: Mutex::new(None),
         }
     }
@@ -72,46 +78,104 @@ impl PcClientState {
         Ok(client)
     }
 
+    fn sealed_file(&self) -> PathBuf {
+        self.file.with_extension("sealed")
+    }
+
     fn load(&self) -> Result<Option<SavedConnection>, ClientError> {
-        let bytes = match fs::read(&self.file) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        // Keystore への問い合わせは数ミリ秒かかるので、画像ごとに開かない。
+        let mut cache = self.saved.lock().map_err(|_| ClientError::storage())?;
+        if let Some(saved) = cache.as_ref() {
+            return Ok(Some(saved.clone()));
+        }
+        let saved = match fs::read(self.sealed_file()) {
+            Ok(sealed) => {
+                let bytes = self
+                    .cipher
+                    .open(&sealed)
+                    .map_err(|_| ClientError::secret_lost())?;
+                parse_saved(&bytes)?
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                // 封をする前の版が置いたファイルは、読んだら封じて消す。
+                let bytes = match fs::read(&self.file) {
+                    Ok(bytes) => bytes,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                    Err(_) => return Err(ClientError::storage()),
+                };
+                let saved = parse_saved(&bytes)?;
+                self.write_sealed(&saved)?;
+                saved
+            }
             Err(_) => return Err(ClientError::storage()),
         };
-        let saved: SavedConnection =
-            serde_json::from_slice(&bytes).map_err(|_| ClientError::storage())?;
-        validate_url(&saved.url)?;
-        match (&saved.fingerprint, &saved.certificate_der) {
-            (Some(expected), Some(certificate)) => {
-                validate_fingerprint(expected)?;
-                let certificate = URL_SAFE_NO_PAD
-                    .decode(certificate)
-                    .map_err(|_| ClientError::storage())?;
-                if fingerprint(&certificate) != *expected {
-                    return Err(ClientError::storage());
-                }
-            }
-            (None, None) => {}
-            _ => return Err(ClientError::storage()),
-        }
-        if URL_SAFE_NO_PAD
-            .decode(&saved.token)
-            .map_err(|_| ClientError::storage())?
-            .len()
-            != 32
-        {
-            return Err(ClientError::storage());
-        }
+        *cache = Some(saved.clone());
         Ok(Some(saved))
     }
 
     fn save(&self, saved: &SavedConnection) -> Result<(), ClientError> {
-        let bytes = serde_json::to_vec(saved).map_err(|_| ClientError::storage())?;
-        let temporary = self.file.with_extension("json.tmp");
-        fs::write(&temporary, bytes).map_err(|_| ClientError::storage())?;
-        fs::rename(&temporary, &self.file).map_err(|_| ClientError::storage())?;
+        let mut cache = self.saved.lock().map_err(|_| ClientError::storage())?;
+        self.write_sealed(saved)?;
+        *cache = Some(saved.clone());
         Ok(())
     }
+
+    fn write_sealed(&self, saved: &SavedConnection) -> Result<(), ClientError> {
+        let bytes = serde_json::to_vec(saved).map_err(|_| ClientError::storage())?;
+        let sealed = self
+            .cipher
+            .seal(&bytes)
+            .map_err(|_| ClientError::storage())?;
+        let target = self.sealed_file();
+        let temporary = target.with_extension("sealed.tmp");
+        fs::write(&temporary, sealed).map_err(|_| ClientError::storage())?;
+        fs::rename(&temporary, &target).map_err(|_| ClientError::storage())?;
+        remove_if_present(&self.file)
+    }
+
+    fn forget(&self) -> Result<(), ClientError> {
+        let mut cache = self.saved.lock().map_err(|_| ClientError::storage())?;
+        remove_if_present(&self.sealed_file())?;
+        remove_if_present(&self.file)?;
+        *cache = None;
+        Ok(())
+    }
+}
+
+fn remove_if_present(file: &std::path::Path) -> Result<(), ClientError> {
+    match fs::remove_file(file) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(ClientError::storage()),
+    }
+}
+
+fn parse_saved(bytes: &[u8]) -> Result<SavedConnection, ClientError> {
+    let saved: SavedConnection =
+        serde_json::from_slice(bytes).map_err(|_| ClientError::storage())?;
+    validate_url(&saved.url)?;
+    match (&saved.fingerprint, &saved.certificate_der) {
+        (Some(expected), Some(certificate)) => {
+            validate_fingerprint(expected)?;
+            let certificate = URL_SAFE_NO_PAD
+                .decode(certificate)
+                .map_err(|_| ClientError::storage())?;
+            if fingerprint(&certificate) != *expected {
+                return Err(ClientError::storage());
+            }
+        }
+        (None, None) => {}
+        _ => return Err(ClientError::storage()),
+    }
+    if URL_SAFE_NO_PAD
+        .decode(&saved.token)
+        .map_err(|_| ClientError::storage())?
+        .len()
+        != 32
+    {
+        return Err(ClientError::storage());
+    }
+    Ok(saved)
 }
 
 #[derive(Debug, Serialize)]
@@ -126,6 +190,12 @@ impl ClientError {
         Self {
             code: "invalid_pairing",
             message: "登録文字列を確認してください",
+        }
+    }
+    fn secret_lost() -> Self {
+        Self {
+            code: "secret_lost",
+            message: "この端末に保存した登録を読めません。登録し直してください",
         }
     }
     fn storage() -> Self {
@@ -570,7 +640,16 @@ pub async fn pc_pair(
 pub async fn pc_connection_status(
     state: State<'_, PcClientState>,
 ) -> Result<ConnectionStatus, ClientError> {
-    let Some(mut saved) = state.load()? else {
+    let loaded = match state.load() {
+        Err(error) if error.code == "secret_lost" => {
+            return Ok(ConnectionStatus {
+                issue: Some("secret_lost"),
+                ..ConnectionStatus::empty()
+            })
+        }
+        loaded => loaded?,
+    };
+    let Some(mut saved) = loaded else {
         return Ok(ConnectionStatus::empty());
     };
     let client = state.client(&saved)?;
@@ -633,12 +712,9 @@ pub async fn pc_connection_status(
 }
 
 #[tauri::command]
-pub fn pc_disconnect(state: State<'_, PcClientState>) -> Result<ConnectionStatus, ClientError> {
-    match fs::remove_file(&state.file) {
-        Ok(()) => Ok(ConnectionStatus::empty()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(ConnectionStatus::empty()),
-        Err(_) => Err(ClientError::storage()),
-    }
+pub async fn pc_disconnect(state: State<'_, PcClientState>) -> Result<ConnectionStatus, ClientError> {
+    state.forget()?;
+    Ok(ConnectionStatus::empty())
 }
 
 async fn authenticated_get(
@@ -1545,9 +1621,88 @@ mod tests {
         fs::create_dir_all(&directory).expect("directory");
         let file = directory.join("connection.json");
         fs::write(&file, value.to_string()).expect("write");
-        let loaded = PcClientState::new(file).load();
+        let loaded = PcClientState::new(file, Arc::new(TestCipher)).load();
         fs::remove_dir_all(&directory).expect("cleanup");
         loaded
+    }
+
+    /// 中身が平文のまま見えないことと、開けないときの動きを試すためのもの。
+    struct TestCipher;
+
+    impl SecretCipher for TestCipher {
+        fn seal(&self, plain: &[u8]) -> Result<Vec<u8>, ()> {
+            Ok(plain.iter().map(|byte| byte ^ 0x5a).collect())
+        }
+        fn open(&self, sealed: &[u8]) -> Result<Vec<u8>, ()> {
+            Ok(sealed.iter().map(|byte| byte ^ 0x5a).collect())
+        }
+    }
+
+    struct BrokenCipher;
+
+    impl SecretCipher for BrokenCipher {
+        fn seal(&self, _: &[u8]) -> Result<Vec<u8>, ()> {
+            Err(())
+        }
+        fn open(&self, _: &[u8]) -> Result<Vec<u8>, ()> {
+            Err(())
+        }
+    }
+
+    fn secret_fixture() -> (PathBuf, PathBuf, serde_json::Value) {
+        let directory = std::env::temp_dir().join(format!("piep-android-secret-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&directory).expect("directory");
+        let file = directory.join("pc-connection.json");
+        let value = serde_json::json!({
+            "url": "https://server.example/",
+            "token": URL_SAFE_NO_PAD.encode([7_u8; 32]),
+            "deviceId": "device",
+            "deviceName": "phone",
+        });
+        (directory, file, value)
+    }
+
+    #[test]
+    fn the_old_plain_file_is_sealed_and_removed() {
+        let (directory, file, value) = secret_fixture();
+        fs::write(&file, value.to_string()).expect("write");
+        let state = PcClientState::new(file.clone(), Arc::new(TestCipher));
+        assert_eq!(state.load().expect("load").expect("saved").device_id, "device");
+        assert!(!file.exists());
+        let sealed = fs::read(state.sealed_file()).expect("sealed");
+        let token = URL_SAFE_NO_PAD.encode([7_u8; 32]);
+        assert!(!String::from_utf8_lossy(&sealed).contains(&token));
+        // 開き直しても同じ登録を読める。
+        let reopened = PcClientState::new(file, Arc::new(TestCipher));
+        assert_eq!(reopened.load().expect("load").expect("saved").token, token);
+        reopened.forget().expect("forget");
+        assert!(!reopened.sealed_file().exists());
+        assert!(reopened.load().expect("load").is_none());
+        fs::remove_dir_all(&directory).expect("cleanup");
+    }
+
+    #[test]
+    fn a_seal_that_cannot_be_opened_asks_for_registration_again() {
+        let (directory, file, value) = secret_fixture();
+        fs::write(&file, value.to_string()).expect("write");
+        let writer = PcClientState::new(file.clone(), Arc::new(TestCipher));
+        writer.load().expect("load");
+        let state = PcClientState::new(file, Arc::new(BrokenCipher));
+        let error = state.load().expect_err("cannot open");
+        assert_eq!(error.code, "secret_lost");
+        state.forget().expect("forget");
+        assert!(state.load().expect("load").is_none());
+        fs::remove_dir_all(&directory).expect("cleanup");
+    }
+
+    #[test]
+    fn a_plain_file_stays_until_it_can_be_sealed() {
+        let (directory, file, value) = secret_fixture();
+        fs::write(&file, value.to_string()).expect("write");
+        let state = PcClientState::new(file.clone(), Arc::new(BrokenCipher));
+        assert_eq!(state.load().expect_err("cannot seal").code, "storage");
+        assert!(file.exists());
+        fs::remove_dir_all(&directory).expect("cleanup");
     }
 
     #[test]

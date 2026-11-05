@@ -91,7 +91,7 @@ export function PcConnectionSettings({ status, onStatusChange }: { status: PcCon
   };
 
   const registrationForm = <div className="connection-registration">
-    <p>デスクトップ版 piep の「設定 → サーバー（β）」で「携帯を追加」を押し、表示された QR を読むか、登録文字列を入力します。</p>
+    <p>デスクトップ版 piep の「設定 → サーバー」の「携帯を追加」で「次へ」を押し、表示された QR を読むか、登録文字列を入力します。</p>
     <label>端末の名前<input value={deviceName} onChange={(event) => setDeviceName(event.target.value)} maxLength={64} /></label>
     {isTauri() && <button type="button" className="secondary-button" disabled={busy} onClick={() => void scanPairing()}>QR を読む</button>}
     <label>登録文字列<textarea value={pairingText} onChange={(event) => setPairingText(event.target.value)} rows={4} placeholder='{"version":2,"url":"https://..."}' /></label>

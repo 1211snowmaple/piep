@@ -1,5 +1,6 @@
 mod app_update;
 mod pc_client;
+mod secret_cipher;
 
 use tauri::Manager;
 
@@ -16,8 +17,21 @@ pub fn run() {
             app.handle().plugin(tauri_plugin_barcode_scanner::init())?;
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
+            #[cfg(target_os = "android")]
+            let cipher: std::sync::Arc<dyn secret_cipher::SecretCipher> = {
+                app.handle().plugin(secret_cipher::init())?;
+                std::sync::Arc::new(
+                    app.state::<secret_cipher::KeystoreCipher<tauri::Wry>>()
+                        .inner()
+                        .clone(),
+                )
+            };
+            #[cfg(not(target_os = "android"))]
+            let cipher: std::sync::Arc<dyn secret_cipher::SecretCipher> =
+                std::sync::Arc::new(secret_cipher::DevelopmentCipher);
             app.manage(pc_client::PcClientState::new(
                 data_dir.join("pc-connection.json"),
+                cipher,
             ));
             app.manage(pc_client::offline::OfflineState::new(
                 data_dir.join("offline"),
