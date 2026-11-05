@@ -72,6 +72,59 @@ struct ActiveEmbedded {
     task: tokio::task::JoinHandle<()>,
 }
 
+/// 送信を頼んだ結果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SendAttempt {
+    /// 別の送信が動いていて、何もしなかった。
+    Busy,
+    /// 利用者が止めた。
+    Canceled,
+    /// 最後まで送った。`generation` は写しを作る前のライブラリの世代である。
+    Completed { generation: Option<i64> },
+}
+
+/// 自動送信がどこまで届けたか。実際に送った世代だけを覚える。
+#[derive(Debug)]
+struct AutoSendProgress {
+    sent_generation: Option<i64>,
+    pending_startup_send: bool,
+}
+
+impl Default for AutoSendProgress {
+    fn default() -> Self {
+        Self {
+            sent_generation: None,
+            pending_startup_send: true,
+        }
+    }
+}
+
+impl AutoSendProgress {
+    fn should_send(&self, quiet: bool, generation: Option<i64>) -> bool {
+        self.pending_startup_send || (quiet && generation != self.sent_generation)
+    }
+
+    fn after_attempt(&mut self, attempt: SendAttempt, current: Option<i64>) {
+        match attempt {
+            // 動いている送信は今の世代を含まないかもしれない。送ったことにせず、次の周回で試す。
+            SendAttempt::Busy => {}
+            // 止めた世代を送り続けない。次に変わったら、また送る。
+            SendAttempt::Canceled => {
+                self.pending_startup_send = false;
+                self.sent_generation = current;
+            }
+            SendAttempt::Completed { generation } => {
+                self.pending_startup_send = false;
+                self.sent_generation = generation;
+            }
+        }
+    }
+
+    fn after_failure(&mut self) {
+        self.pending_startup_send = false;
+    }
+}
+
 pub struct DesktopServer {
     dir: PathBuf,
     app_data: PathBuf,
@@ -518,10 +571,12 @@ impl DesktopServer {
     }
 
     /// 送信を 1 回行う。すでに送っていれば何もしない。
-    pub async fn send_once(&self, state: Arc<AppState>) -> Result<(), String> {
+    pub async fn send_once(&self, state: Arc<AppState>) -> Result<SendAttempt, String> {
         let Ok(_running) = self.send_lock.try_lock() else {
-            return Ok(());
+            return Ok(SendAttempt::Busy);
         };
+        // 写しを作る前に読む。この間に変わっても、次回もう一度送るだけで取りこぼさない。
+        let generation = state.db.library_generation().ok();
         let remote = self
             .settings()
             .remote
@@ -593,8 +648,9 @@ impl DesktopServer {
             self.update_remote_if_behind().await;
         }
         match failed {
-            Some(error) if error != CANCELED => Err(error),
-            _ => Ok(()),
+            Some(error) if error == CANCELED => Ok(SendAttempt::Canceled),
+            Some(error) => Err(error),
+            None => Ok(SendAttempt::Completed { generation }),
         }
     }
 
@@ -613,10 +669,9 @@ impl DesktopServer {
             }
             tokio::time::sleep(AUTO_SEND_STARTUP_DELAY).await;
             // 起動して落ち着いたあとに一度送る。変わっていなければ問い合わせだけで終わる。
-            let mut sent_generation = None;
+            let mut progress = AutoSendProgress::default();
             let mut seen = None;
             let mut changed_at = None;
-            let mut pending_startup_send = true;
             let mut retry_at: Option<Instant> = None;
             loop {
                 if server.settings().auto_send && server.settings().remote.is_some() {
@@ -628,15 +683,14 @@ impl DesktopServer {
                     let quiet =
                         changed_at.is_none_or(|at: Instant| at.elapsed() >= AUTO_SEND_QUIET);
                     let waited = retry_at.is_none_or(|at| Instant::now() >= at);
-                    if waited && (pending_startup_send || (quiet && generation != sent_generation))
-                    {
-                        pending_startup_send = false;
+                    if waited && progress.should_send(quiet, generation) {
                         match server.send_once(Arc::clone(&state)).await {
-                            Ok(()) => {
-                                sent_generation = generation;
+                            Ok(attempt) => {
+                                progress.after_attempt(attempt, generation);
                                 retry_at = None;
                             }
                             Err(error) => {
+                                progress.after_failure();
                                 log::warn!("自動送信に失敗しました: {error}");
                                 retry_at = Some(Instant::now() + AUTO_SEND_RETRY);
                             }
@@ -675,4 +729,54 @@ pub fn list_local_interfaces() -> Result<Vec<LocalInterface>, String> {
     });
     interfaces.dedup_by(|left, right| left.ip == right.ip);
     Ok(interfaces)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_busy_attempt_does_not_count_as_sent() {
+        let mut progress = AutoSendProgress::default();
+        assert!(progress.should_send(false, Some(1)));
+        // 手で始めた g1 の送信中に g2 へ変わり、自動送信はロックで見送られる。
+        progress.after_attempt(SendAttempt::Busy, Some(2));
+        assert!(progress.should_send(true, Some(2)));
+        progress.after_attempt(
+            SendAttempt::Completed {
+                generation: Some(2),
+            },
+            Some(2),
+        );
+        assert!(!progress.should_send(true, Some(2)));
+    }
+
+    #[test]
+    fn the_generation_written_during_a_send_is_still_owed() {
+        let mut progress = AutoSendProgress::default();
+        // g1 の写しを送っている間に g2 になった。
+        progress.after_attempt(
+            SendAttempt::Completed {
+                generation: Some(1),
+            },
+            Some(2),
+        );
+        assert!(progress.should_send(true, Some(2)));
+    }
+
+    #[test]
+    fn a_canceled_generation_waits_for_the_next_change() {
+        let mut progress = AutoSendProgress::default();
+        progress.after_attempt(SendAttempt::Canceled, Some(3));
+        assert!(!progress.should_send(true, Some(3)));
+        assert!(progress.should_send(true, Some(4)));
+    }
+
+    #[test]
+    fn a_failure_keeps_the_generation_owed() {
+        let mut progress = AutoSendProgress::default();
+        progress.after_failure();
+        assert!(!progress.pending_startup_send);
+        assert!(progress.should_send(true, Some(1)));
+    }
 }

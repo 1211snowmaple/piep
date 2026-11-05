@@ -34,6 +34,11 @@ use std::time::{Duration, Instant};
 const MAX_ASSET_BYTES: u64 = 25 * 1024 * 1024;
 const MAX_TRANSCODE_SOURCE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_TRANSCODE_PIXELS: u64 = 64_000_000;
+/// 挿絵はそのまま渡さず縮小する境目。端末の保存と同じ値にする。
+const MAX_RAW_ASSET_EDGE: u32 = 8192;
+const MAX_RAW_ASSET_PIXELS: u64 = 16_000_000;
+/// 取り込みが許す上限。これを超えるものは展開しない。
+const MAX_ASSET_SOURCE_PIXELS: u64 = 100_000_000;
 const MAX_JSON_BYTES: usize = 64 * 1024;
 const MAX_ADMIN_BYTES: usize = super::CHUNK_BYTES + 64 * 1024;
 const READ_TIMEOUT: Duration = Duration::from_secs(60);
@@ -1402,23 +1407,93 @@ fn cover_bytes(path: &Path, cover_size: CoverSize) -> Result<(Vec<u8>, String), 
     Ok((bytes, mime))
 }
 
+/// 挿絵をどう返すか。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AssetPlan {
+    Raw,
+    Shrink,
+    Refuse,
+}
+
+/// 圧縮後の大きさでは展開後のメモリが分からないので、寸法で決める。
+/// 9000×9000 の PNG は数百 KB でも、展開すると 300MB を超える。
+fn asset_plan(mime: &str, size: u64, width: u32, height: u32) -> AssetPlan {
+    let pixels = u64::from(width) * u64::from(height);
+    let oversize = width.max(height) > MAX_RAW_ASSET_EDGE
+        || pixels > MAX_RAW_ASSET_PIXELS
+        || size > MAX_ASSET_BYTES;
+    if !oversize {
+        return AssetPlan::Raw;
+    }
+    if size > MAX_TRANSCODE_SOURCE_BYTES
+        || pixels > MAX_ASSET_SOURCE_PIXELS
+        || !matches!(mime, "image/jpeg" | "image/png" | "image/webp")
+    {
+        return AssetPlan::Refuse;
+    }
+    AssetPlan::Shrink
+}
+
+/// AVIF の寸法を読む。`image` の機能では開けないので、必須の `ispe` ボックスを探す。
+/// 画像が複数あるファイルでは、いちばん大きいものを返す。
+fn avif_dimensions(path: &Path) -> Option<(u32, u32)> {
+    use std::io::Read;
+    let mut head = Vec::new();
+    fs::File::open(path)
+        .ok()?
+        .take(256 * 1024)
+        .read_to_end(&mut head)
+        .ok()?;
+    let mut largest: Option<(u32, u32)> = None;
+    for (at, _) in head
+        .windows(4)
+        .enumerate()
+        .filter(|(_, tag)| tag == b"ispe")
+    {
+        let field = |offset: usize| -> Option<u32> {
+            let bytes = head.get(at + offset..at + offset + 4)?;
+            Some(u32::from_be_bytes(bytes.try_into().ok()?))
+        };
+        // 名前の次に、版と印が 4 バイト、幅と高さが 4 バイトずつ続く。
+        let (Some(width), Some(height)) = (field(8), field(12)) else {
+            continue;
+        };
+        if largest
+            .is_none_or(|(w, h)| u64::from(w) * u64::from(h) < u64::from(width) * u64::from(height))
+        {
+            largest = Some((width, height));
+        }
+    }
+    largest
+}
+
+fn asset_dimensions(path: &Path, mime: &str) -> Option<(u32, u32)> {
+    if mime == "image/avif" {
+        avif_dimensions(path)
+    } else {
+        image::image_dimensions(path).ok()
+    }
+}
+
+/// 大きな画像の展開は 1 枚ずつにする。何枚も同時に頼まれてメモリを使い切らないように。
+static LARGE_ASSET_DECODE: Mutex<()> = Mutex::new(());
+
 fn asset_bytes(path: &Path, mime: &str, size: u64) -> Result<(Vec<u8>, String), ApiError> {
-    if size <= MAX_ASSET_BYTES {
-        return fs::read(path)
-            .map(|bytes| (bytes, mime.to_string()))
-            .map_err(|_| ApiError::not_found());
+    let (width, height) = asset_dimensions(path, mime).ok_or_else(ApiError::not_found)?;
+    match asset_plan(mime, size, width, height) {
+        AssetPlan::Raw => {
+            return fs::read(path)
+                .map(|bytes| (bytes, mime.to_string()))
+                .map_err(|_| ApiError::not_found());
+        }
+        AssetPlan::Refuse => return Err(ApiError::asset_too_large()),
+        AssetPlan::Shrink => {}
     }
     // 高解像度の挿絵をそのまま WebView に渡すと、転送量と展開後のメモリが大きい。
     // 元ファイルは変更せず、端末向けの縮小版だけを応答として生成する。
-    if size > MAX_TRANSCODE_SOURCE_BYTES
-        || !matches!(mime, "image/jpeg" | "image/png" | "image/webp")
-    {
-        return Err(ApiError::asset_too_large());
-    }
-    let (width, height) = image::image_dimensions(path).map_err(|_| ApiError::not_found())?;
-    if u64::from(width) * u64::from(height) > MAX_TRANSCODE_PIXELS {
-        return Err(ApiError::asset_too_large());
-    }
+    let _decoding = LARGE_ASSET_DECODE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let options = crate::epub::intermediate::ImageCompressOptions {
         enabled: true,
         max_width: Some(3072),
@@ -1437,4 +1512,80 @@ fn asset_bytes(path: &Path, mime: &str, size: u64) -> Result<(Vec<u8>, String), 
         return Err(ApiError::asset_too_large());
     }
     Ok((bytes, output_mime))
+}
+
+#[cfg(test)]
+mod asset_tests {
+    use super::*;
+
+    #[test]
+    fn dimensions_decide_before_the_file_size() {
+        let png = "image/png";
+        assert_eq!(asset_plan(png, 1_000, 2000, 3000), AssetPlan::Raw);
+        // 監査の例。236KB の 9000×9000 は 81MP で、そのままは渡さない。
+        assert_eq!(asset_plan(png, 236_266, 9000, 9000), AssetPlan::Shrink);
+        assert_eq!(asset_plan(png, 1_000, 8193, 10), AssetPlan::Shrink);
+        assert_eq!(asset_plan(png, 1_000, 4001, 4001), AssetPlan::Shrink);
+        assert_eq!(
+            asset_plan(png, MAX_ASSET_BYTES + 1, 100, 100),
+            AssetPlan::Shrink
+        );
+        // 展開しないものと、縮小できない形式。
+        assert_eq!(asset_plan(png, 1_000, 10_001, 10_000), AssetPlan::Refuse);
+        assert_eq!(
+            asset_plan(png, MAX_TRANSCODE_SOURCE_BYTES + 1, 100, 100),
+            AssetPlan::Refuse
+        );
+        assert_eq!(
+            asset_plan("image/gif", 1_000, 9000, 9000),
+            AssetPlan::Refuse
+        );
+        assert_eq!(
+            asset_plan("image/avif", 1_000, 9000, 9000),
+            AssetPlan::Refuse
+        );
+        assert_eq!(asset_plan("image/gif", 1_000, 300, 300), AssetPlan::Raw);
+    }
+
+    #[test]
+    fn a_small_file_with_a_long_edge_comes_back_shrunk() {
+        let dir = std::env::temp_dir().join(format!("piep-asset-{}", random_name()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("long.png");
+        image::GrayImage::new(9000, 900).save(&path).unwrap();
+        let size = fs::metadata(&path).unwrap().len();
+        assert!(size < MAX_ASSET_BYTES);
+        let (bytes, mime) = asset_bytes(&path, "image/png", size).unwrap();
+        assert_eq!(mime, "image/webp");
+        let (width, _) = image::load_from_memory(&bytes)
+            .unwrap()
+            .to_rgba8()
+            .dimensions();
+        assert!(width <= 3072, "{width}");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn avif_size_comes_from_the_largest_ispe_box() {
+        let dir = std::env::temp_dir().join(format!("piep-avif-{}", random_name()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("x.avif");
+        let mut file = vec![0_u8; 32];
+        for (width, height) in [(320_u32, 200_u32), (9000, 9000)] {
+            file.extend_from_slice(&20_u32.to_be_bytes());
+            file.extend_from_slice(b"ispe");
+            file.extend_from_slice(&[0; 4]);
+            file.extend_from_slice(&width.to_be_bytes());
+            file.extend_from_slice(&height.to_be_bytes());
+        }
+        fs::write(&path, &file).unwrap();
+        assert_eq!(avif_dimensions(&path), Some((9000, 9000)));
+        fs::write(&path, b"not an image").unwrap();
+        assert_eq!(avif_dimensions(&path), None);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn random_name() -> String {
+        super::super::store::random_token(6)
+    }
 }

@@ -106,10 +106,13 @@ local-ip-address = "0.6"
 webview2-com = "0.39.1"
 windows = { version = "0.62.2", features = [
     "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
     "Win32_Security_Credentials",
     "Win32_Storage_FileSystem",
     "Win32_System_JobObjects",
     "Win32_System_Registry",
+    "Win32_System_Threading",
     "Win32_UI_Shell",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",

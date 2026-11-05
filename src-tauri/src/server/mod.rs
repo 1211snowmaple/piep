@@ -8,6 +8,8 @@ pub mod desktop;
 pub mod dto;
 pub mod http;
 pub mod install;
+#[cfg(windows)]
+mod install_acl;
 pub mod library;
 pub mod snapshot;
 pub mod standalone;
