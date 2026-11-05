@@ -572,7 +572,7 @@ export default function DiagnosticsPage({ embedded = false, previewData = previe
           </Box>
         </Group>
         {profileRepairStatus.data.totalCount > 0 && (profileRunning
-          ? <Button color="red" variant="subtle" leftSection={<Icons.stop size={IconSize.menu} />} onClick={cancelProfileRepair}>中止</Button>
+          ? <Button variant="default" leftSection={<Icons.stop size={IconSize.menu} />} onClick={cancelProfileRepair}>中止</Button>
           : <Button leftSection={<Icons.retry size={IconSize.menu} />} disabled={!runtime || maintenance.isPending || indexOptimization.isPending} onClick={() => profileRepair.mutate()}>残件を修復</Button>)}
       </Group>
       {repairProgress && <Box mt="md">

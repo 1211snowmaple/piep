@@ -1664,8 +1664,7 @@ export default function SavePage() {
               {saving && (
                 <ActionIcon
                   className="candidate-rail__action"
-                  variant="light"
-                  color="red"
+                  variant="default"
                   size="lg"
                   loading={canceling}
                   disabled={canceling}
@@ -1922,8 +1921,7 @@ export default function SavePage() {
                         実際に止まるのは次の切れ目でも、返事はその場で返す。 */}
                     <Button
                       size="md"
-                      variant="light"
-                      color="red"
+                      variant="default"
                       leftSection={<Icons.cancel size={IconSize.action} />}
                       loading={canceling}
                       disabled={canceling}

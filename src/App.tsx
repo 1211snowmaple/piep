@@ -11,6 +11,7 @@ import { subscribeTauriEvent } from "@/services/eventBus";
 import { isTauriRuntime } from "@/services/dbApi";
 import { rememberWindowColorScheme } from "@/services/startupApi";
 import { useIncompleteSaveRepair } from "@/features/updates/repairIncompleteSaves";
+import { DANGER_CONFIRM } from "@/components/DangerButton";
 
 const DashboardPage = lazy(() => import("@/features/dashboard/DashboardPage"));
 const LibraryPage = lazy(() => import("@/features/library/LibraryPage"));
@@ -57,7 +58,7 @@ function confirmDiscardOnClose(): Promise<boolean> {
       title: "保存していない変更があります",
       children: <Text size="sm">終了すると編集中の内容は失われます。閉じてよろしいですか？</Text>,
       labels: { confirm: "保存せずに終了", cancel: "アプリに戻る" },
-      confirmProps: { color: "red" },
+      confirmProps: DANGER_CONFIRM,
       onConfirm: () => resolve(true),
       onCancel: () => resolve(false),
       onClose: () => resolve(false),
@@ -71,7 +72,7 @@ function confirmDiscardOnNavigation(): Promise<boolean> {
       title: "この画面を離れますか？",
       children: <Text size="sm">処理中の作業または保存していない変更があります。移動すると現在の作業内容が失われる可能性があります。</Text>,
       labels: { confirm: "破棄して移動", cancel: "この画面に残る" },
-      confirmProps: { color: "red" },
+      confirmProps: DANGER_CONFIRM,
       onConfirm: () => resolve(true),
       onCancel: () => resolve(false),
       onClose: () => resolve(false),

@@ -18,6 +18,7 @@ import { deleteThenCleanup } from "@/features/library/deletedWorkCleanup";
 import { invalidateWorkFlagViews } from "@/features/library/workSetInvalidation";
 import { listPendingRevisionsCommand } from "@/services/updateJobApi";
 import type { DownloadEntry } from "@/types/library";
+import { DANGER_CONFIRM } from "@/components/DangerButton";
 
 interface WorkCardProps {
   work: DownloadEntry;
@@ -454,7 +455,7 @@ function WorkActions({ work, queued, onQueue, onToggleFavorite, onToggleWatch }:
     title: "この作品を削除しますか？",
     children: <Text size="sm">「{work.title}」と保存済みの画像・添付をライブラリから削除します。この操作は元に戻せません。</Text>,
     labels: { confirm: "削除する", cancel: "キャンセル" },
-    confirmProps: { color: "red" },
+    confirmProps: DANGER_CONFIRM,
     onConfirm: async () => {
       try {
         await deleteThenCleanup(

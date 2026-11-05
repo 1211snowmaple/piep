@@ -6,6 +6,7 @@ import { QRCodeSVG } from "qrcode.react";
 import { errorMessage, formatBytes, formatNumber } from "@/lib/format";
 import { openExternalUrl } from "@/services/openerApi";
 import { SectionIntro } from "./SectionIntro";
+import { DANGER_CONFIRM, DangerButton } from "@/components/DangerButton";
 import {
   serverConnectRemote,
   serverCreateReaderPairing,
@@ -270,19 +271,17 @@ function RemoteCard({ status, pending, active, perform, details, connectionError
         {details?.update && <RemoteUpdate update={details.update} version={details.version} perform={perform} pending={pending} active={active} />}
         <Divider />
         <Group justify="flex-end">
-          <Button
+          <DangerButton
             size="xs"
-            color="red"
-            variant="subtle"
             disabled={pending}
             onClick={() => modals.openConfirmModal({
               title: "サーバーとの接続を解除しますか？",
               children: <Text size="sm">この PC に保存した管理者の鍵を削除し、自動で送る設定もオフにします。サーバーの本棚と携帯の登録はそのまま残ります。接続し直すには、サーバーで <Code>piep-server admin-pair --replace</Code> を実行してください。</Text>,
               labels: { confirm: "解除", cancel: "キャンセル" },
-              confirmProps: { color: "red" },
+              confirmProps: DANGER_CONFIRM,
               onConfirm: () => void perform(serverDisconnectRemote),
             })}
-          >接続を解除</Button>
+          >接続を解除</DangerButton>
         </Group>
       </Stack>
     </Card>
@@ -312,7 +311,7 @@ function SendCard({ status, pending, active, perform, connectionError }: CardPro
             {send.phase === "upload" && <Text size="xs" c="dimmed">{formatNumber(send.filesDone)} / {formatNumber(send.filesTotal)} 件・{formatBytes(send.bytesDone)} / {formatBytes(send.bytesTotal)}</Text>}
             <Group justify="space-between" wrap="nowrap" align="center">
               <Text size="xs" c="dimmed">中止しても、送信済みのファイルはサーバーに残ります。次回はその続きから送ります。</Text>
-              <Button size="xs" color="red" variant="light" style={{ flexShrink: 0 }} onClick={() => void perform(serverSendStop)}>中止</Button>
+              <Button size="xs" variant="default" style={{ flexShrink: 0 }} onClick={() => void perform(serverSendStop)}>中止</Button>
             </Group>
           </Stack>
         )}
@@ -367,7 +366,7 @@ function EmbeddedCard({ status, pending, active, perform }: CardProps) {
             {status.embeddedFingerprint && <Text size="xs" c="dimmed" style={{ overflowWrap: "anywhere" }}>証明書のフィンガープリント: <Code>{status.embeddedFingerprint}</Code></Text>}
             <Group justify="space-between" wrap="nowrap">
               <Text size="sm" c="dimmed">この PC が起動している間だけ、携帯から読めます。</Text>
-              <Button color="red" variant="light" size="xs" style={{ flexShrink: 0 }} disabled={pending} loading={active === "stop"} onClick={() => void perform(serverEmbeddedStop, "stop")}>停止</Button>
+              <Button variant="default" size="xs" style={{ flexShrink: 0 }} disabled={pending} loading={active === "stop"} onClick={() => void perform(serverEmbeddedStop, "stop")}>停止</Button>
             </Group>
           </>
         ) : (
@@ -557,24 +556,22 @@ function DevicesCard({ status, pending, perform, connectionError = null }: CardP
                 <Text size="xs" c="dimmed">最後の接続: {formatTime(device.lastSeenAt)}・登録: {formatTime(device.createdAt)}</Text>
               </div>
               {device.role === "reader" && (
-                <Button
+                <DangerButton
                   size="xs"
-                  color="red"
-                  variant="subtle"
                   style={{ flexShrink: 0 }}
                   disabled={pending}
                   onClick={() => modals.openConfirmModal({
                     title: `「${device.name || "Android 端末"}」の登録を解除しますか？`,
                     children: <Text size="sm">解除すると、この端末から本棚を読めなくなります。解除はすぐに反映されます。</Text>,
                     labels: { confirm: "登録を解除", cancel: "キャンセル" },
-                    confirmProps: { color: "red" },
+                    confirmProps: DANGER_CONFIRM,
                     onConfirm: () => void perform(async () => {
                       const next = await serverRevokeDevice(device.id);
                       await remoteDevices.refetch();
                       return next;
                     }),
                   })}
-                >登録を解除</Button>
+                >登録を解除</DangerButton>
               )}
             </Group>
           </Stack>

@@ -75,6 +75,7 @@ import { getDemoReader } from "@/mocks/demoData";
 import { deleteThenCleanup } from "@/features/library/deletedWorkCleanup";
 import { invalidateWorkFlagViews } from "@/features/library/workSetInvalidation";
 import type { ReaderMetadata } from "@/types/library";
+import { DANGER_CONFIRM, DangerButton } from "@/components/DangerButton";
 
 type WorkTab = "overview" | "content" | "assets" | "history" | "json";
 
@@ -359,7 +360,7 @@ export default function WorkPage() {
     title: revision ? "この編集版を消しますか？" : `以前の編集版を${formatNumber(count)}件すべて消しますか？`,
     children: <Text size="sm">{revision ? `${formatDate(revision.updatedAt, true)}の編集版を消します。` : ""}消した編集版は戻せません。取り込んだ本文と、いま反映している編集版・下書きは残ります。</Text>,
     labels: { confirm: "消す", cancel: "やめる" },
-    confirmProps: { color: "red" },
+    confirmProps: DANGER_CONFIRM,
     onConfirm: () => deleteEdits.mutate(revision?.id ?? null),
   });
   const mutate = useMutation({
@@ -468,7 +469,7 @@ export default function WorkPage() {
   const deleteWork = () => modals.openConfirmModal({
     title: "この作品を削除しますか？",
     children: <Text size="sm">「{work.title}」と保存済みの画像・添付をローカルライブラリから削除します。この操作は元に戻せません。</Text>,
-    labels: { confirm: "削除する", cancel: "キャンセル" }, confirmProps: { color: "red" },
+    labels: { confirm: "削除する", cancel: "キャンセル" }, confirmProps: DANGER_CONFIRM,
     onConfirm: async () => {
       try {
         await deleteThenCleanup(
@@ -711,7 +712,7 @@ export default function WorkPage() {
                 </Paper>}
                 {(doc.archivedEditRevisions?.length ?? 0) >= 2 && <Group justify="space-between" wrap="nowrap" gap={6} px={4}>
                   <Text size="xs" c="dimmed">以前の編集版 {formatNumber(doc.archivedEditRevisions?.length ?? 0)}件</Text>
-                  <Button size="compact-xs" variant="subtle" color="red" loading={deleteEdits.isPending && deleteEdits.variables === null} onClick={() => confirmDeleteEdits(null, doc.archivedEditRevisions?.length ?? 0)}>すべて消す</Button>
+                  <DangerButton size="compact-xs" loading={deleteEdits.isPending && deleteEdits.variables === null} onClick={() => confirmDeleteEdits(null, doc.archivedEditRevisions?.length ?? 0)}>すべて消す</DangerButton>
                 </Group>}
                 {(doc.archivedEditRevisions ?? []).map((revision) => <Paper key={`edit-${revision.id}`} p="xs" withBorder className="version-row version-row--static">
                   <Group justify="space-between" wrap="nowrap" gap={6}><Text size="sm" fw={700}>以前の編集版</Text><Badge size="xs" color="gray" variant="light">未使用</Badge></Group>
@@ -723,7 +724,7 @@ export default function WorkPage() {
                     labels: { confirm: "反映する", cancel: "やめる" },
                     onConfirm: () => reapplyEdit.mutate(revision.id),
                   })}>もう一度反映</Button>
-                  <Button mt={4} size="compact-xs" variant="subtle" color="red" fullWidth loading={deleteEdits.isPending && deleteEdits.variables === revision.id} onClick={() => confirmDeleteEdits(revision, 1)}>消す</Button>
+                  <DangerButton mt={4} size="compact-xs" fullWidth loading={deleteEdits.isPending && deleteEdits.variables === revision.id} onClick={() => confirmDeleteEdits(revision, 1)}>消す</DangerButton>
                 </Paper>)}
                 {historyVersions.map((version) => <Paper component="button" type="button" key={version.id} p="xs" withBorder className="version-row" data-active={selectedVersion === version.version || undefined} onClick={() => setSelectedVersion(version.version)} title={version.changeSummary || "保存元から取得"}>
                   <Group justify="space-between" wrap="nowrap" gap={6}><Text size="sm" fw={700}>v{version.version}</Text>{version.version === work.currentVersion && <Badge size="xs">{doc.isEdited ? "取得元の最新版" : "現在"}</Badge>}</Group>

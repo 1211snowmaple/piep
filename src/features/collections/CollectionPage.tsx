@@ -52,6 +52,7 @@ import { CollectionAdditionsModal } from "./CollectionAdditionsModal";
 import { CollectionCoverModal } from "./CollectionCoverModal";
 import { CollectionRenameModal } from "./CollectionRenameModal";
 import { CollectionMemberList } from "./CollectionMemberList";
+import { DANGER_CONFIRM, DangerButton } from "@/components/DangerButton";
 
 function workKey(work: { source: string; sourceId: string }): WorkKey {
   return { source: work.source, sourceId: work.sourceId };
@@ -370,7 +371,7 @@ function CollectionDetail({ collection, readOnly, onEdit, onChanged }: { collect
   const deleteCollection = () => modals.openConfirmModal({
     title: "コレクションを削除しますか？",
     children: <Text size="sm">作品そのものは削除されません。「{collection.name}」というまとまりと並びだけを削除します。</Text>,
-    labels: { confirm: "削除する", cancel: "キャンセル" }, confirmProps: { color: "red" },
+    labels: { confirm: "削除する", cancel: "キャンセル" }, confirmProps: DANGER_CONFIRM,
     // Deleting touches the same caches every other edit on this screen does.
     // Invalidating only the list left the work and author pages still counting
     // this collection in their 所属 menus. The deleted collection's own entry is
@@ -398,7 +399,7 @@ function CollectionDetail({ collection, readOnly, onEdit, onChanged }: { collect
         </Stack>
       ),
       labels: { confirm: "外す", cancel: "キャンセル" },
-      confirmProps: { color: "red" },
+      confirmProps: DANGER_CONFIRM,
       onConfirm: () => mutation.mutate({ type: "remove", keys: chosen.map(workKey) }),
     });
   };
@@ -523,7 +524,7 @@ function CollectionDetail({ collection, readOnly, onEdit, onChanged }: { collect
                 {selectionMode ? (
                   <>
                     <Text size="sm" fw={650}>{formatNumber(selected.length)}件を選択中</Text>
-                    <Button size="compact-sm" variant="subtle" color="red" disabled={selected.length === 0 || mutation.isPending} onClick={removeSelected}>選んだ作品を外す</Button>
+                    <DangerButton size="compact-sm" disabled={selected.length === 0 || mutation.isPending} onClick={removeSelected}>選んだ作品を外す</DangerButton>
                     <Button size="compact-sm" variant="subtle" color="gray" onClick={() => { setSelectionMode(false); setSelected([]); }}>やめる</Button>
                   </>
                 ) : (!ordered || readOnly) && (

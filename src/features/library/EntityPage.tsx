@@ -865,7 +865,7 @@ export default function EntityPage({ kind }: { kind: "person" | "series" }) {
                           <Stack gap="xs">
                             <Text size="sm">ライブラリが更新され、続きの位置が分からなくなったようです。表示中のシリーズはそのまま残しています。</Text>
                             <Group gap="xs">
-                              <Button size="xs" variant="light" color="red" onClick={() => authorSeries.fetchNextPage()}>もう一度試す</Button>
+                              <Button size="xs" variant="default" onClick={() => authorSeries.fetchNextPage()}>もう一度試す</Button>
                               <Button size="xs" variant="default" onClick={() => queryClient.resetQueries({ queryKey: ["entity-series", source, key, serverSeriesQuery, seriesSortBy, seriesSortOrder], exact: true })}>先頭から読み直す</Button>
                             </Group>
                           </Stack>

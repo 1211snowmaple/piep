@@ -40,6 +40,7 @@ import { getDemoEditor } from "@/mocks/demoData";
 import { activateWorkEdit, discardWorkDraft, getAssetUrl, getEditorDocument, importWorkAsset, isTauriRuntime, saveWorkDraft } from "@/services/dbApi";
 import { openSingleDialog } from "@/services/dialogApi";
 import type { AssetEntry, WorkBlockInput } from "@/types/library";
+import { DANGER_CONFIRM } from "@/components/DangerButton";
 
 type EditorBlockType = "paragraph" | "heading" | "quote" | "image" | "link" | "separator" | "pageBreak";
 type EditorBlockValue = WorkBlockInput & { clientId: string; blockType: EditorBlockType };
@@ -710,7 +711,7 @@ export default function EditorPage() {
             {doc.draftRevision && <Tooltip label="書きかけを捨てて、取り込んだままの本文に戻す"><Button size="sm" variant="subtle" color="gray" leftSection={<Icons.delete size={IconSize.menu} />} loading={discardMutation.isPending} disabled={busy} onClick={() => modals.openConfirmModal({
               title: "下書きを破棄しますか？",
               children: <Text size="sm">保存されている書きかけを消して、取り込んだままの本文に戻します。反映済みの編集版がある場合は、そちらは残ります。</Text>,
-              confirmProps: { color: "red" },
+              confirmProps: DANGER_CONFIRM,
               labels: { confirm: "破棄する", cancel: "やめる" },
               onConfirm: () => discardMutation.mutate(),
             })}>下書きを破棄</Button></Tooltip>}
