@@ -181,14 +181,8 @@ export default function SavePage() {
     defaultValue: DEFAULT_LIST_READ_OPTIONS,
   });
   const [listProgress, setListProgress] = useState<{ page: number; pages: number; works: number } | null>(null);
-  const listReadStopRef = useRef(false);
   const [followedUsers, setFollowedUsers] = useState<{ key: string; rows: FollowedUserRow[] }>({ key: "", rows: [] });
   const [addingToWatch, setAddingToWatch] = useState(false);
-  // 画面を離れたあとで、裏のページを送り続けない。
-  useEffect(() => {
-    listReadStopRef.current = false;
-    return () => { listReadStopRef.current = true; };
-  }, [source]);
   const [listOptionsOpen, setListOptionsOpen] = useState(false);
   // While the large window is open the in-app pane hands its job over to it:
   // two live sessions on the same provider would fight over the login state,
@@ -212,6 +206,19 @@ export default function SavePage() {
   // 取得も同じ。Ctrl+S と取得ボタンが同じ瞬間に入ると、state の反映を待たずに
   // もう一周始まり、同じ知らせが二度出る。
   const analyzingRef = useRef(false);
+  const analysisRunRef = useRef<{ cancelled: boolean } | null>(null);
+  // 実行ごとに中止を覚える。別の取得元の開始で古い実行を復活させない。
+  useEffect(() => {
+    return () => {
+      if (analysisRunRef.current) analysisRunRef.current.cancelled = true;
+      analysisRunRef.current = null;
+      analyzingRef.current = false;
+    };
+  }, [source]);
+  useEffect(() => {
+    setAnalyzing(false);
+    setListProgress(null);
+  }, [source]);
   const executeRef = useRef<() => void>(() => undefined);
 
   useEmbeddedBrowserOverlay(browserViewportRef, runtime && !detached);
@@ -780,6 +787,9 @@ export default function SavePage() {
     // 同じ取得が二重に走れば、同じ知らせも二度出る。
     if (analyzingRef.current) return;
     const analysisRevision = beginSaveDraftAnalysis(source);
+    const run = { cancelled: false };
+    analysisRunRef.current = run;
+    const isCurrent = () => !run.cancelled && analysisRunRef.current === run && isLatestSaveDraftAnalysis(source, analysisRevision);
     analyzingRef.current = true;
     setAnalyzing(true);
     setProgress(null);
@@ -788,9 +798,7 @@ export default function SavePage() {
         const pageType = source === "pixiv" ? "pixiv_page" : "fanbox_page";
         const browser = detachedRef.current ? "standalone" : "embedded";
         const options = nextPagedListUrl(analysisUrl) ? listRead : { ...listRead, pages: 1 };
-        const isCurrent = () => isLatestSaveDraftAnalysis(source, analysisRevision);
         const readsUsers = isFollowingListUrl(analysisUrl);
-        listReadStopRef.current = false;
         const result = await readListPages(options, {
           read: readsUsers
             ? async () => {
@@ -801,7 +809,7 @@ export default function SavePage() {
           currentUrl: async () => (await (browser === "standalone" ? getStandaloneBrowserUrl(source) : getEmbeddedBrowserUrl())) ?? "",
           navigate: navigateBrowser,
           wait: (milliseconds) => new Promise((resolve) => window.setTimeout(resolve, milliseconds)),
-          cancelled: () => listReadStopRef.current || !isCurrent(),
+          cancelled: () => !isCurrent(),
           onPage: (page, pagesRead, total) => {
             if (!isCurrent()) return;
             const key = downloadTargetKey(page.url);
@@ -920,7 +928,7 @@ export default function SavePage() {
           originalData: post,
         }));
       }
-      if (!isLatestSaveDraftAnalysis(source, analysisRevision)) return;
+      if (!isCurrent()) return;
       updateSaveDraft(source, (current) => ({
         ...current,
         items: next,
@@ -934,15 +942,18 @@ export default function SavePage() {
         message: "保存する項目を確認してください",
       });
     } catch (error) {
-      if (isLatestSaveDraftAnalysis(source, analysisRevision)) notifications.show({
+      if (isCurrent()) notifications.show({
         color: "red",
         title: "候補を取得できません",
         message: errorMessage(error),
       });
     } finally {
-      analyzingRef.current = false;
-      setAnalyzing(false);
-      setListProgress(null);
+      if (analysisRunRef.current === run) {
+        analysisRunRef.current = null;
+        analyzingRef.current = false;
+        setAnalyzing(false);
+        setListProgress(null);
+      }
     }
   };
   acceleratorHandlerRef.current = (payload) => {
@@ -1754,7 +1765,7 @@ export default function SavePage() {
                 {listProgress && (
                   <Group justify="space-between" gap="xs" mt={6} wrap="nowrap">
                     <Text size="xs" c="dimmed" role="status">{listProgress.page} / {listProgress.pages}ページ目まで（{listProgress.works}{readsFollowing ? "人" : "件"}）</Text>
-                    <DangerButton size="compact-xs" style={{ flexShrink: 0 }} onClick={() => { listReadStopRef.current = true; }}>止める</DangerButton>
+                    <DangerButton size="compact-xs" style={{ flexShrink: 0 }} onClick={() => { if (analysisRunRef.current) analysisRunRef.current.cancelled = true; }}>止める</DangerButton>
                   </Group>
                 )}
                 {canReadNextPages && listOptionsOpen && !listProgress && (
