@@ -219,6 +219,10 @@ struct MultipartBackupPart {
 }
 
 fn restore_failpoint(configured: Option<&str>, name: &'static str) -> Result<(), String> {
+    #[cfg(test)]
+    if configured.and_then(|configured| configured.strip_prefix("panic_")) == Some(name) {
+        panic!("Injected restore panic at {name}");
+    }
     if configured.is_some_and(|configured| configured == name) {
         return Err(format!("Injected restore failure at {name}"));
     }
@@ -998,6 +1002,27 @@ impl PromotionGuard {
         Ok(())
     }
 
+    /// 控えは使い切らず、全件の復旧とDBの記録の後始末が済むまで残す。
+    fn rollback(&mut self) -> Result<(), String> {
+        for file in self.files.iter().rev() {
+            if let Some(backup) = &file.backup {
+                restore_backup_copy(backup, &file.destination)?;
+            } else {
+                match std::fs::remove_file(&file.destination) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        return Err(format!(
+                            "Could not remove uncommitted restored file {}: {error}",
+                            file.destination.display()
+                        ))
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn commit(mut self) {
         self.committed = true;
         for file in &self.files {
@@ -1119,20 +1144,6 @@ fn rollback_promoted_files_from_journal(
     for entry in journal.files.iter().rev() {
         let destination = PathBuf::from(&entry.destination);
         validate_recovery_path(&destination, storage, app_data)?;
-        if destination.exists() {
-            if !destination.is_file() {
-                return Err(format!(
-                    "Restore recovery destination is not a file: {}",
-                    destination.display()
-                ));
-            }
-            std::fs::remove_file(&destination).map_err(|error| {
-                format!(
-                    "Could not remove uncommitted restored file {}: {error}",
-                    destination.display()
-                )
-            })?;
-        }
         if let Some(backup) = &entry.backup {
             let backup = PathBuf::from(backup);
             let canonical_stage = stage_root
@@ -1156,18 +1167,18 @@ fn rollback_promoted_files_from_journal(
             if let Some(parent) = destination.parent() {
                 std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
             }
-            // **控えは消費せずに複製する。** かつては `rename` で戻していたが、
-            // それだと途中の1件で失敗した時点で、そこまでに戻した控えが
-            // 手元から消えている。次の起動でやり直そうとしても控えが無く、
-            // 「戻せない」と言って落ちるだけになる - つまり一度失敗すると
-            // 二度と回復できない。複製なら何度でも同じ結果になる。
-            // 控えごと staging を消すのは、全件を戻し終えたあとである。
-            std::fs::copy(&backup, &destination).map_err(|error| {
-                format!(
-                    "Could not restore previous file {}: {error}",
-                    destination.display()
-                )
-            })?;
+            restore_backup_copy(&backup, &destination)?;
+        } else {
+            match std::fs::remove_file(&destination) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(format!(
+                        "Could not remove uncommitted restored file {}: {error}",
+                        destination.display()
+                    ))
+                }
+            }
         }
     }
     Ok(())
@@ -1266,34 +1277,66 @@ fn recover_one_restore_journal(
                     return Ok(());
                 }
             }
-            if stage_root.exists() {
-                std::fs::remove_dir_all(&stage_root).map_err(|error| {
-                    format!("Could not clean committed restore staging: {error}")
-                })?;
-            }
         } else {
             rollback_promoted_files_from_journal(&stage_root, storage, app_data)?;
-            std::fs::remove_dir_all(&stage_root)
-                .map_err(|error| format!("Could not clean rolled-back restore staging: {error}"))?;
         }
+        // DBの記録の削除に失敗しても、再試行に必要な控えはまだ手元にある。
         state.db.finish_restore_journal(journal_id)?;
+        if stage_root.exists() {
+            std::fs::remove_dir_all(&stage_root)
+                .map_err(|error| format!("Could not clean completed restore staging: {error}"))?;
+        }
     }
     Ok(())
 }
 
+/// 戻す控えを複製してから原子的に差し替える。失敗時にも元の控えは残る。
+fn restore_backup_copy(backup: &Path, destination: &Path) -> Result<(), String> {
+    let temporary = backup.with_extension("restore.tmp");
+    std::fs::copy(backup, &temporary).map_err(|error| {
+        format!(
+            "Could not copy restore rollback file {}: {error}",
+            backup.display()
+        )
+    })?;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&temporary)
+        .and_then(|file| file.sync_all())
+        .map_err(|error| format!("Could not sync restore rollback file: {error}"))?;
+    atomic_replace_file(&temporary, destination)
+}
+
+/// 復旧に失敗したら、起動時に再試行できる記録と控えを一緒に保持する。
+fn abort_file_restore(
+    mut promotion: PromotionGuard,
+    state: &AppState,
+    journal_id: &str,
+    original_error: String,
+) -> String {
+    match promotion
+        .rollback()
+        .and_then(|()| state.db.finish_restore_journal(journal_id))
+    {
+        Ok(()) => {
+            promotion.commit();
+            original_error
+        }
+        Err(recovery_error) => {
+            promotion.preserve_for_recovery();
+            format!("{original_error}。元のファイルへの復旧を次回起動時に再試行します: {recovery_error}")
+        }
+    }
+}
+
 impl Drop for PromotionGuard {
     fn drop(&mut self) {
-        if self.committed {
-            return;
+        if !self.committed {
+            // COMMIT 後のチェックポイントや状態確認が失敗した場合もここへ来る。
+            // Drop は DB の確定を判断できないため、ファイルを巻き戻してはならない。
+            // 通常の失敗は abort_file_restore、予期しない中断は次回起動の記録で戻す。
+            log::warn!("Unfinished restore files remain preserved for journal recovery");
         }
-        for file in self.files.iter().rev() {
-            if let Some(backup) = &file.backup {
-                let _ = atomic_replace_file(backup, &file.destination);
-            } else {
-                let _ = std::fs::remove_file(&file.destination);
-            }
-        }
-        let _ = std::fs::remove_dir_all(&self.stage_root);
     }
 }
 
@@ -3883,21 +3926,16 @@ async fn import_zip_locked(
             );
             let mut promotion = prepare_staged_file_promotion(&stage_root, &promotion_entries)?;
             state.db.create_restore_journal(&journal_id, &stage_root)?;
-            if let Err(error) = promotion.promote() {
-                drop(promotion);
-                let _ = state.db.finish_restore_journal(&journal_id);
-                return Err(error);
-            }
+            // ここからstagingは永続ジャーナルが所有する。promote失敗時も消さない。
             staging_cleanup.disarm();
+            if let Err(error) = promotion.promote() {
+                return Err(abort_file_restore(promotion, &state, &journal_id, error));
+            }
             if let Err(error) = restore_failpoint(failpoint, "before_db_commit") {
-                drop(promotion);
-                state.db.finish_restore_journal(&journal_id)?;
-                return Err(error);
+                return Err(abort_file_restore(promotion, &state, &journal_id, error));
             }
             if let Err(error) = state.db.begin_atomic_restore() {
-                drop(promotion);
-                state.db.finish_restore_journal(&journal_id)?;
-                return Err(error);
+                return Err(abort_file_restore(promotion, &state, &journal_id, error));
             }
             let mut restored_ids = Vec::with_capacity(metadata.entries.len());
             let mut stale_index_ids = Vec::new();
@@ -4330,8 +4368,7 @@ async fn import_zip_locked(
                         if committed {
                             promotion.preserve_for_recovery();
                         } else {
-                            drop(promotion);
-                            state.db.finish_restore_journal(&journal_id)?;
+                            return Err(abort_file_restore(promotion, &state, &journal_id, error));
                         }
                         return Err(error);
                     }
@@ -4382,11 +4419,7 @@ async fn import_zip_locked(
                 }
                 Err(error) => {
                     state.db.rollback_atomic_restore();
-                    // Dropping the promotion guard restores overwritten files
-                    // and removes newly promoted files in reverse order.
-                    drop(promotion);
-                    state.db.finish_restore_journal(&journal_id)?;
-                    Err(error)
+                    Err(abort_file_restore(promotion, &state, &journal_id, error))
                 }
             }
         } else {
@@ -5630,6 +5663,179 @@ mod tests {
         .unwrap()
         .contains(&restored.id));
 
+        drop(state);
+        remove_temp_dir(&base);
+    }
+
+    #[tokio::test]
+    async fn interrupted_restore_uses_the_database_commit_marker_instead_of_drop() {
+        for (failpoint, committed) in [
+            ("panic_before_db_commit", false),
+            ("panic_after_db_commit", true),
+        ] {
+            let base = create_temp_dir();
+            let (state, json_path, _) = restore_target(&base);
+            let zip_path = base.join("restore.zip");
+            write_restore_test_zip(&zip_path, "New restore title", "newrestoremarker");
+            let error = import_zip_internal_with_failpoint(
+                Arc::clone(&state),
+                zip_path.to_string_lossy().to_string(),
+                Some(failpoint),
+            )
+            .await
+            .unwrap_err();
+            assert!(error.contains("Import thread panicked"), "{error}");
+            assert!(fs::read_to_string(&json_path)
+                .unwrap()
+                .contains("newrestoremarker"));
+            let pending = state.db.pending_restore_journals().unwrap();
+            assert_eq!(pending.len(), 1);
+            assert_eq!(pending[0].2, committed);
+            assert!(recover_interrupted_restores(&state).is_empty());
+            let marker = if committed {
+                "newrestoremarker"
+            } else {
+                "oldrestoremarker"
+            };
+            let title = if committed {
+                "New restore title"
+            } else {
+                "Old restore title"
+            };
+            assert!(
+                fs::read_to_string(&json_path).unwrap().contains(marker),
+                "{failpoint}"
+            );
+            assert_eq!(
+                state
+                    .db
+                    .get_download_by_source("pixiv", "crash-restore")
+                    .unwrap()
+                    .unwrap()
+                    .title,
+                title
+            );
+            assert!(state.db.pending_restore_journals().unwrap().is_empty());
+            drop(state);
+            remove_temp_dir(&base);
+        }
+    }
+
+    #[test]
+    fn rollback_copy_and_journal_cleanup_failures_preserve_the_original_for_retry() {
+        let base = create_temp_dir();
+        let storage = base.join("downloads");
+        let state = AppState::new(Database::open(&base.join("piep.db"), &storage).unwrap());
+        let stage = base.join(".restore-staging-io-retry");
+        fs::create_dir_all(&stage).unwrap();
+        let destination = storage.join("original.json");
+        let staged = stage.join("replacement.json");
+        fs::write(&destination, b"original").unwrap();
+        fs::write(&staged, b"replacement").unwrap();
+        let mut promotion =
+            prepare_staged_file_promotion(&stage, &[(staged, destination.clone())]).unwrap();
+        state.db.create_restore_journal("io-retry", &stage).unwrap();
+        promotion.promote().unwrap();
+        let copy_target = stage.join("rollback/0.restore.tmp");
+        fs::create_dir(&copy_target).unwrap();
+        let error = abort_file_restore(promotion, &state, "io-retry", "injected DB failure".into());
+        assert!(error.contains("再試行"), "{error}");
+        assert_eq!(fs::read(&destination).unwrap(), b"replacement");
+        assert_eq!(fs::read(stage.join("rollback/0")).unwrap(), b"original");
+        fs::remove_dir(copy_target).unwrap();
+
+        let connection = rusqlite::Connection::open(base.join("piep.db")).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TRIGGER reject_restore_cleanup BEFORE DELETE ON restore_journal
+             BEGIN SELECT RAISE(ABORT, 'injected cleanup failure'); END;",
+            )
+            .unwrap();
+        assert!(!recover_interrupted_restores(&state).is_empty());
+        assert_eq!(fs::read(&destination).unwrap(), b"original");
+        assert_eq!(fs::read(stage.join("rollback/0")).unwrap(), b"original");
+        assert_eq!(state.db.pending_restore_journals().unwrap().len(), 1);
+        connection
+            .execute_batch("DROP TRIGGER reject_restore_cleanup")
+            .unwrap();
+        assert!(recover_interrupted_restores(&state).is_empty());
+        assert_eq!(fs::read(&destination).unwrap(), b"original");
+        assert!(!stage.exists());
+        assert!(state.db.pending_restore_journals().unwrap().is_empty());
+        drop(connection);
+        drop(state);
+        remove_temp_dir(&base);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn rollback_failure_keeps_originals_and_journal_for_startup_retry() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let base = create_temp_dir();
+        let storage = base.join("downloads");
+        let state = AppState::new(Database::open(&base.join("piep.db"), &storage).unwrap());
+        let stage = base.join(".restore-staging-rollback-retry");
+        fs::create_dir_all(&stage).unwrap();
+        let first = storage.join("first.json");
+        let second = storage.join("second.json");
+        let staged_first = stage.join("first-new");
+        let staged_second = stage.join("second-new");
+        fs::write(&first, b"first-original").unwrap();
+        fs::write(&second, b"second-original").unwrap();
+        fs::write(&staged_first, b"first-restored").unwrap();
+        fs::write(&staged_second, b"second-restored").unwrap();
+        let mut promotion = prepare_staged_file_promotion(
+            &stage,
+            &[
+                (staged_first, first.clone()),
+                (staged_second, second.clone()),
+            ],
+        )
+        .unwrap();
+        state
+            .db
+            .create_restore_journal("retry-rollback", &stage)
+            .unwrap();
+        promotion.promote().unwrap();
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(&first)
+            .unwrap();
+        let error = abort_file_restore(
+            promotion,
+            &state,
+            "retry-rollback",
+            "DB restore failed".into(),
+        );
+        assert!(error.contains("再試行"), "{error}");
+        assert_eq!(
+            fs::read(stage.join("rollback/0")).unwrap(),
+            b"first-original"
+        );
+        assert_eq!(
+            fs::read(stage.join("rollback/1")).unwrap(),
+            b"second-original"
+        );
+        assert_eq!(fs::read(&first).unwrap(), b"first-restored");
+        assert_eq!(fs::read(&second).unwrap(), b"second-original");
+        assert_eq!(state.db.pending_restore_journals().unwrap().len(), 1);
+        assert!(!recover_interrupted_restores(&state).is_empty());
+        assert_eq!(
+            fs::read(stage.join("rollback/0")).unwrap(),
+            b"first-original"
+        );
+        // 復旧が繰り返されても、戻し済みの2件目の控えを消費しない。
+        assert_eq!(
+            fs::read(stage.join("rollback/1")).unwrap(),
+            b"second-original"
+        );
+        drop(lock);
+        assert!(recover_interrupted_restores(&state).is_empty());
+        assert_eq!(fs::read(&first).unwrap(), b"first-original");
+        assert_eq!(fs::read(&second).unwrap(), b"second-original");
+        assert!(state.db.pending_restore_journals().unwrap().is_empty());
+        assert!(!stage.exists());
         drop(state);
         remove_temp_dir(&base);
     }
