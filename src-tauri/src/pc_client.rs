@@ -18,7 +18,9 @@ use url::Url;
 use crate::secret_cipher::SecretCipher;
 
 pub mod cover_protocol;
+pub(crate) mod device_db;
 mod image_validation;
+pub(crate) mod local_reading;
 pub(crate) mod offline;
 pub(crate) mod reading_sync;
 
@@ -271,6 +273,12 @@ impl ClientError {
         Self {
             code: "storage",
             message: "端末内の接続設定を読み書きできません",
+        }
+    }
+    fn device_records() -> Self {
+        Self {
+            code: "device_records",
+            message: "端末内の読書の記録を読み書きできません。空き容量を確認してください",
         }
     }
     fn offline_storage() -> Self {

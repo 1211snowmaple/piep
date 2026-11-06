@@ -2827,7 +2827,7 @@ dependencies = [
 
 [[package]]
 name = "piep-android"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "base64 0.23.1",
  "image",

@@ -1,4 +1,4 @@
-import { useEffect, useState, type MouseEvent } from "react";
+import { useEffect, useState, type MouseEvent, type ReactNode } from "react";
 import { Check, Download, LoaderCircle, RefreshCw } from "lucide-react";
 import { Icons } from "./icons";
 import { WorkFavoriteButton } from "./FavoriteButton";
@@ -47,12 +47,19 @@ function isCardControl(target: EventTarget): boolean {
   return target instanceof Element && target.closest("button, a, input, select, summary") !== null;
 }
 
+/** 本文の抜き出しで、探した語に印を付ける。英字の大文字・小文字は区別しない。 */
+function markTerms(text: string, terms: string[]): ReactNode[] {
+  const words = terms.filter(Boolean).map((term) => term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  if (!words.length) return [text];
+  return text.split(new RegExp(`(${words.join("|")})`, "giu")).map((part, index) => index % 2 ? <mark key={index}>{part}</mark> : part);
+}
+
 /**
  * デスクトップ版 WorkCard と同じ並び。表紙の横に、シリーズ・題名・作者と取得元・タグ・
  * 事実と操作を置く。デスクトップ版の下の段は端末では高さを取りすぎるので、
  * 本文の列の最後の行に収める。長押しで詳細を開く。
  */
-export function WorkCard({ work, onRead, onDetail, offline = false, offlineAuthorCover = false, snapshotGeneration, savedState = null, onSaved, prefix, omit }: {
+export function WorkCard({ work, onRead, onDetail, offline = false, offlineAuthorCover = false, snapshotGeneration, savedState = null, onSaved, prefix, omit, textHit }: {
   work: PcWork;
   onRead: () => void;
   onDetail: () => void;
@@ -65,6 +72,8 @@ export function WorkCard({ work, onRead, onDetail, offline = false, offlineAutho
   prefix?: string;
   /** 作者やシリーズの画面では、その名前を全カードで繰り返さない。 */
   omit?: "author" | "series";
+  /** 本文で見つかった箇所。押すとそのページを開く。 */
+  textHit?: { snippet: string; page: number; pages: number; terms: string[]; onOpen: () => void };
 }) {
   const navigation = useAppNavigation();
   const [problem, setProblem] = useState<string | null>(null);
@@ -92,6 +101,10 @@ export function WorkCard({ work, onRead, onDetail, offline = false, offlineAutho
             </div>
             : <div className="work-card-identity"><ProviderMark source={work.source} compact /></div>}
           {(work.tags?.length ?? 0) > 0 && <div className="work-card-tags"><MobileTagRow tags={work.tags ?? []} onTag={browsable ? navigation.openTag : undefined} /></div>}
+          {textHit && <button className="work-card-hit" type="button" aria-label={`本文の ${textHit.page + 1} ページ目を開く`} onClick={textHit.onOpen}>
+            <span className="work-card-hit-page">{textHit.page + 1} ページ目{textHit.pages > 1 ? `ほか ${textHit.pages - 1} ページ` : ""}</span>
+            <span className="work-card-hit-text">{markTerms(textHit.snippet, textHit.terms)}</span>
+          </button>}
         </div>
         <div className="work-card-bottom">
           {problem ? <p className="work-card-problem" role="alert">{problem}</p> : <div className="work-card-facts">
