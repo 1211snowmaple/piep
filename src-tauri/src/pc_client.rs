@@ -38,6 +38,7 @@ const MAX_NUMBERED_OFFSET: i64 = 5_000;
 const API_VERSION: u32 = 2;
 const PAIRING_VERSION: u32 = 2;
 const CAPABILITY_READING_SYNC: &str = "reading-sync";
+const CAPABILITY_FAVORITE_WRITE: &str = "favorite-write";
 
 pub struct PcClientState {
     file: PathBuf,
@@ -262,6 +263,24 @@ impl ClientError {
             message: "サーバーの作品を読み込めません",
         }
     }
+    fn favorite_unsupported() -> Self {
+        Self {
+            code: "favorite_unsupported",
+            message: "このサーバーではお気に入りを切り替えられません。サーバーを新しい版にしてください",
+        }
+    }
+    fn favorite_missing() -> Self {
+        Self {
+            code: "favorite_missing",
+            message: "サーバーの本棚にこの作品が見つかりません",
+        }
+    }
+    fn favorite_rejected() -> Self {
+        Self {
+            code: "favorite_rejected",
+            message: "お気に入りを切り替えられませんでした",
+        }
+    }
     /// 通信の失敗を、利用者が次に何をすべきかで分ける。
     fn from_send(error: &reqwest::Error, pinned: bool) -> Self {
         if !pinned && rejected_certificate(error) {
@@ -307,6 +326,11 @@ impl SavedConnection {
         self.capabilities
             .iter()
             .any(|capability| capability == CAPABILITY_READING_SYNC)
+    }
+    fn can_write_favorite(&self) -> bool {
+        self.capabilities
+            .iter()
+            .any(|capability| capability == CAPABILITY_FAVORITE_WRITE)
     }
 }
 
@@ -1268,6 +1292,65 @@ pub async fn pc_get_work_collections(
         .bounded_json().await
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FavoriteState {
+    source: String,
+    source_id: String,
+    favorite: bool,
+}
+
+fn favorite_endpoint(base: &str, source: &str, source_id: &str) -> Result<Url, ClientError> {
+    let mut url = Url::parse(base).map_err(|_| ClientError::storage())?;
+    url.path_segments_mut()
+        .map_err(|_| ClientError::storage())?
+        .pop_if_empty()
+        .extend(["api", "v1", "favorites", source, source_id]);
+    Ok(url)
+}
+
+fn valid_favorite_target(source: &str, source_id: &str) -> bool {
+    matches!(source, "pixiv" | "fanbox") && !source_id.is_empty() && source_id.chars().count() <= 200
+}
+
+/// お気に入りを付け外しする。サーバーが `favorite-write` を持つときだけ送る。
+///
+/// 圏外では溜めずに失敗を返す。利用者は「つながる時だけ押せる」を選んでいる。
+/// 返る値はサーバーが残したほうで、別の端末が新しい時刻で書いていればそちらになる。
+#[tauri::command]
+pub async fn pc_set_favorite(
+    state: State<'_, PcClientState>,
+    source: String,
+    source_id: String,
+    favorite: bool,
+) -> Result<FavoriteState, ClientError> {
+    if !valid_favorite_target(&source, &source_id) {
+        return Err(ClientError::favorite_rejected());
+    }
+    let saved = state.load()?.ok_or_else(ClientError::invalid_pairing)?;
+    if !saved.can_write_favorite() {
+        return Err(ClientError::favorite_unsupported());
+    }
+    let device_time = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX))
+        .unwrap_or(1)
+        .max(1);
+    let client = state.client(&saved)?;
+    let response = client
+        .put(favorite_endpoint(&saved.url, &source, &source_id)?)
+        .bearer_auth(&saved.token)
+        .json(&serde_json::json!({ "favorite": favorite, "deviceTime": device_time }))
+        .send()
+        .await
+        .map_err(|error| ClientError::from_send(&error, saved.pinned()))?;
+    match response.status() {
+        reqwest::StatusCode::NOT_FOUND => Err(ClientError::favorite_missing()),
+        status if status.is_client_error() && status != reqwest::StatusCode::UNAUTHORIZED => Err(ClientError::favorite_rejected()),
+        _ => check_response(response)?.bounded_json().await,
+    }
+}
+
 #[tauri::command]
 pub async fn pc_get_collection(
     state: State<'_, PcClientState>,
@@ -1469,6 +1552,20 @@ async fn image_response(response: reqwest::Response) -> Result<MobileAssetData, 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn favorite_endpoint_keeps_the_path_prefix_and_escapes_the_id() {
+        assert_eq!(
+            super::favorite_endpoint("https://example.com/piep", "fanbox", "a/b c").unwrap().as_str(),
+            "https://example.com/piep/api/v1/favorites/fanbox/a%2Fb%20c",
+        );
+        assert_eq!(
+            super::favorite_endpoint("https://192.168.1.2:38777", "pixiv", "123").unwrap().as_str(),
+            "https://192.168.1.2:38777/api/v1/favorites/pixiv/123",
+        );
+        assert!(!super::valid_favorite_target("booth", "1"));
+        assert!(!super::valid_favorite_target("pixiv", ""));
+    }
+
     use super::*;
 
     async fn local_response(wire_response: &'static str) -> reqwest::Response {

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { keepPreviousData, useInfiniteQuery, useQuery } from "@tanstack/react-query";
-import { BookOpen, Check, ChevronLeft, ExternalLink, Search, UserRound } from "lucide-react";
+import { BookOpen, Check, ExternalLink, Funnel, Search, UserRound } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useAppNavigation, type EntityPageState, type EntityTab } from "./appHistory";
 import { ProviderMark } from "./ProviderMark";
@@ -9,6 +9,7 @@ import { CollectionCard, EntityCard, GroupSkeleton } from "./LibraryGroups";
 import { VirtualWorkList } from "./VirtualWorkList";
 import { entityCoverUrl, imageRecentlyFailed, SmoothImage } from "./images";
 import { defaultPcSearch, getPcEntityDetail, listPcEntitySeries, pcErrorMessage, type PcCollection, type PcConnectionStatus, type PcEntityDetail, type PcWork, type PcWorkSort } from "./pcApi";
+import { activeFilterCount, FilterSheet } from "./FilterSheet";
 import { entitySeriesKey, entitySortGroups, entitySortLabel, entityWorkSortGroups, entityWorkSortLabel, loadEntitySort, loadEntityWorkSort, saveEntitySort, saveEntityWorkSort, splitEntitySort, type EntitySort, type EntityWorkSort } from "./librarySort";
 import { refreshShortList, useAutoLoad, useStatusRecovery, useWorkList, WorkResults } from "./workList";
 import { plainText } from "./workText";
@@ -73,7 +74,7 @@ function Hero({ page, detail }: { page: EntityPageState; detail: PcEntityDetail 
         </p>}
       </div>
     </div>
-    {description && <div className="entity-description"><p ref={descriptionRef} data-expanded={expanded || undefined}>{description}</p>{(clamped || expanded) && <button type="button" className="entity-more" aria-expanded={expanded} onClick={() => setExpanded((open) => !open)}>{expanded ? "閉じる" : "続きを読む"}</button>}</div>}
+    {description && <div className="entity-description"><p ref={descriptionRef} data-expanded={expanded || undefined}>{description}</p>{(clamped || expanded) && <button type="button" className="entity-more" aria-expanded={expanded} onClick={() => setExpanded((open) => !open)}>{expanded ? "たたむ" : "すべて表示"}</button>}</div>}
     {(detail?.links.length ?? 0) > 0 && <div className="entity-links">{detail!.links.map((link) => <button key={link} type="button" onClick={() => void openUrl(link)}><ExternalLink aria-hidden="true" />{hostName(link)}</button>)}</div>}
   </header>;
 }
@@ -121,7 +122,11 @@ export function EntityPage({ page, status, savedRevision, pagingMode, onOpenWork
   useEffect(() => { if (!page.query) setRelevance(false); }, [page.query]);
 
   const sentSort: PcWorkSort = relevance && page.query ? "standard" : workSort;
-  const search = useMemo(() => ({ ...defaultPcSearch, text: page.query, tag: page.tags.join(","), tagMode: "and" as const, sort: sentSort }), [page.query, page.tags, sentSort]);
+  // 本棚と同じ絞り込みを、この作者・シリーズの中で使う。含めるタグは札、並び順は並び替えで決める。
+  const filters = page.filters ?? defaultPcSearch;
+  const filterCount = activeFilterCount({ ...filters, tag: "", sort: "remembered" });
+  const [filterOpen, setFilterOpen] = useState(false);
+  const search = useMemo(() => ({ ...defaultPcSearch, ...filters, text: page.query, tag: page.tags.join(","), tagMode: "and" as const, sort: sentSort }), [filters, page.query, page.tags, sentSort]);
   const scope = useMemo(() => ({ kind: page.kind, source: page.source, key: page.key }), [page.kind, page.source, page.key]);
   const list = useWorkList({ search, scope, pagingMode, page: page.listPage, enabled: reachable && page.tab === "works" });
 
@@ -170,7 +175,6 @@ export function EntityPage({ page, status, savedRevision, pagingMode, onOpenWork
   const workGroups = entityWorkSortGroups(page.kind, Boolean(page.query));
 
   return <div className="entity-page">
-    <button className="page-back" type="button" onClick={navigation.back}><ChevronLeft aria-hidden="true" />戻る</button>
     <Hero page={page} detail={detail} />
     {!reachable && <section className="empty-card"><h2>サーバーにつながっていません</h2><p>つながると、この{isPerson ? "作者" : "シリーズ"}の作品がここに並びます。</p></section>}
     {reachable && <>
@@ -179,6 +183,7 @@ export function EntityPage({ page, status, savedRevision, pagingMode, onOpenWork
 
       {page.tab === "works" && <section className="entity-section">
         <LiveSearch value={page.query} label={isPerson ? "この作者の作品を検索" : "このシリーズの作品を検索"} onCommit={(query) => update({ query, listPage: 1 })}>
+          <button type="button" className="filter-button" data-active={filterCount > 0 || undefined} aria-haspopup="dialog" aria-label={filterCount ? `絞り込み（${filterCount} 個の条件）` : "絞り込み"} onClick={() => setFilterOpen(true)}><Funnel aria-hidden="true" />{filterCount > 0 && <small aria-hidden="true">{filterCount}</small>}</button>
           <ChoiceMenu<PcWorkSort> current={sentSort} label={workLabel} groups={workGroups} onSelect={(sort) => {
             if (sort === "standard") setRelevance(true);
             else { setRelevance(false); setWorkSort(sort as EntityWorkSort); saveEntityWorkSort(page.kind, sort as EntityWorkSort); }
@@ -186,8 +191,9 @@ export function EntityPage({ page, status, savedRevision, pagingMode, onOpenWork
           }} />
         </LiveSearch>
         <TagFilter detail={detail} selected={page.tags} onToggle={(tag) => update({ tags: page.tags.includes(tag) ? page.tags.filter((item) => item !== tag) : [...page.tags, tag], listPage: 1 })} />
-        {(page.query || page.tags.length > 0) && <div className="entity-filter-summary"><span>{list.total != null ? `約 ${list.total.toLocaleString("ja-JP")} 件` : list.loading ? "" : `${list.items.length} 件`}</span><button type="button" onClick={() => update({ query: "", tags: [], listPage: 1 })}>絞り込みを解除</button></div>}
-        <WorkResults omit={isPerson ? "author" : "series"} list={list} savedRevision={savedRevision} reachable={reachable} onOpenWork={onOpenWork} onOpenDetail={onOpenDetail} onSaved={onSaved} onPage={(next) => navigation.push({ page: { ...page, listPage: next } })} emptyTitle="作品が見つかりません" emptyHint={page.query || page.tags.length ? "検索語やタグを変えて試してください。" : "この一覧に表示できる作品はありません。"} />
+        {filterOpen && <FilterSheet scope={page.kind} criteria={{ ...filters, text: page.query, sort: "remembered" }} onClose={() => setFilterOpen(false)} onApply={(next) => { setFilterOpen(false); update({ filters: { ...next, text: "", tag: "", tagMode: "and", sort: "remembered" }, listPage: 1 }); }} />}
+        {(page.query || page.tags.length > 0 || filterCount > 0) && <div className="entity-filter-summary"><span>{list.total != null ? `約 ${list.total.toLocaleString("ja-JP")} 件` : list.loading ? "" : `${list.items.length} 件`}</span><button type="button" onClick={() => update({ query: "", tags: [], filters: undefined, listPage: 1 })}>すべて解除</button></div>}
+        <WorkResults omit={isPerson ? "author" : "series"} list={list} savedRevision={savedRevision} reachable={reachable} onOpenWork={onOpenWork} onOpenDetail={onOpenDetail} onSaved={onSaved} onPage={(next) => navigation.push({ page: { ...page, listPage: next } })} emptyTitle="作品が見つかりません" emptyHint={page.query || page.tags.length || filterCount ? "検索語やタグ、絞り込みを変えて試してください。" : "この一覧に表示できる作品はありません。"} />
       </section>}
 
       {page.tab === "series" && isPerson && <section className="entity-section" data-stale={series.isPlaceholderData || undefined}>

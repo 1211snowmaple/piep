@@ -4,7 +4,7 @@ export type FixedSort = Exclude<PcSort, "standard">;
 export type MenuGroup<T extends string> = { label: string; items: { value: T; label: string }[] };
 
 export const sortLabels: Record<FixedSort, string> = {
-  dateDesc: "保存日：新しい順", dateAsc: "保存日：古い順", publishedDesc: "公開日：新しい順", publishedAsc: "公開日：古い順",
+  dateDesc: "追加日：新しい順", dateAsc: "追加日：古い順", publishedDesc: "公開日：新しい順", publishedAsc: "公開日：古い順",
   titleAsc: "タイトル：昇順", titleDesc: "タイトル：降順", authorAsc: "作者名：昇順", authorDesc: "作者名：降順",
   lengthDesc: "文字数：多い順", lengthAsc: "文字数：少ない順", assetsDesc: "画像数：多い順", assetsAsc: "画像数：少ない順",
   versionDesc: "版番号：大きい順", versionAsc: "版番号：小さい順",
@@ -119,7 +119,7 @@ export type EntitySort = `${EntitySortField}:${"asc" | "desc"}`;
 export const entitySortGroups: MenuGroup<EntitySort>[] = [
   { label: "作品数", items: [{ value: "work_count:desc", label: "作品数：多い順" }, { value: "work_count:asc", label: "作品数：少ない順" }] },
   { label: "日付", items: [
-    { value: "downloaded_at:desc", label: "保存日：新しい順" }, { value: "downloaded_at:asc", label: "保存日：古い順" },
+    { value: "downloaded_at:desc", label: "追加日：新しい順" }, { value: "downloaded_at:asc", label: "追加日：古い順" },
     { value: "source_created_at:desc", label: "公開日：新しい順" }, { value: "source_created_at:asc", label: "公開日：古い順" },
     { value: "source_updated_at:desc", label: "更新日：新しい順" }, { value: "source_updated_at:asc", label: "更新日：古い順" },
   ] },

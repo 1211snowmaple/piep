@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { BookText, Funnel, Layers, LibraryBig, UsersRound, X } from "lucide-react";
+import { Funnel, X } from "lucide-react";
+import { Icons } from "./icons";
 import { ContinueShelf } from "./ContinueShelf";
 import { activeFilterCount, FilterSheet } from "./FilterSheet";
 import { SearchField } from "./SearchField";
@@ -15,10 +16,10 @@ import { useSavedStates, useWorkList, WorkListSkeleton, WorkResults } from "./wo
 import { scrollMainToTop } from "./workText";
 
 const tabs: [LibraryTab, string, ReactNode][] = [
-  ["works", "作品", <BookText key="works" aria-hidden="true" />],
-  ["people", "作者・クリエイター", <UsersRound key="people" aria-hidden="true" />],
-  ["series", "シリーズ", <Layers key="series" aria-hidden="true" />],
-  ["collections", "コレクション", <LibraryBig key="collections" aria-hidden="true" />],
+  ["works", "作品", <Icons.works key="works" aria-hidden="true" />],
+  ["people", "作者・クリエイター", <Icons.people key="people" aria-hidden="true" />],
+  ["series", "シリーズ", <Icons.series key="series" aria-hidden="true" />],
+  ["collections", "コレクション", <Icons.collection key="collections" aria-hidden="true" />],
 ];
 
 /** 読みかけの棚。サーバーへは問い合わせず、この端末で読んだ記録から並べる。 */
@@ -118,25 +119,26 @@ export function PcLibrary({ page, status, statusLoading, onOpenWork, onOpenDetai
     if (criteria.revision) filterChips.push({ key: "revision", text: criteria.revision === "revised" ? "改稿あり" : "初版のみ", clear: { revision: "" } });
     if (criteria.edit) filterChips.push({ key: "edit", text: criteria.edit === "edited" ? "編集あり" : "編集なし", clear: { edit: "" } });
     if (criteria.cover) filterChips.push({ key: "cover", text: criteria.cover === "has_cover" ? "表紙あり" : "表紙なし", clear: { cover: "" } });
-    if (criteria.dateFrom || criteria.dateTo) filterChips.push({ key: "date", text: `${criteria.dateField === "downloaded_at" ? "保存日" : criteria.dateField === "source_created_at" ? "公開日" : "更新日"}: ${criteria.dateFrom || "指定なし"}〜${criteria.dateTo || "指定なし"}`, clear: { dateFrom: "", dateTo: "" } });
-    if (conditionSortLabel) filterChips.push({ key: "sort", text: `${conditionSortLabel}（この条件の順）`, clear: { sort: "remembered" } });
+    if (criteria.dateFrom || criteria.dateTo) filterChips.push({ key: "date", text: `${criteria.dateField === "downloaded_at" ? "追加日" : criteria.dateField === "source_created_at" ? "公開日" : "更新日"}: ${criteria.dateFrom || "指定なし"}〜${criteria.dateTo || "指定なし"}`, clear: { dateFrom: "", dateTo: "" } });
+    if (conditionSortLabel) filterChips.push({ key: "sort", text: `並び順: ${conditionSortLabel}`, clear: { sort: "remembered" } });
   }
 
   return <>
     <SearchField value={input} label={`${target}を検索`} placeholder={tab === "works" ? "作品・作者・本文を検索" : `${target}を検索`} onChange={setInput} onSubmit={submitSearch}>
-      {tab === "works" && <button type="button" className="filter-button" data-active={filterCount > 0 || undefined} aria-haspopup="dialog" aria-label={filterCount ? `絞り込み（${filterCount} 個の条件）` : "絞り込み"} onClick={() => setFilterOpen(true)}><Funnel aria-hidden="true" /><span className="sort-button-label">絞り込み</span>{filterCount > 0 && <small>{filterCount}</small>}</button>}
+      {tab === "works" && <button type="button" className="filter-button" data-active={filterCount > 0 || undefined} aria-haspopup="dialog" aria-label={filterCount ? `絞り込み（${filterCount} 個の条件）` : "絞り込み"} onClick={() => setFilterOpen(true)}><Funnel aria-hidden="true" />{filterCount > 0 && <small aria-hidden="true">{filterCount}</small>}</button>}
       {tab === "works" && <SortMenu current={sentSort} relevance={Boolean(criteria.text.trim())} onSelect={selectSort} conditionLabel={conditionSortLabel} />}
       {(tab === "people" || tab === "series") && <ChoiceMenu current={entitySorts[tab]} label={entitySortLabel(entitySorts[tab])} groups={entitySortGroups} onSelect={(sort) => selectEntitySort(tab, sort)} />}
     </SearchField>
-    {filterChips.length > 0 && <div className="active-filters" aria-label="適用中の絞り込み">{filterChips.map((chip) => <button key={chip.key} type="button" className="active-filter" aria-label={`${chip.text}を解除`} onClick={() => changeCriteria({ ...criteria, ...chip.clear })}>{chip.text}<X aria-hidden="true" /></button>)}{filterChips.length > 1 && <button type="button" className="quiet-button" onClick={() => changeCriteria({ ...defaultPcSearch, text: criteria.text })}>すべて解除</button>}</div>}
+    {filterChips.length > 0 && <div className="active-filters" aria-label="適用中の絞り込み">{filterChips.map((chip) => <button key={chip.key} type="button" className="active-filter" aria-label={`${chip.text}を解除`} onClick={() => changeCriteria({ ...criteria, ...chip.clear })}>{chip.text}<X aria-hidden="true" /></button>)}{filterChips.length > 1 && <button type="button" className="quiet-button active-filters-clear" onClick={() => changeCriteria({ ...defaultPcSearch, text: criteria.text })}>すべて解除</button>}</div>}
     {filterOpen && <FilterSheet criteria={criteria} onClose={() => setFilterOpen(false)} onSaveCondition={onSaveCondition} onApply={(next) => { setFilterOpen(false); changeCriteria(next); }} />}
-    {plainShelf && <ContinueShelf items={readingShelf} onOpen={onOpenWork} onAll={() => move({ shelf: "reading" })} />}
     <nav className="library-tabs" aria-label="ライブラリの種類">{tabs.map(([id, label, icon]) => <button key={id} type="button" className={tab === id ? "active" : ""} aria-current={tab === id ? "page" : undefined} onClick={() => move({ tab: id, collectionId: null, listPage: 1 })}>{icon}{label}</button>)}</nav>
     {tab === "people" && <EntityBrowser kind="people" query={queries.people} sort={entitySorts.people} onOpen={(entity) => navigation.openEntity("person", entity.source, entity.sourceKey, entity.displayName)} />}
     {tab === "series" && <EntityBrowser kind="series" query={queries.series} sort={entitySorts.series} onOpen={(entity) => navigation.openEntity("series", entity.source, entity.sourceKey, entity.displayName)} />}
     {tab === "collections" && !collectionId && <CollectionBrowser query={queries.collections} onOpen={(collection) => move({ collectionId: collection.id, queries: { ...queries, members: "" } })} />}
-    {tab === "collections" && collectionId && <CollectionMembers collectionId={collectionId} query={queries.members} savedRevision={savedRevision} onBack={navigation.back} onOpenWork={onOpenWork} onOpenDetail={onOpenDetail} onSaved={onSaved} />}
+    {tab === "collections" && collectionId && <CollectionMembers collectionId={collectionId} query={queries.members} savedRevision={savedRevision} onOpenWork={onOpenWork} onOpenDetail={onOpenDetail} onSaved={onSaved} />}
     {tab === "works" && <>
+      {/* 種類の切り替えより下に置く。上に置くと、作品以外へ切り替えたときに切り替えの列ごと動く。 */}
+      {plainShelf && <ContinueShelf items={readingShelf} onOpen={onOpenWork} onAll={() => move({ shelf: "reading" })} />}
       <div className="results-bar">{resultsTitle && <h2>{resultsTitle}</h2>}<span>{list.total != null ? `約 ${list.total.toLocaleString("ja-JP")} 件` : list.loading ? "" : `${list.items.length} 件を表示`}{list.total != null || !list.loading ? "・" : ""}{sentSort === "standard" ? relevanceLabel : sortLabels[sentSort]}</span></div>
       <WorkResults list={list} savedRevision={savedRevision} reachable={reachable} onOpenWork={onOpenWork} onOpenDetail={onOpenDetail} onSaved={onSaved} onPage={(next) => move({ listPage: next })} emptyTitle={criteria.favorite ? "お気に入りの作品が見つかりません" : "作品が見つかりません"} emptyHint={criteria.favorite ? "デスクトップ版のお気に入り登録と絞り込み条件を確認してください。" : "検索語や絞り込み条件を変えて試してください。"} />
       {pagingMode === "pages" && !list.numbered && <p className="paging-relevance-hint">関連度順の検索は自動読み込みです。ページ番号を使うには並び順を選んでください。</p>}

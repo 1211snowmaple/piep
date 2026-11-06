@@ -72,6 +72,7 @@
 .reader-icon-button svg { width: 24px; height: 24px; stroke-width: 1.9; }
 .reader-icon-button:active { background: var(--reader-control); }
 .reader-icon-button[aria-pressed="true"] { background: var(--reader-accent-soft); color: var(--reader-accent); }
+.reader-icon-button[data-tone="favorite"][aria-pressed="true"] { background: transparent; }
 .reader-icon-button:disabled { opacity: .4; }
 
 /* 上のメニュー。読むときは本文に重ねて隠し、出し入れしても本文を動かさない。 */
@@ -133,7 +134,11 @@
 .reader-screen[data-bars="hidden"] .reader-panel { visibility: hidden; transform: translateY(calc(100% + 80px)); }
 .reader-bars--pinned .reader-panel { position: static; }
 .reader-pagebar { position: relative; z-index: 1; padding: 3px 6px 0; background: var(--reader-bg); }
-.reader-progress-row { display: flex; align-items: center; gap: 6px; min-width: 0; max-width: 760px; width: 100%; margin: 0 auto; }
+.reader-progress-row { display: flex; align-items: center; gap: 10px; min-width: 0; max-width: 960px; width: 100%; margin: 0 auto; padding: 0 8px; }
+/* 目次・表示・作品情報・お気に入り。進み具合の右に、印だけで並べる。 */
+.reader-actions { display: flex; align-items: center; flex: none; gap: 0; margin-right: -4px; }
+.reader-actions .reader-icon-button { width: 44px; height: 44px; }
+.reader-actions .reader-icon-button svg { width: 22px; height: 22px; }
 .reader-progress-slider { flex: 1; min-width: 0; height: 32px; accent-color: var(--reader-accent); }
 .reader-progress-label { flex: none; min-width: 46px; padding-right: 8px; color: var(--reader-control-ink); font-size: 13px; font-weight: 650; font-variant-numeric: tabular-nums; text-align: right; }
 .reader-progress-track { display: block; height: 6px; overflow: hidden; border-radius: 999px; background: var(--reader-control); }
@@ -208,31 +213,37 @@
 .reader-info-cover .work-cover { width: 104px; border-color: var(--reader-line); border-radius: 10px; box-shadow: 0 6px 18px var(--reader-shadow); }
 .reader-info-heading { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; flex: 1; min-width: 0; }
 .reader-info-labels { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; }
-.reader-info-labels > span:not(.provider-mark) { padding: 3px 8px; border-radius: 999px; background: var(--reader-control); color: var(--reader-muted); font-size: 12px; }
-.reader-info-series { margin: 0; color: var(--reader-muted); font-size: 13px; }
+.reader-info-labels > span:not(.provider-mark) { display: inline-flex; align-items: center; gap: 3px; padding: 3px 8px; border-radius: 999px; background: var(--reader-control); color: var(--reader-muted); font-size: 12px; font-weight: 600; }
+.reader-info-labels svg { width: 12px; height: 12px; }
+.reader-info-series { display: inline; max-width: 100%; margin: 0; padding: 2px 0; border: 0; background: transparent; color: var(--reader-muted); font-size: 13px; font-weight: 650; letter-spacing: .02em; line-height: 1.45; text-align: left; overflow-wrap: anywhere; }
 .reader-info-heading h2 { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; margin: 0; font-size: 18px; font-weight: 700; line-height: 1.42; overflow-wrap: anywhere; }
 .reader-info-heading h2.expanded { display: block; }
-.reader-info-author { display: flex; align-items: center; gap: 8px; max-width: 100%; min-width: 0; margin: 2px 0 0; color: var(--reader-muted); font-size: 14px; }
+.reader-info-author { display: inline-flex; align-items: center; gap: 7px; max-width: 100%; min-width: 0; min-height: 34px; margin: 0; padding: 0; border: 0; background: transparent; color: var(--reader-control-ink); font-size: 14px; font-weight: 600; text-align: left; }
 .reader-info-author > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.reader-info-author .work-author-avatar { width: 26px; height: 26px; }
-.reader-more { min-height: 36px; border: 0; padding: 4px 0; background: transparent; color: var(--reader-accent); font-size: 13px; font-weight: 650; }
+.reader-info-author .work-author-avatar { width: 24px; height: 24px; }
+.reader-info-heading .work-facts { margin-top: 2px; color: var(--reader-muted); font-size: var(--fs-small); }
+
 .reader-info-progress { display: grid; gap: 6px; margin-top: 16px; }
 .reader-info-progress > div { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; color: var(--reader-muted); font-size: 13px; font-variant-numeric: tabular-nums; }
 .reader-info-progress strong { color: var(--reader-control-ink); font-size: 16px; font-weight: 700; }
-.reader-info-remaining { margin-left: auto; }
 .reader-info-progress .reader-progress-track { height: 3px; background: var(--reader-line); }
-.reader-info-sheet .work-facts { margin-top: 14px; color: var(--reader-muted); font-size: var(--fs-small); }
-.reader-info-actions { display: flex; justify-content: flex-end; margin-top: 12px; }
-.reader-info-save { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 42px; padding: 7px 14px; border: 1px solid var(--reader-line); border-radius: 9px; background: transparent; color: var(--reader-control-ink); font-size: var(--fs-control); font-weight: 600; }
-.reader-info-save:disabled { opacity: .6; }
-.reader-info-save svg { width: 17px; height: 17px; }
-.reader-info-status { margin: 8px 0 0; color: var(--reader-muted); font-size: 13px; }
-.reader-info-section { margin-top: 20px; }
+.reader-info-footer { flex: none; padding: 10px 16px max(12px, var(--piep-safe-bottom)); border-top: 1px solid var(--reader-line); background: var(--reader-surface); }
+.reader-info-save { display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; min-height: 48px; padding: 8px 16px; border: 0; border-radius: 10px; background: var(--reader-accent); color: #fff; font-size: var(--fs-control); font-weight: 700; }
+.reader-info-save:disabled { opacity: .75; }
+.reader-info-save[data-done] { background: var(--reader-accent-soft); color: var(--reader-accent); }
+.reader-info-save svg { flex: none; width: 18px; height: 18px; }
+.reader-info-save[data-busy] svg { animation: icon-spin 900ms linear infinite; }
+/* 字は小さくても、押せる範囲は指の幅ぶん取る。 */
+.reader-more { align-self: flex-start; min-width: 96px; min-height: 44px; margin: 0 0 -6px; border: 0; padding: 10px 24px 10px 0; background: transparent; color: var(--reader-accent); font-size: 14px; font-weight: 650; text-align: left; }
+.reader-info-section { display: flex; flex-direction: column; }
+.reader-info-status { margin: 14px 0 0; color: var(--reader-muted); font-size: 13px; }
+.reader-info-section { margin-top: 18px; }
 .reader-info-section h3 { margin: 0 0 8px; font-size: 14px; font-weight: 700; }
 .reader-info-description { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 4; overflow: hidden; margin: 0; font-size: 14px; line-height: 1.75; white-space: pre-wrap; overflow-wrap: anywhere; }
 .reader-info-description.expanded { display: block; }
 .reader-info-tags, .reader-info-collections { display: flex; flex-wrap: wrap; gap: 6px; }
-.reader-info-tags span { padding: 5px 11px; border-radius: 999px; background: var(--reader-control); color: var(--reader-control-ink); font-size: var(--fs-small); overflow-wrap: anywhere; }
+.reader-info-tags { margin-top: 16px; }
+.reader-info-tags span, .reader-info-tags button { max-width: 100%; min-height: 30px; padding: 5px 11px; overflow: hidden; border: 0; border-radius: 999px; background: var(--reader-control); color: var(--reader-control-ink); font-size: var(--fs-small); text-overflow: ellipsis; white-space: nowrap; }
 .reader-info-collections span { padding: 6px 10px; border: 1px solid var(--reader-line); border-radius: 9px; font-size: 13px; }
 .reader-toc { display: grid; gap: 1px; margin: -8px -8px 0; padding: 0; list-style: none; }
 .reader-toc button { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 50px; border: 0; border-radius: 10px; padding: 8px 10px; background: transparent; color: var(--reader-control-ink); font-size: 15px; text-align: left; }
@@ -260,6 +271,7 @@
   .reader-status { font-size: 13px; padding-right: 24px; padding-left: 24px; }
   .reader-pager > button { flex-basis: 50px; height: 48px; font-size: 16px; }
   .reader-progress-label { font-size: 15px; }
+  .reader-actions .reader-icon-button { width: 50px; height: 50px; }
   .reader-info-cover .work-cover { width: 128px; }
   .reader-info-heading h2 { font-size: 21px; }
   .reader-control-heading, .reader-toggle, .reader-segmented button, .reader-sheet-tabs button { font-size: 15px; }

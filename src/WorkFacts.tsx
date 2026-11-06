@@ -1,7 +1,8 @@
 import type { LucideIcon } from "lucide-react";
-import { BookOpen, CalendarDays, Clock3, Download, FileText, History, Images } from "lucide-react";
+import { BookOpen } from "lucide-react";
+import { Icons } from "./icons";
 import type { PcWork } from "./pcApi";
-import { longDate, readingMinutes } from "./workText";
+import { longDate } from "./workText";
 
 export type WorkFact = { key: string; icon: LucideIcon; text: string };
 
@@ -17,15 +18,11 @@ export function WorkFacts({ items }: { items: WorkFact[] }) {
 /** 語ることがない項目は出さない。画像のない作品に「画像 0 枚」とは書かない。 */
 export function workFacts(work: PcWork, pageCount?: number): WorkFact[] {
   const published = longDate(work.sourceCreatedAt);
-  const savedAt = longDate(work.downloadedAt);
-  const minutes = readingMinutes(work.textLength);
   const facts: WorkFact[] = [];
-  if (published) facts.push({ key: "published", icon: CalendarDays, text: `公開 ${published}` });
-  if (work.textLength > 0) facts.push({ key: "length", icon: FileText, text: `${work.textLength.toLocaleString("ja-JP")}字` });
-  if (minutes) facts.push({ key: "minutes", icon: Clock3, text: minutes });
-  if (work.assetCount > 0) facts.push({ key: "assets", icon: Images, text: `画像 ${work.assetCount.toLocaleString("ja-JP")}枚` });
+  if (published) facts.push({ key: "published", icon: Icons.publishedDate, text: `公開 ${published}` });
+  if (work.textLength > 0) facts.push({ key: "length", icon: Icons.textLength, text: `${work.textLength.toLocaleString("ja-JP")}字` });
+  if (work.assetCount > 0) facts.push({ key: "assets", icon: Icons.assets, text: `画像 ${work.assetCount.toLocaleString("ja-JP")}枚` });
   if (pageCount && pageCount > 1) facts.push({ key: "pages", icon: BookOpen, text: `${pageCount}ページ` });
-  if (work.currentVersion > 1) facts.push({ key: "version", icon: History, text: `第${work.currentVersion}版` });
-  if (savedAt) facts.push({ key: "saved", icon: Download, text: `保存 ${savedAt}` });
+  if (work.currentVersion > 1) facts.push({ key: "version", icon: Icons.versionHistory, text: `第${work.currentVersion}版` });
   return facts;
 }

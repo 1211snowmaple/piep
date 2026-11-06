@@ -44,11 +44,17 @@ function trimmed(draft: PcSearchCriteria): PcSearchCriteria {
  * 絞り込み。デスクトップ版の「詳細フィルター」と同じく、選ぶものは札で並べ、足元に
  * リセットと適用を置く。サイドバーへ入力欄を積むと、本棚の横に長い書式が居座ってしまう。
  */
-export function FilterSheet({ criteria, onApply, onSaveCondition, onClose }: {
+export function FilterSheet({ criteria, onApply, onSaveCondition, onClose, scope }: {
   criteria: PcSearchCriteria;
   onApply: (next: PcSearchCriteria) => void;
-  onSaveCondition: (name: string, criteria: PcSearchCriteria) => void;
+  /** 本棚の条件だけ保存できる。作者やシリーズの中の絞り込みは、その画面の中だけで使う。 */
+  onSaveCondition?: (name: string, criteria: PcSearchCriteria) => void;
   onClose: () => void;
+  /**
+   * 作者やシリーズの画面の中で絞るとき。作者の画面では作者の欄を出さない。
+   * 含めるタグと並び順はその画面の札と並び替えで選ぶので、ここには出さない。
+   */
+  scope?: "person" | "series";
 }) {
   const [draft, setDraft] = useState(criteria);
   const [problem, setProblem] = useState<string | null>(null);
@@ -86,7 +92,7 @@ export function FilterSheet({ criteria, onApply, onSaveCondition, onClose }: {
     if (invalid) { setProblem(invalid); return; }
     const next = trimmed(draft);
     const finalName = name.trim() || describeCondition(next);
-    onSaveCondition(finalName, next);
+    onSaveCondition?.(finalName, next);
     setSavedName(finalName);
     setNaming(false);
     setName("");
@@ -109,15 +115,15 @@ export function FilterSheet({ criteria, onApply, onSaveCondition, onClose }: {
           <Chips label="種類" value={draft.contentType} options={[{ id: "", label: "すべて" }, { id: "novel", label: "小説" }, { id: "article", label: "記事" }, { id: "text", label: "テキスト" }, { id: "image", label: "画像" }, { id: "file", label: "ファイル" }]} onChange={(contentType) => set({ contentType })} />
           <Chips label="お気に入り" value={draft.favorite ? "on" : "off"} options={[{ id: "off", label: "すべて" }, { id: "on", label: "お気に入りのみ" }]} onChange={(value) => set({ favorite: value === "on" })} />
         </Section>
-        <Section title="作者とタグ">
+        <Section title={scope === "person" ? "タグ" : "作者とタグ"}>
           <div className="filter-fields">
-            {textField("作者", "author")}
-            {textField("除外する作者", "authorExclude")}
-            {textField("タグ", "tag")}
+            {scope !== "person" && textField("作者", "author")}
+            {scope !== "person" && textField("除外する作者", "authorExclude")}
+            {!scope && textField("タグ", "tag")}
             {textField("除外するタグ", "tagExclude")}
           </div>
-          <Chips label="複数のタグ" value={draft.tagMode} options={[{ id: "and", label: "すべて含む" }, { id: "or", label: "いずれかを含む" }]} onChange={(tagMode) => set({ tagMode })} />
-          <p className="filter-hint">作者とタグは読点、コンマ、改行で 10 件まで。検索語には「語句」や -語句 も使えます。</p>
+          {!scope && <Chips label="複数のタグ" value={draft.tagMode} options={[{ id: "and", label: "すべて含む" }, { id: "or", label: "いずれかを含む" }]} onChange={(tagMode) => set({ tagMode })} />}
+          <p className="filter-hint">{scope ? "含めるタグは一覧の上の札で選びます。" : ""}{scope === "person" ? "タグ" : "作者とタグ"}は読点、コンマ、改行で 10 件まで。検索語には「語句」や -語句 も使えます。</p>
         </Section>
         <Section title="状態">
           <Chips label="改稿" value={draft.revision} options={[{ id: "", label: "すべて" }, { id: "revised", label: "改稿あり" }, { id: "first_version", label: "初版のみ" }]} onChange={(revision) => set({ revision })} />
@@ -127,14 +133,14 @@ export function FilterSheet({ criteria, onApply, onSaveCondition, onClose }: {
         <Section title="分量と日付">
           {range("文字数", "minChars", "maxChars", "1000000000")}
           {range("画像数", "minAssets", "maxAssets", "1000000")}
-          <Chips label="日付の種類" value={draft.dateField} options={[{ id: "downloaded_at", label: "保存日" }, { id: "source_created_at", label: "公開日" }, { id: "source_updated_at", label: "更新日" }]} onChange={(dateField) => set({ dateField })} />
+          <Chips label="日付の種類" value={draft.dateField} options={[{ id: "downloaded_at", label: "追加日" }, { id: "source_created_at", label: "公開日" }, { id: "source_updated_at", label: "更新日" }]} onChange={(dateField) => set({ dateField })} />
           <div className="filter-range"><span className="filter-label">期間</span><input aria-label="開始日" type="date" value={draft.dateFrom} onChange={(event) => set({ dateFrom: event.target.value })} /><span aria-hidden="true">〜</span><input aria-label="終了日" type="date" value={draft.dateTo} onChange={(event) => set({ dateTo: event.target.value })} /></div>
         </Section>
-        <Section title="この条件の並び順">
-          <select aria-label="この条件の並び順" className="filter-select" value={draft.sort} onChange={(event) => set({ sort: event.target.value as PcSearchCriteria["sort"] })}><option value="remembered">いつもの順</option>{draft.text.trim() && <option value="standard">関連度順</option>}{sortGroups.map((group) => <optgroup key={group.label} label={group.label}>{group.items.map((sort) => <option key={sort} value={sort}>{sortLabels[sort]}</option>)}</optgroup>)}</select>
-          <p className="filter-hint">いつもの順は検索欄の横で選びます。ここで指定すると、この条件を使う間だけ優先します。</p>
-        </Section>
-        {naming ? <div className="filter-save"><input autoFocus aria-label="保存する条件の名前" value={name} maxLength={60} placeholder={describeCondition(draft)} onChange={(event) => setName(event.target.value)} /><button type="button" className="secondary-button" onClick={saveCondition}>保存</button><button type="button" className="icon-button" aria-label="保存をやめる" onClick={() => setNaming(false)}><X aria-hidden="true" /></button></div>
+        {!scope && <Section title="この条件の並び順">
+          <select aria-label="この条件の並び順" className="filter-select" value={draft.sort} onChange={(event) => set({ sort: event.target.value as PcSearchCriteria["sort"] })}><option value="remembered">指定しない</option>{draft.text.trim() && <option value="standard">関連度順</option>}{sortGroups.map((group) => <optgroup key={group.label} label={group.label}>{group.items.map((sort) => <option key={sort} value={sort}>{sortLabels[sort]}</option>)}</optgroup>)}</select>
+          <p className="filter-hint">指定しなければ、検索欄の横の並び替えで選んだ順になります。ここで選ぶと、この条件で絞り込んでいる間だけその順で並べます。</p>
+        </Section>}
+        {!onSaveCondition ? null : naming ? <div className="filter-save"><input autoFocus aria-label="保存する条件の名前" value={name} maxLength={60} placeholder={describeCondition(draft)} onChange={(event) => setName(event.target.value)} /><button type="button" className="secondary-button" onClick={saveCondition}>保存</button><button type="button" className="icon-button" aria-label="保存をやめる" onClick={() => setNaming(false)}><X aria-hidden="true" /></button></div>
           : <button type="button" className="quiet-button" disabled={!hasConditionToSave(draft)} onClick={() => setNaming(true)}><Bookmark aria-hidden="true" />この条件を保存</button>}
         {savedName && <p className="filter-hint" role="status">「{savedName}」を保存しました。サイドバーから開けます。</p>}
         {problem && <p className="inline-alert" role="alert">{problem}</p>}

@@ -20,6 +20,7 @@ import { homePage, NavigationProvider, useAppHistory, type LibraryPage } from ".
 import { forgetAllPages } from "./pageCache";
 import { setReadingServer } from "./recentReading";
 import { statusQueryKey } from "./workList";
+import { useFavoriteNotice } from "./favorites";
 import { defaultPcSearch, getPcStatus, type OfflineWork, type PcConnectionStatus, type PcSearchCriteria, type PcWork } from "./pcApi";
 import { handleReaderKeyboard } from "./readerKeyboard";
 import { ReaderBehaviorControls, ReaderTypeControls } from "./ReaderSettings";
@@ -518,7 +519,9 @@ function App() {
   }, [section, pcConnection?.paired]);
 
   const canBrowseServer = Boolean(pcConnection?.reachable);
-  const navigation = useMemo(() => ({ entry, depth, push, replace, back, canBrowseServer }), [entry, depth, push, replace, back, canBrowseServer]);
+  const canWriteFavorite = canBrowseServer && Boolean(pcConnection?.capabilities.includes("favorite-write"));
+  const navigation = useMemo(() => ({ entry, depth, push, replace, back, canBrowseServer, canWriteFavorite }), [entry, depth, push, replace, back, canBrowseServer, canWriteFavorite]);
+  const favoriteNotice = useFavoriteNotice();
 
   const readerProps = { type: readerType, behavior: readerBehavior, onBack: closeReader, onTypeChange: changeReaderType, onBehaviorChange: changeReaderBehavior, backLabel: selectedWork ? "作品詳細に戻る" : "作品一覧に戻る" };
   const activeReader = offlineWork
@@ -582,6 +585,7 @@ function App() {
     {selectedWork && <div className="work-detail-overlay" ref={detailOverlayRef} aria-hidden={readerOpen} inert={readerOpen} onClick={(event) => { if (event.target === event.currentTarget && !readerOpen) closeDetail(); }}><WorkDetail key={`${selectedWork.offline ? "saved" : "pc"}:${selectedWork.work.id}`} selected={selectedWork} onBack={closeDetail} onRead={startReading} onSaved={savedWorkChanged} onRemoved={() => { savedWorkChanged(); if (selectedWork.offline) closeDetail(); }} savedRevision={savedRevision} /></div>}
     {activeReader && <div className="reader-overlay" ref={readerOverlayRef}>{activeReader}</div>}
     {exitHint && <div className="app-toast" role="status">もう一度押すと閉じます</div>}
+    {favoriteNotice && !exitHint && <div className="app-toast" role="alert">{favoriteNotice}</div>}
     </NavigationProvider>
   );
 }

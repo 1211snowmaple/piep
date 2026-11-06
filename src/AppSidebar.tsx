@@ -1,4 +1,6 @@
-import type { ReactNode, Ref } from "react";
+import { useEffect, useState, type ReactNode, type Ref } from "react";
+import { getVersion } from "@tauri-apps/api/app";
+import { isTauri } from "@tauri-apps/api/core";
 import { useQuery } from "@tanstack/react-query";
 import { BookMarked, BookOpen, Heart, History, LibraryBig, Rows3, Search, Settings, X } from "lucide-react";
 import { PiepLockup } from "./PiepLockup";
@@ -36,6 +38,25 @@ function useShelfCount(shelf: Exclude<Shelf, "reading">, enabled: boolean): numb
   }).data ?? null;
 }
 
+/** サイドバーの下の一行。デスクトップ版の「● デスクトップ　v0.35.0」と同じ形で、つながり方と版を出す。 */
+function connectionLabel(status: PcConnectionStatus | null): string {
+  if (!status?.paired) return "サーバー未登録";
+  if (status.reachable) return "オンライン";
+  if (status.issue === "not_ready") return "サーバー準備中";
+  return "オフライン";
+}
+
+function useAppVersion(): string | null {
+  const [version, setVersion] = useState<string | null>(null);
+  useEffect(() => {
+    if (!isTauri()) return;
+    let alive = true;
+    getVersion().then((value) => { if (alive) setVersion(value); }).catch(() => undefined);
+    return () => { alive = false; };
+  }, []);
+  return version;
+}
+
 function ShelfItem({ icon, label, count, active, buttonRef, onClick }: { icon: ReactNode; label: string; count: number | null; active: boolean; buttonRef?: Ref<HTMLButtonElement>; onClick: () => void }) {
   return <button type="button" ref={buttonRef} className={active ? "shelf-item active" : "shelf-item"} aria-current={active ? "page" : undefined} onClick={onClick}>
     {icon}<span>{label}</span>{count !== null && <small>{count.toLocaleString("ja-JP")}</small>}
@@ -60,6 +81,7 @@ export function AppSidebar({ open, section, page, status, savedConditions, first
   onRemoveCondition: (condition: SavedCondition) => void;
 }) {
   const reachable = Boolean(status?.reachable);
+  const version = useAppVersion();
   const active = currentShelf(page);
   const reading = useReadingShelf();
   // 閉じている引き出しの数字のために、起動時の通信を増やさない。
@@ -91,6 +113,6 @@ export function AppSidebar({ open, section, page, status, savedConditions, first
         {destination("settings", "設定", <Settings className="icon" aria-hidden="true" />)}
       </div>
     </nav>
-    <div className={reachable ? "sidebar-bottom connected" : "sidebar-bottom"}><span className="status-dot" /> サーバー {reachable ? "接続中" : "未接続"}</div>
+    <div className={reachable ? "sidebar-bottom connected" : "sidebar-bottom"} role="status"><span className="status-dot" aria-hidden="true" /><span className="sidebar-connection">{connectionLabel(status)}</span>{version && <span className="sidebar-version">v{version}</span>}</div>
   </aside>;
 }

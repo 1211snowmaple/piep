@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { keepPreviousData, useInfiniteQuery, useQuery } from "@tanstack/react-query";
-import { BookOpen, ChevronLeft, UserRound } from "lucide-react";
+import { BookOpen, UserRound } from "lucide-react";
 import { getPcCollection, listPcCollections, listPcEntities, pcErrorMessage, type PcCollection, type PcEntity, type PcWork } from "./pcApi";
 import { WorkCard } from "./WorkCard";
 import { ProviderMark } from "./ProviderMark";
@@ -80,7 +80,7 @@ export function CollectionBrowser({ query, onOpen }: { query: string; onOpen: (c
   </section>;
 }
 
-export function CollectionMembers({ collectionId, query, savedRevision, onBack, onOpenWork, onOpenDetail, onSaved }: { collectionId: string; query: string; savedRevision: number; onBack: () => void; onOpenWork: (work: PcWork) => void; onOpenDetail: (work: PcWork) => void; onSaved: () => void }) {
+export function CollectionMembers({ collectionId, query, savedRevision, onOpenWork, onOpenDetail, onSaved }: { collectionId: string; query: string; savedRevision: number; onOpenWork: (work: PcWork) => void; onOpenDetail: (work: PcWork) => void; onSaved: () => void }) {
   const detail = useQuery({ queryKey: ["collection", collectionId], queryFn: () => getPcCollection(collectionId) });
   useStatusRecovery(detail.error);
   const selected = detail.data;
@@ -89,7 +89,6 @@ export function CollectionMembers({ collectionId, query, savedRevision, onBack, 
   const memberWorks = useMemo(() => members.flatMap((member) => member.work ? [member.work] : []), [selected, needle]);
   const savedState = useSavedStates(memberWorks, savedRevision, true);
   return <section className="group-browser">
-    <button className="page-back" type="button" onClick={onBack}><ChevronLeft aria-hidden="true" />戻る</button>
     {detail.error ? <div className="inline-alert" role="alert">{pcErrorMessage(detail.error)}</div> : null}
     {detail.isPending ? <GroupSkeleton /> : selected && <>
       <div className="section-heading group-heading"><h2>{selected.name}</h2><span>{selected.memberCount} 作品</span></div>
