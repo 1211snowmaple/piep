@@ -11,10 +11,20 @@ const PULL_LIMIT: i64 = 200;
 // 1 回の同期で読むページ数の上限。残りは次の同期で続きから読む。
 const MAX_PULL_PAGES: usize = 50;
 
+const SYNC_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS sync_meta (
+    id INTEGER PRIMARY KEY CHECK(id=1), url TEXT NOT NULL, device_id TEXT NOT NULL, cursor INTEGER NOT NULL);
+    CREATE TABLE IF NOT EXISTS positions (key TEXT PRIMARY KEY, data TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS pending (key TEXT PRIMARY KEY, data TEXT NOT NULL);";
+
 pub struct ReadingSyncState {
     file: PathBuf,
-    file_lock: Mutex<()>,
+    database: Mutex<Option<rusqlite::Connection>>,
     sync_lock: AsyncMutex<()>,
+}
+
+struct SyncTarget {
+    saved: SavedConnection,
+    generation: u64,
 }
 
 /// サーバーが持つ読書位置。
@@ -57,59 +67,6 @@ struct SyncFile {
     pending: BTreeMap<String, ReadingWrite>,
 }
 
-impl SyncFile {
-    /// ファイルを今の接続に合わせる。
-    ///
-    /// 別のサーバーの位置は混ぜない。同じサーバーへ登録し直しただけなら、圏外で読んだ分は
-    /// 残し、読み直しのために見た位置だけ捨てる（サーバーを作り直していると番号が戻るため）。
-    fn bind(&mut self, saved: &SavedConnection) {
-        if self.url != saved.url {
-            *self = Self {
-                url: saved.url.clone(),
-                device_id: saved.device_id.clone(),
-                ..Self::default()
-            };
-        } else if self.device_id != saved.device_id {
-            self.device_id = saved.device_id.clone();
-            self.cursor = 0;
-            self.positions.clear();
-        }
-    }
-
-    fn accept(&mut self, position: ReadingPosition) {
-        let key = reading_key(&position.source, &position.source_id);
-        let newer = self
-            .positions
-            .get(&key)
-            .is_none_or(|current| position.device_time >= current.device_time);
-        if newer {
-            self.positions.insert(key, position);
-        }
-    }
-
-    /// 届いた書き込みを消す。送っている間に新しい位置が来ていたら、そちらは残す。
-    fn delivered(&mut self, key: &str, device_time: i64) {
-        if self
-            .pending
-            .get(key)
-            .is_some_and(|write| write.device_time == device_time)
-        {
-            self.pending.remove(key);
-        }
-    }
-
-    fn record(&mut self, write: ReadingWrite) {
-        let key = reading_key(&write.source, &write.source_id);
-        let newer = self
-            .pending
-            .get(&key)
-            .is_none_or(|current| write.device_time >= current.device_time);
-        if newer {
-            self.pending.insert(key, write);
-        }
-    }
-}
-
 fn reading_key(source: &str, source_id: &str) -> String {
     format!("{source}:{source_id}")
 }
@@ -121,7 +78,10 @@ fn validate_write(write: &ReadingWrite) -> Result<(), ClientError> {
         || !(0..=1_000_000).contains(&write.page)
         || !(0.0..=1.0).contains(&write.position)
         || write.device_time <= 0
-        || write.edit_hash.as_ref().is_some_and(|hash| hash.len() > 128)
+        || write
+            .edit_hash
+            .as_ref()
+            .is_some_and(|hash| hash.len() > 128)
     {
         return Err(ClientError::remote());
     }
@@ -137,44 +97,219 @@ fn write_endpoint(base: &str, source: &str, source_id: &str) -> Result<Url, Clie
     Ok(url)
 }
 
+fn storage_error(_: rusqlite::Error) -> ClientError {
+    ClientError::storage()
+}
+
+fn query_entry<T: serde::de::DeserializeOwned>(
+    tx: &rusqlite::Transaction<'_>,
+    table: &str,
+    key: &str,
+) -> Result<Option<T>, ClientError> {
+    use rusqlite::OptionalExtension;
+    let json: Option<String> = tx
+        .query_row(
+            &format!("SELECT data FROM {table} WHERE key = ?1"),
+            [key],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(storage_error)?;
+    json.map(|value| serde_json::from_str(&value).map_err(|_| ClientError::storage()))
+        .transpose()
+}
+
+fn put_entry(
+    tx: &rusqlite::Transaction<'_>,
+    table: &str,
+    key: &str,
+    value: &impl Serialize,
+) -> Result<(), ClientError> {
+    let json = serde_json::to_string(value).map_err(|_| ClientError::storage())?;
+    tx.execute(&format!("INSERT INTO {table}(key, data) VALUES(?1, ?2) ON CONFLICT(key) DO UPDATE SET data=excluded.data"), rusqlite::params![key, json]).map_err(storage_error)?;
+    Ok(())
+}
+
+fn accept_position(
+    tx: &rusqlite::Transaction<'_>,
+    position: ReadingPosition,
+) -> Result<(), ClientError> {
+    let key = reading_key(&position.source, &position.source_id);
+    let old: Option<ReadingPosition> = query_entry(tx, "positions", &key)?;
+    if old
+        .as_ref()
+        .is_none_or(|old| position.device_time >= old.device_time && position != *old)
+    {
+        put_entry(tx, "positions", &key, &position)?;
+    }
+    Ok(())
+}
+
+fn delivered_write(
+    tx: &rusqlite::Transaction<'_>,
+    key: &str,
+    sent: &ReadingWrite,
+) -> Result<(), ClientError> {
+    let pending: Option<ReadingWrite> = query_entry(tx, "pending", key)?;
+    // 同じミリ秒に別の位置が記録されても、その新しい内容を消さない。
+    if pending.as_ref() == Some(sent) {
+        tx.execute("DELETE FROM pending WHERE key=?1", [key])
+            .map_err(storage_error)?;
+    }
+    Ok(())
+}
+
 impl ReadingSyncState {
     pub fn new(file: PathBuf) -> Self {
         Self {
             file,
-            file_lock: Mutex::new(()),
+            database: Mutex::new(None),
             sync_lock: AsyncMutex::new(()),
         }
     }
 
-    /// ファイルを読み、接続に合わせて、変更を書き戻す。
-    fn update<T>(
+    fn open_database(&self) -> Result<rusqlite::Connection, ClientError> {
+        let mut db = rusqlite::Connection::open(self.file.with_extension("sqlite3"))
+            .map_err(storage_error)?;
+        db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")
+            .map_err(storage_error)?;
+        let tx = db.transaction().map_err(storage_error)?;
+        tx.execute_batch(SYNC_SCHEMA).map_err(storage_error)?;
+        let initialized: bool = tx
+            .query_row("SELECT EXISTS(SELECT 1 FROM sync_meta)", [], |row| {
+                row.get(0)
+            })
+            .map_err(storage_error)?;
+        if !initialized {
+            // JSON は commit 後も残す。中断・移行失敗時に元の未送信位置を失わない。
+            let legacy: SyncFile = match fs::read(&self.file) {
+                Ok(bytes) => serde_json::from_slice(&bytes).map_err(|_| ClientError::storage())?,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => SyncFile::default(),
+                Err(_) => return Err(ClientError::storage()),
+            };
+            tx.execute(
+                "INSERT INTO sync_meta VALUES(1, ?1, ?2, ?3)",
+                rusqlite::params![legacy.url, legacy.device_id, legacy.cursor],
+            )
+            .map_err(storage_error)?;
+            for (key, position) in legacy.positions {
+                put_entry(&tx, "positions", &key, &position)?;
+            }
+            for (key, pending) in legacy.pending {
+                put_entry(&tx, "pending", &key, &pending)?;
+            }
+        }
+        tx.commit().map_err(storage_error)?;
+        Ok(db)
+    }
+
+    fn with_store<T>(
         &self,
         saved: &SavedConnection,
-        change: impl FnOnce(&mut SyncFile) -> T,
+        action: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<T, ClientError>,
     ) -> Result<T, ClientError> {
-        let _guard = self.file_lock.lock().map_err(|_| ClientError::storage())?;
-        // 壊れていても読書は止めない。読み直せば位置はまた届く。
-        let mut file: SyncFile = fs::read(&self.file)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .unwrap_or_default();
-        file.bind(saved);
-        let result = change(&mut file);
-        let bytes = serde_json::to_vec(&file).map_err(|_| ClientError::storage())?;
-        let temporary = self.file.with_extension("json.tmp");
-        fs::write(&temporary, bytes).map_err(|_| ClientError::storage())?;
-        fs::rename(&temporary, &self.file).map_err(|_| ClientError::storage())?;
+        let mut database = self.database.lock().map_err(|_| ClientError::storage())?;
+        if database.is_none() {
+            *database = Some(self.open_database()?);
+        }
+        let db = database.as_mut().expect("database initialized");
+        let tx = db.transaction().map_err(storage_error)?;
+        let (url, device_id): (String, String) = tx
+            .query_row(
+                "SELECT url, device_id FROM sync_meta WHERE id=1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(storage_error)?;
+        if url != saved.url {
+            tx.execute_batch("DELETE FROM positions; DELETE FROM pending;")
+                .map_err(storage_error)?;
+        } else if device_id != saved.device_id {
+            tx.execute("DELETE FROM positions", [])
+                .map_err(storage_error)?;
+        }
+        if url != saved.url || device_id != saved.device_id {
+            tx.execute(
+                "UPDATE sync_meta SET url=?1, device_id=?2, cursor=0 WHERE id=1",
+                rusqlite::params![saved.url, saved.device_id],
+            )
+            .map_err(storage_error)?;
+        }
+        let result = action(&tx)?;
+        tx.commit().map_err(storage_error)?;
         Ok(result)
+    }
+
+    fn store_current<T>(
+        &self,
+        pc: &PcClientState,
+        target: &SyncTarget,
+        action: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<T, ClientError>,
+    ) -> Result<T, ClientError> {
+        // 登録変更は、この世代確認から SQLite commit まで待つ。
+        pc.with_connection(target.generation, || self.with_store(&target.saved, action))
+    }
+
+    fn record_current(
+        &self,
+        pc: &PcClientState,
+        target: &SyncTarget,
+        write: ReadingWrite,
+    ) -> Result<(), ClientError> {
+        self.store_current(pc, target, |tx| {
+            let key = reading_key(&write.source, &write.source_id);
+            let pending: Option<ReadingWrite> = query_entry(tx, "pending", &key)?;
+            if pending
+                .as_ref()
+                .is_none_or(|old| write.device_time >= old.device_time && write != *old)
+            {
+                put_entry(tx, "pending", &key, &write)?;
+            }
+            Ok(())
+        })
+    }
+
+    async fn sync(&self, pc: &PcClientState) -> Result<(), ClientError> {
+        // 待っている間に登録が変わるため、接続はロック取得後に読む。
+        let _running = self.sync_lock.lock().await;
+        let Some(target) = sync_target(pc)? else {
+            return Ok(());
+        };
+        let client = pc.client(&target.saved)?;
+        self.push(&client, pc, &target).await?;
+        self.pull(&client, pc, &target).await
     }
 
     /// 溜まった書き込みを送る。圏外やサーバーの不調なら残して次に任せる。
     async fn push(
         &self,
         client: &reqwest::Client,
-        saved: &SavedConnection,
+        pc: &PcClientState,
+        target: &SyncTarget,
     ) -> Result<(), ClientError> {
-        let pending = self.update(saved, |file| file.pending.clone())?;
+        let saved = &target.saved;
+        let pending = self.store_current(pc, target, |tx| {
+            let mut query = tx
+                .prepare("SELECT key, data FROM pending ORDER BY key")
+                .map_err(storage_error)?;
+            let rows = query
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(storage_error)?;
+            let mut pending = Vec::new();
+            for row in rows {
+                let (key, data) = row.map_err(storage_error)?;
+                pending.push((
+                    key,
+                    serde_json::from_str::<ReadingWrite>(&data)
+                        .map_err(|_| ClientError::storage())?,
+                ));
+            }
+            Ok(pending)
+        })?;
         for (key, write) in pending {
+            pc.with_connection(target.generation, || Ok(()))?;
             let response = client
                 .put(write_endpoint(&saved.url, &write.source, &write.source_id)?)
                 .bearer_auth(&saved.token)
@@ -192,15 +327,15 @@ impl ReadingSyncState {
             let status = response.status();
             if status.is_success() {
                 let stored: ReadingPosition = response.bounded_json().await?;
-                self.update(saved, |file| {
-                    file.accept(stored);
-                    file.delivered(&key, write.device_time);
+                self.store_current(pc, target, |tx| {
+                    accept_position(tx, stored)?;
+                    delivered_write(tx, &key, &write)
                 })?;
             } else if status == reqwest::StatusCode::UNAUTHORIZED {
                 return Err(ClientError::revoked());
             } else if status.is_client_error() {
                 // サーバーが受け取らない書き込みを持ち続けると、後ろが永久に詰まる。
-                self.update(saved, |file| file.delivered(&key, write.device_time))?;
+                self.store_current(pc, target, |tx| delivered_write(tx, &key, &write))?;
             } else {
                 return Err(ClientError::remote());
             }
@@ -212,15 +347,22 @@ impl ReadingSyncState {
     async fn pull(
         &self,
         client: &reqwest::Client,
-        saved: &SavedConnection,
+        pc: &PcClientState,
+        target: &SyncTarget,
     ) -> Result<(), ClientError> {
         #[derive(Deserialize)]
         struct Page {
             items: Vec<ReadingPosition>,
             cursor: i64,
         }
+        let saved = &target.saved;
         for _ in 0..MAX_PULL_PAGES {
-            let since = self.update(saved, |file| file.cursor)?;
+            let since: i64 = self.store_current(pc, target, |tx| {
+                tx.query_row("SELECT cursor FROM sync_meta WHERE id=1", [], |row| {
+                    row.get(0)
+                })
+                .map_err(storage_error)
+            })?;
             let response = client
                 .get(format!(
                     "{}/api/v1/reading?since={since}&limit={PULL_LIMIT}",
@@ -232,11 +374,16 @@ impl ReadingSyncState {
                 .map_err(|error| ClientError::from_send(&error, saved.pinned()))?;
             let page: Page = check_response(response)?.bounded_json().await?;
             let full = page.items.len() as i64 >= PULL_LIMIT;
-            self.update(saved, |file| {
+            self.store_current(pc, target, |tx| {
                 for item in page.items {
-                    file.accept(item);
+                    accept_position(tx, item)?;
                 }
-                file.cursor = page.cursor.max(file.cursor);
+                tx.execute(
+                    "UPDATE sync_meta SET cursor=?1 WHERE id=1 AND cursor < ?1",
+                    [page.cursor],
+                )
+                .map_err(storage_error)?;
+                Ok(())
             })?;
             if !full {
                 break;
@@ -246,8 +393,11 @@ impl ReadingSyncState {
     }
 }
 
-fn sync_target(pc: &PcClientState) -> Result<Option<SavedConnection>, ClientError> {
-    Ok(pc.load()?.filter(SavedConnection::can_sync_reading))
+fn sync_target(pc: &PcClientState) -> Result<Option<SyncTarget>, ClientError> {
+    let (generation, saved) = pc.connection_snapshot()?;
+    Ok(saved
+        .filter(SavedConnection::can_sync_reading)
+        .map(|saved| SyncTarget { saved, generation }))
 }
 
 /// 読んだ位置を端末に置く。通信はしない。
@@ -261,7 +411,7 @@ pub async fn reading_record(
     let Some(saved) = sync_target(&pc)? else {
         return Ok(());
     };
-    state.update(&saved, |file| file.record(write))
+    state.record_current(&pc, &saved, write)
 }
 
 /// 溜まった位置を送り、サーバーの変更を受け取る。
@@ -270,13 +420,7 @@ pub async fn reading_sync(
     state: State<'_, ReadingSyncState>,
     pc: State<'_, PcClientState>,
 ) -> Result<(), ClientError> {
-    let Some(saved) = sync_target(&pc)? else {
-        return Ok(());
-    };
-    let _running = state.sync_lock.lock().await;
-    let client = pc.client(&saved)?;
-    state.push(&client, &saved).await?;
-    state.pull(&client, &saved).await
+    state.sync(&pc).await
 }
 
 /// 最後に受け取った、この作品の位置を返す。通信はしない。
@@ -290,8 +434,8 @@ pub async fn reading_get(
     let Some(saved) = sync_target(&pc)? else {
         return Ok(None);
     };
-    state.update(&saved, |file| {
-        file.positions.get(&reading_key(&source, &source_id)).cloned()
+    state.store_current(&pc, &saved, |tx| {
+        query_entry(tx, "positions", &reading_key(&source, &source_id))
     })
 }
 
@@ -339,88 +483,146 @@ mod tests {
         }
     }
 
-    fn state() -> (PathBuf, ReadingSyncState) {
-        let directory = std::env::temp_dir().join(format!("piep-android-reading-{}", uuid::Uuid::new_v4()));
-        fs::create_dir_all(&directory).expect("directory");
-        let file = directory.join("reading-sync.json");
-        (directory, ReadingSyncState::new(file))
+    fn persisted_pending(
+        state: &ReadingSyncState,
+        pc: &PcClientState,
+        target: &SyncTarget,
+    ) -> Option<ReadingWrite> {
+        state
+            .store_current(pc, target, |tx| query_entry(tx, "pending", "pixiv:1"))
+            .unwrap()
     }
 
     #[test]
     fn newest_write_wins_and_an_older_one_does_not_replace_it() {
-        let mut file = SyncFile::default();
-        file.record(write("1", 5, 200));
-        file.record(write("1", 2, 100));
-        assert_eq!(file.pending["pixiv:1"].page, 5);
-        file.record(write("1", 7, 300));
-        assert_eq!(file.pending["pixiv:1"].page, 7);
+        let (root, state, pc) = super::regressions::fixture();
+        pc.save(&saved("https://a.example", "one")).unwrap();
+        let target = sync_target(&pc).unwrap().unwrap();
+        state
+            .record_current(&pc, &target, write("1", 5, 200))
+            .unwrap();
+        state
+            .record_current(&pc, &target, write("1", 2, 100))
+            .unwrap();
+        assert_eq!(persisted_pending(&state, &pc, &target).unwrap().page, 5);
+        state
+            .record_current(&pc, &target, write("1", 7, 300))
+            .unwrap();
+        assert_eq!(persisted_pending(&state, &pc, &target).unwrap().page, 7);
+        drop((state, pc));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn a_write_made_while_sending_survives_delivery() {
-        let mut file = SyncFile::default();
-        file.record(write("1", 5, 200));
-        file.record(write("1", 7, 300));
-        // 200 を送っている間に 300 が来た。
-        file.delivered("pixiv:1", 200);
-        assert_eq!(file.pending["pixiv:1"].page, 7);
-        file.delivered("pixiv:1", 300);
-        assert!(file.pending.is_empty());
+        let (root, state, pc) = super::regressions::fixture();
+        pc.save(&saved("https://a.example", "one")).unwrap();
+        let target = sync_target(&pc).unwrap().unwrap();
+        state
+            .record_current(&pc, &target, write("1", 5, 200))
+            .unwrap();
+        state
+            .record_current(&pc, &target, write("1", 7, 300))
+            .unwrap();
+        state
+            .store_current(&pc, &target, |tx| {
+                delivered_write(tx, "pixiv:1", &write("1", 5, 200))
+            })
+            .unwrap();
+        assert_eq!(persisted_pending(&state, &pc, &target).unwrap().page, 7);
+        state
+            .store_current(&pc, &target, |tx| {
+                delivered_write(tx, "pixiv:1", &write("1", 7, 300))
+            })
+            .unwrap();
+        assert!(persisted_pending(&state, &pc, &target).is_none());
+        drop((state, pc));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn an_older_position_from_the_server_does_not_replace_a_newer_one() {
-        let mut file = SyncFile::default();
-        file.accept(position("1", 5, 200, 1));
-        file.accept(position("1", 2, 100, 2));
-        assert_eq!(file.positions["pixiv:1"].page, 5);
+        let (root, state, pc) = super::regressions::fixture();
+        pc.save(&saved("https://a.example", "one")).unwrap();
+        let target = sync_target(&pc).unwrap().unwrap();
+        state
+            .store_current(&pc, &target, |tx| {
+                accept_position(tx, position("1", 5, 200, 1))?;
+                accept_position(tx, position("1", 2, 100, 2))
+            })
+            .unwrap();
+        let found: ReadingPosition = state
+            .store_current(&pc, &target, |tx| {
+                Ok(query_entry(tx, "positions", "pixiv:1")?.unwrap())
+            })
+            .unwrap();
+        assert_eq!(found.page, 5);
+        drop((state, pc));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn another_server_starts_empty_and_a_new_pairing_keeps_only_unsent_reading() {
-        let mut file = SyncFile::default();
-        file.bind(&saved("https://a.example", "one"));
-        file.record(write("1", 5, 200));
-        file.accept(position("2", 3, 100, 9));
-        file.cursor = 9;
-
-        // 同じサーバーへ登録し直した。読み取りは最初から、未送信は残す。
-        file.bind(&saved("https://a.example", "two"));
-        assert_eq!(file.cursor, 0);
-        assert!(file.positions.is_empty());
-        assert_eq!(file.pending.len(), 1);
-
-        // 別のサーバーへ、前のサーバーの作品の位置を送らない。
-        file.bind(&saved("https://b.example", "three"));
-        assert!(file.pending.is_empty());
-        assert_eq!(file.url, "https://b.example");
-    }
-
-    #[test]
-    fn unsent_reading_survives_on_disk_and_a_broken_file_does_not_stop_reading() {
-        let (directory, state) = state();
-        let connection = saved("https://a.example", "one");
-        state.update(&connection, |file| file.record(write("1", 5, 200))).expect("record");
-        let pending = state.update(&connection, |file| file.pending.len()).expect("read");
-        assert_eq!(pending, 1);
-
-        fs::write(&state.file, b"{ broken").expect("break");
-        let pending = state.update(&connection, |file| file.pending.len()).expect("recover");
-        assert_eq!(pending, 0);
-        fs::remove_dir_all(&directory).expect("cleanup");
+        let (root, state, pc) = super::regressions::fixture();
+        pc.save(&saved("https://a.example", "one")).unwrap();
+        let target = sync_target(&pc).unwrap().unwrap();
+        state
+            .record_current(&pc, &target, write("1", 5, 200))
+            .unwrap();
+        state
+            .store_current(&pc, &target, |tx| {
+                accept_position(tx, position("2", 3, 100, 9))?;
+                tx.execute("UPDATE sync_meta SET cursor=9", [])
+                    .map_err(storage_error)?;
+                Ok(())
+            })
+            .unwrap();
+        pc.save(&saved("https://a.example", "two")).unwrap();
+        let target = sync_target(&pc).unwrap().unwrap();
+        state.store_current(&pc, &target, |tx| {
+            let (cursor, positions, pending): (i64, i64, i64) = tx.query_row("SELECT cursor, (SELECT count(*) FROM positions), (SELECT count(*) FROM pending) FROM sync_meta", [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).map_err(storage_error)?;
+            assert_eq!((cursor, positions, pending), (0, 0, 1));
+            Ok(())
+        }).unwrap();
+        pc.save(&saved("https://b.example", "three")).unwrap();
+        let target = sync_target(&pc).unwrap().unwrap();
+        assert!(persisted_pending(&state, &pc, &target).is_none());
+        drop((state, pc));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn validates_what_the_reader_sends() {
         assert!(validate_write(&write("1", 0, 1)).is_ok());
         for bad in [
-            ReadingWrite { source: "web".to_string(), ..write("1", 0, 1) },
-            ReadingWrite { source_id: String::new(), ..write("1", 0, 1) },
-            ReadingWrite { page: -1, ..write("1", 0, 1) },
-            ReadingWrite { position: 1.5, ..write("1", 0, 1) },
-            ReadingWrite { position: f64::NAN, ..write("1", 0, 1) },
-            ReadingWrite { device_time: 0, ..write("1", 0, 1) },
-            ReadingWrite { edit_hash: Some("x".repeat(129)), ..write("1", 0, 1) },
+            ReadingWrite {
+                source: "web".to_string(),
+                ..write("1", 0, 1)
+            },
+            ReadingWrite {
+                source_id: String::new(),
+                ..write("1", 0, 1)
+            },
+            ReadingWrite {
+                page: -1,
+                ..write("1", 0, 1)
+            },
+            ReadingWrite {
+                position: 1.5,
+                ..write("1", 0, 1)
+            },
+            ReadingWrite {
+                position: f64::NAN,
+                ..write("1", 0, 1)
+            },
+            ReadingWrite {
+                device_time: 0,
+                ..write("1", 0, 1)
+            },
+            ReadingWrite {
+                edit_hash: Some("x".repeat(129)),
+                ..write("1", 0, 1)
+            },
         ] {
             assert!(validate_write(&bad).is_err(), "{bad:?}");
         }
@@ -429,12 +631,20 @@ mod tests {
     #[test]
     fn write_endpoint_keeps_the_path_prefix_and_escapes_the_id() {
         assert_eq!(
-            write_endpoint("https://example.com/piep", "fanbox", "a/b c").unwrap().as_str(),
+            write_endpoint("https://example.com/piep", "fanbox", "a/b c")
+                .unwrap()
+                .as_str(),
             "https://example.com/piep/api/v1/reading/fanbox/a%2Fb%20c",
         );
         assert_eq!(
-            write_endpoint("https://192.168.1.2:38777", "pixiv", "123").unwrap().as_str(),
+            write_endpoint("https://192.168.1.2:38777", "pixiv", "123")
+                .unwrap()
+                .as_str(),
             "https://192.168.1.2:38777/api/v1/reading/pixiv/123",
         );
     }
 }
+
+#[cfg(test)]
+#[path = "reading_sync_regressions.rs"]
+mod regressions;
