@@ -97,6 +97,8 @@ toml = "1"
 # 単独サーバーの自己更新の署名を確かめる。デスクトップ版の updater と同じ検証。
 minisign-verify = "0.3"
 local-ip-address = "0.6"
+toml_edit = { version = "0.23", default-features = false, features = ["parse", "display"] }
+argon2 = { version = "0.5", features = ["std"] }
 
 [target.'cfg(windows)'.dependencies]
 # WebView2 のイベント handler は Tauri から借りる controller に渡すため、

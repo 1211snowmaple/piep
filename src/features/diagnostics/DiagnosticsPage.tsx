@@ -20,6 +20,7 @@ import { modals } from "@mantine/modals";
 import { notifications } from "@mantine/notifications";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ActionRow } from "@/components/ActionRow";
+import { DangerButton } from "@/components/DangerButton";
 import { Icons, IconSize, type LucideIcon } from "@/lib/icons";
 import { ErrorState } from "@/components/AsyncState";
 import { JobProgress } from "@/components/JobProgress";
@@ -572,7 +573,7 @@ export default function DiagnosticsPage({ embedded = false, previewData = previe
           </Box>
         </Group>
         {profileRepairStatus.data.totalCount > 0 && (profileRunning
-          ? <Button color="red" variant="subtle" leftSection={<Icons.stop size={IconSize.menu} />} onClick={cancelProfileRepair}>中止</Button>
+          ? <DangerButton leftSection={<Icons.stop size={IconSize.menu} />} onClick={cancelProfileRepair}>中止</DangerButton>
           : <Button leftSection={<Icons.retry size={IconSize.menu} />} disabled={!runtime || maintenance.isPending || indexOptimization.isPending} onClick={() => profileRepair.mutate()}>残件を修復</Button>)}
       </Group>
       {repairProgress && <Box mt="md">

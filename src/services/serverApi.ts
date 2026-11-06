@@ -63,6 +63,10 @@ export interface RemoteServerStatus {
   sync: { generation: number; committedAt: string | null; indexPending: number | null; indexError: string | null } | null;
   /** 自分で更新できるサーバーにだけある。 */
   update: RemoteServerUpdate | null;
+  /** ここから下は 0.36 からある。 */
+  serverName?: string;
+  adminWeb?: "available" | "public-only" | "disabled" | "none";
+  devices?: ServerDevice[];
 }
 
 export interface RemoteServerUpdate {
@@ -72,6 +76,9 @@ export interface RemoteServerUpdate {
   lastCheckedAt: string | null;
   lastError: string | null;
   lastAppliedAt: string | null;
+  /** ここから下は 0.36 からある。 */
+  window?: string;
+  skipped?: string[];
 }
 
 export interface ServerPairing {
@@ -95,6 +102,9 @@ export const serverRevokeDevice = (deviceId: string) =>
 export const serverRemoteDevices = () => invoke<ServerDevice[]>("server_list_remote_devices");
 export const serverRemoteStatus = () => invoke<RemoteServerStatus>("server_remote_status");
 export const serverUpdateRemote = () => invoke<void>("server_update_remote");
+export const serverCheckRemoteUpdate = () => invoke<unknown>("server_check_remote_update");
+/** 管理画面へ入る、一度きりのリンクを作る。 */
+export const serverAdminLink = () => invoke<string>("server_admin_link");
 export const serverConnectRemote = (pairing: string) =>
   invoke<DesktopServerStatus>("server_connect_remote", { pairing });
 export const serverDisconnectRemote = () => invoke<DesktopServerStatus>("server_disconnect_remote");

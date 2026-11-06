@@ -19,6 +19,7 @@ import { acceptCollectionSuggestion, listCollectionSuggestions, rejectCollection
 import { getReaderContentPage, isTauriRuntime } from "@/services/dbApi";
 import type { CollectionSuggestion, CollectionSuggestionMember, SavedSearchSuggestion, WorkKey } from "@/types/collections";
 import "./discovery.css";
+import { DANGER_CONFIRM } from "@/components/DangerButton";
 
 const EMPTY: CollectionSuggestion[] = [];
 type Track = "sequence" | "theme";
@@ -190,7 +191,7 @@ export function SuggestionInbox({ sweeping, savedSearchIdeas, note, onBusyChange
       title: "この組合せを候補から外す",
       children: <Stack gap="sm"><Text size="sm">選んだ{formatNumber(members.length)}作品の組合せを、同じ規則では再提案しません。チェックを外した作品は対象になりません。</Text><NamedWorkList works={members} /></Stack>,
       labels: { confirm: "候補から外す", cancel: "キャンセル" },
-      confirmProps: { color: "red" },
+      confirmProps: DANGER_CONFIRM,
       onConfirm: () => reject.mutate({ suggestion, members }),
     });
   };

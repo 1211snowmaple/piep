@@ -98,6 +98,7 @@ import {
 } from "@/features/library/sortOptions";
 import type { CollectionSortBy } from "@/types/collections";
 import type { EntityFacet, EntityFacetScope, EntitySortBy, FacetCount, LibraryAssetFilter, LibraryCoverFilter, LibraryDateField, LibraryEditFilter, LibraryRevisionFilter, LibrarySeriesFilter, LibrarySortBy, LibrarySortOrder, LibraryVersionScope, LibraryWatchFilter, SavedSearchRecord, SearchSuggestion, SearchV2Params, SearchV2Result, UpdateTarget } from "@/types/library";
+import { DANGER_CONFIRM, DangerButton } from "@/components/DangerButton";
 
 type LibraryTab = "works" | "people" | "series" | "collections";
 type SavedMembershipShelf = "reading" | "revised" | null;
@@ -552,15 +553,13 @@ function openManageSavedSearches(saved: SavedSearchRecord[], onDelete: (id: numb
                 <Text size="sm" fw={600} className="line-clamp-1">{item.name}</Text>
                 {item.query && <Text size="xs" c="dimmed" className="line-clamp-1">{item.query}</Text>}
               </Box>
-              <Button
+              <DangerButton
                 size="compact-xs"
-                variant="subtle"
-                color="red"
                 leftSection={<Icons.delete size={IconSize.inline} />}
                 onClick={() => onDelete(item.id)}
               >
                 削除
-              </Button>
+              </DangerButton>
             </Group>
           ))}
         <ActionRow mt="sm">
@@ -1357,7 +1356,7 @@ export default function LibraryPage() {
         )}
       </Stack>
     ),
-    confirmProps: { color: "red" }, labels: { confirm: "削除する", cancel: "キャンセル" },
+    confirmProps: DANGER_CONFIRM, labels: { confirm: "削除する", cancel: "キャンセル" },
     onConfirm: () => deleteMutation.mutate(selected),
   });
 

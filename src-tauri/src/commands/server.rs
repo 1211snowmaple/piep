@@ -83,6 +83,20 @@ pub async fn server_update_remote(app: tauri::AppHandle) -> Result<(), String> {
     controller(&app)?.update_remote().await
 }
 
+/// 単独サーバーに、新しいバージョンがあるかを確かめてもらう。
+#[tauri::command]
+pub async fn server_check_remote_update(
+    app: tauri::AppHandle,
+) -> Result<serde_json::Value, String> {
+    controller(&app)?.check_remote_update().await
+}
+
+/// 管理画面へ入る、一度きりのリンクを返す。
+#[tauri::command]
+pub async fn server_admin_link(app: tauri::AppHandle) -> Result<String, String> {
+    controller(&app)?.admin_link().await
+}
+
 /// 管理者用の登録文字列で単独サーバーにつなぐ。鍵は資格情報マネージャーに置く。
 #[tauri::command]
 pub async fn server_connect_remote(
@@ -95,7 +109,7 @@ pub async fn server_connect_remote(
     Ok(server.status().await)
 }
 
-/// 単独サーバーとのつながりを解除し、手元の鍵を消す。サーバーの本棚はそのまま残る。
+/// 単独サーバーとのつながりを解除し、手元の鍵を消す。サーバーのライブラリはそのまま残る。
 #[tauri::command]
 pub async fn server_disconnect_remote(
     app: tauri::AppHandle,

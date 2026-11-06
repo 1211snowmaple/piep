@@ -12,7 +12,7 @@ export function ErrorState({ error, retry }: { error: unknown; retry?: () => voi
     <Alert color="red" icon={<Icons.error size={IconSize.nav} />} title="読み込みに失敗しました" role="alert">
       <Stack gap="sm">
         <Text size="sm" className="async-error-message">{errorMessage(error)}</Text>
-        {retry && <Button variant="light" color="red" size="xs" w="fit-content" leftSection={<Icons.retry size={IconSize.menu} />} onClick={retry}>再試行</Button>}
+        {retry && <Button variant="default" size="xs" w="fit-content" leftSection={<Icons.retry size={IconSize.menu} />} onClick={retry}>再試行</Button>}
       </Stack>
     </Alert>
   );

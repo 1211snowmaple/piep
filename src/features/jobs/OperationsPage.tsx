@@ -148,8 +148,8 @@ function OperationCard({ job }: { job: OperationJob }) {
             {job.canCancel && (
               <Tooltip label="キャンセル">
                 <ActionIcon
+                  variant="outline"
                   color="red"
-                  variant="subtle"
                   aria-label={`${job.label}をキャンセル`}
                   onClick={() => requestOperationCancel(job.id)}
                 >
@@ -515,7 +515,7 @@ export default function OperationsPage() {
                     {!isUpdateJobTerminal(job.status) && (
                       <Tooltip label="キャンセル">
                         <ActionIcon
-                          variant="subtle"
+                          variant="outline"
                           color="red"
                           aria-label="更新確認をキャンセル"
                           onClick={() => void runUpdateJobAction(updateJobs.cancel(job.jobId), "中止できません")}

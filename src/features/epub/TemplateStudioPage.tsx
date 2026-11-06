@@ -70,6 +70,7 @@ import {
   type VisualTemplateValues,
 } from "./visualTemplate";
 import { demoFileContent, demoFileKinds, demoFiles, demoPreview, demoTemplates } from "./templateStudioDemo";
+import { DANGER_CONFIRM } from "@/components/DangerButton";
 
 const STYLE_FILE = "style.css.j2";
 
@@ -199,7 +200,7 @@ function TemplateList({ templates, selected, onSelect, runtime, onChanged, onRen
   const remove = (template: TemplateInfo) => modals.openConfirmModal({
     title: "テンプレートを削除しますか？",
     children: <Text size="sm">「{template.settings.label || template.name}」を削除します。この操作は元に戻せません。</Text>,
-    confirmProps: { color: "red" },
+    confirmProps: DANGER_CONFIRM,
     labels: { confirm: "削除", cancel: "キャンセル" },
     onConfirm: async () => {
       try {
@@ -630,7 +631,7 @@ function CodeEditor({ template, readOnly, onSaved }: { template: TemplateInfo; r
       title: "保存していないコードを破棄しますか？",
       children: <Text size="sm">別のファイルへ移ると、いまの変更は失われます。</Text>,
       labels: { confirm: "破棄して移動", cancel: "編集を続ける" },
-      confirmProps: { color: "red" },
+      confirmProps: DANGER_CONFIRM,
       onConfirm: commit,
     });
   };

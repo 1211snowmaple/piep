@@ -3,6 +3,10 @@
 //! URL が知られていても読めないことを前提にする。無認証で答えるのは `hello` と
 //! `pair` だけで、応答にパスや内部の誤り文を出さない。
 
+pub mod admin_web;
+
+pub use admin_web::{AdminAsset, AdminWeb, ConnectionInfo};
+
 use super::dto::{
     mobile_page, MobileCollection, MobileCollectionDetail, MobileEntity, MobileEntityDetail,
     MobileEntityPage, MobileEntitySeriesPage, MobileFacet, MobileMetadata, MobilePage,
@@ -23,7 +27,7 @@ use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
-use axum::{Json, Router};
+use axum::{Extension, Json, Router};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::fs;
@@ -86,6 +90,9 @@ pub struct ServerContext {
     pub fingerprint: Option<String>,
     /// 自己更新の係。`install` で置いた単独サーバーにだけある。
     update: OnceLock<Arc<UpdateController>>,
+    /// 管理画面。管理者の口を持つ単独サーバーにだけある。
+    web: OnceLock<AdminWeb>,
+    started_at: String,
     pair_attempts: Mutex<VecDeque<Instant>>,
     covers: Mutex<CoverCache>,
     illustrations: Mutex<CoverCache>,
@@ -178,6 +185,8 @@ impl ServerContext {
             public_url,
             fingerprint,
             update: OnceLock::new(),
+            web: OnceLock::new(),
+            started_at: chrono::Utc::now().to_rfc3339(),
             pair_attempts: Mutex::new(VecDeque::new()),
             covers: Mutex::new(CoverCache::default()),
             illustrations: Mutex::new(CoverCache::default()),
@@ -188,6 +197,10 @@ impl ServerContext {
 
     pub fn set_update(&self, controller: Arc<UpdateController>) {
         let _ = self.update.set(controller);
+    }
+
+    pub fn set_admin_web(&self, web: AdminWeb) {
+        let _ = self.web.set(web);
     }
 
     fn pair_attempt_allowed(&self) -> bool {
@@ -239,7 +252,7 @@ impl ApiError {
         Self(
             StatusCode::SERVICE_UNAVAILABLE,
             "library_not_ready",
-            "本棚を準備しています",
+            "ライブラリを準備しています",
         )
     }
     fn invalid(message: &'static str) -> Self {
@@ -316,6 +329,12 @@ fn require_device(ctx: &ServerContext, headers: &HeaderMap) -> Result<Authorized
 }
 
 fn require_admin(ctx: &ServerContext, headers: &HeaderMap) -> Result<AuthorizedDevice, ApiError> {
+    if bearer(headers).is_none() {
+        // Cookie を見るのは管理画面を出している口だけで、別のサイトの守りは `guard` が先に通す。
+        return admin_web::session_from(ctx, headers)
+            .map(|session| admin_web::session_as_device(&session))
+            .ok_or_else(ApiError::unauthorized);
+    }
     let device = require_device(ctx, headers)?;
     if device.role == Role::Admin {
         Ok(device)
@@ -339,6 +358,7 @@ fn read_routes(ctx: Ctx) -> Router {
     Router::new()
         .route("/api/v1/hello", get(hello))
         .route("/api/v1/pair", post(pair))
+        .route("/api/v1/about", get(about))
         .route("/api/v1/works/search", post(search))
         .route("/api/v1/works/{id}", get(metadata))
         .route("/api/v1/works/{id}/pages/{page}", get(page))
@@ -364,7 +384,8 @@ fn read_routes(ctx: Ctx) -> Router {
 }
 
 fn admin_routes(ctx: Ctx) -> Router {
-    Router::new()
+    let routes = Router::new()
+        .merge(admin_web::api_routes())
         .route("/api/v1/admin/status", get(admin_status))
         .route("/api/v1/admin/update", post(admin_update))
         .route("/api/v1/admin/pairings", post(admin_pairing))
@@ -384,7 +405,8 @@ fn admin_routes(ctx: Ctx) -> Router {
         .route("/api/v1/admin/sync/sessions/{id}/commit", post(sync_commit))
         .layer(DefaultBodyLimit::max(MAX_ADMIN_BYTES))
         .layer(middleware::from_fn(admin_timeout))
-        .with_state(ctx)
+        .with_state(Arc::clone(&ctx));
+    admin_web::with_guard(routes, ctx)
 }
 
 /// 読み手の口。管理の API は載せない。
@@ -396,6 +418,15 @@ pub fn reader_router(ctx: Ctx) -> Router {
 /// 管理者の登録と証明書の確認に `pair` と `hello` が要るからである。
 pub fn combined_router(ctx: Ctx) -> Router {
     finish(read_routes(Arc::clone(&ctx)).merge(admin_routes(ctx)))
+}
+
+/// 管理者の口に、管理画面も載せる。`AdminWeb` を渡した単独サーバーだけが使う。
+pub fn admin_router(ctx: Ctx) -> Router {
+    finish(
+        read_routes(Arc::clone(&ctx))
+            .merge(admin_routes(Arc::clone(&ctx)))
+            .merge(admin_web::web_routes(ctx)),
+    )
 }
 
 fn finish(router: Router) -> Router {
@@ -490,12 +521,22 @@ async fn pair(
         .store
         .consume_pairing(&request.secret, &request.device_name)
     {
-        Ok(paired) => Ok(Json(serde_json::json!({
+        Ok(paired) => {
+            ctx.store.audit(
+                "device",
+                "端末の登録",
+                "登録文字列",
+                None,
+                true,
+                Some(paired.role.as_str()),
+            );
+            Ok(Json(serde_json::json!({
             "deviceId": paired.device_id,
             "token": paired.token,
             "role": paired.role,
             "apiVersion": API_VERSION,
-        }))),
+            })))
+        }
         // 理由を区別しない。鍵が合っているかどうかを外から測らせない。
         Err(PairError::Rejected | PairError::TooManyDevices) => Err(ApiError::unauthorized()),
         Err(PairError::Storage(detail)) => {
@@ -1292,6 +1333,10 @@ struct AdminStatus {
     sync: Option<super::sync_receive::ReceiverStatus>,
     public_url: Option<String>,
     update: Option<UpdateStatus>,
+    server_name: String,
+    started_at: String,
+    /// `available`、`public-only`（公開の口しかない）、`disabled`（止めてある）、`none`。
+    admin_web: &'static str,
 }
 
 async fn admin_status(
@@ -1316,7 +1361,49 @@ async fn admin_status(
         sync: ctx.receiver.as_ref().map(|receiver| receiver.status()),
         public_url: ctx.public_url.clone(),
         update: ctx.update.get().map(|controller| controller.status()),
+        server_name: ctx.store.server_name(),
+        started_at: ctx.started_at.clone(),
+        admin_web: admin_web_state(&ctx),
     }))
+}
+
+fn admin_web_state(ctx: &ServerContext) -> &'static str {
+    if ctx.web.get().is_none() {
+        if ctx.public_url.is_some() && ctx.receiver.is_some() {
+            "public-only"
+        } else {
+            "none"
+        }
+    } else if ctx.store.admin_web_disabled() {
+        "disabled"
+    } else {
+        "available"
+    }
+}
+
+/// 登録した端末に、版と機能を知らせる。無認証の `hello` には版を出さない。
+async fn about(
+    State(ctx): State<Ctx>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    require_device(&ctx, &headers)?;
+    let mut capabilities: Vec<&str> = if ctx.receiver.is_some() {
+        CAPABILITIES_STANDALONE.to_vec()
+    } else {
+        CAPABILITIES_EMBEDDED.to_vec()
+    };
+    if ctx.update.get().is_some() {
+        capabilities.push("update-settings");
+    }
+    if admin_web_state(&ctx) == "available" {
+        capabilities.push("admin-web");
+    }
+    Ok(Json(serde_json::json!({
+        "version": super::update::VERSION,
+        "apiVersion": API_VERSION,
+        "serverName": ctx.store.server_name(),
+        "capabilities": capabilities,
+    })))
 }
 
 /// 新しい版を確かめて当てるよう頼む。頼めるのはこれだけで、ファイルや URL は渡せない。
@@ -1339,20 +1426,40 @@ async fn admin_update(
 struct PairingRequest {
     /// 管理者が自分を登録した URL。公開 URL の設定が無いときに使う。
     url: Option<String>,
+    /// `admin` なら管理者の入れ替え。もう一度確かめる。
+    role: Option<String>,
 }
 
 async fn admin_pairing(
     State(ctx): State<Ctx>,
+    Extension(ip): Extension<admin_web::ClientIp>,
     headers: HeaderMap,
     ApiJson(request): ApiJson<PairingRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     require_admin(&ctx, &headers)?;
+    if request.role.as_deref() == Some("admin") {
+        admin_web::require_for_admin_pairing(&ctx, &headers, &ip)?;
+        let url = request
+            .url
+            .filter(|url| url.len() <= 512 && url.starts_with("http"))
+            .ok_or_else(|| ApiError::invalid("このサーバーへ届く URL が決まっていません"))?;
+        let lifetime = Duration::from_secs(30 * 60);
+        let secret = ctx
+            .store
+            .issue_pairing(Role::Admin, lifetime)
+            .map_err(|_| ApiError::internal())?;
+        return Ok(Json(serde_json::json!({
+            "payload": pairing_payload(Role::Admin, &url, ctx.fingerprint.as_deref(), &secret),
+            "expiresInSeconds": lifetime.as_secs(),
+        })));
+    }
+    admin_web::note_device(&ctx, &headers, &ip, "携帯の登録文字列の発行");
     let url = ctx
         .public_url
         .clone()
         .or(request.url)
         .filter(|url| url.len() <= 512 && url.starts_with("https://"))
-        .ok_or_else(|| ApiError::invalid("携帯が接続する https の URL が決まっていません"))?;
+        .ok_or_else(|| ApiError::invalid("携帯が接続する https の URL が決まっていません。server.toml の public_url に書いてください"))?;
     let secret = ctx
         .store
         .issue_pairing(Role::Reader, READER_PAIRING_LIFETIME)
@@ -1375,6 +1482,7 @@ async fn admin_devices(
 
 async fn admin_revoke(
     State(ctx): State<Ctx>,
+    Extension(ip): Extension<admin_web::ClientIp>,
     headers: HeaderMap,
     UrlPath(id): UrlPath<String>,
 ) -> Result<StatusCode, ApiError> {
@@ -1384,6 +1492,7 @@ async fn admin_revoke(
         .revoke_device(&id)
         .map_err(|_| ApiError::internal())?
     {
+        admin_web::note_device(&ctx, &headers, &ip, "端末の解除");
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err(ApiError::not_found())
@@ -1514,9 +1623,10 @@ async fn sync_commit(
     require_admin(&ctx, &headers)?;
     let receiver = receiver(&ctx)?;
     let outcome = blocking(move || receiver.commit(&id, &request)).await?;
-    Ok(Json(
-        serde_json::to_value(outcome).map_err(|_| ApiError::internal())?,
-    ))
+    let value = serde_json::to_value(outcome).map_err(|_| ApiError::internal())?;
+    let detail = value["generation"].as_i64().map(|at| format!("世代 {at}"));
+    admin_web::note_library(&ctx, "ライブラリの受信", detail.as_deref());
+    Ok(Json(value))
 }
 
 /// DB に書かれたパスが置き場の中を指すときだけ、実体のパスを返す。

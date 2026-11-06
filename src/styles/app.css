@@ -3647,7 +3647,7 @@ textarea { scrollbar-gutter: stable; }
 .epub-glyph[data-on] .epub-glyph__book { stroke: light-dark(#4c6c0a, #d3ec9f); }
 .epub-glyph[data-on] .epub-glyph__plus { stroke: light-dark(#fff, #1f2a0d); }
 /* 文字だけのボタンは、押せるものに見えない。地と細い枠を常に付ける。色は Mantine が
-   ボタンごとに渡す値から作るので、赤い操作は赤い地になる。文の中のリンクのように
+   ボタンごとに渡す値から作る。解除と削除は DangerButton で白地にする。文の中のリンクのように
    読ませたいものだけ .button-plain で外す（docs/policy/05-frontend.md）。 */
 .mantine-Button-root[data-variant="subtle"]:not(:disabled, [data-disabled], .button-plain) {
   background: var(--button-hover);
@@ -3741,3 +3741,7 @@ textarea { scrollbar-gutter: stable; }
 /* Mantine stretches an invisible input across the Switch's root, so the empty
    space to the right of a setting toggled it too. */
 .mantine-Switch-root { width: fit-content; }
+
+/* 解除と削除。白地に赤枠と赤文字で、地を赤く塗らない。乗せたときだけ薄く色を付ける。 */
+.mantine-Button-root.button-danger:not(:disabled, [data-disabled]) { background: var(--mantine-color-body); }
+.mantine-Button-root.button-danger:not(:disabled, [data-disabled]):hover { background: var(--mantine-color-red-light); }

@@ -1,12 +1,19 @@
 //! 単独サーバー（`piep-server`）の本体。設定、置き場、待ち受け、コマンド。
 
-use super::http::{combined_router, reader_router, ServerContext};
+use super::admin_assets::ADMIN_ASSETS;
+use super::admin_store::TicketKind;
+use super::http::admin_web::command_ticket;
+use super::http::{
+    admin_router, combined_router, reader_router, AdminWeb, ConnectionInfo, ServerContext,
+};
 use super::install::{self, InstallOptions};
 use super::library::{Library, SwappableDb};
 use super::store::{Role, ServerStore};
 use super::sync_receive::SyncReceiver;
 use super::tls::{self, TlsMaterial};
-use super::update::{self, UpdateController, UpdateSource, UpdateWindow, EXIT_APPLY_UPDATE};
+use super::update::{
+    self, AfterStop, UpdateController, UpdateHistory, UpdateSource, UpdateWindow, EXIT_APPLY_UPDATE,
+};
 use super::watchdog;
 use super::{pairing_payload, DEFAULT_PORT};
 use axum::Router;
@@ -157,6 +164,9 @@ impl ServerPaths {
     }
     pub fn update_record(&self) -> PathBuf {
         self.state().join("update.json")
+    }
+    pub fn update_history(&self) -> PathBuf {
+        self.state().join("update-history.json")
     }
     pub fn update_backup(&self) -> PathBuf {
         self.state().join("update-backup")
@@ -374,7 +384,7 @@ pub async fn run_listener(
     listener
         .set_nonblocking(true)
         .map_err(|error| format!("{address} を設定できません: {error}"))?;
-    let service = router.into_make_service();
+    let service = router.into_make_service_with_connect_info::<SocketAddr>();
     let served = match tls {
         Some(config) => {
             let mut server = axum_server::from_tcp_rustls(listener, config)
@@ -466,6 +476,111 @@ fn check_database(path: &Path) -> Result<(), String> {
     }
 }
 
+/// 動き出したら、前回との違いを更新の履歴と記録に足す。
+fn note_started(paths: &ServerPaths, store: &ServerStore) {
+    let before = UpdateHistory::load(paths).entries.len();
+    UpdateHistory::reconcile(paths, update::VERSION, chrono::Utc::now());
+    let history = UpdateHistory::load(paths);
+    if history.entries.len() > before || history.entries.len() == 50 {
+        if let Some(entry) = history.entries.first() {
+            let detail = format!("{} → {}", entry.from.as_deref().unwrap_or("不明"), entry.to);
+            store.audit(
+                "update",
+                match entry.result.as_str() {
+                    "failed" => "更新に失敗して戻した",
+                    "rolled_back" => "前の版へ戻した",
+                    _ => "更新した",
+                },
+                "サーバー",
+                None,
+                entry.result != "failed",
+                Some(&detail),
+            );
+        }
+    }
+}
+
+fn connection_info(config: &ServerConfig) -> ConnectionInfo {
+    ConnectionInfo {
+        listen: config.listen.to_string(),
+        admin_listen: config.admin_listen.map(|address| address.to_string()),
+        public_url: config.public_url(),
+        tls: match &config.tls {
+            None => "none",
+            Some(TlsSetting::Named(_)) => "self-signed",
+            Some(TlsSetting::Files { .. }) => "files",
+        },
+    }
+}
+
+/// 管理画面の一度きりのリンクを出す。アカウントがなければ作成、あればログインの券にする。
+pub fn command_admin_setup(data: &Path, url: Option<String>) -> Result<String, String> {
+    let paths = ServerPaths::new(data)?;
+    let config = load_config(&paths)?;
+    let store = ServerStore::open(&paths.store())?;
+    let kind = if store.admin_account()?.is_some() {
+        TicketKind::Login
+    } else {
+        TicketKind::Setup
+    };
+    admin_link(&config, &store, url, kind)
+}
+
+/// パスワードの再設定のリンクを出す。再設定すると、今のログインはすべて切れる。
+pub fn command_admin_password(data: &Path, url: Option<String>) -> Result<String, String> {
+    let paths = ServerPaths::new(data)?;
+    let config = load_config(&paths)?;
+    let store = ServerStore::open(&paths.store())?;
+    admin_link(&config, &store, url, TicketKind::Setup)
+}
+
+fn admin_link(
+    config: &ServerConfig,
+    store: &ServerStore,
+    url: Option<String>,
+    kind: TicketKind,
+) -> Result<String, String> {
+    if config.admin_listen.is_none() && config.public_url().is_some() {
+        return Err(format!(
+            "外へ公開している口には管理画面を出しません。{CONFIG_FILE} に admin_listen を書いて、管理者の口を分けてください"
+        ));
+    }
+    if store.admin_web_disabled() {
+        return Err("管理画面は止めてあります。admin-web --enable で戻してください".into());
+    }
+    let base = url
+        .or_else(|| default_admin_url(config))
+        .ok_or("このサーバーへブラウザから届く URL を --url で指定してください")?;
+    let ticket = command_ticket(store, Some(&base), kind)?;
+    Ok(format!(
+        "{}/admin/#ticket={ticket}",
+        base.trim_end_matches('/')
+    ))
+}
+
+/// 管理画面を止める、または戻す。
+pub fn command_admin_web(data: &Path, enable: bool) -> Result<(), String> {
+    let paths = ServerPaths::new(data)?;
+    let store = ServerStore::open(&paths.store())?;
+    store.set_admin_web_disabled(!enable)?;
+    if !enable {
+        store.delete_admin_sessions_except(None)?;
+    }
+    store.audit(
+        "login",
+        if enable {
+            "管理画面の再開"
+        } else {
+            "管理画面の停止"
+        },
+        "サーバーのコマンド",
+        None,
+        true,
+        None,
+    );
+    Ok(())
+}
+
 /// 本体。終了コードを返す。`EXIT_APPLY_UPDATE` なら、見張り役が新しい版へ切り替える。
 pub async fn command_run(data: &Path) -> Result<i32, String> {
     let paths = ServerPaths::new(data)?;
@@ -483,13 +598,23 @@ pub async fn command_run(data: &Path) -> Result<i32, String> {
     let tls_config = material.map(|material| material.config);
     let parts = assemble(&paths, config.public_url(), fingerprint)?;
     parts.receiver.start_index_catch_up();
+    note_started(&paths, &parts.context.store);
+    // 外へ公開している口にログイン画面を置かない。
+    let web_here = config.admin_listen.is_some() || config.public_url().is_none();
+    if web_here {
+        parts.context.set_admin_web(AdminWeb::new(
+            ADMIN_ASSETS,
+            paths.clone(),
+            connection_info(&config),
+        ));
+    }
 
     let mut tasks = tokio::task::JoinSet::new();
     let handle = axum_server::Handle::new();
     match config.admin_listen {
         Some(admin_address) => {
             let read = reader_router(Arc::clone(&parts.context));
-            let admin = combined_router(Arc::clone(&parts.context));
+            let admin = admin_router(Arc::clone(&parts.context));
             tasks.spawn(run_listener(
                 config.listen,
                 tls_config.clone(),
@@ -505,10 +630,15 @@ pub async fn command_run(data: &Path) -> Result<i32, String> {
             log::info!("待ち受け: 読み手 {} / 管理 {admin_address}", config.listen);
         }
         None => {
+            let router = if web_here {
+                admin_router(Arc::clone(&parts.context))
+            } else {
+                combined_router(Arc::clone(&parts.context))
+            };
             tasks.spawn(run_listener(
                 config.listen,
                 tls_config,
-                combined_router(Arc::clone(&parts.context)),
+                router,
                 handle.clone(),
             ));
             log::info!("待ち受け: {}", config.listen);
@@ -557,12 +687,22 @@ pub async fn command_run(data: &Path) -> Result<i32, String> {
     }
     parts.receiver.stop_index_catch_up();
     result?;
-    let Some(version) = updates.and_then(|controller| controller.take_apply()) else {
+    let Some(after) = updates.and_then(|controller| controller.take_after_stop()) else {
         drop(lock);
         return Ok(0);
     };
     // 口を閉じたあとなので、もう誰も書かない。
-    update::back_up_databases(&paths)?;
+    let version = match after {
+        AfterStop::Apply(version) => {
+            update::back_up_databases(&paths)?;
+            version
+        }
+        // 新しい版で書いた DB は古い版で開けないことがあるので、更新の前の写しへ戻す。
+        AfterStop::RollBack(version) => {
+            update::restore_databases(&paths)?;
+            version
+        }
+    };
     update::write_atomic(&paths.pending_version(), version.as_bytes())?;
     log::info!("版 {version} へ切り替えるので止まります");
     drop(lock);
@@ -582,6 +722,12 @@ const USAGE: &str = "piep-server <command>
   admin-pair --data <dir> [--url <url>] [--replace]
                                          管理者用の登録文字列を出し直す。管理者がいるときは
                                          --replace が要る。使うと今の管理者は接続できなくなる
+  admin-setup --data <dir> [--url <url>] 管理画面の一度きりのリンクを出す。管理者がまだいなければ、
+                                         そのリンクで作る。30 分有効
+  admin-password --data <dir> [--url <url>]
+                                         パスワードを決め直すリンクを出す。決め直すと今のログインは切れる
+  admin-web --data <dir> --enable|--disable
+                                         管理画面を戻す、または止める
   status --data <dir>                    状態を出す
   --version                              版を出す
 
@@ -598,6 +744,8 @@ struct Arguments {
     no_task: bool,
     pause: bool,
     replace: bool,
+    enable: bool,
+    disable: bool,
 }
 
 fn parse_arguments(args: &[String]) -> Result<Arguments, String> {
@@ -620,6 +768,8 @@ fn parse_arguments(args: &[String]) -> Result<Arguments, String> {
             "--no-task" => parsed.no_task = true,
             "--pause" => parsed.pause = true,
             "--replace" => parsed.replace = true,
+            "--enable" => parsed.enable = true,
+            "--disable" => parsed.disable = true,
             _ => return Err(USAGE.to_string()),
         }
     }
@@ -632,9 +782,7 @@ fn required_data(parsed: &Arguments) -> Result<&Path, String> {
 
 /// 登録文字列は、この画面にだけ出す。記録には残さない。
 fn print_pairing(payload: &str) {
-    println!(
-        "デスクトップ版の「設定 → サーバー → 別の PC のサーバーに接続」に貼り付けてください。"
-    );
+    println!("デスクトップ版の「設定 → サーバー → サーバーに接続」に貼り付けてください。");
     println!("30 分有効で、一度だけ使えます。人に見せないでください。");
     println!();
     println!("{payload}");
@@ -714,6 +862,35 @@ pub async fn main_from_args(args: Vec<String>) -> i32 {
                     println!("この文字列で登録すると、今の管理者は接続できなくなります。");
                 }
                 print_pairing(&payload);
+                Ok(0)
+            }
+            "admin-setup" => {
+                let link = command_admin_setup(required_data(&parsed)?, parsed.url.clone())?;
+                println!("このリンクをブラウザで開いてください。30 分有効で、一度だけ使えます。人に見せないでください。");
+                println!();
+                println!("{link}");
+                Ok(0)
+            }
+            "admin-password" => {
+                let link = command_admin_password(required_data(&parsed)?, parsed.url.clone())?;
+                println!("このリンクでパスワードを決め直してください。30 分有効で、一度だけ使えます。決め直すと、今のログインはすべて切れます。");
+                println!();
+                println!("{link}");
+                Ok(0)
+            }
+            "admin-web" => {
+                if parsed.enable == parsed.disable {
+                    return Err(USAGE.to_string());
+                }
+                command_admin_web(required_data(&parsed)?, parsed.enable)?;
+                println!(
+                    "{}",
+                    if parsed.enable {
+                        "管理画面を戻しました。"
+                    } else {
+                        "管理画面を止めました。今のログインも切りました。"
+                    }
+                );
                 Ok(0)
             }
             "status" => {

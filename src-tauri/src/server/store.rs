@@ -108,15 +108,15 @@ pub fn random_token(bytes: usize) -> String {
     URL_SAFE_NO_PAD.encode(random)
 }
 
-fn hash_secret(secret: &str) -> [u8; 32] {
+pub(super) fn hash_secret(secret: &str) -> [u8; 32] {
     Sha256::digest(secret.as_bytes()).into()
 }
 
-fn now_ms() -> i64 {
+pub(super) fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
 
-fn db_error(error: rusqlite::Error) -> String {
+pub(super) fn db_error(error: rusqlite::Error) -> String {
     format!("サーバーの状態を読み書きできません: {error}")
 }
 
@@ -192,6 +192,8 @@ impl ServerStore {
             conn.execute_batch("ALTER TABLE devices DROP COLUMN last_user;")
                 .map_err(db_error)?;
         }
+        conn.execute_batch(super::admin_store::ADMIN_TABLES)
+            .map_err(db_error)?;
         Ok(Self {
             conn: Mutex::new(conn),
         })

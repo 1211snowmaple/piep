@@ -139,7 +139,7 @@ export default function DashboardPage() {
                 </Group>
               </form>
               {auth.data && (!auth.data.pixiv || !auth.data.fanbox) && <Button variant="subtle" size="compact-xs" w="fit-content" onClick={() => navigate("/settings")}>未接続サービスを設定</Button>}
-              {auth.isError && <Button variant="subtle" color="red" size="compact-xs" w="fit-content" onClick={() => auth.refetch()}>接続状態を再確認</Button>}
+              {auth.isError && <Button variant="default" size="compact-xs" w="fit-content" onClick={() => auth.refetch()}>接続状態を再確認</Button>}
             </Stack>
           </Group>
         </Card>
@@ -179,7 +179,7 @@ export default function DashboardPage() {
             <div className="dashboard-side">
               <Card p="lg">
                 <Group justify="space-between" mb="sm"><Group gap="xs"><Icons.search size={IconSize.action} /><Text fw={700}>検索インデックス</Text></Group><Badge color={index.isError ? "red" : indexProgress === 100 ? "green" : "yellow"}>{index.isError ? "取得失敗" : `${indexProgress}%`}</Badge></Group>
-                {index.isError ? <Button variant="subtle" color="red" size="compact-xs" onClick={() => index.refetch()}>状態を再確認</Button> : <><Progress value={indexProgress} mb="sm" color={indexProgress === 100 ? "green" : "yellow"} aria-label={`検索インデックス ${indexProgress}%`} /><Text size="xs" c="dimmed">{searchIndexNote(index.data)}</Text></>}
+                {index.isError ? <Button variant="default" size="compact-xs" onClick={() => index.refetch()}>状態を再確認</Button> : <><Progress value={indexProgress} mb="sm" color={indexProgress === 100 ? "green" : "yellow"} aria-label={`検索インデックス ${indexProgress}%`} /><Text size="xs" c="dimmed">{searchIndexNote(index.data)}</Text></>}
               </Card>
               <Card p="lg" className="dashboard-tags-card">
                 <Text fw={700} mb="sm">よく使うタグ</Text>

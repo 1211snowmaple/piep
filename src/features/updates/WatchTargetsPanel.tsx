@@ -30,6 +30,7 @@ import { errorMessage, formatDate, formatNumber } from "@/lib/format";
 import { ProviderMark } from "@/lib/providers";
 import { getAssetUrl } from "@/services/dbApi";
 import type { UpdateTarget, WatchGroup } from "@/types/library";
+import { DANGER_CONFIRM } from "@/components/DangerButton";
 
 export type TargetValues = { targetType: string; source: string; sourceKey: string; displayName: string };
 /** `groupId` があれば、追加した対象をそのグループにも入れる。 */
@@ -114,7 +115,7 @@ export function TargetsPanel({ targets, groups, loading, error, retry, form, mut
     title: "監視対象を削除しますか？",
     children: <Text size="sm">「{target.displayName}」を更新監視から削除します。保存済みの作品は削除されません。</Text>,
     labels: { confirm: "削除する", cancel: "キャンセル" },
-    confirmProps: { color: "red" },
+    confirmProps: DANGER_CONFIRM,
     onConfirm: () => mutation.mutate({ action: "delete", target }),
   });
   const askGroupName = (title: string, current: string, submit: (name: string) => Promise<unknown>) => {
@@ -136,7 +137,7 @@ export function TargetsPanel({ targets, groups, loading, error, retry, form, mut
     title: "監視グループを消しますか？",
     children: <Text size="sm">「{group.name}」を消します。中の監視対象{formatNumber(group.targetIds.length)}件は、監視対象のまま残ります。自動確認の範囲にしていた場合は、すべての監視対象に戻ります。</Text>,
     labels: { confirm: "消す", cancel: "やめる" },
-    confirmProps: { color: "red" },
+    confirmProps: DANGER_CONFIRM,
     onConfirm: () => void groupMutation.mutateAsync({ action: "delete", group }).then(() => changeView("all")).catch(() => undefined),
   });
   const setMembers = (group: WatchGroup, add: boolean) => void groupMutation

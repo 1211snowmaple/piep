@@ -78,6 +78,7 @@ import { LibrarySidebarSettings } from "./LibrarySidebarSettings";
 import { SectionIntro } from "./SectionIntro";
 import { SettingsNavigation } from "./SettingsNavigation";
 import { searchModes, useDefaultSearchMode } from "@/lib/searchPreferences";
+import { DANGER_CONFIRM, DangerButton } from "@/components/DangerButton";
 
 /**
  * 設定の区画。
@@ -231,7 +232,7 @@ export default function SettingsPage() {
     onError: (error) => notifications.show({ color: "red", title: "接続できません", message: errorMessage(error) }),
   });
   const disconnect = (source: "pixiv" | "fanbox") => modals.openConfirmModal({
-    title: `${getProvider(source).label}との接続を解除しますか？`, children: <Text size="sm">保存済みの作品は削除されません。再度保存・更新するには接続が必要です。</Text>, labels: { confirm: "接続を解除", cancel: "キャンセル" }, confirmProps: { color: "red" },
+    title: `${getProvider(source).label}との接続を解除しますか？`, children: <Text size="sm">保存済みの作品は削除されません。再度保存・更新するには接続が必要です。</Text>, labels: { confirm: "接続を解除", cancel: "キャンセル" }, confirmProps: DANGER_CONFIRM,
     onConfirm: async () => {
       try {
         if (source === "pixiv") {
@@ -400,7 +401,7 @@ export default function SettingsPage() {
         <Text size="sm" c="dimmed">全文検索の索引はこの操作では消えません。</Text>
       </Stack>,
       labels: { confirm: "無効にして作り直す", cancel: "やめる" },
-      confirmProps: { color: "red" },
+      confirmProps: DANGER_CONFIRM,
       onConfirm: () => rebuildMutation.mutate(includeSemantic),
     });
   };
@@ -447,7 +448,7 @@ export default function SettingsPage() {
   const nav = [
     { id: "connections", label: "サービス接続", description: "保存・更新に使うアカウント", icon: Icons.credentials, group: "接続とデータ", keywords: "pixiv FANBOX 認証 ログイン 再接続" },
     { id: "library", label: "保存とバックアップ", description: "保存先・書き出し・復元", icon: Icons.database, group: "接続とデータ", keywords: "ローカルライブラリ フォルダー 再取り込み" },
-    { id: "server", label: "サーバー", beta: true, description: "携帯で読む・本棚を送る", icon: Icons.server, group: "接続とデータ", keywords: "Android モバイル スマホ 外出先 Funnel 同期 piep-server" },
+    { id: "server", label: "サーバー", beta: true, description: "携帯で読む・ライブラリを送る", icon: Icons.server, group: "接続とデータ", keywords: "Android モバイル スマホ 外出先 同期 piep-server" },
     { id: "appearance", label: "表示と操作", description: "テーマ・サイドバー・一覧", icon: Icons.appearance, group: "使いやすくする", keywords: "外観 文字 色 ページ 件数 高密度 ショートカット" },
     { id: "search", label: "検索", description: "探し方・検索データ", icon: Icons.search, group: "使いやすくする", keywords: "インデックス 索引 意味検索 GPU" },
     { id: "assist", label: "AIの手伝い", beta: true, description: "モデル・接続・利用する機能", icon: Icons.optimize, group: "使いやすくする", keywords: "推論 サーバー" },
@@ -503,7 +504,7 @@ function ConnectionCard({ source, user, note, runtime, loading, onWeb, onDisconn
   // 人型に落ちていた。**取れない絵を頼んで、取れなかった姿を見せていた。**
   // 作者の顔は棚が持っている（保存時に控えている）。ここで要るのは
   // 「どのサービスに繋がっているか」なので、サービスの記号のほうが答えである。
-  const provider = getProvider(source); return <Card p="lg"><Group justify="space-between" align="flex-start"><Group><Avatar size={54} color="gray" variant="light" style={{ color: provider.color }}>{provider.icon}</Avatar><Box><Group gap="xs"><Text fw={700}>{provider.label}</Text><Badge color={user ? "green" : "gray"} variant="light">{user ? "取得用接続済み" : "未接続"}</Badge></Group><Text size="sm" c="dimmed" mt={4}>{user?.name || provider.description}</Text>{note && <Text size="xs" c="dimmed" mt={2}>{note}</Text>}</Box></Group>{user ? <Group gap="xs"><Button variant="light" size="xs" disabled={!runtime} loading={loading} onClick={onWeb}>再接続</Button><Button color="red" variant="subtle" size="xs" leftSection={<Icons.delete size={IconSize.menu} />} onClick={onDisconnect}>接続解除</Button></Group> : <Button disabled={!runtime} loading={loading} leftSection={<Icons.credentials size={IconSize.menu} />} onClick={onWeb}>ブラウザで接続</Button>}</Group>{!user && <><Divider my="lg" label="または手動入力" labelPosition="center" />{manual}</>}</Card>;
+  const provider = getProvider(source); return <Card p="lg"><Group justify="space-between" align="flex-start"><Group><Avatar size={54} color="gray" variant="light" style={{ color: provider.color }}>{provider.icon}</Avatar><Box><Group gap="xs"><Text fw={700}>{provider.label}</Text><Badge color={user ? "green" : "gray"} variant="light">{user ? "取得用接続済み" : "未接続"}</Badge></Group><Text size="sm" c="dimmed" mt={4}>{user?.name || provider.description}</Text>{note && <Text size="xs" c="dimmed" mt={2}>{note}</Text>}</Box></Group>{user ? <Group gap="xs"><Button variant="light" size="xs" disabled={!runtime} loading={loading} onClick={onWeb}>再接続</Button><DangerButton size="xs" leftSection={<Icons.delete size={IconSize.menu} />} onClick={onDisconnect}>接続解除</DangerButton></Group> : <Button disabled={!runtime} loading={loading} leftSection={<Icons.credentials size={IconSize.menu} />} onClick={onWeb}>ブラウザで接続</Button>}</Group>{!user && <><Divider my="lg" label="または手動入力" labelPosition="center" />{manual}</>}</Card>;
 }
 
 function LibrarySection({ stats, path, runtime, pending, busy, inspecting, run }: { stats?: { totalDownloads: number; totalAssets: number; totalSizeBytes: number }; path?: string; runtime: boolean; pending: boolean; busy: boolean; inspecting: boolean; run: (action: "backup" | "restore" | "scan") => void }) { return <Stack gap="lg"><SectionIntro title="保存とバックアップ" description="保存先の確認、バックアップの作成と復元を行います。" /><Grid><Grid.Col span={{ base: 12, sm: 4 }}><Metric icon={Icons.read} label="作品" value={formatNumber(stats?.totalDownloads)} /></Grid.Col><Grid.Col span={{ base: 12, sm: 4 }}><Metric icon={Icons.archive} label="画像・添付" value={formatNumber(stats?.totalAssets)} /></Grid.Col><Grid.Col span={{ base: 12, sm: 4 }}><Metric icon={Icons.storage} label="使用容量" value={formatBytes(stats?.totalSizeBytes ?? 0)} /></Grid.Col></Grid><Card p="lg"><Text fw={700}>保存先</Text><Group mt="sm" wrap="nowrap"><Code block flex={1}>{path || "読み込み中…"}</Code><ActionIcon variant="light" aria-label="保存先を開く" disabled={!runtime || !path} onClick={() => path && openFilesystemPath(path)}><Icons.openFolder size={IconSize.action} /></ActionIcon></Group></Card><Card p="lg"><Stack gap="md"><Box><Text fw={700}>バックアップと復元</Text><Text size="sm" c="dimmed">大きなライブラリは分割バックアップの管理ファイル（JSON）と複数の分割ZIPファイルに分けて書き出します。復元には同じフォルダー内の一式が必要です。書き出し中は作品の保存や更新の反映が完了を待つ場合があります。</Text></Box>{busy && <Alert color="blue">ライブラリの操作が実行中です。操作履歴で追跡できない場合は、完了後に保存先を確認してください。</Alert>}{inspecting && <Alert color="blue">バックアップを検査しています。分割ZIPファイルの照合には時間がかかる場合があります。</Alert>}<ActionRow><Button disabled={!runtime || busy} loading={pending} variant="default" leftSection={<Icons.import size={IconSize.menu} />} onClick={() => run("restore")}>バックアップを復元</Button><Button disabled={!runtime || busy} loading={pending} variant="light" leftSection={<Icons.export size={IconSize.menu} />} onClick={() => run("backup")}>分割バックアップを書き出す</Button></ActionRow><Divider /><Group justify="space-between" align="flex-start" wrap="nowrap"><Box miw={0}><Text fw={700} size="sm">フォルダーから再取り込み</Text><Text size="xs" c="dimmed" mt={4}>未登録の保存フォルダーを検出し、必要なファイルが揃った作品をライブラリへ戻します。すでにある作品や、手で変えた内容は上書きしません。</Text></Box><Button style={{ flexShrink: 0 }} disabled={!runtime || busy} loading={pending} size="xs" variant="default" leftSection={<Icons.retry size={IconSize.menu} />} onClick={() => run("scan")}>保存フォルダーを調べる</Button></Group></Stack></Card></Stack>; }
@@ -543,7 +544,7 @@ export function RestoreWizard({ review, existingWorkCount, loading, onClose, onC
       {inspection.valid && <Note icon={Icons.secure} title={multipart ? "中断しても再開できます" : "安全な復元"}>{multipart
         ? "すべての分割ZIPファイルを先に検査し、パートごとに安全に復元します。途中で止まった場合は、同じ分割バックアップの管理ファイル（JSON）をもう一度選ぶと続きから再開できます。管理ファイルと分割ZIPファイルは移動・改名せず一緒に保管してください。"
         : "すべてのファイルを一時領域へ展開・検証してから、データベースと保存ファイルを一括で切り替えます。途中で失敗した場合は元の状態へ戻します。"}</Note>}
-      <ActionRow><Button variant="default" disabled={loading} onClick={onClose}>キャンセル</Button><Button color="red" disabled={!canRestore} loading={loading} leftSection={<Icons.import size={IconSize.menu} />} onClick={() => onConfirm(replaceExisting)}>検証済みバックアップを復元</Button></ActionRow>
+      <ActionRow><Button variant="default" disabled={loading} onClick={onClose}>キャンセル</Button><DangerButton disabled={!canRestore} loading={loading} leftSection={<Icons.import size={IconSize.menu} />} onClick={() => onConfirm(replaceExisting)}>検証済みバックアップを復元</DangerButton></ActionRow>
     </Stack>}
   </Modal>;
 }
@@ -598,7 +599,7 @@ function SearchSection({ status, rebuild, runtime, rebuilding, start, cancel }: 
         description="作り直しを実行すると反映されます。オフで実行すると、確認後に意味検索のデータを削除します。"
       />
       <ActionRow mt="lg">
-        {rebuilding && <Button variant="subtle" color="red" leftSection={<Icons.cancel size={IconSize.menu} />} onClick={cancel}>中止</Button>}
+        {rebuilding && <DangerButton leftSection={<Icons.cancel size={IconSize.menu} />} onClick={cancel}>中止</DangerButton>}
         {/* status が届くまでは押させない。届く前の `includeSemantic` は既定の
             false なので、押せてしまうと**意味検索を切る**側に倒れる。 */}
         <Button disabled={!runtime || rebuilding || !status} leftSection={<Icons.retry size={IconSize.menu} />} onClick={() => start(includeSemantic)}>

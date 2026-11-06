@@ -1,7 +1,9 @@
 //! サーバーモードを通しで確かめる。本物の HTTP で話し、本物のファイルと DB を動かす。
 
 use super::desktop::{DesktopServer, EmbeddedSettings};
-use super::http::{combined_router, reader_router};
+use super::http::{
+    admin_router, combined_router, reader_router, AdminAsset, AdminWeb, ConnectionInfo,
+};
 use super::standalone::{assemble, command_admin_pair, command_init, ServerPaths, StandaloneParts};
 use super::store::{random_token, Role, ServerStore};
 use super::sync_receive::{BindEntry, CommitRequest, ManifestEntry, SyncError};
@@ -1647,6 +1649,634 @@ fn opening_the_store_removes_the_recorded_login_name() {
         )
         .unwrap();
     assert_eq!(columns, 0);
+}
+
+// ---- 管理画面 ----
+
+static TEST_ASSETS: &[AdminAsset] = &[
+    AdminAsset {
+        path: "index.html",
+        mime: "text/html; charset=utf-8",
+        bytes: b"<!doctype html><title>piep</title>",
+    },
+    AdminAsset {
+        path: "assets/app.js",
+        mime: "text/javascript; charset=utf-8",
+        bytes: b"console.log(1)",
+    },
+];
+
+const GOOD_PASSWORD: &str = "夏の終わりに海辺で読む本を探す";
+
+struct AdminSite {
+    _root: TestRoot,
+    parts: StandaloneParts,
+    paths: ServerPaths,
+    url: String,
+    client: reqwest::Client,
+}
+
+impl AdminSite {
+    fn new(label: &str) -> Self {
+        let root = TestRoot::new(label);
+        let (parts, paths) = standalone(&root.0);
+        parts.context.set_admin_web(AdminWeb::new(
+            TEST_ASSETS,
+            paths.clone(),
+            ConnectionInfo {
+                listen: "127.0.0.1:1".into(),
+                admin_listen: Some("127.0.0.1:2".into()),
+                public_url: None,
+                tls: "none",
+            },
+        ));
+        let url = spawn_plain(admin_router(Arc::clone(&parts.context)));
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("client");
+        Self {
+            _root: root,
+            parts,
+            paths,
+            url,
+            client,
+        }
+    }
+
+    fn post(&self, path: &str) -> reqwest::RequestBuilder {
+        self.client
+            .post(format!("{}{path}", self.url))
+            .header("sec-fetch-site", "same-origin")
+    }
+
+    fn get(&self, path: &str) -> reqwest::RequestBuilder {
+        self.client.get(format!("{}{path}", self.url))
+    }
+
+    fn setup_ticket(&self) -> String {
+        self.parts
+            .context
+            .store
+            .issue_admin_ticket(
+                crate::server::admin_store::TicketKind::Setup,
+                Duration::from_secs(60),
+            )
+            .expect("ticket")
+    }
+
+    fn login_ticket(&self) -> String {
+        self.parts
+            .context
+            .store
+            .issue_admin_ticket(
+                crate::server::admin_store::TicketKind::Login,
+                Duration::from_secs(60),
+            )
+            .expect("ticket")
+    }
+
+    async fn set_up(&self) -> String {
+        let response = self
+            .post("/api/v1/admin/web/setup")
+            .json(&serde_json::json!({
+                "ticket": self.setup_ticket(),
+                "username": "snow",
+                "password": GOOD_PASSWORD,
+            }))
+            .send()
+            .await
+            .expect("setup");
+        assert_eq!(response.status(), StatusCode::OK);
+        cookie_of(&response)
+    }
+
+    async fn login(&self, username: &str, password: &str) -> reqwest::Response {
+        self.post("/api/v1/admin/web/login")
+            .json(&serde_json::json!({ "username": username, "password": password }))
+            .send()
+            .await
+            .expect("login")
+    }
+}
+
+/// `Set-Cookie` から、送り返す部分だけを取り出す。
+fn cookie_of(response: &reqwest::Response) -> String {
+    response
+        .headers()
+        .get(header::SET_COOKIE)
+        .expect("cookie")
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string()
+}
+
+#[tokio::test]
+async fn the_first_admin_needs_a_ticket_that_works_once() {
+    let site = AdminSite::new("admin-first");
+    let attempt = |ticket: String| {
+        site.post("/api/v1/admin/web/setup")
+            .json(&serde_json::json!({
+                "ticket": ticket,
+                "username": "snow",
+                "password": GOOD_PASSWORD,
+            }))
+            .send()
+    };
+    let refused = attempt("でたらめ".into()).await.unwrap();
+    assert_eq!(refused.status(), StatusCode::UNAUTHORIZED);
+    assert!(site.parts.context.store.admin_account().unwrap().is_none());
+
+    // 期限切れ。
+    let expired = site
+        .parts
+        .context
+        .store
+        .issue_admin_ticket(
+            crate::server::admin_store::TicketKind::Setup,
+            Duration::ZERO,
+        )
+        .unwrap();
+    assert_eq!(
+        attempt(expired).await.unwrap().status(),
+        StatusCode::UNAUTHORIZED
+    );
+
+    // ログインの券ではアカウントを作れない。
+    assert_eq!(
+        attempt(site.login_ticket()).await.unwrap().status(),
+        StatusCode::UNAUTHORIZED
+    );
+
+    // 決まりに合わないパスワードでは、券を使い切らない。
+    let ticket = site.setup_ticket();
+    let weak = site
+        .post("/api/v1/admin/web/setup")
+        .json(&serde_json::json!({
+            "ticket": ticket,
+            "username": "snow",
+            "password": "aaaaaaaaaaaaaaaaaaaa",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(weak.status(), StatusCode::BAD_REQUEST);
+
+    let first = attempt(ticket.clone()).await.unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+    assert!(site.parts.context.store.admin_account().unwrap().is_some());
+    assert_eq!(
+        attempt(ticket).await.unwrap().status(),
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+#[tokio::test]
+async fn the_session_cookie_has_the_designed_attributes_and_ends_at_logout() {
+    let site = AdminSite::new("admin-cookie");
+    let response = site
+        .post("/api/v1/admin/web/setup")
+        .json(&serde_json::json!({
+            "ticket": site.setup_ticket(),
+            "username": "snow",
+            "password": GOOD_PASSWORD,
+        }))
+        .send()
+        .await
+        .unwrap();
+    let raw = response
+        .headers()
+        .get(header::SET_COOKIE)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(raw.starts_with("__Host-piep_admin="), "{raw}");
+    for attribute in ["Secure", "HttpOnly", "SameSite=Strict", "Path=/"] {
+        assert!(raw.contains(attribute), "{raw}");
+    }
+    let cookie = raw.split(';').next().unwrap().to_string();
+
+    let status = site
+        .get("/api/v1/admin/status")
+        .header(header::COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(status.status(), StatusCode::OK);
+    assert_eq!(
+        site.get("/api/v1/admin/status")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+
+    let logout = site
+        .post("/api/v1/admin/web/logout")
+        .header(header::COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(logout.status(), StatusCode::NO_CONTENT);
+    assert_eq!(
+        logout.headers().get("clear-site-data").unwrap(),
+        "\"cookies\""
+    );
+    let after = site
+        .get("/api/v1/admin/status")
+        .header(header::COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(after.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn login_errors_look_the_same_and_the_wait_does_not_lock_out_tickets() {
+    let site = AdminSite::new("admin-login");
+    site.set_up().await;
+    let wrong_password = site.login("snow", "違うパスワードをここに入れる").await;
+    let wrong_name = site.login("someone", GOOD_PASSWORD).await;
+    assert_eq!(wrong_password.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(wrong_name.status(), StatusCode::UNAUTHORIZED);
+    let first: serde_json::Value = wrong_password.json().await.unwrap();
+    let second: serde_json::Value = wrong_name.json().await.unwrap();
+    assert_eq!(first, second);
+
+    for _ in 0..3 {
+        site.login("snow", "違うパスワードをここに入れる").await;
+    }
+    // 5 回目の失敗で待ちに入る。正しいパスワードでも、待っている間は通らない。
+    let waiting = site.login("snow", GOOD_PASSWORD).await;
+    assert_eq!(waiting.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert!(waiting.headers().contains_key(header::RETRY_AFTER));
+
+    // 券は数えないので、持ち主は入れる。
+    let ticket = site
+        .post("/api/v1/admin/web/ticket")
+        .json(&serde_json::json!({ "ticket": site.login_ticket() }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ticket.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn requests_from_other_sites_and_unknown_hosts_are_refused() {
+    let site = AdminSite::new("admin-csrf");
+    let cookie = site.set_up().await;
+    let url = format!("{}/api/v1/admin/web/logout", site.url);
+    let send = |pairs: Vec<(&'static str, &'static str)>| {
+        let mut request = site.client.post(&url).header(header::COOKIE, &cookie);
+        for (name, value) in pairs {
+            request = request.header(name, value);
+        }
+        request.send()
+    };
+    for pairs in [
+        vec![("sec-fetch-site", "cross-site")],
+        vec![("sec-fetch-site", "same-site")],
+        vec![("origin", "null")],
+        vec![("origin", "https://evil.example")],
+        vec![],
+    ] {
+        let response = send(pairs.clone()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{pairs:?}");
+    }
+    // 届いていないので、ログインは続いている。
+    let status = site
+        .get("/api/v1/admin/status")
+        .header(header::COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(status.status(), StatusCode::OK);
+
+    // 知らない名前の Host は読むことも断る。券が通った名前は覚える。
+    let unknown = site
+        .get("/admin/")
+        .header(header::HOST, "attacker.example")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unknown.status(), StatusCode::FORBIDDEN);
+    site.post("/api/v1/admin/web/ticket")
+        .header(header::HOST, "piep.example.net")
+        .header(header::ORIGIN, "https://piep.example.net")
+        .json(&serde_json::json!({ "ticket": site.login_ticket() }))
+        .send()
+        .await
+        .unwrap();
+    // 上は Sec-Fetch-Site を付けている分だけ通り、名前は未知なので断られる。
+    let known_before = site.parts.context.store.admin_hosts();
+    assert!(known_before.is_empty());
+    site.parts
+        .context
+        .store
+        .allow_admin_host("piep.example.net")
+        .unwrap();
+    let known = site
+        .get("/admin/")
+        .header(header::HOST, "piep.example.net:443")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(known.status(), StatusCode::OK);
+
+    // 鍵の要求は Cookie を使わないので、この守りを通らない。
+    let token = pair_admin(
+        &RemoteServer {
+            url: format!("{}/", site.url),
+            fingerprint: None,
+        },
+        &admin_secret(&site.paths),
+        "test desktop",
+    )
+    .await
+    .unwrap();
+    let bearer = site
+        .client
+        .get(format!("{}/api/v1/admin/status", site.url))
+        .bearer_auth(&token)
+        .header(header::HOST, "attacker.example")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bearer.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn tickets_come_only_from_the_key_and_important_actions_ask_again() {
+    let site = AdminSite::new("admin-ticket");
+    let token = pair_admin(
+        &RemoteServer {
+            url: format!("{}/", site.url),
+            fingerprint: None,
+        },
+        &admin_secret(&site.paths),
+        "test desktop",
+    )
+    .await
+    .unwrap();
+    let issue = || {
+        site.client
+            .post(format!("{}/api/v1/admin/tickets", site.url))
+            .bearer_auth(&token)
+            .send()
+    };
+    // アカウントがなければ準備の券になる。
+    let first: serde_json::Value = issue().await.unwrap().json().await.unwrap();
+    assert_eq!(first["kind"], "setup");
+    site.set_up().await;
+    let second: serde_json::Value = issue().await.unwrap().json().await.unwrap();
+    assert_eq!(second["kind"], "login");
+    assert_eq!(second["expiresInSeconds"], 60);
+    let ticket = second["path"]
+        .as_str()
+        .unwrap()
+        .strip_prefix("/admin/#ticket=")
+        .unwrap()
+        .to_string();
+
+    // 券で入る。券は 2 度使えない。
+    let entered = site
+        .post("/api/v1/admin/web/ticket")
+        .json(&serde_json::json!({ "ticket": ticket }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(entered.status(), StatusCode::OK);
+    let cookie = cookie_of(&entered);
+    let again = site
+        .post("/api/v1/admin/web/ticket")
+        .json(&serde_json::json!({ "ticket": ticket }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(again.status(), StatusCode::UNAUTHORIZED);
+
+    // ブラウザからは券を作れない。
+    let by_cookie = site
+        .post("/api/v1/admin/tickets")
+        .header(header::COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(by_cookie.status(), StatusCode::FORBIDDEN);
+
+    // 券で入っただけでは、パスワードの変更を聞き直す。
+    let change = |password: &'static str| {
+        site.client
+            .put(format!("{}/api/v1/admin/password", site.url))
+            .header("sec-fetch-site", "same-origin")
+            .header(header::COOKIE, &cookie)
+            .json(&serde_json::json!({ "password": password }))
+            .send()
+    };
+    let asked = change("秋の夕暮れに図書館で借りた本を読む").await.unwrap();
+    assert_eq!(asked.status(), StatusCode::FORBIDDEN);
+    let body: serde_json::Value = asked.json().await.unwrap();
+    assert_eq!(body["code"], "reauth_required");
+    let wrong = site
+        .post("/api/v1/admin/web/reauth")
+        .header(header::COOKIE, &cookie)
+        .json(&serde_json::json!({ "password": "違うパスワードをここに入れる" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(wrong.status(), StatusCode::UNAUTHORIZED);
+    let right = site
+        .post("/api/v1/admin/web/reauth")
+        .header(header::COOKIE, &cookie)
+        .json(&serde_json::json!({ "password": GOOD_PASSWORD }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(right.status(), StatusCode::NO_CONTENT);
+    assert_eq!(
+        change("秋の夕暮れに図書館で借りた本を読む")
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        site.login("snow", GOOD_PASSWORD).await.status(),
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+#[tokio::test]
+async fn pages_carry_the_security_headers_and_secrets_stay_out_of_the_record() {
+    let site = AdminSite::new("admin-headers");
+    let page = site.get("/admin/").send().await.unwrap();
+    assert_eq!(page.status(), StatusCode::OK);
+    let headers = page.headers();
+    let csp = headers
+        .get(header::CONTENT_SECURITY_POLICY)
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert!(csp.contains("default-src 'none'"));
+    assert!(csp.contains("frame-ancestors 'none'"));
+    assert_eq!(headers.get(header::REFERRER_POLICY).unwrap(), "no-referrer");
+    assert_eq!(
+        headers.get(header::X_CONTENT_TYPE_OPTIONS).unwrap(),
+        "nosniff"
+    );
+    assert_eq!(
+        headers.get(header::CACHE_CONTROL).unwrap(),
+        "private, no-store"
+    );
+    assert!(!headers.contains_key(header::STRICT_TRANSPORT_SECURITY));
+
+    let script = site.get("/admin/assets/app.js").send().await.unwrap();
+    assert_eq!(script.status(), StatusCode::OK);
+    assert_eq!(
+        site.get("/admin/assets/none.js")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+
+    let ticket = site.setup_ticket();
+    let cookie = {
+        let response = site
+            .post("/api/v1/admin/web/setup")
+            .json(&serde_json::json!({
+                "ticket": ticket,
+                "username": "snow",
+                "password": GOOD_PASSWORD,
+            }))
+            .send()
+            .await
+            .unwrap();
+        cookie_of(&response)
+    };
+    site.login("snow", "違うパスワードをここに入れる").await;
+    let audit: serde_json::Value = site
+        .get("/api/v1/admin/audit")
+        .header(header::COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let text = audit.to_string();
+    assert!(text.contains("管理者の作成"));
+    assert!(!text.contains(GOOD_PASSWORD));
+    assert!(!text.contains("違うパスワード"));
+    assert!(!text.contains(&ticket));
+    assert!(!text.contains(cookie.split('=').nth(1).unwrap()));
+
+    // パスワードはハッシュだけが残る。
+    let account = site.parts.context.store.admin_account().unwrap().unwrap();
+    assert!(account.password_hash.starts_with("$argon2id$"));
+}
+
+#[tokio::test]
+async fn the_admin_screen_is_not_on_the_reader_port_or_a_public_only_server() {
+    let site = AdminSite::new("admin-ports");
+    let cookie = site.set_up().await;
+    let reader = spawn_plain(reader_router(Arc::clone(&site.parts.context)));
+    let client = &site.client;
+    for path in [
+        "/admin",
+        "/admin/",
+        "/api/v1/admin/status",
+        "/api/v1/admin/web/state",
+    ] {
+        let response = client
+            .get(format!("{reader}{path}"))
+            .header(header::COOKIE, &cookie)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+    }
+
+    // 管理の口を分けず public_url だけのときは AdminWeb を渡さない。Cookie も見ない。
+    let root = TestRoot::new("admin-public");
+    let (parts, _paths) = standalone(&root.0);
+    let public = spawn_plain(combined_router(Arc::clone(&parts.context)));
+    let page = client.get(format!("{public}/admin/")).send().await.unwrap();
+    assert_eq!(page.status(), StatusCode::NOT_FOUND);
+    let by_cookie = client
+        .get(format!("{public}/api/v1/admin/status"))
+        .header(header::COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(by_cookie.status(), StatusCode::UNAUTHORIZED);
+
+    // 止めると、画面も Cookie も効かなくなる。
+    site.parts
+        .context
+        .store
+        .set_admin_web_disabled(true)
+        .unwrap();
+    assert_eq!(
+        site.get("/admin/").send().await.unwrap().status(),
+        StatusCode::NOT_FOUND
+    );
+    let stopped = site
+        .get("/api/v1/admin/status")
+        .header(header::COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stopped.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn about_is_for_registered_devices_and_hello_stays_silent_about_the_version() {
+    let site = AdminSite::new("admin-about");
+    let hello: serde_json::Value = site
+        .get("/api/v1/hello")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(hello.get("version").is_none());
+    assert_eq!(
+        site.get("/api/v1/about").send().await.unwrap().status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let token = pair_admin(
+        &RemoteServer {
+            url: format!("{}/", site.url),
+            fingerprint: None,
+        },
+        &admin_secret(&site.paths),
+        "test desktop",
+    )
+    .await
+    .unwrap();
+    let about: serde_json::Value = site
+        .get("/api/v1/about")
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(about["version"], super::update::VERSION);
+    assert!(about["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|capability| capability == "admin-web"));
 }
 
 #[tokio::test]
