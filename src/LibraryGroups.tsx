@@ -48,7 +48,7 @@ export function EntityBrowser({ kind, query, sort, onOpen }: {
   useStatusRecovery(list.error);
   const items = useMemo(() => list.data?.pages.flatMap((page) => page.items) ?? [], [list.data]);
   const total = list.data?.pages[0]?.total ?? 0;
-  const loadMore = useAutoLoad(list.hasNextPage && !list.isFetchingNextPage && !list.isPlaceholderData, items.length, () => { void list.fetchNextPage(); });
+  const loadMore = useAutoLoad(list.hasNextPage && !list.isFetchingNextPage && !list.isPlaceholderData && !list.error, items.length, () => { void list.fetchNextPage(); });
 
   return <section className="group-browser" data-stale={list.isPlaceholderData || undefined}>
     <div className="results-bar">{list.data && <span>{total.toLocaleString("ja-JP")} 件</span>}</div>

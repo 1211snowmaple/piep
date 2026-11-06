@@ -141,7 +141,7 @@ export function EntityPage({ page, status, savedRevision, pagingMode, onOpenWork
   });
   useStatusRecovery(series.error);
   const seriesItems = useMemo(() => series.data?.pages.flatMap((entry) => entry.items) ?? [], [series.data]);
-  const loadMoreSeries = useAutoLoad(series.hasNextPage && !series.isFetchingNextPage && !series.isPlaceholderData, seriesItems.length, () => { void series.fetchNextPage(); });
+  const loadMoreSeries = useAutoLoad(series.hasNextPage && !series.isFetchingNextPage && !series.isPlaceholderData && !series.error, seriesItems.length, () => { void series.fetchNextPage(); });
 
   const sortedCollections = useMemo(() => {
     const items = [...collections];
