@@ -33,6 +33,14 @@ html { overflow-y: scroll; scrollbar-gutter: stable; }
 .adm-entry { display: grid; place-items: center; min-height: 100dvh; padding: 16px; box-sizing: border-box; }
 .adm-entry-card { width: min(420px, 100%); padding: 28px; border: 1px solid var(--app-shell-border-color, var(--mantine-color-default-border)); border-radius: var(--mantine-radius-lg); background: var(--mantine-color-body); }
 .adm-entry-brand { display: flex; justify-content: center; margin-bottom: 24px; }
+.adm-entry-head { display: flex; flex-direction: column; gap: 6px; }
+.adm-entry-title { font-size: 20px; font-weight: 700; line-height: 1.35; }
+.adm-entry-lead { line-height: 1.7; }
+.adm-entry-fixed { display: flex; justify-content: space-between; gap: 12px; padding: 10px 12px; border-radius: var(--mantine-radius-md); background: var(--mantine-color-default-hover); }
+.adm-entry-steps { margin: 0; padding-left: 1.4em; font-size: var(--mantine-font-size-sm); line-height: 1.9; }
+/* 必須の印は、ラベルの右上に小さく赤で出す。 */
+.adm .mantine-InputWrapper-required,
+.adm-entry .mantine-InputWrapper-required { color: var(--mantine-color-red-6); font-size: 0.72em; vertical-align: super; line-height: 0; }
 .adm-code { font-family: var(--mantine-font-family-monospace); font-size: 12px; overflow-wrap: anywhere; user-select: all; }
 .adm-qr { align-self: center; padding: 16px; background: #fff; border-radius: 8px; line-height: 0; }
 

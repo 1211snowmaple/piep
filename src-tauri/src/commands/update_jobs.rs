@@ -852,6 +852,10 @@ fn build_initial_items(
             .db
             .list_pending_update_candidates(PENDING_CANDIDATE_LIMIT)?
         {
+            // 前回の改稿候補も「新作だけ」の範囲には含めない。次の全件確認には残す。
+            if new_works_only && candidate.kind == CandidateKind::Revision.key() {
+                continue;
+            }
             // 作品だけを確認するときは、その確認対象の改稿だけを戻す。
             // 作者・シリーズ由来の新作候補や、別の作品の改稿まで混ぜない。
             if !candidate_matches_scope(&candidate, &included_work_keys, &eligible_targets) {
@@ -4186,6 +4190,106 @@ mod tests {
         assert!(super::is_known_hold(&state, &item, super::BLOCKED_CANDIDATE_MESSAGE).unwrap());
         // 保留の種類が変わったら、それは新しい知らせ。
         assert!(!super::is_known_hold(&state, &item, partial).unwrap());
+    }
+
+    #[test]
+    fn new_works_only_keeps_pending_revisions_out_of_both_check_and_save() {
+        let root = std::env::temp_dir().join(format!("piep-pending-revision-{}", make_job_id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let state = Arc::new(AppState::new(
+            Database::open(&root.join("piep.db"), &root.join("downloads")).unwrap(),
+        ));
+        state
+            .db
+            .upsert_update_target(&UpdateTargetInput {
+                target_type: "author".into(),
+                source: "pixiv".into(),
+                source_key: "123".into(),
+                display_name: "作者".into(),
+                enabled: true,
+                metadata_json: None,
+            })
+            .unwrap();
+        let body = root.join("saved.json");
+        std::fs::write(&body, "{}").unwrap();
+        state
+            .db
+            .upsert_download(&NewDownload {
+                source: "pixiv".into(),
+                source_id: "old".into(),
+                title: "保存済み".into(),
+                author_name: "作者".into(),
+                author_id: "123".into(),
+                content_type: "novel".into(),
+                tags: Vec::new(),
+                excerpt: None,
+                cover_path: None,
+                json_path: body.to_string_lossy().into(),
+                original_json_path: None,
+                asset_count: 0,
+                file_size_bytes: 2,
+                downloaded_at: "2026-11-06T00:00:00Z".into(),
+                source_created_at: None,
+                content_hash: None,
+                text_length: 0,
+                source_updated_at: None,
+                watch_updates: false,
+                current_version: 1,
+                favorite: false,
+            })
+            .unwrap();
+        for (source_id, kind) in [("old", "revision"), ("new", "new")] {
+            state.db.upsert_update_candidate(&crate::database::UpdateCandidateInput {
+                source: "pixiv".into(), source_id: source_id.into(),
+                kind: kind.into(), title: source_id.into(),
+                payload_json: serde_json::json!({
+                    "kind": kind, "originSourceKey": "123", "originalData": {"user": {"id": "123"}}
+                }).to_string(), target_type: Some("author".into()),
+            }).unwrap();
+        }
+        for mode in ["check_only", "auto_save"] {
+            let request = StartUpdateJobRequest {
+                scope: "all".into(),
+                mode: mode.into(),
+                work_ids: None,
+                target_ids: None,
+                credentials: None,
+                watch_saved: None,
+                new_works_only: Some(true),
+                adhoc_targets: None,
+            };
+            let items = build_initial_items(&state, &request).unwrap();
+            assert!(!items
+                .iter()
+                .any(|item| item.source_id.as_deref() == Some("old")));
+            let new = items
+                .iter()
+                .find(|item| item.source_id.as_deref() == Some("new"))
+                .unwrap();
+            assert_eq!(
+                new.status,
+                if mode == "auto_save" {
+                    "queued"
+                } else {
+                    "candidate"
+                }
+            );
+            let full = build_initial_items(
+                &state,
+                &StartUpdateJobRequest {
+                    new_works_only: Some(false),
+                    ..request
+                },
+            )
+            .unwrap();
+            assert!(full
+                .iter()
+                .any(|item| item.source_id.as_deref() == Some("old")));
+        }
+        drop(state);
+        assert!(root.starts_with(std::env::temp_dir()));
+        // Pool workers can still be releasing their last SQLite handle on Windows.
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[tokio::test]

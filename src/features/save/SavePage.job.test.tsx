@@ -1,11 +1,11 @@
 import { MantineProvider } from "@mantine/core";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AppRouter } from "@/app/router";
 import { hasUnsavedWork } from "@/lib/unsavedGuard";
 import SavePage from "./SavePage";
-import { resetSaveDraftsForTest } from "./saveDraft";
+import { readSaveDraft, resetSaveDraftsForTest } from "./saveDraft";
 
 const browserApi = vi.hoisted(() => ({
   openEmbeddedBrowser: vi.fn().mockResolvedValue(undefined),
@@ -283,6 +283,37 @@ describe("SavePage の Rust 保存ジョブ", () => {
 
     await waitFor(() => expect(browserApi.readBrowserPageWorkCandidates).toHaveBeenCalled());
     expect(screen.getByText("第一話")).toBeInTheDocument();
+  });
+
+  it("取得元の切替後に古い読み取りが完了しても候補や新しい実行を変更しない", async () => {
+    type Page = Awaited<ReturnType<typeof import("@/services/browserApi").readBrowserPageWorkCandidates>>;
+    let finishOld!: (page: Page) => void;
+    let finishNew!: (page: Page) => void;
+    const oldRead = new Promise<Page>((resolve) => { finishOld = resolve; });
+    const newRead = new Promise<Page>((resolve) => { finishNew = resolve; });
+    browserApi.readBrowserPageWorkCandidates.mockReset().mockImplementation((_browser, source) => source === "pixiv" ? oldRead : newRead);
+    renderSavePage();
+    const open = async (url: string) => {
+      const address = await screen.findByLabelText("ブラウザのアドレス");
+      fireEvent.change(address, { target: { value: url } });
+      fireEvent.click(screen.getByRole("button", { name: "URLを開く" }));
+      fireEvent.click(await screen.findByRole("button", { name: "このページから読み取る" }));
+    };
+    const oldUrl = "https://www.pixiv.net/novel/bookmark_new.php";
+    await open(oldUrl);
+    await waitFor(() => expect(browserApi.readBrowserPageWorkCandidates).toHaveBeenCalledWith("embedded", "pixiv"));
+    fireEvent.click(screen.getByRole("radio", { name: /FANBOX/ }));
+    await waitFor(() => expect(window.location.hash).toContain("/save/fanbox"));
+    const newUrl = "https://www.fanbox.cc/";
+    await open(newUrl);
+    await waitFor(() => expect(browserApi.readBrowserPageWorkCandidates).toHaveBeenCalledWith("embedded", "fanbox"));
+    await act(async () => finishOld({ url: oldUrl, truncated: false, works: [{ sourceId: "old", title: "古い実行の作品", author: "", saved: false }] }));
+    expect(readSaveDraft("pixiv").items).toEqual([]);
+    expect(screen.queryByText("古い実行の作品")).toBeNull();
+    expect(screen.getByRole("button", { name: "このページから読み取る" })).toBeDisabled();
+    await act(async () => finishNew({ url: newUrl, truncated: false, works: [{ sourceId: "new", title: "新しい実行の作品", author: "", saved: false }] }));
+    expect(await screen.findByText("新しい実行の作品")).toBeInTheDocument();
+    expect(readSaveDraft("fanbox").items.map((item) => item.id)).toEqual(["new"]);
   });
 
   it("保留された作品を選択数や再保存対象に含めない", async () => {

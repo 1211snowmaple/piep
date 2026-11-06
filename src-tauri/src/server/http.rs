@@ -102,7 +102,7 @@ pub struct ServerContext {
     pair_attempts: Mutex<VecDeque<Instant>>,
     covers: Mutex<CoverCache>,
     illustrations: Mutex<CoverCache>,
-    illustration_workers: tokio::sync::Semaphore,
+    illustration_workers: Arc<tokio::sync::Semaphore>,
     dimensions: Mutex<HashMap<IllustrationKey, (u32, u32)>>,
     /// 携帯がお気に入りを変えたと、デスクトップ版の画面へ知らせる係。内蔵サーバーにだけある。
     favorites_listener: OnceLock<FavoritesListener>,
@@ -200,7 +200,7 @@ impl ServerContext {
             pair_attempts: Mutex::new(VecDeque::new()),
             covers: Mutex::new(CoverCache::default()),
             illustrations: Mutex::new(CoverCache::default()),
-            illustration_workers: tokio::sync::Semaphore::new(ILLUSTRATION_WORKERS),
+            illustration_workers: Arc::new(tokio::sync::Semaphore::new(ILLUSTRATION_WORKERS)),
             dimensions: Mutex::new(HashMap::new()),
             favorites_listener: OnceLock::new(),
         })
@@ -423,8 +423,25 @@ fn admin_routes(ctx: Ctx) -> Router {
         .route("/api/v1/admin/sync/sessions/{id}/commit", post(sync_commit))
         .layer(DefaultBodyLimit::max(MAX_ADMIN_BYTES))
         .layer(middleware::from_fn(admin_timeout))
+        // 認証のない要求のために、JSON や同期のチャンクを受信しない。
+        // Cookie の Host/Origin 検査は、この外側の with_guard が先に行う。
+        .layer(middleware::from_fn_with_state(
+            Arc::clone(&ctx),
+            authorize_admin_before_body,
+        ))
         .with_state(Arc::clone(&ctx));
     admin_web::with_guard(routes, ctx)
+}
+
+async fn authorize_admin_before_body(
+    State(ctx): State<Ctx>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if let Err(error) = require_admin(&ctx, request.headers()) {
+        return error.into_response();
+    }
+    next.run(request).await
 }
 
 /// 読み手の口。管理の API は載せない。
@@ -1182,13 +1199,9 @@ async fn illustration_bytes_for(
     mime: String,
     width: u32,
 ) -> Result<(Bytes, String), ApiError> {
-    let _slot = ctx
-        .illustration_workers
-        .acquire()
-        .await
-        .map_err(|_| ApiError::internal())?;
-    let ctx = ctx.clone();
-    tokio::task::spawn_blocking(move || {
+    let background = Arc::clone(ctx);
+    illustration_work(ctx, move || {
+        let ctx = background;
         let metadata = fs::metadata(&path).map_err(|_| ApiError::not_found())?;
         let modified = metadata.modified().map_err(|_| ApiError::not_found())?;
         let size = metadata.len();
@@ -1221,6 +1234,24 @@ async fn illustration_bytes_for(
             }
             _ => original(),
         }
+    })
+    .await
+}
+
+async fn illustration_work<T, F>(ctx: &Ctx, work: F) -> Result<T, ApiError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, ApiError> + Send + 'static,
+{
+    let slot = Arc::clone(&ctx.illustration_workers)
+        .acquire_owned()
+        .await
+        .map_err(|_| ApiError::internal())?;
+    tokio::task::spawn_blocking(move || {
+        // HTTP が中断されても spawn_blocking の処理は続く。その処理自身に
+        // permit を持たせ、計算が終わるまで次の変換を入れない。
+        let _slot = slot;
+        work()
     })
     .await
     .map_err(|_| ApiError::internal())?
@@ -2039,6 +2070,62 @@ mod asset_tests {
 #[cfg(test)]
 mod illustration_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn cancelling_a_request_keeps_its_worker_slot_until_blocking_work_finishes() {
+        let dir = crate::server::tests::TestRoot::created("illustration-cancel");
+        let ctx = ServerContext::new(
+            Library::Swappable(Arc::new(super::super::library::SwappableDb::new(
+                dir.0.join("piep.db"),
+                dir.0.join("downloads"),
+            ))),
+            Arc::new(ServerStore::open(&dir.0.join("state.db")).unwrap()),
+            dir.0.clone(),
+            None,
+            None,
+            None,
+        );
+        let _reserved = Arc::clone(&ctx.illustration_workers)
+            .acquire_many_owned((ILLUSTRATION_WORKERS - 1) as u32)
+            .await
+            .unwrap();
+        let (started, observed) = tokio::sync::oneshot::channel();
+        let (release, blocked) = std::sync::mpsc::channel();
+        let first_ctx = Arc::clone(&ctx);
+        let first = tokio::spawn(async move {
+            illustration_work(&first_ctx, move || {
+                let _ = started.send(());
+                let _ = blocked.recv();
+                Ok(())
+            })
+            .await
+        });
+        observed.await.unwrap();
+        first.abort();
+        assert!(first.await.unwrap_err().is_cancelled());
+        assert_eq!(ctx.illustration_workers.available_permits(), 0);
+
+        let (next_started, mut next_observed) = tokio::sync::oneshot::channel();
+        let next_ctx = Arc::clone(&ctx);
+        let next = tokio::spawn(async move {
+            illustration_work(&next_ctx, move || {
+                let _ = next_started.send(());
+                Ok(())
+            })
+            .await
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut next_observed)
+                .await
+                .is_err()
+        );
+        release.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), next_observed)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(next.await.unwrap().is_ok());
+    }
 
     #[test]
     fn widths_round_up_to_a_shared_step() {

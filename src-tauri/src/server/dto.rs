@@ -581,8 +581,14 @@ impl From<&MobileMetadata> for MobileRevision {
     }
 }
 
-static LOCAL_PATH_ATTRIBUTE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?i)\bdata-local-path\s*=\s*"([^"]*)""#).expect("valid attribute regex")
+static HTML_TAG: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?is)<!--.*?-->|<[a-z][a-z0-9:-]*\b(?:[^"'<>]|"[^"]*"|'[^']*')*>"#)
+        .expect("valid tag regex")
+});
+
+static HTML_ATTRIBUTE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?s)(\s+)([^\s/="'<>`]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?"#)
+        .expect("valid attribute regex")
 });
 
 static ATTACHMENT_ORIGINAL_BUTTON: LazyLock<Regex> = LazyLock::new(|| {
@@ -607,23 +613,40 @@ pub fn mobile_page(
         .collect();
     let mut missing = false;
     let readable = ATTACHMENT_ORIGINAL_BUTTON.replace_all(&page.html, "");
-    let html = LOCAL_PATH_ATTRIBUTE
+    let html = HTML_TAG
         .replace_all(&readable, |captures: &regex::Captures<'_>| {
-            if let Some(asset) = asset_ids.get(&captures[1]) {
-                match dimensions(asset) {
-                    Some((width, height)) => format!(
-                        r#"data-asset-id="{}" width="{width}" height="{height}""#,
-                        asset.id
-                    ),
-                    None => format!(r#"data-asset-id="{}""#, asset.id),
-                }
-            } else {
-                missing = true;
-                String::new()
+            let tag = &captures[0];
+            if tag.starts_with("<!--") {
+                return tag.to_string();
             }
+            // 属性を値ごとに読む。本文の単語や、alt/title の値に書かれた
+            // data-local-path は画像の参照として扱わない。
+            HTML_ATTRIBUTE
+                .replace_all(tag, |attribute: &regex::Captures<'_>| {
+                    if !attribute[2].eq_ignore_ascii_case("data-local-path") {
+                        return attribute[0].to_string();
+                    }
+                    let path = attribute
+                        .get(3)
+                        .or_else(|| attribute.get(4))
+                        .or_else(|| attribute.get(5));
+                    let Some(asset) = path.and_then(|path| asset_ids.get(path.as_str())) else {
+                        missing = true;
+                        return String::new();
+                    };
+                    let reference = match dimensions(asset) {
+                        Some((width, height)) => format!(
+                            r#"data-asset-id="{}" width="{width}" height="{height}""#,
+                            asset.id
+                        ),
+                        None => format!(r#"data-asset-id="{}""#, asset.id),
+                    };
+                    format!("{}{reference}", &attribute[1])
+                })
+                .into_owned()
         })
         .into_owned();
-    if missing || html.to_ascii_lowercase().contains("data-local-path") {
+    if missing {
         return Err("本文の画像を解決できません".into());
     }
     Ok(MobilePage {
@@ -714,6 +737,45 @@ mod tests {
             safe.html,
             r#"<div class="attachment-notice">添付ファイル「a.pdf」から取り込んだ本文</div><p>本文</p>"#
         );
+    }
+
+    #[test]
+    fn local_path_words_in_text_and_attribute_values_are_normal_reader_content() {
+        let html = r#"<p>data-local-path と DATA-LOCAL-PATH="説明"</p><p title='data-local-path="例"'>説明</p><code>&lt;img data-local-path="例"&gt;</code>"#;
+        let page = ReaderContentPage {
+            page: 0,
+            page_count: 1,
+            html: html.into(),
+            plain_text: String::new(),
+            total_plain_text_chars: 0,
+            source_page_starts: vec![0],
+        };
+        let revision = MobileRevision {
+            current_version: 1,
+            content_hash: None,
+            active_edit_hash: None,
+        };
+        assert_eq!(
+            mobile_page(page.clone(), &[], revision.clone(), |_| None)
+                .unwrap()
+                .html,
+            html
+        );
+        for attribute in [
+            r#"data-local-path="C:\private.png""#,
+            "DATA-LOCAL-PATH='C:/private.png'",
+            "data-local-path=C:/private.png",
+            "data-local-path",
+        ] {
+            let unsafe_page = ReaderContentPage {
+                html: format!("<img {attribute}>"),
+                ..page.clone()
+            };
+            assert!(
+                mobile_page(unsafe_page, &[], revision.clone(), |_| None).is_err(),
+                "{attribute}"
+            );
+        }
     }
 
     #[test]

@@ -10,7 +10,6 @@ use crate::database::queries::SearchIndexRebuildOptions;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::cell::{Cell, RefCell};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -27,6 +26,7 @@ const META_SESSION_AT: &str = "sync_session_at";
 const META_DATABASE_SHA: &str = "database_sha256";
 const META_GENERATION: &str = "generation";
 const META_COMMITTED_AT: &str = "committed_at";
+const META_PUBLICATION: &str = "sync_publication";
 
 #[derive(Debug)]
 pub enum SyncError {
@@ -120,19 +120,23 @@ struct IndexWorker {
     handle: Option<std::thread::JoinHandle<()>>,
 }
 
-/// 置いたファイル1つ分の、元へ戻すための控え。
-struct PlacedFile {
-    target: PathBuf,
-    /// どけておいた前の中身。
-    previous: Option<PathBuf>,
-    /// ここから動かしてきたかたまり。写して置いたものは消すだけで戻る。
-    blob: Option<PathBuf>,
+/// 公開前に全操作を書き出す。各 rename の前後どちらで止まっても、控えの有無で
+/// 巻き戻せる。状態 DB の publication ID が一致するときだけ新世代を採用する。
+#[derive(Debug, Serialize, Deserialize)]
+struct PublicationJournal {
+    id: String,
+    session_id: String,
+    changes: Vec<FileChange>,
+    database_changed: bool,
+    had_database: bool,
+    trash_batch: String,
 }
 
-/// 公開中のファイルの控え。DB を開き直すまで、前の中身を戻せるようにする。
-#[derive(Default)]
-struct FilePublication {
-    files: Vec<PlacedFile>,
+#[derive(Debug, Serialize, Deserialize)]
+struct FileChange {
+    path: String,
+    had_previous: bool,
+    removal: bool,
 }
 
 struct RestartIndex<'a>(&'a SyncReceiver);
@@ -140,48 +144,6 @@ struct RestartIndex<'a>(&'a SyncReceiver);
 impl Drop for RestartIndex<'_> {
     fn drop(&mut self) {
         self.0.start_index_catch_up();
-    }
-}
-
-impl FilePublication {
-    fn rollback(&mut self) -> Result<(), String> {
-        while let Some(file) = self.files.last() {
-            // 途中で失敗したら、もう一度ここから呼ばれる。済んだ手順は飛ばせる形にする。
-            let cleared = match &file.blob {
-                Some(blob) => fs::rename(&file.target, blob),
-                None => fs::remove_file(&file.target),
-            };
-            let result = match cleared {
-                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-                result => result,
-            }
-            .and_then(|()| match &file.previous {
-                Some(previous) => fs::rename(previous, &file.target),
-                None => Ok(()),
-            });
-            result
-                .map_err(|error| format!("{} を元に戻せません: {error}", file.target.display()))?;
-            self.files.pop();
-        }
-        Ok(())
-    }
-
-    fn accept(mut self) {
-        for file in self.files.drain(..) {
-            if let Some(previous) = file.previous {
-                if let Err(error) = fs::remove_file(&previous) {
-                    log::warn!("確定済みファイルの控えを片付けられません: {error}");
-                }
-            }
-        }
-    }
-}
-
-impl Drop for FilePublication {
-    fn drop(&mut self) {
-        if let Err(error) = self.rollback() {
-            log::error!("送信の巻き戻しに失敗しました: {error}");
-        }
     }
 }
 
@@ -254,10 +216,27 @@ impl SyncReceiver {
     }
 
     pub fn status(&self) -> ReceiverStatus {
+        let writing = matches!(
+            self.write_lock.try_lock(),
+            Err(std::sync::TryLockError::WouldBlock)
+        );
+        let resumable = self
+            .store
+            .meta(META_SESSION)
+            .ok()
+            .flatten()
+            .is_some_and(|session| {
+                self.session_is_fresh().unwrap_or(false) && self.session_dir(&session).is_dir()
+            });
+        let recovering = !writing
+            && self.publication_dir().join("journal.json").exists()
+            && self.db.current().is_none();
         ReceiverStatus {
             generation: self.generation(),
             committed_at: self.store.meta(META_COMMITTED_AT).ok().flatten(),
-            session_open: self.store.meta(META_SESSION).ok().flatten().is_some(),
+            // 放置された期限切れの記録で、自己更新の quiet 待機を妨げ続けない。
+            // 期限の境界をまたいだ書込み・確定そのものは引き続き待つ。
+            session_open: writing || resumable || recovering,
             phase: self
                 .phase
                 .lock()
@@ -289,23 +268,28 @@ impl SyncReceiver {
         }
     }
 
+    fn session_is_fresh(&self) -> Result<bool, String> {
+        Ok(self
+            .store
+            .meta(META_SESSION_AT)?
+            .and_then(|at| chrono::DateTime::parse_from_rfc3339(&at).ok())
+            .is_some_and(|at| chrono::Utc::now().signed_duration_since(at) < SESSION_LIFETIME))
+    }
+
     /// 送信を開く。途中の送信があれば続きとして返す。24 時間より古ければ捨てる。
     pub fn open_session(&self) -> Result<OpenedSession, SyncError> {
         let _guard = self
             .write_lock
             .lock()
             .map_err(|_| SyncError::Conflict("確定の途中です"))?;
+        self.recover_before_write()?;
         let database_sha256 = if self.db.current().is_some() {
             self.store.meta(META_DATABASE_SHA)?
         } else {
             None
         };
         if let Some(existing) = self.store.meta(META_SESSION)? {
-            let fresh = self
-                .store
-                .meta(META_SESSION_AT)?
-                .and_then(|at| chrono::DateTime::parse_from_rfc3339(&at).ok())
-                .is_some_and(|at| chrono::Utc::now().signed_duration_since(at) < SESSION_LIFETIME);
+            let fresh = self.session_is_fresh()?;
             if fresh && self.session_dir(&existing).exists() {
                 // 受け取ったかたまりは残すが、一覧は今回の送信のものに取り替える。
                 // 前回のあとで手元から消えたファイルを、置いてしまわないように。
@@ -354,6 +338,7 @@ impl SyncReceiver {
             .write_lock
             .lock()
             .map_err(|_| SyncError::Conflict("確定の途中です"))?;
+        self.recover_before_write()?;
         self.require_session(session_id)?;
         self.discard_session(session_id)
     }
@@ -553,6 +538,7 @@ impl SyncReceiver {
             .write_lock
             .lock()
             .map_err(|_| SyncError::Conflict("確定の途中です"))?;
+        self.recover_before_write()?;
         self.require_session(session_id)?;
         if !valid_sha(&request.database_sha256) {
             return Err(SyncError::Invalid("ハッシュの形が正しくありません"));
@@ -635,179 +621,296 @@ impl SyncReceiver {
             None
         };
 
-        // ファイルも本棚を読む要求が終わってから切り替える。途中の失敗では、
-        // ファイルを戻してから旧DBを開き直す。
+        let journal =
+            self.prepare_publication(session_id, &needed, &stale, restoring.as_deref())?;
         self.stop_index_catch_up();
         let _restart_index = RestartIndex(self);
-        let publication = RefCell::new(None::<FilePublication>);
-        let database_moved = Cell::new(false);
-        let had_database = live.exists();
-        let result = self.db.replace_with(
-            || {
-                self.set_phase("placing_files");
-                *publication.borrow_mut() = Some(
-                    self.place_files(session_id, &needed)
-                        .map_err(|error| format!("ファイルを配置できません: {error:?}"))?,
-                );
-                if let Some(restoring) = &restoring {
-                    self.set_phase("swapping");
-                    install_database(restoring, &live, &database_moved)?;
+        let generation = self.generation() + 1;
+        let result = self.db.replace_with_finalized(
+            || self.apply_publication(&journal),
+            || self.recover_pending_publication(),
+            |candidate| {
+                if journal.database_changed {
+                    if let Some(db) = candidate {
+                        // 世代の確定・公開より前に当てる。ここで止まっても、未確定なら旧DBへ
+                        // 戻り、確定済みなら携帯の変更を含む新DBとして復旧できる。
+                        self.store.reapply_favorites(db)?;
+                    }
                 }
-                Ok(())
-            },
-            || {
-                if let Some(files) = publication.borrow_mut().as_mut() {
-                    files.rollback()?;
-                }
-                if database_moved.get() {
-                    restore_previous_database(&live, had_database)?;
-                }
-                Ok(())
+                self.record_publication(&journal, generation, &request.database_sha256)
+                    .map_err(|error| format!("世代を確定できません: {error:?}"))
             },
         );
-        if let Err(error) = result {
-            return Err(error.into());
+        result?;
+        // 世代はすでに確定した。片付けの失敗を送信失敗として扱わず、次の起動・送信で続ける。
+        if let Err(error) = self.finish_publication(&journal) {
+            log::warn!("確定済みの送信を片付けられません: {error}");
         }
-        if let Some(files) = publication.into_inner() {
-            files.accept();
-        }
-        // 携帯で変えて、デスクトップ版がまだ取り込んでいないお気に入りは、送られてきた本棚に無い。
-        // 取り込まれるまでは当て直す。当てられなくても送信は済んでいるので、記録だけ残す。
-        if database_changed {
-            if let Some(db) = self.db.current() {
-                if let Err(error) = self.store.reapply_favorites(&db) {
-                    log::warn!("お気に入りを当て直せません: {error}");
-                }
-            }
-        }
-
-        self.set_phase("removing_stale");
-        let files_removed = self.move_to_trash(&stale)?;
         self.purge_trash();
-
-        let generation = self.generation() + 1;
-        {
-            let mut conn = self.store.connection()?;
-            let tx = conn.transaction()?;
-            tx.execute(
-                "INSERT INTO files (path, size, mtime_ms)
-                 SELECT path, size, mtime_ms FROM session_files WHERE session_id = ?1
-                 ON CONFLICT(path) DO UPDATE SET size = excluded.size, mtime_ms = excluded.mtime_ms",
-                [session_id],
-            )?;
-            for (key, value) in [
-                (META_GENERATION, generation.to_string()),
-                (META_DATABASE_SHA, request.database_sha256.clone()),
-                (META_COMMITTED_AT, chrono::Utc::now().to_rfc3339()),
-            ] {
-                tx.execute("INSERT INTO meta(key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value", params![key, value])?;
-            }
-            tx.commit()?;
-        }
-        self.discard_session(session_id)?;
         Ok(CommitOutcome {
             generation,
             works: self.work_count(),
             files_added: needed.len() as i64,
-            files_removed,
+            files_removed: journal
+                .changes
+                .iter()
+                .filter(|change| change.removal)
+                .count() as i64,
             missing_referenced: self.missing_referenced_count(),
             unchanged: false,
         })
     }
 
-    fn place_files(
+    fn publication_dir(&self) -> PathBuf {
+        self.incoming_root.join("publication")
+    }
+
+    fn backup_path(&self, journal: &PublicationJournal, index: usize) -> PathBuf {
+        let change = &journal.changes[index];
+        if change.removal {
+            self.trash_root
+                .join(&journal.trash_batch)
+                .join(&change.path)
+        } else {
+            self.publication_dir().join(format!("old-{index}"))
+        }
+    }
+
+    fn prepare_publication(
         &self,
         session_id: &str,
         needed: &[(String, i64, i64, Option<String>)],
-    ) -> Result<FilePublication, SyncError> {
-        let mut publication = FilePublication::default();
-        let rollback_dir = self.session_dir(session_id).join("rollback");
-        let result = (|| -> Result<(), SyncError> {
-            for (index, (path, _, _, sha)) in needed.iter().enumerate() {
-                let Some(sha) = sha.as_deref() else {
-                    return Err(SyncError::Conflict("上がっていないファイルがあります"));
-                };
-                let (blob, _) = self.blob_paths(session_id, sha);
-                let target = self.library_path(path);
-                if let Some(parent) = target.parent() {
-                    fs::create_dir_all(parent)?;
-                }
-                // 動かして置き、失敗したら動かして戻す。本棚を閉じている間なので、写すと
-                // 止まる時間も要る空き容量も本棚の大きさに比例してしまう。写すのは、同じ中身が
-                // まだ後に続くときだけ（同じ中身は sha の順に並んでいる）。
-                let temporary = needed
-                    .get(index + 1)
-                    .is_some_and(|next| next.3.as_deref() == Some(sha))
-                    .then(|| target.with_extension(format!("piep-incoming-{}", random_token(6))));
-                if let Some(temporary) = &temporary {
-                    if let Err(error) = fs::copy(&blob, temporary) {
-                        let _ = fs::remove_file(temporary);
-                        return Err(error.into());
-                    }
-                }
-                let placed = (|| -> Result<(), SyncError> {
-                    let previous = if target.exists() {
-                        if !target.is_file() {
-                            return Err(SyncError::Conflict(
-                                "ファイルの置き場にフォルダーがあります",
-                            ));
-                        }
-                        fs::create_dir_all(&rollback_dir)?;
-                        let previous = rollback_dir.join(random_token(12));
-                        fs::rename(&target, &previous)?;
-                        Some(previous)
-                    } else {
-                        None
-                    };
-                    publication.files.push(PlacedFile {
-                        target: target.clone(),
-                        previous,
-                        blob: temporary.is_none().then(|| blob.clone()),
-                    });
-                    fs::rename(temporary.as_ref().unwrap_or(&blob), &target)?;
-                    Ok(())
-                })();
-                if let Some(temporary) = &temporary {
-                    let _ = fs::remove_file(temporary);
-                }
-                placed?;
+        stale: &[String],
+        restoring: Option<&Path>,
+    ) -> Result<PublicationJournal, SyncError> {
+        let dir = self.publication_dir();
+        // この時点には未復旧の journal は無い。公開前の準備だけ残った場合は捨てられる。
+        self.remove_publication()?;
+        fs::create_dir_all(&dir)?;
+        let mut journal = PublicationJournal {
+            id: random_token(16),
+            session_id: session_id.to_string(),
+            changes: Vec::new(),
+            database_changed: restoring.is_some(),
+            had_database: self.db.db_path().exists(),
+            trash_batch: format!(
+                "{}-{}",
+                chrono::Utc::now().format("%Y%m%dT%H%M%S%.3fZ"),
+                random_token(6)
+            ),
+        };
+        for (index, (path, _, _, sha)) in needed.iter().enumerate() {
+            let target = self.library_path(path);
+            if target.exists() && !target.is_file() {
+                return Err(SyncError::Conflict(
+                    "ファイルの置き場にフォルダーがあります",
+                ));
             }
-            Ok(())
-        })();
-        if let Err(error) = result {
-            publication
-                .rollback()
-                .map_err(|recovery| SyncError::Internal(format!("{error:?}。{recovery}")))?;
-            return Err(error);
+            let (blob, _) = self.blob_paths(
+                session_id,
+                sha.as_deref()
+                    .ok_or(SyncError::Conflict("上がっていないファイルがあります"))?,
+            );
+            let prepared = dir.join(format!("new-{index}"));
+            // 受信 blob は確定まで保持する。NTFS の hard link なら大きな本文も写さずに済み、
+            // 対応しない置き場では本棚を閉じる前に写す。
+            if fs::hard_link(&blob, &prepared).is_err() {
+                fs::copy(&blob, &prepared)?;
+            }
+            OpenOptions::new().write(true).open(&prepared)?.sync_all()?;
+            journal.changes.push(FileChange {
+                path: path.clone(),
+                had_previous: target.exists(),
+                removal: false,
+            });
         }
-        Ok(publication)
+        for path in stale {
+            let target = self.library_path(path);
+            if target.exists() {
+                journal.changes.push(FileChange {
+                    path: path.clone(),
+                    had_previous: true,
+                    removal: true,
+                });
+            }
+        }
+        if let Some(restoring) = restoring {
+            let previous = self.db.db_path().with_extension("db.previous");
+            if previous.exists() && !previous.is_file() {
+                return Err(SyncError::Conflict(
+                    "DB の控えの置き場にフォルダーがあります",
+                ));
+            }
+            fs::rename(restoring, dir.join("new-db"))?;
+            OpenOptions::new()
+                .write(true)
+                .open(dir.join("new-db"))?
+                .sync_all()?;
+        }
+        Ok(journal)
     }
 
-    /// 一覧から消えたファイルを `library-trash` へ移す。入れ替えのあとなので、読んでいる世代は困らない。
-    fn move_to_trash(&self, stale: &[String]) -> Result<i64, SyncError> {
-        if stale.is_empty() {
-            return Ok(0);
-        }
-        let batch = self
-            .trash_root
-            .join(chrono::Utc::now().format("%Y%m%dT%H%M%S%.3fZ").to_string());
-        let mut moved = 0;
-        for relative in stale {
-            let source = self.library_path(relative);
-            if source.exists() {
-                let mut target = batch.clone();
-                target.extend(relative.split('/'));
-                if let Some(parent) = target.parent() {
-                    fs::create_dir_all(parent)?;
+    fn persist_publication(&self, journal: &PublicationJournal) -> Result<(), String> {
+        let dir = self.publication_dir();
+        let bytes = serde_json::to_vec(journal).map_err(|error| error.to_string())?;
+        let temporary = dir.join("journal.tmp");
+        let mut file = File::create(&temporary).map_err(|error| error.to_string())?;
+        file.write_all(&bytes).map_err(|error| error.to_string())?;
+        file.sync_all().map_err(|error| error.to_string())?;
+        drop(file);
+        rename_publication_file(&temporary, &dir.join("journal.json"))
+            .map_err(|error| error.to_string())?;
+        sync_directory(&dir).map_err(|error| error.to_string())?;
+        publication_boundary();
+        Ok(())
+    }
+
+    fn apply_publication(&self, journal: &PublicationJournal) -> Result<(), String> {
+        self.persist_publication(journal)?;
+        self.set_phase("placing_files");
+        let dir = self.publication_dir();
+        for (index, change) in journal.changes.iter().enumerate() {
+            let target = self.library_path(&change.path);
+            let backup = self.backup_path(journal, index);
+            if change.had_previous {
+                if let Some(parent) = backup.parent() {
+                    fs::create_dir_all(parent).map_err(|error| error.to_string())?;
                 }
-                fs::rename(&source, &target)?;
-                moved += 1;
+                rename_publication_file(&target, &backup).map_err(|error| error.to_string())?;
+                publication_boundary();
             }
-            self.store
-                .connection()?
-                .execute("DELETE FROM files WHERE path = ?1", [relative])?;
+            if !change.removal {
+                if let Some(parent) = target.parent() {
+                    fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+                }
+                rename_publication_file(&dir.join(format!("new-{index}")), &target)
+                    .map_err(|error| error.to_string())?;
+                publication_boundary();
+            }
         }
-        Ok(moved)
+        if journal.database_changed {
+            self.set_phase("swapping");
+            let live = self.db.db_path();
+            remove_database_sidecars(live)?;
+            publication_boundary();
+            if journal.had_database {
+                rename_publication_file(live, &dir.join("old-db"))
+                    .map_err(|error| error.to_string())?;
+                publication_boundary();
+            }
+            rename_publication_file(&dir.join("new-db"), live)
+                .map_err(|error| error.to_string())?;
+            publication_boundary();
+        }
+        Ok(())
+    }
+
+    fn rollback_publication(&self, journal: &PublicationJournal) -> Result<(), String> {
+        for (index, change) in journal.changes.iter().enumerate().rev() {
+            restore_file(
+                &self.library_path(&change.path),
+                &self.backup_path(journal, index),
+                change.had_previous,
+            )?;
+        }
+        if journal.database_changed {
+            remove_database_sidecars(self.db.db_path())?;
+            restore_file(
+                self.db.db_path(),
+                &self.publication_dir().join("old-db"),
+                journal.had_database,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn record_publication(
+        &self,
+        journal: &PublicationJournal,
+        generation: i64,
+        database_sha: &str,
+    ) -> Result<(), SyncError> {
+        let mut conn = self.store.connection()?;
+        let tx = conn.transaction()?;
+        tx.execute("DELETE FROM files", [])?;
+        tx.execute(
+            "INSERT INTO files (path, size, mtime_ms)
+             SELECT path, size, mtime_ms FROM session_files WHERE session_id = ?1",
+            [&journal.session_id],
+        )?;
+        for (key, value) in [
+            (META_GENERATION, generation.to_string()),
+            (META_DATABASE_SHA, database_sha.to_string()),
+            (META_COMMITTED_AT, chrono::Utc::now().to_rfc3339()),
+            (META_PUBLICATION, journal.id.clone()),
+        ] {
+            tx.execute("INSERT INTO meta(key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value", params![key, value])?;
+        }
+        tx.execute(
+            "DELETE FROM session_files WHERE session_id = ?1",
+            [&journal.session_id],
+        )?;
+        tx.execute(
+            "DELETE FROM meta WHERE key IN (?1, ?2)",
+            [META_SESSION, META_SESSION_AT],
+        )?;
+        tx.commit()?;
+        publication_boundary();
+        Ok(())
+    }
+
+    fn finish_publication(&self, journal: &PublicationJournal) -> Result<(), String> {
+        let old_db = self.publication_dir().join("old-db");
+        if old_db.exists() {
+            let previous = self.db.db_path().with_extension("db.previous");
+            remove_file_if_present(&previous)?;
+            rename_publication_file(&old_db, &previous).map_err(|error| error.to_string())?;
+        }
+        let session = self.session_dir(&journal.session_id);
+        if session.exists() {
+            fs::remove_dir_all(session).map_err(|error| error.to_string())?;
+        }
+        self.remove_publication()
+    }
+
+    fn remove_publication(&self) -> Result<(), String> {
+        match fs::remove_dir_all(self.publication_dir()) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(format!("送信の復旧記録を片付けられません: {error}")),
+        }
+    }
+
+    /// DB を開く前に呼ぶ。巻き戻しが失敗したら控えと journal を残し、公開を始めない。
+    pub fn recover_pending_publication(&self) -> Result<(), String> {
+        let path = self.publication_dir().join("journal.json");
+        let bytes = match fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return self.remove_publication()
+            }
+            Err(error) => return Err(format!("送信の復旧記録を読めません: {error}")),
+        };
+        let journal: PublicationJournal = serde_json::from_slice(&bytes)
+            .map_err(|error| format!("送信の復旧記録が壊れています: {error}"))?;
+        if self.store.meta(META_PUBLICATION)?.as_deref() == Some(journal.id.as_str()) {
+            self.finish_publication(&journal)
+        } else {
+            self.rollback_publication(&journal)?;
+            self.remove_publication()
+        }
+    }
+
+    fn recover_before_write(&self) -> Result<(), SyncError> {
+        if self.publication_dir().exists() {
+            // 未確定の復旧記録が残る場合、前の巻き戻しも失敗しており DB は閉じている。
+            // 確定済みなら cleanup だけなので、読んでいる DB はそのままでよい。
+            self.recover_pending_publication()?;
+            if self.db.current().is_none() {
+                self.db.open_existing()?;
+            }
+        }
+        Ok(())
     }
 
     fn purge_trash(&self) {
@@ -921,41 +1024,533 @@ impl SyncReceiver {
     }
 }
 
-/// 受け取った DB を本棚の DB に置き換える。直前の DB を 1 つ残す。
-fn install_database(incoming: &Path, live: &Path, moved: &Cell<bool>) -> Result<(), String> {
-    let error = |detail: io::Error| format!("DB を入れ替えられません: {detail}");
-    let previous = live.with_extension("db.previous");
-    for suffix in ["-wal", "-shm"] {
-        let sidecar = PathBuf::from(format!("{}{suffix}", live.display()));
-        if sidecar.exists() {
-            fs::remove_file(sidecar).map_err(error)?;
-        }
+fn remove_file_if_present(path: &Path) -> Result<(), String> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("{} を消せません: {error}", path.display())),
     }
-    if live.exists() {
-        if previous.exists() {
-            fs::remove_file(&previous).map_err(error)?;
-        }
-        fs::rename(live, &previous).map_err(error)?;
-        moved.set(true);
+}
+
+fn restore_file(target: &Path, backup: &Path, had_previous: bool) -> Result<(), String> {
+    if backup.exists() {
+        remove_file_if_present(target)?;
+        rename_publication_file(backup, target)
+            .map_err(|error| format!("{} を元に戻せません: {error}", target.display()))?;
+    } else if !had_previous {
+        remove_file_if_present(target)?;
     }
-    fs::rename(incoming, live).map_err(error)?;
-    moved.set(true);
     Ok(())
 }
 
-fn restore_previous_database(live: &Path, had_database: bool) -> Result<(), String> {
+fn remove_database_sidecars(live: &Path) -> Result<(), String> {
     for suffix in ["-wal", "-shm"] {
-        let sidecar = PathBuf::from(format!("{}{suffix}", live.display()));
-        match fs::remove_file(sidecar) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(format!("DB の作業ファイルを戻せません: {error}")),
+        remove_file_if_present(&PathBuf::from(format!("{}{suffix}", live.display())))?;
+    }
+    Ok(())
+}
+
+/// journal と公開ファイルの順序を、OS の書込みキャッシュにも反映させる。
+#[cfg(windows)]
+fn rename_publication_file(source: &Path, destination: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_WRITE_THROUGH};
+
+    let source = source.canonicalize()?;
+    let destination = destination
+        .parent()
+        .ok_or_else(|| io::Error::other("配置先の親がありません"))?
+        .canonicalize()?
+        .join(
+            destination
+                .file_name()
+                .ok_or_else(|| io::Error::other("配置先の名前がありません"))?,
+        );
+    let source: Vec<u16> = source
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let destination: Vec<u16> = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    // SAFETY: 両方のパスはNUL終端で、同期呼出しが終わるまで有効である。
+    // 置換先は事前に退避済みなので、予期せず存在するファイルは上書きしない。
+    unsafe {
+        MoveFileExW(
+            PCWSTR(source.as_ptr()),
+            PCWSTR(destination.as_ptr()),
+            MOVEFILE_WRITE_THROUGH,
+        )
+    }
+    .map_err(io::Error::other)
+}
+
+#[cfg(not(windows))]
+fn rename_publication_file(source: &Path, destination: &Path) -> io::Result<()> {
+    fs::rename(source, destination)?;
+    if let Some(parent) = source.parent() {
+        sync_directory(parent)?;
+    }
+    if let Some(parent) = destination.parent() {
+        sync_directory(parent)?;
+    }
+    Ok(())
+}
+
+fn sync_directory(path: &Path) -> io::Result<()> {
+    #[cfg(not(windows))]
+    File::open(path)?.sync_all()?;
+    #[cfg(windows)]
+    let _ = path;
+    Ok(())
+}
+
+fn publication_boundary() {
+    #[cfg(test)]
+    publication_tests::interrupt_at_boundary();
+}
+
+#[cfg(test)]
+mod publication_tests {
+    use super::*;
+    use crate::database::{Database, NewDownload};
+    use crate::server::snapshot::prepare_for_send;
+    use crate::server::standalone::{assemble, ServerPaths, StandaloneParts};
+    use crate::server::tests::TestRoot;
+    use std::cell::Cell;
+
+    const CHANGED: &str = "downloads/pixiv/1/original.json";
+    const ADDED: &str = "downloads/pixiv/1/added.bin";
+    const STALE: &str = "downloads/pixiv/1/stale.bin";
+    thread_local! {
+        static INTERRUPT_AFTER: Cell<Option<usize>> = const { Cell::new(None) };
+    }
+
+    pub(super) fn interrupt_at_boundary() {
+        INTERRUPT_AFTER.with(|remaining| match remaining.get() {
+            Some(1) => {
+                remaining.set(None);
+                panic!("simulated process interruption");
+            }
+            Some(count) => remaining.set(Some(count - 1)),
+            None => {}
+        });
+    }
+
+    fn hash(bytes: &[u8]) -> String {
+        Sha256::digest(bytes)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    }
+
+    fn snapshot(root: &Path, title: &str) -> Vec<u8> {
+        let source = root.join(title);
+        fs::create_dir_all(&source).unwrap();
+        let db = Database::open(&source.join("source.db"), &source.join("downloads")).unwrap();
+        let body = source.join(CHANGED);
+        db.upsert_download(&NewDownload {
+            source: "pixiv".into(),
+            source_id: "1".into(),
+            title: title.into(),
+            author_name: "author".into(),
+            author_id: "author".into(),
+            content_type: "novel".into(),
+            tags: vec![],
+            excerpt: None,
+            cover_path: None,
+            json_path: body.to_string_lossy().into_owned(),
+            original_json_path: Some(body.to_string_lossy().into_owned()),
+            asset_count: 0,
+            file_size_bytes: 0,
+            downloaded_at: "2026-11-06T00:00:00Z".into(),
+            source_created_at: None,
+            content_hash: Some(title.into()),
+            text_length: 3,
+            source_updated_at: None,
+            watch_updates: false,
+            current_version: 1,
+            favorite: false,
+        })
+        .unwrap();
+        let snapshot = source.join("snapshot.db");
+        db.write_vacuumed_copy(&snapshot).unwrap();
+        prepare_for_send(&snapshot, &source).unwrap();
+        fs::read(snapshot).unwrap()
+    }
+
+    fn queue(receiver: &SyncReceiver, session: &str, path: &str, bytes: &[u8], mtime: i64) {
+        receiver
+            .add_manifest(
+                session,
+                &[ManifestEntry {
+                    path: path.into(),
+                    size: bytes.len() as u64,
+                    mtime_ms: mtime,
+                }],
+            )
+            .unwrap();
+        let sha = hash(bytes);
+        receiver
+            .write_blob(session, &sha, 0, bytes.len() as u64, bytes)
+            .unwrap();
+        receiver
+            .bind_files(
+                session,
+                &[BindEntry {
+                    path: path.into(),
+                    sha256: sha,
+                }],
+            )
+            .unwrap();
+    }
+
+    fn seed(paths: &ServerPaths, database: &[u8]) -> StandaloneParts {
+        let parts = assemble(paths, None, None).unwrap();
+        let receiver = &parts.receiver;
+        let session = receiver.open_session().unwrap().session_id;
+        queue(receiver, &session, CHANGED, b"old", 1);
+        queue(receiver, &session, STALE, b"stale", 1);
+        let sha = hash(database);
+        receiver
+            .write_blob(&session, &sha, 0, database.len() as u64, database)
+            .unwrap();
+        receiver
+            .commit(
+                &session,
+                &CommitRequest {
+                    database_sha256: sha,
+                },
+            )
+            .unwrap();
+        receiver.stop_index_catch_up();
+        parts
+    }
+
+    fn next(parts: &StandaloneParts, database: &[u8]) -> (String, CommitRequest) {
+        let receiver = &parts.receiver;
+        let session = receiver.open_session().unwrap().session_id;
+        queue(receiver, &session, CHANGED, b"new", 2);
+        queue(receiver, &session, ADDED, b"added", 2);
+        let sha = hash(database);
+        receiver
+            .write_blob(&session, &sha, 0, database.len() as u64, database)
+            .unwrap();
+        (
+            session,
+            CommitRequest {
+                database_sha256: sha,
+            },
+        )
+    }
+
+    fn assert_generation(parts: &StandaloneParts, paths: &ServerPaths, new: bool) {
+        assert_eq!(parts.receiver.generation(), if new { 2 } else { 1 });
+        assert_eq!(
+            parts.db.current().unwrap().get_download(1).unwrap().title,
+            if new { "new" } else { "old" }
+        );
+        assert_eq!(
+            fs::read(paths.library().join(CHANGED)).unwrap(),
+            if new { b"new" } else { b"old" }
+        );
+        assert_eq!(paths.library().join(STALE).exists(), !new);
+        assert_eq!(paths.library().join(ADDED).exists(), new);
+        let conn = parts.context.store.connection().unwrap();
+        let mtime: i64 = conn
+            .query_row(
+                "SELECT mtime_ms FROM files WHERE path = ?1",
+                [CHANGED],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(mtime, if new { 2 } else { 1 });
+        let stale: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM files WHERE path = ?1",
+                [STALE],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stale, i64::from(!new));
+    }
+
+    #[test]
+    fn interrupted_publication_recovers_at_every_rename_and_commit_boundary() {
+        let root = TestRoot::created("publication_interrupt");
+        let old = snapshot(&root.0, "old");
+        let new = snapshot(&root.0, "new");
+        // journal、変更/追加/不要ファイル、sidecar、旧/新DB、状態DBのcommit。
+        for boundary in 1..=9 {
+            let paths = ServerPaths::new(&root.0.join(format!("server-{boundary}"))).unwrap();
+            let parts = seed(&paths, &old);
+            parts
+                .context
+                .store
+                .apply_favorite(
+                    &parts.db.current().unwrap(),
+                    "pixiv",
+                    "1",
+                    "phone",
+                    &crate::server::store::FavoriteUpdate {
+                        favorite: true,
+                        device_time: 1,
+                    },
+                )
+                .unwrap()
+                .unwrap();
+            let (session, request) = next(&parts, &new);
+            INTERRUPT_AFTER.with(|remaining| remaining.set(Some(boundary)));
+            let interrupted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                parts.receiver.commit(&session, &request)
+            }));
+            assert!(interrupted.is_err(), "boundary {boundary}");
+            INTERRUPT_AFTER.with(|remaining| assert_eq!(remaining.replace(None), None));
+            parts.receiver.stop_index_catch_up();
+            drop(parts);
+
+            let reopened = assemble(&paths, None, None).unwrap();
+            assert_generation(&reopened, &paths, boundary == 9);
+            assert!(
+                reopened
+                    .db
+                    .current()
+                    .unwrap()
+                    .get_download(1)
+                    .unwrap()
+                    .favorite
+            );
+            assert!(!reopened.receiver.publication_dir().exists());
+            if boundary < 9 {
+                assert!(
+                    reopened
+                        .receiver
+                        .blob_state(&session, &hash(b"new"))
+                        .unwrap()
+                        .complete
+                );
+                assert_eq!(
+                    reopened
+                        .receiver
+                        .commit(&session, &request)
+                        .unwrap()
+                        .generation,
+                    2
+                );
+                reopened.receiver.stop_index_catch_up();
+            } else {
+                // commit 直後の中断は新世代を採用し、次の送信はアップロード無しで済む。
+                assert!(!reopened.receiver.status().session_open);
+                let session = reopened.receiver.open_session().unwrap().session_id;
+                assert!(reopened
+                    .receiver
+                    .add_manifest(
+                        &session,
+                        &[
+                            ManifestEntry {
+                                path: CHANGED.into(),
+                                size: 3,
+                                mtime_ms: 2
+                            },
+                            ManifestEntry {
+                                path: ADDED.into(),
+                                size: 5,
+                                mtime_ms: 2
+                            },
+                        ]
+                    )
+                    .unwrap()
+                    .is_empty());
+                assert!(
+                    reopened
+                        .receiver
+                        .commit(&session, &request)
+                        .unwrap()
+                        .unchanged
+                );
+            }
+            assert_generation(&reopened, &paths, true);
+            assert!(
+                reopened
+                    .db
+                    .current()
+                    .unwrap()
+                    .get_download(1)
+                    .unwrap()
+                    .favorite
+            );
         }
     }
-    if had_database {
-        fs::rename(live.with_extension("db.previous"), live)
-            .map_err(|error| format!("前の DB を戻せません: {error}"))
-    } else {
-        fs::remove_file(live).map_err(|error| format!("未確定の DB を消せません: {error}"))
+
+    #[test]
+    fn a_state_database_write_failure_restores_files_database_and_retryable_blobs() {
+        let root = TestRoot::created("publication_metadata_failure");
+        let paths = ServerPaths::new(&root.0.join("server")).unwrap();
+        let parts = seed(&paths, &snapshot(&root.0, "old"));
+        let (session, request) = next(&parts, &snapshot(&root.0, "new"));
+        parts.context.store.connection().unwrap().execute_batch(
+            "CREATE TEMP TRIGGER fail_generation BEFORE INSERT ON meta WHEN NEW.key = 'generation'
+             BEGIN SELECT RAISE(FAIL, 'simulated metadata write failure'); END;"
+        ).unwrap();
+        assert!(parts.receiver.commit(&session, &request).is_err());
+        parts.receiver.stop_index_catch_up();
+        assert_generation(&parts, &paths, false);
+        assert!(
+            parts
+                .receiver
+                .blob_state(&session, &hash(b"new"))
+                .unwrap()
+                .complete
+        );
+        parts
+            .context
+            .store
+            .connection()
+            .unwrap()
+            .execute_batch("DROP TRIGGER fail_generation")
+            .unwrap();
+        assert_eq!(
+            parts
+                .receiver
+                .commit(&session, &request)
+                .unwrap()
+                .generation,
+            2
+        );
+        parts.receiver.stop_index_catch_up();
+        assert_generation(&parts, &paths, true);
+    }
+
+    #[test]
+    fn expired_abandoned_sessions_do_not_keep_updates_waiting_but_active_writes_do() {
+        let root = TestRoot::created("session_expiry");
+        let paths = ServerPaths::new(&root.0.join("server")).unwrap();
+        let parts = assemble(&paths, None, None).unwrap();
+        let receiver = &parts.receiver;
+        assert!(!receiver.status().session_open);
+        let first = receiver.open_session().unwrap().session_id;
+        assert!(receiver.status().session_open);
+
+        let expired = chrono::Utc::now() - SESSION_LIFETIME - chrono::TimeDelta::seconds(1);
+        receiver
+            .store
+            .set_meta(META_SESSION_AT, &expired.to_rfc3339())
+            .unwrap();
+        assert!(
+            !receiver.status().session_open,
+            "再送を開かなくても quiet 待機を通過する"
+        );
+        {
+            let _writing = receiver.write_lock.lock().unwrap();
+            assert!(
+                receiver.status().session_open,
+                "期限をまたいだ実際の書込みは待つ"
+            );
+        }
+        assert!(!receiver.status().session_open);
+        assert!(
+            receiver.session_dir(&first).exists(),
+            "status はファイルを削除しない"
+        );
+        let fresh = receiver.open_session().unwrap();
+        assert!(!fresh.resumed);
+        assert_ne!(fresh.session_id, first);
+        assert!(receiver.status().session_open);
+        assert!(!receiver.session_dir(&first).exists());
+        receiver.store.set_meta(META_SESSION_AT, "invalid").unwrap();
+        assert!(!receiver.status().session_open);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn a_locked_stale_file_leaves_the_old_generation_and_the_same_session_can_retry() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let root = TestRoot::created("publication_stale_lock");
+        let paths = ServerPaths::new(&root.0.join("server")).unwrap();
+        let parts = seed(&paths, &snapshot(&root.0, "old"));
+        let (session, request) = next(&parts, &snapshot(&root.0, "new"));
+        let locked = OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(paths.library().join(STALE))
+            .unwrap();
+        assert!(parts.receiver.commit(&session, &request).is_err());
+        parts.receiver.stop_index_catch_up();
+        drop(locked);
+        assert_generation(&parts, &paths, false);
+        assert_eq!(
+            parts
+                .receiver
+                .commit(&session, &request)
+                .unwrap()
+                .generation,
+            2
+        );
+        parts.receiver.stop_index_catch_up();
+        assert_generation(&parts, &paths, true);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn a_failed_rollback_keeps_the_journal_and_recovers_before_a_same_session_retry() {
+        use std::cell::RefCell;
+        use std::os::windows::fs::OpenOptionsExt;
+        let root = TestRoot::created("publication_rollback_lock");
+        let paths = ServerPaths::new(&root.0.join("server")).unwrap();
+        let parts = seed(&paths, &snapshot(&root.0, "old"));
+        let (session, request) = next(&parts, &snapshot(&root.0, "new"));
+        let receiver = &parts.receiver;
+        let restoring = paths.incoming().join("restoring.db");
+        fs::copy(
+            receiver.blob_paths(&session, &request.database_sha256).0,
+            &restoring,
+        )
+        .unwrap();
+        restore_on_server(&restoring, &paths.library(), Some(&paths.database())).unwrap();
+        let needed = vec![
+            (CHANGED.into(), 3, 2, Some(hash(b"new"))),
+            (ADDED.into(), 5, 2, Some(hash(b"added"))),
+        ];
+        let journal = receiver
+            .prepare_publication(&session, &needed, &[STALE.into()], Some(&restoring))
+            .unwrap();
+        let locked = RefCell::new(None);
+        assert!(parts
+            .db
+            .replace_with(
+                || {
+                    receiver.apply_publication(&journal)?;
+                    *locked.borrow_mut() = Some(
+                        OpenOptions::new()
+                            .read(true)
+                            .share_mode(0)
+                            .open(paths.library().join(CHANGED))
+                            .unwrap(),
+                    );
+                    Err("simulated failure after installation".into())
+                },
+                || receiver.recover_pending_publication(),
+            )
+            .is_err());
+        assert!(parts.db.current().is_none());
+        assert!(receiver.publication_dir().join("journal.json").exists());
+        assert!(receiver.publication_dir().join("old-db").exists());
+        let expired = chrono::Utc::now() - SESSION_LIFETIME - chrono::TimeDelta::seconds(1);
+        receiver
+            .store
+            .set_meta(META_SESSION_AT, &expired.to_rfc3339())
+            .unwrap();
+        assert!(
+            receiver.status().session_open,
+            "期限切れでも未復旧の公開DBを更新へ渡さない"
+        );
+        drop(locked);
+        assert_eq!(receiver.commit(&session, &request).unwrap().generation, 2);
+        receiver.stop_index_catch_up();
+        assert_generation(&parts, &paths, true);
     }
 }

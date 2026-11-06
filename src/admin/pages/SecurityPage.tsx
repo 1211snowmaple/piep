@@ -1,11 +1,12 @@
 import { useEffect, useState } from "react";
-import { Alert, Button, Group, PasswordInput, Skeleton, Stack, Text, TextInput } from "@mantine/core";
+import { Alert, Button, Group, Skeleton, Stack, Text, TextInput } from "@mantine/core";
 import { modals } from "@mantine/modals";
 import { notifications } from "@mantine/notifications";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { DANGER_CONFIRM, DangerButton } from "@/components/DangerButton";
 import { adminApi, failureMessage, type Connection } from "../api";
 import { Card, Facts, PageHead, showFailure, useReauth, useStatus } from "../shared";
+import { NewPasswordFields, newPasswordReady } from "../Entry";
 
 const TLS_LABEL: Record<Connection["tls"], string> = {
   none: "このサーバーの手前で受けます",
@@ -58,7 +59,7 @@ function PasswordCard() {
   const [again, setAgain] = useState("");
   const [problem, setProblem] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
-  const ready = [...password].length >= 15 && password === again;
+  const ready = newPasswordReady(password, again);
   const submit = async () => {
     setPending(true);
     setProblem(null);
@@ -68,7 +69,7 @@ function PasswordCard() {
         if (done) {
           setPassword("");
           setAgain("");
-          notifications.show({ message: "パスワードを変えました。ほかのログインは切れました。" });
+          notifications.show({ message: "パスワードを変更しました。ほかのブラウザはログアウトしました。" });
         }
       });
     } catch (error) {
@@ -81,8 +82,7 @@ function PasswordCard() {
     <Card title="パスワードの変更">
       <form onSubmit={(event) => { event.preventDefault(); if (ready) void submit(); }}>
         <Stack gap="sm" maw={360}>
-          <PasswordInput label="新しいパスワード" description="15 文字以上。文章でもかまいません。" autoComplete="new-password" value={password} onChange={(event) => setPassword(event.currentTarget.value)} />
-          <PasswordInput label="もう一度" autoComplete="new-password" value={again} onChange={(event) => setAgain(event.currentTarget.value)} error={again.length > 0 && again !== password ? "上と違います" : undefined} />
+          <NewPasswordFields label="新しいパスワード" password={password} again={again} onPassword={setPassword} onAgain={setAgain} />
           {problem && <Alert color="red" variant="light">{problem}</Alert>}
           <Group><Button type="submit" variant="default" loading={pending} disabled={!ready}>変更する</Button></Group>
         </Stack>

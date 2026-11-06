@@ -295,8 +295,9 @@ pub fn host_name(host: &str) -> &str {
     host.rsplit_once(':').map_or(host, |(name, _)| name)
 }
 
-/// IP と localhost はいつでも通す。名前は、券が通ったものか `public_url` のものだけを通す。
+/// IP と localhost はいつでも通す。名前は、覚えたものか `public_url` のものだけを通す。
 /// 攻撃者の名前を 127.0.0.1 へ向けて口を読ませる手口（DNS rebinding）を止めるためである。
+/// 名前を覚えるのは、管理者の鍵でリンクを発行したときと、券が通ったときである。
 fn host_allowed(ctx: &ServerContext, host: &str) -> bool {
     let name = host_name(host).to_ascii_lowercase();
     if name == "localhost" || name.parse::<IpAddr>().is_ok() {
@@ -340,6 +341,9 @@ async fn guard(State(ctx): State<Ctx>, mut request: Request, next: Next) -> Resp
             return rejected("host_rejected", "このアドレスでは開けません");
         };
         if !host_allowed(&ctx, &host) {
+            if wants_page(&request) {
+                return host_rejected_page(&host);
+            }
             return rejected(
                 "host_rejected",
                 "このアドレスでは開けません。デスクトップ版の「管理画面を開く」か、サーバーの admin-setup --url から開いてください",
@@ -352,6 +356,106 @@ async fn guard(State(ctx): State<Ctx>, mut request: Request, next: Next) -> Resp
     }
     next.run(request).await
 }
+
+/// ブラウザでページとして開いたか。読み込みの部品や API には JSON で答える。
+fn wants_page(request: &Request) -> bool {
+    if request.method() != Method::GET {
+        return false;
+    }
+    let headers = request.headers();
+    if let Some(dest) = headers.get("sec-fetch-dest") {
+        return dest.as_bytes() == b"document";
+    }
+    headers
+        .get(header::ACCEPT)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|accept| accept.contains("text/html"))
+}
+
+/// 知らない名前で開かれたときのページ。アプリのアイコンを丸ごと出し、理由と開き方を書く。
+/// 外のファイルを読まない。読み込みの部品も、同じ理由で断られるからである。
+fn host_rejected_page(host: &str) -> Response {
+    use base64::Engine as _;
+    static PARTS: std::sync::OnceLock<(String, String)> = std::sync::OnceLock::new();
+    let (favicon, icon) = PARTS.get_or_init(|| {
+        let encode = |svg: &str| {
+            format!(
+                "data:image/svg+xml;base64,{}",
+                base64::engine::general_purpose::STANDARD.encode(svg)
+            )
+        };
+        (
+            encode(include_str!("../../../../public/piep.svg")),
+            encode(include_str!("../../../../src/assets/icon.svg")),
+        )
+    });
+    // Host は相手が自由に書けるので、そのまま埋め込まない。
+    let page = HOST_REJECTED_PAGE
+        .replace("{favicon}", favicon)
+        .replace("{icon}", icon)
+        .replace("{host}", &crate::database::parser::escape_html(host));
+    (
+        StatusCode::FORBIDDEN,
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        page,
+    )
+        .into_response()
+}
+
+/// 色と書体は、アプリの背景（`app.css`）と入口のカード（`admin.css`）に合わせる。
+const HOST_REJECTED_PAGE: &str = r#"<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<link rel="icon" type="image/svg+xml" href="{favicon}">
+<title>piep 管理画面</title>
+<style>
+:root { color-scheme: light dark; --bg: #f5f7fa; --card: #fff; --line: #e4e8ee; --text: #1b1f24; --dim: #6b7380; --code: #f1f3f5; --accent: #0d86f4; }
+@media (prefers-color-scheme: dark) { :root { --bg: #0d1117; --card: #161b22; --line: #252b35; --text: #e6e9ee; --dim: #9aa3af; --code: #1f2630; --accent: #59b8ff; } }
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body { min-height: 100vh; min-height: 100dvh; display: grid; place-items: center; padding: 16px; background: var(--bg); color: var(--text);
+  font-family: "Segoe UI", "Yu Gothic UI", Meiryo, "Hiragino Sans", system-ui, -apple-system, sans-serif; font-size: 14px; line-height: 1.7;
+  word-break: auto-phrase; overflow-wrap: anywhere; }
+main { width: min(420px, 100%); padding: 28px; border: 1px solid var(--line); border-radius: 16px; background: var(--card); }
+.brand { display: flex; justify-content: center; margin-bottom: 24px; }
+.brand img { width: 52px; height: 52px; }
+h1 { margin: 0 0 6px; font-size: 20px; font-weight: 700; line-height: 1.35; }
+.lead { margin: 0 0 20px; color: var(--dim); }
+h2 { margin: 0 0 6px; font-size: 14px; font-weight: 650; }
+ol { margin: 0 0 20px; padding-left: 1.4em; line-height: 1.9; }
+.note { margin: 0; padding-top: 16px; border-top: 1px solid var(--line); color: var(--dim); font-size: 12.5px; }
+.note p { margin: 0 0 8px; }
+.note p:last-child { margin-bottom: 0; }
+.host { color: var(--text); font-weight: 600; }
+code { display: block; margin-top: 4px; padding: 8px 10px; border-radius: 8px; background: var(--code); color: var(--text);
+  font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace; font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+</style>
+</head>
+<body>
+<main>
+<div class="brand"><img src="{icon}" alt="piep" width="52" height="52"></div>
+<h1>このアドレスでは開けません</h1>
+<p class="lead">安全のため、管理画面は、デスクトップ版から一度開いたアドレスでだけ開けます。</p>
+<h2>開き方</h2>
+<ol>
+<li>デスクトップ版で「設定」→「サーバー」を開く</li>
+<li>「管理画面を開く」を押す</li>
+</ol>
+<div class="note">
+<p>一度開くと、このアドレスを覚えます。そのあとは、ほかの PC や携帯のブラウザからもこのアドレスで開けます。</p>
+<p>開こうとしたアドレス: <span class="host">{host}</span></p>
+<p>デスクトップ版を使っていない場合は、サーバーの PC で次を実行し、表示されたリンクを開いてください。<code>piep-server admin-setup --data &lt;置き場所&gt; --url &lt;このアドレス&gt;</code></p>
+</div>
+</main>
+</body>
+</html>
+"#;
 
 /// `admin_routes` に重ねる守り。
 pub(super) fn with_guard(router: Router, ctx: Ctx) -> Router {
@@ -857,6 +961,9 @@ async fn issue_ticket(
             "このサーバーでは管理画面を使えません",
         )
     })?;
+    // デスクトップは、いま話している接続先の URL でリンクを開く。その名前を先に覚えておかないと、
+    // ページの読み込みが断られ、券を使う所まで進めない。
+    learn_host(&ctx, &headers);
     let account = ctx.store.admin_account().map_err(storage_error)?;
     let (kind, lifetime) = if account.is_some() {
         (TicketKind::Login, LOGIN_TICKET)
@@ -1314,7 +1421,15 @@ pub(super) fn api_routes() -> Router<Ctx> {
 
 /// 画面とログイン。管理画面を出す口にだけ足す。
 pub(super) fn web_routes(ctx: Ctx) -> Router {
+    let authenticated = Router::new()
+        .route("/api/v1/admin/web/reauth", post(web_reauth))
+        .route("/api/v1/admin/web/disable", post(web_disable))
+        .layer(middleware::from_fn_with_state(
+            Arc::clone(&ctx),
+            super::authorize_admin_before_body,
+        ));
     let routes = Router::new()
+        .merge(authenticated)
         .route("/admin", get(|| async { Redirect::to("/admin/") }))
         .route("/admin/", get(page_root))
         .route("/admin/{*path}", get(page_asset))
@@ -1324,8 +1439,6 @@ pub(super) fn web_routes(ctx: Ctx) -> Router {
         .route("/api/v1/admin/web/ticket", post(web_ticket))
         .route("/api/v1/admin/web/setup", post(web_setup))
         .route("/api/v1/admin/web/logout", post(web_logout))
-        .route("/api/v1/admin/web/reauth", post(web_reauth))
-        .route("/api/v1/admin/web/disable", post(web_disable))
         .layer(axum::extract::DefaultBodyLimit::max(super::MAX_JSON_BYTES))
         .with_state(Arc::clone(&ctx));
     with_guard(routes, Arc::clone(&ctx)).layer(middleware::from_fn_with_state(ctx, secure_headers))

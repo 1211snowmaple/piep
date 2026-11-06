@@ -146,13 +146,12 @@ fn apply_active_edit_to_epub_data(
     download_id: i64,
     source: &str,
     data: &mut serde_json::Value,
-) -> Vec<crate::database::models::AssetEntry> {
-    let Ok(Some(edit)) = db.active_edit_source_form(download_id) else {
-        return Vec::new();
+) -> Result<Vec<crate::database::models::AssetEntry>, String> {
+    let Some(edit) = db.active_edit_source_form(download_id)? else {
+        return Ok(Vec::new());
     };
-    if edit.plain_text.trim().is_empty() {
-        return Vec::new();
-    }
+    // 空の本文も反映済みの編集。文字数で有無を判定すると、本文を消した編集や
+    // 挿絵だけの編集を無視し、取り込んだ本文が書き出しに戻ってしまう。
     let added_images = edit.added_images;
 
     if source == "pixiv" {
@@ -179,7 +178,7 @@ fn apply_active_edit_to_epub_data(
             );
         }
     }
-    added_images
+    Ok(added_images)
 }
 
 /// 編集画面で足した絵を、本文が指している名前（ファイル名の幹）で本へ加える。
@@ -238,7 +237,7 @@ pub fn load_manifest(
     // 差し込むことになる。編集した人が見ていたのは取り込み済みの本文である。
     let assets = db.get_assets(download_id)?;
     crate::database::attachment::apply_attachment_text(&mut data, &dl.source, &assets);
-    let added_images = apply_active_edit_to_epub_data(db, download_id, &dl.source, &mut data);
+    let added_images = apply_active_edit_to_epub_data(db, download_id, &dl.source, &mut data)?;
 
     let assets_dir = Path::new(&target_json_path)
         .parent()

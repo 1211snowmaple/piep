@@ -242,11 +242,18 @@ impl ServerStore {
     /// 一回限りの登録の鍵を発行する。平文はここで返す分だけで、どこにも残らない。
     pub fn issue_pairing(&self, role: Role, lifetime: Duration) -> Result<String, String> {
         let secret = random_token(32);
-        let conn = self.connection()?;
+        let mut conn = self.connection()?;
         let now = now_ms();
-        conn.execute("DELETE FROM pairings WHERE expires_at <= ?1", [now])
+        let tx = conn.transaction().map_err(db_error)?;
+        tx.execute("DELETE FROM pairings WHERE expires_at <= ?1", [now])
             .map_err(db_error)?;
-        conn.execute(
+        if role == Role::Admin {
+            // 再発行後に以前の登録文字列で管理者を奪い返せないようにする。
+            // 登録済みの管理者の鍵は、新しい登録が成功するまで残す。
+            tx.execute("DELETE FROM pairings WHERE role = 'admin'", [])
+                .map_err(db_error)?;
+        }
+        tx.execute(
             "INSERT INTO pairings (secret_hash, role, expires_at) VALUES (?1, ?2, ?3)",
             params![
                 hash_secret(&secret).as_slice(),
@@ -255,6 +262,7 @@ impl ServerStore {
             ],
         )
         .map_err(db_error)?;
+        tx.commit().map_err(db_error)?;
         Ok(secret)
     }
 
@@ -302,6 +310,9 @@ impl ServerStore {
             }
         } else {
             tx.execute("DELETE FROM devices WHERE role = 'admin'", [])
+                .map_err(storage)?;
+            // 古い版が発行して残した登録文字列も、成功した世代をまたがせない。
+            tx.execute("DELETE FROM pairings WHERE role = 'admin'", [])
                 .map_err(storage)?;
         }
         tx.execute(
@@ -791,6 +802,56 @@ mod tests {
         let second = store.consume_pairing(&second, "二台目").unwrap();
         assert!(store.authorize(&first.token).is_none());
         assert_eq!(store.authorize(&second.token).unwrap().role, Role::Admin);
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn reissuing_and_consuming_an_admin_pairing_invalidates_other_admin_secrets() {
+        let (dir, store) = store();
+        let first = store
+            .issue_pairing(Role::Admin, Duration::from_secs(60))
+            .unwrap();
+        let current = store.consume_pairing(&first, "今の管理者").unwrap();
+        let reader = store
+            .issue_pairing(Role::Reader, Duration::from_secs(60))
+            .unwrap();
+        let obsolete = store
+            .issue_pairing(Role::Admin, Duration::from_secs(60))
+            .unwrap();
+        let latest = store
+            .issue_pairing(Role::Admin, Duration::from_secs(60))
+            .unwrap();
+        assert_eq!(
+            store.consume_pairing(&obsolete, "古い案内").unwrap_err(),
+            PairError::Rejected
+        );
+        assert!(
+            store.authorize(&current.token).is_some(),
+            "発行だけでは今の管理者を失効させない"
+        );
+
+        // 修正前の版が複数発行したまま更新された状態も扱う。
+        let legacy = random_token(32);
+        store
+            .connection()
+            .unwrap()
+            .execute(
+                "INSERT INTO pairings(secret_hash, role, expires_at) VALUES (?1, 'admin', ?2)",
+                params![hash_secret(&legacy).as_slice(), now_ms() + 60_000],
+            )
+            .unwrap();
+        let replacement = store.consume_pairing(&latest, "次の管理者").unwrap();
+        assert!(store.authorize(&current.token).is_none());
+        assert!(store.authorize(&replacement.token).is_some());
+        assert_eq!(
+            store.consume_pairing(&legacy, "古い版の案内").unwrap_err(),
+            PairError::Rejected
+        );
+        assert_eq!(
+            store.consume_pairing(&reader, "携帯").unwrap().role,
+            Role::Reader
+        );
         drop(store);
         let _ = std::fs::remove_dir_all(dir);
     }

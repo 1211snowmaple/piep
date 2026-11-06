@@ -292,12 +292,16 @@ impl Database {
             .map(|edit| edit.base_version)
             .unwrap_or_else(|| version.unwrap_or(download.current_version));
         let target_path = reader_version_path(&download, &versions, target_version);
-        let version_assets = assets_for_version_path(&assets, &target_path)
-            .into_iter()
-            .filter(|asset| {
-                std::fs::metadata(&asset.local_path).is_ok_and(|m| m.is_file() && m.len() > 0)
-            })
-            .collect::<Vec<_>>();
+        let version_assets = if active_edit.is_some() {
+            assets_for_edit(&assets, &target_path)
+        } else {
+            assets_for_version_path(&assets, &target_path)
+        }
+        .into_iter()
+        .filter(|asset| {
+            std::fs::metadata(&asset.local_path).is_ok_and(|m| m.is_file() && m.len() > 0)
+        })
+        .collect::<Vec<_>>();
         let asset_stamp = reader_asset_stamp(&version_assets);
         let stamp = if let Some(edit) = &active_edit {
             format!("edit:{}:{}:{asset_stamp}", edit.id, edit.updated_at)

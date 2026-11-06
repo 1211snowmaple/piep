@@ -631,6 +631,215 @@ fn standalone(root: &Path) -> (StandaloneParts, ServerPaths) {
 }
 
 #[tokio::test]
+async fn protected_admin_routes_reject_before_receiving_the_body() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let root = TestRoot::created("admin-body-auth");
+    let (parts, _) = standalone(&root.0);
+    let secret = parts
+        .context
+        .store
+        .issue_pairing(Role::Reader, Duration::from_secs(60))
+        .unwrap();
+    let reader = parts
+        .context
+        .store
+        .consume_pairing(&secret, "reader")
+        .unwrap();
+    let url = spawn_plain(combined_router(Arc::clone(&parts.context)));
+    for (method, path) in [
+        ("POST", "/api/v1/admin/pairings"),
+        ("POST", "/api/v1/admin/sync/sessions/unused/manifest"),
+        ("POST", "/api/v1/admin/sync/sessions/unused/bind"),
+        ("POST", "/api/v1/admin/sync/sessions/unused/commit"),
+        ("POST", "/api/v1/admin/favorites/ack"),
+        (
+            "PUT",
+            "/api/v1/admin/sync/sessions/unused/blobs/unused?offset=0&total=4194304",
+        ),
+        ("PUT", "/api/v1/admin/settings/server-name"),
+    ] {
+        for (token, status) in [
+            (None, 401),
+            (Some("wrong"), 401),
+            (Some(reader.token.as_str()), 403),
+        ] {
+            let address = url.strip_prefix("http://").unwrap();
+            let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+            let authorization = token
+                .map(|token| format!("Authorization: Bearer {token}\r\n"))
+                .unwrap_or_default();
+            // 宣言した本文を一切送らない。extractor が先なら応答は返ってこない。
+            let headers = format!("{method} {path} HTTP/1.1\r\nHost: {address}\r\n{authorization}Content-Type: application/json\r\nContent-Length: 4194304\r\nConnection: close\r\n\r\n");
+            stream.write_all(headers.as_bytes()).await.unwrap();
+            let mut response = [0; 4096];
+            let read = tokio::time::timeout(Duration::from_secs(2), stream.read(&mut response))
+                .await
+                .expect("authorization must not wait for the body")
+                .unwrap();
+            let response = String::from_utf8_lossy(&response[..read]);
+            assert!(
+                response.starts_with(&format!("HTTP/1.1 {status} ")),
+                "{path}: {response}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn favorite_routes_keep_device_and_admin_authorization_separate() {
+    let root = TestRoot::created("favorite-authorization");
+    let (parts, _) = standalone(&root.0);
+    let store = &parts.context.store;
+    let reader = store
+        .consume_pairing(
+            &store
+                .issue_pairing(Role::Reader, Duration::from_secs(60))
+                .unwrap(),
+            "reader",
+        )
+        .unwrap();
+    let admin = store
+        .consume_pairing(
+            &store
+                .issue_pairing(Role::Admin, Duration::from_secs(60))
+                .unwrap(),
+            "admin",
+        )
+        .unwrap();
+    let url = spawn_plain(combined_router(Arc::clone(&parts.context)));
+    let reader_url = spawn_plain(reader_router(Arc::clone(&parts.context)));
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    for token in [None, Some("wrong")] {
+        let request = client
+            .put(format!("{url}/api/v1/favorites/pixiv/test"))
+            .json(&serde_json::json!({ "favorite": true, "deviceTime": 1 }));
+        let request = match token {
+            Some(token) => request.bearer_auth(token),
+            None => request,
+        };
+        assert_eq!(
+            request.send().await.unwrap().status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    for (token, status) in [
+        (None, StatusCode::UNAUTHORIZED),
+        (Some(reader.token.as_str()), StatusCode::FORBIDDEN),
+        (Some(admin.token.as_str()), StatusCode::OK),
+    ] {
+        let request = client.get(format!("{url}/api/v1/admin/favorites?since=0"));
+        let request = match token {
+            Some(token) => request.bearer_auth(token),
+            None => request,
+        };
+        assert_eq!(request.send().await.unwrap().status(), status);
+        let request = client
+            .post(format!("{url}/api/v1/admin/favorites/ack"))
+            .json(&serde_json::json!({ "cursor": 0 }));
+        let request = match token {
+            Some(token) => request.bearer_auth(token),
+            None => request,
+        };
+        assert_eq!(request.send().await.unwrap().status(), status);
+    }
+    assert_eq!(
+        client
+            .get(format!("{reader_url}/api/v1/admin/favorites"))
+            .bearer_auth(&admin.token)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND,
+    );
+    store.revoke_device(&reader.device_id).unwrap();
+    assert_eq!(
+        put_favorite(&client, &url, &reader.token, "test", true, 2)
+            .await
+            .status(),
+        StatusCode::UNAUTHORIZED,
+    );
+}
+
+#[test]
+fn entity_series_cursor_is_rejected_after_reopening_the_library() {
+    let root = TestRoot::created("entity-series-reopen");
+    let first = fixture(&root.0);
+    let (second_id, _) = add_work(
+        &first.state.db,
+        &first.app_data.join("downloads"),
+        "second-series-work",
+        "別作品",
+        "本文",
+    );
+    first
+        .state
+        .db
+        .upsert_download_series(second_id, "pixiv", "second-series", "別シリーズ", Some(1))
+        .unwrap();
+    let page = first
+        .state
+        .db
+        .list_entity_series_paged(
+            "pixiv",
+            "test-author",
+            None,
+            Some("work_count"),
+            Some("desc"),
+            1,
+            None,
+        )
+        .unwrap();
+    let cursor = page.next_cursor.expect("more than one series");
+    let old_generation = first.state.db.library_generation().unwrap();
+    let app_data = first.app_data.clone();
+    drop(first);
+
+    let reopened = Database::open(&app_data.join("piep.db"), &app_data.join("downloads")).unwrap();
+    assert_eq!(
+        old_generation,
+        reopened.library_generation().unwrap(),
+        "data_version alone cannot identify a reopened database"
+    );
+    assert!(reopened
+        .list_entity_series_paged(
+            "pixiv",
+            "test-author",
+            None,
+            Some("work_count"),
+            Some("desc"),
+            1,
+            Some(&cursor)
+        )
+        .unwrap_err()
+        .contains("Library changed"));
+    let fresh = reopened
+        .list_entity_series_paged(
+            "pixiv",
+            "test-author",
+            None,
+            Some("work_count"),
+            Some("desc"),
+            1,
+            None,
+        )
+        .unwrap();
+    assert_eq!(fresh.total, 2);
+    assert!(reopened
+        .list_entity_series_paged(
+            "pixiv",
+            "test-author",
+            None,
+            Some("work_count"),
+            Some("desc"),
+            1,
+            fresh.next_cursor.as_deref()
+        )
+        .is_ok());
+}
+
+#[tokio::test]
 async fn an_existing_admin_is_not_replaced_without_asking() {
     let root = TestRoot::created("admin-guard");
     let url = Some("https://server.example/".to_string());
@@ -2008,6 +2217,97 @@ async fn requests_from_other_sites_and_unknown_hosts_are_refused() {
         .await
         .unwrap();
     assert_eq!(bearer.status(), StatusCode::OK);
+}
+
+/// デスクトップが接続先の名前でリンクを発行すると、その名前でページを開ける。
+/// 127.0.0.1 は名前を問わないので、名前を付けて試す。
+#[tokio::test]
+async fn the_name_the_desktop_issued_a_link_for_opens_the_page() {
+    let site = AdminSite::new("admin-host-learn");
+    site.set_up().await;
+    let token = pair_admin(
+        &RemoteServer {
+            url: format!("{}/", site.url),
+            fingerprint: None,
+        },
+        &admin_secret(&site.paths),
+        "test desktop",
+    )
+    .await
+    .unwrap();
+    let page = |host: &'static str| {
+        site.get("/admin/")
+            .header(header::HOST, host)
+            .header("sec-fetch-dest", "document")
+            .send()
+    };
+    // 覚える前は、ブラウザには理由と次の手を書いたページを返す。
+    let before = page("piep.example.net").await.unwrap();
+    assert_eq!(before.status(), StatusCode::FORBIDDEN);
+    assert!(before.headers()[header::CONTENT_TYPE]
+        .to_str()
+        .unwrap()
+        .starts_with("text/html"));
+    let body = before.text().await.unwrap();
+    assert!(body.contains("管理画面を開く"), "{body}");
+    assert!(body.contains("data:image/svg+xml;base64,"), "{body}");
+    assert!(body.contains("piep.example.net"), "{body}");
+    // Host は相手が自由に書けるので、ページには文字として入れる。
+    let hostile = site
+        .get("/admin/")
+        .header(header::HOST, "a<script>.example")
+        .header("sec-fetch-dest", "document")
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(!hostile.contains("<script>"), "{hostile}");
+    // 部品や API には、今までどおり JSON で答える。
+    let api = site
+        .get("/api/v1/admin/web/state")
+        .header(header::HOST, "piep.example.net")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(api.status(), StatusCode::FORBIDDEN);
+    let error: serde_json::Value = api.json().await.unwrap();
+    assert_eq!(error["code"], "host_rejected");
+
+    let issued = site
+        .client
+        .post(format!("{}/api/v1/admin/tickets", site.url))
+        .bearer_auth(&token)
+        .header(header::HOST, "piep.example.net")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(issued.status(), StatusCode::OK);
+    let issued: serde_json::Value = issued.json().await.unwrap();
+    let ticket = issued["path"]
+        .as_str()
+        .unwrap()
+        .strip_prefix("/admin/#ticket=")
+        .unwrap()
+        .to_string();
+
+    // 発行のあとは、同じ名前でページを開き、券で入れる。
+    let after = page("piep.example.net").await.unwrap();
+    assert_eq!(after.status(), StatusCode::OK);
+    let entered = site
+        .post("/api/v1/admin/web/ticket")
+        .header(header::HOST, "piep.example.net")
+        .json(&serde_json::json!({ "ticket": ticket }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(entered.status(), StatusCode::OK);
+    // 覚えるのは発行に使った名前だけで、ほかの名前は断ったまま。
+    assert_eq!(
+        page("other.example.net").await.unwrap().status(),
+        StatusCode::FORBIDDEN
+    );
 }
 
 #[tokio::test]
