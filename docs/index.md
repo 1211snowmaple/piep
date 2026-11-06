@@ -63,7 +63,7 @@ features:
 | 画面 | <!--stat:screens.count-->10<!--/stat--> |
 | IPC コマンド | <!--stat:commands.total-->199<!--/stat--> |
 | うち説明のあるもの | <!--stat:commands.described-->199<!--/stat--> |
-| イベント | <!--stat:events.total-->17<!--/stat--> |
+| イベント | <!--stat:events.total-->18<!--/stat--> |
 | テーブル | <!--stat:tables.total-->34<!--/stat--> |
 
 この表の数は手で書いていない。抽出器が数え、`docs:check` が古くなっていないかを

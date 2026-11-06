@@ -231,6 +231,33 @@ pub async fn admin_get(
         .map_err(net_error)
 }
 
+/// `admin_get` と同じだが、その口が無い（古いサーバーの）ときは `None` を返す。
+pub async fn admin_get_if_present(
+    remote: &RemoteServer,
+    token: &str,
+    path: &str,
+) -> Result<Option<serde_json::Value>, String> {
+    let client = build_client(remote).await?;
+    let response = client
+        .get(format!(
+            "{}/api/v1/admin/{path}",
+            normalized_base(&remote.url)
+        ))
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(net_error)?;
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    check_status(response)
+        .await?
+        .json()
+        .await
+        .map(Some)
+        .map_err(net_error)
+}
+
 pub async fn admin_post(
     remote: &RemoteServer,
     token: &str,

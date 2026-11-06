@@ -13,7 +13,7 @@ use super::dto::{
     MobilePerson, MobileRevision, MobileSearchPage, MobileSearchRequest, MobileSeriesMembership,
 };
 use super::library::Library;
-use super::store::{AuthorizedDevice, PairError, ReadingUpdate, Role, ServerStore};
+use super::store::{AuthorizedDevice, FavoriteUpdate, PairError, ReadingUpdate, Role, ServerStore};
 use super::sync_receive::{BindEntry, CommitRequest, ManifestEntry, SyncError, SyncReceiver};
 use super::update::{UpdateController, UpdateStatus};
 use super::{pairing_payload, API_VERSION};
@@ -53,8 +53,14 @@ const READER_PAIRING_LIFETIME: Duration = Duration::from_secs(10 * 60);
 const PAIR_ATTEMPTS_PER_MINUTE: usize = 10;
 
 /// `hello` で知らせる機能の一覧。
-const CAPABILITIES_EMBEDDED: &[&str] = &["read", "reading-sync", "entity-detail"];
-const CAPABILITIES_STANDALONE: &[&str] = &["read", "reading-sync", "entity-detail", "admin-sync"];
+const CAPABILITIES_EMBEDDED: &[&str] = &["read", "reading-sync", "entity-detail", "favorite-write"];
+const CAPABILITIES_STANDALONE: &[&str] = &[
+    "read",
+    "reading-sync",
+    "entity-detail",
+    "favorite-write",
+    "admin-sync",
+];
 /// デスクトップ版の作者・シリーズの並び順と同じ語彙。
 const ENTITY_SORTS: &[&str] = &[
     "work_count",
@@ -98,7 +104,11 @@ pub struct ServerContext {
     illustrations: Mutex<CoverCache>,
     illustration_workers: tokio::sync::Semaphore,
     dimensions: Mutex<HashMap<IllustrationKey, (u32, u32)>>,
+    /// 携帯がお気に入りを変えたと、デスクトップ版の画面へ知らせる係。内蔵サーバーにだけある。
+    favorites_listener: OnceLock<FavoritesListener>,
 }
+
+pub type FavoritesListener = Arc<dyn Fn() + Send + Sync>;
 
 /// 挿絵の寸法を覚える鍵。ファイルが置き換わったら別のものとして測り直す。
 type IllustrationKey = (PathBuf, std::time::SystemTime, u64);
@@ -192,7 +202,12 @@ impl ServerContext {
             illustrations: Mutex::new(CoverCache::default()),
             illustration_workers: tokio::sync::Semaphore::new(ILLUSTRATION_WORKERS),
             dimensions: Mutex::new(HashMap::new()),
+            favorites_listener: OnceLock::new(),
         })
+    }
+
+    pub fn set_favorites_listener(&self, listener: FavoritesListener) {
+        let _ = self.favorites_listener.set(listener);
     }
 
     pub fn set_update(&self, controller: Arc<UpdateController>) {
@@ -378,6 +393,7 @@ fn read_routes(ctx: Ctx) -> Router {
         )
         .route("/api/v1/reading", get(reading_since))
         .route("/api/v1/reading/{source}/{source_id}", put(reading_put))
+        .route("/api/v1/favorites/{source}/{source_id}", put(favorite_put))
         .layer(DefaultBodyLimit::max(MAX_JSON_BYTES))
         .layer(middleware::from_fn(read_timeout))
         .with_state(ctx)
@@ -391,6 +407,8 @@ fn admin_routes(ctx: Ctx) -> Router {
         .route("/api/v1/admin/pairings", post(admin_pairing))
         .route("/api/v1/admin/devices", get(admin_devices))
         .route("/api/v1/admin/devices/{id}", delete(admin_revoke))
+        .route("/api/v1/admin/favorites", get(admin_favorites))
+        .route("/api/v1/admin/favorites/ack", post(admin_favorites_ack))
         .route("/api/v1/admin/sync/sessions", post(sync_open))
         .route("/api/v1/admin/sync/sessions/{id}", delete(sync_abort))
         .route(
@@ -1290,6 +1308,135 @@ async fn reading_since(
     ))
 }
 
+/// 取得元と取得元の番号として受け付ける形か。
+fn valid_work_key(source: &str, source_id: &str) -> bool {
+    matches!(source, "pixiv" | "fanbox")
+        && !source_id.is_empty()
+        && source_id.chars().count() <= 200
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FavoriteState {
+    source: String,
+    source_id: String,
+    favorite: bool,
+}
+
+/// 携帯からお気に入りを付け外しする。
+///
+/// 内蔵サーバーはデスクトップ版の本棚へそのまま書く。単独サーバーは自分の本棚へ書いたうえで
+/// 記録を残し、デスクトップ版が取り込むまで、送られてきた本棚へも当て直す。
+async fn favorite_put(
+    State(ctx): State<Ctx>,
+    headers: HeaderMap,
+    UrlPath((source, source_id)): UrlPath<(String, String)>,
+    ApiJson(update): ApiJson<FavoriteUpdate>,
+) -> Result<Json<FavoriteState>, ApiError> {
+    let device = require_device(&ctx, &headers)?;
+    if !valid_work_key(&source, &source_id) {
+        return Err(ApiError::not_found());
+    }
+    if update.device_time <= 0 {
+        return Err(ApiError::invalid("お気に入りの変更が正しくありません"));
+    }
+    let favorite = match &ctx.library {
+        Library::App(state) => {
+            // デスクトップ版の書き込みと同じ順番待ちに並ぶ。取り込みや作り直しの途中に割り込まない。
+            let gate = state.library_gate.clone().write_owned().await;
+            let state = Arc::clone(state);
+            let (key, id, favorite) = (source.clone(), source_id.clone(), update.favorite);
+            let found = tokio::task::spawn_blocking(move || {
+                let _gate = gate;
+                state.db.set_favorite_by_source(&key, &id, favorite)
+            })
+            .await
+            .map_err(|_| ApiError::internal())?
+            .map_err(|error| {
+                log::error!("お気に入りを書けません: {error}");
+                ApiError::internal()
+            })?;
+            found.ok_or_else(ApiError::not_found)?;
+            if let Some(listener) = ctx.favorites_listener.get() {
+                listener();
+            }
+            favorite
+        }
+        Library::Swappable(_) => {
+            let store = Arc::clone(&ctx.store);
+            let (key, id) = (source.clone(), source_id.clone());
+            let stored = with_db(&ctx, move |db| {
+                store
+                    .apply_favorite(db, &key, &id, &device.id, &update)
+                    .map_err(|error| {
+                        log::error!("お気に入りを書けません: {error}");
+                        ApiError::internal()
+                    })
+            })
+            .await?;
+            stored.ok_or_else(ApiError::not_found)?.favorite
+        }
+    };
+    Ok(Json(FavoriteState {
+        source,
+        source_id,
+        favorite,
+    }))
+}
+
+/// 携帯で変えたお気に入りを、デスクトップ版が取り込むために読む。単独サーバーにだけある。
+async fn admin_favorites(
+    State(ctx): State<Ctx>,
+    headers: HeaderMap,
+    Query(query): Query<ReadingQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    require_admin(&ctx, &headers)?;
+    if ctx.receiver.is_none() {
+        return Err(ApiError::not_found());
+    }
+    let since = query.since.unwrap_or(0).max(0);
+    let limit = query.limit.unwrap_or(200).clamp(1, 500);
+    let items = ctx
+        .store
+        .favorite_changes_since(since, limit)
+        .map_err(|error| {
+            log::error!("お気に入りの変更を読めません: {error}");
+            ApiError::internal()
+        })?;
+    let cursor = items.last().map_or(since, |item| item.cursor);
+    Ok(Json(
+        serde_json::json!({ "items": items, "cursor": cursor }),
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct FavoritesAck {
+    cursor: i64,
+}
+
+/// デスクトップ版が `cursor` までを自分の本棚へ取り込んだ。その分は送られてくる本棚に入っている。
+async fn admin_favorites_ack(
+    State(ctx): State<Ctx>,
+    headers: HeaderMap,
+    ApiJson(ack): ApiJson<FavoritesAck>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    require_admin(&ctx, &headers)?;
+    if ctx.receiver.is_none() {
+        return Err(ApiError::not_found());
+    }
+    if ack.cursor < 0 {
+        return Err(ApiError::invalid("取り込んだ位置が正しくありません"));
+    }
+    ctx.store
+        .forget_favorite_changes(ack.cursor)
+        .map_err(|error| {
+            log::error!("取り込んだお気に入りを消せません: {error}");
+            ApiError::internal()
+        })?;
+    Ok(Json(serde_json::json!({ "cursor": ack.cursor })))
+}
+
 async fn reading_put(
     State(ctx): State<Ctx>,
     headers: HeaderMap,
@@ -1297,10 +1444,7 @@ async fn reading_put(
     ApiJson(update): ApiJson<ReadingUpdate>,
 ) -> Result<Json<super::store::ReadingPosition>, ApiError> {
     let device = require_device(&ctx, &headers)?;
-    if !matches!(source.as_str(), "pixiv" | "fanbox")
-        || source_id.is_empty()
-        || source_id.chars().count() > 200
-    {
+    if !valid_work_key(&source, &source_id) {
         return Err(ApiError::not_found());
     }
     if !(0..=1_000_000).contains(&update.page)

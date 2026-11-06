@@ -671,6 +671,15 @@ impl SyncReceiver {
         if let Some(files) = publication.into_inner() {
             files.accept();
         }
+        // 携帯で変えて、デスクトップ版がまだ取り込んでいないお気に入りは、送られてきた本棚に無い。
+        // 取り込まれるまでは当て直す。当てられなくても送信は済んでいるので、記録だけ残す。
+        if database_changed {
+            if let Some(db) = self.db.current() {
+                if let Err(error) = self.store.reapply_favorites(&db) {
+                    log::warn!("お気に入りを当て直せません: {error}");
+                }
+            }
+        }
 
         self.set_phase("removing_stale");
         let files_removed = self.move_to_trash(&stale)?;

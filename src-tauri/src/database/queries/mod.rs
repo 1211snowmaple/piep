@@ -9560,6 +9560,35 @@ impl Database {
         Ok(())
     }
 
+    /// 取得元の番号で指した作品のお気に入りを切り替え、その作品の番号を返す。
+    /// 作品が無ければ `None`。携帯からの変更は、機械ごとに違う作品番号ではなく
+    /// 取得元の番号で届くので、こちらで引き直す。
+    pub fn set_favorite_by_source(
+        &self,
+        source: &str,
+        source_id: &str,
+        favorite: bool,
+    ) -> Result<Option<i64>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let id: Option<i64> = conn
+            .query_row(
+                "SELECT id FROM downloads WHERE source = ?1 AND source_id = ?2",
+                params![source, source_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| format!("Failed to find work: {}", e))?;
+        if let Some(id) = id {
+            // 同じ値なら書かない。書くと本棚の世代が進み、送るものが無いのに送信が走る。
+            conn.execute(
+                "UPDATE downloads SET favorite = ?1 WHERE id = ?2 AND favorite IS NOT ?1",
+                params![if favorite { 1i64 } else { 0i64 }, id],
+            )
+            .map_err(|e| format!("Failed to set favorite: {}", e))?;
+        }
+        Ok(id)
+    }
+
     /// 監視対象（watch_updates = 1）のダウンロード作品一覧を取得
     pub fn get_watched_downloads(&self) -> Result<Vec<DownloadEntry>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
