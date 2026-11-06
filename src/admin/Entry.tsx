@@ -14,6 +14,47 @@ export function takeTicket(): string | null {
 /** 文字数の下限はサーバーも確かめる。画面では入力の途中で知らせるために見る。 */
 const MIN_PASSWORD = 15;
 
+/** 新しいパスワードが条件を満たしたか。 */
+export function newPasswordReady(password: string, again: string): boolean {
+  return [...password].length >= MIN_PASSWORD && again === password;
+}
+
+/** 新しいパスワードと確認の 2 欄。作成・決め直し・変更で同じ言葉と動きにする。 */
+export function NewPasswordFields({ label = "パスワード", password, again, onPassword, onAgain }: {
+  label?: string;
+  password: string;
+  again: string;
+  onPassword: (value: string) => void;
+  onAgain: (value: string) => void;
+}) {
+  const length = [...password].length;
+  const remaining = Math.max(0, MIN_PASSWORD - length);
+  // 打っている途中で赤くしない。確認の欄は、上と同じ長さまで打ってから比べる。
+  const mismatch = again.length > 0 && [...again].length >= length && again !== password;
+  return (
+    <>
+      <PasswordInput
+        label={label}
+        description={remaining > 0 ? `${MIN_PASSWORD} 文字以上（あと ${remaining} 文字）` : `${MIN_PASSWORD} 文字以上`}
+        value={password}
+        onChange={(event) => onPassword(event.currentTarget.value)}
+        autoComplete="new-password"
+        required
+       
+      />
+      <PasswordInput
+        label={`${label}（確認）`}
+        value={again}
+        onChange={(event) => onAgain(event.currentTarget.value)}
+        autoComplete="new-password"
+        error={mismatch ? "パスワードが一致しません" : undefined}
+        required
+       
+      />
+    </>
+  );
+}
+
 interface TicketState {
   ticket: string;
   kind: TicketKind;
@@ -27,9 +68,7 @@ function SetupForm({ ticket, onDone }: { ticket: TicketState; onDone: () => void
   const [again, setAgain] = useState("");
   const [problem, setProblem] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
-  const short = password.length > 0 && [...password].length < MIN_PASSWORD;
-  const mismatch = again.length > 0 && again !== password;
-  const ready = [...password].length >= MIN_PASSWORD && again === password && (resetting || username.trim().length > 0);
+  const ready = newPasswordReady(password, again) && (resetting || username.trim().length > 0);
   const submit = async () => {
     setPending(true);
     setProblem(null);
@@ -44,35 +83,36 @@ function SetupForm({ ticket, onDone }: { ticket: TicketState; onDone: () => void
   };
   return (
     <form onSubmit={(event) => { event.preventDefault(); if (ready) void submit(); }}>
-      <Stack gap="md">
-        <div>
-          <Title order={1} fz={22}>{resetting ? "パスワードを決め直す" : "管理者を作る"}</Title>
-          <Text size="sm" c="dimmed" mt={6}>
-            {resetting ? "決め直すと、今のログインはすべて切れます。" : "このサーバーを管理するアカウントです。あとで別の PC や携帯のブラウザからも入れます。"}
-          </Text>
-        </div>
+      {/* 塊の間は広く、パスワードと確認の 2 欄は詰めて 1 組に見せる。 */}
+      <Stack gap={26}>
+        <EntryHead
+          title={resetting ? "パスワードを変更" : "管理者のアカウントを作成"}
+          lead={resetting
+            ? "新しいパスワードにすると、ログインしているブラウザはすべてログアウトします。"
+            : "この管理画面に入るためのアカウントです。作成すると、ほかの PC や携帯のブラウザからも、このパスワードでログインできます。"}
+        />
         {resetting
-          ? <TextInput label="アカウント" value={ticket.username ?? ""} readOnly autoComplete="username" />
-          : <TextInput label="アカウント" value={username} onChange={(event) => setUsername(event.currentTarget.value)} autoComplete="username" maxLength={64} required />}
-        <PasswordInput
-          label="パスワード"
-          description="15 文字以上。文章でもかまいません。"
-          value={password}
-          onChange={(event) => setPassword(event.currentTarget.value)}
-          autoComplete="new-password"
-          error={short ? "あと少し長くしてください" : undefined}
-          required
-        />
-        <PasswordInput
-          label="もう一度"
-          value={again}
-          onChange={(event) => setAgain(event.currentTarget.value)}
-          autoComplete="new-password"
-          error={mismatch ? "上と違います" : undefined}
-          required
-        />
-        {problem && <Alert color="red" variant="light">{problem}</Alert>}
-        <Button type="submit" loading={pending} disabled={!ready} fullWidth>{resetting ? "決め直す" : "作成して開く"}</Button>
+          ? (
+            // 変えられない値は入力欄に見せない。
+            <div className="adm-entry-fixed">
+              <Text size="sm" fw={600}>アカウント名</Text>
+              <Text size="sm">{ticket.username}</Text>
+            </div>
+          )
+          : <TextInput label="アカウント名" value={username} onChange={(event) => setUsername(event.currentTarget.value)} autoComplete="username" maxLength={64} required />}
+        <Stack gap={10}>
+          <NewPasswordFields
+            label={resetting ? "新しいパスワード" : "パスワード"}
+            password={password}
+            again={again}
+            onPassword={setPassword}
+            onAgain={setAgain}
+          />
+        </Stack>
+        <Stack gap="sm">
+          {problem && <Alert color="red" variant="light">{problem}</Alert>}
+          <Button type="submit" loading={pending} disabled={!ready} fullWidth>{resetting ? "変更してログイン" : "作成してログイン"}</Button>
+        </Stack>
       </Stack>
     </form>
   );
@@ -105,22 +145,31 @@ export function LoginForm({ onDone, notice = null }: { onDone: () => void; notic
     <form onSubmit={(event) => { event.preventDefault(); void submit(); }}>
       <Stack gap="md">
         {notice && <Alert color="gray" variant="light">{notice}</Alert>}
-        <TextInput label="アカウント" value={username} onChange={(event) => setUsername(event.currentTarget.value)} autoComplete="username" required />
+        <TextInput label="アカウント名" value={username} onChange={(event) => setUsername(event.currentTarget.value)} autoComplete="username" required />
         <PasswordInput label="パスワード" value={password} onChange={(event) => setPassword(event.currentTarget.value)} autoComplete="current-password" required />
         {problem && <Alert color="red" variant="light">{problem}</Alert>}
-        <Button type="submit" loading={pending} disabled={!username || !password} fullWidth>ログイン</Button>
+        <Button type="submit" loading={pending} disabled={!username || !password} fullWidth mt={4}>ログイン</Button>
       </Stack>
     </form>
   );
 }
 
+/** 入口の見出し。どの入口も、題と一文の説明を同じ形で出す。 */
+function EntryHead({ title, lead }: { title: string; lead?: string }) {
+  return (
+    <div className="adm-entry-head">
+      <Title order={1} className="adm-entry-title">{title}</Title>
+      {lead && <Text size="sm" c="dimmed" className="adm-entry-lead">{lead}</Text>}
+    </div>
+  );
+}
+
 /** ログインの前の画面。ロゴを丸ごと出してから、用件を書く。 */
-function EntryFrame({ title, children }: { title?: string; children: ReactNode }) {
+function EntryFrame({ children }: { children: ReactNode }) {
   return (
     <div className="adm-entry app-shell">
       <div className="adm-entry-card">
         <div className="adm-entry-brand"><PiepLockup size={34} /></div>
-        {title && <Title order={1} fz={18} ta="center" mb="lg">{title}</Title>}
         {children}
       </div>
     </div>
@@ -129,12 +178,24 @@ function EntryFrame({ title, children }: { title?: string; children: ReactNode }
 
 export function EntryCard({ onDone, hasAccount, notice }: { onDone: () => void; hasAccount: boolean; notice?: string }) {
   return hasAccount ? (
-    <EntryFrame title="管理画面にログイン"><LoginForm onDone={onDone} notice={notice ?? null} /></EntryFrame>
+    <EntryFrame>
+      <Stack gap={22}>
+        <EntryHead title="管理画面にログイン" />
+        <LoginForm onDone={onDone} notice={notice ?? null} />
+      </Stack>
+    </EntryFrame>
   ) : (
-    <EntryFrame title="管理者がまだいません">
-      <Stack gap="sm">
-        <Text size="sm">デスクトップ版の「管理画面を開く」から開くか、サーバーで次のコマンドを実行して、表示されたリンクを開いてください。</Text>
-        <Text className="adm-code">piep-server admin-setup --data &lt;置き場所&gt;</Text>
+    <EntryFrame>
+      <Stack gap={22}>
+        <EntryHead title="管理者のアカウントがまだありません" lead="アカウントは、一度きりのリンクから作成します。" />
+        <ol className="adm-entry-steps">
+          <li>デスクトップ版で「設定」→「サーバー」を開く</li>
+          <li>「管理画面を開く」を押す</li>
+        </ol>
+        <Text size="xs" c="dimmed">
+          デスクトップ版を使っていない場合は、サーバーの PC で次を実行し、表示されたリンクを開いてください。
+        </Text>
+        <Text className="adm-code">{`piep-server admin-setup --data <置き場所> --url ${window.location.origin}/`}</Text>
       </Stack>
     </EntryFrame>
   );
@@ -165,7 +226,7 @@ export function TicketEntry({ ticket, onDone, onInvalid }: { ticket: string; onD
   }, []);
   return (
     <EntryFrame>
-      {state ? <SetupForm ticket={state} onDone={onDone} /> : <Stack align="center" py="xl"><Loader size="sm" /><Text size="sm" c="dimmed">確かめています</Text></Stack>}
+      {state ? <SetupForm ticket={state} onDone={onDone} /> : <Stack align="center" gap="sm" py="xl"><Loader size="sm" /><Text size="sm" c="dimmed">リンクを確かめています</Text></Stack>}
     </EntryFrame>
   );
 }

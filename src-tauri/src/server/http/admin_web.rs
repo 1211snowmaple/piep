@@ -342,7 +342,7 @@ async fn guard(State(ctx): State<Ctx>, mut request: Request, next: Next) -> Resp
         };
         if !host_allowed(&ctx, &host) {
             if wants_page(&request) {
-                return host_rejected_page();
+                return host_rejected_page(&host);
             }
             return rejected(
                 "host_rejected",
@@ -372,60 +372,86 @@ fn wants_page(request: &Request) -> bool {
         .is_some_and(|accept| accept.contains("text/html"))
 }
 
-/// 知らない名前で開かれたときのページ。アプリのアイコンを丸ごと出し、次にすることを書く。
+/// 知らない名前で開かれたときのページ。アプリのアイコンを丸ごと出し、理由と開き方を書く。
 /// 外のファイルを読まない。読み込みの部品も、同じ理由で断られるからである。
-fn host_rejected_page() -> Response {
+fn host_rejected_page(host: &str) -> Response {
     use base64::Engine as _;
-    static PAGE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    let page = PAGE.get_or_init(|| {
-        let icon = include_str!("../../../../public/piep.svg");
-        let data = base64::engine::general_purpose::STANDARD.encode(icon);
-        HOST_REJECTED_PAGE.replace("{icon}", &format!("data:image/svg+xml;base64,{data}"))
+    static PARTS: std::sync::OnceLock<(String, String)> = std::sync::OnceLock::new();
+    let (favicon, icon) = PARTS.get_or_init(|| {
+        let encode = |svg: &str| {
+            format!(
+                "data:image/svg+xml;base64,{}",
+                base64::engine::general_purpose::STANDARD.encode(svg)
+            )
+        };
+        (
+            encode(include_str!("../../../../public/piep.svg")),
+            encode(include_str!("../../../../src/assets/icon.svg")),
+        )
     });
+    // Host は相手が自由に書けるので、そのまま埋め込まない。
+    let page = HOST_REJECTED_PAGE
+        .replace("{favicon}", favicon)
+        .replace("{icon}", icon)
+        .replace("{host}", &crate::database::parser::escape_html(host));
     (
         StatusCode::FORBIDDEN,
         [
             (header::CONTENT_TYPE, "text/html; charset=utf-8"),
             (header::CACHE_CONTROL, "no-store"),
         ],
-        page.clone(),
+        page,
     )
         .into_response()
 }
 
+/// 色と書体は、アプリの背景（`app.css`）と入口のカード（`admin.css`）に合わせる。
 const HOST_REJECTED_PAGE: &str = r#"<!doctype html>
 <html lang="ja">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow">
-<link rel="icon" type="image/svg+xml" href="{icon}">
+<link rel="icon" type="image/svg+xml" href="{favicon}">
 <title>piep 管理画面</title>
 <style>
-:root { color-scheme: light dark; --bg: #f5f7fb; --card: #fff; --line: #dfe3ea; --text: #1f2430; --dim: #667085; }
-@media (prefers-color-scheme: dark) { :root { --bg: #16181d; --card: #1f2229; --line: #343944; --text: #e7e9ee; --dim: #9aa3b2; } }
+:root { color-scheme: light dark; --bg: #f5f7fa; --card: #fff; --line: #e4e8ee; --text: #1b1f24; --dim: #6b7380; --code: #f1f3f5; --accent: #0d86f4; }
+@media (prefers-color-scheme: dark) { :root { --bg: #0d1117; --card: #161b22; --line: #252b35; --text: #e6e9ee; --dim: #9aa3af; --code: #1f2630; --accent: #59b8ff; } }
 * { box-sizing: border-box; }
-body { margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 24px 16px; background: var(--bg); color: var(--text);
-  font-family: system-ui, -apple-system, "Segoe UI", "Hiragino Sans", "Yu Gothic UI", Meiryo, sans-serif; line-height: 1.7; }
-main { width: 100%; max-width: 480px; background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 28px 28px 24px; }
-img { display: block; width: 44px; height: 44px; margin-bottom: 18px; }
-h1 { font-size: 19px; margin: 0 0 8px; }
-p { margin: 0 0 12px; font-size: 14px; }
-.dim { color: var(--dim); font-size: 13px; }
-ol { margin: 0 0 14px; padding-left: 1.4em; font-size: 14px; }
-code { font-size: 12.5px; padding: 1px 5px; border-radius: 5px; border: 1px solid var(--line); word-break: break-all; }
+html, body { margin: 0; }
+body { min-height: 100vh; min-height: 100dvh; display: grid; place-items: center; padding: 16px; background: var(--bg); color: var(--text);
+  font-family: "Segoe UI", "Yu Gothic UI", Meiryo, "Hiragino Sans", system-ui, -apple-system, sans-serif; font-size: 14px; line-height: 1.7;
+  word-break: auto-phrase; overflow-wrap: anywhere; }
+main { width: min(420px, 100%); padding: 28px; border: 1px solid var(--line); border-radius: 16px; background: var(--card); }
+.brand { display: flex; justify-content: center; margin-bottom: 24px; }
+.brand img { width: 52px; height: 52px; }
+h1 { margin: 0 0 6px; font-size: 20px; font-weight: 700; line-height: 1.35; }
+.lead { margin: 0 0 20px; color: var(--dim); }
+h2 { margin: 0 0 6px; font-size: 14px; font-weight: 650; }
+ol { margin: 0 0 20px; padding-left: 1.4em; line-height: 1.9; }
+.note { margin: 0; padding-top: 16px; border-top: 1px solid var(--line); color: var(--dim); font-size: 12.5px; }
+.note p { margin: 0 0 8px; }
+.note p:last-child { margin-bottom: 0; }
+.host { color: var(--text); font-weight: 600; }
+code { display: block; margin-top: 4px; padding: 8px 10px; border-radius: 8px; background: var(--code); color: var(--text);
+  font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace; font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
 </style>
 </head>
 <body>
 <main>
-<img src="{icon}" alt="" width="44" height="44">
-<h1>このアドレスでは、まだ開けません</h1>
-<p>管理画面は、デスクトップ版から開いたアドレスだけを受け付けます。知らないアドレスを受け付けないのは、別のサイトから管理画面を読まれないようにするためです。</p>
+<div class="brand"><img src="{icon}" alt="piep" width="52" height="52"></div>
+<h1>このアドレスでは開けません</h1>
+<p class="lead">安全のため、管理画面は、デスクトップ版から一度開いたアドレスでだけ開けます。</p>
+<h2>開き方</h2>
 <ol>
-<li>デスクトップ版の「設定」→「サーバー」を開く</li>
+<li>デスクトップ版で「設定」→「サーバー」を開く</li>
 <li>「管理画面を開く」を押す</li>
 </ol>
-<p class="dim">一度開くと、このアドレスを覚えます。サーバーの PC からは <code>piep-server admin-setup --url このアドレス</code> でも開けます。</p>
+<div class="note">
+<p>一度開くと、このアドレスを覚えます。そのあとは、ほかの PC や携帯のブラウザからもこのアドレスで開けます。</p>
+<p>開こうとしたアドレス: <span class="host">{host}</span></p>
+<p>デスクトップ版を使っていない場合は、サーバーの PC で次を実行し、表示されたリンクを開いてください。<code>piep-server admin-setup --data &lt;置き場所&gt; --url &lt;このアドレス&gt;</code></p>
+</div>
 </main>
 </body>
 </html>

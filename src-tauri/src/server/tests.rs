@@ -2042,6 +2042,19 @@ async fn the_name_the_desktop_issued_a_link_for_opens_the_page() {
     let body = before.text().await.unwrap();
     assert!(body.contains("管理画面を開く"), "{body}");
     assert!(body.contains("data:image/svg+xml;base64,"), "{body}");
+    assert!(body.contains("piep.example.net"), "{body}");
+    // Host は相手が自由に書けるので、ページには文字として入れる。
+    let hostile = site
+        .get("/admin/")
+        .header(header::HOST, "a<script>.example")
+        .header("sec-fetch-dest", "document")
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(!hostile.contains("<script>"), "{hostile}");
     // 部品や API には、今までどおり JSON で答える。
     let api = site
         .get("/api/v1/admin/web/state")
