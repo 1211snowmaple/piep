@@ -1421,7 +1421,15 @@ pub(super) fn api_routes() -> Router<Ctx> {
 
 /// 画面とログイン。管理画面を出す口にだけ足す。
 pub(super) fn web_routes(ctx: Ctx) -> Router {
+    let authenticated = Router::new()
+        .route("/api/v1/admin/web/reauth", post(web_reauth))
+        .route("/api/v1/admin/web/disable", post(web_disable))
+        .layer(middleware::from_fn_with_state(
+            Arc::clone(&ctx),
+            super::authorize_admin_before_body,
+        ));
     let routes = Router::new()
+        .merge(authenticated)
         .route("/admin", get(|| async { Redirect::to("/admin/") }))
         .route("/admin/", get(page_root))
         .route("/admin/{*path}", get(page_asset))
@@ -1431,8 +1439,6 @@ pub(super) fn web_routes(ctx: Ctx) -> Router {
         .route("/api/v1/admin/web/ticket", post(web_ticket))
         .route("/api/v1/admin/web/setup", post(web_setup))
         .route("/api/v1/admin/web/logout", post(web_logout))
-        .route("/api/v1/admin/web/reauth", post(web_reauth))
-        .route("/api/v1/admin/web/disable", post(web_disable))
         .layer(axum::extract::DefaultBodyLimit::max(super::MAX_JSON_BYTES))
         .with_state(Arc::clone(&ctx));
     with_guard(routes, Arc::clone(&ctx)).layer(middleware::from_fn_with_state(ctx, secure_headers))

@@ -1369,6 +1369,8 @@ struct SearchCursor {
 #[serde(rename_all = "camelCase")]
 struct EntitySeriesCursor {
     scope: String,
+    #[serde(default)]
+    library_instance: String,
     library_generation: i64,
     sort_value: String,
     count: i64,
@@ -1683,6 +1685,8 @@ pub struct Database {
     conn: RestoreAwareConnection,
     read_pool: Pool<SqliteConnectionManager>,
     generation_conn: Mutex<Connection>,
+    /// data_version は接続ごとの番号なので、DB を開き直した世代も区別する。
+    instance_id: String,
     db_path: PathBuf,
     storage_dir: PathBuf,
     index_status_cache: Mutex<Option<CachedIndexStatus>>,
@@ -1736,6 +1740,7 @@ impl Database {
             conn: RestoreAwareConnection::new(conn),
             read_pool,
             generation_conn: Mutex::new(generation_conn),
+            instance_id: format!("{:032x}", rand::random::<u128>()),
             db_path: db_path.to_path_buf(),
             storage_dir: storage_dir.to_path_buf(),
             index_status_cache: Mutex::new(None),
@@ -7448,9 +7453,9 @@ impl Database {
 
     /// Returns every series connected to a person through a stable keyset.
     ///
-    /// The opaque cursor is scoped to the person and query and pins SQLite's
-    /// data generation. Continuing after a library mutation is rejected so a
-    /// UI can restart instead of silently showing a gap or duplicate.
+    /// The opaque cursor is scoped to the person and query and pins both this
+    /// database instance and SQLite's data generation. Continuing after a
+    /// mutation or reopening is rejected so a UI can restart without a gap or duplicate.
     // Keep the database boundary parallel to the named IPC fields above. Each
     // argument belongs to cursor scope; hiding only some in a tuple makes a
     // continuation easier to validate against the wrong filter.
@@ -7521,7 +7526,9 @@ impl Database {
             if cursor.scope != scope {
                 return Err("Entity series cursor belongs to another person or query".to_string());
             }
-            if cursor.library_generation != library_generation {
+            if cursor.library_instance != self.instance_id
+                || cursor.library_generation != library_generation
+            {
                 return Err(
                     "Library changed while paging entity series; restart the list".to_string(),
                 );
@@ -7719,6 +7726,7 @@ impl Database {
                 .map(|(item, sort_value)| {
                     encode_entity_series_cursor(&EntitySeriesCursor {
                         scope: scope.clone(),
+                        library_instance: self.instance_id.clone(),
                         library_generation,
                         sort_value: sort_value.clone(),
                         count: item.count,
