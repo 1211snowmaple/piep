@@ -4,6 +4,7 @@
 //! 動いている `serve` のように別のプロセスからも触るので、SQLite にしておく。
 //! 鍵はすべて SHA-256 だけを持ち、平文は発行した瞬間に返すだけで残さない。
 
+use crate::database::Database;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -86,6 +87,25 @@ pub struct ReadingPosition {
     pub cursor: i64,
 }
 
+/// 携帯で付け外ししたお気に入り。デスクトップ版が取り込むまでサーバーに残す。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct FavoriteChange {
+    pub source: String,
+    pub source_id: String,
+    pub favorite: bool,
+    pub device_id: String,
+    pub device_time: i64,
+    pub cursor: i64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FavoriteUpdate {
+    pub favorite: bool,
+    pub device_time: i64,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ReadingUpdate {
@@ -100,6 +120,9 @@ pub struct ReadingUpdate {
 
 pub struct ServerStore {
     conn: Mutex<Connection>,
+    /// 携帯からの書き込みと、入れ替えたあとの当て直しを一列に並べる。
+    /// 並べないと、当て直しが読んだ古い値で、そのあいだに届いた新しい値を上書きする。
+    favorites: Mutex<()>,
 }
 
 pub fn random_token(bytes: usize) -> String {
@@ -176,7 +199,17 @@ impl ServerStore {
                  cursor INTEGER NOT NULL,
                  PRIMARY KEY (source, source_id)
              );
-             CREATE INDEX IF NOT EXISTS idx_reading_cursor ON reading(cursor);",
+             CREATE INDEX IF NOT EXISTS idx_reading_cursor ON reading(cursor);
+             CREATE TABLE IF NOT EXISTS favorite_changes (
+                 source TEXT NOT NULL,
+                 source_id TEXT NOT NULL,
+                 favorite INTEGER NOT NULL,
+                 device_id TEXT NOT NULL,
+                 device_time INTEGER NOT NULL,
+                 cursor INTEGER NOT NULL,
+                 PRIMARY KEY (source, source_id)
+             );
+             CREATE INDEX IF NOT EXISTS idx_favorite_changes_cursor ON favorite_changes(cursor);",
         )
         .map_err(db_error)?;
         // 0.33.0 が記録したメールアドレスを残さない。
@@ -196,6 +229,7 @@ impl ServerStore {
             .map_err(db_error)?;
         Ok(Self {
             conn: Mutex::new(conn),
+            favorites: Mutex::new(()),
         })
     }
 
@@ -460,6 +494,166 @@ impl ServerStore {
             .map_err(db_error)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(db_error)
     }
+
+    /// 携帯からのお気に入りを記録する。端末の時刻が持っているものより古ければ書かず、今の値を返す。
+    ///
+    /// 単独サーバーの本棚は送信のたびに入れ替わる。デスクトップ版が取り込んだと知らせるまで
+    /// ここに残し、入れ替えたあとの本棚へ当て直す。
+    pub fn put_favorite(
+        &self,
+        source: &str,
+        source_id: &str,
+        device_id: &str,
+        update: &FavoriteUpdate,
+    ) -> Result<FavoriteChange, String> {
+        let device_time = update.device_time.min(now_ms() + MAX_CLOCK_SKEW_MS);
+        let mut conn = self.connection()?;
+        let tx = conn.transaction().map_err(db_error)?;
+        let current: Option<i64> = tx
+            .query_row(
+                "SELECT device_time FROM favorite_changes WHERE source = ?1 AND source_id = ?2",
+                params![source, source_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(db_error)?;
+        if current.is_none_or(|current| device_time >= current) {
+            // 取り込みの知らせで行を消しても番号を戻さないよう、読書位置と同じ通し番号の場所を使う。
+            let cursor = next_favorite_cursor(&tx)?;
+            tx.execute(
+                "INSERT INTO favorite_changes (source, source_id, favorite, device_id, device_time, cursor)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(source, source_id) DO UPDATE SET
+                     favorite = excluded.favorite, device_id = excluded.device_id,
+                     device_time = excluded.device_time, cursor = excluded.cursor",
+                params![source, source_id, update.favorite, device_id, device_time, cursor],
+            )
+            .map_err(db_error)?;
+        }
+        let row = tx
+            .query_row(
+                "SELECT source, source_id, favorite, device_id, device_time, cursor
+                 FROM favorite_changes WHERE source = ?1 AND source_id = ?2",
+                params![source, source_id],
+                favorite_from_row,
+            )
+            .map_err(db_error)?;
+        tx.commit().map_err(db_error)?;
+        Ok(row)
+    }
+
+    /// 携帯からのお気に入りを記録し、勝ったほうの値を本棚へ書く。作品が無ければ記録しない。
+    pub fn apply_favorite(
+        &self,
+        db: &Database,
+        source: &str,
+        source_id: &str,
+        device_id: &str,
+        update: &FavoriteUpdate,
+    ) -> Result<Option<FavoriteChange>, String> {
+        let _order = self
+            .favorites
+            .lock()
+            .map_err(|_| "お気に入りの記録を開けません")?;
+        // 無い作品の変更を残すと、送られてくるたびに当て直そうとする。
+        if db.get_download_by_source(source, source_id)?.is_none() {
+            return Ok(None);
+        }
+        let stored = self.put_favorite(source, source_id, device_id, update)?;
+        db.set_favorite_by_source(source, source_id, stored.favorite)?;
+        Ok(Some(stored))
+    }
+
+    /// 送られてきた本棚へ、デスクトップ版がまだ取り込んでいない変更を当て直す。
+    /// 当てられなかった作品があっても止めず、当てた数を返す。
+    pub fn reapply_favorites(&self, db: &Database) -> Result<usize, String> {
+        let _order = self
+            .favorites
+            .lock()
+            .map_err(|_| "お気に入りの記録を開けません")?;
+        let mut applied = 0;
+        let mut since = 0;
+        loop {
+            let changes = self.favorite_changes_since(since, 500)?;
+            let Some(last) = changes.last() else {
+                break;
+            };
+            since = last.cursor;
+            for change in &changes {
+                match db.set_favorite_by_source(&change.source, &change.source_id, change.favorite)
+                {
+                    Ok(Some(_)) => applied += 1,
+                    Ok(None) => {}
+                    Err(error) => log::warn!(
+                        "お気に入りを当て直せません（{} {}）: {error}",
+                        change.source,
+                        change.source_id
+                    ),
+                }
+            }
+        }
+        Ok(applied)
+    }
+
+    /// `since` より後に記録したお気に入りを、古い順に返す。
+    pub fn favorite_changes_since(
+        &self,
+        since: i64,
+        limit: i64,
+    ) -> Result<Vec<FavoriteChange>, String> {
+        let conn = self.connection()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT source, source_id, favorite, device_id, device_time, cursor
+                 FROM favorite_changes WHERE cursor > ?1 ORDER BY cursor LIMIT ?2",
+            )
+            .map_err(db_error)?;
+        let rows = stmt
+            .query_map(params![since, limit], favorite_from_row)
+            .map_err(db_error)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(db_error)
+    }
+
+    /// デスクトップ版が `cursor` までを取り込んだ。その分はもう当て直さない。
+    pub fn forget_favorite_changes(&self, cursor: i64) -> Result<usize, String> {
+        let conn = self.connection()?;
+        conn.execute(
+            "DELETE FROM favorite_changes WHERE cursor <= ?1",
+            params![cursor],
+        )
+        .map_err(db_error)
+    }
+}
+
+/// 消した行の番号を使い回すと、デスクトップ版が覚えている続きの番号より前に新しい変更が入り、
+/// 取りこぼす。最後に振った番号を別に覚えておく。
+fn next_favorite_cursor(tx: &rusqlite::Transaction<'_>) -> Result<i64, String> {
+    let last: i64 = tx
+        .query_row(
+            "SELECT COALESCE((SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'favorite_cursor'), 0)",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(db_error)?;
+    let next = last + 1;
+    tx.execute(
+        "INSERT INTO meta (key, value) VALUES ('favorite_cursor', ?1)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![next.to_string()],
+    )
+    .map_err(db_error)?;
+    Ok(next)
+}
+
+fn favorite_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<FavoriteChange> {
+    Ok(FavoriteChange {
+        source: row.get(0)?,
+        source_id: row.get(1)?,
+        favorite: row.get(2)?,
+        device_id: row.get(3)?,
+        device_time: row.get(4)?,
+        cursor: row.get(5)?,
+    })
 }
 
 fn reading_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ReadingPosition> {
@@ -485,6 +679,41 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("piep_store_{}", random_token(8)));
         let store = ServerStore::open(&dir.join("state.db")).expect("store");
         (dir, store)
+    }
+
+    fn favorite(favorite: bool, device_time: i64) -> FavoriteUpdate {
+        FavoriteUpdate {
+            favorite,
+            device_time,
+        }
+    }
+
+    #[test]
+    fn favorites_keep_the_newest_change_and_numbers_never_go_back() {
+        let (_dir, store) = store();
+        let first = store
+            .put_favorite("pixiv", "1", "phone", &favorite(true, 1_000))
+            .unwrap();
+        // 古い時刻の変更は負ける。
+        let stale = store
+            .put_favorite("pixiv", "1", "tablet", &favorite(false, 500))
+            .unwrap();
+        assert_eq!(stale, first);
+        let other = store
+            .put_favorite("pixiv", "2", "phone", &favorite(true, 2_000))
+            .unwrap();
+        assert_eq!(store.favorite_changes_since(0, 10).unwrap().len(), 2);
+        assert_eq!(store.forget_favorite_changes(other.cursor).unwrap(), 2);
+        assert!(store.favorite_changes_since(0, 10).unwrap().is_empty());
+        // 消したあとも番号は進む。取り込み済みの続きの番号より前に入ると取りこぼすため。
+        let later = store
+            .put_favorite("pixiv", "1", "phone", &favorite(false, 3_000))
+            .unwrap();
+        assert!(later.cursor > other.cursor);
+        assert_eq!(
+            store.favorite_changes_since(other.cursor, 10).unwrap(),
+            vec![later]
+        );
     }
 
     fn update(page: i64, device_time: i64) -> ReadingUpdate {

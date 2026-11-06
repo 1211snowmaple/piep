@@ -3,13 +3,13 @@
 //! 設定は Rust の側で持つ。画面を開いていないときの自動送信が読むからである。
 //! 管理者の鍵は Windows の資格情報マネージャーに置き、設定ファイルには書かない。
 
-use super::http::{combined_router, ServerContext};
+use super::http::{combined_router, FavoritesListener, ServerContext};
 use super::library::Library;
 use super::standalone::run_listener;
-use super::store::{DeviceSummary, Role, ServerStore};
+use super::store::{DeviceSummary, FavoriteChange, Role, ServerStore};
 use super::sync_send::{
-    admin_delete, admin_get, admin_post, pair_admin, prepare_snapshot, send_prepared, RemoteServer,
-    SendHandle, SendProgress, CANCELED,
+    admin_delete, admin_get, admin_get_if_present, admin_post, pair_admin, prepare_snapshot,
+    send_prepared, RemoteServer, SendHandle, SendProgress, CANCELED,
 };
 use super::{pairing_payload, tls, DEFAULT_PORT};
 use crate::AppState;
@@ -18,7 +18,7 @@ use std::fs;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex as AsyncMutex;
 
@@ -30,6 +30,10 @@ const AUTO_SEND_POLL: Duration = Duration::from_secs(30);
 const AUTO_SEND_STARTUP_DELAY: Duration = Duration::from_secs(2 * 60);
 /// 失敗のあとは間を置く。送るたびに本棚の写しを作るので、すぐには繰り返さない。
 const AUTO_SEND_RETRY: Duration = Duration::from_secs(15 * 60);
+/// 携帯で変えたお気に入りを、単独サーバーへ聞きに行く間隔。
+const FAVORITES_POLL: Duration = Duration::from_secs(60);
+/// 一度に受け取る携帯のお気に入りの数。
+const FAVORITES_PAGE: usize = 500;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", default)]
@@ -62,6 +66,8 @@ pub struct DesktopServerSettings {
     pub remote: Option<RemoteServer>,
     pub auto_send: bool,
     pub last_send: LastSend,
+    /// 単独サーバーから、携帯のお気に入りをどこまで取り込んだか。
+    pub favorites_cursor: i64,
 }
 
 struct ActiveEmbedded {
@@ -133,6 +139,9 @@ pub struct DesktopServer {
     active: AsyncMutex<Option<ActiveEmbedded>>,
     send: SendHandle,
     send_lock: AsyncMutex<()>,
+    /// 携帯がお気に入りを変えたと画面へ知らせる係。起動の途中で付ける。
+    /// Tauri の型を持たせると、試験の実行ファイルにまで画面の部品がつながるので、関数で受け取る。
+    favorites_listener: OnceLock<FavoritesListener>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -272,7 +281,19 @@ impl DesktopServer {
             active: AsyncMutex::new(None),
             send: SendHandle::new(),
             send_lock: AsyncMutex::new(()),
+            favorites_listener: OnceLock::new(),
         })
+    }
+
+    /// 画面へ知らせる係を付ける。内蔵サーバーを始める前に呼ぶ。
+    pub fn set_favorites_listener(&self, listener: FavoritesListener) {
+        let _ = self.favorites_listener.set(listener);
+    }
+
+    fn notify_favorites(&self) {
+        if let Some(listener) = self.favorites_listener.get() {
+            listener();
+        }
     }
 
     fn settings(&self) -> DesktopServerSettings {
@@ -372,6 +393,9 @@ impl DesktopServer {
             public_url,
             fingerprint.clone(),
         );
+        if let Some(listener) = self.favorites_listener.get() {
+            context.set_favorites_listener(Arc::clone(listener));
+        }
         let router = combined_router(context);
         let handle = axum_server::Handle::new();
         // 実際のポートと、待ち受けの失敗をここで確かめる。
@@ -573,6 +597,8 @@ impl DesktopServer {
         self.change_settings(|settings| {
             settings.remote = Some(remote);
             settings.last_send = LastSend::default();
+            // 別のサーバーの記録の番号は、このサーバーでは意味を持たない。
+            settings.favorites_cursor = 0;
         })
     }
 
@@ -584,6 +610,7 @@ impl DesktopServer {
             settings.remote = None;
             settings.auto_send = false;
             settings.last_send = LastSend::default();
+            settings.favorites_cursor = 0;
         })
     }
 
@@ -595,11 +622,87 @@ impl DesktopServer {
         self.send.cancel.store(true, Ordering::Relaxed);
     }
 
+    /// 携帯で変えたお気に入りを単独サーバーから受け取り、本棚へ書く。送信の途中なら何もしない。
+    pub async fn pull_favorites(&self, state: &Arc<AppState>) -> Result<usize, String> {
+        let Ok(_running) = self.send_lock.try_lock() else {
+            return Ok(0);
+        };
+        self.pull_favorites_locked(state).await
+    }
+
+    /// 送信の鍵を持ったまま呼ぶ。
+    ///
+    /// 写しを作る前に取り込めば、取り込んだ変更は写しに入る。だから取り込んだと知らせて
+    /// サーバーの記録を消してよい。送信の途中に取り込むと、取り込む前の写しが届いて
+    /// 携帯の変更が消えるので、送信と同時には動かさない。
+    async fn pull_favorites_locked(&self, state: &Arc<AppState>) -> Result<usize, String> {
+        let Some(remote) = self.settings().remote else {
+            return Ok(0);
+        };
+        let Some(token) = credential::load()? else {
+            return Ok(0);
+        };
+        let mut since = self.settings().favorites_cursor;
+        let mut applied = 0;
+        loop {
+            let path = format!("favorites?since={since}&limit={FAVORITES_PAGE}");
+            // 古いサーバーには口が無い。携帯からも変えられないので、取り込むものも無い。
+            let Some(page) = admin_get_if_present(&remote, &token, &path).await? else {
+                break;
+            };
+            let items: Vec<FavoriteChange> =
+                serde_json::from_value(page.get("items").cloned().unwrap_or_default())
+                    .map_err(|_| "サーバーのお気に入りの変更を読み取れません".to_string())?;
+            let Some(cursor) = items.last().map(|item| item.cursor) else {
+                break;
+            };
+            let full = items.len() >= FAVORITES_PAGE;
+            let gate = state.library_gate.clone().write_owned().await;
+            let library = Arc::clone(state);
+            applied += tokio::task::spawn_blocking(move || {
+                let _gate = gate;
+                let mut applied = 0;
+                for item in &items {
+                    if library
+                        .db
+                        .set_favorite_by_source(&item.source, &item.source_id, item.favorite)?
+                        .is_some()
+                    {
+                        applied += 1;
+                    }
+                }
+                Ok::<_, String>(applied)
+            })
+            .await
+            .map_err(|error| format!("お気に入りを書けません: {error}"))??;
+            admin_post(
+                &remote,
+                &token,
+                "favorites/ack",
+                &serde_json::json!({ "cursor": cursor }),
+            )
+            .await?;
+            self.change_settings(|settings| settings.favorites_cursor = cursor)?;
+            since = cursor;
+            if !full {
+                break;
+            }
+        }
+        if applied > 0 {
+            self.notify_favorites();
+        }
+        Ok(applied)
+    }
+
     /// 送信を 1 回行う。すでに送っていれば何もしない。
     pub async fn send_once(&self, state: Arc<AppState>) -> Result<SendAttempt, String> {
         let Ok(_running) = self.send_lock.try_lock() else {
             return Ok(SendAttempt::Busy);
         };
+        // 写しに入れるため、携帯の変更を先に取り込む。取り込めなくても送信は止めない。
+        if let Err(error) = self.pull_favorites_locked(&state).await {
+            log::warn!("携帯のお気に入りを取り込めません: {error}");
+        }
         // 写しを作る前に読む。この間に変わっても、次回もう一度送るだけで取りこぼさない。
         let generation = state.db.library_generation().ok();
         let remote = self
@@ -702,7 +805,17 @@ impl DesktopServer {
             let mut seen = None;
             let mut changed_at = None;
             let mut retry_at: Option<Instant> = None;
+            let mut favorites_at: Option<Instant> = None;
             loop {
+                // 自動送信を切っていても、携帯の変更はデスクトップ版へ届ける。
+                if server.settings().remote.is_some()
+                    && favorites_at.is_none_or(|at| at.elapsed() >= FAVORITES_POLL)
+                {
+                    favorites_at = Some(Instant::now());
+                    if let Err(error) = server.pull_favorites(&state).await {
+                        log::debug!("携帯のお気に入りを取り込めません: {error}");
+                    }
+                }
                 if server.settings().auto_send && server.settings().remote.is_some() {
                     let generation = state.db.library_generation().ok();
                     if generation != seen {

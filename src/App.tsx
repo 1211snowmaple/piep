@@ -11,6 +11,7 @@ import { subscribeTauriEvent } from "@/services/eventBus";
 import { isTauriRuntime } from "@/services/dbApi";
 import { rememberWindowColorScheme } from "@/services/startupApi";
 import { useIncompleteSaveRepair } from "@/features/updates/repairIncompleteSaves";
+import { invalidateWorkFlagViews } from "@/features/library/workSetInvalidation";
 import { DANGER_CONFIRM } from "@/components/DangerButton";
 
 const DashboardPage = lazy(() => import("@/features/dashboard/DashboardPage"));
@@ -108,6 +109,13 @@ function AppContent() {
       queryClient.invalidateQueries({ queryKey: ["dashboard"] });
       queryClient.invalidateQueries({ queryKey: ["epub-queue-works"] });
       payload.forEach((id) => queryClient.invalidateQueries({ queryKey: ["reader-metadata", id] }));
+    });
+  }, [queryClient]);
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    // 携帯がサーバー越しにお気に入りを付け外しした。同じハートを押したときと同じ範囲を読み直す。
+    return subscribeTauriEvent<null>("favorites-changed", () => {
+      void invalidateWorkFlagViews(queryClient);
     });
   }, [queryClient]);
   useEffect(() => {

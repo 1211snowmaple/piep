@@ -39,8 +39,11 @@ export function invalidateWorkSetViews(queryClient: QueryClient): void {
  * カードは作者ページ・束・EPUBキューまで知らせていたのに、作品ページは
  * 棚と件数しか知らせていない。**同じ操作なら同じ範囲が古くなる**ので、
  * 一覧はひとつだけ置く。
+ *
+ * `workId` を渡さなければ、すべての作品の詳細を古いものにする。携帯がサーバー越しに
+ * 変えたときは、どの作品かを画面の番号で知らせないため。
  */
-export function invalidateWorkFlagViews(queryClient: QueryClient, workId: number): Promise<unknown> {
+export function invalidateWorkFlagViews(queryClient: QueryClient, workId?: number): Promise<unknown> {
   return Promise.all([
     queryClient.invalidateQueries({ queryKey: ["library"] }),
     queryClient.invalidateQueries({ queryKey: ["library-shelf-counts"] }),
@@ -48,6 +51,8 @@ export function invalidateWorkFlagViews(queryClient: QueryClient, workId: number
     queryClient.invalidateQueries({ queryKey: ["entity-works"] }),
     queryClient.invalidateQueries({ queryKey: ["work-collection"] }),
     queryClient.invalidateQueries({ queryKey: ["epub-queue-works"] }),
-    queryClient.invalidateQueries({ queryKey: ["reader-metadata", workId] }),
+    queryClient.invalidateQueries({
+      queryKey: workId === undefined ? ["reader-metadata"] : ["reader-metadata", workId],
+    }),
   ]);
 }

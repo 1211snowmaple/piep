@@ -20,7 +20,7 @@ mod source_time;
 use database::Database;
 use std::path::Path;
 use std::sync::Arc;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 const LIBRARY_LOCK_FILENAME: &str = ".piep-library.lock";
 /// 移行や後始末を走らせるスレッドの余裕。既定の 2MB では、メインスレッドで
@@ -180,6 +180,10 @@ fn prepare_library(
     match server::desktop::DesktopServer::new(app_data) {
         Ok(desktop_server) => {
             let desktop_server = Arc::new(desktop_server);
+            let events = app.clone();
+            desktop_server.set_favorites_listener(Arc::new(move || {
+                let _ = events.emit("favorites-changed", ());
+            }));
             desktop_server.start_background(Arc::clone(&state));
             app.manage(desktop_server);
         }

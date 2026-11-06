@@ -2306,3 +2306,223 @@ async fn text_is_compressed_only_for_a_client_that_asks() {
     // 圧縮しても、本文を保存させない指示は変わらない。
     assert_eq!(packed.headers()["cache-control"], "private, no-store");
 }
+
+async fn put_favorite(
+    client: &reqwest::Client,
+    url: &str,
+    token: &str,
+    source_id: &str,
+    favorite: bool,
+    device_time: i64,
+) -> reqwest::Response {
+    client
+        .put(format!("{url}/api/v1/favorites/pixiv/{source_id}"))
+        .bearer_auth(token)
+        .json(&serde_json::json!({ "favorite": favorite, "deviceTime": device_time }))
+        .send()
+        .await
+        .expect("favorite put")
+}
+
+async fn favorite_on_server(client: &reqwest::Client, url: &str, token: &str) -> bool {
+    let found = wait_for_search(client, url, token, "サーバー接続試験", 1).await;
+    found["items"][0]["favorite"]
+        .as_bool()
+        .expect("favorite flag")
+}
+
+#[tokio::test]
+async fn a_favorite_from_the_phone_reaches_the_desktop_and_survives_a_send() {
+    let root = TestRoot::new("favorite-standalone");
+    let fixture = fixture(&root.0);
+    let (parts, paths) = standalone(&root.0);
+    let url = spawn_plain(combined_router(Arc::clone(&parts.context)));
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("client");
+    let remote = RemoteServer {
+        url: format!("{url}/"),
+        fingerprint: None,
+    };
+    let outgoing = root.0.join("outgoing");
+    let token = pair_admin(&remote, &admin_secret(&paths), "test desktop")
+        .await
+        .expect("pair admin");
+    send(
+        &fixture.state,
+        &fixture.app_data,
+        &outgoing,
+        &remote,
+        &token,
+    )
+    .await;
+    let pairing = admin_post(
+        &remote,
+        &token,
+        "pairings",
+        &serde_json::json!({ "url": "https://piep.example.test/" }),
+    )
+    .await
+    .expect("reader pairing");
+    let payload: serde_json::Value =
+        serde_json::from_str(pairing["payload"].as_str().expect("payload")).expect("payload JSON");
+    let credentials = pair_with(&client, &url, payload["secret"].as_str().expect("secret")).await;
+    let reader = credentials["token"]
+        .as_str()
+        .expect("reader token")
+        .to_string();
+
+    let about: serde_json::Value = client
+        .get(format!("{url}/api/v1/about"))
+        .bearer_auth(&reader)
+        .send()
+        .await
+        .expect("about")
+        .json()
+        .await
+        .expect("about JSON");
+    assert!(about["capabilities"]
+        .as_array()
+        .expect("capabilities")
+        .contains(&serde_json::json!("favorite-write")));
+
+    // 無い作品は記録しない。
+    let missing = put_favorite(&client, &url, &reader, "no-such-work", true, 1_000).await;
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    // 携帯は管理の口を読めない。
+    let refused = client
+        .get(format!("{url}/api/v1/admin/favorites?since=0"))
+        .bearer_auth(&reader)
+        .send()
+        .await
+        .expect("reader admin");
+    assert_eq!(refused.status(), StatusCode::FORBIDDEN);
+
+    let stored = put_favorite(&client, &url, &reader, "server-test", true, 2_000).await;
+    assert_eq!(stored.status(), StatusCode::OK);
+    let stored: serde_json::Value = stored.json().await.expect("favorite JSON");
+    assert_eq!(stored["favorite"], true);
+    assert_eq!(stored["sourceId"], "server-test");
+    // 古い時刻の変更は負け、今の値が返る。
+    let stale: serde_json::Value =
+        put_favorite(&client, &url, &reader, "server-test", false, 1_500)
+            .await
+            .json()
+            .await
+            .expect("stale JSON");
+    assert_eq!(stale["favorite"], true);
+    assert!(favorite_on_server(&client, &url, &reader).await);
+
+    // デスクトップ版が取り込む前に別の変更を送っても、送られてきた本棚へ当て直す。
+    let storage = fixture.app_data.join("downloads");
+    add_work(
+        &fixture.state.db,
+        &storage,
+        "server-test-2",
+        "二つ目の作品",
+        "追加の本文",
+    );
+    let replaced = send(
+        &fixture.state,
+        &fixture.app_data,
+        &outgoing,
+        &remote,
+        &token,
+    )
+    .await;
+    assert!(!replaced.unchanged);
+    assert!(favorite_on_server(&client, &url, &reader).await);
+
+    // デスクトップ版の取り込み。送信の前に本棚へ書き、取り込んだ番号を知らせる。
+    let changes = super::sync_send::admin_get_if_present(&remote, &token, "favorites?since=0")
+        .await
+        .expect("favorites")
+        .expect("this server has the favorites route");
+    assert_eq!(changes["items"].as_array().expect("items").len(), 1);
+    let cursor = changes["cursor"].as_i64().expect("cursor");
+    fixture
+        .state
+        .db
+        .set_favorite_by_source("pixiv", "server-test", true)
+        .expect("apply")
+        .expect("work exists");
+    admin_post(
+        &remote,
+        &token,
+        "favorites/ack",
+        &serde_json::json!({ "cursor": cursor }),
+    )
+    .await
+    .expect("ack");
+    let after: serde_json::Value =
+        super::sync_send::admin_get_if_present(&remote, &token, "favorites?since=0")
+            .await
+            .expect("favorites after ack")
+            .expect("route");
+    assert!(after["items"].as_array().expect("items").is_empty());
+
+    // 取り込んだあとは、送った本棚がそのまま正しい。
+    let third = send(
+        &fixture.state,
+        &fixture.app_data,
+        &outgoing,
+        &remote,
+        &token,
+    )
+    .await;
+    assert!(!third.unchanged);
+    assert!(favorite_on_server(&client, &url, &reader).await);
+    parts.receiver.stop_index_catch_up();
+}
+
+#[tokio::test]
+async fn the_embedded_server_writes_a_favorite_to_the_desktop_library_and_says_so() {
+    let root = TestRoot::new("favorite-embedded");
+    let fixture = fixture(&root.0);
+    let store = Arc::new(ServerStore::open(&root.0.join("state.db")).expect("store"));
+    let context = super::http::ServerContext::new(
+        super::library::Library::App(Arc::clone(&fixture.state)),
+        Arc::clone(&store),
+        fixture.app_data.clone(),
+        None,
+        None,
+        None,
+    );
+    let told = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = Arc::clone(&told);
+    context.set_favorites_listener(Arc::new(move || {
+        counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }));
+    let url = spawn_plain(combined_router(context));
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("client");
+    let secret = store
+        .issue_pairing(Role::Reader, Duration::from_secs(60))
+        .expect("pairing");
+    let credentials = pair_with(&client, &url, &secret).await;
+    let reader = credentials["token"].as_str().expect("token").to_string();
+
+    let response = put_favorite(&client, &url, &reader, "server-test", true, 1_000).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        fixture
+            .state
+            .db
+            .get_download(fixture.work_id)
+            .expect("work")
+            .favorite
+    );
+    assert_eq!(told.load(std::sync::atomic::Ordering::SeqCst), 1);
+    // 内蔵サーバーは送信で入れ替わらないので、記録は残さない。
+    assert!(store
+        .favorite_changes_since(0, 10)
+        .expect("changes")
+        .is_empty());
+    // 無い作品は 404 で、画面へも知らせない。
+    let missing = put_favorite(&client, &url, &reader, "no-such-work", true, 2_000).await;
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    assert_eq!(told.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
