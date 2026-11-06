@@ -2010,6 +2010,84 @@ async fn requests_from_other_sites_and_unknown_hosts_are_refused() {
     assert_eq!(bearer.status(), StatusCode::OK);
 }
 
+/// デスクトップが接続先の名前でリンクを発行すると、その名前でページを開ける。
+/// 127.0.0.1 は名前を問わないので、名前を付けて試す。
+#[tokio::test]
+async fn the_name_the_desktop_issued_a_link_for_opens_the_page() {
+    let site = AdminSite::new("admin-host-learn");
+    site.set_up().await;
+    let token = pair_admin(
+        &RemoteServer {
+            url: format!("{}/", site.url),
+            fingerprint: None,
+        },
+        &admin_secret(&site.paths),
+        "test desktop",
+    )
+    .await
+    .unwrap();
+    let page = |host: &'static str| {
+        site.get("/admin/")
+            .header(header::HOST, host)
+            .header("sec-fetch-dest", "document")
+            .send()
+    };
+    // 覚える前は、ブラウザには理由と次の手を書いたページを返す。
+    let before = page("piep.example.net").await.unwrap();
+    assert_eq!(before.status(), StatusCode::FORBIDDEN);
+    assert!(before.headers()[header::CONTENT_TYPE]
+        .to_str()
+        .unwrap()
+        .starts_with("text/html"));
+    let body = before.text().await.unwrap();
+    assert!(body.contains("管理画面を開く"), "{body}");
+    assert!(body.contains("data:image/svg+xml;base64,"), "{body}");
+    // 部品や API には、今までどおり JSON で答える。
+    let api = site
+        .get("/api/v1/admin/web/state")
+        .header(header::HOST, "piep.example.net")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(api.status(), StatusCode::FORBIDDEN);
+    let error: serde_json::Value = api.json().await.unwrap();
+    assert_eq!(error["code"], "host_rejected");
+
+    let issued = site
+        .client
+        .post(format!("{}/api/v1/admin/tickets", site.url))
+        .bearer_auth(&token)
+        .header(header::HOST, "piep.example.net")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(issued.status(), StatusCode::OK);
+    let issued: serde_json::Value = issued.json().await.unwrap();
+    let ticket = issued["path"]
+        .as_str()
+        .unwrap()
+        .strip_prefix("/admin/#ticket=")
+        .unwrap()
+        .to_string();
+
+    // 発行のあとは、同じ名前でページを開き、券で入れる。
+    let after = page("piep.example.net").await.unwrap();
+    assert_eq!(after.status(), StatusCode::OK);
+    let entered = site
+        .post("/api/v1/admin/web/ticket")
+        .header(header::HOST, "piep.example.net")
+        .json(&serde_json::json!({ "ticket": ticket }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(entered.status(), StatusCode::OK);
+    // 覚えるのは発行に使った名前だけで、ほかの名前は断ったまま。
+    assert_eq!(
+        page("other.example.net").await.unwrap().status(),
+        StatusCode::FORBIDDEN
+    );
+}
+
 #[tokio::test]
 async fn tickets_come_only_from_the_key_and_important_actions_ask_again() {
     let site = AdminSite::new("admin-ticket");

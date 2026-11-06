@@ -295,8 +295,9 @@ pub fn host_name(host: &str) -> &str {
     host.rsplit_once(':').map_or(host, |(name, _)| name)
 }
 
-/// IP と localhost はいつでも通す。名前は、券が通ったものか `public_url` のものだけを通す。
+/// IP と localhost はいつでも通す。名前は、覚えたものか `public_url` のものだけを通す。
 /// 攻撃者の名前を 127.0.0.1 へ向けて口を読ませる手口（DNS rebinding）を止めるためである。
+/// 名前を覚えるのは、管理者の鍵でリンクを発行したときと、券が通ったときである。
 fn host_allowed(ctx: &ServerContext, host: &str) -> bool {
     let name = host_name(host).to_ascii_lowercase();
     if name == "localhost" || name.parse::<IpAddr>().is_ok() {
@@ -340,6 +341,9 @@ async fn guard(State(ctx): State<Ctx>, mut request: Request, next: Next) -> Resp
             return rejected("host_rejected", "このアドレスでは開けません");
         };
         if !host_allowed(&ctx, &host) {
+            if wants_page(&request) {
+                return host_rejected_page();
+            }
             return rejected(
                 "host_rejected",
                 "このアドレスでは開けません。デスクトップ版の「管理画面を開く」か、サーバーの admin-setup --url から開いてください",
@@ -352,6 +356,80 @@ async fn guard(State(ctx): State<Ctx>, mut request: Request, next: Next) -> Resp
     }
     next.run(request).await
 }
+
+/// ブラウザでページとして開いたか。読み込みの部品や API には JSON で答える。
+fn wants_page(request: &Request) -> bool {
+    if request.method() != Method::GET {
+        return false;
+    }
+    let headers = request.headers();
+    if let Some(dest) = headers.get("sec-fetch-dest") {
+        return dest.as_bytes() == b"document";
+    }
+    headers
+        .get(header::ACCEPT)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|accept| accept.contains("text/html"))
+}
+
+/// 知らない名前で開かれたときのページ。アプリのアイコンを丸ごと出し、次にすることを書く。
+/// 外のファイルを読まない。読み込みの部品も、同じ理由で断られるからである。
+fn host_rejected_page() -> Response {
+    use base64::Engine as _;
+    static PAGE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let page = PAGE.get_or_init(|| {
+        let icon = include_str!("../../../../public/piep.svg");
+        let data = base64::engine::general_purpose::STANDARD.encode(icon);
+        HOST_REJECTED_PAGE.replace("{icon}", &format!("data:image/svg+xml;base64,{data}"))
+    });
+    (
+        StatusCode::FORBIDDEN,
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        page.clone(),
+    )
+        .into_response()
+}
+
+const HOST_REJECTED_PAGE: &str = r#"<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<link rel="icon" type="image/svg+xml" href="{icon}">
+<title>piep 管理画面</title>
+<style>
+:root { color-scheme: light dark; --bg: #f5f7fb; --card: #fff; --line: #dfe3ea; --text: #1f2430; --dim: #667085; }
+@media (prefers-color-scheme: dark) { :root { --bg: #16181d; --card: #1f2229; --line: #343944; --text: #e7e9ee; --dim: #9aa3b2; } }
+* { box-sizing: border-box; }
+body { margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 24px 16px; background: var(--bg); color: var(--text);
+  font-family: system-ui, -apple-system, "Segoe UI", "Hiragino Sans", "Yu Gothic UI", Meiryo, sans-serif; line-height: 1.7; }
+main { width: 100%; max-width: 480px; background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 28px 28px 24px; }
+img { display: block; width: 44px; height: 44px; margin-bottom: 18px; }
+h1 { font-size: 19px; margin: 0 0 8px; }
+p { margin: 0 0 12px; font-size: 14px; }
+.dim { color: var(--dim); font-size: 13px; }
+ol { margin: 0 0 14px; padding-left: 1.4em; font-size: 14px; }
+code { font-size: 12.5px; padding: 1px 5px; border-radius: 5px; border: 1px solid var(--line); word-break: break-all; }
+</style>
+</head>
+<body>
+<main>
+<img src="{icon}" alt="" width="44" height="44">
+<h1>このアドレスでは、まだ開けません</h1>
+<p>管理画面は、デスクトップ版から開いたアドレスだけを受け付けます。知らないアドレスを受け付けないのは、別のサイトから管理画面を読まれないようにするためです。</p>
+<ol>
+<li>デスクトップ版の「設定」→「サーバー」を開く</li>
+<li>「管理画面を開く」を押す</li>
+</ol>
+<p class="dim">一度開くと、このアドレスを覚えます。サーバーの PC からは <code>piep-server admin-setup --url このアドレス</code> でも開けます。</p>
+</main>
+</body>
+</html>
+"#;
 
 /// `admin_routes` に重ねる守り。
 pub(super) fn with_guard(router: Router, ctx: Ctx) -> Router {
@@ -857,6 +935,9 @@ async fn issue_ticket(
             "このサーバーでは管理画面を使えません",
         )
     })?;
+    // デスクトップは、いま話している接続先の URL でリンクを開く。その名前を先に覚えておかないと、
+    // ページの読み込みが断られ、券を使う所まで進めない。
+    learn_host(&ctx, &headers);
     let account = ctx.store.admin_account().map_err(storage_error)?;
     let (kind, lifetime) = if account.is_some() {
         (TicketKind::Login, LOGIN_TICKET)
