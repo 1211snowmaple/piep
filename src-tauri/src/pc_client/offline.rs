@@ -1,5 +1,6 @@
 //! 利用者が選んだ作品だけを、検証後に版単位で切り替えて保存する。
 
+use super::device_db::DeviceDb;
 use super::image_validation::validate_saved_image;
 use super::*;
 use regex::Regex;
@@ -17,16 +18,28 @@ const MAX_PAGE_BYTES: usize = 10 * 1024 * 1024;
 const MAX_COLLECTION_COVERS: usize = 64;
 const MAX_COLLECTION_COVER_BYTES: usize = 16 * 1024 * 1024;
 
+#[path = "offline_index.rs"]
+mod index;
+
 pub struct OfflineState {
     root: PathBuf,
+    /// 本文の索引。保存版そのものはファイルに置く。
+    db: Arc<DeviceDb>,
     save_lock: Mutex<()>,
     lock: Mutex<()>,
 }
 
 impl OfflineState {
+    /// 試験用。索引はメモリーに置く。
+    #[cfg(test)]
     pub fn new(root: PathBuf) -> Self {
+        Self::with_db(root, Arc::new(DeviceDb::in_memory()))
+    }
+
+    pub fn with_db(root: PathBuf, db: Arc<DeviceDb>) -> Self {
         let state = Self {
             root,
+            db,
             save_lock: Mutex::new(()),
             lock: Mutex::new(()),
         };
@@ -596,6 +609,17 @@ fn scan_works(state: &OfflineState) -> Result<(Vec<OfflineWork>, Vec<OfflineIssu
     Ok((result, issues))
 }
 
+/// 保存した作品の本文を探す。索引が保存版とずれていれば、先に作り直す。
+#[tauri::command]
+pub async fn offline_search_text(
+    state: State<'_, OfflineState>,
+    query: String,
+) -> Result<Vec<index::TextHit>, ClientError> {
+    let _guard = state.lock.lock().await;
+    index::reconcile(&state)?;
+    index::search(&state, &query)
+}
+
 #[tauri::command]
 pub async fn offline_list_works(
     state: State<'_, OfflineState>,
@@ -668,6 +692,10 @@ async fn save_snapshot(
     let pointer = publish_snapshot(&work_dir, &staging, snapshot_name)?;
     // ページ/画像取得も同じロックを使うため、旧版を参照中の読み込みが終わってから削除する。
     cleanup_superseded_snapshots(&work_dir, &pointer.snapshot);
+    // 索引は控えなので、作れなくても保存は済んでいる。次の検索の前に作り直す。
+    if index::index_work(state, metadata.work.id).is_err() {
+        let _ = index::remove_work(state, metadata.work.id);
+    }
     Ok(manifest.summary)
 }
 
@@ -1065,10 +1093,13 @@ fn delete_saved_work(
         });
     }
     match fs::remove_dir_all(dir) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(_) => Err(storage()),
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err(storage()),
     }
+    // 外せなくても、次の検索の前にそろえる。
+    let _ = index::remove_work(state, work_id);
+    Ok(())
 }
 
 fn delete_corrupt_work(state: &OfflineState, work_id: i64) -> Result<(), ClientError> {
@@ -1080,10 +1111,13 @@ fn delete_corrupt_work(state: &OfflineState, work_id: i64) -> Result<(), ClientE
         });
     }
     match fs::remove_dir_all(dir) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(_) => Err(storage()),
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err(storage()),
     }
+    // 外せなくても、次の検索の前にそろえる。
+    let _ = index::remove_work(state, work_id);
+    Ok(())
 }
 
 #[tauri::command]

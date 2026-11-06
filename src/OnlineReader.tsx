@@ -1,4 +1,4 @@
-import { rememberReading } from "./recentReading";
+import { adoptLocalPosition, flushLocalReading, hasLocalPosition, localPage, localPosition, localReadingTime, markLocalReading, rememberReading, saveLocalPage, saveLocalPosition, type SavedPosition } from "./localReading";
 import { progressLabel } from "./workText";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -15,24 +15,18 @@ import { readRemotePosition, recordReading, refreshReading, refreshReadingWithin
 import { forgetWorkPages, fetchPage, prefetchPage } from "./pageCache";
 import { illustrationUrl } from "./images";
 import { getOfflineAsset, getOfflineOutline, getOfflinePage, getPcMetadata, getPcOutline, getPcWorkCollections, pcErrorMessage, saveOfflineWork, type PcCollection, type PcMetadata, type PcOutlineEntry, type PcPage, type PcWork } from "./pcApi";
-import type { ReaderBehavior, ReaderFont, ReaderLayout, ReaderType } from "./readerPrefs";
+import type { ReaderBehavior, ReaderFont, ReaderType } from "./readerPrefs";
 
 function offlineSnapshotChanged(error: unknown): boolean {
   return typeof error === "object" && error !== null && "code" in error && error.code === "offline_snapshot_changed";
 }
 
+/** 読書位置を書く本文の識別。作業中の値が変わったら、位置を書き直す合図にする。 */
 function readingKey(work: PcWork, editHash: string | null): string {
-  return `piep.android.pc.${work.id}.${work.currentVersion}.${work.contentHash ?? ""}.${editHash ?? "original"}`;
+  return `${work.source}:${work.sourceId}.${work.currentVersion}.${work.contentHash ?? ""}.${editHash ?? "original"}`;
 }
 
-function savedPage(work: PcWork, editHash: string | null): number {
-  try {
-    const raw = window.localStorage.getItem(`${readingKey(work, editHash)}.page`);
-    if (raw === null) return 0;
-    const value = Number(raw);
-    return Number.isSafeInteger(value) && value >= 0 && value <= 1_000_000 ? value : 0;
-  } catch { return 0; }
-}
+const savedPage = localPage;
 
 // サーバーの位置を待つのは開くときの一瞬だけ。遅ければ手元の位置で開き、あとで案内する。
 // 同期を待つのは短く。間に合わなければ手元の位置で開き、本文を先に出す。
@@ -41,40 +35,14 @@ const SYNC_WAIT_MS = 600;
 const PREFETCH_DELAY_MS = 300;
 const WRITE_DELAY_MS = 3000;
 
-function localReadingTime(work: PcWork, editHash: string | null): number {
-  try {
-    const value = Number(window.localStorage.getItem(`${readingKey(work, editHash)}.at`));
-    return Number.isSafeInteger(value) && value > 0 ? value : 0;
-  } catch { return 0; }
-}
-
-function markLocalReading(key: string, time: number): void {
-  try { window.localStorage.setItem(`${key}.at`, String(time)); } catch { /* storage unavailable */ }
-}
-
 async function remoteStartFor(work: PcWork, editHash: string | null): Promise<RemoteStart | null> {
   return remoteStart(await readRemotePosition(work.source, work.sourceId), localReadingTime(work, editHash), work.currentVersion, editHash);
 }
 
-// layout が違う位置は、割合だけを使って戻す。ページごとと一続きでは top の基準が違う。
-type SavedPosition = { page: number; top: number; ratio: number; fontSize: number; lineHeight: number; readerWidth: number; fontFamily: ReaderFont; layout?: ReaderLayout };
-
-function readSavedPosition(work: PcWork, editHash: string | null): SavedPosition | null {
-  try {
-    const raw = window.localStorage.getItem(`${readingKey(work, editHash)}.position`);
-    if (raw === null) return null;
-    const value = JSON.parse(raw) as Partial<SavedPosition> | null;
-    if (!value || !Number.isSafeInteger(value.page) || !Number.isFinite(value.top) || !Number.isFinite(value.ratio)) return null;
-    if (value.page! < 0 || value.top! < 0 || value.ratio! < 0 || value.ratio! > 1) return null;
-    return value as SavedPosition;
-  } catch { return null; }
-}
+const readSavedPosition = localPosition;
 
 /** 詳細画面の「続きから読む」のため。開いただけのものは続きとして扱わない。 */
-export function hasReadingPosition(work: PcWork, editHash: string | null): boolean {
-  const saved = readSavedPosition(work, editHash);
-  return saved !== null && (saved.page > 0 || (saved.ratio ?? 0) > 0.01);
-}
+export const hasReadingPosition = hasLocalPosition;
 
 function positionFromRemote(start: RemoteStart, fontFamily: ReaderFont): SavedPosition {
   // 別の端末とは文字の大きさが違うので、割合で戻す。先頭から順に画像が埋まるのを待つよう top は末尾にする。
@@ -95,11 +63,11 @@ function stepHeight(viewport: HTMLElement): number {
   return Math.max(1, viewport.clientHeight - keep);
 }
 
-export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBehaviorChange, backLabel = "作品一覧に戻る", onSaved, offline = false, offlineCollections, offlineAuthorCover = false, offlineEditHash = null, snapshotGeneration }: { work: PcWork; type: ReaderType; behavior: ReaderBehavior; onBack: () => void; onTypeChange: (patch: Partial<ReaderType>) => void; onBehaviorChange: (patch: Partial<ReaderBehavior>) => void; backLabel?: string; onSaved?: () => void; offline?: boolean; offlineCollections?: PcCollection[]; offlineAuthorCover?: boolean; offlineEditHash?: string | null; snapshotGeneration?: number }) {
+export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBehaviorChange, backLabel = "作品一覧に戻る", onSaved, offline = false, offlineCollections, offlineAuthorCover = false, offlineEditHash = null, snapshotGeneration, startPage }: { work: PcWork; type: ReaderType; behavior: ReaderBehavior; onBack: () => void; onTypeChange: (patch: Partial<ReaderType>) => void; onBehaviorChange: (patch: Partial<ReaderBehavior>) => void; backLabel?: string; onSaved?: () => void; offline?: boolean; offlineCollections?: PcCollection[]; offlineAuthorCover?: boolean; offlineEditHash?: string | null; snapshotGeneration?: number; /** 本文検索から開くときのページ。保存した作品だけ。 */ startPage?: number }) {
   const { fontSize, lineHeight, readerWidth, fontFamily, readerTheme } = type;
   const continuous = behavior.layout === "continuous";
   const [activeEditHash, setActiveEditHash] = useState<string | null | undefined>(offline ? offlineEditHash : undefined);
-  const [pageIndex, setPageIndex] = useState(() => offline ? savedPage(work, offlineEditHash) : 0);
+  const [pageIndex, setPageIndex] = useState(() => offline ? startPage ?? savedPage(work, offlineEditHash) : 0);
   const [page, setPage] = useState<PcPage | null>(null);
   const [html, setHtml] = useState("");
   const [loading, setLoading] = useState(true);
@@ -139,7 +107,8 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
   const latestPosition = useRef<LivePosition | null>(null);
   const flushContinuous = useRef<(() => void) | null>(null);
   const targetNonce = useRef(0);
-  const pendingRestore = useRef<SavedPosition | null>(offline ? readSavedPosition(work, offlineEditHash) : null);
+  // 検索から開いたときは、そのページの頭から。前に読んだ位置へは戻さない。
+  const pendingRestore = useRef<SavedPosition | null>(offline && startPage === undefined ? readSavedPosition(work, offlineEditHash) : null);
   const pendingOutline = useRef<{ page: number; index: number } | null>(null);
   const [remoteOffer, setRemoteOffer] = useState<RemoteStart | null>(null);
   // 最初に開いたページは読み進めた印ではないので、送らない。
@@ -226,13 +195,8 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
       setIsEdited(metadata.isEdited);
       if (start) {
         // 時刻だけ新しくなると、次に開いたとき古い位置を「最新」と扱ってしまう。位置も同時に書く。
-        const key = readingKey(metadata.work, metadata.activeEditHash);
         const adopted = positionFromRemote(start, fontFamily);
-        try {
-          window.localStorage.setItem(`${key}.page`, String(start.page));
-          window.localStorage.setItem(`${key}.position`, JSON.stringify({ ...adopted, top: 0 }));
-        } catch { /* storage unavailable */ }
-        markLocalReading(key, start.deviceTime);
+        adoptLocalPosition(metadata.work, metadata.activeEditHash, { ...adopted, top: 0 }, start.deviceTime);
         guidedPage.current = start.guide;
         pendingRestore.current = start.guide ? null : adopted;
         setPageIndex(start.page);
@@ -290,7 +254,7 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
   const queueReadingWrite = (pageNumber: number, ratio: number, pageCount: number) => {
     if (!positionKey || activeEditHash === undefined || activeEditHash === "unknown") return;
     const time = Date.now();
-    markLocalReading(positionKey, time);
+    markLocalReading(readingWork, activeEditHash, time);
     setRemoteOffer(null);
     queuedWrite.current = {
       source: readingWork.source,
@@ -303,12 +267,12 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
       deviceTime: time,
     };
     if (writeTimer.current === null) writeTimer.current = window.setTimeout(sendQueuedWrite, WRITE_DELAY_MS);
-    rememberReading(readingWork, pageCount > 0 ? (pageNumber + Math.min(1, Math.max(0, ratio))) / pageCount : 0, pageNumber === pageCount - 1 && ratio >= 0.98);
+    rememberReading(readingWork, activeEditHash, pageCount > 0 ? (pageNumber + Math.min(1, Math.max(0, ratio))) / pageCount : 0, pageNumber === pageCount - 1 && ratio >= 0.98);
   };
 
   const acceptRemote = () => {
-    if (!remoteOffer || !positionKey) return;
-    markLocalReading(positionKey, remoteOffer.deviceTime);
+    if (!remoteOffer || !positionKey || activeEditHash === undefined || activeEditHash === "unknown") return;
+    markLocalReading(readingWork, activeEditHash, remoteOffer.deviceTime);
     syncedPage.current = remoteOffer.page;
     guidedPage.current = remoteOffer.guide;
     if (continuous) {
@@ -342,7 +306,7 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
     };
     const onVisibility = () => {
       if (document.visibilityState === "visible") check();
-      else { flushContinuous.current?.(); sendQueuedWrite(); }
+      else { flushContinuous.current?.(); sendQueuedWrite(); void flushLocalReading(); }
     };
     check();
     document.addEventListener("visibilitychange", onVisibility);
@@ -436,8 +400,9 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
   };
 
   useEffect(() => {
-    if (!positionKey) return;
-    try { window.localStorage.setItem(`${positionKey}.page`, String(pageIndex)); } catch { /* storage unavailable */ }
+    // 版が分からないあいだの位置は、どの本文のものか決まらないので残さない。
+    if (!positionKey || activeEditHash === undefined || activeEditHash === "unknown") return;
+    saveLocalPage(readingWork, activeEditHash, pageIndex);
   }, [positionKey, pageIndex]);
 
   useEffect(() => {
@@ -478,7 +443,7 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
     const flush = () => {
       if (!changed || !restored || !latest) return;
       changed = false;
-      try { window.localStorage.setItem(`${positionKey}.position`, JSON.stringify(latest)); } catch { /* storage unavailable */ }
+      if (activeEditHash !== undefined && activeEditHash !== "unknown") saveLocalPosition(readingWork, activeEditHash, latest);
       // 位置を戻しただけのスクロールは、読み進めた印ではない。
       if (restoredTop === null || Math.abs(latest.top - restoredTop) > 2) queueReadingWrite(pageIndex, latest.ratio, pageCount);
     };
@@ -538,7 +503,7 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
   }, [continuous, positionKey, pageIndex, page, html, loading, problem, assetsReady, fontSize, lineHeight, readerWidth, fontFamily]);
 
   // 上の片付けが最後の位置を積むので、この片付けはその後に走らせる。
-  useEffect(() => () => { flushContinuous.current?.(); sendQueuedWrite(); }, []);
+  useEffect(() => () => { flushContinuous.current?.(); sendQueuedWrite(); void flushLocalReading(); }, []);
 
   useEffect(() => {
     const target = pendingOutline.current;
@@ -821,9 +786,9 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
   };
 
   const continuousCommit = (position: LivePosition) => {
-    if (!positionKey) return;
+    if (!positionKey || activeEditHash === undefined || activeEditHash === "unknown") return;
     const saved: SavedPosition = { page: position.page, top: position.top, ratio: position.ratio, fontSize, lineHeight, readerWidth, fontFamily, layout: "continuous" };
-    try { window.localStorage.setItem(`${positionKey}.position`, JSON.stringify(saved)); } catch { /* storage unavailable */ }
+    saveLocalPosition(readingWork, activeEditHash, saved);
     queueReadingWrite(position.page, position.ratio, position.pageCount);
   };
 

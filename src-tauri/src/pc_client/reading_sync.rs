@@ -1,8 +1,9 @@
 //! 読書位置をサーバーと同期する。
 //!
-//! 読書を止めないよう、書き込みはまず端末のファイルに置き、通信はあとで行う。
+//! 読書を止めないよう、書き込みはまず端末の SQLite（`device_db`）に置き、通信はあとで行う。
 //! 圏外で読んだ分もここに残り、次につながったときに届く。
 
+use super::device_db::DeviceDb;
 use super::*;
 use std::collections::BTreeMap;
 use tokio::sync::Mutex as AsyncMutex;
@@ -11,14 +12,8 @@ const PULL_LIMIT: i64 = 200;
 // 1 回の同期で読むページ数の上限。残りは次の同期で続きから読む。
 const MAX_PULL_PAGES: usize = 50;
 
-const SYNC_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS sync_meta (
-    id INTEGER PRIMARY KEY CHECK(id=1), url TEXT NOT NULL, device_id TEXT NOT NULL, cursor INTEGER NOT NULL);
-    CREATE TABLE IF NOT EXISTS positions (key TEXT PRIMARY KEY, data TEXT NOT NULL);
-    CREATE TABLE IF NOT EXISTS pending (key TEXT PRIMARY KEY, data TEXT NOT NULL);";
-
 pub struct ReadingSyncState {
-    file: PathBuf,
-    database: Mutex<Option<rusqlite::Connection>>,
+    db: Arc<DeviceDb>,
     sync_lock: AsyncMutex<()>,
 }
 
@@ -159,48 +154,36 @@ fn delivered_write(
     Ok(())
 }
 
+/// 0.5.0 までの `reading-sync.json` を写す。元の JSON は消さずに残す。
+pub(super) fn import_legacy_json(
+    tx: &rusqlite::Transaction<'_>,
+    file: &std::path::Path,
+) -> Result<(), ClientError> {
+    let legacy: SyncFile = match fs::read(file) {
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|_| ClientError::device_records())?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => SyncFile::default(),
+        Err(_) => return Err(ClientError::device_records()),
+    };
+    tx.execute(
+        "INSERT INTO sync_meta VALUES(1, ?1, ?2, ?3)",
+        rusqlite::params![legacy.url, legacy.device_id, legacy.cursor],
+    )
+    .map_err(storage_error)?;
+    for (key, position) in legacy.positions {
+        put_entry(tx, "positions", &key, &position)?;
+    }
+    for (key, pending) in legacy.pending {
+        put_entry(tx, "pending", &key, &pending)?;
+    }
+    Ok(())
+}
+
 impl ReadingSyncState {
-    pub fn new(file: PathBuf) -> Self {
+    pub fn new(db: Arc<DeviceDb>) -> Self {
         Self {
-            file,
-            database: Mutex::new(None),
+            db,
             sync_lock: AsyncMutex::new(()),
         }
-    }
-
-    fn open_database(&self) -> Result<rusqlite::Connection, ClientError> {
-        let mut db = rusqlite::Connection::open(self.file.with_extension("sqlite3"))
-            .map_err(storage_error)?;
-        db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")
-            .map_err(storage_error)?;
-        let tx = db.transaction().map_err(storage_error)?;
-        tx.execute_batch(SYNC_SCHEMA).map_err(storage_error)?;
-        let initialized: bool = tx
-            .query_row("SELECT EXISTS(SELECT 1 FROM sync_meta)", [], |row| {
-                row.get(0)
-            })
-            .map_err(storage_error)?;
-        if !initialized {
-            // JSON は commit 後も残す。中断・移行失敗時に元の未送信位置を失わない。
-            let legacy: SyncFile = match fs::read(&self.file) {
-                Ok(bytes) => serde_json::from_slice(&bytes).map_err(|_| ClientError::storage())?,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => SyncFile::default(),
-                Err(_) => return Err(ClientError::storage()),
-            };
-            tx.execute(
-                "INSERT INTO sync_meta VALUES(1, ?1, ?2, ?3)",
-                rusqlite::params![legacy.url, legacy.device_id, legacy.cursor],
-            )
-            .map_err(storage_error)?;
-            for (key, position) in legacy.positions {
-                put_entry(&tx, "positions", &key, &position)?;
-            }
-            for (key, pending) in legacy.pending {
-                put_entry(&tx, "pending", &key, &pending)?;
-            }
-        }
-        tx.commit().map_err(storage_error)?;
-        Ok(db)
     }
 
     fn with_store<T>(
@@ -208,12 +191,16 @@ impl ReadingSyncState {
         saved: &SavedConnection,
         action: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<T, ClientError>,
     ) -> Result<T, ClientError> {
-        let mut database = self.database.lock().map_err(|_| ClientError::storage())?;
-        if database.is_none() {
-            *database = Some(self.open_database()?);
-        }
-        let db = database.as_mut().expect("database initialized");
-        let tx = db.transaction().map_err(storage_error)?;
+        self.db
+            .transaction(|tx| self.adjust_and_run(tx, saved, action))
+    }
+
+    fn adjust_and_run<T>(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        saved: &SavedConnection,
+        action: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<T, ClientError>,
+    ) -> Result<T, ClientError> {
         let (url, device_id): (String, String) = tx
             .query_row(
                 "SELECT url, device_id FROM sync_meta WHERE id=1",
@@ -235,9 +222,7 @@ impl ReadingSyncState {
             )
             .map_err(storage_error)?;
         }
-        let result = action(&tx)?;
-        tx.commit().map_err(storage_error)?;
-        Ok(result)
+        action(tx)
     }
 
     fn store_current<T>(

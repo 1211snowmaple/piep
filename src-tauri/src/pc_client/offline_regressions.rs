@@ -188,3 +188,55 @@ fn reading_during_a_save_and_aborting_it_keep_the_published_snapshot() {
         fs::remove_dir_all(root).unwrap();
     });
 }
+
+#[test]
+fn saved_bodies_are_searchable_offline_and_follow_saves_and_deletes() {
+    tauri::async_runtime::block_on(async {
+        let root = std::env::temp_dir().join(format!("piep-offline-search-{}", Uuid::new_v4()));
+        let state = OfflineState::new(root.clone());
+        let metadata: MobileMetadata = serde_json::from_value(metadata_json()).unwrap();
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(3))
+            .build()
+            .unwrap();
+        let good = serde_json::json!({"currentVersion": 1, "contentHash": "source-v1", "activeEditHash": "edit-A"});
+        let (saved, handle) = server(good, 5);
+        save_snapshot(&state, &client, &saved, &metadata)
+            .await
+            .unwrap();
+        handle.join().unwrap();
+
+        // 保存した時点で索引に入っている。3 文字以上は索引で、短い語は順に探す。
+        let hits = super::index::search(&state, "page-1").unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(serde_json::to_value(&hits[0]).unwrap()["page"], 1);
+        let both = super::index::search(&state, "pa").unwrap();
+        assert_eq!(serde_json::to_value(&both[0]).unwrap()["pages"], 2);
+        assert!(
+            super::index::search(&state, "page-1 missing")
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            super::index::search(&state, "PAGE-0 ge-1").unwrap().len(),
+            1
+        );
+
+        // 索引が失われても、検索の前に保存版から作り直す。
+        state
+            .db
+            .transaction(|tx| {
+                tx.execute_batch("DELETE FROM offline_text; DELETE FROM offline_catalog;")
+                    .map_err(super::super::device_db::records_error)
+            })
+            .unwrap();
+        assert!(super::index::search(&state, "page-1").unwrap().is_empty());
+        super::index::reconcile(&state).unwrap();
+        assert_eq!(super::index::search(&state, "page-1").unwrap().len(), 1);
+
+        delete_saved_work(&state, 3, "pixiv", "3").unwrap();
+        assert!(super::index::search(&state, "page").unwrap().is_empty());
+        fs::remove_dir_all(root).unwrap();
+    });
+}

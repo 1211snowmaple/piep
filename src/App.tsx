@@ -18,7 +18,8 @@ import { WorkDetail } from "./WorkDetail";
 import { EntityPage } from "./EntityPage";
 import { homePage, NavigationProvider, useAppHistory, type LibraryPage } from "./appHistory";
 import { forgetAllPages } from "./pageCache";
-import { setReadingServer } from "./recentReading";
+import { flushLocalReading } from "./localReading";
+import { setReadingServer, useLocalReadingsReady } from "./recentReading";
 import { statusQueryKey } from "./workList";
 import { useFavoriteNotice } from "./favorites";
 import { defaultPcSearch, getPcStatus, type OfflineWork, type PcConnectionStatus, type PcSearchCriteria, type PcWork } from "./pcApi";
@@ -104,6 +105,7 @@ function App() {
   const selectedWork = entry.detail;
   const onlineWork = entry.reader?.kind === "online" ? entry.reader.work : null;
   const offlineWork = entry.reader?.kind === "offline" ? entry.reader.work : null;
+  const offlineStartPage = entry.reader?.kind === "offline" ? entry.reader.page : undefined;
   const reading = entry.reader?.kind === "preview";
   const [exitHint, setExitHint] = useState(false);
   const lastBackAt = useRef(0);
@@ -168,6 +170,8 @@ function App() {
   const [appearance, setAppearance] = useState<Appearance>(() => storedChoice(appearanceKey, "auto", ["auto", "light", "dark"]));
   const [pagingMode, setPagingMode] = useState<PagingMode>(() => storedChoice(pagingModeKey, "auto", ["auto", "pages"]));
   const readerOpen = onlineWork !== null || offlineWork !== null || reading;
+  // 読書の記録は SQLite から読む。開く前に読み終えておき、位置や表示が後から変わらないようにする。
+  const recordsReady = useLocalReadingsReady([selectedWork?.work, onlineWork, offlineWork?.work]);
   const detailOpen = selectedWork !== null;
 
   useLayoutEffect(() => {
@@ -465,9 +469,9 @@ function App() {
     push({ detail: { work, offline: false } });
   };
 
-  const openOfflineWork = (work: OfflineWork) => {
+  const openOfflineWork = (work: OfflineWork, page?: number) => {
     readerReturnFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    push({ reader: { kind: "offline", work } });
+    push({ reader: { kind: "offline", work, page } });
   };
 
   const openOfflineDetail = (work: OfflineWork) => {
@@ -489,7 +493,10 @@ function App() {
   // 圏外で読んだ位置を、アプリへ戻るたびに届ける。
   useEffect(() => {
     if (!isTauri()) return;
-    const deliver = () => { if (document.visibilityState === "visible") void sendReading(); };
+    const deliver = () => {
+      if (document.visibilityState === "visible") void sendReading();
+      else void flushLocalReading();
+    };
     deliver();
     document.addEventListener("visibilitychange", deliver);
     return () => document.removeEventListener("visibilitychange", deliver);
@@ -524,8 +531,8 @@ function App() {
   const favoriteNotice = useFavoriteNotice();
 
   const readerProps = { type: readerType, behavior: readerBehavior, onBack: closeReader, onTypeChange: changeReaderType, onBehaviorChange: changeReaderBehavior, backLabel: selectedWork ? "作品詳細に戻る" : "作品一覧に戻る" };
-  const activeReader = offlineWork
-    ? <OnlineReader key={`saved:${offlineWork.work.id}`} work={offlineWork.work} offline offlineCollections={offlineWork.collections ?? []} offlineEditHash={offlineWork.savedEditHash} offlineAuthorCover={Boolean(offlineWork.hasAuthorCover)} snapshotGeneration={offlineWork.savedAtMs} {...readerProps} />
+  const activeReader = !recordsReady ? null : offlineWork
+    ? <OnlineReader key={`saved:${offlineWork.work.id}`} work={offlineWork.work} offline offlineCollections={offlineWork.collections ?? []} offlineEditHash={offlineWork.savedEditHash} offlineAuthorCover={Boolean(offlineWork.hasAuthorCover)} snapshotGeneration={offlineWork.savedAtMs} startPage={offlineStartPage} {...readerProps} />
     : onlineWork
       ? <OnlineReader key={`pc:${onlineWork.id}`} work={onlineWork} onSaved={savedWorkChanged} {...readerProps} />
       : reading ? (
@@ -582,7 +589,7 @@ function App() {
         <nav className="bottom-nav" aria-label="下部ナビゲーション">{sections.map((item) => <button key={item.id} className={section === item.id ? "bottom-item active" : "bottom-item"} onClick={() => showSection(item.id)} aria-current={section === item.id ? "page" : undefined}><Icon name={item.icon} /><span>{item.label}</span></button>)}</nav>
       </div>
     </div>
-    {selectedWork && <div className="work-detail-overlay" ref={detailOverlayRef} aria-hidden={readerOpen} inert={readerOpen} onClick={(event) => { if (event.target === event.currentTarget && !readerOpen) closeDetail(); }}><WorkDetail key={`${selectedWork.offline ? "saved" : "pc"}:${selectedWork.work.id}`} selected={selectedWork} onBack={closeDetail} onRead={startReading} onSaved={savedWorkChanged} onRemoved={() => { savedWorkChanged(); if (selectedWork.offline) closeDetail(); }} savedRevision={savedRevision} /></div>}
+    {selectedWork && recordsReady && <div className="work-detail-overlay" ref={detailOverlayRef} aria-hidden={readerOpen} inert={readerOpen} onClick={(event) => { if (event.target === event.currentTarget && !readerOpen) closeDetail(); }}><WorkDetail key={`${selectedWork.offline ? "saved" : "pc"}:${selectedWork.work.id}`} selected={selectedWork} onBack={closeDetail} onRead={startReading} onSaved={savedWorkChanged} onRemoved={() => { savedWorkChanged(); if (selectedWork.offline) closeDetail(); }} savedRevision={savedRevision} /></div>}
     {activeReader && <div className="reader-overlay" ref={readerOverlayRef}>{activeReader}</div>}
     {exitHint && <div className="app-toast" role="status">もう一度押すと閉じます</div>}
     {favoriteNotice && !exitHint && <div className="app-toast" role="alert">{favoriteNotice}</div>}
