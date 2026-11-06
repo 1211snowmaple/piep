@@ -60,6 +60,7 @@ pub fn run() {
             pc_client::pc_list_collections,
             pc_client::pc_get_work_collections,
             pc_client::pc_get_collection,
+            pc_client::pc_set_favorite,
             pc_client::pc_get_metadata,
             pc_client::pc_get_page,
             pc_client::pc_get_outline,

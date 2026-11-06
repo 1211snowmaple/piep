@@ -1,12 +1,12 @@
 import { useLayoutEffect, useRef, useState } from "react";
-import { Check, Download, X } from "lucide-react";
+import { Check, Download, LoaderCircle, SquarePen, X } from "lucide-react";
 import { ProviderMark } from "./ProviderMark";
 import { WorkThumbnail } from "./WorkThumbnail";
 import { WorkFacts, workFacts } from "./WorkFacts";
 import { AuthorAvatar } from "./WorkCard";
 import type { PcCollection, PcOutlineEntry, PcWork } from "./pcApi";
 import { useAppNavigation } from "./appHistory";
-import { plainText, progressLabel, readingFinished, readingMinutes } from "./workText";
+import { plainText, progressLabel } from "./workText";
 
 export type InfoTab = "outline" | "info";
 
@@ -38,8 +38,6 @@ export function ReaderInfoSheet({ tab, onTabChange, onClose, work, isEdited, off
   const description = plainText(work.excerpt);
   const navigation = useAppNavigation();
   const percent = Math.round(progress * 100);
-  const finished = readingFinished(progress, pageCount);
-  const remaining = readingMinutes(Math.round(work.textLength * (1 - progress)));
   const hasOutline = outline.length > 0;
   const activeTab = hasOutline ? tab : "info";
 
@@ -69,35 +67,41 @@ export function ReaderInfoSheet({ tab, onTabChange, onClose, work, isEdited, off
             return <li key={`${entry.page}:${entry.index}`}><button type="button" aria-current={current ? "true" : undefined} onClick={() => onOutline(entry)}><span className="reader-toc-title">{entry.title}</span>{pageCount > 1 && <span className="reader-toc-page">{entry.page}</span>}</button></li>;
           })}
         </ol> : <>
+          {/* 作品の詳細と同じ組み立て。ラベル、シリーズ、題名、作者、事実の一行。 */}
           <div className="reader-info-hero">
             <span className="reader-info-cover"><WorkThumbnail work={work} offline={offline} snapshotGeneration={snapshotGeneration} variant="detail" /></span>
             <div className="reader-info-heading">
-              <div className="reader-info-labels"><ProviderMark source={work.source} /><span>{work.contentType === "novel" ? "小説" : "作品"}</span>{work.favorite && <span>お気に入り</span>}{isEdited && <span>編集版</span>}</div>
+              <div className="reader-info-labels"><ProviderMark source={work.source} /><span>{work.contentType === "novel" ? "小説" : "作品"}</span>{isEdited && <span><SquarePen aria-hidden="true" />編集版</span>}{offline && <span>端末に保存</span>}</div>
               {work.seriesTitle && (navigation.canBrowseServer && work.seriesId
                 ? <button type="button" className="reader-info-series" onClick={() => navigation.openEntity("series", work.source, work.seriesId!, work.seriesTitle!)}>{work.seriesTitle}</button>
                 : <p className="reader-info-series">{work.seriesTitle}</p>)}
               <h2 ref={titleRef} className={titleOpen ? "expanded" : ""}>{work.title}</h2>
-              {(titleLong || titleOpen) && <button type="button" className="reader-more" onClick={() => setTitleOpen((open) => !open)} aria-expanded={titleOpen}>{titleOpen ? "短く表示" : "すべて表示"}</button>}
+              {(titleLong || titleOpen) && <button type="button" className="reader-more" onClick={() => setTitleOpen((open) => !open)} aria-expanded={titleOpen}>{titleOpen ? "たたむ" : "すべて表示"}</button>}
               {navigation.canBrowseServer && work.authorId
                 ? <button type="button" className="reader-info-author" onClick={() => navigation.openEntity("person", work.source, work.authorId, work.authorName)}><AuthorAvatar work={work} offline={offline} offlineAuthorCover={offlineAuthorCover} snapshotGeneration={snapshotGeneration} /><span>{work.authorName}</span></button>
                 : <p className="reader-info-author"><AuthorAvatar work={work} offline={offline} offlineAuthorCover={offlineAuthorCover} snapshotGeneration={snapshotGeneration} /><span>{work.authorName}</span></p>}
+              <WorkFacts items={workFacts(work)} />
             </div>
           </div>
           <div className="reader-info-progress">
-            <div><strong>{progressLabel(progress, pageCount)}</strong>{pageCount > 1 && <span>{currentPage + 1} / {pageCount} ページ</span>}{remaining && !finished && <span className="reader-info-remaining">残り{remaining}</span>}</div>
+            <div><strong>{progressLabel(progress, pageCount)}</strong>{pageCount > 1 && <span>{currentPage + 1} / {pageCount} ページ</span>}</div>
             <span className="reader-progress-track" aria-hidden="true"><span style={{ width: `${percent}%` }} /></span>
           </div>
-          <WorkFacts items={workFacts(work)} />
-          {!offline && <div className="reader-info-actions"><button type="button" className="reader-info-save" disabled={saving} onClick={onSave}>{saveMessage === "端末に保存しました" ? <Check aria-hidden="true" /> : <Download aria-hidden="true" />}{saving ? "保存中…" : "端末に保存"}</button></div>}
-          {saveMessage && <p className="reader-info-status" role="status">{saveMessage}</p>}
+          {work.tags.length > 0 && <div className="reader-info-tags" aria-label="タグ">{work.tags.map((tag, index) => navigation.canBrowseServer ? <button type="button" key={`${tag}:${index}`} onClick={() => navigation.openTag(tag)}>{tag}</button> : <span key={`${tag}:${index}`}>{tag}</span>)}</div>}
           {description && <section className="reader-info-section" aria-label="概要">
             <p ref={descriptionRef} className={descriptionOpen ? "reader-info-description expanded" : "reader-info-description"}>{description}</p>
-            {(descriptionLong || descriptionOpen) && <button type="button" className="reader-more" onClick={() => setDescriptionOpen((open) => !open)} aria-expanded={descriptionOpen}>{descriptionOpen ? "短く表示" : "続きを読む"}</button>}
+            {(descriptionLong || descriptionOpen) && <button type="button" className="reader-more" onClick={() => setDescriptionOpen((open) => !open)} aria-expanded={descriptionOpen}>{descriptionOpen ? "たたむ" : "すべて表示"}</button>}
           </section>}
-          {work.tags.length > 0 && <section className="reader-info-section" aria-label="タグ"><div className="reader-info-tags">{work.tags.map((tag, index) => navigation.canBrowseServer ? <button type="button" key={`${tag}:${index}`} onClick={() => navigation.openTag(tag)}>#{tag}</button> : <span key={`${tag}:${index}`}>#{tag}</span>)}</div></section>}
           {collections && collections.length > 0 && <section className="reader-info-section"><h3>コレクション</h3><div className="reader-info-collections">{collections.map((collection) => <span key={collection.id}>{collection.name}</span>)}</div></section>}
+          {saveMessage && saveMessage !== "端末に保存しました" && <p className="reader-info-status" role="status">{saveMessage}</p>}
         </>}
       </div>
+      {/* 保存は読むボタンと同じく、面のいちばん下に横いっぱいで置く。 */}
+      {activeTab === "info" && !offline && <footer className="reader-info-footer">
+        {saveMessage === "端末に保存しました"
+          ? <span className="reader-info-save" data-done="true" role="status"><Check aria-hidden="true" />端末に保存しました</span>
+          : <button type="button" className="reader-info-save" data-busy={saving || undefined} disabled={saving} onClick={onSave}>{saving ? <LoaderCircle aria-hidden="true" /> : <Download aria-hidden="true" />}{saving ? "保存しています…" : "端末に保存"}</button>}
+      </footer>}
     </aside>
   </div>;
 }

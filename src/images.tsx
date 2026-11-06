@@ -21,6 +21,14 @@ const loaded = new Set<string>();
 // 画像のない作者は多い。行き来のたびに問い合わせ直さない。通信の失敗もあるので、しばらくしたら試し直す。
 const failed = new Map<string, number>();
 const retryFailedAfterMs = 60_000;
+// 通信が一瞬切れた、サーバーが混んでいた、という失敗で表紙を諦めない。
+// 間を空けて取り直し、それでも出なければ代わりの絵にする。
+const retryDelaysMs = [1_200, 4_000];
+
+/** 取り直しの印。経路は Rust 側で見るので、問い合わせの部分は読み捨てられる。 */
+function attemptSrc(src: string, attempt: number): string {
+  return attempt === 0 ? src : `${src}${src.includes("?") ? "&" : "?"}attempt=${attempt}`;
+}
 
 export function imageRecentlyFailed(src: string | null): boolean {
   if (!src) return false;
@@ -44,20 +52,36 @@ export function SmoothImage({ src, alt, className, onFailed, onLoaded }: {
 }) {
   const known = loaded.has(src);
   const [shown, setShown] = useState(known);
+  const [attempt, setAttempt] = useState(0);
   const node = useRef<HTMLImageElement>(null);
   useEffect(() => {
     setShown(loaded.has(src));
+    setAttempt(0);
     if (node.current?.complete && node.current.naturalWidth > 0) { loaded.add(src); setShown(true); }
   }, [src]);
+  const retry = useRef<number | null>(null);
+  useEffect(() => () => { if (retry.current !== null) window.clearTimeout(retry.current); }, []);
   return <img
     ref={node}
     className={className ? `smooth-image ${className}` : "smooth-image"}
-    src={src}
+    src={attemptSrc(src, attempt)}
     alt={alt}
+    draggable={false}
     decoding={known ? "sync" : "async"}
     data-shown={shown || undefined}
     data-instant={known || undefined}
-    onLoad={(event) => { loaded.add(src); setShown(true); onLoaded?.(event); }}
-    onError={() => { loaded.delete(src); failed.set(src, Date.now()); if (failed.size > 2000) failed.clear(); onFailed?.(); }}
+    onLoad={(event) => { loaded.add(src); failed.delete(src); setShown(true); onLoaded?.(event); }}
+    onError={() => {
+      loaded.delete(src);
+      if (attempt < retryDelaysMs.length) {
+        const next = attempt + 1;
+        if (retry.current !== null) window.clearTimeout(retry.current);
+        retry.current = window.setTimeout(() => { retry.current = null; setAttempt(next); }, retryDelaysMs[attempt]);
+        return;
+      }
+      failed.set(src, Date.now());
+      if (failed.size > 2000) failed.clear();
+      onFailed?.();
+    }}
   />;
 }

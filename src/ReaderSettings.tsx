@@ -1,5 +1,5 @@
 import { Minus, Plus } from "lucide-react";
-import { autoScrollLimits, typeLimits, type ReaderBehavior, type ReaderFont, type ReaderTheme, type ReaderType } from "./readerPrefs";
+import { typeLimits, type ReaderBehavior, type ReaderFont, type ReaderTheme, type ReaderType } from "./readerPrefs";
 
 const themes: { id: ReaderTheme; label: string }[] = [
   { id: "white", label: "白" },
@@ -96,6 +96,5 @@ export function ReaderBehaviorControls({ value, onChange }: { value: ReaderBehav
     <Segmented label="送るときの動き" value={value.motion} options={[{ id: "slide", label: "なめらか" }, { id: "none", label: "すぐ切り替える" }]} onChange={(motion) => onChange({ motion })} />
     <Segmented label="上下のメニュー" value={value.bars} options={[{ id: "auto", label: "読むときは隠す" }, { id: "pinned", label: "常に出す" }]} onChange={(bars) => onChange({ bars })} />
     <Segmented label="ページボタン" value={value.pageButtons} options={[{ id: "always", label: "常に出す" }, { id: "menu", label: "メニューと一緒" }]} onChange={(pageButtons) => onChange({ pageButtons })} help="つなげて読むときは使いません。" />
-    <SliderRow label="自動スクロールの速さ" value={value.autoScrollSpeed} display={`毎秒 ${value.autoScrollSpeed}px`} {...autoScrollLimits} onChange={(autoScrollSpeed) => onChange({ autoScrollSpeed })} decrease="自動スクロールを遅くする" increase="自動スクロールを速くする" />
   </div>;
 }

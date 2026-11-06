@@ -37,7 +37,6 @@ export interface ReaderBehavior {
   motion: "slide" | "none";
   bars: "auto" | "pinned";
   pageButtons: "always" | "menu";
-  autoScrollSpeed: number;
 }
 
 export const defaultReaderBehavior: ReaderBehavior = {
@@ -49,10 +48,7 @@ export const defaultReaderBehavior: ReaderBehavior = {
   motion: "slide",
   bars: "auto",
   pageButtons: "always",
-  autoScrollSpeed: 40,
 };
-
-export const autoScrollLimits = { min: 10, max: 160, step: 5 } as const;
 
 const behaviorKey = "piep.android.reader.behavior.v1";
 
@@ -63,7 +59,6 @@ function choice<T extends string>(value: unknown, options: readonly T[], fallbac
 export function loadReaderBehavior(): ReaderBehavior {
   let raw: Partial<Record<keyof ReaderBehavior, unknown>> = {};
   try { raw = JSON.parse(window.localStorage.getItem(behaviorKey) ?? "{}") ?? {}; } catch { /* 読めなければ既定で開く */ }
-  const speed = Number(raw.autoScrollSpeed);
   return {
     layout: choice(raw.layout, ["pages", "continuous"], defaultReaderBehavior.layout),
     tap: choice(raw.tap, ["sides", "updown", "off"], defaultReaderBehavior.tap),
@@ -73,7 +68,6 @@ export function loadReaderBehavior(): ReaderBehavior {
     motion: choice(raw.motion, ["slide", "none"], defaultReaderBehavior.motion),
     bars: choice(raw.bars, ["auto", "pinned"], defaultReaderBehavior.bars),
     pageButtons: choice(raw.pageButtons, ["always", "menu"], defaultReaderBehavior.pageButtons),
-    autoScrollSpeed: Number.isFinite(speed) && speed >= autoScrollLimits.min && speed <= autoScrollLimits.max ? speed : defaultReaderBehavior.autoScrollSpeed,
   };
 }
 

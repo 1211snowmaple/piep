@@ -8,11 +8,10 @@
 .smooth-image[data-shown] { opacity: 1; }
 .smooth-image[data-instant] { transition: none; }
 
-.work-cover { --cover-rest: color-mix(in srgb, hsl(var(--work-cover-hue, 210) 30% 60%) 16%, var(--piep-surface)); width: 100%; aspect-ratio: 2 / 3; border-radius: 6px; background: var(--cover-rest); }
-.work-cover-image { background: transparent; z-index: 1; }
-/* 枠に近い比率なら、上下の細い帯を残さず枠いっぱいに出す。大きく違うものは全体を見せる。 */
-.work-cover-image--fill { object-fit: cover; }
-.work-cover-backdrop { position: absolute; inset: -12%; width: 124%; height: 124%; object-fit: cover; filter: blur(16px) saturate(1.15); opacity: .5; }
+/* デスクトップ版 WorkCover と同じ枠。画像は切らずに収め（object-fit: contain は App.desktop.css）、余りは地の色にする。 */
+.work-cover { --cover-rest: color-mix(in srgb, hsl(var(--work-cover-hue, 210) 30% 60%) 16%, var(--piep-surface)); width: 100%; aspect-ratio: 112 / 158; border-radius: 6px; background: var(--cover-rest); }
+.work-cover[data-image] { background: var(--piep-surface); }
+.work-cover-image { z-index: 1; }
 .work-author-avatar { position: relative; }
 .work-author-avatar img { position: absolute; inset: 0; }
 .group-card-art { position: relative; overflow: hidden; }
@@ -21,7 +20,7 @@
 
 @keyframes skeleton-breathe { 0%, 100% { opacity: .55; } 50% { opacity: 1; } }
 .skeleton-block { display: block; border-radius: 6px; background: var(--piep-tag-bg); animation: skeleton-breathe 1.6s ease-in-out infinite; }
-.skeleton-cover { width: 100%; aspect-ratio: 2 / 3; }
+.skeleton-cover { width: 100%; aspect-ratio: 112 / 158; }
 .skeleton-line { width: 72%; height: 12px; }
 .skeleton-line--title { width: 88%; height: 16px; }
 .skeleton-line--short { width: 42%; }
@@ -32,46 +31,48 @@
 .work-results[data-stale], .group-browser[data-stale], .entity-section[data-stale] { opacity: .6; transition: opacity 120ms linear 120ms; }
 
 /* ---- 作品カード ---- */
-.work-card { container-type: inline-size; width: 100%; min-width: 0; height: 100%; border: 1px solid var(--piep-line); border-radius: 12px; background: var(--piep-surface); color: var(--piep-text); overflow: hidden; }
-.work-card-inner { display: grid; grid-template-columns: clamp(84px, 25cqi, 124px) minmax(0, 1fr); grid-template-rows: 1fr auto; height: 100%; }
-.work-card-cover { grid-row: 1 / 3; align-self: start; display: block; width: 100%; padding: 10px 0 10px 10px; border: 0; background: transparent; }
-.work-card-body { grid-row: 1; grid-column: 2; display: flex; flex-direction: column; gap: 3px; min-width: 0; padding: 9px 12px 2px; }
-.work-card-series { display: inline-flex; align-items: center; gap: 4px; align-self: flex-start; max-width: 100%; min-height: 22px; margin: -2px 0 -2px; padding: 0; border: 0; background: transparent; color: var(--piep-muted); font-size: var(--fs-tiny); font-weight: 600; text-align: left; }
-button.work-card-series { color: var(--piep-active-text); }
-.work-card-series svg { flex: none; width: 12px; height: 12px; }
-.work-card-series span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.work-card-title { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; padding: 0; border: 0; background: transparent; color: var(--piep-text); font-size: var(--fs-control); font-weight: 680; line-height: 1.42; text-align: left; overflow-wrap: anywhere; }
-.work-card-identity { display: flex; align-items: center; gap: 6px; min-width: 0; min-height: 28px; }
-.work-card-author { display: inline-flex; align-items: center; gap: 6px; min-width: 0; min-height: 28px; padding: 0; border: 0; background: transparent; color: var(--piep-muted); font-size: var(--fs-small); text-align: left; }
-button.work-card-author:active, button.work-card-series:active { opacity: .6; }
-.work-card-author > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.work-card-provider, .work-card-provider-wide { flex: none; display: inline-flex; }
-.work-card-provider-wide { display: none; }
-.work-card-favorite { flex: none; width: 14px; height: 14px; color: var(--piep-favorite); fill: currentColor; }
-.work-card-excerpt { display: none; margin: 0 0 3px; color: var(--piep-muted); font-size: var(--fs-small); line-height: 1.5; overflow: hidden; }
-.work-card .work-tags { display: flex; align-items: center; gap: 4px; width: 100%; min-width: 0; height: 24px; flex-wrap: nowrap; overflow: hidden; margin-top: auto; }
-.work-card button.work-tag { border: 0; font-family: inherit; line-height: 20px; color: var(--piep-tag-text); }
+/* デスクトップ版 .work-card と同じ寸法。表紙の列、表紙の余白、題名や名前の太さと間隔を揃える。
+   長押しは詳細を開く操作なので、文字の選択や画像のメニュー、押した色の膜を出さない。 */
+.work-card { container-type: inline-size; width: 100%; min-width: 0; height: 100%; border: 1px solid var(--piep-line); border-radius: 12px; background: var(--piep-surface); color: var(--piep-text); overflow: hidden; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; transition: border-color 140ms ease, box-shadow 140ms ease; }
+.work-card img { -webkit-user-drag: none; }
+.work-card:active:not(:has(button:active)) { border-color: light-dark(#cdd8e5, #384352); box-shadow: 0 10px 32px rgb(28 53 82 / 9%); }
+.work-card-inner { display: grid; grid-template-columns: clamp(104px, 31cqi, 132px) minmax(0, 1fr); height: 100%; min-width: 0; }
+.work-card-cover { display: flex; flex-direction: column; justify-content: center; width: 100%; padding: 12px; border: 0; background: transparent; }
+.work-card-cover .work-cover { border-radius: 8px; overflow: hidden; }
+.work-card-body { display: grid; grid-template-rows: minmax(0, 1fr) auto; min-width: 0; padding: 10px 6px 4px 1px; }
+.work-card-main { display: flex; flex-direction: column; justify-content: center; min-width: 0; padding-right: 6px; }
+/* 組になるものは近く、別のものは離す。デスクトップ版と同じく間隔は組ごとに決める。 */
+.work-card-series { display: block; width: fit-content; max-width: 100%; min-height: 20px; padding: 0; border: 0; background: transparent; color: var(--piep-muted); font-size: var(--fs-small); font-weight: 650; line-height: 20px; letter-spacing: .02em; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; transition: color 120ms ease; }
+.work-card-title { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; width: fit-content; max-width: 100%; min-height: 28px; overflow: hidden; padding: 0; border: 0; background: transparent; color: var(--piep-text); font-size: var(--fs-control); font-weight: 720; line-height: 1.32; text-align: left; overflow-wrap: anywhere; transition: color 120ms ease; }
+.work-card-identity { display: flex; align-items: center; gap: 8px; min-width: 0; min-height: 28px; margin-top: 5px; }
+.work-card-author { display: inline-flex; align-items: center; gap: 6px; width: fit-content; max-width: 100%; min-width: 0; min-height: 28px; padding: 0; border: 0; background: transparent; color: var(--piep-muted); font-size: var(--fs-small); text-align: left; }
+.work-card-author > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; transition: color 120ms ease; }
+.work-card-author .work-author-avatar { width: 20px; height: 20px; }
+.work-card-divider { flex: none; width: 1px; height: 18px; background: light-dark(#d5dae0, #38414c); }
+.work-card-identity .provider-mark { flex: none; }
+.work-card-tags { margin-top: 8px; min-width: 0; }
+.work-card .work-tags { display: flex; align-items: center; gap: 4px; width: 100%; min-width: 0; height: 26px; flex-wrap: nowrap; overflow: hidden; }
+.work-card .work-tag, .work-card .work-tag-overflow { height: 26px; line-height: 22px; }
+.work-card button.work-tag { border: 0; font-family: inherit; color: var(--piep-tag-text); transition: background-color 120ms ease, color 120ms ease; }
+/* 押したところだけが色を変える。デスクトップ版で指を乗せたときと同じ色。 */
+button.work-card-series:active, button.work-card-title:active, button.work-card-author:active > span:last-child { color: var(--piep-active-text); }
+.work-card button.work-tag:active { background: var(--piep-active); color: var(--piep-active-text); }
 
-/* 情報は左、操作は右。罫線で区切らず、足りない事実は 2 段目へ折り返して見えない高さへ送る。 */
-.work-card-footer { grid-row: 2; grid-column: 2; display: flex; align-items: center; gap: 8px; min-height: 46px; padding: 2px 8px 6px 12px; color: var(--piep-muted); font-size: var(--fs-tiny); }
-.work-card-facts { display: flex; flex: 1 1 auto; flex-wrap: wrap; align-items: center; gap: 31px 10px; min-width: 0; height: 20px; overflow: hidden; }
-.work-card-facts .work-meta { flex: none; line-height: 20px; }
-.work-meta--wide { display: none; }
+/* 事実は左、操作は右。足りない事実は見えない 2 段目へ折り返して、字の途中で切らない。 */
+.work-card-bottom { display: flex; align-items: center; gap: 6px; min-width: 0; min-height: 40px; margin-top: 4px; color: var(--piep-muted); font-size: var(--fs-tiny); }
+.work-card-facts { display: flex; flex: 1 1 auto; flex-wrap: wrap; align-items: center; gap: 31px 10px; min-width: 0; height: 22px; overflow: hidden; }
+.work-card-facts .work-meta { flex: none; line-height: 22px; font-variant-numeric: tabular-nums; }
+.work-meta--strong { color: var(--piep-active-text); font-weight: 700; }
 .work-meta svg { width: 13px; height: 13px; }
+.work-version { flex: none; display: inline-flex; align-items: center; height: 20px; padding: 0 7px; border-radius: 999px; background: var(--piep-active); color: var(--piep-active-text); font-size: 10.5px; font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .work-card-problem { flex: 1 1 auto; min-width: 0; margin: 0; color: #b33b35; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.work-card-actions { flex: none; display: flex; align-items: center; gap: 6px; }
-.work-card:active:not(:has(button:active)) { background: var(--piep-rail); }
+.work-card-actions { flex: none; display: flex; align-items: center; gap: 2px; margin-left: auto; }
 
-@container (min-width: 300px) {
-  .work-card-excerpt { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
-}
 @container (min-width: 520px) {
-  .work-card-inner { grid-template-columns: 124px minmax(0, 1fr); }
-  .work-meta--wide { display: inline-flex; }
-  .work-card-provider { display: none; }
-  .work-card-provider-wide { display: inline-flex; }
-  .work-card-excerpt { -webkit-line-clamp: 3; }
+  .work-card-body { padding: 10px 8px 6px 1px; }
+  .work-card-main { padding-right: 5px; }
   .work-card-title { font-size: var(--fs-title); }
+  .work-card-bottom { gap: 8px; }
 }
 
 /* ---- 共通の操作 ---- */
@@ -85,6 +86,18 @@ button.work-card-author:active, button.work-card-series:active { opacity: .6; }
 .icon-button--large { width: 48px; height: 48px; }
 .icon-button--large svg { width: 20px; height: 20px; }
 @keyframes icon-spin { to { transform: rotate(360deg); } }
+/* カードの中の印。デスクトップ版の subtle な ActionIcon と同じく枠を付けず、入っているものだけ色を付ける。 */
+.card-action { flex: none; display: inline-grid; place-items: center; width: 34px; height: 36px; padding: 0; border: 0; border-radius: 8px; background: transparent; color: light-dark(#868e96, #8b95a1); transition: background-color 120ms ease, color 120ms ease; }
+.card-action svg { width: 18px; height: 18px; }
+button.card-action:active { background: var(--piep-tag-bg); color: var(--piep-text); }
+/* お気に入りはデスクトップ版の ActionIcon と同じく、入っていれば赤、外れていれば灰色の線。 */
+[data-tone="favorite"][data-on] { color: light-dark(#fa5252, #ff8787); }
+.card-action[data-tone="favorite"][data-on], .icon-button[data-tone="favorite"][data-on] { background: light-dark(rgb(250 82 82 / 13%), transparent); }
+[data-tone="favorite"][data-on] svg { fill: currentColor; }
+.card-action[data-tone="ok"] { color: var(--piep-ok); background: light-dark(rgb(35 134 95 / 12%), transparent); }
+.card-action[data-tone="warn"] { color: var(--piep-warn); }
+.card-action[data-busy] { color: var(--piep-active-text); }
+.card-action[data-busy] svg { animation: icon-spin 900ms linear infinite; }
 .card-saved { flex: none; display: inline-grid; place-items: center; width: 38px; height: 38px; color: var(--piep-ok); }
 .card-saved svg { width: 18px; height: 18px; }
 .card-saved--large { width: 48px; height: 48px; }
@@ -102,33 +115,52 @@ button.work-card-author:active, button.work-card-series:active { opacity: .6; }
 .search-field-go, .search-field-clear { flex: none; display: grid; place-items: center; width: 40px; height: 42px; padding: 0; border: 0; background: transparent; color: var(--piep-muted); }
 .search-field-go svg { width: 17px; height: 17px; }
 .search-field-clear svg { width: 16px; height: 16px; }
-.filter-button { position: relative; flex: none; display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-width: 44px; min-height: 44px; padding: 0 12px; border: 1px solid var(--piep-line); border-radius: 9px; background: var(--piep-control); color: var(--piep-text); font-size: var(--fs-control); font-weight: 600; white-space: nowrap; }
+/* 絞り込みと並び替えは印だけ。端末の横幅は検索欄に回す。条件の数は印の右上に載せる。 */
+.filter-button { position: relative; flex: none; display: inline-flex; align-items: center; justify-content: center; width: 44px; min-height: 44px; padding: 0; border: 1px solid var(--piep-line); border-radius: 9px; background: var(--piep-control); color: var(--piep-text); font-size: var(--fs-control); font-weight: 600; white-space: nowrap; }
 .filter-button svg { flex: none; width: 18px; height: 18px; }
 .filter-button[data-active] { border-color: var(--piep-blue); background: var(--piep-active); color: var(--piep-active-text); }
-.filter-button small { min-width: 18px; height: 18px; padding: 0 5px; border-radius: 999px; background: var(--piep-blue); color: #fff; font-size: 11px; font-weight: 700; line-height: 18px; text-align: center; }
-@media (max-width: 699px) {
-  .filter-button { padding: 0; }
-  .filter-button small { position: absolute; top: -5px; right: -5px; }
-}
+.filter-button small { position: absolute; top: -5px; right: -5px; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 999px; background: var(--piep-blue); color: #fff; font-size: 11px; font-weight: 700; line-height: 18px; text-align: center; }
+.filter-button:active, .sort-button:active { background: var(--piep-active); }
+.sort-button { width: 44px; padding: 0; }
 @media (min-width: 700px) { .library-tabs svg { display: block; } }
 .active-filters { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin: -2px 0 12px; }
 .active-filter { display: inline-flex; align-items: center; gap: 5px; max-width: 100%; min-height: 32px; padding: 3px 9px 3px 11px; border: 1px solid color-mix(in srgb, var(--piep-blue) 35%, var(--piep-line)); border-radius: 999px; background: var(--piep-active); color: var(--piep-active-text); font-size: var(--fs-small); text-align: left; }
 .active-filter svg { flex: none; width: 13px; height: 13px; }
+.active-filter:active { background: color-mix(in srgb, var(--piep-blue) 18%, var(--piep-active)); }
+/* まとめて外す操作は、外す対象の並びの終わり（右端）に置く。 */
+.active-filters-clear { margin-left: auto; min-height: 32px; }
 .results-bar { display: flex; align-items: baseline; flex-wrap: wrap; gap: 2px 10px; min-height: 22px; margin: 0 0 10px; color: var(--piep-muted); font-size: var(--fs-small); }
 .results-bar h2 { margin: 0; color: var(--piep-text); font-size: var(--fs-heading); font-weight: 680; }
 
 /* ---- 続きを読む ---- */
-.continue-shelf { margin: 0 0 14px; }
-.continue-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 8px; }
-.continue-heading h2 { margin: 0; color: var(--piep-text); font-size: var(--fs-title); font-weight: 680; }
-.continue-heading .quiet-button { min-height: 32px; padding: 3px 6px 3px 10px; }
-.continue-row { display: flex; gap: 10px; overflow-x: auto; scrollbar-width: none; margin-inline: -16px; padding-inline: 16px; }
-.continue-item { flex: none; display: flex; flex-direction: column; gap: 5px; width: 76px; padding: 0; border: 0; background: transparent; color: var(--piep-text); text-align: left; }
-.continue-item .work-cover { width: 100%; }
-.continue-progress { display: block; height: 3px; overflow: hidden; border-radius: 999px; background: var(--piep-line); }
+/* 一覧を押し下げない一段。小さな表紙の横に題名と進み具合を置く。 */
+.continue-shelf { margin: 0 0 12px; }
+.continue-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 32px; margin-bottom: 4px; }
+.continue-heading h2 { margin: 0; color: var(--piep-muted); font-size: var(--fs-small); font-weight: 700; }
+.continue-all { display: inline-flex; align-items: center; gap: 1px; min-height: 32px; margin-right: -6px; padding: 0 2px 0 8px; border: 0; border-radius: 8px; background: transparent; color: var(--piep-active-text); font-size: var(--fs-small); font-weight: 650; }
+.continue-all svg { width: 15px; height: 15px; }
+.continue-all:active { background: var(--piep-active); }
+.continue-row { display: flex; gap: 8px; overflow-x: auto; scroll-snap-type: x proximity; scrollbar-width: none; margin-inline: -16px; padding-inline: 16px; scroll-padding-inline: 16px; }
+.continue-row::-webkit-scrollbar { display: none; }
+/* 携帯で 3 冊、タブレットで 4〜5 冊が一度に見える幅。それより多ければ横に送る。 */
+.continue-item { --continue-columns: 3; flex: 0 0 calc((100% - (var(--continue-columns) - 1) * 8px) / var(--continue-columns)); display: flex; align-items: center; gap: 7px; min-width: 0; min-height: 62px; padding: 6px 8px 6px 6px; border: 1px solid var(--piep-line); border-radius: 10px; background: var(--piep-surface); color: var(--piep-text); text-align: left; scroll-snap-align: start; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; transition: border-color 140ms ease, box-shadow 140ms ease; }
+.continue-item:active { border-color: light-dark(#cdd8e5, #384352); box-shadow: 0 6px 18px rgb(28 53 82 / 9%); }
+.continue-cover { flex: none; width: 30px; }
+.continue-cover .work-cover { width: 100%; border-radius: 4px; }
+.continue-cover .cover-caption { display: none; }
+.continue-text { flex: 1; display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.continue-title { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; font-size: var(--fs-tiny); font-weight: 650; line-height: 1.35; overflow-wrap: anywhere; }
+.continue-meta { display: flex; align-items: center; gap: 5px; color: var(--piep-muted); font-size: 10.5px; font-variant-numeric: tabular-nums; }
+.continue-progress { flex: 1; display: block; height: 3px; overflow: hidden; border-radius: 999px; background: var(--piep-line); }
 .continue-progress span { display: block; height: 100%; background: var(--piep-blue); }
-.continue-title { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; font-size: var(--fs-tiny); line-height: 1.4; }
-@media (min-width: 600px) { .continue-row { margin-inline: 0; padding-inline: 0; } .continue-item { width: 118px; } }
+@media (min-width: 600px) {
+  .continue-row { margin-inline: 0; padding-inline: 0; scroll-padding-inline: 0; }
+  .continue-item { --continue-columns: 4; gap: 9px; min-height: 66px; padding: 7px 10px 7px 7px; }
+  .continue-cover { width: 36px; }
+  .continue-title { font-size: var(--fs-small); }
+  .continue-meta { font-size: var(--fs-tiny); }
+}
+@media (min-width: 1000px) { .continue-item { --continue-columns: 5; } }
 
 /* ---- 絞り込み ---- */
 .filter-layer { position: fixed; z-index: 45; inset: 0; display: flex; align-items: flex-end; justify-content: center; }
@@ -152,7 +184,7 @@ button.work-card-author:active, button.work-card-series:active { opacity: .6; }
 .filter-fields input, .filter-range input, .filter-select, .filter-save input { width: 100%; min-width: 0; min-height: 42px; padding: 7px 10px; border: 1px solid var(--piep-line); border-radius: 8px; background: var(--piep-control); color: var(--piep-text); font-size: var(--fs-control); font-weight: 400; }
 .filter-range { display: grid; grid-template-columns: 64px minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; gap: 7px; color: var(--piep-muted); }
 .filter-hint { margin: 0; color: var(--piep-muted); font-size: var(--fs-small); line-height: 1.55; }
-.filter-body > .quiet-button { align-self: flex-start; }
+.filter-body > .quiet-button { align-self: flex-end; }
 .filter-save { display: flex; align-items: center; gap: 6px; }
 .filter-save input { flex: 1; }
 .filter-save .secondary-button { flex: none; min-height: 42px; margin: 0; padding: 7px 14px; }
@@ -188,7 +220,11 @@ button.work-card-author:active, button.work-card-series:active { opacity: .6; }
 .saved-search p { margin: 0; padding: 0 10px; color: var(--piep-muted); font-size: var(--fs-small); line-height: 1.5; }
 .saved-search-remove { flex: none; display: grid; place-items: center; width: 36px; height: 40px; padding: 0; border: 0; border-radius: 8px; background: transparent; color: var(--piep-muted); }
 .saved-search-remove svg { width: 15px; height: 15px; }
-.sidebar-bottom { flex: none; margin-top: 12px; }
+/* デスクトップ版の下の一行と同じ詰め方。線の下に余白を残さない。 */
+.sidebar-bottom { flex: none; margin-top: 10px; padding: 8px 6px 0; font-size: var(--fs-tiny); }
+.sidebar-connection { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sidebar-version { flex: none; color: var(--piep-muted); font-variant-numeric: tabular-nums; }
+.sidebar-bottom .status-dot { width: 7px; height: 7px; }
 @media (max-width: 599px), (max-width: 900px) and (orientation: portrait) {
   /* 下メニューのある幅では、行き先は下メニューに任せる。棚と保存した検索だけを置く。 */
   .side-destination { display: none; }
@@ -206,6 +242,11 @@ button.work-card-author:active, button.work-card-series:active { opacity: .6; }
 .settings-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 18px; }
 .settings-actions button { margin: 0; min-height: 40px; padding: 7px 14px; font-size: var(--fs-body); }
 .settings-card .settings-help { margin-top: 10px; }
+/* 決める操作は読み終えた位置、右下に置く。左に寄せると、説明の頭と取り違えて押しにくい。 */
+.connection-actions { justify-content: flex-end; flex-wrap: wrap; }
+.connection-registration .primary-button, .connection-registration .secondary-button { justify-self: end; }
+.connection-forget { display: block; margin-left: auto; }
+.offline-retry { display: block; margin-left: auto; }
 
 .virtual-work-cell { display: block; min-width: 0; }
 .scroll-top { position: fixed; z-index: 28; right: 18px; bottom: calc(18px + var(--piep-safe-bottom)); display: grid; place-items: center; width: 46px; height: 46px; border: 1px solid var(--piep-line); border-radius: 50%; background: var(--piep-surface); color: var(--piep-text); box-shadow: 0 4px 14px #0e1d3026; }
@@ -221,82 +262,93 @@ button.work-card-author:active, button.work-card-series:active { opacity: .6; }
 .library-tabs button.active small { color: inherit; }
 
 /* ---- 作品の詳細 ---- */
+/* デスクトップ版の作品ページ（.work-hero）と同じ組み立て。左に表紙、右に印の段・シリーズ・題名・作者・事実。
+   携帯は戻る操作で閉じるので上の帯を置かず、その分だけ表紙と題名を上へ詰める。 */
 .work-detail-overlay { position: fixed; z-index: 40; inset: 0; display: flex; align-items: stretch; justify-content: center; background: var(--piep-bg); }
 .detail { display: flex; flex-direction: column; width: 100%; height: 100%; padding-top: var(--piep-safe-top); background: var(--piep-bg); color: var(--piep-text); }
-.detail-bar { flex: none; display: flex; align-items: center; gap: 6px; min-height: 52px; padding: 0 6px; }
-.detail-bar-state { flex: 1; min-width: 0; color: var(--piep-muted); font-size: var(--fs-small); }
-.detail-icon { display: grid; place-items: center; width: 44px; height: 44px; padding: 0; border: 0; border-radius: 50%; background: transparent; color: var(--piep-text); }
-.detail-icon:active { background: var(--piep-tag-bg); }
-.detail-icon svg { width: 22px; height: 22px; }
+.detail-icon { flex: none; display: grid; place-items: center; width: 40px; height: 40px; padding: 0; border: 0; border-radius: 8px; background: transparent; color: light-dark(#868e96, #8b95a1); transition: background-color 120ms ease, color 120ms ease; }
+.detail-icon:active { background: var(--piep-tag-bg); color: var(--piep-text); }
+.detail-icon svg { width: 20px; height: 20px; }
 .detail-menu-root { position: relative; }
-.detail-menu { position: absolute; z-index: 3; top: calc(100% + 2px); right: 4px; min-width: 176px; padding: 5px; border: 1px solid var(--piep-line); border-radius: 10px; background: var(--piep-surface); box-shadow: 0 8px 24px #0e1d3026; }
+.detail-menu { position: absolute; z-index: 3; top: calc(100% + 2px); right: 0; min-width: 176px; padding: 5px; border: 1px solid var(--piep-line); border-radius: 10px; background: var(--piep-surface); box-shadow: 0 8px 24px #0e1d3026; }
 .detail-menu button { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 42px; padding: 8px 10px; border: 0; border-radius: 6px; background: transparent; color: var(--piep-text); font-size: var(--fs-body); text-align: left; }
+.detail-menu button:active { background: var(--piep-tag-bg); }
 .detail-menu svg { width: 16px; height: 16px; }
-.detail-scroll { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 2px 16px 24px; }
-.detail-layout { display: flex; flex-direction: column; gap: 14px; }
+.detail-scroll { flex: 1 1 auto; min-height: 0; overflow: auto; overscroll-behavior: contain; padding: 14px 16px 24px; }
+.detail-layout { display: flex; flex-direction: column; gap: 16px; }
 .detail-hero { display: flex; align-items: flex-start; gap: 14px; min-width: 0; }
 .detail-cover { flex: none; width: 112px; }
 .detail-cover .work-cover { width: 100%; border: 0; border-radius: 8px; box-shadow: 0 6px 18px #0e1d3028; overflow: hidden; }
-.detail-content { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
-.detail-heading { flex: 1; display: flex; flex-direction: column; align-items: flex-start; gap: 6px; min-width: 0; }
-.detail-labels { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; }
-.detail-labels > span:not(.provider-mark) { display: inline-flex; align-items: center; gap: 3px; padding: 3px 8px; border-radius: 999px; background: var(--piep-tag-bg); color: var(--piep-tag-text); font-size: var(--fs-tiny); }
+.detail-heading { flex: 1; display: flex; flex-direction: column; align-items: flex-start; gap: 4px; min-width: 0; }
+/* 印は左から流れて折り返す。操作は右上から動かない。 */
+.detail-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; width: 100%; margin-bottom: 2px; }
+.detail-labels { flex: 1 1 0; display: flex; align-items: center; align-content: center; flex-wrap: wrap; gap: 5px; min-width: 0; min-height: 32px; }
+.detail-labels > span:not(.provider-mark) { display: inline-flex; align-items: center; gap: 3px; padding: 3px 8px; border-radius: 999px; background: var(--piep-tag-bg); color: var(--piep-tag-text); font-size: var(--fs-tiny); font-weight: 600; }
 .detail-labels svg { width: 12px; height: 12px; }
-.detail-labels > .detail-label--favorite { color: var(--piep-favorite); }
-.detail-label--favorite svg { fill: currentColor; }
-.detail-heading h1 { margin: 0; color: var(--piep-text); font-size: clamp(17px, 4.6vw, 22px); font-weight: 700; line-height: 1.4; overflow-wrap: anywhere; }
-.detail-people { display: flex; flex-wrap: wrap; gap: 6px; max-width: 100%; }
-.detail-person { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; min-height: 36px; padding: 2px 8px 2px 3px; border: 1px solid var(--piep-line); border-radius: 999px; background: var(--piep-control); color: var(--piep-text); font-size: var(--fs-body); font-weight: 600; }
+.detail-utility { flex: none; display: flex; align-items: center; gap: 2px; margin: -4px -8px 0 0; }
+.detail-close { display: none; }
+.detail-series { display: inline; max-width: 100%; padding: 3px 0; border: 0; background: transparent; color: var(--piep-muted); font-size: var(--fs-small); font-weight: 650; letter-spacing: .02em; line-height: 1.45; text-align: left; overflow-wrap: anywhere; transition: color 120ms ease; }
+.detail-series small { margin-left: 6px; color: var(--piep-muted); font-size: var(--fs-tiny); font-weight: 500; letter-spacing: 0; white-space: nowrap; }
+button.detail-series:active, button.detail-person:active { color: var(--piep-active-text); }
+.detail-heading h1 { margin: 0; color: var(--piep-text); font-size: clamp(17px, 4.6vw, 22px); font-weight: 720; line-height: 1.38; letter-spacing: -.01em; overflow-wrap: anywhere; }
+.detail-people { display: flex; flex-wrap: wrap; gap: 2px 14px; max-width: 100%; }
+.detail-person { display: inline-flex; align-items: center; gap: 7px; max-width: 100%; min-height: 34px; padding: 0; border: 0; background: transparent; color: var(--piep-text); font-size: var(--fs-body); font-weight: 600; text-align: left; transition: color 120ms ease; }
 .detail-person > span:nth-child(2) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.detail-person .work-author-avatar { width: 28px; height: 28px; }
-.detail-person > svg, .detail-collections svg { flex: none; width: 14px; height: 14px; color: var(--piep-muted); }
-.detail-series { display: inline-flex; align-items: center; gap: 5px; max-width: 100%; min-height: 26px; padding: 0; border: 0; background: transparent; color: var(--piep-active-text); font-size: var(--fs-small); font-weight: 600; text-align: left; }
-span.detail-series { color: var(--piep-muted); }
-.detail-series > svg { flex: none; width: 14px; height: 14px; }
-.detail-series > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.detail-series small { flex: none; color: var(--piep-muted); font-size: var(--fs-tiny); font-weight: 500; }
+.detail-person .work-author-avatar { width: 24px; height: 24px; }
+.detail-collections svg { flex: none; width: 14px; height: 14px; color: var(--piep-muted); }
+.detail-heading .work-facts { margin-top: 6px; }
 /* 事実は升目にしない。印と文字を文の続きのように流す。 */
 .work-facts { display: flex; flex-wrap: wrap; gap: 6px 14px; margin: 0; padding: 0; list-style: none; color: var(--piep-muted); font-size: var(--fs-small); font-variant-numeric: tabular-nums; }
-.work-facts li { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+.work-facts li { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
 .work-facts svg { flex: none; width: 14px; height: 14px; opacity: .85; }
+.detail-content { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.detail-section { display: flex; flex-direction: column; }
 .detail-section h2 { margin: 0 0 8px; color: var(--piep-muted); font-size: var(--fs-small); font-weight: 650; }
-.detail-description { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 5; overflow: hidden; margin: 0; color: var(--piep-text); font-size: var(--fs-control); line-height: 1.8; white-space: pre-wrap; overflow-wrap: anywhere; }
+.detail-description { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 5; overflow: hidden; margin: 0; color: var(--piep-muted); font-size: var(--fs-body); line-height: 1.75; white-space: pre-wrap; overflow-wrap: anywhere; }
 .detail-description[data-expanded] { display: block; }
-.detail-more, .entity-more { min-height: 36px; padding: 4px 0; border: 0; background: transparent; color: var(--piep-active-text); font-size: var(--fs-body); font-weight: 650; }
+/* 開け閉めは読んだ文の終わり、右下に置く。 */
+.detail-more, .entity-more { align-self: flex-start; min-width: 96px; min-height: 44px; margin-bottom: -6px; padding: 10px 24px 10px 0; text-align: left; border: 0; background: transparent; color: var(--piep-active-text); font-size: var(--fs-body); font-weight: 650; }
+.detail-more:active, .entity-more:active { opacity: .6; }
 .detail-tags { display: flex; flex-wrap: wrap; gap: 6px; }
-.detail-tags > * { max-width: 100%; min-height: 32px; padding: 5px 11px; overflow: hidden; border: 0; border-radius: 999px; background: var(--piep-tag-bg); color: var(--piep-tag-text); font-size: var(--fs-small); text-overflow: ellipsis; white-space: nowrap; }
+.detail-tags > * { max-width: 100%; height: 30px; padding: 0 11px; overflow: hidden; border: 1px solid transparent; border-radius: 999px; background: var(--piep-tag-bg); color: var(--piep-tag-text); font-size: var(--fs-small); font-weight: 600; line-height: 28px; text-overflow: ellipsis; white-space: nowrap; transition: color 120ms ease, background-color 120ms ease, border-color 120ms ease; }
 .detail-tags > span { display: inline-block; }
+.detail-tags > button:active { border-color: color-mix(in srgb, var(--piep-blue) 40%, transparent); background: var(--piep-active); color: var(--piep-active-text); }
 .detail-collections { display: flex; flex-wrap: wrap; gap: 6px; }
 .detail-collections > * { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; min-height: 36px; padding: 5px 10px; border: 1px solid var(--piep-line); border-radius: 8px; background: var(--piep-control); color: var(--piep-text); font-size: var(--fs-small); text-align: left; }
-/* 読むが先頭。保存は印にして右へ並べ、列は折り返さない。 */
-.detail-actions { flex: none; display: flex; align-items: center; gap: 8px; padding: 10px 16px max(12px, var(--piep-safe-bottom)); border-top: 1px solid var(--piep-line); background: var(--piep-surface); }
-.detail-actions-note { display: none; min-width: 0; color: var(--piep-muted); font-size: var(--fs-small); }
-.detail-read { flex: 1 1 auto; display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 48px; margin: 0; padding: 8px 18px; font-size: var(--fs-control); font-weight: 700; white-space: nowrap; }
+.detail-collections > button:active { background: var(--piep-active); color: var(--piep-active-text); }
+/* 操作の列は右に寄せる。いちばん右が読む。説明の一言は左に置き、操作を押し出さない。 */
+.detail-actions { flex: none; display: grid; gap: 6px; padding: 10px 16px max(12px, var(--piep-safe-bottom)); border-top: 1px solid var(--piep-line); background: var(--piep-surface); }
+.detail-actions-row { display: flex; align-items: center; justify-content: center; gap: 8px; }
+.detail-actions-note { margin: 0; color: light-dark(#e8590c, #ffa94d); font-size: var(--fs-small); text-align: center; }
+.detail-read { flex: 1 1 auto; display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-width: 0; min-height: 48px; margin: 0; padding: 8px 20px; font-size: var(--fs-control); font-weight: 700; white-space: nowrap; }
 .detail-read svg { flex: none; width: 17px; height: 17px; }
 
 @media (min-width: 600px) {
   .work-detail-overlay { align-items: center; padding: max(20px, var(--piep-safe-top)) 24px max(20px, var(--piep-safe-bottom)); background: #101c2d88; }
   .detail { width: min(880px, 100%); height: auto; max-height: 100%; padding-top: 0; border: 1px solid var(--piep-line); border-radius: 16px; background: var(--piep-surface); overflow: hidden; box-shadow: 0 18px 48px #0e1d3040; }
-  .detail-bar { min-height: 50px; padding: 3px 8px 0; }
-  .detail-scroll { padding: 0 28px 22px; }
-  .detail-hero { gap: 24px; }
-  .detail-cover { width: 188px; }
-  .detail-heading { gap: 8px; }
+  .detail-scroll { padding: 22px 28px 22px; }
+  /* 広い画面では、タグと概要も表紙の右の列に続ける。表紙の下に回すと右側が空く。 */
+  .detail-layout { display: grid; grid-template-columns: 188px minmax(0, 1fr); align-items: start; gap: 16px 24px; }
+  .detail-hero { display: contents; }
+  .detail-cover { grid-column: 1; grid-row: 1 / span 2; width: 188px; }
+  .detail-heading { grid-column: 2; grid-row: 1; }
+  .detail-content { grid-column: 2; grid-row: 2; }
+  .detail-heading { gap: 6px; }
   .detail-heading h1 { font-size: 22px; }
+  .detail-close { display: grid; }
+  .detail-utility { margin: -8px -12px 0 0; }
   .detail-actions { padding: 12px 28px; }
-  .detail-read { flex: 0 0 auto; min-width: 176px; min-height: 44px; }
-  .icon-button--large, .card-saved--large { width: 44px; height: 44px; }
-  .detail-actions-note { display: block; flex: 1; text-align: right; }
+  .detail-read { min-height: 46px; }
+  .icon-button--large, .card-saved--large { width: 46px; height: 46px; }
 }
 @media (max-height: 520px) and (min-width: 600px) {
   .work-detail-overlay { padding: 8px 20px; }
+  .detail-layout { grid-template-columns: 120px minmax(0, 1fr); }
   .detail-cover { width: 120px; }
   .detail-heading h1 { font-size: 19px; }
 }
 
 /* ---- 作者・シリーズ ---- */
-.page-back { display: inline-flex; align-items: center; gap: 2px; min-height: 36px; margin: 0 0 10px; padding: 0 12px 0 6px; border: 1px solid var(--piep-line); border-radius: 8px; background: var(--piep-control); color: var(--piep-text); font-size: var(--fs-body); font-weight: 600; box-shadow: 0 1px 2px rgb(20 32 45 / 5%); }
-.page-back svg { width: 18px; height: 18px; color: var(--piep-muted); }
 .entity-hero { margin-bottom: 14px; padding: 16px; border: 1px solid var(--piep-line); border-radius: 14px; background: var(--piep-surface); overflow: hidden; }
 .entity-banner { margin: -16px -16px 12px; aspect-ratio: 8 / 3; max-height: 220px; width: calc(100% + 32px); background: var(--piep-tag-bg); }
 .entity-banner img { display: block; width: 100%; height: 100%; object-fit: cover; }
@@ -307,7 +359,7 @@ span.detail-series { color: var(--piep-muted); }
 .entity-art svg { width: 44%; height: 44%; stroke-width: 1.6; }
 .entity-art img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
 .entity-hero[data-kind="person"] .entity-art { width: 76px; height: 76px; border-radius: 50%; }
-.entity-hero[data-kind="series"] .entity-art { width: 84px; aspect-ratio: 2 / 3; border-radius: 8px; }
+.entity-hero[data-kind="series"] .entity-art { width: 84px; aspect-ratio: 112 / 158; border-radius: 8px; background: var(--piep-surface); border: 1px solid var(--piep-line); }
 .entity-hero[data-kind="series"] .entity-art img { object-fit: contain; }
 .entity-hero-text { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
 .entity-labels { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
@@ -356,11 +408,9 @@ span.detail-series { color: var(--piep-muted); }
 }
 
 /* 読書の情報面の中の行き先。 */
-button.reader-info-author { display: inline-flex; align-items: center; gap: 6px; min-height: 36px; padding: 2px 11px 2px 3px; border: 1px solid var(--reader-line); border-radius: 999px; background: transparent; color: var(--reader-control-ink); font-size: var(--fs-body); font-weight: 600; text-align: left; }
-button.reader-info-series { display: block; min-height: 30px; padding: 0; border: 0; background: transparent; color: var(--reader-link, inherit); font-size: var(--fs-small); text-align: left; }
-.reader-info-tags button { max-width: 100%; min-height: 32px; padding: 5px 11px; overflow: hidden; border: 0; border-radius: 999px; background: var(--reader-control, transparent); color: var(--reader-control-ink); font-size: var(--fs-small); text-overflow: ellipsis; white-space: nowrap; }
 
 @media (prefers-reduced-motion: reduce) {
   .smooth-image { transition: none; }
-  .skeleton-block, .icon-button[data-busy] svg { animation: none; }
+  .skeleton-block, .icon-button[data-busy] svg, .card-action[data-busy] svg { animation: none; }
+  .work-card, .card-action { transition: none; }
 }

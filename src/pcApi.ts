@@ -233,6 +233,8 @@ export interface OfflineIssue {
 export const getPcStatus = () => invoke<PcConnectionStatus>("pc_connection_status");
 export const pairPc = (payload: string, deviceName: string) => invoke<PcConnectionStatus>("pc_pair", { payload, deviceName });
 export const disconnectPc = () => invoke<PcConnectionStatus>("pc_disconnect");
+/** お気に入りを付け外しする。返るのはサーバーが残した値。 */
+export const setPcFavorite = (source: string, sourceId: string, favorite: boolean) => invoke<{ source: string; sourceId: string; favorite: boolean }>("pc_set_favorite", { source, sourceId, favorite });
 export const searchPcWorks = (criteria: PcWorkSearch, cursor: string | null = null, scope: PcWorkScope | null = null, offset: number | null = null, limit: number | null = null) => invoke<PcSearchPage>("pc_search_works", {
   criteria,
   cursor,

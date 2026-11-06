@@ -2,7 +2,9 @@ import { rememberReading } from "./recentReading";
 import { progressLabel } from "./workText";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { ALargeSmall, ChevronLeft, Info, Pause, Play, TableOfContents, X } from "lucide-react";
+import { ALargeSmall, ChevronLeft, TableOfContents, X } from "lucide-react";
+import { Icons } from "./icons";
+import { WorkFavoriteButton } from "./FavoriteButton";
 import { ContinuousDocument, type ContinuousTarget, type LivePosition, type LoadedSection } from "./ContinuousDocument";
 import { ReaderInfoSheet, type InfoTab } from "./ReaderInfoSheet";
 import { ReaderPager } from "./ReaderPager";
@@ -118,7 +120,6 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
   const [barsShown, setBarsShown] = useState(true);
   const [progress, setProgress] = useState(0);
   const [dragPosition, setDragPosition] = useState<number | null>(null);
-  const [autoScroll, setAutoScroll] = useState(false);
   const [enterDirection, setEnterDirection] = useState<"next" | "prev" | null>(null);
   const [continuousTarget, setContinuousTarget] = useState<ContinuousTarget | null>(null);
   const [detailWork, setDetailWork] = useState<PcWork | null>(null);
@@ -745,41 +746,6 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
     };
   }, [behavior.volumeKeys]);
 
-  // 自動スクロール。読者が触ると止める。止めるまで画面を消さない。
-  const autoRunning = autoScroll && !infoOpen && !typeOpen;
-  useEffect(() => {
-    if (!autoRunning) return;
-    const native = window as Window & { piepAndroidReader?: { setKeepScreenOn: (enabled: boolean) => void } };
-    native.piepAndroidReader?.setKeepScreenOn(true);
-    let frame = 0;
-    let last = performance.now();
-    let carry = 0;
-    const tick = (now: number) => {
-      const viewport = scrollRef.current;
-      const elapsed = Math.min(100, now - last);
-      last = now;
-      if (viewport) {
-        carry += behavior.autoScrollSpeed * elapsed / 1000;
-        const whole = Math.floor(carry);
-        if (whole >= 1) {
-          carry -= whole;
-          viewport.scrollTop += whole;
-        }
-        if (viewport.scrollTop >= viewport.scrollHeight - viewport.clientHeight - 1) {
-          const count = latestPosition.current?.pageCount ?? 1;
-          if (currentPage.current >= count - 1) { setAutoScroll(false); return; }
-          if (!continuous) turnRef.current(1);
-        }
-      }
-      frame = requestAnimationFrame(tick);
-    };
-    frame = requestAnimationFrame(tick);
-    return () => {
-      cancelAnimationFrame(frame);
-      native.piepAndroidReader?.setKeepScreenOn(false);
-    };
-  }, [autoRunning, behavior.autoScrollSpeed, continuous]);
-
   const finishHorizontalSwipe = (event: React.TouchEvent<HTMLElement>) => {
     const start = touchStart.current;
     touchStart.current = null;
@@ -897,11 +863,6 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
     <header className="reader-toolbar">
       <button className="reader-icon-button" onClick={onBack} aria-label={backLabel}><ChevronLeft aria-hidden="true" /></button>
       <span className="reader-toolbar-title">{work.title}</span>
-      <div className="reader-toolbar-actions">
-        {outline.length > 0 && <button className="reader-icon-button" onClick={() => { setInfoTab("outline"); setInfoOpen(true); }} aria-label="目次"><TableOfContents aria-hidden="true" /></button>}
-        <button ref={typeTriggerRef} className="reader-icon-button" onClick={() => setTypeOpen(true)} aria-label="文字とページ送りの設定"><ALargeSmall aria-hidden="true" /></button>
-        <button ref={infoTriggerRef} className="reader-icon-button" onClick={() => { setInfoTab("info"); setInfoOpen(true); }} aria-label="作品情報"><Info aria-hidden="true" /></button>
-      </div>
     </header>
     <div className="reader-toasts">
       {saveMessage && !infoOpen && <div className="reader-notice" role="status"><span>{saveMessage}</span><button type="button" onClick={() => setSaveMessage(null)} aria-label="閉じる"><X aria-hidden="true" /></button></div>}
@@ -915,7 +876,6 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
       turn(direction);
     }} onTouchStart={(event) => {
       touching.current = true;
-      if (autoScroll) { setAutoScroll(false); swallowClick.current = true; }
       if (event.touches.length === 1) touchStart.current = { x: event.touches[0].clientX, y: event.touches[0].clientY };
     }} onTouchMove={() => { if (behavior.bars === "auto" && barsShown) setBarsShown(false); }} onTouchEnd={finishHorizontalSwipe}><article className={`reading-paper online-paper reader-font--${fontFamily}${!continuous && enterDirection ? ` reader-enter--${enterDirection}` : ""}`} style={{ maxWidth: `${readerWidth}px`, fontSize: `${fontSize}px`, lineHeight }}>
       {continuous
@@ -927,10 +887,16 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
     </article></main>
     <div className="reader-bottom">
       <div className="reader-panel" aria-hidden={!barsVisible} inert={!barsVisible}>
+        {/* 進み具合と、読みながら触るものを一行に。字の説明は付けず、印だけを親指の届く下に置く。 */}
         <div className="reader-progress-row">
-          <button type="button" className="reader-icon-button" onClick={() => { setAutoScroll((running) => !running); if (behavior.bars === "auto") setBarsShown(false); }} aria-pressed={autoScroll} aria-label={autoScroll ? "自動スクロールを止める" : "自動スクロールを始める"}>{autoScroll ? <Pause aria-hidden="true" /> : <Play aria-hidden="true" />}</button>
           <input type="range" className="reader-progress-slider" min={0} max={1000} step={1} value={Math.round(shownProgress * 1000)} aria-label="読書位置" onChange={(event) => setDragPosition(Number(event.target.value) / 1000)} onPointerUp={commitDrag} onTouchEnd={commitDrag} onKeyUp={commitDrag} />
           <span className="reader-progress-label">{percentLabel}</span>
+          <div className="reader-actions">
+            {outline.length > 0 && <button type="button" className="reader-icon-button" onClick={() => { setInfoTab("outline"); setInfoOpen(true); }} aria-label="目次" title="目次"><TableOfContents aria-hidden="true" /></button>}
+            <button ref={typeTriggerRef} type="button" className="reader-icon-button" onClick={() => setTypeOpen(true)} aria-label="文字とページ送りの設定" title="表示"><ALargeSmall aria-hidden="true" /></button>
+            <button ref={infoTriggerRef} type="button" className="reader-icon-button" onClick={() => { setInfoTab("info"); setInfoOpen(true); }} aria-label="作品情報" title="作品情報"><Icons.workInfo aria-hidden="true" /></button>
+            <WorkFavoriteButton work={sidebarWork} className="reader-icon-button" readOnly={offline} />
+          </div>
         </div>
         {showPager && behavior.pageButtons === "menu" && <ReaderPager page={pageIndex} pageCount={pageCount} disabled={loading} onChange={goToPage} />}
       </div>

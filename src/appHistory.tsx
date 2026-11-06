@@ -29,6 +29,8 @@ export type EntityPageState = {
   tags: string[];
   seriesQuery: string;
   listPage: number;
+  /** 絞り込み（取得元、種類、文字数など）。検索語・含めるタグ・並び順はほかの欄で持つ。 */
+  filters?: PcSearchCriteria;
 };
 
 export type OfflineTab = "works" | "people" | "series" | "collections";
@@ -197,6 +199,8 @@ export type AppNavigation = {
   openTag: (tag: string) => void;
   /** サーバーの本棚へ移動できるときだけ、作者やシリーズへの導線を出す。 */
   canBrowseServer: boolean;
+  /** サーバーが `favorite-write` を持ち、つながっているときだけお気に入りを押せる。 */
+  canWriteFavorite: boolean;
 };
 
 const NavigationContext = createContext<AppNavigation | null>(null);
