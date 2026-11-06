@@ -89,6 +89,22 @@ impl SwappableDb {
         F: FnOnce() -> Result<(), String>,
         R: FnOnce() -> Result<(), String>,
     {
+        self.replace_with_finalized(install, rollback, |_| Ok(()))
+    }
+
+    /// 開けることを確かめた新しい DB を公開する直前に、世代の記録を確定する。
+    /// `finalize` の成功後には、失敗し得るファイル操作を行わない。
+    pub fn replace_with_finalized<F, R, C>(
+        &self,
+        install: F,
+        rollback: R,
+        finalize: C,
+    ) -> Result<(), String>
+    where
+        F: FnOnce() -> Result<(), String>,
+        R: FnOnce() -> Result<(), String>,
+        C: FnOnce(Option<&Database>) -> Result<(), String>,
+    {
         let previous = self
             .slot
             .write()
@@ -106,7 +122,20 @@ impl SwappableDb {
             drop(previous);
         }
         crate::database::tantivy_index::release_runtime(&self.storage_dir);
-        let result = install().and_then(|()| self.open_existing().map(|_| ()));
+        let result = (|| {
+            install()?;
+            let candidate = if self.db_path.exists() {
+                Some(Arc::new(Database::open(&self.db_path, &self.storage_dir)?))
+            } else {
+                None
+            };
+            // 鍵の取得も commit より前に済ませる。公開前の DB をどこにも貸さないので、
+            // finalize の失敗時には閉じてから巻き戻せる。
+            let mut slot = self.slot.write().map_err(|_| "本棚の状態を開けません")?;
+            finalize(candidate.as_deref())?;
+            *slot = candidate;
+            Ok(())
+        })();
         if let Err(error) = result {
             crate::database::tantivy_index::release_runtime(&self.storage_dir);
             rollback()

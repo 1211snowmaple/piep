@@ -11,6 +11,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
@@ -114,7 +115,30 @@ fn clear_pending(paths: &ServerPaths) -> Result<(), String> {
     }
 }
 
-/// 更新が定着したあとの片付け。直前の版だけ残し、見張り役を次の起動で新しくする。
+fn resume_pending_update(paths: &ServerPaths) -> Result<Option<String>, String> {
+    if !paths.pending_version().exists() {
+        return Ok(None);
+    }
+    match switch_to_pending(paths) {
+        Ok(version) => Ok(Some(version)),
+        Err(error) => {
+            note(paths, &format!("更新できません: {error}"));
+            let pending = read_version_file(&paths.pending_version());
+            // current を書いた後の中断で、選択済みの exe が壊れたり消えたりしても、
+            // pending を消すだけで起動不能な current を残さない。
+            if let Some(failed) =
+                pending.filter(|version| Some(version) == current_version(paths).as_ref())
+            {
+                fail_update(paths, &failed, &error)?;
+            } else {
+                clear_pending(paths)?;
+            }
+            Ok(None)
+        }
+    }
+}
+
+/// 更新が定着したあとの片付け。直前の版だけ残す。
 fn settle(paths: &ServerPaths, version: &str) {
     if let Err(error) = clear_pending(paths) {
         note(paths, &error);
@@ -131,37 +155,68 @@ fn settle(paths: &ServerPaths, version: &str) {
             }
         }
     }
-    if let Err(error) = refresh_watchdog(paths, version) {
-        note(paths, &format!("見張り役を新しくできません: {error}"));
-    }
     let mut record = UpdateRecord::load(paths);
     record.last_error = None;
     record.last_applied_at = Some(Utc::now().to_rfc3339());
     record.save(paths);
 }
 
-/// 動いている実行ファイルは上書きできないが、名前は変えられる。効くのは次の起動から。
-/// 次の起動の入口なので、無い瞬間を作らない。先に全部写してから名前を入れ替える。
-fn refresh_watchdog(paths: &ServerPaths, version: &str) -> Result<(), String> {
+/// 起動タスクが指す root の exe は固定の入口にする。Windows で実行中の入口を
+/// 退避・差し替えず、起動するたびに current の版の見張り役へ委譲する。
+fn bootstrap_target(paths: &ServerPaths, executable: &Path) -> Result<Option<PathBuf>, String> {
     let installed = paths.root.join("piep-server.exe");
-    let incoming = paths.root.join("piep-server.new.exe");
-    let retired = paths.root.join("piep-server.old.exe");
-    fs::copy(
-        paths.version_dir(version).join("piep-server.exe"),
-        &incoming,
-    )
-    .map_err(|error| error.to_string())?;
-    if retired.exists() {
-        let _ = fs::remove_file(&retired);
+    let is_bootstrap = fs::canonicalize(executable)
+        .and_then(|executable| fs::canonicalize(installed).map(|installed| executable == installed))
+        .map_err(|error| format!("起動入口を確かめられません: {error}"))?;
+    if !is_bootstrap {
+        return Ok(None);
     }
-    if installed.exists() {
-        fs::rename(&installed, &retired).map_err(|error| error.to_string())?;
+    let version = current_version(paths).ok_or("動かす版が書かれていません")?;
+    let target = paths.version_dir(&version).join("piep-server.exe");
+    if !target.is_file() {
+        return Err(format!("版 {version} の実行ファイルがありません"));
     }
-    if let Err(error) = fs::rename(&incoming, &installed) {
-        let _ = fs::rename(&retired, &installed);
-        return Err(error.to_string());
+    Ok(Some(target))
+}
+
+/// 新版の見張り役そのものが起動できない場合も、固定入口の見張り役で pending の
+/// 起動確認・巻き戻しを続ける。0 は利用者が止めた場合なので、そのまま終了する。
+fn delegate_bootstrap(paths: &ServerPaths, executable: &Path) -> Option<i32> {
+    let target = match bootstrap_target(paths, executable) {
+        Ok(Some(target)) => target,
+        Ok(None) => return None,
+        Err(error) => {
+            note(paths, &format!("固定入口の見張り役で続けます: {error}"));
+            return None;
+        }
+    };
+    let delegated = (|| -> Result<i32, String> {
+        let job = JobGuard::new();
+        let mut child = Command::new(&target)
+            // 旧版の serve は root exe を差し替える。専用commandを知らない旧版なら
+            // 非0で終わらせ、固定入口の安全な見張り役へ戻す。
+            .arg("watchdog")
+            .arg("--data")
+            .arg(&paths.root)
+            .spawn()
+            .map_err(|error| format!("{} を起動できません: {error}", target.display()))?;
+        job.adopt(&child);
+        match child.wait() {
+            Ok(status) => Ok(status.code().unwrap_or(1)),
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                Err(format!("見張り役を待てません: {error}"))
+            }
+        }
+    })();
+    match delegated {
+        Ok(0) => Some(0),
+        result => {
+            note(paths, &format!("固定入口の見張り役で続けます: {result:?}"));
+            None
+        }
     }
-    Ok(())
 }
 
 /// 本体を子として動かす。見張り役が消えたら一緒に消えるようにする。
@@ -212,30 +267,21 @@ fn read_ready_mark(paths: &ServerPaths) -> Option<ReadyMark> {
 
 /// `piep-server serve` の本体。`install` の形で置かれているときだけ呼ばれる。
 pub fn run(paths: &ServerPaths) -> Result<i32, String> {
+    let executable = std::env::current_exe().map_err(|error| error.to_string())?;
+    if let Some(code) = delegate_bootstrap(paths, &executable) {
+        return Ok(code);
+    }
     // 同じ置き場を 2 つの見張り役で見ない。
     let lock = File::create(paths.watchdog_lock())
         .map_err(|error| format!("置き場を確保できません: {error}"))?;
     lock.try_lock()
         .map_err(|_| "この置き場ではすでに piep-server が動いています".to_string())?;
     let job = JobGuard::new();
-    // 前の更新で退かした見張り役。もう動いていないので消せる。
-    let _ = fs::remove_file(paths.root.join("piep-server.old.exe"));
     let mut backoff = Backoff::default();
     note(paths, &format!("見張り役を始めました（{VERSION}）"));
 
     // 更新の途中で機械が落ちたら、切り替える前の状態から続ける。
-    let mut applying = if paths.pending_version().exists() {
-        match switch_to_pending(paths) {
-            Ok(version) => Some(version),
-            Err(error) => {
-                note(paths, &format!("更新できません: {error}"));
-                let _ = fs::remove_file(paths.pending_version());
-                None
-            }
-        }
-    } else {
-        None
-    };
+    let mut applying = resume_pending_update(paths)?;
 
     loop {
         let version = current_version(paths).ok_or("動かす版が書かれていません")?;
@@ -397,6 +443,7 @@ mod tests {
         let paths = ServerPaths::new(&dir.0).expect("paths");
         fs::create_dir_all(paths.state()).expect("state");
         fs::create_dir_all(paths.library()).expect("library");
+        fs::write(paths.root.join("piep-server.exe"), b"fixed bootstrap").expect("bootstrap");
         for version in ["1.0.0", "1.1.0"] {
             fs::create_dir_all(paths.version_dir(version)).expect("version");
             fs::write(paths.version_dir(version).join("piep-server.exe"), version).expect("exe");
@@ -492,6 +539,93 @@ mod tests {
         assert!(paths.version_dir("1.0.0").exists());
         assert!(!paths.version_dir("0.9.0").exists());
         assert!(paths.root.join("piep-server.exe").exists());
+        assert_eq!(
+            fs::read(paths.root.join("piep-server.exe")).unwrap(),
+            b"fixed bootstrap"
+        );
         assert!(UpdateRecord::load(&paths).last_applied_at.is_some());
+    }
+
+    #[test]
+    fn the_fixed_bootstrap_selects_the_current_watchdog_without_replacing_the_entry() {
+        let (_dir, paths) = laid_out();
+        let entry = paths.root.join("piep-server.exe");
+        assert_eq!(
+            bootstrap_target(&paths, &entry).unwrap(),
+            Some(paths.version_dir("1.0.0").join("piep-server.exe"))
+        );
+        write_atomic(&paths.current_version(), b"1.1.0").unwrap();
+        // current の更新直後に止まっても、同じ固定入口から新しい見張り役へ進める。
+        assert_eq!(
+            bootstrap_target(&paths, &entry).unwrap(),
+            Some(paths.version_dir("1.1.0").join("piep-server.exe"))
+        );
+        assert_eq!(
+            bootstrap_target(&paths, &paths.version_dir("1.1.0").join("piep-server.exe")).unwrap(),
+            None
+        );
+        assert_eq!(fs::read(entry).unwrap(), b"fixed bootstrap");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn settling_does_not_touch_a_running_bootstrap_executable() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let (_dir, paths) = laid_out();
+        let entry = paths.root.join("piep-server.exe");
+        // 実行中exeより厳しい共有設定で保持する。更新が入口をrename/上書きしないことを確かめる。
+        let locked = OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&entry)
+            .unwrap();
+        write_atomic(&paths.previous_version(), b"1.0.0").unwrap();
+        write_atomic(&paths.current_version(), b"1.1.0").unwrap();
+        write_atomic(&paths.pending_version(), b"1.1.0").unwrap();
+        settle(&paths, "1.1.0");
+        assert!(entry.exists());
+        assert!(!paths.root.join("piep-server.new.exe").exists());
+        assert!(!paths.root.join("piep-server.old.exe").exists());
+        drop(locked);
+        assert_eq!(fs::read(entry).unwrap(), b"fixed bootstrap");
+    }
+
+    #[test]
+    fn an_unlaunchable_pending_watchdog_falls_back_to_the_fixed_entry_and_rolls_back() {
+        let (_dir, paths) = laid_out();
+        write_atomic(&paths.previous_version(), b"1.0.0").unwrap();
+        write_atomic(&paths.current_version(), b"1.1.0").unwrap();
+        write_atomic(&paths.pending_version(), b"1.1.0").unwrap();
+        // fixture の新exeはダミーなので、実際のプロセス起動が失敗する。
+        assert_eq!(
+            delegate_bootstrap(&paths, &paths.root.join("piep-server.exe")),
+            None
+        );
+        let applying = resume_pending_update(&paths).unwrap().unwrap();
+        let reason = spawn_body(&paths, &applying, &JobGuard::new()).unwrap_err();
+        fail_update(&paths, &applying, &reason).unwrap();
+        assert_eq!(current_version(&paths).as_deref(), Some("1.0.0"));
+        assert!(!paths.pending_version().exists());
+        assert_eq!(
+            fs::read(paths.root.join("piep-server.exe")).unwrap(),
+            b"fixed bootstrap"
+        );
+    }
+
+    #[test]
+    fn a_missing_selected_pending_program_is_rolled_back_from_the_fixed_entry() {
+        let (_dir, paths) = laid_out();
+        write_atomic(&paths.previous_version(), b"1.0.0").unwrap();
+        write_atomic(&paths.current_version(), b"1.1.0").unwrap();
+        write_atomic(&paths.pending_version(), b"1.1.0").unwrap();
+        fs::remove_file(paths.version_dir("1.1.0").join("piep-server.exe")).unwrap();
+        assert_eq!(
+            delegate_bootstrap(&paths, &paths.root.join("piep-server.exe")),
+            None
+        );
+        assert_eq!(resume_pending_update(&paths).unwrap(), None);
+        assert_eq!(current_version(&paths).as_deref(), Some("1.0.0"));
+        assert!(!paths.pending_version().exists());
+        assert_eq!(UpdateRecord::load(&paths).skipped, vec!["1.1.0"]);
     }
 }

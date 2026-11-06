@@ -346,7 +346,6 @@ pub fn assemble(
     fs::create_dir_all(paths.incoming()).map_err(|error| format!("置き場を作れません: {error}"))?;
     let store = Arc::new(ServerStore::open(&paths.store())?);
     let db = Arc::new(SwappableDb::new(paths.database(), paths.storage()));
-    db.open_existing()?;
     let receiver = Arc::new(SyncReceiver::new(
         paths.library(),
         paths.trash(),
@@ -354,6 +353,8 @@ pub fn assemble(
         Arc::clone(&store),
         Arc::clone(&db),
     ));
+    receiver.recover_pending_publication()?;
+    db.open_existing()?;
     let context = ServerContext::new(
         Library::Swappable(Arc::clone(&db)),
         store,
@@ -897,7 +898,7 @@ pub async fn main_from_args(args: Vec<String>) -> i32 {
                 println!("{}", command_status(required_data(&parsed)?)?);
                 Ok(0)
             }
-            "serve" => {
+            "serve" | "watchdog" => {
                 let paths = ServerPaths::new(required_data(&parsed)?)?;
                 fs::create_dir_all(paths.state())
                     .map_err(|error| format!("置き場を作れません: {error}"))?;
