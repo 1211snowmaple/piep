@@ -194,7 +194,7 @@ button.card-action:active { background: var(--piep-tag-bg); color: var(--piep-te
 .filter-save { display: flex; align-items: center; gap: 6px; }
 .filter-save input { flex: 1; }
 .filter-save .secondary-button { flex: none; min-height: 42px; margin: 0; padding: 7px 14px; }
-.filter-footer { flex: none; display: flex; align-items: center; gap: 8px; padding: 10px 18px max(12px, var(--piep-safe-bottom)); border-top: 1px solid var(--piep-line); }
+.filter-footer { flex: none; display: flex; align-items: center; gap: 8px; padding: 10px 18px calc(10px + var(--piep-safe-bottom)); border-top: 1px solid var(--piep-line); }
 .filter-summary { flex: 1; min-width: 0; color: var(--piep-muted); font-size: var(--fs-small); }
 .filter-footer button { flex: none; min-height: 44px; margin: 0; padding: 8px 16px; font-size: var(--fs-control); }
 .filter-footer .primary-button { min-width: 96px; }
@@ -334,7 +334,7 @@ button.detail-series:active, button.detail-person:active { color: var(--piep-act
 .detail-collections > * { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; min-height: 36px; padding: 5px 10px; border: 1px solid var(--piep-line); border-radius: 8px; background: var(--piep-control); color: var(--piep-text); font-size: var(--fs-small); text-align: left; }
 .detail-collections > button:active { background: var(--piep-active); color: var(--piep-active-text); }
 /* 操作の列は右に寄せる。いちばん右が読む。説明の一言は左に置き、操作を押し出さない。 */
-.detail-actions { flex: none; display: grid; gap: 6px; padding: 10px 16px max(12px, var(--piep-safe-bottom)); border-top: 1px solid var(--piep-line); background: var(--piep-surface); }
+.detail-actions { flex: none; display: grid; gap: 6px; padding: 10px 16px calc(10px + var(--piep-safe-bottom)); border-top: 1px solid var(--piep-line); background: var(--piep-surface); }
 .detail-actions-row { display: flex; align-items: center; justify-content: center; gap: 8px; }
 .detail-actions-note { margin: 0; color: light-dark(#e8590c, #ffa94d); font-size: var(--fs-small); text-align: center; }
 .detail-read { flex: 1 1 auto; display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-width: 0; min-height: 48px; margin: 0; padding: 8px 20px; font-size: var(--fs-control); font-weight: 700; white-space: nowrap; }

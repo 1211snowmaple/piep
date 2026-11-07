@@ -196,7 +196,7 @@
 .reader-sheet-tabs { display: flex; gap: 4px; min-width: 0; padding: 3px; border-radius: 12px; background: var(--reader-control); }
 .reader-sheet-tabs button { min-height: 40px; border: 0; border-radius: 9px; padding: 4px 16px; background: transparent; color: var(--reader-muted); font-size: 14px; font-weight: 650; white-space: nowrap; }
 .reader-sheet-tabs button[aria-selected="true"] { background: var(--reader-surface); box-shadow: 0 1px 3px var(--reader-shadow); color: var(--reader-control-ink); }
-.reader-sheet-body { flex: 1 1 auto; min-height: 0; overflow: auto; overscroll-behavior: contain; padding: 16px 16px max(20px, var(--piep-safe-bottom)); }
+.reader-sheet-body { flex: 1 1 auto; min-height: 0; overflow: auto; overscroll-behavior: contain; padding: 16px 16px calc(16px + var(--piep-safe-bottom)); }
 
 /* 文字と色、ページ送りの部品。 */
 .reader-controls { display: grid; gap: 18px; }
@@ -252,7 +252,8 @@
 .reader-info-progress > div { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; color: var(--reader-muted); font-size: 13px; font-variant-numeric: tabular-nums; }
 .reader-info-progress strong { color: var(--reader-control-ink); font-size: 16px; font-weight: 700; }
 .reader-info-progress .reader-progress-track { height: 3px; background: var(--reader-line); }
-.reader-info-footer { flex: none; padding: 10px 16px max(12px, var(--piep-safe-bottom)); border-top: 1px solid var(--reader-line); background: var(--reader-surface); }
+/* 端末の下の操作領域は下メニューと同じく丸ごと空け、その上に上と同じ 10px の余白を取る。 */
+.reader-info-footer { flex: none; padding: 10px 16px calc(10px + var(--piep-safe-bottom)); border-top: 1px solid var(--reader-line); background: var(--reader-surface); }
 .reader-info-save { display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; min-height: 48px; padding: 8px 16px; border: 0; border-radius: 10px; background: var(--reader-accent); color: #fff; font-size: var(--fs-control); font-weight: 700; }
 .reader-info-save:disabled { opacity: .75; }
 .reader-info-save[data-done] { background: var(--reader-accent-soft); color: var(--reader-accent); }
@@ -278,7 +279,7 @@
 .reader-toc-page { flex: none; color: var(--reader-muted); font-size: 13px; font-variant-numeric: tabular-nums; }
 .reader-toc button[aria-current="true"] .reader-toc-page { color: inherit; }
 
-.reader-sample-footer { flex: none; display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: calc(62px + var(--piep-safe-bottom)); padding: 7px 14px max(8px, var(--piep-safe-bottom)); border-top: 1px solid var(--reader-line); background: var(--reader-chrome); color: var(--reader-muted); font-size: 14px; font-variant-numeric: tabular-nums; }
+.reader-sample-footer { flex: none; display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: calc(62px + var(--piep-safe-bottom)); padding: 7px 14px calc(7px + var(--piep-safe-bottom)); border-top: 1px solid var(--reader-line); background: var(--reader-chrome); color: var(--reader-muted); font-size: 14px; font-variant-numeric: tabular-nums; }
 .reader-sample-footer button { min-height: 44px; border: 0; border-radius: 10px; padding: 6px 14px; background: var(--reader-control); color: var(--reader-control-ink); font-size: 14px; font-weight: 650; }
 
 /* 広い画面: 面は右に寄せ、本文を隠しすぎない。 */
