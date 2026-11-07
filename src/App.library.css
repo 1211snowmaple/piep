@@ -51,6 +51,12 @@
 .work-card-divider { flex: none; width: 1px; height: 18px; background: light-dark(#d5dae0, #38414c); }
 .work-card-identity .provider-mark { flex: none; }
 .work-card-tags { margin-top: 8px; min-width: 0; }
+/* 本文で見つかった箇所。高さは 2 行で決め、抜き出しの長さでカードの高さを変えない。 */
+.work-card-hit { display: block; width: 100%; min-width: 0; margin-top: 8px; padding: 6px 8px; border: 0; border-radius: 8px; background: var(--piep-active); color: var(--piep-text); font-size: var(--fs-small); line-height: 1.45; text-align: left; }
+.work-card-hit-page { display: block; color: var(--piep-active-text); font-size: var(--fs-tiny); font-weight: 700; font-variant-numeric: tabular-nums; }
+.work-card-hit-text { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; height: 2.9em; overflow: hidden; overflow-wrap: anywhere; }
+.work-card-hit mark { padding: 0 1px; border-radius: 3px; background: light-dark(#ffe58f, #6b5a17); color: inherit; }
+button.work-card-hit:active { color: var(--piep-active-text); }
 .work-card .work-tags { display: flex; align-items: center; gap: 4px; width: 100%; min-width: 0; height: 26px; flex-wrap: nowrap; overflow: hidden; }
 .work-card .work-tag, .work-card .work-tag-overflow { height: 26px; line-height: 22px; }
 .work-card button.work-tag { border: 0; font-family: inherit; color: var(--piep-tag-text); transition: background-color 120ms ease, color 120ms ease; }

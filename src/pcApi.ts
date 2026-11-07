@@ -225,6 +225,14 @@ export interface OfflineWork {
   seriesCoverEntity?: { source: string; key: string } | null;
 }
 
+/** 保存した作品の本文で見つかった箇所。page は 0 から数える。pages は語を含むページの数。 */
+export interface OfflineTextHit {
+  workId: number;
+  page: number;
+  snippet: string;
+  pages: number;
+}
+
 export interface OfflineIssue {
   workId: number;
   issue: "offline_storage";
@@ -260,6 +268,7 @@ export const getOfflineAsset = (workId: number, assetId: number, generation: str
 export const deleteOfflineWork = (work: Pick<PcWork, "id" | "source" | "sourceId">) => invoke<void>("offline_delete_work", { workId: work.id, source: work.source, sourceId: work.sourceId });
 /** 数値 ID はサーバーごとに振られる。同じ作品かは取得元の識別子まで見て決める。 */
 export const sameWork = (left: Pick<PcWork, "id" | "source" | "sourceId">, right: Pick<PcWork, "id" | "source" | "sourceId">) => left.id === right.id && left.source === right.source && left.sourceId === right.sourceId;
+export const searchOfflineText = (query: string) => invoke<OfflineTextHit[]>("offline_search_text", { query });
 export const listOfflineIssues = () => invoke<OfflineIssue[]>("offline_list_issues");
 export const deleteOfflineIssue = (workId: number) => invoke<void>("offline_delete_corrupt_work", { workId });
 

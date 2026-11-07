@@ -33,12 +33,16 @@ pub fn run() {
                 data_dir.join("pc-connection.json"),
                 cipher,
             ));
-            app.manage(pc_client::offline::OfflineState::new(
+            // 読書の記録と本文の索引は一つの SQLite に置く。
+            let records = std::sync::Arc::new(pc_client::device_db::DeviceDb::new(&data_dir));
+            app.manage(pc_client::offline::OfflineState::with_db(
                 data_dir.join("offline"),
+                records.clone(),
             ));
             app.manage(pc_client::reading_sync::ReadingSyncState::new(
-                data_dir.join("reading-sync.json"),
+                records.clone(),
             ));
+            app.manage(records);
             let covers = pc_client::cover_protocol::CoverCacheState::new(
                 app.path().app_cache_dir()?.join("covers"),
             );
@@ -67,7 +71,12 @@ pub fn run() {
             pc_client::reading_sync::reading_record,
             pc_client::reading_sync::reading_sync,
             pc_client::reading_sync::reading_get,
+            pc_client::local_reading::reading_local_get,
+            pc_client::local_reading::reading_local_put,
+            pc_client::local_reading::reading_local_shelf,
+            pc_client::local_reading::reading_local_import,
             pc_client::offline::offline_list_works,
+            pc_client::offline::offline_search_text,
             pc_client::offline::offline_list_issues,
             pc_client::offline::offline_save_work,
             pc_client::offline::offline_get_page,

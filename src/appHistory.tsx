@@ -36,7 +36,7 @@ export type EntityPageState = {
 export type OfflineTab = "works" | "people" | "series" | "collections";
 export type OfflinePageState = { name: "offline"; tab: OfflineTab; groupId: string | null };
 export type AppPage = LibraryPage | EntityPageState | OfflinePageState | { name: "settings" };
-export type ReaderOverlay = { kind: "online"; work: PcWork } | { kind: "offline"; work: OfflineWork } | { kind: "preview" };
+export type ReaderOverlay = { kind: "online"; work: PcWork } | { kind: "offline"; work: OfflineWork; page?: number } | { kind: "preview" };
 export type AppEntry = { id: number; page: AppPage; detail: SelectedWork | null; reader: ReaderOverlay | null };
 export type EntryPatch = Partial<Omit<AppEntry, "id">>;
 

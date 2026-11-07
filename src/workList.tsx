@@ -192,7 +192,7 @@ export function WorkResults({ list, savedRevision, reachable, onOpenWork, onOpen
   omit?: "author" | "series";
 }) {
   const savedState = useSavedStates(list.items, savedRevision, reachable);
-  const loadMore = useAutoLoad(list.hasMore && !list.fetchingMore && !list.stale, list.items.length, list.fetchMore);
+  const loadMore = useAutoLoad(list.hasMore && !list.fetchingMore && !list.stale && !list.error, list.items.length, list.fetchMore);
 
   if (list.loading) return <WorkListSkeleton />;
   if (list.error && !list.items.length) return <section className="empty-card"><h2>一覧を読み込めません</h2><p>{pcErrorMessage(list.error)}</p></section>;

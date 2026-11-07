@@ -5,13 +5,18 @@
 //! WebView へ返し、取得したものは端末に残す。次からはサーバーへ行かずに出せる。
 
 use super::image_validation::validate_display_image;
-use super::{authenticated_get_with_timeout, bounded_response_bytes, PcClientState, ASSET_TIMEOUT, MAX_ASSET_BYTES};
+use super::{
+    ASSET_TIMEOUT, MAX_ASSET_BYTES, PcClientState, authenticated_get_with_timeout,
+    bounded_response_bytes,
+};
 use sha2::{Digest, Sha256};
+use std::collections::{BTreeSet, HashMap};
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime};
-use tauri::http::{header, Response, StatusCode};
+use tauri::http::{Response, StatusCode, header};
 use tauri::{AppHandle, Manager, Runtime, UriSchemeContext, UriSchemeResponder};
 use tokio::sync::oneshot;
 
@@ -62,7 +67,11 @@ impl Limiter {
 
 impl Drop for Permit<'_> {
     fn drop(&mut self) {
-        let mut state = self.0.state.lock().unwrap_or_else(|error| error.into_inner());
+        let mut state = self
+            .0
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         while let Some(next) = state.1.pop() {
             if next.send(()).is_ok() {
                 return;
@@ -75,39 +84,142 @@ impl Drop for Permit<'_> {
 pub struct CoverCacheState {
     dir: PathBuf,
     limiter: Limiter,
+    index: Mutex<Option<CacheIndex>>,
+}
+
+#[derive(Default)]
+struct CacheIndex {
+    files: HashMap<PathBuf, (SystemTime, u64)>,
+    oldest: BTreeSet<(SystemTime, PathBuf)>,
+    bytes: u64,
+}
+
+impl CacheIndex {
+    fn load(dir: &Path) -> std::io::Result<Self> {
+        let mut index = Self::default();
+        let entries = match fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(index),
+            Err(error) => return Err(error),
+        };
+        for entry in entries {
+            let entry = entry?;
+            let metadata = entry.metadata()?;
+            if metadata.is_file() {
+                index.insert(
+                    entry.path(),
+                    metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+                    metadata.len(),
+                );
+            }
+        }
+        Ok(index)
+    }
+
+    fn insert(&mut self, path: PathBuf, modified: SystemTime, size: u64) {
+        if let Some((old_time, old_size)) = self.files.insert(path.clone(), (modified, size)) {
+            self.oldest.remove(&(old_time, path.clone()));
+            self.bytes -= old_size;
+        }
+        self.bytes += size;
+        self.oldest.insert((modified, path));
+    }
+
+    fn remove(&mut self, path: &Path) {
+        if let Some((time, size)) = self.files.remove(path) {
+            self.oldest.remove(&(time, path.to_path_buf()));
+            self.bytes -= size;
+        }
+    }
+
+    fn trim_to(&mut self, target: u64) {
+        let mut failed = Vec::new();
+        while self.bytes > target {
+            let Some((time, path)) = self.oldest.pop_first() else {
+                break;
+            };
+            match fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) => {
+                    failed.push((time, path));
+                    continue;
+                }
+            }
+            if let Some((_, size)) = self.files.remove(&path) {
+                self.bytes -= size;
+            }
+        }
+        self.oldest.extend(failed);
+    }
 }
 
 impl CoverCacheState {
     pub fn new(dir: PathBuf) -> Self {
-        Self { dir, limiter: Limiter::default() }
-    }
-
-    /// 上限を超えていたら古いものから消す。起動時に裏で一度だけ呼ぶ。
-    pub fn trim(&self) {
-        trim_directory(&self.dir, MAX_CACHE_BYTES, TRIMMED_CACHE_BYTES);
-    }
-}
-
-fn trim_directory(dir: &Path, limit: u64, target: u64) {
-    let Ok(entries) = fs::read_dir(dir) else { return };
-    let mut files: Vec<(SystemTime, u64, PathBuf)> = entries
-        .flatten()
-        .filter_map(|entry| {
-            let metadata = entry.metadata().ok()?;
-            metadata.is_file().then(|| (metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH), metadata.len(), entry.path()))
-        })
-        .collect();
-    let mut total: u64 = files.iter().map(|file| file.1).sum();
-    if total <= limit {
-        return;
-    }
-    files.sort_by_key(|file| file.0);
-    for (_, size, path) in files {
-        if total <= target {
-            break;
+        Self {
+            dir,
+            limiter: Limiter::default(),
+            index: Mutex::new(None),
         }
-        if fs::remove_file(path).is_ok() {
-            total -= size;
+    }
+
+    /// ディレクトリを一度だけ索引化し、以後は書き込み時に増分で管理する。
+    pub fn trim(&self) {
+        let mut index = self.index.lock().unwrap_or_else(|error| error.into_inner());
+        if index.is_none() {
+            *index = CacheIndex::load(&self.dir).ok();
+        }
+        let Some(index) = index.as_mut() else {
+            return;
+        };
+        if index.bytes > MAX_CACHE_BYTES {
+            index.trim_to(TRIMMED_CACHE_BYTES);
+        }
+    }
+
+    fn write(&self, file: &Path, mime: &str, bytes: &[u8]) {
+        self.write_with_limits(file, mime, bytes, MAX_CACHE_BYTES, TRIMMED_CACHE_BYTES);
+    }
+
+    fn write_with_limits(&self, file: &Path, mime: &str, bytes: &[u8], limit: u64, target: u64) {
+        let size = (mime.len() + 1 + bytes.len()) as u64;
+        if size > limit || fs::create_dir_all(&self.dir).is_err() {
+            return;
+        }
+        // 同じ画像の同時取得や裏の更新も、一時ファイルを含めて容量を予約する。
+        let mut guard = self.index.lock().unwrap_or_else(|error| error.into_inner());
+        if guard.is_none() {
+            *guard = CacheIndex::load(&self.dir).ok();
+        }
+        let Some(index) = guard.as_mut() else {
+            return;
+        };
+        if index.bytes.saturating_add(size) > limit {
+            index.trim_to(target.min(limit - size));
+        }
+        if index.bytes.saturating_add(size) > limit {
+            return;
+        }
+        let temp = file.with_extension("tmp");
+        let written = (|| -> std::io::Result<()> {
+            let mut target = fs::File::create(&temp)?;
+            target.write_all(mime.as_bytes())?;
+            target.write_all(b"\n")?;
+            target.write_all(bytes)
+        })();
+        if written.is_ok() && fs::rename(&temp, file).is_ok() {
+            index.remove(&temp);
+            index.insert(file.to_path_buf(), SystemTime::now(), size);
+        } else {
+            let _ = fs::remove_file(&temp);
+            index.remove(&temp);
+            if let Ok(metadata) = fs::metadata(&temp) {
+                index.insert(
+                    temp,
+                    metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+                    metadata.len(),
+                );
+            }
         }
     }
 }
@@ -134,7 +246,11 @@ fn positive(value: &str) -> Option<i64> {
 }
 
 fn safe_collection_id(id: &str) -> bool {
-    !id.is_empty() && id.len() <= 128 && id.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    !id.is_empty()
+        && id.len() <= 128
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
 }
 
 /// 受け付ける形を限る。ここで組み立てる以外の経路へは出ていかない。
@@ -145,14 +261,36 @@ fn parse_route(path: &str) -> Option<Route> {
     let decoded = percent_decode(path.trim_start_matches('/'))?;
     let parts: Vec<&str> = decoded.split('/').collect();
     match parts.as_slice() {
-        ["work", id, _version, _hash] => Some(Route::Remote { endpoint: format!("/api/v1/works/{}/cover", positive(id)?), refreshes: false }),
+        ["work", id, _version, _hash] => Some(Route::Remote {
+            endpoint: format!("/api/v1/works/{}/cover", positive(id)?),
+            refreshes: false,
+        }),
         // 本文の挿絵。端末の幅を添える。版と内容の印は、改稿後に古い絵を出さないためのキャッシュ鍵。
         ["asset", id, asset, width, _version, _hash] => {
-            let width: u32 = width.parse().ok().filter(|width| (1..=4096).contains(width))?;
-            Some(Route::Remote { endpoint: format!("/api/v1/works/{}/assets/{}?width={width}", positive(id)?, positive(asset)?), refreshes: false })
+            let width: u32 = width
+                .parse()
+                .ok()
+                .filter(|width| (1..=4096).contains(width))?;
+            Some(Route::Remote {
+                endpoint: format!(
+                    "/api/v1/works/{}/assets/{}?width={width}",
+                    positive(id)?,
+                    positive(asset)?
+                ),
+                refreshes: false,
+            })
         }
-        ["work", id, _version, _hash, "large"] => Some(Route::Remote { endpoint: format!("/api/v1/works/{}/cover?size=large", positive(id)?), refreshes: false }),
-        ["entity", kind @ ("people" | "series"), source @ ("pixiv" | "fanbox"), key, rest @ ..] if rest.is_empty() || rest == ["banner"] => {
+        ["work", id, _version, _hash, "large"] => Some(Route::Remote {
+            endpoint: format!("/api/v1/works/{}/cover?size=large", positive(id)?),
+            refreshes: false,
+        }),
+        [
+            "entity",
+            kind @ ("people" | "series"),
+            source @ ("pixiv" | "fanbox"),
+            key,
+            rest @ ..,
+        ] if rest.is_empty() || rest == ["banner"] => {
             let key = percent_decode(key)?;
             if key.is_empty() || key.chars().count() > 200 {
                 return None;
@@ -163,14 +301,38 @@ fn parse_route(path: &str) -> Option<Route> {
             if !rest.is_empty() {
                 query.append_pair("variant", "banner");
             }
-            Some(Route::Remote { endpoint: format!("/api/v1/entities/{kind}/cover?{}", query.finish()), refreshes: true })
+            Some(Route::Remote {
+                endpoint: format!("/api/v1/entities/{kind}/cover?{}", query.finish()),
+                refreshes: true,
+            })
         }
-        ["collection", id, slot @ ("file" | "tile-0" | "tile-1" | "tile-2" | "tile-3"), _revision] if safe_collection_id(id) => {
-            Some(Route::Remote { endpoint: format!("/api/v1/collections/{id}/cover/{slot}"), refreshes: false })
+        [
+            "collection",
+            id,
+            slot @ ("file" | "tile-0" | "tile-1" | "tile-2" | "tile-3"),
+            _revision,
+        ] if safe_collection_id(id) => Some(Route::Remote {
+            endpoint: format!("/api/v1/collections/{id}/cover/{slot}"),
+            refreshes: false,
+        }),
+        ["saved", id, _generation] => Some(Route::SavedCover {
+            work_id: positive(id)?,
+        }),
+        [
+            "saved-entity",
+            id,
+            kind @ ("people" | "series"),
+            _generation,
+        ] => Some(Route::SavedEntity {
+            work_id: positive(id)?,
+            kind: (*kind).to_string(),
+        }),
+        ["saved-collection", id, collection, _generation] if safe_collection_id(collection) => {
+            Some(Route::SavedCollection {
+                work_id: positive(id)?,
+                collection_id: (*collection).to_string(),
+            })
         }
-        ["saved", id, _generation] => Some(Route::SavedCover { work_id: positive(id)? }),
-        ["saved-entity", id, kind @ ("people" | "series"), _generation] => Some(Route::SavedEntity { work_id: positive(id)?, kind: (*kind).to_string() }),
-        ["saved-collection", id, collection, _generation] if safe_collection_id(collection) => Some(Route::SavedCollection { work_id: positive(id)?, collection_id: (*collection).to_string() }),
         _ => None,
     }
 }
@@ -178,9 +340,13 @@ fn parse_route(path: &str) -> Option<Route> {
 fn respond(status: StatusCode, mime: Option<&str>, body: Vec<u8>) -> Response<Vec<u8>> {
     let mut builder = Response::builder().status(status);
     if let Some(mime) = mime {
-        builder = builder.header(header::CONTENT_TYPE, mime).header(header::CACHE_CONTROL, "private, max-age=86400");
+        builder = builder
+            .header(header::CONTENT_TYPE, mime)
+            .header(header::CACHE_CONTROL, "private, max-age=86400");
     }
-    builder.body(body).unwrap_or_else(|_| Response::new(Vec::new()))
+    builder
+        .body(body)
+        .unwrap_or_else(|_| Response::new(Vec::new()))
 }
 
 fn failure(status: StatusCode) -> Response<Vec<u8>> {
@@ -190,10 +356,16 @@ fn failure(status: StatusCode) -> Response<Vec<u8>> {
 fn cache_path(dir: &Path, server: &str, path: &str) -> PathBuf {
     // 接続先が変わると同じ番号が別の作品を指す。接続先ごとに分ける。
     let mut hasher = Sha256::new();
+    // APNG 検査のない旧版が保存した画像を、検査済みとして使い回さない。
+    hasher.update(b"display-image-validation-v2\0");
     hasher.update(server.as_bytes());
     hasher.update([0]);
     hasher.update(path.as_bytes());
-    let name: String = hasher.finalize().iter().map(|byte| format!("{byte:02x}")).collect();
+    let name: String = hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
     dir.join(name)
 }
 
@@ -204,27 +376,21 @@ fn read_cached(file: &Path) -> Option<(String, Vec<u8>)> {
     allowed_mime(&mime).then(|| (mime, data[split + 1..].to_vec()))
 }
 
-fn write_cached(dir: &Path, file: &Path, mime: &str, bytes: &[u8]) {
-    if fs::create_dir_all(dir).is_err() {
-        return;
-    }
-    let temp = file.with_extension(format!("{:x}.tmp", std::process::id()));
-    let mut data = Vec::with_capacity(mime.len() + 1 + bytes.len());
-    data.extend_from_slice(mime.as_bytes());
-    data.push(b'\n');
-    data.extend_from_slice(bytes);
-    if fs::write(&temp, data).is_ok() && fs::rename(&temp, file).is_err() {
-        let _ = fs::remove_file(&temp);
-    }
-}
-
 fn allowed_mime(mime: &str) -> bool {
-    matches!(mime, "image/jpeg" | "image/png" | "image/webp" | "image/gif" | "image/avif")
+    matches!(
+        mime,
+        "image/jpeg" | "image/png" | "image/webp" | "image/gif" | "image/avif"
+    )
 }
 
-async fn fetch<R: Runtime>(app: &AppHandle<R>, endpoint: &str) -> Result<(String, Vec<u8>), StatusCode> {
+async fn fetch<R: Runtime>(
+    app: &AppHandle<R>,
+    endpoint: &str,
+) -> Result<(String, Vec<u8>), StatusCode> {
     let state = app.state::<PcClientState>();
-    let response = authenticated_get_with_timeout(&state, endpoint, ASSET_TIMEOUT).await.map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    let response = authenticated_get_with_timeout(&state, endpoint, ASSET_TIMEOUT)
+        .await
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
     let mime = response
         .headers()
         .get(reqwest::header::CONTENT_TYPE)
@@ -232,20 +398,32 @@ async fn fetch<R: Runtime>(app: &AppHandle<R>, endpoint: &str) -> Result<(String
         .filter(|value| allowed_mime(value))
         .ok_or(StatusCode::BAD_GATEWAY)?
         .to_string();
-    let bytes = bounded_response_bytes(response, MAX_ASSET_BYTES).await.map_err(|_| StatusCode::BAD_GATEWAY)?;
+    let bytes = bounded_response_bytes(response, MAX_ASSET_BYTES)
+        .await
+        .map_err(|_| StatusCode::BAD_GATEWAY)?;
     // 圧縮後は小さくても、展開すると端末のメモリを食い尽くす画像がある。
     validate_display_image(&bytes, &mime).map_err(|_| StatusCode::BAD_GATEWAY)?;
     Ok((mime, bytes))
 }
 
-async fn serve_remote<R: Runtime>(app: &AppHandle<R>, path: &str, endpoint: &str, refreshes: bool) -> Response<Vec<u8>> {
+async fn serve_remote<R: Runtime>(
+    app: &AppHandle<R>,
+    path: &str,
+    endpoint: &str,
+    refreshes: bool,
+) -> Response<Vec<u8>> {
     let cache = app.state::<CoverCacheState>();
     let Ok(Some(saved)) = app.state::<PcClientState>().load() else {
         return failure(StatusCode::SERVICE_UNAVAILABLE);
     };
     let file = cache_path(&cache.dir, &saved.url, path);
     if let Some((mime, bytes)) = read_cached(&file) {
-        let stale = refreshes && fs::metadata(&file).and_then(|metadata| metadata.modified()).ok().and_then(|time| time.elapsed().ok()).is_some_and(|age| age > ENTITY_REFRESH_AFTER);
+        let stale = refreshes
+            && fs::metadata(&file)
+                .and_then(|metadata| metadata.modified())
+                .ok()
+                .and_then(|time| time.elapsed().ok())
+                .is_some_and(|age| age > ENTITY_REFRESH_AFTER);
         if stale {
             // 今あるものを先に出し、次に開いたときのために取り直す。
             let (app, endpoint) = (app.clone(), endpoint.to_string());
@@ -253,7 +431,7 @@ async fn serve_remote<R: Runtime>(app: &AppHandle<R>, path: &str, endpoint: &str
                 let cache = app.state::<CoverCacheState>();
                 let _permit = cache.limiter.acquire().await;
                 if let Ok((mime, bytes)) = fetch(&app, &endpoint).await {
-                    write_cached(&cache.dir, &file, &mime, &bytes);
+                    cache.write(&file, &mime, &bytes);
                 }
             });
         }
@@ -266,7 +444,7 @@ async fn serve_remote<R: Runtime>(app: &AppHandle<R>, path: &str, endpoint: &str
     }
     match fetch(app, endpoint).await {
         Ok((mime, bytes)) => {
-            write_cached(&cache.dir, &file, &mime, &bytes);
+            cache.write(&file, &mime, &bytes);
             respond(StatusCode::OK, Some(&mime), bytes)
         }
         Err(status) => failure(status),
@@ -274,15 +452,23 @@ async fn serve_remote<R: Runtime>(app: &AppHandle<R>, path: &str, endpoint: &str
 }
 
 async fn serve<R: Runtime>(app: &AppHandle<R>, path: &str) -> Response<Vec<u8>> {
-    use super::offline::{saved_collection_cover, saved_cover, saved_entity_cover, OfflineState};
+    use super::offline::{OfflineState, saved_collection_cover, saved_cover, saved_entity_cover};
     let Some(route) = parse_route(path) else {
         return failure(StatusCode::NOT_FOUND);
     };
     let saved = match route {
-        Route::Remote { endpoint, refreshes } => return serve_remote(app, path, &endpoint, refreshes).await,
+        Route::Remote {
+            endpoint,
+            refreshes,
+        } => return serve_remote(app, path, &endpoint, refreshes).await,
         Route::SavedCover { work_id } => saved_cover(&app.state::<OfflineState>(), work_id).await,
-        Route::SavedEntity { work_id, kind } => saved_entity_cover(&app.state::<OfflineState>(), work_id, &kind).await,
-        Route::SavedCollection { work_id, collection_id } => saved_collection_cover(&app.state::<OfflineState>(), work_id, &collection_id).await,
+        Route::SavedEntity { work_id, kind } => {
+            saved_entity_cover(&app.state::<OfflineState>(), work_id, &kind).await
+        }
+        Route::SavedCollection {
+            work_id,
+            collection_id,
+        } => saved_collection_cover(&app.state::<OfflineState>(), work_id, &collection_id).await,
     };
     match saved {
         Ok((mime, bytes)) => respond(StatusCode::OK, Some(&mime), bytes),
@@ -290,7 +476,11 @@ async fn serve<R: Runtime>(app: &AppHandle<R>, path: &str) -> Response<Vec<u8>> 
     }
 }
 
-pub fn handle<R: Runtime>(context: UriSchemeContext<'_, R>, request: tauri::http::Request<Vec<u8>>, responder: UriSchemeResponder) {
+pub fn handle<R: Runtime>(
+    context: UriSchemeContext<'_, R>,
+    request: tauri::http::Request<Vec<u8>>,
+    responder: UriSchemeResponder,
+) {
     let app = context.app_handle().clone();
     let path = request.uri().path().to_string();
     tauri::async_runtime::spawn(async move {
@@ -304,16 +494,64 @@ mod tests {
 
     #[test]
     fn routes_only_accept_known_shapes() {
-        assert_eq!(parse_route("/work%2F12%2F3%2Fabc"), Some(Route::Remote { endpoint: "/api/v1/works/12/cover".into(), refreshes: false }));
-        assert_eq!(parse_route("/work%2F12%2F3%2Fabc%2Flarge"), Some(Route::Remote { endpoint: "/api/v1/works/12/cover?size=large".into(), refreshes: false }));
-        assert_eq!(parse_route("/entity%2Fpeople%2Fpixiv%2Fa%252Fb"), Some(Route::Remote { endpoint: "/api/v1/entities/people/cover?source=pixiv&key=a%2Fb".into(), refreshes: true }));
-        assert_eq!(parse_route("/entity%2Fpeople%2Fpixiv%2Fa%2Fbanner"), Some(Route::Remote { endpoint: "/api/v1/entities/people/cover?source=pixiv&key=a&variant=banner".into(), refreshes: true }));
-        assert_eq!(parse_route("/collection%2Fabc-1%2Ftile-2%2F4"), Some(Route::Remote { endpoint: "/api/v1/collections/abc-1/cover/tile-2".into(), refreshes: false }));
-        assert_eq!(parse_route("/asset%2F12%2F5%2F1080%2F3%2Fabc"), Some(Route::Remote { endpoint: "/api/v1/works/12/assets/5?width=1080".into(), refreshes: false }));
+        assert_eq!(
+            parse_route("/work%2F12%2F3%2Fabc"),
+            Some(Route::Remote {
+                endpoint: "/api/v1/works/12/cover".into(),
+                refreshes: false
+            })
+        );
+        assert_eq!(
+            parse_route("/work%2F12%2F3%2Fabc%2Flarge"),
+            Some(Route::Remote {
+                endpoint: "/api/v1/works/12/cover?size=large".into(),
+                refreshes: false
+            })
+        );
+        assert_eq!(
+            parse_route("/entity%2Fpeople%2Fpixiv%2Fa%252Fb"),
+            Some(Route::Remote {
+                endpoint: "/api/v1/entities/people/cover?source=pixiv&key=a%2Fb".into(),
+                refreshes: true
+            })
+        );
+        assert_eq!(
+            parse_route("/entity%2Fpeople%2Fpixiv%2Fa%2Fbanner"),
+            Some(Route::Remote {
+                endpoint: "/api/v1/entities/people/cover?source=pixiv&key=a&variant=banner".into(),
+                refreshes: true
+            })
+        );
+        assert_eq!(
+            parse_route("/collection%2Fabc-1%2Ftile-2%2F4"),
+            Some(Route::Remote {
+                endpoint: "/api/v1/collections/abc-1/cover/tile-2".into(),
+                refreshes: false
+            })
+        );
+        assert_eq!(
+            parse_route("/asset%2F12%2F5%2F1080%2F3%2Fabc"),
+            Some(Route::Remote {
+                endpoint: "/api/v1/works/12/assets/5?width=1080".into(),
+                refreshes: false
+            })
+        );
         assert_eq!(parse_route("/asset%2F12%2F5%2F99999%2F3%2Fabc"), None);
         assert_eq!(parse_route("/asset%2F12%2F-5%2F1080%2F3%2Fabc"), None);
-        assert_eq!(parse_route("/saved%2F7%2F99"), Some(Route::SavedCover { work_id: 7 }));
-        for bad in ["/work%2F0%2F1%2Fa", "/work%2F-1%2F1%2Fa", "/entity%2Fpeople%2Fother%2Fa", "/entity%2Fother%2Fpixiv%2Fa", "/collection%2F..%2Ffile%2F1", "/collection%2Fa%2Ftile-4%2F1", "/etc%2Fpasswd", "/%zz"] {
+        assert_eq!(
+            parse_route("/saved%2F7%2F99"),
+            Some(Route::SavedCover { work_id: 7 })
+        );
+        for bad in [
+            "/work%2F0%2F1%2Fa",
+            "/work%2F-1%2F1%2Fa",
+            "/entity%2Fpeople%2Fother%2Fa",
+            "/entity%2Fother%2Fpixiv%2Fa",
+            "/collection%2F..%2Ffile%2F1",
+            "/collection%2Fa%2Ftile-4%2F1",
+            "/etc%2Fpasswd",
+            "/%zz",
+        ] {
             assert_eq!(parse_route(bad), None, "{bad}");
         }
     }
@@ -321,7 +559,10 @@ mod tests {
     #[test]
     fn cached_files_are_scoped_by_server() {
         let dir = Path::new("covers");
-        assert_ne!(cache_path(dir, "https://a/", "/work%2F1"), cache_path(dir, "https://b/", "/work%2F1"));
+        assert_ne!(
+            cache_path(dir, "https://a/", "/work%2F1"),
+            cache_path(dir, "https://b/", "/work%2F1")
+        );
     }
 
     #[test]
@@ -333,10 +574,83 @@ mod tests {
             fs::write(dir.join(name), vec![0u8; 100]).unwrap();
             std::thread::sleep(Duration::from_millis(30));
         }
-        trim_directory(&dir, 150, 100);
+        CacheIndex::load(&dir).unwrap().trim_to(100);
         assert!(!dir.join("old").exists());
         assert!(dir.join("new").exists());
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn runtime_writes_and_refreshes_stay_within_the_budget() {
+        let dir = std::env::temp_dir().join(format!("piep-cover-budget-{}", uuid::Uuid::new_v4()));
+        let cache = std::sync::Arc::new(CoverCacheState::new(dir.clone()));
+        cache.trim();
+        for number in 0..30 {
+            let file = dir.join(format!("image-{}", number % 8));
+            cache.write_with_limits(&file, "image/png", &[number; 100], 512, 384);
+            let actual: u64 = fs::read_dir(&dir)
+                .unwrap()
+                .map(|entry| entry.unwrap().metadata().unwrap().len())
+                .sum();
+            assert!(actual <= 512);
+            assert_eq!(cache.index.lock().unwrap().as_ref().unwrap().bytes, actual);
+        }
+        let threads: Vec<_> = (0..8)
+            .map(|number| {
+                let cache = cache.clone();
+                std::thread::spawn(move || {
+                    cache.write_with_limits(
+                        &cache.dir.join("shared"),
+                        "image/png",
+                        &[number; 100],
+                        512,
+                        384,
+                    );
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        let blocked = dir.join("blocked");
+        fs::create_dir(&blocked).unwrap();
+        cache.write_with_limits(&blocked, "image/png", &[0; 100], 512, 384);
+        assert!(!blocked.with_extension("tmp").exists());
+        let actual: u64 = fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|entry| {
+                let metadata = entry.unwrap().metadata().unwrap();
+                metadata.is_file().then_some(metadata.len())
+            })
+            .sum();
+        assert!(actual <= 512);
+        assert_eq!(cache.index.lock().unwrap().as_ref().unwrap().bytes, actual);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn failed_indexing_is_retried_and_orphan_temporary_bytes_are_accounted_for() {
+        let root = std::env::temp_dir().join(format!("piep-cover-index-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&root).unwrap();
+        let dir = root.join("covers");
+        fs::write(&dir, b"a file cannot be scanned as a cache directory").unwrap();
+        let cache = CoverCacheState::new(dir.clone());
+        cache.trim();
+        assert!(cache.index.lock().unwrap().is_none());
+        cache.write_with_limits(&dir.join("image"), "image/png", &[1; 100], 512, 384);
+        assert!(cache.index.lock().unwrap().is_none());
+        fs::remove_file(&dir).unwrap();
+        fs::create_dir(&dir).unwrap();
+        fs::write(dir.join("image.tmp"), [0; 64]).unwrap();
+        cache.trim();
+        assert_eq!(cache.index.lock().unwrap().as_ref().unwrap().bytes, 64);
+        cache.write_with_limits(&dir.join("image"), "image/png", &[1; 100], 512, 384);
+        assert!(!dir.join("image.tmp").exists());
+        assert_eq!(
+            cache.index.lock().unwrap().as_ref().unwrap().bytes,
+            fs::metadata(dir.join("image")).unwrap().len()
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

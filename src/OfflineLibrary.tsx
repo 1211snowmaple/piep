@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { isTauri } from "@tauri-apps/api/core";
 import { SearchField } from "./SearchField";
 import { WorkThumbnail } from "./WorkThumbnail";
@@ -11,7 +11,7 @@ import { savedEntityCoverUrl } from "./images";
 import { useAppNavigation, type OfflinePageState, type OfflineTab } from "./appHistory";
 import { SortMenu } from "./SortMenu";
 import { sortOfflineWorks, type FixedSort } from "./librarySort";
-import { deleteOfflineIssue, listOfflineIssues, listOfflineWorks, type OfflineIssue, type OfflineWork, type PcCollection } from "./pcApi";
+import { deleteOfflineIssue, listOfflineIssues, listOfflineWorks, searchOfflineText, type OfflineIssue, type OfflineTextHit, type OfflineWork, type PcCollection } from "./pcApi";
 
 type SavedGroup = { id: string; name: string; works: OfflineWork[]; cover: OfflineWork; coverWorkId?: number | null; collection?: PcCollection };
 const emptySearches: Record<OfflineTab, string> = { works: "", people: "", series: "", collections: "" };
@@ -93,9 +93,35 @@ function SavedGroupArtwork({ group, kind }: { group: SavedGroup; kind: "people" 
   return <GroupArtwork kind={kind} src={hasImage ? savedEntityCoverUrl(group.cover.work.id, kind, group.cover.savedAtMs) : null} />;
 }
 
+interface TextSearch {
+  query: string;
+  hits: Map<number, OfflineTextHit>;
+  failed: boolean;
+}
+
+// 本文の検索は語を 100 文字まで受け付ける。それより長い語は題名などだけで探す。
+const textQueryLimit = 100;
+
+async function findInText(query: string): Promise<TextSearch> {
+  const empty = { query, hits: new Map<number, OfflineTextHit>(), failed: false };
+  if (!query.trim() || query.length > textQueryLimit || !isTauri()) return empty;
+  try {
+    const hits = await searchOfflineText(query);
+    return { ...empty, hits: new Map(hits.map((hit) => [hit.workId, hit])) };
+  } catch {
+    return { ...empty, failed: true };
+  }
+}
+
+function textHitFor(item: OfflineWork, search: TextSearch | null, open: (work: OfflineWork, page?: number) => void) {
+  const hit = search?.hits.get(item.work.id);
+  if (!hit) return undefined;
+  return { snippet: hit.snippet, page: hit.page, pages: hit.pages, terms: search!.query.split(/\s+/), onOpen: () => open(item, hit.page) };
+}
+
 export function OfflineLibrary({ page, onOpenWork, onOpenDetail, onShowPc, savedRevision, pagingMode, rememberedSort, onRememberedSortChange }: {
   page: OfflinePageState;
-  onOpenWork: (work: OfflineWork) => void;
+  onOpenWork: (work: OfflineWork, page?: number) => void;
   onOpenDetail: (work: OfflineWork) => void;
   onShowPc: () => void;
   savedRevision: number;
@@ -117,6 +143,9 @@ export function OfflineLibrary({ page, onOpenWork, onOpenDetail, onShowPc, saved
   const [groupSearchInput, setGroupSearchInput] = useState("");
   const [groupQuery, setGroupQuery] = useState("");
   const [currentPage, setCurrentPage] = useState(1);
+  // 本文で見つかった作品。検索語と一緒に入れ替え、一覧が二度に分けて変わらないようにする。
+  const [textSearch, setTextSearch] = useState<TextSearch | null>(null);
+  const textRequest = useRef(0);
 
   useEffect(() => {
     if (!isTauri()) { setLoading(false); return; }
@@ -161,24 +190,41 @@ export function OfflineLibrary({ page, onOpenWork, onOpenDetail, onShowPc, saved
   const searchInput = selected ? groupSearchInput : searchInputs[tab];
   const query = selected ? groupQuery : queries[tab];
   const needle = query.toLocaleLowerCase();
+  const searchesText = tab === "works" || Boolean(selected);
+  const textHits = searchesText && textSearch?.query === query ? textSearch : null;
   const matchingGroups = needle ? groups.filter((group) => group.name.toLocaleLowerCase().includes(needle)) : groups;
   // シリーズやコレクションの中は、そのグループ自身の順を保つ。
   const allVisibleWorks = tab === "works" ? sortOfflineWorks(works, rememberedSort) : selected?.works ?? [];
-  const visibleWorks = needle ? allVisibleWorks.filter((item) => `${item.work.title} ${item.work.authorName} ${item.work.seriesTitle ?? ""} ${item.work.tags.join(" ")}`.toLocaleLowerCase().includes(needle)) : allVisibleWorks;
+  const visibleWorks = needle ? allVisibleWorks.filter((item) => textHits?.hits.has(item.work.id) || `${item.work.title} ${item.work.authorName} ${item.work.seriesTitle ?? ""} ${item.work.tags.join(" ")}`.toLocaleLowerCase().includes(needle)) : allVisibleWorks;
   const pageCount = Math.max(1, Math.ceil(visibleWorks.length / 20));
   const pagedWorks = pagingMode === "pages" ? visibleWorks.slice((currentPage - 1) * 20, currentPage * 20) : visibleWorks;
   const tabLabel = { works: "作品", people: "作者・クリエイター", series: "シリーズ", collections: "コレクション" };
-  const searchTarget = selected ? "このグループの作品・タグ" : {
-    works: "保存作品・作者・タグ",
+  const searchTarget = selected ? "このグループの作品・タグ・本文" : {
+    works: "保存作品・作者・タグ・本文",
     people: "保存した作者・クリエイター",
     series: "保存したシリーズ",
     collections: "保存したコレクション",
   }[tab];
 
-  const submitSearch = (next: string) => {
+  const applyQuery = (next: string) => {
     if (selected) setGroupQuery(next);
     else setQueries((previous) => ({ ...previous, [tab]: next }));
   };
+  const submitSearch = (next: string) => {
+    if (!searchesText) { applyQuery(next); return; }
+    const request = ++textRequest.current;
+    void findInText(next).then((found) => {
+      if (request !== textRequest.current) return;
+      setTextSearch(found);
+      applyQuery(next);
+    });
+  };
+  // 保存し直した・消した作品があれば、同じ語で本文を探し直す。
+  useEffect(() => {
+    if (!searchesText || !query.trim()) return;
+    const request = ++textRequest.current;
+    void findInText(query).then((found) => { if (request === textRequest.current) setTextSearch(found); });
+  }, [works]);
 
   useEffect(() => { setCurrentPage(1); }, [query, tab, selectedGroup, pagingMode]);
 
@@ -202,12 +248,12 @@ export function OfflineLibrary({ page, onOpenWork, onOpenDetail, onShowPc, saved
         <span className="group-card-text"><strong>{group.name}</strong><small className="group-card-meta">{tab !== "collections" && <ProviderMark source={group.cover.work.source} compact />}<span>端末に保存した {group.works.length} 作品</span></small></span>
       </button>)}</div>}
       {(tab === "works" || selected) && visibleWorks.length > 0 && <VirtualWorkList listKey={`offline:${tab}:${selectedGroup ?? ""}:${query}:${rememberedSort}:${currentPage}`} items={pagedWorks} itemKey={(item) => item.work.id} renderItem={(item) => <div className="offline-row">
-        <WorkCard work={item.work} offline offlineAuthorCover={item.hasAuthorCover} snapshotGeneration={item.savedAtMs} onRead={() => onOpenWork(item)} onDetail={() => onOpenDetail(item)} prefix={`${item.pageCount} ページ`} />
+        <WorkCard work={item.work} offline offlineAuthorCover={item.hasAuthorCover} snapshotGeneration={item.savedAtMs} onRead={() => onOpenWork(item)} onDetail={() => onOpenDetail(item)} prefix={`${item.pageCount} ページ`} textHit={textHitFor(item, textHits, onOpenWork)} />
       </div>} />}
       {pagingMode === "pages" && (tab === "works" || selected) && visibleWorks.length > 20 && <nav className="numbered-pager" aria-label="端末内作品のページ"><button type="button" disabled={currentPage <= 1} onClick={() => setCurrentPage((page) => page - 1)}>前へ</button><select aria-label="端末内のページ番号" value={currentPage} onChange={(event) => setCurrentPage(Number(event.target.value))}>{Array.from({ length: pageCount }, (_, index) => <option key={index + 1} value={index + 1}>{index + 1} / {pageCount} ページ</option>)}</select><button type="button" disabled={currentPage >= pageCount} onClick={() => setCurrentPage((page) => page + 1)}>次へ</button></nav>}
       {!works.length && !issues.length && !problem && !issuesProblem && <section className="empty-card"><h2>保存した作品はまだありません</h2><p>サーバーの本棚で作品を開き、「端末に保存」を押すと、ここでオフラインでも読めます。</p><button className="primary-button" onClick={onShowPc}>サーバーの本棚を見る</button></section>}
       {works.length > 0 && tab !== "works" && !selected && !matchingGroups.length && <section className="empty-card"><h2>{query ? "該当する項目はありません" : `${tabLabel[tab]}はまだありません`}</h2><p>{query ? "検索語を変えて試してください。" : "対応する作品を保存すると、ここにまとまって表示されます。以前に保存した作品のコレクションは、サーバーに接続して保存し直すと反映されます。"}</p></section>}
-      {works.length > 0 && (tab === "works" || selected) && !visibleWorks.length && <section className="empty-card"><h2>作品が見つかりません</h2><p>検索語を変えて試してください。</p></section>}
+      {works.length > 0 && (tab === "works" || selected) && !visibleWorks.length && <section className="empty-card"><h2>作品が見つかりません</h2><p>{textHits?.failed ? "本文を検索できませんでした。題名・作者・タグだけで探しています。" : "検索語を変えて試してください。"}</p></section>}
     </>}
   </>;
 }

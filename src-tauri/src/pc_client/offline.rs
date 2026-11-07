@@ -1,7 +1,8 @@
 //! 利用者が選んだ作品だけを、検証後に版単位で切り替えて保存する。
 
-use super::*;
+use super::device_db::DeviceDb;
 use super::image_validation::validate_saved_image;
+use super::*;
 use regex::Regex;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -17,16 +18,28 @@ const MAX_PAGE_BYTES: usize = 10 * 1024 * 1024;
 const MAX_COLLECTION_COVERS: usize = 64;
 const MAX_COLLECTION_COVER_BYTES: usize = 16 * 1024 * 1024;
 
+#[path = "offline_index.rs"]
+mod index;
+
 pub struct OfflineState {
     root: PathBuf,
+    /// 本文の索引。保存版そのものはファイルに置く。
+    db: Arc<DeviceDb>,
     save_lock: Mutex<()>,
     lock: Mutex<()>,
 }
 
 impl OfflineState {
+    /// 試験用。索引はメモリーに置く。
+    #[cfg(test)]
     pub fn new(root: PathBuf) -> Self {
+        Self::with_db(root, Arc::new(DeviceDb::in_memory()))
+    }
+
+    pub fn with_db(root: PathBuf, db: Arc<DeviceDb>) -> Self {
         let state = Self {
             root,
+            db,
             save_lock: Mutex::new(()),
             lock: Mutex::new(()),
         };
@@ -36,29 +49,72 @@ impl OfflineState {
     }
 
     fn recover_storage(&self) {
-        let Ok(root) = fs::canonicalize(&self.root) else { return; };
-        let Ok(works) = fs::read_dir(&root) else { return; };
+        let Ok(root) = fs::canonicalize(&self.root) else {
+            return;
+        };
+        let Ok(works) = fs::read_dir(&root) else {
+            return;
+        };
         for work in works.flatten() {
             let name = work.file_name();
-            let Some(id) = name.to_str().and_then(|name| name.strip_prefix("work-")).and_then(|value| value.parse::<i64>().ok()) else { continue; };
-            if id <= 0 || name.to_str() != Some(format!("work-{id}").as_str())
-                || !work.file_type().is_ok_and(|kind| kind.is_dir() && !kind.is_symlink()) { continue; }
-            let Ok(work_dir) = fs::canonicalize(work.path()) else { continue; };
+            let Some(id) = name
+                .to_str()
+                .and_then(|name| name.strip_prefix("work-"))
+                .and_then(|value| value.parse::<i64>().ok())
+            else {
+                continue;
+            };
+            if id <= 0
+                || name.to_str() != Some(format!("work-{id}").as_str())
+                || !work
+                    .file_type()
+                    .is_ok_and(|kind| kind.is_dir() && !kind.is_symlink())
+            {
+                continue;
+            }
+            let Ok(work_dir) = fs::canonicalize(work.path()) else {
+                continue;
+            };
             // Junction などによる、別の保存領域への移動も許可しない。
-            if work_dir != root.join(&name) { continue; }
-            let current = read_manifest(self, id).ok().and_then(|(_, path)| path.file_name().map(|name| name.to_owned()));
-            let Ok(entries) = fs::read_dir(&work_dir) else { continue; };
+            if work_dir != root.join(&name) {
+                continue;
+            }
+            let current = read_manifest(self, id)
+                .ok()
+                .and_then(|(_, path)| path.file_name().map(|name| name.to_owned()));
+            let Ok(entries) = fs::read_dir(&work_dir) else {
+                continue;
+            };
             for entry in entries.flatten() {
-                if !entry.file_type().is_ok_and(|kind| kind.is_dir() && !kind.is_symlink()) { continue; }
+                if !entry
+                    .file_type()
+                    .is_ok_and(|kind| kind.is_dir() && !kind.is_symlink())
+                {
+                    continue;
+                }
                 let entry_name = entry.file_name();
-                let Some(name) = entry_name.to_str() else { continue; };
-                let abandoned_staging = name.strip_prefix("staging-").is_some_and(|id| Uuid::parse_str(id).is_ok());
-                let old_snapshot = current.as_ref().is_some_and(|current| current != &entry_name)
-                    && name.strip_prefix("snapshot-").is_some_and(|id| Uuid::parse_str(id).is_ok());
-                if !abandoned_staging && !old_snapshot { continue; }
-                let Ok(target) = fs::canonicalize(entry.path()) else { continue; };
+                let Some(name) = entry_name.to_str() else {
+                    continue;
+                };
+                let abandoned_staging = name
+                    .strip_prefix("staging-")
+                    .is_some_and(|id| Uuid::parse_str(id).is_ok());
+                let old_snapshot = current
+                    .as_ref()
+                    .is_some_and(|current| current != &entry_name)
+                    && name
+                        .strip_prefix("snapshot-")
+                        .is_some_and(|id| Uuid::parse_str(id).is_ok());
+                if !abandoned_staging && !old_snapshot {
+                    continue;
+                }
+                let Ok(target) = fs::canonicalize(entry.path()) else {
+                    continue;
+                };
                 // 再帰削除の直前に最終パスがこの作品内の実ディレクトリであることを確認する。
-                if target != work_dir.join(&entry_name) || !target.starts_with(&root) { continue; }
+                if target != work_dir.join(&entry_name) || !target.starts_with(&root) {
+                    continue;
+                }
                 let _ = fs::remove_dir_all(target);
             }
         }
@@ -183,27 +239,44 @@ fn snapshot_changed() -> ClientError {
 }
 
 fn snapshot_generation(snapshot: &Path) -> Result<String, ClientError> {
-    let name = snapshot.file_name().and_then(|name| name.to_str()).ok_or_else(storage)?;
+    let name = snapshot
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(storage)?;
     let id = name.strip_prefix("snapshot-").ok_or_else(storage)?;
-    Uuid::parse_str(id).map(|uuid| uuid.to_string()).map_err(|_| storage())
+    Uuid::parse_str(id)
+        .map(|uuid| uuid.to_string())
+        .map_err(|_| storage())
 }
 
 fn require_generation(snapshot: &Path, generation: &str) -> Result<(), ClientError> {
     let requested = Uuid::parse_str(generation).map_err(|_| snapshot_changed())?;
     let current = snapshot_generation(snapshot).map_err(|_| snapshot_changed())?;
-    if requested.to_string() == current { Ok(()) } else { Err(snapshot_changed()) }
+    if requested.to_string() == current {
+        Ok(())
+    } else {
+        Err(snapshot_changed())
+    }
 }
 
 fn cleanup_superseded_snapshots(work_dir: &Path, current_snapshot: &str) {
-    let Ok(canonical_work_dir) = fs::canonicalize(work_dir) else { return; };
+    let Ok(canonical_work_dir) = fs::canonicalize(work_dir) else {
+        return;
+    };
     if let Ok(entries) = fs::read_dir(work_dir) {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
             if name != current_snapshot
-                && name.strip_prefix("snapshot-").is_some_and(|id| Uuid::parse_str(id).is_ok())
-                && entry.file_type().is_ok_and(|kind| kind.is_dir() && !kind.is_symlink())
+                && name
+                    .strip_prefix("snapshot-")
+                    .is_some_and(|id| Uuid::parse_str(id).is_ok())
+                && entry
+                    .file_type()
+                    .is_ok_and(|kind| kind.is_dir() && !kind.is_symlink())
             {
-                let Ok(target) = fs::canonicalize(entry.path()) else { continue; };
+                let Ok(target) = fs::canonicalize(entry.path()) else {
+                    continue;
+                };
                 if target != canonical_work_dir.join(entry.file_name())
                     || target.parent() != Some(canonical_work_dir.as_path())
                 {
@@ -215,25 +288,56 @@ fn cleanup_superseded_snapshots(work_dir: &Path, current_snapshot: &str) {
     }
 }
 
-fn read_offline_page(state: &OfflineState, work_id: i64, page: usize) -> Result<OfflinePage, ClientError> {
+fn read_offline_page(
+    state: &OfflineState,
+    work_id: i64,
+    page: usize,
+) -> Result<OfflinePage, ClientError> {
     let (manifest, snapshot) = read_manifest(state, work_id)?;
     let generation = snapshot_generation(&snapshot)?;
     let page = page.min(manifest.summary.page_count - 1);
-    let record = manifest.pages.get(page).filter(|record| record.page == page).ok_or_else(ClientError::remote)?;
-    let bytes = fs::read(snapshot.join("pages").join(format!("{page}.json"))).map_err(|_| storage())?;
-    if bytes.len() > MAX_PAGE_BYTES || digest(&bytes) != record.sha256 { return Err(storage()); }
+    let record = manifest
+        .pages
+        .get(page)
+        .filter(|record| record.page == page)
+        .ok_or_else(ClientError::remote)?;
+    let bytes =
+        fs::read(snapshot.join("pages").join(format!("{page}.json"))).map_err(|_| storage())?;
+    if bytes.len() > MAX_PAGE_BYTES || digest(&bytes) != record.sha256 {
+        return Err(storage());
+    }
     let page_data: MobilePage = serde_json::from_slice(&bytes).map_err(|_| storage())?;
-    if page_data.page != page || page_data.page_count != manifest.summary.page_count { return Err(storage()); }
-    Ok(OfflinePage { generation, page: page_data })
+    if page_data.page != page || page_data.page_count != manifest.summary.page_count {
+        return Err(storage());
+    }
+    Ok(OfflinePage {
+        generation,
+        page: page_data,
+    })
 }
 
-fn read_offline_asset(state: &OfflineState, work_id: i64, asset_id: i64, generation: &str) -> Result<MobileAssetData, ClientError> {
+fn read_offline_asset(
+    state: &OfflineState,
+    work_id: i64,
+    asset_id: i64,
+    generation: &str,
+) -> Result<MobileAssetData, ClientError> {
     let (manifest, snapshot) = read_manifest(state, work_id)?;
     require_generation(&snapshot, generation)?;
-    let record = manifest.assets.iter().find(|record| record.id == asset_id).ok_or_else(ClientError::remote)?;
-    let bytes = fs::read(snapshot.join("assets").join(format!("{asset_id}.bin"))).map_err(|_| storage())?;
-    if bytes.len() > MAX_ASSET_BYTES || digest(&bytes) != record.sha256 { return Err(storage()); }
-    Ok(MobileAssetData { mime_type: record.mime_type.clone(), base64: STANDARD.encode(bytes) })
+    let record = manifest
+        .assets
+        .iter()
+        .find(|record| record.id == asset_id)
+        .ok_or_else(ClientError::remote)?;
+    let bytes =
+        fs::read(snapshot.join("assets").join(format!("{asset_id}.bin"))).map_err(|_| storage())?;
+    if bytes.len() > MAX_ASSET_BYTES || digest(&bytes) != record.sha256 {
+        return Err(storage());
+    }
+    Ok(MobileAssetData {
+        mime_type: record.mime_type.clone(),
+        base64: STANDARD.encode(bytes),
+    })
 }
 
 fn digest(bytes: &[u8]) -> String {
@@ -309,9 +413,13 @@ async fn get_pc_with_timeout(
     check_response(response)
 }
 
-async fn validated_image_response(response: reqwest::Response) -> Result<MobileAssetData, ClientError> {
+async fn validated_image_response(
+    response: reqwest::Response,
+) -> Result<MobileAssetData, ClientError> {
     let image = image_response(response).await?;
-    let bytes = STANDARD.decode(&image.base64).map_err(|_| ClientError::protocol())?;
+    let bytes = STANDARD
+        .decode(&image.base64)
+        .map_err(|_| ClientError::protocol())?;
     validate_saved_image(&bytes, &image.mime_type)?;
     Ok(image)
 }
@@ -374,26 +482,55 @@ async fn save_collection_covers(
     let mut records = Vec::new();
     let mut cover_bytes = 0usize;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
-    for collection in collections.iter().filter(|value| value.cover_mode == "file" && value.has_file_cover).take(MAX_COLLECTION_COVERS) {
-        if cover_bytes >= MAX_COLLECTION_COVER_BYTES || tokio::time::Instant::now() >= deadline { break; }
-        if collection.id.is_empty() || collection.id.len() > 128
-            || !collection.id.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')) { continue; }
+    for collection in collections
+        .iter()
+        .filter(|value| value.cover_mode == "file" && value.has_file_cover)
+        .take(MAX_COLLECTION_COVERS)
+    {
+        if cover_bytes >= MAX_COLLECTION_COVER_BYTES || tokio::time::Instant::now() >= deadline {
+            break;
+        }
+        if collection.id.is_empty()
+            || collection.id.len() > 128
+            || !collection
+                .id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        {
+            continue;
+        }
         let endpoint = format!("/api/v1/collections/{}/cover/file", collection.id);
-        let response = match tokio::time::timeout_at(deadline, get_pc_with_timeout(client, saved, &endpoint, ASSET_TIMEOUT)).await {
+        let response = match tokio::time::timeout_at(
+            deadline,
+            get_pc_with_timeout(client, saved, &endpoint, ASSET_TIMEOUT),
+        )
+        .await
+        {
             Ok(Ok(response)) => response,
             Ok(Err(_)) => continue,
             Err(_) => break,
         };
-        let image = match tokio::time::timeout_at(deadline, validated_image_response(response)).await {
-            Ok(Ok(image)) => image,
-            Ok(Err(_)) => continue,
-            Err(_) => break,
+        let image =
+            match tokio::time::timeout_at(deadline, validated_image_response(response)).await {
+                Ok(Ok(image)) => image,
+                Ok(Err(_)) => continue,
+                Err(_) => break,
+            };
+        let bytes = match STANDARD.decode(&image.base64) {
+            Ok(bytes) => bytes,
+            Err(_) => continue,
         };
-        let bytes = match STANDARD.decode(&image.base64) { Ok(bytes) => bytes, Err(_) => continue };
         if cover_bytes.saturating_add(bytes.len()) > MAX_COLLECTION_COVER_BYTES
-            || total_bytes.saturating_add(bytes.len()) > MAX_SNAPSHOT_BYTES { continue; }
+            || total_bytes.saturating_add(bytes.len()) > MAX_SNAPSHOT_BYTES
+        {
+            continue;
+        }
         let file_number = records.len();
-        fs::write(staging.join(format!("collection-cover-{file_number}.bin")), &bytes).map_err(|_| storage())?;
+        fs::write(
+            staging.join(format!("collection-cover-{file_number}.bin")),
+            &bytes,
+        )
+        .map_err(|_| storage())?;
         cover_bytes += bytes.len();
         *total_bytes += bytes.len();
         records.push(CollectionCoverRecord {
@@ -416,7 +553,9 @@ pub struct OfflineIssue {
 fn scan_works(state: &OfflineState) -> Result<(Vec<OfflineWork>, Vec<OfflineIssue>), ClientError> {
     let entries = match fs::read_dir(&state.root) {
         Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok((Vec::new(), Vec::new())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((Vec::new(), Vec::new()));
+        }
         Err(_) => return Err(storage()),
     };
     let mut result = Vec::new();
@@ -431,42 +570,68 @@ fn scan_works(state: &OfflineState) -> Result<(Vec<OfflineWork>, Vec<OfflineIssu
         else {
             continue;
         };
-        if id <= 0 || name.to_str() != Some(format!("work-{id}").as_str())
-            || !entry.file_type().map_err(|_| storage())?.is_dir() {
+        if id <= 0
+            || name.to_str() != Some(format!("work-{id}").as_str())
+            || !entry.file_type().map_err(|_| storage())?.is_dir()
+        {
             continue;
         }
-        match read_manifest(&state, id) {
+        match read_manifest(state, id) {
             Ok((manifest, _)) => result.push(manifest.summary),
             Err(_) => {
                 // 新規保存の通信中は staging だけなので問題として表示しない。
                 let has_snapshot = match fs::read_dir(entry.path()) {
                     Ok(mut entries) => entries.any(|item| match item {
-                        Ok(item) => item.file_type().is_ok_and(|kind| kind.is_dir())
-                            && item.file_name().to_str().and_then(|name| name.strip_prefix("snapshot-")).is_some_and(|value| Uuid::parse_str(value).is_ok()),
+                        Ok(item) => {
+                            item.file_type().is_ok_and(|kind| kind.is_dir())
+                                && item
+                                    .file_name()
+                                    .to_str()
+                                    .and_then(|name| name.strip_prefix("snapshot-"))
+                                    .is_some_and(|value| Uuid::parse_str(value).is_ok())
+                        }
                         // この作品の中だけを読めない場合、他作品の一覧を妨げない。
                         Err(_) => true,
                     }),
                     Err(_) => true,
                 };
                 if entry.path().join("current.json").exists() || has_snapshot {
-                    issues.push(OfflineIssue { work_id: id, issue: "offline_storage" });
+                    issues.push(OfflineIssue {
+                        work_id: id,
+                        issue: "offline_storage",
+                    });
                 }
             }
         }
     }
-    result.sort_by(|left, right| right.saved_at_ms.cmp(&left.saved_at_ms));
+    result.sort_by_key(|work| std::cmp::Reverse(work.saved_at_ms));
     issues.sort_by_key(|issue| issue.work_id);
     Ok((result, issues))
 }
 
+/// 保存した作品の本文を探す。索引が保存版とずれていれば、先に作り直す。
 #[tauri::command]
-pub async fn offline_list_works(state: State<'_, OfflineState>) -> Result<Vec<OfflineWork>, ClientError> {
+pub async fn offline_search_text(
+    state: State<'_, OfflineState>,
+    query: String,
+) -> Result<Vec<index::TextHit>, ClientError> {
+    let _guard = state.lock.lock().await;
+    index::reconcile(&state)?;
+    index::search(&state, &query)
+}
+
+#[tauri::command]
+pub async fn offline_list_works(
+    state: State<'_, OfflineState>,
+) -> Result<Vec<OfflineWork>, ClientError> {
     let _guard = state.lock.lock().await;
     Ok(scan_works(&state)?.0)
 }
 
 #[tauri::command]
-pub async fn offline_list_issues(state: State<'_, OfflineState>) -> Result<Vec<OfflineIssue>, ClientError> {
+pub async fn offline_list_issues(
+    state: State<'_, OfflineState>,
+) -> Result<Vec<OfflineIssue>, ClientError> {
     let _guard = state.lock.lock().await;
     Ok(scan_works(&state)?.1)
 }
@@ -484,21 +649,21 @@ pub async fn offline_save_work(
     let client = pc.client(&saved)?;
     let metadata: MobileMetadata = get_pc(&client, &saved, &format!("/api/v1/works/{work_id}"))
         .await?
-        .bounded_json().await?;
+        .bounded_json()
+        .await?;
     if metadata.work.id != work_id {
         return Err(ClientError::protocol());
     }
     // DB の数値 ID はサーバーごとに異なる。別のサーバーへ登録し直しても、同じ ID の
     // 別作品で持ち歩き中の作品を置き換えない。
-    if let Ok((existing, _)) = read_manifest(&state, work_id) {
-        if existing.summary.work.source != metadata.work.source
-            || existing.summary.work.source_id != metadata.work.source_id
-        {
-            return Err(ClientError {
-                code: "offline_work_conflict",
-                message: "別のサーバーから保存した作品と番号が重なっています。保存済み作品を確認してください",
-            });
-        }
+    if let Ok((existing, _)) = read_manifest(&state, work_id)
+        && (existing.summary.work.source != metadata.work.source
+            || existing.summary.work.source_id != metadata.work.source_id)
+    {
+        return Err(ClientError {
+            code: "offline_work_conflict",
+            message: "別のサーバーから保存した作品と番号が重なっています。保存済み作品を確認してください",
+        });
     }
     save_snapshot(&state, &client, &saved, &metadata).await
 }
@@ -527,6 +692,10 @@ async fn save_snapshot(
     let pointer = publish_snapshot(&work_dir, &staging, snapshot_name)?;
     // ページ/画像取得も同じロックを使うため、旧版を参照中の読み込みが終わってから削除する。
     cleanup_superseded_snapshots(&work_dir, &pointer.snapshot);
+    // 索引は控えなので、作れなくても保存は済んでいる。次の検索の前に作り直す。
+    if index::index_work(state, metadata.work.id).is_err() {
+        let _ = index::remove_work(state, metadata.work.id);
+    }
     Ok(manifest.summary)
 }
 
@@ -536,8 +705,8 @@ fn publish_snapshot(
     snapshot_name: String,
 ) -> Result<CurrentPointer, ClientError> {
     let snapshot = work_dir.join(&snapshot_name);
-    if fs::rename(&staging, &snapshot).is_err() {
-        let _ = fs::remove_dir_all(&staging);
+    if fs::rename(staging, &snapshot).is_err() {
+        let _ = fs::remove_dir_all(staging);
         return Err(storage());
     }
     let pointer = CurrentPointer {
@@ -565,7 +734,8 @@ async fn save_into(
     let work_id = metadata.work.id;
     let first: MobilePage = get_pc(client, saved, &format!("/api/v1/works/{work_id}/pages/0"))
         .await?
-        .bounded_json().await?;
+        .bounded_json()
+        .await?;
     if first.page != 0 || first.page_count == 0 || first.page_count > MAX_PAGES {
         return Err(ClientError::protocol());
     }
@@ -582,10 +752,20 @@ async fn save_into(
                 &format!("/api/v1/works/{work_id}/pages/{index}"),
             )
             .await?
-            .bounded_json().await?
+            .bounded_json()
+            .await?
         };
         if page.page != index || page.page_count != first.page_count {
             return Err(ClientError::protocol());
+        }
+        // 最後のメタデータ比較だけでは、途中で A → B → A と戻った変更を見逃す。
+        // 版を返さない旧サーバーも、安全に混在を判別できないため新規保存はしない。
+        let revision = page.revision.as_ref().ok_or_else(ClientError::protocol)?;
+        if revision.current_version != metadata.work.current_version
+            || revision.content_hash != metadata.work.content_hash
+            || revision.active_edit_hash != metadata.active_edit_hash
+        {
+            return Err(ClientError::remote());
         }
         assets.extend(asset_ids(&page.html));
         if assets.len() > MAX_ASSETS {
@@ -647,28 +827,24 @@ async fn save_into(
     }
     // 表紙は本文の画像一覧とは別に保管する。取得できなくても本文の保存は続ける。
     let mut cover = None;
-    if metadata.work.has_cover {
-        if let Ok(response) = get_pc_with_timeout(
+    if metadata.work.has_cover
+        && let Ok(response) = get_pc_with_timeout(
             client,
             saved,
             &format!("/api/v1/works/{work_id}/cover"),
             ASSET_TIMEOUT,
         )
         .await
-        {
-            if let Ok(image) = validated_image_response(response).await {
-                if let Ok(bytes) = STANDARD.decode(&image.base64) {
-                    if total_bytes.saturating_add(bytes.len()) <= MAX_SNAPSHOT_BYTES {
-                        fs::write(staging.join("cover.bin"), &bytes).map_err(|_| storage())?;
-                        total_bytes += bytes.len();
-                        cover = Some(CoverRecord {
-                            mime_type: image.mime_type,
-                            sha256: digest(&bytes),
-                        });
-                    }
-                }
-            }
-        }
+        && let Ok(image) = validated_image_response(response).await
+        && let Ok(bytes) = STANDARD.decode(&image.base64)
+        && total_bytes.saturating_add(bytes.len()) <= MAX_SNAPSHOT_BYTES
+    {
+        fs::write(staging.join("cover.bin"), &bytes).map_err(|_| storage())?;
+        total_bytes += bytes.len();
+        cover = Some(CoverRecord {
+            mime_type: image.mime_type,
+            sha256: digest(&bytes),
+        });
     }
     let author_cover = save_entity_cover(
         client,
@@ -695,15 +871,14 @@ async fn save_into(
         None
     };
     let mut outline_sha256 = None;
-    if let Ok(response) = get_pc(client, saved, &format!("/api/v1/works/{work_id}/outline")).await {
-        if let Ok(entries) = response.bounded_json::<Vec<MobileOutlineEntry>>().await {
-            if entries.len() <= 2_000 {
-                let bytes = serde_json::to_vec(&entries).map_err(|_| storage())?;
-                if bytes.len() <= 1_000_000 {
-                    fs::write(staging.join("outline.json"), &bytes).map_err(|_| storage())?;
-                    outline_sha256 = Some(digest(&bytes));
-                }
-            }
+    if let Ok(response) = get_pc(client, saved, &format!("/api/v1/works/{work_id}/outline")).await
+        && let Ok(entries) = response.bounded_json::<Vec<MobileOutlineEntry>>().await
+        && entries.len() <= 2_000
+    {
+        let bytes = serde_json::to_vec(&entries).map_err(|_| storage())?;
+        if bytes.len() <= 1_000_000 {
+            fs::write(staging.join("outline.json"), &bytes).map_err(|_| storage())?;
+            outline_sha256 = Some(digest(&bytes));
         }
     }
     let collections: Vec<MobileCollection> = get_pc(
@@ -712,16 +887,27 @@ async fn save_into(
         &format!("/api/v1/works/{work_id}/collections"),
     )
     .await?
-    .bounded_json().await?;
-    let collection_positions = collections.iter()
-        .filter_map(|collection| collection.position.map(|position| (collection.id.clone(), position)))
+    .bounded_json()
+    .await?;
+    let collection_positions = collections
+        .iter()
+        .filter_map(|collection| {
+            collection
+                .position
+                .map(|position| (collection.id.clone(), position))
+        })
         .collect::<BTreeMap<_, _>>();
-    let collection_covers = save_collection_covers(client, saved, &collections, staging, &mut total_bytes).await?;
-    let collection_cover_ids = collection_covers.iter().map(|record| record.collection_id.clone()).collect();
+    let collection_covers =
+        save_collection_covers(client, saved, &collections, staging, &mut total_bytes).await?;
+    let collection_cover_ids = collection_covers
+        .iter()
+        .map(|record| record.collection_id.clone())
+        .collect();
     // 読み込み中にサーバー側が更新された場合、混在した版を保存しない。
     let latest: MobileMetadata = get_pc(client, saved, &format!("/api/v1/works/{work_id}"))
         .await?
-        .bounded_json().await?;
+        .bounded_json()
+        .await?;
     if latest.work.current_version != metadata.work.current_version
         || latest.work.content_hash != metadata.work.content_hash
         || latest.active_edit_hash != metadata.active_edit_hash
@@ -749,10 +935,16 @@ async fn save_into(
             source: metadata.work.source.clone(),
             key: metadata.work.author_id.clone(),
         }),
-        series_cover_entity: series_cover.as_ref().and_then(|_| metadata.work.series_id.as_ref().map(|key| OfflineEntityKey {
-            source: metadata.work.source.clone(),
-            key: key.clone(),
-        })),
+        series_cover_entity: series_cover.as_ref().and_then(|_| {
+            metadata
+                .work
+                .series_id
+                .as_ref()
+                .map(|key| OfflineEntityKey {
+                    source: metadata.work.source.clone(),
+                    key: key.clone(),
+                })
+        }),
     };
     let manifest = Manifest {
         summary,
@@ -787,7 +979,11 @@ pub async fn offline_get_outline(
     serde_json::from_slice(&bytes).map_err(|_| storage())
 }
 
-fn verified_cover(path: PathBuf, sha256: &str, mime_type: &str) -> Result<(String, Vec<u8>), ClientError> {
+fn verified_cover(
+    path: PathBuf,
+    sha256: &str,
+    mime_type: &str,
+) -> Result<(String, Vec<u8>), ClientError> {
     let bytes = fs::read(path).map_err(|_| storage())?;
     if bytes.len() > MAX_ASSET_BYTES || digest(&bytes) != sha256 {
         return Err(storage());
@@ -795,11 +991,18 @@ fn verified_cover(path: PathBuf, sha256: &str, mime_type: &str) -> Result<(Strin
     Ok((mime_type.to_string(), bytes))
 }
 
-pub async fn saved_cover(state: &OfflineState, work_id: i64) -> Result<(String, Vec<u8>), ClientError> {
+pub async fn saved_cover(
+    state: &OfflineState,
+    work_id: i64,
+) -> Result<(String, Vec<u8>), ClientError> {
     let _guard = state.lock.lock().await;
     let (manifest, snapshot) = read_manifest(state, work_id)?;
     let record = manifest.cover.ok_or_else(ClientError::remote)?;
-    verified_cover(snapshot.join("cover.bin"), &record.sha256, &record.mime_type)
+    verified_cover(
+        snapshot.join("cover.bin"),
+        &record.sha256,
+        &record.mime_type,
+    )
 }
 
 pub async fn saved_collection_cover(
@@ -809,10 +1012,16 @@ pub async fn saved_collection_cover(
 ) -> Result<(String, Vec<u8>), ClientError> {
     let _guard = state.lock.lock().await;
     let (manifest, snapshot) = read_manifest(state, work_id)?;
-    let record = manifest.collection_covers.iter()
+    let record = manifest
+        .collection_covers
+        .iter()
         .find(|record| record.collection_id == collection_id)
         .ok_or_else(ClientError::remote)?;
-    verified_cover(snapshot.join(format!("collection-cover-{}.bin", record.file_number)), &record.sha256, &record.mime_type)
+    verified_cover(
+        snapshot.join(format!("collection-cover-{}.bin", record.file_number)),
+        &record.sha256,
+        &record.mime_type,
+    )
 }
 
 pub async fn saved_entity_cover(
@@ -866,7 +1075,12 @@ pub async fn offline_delete_work(
 
 /// 数値 ID はサーバーごとに振られる。別のサーバーの同じ番号の作品を消さないよう、
 /// 消す直前に保存版の出どころを確かめる。読めない保存版は `offline_delete_corrupt_work` で消す。
-fn delete_saved_work(state: &OfflineState, work_id: i64, source: &str, source_id: &str) -> Result<(), ClientError> {
+fn delete_saved_work(
+    state: &OfflineState,
+    work_id: i64,
+    source: &str,
+    source_id: &str,
+) -> Result<(), ClientError> {
     let dir = state.work_dir(work_id)?;
     if !dir.exists() {
         return Ok(());
@@ -879,10 +1093,13 @@ fn delete_saved_work(state: &OfflineState, work_id: i64, source: &str, source_id
         });
     }
     match fs::remove_dir_all(dir) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(_) => Err(storage()),
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err(storage()),
     }
+    // 外せなくても、次の検索の前にそろえる。
+    let _ = index::remove_work(state, work_id);
+    Ok(())
 }
 
 fn delete_corrupt_work(state: &OfflineState, work_id: i64) -> Result<(), ClientError> {
@@ -894,14 +1111,20 @@ fn delete_corrupt_work(state: &OfflineState, work_id: i64) -> Result<(), ClientE
         });
     }
     match fs::remove_dir_all(dir) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(_) => Err(storage()),
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err(storage()),
     }
+    // 外せなくても、次の検索の前にそろえる。
+    let _ = index::remove_work(state, work_id);
+    Ok(())
 }
 
 #[tauri::command]
-pub async fn offline_delete_corrupt_work(state: State<'_, OfflineState>, work_id: i64) -> Result<(), ClientError> {
+pub async fn offline_delete_corrupt_work(
+    state: State<'_, OfflineState>,
+    work_id: i64,
+) -> Result<(), ClientError> {
     let _save_guard = state.save_lock.lock().await;
     let _guard = state.lock.lock().await;
     delete_corrupt_work(&state, work_id)
@@ -915,16 +1138,23 @@ mod tests {
     fn invalid_required_http_image_never_replaces_the_saved_snapshot() {
         use std::io::{Cursor, Read, Write};
         let mut encoded = Cursor::new(Vec::new());
-        image::DynamicImage::new_rgb8(3, 4).write_to(&mut encoded, image::ImageFormat::Png).unwrap();
+        image::DynamicImage::new_rgb8(3, 4)
+            .write_to(&mut encoded, image::ImageFormat::Png)
+            .unwrap();
         let png = encoded.into_inner();
         tauri::async_runtime::block_on(async {
             for (mime, bytes, expected) in [
                 ("image/png", Vec::new(), "invalid_offline_image"),
-                ("image/png", png[..png.len() / 2].to_vec(), "invalid_offline_image"),
+                (
+                    "image/png",
+                    png[..png.len() / 2].to_vec(),
+                    "invalid_offline_image",
+                ),
                 ("image/jpeg", png.clone(), "invalid_offline_image"),
                 ("image/avif", png.clone(), "unsupported_offline_image"),
             ] {
-                let root = std::env::temp_dir().join(format!("piep-offline-test-{}", Uuid::new_v4()));
+                let root =
+                    std::env::temp_dir().join(format!("piep-offline-test-{}", Uuid::new_v4()));
                 let state = OfflineState::new(root.clone());
                 let metadata: MobileMetadata = serde_json::from_value(serde_json::json!({
                     "work": {"id": 3, "source": "pixiv", "sourceId": "3", "title": "作品",
@@ -938,25 +1168,40 @@ mod tests {
                 let old = work_dir.join(&old_name);
                 fs::create_dir_all(old.join("assets")).unwrap();
                 fs::write(old.join("assets/42.bin"), &png).unwrap();
-                write_json(&old.join("manifest.json"), &serde_json::json!({
-                    "summary": {"work": metadata.work, "savedAtMs": 1, "savedVersion": 1,
-                        "savedContentHash": null, "savedEditHash": null, "pageCount": 1},
-                    "pages": [{"page": 0, "sha256": "test"}], "assets": []
-                })).unwrap();
-                write_json(&work_dir.join("current.json"), &CurrentPointer { snapshot: old_name.clone() }).unwrap();
+                write_json(
+                    &old.join("manifest.json"),
+                    &serde_json::json!({
+                        "summary": {"work": metadata.work, "savedAtMs": 1, "savedVersion": 1,
+                            "savedContentHash": null, "savedEditHash": null, "pageCount": 1},
+                        "pages": [{"page": 0, "sha256": "test"}], "assets": []
+                    }),
+                )
+                .unwrap();
+                write_json(
+                    &work_dir.join("current.json"),
+                    &CurrentPointer {
+                        snapshot: old_name.clone(),
+                    },
+                )
+                .unwrap();
                 let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
                 let address = listener.local_addr().unwrap();
                 let server = std::thread::spawn(move || {
                     for _ in 0..2 {
                         let (mut stream, _) = listener.accept().unwrap();
-                        stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+                        stream
+                            .set_read_timeout(Some(Duration::from_secs(3)))
+                            .unwrap();
                         let mut request = [0; 4096];
                         let length = stream.read(&mut request).unwrap();
                         let request = String::from_utf8_lossy(&request[..length]);
-                        let (response_mime, body) = if request.starts_with("GET /api/v1/works/3/pages/0 ") {
+                        let (response_mime, body) = if request
+                            .starts_with("GET /api/v1/works/3/pages/0 ")
+                        {
                             ("application/json", serde_json::to_vec(&serde_json::json!({
                                 "page": 0, "pageCount": 1, "html": "<img data-asset-id=\"42\">",
-                                "totalPlainTextChars": 0, "sourcePageStarts": [0]
+                                "totalPlainTextChars": 0, "sourcePageStarts": [0],
+                                "revision": {"currentVersion": 1, "contentHash": null, "activeEditHash": null}
                             })).unwrap())
                         } else {
                             assert!(request.starts_with("GET /api/v1/works/3/assets/42 "));
@@ -966,16 +1211,33 @@ mod tests {
                         stream.write_all(&body).unwrap();
                     }
                 });
-                let saved = SavedConnection { url: format!("http://{address}"), fingerprint: None,
-                    certificate_der: None, token: "test-token".into(), device_id: "test".into(), device_name: "test".into(), capabilities: Vec::new() };
-                let client = reqwest::Client::builder().no_proxy().timeout(Duration::from_secs(3)).build().unwrap();
-                let error = save_snapshot(&state, &client, &saved, &metadata).await.unwrap_err();
+                let saved = SavedConnection {
+                    url: format!("http://{address}"),
+                    fingerprint: None,
+                    certificate_der: None,
+                    token: "test-token".into(),
+                    device_id: "test".into(),
+                    device_name: "test".into(),
+                    capabilities: Vec::new(),
+                };
+                let client = reqwest::Client::builder()
+                    .no_proxy()
+                    .timeout(Duration::from_secs(3))
+                    .build()
+                    .unwrap();
+                let error = save_snapshot(&state, &client, &saved, &metadata)
+                    .await
+                    .unwrap_err();
                 assert_eq!(error.code, expected);
                 server.join().unwrap();
                 let (_, current) = read_manifest(&state, 3).unwrap();
                 assert_eq!(current, old);
                 assert_eq!(fs::read(current.join("assets/42.bin")).unwrap(), png);
-                assert_eq!(fs::read_dir(&work_dir).unwrap().count(), 2, "failed staging must be removed");
+                assert_eq!(
+                    fs::read_dir(&work_dir).unwrap().count(),
+                    2,
+                    "failed staging must be removed"
+                );
                 fs::remove_dir_all(root).unwrap();
             }
         });
@@ -988,10 +1250,14 @@ mod tests {
         let current_name = format!("snapshot-{}", Uuid::new_v4());
         let current = work_dir.join(&current_name);
         let old = work_dir.join(format!("snapshot-{}", Uuid::new_v4()));
-        let staging = root.join("work-4").join(format!("staging-{}", Uuid::new_v4()));
+        let staging = root
+            .join("work-4")
+            .join(format!("staging-{}", Uuid::new_v4()));
         let damaged = root.join("work-5");
         let retained = damaged.join(format!("snapshot-{}", Uuid::new_v4()));
-        for path in [&current, &old, &staging, &retained] { fs::create_dir_all(path).unwrap(); }
+        for path in [&current, &old, &staging, &retained] {
+            fs::create_dir_all(path).unwrap();
+        }
         fs::write(staging.join("download.bin"), b"interrupted download").unwrap();
         fs::write(old.join("old.bin"), b"superseded snapshot").unwrap();
         fs::write(retained.join("body.bin"), b"possibly recoverable").unwrap();
@@ -1005,17 +1271,38 @@ mod tests {
                 "savedEditHash": null, "pageCount": 1
             }, "pages": [{"page": 0, "sha256": "test"}], "assets": []
         })).unwrap();
-        write_json(&work_dir.join("current.json"), &CurrentPointer { snapshot: current_name }).unwrap();
+        write_json(
+            &work_dir.join("current.json"),
+            &CurrentPointer {
+                snapshot: current_name,
+            },
+        )
+        .unwrap();
         fs::write(damaged.join("current.json"), b"broken pointer").unwrap();
         let unknown = work_dir.join("staging-unknown");
         fs::create_dir(&unknown).unwrap();
 
         let state = OfflineState::new(root.clone());
-        assert!(!staging.exists(), "interrupted downloads should release storage on restart");
-        assert!(!old.exists(), "crash after publication should not retain the superseded snapshot");
-        assert!(read_manifest(&state, 3).is_ok(), "the active snapshot must remain readable");
-        assert!(retained.join("body.bin").exists(), "a broken current pointer must not cause data loss");
-        assert!(unknown.exists(), "only known generated names may be removed");
+        assert!(
+            !staging.exists(),
+            "interrupted downloads should release storage on restart"
+        );
+        assert!(
+            !old.exists(),
+            "crash after publication should not retain the superseded snapshot"
+        );
+        assert!(
+            read_manifest(&state, 3).is_ok(),
+            "the active snapshot must remain readable"
+        );
+        assert!(
+            retained.join("body.bin").exists(),
+            "a broken current pointer must not cause data loss"
+        );
+        assert!(
+            unknown.exists(),
+            "only known generated names may be removed"
+        );
         let (_, issues) = scan_works(&state).unwrap();
         assert!(issues.iter().any(|issue| issue.work_id == 5));
         // 別のサーバーの同じ番号の作品を消そうとしても、保存版は残る。
@@ -1044,12 +1331,23 @@ mod tests {
         fs::write(outside.join("keep.bin"), b"other application data").unwrap();
         for link in [work.join(&staged_name), root.join("work-7")] {
             let result = std::process::Command::new("cmd")
-                .args(["/C", "mklink", "/J"]).arg(&link).arg(&outside)
-                .creation_flags(0x08000000).output().unwrap();
-            assert!(result.status.success(), "junction fixture failed: {}", String::from_utf8_lossy(&result.stderr));
+                .args(["/C", "mklink", "/J"])
+                .arg(&link)
+                .arg(&outside)
+                .creation_flags(0x08000000)
+                .output()
+                .unwrap();
+            assert!(
+                result.status.success(),
+                "junction fixture failed: {}",
+                String::from_utf8_lossy(&result.stderr)
+            );
         }
         let _state = OfflineState::new(root);
-        assert_eq!(fs::read(outside.join("keep.bin")).unwrap(), b"other application data");
+        assert_eq!(
+            fs::read(outside.join("keep.bin")).unwrap(),
+            b"other application data"
+        );
         assert!(work.join(staged_name).exists());
         fs::remove_dir_all(temporary).unwrap();
     }
@@ -1074,18 +1372,40 @@ mod tests {
             "pages": [{"page": 0, "sha256": "test"}], "assets": []
         });
         write_json(&snapshot.join("manifest.json"), &manifest).unwrap();
-        write_json(&work_dir.join("current.json"), &CurrentPointer { snapshot: snapshot_name }).unwrap();
-        for name in ["work-4", "work-0", "work-03", "work--2", "work-999999999999999999999"] {
+        write_json(
+            &work_dir.join("current.json"),
+            &CurrentPointer {
+                snapshot: snapshot_name,
+            },
+        )
+        .unwrap();
+        for name in [
+            "work-4",
+            "work-0",
+            "work-03",
+            "work--2",
+            "work-999999999999999999999",
+        ] {
             fs::create_dir(root.join(name)).unwrap();
             fs::write(root.join(name).join("current.json"), b"broken").unwrap();
         }
         fs::create_dir_all(root.join("work-5").join("staging-unfinished")).unwrap();
-        fs::create_dir_all(root.join("work-6").join(format!("snapshot-{}", Uuid::new_v4()))).unwrap();
+        fs::create_dir_all(
+            root.join("work-6")
+                .join(format!("snapshot-{}", Uuid::new_v4())),
+        )
+        .unwrap();
         let (works, issues) = scan_works(&state).unwrap();
         assert_eq!(works.len(), 1);
         assert_eq!(works[0].work.id, 3);
-        assert_eq!(issues.iter().map(|issue| issue.work_id).collect::<Vec<_>>(), vec![4, 6]);
-        assert_eq!(delete_corrupt_work(&state, 3).unwrap_err().code, "offline_work_recovered");
+        assert_eq!(
+            issues.iter().map(|issue| issue.work_id).collect::<Vec<_>>(),
+            vec![4, 6]
+        );
+        assert_eq!(
+            delete_corrupt_work(&state, 3).unwrap_err().code,
+            "offline_work_recovered"
+        );
         assert!(read_manifest(&state, 3).is_ok());
         delete_corrupt_work(&state, 4).unwrap();
         assert!(!root.join("work-4").exists());
@@ -1139,10 +1459,14 @@ mod tests {
         assert!(saved.series[1].content_order.is_none());
         assert_eq!(saved.author_cover_entity.as_ref().unwrap().key, "co-author");
         assert_eq!(saved.series_cover_entity.as_ref().unwrap().key, "anthology");
-        let round_trip: OfflineWork = serde_json::from_value(serde_json::to_value(saved).unwrap()).unwrap();
+        let round_trip: OfflineWork =
+            serde_json::from_value(serde_json::to_value(saved).unwrap()).unwrap();
         assert_eq!(round_trip.people.len(), 2);
         assert_eq!(round_trip.series.len(), 2);
-        assert_eq!(round_trip.author_cover_entity.as_ref().unwrap().source, "pixiv");
+        assert_eq!(
+            round_trip.author_cover_entity.as_ref().unwrap().source,
+            "pixiv"
+        );
 
         let mut legacy = snapshot;
         legacy.as_object_mut().unwrap().remove("people");
@@ -1178,18 +1502,22 @@ mod tests {
             })).unwrap();
             fs::write(snapshot.join("pages/0.json"), &page).unwrap();
             fs::write(snapshot.join("assets/42.bin"), image).unwrap();
-            write_json(&snapshot.join("manifest.json"), &serde_json::json!({
-                "summary": {"work": {
-                    "id": 3, "source": "pixiv", "sourceId": "3", "title": "作品",
-                    "authorName": "作者", "authorId": "1", "contentType": "novel", "tags": [],
-                    "excerpt": null, "textLength": 1, "assetCount": 1, "hasCover": false,
-                    "currentVersion": 1, "contentHash": null, "favorite": false,
-                    "seriesTitle": null, "seriesId": null
-                }, "savedAtMs": 1, "savedVersion": 1, "savedContentHash": null,
-                    "savedEditHash": null, "pageCount": 1},
-                "pages": [{"page": 0, "sha256": digest(&page)}],
-                "assets": [{"id": 42, "mimeType": "image/png", "sha256": digest(image)}]
-            })).unwrap();
+            write_json(
+                &snapshot.join("manifest.json"),
+                &serde_json::json!({
+                    "summary": {"work": {
+                        "id": 3, "source": "pixiv", "sourceId": "3", "title": "作品",
+                        "authorName": "作者", "authorId": "1", "contentType": "novel", "tags": [],
+                        "excerpt": null, "textLength": 1, "assetCount": 1, "hasCover": false,
+                        "currentVersion": 1, "contentHash": null, "favorite": false,
+                        "seriesTitle": null, "seriesId": null
+                    }, "savedAtMs": 1, "savedVersion": 1, "savedContentHash": null,
+                        "savedEditHash": null, "pageCount": 1},
+                    "pages": [{"page": 0, "sha256": digest(&page)}],
+                    "assets": [{"id": 42, "mimeType": "image/png", "sha256": digest(image)}]
+                }),
+            )
+            .unwrap();
         }
 
         let root = std::env::temp_dir().join(format!("piep-offline-test-{}", Uuid::new_v4()));
@@ -1200,13 +1528,25 @@ mod tests {
         let image_a = b"image from generation A";
         let image_b = b"image from generation B";
         write_fixture_snapshot(&work_dir, &generation_a, "generation-A", image_a);
-        write_json(&work_dir.join("current.json"), &CurrentPointer { snapshot: generation_a.clone() }).unwrap();
+        write_json(
+            &work_dir.join("current.json"),
+            &CurrentPointer {
+                snapshot: generation_a.clone(),
+            },
+        )
+        .unwrap();
 
         // The reader has obtained A's HTML and will request its referenced asset later.
         let page_a = read_offline_page(&state, 3, 0).unwrap();
         assert!(page_a.page.html.contains("generation-A"));
         write_fixture_snapshot(&work_dir, &generation_b, "generation-B", image_b);
-        write_json(&work_dir.join("current.json"), &CurrentPointer { snapshot: generation_b.clone() }).unwrap();
+        write_json(
+            &work_dir.join("current.json"),
+            &CurrentPointer {
+                snapshot: generation_b.clone(),
+            },
+        )
+        .unwrap();
         cleanup_superseded_snapshots(&work_dir, &generation_b);
 
         let stale = read_offline_asset(&state, 3, 42, &page_a.generation).unwrap_err();
@@ -1216,7 +1556,10 @@ mod tests {
         // Reloading the page selects B, and B's matching image remains readable.
         let page_b = read_offline_page(&state, 3, 0).unwrap();
         assert!(page_b.page.html.contains("generation-B"));
-        assert_eq!(page_b.generation, generation_b.trim_start_matches("snapshot-"));
+        assert_eq!(
+            page_b.generation,
+            generation_b.trim_start_matches("snapshot-")
+        );
         let asset_b = read_offline_asset(&state, 3, 42, &page_b.generation).unwrap();
         assert_eq!(STANDARD.decode(asset_b.base64).unwrap(), image_b);
         fs::remove_dir_all(root).unwrap();
@@ -1266,3 +1609,7 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 }
+
+#[cfg(test)]
+#[path = "offline_regressions.rs"]
+mod regressions;

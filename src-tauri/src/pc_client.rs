@@ -17,10 +17,12 @@ use url::Url;
 
 use crate::secret_cipher::SecretCipher;
 
+pub mod cover_protocol;
+pub(crate) mod device_db;
+mod image_validation;
+pub(crate) mod local_reading;
 pub(crate) mod offline;
 pub(crate) mod reading_sync;
-pub mod cover_protocol;
-mod image_validation;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(12);
 const ASSET_TIMEOUT: Duration = Duration::from_secs(60);
@@ -44,6 +46,8 @@ pub struct PcClientState {
     file: PathBuf,
     cipher: Arc<dyn SecretCipher>,
     saved: Mutex<Option<SavedConnection>>,
+    // 保存直前の確認から履歴の永続化まで、登録変更と排他にする。
+    connection_generation: Mutex<u64>,
     // 要求ごとに TLS を張り直すと、外からの接続では 1 枚の画像ごとに往復が増える。
     client: Mutex<Option<(String, reqwest::Client)>>,
 }
@@ -54,6 +58,7 @@ impl PcClientState {
             file,
             cipher,
             saved: Mutex::new(None),
+            connection_generation: Mutex::new(0),
             client: Mutex::new(None),
         }
     }
@@ -66,10 +71,10 @@ impl PcClientState {
             saved.fingerprint.as_deref().unwrap_or("")
         );
         let mut cache = self.client.lock().map_err(|_| ClientError::storage())?;
-        if let Some((cached, client)) = cache.as_ref() {
-            if *cached == key {
-                return Ok(client.clone());
-            }
+        if let Some((cached, client)) = cache.as_ref()
+            && *cached == key
+        {
+            return Ok(client.clone());
         }
         let client = match &saved.certificate_der {
             Some(certificate) => pinned_client(
@@ -114,14 +119,70 @@ impl PcClientState {
             }
             Err(_) => return Err(ClientError::storage()),
         };
+        remove_if_present(&self.file)?;
         *cache = Some(saved.clone());
         Ok(Some(saved))
     }
 
     fn save(&self, saved: &SavedConnection) -> Result<(), ClientError> {
+        let mut generation = self
+            .connection_generation
+            .lock()
+            .map_err(|_| ClientError::storage())?;
         let mut cache = self.saved.lock().map_err(|_| ClientError::storage())?;
         self.write_sealed(saved)?;
         *cache = Some(saved.clone());
+        *generation += 1;
+        // sealed の公開後は、旧平文の削除に失敗しても接続世代を巻き戻さない。
+        remove_if_present(&self.file)
+    }
+
+    fn connection_snapshot(&self) -> Result<(u64, Option<SavedConnection>), ClientError> {
+        let generation = self
+            .connection_generation
+            .lock()
+            .map_err(|_| ClientError::storage())?;
+        Ok((*generation, self.load()?))
+    }
+
+    fn with_connection<T>(
+        &self,
+        expected: u64,
+        action: impl FnOnce() -> Result<T, ClientError>,
+    ) -> Result<T, ClientError> {
+        let generation = self
+            .connection_generation
+            .lock()
+            .map_err(|_| ClientError::storage())?;
+        if *generation != expected {
+            return Err(ClientError {
+                code: "connection_changed",
+                message: "接続先が変更されました。現在の接続先で同期し直してください",
+            });
+        }
+        action()
+    }
+
+    fn refresh_capabilities(
+        &self,
+        expected: u64,
+        capabilities: Vec<String>,
+    ) -> Result<(), ClientError> {
+        let _generation = self
+            .connection_generation
+            .lock()
+            .map_err(|_| ClientError::storage())?;
+        if *_generation != expected {
+            return Ok(());
+        }
+        let mut cache = self.saved.lock().map_err(|_| ClientError::storage())?;
+        if let Some(current) = cache.as_mut() {
+            let mut updated = current.clone();
+            updated.capabilities = capabilities;
+            self.write_sealed(&updated)?;
+            *current = updated;
+            remove_if_present(&self.file)?;
+        }
         Ok(())
     }
 
@@ -135,14 +196,19 @@ impl PcClientState {
         let temporary = target.with_extension("sealed.tmp");
         fs::write(&temporary, sealed).map_err(|_| ClientError::storage())?;
         fs::rename(&temporary, &target).map_err(|_| ClientError::storage())?;
-        remove_if_present(&self.file)
+        Ok(())
     }
 
     fn forget(&self) -> Result<(), ClientError> {
+        let mut generation = self
+            .connection_generation
+            .lock()
+            .map_err(|_| ClientError::storage())?;
         let mut cache = self.saved.lock().map_err(|_| ClientError::storage())?;
         remove_if_present(&self.sealed_file())?;
         remove_if_present(&self.file)?;
         *cache = None;
+        *generation += 1;
         Ok(())
     }
 }
@@ -207,6 +273,12 @@ impl ClientError {
         Self {
             code: "storage",
             message: "端末内の接続設定を読み書きできません",
+        }
+    }
+    fn device_records() -> Self {
+        Self {
+            code: "device_records",
+            message: "端末内の読書の記録を読み書きできません。空き容量を確認してください",
         }
     }
     fn offline_storage() -> Self {
@@ -541,10 +613,14 @@ pub(crate) fn update_client(allow_plain_http: bool) -> Result<reqwest::Client, S
 /// 既定どおりアプリでは信頼しない。
 #[cfg(target_os = "android")]
 fn android_system_certificates() -> Result<&'static Vec<reqwest::Certificate>, ClientError> {
-    static CERTIFICATES: std::sync::OnceLock<Vec<reqwest::Certificate>> = std::sync::OnceLock::new();
+    static CERTIFICATES: std::sync::OnceLock<Vec<reqwest::Certificate>> =
+        std::sync::OnceLock::new();
     let certificates = CERTIFICATES.get_or_init(|| {
         // Android 14 以降は更新可能な apex 側が本物で、system 側は古いまま残る。
-        for directory in ["/apex/com.android.conscrypt/cacerts", "/system/etc/security/cacerts"] {
+        for directory in [
+            "/apex/com.android.conscrypt/cacerts",
+            "/system/etc/security/cacerts",
+        ] {
             let Ok(entries) = fs::read_dir(directory) else {
                 continue;
             };
@@ -571,10 +647,16 @@ fn rejected_certificate(error: &(dyn std::error::Error + 'static)) -> bool {
     while let Some(cause) = current {
         // io::Error は二重に包まれて届き、source() は包んだ中身を飛ばす。直接ほどく。
         let mut inner: &(dyn std::error::Error + 'static) = cause;
-        while let Some(wrapped) = inner.downcast_ref::<std::io::Error>().and_then(|io| io.get_ref()) {
+        while let Some(wrapped) = inner
+            .downcast_ref::<std::io::Error>()
+            .and_then(|io| io.get_ref())
+        {
             inner = wrapped;
         }
-        if matches!(inner.downcast_ref::<rustls::Error>(), Some(rustls::Error::InvalidCertificate(_))) {
+        if matches!(
+            inner.downcast_ref::<rustls::Error>(),
+            Some(rustls::Error::InvalidCertificate(_))
+        ) {
             return true;
         }
         current = cause.source();
@@ -674,12 +756,12 @@ pub async fn pc_pair(
 pub async fn pc_connection_status(
     state: State<'_, PcClientState>,
 ) -> Result<ConnectionStatus, ClientError> {
-    let loaded = match state.load() {
+    let (generation, loaded) = match state.connection_snapshot() {
         Err(error) if error.code == "secret_lost" => {
             return Ok(ConnectionStatus {
                 issue: Some("secret_lost"),
                 ..ConnectionStatus::empty()
-            })
+            });
         }
         loaded => loaded?,
     };
@@ -700,7 +782,7 @@ pub async fn pc_connection_status(
                 // サーバーの更新で機能が増減したら、次の読書から従う。
                 if hello.capabilities != saved.capabilities {
                     saved.capabilities = hello.capabilities;
-                    state.save(&saved)?;
+                    state.refresh_capabilities(generation, saved.capabilities.clone())?;
                 }
                 // /hello は無認証。登録解除された端末を「接続中」と表示しない。
                 let authorized = client
@@ -714,7 +796,9 @@ pub async fn pc_connection_status(
                     Ok(response) if response.status() == reqwest::StatusCode::UNAUTHORIZED => {
                         Some("revoked")
                     }
-                    Ok(response) if response.status() == reqwest::StatusCode::SERVICE_UNAVAILABLE => {
+                    Ok(response)
+                        if response.status() == reqwest::StatusCode::SERVICE_UNAVAILABLE =>
+                    {
                         Some("not_ready")
                     }
                     Ok(_) => Some("remote_error"),
@@ -746,7 +830,9 @@ pub async fn pc_connection_status(
 }
 
 #[tauri::command]
-pub async fn pc_disconnect(state: State<'_, PcClientState>) -> Result<ConnectionStatus, ClientError> {
+pub async fn pc_disconnect(
+    state: State<'_, PcClientState>,
+) -> Result<ConnectionStatus, ClientError> {
     state.forget()?;
     Ok(ConnectionStatus::empty())
 }
@@ -854,9 +940,11 @@ pub struct PcWorkScope {
 }
 
 fn split_search_terms(value: &str) -> Result<Option<Vec<String>>, ClientError> {
-    if value.chars().count() > 1_100 { return Err(ClientError::remote()); }
+    if value.chars().count() > 1_100 {
+        return Err(ClientError::remote());
+    }
     let terms: Vec<String> = value
-        .split(|character| matches!(character, '\n' | '\r' | ',' | '、' | '，'))
+        .split(['\n', '\r', ',', '、', '，'])
         .map(str::trim)
         .filter(|term| !term.is_empty())
         .map(str::to_string)
@@ -869,16 +957,23 @@ fn split_search_terms(value: &str) -> Result<Option<Vec<String>>, ClientError> {
 
 fn parse_search_count(value: &str) -> Result<Option<i64>, ClientError> {
     let value = value.trim();
-    if value.is_empty() { return Ok(None); }
+    if value.is_empty() {
+        return Ok(None);
+    }
     if value.len() > 10 || !value.bytes().all(|byte| byte.is_ascii_digit()) {
         return Err(ClientError::remote());
     }
     let count = value.parse::<i64>().map_err(|_| ClientError::remote())?;
-    if count > 1_000_000_000 { return Err(ClientError::remote()); }
+    if count > 1_000_000_000 {
+        return Err(ClientError::remote());
+    }
     Ok(Some(count))
 }
 
-fn optional_search_choice<'a>(value: Option<&'a str>, choices: &[&str]) -> Result<Option<&'a str>, ClientError> {
+fn optional_search_choice<'a>(
+    value: Option<&'a str>,
+    choices: &[&str],
+) -> Result<Option<&'a str>, ClientError> {
     match value.unwrap_or("") {
         "" => Ok(None),
         value if choices.contains(&value) => Ok(Some(value)),
@@ -888,13 +983,22 @@ fn optional_search_choice<'a>(value: Option<&'a str>, choices: &[&str]) -> Resul
 
 fn valid_search_date(value: &str) -> bool {
     let bytes = value.as_bytes();
-    if bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-'
-        || !bytes.iter().enumerate().all(|(index, byte)| index == 4 || index == 7 || byte.is_ascii_digit())
-    { return false; }
+    if bytes.len() != 10
+        || bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || !bytes
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| index == 4 || index == 7 || byte.is_ascii_digit())
+    {
+        return false;
+    }
     let year = value[0..4].parse::<u32>().unwrap_or(0);
     let month = value[5..7].parse::<u32>().unwrap_or(0);
     let day = value[8..10].parse::<u32>().unwrap_or(0);
-    if year == 0 { return false; }
+    if year == 0 {
+        return false;
+    }
     let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
     let max_day = match month {
         1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
@@ -919,7 +1023,10 @@ fn search_payload(
         return Err(ClientError::remote());
     }
     let source = optional_search_choice(Some(&criteria.source), &["pixiv", "fanbox"])?;
-    let content_type = optional_search_choice(Some(&criteria.content_type), &["novel", "article", "text", "image", "file"])?;
+    let content_type = optional_search_choice(
+        Some(&criteria.content_type),
+        &["novel", "article", "text", "image", "file"],
+    )?;
     let (sort_by, sort_order) = match criteria.sort.as_str() {
         "standard" => (None, None),
         "dateDesc" => (Some("date"), Some("desc")),
@@ -945,15 +1052,21 @@ fn search_payload(
     let min_assets = parse_search_count(criteria.min_assets.as_deref().unwrap_or(""))?;
     let max_assets = parse_search_count(criteria.max_assets.as_deref().unwrap_or(""))?;
     if min_chars.zip(max_chars).is_some_and(|(min, max)| min > max)
-        || min_assets.zip(max_assets).is_some_and(|(min, max)| min > max)
+        || min_assets
+            .zip(max_assets)
+            .is_some_and(|(min, max)| min > max)
     {
         return Err(ClientError::remote());
     }
     let tag_mode = optional_search_choice(criteria.tag_mode.as_deref(), &["and", "or"])?;
-    let revision = optional_search_choice(criteria.revision.as_deref(), &["revised", "first_version"])?;
+    let revision =
+        optional_search_choice(criteria.revision.as_deref(), &["revised", "first_version"])?;
     let edit = optional_search_choice(criteria.edit.as_deref(), &["edited", "unedited"])?;
     let cover = optional_search_choice(criteria.cover.as_deref(), &["has_cover", "no_cover"])?;
-    let date_field = optional_search_choice(criteria.date_field.as_deref(), &["downloaded_at", "source_created_at", "source_updated_at"])?;
+    let date_field = optional_search_choice(
+        criteria.date_field.as_deref(),
+        &["downloaded_at", "source_created_at", "source_updated_at"],
+    )?;
     let date_from = criteria.date_from.as_deref().unwrap_or("").trim();
     let date_to = criteria.date_to.as_deref().unwrap_or("").trim();
     if (!date_from.is_empty() && !valid_search_date(date_from))
@@ -992,21 +1105,46 @@ fn search_payload(
         "personSource": person_source, "personKey": person_key,
         "seriesSource": series_source, "seriesKey": series_key,
     });
-    if let Some(offset) = offset { payload["offset"] = serde_json::json!(offset); }
-    if tag_mode == Some("or") && payload["tagsInclude"].is_array() { payload["tagFilterMode"] = serde_json::json!("or"); }
-    if let Some(count) = min_assets { payload["minAssetCount"] = serde_json::json!(count); }
-    if let Some(count) = max_assets { payload["maxAssetCount"] = serde_json::json!(count); }
-    if let Some(value) = revision { payload["revisionFilter"] = serde_json::json!(value); }
-    if let Some(value) = edit { payload["editFilter"] = serde_json::json!(value); }
-    if let Some(value) = cover { payload["coverFilter"] = serde_json::json!(value); }
+    if let Some(offset) = offset {
+        payload["offset"] = serde_json::json!(offset);
+    }
+    if tag_mode == Some("or") && payload["tagsInclude"].is_array() {
+        payload["tagFilterMode"] = serde_json::json!("or");
+    }
+    if let Some(count) = min_assets {
+        payload["minAssetCount"] = serde_json::json!(count);
+    }
+    if let Some(count) = max_assets {
+        payload["maxAssetCount"] = serde_json::json!(count);
+    }
+    if let Some(value) = revision {
+        payload["revisionFilter"] = serde_json::json!(value);
+    }
+    if let Some(value) = edit {
+        payload["editFilter"] = serde_json::json!(value);
+    }
+    if let Some(value) = cover {
+        payload["coverFilter"] = serde_json::json!(value);
+    }
     if !date_from.is_empty() || !date_to.is_empty() {
         payload["dateField"] = serde_json::json!(date_field.unwrap_or("downloaded_at"));
-        if !date_from.is_empty() { payload["dateFrom"] = serde_json::json!(date_from); }
-        if !date_to.is_empty() { payload["dateTo"] = serde_json::json!(date_to); }
+        if !date_from.is_empty() {
+            payload["dateFrom"] = serde_json::json!(date_from);
+        }
+        if !date_to.is_empty() {
+            payload["dateTo"] = serde_json::json!(date_to);
+        }
     }
     // Keep the original request shape for PC builds that predate these filters.
-    for key in ["authorsExclude", "tagsExclude", "minCharCount", "maxCharCount"] {
-        if payload[key].is_null() { payload.as_object_mut().unwrap().remove(key); }
+    for key in [
+        "authorsExclude",
+        "tagsExclude",
+        "minCharCount",
+        "maxCharCount",
+    ] {
+        if payload[key].is_null() {
+            payload.as_object_mut().unwrap().remove(key);
+        }
     }
     Ok(payload)
 }
@@ -1036,8 +1174,7 @@ pub async fn pc_search_works(
         .send()
         .await
         .map_err(|error| ClientError::from_send(&error, saved.pinned()))?;
-    check_response(response)?
-        .bounded_json().await
+    check_response(response)?.bounded_json().await
 }
 
 fn validate_numbered_offset(offset: Option<i64>, cursor: Option<&str>) -> Result<(), ClientError> {
@@ -1123,7 +1260,8 @@ pub async fn pc_list_entities(
     let endpoint = format!("/api/v1/entities/{kind}?{query_string}");
     authenticated_get(&state, &endpoint)
         .await?
-        .bounded_json().await
+        .bounded_json()
+        .await
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1167,9 +1305,13 @@ pub async fn pc_get_entity_detail(
         query.append_pair("key", &key);
         query.finish()
     };
-    authenticated_get(&state, &format!("/api/v1/entities/{kind}/detail?{query_string}"))
-        .await?
-        .bounded_json().await
+    authenticated_get(
+        &state,
+        &format!("/api/v1/entities/{kind}/detail?{query_string}"),
+    )
+    .await?
+    .bounded_json()
+    .await
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1214,9 +1356,13 @@ pub async fn pc_list_entity_series(
         }
         query.finish()
     };
-    authenticated_get(&state, &format!("/api/v1/entities/people/series?{query_string}"))
-        .await?
-        .bounded_json().await
+    authenticated_get(
+        &state,
+        &format!("/api/v1/entities/people/series?{query_string}"),
+    )
+    .await?
+    .bounded_json()
+    .await
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1276,7 +1422,8 @@ pub async fn pc_list_collections(
 ) -> Result<Vec<MobileCollection>, ClientError> {
     authenticated_get(&state, "/api/v1/collections")
         .await?
-        .bounded_json().await
+        .bounded_json()
+        .await
 }
 
 #[tauri::command]
@@ -1289,7 +1436,8 @@ pub async fn pc_get_work_collections(
     }
     authenticated_get(&state, &format!("/api/v1/works/{work_id}/collections"))
         .await?
-        .bounded_json().await
+        .bounded_json()
+        .await
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1310,7 +1458,9 @@ fn favorite_endpoint(base: &str, source: &str, source_id: &str) -> Result<Url, C
 }
 
 fn valid_favorite_target(source: &str, source_id: &str) -> bool {
-    matches!(source, "pixiv" | "fanbox") && !source_id.is_empty() && source_id.chars().count() <= 200
+    matches!(source, "pixiv" | "fanbox")
+        && !source_id.is_empty()
+        && source_id.chars().count() <= 200
 }
 
 /// お気に入りを付け外しする。サーバーが `favorite-write` を持つときだけ送る。
@@ -1346,7 +1496,9 @@ pub async fn pc_set_favorite(
         .map_err(|error| ClientError::from_send(&error, saved.pinned()))?;
     match response.status() {
         reqwest::StatusCode::NOT_FOUND => Err(ClientError::favorite_missing()),
-        status if status.is_client_error() && status != reqwest::StatusCode::UNAUTHORIZED => Err(ClientError::favorite_rejected()),
+        status if status.is_client_error() && status != reqwest::StatusCode::UNAUTHORIZED => {
+            Err(ClientError::favorite_rejected())
+        }
         _ => check_response(response)?.bounded_json().await,
     }
 }
@@ -1366,7 +1518,8 @@ pub async fn pc_get_collection(
     }
     authenticated_get(&state, &format!("/api/v1/collections/{collection_id}"))
         .await?
-        .bounded_json().await
+        .bounded_json()
+        .await
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1421,7 +1574,8 @@ pub async fn pc_get_metadata(
     }
     authenticated_get(&state, &format!("/api/v1/works/{work_id}"))
         .await?
-        .bounded_json().await
+        .bounded_json()
+        .await
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1463,7 +1617,8 @@ pub async fn pc_get_outline(
     }
     authenticated_get(&state, &format!("/api/v1/works/{work_id}/outline"))
         .await?
-        .bounded_json().await
+        .bounded_json()
+        .await
 }
 
 #[tauri::command]
@@ -1484,7 +1639,8 @@ pub async fn pc_get_page(
         &format!("/api/v1/works/{work_id}/pages/{page}{version_query}"),
     )
     .await?
-    .bounded_json().await
+    .bounded_json()
+    .await
 }
 
 #[derive(Debug, Serialize)]
@@ -1499,7 +1655,10 @@ async fn bounded_response_bytes(
     mut response: reqwest::Response,
     maximum: usize,
 ) -> Result<Vec<u8>, ClientError> {
-    if response.content_length().is_some_and(|length| length > maximum as u64) {
+    if response
+        .content_length()
+        .is_some_and(|length| length > maximum as u64)
+    {
         return Err(ClientError::remote());
     }
     let mut bytes = Vec::new();
@@ -1555,11 +1714,15 @@ mod tests {
     #[test]
     fn favorite_endpoint_keeps_the_path_prefix_and_escapes_the_id() {
         assert_eq!(
-            super::favorite_endpoint("https://example.com/piep", "fanbox", "a/b c").unwrap().as_str(),
+            super::favorite_endpoint("https://example.com/piep", "fanbox", "a/b c")
+                .unwrap()
+                .as_str(),
             "https://example.com/piep/api/v1/favorites/fanbox/a%2Fb%20c",
         );
         assert_eq!(
-            super::favorite_endpoint("https://192.168.1.2:38777", "pixiv", "123").unwrap().as_str(),
+            super::favorite_endpoint("https://192.168.1.2:38777", "pixiv", "123")
+                .unwrap()
+                .as_str(),
             "https://192.168.1.2:38777/api/v1/favorites/pixiv/123",
         );
         assert!(!super::valid_favorite_target("booth", "1"));
@@ -1574,23 +1737,38 @@ mod tests {
         let address = listener.local_addr().unwrap();
         std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
             let mut request = [0; 4096];
             let _ = stream.read(&mut request);
             let _ = stream.write_all(wire_response.as_bytes());
         });
-        reqwest::Client::builder().no_proxy().timeout(Duration::from_secs(3))
-            .build().unwrap().get(format!("http://{address}/"))
-            .send().await.unwrap()
+        reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(3))
+            .build()
+            .unwrap()
+            .get(format!("http://{address}/"))
+            .send()
+            .await
+            .unwrap()
     }
 
     #[test]
     fn bounds_response_body_with_and_without_content_length() {
         tauri::async_runtime::block_on(async {
-            let response = local_response("HTTP/1.1 200 OK\r\nContent-Length: 999999999\r\n\r\n").await;
-            assert_eq!(bounded_response_bytes(response, 4).await.unwrap_err().code, "remote_error");
+            let response =
+                local_response("HTTP/1.1 200 OK\r\nContent-Length: 999999999\r\n\r\n").await;
+            assert_eq!(
+                bounded_response_bytes(response, 4).await.unwrap_err().code,
+                "remote_error"
+            );
             let response = local_response("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n3\r\ndef\r\n0\r\n\r\n").await;
-            assert_eq!(bounded_response_bytes(response, 4).await.unwrap_err().code, "remote_error");
+            assert_eq!(
+                bounded_response_bytes(response, 4).await.unwrap_err().code,
+                "remote_error"
+            );
             let response = local_response("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nab\r\n2\r\ncd\r\n0\r\n\r\n").await;
             assert_eq!(bounded_response_bytes(response, 4).await.unwrap(), b"abcd");
         });
@@ -1599,14 +1777,40 @@ mod tests {
     #[test]
     fn json_decoder_bounds_http_bodies_and_reports_invalid_json() {
         tauri::async_runtime::block_on(async {
-            let response = local_response("HTTP/1.1 200 OK\r\nContent-Length: 999999999\r\n\r\n").await;
-            assert_eq!(response.bounded_json::<serde_json::Value>().await.unwrap_err().code, "remote_error");
+            let response =
+                local_response("HTTP/1.1 200 OK\r\nContent-Length: 999999999\r\n\r\n").await;
+            assert_eq!(
+                response
+                    .bounded_json::<serde_json::Value>()
+                    .await
+                    .unwrap_err()
+                    .code,
+                "remote_error"
+            );
             let response = local_response("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\n[1,2\r\n5\r\n,3,4]\r\n0\r\n\r\n").await;
-            assert_eq!(bounded_json_response::<serde_json::Value>(response, 8).await.unwrap_err().code, "remote_error");
+            assert_eq!(
+                bounded_json_response::<serde_json::Value>(response, 8)
+                    .await
+                    .unwrap_err()
+                    .code,
+                "remote_error"
+            );
             let response = local_response("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\n{\"v\"\r\n3\r\n:1}\r\n0\r\n\r\n").await;
-            assert_eq!(bounded_json_response::<serde_json::Value>(response, 7).await.unwrap(), serde_json::json!({"v": 1}));
+            assert_eq!(
+                bounded_json_response::<serde_json::Value>(response, 7)
+                    .await
+                    .unwrap(),
+                serde_json::json!({"v": 1})
+            );
             let response = local_response("HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nbad").await;
-            assert_eq!(response.bounded_json::<serde_json::Value>().await.unwrap_err().code, "protocol_mismatch");
+            assert_eq!(
+                response
+                    .bounded_json::<serde_json::Value>()
+                    .await
+                    .unwrap_err()
+                    .code,
+                "protocol_mismatch"
+            );
         });
     }
 
@@ -1626,7 +1830,7 @@ mod tests {
     fn recognizes_a_rejected_certificate_inside_nested_io_errors() {
         use std::io::{Error, ErrorKind};
         let rejected = rustls::Error::InvalidCertificate(rustls::CertificateError::NotValidForName);
-        let nested = Error::new(ErrorKind::Other, Error::new(ErrorKind::InvalidData, rejected));
+        let nested = Error::other(Error::new(ErrorKind::InvalidData, rejected));
         assert!(rejected_certificate(&nested));
         let refused = Error::new(ErrorKind::ConnectionRefused, "refused");
         assert!(!rejected_certificate(&refused));
@@ -1678,8 +1882,11 @@ mod tests {
         assert_eq!(parsed.fingerprint, None);
 
         let upper = "A".repeat(64);
-        let parsed = parse_pairing(&pairing(serde_json::json!({ "fingerprint": upper })), "phone")
-            .expect("pinned pairing");
+        let parsed = parse_pairing(
+            &pairing(serde_json::json!({ "fingerprint": upper })),
+            "phone",
+        )
+        .expect("pinned pairing");
         assert_eq!(parsed.fingerprint, Some("a".repeat(64)));
     }
 
@@ -1691,9 +1898,13 @@ mod tests {
             "fingerprint": "a".repeat(64),
             "secret": URL_SAFE_NO_PAD.encode([7_u8; 32]),
         });
-        assert_eq!(parse_pairing(&old.to_string(), "phone").unwrap_err().code, "invalid_pairing");
+        assert_eq!(
+            parse_pairing(&old.to_string(), "phone").unwrap_err().code,
+            "invalid_pairing"
+        );
 
-        let admin = parse_pairing(&pairing(serde_json::json!({ "role": "admin" })), "phone").unwrap_err();
+        let admin =
+            parse_pairing(&pairing(serde_json::json!({ "role": "admin" })), "phone").unwrap_err();
         assert!(admin.message.contains("管理者用"), "{}", admin.message);
 
         for changes in [
@@ -1704,7 +1915,10 @@ mod tests {
             serde_json::json!({ "secret": "short" }),
             serde_json::json!({ "extra": true }),
         ] {
-            assert!(parse_pairing(&pairing(changes.clone()), "phone").is_err(), "{changes}");
+            assert!(
+                parse_pairing(&pairing(changes.clone()), "phone").is_err(),
+                "{changes}"
+            );
         }
         assert!(parse_pairing(&pairing(serde_json::json!({})), "  ").is_err());
         assert!(parse_pairing(&pairing(serde_json::json!({})), &"x".repeat(65)).is_err());
@@ -1723,8 +1937,12 @@ mod tests {
         value
     }
 
-    fn load_saved(name: &str, value: serde_json::Value) -> Result<Option<SavedConnection>, ClientError> {
-        let directory = std::env::temp_dir().join(format!("piep-android-{name}-{}", uuid::Uuid::new_v4()));
+    fn load_saved(
+        name: &str,
+        value: serde_json::Value,
+    ) -> Result<Option<SavedConnection>, ClientError> {
+        let directory =
+            std::env::temp_dir().join(format!("piep-android-{name}-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&directory).expect("directory");
         let file = directory.join("connection.json");
         fs::write(&file, value.to_string()).expect("write");
@@ -1757,7 +1975,8 @@ mod tests {
     }
 
     fn secret_fixture() -> (PathBuf, PathBuf, serde_json::Value) {
-        let directory = std::env::temp_dir().join(format!("piep-android-secret-{}", uuid::Uuid::new_v4()));
+        let directory =
+            std::env::temp_dir().join(format!("piep-android-secret-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&directory).expect("directory");
         let file = directory.join("pc-connection.json");
         let value = serde_json::json!({
@@ -1774,7 +1993,10 @@ mod tests {
         let (directory, file, value) = secret_fixture();
         fs::write(&file, value.to_string()).expect("write");
         let state = PcClientState::new(file.clone(), Arc::new(TestCipher));
-        assert_eq!(state.load().expect("load").expect("saved").device_id, "device");
+        assert_eq!(
+            state.load().expect("load").expect("saved").device_id,
+            "device"
+        );
         assert!(!file.exists());
         let sealed = fs::read(state.sealed_file()).expect("sealed");
         let token = URL_SAFE_NO_PAD.encode([7_u8; 32]);
@@ -1803,6 +2025,33 @@ mod tests {
     }
 
     #[test]
+    fn published_connection_advances_generation_even_if_plaintext_cleanup_fails() {
+        let (directory, file, value) = secret_fixture();
+        let state = PcClientState::new(file.clone(), Arc::new(TestCipher));
+        let old: SavedConnection = serde_json::from_value(value).unwrap();
+        state.save(&old).unwrap();
+        let (old_generation, _) = state.connection_snapshot().unwrap();
+        fs::create_dir(&file).unwrap();
+        let mut new = old;
+        new.url = "https://new.example".into();
+        assert_eq!(state.save(&new).unwrap_err().code, "storage");
+        let (new_generation, current) = state.connection_snapshot().unwrap();
+        assert_ne!(new_generation, old_generation);
+        assert_eq!(current.unwrap().url, new.url);
+        assert_eq!(
+            state
+                .with_connection(old_generation, || Ok(()))
+                .unwrap_err()
+                .code,
+            "connection_changed"
+        );
+        fs::remove_dir(&file).unwrap();
+        let reopened = PcClientState::new(file, Arc::new(TestCipher));
+        assert_eq!(reopened.load().unwrap().unwrap().url, new.url);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn a_plain_file_stays_until_it_can_be_sealed() {
         let (directory, file, value) = secret_fixture();
         fs::write(&file, value.to_string()).expect("write");
@@ -1827,9 +2076,12 @@ mod tests {
 
     #[test]
     fn saved_connection_without_a_pin_loads_and_half_a_pin_does_not() {
-        let loaded = load_saved("ca", saved(serde_json::json!({ "capabilities": ["read", "reading-sync"] })))
-            .expect("load")
-            .expect("saved");
+        let loaded = load_saved(
+            "ca",
+            saved(serde_json::json!({ "capabilities": ["read", "reading-sync"] })),
+        )
+        .expect("load")
+        .expect("saved");
         assert!(!loaded.pinned());
         assert!(loaded.can_sync_reading());
         // 指紋だけ残っていて証明書が無い形を、CA 検証へ格下げしない。
@@ -1839,7 +2091,10 @@ mod tests {
             "fingerprint": "a".repeat(64),
             "certificateDer": URL_SAFE_NO_PAD.encode(b"certificate"),
         }));
-        assert_eq!(load_saved("mismatch", mismatch).unwrap_err().code, "storage");
+        assert_eq!(
+            load_saved("mismatch", mismatch).unwrap_err().code,
+            "storage"
+        );
     }
 
     #[test]
@@ -1862,7 +2117,10 @@ mod tests {
             "sort": "publishedAsc"
         }));
         let payload = search_payload(&criteria, None, None, None).expect("payload");
-        assert_eq!(payload["authorsInclude"], serde_json::json!(["作者A", "作者B", "作者C"]));
+        assert_eq!(
+            payload["authorsInclude"],
+            serde_json::json!(["作者A", "作者B", "作者C"])
+        );
         assert_eq!(payload["tagsInclude"], serde_json::json!(["猫", "海"]));
         assert_eq!(payload["tagFilterMode"], "or");
         assert_eq!(payload["minAssetCount"], 2);
@@ -1885,7 +2143,17 @@ mod tests {
             "dateField": "downloaded_at", "dateFrom": "", "dateTo": ""
         }));
         let payload = search_payload(&criteria, None, None, None).expect("payload");
-        for key in ["tagFilterMode", "minAssetCount", "maxAssetCount", "revisionFilter", "editFilter", "coverFilter", "dateField", "dateFrom", "dateTo"] {
+        for key in [
+            "tagFilterMode",
+            "minAssetCount",
+            "maxAssetCount",
+            "revisionFilter",
+            "editFilter",
+            "coverFilter",
+            "dateField",
+            "dateFrom",
+            "dateTo",
+        ] {
             assert!(payload.get(key).is_none(), "unexpected {key}");
         }
     }
@@ -1903,7 +2171,10 @@ mod tests {
             serde_json::json!({ "sort": "privatePath" }),
         ] {
             let criteria = search_criteria(changes.clone());
-            assert!(search_payload(&criteria, None, None, None).is_err(), "accepted {changes}");
+            assert!(
+                search_payload(&criteria, None, None, None).is_err(),
+                "accepted {changes}"
+            );
         }
     }
 }
