@@ -1,8 +1,8 @@
 //! 縮小版で保存された pixiv の表紙・イラストを、原寸に取り直す。
 //!
 //! 取りに行くのは画像サーバー（`i.pximg.net`）だけで、pixiv の API も
-//! アカウントも使わない。原寸の在り処は保存済みの縮小版の URL から決まる
-//! （`downloader::pixiv_originals`）。
+//! アカウントも使わない。原寸の在り処は保存済みの縮小版の URL から決まる。
+//! 決め方は `downloader::pixiv_originals` にある。
 //!
 //! 版は増やさず、今の版の画像をその場で差し替える。作者が何かを変えたわけ
 //! ではないので、版の履歴に「更新」を残すと読み手を誤らせる。
@@ -36,7 +36,7 @@ const MAX_CONSECUTIVE_FAILURES: usize = 5;
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OriginalImageProgress {
-    /// `running` / `checked` / `complete` / `canceled` / `paused`
+    /// 段階。`running` / `checked` / `complete` / `canceled` / `paused` のどれか。
     phase: String,
     completed: usize,
     total: usize,
