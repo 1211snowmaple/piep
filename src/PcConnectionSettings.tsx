@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import { isTauri } from "@tauri-apps/api/core";
 import { disconnectPc, getPcStatus, pairPc, pcConnectionIssue, pcErrorMessage, type PcConnectionStatus } from "./pcApi";
 import { readingSyncEnabled, sendReading, setReadingSyncEnabled } from "./readingSync";
+import { isPairingPayload } from "./pairingQr";
 
 const scannerControls: { stop: (() => boolean) | null } = { stop: null };
 
@@ -38,11 +39,11 @@ export function PcConnectionSettings({ status, onStatusChange }: { status: PcCon
     return () => { active = false; };
   }, [onStatusChange]);
 
-  const register = async () => {
+  const register = async (payload = pairingText) => {
     setBusy(true);
     setProblem(null);
     try {
-      onStatusChange(await pairPc(pairingText.trim(), deviceName.trim()));
+      onStatusChange(await pairPc(payload.trim(), deviceName.trim()));
       setPairingText("");
     } catch (error) { setProblem(pcErrorMessage(error)); }
     finally { setBusy(false); }
@@ -79,7 +80,17 @@ export function PcConnectionSettings({ status, onStatusChange }: { status: PcCon
       document.documentElement.classList.add("qr-scanning");
       setScanning(true);
       const scanned = await scanner.scan({ windowed: true, formats: [scanner.Format.QRCode] });
-      if (scanned.content) setPairingText(scanned.content);
+      const content = scanned.content?.trim() ?? "";
+      if (!content) return;
+      // piep の登録用 QR の形でなければ、入力欄にも入れず、接続もしない。
+      if (!isPairingPayload(content)) {
+        setProblem("piep の接続用 QR ではありません。デスクトップ版の「携帯を追加」に出る QR を読んでください");
+        return;
+      }
+      setPairingText(content);
+      // 正しく読めたら、ボタンを押さずにそのまま接続する。中身は Rust 側が通信の前にもう一度確かめる。
+      if (deviceName.trim()) void register(content);
+      else setProblem("端末の名前を入れてから「サーバーと接続」を押してください");
     } catch {
       if (!scanStopped.current) setProblem("QR を読めませんでした。登録文字列を貼り付けてください");
     } finally {
@@ -91,7 +102,7 @@ export function PcConnectionSettings({ status, onStatusChange }: { status: PcCon
   };
 
   const registrationForm = <div className="connection-registration">
-    <p>デスクトップ版 piep の「設定 → サーバー」の「携帯を追加」で「次へ」を押し、表示された QR を読むか、登録文字列を入力します。</p>
+    <p>デスクトップ版 piep の「設定 → サーバー」の「携帯を追加」で「次へ」を押し、表示された QR を読むと、そのまま接続します。登録文字列を貼り付けたときは「サーバーと接続」を押します。</p>
     <label>端末の名前<input value={deviceName} onChange={(event) => setDeviceName(event.target.value)} maxLength={64} /></label>
     {isTauri() && <button type="button" className="secondary-button" disabled={busy} onClick={() => void scanPairing()}>QR を読む</button>}
     <label>登録文字列<textarea value={pairingText} onChange={(event) => setPairingText(event.target.value)} rows={4} placeholder='{"version":2,"url":"https://..."}' /></label>
