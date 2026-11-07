@@ -12,7 +12,8 @@ use super::store::{Role, ServerStore};
 use super::sync_receive::SyncReceiver;
 use super::tls::{self, TlsMaterial};
 use super::update::{
-    self, AfterStop, UpdateController, UpdateHistory, UpdateSource, UpdateWindow, EXIT_APPLY_UPDATE,
+    self, AfterStop, UpdateController, UpdateHistory, UpdateSource, UpdateWindow,
+    EXIT_APPLY_UPDATE, EXIT_RESTART,
 };
 use super::watchdog;
 use super::{pairing_payload, DEFAULT_PORT};
@@ -22,6 +23,7 @@ use serde::Deserialize;
 use std::fs::{self, File};
 use std::net::{SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -123,6 +125,14 @@ impl ServerPaths {
     pub fn config(&self) -> PathBuf {
         self.root.join(CONFIG_FILE)
     }
+    /// 管理画面から接続の設定を変える前の写し。
+    pub fn config_previous(&self) -> PathBuf {
+        self.root.join("server.toml.previous")
+    }
+    /// 管理画面から変えた接続の設定を、まだ試している印。立ち上がれたら消す。
+    pub fn config_trial(&self) -> PathBuf {
+        self.state().join("config-trial")
+    }
     pub fn library(&self) -> PathBuf {
         self.root.join("library")
     }
@@ -195,6 +205,205 @@ pub fn load_config(paths: &ServerPaths) -> Result<ServerConfig, String> {
     Ok(config)
 }
 
+/// 管理画面から変える接続の設定。`tls` は `none`・`self-signed`・`files`。
+/// 証明書の場所は応答に出さないので、`files` のまま空で送れば今の場所を使う。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ConnectionChange {
+    pub listen: String,
+    #[serde(default)]
+    pub admin_listen: Option<String>,
+    #[serde(default)]
+    pub public_url: String,
+    pub tls: String,
+    #[serde(default)]
+    pub cert: Option<String>,
+    #[serde(default)]
+    pub key: Option<String>,
+}
+
+fn parse_address(text: &str, what: &str) -> Result<SocketAddr, String> {
+    text.trim()
+        .parse()
+        .map_err(|_| format!("{what}は 127.0.0.1:38777 の形で書いてください"))
+}
+
+fn public_url_of(text: &str) -> Result<String, String> {
+    let url = text.trim();
+    if url.is_empty() {
+        return Ok(String::new());
+    }
+    let host = url
+        .strip_prefix("https://")
+        .and_then(|rest| rest.split('/').next())
+        .filter(|host| !host.is_empty() && !host.contains(char::is_whitespace));
+    if host.is_none() {
+        return Err("公開の URL は https:// から始めてください".into());
+    }
+    Ok(if url.ends_with('/') {
+        url.to_string()
+    } else {
+        format!("{url}/")
+    })
+}
+
+/// 送られた設定から、次に使う設定を組む。ファイルには書かない。
+pub(crate) async fn next_connection(
+    current: &ServerConfig,
+    running: &[SocketAddr],
+    change: ConnectionChange,
+) -> Result<ServerConfig, String> {
+    let listen = parse_address(&change.listen, "携帯用のアドレス")?;
+    let admin_listen = match change.admin_listen.as_deref().map(str::trim) {
+        None | Some("") => None,
+        Some(text) => Some(parse_address(text, "管理用のアドレス")?),
+    };
+    if admin_listen.is_some_and(|admin| admin.port() == listen.port()) {
+        return Err("携帯用と管理用は別のポートにしてください".into());
+    }
+    let public_url = public_url_of(&change.public_url)?;
+    let tls = match change.tls.as_str() {
+        "none" => None,
+        "self-signed" => Some(TlsSetting::Named("self-signed".into())),
+        "files" => {
+            let field = |value: &Option<String>| {
+                value
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|text| !text.is_empty())
+                    .map(PathBuf::from)
+            };
+            match (field(&change.cert), field(&change.key), &current.tls) {
+                (None, None, Some(TlsSetting::Files { cert, key })) => Some(TlsSetting::Files {
+                    cert: cert.clone(),
+                    key: key.clone(),
+                }),
+                (Some(cert), Some(key), _) => {
+                    if !cert.is_absolute() || !key.is_absolute() {
+                        return Err(
+                            "証明書と鍵は、ドライブから始まる場所（C:\\… など）で書いてください"
+                                .into(),
+                        );
+                    }
+                    Some(TlsSetting::Files { cert, key })
+                }
+                _ => return Err("証明書と鍵のファイルの場所を書いてください".into()),
+            }
+        }
+        _ => return Err("HTTPS の受け方を選んでください".into()),
+    };
+    if tls.is_none() {
+        if let Some(open) = std::iter::once(listen)
+            .chain(admin_listen)
+            .find(|address| !address.ip().is_loopback())
+        {
+            return Err(format!(
+                "{open} で待ち受けるには HTTPS が要ります。127.0.0.1 にするか、証明書を選んでください"
+            ));
+        }
+    }
+    let next = ServerConfig {
+        listen,
+        admin_listen,
+        public_url,
+        tls,
+        update: current.update.clone(),
+    };
+    next.validate()?;
+    if let Some(TlsSetting::Files { cert, key }) = &next.tls {
+        tls::from_files(cert, key)
+            .await
+            .map_err(|error| format!("証明書を使えません: {error}"))?;
+    }
+    // 今待ち受けているポートは自分が使っているので、確かめられない。
+    for address in std::iter::once(listen).chain(admin_listen) {
+        if running.iter().any(|bound| bound.port() == address.port()) {
+            continue;
+        }
+        TcpListener::bind(address).map_err(|_| {
+            format!(
+                "{address} では待ち受けられません。ほかのプログラムが使っているか、サーバーの PC のアドレスではありません"
+            )
+        })?;
+    }
+    Ok(next)
+}
+
+/// 値だけを差し替え、行の後ろの説明は残す。
+fn set_kept(document: &mut toml_edit::DocumentMut, key: &str, mut value: toml_edit::Value) {
+    if let Some(old) = document.get(key).and_then(toml_edit::Item::as_value) {
+        *value.decor_mut() = old.decor().clone();
+    }
+    document[key] = toml_edit::Item::Value(value);
+}
+
+/// 接続の項目だけを書き換える。説明の行と `[update]` はそのまま残す。
+fn connection_text(text: &str, config: &ServerConfig) -> Result<String, String> {
+    let mut document: toml_edit::DocumentMut = text
+        .parse()
+        .map_err(|error| format!("{CONFIG_FILE} を読み取れません: {error}"))?;
+    set_kept(&mut document, "listen", config.listen.to_string().into());
+    match config.admin_listen {
+        Some(address) => set_kept(&mut document, "admin_listen", address.to_string().into()),
+        None => {
+            document.remove("admin_listen");
+        }
+    }
+    set_kept(
+        &mut document,
+        "public_url",
+        config.public_url.clone().into(),
+    );
+    match &config.tls {
+        None => {
+            document.remove("tls");
+        }
+        Some(TlsSetting::Named(name)) => set_kept(&mut document, "tls", name.clone().into()),
+        Some(TlsSetting::Files { cert, key }) => {
+            let mut table = toml_edit::InlineTable::new();
+            table.insert("cert", cert.display().to_string().into());
+            table.insert("key", key.display().to_string().into());
+            set_kept(&mut document, "tls", table.into());
+        }
+    }
+    let written = document.to_string();
+    let parsed: ServerConfig =
+        toml::from_str(&written).map_err(|error| format!("{CONFIG_FILE} を書けません: {error}"))?;
+    parsed.validate()?;
+    Ok(written)
+}
+
+/// 確かめた設定を書く。動いている設定は再起動まで変わらない。立ち上がれなければ、
+/// 次の起動で前の写しへ戻す（`restore_trial`）。
+pub(crate) fn save_connection(paths: &ServerPaths, config: &ServerConfig) -> Result<(), String> {
+    let text = fs::read_to_string(paths.config())
+        .map_err(|error| format!("{CONFIG_FILE} を読めません: {error}"))?;
+    let written = connection_text(&text, config)?;
+    update::write_atomic(&paths.config_previous(), text.as_bytes())?;
+    update::write_atomic(&paths.config(), written.as_bytes())?;
+    update::write_atomic(&paths.config_trial(), b"")
+}
+
+/// 試している設定で立ち上がれなかったら、前の設定へ戻す。戻したら true。
+fn restore_trial(paths: &ServerPaths, error: &str) -> bool {
+    if !paths.config_trial().exists() {
+        return false;
+    }
+    let restored = fs::copy(paths.config_previous(), paths.config()).is_ok();
+    let _ = fs::remove_file(paths.config_trial());
+    if let Ok(store) = ServerStore::open(&paths.store()) {
+        store.audit(
+            "system",
+            "接続の設定を前に戻した",
+            "サーバー",
+            None,
+            false,
+            Some(error),
+        );
+    }
+    restored
+}
+
 const CONFIG_TEMPLATE: &str = r#"# piep-server の設定。説明は docs/plan/server-mode.md
 
 listen = "127.0.0.1:38777"   # 読み手（携帯）。これ以外のアドレスには tls が要る
@@ -217,8 +426,27 @@ fn admin_pairing_text(
     Ok(pairing_payload(Role::Admin, url, fingerprint, &secret))
 }
 
+/// 管理画面だけを出す、この機械の中の口のポート。
+const LOCAL_ADMIN_PORT: u16 = 38778;
+
+/// 公開の URL があって管理の口を分けていないとき、管理画面はこの機械の中の口にだけ出す。
+/// 外へ出している口にはログイン画面を置かない。
+pub(crate) fn local_admin(config: &ServerConfig) -> Option<SocketAddr> {
+    (config.admin_listen.is_none()
+        && config.public_url().is_some()
+        && config.listen.port() != LOCAL_ADMIN_PORT)
+        .then(|| SocketAddr::from(([127, 0, 0, 1], LOCAL_ADMIN_PORT)))
+}
+
 fn default_admin_url(config: &ServerConfig) -> Option<String> {
-    let address = config.admin_listen.unwrap_or(config.listen);
+    if let Some(local) = local_admin(config) {
+        return Some(format!("http://{local}/"));
+    }
+    let mut address = config.admin_listen.unwrap_or(config.listen);
+    // すべてのアドレスで待ち受けているなら、この機械からは 127.0.0.1 で届く。
+    if address.ip().is_unspecified() {
+        address.set_ip(std::net::Ipv4Addr::LOCALHOST.into());
+    }
     address.ip().is_loopback().then(|| {
         let scheme = if config.tls.is_some() {
             "https"
@@ -288,8 +516,10 @@ pub fn command_status(data: &Path) -> Result<String, String> {
             "管理の口: {}",
             config
                 .admin_listen
-                .map_or("読み手と同じ".to_string(), |address| address
-                    .to_string())
+                .map(|address| address.to_string())
+                .or_else(|| local_admin(&config)
+                    .map(|address| format!("{address}（管理画面だけ・この PC の中）")))
+                .unwrap_or_else(|| "読み手と同じ".to_string())
         ),
         format!(
             "本棚の世代: {}",
@@ -501,11 +731,12 @@ fn note_started(paths: &ServerPaths, store: &ServerStore) {
     }
 }
 
-fn connection_info(config: &ServerConfig) -> ConnectionInfo {
+pub(crate) fn connection_info(config: &ServerConfig) -> ConnectionInfo {
     ConnectionInfo {
         listen: config.listen.to_string(),
         admin_listen: config.admin_listen.map(|address| address.to_string()),
         public_url: config.public_url(),
+        local_admin: local_admin(config).map(|address| address.to_string()),
         tls: match &config.tls {
             None => "none",
             Some(TlsSetting::Named(_)) => "self-signed",
@@ -541,11 +772,6 @@ fn admin_link(
     url: Option<String>,
     kind: TicketKind,
 ) -> Result<String, String> {
-    if config.admin_listen.is_none() && config.public_url().is_some() {
-        return Err(format!(
-            "外へ公開している口には管理画面を出しません。{CONFIG_FILE} に admin_listen を書いて、管理者の口を分けてください"
-        ));
-    }
     if store.admin_web_disabled() {
         return Err("管理画面は止めてあります。admin-web --enable で戻してください".into());
     }
@@ -583,15 +809,25 @@ pub fn command_admin_web(data: &Path, enable: bool) -> Result<(), String> {
 }
 
 /// 本体。終了コードを返す。`EXIT_APPLY_UPDATE` なら、見張り役が新しい版へ切り替える。
+/// `EXIT_RESTART` なら、管理画面から頼まれたので立ち上げ直す。
 pub async fn command_run(data: &Path) -> Result<i32, String> {
     let paths = ServerPaths::new(data)?;
-    let config = load_config(&paths)?;
     fs::create_dir_all(paths.state()).map_err(|error| format!("置き場を作れません: {error}"))?;
     // 同じ置き場を 2 つのプロセスで動かさない。
     let lock =
         File::create(paths.lock()).map_err(|error| format!("置き場を確保できません: {error}"))?;
     lock.try_lock()
         .map_err(|_| "この置き場ではすでに piep-server が動いています".to_string())?;
+    match run_locked(paths.clone(), lock).await {
+        Err(error) if restore_trial(&paths, &error) => Err(format!(
+            "{error}。管理画面で変えた接続の設定では立ち上がれないので、前の設定へ戻しました"
+        )),
+        other => other,
+    }
+}
+
+async fn run_locked(paths: ServerPaths, lock: File) -> Result<i32, String> {
+    let config = load_config(&paths)?;
     let material = tls_material(&paths, &config).await?;
     let fingerprint = material
         .as_ref()
@@ -600,18 +836,27 @@ pub async fn command_run(data: &Path) -> Result<i32, String> {
     let parts = assemble(&paths, config.public_url(), fingerprint)?;
     parts.receiver.start_index_catch_up();
     note_started(&paths, &parts.context.store);
+    let handle = axum_server::Handle::new();
+    let restart = Arc::new(AtomicBool::new(false));
     // 外へ公開している口にログイン画面を置かない。
-    let web_here = config.admin_listen.is_some() || config.public_url().is_none();
+    let local = local_admin(&config);
+    let web_here =
+        config.admin_listen.is_some() || config.public_url().is_none() || local.is_some();
     if web_here {
-        parts.context.set_admin_web(AdminWeb::new(
-            ADMIN_ASSETS,
-            paths.clone(),
-            connection_info(&config),
-        ));
+        let web = AdminWeb::new(ADMIN_ASSETS, paths.clone(), connection_info(&config));
+        // 立ち上げ直してくれる見張り役がいるときだけ、管理画面から再起動できる。
+        if update::is_managed(&paths) {
+            let stop_handle = handle.clone();
+            let requested = Arc::clone(&restart);
+            web.set_restart(Box::new(move || {
+                requested.store(true, Ordering::SeqCst);
+                stop_handle.graceful_shutdown(Some(Duration::from_secs(5)));
+            }));
+        }
+        parts.context.set_admin_web(web);
     }
 
     let mut tasks = tokio::task::JoinSet::new();
-    let handle = axum_server::Handle::new();
     match config.admin_listen {
         Some(admin_address) => {
             let read = reader_router(Arc::clone(&parts.context));
@@ -631,7 +876,7 @@ pub async fn command_run(data: &Path) -> Result<i32, String> {
             log::info!("待ち受け: 読み手 {} / 管理 {admin_address}", config.listen);
         }
         None => {
-            let router = if web_here {
+            let router = if config.public_url().is_none() {
                 admin_router(Arc::clone(&parts.context))
             } else {
                 combined_router(Arc::clone(&parts.context))
@@ -643,6 +888,18 @@ pub async fn command_run(data: &Path) -> Result<i32, String> {
                 handle.clone(),
             ));
             log::info!("待ち受け: {}", config.listen);
+            if let Some(local) = local {
+                // 開けなくても携帯は困らないので、サーバーは止めない。
+                let admin = admin_router(Arc::clone(&parts.context));
+                let local_handle = handle.clone();
+                tasks.spawn(async move {
+                    if let Err(error) = run_listener(local, None, admin, local_handle).await {
+                        log::warn!("この機械の中の管理画面を出せません: {error}");
+                    }
+                    Ok(())
+                });
+                log::info!("管理画面: http://{local}/admin/（この機械の中だけ）");
+            }
         }
     }
     let updates = if update::is_managed(&paths) {
@@ -662,8 +919,13 @@ pub async fn command_run(data: &Path) -> Result<i32, String> {
     let ready_paths = paths.clone();
     let ready_config = config.clone();
     tokio::spawn(async move {
-        if let Err(error) = report_ready(ready_paths, ready_config).await {
-            log::error!("起動の確認に失敗しました: {error}");
+        let trial = ready_paths.config_trial();
+        match report_ready(ready_paths, ready_config).await {
+            // 変えた接続の設定で答えられたので、もう戻さない。
+            Ok(()) => {
+                let _ = fs::remove_file(trial);
+            }
+            Err(error) => log::error!("起動の確認に失敗しました: {error}"),
         }
     });
     let stop_handle = handle.clone();
@@ -690,7 +952,11 @@ pub async fn command_run(data: &Path) -> Result<i32, String> {
     result?;
     let Some(after) = updates.and_then(|controller| controller.take_after_stop()) else {
         drop(lock);
-        return Ok(0);
+        return Ok(if restart.load(Ordering::SeqCst) {
+            EXIT_RESTART
+        } else {
+            0
+        });
     };
     // 口を閉じたあとなので、もう誰も書かない。
     let version = match after {
@@ -782,6 +1048,15 @@ fn required_data(parsed: &Arguments) -> Result<&Path, String> {
 }
 
 /// 登録文字列は、この画面にだけ出す。記録には残さない。
+/// 入れたあとの管理画面の入口。この機械のブラウザで開けば、管理者のアカウントを作れる。
+fn print_admin_link(link: &str) {
+    println!();
+    println!("管理画面は、この PC のブラウザで次のリンクを開くと使えます。");
+    println!("はじめて開くと、管理者の名前とパスワードを決めます。30 分有効で、一度だけ使えます。");
+    println!();
+    println!("{link}");
+}
+
 fn print_pairing(payload: &str) {
     println!("デスクトップ版の「設定 → サーバー → サーバーに接続」に貼り付けてください。");
     println!("30 分有効で、一度だけ使えます。人に見せないでください。");
@@ -837,8 +1112,11 @@ pub async fn main_from_args(args: Vec<String>) -> i32 {
                     expose: parsed.expose,
                     no_task: parsed.no_task,
                 };
-                if let Some(payload) = install::command_install(options, &again, pause).await? {
-                    print_pairing(&payload);
+                if let Some(done) = install::command_install(options, &again, pause).await? {
+                    print_pairing(&done.pairing);
+                    if let Some(link) = done.admin_link {
+                        print_admin_link(&link);
+                    }
                     install::finish_install(pause);
                 }
                 Ok(0)
@@ -976,5 +1254,173 @@ mod tests {
     #[test]
     fn unknown_settings_are_rejected() {
         assert!(toml::from_str::<ServerConfig>(r#"lisen = "127.0.0.1:1""#).is_err());
+    }
+
+    fn change(listen: &str, admin: Option<&str>, public_url: &str, tls: &str) -> ConnectionChange {
+        ConnectionChange {
+            listen: listen.into(),
+            admin_listen: admin.map(Into::into),
+            public_url: public_url.into(),
+            tls: tls.into(),
+            cert: None,
+            key: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn connection_changes_are_checked_before_saving() {
+        let current = config("");
+        // 自分が使っているポートは確かめられないので、動いている口として渡す。
+        let running = [current.listen];
+        let next = |change| next_connection(&current, &running, change);
+        let open = next(change("0.0.0.0:38777", None, "", "none")).await;
+        assert!(open.unwrap_err().contains("HTTPS"));
+        let same_port = next(change(
+            "127.0.0.1:38777",
+            Some("127.0.0.1:38777"),
+            "",
+            "none",
+        ))
+        .await;
+        assert!(same_port.unwrap_err().contains("別のポート"));
+        let plain_url = next(change(
+            "127.0.0.1:38777",
+            None,
+            "http://example.com/",
+            "none",
+        ))
+        .await;
+        assert!(plain_url.unwrap_err().contains("https://"));
+        let no_files = next(change("127.0.0.1:38777", None, "", "files")).await;
+        assert!(no_files.unwrap_err().contains("証明書"));
+        let relative = ConnectionChange {
+            cert: Some("cert.pem".into()),
+            key: Some("key.pem".into()),
+            ..change("127.0.0.1:38777", None, "", "files")
+        };
+        assert!(next(relative).await.unwrap_err().contains("ドライブ"));
+
+        let fine = next(change(
+            " 127.0.0.1:38777 ",
+            None,
+            "https://example.com/piep",
+            "none",
+        ))
+        .await
+        .expect("valid change");
+        assert_eq!(fine.public_url, "https://example.com/piep/");
+        assert!(fine.admin_listen.is_none());
+    }
+
+    #[test]
+    fn a_public_url_without_an_admin_port_keeps_the_page_on_this_machine() {
+        let local = |text: &str| local_admin(&config(text)).map(|address| address.to_string());
+        assert_eq!(local(""), None);
+        assert_eq!(
+            local(r#"public_url = "https://example.com/""#).as_deref(),
+            Some("127.0.0.1:38778")
+        );
+        assert_eq!(
+            local(
+                "public_url = \"https://example.com/\"
+admin_listen = \"127.0.0.1:40000\""
+            ),
+            None
+        );
+        // 携帯用の口と重なるなら出さない。
+        assert_eq!(
+            local(
+                "public_url = \"https://example.com/\"
+listen = \"127.0.0.1:38778\""
+            ),
+            None
+        );
+        assert_eq!(
+            default_admin_url(&config(
+                "listen = \"0.0.0.0:38777\"
+tls = \"self-signed\""
+            ))
+            .as_deref(),
+            Some("https://127.0.0.1:38777/")
+        );
+        let info = connection_info(&config(r#"public_url = "https://example.com/""#));
+        assert_eq!(info.local_admin.as_deref(), Some("127.0.0.1:38778"));
+        assert_eq!(
+            default_admin_url(&config(r#"public_url = "https://example.com/""#)).as_deref(),
+            Some("http://127.0.0.1:38778/")
+        );
+    }
+
+    #[test]
+    fn saving_a_connection_keeps_comments_and_other_settings() {
+        let text = format!(
+            "{CONFIG_TEMPLATE}
+[update]
+auto = false
+"
+        );
+        let next = ServerConfig {
+            listen: "0.0.0.0:40001".parse().unwrap(),
+            admin_listen: Some("127.0.0.1:40002".parse().unwrap()),
+            public_url: "https://example.com/".into(),
+            tls: Some(TlsSetting::Files {
+                cert: PathBuf::from("C:/certs/cert.pem"),
+                key: PathBuf::from("C:/certs/key.pem"),
+            }),
+            update: UpdateConfig::default(),
+        };
+        let written = connection_text(&text, &next).expect("written");
+        assert!(written.contains("# piep-server の設定"));
+        // 行の後ろの説明も残る。
+        assert!(written.contains("\"0.0.0.0:40001\"   # 読み手（携帯）"));
+        assert!(written.contains("# auto = true"));
+        let parsed = config(&written);
+        assert_eq!(parsed.listen, next.listen);
+        assert_eq!(parsed.admin_listen, next.admin_listen);
+        assert_eq!(parsed.public_url, next.public_url);
+        assert!(matches!(parsed.tls, Some(TlsSetting::Files { .. })));
+        assert!(!parsed.update.auto);
+
+        // 分けた口と HTTPS をやめると、項目ごと消える。
+        let back = ServerConfig {
+            listen: "127.0.0.1:38777".parse().unwrap(),
+            admin_listen: None,
+            public_url: String::new(),
+            tls: None,
+            update: UpdateConfig::default(),
+        };
+        let written = connection_text(&written, &back).expect("written again");
+        let parsed = config(&written);
+        assert!(parsed.admin_listen.is_none());
+        assert!(parsed.tls.is_none());
+        assert!(parsed.public_url().is_none());
+        assert!(!parsed.update.auto);
+    }
+
+    #[test]
+    fn a_connection_that_cannot_start_is_rolled_back() {
+        let root = std::env::temp_dir().join(format!("piep_trial_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let paths = ServerPaths::new(&root).unwrap();
+        fs::create_dir_all(paths.state()).unwrap();
+        fs::write(paths.config(), CONFIG_TEMPLATE).unwrap();
+        // 試していなければ何もしない。
+        assert!(!restore_trial(&paths, "失敗"));
+
+        let next = ServerConfig {
+            public_url: "https://example.com/".into(),
+            ..config("")
+        };
+        save_connection(&paths, &next).unwrap();
+        assert!(paths.config_trial().exists());
+        assert_eq!(
+            load_config(&paths).unwrap().public_url,
+            "https://example.com/"
+        );
+
+        assert!(restore_trial(&paths, "待ち受けられません"));
+        assert!(!paths.config_trial().exists());
+        assert_eq!(fs::read_to_string(paths.config()).unwrap(), CONFIG_TEMPLATE);
+        let _ = fs::remove_dir_all(&root);
     }
 }

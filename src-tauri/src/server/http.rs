@@ -462,6 +462,7 @@ pub fn admin_router(ctx: Ctx) -> Router {
             .merge(admin_routes(Arc::clone(&ctx)))
             .merge(admin_web::web_routes(ctx)),
     )
+    .layer(Extension(admin_web::PageHere))
 }
 
 fn finish(router: Router) -> Router {

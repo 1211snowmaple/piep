@@ -1896,6 +1896,7 @@ impl AdminSite {
                 listen: "127.0.0.1:1".into(),
                 admin_listen: Some("127.0.0.1:2".into()),
                 public_url: None,
+                local_admin: None,
                 tls: "none",
             },
         ));
@@ -2217,6 +2218,47 @@ async fn requests_from_other_sites_and_unknown_hosts_are_refused() {
         .await
         .unwrap();
     assert_eq!(bearer.status(), StatusCode::OK);
+}
+
+/// 管理画面のない口（公開の口）からは、リンクを出さずに開ける場所を教える。
+#[tokio::test]
+async fn a_link_is_not_issued_where_the_page_is_not_served() {
+    let site = AdminSite::new("admin-link-elsewhere");
+    site.set_up().await;
+    let token = pair_admin(
+        &RemoteServer {
+            url: format!("{}/", site.url),
+            fingerprint: None,
+        },
+        &admin_secret(&site.paths),
+        "test desktop",
+    )
+    .await
+    .unwrap();
+    let public = spawn_plain(combined_router(Arc::clone(&site.parts.context)));
+    let refused = site
+        .client
+        .post(format!("{public}/api/v1/admin/tickets"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), StatusCode::CONFLICT);
+    let error: serde_json::Value = refused.json().await.unwrap();
+    assert_eq!(error["code"], "admin_web_local");
+    assert!(error["message"]
+        .as_str()
+        .unwrap()
+        .contains("127.0.0.1:38778"));
+    // 画面のある口では、今までどおり出す。
+    let issued = site
+        .client
+        .post(format!("{}/api/v1/admin/tickets", site.url))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(issued.status(), StatusCode::OK);
 }
 
 /// デスクトップが接続先の名前でリンクを発行すると、その名前でページを開ける。

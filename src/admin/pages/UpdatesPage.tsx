@@ -1,12 +1,12 @@
-import { useEffect, useState } from "react";
-import { ActionIcon, Button, Group, Menu, Skeleton, Stack, Switch, Text, TextInput } from "@mantine/core";
+import { useEffect, useRef, useState } from "react";
+import { ActionIcon, Button, Group, Menu, Skeleton, Switch, Text, TextInput } from "@mantine/core";
 import { modals } from "@mantine/modals";
 import { notifications } from "@mantine/notifications";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Icons, IconSize } from "@/lib/icons";
 import { DANGER_CONFIRM } from "@/components/DangerButton";
 import { adminApi, type UpdateHistoryEntry } from "../api";
-import { dayTime, isNewer, relativeTime, windowLabel } from "../format";
+import { isNewer, relativeTime, stamp, windowLabel } from "../format";
 import { Card, PageHead, showFailure, useReauth, useStatus } from "../shared";
 
 const RESULT_LABEL: Record<UpdateHistoryEntry["result"], string> = {
@@ -17,7 +17,33 @@ const RESULT_LABEL: Record<UpdateHistoryEntry["result"], string> = {
 
 function downtime(seconds: number | null): string | null {
   if (seconds === null) return null;
-  return seconds < 60 ? `${seconds} 秒止まりました` : `${Math.round(seconds / 60)} 分止まりました`;
+  return seconds < 60 ? `${seconds} 秒` : `${Math.round(seconds / 60)} 分`;
+}
+
+/** 時刻の欄。時計は左に置き、欄のどこを押しても選べるようにする。 */
+function TimeField({ label, value, disabled, onChange, onCommit }: { label: string; value: string; disabled: boolean; onChange: (value: string) => void; onCommit: () => void }) {
+  const input = useRef<HTMLInputElement>(null);
+  return (
+    <TextInput
+      ref={input}
+      type="time"
+      label={label}
+      w={150}
+      className="adm-time"
+      leftSection={<Icons.pending size={IconSize.action} />}
+      disabled={disabled}
+      value={value}
+      onChange={(event) => onChange(event.currentTarget.value)}
+      onClick={() => {
+        try {
+          input.current?.showPicker();
+        } catch {
+          // 選ぶ窓を出せないブラウザでは、打って入れる。
+        }
+      }}
+      onBlur={onCommit}
+    />
+  );
 }
 
 function AutoCard() {
@@ -52,12 +78,13 @@ function AutoCard() {
       title="自動で更新する"
       side={<Switch aria-label="自動で更新する" checked={update.auto} onChange={(event) => void save(event.currentTarget.checked, update.window)} />}
     >
-      <Text size="sm" c="dimmed" mb="sm">
+      <Text c="dimmed" mb="md">
         {update.auto ? `新しいバージョンがあれば、${windowLabel(update.window)} の間に更新します。` : "押したときしか更新しません。新しいバージョンの確認は続けます。"}
       </Text>
       <Group gap="sm" wrap="nowrap" align="flex-end">
-        <TextInput type="time" label="開始" size="sm" w={130} disabled={!update.auto} value={start} onChange={(event) => setStart(event.currentTarget.value)} onBlur={commitWindow} />
-        <TextInput type="time" label="終了" size="sm" w={130} disabled={!update.auto} value={end} onChange={(event) => setEnd(event.currentTarget.value)} onBlur={commitWindow} />
+        <TimeField label="開始" disabled={!update.auto} value={start} onChange={setStart} onCommit={commitWindow} />
+        <span className="adm-time-sep" aria-hidden>〜</span>
+        <TimeField label="終了" disabled={!update.auto} value={end} onChange={setEnd} onCommit={commitWindow} />
       </Group>
     </Card>
   );
@@ -114,7 +141,7 @@ export function UpdatesPage() {
   };
   return (
     <div className="adm-section">
-      <PageHead title="更新" />
+      <PageHead title="更新" lead="サーバーのバージョンと、自動で更新する時間帯です。" />
       {!data ? <Skeleton height={200} radius="lg" /> : !update ? (
         <Card>
           <Text size="sm">このサーバーは自分では更新できません。<span className="adm-code">piep-server install</span> で置くと、自動で更新できるようになります。</Text>
@@ -133,10 +160,10 @@ export function UpdatesPage() {
                 {update.phase.state === "waiting" && <Text size="sm" c="dimmed" mt={6}>{update.phase.version} を用意しました。{update.auto ? `${windowLabel(update.window)} に更新します。` : "押すと更新します。"}</Text>}
               </div>
               <Group gap={8} wrap="nowrap" style={{ flex: "none" }}>
-                {fresh && <Button size="xs" onClick={() => void apply()} disabled={update.phase.state === "applying"}>今すぐ更新</Button>}
-                <Button size="xs" variant="default" loading={checking} onClick={() => void check()}>更新を確認</Button>
+                {fresh && <Button onClick={() => void apply()} disabled={update.phase.state === "applying"}>今すぐ更新</Button>}
+                <Button variant="default" loading={checking} onClick={() => void check()}>更新を確認</Button>
                 <Menu position="bottom-end" width={220}>
-                  <Menu.Target><ActionIcon size={30} variant="default" aria-label="その他"><Icons.more size={IconSize.menu} /></ActionIcon></Menu.Target>
+                  <Menu.Target><ActionIcon size={36} variant="default" aria-label="その他"><Icons.more size={IconSize.menu} /></ActionIcon></Menu.Target>
                   <Menu.Dropdown>
                     <Menu.Item color="red" disabled={!update.previous} onClick={rollback}>前のバージョンへ戻す</Menu.Item>
                   </Menu.Dropdown>
@@ -154,24 +181,37 @@ export function UpdatesPage() {
             <Card>
               <Group justify="space-between" wrap="nowrap" gap="md">
                 <Text size="sm">{update.skipped.join("、")} は起動に失敗したか戻したため、飛ばしています。</Text>
-                <Button size="xs" variant="default" style={{ flex: "none" }} onClick={() => void retry()}>もう一度試す</Button>
+                <Button variant="default" style={{ flex: "none" }} onClick={() => void retry()}>もう一度試す</Button>
               </Group>
             </Card>
           )}
           <AutoCard />
-          <Card title="履歴">
-            {history.isPending ? <Skeleton height={60} /> : (history.data ?? []).length === 0 ? <Text size="sm" c="dimmed">まだ更新していません。</Text> : (
-              <Stack gap={0} className="adm-rows">
-                {(history.data ?? []).map((entry) => (
-                  <div key={`${entry.at}-${entry.to}`} className="adm-row">
-                    <div className="adm-row-body">
-                      {entry.from ?? "不明"} → {entry.to}・{RESULT_LABEL[entry.result]}
-                      {(entry.reason || entry.downtimeSeconds !== null) && <div className="adm-row-sub">{[downtime(entry.downtimeSeconds), entry.reason].filter(Boolean).join("・")}</div>}
-                    </div>
-                    <div className="adm-row-side">{dayTime(new Date(entry.at))}</div>
-                  </div>
-                ))}
-              </Stack>
+          <Card title="履歴" flush>
+            {history.isPending ? <div className="adm-card-pad"><Skeleton height={60} /></div> : (history.data ?? []).length === 0 ? <Text className="adm-card-pad" c="dimmed">まだ更新していません。</Text> : (
+              <div className="adm-table-wrap">
+                <table className="adm-table">
+                  <thead>
+                    <tr>
+                      <th className="adm-col-time">日時</th>
+                      <th>バージョン</th>
+                      <th>結果</th>
+                      <th>止まった時間</th>
+                      <th>理由</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(history.data ?? []).map((entry) => (
+                      <tr key={`${entry.at}-${entry.to}`}>
+                        <td data-label="日時" className="adm-num adm-col-time">{stamp(new Date(entry.at))}</td>
+                        <td data-label="バージョン" className="adm-num">{entry.from ?? "不明"} → {entry.to}</td>
+                        <td data-label="結果">{entry.result === "applied" ? RESULT_LABEL[entry.result] : <span className="adm-event"><span className="adm-failed">戻した</span>{RESULT_LABEL[entry.result]}</span>}</td>
+                        <td data-label="止まった時間" className="adm-num">{downtime(entry.downtimeSeconds) ?? "—"}</td>
+                        <td data-label="理由">{entry.reason ?? "—"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             )}
           </Card>
         </>

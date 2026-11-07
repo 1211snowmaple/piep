@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { AdminStatus } from "./api";
-import { bytes, findIssues, isNewer, relativeTime, windowLabel } from "./format";
+import type { AdminStatus, Connection } from "./api";
+import { adminPlace, bytes, connectionWarnings, draftConnection, findIssues, isNewer, pageFromName, relativeTime, sameConnection, stamp, windowLabel } from "./format";
 
 const status = (overrides: Partial<AdminStatus> = {}): AdminStatus => ({
   version: "0.36.0",
@@ -54,5 +54,51 @@ describe("format", () => {
     );
     expect(issues.map((issue) => issue.page)).toEqual(["library", "updates", "updates", "library"]);
     expect(issues[2]?.message).toBe("0.36.1 は起動に失敗したため飛ばしています");
+  });
+
+  it("keeps old page names working", () => {
+    expect(pageFromName("security")).toBe("settings");
+    expect(pageFromName("account")).toBe("account");
+    expect(pageFromName("nothing")).toBeNull();
+  });
+
+  it("lines up record times to the second", () => {
+    const now = new Date(2026, 10, 7, 12, 0);
+    expect(stamp(new Date(2026, 10, 7, 9, 5, 3), now)).toBe("11/07 09:05:03");
+    expect(stamp(new Date(2025, 0, 2, 23, 59, 59), now)).toBe("2025/01/02 23:59:59");
+  });
+});
+
+const connection = (overrides: Partial<Connection> = {}): Connection => ({
+  listen: "127.0.0.1:38777",
+  adminListen: null,
+  publicUrl: null,
+  localAdmin: null,
+  tls: "none",
+  ...overrides,
+});
+
+describe("connection", () => {
+  it("says where the admin page is", () => {
+    expect(adminPlace(connection())).toEqual({ url: "http://127.0.0.1:38777/admin/", thisMachineOnly: true });
+    expect(adminPlace(connection({ adminListen: "0.0.0.0:38778", tls: "self-signed" }))).toEqual({ url: "https://サーバーの PC のアドレス:38778/admin/", thisMachineOnly: false });
+    expect(adminPlace(connection({ publicUrl: "https://example.com/", localAdmin: "127.0.0.1:38778" }))).toEqual({ url: "http://127.0.0.1:38778/admin/", thisMachineOnly: true });
+    expect(adminPlace(connection({ publicUrl: "https://example.com/" }))).toBeNull();
+  });
+
+  it("warns only when the login page is reachable from outside", () => {
+    expect(connectionWarnings(connection())).toEqual([]);
+    expect(connectionWarnings(connection({ listen: "0.0.0.0:38777", tls: "self-signed" }))).toHaveLength(1);
+    // 公開の URL があれば、管理画面はこの機械の中にしか出ない。
+    expect(connectionWarnings(connection({ listen: "0.0.0.0:38777", tls: "self-signed", publicUrl: "https://example.com/", localAdmin: "127.0.0.1:38778" }))).toEqual([]);
+    expect(connectionWarnings(connection({ adminListen: "192.168.1.2:38778", tls: "self-signed" }))[0]).toContain("192.168.1.2:38778");
+  });
+
+  it("drafts from the saved settings and compares them", () => {
+    const saved = connection({ adminListen: "127.0.0.1:40000", publicUrl: "https://example.com/" });
+    expect(draftConnection(saved)).toMatchObject({ split: true, adminListen: "127.0.0.1:40000", publicUrl: "https://example.com/", cert: "", key: "" });
+    expect(draftConnection(connection())).toMatchObject({ split: false, adminListen: "127.0.0.1:38778", publicUrl: "" });
+    expect(sameConnection(saved, { ...saved, localAdmin: "127.0.0.1:38778" })).toBe(true);
+    expect(sameConnection(saved, { ...saved, tls: "self-signed" })).toBe(false);
   });
 });

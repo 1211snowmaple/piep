@@ -136,11 +136,33 @@ export interface Storage {
   freeBytes: number | null;
 }
 
+export type TlsMode = "none" | "self-signed" | "files";
+
 export interface Connection {
   listen: string;
   adminListen: string | null;
   publicUrl: string | null;
-  tls: "none" | "self-signed" | "files";
+  /** 公開の口しかないときに、管理画面だけを出すこの機械の中の口。 */
+  localAdmin: string | null;
+  tls: TlsMode;
+}
+
+/** 動いている設定と、server.toml に書いてある設定。違えば再起動で切り替わる。 */
+export interface ConnectionState {
+  running: Connection;
+  saved: Connection | null;
+  problem: string | null;
+  /** 管理画面から立ち上げ直せるか。見張り役の下で動いているときだけ。 */
+  restartable: boolean;
+}
+
+export interface ConnectionChange {
+  listen: string;
+  adminListen: string | null;
+  publicUrl: string;
+  tls: TlsMode;
+  cert: string | null;
+  key: string | null;
 }
 
 export interface Pairing {
@@ -174,7 +196,9 @@ export const adminApi = {
   addReader: (url: string) => post<Pairing>("/api/v1/admin/pairings", { url }),
   replaceAdmin: (url: string) => post<Pairing>("/api/v1/admin/pairings", { url, role: "admin" }),
   storage: () => get<Storage>("/api/v1/admin/storage"),
-  connection: () => get<Connection>("/api/v1/admin/connection"),
+  connection: () => get<ConnectionState>("/api/v1/admin/connection"),
+  saveConnection: (change: ConnectionChange) => put<ConnectionState>("/api/v1/admin/connection", change),
+  restart: () => post<void>("/api/v1/admin/restart"),
   reindex: () => post<void>("/api/v1/admin/library/reindex"),
   audit: (kind: string | null, onlyFailures: boolean, before: number | null) => {
     const query = new URLSearchParams();

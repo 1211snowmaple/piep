@@ -1,63 +1,158 @@
-/* 色・文字・ボタン・左の項目は本体の app.css をそのまま使う。
+/* 色・ボタン・左の項目は本体の app.css をそのまま使う。文字の大きさは main.tsx で一段上げてある。
    本体は窓の中でスクロールするが、こちらはブラウザのページなので、ここだけ戻す。 */
 html, body, #root { height: auto; min-height: 100%; overflow: visible; }
 html { overflow-y: scroll; scrollbar-gutter: stable; }
 
-.adm { --line: var(--app-shell-border-color); display: grid; grid-template-columns: var(--piep-sidebar-width) minmax(0, 1fr); min-height: 100dvh; }
-.adm-nav { position: sticky; top: 0; align-self: start; display: flex; flex-direction: column; height: 100dvh; border-right: 1px solid var(--app-shell-border-color); }
-.adm-server { padding: 0 14px 12px; font-size: 12px; color: var(--mantine-color-dimmed); overflow-wrap: anywhere; }
-.adm-links { display: flex; flex-direction: column; gap: 2px; padding: 0 8px; }
-.adm-foot { margin-top: auto; display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px; }
-.adm-main { min-width: 0; padding: 28px 32px 56px; }
-.adm-body { container-type: inline-size; max-width: 960px; }
+.adm {
+  --line: var(--app-shell-border-color);
+  --adm-sidebar: 240px;
+  --adm-dim: var(--mantine-color-dimmed);
+  --adm-soft: light-dark(#f5f7fa, #161c24);
+  --adm-hover: light-dark(#eef3f7, #1a222d);
+  min-height: 100dvh;
+  padding-left: var(--adm-sidebar);
+}
+
+/* 左の帯。ダイアログがページのスクロールを止めても動かないよう、画面に留める。 */
+.adm-nav { position: fixed; inset: 0 auto 0 0; z-index: 2; display: flex; flex-direction: column; width: var(--adm-sidebar); border-right: 1px solid var(--app-shell-border-color); }
+.adm-brand { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 18px 14px 16px; }
+.adm-server { max-width: 100%; overflow: hidden; color: var(--adm-dim); font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.adm-links { display: flex; flex-direction: column; gap: 2px; padding: 4px 12px; }
+.adm-link { min-height: 42px; padding-inline: 12px; }
+.adm-link .mantine-NavLink-label { font-size: 15px; }
+.adm-foot { margin-top: auto; padding: 10px 12px 12px; border-top: 1px solid var(--line); }
+.adm-account { display: flex; align-items: center; gap: 10px; width: 100%; padding: 8px 10px; border-radius: var(--mantine-radius-md); transition: background-color 120ms ease; }
+.adm-account:hover, .adm-account[data-expanded] { background: var(--adm-hover); }
+.adm-account-text { display: flex; flex: 1; flex-direction: column; min-width: 0; line-height: 1.35; text-align: left; }
+.adm-account-name { overflow: hidden; font-size: 15px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.adm-account-role { color: var(--adm-dim); font-size: 13px; }
+.adm-account-more { flex: none; color: var(--adm-dim); }
+.adm-avatar { display: grid; flex: none; place-items: center; width: 34px; height: 34px; border-radius: 50%; background: var(--mantine-color-piep-light); color: var(--mantine-color-piep-light-color); font-size: 15px; font-weight: 700; }
+.adm-avatar-large { width: 56px; height: 56px; font-size: 22px; }
+.adm-avatar-button { flex: none; border-radius: 50%; }
+
+/* 中身 */
+.adm-main { min-width: 0; padding: 36px 40px 72px; }
+.adm-body { container-type: inline-size; max-width: 1080px; margin-inline: auto; }
 .adm-select { display: none; }
-.adm-notice { background: var(--mantine-color-body); display: flex; align-items: center; gap: 10px; margin-bottom: 16px; padding: 10px 14px; border: 1px solid var(--line); border-radius: var(--mantine-radius-md); font-size: 14px; }
-.adm-section { display: flex; flex-direction: column; gap: 12px; }
-.adm-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 36px; margin-bottom: 4px; }
-.adm-card { padding: 20px; border: 1px solid var(--line); border-radius: var(--mantine-radius-lg); background: var(--mantine-color-body); }
-.adm-card-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; font-size: 15px; font-weight: 650; }
-.adm-facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 10px 24px; font-size: 14px; }
-.adm-facts > dt { margin: 0; color: var(--mantine-color-dimmed); }
+.adm-notice { background: var(--mantine-color-body); display: flex; align-items: center; gap: 10px; margin-bottom: 16px; padding: 12px 16px; border: 1px solid var(--line); border-radius: var(--mantine-radius-md); }
+.adm-section { display: flex; flex-direction: column; gap: 18px; }
+.adm-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; margin-bottom: 6px; }
+.adm-head-text { min-width: 0; }
+.adm-title { font-size: 28px; line-height: 1.25; }
+.adm-lead { margin-top: 6px; color: var(--adm-dim); font-size: 15px; line-height: 1.6; }
+.adm-head-actions { flex: none; }
+
+.adm-card { padding: 22px 24px; border: 1px solid var(--line); border-radius: var(--mantine-radius-lg); background: var(--mantine-color-body); }
+.adm-card[data-flush] { padding: 0; overflow: hidden; }
+.adm-card[data-flush] > .adm-card-head { margin: 0; padding: 20px 24px 16px; }
+.adm-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 18px; }
+.adm-card-title { display: flex; flex-direction: column; gap: 4px; min-width: 0; font-size: 17px; font-weight: 650; line-height: 1.4; }
+.adm-card-lead { color: var(--adm-dim); font-size: 14px; font-weight: 400; line-height: 1.6; }
+.adm-card-side { display: flex; flex: none; align-items: center; gap: 8px; }
+.adm-card-pad { padding: 20px 24px; }
+.adm-card-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+
+.adm-facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 12px 32px; font-size: 15px; }
+.adm-facts > dt { margin: 0; color: var(--adm-dim); }
 .adm-facts > dd { margin: 0; min-width: 0; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
-.adm-numbers { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
-.adm-number { padding: 16px; border: 1px solid var(--line); border-radius: var(--mantine-radius-lg); background: var(--mantine-color-body); min-width: 0; }
-.adm-number-label { font-size: 12px; color: var(--mantine-color-dimmed); }
-.adm-number-value { margin-top: 6px; font-size: 20px; font-weight: 650; line-height: 1.3; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.adm-numbers { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; }
+.adm-number { padding: 18px 20px; border: 1px solid var(--line); border-radius: var(--mantine-radius-lg); background: var(--mantine-color-body); min-width: 0; }
+.adm-number-label { color: var(--adm-dim); font-size: 13.5px; }
+.adm-number-value { margin-top: 6px; font-size: 22px; font-weight: 650; line-height: 1.3; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
 .adm-rows { display: flex; flex-direction: column; }
-.adm-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 0; border-top: 1px solid var(--line); font-size: 14px; min-width: 0; }
+.adm-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 0; border-top: 1px solid var(--line); min-width: 0; }
 .adm-row:first-child { border-top: 0; padding-top: 0; }
 .adm-row:last-child { padding-bottom: 0; }
 .adm-row-body { min-width: 0; flex: 1; overflow-wrap: anywhere; }
-.adm-row-sub { margin-top: 2px; font-size: 12px; color: var(--mantine-color-dimmed); overflow-wrap: anywhere; }
-.adm-row-side { flex: none; display: flex; align-items: center; gap: 8px; color: var(--mantine-color-dimmed); font-size: 13px; font-variant-numeric: tabular-nums; }
+
+/* 表。見出しの行は薄い地、行の間に線。日時は左に寄せて桁をそろえる。 */
+.adm-toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px 16px; padding: 16px 24px; }
+.adm-toolbar-filters { min-width: 0; }
+.adm-table-wrap { min-width: 0; }
+.adm-table { width: 100%; border-collapse: collapse; font-size: 15px; }
+.adm-table th { padding: 10px 16px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); background: var(--adm-soft); color: var(--adm-dim); font-size: 13px; font-weight: 600; text-align: left; white-space: nowrap; }
+.adm-table td { padding: 13px 16px; border-bottom: 1px solid var(--line); vertical-align: middle; overflow-wrap: anywhere; }
+.adm-table tbody tr:last-child td { border-bottom: 0; }
+/* 見出しの行がない表は、上の線を自分で引く。 */
+.adm-table:not(:has(thead)) tbody tr:first-child td { border-top: 1px solid var(--line); }
+.adm-table th:first-child, .adm-table td:first-child { padding-left: 24px; }
+.adm-table th:last-child, .adm-table td:last-child { padding-right: 24px; }
+.adm-table tbody tr:hover { background: light-dark(#f9fbfc, #131920); }
+.adm-num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.adm-col-time { width: 1%; color: var(--adm-dim); white-space: nowrap; }
+.adm-cell-sub { margin-top: 3px; color: var(--adm-dim); font-size: 13.5px; line-height: 1.5; }
+.adm-cell-action { width: 1%; text-align: right; white-space: nowrap; }
+.adm-dim { color: var(--adm-dim); white-space: nowrap; text-align: right; }
+.adm-nowrap { white-space: nowrap; overflow-wrap: normal; }
+.adm-strong { font-weight: 600; }
+.adm-clamp { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.adm-tag { display: inline-block; margin-left: 8px; padding: 1px 8px; border-radius: 999px; background: var(--mantine-color-piep-light); color: var(--mantine-color-piep-light-color); font-size: 12.5px; font-weight: 600; white-space: nowrap; vertical-align: 1px; }
+.adm-event { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.adm-failed { flex: none; padding: 0 8px; border: 1px solid var(--mantine-color-red-6); border-radius: 999px; background: var(--mantine-color-body); color: var(--mantine-color-red-7); font-size: 12.5px; font-weight: 600; line-height: 1.6; }
+[data-mantine-color-scheme="dark"] .adm-failed { border-color: var(--mantine-color-red-5); color: var(--mantine-color-red-4); }
+.adm-table-foot { display: flex; justify-content: center; padding: 14px; border-top: 1px solid var(--line); }
+
+/* アカウント */
+.adm-account-card { display: flex; align-items: center; gap: 20px; }
+
+/* 設定の入力 */
+.adm-form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px 24px; }
+.adm-place { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 16px; padding: 12px 16px; border-radius: var(--mantine-radius-md); background: var(--adm-soft); }
+.adm-place-label { color: var(--adm-dim); font-size: 14px; }
+.adm-place-note { margin-left: 10px; color: var(--adm-dim); font-size: 13.5px; }
+.adm-place-note[data-tone="move"] { color: var(--mantine-color-yellow-light-color); font-weight: 600; }
+.adm-move-link { display: block; padding: 10px 12px; border-radius: var(--mantine-radius-md); background: var(--adm-soft); }
+
+/* 時刻。時計は左に出し、ブラウザの右端の印は消す。 */
+.adm-time input { cursor: pointer; font-variant-numeric: tabular-nums; }
+.adm-time input::-webkit-calendar-picker-indicator { display: none; }
+.adm-time-sep { padding-bottom: 8px; color: var(--adm-dim); }
+
+/* 入口 */
 .adm-entry { display: grid; place-items: center; min-height: 100dvh; padding: 16px; box-sizing: border-box; }
-.adm-entry-card { width: min(420px, 100%); padding: 28px; border: 1px solid var(--app-shell-border-color, var(--mantine-color-default-border)); border-radius: var(--mantine-radius-lg); background: var(--mantine-color-body); }
+.adm-entry-card { width: min(440px, 100%); padding: 32px; border: 1px solid var(--app-shell-border-color, var(--mantine-color-default-border)); border-radius: var(--mantine-radius-lg); background: var(--mantine-color-body); }
 .adm-entry-brand { display: flex; justify-content: center; margin-bottom: 24px; }
 .adm-entry-head { display: flex; flex-direction: column; gap: 6px; }
-.adm-entry-title { font-size: 20px; font-weight: 700; line-height: 1.35; }
+.adm-entry-title { font-size: 22px; font-weight: 700; line-height: 1.35; }
 .adm-entry-lead { line-height: 1.7; }
 .adm-entry-fixed { display: flex; justify-content: space-between; gap: 12px; padding: 10px 12px; border-radius: var(--mantine-radius-md); background: var(--mantine-color-default-hover); }
 .adm-entry-steps { margin: 0; padding-left: 1.4em; font-size: var(--mantine-font-size-sm); line-height: 1.9; }
 /* 必須の印は、ラベルの右上に小さく赤で出す。 */
 .adm .mantine-InputWrapper-required,
 .adm-entry .mantine-InputWrapper-required { color: var(--mantine-color-red-6); font-size: 0.72em; vertical-align: super; line-height: 0; }
-.adm-code { font-family: var(--mantine-font-family-monospace); font-size: 12px; overflow-wrap: anywhere; user-select: all; }
+.adm-code { font-family: var(--mantine-font-family-monospace); font-size: 13.5px; overflow-wrap: anywhere; user-select: all; }
 .adm-qr { align-self: center; padding: 16px; background: #fff; border-radius: 8px; line-height: 0; }
 
-@container (max-width: 620px) {
+@container (max-width: 680px) {
   .adm-numbers { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .adm-facts { grid-template-columns: minmax(0, 1fr); gap: 2px 0; }
   .adm-facts > dd { margin-bottom: 10px; }
+  .adm-form-grid { grid-template-columns: minmax(0, 1fr); }
+  .adm-card-row { flex-wrap: wrap; }
+  .adm-head { flex-wrap: wrap; align-items: flex-start; }
   .adm-row { flex-wrap: wrap; }
   .adm-row-body { flex: 1 1 100%; }
-  .adm-row-side { flex: 1 1 100%; justify-content: space-between; }
+  /* 狭いと表は縦に積む。各欄の名前を前に出す。 */
+  .adm-table thead { display: none; }
+  .adm-table, .adm-table tbody, .adm-table tr, .adm-table td { display: block; width: auto; }
+  .adm-table tr { padding: 12px 20px; border-top: 1px solid var(--line); }
+  .adm-table td, .adm-table td:first-child, .adm-table td:last-child { padding: 2px 0; border: 0; text-align: left; }
+  .adm-table:not(:has(thead)) tbody tr:first-child td { border-top: 0; }
+  .adm-table td[data-label]::before { content: attr(data-label); display: inline-block; min-width: 6.5em; color: var(--adm-dim); font-size: 13px; }
+  .adm-cell-action:not(:empty) { padding-top: 8px; }
+  .adm-dim { text-align: left; }
+  .adm-card { padding: 18px; }
+  .adm-card[data-flush] > .adm-card-head, .adm-toolbar, .adm-card-pad { padding-inline: 18px; }
+  .adm-table tr { padding-inline: 18px; }
 }
 
 @media (max-width: 760px) {
-  .adm { display: block; }
+  .adm { padding-left: 0; }
   .adm-nav { display: none; }
-  .adm-select { display: flex; align-items: center; gap: 8px; margin-bottom: 16px; }
+  .adm-select { display: flex; align-items: center; gap: 10px; margin-bottom: 18px; }
   .adm-main { padding: 16px 16px 40px; }
+  .adm-title { font-size: 24px; }
   /* 手元の画面の QR は、その携帯では読めない。コピーで渡す。 */
   .adm-qr { display: none; }
 }

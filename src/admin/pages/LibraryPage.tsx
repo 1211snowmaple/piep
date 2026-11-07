@@ -22,8 +22,7 @@ export function LibraryPage() {
   };
   return (
     <div className="adm-section">
-      <PageHead title="ライブラリ" />
-      <Text size="sm" c="dimmed">このサーバーではライブラリを変更しません。変更はデスクトップ版から送ります。</Text>
+      <PageHead title="ライブラリ" lead="このサーバーではライブラリを変更しません。変更はデスクトップ版から送ります。" />
       <Card title="受け取った内容">
         {!data ? <Skeleton height={80} /> : (
           <Facts items={[
@@ -45,7 +44,7 @@ export function LibraryPage() {
           ]} />
         )}
       </Card>
-      <Card title="検索の索引" side={<Button size="xs" variant="default" fw={500} onClick={() => void reindex()}>確かめて作る</Button>}>
+      <Card title="検索の索引" side={<Button variant="default" fw={500} onClick={() => void reindex()}>確かめて作る</Button>}>
         {!data ? <Skeleton height={50} /> : (
           <Facts items={[
             ["残り", sync?.indexPending === null || sync?.indexPending === undefined ? "確認中" : sync.indexPending === 0 ? "なし" : `${sync.indexPending.toLocaleString("ja-JP")} 件`],
