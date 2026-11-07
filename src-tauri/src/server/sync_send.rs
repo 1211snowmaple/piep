@@ -117,6 +117,8 @@ pub async fn build_client(remote: &RemoteServer) -> Result<reqwest::Client, Stri
         return Err("サーバーの URL に利用者名や問い合わせは書けません".into());
     }
     let builder = reqwest::Client::builder()
+        // 登録の鍵や本棚の本文を、307/308 の転送先へ再送しない。
+        .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(15))
         .timeout(Duration::from_secs(30 * 60))
         .no_proxy();
@@ -132,6 +134,7 @@ pub async fn build_client(remote: &RemoteServer) -> Result<reqwest::Client, Stri
     };
     // 鍵を送る前に証明書の指紋を照らし合わせる。ここでは hello しか呼ばない。
     let probe = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
         .tls_backend_rustls()
         .tls_danger_accept_invalid_certs(true)
         .tls_info(true)

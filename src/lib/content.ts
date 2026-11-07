@@ -9,7 +9,6 @@ type LocalAssetResolver = (path: string | null | undefined) => string | null;
 // window. Saved documents are third-party HTML, so all of it is dropped.
 const UNSAFE_ELEMENTS = "script, style, iframe, object, embed, form, link, base, meta, template, noscript, svg, math, portal, frame, frameset";
 const SAFE_PROTOCOLS = new Set(["http:", "https:", "mailto:"]);
-const ALLOWED_URL_ATTRIBUTES = new Set(["href"]);
 const MEDIA_ELEMENTS = new Set(["AUDIO", "VIDEO", "SOURCE", "TRACK"]);
 
 function isLocalMediaSource(raw: string, tagName: string): boolean {
@@ -124,13 +123,18 @@ export function prepareDocumentHtml(
         }
         continue;
       }
-      if (name.startsWith("on") || name === "srcdoc" || name === "style" || name === "srcset" || name === "formaction" || name === "xlink:href") {
+      // Only anchors pass through the URL validation below. Image-map areas
+      // can navigate too, so leaving their href unchecked would retain e.g.
+      // javascript: links. Stored attributes must not override a checked href
+      // through the delegated click handler either.
+      if ((name === "href" && node.tagName !== "A") || name === "data-content-href"
+        || name.startsWith("on") || name === "srcdoc" || name === "style" || name === "srcset" || name === "formaction" || name === "xlink:href") {
         node.removeAttribute(attribute.name);
         continue;
       }
       // Anything that resolves to a URL and is not an anchor href or an image
       // source is dropped rather than protocol-checked one attribute at a time.
-      if (!ALLOWED_URL_ATTRIBUTES.has(name) && /^(?:data-)?(?:action|background|ping|poster|codebase)$/.test(name)) {
+      if (/^(?:data-)?(?:action|background|ping|poster|codebase)$/.test(name)) {
         node.removeAttribute(attribute.name);
       }
     }

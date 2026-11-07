@@ -118,6 +118,9 @@ struct StagedDeleteEntry {
     source: String,
     source_id: String,
     staged_name: String,
+    /// Older journals contain only the source work directory.
+    #[serde(default)]
+    editor_assets: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -6627,7 +6630,11 @@ impl Database {
                 // Legacy records can point directly to
                 // `{source}/{source_id}/data.json`.
                 let root = validated_download_work_root(&self.storage_dir, &source, &source_id)?;
-                work_root_dirs.push((*id, source, source_id, root));
+                let editor_root = validated_editor_assets_root(&self.storage_dir, *id)?;
+                work_root_dirs.push((*id, source.clone(), source_id.clone(), root, false));
+                if editor_root.exists() {
+                    work_root_dirs.push((*id, source, source_id, editor_root, true));
+                }
                 if let Some(path) = cover_path.filter(|path| !path.trim().is_empty()) {
                     deleted_cover_paths.push(path);
                 }
@@ -6654,11 +6661,12 @@ impl Database {
             .iter()
             .enumerate()
             .map(
-                |(index, (download_id, source, source_id, _))| StagedDeleteEntry {
+                |(index, (download_id, source, source_id, _, editor_assets))| StagedDeleteEntry {
                     download_id: *download_id,
                     source: source.clone(),
                     source_id: source_id.clone(),
                     staged_name: index.to_string(),
+                    editor_assets: *editor_assets,
                 },
             )
             .collect::<Vec<_>>();
@@ -6679,7 +6687,7 @@ impl Database {
         }
 
         let mut staged = Vec::<(PathBuf, PathBuf)>::new();
-        for (index, (_, _, _, original)) in work_root_dirs.iter().enumerate() {
+        for (index, (_, _, _, original, _)) in work_root_dirs.iter().enumerate() {
             if !original.exists() {
                 continue;
             }
@@ -6807,7 +6815,7 @@ impl Database {
             let _ = std::fs::remove_dir(&operation_dir);
         }
         let _ = std::fs::remove_dir(&delete_staging_root);
-        for (_, _, _, work_root_dir) in &work_root_dirs {
+        for (_, _, _, work_root_dir, _) in &work_root_dirs {
             if let Some(source_dir) = work_root_dir.parent() {
                 let _ = remove_dir_resilient(source_dir);
             }
@@ -15358,17 +15366,26 @@ fn search_index_document_locked(
 
     let json_path = original_json_path.unwrap_or(json_path);
     let current_assets = assets_for_download_locked(conn, download_id)
-        .map(|assets| assets_for_version_path(&assets, Path::new(&json_path)))
-        .unwrap_or_default();
-    let body = active_edit_plain_text_locked(conn, download_id)?.unwrap_or_else(|| {
+        .map(|assets| assets_for_version_path(&assets, Path::new(&json_path)))?;
+    let body = if let Some(body) = active_edit_plain_text_locked(conn, download_id)? {
+        body
+    } else {
         // 添付の中の本文も索引に入れる。ここを通さないと、**読める作品が検索に
         // 出てこない**という食い違いができる。反映済みの編集があるときは、
         // そちらが本文なのでアセットを引きに行かない。
-        std::fs::read_to_string(&json_path)
-            .ok()
-            .map(|raw| super::attachment::search_body_from_json(&raw, &source, &current_assets))
-            .unwrap_or_default()
-    });
+        let raw = std::fs::read_to_string(&json_path).map_err(|error| {
+            format!("検索索引の原本を読めません。ファイルを確認してから再試行してください: {error}")
+        })?;
+        let parsed: serde_json::Value = serde_json::from_str(&raw).map_err(|error| {
+            format!(
+                "検索索引の原本を解析できません。ファイルを確認してから再試行してください: {error}"
+            )
+        })?;
+        if !parsed.is_object() {
+            return Err("検索索引の原本が作品の形式ではありません。ファイルを確認してから再試行してください".into());
+        }
+        super::attachment::search_body_from_json(&raw, &source, &current_assets)
+    };
     let asset_kinds = current_assets
         .iter()
         .map(|asset| asset.asset_type.as_str())
@@ -15966,8 +15983,11 @@ fn recover_staged_deletes(
             {
                 return Err("Invalid path in delete recovery manifest".to_string());
             }
-            let original =
-                validated_download_work_root(storage_dir, &entry.source, &entry.source_id)?;
+            let original = if entry.editor_assets {
+                validated_editor_assets_root(storage_dir, entry.download_id)?
+            } else {
+                validated_download_work_root(storage_dir, &entry.source, &entry.source_id)?
+            };
             let staged = operation_path.join(&entry.staged_name);
             let still_exists = conn
                 .query_row(
@@ -16010,6 +16030,8 @@ fn recover_staged_deletes(
         }
     }
     if !deleted_ids.is_empty() {
+        deleted_ids.sort_unstable();
+        deleted_ids.dedup();
         if let Err(error) = super::tantivy_index::delete_documents(storage_dir, &deleted_ids) {
             log::warn!("Failed to recover lexical index cleanup: {error}");
         }
@@ -16147,6 +16169,34 @@ fn validated_download_work_root(
         }
     }
     Ok(work_root)
+}
+
+/// Legacy editor imports use the local download ID rather than the source
+/// directory. Never follow a substituted editor-assets directory when deleting.
+fn validated_editor_assets_root(storage_dir: &Path, download_id: i64) -> Result<PathBuf, String> {
+    if download_id <= 0 {
+        return Err("Invalid download ID for editor assets".into());
+    }
+    let parent = storage_dir.join("editor-assets");
+    let root = parent.join(download_id.to_string());
+    for path in [&parent, &root] {
+        let metadata = match std::fs::symlink_metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(format!("Failed to validate editor assets: {error}")),
+        };
+        let linked = metadata.file_type().is_symlink();
+        #[cfg(windows)]
+        let linked = {
+            use std::os::windows::fs::MetadataExt;
+            use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+            linked || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0
+        };
+        if linked || !metadata.is_dir() {
+            return Err("Refusing to delete linked or invalid editor assets".into());
+        }
+    }
+    Ok(root)
 }
 
 /// Windowsなどでファイルが掴まれているため一時的に削除に失敗するケースに備えた、

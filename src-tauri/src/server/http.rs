@@ -371,8 +371,6 @@ where
 
 fn read_routes(ctx: Ctx) -> Router {
     Router::new()
-        .route("/api/v1/hello", get(hello))
-        .route("/api/v1/pair", post(pair))
         .route("/api/v1/about", get(about))
         .route("/api/v1/works/search", post(search))
         .route("/api/v1/works/{id}", get(metadata))
@@ -394,6 +392,13 @@ fn read_routes(ctx: Ctx) -> Router {
         .route("/api/v1/reading", get(reading_since))
         .route("/api/v1/reading/{source}/{source_id}", put(reading_put))
         .route("/api/v1/favorites/{source}/{source_id}", put(favorite_put))
+        .route_layer(middleware::from_fn_with_state(
+            Arc::clone(&ctx),
+            authorize_device_before_body,
+        ))
+        // 登録と接続確認だけは公開する。
+        .route("/api/v1/hello", get(hello))
+        .route("/api/v1/pair", post(pair))
         .layer(DefaultBodyLimit::max(MAX_JSON_BYTES))
         .layer(middleware::from_fn(read_timeout))
         .with_state(ctx)
@@ -438,7 +443,30 @@ async fn authorize_admin_before_body(
     request: Request,
     next: Next,
 ) -> Response {
-    if let Err(error) = require_admin(&ctx, request.headers()) {
+    authorize_before_body(ctx, request, next, true).await
+}
+
+async fn authorize_device_before_body(
+    State(ctx): State<Ctx>,
+    request: Request,
+    next: Next,
+) -> Response {
+    authorize_before_body(ctx, request, next, false).await
+}
+
+async fn authorize_before_body(ctx: Ctx, request: Request, next: Next, admin: bool) -> Response {
+    let headers = request.headers().clone();
+    // 本文を待たずに拒否し、状態DBを待つ間もHTTP実行スレッドを止めない。
+    let authorized = tokio::task::spawn_blocking(move || {
+        if admin {
+            require_admin(&ctx, &headers)
+        } else {
+            require_device(&ctx, &headers)
+        }
+    })
+    .await
+    .unwrap_or_else(|_| Err(ApiError::internal()));
+    if let Err(error) = authorized {
         return error.into_response();
     }
     next.run(request).await

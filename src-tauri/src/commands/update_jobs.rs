@@ -52,8 +52,8 @@ pub const KEEP_UPDATE_JOBS: i64 = 50;
 /// それより古いジョブを、何日で消すか。
 pub const KEEP_UPDATE_JOB_DAYS: i64 = 30;
 
-/// 1つのジョブに戻す「前回までの候補」の上限。
-const PENDING_CANDIDATE_LIMIT: i64 = 2_000;
+/// 前回までの候補は全件たどるが、一度に読む本文データはこの件数に収める。
+const PENDING_CANDIDATE_PAGE_SIZE: i64 = 500;
 
 /// メタデータの指紋が同じでも、この日数を過ぎたら本文まで突き合わせる。
 ///
@@ -848,43 +848,53 @@ fn build_initial_items(
     // これをやらないと、取得元の一覧が前回位置から先しか返さないぶん、
     // 「一度出たきり二度と出ない作品」が生まれる。
     if include_work || include_author || include_series {
-        for candidate in state
-            .db
-            .list_pending_update_candidates(PENDING_CANDIDATE_LIMIT)?
-        {
-            // 前回の改稿候補も「新作だけ」の範囲には含めない。次の全件確認には残す。
-            if new_works_only && candidate.kind == CandidateKind::Revision.key() {
-                continue;
-            }
-            // 作品だけを確認するときは、その確認対象の改稿だけを戻す。
-            // 作者・シリーズ由来の新作候補や、別の作品の改稿まで混ぜない。
-            if !candidate_matches_scope(&candidate, &included_work_keys, &eligible_targets) {
-                continue;
-            }
-            // すでに手元にあるものは、改稿として見つけた場合だけ残す。
-            let saved = state
-                .db
-                .get_download_by_source(&candidate.source, &candidate.source_id)?;
-            if saved.is_some() && candidate.kind != CandidateKind::Revision.key() {
-                state
+        let mut cursor: Option<(String, String)> = None;
+        loop {
+            let page = state.db.list_pending_update_candidates_after(
+                cursor
+                    .as_ref()
+                    .map(|(source, source_id)| (source.as_str(), source_id.as_str())),
+                PENDING_CANDIDATE_PAGE_SIZE,
+            )?;
+            let Some(last) = page.last() else {
+                break;
+            };
+            cursor = Some((last.source.clone(), last.source_id.clone()));
+            for candidate in page {
+                // 前回の改稿候補も「新作だけ」の範囲には含めない。次の全件確認には残す。
+                if new_works_only && candidate.kind == CandidateKind::Revision.key() {
+                    continue;
+                }
+                // 作品だけを確認するときは、その確認対象の改稿だけを戻す。
+                // 作者・シリーズ由来の新作候補や、別の作品の改稿まで混ぜない。
+                if !candidate_matches_scope(&candidate, &included_work_keys, &eligible_targets) {
+                    continue;
+                }
+                // すでに手元にあるものは、改稿として見つけた場合だけ残す。
+                let saved = state
                     .db
-                    .clear_update_candidate(&candidate.source, &candidate.source_id)?;
-                continue;
+                    .get_download_by_source(&candidate.source, &candidate.source_id)?;
+                if saved.is_some() && candidate.kind != CandidateKind::Revision.key() {
+                    state
+                        .db
+                        .clear_update_candidate(&candidate.source, &candidate.source_id)?;
+                    continue;
+                }
+                items.push(UpdateJobItemInput {
+                    item_type: "candidate".to_string(),
+                    source: Some(candidate.source),
+                    source_id: Some(candidate.source_id),
+                    target_type: candidate.target_type,
+                    title: candidate.title,
+                    payload_json: candidate.payload_json,
+                    // 確認のみのときは選ぶ前の状態で並べ、自動保存なら最初から待機列へ。
+                    status: if request.mode == "auto_save" {
+                        "queued".to_string()
+                    } else {
+                        "candidate".to_string()
+                    },
+                });
             }
-            items.push(UpdateJobItemInput {
-                item_type: "candidate".to_string(),
-                source: Some(candidate.source),
-                source_id: Some(candidate.source_id),
-                target_type: candidate.target_type,
-                title: candidate.title,
-                payload_json: candidate.payload_json,
-                // 確認のみのときは選ぶ前の状態で並べ、自動保存なら最初から待機列へ。
-                status: if request.mode == "auto_save" {
-                    "queued".to_string()
-                } else {
-                    "candidate".to_string()
-                },
-            });
         }
     }
 
@@ -4535,6 +4545,63 @@ mod tests {
             .set_download_meta_state(id, None, "2020-01-01T00:00:00Z")
             .unwrap();
         assert!(!super::pixiv_listing_confirms_recent_copy(&state, &dl));
+        drop(state);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_target_check_recovers_pending_candidates_beyond_the_global_first_page() {
+        let root = std::env::temp_dir().join(format!("piep-pending-pages-{}", make_job_id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let state = Arc::new(AppState::new(
+            Database::open(&root.join("piep.db"), &root.join("downloads")).unwrap(),
+        ));
+        let candidate = |source_id: String, author: &str| crate::database::UpdateCandidateInput {
+            source: "pixiv".into(),
+            source_id,
+            kind: "new".into(),
+            title: "Candidate".into(),
+            payload_json: serde_json::json!({"originSourceKey": author}).to_string(),
+            target_type: Some("author".into()),
+        };
+        state
+            .db
+            .upsert_update_candidate(&candidate("a-requested".into(), "requested"))
+            .unwrap();
+        // More recent, unrelated candidates used to consume the entire global
+        // 2,000-row allowance before the requested author's scope was applied.
+        for index in 0..2_001 {
+            state
+                .db
+                .upsert_update_candidate(&candidate(format!("noise-{index:04}"), "another-author"))
+                .unwrap();
+        }
+        state
+            .db
+            .upsert_update_candidate(&candidate("z-requested".into(), "requested"))
+            .unwrap();
+        let request = StartUpdateJobRequest {
+            scope: "author".into(),
+            mode: "check_only".into(),
+            work_ids: None,
+            target_ids: None,
+            credentials: None,
+            watch_saved: None,
+            new_works_only: Some(true),
+            adhoc_targets: Some(vec![AdhocUpdateTarget {
+                target_type: "author".into(),
+                source: "pixiv".into(),
+                source_key: "requested".into(),
+                display_name: "Requested".into(),
+            }]),
+        };
+        let items = build_initial_items(&state, &request).unwrap();
+        let keys = items
+            .iter()
+            .filter(|item| item.item_type == "candidate")
+            .filter_map(|item| item.source_id.as_deref())
+            .collect::<HashSet<_>>();
+        assert_eq!(keys, HashSet::from(["a-requested", "z-requested"]));
         drop(state);
         let _ = std::fs::remove_dir_all(root);
     }

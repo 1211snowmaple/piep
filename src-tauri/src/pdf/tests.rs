@@ -125,6 +125,74 @@ fn a_file_that_is_not_a_pdf_reports_that_it_cannot_be_opened() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+#[test]
+fn oversized_pdf_is_refused_by_extraction_and_rendering_before_reading_it() {
+    let dir = temp_dir();
+    let path = dir.join("oversized.pdf");
+    std::fs::File::create(&path)
+        .unwrap()
+        .set_len(super::engine::MAX_PDF_BYTES + 1)
+        .unwrap();
+    assert!(extract_text(&path).unwrap_err().contains("大きすぎ"));
+    assert!(render_page(&path, 0, 600).unwrap_err().contains("大きすぎ"));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn extraction_bounds_page_count_and_expanded_text() {
+    let dir = temp_dir();
+    let mut pdf = Pdf::new();
+    let catalog = pdf.reserve();
+    let pages = pdf.reserve();
+    let mut children = Vec::new();
+    for _ in 0..=super::extract::MAX_EXTRACT_PAGES {
+        children.push(pdf.add(&format!(
+            "<< /Type /Page /Parent {pages} 0 R /MediaBox [0 0 300 200] >>"
+        )));
+    }
+    let kids = children
+        .iter()
+        .map(|page| format!("{page} 0 R"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    pdf.set(
+        pages,
+        &format!(
+            "<< /Type /Pages /Kids [{kids}] /Count {} >>",
+            children.len()
+        ),
+    );
+    pdf.set(catalog, &format!("<< /Type /Catalog /Pages {pages} 0 R >>"));
+    let path = write(&dir, "many-pages.pdf", pdf.finish(catalog));
+    assert!(extract_text(&path)
+        .unwrap_err()
+        .contains("ページ数が多すぎ"));
+
+    let mut pdf = Pdf::new();
+    let catalog = pdf.reserve();
+    let pages = pdf.reserve();
+    let page = pdf.reserve();
+    let font = pdf.add("<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>");
+    // Pdfium caps a single text object's character count at 32,767. Separate
+    // objects exercise the page budget rather than that unrelated parser cap.
+    let text = "x".repeat(30_000);
+    let content = pdf.stream(
+        &(0..=super::extract::MAX_PAGE_CHARS / text.len())
+            .map(|index| format!("BT /F1 12 Tf 20 {} Td ({text}) Tj ET\n", 20 + index * 20))
+            .collect::<String>(),
+    );
+    pdf.set(page, &format!("<< /Type /Page /Parent {pages} 0 R /MediaBox [0 0 300 200] /Resources << /Font << /F1 {font} 0 R >> >> /Contents {content} 0 R >>"));
+    pdf.set(
+        pages,
+        &format!("<< /Type /Pages /Kids [{page} 0 R] /Count 1 >>"),
+    );
+    pdf.set(catalog, &format!("<< /Type /Catalog /Pages {pages} 0 R >>"));
+    let path = write(&dir, "expanded-text.pdf", pdf.finish(catalog));
+    let error = extract_text(&path).expect_err("expanded page text must be bounded");
+    assert!(error.contains("文字数が取り込み上限"), "{error}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// 文字も図も無い、同じ大きさの紙。描いたものを比べる相手に使う。
 fn blank_pdf(dir: &std::path::Path) -> std::path::PathBuf {
     let mut pdf = Pdf::new();

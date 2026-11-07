@@ -5,7 +5,7 @@
 //! piep は PDF を外のアプリへ渡さない（[`crate::commands::shell`] が起動して
 //! よい種類を絞っている）ので、見る手段はアプリの中にしか作れない。
 
-use super::engine::bindings;
+use super::engine::{bindings, read_pdf_bytes};
 use pdfium_render::prelude::*;
 use std::path::Path;
 
@@ -64,7 +64,7 @@ const PAPER: u32 = 0xFFFF_FFFF;
 pub fn render_page(path: &Path, index: usize, target_width: u32) -> Result<RenderedPage, String> {
     let bindings = bindings()?;
     // 道ではなく中身を渡す理由は [`super::extract::extract_text`] と同じ。
-    let bytes = std::fs::read(path).map_err(|error| format!("PDF を読めません: {error}"))?;
+    let bytes = read_pdf_bytes(path)?;
     let document = unsafe { bindings.FPDF_LoadMemDocument64(&bytes, None) };
     if document.is_null() {
         return Err("PDF として開けません（壊れているか、鍵がかかっています）".to_string());

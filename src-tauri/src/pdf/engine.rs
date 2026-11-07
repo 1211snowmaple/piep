@@ -9,6 +9,7 @@
 //! ここでは束ねた本体だけを持ち、開け閉めは `extract` 側の番人が受け持つ。
 
 use pdfium_render::prelude::*;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
@@ -19,6 +20,28 @@ use std::sync::{Mutex, OnceLock};
 static LIBRARY_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
 
 static BINDINGS: OnceLock<Result<Bindings, String>> = OnceLock::new();
+
+pub(super) const MAX_PDF_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Restored/local attachments need the same size limit as network downloads.
+/// Bound the read itself as well, so a growing file cannot evade the check.
+pub(super) fn read_pdf_bytes(path: &Path) -> Result<Vec<u8>, String> {
+    let file = std::fs::File::open(path).map_err(|error| format!("PDF を読めません: {error}"))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| format!("PDF を調べられません: {error}"))?;
+    if !metadata.is_file() || metadata.len() > MAX_PDF_BYTES {
+        return Err("PDF が大きすぎるか、通常のファイルではありません".into());
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_PDF_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("PDF を読めません: {error}"))?;
+    if bytes.len() as u64 > MAX_PDF_BYTES {
+        return Err("PDF が大きすぎます".into());
+    }
+    Ok(bytes)
+}
 
 /// 束ねた pdfium。`thread_safe` により、`FPDF_*` の呼び出しは中で直列化される。
 struct Bindings(Box<dyn PdfiumLibraryBindings>);

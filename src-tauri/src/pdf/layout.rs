@@ -1,6 +1,7 @@
 //! 文字の位置から行と段落を組み直す。タグが無い PDF のための経路。
 
 use pdfium_render::prelude::*;
+use std::collections::HashMap;
 use std::os::raw::c_double;
 
 /// ページ上の一文字。
@@ -59,7 +60,7 @@ pub(super) fn read_glyphs(
     let mut glyphs = Vec::with_capacity(count.max(0) as usize);
     // 同じ文字オブジェクトの番号を何度も引かない。ページ 1,300 文字に対して
     // オブジェクトは数十しかない。
-    let mut object_mcid: Vec<(usize, i32)> = Vec::new();
+    let mut object_mcid = HashMap::new();
     for index in 0..count {
         let code = unsafe { bindings.FPDFText_GetUnicode(text_page, index) };
         let Some(ch) = char::from_u32(code) else {
@@ -80,14 +81,9 @@ pub(super) fn read_glyphs(
         }
         let object = unsafe { bindings.FPDFText_GetTextObject(text_page, index) };
         let key = object as usize;
-        let mcid = match object_mcid.iter().find(|(k, _)| *k == key) {
-            Some((_, mcid)) => *mcid,
-            None => {
-                let mcid = unsafe { bindings.FPDFPageObj_GetMarkedContentID(object) };
-                object_mcid.push((key, mcid));
-                mcid
-            }
-        };
+        let mcid = *object_mcid
+            .entry(key)
+            .or_insert_with(|| unsafe { bindings.FPDFPageObj_GetMarkedContentID(object) });
         glyphs.push(Glyph {
             ch,
             origin_y: y,

@@ -3996,6 +3996,193 @@ fn resync_repairs_partial_semantic_coverage_not_just_an_empty_sidecar() {
 }
 
 #[test]
+fn unreadable_or_invalid_source_keeps_the_previous_index_and_remains_pending() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let id = insert_download(
+        &db,
+        &storage,
+        "index-read-retry",
+        "作品",
+        "作者",
+        &[],
+        "oldreadindexmarker",
+    );
+    let source = storage.join("pixiv/index-read-retry/v1/original.json");
+    db.conn
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE downloads SET content_hash = 'replacement-hash' WHERE id = ?1",
+            [id],
+        )
+        .unwrap();
+    for invalid in [None, Some("{"), Some("null")] {
+        if let Some(raw) = invalid {
+            fs::write(&source, raw).unwrap();
+        } else {
+            fs::remove_file(&source).unwrap();
+        }
+        assert!(db.reindex_download(id).unwrap_err().contains("検索索引"));
+        assert_eq!(
+            db.rebuild_search_index_batch(20).unwrap().pending_downloads,
+            1
+        );
+        let old_hash: String = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT content_hash FROM search_index_state WHERE download_id = ?1",
+                [id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_ne!(old_hash, "replacement-hash");
+        assert!(crate::database::tantivy_index::matching_download_ids(
+            &storage,
+            "oldreadindexmarker"
+        )
+        .unwrap()
+        .contains(&id));
+    }
+    fs::write(&source, r#"{"text":"repairedreadindexmarker"}"#).unwrap();
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        let locked = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&source)
+            .unwrap();
+        assert!(db.reindex_download(id).is_err());
+        assert_eq!(db.get_search_index_status().unwrap().pending_downloads, 1);
+        drop(locked);
+    }
+    db.reindex_download(id).unwrap();
+    assert_eq!(db.get_search_index_status().unwrap().pending_downloads, 0);
+    assert!(crate::database::tantivy_index::matching_download_ids(
+        &storage,
+        "repairedreadindexmarker"
+    )
+    .unwrap()
+    .contains(&id));
+    assert!(
+        !crate::database::tantivy_index::matching_download_ids(&storage, "oldreadindexmarker")
+            .unwrap()
+            .contains(&id)
+    );
+}
+
+#[test]
+fn deleting_legacy_editor_assets_preserves_other_works_and_rolls_back_with_the_database() {
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let first = insert_download_unindexed(
+        &db,
+        &storage,
+        "editor-delete-first",
+        "作品1",
+        "作者",
+        &[],
+        "本文",
+    );
+    let second = insert_download_unindexed(
+        &db,
+        &storage,
+        "editor-delete-second",
+        "作品2",
+        "作者",
+        &[],
+        "本文",
+    );
+    let image = |id: i64| {
+        storage
+            .join("editor-assets")
+            .join(id.to_string())
+            .join("image.png")
+    };
+    for id in [first, second] {
+        let path = image(id);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, b"editor image").unwrap();
+    }
+    db.delete_download(first).unwrap();
+    assert!(!image(first).exists());
+    assert_eq!(fs::read(image(second)).unwrap(), b"editor image");
+    db.conn
+        .lock()
+        .unwrap()
+        .execute_batch(&format!(
+            "CREATE TRIGGER fail_editor_delete BEFORE DELETE ON downloads WHEN OLD.id = {second}
+         BEGIN SELECT RAISE(ABORT, 'expected delete failure'); END;"
+        ))
+        .unwrap();
+    assert!(db.delete_download(second).is_err());
+    assert!(db.get_download(second).is_ok());
+    assert!(storage
+        .join("pixiv/editor-delete-second/v1/original.json")
+        .exists());
+    assert_eq!(fs::read(image(second)).unwrap(), b"editor image");
+    db.conn
+        .lock()
+        .unwrap()
+        .execute_batch("DROP TRIGGER fail_editor_delete")
+        .unwrap();
+    db.delete_download(second).unwrap();
+    assert!(!image(second).exists());
+}
+
+#[cfg(windows)]
+#[test]
+fn deleting_legacy_editor_assets_does_not_follow_directory_links() {
+    fn junction(link: &Path, target: &Path) {
+        let made = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .output()
+            .unwrap();
+        assert!(
+            made.status.success(),
+            "{}",
+            String::from_utf8_lossy(&made.stderr)
+        );
+    }
+    let (_temp, root, storage) = temp_paths();
+    let db = Database::open(&root.join("piep.db"), &storage).unwrap();
+    let id = insert_download_unindexed(
+        &db,
+        &storage,
+        "editor-delete-linked",
+        "作品",
+        "作者",
+        &[],
+        "本文",
+    );
+    // mklink は "/" を区切りではなく指定として読むので、"\" だけで組む。
+    let other = storage.join("pixiv").join("other-work");
+    fs::create_dir_all(&other).unwrap();
+    fs::write(other.join("keep.png"), b"other work").unwrap();
+    let parent = storage.join("editor-assets");
+    fs::create_dir(&parent).unwrap();
+    let editor = parent.join(id.to_string());
+    junction(&editor, &other);
+    assert!(db.delete_download(id).unwrap_err().contains("linked"));
+    assert!(db.get_download(id).is_ok());
+    assert!(storage
+        .join("pixiv/editor-delete-linked/v1/original.json")
+        .exists());
+    assert_eq!(fs::read(other.join("keep.png")).unwrap(), b"other work");
+    fs::remove_dir(&editor).unwrap();
+    fs::create_dir(&editor).unwrap();
+    junction(&editor.join("nested"), &other);
+    db.delete_download(id).unwrap();
+    assert!(!editor.exists());
+    assert_eq!(fs::read(other.join("keep.png")).unwrap(), b"other work");
+}
+
+#[test]
 fn opening_database_recovers_both_sides_of_an_interrupted_delete() {
     let (_temp, root, storage) = temp_paths();
     let db_path = root.join("piep.db");
@@ -4011,25 +4198,45 @@ fn opening_database_recovers_both_sides_of_an_interrupted_delete() {
         "削除処理の途中で停止する本文",
     );
     let original = storage.join("pixiv").join("delete-recovery");
+    let editor = storage.join("editor-assets").join(id.to_string());
+    fs::create_dir_all(&editor).unwrap();
+    fs::write(editor.join("image.png"), b"editor image").unwrap();
     let operation = root.join("delete-staging").join("before-commit");
     fs::create_dir_all(&operation).unwrap();
-    let manifest = vec![StagedDeleteEntry {
-        download_id: id,
-        source: "pixiv".to_string(),
-        source_id: "delete-recovery".to_string(),
-        staged_name: "0".to_string(),
-    }];
+    let manifest = vec![
+        StagedDeleteEntry {
+            download_id: id,
+            source: "pixiv".to_string(),
+            source_id: "delete-recovery".to_string(),
+            staged_name: "0".to_string(),
+            editor_assets: false,
+        },
+        StagedDeleteEntry {
+            download_id: id,
+            source: "pixiv".into(),
+            source_id: "delete-recovery".into(),
+            staged_name: "1".into(),
+            editor_assets: true,
+        },
+    ];
+    let mut portable_manifest = serde_json::to_value(&manifest).unwrap();
+    portable_manifest[0]
+        .as_object_mut()
+        .unwrap()
+        .remove("editorAssets");
     fs::write(
         operation.join("manifest.json"),
-        serde_json::to_vec(&manifest).unwrap(),
+        serde_json::to_vec(&portable_manifest).unwrap(),
     )
     .unwrap();
     fs::rename(&original, operation.join("0")).unwrap();
+    fs::rename(&editor, operation.join("1")).unwrap();
     drop(db);
 
     // SQLite still has the row, so startup rolls the file move back.
     let db = Database::open(&db_path, &storage).unwrap();
     assert!(original.exists());
+    assert_eq!(fs::read(editor.join("image.png")).unwrap(), b"editor image");
     assert!(db.get_download(id).is_ok());
 
     // Simulate a crash just after SQLite committed but before staged files
@@ -4042,6 +4249,7 @@ fn opening_database_recovers_both_sides_of_an_interrupted_delete() {
     )
     .unwrap();
     fs::rename(&original, operation.join("0")).unwrap();
+    fs::rename(&editor, operation.join("1")).unwrap();
     {
         let conn = db.conn.lock().unwrap();
         conn.execute("DELETE FROM downloads WHERE id = ?1", params![id])
@@ -4051,6 +4259,7 @@ fn opening_database_recovers_both_sides_of_an_interrupted_delete() {
 
     let reopened = Database::open(&db_path, &storage).unwrap();
     assert!(!original.exists());
+    assert!(!editor.exists());
     assert!(!operation.exists());
     assert!(reopened.get_download(id).is_err());
     assert_eq!(

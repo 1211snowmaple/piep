@@ -488,12 +488,19 @@ mod tests {
         let db = Database::open(&path, &root.0.join("storage")).unwrap();
         db.set_semantic_index_enabled(false).unwrap();
         let conn = rusqlite::Connection::open(path).unwrap();
-        conn.execute_batch(
+        // 索引は原本を読めないと失敗するので、本文の原本も置く。
+        let body = root.0.join("synthetic-body.json");
+        std::fs::write(&body, br#"{"content":"synthetic"}"#).unwrap();
+        conn.execute(
             "INSERT INTO downloads(id, source, source_id, title, author_name, author_id,
                                    content_type, json_path, downloaded_at)
              VALUES (1, 'pixiv', 'synthetic-tag-sync', '灯台', '作者', 'test-author',
-                     'synthetic', 'missing-synthetic-body', '2026-01-01');
-             INSERT INTO tags(name) VALUES ('推理');
+                     'synthetic', ?1, '2026-01-01')",
+            [body.to_string_lossy()],
+        )
+        .unwrap();
+        conn.execute_batch(
+            "INSERT INTO tags(name) VALUES ('推理');
              CREATE TRIGGER reject_test_index_marker BEFORE INSERT ON search_index_state
              BEGIN SELECT RAISE(ABORT, 'injected index-state failure'); END;",
         )

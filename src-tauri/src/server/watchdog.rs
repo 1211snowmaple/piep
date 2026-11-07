@@ -27,6 +27,7 @@ const BACKOFF: [Duration; 3] = [
 ];
 const FAILURES_BEFORE_DOWN: u32 = 5;
 const DOWN_RETRY: Duration = Duration::from_secs(60 * 60);
+const DEFERRED_ROLLBACK_ENV: &str = "PIEP_SERVER_DEFERRED_ROLLBACK";
 
 /// 本体が、起動して自分の口に `hello` を通したあとに書く。
 #[derive(Debug, Serialize, Deserialize)]
@@ -93,6 +94,9 @@ fn switch_to_pending(paths: &ServerPaths) -> Result<String, String> {
 /// 前の版と DB の写しへ戻し、失敗した版を飛ばすよう記録する。
 fn roll_back(paths: &ServerPaths, failed: &str, reason: &str) -> Result<(), String> {
     let previous = read_version_file(&paths.previous_version()).ok_or("戻す版がありません")?;
+    // DB を戻し始めたあとは、新しい版を再び起動してはいけない。current と
+    // pending の間で止まっても、次の起動では切り替えより先に戻しを完了する。
+    write_atomic(&rollback_mark(paths), failed.as_bytes())?;
     restore_databases(paths)?;
     write_atomic(&paths.current_version(), previous.as_bytes())?;
     let mut record = UpdateRecord::load(paths);
@@ -104,7 +108,73 @@ fn roll_back(paths: &ServerPaths, failed: &str, reason: &str) -> Result<(), Stri
     ));
     record.save(paths);
     clear_pending(paths)?;
+    fs::remove_file(rollback_mark(paths))
+        .map_err(|error| format!("戻しの印を消せません: {error}"))?;
     Ok(())
+}
+
+fn rollback_mark(paths: &ServerPaths) -> std::path::PathBuf {
+    paths.state().join("rollback-version")
+}
+
+fn resume_rollback(paths: &ServerPaths) -> Result<(), String> {
+    if rollback_mark(paths).exists() {
+        let failed = read_version_file(&rollback_mark(paths)).ok_or("戻しの印を読めません")?;
+        roll_back(paths, &failed, "中断された旧版への戻しを再開しました")?;
+    }
+    Ok(())
+}
+
+fn requested_rollback_mark(paths: &ServerPaths) -> PathBuf {
+    paths.state().join("requested-rollback-version")
+}
+
+/// 本体は開いているDBを置き換えず、終了後の見張り役へ戻しを頼む。
+pub fn request_rollback(paths: &ServerPaths, version: &str) -> Result<(), String> {
+    check_rollback_support()?;
+    write_requested_rollback(paths, version)
+}
+
+pub fn check_rollback_support() -> Result<(), String> {
+    check_rollback_capability(std::env::var(DEFERRED_ROLLBACK_ENV).ok().as_deref())
+}
+
+fn check_rollback_capability(value: Option<&str>) -> Result<(), String> {
+    if value == Some("1") {
+        Ok(())
+    } else {
+        Err("見張り役が以前のバージョンです。サーバーの起動タスクかPCを再起動してから、もう一度戻してください".into())
+    }
+}
+
+fn write_requested_rollback(paths: &ServerPaths, version: &str) -> Result<(), String> {
+    if read_version_file(&paths.previous_version()).as_deref() != Some(version)
+        || !paths.version_dir(version).join("piep-server.exe").is_file()
+    {
+        return Err("戻すバージョンを確かめられません".into());
+    }
+    write_atomic(&requested_rollback_mark(paths), version.as_bytes())
+}
+
+fn resume_requested_rollback(paths: &ServerPaths) -> Result<(), String> {
+    if !requested_rollback_mark(paths).exists() {
+        return Ok(());
+    }
+    let target = read_version_file(&requested_rollback_mark(paths))
+        .ok_or("頼まれた戻しのバージョンを読めません")?;
+    let current = current_version(paths).ok_or("動いていたバージョンを読めません")?;
+    if current != target {
+        if read_version_file(&paths.previous_version()).as_deref() != Some(target.as_str()) {
+            return Err("戻すバージョンが変わっています".into());
+        }
+        roll_back(paths, &current, "利用者が前のバージョンへ戻しました")?;
+    }
+    let mut record = UpdateRecord::load(paths);
+    record.last_error = None;
+    record.save(paths);
+    // currentを戻した直後に中断しても、済んだ戻しで旧版をskippedへ足さない。
+    fs::remove_file(requested_rollback_mark(paths))
+        .map_err(|error| format!("頼まれた戻しの印を消せません: {error}"))
 }
 
 fn clear_pending(paths: &ServerPaths) -> Result<(), String> {
@@ -182,6 +252,11 @@ fn bootstrap_target(paths: &ServerPaths, executable: &Path) -> Result<Option<Pat
 /// 新版の見張り役そのものが起動できない場合も、固定入口の見張り役で pending の
 /// 起動確認・巻き戻しを続ける。0 は利用者が止めた場合なので、そのまま終了する。
 fn delegate_bootstrap(paths: &ServerPaths, executable: &Path) -> Option<i32> {
+    // 戻し先の旧版は、この復旧用の印を知らないことがある。固定入口が先に
+    // 復旧してから動かし、古い見張り役へ未完了の戻しを渡さない。
+    if rollback_mark(paths).exists() || requested_rollback_mark(paths).exists() {
+        return None;
+    }
     let target = match bootstrap_target(paths, executable) {
         Ok(Some(target)) => target,
         Ok(None) => return None,
@@ -223,14 +298,21 @@ fn delegate_bootstrap(paths: &ServerPaths, executable: &Path) -> Option<i32> {
 fn spawn_body(paths: &ServerPaths, version: &str, job: &JobGuard) -> Result<Child, String> {
     let _ = fs::remove_file(paths.ready_mark());
     let executable = paths.version_dir(version).join("piep-server.exe");
-    let child = Command::new(&executable)
-        .arg("run")
-        .arg("--data")
-        .arg(&paths.root)
+    let child = body_command(paths, version)
         .spawn()
         .map_err(|error| format!("{} を起動できません: {error}", executable.display()))?;
     job.adopt(&child);
     Ok(child)
+}
+
+fn body_command(paths: &ServerPaths, version: &str) -> Command {
+    let mut command = Command::new(paths.version_dir(version).join("piep-server.exe"));
+    command
+        .arg("run")
+        .arg("--data")
+        .arg(&paths.root)
+        .env(DEFERRED_ROLLBACK_ENV, "1");
+    command
 }
 
 /// 本体が準備できたか、終わったかを待つ。
@@ -280,6 +362,8 @@ pub fn run(paths: &ServerPaths) -> Result<i32, String> {
     let mut backoff = Backoff::default();
     note(paths, &format!("見張り役を始めました（{VERSION}）"));
 
+    resume_rollback(paths)?;
+    resume_requested_rollback(paths)?;
     // 更新の途中で機械が落ちたら、切り替える前の状態から続ける。
     let mut applying = resume_pending_update(paths)?;
 
@@ -321,6 +405,8 @@ pub fn run(paths: &ServerPaths) -> Result<i32, String> {
                 return Ok(0);
             }
             Some(EXIT_RESTART) => {
+                resume_rollback(paths)?;
+                resume_requested_rollback(paths)?;
                 note(paths, "管理画面から頼まれたので立ち上げ直します");
                 backoff = Backoff::default();
             }
@@ -526,6 +612,97 @@ mod tests {
         );
         roll_back(&paths, "1.1.0", "起動に失敗").unwrap();
         assert_eq!(current_version(&paths).as_deref(), Some("1.0.0"));
+    }
+
+    #[test]
+    fn an_interrupted_rollback_finishes_before_retrying_the_pending_version() {
+        for current in ["1.1.0", "1.0.0"] {
+            let (_dir, paths) = laid_out();
+            let database = rusqlite::Connection::open(paths.database()).unwrap();
+            database
+                .execute_batch("CREATE TABLE t(v); INSERT INTO t VALUES (1);")
+                .unwrap();
+            update::back_up_databases(&paths).unwrap();
+            database.execute("UPDATE t SET v = 2", []).unwrap();
+            drop(database);
+            write_atomic(&paths.previous_version(), b"1.0.0").unwrap();
+            write_atomic(&paths.pending_version(), b"1.1.0").unwrap();
+            write_atomic(&paths.current_version(), current.as_bytes()).unwrap();
+            write_atomic(&rollback_mark(&paths), b"1.1.0").unwrap();
+
+            resume_rollback(&paths).unwrap();
+
+            assert_eq!(current_version(&paths).as_deref(), Some("1.0.0"));
+            assert!(!paths.pending_version().exists());
+            assert!(!rollback_mark(&paths).exists());
+            assert_eq!(UpdateRecord::load(&paths).skipped, ["1.1.0"]);
+            let database = rusqlite::Connection::open(paths.database()).unwrap();
+            let value: i64 = database
+                .query_row("SELECT v FROM t", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(value, 1);
+        }
+    }
+
+    #[test]
+    fn a_manual_rollback_is_deferred_until_the_body_exits_and_can_resume() {
+        let (_dir, paths) = laid_out();
+        let database = rusqlite::Connection::open(paths.database()).unwrap();
+        database
+            .execute_batch("CREATE TABLE t(v); INSERT INTO t VALUES (1);")
+            .unwrap();
+        update::back_up_databases(&paths).unwrap();
+        database.execute("UPDATE t SET v = 2", []).unwrap();
+        write_atomic(&paths.previous_version(), b"1.0.0").unwrap();
+        write_atomic(&paths.current_version(), b"1.1.0").unwrap();
+
+        write_requested_rollback(&paths, "1.0.0").unwrap();
+        assert_eq!(current_version(&paths).as_deref(), Some("1.1.0"));
+        assert_eq!(
+            database
+                .query_row("SELECT v FROM t", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        assert!(delegate_bootstrap(&paths, &paths.root.join("piep-server.exe")).is_none());
+        drop(database);
+
+        resume_requested_rollback(&paths).unwrap();
+        assert_eq!(current_version(&paths).as_deref(), Some("1.0.0"));
+        assert!(!requested_rollback_mark(&paths).exists());
+        assert_eq!(UpdateRecord::load(&paths).skipped, ["1.1.0"]);
+        assert!(UpdateRecord::load(&paths).last_error.is_none());
+        let database = rusqlite::Connection::open(paths.database()).unwrap();
+        assert_eq!(
+            database
+                .query_row("SELECT v FROM t", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        drop(database);
+
+        // ポインターを書いた直後、依頼の印を消すより前に中断した場合。
+        write_atomic(&requested_rollback_mark(&paths), b"1.0.0").unwrap();
+        resume_requested_rollback(&paths).unwrap();
+        assert_eq!(UpdateRecord::load(&paths).skipped, ["1.1.0"]);
+        assert!(!requested_rollback_mark(&paths).exists());
+        assert!(write_requested_rollback(&paths, "9.9.9").is_err());
+    }
+
+    #[test]
+    fn only_watchdogs_that_support_deferred_rollback_advertise_it_to_the_body() {
+        let (_dir, paths) = laid_out();
+        let command = body_command(&paths, "1.1.0");
+        let capability = command
+            .get_envs()
+            .find(|(name, _)| *name == DEFERRED_ROLLBACK_ENV)
+            .and_then(|(_, value)| value.and_then(|value| value.to_str()));
+        assert!(check_rollback_capability(capability).is_ok());
+        for unsupported in [None, Some(""), Some("0"), Some("2")] {
+            assert!(check_rollback_capability(unsupported)
+                .unwrap_err()
+                .contains("再起動"));
+        }
     }
 
     #[test]
