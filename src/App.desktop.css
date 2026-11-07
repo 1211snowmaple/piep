@@ -271,6 +271,8 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .work-tag, .work-tag-overflow { flex: none; max-width: 100%; height: 24px; padding: 2px 7px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border-radius: 999px; background: var(--piep-tag-bg); color: var(--piep-tag-text); font-size: var(--fs-tiny); line-height: 18px; }
 .work-tags[data-overflow] .work-tag:first-child { max-width: calc(100% - 45px); }
 .work-tag-overflow { min-width: 38px; border: 1px solid var(--piep-blue); background: var(--piep-surface); color: var(--piep-blue); text-align: center; font-variant-numeric: tabular-nums; }
+button.work-tag-overflow { font-family: inherit; font-weight: inherit; cursor: pointer; }
+button.work-tag-overflow:active { background: var(--piep-tag-bg); }
 .work-meta { display: inline-flex; align-items: center; gap: 3px; white-space: nowrap; }
 .work-meta svg { width: 12px; height: 12px; }
 .load-more { margin: 18px 0; }

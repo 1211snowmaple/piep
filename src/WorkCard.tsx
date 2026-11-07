@@ -100,7 +100,7 @@ export function WorkCard({ work, onRead, onDetail, offline = false, offlineAutho
               <ProviderMark source={work.source} compact />
             </div>
             : <div className="work-card-identity"><ProviderMark source={work.source} compact /></div>}
-          {(work.tags?.length ?? 0) > 0 && <div className="work-card-tags"><MobileTagRow tags={work.tags ?? []} onTag={browsable ? navigation.openTag : undefined} /></div>}
+          {(work.tags?.length ?? 0) > 0 && <div className="work-card-tags"><MobileTagRow tags={work.tags ?? []} onTag={browsable ? navigation.openTag : undefined} onMore={onDetail} /></div>}
           {textHit && <button className="work-card-hit" type="button" aria-label={`本文の ${textHit.page + 1} ページ目を開く`} onClick={textHit.onOpen}>
             <span className="work-card-hit-page">{textHit.page + 1} ページ目{textHit.pages > 1 ? `ほか ${textHit.pages - 1} ページ` : ""}</span>
             <span className="work-card-hit-text">{markTerms(textHit.snippet, textHit.terms)}</span>

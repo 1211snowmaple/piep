@@ -3,7 +3,8 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 const gap = 4;
 
 // デスクトップ版 TagRow と同じく、固定件数ではなく実際の横幅で表示数を決める。
-export function MobileTagRow({ tags, onTag }: { tags: string[]; onTag?: (tag: string) => void }) {
+// 「+N」を押すと onMore を呼ぶ。カードでは作品情報を開き、そこで全部のタグを見せる（デスクトップ版は吹き出しで出す）。
+export function MobileTagRow({ tags, onTag, onMore }: { tags: string[]; onTag?: (tag: string) => void; onMore?: () => void }) {
   const rowRef = useRef<HTMLSpanElement>(null);
   const [visibleCount, setVisibleCount] = useState(tags.length);
 
@@ -65,6 +66,8 @@ export function MobileTagRow({ tags, onTag }: { tags: string[]; onTag?: (tag: st
     {tags.map((tag, index) => onTag
       ? <button type="button" className="work-tag" data-tag data-hidden={index >= visibleCount || undefined} key={`${tag}:${index}`} onClick={() => onTag(tag)}>#{tag}</button>
       : <span className="work-tag" data-tag data-hidden={index >= visibleCount || undefined} key={`${tag}:${index}`}>#{tag}</span>)}
-    {tags.length > 1 && <span className="work-tag-overflow" data-tag-overflow data-hidden={visibleCount >= tags.length || undefined}>+{tags.length - visibleCount}</span>}
+    {tags.length > 1 && (onMore
+      ? <button type="button" className="work-tag-overflow" data-tag-overflow data-hidden={visibleCount >= tags.length || undefined} aria-label={`ほか ${tags.length - visibleCount} 件のタグを作品情報で見る`} onClick={onMore}>+{tags.length - visibleCount}</button>
+      : <span className="work-tag-overflow" data-tag-overflow data-hidden={visibleCount >= tags.length || undefined}>+{tags.length - visibleCount}</span>)}
   </span>;
 }
