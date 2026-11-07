@@ -184,6 +184,9 @@ pub struct ImageUrls {
     pub square_medium: String,
     pub medium: String,
     pub large: String,
+    /// 複数ページのイラストの各ページにだけ付く原寸。小説の表紙には無い。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original: Option<String>,
 }
 
 /// Tag on an illustration.

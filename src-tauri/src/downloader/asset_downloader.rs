@@ -406,8 +406,15 @@ pub fn extract_download_targets(data: &Value, is_fanbox: bool, targets: &mut Vec
         }
     } else {
         // Pixiv小説
-        // 1. カバー画像
-        if let Some(cover_url) = data.get("cover_url").and_then(|v| v.as_str()) {
+        // 1. カバー画像（原寸が分かっていればそちら。`cover_url` は縮小版）
+        if let Some(cover_url) = pixiv_original_cover(data) {
+            let filename = sanitize_filename(&extract_filename(cover_url, "cover.jpg"));
+            targets.push(DownloadTarget {
+                url: cover_url.to_string(),
+                sub_folder: "cover",
+                filename,
+            });
+        } else if let Some(cover_url) = data.get("cover_url").and_then(|v| v.as_str()) {
             let filename = sanitize_filename(&extract_filename(cover_url, "cover.jpg"));
             targets.push(DownloadTarget {
                 url: cover_url.to_string(),
@@ -591,7 +598,11 @@ pub fn inject_local_paths(data: &mut Value, assets_dir_name: &str, is_fanbox: bo
             }
         }
     } else {
-        if let Some(cover_url) = data.get("cover_url").and_then(|v| v.as_str()) {
+        if let Some(cover_url) = pixiv_original_cover(data).map(str::to_string) {
+            let filename = sanitize_filename(&extract_filename(&cover_url, "cover.jpg"));
+            data["localCoverPath"] =
+                Value::String(format!("./{}/cover/{}", assets_dir_name, filename));
+        } else if let Some(cover_url) = data.get("cover_url").and_then(|v| v.as_str()) {
             let filename = sanitize_filename(&extract_filename(cover_url, "cover.jpg"));
             data["localCoverPath"] =
                 Value::String(format!("./{}/cover/{}", assets_dir_name, filename));
@@ -701,7 +712,14 @@ pub fn inject_local_paths(data: &mut Value, assets_dir_name: &str, is_fanbox: bo
     }
 }
 
-fn extract_filename(url: &str, default: &str) -> String {
+/// 保存前に探しておいた原寸の表紙。無ければ `None`。
+fn pixiv_original_cover(data: &Value) -> Option<&str> {
+    data.get(super::pixiv_originals::COVER_ORIGINAL_FIELD)
+        .and_then(|v| v.as_str())
+        .filter(|url| !url.trim().is_empty())
+}
+
+pub(crate) fn extract_filename(url: &str, default: &str) -> String {
     let raw = url
         .split('?')
         .next()
