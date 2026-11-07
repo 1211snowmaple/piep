@@ -23,14 +23,24 @@ export function longDate(value: string | null | undefined): string | null {
 
 /**
  * 全体の割合を丸めると、201 ページの本は 200 ページ目で 100% になる。読書位置を片付ける
- * 条件と同じく、最後のページの端まで読んだときだけ読了と書く。デスクトップ版と同じ考え。
+ * 条件と同じく、最後のページの端まで読んだときだけ読了とみなす。デスクトップ版と同じ考え。
  */
 export function readingFinished(progress: number, pageCount: number): boolean {
   return pageCount > 0 && progress * pageCount >= pageCount - 0.02;
 }
 
+/**
+ * 進み具合の百分率。読み終えたときだけ 100 にする。端まで来ていないのに丸めで 100 と出さない。
+ * 少しでも読み進めていれば 1 からにする。読みかけの棚に 0% と並ぶのを避ける。
+ */
+export function readingPercent(progress: number, pageCount = 0): number {
+  if (pageCount > 0 && readingFinished(progress, pageCount)) return 100;
+  if (!(progress > 0)) return 0;
+  return Math.max(1, Math.min(99, Math.round(progress * 100)));
+}
+
 export function progressLabel(progress: number, pageCount: number): string {
-  return readingFinished(progress, pageCount) ? "読了" : `${Math.min(99, Math.round(progress * 100))}%`;
+  return `${readingPercent(progress, pageCount)}%`;
 }
 
 export function scrollMainToTop(): void {

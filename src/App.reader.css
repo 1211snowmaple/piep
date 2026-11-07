@@ -87,7 +87,29 @@
 .reader-notice button { min-height: 40px; padding: 4px 10px; border: 0; border-radius: 9px; background: transparent; color: var(--reader-accent); font-weight: 700; }
 .reader-notice button svg { width: 18px; height: 18px; vertical-align: middle; }
 
-.reader-scroll { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; background: var(--reader-bg); }
+.reader-body { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
+/* 位置は右端の縦の列で示す。端末の細いスクロールバーと二重に出さない。 */
+.reader-scroll { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; background: var(--reader-bg); scrollbar-width: none; }
+.reader-scroll::-webkit-scrollbar { display: none; }
+
+/* ---- 右端の進み具合 ----
+   読むあいだは薄い灰色の短い印。メニューを出すと同じ場所がつまみになる。
+   上下の端は、重なるメニューの高さだけ内側へ寄せる。出し入れで印の位置が跳ねないよう、隠れていても同じ範囲を使う。 */
+.reader-rail { --reader-rail-thumb: 28px; --reader-rail-x: 5px; --reader-rail-width: 3px; position: absolute; z-index: 15; top: 64px; right: 0; bottom: 64px; width: 32px; outline: none; pointer-events: none; touch-action: none; }
+.reader-bars--pinned .reader-rail { top: 10px; bottom: 10px; }
+.reader-screen[data-pager="menu"]:not(.reader-bars--pinned) .reader-rail { bottom: 112px; }
+.reader-rail[data-interactive] { --reader-rail-x: 11px; --reader-rail-width: 8px; pointer-events: auto; }
+.reader-rail[data-dragging] { --reader-rail-width: 12px; }
+/* 線とつまみは同じ縦の中心（右端から --reader-rail-x）にそろえ、太っても画面の外へはみ出さない。 */
+.reader-rail-track { position: absolute; top: calc(var(--reader-rail-thumb) / 2); right: calc(var(--reader-rail-x) - 1.5px); bottom: calc(var(--reader-rail-thumb) / 2); width: 3px; border-radius: 999px; background: transparent; transition: background-color .18s ease, right .18s ease; }
+.reader-rail-fill { position: absolute; top: 0; right: 0; left: 0; height: calc(var(--reader-rail-value) * 100%); border-radius: inherit; background: transparent; transition: background-color .18s ease; }
+.reader-rail-thumb { position: absolute; top: calc(var(--reader-rail-value) * 100%); right: calc(1.5px - var(--reader-rail-width) / 2); width: var(--reader-rail-width); height: var(--reader-rail-thumb); border-radius: 999px; background: color-mix(in srgb, var(--reader-muted) 42%, transparent); transform: translateY(-50%); transition: width .18s ease, right .18s ease, background-color .18s ease; }
+.reader-rail[data-interactive] .reader-rail-track { background: var(--reader-line); }
+.reader-rail[data-interactive] .reader-rail-fill { background: color-mix(in srgb, var(--reader-accent) 45%, transparent); }
+.reader-rail[data-interactive] .reader-rail-thumb { background: var(--reader-accent); box-shadow: 0 1px 4px var(--reader-shadow); }
+.reader-rail:focus-visible .reader-rail-thumb { outline: 2px solid var(--reader-accent); outline-offset: 2px; }
+.reader-rail-bubble { position: absolute; top: 50%; right: calc(100% + 12px); padding: 6px 10px; border: 1px solid var(--reader-line); border-radius: 10px; background: var(--reader-surface); box-shadow: 0 6px 18px var(--reader-shadow); color: var(--reader-control-ink); font-size: 14px; font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; transform: translateY(-50%); }
+@media (prefers-reduced-motion: reduce) { .reader-rail-track, .reader-rail-fill, .reader-rail-thumb { transition: none; } }
 .reader-scroll:focus-visible { outline: none; }
 .reading-paper { max-width: 680px; min-height: 100%; margin: 0 auto; padding: 28px 22px 48px; color: var(--reader-ink); font-family: "Noto Sans JP", "Yu Gothic UI", sans-serif; overflow-wrap: anywhere; }
 .reader-bars--auto .reading-paper { padding-top: 68px; }
@@ -129,18 +151,18 @@
 .reader-bottom { position: relative; flex: none; z-index: 20; }
 .reader-status { position: relative; z-index: 1; display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: calc(26px + var(--piep-safe-bottom)); padding: 0 16px var(--piep-safe-bottom); background: var(--reader-bg); color: var(--reader-muted); font-size: 12px; font-variant-numeric: tabular-nums; }
 /* メニューの進捗と同じ数字を二か所に出さない。 */
-.reader-screen[data-bars="shown"] .reader-status span:last-child { visibility: hidden; }
+.reader-screen[data-bars="shown"] .reader-status span { visibility: hidden; }
 .reader-panel { position: absolute; right: 0; bottom: 100%; left: 0; display: grid; gap: 2px; padding: 4px 6px; border-top: 1px solid var(--reader-line); background: var(--reader-chrome); transition: transform .18s ease, visibility .18s; }
 .reader-screen[data-bars="hidden"] .reader-panel { visibility: hidden; transform: translateY(calc(100% + 80px)); }
 .reader-bars--pinned .reader-panel { position: static; }
 .reader-pagebar { position: relative; z-index: 1; padding: 3px 6px 0; background: var(--reader-bg); }
-.reader-progress-row { display: flex; align-items: center; gap: 10px; min-width: 0; max-width: 960px; width: 100%; margin: 0 auto; padding: 0 8px; }
+.reader-progress-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-width: 0; max-width: 960px; width: 100%; margin: 0 auto; padding: 0 4px 0 10px; }
 /* 目次・表示・作品情報・お気に入り。進み具合の右に、印だけで並べる。 */
 .reader-actions { display: flex; align-items: center; flex: none; gap: 0; margin-right: -4px; }
 .reader-actions .reader-icon-button { width: 44px; height: 44px; }
 .reader-actions .reader-icon-button svg { width: 22px; height: 22px; }
-.reader-progress-slider { flex: 1; min-width: 0; height: 32px; accent-color: var(--reader-accent); }
-.reader-progress-label { flex: none; min-width: 46px; padding-right: 8px; color: var(--reader-control-ink); font-size: 13px; font-weight: 650; font-variant-numeric: tabular-nums; text-align: right; }
+.reader-progress-label { display: flex; align-items: baseline; gap: 10px; min-width: 0; color: var(--reader-control-ink); font-size: 14px; font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.reader-progress-label small { color: var(--reader-muted); font-size: 13px; font-weight: 600; }
 .reader-progress-track { display: block; height: 6px; overflow: hidden; border-radius: 999px; background: var(--reader-control); }
 .reader-progress-track span { display: block; height: 100%; border-radius: inherit; background: var(--reader-accent); }
 

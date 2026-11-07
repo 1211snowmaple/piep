@@ -50,5 +50,16 @@ npm run build
 npx tauri android build --debug --apk
 ```
 
+### 画面の崩れの点検
+
+デバッグ APK を入れた端末で、確かめたい画面（ライブラリ、読書画面など）を開いてから次を実行します。端末の画面の大きさと密度を順に変え、横へのはみ出し、切れたボタン、下の操作領域（ジェスチャーの線・3 ボタン）への食い込み、下メニューに重なる浮かぶボタンを数えます。終われば元の大きさに戻します。
+
+```powershell
+node tools/layout-audit.mjs emulator-5554 --out $env:TEMP\piep-layout
+node tools/layout-audit.mjs emulator-5556 --out $env:TEMP\piep-layout
+```
+
+何か見つかれば一覧を出して終了コード 1 で終わります。`--out` の先に大きさごとの画面写真が残るので、数で拾えない見た目の崩れはそこで目でも確かめます。下の操作領域の高さは機種で違うため、エミュレーター 1 台の見た目だけで決めず、この点検を通してから出します。
+
 デバッグ APK は動作確認用です。公開配布には署名済みリリースビルドと配布手順が別途必要です。接続方式は [PROTOCOL.md](PROTOCOL.md)、デスクトップ版との表示対応は [DESKTOP-PARITY.md](DESKTOP-PARITY.md) を参照してください。
 実用化の監査項目と検証結果は [QUALITY-PLAN.md](QUALITY-PLAN.md) に記録します。

@@ -330,7 +330,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   .group-grid { grid-template-columns: 1fr; gap: 10px; }
   .library-tabs button { padding: 8px 11px; font-size: var(--fs-small); }
   .work-cover { width: 59px; }
-  /* 下メニューは本文の場所を取りすぎない。端末のジェスチャー領域ぶんだけ下に足す。 */
+  /* 下メニューは本文の場所を取りすぎない。端末のジェスチャー領域ぶんは必ず下に足す。 */
   .bottom-nav { min-height: calc(var(--piep-bottom-nav) + var(--piep-nav-inset)); padding: 2px 6px var(--piep-nav-inset); border-top: 1px solid var(--piep-line); background: var(--piep-surface); }
   .bottom-item { color: var(--piep-muted); font-size: var(--fs-tiny); }
   .bottom-item.active { color: var(--piep-active-text); }
@@ -343,8 +343,9 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 
 /* 行き先は常に 1 か所に出す。狭い画面は下メニューと開閉式の絞り込み、広い画面はサイドバーだけにする。 */
 @media (max-width: 599px), (max-width: 900px) and (orientation: portrait) {
-  /* ジェスチャーの線は細いので、その領域の半分だけ空ければ字に重ならない。 */
-  :root { --piep-bottom-nav: 50px; --piep-nav-inset: max(4px, calc(var(--piep-safe-bottom) * .5)); }
+  /* 端末のジェスチャー領域は丸ごと空ける。線の位置や太さは機種で違い、半分だけ空けた版は実機で字に重なった。
+     高さは中身の 54px だけを詰め、領域そのものは削らない。 */
+  :root { --piep-bottom-nav: 54px; --piep-nav-inset: max(6px, var(--piep-safe-bottom)); }
   .sidebar { display: flex; position: fixed; z-index: 31; top: calc(58px + var(--piep-safe-top)); bottom: max(calc(var(--piep-bottom-nav) + var(--piep-nav-inset)), var(--piep-visual-viewport-bottom-inset, 0px)); left: 0; width: min(280px, calc(100vw - 48px)); height: auto; padding: 13px 12px 8px; overflow-y: auto; overscroll-behavior: contain; scroll-padding-block: 16px; box-shadow: 8px 0 28px #101c2d24; transform: translateX(-105%); visibility: hidden; pointer-events: none; transition: transform .2s ease, visibility .2s ease; }
   .sidebar.mobile-open { transform: translateX(0); visibility: visible; pointer-events: auto; }
   .sidebar .brand { display: none; }

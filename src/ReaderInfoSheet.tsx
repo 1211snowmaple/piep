@@ -6,7 +6,7 @@ import { WorkFacts, workFacts } from "./WorkFacts";
 import { AuthorAvatar } from "./WorkCard";
 import type { PcCollection, PcOutlineEntry, PcWork } from "./pcApi";
 import { useAppNavigation } from "./appHistory";
-import { plainText, progressLabel } from "./workText";
+import { plainText, progressLabel, readingPercent } from "./workText";
 
 export type InfoTab = "outline" | "info";
 
@@ -37,7 +37,7 @@ export function ReaderInfoSheet({ tab, onTabChange, onClose, work, isEdited, off
   const titleRef = useRef<HTMLHeadingElement>(null);
   const description = plainText(work.excerpt);
   const navigation = useAppNavigation();
-  const percent = Math.round(progress * 100);
+  const percent = readingPercent(progress, pageCount);
   const hasOutline = outline.length > 0;
   const activeTab = hasOutline ? tab : "info";
 

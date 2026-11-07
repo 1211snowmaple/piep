@@ -13,7 +13,7 @@ import { effectiveSort, entitySortGroups, entitySortLabel, loadEntitySort, saveE
 import { defaultPcSearch, pcConnectionIssue, type PcConnectionStatus, type PcSearchCriteria, type PcSort, type PcWork } from "./pcApi";
 import { useAppNavigation, type LibraryPage, type LibraryTab } from "./appHistory";
 import { useSavedStates, useWorkList, WorkListSkeleton, WorkResults } from "./workList";
-import { scrollMainToTop } from "./workText";
+import { readingPercent, scrollMainToTop } from "./workText";
 
 const tabs: [LibraryTab, string, ReactNode][] = [
   ["works", "作品", <Icons.works key="works" aria-hidden="true" />],
@@ -29,12 +29,12 @@ function ReadingShelf({ savedRevision, onOpenWork, onOpenDetail, onSaved }: { sa
   const savedState = useSavedStates(works, savedRevision, true);
   return <>
     <div className="results-bar"><h2>読みかけ</h2><span>この端末で読んだ {items.length} 作品</span></div>
-    {items.length ? <VirtualWorkList listKey="reading-shelf" items={items} itemKey={(item) => item.work.id} renderItem={(item) => <WorkCard work={item.work} prefix={`${Math.min(99, Math.round(item.progress * 100))}%`} savedState={savedState(item.work)} onSaved={onSaved} onRead={() => onOpenWork(item.work)} onDetail={() => onOpenDetail(item.work)} />} />
+    {items.length ? <VirtualWorkList listKey="reading-shelf" items={items} itemKey={(item) => item.work.id} renderItem={(item) => <WorkCard work={item.work} prefix={`${readingPercent(item.progress)}%`} savedState={savedState(item.work)} onSaved={onSaved} onRead={() => onOpenWork(item.work)} onDetail={() => onOpenDetail(item.work)} />} />
       : <section className="empty-card"><h2>読みかけの作品はありません</h2><p>この端末で読み始めた作品がここに並びます。読み終えると棚から外れます。</p></section>}
   </>;
 }
 
-export function PcLibrary({ page, status, statusLoading, onOpenWork, onOpenDetail, onGoToSettings, onSaved, onSaveCondition, savedRevision, pagingMode, rememberedSort, onRememberedSortChange }: {
+export function PcLibrary({ page, status, statusLoading, onOpenWork, onOpenDetail, onGoToSettings, onSaved, onSaveCondition, savedRevision, pagingMode, showContinue, rememberedSort, onRememberedSortChange }: {
   page: LibraryPage;
   status: PcConnectionStatus | null;
   statusLoading: boolean;
@@ -45,6 +45,8 @@ export function PcLibrary({ page, status, statusLoading, onOpenWork, onOpenDetai
   onSaveCondition: (name: string, criteria: PcSearchCriteria) => void;
   savedRevision: number;
   pagingMode: "auto" | "pages";
+  /** 設定で「続きを読む」を消していれば false。 */
+  showContinue: boolean;
   rememberedSort: FixedSort;
   onRememberedSortChange: (sort: FixedSort) => void;
 }) {
@@ -138,7 +140,7 @@ export function PcLibrary({ page, status, statusLoading, onOpenWork, onOpenDetai
     {tab === "collections" && collectionId && <CollectionMembers collectionId={collectionId} query={queries.members} savedRevision={savedRevision} onOpenWork={onOpenWork} onOpenDetail={onOpenDetail} onSaved={onSaved} />}
     {tab === "works" && <>
       {/* 種類の切り替えより下に置く。上に置くと、作品以外へ切り替えたときに切り替えの列ごと動く。 */}
-      {plainShelf && <ContinueShelf items={readingShelf} onOpen={onOpenWork} onAll={() => move({ shelf: "reading" })} />}
+      {plainShelf && showContinue && <ContinueShelf items={readingShelf} onOpen={onOpenWork} onAll={() => move({ shelf: "reading" })} />}
       <div className="results-bar">{resultsTitle && <h2>{resultsTitle}</h2>}<span>{list.total != null ? `約 ${list.total.toLocaleString("ja-JP")} 件` : list.loading ? "" : `${list.items.length} 件を表示`}{list.total != null || !list.loading ? "・" : ""}{sentSort === "standard" ? relevanceLabel : sortLabels[sentSort]}</span></div>
       <WorkResults list={list} savedRevision={savedRevision} reachable={reachable} onOpenWork={onOpenWork} onOpenDetail={onOpenDetail} onSaved={onSaved} onPage={(next) => move({ listPage: next })} emptyTitle={criteria.favorite ? "お気に入りの作品が見つかりません" : "作品が見つかりません"} emptyHint={criteria.favorite ? "デスクトップ版のお気に入り登録と絞り込み条件を確認してください。" : "検索語や絞り込み条件を変えて試してください。"} />
       {pagingMode === "pages" && !list.numbered && <p className="paging-relevance-hint">関連度順の検索は自動読み込みです。ページ番号を使うには並び順を選んでください。</p>}

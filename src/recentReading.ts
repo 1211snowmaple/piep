@@ -41,12 +41,24 @@ const fromThisServer = (entry: RecentWork) => currentServer !== null && (entry.s
 let lastWrite = { id: 0, at: 0 };
 let trailing: number | undefined;
 
+/**
+ * 読みかけとみなす最小の進み具合。デスクトップ版は本文の頭（1 ページ目の最上部）にいる作品を
+ * 読みかけに数えない。開いて少し動かしただけ、読み進めてから頭へ戻した、も同じ扱いにする。
+ * 丸めて 1% に届かないものを棚に 0% と並べない。
+ */
+const minimumProgress = 0.005;
+
+const partRead = (entry: Pick<RecentWork, "progress" | "finished">) => !entry.finished && entry.progress >= minimumProgress;
+
 function write(work: PcWork, progress: number, finished: boolean, now: number): void {
   const entries = read();
   const same = (entry: RecentWork) => fromThisServer(entry) && entry.work.id === work.id;
-  if (!entries.some(same) && !finished && progress <= 0.002) return;
+  const known = entries.some(same);
+  if (!known && !finished && progress < minimumProgress) return;
   lastWrite = { id: work.id, at: now };
-  const next = [{ work, at: now, progress, finished, server: currentServer ?? undefined }, ...entries.filter((entry) => !same(entry))].slice(0, maxEntries);
+  // 頭へ戻ったものは、履歴に残さず棚から降ろす。
+  const kept = entries.filter((entry) => !same(entry));
+  const next = (finished || progress >= minimumProgress ? [{ work, at: now, progress, finished, server: currentServer ?? undefined }, ...kept] : kept).slice(0, maxEntries);
   try { window.localStorage.setItem(storageKey, JSON.stringify(next)); } catch { return; }
   window.dispatchEvent(new CustomEvent(changedEvent));
 }
@@ -64,9 +76,9 @@ export function rememberReading(work: PcWork, progress: number, finished: boolea
   trailing = window.setTimeout(() => write(work, progress, finished, Date.now()), wait);
 }
 
-/** 読み終えたものは棚から外す。新しく読んだ順。 */
+/** 読み終えたものと、頭から動いていないものは棚から外す。新しく読んだ順。 */
 export function useReadingShelf(): RecentWork[] {
-  const shelf = () => read().filter((entry) => !entry.finished && fromThisServer(entry));
+  const shelf = () => read().filter((entry) => partRead(entry) && fromThisServer(entry));
   const [items, setItems] = useState(shelf);
   useEffect(() => {
     const update = () => setItems(shelf());
