@@ -5,19 +5,31 @@ import { useQuery } from "@tanstack/react-query";
 import { adminApi, ApiFailure, failureMessage, type AdminStatus } from "./api";
 import { notifyIfExpired } from "./queryClient";
 
-export function PageHead({ title, children }: { title: string; children?: ReactNode }) {
+/** ページの見出し。操作は見出しの右に並べ、説明は見出しの下に置く。 */
+export function PageHead({ title, lead, children }: { title: string; lead?: ReactNode; children?: ReactNode }) {
   return (
-    <div className="adm-head">
-      <Title order={2} fz={22}>{title}</Title>
-      {children && <Group gap={8} wrap="nowrap" style={{ flex: "none" }}>{children}</Group>}
-    </div>
+    <header className="adm-head">
+      <div className="adm-head-text">
+        <Title order={1} className="adm-title">{title}</Title>
+        {lead && <Text className="adm-lead">{lead}</Text>}
+      </div>
+      {children && <Group gap={8} wrap="nowrap" className="adm-head-actions">{children}</Group>}
+    </header>
   );
 }
 
-export function Card({ title, side, children }: { title?: string; side?: ReactNode; children: ReactNode }) {
+export function Card({ title, lead, side, flush, children }: { title?: string; lead?: ReactNode; side?: ReactNode; flush?: boolean; children: ReactNode }) {
   return (
-    <section className="adm-card" aria-label={title}>
-      {title && <div className="adm-card-head"><span>{title}</span>{side}</div>}
+    <section className="adm-card" data-flush={flush || undefined} aria-label={title}>
+      {title && (
+        <div className="adm-card-head">
+          <div className="adm-card-title">
+            <span>{title}</span>
+            {lead && <span className="adm-card-lead">{lead}</span>}
+          </div>
+          {side && <div className="adm-card-side">{side}</div>}
+        </div>
+      )}
       {children}
     </section>
   );

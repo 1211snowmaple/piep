@@ -4,7 +4,7 @@
 //! 設計の理由は `docs/policy/06-backend.md` に書いてある。
 
 use super::super::admin_store::{TicketKind, RECENT_AUTH};
-use super::super::standalone::ServerPaths;
+use super::super::standalone::{self, ConnectionChange, ServerPaths};
 use super::super::store::Role;
 use super::super::update::{self, UpdateController};
 use super::{require_admin, ApiError, ApiJson, Ctx, ServerContext};
@@ -20,7 +20,7 @@ use axum::{Extension, Json, Router};
 use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::sync::Semaphore;
 
@@ -42,15 +42,21 @@ pub struct AdminAsset {
     pub bytes: &'static [u8],
 }
 
-/// 管理の口の設定。読み取りで見せる。
-#[derive(Debug, Clone, Serialize)]
+/// 管理の口の設定。読み取りで見せる。証明書の場所は出さない。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectionInfo {
     pub listen: String,
     pub admin_listen: Option<String>,
     pub public_url: Option<String>,
+    /// 管理画面だけを出す、この機械の中の口。公開の口しかないときに使う。
+    pub local_admin: Option<String>,
     pub tls: &'static str,
 }
+
+/// 管理画面を出している口の印。デスクトップ版がつないでいる口に画面がなければ、リンクを出さない。
+#[derive(Clone, Copy)]
+pub struct PageHere;
 
 /// 管理画面に要るもの。これがある口にだけ画面を出す。
 pub struct AdminWeb {
@@ -62,6 +68,8 @@ pub struct AdminWeb {
     /// ハッシュの計算でメモリを使い切らせない。
     hash_slots: Semaphore,
     storage: Mutex<Option<(Instant, serde_json::Value)>>,
+    /// 立ち上げ直す。見張り役の下で動いているときだけある。
+    restart: OnceLock<Box<dyn Fn() + Send + Sync>>,
 }
 
 impl AdminWeb {
@@ -79,7 +87,12 @@ impl AdminWeb {
             throttle: Mutex::new(LoginThrottle::default()),
             hash_slots: Semaphore::new(2),
             storage: Mutex::new(None),
+            restart: OnceLock::new(),
         }
+    }
+
+    pub fn set_restart(&self, restart: Box<dyn Fn() + Send + Sync>) {
+        let _ = self.restart.set(restart);
     }
 }
 
@@ -948,6 +961,7 @@ async fn web_disable(
 async fn issue_ticket(
     State(ctx): State<Ctx>,
     Extension(ip): Extension<ClientIp>,
+    page: Option<Extension<PageHere>>,
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     if !headers.contains_key(header::AUTHORIZATION) {
@@ -961,6 +975,13 @@ async fn issue_ticket(
             "このサーバーでは管理画面を使えません",
         )
     })?;
+    if page.is_none() {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "admin_web_local",
+            "このサーバーの管理画面は、サーバーの PCのブラウザでだけ開けます。サーバーの PCで http://127.0.0.1:38778/admin/ を開いてください",
+        ));
+    }
     // デスクトップは、いま話している接続先の URL でリンクを開く。その名前を先に覚えておかないと、
     // ページの読み込みが断られ、券を使う所まで進めない。
     learn_host(&ctx, &headers);
@@ -1299,13 +1320,123 @@ async fn storage(
     Ok(Json(value))
 }
 
+/// 動いている設定と、`server.toml` に書いてある設定。違えば再起動で切り替わる。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ConnectionState {
+    running: ConnectionInfo,
+    saved: Option<ConnectionInfo>,
+    /// `server.toml` を読めないときの理由。
+    problem: Option<String>,
+    restartable: bool,
+}
+
+fn connection_state(site: &AdminWeb) -> ConnectionState {
+    let saved =
+        standalone::load_config(&site.paths).map(|config| standalone::connection_info(&config));
+    ConnectionState {
+        running: site.connection.clone(),
+        problem: saved.as_ref().err().cloned(),
+        saved: saved.ok(),
+        restartable: site.restart.get().is_some(),
+    }
+}
+
 async fn connection(
     State(ctx): State<Ctx>,
     headers: HeaderMap,
-) -> Result<Json<ConnectionInfo>, ApiError> {
+) -> Result<Json<ConnectionState>, ApiError> {
     require_admin(&ctx, &headers)?;
     let site = ctx.web.get().ok_or_else(ApiError::not_found)?;
-    Ok(Json(site.connection.clone()))
+    Ok(Json(connection_state(site)))
+}
+
+/// 文の決まっていない断り。設定の誤りは、どこが悪いかを書いて返す。
+fn refused(message: String) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(serde_json::json!({ "code": "invalid_request", "message": message })),
+    )
+        .into_response()
+}
+
+/// 接続の設定を確かめて `server.toml` に書く。切り替わるのは再起動のあと。
+async fn put_connection(
+    State(ctx): State<Ctx>,
+    Extension(ip): Extension<ClientIp>,
+    headers: HeaderMap,
+    ApiJson(change): ApiJson<ConnectionChange>,
+) -> Result<Response, ApiError> {
+    require_recent(&ctx, &headers)?;
+    let site = web(&ctx)?;
+    let current = match standalone::load_config(&site.paths) {
+        Ok(config) => config,
+        Err(message) => return Ok(refused(message)),
+    };
+    let running: Vec<SocketAddr> = std::iter::once(&site.connection.listen)
+        .chain(site.connection.admin_listen.iter())
+        .chain(site.connection.local_admin.iter())
+        .filter_map(|address| address.parse().ok())
+        .collect();
+    let next = match standalone::next_connection(&current, &running, change).await {
+        Ok(next) => next,
+        Err(message) => return Ok(refused(message)),
+    };
+    if let Err(message) = standalone::save_connection(&site.paths, &next) {
+        return Ok(refused(message));
+    }
+    let info = standalone::connection_info(&next);
+    let admin = match (&info.admin_listen, &info.local_admin) {
+        (Some(address), _) => address.clone(),
+        (None, Some(local)) => format!("{local}（サーバーの PC だけ）"),
+        (None, None) => "携帯用と同じ".into(),
+    };
+    let tls = match info.tls {
+        "self-signed" => "自己署名",
+        "files" => "証明書のファイル",
+        _ => "使わない",
+    };
+    let detail = format!(
+        "携帯用 {}・管理画面 {admin}・公開の URL {}・HTTPS {tls}",
+        info.listen,
+        info.public_url.as_deref().unwrap_or("なし"),
+    );
+    ctx.store.audit(
+        "system",
+        "接続の設定の変更",
+        actor(&headers),
+        ip.get(),
+        true,
+        Some(&detail),
+    );
+    Ok(Json(connection_state(site)).into_response())
+}
+
+/// 立ち上げ直す。答えを返してから止まる。
+async fn restart(
+    State(ctx): State<Ctx>,
+    Extension(ip): Extension<ClientIp>,
+    headers: HeaderMap,
+) -> Result<StatusCode, ApiError> {
+    require_recent(&ctx, &headers)?;
+    let site = web(&ctx)?;
+    if site.restart.get().is_none() {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "restart_unavailable",
+            "このサーバーは自分では立ち上がれません。サーバーの PCで動かし直してください",
+        ));
+    }
+    ctx.store
+        .audit("system", "再起動", actor(&headers), ip.get(), true, None);
+    let ctx = Arc::clone(&ctx);
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        if let Some(restart) = ctx.web.get().and_then(|site| site.restart.get()) {
+            restart();
+        }
+    });
+    Ok(StatusCode::ACCEPTED)
 }
 
 /// 索引の続きを作り直す。
@@ -1415,7 +1546,11 @@ pub(super) fn api_routes() -> Router<Ctx> {
         .route("/api/v1/admin/update/rollback", post(update_rollback))
         .route("/api/v1/admin/audit", get(audit_list))
         .route("/api/v1/admin/storage", get(storage))
-        .route("/api/v1/admin/connection", get(connection))
+        .route(
+            "/api/v1/admin/connection",
+            get(connection).put(put_connection),
+        )
+        .route("/api/v1/admin/restart", post(restart))
         .route("/api/v1/admin/library/reindex", post(reindex))
 }
 

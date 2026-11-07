@@ -377,10 +377,18 @@ pub fn lay_out(
     Ok(paths)
 }
 
+/// 入れ終わったときに見せるもの。
+pub struct InstallDone {
+    /// デスクトップ版に貼る、管理者の登録文字列。
+    pub pairing: String,
+    /// この機械のブラウザで開く、管理画面の一度きりのリンク。管理者のアカウントをここで作る。
+    pub admin_link: Option<String>,
+}
+
 /// `piep-server install` の本体。登録文字列を返す。
 #[cfg(windows)]
 /// 入れ直しで管理者がすでにいれば、登録文字列は出さない。
-async fn install_inner(options: InstallOptions) -> Result<Option<String>, String> {
+async fn install_inner(options: InstallOptions) -> Result<Option<InstallDone>, String> {
     let no_task = options.no_task;
     let (root, exposure, url) = complete_options(options)?;
     if !no_task {
@@ -410,7 +418,17 @@ async fn install_inner(options: InstallOptions) -> Result<Option<String>, String
     if ServerStore::open(&paths.store())?.has_admin()? {
         return Ok(None);
     }
-    command_admin_pair(&paths.root, url, false).await.map(Some)
+    let pairing = command_admin_pair(&paths.root, url, false).await?;
+    // 起動の仕組みを自分で用意するときは、まだ動いていないのでリンクを出さない。
+    let admin_link = if no_task {
+        None
+    } else {
+        super::standalone::command_admin_setup(&paths.root, None).ok()
+    };
+    Ok(Some(InstallDone {
+        pairing,
+        admin_link,
+    }))
 }
 
 /// 引数なしで開いたときも、ここへ来る。
@@ -419,14 +437,14 @@ pub async fn command_install(
     options: InstallOptions,
     args: &[String],
     interactive: bool,
-) -> Result<Option<String>, String> {
+) -> Result<Option<InstallDone>, String> {
     if !options.no_task && !is_elevated() {
         relaunch_elevated(args)?;
         return Ok(None);
     }
     println!("piep-server {VERSION} を入れます。");
     match install_inner(options).await {
-        Ok(Some(payload)) => Ok(Some(payload)),
+        Ok(Some(done)) => Ok(Some(done)),
         Ok(None) => {
             println!("管理者は登録済みなので、そのまま使えます。");
             pause_if_own_window(interactive);
@@ -462,7 +480,7 @@ pub async fn command_install(
     _options: InstallOptions,
     _args: &[String],
     _interactive: bool,
-) -> Result<Option<String>, String> {
+) -> Result<Option<InstallDone>, String> {
     Err("install は Windows だけで動きます".into())
 }
 

@@ -5,7 +5,7 @@
 use super::standalone::ServerPaths;
 use super::update::{
     self, current_version, read_version_file, restore_databases, write_atomic, UpdateRecord,
-    EXIT_APPLY_UPDATE, VERSION,
+    EXIT_APPLY_UPDATE, EXIT_RESTART, VERSION,
 };
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -319,6 +319,10 @@ pub fn run(paths: &ServerPaths) -> Result<i32, String> {
             Some(0) => {
                 note(paths, "本体が止まったので、見張り役も止まります");
                 return Ok(0);
+            }
+            Some(EXIT_RESTART) => {
+                note(paths, "管理画面から頼まれたので立ち上げ直します");
+                backoff = Backoff::default();
             }
             Some(EXIT_APPLY_UPDATE) => match switch_to_pending(paths) {
                 Ok(next) => {

@@ -25,6 +25,8 @@ pub const VERSION: &str = match option_env!("PIEP_SERVER_TEST_VERSION") {
 
 /// 本体が「更新を当ててほしい」と見張り役へ伝える終了コード。
 pub const EXIT_APPLY_UPDATE: i32 = 75;
+/// 管理画面から頼まれた再起動。見張り役は待たずに立ち上げ直す。古い見張り役は異常終了として扱い、少し待って立ち上げ直す。
+pub const EXIT_RESTART: i32 = 76;
 
 /// `tauri.conf.json` の `plugins.updater.pubkey` と同じ鍵。デスクトップ版と同じ鍵で署名する。
 const PUBLIC_KEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDc3N0U3OUI0OUJBQzY1QkYKUldTL1pheWJ0SGwrZHhMa2FaNlc2KzYwZmYyK1BoU01iS2paUzBxTExmMzFDVWRQZkxSVTRuemQK";

@@ -1,22 +1,14 @@
 import { useState } from "react";
-import { ActionIcon, Alert, Button, Group, Menu, Modal, Skeleton, Stack, Text } from "@mantine/core";
+import { Alert, Button, Group, Modal, Skeleton, Stack, Text } from "@mantine/core";
 import { modals } from "@mantine/modals";
 import { notifications } from "@mantine/notifications";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQueryClient } from "@tanstack/react-query";
 import { Icons, IconSize } from "@/lib/icons";
 import { QRCodeSVG } from "qrcode.react";
-import { DANGER_CONFIRM } from "@/components/DangerButton";
-import { adminApi, failureMessage, type AdminSession, type Device, type Pairing } from "../api";
+import { DANGER_CONFIRM, DangerButton } from "@/components/DangerButton";
+import { adminApi, failureMessage, type Device, type Pairing } from "../api";
 import { dayTime, relativeTime } from "../format";
 import { Card, PageHead, showFailure, useReauth, useStatus } from "../shared";
-
-/** ブラウザの名前を読める形にする。正確さより見分けやすさを優先する。 */
-export function browserLabel(agent: string | null): string {
-  if (!agent) return "不明なブラウザ";
-  const browser = /Edg\//.test(agent) ? "Edge" : /Firefox\//.test(agent) ? "Firefox" : /Chrome\//.test(agent) ? "Chrome" : /Safari\//.test(agent) ? "Safari" : "ブラウザ";
-  const system = /Android/.test(agent) ? "Android" : /iPhone|iPad/.test(agent) ? "iOS" : /Windows/.test(agent) ? "Windows" : /Mac OS/.test(agent) ? "Mac" : /Linux/.test(agent) ? "Linux" : null;
-  return system ? `${browser}（${system}）` : browser;
-}
 
 function PairingDialog({ title, note, pairing, qr, onClose }: { title: string; note: string; pairing: Pairing | null; qr: boolean; onClose: () => void }) {
   return (
@@ -27,7 +19,6 @@ function PairingDialog({ title, note, pairing, qr, onClose }: { title: string; n
           {qr && <div className="adm-qr"><QRCodeSVG value={pairing.payload} size={240} level="M" aria-label="登録の QR コード" /></div>}
           <Group justify="center">
             <Button
-              size="xs"
               variant="default"
               leftSection={<Icons.copy size={IconSize.menu} />}
               onClick={() => {
@@ -45,40 +36,38 @@ function PairingDialog({ title, note, pairing, qr, onClose }: { title: string; n
   );
 }
 
-function DeviceRow({ device, onReplace, onRevoke }: { device: Device; onReplace: () => void; onRevoke: () => void }) {
-  const admin = device.role === "admin";
+function DeviceTable({ devices, onReplace, onRevoke }: { devices: Device[]; onReplace: () => void; onRevoke: (device: Device) => void }) {
   return (
-    <div className="adm-row">
-      <div className="adm-row-body">
-        <div style={{ fontWeight: 600, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>{device.name || "名前なし"}</div>
-        <div className="adm-row-sub">{admin ? "管理者（デスクトップ版）" : "携帯"}・登録 {dayTime(new Date(device.createdAt))}</div>
-      </div>
-      <div className="adm-row-side">
-        <span>{device.lastSeenAt ? `最後の接続 ${relativeTime(device.lastSeenAt)}` : "まだ接続していません"}</span>
-        <Menu position="bottom-end" width={220}>
-          <Menu.Target><ActionIcon size={28} variant="subtle" color="gray" aria-label={`${device.name}の操作`}><Icons.more size={IconSize.menu} /></ActionIcon></Menu.Target>
-          <Menu.Dropdown>
-            {admin
-              ? <Menu.Item onClick={onReplace}>別の PC へ入れ替える</Menu.Item>
-              : <Menu.Item color="red" onClick={onRevoke}>登録を解除</Menu.Item>}
-          </Menu.Dropdown>
-        </Menu>
-      </div>
-    </div>
-  );
-}
-
-function SessionRow({ session, current, onEnd }: { session: AdminSession; current: boolean; onEnd: () => void }) {
-  return (
-    <div className="adm-row">
-      <div className="adm-row-body">
-        <div style={{ fontWeight: 600 }}>{browserLabel(session.label)}{current ? "・このブラウザ" : ""}</div>
-        <div className="adm-row-sub">{session.ip ? `${session.ip}・` : ""}ログイン {relativeTime(session.createdAt)}</div>
-      </div>
-      <div className="adm-row-side">
-        <span>最後の操作 {relativeTime(session.lastSeenAt)}</span>
-        {!current && <Button size="compact-xs" variant="default" onClick={onEnd}>切る</Button>}
-      </div>
+    <div className="adm-table-wrap">
+      <table className="adm-table">
+        <thead>
+          <tr>
+            <th>名前</th>
+            <th>種類</th>
+            <th>登録</th>
+            <th>最後の接続</th>
+            <th aria-label="操作" />
+          </tr>
+        </thead>
+        <tbody>
+          {devices.map((device) => {
+            const admin = device.role === "admin";
+            return (
+              <tr key={device.id}>
+                <td data-label="名前"><span className="adm-strong adm-clamp">{device.name || "名前なし"}</span></td>
+                <td data-label="種類" className="adm-nowrap">{admin ? "管理者（デスクトップ版）" : "携帯"}</td>
+                <td data-label="登録" className="adm-num">{dayTime(new Date(device.createdAt))}</td>
+                <td data-label="最後の接続" className="adm-num">{device.lastSeenAt ? relativeTime(device.lastSeenAt) : "まだ接続していません"}</td>
+                <td className="adm-cell-action">
+                  {admin
+                    ? <Button size="compact-sm" variant="default" onClick={onReplace}>別の PC へ入れ替える</Button>
+                    : <DangerButton size="compact-sm" onClick={() => onRevoke(device)}>登録を解除</DangerButton>}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
     </div>
   );
 }
@@ -87,7 +76,6 @@ export function DevicesPage() {
   const status = useStatus();
   const client = useQueryClient();
   const { confirmed } = useReauth();
-  const sessions = useQuery({ queryKey: ["sessions"], queryFn: adminApi.sessions, refetchInterval: 30_000 });
   const [reader, setReader] = useState<Pairing | null>(null);
   const [admin, setAdmin] = useState<Pairing | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
@@ -125,27 +113,15 @@ export function DevicesPage() {
       },
     });
   };
-  const endSession = (id: string) => {
-    void adminApi.endSession(id).then(() => client.invalidateQueries({ queryKey: ["sessions"] })).catch(showFailure);
-  };
   return (
     <div className="adm-section">
-      <PageHead title="端末">
-        <Button size="xs" variant="default" leftSection={<Icons.add size={IconSize.menu} />} loading={adding} onClick={() => void addReader()}>携帯を追加</Button>
+      <PageHead title="端末" lead="このサーバーを読む携帯と、本棚を送る管理者の PC です。">
+        <Button leftSection={<Icons.add size={IconSize.action} />} loading={adding} onClick={() => void addReader()}>携帯を追加</Button>
       </PageHead>
       {problem && <Alert color="red" variant="light" withCloseButton onClose={() => setProblem(null)}>{problem}</Alert>}
-      <Card title="登録している端末">
-        {!status.data ? <Skeleton height={80} /> : status.data.devices.length === 0 ? <Text size="sm" c="dimmed">まだありません。</Text> : (
-          <div className="adm-rows">
-            {status.data.devices.map((device) => <DeviceRow key={device.id} device={device} onReplace={replace} onRevoke={() => revoke(device)} />)}
-          </div>
-        )}
-      </Card>
-      <Card title="ログイン中のブラウザ">
-        {sessions.isPending ? <Skeleton height={60} /> : (
-          <div className="adm-rows">
-            {(sessions.data?.sessions ?? []).map((session) => <SessionRow key={session.id} session={session} current={session.id === sessions.data?.currentId} onEnd={() => endSession(session.id)} />)}
-          </div>
+      <Card title="登録している端末" lead={status.data ? `${status.data.devices.length} 台` : undefined} flush>
+        {!status.data ? <div className="adm-card-pad"><Skeleton height={80} /></div> : status.data.devices.length === 0 ? <Text className="adm-card-pad" c="dimmed">まだありません。</Text> : (
+          <DeviceTable devices={status.data.devices} onReplace={replace} onRevoke={revoke} />
         )}
       </Card>
       <PairingDialog title="携帯を追加" note="携帯のアプリで QR を読むか、登録文字列を貼り付けてください。" pairing={reader} qr onClose={() => { setReader(null); void client.invalidateQueries({ queryKey: ["status"] }); }} />
