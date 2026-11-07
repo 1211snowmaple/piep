@@ -1,6 +1,7 @@
 import {
   BookOpen,
   BookPlus,
+  BookText,
   CalendarDays,
   Ellipsis,
   FileText,
@@ -8,7 +9,6 @@ import {
   Heart,
   History,
   Images,
-  Info,
   Library,
   LibraryBig,
   UserRound,
@@ -34,7 +34,11 @@ export const Icons = {
   series: Library,
   library: LibraryBig,
   collection: GalleryHorizontalEnd,
-  /** 作品情報を開く。一覧のカード、読書画面のどちらからでも同じ絵にする。 */
-  workInfo: Info,
+  /**
+   * 作品情報を開く。一覧のカード、読書画面のどちらからでも同じ絵にする。
+   * デスクトップ版は丸の中の i（`Info`）だが、端末では「この作品について」と読める本と行の絵にする
+   * （2026-11-07 に利用者が選んだ）。隣の文字設定「AA」とお気に入りのハートとも線の重さがそろう。
+   */
+  workInfo: BookText,
   more: Ellipsis,
 } as const satisfies Record<string, LucideIcon>;
