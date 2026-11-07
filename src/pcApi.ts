@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { markFavoriteRead, nextFavoriteRevision } from "./favoriteFreshness";
 
 export interface PcConnectionStatus {
   paired: boolean;
@@ -41,6 +42,8 @@ export interface PcWork {
   currentVersion: number;
   contentHash: string | null;
   favorite: boolean;
+  /** フロント側だけの取得順。お気に入りの書き込みより新しい応答を見分ける。 */
+  favoriteReadSequence?: number;
   seriesTitle: string | null;
   seriesId: string | null;
   sourceCreatedAt?: string | null;
@@ -243,21 +246,39 @@ export const pairPc = (payload: string, deviceName: string) => invoke<PcConnecti
 export const disconnectPc = () => invoke<PcConnectionStatus>("pc_disconnect");
 /** お気に入りを付け外しする。返るのはサーバーが残した値。 */
 export const setPcFavorite = (source: string, sourceId: string, favorite: boolean) => invoke<{ source: string; sourceId: string; favorite: boolean }>("pc_set_favorite", { source, sourceId, favorite });
-export const searchPcWorks = (criteria: PcWorkSearch, cursor: string | null = null, scope: PcWorkScope | null = null, offset: number | null = null, limit: number | null = null) => invoke<PcSearchPage>("pc_search_works", {
+export const searchPcWorks = (criteria: PcWorkSearch, cursor: string | null = null, scope: PcWorkScope | null = null, offset: number | null = null, limit: number | null = null) => {
+  const revision = nextFavoriteRevision();
+  return invoke<PcSearchPage>("pc_search_works", {
   criteria,
   cursor,
   offset,
   limit,
   // 画面表示用の名前などを Rust コマンドへ渡さない。入力は三つの識別子だけ。
   scope: scope ? { kind: scope.kind, source: scope.source, key: scope.key } : null,
-});
+  }).then((page) => {
+    for (const work of page.items) markFavoriteRead(work, revision);
+    return page;
+  });
+};
 export const listPcEntities = (kind: "people" | "series", text = "", offset = 0, sort?: { sort: string; order: string }) => invoke<PcEntityPage>("pc_list_entities", { kind, text, offset, sort: sort?.sort ?? null, order: sort?.order ?? null });
 export const getPcEntityDetail = (kind: "people" | "series", source: string, key: string) => invoke<PcEntityDetail>("pc_get_entity_detail", { kind, source, key });
 export const listPcEntitySeries = (source: string, key: string, text: string, cursor: string | null, sort?: { sort: string; order: string }) => invoke<PcEntitySeriesPage>("pc_list_entity_series", { source, key, text, cursor, sort: sort?.sort ?? null, order: sort?.order ?? null });
 export const listPcCollections = () => invoke<PcCollection[]>("pc_list_collections");
 export const getPcWorkCollections = (workId: number) => invoke<PcCollection[]>("pc_get_work_collections", { workId });
-export const getPcCollection = (collectionId: string) => invoke<PcCollectionDetail>("pc_get_collection", { collectionId });
-export const getPcMetadata = (workId: number) => invoke<PcMetadata>("pc_get_metadata", { workId });
+export const getPcCollection = (collectionId: string) => {
+  const revision = nextFavoriteRevision();
+  return invoke<PcCollectionDetail>("pc_get_collection", { collectionId }).then((collection) => {
+    for (const member of collection.members) if (member.work) markFavoriteRead(member.work, revision);
+    return collection;
+  });
+};
+export const getPcMetadata = (workId: number) => {
+  const revision = nextFavoriteRevision();
+  return invoke<PcMetadata>("pc_get_metadata", { workId }).then((metadata) => {
+    markFavoriteRead(metadata.work, revision);
+    return metadata;
+  });
+};
 export const getPcPage = (workId: number, page: number, version: number | null = null) => invoke<PcPage>("pc_get_page", { workId, page, version });
 export const getPcOutline = (workId: number) => invoke<PcOutlineEntry[]>("pc_get_outline", { workId });
 export const listOfflineWorks = () => invoke<OfflineWork[]>("offline_list_works");
