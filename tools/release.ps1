@@ -28,7 +28,7 @@ if ($env:PIEP_ANDROID_TEST_UPDATE_SOURCE) { throw '試験用の更新先が設�
 $env:RUSTFLAGS = "--remap-path-prefix=$env:USERPROFILE=/build"
 npm ci
 if ($LASTEXITCODE -ne 0) { throw 'npm ci に失敗しました' }
-npx tauri android build --apk --target aarch64 --ci
+node node_modules/@tauri-apps/cli/tauri.js android build --apk --target aarch64 --ci
 if ($LASTEXITCODE -ne 0) { throw 'APK を組めませんでした' }
 
 $built = 'src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk'

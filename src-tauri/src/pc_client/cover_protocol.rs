@@ -6,7 +6,7 @@
 
 use super::image_validation::validate_display_image;
 use super::{
-    ASSET_TIMEOUT, MAX_ASSET_BYTES, PcClientState, authenticated_get_with_timeout,
+    ASSET_TIMEOUT, MAX_ASSET_BYTES, PcClientState, SavedConnection, authenticated_get_with_saved,
     bounded_response_bytes,
 };
 use sha2::{Digest, Sha256};
@@ -383,12 +383,20 @@ fn allowed_mime(mime: &str) -> bool {
     )
 }
 
-async fn fetch<R: Runtime>(
-    app: &AppHandle<R>,
+async fn fetch_and_cache(
+    state: &PcClientState,
+    cache: &CoverCacheState,
+    saved: &SavedConnection,
+    generation: u64,
+    file: &Path,
     endpoint: &str,
 ) -> Result<(String, Vec<u8>), StatusCode> {
-    let state = app.state::<PcClientState>();
-    let response = authenticated_get_with_timeout(&state, endpoint, ASSET_TIMEOUT)
+    // 待ち行列の間に登録を変えた要求は送らない。送信先は、キャッシュの
+    // パスを決めたときの接続そのものを使う。
+    state
+        .with_connection(generation, || Ok(()))
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    let response = authenticated_get_with_saved(state, saved, endpoint, ASSET_TIMEOUT)
         .await
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
     let mime = response
@@ -403,6 +411,14 @@ async fn fetch<R: Runtime>(
         .map_err(|_| StatusCode::BAD_GATEWAY)?;
     // 圧縮後は小さくても、展開すると端末のメモリを食い尽くす画像がある。
     validate_display_image(&bytes, &mime).map_err(|_| StatusCode::BAD_GATEWAY)?;
+    // 通信中の A→B→A も世代で見分ける。照合から書き込みまで登録変更を
+    // 挟ませず、古い返事を別の接続の画像として残さない。
+    state
+        .with_connection(generation, || {
+            cache.write(file, &mime, &bytes);
+            Ok(())
+        })
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
     Ok((mime, bytes))
 }
 
@@ -413,11 +429,15 @@ async fn serve_remote<R: Runtime>(
     refreshes: bool,
 ) -> Response<Vec<u8>> {
     let cache = app.state::<CoverCacheState>();
-    let Ok(Some(saved)) = app.state::<PcClientState>().load() else {
+    let state = app.state::<PcClientState>();
+    let Ok((generation, Some(saved))) = state.connection_snapshot() else {
         return failure(StatusCode::SERVICE_UNAVAILABLE);
     };
     let file = cache_path(&cache.dir, &saved.url, path);
-    if let Some((mime, bytes)) = read_cached(&file) {
+    let Ok(cached) = state.with_connection(generation, || Ok(read_cached(&file))) else {
+        return failure(StatusCode::SERVICE_UNAVAILABLE);
+    };
+    if let Some((mime, bytes)) = cached {
         let stale = refreshes
             && fs::metadata(&file)
                 .and_then(|metadata| metadata.modified())
@@ -430,23 +450,22 @@ async fn serve_remote<R: Runtime>(
             tauri::async_runtime::spawn(async move {
                 let cache = app.state::<CoverCacheState>();
                 let _permit = cache.limiter.acquire().await;
-                if let Ok((mime, bytes)) = fetch(&app, &endpoint).await {
-                    cache.write(&file, &mime, &bytes);
-                }
+                let state = app.state::<PcClientState>();
+                let _ = fetch_and_cache(&state, &cache, &saved, generation, &file, &endpoint).await;
             });
         }
         return respond(StatusCode::OK, Some(&mime), bytes);
     }
     let _permit = cache.limiter.acquire().await;
     // 待っているあいだに同じ表紙が届いていることがある。
-    if let Some((mime, bytes)) = read_cached(&file) {
+    let Ok(cached) = state.with_connection(generation, || Ok(read_cached(&file))) else {
+        return failure(StatusCode::SERVICE_UNAVAILABLE);
+    };
+    if let Some((mime, bytes)) = cached {
         return respond(StatusCode::OK, Some(&mime), bytes);
     }
-    match fetch(app, endpoint).await {
-        Ok((mime, bytes)) => {
-            cache.write(&file, &mime, &bytes);
-            respond(StatusCode::OK, Some(&mime), bytes)
-        }
+    match fetch_and_cache(&state, &cache, &saved, generation, &file, endpoint).await {
+        Ok((mime, bytes)) => respond(StatusCode::OK, Some(&mime), bytes),
         Err(status) => failure(status),
     }
 }
@@ -491,6 +510,109 @@ pub fn handle<R: Runtime>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct TestCipher;
+    impl crate::secret_cipher::SecretCipher for TestCipher {
+        fn seal(&self, plain: &[u8]) -> Result<Vec<u8>, ()> {
+            Ok(plain.to_vec())
+        }
+        fn open(&self, sealed: &[u8]) -> Result<Vec<u8>, ()> {
+            Ok(sealed.to_vec())
+        }
+    }
+
+    fn connection(url: String) -> SavedConnection {
+        SavedConnection {
+            url,
+            fingerprint: None,
+            certificate_der: None,
+            token: "dummy".into(),
+            device_id: "dummy".into(),
+            device_name: "dummy".into(),
+            capabilities: vec![],
+        }
+    }
+
+    #[test]
+    fn queued_image_requests_do_not_follow_a_new_connection() {
+        tauri::async_runtime::block_on(async {
+            let root =
+                std::env::temp_dir().join(format!("piep-cover-queue-{}", uuid::Uuid::new_v4()));
+            let state =
+                PcClientState::new(root.join("connection"), std::sync::Arc::new(TestCipher));
+            let saved = connection("https://old.invalid".into());
+            *state.saved.lock().unwrap() = Some(connection("https://new.invalid".into()));
+            *state.connection_generation.lock().unwrap() = 1;
+            let cache = CoverCacheState::new(root.join("covers"));
+            let file = cache_path(&cache.dir, &saved.url, "/work/1");
+            assert_eq!(
+                fetch_and_cache(&state, &cache, &saved, 0, &file, "/api/v1/works/1/cover")
+                    .await
+                    .unwrap_err(),
+                StatusCode::SERVICE_UNAVAILABLE
+            );
+            assert!(!root.exists());
+        });
+    }
+
+    #[test]
+    fn an_image_received_after_registration_changes_is_not_cached() {
+        use std::io::{Read, Write};
+        tauri::async_runtime::block_on(async {
+            for change in [false, true] {
+                let root = std::env::temp_dir()
+                    .join(format!("piep-cover-flight-{}", uuid::Uuid::new_v4()));
+                let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+                let saved = connection(format!("http://{}", listener.local_addr().unwrap()));
+                let state = std::sync::Arc::new(PcClientState::new(
+                    root.join("connection"),
+                    std::sync::Arc::new(TestCipher),
+                ));
+                *state.saved.lock().unwrap() = Some(saved.clone());
+                *state.client.lock().unwrap() = Some((
+                    format!("{}|", saved.url),
+                    reqwest::Client::builder()
+                        .no_proxy()
+                        .timeout(Duration::from_secs(3))
+                        .build()
+                        .unwrap(),
+                ));
+                let changed_state = state.clone();
+                let server = std::thread::spawn(move || {
+                    let (mut socket, _) = listener.accept().unwrap();
+                    socket
+                        .set_read_timeout(Some(Duration::from_secs(3)))
+                        .unwrap();
+                    let mut request = [0; 4096];
+                    let length = socket.read(&mut request).unwrap();
+                    assert!(
+                        String::from_utf8_lossy(&request[..length])
+                            .starts_with("GET /api/v1/works/1/cover ")
+                    );
+                    if change {
+                        *changed_state.connection_generation.lock().unwrap() += 1;
+                    }
+                    let image = include_bytes!("fixtures/apng-2-frames.png");
+                    write!(socket, "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: image/png\r\nContent-Length: {}\r\n\r\n", image.len()).unwrap();
+                    socket.write_all(image).unwrap();
+                });
+                let cache = CoverCacheState::new(root.join("covers"));
+                let file = cache_path(&cache.dir, &saved.url, "/work/1");
+                let result =
+                    fetch_and_cache(&state, &cache, &saved, 0, &file, "/api/v1/works/1/cover")
+                        .await;
+                server.join().unwrap();
+                if change {
+                    assert_eq!(result.unwrap_err(), StatusCode::SERVICE_UNAVAILABLE);
+                    assert!(!file.exists());
+                } else {
+                    let (mime, bytes) = result.unwrap();
+                    assert_eq!(read_cached(&file).unwrap(), (mime, bytes));
+                    fs::remove_dir_all(root).unwrap();
+                }
+            }
+        });
+    }
 
     #[test]
     fn routes_only_accept_known_shapes() {

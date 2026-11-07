@@ -850,7 +850,17 @@ async fn authenticated_get_with_timeout(
     timeout: Duration,
 ) -> Result<reqwest::Response, ClientError> {
     let saved = state.load()?.ok_or_else(ClientError::invalid_pairing)?;
-    let client = state.client(&saved)?;
+    authenticated_get_with_saved(state, &saved, endpoint, timeout).await
+}
+
+// キャッシュの名前空間を決めた接続と、実際の送信先を一致させる。
+async fn authenticated_get_with_saved(
+    state: &PcClientState,
+    saved: &SavedConnection,
+    endpoint: &str,
+    timeout: Duration,
+) -> Result<reqwest::Response, ClientError> {
+    let client = state.client(saved)?;
     let response = client
         .get(format!("{}{}", saved.url, endpoint))
         .bearer_auth(&saved.token)
@@ -1651,7 +1661,7 @@ pub struct MobileAssetData {
 }
 
 // 上限は受信後ではなく受信中に適用する。Content-Length がない応答にも適用する。
-async fn bounded_response_bytes(
+pub(crate) async fn bounded_response_bytes(
     mut response: reqwest::Response,
     maximum: usize,
 ) -> Result<Vec<u8>, ClientError> {

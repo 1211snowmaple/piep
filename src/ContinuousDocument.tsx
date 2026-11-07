@@ -61,6 +61,7 @@ export function ContinuousDocument({ viewportRef, load, imageSource, isSnapshotC
   sectionsRef.current = sections;
   const pageCountRef = useRef<number | null>(null);
   const seedRef = useRef(0);
+  const snapshotGeneration = useRef<string | null | undefined>(undefined);
   const inFlight = useRef(new Set<number>());
   const filled = useRef(new Set<number>());
   const nodes = useRef(new Map<number, HTMLElement>());
@@ -135,6 +136,16 @@ export function ContinuousDocument({ viewportRef, load, imageSource, isSnapshotC
     try {
       const loaded = await callbacks.current.load(page);
       if (currentSeed !== seedRef.current || !loaded) return;
+      if (snapshotGeneration.current !== undefined && snapshotGeneration.current !== loaded.generation) {
+        seedRef.current += 1;
+        sectionsRef.current = [];
+        setSections([]);
+        pageCountRef.current = null;
+        setPageCount(null);
+        callbacks.current.onSnapshotChanged();
+        return;
+      }
+      snapshotGeneration.current = loaded.generation;
       if (!sectionsRef.current.length && callbacks.current.onStartRejected(loaded.page)) return;
       // 版が変わってページが減ると、頼んだのと別のページが返る。目標を合わせないと位置が決まらない。
       if (pending.current?.page === page && loaded.page.page !== page) {
@@ -154,7 +165,7 @@ export function ContinuousDocument({ viewportRef, load, imageSource, isSnapshotC
       if (!sectionsRef.current.length && callbacks.current.onStartRejected(null)) return;
       setFailure({ page, message: typeof error === "object" && error && "message" in error && typeof error.message === "string" ? error.message : "本文を読み込めませんでした" });
     } finally {
-      inFlight.current.delete(page);
+      if (currentSeed === seedRef.current) inFlight.current.delete(page);
     }
   }, [captureAnchor]);
 
@@ -179,6 +190,7 @@ export function ContinuousDocument({ viewportRef, load, imageSource, isSnapshotC
   const beginAt = useCallback((goal: ContinuousTarget) => {
     flush();
     seedRef.current += 1;
+    snapshotGeneration.current = undefined;
     inFlight.current.clear();
     filled.current.clear();
     nodes.current.clear();

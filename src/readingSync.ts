@@ -45,14 +45,21 @@ export function setReadingSyncEnabled(enabled: boolean): void {
 const active = () => isTauri() && readingSyncEnabled();
 
 let running: Promise<void> | null = null;
+let sendAgain = false;
 let lastFinished = 0;
 
 function run(): Promise<void> {
   // 圏外でも読書は続く。届かなかった位置は端末に残り、次の同期で送られる。
-  const current = invoke<void>("reading_sync").catch(() => {}).then(() => {
+  const current = (async () => {
+    do {
+      sendAgain = false;
+      await invoke<void>("reading_sync").catch(() => {});
+      // 同時に届いた保存・画面終了の知らせは一回にまとめる。別々の
+      // .then(run) を積むと、同じ同期の直後に何本も起動してしまう。
+    } while (sendAgain && active());
     lastFinished = Date.now();
     running = null;
-  });
+  })();
   running = current;
   return current;
 }
@@ -68,7 +75,11 @@ export function refreshReading(maxAgeMs = 5000): Promise<void> {
 /** 溜まった位置を今すぐ送る。走っている同期には間に合わないので、その後にもう一度走らせる。 */
 export function sendReading(): Promise<void> {
   if (!active()) return Promise.resolve();
-  return running ? running.then(run) : run();
+  if (running) {
+    sendAgain = true;
+    return running;
+  }
+  return run();
 }
 
 export function refreshReadingWithin(limitMs: number): Promise<void> {
