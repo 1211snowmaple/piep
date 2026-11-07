@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Emitter, Manager};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const MANIFEST_URL: &str =
     "https://github.com/1211snowmaple/piep-android/releases/latest/download/latest-android.json";
@@ -15,6 +15,7 @@ const DOWNLOAD_PREFIX: &str = "https://github.com/1211snowmaple/piep-android/rel
 /// `manifest_url|download_prefix`。試験の組み立てだけで効く。
 const TEST_SOURCE: Option<&str> = option_env!("PIEP_ANDROID_TEST_UPDATE_SOURCE");
 const MAX_APK_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_MANIFEST_BYTES: usize = 64 * 1024;
 const UPDATE_FILE: &str = "update.apk";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -24,7 +25,8 @@ struct Source {
 }
 
 fn source() -> Source {
-    if let Some((manifest_url, download_prefix)) = TEST_SOURCE.and_then(|text| text.split_once('|')) {
+    if let Some((manifest_url, download_prefix)) = TEST_SOURCE.and_then(|text| text.split_once('|'))
+    {
         return Source {
             manifest_url: manifest_url.to_string(),
             download_prefix: download_prefix.to_string(),
@@ -104,15 +106,17 @@ fn updates_dir(app: &AppHandle) -> Result<PathBuf, String> {
 }
 
 async fn fetch_manifest(client: &reqwest::Client, source: &Source) -> Result<Manifest, String> {
-    let manifest: Manifest = client
+    let response = client
         .get(&source.manifest_url)
         .send()
         .await
         .and_then(reqwest::Response::error_for_status)
-        .map_err(|_| "更新を確かめられません。通信状態を確認してください".to_string())?
-        .json()
+        .map_err(|_| "更新を確かめられません。通信状態を確認してください".to_string())?;
+    let bytes = crate::pc_client::bounded_response_bytes(response, MAX_MANIFEST_BYTES)
         .await
         .map_err(|_| "更新の案内を読み取れません".to_string())?;
+    let manifest: Manifest =
+        serde_json::from_slice(&bytes).map_err(|_| "更新の案内を読み取れません".to_string())?;
     manifest.validate(source)?;
     Ok(manifest)
 }
@@ -122,8 +126,24 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 async fn file_sha256(path: &Path) -> Option<String> {
-    let bytes = tokio::fs::read(path).await.ok()?;
-    Some(hex(&Sha256::digest(&bytes)))
+    let mut file = tokio::fs::File::open(path).await.ok()?;
+    if file.metadata().await.ok()?.len() > MAX_APK_BYTES {
+        return None;
+    }
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    let mut total = 0u64;
+    loop {
+        let size = file.read(&mut buffer).await.ok()?;
+        if size == 0 {
+            return Some(hex(&hasher.finalize()));
+        }
+        total += size as u64;
+        if total > MAX_APK_BYTES {
+            return None;
+        }
+        hasher.update(&buffer[..size]);
+    }
 }
 
 #[tauri::command]
@@ -224,6 +244,55 @@ mod tests {
     use super::*;
 
     #[test]
+    fn cached_apk_hash_is_checked_in_chunks() {
+        tauri::async_runtime::block_on(async {
+            let file =
+                std::env::temp_dir().join(format!("piep-update-hash-{}", uuid::Uuid::new_v4()));
+            let bytes = vec![0x5au8; 64 * 1024 + 19];
+            tokio::fs::write(&file, &bytes).await.unwrap();
+            assert_eq!(file_sha256(&file).await, Some(hex(&Sha256::digest(&bytes))));
+            tokio::fs::remove_file(file).await.unwrap();
+        });
+    }
+
+    #[test]
+    fn oversized_update_manifests_are_rejected_before_parsing() {
+        use std::io::{Read, Write};
+        tauri::async_runtime::block_on(async {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(3)))
+                    .unwrap();
+                let mut request = [0; 4096];
+                let received = stream.read(&mut request).unwrap();
+                assert!(
+                    String::from_utf8_lossy(&request[..received]).starts_with("GET /manifest ")
+                );
+                let body = format!(
+                    "{}{}",
+                    " ".repeat(MAX_MANIFEST_BYTES),
+                    serde_json::json!({"version":"1.0.0", "url": format!("{DOWNLOAD_PREFIX}v1/piep.apk"), "sha256":"a".repeat(64), "size":10})
+                );
+                write!(stream, "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n", body.len()).unwrap();
+                // 大きさを見て切ったクライアントには、残りが届かなくてよい。
+                let _ = stream.write_all(body.as_bytes());
+            });
+            let mut source = source();
+            source.manifest_url = format!("http://{address}/manifest");
+            let client = reqwest::Client::builder()
+                .no_proxy()
+                .timeout(std::time::Duration::from_secs(3))
+                .build()
+                .unwrap();
+            assert!(fetch_manifest(&client, &source).await.is_err());
+            server.join().unwrap();
+        });
+    }
+
+    #[test]
     fn versions_compare_as_numbers() {
         assert!(is_newer("0.10.0", "0.9.9"));
         assert!(is_newer("1.0.0", "0.2.0"));
@@ -246,9 +315,21 @@ mod tests {
     fn the_destination_is_fixed() {
         let source = source();
         assert_eq!(source.manifest_url, MANIFEST_URL);
-        assert!(manifest(&format!("{DOWNLOAD_PREFIX}v1.0.0/piep.apk")).validate(&source).is_ok());
-        assert!(manifest("https://example.com/piep.apk").validate(&source).is_err());
-        assert!(manifest("https://github.com/someone/else/releases/download/v1/piep.apk").validate(&source).is_err());
+        assert!(
+            manifest(&format!("{DOWNLOAD_PREFIX}v1.0.0/piep.apk"))
+                .validate(&source)
+                .is_ok()
+        );
+        assert!(
+            manifest("https://example.com/piep.apk")
+                .validate(&source)
+                .is_err()
+        );
+        assert!(
+            manifest("https://github.com/someone/else/releases/download/v1/piep.apk")
+                .validate(&source)
+                .is_err()
+        );
     }
 
     #[test]

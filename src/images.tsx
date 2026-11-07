@@ -2,8 +2,21 @@ import { useEffect, useRef, useState, type ReactEventHandler } from "react";
 import { convertFileSrc, isTauri } from "@tauri-apps/api/core";
 import type { PcWork } from "./pcApi";
 
-function imageUrl(path: string): string | null {
-  return isTauri() ? convertFileSrc(path, "pcimg") : null;
+// WebView の HTTP キャッシュも接続ごとに分ける。Rust 側のディスクキャッシュ
+// だけを分けても、同じ作品番号の URL が先に WebView から返されてしまう。
+const newRemoteScope = () => [...crypto.getRandomValues(new Uint32Array(4))].map((part) => part.toString(16).padStart(8, "0")).join("");
+let remoteScope = newRemoteScope();
+function imageUrl(path: string, remote = true): string | null {
+  if (!isTauri()) return null;
+  const url = convertFileSrc(path, "pcimg");
+  return remote ? `${url}?connection=${remoteScope}` : url;
+}
+
+/** 起動し直したときも、接続を変えたときも、前の接続の URL を使わない。 */
+export function forgetServerImages(): void {
+  remoteScope = newRemoteScope();
+  loaded.clear();
+  failed.clear();
 }
 
 export const workCoverUrl = (work: PcWork, large = false) => imageUrl(`work/${work.id}/${work.currentVersion}/${work.contentHash ?? ""}${large ? "/large" : ""}`);
@@ -12,9 +25,9 @@ export const illustrationUrl = (workId: number, assetId: number, width: number, 
 export const workCoverUrlById = (workId: number, revision: number) => imageUrl(`work/${workId}/c${revision}/`);
 export const entityCoverUrl = (kind: "people" | "series", source: string, key: string, banner = false) => imageUrl(`entity/${kind}/${source}/${encodeURIComponent(key)}${banner ? "/banner" : ""}`);
 export const collectionCoverUrl = (collectionId: string, slot: string, revision: number) => imageUrl(`collection/${collectionId}/${slot}/${revision}`);
-export const savedCoverUrl = (workId: number, generation: number) => imageUrl(`saved/${workId}/${generation}`);
-export const savedEntityCoverUrl = (workId: number, kind: "people" | "series", generation: number) => imageUrl(`saved-entity/${workId}/${kind}/${generation}`);
-export const savedCollectionCoverUrl = (workId: number, collectionId: string, generation: number) => imageUrl(`saved-collection/${workId}/${collectionId}/${generation}`);
+export const savedCoverUrl = (workId: number, generation: number) => imageUrl(`saved/${workId}/${generation}`, false);
+export const savedEntityCoverUrl = (workId: number, kind: "people" | "series", generation: number) => imageUrl(`saved-entity/${workId}/${kind}/${generation}`, false);
+export const savedCollectionCoverUrl = (workId: number, collectionId: string, generation: number) => imageUrl(`saved-collection/${workId}/${collectionId}/${generation}`, false);
 
 // 一度出た画像は、スクロールで戻ったときに溶け込ませず、その場で出す。
 const loaded = new Set<string>();

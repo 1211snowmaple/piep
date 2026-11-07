@@ -27,6 +27,15 @@ function subscribe(listener: () => void) {
   return () => { listeners.delete(listener); };
 }
 
+/** 接続先ごとの値なので、登録を変えたら前の本棚の変更を忘れる。 */
+export function forgetFavoriteChanges(): void {
+  entries.clear();
+  notice = null;
+  if (noticeTimer !== null) window.clearTimeout(noticeTimer);
+  noticeTimer = null;
+  emit();
+}
+
 const keyOf = (work: Pick<PcWork, "source" | "sourceId">) => `${work.source}:${work.sourceId}`;
 
 function showNotice(message: string) {
@@ -58,10 +67,13 @@ export function useFavorite(work: PcWork): { favorite: boolean; busy: boolean; o
   const toggle = useCallback((next: boolean) => {
     const before = entries.get(key)?.favorite ?? work.favorite;
     if (entries.get(key)?.busy) return;
-    entries.set(key, { favorite: next, busy: true });
+    const pending: Entry = { favorite: next, busy: true };
+    entries.set(key, pending);
     emit();
     setPcFavorite(work.source, work.sourceId, next)
       .then((stored) => {
+        // 接続変更後に届いた古いサーバーの返事は、新しい本棚へ当てない。
+        if (entries.get(key) !== pending) return;
         entries.set(key, { favorite: stored.favorite, busy: false });
         emit();
         // サイドバーの件数と、お気に入りで絞った一覧を次に開いたときに合わせる。
@@ -69,6 +81,7 @@ export function useFavorite(work: PcWork): { favorite: boolean; busy: boolean; o
         void queryClient.invalidateQueries({ queryKey: ["metadata"] });
       })
       .catch((error: unknown) => {
+        if (entries.get(key) !== pending) return;
         entries.set(key, { favorite: before, busy: false });
         emit();
         showNotice(pcErrorMessage(error));
