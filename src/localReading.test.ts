@@ -143,6 +143,11 @@ describe("続きを読む", () => {
 
     store.rememberReading(other, null, 1, true);
     expect((await store.loadShelf()).map((item) => item.work.sourceId)).toEqual(["100"]);
+    // 頭へ戻すと棚から降り、読み進めればまた並ぶ。
+    store.rememberReading(work, null, 0.002, false);
+    expect(await store.loadShelf()).toEqual([]);
+    store.rememberReading(work, null, 0.2, false);
+    expect((await store.loadShelf()).map((item) => item.work.sourceId)).toEqual(["100"]);
     store.setReadingServer("https://other.example/");
     expect(await store.loadShelf()).toEqual([]);
   });

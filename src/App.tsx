@@ -24,6 +24,7 @@ import { statusQueryKey } from "./workList";
 import { useFavoriteNotice } from "./favorites";
 import { defaultPcSearch, getPcStatus, type OfflineWork, type PcConnectionStatus, type PcSearchCriteria, type PcWork } from "./pcApi";
 import { handleReaderKeyboard } from "./readerKeyboard";
+import { PullIndicator, usePullToRefresh } from "./pullToRefresh";
 import { ReaderBehaviorControls, ReaderTypeControls } from "./ReaderSettings";
 import { defaultReaderBehavior, defaultReaderType, loadReaderBehavior, saveReaderBehavior, typeLimits, type ReaderBehavior, type ReaderFont, type ReaderTheme, type ReaderType } from "./readerPrefs";
 import { loadRememberedSort, loadSavedConditions, saveRememberedSort, saveSavedConditions, type FixedSort, type SavedCondition } from "./librarySort";
@@ -59,6 +60,7 @@ const fontFamilyKey = "piep.android.reader.font-family.v2";
 const readerThemeKey = "piep.android.reader.theme";
 const appearanceKey = "piep.android.appearance";
 const pagingModeKey = "piep.android.library.paging-mode";
+const continueShelfKey = "piep.android.library.continue-shelf";
 
 type Appearance = "auto" | "light" | "dark";
 type PagingMode = "auto" | "pages";
@@ -169,6 +171,7 @@ function App() {
   const { fontSize, lineHeight, readerWidth, fontFamily, readerTheme } = readerType;
   const [appearance, setAppearance] = useState<Appearance>(() => storedChoice(appearanceKey, "auto", ["auto", "light", "dark"]));
   const [pagingMode, setPagingMode] = useState<PagingMode>(() => storedChoice(pagingModeKey, "auto", ["auto", "pages"]));
+  const [continueShelf, setContinueShelf] = useState<"show" | "hide">(() => storedChoice(continueShelfKey, "show", ["show", "hide"]));
   const readerOpen = onlineWork !== null || offlineWork !== null || reading;
   // 読書の記録は SQLite から読む。開く前に読み終えておき、位置や表示が後から変わらないようにする。
   const recordsReady = useLocalReadingsReady([selectedWork?.work, onlineWork, offlineWork?.work]);
@@ -232,10 +235,23 @@ function App() {
   useEffect(() => {
     const scroller = mainRef.current;
     if (!scroller) return;
-    const update = () => setScrolledFar(scroller.scrollTop > 1400);
-    update();
+    // 戻ろうとして上へ動かしたときだけ出す。下へ読み進めているあいだと、止まって少したったら引っ込める。
+    // 出しっぱなしにすると、カードの右下のボタンや下メニューに重なる。
+    let last = scroller.scrollTop;
+    let climbed = 0;
+    let idle: number | undefined;
+    const update = () => {
+      const top = scroller.scrollTop;
+      const delta = top - last;
+      last = top;
+      window.clearTimeout(idle);
+      if (top <= 1400 || delta > 4) { climbed = 0; setScrolledFar(false); return; }
+      if (delta < 0) climbed -= delta;
+      if (climbed > 48) setScrolledFar(true);
+      idle = window.setTimeout(() => { climbed = 0; setScrolledFar(false); }, 3200);
+    };
     scroller.addEventListener("scroll", update, { passive: true });
-    return () => scroller.removeEventListener("scroll", update);
+    return () => { scroller.removeEventListener("scroll", update); window.clearTimeout(idle); };
   }, []);
 
   // 回転してサイドバーが常設になったら、開いたままの状態を残さない。
@@ -487,6 +503,11 @@ function App() {
 
   const closeDetail = () => { back(); };
   const savedWorkChanged = () => setSavedRevision((revision) => revision + 1);
+  // 一覧の一番上で下へ引くと読み込み直す。サーバーの一覧は接続の確認ごと取り直し、端末内は保存の一覧を読み直す。
+  const refreshList = currentPage.name === "library" || currentPage.name === "entity"
+    ? () => queryClient.refetchQueries({ type: "active" })
+    : currentPage.name === "offline" ? savedWorkChanged : null;
+  const listPull = usePullToRefresh(mainRef, mainRef, readerOpen || detailOpen ? null : refreshList);
 
   const closeReader = () => { back(); };
 
@@ -503,6 +524,7 @@ function App() {
   }, []);
   useEffect(() => { try { window.localStorage.setItem(positionKey, String(page)); } catch { /* storage unavailable */ } }, [page]);
   useEffect(() => { try { window.localStorage.setItem(pagingModeKey, pagingMode); } catch { /* storage unavailable */ } }, [pagingMode]);
+  useEffect(() => { try { window.localStorage.setItem(continueShelfKey, continueShelf); } catch { /* storage unavailable */ } }, [continueShelf]);
   useEffect(() => {
     document.documentElement.dataset.piepAppearance = appearance;
     try { window.localStorage.setItem(appearanceKey, appearance); } catch { /* storage unavailable */ }
@@ -565,9 +587,11 @@ function App() {
       <div className="main-column">
         <header className="mobile-header"><button ref={sidebarToggleRef} className="sidebar-toggle" type="button" onClick={() => setSidebarOpen((open) => !open)} aria-label={sidebarOpen ? "サイドバーを閉じる" : "サイドバーを開く"} aria-expanded={sidebarOpen} aria-controls="app-navigation"><Icon name="menu" /></button><PiepLockup size={22} /></header>
         {sidebarOpen && <button className="mobile-sidebar-scrim" type="button" onClick={() => setSidebarOpen(false)} aria-label="サイドバーを閉じる" />}
+        {/* 一覧の上端に高さ 0 の足場を置き、そこから吊るす。上の見出しの高さや端末の余白に依らず、必ず一覧の上に乗る。 */}
+        <div className="scroll-top-anchor"><PullIndicator {...listPull} />{scrolledFar && <button className="scroll-top" type="button" onClick={() => { setScrolledFar(false); mainRef.current?.scrollTo({ top: 0, behavior: "smooth" }); }}><ArrowUp aria-hidden="true" />一番上へ</button>}</div>
         <main className="main-content" ref={mainRef}>
           {currentPage.name === "library" && <AppUpdateNotice info={appUpdate} onOpenSettings={() => showSection("settings")} />}
-          {currentPage.name === "library" && <PcLibrary page={currentPage} status={pcConnection} statusLoading={isTauri() && statusQuery.isPending} onOpenWork={openOnlineWork} onOpenDetail={openOnlineDetail} onGoToSettings={() => showSection("settings")} onSaved={savedWorkChanged} onSaveCondition={saveCondition} savedRevision={savedRevision} pagingMode={pagingMode} rememberedSort={rememberedSort} onRememberedSortChange={changeRememberedSort} />}
+          {currentPage.name === "library" && <PcLibrary page={currentPage} status={pcConnection} statusLoading={isTauri() && statusQuery.isPending} onOpenWork={openOnlineWork} onOpenDetail={openOnlineDetail} onGoToSettings={() => showSection("settings")} onSaved={savedWorkChanged} onSaveCondition={saveCondition} savedRevision={savedRevision} pagingMode={pagingMode} showContinue={continueShelf === "show"} rememberedSort={rememberedSort} onRememberedSortChange={changeRememberedSort} />}
           {currentPage.name === "entity" && <EntityPage key={`${currentPage.kind}:${currentPage.source}:${currentPage.key}`} page={currentPage} status={pcConnection} savedRevision={savedRevision} pagingMode={pagingMode} onOpenWork={openOnlineWork} onOpenDetail={openOnlineDetail} onSaved={savedWorkChanged} />}
           {currentPage.name === "offline" && <OfflineLibrary page={currentPage} onOpenWork={openOfflineWork} onOpenDetail={openOfflineDetail} onShowPc={() => showSection("pc")} savedRevision={savedRevision} pagingMode={pagingMode} rememberedSort={rememberedSort} onRememberedSortChange={changeRememberedSort} />}
           {currentPage.name === "settings" && <>
@@ -579,13 +603,12 @@ function App() {
               <section className="settings-card"><div className="setting-title"><div><h2>読書の表示</h2><p>読書中も右上のボタンから変えられます。</p></div></div><ReaderTypeControls value={readerType} onChange={changeReaderType} /><div className="settings-actions"><button className="secondary-button" onClick={resetReaderSettings}>初期値に戻す</button><button className="secondary-button" onClick={showPreview}>表示サンプルで試す</button></div></section>
               <section className="settings-card"><div className="setting-title"><div><h2>読み方とページ送り</h2><p>つなげて読むかどうかと、タップ、スワイプ、音量キーでの送り方を選べます。</p></div></div><ReaderBehaviorControls value={readerBehavior} onChange={changeReaderBehavior} /></section>
               <h2 className="settings-group">表示</h2>
-              <section className="settings-card"><div className="setting-choice"><span>カラーテーマ</span><div role="group" aria-label="アプリのカラーテーマ"><button className={appearance === "auto" ? "selected" : ""} onClick={() => setAppearance("auto")}>システム</button><button className={appearance === "light" ? "selected" : ""} onClick={() => setAppearance("light")}>ライト</button><button className={appearance === "dark" ? "selected" : ""} onClick={() => setAppearance("dark")}>ダーク</button></div></div><div className="setting-choice"><span>作品一覧の続き</span><div role="group" aria-label="一覧の読み込み方"><button className={pagingMode === "auto" ? "selected" : ""} onClick={() => setPagingMode("auto")}>スクロールで自動</button><button className={pagingMode === "pages" ? "selected" : ""} onClick={() => setPagingMode("pages")}>ページ番号</button></div></div><p className="settings-help">関連度順の検索は自動読み込みになります。ページ番号は先頭 251 ページまで選べます。</p></section>
+              <section className="settings-card"><div className="setting-choice"><span>カラーテーマ</span><div role="group" aria-label="アプリのカラーテーマ"><button className={appearance === "auto" ? "selected" : ""} onClick={() => setAppearance("auto")}>システム</button><button className={appearance === "light" ? "selected" : ""} onClick={() => setAppearance("light")}>ライト</button><button className={appearance === "dark" ? "selected" : ""} onClick={() => setAppearance("dark")}>ダーク</button></div></div><div className="setting-choice"><span>作品一覧の続き</span><div role="group" aria-label="一覧の読み込み方"><button className={pagingMode === "auto" ? "selected" : ""} onClick={() => setPagingMode("auto")}>スクロールで自動</button><button className={pagingMode === "pages" ? "selected" : ""} onClick={() => setPagingMode("pages")}>ページ番号</button></div></div><div className="setting-choice"><span>続きを読む</span><div role="group" aria-label="ライブラリの「続きを読む」"><button className={continueShelf === "show" ? "selected" : ""} onClick={() => setContinueShelf("show")}>表示する</button><button className={continueShelf === "hide" ? "selected" : ""} onClick={() => setContinueShelf("hide")}>表示しない</button></div></div><p className="settings-help">関連度順の検索は自動読み込みになります。ページ番号は先頭 251 ページまで選べます。「続きを読む」を表示しなくても、読みかけの作品はサイドバーの「読みかけ」から開けます。</p></section>
               <h2 className="settings-group">管理</h2>
               <AppUpdateSettings info={appUpdate} onInfo={setAppUpdate} />
             </div>
           </>}
         </main>
-        {scrolledFar && <button className="scroll-top" type="button" aria-label="一番上へ" onClick={() => mainRef.current?.scrollTo({ top: 0, behavior: "smooth" })}><ArrowUp aria-hidden="true" /></button>}
         <nav className="bottom-nav" aria-label="下部ナビゲーション">{sections.map((item) => <button key={item.id} className={section === item.id ? "bottom-item active" : "bottom-item"} onClick={() => showSection(item.id)} aria-current={section === item.id ? "page" : undefined}><Icon name={item.icon} /><span>{item.label}</span></button>)}</nav>
       </div>
     </div>

@@ -139,34 +139,34 @@ button.card-action:active { background: var(--piep-tag-bg); color: var(--piep-te
 .results-bar h2 { margin: 0; color: var(--piep-text); font-size: var(--fs-heading); font-weight: 680; }
 
 /* ---- 続きを読む ---- */
-/* 一覧を押し下げない一段。小さな表紙の横に題名と進み具合を置く。 */
+/* 一覧を押し下げない一段。表紙と進み具合だけを並べる。 */
 .continue-shelf { margin: 0 0 12px; }
 .continue-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 32px; margin-bottom: 4px; }
 .continue-heading h2 { margin: 0; color: var(--piep-muted); font-size: var(--fs-small); font-weight: 700; }
 .continue-all { display: inline-flex; align-items: center; gap: 1px; min-height: 32px; margin-right: -6px; padding: 0 2px 0 8px; border: 0; border-radius: 8px; background: transparent; color: var(--piep-active-text); font-size: var(--fs-small); font-weight: 650; }
 .continue-all svg { width: 15px; height: 15px; }
 .continue-all:active { background: var(--piep-active); }
-.continue-row { display: flex; gap: 8px; overflow-x: auto; scroll-snap-type: x proximity; scrollbar-width: none; margin-inline: -16px; padding-inline: 16px; scroll-padding-inline: 16px; }
+/* 表紙の左右の端は、下の作品カードの中の表紙にそろえる。カードは白い枠の内側 13px に表紙を置くので、
+   棚もその分だけ内側から始める（枠の外端にそろえると、白い余白がないぶん詰まって見えた）。
+   列の数で幅を割り、端に半端な表紙を出さない。多いときは横に送る。 */
+.continue-row { --continue-columns: 4; --continue-gap: 10px; --continue-inset: 13px; display: flex; gap: var(--continue-gap); overflow-x: auto; scroll-snap-type: x proximity; scrollbar-width: none; padding: 2px var(--continue-inset) 4px; scroll-padding-inline: var(--continue-inset); }
 .continue-row::-webkit-scrollbar { display: none; }
-/* 携帯で 3 冊、タブレットで 4〜5 冊が一度に見える幅。それより多ければ横に送る。 */
-.continue-item { --continue-columns: 3; flex: 0 0 calc((100% - (var(--continue-columns) - 1) * 8px) / var(--continue-columns)); display: flex; align-items: center; gap: 7px; min-width: 0; min-height: 62px; padding: 6px 8px 6px 6px; border: 1px solid var(--piep-line); border-radius: 10px; background: var(--piep-surface); color: var(--piep-text); text-align: left; scroll-snap-align: start; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; transition: border-color 140ms ease, box-shadow 140ms ease; }
-.continue-item:active { border-color: light-dark(#cdd8e5, #384352); box-shadow: 0 6px 18px rgb(28 53 82 / 9%); }
-.continue-cover { flex: none; width: 30px; }
-.continue-cover .work-cover { width: 100%; border-radius: 4px; }
-.continue-cover .cover-caption { display: none; }
-.continue-text { flex: 1; display: flex; flex-direction: column; gap: 5px; min-width: 0; }
-.continue-title { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; font-size: var(--fs-tiny); font-weight: 650; line-height: 1.35; overflow-wrap: anywhere; }
-.continue-meta { display: flex; align-items: center; gap: 5px; color: var(--piep-muted); font-size: 10.5px; font-variant-numeric: tabular-nums; }
-.continue-progress { flex: 1; display: block; height: 3px; overflow: hidden; border-radius: 999px; background: var(--piep-line); }
-.continue-progress span { display: block; height: 100%; background: var(--piep-blue); }
-@media (min-width: 600px) {
-  .continue-row { margin-inline: 0; padding-inline: 0; scroll-padding-inline: 0; }
-  .continue-item { --continue-columns: 4; gap: 9px; min-height: 66px; padding: 7px 10px 7px 7px; }
-  .continue-cover { width: 36px; }
-  .continue-title { font-size: var(--fs-small); }
-  .continue-meta { font-size: var(--fs-tiny); }
-}
-@media (min-width: 1000px) { .continue-item { --continue-columns: 5; } }
+.continue-item { flex: 0 0 calc((100% - (var(--continue-columns) - 1) * var(--continue-gap)) / var(--continue-columns)); display: block; min-width: 0; padding: 0; border: 0; border-radius: 8px; background: transparent; color: var(--piep-text); text-align: left; scroll-snap-align: start; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+.continue-cover { position: relative; display: block; overflow: hidden; border-radius: 8px; box-shadow: 0 2px 8px rgb(28 53 82 / 8%); transition: transform 140ms ease, box-shadow 140ms ease; }
+.continue-item:active .continue-cover { transform: scale(.97); box-shadow: 0 1px 4px rgb(28 53 82 / 10%); }
+/* 表紙の画像は z-index を持つので、表紙を一つの重なりに閉じ込めて、数字と棒が必ず上に出るようにする。 */
+.continue-cover .work-cover { width: 100%; height: auto; isolation: isolate; }
+/* 表紙のない作品は下に題名を刷っているので、数字と棒の分だけ題名を上へ逃がす。 */
+.continue-cover .cover-caption { padding-bottom: 28px; }
+.continue-cover .cover-caption > span, .continue-cover .cover-caption > span[data-scale] { -webkit-line-clamp: 3; }
+.continue-percent { position: absolute; right: 6px; bottom: 16px; padding: 2px 5px; border-radius: 999px; background: rgb(16 24 34 / 68%); color: #fff; font-size: 10.5px; font-weight: 650; line-height: 1.25; font-variant-numeric: tabular-nums; }
+/* 棒は縁に貼りつけず、少し内側に浮かせる。縁に沿わせると表紙の下の帯に見えた。地は白く透かし、どの表紙の上でも青が読めるようにする。 */
+.continue-progress { position: absolute; right: 6px; bottom: 6px; left: 6px; display: block; height: 5px; overflow: hidden; border-radius: 999px; background: rgb(255 255 255 / 78%); box-shadow: 0 0 0 1px rgb(16 24 34 / 12%); }
+.continue-progress span { display: block; height: 100%; border-radius: inherit; background: var(--piep-blue); }
+.continue-item:focus-visible { outline: 2px solid var(--piep-blue); outline-offset: 3px; }
+@media (min-width: 600px) { .continue-row { --continue-columns: 6; --continue-gap: 14px; } }
+@media (min-width: 900px) { .continue-row { --continue-columns: 8; } }
+@media (min-width: 1300px) { .continue-row { --continue-columns: 10; } }
 
 /* ---- 絞り込み ---- */
 .filter-layer { position: fixed; z-index: 45; inset: 0; display: flex; align-items: flex-end; justify-content: center; }
@@ -208,7 +208,8 @@ button.card-action:active { background: var(--piep-tag-bg); color: var(--piep-te
 }
 
 /* ---- サイドバー ---- */
-.side-nav { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
+/* 高さが足りないとき（スマホの横向きなど）は中身を縮めず、サイドバーごと縦に送る。縮めると下の接続表示に字が重なった。 */
+.side-nav { display: flex; flex-direction: column; flex: 1 0 auto; }
 .side-destination { display: grid; gap: 4px; }
 .side-destination--end { margin-top: auto; padding-top: 12px; }
 .shelf-list { display: grid; gap: 2px; margin: 2px 0 0; padding-left: 16px; }
@@ -255,8 +256,18 @@ button.card-action:active { background: var(--piep-tag-bg); color: var(--piep-te
 .offline-retry { display: block; margin-left: auto; }
 
 .virtual-work-cell { display: block; min-width: 0; }
-.scroll-top { position: fixed; z-index: 28; right: 18px; bottom: calc(18px + var(--piep-safe-bottom)); display: grid; place-items: center; width: 46px; height: 46px; border: 1px solid var(--piep-line); border-radius: 50%; background: var(--piep-surface); color: var(--piep-text); box-shadow: 0 4px 14px #0e1d3026; }
-.scroll-top svg { width: 20px; height: 20px; }
+.scroll-top-anchor { position: relative; z-index: 28; flex: none; height: 0; }
+.scroll-top { position: absolute; top: 10px; left: 50%; display: inline-flex; align-items: center; gap: 6px; min-height: 40px; padding: 0 16px 0 12px; border: 1px solid var(--piep-line); border-radius: 999px; background: var(--piep-surface); color: var(--piep-text); font-size: var(--fs-small); font-weight: 650; box-shadow: 0 4px 14px #0e1d3026; transform: translateX(-50%); animation: scroll-top-in .16s ease-out; }
+.scroll-top svg { width: 17px; height: 17px; }
+@keyframes scroll-top-in { from { opacity: 0; transform: translate(-50%, -8px); } }
+@media (prefers-reduced-motion: reduce) { .scroll-top { animation: none; } }
+/* 一番上で下へ引いたときの印。引いた量だけ下り、読み込み直す量に届くと青くなる。 */
+.pull-indicator { position: absolute; z-index: 29; top: 4px; left: 50%; display: grid; width: 38px; height: 38px; place-items: center; border: 1px solid var(--piep-line, #dfe5ec); border-radius: 50%; background: var(--piep-surface, #fff); color: var(--piep-muted, #667380); box-shadow: 0 4px 14px #0e1d3026; pointer-events: none; transform: translate(-50%, calc(var(--pull) * .7 - 12px)); }
+.pull-indicator svg { width: 19px; height: 19px; }
+.pull-indicator[data-ready], .pull-indicator[data-refreshing] { color: var(--piep-blue, #1677d2); }
+.pull-indicator[data-refreshing] svg { animation: pull-spin .8s linear infinite; }
+@keyframes pull-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .pull-indicator[data-refreshing] svg { animation: none; } }
 .app-toast { position: fixed; z-index: 60; left: 50%; bottom: calc(92px + var(--piep-safe-bottom)); transform: translateX(-50%); padding: 10px 16px; border-radius: 999px; background: #1c2530ee; color: #fff; font-size: var(--fs-body); white-space: nowrap; }
 .load-more-status { color: var(--piep-muted); font-size: var(--fs-small); }
 .load-more { display: flex; justify-content: center; }

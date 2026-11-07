@@ -1,6 +1,7 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import type { PcWork } from "./pcApi";
 import type { ReaderFont, ReaderLayout } from "./readerPrefs";
+import { minimumReadProgress } from "./workText";
 
 /**
  * 端末での読書の記録。Rust 側の SQLite（`reading_local_*`）に置く。
@@ -207,15 +208,19 @@ export function adoptLocalPosition(work: WorkIdentity, editHash: string | null, 
   store({ ...editable(work, editHash), page: position.page, position, readAt: time }, true);
 }
 
+/** 読書画面で 1% 以上と出る作品だけを棚に載せる（`readingPercent` と同じ境目）。 */
+const partRead = (progress: number) => progress >= minimumReadProgress;
+
 /**
  * 「続きを読む」の材料。サーバーの検索は「読みかけ」で絞れず、読書位置からは作品を引けないので、
  * この端末で読んだ作品を表示に要る情報ごと覚える。開いただけでは棚に並べない。
  */
 export function rememberReading(work: PcWork, editHash: string | null, progress: number, finished: boolean): void {
   const row = editable(work, editHash);
-  const shelved = row.shelved || finished || progress > 0.002;
+  // 頭へ戻した作品は棚から降ろす。読み進めればまた並ぶ。
+  const shelved = finished || partRead(progress);
   const joined = shelved !== row.shelved || finished !== row.finished;
-  store({ ...row, progress: Math.min(1, Math.max(0, progress)), finished, shelved, serverUrl: currentServer ?? row.serverUrl, workId: work.id, work }, shelved, joined);
+  store({ ...row, progress: Math.min(1, Math.max(0, progress)), finished, shelved, serverUrl: currentServer ?? row.serverUrl, workId: work.id, work }, shelved || row.shelved, joined);
 }
 
 /** 接続先が変わったら呼ぶ。接続先を記録していない古い履歴は、最初に分かった接続先のものとして扱う。 */
@@ -245,7 +250,8 @@ export async function loadShelf(): Promise<RecentWork[]> {
   try {
     const rows = await invoke<LocalReading[]>("reading_local_shelf", { serverUrl: server, limit: shelfLimit });
     for (const row of rows) if (!queued.has(workKey(row))) cache.set(workKey(row), row);
-    const items = rows.filter((row) => row.work).map((row) => ({ work: row.work!, at: row.readAt, progress: row.progress, finished: row.finished, server: row.serverUrl ?? undefined }));
+    // 0.6 までは少しでも動かせば棚に載せたので、頭にいる作品が記録に残っている。
+    const items = rows.filter((row) => row.work && partRead(row.progress)).map((row) => ({ work: row.work!, at: row.readAt, progress: row.progress, finished: row.finished, server: row.serverUrl ?? undefined }));
     lastShelf = { server, items };
     return items;
   } catch { return cachedShelf(); }
@@ -348,7 +354,7 @@ async function migrateLegacyShelf(server: string): Promise<void> {
       ...base,
       progress: Math.min(1, Math.max(0, entry.progress)),
       finished: Boolean(entry.finished),
-      shelved: true,
+      shelved: Boolean(entry.finished) || partRead(entry.progress),
       readAt: Math.max(base.readAt, Math.round(entry.at)),
       serverUrl: entry.server ?? server,
       workId: entry.work.id,

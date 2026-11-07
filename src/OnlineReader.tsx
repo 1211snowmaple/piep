@@ -8,6 +8,8 @@ import { WorkFavoriteButton } from "./FavoriteButton";
 import { ContinuousDocument, type ContinuousTarget, type LivePosition, type LoadedSection } from "./ContinuousDocument";
 import { ReaderInfoSheet, type InfoTab } from "./ReaderInfoSheet";
 import { ReaderPager } from "./ReaderPager";
+import { ReaderRail } from "./ReaderRail";
+import { PullIndicator, usePullToRefresh } from "./pullToRefresh";
 import { ReaderBehaviorControls, ReaderTypeControls } from "./ReaderSettings";
 import { fillDocumentImages, safePageHtml } from "./readerDocument";
 import { readerKeyDirection } from "./readerKeyboard";
@@ -95,6 +97,9 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
   const [collections, setCollections] = useState<PcCollection[] | null>(offlineCollections ?? null);
   const touchStart = useRef<{ x: number; y: number } | null>(null);
   const scrollRef = useRef<HTMLElement>(null);
+  const bodyRef = useRef<HTMLDivElement>(null);
+  // 読み込めなかったときだけ、一番上で下へ引いて読み込み直せる。読んでいる最中の引き下げは、本文のスクロールに任せる。
+  const retryPull = usePullToRefresh(bodyRef, scrollRef, problem && !loading ? () => setRetry((current) => current + 1) : null);
   const keyboardPageChange = useRef(false);
   const infoTriggerRef = useRef<HTMLButtonElement>(null);
   const typeTriggerRef = useRef<HTMLButtonElement>(null);
@@ -421,7 +426,8 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
     if (syncedPage.current === null) syncedPage.current = pageIndex;
     else if (syncedPage.current !== pageIndex) {
       syncedPage.current = pageIndex;
-      queueReadingWrite(pageIndex, saved?.ratio ?? 0, pageCount);
+      // 一画面に収まるページは、開いた時点で読み切っている。最後のページなら読了まで届かせる。
+      queueReadingWrite(pageIndex, saved?.ratio ?? (viewport.scrollHeight - viewport.clientHeight <= 1 ? 1 : 0), pageCount);
     }
     const readPosition = () => {
       const length = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
@@ -429,7 +435,8 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
       const position: SavedPosition = {
         page: pageIndex,
         top: viewport.scrollTop,
-        ratio: length > 0 ? viewport.scrollTop / length : 0,
+        // 動かせないほど短いページは全部見えている。0 にすると最後のページで 100% に届かない。
+        ratio: length > 1 ? Math.min(1, viewport.scrollTop / length) : 1,
         fontSize,
         lineHeight,
         readerWidth,
@@ -817,13 +824,9 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
   const dragPage = Math.min(pageCount - 1, Math.floor(Math.min(0.9999, shownProgress) * pageCount));
   const statusLabel = !continuous && multiPage && !(showPager && behavior.pageButtons === "always") ? `${(dragPosition === null ? pageIndex : dragPage) + 1} / ${pageCount}` : null;
   const titleBlock = <><h1 ref={readerTitleRef} className={readerTitleExpanded ? "reader-work-title expanded" : "reader-work-title"}>{work.title}</h1>{readerTitleOverflow && <button className="reader-title-toggle" onClick={() => setReaderTitleExpanded((expanded) => !expanded)} aria-expanded={readerTitleExpanded}>{readerTitleExpanded ? "タイトルを短く表示" : "タイトルをすべて表示"}</button>}<div className="reader-rule" /></>;
-  const commitDrag = () => {
-    if (dragPosition === null) return;
-    goToProgress(dragPosition);
-    setDragPosition(null);
-  };
+  const dragLabel = multiPage && !continuous ? `${percentLabel} · ${dragPage + 1} / ${pageCount}` : percentLabel;
 
-  return <div className={`reader-screen reader-theme--${readerTheme} ${pinned ? "reader-bars--pinned" : "reader-bars--auto"}`} data-bars={barsVisible ? "shown" : "hidden"}>
+  return <div className={`reader-screen reader-theme--${readerTheme} ${pinned ? "reader-bars--pinned" : "reader-bars--auto"}`} data-bars={barsVisible ? "shown" : "hidden"} data-pager={showPager && behavior.pageButtons === "menu" ? "menu" : undefined}>
     <span className="reader-safe-top" aria-hidden="true" />
     <header className="reader-toolbar">
       <button className="reader-icon-button" onClick={onBack} aria-label={backLabel}><ChevronLeft aria-hidden="true" /></button>
@@ -833,6 +836,8 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
       {saveMessage && !infoOpen && <div className="reader-notice" role="status"><span>{saveMessage}</span><button type="button" onClick={() => setSaveMessage(null)} aria-label="閉じる"><X aria-hidden="true" /></button></div>}
       {remoteOffer && <div className="reader-notice reader-sync-offer" role="status"><span>{remoteOffer.guide ? "別の版を" : "別の端末で"} {remoteOffer.page + 1} ページまで読んでいます</span><button onClick={acceptRemote}>そこへ移動</button><button onClick={dismissRemote}>閉じる</button></div>}
     </div>
+    <div className="reader-body" ref={bodyRef}>
+      <PullIndicator {...retryPull} />
     <main className="reader-scroll" ref={scrollRef} key={continuous ? "continuous" : pageIndex} tabIndex={0} aria-label="本文。Page Up、Page Down、左右矢印、Spaceで移動" onClick={tapReader} onKeyDown={(event) => {
       const direction = readerKeyDirection(event);
       if (!direction || infoOpen || typeOpen) return;
@@ -847,15 +852,16 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
         ? activeEditHash !== undefined && <ContinuousDocument key={`${positionKey}:${retry}`} viewportRef={scrollRef} load={loadSection} imageSource={imageSource} isSnapshotChange={(error) => offline && offlineSnapshotChanged(error)} onSnapshotChanged={() => setRetry((current) => current + 1)} start={continuousStart} target={continuousTarget} typeKey={`${fontSize}:${lineHeight}:${readerWidth}:${fontFamily}`} header={titleBlock} onInfo={continuousInfo} onPosition={continuousPosition} onCommit={continuousCommit} onLink={openContentLink} onStartRejected={rejectContinuousStart} flushRef={flushContinuous} />
         : <>
           {pageIndex === 0 && titleBlock}
-          {loading ? <p>本文を読み込んでいます…</p> : problem ? <div className="reader-error" role="alert"><p>{problem}</p><button onClick={() => setRetry((current) => current + 1)}>もう一度読み込む</button></div> : <div className="online-document" onClick={openContentLink} dangerouslySetInnerHTML={{ __html: html }} />}
+          {loading ? <p>本文を読み込んでいます…</p> : problem ? <div className="reader-error" role="alert"><p>{problem}</p><button onClick={() => setRetry((current) => current + 1)}>もう一度読み込む</button><small>下へ引いても読み込み直せます</small></div> : <div className="online-document" onClick={openContentLink} dangerouslySetInnerHTML={{ __html: html }} />}
         </>}
     </article></main>
+    <ReaderRail progress={shownProgress} interactive={barsVisible && !loading && !problem} label={dragLabel} onPreview={setDragPosition} onCommit={(value) => { goToProgress(value); setDragPosition(null); }} />
+    </div>
     <div className="reader-bottom">
       <div className="reader-panel" aria-hidden={!barsVisible} inert={!barsVisible}>
-        {/* 進み具合と、読みながら触るものを一行に。字の説明は付けず、印だけを親指の届く下に置く。 */}
+        {/* 読みながら触るものを一行に。字の説明は付けず、印だけを親指の届く下に置く。進み具合の棒は右端の縦の列。 */}
         <div className="reader-progress-row">
-          <input type="range" className="reader-progress-slider" min={0} max={1000} step={1} value={Math.round(shownProgress * 1000)} aria-label="読書位置" onChange={(event) => setDragPosition(Number(event.target.value) / 1000)} onPointerUp={commitDrag} onTouchEnd={commitDrag} onKeyUp={commitDrag} />
-          <span className="reader-progress-label">{percentLabel}</span>
+          <span className="reader-progress-label">{percentLabel}{statusLabel && <small>{statusLabel}</small>}</span>
           <div className="reader-actions">
             {outline.length > 0 && <button type="button" className="reader-icon-button" onClick={() => { setInfoTab("outline"); setInfoOpen(true); }} aria-label="目次" title="目次"><TableOfContents aria-hidden="true" /></button>}
             <button ref={typeTriggerRef} type="button" className="reader-icon-button" onClick={() => setTypeOpen(true)} aria-label="文字とページ送りの設定" title="表示"><ALargeSmall aria-hidden="true" /></button>
