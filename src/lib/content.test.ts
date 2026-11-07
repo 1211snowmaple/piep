@@ -44,6 +44,21 @@ describe("document content helpers", () => {
     expect(html).toContain('src="asset://localhost/cover.png"');
   });
 
+  it("does not leave unvalidated navigation on image-map areas or delegated link attributes", () => {
+    const html = prepareDocumentHtml(
+      '<map name="map"><area href="javascript:evil()" shape="rect" coords="0,0,100,100"></map>'
+        + '<a href="https://example.com/safe" data-content-href="https://tracker.example/override">続き</a>'
+        + '<a data-content-href="https://tracker.example/hidden">本文</a>',
+      () => null,
+    );
+    const document = new DOMParser().parseFromString(html, "text/html");
+    expect(document.querySelector("area")?.hasAttribute("href")).toBe(false);
+    expect(document.querySelector("a[href]")?.getAttribute("href")).toBe("https://example.com/safe");
+    expect(html).not.toContain("javascript:");
+    expect(html).not.toContain("data-content-href");
+    expect(html).not.toContain("tracker.example");
+  });
+
   it("keeps app-local audio and video without loading external media", () => {
     const html = prepareDocumentHtml(
       '<audio controls src="asset://localhost/song.mp3"></audio><video controls data-local-path="C:/book/clip.mp4"></video><source src="https://tracker.example/read"><track src="data:text/vtt,WEBVTT">',

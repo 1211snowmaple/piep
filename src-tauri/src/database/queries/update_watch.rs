@@ -466,6 +466,23 @@ impl Database {
         cursor: Option<(&str, &str)>,
         limit: i64,
     ) -> Result<Vec<UpdateCandidateRow>, String> {
+        self.list_update_candidate_page(cursor, limit, None)
+    }
+
+    pub(crate) fn list_pending_update_candidates_after(
+        &self,
+        cursor: Option<(&str, &str)>,
+        limit: i64,
+    ) -> Result<Vec<UpdateCandidateRow>, String> {
+        self.list_update_candidate_page(cursor, limit, Some("pending"))
+    }
+
+    fn list_update_candidate_page(
+        &self,
+        cursor: Option<(&str, &str)>,
+        limit: i64,
+        status: Option<&str>,
+    ) -> Result<Vec<UpdateCandidateRow>, String> {
         let conn = self.read_conn()?;
         let limit = limit.clamp(1, 5_000);
         let (sql, bind_values): (&str, Vec<Box<dyn rusqlite::types::ToSql>>) = match cursor {
@@ -473,22 +490,25 @@ impl Database {
                 "SELECT source, source_id, kind, title, payload_json, target_type, status,
                         first_seen_at, updated_at
                    FROM update_candidates
-                  WHERE source > ?1 OR (source = ?1 AND source_id > ?2)
+                  WHERE (source > ?1 OR (source = ?1 AND source_id > ?2))
+                    AND (?4 IS NULL OR status = ?4)
                   ORDER BY source ASC, source_id ASC
                   LIMIT ?3",
                 vec![
                     Box::new(source.to_string()),
                     Box::new(source_id.to_string()),
                     Box::new(limit),
+                    Box::new(status.map(str::to_string)),
                 ],
             ),
             None => (
                 "SELECT source, source_id, kind, title, payload_json, target_type, status,
                         first_seen_at, updated_at
                    FROM update_candidates
+                  WHERE ?2 IS NULL OR status = ?2
                   ORDER BY source ASC, source_id ASC
                   LIMIT ?1",
-                vec![Box::new(limit)],
+                vec![Box::new(limit), Box::new(status.map(str::to_string))],
             ),
         };
         let refs = bind_values

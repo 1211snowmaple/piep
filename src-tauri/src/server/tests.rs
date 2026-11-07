@@ -2868,3 +2868,234 @@ async fn the_embedded_server_writes_a_favorite_to_the_desktop_library_and_says_s
     assert_eq!(missing.status(), StatusCode::NOT_FOUND);
     assert_eq!(told.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
+
+#[tokio::test]
+async fn unauthorized_bodies_are_rejected_before_they_are_received() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let root = TestRoot::new("body_auth");
+    let (parts, _) = standalone(&root.0);
+    let secret = parts
+        .context
+        .store
+        .issue_pairing(Role::Reader, Duration::from_secs(60))
+        .unwrap();
+    let reader = parts
+        .context
+        .store
+        .consume_pairing(&secret, "reader")
+        .unwrap();
+    let url = spawn_plain(combined_router(Arc::clone(&parts.context)));
+    for (method, path, token, expected) in [
+        ("POST", "/api/v1/works/search", None, 401),
+        ("PUT", "/api/v1/reading/pixiv/1", None, 401),
+        ("POST", "/api/v1/admin/sync/sessions/s/manifest", None, 401),
+        (
+            "PUT",
+            "/api/v1/admin/sync/sessions/s/blobs/b?offset=0&total=1",
+            None,
+            401,
+        ),
+        (
+            "PUT",
+            "/api/v1/admin/sync/sessions/s/blobs/b?offset=0&total=1",
+            Some(reader.token.as_str()),
+            403,
+        ),
+    ] {
+        let mut socket = tokio::net::TcpStream::connect(url.trim_start_matches("http://"))
+            .await
+            .unwrap();
+        let authorization = token.map_or(String::new(), |token| {
+            format!("Authorization: Bearer {token}\r\n")
+        });
+        let request = format!("{method} {path} HTTP/1.1\r\nHost: localhost\r\n{authorization}Content-Type: application/json\r\nContent-Length: 8388608\r\n\r\n");
+        socket.write_all(request.as_bytes()).await.unwrap();
+        // 本文は送らない。認証が抽出後なら、タイムアウトまで応答できない。
+        let mut response = [0_u8; 1024];
+        let received = tokio::time::timeout(Duration::from_secs(3), socket.read(&mut response))
+            .await
+            .expect("bodyを待たず認証を拒否する")
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&response[..received])
+                .starts_with(&format!("HTTP/1.1 {expected}")),
+            "{path}: {}",
+            String::from_utf8_lossy(&response[..received])
+        );
+    }
+}
+
+#[tokio::test]
+async fn pairing_secrets_and_library_bodies_are_not_forwarded_to_redirects() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let forwarded = Arc::new(AtomicUsize::new(0));
+    let seen = Arc::clone(&forwarded);
+    let destination = spawn_plain(axum::Router::new().fallback(move || {
+        let seen = Arc::clone(&seen);
+        async move {
+            seen.fetch_add(1, Ordering::SeqCst);
+            axum::Json(serde_json::json!({ "role": "admin", "token": "forwarded" }))
+        }
+    }));
+    for status in [
+        StatusCode::TEMPORARY_REDIRECT,
+        StatusCode::PERMANENT_REDIRECT,
+    ] {
+        let destination = destination.clone();
+        let url = spawn_plain(axum::Router::new().fallback(move || {
+            let destination = destination.clone();
+            async move { (status, [(header::LOCATION, destination)]) }
+        }));
+        let remote = RemoteServer {
+            url,
+            fingerprint: None,
+        };
+        assert!(pair_admin(&remote, "one-time-secret", "desktop")
+            .await
+            .is_err());
+        let client = super::sync_send::build_client(&remote).await.unwrap();
+        let response = client
+            .put(format!(
+                "{}/api/v1/admin/sync/sessions/s/blobs/b",
+                remote.url
+            ))
+            .bearer_auth("admin-token")
+            .body("private library bytes")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), status);
+    }
+    assert_eq!(forwarded.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+#[cfg(windows)]
+fn failures_during_stale_removal_or_recording_restore_the_entire_commit() {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    for failure in ["trash", "metadata"] {
+        let root = TestRoot::new("late_commit_failure");
+        let (parts, paths) = standalone(&root.0);
+        let db = Database::open(&paths.database(), &paths.storage()).unwrap();
+        let (_, original) = add_work(&db, &paths.storage(), "late", "元の作品", "元の本文");
+        let previous = fs::read(&original).unwrap();
+        let incoming = root.0.join("snapshot.db");
+        db.write_vacuumed_copy(&incoming).unwrap();
+        super::snapshot::prepare_for_send(&incoming, &paths.library()).unwrap();
+        drop(db);
+        parts.db.open_existing().unwrap();
+        let receiver = &parts.receiver;
+        let store = &parts.context.store;
+        let stale_relative = "downloads/pixiv/late/stale.bin";
+        let stale = paths.library().join(stale_relative);
+        fs::write(&stale, b"keep until committed").unwrap();
+        store
+            .connection()
+            .unwrap()
+            .execute(
+                "INSERT INTO files(path, size, mtime_ms) VALUES (?1, 20, 1)",
+                [stale_relative],
+            )
+            .unwrap();
+        let session = receiver.open_session().unwrap().session_id;
+        let relative = original
+            .strip_prefix(paths.library())
+            .unwrap()
+            .to_string_lossy()
+            .replace('\\', "/");
+        let content = br#"{"text":"replacement"}"#;
+        let database = fs::read(&incoming).unwrap();
+        let hash = |bytes: &[u8]| {
+            Sha256::digest(bytes)
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        };
+        let sha = hash(content);
+        let database_sha = hash(&database);
+        receiver
+            .add_manifest(
+                &session,
+                &[ManifestEntry {
+                    path: relative.clone(),
+                    size: content.len() as u64,
+                    mtime_ms: 1,
+                }],
+            )
+            .unwrap();
+        for (sha, bytes) in [
+            (&sha, content.as_slice()),
+            (&database_sha, database.as_slice()),
+        ] {
+            receiver
+                .write_blob(&session, sha, 0, bytes.len() as u64, bytes)
+                .unwrap();
+        }
+        receiver
+            .bind_files(
+                &session,
+                &[BindEntry {
+                    path: relative,
+                    sha256: sha.clone(),
+                }],
+            )
+            .unwrap();
+        let locked = if failure == "trash" {
+            Some(
+                fs::OpenOptions::new()
+                    .read(true)
+                    .share_mode(0)
+                    .open(&stale)
+                    .unwrap(),
+            )
+        } else {
+            store.connection().unwrap().execute_batch(
+                "CREATE TRIGGER refuse_file_record BEFORE INSERT ON files BEGIN SELECT RAISE(ABORT, 'test recording failure'); END;"
+            ).unwrap();
+            None
+        };
+        let request = CommitRequest {
+            database_sha256: database_sha,
+        };
+        assert!(receiver.commit(&session, &request).is_err(), "{failure}");
+        drop(locked);
+        receiver.stop_index_catch_up();
+        assert_eq!(fs::read(&original).unwrap(), previous, "{failure}");
+        assert_eq!(
+            fs::read(&stale).unwrap(),
+            b"keep until committed",
+            "{failure}"
+        );
+        assert_eq!(receiver.status().generation, 0, "{failure}");
+        assert!(
+            receiver.blob_state(&session, &sha).unwrap().complete,
+            "{failure}"
+        );
+        assert_eq!(
+            parts
+                .db
+                .current()
+                .unwrap()
+                .get_stats()
+                .unwrap()
+                .total_downloads,
+            1
+        );
+        if failure == "metadata" {
+            store
+                .connection()
+                .unwrap()
+                .execute_batch("DROP TRIGGER refuse_file_record;")
+                .unwrap();
+        }
+        let outcome = receiver.commit(&session, &request).unwrap();
+        receiver.stop_index_catch_up();
+        assert_eq!(outcome.generation, 1);
+        assert_eq!(outcome.files_removed, 1);
+        assert!(!stale.exists());
+        assert_eq!(fs::read(&original).unwrap(), content);
+    }
+}

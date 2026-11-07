@@ -242,7 +242,9 @@ fn place_programs(paths: &ServerPaths) -> Result<(), String> {
         .to_path_buf();
     let version_dir = paths.version_dir(VERSION);
     fs::create_dir_all(&version_dir).map_err(|error| format!("置き場を作れません: {error}"))?;
+    clear_install_transitions(paths)?;
     for target in [&version_dir, &paths.root] {
+        remove_stale_dlls(target, &source)?;
         let destination = target.join("piep-server.exe");
         if !same_file(&executable, &destination) {
             fs::copy(&executable, &destination)
@@ -259,6 +261,54 @@ fn place_programs(paths: &ServerPaths) -> Result<(), String> {
         }
     }
     write_atomic(&paths.current_version(), VERSION.as_bytes())
+}
+
+/// 再導入では、アクセス権を塞ぐ前からあった版の指示を信頼しない。
+/// 動かすのは今回配置する版だけで、待機中や戻し中の実行ファイルを起動させない。
+fn clear_install_transitions(paths: &ServerPaths) -> Result<(), String> {
+    // 保護された既存の置き場では、戻しの印はDB復旧に必要な状態である。
+    // 再導入で消して部分的な復元を隠さず、見張り役による復旧を先に済ませる。
+    if ["rollback-version", "requested-rollback-version"]
+        .iter()
+        .any(|name| paths.state().join(name).exists())
+    {
+        return Err(
+            "前のバージョンへの復旧が残っています。serve で復旧を完了してから入れ直してください"
+                .into(),
+        );
+    }
+    for path in [paths.pending_version(), paths.previous_version()] {
+        match fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("前の版の指示を片付けられません: {error}")),
+        }
+    }
+    Ok(())
+}
+
+/// DLL の残骸を昇格後の本体に読み込ませない。今回の配布元にある既知の DLL だけを残す。
+fn remove_stale_dlls(target: &Path, source: &Path) -> Result<(), String> {
+    for entry in fs::read_dir(target).map_err(|error| format!("実行物を調べられません: {error}"))?
+    {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let path = entry.path();
+        if !path
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("dll"))
+        {
+            continue;
+        }
+        let name = entry.file_name();
+        let supplied = COMPANION_FILES
+            .iter()
+            .any(|allowed| name.eq_ignore_ascii_case(allowed) && source.join(allowed).is_file());
+        if !supplied {
+            fs::remove_file(path)
+                .map_err(|error| format!("以前の DLL を片付けられません: {error}"))?;
+        }
+    }
+    Ok(())
 }
 
 fn run_quiet(program: &str, args: &[&str]) -> Result<(), String> {
@@ -391,6 +441,7 @@ pub struct InstallDone {
 async fn install_inner(options: InstallOptions) -> Result<Option<InstallDone>, String> {
     let no_task = options.no_task;
     let (root, exposure, url) = complete_options(options)?;
+    validate_install_directory(&root)?;
     if !no_task {
         // 断るなら、動いているサーバーを止める前に断る。
         super::install_acl::secure_install_root(&root)?;
@@ -429,6 +480,52 @@ async fn install_inner(options: InstallOptions) -> Result<Option<InstallDone>, S
         pairing,
         admin_link,
     }))
+}
+
+/// 既存の無関係なフォルダー全体のアクセス権を変えない。
+fn validate_install_directory(root: &Path) -> Result<(), String> {
+    if root.parent().is_none() {
+        return Err("ドライブ全体ではなく、サーバー専用のフォルダーを選んでください".into());
+    }
+    if root.exists() {
+        let mut entries =
+            fs::read_dir(root).map_err(|error| format!("置き場を調べられません: {error}"))?;
+        let occupied = entries
+            .next()
+            .transpose()
+            .map_err(|error| error.to_string())?
+            .is_some();
+        let paths = ServerPaths::new(root)?;
+        let known = super::standalone::load_config(&paths).is_ok()
+            && (is_server_store(&paths.store())
+                || current_version(&paths).is_some_and(|version| {
+                    paths
+                        .version_dir(&version)
+                        .join("piep-server.exe")
+                        .is_file()
+                }));
+        if occupied && !known {
+            return Err(
+                "空のフォルダーか、すでに piep-server を置いたフォルダーを選んでください".into(),
+            );
+        }
+    }
+    Ok(())
+}
+
+fn is_server_store(path: &Path) -> bool {
+    let Ok(connection) =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+    else {
+        return false;
+    };
+    connection
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('devices', 'pairings', 'files', 'reading')",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .is_ok_and(|count| count == 4)
 }
 
 /// 引数なしで開いたときも、ここへ来る。
@@ -557,5 +654,60 @@ mod tests {
             fs::read_to_string(paths.config()).expect("config"),
             "listen = \"127.0.0.1:1234\"\n"
         );
+    }
+    #[test]
+    fn installation_requires_a_dedicated_directory() {
+        let dir = crate::server::tests::TestRoot::created("install_directory");
+        assert!(validate_install_directory(&dir.0).is_ok());
+        fs::write(dir.0.join("unrelated.txt"), b"keep").unwrap();
+        assert!(validate_install_directory(&dir.0).is_err());
+        fs::write(dir.0.join("server.toml"), b"").unwrap();
+        assert!(validate_install_directory(&dir.0).is_err());
+        let paths = ServerPaths::new(&dir.0).unwrap();
+        drop(ServerStore::open(&paths.store()).unwrap());
+        assert!(validate_install_directory(&dir.0).is_ok());
+        assert_eq!(fs::read(dir.0.join("unrelated.txt")).unwrap(), b"keep");
+        #[cfg(windows)]
+        assert!(validate_install_directory(Path::new(r"C:\")).is_err());
+    }
+
+    #[test]
+    fn reinstall_clears_old_instructions_after_recovery_and_removes_stale_dlls() {
+        let dir = crate::server::tests::TestRoot::created("reinstall_contents");
+        let paths = ServerPaths::new(&dir.0).unwrap();
+        fs::create_dir_all(paths.state()).unwrap();
+        write_atomic(&paths.current_version(), VERSION.as_bytes()).unwrap();
+        for path in [paths.pending_version(), paths.previous_version()] {
+            fs::write(path, b"9.9.9").unwrap();
+        }
+        for name in ["rollback-version", "requested-rollback-version"] {
+            let marker = paths.state().join(name);
+            fs::write(&marker, b"9.9.9").unwrap();
+            assert!(clear_install_transitions(&paths).is_err());
+            assert!(marker.exists());
+            assert!(paths.pending_version().exists());
+            assert!(paths.previous_version().exists());
+            fs::remove_file(marker).unwrap();
+        }
+        clear_install_transitions(&paths).unwrap();
+        assert!(current_version(&paths).is_some());
+        for path in [paths.pending_version(), paths.previous_version()] {
+            assert!(!path.exists());
+        }
+
+        let source = dir.0.join("source");
+        let target = dir.0.join("target");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&target).unwrap();
+        fs::write(source.join("pdfium.dll"), b"supplied").unwrap();
+        fs::write(target.join("pdfium.dll"), b"old but will be replaced").unwrap();
+        fs::write(target.join("vcruntime140.dll"), b"not supplied").unwrap();
+        fs::write(target.join("unknown.DLL"), b"not in the package").unwrap();
+        fs::write(target.join("notes.txt"), b"keep").unwrap();
+        remove_stale_dlls(&target, &source).unwrap();
+        assert!(target.join("pdfium.dll").is_file());
+        assert!(!target.join("vcruntime140.dll").exists());
+        assert!(!target.join("unknown.DLL").exists());
+        assert_eq!(fs::read(target.join("notes.txt")).unwrap(), b"keep");
     }
 }

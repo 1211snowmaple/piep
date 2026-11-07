@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 use super::Database;
 use crate::database::models::SavedSearch;
 
+type RestoreEntityFile = (String, String, String, String);
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct PortableTag {
@@ -87,6 +89,44 @@ fn valid_pair_decision(decision: &str) -> bool {
 }
 
 impl Database {
+    /// Owner kind, provider, stable key and path for files a catalog restore
+    /// may overwrite. Historical metadata participates as well as current art.
+    pub(crate) fn list_restore_entity_paths(&self) -> Result<Vec<RestoreEntityFile>, String> {
+        let conn = self.read_conn()?;
+        let mut statement = conn
+            .prepare(
+                "SELECT kind, source, source_key, path FROM (
+                SELECT 'person' AS kind, source, source_key, icon_path AS path FROM people
+                UNION ALL SELECT 'person', source, source_key, cover_path FROM people
+                UNION ALL SELECT 'series', source, source_key, cover_path FROM series
+                UNION ALL SELECT entity_type, source, source_key, json_path FROM entity_versions
+                UNION ALL SELECT 'collection', '', id, cover_image_path FROM work_collections
+             ) WHERE path IS NOT NULL AND TRIM(path) != ''",
+            )
+            .map_err(|error| format!("Failed to prepare restore entity paths: {error}"))?;
+        let paths = statement
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })
+            .map_err(|error| format!("Failed to query restore entity paths: {error}"))?;
+        paths
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("Failed to read restore entity paths: {error}"))
+    }
+
+    /// Only stable keys are needed to check restore destination ownership.
+    pub(crate) fn list_restore_work_keys(&self) -> Result<Vec<(String, String)>, String> {
+        let conn = self.read_conn()?;
+        let mut statement = conn
+            .prepare("SELECT source, source_id FROM downloads")
+            .map_err(|error| format!("Failed to prepare restore work keys: {error}"))?;
+        let keys = statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(|error| format!("Failed to query restore work keys: {error}"))?;
+        keys.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("Failed to read restore work keys: {error}"))
+    }
+
     pub fn archive_tags(&self, download_id: i64) -> Result<Vec<PortableTag>, String> {
         let conn = self.read_conn()?;
         let mut statement = conn

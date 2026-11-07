@@ -1,9 +1,16 @@
 //! PDF 一冊ぶんの取り出し。
 
-use super::engine::bindings;
+use super::engine::{bindings, read_pdf_bytes};
 use super::layout::{self, Glyph, Line, Metrics};
 use pdfium_render::prelude::*;
+use std::collections::HashMap;
 use std::path::Path;
+
+// Compressed PDF size does not bound the expanded text or page count. These
+// limits apply before allocating per-character/per-page working storage.
+pub(super) const MAX_EXTRACT_PAGES: usize = 5_000;
+pub(super) const MAX_PAGE_CHARS: usize = 250_000;
+const MAX_DOCUMENT_CHARS: usize = 8_000_000;
 
 /// どの経路で組んだか。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,6 +60,7 @@ struct PageWork {
     /// **`lines` の最後ではいけない。** フッターのあるページでは、紙面で最後に
     /// 来る行はフッターであって本文の続きではない。
     last_body_right: f32,
+    char_count: usize,
 }
 
 /// 添付 PDF から本文を取り出す。
@@ -61,7 +69,7 @@ pub fn extract_text(path: &Path) -> Result<PdfDocumentText, String> {
     // 経路をファイル名に依存させない。pdfium の `FPDF_LoadDocument` が受け取る
     // のは C の文字列で、日本語を含む道の扱いが環境で変わる。読み込みはこちらで
     // 済ませ、pdfium には中身だけ渡す。
-    let bytes = std::fs::read(path).map_err(|error| format!("PDF を読めません: {error}"))?;
+    let bytes = read_pdf_bytes(path)?;
     let document = unsafe { bindings.FPDF_LoadMemDocument64(&bytes, None) };
     if document.is_null() {
         return Err("PDF として開けません（壊れているか、鍵がかかっています）".to_string());
@@ -81,9 +89,17 @@ fn read_document(
     if page_count <= 0 {
         return Err("ページがありません".to_string());
     }
+    if page_count as usize > MAX_EXTRACT_PAGES {
+        return Err(format!(
+            "PDF のページ数が多すぎます（上限 {MAX_EXTRACT_PAGES} ページ）"
+        ));
+    }
     let mut pages = Vec::with_capacity(page_count as usize);
+    let mut remaining_chars = MAX_DOCUMENT_CHARS;
     for index in 0..page_count {
-        pages.push(read_page(bindings, document, index)?);
+        let page = read_page(bindings, document, index, remaining_chars)?;
+        remaining_chars -= page.char_count;
+        pages.push(page);
     }
 
     let line_pages: Vec<&[Line]> = pages.iter().map(|page| page.lines.as_slice()).collect();
@@ -151,6 +167,7 @@ fn read_page(
     bindings: &dyn PdfiumLibraryBindings,
     document: FPDF_DOCUMENT,
     index: i32,
+    remaining_chars: usize,
 ) -> Result<PageWork, String> {
     let page = unsafe { bindings.FPDF_LoadPage(document, index) };
     if page.is_null() {
@@ -162,6 +179,17 @@ fn read_page(
         return Err(format!("{} ページ目の文字を読めません", index + 1));
     }
 
+    let count = unsafe { bindings.FPDFText_CountChars(text_page) };
+    if count < 0 || count as usize > MAX_PAGE_CHARS.min(remaining_chars) {
+        unsafe {
+            bindings.FPDFText_ClosePage(text_page);
+            bindings.FPDF_ClosePage(page);
+        }
+        return Err(format!(
+            "{} ページ目の文字数が取り込み上限を超えています",
+            index + 1
+        ));
+    }
     let glyphs = layout::read_glyphs(bindings, text_page);
     // 幾何経路はすべての文字を見る。構造ツリーが取りこぼしたときの受け皿なので、
     // ここで印の有無を理由に落とすと、落ちた先でも同じものが欠ける。
@@ -200,6 +228,7 @@ fn read_page(
         ink,
         unmarked,
         last_body_right,
+        char_count: count as usize,
     })
 }
 
@@ -216,14 +245,26 @@ fn read_tagged(
     let runs = runs_by_mcid(glyphs);
     let mut paragraphs = Vec::new();
     let children = unsafe { bindings.FPDF_StructTree_CountChildren(tree) };
+    let mut budget = TaggedBudget {
+        visits: 100_000,
+        bytes: 4_000_000,
+    };
+    let mut complete = true;
     for index in 0..children {
+        if !budget.visit() {
+            complete = false;
+            break;
+        }
         let element = unsafe { bindings.FPDF_StructTree_GetChildAtIndex(tree, index) };
-        if !element.is_null() {
-            walk(bindings, element, &runs, 0, &mut paragraphs);
+        if !element.is_null()
+            && walk(bindings, element, &runs, 0, &mut paragraphs, &mut budget).is_err()
+        {
+            complete = false;
+            break;
         }
     }
     unsafe { bindings.FPDF_StructTree_Close(tree) };
-    Some(paragraphs)
+    complete.then_some(paragraphs)
 }
 
 /// marked content の番号ごとに文字を集める。
@@ -234,8 +275,8 @@ fn read_tagged(
 /// **番号を持たない文字のほうは落とす。** タグ付きの PDF で印の外にあるものは
 /// `/Artifact`、すなわちヘッダー・フッター・ページ番号である。直前の段落へ
 /// 付けると、ページ番号が本文の末尾に貼り付く。
-fn runs_by_mcid(glyphs: &[Glyph]) -> Vec<(i32, String)> {
-    let mut runs: Vec<(i32, String)> = Vec::new();
+fn runs_by_mcid(glyphs: &[Glyph]) -> HashMap<i32, String> {
+    let mut runs: HashMap<i32, String> = HashMap::new();
     let mut last: Option<i32> = None;
     for glyph in glyphs {
         let target = if glyph.mcid >= 0 {
@@ -249,12 +290,32 @@ fn runs_by_mcid(glyphs: &[Glyph]) -> Vec<(i32, String)> {
         let Some(target) = target else {
             continue;
         };
-        match runs.iter_mut().find(|(mcid, _)| *mcid == target) {
-            Some((_, text)) => text.push(glyph.ch),
-            None => runs.push((target, glyph.ch.to_string())),
-        }
+        runs.entry(target).or_default().push(glyph.ch);
     }
     runs
+}
+
+// Depth alone does not bound a cyclic or highly branching structure tree.
+// Exhausted budgets discard the tagged result and use the bounded glyph path.
+struct TaggedBudget {
+    visits: usize,
+    bytes: usize,
+}
+
+impl TaggedBudget {
+    fn visit(&mut self) -> bool {
+        let Some(remaining) = self.visits.checked_sub(1) else {
+            return false;
+        };
+        self.visits = remaining;
+        true
+    }
+
+    fn append(&mut self, target: &mut String, text: &str) -> Result<(), ()> {
+        self.bytes = self.bytes.checked_sub(text.len()).ok_or(())?;
+        target.push_str(text);
+        Ok(())
+    }
 }
 
 /// 段落になる型の要素で切り出しながら、木を深さ優先で辿る。
@@ -263,34 +324,39 @@ fn runs_by_mcid(glyphs: &[Glyph]) -> Vec<(i32, String)> {
 fn walk(
     bindings: &dyn PdfiumLibraryBindings,
     element: FPDF_STRUCTELEMENT,
-    runs: &[(i32, String)],
+    runs: &HashMap<i32, String>,
     depth: usize,
     out: &mut Vec<String>,
-) -> String {
+    budget: &mut TaggedBudget,
+) -> Result<String, ()> {
     if depth > 32 {
-        return String::new();
+        return Err(());
     }
     let kind = element_type(bindings, element);
     let children = unsafe { bindings.FPDF_StructElement_CountChildren(element) };
     let mut collected = String::new();
     for index in 0..children {
+        if !budget.visit() {
+            return Err(());
+        }
         let child = unsafe { bindings.FPDF_StructElement_GetChildAtIndex(element, index) };
         if !child.is_null() {
-            collected.push_str(&walk(bindings, child, runs, depth + 1, out));
+            let text = walk(bindings, child, runs, depth + 1, out, budget)?;
+            budget.append(&mut collected, &text)?;
             continue;
         }
         let mcid = unsafe { bindings.FPDF_StructElement_GetChildMarkedContentID(element, index) };
         if mcid >= 0 {
-            if let Some((_, text)) = runs.iter().find(|(id, _)| *id == mcid) {
-                collected.push_str(text);
+            if let Some(text) = runs.get(&mcid) {
+                budget.append(&mut collected, text)?;
             }
         }
     }
     if is_block(&kind) {
         out.push(tidy(&collected));
-        return String::new();
+        return Ok(String::new());
     }
-    collected
+    Ok(collected)
 }
 
 fn is_block(kind: &str) -> bool {
@@ -329,7 +395,7 @@ fn tidy(text: &str) -> String {
 
 fn element_type(bindings: &dyn PdfiumLibraryBindings, element: FPDF_STRUCTELEMENT) -> String {
     let length = unsafe { bindings.FPDF_StructElement_GetType(element, std::ptr::null_mut(), 0) };
-    if length <= 2 {
+    if !(3..=256).contains(&length) {
         return String::new();
     }
     let mut buffer = vec![0u8; length as usize];

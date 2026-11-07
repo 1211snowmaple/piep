@@ -49,6 +49,7 @@ const PACKAGE_FILES: [&str; 6] = [
 ];
 const MAX_PACKAGE_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_EXTRACTED_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const MAX_MANIFEST_BYTES: usize = 64 * 1024;
 
 const FIRST_CHECK_DELAY: Duration = Duration::from_secs(5 * 60);
 const CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
@@ -404,16 +405,23 @@ async fn fetch_manifest(
     source: &UpdateSource,
     timeout: Duration,
 ) -> Result<Manifest, String> {
-    client
+    let response = client
         .get(&source.manifest_url)
         .timeout(timeout)
         .send()
         .await
         .and_then(reqwest::Response::error_for_status)
-        .map_err(|error| format!("更新を確かめられません: {error}"))?
-        .json()
-        .await
-        .map_err(|error| format!("更新の案内を読み取れません: {error}"))
+        .map_err(|error| format!("更新を確かめられません: {error}"))?;
+    let mut stream = response.bytes_stream();
+    let mut body = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| format!("更新の案内を読み取れません: {error}"))?;
+        if chunk.len() > MAX_MANIFEST_BYTES.saturating_sub(body.len()) {
+            return Err("更新の案内が大きすぎます".into());
+        }
+        body.extend_from_slice(&chunk);
+    }
+    serde_json::from_slice(&body).map_err(|error| format!("更新の案内を読み取れません: {error}"))
 }
 
 /// 新しいバージョンがあれば取ってきて検証し、`versions\<版>\` に置く。置いた版を返す。
@@ -460,13 +468,7 @@ async fn prepare_latest_with_timeouts(
     }
 
     let installed = paths.version_dir(&manifest.version);
-    if reported_version(&installed.join(EXECUTABLE))
-        .ok()
-        .as_deref()
-        == Some(&manifest.version)
-    {
-        return Ok(Some(manifest.version));
-    }
+    // 既存exeが答える版だけでは信頼せず、毎回署名済み配布物から配置し直す。
 
     let incoming = paths.versions().join(".incoming");
     if incoming.exists() {
@@ -693,6 +695,9 @@ impl UpdateController {
 
     /// 前の版へ戻す。戻した版は飛ばすので、自動で当て直さない。
     pub fn roll_back(&self) -> Result<String, String> {
+        // 自己更新直後には、以前の見張り役がまだ動いていることがある。
+        // HTTPを止める前に確認し、旧版へ新しい復旧手順を渡さない。
+        super::watchdog::check_rollback_support()?;
         let previous = self
             .rollback_target()
             .ok_or("戻せるバージョンがありません".to_string())?;
@@ -869,6 +874,7 @@ pub fn back_up_databases(paths: &ServerPaths) -> Result<(), String> {
         fs::remove_dir_all(&backup).map_err(|error| format!("前の写しを消せません: {error}"))?;
     }
     fs::create_dir_all(&backup).map_err(|error| format!("写しの置き場を作れません: {error}"))?;
+    let mut present = Vec::new();
     for (source, name) in database_pairs(paths) {
         if !source.exists() {
             continue;
@@ -884,17 +890,53 @@ pub fn back_up_databases(paths: &ServerPaths) -> Result<(), String> {
                 [backup.join(name).to_string_lossy().as_ref()],
             )
             .map_err(|error| format!("{name} を写せません: {error}"))?;
+        present.push(name);
     }
+    // 初回の送信前には本棚の DB がない。更新した版が新しく作った DB も、
+    // 旧版へ戻すときは取り除かないと新しい形式だけが残ってしまう。
+    let manifest = serde_json::to_vec(&present).map_err(|error| error.to_string())?;
+    write_atomic(&backup.join("databases.json"), &manifest)?;
     Ok(())
 }
 
 /// 写しへ戻す。WAL が残っていると古い変更が混ざるので一緒に消す。
 pub fn restore_databases(paths: &ServerPaths) -> Result<(), String> {
     let backup = paths.update_backup();
+    let manifest = backup.join("databases.json");
+    let present: Option<Vec<String>> = if manifest.exists() {
+        let bytes =
+            fs::read(&manifest).map_err(|error| format!("写しの目録を読めません: {error}"))?;
+        let names: Vec<String> = serde_json::from_slice(&bytes)
+            .map_err(|error| format!("写しの目録を読めません: {error}"))?;
+        // どれかの写しが欠けていれば、いずれの DB にも手を付けない。
+        for name in &names {
+            if !database_pairs(paths)
+                .iter()
+                .any(|(_, allowed)| name == allowed)
+                || !backup.join(name).is_file()
+            {
+                return Err("DB の写しが欠けているか、目録が正しくありません".into());
+            }
+        }
+        Some(names)
+    } else {
+        // この目録を持たない旧版が作った写しも引き続き戻せる。
+        None
+    };
     for (target, name) in database_pairs(paths) {
         let copy = backup.join(name);
-        if !copy.exists() {
+        let was_present = present.as_ref().map_or_else(
+            || copy.exists(),
+            |names| names.iter().any(|saved| saved == name),
+        );
+        if !was_present && present.is_none() {
             continue;
+        }
+        // 全部写してから置き換える。写している途中で中断しても、今の DB を
+        // 途中までの内容で壊さず、戻しの印からもう一度始められる。
+        let temporary = target.with_extension("restore");
+        if was_present {
+            fs::copy(&copy, &temporary).map_err(|error| format!("{name} を戻せません: {error}"))?;
         }
         for suffix in ["-wal", "-shm"] {
             let mut sidecar = target.clone().into_os_string();
@@ -905,7 +947,12 @@ pub fn restore_databases(paths: &ServerPaths) -> Result<(), String> {
                     .map_err(|error| format!("{name} の作業ファイルを消せません: {error}"))?;
             }
         }
-        fs::copy(&copy, &target).map_err(|error| format!("{name} を戻せません: {error}"))?;
+        if was_present {
+            fs::rename(&temporary, &target)
+                .map_err(|error| format!("{name} を戻せません: {error}"))?;
+        } else if target.exists() {
+            fs::remove_file(&target).map_err(|error| format!("{name} を消せません: {error}"))?;
+        }
     }
     Ok(())
 }
@@ -990,7 +1037,7 @@ mod tests {
     async fn stalled_update_requests_end_and_can_be_retried() {
         use axum::{body::Body, response::Response, routing::get, Json, Router};
 
-        for phase in ["headers", "manifest", "package"] {
+        for phase in ["headers", "manifest", "oversized_manifest", "package"] {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let base = format!("http://{}", listener.local_addr().unwrap());
             let package_url = format!("{base}/package");
@@ -1009,6 +1056,12 @@ mod tests {
                                         Result<axum::body::Bytes, std::io::Error>,
                                     >(),
                                 ));
+                            }
+                            if phase == "oversized_manifest" {
+                                return Response::new(Body::from(vec![
+                                    b' ';
+                                    MAX_MANIFEST_BYTES + 1
+                                ]));
                             }
                             axum::response::IntoResponse::into_response(Json(serde_json::json!({
                                 "version": "1.0.1", "url": package_url, "signature": "unused"
@@ -1180,5 +1233,68 @@ mod tests {
             .query_row("SELECT v FROM t", [], |row| row.get(0))
             .expect("value");
         assert_eq!(value, 1);
+    }
+    #[test]
+    fn rollback_removes_databases_that_did_not_exist_before_the_update() {
+        let dir = crate::server::tests::TestRoot::created("update_absent_db");
+        let paths = ServerPaths::new(&dir.0).unwrap();
+        fs::create_dir_all(paths.library()).unwrap();
+        fs::create_dir_all(paths.state()).unwrap();
+        back_up_databases(&paths).unwrap();
+
+        for (path, _) in database_pairs(&paths) {
+            fs::write(&path, b"created by the new version").unwrap();
+            for suffix in ["-wal", "-shm"] {
+                let mut sidecar = path.clone().into_os_string();
+                sidecar.push(suffix);
+                fs::write(sidecar, b"new journal").unwrap();
+            }
+        }
+        restore_databases(&paths).unwrap();
+        restore_databases(&paths).unwrap();
+        for (path, _) in database_pairs(&paths) {
+            assert!(!path.exists());
+            for suffix in ["-wal", "-shm"] {
+                let mut sidecar = path.clone().into_os_string();
+                sidecar.push(suffix);
+                assert!(!PathBuf::from(sidecar).exists());
+            }
+        }
+    }
+
+    #[test]
+    fn a_missing_snapshot_is_refused_before_any_database_is_restored() {
+        let dir = crate::server::tests::TestRoot::created("update_missing_snapshot");
+        let paths = ServerPaths::new(&dir.0).unwrap();
+        fs::create_dir_all(paths.library()).unwrap();
+        fs::create_dir_all(paths.state()).unwrap();
+        for (path, _) in database_pairs(&paths) {
+            rusqlite::Connection::open(path)
+                .unwrap()
+                .execute_batch("CREATE TABLE t(v);")
+                .unwrap();
+        }
+        back_up_databases(&paths).unwrap();
+        fs::write(paths.database(), b"current database").unwrap();
+        fs::remove_file(paths.update_backup().join("state.db")).unwrap();
+
+        assert!(restore_databases(&paths).is_err());
+        assert_eq!(fs::read(paths.database()).unwrap(), b"current database");
+    }
+
+    #[test]
+    fn older_database_snapshots_without_a_manifest_can_still_be_restored() {
+        let dir = crate::server::tests::TestRoot::created("update_legacy_snapshot");
+        let paths = ServerPaths::new(&dir.0).unwrap();
+        fs::create_dir_all(paths.library()).unwrap();
+        fs::create_dir_all(paths.state()).unwrap();
+        fs::create_dir_all(paths.update_backup()).unwrap();
+        fs::write(paths.update_backup().join("piep.db"), b"previous").unwrap();
+        fs::write(paths.database(), b"current").unwrap();
+        fs::write(paths.store(), b"unchanged").unwrap();
+
+        restore_databases(&paths).unwrap();
+        assert_eq!(fs::read(paths.database()).unwrap(), b"previous");
+        assert_eq!(fs::read(paths.store()).unwrap(), b"unchanged");
     }
 }

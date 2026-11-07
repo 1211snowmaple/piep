@@ -966,8 +966,11 @@ async fn run_locked(paths: ServerPaths, lock: File) -> Result<i32, String> {
         }
         // 新しい版で書いた DB は古い版で開けないことがあるので、更新の前の写しへ戻す。
         AfterStop::RollBack(version) => {
-            update::restore_databases(&paths)?;
-            version
+            // このプロセスの状態DBや本棚の接続はまだ開いている。DBの復元は
+            // 終了を待った見張り役に任せ、Windowsで開いたDBを置き換えない。
+            watchdog::request_rollback(&paths, &version)?;
+            drop(lock);
+            return Ok(EXIT_RESTART);
         }
     };
     update::write_atomic(&paths.pending_version(), version.as_bytes())?;

@@ -641,6 +641,106 @@ fn resolve_storage_metadata_path(raw: &str, storage_dir: &Path) -> Result<PathBu
     Ok(storage_dir.join(relative))
 }
 
+/// A backup must not grant one work ownership of another work's files. Root
+/// containment alone still permits a new work to overwrite an existing one
+/// while bypassing the explicit replace-existing check.
+fn resolve_work_metadata_path(
+    raw: &str,
+    source: &str,
+    source_id: &str,
+    storage_dir: &Path,
+) -> Result<PathBuf, String> {
+    if !matches!(source, "pixiv" | "fanbox") {
+        return Err(format!("Unsupported backup work source: {source}"));
+    }
+    let relative = validated_backup_relative_path(raw)?;
+    let work_root = validated_backup_relative_path(&format!("{source}/{source_id}"))?;
+    if work_root.components().count() != 2 {
+        return Err(format!(
+            "Backup path does not belong to work {source}/{source_id}: {raw}"
+        ));
+    }
+    let resolve_owned = |relative: &str| {
+        let destination = resolve_storage_metadata_path(relative, storage_dir)?;
+        let owner_root = storage_dir.join(&work_root);
+        // A nested junction can stay inside downloads while leaving this
+        // work's directory. Check ownership against the physical work root as
+        // well as the library root before promoting any files.
+        if owner_root.exists() {
+            validate_import_parent_before_create(&destination, &owner_root)?;
+        }
+        Ok(destination)
+    };
+    if relative.starts_with(&work_root) && relative != work_root {
+        return resolve_owned(raw);
+    }
+    // Editor imports historically lived under an installation-local numeric
+    // download ID. Restore them beneath the stable work key so an unrelated
+    // work with that same row ID cannot have its images overwritten.
+    let mut components = relative.components();
+    if components
+        .next()
+        .is_some_and(|part| part.as_os_str() == "editor-assets")
+        && components
+            .next()
+            .and_then(|part| part.as_os_str().to_str())
+            .is_some_and(|id| !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        let suffix = components.as_path();
+        if !suffix.as_os_str().is_empty() {
+            let mapped = work_root.join("editor-assets").join(suffix);
+            return resolve_owned(&mapped.to_string_lossy().replace('\\', "/"));
+        }
+    }
+    Err(format!(
+        "Backup path does not belong to work {source}/{source_id}: {raw}"
+    ))
+}
+
+fn backup_work_restore_paths(
+    metadata: &BackupMetadata,
+    storage: &Path,
+) -> Result<HashMap<String, PathBuf>, String> {
+    let mut paths = HashMap::new();
+    let mut destinations = HashMap::new();
+    for entry in &metadata.entries {
+        let source_paths = entry
+            .relative_cover_path
+            .iter()
+            .chain(entry.versions.iter().flat_map(|version| {
+                std::iter::once(&version.relative_json_path)
+                    .chain(version.relative_original_json_path.iter())
+            }))
+            .chain(entry.assets.iter().map(|asset| &asset.relative_local_path))
+            .chain(entry.work_edits.iter().flat_map(|revision| {
+                revision
+                    .blocks
+                    .iter()
+                    .filter_map(|block| block.asset_path.as_ref())
+            }));
+        for raw in source_paths {
+            let destination =
+                resolve_work_metadata_path(raw, &entry.source, &entry.source_id, storage)?;
+            if paths
+                .get(raw)
+                .is_some_and(|previous| previous != &destination)
+            {
+                return Err(format!("Backup file is claimed by multiple works: {raw}"));
+            }
+            let collision_key = restore_entity_path_key(&destination);
+            if destinations
+                .get(&collision_key)
+                .is_some_and(|previous| previous != raw)
+            {
+                return Err(format!("Backup work paths collide after restore: {raw}"));
+            }
+            destinations.insert(collision_key, raw.clone());
+            paths.insert(raw.clone(), destination);
+        }
+    }
+    Ok(paths)
+}
+
 fn resolve_entity_metadata_path(
     raw: &str,
     expected_prefix: &str,
@@ -653,6 +753,128 @@ fn resolve_entity_metadata_path(
         ));
     }
     Ok(app_data_dir.join(relative))
+}
+
+type RestoreEntityOwner = (String, String, String);
+
+fn restore_entity_path_key(path: &Path) -> String {
+    let resolved = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let normalized = import_collision_key(&resolved);
+    // SQLite can retain an extended-length Windows path while the current
+    // library root was supplied without that prefix.
+    normalized
+        .strip_prefix("//?/")
+        .unwrap_or(&normalized)
+        .to_string()
+}
+
+fn merge_entity_path_owners(
+    owners: &mut HashMap<String, RestoreEntityOwner>,
+    incoming: HashMap<String, RestoreEntityOwner>,
+) -> Result<(), String> {
+    for (path, owner) in incoming {
+        if owners.get(&path).is_some_and(|existing| existing != &owner) {
+            return Err(format!(
+                "Backup file is claimed by multiple entities: {path}"
+            ));
+        }
+        owners.insert(path, owner);
+    }
+    Ok(())
+}
+
+fn backup_entity_path_owners(
+    metadata: &BackupMetadata,
+    app_data: &Path,
+) -> Result<HashMap<String, RestoreEntityOwner>, String> {
+    let mut owners = HashMap::new();
+    let mut record = |raw: &str, prefix: &str, owner: &RestoreEntityOwner| {
+        let path = resolve_entity_metadata_path(raw, prefix, app_data)?;
+        let normalized = restore_entity_path_key(&path);
+        if owners
+            .get(&normalized)
+            .is_some_and(|existing| existing != owner)
+        {
+            return Err(format!(
+                "Backup file is claimed by multiple entities: {raw}"
+            ));
+        }
+        owners.insert(normalized, owner.clone());
+        Ok(())
+    };
+    for person in &metadata.people {
+        let owner = (
+            "person".into(),
+            person.source.clone(),
+            person.source_key.clone(),
+        );
+        for path in person
+            .relative_icon_path
+            .iter()
+            .chain(person.relative_cover_path.iter())
+        {
+            record(path, "profiles", &owner)?;
+        }
+        for version in &person.versions {
+            if version.entity_type != owner.0
+                || version.source != owner.1
+                || version.source_key != owner.2
+            {
+                return Err("Backup person version belongs to a different entity".into());
+            }
+            record(&version.relative_json_path, "profiles", &owner)?;
+        }
+    }
+    for series in &metadata.series {
+        let owner = (
+            "series".into(),
+            series.source.clone(),
+            series.source_key.clone(),
+        );
+        if let Some(path) = &series.relative_cover_path {
+            record(path, "series", &owner)?;
+        }
+        for version in &series.versions {
+            if version.entity_type != owner.0
+                || version.source != owner.1
+                || version.source_key != owner.2
+            {
+                return Err("Backup series version belongs to a different entity".into());
+            }
+            record(&version.relative_json_path, "series", &owner)?;
+        }
+    }
+    for collection in &metadata.collections {
+        if let Some(path) = &collection.relative_cover_image_path {
+            record(
+                path,
+                "collection-covers",
+                &("collection".into(), String::new(), collection.id.clone()),
+            )?;
+        }
+    }
+    Ok(owners)
+}
+
+fn validate_existing_entity_path_owners(
+    db: &Database,
+    incoming: &HashMap<String, RestoreEntityOwner>,
+) -> Result<(), String> {
+    if incoming.is_empty() {
+        return Ok(());
+    }
+    for (kind, source, key, path) in db.list_restore_entity_paths()? {
+        let normalized = restore_entity_path_key(Path::new(&path));
+        if incoming
+            .get(&normalized)
+            .is_some_and(|owner| owner != &(kind, source, key))
+        {
+            return Err(format!(
+                "Backup entity path is owned by a different existing entity: {path}"
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn canonical_path_is_within(path: &Path, root: &Path) -> Result<(), String> {
@@ -693,11 +915,53 @@ fn import_collision_key(path: &Path) -> String {
     }
 }
 
+fn validate_restore_work_collisions(
+    db: &Database,
+    storage: &Path,
+    work_keys: &[(String, String)],
+    replace_existing: bool,
+) -> Result<(), String> {
+    if work_keys.is_empty() {
+        return Ok(());
+    }
+    let mut incoming = HashMap::new();
+    for key in work_keys {
+        let normalized = restore_entity_path_key(&storage.join(&key.0).join(&key.1));
+        if incoming
+            .insert(normalized, key)
+            .is_some_and(|previous| previous != key)
+        {
+            return Err("Backup work keys resolve to the same storage directory".into());
+        }
+    }
+    for existing in db.list_restore_work_keys()? {
+        let normalized = restore_entity_path_key(&storage.join(&existing.0).join(&existing.1));
+        let Some(requested) = incoming.get(&normalized) else {
+            continue;
+        };
+        if *requested != &existing {
+            return Err(format!(
+                "Backup work {}/{} conflicts with the storage path of existing work {}/{}",
+                requested.0, requested.1, existing.0, existing.1
+            ));
+        }
+        if !replace_existing {
+            return Err(format!(
+                "既存作品 {} / {} と重複します。置換を明示的に選択してから復元してください。",
+                existing.0, existing.1
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_backup_metadata_paths(
     metadata: &BackupMetadata,
     storage_dir: &Path,
     app_data_dir: &Path,
 ) -> Result<(), String> {
+    backup_work_restore_paths(metadata, storage_dir)?;
+    backup_entity_path_owners(metadata, app_data_dir)?;
     for person in &metadata.people {
         if let Some(path) = &person.relative_icon_path {
             resolve_entity_metadata_path(path, "profiles", app_data_dir)?;
@@ -725,29 +989,56 @@ fn validate_backup_metadata_paths(
         }
     }
 
+    let mut work_keys = HashSet::new();
     for entry in &metadata.entries {
+        if !work_keys.insert(import_collision_key(
+            &Path::new(&entry.source).join(&entry.source_id),
+        )) {
+            return Err(format!(
+                "Backup contains duplicate work {}/{}",
+                entry.source, entry.source_id
+            ));
+        }
+        let resolve_work = |path: &str| {
+            resolve_work_metadata_path(path, &entry.source, &entry.source_id, storage_dir)
+        };
         if let Some(path) = &entry.relative_cover_path {
-            resolve_storage_metadata_path(path, storage_dir)?;
+            resolve_work(path)?;
         }
         for version in &entry.versions {
-            resolve_storage_metadata_path(&version.relative_json_path, storage_dir)?;
+            resolve_work(&version.relative_json_path)?;
             if let Some(path) = &version.relative_original_json_path {
-                resolve_storage_metadata_path(path, storage_dir)?;
+                resolve_work(path)?;
             }
         }
         for asset in &entry.assets {
-            resolve_storage_metadata_path(&asset.relative_local_path, storage_dir)?;
+            resolve_work(&asset.relative_local_path)?;
+        }
+        let asset_paths: HashSet<_> = entry
+            .assets
+            .iter()
+            .map(|asset| asset.relative_local_path.as_str())
+            .collect();
+        for revision in &entry.work_edits {
+            for block in &revision.blocks {
+                if let Some(path) = &block.asset_path {
+                    resolve_work(path)?;
+                    if !asset_paths.contains(path.as_str()) {
+                        return Err(format!(
+                            "Backup edit asset has no asset record for work {}/{}: {path}",
+                            entry.source, entry.source_id
+                        ));
+                    }
+                }
+            }
         }
 
         // This fallback is used for old metadata without version records. Source
         // identifiers are untrusted metadata too, so validate the derived path.
-        resolve_storage_metadata_path(
-            &format!(
-                "{}/{}/v{}/original.json",
-                entry.source, entry.source_id, entry.current_version
-            ),
-            storage_dir,
-        )?;
+        resolve_work(&format!(
+            "{}/{}/v{}/original.json",
+            entry.source, entry.source_id, entry.current_version
+        ))?;
     }
     Ok(())
 }
@@ -841,6 +1132,16 @@ fn validate_backup_metadata_files_exist(
                 "work asset",
             )?;
         }
+        for revision in &entry.work_edits {
+            for block in &revision.blocks {
+                if let Some(path) = &block.asset_path {
+                    require_file(
+                        resolve_storage_metadata_path(path, storage_dir)?,
+                        "work edit asset",
+                    )?;
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -887,6 +1188,12 @@ fn referenced_backup_paths(metadata: &BackupMetadata) -> Result<Vec<String>, Str
                 .iter()
                 .map(|asset| asset.relative_local_path.clone()),
         );
+        paths.extend(entry.work_edits.iter().flat_map(|revision| {
+            revision
+                .blocks
+                .iter()
+                .filter_map(|block| block.asset_path.clone())
+        }));
     }
     for path in &paths {
         validated_backup_relative_path(path)?;
@@ -1917,7 +2224,7 @@ fn read_and_validate_multipart_manifest(
     Ok((manifest, paths))
 }
 
-fn read_backup_work_keys(path: &Path) -> Result<Vec<(String, String)>, String> {
+fn read_backup_metadata(path: &Path) -> Result<BackupMetadata, String> {
     let file = std::fs::File::open(path)
         .map_err(|error| format!("Could not open multipart part metadata: {error}"))?;
     let mut archive =
@@ -1929,9 +2236,12 @@ fn read_backup_work_keys(path: &Path) -> Result<Vec<(String, String)>, String> {
         .take(MAX_BACKUP_METADATA_BYTES + 1)
         .read_to_string(&mut metadata_text)
         .map_err(|error| format!("Could not read multipart part metadata: {error}"))?;
-    let metadata: BackupMetadata = serde_json::from_str(&metadata_text)
-        .map_err(|error| format!("Invalid multipart part metadata: {error}"))?;
-    Ok(metadata
+    serde_json::from_str(&metadata_text)
+        .map_err(|error| format!("Invalid multipart part metadata: {error}"))
+}
+
+fn read_backup_work_keys(path: &Path) -> Result<Vec<(String, String)>, String> {
+    Ok(read_backup_metadata(path)?
         .entries
         .into_iter()
         .map(|entry| (entry.source, entry.source_id))
@@ -1994,8 +2304,8 @@ fn inspect_validated_multipart_parts(
             ));
             return Ok(aggregate);
         }
-        for key in read_backup_work_keys(path)? {
-            if !work_keys.insert(key) {
+        for (source, source_id) in read_backup_work_keys(path)? {
+            if !work_keys.insert(import_collision_key(&Path::new(&source).join(&source_id))) {
                 aggregate.valid = false;
                 aggregate.error = Some(format!(
                     "Multipart backup contains the same work in more than one part: {}",
@@ -2892,11 +3202,19 @@ async fn export_zip_with_params_locked(
             for revision in &mut work_edits {
                 for block in &mut revision.blocks {
                     if let Some(path) = block.asset_path.as_deref() {
-                        block.asset_path = Some(required_export_relative_path(
+                        let relative = required_export_relative_path(
                             path,
                             &storage,
                             &format!("work {}/{} edit asset", dl.source, dl.source_id),
-                        )?);
+                        )?;
+                        add_zip_file_once(
+                            &mut zip,
+                            options,
+                            &mut written_files,
+                            &relative,
+                            Path::new(path),
+                        )?;
+                        block.asset_path = Some(relative);
                     }
                 }
             }
@@ -3706,12 +4024,17 @@ fn overwritten_bytes_for_backup(
     let Ok(paths) = referenced_backup_paths(&metadata) else {
         return 0;
     };
+    let work_destinations = backup_work_restore_paths(&metadata, storage).unwrap_or_default();
     let mut total = 0u64;
     for path in paths {
-        let Ok((destination, _)) = resolve_zip_import_path(&path, storage, app_data) else {
+        let Ok((original_destination, _)) = resolve_zip_import_path(&path, storage, app_data)
+        else {
             continue;
         };
-        if let Ok(meta) = std::fs::metadata(&destination) {
+        let destination = work_destinations
+            .get(&path)
+            .unwrap_or(&original_destination);
+        if let Ok(meta) = std::fs::metadata(destination) {
             if meta.is_file() {
                 total = total.saturating_add(meta.len());
             }
@@ -3886,20 +4209,13 @@ async fn import_zip_locked(
             // A collision destroys the existing work row, including local edit
             // revisions. Check under the library write lock and before file
             // promotion so a caller cannot silently discard those edits.
-            if !replace_existing {
-                for entry in &metadata.entries {
-                    if state
-                        .db
-                        .get_download_by_source(&entry.source, &entry.source_id)?
-                        .is_some()
-                    {
-                        return Err(format!(
-                            "既存作品 {} / {} と重複します。置換を明示的に選択してから復元してください。",
-                            entry.source, entry.source_id
-                        ));
-                    }
-                }
-            }
+            validate_restore_work_collisions(
+                &state.db,
+                &storage,
+                &metadata.entries.iter().map(|entry| (entry.source.clone(), entry.source_id.clone())).collect::<Vec<_>>(),
+                replace_existing,
+            )?;
+            validate_existing_entity_path_owners(&state.db, &backup_entity_path_owners(&metadata, &app_data)?)?;
 
             // **目録が指していないものは、棚へ上げない。**
             //
@@ -3910,12 +4226,13 @@ async fn import_zip_locked(
             let referenced: HashSet<String> = referenced_backup_paths(&metadata)?
                 .into_iter()
                 .collect();
+            let work_destinations = backup_work_restore_paths(&metadata, &storage)?;
             let promotion_entries: Vec<(PathBuf, PathBuf)> = promotion_entries
                 .into_iter()
                 .filter_map(|(name, staged, destination)| {
                     referenced
                         .contains(&name)
-                        .then_some((staged, destination))
+                        .then_some((staged, work_destinations.get(&name).cloned().unwrap_or(destination)))
                 })
                 .collect();
 
@@ -4062,6 +4379,7 @@ async fn import_zip_locked(
             // 進み具合だけは知らせる。
             let entry_total = metadata.entries.len() as i64;
             for (position, entry) in metadata.entries.iter().enumerate() {
+                let resolve_work = |raw: &str| resolve_work_metadata_path(raw, &entry.source, &entry.source_id, &storage);
                 if position % 32 == 0 {
                     reporter.report("database", position as i64, entry_total, None);
                 }
@@ -4081,17 +4399,14 @@ async fn import_zip_locked(
                 let final_original_json_path = if let Some(latest_ver) = latest_ver {
                     if let Some(path) = &latest_ver.relative_original_json_path {
                         Some(
-                            resolve_storage_metadata_path(path, &storage)?
+                            resolve_work(path)?
                                 .to_string_lossy()
                                 .to_string(),
                         )
                     } else {
                         // If relative_original_json_path is absent, use an
                         // original.json next to the already-validated JSON path.
-                        let json_path = resolve_storage_metadata_path(
-                            &latest_ver.relative_json_path,
-                            &storage,
-                        )?;
+                        let json_path = resolve_work(&latest_ver.relative_json_path)?;
                         let orig_p = json_path
                             .parent()
                             .ok_or_else(|| "Version JSON path has no parent".to_string())?
@@ -4108,17 +4423,14 @@ async fn import_zip_locked(
                     // Prefer using original.json for json_path as well!
                     orig.clone()
                 } else if let Some(latest_ver) = latest_ver {
-                    resolve_storage_metadata_path(&latest_ver.relative_json_path, &storage)?
+                    resolve_work(&latest_ver.relative_json_path)?
                         .to_string_lossy()
                         .to_string()
                 } else {
-                    resolve_storage_metadata_path(
-                        &format!(
+                    resolve_work(&format!(
                             "{}/{}/v{}/original.json",
                             entry.source, entry.source_id, entry.current_version
-                        ),
-                        &storage,
-                    )?
+                        ))?
                     .to_string_lossy()
                     .to_string()
                 };
@@ -4126,7 +4438,7 @@ async fn import_zip_locked(
                 let final_cover_path = entry
                     .relative_cover_path
                     .as_deref()
-                    .map(|p| resolve_storage_metadata_path(p, &storage))
+                    .map(resolve_work)
                     .transpose()?
                     .map(|p| p.to_string_lossy().to_string());
 
@@ -4201,15 +4513,12 @@ async fn import_zip_locked(
                         for v in &entry.versions {
                             let ver_orig = if let Some(path) = &v.relative_original_json_path {
                                 Some(
-                                    resolve_storage_metadata_path(path, &storage)?
+                                    resolve_work(path)?
                                         .to_string_lossy()
                                         .to_string(),
                                 )
                             } else {
-                                let json_path = resolve_storage_metadata_path(
-                                    &v.relative_json_path,
-                                    &storage,
-                                )?;
+                                let json_path = resolve_work(&v.relative_json_path)?;
                                 let orig_p = json_path
                                     .parent()
                                     .ok_or_else(|| "Version JSON path has no parent".to_string())?
@@ -4222,7 +4531,7 @@ async fn import_zip_locked(
                             let ver_json = if let Some(ref orig) = ver_orig {
                                 orig.clone()
                             } else {
-                                resolve_storage_metadata_path(&v.relative_json_path, &storage)?
+                                resolve_work(&v.relative_json_path)?
                                     .to_string_lossy()
                                     .to_string()
                             };
@@ -4248,10 +4557,7 @@ async fn import_zip_locked(
 
                         // アセット情報の復元
                         for asset in &entry.assets {
-                            let asset_local = resolve_storage_metadata_path(
-                                &asset.relative_local_path,
-                                &storage,
-                            )?
+                            let asset_local = resolve_work(&asset.relative_local_path)?
                             .to_string_lossy()
                             .to_string();
 
@@ -4282,7 +4588,7 @@ async fn import_zip_locked(
                             for block in &mut revision.blocks {
                                 if let Some(path) = block.asset_path.as_deref() {
                                     block.asset_path = Some(
-                                        resolve_storage_metadata_path(path, &storage)?
+                                        resolve_work(path)?
                                             .to_string_lossy()
                                             .to_string(),
                                     );
@@ -4446,6 +4752,7 @@ async fn import_multipart_with_reporter(
     let storage = state.db.storage_dir().to_path_buf();
     let app_data = storage.parent().unwrap_or(storage.as_path()).to_path_buf();
     let manifest_path_buf = PathBuf::from(&manifest_path);
+    let target_app_data = app_data.clone();
     let (inspection, manifest, paths) = tokio::task::spawn_blocking(move || {
         let (manifest, paths) = read_and_validate_multipart_manifest(&manifest_path_buf)?;
         let inspection = inspect_validated_multipart_parts(&manifest, &paths, &storage, &app_data)?;
@@ -4481,21 +4788,28 @@ async fn import_multipart_with_reporter(
     // A collision in a later part must not leave earlier parts imported when
     // replacement was not explicitly allowed. Check every remaining part
     // before changing any work or file in this invocation.
-    if !replace_existing {
-        for path in paths.iter().skip(completed as usize) {
-            for (source, source_id) in read_backup_work_keys(path)? {
-                if state
-                    .db
-                    .get_download_by_source(&source, &source_id)?
-                    .is_some()
-                {
-                    return Err(format!(
-                        "既存作品 {source} / {source_id} と重複します。置換を明示的に選択してから復元してください。"
-                    ));
-                }
-            }
-        }
+    let mut remaining_keys = Vec::new();
+    let mut entity_owners = HashMap::new();
+    for path in paths.iter().skip(completed as usize) {
+        let metadata = read_backup_metadata(path)?;
+        merge_entity_path_owners(
+            &mut entity_owners,
+            backup_entity_path_owners(&metadata, &target_app_data)?,
+        )?;
+        remaining_keys.extend(
+            metadata
+                .entries
+                .into_iter()
+                .map(|entry| (entry.source, entry.source_id)),
+        );
     }
+    validate_restore_work_collisions(
+        &state.db,
+        state.db.storage_dir(),
+        &remaining_keys,
+        replace_existing,
+    )?;
+    validate_existing_entity_path_owners(&state.db, &entity_owners)?;
 
     let mut imported = 0i64;
     let mut done = completed;
@@ -5233,6 +5547,50 @@ mod tests {
         );
     }
 
+    fn rewrite_restore_test_zip_identity(path: &Path, source: &str, source_id: &str) {
+        let mut archive = zip::ZipArchive::new(fs::File::open(path).unwrap()).unwrap();
+        let mut raw = String::new();
+        archive
+            .by_name("backup_metadata.json")
+            .unwrap()
+            .read_to_string(&mut raw)
+            .unwrap();
+        let mut metadata: BackupMetadata = serde_json::from_str(&raw).unwrap();
+        let mut payload = Vec::new();
+        archive
+            .by_name(&metadata.entries[0].versions[0].relative_json_path)
+            .unwrap()
+            .read_to_end(&mut payload)
+            .unwrap();
+        drop(archive);
+        let relative = format!("{source}/{source_id}/v1/data.json");
+        metadata.entries[0].source = source.into();
+        metadata.entries[0].source_id = source_id.into();
+        metadata.entries[0].versions[0].relative_json_path = relative.clone();
+        let raw = serde_json::to_vec(&metadata).unwrap();
+        write_test_zip(
+            path,
+            &[("backup_metadata.json", &raw), (&relative, &payload)],
+        );
+    }
+
+    #[cfg(windows)]
+    fn create_test_junction(target: &Path, junction: &Path) {
+        use std::os::windows::process::CommandExt;
+        let result = std::process::Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command",
+                "$ErrorActionPreference = 'Stop'; New-Item -ItemType Junction -Path $env:PIEP_TEST_JUNCTION -Target $env:PIEP_TEST_JUNCTION_TARGET | Out-Null"])
+            .env("PIEP_TEST_JUNCTION", junction)
+            .env("PIEP_TEST_JUNCTION_TARGET", target)
+            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+            .output().unwrap();
+        assert!(
+            result.status.success(),
+            "Cannot create test junction: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+
     fn restore_target(base: &Path) -> (Arc<AppState>, PathBuf, i64) {
         let storage = base.join("downloads");
         let db = Database::open(&base.join("piep.db"), &storage).unwrap();
@@ -5464,6 +5822,620 @@ mod tests {
             "a failed export must remove its same-directory temporary ZIP"
         );
 
+        drop(state);
+        remove_temp_dir(&base);
+    }
+
+    #[tokio::test]
+    async fn restore_refuses_a_new_work_that_points_at_another_works_files() {
+        let base = create_temp_dir();
+        let (state, json_path, old_id) = restore_target(&base);
+        let zip_path = base.join("foreign-work.zip");
+        write_restore_test_zip(&zip_path, "New restore title", "tampered-marker");
+        let mut archive = zip::ZipArchive::new(fs::File::open(&zip_path).unwrap()).unwrap();
+        let mut raw = String::new();
+        archive
+            .by_name("backup_metadata.json")
+            .unwrap()
+            .read_to_string(&mut raw)
+            .unwrap();
+        let mut metadata: BackupMetadata = serde_json::from_str(&raw).unwrap();
+        // The new key bypasses the duplicate-work check, while its payload still
+        // points at the existing work's path inside the allowed storage root.
+        metadata.entries[0].source_id = "unrelated-new-work".into();
+        drop(archive);
+        let raw = serde_json::to_vec(&metadata).unwrap();
+        write_test_zip(
+            &zip_path,
+            &[
+                ("backup_metadata.json", raw.as_slice()),
+                (
+                    "pixiv/crash-restore/v1/data.json",
+                    br#"{"text":"tampered-marker"}"#,
+                ),
+            ],
+        );
+
+        let inspection =
+            inspect_backup_internal(&zip_path.to_string_lossy(), state.db.storage_dir(), &base)
+                .unwrap();
+        assert!(!inspection.valid);
+        let error = import_zip_with_reporter(
+            state.clone(),
+            zip_path.to_string_lossy().into(),
+            false,
+            &ArchiveReporter::detached(),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("does not belong to work"), "{error}");
+        assert_eq!(
+            state.db.get_download(old_id).unwrap().title,
+            "Old restore title"
+        );
+        assert!(state
+            .db
+            .get_download_by_source("pixiv", "unrelated-new-work")
+            .unwrap()
+            .is_none());
+        assert!(fs::read_to_string(&json_path)
+            .unwrap()
+            .contains("oldrestoremarker"));
+        assert!(state.db.pending_restore_journals().unwrap().is_empty());
+        drop(state);
+        remove_temp_dir(&base);
+    }
+
+    #[tokio::test]
+    async fn work_paths_include_edit_assets_and_reject_cross_work_references() {
+        let base = create_temp_dir();
+        let (state, existing_json, old_id) = restore_target(&base);
+        let zip_path = base.join("work.zip");
+        write_restore_test_zip(&zip_path, "Work", "marker");
+        let mut archive = zip::ZipArchive::new(fs::File::open(&zip_path).unwrap()).unwrap();
+        let mut raw = String::new();
+        archive
+            .by_name("backup_metadata.json")
+            .unwrap()
+            .read_to_string(&mut raw)
+            .unwrap();
+        let mut metadata: BackupMetadata = serde_json::from_str(&raw).unwrap();
+        let asset_path = "pixiv/crash-restore/v1/editor/only-in-edit.png";
+        metadata.entries[0].work_edits = vec![PortableWorkEdit {
+            base_version: 1,
+            status: "active".into(),
+            title: None,
+            content_hash: None,
+            created_at: "2026-11-07T00:00:00Z".into(),
+            updated_at: "2026-11-07T00:00:00Z".into(),
+            blocks: vec![crate::database::queries::PortableWorkEditBlock {
+                order: 0,
+                block_type: "image".into(),
+                text: None,
+                asset_path: Some(asset_path.into()),
+                attrs_json: None,
+            }],
+        }];
+        assert!(referenced_backup_paths(&metadata)
+            .unwrap()
+            .contains(&asset_path.to_string()));
+        assert!(
+            validate_backup_metadata_paths(&metadata, &base.join("downloads"), &base)
+                .unwrap_err()
+                .contains("no asset record")
+        );
+        drop(archive);
+        let raw = serde_json::to_vec(&metadata).unwrap();
+        write_test_zip(
+            &zip_path,
+            &[
+                ("backup_metadata.json", &raw),
+                ("pixiv/crash-restore/v1/data.json", br#"{"text":"marker"}"#),
+                (asset_path, b"image bytes"),
+            ],
+        );
+        assert!(
+            !inspect_backup_internal(&zip_path.to_string_lossy(), state.db.storage_dir(), &base)
+                .unwrap()
+                .valid
+        );
+        let error = import_zip_with_reporter(
+            state.clone(),
+            zip_path.to_string_lossy().into(),
+            true,
+            &ArchiveReporter::detached(),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("no asset record"), "{error}");
+        assert_eq!(
+            state.db.get_download(old_id).unwrap().title,
+            "Old restore title"
+        );
+        assert!(fs::read_to_string(existing_json)
+            .unwrap()
+            .contains("oldrestoremarker"));
+        metadata.entries[0].assets.push(BackupAsset {
+            asset_type: "editor_image".into(),
+            filename: "only-in-edit.png".into(),
+            original_url: None,
+            mime_type: Some("image/png".into()),
+            file_size_bytes: 11,
+            relative_local_path: asset_path.into(),
+        });
+        assert!(validate_backup_metadata_paths(&metadata, &base.join("downloads"), &base).is_ok());
+        metadata.entries[0].work_edits[0].blocks[0].asset_path =
+            Some("pixiv/another-work/v1/image.png".into());
+        assert!(validate_backup_metadata_paths(&metadata, &base.join("downloads"), &base).is_err());
+        metadata.entries[0].work_edits.clear();
+        metadata.entries.push(metadata.entries[0].clone());
+        assert!(
+            validate_backup_metadata_paths(&metadata, &base.join("downloads"), &base)
+                .unwrap_err()
+                .contains("duplicate work")
+        );
+        drop(state);
+        remove_temp_dir(&base);
+    }
+
+    #[tokio::test]
+    async fn backup_work_sources_cannot_claim_reserved_or_case_variant_roots() {
+        let base = create_temp_dir();
+        let (state, existing_json, old_id) = restore_target(&base);
+        let editor_file = state
+            .db
+            .storage_dir()
+            .join(format!("editor-assets/{old_id}/v1/data.json"));
+        fs::create_dir_all(editor_file.parent().unwrap()).unwrap();
+        fs::write(&editor_file, b"existing editor image").unwrap();
+        for (source, source_id) in [
+            ("PIXIV", "crash-restore".to_string()),
+            ("editor-assets", old_id.to_string()),
+        ] {
+            let zip_path = base.join("invalid-source.zip");
+            write_restore_test_zip(&zip_path, "Tampered work", "new-marker");
+            rewrite_restore_test_zip_identity(&zip_path, source, &source_id);
+            assert!(
+                !inspect_backup_internal(
+                    &zip_path.to_string_lossy(),
+                    state.db.storage_dir(),
+                    &base
+                )
+                .unwrap()
+                .valid
+            );
+            for replace_existing in [false, true] {
+                let error = import_zip_with_reporter(
+                    state.clone(),
+                    zip_path.to_string_lossy().into(),
+                    replace_existing,
+                    &ArchiveReporter::detached(),
+                )
+                .await
+                .unwrap_err();
+                assert!(error.contains("Unsupported backup work source"), "{error}");
+                assert_eq!(
+                    state.db.get_download(old_id).unwrap().title,
+                    "Old restore title"
+                );
+                assert!(state
+                    .db
+                    .get_download_by_source(source, &source_id)
+                    .unwrap()
+                    .is_none());
+                assert!(fs::read_to_string(&existing_json)
+                    .unwrap()
+                    .contains("oldrestoremarker"));
+                assert_eq!(fs::read(&editor_file).unwrap(), b"existing editor image");
+                assert!(state.db.pending_restore_journals().unwrap().is_empty());
+            }
+        }
+        drop(state);
+        remove_temp_dir(&base);
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_case_variant_work_key_cannot_overwrite_an_existing_windows_directory() {
+        let base = create_temp_dir();
+        let (state, existing_json, old_id) = restore_target(&base);
+        let zip_path = base.join("case-variant.zip");
+        write_restore_test_zip(&zip_path, "Tampered work", "new-marker");
+        rewrite_restore_test_zip_identity(&zip_path, "pixiv", "CRASH-RESTORE");
+        for replace_existing in [false, true] {
+            let error = import_zip_with_reporter(
+                state.clone(),
+                zip_path.to_string_lossy().into(),
+                replace_existing,
+                &ArchiveReporter::detached(),
+            )
+            .await
+            .unwrap_err();
+            assert!(error.contains("conflicts with the storage path"), "{error}");
+            assert_eq!(
+                state.db.get_download(old_id).unwrap().title,
+                "Old restore title"
+            );
+            assert!(state
+                .db
+                .get_download_by_source("pixiv", "CRASH-RESTORE")
+                .unwrap()
+                .is_none());
+            assert!(fs::read_to_string(&existing_json)
+                .unwrap()
+                .contains("oldrestoremarker"));
+            assert!(state.db.pending_restore_journals().unwrap().is_empty());
+        }
+        let alias = state.db.storage_dir().join("pixiv/aliased-work");
+        create_test_junction(existing_json.parent().unwrap().parent().unwrap(), &alias);
+        write_restore_test_zip_for_id(&zip_path, "Aliased work", "new-marker", "aliased-work");
+        for replace_existing in [false, true] {
+            let error = import_zip_with_reporter(
+                state.clone(),
+                zip_path.to_string_lossy().into(),
+                replace_existing,
+                &ArchiveReporter::detached(),
+            )
+            .await
+            .unwrap_err();
+            assert!(error.contains("conflicts with the storage path"), "{error}");
+            assert_eq!(
+                state.db.get_download(old_id).unwrap().title,
+                "Old restore title"
+            );
+            assert!(state
+                .db
+                .get_download_by_source("pixiv", "aliased-work")
+                .unwrap()
+                .is_none());
+            assert!(fs::read_to_string(&existing_json)
+                .unwrap()
+                .contains("oldrestoremarker"));
+            assert!(state.db.pending_restore_journals().unwrap().is_empty());
+        }
+        let mut metadata = read_backup_metadata(&zip_path).unwrap();
+        let mut original = metadata.entries[0].clone();
+        original.source_id = "crash-restore".into();
+        original.versions[0].relative_json_path = "pixiv/crash-restore/v1/data.json".into();
+        metadata.entries.push(original);
+        assert!(backup_work_restore_paths(&metadata, state.db.storage_dir())
+            .unwrap_err()
+            .contains("collide after restore"));
+        fs::remove_dir(&alias).unwrap();
+        drop(state);
+        remove_temp_dir(&base);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn incoming_work_directory_aliases_are_rejected_even_without_existing_rows() {
+        let base = create_temp_dir();
+        let storage = base.join("downloads");
+        let db = Database::open(&base.join("piep.db"), &storage).unwrap();
+        let original = storage.join("pixiv/original-work");
+        let alias = storage.join("pixiv/aliased-work");
+        fs::create_dir_all(&original).unwrap();
+        create_test_junction(&original, &alias);
+        let mut keys = vec![
+            ("pixiv".into(), "original-work".into()),
+            ("pixiv".into(), "aliased-work".into()),
+        ];
+        for replace_existing in [false, true] {
+            for _ in 0..2 {
+                assert!(
+                    validate_restore_work_collisions(&db, &storage, &keys, replace_existing)
+                        .unwrap_err()
+                        .contains("same storage directory")
+                );
+                keys.reverse();
+            }
+        }
+        assert!(db.list_restore_work_keys().unwrap().is_empty());
+        fs::remove_dir(&alias).unwrap();
+        drop(db);
+        remove_temp_dir(&base);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_nested_junction_cannot_escape_its_work_while_staying_inside_the_library() {
+        let base = create_temp_dir();
+        let storage = base.join("downloads");
+        let other_version = storage.join("pixiv/another-work/v1");
+        let owner = storage.join("pixiv/incoming-work");
+        fs::create_dir_all(&other_version).unwrap();
+        fs::create_dir_all(&owner).unwrap();
+        let protected = other_version.join("data.json");
+        fs::write(&protected, b"existing work").unwrap();
+        let link = owner.join("v1");
+        create_test_junction(&other_version, &link);
+
+        assert!(resolve_work_metadata_path(
+            "pixiv/incoming-work/v1/data.json",
+            "pixiv",
+            "incoming-work",
+            &storage,
+        )
+        .unwrap_err()
+        .contains("escapes its expected root"));
+        assert_eq!(fs::read(&protected).unwrap(), b"existing work");
+
+        fs::remove_dir(&link).unwrap();
+        remove_temp_dir(&base);
+    }
+
+    #[tokio::test]
+    async fn catalog_restore_preserves_files_owned_by_another_entity_and_allows_same_owner_updates()
+    {
+        let base = create_temp_dir();
+        let state = Arc::new(AppState::new(
+            Database::open(&base.join("piep.db"), &base.join("downloads")).unwrap(),
+        ));
+        let zip_path = base.join("catalog.zip");
+        write_restore_test_zip(&zip_path, "Unused work", "unused-marker");
+        let mut metadata = read_backup_metadata(&zip_path).unwrap();
+        metadata.entries.clear();
+        let timestamp = "2026-11-07T00:00:00Z";
+        let person_icon = "profiles/pixiv/existing-person/v1/icon.png";
+        let person_json = "profiles/pixiv/existing-person/v1/original.json";
+        let series_cover = "series/pixiv/existing-series/v1/cover.png";
+        let series_json = "series/pixiv/existing-series/v1/original.json";
+        let collection_cover = "collection-covers/existing-collection.png";
+        let version = |kind: &str, key: &str, path: &str| BackupEntityVersion {
+            entity_type: kind.into(),
+            source: "pixiv".into(),
+            source_key: key.into(),
+            version: 1,
+            content_hash: Some("old-hash".into()),
+            relative_json_path: path.into(),
+            asset_count: 1,
+            file_size_bytes: 9,
+            created_at: timestamp.into(),
+            change_summary: None,
+        };
+        metadata.people.push(BackupPerson {
+            source: "pixiv".into(),
+            source_key: "existing-person".into(),
+            display_name: "Existing person".into(),
+            relative_icon_path: Some(person_icon.into()),
+            relative_cover_path: None,
+            description: None,
+            links_json: None,
+            content_hash: Some("old-hash".into()),
+            current_version: 1,
+            last_checked_at: None,
+            last_fetched_at: None,
+            created_at: timestamp.into(),
+            updated_at: timestamp.into(),
+            versions: vec![version("person", "existing-person", person_json)],
+        });
+        metadata.series.push(BackupSeries {
+            source: "pixiv".into(),
+            source_key: "existing-series".into(),
+            title: "Existing series".into(),
+            description: None,
+            relative_cover_path: Some(series_cover.into()),
+            content_hash: Some("old-hash".into()),
+            current_version: 1,
+            last_checked_at: None,
+            last_fetched_at: None,
+            created_at: timestamp.into(),
+            updated_at: timestamp.into(),
+            versions: vec![version("series", "existing-series", series_json)],
+        });
+        metadata.collections[0].id = "existing-collection".into();
+        metadata.collections[0].relative_cover_image_path = Some(collection_cover.into());
+        metadata.collections[0].cover_mode = Some("file".into());
+        metadata.collections[0].cover_work = None;
+        metadata.collections[0].members.clear();
+        let payload_paths = [
+            person_icon,
+            person_json,
+            series_cover,
+            series_json,
+            collection_cover,
+        ];
+        let write_catalog = |metadata: &BackupMetadata, bytes: &[u8]| {
+            let raw = serde_json::to_vec(metadata).unwrap();
+            let mut entries = vec![("backup_metadata.json", raw.as_slice())];
+            entries.extend(payload_paths.iter().map(|path| (*path, bytes)));
+            write_test_zip(&zip_path, &entries);
+        };
+        write_catalog(&metadata, b"old bytes");
+        assert_eq!(
+            import_zip_internal(state.clone(), zip_path.to_string_lossy().into())
+                .await
+                .unwrap(),
+            0
+        );
+
+        for kind in ["person", "person-version", "series", "collection"] {
+            let mut attack = metadata.clone();
+            match kind {
+                "person" | "person-version" => {
+                    attack.series.clear();
+                    attack.collections.clear();
+                    attack.people[0].source_key = "new-person".into();
+                    attack.people[0].versions[0].source_key = "new-person".into();
+                    if kind == "person-version" {
+                        attack.people[0].relative_icon_path = None;
+                    }
+                }
+                "series" => {
+                    attack.people.clear();
+                    attack.collections.clear();
+                    attack.series[0].source_key = "new-series".into();
+                    attack.series[0].versions[0].source_key = "new-series".into();
+                }
+                _ => {
+                    attack.people.clear();
+                    attack.series.clear();
+                    attack.collections[0].id = "new-collection".into();
+                }
+            }
+            write_catalog(&attack, b"tampered bytes");
+            let error = import_zip_internal(state.clone(), zip_path.to_string_lossy().into())
+                .await
+                .unwrap_err();
+            assert!(
+                error.contains("owned by a different existing entity"),
+                "{kind}: {error}"
+            );
+            for path in payload_paths {
+                assert_eq!(fs::read(base.join(path)).unwrap(), b"old bytes");
+            }
+            assert_eq!(
+                state
+                    .db
+                    .get_person("pixiv", "existing-person")
+                    .unwrap()
+                    .display_name,
+                "Existing person"
+            );
+            assert_eq!(
+                state
+                    .db
+                    .get_series("pixiv", "existing-series")
+                    .unwrap()
+                    .title,
+                "Existing series"
+            );
+            assert!(state.db.get_person("pixiv", "new-person").is_err());
+            assert!(state.db.get_series("pixiv", "new-series").is_err());
+            assert!(state.db.get_work_collection("new-collection").is_err());
+            assert!(state.db.pending_restore_journals().unwrap().is_empty());
+        }
+        metadata.people[0].display_name = "Updated person".into();
+        metadata.series[0].title = "Updated series".into();
+        write_catalog(&metadata, b"new bytes");
+        assert_eq!(
+            import_zip_internal(state.clone(), zip_path.to_string_lossy().into())
+                .await
+                .unwrap(),
+            0
+        );
+        for path in payload_paths {
+            assert_eq!(fs::read(base.join(path)).unwrap(), b"new bytes");
+        }
+        assert_eq!(
+            state
+                .db
+                .get_person("pixiv", "existing-person")
+                .unwrap()
+                .display_name,
+            "Updated person"
+        );
+        assert_eq!(
+            state
+                .db
+                .get_series("pixiv", "existing-series")
+                .unwrap()
+                .title,
+            "Updated series"
+        );
+        drop(state);
+        remove_temp_dir(&base);
+    }
+
+    #[tokio::test]
+    async fn legacy_editor_assets_restore_by_work_key_without_overwriting_a_local_row_id() {
+        let base = create_temp_dir();
+        let (state, _, old_id) = restore_target(&base);
+        let legacy_relative = format!("editor-assets/{old_id}/image.png");
+        let existing_image = state.db.storage_dir().join(&legacy_relative);
+        fs::create_dir_all(existing_image.parent().unwrap()).unwrap();
+        fs::write(&existing_image, b"existing unrelated image").unwrap();
+        let zip_path = base.join("legacy-editor.zip");
+        write_restore_test_zip_for_id(&zip_path, "Editor work", "editor-body", "new-editor-work");
+        let mut archive = zip::ZipArchive::new(fs::File::open(&zip_path).unwrap()).unwrap();
+        let mut raw = String::new();
+        archive
+            .by_name("backup_metadata.json")
+            .unwrap()
+            .read_to_string(&mut raw)
+            .unwrap();
+        let mut metadata: BackupMetadata = serde_json::from_str(&raw).unwrap();
+        metadata.entries[0].assets.push(BackupAsset {
+            asset_type: "editor_image".into(),
+            filename: "image.png".into(),
+            original_url: None,
+            mime_type: Some("image/png".into()),
+            file_size_bytes: 14,
+            relative_local_path: legacy_relative.clone(),
+        });
+        metadata.entries[0].work_edits.push(PortableWorkEdit {
+            base_version: 1,
+            status: "active".into(),
+            title: None,
+            content_hash: None,
+            created_at: "2026-11-07T00:00:00Z".into(),
+            updated_at: "2026-11-07T00:00:00Z".into(),
+            blocks: vec![crate::database::queries::PortableWorkEditBlock {
+                order: 0,
+                block_type: "image".into(),
+                text: None,
+                asset_path: Some(legacy_relative.clone()),
+                attrs_json: None,
+            }],
+        });
+        drop(archive);
+        let raw = serde_json::to_vec(&metadata).unwrap();
+        write_test_zip(
+            &zip_path,
+            &[
+                ("backup_metadata.json", raw.as_slice()),
+                (
+                    "pixiv/new-editor-work/v1/data.json",
+                    br#"{"text":"editor-body"}"#,
+                ),
+                (&legacy_relative, b"restored image"),
+            ],
+        );
+        assert!(
+            inspect_backup_internal(&zip_path.to_string_lossy(), state.db.storage_dir(), &base)
+                .unwrap()
+                .valid
+        );
+        assert_eq!(
+            import_zip_with_reporter(
+                state.clone(),
+                zip_path.to_string_lossy().into(),
+                false,
+                &ArchiveReporter::detached()
+            )
+            .await
+            .unwrap(),
+            1
+        );
+        assert_eq!(
+            fs::read(&existing_image).unwrap(),
+            b"existing unrelated image"
+        );
+        let restored = state
+            .db
+            .get_download_by_source("pixiv", "new-editor-work")
+            .unwrap()
+            .unwrap();
+        assert_ne!(restored.id, old_id);
+        let assets = state.db.get_assets(restored.id).unwrap();
+        assert_eq!(assets.len(), 1);
+        assert!(Path::new(&assets[0].local_path)
+            .ends_with("pixiv/new-editor-work/editor-assets/image.png"));
+        assert_eq!(fs::read(&assets[0].local_path).unwrap(), b"restored image");
+        let edits = state.db.archive_work_edits(restored.id).unwrap();
+        assert_eq!(
+            edits[0].blocks[0].asset_path.as_deref(),
+            Some(assets[0].local_path.as_str())
+        );
+        let exported = base.join("reexported.zip");
+        export_all_zip_internal(state.clone(), exported.to_string_lossy().into())
+            .await
+            .unwrap();
+        assert!(
+            inspect_backup_internal(&exported.to_string_lossy(), state.db.storage_dir(), &base)
+                .unwrap()
+                .valid
+        );
         drop(state);
         remove_temp_dir(&base);
     }
