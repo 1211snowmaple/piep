@@ -2226,7 +2226,7 @@ pub async fn download_and_save(
     cookie: Option<String>,
     user_agent: Option<String>,
 ) -> Result<DownloadEntry, String> {
-    let data = if source == "fanbox" {
+    let mut data = if source == "fanbox" {
         crate::fanbox_api::payload::into_post(data).ok_or_else(|| {
             "FANBOX投稿データの形式を解釈できませんでした（応答形式が変わった可能性があります）"
                 .to_string()
@@ -2381,6 +2381,19 @@ pub async fn download_and_save(
             // 軽く済ませられるよう、指紋と時刻を取り直しておく。
             record_pixiv_meta_state(&state, dl.id, &source, &data);
             return state.db.get_download(dl.id);
+        }
+    }
+
+    // pixiv は表紙を縮小版でしか返さず、参照イラストも 1200px の版しか返さない
+    // ことがある。原寸を探すのは、実際に保存すると決まったここだけ - 変わって
+    // いなかった作品（上で戻った分）のために画像サーバーを叩かない。
+    // 探せなかったときは今までどおり縮小版で保存する。
+    if source == "pixiv" {
+        match crate::downloader::pixiv_originals::cdn_client() {
+            Ok(client) => {
+                crate::downloader::pixiv_originals::add_original_urls(&client, &mut data).await
+            }
+            Err(error) => log::warn!("原寸の画像を探さずに保存します: {error}"),
         }
     }
 

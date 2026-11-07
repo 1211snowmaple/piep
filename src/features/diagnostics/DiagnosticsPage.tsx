@@ -47,6 +47,7 @@ import { onTauriEvent, subscribeTauriEvent } from "@/services/eventBus";
 import { openFilesystemPath } from "@/services/openerApi";
 import type { LibraryDiagnostics, LibraryFileIssue } from "@/types/library";
 import { useLibraryDiagnostics } from "./useLibraryDiagnostics";
+import { OriginalImagesCard } from "./OriginalImagesCard";
 
 export const previewDiagnostics: LibraryDiagnostics = {
   measuredAt: "2026-08-09T12:00:00.000Z", totalDownloads: 1284, totalAssets: 8241, totalVersions: 1392, totalTextLength: 31_400_000,
@@ -584,6 +585,7 @@ export default function DiagnosticsPage({ embedded = false, previewData = previe
         {repairProgress.failed > 0 && <Button size="xs" variant="subtle" mt={6} onClick={() => navigate("/operations")}>失敗の詳細</Button>}
       </Box>}
     </Card>}
+    <OriginalImagesCard runtime={runtime} disabled={maintenance.isPending || indexOptimization.isPending} />
     {(diagnostics.isFetching || optimizePhase) && (
       <Card p="md" mt="md">
         {diagnostics.isFetching && (

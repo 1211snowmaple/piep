@@ -125,6 +125,49 @@ export function cancelEntityProfileRepair(): Promise<boolean> {
   return invoke<boolean>("cancel_entity_profile_repair");
 }
 
+/** 縮小版で保存された pixiv の表紙・挿絵の数と、取り直しの進み具合。 */
+export interface OriginalImageStatus {
+  covers: number;
+  illustrations: number;
+  running: boolean;
+  progress: OriginalImageProgress | null;
+}
+
+export interface OriginalImageProgress {
+  phase: "running" | "checked" | "complete" | "canceled" | "paused";
+  completed: number;
+  total: number;
+  upgraded: number;
+  /** 公開元に原寸が無かった画像。縮小版のまま残る。 */
+  unavailable: number;
+  failed: number;
+  activeLabel: string | null;
+  error: string | null;
+}
+
+export interface OriginalImageResult {
+  attempted: number;
+  upgraded: number;
+  unavailable: number;
+  failed: number;
+  canceled: boolean;
+  stoppedReason: string | null;
+  remaining: number;
+}
+
+export function getOriginalImageStatus(): Promise<OriginalImageStatus> {
+  return invoke<OriginalImageStatus>("get_original_image_status");
+}
+
+/** 画像サーバーから原寸を取り直し、今の版の画像をその場で置き換える。版は増えない。 */
+export function upgradePixivImagesToOriginal(): Promise<OriginalImageResult> {
+  return invoke<OriginalImageResult>("upgrade_pixiv_images_to_original");
+}
+
+export function cancelOriginalImageUpgrade(): Promise<boolean> {
+  return invoke<boolean>("cancel_original_image_upgrade");
+}
+
 export async function maintainLibrary(compact = false): Promise<LibraryMaintenanceResult> {
   return invoke<LibraryMaintenanceResult>("db_maintain_library", { compact });
 }

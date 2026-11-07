@@ -5,6 +5,7 @@ pub mod browser;
 pub mod database;
 pub mod downloader;
 pub mod epub;
+pub mod original_images;
 pub mod pdf;
 pub mod server;
 pub mod shell;

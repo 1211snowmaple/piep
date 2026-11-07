@@ -596,7 +596,13 @@ fn illust_pages(
         illust
             .meta_pages
             .iter()
-            .map(|page| page.image_urls.large.as_str())
+            .map(|page| {
+                page.image_urls
+                    .original
+                    .as_deref()
+                    .filter(|url| !url.is_empty())
+                    .unwrap_or(&page.image_urls.large)
+            })
             .collect()
     };
     illust_pages_from_urls(id, required_page, urls)

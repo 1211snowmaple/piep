@@ -31,6 +31,8 @@ use super::search::{
 use super::search_normalization::index_text;
 
 mod acquisition_audit;
+mod original_images;
+pub use original_images::{ReducedImageReplacement, ReducedPixivImage};
 mod assist_inputs;
 /// 作品コレクションは `Database` の非公開内部へ触れるため、子モジュールに置く。
 mod reader;

@@ -108,7 +108,11 @@ function AppContent() {
       queryClient.invalidateQueries({ queryKey: ["entity-works"] });
       queryClient.invalidateQueries({ queryKey: ["dashboard"] });
       queryClient.invalidateQueries({ queryKey: ["epub-queue-works"] });
-      payload.forEach((id) => queryClient.invalidateQueries({ queryKey: ["reader-metadata", id] }));
+      // 原寸への取り直しは挿絵の拡張子も変える。開いている本文の画像の参照も読み直す。
+      payload.forEach((id) => {
+        queryClient.invalidateQueries({ queryKey: ["reader-metadata", id] });
+        queryClient.invalidateQueries({ queryKey: ["reader-content-page", id] });
+      });
     });
   }, [queryClient]);
   useEffect(() => {
