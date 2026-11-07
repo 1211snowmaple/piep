@@ -9,6 +9,7 @@ import { ContinuousDocument, type ContinuousTarget, type LivePosition, type Load
 import { ReaderInfoSheet, type InfoTab } from "./ReaderInfoSheet";
 import { ReaderPager } from "./ReaderPager";
 import { ReaderRail } from "./ReaderRail";
+import { PullIndicator, usePullToRefresh } from "./pullToRefresh";
 import { ReaderBehaviorControls, ReaderTypeControls } from "./ReaderSettings";
 import { fillDocumentImages, safePageHtml } from "./readerDocument";
 import { readerKeyDirection } from "./readerKeyboard";
@@ -96,6 +97,9 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
   const [collections, setCollections] = useState<PcCollection[] | null>(offlineCollections ?? null);
   const touchStart = useRef<{ x: number; y: number } | null>(null);
   const scrollRef = useRef<HTMLElement>(null);
+  const bodyRef = useRef<HTMLDivElement>(null);
+  // 読み込めなかったときだけ、一番上で下へ引いて読み込み直せる。読んでいる最中の引き下げは、本文のスクロールに任せる。
+  const retryPull = usePullToRefresh(bodyRef, scrollRef, problem && !loading ? () => setRetry((current) => current + 1) : null);
   const keyboardPageChange = useRef(false);
   const infoTriggerRef = useRef<HTMLButtonElement>(null);
   const typeTriggerRef = useRef<HTMLButtonElement>(null);
@@ -832,7 +836,8 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
       {saveMessage && !infoOpen && <div className="reader-notice" role="status"><span>{saveMessage}</span><button type="button" onClick={() => setSaveMessage(null)} aria-label="閉じる"><X aria-hidden="true" /></button></div>}
       {remoteOffer && <div className="reader-notice reader-sync-offer" role="status"><span>{remoteOffer.guide ? "別の版を" : "別の端末で"} {remoteOffer.page + 1} ページまで読んでいます</span><button onClick={acceptRemote}>そこへ移動</button><button onClick={dismissRemote}>閉じる</button></div>}
     </div>
-    <div className="reader-body">
+    <div className="reader-body" ref={bodyRef}>
+      <PullIndicator {...retryPull} />
     <main className="reader-scroll" ref={scrollRef} key={continuous ? "continuous" : pageIndex} tabIndex={0} aria-label="本文。Page Up、Page Down、左右矢印、Spaceで移動" onClick={tapReader} onKeyDown={(event) => {
       const direction = readerKeyDirection(event);
       if (!direction || infoOpen || typeOpen) return;
@@ -847,7 +852,7 @@ export function OnlineReader({ work, type, behavior, onBack, onTypeChange, onBeh
         ? activeEditHash !== undefined && <ContinuousDocument key={`${positionKey}:${retry}`} viewportRef={scrollRef} load={loadSection} imageSource={imageSource} isSnapshotChange={(error) => offline && offlineSnapshotChanged(error)} onSnapshotChanged={() => setRetry((current) => current + 1)} start={continuousStart} target={continuousTarget} typeKey={`${fontSize}:${lineHeight}:${readerWidth}:${fontFamily}`} header={titleBlock} onInfo={continuousInfo} onPosition={continuousPosition} onCommit={continuousCommit} onLink={openContentLink} onStartRejected={rejectContinuousStart} flushRef={flushContinuous} />
         : <>
           {pageIndex === 0 && titleBlock}
-          {loading ? <p>本文を読み込んでいます…</p> : problem ? <div className="reader-error" role="alert"><p>{problem}</p><button onClick={() => setRetry((current) => current + 1)}>もう一度読み込む</button></div> : <div className="online-document" onClick={openContentLink} dangerouslySetInnerHTML={{ __html: html }} />}
+          {loading ? <p>本文を読み込んでいます…</p> : problem ? <div className="reader-error" role="alert"><p>{problem}</p><button onClick={() => setRetry((current) => current + 1)}>もう一度読み込む</button><small>下へ引いても読み込み直せます</small></div> : <div className="online-document" onClick={openContentLink} dangerouslySetInnerHTML={{ __html: html }} />}
         </>}
     </article></main>
     <ReaderRail progress={shownProgress} interactive={barsVisible && !loading && !problem} label={dragLabel} onPreview={setDragPosition} onCommit={(value) => { goToProgress(value); setDragPosition(null); }} />

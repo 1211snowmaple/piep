@@ -1,6 +1,7 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import type { PcWork } from "./pcApi";
 import type { ReaderFont, ReaderLayout } from "./readerPrefs";
+import { minimumReadProgress } from "./workText";
 
 /**
  * 端末での読書の記録。Rust 側の SQLite（`reading_local_*`）に置く。
@@ -207,13 +208,8 @@ export function adoptLocalPosition(work: WorkIdentity, editHash: string | null, 
   store({ ...editable(work, editHash), page: position.page, position, readAt: time }, true);
 }
 
-/**
- * 読みかけとみなす最小の進み具合。デスクトップ版は本文の頭（1 ページ目の最上部）にいる作品を
- * 読みかけに数えない。開いて少し動かしただけ、読み進めてから頭へ戻した、も同じ扱いにする。
- * 丸めて 1% に届かないものを棚に 0% と並べない。
- */
-const minimumProgress = 0.005;
-const partRead = (progress: number) => progress >= minimumProgress;
+/** 読書画面で 1% 以上と出る作品だけを棚に載せる（`readingPercent` と同じ境目）。 */
+const partRead = (progress: number) => progress >= minimumReadProgress;
 
 /**
  * 「続きを読む」の材料。サーバーの検索は「読みかけ」で絞れず、読書位置からは作品を引けないので、

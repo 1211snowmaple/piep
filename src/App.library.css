@@ -261,6 +261,13 @@ button.card-action:active { background: var(--piep-tag-bg); color: var(--piep-te
 .scroll-top svg { width: 17px; height: 17px; }
 @keyframes scroll-top-in { from { opacity: 0; transform: translate(-50%, -8px); } }
 @media (prefers-reduced-motion: reduce) { .scroll-top { animation: none; } }
+/* 一番上で下へ引いたときの印。引いた量だけ下り、読み込み直す量に届くと青くなる。 */
+.pull-indicator { position: absolute; z-index: 29; top: 4px; left: 50%; display: grid; width: 38px; height: 38px; place-items: center; border: 1px solid var(--piep-line, #dfe5ec); border-radius: 50%; background: var(--piep-surface, #fff); color: var(--piep-muted, #667380); box-shadow: 0 4px 14px #0e1d3026; pointer-events: none; transform: translate(-50%, calc(var(--pull) * .7 - 12px)); }
+.pull-indicator svg { width: 19px; height: 19px; }
+.pull-indicator[data-ready], .pull-indicator[data-refreshing] { color: var(--piep-blue, #1677d2); }
+.pull-indicator[data-refreshing] svg { animation: pull-spin .8s linear infinite; }
+@keyframes pull-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .pull-indicator[data-refreshing] svg { animation: none; } }
 .app-toast { position: fixed; z-index: 60; left: 50%; bottom: calc(92px + var(--piep-safe-bottom)); transform: translateX(-50%); padding: 10px 16px; border-radius: 999px; background: #1c2530ee; color: #fff; font-size: var(--fs-body); white-space: nowrap; }
 .load-more-status { color: var(--piep-muted); font-size: var(--fs-small); }
 .load-more { display: flex; justify-content: center; }

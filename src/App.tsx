@@ -24,6 +24,7 @@ import { statusQueryKey } from "./workList";
 import { useFavoriteNotice } from "./favorites";
 import { defaultPcSearch, getPcStatus, type OfflineWork, type PcConnectionStatus, type PcSearchCriteria, type PcWork } from "./pcApi";
 import { handleReaderKeyboard } from "./readerKeyboard";
+import { PullIndicator, usePullToRefresh } from "./pullToRefresh";
 import { ReaderBehaviorControls, ReaderTypeControls } from "./ReaderSettings";
 import { defaultReaderBehavior, defaultReaderType, loadReaderBehavior, saveReaderBehavior, typeLimits, type ReaderBehavior, type ReaderFont, type ReaderTheme, type ReaderType } from "./readerPrefs";
 import { loadRememberedSort, loadSavedConditions, saveRememberedSort, saveSavedConditions, type FixedSort, type SavedCondition } from "./librarySort";
@@ -502,6 +503,11 @@ function App() {
 
   const closeDetail = () => { back(); };
   const savedWorkChanged = () => setSavedRevision((revision) => revision + 1);
+  // 一覧の一番上で下へ引くと読み込み直す。サーバーの一覧は接続の確認ごと取り直し、端末内は保存の一覧を読み直す。
+  const refreshList = currentPage.name === "library" || currentPage.name === "entity"
+    ? () => queryClient.refetchQueries({ type: "active" })
+    : currentPage.name === "offline" ? savedWorkChanged : null;
+  const listPull = usePullToRefresh(mainRef, mainRef, readerOpen || detailOpen ? null : refreshList);
 
   const closeReader = () => { back(); };
 
@@ -582,7 +588,7 @@ function App() {
         <header className="mobile-header"><button ref={sidebarToggleRef} className="sidebar-toggle" type="button" onClick={() => setSidebarOpen((open) => !open)} aria-label={sidebarOpen ? "サイドバーを閉じる" : "サイドバーを開く"} aria-expanded={sidebarOpen} aria-controls="app-navigation"><Icon name="menu" /></button><PiepLockup size={22} /></header>
         {sidebarOpen && <button className="mobile-sidebar-scrim" type="button" onClick={() => setSidebarOpen(false)} aria-label="サイドバーを閉じる" />}
         {/* 一覧の上端に高さ 0 の足場を置き、そこから吊るす。上の見出しの高さや端末の余白に依らず、必ず一覧の上に乗る。 */}
-        <div className="scroll-top-anchor">{scrolledFar && <button className="scroll-top" type="button" onClick={() => { setScrolledFar(false); mainRef.current?.scrollTo({ top: 0, behavior: "smooth" }); }}><ArrowUp aria-hidden="true" />一番上へ</button>}</div>
+        <div className="scroll-top-anchor"><PullIndicator {...listPull} />{scrolledFar && <button className="scroll-top" type="button" onClick={() => { setScrolledFar(false); mainRef.current?.scrollTo({ top: 0, behavior: "smooth" }); }}><ArrowUp aria-hidden="true" />一番上へ</button>}</div>
         <main className="main-content" ref={mainRef}>
           {currentPage.name === "library" && <AppUpdateNotice info={appUpdate} onOpenSettings={() => showSection("settings")} />}
           {currentPage.name === "library" && <PcLibrary page={currentPage} status={pcConnection} statusLoading={isTauri() && statusQuery.isPending} onOpenWork={openOnlineWork} onOpenDetail={openOnlineDetail} onGoToSettings={() => showSection("settings")} onSaved={savedWorkChanged} onSaveCondition={saveCondition} savedRevision={savedRevision} pagingMode={pagingMode} showContinue={continueShelf === "show"} rememberedSort={rememberedSort} onRememberedSortChange={changeRememberedSort} />}

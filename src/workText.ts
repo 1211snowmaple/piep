@@ -30,12 +30,19 @@ export function readingFinished(progress: number, pageCount: number): boolean {
 }
 
 /**
+ * 読みかけとみなす最小の進み具合。デスクトップ版は本文の頭（1 ページ目の最上部）にいる作品を
+ * 読みかけに数えない。開いて少し動かしただけ、読み進めてから頭へ戻した、も同じ扱いにする。
+ */
+export const minimumReadProgress = 0.005;
+
+/**
  * 進み具合の百分率。読み終えたときだけ 100 にする。端まで来ていないのに丸めで 100 と出さない。
- * 少しでも読み進めていれば 1 からにする。読みかけの棚に 0% と並ぶのを避ける。
+ * 読みかけに数える量（`minimumReadProgress`）に届いていれば 1 からにする。棚に 0% と並ばず、
+ * 読書画面で 1% と出た作品は必ず棚にも載る。
  */
 export function readingPercent(progress: number, pageCount = 0): number {
   if (pageCount > 0 && readingFinished(progress, pageCount)) return 100;
-  if (!(progress > 0)) return 0;
+  if (!(progress >= minimumReadProgress)) return 0;
   return Math.max(1, Math.min(99, Math.round(progress * 100)));
 }
 
