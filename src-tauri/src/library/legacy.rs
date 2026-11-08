@@ -18,6 +18,7 @@ mod inventory;
 mod profiles;
 mod relations;
 mod rows;
+mod suggestions;
 
 /// 未解決の記録がある移行先は、完成した棚として切り替えてはならない。
 #[derive(Default, Debug, Serialize)]
@@ -268,6 +269,13 @@ impl LegacyImporter {
             "source_relations",
             "作者・シリーズの所属の照合",
             self.normalize_source_relations(target),
+            &mut report,
+        )?;
+        self.finish_normalization(
+            target,
+            "collection_suggestions",
+            "コレクション提案と判断の正規化",
+            self.normalize_suggestions(target, cancel),
             &mut report,
         )?;
         report.unresolved.extend(target.activation_problems()?);

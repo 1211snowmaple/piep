@@ -12,6 +12,267 @@ pub enum ReadingAnchor {
     EditBlock { block: LibraryId, offset: u64 },
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ReadingLocation {
+    Source {
+        snapshot: LibraryId,
+        anchor: ReadingAnchor,
+    },
+    Edit {
+        edit: LibraryId,
+        anchor: ReadingAnchor,
+    },
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReadingPosition {
+    pub location: Option<ReadingLocation>,
+    pub finished: bool,
+    pub device: Option<LibraryId>,
+    pub updated_at: Option<i64>,
+    pub generation: i64,
+}
+
+pub struct ReadingUpdate {
+    pub request: LibraryId,
+    pub work: LibraryId,
+    pub user: LibraryId,
+    /// 呼び出し側が認証済み端末から決める。端末時刻は更新順に使わない。
+    pub device: LibraryId,
+    pub expected: i64,
+    /// None は明示的な消去。世代と再送記録を消さずに残す。
+    pub location: Option<ReadingLocation>,
+    pub finished: bool,
+}
+
+fn invalid_anchor() -> Error {
+    Error::Integrity("読書位置が指定した本文の範囲にありません".into())
+}
+
+fn text_boundary(text: &str, offset: u64) -> Result<()> {
+    let offset = usize::try_from(offset).map_err(|_| invalid_anchor())?;
+    if text.is_char_boundary(offset) {
+        Ok(())
+    } else {
+        Err(invalid_anchor())
+    }
+}
+
+fn check_source_anchor(body: &SourceBody, anchor: &ReadingAnchor) -> Result<()> {
+    match (body, anchor) {
+        (
+            SourceBody::PlainText(text) | SourceBody::PixivText(text),
+            ReadingAnchor::TextByte { offset },
+        ) => text_boundary(text, *offset),
+        (SourceBody::FanboxBody(body), ReadingAnchor::TextByte { offset }) => text_boundary(
+            body.get("text")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(invalid_anchor)?,
+            *offset,
+        ),
+        (SourceBody::FanboxBody(body), ReadingAnchor::BodyBlock { index, offset }) => {
+            let index = usize::try_from(*index).map_err(|_| invalid_anchor())?;
+            let block = body
+                .get("blocks")
+                .and_then(serde_json::Value::as_array)
+                .and_then(|b| b.get(index))
+                .filter(|b| b.is_object())
+                .ok_or_else(invalid_anchor)?;
+            text_boundary(
+                block
+                    .get("text")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or(""),
+                *offset,
+            )
+        }
+        _ => Err(invalid_anchor()),
+    }
+}
+
+impl Library {
+    fn check_reading_location(&self, work: LibraryId, location: &ReadingLocation) -> Result<()> {
+        match location {
+            ReadingLocation::Source { snapshot, anchor } => {
+                let body = self
+                    .source_body(work, *snapshot)?
+                    .ok_or_else(invalid_anchor)?;
+                check_source_anchor(&body, anchor)
+            }
+            ReadingLocation::Edit { edit, anchor } => {
+                let content = self.edit(work, *edit)?.content;
+                let ReadingAnchor::EditBlock { block, offset } = anchor else {
+                    return Err(invalid_anchor());
+                };
+                let block = content
+                    .blocks
+                    .iter()
+                    .find(|b| b.id == *block)
+                    .ok_or_else(invalid_anchor)?;
+                text_boundary(block.text.as_deref().unwrap_or(""), *offset)
+            }
+        }
+    }
+
+    pub fn reading_position(&self, work: LibraryId, user: LibraryId) -> Result<ReadingPosition> {
+        let conn = self.conn.lock().map_err(|_| Error::Busy)?;
+        conn.query_row(
+            "SELECT id FROM works WHERE id=?1",
+            [work.as_bytes().as_slice()],
+            |_| Ok(()),
+        )?;
+        let raw = conn.query_row(
+            "SELECT snapshot_id,edit_id,anchor_json,finished,device_id,updated_at,generation FROM reading_positions WHERE work_id=?1 AND user_id=?2",
+            params![work.as_bytes().as_slice(),user.as_bytes().as_slice()], |r|Ok((
+                r.get::<_,Option<Vec<u8>>>(0)?,r.get::<_,Option<Vec<u8>>>(1)?,r.get::<_,Option<String>>(2)?,r.get(3)?,r.get::<_,Vec<u8>>(4)?,r.get(5)?,r.get(6)?
+            )),
+        ).optional()?;
+        let Some((snapshot, edit, anchor, finished, device, updated_at, generation)) = raw else {
+            return Ok(ReadingPosition::default());
+        };
+        let id = |b: Vec<u8>| {
+            LibraryId::from_slice(&b)
+                .map_err(|_| Error::Integrity("読書位置の識別子が不正です".into()))
+        };
+        let location = match (snapshot, edit, anchor) {
+            (Some(s), None, Some(a)) => Some(ReadingLocation::Source {
+                snapshot: id(s)?,
+                anchor: serde_json::from_str(&a)?,
+            }),
+            (None, Some(e), Some(a)) => Some(ReadingLocation::Edit {
+                edit: id(e)?,
+                anchor: serde_json::from_str(&a)?,
+            }),
+            (None, None, None) => None,
+            _ => return Err(invalid_anchor()),
+        };
+        Ok(ReadingPosition {
+            location,
+            finished,
+            device: Some(id(device)?),
+            updated_at: Some(updated_at),
+            generation,
+        })
+    }
+
+    pub fn set_reading_position(&self, update: ReadingUpdate) -> Result<ReadingPosition> {
+        let ReadingUpdate {
+            request,
+            work,
+            user,
+            device,
+            expected,
+            location,
+            finished,
+        } = update;
+        if expected < 0 || (location.is_none() && finished) {
+            return Err(Error::Integrity("読書位置の更新が不正です".into()));
+        }
+        // 本文の復元・位置検証中に書き込みの錠を持たない。参照先の版は不変。
+        if let Some(location) = &location {
+            self.check_reading_location(work, location)?;
+        }
+        let payload = serde_json::json!({"work":work,"user":user,"device":device,"expected":expected,"location":location,"finished":finished});
+        let mut conn = self.conn.lock().map_err(|_| Error::Busy)?;
+        let tx = conn.transaction()?;
+        let receipt: Option<(String, String)> = tx
+            .query_row(
+                "SELECT operation,payload_json FROM outbox WHERE request_id=?1",
+                [request.as_bytes().as_slice()],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        if let Some((operation, stored)) = receipt {
+            let stored: serde_json::Value = serde_json::from_str(&stored)?;
+            if operation != "reading_position" || stored["request"] != payload {
+                return Err(Error::Integrity(
+                    "同じ要求 ID が異なる更新に使われました".into(),
+                ));
+            }
+            return Ok(serde_json::from_value(stored["result"].clone())?);
+        }
+        let generation: i64 = tx
+            .query_row(
+                "SELECT generation FROM reading_positions WHERE work_id=?1 AND user_id=?2",
+                params![work.as_bytes().as_slice(), user.as_bytes().as_slice()],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(0);
+        if generation != expected {
+            return Err(Error::Integrity(format!(
+                "読書位置が競合しました。現在の世代は {generation} です"
+            )));
+        }
+        let next = generation
+            .checked_add(1)
+            .ok_or_else(|| Error::Integrity("更新世代が上限を超えました".into()))?;
+        let now = chrono::Utc::now().timestamp_millis();
+        let (snapshot, edit, anchor) = match &location {
+            Some(ReadingLocation::Source { snapshot, anchor }) => (
+                Some(snapshot.as_bytes().to_vec()),
+                None,
+                Some(serde_json::to_string(anchor)?),
+            ),
+            Some(ReadingLocation::Edit { edit, anchor }) => (
+                None,
+                Some(edit.as_bytes().to_vec()),
+                Some(serde_json::to_string(anchor)?),
+            ),
+            None => (None, None, None),
+        };
+        tx.execute("INSERT INTO reading_positions(work_id,user_id,snapshot_id,edit_id,anchor_json,cleared,finished,device_id,updated_at,generation) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
+            ON CONFLICT(work_id,user_id) DO UPDATE SET snapshot_id=excluded.snapshot_id,edit_id=excluded.edit_id,anchor_json=excluded.anchor_json,cleared=excluded.cleared,finished=excluded.finished,device_id=excluded.device_id,updated_at=excluded.updated_at,generation=excluded.generation",
+            params![work.as_bytes().as_slice(),user.as_bytes().as_slice(),snapshot,edit,anchor,location.is_none(),finished,device.as_bytes().as_slice(),now,next])?;
+        let result = ReadingPosition {
+            location,
+            finished,
+            device: Some(device),
+            updated_at: Some(now),
+            generation: next,
+        };
+        tx.execute("INSERT INTO outbox(request_id,entity_id,operation,payload_json,created_at) VALUES(?1,?2,'reading_position',?3,?4)",params![request.as_bytes().as_slice(),work.as_bytes().as_slice(),serde_json::json!({"request":payload,"result":result}).to_string(),now])?;
+        tx.execute(
+            "UPDATE library_meta SET generation=generation+1 WHERE singleton=1",
+            [],
+        )?;
+        tx.commit()?;
+        Ok(result)
+    }
+
+    pub(super) fn verify_reading_positions(&self, conn: &rusqlite::Connection) -> Result<()> {
+        let mut stmt = conn.prepare(
+            "SELECT work_id,snapshot_id,edit_id,anchor_json FROM reading_positions WHERE cleared=0",
+        )?;
+        let mut rows = stmt.query([])?;
+        let id = |b: Vec<u8>| LibraryId::from_slice(&b).map_err(|_| invalid_anchor());
+        while let Some(row) = rows.next()? {
+            let work = id(row.get(0)?)?;
+            let snapshot: Option<Vec<u8>> = row.get(1)?;
+            let edit: Option<Vec<u8>> = row.get(2)?;
+            let anchor: ReadingAnchor = serde_json::from_str(&row.get::<_, String>(3)?)?;
+            match (snapshot, edit) {
+                (Some(snapshot), None) => {
+                    let body = self
+                        .source_body_from_conn(conn, work, id(snapshot)?)?
+                        .ok_or_else(invalid_anchor)?;
+                    check_source_anchor(&body, &anchor)?;
+                }
+                (None, Some(edit)) => {
+                    let ReadingAnchor::EditBlock { block, offset } = anchor else {
+                        return Err(invalid_anchor());
+                    };
+                    let text:Option<String> = conn.query_row("SELECT b.text FROM edit_blocks b JOIN edit_revisions e ON e.id=b.edit_id WHERE e.work_id=?1 AND e.id=?2 AND e.sealed=1 AND b.block_id=?3",params![work.as_bytes().as_slice(),edit,block.as_bytes().as_slice()],|r|r.get(0))?;
+                    text_boundary(text.as_deref().unwrap_or(""), offset)?;
+                }
+                _ => return Err(invalid_anchor()),
+            }
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -312,266 +573,5 @@ mod tests {
         // 本文版に編集用のアンカーを付け替えた改変は検証で検出する。
         drop(conn);
         assert!(library.verify().is_err());
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum ReadingLocation {
-    Source {
-        snapshot: LibraryId,
-        anchor: ReadingAnchor,
-    },
-    Edit {
-        edit: LibraryId,
-        anchor: ReadingAnchor,
-    },
-}
-
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ReadingPosition {
-    pub location: Option<ReadingLocation>,
-    pub finished: bool,
-    pub device: Option<LibraryId>,
-    pub updated_at: Option<i64>,
-    pub generation: i64,
-}
-
-pub struct ReadingUpdate {
-    pub request: LibraryId,
-    pub work: LibraryId,
-    pub user: LibraryId,
-    /// 呼び出し側が認証済み端末から決める。端末時刻は更新順に使わない。
-    pub device: LibraryId,
-    pub expected: i64,
-    /// None は明示的な消去。世代と再送記録を消さずに残す。
-    pub location: Option<ReadingLocation>,
-    pub finished: bool,
-}
-
-fn invalid_anchor() -> Error {
-    Error::Integrity("読書位置が指定した本文の範囲にありません".into())
-}
-
-fn text_boundary(text: &str, offset: u64) -> Result<()> {
-    let offset = usize::try_from(offset).map_err(|_| invalid_anchor())?;
-    if text.is_char_boundary(offset) {
-        Ok(())
-    } else {
-        Err(invalid_anchor())
-    }
-}
-
-fn check_source_anchor(body: &SourceBody, anchor: &ReadingAnchor) -> Result<()> {
-    match (body, anchor) {
-        (
-            SourceBody::PlainText(text) | SourceBody::PixivText(text),
-            ReadingAnchor::TextByte { offset },
-        ) => text_boundary(text, *offset),
-        (SourceBody::FanboxBody(body), ReadingAnchor::TextByte { offset }) => text_boundary(
-            body.get("text")
-                .and_then(serde_json::Value::as_str)
-                .ok_or_else(invalid_anchor)?,
-            *offset,
-        ),
-        (SourceBody::FanboxBody(body), ReadingAnchor::BodyBlock { index, offset }) => {
-            let index = usize::try_from(*index).map_err(|_| invalid_anchor())?;
-            let block = body
-                .get("blocks")
-                .and_then(serde_json::Value::as_array)
-                .and_then(|b| b.get(index))
-                .filter(|b| b.is_object())
-                .ok_or_else(invalid_anchor)?;
-            text_boundary(
-                block
-                    .get("text")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or(""),
-                *offset,
-            )
-        }
-        _ => Err(invalid_anchor()),
-    }
-}
-
-impl Library {
-    fn check_reading_location(&self, work: LibraryId, location: &ReadingLocation) -> Result<()> {
-        match location {
-            ReadingLocation::Source { snapshot, anchor } => {
-                let body = self
-                    .source_body(work, *snapshot)?
-                    .ok_or_else(invalid_anchor)?;
-                check_source_anchor(&body, anchor)
-            }
-            ReadingLocation::Edit { edit, anchor } => {
-                let content = self.edit(work, *edit)?.content;
-                let ReadingAnchor::EditBlock { block, offset } = anchor else {
-                    return Err(invalid_anchor());
-                };
-                let block = content
-                    .blocks
-                    .iter()
-                    .find(|b| b.id == *block)
-                    .ok_or_else(invalid_anchor)?;
-                text_boundary(block.text.as_deref().unwrap_or(""), *offset)
-            }
-        }
-    }
-
-    pub fn reading_position(&self, work: LibraryId, user: LibraryId) -> Result<ReadingPosition> {
-        let conn = self.conn.lock().map_err(|_| Error::Busy)?;
-        conn.query_row(
-            "SELECT id FROM works WHERE id=?1",
-            [work.as_bytes().as_slice()],
-            |_| Ok(()),
-        )?;
-        let raw = conn.query_row(
-            "SELECT snapshot_id,edit_id,anchor_json,finished,device_id,updated_at,generation FROM reading_positions WHERE work_id=?1 AND user_id=?2",
-            params![work.as_bytes().as_slice(),user.as_bytes().as_slice()], |r|Ok((
-                r.get::<_,Option<Vec<u8>>>(0)?,r.get::<_,Option<Vec<u8>>>(1)?,r.get::<_,Option<String>>(2)?,r.get(3)?,r.get::<_,Vec<u8>>(4)?,r.get(5)?,r.get(6)?
-            )),
-        ).optional()?;
-        let Some((snapshot, edit, anchor, finished, device, updated_at, generation)) = raw else {
-            return Ok(ReadingPosition::default());
-        };
-        let id = |b: Vec<u8>| {
-            LibraryId::from_slice(&b)
-                .map_err(|_| Error::Integrity("読書位置の識別子が不正です".into()))
-        };
-        let location = match (snapshot, edit, anchor) {
-            (Some(s), None, Some(a)) => Some(ReadingLocation::Source {
-                snapshot: id(s)?,
-                anchor: serde_json::from_str(&a)?,
-            }),
-            (None, Some(e), Some(a)) => Some(ReadingLocation::Edit {
-                edit: id(e)?,
-                anchor: serde_json::from_str(&a)?,
-            }),
-            (None, None, None) => None,
-            _ => return Err(invalid_anchor()),
-        };
-        Ok(ReadingPosition {
-            location,
-            finished,
-            device: Some(id(device)?),
-            updated_at: Some(updated_at),
-            generation,
-        })
-    }
-
-    pub fn set_reading_position(&self, update: ReadingUpdate) -> Result<ReadingPosition> {
-        let ReadingUpdate {
-            request,
-            work,
-            user,
-            device,
-            expected,
-            location,
-            finished,
-        } = update;
-        if expected < 0 || (location.is_none() && finished) {
-            return Err(Error::Integrity("読書位置の更新が不正です".into()));
-        }
-        // 本文の復元・位置検証中に書き込みの錠を持たない。参照先の版は不変。
-        if let Some(location) = &location {
-            self.check_reading_location(work, location)?;
-        }
-        let payload = serde_json::json!({"work":work,"user":user,"device":device,"expected":expected,"location":location,"finished":finished});
-        let mut conn = self.conn.lock().map_err(|_| Error::Busy)?;
-        let tx = conn.transaction()?;
-        let receipt: Option<(String, String)> = tx
-            .query_row(
-                "SELECT operation,payload_json FROM outbox WHERE request_id=?1",
-                [request.as_bytes().as_slice()],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()?;
-        if let Some((operation, stored)) = receipt {
-            let stored: serde_json::Value = serde_json::from_str(&stored)?;
-            if operation != "reading_position" || stored["request"] != payload {
-                return Err(Error::Integrity(
-                    "同じ要求 ID が異なる更新に使われました".into(),
-                ));
-            }
-            return Ok(serde_json::from_value(stored["result"].clone())?);
-        }
-        let generation: i64 = tx
-            .query_row(
-                "SELECT generation FROM reading_positions WHERE work_id=?1 AND user_id=?2",
-                params![work.as_bytes().as_slice(), user.as_bytes().as_slice()],
-                |r| r.get(0),
-            )
-            .optional()?
-            .unwrap_or(0);
-        if generation != expected {
-            return Err(Error::Integrity(format!(
-                "読書位置が競合しました。現在の世代は {generation} です"
-            )));
-        }
-        let next = generation
-            .checked_add(1)
-            .ok_or_else(|| Error::Integrity("更新世代が上限を超えました".into()))?;
-        let now = chrono::Utc::now().timestamp_millis();
-        let (snapshot, edit, anchor) = match &location {
-            Some(ReadingLocation::Source { snapshot, anchor }) => (
-                Some(snapshot.as_bytes().to_vec()),
-                None,
-                Some(serde_json::to_string(anchor)?),
-            ),
-            Some(ReadingLocation::Edit { edit, anchor }) => (
-                None,
-                Some(edit.as_bytes().to_vec()),
-                Some(serde_json::to_string(anchor)?),
-            ),
-            None => (None, None, None),
-        };
-        tx.execute("INSERT INTO reading_positions(work_id,user_id,snapshot_id,edit_id,anchor_json,cleared,finished,device_id,updated_at,generation) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
-            ON CONFLICT(work_id,user_id) DO UPDATE SET snapshot_id=excluded.snapshot_id,edit_id=excluded.edit_id,anchor_json=excluded.anchor_json,cleared=excluded.cleared,finished=excluded.finished,device_id=excluded.device_id,updated_at=excluded.updated_at,generation=excluded.generation",
-            params![work.as_bytes().as_slice(),user.as_bytes().as_slice(),snapshot,edit,anchor,location.is_none(),finished,device.as_bytes().as_slice(),now,next])?;
-        let result = ReadingPosition {
-            location,
-            finished,
-            device: Some(device),
-            updated_at: Some(now),
-            generation: next,
-        };
-        tx.execute("INSERT INTO outbox(request_id,entity_id,operation,payload_json,created_at) VALUES(?1,?2,'reading_position',?3,?4)",params![request.as_bytes().as_slice(),work.as_bytes().as_slice(),serde_json::json!({"request":payload,"result":result}).to_string(),now])?;
-        tx.execute(
-            "UPDATE library_meta SET generation=generation+1 WHERE singleton=1",
-            [],
-        )?;
-        tx.commit()?;
-        Ok(result)
-    }
-
-    pub(super) fn verify_reading_positions(&self, conn: &rusqlite::Connection) -> Result<()> {
-        let mut stmt = conn.prepare(
-            "SELECT work_id,snapshot_id,edit_id,anchor_json FROM reading_positions WHERE cleared=0",
-        )?;
-        let mut rows = stmt.query([])?;
-        let id = |b: Vec<u8>| LibraryId::from_slice(&b).map_err(|_| invalid_anchor());
-        while let Some(row) = rows.next()? {
-            let work = id(row.get(0)?)?;
-            let snapshot: Option<Vec<u8>> = row.get(1)?;
-            let edit: Option<Vec<u8>> = row.get(2)?;
-            let anchor: ReadingAnchor = serde_json::from_str(&row.get::<_, String>(3)?)?;
-            match (snapshot, edit) {
-                (Some(snapshot), None) => {
-                    let body = self
-                        .source_body_from_conn(conn, work, id(snapshot)?)?
-                        .ok_or_else(invalid_anchor)?;
-                    check_source_anchor(&body, &anchor)?;
-                }
-                (None, Some(edit)) => {
-                    let ReadingAnchor::EditBlock { block, offset } = anchor else {
-                        return Err(invalid_anchor());
-                    };
-                    let text:Option<String> = conn.query_row("SELECT b.text FROM edit_blocks b JOIN edit_revisions e ON e.id=b.edit_id WHERE e.work_id=?1 AND e.id=?2 AND e.sealed=1 AND b.block_id=?3",params![work.as_bytes().as_slice(),edit,block.as_bytes().as_slice()],|r|r.get(0))?;
-                    text_boundary(text.as_deref().unwrap_or(""), offset)?;
-                }
-                _ => return Err(invalid_anchor()),
-            }
-        }
-        Ok(())
     }
 }

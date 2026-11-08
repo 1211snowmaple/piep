@@ -1,6 +1,6 @@
 //! 新形式の棚を、本番の棚から独立して検証・バックアップ・原本復元する道具。
 
-use piep_lib::library::{Fingerprint, LegacyImporter, Library};
+use piep_lib::library::{Fingerprint, LegacyImporter, Library, LibraryId};
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 
@@ -30,6 +30,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 return Err("ファイルの検証は完了しましたが、未解決の移行データが残っています".into());
             }
         },
+        Some("suggestion") if args.len()==4=>{
+            let library=Library::open(Path::new(&args[2]))?;
+            let id=LibraryId::parse_str(&args[3])?;
+            println!("{}",serde_json::to_string_pretty(&library.collection_suggestion(id)?)?);
+        },
         Some("backup") if args.len()==4=>{
             let library=Library::open(Path::new(&args[2]))?;
             library.backup(Path::new(&args[3]))?;
@@ -51,7 +56,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 return Err("未解決のデータがあります。この移行先へ本番の棚を切り替えてはいけません".into());
             }
         },
-        _=>return Err("使用方法: piep-library init|list|verify <新棚> / backup <新棚> <新規出力先> / export-original <新棚> <ファイルSHA-256> <新規ファイル> / import-legacy <旧棚> <新棚>".into()),
+        _=>return Err("使用方法: piep-library init|list|verify <新棚> / suggestion <新棚> <提案UUID> / backup <新棚> <新規出力先> / export-original <新棚> <ファイルSHA-256> <新規ファイル> / import-legacy <旧棚> <新棚>".into()),
     }
     Ok(())
 }

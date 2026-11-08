@@ -16,6 +16,7 @@ mod renditions;
 mod repository;
 mod schema;
 mod store;
+mod suggestions;
 
 pub use annotations::{TagProvenance, TagUpdate, UserTag, UserTags};
 pub use body::{BodyFormat, SourceBody};
@@ -30,6 +31,7 @@ pub use repository::{
     WorkSummary,
 };
 pub use store::{ContentFile, FileChunk, ObjectStore, StorageStats};
+pub use suggestions::{CollectionSuggestion, SuggestedMember, SuggestionDecision, SuggestionJson};
 
 use std::path::PathBuf;
 
