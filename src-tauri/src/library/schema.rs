@@ -2,9 +2,13 @@ use super::{Error, Fingerprint, LibraryId, Result};
 use rusqlite::Connection;
 
 pub(crate) const APPLICATION_ID: i64 = 0x504C5632;
-pub(crate) const VERSION: i64 = 2;
+pub(crate) const VERSION: i64 = 3;
 const SQL: &str = include_str!("schema.sql");
-const MIGRATIONS: &[&str] = &[SQL, include_str!("migration_002_suggestions.sql")];
+const MIGRATIONS: &[&str] = &[
+    SQL,
+    include_str!("migration_002_suggestions.sql"),
+    include_str!("migration_003_acquisitions.sql"),
+];
 
 fn migration_checksum(sql: &str) -> Fingerprint {
     // Git のチェックアウト設定による CRLF/LF の違いは、スキーマの変更ではない。
@@ -194,7 +198,7 @@ mod tests {
             conn.query_row("SELECT count(*) FROM schema_migrations", [], |r| r
                 .get::<_, i64>(0))
                 .unwrap(),
-            2
+            VERSION
         );
     }
 

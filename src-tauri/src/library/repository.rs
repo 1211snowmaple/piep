@@ -37,7 +37,7 @@ pub enum EntityKind {
     Collection,
 }
 impl EntityKind {
-    fn name(self) -> &'static str {
+    pub(super) fn name(self) -> &'static str {
         match self {
             Self::Work => "work",
             Self::Person => "person",
@@ -58,7 +58,7 @@ impl From<Vec<u8>> for CaptureSource {
     }
 }
 impl CaptureSource {
-    fn store(&self, objects: &ObjectStore) -> Result<ContentFile> {
+    pub(super) fn store(&self, objects: &ObjectStore) -> Result<ContentFile> {
         match self {
             Self::Bytes(bytes) => objects.put(Cursor::new(bytes)),
             Self::File(path) => objects.put_path(path),
@@ -488,14 +488,25 @@ impl Library {
         Ok(file)
     }
 
-    pub fn capture(&self, capture: Capture) -> Result<CaptureResult> {
-        self.capture_with_legacy_classification(capture, None)
+    /// オフライン入力の取り込み用。ネットワーク取得は開始記録を作ってから完了する。
+    #[cfg(test)]
+    pub(super) fn capture(&self, capture: Capture) -> Result<CaptureResult> {
+        self.capture_prepared(capture, None, None)
     }
 
-    pub(crate) fn capture_with_legacy_classification(
+    pub(super) fn capture_with_legacy_classification(
+        &self,
+        capture: Capture,
+        legacy_kind: Option<&str>,
+    ) -> Result<CaptureResult> {
+        self.capture_prepared(capture, legacy_kind, None)
+    }
+
+    pub(super) fn capture_prepared(
         &self,
         mut capture: Capture,
         legacy_kind: Option<&str>,
+        context: Option<super::acquisitions::CompletionContext>,
     ) -> Result<CaptureResult> {
         if capture
             .acquired_at
@@ -634,6 +645,11 @@ impl Library {
             &attachments,
             legacy_kind,
         ))?;
+        let request_bytes = if let Some(context) = &context {
+            super::acquisitions::encode_manifest(context, request_bytes)?
+        } else {
+            request_bytes
+        };
         let request_file = self.objects.put(Cursor::new(request_bytes))?;
         let request_hash = request_file.id;
         // 復元検査・ファイル読み込みは DB の書き込みトランザクションより前に済ませる。
@@ -658,6 +674,14 @@ impl Library {
                     "同じ要求 ID が異なる内容で再送されました".into(),
                 ));
             }
+            if let Some(context) = &context {
+                let info = super::acquisitions::load_info(&tx, context.ticket.id)?;
+                if info.state != super::AcquisitionState::Complete
+                    || info.input_manifest != Some(request_hash)
+                {
+                    return Err(Error::Integrity("取得結果と完了記録が一致しません".into()));
+                }
+            }
             return Ok(CaptureResult {
                 entity_id: uuid(entity)?,
                 snapshot_id: uuid(snapshot)?,
@@ -665,6 +689,81 @@ impl Library {
             });
         }
         let now = chrono::Utc::now().timestamp_millis();
+        if let Some(context) = &context {
+            let info = super::acquisitions::load_info(&tx, context.ticket.id)?;
+            if info.ticket != context.ticket
+                || super::acquisitions::raw_parts(&tx, context.ticket.id)? != context.parts
+            {
+                return Err(Error::Integrity(
+                    "保存の準備中に受信記録が変わりました。確認し直してください".into(),
+                ));
+            }
+            match info.state {
+                super::AcquisitionState::Pending => {}
+                super::AcquisitionState::Cancelled => return Err(Error::Canceled),
+                super::AcquisitionState::Superseded
+                    if info.input_manifest == Some(request_hash) =>
+                {
+                    return Err(Error::Superseded)
+                }
+                _ => return Err(Error::Integrity("取得の状態と入力が一致しません".into())),
+            }
+            for file in &prepared {
+                Self::register_file(&tx, file)?;
+            }
+            let mut inputs = vec![("raw", "", raw.id), ("request", "", request_hash)];
+            if let Some(body) = &input_body {
+                inputs.push(("body", "", body.file.id));
+            }
+            for item in &media {
+                if let Some(file) = &item.file {
+                    inputs.push(("media", item.slot, file.id));
+                }
+            }
+            for (slot, _, _, file) in &attachments {
+                inputs.push(("attachment", slot.as_str(), file.id));
+            }
+            for (role, slot, file) in inputs {
+                tx.execute(
+                    "INSERT INTO acquisition_inputs VALUES(?1,?2,?3,?4)",
+                    params![
+                        context.ticket.id.as_bytes().as_slice(),
+                        role,
+                        slot,
+                        file.0.as_slice()
+                    ],
+                )?;
+            }
+            let (epoch,current,generation):(i64,Option<Vec<u8>>,Option<i64>)=tx.query_row("SELECT h.epoch,c.snapshot_id,c.generation FROM acquisition_heads h LEFT JOIN entity_current c ON c.entity_id=h.entity_id WHERE h.entity_id=?1",[context.ticket.entity.as_bytes().as_slice()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
+            if epoch != context.ticket.epoch
+                || generation.unwrap_or(0) != context.ticket.base_generation
+                || current.as_deref()
+                    != context
+                        .ticket
+                        .base_snapshot
+                        .as_ref()
+                        .map(|id| id.as_bytes().as_slice())
+            {
+                tx.execute("UPDATE acquisition_attempts SET state='superseded',input_manifest_file_id=?2,finished_at=?3 WHERE id=?1",params![context.ticket.id.as_bytes().as_slice(),request_hash.0.as_slice(),now])?;
+                tx.execute(
+                    "UPDATE library_meta SET generation=generation+1 WHERE singleton=1",
+                    [],
+                )?;
+                tx.commit()?;
+                return Err(Error::Superseded);
+            }
+        } else {
+            let reserved: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM acquisition_attempts WHERE id=?1)",
+                [capture.request_id.as_bytes().as_slice()],
+                |r| r.get(0),
+            )?;
+            if reserved {
+                return Err(Error::Integrity(
+                    "この要求 ID は開始済みの取得に予約されています".into(),
+                ));
+            }
+        }
         let acquired_at = capture.acquired_at.unwrap_or(now);
         let entity = match tx.query_row("SELECT entity_id FROM external_identities WHERE provider=?1 AND kind=?2 AND external_key=?3",params![capture.provider,capture.kind.name(),capture.external_key],|r|r.get::<_,Vec<u8>>(0)).optional()? {
             Some(id)=>uuid(id)?,
@@ -682,7 +781,7 @@ impl Library {
             }
         };
         let previous = tx.query_row("SELECT s.id,s.revision_id,s.metadata_json,s.body_file_id,s.field_states_json,s.body_format,s.body_semantic_hash,s.body_semantic_rule FROM entity_current c JOIN revision_snapshots s ON s.id=c.snapshot_id WHERE c.entity_id=?1",[entity.as_bytes().as_slice()],|r|Ok((r.get::<_,Vec<u8>>(0)?,r.get::<_,Vec<u8>>(1)?,r.get::<_,String>(2)?,StoredBody {file:r.get(3)?,format:r.get(5)?,semantic:r.get(6)?,rule:r.get(7)?},r.get::<_,String>(4)?))).optional()?;
-        if previous.as_ref().map(|p| &p.0) != baseline.as_ref() {
+        if context.is_none() && previous.as_ref().map(|p| &p.0) != baseline.as_ref() {
             return Err(Error::Integrity(
                 "保存の準備中に別の取得が確定しました。最新の状態で比較し直してください".into(),
             ));
@@ -1072,6 +1171,14 @@ impl Library {
             "UPDATE library_meta SET generation=generation+1 WHERE singleton=1",
             [],
         )?;
+        if let Some(context) = &context {
+            if entity != context.ticket.entity {
+                return Err(Error::Integrity(
+                    "取得開始の対象と保存対象が一致しません".into(),
+                ));
+            }
+            tx.execute("UPDATE acquisition_attempts SET state='complete',input_manifest_file_id=?2,observation_id=?3,result_snapshot_id=?4,finished_at=?5 WHERE id=?1",params![context.ticket.id.as_bytes().as_slice(),request_hash.0.as_slice(),observation.as_bytes().as_slice(),snapshot.as_bytes().as_slice(),now])?;
+        }
         tx.execute("INSERT INTO outbox(request_id,entity_id,operation,payload_json,created_at) VALUES(?1,?2,'capture',?3,?4)",params![capture.request_id.as_bytes().as_slice(),entity.as_bytes().as_slice(),serde_json::to_string(&CaptureResult { entity_id:entity,snapshot_id:snapshot,created_revision:changed })?,now])?;
         tx.commit()?;
         Ok(CaptureResult {
@@ -1264,6 +1371,7 @@ impl Library {
         self.verify_edit_documents(&conn)?;
         self.verify_source_bodies(&conn)?;
         self.verify_reading_positions(&conn)?;
+        self.verify_acquisitions(&conn)?;
         super::integrity::verify_snapshots(&conn)?;
         Ok(count)
     }

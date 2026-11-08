@@ -9,7 +9,7 @@ impl LegacyImporter {
         // 再開時は、各表の原記録のハッシュを preserve_tables で照合する。
         let resuming:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM migration_records WHERE source_key='__all_rows__' AND evidence_file_id IS NOT NULL)",[],|r|r.get(0))?;
         if resuming {
-            let advanced:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM acquisition_observations WHERE route NOT IN ('legacy-import','legacy-profile-import'))",[],|r|r.get(0))?;
+            let advanced:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM acquisition_observations WHERE route NOT IN ('legacy-import','legacy-profile-import')) OR EXISTS(SELECT 1 FROM acquisition_attempts)",[],|r|r.get(0))?;
             if advanced {
                 return Err(Error::Integrity(
                     "移行後に別の取得が行われています。移行先は新しい空のライブラリにしてください"
@@ -218,6 +218,31 @@ CREATE TABLE assets(id INTEGER,download_id INTEGER,asset_type TEXT,filename TEXT
             assert_eq!(target.snapshots(work.id).unwrap().len(), 2);
             target.verify().unwrap();
         }
+    }
+
+    #[test]
+    fn a_pending_acquisition_blocks_migration_resume_before_publishing_any_source_result() {
+        let fixture = Fixture::new(2);
+        let source = LegacyImporter::open(&fixture.0.join("old")).unwrap();
+        let target = Library::create(&fixture.0.join("new")).unwrap();
+        source
+            .import(&target, &AtomicBool::new(false), |_| {})
+            .unwrap();
+        let before = target.works(1).unwrap().remove(0);
+        let request = LibraryId::now_v7();
+        target
+            .begin_acquisition(request, "pixiv", EntityKind::Work, "one", "test")
+            .unwrap();
+        assert!(matches!(
+            source.import(&target, &AtomicBool::new(false), |_| {}),
+            Err(Error::Integrity(_))
+        ));
+        assert_eq!(
+            target.current_snapshot(before.id).unwrap(),
+            before.snapshot_id
+        );
+        assert_eq!(target.snapshots(before.id).unwrap().len(), 2);
+        target.verify().unwrap();
     }
 
     #[test]

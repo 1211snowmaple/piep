@@ -2,6 +2,7 @@
 //!
 //! 旧形式への読み取りは移行器だけに閉じ込める。本番の保存先を自動変換しない。
 
+mod acquisitions;
 mod annotations;
 mod archive;
 mod body;
@@ -18,6 +19,7 @@ mod schema;
 mod store;
 mod suggestions;
 
+pub use acquisitions::{AcquisitionInfo, AcquisitionPayload, AcquisitionState, AcquisitionTicket};
 pub use annotations::{TagProvenance, TagUpdate, UserTag, UserTags};
 pub use body::{BodyFormat, SourceBody};
 pub use catalogue::{CollectionInfo, CollectionMember, CollectionSave};
@@ -46,6 +48,8 @@ pub enum Error {
     Json(#[from] serde_json::Error),
     #[error("保存データの完全性を確認できません: {0}")]
     Integrity(String),
+    #[error("新しい取得や保存が先に進んだため、この取得結果は現在版に適用しませんでした")]
+    Superseded,
     #[error("対応していないライブラリ形式です: {0}")]
     Unsupported(String),
     #[error("保存先が安全な管理領域ではありません: {}", .0.display())]
